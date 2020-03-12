@@ -1,0 +1,10 @@
+[package]
+name = 'boomerang'
+description = 'Rust implementation of "Reactors" Deterministic Actor Model, described by M. Lohstroh, A. Lee, U.C. Berlekely'
+version = '0.1.0'
+authors = ['John Hughes <jondo2010@gmail.com']
+edition = '2018'
+
+[dependencies]
+tabular = '0.1.4'
+

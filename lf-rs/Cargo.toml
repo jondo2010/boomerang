@@ -1,0 +1,10 @@
+[package]
+name = "lf-rs"
+version = "0.1.0"
+authors = ["John Hughes <john.hughes@aid-driving.eu>"]
+edition = "2018"
+
+[dependencies]
+
+[build-dependencies]
+cc = '1.0.50'

@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "boomerang",
+    "boomerang_derive",
+    "lf-rs",
+]

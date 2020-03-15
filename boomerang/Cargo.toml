@@ -4,7 +4,12 @@ description = 'Rust implementation of "Reactors" Deterministic Actor Model, desc
 version = '0.1.0'
 authors = ['John Hughes <jondo2010@gmail.com']
 edition = '2018'
+license = "MIT OR Apache-2.0"
 
 [dependencies]
+derive_more = '0.99.3'
 tabular = '0.1.4'
+boomerang_derive = { version = "0.1.0", path = "../boomerang_derive" }
+lf-rs = { path = "../lf-rs" }
 
+[dev-dependencies]

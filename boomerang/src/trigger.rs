@@ -1,8 +1,6 @@
 use std::{cell::RefCell, rc::Rc};
 
-use crate::event::EventValue;
-use crate::reaction::Reaction;
-use crate::{Duration, Index, Instant};
+use super::{Duration, EventValue, Instant, Reaction, Sched};
 
 /// Enumeration of different policies for handling events that succeed one another more rapidly than
 /// is allowed by a physical action's min. inter-arrival time.
@@ -26,16 +24,20 @@ pub enum QueuingPolicy {
 
 /// Reaction activation record to push onto the reaction queue.
 #[derive(Eq, PartialEq, Debug)]
-pub struct Trigger<T: EventValue> {
+pub struct Trigger<V, S>
+where
+    V: EventValue,
+    S: Sched<V>,
+{
     /// Reactions sensitive to this trigger.
-    pub reactions: Vec<Rc<Reaction<T>>>,
+    pub reactions: Vec<Rc<Reaction<V, S>>>,
     /// For a logical action, this will be a minimum delay. For physical, it is the minimum
     /// interarrival time.
     pub offset: Duration,
     /// For an action, this is not used.
     pub period: Option<Duration>,
     /// Pointer to malloc'd value (or None)
-    pub value: Rc<RefCell<Option<T>>>,
+    pub value: Rc<RefCell<Option<V>>>,
     /// Indicator that this denotes a physical action (i.e., to be scheduled relative to physical
     /// time).
     pub is_physical: bool,

@@ -9,11 +9,8 @@ description = 'Macros implementation'
 [dependencies]
 proc-macro2 = '1.0'
 quote = '1.0'
-
-[dependencies.syn]
-version = '1.0'
-features = ['visit']
+syn = { version = '1.0', features = ['visit'] }
 
 [lib]
-name = 'serde_derive'
+name = 'boomerang_derive'
 proc-macro = true

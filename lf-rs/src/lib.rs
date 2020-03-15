@@ -1,2 +1,2 @@
-mod bindings;
-mod wrapper;
+pub mod bindings;
+pub mod wrapper;

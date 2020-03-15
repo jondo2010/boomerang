@@ -4,6 +4,32 @@ use super::{Duration, EventValue, Index, Sched, Trigger};
 
 use derive_more::Display;
 
+pub struct Port<T>(T, bool);
+
+impl<T> Port<T> {
+    pub fn new(t: T) -> Self {
+        Port(t, false)
+    }
+    pub fn set(&mut self, t: T) {
+        self.0 = t;
+        self.1 = true;
+    }
+}
+
+pub trait IsPresent {
+    fn is_present(&self) -> bool;
+    fn reset(&mut self);
+}
+
+impl<T> IsPresent for Port<T> {
+    fn is_present(&self) -> bool {
+        self.1
+    }
+    fn reset(&mut self) {
+        self.1 = false;
+    }
+}
+
 /// Reaction activation record to push onto the reaction queue.
 #[derive(Display)]
 #[display(fmt = "{:p} {} {}", "reactor", "index", "chain_id")]
@@ -27,6 +53,7 @@ where
     /// Array of pointers to arrays of pointers to triggers triggered by each output.
     /// Each output has a list of associated triggers
     pub triggers: Vec<Vec<Box<Trigger<V, S>>>>,
+    // pub triggers: Vec<(&'a dyn IsPresent, Vec<Box<Trigger<V, S>>>)>,
     /// Indicator that this reaction has already started executing.
     pub running: bool,
     /// Local deadline relative to the time stamp for invocation of the reaction.

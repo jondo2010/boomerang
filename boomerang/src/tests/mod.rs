@@ -21,6 +21,20 @@ where
     phantom: (PhantomData<V>, PhantomData<S>),
 }
 
+struct Test {
+    x: Port<u32>,
+}
+struct Test2<'a> {
+    // inputs: [&'a dyn IsPresent; 1],
+    inputs: Vec<&'a dyn IsPresent>,
+}
+
+#[test]
+fn testTest() {
+    let mut test = Test { x: Port::new(0) };
+    let t2 = Test2 { inputs: vec![&test.x] };
+}
+
 impl<V, S> HelloWorld<V, S>
 where
     V: EventValue,

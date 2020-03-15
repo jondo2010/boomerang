@@ -11,7 +11,7 @@ mod tests;
 
 // Re-exports
 pub use event::{Event, EventValue};
-pub use reaction::Reaction;
+pub use reaction::{IsPresent, Port, Reaction};
 pub use scheduler::{Sched, Scheduler};
 pub use trigger::{QueuingPolicy, Trigger};
 

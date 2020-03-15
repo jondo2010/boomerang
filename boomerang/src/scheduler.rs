@@ -161,7 +161,7 @@ where
 
     /// For the specified reaction, if it has produced outputs, insert the resulting triggered
     /// reactions into the reaction queue.
-    fn schedule_output_reactions(&mut self, reaction: Rc<Reaction<V, Self>>) {
+    fn schedule_output_reactions(&mut self, reaction: &Rc<Reaction<V, Self>>) {
         // If the reaction produced outputs, put the resulting triggered reactions into the blocking
         // queue.
         // for(int i=0; i < reaction->num_outputs; i++) {
@@ -393,13 +393,13 @@ where
                 if physical_time > self.current_time + local_deadline {
                     println!("Deadline violation.");
                     // Deadline violation has occurred.
-                    // violation = true;
                     // Invoke the local handler, if there is one.
                     // reaction_function_t handler = reaction->deadline_violation_handler;
                     // if (handler != NULL) {
                     // (*handler)(reaction->self);
                     // If the reaction produced outputs, put the resulting triggered reactions into
-                    // the queue. schedule_output_reactions(reaction);
+                    // the queue.
+                    self.schedule_output_reactions(&reaction);
                     // }
                     true
                 } else {
@@ -415,7 +415,7 @@ where
 
                 // If the reaction produced outputs, put the resulting triggered reactions into the
                 // queue.
-                self.schedule_output_reactions(reaction);
+                self.schedule_output_reactions(&reaction);
             }
         }
 

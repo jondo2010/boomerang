@@ -1,24 +1,65 @@
-# This file is a template, and might need editing before it works on your project.
-# Official language image. Look for the different tagged releases at:
-# https://hub.docker.com/r/library/rust/tags/
-image: "rust:latest"
+variables:
+  CARGO_HOME: $CI_PROJECT_DIR/cargo
 
-# Optional: Pick zero or more services to be used on all builds.
-# Only needed when using a docker container to run your tests in.
-# Check out: http://docs.gitlab.com/ce/ci/docker/using_docker_images.html#what-is-a-service
-# services:
-#   - mysql:latest
-#   - redis:latest
-#   - postgres:latest
-
-# Optional: Install a C compiler, cmake and git into the container.
-# You will often need this when you (or any of your dependencies) depends on C code.
-# before_script:
-#   - apt-get update -yqq
-#   - apt-get install -yqq --no-install-recommends build-essential
-
-# Use cargo to test the project
-test:cargo:
+.cargo_build_template: &cargo_build
+  stage: build
   script:
-    - rustc --version && cargo --version  # Print version info for debugging
-    - cargo test --all --verbose
+    - cargo build --release --all
+    - cargo bench --no-run
+  artifacts:
+    paths:
+      - target/release
+
+.cargo_test_template: &cargo_test
+  stage: test
+  script:
+    - cargo test --verbose --jobs 1 --all
+
+cache:
+  untracked: true
+  paths:
+    - cargo/
+    - target/
+
+stages:
+  - build
+  - test
+  - docs
+
+#build:stable:cargo:
+#  cache:
+#    key: stable
+#  image: rust
+#  <<: *cargo_build
+
+build:nightly:cargo:
+  cache:
+    key: nightly
+  image: registry.gitlab.com/starshell/docker/rust-codecov:nightly
+  <<: *cargo_build
+
+test:nightly:cargo:
+  cache:
+    key: nightly
+  image: registry.gitlab.com/starshell/docker/rust-codecov:nightly
+  <<: *cargo_test
+  after_script:
+    - ./codecov.sh
+
+pages:
+  image: registry.gitlab.com/starshell/docker/rust-codecov:nightly
+  stage: docs
+  cache:
+    key: nightly
+    policy: pull
+  script:
+    - cargo doc --all --no-deps
+    - rm -rf public
+    - mkdir public
+    - cp -R target/doc/* public
+  artifacts:
+    paths:
+      - public
+  only:
+    - master
+    - tags

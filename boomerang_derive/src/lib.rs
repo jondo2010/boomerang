@@ -2,10 +2,10 @@
 //!
 //! ```edition2018
 //! use boomerang_derive::Reactor;
-//! 
+//!
 //! #[derive(Reactor)]
 //! struct MyReactor {}
-//! 
+//!
 //! fn main() {}
 //! ```
 

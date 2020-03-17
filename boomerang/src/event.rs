@@ -60,7 +60,7 @@ where
     V: EventValue,
     S: Sched<V>,
 {
-    fn partial_cmp(&self, other: &Event<V, S>) -> Option<Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
@@ -70,7 +70,7 @@ where
     V: EventValue,
     S: Sched<V>,
 {
-    fn cmp(&self, other: &Event<V, S>) -> Ordering {
+    fn cmp(&self, other: &Self) -> Ordering {
         other.time.cmp(&self.time)
     }
 }

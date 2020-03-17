@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell};
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
@@ -21,7 +21,7 @@ where
     fn get_physical_time(&self) -> Instant;
 
     /// Return the elapsed physical time.
-    //fn get_elapsed_physical_time(&self) -> Duration;
+    // fn get_elapsed_physical_time(&self) -> Duration;
 
     /// Print a snapshot of the priority queues used during execution.
     fn print_snapshot(&self) {}
@@ -164,25 +164,28 @@ where
     fn schedule_output_reactions(&mut self, reaction: &Rc<Reaction<V, Self>>) {
         // If the reaction produced outputs, put the resulting triggered reactions into the blocking
         // queue.
-        // for(int i=0; i < reaction->num_outputs; i++) {
-        // if (*(reaction->output_produced[i])) {
-        // trigger_t** triggerArray = (reaction->triggers)[i];
-        // for (int j=0; j < reaction->triggered_sizes[i]; j++) {
-        // trigger_t* trigger = triggerArray[j];
-        // if (trigger != NULL) {
-        // for (int k=0; k < trigger->number_of_reactions; k++) {
-        // reaction_t* reaction = trigger->reactions[k];
-        // if (reaction != NULL) {
-        // Do not enqueue this reaction twice.
-        // if (pqueue_find_equal_same_priority(reaction_q, reaction) == NULL) {
-        // pqueue_insert(reaction_q, reaction);
-        // }
-        // }
-        // }
-        // }
-        // }
-        // }
-        // }
+        for out_reaction in reaction
+            .triggers
+            .iter()
+            .filter_map(|(present, out_triggers)| {
+                if present.borrow().is_present() {
+                    Some(out_triggers)
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .flat_map(|trigger| {
+                trigger
+                    .borrow()
+                    .reactions
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<Rc<_>>>()
+            })
+        {
+            self.reaction_q.insert(out_reaction);
+        }
     }
 
     /// Advance logical time to the lesser of the specified time or the timeout time, if a timeout
@@ -315,7 +318,7 @@ where
         // reactions triggered by these events, and stick them into the reaction queue.
         loop {
             let event = self.event_q.pop_last().expect("Should be some");
-            //println!("Handling {:?}", event);
+            // println!("Handling {:?}", event);
 
             // Scope the first borrow of event.trigger
             {
@@ -323,10 +326,10 @@ where
 
                 // Load reactions triggered by this event onto the reaction queue.
                 for reaction in trigger.reactions.iter() {
-                    println!(
-                        "Pushed on reaction_q reaction with level: {}",
-                        reaction.index
-                    );
+                    // println!(
+                    // "Pushed on reaction_q reaction with level: {}",
+                    // reaction.index
+                    // );
                     self.reaction_q.insert(reaction.clone());
                 }
 
@@ -363,11 +366,11 @@ where
 
         // Invoke reactions.
         while let Some(reaction) = self.reaction_q.pop_last() {
-            println!(
-                "Popped from reaction_q reaction with deadline: {:?}",
-                reaction.local_deadline
-            );
-            println!("Address of reaction: {:p}", reaction);
+            // println!(
+            // "Popped from reaction_q reaction with deadline: {:?}",
+            // reaction.local_deadline
+            // );
+            // println!("Address of reaction: {:p}", reaction);
 
             // If the reaction has a deadline, compare to current physical time and invoke the
             // deadline violation reaction instead of the reaction function if a violation has
@@ -376,7 +379,9 @@ where
             // the violation reaction triggers the same reaction at the current time value, even if
             // at a future superdense time, then the reaction will be invoked and the violation
             // reaction will not be invoked again.
-            let violation = if let Some(local_deadline) = reaction.local_deadline {
+            let violation = if let Some((local_deadline, ref local_deadline_callback)) =
+                reaction.local_deadline
+            {
                 // Get the current physical time.
                 // struct timespec current_physical_time;
                 // clock_gettime(CLOCK_REALTIME, &current_physical_time);
@@ -392,15 +397,12 @@ where
                 // Handle the local deadline first.
                 if physical_time > self.current_time + local_deadline {
                     println!("Deadline violation.");
-                    // Deadline violation has occurred.
-                    // Invoke the local handler, if there is one.
-                    // reaction_function_t handler = reaction->deadline_violation_handler;
-                    // if (handler != NULL) {
-                    // (*handler)(reaction->self);
-                    // If the reaction produced outputs, put the resulting triggered reactions into
-                    // the queue.
-                    self.schedule_output_reactions(&reaction);
-                    // }
+                    // Deadline violation has occurred. Invoke the local handler, if there is one.
+                    if (&mut *local_deadline_callback.borrow_mut())(self) {
+                        // If the reaction produced outputs, put the resulting triggered reactions
+                        // into the queue.
+                        self.schedule_output_reactions(&reaction);
+                    }
                     true
                 } else {
                     false
@@ -451,11 +453,9 @@ where
         Instant::now()
     }
 
-    /*
-    fn get_elapsed_physical_time() -> Duration {
-        self
-    }
-    */
+    // fn get_elapsed_physical_time() -> Duration {
+    // self
+    // }
 
     fn stop(&mut self) {
         self.stop_requested = true;
@@ -563,7 +563,7 @@ where
             // }
         }
 
-        //println!("Inserting Event {:#?}", &e);
+        // println!("Inserting Event {:#?}", &e);
 
         // NOTE: There is no need for an explicit microstep because when this is called, all events
         // at the current tag (time and microstep) have been pulled from the queue, and any new

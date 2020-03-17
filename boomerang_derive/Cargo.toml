@@ -10,6 +10,7 @@ description = 'Macros implementation'
 proc-macro2 = '1.0'
 quote = '1.0'
 syn = { version = '1.0', features = ['visit'] }
+darling = '0.10.2'
 
 [lib]
 name = 'boomerang_derive'

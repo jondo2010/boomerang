@@ -1,77 +1,98 @@
 use super::*;
 
-use boomerang_derive::{reaction, Reactor};
-
 use std::{cell::RefCell, marker::PhantomData, rc::Rc};
 
-#[derive(Eq, PartialEq, Reactor, Debug)]
+use boomerang_derive::Reactor;
+
+trait Reactor {
+    fn start_time_step(&self);
+}
+
+#[derive(Reactor, Debug)]
 struct HelloWorld<V, S>
 where
     V: EventValue,
     S: Sched<V>,
 {
+    i: u32,
+
+    #[reactor(timer("Duration::from_millis(100)", "Duration::from_millis(1000)"))]
+    foo: Rc<RefCell<Trigger<V, S>>>,
+
     #[reactor(input)]
-    x: u32,
-    #[reactor(input)]
-    y: u32,
+    input: Rc<RefCell<Port<u32>>>,
 
     #[reactor(output)]
-    o: u32,
+    output: Rc<RefCell<Port<u32>>>,
 
     phantom: (PhantomData<V>, PhantomData<S>),
 }
 
-struct Test {
-    x: Port<u32>,
-}
-struct Test2<'a> {
-    // inputs: [&'a dyn IsPresent; 1],
-    inputs: Vec<&'a dyn IsPresent>,
-}
-
-#[test]
-fn testTest() {
-    let mut test = Test { x: Port::new(0) };
-    let t2 = Test2 { inputs: vec![&test.x] };
-}
-
 impl<V, S> HelloWorld<V, S>
-where
-    V: EventValue,
-    S: Sched<V>,
-{
-    #[reaction((x, y) -> o)]
-    fn foo(&mut self, scheduler: &mut S) {
-        println!("Hello foo! {:?}", scheduler.get_elapsed_logical_time());
-        self.x += 1;
-        if self.x >= 5 {
-            scheduler.stop();
-        }
-    }
-
-    fn bar(&mut self, scheduler: &mut S) {
-        println!("Hello bar! {:?}", scheduler.get_elapsed_logical_time());
-        self.y += 1;
-    }
-}
-
-fn schedule_destination<V, S>(dest: &Rc<RefCell<HelloWorld<V, S>>>, scheduler: &mut S)
 where
     V: EventValue + 'static,
     S: Sched<V> + 'static,
 {
-    {
-        let r1 = {
-            let r1_dest = dest.clone();
-            let r1_closure = Box::new(RefCell::new(move |sched: &mut S| {
-                HelloWorld::foo(&mut (*r1_dest).borrow_mut(), sched);
+    //#[reaction((foo) -> output)]
+    fn hello(&mut self, scheduler: &mut S) {
+        println!("Hello foo! {:?}", scheduler.get_elapsed_logical_time());
+        self.i += 1;
+        if self.i >= 2 {
+            scheduler.stop();
+        }
+
+        self.output.borrow_mut().set(self.i);
+    }
+
+    //#[reaction((input))]
+    fn input(&mut self, scheduler: &mut S) {
+        println!("Replying to input in={}", self.input.borrow().get());
+    }
+
+    // -----
+
+    fn schedule(this: &Rc<RefCell<Self>>, scheduler: &mut S) {
+        let reply_in_reaction = {
+            let this_clone = this.clone();
+            let closure = Box::new(RefCell::new(move |sched: &mut S| {
+                Self::input(&mut (*this_clone).borrow_mut(), sched);
             }));
-            Rc::new(Reaction::new(r1_closure, 0, 0))
+            Rc::new(Reaction::new(
+                "reply_reaction",
+                closure,
+                u64::MAX,
+                1,
+                vec![],
+            ))
+        };
+
+        let reply_in_trigger = Rc::new(RefCell::new(Trigger {
+            reactions: vec![reply_in_reaction],
+            offset: Duration::from_millis(0),
+            period: None,
+            value: Rc::new(RefCell::new(None)),
+            is_physical: false,
+            scheduled: None,
+            policy: QueuingPolicy::NONE,
+        }));
+
+        let hello_reaction = {
+            let this_clone = this.clone();
+            let closure = Box::new(RefCell::new(move |sched: &mut S| {
+                HelloWorld::hello(&mut (*this_clone).borrow_mut(), sched);
+            }));
+            Rc::new(Reaction::new(
+                "hello_reaction",
+                closure,
+                0,
+                0,
+                vec![(this.borrow().output.clone(), vec![reply_in_trigger])],
+            ))
         };
 
         // timer foo(100 msec, 1000 msec)
         let foo_trigger = Rc::new(RefCell::new(Trigger {
-            reactions: vec![r1],
+            reactions: vec![hello_reaction],
             offset: Duration::from_millis(100),
             period: Some(Duration::from_millis(1000)),
             value: Rc::new(RefCell::new(None)),
@@ -84,18 +105,42 @@ where
     }
 }
 
+impl<V, S> Reactor for HelloWorld<V, S>
+where
+    V: EventValue,
+    S: Sched<V>,
+{
+    fn start_time_step(&self) {
+        self.output.borrow_mut().reset();
+    }
+}
+
 #[test]
 fn test2() {
     let mut sched = Scheduler::<&'static str>::new();
 
+    let output = Rc::new(RefCell::new(Port::new(0)));
+    let input = output.clone();
+
     let mut dest = Rc::new(RefCell::new(HelloWorld {
-        x: 0,
-        y: 0,
-        o: 0,
+        i: 0,
+        foo: Rc::new(RefCell::new(Trigger {
+            reactions: vec![],
+            offset: Duration::from_millis(100),
+            period: Some(Duration::from_millis(1000)),
+            value: Rc::new(RefCell::new(None)),
+            is_physical: false,
+            scheduled: None,
+            policy: QueuingPolicy::NONE,
+        })),
+        output: output,
+        input: input,
         phantom: (PhantomData, PhantomData),
     }));
 
-    schedule_destination::<&'static str, _>(&dest, &mut sched);
+    dest.borrow_mut().poo();
+
+    HelloWorld::schedule(&dest, &mut sched);
 
     while sched.next() && !sched.stop_requested {}
     // sched.next();

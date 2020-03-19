@@ -1,16 +1,19 @@
-use std::cell::{Ref, RefCell};
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
-use super::{Duration, Event, EventValue, Instant, QueuingPolicy, Reaction, Trigger};
+use super::{Duration, Event, EventValue, Instant, QueuingPolicy, Reaction, Trigger, Port};
 
 const INITIAL_REACT_QUEUE_SIZE: usize = 10;
 const INITIAL_EVENT_QUEUE_SIZE: usize = 10;
 
-pub trait Sched<V>: Sized + std::fmt::Debug
-where
-    V: EventValue,
-{
+pub trait Sched: Sized + std::fmt::Debug {
+    /// EventValue type
+    type Value;
+    type Timer;
+    //type Input<T>;
+    //type Output<T>;
+
     /// Return the elpased logical time in nanoseconds since the start of execution.
     fn get_elapsed_logical_time(&self) -> Duration;
 
@@ -38,9 +41,9 @@ where
     /// integer greater than 0.
     fn schedule(
         &mut self,
-        trigger: Rc<RefCell<Trigger<V, Self>>>,
+        trigger: Rc<RefCell<Trigger<Self>>>,
         extra_delay: Duration,
-        value: Option<V>,
+        value: Option<Self::Value>,
     );
 }
 
@@ -78,19 +81,19 @@ where
 
     // Priority queues.
     /// For sorting by time.
-    event_q: BTreeSet<Box<Event<V, Self>>>,
+    event_q: BTreeSet<Box<Event<Self>>>,
     /// For sorting by deadline
-    reaction_q: BTreeSet<Rc<Reaction<V, Self>>>,
+    reaction_q: BTreeSet<Rc<Reaction<Self>>>,
     /// For recycling malloc'd events.
-    recycle_q: Vec<Box<Event<V, Self>>>,
+    recycle_q: Vec<Box<Event<Self>>>,
 }
 
 impl<V> Scheduler<V>
 where
     V: EventValue,
 {
-    pub fn new() -> Scheduler<V> {
-        Scheduler {
+    pub fn new() -> Self {
+        Self {
             fast: false,
             current_time: Instant::now(),
             start_time: Instant::now(),
@@ -114,10 +117,10 @@ where
     /// priority that matches the supplied entry.
     fn find_event_bounded(
         &self,
-        event: &Box<Event<V, Self>>,
+        event: &Box<Event<Self>>,
         limit: &Instant,
-    ) -> Option<&Box<Event<V, Self>>> {
-        let rng = self.event_q.range::<Box<Event<V, Self>>, _>(event..);
+    ) -> Option<&Box<Event<Self>>> {
+        let rng = self.event_q.range::<Box<Event<Self>>, _>(event..);
         let found = rng.rev().find(|&x| {
             println!("ev: {:?}", x.time);
             x.trigger.as_ptr() == event.trigger.as_ptr() || x.time == *limit
@@ -161,7 +164,7 @@ where
 
     /// For the specified reaction, if it has produced outputs, insert the resulting triggered
     /// reactions into the reaction queue.
-    fn schedule_output_reactions(&mut self, reaction: &Rc<Reaction<V, Self>>) {
+    fn schedule_output_reactions(&mut self, reaction: &Rc<Reaction<Self>>) {
         // If the reaction produced outputs, put the resulting triggered reactions into the blocking
         // queue.
         for out_reaction in reaction
@@ -437,10 +440,15 @@ where
     }
 }
 
-impl<V> Sched<V> for Scheduler<V>
+impl<V> Sched for Scheduler<V>
 where
     V: EventValue,
 {
+    type Value = V;
+    type Timer = Rc<RefCell<Trigger<Self>>>;
+    //type Input<T> = Rc<RefCell<Port<T>>>;
+    //type Output<T> = Rc<RefCell<Port<T>>>;
+
     fn get_elapsed_logical_time(&self) -> Duration {
         self.current_time - self.start_time
     }
@@ -463,9 +471,9 @@ where
 
     fn schedule(
         &mut self,
-        trigger: Rc<RefCell<Trigger<V, Self>>>,
+        trigger: Rc<RefCell<Trigger<Self>>>,
         extra_delay: Duration,
-        value: Option<V>,
+        value: Option<Self::Value>,
     ) {
         // The trigger argument could be null, meaning that nothing is triggered.
         // if (trigger == NULL) return 0;

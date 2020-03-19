@@ -1,4 +1,3 @@
-use derive_more::Display;
 use std::{cell::RefCell, cmp::Ordering, rc::Rc};
 
 use super::{Instant, Sched, Trigger};
@@ -9,23 +8,22 @@ impl<V> EventValue for V where V: std::fmt::Debug + Eq + Copy + Clone {}
 
 /// Event activation record to push onto the event queue.
 #[derive(Debug)]
-pub struct Event<V, S>
+pub struct Event<S>
 where
-    V: EventValue,
-    S: Sched<V>,
+    S: Sched,
 {
     /// Time of release.
     pub time: Instant,
     /// Associated trigger.
-    pub trigger: Rc<RefCell<Trigger<V, S>>>,
+    pub trigger: Rc<RefCell<Trigger<S>>>,
     /// Pointer to malloc'd value (or None)
-    pub value: Rc<RefCell<Option<V>>>,
+    pub value: Rc<RefCell<Option<S::Value>>>,
 }
 
-impl<V, S> std::fmt::Display for Event<V, S>
+impl<S> std::fmt::Display for Event<S>
 where
-    V: EventValue,
-    S: Sched<V>,
+    S: Sched,
+    <S as Sched>::Value: std::fmt::Debug,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -38,49 +36,44 @@ where
     }
 }
 
-impl<V, S> PartialEq for Event<V, S>
+impl<S> PartialEq for Event<S>
 where
-    V: EventValue,
-    S: Sched<V>,
+    S: Sched,
 {
     fn eq(&self, other: &Self) -> bool {
         self.time == other.time && self.trigger.as_ptr() == other.trigger.as_ptr()
     }
 }
 
-impl<V, S> Eq for Event<V, S>
+impl<S> Eq for Event<S>
 where
-    V: EventValue,
-    S: Sched<V>,
+    S: Sched,
 {
 }
 
-impl<V, S> PartialOrd for Event<V, S> 
+impl<S> PartialOrd for Event<S> 
 where
-    V: EventValue,
-    S: Sched<V>,
+    S: Sched,
 {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<V, S> Ord for Event<V, S> 
+impl<S> Ord for Event<S> 
 where
-    V: EventValue,
-    S: Sched<V>,
+    S: Sched,
 {
     fn cmp(&self, other: &Self) -> Ordering {
         other.time.cmp(&self.time)
     }
 }
 
-impl<V, S> Event<V, S> 
+impl<S> Event<S> 
 where
-    V: EventValue,
-    S: Sched<V>,
+    S: Sched,
 {
-    pub fn new(time: Instant, trigger: Rc<RefCell<Trigger<V, S>>>, value: Option<V>) -> Self {
+    pub fn new(time: Instant, trigger: Rc<RefCell<Trigger<S>>>, value: Option<S::Value>) -> Self {
         Event {
             time,
             trigger,

@@ -8,30 +8,27 @@ trait Reactor {
     fn start_time_step(&self);
 }
 
-#[derive(Reactor, Debug)]
-struct HelloWorld<V, S>
+//#[derive(Reactor, Debug)]
+struct HelloWorld<S>
 where
-    V: EventValue,
-    S: Sched<V>,
+    S: Sched,
+    <S as Sched>::Value: EventValue,
 {
     i: u32,
 
-    #[reactor(timer("Duration::from_millis(100)", "Duration::from_millis(1000)"))]
-    foo: Rc<RefCell<Trigger<V, S>>>,
-
-    #[reactor(input)]
+    //#[reactor(input)]
     input: Rc<RefCell<Port<u32>>>,
 
-    #[reactor(output)]
+    //#[reactor(output)]
     output: Rc<RefCell<Port<u32>>>,
 
-    phantom: (PhantomData<V>, PhantomData<S>),
+    phantom: PhantomData<S>,
 }
 
-impl<V, S> HelloWorld<V, S>
+impl<S> HelloWorld<S>
 where
-    V: EventValue + 'static,
-    S: Sched<V> + 'static,
+    S: Sched + 'static,
+    <S as Sched>::Value: EventValue,
 {
     //#[reaction((foo) -> output)]
     fn hello(&mut self, scheduler: &mut S) {
@@ -105,10 +102,10 @@ where
     }
 }
 
-impl<V, S> Reactor for HelloWorld<V, S>
+impl<S> Reactor for HelloWorld<S>
 where
-    V: EventValue,
-    S: Sched<V>,
+    S: Sched,
+    <S as Sched>::Value: EventValue,
 {
     fn start_time_step(&self) {
         self.output.borrow_mut().reset();
@@ -124,21 +121,10 @@ fn test2() {
 
     let mut dest = Rc::new(RefCell::new(HelloWorld {
         i: 0,
-        foo: Rc::new(RefCell::new(Trigger {
-            reactions: vec![],
-            offset: Duration::from_millis(100),
-            period: Some(Duration::from_millis(1000)),
-            value: Rc::new(RefCell::new(None)),
-            is_physical: false,
-            scheduled: None,
-            policy: QueuingPolicy::NONE,
-        })),
         output: output,
         input: input,
-        phantom: (PhantomData, PhantomData),
+        phantom: PhantomData,
     }));
-
-    dest.borrow_mut().poo();
 
     HelloWorld::schedule(&dest, &mut sched);
 

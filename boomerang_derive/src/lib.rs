@@ -14,9 +14,17 @@ mod detail;
 use darling::FromDeriveInput;
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::parse_macro_input;
+use syn::{parse_macro_input, AttributeArgs};
 
 use detail::ReactorReceiver;
+
+#[proc_macro_attribute]
+pub fn timer(args:  TokenStream, input: TokenStream) -> TokenStream {
+    println!("timer: {}", args.to_string());
+    println!("timer: {}", input.to_string());
+    let ast = parse_macro_input!(args as AttributeArgs);
+    input
+}
 
 #[doc(hidden)]
 #[proc_macro_derive(Reactor, attributes(reactor))]
@@ -32,6 +40,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
     // reactor.data.map_struct_fields(|field| {
     // println!("Field: {:?}, {:?}", field.ident, field.timer);
     // });
+
+    //println!("{}", quote!(#reactor).to_string());
 
     quote!(#reactor).into()
 }

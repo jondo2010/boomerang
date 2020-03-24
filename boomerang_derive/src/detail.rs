@@ -13,7 +13,9 @@ pub struct TimerField {
 pub struct StringList(Vec<String>);
 impl std::ops::Deref for StringList {
     type Target = Vec<String>;
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 impl FromMeta for StringList {
@@ -108,7 +110,7 @@ impl ToTokens for ReactorReceiver {
                         ))),
                         //let t = S::Timer::new();
                     ));
-                },
+                }
                 (false, false, None, Some(reaction)) => {
                     impl_details.extend(quote!(
                         #field_ident : {
@@ -125,7 +127,7 @@ impl ToTokens for ReactorReceiver {
                             ))
                         };
                     ));
-                },
+                }
                 _ => panic!(format!(
                     "Reactor attributes input/output/timer must be mutually exclusive: {:?}",
                     (&f.input, &f.output, &f.timer)
@@ -152,7 +154,8 @@ impl ToTokens for ReactorReceiver {
 
 #[test]
 fn test_reaction_field() {
-    let input = syn::parse_str(r#"
+    let input = syn::parse_str(
+        r#"
     #[derive(Reactor)]
     pub struct Foo {
         #[reactor(reaction(
@@ -161,7 +164,9 @@ fn test_reaction_field() {
         ))]
         hello2: u32,
     }
-    "#,).unwrap();
+    "#,
+    )
+    .unwrap();
     let receiver: ReactorReceiver = ReactorReceiver::from_derive_input(&input).unwrap();
     let fields = &receiver.data.take_struct().unwrap().fields;
     dbg!(&fields[0]);

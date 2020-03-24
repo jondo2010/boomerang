@@ -10,6 +10,7 @@ license = "MIT OR Apache-2.0"
 derive_more = '0.99.3'
 tabular = '0.1.4'
 boomerang_derive = { version = "0.1.0", path = "../boomerang_derive" }
-lf-rs = { path = "../lf-rs" }
+#lf-rs = { path = "../lf-rs" }
+petgraph = "0.5.0"
 
 [dev-dependencies]

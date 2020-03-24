@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
-use super::{Duration, Event, EventValue, Instant, QueuingPolicy, Reaction, Trigger, Port};
+use super::{Duration, Event, EventValue, Instant, Port, QueuingPolicy, Reaction, Trigger};
 
 const INITIAL_REACT_QUEUE_SIZE: usize = 10;
 const INITIAL_EVENT_QUEUE_SIZE: usize = 10;
@@ -10,9 +10,9 @@ const INITIAL_EVENT_QUEUE_SIZE: usize = 10;
 pub trait Sched: Sized + std::fmt::Debug {
     /// EventValue type
     type Value;
-    type Timer;
-    //type Input<T>;
-    //type Output<T>;
+    // type Timer;
+    // type Input<T>;
+    // type Output<T>;
 
     /// Return the elpased logical time in nanoseconds since the start of execution.
     fn get_elapsed_logical_time(&self) -> Duration;
@@ -41,7 +41,7 @@ pub trait Sched: Sized + std::fmt::Debug {
     /// integer greater than 0.
     fn schedule(
         &mut self,
-        trigger: Rc<RefCell<Trigger<Self>>>,
+        trigger: Rc<Trigger<Self>>,
         extra_delay: Duration,
         value: Option<Self::Value>,
     );
@@ -123,7 +123,9 @@ where
         let rng = self.event_q.range::<Box<Event<Self>>, _>(event..);
         let found = rng.rev().find(|&x| {
             println!("ev: {:?}", x.time);
-            x.trigger.as_ptr() == event.trigger.as_ptr() || x.time == *limit
+            (x.trigger.as_ref() as *const Trigger<Self>
+                == event.trigger.as_ref() as *const Trigger<Self>)
+                || x.time == *limit
         });
         if let Some(f2) = found {
             println!("found: {:?}", f2.time);
@@ -292,7 +294,10 @@ where
             // There may be a new earlier event on the queue.
             let new_event = self.event_q.last();
             if new_event
-                .filter(|ev| ev.trigger.as_ptr() == event_trigger.as_ptr())
+                .filter(|ev| {
+                    ev.trigger.as_ref() as *const Trigger<Self>
+                        == event_trigger.as_ref() as *const Trigger<Self>
+                })
                 .is_some()
             {
                 // There is no new event. If the timeout time has been reached, or if the maximum
@@ -323,33 +328,29 @@ where
             let event = self.event_q.pop_last().expect("Should be some");
             // println!("Handling {:?}", event);
 
-            // Scope the first borrow of event.trigger
-            {
-                let trigger = event.trigger.borrow();
-
-                // Load reactions triggered by this event onto the reaction queue.
-                for reaction in trigger.reactions.iter() {
-                    // println!(
-                    // "Pushed on reaction_q reaction with level: {}",
-                    // reaction.index
-                    // );
-                    self.reaction_q.insert(reaction.clone());
-                }
-
-                if !trigger.is_physical && trigger.period.is_some() {
-                    // Reschedule the trigger.
-                    // NOTE: the delay here may be negative because the schedule function will add
-                    // the trigger.offset, which we don't want at this point.
-                    self.schedule(
-                        event.trigger.clone(),
-                        trigger.period.unwrap_or(Duration::from_micros(0)) - trigger.offset,
-                        None,
-                    );
-                }
+            // Load reactions triggered by this event onto the reaction queue.
+            for reaction in event.trigger.reactions.iter() {
+                // println!(
+                // "Pushed on reaction_q reaction with level: {}",
+                // reaction.index
+                // );
+                self.reaction_q.insert(reaction.clone());
             }
+
+            if !event.trigger.is_physical && event.trigger.period.is_some() {
+                // Reschedule the trigger.
+                // NOTE: the delay here may be negative because the schedule function will add
+                // the trigger.offset, which we don't want at this point.
+                self.schedule(
+                    event.trigger.clone(),
+                    event.trigger.period.unwrap_or(Duration::from_micros(0)) - event.trigger.offset,
+                    None,
+                );
+            }
+
             // Copy the value pointer into the trigger struct so that the reactions can access
             // it. event->trigger->value = event->value;
-            event.trigger.borrow_mut().value = event.value.clone();
+            *event.trigger.value.borrow_mut() = *event.value.borrow();
 
             // Recycle the event
             self.recycle_q.push(event);
@@ -445,9 +446,9 @@ where
     V: EventValue,
 {
     type Value = V;
-    type Timer = Rc<RefCell<Trigger<Self>>>;
-    //type Input<T> = Rc<RefCell<Port<T>>>;
-    //type Output<T> = Rc<RefCell<Port<T>>>;
+    // type Timer = Rc<RefCell<Trigger<Self>>>;
+    // type Input<T> = Rc<RefCell<Port<T>>>;
+    // type Output<T> = Rc<RefCell<Port<T>>>;
 
     fn get_elapsed_logical_time(&self) -> Duration {
         self.current_time - self.start_time
@@ -471,7 +472,7 @@ where
 
     fn schedule(
         &mut self,
-        trigger: Rc<RefCell<Trigger<Self>>>,
+        trigger: Rc<Trigger<Self>>,
         extra_delay: Duration,
         value: Option<Self::Value>,
     ) {
@@ -494,9 +495,9 @@ where
         // For logical actions, the logical time of the new event is just the current logical time
         // plus the minimum offset (action parameter) plus the extra delay specified in the call to
         // schedule.
-        e.time = tag + trigger.borrow().offset + extra_delay;
+        e.time = tag + trigger.offset + extra_delay;
 
-        if trigger.borrow().is_physical {
+        if trigger.is_physical {
             // If the trigger is physical, then we need to use physical time and the time of the
             // last invocation to adjust the tag. Specifically, the timestamp assigned to the action
             // event will be the maximum of the current logical time, the current physical time, and
@@ -510,19 +511,19 @@ where
                 tag = physical_time;
             }
 
-            let min_inter_arrival = trigger.borrow().offset + extra_delay;
+            let min_inter_arrival = trigger.offset + extra_delay;
 
             // Compute the earliest time that this event can be scheduled.
             let earliest_time = trigger
-                .borrow()
                 .scheduled
+                .borrow()
                 .map_or(self.start_time + min_inter_arrival, |scheduled| {
                     scheduled + min_inter_arrival
                 });
 
             if earliest_time > tag {
                 // The event is early. See which policy applies.
-                match trigger.borrow().policy {
+                match trigger.policy {
                     QueuingPolicy::UPDATE => {
                         // Update existing event if it exists.
                         e.time = tag;
@@ -551,7 +552,7 @@ where
             }
 
             // Record the tag.
-            trigger.borrow_mut().scheduled = Some(tag);
+            *trigger.scheduled.borrow_mut() = Some(tag);
             e.time = tag;
         }
         // Do not schedule events if a stop has been requested.
@@ -560,7 +561,7 @@ where
         }
 
         // Handle duplicate events for logical actions.
-        if !trigger.borrow().is_physical {
+        if !trigger.is_physical {
             // existing = pqueue_find_equal_same_priority(event_q, e);
             // if (existing != NULL) {
             // existing->value = value;

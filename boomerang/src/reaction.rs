@@ -11,7 +11,7 @@ impl<T> Port<T> {
     pub fn new(t: T) -> Self {
         Port(t, false)
     }
-    pub fn get(&self) -> &T {
+    pub fn get<'a>(&'a self) -> &'a T {
         &self.0
     }
     pub fn set(&mut self, t: T) {

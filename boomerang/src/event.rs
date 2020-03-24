@@ -15,7 +15,7 @@ where
     /// Time of release.
     pub time: Instant,
     /// Associated trigger.
-    pub trigger: Rc<RefCell<Trigger<S>>>,
+    pub trigger: Rc<Trigger<S>>,
     /// Pointer to malloc'd value (or None)
     pub value: Rc<RefCell<Option<S::Value>>>,
 }
@@ -29,9 +29,7 @@ where
         write!(
             f,
             "Event<time: {:?}, trigger: {:p}, value: {:?}>",
-            self.time,
-            self.trigger.as_ptr(),
-            self.value
+            self.time, self.trigger, self.value
         )
     }
 }
@@ -41,17 +39,15 @@ where
     S: Sched,
 {
     fn eq(&self, other: &Self) -> bool {
-        self.time == other.time && self.trigger.as_ptr() == other.trigger.as_ptr()
+        self.time == other.time
+            && (self.trigger.as_ref() as *const Trigger<S>
+                == other.trigger.as_ref() as *const Trigger<S>)
     }
 }
 
-impl<S> Eq for Event<S>
-where
-    S: Sched,
-{
-}
+impl<S> Eq for Event<S> where S: Sched {}
 
-impl<S> PartialOrd for Event<S> 
+impl<S> PartialOrd for Event<S>
 where
     S: Sched,
 {
@@ -60,7 +56,7 @@ where
     }
 }
 
-impl<S> Ord for Event<S> 
+impl<S> Ord for Event<S>
 where
     S: Sched,
 {
@@ -69,11 +65,11 @@ where
     }
 }
 
-impl<S> Event<S> 
+impl<S> Event<S>
 where
     S: Sched,
 {
-    pub fn new(time: Instant, trigger: Rc<RefCell<Trigger<S>>>, value: Option<S::Value>) -> Self {
+    pub fn new(time: Instant, trigger: Rc<Trigger<S>>, value: Option<S::Value>) -> Self {
         Event {
             time,
             trigger,

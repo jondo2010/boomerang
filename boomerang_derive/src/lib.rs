@@ -19,7 +19,7 @@ use syn::{parse_macro_input, AttributeArgs};
 use detail::ReactorReceiver;
 
 #[proc_macro_attribute]
-pub fn timer(args:  TokenStream, input: TokenStream) -> TokenStream {
+pub fn timer(args: TokenStream, input: TokenStream) -> TokenStream {
     println!("timer: {}", args.to_string());
     println!("timer: {}", input.to_string());
     let ast = parse_macro_input!(args as AttributeArgs);
@@ -41,7 +41,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
     // println!("Field: {:?}, {:?}", field.ident, field.timer);
     // });
 
-    //println!("{}", quote!(#reactor).to_string());
+    // println!("{}", quote!(#reactor).to_string());
 
     quote!(#reactor).into()
 }

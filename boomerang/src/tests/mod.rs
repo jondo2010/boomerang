@@ -4,9 +4,6 @@ use std::{cell::RefCell, marker::PhantomData, rc::Rc};
 
 use boomerang_derive::Reactor;
 
-trait Reactor {
-    fn start_time_step(&self);
-}
 
 //#[derive(Reactor, Debug)]
 struct HelloWorld<S>
@@ -69,7 +66,7 @@ where
             period: None,
             value: Rc::new(RefCell::new(None)),
             is_physical: false,
-            scheduled: None,
+            scheduled: RefCell::new(None),
             policy: QueuingPolicy::NONE,
         }));
 
@@ -88,15 +85,15 @@ where
         };
 
         // timer foo(100 msec, 1000 msec)
-        let foo_trigger = Rc::new(RefCell::new(Trigger {
+        let foo_trigger = Rc::new(Trigger {
             reactions: vec![hello_reaction],
             offset: Duration::from_millis(100),
             period: Some(Duration::from_millis(1000)),
             value: Rc::new(RefCell::new(None)),
             is_physical: false,
-            scheduled: None,
+            scheduled: RefCell::new(None),
             policy: QueuingPolicy::NONE,
-        }));
+        });
 
         scheduler.schedule(foo_trigger, Duration::from_micros(0), None);
     }

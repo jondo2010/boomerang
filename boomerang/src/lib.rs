@@ -3,6 +3,7 @@
 
 mod event;
 mod reaction;
+mod reactor;
 mod scheduler;
 mod trigger;
 
@@ -14,6 +15,7 @@ pub use event::{Event, EventValue};
 pub use reaction::{IsPresent, Port, Reaction};
 pub use scheduler::{Sched, Scheduler};
 pub use trigger::{QueuingPolicy, Trigger};
+pub use reactor::{Reactor};
 
 pub use std::{
     cell::RefCell,
@@ -42,7 +44,6 @@ mod turd {
         //#[reactor(input)]
         // in1: S::Input,
         // int1: Rc<RefCell<Port<bool>>>,
-
         #[reactor(output)]
         out1: Output<u32>,
 
@@ -50,11 +51,12 @@ mod turd {
             offset = "Duration::from_millis(100)",
             period = "Duration::from_millis(1000)"
         ))]
-        // tim1: S::Timer,
         tim1: Rc<RefCell<Trigger<S>>>,
-
-        #[reactor(reaction((tim1) -> output))]
-        hello: React<S>,
+        /* #[reactor(reaction(
+         * triggers = [tim1],
+         * output))]
+         * hello: React<S>,
+         */
     }
 
     #[test]

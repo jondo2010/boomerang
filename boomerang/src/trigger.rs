@@ -41,7 +41,7 @@ where
     /// time).
     pub is_physical: bool,
     /// Tag of the last event that was scheduled for this action.
-    pub scheduled: Option<Instant>,
+    pub scheduled: RefCell<Option<Instant>>,
     /// Indicates the policy for handling events that succeed one another more rapidly than
     /// allowable by the specified min. interarrival time. Only applies to physical actions.
     pub policy: QueuingPolicy,
@@ -64,7 +64,7 @@ where
             period,
             value: Rc::new(RefCell::new(None)),
             is_physical,
-            scheduled: None,
+            scheduled: RefCell::new(None),
             policy,
         }
     }

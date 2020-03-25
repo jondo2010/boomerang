@@ -365,18 +365,16 @@ impl ReactionBuilder {
 trait ReactorState: std::any::Any + std::fmt::Debug {
     // Get a mutable reference to the innter state.
     // fn get_state_mut<State>(&mut self) -> &mut State;
-    //type Inputs;
-    //type Outputs;
 
-    //fn new(inputs: Self::Inputs, outputs: Self::Outputs) -> Self;
+    fn new(inputs: &[&dyn std::any::Any], outputs: &[&dyn std::any::Any]) -> Self;
 }
 
 type MySched = Scheduler<()>;
 #[derive(Debug, Default)]
 struct SourceState {
     pub count: u32,
-    pub y: Rc<RefCell<Port<u32>>>,
     pub x: Rc<RefCell<Port<u32>>>,
+    pub y: Rc<RefCell<Port<u32>>>,
 }
 
 impl SourceState {
@@ -388,31 +386,29 @@ impl SourceState {
     pub fn fart(self: &mut Self, _sched: &mut MySched) {
         println!("Hello fart: {}", self.x.borrow().get());
     }
-
-    pub fn asdf(&mut self) {
-        let xx: Box<dyn ReactorState> = Box::new(Self::default());
-
-        let yy = xx.downcast::<Self>();
-    }
 }
 
 impl ReactorState for SourceState {
-/*
-    type Inputs = (Rc<RefCell<Port<u32>>>,);
-    type Outputs = (Rc<RefCell<Port<u32>>>,);
-
-    fn new(inputs: Self::Inputs, outputs: Self::Outputs) -> Self {
-        let (x,) = inputs;
-        let (y,) = outputs;
-        let x = Self {
-            x,
-            y,
+    fn new(inputs: &[&dyn std::any::Any], _outputs: &[&dyn std::any::Any]) -> Self {
+        let x = inputs[0].downcast_ref::<Rc<RefCell<Port<u32>>>>().unwrap();
+        let y = inputs[1].downcast_ref::<Rc<RefCell<Port<u32>>>>().unwrap();
+        Self {
+            x: x.clone(),
+            y: y.clone(),
             ..Default::default()
-        };
-
-        let xx: Box<dyn ReactorState> = Box::new(x);
+        }
     }
-*/
+}
+
+#[test]
+fn test_reactor_state() {
+    let o1 = Rc::new(RefCell::new(Port::<u32>::new(0)));
+    let o2 = Rc::new(RefCell::new(Port::<u32>::new(1)));
+
+    let y: Vec<&dyn std::any::Any> = vec![&o1, &o2];
+
+    let r = SourceState::new(y.as_slice(), y.as_slice());
+    dbg!(r);
 }
 
 #[test]
@@ -425,16 +421,13 @@ fn test() {
                     .with_period(Duration::from_secs(2))
             })
             .unwrap();
-        
-            let xx = vec![1,2,3];
-            let [a, b ,c] = xx.as_slice();
 
-        let (y, y_port) = PortBuilder::new::<u32>("y");
+        //let (y, y_port) = PortBuilder::new::<u32>("y");
 
         let r1 = ReactionBuilder::new("r1")
             .with_trigger(&t)
             //.with_uses()
-            .with_effects(&[y])
+            //.with_effects(&[y])
             .with_closure(SourceState::poo);
         // .with_closure(|state: &mut SourceState, outputs: (&RefCell<Port<u32>>,), _sched: &mut
         // MySched| { let (y,) = outputs;

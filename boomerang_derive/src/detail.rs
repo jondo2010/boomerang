@@ -1,63 +1,56 @@
 //! Details of implementation for derive macros and attributes
 
+use crate::util::{ExprField, ExprFieldList, StringList};
 use darling::{ast, util, FromDeriveInput, FromField, FromMeta};
-use quote::{quote, ToTokens};
 
-#[derive(Debug, Default, FromMeta)]
+#[derive(Debug, Default, FromMeta, PartialEq)]
 pub struct TimerField {
+    pub name: String,
     pub offset: String,
     pub period: String,
 }
 
-#[derive(Debug, Default, Clone)]
-pub struct StringList(Vec<String>);
-impl std::ops::Deref for StringList {
-    type Target = Vec<String>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl FromMeta for StringList {
-    fn from_list(v: &[syn::NestedMeta]) -> darling::Result<Self> {
-        let mut strings = Vec::with_capacity(v.len());
-        for nmi in v {
-            if let syn::NestedMeta::Lit(syn::Lit::Str(ref string)) = *nmi {
-                strings.push(string.value().clone());
-            } else {
-                return Err(darling::Error::unexpected_type("non-word").with_span(nmi));
-            }
-        }
-        Ok(StringList(strings))
-    }
-}
-
-#[derive(Debug, FromMeta)]
+#[derive(Debug, FromMeta, PartialEq)]
 pub struct ReactionField {
-    #[darling(default)]
-    pub triggers: StringList,
-    #[darling(default)]
-    pub uses: StringList,
-    #[darling(default)]
-    pub effects: StringList,
+    pub function: syn::Path,
+    #[darling(default, map = "ExprFieldList::into")]
+    pub triggers: Vec<syn::ExprField>,
+    #[darling(default, map = "StringList::into")]
+    pub uses: Vec<String>,
+    #[darling(default, map = "StringList::into")]
+    pub effects: Vec<String>,
+}
+
+#[derive(Debug, FromMeta, PartialEq)]
+pub struct ChildField {
+    pub reactor: syn::Path,
+    pub name: String,
+    #[darling(default, map = "ExprFieldList::into")]
+    pub inputs: Vec<syn::ExprField>,
+    #[darling(default, map = "StringList::into")]
+    pub outputs: Vec<String>,
+}
+
+#[derive(Debug, FromMeta, PartialEq)]
+pub struct ConnectionField {
+    #[darling(map = "ExprField::into")]
+    pub from: syn::ExprField,
+    #[darling(map = "ExprField::into")]
+    pub to: syn::ExprField,
 }
 
 #[derive(Debug, FromField)]
 #[darling(attributes(reactor), forward_attrs(doc, cfg, allow))]
 pub struct ReactorField {
     pub ident: Option<syn::Ident>,
-    vis: syn::Visibility,
-    ty: syn::Type,
+    pub vis: syn::Visibility,
+    pub ty: syn::Type,
     attrs: Vec<syn::Attribute>,
 
     #[darling(default)]
     pub input: bool,
     #[darling(default)]
     pub output: bool,
-    #[darling(default)]
-    pub timer: Option<TimerField>,
-    #[darling(default)]
-    pub reaction: Option<ReactionField>,
 }
 
 #[derive(Debug, FromDeriveInput)]
@@ -67,130 +60,118 @@ pub struct ReactorReceiver {
     pub generics: syn::Generics,
     // pub attrs: Vec<syn::Attribute>,
     pub data: ast::Data<util::Ignored, ReactorField>,
-}
 
-impl ToTokens for ReactorReceiver {
-    /// # Panics
-    /// This method panics if the field attributes input, output, timer are not mutually-exclusive.
-    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
-        let type_ident = &self.ident;
-        let (imp, ty, wher) = self.generics.split_for_impl();
-        let fields = self
-            .data
-            .as_ref()
-            .take_struct()
-            .expect("Should never be enum")
-            .fields;
-
-        let mut impl_details = proc_macro2::TokenStream::new();
-
-        for f in fields {
-            let field_ident = &f.ident;
-            let field_type = &f.ty;
-            match (&f.input, &f.output, &f.timer, &f.reaction) {
-                (false, false, None, None) => impl_details.extend(quote!(
-                    #field_ident : Default::default(),
-                )),
-                (true, false, None, None) => todo!(),
-                (false, true, None, None) => impl_details.extend(quote!(
-                    #field_ident : Rc::new(RefCell::new(Port::default())),
-                )),
-                (false, false, Some(timer), None) => {
-                    let offset =
-                        syn::parse_str::<syn::Expr>(&timer.offset).expect("Invalid expression");
-                    let period =
-                        syn::parse_str::<syn::Expr>(&timer.period).expect("Invalid expression");
-                    impl_details.extend(quote!(
-                        #field_ident : Rc::new(RefCell::new(Trigger:: #ty ::new(
-                            /* reactions:*/ vec![],
-                            /* offset:*/ #offset,
-                            /* period:*/ Some(#period),
-                            /* is_physical:*/ false,
-                            /* policy:*/ QueuingPolicy::NONE,
-                        ))),
-                        //let t = S::Timer::new();
-                    ));
-                }
-                (false, false, None, Some(reaction)) => {
-                    impl_details.extend(quote!(
-                        #field_ident : {
-                            let this_clone = this.clone();
-                            let closure = Box::new(RefCell::new(move |sched: &mut S| {
-                                HelloWorld::hello(&mut (*this_clone).borrow_mut(), sched);
-                            }));
-                            ::std::rc::Rc::new(Reaction::new(
-                                "hello_reaction",
-                                /* reactor */ closure,
-                                /* index */ 0,
-                                /* chain_id */ 0,
-                                /* triggers */ vec![(this.borrow().output.clone(), vec![reply_in_trigger])],
-                            ))
-                        };
-                    ));
-                }
-                _ => panic!(format!(
-                    "Reactor attributes input/output/timer must be mutually exclusive: {:?}",
-                    (&f.input, &f.output, &f.timer)
-                )),
-            }
-        }
-
-        tokens.extend(quote! {
-            impl #imp #type_ident #ty #wher {
-                pub fn schedule(this: &Rc<RefCell<Self>>, scheduler: &mut S) {
-                }
-                pub fn new() -> Self {
-                    use crate::*;
-                    println!("Poo!");
-                    Self {
-                        #impl_details
-                        //..Default::default()
-                    }
-                }
-            }
-        })
-    }
+    /// Timer definitions for this reactor definition
+    #[darling(default, multiple, rename = "timer")]
+    pub timers: Vec<TimerField>,
+    /// Reaction definitions for this reactor definition
+    #[darling(default, multiple, rename = "reaction")]
+    pub reactions: Vec<ReactionField>,
+    /// Child reactor instance definitions
+    #[darling(default, multiple, rename = "child")]
+    pub children: Vec<ChildField>,
+    /// Connection definitions
+    #[darling(default, multiple, rename = "connection")]
+    pub connections: Vec<ConnectionField>,
 }
 
 #[test]
-fn test_reaction_field() {
+fn test_reaction() {
+    use syn::parse_quote;
     let input = syn::parse_str(
         r#"
     #[derive(Reactor)]
-    pub struct Foo {
-        #[reactor(reaction(
-            triggers("tim1", "hello1.x"),
-            uses(),
-        ))]
-        hello2: u32,
-    }
-    "#,
+    #[reactor(
+        reaction(function="Foo::bar", triggers("tim1", "hello1.x"), uses(), effects("y")),
+        reaction(function="Foo::rab", triggers("i")),
+    )]
+    pub struct Foo {}"#,
     )
     .unwrap();
-    let receiver: ReactorReceiver = ReactorReceiver::from_derive_input(&input).unwrap();
-    let fields = &receiver.data.take_struct().unwrap().fields;
-    dbg!(&fields[0]);
-    assert_eq!(fields.len(), 1);
-    assert!(fields[0].reaction.is_some());
+    let receiver = ReactorReceiver::from_derive_input(&input).unwrap();
+    assert_eq!(
+        receiver.reactions,
+        vec![
+            ReactionField {
+                function: parse_quote!(Foo::bar),
+                triggers: vec![parse_quote!(self.tim1), parse_quote!(hello1.x)],
+                uses: vec![],
+                effects: vec!["y".into()]
+            },
+            ReactionField {
+                function: parse_quote!(Foo::rab),
+                triggers: vec![parse_quote!(self.i)],
+                uses: vec![],
+                effects: vec![]
+            }
+        ]
+    );
 }
 
 #[test]
-fn test_parse() {
-    let good_input = r#"
+fn test_timer() {
+    let input = syn::parse_str(
+        r#"
     #[derive(Reactor)]
-    pub struct Foo {
-        //#[reactor(input)]
-        //bar: bool,
+    #[reactor(
+        timer(name="t", offset="Duration::from_millis(100)", period="Duration::from_millis(1000)")
+    )]
+    pub struct Foo {}"#,
+    )
+    .unwrap();
+    let receiver = ReactorReceiver::from_derive_input(&input).unwrap();
+    assert_eq!(
+        receiver.timers[0],
+        TimerField {
+            name: "t".into(),
+            offset: "Duration::from_millis(100)".into(),
+            period: "Duration::from_millis(1000)".into()
+        }
+    );
+}
 
-        //#[reactor(output)]
-        //baz: i64,
+#[test]
+fn test_child() {
+    use syn::parse_quote;
+    let input = syn::parse_str(
+        r#"
+    #[derive(Reactor)]
+    #[reactor(
+        child(reactor="Bar", name="my_bar", inputs("x.y", "y"), outputs("b")),
+    )]
+    pub struct Foo {}"#,
+    )
+    .unwrap();
+    let receiver = ReactorReceiver::from_derive_input(&input).unwrap();
+    assert_eq!(
+        receiver.children[0],
+        ChildField {
+            reactor: parse_quote!(Bar),
+            name: "my_bar".into(),
+            inputs: vec![parse_quote!(x.y), parse_quote!(self.y)],
+            outputs: vec!["b".into()],
+        }
+    );
+}
 
-        //#[reactor(timer(offset="Duration::from_millis(100)", period="Duration::from_millis(1000)"))]
-        //foo: u32,
-
-    }"#;
-    let parsed = syn::parse_str(good_input).unwrap();
-    let receiver = ReactorReceiver::from_derive_input(&parsed).unwrap();
-    // assert_eq!(receiver.timers[0].offset, "Duration::from_millis(100)");
-    dbg!(receiver);
+#[test]
+fn test_connection() {
+    use syn::parse_quote;
+    let input = syn::parse_str(
+        r#"
+    #[derive(Reactor)]
+    #[reactor(
+        connection(from="x.y", to="inp"),
+    )]
+    pub struct Foo {}"#,
+    )
+    .unwrap();
+    let receiver = ReactorReceiver::from_derive_input(&input).unwrap();
+    assert_eq!(
+        receiver.connections,
+        vec![ConnectionField {
+            from: parse_quote!(x.y),
+            to: parse_quote!(self.inp),
+        }]
+    );
 }

@@ -34,11 +34,13 @@ mod turd {
     use crate::*;
     use boomerang_derive::Reactor;
 
-    #[derive(Reactor, Debug)]
-    pub struct Foo<S>
-    where
-        S: Sched,
-        <S as Sched>::Value: std::fmt::Debug,
+    #[derive(Reactor, Debug, Default)]
+    #[reactor(
+        timer(name="tim1", offset = "Duration::from_millis(100)", period = "Duration::from_millis(1000)"),
+        reactor(reaction(triggers = [tim1],  output)),
+        child(reactor="Bar", name="my_bar", inputs(x.y), outputs("b")),
+    )]
+    pub struct Foo
     {
         my_i: u32,
         //#[reactor(input)]
@@ -46,24 +48,13 @@ mod turd {
         // int1: Rc<RefCell<Port<bool>>>,
         #[reactor(output)]
         out1: Output<u32>,
-
-        #[reactor(timer(
-            offset = "Duration::from_millis(100)",
-            period = "Duration::from_millis(1000)"
-        ))]
-        tim1: Rc<RefCell<Trigger<S>>>,
-        /* #[reactor(reaction(
-         * triggers = [tim1],
-         * output))]
-         * hello: React<S>,
-         */
     }
 
     #[test]
     fn test() {
         type MySched = Scheduler<&'static str>;
         let mut sched = MySched::new();
-        let f = Foo::<MySched>::new();
+        let f = Foo::new();
         dbg!(f);
     }
 }

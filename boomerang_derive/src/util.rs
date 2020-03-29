@@ -32,6 +32,28 @@ impl FromMeta for StringList {
     }
 }
 
+pub struct Type(syn::Type);
+impl FromMeta for Type {
+    fn from_string(value: &str) -> darling::Result<Self> {
+        syn::parse_str::<syn::Type>(value)
+            .map_err(|err| {
+                darling::Error::unsupported_format("Error parsing expression.")
+                    .with_span(&err.span())
+            })
+            .map(Self::from)
+    }
+}
+impl From<Type> for syn::Type {
+    fn from(ty: Type) -> Self {
+        ty.0
+    }
+}
+impl From<syn::Type> for Type {
+    fn from(ty: syn::Type) -> Self {
+        Type(ty)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExprField(syn::ExprField);
 impl From<ExprField> for syn::ExprField {

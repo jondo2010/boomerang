@@ -1,3 +1,5 @@
+#![feature(hash_set_entry)]
+
 //! This crate provides Boomerangs's macros.
 //!
 //! ```edition2018
@@ -9,15 +11,18 @@
 //! fn main() {}
 //! ```
 
-mod detail;
+mod builder;
+mod parse;
 mod util;
 
+use builder::*;
+
 use darling::{FromDeriveInput, ToTokens};
+use parse::{ReactorReceiver, TimerAttr};
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, AttributeArgs};
-
-use detail::ReactorReceiver;
+use std::convert::TryFrom;
+use syn::parse_macro_input;
 
 impl ToTokens for ReactorReceiver {
     /// # Panics
@@ -37,54 +42,6 @@ impl ToTokens for ReactorReceiver {
         for f in fields {
             let field_ident = &f.ident;
             let field_type = &f.ty;
-            match (&f.input, &f.output) {
-                (false, false) => impl_details.extend(quote!(
-                    //#field_ident : Default::default(),
-                )),
-                (true, false ) => todo!(),
-                (false, true ) => impl_details.extend(quote!(
-                    //#field_ident : Rc::new(RefCell::new(Port::default())),
-                )),
-                /*
-                (false, false, Some(timer)) => {
-                    let offset =
-                        syn::parse_str::<syn::Expr>(&timer.offset).expect("Invalid expression");
-                    let period =
-                        syn::parse_str::<syn::Expr>(&timer.period).expect("Invalid expression");
-                    impl_details.extend(quote!(
-                        #field_ident : Rc::new(RefCell::new(Trigger:: #ty ::new(
-                            /* reactions:*/ vec![],
-                            /* offset:*/ #offset,
-                            /* period:*/ Some(#period),
-                            /* is_physical:*/ false,
-                            /* policy:*/ QueuingPolicy::NONE,
-                        ))),
-                        //let t = S::Timer::new();
-                    ));
-                }
-                (false, false, None, Some(reaction)) => {
-                    impl_details.extend(quote!(
-                        #field_ident : {
-                            let this_clone = this.clone();
-                            let closure = Box::new(RefCell::new(move |sched: &mut S| {
-                                HelloWorld::hello(&mut (*this_clone).borrow_mut(), sched);
-                            }));
-                            ::std::rc::Rc::new(Reaction::new(
-                                "hello_reaction",
-                                /* reactor */ closure,
-                                /* index */ 0,
-                                /* chain_id */ 0,
-                                /* triggers */ vec![(this.borrow().output.clone(), vec![reply_in_trigger])],
-                            ))
-                        };
-                    ));
-                }
-                */
-                _ => panic!(format!(
-                    "Reactor attributes input/output/timer must be mutually exclusive: {:?}",
-                    (&f.input, &f.output)
-                )),
-            }
         }
 
         tokens.extend(quote! {
@@ -103,13 +60,13 @@ impl ToTokens for ReactorReceiver {
     }
 }
 
-#[proc_macro_attribute]
-pub fn timer(args: TokenStream, input: TokenStream) -> TokenStream {
-    println!("timer: {}", args.to_string());
-    println!("timer: {}", input.to_string());
-    let ast = parse_macro_input!(args as AttributeArgs);
-    input
-}
+// #[proc_macro_attribute]
+// pub fn timer(args: TokenStream, input: TokenStream) -> TokenStream {
+// println!("timer: {}", args.to_string());
+// println!("timer: {}", input.to_string());
+// let ast = parse_macro_input!(args as AttributeArgs);
+// input
+// }
 
 #[doc(hidden)]
 #[proc_macro_derive(Reactor, attributes(reactor))]
@@ -126,7 +83,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
     // println!("Field: {:?}, {:?}", field.ident, field.timer);
     // });
 
+    let builder = builder::ReactorBuilder::try_from(reactor);
+    dbg!(&builder);
+
     // println!("{}", quote!(#reactor).to_string());
 
-    quote!(#reactor).into()
+    // quote!(#reactor).into()
+    quote!().into()
 }

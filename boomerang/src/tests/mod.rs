@@ -4,7 +4,6 @@ use std::{cell::RefCell, marker::PhantomData, rc::Rc};
 
 use boomerang_derive::Reactor;
 
-
 //#[derive(Reactor, Debug)]
 struct HelloWorld<S>
 where
@@ -106,6 +105,9 @@ where
 {
     fn start_time_step(&self) {
         self.output.borrow_mut().reset();
+    }
+    fn start_timers<SS>(&self, sched: &mut SS) {
+        unimplemented!()
     }
 }
 

@@ -7,10 +7,12 @@ license = 'MIT OR Apache-2.0'
 description = 'Macros implementation'
 
 [dependencies]
+darling = '0.10.2'
+derive_more = "0.99.5"
+parse_duration = "2.1.0"
 proc-macro2 = '1.0'
 quote = '1.0'
 syn = { version = '1.0', features = ['visit'] }
-darling = '0.10.2'
 
 [lib]
 name = 'boomerang_derive'

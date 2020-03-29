@@ -5,7 +5,7 @@ use crate::parse::{PortAttr, ReactionAttr, ReactorReceiver, TimerAttr};
 
 use std::{
     collections::{HashMap, HashSet},
-    convert::{TryFrom},
+    convert::TryFrom,
     iter::FromIterator,
     rc::Rc,
 };
@@ -23,8 +23,8 @@ pub struct TimerBuilder {
 #[derive(Debug)]
 pub struct ReactionBuilder {
     attr: ReactionAttr,
-    depends_on_timers: HashSet<Rc<TimerBuilder>>,
-    depends_on_inputs: HashSet<Rc<PortBuilder>>,
+    depends_on_timers: Vec<Rc<TimerBuilder>>,
+    depends_on_inputs: Vec<Rc<PortBuilder>>,
 }
 
 #[derive(Debug, Default)]
@@ -33,6 +33,7 @@ pub struct ReactorBuilder {
     timers: HashMap<syn::Ident, Rc<TimerBuilder>>,
     inputs: HashMap<syn::Ident, Rc<PortBuilder>>,
     outputs: HashMap<syn::Ident, Rc<PortBuilder>>,
+    reactions: Vec<ReactionBuilder>,
 }
 
 /// Extract the expected (base, member) ident tuple, or None if the ExprField doesn't match.
@@ -94,42 +95,58 @@ impl TryFrom<ReactorReceiver> for ReactorBuilder {
         let outputs: HashMap<_, _> = build_ports(&mut idents, receiver.outputs)?;
 
         // Children
-        for child in receiver.children.into_iter() {}
+        for child in receiver.children.into_iter() {
+            todo!();
+        }
 
         // Reactions
-        for reaction in receiver.reactions.into_iter() {
-            let mut depends_on_timers = HashSet::new();
-            let mut depends_on_inputs = HashSet::new();
+        let reactions = receiver
+            .reactions
+            .into_iter()
+            .map(|reaction| {
+                // Triggers can be timers, inputs, outputs of child reactors, or actions
+                let triggers = reaction
+                    .triggers
+                    .iter()
+                    .map(|trigger| {
+                        expr_field_parts(trigger)
+                            .ok_or(darling::Error::custom("Unexpected expression for trigger"))
+                            .map(|(base, member)| {
+                                let trigger_name = format!("{}.{}", base, member);
+                                if base.to_string() == "self" {
+                                    (
+                                        trigger_name,
+                                        timers.get(member).cloned(),
+                                        inputs.get(member).cloned(),
+                                    )
+                                } else {
+                                    todo!("Outputs of child reactors");
+                                    (trigger_name, None, None)
+                                }
+                            })
+                            .and_then(|(field_name, timer, input)| match (&timer, &input) {
+                                (None, None) => Err(darling::Error::unknown_field(&field_name)),
+                                _ => Ok((timer, input)),
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
 
-            // Triggers can be timers, inputs, outputs of child reactors, or actions
-            for trigger in reaction.triggers.iter() {
-                let (base, member) = expr_field_parts(trigger)
-                    .ok_or(darling::Error::custom("Unexpected expression for trigger"))?;
+                let (timers, inputs): (Vec<_>, Vec<_>) = triggers.into_iter().unzip();
 
-                if base.to_string() == "self" {
-                    if let Some(timer) = timers.get(member) {
-                        depends_on_timers.insert(timer.clone());
-                    } else if let Some(input) = inputs.get(member) {
-                        depends_on_inputs.insert(input.clone());
-                    } else {
-                        return Err(darling::Error::unknown_field(&format!(
-                            "{}.{}",
-                            base, member
-                        )));
-                    }
-                }
-
-                // timers.get(trigger).and_then(|timer| {
-                // depends_on_timers.insert(timer.clone())
-                // });
-            }
-        }
+                Ok(ReactionBuilder {
+                    attr: reaction,
+                    depends_on_timers: timers.into_iter().filter_map(|x| x).collect(),
+                    depends_on_inputs: inputs.into_iter().filter_map(|x| x).collect(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(ReactorBuilder {
             idents,
             timers,
             inputs,
             outputs,
+            reactions,
         })
     }
 }

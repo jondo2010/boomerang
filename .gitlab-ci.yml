@@ -44,7 +44,7 @@ test:nightly:cargo:
   image: registry.gitlab.com/starshell/docker/rust-codecov:nightly
   <<: *cargo_test
   after_script:
-    - ./codecov.sh
+    - /bin/bash ./codecov.sh
 
 pages:
   image: registry.gitlab.com/starshell/docker/rust-codecov:nightly

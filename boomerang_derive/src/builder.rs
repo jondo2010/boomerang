@@ -10,30 +10,79 @@ use std::{
     rc::Rc,
 };
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+use derive_more::Display;
+use petgraph::graphmap::DiGraphMap;
+
+#[derive(Debug, PartialEq, Eq, Hash, Ord, PartialOrd, Display)]
 pub struct PortBuilder {
     attr: PortAttr,
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash, Ord, PartialOrd, Display)]
 pub struct TimerBuilder {
     attr: TimerAttr,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq, Hash, PartialOrd, Ord, Display)]
+#[display(fmt = "{}", attr)]
 pub struct ReactionBuilder {
     attr: ReactionAttr,
     depends_on_timers: Vec<Rc<TimerBuilder>>,
     depends_on_inputs: Vec<Rc<PortBuilder>>,
+
+    provides_outputs: Vec<Rc<PortBuilder>>,
+    // provides_actions:
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Eq, PartialEq)]
 pub struct ReactorBuilder {
     idents: HashSet<syn::Ident>,
     timers: HashMap<syn::Ident, Rc<TimerBuilder>>,
     inputs: HashMap<syn::Ident, Rc<PortBuilder>>,
     outputs: HashMap<syn::Ident, Rc<PortBuilder>>,
-    reactions: Vec<ReactionBuilder>,
+    reactions: Vec<Rc<ReactionBuilder>>,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, Display)]
+pub enum GraphNode<'a> {
+    #[display(fmt = "Timer: {}", _0.)]
+    Timer(&'a Rc<TimerBuilder>),
+    Input(&'a Rc<PortBuilder>),
+    Output(&'a Rc<PortBuilder>),
+    Reaction(&'a Rc<ReactionBuilder>),
+}
+
+impl ReactorBuilder {
+    pub fn get_dependency_graph(&self) -> DiGraphMap<GraphNode, bool> {
+        let iter = self.reactions.iter().flat_map(|reaction| {
+            reaction
+                .depends_on_timers
+                .iter()
+                .map(move |timer| {
+                    (
+                        GraphNode::Reaction(&reaction),
+                        GraphNode::Timer(&timer),
+                        false,
+                    )
+                })
+                .chain(reaction.depends_on_inputs.iter().map(move |input| {
+                    (
+                        GraphNode::Reaction(&reaction),
+                        GraphNode::Input(&input),
+                        false,
+                    )
+                }))
+                .chain(reaction.provides_outputs.iter().map(move |output| {
+                    (
+                        GraphNode::Output(&output),
+                        GraphNode::Reaction(&reaction),
+                        false,
+                    )
+                }))
+        });
+
+        DiGraphMap::from_edges(iter)
+    }
 }
 
 /// Extract the expected (base, member) ident tuple, or None if the ExprField doesn't match.
@@ -90,9 +139,9 @@ impl TryFrom<ReactorReceiver> for ReactorBuilder {
     fn try_from(receiver: ReactorReceiver) -> Result<Self, Self::Error> {
         let mut idents = HashSet::<syn::Ident>::new();
 
-        let timers: HashMap<_, _> = build_timers(&mut idents, receiver.timers)?;
-        let inputs: HashMap<_, _> = build_ports(&mut idents, receiver.inputs)?;
-        let outputs: HashMap<_, _> = build_ports(&mut idents, receiver.outputs)?;
+        let all_timers: HashMap<_, _> = build_timers(&mut idents, receiver.timers)?;
+        let all_inputs: HashMap<_, _> = build_ports(&mut idents, receiver.inputs)?;
+        let all_outputs: HashMap<_, _> = build_ports(&mut idents, receiver.outputs)?;
 
         // Children
         for child in receiver.children.into_iter() {
@@ -116,8 +165,8 @@ impl TryFrom<ReactorReceiver> for ReactorBuilder {
                                 if base.to_string() == "self" {
                                     (
                                         trigger_name,
-                                        timers.get(member).cloned(),
-                                        inputs.get(member).cloned(),
+                                        all_timers.get(member).cloned(),
+                                        all_inputs.get(member).cloned(),
                                     )
                                 } else {
                                     todo!("Outputs of child reactors");
@@ -133,19 +182,36 @@ impl TryFrom<ReactorReceiver> for ReactorBuilder {
 
                 let (timers, inputs): (Vec<_>, Vec<_>) = triggers.into_iter().unzip();
 
-                Ok(ReactionBuilder {
+                let outputs = reaction
+                    .effects
+                    .iter()
+                    .map(|effect| {
+                        expr_field_parts(effect)
+                            .ok_or(darling::Error::custom("Unexpected expression for effect"))
+                            .map(|(base, member)| {
+                                if base.to_string() == "self" {
+                                    all_outputs.get(member).cloned()
+                                } else {
+                                    todo!("Handle this error");
+                                }
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                Ok(Rc::new(ReactionBuilder {
                     attr: reaction,
                     depends_on_timers: timers.into_iter().filter_map(|x| x).collect(),
                     depends_on_inputs: inputs.into_iter().filter_map(|x| x).collect(),
-                })
+                    provides_outputs: outputs.into_iter().filter_map(|x| x).collect(),
+                }))
             })
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(ReactorBuilder {
             idents,
-            timers,
-            inputs,
-            outputs,
+            timers: all_timers,
+            inputs: all_inputs,
+            outputs: all_outputs,
             reactions,
         })
     }

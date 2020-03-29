@@ -83,8 +83,13 @@ pub fn derive(input: TokenStream) -> TokenStream {
     // println!("Field: {:?}, {:?}", field.ident, field.timer);
     // });
 
-    let builder = builder::ReactorBuilder::try_from(reactor);
-    dbg!(&builder);
+    use petgraph::dot::{Dot, Config};
+
+    let builder = builder::ReactorBuilder::try_from(reactor).unwrap();
+    let graph = builder.get_dependency_graph();
+    let dot = Dot::with_config(&graph, &[Config::EdgeNoLabel]);
+
+    println!("{}", dot);
 
     // println!("{}", quote!(#reactor).to_string());
 

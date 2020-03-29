@@ -46,7 +46,7 @@ mod turd {
         input(name="in1", type="u32"),
         output(name="out1", type="u32"),
         reaction(function="Foo::bar", triggers("tim1"), uses(), effects("out1")),
-        reaction(function="Foo::rab", triggers("in1")),
+        reaction(function="Foo::rab", triggers("tim1", "in1")),
         connection(from="out1", to="in1"),
         //child(reactor="Bar", name="my_bar", inputs("x.y", "y"), outputs("b")),
     )]

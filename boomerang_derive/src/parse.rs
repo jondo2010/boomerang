@@ -3,14 +3,17 @@
 //! processing.
 
 use crate::util::{ExprField, ExprFieldList, StringList, Type};
-use darling::{ast, util, FromDeriveInput, FromField, FromMeta};
+use darling::{ast, util, FromDeriveInput, FromField, FromMeta, ToTokens};
 use std::time::Duration;
+use quote::quote;
+use derive_more::Display;
 
 fn handle_duration(value: String) -> Option<Duration> {
     Some(parse_duration::parse(&value).unwrap())
 }
 
-#[derive(Debug, FromMeta, PartialEq, Eq, Hash)]
+#[derive(Debug, FromMeta, PartialEq, Eq, Hash, Ord, PartialOrd, Display)]
+#[display(fmt = "Timer: '{}'", "name.to_string()")]
 pub struct TimerAttr {
     pub name: syn::Ident,
     #[darling(default, map = "handle_duration")]
@@ -19,14 +22,28 @@ pub struct TimerAttr {
     pub period: Option<Duration>,
 }
 
-#[derive(Debug, FromMeta, PartialEq, Eq, Hash)]
+#[derive(Debug, FromMeta, PartialEq, Eq, Hash, Display)]
+#[display(fmt = "Port: '{}'", "name.to_string()")]
 pub struct PortAttr {
     pub name: syn::Ident,
     #[darling(rename = "type", map = "Type::into")]
     pub ty: syn::Type,
 }
 
-#[derive(Debug, FromMeta, PartialEq)]
+impl PartialOrd for PortAttr {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.name.partial_cmp(&other.name)
+    }
+}
+
+impl Ord for PortAttr {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.name.cmp(&other.name)
+    }
+}
+
+#[derive(Debug, FromMeta, Eq, PartialEq, Hash, Display)]
+#[display(fmt = "Reaction: '{}'", "function.to_token_stream().to_string()")]
 pub struct ReactionAttr {
     pub function: syn::Path,
     #[darling(default, map = "ExprFieldList::into")]
@@ -35,6 +52,22 @@ pub struct ReactionAttr {
     pub uses: Vec<syn::ExprField>,
     #[darling(default, map = "ExprFieldList::into")]
     pub effects: Vec<syn::ExprField>,
+}
+
+impl PartialOrd for ReactionAttr {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        let f1 = self.function.to_token_stream().to_string();
+        let f2 = other.function.to_token_stream().to_string();
+        f1.partial_cmp(&f2)
+    }
+}
+
+impl Ord for ReactionAttr {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let f1 = self.function.to_token_stream().to_string();
+        let f2 = other.function.to_token_stream().to_string();
+        f1.cmp(&f2)
+    }
 }
 
 #[derive(Debug, FromMeta, PartialEq)]

@@ -4,9 +4,8 @@
 
 use crate::util::{ExprField, ExprFieldList, StringList, Type};
 use darling::{ast, util, FromDeriveInput, FromField, FromMeta, ToTokens};
-use std::time::Duration;
-use quote::quote;
 use derive_more::Display;
+use std::time::Duration;
 
 fn handle_duration(value: String) -> Option<Duration> {
     Some(parse_duration::parse(&value).unwrap())

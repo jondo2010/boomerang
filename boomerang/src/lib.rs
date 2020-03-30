@@ -45,8 +45,8 @@ mod turd {
         timer(name="tim1", offset = "100 msec", period = "1 sec"),
         input(name="in1", type="u32"),
         output(name="out1", type="u32"),
-        reaction(function="Foo::bar", triggers("tim1"), uses(), effects("out1")),
-        reaction(function="Foo::rab", triggers("tim1", "in1")),
+        reaction(function="X::foo", triggers("tim1"), uses(), effects("out1")),
+        reaction(function="X::bar", triggers("tim1", "in1")),
         connection(from="out1", to="in1"),
         //child(reactor="Bar", name="my_bar", inputs("x.y", "y"), outputs("b")),
     )]
@@ -67,7 +67,7 @@ mod turd {
     fn test() {
         type MySched = Scheduler<&'static str>;
         let mut sched = MySched::new();
-        //let f = Foo::new();
-        //dbg!(f);
+        // let f = Foo::new();
+        // dbg!(f);
     }
 }

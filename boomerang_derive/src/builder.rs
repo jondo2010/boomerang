@@ -16,20 +16,21 @@ use petgraph::graphmap::DiGraphMap;
 
 #[derive(Debug, PartialEq, Eq, Ord, PartialOrd, Display, Clone, Hash)]
 pub enum PortBuilderType {
-    #[display(fmt = "[I]")]
+    #[display(fmt = "I")]
     Input,
-    #[display(fmt = "[O]")]
+    #[display(fmt = "O")]
     Output,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Ord, PartialOrd, Display)]
-#[display(fmt = "PortBuilder: '{}' {}", "attr.name.to_string()", subtype)]
+#[display(fmt = "'{}' {}", "attr.name.to_string()", subtype)]
 pub struct PortBuilder {
     attr: PortAttr,
     subtype: PortBuilderType,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Ord, PartialOrd, Display)]
+#[display(fmt = "{}", "attr.name.to_string()")]
 pub struct TimerBuilder {
     attr: TimerAttr,
 }
@@ -52,61 +53,103 @@ pub struct ReactorBuilder {
     inputs: HashMap<syn::Ident, Rc<PortBuilder>>,
     outputs: HashMap<syn::Ident, Rc<PortBuilder>>,
     reactions: Vec<Rc<ReactionBuilder>>,
-    connections: HashSet<(Rc<PortBuilder>, Rc<PortBuilder>)>,
+    connections: HashMap<Rc<PortBuilder>, Vec<Rc<PortBuilder>>>,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, Display)]
+pub enum TriggerNodeType<'a> {
+    #[display(fmt = "Timer: {}", _0.)]
+    Timer(&'a Rc<TimerBuilder>),
+    #[display(fmt = "Input: {}", _0.)]
+    Input(&'a Rc<PortBuilder>),
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, Display)]
 pub enum GraphNode<'a> {
-    #[display(fmt = "Timer: {}", _0.)]
-    Timer(&'a Rc<TimerBuilder>),
+    #[display(fmt = "T {}", _0)]
+    Trigger(TriggerNodeType<'a>),
+    #[display(fmt = "I {}", _0)]
     Input(&'a Rc<PortBuilder>),
+    #[display(fmt = "O {}", _0)]
     Output(&'a Rc<PortBuilder>),
+    #[display(fmt = "R {}", _0)]
     Reaction(&'a Rc<ReactionBuilder>),
 }
 
-impl<'a> From<&'a Rc<TimerBuilder>> for GraphNode<'a> {
-    fn from(tim: &'a Rc<TimerBuilder>) -> Self {
-        GraphNode::Timer(tim)
-    }
-}
-
-impl<'a> From<&'a Rc<PortBuilder>> for GraphNode<'a> {
-    fn from(port: &'a Rc<PortBuilder>) -> Self {
-        match port.subtype {
-            PortBuilderType::Input => GraphNode::Input(port),
-            PortBuilderType::Output => GraphNode::Output(port),
-        }
-    }
-}
-
-impl<'a> From<&'a Rc<ReactionBuilder>> for GraphNode<'a> {
-    fn from(reac: &'a Rc<ReactionBuilder>) -> Self {
-        GraphNode::Reaction(reac)
-    }
-}
-
 impl ReactorBuilder {
+    /// Create the complete dependency graph needed to generate the reactor structures
     pub fn get_dependency_graph(&self) -> DiGraphMap<GraphNode, bool> {
-        let iter =
-            self.reactions.iter().flat_map(|reaction| {
-                reaction
-                    .depends_on_timers
-                    .iter()
-                    .map(move |timer| (GraphNode::from(reaction), GraphNode::from(timer), false))
-                    .chain(reaction.depends_on_inputs.iter().map(move |input| {
-                        (GraphNode::from(reaction), GraphNode::from(input), false)
-                    }))
-                    .chain(reaction.provides_outputs.iter().map(move |output| {
-                        (GraphNode::from(output), GraphNode::from(reaction), false)
-                    }))
-                    .chain(
-                        self.connections
-                            .iter()
-                            .map(|(from, to)| (GraphNode::from(to), GraphNode::from(from), false)),
-                    )
+        let reaction_edges = self.reactions.iter().flat_map(|reaction| {
+            // Trigger output reactions from timers.
+            let trigger_reactions_timers = reaction.depends_on_timers.iter().map(move |timer| {
+                (
+                    GraphNode::Trigger(TriggerNodeType::Timer(timer)),
+                    GraphNode::Reaction(reaction),
+                    false,
+                )
             });
 
-        DiGraphMap::from_edges(iter)
+            // Trigger output reactions from inputs
+            let trigger_reactions_inputs = reaction.depends_on_inputs.iter().map(move |input| {
+                (
+                    GraphNode::Trigger(TriggerNodeType::Input(input)),
+                    GraphNode::Reaction(reaction),
+                    false,
+                )
+            });
+
+            // Reaction input ports
+            let reaction_inputs = reaction.depends_on_inputs.iter().map(move |input| {
+                (
+                    GraphNode::Reaction(reaction),
+                    GraphNode::Input(input),
+                    false,
+                )
+            });
+
+            // Reaction output ports
+            let reaction_outputs = reaction.provides_outputs.iter().map(move |output| {
+                (
+                    GraphNode::Reaction(reaction),
+                    GraphNode::Output(output),
+                    false,
+                )
+            });
+
+            // Reaction output triggers
+            // Find any reactions who's `provides_outputs` contains `to`
+            let reaction_output_triggers = reaction
+                .provides_outputs
+                .iter()
+                .map(move |output: &Rc<PortBuilder>| {
+                    self.connections.get(output).map(|input_vec| {
+                        input_vec.iter().map(move |input| {
+                            (
+                                GraphNode::Reaction(reaction),
+                                GraphNode::Trigger(TriggerNodeType::Input(input)),
+                                false,
+                            )
+                        })
+                    })
+                })
+                .filter_map(|x| x)
+                .flatten();
+
+            trigger_reactions_timers
+                .chain(trigger_reactions_inputs)
+                .chain(reaction_inputs)
+                .chain(reaction_outputs)
+                .chain(reaction_output_triggers)
+        });
+
+        // Connections between ports
+        let port_connections = self.connections.iter().flat_map(|(from, to_vec)| {
+            to_vec
+                .iter()
+                .map(move |to| (GraphNode::Input(to), GraphNode::Output(from), false))
+        });
+
+        DiGraphMap::from_edges(reaction_edges.chain(port_connections))
     }
 }
 
@@ -271,7 +314,14 @@ impl TryFrom<ReactorReceiver> for ReactorBuilder {
 
                 Ok((out_port, in_port))
             })
-            .collect::<Result<HashSet<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let connections = connections
+            .into_iter()
+            .fold(HashMap::new(), |mut acc, (key, val)| {
+                acc.entry(key).or_insert_with(Vec::new).push(val);
+                acc
+            });
 
         Ok(ReactorBuilder {
             idents,

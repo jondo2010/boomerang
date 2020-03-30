@@ -2,7 +2,7 @@
 //! The `Reactor` derive macro is parsed into a `ReactorReceiver` struct for further
 //! processing.
 
-use crate::util::{ExprField, ExprFieldList, StringList, Type};
+use crate::util::{ExprField, ExprFieldList, Type};
 use darling::{ast, util, FromDeriveInput, FromField, FromMeta, ToTokens};
 use derive_more::Display;
 use std::time::Duration;
@@ -42,7 +42,7 @@ impl Ord for PortAttr {
 }
 
 #[derive(Debug, FromMeta, Eq, PartialEq, Hash, Display)]
-#[display(fmt = "Reaction: '{}'", "function.to_token_stream().to_string()")]
+#[display(fmt = "'{}'", "function.to_token_stream().to_string()")]
 pub struct ReactionAttr {
     pub function: syn::Path,
     #[darling(default, map = "ExprFieldList::into")]

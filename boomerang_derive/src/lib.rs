@@ -83,12 +83,18 @@ pub fn derive(input: TokenStream) -> TokenStream {
     // println!("Field: {:?}, {:?}", field.ident, field.timer);
     // });
 
-    use petgraph::dot::{Dot, Config};
+    use petgraph::dot::{Config, Dot};
 
     let builder = builder::ReactorBuilder::try_from(reactor).unwrap();
     let graph = builder.get_dependency_graph();
-    let dot = Dot::with_config(&graph, &[Config::EdgeNoLabel]);
+    let dot = Dot::with_config(&graph, &[/*Config::EdgeNoLabel*/]);
 
+    let mut space = petgraph::algo::DfsSpace::new(&graph);
+    let sort = petgraph::algo::toposort(&graph, Some(&mut space));
+
+    for step in sort.unwrap().iter() {
+        println!("{}", step);
+    }
     println!("{}", dot);
 
     // println!("{}", quote!(#reactor).to_string());

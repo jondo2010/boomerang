@@ -1,10 +1,11 @@
 #!/bin/bash
-boomerang_derive
-for file in target/debug/boomerang-*[^\.d]; do
+for file in ./target/debug/boomerang-*[^\.d]; do
+    echo "Running coverage on $file"
     mkdir -p "target/cov/$(basename $file)";
     kcov --exclude-pattern=/.cargo,/usr/lib --verify "target/cov/$(basename $file)" "$file";
 done && \
-for file in target/debug/boomerang_derive-*[^\.d]; do
+for file in ./target/debug/boomerang_derive-*[^\.d]; do
+    echo "Running coverage on $file"
     mkdir -p "target/cov/$(basename $file)";
     kcov --exclude-pattern=/.cargo,/usr/lib --verify "target/cov/$(basename $file)" "$file";
 done && \

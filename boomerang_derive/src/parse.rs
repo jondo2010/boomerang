@@ -12,7 +12,7 @@ fn handle_duration(value: String) -> Option<Duration> {
 }
 
 #[derive(Debug, FromMeta, PartialEq, Eq, Hash, Ord, PartialOrd, Display)]
-#[display(fmt = "Timer: '{}'", "name.to_string()")]
+#[display(fmt = "{}", "name.to_string()")]
 pub struct TimerAttr {
     pub name: syn::Ident,
     #[darling(default, map = "handle_duration")]
@@ -22,7 +22,7 @@ pub struct TimerAttr {
 }
 
 #[derive(Debug, FromMeta, PartialEq, Eq, Hash, Display)]
-#[display(fmt = "Port: '{}'", "name.to_string()")]
+#[display(fmt = "{}", "name.to_string()")]
 pub struct PortAttr {
     pub name: syn::Ident,
     #[darling(rename = "type", map = "Type::into")]
@@ -42,7 +42,7 @@ impl Ord for PortAttr {
 }
 
 #[derive(Debug, FromMeta, Eq, PartialEq, Hash, Display)]
-#[display(fmt = "'{}'", "function.to_token_stream().to_string()")]
+#[display(fmt = "{}", "function.segments.last().unwrap().ident.to_string()")]
 pub struct ReactionAttr {
     pub function: syn::Path,
     #[darling(default, map = "ExprFieldList::into")]

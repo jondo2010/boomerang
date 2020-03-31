@@ -32,7 +32,7 @@ where
     pub reactions: Vec<Rc<Reaction<S>>>,
     /// For a logical action, this will be a minimum delay. For physical, it is the minimum
     /// interarrival time.
-    pub offset: Duration,
+    pub offset: Option<Duration>,
     /// For an action, this is not used.
     pub period: Option<Duration>,
     /// Pointer to malloc'd value (or None)
@@ -53,7 +53,7 @@ where
 {
     pub fn new(
         reactions: Vec<Rc<Reaction<S>>>,
-        offset: Duration,
+        offset: Option<Duration>,
         period: Option<Duration>,
         is_physical: bool,
         policy: QueuingPolicy,

@@ -50,13 +50,13 @@ mod turd {
         connection(from="out1", to="in1"),
         //child(reactor="Bar", name="my_bar", inputs("x.y", "y"), outputs("b")),
     )]
-    pub struct Foo {
+    pub struct X {
         my_i: u32,
     }
 
-    impl Foo {
-        fn bar(&mut self, inputs: (), outputs: (&mut Port<u32>)) {}
-        fn rab(&mut self, inputs: (&mut Port<u32>), outputs: ()) {}
+    impl X {
+        fn foo(&mut self, inputs: (), outputs: (&mut Port<u32>)) {}
+        fn bar(&mut self, inputs: (&mut Port<u32>), outputs: ()) {}
     }
 
     // impl Reactor for Foo {

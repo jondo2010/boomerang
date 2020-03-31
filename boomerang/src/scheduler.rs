@@ -1,8 +1,7 @@
-use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
-use super::{Duration, Event, EventValue, Instant, Port, QueuingPolicy, Reaction, Trigger};
+use super::{Duration, Event, EventValue, Instant, QueuingPolicy, Reaction, Trigger};
 
 const INITIAL_REACT_QUEUE_SIZE: usize = 10;
 const INITIAL_EVENT_QUEUE_SIZE: usize = 10;
@@ -343,7 +342,8 @@ where
                 // the trigger.offset, which we don't want at this point.
                 self.schedule(
                     event.trigger.clone(),
-                    event.trigger.period.unwrap_or(Duration::from_micros(0)) - event.trigger.offset,
+                    event.trigger.period.unwrap_or(Duration::from_micros(0))
+                        - event.trigger.offset.unwrap_or_default(),
                     None,
                 );
             }
@@ -495,7 +495,7 @@ where
         // For logical actions, the logical time of the new event is just the current logical time
         // plus the minimum offset (action parameter) plus the extra delay specified in the call to
         // schedule.
-        e.time = tag + trigger.offset + extra_delay;
+        e.time = tag + trigger.offset.unwrap_or_default() + extra_delay;
 
         if trigger.is_physical {
             // If the trigger is physical, then we need to use physical time and the time of the
@@ -511,7 +511,7 @@ where
                 tag = physical_time;
             }
 
-            let min_inter_arrival = trigger.offset + extra_delay;
+            let min_inter_arrival = trigger.offset.unwrap_or_default() + extra_delay;
 
             // Compute the earliest time that this event can be scheduled.
             let earliest_time = trigger

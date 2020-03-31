@@ -11,6 +11,10 @@ use std::{
     rc::Rc,
 };
 
+mod graph;
+pub use graph::{GraphNode, NodeWithContext, TriggerNodeType};
+
+use darling::ToTokens;
 use derive_more::Display;
 use petgraph::graphmap::DiGraphMap;
 
@@ -23,7 +27,7 @@ pub enum PortBuilderType {
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Ord, PartialOrd, Display)]
-#[display(fmt = "'{}' {}", "attr.name.to_string()", subtype)]
+#[display(fmt = "{}", "attr.name.to_string()")]
 pub struct PortBuilder {
     attr: PortAttr,
     subtype: PortBuilderType,
@@ -46,34 +50,20 @@ pub struct ReactionBuilder {
     // provides_actions:
 }
 
-#[derive(Debug, Default, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct ReactorBuilder {
+    /// Ident for the Reactor
+    ident: syn::Ident,
+    /// Generics information for the Reactor
+    generics: syn::Generics,
+
+    /// Set of idents used in the macro attributes
     idents: HashSet<syn::Ident>,
     timers: HashMap<syn::Ident, Rc<TimerBuilder>>,
     inputs: HashMap<syn::Ident, Rc<PortBuilder>>,
     outputs: HashMap<syn::Ident, Rc<PortBuilder>>,
     reactions: Vec<Rc<ReactionBuilder>>,
     connections: HashMap<Rc<PortBuilder>, Vec<Rc<PortBuilder>>>,
-}
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, Display)]
-pub enum TriggerNodeType<'a> {
-    #[display(fmt = "Timer: {}", _0.)]
-    Timer(&'a Rc<TimerBuilder>),
-    #[display(fmt = "Input: {}", _0.)]
-    Input(&'a Rc<PortBuilder>),
-}
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, Display)]
-pub enum GraphNode<'a> {
-    #[display(fmt = "T {}", _0)]
-    Trigger(TriggerNodeType<'a>),
-    #[display(fmt = "I {}", _0)]
-    Input(&'a Rc<PortBuilder>),
-    #[display(fmt = "O {}", _0)]
-    Output(&'a Rc<PortBuilder>),
-    #[display(fmt = "R {}", _0)]
-    Reaction(&'a Rc<ReactionBuilder>),
 }
 
 impl ReactorBuilder {
@@ -324,12 +314,61 @@ impl TryFrom<ReactorReceiver> for ReactorBuilder {
             });
 
         Ok(ReactorBuilder {
+            ident: receiver.ident,
+            generics: receiver.generics,
             idents,
             timers: all_timers,
             inputs: all_inputs,
             outputs: all_outputs,
             reactions,
             connections,
+        })
+    }
+}
+
+impl ToTokens for ReactorBuilder {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        use petgraph::algo::{toposort, DfsSpace};
+        use quote::quote;
+
+        let graph = self.get_dependency_graph();
+        let mut space = DfsSpace::new(&graph);
+        let sorted = toposort(&graph, Some(&mut space));
+
+        // use petgraph::dot::{Config, Dot};
+        // let dot = Dot::with_config(&graph, &[/*Config::EdgeNoLabel*/]);
+        // println!("{}", dot);
+
+        // Turn the reversed graph traversal into output tokens
+        let graph_tokens = sorted
+            .unwrap()
+            .iter()
+            .rev()
+            .map(|node| {
+                let out = NodeWithContext {
+                    node: *node,
+                    graph: &graph,
+                };
+                out.into_token_stream()
+            })
+            .collect::<proc_macro2::TokenStream>();
+
+        let type_ident = &self.ident;
+        let (imp, ty, wher) = self.generics.split_for_impl();
+        
+        tokens.extend(quote! {
+            impl #imp #type_ident #ty #wher {
+                // pub fn schedule(this: &Rc<RefCell<Self>>, scheduler: &mut S) {}
+                pub fn test() {
+                    #graph_tokens
+                    // use crate::*;
+                    // println!("Poo!");
+                    // Self {
+                    // #impl_details
+                    // ..Default::default()
+                    // }
+                }
+            }
         })
     }
 }

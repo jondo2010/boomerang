@@ -61,7 +61,7 @@ where
 
         let reply_in_trigger = Rc::new(RefCell::new(Trigger {
             reactions: vec![reply_in_reaction],
-            offset: Duration::from_millis(0),
+            offset: None,
             period: None,
             value: Rc::new(RefCell::new(None)),
             is_physical: false,
@@ -86,7 +86,7 @@ where
         // timer foo(100 msec, 1000 msec)
         let foo_trigger = Rc::new(Trigger {
             reactions: vec![hello_reaction],
-            offset: Duration::from_millis(100),
+            offset: Some(Duration::from_millis(100)),
             period: Some(Duration::from_millis(1000)),
             value: Rc::new(RefCell::new(None)),
             is_physical: false,

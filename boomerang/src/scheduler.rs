@@ -179,14 +179,7 @@ where
                 }
             })
             .flatten()
-            .flat_map(|trigger| {
-                trigger
-                    .borrow()
-                    .reactions
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<Rc<_>>>()
-            })
+            .flat_map(|trigger| trigger.reactions.iter().cloned().collect::<Vec<Rc<_>>>())
         {
             self.reaction_q.insert(out_reaction);
         }

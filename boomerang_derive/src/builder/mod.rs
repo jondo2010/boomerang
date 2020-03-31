@@ -17,6 +17,7 @@ pub use graph::{GraphNode, NodeWithContext, TriggerNodeType};
 use darling::ToTokens;
 use derive_more::Display;
 use petgraph::graphmap::DiGraphMap;
+use quote::format_ident;
 
 #[derive(Debug, PartialEq, Eq, Ord, PartialOrd, Display, Clone, Hash)]
 pub enum PortBuilderType {
@@ -50,13 +51,30 @@ pub struct ReactionBuilder {
     // provides_actions:
 }
 
-#[derive(Debug)]
-pub struct ReactorBuilder {
-    /// Ident for the Reactor
+#[derive(Debug, Eq, PartialEq, Hash, Display)]
+#[display(fmt = "{}", ident)]
+pub struct ReactorStateBuilder {
+    /// Ident for the Reactor state struct
     ident: syn::Ident,
     /// Generics information for the Reactor
     generics: syn::Generics,
+}
 
+impl PartialOrd for ReactorStateBuilder {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.ident.partial_cmp(&other.ident)
+    }
+}
+
+impl Ord for ReactorStateBuilder {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.ident.cmp(&other.ident)
+    }
+}
+
+#[derive(Debug)]
+pub struct ReactorBuilder {
+    state: Rc<ReactorStateBuilder>,
     /// Set of idents used in the macro attributes
     idents: HashSet<syn::Ident>,
     timers: HashMap<syn::Ident, Rc<TimerBuilder>>,
@@ -70,6 +88,13 @@ impl ReactorBuilder {
     /// Create the complete dependency graph needed to generate the reactor structures
     pub fn get_dependency_graph(&self) -> DiGraphMap<GraphNode, bool> {
         let reaction_edges = self.reactions.iter().flat_map(|reaction| {
+            // All reactions depend on the reactor state
+            let reactor_state = std::iter::once((
+                GraphNode::Reaction(reaction),
+                GraphNode::State(&self.state),
+                false,
+            ));
+
             // Trigger output reactions from timers.
             let trigger_reactions_timers = reaction.depends_on_timers.iter().map(move |timer| {
                 (
@@ -125,7 +150,8 @@ impl ReactorBuilder {
                 .filter_map(|x| x)
                 .flatten();
 
-            trigger_reactions_timers
+            reactor_state
+                .chain(trigger_reactions_timers)
                 .chain(trigger_reactions_inputs)
                 .chain(reaction_inputs)
                 .chain(reaction_outputs)
@@ -313,9 +339,13 @@ impl TryFrom<ReactorReceiver> for ReactorBuilder {
                 acc
             });
 
-        Ok(ReactorBuilder {
+        let state = Rc::new(ReactorStateBuilder {
             ident: receiver.ident,
             generics: receiver.generics,
+        });
+
+        Ok(ReactorBuilder {
+            state,
             idents,
             timers: all_timers,
             inputs: all_inputs,
@@ -335,9 +365,9 @@ impl ToTokens for ReactorBuilder {
         let mut space = DfsSpace::new(&graph);
         let sorted = toposort(&graph, Some(&mut space));
 
-        // use petgraph::dot::{Config, Dot};
-        // let dot = Dot::with_config(&graph, &[/*Config::EdgeNoLabel*/]);
-        // println!("{}", dot);
+        use petgraph::dot::{Config, Dot};
+        let dot = Dot::with_config(&graph, &[Config::EdgeNoLabel]);
+        println!("{}", dot);
 
         // Turn the reversed graph traversal into output tokens
         let graph_tokens = sorted
@@ -353,20 +383,16 @@ impl ToTokens for ReactorBuilder {
             })
             .collect::<proc_macro2::TokenStream>();
 
-        let type_ident = &self.ident;
-        let (imp, ty, wher) = self.generics.split_for_impl();
-        
+        let type_ident = &self.state.ident;
+        let (imp, ty, wher) = self.state.generics.split_for_impl();
+
         tokens.extend(quote! {
             impl #imp #type_ident #ty #wher {
                 // pub fn schedule(this: &Rc<RefCell<Self>>, scheduler: &mut S) {}
-                pub fn test() {
+                pub fn create<S: Sched>(scheduler: &mut S) {
                     #graph_tokens
-                    // use crate::*;
-                    // println!("Poo!");
-                    // Self {
-                    // #impl_details
-                    // ..Default::default()
-                    // }
+
+                    scheduler.schedule(trigger_tim1, Duration::from_micros(0), None);
                 }
             }
         })

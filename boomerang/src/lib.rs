@@ -44,19 +44,31 @@ mod turd {
     #[reactor(
         timer(name="tim1", offset = "100 msec", period = "1 sec"),
         input(name="in1", type="u32"),
+        input(name="in2", type="bool"),
         output(name="out1", type="u32"),
-        reaction(function="X::foo", triggers("tim1"), uses(), effects("out1")),
-        reaction(function="X::bar", triggers("tim1", "in1")),
+        reaction(function="Hello::foo", triggers("tim1"), uses(), effects("out1")),
+        reaction(function="Hello::bar", triggers("in1", "in2")),
         connection(from="out1", to="in1"),
         //child(reactor="Bar", name="my_bar", inputs("x.y", "y"), outputs("b")),
     )]
-    pub struct X {
+    pub struct Hello {
         my_i: u32,
     }
 
-    impl X {
-        fn foo(&mut self, inputs: (), outputs: (&mut Port<u32>)) {}
-        fn bar(&mut self, inputs: (&mut Port<u32>), outputs: ()) {}
+    impl Hello {
+        fn foo<S: Sched>(&mut self, sched: &mut S, inputs: (), outputs: (&mut Port<u32>)) {
+            let (out1) = outputs;
+            self.my_i += 1;
+            out1.set(self.my_i);
+            println!("foo, my_i={}", self.my_i);
+        }
+        fn bar<S: Sched>(&mut self, sched: &mut S, inputs: (&mut Port<u32>, &mut Port<bool>), outputs: ()) {
+            let (in1, int2) = inputs;
+            println!("bar, in1={}", in1.get());
+            if *in1.get() == 5 {
+                sched.stop();
+            }
+        }
     }
 
     // impl Reactor for Foo {
@@ -67,7 +79,10 @@ mod turd {
     fn test() {
         type MySched = Scheduler<&'static str>;
         let mut sched = MySched::new();
+
+        Hello::create::<MySched>(&mut sched);
         // let f = Foo::new();
         // dbg!(f);
+        while sched.next() && !sched.stop_requested {}
     }
 }

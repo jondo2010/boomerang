@@ -59,7 +59,7 @@ where
             ))
         };
 
-        let reply_in_trigger = Rc::new(RefCell::new(Trigger {
+        let reply_in_trigger = Rc::new(Trigger {
             reactions: vec![reply_in_reaction],
             offset: None,
             period: None,
@@ -67,13 +67,14 @@ where
             is_physical: false,
             scheduled: RefCell::new(None),
             policy: QueuingPolicy::NONE,
-        }));
+        });
 
         let hello_reaction = {
             let this_clone = this.clone();
-            let closure = Box::new(RefCell::new(move |sched: &mut S| {
+            let closure = move |sched: &mut S| {
                 HelloWorld::hello(&mut (*this_clone).borrow_mut(), sched);
-            }));
+            };
+            let closure = Box::new(RefCell::new(closure));
             Rc::new(Reaction::new(
                 "hello_reaction",
                 closure,
@@ -117,6 +118,7 @@ fn test2() {
 
     let output = Rc::new(RefCell::new(Port::new(0)));
     let input = output.clone();
+
 
     let mut dest = Rc::new(RefCell::new(HelloWorld {
         i: 0,

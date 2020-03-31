@@ -34,7 +34,7 @@ impl<T> IsPresent for Port<T> {
     }
 }
 
-type OutputTriggers<S> = (Rc<RefCell<dyn IsPresent>>, Vec<Rc<RefCell<Trigger<S>>>>);
+type OutputTriggers<S> = (Rc<RefCell<dyn IsPresent>>, Vec<Rc<Trigger<S>>>);
 
 /// Reaction activation record to push onto the reaction queue.
 #[derive(Display)]

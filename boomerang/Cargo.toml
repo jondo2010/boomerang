@@ -1,24 +1,30 @@
 [package]
 name = 'boomerang'
-description = 'Rust implementation of "Reactors" Deterministic Actor Model, described by M. Lohstroh, A. Lee, U.C. Berlekely'
+description = 'Rust implementation of "Reactors" Deterministic Actor Model'
 version = '0.1.0'
 authors = ['John Hughes <jondo2010@gmail.com']
 edition = '2018'
-license = "MIT OR Apache-2.0"
+license = 'MIT OR Apache-2.0'
 readme = 'README.md'
-keywords = ["actor", "reactor"]
-repository = "https://gitlab.com/jondo2010/boomerang"
-documentation = "https://docs.rs/boomerang_derive"
+keywords = [ 'actor', 'reactor', ]
+repository = 'https://gitlab.com/jondo2010/boomerang'
+documentation = 'https://docs.rs/boomerang_derive'
 categories = []
-exclude = [".gitignore", ".cargo/config", ".gitlab-ci.yml"]
-
+exclude = [
+    '.gitignore',
+    '.cargo/config',
+    '.gitlab-ci.yml',
+]
 [badges]
-gitlab = { repository = "jondo2010/boomerang", branch = "master" }
-codecov = { repository = "jondo2010/boomerang", branch = "master", service = "gitlab" }
+gitlab = { repository = 'jondo2010/boomerang', branch = 'master' }
+codecov = { repository = 'jondo2010/boomerang', branch = 'master', service = 'gitlab' }
 
 [dependencies]
-boomerang_derive = { version = "0.1.0", path = "../boomerang_derive" }
 derive_more = '0.99.5'
 tabular = '0.1.4'
+
+[dependencies.boomerang_derive]
+version = '0.1.0'
+#path = '../boomerang_derive'
 
 [dev-dependencies]

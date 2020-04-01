@@ -21,6 +21,6 @@ pub fn derive(input: TokenStream) -> TokenStream {
     });
     let ast = parse_macro_input!(input as syn::DeriveInput);
     let receiver = parse::ReactorReceiver::from_derive_input(&ast).unwrap();
-    let builder = builder::ReactorBuilder::try_from(receiver).unwrap();
+    let builder = builder::ReactorBuilderGen::try_from(receiver).unwrap();
     quote!(#builder).into()
 }

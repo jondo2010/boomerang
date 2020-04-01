@@ -2,10 +2,10 @@
 //! The `Reactor` derive macro is parsed into a `ReactorReceiver` struct for further
 //! processing.
 
-use crate::util::{ExprField, ExprFieldList, Type};
+use crate::util::{handle_ident, IdentSet, NamedField, NamedFieldList, Type};
 use darling::{ast, util, FromDeriveInput, FromField, FromMeta, ToTokens};
 use derive_more::Display;
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 fn handle_duration(value: String) -> Option<Duration> {
     Some(parse_duration::parse(&value).unwrap())
@@ -14,6 +14,7 @@ fn handle_duration(value: String) -> Option<Duration> {
 #[derive(Debug, FromMeta, PartialEq, Eq, Hash, Ord, PartialOrd, Display)]
 #[display(fmt = "{}", "name.to_string()")]
 pub struct TimerAttr {
+    #[darling(map = "handle_ident")]
     pub name: syn::Ident,
     #[darling(default, map = "handle_duration")]
     pub offset: Option<Duration>,
@@ -24,6 +25,7 @@ pub struct TimerAttr {
 #[derive(Debug, FromMeta, PartialEq, Eq, Hash, Display)]
 #[display(fmt = "{}", "name.to_string()")]
 pub struct PortAttr {
+    #[darling(map = "handle_ident")]
     pub name: syn::Ident,
     #[darling(rename = "type", map = "Type::into")]
     pub ty: syn::Type,
@@ -41,16 +43,39 @@ impl Ord for PortAttr {
     }
 }
 
+#[derive(Debug, FromMeta, PartialEq, Eq, Hash, Display)]
+pub enum ActionAttrPolicy {
+    Defer,
+    Drop,
+}
+
+#[derive(Debug, FromMeta, PartialEq, Eq, Hash, Display)]
+#[display(fmt = "{}", "name.to_string()")]
+pub struct ActionAttr {
+    #[darling(map = "handle_ident")]
+    pub name: syn::Ident,
+    //#[darling(rename = "type", map = "Type::into")]
+    // pub ty: syn::Type,
+    #[darling(default)]
+    pub physical: bool,
+    #[darling(default, map = "handle_duration")]
+    pub min_delay: Option<Duration>,
+    #[darling(default, map = "handle_duration")]
+    pub mit: Option<Duration>,
+    #[darling(default)]
+    pub policy: Option<ActionAttrPolicy>,
+}
+
 #[derive(Debug, FromMeta, Eq, PartialEq, Hash, Display)]
 #[display(fmt = "{}", "function.segments.last().unwrap().ident.to_string()")]
 pub struct ReactionAttr {
     pub function: syn::Path,
-    #[darling(default, map = "ExprFieldList::into")]
-    pub triggers: Vec<syn::ExprField>,
-    #[darling(default, map = "ExprFieldList::into")]
-    pub uses: Vec<syn::ExprField>,
-    #[darling(default, map = "ExprFieldList::into")]
-    pub effects: Vec<syn::ExprField>,
+    #[darling(default, map = "NamedFieldList::into")]
+    pub triggers: Vec<NamedField>,
+    #[darling(default, map = "NamedFieldList::into")]
+    pub uses: Vec<NamedField>,
+    #[darling(default, map = "NamedFieldList::into")]
+    pub effects: Vec<NamedField>,
 }
 
 impl PartialOrd for ReactionAttr {
@@ -69,22 +94,37 @@ impl Ord for ReactionAttr {
     }
 }
 
-#[derive(Debug, FromMeta, PartialEq)]
+#[derive(Debug, FromMeta, PartialEq, Eq)]
 pub struct ChildAttr {
-    pub reactor: syn::Path,
-    pub name: String,
-    #[darling(default, map = "ExprFieldList::into")]
-    pub inputs: Vec<syn::ExprField>,
-    #[darling(default, map = "ExprFieldList::into")]
-    pub outputs: Vec<syn::ExprField>,
+    pub class: syn::Path,
+    #[darling(map = "handle_ident")]
+    pub name: syn::Ident,
+    #[darling(default, map = "IdentSet::into")]
+    pub inputs: HashSet<syn::Ident>,
+    #[darling(default, map = "IdentSet::into")]
+    pub outputs: HashSet<syn::Ident>,
+}
+
+impl PartialOrd for ChildAttr {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        // let f1 = self.reactor.to_token_stream().to_string();
+        // let f2 = self.reactor.to_token_stream().to_string();
+        self.name.partial_cmp(&other.name)
+    }
+}
+
+impl Ord for ChildAttr {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.name.cmp(&other.name)
+    }
 }
 
 #[derive(Debug, FromMeta, PartialEq)]
 pub struct ConnectionAttr {
-    #[darling(map = "ExprField::into")]
-    pub from: syn::ExprField,
-    #[darling(map = "ExprField::into")]
-    pub to: syn::ExprField,
+    pub from: NamedField,
+    pub to: NamedField,
+    #[darling(default, map = "handle_duration")]
+    pub after: Option<Duration>,
 }
 
 #[derive(Debug, FromField)]
@@ -113,6 +153,9 @@ pub struct ReactorReceiver {
     /// Output port definitions
     #[darling(multiple, rename = "output")]
     pub outputs: Vec<PortAttr>,
+    /// Action definitions
+    #[darling(multiple, rename = "action")]
+    pub actions: Vec<ActionAttr>,
     /// Reaction definitions for this reactor definition
     #[darling(default, multiple, rename = "reaction")]
     pub reactions: Vec<ReactionAttr>,
@@ -132,12 +175,12 @@ mod tests {
     fn test_reaction() {
         let input = syn::parse_str(
             r#"
-    #[derive(Reactor)]
-    #[reactor(
-        reaction(function="Foo::bar", triggers("tim1", "hello1.x"), uses(), effects("y")),
-        reaction(function="Foo::rab", triggers("i")),
-    )]
-    pub struct Foo {}"#,
+#[derive(Reactor)]
+#[reactor(
+    reaction(function="Foo::bar", triggers("tim1", "hello1.x"), uses(), effects("y")),
+    reaction(function="Foo::rab", triggers("i")),
+)]
+pub struct Foo {}"#,
         )
         .unwrap();
         let receiver = ReactorReceiver::from_derive_input(&input).unwrap();
@@ -164,12 +207,12 @@ mod tests {
     fn test_timer() {
         let input = syn::parse_str(
             r#"
-    #[derive(Reactor)]
-    #[reactor(
-        timer(name="t1", offset="100 msec", period="1000 msec"),
-        timer(name="t2", period="10 sec"),
-    )]
-    pub struct Foo {}"#,
+#[derive(Reactor)]
+#[reactor(
+    timer(name="t1", offset="100 msec", period="1000 msec"),
+    timer(name="t2", period="10 sec"),
+)]
+pub struct Foo {}"#,
         )
         .unwrap();
         let receiver = ReactorReceiver::from_derive_input(&input).unwrap();
@@ -194,21 +237,30 @@ mod tests {
     fn test_ports() {
         let input = syn::parse_str(
             r#"
-    #[derive(Reactor)]
-    #[reactor(
-        input(name="in1", type="u32"),
-        output(name="out1", type="Vec<u32>"),
-    )]
-    pub struct Foo {}"#,
+#[derive(Reactor)]
+#[reactor(
+    input(name="in", type="u32"),
+    input(name="in1", type="u32"),
+    output(name="out1", type="Vec<u32>"),
+    action(name="action1", physical="true", min_delay="1 sec", policy="drop"),
+    action(name="action2", mit="1 msec"),
+)]
+pub struct Foo {}"#,
         )
         .unwrap();
         let receiver = ReactorReceiver::from_derive_input(&input).unwrap();
         assert_eq!(
             receiver.inputs,
-            vec![PortAttr {
-                name: parse_quote!(in1),
-                ty: parse_quote!(u32),
-            },]
+            vec![
+                PortAttr {
+                    name: syn::Ident::new("in", proc_macro2::Span::call_site()),
+                    ty: parse_quote!(u32),
+                },
+                PortAttr {
+                    name: parse_quote!(in1),
+                    ty: parse_quote!(u32),
+                },
+            ]
         );
         assert_eq!(
             receiver.outputs,
@@ -216,6 +268,25 @@ mod tests {
                 name: parse_quote!(out1),
                 ty: parse_quote!(Vec<u32>),
             }]
+        );
+        assert_eq!(
+            receiver.actions,
+            vec![
+                ActionAttr {
+                    name: parse_quote!(action1),
+                    physical: true,
+                    min_delay: Some(Duration::from_secs(1)),
+                    mit: None,
+                    policy: Some(ActionAttrPolicy::Drop),
+                },
+                ActionAttr {
+                    name: parse_quote!(action2),
+                    physical: false,
+                    min_delay: None,
+                    mit: Some(Duration::from_millis(1)),
+                    policy: None,
+                }
+            ]
         )
     }
 
@@ -223,21 +294,29 @@ mod tests {
     fn test_child() {
         let input = syn::parse_str(
             r#"
-    #[derive(Reactor)]
-    #[reactor(
-        child(reactor="Bar", name="my_bar", inputs("x.y", "y"), outputs("b")),
-    )]
-    pub struct Foo {}"#,
+#[derive(Reactor)]
+#[reactor(
+    child(class="Bar", name="my_bar", inputs("in", "x", "y"), outputs("b")),
+)]
+pub struct Foo {}"#,
         )
         .unwrap();
         let receiver = ReactorReceiver::from_derive_input(&input).unwrap();
         assert_eq!(
             receiver.children[0],
             ChildAttr {
-                reactor: parse_quote!(Bar),
-                name: "my_bar".into(),
-                inputs: vec![parse_quote!(x.y), parse_quote!(self.y)],
-                outputs: vec![parse_quote!(self.b)],
+                class: parse_quote!(Bar),
+                name: parse_quote!(my_bar),
+                inputs: [
+                    // This tests using a Rust keyword here, special handling needed.
+                    syn::Ident::new("in", proc_macro2::Span::call_site()),
+                    parse_quote!(x),
+                    parse_quote!(y)
+                ]
+                .iter()
+                .cloned()
+                .collect(),
+                outputs: [parse_quote!(b)].iter().cloned().collect(),
             }
         );
     }
@@ -246,20 +325,35 @@ mod tests {
     fn test_connection() {
         let input = syn::parse_str(
             r#"
-    #[derive(Reactor)]
-    #[reactor(
-        connection(from="x.y", to="inp"),
-    )]
-    pub struct Foo {}"#,
+#[derive(Reactor)]
+#[reactor(
+    connection(from="x.y", to="inp"),
+    connection(from="o", to="i", after="1 sec"),
+    connection(from="in1", to="gain.in1"),
+)]
+pub struct Foo {}"#,
         )
         .unwrap();
         let receiver = ReactorReceiver::from_derive_input(&input).unwrap();
         assert_eq!(
             receiver.connections,
-            vec![ConnectionAttr {
-                from: parse_quote!(x.y),
-                to: parse_quote!(self.inp),
-            }]
+            vec![
+                ConnectionAttr {
+                    from: parse_quote!(x.y),
+                    to: parse_quote!(self.inp),
+                    after: None,
+                },
+                ConnectionAttr {
+                    from: parse_quote!(self.o),
+                    to: parse_quote!(self.i),
+                    after: Some(Duration::from_secs(1)),
+                },
+                ConnectionAttr {
+                    from: parse_quote!(self.in1),
+                    to: parse_quote!(gain.in1),
+                    after: None,
+                }
+            ]
         );
     }
 }

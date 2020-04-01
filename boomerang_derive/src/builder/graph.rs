@@ -1,19 +1,130 @@
-use super::{PortBuilder, ReactionBuilder, ReactorStateBuilder, TimerBuilder};
-use darling::ToTokens;
+use super::{
+    ChildBuilder, PortBuilder, ReactionBuilder, ReactorBuilderGen, ReactorStateBuilder,
+    TimerBuilder,
+};
 use derive_more::Display;
-use quote::{format_ident, quote};
-use std::{rc::Rc, time::Duration};
+use petgraph::graphmap::DiGraphMap;
+use std::rc::Rc;
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Hash, Display)]
+pub(super) enum ReactorBuildableNode<'a> {
+    #[display(fmt = "Timer: {}", _0)]
+    Timer(&'a Rc<TimerBuilder>),
+
+    #[display(fmt = "Port: {}", _0)]
+    Port(&'a Rc<PortBuilder>),
+
+    #[display(fmt = "Child: {}", _0)]
+    Child(&'a Rc<ChildBuilder>),
+
+    #[display(fmt = "Reaction: {}", _0)]
+    Reaction(&'a Rc<ReactionBuilder>),
+
+    UnpackInputs,
+
+    PackOutputs,
+}
+
+impl<'a> From<&'a ReactorBuilderGen> for DiGraphMap<ReactorBuildableNode<'a>, bool> {
+    /// Create the complete dependency graph needed to generate the reactor structures
+    fn from(builder: &'a ReactorBuilderGen) -> Self {
+        let children_edges = builder
+            .children
+            .values()
+            .flat_map(|child: &Rc<ChildBuilder>| {
+                // Each child node depends on its' child input ports
+                let input_edges = child.inputs.iter().map(move |(_, input)| {
+                    (
+                        ReactorBuildableNode::Child(child),
+                        ReactorBuildableNode::Port(input),
+                        true,
+                    )
+                });
+                // Each child output port depends on its' child node
+                let output_edges = child.outputs.iter().map(move |(_, output)| {
+                    (
+                        ReactorBuildableNode::Port(output),
+                        ReactorBuildableNode::Child(child),
+                        true,
+                    )
+                });
+                input_edges.chain(output_edges)
+            });
+
+        let connection_edges = builder.connections.iter().flat_map(|(from, to)| {
+            to.iter().map(move |to| {
+                (
+                    ReactorBuildableNode::Port(to),
+                    ReactorBuildableNode::Port(from),
+                    true,
+                )
+            })
+        });
+
+        let reaction_edges = builder.reactions.iter().flat_map(|reaction| {
+            let input_edges = reaction.depends_on_inputs.iter().map(move |port| {
+                (
+                    ReactorBuildableNode::Reaction(reaction),
+                    ReactorBuildableNode::Port(port),
+                    true,
+                )
+            });
+            let output_edges = reaction.provides_outputs.iter().map(move |port| {
+                (
+                    ReactorBuildableNode::Reaction(reaction),
+                    ReactorBuildableNode::Port(port),
+                    true,
+                )
+            });
+            let timer_edges = reaction.depends_on_timers.iter().map(move |timer| {
+                (
+                    ReactorBuildableNode::Reaction(reaction),
+                    ReactorBuildableNode::Timer(timer),
+                    true,
+                )
+            });
+            input_edges.chain(output_edges).chain(timer_edges)
+        });
+
+        // All input ports depend on the unpack node
+        let unpack_edges = builder.inputs.values().map(|port| {
+            (
+                ReactorBuildableNode::Port(port),
+                ReactorBuildableNode::UnpackInputs,
+                true,
+            )
+        });
+
+        // All output ports fan into the PackOutputs node
+        let pack_edges = builder.outputs.values().map(|port| {
+            (
+                ReactorBuildableNode::PackOutputs,
+                ReactorBuildableNode::Port(port),
+                true,
+            )
+        });
+
+        DiGraphMap::from_edges(
+            children_edges
+                .chain(connection_edges)
+                .chain(reaction_edges)
+                .chain(unpack_edges)
+                .chain(pack_edges),
+        )
+    }
+}
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, Display)]
-pub enum TriggerNodeType<'a> {
+pub(super) enum TriggerNodeType<'a> {
     #[display(fmt = "Timer: {}", _0.)]
     Timer(&'a Rc<TimerBuilder>),
+
     #[display(fmt = "Input: {}", _0.)]
     Input(&'a Rc<PortBuilder>),
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, Display)]
-pub enum GraphNode<'a> {
+pub(super) enum GraphNode<'a> {
     #[display(fmt = "tri_{}", _0)]
     Trigger(TriggerNodeType<'a>),
 
@@ -30,243 +141,31 @@ pub enum GraphNode<'a> {
     State(&'a Rc<ReactorStateBuilder>),
 }
 
-impl<'a> GraphNode<'a> {
-    /// Create an ident for code generation
-    fn create_ident(&self) -> syn::Ident {
-        match *self {
-            GraphNode::Trigger(TriggerNodeType::Input(input)) => {
-                format_ident!("trigger_{}", &input.attr.name)
-            }
-            GraphNode::Trigger(TriggerNodeType::Timer(timer)) => {
-                format_ident!("trigger_{}", &timer.attr.name)
-            }
-            GraphNode::Input(input) => format_ident!("input_{}", &input.attr.name),
-            GraphNode::Output(output) => format_ident!("output_{}", &output.attr.name),
-            GraphNode::Reaction(reaction) => format_ident!(
-                "reaction_{}",
-                &reaction.attr.function.segments.last().unwrap().ident
-            ),
-            GraphNode::State(state) => {
-                format_ident!("state_{}", &state.ident.to_string().to_lowercase())
-            }
-        }
-    }
-}
-
-pub struct NodeWithContext<'a, G> {
+pub(super) struct NodeWithContext<'a, G> {
     pub node: GraphNode<'a>,
     pub graph: G,
 }
 
-fn duration_quote(duration: &Option<Duration>) -> proc_macro2::TokenStream {
-    match duration {
-        Some(offset) => {
-            let secs = offset.as_secs();
-            let nanos = offset.subsec_nanos();
-            quote!(Some(boomerang::Duration::new(#secs, #nanos)))
+impl<'a> GraphNode<'a> {
+    /// Create an ident for code generation
+    pub(super) fn create_ident(&self) -> syn::Ident {
+        use quote::format_ident;
+        match *self {
+            GraphNode::Trigger(TriggerNodeType::Input(input)) => {
+                format_ident!("_trigger_{}", &input.name)
+            }
+            GraphNode::Trigger(TriggerNodeType::Timer(timer)) => {
+                format_ident!("_trigger_{}", &timer.name)
+            }
+            GraphNode::Input(input) => format_ident!("_input_{}", &input.name),
+            GraphNode::Output(output) => format_ident!("_output_{}", &output.name),
+            GraphNode::Reaction(reaction) => format_ident!(
+                "_reaction_{}",
+                &reaction.attr.function.segments.last().unwrap().ident
+            ),
+            GraphNode::State(state) => {
+                format_ident!("_state_{}", &state.ident.to_string().to_lowercase())
+            }
         }
-        None => quote!(None),
-    }
-}
-
-impl<'a, G> ToTokens for NodeWithContext<'a, G>
-where
-    G: petgraph::visit::IntoNeighborsDirected<NodeId = GraphNode<'a>>,
-{
-    /// # Panics
-    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
-        let NodeWithContext { node, graph } = self;
-        let node_ident = node.create_ident();
-        match *node {
-            GraphNode::Trigger(trigger) => {
-                let (offset, period) = match trigger {
-                    TriggerNodeType::Timer(timer) => {
-                        let offset = duration_quote(&timer.attr.offset);
-                        let period = duration_quote(&timer.attr.period);
-                        (offset, period)
-                    }
-                    TriggerNodeType::Input(_) => {
-                        let offset = quote!(None);
-                        let period = quote!(None);
-                        (offset, period)
-                    }
-                };
-
-                let reactions_iter = graph
-                    .neighbors_directed(*node, petgraph::Direction::Outgoing)
-                    .filter_map(|node| match node {
-                        GraphNode::Reaction(_) => Some(node.create_ident()),
-                        _ => None,
-                    });
-
-                let reactions = quote!(vec![#(#reactions_iter.clone()),*]);
-
-                tokens.extend(quote! {
-                    let #node_ident = std::rc::Rc::new(boomerang::Trigger {
-                        reactions: #reactions,
-                        offset: #offset,
-                        period: #period,
-                        value: std::rc::Rc::new(std::cell::RefCell::new(None)),
-                        is_physical: false,
-                        scheduled: std::cell::RefCell::new(None),
-                        policy: boomerang::QueuingPolicy::NONE,
-                    });
-                })
-            }
-            GraphNode::Input(input) => {
-                let ty = &input.attr.ty;
-                if let Some(out_ident) = graph
-                    .neighbors_directed(*node, petgraph::Direction::Outgoing)
-                    .next()
-                    .map(|node| match node {
-                        GraphNode::Output(out_node) if out_node.attr.ty == *ty => {
-                            Some(node.create_ident())
-                        }
-                        _ => None,
-                    })
-                    .flatten()
-                {
-                    // If there is an output port connect to this input, clone it.
-                    tokens.extend(quote! {
-                        let #node_ident = #out_ident.clone();
-                    })
-                } else {
-                    // Otherwise, create a new, disconnected one.
-                    tokens.extend(quote! {
-                        let #node_ident = std::rc::Rc::new(
-                            std::cell::RefCell::new(
-                                <boomerang::Port::<#ty>>::new(Default::default())
-                            )
-                        );
-                    });
-                }
-            }
-            GraphNode::Output(output) => {
-                let ty = &output.attr.ty;
-                tokens.extend(quote! {
-                    let #node_ident = std::rc::Rc::new(
-                        std::cell::RefCell::new(
-                            <boomerang::Port::<#ty>>::new(Default::default())
-                        )
-                    );
-                });
-            }
-            GraphNode::Reaction(reaction) => {
-                let function = &reaction.attr.function;
-
-                let state_ident = graph
-                    .neighbors_directed(*node, petgraph::Direction::Outgoing)
-                    .filter_map(|node| match node {
-                        GraphNode::State(_) => Some(node.create_ident()),
-                        _ => None,
-                    })
-                    .next()
-                    .expect("State node not found for Reaction");
-
-                let input_idents_iter = reaction
-                    .depends_on_inputs
-                    .iter()
-                    .map(|input| GraphNode::Input(input).create_ident())
-                    .collect::<Vec<_>>();
-
-                let clone_input_idents = {
-                    let iter = input_idents_iter.iter().map(|ident| {
-                        let cloned_ident = format_ident!("_{}_cloned", ident);
-                        quote!(let #cloned_ident = #ident.clone();)
-                    });
-                    quote!(#(#iter)*)
-                };
-
-                let input_idents = {
-                    let iter = input_idents_iter
-                        .iter()
-                        .map(|ident| format_ident!("_{}_cloned", ident));
-                    quote!(#(&mut *#iter.borrow_mut()),*)
-                };
-
-                let output_nodes = graph
-                    .neighbors_directed(*node, petgraph::Direction::Outgoing)
-                    .filter_map(|node| match node {
-                        GraphNode::Output(_) => Some(node),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
-
-                let output_idents_iter = output_nodes
-                    .iter()
-                    .map(|node| node.create_ident())
-                    .collect::<Vec<_>>();
-
-                let clone_output_idents = {
-                    let iter = output_idents_iter.iter().map(|output| {
-                        let cloned_ident = format_ident!("_{}_cloned", output);
-                        quote!(let #cloned_ident = #output.clone();)
-                    });
-                    quote!(#(#iter)*)
-                };
-
-                let output_idents = {
-                    let iter = output_idents_iter
-                        .iter()
-                        .map(|output| format_ident!("_{}_cloned", output));
-                    quote!(#(&mut *#iter.borrow_mut()),*)
-                };
-
-                let output_triggers_iter = output_nodes.iter().map(|node| {
-                    let output_ident = node.create_ident();
-                    // Get all input ports (triggers) into this output port
-                    let triggers = graph
-                        .neighbors_directed(*node, petgraph::Direction::Incoming)
-                        .filter_map(|node| match node {
-                            GraphNode::Input(input) => Some(
-                                GraphNode::Trigger(TriggerNodeType::Input(input)).create_ident(),
-                            ),
-                            _ => None,
-                        });
-                    quote! {(
-                        #output_ident.clone() as std::rc::Rc<
-                            std::cell::RefCell<dyn boomerang::IsPresent>>,
-                        vec![#(#triggers.clone()),*]
-                    )}
-                });
-
-                let output_triggers = quote!(#(#output_triggers_iter),*);
-
-                tokens.extend(quote! {
-                    let #node_ident = {
-                        let _state_cloned = #state_ident.clone();
-                        #clone_input_idents;
-                        #clone_output_idents;
-                        let _closure = std::boxed::Box::new(
-                            std::cell::RefCell::new(move |sched: &mut S| {
-                            #function(
-                                &mut (*_state_cloned).borrow_mut(),
-                                sched,
-                                (#input_idents),
-                                (#output_idents),
-                            );
-                        }));
-                        let _output_triggers = vec![#output_triggers];
-
-                        std::rc::Rc::new(boomerang::Reaction::new(
-                            "reply_reaction",
-                            _closure,
-                            u64::MAX,
-                            1,
-                            _output_triggers,
-                        ))
-                    };
-                });
-            }
-            GraphNode::State(_) => {
-                tokens.extend(quote! {
-                    let #node_ident = std::rc::Rc::new(
-                        std::cell::RefCell::new(
-                            Self::default()
-                        )
-                    );
-                });
-            }
-        };
     }
 }

@@ -2,6 +2,8 @@
 
 [![pipeline status](https://gitlab.com/jondo2010/boomerang/badges/master/pipeline.svg)](https://gitlab.com/jondo2010/boomerang/commits/master)
 [![codecov](https://codecov.io/gl/jondo2010/boomerang/branch/master/graph/badge.svg)](https://codecov.io/gl/boomerang/rust-fmi)
+[![crates.io](https://img.shields.io/crates/v/boomerang.svg)](https://crates.io/crates/boomerang)
+[![API](https://docs.rs/boomerang/badge.svg)](https://docs.rs/boomerang)
 
 Rust implementation of the "Reactors" Deterministic Actor Model, described by M. Lohstroh, A. Lee, et al U.C. Berlekely, [Link to paper](https://ptolemy.berkeley.edu/publications/papers/19/LohstrohEtAl_Reactors_DAC_2019.pdf).
 

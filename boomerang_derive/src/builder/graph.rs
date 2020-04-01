@@ -63,7 +63,7 @@ fn duration_quote(duration: &Option<Duration>) -> proc_macro2::TokenStream {
         Some(offset) => {
             let secs = offset.as_secs();
             let nanos = offset.subsec_nanos();
-            quote!(Some(Duration::new(#secs, #nanos)))
+            quote!(Some(boomerang::Duration::new(#secs, #nanos)))
         }
         None => quote!(None),
     }
@@ -85,7 +85,7 @@ where
                         let period = duration_quote(&timer.attr.period);
                         (offset, period)
                     }
-                    TriggerNodeType::Input(input) => {
+                    TriggerNodeType::Input(_) => {
                         let offset = quote!(None);
                         let period = quote!(None);
                         (offset, period)
@@ -102,14 +102,14 @@ where
                 let reactions = quote!(vec![#(#reactions_iter.clone()),*]);
 
                 tokens.extend(quote! {
-                    let #node_ident = std::rc::Rc::new(Trigger {
+                    let #node_ident = std::rc::Rc::new(boomerang::Trigger {
                         reactions: #reactions,
                         offset: #offset,
                         period: #period,
-                        value: std::rc::Rc::new(RefCell::new(None)),
+                        value: std::rc::Rc::new(std::cell::RefCell::new(None)),
                         is_physical: false,
-                        scheduled: RefCell::new(None),
-                        policy: QueuingPolicy::NONE,
+                        scheduled: std::cell::RefCell::new(None),
+                        policy: boomerang::QueuingPolicy::NONE,
                     });
                 })
             }
@@ -132,10 +132,10 @@ where
                     })
                 } else {
                     // Otherwise, create a new, disconnected one.
-                    tokens.extend(quote!{
+                    tokens.extend(quote! {
                         let #node_ident = std::rc::Rc::new(
                             std::cell::RefCell::new(
-                                <Port::<#ty>>::new(Default::default())
+                                <boomerang::Port::<#ty>>::new(Default::default())
                             )
                         );
                     });
@@ -146,7 +146,7 @@ where
                 tokens.extend(quote! {
                     let #node_ident = std::rc::Rc::new(
                         std::cell::RefCell::new(
-                            <Port::<#ty>>::new(Default::default())
+                            <boomerang::Port::<#ty>>::new(Default::default())
                         )
                     );
                 });
@@ -224,7 +224,8 @@ where
                             _ => None,
                         });
                     quote! {(
-                        #output_ident.clone() as std::rc::Rc<std::cell::RefCell<dyn IsPresent>>,
+                        #output_ident.clone() as std::rc::Rc<
+                            std::cell::RefCell<dyn boomerang::IsPresent>>,
                         vec![#(#triggers.clone()),*]
                     )}
                 });
@@ -247,7 +248,7 @@ where
                         }));
                         let _output_triggers = vec![#output_triggers];
 
-                        std::rc::Rc::new(Reaction::new(
+                        std::rc::Rc::new(boomerang::Reaction::new(
                             "reply_reaction",
                             _closure,
                             u64::MAX,
@@ -257,7 +258,7 @@ where
                     };
                 });
             }
-            GraphNode::State(state) => {
+            GraphNode::State(_) => {
                 tokens.extend(quote! {
                     let #node_ident = std::rc::Rc::new(
                         std::cell::RefCell::new(

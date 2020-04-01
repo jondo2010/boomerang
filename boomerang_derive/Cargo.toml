@@ -4,7 +4,17 @@ version = '0.1.0'
 authors = ['John Hughes <jondo2010@gmail.com>']
 edition = '2018'
 license = 'MIT OR Apache-2.0'
-description = 'Macros implementation'
+description = 'Derive macro parsing, analysis and code generation for Boomerang'
+readme = 'README.md'
+keywords = ["actor", "reactor"]
+repository = "https://gitlab.com/jondo2010/boomerang"
+documentation = "https://docs.rs/boomerang_derive"
+categories = []
+exclude = [".gitignore", ".cargo/config", ".gitlab-ci.yml"]
+
+[badges]
+gitlab = { repository = "jondo2010/boomerang", branch = "master" }
+codecov = { repository = "jondo2010/boomerang", branch = "master", service = "gitlab" }
 
 [dependencies]
 darling = '0.10.2'

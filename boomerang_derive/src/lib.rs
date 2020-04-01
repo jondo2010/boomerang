@@ -1,15 +1,6 @@
 #![feature(hash_set_entry)]
 
 //! This crate provides Boomerangs' derive macro.
-//!
-//! ```edition2018
-//! use boomerang_derive::Reactor;
-//!
-//! #[derive(Reactor)]
-//! struct MyReactor {}
-//!
-//! fn main() {}
-//! ```
 
 mod builder;
 mod parse;
@@ -32,18 +23,4 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let receiver = parse::ReactorReceiver::from_derive_input(&ast).unwrap();
     let builder = builder::ReactorBuilder::try_from(receiver).unwrap();
     quote!(#builder).into()
-}
-
-struct S
-{
-    poo: Box<dyn FnMut(&mut u32) -> bool>,
-}
-
-#[test]
-fn test2() {
-    let mut x = std::rc::Rc::new(0.0);
-
-    let mut s = S {
-        poo: Box::new(|x: &mut u32| *x > 0),
-    };
 }

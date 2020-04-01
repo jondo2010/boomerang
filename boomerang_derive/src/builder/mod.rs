@@ -17,7 +17,6 @@ pub use graph::{GraphNode, NodeWithContext, TriggerNodeType};
 use darling::ToTokens;
 use derive_more::Display;
 use petgraph::graphmap::DiGraphMap;
-use quote::format_ident;
 
 #[derive(Debug, PartialEq, Eq, Ord, PartialOrd, Display, Clone, Hash)]
 pub enum PortBuilderType {
@@ -241,7 +240,7 @@ impl TryFrom<ReactorReceiver> for ReactorBuilder {
             build_ports(&mut idents, receiver.outputs, PortBuilderType::Output)?;
 
         // Children
-        for child in receiver.children.into_iter() {
+        for _child in receiver.children.into_iter() {
             todo!();
         }
 
@@ -266,7 +265,7 @@ impl TryFrom<ReactorReceiver> for ReactorBuilder {
                                     )
                                 } else {
                                     todo!("Outputs of child reactors");
-                                    (trigger_name, None, None)
+                                    //(trigger_name, None, None)
                                 }
                             })
                             .and_then(|(field_name, timer, input)| match (&timer, &input) {
@@ -392,7 +391,7 @@ impl ToTokens for ReactorBuilder {
                 pub fn create<S: Sched>(scheduler: &mut S) {
                     #graph_tokens
 
-                    scheduler.schedule(trigger_tim1, Duration::from_micros(0), None);
+                    scheduler.schedule(trigger_tim1, boomerang::Duration::from_micros(0), None);
                 }
             }
         })

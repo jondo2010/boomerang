@@ -8,7 +8,7 @@ license = 'MIT OR Apache-2.0'
 readme = 'README.md'
 keywords = [ 'actor', 'reactor', ]
 repository = 'https://gitlab.com/jondo2010/boomerang'
-documentation = 'https://docs.rs/boomerang_derive'
+documentation = 'https://docs.rs/boomerang'
 categories = []
 exclude = [
     '.gitignore',

@@ -14,13 +14,6 @@ pub use reactor::*;
 
 use crate::runtime;
 
-#[derive(Display, Debug, Ord, PartialOrd, Eq, PartialEq, Copy, Clone)]
-pub struct ReactorTypeBuilderIndex(usize);
-#[derive(Display, Debug, Ord, PartialOrd, Eq, PartialEq, Copy, Clone)]
-pub struct ReactorTypeIndex(usize);
-#[derive(Display, Debug, Copy, Clone, Eq, PartialEq)]
-pub struct ReactorTypeBuilderChildRefIndex(usize);
-
 #[derive(thiserror::Error, Debug, Eq, PartialEq)]
 pub enum BuilderError {
     #[error("Duplicate Port Definition: {}.{}", reactor_name, port_name)]
@@ -28,6 +21,7 @@ pub enum BuilderError {
         reactor_name: String,
         port_name: String,
     },
+
     #[error("Port Definition not found: {}.{}", reactor_name, port_name)]
     PortNotFound {
         reactor_name: String,
@@ -35,13 +29,13 @@ pub enum BuilderError {
     },
 
     #[error("ReactorType Index not found: {}", 0)]
-    ReactorTypeIndexNotFound(ReactorTypeIndex),
+    ReactorKeyNotFound(runtime::ReactorKey),
 
-    #[error("Port Index not found: {}", 0)]
-    PortIndexNotFound(runtime::PortIndex),
+    #[error("Port Key not found: {}", 0)]
+    PortKeyNotFound(runtime::BasePortKey),
 
-    #[error("Reaction Index not found: {}", 0)]
-    ReactionIndexNotFound(runtime::ReactionIndex),
+    #[error("Reaction Key not found: {}", 0)]
+    ReactionKeyNotFound(runtime::ReactionKey),
 
     #[error("Inconsistent Builder State: {}", what)]
     InconsistentBuilderState {

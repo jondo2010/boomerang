@@ -1,6 +1,9 @@
 #![allow(dead_code)]
 #![feature(map_first_last)]
 
+#[macro_use]
+extern crate derivative;
+
 pub mod builder;
 pub mod runtime;
 

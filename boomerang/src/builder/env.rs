@@ -1,121 +1,71 @@
+use embedded_time::duration::Seconds;
 use itertools::Itertools;
+use runtime::PortData;
+use slotmap::{DefaultKey, Key, SecondaryMap, SlotMap};
 use std::{collections::BTreeSet, sync::Arc};
 use tracing::event;
 
-use super::{
-    action::ActionBuilder, port::BasePortBuilder, reaction::ReactionProto,
-    reactor::ReactorTypeChildRef, BuilderError, ReactorType, ReactorTypeBuilder,
-    ReactorTypeBuilderIndex, ReactorTypeBuilderState, ReactorTypeIndex,
-};
-use crate::runtime::{self, PortIndex, ReactionIndex};
+use crate::runtime;
 
-/// Stores all top-level ReactorTypeBuilder prototypes
+use super::{
+    action::ActionBuilder,
+    port::{self, BasePortBuilder},
+    reaction::ReactionBuilder,
+    BuilderError, Reactor, ReactorBuilder, ReactorBuilderState,
+};
 #[derive(Debug)]
 pub struct EnvBuilder {
-    reactor_type_builders: Vec<ReactorTypeBuilder>,
+    pub(super) reactors: SlotMap<runtime::ReactorKey, ReactorBuilder>,
+
+    pub(super) ports: SlotMap<runtime::BasePortKey, Arc<dyn runtime::BasePort>>,
+    pub(super) port_builders: SecondaryMap<runtime::BasePortKey, Box<dyn BasePortBuilder>>,
+
+    pub(super) actions: SlotMap<runtime::BaseActionKey, ActionBuilder>,
+    pub(super) reactions: SlotMap<runtime::ReactionKey, ReactionBuilder>,
+    pub(super) connections: Vec<(Box<dyn BasePortBuilder>, Box<dyn BasePortBuilder>)>,
 }
 
 impl EnvBuilder {
     pub fn new() -> Self {
         Self {
-            reactor_type_builders: Vec::new(),
-        }
-    }
-
-    pub fn add_reactor_type<F>(&mut self, name: &str, builder_fn: F) -> ReactorTypeBuilderIndex
-    where
-        F: 'static + Fn(ReactorTypeBuilderState) -> ReactorType,
-    {
-        let idx = ReactorTypeBuilderIndex(self.reactor_type_builders.len());
-        self.reactor_type_builders
-            .push(ReactorTypeBuilder::new(name, idx, Box::new(builder_fn)));
-        idx
-    }
-
-    pub fn build(&mut self, main_ref_index: ReactorTypeBuilderIndex) -> EnvBuilderState {
-        let mut env = EnvBuilderState::new();
-        let mut stack = Vec::new();
-        stack.push(ReactorTypeChildRef {
-            name: "main".to_owned(),
-            reactor_type_builder_idx: main_ref_index,
-            parent_type_idx: None,
-            parent_builder_child_ref_idx: None,
-        });
-
-        while !stack.is_empty() {
-            let child = stack.pop().unwrap();
-
-            // Build a ReactorType from ReactorTypeBuilder
-            let reactor_type = self
-                .reactor_type_builders
-                .get_mut(child.reactor_type_builder_idx.0)
-                .map(|type_builder| type_builder.build(&mut env, &child))
-                .unwrap();
-
-            stack.extend(reactor_type.children.iter().cloned());
-            env.expanded_reactor_types.push(reactor_type);
-        }
-
-        // Handle connection definitions in each ReactorType
-        let connections = env
-            .expanded_reactor_types
-            .iter()
-            .enumerate()
-            .flat_map(|(idx, reactor_type)| {
-                env.iter_reactor_type_connections(ReactorTypeIndex(idx), reactor_type)
-            })
-            .collect::<Vec<_>>();
-
-        // The connections must be collected here since we need to mutably borrow env
-        for connection_pair in connections.iter() {
-            match *connection_pair {
-                (Ok(from_port_idx), Ok(to_port_idx)) => {
-                    println!(
-                        "Connect {} -> {}",
-                        env.port_fqn(from_port_idx).unwrap(),
-                        env.port_fqn(to_port_idx).unwrap()
-                    );
-                    env.port_bind_to(from_port_idx, to_port_idx);
-                }
-                _ => todo!(),
-            };
-        }
-
-        env
-    }
-}
-
-#[derive(Debug)]
-pub struct EnvBuilderState {
-    pub expanded_reactor_types: Vec<ReactorType>,
-    pub ports: Vec<Box<dyn BasePortBuilder>>,
-    pub actions: Vec<ActionBuilder>,
-    pub reactions: Vec<ReactionProto>,
-    pub connections: Vec<(Box<dyn BasePortBuilder>, Box<dyn BasePortBuilder>)>,
-}
-
-impl EnvBuilderState {
-    pub fn new() -> Self {
-        Self {
-            expanded_reactor_types: Vec::new(),
-            ports: Vec::new(),
-            actions: Vec::new(),
-            reactions: Vec::new(),
+            reactors: SlotMap::<runtime::ReactorKey, ReactorBuilder>::with_key(),
+            ports: SlotMap::new(),
+            port_builders: SecondaryMap::new(),
+            actions: SlotMap::new(),
+            // reactions: Vec::new(),
+            reactions: SlotMap::with_key(),
             connections: Vec::new(),
         }
     }
 
+    /// Add a new Reactor
+    /// - name: Instance name of the reactor
+    pub fn add_reactor<R: Reactor>(
+        &mut self,
+        name: &str,
+        parent: Option<runtime::ReactorKey>,
+        reactor: R,
+    ) -> ReactorBuilderState<R> {
+        ReactorBuilderState::new(name, parent, reactor, self)
+    }
+
     /// Bind one port to another
-    fn port_bind_to(&mut self, port_a_idx: PortIndex, port_b_idx: PortIndex) {
-        use super::TupleSlice;
-        let (port_a, port_b) = self.ports.tuple_at_mut((port_a_idx.0, port_b_idx.0));
+    fn port_bind_to<T: runtime::PortData>(
+        &mut self,
+        port_a_key: runtime::PortKey<T>,
+        port_b_key: runtime::PortKey<T>,
+    ) {
+        let [port_a, port_b] = self
+            .port_builders
+            .get_disjoint_mut([port_a_key.data().into(), port_b_key.data().into()])
+            .unwrap();
 
         assert!(
             port_b.get_inward_binding().is_none(),
             format!(
                 "Ports may only be connected once {:?}->{:?}, ({:?})",
-                port_a_idx,
-                port_b_idx,
+                port_a_key,
+                port_b_key,
                 port_b.get_inward_binding()
             )
         );
@@ -123,13 +73,13 @@ impl EnvBuilderState {
             port_b.get_antideps().is_empty(),
             "Ports with antidependencies may not be connected to other ports"
         );
-        port_b.set_inward_binding(Some(port_a_idx));
+        port_b.set_inward_binding(Some(port_a_key.data().into()));
 
         assert!(
             port_a.get_deps().is_empty(),
             "Ports with dependencies may not be connected to other ports"
         );
-        port_a.add_outward_binding(port_b_idx);
+        port_a.add_outward_binding(port_b_key.data().into());
 
         // match (self.get_port_type(), port.get_port_type()) {
         // (runtime::PortType::Input, runtime::PortType::Input) => {
@@ -149,27 +99,27 @@ impl EnvBuilderState {
         // }
     }
 
-    pub fn reactor_fqn(&self, reactor_idx: ReactorTypeIndex) -> Result<String, BuilderError> {
-        self.expanded_reactor_types
-            .get(reactor_idx.0)
-            .ok_or(BuilderError::ReactorTypeIndexNotFound(reactor_idx))
-            .and_then(|reactor_type| {
-                reactor_type.parent_reactor_type_idx.map_or_else(
-                    || Ok(reactor_type.name.clone()),
+    pub fn reactor_fqn(&self, reactor_key: runtime::ReactorKey) -> Result<String, BuilderError> {
+        self.reactors
+            .get(reactor_key)
+            .ok_or(BuilderError::ReactorKeyNotFound(reactor_key))
+            .and_then(|reactor| {
+                reactor.parent_reactor_key.map_or_else(
+                    || Ok(reactor.name.clone()),
                     |parent| {
                         self.reactor_fqn(parent)
-                            .map(|parent| format!("{}.{}", parent, reactor_type.name))
+                            .map(|parent| format!("{}.{}", parent, reactor.name))
                     },
                 )
             })
     }
 
-    pub fn reaction_fqn(&self, reaction_idx: ReactionIndex) -> Result<String, BuilderError> {
+    pub fn reaction_fqn(&self, reaction_key: runtime::ReactionKey) -> Result<String, BuilderError> {
         self.reactions
-            .get(reaction_idx.0)
-            .ok_or(BuilderError::ReactionIndexNotFound(reaction_idx))
-            .and_then(|reaction: &ReactionProto| {
-                self.reactor_fqn(reaction.reactor_type_idx)
+            .get(reaction_key)
+            .ok_or(BuilderError::ReactionKeyNotFound(reaction_key))
+            .and_then(|reaction| {
+                self.reactor_fqn(reaction.reactor_key)
                     .map_err(|err| BuilderError::InconsistentBuilderState {
                         what: format!("Reactor referenced by {:?} not found: {:?}", reaction, err),
                     })
@@ -178,49 +128,59 @@ impl EnvBuilderState {
             .map(|(reactor_name, reaction_name)| format!("{}.{}", reactor_name, reaction_name))
     }
 
-    pub fn port_fqn(&self, port_idx: PortIndex) -> Result<String, BuilderError> {
-        self.ports
-            .get(port_idx.0)
-            .ok_or(BuilderError::PortIndexNotFound(port_idx))
-            .and_then(|port| {
-                self.reactor_fqn(port.get_reactor_type_idx())
+    pub fn port_fqn<T: runtime::PortData>(
+        &self,
+        port_key: runtime::PortKey<T>,
+    ) -> Result<String, BuilderError> {
+        let port_key = port_key.data().into();
+        self.port_builders
+            .get(port_key)
+            .ok_or(BuilderError::PortKeyNotFound(port_key))
+            .and_then(|port_builder| {
+                self.reactor_fqn(port_builder.get_reactor_key())
                     .map_err(|err| BuilderError::InconsistentBuilderState {
-                        what: format!("Reactor referenced by {:?} not found: {:?}", port, err),
+                        what: format!(
+                            "Reactor referenced by {:?} not found: {:?}",
+                            port_builder, err
+                        ),
                     })
-                    .map(|reactor_fqn| (reactor_fqn, port.get_name().clone()))
+                    .map(|reactor_fqn| (reactor_fqn, port_builder.get_name().clone()))
             })
             .map(|(reactor_name, port_name)| format!("{}.{}", reactor_name, port_name))
     }
 
     /// Follow the inward_binding's of Ports to the source
-    pub fn follow_port_inward_binding(&self, port_idx: PortIndex) -> PortIndex {
-        let mut cur_idx = port_idx;
+    pub fn follow_port_inward_binding(
+        &self,
+        port_key: runtime::BasePortKey,
+    ) -> runtime::BasePortKey {
+        let mut cur_key = port_key;
         loop {
             if let Some(new_idx) = self
-                .ports
-                .get(cur_idx.0)
+                .port_builders
+                .get(cur_key)
                 .and_then(|port| port.get_inward_binding().as_ref())
             {
-                cur_idx = *new_idx;
+                cur_key = *new_idx;
             } else {
                 break;
             }
         }
-        cur_idx
+        cur_key
     }
 
     /// Transitively collect all Reactions triggered by this Port being set
     fn collect_transitive_port_triggers(
         &self,
-        port_idx: PortIndex,
-    ) -> BTreeSet<runtime::ReactionIndex> {
-        let mut all_triggers = BTreeSet::new();
-        let mut port_set = BTreeSet::new();
-        port_set.insert(port_idx);
+        port_key: runtime::BasePortKey,
+    ) -> SecondaryMap<runtime::ReactionKey, ()> {
+        let mut all_triggers = SecondaryMap::new();
+        let mut port_set = BTreeSet::<runtime::BasePortKey>::new();
+        port_set.insert(port_key);
         while !port_set.is_empty() {
-            let port_idx = port_set.pop_first().unwrap();
-            let port_builder = &self.ports[port_idx.0];
-            all_triggers.extend(port_builder.get_triggers());
+            let port_key = port_set.pop_first().unwrap();
+            let port_builder = &self.port_builders[port_key];
+            all_triggers.extend(port_builder.get_triggers().iter().map(|&key| (key, ())));
             port_set.extend(port_builder.get_outward_bindings());
         }
         all_triggers
@@ -228,21 +188,23 @@ impl EnvBuilderState {
 
     pub(crate) fn reaction_dependency_edges<'a>(
         &'a self,
-    ) -> impl Iterator<Item = (runtime::ReactionIndex, runtime::ReactionIndex)> + 'a {
+    ) -> impl Iterator<Item = (runtime::ReactionKey, runtime::ReactionKey)> + 'a {
         let deps = self
             .reactions
             .iter()
-            .enumerate()
-            .flat_map(move |(idx, reaction)| {
+            .flat_map(move |(reaction_key, reaction)| {
                 // Connect all reactions this reaction depends upon
                 reaction
                     .deps
-                    .iter()
-                    .flat_map(move |&port_idx| {
-                        let source_port_idx = self.follow_port_inward_binding(port_idx);
-                        self.ports[source_port_idx.0].get_antideps().iter()
+                    .keys()
+                    .flat_map(move |port_key| {
+                        let source_port_key = self.follow_port_inward_binding(port_key);
+                        self.port_builders[source_port_key.data().into()]
+                            .get_antideps()
+                            .iter()
+                            .copied()
                     })
-                    .map(move |dep_idx| (runtime::ReactionIndex(idx), *dep_idx))
+                    .map(move |dep_key| (reaction_key, dep_key))
             });
 
         // Connect internal reactions by priority
@@ -250,29 +212,29 @@ impl EnvBuilderState {
             .reactions
             .iter()
             .sorted()
-            .enumerate()
-            .map(|(idx, _)| runtime::ReactionIndex(idx))
+            .map(|(key, _)| key)
             .tuple_windows();
 
         deps.chain(internal)
     }
 
-    /// Get an Iterator over the connections in a ReactorType
-    /// - parent_reactor_type_idx: The index of the ReactorType
-    /// - parent_reactor_type: A reference to the ReactorType
-    fn iter_reactor_type_connections<'a>(
+    /// Get an Iterator over the connections in a Reactor
+    /// - parent_reactor_type_idx: The index of the Reactor
+    /// - parent_reactor_type: A reference to the Reactor
+    #[cfg(feature = "old")]
+    fn iter_reactor_type_connections<'a, T: PortData>(
         &'a self,
-        parent_reactor_type_idx: ReactorTypeIndex,
-        parent_reactor_type: &'a ReactorType,
+        parent_reactor_type_idx: runtime::ReactorKey,
+        parent_reactor_type: &'a ReactorBuilder,
     ) -> impl 'a
            + Iterator<
         Item = (
-            Result<PortIndex, BuilderError>,
-            Result<PortIndex, BuilderError>,
+            Result<runtime::PortKey<T>, BuilderError>,
+            Result<runtime::PortKey<T>, BuilderError>,
         ),
     > {
         parent_reactor_type.connections.iter().map(move |connection| {
-            let reactor_types_iter = self.expanded_reactor_types.iter()
+            let reactor_types_iter = self.reactors.iter()
                 .enumerate()
                 .filter( |(_, reactor_type)| {
                 matches!(reactor_type.parent_reactor_type_idx, Some(idx) if idx == parent_reactor_type_idx)
@@ -286,7 +248,7 @@ impl EnvBuilderState {
                 }
             })
             .ok_or(|| BuilderError::InconsistentBuilderState{what: format!("ReactorTypeBuilderChildReference not found")}) {
-                Ok((reactor_type_idx,port_name)) => self.find_port_idx(reactor_type_idx, port_name),
+                Ok((reactor_type_idx,port_name)) => self.find_port_key(reactor_type_idx, port_name),
                 Err(error) => Err(error())
             };
 
@@ -298,7 +260,7 @@ impl EnvBuilderState {
                 }
             })
             .ok_or(|| BuilderError::InconsistentBuilderState{what: format!("ReactorTypeBuilderChildReference not found")}) {
-                Ok((reactor_type_idx,port_name)) => self.find_port_idx(reactor_type_idx, port_name),
+                Ok((reactor_type_idx,port_name)) => self.find_port_key(reactor_type_idx, port_name),
                 Err(error) => Err(error())
             };
 
@@ -306,23 +268,23 @@ impl EnvBuilderState {
         })
     }
 
-    /// Find the index of a Port given a ReactorTypeIndex and the port name.
-    /// This works by finding the ReactorTypeIndex in the list of ReactorProtos, and then matching
-    /// the port name.
-    pub fn find_port_idx(
+    /// Find the index of a Port given a runtime::ReactorKey and the port name.
+    /// This works by finding the runtime::ReactorKey in the list of ReactorBuilder, and then
+    /// matching the port name.
+    pub fn find_port_key<T: PortData>(
         &self,
-        reactor_type_idx: ReactorTypeIndex,
+        reactor_key: runtime::ReactorKey,
         port_name: &str,
-    ) -> Result<PortIndex, BuilderError> {
-        self.expanded_reactor_types
-            .get(reactor_type_idx.0)
-            .ok_or_else(|| BuilderError::ReactorTypeIndexNotFound(reactor_type_idx))
+    ) -> Result<runtime::PortKey<T>, BuilderError> {
+        self.reactors
+            .get(reactor_key)
+            .ok_or_else(|| BuilderError::ReactorKeyNotFound(reactor_key))
             .and_then(|reactor_type| {
                 reactor_type
                     .ports
-                    .iter()
-                    .find(|&port_idx| self.ports[port_idx.0].get_name().eq(port_name))
-                    .copied()
+                    .keys()
+                    .find(|&port_key| self.port_builders[port_key].get_name().eq(port_name))
+                    .map(|base_key| base_key.data().into())
                     .ok_or_else(|| BuilderError::PortNotFound {
                         reactor_name: reactor_type.name.to_owned(),
                         port_name: port_name.to_owned(),
@@ -337,9 +299,9 @@ impl EnvBuilderState {
                 self.reaction_dependency_edges().map(|(a, b)| (b, a)),
             );
             // Ensure all ReactionIndicies are represented
-            for ix in 0..self.reactions.len() {
-                graph.add_node(ReactionIndex(ix));
-            }
+            self.reactions.keys().for_each(|key| {
+                graph.add_node(key);
+            });
             graph
         };
 
@@ -352,7 +314,12 @@ impl EnvBuilderState {
                 1usize
             });
 
-        let mut builder_state = runtime::Environment::new();
+        let mut builder_state = runtime::Environment {
+            ports: self.ports,
+            port_triggers: SecondaryMap::new(),
+            runtime_actions: SlotMap::new(),
+            reactions: SlotMap::with_key(),
+        };
 
         // Build Reactions in topo-sorted order
         event!(
@@ -360,53 +327,42 @@ impl EnvBuilderState {
             "Building Reactions in order: {:?}",
             ordered_reactions
                 .iter()
-                .map(|&reaction_idx| (reaction_idx, self.reaction_fqn(reaction_idx).unwrap()))
+                .map(|reaction_key| (reaction_key, self.reaction_fqn(*reaction_key).unwrap()))
                 .collect::<Vec<_>>()
         );
 
-        for reaction_index in ordered_reactions.iter() {
-            let reaction_proto = self.reactions.remove(reaction_index.0);
+        for reaction_key in ordered_reactions.iter() {
+            let reaction = self.reactions.remove(*reaction_key).unwrap();
 
             // Build all required Ports and aliases
-            for &port_idx in reaction_proto
-                .antideps
-                .iter()
-                .chain(reaction_proto.deps.iter())
-            {
-                let inward_port_idx = self.follow_port_inward_binding(port_idx);
-
-                let port = builder_state
-                    .runtime_ports
-                    .entry(inward_port_idx)
-                    .or_insert_with(|| {
-                        let transitive_port_triggers =
-                            self.collect_transitive_port_triggers(port_idx);
-                        let port_builder = &self.ports[inward_port_idx.0];
-                        port_builder.build(transitive_port_triggers)
-                    })
-                    .clone();
-
-                // We do a second insert in case the port was aliased (inward_port_idx != port_idx)
-                builder_state.runtime_ports.insert(port_idx, port);
+            for port_key in reaction.antideps.keys().chain(reaction.deps.keys()) {
+                let inward_port_key = self.follow_port_inward_binding(port_key);
+                if inward_port_key == port_key {
+                    // Only set the port_triggers for non-aliased ports.
+                    let transitive_port_triggers = self.collect_transitive_port_triggers(port_key);
+                    builder_state.port_triggers[inward_port_key].extend(transitive_port_triggers);
+                } else {
+                    builder_state.ports[port_key] = builder_state.ports[inward_port_key].clone();
+                }
             }
 
-            let runtime_level: usize = runtime_level_map[reaction_index];
-            builder_state.runtime_reactions.insert(
-                *reaction_index,
+            let runtime_level: usize = runtime_level_map[reaction_key];
+            builder_state.reactions.insert(
+                //*reaction_key,
                 Arc::new(runtime::Reaction::new(
-                    reaction_proto.name,
+                    reaction.name,
                     runtime_level,
-                    reaction_proto.reaction_fn,
+                    reaction.reaction_fn,
                     None,
                 )),
             );
         }
 
-        for (idx, action_builder) in self.actions.iter().enumerate() {
-            builder_state
-                .runtime_actions
-                .insert(runtime::ActionIndex(idx), action_builder.build());
-        }
+        // for (idx, action_builder) in self.actions.iter().enumerate() {
+        // builder_state
+        // .runtime_actions
+        // .insert(runtime::ActionIndex(idx), action_builder.build());
+        // }
 
         Ok(builder_state)
     }

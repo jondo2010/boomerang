@@ -1,9 +1,9 @@
-use std::{collections::BTreeSet, fmt::Debug, marker::PhantomData, sync::Arc};
-
+use crate::runtime::{self};
+use slotmap::{Key, SecondaryMap};
+use std::{fmt::Debug, sync::Arc};
 use tracing::event;
 
-use super::ReactorTypeIndex;
-use crate::runtime::{self, PortIndex, PortValue, ReactionIndex};
+use super::EnvBuilder;
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Copy, Clone)]
 pub enum PortType {
@@ -13,19 +13,23 @@ pub enum PortType {
 
 pub trait BasePortBuilder: Debug {
     fn get_name(&self) -> &str;
-    fn get_reactor_type_idx(&self) -> ReactorTypeIndex;
-    fn get_inward_binding(&self) -> &Option<PortIndex>;
-    fn set_inward_binding(&mut self, inward_binding: Option<PortIndex>);
-    fn get_outward_bindings(&self) -> &BTreeSet<PortIndex>;
-    fn add_outward_binding(&mut self, outward_binding: PortIndex);
+    fn get_port_key(&self) -> runtime::BasePortKey;
+    fn get_reactor_key(&self) -> runtime::ReactorKey;
+    fn get_inward_binding(&self) -> Option<runtime::BasePortKey>;
+    fn set_inward_binding(&mut self, inward_binding: Option<runtime::BasePortKey>);
+    fn get_outward_bindings(&self) -> &Vec<runtime::BasePortKey>;
+    fn add_outward_binding(&mut self, outward_binding: runtime::BasePortKey);
     fn get_port_type(&self) -> &PortType;
-    fn get_deps(&self) -> &Vec<ReactionIndex>;
-    fn get_antideps(&self) -> &Vec<ReactionIndex>;
+    fn get_deps(&self) -> Vec<runtime::ReactionKey>;
+    fn get_antideps(&self) -> Vec<runtime::ReactionKey>;
     /// Get the out-going Reactions that this Port triggers
-    fn get_triggers(&self) -> &BTreeSet<ReactionIndex>;
-    fn register_dependency(&mut self, reaction_idx: ReactionIndex, is_trigger: bool);
-    fn register_antidependency(&mut self, reaction_idx: ReactionIndex);
-    fn build(&self, transitive_triggers: BTreeSet<ReactionIndex>) -> Arc<dyn runtime::BasePort>;
+    fn get_triggers(&self) -> Vec<runtime::ReactionKey>;
+    fn register_dependency(&mut self, reaction_key: runtime::ReactionKey, is_trigger: bool);
+    fn register_antidependency(&mut self, reaction_key: runtime::ReactionKey);
+    // fn build(
+    // &self,
+    // transitive_triggers: SecondaryMap<runtime::ReactionKey, ()>,
+    // ) -> Arc<dyn runtime::BasePort>;
 }
 
 #[derive(Debug)]
@@ -34,38 +38,43 @@ where
     T: runtime::PortData,
 {
     name: String,
-    /// The index of the ReactorType that owns this PortBuilder
-    reactor_type_idx: ReactorTypeIndex,
+    /// The key of the runtime Port
+    port_key: runtime::PortKey<T>,
+    /// The key of the Reactor that owns this PortBuilder
+    reactor_key: runtime::ReactorKey,
     /// The type of Port to build
     port_type: PortType,
     /// Reactions that this Port depends on
-    deps: Vec<ReactionIndex>,
+    deps: SecondaryMap<runtime::ReactionKey, ()>,
     /// Reactions that depend on this port
-    antideps: Vec<ReactionIndex>,
+    antideps: SecondaryMap<runtime::ReactionKey, ()>,
     /// Out-going Reactions that this port triggers
-    triggers: BTreeSet<ReactionIndex>,
+    triggers: SecondaryMap<runtime::ReactionKey, ()>,
 
-    inward_binding: Option<PortIndex>,
-    outward_bindings: BTreeSet<PortIndex>,
-
-    _phantom: PhantomData<T>,
+    inward_binding: Option<runtime::PortKey<T>>,
+    outward_bindings: SecondaryMap<runtime::PortKey<T>, ()>,
 }
 
 impl<T> PortBuilder<T>
 where
     T: runtime::PortData,
 {
-    pub fn new(name: &str, container_idx: ReactorTypeIndex, port_type: PortType) -> Self {
+    pub fn new(
+        name: &str,
+        port_key: runtime::PortKey<T>,
+        reactor_key: runtime::ReactorKey,
+        port_type: PortType,
+    ) -> Self {
         Self {
             name: name.into(),
-            reactor_type_idx: container_idx,
+            port_key,
+            reactor_key,
             port_type,
-            deps: Vec::new(),
-            antideps: Vec::new(),
-            triggers: BTreeSet::new(),
+            deps: SecondaryMap::new(),
+            antideps: SecondaryMap::new(),
+            triggers: SecondaryMap::new(),
             inward_binding: None,
-            outward_bindings: BTreeSet::new(),
-            _phantom: PhantomData,
+            outward_bindings: SecondaryMap::new(),
         }
     }
 }
@@ -77,34 +86,42 @@ where
     fn get_name(&self) -> &str {
         &self.name
     }
-    fn get_reactor_type_idx(&self) -> ReactorTypeIndex {
-        self.reactor_type_idx
+    fn get_port_key(&self) -> runtime::BasePortKey {
+        self.port_key.data().into()
     }
-    fn get_inward_binding(&self) -> &Option<PortIndex> {
-        &self.inward_binding
+    fn get_reactor_key(&self) -> runtime::ReactorKey {
+        self.reactor_key
+    }
+    fn get_inward_binding(&self) -> Option<runtime::BasePortKey> {
+        self.inward_binding.map(|key| key.data().into())
     }
     fn get_port_type(&self) -> &PortType {
         &self.port_type
     }
-    fn get_deps(&self) -> &Vec<ReactionIndex> {
-        &self.deps
+    fn get_deps(&self) -> Vec<runtime::ReactionKey> {
+        self.deps.keys().collect()
     }
-    fn get_antideps(&self) -> &Vec<ReactionIndex> {
-        &self.antideps
+    fn get_antideps(&self) -> Vec<runtime::ReactionKey> {
+        self.antideps.keys().collect()
     }
-    fn get_triggers(&self) -> &BTreeSet<ReactionIndex> {
-        &self.triggers
+    fn get_triggers(&self) -> Vec<runtime::ReactionKey> {
+        self.triggers.keys().collect()
     }
-    fn set_inward_binding(&mut self, inward_binding: Option<PortIndex>) {
-        self.inward_binding = inward_binding;
+    fn set_inward_binding(&mut self, inward_binding: Option<runtime::BasePortKey>) {
+        self.inward_binding = inward_binding.map(|key| key.data().into());
     }
-    fn get_outward_bindings(&self) -> &BTreeSet<PortIndex> {
-        &self.outward_bindings
+    fn get_outward_bindings(&self) -> &Vec<runtime::BasePortKey> {
+        &self
+            .outward_bindings
+            .keys()
+            .map(|key| key.data().into())
+            .collect()
     }
-    fn add_outward_binding(&mut self, outward_binding: PortIndex) {
-        self.outward_bindings.insert(outward_binding);
+    fn add_outward_binding(&mut self, outward_binding: runtime::BasePortKey) {
+        self.outward_bindings
+            .insert(outward_binding.data().into(), ());
     }
-    fn register_dependency(&mut self, reaction_idx: ReactionIndex, is_trigger: bool) {
+    fn register_dependency(&mut self, reaction_key: runtime::ReactionKey, is_trigger: bool) {
         assert!(
             self.outward_bindings.is_empty(),
             "Dependencies may no be declared on ports with an outward binding!"
@@ -118,13 +135,13 @@ where
             // ports must belong to a contained reactor");
         }
 
-        self.deps.push(reaction_idx);
+        self.deps.insert(reaction_key, ());
         if is_trigger {
-            self.triggers.insert(reaction_idx);
+            self.triggers.insert(reaction_key, ());
         }
     }
 
-    fn register_antidependency(&mut self, reaction_idx: ReactionIndex) {
+    fn register_antidependency(&mut self, reaction_key: runtime::ReactionKey) {
         assert!(
             self.inward_binding.is_none(),
             "Antidependencies may no be declared on ports with an inward binding!"
@@ -136,21 +153,21 @@ where
             //  VALIDATE(this->container()->container() == reaction->container(), "Antidependent
             // input ports must belong to a contained reactor");
         }
-        self.antideps.push(reaction_idx);
+        self.antideps.insert(reaction_key, ());
     }
 
-    fn build(&self, transitive_triggers: BTreeSet<ReactionIndex>) -> Arc<dyn runtime::BasePort> {
-        event!(
-            tracing::Level::DEBUG,
-            "Building Port: {}, triggers: {:?}",
-            self.name,
-            self.triggers
-        );
-
-        Arc::new(runtime::Port::new(
-            self.name.clone(),
-            PortValue::new(Option::<T>::None),
-            transitive_triggers,
-        ))
-    }
+    // fn build(
+    // &self,
+    // transitive_triggers: SecondaryMap<runtime::ReactionKey, ()>,
+    // env: &mut EnvBuilder,
+    // ) {
+    // event!(
+    // tracing::Level::DEBUG,
+    // "Building Port: {}, triggers: {:?}",
+    // self.name,
+    // self.triggers
+    // );
+    //
+    // env.ports[self.get_port_key()].
+    // }
 }

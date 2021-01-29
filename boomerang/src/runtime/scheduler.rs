@@ -1,14 +1,13 @@
-use crate::BoomerangError;
-
 use super::{
     environment::Environment,
     time::{LogicalTime, Tag},
-    ActionIndex, PortData, PortIndex, ReactionIndex,
+    BaseActionKey, BasePortKey, PortData, PortKey, ReactionKey,
 };
+use crate::BoomerangError;
 use crossbeam_channel::{Receiver, Sender};
 use rayon::prelude::*;
+use slotmap::Key;
 use std::{
-    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     fmt::Debug,
     sync::{Arc, RwLock},
@@ -17,8 +16,8 @@ use std::{
 use tracing::event;
 
 type PreHandlerFn = Box<dyn Fn() -> () + Send + Sync>;
-type EventMap = BTreeMap<ActionIndex, Option<PreHandlerFn>>;
-type ScheduledEvent = (Tag, ActionIndex, Option<PreHandlerFn>);
+type EventMap = BTreeMap<BaseActionKey, Option<PreHandlerFn>>;
+type ScheduledEvent = (Tag, BaseActionKey, Option<PreHandlerFn>);
 
 pub struct Scheduler {
     /// Physical time the Scheduler was started
@@ -35,8 +34,8 @@ pub struct Scheduler {
 
     /// Reaction Queue organized by level bins
     // reaction_queue: Vec<BTreeSet<ReactionIndex>>,
-    reaction_queue_s: Vec<Sender<ReactionIndex>>,
-    reaction_queue_r: Vec<Receiver<ReactionIndex>>,
+    reaction_queue_s: Vec<Sender<ReactionKey>>,
+    reaction_queue_r: Vec<Receiver<ReactionKey>>,
 
     /// Stop requested
     stop_requested: bool,
@@ -47,13 +46,17 @@ pub struct SchedulerPoint<'a> {
     start_time: &'a Instant,
     logical_time: &'a LogicalTime,
     env: &'a Environment,
-    reaction_queue_s: &'a Vec<Sender<ReactionIndex>>,
-    set_ports_s: Sender<PortIndex>,
+    reaction_queue_s: &'a Vec<Sender<ReactionKey>>,
+    set_ports_s: Sender<BasePortKey>,
     stop_requested: Arc<RwLock<bool>>,
 }
 
 impl<'a> SchedulerPoint<'a> {
-    fn new(scheduler: &'a Scheduler, env: &'a Environment, set_ports_s: Sender<PortIndex>) -> Self {
+    fn new(
+        scheduler: &'a Scheduler,
+        env: &'a Environment,
+        set_ports_s: Sender<BasePortKey>,
+    ) -> Self {
         SchedulerPoint {
             start_time: &scheduler.start_time,
             logical_time: &scheduler.logical_time,
@@ -70,28 +73,30 @@ impl<'a> SchedulerPoint<'a> {
     pub fn get_logical_time(&self) -> &LogicalTime {
         self.logical_time
     }
-    pub fn set_port<T: PortData>(&self, port_idx: PortIndex, value: T) {
-        self.env.get_port(port_idx).unwrap().set(Some(value));
+    pub fn set_port<T: PortData>(&self, port_key: PortKey<T>, value: T) {
+        self.env.get_port(port_key).unwrap().set(Some(value));
 
         // Schedule any reactions triggered by this port being set.
-        for sub_reaction_idx in self.env.runtime_ports[&port_idx].get_triggers() {
-            let new_reaction_level = self.env.runtime_reactions[sub_reaction_idx].get_level();
+        let port_key = port_key.data().into();
+
+        for sub_reaction_key in self.env.port_triggers[port_key].keys() {
+            let new_reaction_level = self.env.reactions[sub_reaction_key].get_level();
             event!(
                 tracing::Level::DEBUG,
-                ?sub_reaction_idx,
+                ?sub_reaction_key,
                 "Triggerd by Port (new level {})",
                 new_reaction_level
             );
             self.reaction_queue_s[new_reaction_level]
-                .send(*sub_reaction_idx)
+                .send(sub_reaction_key)
                 .unwrap();
         }
 
         // Add this port to the list of ports that need reset
-        self.set_ports_s.send(port_idx).unwrap();
+        self.set_ports_s.send(port_key).unwrap();
     }
-    pub fn get_port<T: PortData>(&self, port_idx: PortIndex) -> Option<T> {
-        self.env.get_port(port_idx).unwrap().get()
+    pub fn get_port<T: PortData>(&self, port_key: PortKey<T>) -> Option<T> {
+        self.env.get_port(port_key).unwrap().get()
     }
     pub fn shutdown(&self) {
         event!(tracing::Level::INFO, "Schduler shutdown requested...");
@@ -136,10 +141,10 @@ impl Scheduler {
         &self.logical_time
     }
 
-    pub fn schedule(&self, tag: Tag, action_idx: ActionIndex, pre_handler: Option<PreHandlerFn>) {
-        event!(tracing::Level::DEBUG, %action_idx, "Schedule");
+    pub fn schedule(&self, tag: Tag, action_key: BaseActionKey, pre_handler: Option<PreHandlerFn>) {
+        event!(tracing::Level::DEBUG, ?action_key, "Schedule");
         self.events_channel_s
-            .send((tag, action_idx, pre_handler))
+            .send((tag, action_key, pre_handler))
             .unwrap();
     }
 
@@ -255,11 +260,11 @@ impl Scheduler {
         // Insert all Reactions triggered by each Event/Action into the reaction_queue.
         for reaction_idx in tag_events
             .keys()
-            .flat_map(|action_idx| env.runtime_actions[action_idx].get_triggers())
+            .flat_map(|&action_idx| env.runtime_actions[action_idx].get_triggers())
         {
-            let reaction_level = env.runtime_reactions[reaction_idx].get_level();
+            let reaction_level = env.reactions[reaction_idx].get_level();
             self.reaction_queue_s[reaction_level]
-                .send(*reaction_idx)
+                .send(reaction_idx)
                 .unwrap();
         }
 
@@ -268,10 +273,10 @@ impl Scheduler {
 
         for rqueue_r in self.reaction_queue_r.iter() {
             // Pull all the ReactionIdx at this level into a set
-            let reactions: BTreeSet<ReactionIndex> = rqueue_r.try_iter().collect();
+            let reactions: BTreeSet<ReactionKey> = rqueue_r.try_iter().collect();
             let sched_point = SchedulerPoint::new(&self, env, clear_ports_s.clone());
-            reactions.par_iter().for_each(|reaction_idx| {
-                let reaction = &env.runtime_reactions[&reaction_idx];
+            reactions.par_iter().for_each(|&reaction_idx| {
+                let reaction = &env.reactions[reaction_idx];
                 event!(tracing::Level::DEBUG, ?reaction_idx, ?reaction, "Executing");
                 reaction.trigger(&sched_point);
             });
@@ -281,14 +286,14 @@ impl Scheduler {
         }
 
         // cleanup all triggered actions
-        tag_events.keys().for_each(|event_idx| {
+        tag_events.keys().for_each(|&event_idx| {
             env.runtime_actions[event_idx].cleanup(self);
         });
 
         // Call clean on set ports
         clear_ports_r
             .try_iter()
-            .map(|port_idx| &env.runtime_ports[&port_idx])
+            .map(|port_key| &env.ports[port_key])
             .for_each(|port| port.cleanup());
 
         Ok(run_again)

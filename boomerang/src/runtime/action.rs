@@ -1,19 +1,33 @@
-use super::{scheduler::Scheduler, time::Tag, PortData, PortValue, ReactionIndex, ReactorElement};
+use super::{scheduler::Scheduler, time::Tag, PortData, PortValue, ReactionKey, ReactorElement};
 use derive_more::Display;
+use slotmap::SecondaryMap;
 use std::{
-    cell::RefCell,
-    collections::BTreeSet,
     fmt::{Debug, Display},
-    sync::{Arc, RwLock},
+    marker::PhantomData,
+    sync::Arc,
     time::Duration,
 };
 
-#[derive(Display, Debug, Ord, PartialOrd, Eq, PartialEq, Copy, Clone)]
-pub struct ActionIndex(pub usize);
+pub use slotmap::DefaultKey as BaseActionKey;
+#[derive(Clone, Copy, Derivative)]
+#[derivative(Debug, Default, Hash, Ord, PartialOrd, Eq, PartialEq)]
+pub struct ActionKey<T: PortData>(slotmap::KeyData, PhantomData<T>);
+
+impl<T: PortData> From<slotmap::KeyData> for ActionKey<T> {
+    fn from(key: slotmap::KeyData) -> Self {
+        Self(key, PhantomData)
+    }
+}
+
+impl<T: PortData> slotmap::Key for ActionKey<T> {
+    fn data(&self) -> slotmap::KeyData {
+        self.0
+    }
+}
 
 pub trait BaseAction: Debug + Display + Send + Sync + ReactorElement {
     /// Get the transitive set of Reactions that are sensitive to this Action executing.
-    fn get_triggers(&self) -> &BTreeSet<ReactionIndex>;
+    fn get_triggers(&self) -> Vec<ReactionKey>;
 }
 
 impl std::cmp::PartialEq for dyn BaseAction {
@@ -44,7 +58,7 @@ where
 {
     name: String,
     value: PortValue<T>,
-    triggers: BTreeSet<ReactionIndex>,
+    triggers: SecondaryMap<ReactionKey, ()>,
     min_delay: Duration,
 }
 
@@ -56,7 +70,7 @@ where
         Self {
             name: name.to_owned(),
             value: PortValue::new(None),
-            triggers: BTreeSet::new(),
+            triggers: SecondaryMap::new(),
             min_delay,
         }
     }
@@ -75,8 +89,8 @@ impl<T> BaseAction for Action<T>
 where
     T: PortData,
 {
-    fn get_triggers(&self) -> &BTreeSet<ReactionIndex> {
-        &self.triggers
+    fn get_triggers(&self) -> Vec<ReactionKey> {
+        self.triggers.keys().collect()
     }
 }
 
@@ -84,23 +98,23 @@ where
 #[display(fmt = "{}", name)]
 pub struct Timer {
     name: String,
-    action_idx: ActionIndex,
+    action_key: BaseActionKey,
     offset: Duration,
     period: Duration,
-    triggers: BTreeSet<ReactionIndex>,
+    triggers: SecondaryMap<ReactionKey, ()>,
 }
 
 impl Timer {
     pub fn new(
         name: &str,
-        action_idx: ActionIndex,
+        action_key: BaseActionKey,
         offset: Duration,
         period: Duration,
-        triggers: BTreeSet<ReactionIndex>,
+        triggers: SecondaryMap<ReactionKey, ()>,
     ) -> Self {
         Self {
             name: name.to_owned(),
-            action_idx,
+            action_key: action_key,
             offset,
             period,
             triggers,
@@ -109,12 +123,12 @@ impl Timer {
 
     pub fn new_zero(
         name: &str,
-        action_idx: ActionIndex,
-        triggers: BTreeSet<ReactionIndex>,
+        action_key: BaseActionKey,
+        triggers: SecondaryMap<ReactionKey, ()>,
     ) -> Self {
         Timer::new(
             name,
-            action_idx,
+            action_key,
             Duration::from_secs(0),
             Duration::from_secs(0),
             triggers,
@@ -123,8 +137,8 @@ impl Timer {
 }
 
 impl BaseAction for Timer {
-    fn get_triggers(&self) -> &BTreeSet<ReactionIndex> {
-        &self.triggers
+    fn get_triggers(&self) -> Vec<ReactionKey> {
+        self.triggers.keys().collect()
     }
 }
 
@@ -132,9 +146,9 @@ impl ReactorElement for Timer {
     fn startup(&self, scheduler: &mut Scheduler) {
         let t0 = Tag::from(scheduler.get_start_time());
         if self.offset > Duration::from_secs(0) {
-            scheduler.schedule(t0.delay(Some(self.offset)), self.action_idx, None);
+            scheduler.schedule(t0.delay(Some(self.offset)), self.action_key, None);
         } else {
-            scheduler.schedule(t0, self.action_idx, None);
+            scheduler.schedule(t0, self.action_key, None);
         }
     }
 
@@ -143,7 +157,7 @@ impl ReactorElement for Timer {
         if self.period > Duration::from_secs(0) {
             let now = Tag::from(scheduler.get_logical_time());
             let next = now.delay(Some(self.period));
-            scheduler.schedule(next, self.action_idx, None);
+            scheduler.schedule(next, self.action_key, None);
         }
     }
 }

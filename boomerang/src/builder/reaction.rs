@@ -1,147 +1,126 @@
-use super::{EnvBuilderState, PortType, ReactorTypeIndex};
-use crate::runtime::{self, ActionIndex, PortIndex, ReactionIndex};
+use super::{EnvBuilder, PortType};
+use crate::runtime::{self};
+use slotmap::SecondaryMap;
 
-#[derive(Debug)]
-pub struct ReactionProto {
+#[derive(Derivative, Eq)]
+#[derivative(Debug)]
+pub(crate) struct ReactionBuilder {
     pub(super) name: String,
     /// Unique ordering of this reaction within the reactor.
     priority: usize,
     /// The owning Reactor for this Reaction
-    pub(super) reactor_type_idx: ReactorTypeIndex,
+    pub(super) reactor_key: runtime::ReactorKey,
+    #[derivative(Debug = "ignore")]
     pub(super) reaction_fn: runtime::ReactionFn,
-    trigger_actions: Vec<ActionIndex>,
-    trigger_ports: Vec<PortIndex>,
-    pub(super) deps: Vec<PortIndex>,
-    pub(super) antideps: Vec<PortIndex>,
+    trigger_actions: SecondaryMap<runtime::BaseActionKey, ()>,
+    schedulable_actions: SecondaryMap<runtime::BaseActionKey, ()>,
+    trigger_ports: SecondaryMap<runtime::BasePortKey, ()>,
+    pub(super) deps: SecondaryMap<runtime::BasePortKey, ()>,
+    pub(super) antideps: SecondaryMap<runtime::BasePortKey, ()>,
 }
 
-impl Ord for ReactionProto {
+impl Ord for ReactionBuilder {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.priority
             .cmp(&other.priority)
-            .then_with(|| self.reactor_type_idx.cmp(&other.reactor_type_idx))
+            .then_with(|| self.reactor_key.cmp(&other.reactor_key))
     }
 }
 
-impl PartialOrd for ReactionProto {
+impl PartialOrd for ReactionBuilder {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(&other))
     }
 }
 
-impl Eq for ReactionProto {}
-
-impl PartialEq for ReactionProto {
+impl PartialEq for ReactionBuilder {
     fn eq(&self, other: &Self) -> bool {
-        self.priority.eq(&other.priority) && self.reactor_type_idx.eq(&other.reactor_type_idx)
+        self.priority.eq(&other.priority) && self.reactor_key.eq(&other.reactor_key)
     }
 }
 
-pub(crate) struct ReactionBuilderInt {
-    name: String,
-    /// Unique ordering of this reaction within the reactor.
-    priority: usize,
-    /// The owning Reactor for this Reaction
-    reactor_type_idx: ReactorTypeIndex,
-    reaction_idx: ReactionIndex,
-    reaction_fn: runtime::ReactionFn,
-    trigger_actions: Vec<ActionIndex>,
-    schedulable_actions: Vec<ActionIndex>,
-    trigger_ports: Vec<PortIndex>,
-    deps: Vec<PortIndex>,
-    antideps: Vec<PortIndex>,
-}
-
-pub struct ReactionBuilder<'a>(ReactionBuilderInt, &'a mut EnvBuilderState);
-
-impl<'a> ReactionBuilder<'a> {
+impl ReactionBuilder {
     pub fn new(
         name: &str,
         priority: usize,
-        reaction_idx: ReactionIndex,
-        reactor_type_idx: ReactorTypeIndex,
+        reactor_key: runtime::ReactorKey,
         reaction_fn: runtime::ReactionFn,
-        env: &'a mut EnvBuilderState,
     ) -> Self {
-        Self(
-            ReactionBuilderInt {
-                name: name.into(),
-                priority,
-                reactor_type_idx,
-                reaction_fn,
-                reaction_idx,
-                trigger_ports: Vec::new(),
-                schedulable_actions: Vec::new(),
-                trigger_actions: Vec::new(),
-                deps: Vec::new(),
-                antideps: Vec::new(),
-            },
-            env,
-        )
+        Self {
+            name: name.into(),
+            priority,
+            reactor_key,
+            reaction_fn,
+            trigger_ports: SecondaryMap::new(),
+            schedulable_actions: SecondaryMap::new(),
+            trigger_actions: SecondaryMap::new(),
+            deps: SecondaryMap::new(),
+            antideps: SecondaryMap::new(),
+        }
     }
 
-    pub fn with_trigger_action(mut self, trigger_idx: ActionIndex) -> Self {
-        let ReactionBuilder(int, env) = &mut self;
-        let action = env.actions.get_mut(trigger_idx.0).unwrap();
-        assert!(
-            int.reactor_type_idx == action.get_reactor_type_idx(),
-            "Action triggers must belong to the same reactor as the triggered reaction"
-        );
-        action.triggers.insert(int.reaction_idx);
-        int.trigger_actions.push(trigger_idx);
+    pub fn with_trigger_action(mut self, trigger_key: runtime::BaseActionKey) -> Self {
+        self.trigger_actions.insert(trigger_key, ());
         self
     }
 
-    pub fn with_trigger_port(mut self, port_idx: PortIndex) -> Self {
-        let ReactionBuilder(int, env) = &mut self;
-        let port = env.ports.get_mut(port_idx.0).unwrap();
+    pub fn with_trigger_port(mut self, port_key: runtime::BasePortKey) -> Self {
+        self.trigger_ports.insert(port_key, ());
+        self.deps.insert(port_key, ());
+        self
+    }
 
-        if port.get_port_type() == &PortType::Input {
-            // assert!( this->container() == port->container(), "Input port triggers must belong to
-            // the same reactor as the triggered reaction");
-        } else {
-            // assert!(this->container() == port->container()->container(), "Output port triggers
-            // must belong to a contained reactor");
+    pub fn with_scheduable_action(mut self, action_key: runtime::BaseActionKey) -> Self {
+        self.schedulable_actions.insert(action_key, ());
+        self
+    }
+
+    pub fn with_antidependency(mut self, antidep_key: runtime::BasePortKey) -> Self {
+        self.antideps.insert(antidep_key, ());
+        self
+    }
+
+    pub fn finish(self, env: &mut EnvBuilder) -> runtime::ReactionKey {
+        let key = env.reactions.insert(self.into());
+
+        for trigger_key in self.trigger_actions.keys() {
+            let action = env.actions.get_mut(trigger_key).unwrap();
+            assert!(
+                self.reactor_key == action.get_reactor_key(),
+                "Action triggers must belong to the same reactor as the triggered reaction"
+            );
+            action.triggers.insert(key, ());
         }
 
-        int.trigger_ports.push(port_idx);
-        int.deps.push(port_idx);
-        port.register_dependency(int.reaction_idx, true);
-        self
+        for port_key in self.deps.keys() {
+            let port = env.port_builders.get_mut(port_key).unwrap();
+            if port.get_port_type() == &PortType::Input {
+                // assert!( this->container() == port->container(), "Input port triggers must belong
+                // to the same reactor as the triggered reaction");
+            } else {
+                // assert!(this->container() == port->container()->container(), "Output port
+                // triggers must belong to a contained reactor");
+            }
+            port.register_dependency(key, true);
+        }
+
+        for action_idx in self.schedulable_actions.iter() {
+            let trig = env.actions.get_mut(action_idx.0).unwrap();
+            // ASSERT(this->environment() == action->environment());
+            // VALIDATE(this->container() == action->container(), "Scheduable actions must belong to
+            // the same reactor as the triggered reaction");
+            trig.schedulers.insert(key, ());
+        }
+
+        for antidep_idx in self.antideps.iter() {
+            let port = env.port_builders.get_mut(antidep_idx.0).unwrap();
+            port.register_antidependency(key);
+        }
+
+        key
     }
 
-    pub fn with_scheduable_action(mut self, action_idx: ActionIndex) -> Self {
-        let ReactionBuilder(int, env) = &mut self;
-        let trig = env.actions.get_mut(action_idx.0).unwrap();
-        // ASSERT(this->environment() == action->environment());
-        // VALIDATE(this->container() == action->container(), "Scheduable actions must belong to the
-        // same reactor as the triggered reaction");
-        int.schedulable_actions.push(action_idx);
-        trig.schedulers.push(int.reaction_idx);
-        self
-    }
-
-    pub fn with_antidependency(mut self, antidep_idx: PortIndex) -> Self {
-        let ReactionBuilder(int, env) = &mut self;
-        let port = env.ports.get_mut(antidep_idx.0).unwrap();
-        int.antideps.push(antidep_idx);
-        port.register_antidependency(int.reaction_idx);
-        self
-    }
-
-    pub fn finish(self) -> ReactionIndex {
-        let ReactionBuilder(int, env) = self;
-        let reaction = ReactionProto {
-            name: int.name,
-            priority: int.priority,
-            reactor_type_idx: int.reactor_type_idx,
-            reaction_fn: int.reaction_fn,
-            trigger_actions: int.trigger_actions,
-            trigger_ports: int.trigger_ports,
-            deps: int.deps,
-            antideps: int.antideps,
-        };
-        env.reactions.push(reaction);
-        int.reaction_idx
+    pub fn set_priority(&mut self, priority: usize) {
+        self.priority = priority;
     }
 }

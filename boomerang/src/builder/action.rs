@@ -1,8 +1,7 @@
+use slotmap::SecondaryMap;
 use tracing::event;
-
-use super::ReactorTypeIndex;
-use crate::runtime::{self, ActionIndex};
-use std::{collections::BTreeSet, sync::Arc};
+use crate::runtime::{self};
+use std::sync::Arc;
 
 #[derive(Debug)]
 enum ActionBuilderInner {
@@ -18,13 +17,13 @@ enum ActionBuilderInner {
 pub struct ActionBuilder {
     name: String,
     /// The index of this action
-    action_idx: ActionIndex,
+    action_key: runtime::BaseActionKey,
     /// The ReactorType that contains this ActionBuilder
-    reactor_type_idx: ReactorTypeIndex,
+    reactor_key: runtime::ReactorKey,
     /// Out-going Reactions that this action triggers
-    pub triggers: BTreeSet<runtime::ReactionIndex>,
+    pub triggers: SecondaryMap<runtime::ReactionKey, ()>,
     /// TODO?
-    pub schedulers: Vec<runtime::ReactionIndex>,
+    pub schedulers: SecondaryMap<runtime::ReactionKey, ()>,
     inner: ActionBuilderInner,
 }
 
@@ -34,27 +33,27 @@ impl ActionBuilder {
     ///     On cleanup() - reschedule if the duration is non-zero
     pub fn new_timer_action(
         name: &str,
-        action_idx: ActionIndex,
-        reactor_type_idx: ReactorTypeIndex,
+        action_key: runtime::BaseActionKey,
+        reactor_key: runtime::ReactorKey,
         offset: runtime::Duration,
         period: runtime::Duration,
     ) -> Self {
         Self {
             name: name.into(),
-            action_idx,
-            reactor_type_idx,
-            triggers: BTreeSet::new(),
-            schedulers: Vec::new(),
+            action_key,
+            reactor_key,
+            triggers: SecondaryMap::new(),
+            schedulers: SecondaryMap::new(),
             inner: ActionBuilderInner::Timer { offset, period },
         }
     }
 
-    pub fn get_action_idx(&self) -> ActionIndex {
-        self.action_idx
+    pub fn get_action_key(&self) -> runtime::BaseActionKey {
+        self.action_key
     }
 
-    pub fn get_reactor_type_idx(&self) -> ReactorTypeIndex {
-        self.reactor_type_idx
+    pub fn get_reactor_key(&self) -> runtime::ReactorKey {
+        self.reactor_key
     }
 
     pub fn build(&self) -> Arc<dyn runtime::BaseAction> {
@@ -68,13 +67,13 @@ impl ActionBuilder {
         Arc::new(match self.inner {
             ActionBuilderInner::Timer { offset, period } => runtime::Timer::new(
                 &self.name,
-                self.action_idx,
+                self.action_key,
                 offset,
                 period,
                 self.triggers.clone(),
             ),
             ActionBuilderInner::StartupAction => {
-                runtime::Timer::new_zero(&self.name, self.action_idx, self.triggers.clone())
+                runtime::Timer::new_zero(&self.name, self.action_key, self.triggers.clone())
             }
             ActionBuilderInner::ShutdownAction => unimplemented!(),
         })

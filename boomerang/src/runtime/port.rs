@@ -1,16 +1,30 @@
+use super::ReactionKey;
 use derive_more::Display;
 use downcast_rs::{impl_downcast, DowncastSync};
-use tracing::event;
+use slotmap::SecondaryMap;
 use std::{
-    collections::BTreeSet,
     fmt::{Debug, Display},
+    marker::PhantomData,
     sync::{Arc, RwLock},
 };
+use tracing::event;
 
-use super::ReactionIndex;
+pub use slotmap::DefaultKey as BasePortKey;
+#[derive(Clone, Copy, Derivative)]
+#[derivative(Debug, Default, Hash, Ord, PartialOrd, Eq, PartialEq)]
+pub struct PortKey<T: PortData>(slotmap::KeyData, PhantomData<T>);
 
-#[derive(Display, Debug, Ord, PartialOrd, Eq, PartialEq, Copy, Clone)]
-pub struct PortIndex(pub usize);
+impl<T: PortData> From<slotmap::KeyData> for PortKey<T> {
+    fn from(key: slotmap::KeyData) -> Self {
+        Self(key, PhantomData)
+    }
+}
+
+impl<T: PortData> slotmap::Key for PortKey<T> {
+    fn data(&self) -> slotmap::KeyData {
+        self.0
+    }
+}
 
 pub trait PortData: Debug + Copy + Clone + Send + Sync + 'static {}
 impl<T> PortData for T where T: Debug + Copy + Clone + Send + Sync + 'static {}
@@ -18,7 +32,7 @@ pub type PortValue<T> = RwLock<Option<T>>;
 
 pub trait BasePort: Debug + Display + Send + Sync + DowncastSync {
     /// Get the transitive set of Reactions that are sensitive to this Port being set.
-    fn get_triggers(&self) -> &BTreeSet<ReactionIndex>;
+    //fn get_triggers(&self) -> &Vec<ReactionKey>;
     /// Reset the internal value
     fn cleanup(&self);
 }
@@ -32,18 +46,17 @@ where
 {
     name: String,
     value: PortValue<T>,
-    triggers: BTreeSet<ReactionIndex>,
+    //triggers: SecondaryMap<ReactionKey, ()>,
 }
 
 impl<T> Port<T>
 where
     T: PortData,
 {
-    pub fn new(name: String, value: PortValue<T>, triggers: BTreeSet<ReactionIndex>) -> Self {
+    pub fn new(name: String, value: PortValue<T>) -> Self {
         Self {
             name,
             value,
-            triggers,
         }
     }
 
@@ -75,9 +88,11 @@ impl<T> BasePort for Port<T>
 where
     T: PortData,
 {
-    fn get_triggers(&self) -> &BTreeSet<ReactionIndex> {
-        &self.triggers
+    /*
+    fn get_triggers(&self) -> &Vec<ReactionKey> {
+        &self.triggers.keys().collect()
     }
+    */
 
     fn cleanup(&self) {
         event!(tracing::Level::DEBUG, ?self.name, "cleanup()");
@@ -91,7 +106,6 @@ fn test_port() {
     let p0: Arc<dyn BasePort> = Arc::new(Port::new(
         "p0".into(),
         RwLock::new(Some(1.0f64)),
-        BTreeSet::new(),
     ));
     dbg!(&p0);
     let x = p0.downcast_ref::<Port<f64>>();

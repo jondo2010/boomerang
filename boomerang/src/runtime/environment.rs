@@ -1,7 +1,8 @@
 use super::{
-    ActionIndex, BaseAction, BasePort, Port, PortData, PortIndex, Reaction, ReactionIndex,
+    BaseActionKey, BaseAction, BasePort, BasePortKey, Port, PortData, PortKey, Reaction, ReactionKey,
 };
 use downcast_rs::{Downcast, DowncastSync};
+use slotmap::{Key, SecondaryMap, SlotMap};
 use std::{collections::BTreeMap, sync::Arc};
 
 //#[derive(Debug)]
@@ -15,33 +16,38 @@ use std::{collections::BTreeMap, sync::Arc};
 /// This gets passed into the builder callback.
 #[derive(Debug)]
 pub struct Environment {
-    pub runtime_ports: BTreeMap<PortIndex, Arc<dyn BasePort>>,
-    pub runtime_reactions: BTreeMap<ReactionIndex, Arc<Reaction>>,
-    pub runtime_actions: BTreeMap<ActionIndex, Arc<dyn BaseAction>>,
+    /// The runtime set of Ports
+    pub ports: SlotMap<BasePortKey, Arc<dyn BasePort>>,
+    /// For each Port a set of Reactions triggered by it
+    pub port_triggers: SecondaryMap<BasePortKey, SecondaryMap<ReactionKey, ()>>,
+
+    pub reactions: SlotMap<ReactionKey, Arc<Reaction>>,
+    pub runtime_actions: SlotMap<BaseActionKey, Arc<dyn BaseAction>>,
 }
 
 impl Environment {
     pub fn new() -> Self {
         Self {
-            runtime_ports: BTreeMap::new(),
-            runtime_reactions: BTreeMap::new(),
-            runtime_actions: BTreeMap::new(),
+            ports: SlotMap::new(),
+            port_triggers: SecondaryMap::new(),
+            reactions: SlotMap::with_key(),
+            runtime_actions: SlotMap::new(),
         }
     }
 
-    pub fn get_port<T>(&self, port_idx: PortIndex) -> Option<Arc<Port<T>>>
+    pub fn get_port<T: PortData>(&self, port_key: PortKey<T>) -> Option<Arc<Port<T>>>
     where
         T: PortData,
     {
-        self.runtime_ports
-            .get(&port_idx)
+        self.ports
+            .get(port_key.data().into())
             .cloned()
             .and_then(|base_port| DowncastSync::into_any_arc(base_port).downcast().ok())
     }
 
     /// Return the maximum reaction level
     pub fn max_level(&self) -> usize {
-        self.runtime_reactions
+        self.reactions
             .values()
             .map(|reaction| reaction.get_level())
             .max()

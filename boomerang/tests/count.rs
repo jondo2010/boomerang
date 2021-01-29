@@ -13,17 +13,18 @@ use std::sync::{Arc, RwLock};
 use boomerang::runtime;
 use boomerang::{
     builder::*,
-    runtime::{ActionIndex, PortIndex, SchedulerPoint},
+    runtime::{BasePortKey, SchedulerPoint},
 };
 
 struct Count {
-    c: PortIndex,
+    max_count: usize,
+    c: BasePortKey,
     t: ActionIndex,
     i: u32,
 }
 
 impl Count {
-    fn build(builder: &mut ReactorTypeBuilderState) -> Arc<RwLock<Self>> {
+    fn build(builder: &mut ReactorBuilder, max_count: usize) -> Arc<RwLock<Self>> {
         let c = builder.add_output::<u32>("c").unwrap();
         let t = builder.add_timer(
             "t",
@@ -31,7 +32,12 @@ impl Count {
             runtime::Duration::new(0, 0),
         );
 
-        let this = Arc::new(RwLock::new(Self { c, t, i: 0 }));
+        let this = Arc::new(RwLock::new(Self {
+            max_count,
+            c,
+            t,
+            i: 0,
+        }));
         let this2 = this.clone();
 
         builder
@@ -48,7 +54,7 @@ impl Count {
     fn r0(&mut self, sched: &SchedulerPoint) {
         self.i += 1;
         sched.set_port(self.c, self.i);
-        if self.i >= 100_000u32 {
+        if self.i >= self.max_count {
             sched.shutdown();
         }
     }
@@ -62,7 +68,7 @@ fn count() {
     let mut env_builder = EnvBuilder::new();
 
     let count = env_builder.add_reactor_type("Count", move |mut builder| {
-        let _count = Count::build(&mut builder);
+        let _count = Count::build(&mut builder, 100_100);
         builder.finish()
     });
 

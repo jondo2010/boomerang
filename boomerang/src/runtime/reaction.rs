@@ -1,8 +1,9 @@
 use super::SchedulerPoint;
 use std::{fmt::Debug, sync::RwLock, time::Duration};
 
-#[derive(Debug, Copy, Clone, Hash, Ord, PartialOrd, Eq, PartialEq)]
-pub struct ReactionIndex(pub usize);
+slotmap::new_key_type!{
+    pub struct ReactionKey;
+}
 
 pub trait ReactionFnTrait: FnMut(& SchedulerPoint) + Send + Sync {}
 impl<T> ReactionFnTrait for T where T: FnMut(& SchedulerPoint) + Send + Sync {}

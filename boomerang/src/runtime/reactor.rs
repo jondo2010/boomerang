@@ -1,6 +1,6 @@
 use super::scheduler::Scheduler;
 
-slotmap::new_key_type!{
+slotmap::new_key_type! {
     pub struct ReactorKey;
 }
 

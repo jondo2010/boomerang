@@ -1,9 +1,6 @@
 use crate::runtime::{self};
-use slotmap::{Key, SecondaryMap};
-use std::{fmt::Debug, sync::Arc};
-use tracing::event;
-
-use super::EnvBuilder;
+use slotmap::{secondary, Key, SecondaryMap};
+use std::fmt::Debug;
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Copy, Clone)]
 pub enum PortType {
@@ -17,11 +14,11 @@ pub trait BasePortBuilder: Debug {
     fn get_reactor_key(&self) -> runtime::ReactorKey;
     fn get_inward_binding(&self) -> Option<runtime::BasePortKey>;
     fn set_inward_binding(&mut self, inward_binding: Option<runtime::BasePortKey>);
-    fn get_outward_bindings(&self) -> &Vec<runtime::BasePortKey>;
+    fn get_outward_bindings(&self) -> secondary::Keys<runtime::BasePortKey, ()>;
     fn add_outward_binding(&mut self, outward_binding: runtime::BasePortKey);
     fn get_port_type(&self) -> &PortType;
     fn get_deps(&self) -> Vec<runtime::ReactionKey>;
-    fn get_antideps(&self) -> Vec<runtime::ReactionKey>;
+    fn get_antideps(&self) -> secondary::Keys<runtime::ReactionKey, ()>;
     /// Get the out-going Reactions that this Port triggers
     fn get_triggers(&self) -> Vec<runtime::ReactionKey>;
     fn register_dependency(&mut self, reaction_key: runtime::ReactionKey, is_trigger: bool);
@@ -33,10 +30,7 @@ pub trait BasePortBuilder: Debug {
 }
 
 #[derive(Debug)]
-pub struct PortBuilder<T>
-where
-    T: runtime::PortData,
-{
+pub struct PortBuilder<T: runtime::PortData> {
     name: String,
     /// The key of the runtime Port
     port_key: runtime::PortKey<T>,
@@ -52,7 +46,7 @@ where
     triggers: SecondaryMap<runtime::ReactionKey, ()>,
 
     inward_binding: Option<runtime::PortKey<T>>,
-    outward_bindings: SecondaryMap<runtime::PortKey<T>, ()>,
+    outward_bindings: SecondaryMap<runtime::BasePortKey, ()>,
 }
 
 impl<T> PortBuilder<T>
@@ -79,10 +73,7 @@ where
     }
 }
 
-impl<T> BasePortBuilder for PortBuilder<T>
-where
-    T: runtime::PortData,
-{
+impl<T: runtime::PortData> BasePortBuilder for PortBuilder<T> {
     fn get_name(&self) -> &str {
         &self.name
     }
@@ -101,21 +92,17 @@ where
     fn get_deps(&self) -> Vec<runtime::ReactionKey> {
         self.deps.keys().collect()
     }
-    fn get_antideps(&self) -> Vec<runtime::ReactionKey> {
-        self.antideps.keys().collect()
+    fn get_antideps(&self) -> secondary::Keys<runtime::ReactionKey, ()> {
+        self.antideps.keys()
     }
     fn get_triggers(&self) -> Vec<runtime::ReactionKey> {
         self.triggers.keys().collect()
     }
     fn set_inward_binding(&mut self, inward_binding: Option<runtime::BasePortKey>) {
-        self.inward_binding = inward_binding.map(|key| key.data().into());
+        self.inward_binding = inward_binding.map(|port_key| port_key.data().into());
     }
-    fn get_outward_bindings(&self) -> &Vec<runtime::BasePortKey> {
-        &self
-            .outward_bindings
-            .keys()
-            .map(|key| key.data().into())
-            .collect()
+    fn get_outward_bindings(&self) -> secondary::Keys<runtime::BasePortKey, ()> {
+        self.outward_bindings.keys()
     }
     fn add_outward_binding(&mut self, outward_binding: runtime::BasePortKey) {
         self.outward_bindings

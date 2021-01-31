@@ -3,7 +3,7 @@
 // runtime. It also performs various smoke tests of timing aligned
 // reactions. The first instance has a period of 4 seconds, the second
 // of 2 seconds, and the third (composite) or 1 second.
-//reactor HelloCpp(period:time(2 secs), message:{=std::string=}("Hello C++")) {
+// reactor HelloCpp(period:time(2 secs), message:{=std::string=}("Hello C++")) {
 //    state count:int(0);
 //    state previous_time:{=reactor::TimePoint=}();
 //    timer t(1 secs, period);
@@ -18,7 +18,7 @@
 //    reaction(a) {=
 //         count++;
 //         auto time = get_logical_time();
-//	 	std::cout << "***** action " << count << " at time "
+// 	 	std::cout << "***** action " << count << " at time "
 //                   << time << std::endl;
 //         auto diff = time - previous_time;
 //         if (diff != 200ms) {
@@ -27,14 +27,14 @@
 //             exit(1);
 //        }
 //    =}
-//} 
-//reactor Inside(period:time(1 sec), 
+//}
+// reactor Inside(period:time(1 sec),
 //               message:{=std::string=}("Composite default message.")) {
 //    third_instance = new HelloCpp(period = period, message = message);
 //}
-//main reactor Hello { 
-//    first_instance = new HelloCpp(period = 4 sec, 
+// main reactor Hello {
+//    first_instance = new HelloCpp(period = 4 sec,
 //                                  message = "Hello from first_instance.");
 //    second_instance = new HelloCpp(message = "Hello from second_instance.");
 //    composite_instance = new Inside(message = "Hello from composite_instance.");
-//} 
+//}

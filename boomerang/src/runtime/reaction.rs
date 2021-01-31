@@ -1,17 +1,17 @@
 use super::SchedulerPoint;
 use std::{fmt::Debug, sync::RwLock, time::Duration};
 
-slotmap::new_key_type!{
+slotmap::new_key_type! {
     pub struct ReactionKey;
 }
 
-pub trait ReactionFnTrait: FnMut(& SchedulerPoint) + Send + Sync {}
-impl<T> ReactionFnTrait for T where T: FnMut(& SchedulerPoint) + Send + Sync {}
+pub trait ReactionFnTrait: FnMut(&SchedulerPoint) + Send + Sync {}
+impl<T> ReactionFnTrait for T where T: FnMut(&SchedulerPoint) + Send + Sync {}
 pub struct ReactionFn(Box<dyn ReactionFnTrait>);
 impl ReactionFn {
     pub fn new<F>(f: F) -> Self
     where
-        F: FnMut(& SchedulerPoint) + Send + Sync + 'static,
+        F: FnMut(&SchedulerPoint) + Send + Sync + 'static,
     {
         Self(Box::new(f))
     }
@@ -114,7 +114,7 @@ impl Reaction {
         self.level
     }
 
-    pub fn trigger(&self, sched: & SchedulerPoint) {
+    pub fn trigger(&self, sched: &SchedulerPoint) {
         match self.deadline.as_ref() {
             Some(Deadline {
                 deadline: _,

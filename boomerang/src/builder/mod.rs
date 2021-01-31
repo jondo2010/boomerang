@@ -1,5 +1,3 @@
-use derive_more::Display;
-
 mod action;
 mod env;
 mod port;
@@ -45,6 +43,13 @@ pub enum BuilderError {
 
     #[error("A cycle in the Reaction graph was found.")]
     ReactionGraphCycle,
+
+    #[error("Error binding ports ({:?}->{:?}): {}", port_a_key, port_b_key, what)]
+    PortBindError {
+        port_a_key: runtime::BasePortKey,
+        port_b_key: runtime::BasePortKey,
+        what: String,
+    },
 }
 
 trait TupleSlice {

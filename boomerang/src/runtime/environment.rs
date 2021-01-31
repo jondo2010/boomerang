@@ -1,9 +1,10 @@
 use super::{
-    BaseActionKey, BaseAction, BasePort, BasePortKey, Port, PortData, PortKey, Reaction, ReactionKey,
+    BaseAction, BaseActionKey, BasePort, BasePortKey, Port, PortData, PortKey, Reaction,
+    ReactionKey,
 };
-use downcast_rs::{Downcast, DowncastSync};
+use downcast_rs::DowncastSync;
 use slotmap::{Key, SecondaryMap, SlotMap};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{fmt::Display, sync::Arc};
 
 //#[derive(Debug)]
 // pub struct Environment {
@@ -23,6 +24,14 @@ pub struct Environment {
 
     pub reactions: SlotMap<ReactionKey, Arc<Reaction>>,
     pub runtime_actions: SlotMap<BaseActionKey, Arc<dyn BaseAction>>,
+}
+
+impl Display for Environment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Environment {\n")?;
+        f.write_str("}\n")?;
+        Ok(())
+    }
 }
 
 impl Environment {

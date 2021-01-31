@@ -1,7 +1,6 @@
-use super::ReactionKey;
 use derive_more::Display;
 use downcast_rs::{impl_downcast, DowncastSync};
-use slotmap::SecondaryMap;
+
 use std::{
     fmt::{Debug, Display},
     marker::PhantomData,
@@ -32,7 +31,7 @@ pub type PortValue<T> = RwLock<Option<T>>;
 
 pub trait BasePort: Debug + Display + Send + Sync + DowncastSync {
     /// Get the transitive set of Reactions that are sensitive to this Port being set.
-    //fn get_triggers(&self) -> &Vec<ReactionKey>;
+    // fn get_triggers(&self) -> &Vec<ReactionKey>;
     /// Reset the internal value
     fn cleanup(&self);
 }
@@ -46,7 +45,7 @@ where
 {
     name: String,
     value: PortValue<T>,
-    //triggers: SecondaryMap<ReactionKey, ()>,
+    // triggers: SecondaryMap<ReactionKey, ()>,
 }
 
 impl<T> Port<T>
@@ -54,10 +53,7 @@ where
     T: PortData,
 {
     pub fn new(name: String, value: PortValue<T>) -> Self {
-        Self {
-            name,
-            value,
-        }
+        Self { name, value }
     }
 
     pub fn get(&self) -> Option<T> {
@@ -88,11 +84,9 @@ impl<T> BasePort for Port<T>
 where
     T: PortData,
 {
-    /*
-    fn get_triggers(&self) -> &Vec<ReactionKey> {
-        &self.triggers.keys().collect()
-    }
-    */
+    // fn get_triggers(&self) -> &Vec<ReactionKey> {
+    // &self.triggers.keys().collect()
+    // }
 
     fn cleanup(&self) {
         event!(tracing::Level::DEBUG, ?self.name, "cleanup()");
@@ -103,10 +97,7 @@ where
 
 #[test]
 fn test_port() {
-    let p0: Arc<dyn BasePort> = Arc::new(Port::new(
-        "p0".into(),
-        RwLock::new(Some(1.0f64)),
-    ));
+    let p0: Arc<dyn BasePort> = Arc::new(Port::new("p0".into(), RwLock::new(Some(1.0f64))));
     dbg!(&p0);
     let x = p0.downcast_ref::<Port<f64>>();
     dbg!(&x);

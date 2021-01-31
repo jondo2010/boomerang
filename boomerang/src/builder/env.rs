@@ -1,17 +1,14 @@
-use embedded_time::duration::Seconds;
 use itertools::Itertools;
 use runtime::PortData;
-use slotmap::{DefaultKey, Key, SecondaryMap, SlotMap};
+use slotmap::{Key, SecondaryMap, SlotMap};
 use std::{collections::BTreeSet, sync::Arc};
 use tracing::event;
 
 use crate::runtime;
 
 use super::{
-    action::ActionBuilder,
-    port::{self, BasePortBuilder},
-    reaction::ReactionBuilder,
-    BuilderError, Reactor, ReactorBuilder, ReactorBuilderState,
+    action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder, BuilderError,
+    PortType, Reactor, ReactorBuilder, ReactorBuilderState,
 };
 #[derive(Debug)]
 pub struct EnvBuilder {
@@ -49,54 +46,93 @@ impl EnvBuilder {
         ReactorBuilderState::new(name, parent, reactor, self)
     }
 
-    /// Bind one port to another
-    fn port_bind_to<T: runtime::PortData>(
+    /// Bind Port A to Port B
+    /// The nominal case is to bind Input A to Output B
+    pub fn bind_port<T: runtime::PortData>(
         &mut self,
         port_a_key: runtime::PortKey<T>,
         port_b_key: runtime::PortKey<T>,
-    ) {
+    ) -> Result<(), BuilderError> {
         let [port_a, port_b] = self
             .port_builders
             .get_disjoint_mut([port_a_key.data().into(), port_b_key.data().into()])
             .unwrap();
 
-        assert!(
-            port_b.get_inward_binding().is_none(),
-            format!(
-                "Ports may only be connected once {:?}->{:?}, ({:?})",
-                port_a_key,
-                port_b_key,
-                port_b.get_inward_binding()
-            )
-        );
-        assert!(
-            port_b.get_antideps().is_empty(),
-            "Ports with antidependencies may not be connected to other ports"
-        );
-        port_b.set_inward_binding(Some(port_a_key.data().into()));
+        if port_b.get_inward_binding().is_some() {
+            return Err(BuilderError::PortBindError {
+                port_a_key: port_a_key.data().into(),
+                port_b_key: port_b_key.data().into(),
+                what: format!(
+                    "Ports may only be connected once, but B is already connected to {:?}",
+                    port_b.get_inward_binding()
+                ),
+            });
+        }
 
-        assert!(
-            port_a.get_deps().is_empty(),
-            "Ports with dependencies may not be connected to other ports"
-        );
+        if port_a.get_deps().len() > 0 {
+            return Err(BuilderError::PortBindError {
+                port_a_key: port_a_key.data().into(),
+                port_b_key: port_b_key.data().into(),
+                what: "Ports with dependencies may not be connected to other ports".to_owned(),
+            });
+        }
+
+        if port_b.get_antideps().len() > 0 {
+            return Err(BuilderError::PortBindError {
+                port_a_key: port_a_key.data().into(),
+                port_b_key: port_b_key.data().into(),
+                what: "Ports with antidependencies may not be connected to other ports".to_owned(),
+            });
+        }
+
+        match (port_a.get_port_type(), port_b.get_port_type()) {
+            (PortType::Input, PortType::Input) => {
+                self.reactors[port_b.get_reactor_key()]
+                    .parent_reactor_key
+                    .and_then(|parent_key| {
+                        if port_a.get_reactor_key() == parent_key { Some(()) } else { None }
+                     }).ok_or(
+                        BuilderError::PortBindError{
+                                port_a_key: port_a_key.data().into(),
+                                port_b_key: port_b_key.data().into(),
+                                what: "An input port A may only be bound to another input port B if B is contained by a reactor that in turn is contained by the reactor of A.".into()
+                            })
+            }
+            (PortType::Output, PortType::Input) => {
+                // VALIDATE(this->container()->container() == port->container()->container(), "An output port can only be bound to an input port if both ports belong to reactors in the same hierarichal level"
+                // VALIDATE(this->container() != port->container(), "An output port can only be bound to an input port if both ports belong to different reactors!");
+                Ok(())
+            }
+            (PortType::Output, PortType::Output) => {
+                // VALIDATE( this->container()->container() == port->container(),
+                self.reactors[port_a.get_reactor_key()]
+                    .parent_reactor_key
+                    .and_then(|parent_key| {
+                        if parent_key == port_b.get_reactor_key() {
+                            Some(())
+                        } else {
+                            None
+                        }
+                    }).ok_or(
+                        BuilderError::PortBindError {
+                                port_a_key: port_a_key.data().into(),
+                                port_b_key: port_b_key.data().into(),
+                                what: "An output port A may only be bound to another output port B if A is contained by a reactor that in turn is contained by the reactor of B".to_owned()
+                            })
+            }
+            (PortType::Input, PortType::Output) =>  {
+                Err(BuilderError::PortBindError {
+                    port_a_key: port_a_key.data().into(),
+                    port_b_key: port_b_key.data().into(),
+                    what: "Unexpected case: can't bind an input Port to an output Port.".to_owned()
+                })
+            }
+        }?;
+
+        port_b.set_inward_binding(Some(port_a_key.data().into()));
         port_a.add_outward_binding(port_b_key.data().into());
 
-        // match (self.get_port_type(), port.get_port_type()) {
-        // (runtime::PortType::Input, runtime::PortType::Input) => {
-        // assert!( this->container() == port->container()->container(), "An input port A may only
-        // be bound to another input port B if B is contained by a reactor that in turn is contained
-        // by the reactor of A"); },
-        // (runtime::PortType::Output, runtime::PortType::Input) => {
-        // VALIDATE(this->container()->container() == port->container()->container(), "An output
-        // port can only be bound to an input port if both ports belong to reactors in the same
-        // hierarichal level"); VALIDATE(this->container() != port->container(), "An output
-        // port can only be bound to an input port if both ports belong to different reactors!");
-        // },
-        // (runtime::PortType::Output, runtime::PortType::Output) => {
-        // VALIDATE( this->container()->container() == port->container(), "An output port A may only
-        // be bound to another output port B if A is contained by a reactor that in turn is
-        // contained by the reactor of B"); }
-        // }
+        Ok(())
     }
 
     pub fn reactor_fqn(&self, reactor_key: runtime::ReactorKey) -> Result<String, BuilderError> {
@@ -159,9 +195,9 @@ impl EnvBuilder {
             if let Some(new_idx) = self
                 .port_builders
                 .get(cur_key)
-                .and_then(|port| port.get_inward_binding().as_ref())
+                .and_then(|port| port.get_inward_binding())
             {
-                cur_key = *new_idx;
+                cur_key = new_idx;
             } else {
                 break;
             }
@@ -186,7 +222,7 @@ impl EnvBuilder {
         all_triggers
     }
 
-    pub(crate) fn reaction_dependency_edges<'a>(
+    pub fn reaction_dependency_edges<'a>(
         &'a self,
     ) -> impl Iterator<Item = (runtime::ReactionKey, runtime::ReactionKey)> + 'a {
         let deps = self
@@ -199,21 +235,19 @@ impl EnvBuilder {
                     .keys()
                     .flat_map(move |port_key| {
                         let source_port_key = self.follow_port_inward_binding(port_key);
-                        self.port_builders[source_port_key.data().into()]
-                            .get_antideps()
-                            .iter()
-                            .copied()
+                        self.port_builders[source_port_key.data().into()].get_antideps()
                     })
                     .map(move |dep_key| (reaction_key, dep_key))
             });
 
-        // Connect internal reactions by priority
-        let internal = self
-            .reactions
-            .iter()
-            .sorted()
-            .map(|(key, _)| key)
-            .tuple_windows();
+        // For all Reactions within a Reactor, create a chain of dependencies by priority
+        let internal = self.reactors.values().flat_map(move |reactor| {
+            reactor
+                .reactions
+                .keys()
+                .sorted_by_key(|&reaction_key| self.reactions[reaction_key].priority)
+                .tuple_windows()
+        });
 
         deps.chain(internal)
     }
@@ -308,18 +342,12 @@ impl EnvBuilder {
         let mut space = petgraph::algo::DfsSpace::new(&graph);
         let ordered_reactions = petgraph::algo::toposort(&graph, Some(&mut space))
             .map_err(|_| BuilderError::ReactionGraphCycle)?;
+
         // Run dijkstra's algorithm over all nodes to generate the runtime indices
         let runtime_level_map =
             petgraph::algo::dijkstra(&graph, *ordered_reactions.first().unwrap(), None, |_| {
                 1usize
             });
-
-        let mut builder_state = runtime::Environment {
-            ports: self.ports,
-            port_triggers: SecondaryMap::new(),
-            runtime_actions: SlotMap::new(),
-            reactions: SlotMap::with_key(),
-        };
 
         // Build Reactions in topo-sorted order
         event!(
@@ -331,6 +359,14 @@ impl EnvBuilder {
                 .collect::<Vec<_>>()
         );
 
+        let mut runtime_ports = self.ports.clone();
+        let mut runtime_port_triggers: SecondaryMap<
+            runtime::BasePortKey,
+            SecondaryMap<runtime::ReactionKey, ()>,
+        > = SecondaryMap::new();
+        let runtime_actions = SlotMap::new();
+        let mut runtime_reactions = SlotMap::with_key();
+
         for reaction_key in ordered_reactions.iter() {
             let reaction = self.reactions.remove(*reaction_key).unwrap();
 
@@ -340,22 +376,22 @@ impl EnvBuilder {
                 if inward_port_key == port_key {
                     // Only set the port_triggers for non-aliased ports.
                     let transitive_port_triggers = self.collect_transitive_port_triggers(port_key);
-                    builder_state.port_triggers[inward_port_key].extend(transitive_port_triggers);
+                    runtime_port_triggers
+                        .entry(inward_port_key)
+                        .unwrap()
+                        .or_insert(SecondaryMap::new())
+                        .extend(transitive_port_triggers);
                 } else {
-                    builder_state.ports[port_key] = builder_state.ports[inward_port_key].clone();
+                    runtime_ports[port_key] = runtime_ports[inward_port_key].clone();
                 }
             }
 
-            let runtime_level: usize = runtime_level_map[reaction_key];
-            builder_state.reactions.insert(
-                //*reaction_key,
-                Arc::new(runtime::Reaction::new(
-                    reaction.name,
-                    runtime_level,
-                    reaction.reaction_fn,
-                    None,
-                )),
-            );
+            runtime_reactions.insert(Arc::new(runtime::Reaction::new(
+                reaction.name,
+                runtime_level_map[reaction_key],
+                reaction.reaction_fn,
+                None,
+            )));
         }
 
         // for (idx, action_builder) in self.actions.iter().enumerate() {
@@ -364,6 +400,11 @@ impl EnvBuilder {
         // .insert(runtime::ActionIndex(idx), action_builder.build());
         // }
 
-        Ok(builder_state)
+        Ok(runtime::Environment {
+            ports: runtime_ports,
+            port_triggers: runtime_port_triggers,
+            runtime_actions: runtime_actions,
+            reactions: runtime_reactions,
+        })
     }
 }

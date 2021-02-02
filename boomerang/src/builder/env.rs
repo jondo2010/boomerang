@@ -1,49 +1,151 @@
 use itertools::Itertools;
-use runtime::PortData;
-use slotmap::{Key, SecondaryMap, SlotMap};
-use std::{collections::BTreeSet, sync::Arc};
+use petgraph::visit;
+use runtime::{Action, PortData, PortKey, Timer};
+use slotmap::{SecondaryMap, SlotMap};
+use visit::DfsEvent;
+use std::{collections::BTreeSet, convert::TryInto, sync::Arc};
 use tracing::event;
 
+use super::{
+    action::{self, ActionBuilder},
+    port::BasePortBuilder,
+    reaction::ReactionBuilder,
+    BuilderError, PortBuilder, PortType, Reactor, ReactorBuilder, ReactorBuilderState, ReactorPart,
+};
 use crate::runtime;
 
-use super::{
-    action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder, BuilderError,
-    PortType, Reactor, ReactorBuilder, ReactorBuilderState,
-};
 #[derive(Debug)]
 pub struct EnvBuilder {
-    pub(super) reactors: SlotMap<runtime::ReactorKey, ReactorBuilder>,
-
     pub(super) ports: SlotMap<runtime::BasePortKey, Arc<dyn runtime::BasePort>>,
     pub(super) port_builders: SecondaryMap<runtime::BasePortKey, Box<dyn BasePortBuilder>>,
 
-    pub(super) actions: SlotMap<runtime::BaseActionKey, ActionBuilder>,
+    pub(super) actions: SlotMap<runtime::BaseActionKey, Arc<dyn runtime::BaseAction>>,
+    pub(super) action_builders: SecondaryMap<runtime::BaseActionKey, ActionBuilder>,
+
     pub(super) reactions: SlotMap<runtime::ReactionKey, ReactionBuilder>,
-    pub(super) connections: Vec<(Box<dyn BasePortBuilder>, Box<dyn BasePortBuilder>)>,
+
+    pub(super) reactors: SlotMap<runtime::ReactorKey, ReactorBuilder>,
 }
 
 impl EnvBuilder {
     pub fn new() -> Self {
         Self {
-            reactors: SlotMap::<runtime::ReactorKey, ReactorBuilder>::with_key(),
-            ports: SlotMap::new(),
+            ports: SlotMap::with_key(),
             port_builders: SecondaryMap::new(),
-            actions: SlotMap::new(),
-            // reactions: Vec::new(),
+            actions: SlotMap::with_key(),
+            action_builders: SecondaryMap::new(),
             reactions: SlotMap::with_key(),
-            connections: Vec::new(),
+            reactors: SlotMap::<runtime::ReactorKey, ReactorBuilder>::with_key(),
         }
     }
 
     /// Add a new Reactor
     /// - name: Instance name of the reactor
-    pub fn add_reactor<R: Reactor>(
+    pub fn add_reactor<R>(
         &mut self,
         name: &str,
         parent: Option<runtime::ReactorKey>,
         reactor: R,
-    ) -> ReactorBuilderState<R> {
+    ) -> ReactorBuilderState<R>
+    where
+        R: Reactor,
+        R::Inputs: ReactorPart,
+        R::Outputs: ReactorPart,
+        R::Actions: ReactorPart,
+    {
         ReactorBuilderState::new(name, parent, reactor, self)
+    }
+
+    pub fn add_port<T: PortData>(
+        &mut self,
+        name: &str,
+        port_type: PortType,
+        reactor_key: runtime::ReactorKey,
+    ) -> Result<PortKey<T>, BuilderError> {
+        // Ensure no duplicates
+        if self
+            .port_builders
+            .values()
+            .find(|&port| port.get_name() == name && port.get_reactor_key() == reactor_key)
+            .is_some()
+        {
+            return Err(BuilderError::DuplicatePortDefinition {
+                reactor_name: self.reactors[reactor_key].name.clone(),
+                port_name: name.into(),
+            });
+        }
+
+        let port_builders = &mut self.port_builders;
+        let key = self.ports.insert_with_key(|port_key| {
+            port_builders.insert(
+                port_key,
+                Box::new(PortBuilder::<T>::new(name, reactor_key, port_type)),
+            );
+            Arc::new(runtime::Port::<T>::new(name.to_owned()))
+        });
+
+        Ok(key.into())
+    }
+    pub fn add_timer(
+        &mut self,
+        name: &str,
+        period: runtime::Duration,
+        offset: runtime::Duration,
+        reactor_key: runtime::ReactorKey,
+    ) -> Result<runtime::BaseActionKey, BuilderError> {
+        let key = self.add_action(name, reactor_key, |action_key| {
+            Arc::new(runtime::Timer::new(name, action_key, offset, period))
+        })?;
+
+        Ok(key)
+    }
+
+    pub fn add_logical_action<T: runtime::PortData>(
+        &mut self,
+        name: &str,
+        min_delay: Option<runtime::Duration>,
+        reactor_key: runtime::ReactorKey,
+    ) -> Result<runtime::ActionKey<T>, BuilderError> {
+        let key = self.add_action(name, reactor_key, |_| {
+            Arc::new(runtime::Action::<T>::new(
+                name,
+                true,
+                min_delay.unwrap_or_default(),
+            ))
+        })?;
+        Ok(key.into())
+    }
+
+    pub fn add_action<F: Fn(runtime::BaseActionKey) -> Arc<dyn runtime::BaseAction>>(
+        &mut self,
+        name: &str,
+        reactor_key: runtime::ReactorKey,
+        action_fn: F,
+    ) -> Result<runtime::BaseActionKey, BuilderError> {
+        // Ensure no duplicates
+        if self
+            .action_builders
+            .values()
+            .find(|&action_builder| {
+                action_builder.get_name() == name && action_builder.get_reactor_key() == reactor_key
+            })
+            .is_some()
+        {
+            return Err(BuilderError::DuplicateActionDefinition {
+                reactor_name: self.reactors[reactor_key].name.clone(),
+                action_name: name.into(),
+            });
+        }
+
+        let action_builders = &mut self.action_builders;
+        let key = self.actions.insert_with_key(|action_key| {
+            action_builders.insert(
+                action_key,
+                ActionBuilder::new(name, action_key, reactor_key),
+            );
+            action_fn(action_key)
+        });
+        Ok(key.into())
     }
 
     /// Bind Port A to Port B
@@ -55,13 +157,13 @@ impl EnvBuilder {
     ) -> Result<(), BuilderError> {
         let [port_a, port_b] = self
             .port_builders
-            .get_disjoint_mut([port_a_key.data().into(), port_b_key.data().into()])
+            .get_disjoint_mut([port_a_key.into(), port_b_key.into()])
             .unwrap();
 
         if port_b.get_inward_binding().is_some() {
             return Err(BuilderError::PortBindError {
-                port_a_key: port_a_key.data().into(),
-                port_b_key: port_b_key.data().into(),
+                port_a_key: port_a_key.into(),
+                port_b_key: port_b_key.into(),
                 what: format!(
                     "Ports may only be connected once, but B is already connected to {:?}",
                     port_b.get_inward_binding()
@@ -71,16 +173,16 @@ impl EnvBuilder {
 
         if port_a.get_deps().len() > 0 {
             return Err(BuilderError::PortBindError {
-                port_a_key: port_a_key.data().into(),
-                port_b_key: port_b_key.data().into(),
+                port_a_key: port_a_key.into(),
+                port_b_key: port_b_key.into(),
                 what: "Ports with dependencies may not be connected to other ports".to_owned(),
             });
         }
 
         if port_b.get_antideps().len() > 0 {
             return Err(BuilderError::PortBindError {
-                port_a_key: port_a_key.data().into(),
-                port_b_key: port_b_key.data().into(),
+                port_a_key: port_a_key.into(),
+                port_b_key: port_b_key.into(),
                 what: "Ports with antidependencies may not be connected to other ports".to_owned(),
             });
         }
@@ -93,8 +195,8 @@ impl EnvBuilder {
                         if port_a.get_reactor_key() == parent_key { Some(()) } else { None }
                      }).ok_or(
                         BuilderError::PortBindError{
-                                port_a_key: port_a_key.data().into(),
-                                port_b_key: port_b_key.data().into(),
+                                port_a_key: port_a_key.into(),
+                                port_b_key: port_b_key.into(),
                                 what: "An input port A may only be bound to another input port B if B is contained by a reactor that in turn is contained by the reactor of A.".into()
                             })
             }
@@ -115,22 +217,22 @@ impl EnvBuilder {
                         }
                     }).ok_or(
                         BuilderError::PortBindError {
-                                port_a_key: port_a_key.data().into(),
-                                port_b_key: port_b_key.data().into(),
+                                port_a_key: port_a_key.into(),
+                                port_b_key: port_b_key.into(),
                                 what: "An output port A may only be bound to another output port B if A is contained by a reactor that in turn is contained by the reactor of B".to_owned()
                             })
             }
             (PortType::Input, PortType::Output) =>  {
                 Err(BuilderError::PortBindError {
-                    port_a_key: port_a_key.data().into(),
-                    port_b_key: port_b_key.data().into(),
+                    port_a_key: port_a_key.into(),
+                    port_b_key: port_b_key.into(),
                     what: "Unexpected case: can't bind an input Port to an output Port.".to_owned()
                 })
             }
         }?;
 
-        port_b.set_inward_binding(Some(port_a_key.data().into()));
-        port_a.add_outward_binding(port_b_key.data().into());
+        port_b.set_inward_binding(Some(port_a_key.into()));
+        port_a.add_outward_binding(port_b_key.into());
 
         Ok(())
     }
@@ -168,7 +270,7 @@ impl EnvBuilder {
         &self,
         port_key: runtime::PortKey<T>,
     ) -> Result<String, BuilderError> {
-        let port_key = port_key.data().into();
+        let port_key = port_key.into();
         self.port_builders
             .get(port_key)
             .ok_or(BuilderError::PortKeyNotFound(port_key))
@@ -235,7 +337,7 @@ impl EnvBuilder {
                     .keys()
                     .flat_map(move |port_key| {
                         let source_port_key = self.follow_port_inward_binding(port_key);
-                        self.port_builders[source_port_key.data().into()].get_antideps()
+                        self.port_builders[source_port_key.into()].get_antideps()
                     })
                     .map(move |dep_key| (reaction_key, dep_key))
             });
@@ -318,7 +420,7 @@ impl EnvBuilder {
                     .ports
                     .keys()
                     .find(|&port_key| self.port_builders[port_key].get_name().eq(port_name))
-                    .map(|base_key| base_key.data().into())
+                    .map(|base_key| base_key.into())
                     .ok_or_else(|| BuilderError::PortNotFound {
                         reactor_name: reactor_type.name.to_owned(),
                         port_name: port_name.to_owned(),
@@ -326,22 +428,31 @@ impl EnvBuilder {
             })
     }
 
-    pub fn build(mut self) -> Result<runtime::Environment, BuilderError> {
-        // Prepare the DAG of Reactions
-        let graph = {
-            let mut graph = petgraph::graphmap::DiGraphMap::<_, ()>::from_edges(
-                self.reaction_dependency_edges().map(|(a, b)| (b, a)),
-            );
-            // Ensure all ReactionIndicies are represented
-            self.reactions.keys().for_each(|key| {
-                graph.add_node(key);
-            });
-            graph
-        };
+    /// Prepare the DAG of Reactions
+    fn get_reaction_graph(&self) -> petgraph::graphmap::DiGraphMap<runtime::ReactionKey, ()> {
+        let mut graph = petgraph::graphmap::DiGraphMap::from_edges(
+            self.reaction_dependency_edges().map(|(a, b)| (b, a)),
+        );
+        // Ensure all ReactionIndicies are represented
+        self.reactions.keys().for_each(|key| {
+            graph.add_node(key);
+        });
+        graph
+    }
+}
+
+impl TryInto<runtime::Environment> for EnvBuilder {
+    type Error = BuilderError;
+    fn try_into(mut self) -> Result<runtime::Environment, Self::Error> {
+        let graph = self.get_reaction_graph();
 
         let mut space = petgraph::algo::DfsSpace::new(&graph);
         let ordered_reactions = petgraph::algo::toposort(&graph, Some(&mut space))
             .map_err(|_| BuilderError::ReactionGraphCycle)?;
+        
+        petgraph::visit::depth_first_search(&graph, graph.nodes().next(), |event| {
+            dbg!(event);
+        });
 
         // Run dijkstra's algorithm over all nodes to generate the runtime indices
         let runtime_level_map =
@@ -349,14 +460,27 @@ impl EnvBuilder {
                 1usize
             });
 
+        event!(
+            tracing::Level::DEBUG,
+            "reaction_dependency_edges: {:#?}",
+            self.reaction_dependency_edges().collect::<Vec<_>>()
+        );
+
+        event!(
+            tracing::Level::DEBUG,
+            "runtime_level_map: {:#?}",
+            runtime_level_map
+                .iter()
+                .map(|(&key, level)| format!("{:?}: {}", key, level))
+        );
+
         // Build Reactions in topo-sorted order
         event!(
             tracing::Level::DEBUG,
-            "Building Reactions in order: {:?}",
+            "Building Reactions in order: {:#?}",
             ordered_reactions
                 .iter()
-                .map(|reaction_key| (reaction_key, self.reaction_fqn(*reaction_key).unwrap()))
-                .collect::<Vec<_>>()
+                .map(|reaction_key| (reaction_key, self.reaction_fqn(*reaction_key).unwrap())) /*  */
         );
 
         let mut runtime_ports = self.ports.clone();
@@ -364,7 +488,13 @@ impl EnvBuilder {
             runtime::BasePortKey,
             SecondaryMap<runtime::ReactionKey, ()>,
         > = SecondaryMap::new();
-        let runtime_actions = SlotMap::new();
+        let runtime_actions = SlotMap::with_key();
+        let runtime_action_triggers = self
+            .action_builders
+            .iter()
+            .map(|(action_key, action_builder)| (action_key, action_builder.triggers.clone()))
+            .collect();
+
         let mut runtime_reactions = SlotMap::with_key();
 
         for reaction_key in ordered_reactions.iter() {
@@ -394,17 +524,105 @@ impl EnvBuilder {
             )));
         }
 
-        // for (idx, action_builder) in self.actions.iter().enumerate() {
-        // builder_state
-        // .runtime_actions
-        // .insert(runtime::ActionIndex(idx), action_builder.build());
-        // }
-
         Ok(runtime::Environment {
             ports: runtime_ports,
             port_triggers: runtime_port_triggers,
-            runtime_actions: runtime_actions,
+            actions: runtime_actions,
+            action_triggers: runtime_action_triggers,
             reactions: runtime_reactions,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::builder::{reactor, tests::*};
+
+    #[test]
+    fn test_duplicate_ports() {
+        let mut env_builder = EnvBuilder::new();
+        let (reactor_key, _, _) = env_builder
+            .add_reactor("test_reactor", None, TestReactorDummy)
+            .finish()
+            .unwrap();
+        let _ = env_builder
+            .add_port::<()>("port0", PortType::Input, reactor_key)
+            .unwrap();
+        assert_eq!(
+            env_builder
+                .add_port::<()>("port0", PortType::Output, reactor_key)
+                .expect_err("Expected duplicate"),
+            BuilderError::DuplicatePortDefinition {
+                reactor_name: "test_reactor".into(),
+                port_name: "port0".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_duplicate_actions() {
+        let mut env_builder = EnvBuilder::new();
+        let (reactor_key, _, _) = env_builder
+            .add_reactor("test_reactor", None, TestReactorDummy)
+            .finish()
+            .unwrap();
+
+        env_builder
+            .add_logical_action::<()>("action0", None, reactor_key)
+            .unwrap();
+
+        assert_eq!(
+            env_builder
+                .add_logical_action::<()>("action0", None, reactor_key)
+                .expect_err("Expected duplicate"),
+            BuilderError::DuplicateActionDefinition {
+                reactor_name: "test_reactor".into(),
+                action_name: "action0".into(),
+            }
+        );
+
+        assert_eq!(
+            env_builder
+                .add_timer(
+                    "action0",
+                    runtime::Duration::from_micros(0),
+                    runtime::Duration::from_micros(0),
+                    reactor_key
+                )
+                .expect_err("Expected duplicate"),
+            BuilderError::DuplicateActionDefinition {
+                reactor_name: "test_reactor".into(),
+                action_name: "action0".into(),
+            }
+        )
+    }
+
+    #[test]
+    fn test_reactions1() {
+        let mut env_builder = EnvBuilder::new();
+        let mut reactor_builder = env_builder.add_reactor("test_reactor", None, TestReactorDummy);
+
+        let r0_key = reactor_builder
+            .add_reaction(|_, _, _, _, _| {})
+            .finish()
+            .unwrap();
+        let r1_key = reactor_builder
+            .add_reaction(|_, _, _, _, _| {})
+            .finish()
+            .unwrap();
+        let (reactor_key, _, _) = reactor_builder.finish().unwrap();
+
+        assert_eq!(env_builder.reactors.len(), 1);
+        assert_eq!(env_builder.reactions.len(), 2);
+        assert_eq!(env_builder.reactions.keys().collect::<Vec<_>>(), vec![r0_key, r1_key]);
+
+        assert_eq!(env_builder.reactors[reactor_key].reactions.len(), 2);
+
+        let dep_edges = env_builder.reaction_dependency_edges().collect::<Vec<_>>();
+        assert_eq!(dep_edges, vec![(r0_key, r1_key)]);
+
+        let env: runtime::Environment = env_builder.try_into().unwrap();
+        assert_eq!(env.reactions.len(), 2);
     }
 }

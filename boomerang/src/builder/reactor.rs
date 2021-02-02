@@ -1,12 +1,18 @@
-use std::sync::{Arc, RwLock};
-
 use super::{ActionBuilder, BuilderError, EnvBuilder, PortBuilder, PortType, ReactionBuilderState};
 use crate::runtime::{self};
-use slotmap::{Key, SecondaryMap};
+use slotmap::SecondaryMap;
+use std::{
+    sync::{Arc, RwLock},
+    todo,
+};
 
 pub trait Reactor: Send + Sync + 'static {
+    /// Type containing the Reactor's input Ports
     type Inputs;
+    /// Type containing the Reactor's output Ports
     type Outputs;
+    /// Type containing the Reactor's Actions
+    type Actions;
     /// Build a new Reactor with the given instance name
     fn build(
         self,
@@ -14,6 +20,18 @@ pub trait Reactor: Send + Sync + 'static {
         env: &mut EnvBuilder,
         parent: Option<runtime::ReactorKey>,
     ) -> Result<(runtime::ReactorKey, Self::Inputs, Self::Outputs), BuilderError>;
+}
+
+pub trait ReactorPart: Send + Sync + Clone + 'static {
+    fn build(env: &mut EnvBuilder, reactor_key: runtime::ReactorKey) -> Result<Self, BuilderError>;
+}
+
+#[derive(Clone)]
+pub struct EmptyPart;
+impl ReactorPart for EmptyPart {
+    fn build(_: &mut EnvBuilder, _: runtime::ReactorKey) -> Result<Self, BuilderError> {
+        Ok(Self)
+    }
 }
 
 // ------------------------- //
@@ -53,10 +71,19 @@ impl ReactorBuilder {
 pub struct ReactorBuilderState<'a, R: Reactor> {
     reactor_key: runtime::ReactorKey,
     reactor: Arc<RwLock<R>>,
+    pub inputs: R::Inputs,
+    pub outputs: R::Outputs,
+    pub actions: R::Actions,
     env: &'a mut EnvBuilder,
 }
 
-impl<'a, R: Reactor> ReactorBuilderState<'a, R> {
+impl<'a, R> ReactorBuilderState<'a, R>
+where
+    R: Reactor,
+    R::Inputs: ReactorPart,
+    R::Outputs: ReactorPart,
+    R::Actions: ReactorPart,
+{
     pub(super) fn new(
         name: &str,
         parent: Option<runtime::ReactorKey>,
@@ -69,64 +96,18 @@ impl<'a, R: Reactor> ReactorBuilderState<'a, R> {
             parent,
         ));
 
+        let inputs = R::Inputs::build(env, reactor_key).unwrap();
+        let outputs = R::Outputs::build(env, reactor_key).unwrap();
+        let actions = R::Actions::build(env, reactor_key).unwrap();
+
         Self {
             reactor_key,
             reactor: Arc::new(RwLock::new(reactor)),
+            inputs,
+            outputs,
+            actions,
             env,
         }
-    }
-
-    /// Add a new Port to this Reactor
-    fn add_port<T: runtime::PortData>(
-        &mut self,
-        name: &str,
-        port_type: PortType,
-    ) -> Result<runtime::PortKey<T>, BuilderError> {
-        // Ensure no duplicates
-        if self
-            .env
-            .port_builders
-            .iter()
-            .find(|(_, port)| port.get_name() == name && port.get_reactor_key() == self.reactor_key)
-            .is_some()
-        {
-            return Err(BuilderError::DuplicatedPortDefinition {
-                reactor_name: self.env.reactors[self.reactor_key].name.clone(),
-                port_name: name.into(),
-            });
-        }
-
-        let base_port_key = self.env.ports.insert(Arc::new(runtime::Port::new(
-            name.into(),
-            runtime::PortValue::new(Option::<T>::None),
-        )));
-        let port_key = base_port_key.data().into();
-
-        self.env.port_builders.insert(
-            base_port_key,
-            Box::new(PortBuilder::<T>::new(
-                name,
-                port_key,
-                self.reactor_key,
-                port_type,
-            )),
-        );
-
-        Ok(port_key)
-    }
-
-    pub fn add_input<T: runtime::PortData>(
-        &mut self,
-        name: &str,
-    ) -> Result<runtime::PortKey<T>, BuilderError> {
-        self.add_port(name, PortType::Input)
-    }
-
-    pub fn add_output<T: runtime::PortData>(
-        &mut self,
-        name: &str,
-    ) -> Result<runtime::PortKey<T>, BuilderError> {
-        self.add_port(name, PortType::Output)
     }
 
     pub fn add_startup_timer(
@@ -146,71 +127,49 @@ impl<'a, R: Reactor> ReactorBuilderState<'a, R> {
         period: runtime::Duration,
         offset: runtime::Duration,
     ) -> Result<runtime::BaseActionKey, BuilderError> {
-        let reactor_key = self.reactor_key;
-        let key = self.env.actions.insert_with_key(|action_key| {
-            ActionBuilder::new_timer_action(name, action_key, reactor_key, offset, period)
-        });
-        Ok(key)
+        self.env.add_timer(name, period, offset, self.reactor_key)
     }
 
     pub fn add_reaction<F>(&mut self, reaction_fn: F) -> ReactionBuilderState
     where
-        F: Fn(&mut R, &runtime::SchedulerPoint) + Send + Sync + 'static,
+        F: Fn(&mut R, &runtime::SchedulerPoint, &R::Inputs, &R::Outputs, &R::Actions)
+            + Send
+            + Sync
+            + 'static,
     {
         // Priority = number of reactions declared thus far + 1
         let priority = self.env.reactors[self.reactor_key].reactions.len();
         let reactor = self.reactor.clone();
+        let inputs = self.inputs.clone();
+        let outputs = self.outputs.clone();
+        let actions = self.actions.clone();
+
         ReactionBuilderState::new(
             std::any::type_name::<F>(),
             priority,
             self.reactor_key,
             runtime::ReactionFn::new(move |sched| {
                 let mut reactor = reactor.write().unwrap();
-                reaction_fn(&mut *reactor, sched);
+                reaction_fn(&mut *reactor, sched, &inputs, &outputs, &actions);
             }),
             self.env,
         )
     }
 
-    pub fn finish(self) -> Result<runtime::ReactorKey, BuilderError> {
-        Ok(self.reactor_key)
+    pub fn finish(self) -> Result<(runtime::ReactorKey, R::Inputs, R::Outputs), BuilderError> {
+        Ok((self.reactor_key, self.inputs, self.outputs))
     }
 }
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
-
-    struct TestReactor;
-    impl Reactor for TestReactor {
-        type Inputs = ();
-        type Outputs = ();
-
-        fn build(
-            self,
-            _name: &str,
-            _env: &mut EnvBuilder,
-            _parent: Option<runtime::ReactorKey>,
-        ) -> Result<(runtime::ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
-            todo!()
-        }
-    }
+    use crate::builder::tests::*;
 
     #[test]
     fn test_add_input() {
         let mut env_builder = EnvBuilder::new();
-        let mut builder_state =
-            ReactorBuilderState::new("test_reactor", None, TestReactor, &mut env_builder);
-        let _p0 = builder_state.add_input::<u32>("p0").unwrap();
-        assert_eq!(
-            builder_state
-                .add_input::<u32>("p0")
-                .expect_err("Expected duplicate"),
-            BuilderError::DuplicatedPortDefinition {
-                reactor_name: "test_reactor".into(),
-                port_name: "p0".into(),
-            }
-        );
+        let _builder_state =
+            ReactorBuilderState::new("test_reactor", None, TestReactor2, &mut env_builder);
     }
 }

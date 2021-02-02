@@ -21,9 +21,12 @@ pub struct Environment {
     pub ports: SlotMap<BasePortKey, Arc<dyn BasePort>>,
     /// For each Port a set of Reactions triggered by it
     pub port_triggers: SecondaryMap<BasePortKey, SecondaryMap<ReactionKey, ()>>,
-
+    /// The runtime set of Actions
+    pub actions: SlotMap<BaseActionKey, Arc<dyn BaseAction>>,
+    /// For each Action, a set of Reactions triggered by it
+    pub action_triggers: SecondaryMap<BaseActionKey, SecondaryMap<ReactionKey, ()>>,
+    /// The runtime set of Reactions
     pub reactions: SlotMap<ReactionKey, Arc<Reaction>>,
-    pub runtime_actions: SlotMap<BaseActionKey, Arc<dyn BaseAction>>,
 }
 
 impl Display for Environment {
@@ -37,10 +40,11 @@ impl Display for Environment {
 impl Environment {
     pub fn new() -> Self {
         Self {
-            ports: SlotMap::new(),
+            ports: SlotMap::with_key(),
             port_triggers: SecondaryMap::new(),
+            actions: SlotMap::with_key(),
+            action_triggers: SecondaryMap::new(),
             reactions: SlotMap::with_key(),
-            runtime_actions: SlotMap::new(),
         }
     }
 

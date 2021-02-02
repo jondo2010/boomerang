@@ -15,9 +15,15 @@ use crate::runtime;
 #[derive(thiserror::Error, Debug, Eq, PartialEq)]
 pub enum BuilderError {
     #[error("Duplicate Port Definition: {}.{}", reactor_name, port_name)]
-    DuplicatedPortDefinition {
+    DuplicatePortDefinition {
         reactor_name: String,
         port_name: String,
+    },
+
+    #[error("Duplicate Action Definition: {}.{}", reactor_name, action_name)]
+    DuplicateActionDefinition {
+        reactor_name: String,
+        action_name: String,
     },
 
     #[error("Port Definition not found: {}.{}", reactor_name, port_name)]
@@ -67,4 +73,58 @@ impl<T: Sized> TupleSlice for [T] {
         let slice = std::ptr::slice_from_raw_parts_mut(ptr, len);
         unsafe { (&mut (*slice)[idx.0], &mut (*slice)[idx.1]) }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::runtime::PortKey;
+
+    use super::*;
+
+    pub(crate) struct TestReactorDummy;
+    impl Reactor for TestReactorDummy {
+        type Inputs = EmptyPart;
+        type Outputs = EmptyPart;
+        type Actions = EmptyPart;
+        fn build(
+            self,
+            name: &str,
+            env: &mut EnvBuilder,
+            parent: Option<runtime::ReactorKey>,
+        ) -> Result<(runtime::ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
+            //Ok((Self, EmptyPart, EmptyPart))
+            todo!()
+        }
+    }
+
+    pub(crate) struct TestReactor2;
+    #[derive(Clone)]
+    pub(crate) struct TestReactorInputs {
+        p0: PortKey<u32>,
+    }
+    impl ReactorPart for TestReactorInputs {
+        fn build(
+            env: &mut EnvBuilder,
+            reactor_key: runtime::ReactorKey,
+        ) -> Result<Self, BuilderError> {
+            let p0 = env.add_port("p0", PortType::Input, reactor_key)?;
+            Ok(Self { p0 })
+        }
+    }
+    impl Reactor for TestReactor2 {
+        type Inputs = TestReactorInputs;
+        type Outputs = EmptyPart;
+        type Actions = EmptyPart;
+
+        fn build(
+            self,
+            _name: &str,
+            _env: &mut EnvBuilder,
+            _parent: Option<runtime::ReactorKey>,
+        ) -> Result<(runtime::ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
+            todo!()
+        }
+    }
+
+    pub(crate) fn foo() {}
 }

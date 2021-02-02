@@ -1,6 +1,7 @@
 use super::{BuilderError, EnvBuilder, PortType};
 use crate::runtime::{self};
 
+use runtime::PortData;
 use slotmap::SecondaryMap;
 
 #[derive(Derivative, Eq)]
@@ -74,9 +75,9 @@ impl<'a> ReactionBuilderState<'a> {
         self
     }
 
-    pub fn with_trigger_port(mut self, port_key: runtime::BasePortKey) -> Self {
-        self.reaction.trigger_ports.insert(port_key, ());
-        self.reaction.deps.insert(port_key, ());
+    pub fn with_trigger_port<T: PortData>(mut self, port_key: runtime::PortKey<T>) -> Self {
+        self.reaction.trigger_ports.insert(port_key.into(), ());
+        self.reaction.deps.insert(port_key.into(), ());
         self
     }
 
@@ -85,18 +86,21 @@ impl<'a> ReactionBuilderState<'a> {
         self
     }
 
-    pub fn with_antidependency(mut self, antidep_key: runtime::BasePortKey) -> Self {
-        self.reaction.antideps.insert(antidep_key, ());
+    pub fn with_antidependency<T: PortData>(mut self, antidep_key: runtime::PortKey<T>) -> Self {
+        self.reaction.antideps.insert(antidep_key.into(), ());
         self
     }
 
     pub fn finish(self) -> Result<runtime::ReactionKey, BuilderError> {
         let Self { reaction, env } = self;
+        let reactor = &mut env.reactors[reaction.reactor_key];
         let reactions = &mut env.reactions;
-        let actions = &mut env.actions;
+        let actions = &mut env.action_builders;
         let port_builders = &mut env.port_builders;
 
         let key = reactions.insert_with_key(|key| {
+            reactor.reactions.insert(key, ());
+
             for trigger_key in reaction.trigger_actions.keys() {
                 let action = actions.get_mut(trigger_key).unwrap();
                 assert!(

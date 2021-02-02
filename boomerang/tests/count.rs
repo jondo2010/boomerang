@@ -1,62 +1,70 @@
-// reactor Count {
-//    output c:int;
-//    timer t(0, 1 sec);
-//    state i:int(0);
-//    reaction(t) -> c {=
-//        i++;
-//        c.set(i);
-//    =}
-//}
-
-use std::sync::{Arc, RwLock};
+use std::convert::TryInto;
 
 use boomerang::runtime;
-use boomerang::{
-    builder::*,
-    runtime::{BasePortKey, SchedulerPoint},
-};
+use boomerang::{builder::*, runtime::SchedulerPoint};
 
 struct Count {
-    max_count: usize,
-    c: BasePortKey,
-    t: ActionIndex,
+    max_count: u32,
     i: u32,
 }
 
 impl Count {
-    fn build(builder: &mut ReactorBuilder, max_count: usize) -> Arc<RwLock<Self>> {
-        let c = builder.add_output::<u32>("c").unwrap();
+    fn new(max_count: u32) -> Self {
+        Self { max_count, i: 0 }
+    }
+    fn r0(
+        &mut self,
+        sched: &SchedulerPoint,
+        _inputs: &<Self as Reactor>::Inputs,
+        outputs: &<Self as Reactor>::Outputs,
+        _actions: &<Self as Reactor>::Actions,
+    ) {
+        self.i += 1;
+        sched.set_port(outputs.c, self.i);
+        if self.i >= self.max_count {
+            sched.shutdown();
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+struct CountOutputs {
+    pub c: runtime::PortKey<u32>,
+}
+impl ReactorPart for CountOutputs {
+    fn build(env: &mut EnvBuilder, reactor_key: runtime::ReactorKey) -> Result<Self, BuilderError> {
+        let c = env.add_port::<u32>("c", PortType::Output, reactor_key)?;
+        Ok(Self { c })
+    }
+}
+impl Reactor for Count {
+    type Inputs = EmptyPart;
+    type Outputs = CountOutputs;
+    type Actions = EmptyPart;
+
+    fn build(
+        self,
+        name: &str,
+        env: &mut EnvBuilder,
+        parent: Option<runtime::ReactorKey>,
+    ) -> Result<(runtime::ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
+        let mut builder = env.add_reactor(name, parent, self);
+
         let t = builder.add_timer(
             "t",
             runtime::Duration::new(1, 0),
             runtime::Duration::new(0, 0),
-        );
+        )?;
 
-        let this = Arc::new(RwLock::new(Self {
-            max_count,
-            c,
-            t,
-            i: 0,
-        }));
-        let this2 = this.clone();
+        let Self::Outputs { c } = builder.outputs;
 
         builder
-            .add_reaction("r0", move |sched| {
-                this2.write().unwrap().r0(sched);
-            })
+            .add_reaction(Self::r0)
             .with_trigger_action(t)
             .with_antidependency(c)
-            .finish();
+            .finish()?;
 
-        this
-    }
-
-    fn r0(&mut self, sched: &SchedulerPoint) {
-        self.i += 1;
-        sched.set_port(self.c, self.i);
-        if self.i >= self.max_count {
-            sched.shutdown();
-        }
+        builder.finish()
     }
 }
 
@@ -67,13 +75,20 @@ fn count() {
 
     let mut env_builder = EnvBuilder::new();
 
-    let count = env_builder.add_reactor_type("Count", move |mut builder| {
-        let _count = Count::build(&mut builder, 100_100);
-        builder.finish()
-    });
+    let (_, _, _) = Count::new(100_000)
+        .build("count", &mut env_builder, None)
+        .unwrap();
 
-    let env = env_builder.build(count);
-    let environment = env.build().unwrap();
-    let mut sched = runtime::Scheduler::new(environment.max_level());
-    sched.start(environment).unwrap();
+    let env: runtime::Environment = env_builder.try_into().unwrap();
+
+    for port in env.ports.values() {
+        println!("{}", port);
+    }
+
+    for action in env.actions.values() {
+        println!("{}", action);
+    }
+
+    // let mut sched = runtime::Scheduler::new(environment.max_level());
+    // sched.start(environment).unwrap();
 }

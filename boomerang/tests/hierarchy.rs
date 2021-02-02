@@ -1,3 +1,5 @@
+use std::convert::TryInto;
+
 use boomerang::{
     builder::{BuilderError, EnvBuilder, Reactor},
     runtime::{self, PortKey, ReactorKey},
@@ -212,8 +214,7 @@ fn hierarchy() {
     tracing_subscriber::fmt::init();
 
     use boomerang::builder::*;
-
-    let mut builder = EnvBuilder::new();
+    let mut env_builder = EnvBuilder::new();
 
     // let gain_container = env_builder.add_reactor_type(
     // "GainContainer",
@@ -227,18 +228,18 @@ fn hierarchy() {
     // },
     // );
 
-    let (_, _, _) = Hierarchy::new(2).build("top", &mut builder, None).unwrap();
+    let (_, _, _) = Hierarchy::new(2).build("top", &mut env_builder, None).unwrap();
 
-    for (a, b) in builder.reaction_dependency_edges() {
+    for (a, b) in env_builder.reaction_dependency_edges() {
         println!(
             "{}->{}",
-            builder.reaction_fqn(a).unwrap(),
-            builder.reaction_fqn(b).unwrap()
+            env_builder.reaction_fqn(a).unwrap(),
+            env_builder.reaction_fqn(b).unwrap()
         );
     }
 
-    let env = builder.build();
-    println!("{}", &env.unwrap());
+    let env: runtime::Environment = env_builder.try_into().unwrap();
+    println!("{}", &env);
 
     // let mut sched = runtime::Scheduler::new(environment.max_level());
     // sched.start(environment).unwrap();

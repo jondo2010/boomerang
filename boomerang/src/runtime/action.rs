@@ -1,14 +1,17 @@
+use super::Duration;
 use super::{scheduler::Scheduler, time::Tag, PortData, PortValue, ReactionKey, ReactorElement};
 use derive_more::Display;
-use slotmap::SecondaryMap;
+use slotmap::Key;
 use std::{
     fmt::{Debug, Display},
     marker::PhantomData,
     sync::Arc,
-    time::Duration,
 };
 
-pub use slotmap::DefaultKey as BaseActionKey;
+slotmap::new_key_type! {
+    pub struct BaseActionKey;
+}
+
 #[derive(Clone, Copy, Derivative)]
 #[derivative(Debug, Default, Hash, Ord, PartialOrd, Eq, PartialEq)]
 pub struct ActionKey<T: PortData>(slotmap::KeyData, PhantomData<T>);
@@ -25,9 +28,23 @@ impl<T: PortData> slotmap::Key for ActionKey<T> {
     }
 }
 
+impl<T: PortData> From<ActionKey<T>> for BaseActionKey {
+    fn from(key: ActionKey<T>) -> Self {
+        key.data().into()
+    }
+}
+
+impl<T: PortData> From<BaseActionKey> for ActionKey<T> {
+    fn from(key: BaseActionKey) -> Self {
+        key.data().into()
+    }
+}
+
 pub trait BaseAction: Debug + Display + Send + Sync + ReactorElement {
-    /// Get the transitive set of Reactions that are sensitive to this Action executing.
-    fn get_triggers(&self) -> Vec<ReactionKey>;
+    fn get_name(&self) -> &str;
+    /// Is this a logical action?
+    fn get_is_logical(&self) -> bool;
+    fn get_min_delay(&self) -> Duration;
 }
 
 impl std::cmp::PartialEq for dyn BaseAction {
@@ -50,95 +67,91 @@ impl std::cmp::Ord for dyn BaseAction {
     }
 }
 
-#[derive(Debug, Display)]
-#[display(fmt = "Action <{}>, triggers={:?}", name, triggers)]
-pub struct Action<T>
-where
-    T: PortData,
-{
+#[derive(Debug)]
+pub struct Action<T: PortData> {
     name: String,
+    logical: bool,
     value: PortValue<T>,
-    triggers: SecondaryMap<ReactionKey, ()>,
     min_delay: Duration,
 }
 
-impl<T> Action<T>
-where
-    T: PortData,
-{
-    pub fn new(name: &str, _logical: bool, min_delay: Duration) -> Self {
+impl<T: PortData> Display for Action<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!(
+            "Action<{}> \"{}\"",
+            std::any::type_name::<T>(),
+            self.name,
+        ))
+    }
+}
+
+impl<T: PortData> Action<T> {
+    pub fn new(name: &str, logical: bool, min_delay: Duration) -> Self {
         Self {
             name: name.to_owned(),
+            logical,
             value: PortValue::new(None),
-            triggers: SecondaryMap::new(),
             min_delay,
         }
     }
 }
 
-impl<T> ReactorElement for Action<T>
-where
-    T: PortData,
-{
+impl<T: PortData> ReactorElement for Action<T> {
     fn cleanup(&self, _scheduler: &mut Scheduler) {
         *self.value.write().unwrap() = None;
     }
 }
 
-impl<T> BaseAction for Action<T>
-where
-    T: PortData,
-{
-    fn get_triggers(&self) -> Vec<ReactionKey> {
-        self.triggers.keys().collect()
+impl<T: PortData> BaseAction for Action<T> {
+    fn get_name(&self) -> &str {
+        &self.name
+    }
+    fn get_is_logical(&self) -> bool {
+        self.logical
+    }
+    fn get_min_delay(&self) -> Duration {
+        self.min_delay
     }
 }
 
 #[derive(Debug, Display)]
-#[display(fmt = "{}", name)]
+#[display(fmt = "Timer<{}>", name)]
 pub struct Timer {
     name: String,
     action_key: BaseActionKey,
     offset: Duration,
     period: Duration,
-    triggers: SecondaryMap<ReactionKey, ()>,
 }
 
 impl Timer {
-    pub fn new(
-        name: &str,
-        action_key: BaseActionKey,
-        offset: Duration,
-        period: Duration,
-        triggers: SecondaryMap<ReactionKey, ()>,
-    ) -> Self {
+    pub fn new(name: &str, action_key: BaseActionKey, offset: Duration, period: Duration) -> Self {
         Self {
             name: name.to_owned(),
             action_key: action_key,
             offset,
             period,
-            triggers,
         }
     }
 
-    pub fn new_zero(
-        name: &str,
-        action_key: BaseActionKey,
-        triggers: SecondaryMap<ReactionKey, ()>,
-    ) -> Self {
+    pub fn new_zero(name: &str, action_key: BaseActionKey) -> Self {
         Timer::new(
             name,
             action_key,
             Duration::from_secs(0),
             Duration::from_secs(0),
-            triggers,
         )
     }
 }
 
 impl BaseAction for Timer {
-    fn get_triggers(&self) -> Vec<ReactionKey> {
-        self.triggers.keys().collect()
+    fn get_name(&self) -> &str {
+        &self.name
+    }
+    fn get_is_logical(&self) -> bool {
+        true
+    }
+    fn get_min_delay(&self) -> Duration {
+        Duration::from_micros(0)
     }
 }
 

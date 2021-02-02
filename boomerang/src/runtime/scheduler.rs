@@ -1,7 +1,7 @@
 use super::{
     environment::Environment,
     time::{LogicalTime, Tag},
-    BaseActionKey, BasePortKey, PortData, PortKey, ReactionKey,
+    ActionKey, BaseActionKey, BasePortKey, PortData, PortKey, ReactionKey,
 };
 use crate::BoomerangError;
 use crossbeam_channel::{Receiver, Sender};
@@ -43,10 +43,8 @@ pub struct Scheduler {
 
 #[derive(Debug, Clone)]
 pub struct SchedulerPoint<'a> {
-    start_time: &'a Instant,
-    logical_time: &'a LogicalTime,
+    scheduler: &'a Scheduler,
     env: &'a Environment,
-    reaction_queue_s: &'a Vec<Sender<ReactionKey>>,
     set_ports_s: Sender<BasePortKey>,
     stop_requested: Arc<RwLock<bool>>,
 }
@@ -58,20 +56,18 @@ impl<'a> SchedulerPoint<'a> {
         set_ports_s: Sender<BasePortKey>,
     ) -> Self {
         SchedulerPoint {
-            start_time: &scheduler.start_time,
-            logical_time: &scheduler.logical_time,
+            scheduler,
             env,
-            reaction_queue_s: &scheduler.reaction_queue_s,
             set_ports_s,
             stop_requested: Arc::new(RwLock::new(false)),
         }
     }
 
     pub fn get_start_time(&self) -> &Instant {
-        self.start_time
+        self.scheduler.get_start_time()
     }
     pub fn get_logical_time(&self) -> &LogicalTime {
-        self.logical_time
+        self.scheduler.get_logical_time()
     }
     pub fn set_port<T: PortData>(&self, port_key: PortKey<T>, value: T) {
         self.env.get_port(port_key).unwrap().set(Some(value));
@@ -87,7 +83,7 @@ impl<'a> SchedulerPoint<'a> {
                 "Triggerd by Port (new level {})",
                 new_reaction_level
             );
-            self.reaction_queue_s[new_reaction_level]
+            self.scheduler.reaction_queue_s[new_reaction_level]
                 .send(sub_reaction_key)
                 .unwrap();
         }
@@ -97,6 +93,20 @@ impl<'a> SchedulerPoint<'a> {
     }
     pub fn get_port<T: PortData>(&self, port_key: PortKey<T>) -> Option<T> {
         self.env.get_port(port_key).unwrap().get()
+    }
+
+    pub fn schedule_action<T: PortData>(
+        &self,
+        action_key: ActionKey<T>,
+        value: T,
+        delay: super::Duration,
+    ) {
+        let action = &self.env.actions[action_key.data().into()];
+        if action.get_is_logical() {
+            let tag =
+                Tag::from(self.get_logical_time()).delay(Some(delay + action.get_min_delay()));
+            self.scheduler.schedule(tag, action_key.data().into(), None);
+        }
     }
     pub fn shutdown(&self) {
         event!(tracing::Level::INFO, "Schduler shutdown requested...");
@@ -151,9 +161,7 @@ impl Scheduler {
     pub fn start(&mut self, mut env: Environment) -> Result<(), BoomerangError> {
         event!(tracing::Level::INFO, "Starting the scheduler...");
 
-        env.runtime_actions
-            .values()
-            .for_each(|action| action.startup(self));
+        env.actions.values().for_each(|action| action.startup(self));
 
         while self.next(&mut env)? {}
 
@@ -258,13 +266,13 @@ impl Scheduler {
         });
 
         // Insert all Reactions triggered by each Event/Action into the reaction_queue.
-        for reaction_idx in tag_events
+        for reaction_key in tag_events
             .keys()
-            .flat_map(|&action_idx| env.runtime_actions[action_idx].get_triggers())
+            .flat_map(|&action_key| env.action_triggers[action_key].keys())
         {
-            let reaction_level = env.reactions[reaction_idx].get_level();
+            let reaction_level = env.reactions[reaction_key].get_level();
             self.reaction_queue_s[reaction_level]
-                .send(reaction_idx)
+                .send(reaction_key)
                 .unwrap();
         }
 
@@ -287,7 +295,7 @@ impl Scheduler {
 
         // cleanup all triggered actions
         tag_events.keys().for_each(|&event_idx| {
-            env.runtime_actions[event_idx].cleanup(self);
+            env.actions[event_idx].cleanup(self);
         });
 
         // Call clean on set ports

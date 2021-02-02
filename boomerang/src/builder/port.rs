@@ -8,9 +8,10 @@ pub enum PortType {
     Output,
 }
 
+pub use slotmap::DefaultKey as BasePortKey;
+
 pub trait BasePortBuilder: Debug {
     fn get_name(&self) -> &str;
-    fn get_port_key(&self) -> runtime::BasePortKey;
     fn get_reactor_key(&self) -> runtime::ReactorKey;
     fn get_inward_binding(&self) -> Option<runtime::BasePortKey>;
     fn set_inward_binding(&mut self, inward_binding: Option<runtime::BasePortKey>);
@@ -32,8 +33,6 @@ pub trait BasePortBuilder: Debug {
 #[derive(Debug)]
 pub struct PortBuilder<T: runtime::PortData> {
     name: String,
-    /// The key of the runtime Port
-    port_key: runtime::PortKey<T>,
     /// The key of the Reactor that owns this PortBuilder
     reactor_key: runtime::ReactorKey,
     /// The type of Port to build
@@ -55,13 +54,11 @@ where
 {
     pub fn new(
         name: &str,
-        port_key: runtime::PortKey<T>,
         reactor_key: runtime::ReactorKey,
         port_type: PortType,
     ) -> Self {
         Self {
             name: name.into(),
-            port_key,
             reactor_key,
             port_type,
             deps: SecondaryMap::new(),
@@ -76,9 +73,6 @@ where
 impl<T: runtime::PortData> BasePortBuilder for PortBuilder<T> {
     fn get_name(&self) -> &str {
         &self.name
-    }
-    fn get_port_key(&self) -> runtime::BasePortKey {
-        self.port_key.data().into()
     }
     fn get_reactor_key(&self) -> runtime::ReactorKey {
         self.reactor_key

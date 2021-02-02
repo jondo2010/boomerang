@@ -1,5 +1,6 @@
 use derive_more::Display;
 use downcast_rs::{impl_downcast, DowncastSync};
+use slotmap::Key;
 
 use std::{
     fmt::{Debug, Display},
@@ -8,7 +9,10 @@ use std::{
 };
 use tracing::event;
 
-pub use slotmap::DefaultKey as BasePortKey;
+slotmap::new_key_type! {
+    pub struct BasePortKey;
+}
+
 #[derive(Clone, Copy, Derivative)]
 #[derivative(Debug, Default, Hash, Ord, PartialOrd, Eq, PartialEq)]
 pub struct PortKey<T: PortData>(slotmap::KeyData, PhantomData<T>);
@@ -25,6 +29,18 @@ impl<T: PortData> slotmap::Key for PortKey<T> {
     }
 }
 
+impl<T: PortData> From<BasePortKey> for PortKey<T> {
+    fn from(base_key: BasePortKey) -> Self {
+        base_key.data().into()
+    }
+}
+
+impl<T: PortData> From<PortKey<T>> for BasePortKey {
+    fn from(key: PortKey<T>) -> Self {
+        key.data().into()
+    }
+}
+
 pub trait PortData: Debug + Copy + Clone + Send + Sync + 'static {}
 impl<T> PortData for T where T: Debug + Copy + Clone + Send + Sync + 'static {}
 pub type PortValue<T> = RwLock<Option<T>>;
@@ -37,23 +53,31 @@ pub trait BasePort: Debug + Display + Send + Sync + DowncastSync {
 }
 impl_downcast!(sync BasePort);
 
-#[derive(Debug, Display)]
-#[display(fmt = "{}", name)]
-pub struct Port<T>
-where
-    T: PortData,
-{
+#[derive(Debug)]
+pub struct Port<T: PortData> {
     name: String,
     value: PortValue<T>,
-    // triggers: SecondaryMap<ReactionKey, ()>,
+}
+
+impl<T: PortData> Display for Port<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!(
+            "Port<{}> \"{}\"",
+            std::any::type_name::<T>(),
+            self.name
+        ))
+    }
 }
 
 impl<T> Port<T>
 where
     T: PortData,
 {
-    pub fn new(name: String, value: PortValue<T>) -> Self {
-        Self { name, value }
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            value: PortValue::new(None),
+        }
     }
 
     pub fn get(&self) -> Option<T> {
@@ -97,7 +121,7 @@ where
 
 #[test]
 fn test_port() {
-    let p0: Arc<dyn BasePort> = Arc::new(Port::new("p0".into(), RwLock::new(Some(1.0f64))));
+    let p0: Arc<dyn BasePort> = Arc::new(Port::<f64>::new("p0".into()));
     dbg!(&p0);
     let x = p0.downcast_ref::<Port<f64>>();
     dbg!(&x);

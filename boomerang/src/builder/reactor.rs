@@ -45,10 +45,6 @@ pub(super) struct ReactorBuilder {
     /// Reactions in this ReactorType
     pub reactions: SecondaryMap<runtime::ReactionKey, ()>,
     pub ports: SecondaryMap<runtime::BasePortKey, ()>,
-    /* Child reactor instances declared on this ReactorBuilder
-     * children: Vec<ReactorTypeChildRef>,
-     * Port connections declared on this ReactorBuilder
-     * connections: Vec<ReactorTypeConnection>, */
 }
 
 impl ReactorBuilder {

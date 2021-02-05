@@ -26,12 +26,6 @@ pub enum BuilderError {
         action_name: String,
     },
 
-    #[error("Port Definition not found: {}.{}", reactor_name, port_name)]
-    PortNotFound {
-        reactor_name: String,
-        port_name: String,
-    },
-
     #[error("ReactorType Index not found: {}", 0)]
     ReactorKeyNotFound(runtime::ReactorKey),
 

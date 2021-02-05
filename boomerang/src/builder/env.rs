@@ -87,6 +87,7 @@ impl EnvBuilder {
 
         Ok(key.into())
     }
+
     pub fn add_timer(
         &mut self,
         name: &str,
@@ -204,7 +205,8 @@ impl EnvBuilder {
             (PortType::Output, PortType::Input) => {
                 // VALIDATE(this->container()->container() == port->container()->container(), "An output port can only be bound to an input port if both ports belong to reactors in the same hierarichal level"
                 // VALIDATE(this->container() != port->container(), "An output port can only be bound to an input port if both ports belong to different reactors!");
-                Ok(())
+                todo!();
+                //Ok(())
             }
             (PortType::Output, PortType::Output) => {
                 // VALIDATE( this->container()->container() == port->container(),
@@ -238,6 +240,7 @@ impl EnvBuilder {
         Ok(())
     }
 
+    /// Get a fully-qualified string for the given ReactionKey
     pub fn reactor_fqn(&self, reactor_key: runtime::ReactorKey) -> Result<String, BuilderError> {
         self.reactors
             .get(reactor_key)
@@ -253,6 +256,7 @@ impl EnvBuilder {
             })
     }
 
+    /// Get a fully-qualified string for the given ReactionKey
     pub fn reaction_fqn(&self, reaction_key: runtime::ReactionKey) -> Result<String, BuilderError> {
         self.reactions
             .get(reaction_key)
@@ -267,6 +271,7 @@ impl EnvBuilder {
             .map(|(reactor_name, reaction_name)| format!("{}/{}", reactor_name, reaction_name))
     }
 
+    /// Get a fully-qualified string for the given PortKey
     pub fn port_fqn<T: runtime::PortData>(
         &self,
         port_key: runtime::PortKey<T>,
@@ -353,80 +358,6 @@ impl EnvBuilder {
         });
 
         deps.chain(internal)
-    }
-
-    /// Get an Iterator over the connections in a Reactor
-    /// - parent_reactor_type_idx: The index of the Reactor
-    /// - parent_reactor_type: A reference to the Reactor
-    #[cfg(feature = "old")]
-    fn iter_reactor_type_connections<'a, T: PortData>(
-        &'a self,
-        parent_reactor_type_idx: runtime::ReactorKey,
-        parent_reactor_type: &'a ReactorBuilder,
-    ) -> impl 'a
-           + Iterator<
-        Item = (
-            Result<runtime::PortKey<T>, BuilderError>,
-            Result<runtime::PortKey<T>, BuilderError>,
-        ),
-    > {
-        parent_reactor_type.connections.iter().map(move |connection| {
-            let reactor_types_iter = self.reactors.iter()
-                .enumerate()
-                .filter( |(_, reactor_type)| {
-                matches!(reactor_type.parent_reactor_type_idx, Some(idx) if idx == parent_reactor_type_idx)
-            });
-
-            let from_idx = match reactor_types_iter.clone().find_map(|(idx,reactor_type)| {
-                match reactor_type.parent_builder_child_ref_idx{
-                    Some(child_ref_idx)
-                        if child_ref_idx == connection.from_reactor_idx => Some((ReactorTypeIndex(idx), connection.from_port.as_str())),
-                    _ => None
-                }
-            })
-            .ok_or(|| BuilderError::InconsistentBuilderState{what: format!("ReactorTypeBuilderChildReference not found")}) {
-                Ok((reactor_type_idx,port_name)) => self.find_port_key(reactor_type_idx, port_name),
-                Err(error) => Err(error())
-            };
-
-            let to_idx = match reactor_types_iter.clone().find_map(|(idx,reactor_type)| {
-                match reactor_type.parent_builder_child_ref_idx{
-                    Some(child_ref_idx)
-                        if child_ref_idx == connection.to_reactor_idx => Some((ReactorTypeIndex(idx), connection.to_port.as_str())),
-                    _ => None
-                }
-            })
-            .ok_or(|| BuilderError::InconsistentBuilderState{what: format!("ReactorTypeBuilderChildReference not found")}) {
-                Ok((reactor_type_idx,port_name)) => self.find_port_key(reactor_type_idx, port_name),
-                Err(error) => Err(error())
-            };
-
-            (from_idx, to_idx)
-        })
-    }
-
-    /// Find the index of a Port given a runtime::ReactorKey and the port name.
-    /// This works by finding the runtime::ReactorKey in the list of ReactorBuilder, and then
-    /// matching the port name.
-    pub fn find_port_key<T: PortData>(
-        &self,
-        reactor_key: runtime::ReactorKey,
-        port_name: &str,
-    ) -> Result<runtime::PortKey<T>, BuilderError> {
-        self.reactors
-            .get(reactor_key)
-            .ok_or_else(|| BuilderError::ReactorKeyNotFound(reactor_key))
-            .and_then(|reactor_type| {
-                reactor_type
-                    .ports
-                    .keys()
-                    .find(|&port_key| self.port_builders[port_key].get_name().eq(port_name))
-                    .map(|base_key| base_key.into())
-                    .ok_or_else(|| BuilderError::PortNotFound {
-                        reactor_name: reactor_type.name.to_owned(),
-                        port_name: port_name.to_owned(),
-                    })
-            })
     }
 
     /// Prepare the DAG of Reactions

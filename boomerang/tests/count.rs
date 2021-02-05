@@ -80,15 +80,6 @@ fn count() {
         .unwrap();
 
     let env: runtime::Environment = env_builder.try_into().unwrap();
-
-    for port in env.ports.values() {
-        println!("{}", port);
-    }
-
-    for action in env.actions.values() {
-        println!("{}", action);
-    }
-
-    // let mut sched = runtime::Scheduler::new(environment.max_level());
-    // sched.start(environment).unwrap();
+    let mut sched = runtime::Scheduler::new(env.max_level());
+    sched.start(env).unwrap();
 }

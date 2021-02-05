@@ -1,6 +1,6 @@
 use boomerang::{
-    builder::{self, EmptyPart, Reactor},
-    runtime::{self, Duration, Instant},
+    builder::{self, BuilderError, EmptyPart, Reactor},
+    runtime::{self, Duration, Instant, ReactorKey},
 };
 use builder::ReactorPart;
 use runtime::ActionKey;
@@ -127,14 +127,11 @@ impl Reactor for Hello {
         self,
         name: &str,
         env: &mut boomerang::builder::EnvBuilder,
-        parent: Option<boomerang::runtime::ReactorKey>,
-    ) -> Result<
-        (boomerang::runtime::ReactorKey, Self::Inputs, Self::Outputs),
-        boomerang::builder::BuilderError,
-    > {
+        parent: Option<ReactorKey>,
+    ) -> Result<(ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
         let period = self.period;
         let mut builder = env.add_reactor(name, parent, self);
-        let t = builder.add_timer("t", period, Duration::from_micros(0))?;
+        let t = builder.add_timer("t", period, Duration::from_secs(1))?;
 
         let Self::Actions { a } = builder.actions;
         let _ = builder
@@ -190,11 +187,8 @@ impl Reactor for Main {
         self,
         name: &str,
         env: &mut boomerang::builder::EnvBuilder,
-        parent: Option<boomerang::runtime::ReactorKey>,
-    ) -> Result<
-        (boomerang::runtime::ReactorKey, Self::Inputs, Self::Outputs),
-        boomerang::builder::BuilderError,
-    > {
+        parent: Option<ReactorKey>,
+    ) -> Result<(ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
         let (key, inputs, outputs) = env.add_reactor(name, parent, self).finish()?;
 
         let (_, _, _) = Hello::new(Duration::from_secs(4), "Hello from first_instance.").build(
@@ -230,12 +224,6 @@ fn hello() {
     let (_, _, _) = Main {}.build("main", &mut env_builder, None).unwrap();
 
     let env: runtime::Environment = env_builder.try_into().unwrap();
-
-    for port in env.ports.values() {
-        println!("{}", port);
-    }
-
-    for action in env.actions.values() {
-        println!("{}", action);
-    }
+    let mut sched = runtime::Scheduler::new(env.max_level());
+    sched.start(env).unwrap();
 }

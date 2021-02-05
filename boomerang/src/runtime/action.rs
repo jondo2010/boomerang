@@ -1,5 +1,5 @@
 use super::Duration;
-use super::{scheduler::Scheduler, time::Tag, PortData, PortValue, ReactionKey, ReactorElement};
+use super::{scheduler::Scheduler, time::Tag, PortData, PortValue, ReactorElement};
 use derive_more::Display;
 use slotmap::Key;
 use std::{

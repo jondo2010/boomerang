@@ -98,10 +98,11 @@ impl<'a> SchedulerPoint<'a> {
     pub fn schedule_action<T: PortData>(
         &self,
         action_key: ActionKey<T>,
-        value: T,
+        _value: T,
         delay: super::Duration,
     ) {
         let action = &self.env.actions[action_key.data().into()];
+        // TODO set value
         if action.get_is_logical() {
             let tag =
                 Tag::from(self.get_logical_time()).delay(Some(delay + action.get_min_delay()));
@@ -152,7 +153,12 @@ impl Scheduler {
     }
 
     pub fn schedule(&self, tag: Tag, action_key: BaseActionKey, pre_handler: Option<PreHandlerFn>) {
-        event!(tracing::Level::DEBUG, ?action_key, "Schedule");
+        event!(
+            tracing::Level::DEBUG,
+            ?action_key,
+            "Schedule ({:?})",
+            tag.difference(&Tag::from(&self.start_time)),
+        );
         self.events_channel_s
             .send((tag, action_key, pre_handler))
             .unwrap();
@@ -161,7 +167,9 @@ impl Scheduler {
     pub fn start(&mut self, mut env: Environment) -> Result<(), BoomerangError> {
         event!(tracing::Level::INFO, "Starting the scheduler...");
 
-        env.actions.values().for_each(|action| action.startup(self));
+        for action in env.actions.values() {
+            action.startup(self);
+        }
 
         while self.next(&mut env)? {}
 
@@ -251,11 +259,8 @@ impl Scheduler {
         let (t_next, tag_events, run_again) = next_events.unwrap();
 
         // advance logical time
-        event!(
-            tracing::Level::DEBUG,
-            "Advance logical time to tag [{}]",
-            t_next
-        );
+        let dt = Tag::from(&self.logical_time).difference(&t_next);
+        event!(tracing::Level::DEBUG, "Advance logical time by [{:?}]", dt,);
         self.logical_time.advance_to(&t_next);
 
         // Execute pre-handler setup functions; this sets the values of the corresponding actions

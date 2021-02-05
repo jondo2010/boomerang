@@ -88,9 +88,9 @@ mod tests {
         type Actions = EmptyPart;
         fn build(
             self,
-            name: &str,
-            env: &mut EnvBuilder,
-            parent: Option<runtime::ReactorKey>,
+            _name: &str,
+            _env: &mut EnvBuilder,
+            _parent: Option<runtime::ReactorKey>,
         ) -> Result<(runtime::ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
             //Ok((Self, EmptyPart, EmptyPart))
             todo!()

@@ -111,21 +111,21 @@ impl<'a> ReactionBuilderState<'a> {
             }
 
             for action_idx in reaction.schedulable_actions.iter() {
-                let trig = actions.get_mut(action_idx.0).unwrap();
-                // ASSERT(this->environment() == action->environment());
-                // VALIDATE(this->container() == action->container(), "Scheduable actions must
-                // belong to the same reactor as the triggered reaction");
-                trig.schedulers.insert(key, ());
+                let action = actions.get_mut(action_idx.0).unwrap();
+                assert!(
+                    action.get_reactor_key() == reaction.reactor_key,
+                    "Scheduable actions must belong to the same reactor as the triggered reaction"
+                );
+                action.schedulers.insert(key, ());
             }
 
             for port_key in reaction.deps.keys() {
                 let port = port_builders.get_mut(port_key).unwrap();
                 if port.get_port_type() == &PortType::Input {
-                    // assert!( this->container() == port->container(), "Input port triggers must
-                    // belong to the same reactor as the triggered reaction");
+                    assert!(reaction.reactor_key == port.get_reactor_key(), "Input port triggers must belong to the same reactor as the triggered reaction");
                 } else {
-                    // assert!(this->container() == port->container()->container(), "Output port
-                    // triggers must belong to a contained reactor");
+                    //assert!(reaction.reactor_key == env.reactors[port.get_reactor_key()].parent_reactor_key.unwrap(), "Output port triggers must belong to a contained reactor");
+                    todo!();
                 }
                 port.register_dependency(key, true);
             }

@@ -1,18 +1,19 @@
-use itertools::Itertools;
-use petgraph::visit;
-use runtime::{Action, PortData, PortKey, Timer};
-use slotmap::{SecondaryMap, SlotMap};
-use visit::DfsEvent;
-use std::{collections::BTreeSet, convert::TryInto, sync::Arc};
-use tracing::event;
-
 use super::{
-    action::{self, ActionBuilder},
+    action::{ActionBuilder},
     port::BasePortBuilder,
     reaction::ReactionBuilder,
     BuilderError, PortBuilder, PortType, Reactor, ReactorBuilder, ReactorBuilderState, ReactorPart,
 };
 use crate::runtime;
+use itertools::Itertools;
+use runtime::{PortData, PortKey};
+use slotmap::{SecondaryMap, SlotMap};
+use std::{
+    collections::{BTreeSet, HashMap},
+    convert::TryInto,
+    sync::Arc,
+};
+use tracing::event;
 
 #[derive(Debug)]
 pub struct EnvBuilder {
@@ -246,7 +247,7 @@ impl EnvBuilder {
                     || Ok(reactor.name.clone()),
                     |parent| {
                         self.reactor_fqn(parent)
-                            .map(|parent| format!("{}.{}", parent, reactor.name))
+                            .map(|parent| format!("{}/{}", parent, reactor.name))
                     },
                 )
             })
@@ -263,7 +264,7 @@ impl EnvBuilder {
                     })
                     .map(|reactor_fqn| (reactor_fqn, reaction.name.clone()))
             })
-            .map(|(reactor_name, reaction_name)| format!("{}.{}", reactor_name, reaction_name))
+            .map(|(reactor_name, reaction_name)| format!("{}/{}", reactor_name, reaction_name))
     }
 
     pub fn port_fqn<T: runtime::PortData>(
@@ -437,8 +438,44 @@ impl EnvBuilder {
         self.reactions.keys().for_each(|key| {
             graph.add_node(key);
         });
+
         graph
     }
+}
+
+/// Build a HashMap of the runtime-levels for each node corresponding to the parallelizable
+/// schedule.
+fn build_runtime_level_map<N, E>(graph: &petgraph::graphmap::DiGraphMap<N, E>) -> HashMap<N, usize>
+where
+    N: petgraph::graphmap::NodeTrait,
+{
+    graph
+        .nodes()
+        .filter_map(|reaction_key| {
+            // Filter all nodes that have no incoming edges
+            if graph
+                .neighbors_directed(reaction_key, petgraph::EdgeDirection::Incoming)
+                .count()
+                == 0
+            {
+                // Run Dijkstra on each of them
+                Some(petgraph::algo::dijkstra(&graph, reaction_key, None, |_| {
+                    1usize
+                }))
+            } else {
+                None
+            }
+        })
+        // Now fold the resultant (Node -> level) maps into a single one.
+        .fold(HashMap::new(), |mut acc, fold| {
+            for (&key, &level) in fold.iter() {
+                let entry = acc.entry(key).or_insert(level);
+                if level > *entry {
+                    *entry = level;
+                }
+            }
+            acc
+        })
 }
 
 impl TryInto<runtime::Environment> for EnvBuilder {
@@ -446,29 +483,30 @@ impl TryInto<runtime::Environment> for EnvBuilder {
     fn try_into(mut self) -> Result<runtime::Environment, Self::Error> {
         let graph = self.get_reaction_graph();
 
-        let mut space = petgraph::algo::DfsSpace::new(&graph);
-        let ordered_reactions = petgraph::algo::toposort(&graph, Some(&mut space))
-            .map_err(|_| BuilderError::ReactionGraphCycle)?;
-        
-        petgraph::visit::depth_first_search(&graph, graph.nodes().next(), |event| {
-            dbg!(event);
-        });
+        let ordered_reactions =
+            petgraph::algo::toposort(&graph, None).map_err(|_| BuilderError::ReactionGraphCycle)?;
 
-        // Run dijkstra's algorithm over all nodes to generate the runtime indices
-        let runtime_level_map =
-            petgraph::algo::dijkstra(&graph, *ordered_reactions.first().unwrap(), None, |_| {
-                1usize
-            });
+        let runtime_level_map = build_runtime_level_map(&graph);
 
         event!(
             tracing::Level::DEBUG,
             "reaction_dependency_edges: {:#?}",
-            self.reaction_dependency_edges().collect::<Vec<_>>()
+            self.reaction_dependency_edges()
+                .map(|(a, b)| {
+                    format!(
+                        "{} : {:?} -> {} : {:?}",
+                        self.reaction_fqn(a).unwrap(),
+                        a,
+                        self.reaction_fqn(b).unwrap(),
+                        b
+                    )
+                })
+                .collect::<Vec<_>>()
         );
 
         event!(
             tracing::Level::DEBUG,
-            "runtime_level_map: {:#?}",
+            "runtime_level_map: {:?}",
             runtime_level_map
                 .iter()
                 .map(|(&key, level)| format!("{:?}: {}", key, level))
@@ -477,7 +515,7 @@ impl TryInto<runtime::Environment> for EnvBuilder {
         // Build Reactions in topo-sorted order
         event!(
             tracing::Level::DEBUG,
-            "Building Reactions in order: {:#?}",
+            "Building Reactions in order: {:?}",
             ordered_reactions
                 .iter()
                 .map(|reaction_key| (reaction_key, self.reaction_fqn(*reaction_key).unwrap())) /*  */
@@ -488,7 +526,7 @@ impl TryInto<runtime::Environment> for EnvBuilder {
             runtime::BasePortKey,
             SecondaryMap<runtime::ReactionKey, ()>,
         > = SecondaryMap::new();
-        let runtime_actions = SlotMap::with_key();
+        let runtime_actions = self.actions.clone();
         let runtime_action_triggers = self
             .action_builders
             .iter()
@@ -537,7 +575,7 @@ impl TryInto<runtime::Environment> for EnvBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builder::{reactor, tests::*};
+    use crate::builder::tests::*;
 
     #[test]
     fn test_duplicate_ports() {
@@ -615,7 +653,10 @@ mod tests {
 
         assert_eq!(env_builder.reactors.len(), 1);
         assert_eq!(env_builder.reactions.len(), 2);
-        assert_eq!(env_builder.reactions.keys().collect::<Vec<_>>(), vec![r0_key, r1_key]);
+        assert_eq!(
+            env_builder.reactions.keys().collect::<Vec<_>>(),
+            vec![r0_key, r1_key]
+        );
 
         assert_eq!(env_builder.reactors[reactor_key].reactions.len(), 2);
 

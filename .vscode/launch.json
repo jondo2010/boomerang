@@ -58,7 +58,12 @@
                     "kind": "test"
                 }
             },
-            "args": [],
+            "args": [
+                "--nocapture"
+            ],
+            "env": {
+                "RUST_LOG": "debug"
+            },
             "cwd": "${workspaceFolder}"
         },
         {
@@ -77,8 +82,13 @@
                     "kind": "test"
                 }
             },
-            "args": [],
-            "cwd": "${workspaceFolder}"
+            "args": [
+                "--nocapture"
+            ],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "RUST_LOG": "debug"
+            }
         }
     ]
 }

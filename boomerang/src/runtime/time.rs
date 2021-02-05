@@ -30,6 +30,13 @@ impl Tag {
             }
         }
     }
+
+    pub fn difference(&self, other: &Tag) -> (Duration, usize) {
+        (
+            self.time_point.saturating_duration_since(other.time_point),
+            self.micro_step - other.micro_step,
+        )
+    }
 }
 
 impl From<&Instant> for Tag {

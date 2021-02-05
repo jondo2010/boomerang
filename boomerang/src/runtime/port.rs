@@ -1,4 +1,3 @@
-use derive_more::Display;
 use downcast_rs::{impl_downcast, DowncastSync};
 use slotmap::Key;
 
@@ -7,7 +6,7 @@ use std::{
     marker::PhantomData,
     sync::{Arc, RwLock},
 };
-use tracing::event;
+
 
 slotmap::new_key_type! {
     pub struct BasePortKey;
@@ -113,8 +112,7 @@ where
     // }
 
     fn cleanup(&self) {
-        event!(tracing::Level::DEBUG, ?self.name, "cleanup()");
-
+        //event!(tracing::Level::DEBUG, ?self.name, "cleanup()");
         *self.value.write().unwrap() = None;
     }
 }

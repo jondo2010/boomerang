@@ -1,10 +1,7 @@
-use super::{ActionBuilder, BuilderError, EnvBuilder, PortBuilder, PortType, ReactionBuilderState};
+use super::{BuilderError, EnvBuilder, ReactionBuilderState};
 use crate::runtime::{self};
 use slotmap::SecondaryMap;
-use std::{
-    sync::{Arc, RwLock},
-    todo,
-};
+use std::sync::{Arc, RwLock};
 
 pub trait Reactor: Send + Sync + 'static {
     /// Type containing the Reactor's input Ports

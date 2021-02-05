@@ -1,10 +1,9 @@
-use std::convert::TryInto;
-
 use boomerang::{
-    builder::{BuilderError, EnvBuilder, Reactor},
+    builder::{BuilderError, EmptyPart, EnvBuilder, PortType, Reactor, ReactorPart},
     runtime::{self, PortKey, ReactorKey},
 };
-use slotmap::Key;
+use std::convert::TryInto;
+use tracing::event;
 
 // Test data transport across hierarchy.
 // target Cpp;
@@ -55,10 +54,40 @@ use slotmap::Key;
 struct Source {
     value: u32,
 }
+impl Source {
+    pub fn new(value: u32) -> Self {
+        Self { value }
+    }
+    fn reaction_out(
+        &mut self,
+        sched: &runtime::SchedulerPoint,
+        _inputs: &<Self as Reactor>::Inputs,
+        outputs: &<Self as Reactor>::Outputs,
+        _actions: &<Self as Reactor>::Actions,
+    ) {
+        sched.set_port(outputs.out, self.value);
+        event!(
+            tracing::Level::INFO,
+            "Sent {:?}",
+            sched.get_port::<u32>(outputs.out)
+        );
+    }
+}
+#[derive(Clone)]
+struct SourceOutputs {
+    out: PortKey<u32>,
+}
+impl ReactorPart for SourceOutputs {
+    fn build(env: &mut EnvBuilder, reactor_key: ReactorKey) -> Result<Self, BuilderError> {
+        let out = env.add_port("out", PortType::Output, reactor_key)?;
+        Ok(Self { out })
+    }
+}
 
 impl Reactor for Source {
-    type Inputs = ();
-    type Outputs = PortKey<u32>;
+    type Inputs = EmptyPart;
+    type Outputs = SourceOutputs;
+    type Actions = EmptyPart;
 
     fn build(
         self,
@@ -67,90 +96,116 @@ impl Reactor for Source {
         parent: Option<ReactorKey>,
     ) -> Result<(ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
         let mut builder = env.add_reactor(name, parent, self);
-        let out = builder.add_output::<u32>("out")?;
         let t = builder.add_startup_timer("t")?;
 
-        let _r0 = builder
-            .add_reaction(Self::r0)
+        let Self::Outputs { out } = builder.outputs;
+        let _ = builder
+            .add_reaction(Self::reaction_out)
             .with_trigger_action(t)
-            .with_antidependency(out.data().into())
+            .with_antidependency(out.into())
             .finish();
 
-        let key = builder.finish()?;
-        Ok((key, (), (out)))
-    }
-}
-
-impl Source {
-    pub fn new(value: u32) -> Self {
-        Self { value }
-    }
-
-    fn r0(&mut self, _sched: &runtime::SchedulerPoint) {
-        // sched.set_port(self.out, 1u32);
-        // event!(
-        // tracing::Level::INFO,
-        // "Sent {:?}",
-        // sched.get_port::<u32>(self.out)
-        // );
+        builder.finish()
     }
 }
 
 struct Gain {
     gain: u32,
 }
-
-impl Reactor for Gain {
-    type Inputs = PortKey<u32>;
-    type Outputs = PortKey<u32>;
-    fn build(
-        self,
-        name: &str,
-        env: &mut EnvBuilder,
-        parent: Option<ReactorKey>,
-    ) -> Result<(ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
-        let mut builder = env.add_reactor(name, parent, self);
-        let inp = builder.add_input::<u32>("in")?;
-        let out = builder.add_output::<u32>("out")?;
-
-        let _ = builder
-            .add_reaction(Self::r0)
-            .with_trigger_port(inp.data().into())
-            .with_antidependency(out.data().into())
-            .finish();
-
-        let key = builder.finish()?;
-        Ok((key, inp, out))
-    }
-}
-
 impl Gain {
     pub fn new(gain: u32) -> Self {
         Self { gain }
     }
-    fn r0(&mut self, _sched: &runtime::SchedulerPoint) {
-        // let in_val: u32 = sched.get_port(inp).unwrap();
-        // sched.set_port(out, in_val * 2);
+    fn reaction_in(
+        &mut self,
+        sched: &runtime::SchedulerPoint,
+        inputs: &<Self as Reactor>::Inputs,
+        outputs: &<Self as Reactor>::Outputs,
+        _actions: &<Self as Reactor>::Actions,
+    ) {
+        let in_val: u32 = sched.get_port(inputs.inp).unwrap();
+        sched.set_port(outputs.out, in_val * self.gain);
+    }
+}
+#[derive(Clone)]
+struct GainInputs {
+    inp: PortKey<u32>,
+}
+impl ReactorPart for GainInputs {
+    fn build(env: &mut EnvBuilder, reactor_key: runtime::ReactorKey) -> Result<Self, BuilderError> {
+        let inp = env.add_port::<u32>("in", PortType::Input, reactor_key)?;
+        Ok(Self { inp })
+    }
+}
+#[derive(Clone)]
+struct GainOutputs {
+    out: PortKey<u32>,
+}
+impl ReactorPart for GainOutputs {
+    fn build(env: &mut EnvBuilder, reactor_key: runtime::ReactorKey) -> Result<Self, BuilderError> {
+        let out = env.add_port::<u32>("out", PortType::Output, reactor_key)?;
+        // let out = builder.add_output::<u32>("out")?;
+        Ok(Self { out })
+    }
+}
+
+impl Reactor for Gain {
+    type Inputs = GainInputs;
+    type Outputs = GainOutputs;
+    type Actions = EmptyPart;
+    fn build(
+        self,
+        name: &str,
+        env: &mut EnvBuilder,
+        parent: Option<ReactorKey>,
+    ) -> Result<(ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
+        let mut builder = env.add_reactor(name, parent, self);
+
+        let Self::Inputs { inp } = builder.inputs;
+        let Self::Outputs { out } = builder.outputs;
+        let _ = builder
+            .add_reaction(Self::reaction_in)
+            .with_trigger_port(inp.into())
+            .with_antidependency(out.into())
+            .finish();
+
+        builder.finish()
     }
 }
 
 struct Print;
-
 impl Print {
     pub fn new() -> Self {
         Self
     }
+    fn reaction_in(
+        &mut self,
+        sched: &runtime::SchedulerPoint,
+        inputs: &<Self as Reactor>::Inputs,
+        _outputs: &<Self as Reactor>::Outputs,
+        _actions: &<Self as Reactor>::Actions,
+    ) {
+        let value = sched.get_port::<u32>(inputs.inp);
+        event!(tracing::Level::INFO, "Received {:?}", value);
+        assert!(matches!(value, Some(2)));
+    }
+}
+#[derive(Clone)]
+struct PrintInputs {
+    inp: PortKey<u32>,
+}
 
-    fn receive(&mut self, _sched: &runtime::SchedulerPoint) {
-        // let value = sched.get_port::<u32>(self.inp);
-        // event!(tracing::Level::INFO, "Received {:?}", value);
-        // assert!(matches!(value, Some(2)));
+impl ReactorPart for PrintInputs {
+    fn build(env: &mut EnvBuilder, reactor_key: runtime::ReactorKey) -> Result<Self, BuilderError> {
+        let inp = env.add_port::<u32>("in2", PortType::Input, reactor_key)?;
+        Ok(Self { inp })
     }
 }
 
 impl Reactor for Print {
-    type Inputs = PortKey<u32>;
-    type Outputs = ();
+    type Inputs = PrintInputs;
+    type Outputs = EmptyPart;
+    type Actions = EmptyPart;
 
     fn build(
         self,
@@ -159,13 +214,12 @@ impl Reactor for Print {
         parent: Option<ReactorKey>,
     ) -> Result<(ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
         let mut builder = env.add_reactor(name, parent, self);
-        let i = builder.add_input::<u32>("in2")?;
+        let Self::Inputs { inp } = builder.inputs;
         let _ = builder
-            .add_reaction(Self::receive)
-            .with_trigger_port(i.data().into())
+            .add_reaction(Self::reaction_in)
+            .with_trigger_port(inp.into())
             .finish();
-        let key = builder.finish()?;
-        Ok((key, i, ()))
+        builder.finish()
     }
 }
 
@@ -174,8 +228,9 @@ struct Hierarchy {
 }
 
 impl Reactor for Hierarchy {
-    type Inputs = ();
-    type Outputs = ();
+    type Inputs = EmptyPart;
+    type Outputs = EmptyPart;
+    type Actions = EmptyPart;
 
     fn build(
         self,
@@ -185,20 +240,20 @@ impl Reactor for Hierarchy {
     ) -> Result<(ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
         let num_prints = self.num_prints;
         let builder = env.add_reactor(name, parent, self);
-        let parent_key = builder.finish()?;
+        let (parent_key, _, _) = builder.finish()?;
 
         let (_source_key, _, source_out) =
             Source::new(1).build("source0", env, Some(parent_key))?;
         let (_gain_key, gain_in, gain_out) = Gain::new(2).build("gain0", env, Some(parent_key))?;
-        env.bind_port(source_out, gain_in)?;
+        env.bind_port(source_out.out, gain_in.inp)?;
 
         for i in 0..num_prints {
             let (_print_key, print_in, _) =
                 Print::new().build(&format!("print{}", i), env, Some(parent_key))?;
-            env.bind_port(gain_out, print_in)?;
+            env.bind_port(gain_out.out, print_in.inp)?;
         }
 
-        Ok((parent_key, (), ()))
+        Ok((parent_key, EmptyPart, EmptyPart))
     }
 }
 
@@ -228,7 +283,9 @@ fn hierarchy() {
     // },
     // );
 
-    let (_, _, _) = Hierarchy::new(2).build("top", &mut env_builder, None).unwrap();
+    let (_, _, _) = Hierarchy::new(2)
+        .build("top", &mut env_builder, None)
+        .unwrap();
 
     for (a, b) in env_builder.reaction_dependency_edges() {
         println!(
@@ -239,8 +296,8 @@ fn hierarchy() {
     }
 
     let env: runtime::Environment = env_builder.try_into().unwrap();
-    println!("{}", &env);
+    //println!("{:#?}", &env);
 
-    // let mut sched = runtime::Scheduler::new(environment.max_level());
-    // sched.start(environment).unwrap();
+    let mut sched = runtime::Scheduler::new(env.max_level());
+    sched.start(env).unwrap();
 }

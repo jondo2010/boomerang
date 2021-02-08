@@ -104,7 +104,7 @@ impl Reaction {
     pub fn new(name: String, level: usize, body: ReactionFn, deadline: Option<Deadline>) -> Self {
         Self {
             name,
-            level,
+            level: level,
             body: RwLock::new(body),
             deadline,
         }
@@ -112,6 +112,10 @@ impl Reaction {
 
     pub fn get_level(&self) -> usize {
         self.level
+    }
+
+    pub fn get_name(&self) -> &str {
+        &self.name
     }
 
     pub fn trigger(&self, sched: &SchedulerPoint) {

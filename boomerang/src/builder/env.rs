@@ -1,8 +1,6 @@
 use super::{
-    action::{ActionBuilder},
-    port::BasePortBuilder,
-    reaction::ReactionBuilder,
-    BuilderError, PortBuilder, PortType, Reactor, ReactorBuilder, ReactorBuilderState, ReactorPart,
+    action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder, BuilderError,
+    PortBuilder, PortType, Reactor, ReactorBuilder, ReactorBuilderState, ReactorPart,
 };
 use crate::runtime;
 use itertools::Itertools;
@@ -23,7 +21,7 @@ pub struct EnvBuilder {
     pub(super) actions: SlotMap<runtime::BaseActionKey, Arc<dyn runtime::BaseAction>>,
     pub(super) action_builders: SecondaryMap<runtime::BaseActionKey, ActionBuilder>,
 
-    pub(super) reactions: SlotMap<runtime::ReactionKey, ReactionBuilder>,
+    pub(super) reaction_builders: SlotMap<runtime::ReactionKey, ReactionBuilder>,
 
     pub(super) reactors: SlotMap<runtime::ReactorKey, ReactorBuilder>,
 }
@@ -35,7 +33,7 @@ impl EnvBuilder {
             port_builders: SecondaryMap::new(),
             actions: SlotMap::with_key(),
             action_builders: SecondaryMap::new(),
-            reactions: SlotMap::with_key(),
+            reaction_builders: SlotMap::with_key(),
             reactors: SlotMap::<runtime::ReactorKey, ReactorBuilder>::with_key(),
         }
     }
@@ -203,10 +201,27 @@ impl EnvBuilder {
                             })
             }
             (PortType::Output, PortType::Input) => {
-                // VALIDATE(this->container()->container() == port->container()->container(), "An output port can only be bound to an input port if both ports belong to reactors in the same hierarichal level"
-                // VALIDATE(this->container() != port->container(), "An output port can only be bound to an input port if both ports belong to different reactors!");
-                todo!();
-                //Ok(())
+                let port_a_grandparent = self.reactors[port_a.get_reactor_key()].parent_reactor_key;
+                let port_b_grandparent = self.reactors[port_b.get_reactor_key()].parent_reactor_key;
+                // VALIDATE(this->container()->container() == port->container()->container(), 
+                if !matches!((port_a_grandparent, port_b_grandparent), (Some(key_a), Some(key_b)) if key_a == key_b) {
+                    Err(BuilderError::PortBindError{
+                        port_a_key: port_a_key.into(),
+                        port_b_key: port_b_key.into(),
+                        what: "An output port can only be bound to an input port if both ports belong to reactors in the same hierarichal level".to_owned(),
+                    })
+                }
+                // VALIDATE(this->container() != port->container(), );
+                else if port_a.get_reactor_key() == port_b.get_reactor_key() {
+                    Err(BuilderError::PortBindError{
+                        port_a_key: port_a_key.into(),
+                        port_b_key: port_b_key.into(),
+                        what: "An output port can only be bound to an input port if both ports belong to different reactors!".to_owned(),
+                    })
+                }
+                else {
+                    Ok(())
+                }
             }
             (PortType::Output, PortType::Output) => {
                 // VALIDATE( this->container()->container() == port->container(),
@@ -258,7 +273,7 @@ impl EnvBuilder {
 
     /// Get a fully-qualified string for the given ReactionKey
     pub fn reaction_fqn(&self, reaction_key: runtime::ReactionKey) -> Result<String, BuilderError> {
-        self.reactions
+        self.reaction_builders
             .get(reaction_key)
             .ok_or(BuilderError::ReactionKeyNotFound(reaction_key))
             .and_then(|reaction| {
@@ -334,7 +349,7 @@ impl EnvBuilder {
         &'a self,
     ) -> impl Iterator<Item = (runtime::ReactionKey, runtime::ReactionKey)> + 'a {
         let deps = self
-            .reactions
+            .reaction_builders
             .iter()
             .flat_map(move |(reaction_key, reaction)| {
                 // Connect all reactions this reaction depends upon
@@ -353,7 +368,7 @@ impl EnvBuilder {
             reactor
                 .reactions
                 .keys()
-                .sorted_by_key(|&reaction_key| self.reactions[reaction_key].priority)
+                .sorted_by_key(|&reaction_key| self.reaction_builders[reaction_key].priority)
                 .tuple_windows()
         });
 
@@ -366,7 +381,7 @@ impl EnvBuilder {
             self.reaction_dependency_edges().map(|(a, b)| (b, a)),
         );
         // Ensure all ReactionIndicies are represented
-        self.reactions.keys().for_each(|key| {
+        self.reaction_builders.keys().for_each(|key| {
             graph.add_node(key);
         });
 
@@ -411,7 +426,7 @@ where
 
 impl TryInto<runtime::Environment> for EnvBuilder {
     type Error = BuilderError;
-    fn try_into(mut self) -> Result<runtime::Environment, Self::Error> {
+    fn try_into(self) -> Result<runtime::Environment, Self::Error> {
         let graph = self.get_reaction_graph();
 
         let ordered_reactions =
@@ -464,13 +479,13 @@ impl TryInto<runtime::Environment> for EnvBuilder {
             .map(|(action_key, action_builder)| (action_key, action_builder.triggers.clone()))
             .collect();
 
-        let mut runtime_reactions = SlotMap::with_key();
-
-        for reaction_key in ordered_reactions.iter() {
-            let reaction = self.reactions.remove(*reaction_key).unwrap();
-
+        for reaction_builder in self.reaction_builders.values() {
             // Build all required Ports and aliases
-            for port_key in reaction.antideps.keys().chain(reaction.deps.keys()) {
+            for port_key in reaction_builder
+                .antideps
+                .keys()
+                .chain(reaction_builder.deps.keys())
+            {
                 let inward_port_key = self.follow_port_inward_binding(port_key);
                 if inward_port_key == port_key {
                     // Only set the port_triggers for non-aliased ports.
@@ -484,21 +499,31 @@ impl TryInto<runtime::Environment> for EnvBuilder {
                     runtime_ports[port_key] = runtime_ports[inward_port_key].clone();
                 }
             }
-
-            runtime_reactions.insert(Arc::new(runtime::Reaction::new(
-                reaction.name,
-                runtime_level_map[reaction_key],
-                reaction.reaction_fn,
-                None,
-            )));
         }
+
+        // Build the SlotMap of runtime::Reaction from the ReactionBuilders.
+        // This depends on iter() being stable and that inserting in the same order results in the
+        // same keys.
+        let reactions = {
+            let mut reactions = SlotMap::with_key();
+            for (key, builder) in self.reaction_builders.into_iter() {
+                let new_key = reactions.insert(Arc::new(runtime::Reaction::new(
+                    builder.name,
+                    runtime_level_map[&key],
+                    builder.reaction_fn,
+                    None,
+                )));
+                assert!(key == new_key);
+            }
+            reactions
+        };
 
         Ok(runtime::Environment {
             ports: runtime_ports,
             port_triggers: runtime_port_triggers,
             actions: runtime_actions,
             action_triggers: runtime_action_triggers,
-            reactions: runtime_reactions,
+            reactions: reactions,
         })
     }
 }
@@ -583,9 +608,9 @@ mod tests {
         let (reactor_key, _, _) = reactor_builder.finish().unwrap();
 
         assert_eq!(env_builder.reactors.len(), 1);
-        assert_eq!(env_builder.reactions.len(), 2);
+        assert_eq!(env_builder.reaction_builders.len(), 2);
         assert_eq!(
-            env_builder.reactions.keys().collect::<Vec<_>>(),
+            env_builder.reaction_builders.keys().collect::<Vec<_>>(),
             vec![r0_key, r1_key]
         );
 
@@ -596,5 +621,25 @@ mod tests {
 
         let env: runtime::Environment = env_builder.try_into().unwrap();
         assert_eq!(env.reactions.len(), 2);
+    }
+
+    #[test]
+    fn test_actions1() {
+        let mut env_builder = EnvBuilder::new();
+        let reactor_builder = env_builder.add_reactor("test_reactor", None, TestReactorDummy);
+        // let r0_key = reactor_builder.add_reaction(|_, _, _, _, _| {}).finish().unwrap();
+        let (reactor_key, _, _) = reactor_builder.finish().unwrap();
+        let action_key = env_builder
+            .add_logical_action::<()>("a", Some(runtime::Duration::from_secs(1)), reactor_key)
+            .unwrap()
+            .into();
+        let env: runtime::Environment = env_builder.try_into().unwrap();
+
+        assert_eq!(env.actions[action_key].get_name(), "a");
+        assert_eq!(env.actions[action_key].get_is_logical(), true);
+        assert_eq!(
+            env.actions[action_key].get_min_delay(),
+            runtime::Duration::from_secs(1)
+        );
     }
 }

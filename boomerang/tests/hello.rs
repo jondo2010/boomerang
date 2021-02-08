@@ -88,11 +88,14 @@ impl Hello {
     ) {
         self.count += 1;
         let time = sched.get_logical_time();
+        let time_now = time
+            .get_time_point()
+            .duration_since(*sched.get_start_time());
         event!(
             tracing::Level::INFO,
-            "***** action {} at time {}",
+            "***** action {} at time {:?}",
             self.count,
-            time
+            time_now
         );
         let diff = *time.get_time_point() - self.previous_time;
         assert_eq!(
@@ -138,12 +141,12 @@ impl Reactor for Hello {
             .add_reaction(Self::reaction_t)
             .with_trigger_action(t)
             .with_scheduable_action(a.into())
-            .finish();
+            .finish()?;
 
         let _ = builder
             .add_reaction(Self::reaction_a)
             .with_trigger_action(a.into())
-            .finish();
+            .finish()?;
 
         builder.finish()
     }
@@ -224,6 +227,21 @@ fn hello() {
     let (_, _, _) = Main {}.build("main", &mut env_builder, None).unwrap();
 
     let env: runtime::Environment = env_builder.try_into().unwrap();
+
+    for (key, r) in env.reactions.iter() {
+        println!("{:?}: {}", key, r.get_name());
+    }
+
+    for (key, a) in env.actions.iter() {
+        let triggers = itertools::free::join(
+            env.action_triggers[key]
+                .keys()
+                .map(|key| format!("{:?}", key)),
+            ",",
+        );
+        println!("{:?}: {}, [{}]", key, a, triggers);
+    }
+
     let mut sched = runtime::Scheduler::new(env.max_level());
     sched.start(env).unwrap();
 }

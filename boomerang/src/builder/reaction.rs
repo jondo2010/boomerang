@@ -92,37 +92,37 @@ impl<'a> ReactionBuilderState<'a> {
     }
 
     pub fn finish(self) -> Result<runtime::ReactionKey, BuilderError> {
-        let Self { reaction, env } = self;
-        let reactor = &mut env.reactors[reaction.reactor_key];
-        let reactions = &mut env.reactions;
+        let Self { reaction: reaction_builder, env } = self;
+        let reactor = &mut env.reactors[reaction_builder.reactor_key];
+        let reactions = &mut env.reaction_builders;
         let actions = &mut env.action_builders;
-        let port_builders = &mut env.port_builders;
+        let ports = &mut env.port_builders;
 
         let key = reactions.insert_with_key(|key| {
             reactor.reactions.insert(key, ());
 
-            for trigger_key in reaction.trigger_actions.keys() {
+            for trigger_key in reaction_builder.trigger_actions.keys() {
                 let action = actions.get_mut(trigger_key).unwrap();
                 assert!(
-                    reaction.reactor_key == action.get_reactor_key(),
+                    reaction_builder.reactor_key == action.get_reactor_key(),
                     "Action triggers must belong to the same reactor as the triggered reaction"
                 );
                 action.triggers.insert(key, ());
             }
 
-            for action_idx in reaction.schedulable_actions.iter() {
-                let action = actions.get_mut(action_idx.0).unwrap();
+            for action_key in reaction_builder.schedulable_actions.keys() {
+                let action = actions.get_mut(action_key).unwrap();
                 assert!(
-                    action.get_reactor_key() == reaction.reactor_key,
+                    action.get_reactor_key() == reaction_builder.reactor_key,
                     "Scheduable actions must belong to the same reactor as the triggered reaction"
                 );
                 action.schedulers.insert(key, ());
             }
 
-            for port_key in reaction.deps.keys() {
-                let port = port_builders.get_mut(port_key).unwrap();
+            for port_key in reaction_builder.deps.keys() {
+                let port = ports.get_mut(port_key).unwrap();
                 if port.get_port_type() == &PortType::Input {
-                    assert!(reaction.reactor_key == port.get_reactor_key(), "Input port triggers must belong to the same reactor as the triggered reaction");
+                    assert!(reaction_builder.reactor_key == port.get_reactor_key(), "Input port triggers must belong to the same reactor as the triggered reaction");
                 } else {
                     //assert!(reaction.reactor_key == env.reactors[port.get_reactor_key()].parent_reactor_key.unwrap(), "Output port triggers must belong to a contained reactor");
                     todo!();
@@ -130,12 +130,12 @@ impl<'a> ReactionBuilderState<'a> {
                 port.register_dependency(key, true);
             }
 
-            for antidep_key in reaction.antideps.keys() {
-                let port = port_builders.get_mut(antidep_key).unwrap();
+            for antidep_key in reaction_builder.antideps.keys() {
+                let port = ports.get_mut(antidep_key).unwrap();
                 port.register_antidependency(key);
             }
 
-            reaction
+            reaction_builder
         });
 
         Ok(key)

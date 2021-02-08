@@ -223,6 +223,58 @@ impl Reactor for Print {
     }
 }
 
+struct GainContainer;
+impl GainContainer {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[derive(Clone)]
+struct GainContainerInputs {
+    inp: PortKey<u32>,
+}
+
+impl ReactorPart for GainContainerInputs {
+    fn build(env: &mut EnvBuilder, reactor_key: ReactorKey) -> Result<Self, BuilderError> {
+        let inp = env.add_port("inp", PortType::Input, reactor_key)?;
+        Ok(Self { inp })
+    }
+}
+
+#[derive(Clone)]
+struct GainContainerOutputs {
+    out1: PortKey<u32>,
+    out2: PortKey<u32>,
+}
+impl ReactorPart for GainContainerOutputs {
+    fn build(env: &mut EnvBuilder, reactor_key: runtime::ReactorKey) -> Result<Self, BuilderError> {
+        let out1 = env.add_port("out1", PortType::Output, reactor_key)?;
+        let out2 = env.add_port("out2", PortType::Output, reactor_key)?;
+        Ok(Self { out1, out2 })
+    }
+}
+impl Reactor for GainContainer {
+    type Inputs = GainContainerInputs;
+    type Outputs = GainContainerOutputs;
+    type Actions = EmptyPart;
+
+    fn build(
+        self,
+        name: &str,
+        env: &mut EnvBuilder,
+        parent: Option<ReactorKey>,
+    ) -> Result<(ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
+        let builder = env.add_reactor(name, parent, self);
+        let (parent_key, inputs, outputs) = builder.finish()?;
+        let (_gain_key, gain_in, gain_out) = Gain::new(2).build("gain", env, Some(parent_key))?;
+        env.bind_port(inputs.inp, gain_in.inp)?;
+        env.bind_port(gain_out.out, outputs.out1)?;
+        env.bind_port(gain_out.out, outputs.out2)?;
+        Ok((parent_key, inputs, outputs))
+    }
+}
+
 struct Hierarchy {
     num_prints: usize,
 }
@@ -244,13 +296,18 @@ impl Reactor for Hierarchy {
 
         let (_source_key, _, source_out) =
             Source::new(1).build("source0", env, Some(parent_key))?;
-        let (_gain_key, gain_in, gain_out) = Gain::new(2).build("gain0", env, Some(parent_key))?;
-        env.bind_port(source_out.out, gain_in.inp)?;
+        let (_, container_in, container_out) =
+            GainContainer::new().build("container", env, Some(parent_key))?;
+        env.bind_port(source_out.out, container_in.inp)?;
 
         for i in 0..num_prints {
             let (_print_key, print_in, _) =
                 Print::new().build(&format!("print{}", i), env, Some(parent_key))?;
-            env.bind_port(gain_out.out, print_in.inp)?;
+            if i % 2 == 0 {
+                env.bind_port(container_out.out1, print_in.inp)?;
+            } else {
+                env.bind_port(container_out.out2, print_in.inp)?;
+            }
         }
 
         Ok((parent_key, EmptyPart, EmptyPart))
@@ -271,32 +328,12 @@ fn hierarchy() {
     use boomerang::builder::*;
     let mut env_builder = EnvBuilder::new();
 
-    // let gain_container = env_builder.add_reactor_type(
-    // "GainContainer",
-    // move |mut builder: ReactorTypeBuilderState| {
-    // let inp = builder.add_input::<u32>("in").unwrap();
-    // let out1 = builder.add_output::<u32>("out1").unwrap();
-    // let out2 = builder.add_output::<u32>("out2").unwrap();
-    // let gain0 = builder.add_child_instance("gain0", gain);
-    //
-    // builder.finish()
-    // },
-    // );
-
-    let (_, _, _) = Hierarchy::new(2)
+    let (_, _, _) = Hierarchy::new(4)
         .build("top", &mut env_builder, None)
         .unwrap();
 
-    for (a, b) in env_builder.reaction_dependency_edges() {
-        println!(
-            "{}->{}",
-            env_builder.reaction_fqn(a).unwrap(),
-            env_builder.reaction_fqn(b).unwrap()
-        );
-    }
-
     let env: runtime::Environment = env_builder.try_into().unwrap();
-    //println!("{:#?}", &env);
+    // println!("{:#?}", &env);
 
     let mut sched = runtime::Scheduler::new(env.max_level());
     sched.start(env).unwrap();

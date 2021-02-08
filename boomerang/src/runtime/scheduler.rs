@@ -77,12 +77,6 @@ impl<'a> SchedulerPoint<'a> {
 
         for sub_reaction_key in self.env.port_triggers[port_key].keys() {
             let new_reaction_level = self.env.reactions[sub_reaction_key].get_level();
-            event!(
-                tracing::Level::DEBUG,
-                ?sub_reaction_key,
-                "Triggerd by Port (new level {})",
-                new_reaction_level
-            );
             self.scheduler.reaction_queue_s[new_reaction_level]
                 .send(sub_reaction_key)
                 .unwrap();
@@ -259,7 +253,7 @@ impl Scheduler {
         let (t_next, tag_events, run_again) = next_events.unwrap();
 
         // advance logical time
-        let dt = Tag::from(&self.logical_time).difference(&t_next);
+        let dt = t_next.difference(&Tag::from(&self.logical_time));
         event!(tracing::Level::DEBUG, "Advance logical time by [{:?}]", dt,);
         self.logical_time.advance_to(&t_next);
 
@@ -290,7 +284,7 @@ impl Scheduler {
             let sched_point = SchedulerPoint::new(&self, env, clear_ports_s.clone());
             reactions.par_iter().for_each(|&reaction_idx| {
                 let reaction = &env.reactions[reaction_idx];
-                event!(tracing::Level::DEBUG, ?reaction_idx, ?reaction, "Executing");
+                event!(tracing::Level::DEBUG, ?reaction_idx, "Executing {}", reaction.get_name());
                 reaction.trigger(&sched_point);
             });
             if *sched_point.stop_requested.read().unwrap() {

@@ -1,11 +1,13 @@
 mod action;
 mod env;
+mod macros;
 mod port;
 mod reaction;
 mod reactor;
 
 pub use action::*;
 pub use env::*;
+pub use macros::*;
 pub use port::*;
 pub use reaction::*;
 pub use reactor::*;
@@ -86,7 +88,7 @@ mod tests {
             _env: &mut EnvBuilder,
             _parent: Option<runtime::ReactorKey>,
         ) -> Result<(runtime::ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
-            //Ok((Self, EmptyPart, EmptyPart))
+            // Ok((Self, EmptyPart, EmptyPart))
             todo!()
         }
     }
@@ -119,6 +121,4 @@ mod tests {
             todo!()
         }
     }
-
-    pub(crate) fn foo() {}
 }

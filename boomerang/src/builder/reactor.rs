@@ -103,7 +103,7 @@ where
         }
     }
 
-    pub fn add_startup_timer(
+    pub fn add_startup_action(
         &mut self,
         name: &str,
     ) -> Result<runtime::BaseActionKey, BuilderError> {
@@ -112,6 +112,13 @@ where
             runtime::Duration::from_micros(0),
             runtime::Duration::from_micros(0),
         )
+    }
+
+    pub fn add_shutdown_action(
+        &mut self,
+        name: &str
+    ) -> Result<runtime::BaseActionKey, BuilderError> {
+        todo!()
     }
 
     pub fn add_timer(

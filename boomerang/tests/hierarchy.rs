@@ -1,7 +1,4 @@
-use boomerang::{
-    builder::{BuilderError, EmptyPart, EnvBuilder, PortType, Reactor, ReactorPart},
-    runtime::{self, PortKey, ReactorKey},
-};
+use boomerang::{ReactorInputs, ReactorOutputs, builder::{BuilderError, EmptyPart, EnvBuilder, PortType, Reactor, ReactorPart}, runtime::{self, PortKey, ReactorKey}};
 use std::convert::TryInto;
 use tracing::event;
 
@@ -73,16 +70,8 @@ impl Source {
         );
     }
 }
-#[derive(Clone)]
-struct SourceOutputs {
-    out: PortKey<u32>,
-}
-impl ReactorPart for SourceOutputs {
-    fn build(env: &mut EnvBuilder, reactor_key: ReactorKey) -> Result<Self, BuilderError> {
-        let out = env.add_port("out", PortType::Output, reactor_key)?;
-        Ok(Self { out })
-    }
-}
+
+ReactorOutputs!(SourceOutputs, (out, u32));
 
 impl Reactor for Source {
     type Inputs = EmptyPart;
@@ -96,7 +85,7 @@ impl Reactor for Source {
         parent: Option<ReactorKey>,
     ) -> Result<(ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
         let mut builder = env.add_reactor(name, parent, self);
-        let t = builder.add_startup_timer("t")?;
+        let t = builder.add_startup_action("t")?;
 
         let Self::Outputs { out } = builder.outputs;
         let _ = builder
@@ -127,27 +116,9 @@ impl Gain {
         sched.set_port(outputs.out, in_val * self.gain);
     }
 }
-#[derive(Clone)]
-struct GainInputs {
-    inp: PortKey<u32>,
-}
-impl ReactorPart for GainInputs {
-    fn build(env: &mut EnvBuilder, reactor_key: runtime::ReactorKey) -> Result<Self, BuilderError> {
-        let inp = env.add_port::<u32>("in", PortType::Input, reactor_key)?;
-        Ok(Self { inp })
-    }
-}
-#[derive(Clone)]
-struct GainOutputs {
-    out: PortKey<u32>,
-}
-impl ReactorPart for GainOutputs {
-    fn build(env: &mut EnvBuilder, reactor_key: runtime::ReactorKey) -> Result<Self, BuilderError> {
-        let out = env.add_port::<u32>("out", PortType::Output, reactor_key)?;
-        // let out = builder.add_output::<u32>("out")?;
-        Ok(Self { out })
-    }
-}
+
+ReactorInputs!(GainInputs, (inp, u32));
+ReactorOutputs!(GainOutputs, (out, u32));
 
 impl Reactor for Gain {
     type Inputs = GainInputs;
@@ -190,18 +161,8 @@ impl Print {
         assert!(matches!(value, Some(2)));
     }
 }
-#[derive(Clone)]
-struct PrintInputs {
-    inp: PortKey<u32>,
-}
 
-impl ReactorPart for PrintInputs {
-    fn build(env: &mut EnvBuilder, reactor_key: runtime::ReactorKey) -> Result<Self, BuilderError> {
-        let inp = env.add_port::<u32>("in2", PortType::Input, reactor_key)?;
-        Ok(Self { inp })
-    }
-}
-
+ReactorInputs!(PrintInputs, (inp, u32));
 impl Reactor for Print {
     type Inputs = PrintInputs;
     type Outputs = EmptyPart;
@@ -230,30 +191,8 @@ impl GainContainer {
     }
 }
 
-#[derive(Clone)]
-struct GainContainerInputs {
-    inp: PortKey<u32>,
-}
-
-impl ReactorPart for GainContainerInputs {
-    fn build(env: &mut EnvBuilder, reactor_key: ReactorKey) -> Result<Self, BuilderError> {
-        let inp = env.add_port("inp", PortType::Input, reactor_key)?;
-        Ok(Self { inp })
-    }
-}
-
-#[derive(Clone)]
-struct GainContainerOutputs {
-    out1: PortKey<u32>,
-    out2: PortKey<u32>,
-}
-impl ReactorPart for GainContainerOutputs {
-    fn build(env: &mut EnvBuilder, reactor_key: runtime::ReactorKey) -> Result<Self, BuilderError> {
-        let out1 = env.add_port("out1", PortType::Output, reactor_key)?;
-        let out2 = env.add_port("out2", PortType::Output, reactor_key)?;
-        Ok(Self { out1, out2 })
-    }
-}
+ReactorInputs!(GainContainerInputs, (inp, u32));
+ReactorOutputs!(GainContainerOutputs, (out1, u32), (out2, u32));
 impl Reactor for GainContainer {
     type Inputs = GainContainerInputs;
     type Outputs = GainContainerOutputs;
@@ -333,8 +272,6 @@ fn hierarchy() {
         .unwrap();
 
     let env: runtime::Environment = env_builder.try_into().unwrap();
-    // println!("{:#?}", &env);
-
     let mut sched = runtime::Scheduler::new(env.max_level());
     sched.start(env).unwrap();
 }

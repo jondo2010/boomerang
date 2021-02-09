@@ -3,15 +3,14 @@ use super::{
     time::{LogicalTime, Tag},
     ActionKey, BaseActionKey, BasePortKey, PortData, PortKey, ReactionKey,
 };
+use super::{Duration, Instant};
 use crate::BoomerangError;
 use crossbeam_channel::{Receiver, Sender};
 use rayon::prelude::*;
-use slotmap::Key;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Debug,
     sync::{Arc, RwLock},
-    time::Instant,
 };
 use tracing::event;
 
@@ -66,14 +65,30 @@ impl<'a> SchedulerPoint<'a> {
     pub fn get_start_time(&self) -> &Instant {
         self.scheduler.get_start_time()
     }
-    pub fn get_logical_time(&self) -> &LogicalTime {
-        self.scheduler.get_logical_time()
+    pub fn get_logical_time(&self) -> &Instant {
+        self.scheduler.get_logical_time().get_time_point()
     }
+
+    pub fn get_physical_time(&self) -> Instant {
+        self.scheduler.get_physical_time()
+    }
+
+    pub fn get_elapsed_logical_time(&self) -> Duration {
+        self.get_logical_time()
+            .saturating_duration_since(*self.scheduler.get_start_time())
+    }
+
+    pub fn get_elapsed_physical_time(&self) -> Duration {
+        self.scheduler
+            .get_physical_time()
+            .saturating_duration_since(*self.scheduler.get_start_time())
+    }
+
     pub fn set_port<T: PortData>(&self, port_key: PortKey<T>, value: T) {
         self.env.get_port(port_key).unwrap().set(Some(value));
 
         // Schedule any reactions triggered by this port being set.
-        let port_key = port_key.data().into();
+        let port_key = port_key.into();
 
         for sub_reaction_key in self.env.port_triggers[port_key].keys() {
             let new_reaction_level = self.env.reactions[sub_reaction_key].get_level();
@@ -93,14 +108,15 @@ impl<'a> SchedulerPoint<'a> {
         &self,
         action_key: ActionKey<T>,
         _value: T,
-        delay: super::Duration,
+        delay: Option<super::Duration>,
     ) {
-        let action = &self.env.actions[action_key.data().into()];
+        let action = &self.env.actions[action_key.into()];
         // TODO set value
         if action.get_is_logical() {
+            let delay = delay.unwrap_or_default();
             let tag =
                 Tag::from(self.get_logical_time()).delay(Some(delay + action.get_min_delay()));
-            self.scheduler.schedule(tag, action_key.data().into(), None);
+            self.scheduler.schedule(tag, action_key.into(), None);
         }
     }
     pub fn shutdown(&self) {
@@ -144,6 +160,10 @@ impl Scheduler {
 
     pub fn get_logical_time(&self) -> &LogicalTime {
         &self.logical_time
+    }
+
+    pub fn get_physical_time(&self) -> Instant {
+        Instant::now()
     }
 
     pub fn schedule(&self, tag: Tag, action_key: BaseActionKey, pre_handler: Option<PreHandlerFn>) {
@@ -284,7 +304,12 @@ impl Scheduler {
             let sched_point = SchedulerPoint::new(&self, env, clear_ports_s.clone());
             reactions.par_iter().for_each(|&reaction_idx| {
                 let reaction = &env.reactions[reaction_idx];
-                event!(tracing::Level::DEBUG, ?reaction_idx, "Executing {}", reaction.get_name());
+                event!(
+                    tracing::Level::DEBUG,
+                    ?reaction_idx,
+                    "Executing {}",
+                    reaction.get_name()
+                );
                 reaction.trigger(&sched_point);
             });
             if *sched_point.stop_requested.read().unwrap() {

@@ -5,7 +5,6 @@ use slotmap::Key;
 use std::{
     fmt::{Debug, Display},
     marker::PhantomData,
-    sync::Arc,
 };
 
 slotmap::new_key_type! {
@@ -45,26 +44,6 @@ pub trait BaseAction: Debug + Display + Send + Sync + ReactorElement {
     /// Is this a logical action?
     fn get_is_logical(&self) -> bool;
     fn get_min_delay(&self) -> Duration;
-}
-
-impl std::cmp::PartialEq for dyn BaseAction {
-    fn eq(&self, _other: &Self) -> bool {
-        todo!()
-    }
-}
-
-impl std::cmp::Eq for dyn BaseAction {}
-
-impl std::cmp::PartialOrd for dyn BaseAction {
-    fn partial_cmp(&self, _other: &Self) -> Option<std::cmp::Ordering> {
-        todo!()
-    }
-}
-
-impl std::cmp::Ord for dyn BaseAction {
-    fn cmp(&self, _other: &Self) -> std::cmp::Ordering {
-        todo!()
-    }
 }
 
 #[derive(Debug)]
@@ -175,9 +154,36 @@ impl ReactorElement for Timer {
     }
 }
 
-// ----------
+/// ShutdownAction is a logical action that fires when the scheduler shuts down.
+#[derive(Debug, Display)]
+#[display(fmt = "ShutdownAction<{}>", name)]
+struct ShutdownAction {
+    name: String,
+    action_key: BaseActionKey,
+}
 
-pub struct ActionFn(dyn Fn(&Arc<dyn BaseAction>, &mut Scheduler) -> ());
+impl BaseAction for ShutdownAction {
+    fn get_name(&self) -> &str {
+        &self.name
+    }
+
+    fn get_is_logical(&self) -> bool {
+        true
+    }
+
+    fn get_min_delay(&self) -> Duration {
+        Duration::default()
+    }
+}
+
+impl ReactorElement for ShutdownAction {
+    fn shutdown(&self, scheduler: &mut Scheduler) {
+        let tag = Tag::from(scheduler.get_logical_time()).delay(None);
+        scheduler.schedule(tag, self.action_key, None);
+    }
+}
+
+// ----------
 
 // A runtime Action
 // pub struct Action {

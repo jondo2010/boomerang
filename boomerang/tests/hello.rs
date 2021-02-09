@@ -1,6 +1,7 @@
 use boomerang::{
     builder::{self, BuilderError, EmptyPart, Reactor},
     runtime::{self, Duration, Instant, ReactorKey},
+    ReactorActions,
 };
 use builder::ReactorPart;
 use runtime::ActionKey;
@@ -73,8 +74,8 @@ impl Hello {
         actions: &<Self as Reactor>::Actions,
     ) {
         // Print the current time.
-        self.previous_time = *sched.get_logical_time().get_time_point();
-        sched.schedule_action(actions.a, (), Duration::from_millis(200)); // No payload.
+        self.previous_time = *sched.get_logical_time();
+        sched.schedule_action(actions.a, (), Some(Duration::from_millis(200))); // No payload.
         event!(tracing::Level::INFO, ?self.message, "Current time is {:?}", self.previous_time);
     }
 
@@ -89,7 +90,6 @@ impl Hello {
         self.count += 1;
         let time = sched.get_logical_time();
         let time_now = time
-            .get_time_point()
             .duration_since(*sched.get_start_time());
         event!(
             tracing::Level::INFO,
@@ -97,7 +97,7 @@ impl Hello {
             self.count,
             time_now
         );
-        let diff = *time.get_time_point() - self.previous_time;
+        let diff = *time - self.previous_time;
         assert_eq!(
             diff,
             Duration::from_millis(200),
@@ -107,20 +107,7 @@ impl Hello {
     }
 }
 
-#[derive(Clone)]
-struct HelloActions {
-    a: ActionKey<()>,
-}
-impl ReactorPart for HelloActions {
-    fn build(
-        env: &mut builder::EnvBuilder,
-        reactor_key: runtime::ReactorKey,
-    ) -> Result<Self, builder::BuilderError> {
-        let a = env.add_logical_action("a", None, reactor_key)?;
-        Ok(Self { a })
-    }
-}
-
+ReactorActions!(HelloActions, (a, (), None));
 impl Reactor for Hello {
     type Inputs = EmptyPart;
     type Outputs = EmptyPart;

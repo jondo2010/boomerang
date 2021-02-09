@@ -1,6 +1,6 @@
 use std::convert::TryInto;
 
-use boomerang::runtime;
+use boomerang::{ReactorOutputs, runtime};
 use boomerang::{builder::*, runtime::SchedulerPoint};
 
 struct Count {
@@ -12,7 +12,7 @@ impl Count {
     fn new(max_count: u32) -> Self {
         Self { max_count, i: 0 }
     }
-    fn r0(
+    fn reaction_t(
         &mut self,
         sched: &SchedulerPoint,
         _inputs: &<Self as Reactor>::Inputs,
@@ -27,16 +27,7 @@ impl Count {
     }
 }
 
-#[derive(Copy, Clone)]
-struct CountOutputs {
-    pub c: runtime::PortKey<u32>,
-}
-impl ReactorPart for CountOutputs {
-    fn build(env: &mut EnvBuilder, reactor_key: runtime::ReactorKey) -> Result<Self, BuilderError> {
-        let c = env.add_port::<u32>("c", PortType::Output, reactor_key)?;
-        Ok(Self { c })
-    }
-}
+ReactorOutputs!(CountOutputs, (c, u32));
 impl Reactor for Count {
     type Inputs = EmptyPart;
     type Outputs = CountOutputs;
@@ -59,7 +50,7 @@ impl Reactor for Count {
         let Self::Outputs { c } = builder.outputs;
 
         builder
-            .add_reaction(Self::r0)
+            .add_reaction(Self::reaction_t)
             .with_trigger_action(t)
             .with_antidependency(c)
             .finish()?;

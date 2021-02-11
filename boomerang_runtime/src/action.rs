@@ -1,5 +1,7 @@
+use crate::SchedulerPoint;
+
 use super::Duration;
-use super::{scheduler::Scheduler, time::Tag, PortData, PortValue, ReactorElement};
+use super::{time::Tag, PortData, PortValue, ReactorElement};
 use derive_more::Display;
 use slotmap::Key;
 use std::{
@@ -76,7 +78,7 @@ impl<T: PortData> Action<T> {
 }
 
 impl<T: PortData> ReactorElement for Action<T> {
-    fn cleanup(&self, _scheduler: &mut Scheduler) {
+    fn cleanup(&self, _scheduler: &SchedulerPoint) {
         *self.value.write().unwrap() = None;
     }
 }
@@ -135,21 +137,19 @@ impl BaseAction for Timer {
 }
 
 impl ReactorElement for Timer {
-    fn startup(&self, scheduler: &mut Scheduler) {
-        let t0 = Tag::from(scheduler.get_start_time());
+    fn startup(&self, sched: &SchedulerPoint) {
+        let t0 = Tag::from(sched.get_start_time());
         if self.offset > Duration::from_secs(0) {
-            scheduler.schedule(t0.delay(Some(self.offset)), self.action_key, None);
+            sched.schedule(t0.delay(Some(self.offset)), self.action_key);
         } else {
-            scheduler.schedule(t0, self.action_key, None);
+            sched.schedule(t0, self.action_key);
         }
     }
 
-    fn cleanup(&self, scheduler: &mut Scheduler) {
+    fn cleanup(&self, sched: &SchedulerPoint) {
         // schedule the timer again
         if self.period > Duration::from_secs(0) {
-            let now = Tag::from(scheduler.get_logical_time());
-            let next = now.delay(Some(self.period));
-            scheduler.schedule(next, self.action_key, None);
+            sched.schedule_action(self.action_key.into(), (), Some(self.period));
         }
     }
 }
@@ -177,39 +177,7 @@ impl BaseAction for ShutdownAction {
 }
 
 impl ReactorElement for ShutdownAction {
-    fn shutdown(&self, scheduler: &mut Scheduler) {
-        let tag = Tag::from(scheduler.get_logical_time()).delay(None);
-        scheduler.schedule(tag, self.action_key, None);
+    fn shutdown(&self, sched: & SchedulerPoint) {
+        sched.schedule_action(self.action_key.into(), (), None);
     }
 }
-
-// ----------
-
-// A runtime Action
-// pub struct Action {
-// name: String,
-// triggers: Vec<Rc<Reaction>>,
-// on_startup: Option<Box<ActionFn>>,
-// on_shutdown: Option<Box<ActionFn>>,
-// on_cleanup: Option<Box<ActionFn>>,
-// }
-// impl Action {
-// pub fn startup(self: &Rc<Self>, sched: &mut Scheduler) {
-// if let Some(startup_fn) = self.on_startup {
-// startup_fn(self, sched);
-// }
-// }
-// pub fn shutdown(self: &Rc<Self>, sched: &mut Scheduler) {
-// if let Some(shutdown_fn) = self.on_shutdown {
-// shutdown_fn(self, sched);
-// }
-// }
-// pub fn cleanup(self: &Rc<Self>, sched: &mut Scheduler) {
-// if let Some(cleanup_fn) = self.on_cleanup {
-// cleanup_fn(self, sched);
-// }
-// }
-// pub fn get_triggers(&self) -> impl Iterator<item = Rc<Reaction>> {
-// }
-// }
-//

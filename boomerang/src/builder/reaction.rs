@@ -1,5 +1,5 @@
 use super::{BuilderError, EnvBuilder, PortType};
-use crate::runtime::{self};
+use crate::runtime;
 
 use runtime::PortData;
 use slotmap::SecondaryMap;

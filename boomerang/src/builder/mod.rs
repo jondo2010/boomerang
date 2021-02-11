@@ -5,14 +5,14 @@ mod port;
 mod reaction;
 mod reactor;
 
+use crate::runtime;
+
 pub use action::*;
 pub use env::*;
 pub use macros::*;
 pub use port::*;
 pub use reaction::*;
 pub use reactor::*;
-
-use crate::runtime;
 
 #[derive(thiserror::Error, Debug, Eq, PartialEq)]
 pub enum BuilderError {
@@ -73,8 +73,6 @@ impl<T: Sized> TupleSlice for [T] {
 
 #[cfg(test)]
 mod tests {
-    use crate::runtime::PortKey;
-
     use super::*;
 
     pub(crate) struct TestReactorDummy;
@@ -96,7 +94,7 @@ mod tests {
     pub(crate) struct TestReactor2;
     #[derive(Clone)]
     pub(crate) struct TestReactorInputs {
-        p0: PortKey<u32>,
+        p0: runtime::PortKey<u32>,
     }
     impl ReactorPart for TestReactorInputs {
         fn build(

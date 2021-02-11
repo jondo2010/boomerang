@@ -1,11 +1,10 @@
 use boomerang::{
     builder::{self, BuilderError, EmptyPart, Reactor},
-    runtime::{self, Duration, Instant, ReactorKey},
+    runtime::{self, Duration, ReactorKey},
     ReactorActions,
 };
 use builder::ReactorPart;
-use runtime::ActionKey;
-use tracing::event;
+use runtime::{Config, RunMode};
 
 // This test checks that logical time is incremented an appropriate
 // amount as a result of an invocation of the schedule() function at
@@ -52,7 +51,7 @@ struct Hello {
     period: Duration,
     message: String,
     count: usize,
-    previous_time: Instant,
+    previous_time: Duration,
 }
 
 impl Hello {
@@ -61,7 +60,7 @@ impl Hello {
             period,
             message: message.to_owned(),
             count: 0,
-            previous_time: Instant::now(),
+            previous_time: Duration::default(),
         }
     }
 
@@ -74,9 +73,9 @@ impl Hello {
         actions: &<Self as Reactor>::Actions,
     ) {
         // Print the current time.
-        self.previous_time = *sched.get_logical_time();
+        self.previous_time = sched.get_elapsed_logical_time();
         sched.schedule_action(actions.a, (), Some(Duration::from_millis(200))); // No payload.
-        event!(tracing::Level::INFO, ?self.message, "Current time is {:?}", self.previous_time);
+        println!("{} Current time is {:?}", self.message, self.previous_time);
     }
 
     /// reaction_a is sensetive to Action `a`
@@ -88,16 +87,13 @@ impl Hello {
         _actions: &<Self as Reactor>::Actions,
     ) {
         self.count += 1;
-        let time = sched.get_logical_time();
-        let time_now = time
-            .duration_since(*sched.get_start_time());
-        event!(
-            tracing::Level::INFO,
+        let time = sched.get_elapsed_logical_time();
+        println!(
             "***** action {} at time {:?}",
             self.count,
-            time_now
+            time
         );
-        let diff = *time - self.previous_time;
+        let diff = time - self.previous_time;
         assert_eq!(
             diff,
             Duration::from_millis(200),
@@ -213,22 +209,10 @@ fn hello() {
     let mut env_builder = EnvBuilder::new();
     let (_, _, _) = Main {}.build("main", &mut env_builder, None).unwrap();
 
-    let env: runtime::Environment = env_builder.try_into().unwrap();
-
-    for (key, r) in env.reactions.iter() {
-        println!("{:?}: {}", key, r.get_name());
-    }
-
-    for (key, a) in env.actions.iter() {
-        let triggers = itertools::free::join(
-            env.action_triggers[key]
-                .keys()
-                .map(|key| format!("{:?}", key)),
-            ",",
-        );
-        println!("{:?}: {}, [{}]", key, a, triggers);
-    }
-
-    let mut sched = runtime::Scheduler::new(env.max_level());
-    sched.start(env).unwrap();
+    let env: runtime::Env = env_builder.try_into().unwrap();
+    let mut sched = runtime::Scheduler::with_config(
+        env,
+        Config::new(RunMode::RunFor(Duration::from_secs(10)), true),
+    );
+    sched.start().unwrap();
 }

@@ -1,5 +1,5 @@
 use super::{BuilderError, EnvBuilder, ReactionBuilderState};
-use crate::runtime::{self};
+use crate::runtime;
 use slotmap::SecondaryMap;
 use std::sync::{Arc, RwLock};
 
@@ -116,7 +116,7 @@ where
 
     pub fn add_shutdown_action(
         &mut self,
-        name: &str
+        _name: &str,
     ) -> Result<runtime::BaseActionKey, BuilderError> {
         todo!()
     }

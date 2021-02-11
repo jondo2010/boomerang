@@ -4,7 +4,6 @@ use super::{
 };
 use crate::runtime;
 use itertools::Itertools;
-use runtime::{PortData, PortKey};
 use slotmap::{SecondaryMap, SlotMap};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -55,12 +54,12 @@ impl EnvBuilder {
         ReactorBuilderState::new(name, parent, reactor, self)
     }
 
-    pub fn add_port<T: PortData>(
+    pub fn add_port<T: runtime::PortData>(
         &mut self,
         name: &str,
         port_type: PortType,
         reactor_key: runtime::ReactorKey,
-    ) -> Result<PortKey<T>, BuilderError> {
+    ) -> Result<runtime::PortKey<T>, BuilderError> {
         // Ensure no duplicates
         if self
             .port_builders
@@ -424,9 +423,9 @@ where
         })
 }
 
-impl TryInto<runtime::Environment> for EnvBuilder {
+impl TryInto<runtime::Env> for EnvBuilder {
     type Error = BuilderError;
-    fn try_into(self) -> Result<runtime::Environment, Self::Error> {
+    fn try_into(self) -> Result<runtime::Env, Self::Error> {
         let graph = self.get_reaction_graph();
 
         let ordered_reactions =
@@ -518,7 +517,7 @@ impl TryInto<runtime::Environment> for EnvBuilder {
             reactions
         };
 
-        Ok(runtime::Environment {
+        Ok(runtime::Env {
             ports: runtime_ports,
             port_triggers: runtime_port_triggers,
             actions: runtime_actions,
@@ -619,7 +618,7 @@ mod tests {
         let dep_edges = env_builder.reaction_dependency_edges().collect::<Vec<_>>();
         assert_eq!(dep_edges, vec![(r0_key, r1_key)]);
 
-        let env: runtime::Environment = env_builder.try_into().unwrap();
+        let env: runtime::Env = env_builder.try_into().unwrap();
         assert_eq!(env.reactions.len(), 2);
     }
 
@@ -633,7 +632,7 @@ mod tests {
             .add_logical_action::<()>("a", Some(runtime::Duration::from_secs(1)), reactor_key)
             .unwrap()
             .into();
-        let env: runtime::Environment = env_builder.try_into().unwrap();
+        let env: runtime::Env = env_builder.try_into().unwrap();
 
         assert_eq!(env.actions[action_key].get_name(), "a");
         assert_eq!(env.actions[action_key].get_is_logical(), true);

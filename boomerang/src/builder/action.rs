@@ -1,16 +1,16 @@
-use crate::runtime::{self};
+use super::runtime;
 use slotmap::SecondaryMap;
 
 #[derive(Debug)]
 pub struct ActionBuilder {
     name: String,
-    /// The index of this action
+    /// The key of this action in the EnvBuilder
     action_key: runtime::BaseActionKey,
-    /// The ReactorType that contains this ActionBuilder
+    /// The parent Reactor that owns this Action
     reactor_key: runtime::ReactorKey,
     /// Out-going Reactions that this action triggers
     pub triggers: SecondaryMap<runtime::ReactionKey, ()>,
-    /// TODO?
+    /// List of Reactions that may schedule this action
     pub schedulers: SecondaryMap<runtime::ReactionKey, ()>,
 }
 

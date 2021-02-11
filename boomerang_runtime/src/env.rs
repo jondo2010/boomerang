@@ -6,17 +6,10 @@ use downcast_rs::DowncastSync;
 use slotmap::{Key, SecondaryMap, SlotMap};
 use std::{fmt::Display, sync::Arc};
 
-//#[derive(Debug)]
-// pub struct Environment {
-//    scheduler: Scheduler,
-//    run_forever: bool,
-//    fast_fwd_execution: bool,
-//}
-
 /// Builder struct used to facilitate construction of a Reaction
 /// This gets passed into the builder callback.
 #[derive(Debug)]
-pub struct Environment {
+pub struct Env {
     /// The runtime set of Ports
     pub ports: SlotMap<BasePortKey, Arc<dyn BasePort>>,
     /// For each Port a set of Reactions triggered by it
@@ -29,7 +22,7 @@ pub struct Environment {
     pub reactions: SlotMap<ReactionKey, Arc<Reaction>>,
 }
 
-impl Display for Environment {
+impl Display for Env {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Environment {\n")?;
         f.write_str("}\n")?;
@@ -37,7 +30,7 @@ impl Display for Environment {
     }
 }
 
-impl Environment {
+impl Env {
     pub fn new() -> Self {
         Self {
             ports: SlotMap::with_key(),

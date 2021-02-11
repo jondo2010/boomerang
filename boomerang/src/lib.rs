@@ -5,7 +5,8 @@
 extern crate derivative;
 
 pub mod builder;
-pub mod runtime;
+
+pub use boomerang_runtime as runtime;
 
 #[derive(thiserror::Error, Debug)]
 pub enum BoomerangError {
@@ -18,4 +19,7 @@ pub enum BoomerangError {
 
     #[error(transparent)]
     Builder(#[from] builder::BuilderError),
+
+    #[error(transparent)]
+    Runtime(#[from] boomerang_runtime::RuntimeError),
 }

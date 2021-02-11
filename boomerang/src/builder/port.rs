@@ -1,4 +1,4 @@
-use crate::runtime::{self};
+use crate::runtime;
 use slotmap::{secondary, Key, SecondaryMap};
 use std::fmt::Debug;
 
@@ -52,11 +52,7 @@ impl<T> PortBuilder<T>
 where
     T: runtime::PortData,
 {
-    pub fn new(
-        name: &str,
-        reactor_key: runtime::ReactorKey,
-        port_type: PortType,
-    ) -> Self {
+    pub fn new(name: &str, reactor_key: runtime::ReactorKey, port_type: PortType) -> Self {
         Self {
             name: name.into(),
             reactor_key,

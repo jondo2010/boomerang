@@ -236,7 +236,7 @@ impl Reactor for ActionDelay {
         let (parent_key, _, _) = env.add_reactor(name, parent, self).finish()?;
         let (_, _, source_outputs) = Source.build("source", env, Some(parent_key))?;
         let (_, sink0_inputs, _) = Sink.build("sink0", env, Some(parent_key))?;
-        let (_, sink1_inputs, _) = Sink.build("sink1", env, Some(parent_key))?;
+        let (_, _sink1_inputs, _) = Sink.build("sink1", env, Some(parent_key))?;
         let (_, sink2_inputs, _) = Sink.build("sink2", env, Some(parent_key))?;
         let (_, g_inputs, g_outputs) = GeneratedDelay::new().build("g", env, Some(parent_key))?;
         env.bind_port(source_outputs.out, g_inputs.y_in).unwrap();
@@ -255,7 +255,7 @@ fn action_delay() {
     let mut env_builder = EnvBuilder::new();
     let _ = ActionDelay.build("action_delay", &mut env_builder, None).unwrap();
 
-    let env: runtime::Environment = env_builder.try_into().unwrap();
-    let mut sched = runtime::Scheduler::new(env.max_level());
-    sched.start(env).unwrap();
+    let env: runtime::Env = env_builder.try_into().unwrap();
+    let mut sched = runtime::Scheduler::new(env);
+    sched.start().unwrap();
 }

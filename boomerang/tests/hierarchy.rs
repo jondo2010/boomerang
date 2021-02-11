@@ -271,7 +271,7 @@ fn hierarchy() {
         .build("top", &mut env_builder, None)
         .unwrap();
 
-    let env: runtime::Environment = env_builder.try_into().unwrap();
-    let mut sched = runtime::Scheduler::new(env.max_level());
-    sched.start(env).unwrap();
+    let env: runtime::Env = env_builder.try_into().unwrap();
+    let mut sched = runtime::Scheduler::new(env);
+    sched.start().unwrap();
 }

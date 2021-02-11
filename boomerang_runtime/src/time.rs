@@ -1,6 +1,5 @@
-use derive_more::Display;
-
 use super::{Duration, Instant};
+use derive_more::Display;
 
 #[derive(Debug, Display, PartialEq, Eq, PartialOrd, Ord, Clone)]
 #[display(fmt = "[{:?}, {}]", time_point, micro_step)]

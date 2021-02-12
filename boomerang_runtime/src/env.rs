@@ -1,9 +1,12 @@
+use crate::SchedulerPoint;
+
 use super::{
     BaseAction, BaseActionKey, BasePort, BasePortKey, Port, PortData, PortKey, Reaction,
     ReactionKey,
 };
 use downcast_rs::DowncastSync;
 use slotmap::{Key, SecondaryMap, SlotMap};
+use tracing::event;
 use std::{fmt::Display, sync::Arc};
 
 /// Builder struct used to facilitate construction of a Reaction
@@ -58,5 +61,18 @@ impl Env {
             .map(|reaction| reaction.get_level())
             .max()
             .unwrap_or_default()
+    }
+
+    pub fn startup(&self, sched: &SchedulerPoint) {
+        event!(tracing::Level::INFO, "Starting the execution");
+        for action in self.actions.values() {
+            action.startup(&sched);
+        }
+    }
+    pub fn shutdown(&self, sched: &SchedulerPoint) {
+        event!(tracing::Level::INFO, "Terminating the execution");
+        for action in self.actions.values() {
+            action.shutdown(&sched);
+        }
     }
 }

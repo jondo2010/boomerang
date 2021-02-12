@@ -5,7 +5,7 @@ slotmap::new_key_type! {
 }
 
 pub trait ReactorElement {
-    fn startup(&self, _scheduler: &SchedulerPoint) {}
-    fn shutdown(&self, _scheduler: &SchedulerPoint) {}
-    fn cleanup(&self, _scheduler: &SchedulerPoint) {}
+    fn startup(&self, _sched: &SchedulerPoint) {}
+    fn shutdown(&self, _sched: &SchedulerPoint) {}
+    fn cleanup(&self, _sched: &SchedulerPoint) {}
 }

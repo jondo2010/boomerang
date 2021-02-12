@@ -5,11 +5,11 @@ use super::{
 };
 use crate::RuntimeError;
 use crossbeam_channel::{Receiver, Sender};
+use crossbeam_utils::atomic::AtomicCell;
 use rayon::prelude::*;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Debug,
-    sync::{Arc, RwLock},
 };
 use tracing::event;
 
@@ -47,7 +47,6 @@ impl Config {
 pub struct SchedulerPoint<'a> {
     scheduler: &'a Scheduler,
     env: &'a Env,
-    stop_requested: Arc<RwLock<bool>>,
 }
 
 impl<'a> SchedulerPoint<'a> {
@@ -55,7 +54,6 @@ impl<'a> SchedulerPoint<'a> {
         SchedulerPoint {
             scheduler,
             env,
-            stop_requested: Arc::new(RwLock::new(false)),
         }
     }
 
@@ -124,8 +122,7 @@ impl<'a> SchedulerPoint<'a> {
     pub fn shutdown(&self) {
         event!(tracing::Level::INFO, "Schduler shutdown requested...");
         // all reactors shutdown()
-        // scheduler _stop = true
-        *self.stop_requested.write().unwrap() = true;
+        self.scheduler.stop();
     }
 }
 
@@ -153,7 +150,7 @@ pub struct Scheduler {
     clear_ports_r: Receiver<BasePortKey>,
 
     /// Stop requested
-    stop_requested: bool,
+    stop_requested: AtomicCell<bool>,
 }
 
 impl Debug for Scheduler {
@@ -193,7 +190,7 @@ impl Scheduler {
             reaction_queue_r,
             clear_ports_s,
             clear_ports_r,
-            stop_requested: false,
+            stop_requested: AtomicCell::new(false),
         }
     }
 
@@ -233,19 +230,16 @@ impl Scheduler {
 
     pub fn start(&mut self) -> Result<(), RuntimeError> {
         event!(tracing::Level::INFO, "Starting the scheduler...");
-
         let sched_point = SchedulerPoint::new(&self, &self.env);
-        for action in self.env.actions.values() {
-            action.startup(&sched_point);
-        }
-
+        self.env.startup(&sched_point);
         while self.next()? {}
-
         Ok(())
     }
 
-    pub fn stop(&mut self) {
-        self.stop_requested = true;
+    pub fn stop(&self) {
+        let sched_point = SchedulerPoint::new(&self, &self.env);
+        self.env.shutdown(&sched_point);
+        self.stop_requested.store(true);
     }
 
     fn get_next_tagged_events(&mut self) -> Option<(Tag, EventMap, bool)> {
@@ -257,14 +251,8 @@ impl Scheduler {
                 .insert(action_idx, pre_handler);
         }
 
-        if let RunMode::RunFor(run_for) = self.config.run_mode {
-            if self.get_elapsed_logical_time() >= run_for {
-                self.stop_requested = true;
-            }
-        }
-
         // shutdown if there are no more events in the queue
-        if self.event_queue.is_empty() && !self.stop_requested {
+        if self.event_queue.is_empty() && !self.stop_requested.load() {
             if matches!(self.config.run_mode, RunMode::RunForever) {
                 // wait for a new asynchronous event
                 // cv_schedule.wait(lock, [this]() { return !event_queue.empty(); });
@@ -273,7 +261,8 @@ impl Scheduler {
                     tracing::Level::DEBUG,
                     "No more events in queue. -> Terminate!"
                 );
-                //_environment->sync_shutdown();
+                let sched = SchedulerPoint::new(&self, &self.env);
+                self.env.shutdown(&sched);
 
                 // The shutdown call might schedule shutdown reactions. If none was scheduled, we
                 // simply return.
@@ -285,7 +274,7 @@ impl Scheduler {
 
         let event_entry = self.event_queue.first_entry().expect("Empty Event Queue!");
 
-        let (t_next, run_again) = if self.stop_requested {
+        let (t_next, run_again) = if self.stop_requested.load() {
             event!(tracing::Level::INFO, "Shutting down the scheduler");
             let t_next = Tag::from(&self.logical_time).delay(None);
             if t_next != *event_entry.key() {
@@ -302,7 +291,7 @@ impl Scheduler {
             let t_next = event_entry.key();
 
             // synchronize with physical time if not in fast forward mode
-            if self.config.fast_forward {
+            if !self.config.fast_forward {
             /*
                 // wait until the next tag or until a new event is inserted
                 // asynchronously into the queue
@@ -334,6 +323,12 @@ impl Scheduler {
         let dt = t_next.difference(&Tag::from(&self.logical_time));
         event!(tracing::Level::DEBUG, "Advance logical time by [{:?}]", dt,);
         self.logical_time.advance_to(&t_next);
+
+        if let RunMode::RunFor(run_for) = self.config.run_mode {
+            if self.get_elapsed_logical_time() >= run_for {
+                self.stop_requested.store(true);
+            }
+        }
 
         // Execute pre-handler setup functions; this sets the values of the corresponding actions
         tag_events.values().for_each(|setup| {
@@ -374,10 +369,6 @@ impl Scheduler {
         tag_events.keys().for_each(|&event_idx| {
             self.env.actions[event_idx].cleanup(&sched_point);
         });
-
-        if *sched_point.stop_requested.read().unwrap() {
-            self.stop_requested = true;
-        }
 
         // Call clean on set ports
         self.clear_ports_r

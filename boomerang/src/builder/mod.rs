@@ -14,7 +14,7 @@ pub use port::*;
 pub use reaction::*;
 pub use reactor::*;
 
-#[derive(thiserror::Error, Debug, Eq, PartialEq)]
+#[derive(thiserror::Error, Debug)]
 pub enum BuilderError {
     #[error("Duplicate Port Definition: {}.{}", reactor_name, port_name)]
     DuplicatePortDefinition {
@@ -52,6 +52,9 @@ pub enum BuilderError {
         port_b_key: runtime::BasePortKey,
         what: String,
     },
+
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
 trait TupleSlice {
@@ -74,20 +77,72 @@ impl<T: Sized> TupleSlice for [T] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use runtime::SchedulerPoint;
+
+    pub(crate) struct SchedulerDummy {}
+    impl SchedulerPoint for SchedulerDummy {
+        fn get_start_time(&self) -> &runtime::Instant {
+            todo!()
+        }
+        fn get_logical_time(&self) -> &runtime::Instant {
+            todo!()
+        }
+        fn get_physical_time(&self) -> runtime::Instant {
+            todo!()
+        }
+        fn get_elapsed_logical_time(&self) -> runtime::Duration {
+            todo!()
+        }
+        fn get_elapsed_physical_time(&self) -> runtime::Duration {
+            todo!()
+        }
+        fn set_port<T: runtime::PortData>(&self, _: runtime::PortKey<T>, _: T) {
+            todo!()
+        }
+        fn get_port<T: runtime::PortData>(&self, _: runtime::PortKey<T>) -> Option<T> {
+            todo!()
+        }
+        fn schedule_action<T: runtime::PortData>(
+            &self,
+            _: runtime::ActionKey<T>,
+            _: T,
+            _: Option<runtime::Duration>,
+        ) {
+            todo!()
+        }
+        fn schedule(&self, _: runtime::Tag, _: runtime::BaseActionKey) {
+            todo!()
+        }
+        fn shutdown(&self) {
+            todo!()
+        }
+    }
 
     pub(crate) struct TestReactorDummy;
-    impl Reactor for TestReactorDummy {
+    impl<S: runtime::SchedulerPoint> Reactor<S> for TestReactorDummy {
         type Inputs = EmptyPart;
         type Outputs = EmptyPart;
         type Actions = EmptyPart;
         fn build(
             self,
             _name: &str,
-            _env: &mut EnvBuilder,
+            _env: &mut EnvBuilder<S>,
             _parent: Option<runtime::ReactorKey>,
         ) -> Result<(runtime::ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
             // Ok((Self, EmptyPart, EmptyPart))
             todo!()
+        }
+
+        fn build_parts(
+            &self,
+            _: &mut EnvBuilder<S>,
+            _: runtime::ReactorKey,
+        ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError> {
+            Ok((
+                EmptyPart::default(),
+                EmptyPart::default(),
+                EmptyPart::default(),
+            ))
         }
     }
 
@@ -96,16 +151,7 @@ mod tests {
     pub(crate) struct TestReactorInputs {
         p0: runtime::PortKey<u32>,
     }
-    impl ReactorPart for TestReactorInputs {
-        fn build(
-            env: &mut EnvBuilder,
-            reactor_key: runtime::ReactorKey,
-        ) -> Result<Self, BuilderError> {
-            let p0 = env.add_port("p0", PortType::Input, reactor_key)?;
-            Ok(Self { p0 })
-        }
-    }
-    impl Reactor for TestReactor2 {
+    impl<S: SchedulerPoint> Reactor<S> for TestReactor2 {
         type Inputs = TestReactorInputs;
         type Outputs = EmptyPart;
         type Actions = EmptyPart;
@@ -113,10 +159,23 @@ mod tests {
         fn build(
             self,
             _name: &str,
-            _env: &mut EnvBuilder,
+            _env: &mut EnvBuilder<S>,
             _parent: Option<runtime::ReactorKey>,
         ) -> Result<(runtime::ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
             todo!()
+        }
+
+        fn build_parts(
+            &self,
+            env: &mut EnvBuilder<S>,
+            reactor_key: runtime::ReactorKey,
+        ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError> {
+            let p0 = env.add_port("p0", PortType::Input, reactor_key)?;
+            Ok((
+                Self::Inputs { p0 },
+                EmptyPart::default(),
+                EmptyPart::default(),
+            ))
         }
     }
 }

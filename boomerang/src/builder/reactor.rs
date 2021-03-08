@@ -3,33 +3,35 @@ use crate::runtime;
 use slotmap::SecondaryMap;
 use std::sync::{Arc, RwLock};
 
-pub trait Reactor: Send + Sync + 'static {
-    /// Type containing the Reactor's input Ports
-    type Inputs;
-    /// Type containing the Reactor's output Ports
-    type Outputs;
-    /// Type containing the Reactor's Actions
-    type Actions;
+/// ReactorPart
+pub trait ReactorPart: Send + Sync + Clone {}
+impl<T> ReactorPart for T where T: Send + Sync + Clone {}
+
+pub trait Reactor<S: runtime::SchedulerPoint>: Send + Sync {
+    /// Type containing the Reactors input Ports
+    type Inputs: ReactorPart = EmptyPart;
+    /// Type containing the Reactors output Ports
+    type Outputs: ReactorPart = EmptyPart;
+    /// Type containing the Reactors Actions
+    type Actions: ReactorPart = EmptyPart;
+
+    /// Build the Reactors' Inputs/Outputs/Actions
+    fn build_parts<'b>(
+        &'b self,
+        env: &'b mut EnvBuilder<S>,
+        reactor_key: runtime::ReactorKey,
+    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError>;
     /// Build a new Reactor with the given instance name
     fn build(
         self,
         name: &str,
-        env: &mut EnvBuilder,
+        env: &mut EnvBuilder<S>,
         parent: Option<runtime::ReactorKey>,
     ) -> Result<(runtime::ReactorKey, Self::Inputs, Self::Outputs), BuilderError>;
 }
 
-pub trait ReactorPart: Send + Sync + Clone + 'static {
-    fn build(env: &mut EnvBuilder, reactor_key: runtime::ReactorKey) -> Result<Self, BuilderError>;
-}
-
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct EmptyPart;
-impl ReactorPart for EmptyPart {
-    fn build(_: &mut EnvBuilder, _: runtime::ReactorKey) -> Result<Self, BuilderError> {
-        Ok(Self)
-    }
-}
 
 // ------------------------- //
 
@@ -61,27 +63,29 @@ impl ReactorBuilder {
 
 /// Builder struct used to facilitate construction of a ReactorType
 #[derive(Debug)]
-pub struct ReactorBuilderState<'a, R: Reactor> {
+pub struct ReactorBuilderState<'a, S, R>
+where
+    S: runtime::SchedulerPoint,
+    R: Reactor<S>,
+{
     reactor_key: runtime::ReactorKey,
     reactor: Arc<RwLock<R>>,
     pub inputs: R::Inputs,
     pub outputs: R::Outputs,
     pub actions: R::Actions,
-    env: &'a mut EnvBuilder,
+    env: &'a mut EnvBuilder<S>,
 }
 
-impl<'a, R> ReactorBuilderState<'a, R>
+impl<'a, S, R> ReactorBuilderState<'a, S, R>
 where
-    R: Reactor,
-    R::Inputs: ReactorPart,
-    R::Outputs: ReactorPart,
-    R::Actions: ReactorPart,
+    S: runtime::SchedulerPoint,
+    R: Reactor<S>,
 {
     pub(super) fn new(
         name: &str,
         parent: Option<runtime::ReactorKey>,
         reactor: R,
-        env: &'a mut EnvBuilder,
+        env: &'a mut EnvBuilder<S>,
     ) -> Self {
         let reactor_key = env.reactors.insert(ReactorBuilder::new(
             name,
@@ -89,9 +93,7 @@ where
             parent,
         ));
 
-        let inputs = R::Inputs::build(env, reactor_key).unwrap();
-        let outputs = R::Outputs::build(env, reactor_key).unwrap();
-        let actions = R::Actions::build(env, reactor_key).unwrap();
+        let (inputs, outputs, actions) = reactor.build_parts(env, reactor_key).unwrap();
 
         Self {
             reactor_key,
@@ -130,12 +132,16 @@ where
         self.env.add_timer(name, period, offset, self.reactor_key)
     }
 
-    pub fn add_reaction<F>(&mut self, reaction_fn: F) -> ReactionBuilderState
+    pub fn add_reaction<F>(&mut self, reaction_fn: F) -> ReactionBuilderState<S>
     where
-        F: Fn(&mut R, &runtime::SchedulerPoint, &R::Inputs, &R::Outputs, &R::Actions)
+        F: for<'c> Fn(&'c mut R, &'c S, &'c R::Inputs, &'c R::Outputs, &'c R::Actions)
             + Send
             + Sync
             + 'static,
+        R: 'static,
+        R::Inputs: 'static,
+        R::Outputs: 'static,
+        R::Actions: 'static,
     {
         // Priority = number of reactions declared thus far + 1
         let priority = self.env.reactors[self.reactor_key].reactions.len();
@@ -148,28 +154,15 @@ where
             std::any::type_name::<F>(),
             priority,
             self.reactor_key,
-            runtime::ReactionFn::new(move |sched| {
+            move |sched: &S| {
                 let mut reactor = reactor.write().unwrap();
                 reaction_fn(&mut *reactor, sched, &inputs, &outputs, &actions);
-            }),
+            },
             self.env,
         )
     }
 
     pub fn finish(self) -> Result<(runtime::ReactorKey, R::Inputs, R::Outputs), BuilderError> {
         Ok((self.reactor_key, self.inputs, self.outputs))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::builder::tests::*;
-
-    #[test]
-    fn test_add_input() {
-        let mut env_builder = EnvBuilder::new();
-        let _builder_state =
-            ReactorBuilderState::new("test_reactor", None, TestReactor2, &mut env_builder);
     }
 }

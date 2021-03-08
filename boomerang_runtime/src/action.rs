@@ -41,7 +41,7 @@ impl<T: PortData> From<BaseActionKey> for ActionKey<T> {
     }
 }
 
-pub trait BaseAction: Debug + Display + Send + Sync + ReactorElement {
+pub trait BaseAction<S: SchedulerPoint>: Debug + Display + Send + Sync + ReactorElement<S> {
     fn get_name(&self) -> &str;
     /// Is this a logical action?
     fn get_is_logical(&self) -> bool;
@@ -77,13 +77,13 @@ impl<T: PortData> Action<T> {
     }
 }
 
-impl<T: PortData> ReactorElement for Action<T> {
-    fn cleanup(&self, _scheduler: &SchedulerPoint) {
+impl<S: SchedulerPoint, T: PortData> ReactorElement<S> for Action<T> {
+    fn cleanup(&self, _scheduler: &S) {
         *self.value.write().unwrap() = None;
     }
 }
 
-impl<T: PortData> BaseAction for Action<T> {
+impl<S: SchedulerPoint, T: PortData> BaseAction<S> for Action<T> {
     fn get_name(&self) -> &str {
         &self.name
     }
@@ -124,7 +124,7 @@ impl Timer {
     }
 }
 
-impl BaseAction for Timer {
+impl<S: SchedulerPoint> BaseAction<S> for Timer {
     fn get_name(&self) -> &str {
         &self.name
     }
@@ -136,8 +136,8 @@ impl BaseAction for Timer {
     }
 }
 
-impl ReactorElement for Timer {
-    fn startup(&self, sched: &SchedulerPoint) {
+impl<S: SchedulerPoint> ReactorElement<S> for Timer {
+    fn startup(&self, sched: &S) {
         let t0 = Tag::from(sched.get_start_time());
         if self.offset > Duration::from_secs(0) {
             sched.schedule(t0.delay(Some(self.offset)), self.action_key);
@@ -146,7 +146,7 @@ impl ReactorElement for Timer {
         }
     }
 
-    fn cleanup(&self, sched: &SchedulerPoint) {
+    fn cleanup(&self, sched: &S) {
         // schedule the timer again
         if self.period > Duration::from_secs(0) {
             sched.schedule_action(self.action_key.into(), (), Some(self.period));
@@ -162,7 +162,7 @@ struct ShutdownAction {
     action_key: BaseActionKey,
 }
 
-impl BaseAction for ShutdownAction {
+impl<S: SchedulerPoint> BaseAction<S> for ShutdownAction {
     fn get_name(&self) -> &str {
         &self.name
     }
@@ -176,8 +176,8 @@ impl BaseAction for ShutdownAction {
     }
 }
 
-impl ReactorElement for ShutdownAction {
-    fn shutdown(&self, sched: & SchedulerPoint) {
+impl<S: SchedulerPoint> ReactorElement<S> for ShutdownAction {
+    fn shutdown(&self, sched: &S) {
         sched.schedule_action(self.action_key.into(), (), None);
     }
 }

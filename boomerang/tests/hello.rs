@@ -3,8 +3,7 @@ use boomerang::{
     runtime::{self, Duration, ReactorKey},
     ReactorActions,
 };
-use builder::ReactorPart;
-use runtime::{Config, RunMode};
+use runtime::{Config, RunMode, SchedulerPoint};
 
 // This test checks that logical time is incremented an appropriate
 // amount as a result of an invocation of the schedule() function at
@@ -65,12 +64,12 @@ impl Hello {
     }
 
     /// reaction_t is sensitive to Timer `t` and schedules Action `a`
-    fn reaction_t(
+    fn reaction_t<S: SchedulerPoint>(
         &mut self,
-        sched: &runtime::SchedulerPoint,
-        _inputs: &<Self as Reactor>::Inputs,
-        _outputs: &<Self as Reactor>::Outputs,
-        actions: &<Self as Reactor>::Actions,
+        sched: &S,
+        _inputs: &EmptyPart,
+        _outputs: &EmptyPart,
+        actions: &HelloActions,
     ) {
         // Print the current time.
         self.previous_time = sched.get_elapsed_logical_time();
@@ -79,20 +78,16 @@ impl Hello {
     }
 
     /// reaction_a is sensetive to Action `a`
-    fn reaction_a(
+    fn reaction_a<S: SchedulerPoint>(
         &mut self,
-        sched: &runtime::SchedulerPoint,
-        _inputs: &<Self as Reactor>::Inputs,
-        _outputs: &<Self as Reactor>::Outputs,
-        _actions: &<Self as Reactor>::Actions,
+        sched: &S,
+        _inputs: &EmptyPart,
+        _outputs: &EmptyPart,
+        _actions: &HelloActions,
     ) {
         self.count += 1;
         let time = sched.get_elapsed_logical_time();
-        println!(
-            "***** action {} at time {:?}",
-            self.count,
-            time
-        );
+        println!("***** action {} at time {:?}", self.count, time);
         let diff = time - self.previous_time;
         assert_eq!(
             diff,
@@ -103,8 +98,8 @@ impl Hello {
     }
 }
 
-ReactorActions!(HelloActions, (a, (), None));
-impl Reactor for Hello {
+ReactorActions!(Hello, HelloActions, (a, (), None));
+impl<S: SchedulerPoint> Reactor<S> for Hello {
     type Inputs = EmptyPart;
     type Outputs = EmptyPart;
     type Actions = HelloActions;
@@ -112,7 +107,7 @@ impl Reactor for Hello {
     fn build(
         self,
         name: &str,
-        env: &mut boomerang::builder::EnvBuilder,
+        env: &mut boomerang::builder::EnvBuilder<S>,
         parent: Option<ReactorKey>,
     ) -> Result<(ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
         let period = self.period;
@@ -133,6 +128,14 @@ impl Reactor for Hello {
 
         builder.finish()
     }
+
+    fn build_parts(
+        &self,
+        env: &mut builder::EnvBuilder<S>,
+        reactor_key: ReactorKey,
+    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError> {
+        Ok((EmptyPart, EmptyPart, HelloActions::build(env, reactor_key)?))
+    }
 }
 
 struct Inside {
@@ -145,7 +148,7 @@ impl Inside {
         }
     }
 }
-impl Reactor for Inside {
+impl<S: SchedulerPoint> Reactor<S> for Inside {
     type Inputs = EmptyPart;
     type Outputs = EmptyPart;
     type Actions = EmptyPart;
@@ -153,7 +156,7 @@ impl Reactor for Inside {
     fn build(
         self,
         name: &str,
-        env: &mut builder::EnvBuilder,
+        env: &mut builder::EnvBuilder<S>,
         parent: Option<runtime::ReactorKey>,
     ) -> Result<(runtime::ReactorKey, Self::Inputs, Self::Outputs), builder::BuilderError> {
         let hello = Hello::new(Duration::from_secs(1), &self.message);
@@ -161,10 +164,18 @@ impl Reactor for Inside {
         let (_, _, _) = hello.build("first_instance", env, Some(key))?;
         Ok((key, inputs, outputs))
     }
+
+    fn build_parts(
+        &self,
+        _env: &mut builder::EnvBuilder<S>,
+        _reactor_key: ReactorKey,
+    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError> {
+        Ok((EmptyPart, EmptyPart, EmptyPart))
+    }
 }
 
 struct Main;
-impl Reactor for Main {
+impl<S: SchedulerPoint> Reactor<S> for Main {
     type Inputs = EmptyPart;
     type Outputs = EmptyPart;
     type Actions = EmptyPart;
@@ -172,7 +183,7 @@ impl Reactor for Main {
     fn build(
         self,
         name: &str,
-        env: &mut boomerang::builder::EnvBuilder,
+        env: &mut boomerang::builder::EnvBuilder<S>,
         parent: Option<ReactorKey>,
     ) -> Result<(ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
         let (key, inputs, outputs) = env.add_reactor(name, parent, self).finish()?;
@@ -197,6 +208,14 @@ impl Reactor for Main {
 
         Ok((key, inputs, outputs))
     }
+
+    fn build_parts(
+        &self,
+        _env: &mut builder::EnvBuilder<S>,
+        _reactor_key: ReactorKey,
+    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError> {
+        Ok((EmptyPart, EmptyPart, EmptyPart))
+    }
 }
 
 #[test]
@@ -209,7 +228,7 @@ fn hello() {
     let mut env_builder = EnvBuilder::new();
     let (_, _, _) = Main {}.build("main", &mut env_builder, None).unwrap();
 
-    let env: runtime::Env = env_builder.try_into().unwrap();
+    let env: runtime::Env<_> = env_builder.try_into().unwrap();
     let mut sched = runtime::Scheduler::with_config(
         env,
         Config::new(RunMode::RunFor(Duration::from_secs(10)), true),

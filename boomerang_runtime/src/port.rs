@@ -7,7 +7,6 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-
 slotmap::new_key_type! {
     pub struct BasePortKey;
 }
@@ -112,7 +111,7 @@ where
     // }
 
     fn cleanup(&self) {
-        //event!(tracing::Level::DEBUG, ?self.name, "cleanup()");
+        // event!(tracing::Level::DEBUG, ?self.name, "cleanup()");
         *self.value.write().unwrap() = None;
     }
 }

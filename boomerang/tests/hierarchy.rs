@@ -1,4 +1,9 @@
-use boomerang::{ReactorInputs, ReactorOutputs, builder::{BuilderError, EmptyPart, EnvBuilder, PortType, Reactor, ReactorPart}, runtime::{self, PortKey, ReactorKey}};
+use boomerang::{
+    builder::{BuilderError, EmptyPart, EnvBuilder, Reactor},
+    runtime::{self, ReactorKey},
+    ReactorInputs, ReactorOutputs,
+};
+use runtime::SchedulerPoint;
 use std::convert::TryInto;
 use tracing::event;
 
@@ -55,12 +60,12 @@ impl Source {
     pub fn new(value: u32) -> Self {
         Self { value }
     }
-    fn reaction_out(
+    fn reaction_out<S: SchedulerPoint>(
         &mut self,
-        sched: &runtime::SchedulerPoint,
-        _inputs: &<Self as Reactor>::Inputs,
-        outputs: &<Self as Reactor>::Outputs,
-        _actions: &<Self as Reactor>::Actions,
+        sched: &S,
+        _inputs: &<Self as Reactor<S>>::Inputs,
+        outputs: &<Self as Reactor<S>>::Outputs,
+        _actions: &<Self as Reactor<S>>::Actions,
     ) {
         sched.set_port(outputs.out, self.value);
         event!(
@@ -71,9 +76,9 @@ impl Source {
     }
 }
 
-ReactorOutputs!(SourceOutputs, (out, u32));
+ReactorOutputs!(Source, SourceOutputs, (out, u32));
 
-impl Reactor for Source {
+impl<S: SchedulerPoint> Reactor<S> for Source {
     type Inputs = EmptyPart;
     type Outputs = SourceOutputs;
     type Actions = EmptyPart;
@@ -81,7 +86,7 @@ impl Reactor for Source {
     fn build(
         self,
         name: &str,
-        env: &mut EnvBuilder,
+        env: &mut EnvBuilder<S>,
         parent: Option<ReactorKey>,
     ) -> Result<(ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
         let mut builder = env.add_reactor(name, parent, self);
@@ -96,6 +101,18 @@ impl Reactor for Source {
 
         builder.finish()
     }
+
+    fn build_parts(
+        &self,
+        env: &mut EnvBuilder<S>,
+        reactor_key: ReactorKey,
+    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError> {
+        Ok((
+            EmptyPart,
+            SourceOutputs::build(env, reactor_key)?,
+            EmptyPart,
+        ))
+    }
 }
 
 struct Gain {
@@ -105,29 +122,29 @@ impl Gain {
     pub fn new(gain: u32) -> Self {
         Self { gain }
     }
-    fn reaction_in(
+    fn reaction_in<S: SchedulerPoint>(
         &mut self,
-        sched: &runtime::SchedulerPoint,
-        inputs: &<Self as Reactor>::Inputs,
-        outputs: &<Self as Reactor>::Outputs,
-        _actions: &<Self as Reactor>::Actions,
+        sched: &S,
+        inputs: &<Self as Reactor<S>>::Inputs,
+        outputs: &<Self as Reactor<S>>::Outputs,
+        _actions: &<Self as Reactor<S>>::Actions,
     ) {
         let in_val: u32 = sched.get_port(inputs.inp).unwrap();
         sched.set_port(outputs.out, in_val * self.gain);
     }
 }
 
-ReactorInputs!(GainInputs, (inp, u32));
-ReactorOutputs!(GainOutputs, (out, u32));
+ReactorInputs!(Gain, GainInputs, (inp, u32));
+ReactorOutputs!(Gain, GainOutputs, (out, u32));
 
-impl Reactor for Gain {
+impl<S: SchedulerPoint> Reactor<S> for Gain {
     type Inputs = GainInputs;
     type Outputs = GainOutputs;
     type Actions = EmptyPart;
     fn build(
         self,
         name: &str,
-        env: &mut EnvBuilder,
+        env: &mut EnvBuilder<S>,
         parent: Option<ReactorKey>,
     ) -> Result<(ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
         let mut builder = env.add_reactor(name, parent, self);
@@ -142,6 +159,18 @@ impl Reactor for Gain {
 
         builder.finish()
     }
+
+    fn build_parts(
+        &self,
+        env: &mut EnvBuilder<S>,
+        reactor_key: ReactorKey,
+    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError> {
+        Ok((
+            GainInputs::build(env, reactor_key)?,
+            GainOutputs::build(env, reactor_key)?,
+            EmptyPart,
+        ))
+    }
 }
 
 struct Print;
@@ -149,12 +178,12 @@ impl Print {
     pub fn new() -> Self {
         Self
     }
-    fn reaction_in(
+    fn reaction_in<S: SchedulerPoint>(
         &mut self,
-        sched: &runtime::SchedulerPoint,
-        inputs: &<Self as Reactor>::Inputs,
-        _outputs: &<Self as Reactor>::Outputs,
-        _actions: &<Self as Reactor>::Actions,
+        sched: &S,
+        inputs: &<Self as Reactor<S>>::Inputs,
+        _outputs: &<Self as Reactor<S>>::Outputs,
+        _actions: &<Self as Reactor<S>>::Actions,
     ) {
         let value = sched.get_port::<u32>(inputs.inp);
         event!(tracing::Level::INFO, "Received {:?}", value);
@@ -162,8 +191,8 @@ impl Print {
     }
 }
 
-ReactorInputs!(PrintInputs, (inp, u32));
-impl Reactor for Print {
+ReactorInputs!(Print, PrintInputs, (inp, u32));
+impl<S: SchedulerPoint> Reactor<S> for Print {
     type Inputs = PrintInputs;
     type Outputs = EmptyPart;
     type Actions = EmptyPart;
@@ -171,7 +200,7 @@ impl Reactor for Print {
     fn build(
         self,
         name: &str,
-        env: &mut EnvBuilder,
+        env: &mut EnvBuilder<S>,
         parent: Option<ReactorKey>,
     ) -> Result<(ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
         let mut builder = env.add_reactor(name, parent, self);
@@ -182,6 +211,14 @@ impl Reactor for Print {
             .finish();
         builder.finish()
     }
+
+    fn build_parts(
+        &self,
+        env: &mut EnvBuilder<S>,
+        reactor_key: ReactorKey,
+    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError> {
+        Ok((PrintInputs::build(env, reactor_key)?, EmptyPart, EmptyPart))
+    }
 }
 
 struct GainContainer;
@@ -191,9 +228,14 @@ impl GainContainer {
     }
 }
 
-ReactorInputs!(GainContainerInputs, (inp, u32));
-ReactorOutputs!(GainContainerOutputs, (out1, u32), (out2, u32));
-impl Reactor for GainContainer {
+ReactorInputs!(GainContainer, GainContainerInputs, (inp, u32));
+ReactorOutputs!(
+    GainContainer,
+    GainContainerOutputs,
+    (out1, u32),
+    (out2, u32)
+);
+impl<S: SchedulerPoint> Reactor<S> for GainContainer {
     type Inputs = GainContainerInputs;
     type Outputs = GainContainerOutputs;
     type Actions = EmptyPart;
@@ -201,7 +243,7 @@ impl Reactor for GainContainer {
     fn build(
         self,
         name: &str,
-        env: &mut EnvBuilder,
+        env: &mut EnvBuilder<S>,
         parent: Option<ReactorKey>,
     ) -> Result<(ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
         let builder = env.add_reactor(name, parent, self);
@@ -212,13 +254,25 @@ impl Reactor for GainContainer {
         env.bind_port(gain_out.out, outputs.out2)?;
         Ok((parent_key, inputs, outputs))
     }
+
+    fn build_parts(
+        &self,
+        env: &mut EnvBuilder<S>,
+        reactor_key: ReactorKey,
+    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError> {
+        Ok((
+            GainContainerInputs::build(env, reactor_key)?,
+            GainContainerOutputs::build(env, reactor_key)?,
+            EmptyPart,
+        ))
+    }
 }
 
 struct Hierarchy {
     num_prints: usize,
 }
 
-impl Reactor for Hierarchy {
+impl<S: SchedulerPoint> Reactor<S> for Hierarchy {
     type Inputs = EmptyPart;
     type Outputs = EmptyPart;
     type Actions = EmptyPart;
@@ -226,7 +280,7 @@ impl Reactor for Hierarchy {
     fn build(
         self,
         name: &str,
-        env: &mut EnvBuilder,
+        env: &mut EnvBuilder<S>,
         parent: Option<ReactorKey>,
     ) -> Result<(ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
         let num_prints = self.num_prints;
@@ -251,6 +305,14 @@ impl Reactor for Hierarchy {
 
         Ok((parent_key, EmptyPart, EmptyPart))
     }
+
+    fn build_parts(
+        &self,
+        _env: &mut EnvBuilder<S>,
+        _reactor_key: ReactorKey,
+    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError> {
+        Ok((EmptyPart, EmptyPart, EmptyPart))
+    }
 }
 
 impl Hierarchy {
@@ -271,7 +333,7 @@ fn hierarchy() {
         .build("top", &mut env_builder, None)
         .unwrap();
 
-    let env: runtime::Env = env_builder.try_into().unwrap();
+    let env: runtime::Env<_> = env_builder.try_into().unwrap();
     let mut sched = runtime::Scheduler::new(env);
     sched.start().unwrap();
 }

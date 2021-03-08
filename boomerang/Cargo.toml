@@ -11,6 +11,7 @@ repository = 'https://gitlab.com/jondo2010/boomerang'
 documentation = 'https://docs.rs/boomerang'
 categories = []
 exclude = ['.gitignore', '.cargo/config', '.gitlab-ci.yml']
+
 [badges]
 gitlab = { repository = 'jondo2010/boomerang', branch = 'master' }
 codecov = { repository = 'jondo2010/boomerang', branch = 'master', service = 'gitlab' }
@@ -20,10 +21,11 @@ boomerang_runtime = { path = "../boomerang_runtime" }
 derivative = "2.2.0"
 derive_more = '0.99.11'
 petgraph = "0.5.1"
-thiserror = "1.0.23"
+thiserror = "1.0.24"
 tracing = "0.1.23"
 slotmap = { version = "1.0.2", features = ["unstable"] }
 itertools = "0.10.0"
+anyhow = "1.0.38"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.2.15", features = ["fmt"] }

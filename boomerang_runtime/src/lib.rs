@@ -22,5 +22,4 @@ pub use std::time::{Duration, Instant};
 extern crate derivative;
 
 #[derive(thiserror::Error, Debug, Eq, PartialEq)]
-pub enum RuntimeError {
-}
+pub enum RuntimeError {}

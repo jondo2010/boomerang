@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 #![feature(map_first_last)]
+#![feature(associated_type_defaults)]
 
 #[macro_use]
 extern crate derivative;

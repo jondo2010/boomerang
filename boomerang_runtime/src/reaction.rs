@@ -5,107 +5,60 @@ slotmap::new_key_type! {
     pub struct ReactionKey;
 }
 
-pub trait ReactionFnTrait: FnMut(&SchedulerPoint) + Send + Sync {}
-impl<T> ReactionFnTrait for T where T: FnMut(&SchedulerPoint) + Send + Sync {}
-pub struct ReactionFn(Box<dyn ReactionFnTrait>);
-impl ReactionFn {
-    pub fn new<F>(f: F) -> Self
-    where
-        F: FnMut(&SchedulerPoint) + Send + Sync + 'static,
-    {
-        Self(Box::new(f))
-    }
+pub trait ReactionFn<S>: FnMut(&S) + Send + Sync
+where
+    S: SchedulerPoint,
+{
 }
 
-impl Debug for ReactionFn {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("ReactionFn").finish()
-    }
+impl<S, F> ReactionFn<S> for F
+where
+    S: SchedulerPoint,
+    F: FnMut(&S) + Send + Sync,
+{
 }
 
-impl Ord for ReactionFn {
-    fn cmp(&self, _: &Self) -> std::cmp::Ordering {
-        std::cmp::Ordering::Equal
-    }
-}
-
-impl PartialOrd for ReactionFn {
-    fn partial_cmp(&self, _: &Self) -> Option<std::cmp::Ordering> {
-        Some(std::cmp::Ordering::Equal)
-    }
-}
-
-impl Eq for ReactionFn {}
-
-impl PartialEq for ReactionFn {
-    fn eq(&self, _: &Self) -> bool {
-        true
-    }
-}
-
-#[derive(Debug)]
-pub struct Deadline {
+#[derive(Derivative)]
+#[derivative(Debug, PartialEq)]
+pub struct Deadline<S>
+where
+    S: SchedulerPoint,
+{
     deadline: Duration,
-    handler: RwLock<ReactionFn>,
+    #[derivative(PartialEq = "ignore")]
+    #[derivative(Debug = "ignore")]
+    handler: RwLock<Box<dyn ReactionFn<S>>>,
 }
 
-impl PartialEq for Deadline {
-    fn eq(&self, other: &Self) -> bool {
-        self.deadline.eq(&other.deadline)
-    }
-}
-
-impl Eq for Deadline {}
-
-impl PartialOrd for Deadline {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.deadline.partial_cmp(&other.deadline)
-    }
-}
-
-impl Ord for Deadline {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.deadline.cmp(&other.deadline)
-    }
-}
-
-#[derive(Debug)]
-pub struct Reaction {
+#[derive(Derivative)]
+#[derivative(Debug, PartialEq)]
+pub struct Reaction<S>
+where
+    S: SchedulerPoint,
+{
     name: String,
     /// Inverse priority determined by dependency analysis.
     level: usize,
     /// Reaction closure
-    body: RwLock<ReactionFn>,
+    #[derivative(PartialEq = "ignore")]
+    #[derivative(Debug = "ignore")]
+    body: RwLock<Box<dyn ReactionFn<S>>>,
     /// Local deadline relative to the time stamp for invocation of the reaction.
-    deadline: Option<Deadline>,
+    deadline: Option<Deadline<S>>,
 }
 
-impl PartialEq for Reaction {
-    fn eq(&self, other: &Self) -> bool {
-        self.name.eq(&other.name) && self.level.eq(&other.level)
-    }
-}
-
-impl Eq for Reaction {}
-
-impl PartialOrd for Reaction {
-    fn partial_cmp(&self, _other: &Self) -> Option<std::cmp::Ordering> {
-        todo!()
-    }
-}
-
-impl Ord for Reaction {
-    fn cmp(&self, _other: &Self) -> std::cmp::Ordering {
-        todo!()
-    }
-}
-
-impl Reaction {
-    pub fn new(name: String, level: usize, body: ReactionFn, deadline: Option<Deadline>) -> Self {
+impl<S> Reaction<S>
+where
+    S: SchedulerPoint,
+{
+    pub fn new<F>(name: String, level: usize, body: F, deadline: Option<Deadline<S>>) -> Self
+    where
+        F: ReactionFn<S> + 'static,
+    {
         Self {
             name,
-            level: level,
-            body: RwLock::new(body),
+            level,
+            body: RwLock::new(Box::new(body)),
             deadline,
         }
     }
@@ -118,22 +71,29 @@ impl Reaction {
         &self.name
     }
 
-    pub fn trigger(&self, sched: &SchedulerPoint) {
+    pub fn trigger<'b>(&self, sched: &'b S) {
         match self.deadline.as_ref() {
-            Some(Deadline {
-                deadline: _,
-                handler: _,
-            }) => {
-                // let lag = container()->get_physical_time() - container()->get_logical_time();
-                // if lag > deadline {
-                // handler();
-                // return;
-                // }
+            Some(Deadline { deadline, handler }) => {
+                let lag = sched.get_physical_time() - *sched.get_logical_time();
+                if lag > *deadline {
+                    (handler.write().unwrap())(sched);
+                }
             }
             _ => {}
         }
 
-        let mut body = self.body.write().unwrap();
-        (body.0.as_mut())(sched)
+        (self.body.write().unwrap())(sched);
     }
+}
+
+#[test]
+fn test_new() {
+    let _ = Reaction::new(
+        "test".into(),
+        0,
+        |sched: &crate::Scheduler| {
+            let _x = sched.get_start_time();
+        },
+        None,
+    );
 }

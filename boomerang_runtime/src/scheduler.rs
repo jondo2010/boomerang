@@ -7,10 +7,7 @@ use crate::RuntimeError;
 use crossbeam_channel::{Receiver, Sender};
 use crossbeam_utils::atomic::AtomicCell;
 use rayon::prelude::*;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt::Debug,
-};
+use std::collections::{BTreeMap, BTreeSet};
 use tracing::event;
 
 type PreHandlerFn = Box<dyn Fn() -> () + Send + Sync>;
@@ -42,44 +39,47 @@ impl Config {
     }
 }
 
-/// SchedulerPoint is a short-lived container passed by the Scheduler to Reaction functions.
-#[derive(Debug, Clone)]
-pub struct SchedulerPoint<'a> {
-    scheduler: &'a Scheduler,
-    env: &'a Env,
+pub trait SchedulerPoint: Send + Sync + 'static {
+    fn get_start_time(&self) -> &Instant;
+    fn get_logical_time(&self) -> &Instant;
+    fn get_physical_time(&self) -> Instant;
+    fn get_elapsed_logical_time(&self) -> Duration;
+    fn get_elapsed_physical_time(&self) -> Duration;
+    fn set_port<T: PortData>(&self, port_key: PortKey<T>, value: T);
+    fn get_port<T: PortData>(&self, port_key: PortKey<T>) -> Option<T>;
+    fn schedule_action<T: PortData>(
+        &self,
+        action_key: ActionKey<T>,
+        _value: T,
+        delay: Option<super::Duration>,
+    );
+    fn schedule(&self, tag: Tag, action_key: BaseActionKey);
+    fn shutdown(&self);
 }
 
-impl<'a> SchedulerPoint<'a> {
-    fn new(scheduler: &'a Scheduler, env: &'a Env) -> Self {
-        SchedulerPoint {
-            scheduler,
-            env,
-        }
+impl SchedulerPoint for Scheduler {
+    fn get_start_time(&self) -> &Instant {
+        self.get_start_time()
     }
 
-    pub fn get_start_time(&self) -> &Instant {
-        self.scheduler.get_start_time()
+    fn get_logical_time(&self) -> &Instant {
+        self.get_logical_time().get_time_point()
     }
 
-    pub fn get_logical_time(&self) -> &Instant {
-        self.scheduler.get_logical_time().get_time_point()
+    fn get_physical_time(&self) -> Instant {
+        self.get_physical_time()
     }
 
-    pub fn get_physical_time(&self) -> Instant {
-        self.scheduler.get_physical_time()
+    fn get_elapsed_logical_time(&self) -> Duration {
+        self.get_elapsed_logical_time()
     }
 
-    pub fn get_elapsed_logical_time(&self) -> Duration {
-        self.scheduler.get_elapsed_logical_time()
+    fn get_elapsed_physical_time(&self) -> Duration {
+        self.get_physical_time()
+            .saturating_duration_since(*self.get_start_time())
     }
 
-    pub fn get_elapsed_physical_time(&self) -> Duration {
-        self.scheduler
-            .get_physical_time()
-            .saturating_duration_since(*self.scheduler.get_start_time())
-    }
-
-    pub fn set_port<T: PortData>(&self, port_key: PortKey<T>, value: T) {
+    fn set_port<T: PortData>(&self, port_key: PortKey<T>, value: T) {
         self.env.get_port(port_key).unwrap().set(Some(value));
 
         // Schedule any reactions triggered by this port being set.
@@ -87,19 +87,19 @@ impl<'a> SchedulerPoint<'a> {
 
         for sub_reaction_key in self.env.port_triggers[port_key].keys() {
             let new_reaction_level = self.env.reactions[sub_reaction_key].get_level();
-            self.scheduler.reaction_queue_s[new_reaction_level]
+            self.reaction_queue_s[new_reaction_level]
                 .send(sub_reaction_key)
                 .unwrap();
         }
 
         // Add this port to the list of ports that need to be cleared
-        self.scheduler.clear_ports_s.send(port_key).unwrap();
+        self.clear_ports_s.send(port_key).unwrap();
     }
-    pub fn get_port<T: PortData>(&self, port_key: PortKey<T>) -> Option<T> {
+    fn get_port<T: PortData>(&self, port_key: PortKey<T>) -> Option<T> {
         self.env.get_port(port_key).unwrap().get()
     }
 
-    pub fn schedule_action<T: PortData>(
+    fn schedule_action<T: PortData>(
         &self,
         action_key: ActionKey<T>,
         _value: T,
@@ -111,24 +111,24 @@ impl<'a> SchedulerPoint<'a> {
             let delay = delay.unwrap_or_default();
             let tag =
                 Tag::from(self.get_logical_time()).delay(Some(delay + action.get_min_delay()));
-            self.scheduler.schedule(tag, action_key.into(), None);
+            self.schedule(tag, action_key.into(), None);
         }
     }
 
-    pub fn schedule(&self, tag: Tag, action_key: BaseActionKey) {
-        self.scheduler.schedule(tag, action_key, None);
+    fn schedule(&self, tag: Tag, action_key: BaseActionKey) {
+        self.schedule(tag, action_key, None);
     }
 
-    pub fn shutdown(&self) {
+    fn shutdown(&self) {
         event!(tracing::Level::INFO, "Schduler shutdown requested...");
         // all reactors shutdown()
-        self.scheduler.stop();
+        self.stop();
     }
 }
 
 pub struct Scheduler {
     config: Config,
-    env: Env,
+    env: Env<Self>,
 
     /// Physical time the Scheduler was started
     start_time: Instant,
@@ -153,14 +153,8 @@ pub struct Scheduler {
     stop_requested: AtomicCell<bool>,
 }
 
-impl Debug for Scheduler {
-    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
-    }
-}
-
 impl Scheduler {
-    pub fn new(env: Env) -> Self {
+    pub fn new(env: Env<Self>) -> Self {
         Self::with_config(
             env,
             Config {
@@ -170,7 +164,7 @@ impl Scheduler {
         )
     }
 
-    pub fn with_config(env: Env, config: Config) -> Self {
+    pub fn with_config(env: Env<Self>, config: Config) -> Self {
         let (events_channel_s, events_channel_r) = crossbeam_channel::unbounded();
         let (reaction_queue_s, reaction_queue_r) =
             std::iter::repeat_with(crossbeam_channel::unbounded)
@@ -230,16 +224,26 @@ impl Scheduler {
 
     pub fn start(&mut self) -> Result<(), RuntimeError> {
         event!(tracing::Level::INFO, "Starting the scheduler...");
-        let sched_point = SchedulerPoint::new(&self, &self.env);
-        self.env.startup(&sched_point);
-        while self.next()? {}
-        Ok(())
+        self.env.startup(self);
+        self.run()
     }
 
     pub fn stop(&self) {
-        let sched_point = SchedulerPoint::new(&self, &self.env);
-        self.env.shutdown(&sched_point);
+        self.env.shutdown(&self);
         self.stop_requested.store(true);
+    }
+
+    fn run(&mut self) -> Result<(), RuntimeError> {
+        while let Some((t_next, tag_events, run_again)) = self.get_next_tagged_events() {
+            let dt = t_next.difference(&Tag::from(&self.logical_time));
+            event!(tracing::Level::DEBUG, "Advance logical time by [{:?}]", dt,);
+            self.logical_time.advance_to(&t_next);
+            self.next(tag_events)?;
+            if !run_again {
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn get_next_tagged_events(&mut self) -> Option<(Tag, EventMap, bool)> {
@@ -261,8 +265,7 @@ impl Scheduler {
                     tracing::Level::DEBUG,
                     "No more events in queue. -> Terminate!"
                 );
-                let sched = SchedulerPoint::new(&self, &self.env);
-                self.env.shutdown(&sched);
+                self.env.shutdown(&self);
 
                 // The shutdown call might schedule shutdown reactions. If none was scheduled, we
                 // simply return.
@@ -312,18 +315,15 @@ impl Scheduler {
         Some((t_next, tag_events, run_again))
     }
 
-    fn next(&mut self) -> Result<bool, RuntimeError> {
-        let next_events = self.get_next_tagged_events();
-        if next_events.is_none() {
-            return Ok(false);
-        }
-        let (t_next, tag_events, run_again) = next_events.unwrap();
+    fn trigger_reactions(&self, reaction_keys: BTreeSet<ReactionKey>) {
+        reaction_keys.par_iter().for_each(|&key| {
+            let reaction = &self.env.reactions[key];
+            event!(tracing::Level::DEBUG, "Executing {}", reaction.get_name());
+            reaction.trigger(self);
+        });
+    }
 
-        // advance logical time
-        let dt = t_next.difference(&Tag::from(&self.logical_time));
-        event!(tracing::Level::DEBUG, "Advance logical time by [{:?}]", dt,);
-        self.logical_time.advance_to(&t_next);
-
+    fn next(&self, tag_events: EventMap) -> Result<(), RuntimeError> {
         if let RunMode::RunFor(run_for) = self.config.run_mode {
             if self.get_elapsed_logical_time() >= run_for {
                 self.stop_requested.store(true);
@@ -349,25 +349,15 @@ impl Scheduler {
         }
 
         // Process all Reactions in the queue in order of index
-        let sched_point = SchedulerPoint::new(&self, &self.env);
         for rqueue_r in self.reaction_queue_r.iter() {
             // Pull all the ReactionIdx at this level into a set
-            let reactions: BTreeSet<ReactionKey> = rqueue_r.try_iter().collect();
-            reactions.par_iter().for_each(|&reaction_idx| {
-                let reaction = &self.env.reactions[reaction_idx];
-                event!(
-                    tracing::Level::DEBUG,
-                    ?reaction_idx,
-                    "Executing {}",
-                    reaction.get_name()
-                );
-                reaction.trigger(&sched_point);
-            });
+            let rqueue_keys: BTreeSet<ReactionKey> = rqueue_r.try_iter().collect();
+            self.trigger_reactions(rqueue_keys);
         }
 
         // cleanup all triggered actions
         tag_events.keys().for_each(|&event_idx| {
-            self.env.actions[event_idx].cleanup(&sched_point);
+            self.env.actions[event_idx].cleanup(&self);
         });
 
         // Call clean on set ports
@@ -376,6 +366,6 @@ impl Scheduler {
             .map(|port_key| &self.env.ports[port_key])
             .for_each(|port| port.cleanup());
 
-        Ok(run_again)
+        Ok(())
     }
 }

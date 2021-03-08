@@ -1,7 +1,7 @@
 use std::convert::TryInto;
 
-use boomerang::{ReactorOutputs, runtime};
 use boomerang::{builder::*, runtime::SchedulerPoint};
+use boomerang::{runtime, ReactorOutputs};
 
 struct Count {
     max_count: u32,
@@ -12,12 +12,12 @@ impl Count {
     fn new(max_count: u32) -> Self {
         Self { max_count, i: 0 }
     }
-    fn reaction_t(
+    fn reaction_t<S: SchedulerPoint>(
         &mut self,
-        sched: &SchedulerPoint,
-        _inputs: &<Self as Reactor>::Inputs,
-        outputs: &<Self as Reactor>::Outputs,
-        _actions: &<Self as Reactor>::Actions,
+        sched: &S,
+        _inputs: &EmptyPart,
+        outputs: &CountOutputs,
+        _actions: &EmptyPart,
     ) {
         self.i += 1;
         sched.set_port(outputs.c, self.i);
@@ -27,8 +27,8 @@ impl Count {
     }
 }
 
-ReactorOutputs!(CountOutputs, (c, u32));
-impl Reactor for Count {
+ReactorOutputs!(Count, CountOutputs, (c, u32));
+impl<'a, S: SchedulerPoint> Reactor<S> for Count {
     type Inputs = EmptyPart;
     type Outputs = CountOutputs;
     type Actions = EmptyPart;
@@ -36,7 +36,7 @@ impl Reactor for Count {
     fn build(
         self,
         name: &str,
-        env: &mut EnvBuilder,
+        env: &mut EnvBuilder<S>,
         parent: Option<runtime::ReactorKey>,
     ) -> Result<(runtime::ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
         let mut builder = env.add_reactor(name, parent, self);
@@ -57,6 +57,14 @@ impl Reactor for Count {
 
         builder.finish()
     }
+
+    fn build_parts(
+        &self,
+        env: &mut EnvBuilder<S>,
+        reactor_key: runtime::ReactorKey,
+    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError> {
+        Ok((EmptyPart, CountOutputs::build(env, reactor_key)?, EmptyPart))
+    }
 }
 
 #[test]
@@ -70,7 +78,7 @@ fn count() {
         .build("count", &mut env_builder, None)
         .unwrap();
 
-    let env: runtime::Env = env_builder.try_into().unwrap();
+    let env: runtime::Env<_> = env_builder.try_into().unwrap();
     let mut sched = runtime::Scheduler::new(env);
     sched.start().unwrap();
 }

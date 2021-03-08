@@ -1,19 +1,21 @@
 use super::{BuilderError, EnvBuilder, PortType};
 use crate::runtime;
-
-use runtime::PortData;
 use slotmap::SecondaryMap;
 
-#[derive(Derivative, Eq)]
+#[derive(Derivative)]
 #[derivative(Debug)]
-pub struct ReactionBuilder {
+pub struct ReactionBuilder<S> {
+    #[derivative(Ord = "ignore")]
+    #[derivative(PartialEq = "ignore")]
     pub(super) name: String,
     /// Unique ordering of this reaction within the reactor.
     pub(super) priority: usize,
     /// The owning Reactor for this Reaction
     pub(super) reactor_key: runtime::ReactorKey,
+
     #[derivative(Debug = "ignore")]
-    pub(super) reaction_fn: runtime::ReactionFn,
+    pub(super) reaction_fn: Box<dyn runtime::ReactionFn<S>>,
+
     trigger_actions: SecondaryMap<runtime::BaseActionKey, ()>,
     schedulable_actions: SecondaryMap<runtime::BaseActionKey, ()>,
     trigger_ports: SecondaryMap<runtime::BasePortKey, ()>,
@@ -21,45 +23,51 @@ pub struct ReactionBuilder {
     pub(super) antideps: SecondaryMap<runtime::BasePortKey, ()>,
 }
 
-impl Ord for ReactionBuilder {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.priority
-            .cmp(&other.priority)
-            .then_with(|| self.reactor_key.cmp(&other.reactor_key))
-    }
+// impl Ord for ReactionBuilder {
+// fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+// self.priority
+// .cmp(&other.priority)
+// .then_with(|| self.reactor_key.cmp(&other.reactor_key))
+// }
+// }
+//
+// impl PartialOrd for ReactionBuilder {
+// fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+// Some(self.cmp(&other))
+// }
+// }
+//
+// impl PartialEq for ReactionBuilder {
+// fn eq(&self, other: &Self) -> bool {
+// self.priority.eq(&other.priority) && self.reactor_key.eq(&other.reactor_key)
+// }
+// }
+
+pub struct ReactionBuilderState<'a, S> {
+    reaction: ReactionBuilder<S>,
+    env: &'a mut EnvBuilder<S>,
 }
 
-impl PartialOrd for ReactionBuilder {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(&other))
-    }
-}
-
-impl PartialEq for ReactionBuilder {
-    fn eq(&self, other: &Self) -> bool {
-        self.priority.eq(&other.priority) && self.reactor_key.eq(&other.reactor_key)
-    }
-}
-
-pub struct ReactionBuilderState<'a> {
-    reaction: ReactionBuilder,
-    env: &'a mut EnvBuilder,
-}
-
-impl<'a> ReactionBuilderState<'a> {
-    pub fn new(
+impl<'a, S> ReactionBuilderState<'a, S>
+where
+    S: runtime::SchedulerPoint,
+{
+    pub fn new<F>(
         name: &str,
         priority: usize,
         reactor_key: runtime::ReactorKey,
-        reaction_fn: runtime::ReactionFn,
-        env: &'a mut EnvBuilder,
-    ) -> Self {
+        reaction_fn: F,
+        env: &'a mut EnvBuilder<S>,
+    ) -> Self
+    where
+        F: runtime::ReactionFn<S> + 'static,
+    {
         Self {
             reaction: ReactionBuilder {
                 name: name.into(),
                 priority,
                 reactor_key,
-                reaction_fn,
+                reaction_fn: Box::new(reaction_fn),
                 trigger_ports: SecondaryMap::new(),
                 schedulable_actions: SecondaryMap::new(),
                 trigger_actions: SecondaryMap::new(),
@@ -75,9 +83,9 @@ impl<'a> ReactionBuilderState<'a> {
         self
     }
 
-    pub fn with_trigger_port<T: PortData>(mut self, port_key: runtime::PortKey<T>) -> Self {
-        self.reaction.trigger_ports.insert(port_key.into(), ());
-        self.reaction.deps.insert(port_key.into(), ());
+    pub fn with_trigger_port(mut self, port_key: runtime::BasePortKey) -> Self {
+        self.reaction.trigger_ports.insert(port_key, ());
+        self.reaction.deps.insert(port_key, ());
         self
     }
 
@@ -86,13 +94,19 @@ impl<'a> ReactionBuilderState<'a> {
         self
     }
 
-    pub fn with_antidependency<T: PortData>(mut self, antidep_key: runtime::PortKey<T>) -> Self {
+    pub fn with_antidependency<T: runtime::PortData>(
+        mut self,
+        antidep_key: runtime::PortKey<T>,
+    ) -> Self {
         self.reaction.antideps.insert(antidep_key.into(), ());
         self
     }
 
     pub fn finish(self) -> Result<runtime::ReactionKey, BuilderError> {
-        let Self { reaction: reaction_builder, env } = self;
+        let Self {
+            reaction: reaction_builder,
+            env,
+        } = self;
         let reactor = &mut env.reactors[reaction_builder.reactor_key];
         let reactions = &mut env.reaction_builders;
         let actions = &mut env.action_builders;

@@ -78,27 +78,35 @@ where
         }
     }
 
+    /// Indicate that this Reaction can be triggered by the given Action
     pub fn with_trigger_action(mut self, trigger_key: runtime::BaseActionKey) -> Self {
         self.reaction.trigger_actions.insert(trigger_key, ());
         self
     }
 
+    /// Indicate that this Reaction can be triggered by the given Port
     pub fn with_trigger_port(mut self, port_key: runtime::BasePortKey) -> Self {
         self.reaction.trigger_ports.insert(port_key, ());
         self.reaction.deps.insert(port_key, ());
         self
     }
 
+    /// Indicate that this Reaction may schedule the given Action
     pub fn with_scheduable_action(mut self, action_key: runtime::BaseActionKey) -> Self {
         self.reaction.schedulable_actions.insert(action_key, ());
         self
     }
 
-    pub fn with_antidependency<T: runtime::PortData>(
-        mut self,
-        antidep_key: runtime::PortKey<T>,
-    ) -> Self {
-        self.reaction.antideps.insert(antidep_key.into(), ());
+    pub fn with_scheduable_actions(mut self, action_keys: &[runtime::BaseActionKey]) -> Self {
+        self.reaction
+            .schedulable_actions
+            .extend(action_keys.iter().map(|&key| (key, ())));
+        self
+    }
+
+    /// Indicate that this Reaction may set the value of the given Port.
+    pub fn with_antidependency(mut self, antidep_key: runtime::BasePortKey) -> Self {
+        self.reaction.antideps.insert(antidep_key, ());
         self
     }
 

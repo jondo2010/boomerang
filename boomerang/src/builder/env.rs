@@ -114,6 +114,7 @@ where
         Ok(key.into())
     }
 
+    /// Add an Action to a given Reactor using closure F
     pub fn add_action<F: Fn(runtime::BaseActionKey) -> Arc<dyn runtime::BaseAction<S>>>(
         &mut self,
         name: &str,
@@ -148,20 +149,20 @@ where
 
     /// Bind Port A to Port B
     /// The nominal case is to bind Input A to Output B
-    pub fn bind_port<T: runtime::PortData>(
+    pub fn bind_port(
         &mut self,
-        port_a_key: runtime::PortKey<T>,
-        port_b_key: runtime::PortKey<T>,
+        port_a_key: runtime::BasePortKey,
+        port_b_key: runtime::BasePortKey,
     ) -> Result<(), BuilderError> {
         let [port_a, port_b] = self
             .port_builders
-            .get_disjoint_mut([port_a_key.into(), port_b_key.into()])
+            .get_disjoint_mut([port_a_key, port_b_key])
             .unwrap();
 
         if port_b.get_inward_binding().is_some() {
             return Err(BuilderError::PortBindError {
-                port_a_key: port_a_key.into(),
-                port_b_key: port_b_key.into(),
+                port_a_key,
+                port_b_key,
                 what: format!(
                     "Ports may only be connected once, but B is already connected to {:?}",
                     port_b.get_inward_binding()
@@ -171,16 +172,16 @@ where
 
         if port_a.get_deps().len() > 0 {
             return Err(BuilderError::PortBindError {
-                port_a_key: port_a_key.into(),
-                port_b_key: port_b_key.into(),
+                port_a_key,
+                port_b_key,
                 what: "Ports with dependencies may not be connected to other ports".to_owned(),
             });
         }
 
         if port_b.get_antideps().len() > 0 {
             return Err(BuilderError::PortBindError {
-                port_a_key: port_a_key.into(),
-                port_b_key: port_b_key.into(),
+                port_a_key,
+                port_b_key,
                 what: "Ports with antidependencies may not be connected to other ports".to_owned(),
             });
         }
@@ -193,8 +194,8 @@ where
                         if port_a.get_reactor_key() == parent_key { Some(()) } else { None }
                      }).ok_or(
                         BuilderError::PortBindError{
-                                port_a_key: port_a_key.into(),
-                                port_b_key: port_b_key.into(),
+                                port_a_key,
+                                port_b_key,
                                 what: "An input port A may only be bound to another input port B if B is contained by a reactor that in turn is contained by the reactor of A.".into()
                             })
             }
@@ -204,16 +205,16 @@ where
                 // VALIDATE(this->container()->container() == port->container()->container(), 
                 if !matches!((port_a_grandparent, port_b_grandparent), (Some(key_a), Some(key_b)) if key_a == key_b) {
                     Err(BuilderError::PortBindError{
-                        port_a_key: port_a_key.into(),
-                        port_b_key: port_b_key.into(),
+                        port_a_key: port_a_key,
+                        port_b_key: port_b_key,
                         what: "An output port can only be bound to an input port if both ports belong to reactors in the same hierarichal level".to_owned(),
                     })
                 }
                 // VALIDATE(this->container() != port->container(), );
                 else if port_a.get_reactor_key() == port_b.get_reactor_key() {
                     Err(BuilderError::PortBindError{
-                        port_a_key: port_a_key.into(),
-                        port_b_key: port_b_key.into(),
+                        port_a_key: port_a_key,
+                        port_b_key: port_b_key,
                         what: "An output port can only be bound to an input port if both ports belong to different reactors!".to_owned(),
                     })
                 }
@@ -233,22 +234,22 @@ where
                         }
                     }).ok_or(
                         BuilderError::PortBindError {
-                                port_a_key: port_a_key.into(),
-                                port_b_key: port_b_key.into(),
+                                port_a_key: port_a_key,
+                                port_b_key: port_b_key,
                                 what: "An output port A may only be bound to another output port B if A is contained by a reactor that in turn is contained by the reactor of B".to_owned()
                             })
             }
             (PortType::Input, PortType::Output) =>  {
                 Err(BuilderError::PortBindError {
-                    port_a_key: port_a_key.into(),
-                    port_b_key: port_b_key.into(),
+                    port_a_key: port_a_key,
+                    port_b_key: port_b_key,
                     what: "Unexpected case: can't bind an input Port to an output Port.".to_owned()
                 })
             }
         }?;
 
-        port_b.set_inward_binding(Some(port_a_key.into()));
-        port_a.add_outward_binding(port_b_key.into());
+        port_b.set_inward_binding(Some(port_a_key));
+        port_a.add_outward_binding(port_b_key);
 
         Ok(())
     }

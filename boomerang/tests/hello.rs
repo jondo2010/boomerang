@@ -116,13 +116,13 @@ impl<S: SchedulerPoint> Reactor<S> for Hello {
 
         let Self::Actions { a } = builder.actions;
         let _ = builder
-            .add_reaction(Self::reaction_t)
+            .add_reaction("reaction_t", Self::reaction_t)
             .with_trigger_action(t)
             .with_scheduable_action(a.into())
             .finish()?;
 
         let _ = builder
-            .add_reaction(Self::reaction_a)
+            .add_reaction("reaction_a", Self::reaction_a)
             .with_trigger_action(a.into())
             .finish()?;
 

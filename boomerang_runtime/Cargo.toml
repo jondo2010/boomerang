@@ -22,7 +22,7 @@ crossbeam-utils = "0.8.1"
 derive_more = '0.99.11'
 downcast-rs = "1.2.0"
 thiserror = "1.0.24"
-tracing = "0.1.22"
+tracing = "0.1.25"
 rayon = "1.5.0"
 slotmap = { version = "1.0.2", features = ["unstable"] }
 derivative = "2.2.0"

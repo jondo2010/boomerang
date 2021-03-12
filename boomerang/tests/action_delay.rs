@@ -121,14 +121,14 @@ impl<'a, S: SchedulerPoint> Reactor<S> for GeneratedDelay {
         let Self::Outputs { y_out } = builder.outputs;
         let Self::Actions { act } = builder.actions;
         let _ = builder
-            .add_reaction(Self::reaction_y_in)
+            .add_reaction("reaction_y_in", Self::reaction_y_in)
             .with_trigger_port(y_in.into())
             .with_scheduable_action(act.into())
             .finish()?;
         let _ = builder
-            .add_reaction(Self::reaction_act)
+            .add_reaction("reaction_act", Self::reaction_act)
             .with_trigger_action(act.into())
-            .with_antidependency(y_out)
+            .with_antidependency(y_out.into())
             .finish()?;
         builder.finish()
     }
@@ -178,9 +178,9 @@ impl<'a, S: SchedulerPoint> Reactor<S> for Source {
         let startup = builder.add_startup_action("startup")?;
         let Self::Outputs { out } = builder.outputs;
         let _ = builder
-            .add_reaction(Self::reaction_startup)
+            .add_reaction("reaction_startup", Self::reaction_startup)
             .with_trigger_action(startup)
-            .with_antidependency(out)
+            .with_antidependency(out.into())
             .finish()?;
         builder.finish()
     }
@@ -239,7 +239,7 @@ impl<'a, S: SchedulerPoint> Reactor<S> for Sink {
         let mut builder = env.add_reactor(name, parent, self);
         let Self::Inputs { inp } = builder.inputs;
         let _ = builder
-            .add_reaction(Self::reaction_in)
+            .add_reaction("reaction_in", Self::reaction_in)
             .with_trigger_port(inp.into())
             .finish()?;
         builder.finish()
@@ -276,10 +276,10 @@ impl<'a, S: SchedulerPoint> Reactor<S> for ActionDelay {
         let (_, _sink1_inputs, _) = Sink.build("sink1", env, Some(parent_key))?;
         let (_, sink2_inputs, _) = Sink.build("sink2", env, Some(parent_key))?;
         let (_, g_inputs, g_outputs) = GeneratedDelay::new().build("g", env, Some(parent_key))?;
-        env.bind_port(source_outputs.out, g_inputs.y_in).unwrap();
+        env.bind_port(source_outputs.out.into(), g_inputs.y_in.into()).unwrap();
         // env.bind_port(source_outputs.out, sink1_inputs.inp).unwrap();
-        env.bind_port(g_outputs.y_out, sink0_inputs.inp).unwrap();
-        env.bind_port(g_outputs.y_out, sink2_inputs.inp).unwrap();
+        env.bind_port(g_outputs.y_out.into(), sink0_inputs.inp.into()).unwrap();
+        env.bind_port(g_outputs.y_out.into(), sink2_inputs.inp.into()).unwrap();
         Ok((parent_key, EmptyPart::default(), EmptyPart::default()))
     }
 

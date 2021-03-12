@@ -50,9 +50,9 @@ impl<'a, S: SchedulerPoint> Reactor<S> for Count {
         let Self::Outputs { c } = builder.outputs;
 
         builder
-            .add_reaction(Self::reaction_t)
+            .add_reaction("reaction_t", Self::reaction_t)
             .with_trigger_action(t)
-            .with_antidependency(c)
+            .with_antidependency(c.into())
             .finish()?;
 
         builder.finish()

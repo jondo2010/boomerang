@@ -94,7 +94,7 @@ impl<S: SchedulerPoint> Reactor<S> for Source {
 
         let Self::Outputs { out } = builder.outputs;
         let _ = builder
-            .add_reaction(Self::reaction_out)
+            .add_reaction("reaction_out", Self::reaction_out)
             .with_trigger_action(t)
             .with_antidependency(out.into())
             .finish();
@@ -152,7 +152,7 @@ impl<S: SchedulerPoint> Reactor<S> for Gain {
         let Self::Inputs { inp } = builder.inputs;
         let Self::Outputs { out } = builder.outputs;
         let _ = builder
-            .add_reaction(Self::reaction_in)
+            .add_reaction("reaction_in", Self::reaction_in)
             .with_trigger_port(inp.into())
             .with_antidependency(out.into())
             .finish();
@@ -206,7 +206,7 @@ impl<S: SchedulerPoint> Reactor<S> for Print {
         let mut builder = env.add_reactor(name, parent, self);
         let Self::Inputs { inp } = builder.inputs;
         let _ = builder
-            .add_reaction(Self::reaction_in)
+            .add_reaction("reaction_in", Self::reaction_in)
             .with_trigger_port(inp.into())
             .finish();
         builder.finish()
@@ -249,9 +249,9 @@ impl<S: SchedulerPoint> Reactor<S> for GainContainer {
         let builder = env.add_reactor(name, parent, self);
         let (parent_key, inputs, outputs) = builder.finish()?;
         let (_gain_key, gain_in, gain_out) = Gain::new(2).build("gain", env, Some(parent_key))?;
-        env.bind_port(inputs.inp, gain_in.inp)?;
-        env.bind_port(gain_out.out, outputs.out1)?;
-        env.bind_port(gain_out.out, outputs.out2)?;
+        env.bind_port(inputs.inp.into(), gain_in.inp.into())?;
+        env.bind_port(gain_out.out.into(), outputs.out1.into())?;
+        env.bind_port(gain_out.out.into(), outputs.out2.into())?;
         Ok((parent_key, inputs, outputs))
     }
 
@@ -291,15 +291,15 @@ impl<S: SchedulerPoint> Reactor<S> for Hierarchy {
             Source::new(1).build("source0", env, Some(parent_key))?;
         let (_, container_in, container_out) =
             GainContainer::new().build("container", env, Some(parent_key))?;
-        env.bind_port(source_out.out, container_in.inp)?;
+        env.bind_port(source_out.out.into(), container_in.inp.into())?;
 
         for i in 0..num_prints {
             let (_print_key, print_in, _) =
                 Print::new().build(&format!("print{}", i), env, Some(parent_key))?;
             if i % 2 == 0 {
-                env.bind_port(container_out.out1, print_in.inp)?;
+                env.bind_port(container_out.out1.into(), print_in.inp.into())?;
             } else {
-                env.bind_port(container_out.out2, print_in.inp)?;
+                env.bind_port(container_out.out2.into(), print_in.inp.into())?;
             }
         }
 

@@ -1,5 +1,6 @@
 use super::{BuilderError, EnvBuilder, ReactionBuilderState};
 use crate::runtime;
+use runtime::SchedulerPoint;
 use slotmap::SecondaryMap;
 use std::sync::{Arc, RwLock};
 
@@ -20,7 +21,7 @@ pub trait Reactor<S: runtime::SchedulerPoint>: Send + Sync {
         &'b self,
         env: &'b mut EnvBuilder<S>,
         reactor_key: runtime::ReactorKey,
-    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError>;
+    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError>; 
     /// Build a new Reactor with the given instance name
     fn build(
         self,
@@ -61,6 +62,18 @@ impl ReactorBuilder {
     }
 }
 
+pub trait ReactionBuilderFn<S: SchedulerPoint, R: Reactor<S>>:
+    for<'c> Fn(&'c mut R, &'c S, &'c R::Inputs, &'c R::Outputs, &'c R::Actions) + Send + Sync
+{
+}
+impl<S, R, F> ReactionBuilderFn<S, R> for F
+where
+    S: SchedulerPoint,
+    R: Reactor<S>,
+    F: for<'c> Fn(&'c mut R, &'c S, &'c R::Inputs, &'c R::Outputs, &'c R::Actions) + Send + Sync,
+{
+}
+
 /// Builder struct used to facilitate construction of a ReactorType
 #[derive(Debug)]
 pub struct ReactorBuilderState<'a, S, R>
@@ -69,7 +82,7 @@ where
     R: Reactor<S>,
 {
     reactor_key: runtime::ReactorKey,
-    reactor: Arc<RwLock<R>>,
+    pub reactor: Arc<RwLock<R>>,
     pub inputs: R::Inputs,
     pub outputs: R::Outputs,
     pub actions: R::Actions,
@@ -132,12 +145,9 @@ where
         self.env.add_timer(name, period, offset, self.reactor_key)
     }
 
-    pub fn add_reaction<F>(&mut self, reaction_fn: F) -> ReactionBuilderState<S>
+    pub fn add_reaction<F>(&mut self, name: &str, reaction_fn: F) -> ReactionBuilderState<S>
     where
-        F: for<'c> Fn(&'c mut R, &'c S, &'c R::Inputs, &'c R::Outputs, &'c R::Actions)
-            + Send
-            + Sync
-            + 'static,
+        F: ReactionBuilderFn<S, R> + 'static,
         R: 'static,
         R::Inputs: 'static,
         R::Outputs: 'static,
@@ -151,7 +161,7 @@ where
         let actions = self.actions.clone();
 
         ReactionBuilderState::new(
-            std::any::type_name::<F>(),
+            name,
             priority,
             self.reactor_key,
             move |sched: &S| {

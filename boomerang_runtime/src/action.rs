@@ -1,44 +1,12 @@
 use crate::SchedulerPoint;
 
 use super::Duration;
-use super::{time::Tag, PortData, PortValue, ReactorElement};
+use super::{time::Tag, PortData, ReactorElement};
 use derive_more::Display;
-use slotmap::Key;
-use std::{
-    fmt::{Debug, Display},
-    marker::PhantomData,
-};
+use std::{fmt::{Debug, Display}, sync::RwLock};
 
 slotmap::new_key_type! {
-    pub struct BaseActionKey;
-}
-
-#[derive(Clone, Copy, Derivative)]
-#[derivative(Debug, Default, Hash, Ord, PartialOrd, Eq, PartialEq)]
-pub struct ActionKey<T: PortData>(slotmap::KeyData, PhantomData<T>);
-
-impl<T: PortData> From<slotmap::KeyData> for ActionKey<T> {
-    fn from(key: slotmap::KeyData) -> Self {
-        Self(key, PhantomData)
-    }
-}
-
-impl<T: PortData> slotmap::Key for ActionKey<T> {
-    fn data(&self) -> slotmap::KeyData {
-        self.0
-    }
-}
-
-impl<T: PortData> From<ActionKey<T>> for BaseActionKey {
-    fn from(key: ActionKey<T>) -> Self {
-        key.data().into()
-    }
-}
-
-impl<T: PortData> From<BaseActionKey> for ActionKey<T> {
-    fn from(key: BaseActionKey) -> Self {
-        key.data().into()
-    }
+    pub struct ActionKey;
 }
 
 pub trait BaseAction<S: SchedulerPoint>: Debug + Display + Send + Sync + ReactorElement<S> {
@@ -52,7 +20,7 @@ pub trait BaseAction<S: SchedulerPoint>: Debug + Display + Send + Sync + Reactor
 pub struct Action<T: PortData> {
     name: String,
     logical: bool,
-    value: PortValue<T>,
+    value: RwLock<(T, bool)>,
     min_delay: Duration,
 }
 
@@ -71,7 +39,7 @@ impl<T: PortData> Action<T> {
         Self {
             name: name.to_owned(),
             logical,
-            value: PortValue::new(None),
+            value: RwLock::new((T::default(), false)),
             min_delay,
         }
     }
@@ -79,7 +47,7 @@ impl<T: PortData> Action<T> {
 
 impl<S: SchedulerPoint, T: PortData> ReactorElement<S> for Action<T> {
     fn cleanup(&self, _scheduler: &S) {
-        *self.value.write().unwrap() = None;
+        self.value.write().unwrap().1 = false;
     }
 }
 
@@ -99,13 +67,13 @@ impl<S: SchedulerPoint, T: PortData> BaseAction<S> for Action<T> {
 #[display(fmt = "Timer<{}>", name)]
 pub struct Timer {
     name: String,
-    action_key: BaseActionKey,
+    action_key: ActionKey,
     offset: Duration,
     period: Duration,
 }
 
 impl Timer {
-    pub fn new(name: &str, action_key: BaseActionKey, offset: Duration, period: Duration) -> Self {
+    pub fn new(name: &str, action_key: ActionKey, offset: Duration, period: Duration) -> Self {
         Self {
             name: name.to_owned(),
             action_key: action_key,
@@ -114,7 +82,7 @@ impl Timer {
         }
     }
 
-    pub fn new_zero(name: &str, action_key: BaseActionKey) -> Self {
+    pub fn new_zero(name: &str, action_key: ActionKey) -> Self {
         Timer::new(
             name,
             action_key,
@@ -159,7 +127,7 @@ impl<S: SchedulerPoint> ReactorElement<S> for Timer {
 #[display(fmt = "ShutdownAction<{}>", name)]
 struct ShutdownAction {
     name: String,
-    action_key: BaseActionKey,
+    action_key: ActionKey,
 }
 
 impl<S: SchedulerPoint> BaseAction<S> for ShutdownAction {

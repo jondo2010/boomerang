@@ -4,7 +4,7 @@ use boomerang::{
     ReactorInputs, ReactorOutputs,
 };
 use runtime::SchedulerPoint;
-use std::convert::TryInto;
+use std::{convert::TryInto, io::stdout};
 use tracing::event;
 
 // Test data transport across hierarchy.
@@ -67,12 +67,12 @@ impl Source {
         outputs: &<Self as Reactor<S>>::Outputs,
         _actions: &<Self as Reactor<S>>::Actions,
     ) {
-        sched.set_port(outputs.out, self.value);
-        event!(
-            tracing::Level::INFO,
-            "Sent {:?}",
-            sched.get_port::<u32>(outputs.out)
-        );
+        sched.get_port_with_mut(outputs.out, |value, _is_set| {
+            *value = self.value;
+            true
+        });
+
+        event!(tracing::Level::INFO, "Sent {:?}", self.value,);
     }
 }
 
@@ -129,8 +129,14 @@ impl Gain {
         outputs: &<Self as Reactor<S>>::Outputs,
         _actions: &<Self as Reactor<S>>::Actions,
     ) {
-        let in_val: u32 = sched.get_port(inputs.inp).unwrap();
-        sched.set_port(outputs.out, in_val * self.gain);
+        sched.get_port_with(inputs.inp, |inp: &u32, is_set| {
+            if is_set {
+                sched.get_port_with_mut(outputs.out, |out: &mut u32, _is_set| {
+                    *out = inp * self.gain;
+                    true
+                });
+            }
+        });
     }
 }
 
@@ -185,9 +191,11 @@ impl Print {
         _outputs: &<Self as Reactor<S>>::Outputs,
         _actions: &<Self as Reactor<S>>::Actions,
     ) {
-        let value = sched.get_port::<u32>(inputs.inp);
-        event!(tracing::Level::INFO, "Received {:?}", value);
-        assert!(matches!(value, Some(2)));
+        sched.get_port_with(inputs.inp, |value, is_set| {
+            event!(tracing::Level::INFO, "Received {:?}", value);
+            assert!(is_set);
+            assert!(matches!(value, 2u32));
+        });
     }
 }
 
@@ -332,6 +340,8 @@ fn hierarchy() {
     let (_, _, _) = Hierarchy::new(4)
         .build("top", &mut env_builder, None)
         .unwrap();
+
+    boomerang::builder::graphviz::reaction_graph::render_to(&env_builder, &mut stdout());
 
     let env: runtime::Env<_> = env_builder.try_into().unwrap();
     let mut sched = runtime::Scheduler::new(env);

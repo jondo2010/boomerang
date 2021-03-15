@@ -1,51 +1,17 @@
 use downcast_rs::{impl_downcast, DowncastSync};
-use slotmap::Key;
-
 use std::{
     fmt::{Debug, Display},
-    marker::PhantomData,
-    sync::{Arc, RwLock},
+    sync::RwLock,
 };
 
 slotmap::new_key_type! {
-    pub struct BasePortKey;
+    pub struct PortKey;
 }
 
-#[derive(Clone, Copy, Derivative)]
-#[derivative(Debug, Default, Hash, Ord, PartialOrd, Eq, PartialEq)]
-pub struct PortKey<T: PortData>(slotmap::KeyData, PhantomData<T>);
-
-impl<T: PortData> From<slotmap::KeyData> for PortKey<T> {
-    fn from(key: slotmap::KeyData) -> Self {
-        Self(key, PhantomData)
-    }
-}
-
-impl<T: PortData> slotmap::Key for PortKey<T> {
-    fn data(&self) -> slotmap::KeyData {
-        self.0
-    }
-}
-
-impl<T: PortData> From<BasePortKey> for PortKey<T> {
-    fn from(base_key: BasePortKey) -> Self {
-        base_key.data().into()
-    }
-}
-
-impl<T: PortData> From<PortKey<T>> for BasePortKey {
-    fn from(key: PortKey<T>) -> Self {
-        key.data().into()
-    }
-}
-
-pub trait PortData: Debug + Copy + Clone + Send + Sync + 'static {}
-impl<T> PortData for T where T: Debug + Copy + Clone + Send + Sync + 'static {}
-pub type PortValue<T> = RwLock<Option<T>>;
+pub trait PortData: Debug + Clone + Send + Sync + Default + 'static {}
+impl<T> PortData for T where T: Debug + Clone + Send + Sync + Default + 'static {}
 
 pub trait BasePort: Debug + Display + Send + Sync + DowncastSync {
-    /// Get the transitive set of Reactions that are sensitive to this Port being set.
-    // fn get_triggers(&self) -> &Vec<ReactionKey>;
     /// Reset the internal value
     fn cleanup(&self);
 }
@@ -54,7 +20,7 @@ impl_downcast!(sync BasePort);
 #[derive(Debug)]
 pub struct Port<T: PortData> {
     name: String,
-    value: PortValue<T>,
+    value: RwLock<(T, bool)>,
 }
 
 impl<T: PortData> Display for Port<T> {
@@ -74,51 +40,36 @@ where
     pub fn new(name: String) -> Self {
         Self {
             name,
-            value: PortValue::new(None),
+            value: RwLock::new((T::default(), false)),
         }
     }
 
-    pub fn get(&self) -> Option<T> {
-        *self.value.read().unwrap()
+    pub fn get_with<F: FnOnce(&T, bool)>(&self, f: F) {
+        let value = self.value.read().unwrap();
+        f(&value.0, value.1)
     }
 
-    pub fn set(self: &Arc<Self>, value: Option<T> /* , scheduler: &mut Scheduler */) {
-        // assert!(
-        // self.inward_binding.borrow().is_none(),
-        // "set() may only be called on a ports that do not have an inward binding!"
-        // );
-        *self.value.write().unwrap() = value;
-
-        // let port: Arc<dyn BasePort> = self.clone();
-        // scheduler.set_port(&port);
+    pub fn get_with_mut<F: FnOnce(&mut T, bool) -> bool>(&self, f: F) -> bool {
+        let mut value = self.value.write().unwrap();
+        let is_set = value.1;
+        f(&mut value.0, is_set)
     }
-
-    // pub fn is_present(&self) -> bool {
-    // self.inward_binding
-    // .borrow()
-    // .as_ref()
-    // .map(|port| port.is_present())
-    // .unwrap_or(self.value.borrow().is_some())
-    // }
 }
 
 impl<T> BasePort for Port<T>
 where
     T: PortData,
 {
-    // fn get_triggers(&self) -> &Vec<ReactionKey> {
-    // &self.triggers.keys().collect()
-    // }
-
     fn cleanup(&self) {
         // event!(tracing::Level::DEBUG, ?self.name, "cleanup()");
-        *self.value.write().unwrap() = None;
+        let mut value = self.value.write().unwrap();
+        (*value).1 = false;
     }
 }
 
 #[test]
 fn test_port() {
-    let p0: Arc<dyn BasePort> = Arc::new(Port::<f64>::new("p0".into()));
+    let p0: Box<dyn BasePort> = Box::new(Port::<f64>::new("p0".into()));
     dbg!(&p0);
     let x = p0.downcast_ref::<Port<f64>>();
     dbg!(&x);

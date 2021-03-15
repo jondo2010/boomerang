@@ -16,11 +16,11 @@ pub struct ReactionBuilder<S> {
     #[derivative(Debug = "ignore")]
     pub(super) reaction_fn: Box<dyn runtime::ReactionFn<S>>,
 
-    trigger_actions: SecondaryMap<runtime::BaseActionKey, ()>,
-    schedulable_actions: SecondaryMap<runtime::BaseActionKey, ()>,
-    trigger_ports: SecondaryMap<runtime::BasePortKey, ()>,
-    pub(super) deps: SecondaryMap<runtime::BasePortKey, ()>,
-    pub(super) antideps: SecondaryMap<runtime::BasePortKey, ()>,
+    trigger_actions: SecondaryMap<runtime::ActionKey, ()>,
+    schedulable_actions: SecondaryMap<runtime::ActionKey, ()>,
+    trigger_ports: SecondaryMap<runtime::PortKey, ()>,
+    pub(super) deps: SecondaryMap<runtime::PortKey, ()>,
+    pub(super) antideps: SecondaryMap<runtime::PortKey, ()>,
 }
 
 // impl Ord for ReactionBuilder {
@@ -79,25 +79,25 @@ where
     }
 
     /// Indicate that this Reaction can be triggered by the given Action
-    pub fn with_trigger_action(mut self, trigger_key: runtime::BaseActionKey) -> Self {
+    pub fn with_trigger_action(mut self, trigger_key: runtime::ActionKey) -> Self {
         self.reaction.trigger_actions.insert(trigger_key, ());
         self
     }
 
     /// Indicate that this Reaction can be triggered by the given Port
-    pub fn with_trigger_port(mut self, port_key: runtime::BasePortKey) -> Self {
+    pub fn with_trigger_port(mut self, port_key: runtime::PortKey) -> Self {
         self.reaction.trigger_ports.insert(port_key, ());
         self.reaction.deps.insert(port_key, ());
         self
     }
 
     /// Indicate that this Reaction may schedule the given Action
-    pub fn with_scheduable_action(mut self, action_key: runtime::BaseActionKey) -> Self {
+    pub fn with_scheduable_action(mut self, action_key: runtime::ActionKey) -> Self {
         self.reaction.schedulable_actions.insert(action_key, ());
         self
     }
 
-    pub fn with_scheduable_actions(mut self, action_keys: &[runtime::BaseActionKey]) -> Self {
+    pub fn with_scheduable_actions(mut self, action_keys: &[runtime::ActionKey]) -> Self {
         self.reaction
             .schedulable_actions
             .extend(action_keys.iter().map(|&key| (key, ())));
@@ -105,7 +105,7 @@ where
     }
 
     /// Indicate that this Reaction may set the value of the given Port.
-    pub fn with_antidependency(mut self, antidep_key: runtime::BasePortKey) -> Self {
+    pub fn with_antidependency(mut self, antidep_key: runtime::PortKey) -> Self {
         self.reaction.antideps.insert(antidep_key, ());
         self
     }

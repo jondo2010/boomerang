@@ -47,7 +47,7 @@ pub(super) struct ReactorBuilder {
     pub parent_reactor_key: Option<runtime::ReactorKey>,
     /// Reactions in this ReactorType
     pub reactions: SecondaryMap<runtime::ReactionKey, ()>,
-    pub ports: SecondaryMap<runtime::BasePortKey, ()>,
+    pub ports: SecondaryMap<runtime::PortKey, ()>,
 }
 
 impl ReactorBuilder {
@@ -63,14 +63,14 @@ impl ReactorBuilder {
 }
 
 pub trait ReactionBuilderFn<S: SchedulerPoint, R: Reactor<S>>:
-    for<'c> Fn(&'c mut R, &'c S, &'c R::Inputs, &'c R::Outputs, &'c R::Actions) + Send + Sync
+    Fn(&mut R, &S, &R::Inputs, &R::Outputs, &R::Actions) + Send + Sync
 {
 }
 impl<S, R, F> ReactionBuilderFn<S, R> for F
 where
     S: SchedulerPoint,
     R: Reactor<S>,
-    F: for<'c> Fn(&'c mut R, &'c S, &'c R::Inputs, &'c R::Outputs, &'c R::Actions) + Send + Sync,
+    F: Fn(&mut R, &S, &R::Inputs, &R::Outputs, &R::Actions) + Send + Sync
 {
 }
 
@@ -121,7 +121,7 @@ where
     pub fn add_startup_action(
         &mut self,
         name: &str,
-    ) -> Result<runtime::BaseActionKey, BuilderError> {
+    ) -> Result<runtime::ActionKey, BuilderError> {
         self.add_timer(
             name,
             runtime::Duration::from_micros(0),
@@ -132,7 +132,7 @@ where
     pub fn add_shutdown_action(
         &mut self,
         _name: &str,
-    ) -> Result<runtime::BaseActionKey, BuilderError> {
+    ) -> Result<runtime::ActionKey, BuilderError> {
         todo!()
     }
 
@@ -141,7 +141,7 @@ where
         name: &str,
         period: runtime::Duration,
         offset: runtime::Duration,
-    ) -> Result<runtime::BaseActionKey, BuilderError> {
+    ) -> Result<runtime::ActionKey, BuilderError> {
         self.env.add_timer(name, period, offset, self.reactor_key)
     }
 

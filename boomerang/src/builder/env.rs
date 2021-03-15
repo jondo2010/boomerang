@@ -13,11 +13,11 @@ use std::{
 
 #[derive(Debug)]
 pub struct EnvBuilder<S> {
-    pub(super) ports: SlotMap<runtime::BasePortKey, Arc<dyn runtime::BasePort>>,
-    pub(super) port_builders: SecondaryMap<runtime::BasePortKey, Box<dyn BasePortBuilder>>,
+    pub(super) ports: SlotMap<runtime::PortKey, Arc<dyn runtime::BasePort>>,
+    pub(super) port_builders: SecondaryMap<runtime::PortKey, Box<dyn BasePortBuilder>>,
 
-    pub(super) actions: SlotMap<runtime::BaseActionKey, Arc<dyn runtime::BaseAction<S>>>,
-    pub(super) action_builders: SecondaryMap<runtime::BaseActionKey, ActionBuilder>,
+    pub(super) actions: SlotMap<runtime::ActionKey, Arc<dyn runtime::BaseAction<S>>>,
+    pub(super) action_builders: SecondaryMap<runtime::ActionKey, ActionBuilder>,
 
     pub(super) reaction_builders: SlotMap<runtime::ReactionKey, ReactionBuilder<S>>,
 
@@ -58,7 +58,7 @@ where
         name: &str,
         port_type: PortType,
         reactor_key: runtime::ReactorKey,
-    ) -> Result<runtime::PortKey<T>, BuilderError> {
+    ) -> Result<runtime::PortKey, BuilderError> {
         // Ensure no duplicates
         if self
             .port_builders
@@ -90,7 +90,7 @@ where
         period: runtime::Duration,
         offset: runtime::Duration,
         reactor_key: runtime::ReactorKey,
-    ) -> Result<runtime::BaseActionKey, BuilderError> {
+    ) -> Result<runtime::ActionKey, BuilderError> {
         let key = self.add_action(name, reactor_key, |action_key| {
             Arc::new(runtime::Timer::new(name, action_key, offset, period))
         })?;
@@ -103,7 +103,7 @@ where
         name: &str,
         min_delay: Option<runtime::Duration>,
         reactor_key: runtime::ReactorKey,
-    ) -> Result<runtime::ActionKey<T>, BuilderError> {
+    ) -> Result<runtime::ActionKey, BuilderError> {
         let key = self.add_action(name, reactor_key, |_| {
             Arc::new(runtime::Action::<T>::new(
                 name,
@@ -115,12 +115,12 @@ where
     }
 
     /// Add an Action to a given Reactor using closure F
-    pub fn add_action<F: Fn(runtime::BaseActionKey) -> Arc<dyn runtime::BaseAction<S>>>(
+    pub fn add_action<F: Fn(runtime::ActionKey) -> Arc<dyn runtime::BaseAction<S>>>(
         &mut self,
         name: &str,
         reactor_key: runtime::ReactorKey,
         action_fn: F,
-    ) -> Result<runtime::BaseActionKey, BuilderError> {
+    ) -> Result<runtime::ActionKey, BuilderError> {
         // Ensure no duplicates
         if self
             .action_builders
@@ -151,8 +151,8 @@ where
     /// The nominal case is to bind Input A to Output B
     pub fn bind_port(
         &mut self,
-        port_a_key: runtime::BasePortKey,
-        port_b_key: runtime::BasePortKey,
+        port_a_key: runtime::PortKey,
+        port_b_key: runtime::PortKey,
     ) -> Result<(), BuilderError> {
         let [port_a, port_b] = self
             .port_builders
@@ -288,7 +288,7 @@ where
     /// Get a fully-qualified string for the given PortKey
     pub fn port_fqn<T: runtime::PortData>(
         &self,
-        port_key: runtime::PortKey<T>,
+        port_key: runtime::PortKey,
     ) -> Result<String, BuilderError> {
         let port_key = port_key.into();
         self.port_builders
@@ -310,8 +310,8 @@ where
     /// Follow the inward_binding's of Ports to the source
     pub fn follow_port_inward_binding(
         &self,
-        port_key: runtime::BasePortKey,
-    ) -> runtime::BasePortKey {
+        port_key: runtime::PortKey,
+    ) -> runtime::PortKey {
         let mut cur_key = port_key;
         loop {
             if let Some(new_idx) = self
@@ -330,10 +330,10 @@ where
     /// Transitively collect all Reactions triggered by this Port being set
     fn collect_transitive_port_triggers(
         &self,
-        port_key: runtime::BasePortKey,
+        port_key: runtime::PortKey,
     ) -> SecondaryMap<runtime::ReactionKey, ()> {
         let mut all_triggers = SecondaryMap::new();
-        let mut port_set = BTreeSet::<runtime::BasePortKey>::new();
+        let mut port_set = BTreeSet::<runtime::PortKey>::new();
         port_set.insert(port_key);
         while !port_set.is_empty() {
             let port_key = port_set.pop_first().unwrap();
@@ -473,7 +473,7 @@ where
 
         let mut runtime_ports = self.ports.clone();
         let mut runtime_port_triggers: SecondaryMap<
-            runtime::BasePortKey,
+            runtime::PortKey,
             SecondaryMap<runtime::ReactionKey, ()>,
         > = SecondaryMap::new();
         let runtime_actions = self.actions.clone();
@@ -511,12 +511,12 @@ where
         let reactions = {
             let mut reactions = SlotMap::with_key();
             for (key, builder) in self.reaction_builders.into_iter() {
-                let new_key = reactions.insert(Arc::new(runtime::Reaction::new(
+                let new_key = reactions.insert(runtime::Reaction::new(
                     builder.name,
                     runtime_level_map[&key],
                     builder.reaction_fn,
                     None,
-                )));
+                ));
                 assert!(key == new_key);
             }
             reactions
@@ -532,7 +532,6 @@ where
     }
 }
 
-#[cfg(feature = "off")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -604,16 +603,16 @@ mod tests {
         let mut reactor_builder = env_builder.add_reactor("test_reactor", None, TestReactorDummy);
 
         let r0_key = reactor_builder
-            .add_reaction(|_, _, _, _, _| {})
+            .add_reaction("test", TestReactorDummy::reaction_dummy)
             .finish()
             .unwrap();
 
         let r1_key = reactor_builder
-            .add_reaction(|_, _, _, _, _| {})
+            .add_reaction("test", TestReactorDummy::reaction_dummy)
             .finish()
             .unwrap();
 
-        let (reactor_key, _, _) = reactor_builder.finish().unwrap();
+        let (_reactor_key, _, _) = reactor_builder.finish().unwrap();
 
         assert_eq!(env_builder.reactors.len(), 1);
         assert_eq!(env_builder.reaction_builders.len(), 2);

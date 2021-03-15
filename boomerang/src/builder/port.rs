@@ -1,6 +1,6 @@
 use crate::runtime;
 use slotmap::{secondary, Key, SecondaryMap};
-use std::fmt::Debug;
+use std::{fmt::Debug, marker::PhantomData};
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Copy, Clone)]
 pub enum PortType {
@@ -8,15 +8,15 @@ pub enum PortType {
     Output,
 }
 
-pub use slotmap::DefaultKey as BasePortKey;
+pub use slotmap::DefaultKey as PortKey;
 
 pub trait BasePortBuilder: Debug {
     fn get_name(&self) -> &str;
     fn get_reactor_key(&self) -> runtime::ReactorKey;
-    fn get_inward_binding(&self) -> Option<runtime::BasePortKey>;
-    fn set_inward_binding(&mut self, inward_binding: Option<runtime::BasePortKey>);
-    fn get_outward_bindings(&self) -> secondary::Keys<runtime::BasePortKey, ()>;
-    fn add_outward_binding(&mut self, outward_binding: runtime::BasePortKey);
+    fn get_inward_binding(&self) -> Option<runtime::PortKey>;
+    fn set_inward_binding(&mut self, inward_binding: Option<runtime::PortKey>);
+    fn get_outward_bindings(&self) -> secondary::Keys<runtime::PortKey, ()>;
+    fn add_outward_binding(&mut self, outward_binding: runtime::PortKey);
     fn get_port_type(&self) -> &PortType;
     fn get_deps(&self) -> Vec<runtime::ReactionKey>;
     fn get_antideps(&self) -> secondary::Keys<runtime::ReactionKey, ()>;
@@ -31,7 +31,7 @@ pub trait BasePortBuilder: Debug {
 }
 
 #[derive(Debug)]
-pub struct PortBuilder<T: runtime::PortData> {
+pub struct PortBuilder<T> {
     name: String,
     /// The key of the Reactor that owns this PortBuilder
     reactor_key: runtime::ReactorKey,
@@ -44,13 +44,13 @@ pub struct PortBuilder<T: runtime::PortData> {
     /// Out-going Reactions that this port triggers
     triggers: SecondaryMap<runtime::ReactionKey, ()>,
 
-    inward_binding: Option<runtime::PortKey<T>>,
-    outward_bindings: SecondaryMap<runtime::BasePortKey, ()>,
+    inward_binding: Option<runtime::PortKey>,
+    outward_bindings: SecondaryMap<runtime::PortKey, ()>,
+
+    _phantom: PhantomData<T>,
 }
 
 impl<T> PortBuilder<T>
-where
-    T: runtime::PortData,
 {
     pub fn new(name: &str, reactor_key: runtime::ReactorKey, port_type: PortType) -> Self {
         Self {
@@ -62,6 +62,7 @@ where
             triggers: SecondaryMap::new(),
             inward_binding: None,
             outward_bindings: SecondaryMap::new(),
+            _phantom: PhantomData,
         }
     }
 }
@@ -73,7 +74,7 @@ impl<T: runtime::PortData> BasePortBuilder for PortBuilder<T> {
     fn get_reactor_key(&self) -> runtime::ReactorKey {
         self.reactor_key
     }
-    fn get_inward_binding(&self) -> Option<runtime::BasePortKey> {
+    fn get_inward_binding(&self) -> Option<runtime::PortKey> {
         self.inward_binding.map(|key| key.data().into())
     }
     fn get_port_type(&self) -> &PortType {
@@ -88,13 +89,13 @@ impl<T: runtime::PortData> BasePortBuilder for PortBuilder<T> {
     fn get_triggers(&self) -> Vec<runtime::ReactionKey> {
         self.triggers.keys().collect()
     }
-    fn set_inward_binding(&mut self, inward_binding: Option<runtime::BasePortKey>) {
+    fn set_inward_binding(&mut self, inward_binding: Option<runtime::PortKey>) {
         self.inward_binding = inward_binding.map(|port_key| port_key.data().into());
     }
-    fn get_outward_bindings(&self) -> secondary::Keys<runtime::BasePortKey, ()> {
+    fn get_outward_bindings(&self) -> secondary::Keys<runtime::PortKey, ()> {
         self.outward_bindings.keys()
     }
-    fn add_outward_binding(&mut self, outward_binding: runtime::BasePortKey) {
+    fn add_outward_binding(&mut self, outward_binding: runtime::PortKey) {
         self.outward_bindings
             .insert(outward_binding.data().into(), ());
     }

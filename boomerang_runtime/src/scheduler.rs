@@ -1,7 +1,7 @@
 use super::Env;
 use super::{
     time::{LogicalTime, Tag},
-    ActionKey, BaseActionKey, BasePortKey, Duration, Instant, PortData, PortKey, ReactionKey,
+    ActionKey, PortKey, Duration, Instant, PortData, ReactionKey,
 };
 use crate::RuntimeError;
 use crossbeam_channel::{Receiver, Sender};
@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use tracing::event;
 
 type PreHandlerFn = Box<dyn Fn() -> () + Send + Sync>;
-type EventMap = BTreeMap<BaseActionKey, Option<PreHandlerFn>>;
-type ScheduledEvent = (Tag, BaseActionKey, Option<PreHandlerFn>);
+type EventMap = BTreeMap<ActionKey, Option<PreHandlerFn>>;
+type ScheduledEvent = (Tag, ActionKey, Option<PreHandlerFn>);
 
 pub enum RunMode {
     /// In Normal mode, exit when no more events have been scheduled.
@@ -45,15 +45,27 @@ pub trait SchedulerPoint: Send + Sync + 'static {
     fn get_physical_time(&self) -> Instant;
     fn get_elapsed_logical_time(&self) -> Duration;
     fn get_elapsed_physical_time(&self) -> Duration;
-    fn set_port<T: PortData>(&self, port_key: PortKey<T>, value: T);
-    fn get_port<T: PortData>(&self, port_key: PortKey<T>) -> Option<T>;
+    /// Apply a closure to the port data.
+    /// The closure `F` should conform to `FnOnce(value: &T, is_set: bool)`.
+    /// `is_set` indicates that the port was set within the last scheduling round.
+    fn get_port_with<T: PortData, F: FnOnce(&T, bool)>(&self, port_key: PortKey, f: F);
+
+    /// Apply a closure to the port data mutably.
+    /// The closure `F` should conform to `FnOnce(value: &mut T, is_set: bool) -> bool`.
+    /// `is_set` indicates that the port was set within the last scheduling round.
+    /// `F` should return `true` if the port value was set.
+    fn get_port_with_mut<T: PortData, F: FnOnce(&mut T, bool) -> bool>(
+        &self,
+        port_key: PortKey,
+        f: F,
+    );
     fn schedule_action<T: PortData>(
         &self,
-        action_key: ActionKey<T>,
+        action_key: ActionKey,
         _value: T,
         delay: Option<super::Duration>,
     );
-    fn schedule(&self, tag: Tag, action_key: BaseActionKey);
+    fn schedule(&self, tag: Tag, action_key: ActionKey);
     fn shutdown(&self);
 }
 
@@ -79,29 +91,36 @@ impl SchedulerPoint for Scheduler {
             .saturating_duration_since(*self.get_start_time())
     }
 
-    fn set_port<T: PortData>(&self, port_key: PortKey<T>, value: T) {
-        self.env.get_port(port_key).unwrap().set(Some(value));
-
-        // Schedule any reactions triggered by this port being set.
-        let port_key = port_key.into();
-
-        for sub_reaction_key in self.env.port_triggers[port_key].keys() {
-            let new_reaction_level = self.env.reactions[sub_reaction_key].get_level();
-            self.reaction_queue_s[new_reaction_level]
-                .send(sub_reaction_key)
-                .unwrap();
-        }
-
-        // Add this port to the list of ports that need to be cleared
-        self.clear_ports_s.send(port_key).unwrap();
+    fn get_port_with<T: PortData, F: FnOnce(&T, bool)>(&self, port_key: PortKey, f: F) {
+        let port = self.env.get_port::<T>(port_key).unwrap();
+        port.get_with(f);
     }
-    fn get_port<T: PortData>(&self, port_key: PortKey<T>) -> Option<T> {
-        self.env.get_port(port_key).unwrap().get()
+
+    fn get_port_with_mut<T: PortData, F: FnOnce(&mut T, bool) -> bool>(
+        &self,
+        port_key: PortKey,
+        f: F,
+    ) {
+        let port = self.env.get_port::<T>(port_key).unwrap();
+        if port.get_with_mut(f) {
+            // Schedule any reactions triggered by this port being set.
+            let port_key = port_key.into();
+
+            for sub_reaction_key in self.env.port_triggers[port_key].keys() {
+                let new_reaction_level = self.env.reactions[sub_reaction_key].get_level();
+                self.reaction_queue_s[new_reaction_level]
+                    .send(sub_reaction_key)
+                    .unwrap();
+            }
+
+            // Add this port to the list of ports that need to be cleared
+            self.clear_ports_s.send(port_key).unwrap();
+        }
     }
 
     fn schedule_action<T: PortData>(
         &self,
-        action_key: ActionKey<T>,
+        action_key: ActionKey,
         _value: T,
         delay: Option<super::Duration>,
     ) {
@@ -115,7 +134,7 @@ impl SchedulerPoint for Scheduler {
         }
     }
 
-    fn schedule(&self, tag: Tag, action_key: BaseActionKey) {
+    fn schedule(&self, tag: Tag, action_key: ActionKey) {
         self.schedule(tag, action_key, None);
     }
 
@@ -146,8 +165,8 @@ pub struct Scheduler {
     reaction_queue_s: Vec<Sender<ReactionKey>>,
     reaction_queue_r: Vec<Receiver<ReactionKey>>,
 
-    clear_ports_s: Sender<BasePortKey>,
-    clear_ports_r: Receiver<BasePortKey>,
+    clear_ports_s: Sender<PortKey>,
+    clear_ports_r: Receiver<PortKey>,
 
     /// Stop requested
     stop_requested: AtomicCell<bool>,
@@ -210,7 +229,7 @@ impl Scheduler {
             .saturating_duration_since(self.start_time)
     }
 
-    pub fn schedule(&self, tag: Tag, action_key: BaseActionKey, pre_handler: Option<PreHandlerFn>) {
+    pub fn schedule(&self, tag: Tag, action_key: ActionKey, pre_handler: Option<PreHandlerFn>) {
         event!(
             tracing::Level::DEBUG,
             ?action_key,

@@ -5,7 +5,7 @@ use slotmap::SecondaryMap;
 pub struct ActionBuilder {
     name: String,
     /// The key of this action in the EnvBuilder
-    action_key: runtime::BaseActionKey,
+    action_key: runtime::ActionKey,
     /// The parent Reactor that owns this Action
     reactor_key: runtime::ReactorKey,
     /// Out-going Reactions that this action triggers
@@ -17,7 +17,7 @@ pub struct ActionBuilder {
 impl ActionBuilder {
     pub fn new(
         name: &str,
-        action_key: runtime::BaseActionKey,
+        action_key: runtime::ActionKey,
         reactor_key: runtime::ReactorKey,
     ) -> Self {
         Self {
@@ -33,7 +33,7 @@ impl ActionBuilder {
         &self.name
     }
 
-    pub fn get_action_key(&self) -> runtime::BaseActionKey {
+    pub fn get_action_key(&self) -> runtime::ActionKey {
         self.action_key
     }
 

@@ -78,7 +78,11 @@ impl GeneratedDelay {
         _outputs: &GeneratedDelayOutputs,
         actions: &GeneratedDelayActions,
     ) {
-        self.y_state = sched.get_port(inputs.y_in).unwrap();
+        sched.get_port_with(inputs.y_in, |value, is_set| {
+            if is_set {
+                self.y_state = *value;
+            }
+        });
         sched.schedule_action(actions.act, (), None);
     }
 
@@ -90,7 +94,10 @@ impl GeneratedDelay {
         outputs: &<Self as Reactor<S>>::Outputs,
         _actions: &<Self as Reactor<S>>::Actions,
     ) {
-        sched.set_port(outputs.y_out, self.y_state);
+        sched.get_port_with_mut(outputs.y_out, |value, _is_set| {
+            *value = self.y_state;
+            true
+        });
     }
 }
 
@@ -156,7 +163,10 @@ impl Source {
         outputs: &SourceOutputs,
         _actions: &EmptyPart,
     ) {
-        sched.set_port(outputs.out, 1);
+        sched.get_port_with_mut(outputs.out, |value, _is_set| {
+            *value = 1u32;
+            true
+        });
     }
 }
 ReactorOutputs!(Source, SourceOutputs, (out, u32));

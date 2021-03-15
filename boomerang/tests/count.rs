@@ -20,7 +20,10 @@ impl Count {
         _actions: &EmptyPart,
     ) {
         self.i += 1;
-        sched.set_port(outputs.c, self.i);
+        sched.get_port_with_mut(outputs.c, |value, _is_set| {
+            *value = self.i;
+            true
+        });
         if self.i >= self.max_count {
             sched.shutdown();
         }

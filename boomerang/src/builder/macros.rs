@@ -3,7 +3,7 @@ macro_rules! ReactorInputs {
     ($reactor:ty, $name:ident, $(($var:ident, $typ:ty)),*) => {
         #[derive(Clone)]
         struct $name {
-            $($var: boomerang::runtime::PortKey<$typ>,)*
+            $($var: boomerang::runtime::PortKey,)*
         }
         impl $name {
             fn build<S: boomerang::runtime::SchedulerPoint>(
@@ -22,7 +22,7 @@ macro_rules! ReactorOutputs {
     ($reactor:ty, $name:ident, $(($var:ident, $typ:ty)),*) => {
         #[derive(Clone)]
         struct $name {
-            $($var: boomerang::runtime::PortKey<$typ>,)*
+            $($var: boomerang::runtime::PortKey,)*
         }
         impl $name {
             fn build<S: boomerang::runtime::SchedulerPoint>(
@@ -41,7 +41,7 @@ macro_rules! ReactorActions {
     ($reactor:ty, $name:ident, $(($var:ident, $typ:ty, $delay:expr)),*) => {
         #[derive(Clone)]
         struct $name {
-            $($var: boomerang::runtime::ActionKey<$typ>,)*
+            $($var: boomerang::runtime::ActionKey,)*
         }
         impl $name {
             fn build<S: boomerang::runtime::SchedulerPoint>(

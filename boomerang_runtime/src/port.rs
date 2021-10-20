@@ -14,6 +14,9 @@ impl<T> PortData for T where T: Debug + Clone + Send + Sync + Default + 'static 
 pub trait BasePort: Debug + Display + Send + Sync + DowncastSync {
     /// Reset the internal value
     fn cleanup(&self);
+
+    /// Get the internal type name str
+    fn type_name(&self) -> &'static str;
 }
 impl_downcast!(sync BasePort);
 
@@ -52,7 +55,12 @@ where
     pub fn get_with_mut<F: FnOnce(&mut T, bool) -> bool>(&self, f: F) -> bool {
         let mut value = self.value.write().unwrap();
         let is_set = value.1;
-        f(&mut value.0, is_set)
+        if f(&mut value.0, is_set) {
+            (*value).1 = true;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -64,6 +72,10 @@ where
         // event!(tracing::Level::DEBUG, ?self.name, "cleanup()");
         let mut value = self.value.write().unwrap();
         (*value).1 = false;
+    }
+
+    fn type_name(&self) -> &'static str {
+        std::any::type_name::<T>()
     }
 }
 

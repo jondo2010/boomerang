@@ -1,11 +1,8 @@
-use crate::SchedulerPoint;
+use crate::{RuntimeError, SchedulerPoint};
 
-use super::{
-    BaseAction, ActionKey, BasePort, PortKey, Port, PortData, Reaction,
-    ReactionKey,
-};
+use super::{ActionKey, BaseAction, BasePort, Port, PortData, PortKey, Reaction, ReactionKey};
 use downcast_rs::DowncastSync;
-use slotmap::{Key, SecondaryMap, SlotMap};
+use slotmap::{SecondaryMap, SlotMap};
 use std::{fmt::Display, sync::Arc};
 use tracing::event;
 
@@ -44,14 +41,23 @@ impl<S: SchedulerPoint> Env<S> {
         }
     }
 
-    pub fn get_port<T: PortData>(&self, port_key: PortKey) -> Option<Arc<Port<T>>>
+    pub fn get_port<T: PortData>(&self, port_key: PortKey) -> Result<Arc<Port<T>>, RuntimeError>
     where
         T: PortData,
     {
         self.ports
-            .get(port_key.data().into())
+            .get(port_key)
             .cloned()
-            .and_then(|base_port| DowncastSync::into_any_arc(base_port).downcast().ok())
+            .ok_or(RuntimeError::PortKeyNotFound(port_key))
+            .and_then(|base_port| {
+                let base_type = base_port.type_name();
+                DowncastSync::into_any_arc(base_port)
+                    .downcast()
+                    .map_err(|_err| RuntimeError::TypeMismatch {
+                        found: base_type,
+                        wanted: std::any::type_name::<T>(),
+                    })
+            })
     }
 
     /// Return the maximum reaction level

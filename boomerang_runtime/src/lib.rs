@@ -1,4 +1,5 @@
 #![feature(map_first_last)]
+#![feature(type_name_of_val)]
 
 mod action;
 mod env;
@@ -22,4 +23,13 @@ pub use std::time::{Duration, Instant};
 extern crate derivative;
 
 #[derive(thiserror::Error, Debug, Eq, PartialEq)]
-pub enum RuntimeError {}
+pub enum RuntimeError {
+    #[error("Port Key not found: {}", 0)]
+    PortKeyNotFound(PortKey),
+
+    #[error("Mismatched Dynamic Types found {} but wanted {}", found, wanted)]
+    TypeMismatch {
+        found: &'static str,
+        wanted: &'static str,
+    },
+}

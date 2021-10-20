@@ -17,21 +17,21 @@ gitlab = { repository = 'jondo2010/boomerang', branch = 'master' }
 codecov = { repository = 'jondo2010/boomerang', branch = 'master', service = 'gitlab' }
 
 [features]
-default = ["graphviz"]
-graphviz = ["dot"]
+default = ["visualization"]
+visualization = ["serde_json"]
 
 [dependencies]
 anyhow = "1.0.38"
 boomerang_runtime = { path = "../boomerang_runtime" }
 derivative = "2.2.0"
 derive_more = '0.99.11'
-dot = { path = "../../dot-rust", optional = true }
 itertools = "0.10.0"
 petgraph = "0.5.1"
 ref-cast = "1.0.6"
 slotmap = { version = "1.0.2", features = ["unstable"] }
 thiserror = "1.0.24"
 tracing = "0.1.23"
+serde_json = { version = "1.0.68", optional = true }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.2.15", features = ["fmt"] }

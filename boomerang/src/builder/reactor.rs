@@ -21,7 +21,7 @@ pub trait Reactor<S: runtime::SchedulerPoint>: Send + Sync {
         &'b self,
         env: &'b mut EnvBuilder<S>,
         reactor_key: runtime::ReactorKey,
-    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError>; 
+    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError>;
     /// Build a new Reactor with the given instance name
     fn build(
         self,
@@ -47,7 +47,10 @@ pub(super) struct ReactorBuilder {
     pub parent_reactor_key: Option<runtime::ReactorKey>,
     /// Reactions in this ReactorType
     pub reactions: SecondaryMap<runtime::ReactionKey, ()>,
+    /// Ports in this Reactor
     pub ports: SecondaryMap<runtime::PortKey, ()>,
+    /// Actions in this Reactor
+    pub actions: SecondaryMap<runtime::ActionKey, ()>,
 }
 
 impl ReactorBuilder {
@@ -58,6 +61,7 @@ impl ReactorBuilder {
             parent_reactor_key,
             reactions: SecondaryMap::new(),
             ports: SecondaryMap::new(),
+            actions: SecondaryMap::new(),
         }
     }
 }
@@ -70,7 +74,7 @@ impl<S, R, F> ReactionBuilderFn<S, R> for F
 where
     S: SchedulerPoint,
     R: Reactor<S>,
-    F: Fn(&mut R, &S, &R::Inputs, &R::Outputs, &R::Actions) + Send + Sync
+    F: Fn(&mut R, &S, &R::Inputs, &R::Outputs, &R::Actions) + Send + Sync,
 {
 }
 
@@ -118,10 +122,7 @@ where
         }
     }
 
-    pub fn add_startup_action(
-        &mut self,
-        name: &str,
-    ) -> Result<runtime::ActionKey, BuilderError> {
+    pub fn add_startup_action(&mut self, name: &str) -> Result<runtime::ActionKey, BuilderError> {
         self.add_timer(
             name,
             runtime::Duration::from_micros(0),
@@ -129,10 +130,7 @@ where
         )
     }
 
-    pub fn add_shutdown_action(
-        &mut self,
-        _name: &str,
-    ) -> Result<runtime::ActionKey, BuilderError> {
+    pub fn add_shutdown_action(&mut self, _name: &str) -> Result<runtime::ActionKey, BuilderError> {
         todo!()
     }
 

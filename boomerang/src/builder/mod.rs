@@ -1,5 +1,6 @@
 mod action;
 mod env;
+#[cfg(feature = "visualization")]
 pub mod graphviz;
 mod macros;
 mod port;
@@ -97,10 +98,18 @@ mod tests {
         fn get_elapsed_physical_time(&self) -> runtime::Duration {
             todo!()
         }
-        fn get_port_with<T: runtime::PortData, F: FnOnce(&T, bool)>(&self, _: runtime::PortKey,_: F) {
+        fn get_port_with<T: runtime::PortData, F: FnOnce(&T, bool)>(
+            &self,
+            _: runtime::PortKey,
+            _: F,
+        ) {
             todo!()
         }
-        fn get_port_with_mut<T: runtime::PortData, F: FnOnce(&mut T, bool) -> bool>(&self, _: runtime::PortKey, _: F) {
+        fn get_port_with_mut<T: runtime::PortData, F: FnOnce(&mut T, bool) -> bool>(
+            &self,
+            _: runtime::PortKey,
+            _: F,
+        ) {
             todo!()
         }
         fn schedule_action<T: runtime::PortData>(

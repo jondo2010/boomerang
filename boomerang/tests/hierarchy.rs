@@ -341,7 +341,10 @@ fn hierarchy() {
         .build("top", &mut env_builder, None)
         .unwrap();
 
-    boomerang::builder::graphviz::reaction_graph::render_to(&env_builder, &mut stdout());
+    // boomerang::builder::graphviz::reaction_graph::render_to(&env_builder, &mut stdout());
+    let gv = graphviz::build(&env_builder).unwrap();
+    let mut f = std::fs::File::create("out.dot").unwrap();
+    std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
 
     let env: runtime::Env<_> = env_builder.try_into().unwrap();
     let mut sched = runtime::Scheduler::new(env);

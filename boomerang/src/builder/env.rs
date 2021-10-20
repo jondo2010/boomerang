@@ -1,7 +1,4 @@
-use super::{
-    action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder, BuilderError,
-    PortBuilder, PortType, Reactor, ReactorBuilder, ReactorBuilderState,
-};
+use super::{ActionType, BuilderError, PortBuilder, PortType, Reactor, ReactorBuilder, ReactorBuilderState, action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder};
 use crate::runtime;
 use itertools::Itertools;
 use slotmap::{SecondaryMap, SlotMap};
@@ -10,6 +7,9 @@ use std::{
     convert::TryInto,
     sync::Arc,
 };
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Debug)]
 pub struct EnvBuilder<S> {
@@ -81,6 +81,8 @@ where
             Arc::new(runtime::Port::<T>::new(name.to_owned()))
         });
 
+        self.reactors[reactor_key].ports.insert(key, ());
+
         Ok(key.into())
     }
 
@@ -94,6 +96,11 @@ where
         let key = self.add_action(name, reactor_key, |action_key| {
             Arc::new(runtime::Timer::new(name, action_key, offset, period))
         })?;
+
+        self.action_builders.insert(
+            key,
+            ActionBuilder::new(name, ActionType::Timer { period, offset }, key, reactor_key),
+        );
 
         Ok(key)
     }
@@ -111,6 +118,10 @@ where
                 min_delay.unwrap_or_default(),
             ))
         })?;
+        self.action_builders.insert(
+            key,
+            ActionBuilder::new(name, ActionType::Logical { min_delay }, key, reactor_key),
+        );
         Ok(key.into())
     }
 
@@ -136,14 +147,10 @@ where
             });
         }
 
-        let action_builders = &mut self.action_builders;
-        let key = self.actions.insert_with_key(|action_key| {
-            action_builders.insert(
-                action_key,
-                ActionBuilder::new(name, action_key, reactor_key),
-            );
-            action_fn(action_key)
-        });
+        let key = self
+            .actions
+            .insert_with_key(|action_key| action_fn(action_key));
+        self.reactors[reactor_key].actions.insert(key, ());
         Ok(key.into())
     }
 
@@ -308,10 +315,7 @@ where
     }
 
     /// Follow the inward_binding's of Ports to the source
-    pub fn follow_port_inward_binding(
-        &self,
-        port_key: runtime::PortKey,
-    ) -> runtime::PortKey {
+    pub fn follow_port_inward_binding(&self, port_key: runtime::PortKey) -> runtime::PortKey {
         let mut cur_key = port_key;
         loop {
             if let Some(new_idx) = self
@@ -384,6 +388,22 @@ where
             graph.add_node(key);
         });
 
+        graph
+    }
+
+    /// Build a DAG of Reactors
+    pub fn build_reactor_graph(&self) -> petgraph::graphmap::DiGraphMap<runtime::ReactorKey, ()> {
+        let mut graph = petgraph::graphmap::DiGraphMap::from_edges(
+            self.reactors.iter().filter_map(|(key, reactor)| {
+                reactor
+                    .parent_reactor_key
+                    .map(|parent_key| (parent_key, key))
+            }),
+        );
+        // ensure all Reactors are represented
+        self.reactors.keys().for_each(|key| {
+            graph.add_node(key);
+        });
         graph
     }
 }
@@ -529,124 +549,5 @@ where
             action_triggers: runtime_action_triggers,
             reactions: reactions,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::builder::tests::*;
-
-    #[test]
-    fn test_duplicate_ports() {
-        let mut env_builder = EnvBuilder::<SchedulerDummy>::new();
-        let (reactor_key, _, _) = env_builder
-            .add_reactor("test_reactor", None, TestReactorDummy)
-            .finish()
-            .unwrap();
-        let _ = env_builder
-            .add_port::<()>("port0", PortType::Input, reactor_key)
-            .unwrap();
-
-        assert!(matches!(
-            env_builder
-                .add_port::<()>("port0", PortType::Output, reactor_key)
-                .expect_err("Expected duplicate"),
-            BuilderError::DuplicatePortDefinition {
-                reactor_name,
-                port_name
-            } if reactor_name == "test_reactor" && port_name == "port0"
-        ));
-    }
-
-    #[test]
-    fn test_duplicate_actions() {
-        let mut env_builder = EnvBuilder::<SchedulerDummy>::new();
-        let (reactor_key, _, _) = env_builder
-            .add_reactor("test_reactor", None, TestReactorDummy)
-            .finish()
-            .unwrap();
-
-        env_builder
-            .add_logical_action::<()>("action0", None, reactor_key)
-            .unwrap();
-
-        assert!(matches!(
-            env_builder
-                .add_logical_action::<()>("action0", None, reactor_key)
-                .expect_err("Expected duplicate"),
-            BuilderError::DuplicateActionDefinition {
-                reactor_name,
-                action_name,
-            } if reactor_name== "test_reactor" && action_name == "action0"
-        ));
-
-        assert!(matches!(
-            env_builder
-                .add_timer(
-                    "action0",
-                    runtime::Duration::from_micros(0),
-                    runtime::Duration::from_micros(0),
-                    reactor_key
-                )
-                .expect_err("Expected duplicate"),
-            BuilderError::DuplicateActionDefinition {
-                reactor_name,
-                action_name,
-            } if reactor_name == "test_reactor" && action_name == "action0"
-        ));
-    }
-
-    #[test]
-    fn test_reactions1() {
-        let mut env_builder = EnvBuilder::<SchedulerDummy>::new();
-        let mut reactor_builder = env_builder.add_reactor("test_reactor", None, TestReactorDummy);
-
-        let r0_key = reactor_builder
-            .add_reaction("test", TestReactorDummy::reaction_dummy)
-            .finish()
-            .unwrap();
-
-        let r1_key = reactor_builder
-            .add_reaction("test", TestReactorDummy::reaction_dummy)
-            .finish()
-            .unwrap();
-
-        let (_reactor_key, _, _) = reactor_builder.finish().unwrap();
-
-        assert_eq!(env_builder.reactors.len(), 1);
-        assert_eq!(env_builder.reaction_builders.len(), 2);
-        assert_eq!(
-            env_builder.reaction_builders.keys().collect::<Vec<_>>(),
-            vec![r0_key, r1_key]
-        );
-
-        // assert_eq!(env_builder.reactors[reactor_key].reactions.len(), 2);
-
-        let dep_edges = env_builder.reaction_dependency_edges().collect::<Vec<_>>();
-        assert_eq!(dep_edges, vec![(r0_key, r1_key)]);
-
-        let env: runtime::Env<_> = env_builder.try_into().unwrap();
-        assert_eq!(env.reactions.len(), 2);
-    }
-
-    #[test]
-    fn test_actions1() {
-        let mut env_builder = EnvBuilder::<SchedulerDummy>::new();
-        let reactor_builder = env_builder.add_reactor("test_reactor", None, TestReactorDummy);
-        // let r0_key = reactor_builder.add_reaction(|_, _, _, _, _| {}).finish().unwrap();
-        let (reactor_key, _, _) = reactor_builder.finish().unwrap();
-        let action_key = env_builder
-            .add_logical_action::<()>("a", Some(runtime::Duration::from_secs(1)), reactor_key)
-            .unwrap()
-            .into();
-        let env: runtime::Env<_> = env_builder.try_into().unwrap();
-
-        assert_eq!(env.actions[action_key].get_name(), "a");
-        assert_eq!(env.actions[action_key].get_is_logical(), true);
-        assert_eq!(
-            env.actions[action_key].get_min_delay(),
-            runtime::Duration::from_secs(1)
-        );
     }
 }

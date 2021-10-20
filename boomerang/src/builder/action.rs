@@ -2,8 +2,22 @@ use super::runtime;
 use slotmap::SecondaryMap;
 
 #[derive(Debug)]
+pub enum ActionType {
+    Timer {
+        period: runtime::Duration,
+        offset: runtime::Duration,
+    },
+    Logical {
+        min_delay: Option<runtime::Duration>,
+    },
+}
+
+#[derive(Debug)]
 pub struct ActionBuilder {
+    /// Name of the Action
     name: String,
+    /// Logical type of the action
+    ty: ActionType,
     /// The key of this action in the EnvBuilder
     action_key: runtime::ActionKey,
     /// The parent Reactor that owns this Action
@@ -17,11 +31,13 @@ pub struct ActionBuilder {
 impl ActionBuilder {
     pub fn new(
         name: &str,
+        ty: ActionType,
         action_key: runtime::ActionKey,
         reactor_key: runtime::ReactorKey,
     ) -> Self {
         Self {
             name: name.to_owned(),
+            ty,
             action_key,
             reactor_key,
             triggers: SecondaryMap::new(),
@@ -31,6 +47,10 @@ impl ActionBuilder {
 
     pub fn get_name(&self) -> &str {
         &self.name
+    }
+
+    pub fn get_type(&self) -> &ActionType {
+        &self.ty
     }
 
     pub fn get_action_key(&self) -> runtime::ActionKey {

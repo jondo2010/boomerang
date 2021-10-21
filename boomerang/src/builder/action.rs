@@ -10,6 +10,7 @@ pub enum ActionType {
     Logical {
         min_delay: Option<runtime::Duration>,
     },
+    Shutdown,
 }
 
 #[derive(Debug)]

@@ -81,6 +81,14 @@ fn count() {
         .build("count", &mut env_builder, None)
         .unwrap();
 
+    let gv = graphviz::build(&env_builder).unwrap();
+    let mut f = std::fs::File::create(format!("{}.dot", module_path!())).unwrap();
+    std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
+
+    let gv = graphviz::build_reaction_graph(&env_builder).unwrap();
+    let mut f = std::fs::File::create(format!("{}_levels.dot", module_path!())).unwrap();
+    std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
+
     let env: runtime::Env<_> = env_builder.try_into().unwrap();
     let mut sched = runtime::Scheduler::new(env);
     sched.start().unwrap();

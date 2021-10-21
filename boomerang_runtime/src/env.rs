@@ -4,7 +4,7 @@ use super::{ActionKey, BaseAction, BasePort, Port, PortData, PortKey, Reaction, 
 use downcast_rs::DowncastSync;
 use slotmap::{SecondaryMap, SlotMap};
 use std::{fmt::Display, sync::Arc};
-use tracing::event;
+use tracing::{debug, event};
 
 /// Builder struct used to facilitate construction of a Reaction
 /// This gets passed into the builder callback.
@@ -71,15 +71,15 @@ impl<S: SchedulerPoint> Env<S> {
 
     pub fn startup(&self, sched: &S) {
         event!(tracing::Level::INFO, "Starting the execution");
-        for action in self.actions.values() {
-            action.startup(&sched);
+        for (key, action) in self.actions.iter() {
+            action.startup(&sched, key);
         }
     }
 
     pub fn shutdown(&self, sched: &S) {
         event!(tracing::Level::INFO, "Terminating the execution");
-        for action in self.actions.values() {
-            action.shutdown(&sched);
+        for (key, action) in self.actions.iter() {
+            action.shutdown(&sched, key);
         }
     }
 }

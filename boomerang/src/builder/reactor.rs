@@ -130,8 +130,8 @@ where
         )
     }
 
-    pub fn add_shutdown_action(&mut self, _name: &str) -> Result<runtime::ActionKey, BuilderError> {
-        todo!()
+    pub fn add_shutdown_action(&mut self, name: &str) -> Result<runtime::ActionKey, BuilderError> {
+        self.env.add_shutdown_action(name, self.reactor_key)
     }
 
     pub fn add_timer(

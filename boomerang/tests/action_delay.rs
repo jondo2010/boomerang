@@ -1,5 +1,5 @@
 use boomerang::{
-    builder::{EmptyPart, EnvBuilder, Reactor},
+    builder::{graphviz, EmptyPart, EnvBuilder, Reactor},
     runtime::{self, Duration, SchedulerPoint},
     ReactorActions, ReactorInputs, ReactorOutputs,
 };
@@ -283,13 +283,13 @@ impl<'a, S: SchedulerPoint> Reactor<S> for ActionDelay {
         let (parent_key, _, _) = env.add_reactor(name, parent, self).finish()?;
         let (_, _, source_outputs) = Source.build("source", env, Some(parent_key))?;
         let (_, sink0_inputs, _) = Sink.build("sink0", env, Some(parent_key))?;
-        let (_, _sink1_inputs, _) = Sink.build("sink1", env, Some(parent_key))?;
+        let (_, sink1_inputs, _) = Sink.build("sink1", env, Some(parent_key))?;
         let (_, sink2_inputs, _) = Sink.build("sink2", env, Some(parent_key))?;
         let (_, g_inputs, g_outputs) = GeneratedDelay::new().build("g", env, Some(parent_key))?;
-        env.bind_port(source_outputs.out.into(), g_inputs.y_in.into()).unwrap();
-        // env.bind_port(source_outputs.out, sink1_inputs.inp).unwrap();
-        env.bind_port(g_outputs.y_out.into(), sink0_inputs.inp.into()).unwrap();
-        env.bind_port(g_outputs.y_out.into(), sink2_inputs.inp.into()).unwrap();
+        env.bind_port(source_outputs.out, g_inputs.y_in).unwrap();
+        env.bind_port(g_outputs.y_out, sink0_inputs.inp).unwrap();
+        env.bind_port(g_outputs.y_out, sink1_inputs.inp).unwrap();
+        env.bind_port(g_outputs.y_out, sink2_inputs.inp).unwrap();
         Ok((parent_key, EmptyPart::default(), EmptyPart::default()))
     }
 
@@ -312,6 +312,14 @@ fn action_delay() {
     let _ = ActionDelay
         .build("action_delay", &mut env_builder, None)
         .unwrap();
+
+    let gv = graphviz::build(&env_builder).unwrap();
+    let mut f = std::fs::File::create(format!("{}.dot", module_path!())).unwrap();
+    std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
+
+    let gv = graphviz::build_reaction_graph(&env_builder).unwrap();
+    let mut f = std::fs::File::create(format!("{}_levels.dot", module_path!())).unwrap();
+    std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
 
     let env: runtime::Env<_> = env_builder.try_into().unwrap();
     let mut sched = runtime::Scheduler::new(env);

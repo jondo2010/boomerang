@@ -3,7 +3,10 @@ use crate::SchedulerPoint;
 use super::Duration;
 use super::{time::Tag, PortData, ReactorElement};
 use derive_more::Display;
-use std::{fmt::{Debug, Display}, sync::RwLock};
+use std::{
+    fmt::{Debug, Display},
+    sync::RwLock,
+};
 
 slotmap::new_key_type! {
     pub struct ActionKey;
@@ -46,7 +49,7 @@ impl<T: PortData> Action<T> {
 }
 
 impl<S: SchedulerPoint, T: PortData> ReactorElement<S> for Action<T> {
-    fn cleanup(&self, _scheduler: &S) {
+    fn cleanup(&self, _scheduler: &S, _key: ActionKey) {
         self.value.write().unwrap().1 = false;
     }
 }
@@ -67,28 +70,21 @@ impl<S: SchedulerPoint, T: PortData> BaseAction<S> for Action<T> {
 #[display(fmt = "Timer<{}>", name)]
 pub struct Timer {
     name: String,
-    action_key: ActionKey,
     offset: Duration,
     period: Duration,
 }
 
 impl Timer {
-    pub fn new(name: &str, action_key: ActionKey, offset: Duration, period: Duration) -> Self {
+    pub fn new(name: &str, offset: Duration, period: Duration) -> Self {
         Self {
             name: name.to_owned(),
-            action_key: action_key,
             offset,
             period,
         }
     }
 
-    pub fn new_zero(name: &str, action_key: ActionKey) -> Self {
-        Timer::new(
-            name,
-            action_key,
-            Duration::from_secs(0),
-            Duration::from_secs(0),
-        )
+    pub fn new_zero(name: &str) -> Self {
+        Timer::new(name, Duration::from_secs(0), Duration::from_secs(0))
     }
 }
 
@@ -105,19 +101,19 @@ impl<S: SchedulerPoint> BaseAction<S> for Timer {
 }
 
 impl<S: SchedulerPoint> ReactorElement<S> for Timer {
-    fn startup(&self, sched: &S) {
+    fn startup(&self, sched: &S, key: ActionKey) {
         let t0 = Tag::from(sched.get_start_time());
         if self.offset > Duration::from_secs(0) {
-            sched.schedule(t0.delay(Some(self.offset)), self.action_key);
+            sched.schedule(t0.delay(Some(self.offset)), key);
         } else {
-            sched.schedule(t0, self.action_key);
+            sched.schedule(t0, key);
         }
     }
 
-    fn cleanup(&self, sched: &S) {
+    fn cleanup(&self, sched: &S, key: ActionKey) {
         // schedule the timer again
         if self.period > Duration::from_secs(0) {
-            sched.schedule_action(self.action_key.into(), (), Some(self.period));
+            sched.schedule_action(key, (), Some(self.period));
         }
     }
 }
@@ -125,9 +121,16 @@ impl<S: SchedulerPoint> ReactorElement<S> for Timer {
 /// ShutdownAction is a logical action that fires when the scheduler shuts down.
 #[derive(Debug, Display)]
 #[display(fmt = "ShutdownAction<{}>", name)]
-struct ShutdownAction {
+pub struct ShutdownAction {
     name: String,
-    action_key: ActionKey,
+}
+
+impl ShutdownAction {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+        }
+    }
 }
 
 impl<S: SchedulerPoint> BaseAction<S> for ShutdownAction {
@@ -145,7 +148,8 @@ impl<S: SchedulerPoint> BaseAction<S> for ShutdownAction {
 }
 
 impl<S: SchedulerPoint> ReactorElement<S> for ShutdownAction {
-    fn shutdown(&self, sched: &S) {
-        sched.schedule_action(self.action_key.into(), (), None);
+    fn shutdown(&self, sched: &S, key: ActionKey) {
+        let tag = Tag::from(sched.get_logical_time()).delay(None);
+        sched.schedule(tag, key);
     }
 }

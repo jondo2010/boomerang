@@ -1,7 +1,7 @@
 use super::Env;
 use super::{
     time::{LogicalTime, Tag},
-    ActionKey, PortKey, Duration, Instant, PortData, ReactionKey,
+    ActionKey, Duration, Instant, PortData, PortKey, ReactionKey,
 };
 use crate::RuntimeError;
 use crossbeam_channel::{Receiver, Sender};
@@ -108,6 +108,13 @@ impl SchedulerPoint for Scheduler {
 
             for sub_reaction_key in self.env.port_triggers[port_key].keys() {
                 let new_reaction_level = self.env.reactions[sub_reaction_key].get_level();
+                event!(
+                    tracing::Level::DEBUG,
+                    "set({:?}) triggering {:?} at level {}",
+                    port_key,
+                    sub_reaction_key,
+                    new_reaction_level
+                );
                 self.reaction_queue_s[new_reaction_level]
                     .send(sub_reaction_key)
                     .unwrap();
@@ -124,13 +131,18 @@ impl SchedulerPoint for Scheduler {
         _value: T,
         delay: Option<super::Duration>,
     ) {
-        let action = &self.env.actions[action_key.into()];
+        let action = &self.env.actions[action_key];
         // TODO set value
         if action.get_is_logical() {
             let delay = delay.unwrap_or_default();
             let tag =
                 Tag::from(self.get_logical_time()).delay(Some(delay + action.get_min_delay()));
-            self.schedule(tag, action_key.into(), None);
+            event!(
+                tracing::Level::DEBUG,
+                "Scheduling action \"{}\"",
+                action.get_name()
+            );
+            self.schedule(tag, action_key, None);
         }
     }
 
@@ -168,8 +180,8 @@ pub struct Scheduler {
     clear_ports_s: Sender<PortKey>,
     clear_ports_r: Receiver<PortKey>,
 
-    /// Stop requested
-    stop_requested: AtomicCell<bool>,
+    /// Stop requested or triggered by end conditions
+    should_stop: AtomicCell<bool>,
 }
 
 impl Scheduler {
@@ -203,7 +215,7 @@ impl Scheduler {
             reaction_queue_r,
             clear_ports_s,
             clear_ports_r,
-            stop_requested: AtomicCell::new(false),
+            should_stop: AtomicCell::new(false),
         }
     }
 
@@ -249,7 +261,7 @@ impl Scheduler {
 
     pub fn stop(&self) {
         self.env.shutdown(&self);
-        self.stop_requested.store(true);
+        self.should_stop.store(true);
     }
 
     fn run(&mut self) -> Result<(), RuntimeError> {
@@ -265,17 +277,21 @@ impl Scheduler {
         Ok(())
     }
 
-    fn get_next_tagged_events(&mut self) -> Option<(Tag, EventMap, bool)> {
-        // Take all available events on the channel and push them into the queue.
+    /// Take all available events on the channel and push them into the queue.
+    fn feed_event_queue(&mut self) {
         for (tag, action_idx, pre_handler) in self.events_channel_r.try_iter() {
             self.event_queue
                 .entry(tag)
                 .or_insert(EventMap::new())
                 .insert(action_idx, pre_handler);
         }
+    }
+
+    fn get_next_tagged_events(&mut self) -> Option<(Tag, EventMap, bool)> {
+        self.feed_event_queue();
 
         // shutdown if there are no more events in the queue
-        if self.event_queue.is_empty() && !self.stop_requested.load() {
+        if self.event_queue.is_empty() && !self.should_stop.load() {
             if matches!(self.config.run_mode, RunMode::RunForever) {
                 // wait for a new asynchronous event
                 // cv_schedule.wait(lock, [this]() { return !event_queue.empty(); });
@@ -286,17 +302,21 @@ impl Scheduler {
                 );
                 self.env.shutdown(&self);
 
-                // The shutdown call might schedule shutdown reactions. If none was scheduled, we
-                // simply return.
+                // The shutdown call might schedule shutdown reactions.
+                self.feed_event_queue();
+
+                // If none was scheduled, we simply return.
                 if self.event_queue.is_empty() {
                     return None;
                 }
+
+                self.should_stop.store(true);
             }
         }
 
         let event_entry = self.event_queue.first_entry().expect("Empty Event Queue!");
 
-        let (t_next, run_again) = if self.stop_requested.load() {
+        let (t_next, run_again) = if self.should_stop.load() {
             event!(tracing::Level::INFO, "Shutting down the scheduler");
             let t_next = Tag::from(&self.logical_time).delay(None);
             if t_next != *event_entry.key() {
@@ -337,7 +357,11 @@ impl Scheduler {
     fn trigger_reactions(&self, reaction_keys: BTreeSet<ReactionKey>) {
         reaction_keys.par_iter().for_each(|&key| {
             let reaction = &self.env.reactions[key];
-            event!(tracing::Level::DEBUG, "Executing {}", reaction.get_name());
+            event!(
+                tracing::Level::DEBUG,
+                "Executing reaction [{}]",
+                reaction.get_name()
+            );
             reaction.trigger(self);
         });
     }
@@ -345,7 +369,7 @@ impl Scheduler {
     fn next(&self, tag_events: EventMap) -> Result<(), RuntimeError> {
         if let RunMode::RunFor(run_for) = self.config.run_mode {
             if self.get_elapsed_logical_time() >= run_for {
-                self.stop_requested.store(true);
+                self.should_stop.store(true);
             }
         }
 
@@ -376,7 +400,7 @@ impl Scheduler {
 
         // cleanup all triggered actions
         tag_events.keys().for_each(|&event_idx| {
-            self.env.actions[event_idx].cleanup(&self);
+            self.env.actions[event_idx].cleanup(&self, event_idx);
         });
 
         // Call clean on set ports
@@ -386,5 +410,53 @@ impl Scheduler {
             .for_each(|port| port.cleanup());
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crossbeam_utils::atomic::AtomicCell;
+    use slotmap::{SecondaryMap, SlotMap};
+    use std::sync::Arc;
+
+    use crate::{BaseAction, Reaction, ShutdownAction};
+
+    #[test]
+    fn test_shutdown() {
+        let shutdown = Arc::new(AtomicCell::new(false));
+        let inner = shutdown.clone();
+
+        let mut reactions: SlotMap<ReactionKey, Reaction<Scheduler>> = SlotMap::with_key();
+        let reaction_key = reactions.insert(Reaction::new(
+            "shutdown_reaction".to_owned(),
+            0,
+            move |_: &Scheduler| {
+                println!("shutdown_reaction()");
+                inner.store(true);
+            },
+            None,
+        ));
+
+        let mut actions: SlotMap<ActionKey, Arc<dyn BaseAction<Scheduler>>> = SlotMap::with_key();
+        let action_key = actions.insert(Arc::new(ShutdownAction::new("shutdown_action")));
+
+        let mut action_triggers: SecondaryMap<ActionKey, SecondaryMap<ReactionKey, ()>> =
+            SecondaryMap::new();
+        action_triggers.insert(action_key, vec![(reaction_key, ())].into_iter().collect());
+
+        let env = Env {
+            ports: SlotMap::with_key(),
+            port_triggers: SecondaryMap::new(),
+            actions,
+            action_triggers,
+            reactions,
+        };
+
+        let mut sched = Scheduler::new(env);
+        sched.start().unwrap();
+
+        assert!(shutdown.load());
     }
 }

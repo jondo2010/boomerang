@@ -96,7 +96,7 @@ impl<S: SchedulerPoint> Reactor<S> for Source {
         let _ = builder
             .add_reaction("reaction_out", Self::reaction_out)
             .with_trigger_action(t)
-            .with_antidependency(out.into())
+            .with_antidependency(out)
             .finish();
 
         builder.finish()
@@ -343,7 +343,11 @@ fn hierarchy() {
 
     // boomerang::builder::graphviz::reaction_graph::render_to(&env_builder, &mut stdout());
     let gv = graphviz::build(&env_builder).unwrap();
-    let mut f = std::fs::File::create("out.dot").unwrap();
+    let mut f = std::fs::File::create("hierarchy.dot").unwrap();
+    std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
+
+    let gv = graphviz::build_reaction_graph(&env_builder).unwrap();
+    let mut f = std::fs::File::create("hierarchy2.dot").unwrap();
     std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
 
     let env: runtime::Env<_> = env_builder.try_into().unwrap();

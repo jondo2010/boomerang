@@ -50,8 +50,7 @@ pub struct PortBuilder<T> {
     _phantom: PhantomData<T>,
 }
 
-impl<T> PortBuilder<T>
-{
+impl<T> PortBuilder<T> {
     pub fn new(name: &str, reactor_key: runtime::ReactorKey, port_type: PortType) -> Self {
         Self {
             name: name.into(),

@@ -30,13 +30,16 @@ pub enum BuilderError {
         action_name: String,
     },
 
-    #[error("ReactorType Index not found: {}", 0)]
+    #[error("ActionKey not found: {}", 0)]
+    ActionKeyNotFound(runtime::ActionKey),
+
+    #[error("ReactorKey not found: {}", 0)]
     ReactorKeyNotFound(runtime::ReactorKey),
 
-    #[error("Port Key not found: {}", 0)]
+    #[error("PortKey not found: {}", 0)]
     PortKeyNotFound(runtime::PortKey),
 
-    #[error("Reaction Key not found: {}", 0)]
+    #[error("ReactionKey not found: {}", 0)]
     ReactionKeyNotFound(runtime::ReactionKey),
 
     #[error("Inconsistent Builder State: {}", what)]

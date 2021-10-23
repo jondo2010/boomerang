@@ -1,8 +1,57 @@
-use super::{BuilderError, EnvBuilder, PortType, ReactorBuilder};
+use std::collections::HashMap;
+
+use super::{ActionType, BuilderError, EnvBuilder, PortType, ReactorBuilder};
 use crate::runtime;
 use itertools::Itertools;
 use slotmap::Key;
 
+pub fn build_reaction_graph<S: runtime::SchedulerPoint>(
+    env_builder: &EnvBuilder<S>,
+) -> Result<String, BuilderError> {
+    let graph = env_builder.get_reaction_graph();
+    let runtime_level_map = super::build_runtime_level_map(&graph);
+
+    // Cluster on level
+    let mut level_runtime_map = HashMap::new();
+    runtime_level_map
+        .into_iter()
+        .for_each(|(reaction_key, level)| {
+            level_runtime_map
+                .entry(level)
+                .or_insert(Vec::new())
+                .push(reaction_key)
+        });
+
+    // Add all nodes
+    let mut output = vec!["digraph G {".to_owned()];
+
+    for (level, reactions) in level_runtime_map.iter() {
+        output.push(format!("subgraph cluster{} {{", level));
+        output.push(format!("  label=\"level{}\";", level));
+
+        for &key in reactions.iter() {
+            let reaction = &env_builder.reaction_builders[key];
+            let reaction_id = key.data().as_ffi() % env_builder.reaction_builders.len() as u64;
+            output.push(format!(
+                "  r{} [label=\"{}\";shape=cds;color=3];",
+                reaction_id, reaction.name
+            ));
+        }
+
+        output.push(format!("}}"));
+    }
+
+    for (from, to, _) in graph.all_edges() {
+        let from_id = from.data().as_ffi() % env_builder.reaction_builders.len() as u64;
+        let to_id = to.data().as_ffi() % env_builder.reaction_builders.len() as u64;
+        output.push(format!("  r{} -> r{};", from_id, to_id));
+    }
+
+    output.push(format!("}}\n"));
+    Ok(output.join("\n"))
+}
+
+/// Build a GraphViz representation of the entire Reactor
 pub fn build<S: runtime::SchedulerPoint>(
     env_builder: &EnvBuilder<S>,
 ) -> Result<String, BuilderError> {
@@ -120,31 +169,44 @@ fn build_actions<S>(
 ) {
     for action_key in reactor.actions.keys() {
         let action = &env_builder.action_builders[action_key];
-        let action_id = action_key.data().as_ffi() % env_builder.reactors.len() as u64;
+        let action_id = action_key.data().as_ffi() % env_builder.actions.len() as u64;
 
-        match action.get_type() {
-            crate::builder::ActionType::Timer { period, offset } => {
-                let xlabel = if offset.is_zero() {
-                    format!("startup")
+        let xlabel = match action.get_type() {
+            ActionType::Timer { period, offset } => {
+                if offset.is_zero() {
+                    format!("⏲(startup)")
                 } else {
-                    format!("{} ms, {} ms", offset.as_millis(), period.as_millis())
-                };
-                output.push(format!(
-                    "  a{} [label=\"{}\";xlabel=\"⏲({})\"shape=circle;color=4];",
-                    action_id,
-                    action.get_name(),
-                    xlabel,
-                ));
+                    format!("⏲({} ms, {} ms)", offset.as_millis(), period.as_millis())
+                }
             }
-            crate::builder::ActionType::Logical { min_delay } => todo!(),
-        }
+            ActionType::Logical { min_delay } => {
+                format!("L({} ms)", min_delay.unwrap_or_default().as_millis())
+            }
+            ActionType::Shutdown => {
+                format!("Shutdown")
+            }
+        };
+
+        output.push(format!(
+            "  a{} [label=\"{}\";xlabel=\"{}\"shape=diamond;color=4];",
+            action_id,
+            action.get_name(),
+            xlabel,
+        ));
 
         for reaction_key in action.triggers.keys() {
             let reaction_id =
                 reaction_key.data().as_ffi() % env_builder.reaction_builders.len() as u64;
+            output.push(format!("  a{}:e -> r{}:w;", action_id, reaction_id));
+        }
+
+        for reaction_key in action.schedulers.keys() {
+            let reaction_id =
+                reaction_key.data().as_ffi() % env_builder.reaction_builders.len() as u64;
+
             output.push(format!(
-                "  a{}:e -> r{}:w [constraint=false];",
-                action_id, reaction_id
+                "  r{}:e -> a{}:w [style=dashed];",
+                reaction_id, action_id
             ));
         }
     }

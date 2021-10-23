@@ -1,3 +1,5 @@
+use petgraph::graph;
+
 use super::*;
 use crate::builder::tests::*;
 
@@ -86,9 +88,6 @@ fn test_reactions1() {
     );
 
     // assert_eq!(env_builder.reactors[reactor_key].reactions.len(), 2);
-
-    let dep_edges = env_builder.reaction_dependency_edges().collect::<Vec<_>>();
-    assert_eq!(dep_edges, vec![(r0_key, r1_key)]);
 
     let env: runtime::Env<_> = env_builder.try_into().unwrap();
     assert_eq!(env.reactions.len(), 2);

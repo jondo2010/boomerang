@@ -1,4 +1,7 @@
-use super::{ActionType, BuilderError, PortBuilder, PortType, Reactor, ReactorBuilder, ReactorBuilderState, action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder};
+use super::{
+    action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder, reactor, ActionType,
+    BuilderError, PortBuilder, PortType, Reactor, ReactorBuilder, ReactorBuilderState,
+};
 use crate::runtime;
 use itertools::Itertools;
 use slotmap::{SecondaryMap, SlotMap};
@@ -94,7 +97,7 @@ where
         reactor_key: runtime::ReactorKey,
     ) -> Result<runtime::ActionKey, BuilderError> {
         let key = self.add_action(name, reactor_key, |action_key| {
-            Arc::new(runtime::Timer::new(name, action_key, offset, period))
+            Arc::new(runtime::Timer::new(name, offset, period))
         })?;
 
         self.action_builders.insert(
@@ -102,6 +105,21 @@ where
             ActionBuilder::new(name, ActionType::Timer { period, offset }, key, reactor_key),
         );
 
+        Ok(key)
+    }
+
+    pub fn add_shutdown_action(
+        &mut self,
+        name: &str,
+        reactor_key: runtime::ReactorKey,
+    ) -> Result<runtime::ActionKey, BuilderError> {
+        let key = self.add_action(name, reactor_key, |action_key| {
+            Arc::new(runtime::ShutdownAction::new(name))
+        })?;
+        self.action_builders.insert(
+            key,
+            ActionBuilder::new(name, ActionType::Shutdown, key, reactor_key),
+        );
         Ok(key)
     }
 
@@ -151,7 +169,7 @@ where
             .actions
             .insert_with_key(|action_key| action_fn(action_key));
         self.reactors[reactor_key].actions.insert(key, ());
-        Ok(key.into())
+        Ok(key)
     }
 
     /// Bind Port A to Port B
@@ -261,6 +279,23 @@ where
         Ok(())
     }
 
+    /// Get a fully-qualified string name for the given ActionKey
+    pub fn action_fqn(&self, action_key: runtime::ActionKey) -> Result<String, BuilderError> {
+        self.action_builders
+            .get(action_key)
+            .ok_or(BuilderError::ActionKeyNotFound(action_key))
+            .and_then(|action_builder| {
+                self.reactor_fqn(action_builder.get_reactor_key())
+                    .map_err(|err| BuilderError::InconsistentBuilderState {
+                        what: format!(
+                            "Reactor referenced by {:?} not found: {:?}",
+                            action_builder, err
+                        ),
+                    })
+                    .map(|reactor_fqn| format!("{}/{}", reactor_fqn, action_builder.get_name()))
+            })
+    }
+
     /// Get a fully-qualified string for the given ReactionKey
     pub fn reactor_fqn(&self, reactor_key: runtime::ReactorKey) -> Result<String, BuilderError> {
         self.reactors
@@ -293,10 +328,7 @@ where
     }
 
     /// Get a fully-qualified string for the given PortKey
-    pub fn port_fqn<T: runtime::PortData>(
-        &self,
-        port_key: runtime::PortKey,
-    ) -> Result<String, BuilderError> {
+    pub fn port_fqn(&self, port_key: runtime::PortKey) -> Result<String, BuilderError> {
         let port_key = port_key.into();
         self.port_builders
             .get(port_key)
@@ -367,19 +399,20 @@ where
             });
 
         // For all Reactions within a Reactor, create a chain of dependencies by priority
-        let internal = self.reactors.values().flat_map(move |reactor| {
-            reactor
-                .reactions
-                .keys()
-                .sorted_by_key(|&reaction_key| self.reaction_builders[reaction_key].priority)
-                .tuple_windows()
-        });
-
-        deps.chain(internal)
+        // TODO really ensure this isn't needed.
+        // let internal = self.reactors.values().flat_map(move |reactor| {
+        //    reactor
+        //        .reactions
+        //        .keys()
+        //        .sorted_by_key(|&reaction_key| self.reaction_builders[reaction_key].priority)
+        //        .tuple_windows()
+        //});
+        // deps.chain(internal)
+        deps
     }
 
     /// Prepare the DAG of Reactions
-    fn get_reaction_graph(&self) -> petgraph::graphmap::DiGraphMap<runtime::ReactionKey, ()> {
+    pub fn get_reaction_graph(&self) -> petgraph::graphmap::DiGraphMap<runtime::ReactionKey, ()> {
         let mut graph = petgraph::graphmap::DiGraphMap::from_edges(
             self.reaction_dependency_edges().map(|(a, b)| (b, a)),
         );
@@ -410,7 +443,9 @@ where
 
 /// Build a HashMap of the runtime-levels for each node corresponding to the parallelizable
 /// schedule.
-fn build_runtime_level_map<N, E>(graph: &petgraph::graphmap::DiGraphMap<N, E>) -> HashMap<N, usize>
+pub(crate) fn build_runtime_level_map<N, E>(
+    graph: &petgraph::graphmap::DiGraphMap<N, E>,
+) -> HashMap<N, usize>
 where
     N: petgraph::graphmap::NodeTrait,
 {
@@ -451,11 +486,17 @@ where
     fn try_into(self) -> Result<runtime::Env<S>, Self::Error> {
         use tracing::event;
 
+        if self.port_builders.len() != self.ports.len() {
+            return Err(BuilderError::InconsistentBuilderState {
+                what: format!(
+                    "port_builders len({}) doesn't match ports len({})",
+                    self.port_builders.len(),
+                    self.ports.len()
+                ),
+            });
+        }
+
         let graph = self.get_reaction_graph();
-
-        let ordered_reactions =
-            petgraph::algo::toposort(&graph, None).map_err(|_| BuilderError::ReactionGraphCycle)?;
-
         let runtime_level_map = build_runtime_level_map(&graph);
 
         event!(
@@ -482,14 +523,14 @@ where
                 .map(|(&key, level)| format!("{:?}: {}", key, level))
         );
 
-        // Build Reactions in topo-sorted order
-        event!(
-            tracing::Level::DEBUG,
-            "Building Reactions in order: {:?}",
-            ordered_reactions
-                .iter()
-                .map(|reaction_key| (reaction_key, self.reaction_fqn(*reaction_key).unwrap())) /*  */
-        );
+        for key in self.actions.keys() {
+            event!(
+                tracing::Level::DEBUG,
+                "{:?}: \"{}\"",
+                key,
+                self.action_fqn(key)?
+            );
+        }
 
         let mut runtime_ports = self.ports.clone();
         let mut runtime_port_triggers: SecondaryMap<
@@ -523,6 +564,27 @@ where
                     runtime_ports[port_key] = runtime_ports[inward_port_key].clone();
                 }
             }
+        }
+
+        for port_key in self.ports.keys() {
+            event!(
+                tracing::Level::DEBUG,
+                "{:?}: {}",
+                port_key,
+                self.port_fqn(port_key)?,
+            );
+        }
+
+        for (port_key, triggers) in runtime_port_triggers.iter() {
+            event!(
+                tracing::Level::DEBUG,
+                "{:?}: {:?}",
+                self.port_fqn(port_key)?,
+                triggers
+                    .keys()
+                    .map(|key| format!("{:?}", key))
+                    .collect::<Vec<_>>()
+            );
         }
 
         // Build the SlotMap of runtime::Reaction from the ReactionBuilders.

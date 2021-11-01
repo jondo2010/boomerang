@@ -3,7 +3,8 @@
 use darling::FromMeta;
 use derive_more::Display;
 use proc_macro2::Ident;
-use std::collections::HashSet;
+use quote::quote;
+use std::{collections::HashSet, time::Duration};
 use syn::ext::IdentExt;
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -57,6 +58,28 @@ impl From<syn::Type> for Type {
     }
 }
 
+pub struct Expr(syn::Expr);
+impl FromMeta for Expr {
+    fn from_string(value: &str) -> darling::Result<Self> {
+        syn::parse_str::<syn::Expr>(value)
+            .map_err(|err| {
+                darling::Error::unsupported_format("Error parsing expression.")
+                    .with_span(&err.span())
+            })
+            .map(Self::from)
+    }
+}
+impl From<Expr> for syn::Expr {
+    fn from(expr: Expr) -> Self {
+        expr.0
+    }
+}
+impl From<syn::Expr> for Expr {
+    fn from(expr: syn::Expr) -> Expr {
+        Expr(expr)
+    }
+}
+
 pub fn handle_ident(string: syn::LitStr) -> syn::Ident {
     syn::Ident::new(&string.value(), string.span())
 }
@@ -78,9 +101,9 @@ impl FromMeta for IdentSet {
                     // string.parse::<syn::Ident>().map_err(|err| {})
                 }
                 _ => {
-                    // darling::Error::unsupported_format("Error parsing
-                    // expression.").with_span(&err.span())
-                    panic!("oops2");
+                    Err(darling::Error::unsupported_format(
+                        "Error parsing expression.",
+                    )) //.with_span(&err.span())
                 }
             })
             .collect::<Result<HashSet<_>, _>>()?;
@@ -114,16 +137,6 @@ impl FromMeta for NamedField {
         syn::parse_str(string)
             .map_err(|err| darling::Error::custom("Error parsing value").with_span(&err.span()))
     }
-    fn from_nested_meta(nm: &syn::NestedMeta) -> darling::Result<Self> {
-        if let syn::NestedMeta::Lit(syn::Lit::Str(ref string)) = nm {
-            string.parse().map_err(|err| {
-                darling::Error::unsupported_format("Error parsing expression.")
-                    .with_span(&err.span())
-            })
-        } else {
-            Err(darling::Error::unexpected_type("non-word").with_span(nm))
-        }
-    }
 }
 
 #[test]
@@ -141,21 +154,28 @@ fn test_named_field() {
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
-pub struct NamedFieldList(Vec<NamedField>);
+pub struct MetaList<T>(Vec<T>);
 
-impl From<NamedFieldList> for Vec<NamedField> {
-    fn from(list: NamedFieldList) -> Self {
+impl<T> From<MetaList<T>> for Vec<T> {
+    fn from(list: MetaList<T>) -> Self {
         list.0
     }
 }
 
-impl FromMeta for NamedFieldList {
+impl<T: FromMeta> FromMeta for MetaList<T> {
     fn from_list(items: &[syn::NestedMeta]) -> darling::Result<Self> {
         let exprs = items
             .iter()
-            .map(NamedField::from_nested_meta)
+            .map(T::from_nested_meta)
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(NamedFieldList(exprs))
+        Ok(MetaList(exprs))
     }
+}
+
+/// Generate a TokenSTream from an Option<Duration>
+pub(crate) fn duration_quote(duration: &Duration) -> proc_macro2::TokenStream {
+    let secs = duration.as_secs();
+    let nanos = duration.subsec_nanos();
+    quote! {::boomerang::runtime::Duration::new(#secs, #nanos)}
 }

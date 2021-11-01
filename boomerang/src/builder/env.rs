@@ -1,9 +1,9 @@
 use super::{
-    action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder, reactor, ActionType,
+    action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder, ActionType,
     BuilderError, PortBuilder, PortType, Reactor, ReactorBuilder, ReactorBuilderState,
 };
 use crate::runtime;
-use itertools::Itertools;
+use petgraph::{graphmap::DiGraphMap, EdgeDirection};
 use slotmap::{SecondaryMap, SlotMap};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -412,10 +412,9 @@ where
     }
 
     /// Prepare the DAG of Reactions
-    pub fn get_reaction_graph(&self) -> petgraph::graphmap::DiGraphMap<runtime::ReactionKey, ()> {
-        let mut graph = petgraph::graphmap::DiGraphMap::from_edges(
-            self.reaction_dependency_edges().map(|(a, b)| (b, a)),
-        );
+    pub fn get_reaction_graph(&self) -> DiGraphMap<runtime::ReactionKey, ()> {
+        let mut graph =
+            DiGraphMap::from_edges(self.reaction_dependency_edges().map(|(a, b)| (b, a)));
         // Ensure all ReactionIndicies are represented
         self.reaction_builders.keys().for_each(|key| {
             graph.add_node(key);
@@ -425,57 +424,66 @@ where
     }
 
     /// Build a DAG of Reactors
-    pub fn build_reactor_graph(&self) -> petgraph::graphmap::DiGraphMap<runtime::ReactorKey, ()> {
-        let mut graph = petgraph::graphmap::DiGraphMap::from_edges(
-            self.reactors.iter().filter_map(|(key, reactor)| {
+    pub fn build_reactor_graph(&self) -> DiGraphMap<runtime::ReactorKey, ()> {
+        let mut graph =
+            DiGraphMap::from_edges(self.reactors.iter().filter_map(|(key, reactor)| {
                 reactor
                     .parent_reactor_key
                     .map(|parent_key| (parent_key, key))
-            }),
-        );
+            }));
         // ensure all Reactors are represented
         self.reactors.keys().for_each(|key| {
             graph.add_node(key);
         });
         graph
     }
-}
 
-/// Build a HashMap of the runtime-levels for each node corresponding to the parallelizable
-/// schedule.
-pub(crate) fn build_runtime_level_map<N, E>(
-    graph: &petgraph::graphmap::DiGraphMap<N, E>,
-) -> HashMap<N, usize>
-where
-    N: petgraph::graphmap::NodeTrait,
-{
-    graph
-        .nodes()
-        .filter_map(|reaction_key| {
-            // Filter all nodes that have no incoming edges
-            if graph
-                .neighbors_directed(reaction_key, petgraph::EdgeDirection::Incoming)
-                .count()
-                == 0
-            {
-                // Run Dijkstra on each of them
-                Some(petgraph::algo::dijkstra(&graph, reaction_key, None, |_| {
-                    1usize
-                }))
-            } else {
-                None
+    /// Build a Mapping of ReactionKey -> level corresponding to the parallelizable schedule
+    ///
+    /// This implements the Coffman-Graham algorithm for job scheduling.
+    /// See https://en.m.wikipedia.org/wiki/Coffman%E2%80%93Graham_algorithm
+    pub fn build_runtime_level_map(
+        &self,
+    ) -> Result<HashMap<runtime::ReactionKey, usize>, BuilderError> {
+        use petgraph::{algo::tred, graph::DefaultIx, graph::NodeIndex};
+
+        let mut graph = self.get_reaction_graph().into_graph::<DefaultIx>();
+
+        // Transitive reduction and closures
+        let toposort = petgraph::algo::toposort(&graph, None).map_err(|e| {
+            BuilderError::ReactionGraphCycle {
+                what: graph[e.node_id()],
             }
-        })
-        // Now fold the resultant (Node -> level) maps into a single one.
-        .fold(HashMap::new(), |mut acc, fold| {
-            for (&key, &level) in fold.iter() {
-                let entry = acc.entry(key).or_insert(level);
-                if level > *entry {
-                    *entry = level;
-                }
-            }
-            acc
-        })
+        })?;
+
+        let (res, _) = tred::dag_to_toposorted_adjacency_list::<_, NodeIndex>(&graph, &toposort);
+        let (_reduc, close) = tred::dag_transitive_reduction_closure(&res);
+
+        // Replace the edges in graph with the transitive closure edges
+        graph.clear_edges();
+        graph.extend_with_edges(close.edge_indices().filter_map(|e| {
+            close
+                .edge_endpoints(e)
+                .map(|(a, b)| (toposort[a.index()], toposort[b.index()]))
+        }));
+
+        let mut levels: HashMap<_, usize> = HashMap::new();
+        for &idx in toposort.iter() {
+            let max_neighbor = graph
+                .neighbors_directed(idx, EdgeDirection::Incoming)
+                .map(|neighbor_idx| *levels.entry(neighbor_idx).or_default())
+                .max()
+                .unwrap_or_default();
+
+            levels.insert(idx, max_neighbor + 1);
+        }
+
+        // Collect and return a HashMap with ReactionKey indices instead of NodeIndex
+        Ok(levels
+            .iter()
+            .map(|(&idx, &level)| (graph[idx], level - 1))
+            .collect())
+    }
 }
 
 impl<S> TryInto<runtime::Env<S>> for EnvBuilder<S>
@@ -496,8 +504,7 @@ where
             });
         }
 
-        let graph = self.get_reaction_graph();
-        let runtime_level_map = build_runtime_level_map(&graph);
+        let runtime_level_map = self.build_runtime_level_map()?;
 
         event!(
             tracing::Level::DEBUG,

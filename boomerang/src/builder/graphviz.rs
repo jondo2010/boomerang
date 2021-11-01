@@ -8,8 +8,8 @@ use slotmap::Key;
 pub fn build_reaction_graph<S: runtime::SchedulerPoint>(
     env_builder: &EnvBuilder<S>,
 ) -> Result<String, BuilderError> {
-    let graph = env_builder.get_reaction_graph();
-    let runtime_level_map = super::build_runtime_level_map(&graph);
+    let reaction_graph = env_builder.get_reaction_graph();
+    let runtime_level_map = env_builder.build_runtime_level_map()?;
 
     // Cluster on level
     let mut level_runtime_map = HashMap::new();
@@ -41,7 +41,7 @@ pub fn build_reaction_graph<S: runtime::SchedulerPoint>(
         output.push(format!("}}"));
     }
 
-    for (from, to, _) in graph.all_edges() {
+    for (from, to, _) in reaction_graph.all_edges() {
         let from_id = from.data().as_ffi() % env_builder.reaction_builders.len() as u64;
         let to_id = to.data().as_ffi() % env_builder.reaction_builders.len() as u64;
         output.push(format!("  r{} -> r{};", from_id, to_id));
@@ -56,8 +56,8 @@ pub fn build<S: runtime::SchedulerPoint>(
     env_builder: &EnvBuilder<S>,
 ) -> Result<String, BuilderError> {
     let graph = env_builder.build_reactor_graph();
-    let ordered_reactors =
-        petgraph::algo::toposort(&graph, None).map_err(|_| BuilderError::ReactionGraphCycle)?;
+    let ordered_reactors = petgraph::algo::toposort(&graph, None)
+        .map_err(|e| BuilderError::ReactorGraphCycle { what: e.node_id() })?;
     let start = *ordered_reactors.first().unwrap();
 
     let mut output = vec![

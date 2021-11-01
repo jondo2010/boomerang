@@ -1,4 +1,4 @@
-use super::{BuilderError, EnvBuilder, ReactionBuilderState};
+use super::{BuilderError, EnvBuilder, PortType, ReactionBuilderState};
 use crate::runtime;
 use runtime::SchedulerPoint;
 use slotmap::SecondaryMap;
@@ -168,6 +168,14 @@ where
             },
             self.env,
         )
+    }
+
+    pub fn add_internal_port<T: runtime::PortData>(
+        &mut self,
+        name: &str,
+        port_type: PortType,
+    ) -> Result<runtime::PortKey, BuilderError> {
+        self.env.add_port::<T>(name, port_type, self.reactor_key)
     }
 
     pub fn finish(self) -> Result<(runtime::ReactorKey, R::Inputs, R::Outputs), BuilderError> {

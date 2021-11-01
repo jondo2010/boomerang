@@ -4,7 +4,7 @@ use super::{ActionKey, BaseAction, BasePort, Port, PortData, PortKey, Reaction, 
 use downcast_rs::DowncastSync;
 use slotmap::{SecondaryMap, SlotMap};
 use std::{fmt::Display, sync::Arc};
-use tracing::{debug, event};
+use tracing::event;
 
 /// Builder struct used to facilitate construction of a Reaction
 /// This gets passed into the builder callback.

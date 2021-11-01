@@ -17,16 +17,18 @@ gitlab = { repository = 'jondo2010/boomerang', branch = 'master' }
 codecov = { repository = 'jondo2010/boomerang', branch = 'master', service = 'gitlab' }
 
 [features]
-default = ["visualization"]
+default = ["visualization", "derive"]
 visualization = ["serde_json"]
+derive = ["boomerang_derive"]
 
 [dependencies]
 anyhow = "1.0.38"
 boomerang_runtime = { path = "../boomerang_runtime" }
+boomerang_derive = { optional = true, path = "../boomerang_derive" }
 derivative = "2.2.0"
 derive_more = '0.99.11'
-itertools = "0.10.0"
-petgraph = "0.5.1"
+itertools = "0.10"
+petgraph = "0.6"
 ref-cast = "1.0.6"
 slotmap = { version = "1.0.2", features = ["unstable"] }
 thiserror = "1.0.24"
@@ -35,3 +37,11 @@ serde_json = { version = "1.0.68", optional = true }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.2.15", features = ["fmt"] }
+criterion = "0.3"
+
+[[bench]]
+name = "savina_pong"
+harness = false
+
+[profile.bench]
+debug = true

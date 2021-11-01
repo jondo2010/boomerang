@@ -1,3 +1,4 @@
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use std::convert::TryInto;
 
 use boomerang::{builder::*, runtime, ReactorActions, ReactorInputs, ReactorOutputs};
@@ -21,7 +22,6 @@ impl Ping {
         outputs: &PingOutputs,
         _actions: &PingActions,
     ) {
-        println!("ping serve");
         sched.get_port_with_mut(outputs.send, |send, _is_set| {
             *send = self.pings_left;
             self.pings_left -= 1;
@@ -36,7 +36,6 @@ impl Ping {
         _outputs: &PingOutputs,
         actions: &PingActions,
     ) {
-        println!("ping receive");
         if self.pings_left > 0 {
             sched.schedule_action(actions.serve, (), None);
         } else {
@@ -106,7 +105,6 @@ impl Pong {
         outputs: &PongOutputs,
         _actions: &EmptyPart,
     ) {
-        println!("pong receive");
         sched.get_port_with(inputs.receive, |receive: &u32, is_set| {
             if is_set {
                 self.count += 1;
@@ -124,7 +122,6 @@ impl Pong {
         _outputs: &PongOutputs,
         _actions: &EmptyPart,
     ) {
-        println!("shutdown");
         assert_eq!(self.count, self.expected);
     }
 }
@@ -155,16 +152,21 @@ impl<S: runtime::SchedulerPoint> Reactor<S> for Pong {
         let mut builder = env.add_reactor(name, parent, self);
         let PongInputs { receive } = builder.inputs;
         let PongOutputs { send } = builder.outputs;
+
+        let send_internal = builder.add_internal_port::<()>(name, PortType::Output)?;
+
         let _ = builder
             .add_reaction("receive", Self::reaction_receive)
             .with_trigger_port(receive)
             .with_antidependency(send)
+            .with_antidependency(send_internal)
             .finish();
         let shutdown = builder.add_shutdown_action("shutdown")?;
         let _ = builder
             .add_reaction("shutdown", Self::reaction_shutdown)
             .with_trigger_action(shutdown)
             .finish();
+
         builder.finish()
     }
 }
@@ -179,8 +181,8 @@ impl<S: runtime::SchedulerPoint> Reactor<S> for SavinaPong {
 
     fn build_parts<'b>(
         &'b self,
-        env: &'b mut EnvBuilder<S>,
-        reactor_key: runtime::ReactorKey,
+        _env: &'b mut EnvBuilder<S>,
+        _reactor_key: runtime::ReactorKey,
     ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError> {
         Ok((EmptyPart, EmptyPart, EmptyPart))
     }
@@ -193,11 +195,13 @@ impl<S: runtime::SchedulerPoint> Reactor<S> for SavinaPong {
     ) -> Result<(runtime::ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
         let count = self.count;
         let builder = env.add_reactor(name, parent, self);
+
         let (parent_key, _, _) = builder.finish()?;
 
-        let (ping_key, ping_inputs, ping_outputs) =
+        let (_ping_key, ping_inputs, ping_outputs) =
             Ping::new(count).build("ping", env, Some(parent_key))?;
-        let (pong_key, pong_inputs, pong_outputs) =
+
+        let (_pong_key, pong_inputs, pong_outputs) =
             Pong::new(count).build("pong", env, Some(parent_key))?;
         env.bind_port(ping_outputs.send, pong_inputs.receive)?;
         env.bind_port(pong_outputs.send, ping_inputs.receive)?;
@@ -206,27 +210,24 @@ impl<S: runtime::SchedulerPoint> Reactor<S> for SavinaPong {
     }
 }
 
-#[test]
-fn savina_pong() {
-    // install global collector configured based on RUST_LOG env var.
-    tracing_subscriber::fmt::init();
-
+fn savina_pong(count: u32) {
     use boomerang::builder::*;
-    let mut env_builder = EnvBuilder::new();
 
-    let (_, _, _) = SavinaPong { count: 40000 }
+    let mut env_builder = EnvBuilder::new();
+    let (_, _, _) = SavinaPong { count }
         .build("savina_pong", &mut env_builder, None)
         .unwrap();
-
-    let gv = graphviz::build(&env_builder).unwrap();
-    let mut f = std::fs::File::create(format!("{}.dot", module_path!())).unwrap();
-    std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
-
-    let gv = graphviz::build_reaction_graph(&env_builder).unwrap();
-    let mut f = std::fs::File::create(format!("{}_levels.dot", module_path!())).unwrap();
-    std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
 
     let env: runtime::Env<_> = env_builder.try_into().unwrap();
     let mut sched = runtime::Scheduler::new(env);
     sched.start().unwrap();
 }
+
+fn criterion_benchmark(c: &mut Criterion) {
+    c.bench_function("savina_pong", |bencher| {
+        bencher.iter(|| savina_pong(black_box(100_000)))
+    });
+}
+
+criterion_group!(benches, criterion_benchmark);
+criterion_main!(benches);

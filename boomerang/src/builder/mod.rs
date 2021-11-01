@@ -49,7 +49,10 @@ pub enum BuilderError {
     },
 
     #[error("A cycle in the Reaction graph was found.")]
-    ReactionGraphCycle,
+    ReactionGraphCycle { what: runtime::ReactionKey },
+
+    #[error("A cycle in the Reactor graph was found.")]
+    ReactorGraphCycle { what: runtime::ReactorKey },
 
     #[error("Error binding ports ({:?}->{:?}): {}", port_a_key, port_b_key, what)]
     PortBindError {

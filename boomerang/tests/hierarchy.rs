@@ -4,7 +4,7 @@ use boomerang::{
     ReactorInputs, ReactorOutputs,
 };
 use runtime::SchedulerPoint;
-use std::{convert::TryInto, io::stdout};
+use std::convert::TryInto;
 use tracing::event;
 
 // Test data transport across hierarchy.

@@ -2,10 +2,10 @@
 //! The `Reactor` derive macro is parsed into a `ReactorReceiver` struct for further
 //! processing.
 
-use crate::util::{handle_ident, IdentSet, NamedField, NamedFieldList, Type};
+use crate::util::{handle_ident, Expr, MetaList, NamedField, Type};
 use darling::{ast, util, FromDeriveInput, FromField, FromMeta, ToTokens};
 use derive_more::Display;
-use std::{collections::HashSet, time::Duration};
+use std::time::Duration;
 
 fn handle_duration(value: String) -> Option<Duration> {
     Some(parse_duration::parse(&value).unwrap())
@@ -49,13 +49,17 @@ pub enum ActionAttrPolicy {
     Drop,
 }
 
+fn type_default() -> syn::Type {
+    syn::parse_quote!(())
+}
+
 #[derive(Debug, FromMeta, PartialEq, Eq, Hash, Display)]
 #[display(fmt = "{}", "name.to_string()")]
 pub struct ActionAttr {
     #[darling(map = "handle_ident")]
     pub name: syn::Ident,
-    //#[darling(rename = "type", map = "Type::into")]
-    // pub ty: syn::Type,
+    #[darling(default = "type_default", rename = "type", map = "Type::into")]
+    pub ty: syn::Type,
     #[darling(default)]
     pub physical: bool,
     #[darling(default, map = "handle_duration")]
@@ -66,15 +70,75 @@ pub struct ActionAttr {
     pub policy: Option<ActionAttrPolicy>,
 }
 
+#[derive(Debug, Eq, PartialEq, Hash)]
+pub enum TriggerAttr {
+    Startup,
+    Shutdown,
+    Timer(syn::Ident),
+    Port(NamedField),
+}
+
+impl FromMeta for TriggerAttr {
+    fn from_meta(item: &syn::Meta) -> darling::Result<Self> {
+        (match *item {
+            syn::Meta::Path(ref path) => path.segments.first().map_or_else(
+                || Err(darling::Error::unsupported_shape("something wierd")),
+                |path| match path.ident.to_string().as_ref() {
+                    "startup" => Ok(TriggerAttr::Startup),
+                    "shutdown" => Ok(TriggerAttr::Shutdown),
+                    __other => Err(darling::Error::unknown_field_with_alts(
+                        __other,
+                        &["startup", "shutdown"],
+                    )
+                    .with_span(&path.ident)),
+                },
+            ),
+            syn::Meta::List(ref value) => Self::from_list(
+                &value
+                    .nested
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<syn::NestedMeta>>()[..],
+            ),
+            syn::Meta::NameValue(ref value) => value
+                .path
+                .segments
+                .first()
+                .map(|path| match path.ident.to_string().as_ref() {
+                    "timer" => {
+                        let value = darling::FromMeta::from_value(&value.lit)?;
+                        Ok(TriggerAttr::Timer(value))
+                    }
+                    "port" => {
+                        let value = darling::FromMeta::from_value(&value.lit)?;
+                        Ok(TriggerAttr::Port(value))
+                    }
+                    __other => Err(darling::Error::unknown_field_with_alts(
+                        __other,
+                        &["timer", "port"],
+                    )
+                    .with_span(&path.ident)),
+                })
+                .unwrap(),
+        })
+        .map_err(|e| e.with_span(item))
+    }
+
+    fn from_string(value: &str) -> darling::Result<Self> {
+        let value = darling::FromMeta::from_string(value)?;
+        Ok(TriggerAttr::Port(value))
+    }
+}
+
 #[derive(Debug, FromMeta, Eq, PartialEq, Hash, Display)]
 #[display(fmt = "{}", "function.segments.last().unwrap().ident.to_string()")]
 pub struct ReactionAttr {
     pub function: syn::Path,
-    #[darling(default, map = "NamedFieldList::into")]
-    pub triggers: Vec<NamedField>,
-    #[darling(default, map = "NamedFieldList::into")]
+    #[darling(default, map = "MetaList::into")]
+    pub triggers: Vec<TriggerAttr>,
+    #[darling(default, map = "MetaList::into")]
     pub uses: Vec<NamedField>,
-    #[darling(default, map = "NamedFieldList::into")]
+    #[darling(default, map = "MetaList::into")]
     pub effects: Vec<NamedField>,
 }
 
@@ -96,19 +160,16 @@ impl Ord for ReactionAttr {
 
 #[derive(Debug, FromMeta, PartialEq, Eq)]
 pub struct ChildAttr {
-    pub class: syn::Path,
+    /// The instance name of the child
     #[darling(map = "handle_ident")]
     pub name: syn::Ident,
-    #[darling(default, map = "IdentSet::into")]
-    pub inputs: HashSet<syn::Ident>,
-    #[darling(default, map = "IdentSet::into")]
-    pub outputs: HashSet<syn::Ident>,
+    /// An expression resulting in a Reactor
+    #[darling(map = "Expr::into")]
+    pub reactor: syn::Expr,
 }
 
 impl PartialOrd for ChildAttr {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        // let f1 = self.reactor.to_token_stream().to_string();
-        // let f2 = self.reactor.to_token_stream().to_string();
         self.name.partial_cmp(&other.name)
     }
 }
@@ -177,8 +238,8 @@ mod tests {
             r#"
 #[derive(Reactor)]
 #[reactor(
-    reaction(function="Foo::bar", triggers("tim1", "hello1.x"), uses(), effects("y")),
-    reaction(function="Foo::rab", triggers("i")),
+    reaction(function="Foo::bar", triggers(timer="tim1", "hello1.x"), effects("y")),
+    reaction(function="Foo::rab", triggers(startup, shutdown, "self.i"))
 )]
 pub struct Foo {}"#,
         )
@@ -189,13 +250,20 @@ pub struct Foo {}"#,
             vec![
                 ReactionAttr {
                     function: parse_quote!(Foo::bar),
-                    triggers: vec![parse_quote!(self.tim1), parse_quote!(hello1.x)],
+                    triggers: vec![
+                        TriggerAttr::Timer(parse_quote!(tim1)),
+                        TriggerAttr::Port(parse_quote!(hello1.x)),
+                    ],
                     uses: vec![],
                     effects: vec![parse_quote!(self.y)]
                 },
                 ReactionAttr {
                     function: parse_quote!(Foo::rab),
-                    triggers: vec![parse_quote!(self.i)],
+                    triggers: vec![
+                        TriggerAttr::Startup,
+                        TriggerAttr::Shutdown,
+                        TriggerAttr::Port(parse_quote!(self.i))
+                    ],
                     uses: vec![],
                     effects: vec![]
                 }
@@ -278,6 +346,7 @@ pub struct Foo {}"#,
                     min_delay: Some(Duration::from_secs(1)),
                     mit: None,
                     policy: Some(ActionAttrPolicy::Drop),
+                    ty: parse_quote!(()),
                 },
                 ActionAttr {
                     name: parse_quote!(action2),
@@ -285,6 +354,7 @@ pub struct Foo {}"#,
                     min_delay: None,
                     mit: Some(Duration::from_millis(1)),
                     policy: None,
+                    ty: parse_quote!(()),
                 }
             ]
         )
@@ -296,7 +366,7 @@ pub struct Foo {}"#,
             r#"
 #[derive(Reactor)]
 #[reactor(
-    child(class="Bar", name="my_bar", inputs("in", "x", "y"), outputs("b")),
+    child(name="my_bar", reactor="Bar{}"),
 )]
 pub struct Foo {}"#,
         )
@@ -305,18 +375,8 @@ pub struct Foo {}"#,
         assert_eq!(
             receiver.children[0],
             ChildAttr {
-                class: parse_quote!(Bar),
+                reactor: parse_quote!(Bar {}),
                 name: parse_quote!(my_bar),
-                inputs: [
-                    // This tests using a Rust keyword here, special handling needed.
-                    syn::Ident::new("in", proc_macro2::Span::call_site()),
-                    parse_quote!(x),
-                    parse_quote!(y)
-                ]
-                .iter()
-                .cloned()
-                .collect(),
-                outputs: [parse_quote!(b)].iter().cloned().collect(),
             }
         );
     }

@@ -42,6 +42,12 @@ pub enum BuilderError {
     #[error("ReactionKey not found: {}", 0)]
     ReactionKeyNotFound(runtime::ReactionKey),
 
+    #[error("A Port named '{}' was not found.", 0)]
+    NamedPortNotFound(String),
+
+    #[error("An Action named '{}' was not found.", 0)]
+    NamedActionNotFound(String),
+
     #[error("Inconsistent Builder State: {}", what)]
     InconsistentBuilderState {
         what: String,
@@ -82,126 +88,66 @@ impl<T: Sized> TupleSlice for [T] {
     }
 }
 
-#[cfg(test)]
+#[cfg(feature = "disabled")]
 mod tests {
     use super::*;
-    use runtime::SchedulerPoint;
 
-    pub(crate) struct SchedulerDummy {}
-    impl SchedulerPoint for SchedulerDummy {
-        fn get_start_time(&self) -> &runtime::Instant {
-            todo!()
-        }
-        fn get_logical_time(&self) -> &runtime::Instant {
-            todo!()
-        }
-        fn get_physical_time(&self) -> runtime::Instant {
-            todo!()
-        }
-        fn get_elapsed_logical_time(&self) -> runtime::Duration {
-            todo!()
-        }
-        fn get_elapsed_physical_time(&self) -> runtime::Duration {
-            todo!()
-        }
-        fn get_port_with<T: runtime::PortData, F: FnOnce(&T, bool)>(
-            &self,
-            _: runtime::PortKey,
-            _: F,
-        ) {
-            todo!()
-        }
-        fn get_port_with_mut<T: runtime::PortData, F: FnOnce(&mut T, bool) -> bool>(
-            &self,
-            _: runtime::PortKey,
-            _: F,
-        ) {
-            todo!()
-        }
-        fn schedule_action<T: runtime::PortData>(
-            &self,
-            _: runtime::ActionKey,
-            _: T,
-            _: Option<runtime::Duration>,
-        ) {
-            todo!()
-        }
-        fn schedule(&self, _: runtime::Tag, _: runtime::ActionKey) {
-            todo!()
-        }
-        fn shutdown(&self) {
-            todo!()
-        }
-    }
-
+    #[derive(Debug)]
     pub(crate) struct TestReactorDummy;
-    impl TestReactorDummy {
-        pub fn reaction_dummy<S: SchedulerPoint>(
-            &mut self,
-            _sched: &S,
-            _inputs: &EmptyPart,
-            _outputs: &EmptyPart,
-            _actions: &EmptyPart,
-        ) {
-        }
-    }
-    impl<S: runtime::SchedulerPoint> Reactor<S> for TestReactorDummy {
-        type Inputs = EmptyPart;
-        type Outputs = EmptyPart;
-        type Actions = EmptyPart;
+    impl Reactor for TestReactorDummy {
+        type BuilderParts = EmptyPart;
         fn build(
             self,
             _name: &str,
-            _env: &mut EnvBuilder<S>,
+            _env: &mut EnvBuilder,
             _parent: Option<runtime::ReactorKey>,
-        ) -> Result<(runtime::ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
+        ) -> Result<(runtime::ReactorKey, Self::BuilderParts), BuilderError> {
             // Ok((Self, EmptyPart, EmptyPart))
             todo!()
         }
 
         fn build_parts(
             &self,
-            _: &mut EnvBuilder<S>,
+            _: &mut EnvBuilder,
             _: runtime::ReactorKey,
-        ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError> {
-            Ok((
-                EmptyPart::default(),
-                EmptyPart::default(),
-                EmptyPart::default(),
-            ))
+        ) -> Result<Self::BuilderParts, BuilderError> {
+            Ok(EmptyPart::default())
         }
     }
 
+    #[derive(Debug)]
     pub(crate) struct TestReactor2;
     #[derive(Clone)]
-    pub(crate) struct TestReactorInputs {
-        p0: runtime::PortKey,
+    pub(crate) struct TestReactorPorts {
+        p0: BuilderPortKey,
     }
-    impl<S: SchedulerPoint> Reactor<S> for TestReactor2 {
-        type Inputs = TestReactorInputs;
-        type Outputs = EmptyPart;
-        type Actions = EmptyPart;
+    impl ReactorPart for TestReactorPorts {
+        fn build(
+            _env: &mut EnvBuilder,
+            _reactor_key: runtime::ReactorKey,
+        ) -> Result<Self, BuilderError> {
+            todo!()
+        }
+    }
+    impl Reactor for TestReactor2 {
+        type BuilderParts = TestReactorPorts;
 
         fn build(
             self,
             _name: &str,
-            _env: &mut EnvBuilder<S>,
+            _env: &mut EnvBuilder,
             _parent: Option<runtime::ReactorKey>,
-        ) -> Result<(runtime::ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
+        ) -> Result<(runtime::ReactorKey, Self::BuilderParts), BuilderError> {
             todo!()
         }
 
         fn build_parts(
             &self,
-            env: &mut EnvBuilder<S>,
+            env: &mut EnvBuilder,
             reactor_key: runtime::ReactorKey,
-        ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError> {
+        ) -> Result<Self::BuilderParts, BuilderError> {
             let p0 = env.add_port::<()>("p0", PortType::Input, reactor_key)?;
-            Ok((
-                Self::Inputs { p0 },
-                EmptyPart::default(),
-                EmptyPart::default(),
-            ))
+            Ok(Self::BuilderParts { p0 })
         }
     }
 }

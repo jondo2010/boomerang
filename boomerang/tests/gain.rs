@@ -1,88 +1,91 @@
 // Example in the Wiki.
-use boomerang::{runtime, Reactor};
-use std::convert::TryInto;
+use boomerang::{
+    builder::{BuilderActionKey, BuilderPortKey},
+    runtime, Reactor,
+};
 
 #[derive(Reactor)]
-#[reactor(
-    input(name = "x", type = "u32"),
-    output(name = "y", type = "u32"),
-    reaction(function = "Scale::reaction_x", triggers("x"), effects("y"))
-)]
-struct Scale {
-    scale: u32,
+struct ScaleBuilder {
+    #[reactor(input())]
+    x: BuilderPortKey<u32>,
+    #[reactor(output())]
+    y: BuilderPortKey<u32>,
+    #[reactor(reaction(function = "Scale::reaction_x"))]
+    reaction_x: runtime::ReactionKey,
 }
+
+struct Scale(u32);
 impl Scale {
-    fn reaction_x<S: runtime::SchedulerPoint>(
+    #[boomerang::reaction(reactor = "ScaleBuilder")]
+    fn reaction_x(
         &mut self,
-        sched: &S,
-        inputs: &ScaleInputs,
-        outputs: &ScaleOutputs,
-        _actions: &ScaleActions,
+        _ctx: &mut runtime::Context,
+        #[reactor::port(triggers)] x: &runtime::Port<u32>,
+        #[reactor::port(effects)] y: &mut runtime::Port<u32>,
     ) {
-        sched.get_port_with(inputs.x, |x: &u32, _is_set| {
-            sched.get_port_with_mut(outputs.y, |y, _is_set| {
-                *y = *x * self.scale;
-                true
-            });
-        });
+        *y.get_mut() = Some(self.0 * x.get().unwrap());
     }
 }
 
 #[derive(Reactor)]
-#[reactor(
-    input(name = "x", type = "i32"),
-    reaction(function = "Test::reaction_x", triggers("x"))
-)]
-struct Test {}
+struct TestBuilder {
+    #[reactor(input())]
+    x: BuilderPortKey<u32>,
+    #[reactor(reaction(function = "Test::reaction_x"))]
+    reaction_x: runtime::ReactionKey,
+}
+
+struct Test;
 impl Test {
-    fn reaction_x<S: runtime::SchedulerPoint>(
+    #[boomerang::reaction(reactor = "TestBuilder")]
+    fn reaction_x(
         &mut self,
-        sched: &S,
-        inputs: &TestInputs,
-        _outputs: &TestOutputs,
-        _actions: &TestActions,
+        _ctx: &runtime::Context,
+        #[reactor::port(triggers)] x: &runtime::Port<u32>,
     ) {
-        sched.get_port_with(inputs.x, |x: &i32, _is_set| {
-            println!("Received {}", x);
-            assert!(*x == 2, "Expected 2!");
-        })
+        println!("Received {:?}", x.get());
+        assert_eq!(*x.get(), Some(2), "Expected Some(2)!");
     }
 }
 
 #[derive(Reactor)]
-#[reactor(
-    timer(name = "tim"),
-    reaction(function = "Gain::reaction_tim", triggers(timer="tim"),
-        //effects("g.x")
-    ),
-    child(name = "g", reactor = "Scale{scale: 2}"),
-    child(name = "t", reactor = "Test{}"),
-    connection(from = "g.y", to = "t.x")
-)]
-struct Gain {}
+#[reactor(connection(from = "g.y", to = "t.x"))]
+struct GainBuilder {
+    #[reactor(timer(rename = "tim"))]
+    tim: BuilderActionKey,
+    #[reactor(reaction(function = "Gain::reaction_tim",))]
+    reaction_tim: runtime::ReactionKey,
+    #[reactor(child(state = "Scale(2)"))]
+    g: ScaleBuilder,
+    #[reactor(child(state = "Test"))]
+    t: TestBuilder,
+}
+
+#[derive(Debug)]
+struct Gain;
 impl Gain {
-    fn reaction_tim<S: runtime::SchedulerPoint>(
+    #[boomerang::reaction(reactor = "GainBuilder", triggers(timer = "tim"))]
+    fn reaction_tim(
         &mut self,
-        _sched: &S,
-        _inputs: &GainInputs,
-        _outputs: &GainOutputs,
-        _actions: &GainActions,
+        _ctx: &runtime::Context,
+        #[reactor::port(effects, path = "g.x")] g_x: &mut runtime::Port<u32>,
     ) {
-        // g.x.set(1);
+        *g_x.get_mut() = Some(1);
     }
 }
 
 #[test]
 fn test() {
-    // install global collector configured based on RUST_LOG env var.
     tracing_subscriber::fmt::init();
 
     use boomerang::{builder::*, runtime};
     let mut env_builder = EnvBuilder::new();
+    let _gain = GainBuilder::build("gain", Gain, None, &mut env_builder).unwrap();
+    let (env, dep_info) = env_builder.try_into().unwrap();
 
-    let (_, _, _) = Gain {}.build("gain", &mut env_builder, None).unwrap();
+    runtime::check_consistency(&env, &dep_info);
+    runtime::debug_info(&env, &dep_info);
 
-    let env: runtime::Env<_> = env_builder.try_into().unwrap();
-    let mut sched = runtime::Scheduler::new(env);
-    sched.start().unwrap();
+    let sched = runtime::Scheduler::new(env, dep_info, true);
+    sched.event_loop();
 }

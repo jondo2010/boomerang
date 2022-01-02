@@ -3,7 +3,7 @@ use super::{
     time::{LogicalTime, Tag},
     ActionKey, Duration, Instant, PortData, PortKey, ReactionKey,
 };
-use crate::RuntimeError;
+use crate::{DepInfo, RuntimeError};
 use crossbeam_channel::{Receiver, Sender};
 use crossbeam_utils::atomic::AtomicCell;
 use rayon::prelude::*;
@@ -39,9 +39,10 @@ impl Config {
     }
 }
 
-pub trait SchedulerPoint: Send + Sync + 'static {
-    fn get_start_time(&self) -> &Instant;
-    fn get_logical_time(&self) -> &Instant;
+pub trait SchedulerPoint // : Send + Sync + 'static
+{
+    fn get_start_time(&self) -> Instant;
+    fn get_logical_time(&self) -> Instant;
     fn get_physical_time(&self) -> Instant;
     fn get_elapsed_logical_time(&self) -> Duration;
     fn get_elapsed_physical_time(&self) -> Duration;
@@ -70,11 +71,11 @@ pub trait SchedulerPoint: Send + Sync + 'static {
 }
 
 impl SchedulerPoint for Scheduler {
-    fn get_start_time(&self) -> &Instant {
+    fn get_start_time(&self) -> Instant {
         self.get_start_time()
     }
 
-    fn get_logical_time(&self) -> &Instant {
+    fn get_logical_time(&self) -> Instant {
         self.get_logical_time().get_time_point()
     }
 
@@ -88,7 +89,7 @@ impl SchedulerPoint for Scheduler {
 
     fn get_elapsed_physical_time(&self) -> Duration {
         self.get_physical_time()
-            .saturating_duration_since(*self.get_start_time())
+            .saturating_duration_since(self.get_start_time())
     }
 
     fn get_port_with<T: PortData, F: FnOnce(&T, bool)>(&self, port_key: PortKey, f: F) {
@@ -106,8 +107,8 @@ impl SchedulerPoint for Scheduler {
             // Schedule any reactions triggered by this port being set.
             let port_key = port_key.into();
 
-            for sub_reaction_key in self.env.port_triggers[port_key].keys() {
-                let new_reaction_level = self.env.reactions[sub_reaction_key].get_level();
+            for sub_reaction_key in self.dep_info.port_triggers[port_key].keys() {
+                let new_reaction_level = self.dep_info.reaction_levels[sub_reaction_key];
                 event!(
                     tracing::Level::DEBUG,
                     "set({:?}) triggering {:?} at level {}",
@@ -131,6 +132,8 @@ impl SchedulerPoint for Scheduler {
         _value: T,
         delay: Option<super::Duration>,
     ) {
+        todo!();
+        /*
         let action = &self.env.actions[action_key];
         // TODO set value
         if action.get_is_logical() {
@@ -144,6 +147,7 @@ impl SchedulerPoint for Scheduler {
             );
             self.schedule(tag, action_key, None);
         }
+        */
     }
 
     fn schedule(&self, tag: Tag, action_key: ActionKey) {
@@ -159,7 +163,9 @@ impl SchedulerPoint for Scheduler {
 
 pub struct Scheduler {
     config: Config,
-    env: Env<Self>,
+
+    dep_info: DepInfo,
+    env: Env,
 
     /// Physical time the Scheduler was started
     start_time: Instant,
@@ -185,9 +191,10 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    pub fn new(env: Env<Self>) -> Self {
+    pub fn new(env: Env, dep_info: DepInfo) -> Self {
         Self::with_config(
             env,
+            dep_info,
             Config {
                 run_mode: RunMode::Normal,
                 fast_forward: false,
@@ -195,17 +202,18 @@ impl Scheduler {
         )
     }
 
-    pub fn with_config(env: Env<Self>, config: Config) -> Self {
+    pub fn with_config(env: Env, dep_info: DepInfo, config: Config) -> Self {
         let (events_channel_s, events_channel_r) = crossbeam_channel::unbounded();
         let (reaction_queue_s, reaction_queue_r) =
             std::iter::repeat_with(crossbeam_channel::unbounded)
-                .take(env.max_level() + 1)
+                .take(dep_info.max_level() + 1)
                 .unzip();
         let (clear_ports_s, clear_ports_r) = crossbeam_channel::unbounded();
 
         Scheduler {
             config,
             env,
+            dep_info,
             start_time: Instant::now(),
             logical_time: LogicalTime::new(),
             events_channel_s,
@@ -219,12 +227,13 @@ impl Scheduler {
         }
     }
 
-    pub fn get_start_time(&self) -> &Instant {
-        &self.start_time
+    pub fn get_start_time(&self) -> Instant {
+        self.start_time
     }
 
-    pub fn get_logical_time(&self) -> &LogicalTime {
-        &self.logical_time
+    pub fn get_logical_time(&self) -> LogicalTime {
+        todo!();
+        //self.logical_time
     }
     pub fn get_elapsed_logical_time(&self) -> Duration {
         self.logical_time
@@ -242,12 +251,14 @@ impl Scheduler {
     }
 
     pub fn schedule(&self, tag: Tag, action_key: ActionKey, pre_handler: Option<PreHandlerFn>) {
+        /*
         event!(
             tracing::Level::DEBUG,
             ?action_key,
             "Schedule ({:?})",
             tag.difference(&Tag::from(&self.start_time)),
         );
+        */
         self.events_channel_s
             .send((tag, action_key, pre_handler))
             .unwrap();
@@ -265,6 +276,8 @@ impl Scheduler {
     }
 
     fn run(&mut self) -> Result<(), RuntimeError> {
+        todo!();
+        /*
         while let Some((t_next, tag_events, run_again)) = self.get_next_tagged_events() {
             let dt = t_next.difference(&Tag::from(&self.logical_time));
             event!(tracing::Level::DEBUG, "Advance logical time by [{:?}]", dt,);
@@ -274,6 +287,7 @@ impl Scheduler {
                 break;
             }
         }
+        */
         Ok(())
     }
 
@@ -362,7 +376,7 @@ impl Scheduler {
                 "Executing reaction [{}]",
                 reaction.get_name()
             );
-            reaction.trigger(self);
+            //reaction.trigger(self);
         });
     }
 
@@ -383,9 +397,9 @@ impl Scheduler {
         // Insert all Reactions triggered by each Event/Action into the reaction_queue.
         for reaction_key in tag_events
             .keys()
-            .flat_map(|&action_key| self.env.action_triggers[action_key].keys())
+            .flat_map(|&action_key| self.dep_info.action_triggers[action_key].keys())
         {
-            let reaction_level = self.env.reactions[reaction_key].get_level();
+            let reaction_level = self.dep_info.reaction_levels[reaction_key];
             self.reaction_queue_s[reaction_level]
                 .send(reaction_key)
                 .unwrap();
@@ -428,10 +442,9 @@ mod tests {
         let shutdown = Arc::new(AtomicCell::new(false));
         let inner = shutdown.clone();
 
-        let mut reactions: SlotMap<ReactionKey, Reaction<Scheduler>> = SlotMap::with_key();
+        let mut reactions: SlotMap<ReactionKey, Reaction> = SlotMap::with_key();
         let reaction_key = reactions.insert(Reaction::new(
             "shutdown_reaction".to_owned(),
-            0,
             move |_: &Scheduler| {
                 println!("shutdown_reaction()");
                 inner.store(true);
@@ -439,7 +452,7 @@ mod tests {
             None,
         ));
 
-        let mut actions: SlotMap<ActionKey, Arc<dyn BaseAction<Scheduler>>> = SlotMap::with_key();
+        let mut actions: SlotMap<ActionKey, Arc<dyn BaseAction>> = SlotMap::with_key();
         let action_key = actions.insert(Arc::new(ShutdownAction::new("shutdown_action")));
 
         let mut action_triggers: SecondaryMap<ActionKey, SecondaryMap<ReactionKey, ()>> =
@@ -448,13 +461,17 @@ mod tests {
 
         let env = Env {
             ports: SlotMap::with_key(),
-            port_triggers: SecondaryMap::new(),
             actions,
-            action_triggers,
             reactions,
         };
 
-        let mut sched = Scheduler::new(env);
+        let dep_info = DepInfo {
+            action_triggers,
+            port_triggers: SecondaryMap::new(),
+            reaction_levels: SecondaryMap::new(),
+        };
+
+        let mut sched = Scheduler::new(env, dep_info);
         sched.start().unwrap();
 
         assert!(shutdown.load());

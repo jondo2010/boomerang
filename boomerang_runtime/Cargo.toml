@@ -3,7 +3,7 @@ name = 'boomerang_runtime'
 description = 'Rust implementation of "Reactors" Deterministic Actor Model'
 version = '0.1.0'
 authors = ['John Hughes <jondo2010@gmail.com>']
-edition = '2018'
+edition = '2021'
 license = 'MIT OR Apache-2.0'
 readme = 'README.md'
 keywords = ['actor', 'reactor']
@@ -17,15 +17,16 @@ gitlab = { repository = 'jondo2010/boomerang', branch = 'master' }
 codecov = { repository = 'jondo2010/boomerang', branch = 'master', service = 'gitlab' }
 
 [dependencies]
-crossbeam-channel = "0.5.0"
-crossbeam-utils = "0.8.1"
-derive_more = '0.99.11'
-downcast-rs = "1.2.0"
-thiserror = "1.0.24"
-tracing = "0.1.25"
-rayon = "1.5.0"
-slotmap = { version = "1.0.4", features = ["unstable"] }
-derivative = "2.2.0"
+crossbeam-channel = "0.5"
+crossbeam-utils = "0.8"
+derive_more = '0.99'
+downcast-rs = "1.2"
+thiserror = "1.0"
+tracing = "0.1"
+rayon = "1.5"
+slotmap = { version = "1.0", features = ["unstable"] }
+derivative = "2.2"
+itertools = "*"
 
 [dev-dependencies]
 #tracing-subscriber = { version = "0.2.15", features = ["fmt"] }

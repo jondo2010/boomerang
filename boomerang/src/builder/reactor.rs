@@ -1,46 +1,27 @@
-use super::{BuilderError, EnvBuilder, PortType, ReactionBuilderState};
+use std::marker::PhantomData;
+
+use super::{
+    BuilderActionKey, BuilderError, BuilderPortKey, EnvBuilder, FindElements, PortType,
+    ReactionBuilderState,
+};
 use crate::runtime;
-use runtime::SchedulerPoint;
 use slotmap::SecondaryMap;
-use std::sync::{Arc, RwLock};
 
-/// ReactorPart
-pub trait ReactorPart: Send + Sync + Clone {}
-impl<T> ReactorPart for T where T: Send + Sync + Clone {}
-
-pub trait Reactor<S: runtime::SchedulerPoint>: Send + Sync {
-    /// Type containing the Reactors input Ports
-    type Inputs: ReactorPart = EmptyPart;
-    /// Type containing the Reactors output Ports
-    type Outputs: ReactorPart = EmptyPart;
-    /// Type containing the Reactors Actions
-    type Actions: ReactorPart = EmptyPart;
-
-    /// Build the Reactors' Inputs/Outputs/Actions
-    fn build_parts<'b>(
-        &'b self,
-        env: &'b mut EnvBuilder<S>,
-        reactor_key: runtime::ReactorKey,
-    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError>;
-    /// Build a new Reactor with the given instance name
-    fn build(
-        self,
+pub trait Reactor: Sized {
+    fn build<S: runtime::ReactorState>(
         name: &str,
-        env: &mut EnvBuilder<S>,
+        state: S,
         parent: Option<runtime::ReactorKey>,
-    ) -> Result<(runtime::ReactorKey, Self::Inputs, Self::Outputs), BuilderError>;
+        env: &mut EnvBuilder,
+    ) -> Result<Self, BuilderError>;
 }
 
-#[derive(Clone, Default)]
-pub struct EmptyPart;
-
-// ------------------------- //
-
-/// Reactor Prototype
-#[derive(Debug)]
+/// ReactorBuilder is the Builder-side definition of a Reactor, and is type-erased
 pub(super) struct ReactorBuilder {
     /// The instantiated/child name of the Reactor
     pub name: String,
+    /// The user's Reactor
+    pub state: Option<Box<dyn runtime::ReactorState>>,
     /// The top-level/class name of the Reactor
     pub type_name: String,
     /// Optional parent reactor key
@@ -53,10 +34,17 @@ pub(super) struct ReactorBuilder {
     pub actions: SecondaryMap<runtime::ActionKey, ()>,
 }
 
+impl From<ReactorBuilder> for Box<dyn runtime::ReactorState> {
+    fn from(builder: ReactorBuilder) -> Self {
+        builder.state.expect("No BaseReactor in ReactorBuilder!")
+    }
+}
+
 impl ReactorBuilder {
     fn new(name: &str, type_name: &str, parent_reactor_key: Option<runtime::ReactorKey>) -> Self {
         Self {
             name: name.into(),
+            state: None,
             type_name: type_name.into(),
             parent_reactor_key,
             reactions: SecondaryMap::new(),
@@ -66,72 +54,76 @@ impl ReactorBuilder {
     }
 }
 
-pub trait ReactionBuilderFn<S: SchedulerPoint, R: Reactor<S>>:
-    Fn(&mut R, &S, &R::Inputs, &R::Outputs, &R::Actions) + Send + Sync
-{
-}
-impl<S, R, F> ReactionBuilderFn<S, R> for F
-where
-    S: SchedulerPoint,
-    R: Reactor<S>,
-    F: Fn(&mut R, &S, &R::Inputs, &R::Outputs, &R::Actions) + Send + Sync,
-{
-}
-
-/// Builder struct used to facilitate construction of a ReactorType
-#[derive(Debug)]
-pub struct ReactorBuilderState<'a, S, R>
-where
-    S: runtime::SchedulerPoint,
-    R: Reactor<S>,
-{
+/// Builder struct used to facilitate construction of a ReactorBuilder by user/generated code.
+pub struct ReactorBuilderState<'a, S: runtime::ReactorState> {
+    /// The ReactorKey of this Builder
     reactor_key: runtime::ReactorKey,
-    pub reactor: Arc<RwLock<R>>,
-    pub inputs: R::Inputs,
-    pub outputs: R::Outputs,
-    pub actions: R::Actions,
-    env: &'a mut EnvBuilder<S>,
+    env: &'a mut EnvBuilder,
+    startup_action: BuilderActionKey,
+    shutdown_action: BuilderActionKey,
+    phantom: PhantomData<S>,
 }
 
-impl<'a, S, R> ReactorBuilderState<'a, S, R>
-where
-    S: runtime::SchedulerPoint,
-    R: Reactor<S>,
-{
+impl<'a, S: runtime::ReactorState> FindElements for ReactorBuilderState<'a, S> {
+    fn get_port_by_name(&self, port_name: &str) -> Result<runtime::PortKey, BuilderError> {
+        self.env.get_port(port_name, self.reactor_key)
+    }
+
+    fn get_action_by_name(&self, action_name: &str) -> Result<runtime::ActionKey, BuilderError> {
+        self.env.get_action(action_name, self.reactor_key)
+    }
+}
+
+impl<'a, S: runtime::ReactorState> ReactorBuilderState<'a, S> {
     pub(super) fn new(
         name: &str,
         parent: Option<runtime::ReactorKey>,
-        reactor: R,
-        env: &'a mut EnvBuilder<S>,
+        state: S,
+        env: &'a mut EnvBuilder,
     ) -> Self {
-        let reactor_key = env.reactors.insert(ReactorBuilder::new(
+        let reactor_key = env.reactor_builders.insert(ReactorBuilder::new(
             name,
-            std::any::type_name::<R>(),
+            std::any::type_name::<S>(),
             parent,
         ));
 
-        let (inputs, outputs, actions) = reactor.build_parts(env, reactor_key).unwrap();
+        let startup_action = env
+            .add_timer(
+                "__startup",
+                runtime::Duration::from_micros(0),
+                runtime::Duration::from_micros(0),
+                reactor_key,
+            )
+            .expect("Duplicate startup Action?");
+
+        let shutdown_action = env
+            .add_shutdown_action("__shutdown", reactor_key)
+            .expect("Duplicate shutdown Action?");
+
+        // let parts = reactor.build_parts(env, reactor_key).unwrap();
+
+        env.reactor_builders[reactor_key].state = Some(Box::new(state));
 
         Self {
             reactor_key,
-            reactor: Arc::new(RwLock::new(reactor)),
-            inputs,
-            outputs,
-            actions,
             env,
+            startup_action,
+            shutdown_action,
+            phantom: PhantomData,
         }
     }
 
-    pub fn add_startup_action(&mut self, name: &str) -> Result<runtime::ActionKey, BuilderError> {
-        self.add_timer(
-            name,
-            runtime::Duration::from_micros(0),
-            runtime::Duration::from_micros(0),
-        )
+    /// Get the ReactorKey for this ReactorBuilder
+    pub fn get_key(&self) -> runtime::ReactorKey {
+        self.reactor_key
     }
 
-    pub fn add_shutdown_action(&mut self, name: &str) -> Result<runtime::ActionKey, BuilderError> {
-        self.env.add_shutdown_action(name, self.reactor_key)
+    pub fn get_startup_action(&self) -> BuilderActionKey {
+        self.startup_action
+    }
+
+    pub fn get_shutdown_action(&self) -> BuilderActionKey {
+        self.shutdown_action
     }
 
     pub fn add_timer(
@@ -139,46 +131,54 @@ where
         name: &str,
         period: runtime::Duration,
         offset: runtime::Duration,
-    ) -> Result<runtime::ActionKey, BuilderError> {
+    ) -> Result<BuilderActionKey, BuilderError> {
         self.env.add_timer(name, period, offset, self.reactor_key)
     }
 
-    pub fn add_reaction<F>(&mut self, name: &str, reaction_fn: F) -> ReactionBuilderState<S>
-    where
-        F: ReactionBuilderFn<S, R> + 'static,
-        R: 'static,
-        R::Inputs: 'static,
-        R::Outputs: 'static,
-        R::Actions: 'static,
-    {
-        // Priority = number of reactions declared thus far + 1
-        let priority = self.env.reactors[self.reactor_key].reactions.len();
-        let reactor = self.reactor.clone();
-        let inputs = self.inputs.clone();
-        let outputs = self.outputs.clone();
-        let actions = self.actions.clone();
-
-        ReactionBuilderState::new(
-            name,
-            priority,
-            self.reactor_key,
-            move |sched: &S| {
-                let mut reactor = reactor.write().unwrap();
-                reaction_fn(&mut *reactor, sched, &inputs, &outputs, &actions);
-            },
-            self.env,
-        )
+    pub fn add_logical_action<T: runtime::PortData>(
+        &mut self,
+        name: &str,
+        min_delay: Option<runtime::Duration>,
+    ) -> Result<BuilderActionKey<T>, BuilderError> {
+        self.env
+            .add_logical_action::<T>(name, min_delay, self.reactor_key)
     }
 
-    pub fn add_internal_port<T: runtime::PortData>(
+    pub fn add_reaction(
+        &mut self,
+        name: &str,
+        reaction_fn: Box<dyn runtime::ReactionFn>,
+    ) -> ReactionBuilderState {
+        let priority = self.env.reactor_builders[self.reactor_key].reactions.len();
+        ReactionBuilderState::new(name, priority, self.reactor_key, reaction_fn, self.env)
+    }
+
+    pub fn add_port<T: runtime::PortData>(
         &mut self,
         name: &str,
         port_type: PortType,
-    ) -> Result<runtime::PortKey, BuilderError> {
+    ) -> Result<BuilderPortKey<T>, BuilderError> {
         self.env.add_port::<T>(name, port_type, self.reactor_key)
     }
 
-    pub fn finish(self) -> Result<(runtime::ReactorKey, R::Inputs, R::Outputs), BuilderError> {
-        Ok((self.reactor_key, self.inputs, self.outputs))
+    pub fn add_child_reactor<R: Reactor, CS: runtime::ReactorState>(
+        &mut self,
+        name: &str,
+        // state: R::State,
+        state: CS,
+    ) -> Result<R, BuilderError> {
+        R::build(name, state, Some(self.reactor_key), self.env)
+    }
+
+    pub fn bind_port<T: runtime::PortData>(
+        &mut self,
+        port_a_key: BuilderPortKey<T>,
+        port_b_key: BuilderPortKey<T>,
+    ) -> Result<(), BuilderError> {
+        self.env.bind_port(port_a_key, port_b_key)
+    }
+
+    pub fn finish(self) -> Result<runtime::ReactorKey, BuilderError> {
+        Ok(self.reactor_key)
     }
 }

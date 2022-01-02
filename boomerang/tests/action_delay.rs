@@ -1,65 +1,23 @@
 use boomerang::{
-    builder::{graphviz, EmptyPart, EnvBuilder, Reactor},
-    runtime::{self, Duration, SchedulerPoint},
-    ReactorActions, ReactorInputs, ReactorOutputs,
+    builder::{BuilderActionKey, BuilderPortKey, EnvBuilder, Reactor},
+    runtime, Reactor,
 };
-use std::convert::TryInto;
 
-// Test logical action with delay.
-// reactor GeneratedDelay {
-//     input y_in:int;
-//     output y_out:int;
-//     state y_state:int(0);
-//     logical action act(100 msec):void;
-//     reaction(y_in) -> act {=
-//         y_state = *y_in.get();
-//         act.schedule();
-//     =}
-//
-//     reaction(act) -> y_out {=
-//         y_out.set(y_state);
-//     =}
-// }
-//
-// reactor Source {
-//     output out:int;
-//     reaction(startup) -> out {=
-//         out.set(1);
-//     =}
-// }
-//
-// reactor Sink {
-// 	input in:int;
-// 	reaction(in) {=
-//         auto elapsed_logical = get_elapsed_logical_time();
-//         auto logical = get_logical_time();
-//         auto physical = get_physical_time();
-//         std::cout << "logical time: " << logical << '\n';
-//         std::cout << "physical time: " << physical << '\n';
-//         std::cout << "elapsed logical time: " << elapsed_logical << '\n';
-//         if (elapsed_logical != 100ms) {
-//             std::cerr << "ERROR: Expected 100 msecs but got " << elapsed_logical << '\n';
-//             exit(1);
-//         } else {
-//             std::cout << "SUCCESS. Elapsed logical time is 100 msec.\n";
-//         }
-// 	=}
-// }
-//
-// main reactor ActionDelay {
-//     source = new Source();
-//     sink = new Sink();
-//     sink2 = new Sink();
-//     sink3 = new Sink();
-//
-//     g = new GeneratedDelay();
-//
-//     source.out -> g.y_in;
-//     source.out -> sink2.in;
-//
-//     g.y_out -> sink.in;
-//     g.y_out -> sink3.in;
-// }
+/// Test logical action with delay.
+
+#[derive(Reactor)]
+struct GeneratedDelayBuilder {
+    #[reactor(input())]
+    y_in: BuilderPortKey<u32>,
+    #[reactor(output())]
+    y_out: BuilderPortKey<u32>,
+    #[reactor(action(physical = "false", min_delay = "100 msec"))]
+    act: BuilderActionKey,
+    #[reactor(reaction(function = "GeneratedDelay::reaction_y_in"))]
+    reaction_y_in: runtime::ReactionKey,
+    #[reactor(reaction(function = "GeneratedDelay::reaction_act"))]
+    reaction_act: runtime::ReactionKey,
+}
 
 struct GeneratedDelay {
     y_state: u32,
@@ -70,237 +28,92 @@ impl GeneratedDelay {
         Self { y_state: 0 }
     }
 
-    // y_in -> act
-    fn reaction_y_in<S: SchedulerPoint>(
+    /// y_in -> act
+    #[boomerang::reaction(reactor = "GeneratedDelayBuilder")]
+    fn reaction_y_in(
         &mut self,
-        sched: &S,
-        inputs: &GeneratedDelayInputs,
-        _outputs: &GeneratedDelayOutputs,
-        actions: &GeneratedDelayActions,
+        ctx: &mut runtime::Context,
+        #[reactor::port(triggers)] y_in: &runtime::Port<u32>,
+        #[reactor::action(effects)] mut act: runtime::ActionMut,
     ) {
-        sched.get_port_with(inputs.y_in, |value, is_set| {
-            if is_set {
-                self.y_state = *value;
-            }
-        });
-        sched.schedule_action(actions.act, (), None);
+        self.y_state = y_in.get().unwrap();
+        ctx.schedule_action(&mut act, None, None);
     }
 
-    // act -> y_out
-    fn reaction_act<S: SchedulerPoint>(
+    /// act -> y_out
+    #[boomerang::reaction(reactor = "GeneratedDelayBuilder")]
+    fn reaction_act(
         &mut self,
-        sched: &S,
-        _inputs: &<Self as Reactor<S>>::Inputs,
-        outputs: &<Self as Reactor<S>>::Outputs,
-        _actions: &<Self as Reactor<S>>::Actions,
+        _ctx: &runtime::Context,
+        #[reactor::action(triggers)] act: runtime::Action,
+        #[reactor::port(effects)] y_out: &mut runtime::Port<u32>,
     ) {
-        sched.get_port_with_mut(outputs.y_out, |value, _is_set| {
-            *value = self.y_state;
-            true
-        });
+        *y_out.get_mut() = Some(self.y_state);
     }
 }
 
-ReactorInputs!(GeneratedDelay, GeneratedDelayInputs, (y_in, u32));
-ReactorOutputs!(GeneratedDelay, GeneratedDelayOutputs, (y_out, u32));
-ReactorActions!(
-    GeneratedDelay,
-    GeneratedDelayActions,
-    (act, (), Some(Duration::from_millis(100)))
-);
-
-impl<'a, S: SchedulerPoint> Reactor<S> for GeneratedDelay {
-    type Inputs = GeneratedDelayInputs;
-    type Outputs = GeneratedDelayOutputs;
-    type Actions = GeneratedDelayActions;
-
-    fn build(
-        self,
-        name: &str,
-        env: &mut boomerang::builder::EnvBuilder<S>,
-        parent: Option<boomerang::runtime::ReactorKey>,
-    ) -> Result<
-        (boomerang::runtime::ReactorKey, Self::Inputs, Self::Outputs),
-        boomerang::builder::BuilderError,
-    > {
-        let mut builder = env.add_reactor(name, parent, self);
-        let Self::Inputs { y_in } = builder.inputs;
-        let Self::Outputs { y_out } = builder.outputs;
-        let Self::Actions { act } = builder.actions;
-        let _ = builder
-            .add_reaction("reaction_y_in", Self::reaction_y_in)
-            .with_trigger_port(y_in.into())
-            .with_scheduable_action(act.into())
-            .finish()?;
-        let _ = builder
-            .add_reaction("reaction_act", Self::reaction_act)
-            .with_trigger_action(act.into())
-            .with_antidependency(y_out.into())
-            .finish()?;
-        builder.finish()
-    }
-
-    fn build_parts(
-        &self,
-        env: &mut EnvBuilder<S>,
-        reactor_key: runtime::ReactorKey,
-    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), boomerang::builder::BuilderError>
-    {
-        Ok((
-            Self::Inputs::build(env, reactor_key)?,
-            Self::Outputs::build(env, reactor_key)?,
-            Self::Actions::build(env, reactor_key)?,
-        ))
-    }
+#[derive(Reactor)]
+struct SourceBuilder {
+    #[reactor(output())]
+    out: BuilderPortKey<u32>,
+    #[reactor(reaction(function = "Source::reaction_startup",))]
+    reaction_startup: runtime::ReactionKey,
 }
 
 struct Source;
 impl Source {
-    fn reaction_startup<S: SchedulerPoint>(
+    #[boomerang::reaction(reactor = "SourceBuilder", triggers(startup))]
+    fn reaction_startup(
         &mut self,
-        sched: &S,
-        _inputs: &EmptyPart,
-        outputs: &SourceOutputs,
-        _actions: &EmptyPart,
+        _ctx: &runtime::Context,
+        #[reactor::port(effects)] out: &mut runtime::Port<u32>,
     ) {
-        sched.get_port_with_mut(outputs.out, |value, _is_set| {
-            *value = 1u32;
-            true
-        });
-    }
-}
-ReactorOutputs!(Source, SourceOutputs, (out, u32));
-impl<'a, S: SchedulerPoint> Reactor<S> for Source {
-    type Inputs = EmptyPart;
-    type Outputs = SourceOutputs;
-    type Actions = EmptyPart;
-
-    fn build(
-        self,
-        name: &str,
-        env: &mut boomerang::builder::EnvBuilder<S>,
-        parent: Option<boomerang::runtime::ReactorKey>,
-    ) -> Result<
-        (boomerang::runtime::ReactorKey, Self::Inputs, Self::Outputs),
-        boomerang::builder::BuilderError,
-    > {
-        let mut builder = env.add_reactor(name, parent, self);
-        let startup = builder.add_startup_action("startup")?;
-        let Self::Outputs { out } = builder.outputs;
-        let _ = builder
-            .add_reaction("reaction_startup", Self::reaction_startup)
-            .with_trigger_action(startup)
-            .with_antidependency(out.into())
-            .finish()?;
-        builder.finish()
-    }
-
-    fn build_parts(
-        &self,
-        env: &mut EnvBuilder<S>,
-        reactor_key: runtime::ReactorKey,
-    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), boomerang::builder::BuilderError>
-    {
-        Ok((
-            EmptyPart,
-            Self::Outputs::build(env, reactor_key)?,
-            EmptyPart,
-        ))
+        *out.get_mut() = Some(1);
     }
 }
 
+#[derive(Reactor)]
+struct SinkBuilder {
+    #[reactor(input())]
+    inp: BuilderPortKey<u32>,
+    #[reactor(reaction(function = "Sink::reaction_in"))]
+    reaction_in: runtime::ReactionKey,
+}
 struct Sink;
-ReactorInputs!(Sink, SinkInputs, (inp, u32));
 impl Sink {
-    fn reaction_in<S: SchedulerPoint>(
+    #[boomerang::reaction(reactor = "SinkBuilder")]
+    fn reaction_in(
         &mut self,
-        sched: &S,
-        _inputs: &SinkInputs,
-        _outputs: &EmptyPart,
-        _actions: &EmptyPart,
+        ctx: &runtime::Context,
+        #[reactor::port(triggers, path = "inp")] _inp: &runtime::Port<u32>,
     ) {
-        let elapsed_logical = sched.get_elapsed_logical_time();
-        let logical = sched.get_logical_time();
-        let physical = sched.get_physical_time();
+        let elapsed_logical = ctx.get_elapsed_logical_time();
+        let logical = ctx.get_logical_time();
+        let physical = ctx.get_physical_time();
         println!("logical time: {:?}", logical);
         println!("physical time: {:?}", physical);
         println!("elapsed logical time: {:?}", elapsed_logical);
         assert!(
-            elapsed_logical == Duration::from_millis(100),
+            elapsed_logical == runtime::Duration::from_millis(100),
             "ERROR: Expected 100 msecs but got {:?}",
             elapsed_logical
         );
         println!("SUCCESS. Elapsed logical time is 100 msec.");
     }
 }
-impl<'a, S: SchedulerPoint> Reactor<S> for Sink {
-    type Inputs = SinkInputs;
-    type Outputs = EmptyPart;
-    type Actions = EmptyPart;
-    fn build(
-        self,
-        name: &str,
-        env: &mut boomerang::builder::EnvBuilder<S>,
-        parent: Option<boomerang::runtime::ReactorKey>,
-    ) -> Result<
-        (boomerang::runtime::ReactorKey, Self::Inputs, Self::Outputs),
-        boomerang::builder::BuilderError,
-    > {
-        let mut builder = env.add_reactor(name, parent, self);
-        let Self::Inputs { inp } = builder.inputs;
-        let _ = builder
-            .add_reaction("reaction_in", Self::reaction_in)
-            .with_trigger_port(inp.into())
-            .finish()?;
-        builder.finish()
-    }
 
-    fn build_parts(
-        &self,
-        env: &mut EnvBuilder<S>,
-        reactor_key: runtime::ReactorKey,
-    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), boomerang::builder::BuilderError>
-    {
-        Ok((SinkInputs::build(env, reactor_key)?, EmptyPart, EmptyPart))
-    }
-}
-
-#[derive(Default)]
-struct ActionDelay;
-
-impl<'a, S: SchedulerPoint> Reactor<S> for ActionDelay {
-    type Inputs = EmptyPart;
-    type Outputs = EmptyPart;
-    type Actions = EmptyPart;
-
-    fn build(
-        self,
-        name: &str,
-        env: &mut EnvBuilder<S>,
-        parent: Option<runtime::ReactorKey>,
-    ) -> Result<(runtime::ReactorKey, Self::Inputs, Self::Outputs), boomerang::builder::BuilderError>
-    {
-        let (parent_key, _, _) = env.add_reactor(name, parent, self).finish()?;
-        let (_, _, source_outputs) = Source.build("source", env, Some(parent_key))?;
-        let (_, sink0_inputs, _) = Sink.build("sink0", env, Some(parent_key))?;
-        let (_, sink1_inputs, _) = Sink.build("sink1", env, Some(parent_key))?;
-        let (_, sink2_inputs, _) = Sink.build("sink2", env, Some(parent_key))?;
-        let (_, g_inputs, g_outputs) = GeneratedDelay::new().build("g", env, Some(parent_key))?;
-        env.bind_port(source_outputs.out, g_inputs.y_in).unwrap();
-        env.bind_port(g_outputs.y_out, sink0_inputs.inp).unwrap();
-        env.bind_port(g_outputs.y_out, sink1_inputs.inp).unwrap();
-        env.bind_port(g_outputs.y_out, sink2_inputs.inp).unwrap();
-        Ok((parent_key, EmptyPart::default(), EmptyPart::default()))
-    }
-
-    fn build_parts(
-        &self,
-        _env: &mut EnvBuilder<S>,
-        _reactor_key: runtime::ReactorKey,
-    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), boomerang::builder::BuilderError>
-    {
-        Ok((EmptyPart, EmptyPart, EmptyPart))
-    }
+#[derive(Reactor)]
+#[reactor(
+    connection(from = "source.out", to = "g.y_in"),
+    connection(from = "g.y_out", to = "sink.inp")
+)]
+struct ActionDelayBuilder {
+    #[reactor(child(state = "Source{}"))]
+    source: SourceBuilder,
+    #[reactor(child(state = "Sink{}"))]
+    sink: SinkBuilder,
+    #[reactor(child(state = "GeneratedDelay::new()"))]
+    g: GeneratedDelayBuilder,
 }
 
 #[test]
@@ -309,19 +122,21 @@ fn action_delay() {
     tracing_subscriber::fmt::init();
 
     let mut env_builder = EnvBuilder::new();
-    let _ = ActionDelay
-        .build("action_delay", &mut env_builder, None)
-        .unwrap();
+    let _ = ActionDelayBuilder::build("action_delay", (), None, &mut env_builder).unwrap();
 
-    let gv = graphviz::build(&env_builder).unwrap();
-    let mut f = std::fs::File::create(format!("{}.dot", module_path!())).unwrap();
-    std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
+    // let gv = graphviz::build(&env_builder).unwrap();
+    // let mut f = std::fs::File::create(format!("{}.dot", module_path!())).unwrap();
+    // std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
 
-    let gv = graphviz::build_reaction_graph(&env_builder).unwrap();
-    let mut f = std::fs::File::create(format!("{}_levels.dot", module_path!())).unwrap();
-    std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
+    // let gv = graphviz::build_reaction_graph(&env_builder).unwrap();
+    // let mut f = std::fs::File::create(format!("{}_levels.dot", module_path!())).unwrap();
+    // std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
 
-    let env: runtime::Env<_> = env_builder.try_into().unwrap();
-    let mut sched = runtime::Scheduler::new(env);
-    sched.start().unwrap();
+    let (env, dep_info) = env_builder.try_into().unwrap();
+
+    runtime::check_consistency(&env, &dep_info);
+    runtime::debug_info(&env, &dep_info);
+
+    let sched = runtime::Scheduler::new(env, dep_info, true);
+    sched.event_loop();
 }

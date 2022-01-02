@@ -1,13 +1,10 @@
 use std::collections::HashMap;
 
 use super::{ActionType, BuilderError, EnvBuilder, PortType, ReactorBuilder};
-use crate::runtime;
 use itertools::Itertools;
 use slotmap::Key;
 
-pub fn build_reaction_graph<S: runtime::SchedulerPoint>(
-    env_builder: &EnvBuilder<S>,
-) -> Result<String, BuilderError> {
+pub fn build_reaction_graph(env_builder: &EnvBuilder) -> Result<String, BuilderError> {
     let reaction_graph = env_builder.get_reaction_graph();
     let runtime_level_map = env_builder.build_runtime_level_map()?;
 
@@ -52,9 +49,7 @@ pub fn build_reaction_graph<S: runtime::SchedulerPoint>(
 }
 
 /// Build a GraphViz representation of the entire Reactor
-pub fn build<S: runtime::SchedulerPoint>(
-    env_builder: &EnvBuilder<S>,
-) -> Result<String, BuilderError> {
+pub fn build(env_builder: &EnvBuilder) -> Result<String, BuilderError> {
     let graph = env_builder.build_reactor_graph();
     let ordered_reactors = petgraph::algo::toposort(&graph, None)
         .map_err(|e| BuilderError::ReactorGraphCycle { what: e.node_id() })?;
@@ -71,8 +66,8 @@ pub fn build<S: runtime::SchedulerPoint>(
 
     petgraph::visit::depth_first_search(&graph, Some(start), |event| match event {
         petgraph::visit::DfsEvent::Discover(key, _) => {
-            let reactor = &env_builder.reactors[key];
-            let reactor_id = key.data().as_ffi() % env_builder.reactors.len() as u64;
+            let reactor = &env_builder.reactor_builders[key];
+            let reactor_id = key.data().as_ffi() % env_builder.reactor_builders.len() as u64;
 
             output.push(format!("subgraph cluster{} {{", reactor_id));
             output.push(format!("  label=\"{}\";", reactor.name));
@@ -93,14 +88,14 @@ pub fn build<S: runtime::SchedulerPoint>(
     Ok(output.join("\n"))
 }
 
-fn build_ports<S>(
-    env_builder: &EnvBuilder<S>,
+fn build_ports(
+    env_builder: &EnvBuilder,
     reactor: &ReactorBuilder,
     reactor_id: u64,
     output: &mut Vec<String>,
 ) {
     let (inputs, outputs): (Vec<_>, Vec<_>) = reactor.ports.keys().partition_map(|key| {
-        let port_id = key.data().as_ffi() % env_builder.ports.len() as u64;
+        let port_id = key.data().as_ffi() % env_builder.port_builders.len() as u64;
         let port = &env_builder.port_builders[key];
         let s = format!("<p{}> {}", port_id, port.get_name());
 
@@ -125,8 +120,8 @@ fn build_ports<S>(
     }
 }
 
-fn build_reactions<S>(
-    env_builder: &EnvBuilder<S>,
+fn build_reactions(
+    env_builder: &EnvBuilder,
     reactor: &ReactorBuilder,
     reactor_id: u64,
     output: &mut Vec<String>,
@@ -145,15 +140,15 @@ fn build_reactions<S>(
         //    "  inputs{} -> r{} -> outputs{} [style=invis];",
         //    reactor_id, reaction_id, reactor_id
         //));
-        for port_key in reaction.deps.keys() {
-            let port_id = port_key.data().as_ffi() % env_builder.ports.len() as u64;
+        for port_key in reaction.input_ports.keys() {
+            let port_id = port_key.data().as_ffi() % env_builder.port_builders.len() as u64;
             output.push(format!(
                 "  inputs{}:p{}:e -> r{}:w;",
                 reactor_id, port_id, reaction_id
             ));
         }
-        for port_key in reaction.antideps.keys() {
-            let port_id = port_key.data().as_ffi() % env_builder.ports.len() as u64;
+        for port_key in reaction.output_ports.keys() {
+            let port_id = port_key.data().as_ffi() % env_builder.port_builders.len() as u64;
             output.push(format!(
                 "  r{}:e -> outputs{}:p{}:w;",
                 reaction_id, reactor_id, port_id
@@ -162,14 +157,10 @@ fn build_reactions<S>(
     }
 }
 
-fn build_actions<S>(
-    env_builder: &EnvBuilder<S>,
-    reactor: &ReactorBuilder,
-    output: &mut Vec<String>,
-) {
+fn build_actions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &mut Vec<String>) {
     for action_key in reactor.actions.keys() {
         let action = &env_builder.action_builders[action_key];
-        let action_id = action_key.data().as_ffi() % env_builder.actions.len() as u64;
+        let action_id = action_key.data().as_ffi() % env_builder.action_builders.len() as u64;
 
         let xlabel = match action.get_type() {
             ActionType::Timer { period, offset } => {
@@ -212,20 +203,21 @@ fn build_actions<S>(
     }
 }
 
-fn build_port_bindings<S>(env_builder: &EnvBuilder<S>, output: &mut Vec<String>) {
+fn build_port_bindings(env_builder: &EnvBuilder, output: &mut Vec<String>) {
     env_builder
         .port_builders
         .iter()
         .flat_map(|(port_key, port)| {
             port.get_outward_bindings().map(move |binding_key| {
-                let port_id = port_key.data().as_ffi() % env_builder.ports.len() as u64;
-                let port_reactor_id =
-                    port.get_reactor_key().data().as_ffi() % env_builder.reactors.len() as u64;
+                let port_id = port_key.data().as_ffi() % env_builder.port_builders.len() as u64;
+                let port_reactor_id = port.get_reactor_key().data().as_ffi()
+                    % env_builder.reactor_builders.len() as u64;
 
                 let binding = &env_builder.port_builders[binding_key];
-                let binding_id = binding_key.data().as_ffi() % env_builder.ports.len() as u64;
-                let binding_reactor_id =
-                    binding.get_reactor_key().data().as_ffi() % env_builder.reactors.len() as u64;
+                let binding_id =
+                    binding_key.data().as_ffi() % env_builder.port_builders.len() as u64;
+                let binding_reactor_id = binding.get_reactor_key().data().as_ffi()
+                    % env_builder.reactor_builders.len() as u64;
 
                 let from = match port.get_port_type() {
                     PortType::Input => format!("inputs{}:p{}:e", port_reactor_id, port_id),

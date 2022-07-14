@@ -96,7 +96,7 @@ where
         offset: runtime::Duration,
         reactor_key: runtime::ReactorKey,
     ) -> Result<runtime::ActionKey, BuilderError> {
-        let key = self.add_action(name, reactor_key, |action_key| {
+        let key = self.add_action(name, reactor_key, |_action_key| {
             Arc::new(runtime::Timer::new(name, offset, period))
         })?;
 
@@ -113,7 +113,7 @@ where
         name: &str,
         reactor_key: runtime::ReactorKey,
     ) -> Result<runtime::ActionKey, BuilderError> {
-        let key = self.add_action(name, reactor_key, |action_key| {
+        let key = self.add_action(name, reactor_key, |_action_key| {
             Arc::new(runtime::ShutdownAction::new(name))
         })?;
         self.action_builders.insert(

@@ -1,5 +1,3 @@
-use petgraph::graph;
-
 use super::*;
 use crate::builder::tests::*;
 

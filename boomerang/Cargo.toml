@@ -18,7 +18,7 @@ codecov = { repository = 'jondo2010/boomerang', branch = 'master', service = 'gi
 
 [features]
 default = ["visualization", "derive"]
-visualization = ["serde_json"]
+visualization = []
 derive = ["boomerang_derive"]
 
 [dependencies]

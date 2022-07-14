@@ -18,7 +18,7 @@ codecov = { repository = 'jondo2010/boomerang', branch = 'master', service = 'gi
 
 [features]
 default = ["visualization", "derive"]
-visualization = ["serde_json"]
+visualization = []
 derive = ["boomerang_derive"]
 
 [dependencies]
@@ -29,11 +29,9 @@ derivative = "2.2.0"
 derive_more = '0.99.11'
 itertools = "0.10"
 petgraph = "0.6"
-ref-cast = "1.0.6"
 slotmap = { version = "1.0.2", features = ["unstable"] }
 thiserror = "1.0.24"
 tracing = "0.1.23"
-serde_json = { version = "1.0.68", optional = true }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.2.15", features = ["fmt"] }

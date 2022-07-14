@@ -1,4 +1,3 @@
 {
     "lldb.verboseLogging": true,
-    "cmake.configureOnOpen": false
 }

@@ -15,13 +15,13 @@ jobs:
   test:
     strategy:
       matrix:
-        toolchain: [stable, nightly]
+        toolchain: [nightly]
         os: [windows-latest, ubuntu-latest, macos-latest]
-        exclude:
-          - os: macos-latest
-            toolchain: nightly
-          - os: windows-latest
-            toolchain: nightly
+        #exclude:
+        #  - os: macos-latest
+        #    toolchain: nightly
+        #  - os: windows-latest
+        #    toolchain: nightly
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v3
@@ -42,7 +42,7 @@ jobs:
         run: cargo test
         env:
           CARGO_INCREMENTAL: 0
-          RUSTFLAGS: "-C debuginfo=0 -D warnings"
+          #RUSTFLAGS: "-C debuginfo=0 -D warnings"
 
   check-unused-dependencies:
     runs-on: ubuntu-latest

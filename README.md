@@ -1,8 +1,9 @@
 # Boomerang
 
-[![pipeline status](https://gitlab.com/jondo2010/boomerang/badges/master/pipeline.svg)](https://gitlab.com/jondo2010/boomerang/commits/master)
-[![codecov](https://codecov.io/gl/jondo2010/boomerang/branch/master/graph/badge.svg)](https://codecov.io/gl/boomerang/rust-fmi)
 [![crates.io](https://img.shields.io/crates/v/boomerang.svg)](https://crates.io/crates/boomerang)
+[![MIT/Apache 2.0](https://img.shields.io/badge/license-MIT%2FApache-blue.svg)](./LICENSE)
+[![Crates.io](https://img.shields.io/crates/d/boomerang.svg)](https://crates.io/crates/boomerang)
+[![Rust](https://github.com/jondo2010/boomerang/workflows/CI/badge.svg)](https://github.com/jondo2010/boomerang/actions)
 [![API](https://docs.rs/boomerang/badge.svg)](https://docs.rs/boomerang)
 
 Rust implementation of the "Reactors" Deterministic Actor Model, described by M. Lohstroh, A. Lee, et al U.C. Berlekely, [Link to paper](https://ptolemy.berkeley.edu/publications/papers/19/LohstrohEtAl_Reactors_DAC_2019.pdf).
@@ -14,6 +15,8 @@ The `Lingua-Franca` project (https://github.com/icyphy/lingua-franca/wiki) serve
 The `Boomerang` scheduler started out as a direct Rust port of the `Lingua-Franca` Discrete-Event scheduler runtime. Instead of using a distinct "compositional language" like Lingua-Franca, Boomerang leverages the power of Rust derive-macros to directly annotate the Reactor semantics and composition. The resultant DAG is analyzed and used to generate implementation primitives for the Scheduler.
 
 This project is still in the very early stages, but intends to implement as much of the [language specification](https://github.com/icyphy/lingua-franca/wiki/Language-Specification) and features from `Lingua-Franca` as possible.
+
+See also [Reactor Cpp](https://github.com/tud-ccc/reactor-cpp)
 
 ## License
 

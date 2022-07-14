@@ -1,34 +1,35 @@
 #![allow(dead_code)]
 #![feature(map_first_last)]
+#![feature(associated_type_defaults)]
 
-mod event;
-mod reaction;
-mod scheduler;
-mod trigger;
+#[macro_use]
+extern crate derivative;
 
-// Re-exports
-pub use event::{Event, EventValue};
-pub use reaction::{IsPresent, Port, Reaction};
-pub use scheduler::{Sched, Scheduler};
-pub use trigger::{QueuingPolicy, Trigger};
+pub mod builder;
 
-pub use std::{
-    cell::RefCell,
-    rc::Rc,
-    time::{Duration, Instant},
-};
+pub use boomerang_runtime as runtime;
 
-pub type Index = u64;
+#[cfg(feature = "boomerang_derive")]
+#[allow(unused_imports)]
+#[macro_use]
+extern crate boomerang_derive;
+#[cfg(feature = "boomerang_derive")]
+#[doc(hidden)]
+pub use boomerang_derive::*;
 
-type React<S> = Rc<Reaction<S>>;
-type Timer<S> = Rc<RefCell<Trigger<S>>>;
-type Input<T> = Rc<RefCell<Port<T>>>;
-type Output<T> = Rc<RefCell<Port<T>>>;
+#[derive(thiserror::Error, Debug)]
+pub enum BoomerangError {
+    /// An internal builder error
+    #[error("Internal Builder Error")]
+    BuilderInternal,
 
-pub trait Reactor {
-    /// Invoke code that must execute before starting a new logical time round, such as initializing
-    /// outputs to be absent.
-    fn start_time_step(&self);
+    /// An arbitrary error message.
+    #[error("{0}")]
+    Custom(String),
 
-    fn start_timers<S: Sched>(&self, sched: &mut S);
+    #[error(transparent)]
+    Builder(#[from] builder::BuilderError),
+
+    #[error(transparent)]
+    Runtime(#[from] boomerang_runtime::RuntimeError),
 }

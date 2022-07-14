@@ -1,7 +1,11 @@
 //! Utility newtypes and trait impls for parsing
 
 use darling::FromMeta;
-use std::convert::{TryFrom, TryInto};
+use derive_more::Display;
+use proc_macro2::Ident;
+use quote::quote;
+use std::{collections::HashSet, time::Duration};
+use syn::ext::IdentExt;
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct StringList(Vec<String>);
@@ -54,121 +58,124 @@ impl From<syn::Type> for Type {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct ExprField(syn::ExprField);
-impl From<ExprField> for syn::ExprField {
-    fn from(field: ExprField) -> Self {
-        field.0
+pub struct Expr(syn::Expr);
+impl FromMeta for Expr {
+    fn from_string(value: &str) -> darling::Result<Self> {
+        syn::parse_str::<syn::Expr>(value)
+            .map_err(|err| {
+                darling::Error::unsupported_format("Error parsing expression.")
+                    .with_span(&err.span())
+            })
+            .map(Self::from)
     }
 }
-impl From<syn::ExprField> for ExprField {
-    fn from(field: syn::ExprField) -> Self {
-        ExprField(field)
+impl From<Expr> for syn::Expr {
+    fn from(expr: Expr) -> Self {
+        expr.0
     }
 }
-impl FromMeta for ExprField {
-    fn from_string(string: &str) -> darling::Result<Self> {
-        string.try_into()
-    }
-    fn from_nested_meta(nm: &syn::NestedMeta) -> darling::Result<Self> {
-        if let syn::NestedMeta::Lit(syn::Lit::Str(ref string)) = nm {
-            string.try_into()
-        } else {
-            Err(darling::Error::unexpected_type("non-word").with_span(nm))
-        }
+impl From<syn::Expr> for Expr {
+    fn from(expr: syn::Expr) -> Expr {
+        Expr(expr)
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq)]
-pub struct ExprFieldList(Vec<ExprField>);
-impl From<ExprFieldList> for Vec<ExprField> {
-    fn from(list: ExprFieldList) -> Self {
+pub fn handle_ident(string: syn::LitStr) -> syn::Ident {
+    syn::Ident::new(&string.value(), string.span())
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IdentSet(HashSet<syn::Ident>);
+impl From<IdentSet> for HashSet<syn::Ident> {
+    fn from(list: IdentSet) -> Self {
         list.0
     }
 }
-impl From<ExprFieldList> for Vec<syn::ExprField> {
-    fn from(list: ExprFieldList) -> Self {
-        list.0.into_iter().map(syn::ExprField::from).collect()
-    }
-}
-
-/// Build an ExprPath with an ident of "self"
-fn self_path() -> syn::Expr {
-    syn::Expr::Path(syn::ExprPath {
-        attrs: Vec::new(),
-        qself: None,
-        path: syn::Path {
-            leading_colon: None,
-            segments: vec![syn::PathSegment {
-                ident: syn::Ident::new("self", proc_macro2::Span::call_site()),
-                arguments: syn::PathArguments::None,
-            }]
-            .into_iter()
-            .collect(),
-        },
-    })
-}
-
-impl FromMeta for ExprFieldList {
+impl FromMeta for IdentSet {
     fn from_list(items: &[syn::NestedMeta]) -> darling::Result<Self> {
         let exprs = items
             .iter()
             .map(|nmi: &syn::NestedMeta| match nmi {
-                syn::NestedMeta::Lit(syn::Lit::Str(ref string)) => ExprField::try_from(string),
+                syn::NestedMeta::Lit(syn::Lit::Str(string)) => {
+                    Ok(handle_ident(string.clone()))
+                    // string.parse::<syn::Ident>().map_err(|err| {})
+                }
                 _ => {
-                    panic!("oops2");
+                    Err(darling::Error::unsupported_format(
+                        "Error parsing expression.",
+                    )) //.with_span(&err.span())
                 }
             })
+            .collect::<Result<HashSet<_>, _>>()?;
+
+        Ok(IdentSet(exprs))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Display)]
+#[display(fmt = "{}.{}", "0.to_string()", "1.to_string()")]
+pub struct NamedField(pub Ident, pub Ident);
+
+impl syn::parse::Parse for NamedField {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        use syn::Token;
+        if input.peek2(Token![.]) {
+            let base = Ident::parse_any(input)?;
+            let _ = input.parse::<Token![.]>()?;
+            let member = Ident::parse_any(input)?;
+            Ok(NamedField(base, member))
+        } else {
+            let base = Ident::new("self", input.span());
+            let member = Ident::parse_any(input)?;
+            Ok(NamedField(base, member))
+        }
+    }
+}
+
+impl FromMeta for NamedField {
+    fn from_string(string: &str) -> darling::Result<Self> {
+        syn::parse_str(string)
+            .map_err(|err| darling::Error::custom("Error parsing value").with_span(&err.span()))
+    }
+}
+
+#[test]
+fn test_named_field() {
+    let input = syn::parse_str(r#""source.out""#).unwrap();
+    let field: NamedField = FromMeta::from_nested_meta(&input).unwrap();
+    assert_eq!(field, syn::parse_quote!(source.out));
+
+    let input = syn::parse_str(r#""lonely""#).unwrap();
+    let field: NamedField = FromMeta::from_nested_meta(&input).unwrap();
+    assert_eq!(field, syn::parse_quote!(self.lonely));
+
+    let field: NamedField = syn::parse_str("foo.impl").unwrap();
+    assert_eq!(field, syn::parse_quote!(foo.impl));
+}
+
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct MetaList<T>(Vec<T>);
+
+impl<T> From<MetaList<T>> for Vec<T> {
+    fn from(list: MetaList<T>) -> Self {
+        list.0
+    }
+}
+
+impl<T: FromMeta> FromMeta for MetaList<T> {
+    fn from_list(items: &[syn::NestedMeta]) -> darling::Result<Self> {
+        let exprs = items
+            .iter()
+            .map(T::from_nested_meta)
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(ExprFieldList(exprs))
+        Ok(MetaList(exprs))
     }
 }
 
-impl TryFrom<syn::Expr> for ExprField {
-    type Error = darling::Error;
-    fn try_from(expr: syn::Expr) -> Result<Self, Self::Error> {
-        match expr {
-            syn::Expr::Field(expr) => Ok(expr),
-            syn::Expr::Path(expr) => expr
-                .path
-                .get_ident()
-                .map(|ident| syn::ExprField {
-                    attrs: vec![],
-                    base: Box::new(self_path()),
-                    dot_token: syn::token::Dot::default(),
-                    member: syn::Member::Named(ident.to_owned()),
-                })
-                .ok_or(darling::Error::unexpected_type("bad")),
-            _ => {
-                panic!("oops1");
-            }
-        }
-        .map(ExprField::from)
-    }
-}
-
-impl TryFrom<&syn::LitStr> for ExprField {
-    type Error = darling::Error;
-    fn try_from(string: &syn::LitStr) -> Result<Self, Self::Error> {
-        string
-            .parse::<syn::Expr>()
-            .map_err(|err| {
-                darling::Error::unsupported_format("Error parsing expression.")
-                    .with_span(&err.span())
-            })
-            .and_then(ExprField::try_from)
-    }
-}
-
-impl TryFrom<&str> for ExprField {
-    type Error = darling::Error;
-    fn try_from(string: &str) -> Result<Self, Self::Error> {
-        syn::parse_str::<syn::Expr>(string)
-            .map_err(|err| {
-                darling::Error::unsupported_format("Error parsing expression.")
-                    .with_span(&err.span())
-            })
-            .and_then(ExprField::try_from)
-    }
+/// Generate a TokenSTream from an Option<Duration>
+pub(crate) fn duration_quote(duration: &Duration) -> proc_macro2::TokenStream {
+    let secs = duration.as_secs();
+    let nanos = duration.subsec_nanos();
+    quote! {::boomerang::runtime::Duration::new(#secs, #nanos)}
 }

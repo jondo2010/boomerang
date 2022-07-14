@@ -17,12 +17,13 @@ gitlab = { repository = "jondo2010/boomerang", branch = "master" }
 codecov = { repository = "jondo2010/boomerang", branch = "master", service = "gitlab" }
 
 [dependencies]
-darling = '0.10.2'
-derive_more = "0.99.5"
-parse_duration = "2.1.0"
-petgraph = "0.5.0"
+darling = '0.13.0'
+derive_more = "0.99.16"
+itertools = "0.10"
+parse_duration = "2.1"
 proc-macro2 = '1.0'
 quote = '1.0'
+serde = { version = '1.0', features = ['derive'] }
 syn = { version = '1.0', features = ['visit'] }
 
 [lib]

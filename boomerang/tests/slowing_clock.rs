@@ -2,42 +2,24 @@
 /// msec on a logical action with a minimum delay of 100 msec.  
 /// The use of the logical action ensures the elapsed time jumps exactly from
 /// 0 to 100, 300, 600, and 1000 msec.
-use boomerang::{runtime, Reactor};
-use runtime::{Duration, InternalAction};
+use boomerang::{builder::BuilderActionKey, runtime, Reactor};
+use boomerang_util::{Timeout, TimeoutBuilder};
+use runtime::Duration;
 
-#[derive(Debug, Reactor)]
-#[reactor(reaction(function = "Timeout::reaction_startup", triggers(startup)))]
-struct Timeout {
-    timeout: runtime::Duration,
-}
-impl Timeout {
-    fn new(timeout: runtime::Duration) -> Self {
-        Timeout { timeout }
-    }
-    fn reaction_startup(&mut self, ctx: &mut runtime::Context) {
-        ctx.schedule_shutdown(Some(self.timeout))
-    }
+#[derive(Reactor)]
+struct SlowingClockBuilder {
+    #[reactor(action(min_delay = "100 msec"))]
+    a: BuilderActionKey,
+    #[reactor(reaction(function = "SlowingClock::reaction_startup"))]
+    reaction_startup: runtime::ReactionKey,
+    #[reactor(reaction(function = "SlowingClock::reaction_a"))]
+    reaction_a: runtime::ReactionKey,
+    #[reactor(reaction(function = "SlowingClock::reaction_shutdown"))]
+    reaction_shutdown: runtime::ReactionKey,
+    #[reactor(child(state = "Timeout::new(runtime::Duration::from_secs(1))"))]
+    _timeout: TimeoutBuilder,
 }
 
-#[derive(Reactor, Debug)]
-#[reactor(
-    action(name = "a", min_delay = "100 msec"),
-    reaction(
-        function = "SlowingClock::reaction_startup",
-        triggers(startup),
-        effects(action = "a")
-    ),
-    reaction(
-        function = "SlowingClock::reaction_a",
-        triggers(action = "a"),
-        effects(action = "a")
-    ),
-    reaction(function = "SlowingClock::reaction_shutdown", triggers(shutdown)),
-    child(
-        name = "timeout",
-        reactor = "Timeout::new(runtime::Duration::from_secs(1))"
-    )
-)]
 struct SlowingClock {
     interval: Duration,
     expected_time: Duration,
@@ -51,12 +33,22 @@ impl SlowingClock {
         }
     }
 
-    fn reaction_startup(&mut self, ctx: &mut runtime::Context, a: &mut InternalAction) {
+    #[boomerang::reaction(reactor = "SlowingClockBuilder", triggers(startup))]
+    fn reaction_startup(
+        &mut self,
+        ctx: &mut runtime::Context,
+        #[reactor::action(effects)] mut a: runtime::ActionMut,
+    ) {
         println!("startup");
-        ctx.schedule_action::<()>(a, None, None);
+        ctx.schedule_action::<()>(&mut a, None, None);
     }
 
-    fn reaction_a(&mut self, ctx: &mut runtime::Context, a: &mut InternalAction) {
+    #[boomerang::reaction(reactor = "SlowingClockBuilder", triggers(action = "a"))]
+    fn reaction_a(
+        &mut self,
+        ctx: &mut runtime::Context,
+        #[reactor::action(effects)] mut a: runtime::ActionMut,
+    ) {
         let elapsed_logical_time = ctx.get_elapsed_logical_time();
         println!(
             "Logical time since start: {}ms.",
@@ -68,11 +60,12 @@ impl SlowingClock {
             self.expected_time.as_millis()
         );
 
-        ctx.schedule_action::<()>(a, None, Some(self.interval));
+        ctx.schedule_action::<()>(&mut a, None, Some(self.interval));
         self.expected_time += Duration::from_millis(100) + self.interval;
         self.interval += Duration::from_millis(100);
     }
 
+    #[boomerang::reaction(reactor = "SlowingClockBuilder", triggers(shutdown))]
     fn reaction_shutdown(&mut self, _ctx: &mut runtime::Context) {
         assert_eq!(
             self.expected_time,
@@ -84,7 +77,6 @@ impl SlowingClock {
     }
 }
 
-#[cfg(feature = "disabled")]
 #[test]
 fn slowing_clock() {
     // install global collector configured based on RUST_LOG env var.
@@ -93,13 +85,11 @@ fn slowing_clock() {
 
     use boomerang::builder::*;
     let mut env_builder = EnvBuilder::new();
-    let (key, parts) = SlowingClock::new()
-        .build("slowing_clock", &mut env_builder, None)
-        .unwrap();
+    let _ = SlowingClockBuilder::build("slowing_clock", SlowingClock::new(), None, &mut env_builder).unwrap();
 
-    let gv = graphviz::build(&env_builder).unwrap();
-    let mut f = std::fs::File::create(format!("{}.dot", module_path!())).unwrap();
-    std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
+    //let gv = graphviz::build(&env_builder).unwrap();
+    //let mut f = std::fs::File::create(format!("{}.dot", module_path!())).unwrap();
+    //std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
 
     let (env, dep_info) = env_builder.try_into().unwrap();
 

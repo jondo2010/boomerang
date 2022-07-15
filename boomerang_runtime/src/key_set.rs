@@ -1,5 +1,3 @@
-use std::{borrow::Borrow, ops::Deref};
-
 use itertools::Itertools;
 use slotmap::{Key, SecondaryMap};
 

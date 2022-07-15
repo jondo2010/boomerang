@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use boomerang::{
     builder::BuilderActionKey,
     runtime::{self, Duration},
@@ -85,11 +87,11 @@ impl Hello {
     }
 
     /// reaction_a is sensetive to Action `a`
-    #[boomerang::reaction(reactor = "HelloBuilder")]
+    #[boomerang::reaction(reactor = "HelloBuilder", triggers(action = "a"))]
     fn reaction_a(
         &mut self,
         ctx: &runtime::Context,
-        #[reactor::action(triggers)] a: runtime::Action,
+        //#[reactor::action(triggers)] a: runtime::Action,
     ) {
         self.count += 1;
         let time = ctx.get_elapsed_logical_time();
@@ -109,7 +111,7 @@ struct InsideBuilder {
     #[reactor(child(
         state = "Hello::new(Duration::from_secs(1), \"Composite default message.\")"
     ))]
-    third_instance: HelloBuilder,
+    _third_instance: HelloBuilder,
 }
 
 struct Inside {

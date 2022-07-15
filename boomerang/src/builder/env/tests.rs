@@ -1,5 +1,3 @@
-use runtime::Duration;
-
 use super::*;
 
 #[test]

@@ -1,7 +1,4 @@
-use crate::{
-    reactor::TriggerAttr,
-    util::{MetaList, NamedField},
-};
+use crate::{reactor::TriggerAttr, util::MetaList};
 use darling::{FromAttributes, FromMeta};
 use itertools::Itertools;
 use quote::{format_ident, quote};
@@ -354,24 +351,6 @@ impl ReactionReceiver {
                     //attrs: ActionAttrs::Effects | ActionAttrs::TriggersAndEffects,
                     ..
                 } => Some(quote! { (* #ident).into() }),
-                _ => todo!(),
-            }
-        })
-    }
-
-    fn find_items_tokens(&self) -> impl Iterator<Item = proc_macro2::TokenStream> + '_ {
-        self.args.iter().filter_map(|arg| {
-            let ident = &arg.ident;
-            let name = ident.to_string();
-            match arg.attr {
-                ArgumentAttr::Port { .. } => Some(quote! {
-                    let #ident = <::boomerang::builder::ReactorBuilderState<Self> as
-                        ::boomerang::builder::FindElements>::get_port_by_name(builder, #name)?;
-                }),
-                ArgumentAttr::Action { .. } => Some(quote! {
-                    let #ident = <::boomerang::builder::ReactionBuilderState<Self> as
-                        ::boomerang::builder::FindElements>::get_action_by_name(builder, #name)?;
-                }),
             }
         })
     }
@@ -383,7 +362,7 @@ impl ReactionReceiver {
             TriggerAttr::Shutdown => quote! { .with_trigger_action(__shutdown_action, 0)},
             TriggerAttr::Action(action) => quote! { .with_trigger_action(reactor.#action, 0)},
             TriggerAttr::Timer(timer) => quote! { .with_trigger_action(reactor.#timer, 0) },
-            TriggerAttr::Port(_) => todo!(),
+            TriggerAttr::Port(port) => quote! { .with_trigger_port(reactor.#port, 0) },
         });
 
         // Values from argument attributes

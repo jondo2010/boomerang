@@ -36,6 +36,7 @@ tracing = "0.1.23"
 [dev-dependencies]
 tracing-subscriber = { version = "0.2.15", features = ["fmt"] }
 criterion = "0.3"
+boomerang_util = { path = "../boomerang_util" }
 
 [[bench]]
 name = "savina_pong"

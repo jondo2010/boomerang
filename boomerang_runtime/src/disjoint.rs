@@ -236,9 +236,9 @@ mod tests {
         let (_i, mut o) =
             disjoint_unchecked_chunked(&mut sm, std::iter::empty(), keys.iter().map(|x| x.iter()));
 
-        let bar = o.next().unwrap();
+        let _bar = o.next().unwrap();
         // dbg!(bar);
-        let bar = o.next().unwrap();
+        let _bar = o.next().unwrap();
         // dbg!(bar);
     }
 }

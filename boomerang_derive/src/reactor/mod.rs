@@ -29,10 +29,6 @@ pub enum ActionAttrPolicy {
     Drop,
 }
 
-fn type_default() -> syn::Type {
-    syn::parse_quote!(())
-}
-
 #[derive(Debug, FromMeta, PartialEq, Eq)]
 pub struct ActionAttr {
     pub rename: Option<syn::Ident>,
@@ -52,7 +48,7 @@ pub enum TriggerAttr {
     Shutdown,
     Action(syn::Ident),
     Timer(syn::Ident),
-    Port(util::NamedField),
+    Port(syn::Path),
 }
 
 impl FromMeta for TriggerAttr {
@@ -154,20 +150,10 @@ pub struct ChildAttr {
     pub state: syn::Expr,
 }
 
+/// Attribute on a Reaction field in a ReactorBuilder struct
 #[derive(Debug, FromMeta, PartialEq, Eq)]
 pub struct ReactionAttr {
     pub function: syn::Path,
-    // Triggers can be timers, inputs, outputs of contained reactors, or actions.
-    // #[darling(default, map = "util::MetaList::into")]
-    // pub triggers: Vec<TriggerAttr>,
-    // The uses field specifies inputs that the reaction observes but that do not trigger the
-    // reaction.
-    // #[darling(default, map = "util::MetaList::into")]
-    // pub uses: Vec<NamedField>,
-    // The effects field declares which outputs and actions the target code may produce or
-    // schedule.
-    // #[darling(default, map = "util::MetaList::into")]
-    // pub effects: Vec<EffectAttr>,
 }
 
 /// Attributes on fields in a Reactor
@@ -177,7 +163,6 @@ pub struct RawReactorField {
     pub ident: Option<syn::Ident>,
     pub vis: syn::Visibility,
     pub ty: syn::Type,
-    // attrs: Vec<syn::Attribute>,
     pub timer: Option<TimerAttr>,
     pub input: Option<PortAttr>,
     pub output: Option<PortAttr>,

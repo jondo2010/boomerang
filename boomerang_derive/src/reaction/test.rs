@@ -1,17 +1,16 @@
 use super::build_reaction_args;
-use syn::{parse_quote, Attribute, ItemFn, NestedMeta};
+use syn::ItemFn;
 
+#[cfg(feature = "disabled")]
 #[test]
 fn test_missing_timer() {
     let input: Attribute = parse_quote! {
         #[boomerang::reaction(triggers(startup, timer = "t"), uses(port = "x"))]
     };
-    // let attr = ReactionAttr2::from_nested_meta(&input).unwrap();
-    dbg!(&input.tokens.to_string());
-    let attr: NestedMeta = syn::parse2(input.tokens).unwrap();
+    let attr = ReactionAttr::from_nested_meta(&input).unwrap();
     dbg!(&attr);
 
-    let x: ItemFn = syn::parse_quote! {
+    let _x: ItemFn = syn::parse_quote! {
         fn reaction_startup(
             &mut self,
             _ctx: &runtime::Context,
@@ -37,6 +36,5 @@ fn test_build_reaction_args() {
         ) {}
     };
 
-    let args = build_reaction_args(&mut input);
-    dbg!(args);
+    let _args = build_reaction_args(&mut input);
 }

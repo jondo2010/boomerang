@@ -1,9 +1,5 @@
 use super::*;
-use darling::FromAttributes;
-use syn::{
-    parse_macro_input::{self, ParseMacroInput},
-    parse_quote, AttributeArgs, ItemFn, NestedMeta,
-};
+use syn::parse_quote;
 
 #[test]
 #[cfg(feature = "disabled")]
@@ -246,14 +242,12 @@ pub struct Foo {}
 fn test0() {
     let input = syn::parse_str(
         r#"
-#[derive(Debug, Reactor)]
+#[derive(Reactor)]
 struct Foo {
-    #[reactor(reaction(function = "Count::reaction_t", triggers(timer = "t")))]
+    #[reactor(reaction(function = "Count::reaction_t"))]
     reaction_t: runtime::ReactionKey,
 }"#,
     )
     .unwrap();
     let ret = ReactorReceiver::from_derive_input(&input).unwrap();
-
-    dbg!(&ret.data);
 }

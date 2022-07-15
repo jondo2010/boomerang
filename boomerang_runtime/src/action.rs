@@ -16,6 +16,7 @@ pub struct ActionMut<'a, T: PortData = ()> {
     pub(crate) min_delay: &'a Duration,
     pub(crate) values: &'a mut ActionValues<T>,
 }
+#[allow(dead_code)]
 
 pub struct Action<'a, T: PortData = ()> {
     pub(crate) key: ActionKey,
@@ -199,22 +200,18 @@ impl Display for InternalAction {
         match self {
             InternalAction::Timer {
                 name,
-                key,
                 offset,
                 period,
+                ..
             } => f.write_fmt(format_args!(
                 "Action::Timer<{name}, {offset:#?}, {period:#?}>"
             )),
-            InternalAction::Shutdown { name, key } => {
+            InternalAction::Shutdown { name, .. } => {
                 f.write_fmt(format_args!("Action::Shutdown<{name}>"))
             }
-            InternalAction::Valued(ValuedAction {
-                name,
-                key,
-                logical,
-                min_delay,
-                values,
-            }) => f.write_fmt(format_args!("Action::BaseAction<{name}>")),
+            InternalAction::Valued(ValuedAction { name, .. }) => {
+                f.write_fmt(format_args!("Action::BaseAction<{name}>"))
+            }
         }
     }
 }

@@ -81,22 +81,6 @@ where
         // ctx.enqueue_now(downstream)
         &mut self.value
     }
-
-    // pub fn get_with<F: FnOnce(&T, bool)>(&self, f: F) {
-    // let value = self.value.read().unwrap();
-    // f(&value.0, value.1)
-    // }
-    //
-    // pub fn get_with_mut<F: FnOnce(&mut T, bool) -> bool>(&self, f: F) -> bool {
-    // let mut value = self.value.write().unwrap();
-    // let is_set = value.1;
-    // if f(&mut value.0, is_set) {
-    // (*value).1 = true;
-    // true
-    // } else {
-    // false
-    // }
-    // }
 }
 
 impl<T> BasePort for Port<T>

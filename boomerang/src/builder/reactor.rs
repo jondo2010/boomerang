@@ -34,6 +34,20 @@ pub(super) struct ReactorBuilder {
     pub actions: SecondaryMap<runtime::ActionKey, ()>,
 }
 
+impl std::fmt::Debug for ReactorBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReactorBuilder")
+            .field("name", &self.name)
+            .field("state", &self.state.as_ref().map(|_| &"State"))
+            .field("type_name", &self.type_name)
+            .field("parent_reactor_key", &self.parent_reactor_key)
+            .field("reactions", &self.reactions)
+            .field("ports", &self.ports)
+            .field("actions", &self.actions)
+            .finish()
+    }
+}
+
 impl From<ReactorBuilder> for Box<dyn runtime::ReactorState> {
     fn from(builder: ReactorBuilder) -> Self {
         builder.state.expect("No BaseReactor in ReactorBuilder!")
@@ -99,8 +113,6 @@ impl<'a, S: runtime::ReactorState> ReactorBuilderState<'a, S> {
         let shutdown_action = env
             .add_shutdown_action("__shutdown", reactor_key)
             .expect("Duplicate shutdown Action?");
-
-        // let parts = reactor.build_parts(env, reactor_key).unwrap();
 
         env.reactor_builders[reactor_key].state = Some(Box::new(state));
 

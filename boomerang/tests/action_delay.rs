@@ -41,11 +41,10 @@ impl GeneratedDelay {
     }
 
     /// act -> y_out
-    #[boomerang::reaction(reactor = "GeneratedDelayBuilder")]
+    #[boomerang::reaction(reactor = "GeneratedDelayBuilder", triggers(action = "act"))]
     fn reaction_act(
         &mut self,
         _ctx: &runtime::Context,
-        #[reactor::action(triggers)] act: runtime::Action,
         #[reactor::port(effects)] y_out: &mut runtime::Port<u32>,
     ) {
         *y_out.get_mut() = Some(self.y_state);
@@ -107,6 +106,7 @@ impl Sink {
     connection(from = "source.out", to = "g.y_in"),
     connection(from = "g.y_out", to = "sink.inp")
 )]
+#[allow(dead_code)]
 struct ActionDelayBuilder {
     #[reactor(child(state = "Source{}"))]
     source: SourceBuilder,

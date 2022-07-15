@@ -1,11 +1,10 @@
 use std::fmt::Display;
 
 use itertools::Itertools;
-use rayon::iter::ParallelBridge;
 use slotmap::{SecondaryMap, SlotMap};
 
 use crate::{
-    disjoint, sched, ActionKey, BasePort, InternalAction, PortKey, Reaction, ReactionKey,
+    disjoint, ActionKey, BasePort, InternalAction, PortKey, Reaction, ReactionKey,
     ReactorKey, ReactorState,
 };
 
@@ -118,7 +117,7 @@ where
 {
     type Item = ReactionTriggerCtx<'a>;
 
-    fn drive_unindexed<C>(self, consumer: C) -> C::Result
+    fn drive_unindexed<C>(self, _consumer: C) -> C::Result
     where
         C: rayon::iter::plumbing::UnindexedConsumer<Self::Item>,
     {

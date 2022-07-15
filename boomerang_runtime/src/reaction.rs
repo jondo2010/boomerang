@@ -1,8 +1,7 @@
 use std::{fmt::Debug, sync::RwLock};
 
 use crate::{
-    key_set::KeySet, ActionMut, BasePort, Context, Duration, InternalAction, ReactorKey,
-    ReactorState,
+    key_set::KeySet, BasePort, Context, Duration, InternalAction, ReactorKey, ReactorState,
 };
 
 slotmap::new_key_type! {
@@ -45,6 +44,7 @@ pub struct Deadline {
     deadline: Duration,
     #[derivative(PartialEq = "ignore")]
     #[derivative(Debug = "ignore")]
+    #[allow(dead_code)]
     handler: RwLock<Box<dyn Fn() + Sync + Send>>,
 }
 

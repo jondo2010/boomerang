@@ -67,7 +67,7 @@ impl ActionValues {
     }
 
     #[boomerang::reaction(reactor = "ActionValuesBuilder", triggers(shutdown))]
-    fn reaction_shutdown(&mut self, ctx: &mut runtime::Context) {
+    fn reaction_shutdown(&mut self, _ctx: &mut runtime::Context) {
         assert!(
             self.r1done && self.r2done,
             "ERROR: Expected 2 reaction invocations\n"

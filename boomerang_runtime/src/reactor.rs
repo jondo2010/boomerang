@@ -14,8 +14,8 @@ impl_downcast!(sync ReactorState);
 
 pub(crate) trait ReactorElement {
     fn startup(&self, _ctx: &mut Context, _key: ActionKey) {}
-    fn shutdown(&self, dep_info: &DepInfo, reaction_set: &mut ReactionSet) {}
-    fn cleanup(&self, dep_info: &DepInfo, current_tag: Tag) -> Option<ScheduledEvent> {
+    fn shutdown(&self, _dep_info: &DepInfo,_reaction_sett: &mut ReactionSet) {}
+    fn cleanup(&self, _dep_info: &DepInfo, _current_tag: Tag) -> Option<ScheduledEvent> {
         None
     }
 }

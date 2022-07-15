@@ -1,4 +1,5 @@
 // Example in the Wiki.
+
 use boomerang::{
     builder::{BuilderActionKey, BuilderPortKey},
     runtime, Reactor,
@@ -51,14 +52,18 @@ impl Test {
 #[derive(Reactor)]
 #[reactor(connection(from = "g.y", to = "t.x"))]
 struct GainBuilder {
-    #[reactor(timer(rename = "tim"))]
-    tim: BuilderActionKey,
-    #[reactor(reaction(function = "Gain::reaction_tim",))]
-    reaction_tim: runtime::ReactionKey,
     #[reactor(child(state = "Scale(2)"))]
     g: ScaleBuilder,
+
     #[reactor(child(state = "Test"))]
+    #[allow(dead_code)]
     t: TestBuilder,
+
+    #[reactor(timer(rename = "tim"))]
+    tim: BuilderActionKey,
+
+    #[reactor(reaction(function = "Gain::reaction_tim",))]
+    reaction_tim: runtime::ReactionKey,
 }
 
 #[derive(Debug)]

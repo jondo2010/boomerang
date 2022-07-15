@@ -88,6 +88,7 @@ impl Pass {
     connection(from = "p1.y", to = "p2.x"),
     connection(from = "p2.y", to = "d.x")
 )]
+#[allow(dead_code)]
 struct DeterminismBuilder {
     #[reactor(child(state = "Source"))]
     s: SourceBuilder,

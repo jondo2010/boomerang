@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use boomerang::{
     builder::{BuilderActionKey, BuilderPortKey},
     runtime, Reactor,
@@ -60,7 +62,7 @@ struct PrintBuilder {
     #[reactor(input())]
     inp: BuilderPortKey<u32>,
     #[reactor(action())]
-    act: BuilderActionKey,
+    a: BuilderActionKey,
     #[reactor(reaction(function = "Print::reaction_in"))]
     reaction_in: runtime::ReactionKey,
 }
@@ -72,7 +74,7 @@ impl Print {
         &mut self,
         _ctx: &runtime::Context,
         #[reactor::port(triggers)] inp: &runtime::Port<u32>,
-        #[reactor::action(effects)] mut act: runtime::ActionMut,
+        #[reactor::action(effects, rename = "a")] mut _a: runtime::ActionMut,
     ) {
         let value = inp.get();
         assert!(matches!(value, Some(2u32)));
@@ -129,15 +131,15 @@ fn hierarchy() {
     // let mut f = std::fs::File::create(format!("{}.dot", module_path!())).unwrap();
     // std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
 
-    let gv = graphviz::build_reaction_graph(&env_builder).unwrap();
-    let mut f = std::fs::File::create(format!("{}_levels.dot", module_path!())).unwrap();
-    std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
+    //let gv = graphviz::build_reaction_graph(&env_builder).unwrap();
+    //let mut f = std::fs::File::create(format!("{}_levels.dot", module_path!())).unwrap();
+    //std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
 
     let (env, dep_info) = env_builder.try_into().unwrap();
     assert!(env.ports.len() == 2);
 
     runtime::check_consistency(&env, &dep_info);
-    // runtime::debug_info(&env, &dep_info);
+    runtime::debug_info(&env, &dep_info);
 
     let sched = runtime::Scheduler::new(env, dep_info, true);
     sched.event_loop();

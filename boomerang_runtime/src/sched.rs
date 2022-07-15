@@ -62,7 +62,7 @@ pub struct Scheduler {
 
 impl Scheduler {
     pub fn new(env: Env, dep_info: DepInfo, fast_forward: bool) -> Self {
-        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (_event_tx, event_rx) = crossbeam_channel::unbounded();
         Self {
             env,
             dep_info,
@@ -127,7 +127,7 @@ impl Scheduler {
         }
     }
 
-    fn shutdown(&mut self, shutdown_tag: Tag, reactions: Option<ReactionSet>) {
+    fn shutdown(&mut self, shutdown_tag: Tag, _reactions: Option<ReactionSet>) {
         info!("Shutting down at {shutdown_tag}");
         let mut reaction_set = ReactionSet::new();
         for action in self.env.actions.values() {

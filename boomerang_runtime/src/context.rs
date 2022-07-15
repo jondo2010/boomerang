@@ -1,7 +1,7 @@
 use tracing::debug;
 
 use crate::{
-    Action, ActionMut, DepInfo, Duration, Instant, InternalAction, Level, PortData, ReactionKey,
+    Action, ActionMut, DepInfo, Duration, Instant, Level, PortData, ReactionKey,
     ReactionSet, ScheduledEvent, Tag,
 };
 

@@ -45,7 +45,7 @@ impl<'a, 'b> ToTokens for ReactorFieldBuilder<'a, 'b> {
                 let ty = quote! {<#ty as ::boomerang::runtime::InnerType>::Inner};
                 quote! { let #ident = #builder_ident.add_port::<#ty>(#name, ::boomerang::builder::PortType::Output)?; }
             }
-            ReactorField::Action { ident, name, ty, physical, min_delay, mit, policy } => {
+            ReactorField::Action { ident, name, ty, physical: _, min_delay, mit: _, policy :_} => {
                 let ty = quote! {<#ty as ::boomerang::runtime::InnerType>::Inner};
                 let min_delay = OptionalDuration(**min_delay);
                 quote! { let #ident = #builder_ident.add_logical_action::<#ty>(#name, #min_delay)?; }

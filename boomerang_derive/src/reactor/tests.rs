@@ -249,5 +249,5 @@ struct Foo {
 }"#,
     )
     .unwrap();
-    let ret = ReactorReceiver::from_derive_input(&input).unwrap();
+    let _ret = ReactorReceiver::from_derive_input(&input).unwrap();
 }

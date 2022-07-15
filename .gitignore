@@ -1,3 +1,5 @@
 /target
 /boomerang/target
 Cargo.lock
+*.svg
+*.dot

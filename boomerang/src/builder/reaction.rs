@@ -1,10 +1,10 @@
-use super::{BuilderError, EnvBuilder, PortType};
+use super::{BuilderActionKey, BuilderError, BuilderPortKey, EnvBuilder, FindElements, PortType};
 use crate::runtime;
 use slotmap::SecondaryMap;
 
 #[derive(Derivative)]
 #[derivative(Debug)]
-pub struct ReactionBuilder<S> {
+pub struct ReactionBuilder {
     #[derivative(Ord = "ignore")]
     #[derivative(PartialEq = "ignore")]
     pub(super) name: String,
@@ -12,154 +12,178 @@ pub struct ReactionBuilder<S> {
     pub(super) priority: usize,
     /// The owning Reactor for this Reaction
     pub(super) reactor_key: runtime::ReactorKey,
-
+    /// The Reaction function
     #[derivative(Debug = "ignore")]
-    pub(super) reaction_fn: Box<dyn runtime::ReactionFn<S>>,
-
-    trigger_actions: SecondaryMap<runtime::ActionKey, ()>,
-    schedulable_actions: SecondaryMap<runtime::ActionKey, ()>,
-    trigger_ports: SecondaryMap<runtime::PortKey, ()>,
-    pub(super) deps: SecondaryMap<runtime::PortKey, ()>,
-    pub(super) antideps: SecondaryMap<runtime::PortKey, ()>,
+    pub(super) reaction_fn: Box<dyn runtime::ReactionFn>,
+    /// Actions that trigger this Reaction, and their relative ordering.
+    pub(super) trigger_actions: SecondaryMap<runtime::ActionKey, usize>,
+    /// Actions that can be scheduled by this Reaction, and their relative ordering.
+    pub(super) schedulable_actions: SecondaryMap<runtime::ActionKey, usize>,
+    /// Ports that can trigger this Reaction, and their relative ordering.
+    pub(super) input_ports: SecondaryMap<runtime::PortKey, usize>,
+    /// Ports that this Reaction may set the value of, and their relative ordering.
+    pub(super) output_ports: SecondaryMap<runtime::PortKey, usize>,
 }
 
-// impl Ord for ReactionBuilder {
-// fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-// self.priority
-// .cmp(&other.priority)
-// .then_with(|| self.reactor_key.cmp(&other.reactor_key))
-// }
-// }
-//
-// impl PartialOrd for ReactionBuilder {
-// fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-// Some(self.cmp(&other))
-// }
-// }
-//
-// impl PartialEq for ReactionBuilder {
-// fn eq(&self, other: &Self) -> bool {
-// self.priority.eq(&other.priority) && self.reactor_key.eq(&other.reactor_key)
-// }
-// }
-
-pub struct ReactionBuilderState<'a, S> {
-    reaction: ReactionBuilder<S>,
-    env: &'a mut EnvBuilder<S>,
+impl From<ReactionBuilder> for runtime::Reaction {
+    fn from(builder: ReactionBuilder) -> Self {
+        Self::new(builder.name, builder.reactor_key, builder.reaction_fn, None)
+    }
 }
 
-impl<'a, S> ReactionBuilderState<'a, S>
-where
-    S: runtime::SchedulerPoint,
-{
-    pub fn new<F>(
+pub struct ReactionBuilderState<'a> {
+    builder: ReactionBuilder,
+    env: &'a mut EnvBuilder,
+}
+
+impl<'a> FindElements for ReactionBuilderState<'a> {
+    /// Find the PortKey with a given name within the parent Reactor
+    fn get_port_by_name(&self, port_name: &str) -> Result<runtime::PortKey, BuilderError> {
+        self.env.get_port(port_name, self.builder.reactor_key)
+    }
+
+    fn get_action_by_name(&self, action_name: &str) -> Result<runtime::ActionKey, BuilderError> {
+        self.env.get_action(action_name, self.builder.reactor_key)
+    }
+}
+
+impl<'a> ReactionBuilderState<'a> {
+    pub fn new(
         name: &str,
         priority: usize,
         reactor_key: runtime::ReactorKey,
-        reaction_fn: F,
-        env: &'a mut EnvBuilder<S>,
-    ) -> Self
-    where
-        F: runtime::ReactionFn<S> + 'static,
-    {
+        reaction_fn: Box<dyn runtime::ReactionFn>,
+        env: &'a mut EnvBuilder,
+    ) -> Self {
         Self {
-            reaction: ReactionBuilder {
+            builder: ReactionBuilder {
                 name: name.into(),
                 priority,
                 reactor_key,
-                reaction_fn: Box::new(reaction_fn),
-                trigger_ports: SecondaryMap::new(),
-                schedulable_actions: SecondaryMap::new(),
+                reaction_fn,
                 trigger_actions: SecondaryMap::new(),
-                deps: SecondaryMap::new(),
-                antideps: SecondaryMap::new(),
+                schedulable_actions: SecondaryMap::new(),
+                input_ports: SecondaryMap::new(),
+                output_ports: SecondaryMap::new(),
             },
             env,
         }
     }
 
     /// Indicate that this Reaction can be triggered by the given Action
-    pub fn with_trigger_action(mut self, trigger_key: runtime::ActionKey) -> Self {
-        self.reaction.trigger_actions.insert(trigger_key, ());
+    pub fn with_trigger_action<T: runtime::PortData>(
+        mut self,
+        trigger_key: BuilderActionKey<T>,
+        order: usize,
+    ) -> Self {
+        self.builder
+            .trigger_actions
+            .insert(trigger_key.into(), order);
         self
     }
 
     /// Indicate that this Reaction can be triggered by the given Port
-    pub fn with_trigger_port(mut self, port_key: runtime::PortKey) -> Self {
-        self.reaction.trigger_ports.insert(port_key, ());
-        self.reaction.deps.insert(port_key, ());
+    pub fn with_trigger_port<T: runtime::PortData>(
+        mut self,
+        port_key: BuilderPortKey<T>,
+        order: usize,
+    ) -> Self {
+        self.builder.input_ports.insert(port_key.into(), order);
         self
     }
 
     /// Indicate that this Reaction may schedule the given Action
-    pub fn with_scheduable_action(mut self, action_key: runtime::ActionKey) -> Self {
-        self.reaction.schedulable_actions.insert(action_key, ());
-        self
-    }
-
-    pub fn with_scheduable_actions(mut self, action_keys: &[runtime::ActionKey]) -> Self {
-        self.reaction
+    pub fn with_scheduable_action<T: runtime::PortData>(
+        mut self,
+        action_key: BuilderActionKey<T>,
+        order: usize,
+    ) -> Self {
+        self.builder
             .schedulable_actions
-            .extend(action_keys.iter().map(|&key| (key, ())));
+            .insert(action_key.into(), order);
         self
     }
 
-    /// Indicate that this Reaction may set the value of the given Port.
-    pub fn with_antidependency(mut self, antidep_key: runtime::PortKey) -> Self {
-        self.reaction.antideps.insert(antidep_key, ());
+    // pub fn with_scheduable_actions(mut self, action_keys: &[runtime::ActionKey]) -> Self {
+    //    self.builder
+    //        .schedulable_actions
+    //        .extend(action_keys.iter().map(|&key| (key, ())));
+    //    self
+    //}
+
+    /// Indicate that this Reaction may set the value of the given Port (uses keyword).
+    pub fn with_antidependency<T: runtime::PortData>(
+        mut self,
+        antidep_key: BuilderPortKey<T>,
+        order: usize,
+    ) -> Self {
+        self.builder.output_ports.insert(antidep_key.into(), order);
         self
     }
 
     pub fn finish(self) -> Result<runtime::ReactionKey, BuilderError> {
         let Self {
-            reaction: reaction_builder,
+            builder: reaction_builder,
             env,
         } = self;
-        let reactor = &mut env.reactors[reaction_builder.reactor_key];
+
+        let reactor = &mut env.reactor_builders[reaction_builder.reactor_key];
         let reactions = &mut env.reaction_builders;
         let actions = &mut env.action_builders;
         let ports = &mut env.port_builders;
 
-        let key = reactions.insert_with_key(|key| {
+        let reaction_key = reactions.insert_with_key(|key| {
             reactor.reactions.insert(key, ());
-
-            for trigger_key in reaction_builder.trigger_actions.keys() {
-                let action = actions.get_mut(trigger_key).unwrap();
-                assert!(
-                    reaction_builder.reactor_key == action.get_reactor_key(),
-                    "Action triggers must belong to the same reactor as the triggered reaction"
-                );
-                action.triggers.insert(key, ());
-            }
-
-            for action_key in reaction_builder.schedulable_actions.keys() {
-                let action = actions.get_mut(action_key).unwrap();
-                assert!(
-                    action.get_reactor_key() == reaction_builder.reactor_key,
-                    "Scheduable actions must belong to the same reactor as the triggered reaction"
-                );
-                action.schedulers.insert(key, ());
-            }
-
-            for port_key in reaction_builder.deps.keys() {
-                let port = ports.get_mut(port_key).unwrap();
-                if port.get_port_type() == &PortType::Input {
-                    assert!(reaction_builder.reactor_key == port.get_reactor_key(), "Input port triggers must belong to the same reactor as the triggered reaction");
-                } else {
-                    //assert!(reaction.reactor_key == env.reactors[port.get_reactor_key()].parent_reactor_key.unwrap(), "Output port triggers must belong to a contained reactor");
-                    todo!();
-                }
-                port.register_dependency(key, true);
-            }
-
-            for antidep_key in reaction_builder.antideps.keys() {
-                let port = ports.get_mut(antidep_key).unwrap();
-                port.register_antidependency(key);
-            }
-
             reaction_builder
         });
 
-        Ok(key)
+        let reaction_builder = &reactions[reaction_key];
+
+        for trigger_key in reaction_builder.trigger_actions.keys() {
+            let action = actions.get_mut(trigger_key).unwrap();
+            assert_eq!(
+                reaction_builder.reactor_key,
+                action.get_reactor_key(),
+                "Action triggers must belong to the same reactor as the triggered reaction"
+            );
+            action.triggers.insert(reaction_key, ());
+        }
+
+        for action_key in reaction_builder.schedulable_actions.keys() {
+            let action = actions.get_mut(action_key).unwrap();
+            assert_eq!(
+                action.get_reactor_key(),
+                reaction_builder.reactor_key,
+                "Scheduable actions must belong to the same reactor as the triggered reaction"
+            );
+            action.schedulers.insert(reaction_key, ());
+        }
+
+        for port_key in reaction_builder.output_ports.keys() {
+            let port = ports.get_mut(port_key).unwrap();
+            port.register_antidependency(reaction_key);
+        }
+
+        for port_key in reaction_builder.input_ports.keys() {
+            let port = ports.get_mut(port_key).unwrap();
+            if port.get_port_type() == &PortType::Input {
+                assert_eq!(
+                    reaction_builder.reactor_key,
+                    port.get_reactor_key(),
+                    "Input port triggers must belong to the same reactor as the triggered reaction"
+                );
+            } else {
+                assert_eq!(
+                    reaction_builder.reactor_key,
+                    env.reactor_builders[port.get_reactor_key()]
+                        .parent_reactor_key
+                        .unwrap(),
+                    "Output port triggers must belong to a contained reactor"
+                );
+            }
+            port.register_dependency(reaction_key, true);
+        }
+
+        Ok(reaction_key)
     }
 }

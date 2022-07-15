@@ -3,7 +3,7 @@ name = 'boomerang'
 description = 'Rust implementation of "Reactors" Deterministic Actor Model'
 version = '0.2.0'
 authors = ['John Hughes <jondo2010@gmail.com>']
-edition = '2018'
+edition = '2021'
 license = 'MIT OR Apache-2.0'
 readme = 'README.md'
 keywords = ['actor', 'reactor']
@@ -36,6 +36,7 @@ tracing = "0.1.23"
 [dev-dependencies]
 tracing-subscriber = { version = "0.2.15", features = ["fmt"] }
 criterion = "0.3"
+boomerang_util = { path = "../boomerang_util" }
 
 [[bench]]
 name = "savina_pong"

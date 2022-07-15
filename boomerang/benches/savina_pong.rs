@@ -44,16 +44,23 @@ impl Ping {
     }
 }
 
-impl<S: runtime::SchedulerPoint> Reactor<S> for Ping {
-    type Inputs = PingInputs;
-    type Outputs = PingOutputs;
-    type Actions = PingActions;
+impl<S: runtime::SchedulerPoint> Reactor for Ping {
+    type BuilderInputs = PingInputs;
+    type BuilderOutputs = PingOutputs;
+    type BuilderActions = PingActions;
 
     fn build_parts<'b>(
         &'b self,
-        env: &'b mut EnvBuilder<S>,
+        env: &'b mut EnvBuilder,
         reactor_key: runtime::ReactorKey,
-    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError> {
+    ) -> Result<
+        (
+            Self::BuilderInputs,
+            Self::BuilderOutputs,
+            Self::BuilderActions,
+        ),
+        BuilderError,
+    > {
         Ok((
             PingInputs::build(env, reactor_key)?,
             PingOutputs::build(env, reactor_key)?,
@@ -64,9 +71,16 @@ impl<S: runtime::SchedulerPoint> Reactor<S> for Ping {
     fn build(
         self,
         name: &str,
-        env: &mut EnvBuilder<S>,
+        env: &mut EnvBuilder,
         parent: Option<runtime::ReactorKey>,
-    ) -> Result<(runtime::ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
+    ) -> Result<
+        (
+            runtime::ReactorKey,
+            Self::BuilderInputs,
+            Self::BuilderOutputs,
+        ),
+        BuilderError,
+    > {
         let mut builder = env.add_reactor(name, parent, self);
         let PingInputs { receive } = builder.inputs;
         let PingOutputs { send } = builder.outputs;
@@ -126,16 +140,23 @@ impl Pong {
     }
 }
 
-impl<S: runtime::SchedulerPoint> Reactor<S> for Pong {
-    type Inputs = PongInputs;
-    type Outputs = PongOutputs;
-    type Actions = EmptyPart;
+impl<S: runtime::SchedulerPoint> Reactor for Pong {
+    type BuilderInputs = PongInputs;
+    type BuilderOutputs = PongOutputs;
+    type BuilderActions = EmptyPart;
 
     fn build_parts<'b>(
         &'b self,
-        env: &'b mut EnvBuilder<S>,
+        env: &'b mut EnvBuilder,
         reactor_key: runtime::ReactorKey,
-    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError> {
+    ) -> Result<
+        (
+            Self::BuilderInputs,
+            Self::BuilderOutputs,
+            Self::BuilderActions,
+        ),
+        BuilderError,
+    > {
         Ok((
             PongInputs::build(env, reactor_key)?,
             PongOutputs::build(env, reactor_key)?,
@@ -146,14 +167,21 @@ impl<S: runtime::SchedulerPoint> Reactor<S> for Pong {
     fn build(
         self,
         name: &str,
-        env: &mut EnvBuilder<S>,
+        env: &mut EnvBuilder,
         parent: Option<runtime::ReactorKey>,
-    ) -> Result<(runtime::ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
+    ) -> Result<
+        (
+            runtime::ReactorKey,
+            Self::BuilderInputs,
+            Self::BuilderOutputs,
+        ),
+        BuilderError,
+    > {
         let mut builder = env.add_reactor(name, parent, self);
         let PongInputs { receive } = builder.inputs;
         let PongOutputs { send } = builder.outputs;
 
-        let send_internal = builder.add_internal_port::<()>(name, PortType::Output)?;
+        let send_internal = builder.add_port::<()>(name, PortType::Output)?;
 
         let _ = builder
             .add_reaction("receive", Self::reaction_receive)
@@ -174,25 +202,39 @@ impl<S: runtime::SchedulerPoint> Reactor<S> for Pong {
 struct SavinaPong {
     count: u32,
 }
-impl<S: runtime::SchedulerPoint> Reactor<S> for SavinaPong {
-    type Inputs = EmptyPart;
-    type Outputs = EmptyPart;
-    type Actions = EmptyPart;
+impl<S: runtime::SchedulerPoint> Reactor for SavinaPong {
+    type BuilderInputs = EmptyPart;
+    type BuilderOutputs = EmptyPart;
+    type BuilderActions = EmptyPart;
 
     fn build_parts<'b>(
         &'b self,
-        _env: &'b mut EnvBuilder<S>,
+        _env: &'b mut EnvBuilder,
         _reactor_key: runtime::ReactorKey,
-    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError> {
+    ) -> Result<
+        (
+            Self::BuilderInputs,
+            Self::BuilderOutputs,
+            Self::BuilderActions,
+        ),
+        BuilderError,
+    > {
         Ok((EmptyPart, EmptyPart, EmptyPart))
     }
 
     fn build(
         self,
         name: &str,
-        env: &mut EnvBuilder<S>,
+        env: &mut EnvBuilder,
         parent: Option<runtime::ReactorKey>,
-    ) -> Result<(runtime::ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
+    ) -> Result<
+        (
+            runtime::ReactorKey,
+            Self::BuilderInputs,
+            Self::BuilderOutputs,
+        ),
+        BuilderError,
+    > {
         let count = self.count;
         let builder = env.add_reactor(name, parent, self);
 

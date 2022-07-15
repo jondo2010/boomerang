@@ -1,99 +1,109 @@
-use super::SchedulerPoint;
-use std::{fmt::Debug, sync::RwLock, time::Duration};
+use std::{fmt::Debug, sync::RwLock};
+
+use crate::{
+    key_set::KeySet, BasePort, Context, Duration, InternalAction, ReactorKey, ReactorState,
+};
 
 slotmap::new_key_type! {
     pub struct ReactionKey;
 }
 
-pub trait ReactionFn<S>: FnMut(&S) + Send + Sync
-where
-    S: SchedulerPoint,
+pub type ReactionSet = KeySet<ReactionKey>;
+
+pub type InputPorts<'a> = &'a [&'a dyn BasePort];
+pub type OutputPorts<'a> = &'a mut [&'a mut dyn BasePort];
+
+pub trait ReactionFn:
+    Fn(
+        &mut Context,
+        &mut dyn ReactorState,
+        &[&dyn BasePort],           // Input ports
+        &mut [&mut dyn BasePort],   // Output ports
+        &[&InternalAction], // Actions
+        &mut [&mut InternalAction], // Schedulable Actions
+    ) + Sync
+    + Send
 {
 }
-
-impl<S, F> ReactionFn<S> for F
-where
-    S: SchedulerPoint,
-    F: FnMut(&S) + Send + Sync,
+impl<F> ReactionFn for F where
+    F: Fn(
+            &mut Context,
+            &mut dyn ReactorState,
+            &[&dyn BasePort],
+            &mut [&mut dyn BasePort],
+            &[&InternalAction],
+            &mut [&mut InternalAction],
+        ) + Send
+        + Sync
 {
 }
 
 #[derive(Derivative)]
 #[derivative(Debug, PartialEq)]
-pub struct Deadline<S>
-where
-    S: SchedulerPoint,
-{
+pub struct Deadline {
     deadline: Duration,
     #[derivative(PartialEq = "ignore")]
     #[derivative(Debug = "ignore")]
-    handler: RwLock<Box<dyn ReactionFn<S>>>,
+    #[allow(dead_code)]
+    handler: RwLock<Box<dyn Fn() + Sync + Send>>,
 }
 
 #[derive(Derivative)]
 #[derivative(Debug, PartialEq)]
-pub struct Reaction<S>
-where
-    S: SchedulerPoint,
-{
+pub struct Reaction {
     name: String,
-    /// Inverse priority determined by dependency analysis.
-    level: usize,
+    /// The Reactor containing this Reaction
+    reactor_key: ReactorKey,
     /// Reaction closure
     #[derivative(PartialEq = "ignore")]
     #[derivative(Debug = "ignore")]
-    body: RwLock<Box<dyn ReactionFn<S>>>,
-    /// Local deadline relative to the time stamp for invocation of the reaction.
-    deadline: Option<Deadline<S>>,
+    body: Box<dyn ReactionFn>,
+    // Local deadline relative to the time stamp for invocation of the reaction.
+    deadline: Option<Deadline>,
 }
 
-impl<S> Reaction<S>
-where
-    S: SchedulerPoint,
-{
-    pub fn new<F>(name: String, level: usize, body: F, deadline: Option<Deadline<S>>) -> Self
-    where
-        F: ReactionFn<S> + 'static,
-    {
+impl Reaction {
+    pub fn new(
+        name: String,
+        reactor_key: ReactorKey,
+        body: Box<dyn ReactionFn>,
+        deadline: Option<Deadline>,
+    ) -> Self {
         Self {
             name,
-            level,
-            body: RwLock::new(Box::new(body)),
+            reactor_key,
+            body,
             deadline,
         }
-    }
-
-    pub fn get_level(&self) -> usize {
-        self.level
     }
 
     pub fn get_name(&self) -> &str {
         &self.name
     }
 
-    pub fn trigger<'b>(&self, sched: &'b S) {
-        match self.deadline.as_ref() {
-            Some(Deadline { deadline, handler }) => {
-                let lag = sched.get_physical_time() - *sched.get_logical_time();
-                if lag > *deadline {
-                    (handler.write().unwrap())(sched);
-                }
-            }
-            _ => {}
-        }
-
-        (self.body.write().unwrap())(sched);
+    pub fn get_reactor_key(&self) -> ReactorKey {
+        self.reactor_key
     }
-}
 
-#[test]
-fn test_new() {
-    let _ = Reaction::new(
-        "test".into(),
-        0,
-        |sched: &crate::Scheduler| {
-            let _x = sched.get_start_time();
-        },
-        None,
-    );
+    pub fn trigger(
+        &self,
+        ctx: &mut Context,
+        reactor: &mut dyn ReactorState,
+        inputs: &[&dyn BasePort],
+        outputs: &mut [&mut dyn BasePort],
+        actions: &[&InternalAction],
+        schedulable_actions: &mut [&mut InternalAction],
+    ) {
+        // match self.deadline.as_ref() {
+        // Some(Deadline { deadline, handler }) => {
+        // let lag = ctx.get_physical_time() - ctx.get_logical_time();
+        // if lag > *deadline {
+        // (handler.write().unwrap())(ctx);
+        // }
+        // }
+        // _ => {}
+        // }
+
+        (self.body)(ctx, reactor, inputs, outputs, actions, schedulable_actions);
+    }
 }

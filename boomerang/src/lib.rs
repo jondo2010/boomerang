@@ -1,6 +1,4 @@
-#![allow(dead_code)]
 #![feature(map_first_last)]
-#![feature(associated_type_defaults)]
 
 #[macro_use]
 extern crate derivative;
@@ -13,6 +11,7 @@ pub use boomerang_runtime as runtime;
 #[allow(unused_imports)]
 #[macro_use]
 extern crate boomerang_derive;
+
 #[cfg(feature = "boomerang_derive")]
 #[doc(hidden)]
 pub use boomerang_derive::*;

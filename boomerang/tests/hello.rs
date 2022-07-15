@@ -1,15 +1,17 @@
+#![allow(dead_code)]
+
 use boomerang::{
-    builder::{self, BuilderError, EmptyPart, Reactor},
-    runtime::{self, Duration, ReactorKey},
-    ReactorActions,
+    builder::BuilderActionKey,
+    runtime::{self, Duration},
+    Reactor,
 };
-use runtime::{Config, RunMode, SchedulerPoint};
 
 // This test checks that logical time is incremented an appropriate
 // amount as a result of an invocation of the schedule() function at
 // runtime. It also performs various smoke tests of timing aligned
 // reactions. The first instance has a period of 4 seconds, the second
 // of 2 seconds, and the third (composite) or 1 second.
+
 // reactor HelloCpp(period:time(2 secs), message:{=std::string=}("Hello C++")) {
 //    state count:int(0);
 //    state previous_time:{=reactor::TimePoint=}();
@@ -25,26 +27,34 @@ use runtime::{Config, RunMode, SchedulerPoint};
 //    reaction(a) {=
 //         count++;
 //         auto time = get_logical_time();
-// 	 	std::cout << "***** action " << count << " at time "
-//                   << time << std::endl;
+// 	 	std::cout << "***** action " << count << " at time " << time << std::endl;
 //         auto diff = time - previous_time;
 //         if (diff != 200ms) {
-//             std::cerr << "FAILURE: Expected 200 msecs of logical time to elapse "
-//                       << "but got " << diff << std::endl;
-//             exit(1);
+//             std::cerr << "FAILURE: Expected 200 msecs of logical time to elapse " << "but got "
+// << diff << std::endl;             exit(1);
 //        }
 //    =}
 //}
-// reactor Inside(period:time(1 sec),
-//               message:{=std::string=}("Composite default message.")) {
+// reactor Inside(period:time(1 sec), message:{=std::string=}("Composite default message.")) {
 //    third_instance = new HelloCpp(period = period, message = message);
 //}
 // main reactor Hello {
-//    first_instance = new HelloCpp(period = 4 sec,
-//                                  message = "Hello from first_instance.");
+//    first_instance = new HelloCpp(period = 4 sec, message = "Hello from first_instance.");
 //    second_instance = new HelloCpp(message = "Hello from second_instance.");
 //    composite_instance = new Inside(message = "Hello from composite_instance.");
 //}
+
+#[derive(Reactor)]
+struct HelloBuilder {
+    #[reactor(timer(offset = "1 sec", period = "2 sec"))]
+    t: BuilderActionKey,
+    #[reactor(action())]
+    a: BuilderActionKey,
+    #[reactor(reaction(function = "Hello::reaction_t",))]
+    reaction_t: runtime::ReactionKey,
+    #[reactor(reaction(function = "Hello::reaction_a"))]
+    reaction_a: runtime::ReactionKey,
+}
 
 struct Hello {
     period: Duration,
@@ -64,29 +74,27 @@ impl Hello {
     }
 
     /// reaction_t is sensitive to Timer `t` and schedules Action `a`
-    fn reaction_t<S: SchedulerPoint>(
+    #[boomerang::reaction(reactor = "HelloBuilder", triggers(timer = "t"))]
+    fn reaction_t(
         &mut self,
-        sched: &S,
-        _inputs: &EmptyPart,
-        _outputs: &EmptyPart,
-        actions: &HelloActions,
+        ctx: &mut runtime::Context,
+        #[reactor::action(effects)] mut a: runtime::ActionMut,
     ) {
         // Print the current time.
-        self.previous_time = sched.get_elapsed_logical_time();
-        sched.schedule_action(actions.a, (), Some(Duration::from_millis(200))); // No payload.
+        self.previous_time = ctx.get_elapsed_logical_time();
+        ctx.schedule_action(&mut a, None, Some(Duration::from_millis(200))); // No payload.
         println!("{} Current time is {:?}", self.message, self.previous_time);
     }
 
     /// reaction_a is sensetive to Action `a`
-    fn reaction_a<S: SchedulerPoint>(
+    #[boomerang::reaction(reactor = "HelloBuilder", triggers(action = "a"))]
+    fn reaction_a(
         &mut self,
-        sched: &S,
-        _inputs: &EmptyPart,
-        _outputs: &EmptyPart,
-        _actions: &HelloActions,
+        ctx: &runtime::Context,
+        //#[reactor::action(triggers)] a: runtime::Action,
     ) {
         self.count += 1;
-        let time = sched.get_elapsed_logical_time();
+        let time = ctx.get_elapsed_logical_time();
         println!("***** action {} at time {:?}", self.count, time);
         let diff = time - self.previous_time;
         assert_eq!(
@@ -98,44 +106,12 @@ impl Hello {
     }
 }
 
-ReactorActions!(Hello, HelloActions, (a, (), None));
-impl<S: SchedulerPoint> Reactor<S> for Hello {
-    type Inputs = EmptyPart;
-    type Outputs = EmptyPart;
-    type Actions = HelloActions;
-
-    fn build(
-        self,
-        name: &str,
-        env: &mut boomerang::builder::EnvBuilder<S>,
-        parent: Option<ReactorKey>,
-    ) -> Result<(ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
-        let period = self.period;
-        let mut builder = env.add_reactor(name, parent, self);
-        let t = builder.add_timer("t", period, Duration::from_secs(1))?;
-
-        let Self::Actions { a } = builder.actions;
-        let _ = builder
-            .add_reaction("reaction_t", Self::reaction_t)
-            .with_trigger_action(t)
-            .with_scheduable_action(a.into())
-            .finish()?;
-
-        let _ = builder
-            .add_reaction("reaction_a", Self::reaction_a)
-            .with_trigger_action(a.into())
-            .finish()?;
-
-        builder.finish()
-    }
-
-    fn build_parts(
-        &self,
-        env: &mut builder::EnvBuilder<S>,
-        reactor_key: ReactorKey,
-    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError> {
-        Ok((EmptyPart, EmptyPart, HelloActions::build(env, reactor_key)?))
-    }
+#[derive(Reactor)]
+struct InsideBuilder {
+    #[reactor(child(
+        state = "Hello::new(Duration::from_secs(1), \"Composite default message.\")"
+    ))]
+    _third_instance: HelloBuilder,
 }
 
 struct Inside {
@@ -148,76 +124,18 @@ impl Inside {
         }
     }
 }
-impl<S: SchedulerPoint> Reactor<S> for Inside {
-    type Inputs = EmptyPart;
-    type Outputs = EmptyPart;
-    type Actions = EmptyPart;
 
-    fn build(
-        self,
-        name: &str,
-        env: &mut builder::EnvBuilder<S>,
-        parent: Option<runtime::ReactorKey>,
-    ) -> Result<(runtime::ReactorKey, Self::Inputs, Self::Outputs), builder::BuilderError> {
-        let hello = Hello::new(Duration::from_secs(1), &self.message);
-        let (key, inputs, outputs) = env.add_reactor(name, parent, self).finish()?;
-        let (_, _, _) = hello.build("first_instance", env, Some(key))?;
-        Ok((key, inputs, outputs))
-    }
-
-    fn build_parts(
-        &self,
-        _env: &mut builder::EnvBuilder<S>,
-        _reactor_key: ReactorKey,
-    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError> {
-        Ok((EmptyPart, EmptyPart, EmptyPart))
-    }
+#[derive(Reactor)]
+struct MainBuilder {
+    #[reactor(child(state = "Hello::new(Duration::from_secs(4), \"Hello from first.\")"))]
+    first_instance: HelloBuilder,
+    #[reactor(child(state = "Hello::new(Duration::from_secs(2), \"Hello from second.\")"))]
+    second_instance: HelloBuilder,
+    #[reactor(child(state = "Inside::new(\"Hello from composite.\")"))]
+    third_instance: InsideBuilder,
 }
 
-struct Main;
-impl<S: SchedulerPoint> Reactor<S> for Main {
-    type Inputs = EmptyPart;
-    type Outputs = EmptyPart;
-    type Actions = EmptyPart;
-
-    fn build(
-        self,
-        name: &str,
-        env: &mut boomerang::builder::EnvBuilder<S>,
-        parent: Option<ReactorKey>,
-    ) -> Result<(ReactorKey, Self::Inputs, Self::Outputs), BuilderError> {
-        let (key, inputs, outputs) = env.add_reactor(name, parent, self).finish()?;
-
-        let (_, _, _) = Hello::new(Duration::from_secs(4), "Hello from first_instance.").build(
-            "first_instance",
-            env,
-            Some(key),
-        )?;
-
-        let (_, _, _) = Hello::new(Duration::from_secs(1), "Hello from second_instance.").build(
-            "second_instance",
-            env,
-            Some(key),
-        )?;
-
-        let (_, _, _) = Inside::new("Hello from composite_instance.").build(
-            "composite_instance",
-            env,
-            Some(key),
-        )?;
-
-        Ok((key, inputs, outputs))
-    }
-
-    fn build_parts(
-        &self,
-        _env: &mut builder::EnvBuilder<S>,
-        _reactor_key: ReactorKey,
-    ) -> Result<(Self::Inputs, Self::Outputs, Self::Actions), BuilderError> {
-        Ok((EmptyPart, EmptyPart, EmptyPart))
-    }
-}
-
+#[cfg(feature = "disabled")]
 #[test]
 fn hello() {
     // install global collector configured based on RUST_LOG env var.
@@ -226,20 +144,12 @@ fn hello() {
 
     use boomerang::builder::*;
     let mut env_builder = EnvBuilder::new();
-    let (_, _, _) = Main {}.build("main", &mut env_builder, None).unwrap();
+    let _ = MainBuilder::build("main", (), None, &mut env_builder).unwrap();
 
-    let gv = graphviz::build(&env_builder).unwrap();
-    let mut f = std::fs::File::create(format!("{}.dot", module_path!())).unwrap();
-    std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
+    let (env, dep_info) = env_builder.try_into().unwrap();
 
-    let gv = graphviz::build_reaction_graph(&env_builder).unwrap();
-    let mut f = std::fs::File::create(format!("{}_levels.dot", module_path!())).unwrap();
-    std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
+    runtime::check_consistency(&env, &dep_info);
 
-    let env: runtime::Env<_> = env_builder.try_into().unwrap();
-    let mut sched = runtime::Scheduler::with_config(
-        env,
-        Config::new(RunMode::RunFor(Duration::from_secs(10)), true),
-    );
-    sched.start().unwrap();
+    let sched = runtime::Scheduler::new(env, dep_info, false);
+    sched.event_loop();
 }

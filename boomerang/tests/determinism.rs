@@ -1,96 +1,104 @@
-use boomerang::{runtime, Reactor};
-use std::convert::TryInto;
+//#![feature(adt_const_params)]
+
+use boomerang::{
+    builder::{BuilderActionKey, BuilderPortKey},
+    runtime, Reactor,
+};
 
 #[derive(Reactor)]
-#[reactor(
-    output(name = "y", type = "i32"),
-    timer(name = "t"),
-    reaction(function = "Source::reaction_t", triggers(timer="t"), effects("y"))
-)]
-struct Source {}
+struct SourceBuilder {
+    #[reactor(output())]
+    y: BuilderPortKey<i32>,
+    #[reactor(timer())]
+    t: BuilderActionKey,
+    #[reactor(reaction(function = "Source::reaction_t",))]
+    reaction_t: runtime::ReactionKey,
+}
+
+struct Source;
 impl Source {
-    fn reaction_t<S: runtime::SchedulerPoint>(
+    #[boomerang::reaction(reactor = "SourceBuilder", triggers(timer = "t"))]
+    fn reaction_t(
         &mut self,
-        sched: &S,
-        _inputs: &SourceInputs,
-        outputs: &SourceOutputs,
-        _actions: &SourceActions,
+        _ctx: &runtime::Context,
+        #[reactor::port(effects)] y: &mut runtime::Port<i32>,
     ) {
-        sched.get_port_with_mut(outputs.y, |y, _is_set| {
-            *y = 1;
-            true
-        });
+        *y.get_mut() = Some(1);
     }
 }
 
 #[derive(Reactor)]
-#[reactor(
-    input(name = "x", type = "i32"),
-    input(name = "y", type = "i32"),
-    reaction(function = "Destination::reaction_x_y", triggers("x", "y"))
-)]
-struct Destination {}
+struct DestinationBuilder {
+    #[reactor(input())]
+    x: BuilderPortKey<i32>,
+    #[reactor(input())]
+    y: BuilderPortKey<i32>,
+    #[reactor(reaction(function = "Destination::reaction_x_y"))]
+    reaction_x_y: runtime::ReactionKey,
+}
+
+struct Destination;
 impl Destination {
-    fn reaction_x_y<S: runtime::SchedulerPoint>(
+    #[boomerang::reaction(reactor = "DestinationBuilder")]
+    fn reaction_x_y(
         &mut self,
-        sched: &S,
-        inputs: &DestinationInputs,
-        _outputs: &DestinationOutputs,
-        _actions: &DestinationActions,
+        _ctx: &runtime::Context,
+        #[reactor::port(triggers)] x: &runtime::Port<i32>,
+        #[reactor::port(triggers)] y: &runtime::Port<i32>,
     ) {
         let mut sum = 0;
-        sched.get_port_with(inputs.x, |x: &i32, is_set| {
-            if is_set {
-                sum += *x;
-            }
-        });
-        sched.get_port_with(inputs.y, |y: &i32, is_set| {
-            if is_set {
-                sum += *y;
-            }
-        });
+        if let Some(x) = *x.get() {
+            sum += x;
+        }
+        if let Some(y) = *y.get() {
+            sum += y;
+        }
         println!("Received {}", sum);
-        assert!(sum == 2, "FAILURE: Expected 2.");
+        assert_eq!(sum, 2, "FAILURE: Expected 2.");
     }
 }
 
 #[derive(Reactor)]
-#[reactor(
-    input(name = "x", type = "i32"),
-    output(name = "y", type = "i32"),
-    reaction(function = "Pass::reaction_x", triggers("x"), effects("y"))
-)]
-struct Pass {}
+struct PassBuilder {
+    #[reactor(input())]
+    x: BuilderPortKey<i32>,
+    #[reactor(output())]
+    y: BuilderPortKey<i32>,
+    #[reactor(reaction(function = "Pass::reaction_x"))]
+    reaction_x: runtime::ReactionKey,
+}
+
+struct Pass;
 impl Pass {
-    fn reaction_x<S: runtime::SchedulerPoint>(
+    #[boomerang::reaction(reactor = "PassBuilder")]
+    fn reaction_x(
         &mut self,
-        sched: &S,
-        inputs: &PassInputs,
-        outputs: &PassOutputs,
-        _actions: &PassActions,
+        _ctx: &runtime::Context,
+        #[reactor::port(triggers)] x: &runtime::Port<i32>,
+        #[reactor::port(effects)] y: &mut runtime::Port<i32>,
     ) {
-        sched.get_port_with(inputs.x, |x: &i32, _is_set| {
-            sched.get_port_with_mut(outputs.y, |y, _is_set| {
-                *y = *x;
-                true
-            });
-        });
+        *y.get_mut() = *x.get();
     }
 }
 
 #[derive(Reactor)]
 #[reactor(
-    child(name = "s", reactor = "Source{}"),
-    child(name = "d", reactor = "Destination{}"),
-    child(name = "p1", reactor = "Pass{}"),
-    child(name = "p2", reactor = "Pass{}"),
     connection(from = "s.y", to = "d.y"),
     connection(from = "s.y", to = "p1.x"),
     connection(from = "p1.y", to = "p2.x"),
-    connection(from = "p2.y", to = "d.x"),
+    connection(from = "p2.y", to = "d.x")
 )]
-struct Determinism {}
-impl Determinism {}
+#[allow(dead_code)]
+struct DeterminismBuilder {
+    #[reactor(child(state = "Source"))]
+    s: SourceBuilder,
+    #[reactor(child(state = "Destination"))]
+    d: DestinationBuilder,
+    #[reactor(child(state = "Pass"))]
+    p1: PassBuilder,
+    #[reactor(child(state = "Pass"))]
+    p2: PassBuilder,
+}
 
 #[test]
 fn test() {
@@ -100,19 +108,23 @@ fn test() {
     use boomerang::{builder::*, runtime};
     let mut env_builder = EnvBuilder::new();
 
-    let (_, _, _) = Determinism {}
-        .build("gain", &mut env_builder, None)
-        .unwrap();
+    let _ = DeterminismBuilder::build("determinism", (), None, &mut env_builder).unwrap();
 
-    //let gv = graphviz::build(&env_builder).unwrap();
-    //let mut f = std::fs::File::create(format!("{}.dot", module_path!())).unwrap();
-    //std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
+    // let gv = graphviz::build(&env_builder).unwrap();
+    // let mut f = std::fs::File::create(format!("{}.dot", module_path!())).unwrap();
+    // std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
 
-    //let gv = graphviz::build_reaction_graph(&env_builder).unwrap();
-    //let mut f = std::fs::File::create(format!("{}_levels.dot", module_path!())).unwrap();
-    //std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
+    // let gv = graphviz::build_reaction_graph(&env_builder).unwrap();
+    // let mut f = std::fs::File::create(format!("{}_levels.dot", module_path!())).unwrap();
+    // std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
 
-    let env: runtime::Env<_> = env_builder.try_into().unwrap();
-    let mut sched = runtime::Scheduler::new(env);
-    sched.start().unwrap();
+    // env_builder.debug_info();
+
+    let (env, dep_info) = env_builder.try_into().unwrap();
+
+    runtime::check_consistency(&env, &dep_info);
+    runtime::debug_info(&env, &dep_info);
+
+    let sched = runtime::Scheduler::new(env, dep_info, true);
+    sched.event_loop();
 }

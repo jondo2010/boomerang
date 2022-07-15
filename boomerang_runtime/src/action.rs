@@ -1,155 +1,229 @@
-use crate::SchedulerPoint;
-
-use super::Duration;
-use super::{time::Tag, PortData, ReactorElement};
-use derive_more::Display;
 use std::{
+    collections::{hash_map::Entry, HashMap},
     fmt::{Debug, Display},
-    sync::RwLock,
+    hash::Hash,
 };
+
+use crate::{Duration, InnerType, PortData, Tag};
+use downcast_rs::{impl_downcast, DowncastSync};
 
 slotmap::new_key_type! {
     pub struct ActionKey;
 }
 
-pub trait BaseAction<S: SchedulerPoint>: Debug + Display + Send + Sync + ReactorElement<S> {
-    fn get_name(&self) -> &str;
-    /// Is this a logical action?
-    fn get_is_logical(&self) -> bool;
-    fn get_min_delay(&self) -> Duration;
+pub struct ActionMut<'a, T: PortData = ()> {
+    pub(crate) key: ActionKey,
+    pub(crate) min_delay: &'a Duration,
+    pub(crate) values: &'a mut ActionValues<T>,
+}
+#[allow(dead_code)]
+
+pub struct Action<'a, T: PortData = ()> {
+    pub(crate) key: ActionKey,
+    pub(crate) min_delay: &'a Duration,
+    pub(crate) values: &'a ActionValues<T>,
+}
+
+impl<'a, T: PortData> InnerType for ActionMut<'a, T> {
+    type Inner = T;
+}
+
+impl<'a, T: PortData> InnerType for Action<'a, T> {
+    type Inner = T;
+}
+
+impl<'a, T: PortData> From<&'a mut InternalAction> for ActionMut<'a, T> {
+    fn from(action: &'a mut InternalAction) -> Self {
+        action
+            .as_valued_mut()
+            .expect("Expected ValuedAction")
+            .into()
+    }
+}
+
+impl<'a, T: PortData> From<&'a InternalAction> for Action<'a, T> {
+    fn from(action: &'a InternalAction) -> Self {
+        action.as_valued().expect("Expected ValuedAction").into()
+    }
+}
+
+impl<'a, T: PortData> From<&'a mut ValuedAction> for ActionMut<'a, T> {
+    fn from(valued_action: &'a mut ValuedAction) -> Self {
+        let values = valued_action
+            .values
+            .downcast_mut::<ActionValues<T>>()
+            .expect("Type mismatch on ActionValues!");
+        Self {
+            key: valued_action.key,
+            min_delay: &valued_action.min_delay,
+            values: values,
+        }
+    }
+}
+
+impl<'a, T: PortData> From<&'a ValuedAction> for Action<'a, T> {
+    fn from(valued_action: &'a ValuedAction) -> Self {
+        let values = valued_action
+            .values
+            .downcast_ref::<ActionValues<T>>()
+            .expect("Type mismatch on ActionValues!");
+        Self {
+            key: valued_action.key,
+            min_delay: &valued_action.min_delay,
+            values: values,
+        }
+    }
+}
+
+pub trait BaseActionValues: Debug + Send + Sync + DowncastSync {
+    /// Remove any value at the given Tag
+    fn remove(&mut self, tag: Tag);
+}
+impl_downcast!(sync BaseActionValues);
+
+#[derive(Debug)]
+pub(crate) struct ActionValues<T: PortData>(HashMap<Tag, T>);
+impl<T: PortData> BaseActionValues for ActionValues<T> {
+    fn remove(&mut self, tag: Tag) {
+        self.0.remove(&tag);
+    }
+}
+impl<T: PortData> ActionValues<T> {
+    pub fn get_value(&self, tag: Tag) -> Option<&T> {
+        self.0.get(&tag)
+    }
+
+    pub fn set_value(&mut self, value: Option<T>, new_tag: Tag) {
+        match (self.0.entry(new_tag), value) {
+            // Replace the previous value with a new one
+            (Entry::Occupied(mut entry), Some(value)) => {
+                entry.insert(value);
+            }
+            // Remove a previous value
+            (Entry::Occupied(entry), None) => {
+                entry.remove();
+            }
+            // Insert a new value
+            (Entry::Vacant(entry), Some(value)) => {
+                entry.insert(value);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Typed Action state, storing potentially different values at different Tags.
+#[derive(Debug)]
+pub struct ValuedAction {
+    pub name: String,
+    pub key: ActionKey,
+    pub logical: bool,
+    pub min_delay: Duration,
+    pub values: Box<dyn BaseActionValues>,
+}
+
+impl ValuedAction {
+    pub fn new<T: PortData>(
+        name: &str,
+        key: ActionKey,
+        logical: bool,
+        min_delay: Duration,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            key,
+            logical,
+            min_delay,
+            values: Box::new(ActionValues::<T>(HashMap::new())),
+        }
+    }
 }
 
 #[derive(Debug)]
-pub struct Action<T: PortData> {
-    name: String,
-    logical: bool,
-    value: RwLock<(T, bool)>,
-    min_delay: Duration,
+pub enum InternalAction {
+    Timer {
+        name: String,
+        key: ActionKey,
+        offset: Duration,
+        period: Duration,
+    },
+    /// ShutdownAction is a logical action that fires when the scheduler shuts down.
+    Shutdown {
+        name: String,
+        key: ActionKey,
+    },
+    Valued(ValuedAction),
 }
 
-impl<T: PortData> Display for Action<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!(
-            "Action<{}> \"{}\"",
-            std::any::type_name::<T>(),
-            self.name,
-        ))
-    }
-}
-
-impl<T: PortData> Action<T> {
-    pub fn new(name: &str, logical: bool, min_delay: Duration) -> Self {
-        Self {
-            name: name.to_owned(),
-            logical,
-            value: RwLock::new((T::default(), false)),
-            min_delay,
+impl InternalAction {
+    pub fn get_name(&self) -> &str {
+        match self {
+            InternalAction::Timer { name, .. } => name.as_ref(),
+            InternalAction::Shutdown { name, .. } => name.as_ref(),
+            InternalAction::Valued(ValuedAction { name, .. }) => name.as_ref(),
         }
     }
-}
-
-impl<S: SchedulerPoint, T: PortData> ReactorElement<S> for Action<T> {
-    fn cleanup(&self, _scheduler: &S, _key: ActionKey) {
-        self.value.write().unwrap().1 = false;
+    pub fn get_key(&self) -> ActionKey {
+        match self {
+            InternalAction::Timer { key, .. } => *key,
+            InternalAction::Shutdown { key, .. } => *key,
+            InternalAction::Valued(ValuedAction { key, .. }) => *key,
+        }
     }
-}
-
-impl<S: SchedulerPoint, T: PortData> BaseAction<S> for Action<T> {
-    fn get_name(&self) -> &str {
-        &self.name
-    }
-    fn get_is_logical(&self) -> bool {
-        self.logical
-    }
-    fn get_min_delay(&self) -> Duration {
-        self.min_delay
-    }
-}
-
-#[derive(Debug, Display)]
-#[display(fmt = "Timer<{}>", name)]
-pub struct Timer {
-    name: String,
-    offset: Duration,
-    period: Duration,
-}
-
-impl Timer {
-    pub fn new(name: &str, offset: Duration, period: Duration) -> Self {
-        Self {
-            name: name.to_owned(),
-            offset,
-            period,
+    pub fn get_is_logical(&self) -> bool {
+        match self {
+            InternalAction::Timer { .. } => true,
+            InternalAction::Shutdown { .. } => true,
+            InternalAction::Valued(ValuedAction { logical, .. }) => *logical,
         }
     }
 
-    pub fn new_zero(name: &str) -> Self {
-        Timer::new(name, Duration::from_secs(0), Duration::from_secs(0))
-    }
-}
-
-impl<S: SchedulerPoint> BaseAction<S> for Timer {
-    fn get_name(&self) -> &str {
-        &self.name
-    }
-    fn get_is_logical(&self) -> bool {
-        true
-    }
-    fn get_min_delay(&self) -> Duration {
-        Duration::from_micros(0)
-    }
-}
-
-impl<S: SchedulerPoint> ReactorElement<S> for Timer {
-    fn startup(&self, sched: &S, key: ActionKey) {
-        let t0 = Tag::from(sched.get_start_time());
-        if self.offset > Duration::from_secs(0) {
-            sched.schedule(t0.delay(Some(self.offset)), key);
+    pub fn as_valued(&self) -> Option<&ValuedAction> {
+        if let Self::Valued(v) = self {
+            Some(v)
         } else {
-            sched.schedule(t0, key);
+            None
         }
     }
 
-    fn cleanup(&self, sched: &S, key: ActionKey) {
-        // schedule the timer again
-        if self.period > Duration::from_secs(0) {
-            sched.schedule_action(key, (), Some(self.period));
-        }
-    }
-}
-
-/// ShutdownAction is a logical action that fires when the scheduler shuts down.
-#[derive(Debug, Display)]
-#[display(fmt = "ShutdownAction<{}>", name)]
-pub struct ShutdownAction {
-    name: String,
-}
-
-impl ShutdownAction {
-    pub fn new(name: &str) -> Self {
-        Self {
-            name: name.to_owned(),
+    pub fn as_valued_mut(&mut self) -> Option<&mut ValuedAction> {
+        if let Self::Valued(v) = self {
+            Some(v)
+        } else {
+            None
         }
     }
 }
 
-impl<S: SchedulerPoint> BaseAction<S> for ShutdownAction {
-    fn get_name(&self) -> &str {
-        &self.name
-    }
-
-    fn get_is_logical(&self) -> bool {
-        true
-    }
-
-    fn get_min_delay(&self) -> Duration {
-        Duration::default()
+impl Display for InternalAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InternalAction::Timer {
+                name,
+                offset,
+                period,
+                ..
+            } => f.write_fmt(format_args!(
+                "Action::Timer<{name}, {offset:#?}, {period:#?}>"
+            )),
+            InternalAction::Shutdown { name, .. } => {
+                f.write_fmt(format_args!("Action::Shutdown<{name}>"))
+            }
+            InternalAction::Valued(ValuedAction { name, .. }) => {
+                f.write_fmt(format_args!("Action::BaseAction<{name}>"))
+            }
+        }
     }
 }
 
-impl<S: SchedulerPoint> ReactorElement<S> for ShutdownAction {
-    fn shutdown(&self, sched: &S, key: ActionKey) {
-        let tag = Tag::from(sched.get_logical_time()).delay(None);
-        sched.schedule(tag, key);
+impl AsRef<InternalAction> for InternalAction {
+    fn as_ref(&self) -> &Self {
+        self
+    }
+}
+
+impl AsMut<InternalAction> for InternalAction {
+    fn as_mut(&mut self) -> &mut InternalAction {
+        self
     }
 }

@@ -1,7 +1,6 @@
 //! Utility newtypes and trait impls for parsing
 
-use darling::FromMeta;
-use derive_more::Display;
+use darling::{FromMeta, ToTokens};
 use proc_macro2::Ident;
 use quote::quote;
 use std::{collections::HashSet, time::Duration};
@@ -84,6 +83,10 @@ pub fn handle_ident(string: syn::LitStr) -> syn::Ident {
     syn::Ident::new(&string.value(), string.span())
 }
 
+pub fn handle_duration(value: String) -> Option<Duration> {
+    Some(parse_duration::parse(&value).unwrap())
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct IdentSet(HashSet<syn::Ident>);
 impl From<IdentSet> for HashSet<syn::Ident> {
@@ -112,8 +115,7 @@ impl FromMeta for IdentSet {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Display)]
-#[display(fmt = "{}.{}", "0.to_string()", "1.to_string()")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NamedField(pub Ident, pub Ident);
 
 impl syn::parse::Parse for NamedField {
@@ -173,9 +175,23 @@ impl<T: FromMeta> FromMeta for MetaList<T> {
     }
 }
 
-/// Generate a TokenSTream from an Option<Duration>
+/// Generate a TokenStream from an Option<Duration>
 pub(crate) fn duration_quote(duration: &Duration) -> proc_macro2::TokenStream {
     let secs = duration.as_secs();
     let nanos = duration.subsec_nanos();
     quote! {::boomerang::runtime::Duration::new(#secs, #nanos)}
+}
+
+pub struct OptionalDuration(pub Option<Duration>);
+
+impl ToTokens for OptionalDuration {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        tokens.extend(match self.0 {
+            Some(duration) => {
+                let duration = duration_quote(&duration);
+                quote! {Some(#duration)}
+            }
+            None => quote! {None},
+        });
+    }
 }

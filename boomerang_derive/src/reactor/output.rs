@@ -2,29 +2,13 @@ use darling::ToTokens;
 use itertools::{Either, Itertools};
 use quote::{format_ident, quote};
 
-use super::ReactorField;
+use super::{ReactorField, ReactorFieldInner};
 use crate::{
     reactor::ReactorReceiver,
-    util::{self, OptionalDuration},
+    util::{self},
 };
 
-pub struct ReactorFieldBuilder<'a, 'b> {
-    pub(super) field: &'b ReactorField<'a>,
-    pub(super) builder_ident: &'b syn::Ident,
-}
-
-impl<'a, 'b> ReactorFieldBuilder<'a, 'b> {
-    pub fn new(
-        field: &'b ReactorField<'a>,
-        builder_ident: &'b syn::Ident,
-    ) -> ReactorFieldBuilder<'a, 'b> {
-        ReactorFieldBuilder {
-            field,
-            builder_ident,
-        }
-    }
-}
-
+#[cfg(feature = "disabled")]
 impl<'a, 'b> ToTokens for ReactorFieldBuilder<'a, 'b> {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
         let Self {
@@ -33,8 +17,8 @@ impl<'a, 'b> ToTokens for ReactorFieldBuilder<'a, 'b> {
         } = self;
         tokens.extend(match field {
             ReactorField::Timer { ident, name, period, offset } => {
-                let period = util::duration_quote(period);
-                let offset = util::duration_quote(offset);
+                let period = util::tokenize_duration(period);
+                let offset = util::tokenize_duration(offset);
                 quote! { let #ident = #builder_ident.add_timer(#name, #period, #offset)?; }
             }
             ReactorField::Input { ident, name, ty } => {
@@ -63,6 +47,49 @@ impl<'a, 'b> ToTokens for ReactorFieldBuilder<'a, 'b> {
     }
 }
 
+fn build_field_args(field: &ReactorField) -> proc_macro2::TokenStream {
+    match field {
+        ReactorField {
+            inner: ReactorFieldInner::Timer { period, offset },
+            ..
+        } => {
+            let period = util::tokenize_optional(*period, util::tokenize_duration);
+            let offset = util::tokenize_optional(*offset, util::tokenize_duration);
+            quote! { ::boomerang::builder::args::TimerArgs { period: #period, offset: #offset } }
+        }
+        ReactorField {
+            inner:
+                ReactorFieldInner::Action {
+                    physical,
+                    min_delay,
+                    mit,
+                    policy,
+                },
+            ..
+        } => {
+            let min_delay = util::tokenize_optional(*min_delay, util::tokenize_duration);
+            let mit = util::tokenize_optional(*mit, util::tokenize_duration);
+            quote! { ::boomerang::builder::args::ActionArgs { physical: #physical, min_delay: #min_delay, mit: #mit} }
+        }
+        ReactorField {
+            inner: ReactorFieldInner::Child { state },
+            ..
+        } => {
+            quote! { ::boomerang::builder::args::ChildArgs { state: #state } }
+        }
+        ReactorField {
+            inner: ReactorFieldInner::Reaction { path },
+            ..
+        } => {
+            quote! { () }
+        }
+        ReactorField {
+            inner: ReactorFieldInner::Empty,
+            ..
+        } => quote! { () },
+    }
+}
+
 fn build_bindings<'b>(
     receiver: &'b ReactorReceiver,
     builder_ident: &'b syn::Ident,
@@ -78,59 +105,91 @@ impl ToTokens for ReactorReceiver {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
         let builder_ident = format_ident!("__builder");
 
+        let name = &self.ident;
+        let state = &self.state;
+        let (impl_generics, ty_generics, where_clause) = self.generics.split_for_impl();
+
         let fields = self
             .data
             .as_ref()
             .take_struct()
-            .unwrap()
+            .expect("Should never be enum")
             .into_iter()
-            .map(ReactorField::from);
+            .map(|f| ReactorField::from(f.clone()));
 
         let (reaction_fields, rest_fields): (Vec<_>, Vec<_>) =
-            fields.clone().partition_map(|field| match field {
-                ReactorField::Reaction { .. } => Either::Left(field),
-                _ => Either::Right(field),
+            fields.clone().partition_map(|field| {
+                let args = build_field_args(&field);
+                let ident = &field.ident;
+                let ty = &field.ty;
+                let name = &field.name;
+                
+
+                if let ReactorField {
+                    inner: ReactorFieldInner::Reaction { .. },
+                    ..
+                } = field
+                {
+                    Either::Left(
+                        quote! { reactor.#ident = <#ty as ::boomerang::builder::ReactorPart> ::build_part(&mut #builder_ident, #name, #args)?; }
+                    )
+                } else {
+                    Either::Right(
+                        quote! { let #ident = <#ty as ::boomerang::builder::ReactorPart> ::build_part(&mut #builder_ident, #name, #args)?; }
+                    )
+                }
             });
 
-        let reaction_builders = reaction_fields
-            .iter()
-            .map(|field| ReactorFieldBuilder::new(field, &builder_ident).to_token_stream());
-
-        let field_builders = rest_fields
-            .iter()
-            .map(|field| ReactorFieldBuilder::new(field, &builder_ident).to_token_stream());
-
         let field_values = fields.map(|field| match field {
-            ReactorField::Reaction { ident, .. } => quote!(#ident: Default::default()),
+            ReactorField {
+                ident,
+                inner: ReactorFieldInner::Reaction { .. },
+                ..
+            } => quote!(#ident: Default::default()),
             _ => {
-                let ident = field.get_ident();
+                let ident = &field.ident;
                 quote!(#ident)
             }
         });
 
-        let bindings = build_bindings(self, &builder_ident);
-        let ident = &self.ident;
-
         tokens.extend(quote! {
-            #[automatically_derived]
-            impl ::boomerang::builder::Reactor for #ident
-            {
-                fn build<'__builder, S: ::boomerang::runtime::ReactorState>(
+            impl #impl_generics ::boomerang::builder::Reactor for #name #ty_generics #where_clause {
+                type State = #state;
+                fn build<'__builder>(
                     name: &str,
-                    state: S,
+                    state: Self::State,
                     parent: Option<::boomerang::runtime::ReactorKey>,
                     env: &'__builder mut ::boomerang::builder::EnvBuilder,
                 ) -> Result<Self, ::boomerang::builder::BuilderError> {
                     let mut #builder_ident = env.add_reactor(name, parent, state);
-                    #(#field_builders)*
-                    #(#bindings)*
+                    #(#rest_fields)*
                     let mut reactor = Self {
                         #(#field_values),*
                     };
-                    #(#reaction_builders)*
+                    #(#reaction_fields)*
                     Ok(reactor)
                 }
             }
         });
+
+        // let bindings = build_bindings(self, &builder_ident);
+        // let ident = &self.ident;
+        //
+        // tokens.extend(quote! {
+        // #[automatically_derived]
+        // impl ::boomerang::builder::Reactor for #ident
+        // {
+        // fn build<'__builder, S: ::boomerang::runtime::ReactorState>(
+        // name: &str,
+        // state: S,
+        // parent: Option<::boomerang::runtime::ReactorKey>,
+        // env: &'__builder mut ::boomerang::builder::EnvBuilder,
+        // ) -> Result<Self, ::boomerang::builder::BuilderError> {
+        // let mut #builder_ident = env.add_reactor(name, parent, state);
+        // #(#bindings)*
+        // #(#reaction_builders)*
+        // }
+        // }
+        // });
     }
 }

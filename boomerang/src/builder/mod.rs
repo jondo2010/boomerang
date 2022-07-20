@@ -1,4 +1,5 @@
 mod action;
+pub mod args;
 mod env;
 #[cfg(feature = "visualization")]
 pub mod graphviz;
@@ -15,6 +16,40 @@ pub use macros::*;
 pub use port::*;
 pub use reaction::*;
 pub use reactor::*;
+
+use self::args::ChildArgs;
+
+/// Main Reactor-builder trait
+pub trait Reactor: Sized {
+    type State: runtime::ReactorState;
+    fn build(
+        name: &str,
+        state: Self::State,
+        parent: Option<runtime::ReactorKey>,
+        env: &mut EnvBuilder,
+    ) -> Result<Self, BuilderError>;
+}
+
+/// Reactor part builder trait
+pub trait ReactorPart: Sized {
+    type Args;
+    fn build_part<S: runtime::ReactorState>(
+        builder: &mut ReactorBuilderState<S>,
+        name: &str,
+        args: Self::Args,
+    ) -> Result<Self, BuilderError>;
+}
+
+impl<R: Reactor> ReactorPart for R {
+    type Args = ChildArgs<R::State>;
+    fn build_part<S: runtime::ReactorState>(
+        builder: &mut ReactorBuilderState<S>,
+        name: &str,
+        args: Self::Args,
+    ) -> Result<Self, BuilderError> {
+        builder.add_child_reactor(name, args.state)
+    }
+}
 
 #[derive(thiserror::Error, Debug)]
 pub enum BuilderError {
@@ -119,7 +154,7 @@ mod tests {
     pub(crate) struct TestReactor2;
     #[derive(Clone)]
     pub(crate) struct TestReactorPorts {
-        p0: BuilderPortKey,
+        p0: BuilderInputPort,
     }
     impl ReactorPart for TestReactorPorts {
         fn build(

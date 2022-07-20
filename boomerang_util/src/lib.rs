@@ -1,6 +1,7 @@
 use boomerang::{reaction, runtime, Reactor};
 
 #[derive(Reactor)]
+#[reactor(state = "Timeout")]
 pub struct TimeoutBuilder {
     #[reactor(reaction(function = "Timeout::reaction_startup"))]
     startup: runtime::ReactionKey,

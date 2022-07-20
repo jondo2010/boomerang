@@ -4,9 +4,9 @@ use boomerang_util::{Timeout, TimeoutBuilder};
 #[derive(Reactor)]
 struct CountBuilder {
     #[reactor(timer(period = "1 sec"))]
-    t: BuilderActionKey,
+    t: ActionPart,
     #[reactor(output())]
-    c: BuilderPortKey<u32>,
+    c: BuilderInputPort<u32>,
     #[reactor(child(state = "Timeout::new(runtime::Duration::from_secs(3))"))]
     _timeout: TimeoutBuilder,
     #[reactor(reaction(function = "Count::reaction_t",))]

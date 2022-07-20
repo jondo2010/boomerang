@@ -1,6 +1,28 @@
-use super::{BuilderActionKey, BuilderError, BuilderPortKey, EnvBuilder, FindElements, PortType};
+use super::{ActionPart, BuilderError, EnvBuilder, FindElements, PortType, ReactorPart, args::ReactionArgs};
 use crate::runtime;
 use slotmap::SecondaryMap;
+
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BuilderReaction(runtime::ReactionKey);
+
+impl From<BuilderReaction> for runtime::ReactionKey {
+    fn from(builder: BuilderReaction) -> Self {
+        builder.0
+    }
+}
+
+impl ReactorPart for BuilderReaction {
+    type Args = ReactionArgs;
+
+    fn build_part<S: runtime::ReactorState>(
+        builder: &mut super::ReactorBuilderState<S>,
+        name: &str,
+        args: Self::Args,
+    ) -> Result<Self, BuilderError> {
+        //#path(stringify!(#ident), &reactor, &mut #builder_ident).and_then(|b| b.finish())?;
+    }
+}
 
 #[derive(Derivative)]
 #[derivative(Debug)]
@@ -71,9 +93,9 @@ impl<'a> ReactionBuilderState<'a> {
     }
 
     /// Indicate that this Reaction can be triggered by the given Action
-    pub fn with_trigger_action<T: runtime::PortData>(
+    pub fn with_trigger_action<T: Into<runtime::ActionKey>>(
         mut self,
-        trigger_key: BuilderActionKey<T>,
+        trigger_key: T,
         order: usize,
     ) -> Self {
         self.builder
@@ -83,9 +105,9 @@ impl<'a> ReactionBuilderState<'a> {
     }
 
     /// Indicate that this Reaction can be triggered by the given Port
-    pub fn with_trigger_port<T: runtime::PortData>(
+    pub fn with_trigger_port<P: Into<runtime::PortKey>>(
         mut self,
-        port_key: BuilderPortKey<T>,
+        port_key: P,
         order: usize,
     ) -> Self {
         self.builder.input_ports.insert(port_key.into(), order);
@@ -95,7 +117,7 @@ impl<'a> ReactionBuilderState<'a> {
     /// Indicate that this Reaction may schedule the given Action
     pub fn with_scheduable_action<T: runtime::PortData>(
         mut self,
-        action_key: BuilderActionKey<T>,
+        action_key: ActionPart<T>,
         order: usize,
     ) -> Self {
         self.builder
@@ -112,9 +134,9 @@ impl<'a> ReactionBuilderState<'a> {
     //}
 
     /// Indicate that this Reaction may set the value of the given Port (uses keyword).
-    pub fn with_antidependency<T: runtime::PortData>(
+    pub fn with_antidependency<P: Into<runtime::PortKey>>(
         mut self,
-        antidep_key: BuilderPortKey<T>,
+        antidep_key: P,
         order: usize,
     ) -> Self {
         self.builder.output_ports.insert(antidep_key.into(), order);

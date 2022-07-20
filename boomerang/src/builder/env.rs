@@ -1,7 +1,7 @@
 use super::{
     action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder, ActionBuilderFn,
-    ActionType, BuilderActionKey, BuilderError, BuilderPortKey, PortBuilder, PortType,
-    ReactorBuilder, ReactorBuilderState,
+    ActionPart, ActionType, BuilderError, BuilderInputPort, PortBuilder, PortType, ReactorBuilder,
+    ReactorBuilderState, TimerPart,
 };
 use crate::runtime;
 use itertools::{Either, Itertools};
@@ -60,7 +60,7 @@ impl EnvBuilder {
         name: &str,
         port_type: PortType,
         reactor_key: runtime::ReactorKey,
-    ) -> Result<BuilderPortKey<T>, BuilderError> {
+    ) -> Result<runtime::PortKey, BuilderError> {
         // Ensure no duplicates
         if self
             .port_builders
@@ -81,7 +81,7 @@ impl EnvBuilder {
             Box::new(PortBuilder::<T>::new(name, reactor_key, port_type))
         });
 
-        Ok(BuilderPortKey::new(key))
+        Ok(key)
     }
 
     pub fn add_timer(
@@ -90,7 +90,7 @@ impl EnvBuilder {
         period: runtime::Duration,
         offset: runtime::Duration,
         reactor_key: runtime::ReactorKey,
-    ) -> Result<BuilderActionKey, BuilderError> {
+    ) -> Result<TimerPart, BuilderError> {
         self.add_action::<(), _>(
             name,
             ActionType::Timer { period, offset },
@@ -102,13 +102,14 @@ impl EnvBuilder {
                 period: period,
             },
         )
+        .map(|key| TimerPart(key))
     }
 
     pub fn add_shutdown_action(
         &mut self,
         name: &str,
         reactor_key: runtime::ReactorKey,
-    ) -> Result<BuilderActionKey, BuilderError> {
+    ) -> Result<ActionPart, BuilderError> {
         self.add_action::<(), _>(
             name,
             ActionType::Shutdown,
@@ -117,7 +118,7 @@ impl EnvBuilder {
                 name: name.into(),
                 key: action_key,
             },
-        )
+        ).map(|key| ActionPart::new(key))
     }
 
     pub fn add_logical_action<T: runtime::PortData>(
@@ -125,7 +126,7 @@ impl EnvBuilder {
         name: &str,
         min_delay: Option<runtime::Duration>,
         reactor_key: runtime::ReactorKey,
-    ) -> Result<BuilderActionKey<T>, BuilderError> {
+    ) -> Result<ActionPart<T>, BuilderError> {
         self.add_action::<T, _>(
             name,
             ActionType::Logical { min_delay },
@@ -139,6 +140,7 @@ impl EnvBuilder {
                 ))
             },
         )
+        .map(|key| ActionPart::new(key))
     }
 
     /// Add an Action to a given Reactor using closure F
@@ -148,7 +150,7 @@ impl EnvBuilder {
         ty: ActionType,
         reactor_key: runtime::ReactorKey,
         action_fn: F,
-    ) -> Result<BuilderActionKey<T>, BuilderError>
+    ) -> Result<runtime::ActionKey, BuilderError>
     where
         T: runtime::PortData,
         F: ActionBuilderFn + 'static,
@@ -175,7 +177,7 @@ impl EnvBuilder {
             ActionBuilder::new(name, ty, action_key, reactor_key, Box::new(action_fn))
         });
 
-        Ok(BuilderActionKey::new(key))
+        Ok(key)
     }
 
     /// Find a Port matching a given name and ReactorKey
@@ -214,8 +216,8 @@ impl EnvBuilder {
     /// The nominal case is to bind Input A to Output B
     pub fn bind_port<T: runtime::PortData>(
         &mut self,
-        port_a_key: BuilderPortKey<T>,
-        port_b_key: BuilderPortKey<T>,
+        port_a_key: BuilderInputPort<T>,
+        port_b_key: BuilderInputPort<T>,
     ) -> Result<(), BuilderError> {
         let port_a_key = port_a_key.into();
         let port_b_key = port_b_key.into();

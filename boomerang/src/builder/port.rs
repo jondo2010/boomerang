@@ -2,23 +2,54 @@ use crate::runtime;
 use slotmap::{secondary, Key, SecondaryMap};
 use std::{fmt::Debug, marker::PhantomData};
 
+use super::{BuilderError, ReactorBuilderState, ReactorPart};
+
 #[derive(Clone, Copy, Debug)]
-pub struct BuilderPortKey<T: runtime::PortData>(runtime::PortKey, PhantomData<T>);
+pub struct BuilderInputPort<T: runtime::PortData>(runtime::PortKey, PhantomData<T>);
 
-impl<T: runtime::PortData> runtime::InnerType for BuilderPortKey<T> {
+impl<T: runtime::PortData> From<BuilderInputPort<T>> for runtime::PortKey {
+    fn from(builder_port: BuilderInputPort<T>) -> Self {
+        builder_port.0
+    }
+}
+
+impl<T: runtime::PortData> ReactorPart for BuilderInputPort<T> {
+    type Args = ();
+    fn build_part<S: runtime::ReactorState>(
+        builder: &mut ReactorBuilderState<S>,
+        name: &str,
+        _args: Self::Args,
+    ) -> Result<Self, BuilderError> {
+        builder
+            .add_port::<T>(name, PortType::Input)
+            .map(|port_key| Self(port_key, PhantomData))
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct BuilderOutputPort<T: runtime::PortData>(runtime::PortKey, PhantomData<T>);
+
+impl<T: runtime::PortData> From<BuilderOutputPort<T>> for runtime::PortKey {
+    fn from(builder_port: BuilderOutputPort<T>) -> Self {
+        builder_port.0
+    }
+}
+
+impl<T: runtime::PortData> ReactorPart for BuilderOutputPort<T> {
+    type Args = ();
+    fn build_part<S: runtime::ReactorState>(
+        builder: &mut ReactorBuilderState<S>,
+        name: &str,
+        _args: Self::Args,
+    ) -> Result<Self, BuilderError> {
+        builder
+            .add_port::<T>(name, PortType::Output)
+            .map(|port_key| Self(port_key, PhantomData))
+    }
+}
+
+impl<T: runtime::PortData> runtime::InnerType for BuilderInputPort<T> {
     type Inner = T;
-}
-
-impl<T: runtime::PortData> BuilderPortKey<T> {
-    pub fn new(port_key: runtime::PortKey) -> Self {
-        Self(port_key, PhantomData)
-    }
-}
-
-impl<T: runtime::PortData> From<BuilderPortKey<T>> for runtime::PortKey {
-    fn from(builder_port_key: BuilderPortKey<T>) -> Self {
-        builder_port_key.0
-    }
 }
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Copy, Clone)]
@@ -58,7 +89,7 @@ pub struct PortBuilder<T: runtime::PortData> {
     /// Out-going Reactions that this port triggers
     triggers: SecondaryMap<runtime::ReactionKey, ()>,
 
-    inward_binding: Option<BuilderPortKey<T>>,
+    inward_binding: Option<BuilderInputPort<T>>,
     outward_bindings: SecondaryMap<runtime::PortKey, ()>,
     //_phantom: PhantomData<T>,
 }
@@ -104,7 +135,8 @@ impl<T: runtime::PortData> BasePortBuilder for PortBuilder<T> {
         self.triggers.keys().collect()
     }
     fn set_inward_binding(&mut self, inward_binding: Option<runtime::PortKey>) {
-        self.inward_binding = inward_binding.map(|port_key| BuilderPortKey(port_key, PhantomData));
+        self.inward_binding =
+            inward_binding.map(|port_key| BuilderInputPort(port_key, PhantomData));
     }
     fn get_outward_bindings(&self) -> secondary::Keys<runtime::PortKey, ()> {
         self.outward_bindings.keys()

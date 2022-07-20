@@ -4,11 +4,11 @@ mod output;
 #[cfg(test)]
 mod tests;
 
-use crate::util;
+use crate::util::{self};
 use darling::{ast, FromDeriveInput, FromField, FromMeta};
 use quote::format_ident;
 
-#[derive(Debug, FromMeta, PartialEq, Eq)]
+#[derive(Debug, FromMeta, PartialEq, Eq, Clone)]
 pub struct TimerAttr {
     pub rename: Option<syn::Ident>,
     #[darling(default, map = "util::handle_duration")]
@@ -29,7 +29,7 @@ pub enum ActionAttrPolicy {
     Drop,
 }
 
-#[derive(Debug, FromMeta, PartialEq, Eq)]
+#[derive(Debug, FromMeta, PartialEq, Eq, Clone)]
 pub struct ActionAttr {
     pub rename: Option<syn::Ident>,
     #[darling(default)]
@@ -142,7 +142,7 @@ impl FromMeta for EffectAttr {
     }
 }
 
-#[derive(Debug, FromMeta, PartialEq, Eq)]
+#[derive(Debug, FromMeta, PartialEq, Eq, Clone)]
 pub struct ChildAttr {
     /// The instance name of the child
     pub rename: Option<syn::Ident>,
@@ -151,101 +151,77 @@ pub struct ChildAttr {
 }
 
 /// Attribute on a Reaction field in a ReactorBuilder struct
-#[derive(Debug, FromMeta, PartialEq, Eq)]
+#[derive(Debug, FromMeta, PartialEq, Eq, Clone)]
 pub struct ReactionAttr {
     pub function: syn::Path,
 }
 
 /// Attributes on fields in a Reactor
-#[derive(Debug, FromField, PartialEq, Eq)]
+#[derive(Debug, FromField, PartialEq, Eq, Clone)]
 #[darling(attributes(reactor), forward_attrs(doc, cfg, allow))]
 pub struct RawReactorField {
     pub ident: Option<syn::Ident>,
     pub vis: syn::Visibility,
     pub ty: syn::Type,
+
+    pub rename: Option<syn::Ident>,
     pub timer: Option<TimerAttr>,
-    pub input: Option<PortAttr>,
-    pub output: Option<PortAttr>,
     pub action: Option<ActionAttr>,
     pub child: Option<ChildAttr>,
     pub reaction: Option<ReactionAttr>,
 }
 
-pub enum ReactorField<'a> {
+pub enum ReactorFieldInner {
+    /// No element-specific attributes
+    Empty,
     Timer {
-        ident: &'a syn::Ident,
-        name: String,
-        period: Duration,
-        offset: Duration,
-    },
-    Input {
-        ident: &'a syn::Ident,
-        name: String,
-        ty: &'a syn::Type,
-    },
-    Output {
-        ident: &'a syn::Ident,
-        name: String,
-        ty: &'a syn::Type,
+        period: Option<Duration>,
+        offset: Option<Duration>,
     },
     Action {
-        ident: &'a syn::Ident,
-        name: String,
-        ty: &'a syn::Type,
         physical: bool,
-        min_delay: &'a Option<Duration>,
-        mit: Duration,
-        policy: ActionAttrPolicy,
+        min_delay: Option<Duration>,
+        mit: Option<Duration>,
+        policy: Option<ActionAttrPolicy>,
     },
     Child {
-        ident: &'a syn::Ident,
-        name: String,
-        state: &'a syn::Expr,
-        ty: &'a syn::Type,
+        state: syn::Expr,
     },
     Reaction {
-        ident: &'a syn::Ident,
         path: syn::Path,
     },
 }
 
-impl<'a> ReactorField<'a> {
-    pub fn get_ident(&self) -> &syn::Ident {
-        match self {
-            ReactorField::Timer { ident, .. } => ident,
-            ReactorField::Input { ident, .. } => ident,
-            ReactorField::Output { ident, .. } => ident,
-            ReactorField::Action { ident, .. } => ident,
-            ReactorField::Child { ident, .. } => ident,
-            ReactorField::Reaction { ident, .. } => ident,
-        }
-    }
+pub struct ReactorField {
+    ident: syn::Ident,
+    ty: syn::Type,
+    name: String,
+    inner: ReactorFieldInner,
 }
 
-impl<'a> From<&'a RawReactorField> for ReactorField<'a> {
-    fn from(field: &'a RawReactorField) -> Self {
+impl From<RawReactorField> for ReactorField {
+    fn from(field: RawReactorField) -> Self {
         match field {
             RawReactorField {
                 ident: Some(ident),
+                ty,
                 timer:
                     Some(TimerAttr {
                         rename,
                         offset,
                         period,
                     }),
-                input: None,
-                output: None,
                 action: None,
                 child: None,
                 reaction: None,
                 ..
             } => {
                 let name = rename.as_ref().unwrap_or(&ident).to_string();
-                ReactorField::Timer {
+                ReactorField {
                     ident,
+                    ty,
                     name,
-                    period: period.unwrap_or_default(),
-                    offset: offset.unwrap_or_default(),
+                    inner: ReactorFieldInner::Timer { period, offset },
                 }
             }
 
@@ -253,38 +229,25 @@ impl<'a> From<&'a RawReactorField> for ReactorField<'a> {
                 ident: Some(ident),
                 ty,
                 timer: None,
-                input: Some(PortAttr { rename }),
-                output: None,
                 action: None,
                 child: None,
                 reaction: None,
                 ..
             } => {
-                let name = rename.as_ref().unwrap_or(&ident).to_string();
-                ReactorField::Input { ident, name, ty }
+                // let name = rename.as_ref().unwrap_or(&ident).to_string();
+                let name = ident.to_string();
+                ReactorField {
+                    ident,
+                    ty,
+                    name,
+                    inner: ReactorFieldInner::Empty,
+                }
             }
 
             RawReactorField {
                 ident: Some(ident),
                 ty,
                 timer: None,
-                input: None,
-                output: Some(PortAttr { rename }),
-                action: None,
-                child: None,
-                reaction: None,
-                ..
-            } => {
-                let name = rename.as_ref().unwrap_or(&ident).to_string();
-                ReactorField::Output { ident, name, ty }
-            }
-
-            RawReactorField {
-                ident: Some(ident),
-                ty,
-                timer: None,
-                input: None,
-                output: None,
                 action:
                     Some(ActionAttr {
                         rename,
@@ -297,16 +260,17 @@ impl<'a> From<&'a RawReactorField> for ReactorField<'a> {
                 reaction: None,
                 ..
             } => {
-                // let ty = quote! {<#ty as ::boomerang::runtime::AssociatedItem>::Inner};
                 let name = rename.as_ref().unwrap_or(&ident).to_string();
-                ReactorField::Action {
+                ReactorField {
                     ident,
-                    name,
                     ty,
-                    physical: *physical,
-                    min_delay,
-                    mit: mit.unwrap_or_default(),
-                    policy: policy.unwrap_or_default(),
+                    name,
+                    inner: ReactorFieldInner::Action {
+                        physical,
+                        min_delay,
+                        mit,
+                        policy,
+                    },
                 }
             }
 
@@ -314,27 +278,24 @@ impl<'a> From<&'a RawReactorField> for ReactorField<'a> {
                 ident: Some(ident),
                 ty,
                 timer: None,
-                input: None,
-                output: None,
                 action: None,
                 child: Some(ChildAttr { rename, state }),
                 reaction: None,
                 ..
             } => {
                 let name = rename.as_ref().unwrap_or(&ident).to_string();
-                ReactorField::Child {
+                ReactorField {
                     ident,
-                    name,
-                    state,
                     ty,
+                    name,
+                    inner: ReactorFieldInner::Child { state },
                 }
             }
 
             RawReactorField {
                 ident: Some(ident),
+                ty,
                 timer: None,
-                input: None,
-                output: None,
                 action: None,
                 child: None,
                 reaction: Some(ReactionAttr { function }),
@@ -343,7 +304,12 @@ impl<'a> From<&'a RawReactorField> for ReactorField<'a> {
                 let mut path = function.clone();
                 let seg = path.segments.last_mut().unwrap();
                 seg.ident = format_ident!("__build_{}", seg.ident);
-                ReactorField::Reaction { ident, path }
+                ReactorField {
+                    ident,
+                    ty,
+                    name: String::new(),
+                    inner: ReactorFieldInner::Reaction { path },
+                }
             }
 
             _ => {
@@ -368,6 +334,8 @@ pub struct ReactorReceiver {
     pub generics: syn::Generics,
     // pub attrs: Vec<syn::Attribute>,
     pub data: ast::Data<darling::util::Ignored, RawReactorField>,
+    /// Path to the Reactor State type
+    pub state: syn::Path,
     /// Connection definitions
     #[darling(default, multiple, rename = "connection")]
     pub connections: Vec<ConnectionAttr>,

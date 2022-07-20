@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use boomerang::{
-    builder::BuilderActionKey,
+    builder::ActionPart,
     runtime::{self, Duration},
     Reactor,
 };
@@ -47,9 +47,9 @@ use boomerang::{
 #[derive(Reactor)]
 struct HelloBuilder {
     #[reactor(timer(offset = "1 sec", period = "2 sec"))]
-    t: BuilderActionKey,
+    t: ActionPart,
     #[reactor(action())]
-    a: BuilderActionKey,
+    a: ActionPart,
     #[reactor(reaction(function = "Hello::reaction_t",))]
     reaction_t: runtime::ReactionKey,
     #[reactor(reaction(function = "Hello::reaction_a"))]

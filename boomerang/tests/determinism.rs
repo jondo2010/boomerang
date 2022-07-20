@@ -1,16 +1,16 @@
 //#![feature(adt_const_params)]
 
 use boomerang::{
-    builder::{BuilderActionKey, BuilderPortKey},
+    builder::{ActionPart, BuilderInputPort},
     runtime, Reactor,
 };
 
 #[derive(Reactor)]
 struct SourceBuilder {
     #[reactor(output())]
-    y: BuilderPortKey<i32>,
+    y: BuilderInputPort<i32>,
     #[reactor(timer())]
-    t: BuilderActionKey,
+    t: ActionPart,
     #[reactor(reaction(function = "Source::reaction_t",))]
     reaction_t: runtime::ReactionKey,
 }
@@ -30,9 +30,9 @@ impl Source {
 #[derive(Reactor)]
 struct DestinationBuilder {
     #[reactor(input())]
-    x: BuilderPortKey<i32>,
+    x: BuilderInputPort<i32>,
     #[reactor(input())]
-    y: BuilderPortKey<i32>,
+    y: BuilderInputPort<i32>,
     #[reactor(reaction(function = "Destination::reaction_x_y"))]
     reaction_x_y: runtime::ReactionKey,
 }
@@ -61,9 +61,9 @@ impl Destination {
 #[derive(Reactor)]
 struct PassBuilder {
     #[reactor(input())]
-    x: BuilderPortKey<i32>,
+    x: BuilderInputPort<i32>,
     #[reactor(output())]
-    y: BuilderPortKey<i32>,
+    y: BuilderInputPort<i32>,
     #[reactor(reaction(function = "Pass::reaction_x"))]
     reaction_x: runtime::ReactionKey,
 }

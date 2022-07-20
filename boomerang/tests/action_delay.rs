@@ -1,5 +1,5 @@
 use boomerang::{
-    builder::{BuilderActionKey, BuilderPortKey, EnvBuilder, Reactor},
+    builder::{ActionPart, BuilderInputPort, BuilderOutputPort, EnvBuilder, Reactor},
     runtime, Reactor,
 };
 
@@ -7,15 +7,13 @@ use boomerang::{
 
 #[derive(Reactor)]
 struct GeneratedDelayBuilder {
-    #[reactor(input())]
-    y_in: BuilderPortKey<u32>,
-    #[reactor(output())]
-    y_out: BuilderPortKey<u32>,
-    #[reactor(action(physical = "false", min_delay = "100 msec"))]
-    act: BuilderActionKey,
-    #[reactor(reaction(function = "GeneratedDelay::reaction_y_in"))]
+    y_in: BuilderInputPort<u32>,
+    y_out: BuilderOutputPort<u32>,
+    #[action(physical = "false", min_delay = "100 msec")]
+    act: ActionPart,
+    #[reaction(function = "GeneratedDelay::reaction_y_in")]
     reaction_y_in: runtime::ReactionKey,
-    #[reactor(reaction(function = "GeneratedDelay::reaction_act"))]
+    #[reaction(function = "GeneratedDelay::reaction_act")]
     reaction_act: runtime::ReactionKey,
 }
 
@@ -53,9 +51,8 @@ impl GeneratedDelay {
 
 #[derive(Reactor)]
 struct SourceBuilder {
-    #[reactor(output())]
-    out: BuilderPortKey<u32>,
-    #[reactor(reaction(function = "Source::reaction_startup",))]
+    out: BuilderOutputPort<u32>,
+    #[reaction(function = "Source::reaction_startup")]
     reaction_startup: runtime::ReactionKey,
 }
 
@@ -74,7 +71,7 @@ impl Source {
 #[derive(Reactor)]
 struct SinkBuilder {
     #[reactor(input())]
-    inp: BuilderPortKey<u32>,
+    inp: BuilderInputPort<u32>,
     #[reactor(reaction(function = "Sink::reaction_in"))]
     reaction_in: runtime::ReactionKey,
 }

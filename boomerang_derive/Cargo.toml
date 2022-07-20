@@ -18,12 +18,12 @@ codecov = { repository = "jondo2010/boomerang", branch = "master", service = "gi
 
 [dependencies]
 darling = '0.14'
-derive_more = "0.99"
 itertools = "0.10"
 parse_duration = "2.1"
 proc-macro2 = '1.0'
 quote = '1.0'
 syn = { version = '1.0', features = ['visit'] }
+#derive_more = "0.99"
 
 [lib]
 name = 'boomerang_derive'

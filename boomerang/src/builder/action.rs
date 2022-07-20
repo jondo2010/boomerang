@@ -3,22 +3,55 @@ use std::{fmt::Debug, marker::PhantomData};
 use crate::runtime;
 use slotmap::SecondaryMap;
 
-#[derive(Clone, Copy, Debug)]
-pub struct BuilderActionKey<T: runtime::PortData = ()>(runtime::ActionKey, PhantomData<T>);
+use super::{args::{ActionArgs, TimerArgs}, BuilderError, ReactorBuilderState, ReactorPart};
 
-impl<T: runtime::PortData> runtime::InnerType for BuilderActionKey<T> {
+#[derive(Clone, Copy, Debug)]
+pub struct ActionPart<T: runtime::PortData = ()>(runtime::ActionKey, PhantomData<T>);
+
+impl<T: runtime::PortData> From<ActionPart<T>> for runtime::ActionKey {
+    fn from(part: ActionPart<T>) -> Self {
+        part.0
+    }
+}
+
+impl<T: runtime::PortData> ReactorPart for ActionPart<T> {
+    type Args = ActionArgs;
+    fn build_part<S: runtime::ReactorState>(
+        builder: &mut ReactorBuilderState<S>,
+        name: &str,
+        args: Self::Args,
+    ) -> Result<Self, BuilderError> {
+        builder.add_logical_action::<T>(name, args.min_delay)
+    }
+}
+
+impl<T: runtime::PortData> runtime::InnerType for ActionPart<T> {
     type Inner = T;
 }
 
-impl<T: runtime::PortData> BuilderActionKey<T> {
+impl<T: runtime::PortData> ActionPart<T> {
     pub fn new(action_key: runtime::ActionKey) -> Self {
         Self(action_key, PhantomData)
     }
 }
 
-impl<T: runtime::PortData> From<BuilderActionKey<T>> for runtime::ActionKey {
-    fn from(builder_action_key: BuilderActionKey<T>) -> Self {
-        builder_action_key.0
+#[derive(Clone, Copy, Debug)]
+pub struct TimerPart(pub(crate) runtime::ActionKey);
+
+impl From<TimerPart> for runtime::ActionKey {
+    fn from(part: TimerPart) -> Self {
+        part.0
+    }
+}
+
+impl ReactorPart for TimerPart {
+    type Args = TimerArgs;
+    fn build_part<S: runtime::ReactorState>(
+        builder: &mut ReactorBuilderState<S>,
+        name: &str,
+        args: Self::Args,
+    ) -> Result<Self, BuilderError> {
+        builder.add_timer(name, args.period.unwrap_or_default(), args.offset.unwrap_or_default())
     }
 }
 
@@ -99,5 +132,30 @@ impl ActionBuilder {
     /// Build the ActionBuilder into a runtime Action
     pub fn into_action(&self) -> runtime::InternalAction {
         (self.action_builder_fn)(&self.name, self.action_key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::builder::{EnvBuilder, ActionPart, args::{ReactorPartArgs, ActionArgs}, ReactorPart};
+
+    #[test]
+    fn test_build_part() {
+        struct T {
+            a: ActionPart<u32>,
+        }
+
+        let mut env = EnvBuilder::new();
+        let mut builder = env.add_reactor("test", None, ());
+        let args = ActionArgs {
+            physical: false,
+            min_delay: None,
+            mit: None,
+            policy: None,
+        };
+
+        let t = T {
+            a: ReactorPart::build_part(&mut builder, "a", args).unwrap(),
+        };
     }
 }

@@ -35,50 +35,6 @@ impl FromMeta for StringList {
     }
 }
 
-pub struct Type(syn::Type);
-impl FromMeta for Type {
-    fn from_string(value: &str) -> darling::Result<Self> {
-        syn::parse_str::<syn::Type>(value)
-            .map_err(|err| {
-                darling::Error::unsupported_format("Error parsing expression.")
-                    .with_span(&err.span())
-            })
-            .map(Self::from)
-    }
-}
-impl From<Type> for syn::Type {
-    fn from(ty: Type) -> Self {
-        ty.0
-    }
-}
-impl From<syn::Type> for Type {
-    fn from(ty: syn::Type) -> Self {
-        Type(ty)
-    }
-}
-
-pub struct Expr(syn::Expr);
-impl FromMeta for Expr {
-    fn from_string(value: &str) -> darling::Result<Self> {
-        syn::parse_str::<syn::Expr>(value)
-            .map_err(|err| {
-                darling::Error::unsupported_format("Error parsing expression.")
-                    .with_span(&err.span())
-            })
-            .map(Self::from)
-    }
-}
-impl From<Expr> for syn::Expr {
-    fn from(expr: Expr) -> Self {
-        expr.0
-    }
-}
-impl From<syn::Expr> for Expr {
-    fn from(expr: syn::Expr) -> Expr {
-        Expr(expr)
-    }
-}
-
 pub fn handle_ident(string: syn::LitStr) -> syn::Ident {
     syn::Ident::new(&string.value(), string.span())
 }
@@ -175,11 +131,24 @@ impl<T: FromMeta> FromMeta for MetaList<T> {
     }
 }
 
-/// Generate a TokenStream from an Option<Duration>
-pub(crate) fn duration_quote(duration: &Duration) -> proc_macro2::TokenStream {
+/// Generate a TokenStream from a Duration
+pub fn tokenize_duration(duration: &Duration) -> proc_macro2::TokenStream {
     let secs = duration.as_secs();
     let nanos = duration.subsec_nanos();
     quote! {::boomerang::runtime::Duration::new(#secs, #nanos)}
+}
+
+pub fn tokenize_optional<T, F: FnOnce(&T) -> proc_macro2::TokenStream>(
+    value: Option<T>,
+    f: F,
+) -> proc_macro2::TokenStream {
+    match value {
+        Some(inner) => {
+            let inner = f(&inner);
+            quote! {Some(#inner)}
+        }
+        None => quote! {None},
+    }
 }
 
 pub struct OptionalDuration(pub Option<Duration>);
@@ -188,7 +157,7 @@ impl ToTokens for OptionalDuration {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
         tokens.extend(match self.0 {
             Some(duration) => {
-                let duration = duration_quote(&duration);
+                let duration = tokenize_duration(&duration);
                 quote! {Some(#duration)}
             }
             None => quote! {None},

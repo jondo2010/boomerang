@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use boomerang::{
-    builder::{BuilderActionKey, BuilderPortKey},
+    builder::{ActionPart, BuilderInputPort},
     runtime, Reactor,
 };
 
@@ -10,9 +10,9 @@ use boomerang::{
 #[derive(Reactor)]
 struct SourceBuilder {
     #[reactor(output())]
-    out: BuilderPortKey<u32>,
+    out: BuilderInputPort<u32>,
     #[reactor(timer())]
-    t: BuilderActionKey,
+    t: ActionPart,
     #[reactor(reaction(function = "Source::reaction_out"))]
     reaction_out: runtime::ReactionKey,
 }
@@ -32,9 +32,9 @@ impl Source {
 #[derive(Reactor)]
 struct GainBuilder {
     #[reactor(input())]
-    inp: BuilderPortKey<u32>,
+    inp: BuilderInputPort<u32>,
     #[reactor(output())]
-    out: BuilderPortKey<u32>,
+    out: BuilderInputPort<u32>,
     #[reactor(reaction(function = "Gain::reaction_in"))]
     reaction_in: runtime::ReactionKey,
 }
@@ -60,9 +60,9 @@ impl Gain {
 #[derive(Reactor)]
 struct PrintBuilder {
     #[reactor(input())]
-    inp: BuilderPortKey<u32>,
+    inp: BuilderInputPort<u32>,
     #[reactor(action())]
-    a: BuilderActionKey,
+    a: ActionPart,
     #[reactor(reaction(function = "Print::reaction_in"))]
     reaction_in: runtime::ReactionKey,
 }
@@ -90,11 +90,11 @@ impl Print {
 )]
 struct GainContainerBuilder {
     #[reactor(input())]
-    inp: BuilderPortKey<u32>,
+    inp: BuilderInputPort<u32>,
     #[reactor(output())]
-    out: BuilderPortKey<u32>,
+    out: BuilderInputPort<u32>,
     #[reactor(output())]
-    out2: BuilderPortKey<u32>,
+    out2: BuilderInputPort<u32>,
     #[reactor(child(state = "Gain::new(2)"))]
     gain: GainBuilder,
 }

@@ -389,19 +389,19 @@ impl ReactionReceiver {
                 ArgumentAttr::Port {
                     attrs: PortAttrs::Triggers,
                     ..
-                } => Some(quote! { .with_trigger_port::<#ty>(reactor.#expr, 0) }),
+                } => Some(quote! { .with_trigger_port(reactor.#expr, 0) }),
                 ArgumentAttr::Port {
                     attrs: PortAttrs::Effects,
                     ..
-                } => Some(quote! { .with_antidependency::<#ty>(reactor.#expr, 0) }),
+                } => Some(quote! { .with_antidependency(reactor.#expr, 0) }),
                 ArgumentAttr::Action {
                     attrs: ActionAttrs::Triggers,
                     ..
-                } => Some(quote! { .with_trigger_action::<#ty>(reactor.#expr, 0) }),
+                } => Some(quote! { .with_trigger_action(reactor.#expr, 0) }),
                 ArgumentAttr::Action {
                     attrs: ActionAttrs::Effects,
                     ..
-                } => Some(quote! { .with_scheduable_action::<#ty>(reactor.#expr, 0) }),
+                } => Some(quote! { .with_scheduable_action(reactor.#expr, 0) }),
                 ArgumentAttr::Action {
                     attrs: ActionAttrs::TriggersAndEffects,
                     ..
@@ -421,9 +421,6 @@ impl ReactionReceiver {
             generics
                 .params
                 .insert(0, syn::GenericParam::Lifetime(parse_quote! {'builder}));
-            generics.params.push(syn::GenericParam::Type(
-                parse_quote! {S: runtime::ReactorState},
-            ));
             let reactor_path = &self.attr.reactor;
             syn::Signature {
                 constness: None,
@@ -437,7 +434,7 @@ impl ReactionReceiver {
                 inputs: parse_quote!(
                     name: &str,
                     reactor: &#reactor_path,
-                    builder: &'builder mut ::boomerang::builder::ReactorBuilderState<S>,
+                    builder: &'builder mut ::boomerang::builder::ReactorBuilderState<#reactor_path::State>,
                 ),
                 variadic: None,
                 output: parse_quote!(

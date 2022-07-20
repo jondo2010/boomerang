@@ -1,18 +1,17 @@
 // Example in the Wiki.
 
 use boomerang::{
-    builder::{BuilderActionKey, BuilderPortKey},
+    builder::{ActionPart, BuilderInputPort, BuilderOutputPort, TimerPart, BuilderReaction},
     runtime, Reactor,
 };
 
 #[derive(Reactor)]
+#[reactor(state = "Scale")]
 struct ScaleBuilder {
-    #[reactor(input())]
-    x: BuilderPortKey<u32>,
-    #[reactor(output())]
-    y: BuilderPortKey<u32>,
+    x: BuilderInputPort<u32>,
+    y: BuilderOutputPort<u32>,
     #[reactor(reaction(function = "Scale::reaction_x"))]
-    reaction_x: runtime::ReactionKey,
+    reaction_x: BuilderReaction,
 }
 
 struct Scale(u32);
@@ -29,9 +28,9 @@ impl Scale {
 }
 
 #[derive(Reactor)]
+#[reactor(state = "Test")]
 struct TestBuilder {
-    #[reactor(input())]
-    x: BuilderPortKey<u32>,
+    x: BuilderInputPort<u32>,
     #[reactor(reaction(function = "Test::reaction_x"))]
     reaction_x: runtime::ReactionKey,
 }
@@ -50,8 +49,12 @@ impl Test {
 }
 
 #[derive(Reactor)]
-#[reactor(connection(from = "g.y", to = "t.x"))]
+#[reactor(state = "Gain", connection(from = "g.y", to = "t.x"))]
 struct GainBuilder {
+    #[reactor(timer(rename = "tim"))]
+    tim: TimerPart,
+    #[reactor(reaction(function = "Gain::reaction_tim",))]
+    reaction_tim: runtime::ReactionKey,
     #[reactor(child(state = "Scale(2)"))]
     g: ScaleBuilder,
 

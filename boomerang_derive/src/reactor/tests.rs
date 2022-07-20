@@ -2,47 +2,36 @@ use super::*;
 use syn::parse_quote;
 
 #[test]
-#[cfg(feature = "disabled")]
 fn test_reaction() {
     let input = syn::parse_str(
         r#"
-#[derive(Reactor)]
-#[reactor(
-    action(name="a"),
-    reaction(function="Foo::bar", triggers(timer="tim1", "hello1.x"), effects(port="y", action="a")),
-    reaction(function="Foo::rab", triggers(startup, shutdown, "self.i"))
-)]
-pub struct Foo {}"#,
+        #[derive(Reactor)]
+        pub struct Foo {
+            #[reactor(rename="a")]
+            abc: BuilderActionKey,
+            #[reactor(function="Foo::bar", state="()")]
+            bar: runtime::ReactionKey,
+            #[reactor(function="Foo::rab")]
+            rab: runtime::ReactionKey,
+        }"#,
     )
     .unwrap();
-    let receiver = ReactorReceiver::from_derive_input(&input).unwrap();
-    assert_eq!(
-        receiver.reactions,
-        vec![
-            ReactionAttr {
-                function: parse_quote!(Foo::bar),
-                triggers: vec![
-                    TriggerAttr::Timer(parse_quote!(tim1)),
-                    TriggerAttr::Port(parse_quote!(hello1.x)),
-                ],
-                uses: vec![],
-                effects: vec![
-                    EffectAttr::Port(parse_quote!(self.y)),
-                    EffectAttr::Action(parse_quote!(a)),
-                ]
-            },
-            ReactionAttr {
-                function: parse_quote!(Foo::rab),
-                triggers: vec![
-                    TriggerAttr::Startup,
-                    TriggerAttr::Shutdown,
-                    TriggerAttr::Port(parse_quote!(self.i))
-                ],
-                uses: vec![],
-                effects: vec![]
-            }
-        ]
-    );
+
+    let ReactorReceiver2 {
+        ref ident,
+        ref generics,
+        ref data,
+        connections,
+    } = ReactorReceiver2::from_derive_input(&input).unwrap();
+
+    let (imp, ty, wher) = generics.split_for_impl();
+    let fields = data
+        .as_ref()
+        .take_struct()
+        .expect("Should never be enum")
+        .fields;
+
+    dbg!(fields);
 }
 
 #[test]

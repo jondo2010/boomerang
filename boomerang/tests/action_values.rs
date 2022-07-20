@@ -1,14 +1,14 @@
 // Test logical action with delay.
 
 use boomerang::{
-    builder::{BuilderActionKey, EnvBuilder, Reactor},
+    builder::{ActionPart, EnvBuilder, Reactor},
     runtime, Reactor,
 };
 
 #[derive(Reactor)]
 struct ActionValuesBuilder {
     #[reactor(action(min_delay = "100 msec"))]
-    act: BuilderActionKey<i32>,
+    act: ActionPart<i32>,
     #[reactor(reaction(function = "ActionValues::reaction_startup"))]
     reaction_startup: runtime::ReactionKey,
     #[reactor(reaction(function = "ActionValues::reaction_act"))]

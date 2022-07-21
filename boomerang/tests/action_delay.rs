@@ -1,5 +1,5 @@
 use boomerang::{
-    builder::{BuilderActionKey, BuilderPortKey, EnvBuilder, Reactor},
+    builder::{BuilderActionKey, BuilderPortKey},
     runtime, Reactor, boomerang_test_body,
 };
 

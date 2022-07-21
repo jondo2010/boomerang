@@ -1,4 +1,4 @@
-/// Test that a reaction can react to and send two multiple ports of a contained reactor.
+/// Test that a reaction can react to and send to multiple ports of a contained reactor.
 use boomerang::{builder::BuilderPortKey, runtime, Reactor, boomerang_test_body};
 
 #[derive(Reactor)]
@@ -9,12 +9,14 @@ struct ContainedBuilder {
     in1: BuilderPortKey<u32>,
     #[reactor(input())]
     in2: BuilderPortKey<u32>,
-    #[reactor(reaction(function = "Contained::reaction_startup",))]
-    reaction_startup: runtime::ReactionKey,
+
     #[reactor(reaction(function = "Contained::reaction_in1"))]
     reaction_in1: runtime::ReactionKey,
     #[reactor(reaction(function = "Contained::reaction_in2"))]
     reaction_in2: runtime::ReactionKey,
+
+    #[reactor(reaction(function = "Contained::reaction_startup"))]
+    reaction_startup: runtime::ReactionKey,
 }
 struct Contained;
 impl Contained {

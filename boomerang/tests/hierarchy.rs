@@ -103,7 +103,7 @@ struct GainContainerBuilder {
 #[reactor(
     connection(from = "source.out", to = "container.inp"),
     connection(from = "container.out", to = "print.inp"),
-    connection(from = "container.out", to = "print2.inp")
+    connection(from = "container.out2", to = "print2.inp")
 )]
 struct HierarchyBuilder {
     #[reactor(child(state = "Source{}"))]

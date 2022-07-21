@@ -1,7 +1,7 @@
 // Test logical action with delay.
 
 use boomerang::{
-    builder::{BuilderActionKey, EnvBuilder, Reactor},
+    builder::{BuilderActionKey},
     runtime, Reactor, boomerang_test_body,
 };
 

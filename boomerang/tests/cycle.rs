@@ -1,8 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use boomerang::{runtime, builder::{EnvBuilder, Reactor, graphviz}, boomerang_test_body};
-use boomerang::{builder::BuilderPortKey, Reactor};
+use boomerang::{boomerang_test_body, builder::BuilderPortKey, runtime, Reactor};
 
 #[derive(Reactor)]
 struct ABuilder {

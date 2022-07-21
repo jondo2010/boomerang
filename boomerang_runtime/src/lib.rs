@@ -14,6 +14,7 @@ mod reaction;
 mod reactor;
 mod sched;
 mod time;
+pub mod util;
 
 pub use action::*;
 pub use context::*;

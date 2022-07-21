@@ -350,7 +350,7 @@ impl EnvBuilder {
                     || Ok(reactor.name.clone()),
                     |parent| {
                         self.reactor_fqn(parent)
-                            .map(|parent| format!("{}/{}", parent, reactor.name))
+                            .map(|parent| format!("{}::{}", parent, reactor.name))
                     },
                 )
             })
@@ -368,7 +368,7 @@ impl EnvBuilder {
                     })
                     .map(|reactor_fqn| (reactor_fqn, reaction.name.clone()))
             })
-            .map(|(reactor_name, reaction_name)| format!("{}/{}", reactor_name, reaction_name))
+            .map(|(reactor_name, reaction_name)| format!("{}::{}", reactor_name, reaction_name))
     }
 
     /// Get a fully-qualified string for the given PortKey
@@ -443,17 +443,16 @@ impl EnvBuilder {
                     .map(move |dep_key| (reaction_key, dep_key))
             });
 
-        // For all Reactions within a Reactor, create a chain of dependencies by priority
-        // TODO really ensure this isn't needed.
-        // let internal = self.reactors.values().flat_map(move |reactor| {
-        //    reactor
-        //        .reactions
-        //        .keys()
-        //        .sorted_by_key(|&reaction_key| self.reaction_builders[reaction_key].priority)
-        //        .tuple_windows()
-        //});
-        // deps.chain(internal)
-        deps
+        // For all Reactions within a Reactor, create a chain of dependencies by priority. This
+        // ensures that Reactions within a Reactor always end up at unique levels.
+        let internal = self.reactor_builders.values().flat_map(move |reactor| {
+            reactor
+                .reactions
+                .keys()
+                .sorted_by_key(|&reaction_key| self.reaction_builders[reaction_key].priority)
+                .tuple_windows()
+        });
+        deps.chain(internal)
     }
 
     /// Prepare the DAG of Reactions

@@ -1,91 +1,20 @@
-use std::collections::HashMap;
-
 use super::{ActionType, BuilderError, EnvBuilder, PortType, ReactorBuilder};
+
+use boomerang_runtime::PortKey;
 use itertools::Itertools;
 use slotmap::Key;
+use std::collections::HashMap;
 
-pub fn build_reaction_graph(env_builder: &EnvBuilder) -> Result<String, BuilderError> {
-    let reaction_graph = env_builder.get_reaction_graph();
-    let runtime_level_map = env_builder.build_runtime_level_map()?;
-
-    // Cluster on level
-    let mut level_runtime_map = HashMap::new();
-    runtime_level_map
-        .into_iter()
-        .for_each(|(reaction_key, level)| {
-            level_runtime_map
-                .entry(level)
-                .or_insert(Vec::new())
-                .push(reaction_key)
-        });
-
-    // Add all nodes
-    let mut output = vec!["digraph G {".to_owned()];
-
-    for (level, reactions) in level_runtime_map.iter() {
-        output.push(format!("subgraph cluster{} {{", level));
-        output.push(format!("  label=\"level{}\";", level));
-
-        for &key in reactions.iter() {
-            let reaction = &env_builder.reaction_builders[key];
-            let reaction_id = key.data().as_ffi() % env_builder.reaction_builders.len() as u64;
-            output.push(format!(
-                "  r{} [label=\"{}\";shape=cds;color=3];",
-                reaction_id, reaction.name
-            ));
-        }
-
-        output.push(format!("}}"));
+/// Build the node name string for a Port
+fn port_node_name(env_builder: &EnvBuilder, port_key: PortKey) -> String {
+    let port = &env_builder.port_builders[port_key];
+    let port_id = port_key.data().as_ffi() % env_builder.port_builders.len() as u64;
+    let port_reactor_id =
+        port.get_reactor_key().data().as_ffi() % env_builder.reactor_builders.len() as u64;
+    match port.get_port_type() {
+        PortType::Input => format!("inputs{}:p{}", port_reactor_id, port_id),
+        PortType::Output => format!("outputs{}:p{}", port_reactor_id, port_id),
     }
-
-    for (from, to, _) in reaction_graph.all_edges() {
-        let from_id = from.data().as_ffi() % env_builder.reaction_builders.len() as u64;
-        let to_id = to.data().as_ffi() % env_builder.reaction_builders.len() as u64;
-        output.push(format!("  r{} -> r{};", from_id, to_id));
-    }
-
-    output.push(format!("}}\n"));
-    Ok(output.join("\n"))
-}
-
-/// Build a GraphViz representation of the entire Reactor
-pub fn build(env_builder: &EnvBuilder) -> Result<String, BuilderError> {
-    let graph = env_builder.build_reactor_graph();
-    let ordered_reactors = petgraph::algo::toposort(&graph, None)
-        .map_err(|e| BuilderError::ReactorGraphCycle { what: e.node_id() })?;
-    let start = *ordered_reactors.first().unwrap();
-
-    let mut output = vec![
-        "digraph G {".to_owned(),
-        format!(
-            "  rankdir=\"LR\";labeljust=\"l\";colorscheme=\"{}\";bgcolor=\"{}\";",
-            "greys8", "1:2"
-        ),
-        format!("  node [style=filled;colorscheme=\"{}\"];", "accent8"),
-    ];
-
-    petgraph::visit::depth_first_search(&graph, Some(start), |event| match event {
-        petgraph::visit::DfsEvent::Discover(key, _) => {
-            let reactor = &env_builder.reactor_builders[key];
-            let reactor_id = key.data().as_ffi() % env_builder.reactor_builders.len() as u64;
-
-            output.push(format!("subgraph cluster{} {{", reactor_id));
-            output.push(format!("  label=\"{}\";", reactor.name));
-            output.push(format!("  style=\"rounded\"; node [shape=record];"));
-
-            build_ports(env_builder, reactor, reactor_id, &mut output);
-            build_reactions(env_builder, reactor, reactor_id, &mut output);
-            build_actions(env_builder, reactor, &mut output);
-        }
-        petgraph::visit::DfsEvent::Finish(_, _) => {
-            output.push(format!("}}"));
-        }
-        _ => {}
-    });
-
-    build_port_bindings(env_builder, &mut output);
-    output.push(format!("}}\n"));
-    Ok(output.join("\n"))
 }
 
 fn build_ports(
@@ -123,7 +52,6 @@ fn build_ports(
 fn build_reactions(
     env_builder: &EnvBuilder,
     reactor: &ReactorBuilder,
-    reactor_id: u64,
     output: &mut Vec<String>,
 ) {
     for (reaction_key, reaction) in reactor
@@ -133,26 +61,20 @@ fn build_reactions(
     {
         let reaction_id = reaction_key.data().as_ffi() % env_builder.reaction_builders.len() as u64;
         output.push(format!(
-            "  r{} [label=\"{}\";shape=cds;color=3];",
-            reaction_id, reaction.name
+            "  r{} [label=\"{} ({})\";shape=cds;color=3];",
+            reaction_id, reaction.name, reaction.priority
         ));
         // output.push(format!(
         //    "  inputs{} -> r{} -> outputs{} [style=invis];",
         //    reactor_id, reaction_id, reactor_id
         //));
         for port_key in reaction.input_ports.keys() {
-            let port_id = port_key.data().as_ffi() % env_builder.port_builders.len() as u64;
-            output.push(format!(
-                "  inputs{}:p{}:e -> r{}:w;",
-                reactor_id, port_id, reaction_id
-            ));
+            let port_node = port_node_name(env_builder, port_key);
+            output.push(format!("  {}:e -> r{}:w;", port_node, reaction_id));
         }
         for port_key in reaction.output_ports.keys() {
-            let port_id = port_key.data().as_ffi() % env_builder.port_builders.len() as u64;
-            output.push(format!(
-                "  r{}:e -> outputs{}:p{}:w;",
-                reaction_id, reactor_id, port_id
-            ));
+            let port_node = port_node_name(env_builder, port_key);
+            output.push(format!("  r{}:e -> {}:w;", reaction_id, port_node));
         }
     }
 }
@@ -165,9 +87,9 @@ fn build_actions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &mu
         let xlabel = match action.get_type() {
             ActionType::Timer { period, offset } => {
                 if offset.is_zero() {
-                    format!("⏲(startup)")
+                    format!("⏲ (startup)")
                 } else {
-                    format!("⏲({} ms, {} ms)", offset.as_millis(), period.as_millis())
+                    format!("⏲ ({} ms, {} ms)", offset.as_millis(), period.as_millis())
                 }
             }
             ActionType::Logical { min_delay } => {
@@ -209,30 +131,105 @@ fn build_port_bindings(env_builder: &EnvBuilder, output: &mut Vec<String>) {
         .iter()
         .flat_map(|(port_key, port)| {
             port.get_outward_bindings().map(move |binding_key| {
-                let port_id = port_key.data().as_ffi() % env_builder.port_builders.len() as u64;
-                let port_reactor_id = port.get_reactor_key().data().as_ffi()
-                    % env_builder.reactor_builders.len() as u64;
-
-                let binding = &env_builder.port_builders[binding_key];
-                let binding_id =
-                    binding_key.data().as_ffi() % env_builder.port_builders.len() as u64;
-                let binding_reactor_id = binding.get_reactor_key().data().as_ffi()
-                    % env_builder.reactor_builders.len() as u64;
-
-                let from = match port.get_port_type() {
-                    PortType::Input => format!("inputs{}:p{}:e", port_reactor_id, port_id),
-                    PortType::Output => format!("outputs{}:p{}:e", port_reactor_id, port_id),
-                };
-
-                let to = match binding.get_port_type() {
-                    PortType::Input => format!("inputs{}:p{}:w", binding_reactor_id, binding_id),
-                    PortType::Output => format!("outputs{}:p{}:w", binding_reactor_id, binding_id),
-                };
-
+                let from = port_node_name(env_builder, port_key);
+                let to = port_node_name(env_builder, binding_key);
                 (from, to)
             })
         })
         .for_each(|(from, to)| {
-            output.push(format!("  {} -> {};", from, to));
+            output.push(format!("  {}:e -> {}:w;", from, to));
         });
+}
+
+/// Build a GraphViz representation of the entire Reactor environment. This creates a top-level view
+/// of all defined Reactors and any nested children.
+pub fn create_full_graph(env_builder: &EnvBuilder) -> Result<String, BuilderError> {
+    let graph = env_builder.build_reactor_graph();
+    let ordered_reactors = petgraph::algo::toposort(&graph, None)
+        .map_err(|e| BuilderError::ReactorGraphCycle { what: e.node_id() })?;
+    let start = *ordered_reactors.first().unwrap();
+
+    let mut output = vec![
+        "digraph G {".to_owned(),
+        format!(
+            "  rankdir=\"LR\";labeljust=\"l\";colorscheme=\"{}\";bgcolor=\"{}\";",
+            "greys8", "1:2"
+        ),
+        format!("  node [style=filled;colorscheme=\"{}\"];", "accent8"),
+    ];
+
+    petgraph::visit::depth_first_search(&graph, Some(start), |event| match event {
+        petgraph::visit::DfsEvent::Discover(key, _) => {
+            let reactor = &env_builder.reactor_builders[key];
+            let reactor_id = key.data().as_ffi() % env_builder.reactor_builders.len() as u64;
+
+            output.push(format!("subgraph cluster{} {{", reactor_id));
+            output.push(format!(
+                "  label=\"{} '{}'\";",
+                reactor.type_name(),
+                reactor.name
+            ));
+            output.push(format!("  style=\"rounded\"; node [shape=record];"));
+
+            build_ports(env_builder, reactor, reactor_id, &mut output);
+            build_reactions(env_builder, reactor, &mut output);
+            build_actions(env_builder, reactor, &mut output);
+        }
+        petgraph::visit::DfsEvent::Finish(_, _) => {
+            output.push(format!("}}"));
+        }
+        _ => {}
+    });
+
+    build_port_bindings(env_builder, &mut output);
+    output.push(format!("}}\n"));
+    Ok(output.join("\n"))
+}
+
+/// Build a GraphViz representation of the "Reaction Graph", where the nodes are Reactions, and the
+/// edges are dependencies between Reactions. Reactions are clustered into their "Execution Level".
+/// Reactions within the same level can be scheduled in parallel.
+pub fn create_reaction_graph(env_builder: &EnvBuilder) -> Result<String, BuilderError> {
+    let reaction_graph = env_builder.get_reaction_graph();
+    let runtime_level_map = env_builder.build_runtime_level_map()?;
+
+    // Cluster on level
+    let mut level_runtime_map = HashMap::new();
+    runtime_level_map
+        .into_iter()
+        .for_each(|(reaction_key, level)| {
+            level_runtime_map
+                .entry(level)
+                .or_insert(Vec::new())
+                .push(reaction_key)
+        });
+
+    // Add all nodes
+    let mut output = vec!["digraph G {".to_owned()];
+
+    for (level, reactions) in level_runtime_map.iter() {
+        output.push(format!("subgraph cluster{} {{", level));
+        output.push(format!("  label=\"level{}\";", level));
+
+        for &key in reactions.iter() {
+            let _reaction = &env_builder.reaction_builders[key];
+            let reaction_id = key.data().as_ffi() % env_builder.reaction_builders.len() as u64;
+            output.push(format!(
+                "  r{} [label=\"{}\";shape=cds;color=3];",
+                reaction_id,
+                env_builder.reaction_fqn(key).unwrap()
+            ));
+        }
+
+        output.push(format!("}}"));
+    }
+
+    for (from, to, _) in reaction_graph.all_edges() {
+        let from_id = from.data().as_ffi() % env_builder.reaction_builders.len() as u64;
+        let to_id = to.data().as_ffi() % env_builder.reaction_builders.len() as u64;
+        output.push(format!("  r{} -> r{};", from_id, to_id));
+    }
+
+    output.push(format!("}}\n"));
+    Ok(output.join("\n"))
 }

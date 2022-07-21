@@ -2,7 +2,7 @@
 /// msec on a logical action with a minimum delay of 100 msec.  
 /// The use of the logical action ensures the elapsed time jumps exactly from
 /// 0 to 100, 300, 600, and 1000 msec.
-use boomerang::{builder::BuilderActionKey, runtime, Reactor};
+use boomerang::{builder::BuilderActionKey, runtime, Reactor, boomerang_test_body};
 use boomerang_util::{Timeout, TimeoutBuilder};
 use runtime::Duration;
 
@@ -77,24 +77,4 @@ impl SlowingClock {
     }
 }
 
-#[test]
-fn slowing_clock() {
-    // install global collector configured based on RUST_LOG env var.
-    tracing_subscriber::fmt::init();
-    use std::convert::TryInto;
-
-    use boomerang::builder::*;
-    let mut env_builder = EnvBuilder::new();
-    let _ = SlowingClockBuilder::build("slowing_clock", SlowingClock::new(), None, &mut env_builder).unwrap();
-
-    //let gv = graphviz::build(&env_builder).unwrap();
-    //let mut f = std::fs::File::create(format!("{}.dot", module_path!())).unwrap();
-    //std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
-
-    let (env, dep_info) = env_builder.try_into().unwrap();
-
-    runtime::check_consistency(&env, &dep_info);
-
-    let sched = runtime::Scheduler::new(env, dep_info, true);
-    sched.event_loop();
-}
+boomerang_test_body!(slowing_clock, SlowingClockBuilder, SlowingClock::new());

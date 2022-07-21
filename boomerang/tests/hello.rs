@@ -136,20 +136,4 @@ struct MainBuilder {
 }
 
 #[cfg(feature = "disabled")]
-#[test]
-fn hello() {
-    // install global collector configured based on RUST_LOG env var.
-    tracing_subscriber::fmt::init();
-    use std::convert::TryInto;
-
-    use boomerang::builder::*;
-    let mut env_builder = EnvBuilder::new();
-    let _ = MainBuilder::build("main", (), None, &mut env_builder).unwrap();
-
-    let (env, dep_info) = env_builder.try_into().unwrap();
-
-    runtime::check_consistency(&env, &dep_info);
-
-    let sched = runtime::Scheduler::new(env, dep_info, false);
-    sched.event_loop();
-}
+boomerang_test_body!(hello, HelloBuilder, ());

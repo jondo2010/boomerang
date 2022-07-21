@@ -1,5 +1,5 @@
 /// Test that a reaction can react to and send two multiple ports of a contained reactor.
-use boomerang::{builder::BuilderPortKey, runtime, Reactor};
+use boomerang::{builder::BuilderPortKey, runtime, Reactor, boomerang_test_body};
 
 #[derive(Reactor)]
 struct ContainedBuilder {
@@ -68,26 +68,4 @@ impl MultipleContained {
     }
 }
 
-#[test]
-fn test() {
-    tracing_subscriber::fmt::init();
-
-    use boomerang::{builder::*, runtime};
-    let mut env_builder = EnvBuilder::new();
-
-    let _ = MultipleContainedBuilder::build(
-        "multiple_contained",
-        MultipleContained,
-        None,
-        &mut env_builder,
-    )
-    .unwrap();
-
-    let (env, dep_info) = env_builder.try_into().unwrap();
-
-    runtime::check_consistency(&env, &dep_info);
-    runtime::debug_info(&env, &dep_info);
-
-    let sched = runtime::Scheduler::new(env, dep_info, true);
-    sched.event_loop();
-}
+boomerang_test_body!(multiple_contained, MultipleContainedBuilder, MultipleContained);

@@ -31,7 +31,8 @@ pub fn build_reaction_graph(env_builder: &EnvBuilder) -> Result<String, BuilderE
             let reaction_id = key.data().as_ffi() % env_builder.reaction_builders.len() as u64;
             output.push(format!(
                 "  r{} [label=\"{}\";shape=cds;color=3];",
-                reaction_id, reaction.name
+                reaction_id,
+                env_builder.reaction_fqn(key).unwrap()
             ));
         }
 
@@ -70,7 +71,11 @@ pub fn build(env_builder: &EnvBuilder) -> Result<String, BuilderError> {
             let reactor_id = key.data().as_ffi() % env_builder.reactor_builders.len() as u64;
 
             output.push(format!("subgraph cluster{} {{", reactor_id));
-            output.push(format!("  label=\"{}\";", reactor.name));
+            output.push(format!(
+                "  label=\"{} '{}'\";",
+                reactor.type_name(),
+                reactor.name
+            ));
             output.push(format!("  style=\"rounded\"; node [shape=record];"));
 
             build_ports(env_builder, reactor, reactor_id, &mut output);
@@ -133,8 +138,8 @@ fn build_reactions(
     {
         let reaction_id = reaction_key.data().as_ffi() % env_builder.reaction_builders.len() as u64;
         output.push(format!(
-            "  r{} [label=\"{}\";shape=cds;color=3];",
-            reaction_id, reaction.name
+            "  r{} [label=\"{} ({})\";shape=cds;color=3];",
+            reaction_id, reaction.name, reaction.priority
         ));
         // output.push(format!(
         //    "  inputs{} -> r{} -> outputs{} [style=invis];",
@@ -165,9 +170,9 @@ fn build_actions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &mu
         let xlabel = match action.get_type() {
             ActionType::Timer { period, offset } => {
                 if offset.is_zero() {
-                    format!("⏲(startup)")
+                    format!("⏲ (startup)")
                 } else {
-                    format!("⏲({} ms, {} ms)", offset.as_millis(), period.as_millis())
+                    format!("⏲ ({} ms, {} ms)", offset.as_millis(), period.as_millis())
                 }
             }
             ActionType::Logical { min_delay } => {

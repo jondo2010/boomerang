@@ -21,7 +21,7 @@ pub(super) struct ReactorBuilder {
     /// The instantiated/child name of the Reactor
     pub name: String,
     /// The user's Reactor
-    pub state: Option<Box<dyn runtime::ReactorState>>,
+    pub state: Box<dyn runtime::ReactorState>,
     /// The top-level/class name of the Reactor
     pub type_name: String,
     /// Optional parent reactor key
@@ -34,12 +34,17 @@ pub(super) struct ReactorBuilder {
     pub actions: SecondaryMap<runtime::ActionKey, ()>,
 }
 
+impl ReactorBuilder {
+    pub(super) fn type_name(&self) -> &str {
+        self.type_name.as_ref()
+    }
+}
+
 impl std::fmt::Debug for ReactorBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReactorBuilder")
             .field("name", &self.name)
-            .field("state", &self.state.as_ref().map(|_| &"State"))
-            .field("type_name", &self.type_name)
+            .field("(state) type_name", &self.type_name)
             .field("parent_reactor_key", &self.parent_reactor_key)
             .field("reactions", &self.reactions)
             .field("ports", &self.ports)
@@ -50,21 +55,7 @@ impl std::fmt::Debug for ReactorBuilder {
 
 impl From<ReactorBuilder> for Box<dyn runtime::ReactorState> {
     fn from(builder: ReactorBuilder) -> Self {
-        builder.state.expect("No BaseReactor in ReactorBuilder!")
-    }
-}
-
-impl ReactorBuilder {
-    fn new(name: &str, type_name: &str, parent_reactor_key: Option<runtime::ReactorKey>) -> Self {
-        Self {
-            name: name.into(),
-            state: None,
-            type_name: type_name.into(),
-            parent_reactor_key,
-            reactions: SecondaryMap::new(),
-            ports: SecondaryMap::new(),
-            actions: SecondaryMap::new(),
-        }
+        builder.state
     }
 }
 
@@ -95,11 +86,18 @@ impl<'a, S: runtime::ReactorState> ReactorBuilderState<'a, S> {
         state: S,
         env: &'a mut EnvBuilder,
     ) -> Self {
-        let reactor_key = env.reactor_builders.insert(ReactorBuilder::new(
-            name,
-            std::any::type_name::<S>(),
-            parent,
-        ));
+        let type_name = std::any::type_name::<S>();
+        let reactor_key = env.reactor_builders.insert({
+            ReactorBuilder {
+                name: name.into(),
+                state: Box::new(state),
+                type_name: type_name.into(),
+                parent_reactor_key: parent,
+                reactions: SecondaryMap::new(),
+                ports: SecondaryMap::new(),
+                actions: SecondaryMap::new(),
+            }
+        });
 
         let startup_action = env
             .add_timer(
@@ -113,8 +111,6 @@ impl<'a, S: runtime::ReactorState> ReactorBuilderState<'a, S> {
         let shutdown_action = env
             .add_shutdown_action("__shutdown", reactor_key)
             .expect("Duplicate shutdown Action?");
-
-        env.reactor_builders[reactor_key].state = Some(Box::new(state));
 
         Self {
             reactor_key,

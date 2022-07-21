@@ -1,4 +1,4 @@
-use boomerang::{runtime, Reactor};
+use boomerang::{runtime, Reactor, boomerang_test_body};
 use std::convert::TryInto;
 
 #[derive(Reactor)]
@@ -31,18 +31,4 @@ struct HelloWorldBuilder {
     _a: HelloWorld2Builder,
 }
 
-#[test]
-fn test() {
-    use boomerang::{builder::*, runtime};
-    let mut env_builder = EnvBuilder::new();
-
-    let _ = HelloWorldBuilder::build("a", (), None, &mut env_builder);
-
-    let (env, dep_info) = env_builder.try_into().unwrap();
-
-    runtime::check_consistency(&env, &dep_info);
-    runtime::debug_info(&env, &dep_info);
-
-    let sched = runtime::Scheduler::new(env, dep_info, false);
-    sched.event_loop();
-}
+boomerang_test_body!(hello_world, HelloWorldBuilder, ());

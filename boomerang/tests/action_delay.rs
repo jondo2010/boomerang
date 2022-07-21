@@ -1,6 +1,6 @@
 use boomerang::{
     builder::{BuilderActionKey, BuilderPortKey, EnvBuilder, Reactor},
-    runtime, Reactor,
+    runtime, Reactor, boomerang_test_body,
 };
 
 /// Test logical action with delay.
@@ -116,27 +116,4 @@ struct ActionDelayBuilder {
     g: GeneratedDelayBuilder,
 }
 
-#[test]
-fn action_delay() {
-    // install global collector configured based on RUST_LOG env var.
-    tracing_subscriber::fmt::init();
-
-    let mut env_builder = EnvBuilder::new();
-    let _ = ActionDelayBuilder::build("action_delay", (), None, &mut env_builder).unwrap();
-
-    // let gv = graphviz::build(&env_builder).unwrap();
-    // let mut f = std::fs::File::create(format!("{}.dot", module_path!())).unwrap();
-    // std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
-
-    // let gv = graphviz::build_reaction_graph(&env_builder).unwrap();
-    // let mut f = std::fs::File::create(format!("{}_levels.dot", module_path!())).unwrap();
-    // std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
-
-    let (env, dep_info) = env_builder.try_into().unwrap();
-
-    runtime::check_consistency(&env, &dep_info);
-    runtime::debug_info(&env, &dep_info);
-
-    let sched = runtime::Scheduler::new(env, dep_info, true);
-    sched.event_loop();
-}
+boomerang_test_body!(action_delay, ActionDelayBuilder, ());

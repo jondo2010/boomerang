@@ -1,25 +1,28 @@
-use super::{ActionPart, BuilderError, EnvBuilder, FindElements, PortType, ReactorPart, args::ReactionArgs};
+use std::marker::PhantomData;
+
+use super::{Reactor, ActionPart, BuilderError, EnvBuilder, FindElements, PortType, ReactorPart, args::ReactionArgs};
 use crate::runtime;
 use slotmap::SecondaryMap;
 
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct BuilderReaction(runtime::ReactionKey);
+pub struct BuilderReaction<R: Reactor>(runtime::ReactionKey, PhantomData<R>);
 
-impl From<BuilderReaction> for runtime::ReactionKey {
-    fn from(builder: BuilderReaction) -> Self {
+impl<R: Reactor> From<BuilderReaction<R>> for runtime::ReactionKey {
+    fn from(builder: BuilderReaction<R>) -> Self {
         builder.0
     }
 }
 
-impl ReactorPart for BuilderReaction {
-    type Args = ReactionArgs;
+impl<R: Reactor> ReactorPart for BuilderReaction<R> {
+    type Args = ReactionArgs<R>;
 
     fn build_part<S: runtime::ReactorState>(
         builder: &mut super::ReactorBuilderState<S>,
         name: &str,
         args: Self::Args,
     ) -> Result<Self, BuilderError> {
+        (args.function)(name, builder)
         //#path(stringify!(#ident), &reactor, &mut #builder_ident).and_then(|b| b.finish())?;
     }
 }

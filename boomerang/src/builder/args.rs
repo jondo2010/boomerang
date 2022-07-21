@@ -29,11 +29,7 @@ pub struct ChildArgs<S: runtime::ReactorState> {
 }
 
 /// Attribute on a Reaction field in a ReactorBuilder struct
-#[derive(Debug)]
-pub struct ReactionArgs<R, F>
-where
-    R: Reactor,
-    F: FnOnce(&str, &R, &mut ReactorBuilderState<R::State>),
+pub struct ReactionArgs<'a, R: Reactor>
 {
-    pub function: F,
+    pub function: Box<dyn FnOnce(&str, &R, &mut ReactorBuilderState<R::State>) + 'static>,
 }

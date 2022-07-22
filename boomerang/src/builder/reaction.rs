@@ -161,6 +161,23 @@ impl<'a> ReactionBuilderState<'a> {
 
         for port_key in reaction_builder.output_ports.keys() {
             let port = ports.get_mut(port_key).unwrap();
+
+            if port.get_port_type() == &PortType::Output {
+                assert_eq!(
+                    reaction_builder.reactor_key,
+                    port.get_reactor_key(),
+                    "Antidependent output ports must belong to the same reactor as the reaction"
+                );
+            } else {
+                assert_eq!(
+                    reaction_builder.reactor_key,
+                    env.reactor_builders[port.get_reactor_key()]
+                        .parent_reactor_key
+                        .unwrap(),
+                    "Antidependent input ports must belong to a contained reactor"
+                );
+            }
+
             port.register_antidependency(reaction_key);
         }
 
@@ -181,6 +198,7 @@ impl<'a> ReactionBuilderState<'a> {
                     "Output port triggers must belong to a contained reactor"
                 );
             }
+
             port.register_dependency(reaction_key, true);
         }
 

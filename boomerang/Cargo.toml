@@ -39,7 +39,7 @@ criterion = "0.3"
 boomerang_util = { path = "../boomerang_util" }
 
 [[bench]]
-name = "savina_pong"
+name = "benchmark"
 harness = false
 
 [profile.bench]

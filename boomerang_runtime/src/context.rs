@@ -31,26 +31,11 @@ pub struct Context<'a> {
     pub(crate) internal: ContextInternal,
 }
 
-impl<'a> Clone for Context<'a> {
-    fn clone(&self) -> Self {
-        Self {
-            dep_info: self.dep_info.clone(),
-            start_time: self.start_time.clone(),
-            tag: self.tag.clone(),
-            current_level: self.current_level.clone(),
-            internal: ContextInternal {
-                reactions: Vec::new(),
-                events: Vec::new(),
-            },
-        }
-    }
-}
-
 impl<'a> Context<'a> {
     pub(crate) fn new(dep_info: &'a DepInfo, start_time: Instant, tag: Tag) -> Self {
         Self {
-            dep_info: &dep_info,
-            start_time: start_time,
+            dep_info,
+            start_time,
             tag,
             current_level: 0,
             internal: ContextInternal {
@@ -137,7 +122,7 @@ impl<'a> Context<'a> {
         debug!("Scheduling shutdown");
         let event = ScheduledEvent {
             tag: self.tag.delay(offset),
-            reactions: ReactionSet::new(),
+            reactions: ReactionSet::default(),
             terminal: true,
         };
         self.internal.events.push(event);

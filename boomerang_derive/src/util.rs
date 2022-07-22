@@ -6,7 +6,7 @@ use quote::quote;
 use std::{collections::HashSet, time::Duration};
 use syn::ext::IdentExt;
 
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct StringList(Vec<String>);
 impl std::ops::Deref for StringList {
     type Target = Vec<String>;
@@ -87,7 +87,7 @@ pub fn handle_duration(value: String) -> Option<Duration> {
     Some(parse_duration::parse(&value).unwrap())
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentSet(HashSet<syn::Ident>);
 impl From<IdentSet> for HashSet<syn::Ident> {
     fn from(list: IdentSet) -> Self {
@@ -155,7 +155,7 @@ fn test_named_field() {
     assert_eq!(field, syn::parse_quote!(foo.impl));
 }
 
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct MetaList<T>(Vec<T>);
 
 impl<T> From<MetaList<T>> for Vec<T> {

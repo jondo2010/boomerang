@@ -96,11 +96,11 @@ where
     }
 }
 
-pub(crate) unsafe fn disjoint_unchecked<'sm, K, KV, V, I1, I2>(
-    sm: &'sm mut slotmap::SlotMap<K, KV>,
+pub(crate) unsafe fn disjoint_unchecked<K, KV, V, I1, I2>(
+    sm: &'_ mut slotmap::SlotMap<K, KV>,
     keys: I1,
     mut_keys: I2,
-) -> (Box<[&'sm V]>, Box<[&'sm mut V]>)
+) -> (Box<[&'_ V]>, Box<[&'_ mut V]>)
 where
     K: slotmap::Key,
     KV: AsRef<V> + AsMut<V>,
@@ -149,10 +149,10 @@ where
     // let (iboxed, oboxed) = unsafe{disjoint_unchecked(sm, all_keys, all_mut_keys)};
 
     let chunks = {
-        let keys_indices = keys.clone().map(|inner| inner.len());
+        let keys_indices = keys.map(|inner| inner.len());
         let mut iptrs = Box::<[*const T]>::new_uninit_slice(keys_indices.clone().sum());
         let boxed = unsafe {
-            for (&key, ptr) in all_keys.clone().zip(iptrs.iter_mut()) {
+            for (&key, ptr) in all_keys.zip(iptrs.iter_mut()) {
                 ptr.as_mut_ptr().write(sm.get_unchecked(key).as_ref())
             }
             let iraw = core::mem::transmute_copy(&Box::into_raw(iptrs.assume_init()));
@@ -162,10 +162,10 @@ where
     };
 
     let chunks_mut = {
-        let keys_indices = keys_mut.clone().map(|inner| inner.len());
+        let keys_indices = keys_mut.map(|inner| inner.len());
         let mut iptrs = Box::<[*const T]>::new_uninit_slice(keys_indices.clone().sum());
         let boxed = unsafe {
-            for (&key, ptr) in all_mut_keys.clone().zip(iptrs.iter_mut()) {
+            for (&key, ptr) in all_mut_keys.zip(iptrs.iter_mut()) {
                 ptr.as_mut_ptr().write(sm.get_unchecked_mut(key).as_mut())
             }
             let iraw = core::mem::transmute_copy(&Box::into_raw(iptrs.assume_init()));

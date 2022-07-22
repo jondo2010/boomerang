@@ -47,7 +47,7 @@ pub fn print_debug_info(env: &Env, dep_info: &DepInfo) {
     // Which Reactions are triggered by each Action
     for (action_key, action) in env.actions.iter() {
         let mut action_pairs: Vec<_> = dep_info.triggered_by_action(action_key).collect();
-        if action_pairs.len() > 0 {
+        if !action_pairs.is_empty() {
             action_pairs.sort_by_key(|(level, _)| *level);
             println!("Action {:?} ({}) triggers:", action_key, action.get_name());
             for (level, reaction_key) in action_pairs {
@@ -63,7 +63,7 @@ pub fn print_debug_info(env: &Env, dep_info: &DepInfo) {
     // Which Reactions are triggered by each port
     for (port_key, port) in env.ports.iter() {
         let mut port_pairs: Vec<_> = dep_info.triggered_by_port(port_key).collect();
-        if port_pairs.len() > 0 {
+        if !port_pairs.is_empty() {
             port_pairs.sort_by_key(|(level, _)| *level);
             println!("{port} triggers:");
             for (level, reaction_key) in port_pairs {
@@ -81,25 +81,25 @@ pub fn print_debug_info(env: &Env, dep_info: &DepInfo) {
         if !dep_info.reaction_inputs[reaction_key].is_empty() {
             println!("  inputs:");
             for &port_key in dep_info.reaction_inputs[reaction_key].iter() {
-                println!("   . {}", env.ports[port_key]);
+                println!("   - {}", env.ports[port_key]);
             }
         }
         if !dep_info.reaction_outputs[reaction_key].is_empty() {
             println!("  outputs:");
             for &port_key in dep_info.reaction_outputs[reaction_key].iter() {
-                println!("   . {}", env.ports[port_key]);
+                println!("   - {}", env.ports[port_key]);
             }
         }
         if !dep_info.reaction_trig_actions[reaction_key].is_empty() {
             println!("  triggers:");
             for &action_key in dep_info.reaction_trig_actions[reaction_key].iter() {
-                println!("   . {}", env.actions[action_key]);
+                println!("   - {}", env.actions[action_key]);
             }
         }
         if !dep_info.reaction_sched_actions[reaction_key].is_empty() {
             println!("  schedulable actions:");
             for &action_key in dep_info.reaction_sched_actions[reaction_key].iter() {
-                println!("   . {}", env.actions[action_key]);
+                println!("   - {}", env.actions[action_key]);
             }
         }
     }

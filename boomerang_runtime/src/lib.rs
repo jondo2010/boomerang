@@ -1,7 +1,5 @@
 #![feature(map_first_last)]
-#![feature(type_name_of_val)]
 #![feature(new_uninit)]
-#![feature(split_array)]
 #![feature(type_alias_impl_trait)]
 
 mod action;
@@ -53,14 +51,17 @@ pub enum RuntimeError {
 }
 
 /// Returns a tuple of disjoint sets of (immutable, mutable) borrows from the SlotMap.
-/// This is only safe if:
+/// 
+/// # Safety
+/// 
+/// This function is safe if:
 /// 1. All keys in `mut_keys` are disjoint from each other and the keys in `keys`.
 /// 2. All keys in `keys` are disjoint from those in `mut_keys`.
-pub unsafe fn disjoint_unchecked<'sm, K, V, I1, I2>(
-    sm: &'sm mut SlotMap<K, V>,
+pub unsafe fn disjoint_unchecked<K, V, I1, I2>(
+    sm: &'_ mut SlotMap<K, V>,
     keys: I1,
     mut_keys: I2,
-) -> (Box<[&'sm V]>, Box<[&'sm mut V]>)
+) -> (Box<[&'_ V]>, Box<[&'_ mut V]>)
 where
     K: slotmap::Key,
     I1: ExactSizeIterator + Iterator<Item = K>,

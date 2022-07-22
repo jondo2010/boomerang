@@ -94,15 +94,12 @@ impl Reaction {
         actions: &[&InternalAction],
         schedulable_actions: &mut [&mut InternalAction],
     ) {
-        // match self.deadline.as_ref() {
-        // Some(Deadline { deadline, handler }) => {
-        // let lag = ctx.get_physical_time() - ctx.get_logical_time();
-        // if lag > *deadline {
-        // (handler.write().unwrap())(ctx);
-        // }
-        // }
-        // _ => {}
-        // }
+        if let Some(Deadline { deadline, handler }) = self.deadline.as_ref() {
+            let lag = ctx.get_physical_time() - ctx.get_logical_time();
+            if lag > *deadline {
+                (handler.write().unwrap())();
+            }
+        }
 
         (self.body)(ctx, reactor, inputs, outputs, actions, schedulable_actions);
     }

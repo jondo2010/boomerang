@@ -23,6 +23,7 @@ pub trait FindElements {
     fn get_action_by_name(&self, action_name: &str) -> Result<runtime::ActionKey, BuilderError>;
 }
 
+#[derive(Default)]
 pub struct EnvBuilder {
     /// Builders for Ports
     pub(super) port_builders: SlotMap<runtime::PortKey, Box<dyn BasePortBuilder>>,
@@ -34,14 +35,19 @@ pub struct EnvBuilder {
     pub(super) reactor_builders: SlotMap<runtime::ReactorKey, ReactorBuilder>,
 }
 
+/// Return type for building runtime parts
+struct RuntimePortParts {
+    /// All runtime Ports
+    ports: SlotMap<runtime::PortKey, Box<dyn runtime::BasePort>>,
+    /// For each Port, a set of Reactions triggered by it
+    port_triggers: SecondaryMap<runtime::PortKey, Vec<runtime::ReactionKey>>,
+    /// A mapping from builder Ports to aliased runtime Ports
+    aliases: SecondaryMap<runtime::PortKey, runtime::PortKey>,
+}
+
 impl EnvBuilder {
     pub fn new() -> Self {
-        Self {
-            port_builders: SlotMap::with_key(),
-            action_builders: SlotMap::with_key(),
-            reaction_builders: SlotMap::with_key(),
-            reactor_builders: SlotMap::<runtime::ReactorKey, ReactorBuilder>::with_key(),
-        }
+        Default::default()
     }
 
     /// Add a new Reactor
@@ -65,8 +71,7 @@ impl EnvBuilder {
         if self
             .port_builders
             .values()
-            .find(|&port| port.get_name() == name && port.get_reactor_key() == reactor_key)
-            .is_some()
+            .any(|port| port.get_name() == name && port.get_reactor_key() == reactor_key)
         {
             return Err(BuilderError::DuplicatePortDefinition {
                 reactor_name: self.reactor_builders[reactor_key].name.clone(),
@@ -98,8 +103,8 @@ impl EnvBuilder {
             move |name: &'_ str, action_key| runtime::InternalAction::Timer {
                 name: name.into(),
                 key: action_key,
-                offset: offset,
-                period: period,
+                offset,
+                period,
             },
         )
     }
@@ -154,14 +159,9 @@ impl EnvBuilder {
         F: ActionBuilderFn + 'static,
     {
         // Ensure no duplicates
-        if self
-            .action_builders
-            .values()
-            .find(|&action_builder| {
-                action_builder.get_name() == name && action_builder.get_reactor_key() == reactor_key
-            })
-            .is_some()
-        {
+        if self.action_builders.values().any(|action_builder| {
+            action_builder.get_name() == name && action_builder.get_reactor_key() == reactor_key
+        }) {
             return Err(BuilderError::DuplicateActionDefinition {
                 reactor_name: self.reactor_builders[reactor_key].name.clone(),
                 action_name: name.into(),
@@ -239,7 +239,7 @@ impl EnvBuilder {
             });
         }
 
-        if port_a.get_deps().len() > 0 {
+        if !port_a.get_deps().is_empty() {
             return Err(BuilderError::PortBindError {
                 port_a_key,
                 port_b_key,
@@ -274,16 +274,16 @@ impl EnvBuilder {
                 // VALIDATE(this->container()->container() == port->container()->container(), 
                 if !matches!((port_a_grandparent, port_b_grandparent), (Some(key_a), Some(key_b)) if key_a == key_b) {
                     Err(BuilderError::PortBindError{
-                        port_a_key: port_a_key,
-                        port_b_key: port_b_key,
+                        port_a_key,
+                        port_b_key,
                         what: format!("An output port ({}) can only be bound to an input port ({}) if both ports belong to reactors in the same hierarichal level", port_a_fqn, port_b_fqn),
                     })
                 }
                 // VALIDATE(this->container() != port->container(), );
                 else if port_a.get_reactor_key() == port_b.get_reactor_key() {
                     Err(BuilderError::PortBindError{
-                        port_a_key: port_a_key,
-                        port_b_key: port_b_key,
+                        port_a_key,
+                        port_b_key,
                         what: format!("An output port ({}) can only be bound to an input port ({}) if both ports belong to different reactors!", port_a_fqn, port_b_fqn),
                     })
                 }
@@ -303,15 +303,15 @@ impl EnvBuilder {
                         }
                     }).ok_or(
                         BuilderError::PortBindError {
-                                port_a_key: port_a_key,
-                                port_b_key: port_b_key,
+                                port_a_key,
+                                port_b_key,
                                 what: "An output port A may only be bound to another output port B if A is contained by a reactor that in turn is contained by the reactor of B".to_owned()
                             })
             }
             (PortType::Input, PortType::Output) =>  {
                 Err(BuilderError::PortBindError {
-                    port_a_key: port_a_key,
-                    port_b_key: port_b_key,
+                    port_a_key,
+                    port_b_key,
                     what: "Unexpected case: can't bind an input Port to an output Port.".to_owned()
                 })
             }
@@ -373,7 +373,6 @@ impl EnvBuilder {
 
     /// Get a fully-qualified string for the given PortKey
     pub fn port_fqn(&self, port_key: runtime::PortKey) -> Result<String, BuilderError> {
-        let port_key = port_key.into();
         self.port_builders
             .get(port_key)
             .ok_or(BuilderError::PortKeyNotFound(port_key))
@@ -386,7 +385,7 @@ impl EnvBuilder {
                             err
                         ),
                     })
-                    .map(|reactor_fqn| (reactor_fqn, port_builder.get_name().clone()))
+                    .map(|reactor_fqn| (reactor_fqn, port_builder.get_name()))
             })
             .map(|(reactor_name, port_name)| format!("{}.{}", reactor_name, port_name))
     }
@@ -394,16 +393,12 @@ impl EnvBuilder {
     /// Follow the inward_binding's of Ports to the source
     pub fn follow_port_inward_binding(&self, port_key: runtime::PortKey) -> runtime::PortKey {
         let mut cur_key = port_key;
-        loop {
-            if let Some(new_idx) = self
-                .port_builders
-                .get(cur_key)
-                .and_then(|port| port.get_inward_binding())
-            {
-                cur_key = new_idx;
-            } else {
-                break;
-            }
+        while let Some(new_idx) = self
+            .port_builders
+            .get(cur_key)
+            .and_then(|port| port.get_inward_binding())
+        {
+            cur_key = new_idx;
         }
         cur_key
     }
@@ -427,7 +422,7 @@ impl EnvBuilder {
 
     pub fn reaction_dependency_edges<'b>(
         &'b self,
-    ) -> impl Iterator<Item = (runtime::ReactionKey, runtime::ReactionKey)> + 'b {
+    ) -> impl Iterator<Item = (runtime::ReactionKey, runtime::ReactionKey)> + '_ {
         let deps = self
             .reaction_builders
             .iter()
@@ -438,7 +433,7 @@ impl EnvBuilder {
                     .keys()
                     .flat_map(move |port_key| {
                         let source_port_key = self.follow_port_inward_binding(port_key);
-                        self.port_builders[source_port_key.into()].get_antideps()
+                        self.port_builders[source_port_key].get_antideps()
                     })
                     .map(move |dep_key| (reaction_key, dep_key))
             });
@@ -531,13 +526,7 @@ impl EnvBuilder {
 
     /// Construct runtime structures from the builders.
     /// Returns a tuple of (runtime_ports, runtime_port_triggers, alias_map)
-    fn build_runtime_ports(
-        &self,
-    ) -> (
-        SlotMap<runtime::PortKey, Box<dyn runtime::BasePort>>,
-        SecondaryMap<runtime::PortKey, Vec<runtime::ReactionKey>>,
-        SecondaryMap<runtime::PortKey, runtime::PortKey>,
-    ) {
+    fn build_runtime_ports(&self) -> RuntimePortParts {
         let mut runtime_ports = SlotMap::with_key();
         let mut runtime_port_triggers = SecondaryMap::new();
         let mut alias_map = SecondaryMap::new();
@@ -550,8 +539,9 @@ impl EnvBuilder {
             .group_by(|(_port_key, inward_key)| *inward_key);
 
         for (inward_port_key, group) in port_groups.into_iter() {
-            let runtime_port_key = runtime_ports
-                .insert_with_key(|key| self.port_builders[inward_port_key].into_port(key));
+            let runtime_port_key = runtime_ports.insert_with_key(|key| {
+                self.port_builders[inward_port_key].create_runtime_port(key)
+            });
 
             runtime_port_triggers.insert(
                 runtime_port_key,
@@ -563,7 +553,11 @@ impl EnvBuilder {
             alias_map.extend(group.map(move |(port_key, _inward_key)| (port_key, runtime_port_key)))
         }
 
-        (runtime_ports, runtime_port_triggers, alias_map)
+        RuntimePortParts {
+            ports: runtime_ports,
+            port_triggers: runtime_port_triggers,
+            aliases: alias_map,
+        }
     }
 
     fn build_runtime_actions(
@@ -630,27 +624,20 @@ impl EnvBuilder {
             })
             .join("\n");
         info!("runtime_level_map:\n{levels}");
-    }
-}
 
-impl<'a> TryInto<(runtime::Env, runtime::DepInfo)> for EnvBuilder {
-    type Error = BuilderError;
-    fn try_into(self) -> Result<(runtime::Env, runtime::DepInfo), Self::Error> {
-        let reaction_levels = self.build_runtime_level_map()?;
-        let (runtime_actions, runtime_action_triggers) = self.build_runtime_actions();
-        let (runtime_ports, runtime_port_triggers, alias_map) = self.build_runtime_ports();
-
-        for (builder_port_key, port_key) in alias_map.iter() {
+        let runtime_port_parts = self.build_runtime_ports();
+        for (builder_port_key, port_key) in runtime_port_parts.aliases.iter() {
             debug!(
                 "Alias {} -> {:?}",
-                self.port_fqn(builder_port_key)?,
-                runtime_ports[*port_key]
+                self.port_fqn(builder_port_key).unwrap(),
+                runtime_port_parts.ports[*port_key]
             )
         }
 
-        for (runtime_port_key, triggers) in runtime_port_triggers.iter() {
+        for (runtime_port_key, triggers) in runtime_port_parts.port_triggers.iter() {
             // reverse look up the builder::port_key from the runtime::port_key
-            let port_key = alias_map
+            let port_key = runtime_port_parts
+                .aliases
                 .iter()
                 .find_map(|(port_key, runtime_port_key_b)| {
                     if &runtime_port_key == runtime_port_key_b {
@@ -662,13 +649,23 @@ impl<'a> TryInto<(runtime::Env, runtime::DepInfo)> for EnvBuilder {
                 .expect("Illegal internal state.");
             debug!(
                 "{:?}: {:?}",
-                self.port_fqn(port_key)?,
+                self.port_fqn(port_key).unwrap(),
                 triggers
                     .iter()
                     .map(|key| self.reaction_fqn(*key))
-                    .collect::<Result<Vec<_>, _>>()?
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
             );
         }
+    }
+}
+
+impl TryInto<(runtime::Env, runtime::DepInfo)> for EnvBuilder {
+    type Error = BuilderError;
+    fn try_into(self) -> Result<(runtime::Env, runtime::DepInfo), Self::Error> {
+        let reaction_levels = self.build_runtime_level_map()?;
+        let (runtime_actions, runtime_action_triggers) = self.build_runtime_actions();
+        let runtime_port_parts = self.build_runtime_ports();
 
         let mut runtime_reactors = SlotMap::<ReactorKey, _>::with_key();
         for (_, builder) in self.reactor_builders.into_iter() {
@@ -702,7 +699,7 @@ impl<'a> TryInto<(runtime::Env, runtime::DepInfo)> for EnvBuilder {
                             .input_ports
                             .iter()
                             .sorted_by_key(|(_, &order)| order)
-                            .map(|(builder_key, _)| alias_map[builder_key])
+                            .map(|(builder_key, _)| runtime_port_parts.aliases[builder_key])
                             .collect::<Vec<_>>(),
                     );
                     // Create the Vec of output ports for this reaction sorted by order
@@ -712,7 +709,7 @@ impl<'a> TryInto<(runtime::Env, runtime::DepInfo)> for EnvBuilder {
                             .output_ports
                             .iter()
                             .sorted_by_key(|(_, &order)| order)
-                            .map(|(builder_key, _)| alias_map[builder_key])
+                            .map(|(builder_key, _)| runtime_port_parts.aliases[builder_key])
                             .collect::<Vec<_>>(),
                     );
 
@@ -733,10 +730,9 @@ impl<'a> TryInto<(runtime::Env, runtime::DepInfo)> for EnvBuilder {
 
                     let (actions_trigger, actions_schedulable) = grouped_actions
                         .into_iter()
-                        .map(|(_, group)| {
+                        .filter_map(|(_, group)| {
                             group.reduce(|acc, item| (acc.0, acc.1.max(item.1), acc.2.max(item.2)))
                         })
-                        .flatten()
                         .sorted_by_key(|(_, &order, _)| order)
                         .map(|(action_key, _, schedulable)| (action_key, schedulable))
                         .partition_map(|(action_key, schedulable)| {
@@ -769,12 +765,12 @@ impl<'a> TryInto<(runtime::Env, runtime::DepInfo)> for EnvBuilder {
         Ok((
             runtime::Env {
                 reactors: runtime_reactors,
-                ports: runtime_ports,
+                ports: runtime_port_parts.ports,
                 actions: runtime_actions,
-                reactions: reactions,
+                reactions,
             },
             runtime::DepInfo {
-                port_triggers: runtime_port_triggers,
+                port_triggers: runtime_port_parts.port_triggers,
                 action_triggers: runtime_action_triggers,
                 reaction_levels,
                 reaction_inputs,

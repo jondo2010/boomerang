@@ -49,13 +49,6 @@ impl Tag {
             }
         }
     }
-
-    // pub fn difference(&self, other: &Tag) -> (Duration, usize) {
-    //    (
-    //        self.offset.saturating_duration_since(other.offset),
-    //        self.micro_step - other.micro_step,
-    //    )
-    //}
 }
 
 #[derive(Debug, Display, PartialEq, Eq, PartialOrd, Ord, Clone)]
@@ -65,14 +58,13 @@ pub struct LogicalTime {
     micro_step: usize,
 }
 
-impl LogicalTime {
-    pub fn new() -> Self {
-        Self {
-            time_point: Instant::now(),
-            micro_step: 0,
-        }
+impl Default for LogicalTime {
+    fn default() -> Self {
+        Self { time_point: Instant::now(), micro_step: 0 }
     }
+}
 
+impl LogicalTime {
     pub fn get_time_point(&self) -> Instant {
         self.time_point
     }

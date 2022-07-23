@@ -220,7 +220,7 @@ fn build_reaction_args(itemfn: &syn::ItemFn) -> darling::Result<Vec<ReactionArg>
         .collect_vec();
 
     errors.finish()?;
-    return Ok(args);
+    Ok(args)
 }
 
 impl ReactionReceiver {
@@ -334,7 +334,7 @@ impl ReactionReceiver {
     }
 
     fn fn_args_tokens(&self) -> impl Iterator<Item = proc_macro2::TokenStream> + '_ {
-        self.args.iter().filter_map(|arg| {
+        self.args.iter().map(|arg| {
             let ident = &arg.ident;
             // let ty = quote! {<#ty_elem as ::boomerang::runtime::AssociatedItem>::Inner};
             let ty = &arg.ty;
@@ -342,15 +342,15 @@ impl ReactionReceiver {
                 ArgumentAttr::Port {
                     attrs: PortAttrs::Triggers | PortAttrs::Uses,
                     ..
-                } => Some(quote! { #ident.downcast_ref::<#ty>().expect("Wrong Port type!") }),
+                } => quote! { #ident.downcast_ref::<#ty>().expect("Wrong Port type!") },
                 ArgumentAttr::Port {
                     attrs: PortAttrs::Effects,
                     ..
-                } => Some(quote! { #ident.downcast_mut::<#ty>().expect("Wrong Port type!") }),
+                } => quote! { #ident.downcast_mut::<#ty>().expect("Wrong Port type!") },
                 ArgumentAttr::Action {
                     //attrs: ActionAttrs::Effects | ActionAttrs::TriggersAndEffects,
                     ..
-                } => Some(quote! { (* #ident).into() }),
+                } => quote! { (* #ident).into() },
             }
         })
     }
@@ -416,7 +416,7 @@ impl ReactionReceiver {
     }
 
     fn wrapper_signature(&self) -> syn::Signature {
-        let signature = {
+        {
             let mut generics = self.itemfn.sig.generics.clone();
             generics
                 .params
@@ -432,7 +432,7 @@ impl ReactionReceiver {
                 abi: None,
                 fn_token: self.itemfn.sig.fn_token,
                 ident: format_ident!("__build_{}", self.itemfn.sig.ident),
-                generics: generics,
+                generics,
                 paren_token: self.itemfn.sig.paren_token,
                 inputs: parse_quote!(
                     name: &str,
@@ -445,8 +445,7 @@ impl ReactionReceiver {
                         ::boomerang::builder::BuilderError>
                 ),
             }
-        };
-        signature
+        }
     }
 }
 

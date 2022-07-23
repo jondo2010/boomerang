@@ -27,7 +27,7 @@ impl PartialEq for ScheduledEvent {
 
 impl PartialOrd for ScheduledEvent {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(&other))
+        Some(self.cmp(other))
     }
 }
 
@@ -41,22 +41,19 @@ impl Ord for ScheduledEvent {
 }
 
 pub struct Scheduler {
+    /// The environment state
     env: Env,
-
     /// Dependency information
     dep_info: DepInfo,
-
     /// Whether to skip wall-clock synchronization
     fast_forward: bool,
-
     /// Asynchronous events receiver
     event_rx: Receiver<ScheduledEvent>,
 
     event_queue: BinaryHeap<ScheduledEvent>,
-
     /// Initial wall-clock time.
     start_time: Instant,
-
+    /// A shutdown has been scheduled at this time.
     shutdown_tag: Option<Tag>,
 }
 
@@ -78,7 +75,7 @@ impl Scheduler {
     fn startup(&mut self) {
         trace!("Starting the execution");
         let tag = Tag::new(Duration::ZERO, 0);
-        let mut reaction_set = ReactionSet::new();
+        let mut reaction_set = ReactionSet::default();
 
         // For all Timers, pump later events onto the queue and create an initial ReactionSet to
         // process.
@@ -129,7 +126,7 @@ impl Scheduler {
 
     fn shutdown(&mut self, shutdown_tag: Tag, _reactions: Option<ReactionSet>) {
         info!("Shutting down at {shutdown_tag}");
-        let mut reaction_set = ReactionSet::new();
+        let mut reaction_set = ReactionSet::default();
         for action in self.env.actions.values() {
             if let InternalAction::Shutdown { key, .. } = action {
                 let downstream = self.dep_info.triggered_by_action(*key);

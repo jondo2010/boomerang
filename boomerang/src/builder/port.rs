@@ -41,8 +41,8 @@ pub trait BasePortBuilder {
     fn get_triggers(&self) -> Vec<runtime::ReactionKey>;
     fn register_dependency(&mut self, reaction_key: runtime::ReactionKey, is_trigger: bool);
     fn register_antidependency(&mut self, reaction_key: runtime::ReactionKey);
-
-    fn into_port(&self, key: runtime::PortKey) -> Box<dyn runtime::BasePort>;
+    /// Create a runtime Port from this PortBuilder
+    fn create_runtime_port(&self, key: runtime::PortKey) -> Box<dyn runtime::BasePort>;
 }
 
 pub struct PortBuilder<T: runtime::PortData> {
@@ -83,50 +83,49 @@ impl<T: runtime::PortData> BasePortBuilder for PortBuilder<T> {
     fn get_name(&self) -> &str {
         &self.name
     }
+
     fn get_reactor_key(&self) -> runtime::ReactorKey {
         self.reactor_key
     }
+
     fn get_inward_binding(&self) -> Option<runtime::PortKey> {
-        self.inward_binding
-            .as_ref()
-            .map(|port_key| port_key.0.into())
+        self.inward_binding.as_ref().map(|port_key| port_key.0)
     }
+
     fn get_port_type(&self) -> &PortType {
         &self.port_type
     }
+
     fn get_deps(&self) -> Vec<runtime::ReactionKey> {
         self.deps.keys().collect()
     }
+
     fn get_antideps(&self) -> secondary::Keys<runtime::ReactionKey, ()> {
         self.antideps.keys()
     }
+
     fn get_triggers(&self) -> Vec<runtime::ReactionKey> {
         self.triggers.keys().collect()
     }
+
     fn set_inward_binding(&mut self, inward_binding: Option<runtime::PortKey>) {
         self.inward_binding = inward_binding.map(|port_key| BuilderPortKey(port_key, PhantomData));
     }
+
     fn get_outward_bindings(&self) -> secondary::Keys<runtime::PortKey, ()> {
         self.outward_bindings.keys()
     }
+
     fn add_outward_binding(&mut self, outward_binding: runtime::PortKey) {
         self.outward_bindings
             .insert(outward_binding.data().into(), ());
     }
+
     fn register_dependency(&mut self, reaction_key: runtime::ReactionKey, is_trigger: bool) {
         assert!(
             self.outward_bindings.is_empty(),
             "Dependencies may no be declared on ports with an outward binding!"
         );
-
-        if self.port_type == PortType::Input {
-            //  VALIDATE(this->container() == reaction->container(), "Dependent input ports must
-            // belong to the same reactor as the reaction");
-        } else {
-            //  VALIDATE(this->container()->container() == reaction->container(), "Dependent output
-            // ports must belong to a contained reactor");
-        }
-
         self.deps.insert(reaction_key, ());
         if is_trigger {
             self.triggers.insert(reaction_key, ());
@@ -138,18 +137,11 @@ impl<T: runtime::PortData> BasePortBuilder for PortBuilder<T> {
             self.inward_binding.is_none(),
             "Antidependencies may no be declared on ports with an inward binding!"
         );
-        if self.port_type == PortType::Output {
-            //  VALIDATE(this->container() == reaction->container(), "Antidependent output ports
-            // must belong to the same reactor as the reaction");
-        } else {
-            //  VALIDATE(this->container()->container() == reaction->container(), "Antidependent
-            // input ports must belong to a contained reactor");
-        }
         self.antideps.insert(reaction_key, ());
     }
 
     /// Build the PortBuilder into a runtime Port
-    fn into_port(&self, key: runtime::PortKey) -> Box<dyn runtime::BasePort> {
+    fn create_runtime_port(&self, key: runtime::PortKey) -> Box<dyn runtime::BasePort> {
         Box::new(runtime::Port::<T>::new(self.name.clone(), key))
     }
 }

@@ -87,7 +87,7 @@ fn build_actions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &mu
         let xlabel = match action.get_type() {
             ActionType::Timer { period, offset } => {
                 if offset.is_zero() {
-                    format!("⏲ (startup)")
+                    "⏲ (startup)".into()
                 } else {
                     format!("⏲ ({} ms, {} ms)", offset.as_millis(), period.as_millis())
                 }
@@ -96,7 +96,7 @@ fn build_actions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &mu
                 format!("L({} ms)", min_delay.unwrap_or_default().as_millis())
             }
             ActionType::Shutdown => {
-                format!("Shutdown")
+                "Shutdown".into()
             }
         };
 
@@ -169,20 +169,20 @@ pub fn create_full_graph(env_builder: &EnvBuilder) -> Result<String, BuilderErro
                 reactor.type_name(),
                 reactor.name
             ));
-            output.push(format!("  style=\"rounded\"; node [shape=record];"));
+            output.push("  style=\"rounded\"; node [shape=record];".into());
 
             build_ports(env_builder, reactor, reactor_id, &mut output);
             build_reactions(env_builder, reactor, &mut output);
             build_actions(env_builder, reactor, &mut output);
         }
         petgraph::visit::DfsEvent::Finish(_, _) => {
-            output.push(format!("}}"));
+            output.push("}}".into());
         }
         _ => {}
     });
 
     build_port_bindings(env_builder, &mut output);
-    output.push(format!("}}\n"));
+    output.push("}}\n".into());
     Ok(output.join("\n"))
 }
 
@@ -221,7 +221,7 @@ pub fn create_reaction_graph(env_builder: &EnvBuilder) -> Result<String, Builder
             ));
         }
 
-        output.push(format!("}}"));
+        output.push("}}".into());
     }
 
     for (from, to, _) in reaction_graph.all_edges() {
@@ -230,6 +230,6 @@ pub fn create_reaction_graph(env_builder: &EnvBuilder) -> Result<String, Builder
         output.push(format!("  r{} -> r{};", from_id, to_id));
     }
 
-    output.push(format!("}}\n"));
+    output.push("}}\n".into());
     Ok(output.join("\n"))
 }

@@ -56,7 +56,7 @@ impl<'a, T: PortData> From<&'a mut ValuedAction> for ActionMut<'a, T> {
         Self {
             key: valued_action.key,
             min_delay: &valued_action.min_delay,
-            values: values,
+            values,
         }
     }
 }
@@ -70,7 +70,7 @@ impl<'a, T: PortData> From<&'a ValuedAction> for Action<'a, T> {
         Self {
             key: valued_action.key,
             min_delay: &valued_action.min_delay,
-            values: values,
+            values,
         }
     }
 }

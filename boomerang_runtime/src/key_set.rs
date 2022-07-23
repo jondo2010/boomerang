@@ -4,18 +4,13 @@ use slotmap::{Key, SecondaryMap};
 use crate::Level;
 
 /// A set of Keys organized by level
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct KeySet<K: Key> {
     /// List of SecondaryMaps, reverse-sorted by Level
     levels: Vec<(Level, SecondaryMap<K, ()>)>,
 }
 
 impl<K: Key> KeySet<K> {
-    /// Create an empty KeySet
-    pub fn new() -> Self {
-        Self { levels: Vec::new() }
-    }
-
     pub fn len(&self) -> usize {
         self.levels.len()
     }
@@ -25,14 +20,13 @@ impl<K: Key> KeySet<K> {
     where
         I: IntoIterator<Item = (Level, K)>,
     {
-        let levels = keys
+        keys
             .into_iter()
             .sorted_by_key(|(level, _)| -(*level as isize))
             .group_by(|(level, _)| *level)
             .into_iter()
             .map(|(level, group)| (level, group.map(|(_, key)| (key, ())).collect()))
-            .collect_vec();
-        levels
+            .collect_vec()
     }
 
     /// Create a new KeySet from an iterable
@@ -40,9 +34,7 @@ impl<K: Key> KeySet<K> {
     where
         I: IntoIterator<Item = (Level, K)>,
     {
-        let levels = Self::build_levels(keys);
-
-        Self { levels }
+        Self { levels: Self::build_levels(keys) }
     }
 
     /// Extend the set from `other` into `self`. Any keys at a level lower than the current
@@ -159,7 +151,7 @@ mod tests {
         let key2 = sm.insert(());
         let key3 = sm.insert(());
 
-        let mut rset = KeySet::new();
+        let mut rset = KeySet::default();
 
         // Extend into empty set
         rset.extend_above(IntoIterator::into_iter([(1usize, key0)]), 0);
@@ -191,7 +183,7 @@ mod tests {
         let key2 = sm.insert(());
         let key3 = sm.insert(());
 
-        let mut rset = KeySet::new();
+        let mut rset = KeySet::default();
 
         rset.extend_above([(0, key0)].into_iter(), 0);
         let (level, keys) = rset.next().unwrap();

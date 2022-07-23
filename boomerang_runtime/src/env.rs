@@ -178,7 +178,6 @@ impl Env {
             .map(|&k| dep_info.reaction_trig_actions[k].iter());
 
         let sched_action_keys = reaction_keys
-            .clone()
             .map(|&k| dep_info.reaction_sched_actions[k].iter());
 
         let (actions, sched_actions) = disjoint::disjoint_unchecked_chunked(
@@ -193,7 +192,7 @@ impl Env {
             reactions,
             grouped_inputs: inputs,
             grouped_outputs: outputs,
-            actions: actions,
+            actions,
             schedulable_actions: sched_actions,
         }
     }

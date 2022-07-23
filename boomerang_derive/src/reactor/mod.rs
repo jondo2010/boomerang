@@ -120,7 +120,7 @@ impl FromMeta for EffectAttr {
                 .path
                 .segments
                 .first()
-                .ok_or(darling::Error::unknown_field_path(&value.path).with_span(item))
+                .ok_or_else(|| darling::Error::unknown_field_path(&value.path).with_span(item))
                 .and_then(|path| match path.ident.to_string().as_ref() {
                     "action" => {
                         let value = darling::FromMeta::from_value(&value.lit)?;
@@ -240,7 +240,7 @@ impl<'a> From<&'a RawReactorField> for ReactorField<'a> {
                 reaction: None,
                 ..
             } => {
-                let name = rename.as_ref().unwrap_or(&ident).to_string();
+                let name = rename.as_ref().unwrap_or(ident).to_string();
                 ReactorField::Timer {
                     ident,
                     name,
@@ -260,7 +260,7 @@ impl<'a> From<&'a RawReactorField> for ReactorField<'a> {
                 reaction: None,
                 ..
             } => {
-                let name = rename.as_ref().unwrap_or(&ident).to_string();
+                let name = rename.as_ref().unwrap_or(ident).to_string();
                 ReactorField::Input { ident, name, ty }
             }
 
@@ -275,7 +275,7 @@ impl<'a> From<&'a RawReactorField> for ReactorField<'a> {
                 reaction: None,
                 ..
             } => {
-                let name = rename.as_ref().unwrap_or(&ident).to_string();
+                let name = rename.as_ref().unwrap_or(ident).to_string();
                 ReactorField::Output { ident, name, ty }
             }
 
@@ -298,7 +298,7 @@ impl<'a> From<&'a RawReactorField> for ReactorField<'a> {
                 ..
             } => {
                 // let ty = quote! {<#ty as ::boomerang::runtime::AssociatedItem>::Inner};
-                let name = rename.as_ref().unwrap_or(&ident).to_string();
+                let name = rename.as_ref().unwrap_or(ident).to_string();
                 ReactorField::Action {
                     ident,
                     name,
@@ -321,7 +321,7 @@ impl<'a> From<&'a RawReactorField> for ReactorField<'a> {
                 reaction: None,
                 ..
             } => {
-                let name = rename.as_ref().unwrap_or(&ident).to_string();
+                let name = rename.as_ref().unwrap_or(ident).to_string();
                 ReactorField::Child {
                     ident,
                     name,

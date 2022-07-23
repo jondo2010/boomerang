@@ -653,7 +653,8 @@ impl EnvBuilder {
                 triggers
                     .iter()
                     .map(|key| self.reaction_fqn(*key))
-                    .collect::<Result<Vec<_>, _>>().unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
             );
         }
     }
@@ -729,10 +730,9 @@ impl TryInto<(runtime::Env, runtime::DepInfo)> for EnvBuilder {
 
                     let (actions_trigger, actions_schedulable) = grouped_actions
                         .into_iter()
-                        .map(|(_, group)| {
+                        .filter_map(|(_, group)| {
                             group.reduce(|acc, item| (acc.0, acc.1.max(item.1), acc.2.max(item.2)))
                         })
-                        .flatten()
                         .sorted_by_key(|(_, &order, _)| order)
                         .map(|(action_key, _, schedulable)| (action_key, schedulable))
                         .partition_map(|(action_key, schedulable)| {

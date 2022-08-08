@@ -4,7 +4,7 @@ use derive_more::Display;
 #[derive(Debug, Display, PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Hash)]
 #[display(fmt = "[{:?}+{}]", offset, micro_step)]
 pub struct Tag {
-    /// Offset from origin t0 of logical time
+    /// Offset from origin of logical time
     offset: Duration,
     /// Superdense-timestep
     micro_step: usize,
@@ -49,10 +49,14 @@ impl Tag {
             }
         }
     }
+
+    pub fn get_offset(&self) -> Duration {
+        self.offset
+    }
 }
 
 #[derive(Debug, Display, PartialEq, Eq, PartialOrd, Ord, Clone)]
-#[display(fmt = "[{:?}, {}]", "time_point.elapsed()", micro_step)]
+#[display(fmt = "[{:?}+{}]", "time_point.elapsed()", micro_step)]
 pub struct LogicalTime {
     time_point: Instant,
     micro_step: usize,
@@ -60,7 +64,10 @@ pub struct LogicalTime {
 
 impl Default for LogicalTime {
     fn default() -> Self {
-        Self { time_point: Instant::now(), micro_step: 0 }
+        Self {
+            time_point: Instant::now(),
+            micro_step: 0,
+        }
     }
 }
 

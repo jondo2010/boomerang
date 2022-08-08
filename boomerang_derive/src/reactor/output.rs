@@ -3,10 +3,7 @@ use itertools::{Either, Itertools};
 use quote::{format_ident, quote};
 
 use super::ReactorField;
-use crate::{
-    reactor::ReactorReceiver,
-    util::{self, OptionalDuration},
-};
+use crate::{reactor::ReactorReceiver, util::OptionalDuration};
 
 pub struct ReactorFieldBuilder<'a, 'b> {
     pub(super) field: &'b ReactorField<'a>,
@@ -33,8 +30,8 @@ impl<'a, 'b> ToTokens for ReactorFieldBuilder<'a, 'b> {
         } = self;
         tokens.extend(match field {
             ReactorField::Timer { ident, name, period, offset } => {
-                let period = util::duration_quote(period);
-                let offset = util::duration_quote(offset);
+                let period = OptionalDuration(*period);
+                let offset = OptionalDuration(*offset);
                 quote! { let #ident = #builder_ident.add_timer(#name, #period, #offset)?; }
             }
             ReactorField::Input { ident, name, ty } => {
@@ -45,10 +42,15 @@ impl<'a, 'b> ToTokens for ReactorFieldBuilder<'a, 'b> {
                 let ty = quote! {<#ty as ::boomerang::runtime::InnerType>::Inner};
                 quote! { let #ident = #builder_ident.add_port::<#ty>(#name, ::boomerang::builder::PortType::Output)?; }
             }
-            ReactorField::Action { ident, name, ty, physical: _, min_delay, mit: _, policy :_} => {
+            ReactorField::Action { ident, name, ty, physical: false, min_delay, mit: _, policy :_} => {
                 let ty = quote! {<#ty as ::boomerang::runtime::InnerType>::Inner};
                 let min_delay = OptionalDuration(**min_delay);
                 quote! { let #ident = #builder_ident.add_logical_action::<#ty>(#name, #min_delay)?; }
+            }
+            ReactorField::Action { ident, name, ty, physical: true, min_delay, mit: _, policy :_} => {
+                let ty = quote! {<#ty as ::boomerang::runtime::InnerType>::Inner};
+                let min_delay = OptionalDuration(**min_delay);
+                quote! { let #ident = #builder_ident.add_physical_action::<#ty>(#name, #min_delay)?; }
             }
             ReactorField::Child { ident, name, ty, .. } => {
                 let state_ident = format_ident!("__{ident}_state");

@@ -1,13 +1,13 @@
 use super::{
     action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder, ActionBuilderFn,
     ActionType, BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactionKey,
-    BuilderReactorKey, PortBuilder, PortType, ReactorBuilder, ReactorBuilderState, TypedActionKey,
-    TypedPortKey,
+    BuilderReactorKey, Logical, Physical, PortBuilder, PortType, ReactionBuilderState,
+    ReactorBuilder, ReactorBuilderState, TypedActionKey, TypedPortKey,
 };
 use crate::runtime;
 use itertools::Itertools;
 use petgraph::{graphmap::DiGraphMap, EdgeDirection};
-use runtime::ValuedAction;
+use runtime::{LogicalAction, PhysicalAction};
 use slotmap::{SecondaryMap, SlotMap};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -35,6 +35,7 @@ pub struct EnvBuilder {
 }
 
 /// Return type for building runtime parts
+#[derive(Debug)]
 struct RuntimePortParts {
     /// All runtime Ports
     ports: tinymap::TinyMap<runtime::PortKey, Box<dyn runtime::BasePort>>,
@@ -44,8 +45,9 @@ struct RuntimePortParts {
     aliases: SecondaryMap<BuilderPortKey, runtime::PortKey>,
 }
 
+#[derive(Debug)]
 struct RuntimeActionParts {
-    actions: tinymap::TinyMap<runtime::ActionKey, runtime::InternalAction>,
+    actions: tinymap::TinyMap<runtime::ActionKey, runtime::Action>,
     action_triggers: tinymap::TinySecondaryMap<runtime::ActionKey, Vec<BuilderReactionKey>>,
     aliases: SecondaryMap<BuilderActionKey, runtime::ActionKey>,
 }
@@ -94,23 +96,16 @@ impl EnvBuilder {
         Ok(TypedPortKey::new(key))
     }
 
-    pub fn add_timer(
+    pub fn add_startup_action(
         &mut self,
         name: &str,
-        period: runtime::Duration,
-        offset: runtime::Duration,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey, BuilderError> {
-        self.add_action::<(), _>(
+        self.add_action::<(), Logical, _>(
             name,
-            ActionType::Timer { period, offset },
+            ActionType::Startup,
             reactor_key,
-            move |name: &'_ str, key: runtime::ActionKey| runtime::InternalAction::Timer {
-                name: name.into(),
-                key,
-                offset,
-                period,
-            },
+            |_: &'_ str, _: runtime::ActionKey| runtime::Action::Startup,
         )
     }
 
@@ -119,46 +114,73 @@ impl EnvBuilder {
         name: &str,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey, BuilderError> {
-        self.add_action::<(), _>(
+        self.add_action::<(), Logical, _>(
             name,
             ActionType::Shutdown,
             reactor_key,
-            |name: &'_ str, key: runtime::ActionKey| runtime::InternalAction::Shutdown {
-                name: name.into(),
-                key,
-            },
+            |_: &'_ str, _: runtime::ActionKey| runtime::Action::Shutdown,
         )
     }
 
-    pub fn add_logical_action<T: runtime::PortData>(
+    pub fn add_logical_action<T: runtime::ActionData>(
         &mut self,
         name: &str,
         min_delay: Option<runtime::Duration>,
         reactor_key: BuilderReactorKey,
-    ) -> Result<TypedActionKey<T>, BuilderError> {
-        self.add_action::<T, _>(
+    ) -> Result<TypedActionKey<T, Logical>, BuilderError> {
+        self.add_action::<T, Logical, _>(
             name,
             ActionType::Logical { min_delay },
             reactor_key,
             move |name: &'_ str, key: runtime::ActionKey| {
-                runtime::InternalAction::Valued(ValuedAction::new::<T>(
+                runtime::Action::Logical(LogicalAction::new::<T>(
                     name,
                     key,
-                    true,
                     min_delay.unwrap_or_default(),
                 ))
             },
         )
     }
 
+    pub fn add_physical_action<T: runtime::ActionData>(
+        &mut self,
+        name: &str,
+        min_delay: Option<runtime::Duration>,
+        reactor_key: BuilderReactorKey,
+    ) -> Result<TypedActionKey<T, Physical>, BuilderError> {
+        self.add_action::<T, Physical, _>(
+            name,
+            ActionType::Physical { min_delay },
+            reactor_key,
+            move |name: &'_ str, action_key| {
+                runtime::Action::Physical(PhysicalAction::new::<T>(
+                    name,
+                    action_key,
+                    min_delay.unwrap_or_default(),
+                ))
+            },
+        )
+    }
+
+    /// Add a Reaction to a given Reactor
+    pub fn add_reaction(
+        &mut self,
+        name: &str,
+        reactor_key: BuilderReactorKey,
+        reaction_fn: Box<dyn runtime::ReactionFn>,
+    ) -> ReactionBuilderState {
+        let priority = self.reactor_builders[reactor_key].reactions.len();
+        ReactionBuilderState::new(name, priority, reactor_key, reaction_fn, self)
+    }
+
     /// Add an Action to a given Reactor using closure F
-    pub fn add_action<T, F>(
+    pub fn add_action<T, Q, F>(
         &mut self,
         name: &str,
         ty: ActionType,
         reactor_key: BuilderReactorKey,
         action_fn: F,
-    ) -> Result<TypedActionKey<T>, BuilderError>
+    ) -> Result<TypedActionKey<T, Q>, BuilderError>
     where
         T: runtime::PortData,
         F: ActionBuilderFn + 'static,

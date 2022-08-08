@@ -10,12 +10,16 @@ use boomerang::{
 struct GeneratedDelayBuilder {
     #[reactor(input())]
     y_in: TypedPortKey<u32>,
+
     #[reactor(output())]
     y_out: TypedPortKey<u32>,
+
     #[reactor(action(physical = "false", min_delay = "100 msec"))]
-    act: TypedActionKey<()>,
+    act: TypedActionKey,
+
     #[reactor(reaction(function = "GeneratedDelay::reaction_y_in"))]
     reaction_y_in: BuilderReactionKey,
+
     #[reactor(reaction(function = "GeneratedDelay::reaction_act"))]
     reaction_act: BuilderReactionKey,
 }
@@ -35,7 +39,7 @@ impl GeneratedDelay {
         &mut self,
         ctx: &mut runtime::Context,
         #[reactor::port(triggers)] y_in: &runtime::Port<u32>,
-        #[reactor::action(effects)] mut act: runtime::ActionMut,
+        #[reactor::action(effects)] mut act: runtime::ActionRef,
     ) {
         self.y_state = y_in.get().unwrap();
         ctx.schedule_action(&mut act, None, None);
@@ -120,7 +124,9 @@ struct ActionDelayBuilder {
     g: GeneratedDelayBuilder,
 }
 
-fn main() {
+#[test]
+fn action_delay() {
     tracing_subscriber::fmt::init();
-    let _ = run::build_and_run_reactor::<ActionDelayBuilder>("action_delay", ()).unwrap();
+    let _ =
+        run::build_and_test_reactor::<ActionDelayBuilder>("action_delay", (), true, false).unwrap();
 }

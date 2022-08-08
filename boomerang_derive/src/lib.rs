@@ -6,7 +6,6 @@ mod util;
 
 use darling::{FromDeriveInput, ToTokens};
 
-use quote::quote;
 use syn::{parse_macro_input, AttributeArgs, ItemFn};
 
 #[doc(hidden)]
@@ -21,7 +20,7 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     //.and_then(|receiver| receiver.validate());
 
     match receiver {
-        Ok(receiver) => quote!(#receiver),
+        Ok(receiver) => receiver.to_token_stream(),
         Err(err) => err.write_errors(),
     }
     .into()

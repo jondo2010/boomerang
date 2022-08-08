@@ -67,18 +67,13 @@ impl ReactionBuilder {
             .map(|(builder_port_key, _)| port_aliases[builder_port_key])
             .collect();
 
-        let trigger_actions = self
+        let actions = self
             .trigger_actions
             .iter()
+            .chain(self.schedulable_actions.iter())
             .sorted_by_key(|(_, &order)| order)
             .map(|(builder_action_key, _)| action_aliases[builder_action_key])
-            .collect();
-
-        let sched_actions = self
-            .schedulable_actions
-            .iter()
-            .sorted_by_key(|(_, &order)| order)
-            .map(|(builder_action_key, _)| action_aliases[builder_action_key])
+            .dedup()
             .collect();
 
         runtime::Reaction::new(
@@ -86,8 +81,7 @@ impl ReactionBuilder {
             reactor_key,
             inputs,
             outputs,
-            trigger_actions,
-            sched_actions,
+            actions,
             self.reaction_fn,
             None,
         )
@@ -135,9 +129,9 @@ impl<'a> ReactionBuilderState<'a> {
     }
 
     /// Indicate that this Reaction can be triggered by the given Action
-    pub fn with_trigger_action<T: runtime::PortData>(
+    pub fn with_trigger_action<T: runtime::PortData, Q>(
         mut self,
-        trigger_key: TypedActionKey<T>,
+        trigger_key: TypedActionKey<T, Q>,
         order: usize,
     ) -> Self {
         self.builder
@@ -157,9 +151,9 @@ impl<'a> ReactionBuilderState<'a> {
     }
 
     /// Indicate that this Reaction may schedule the given Action
-    pub fn with_scheduable_action<T: runtime::PortData>(
+    pub fn with_schedulable_action<T: runtime::PortData, Q>(
         mut self,
-        action_key: TypedActionKey<T>,
+        action_key: TypedActionKey<T, Q>,
         order: usize,
     ) -> Self {
         self.builder
@@ -167,13 +161,6 @@ impl<'a> ReactionBuilderState<'a> {
             .insert(action_key.into(), order);
         self
     }
-
-    // pub fn with_scheduable_actions(mut self, action_keys: &[runtime::ActionKey]) -> Self {
-    //    self.builder
-    //        .schedulable_actions
-    //        .extend(action_keys.iter().map(|&key| (key, ())));
-    //    self
-    //}
 
     /// Indicate that this Reaction may set the value of the given Port (uses keyword).
     pub fn with_antidependency<T: runtime::PortData>(

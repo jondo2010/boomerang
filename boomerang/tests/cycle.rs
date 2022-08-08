@@ -78,7 +78,8 @@ struct CycleBuilder {
     b: BBuilder,
 }
 
-fn main() {
+#[test]
+fn cycle() {
     tracing_subscriber::fmt::init();
-    let _ = run::build_and_run_reactor::<CycleBuilder>("cycle", ()).unwrap();
+    let _ = run::build_and_test_reactor::<CycleBuilder>("cycle", (), true, false).unwrap();
 }

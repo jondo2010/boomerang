@@ -71,7 +71,7 @@ struct GainBuilder {
 #[derive(Debug)]
 struct Gain;
 impl Gain {
-    #[boomerang::reaction(reactor = "GainBuilder", triggers(timer = "tim"))]
+    #[boomerang::reaction(reactor = "GainBuilder", triggers(action = "tim"))]
     fn reaction_tim(
         &mut self,
         _ctx: &runtime::Context,
@@ -81,7 +81,8 @@ impl Gain {
     }
 }
 
-fn main() {
+#[test]
+fn gain() {
     tracing_subscriber::fmt::init();
-    let _ = run::build_and_run_reactor::<GainBuilder>("gain", Gain).unwrap();
+    let _ = run::build_and_test_reactor::<GainBuilder>("gain", Gain, true, false).unwrap();
 }

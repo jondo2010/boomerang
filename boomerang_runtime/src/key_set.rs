@@ -1,12 +1,27 @@
+use std::fmt::Debug;
+
 use itertools::Itertools;
 
 use crate::Level;
 
-/// A set of Keys organized by level
-#[derive(Debug, Clone, Default)]
+/// A set of Keys organized by [`Level`]. The set is sorted by `Level` in descending order, so that the highest level
+/// is always at the front of the set. Calling `next()` will pop the lowest level off the end.
+#[derive(Clone, Default)]
 pub struct KeySet<K: tinymap::Key> {
     /// List of SecondaryMaps, reverse-sorted by Level
     levels: Vec<(Level, tinymap::TinySecondaryMap<K, ()>)>,
+}
+
+impl<K: tinymap::Key + Debug> Debug for KeySet<K> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_map()
+            .entries(
+                self.levels
+                    .iter()
+                    .map(|(level, keys)| (level, keys.clone().into_keys())),
+            )
+            .finish()
+    }
 }
 
 impl<K: tinymap::Key> KeySet<K> {
@@ -91,6 +106,10 @@ impl<K: tinymap::Key> Iterator for KeySet<K> {
         self.levels
             .pop()
             .map(|(level, keys)| (level, keys.into_keys()))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.levels.len(), Some(self.levels.len()))
     }
 }
 

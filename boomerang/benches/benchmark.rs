@@ -1,23 +1,27 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 
 use boomerang::{
-    builder::{BuilderActionKey, EnvBuilder, Reactor, TypedPortKey},
+    builder::{BuilderReactionKey, EnvBuilder, Reactor, TypedActionKey, TypedPortKey},
     runtime, Reactor,
 };
 
 #[derive(Reactor)]
-#[reactor(connection(from = "out1", to = "in1"))]
+#[reactor(state = "HelloBench", connection(from = "out1", to = "in1"))]
 struct HelloBenchBuilder {
     #[reactor(timer(offset = "100 msec", period = "1 sec"))]
-    tim1: BuilderActionKey,
+    tim1: TypedActionKey,
+
     #[reactor(input())]
     in1: TypedPortKey<u32>,
+
     #[reactor(output())]
     out1: TypedPortKey<u32>,
+
     #[reactor(reaction(function = "HelloBench::foo"))]
-    foo: runtime::ReactionKey,
+    foo: BuilderReactionKey,
+
     #[reactor(reaction(function = "HelloBench::bar"))]
-    bar: runtime::ReactionKey,
+    bar: BuilderReactionKey,
 }
 
 struct HelloBench {
@@ -25,7 +29,7 @@ struct HelloBench {
 }
 
 impl HelloBench {
-    #[boomerang::reaction(reactor = "HelloBenchBuilder", triggers(timer = "tim1"))]
+    #[boomerang::reaction(reactor = "HelloBenchBuilder", triggers(action = "tim1"))]
     fn foo(
         &mut self,
         _ctx: &mut runtime::Context,
@@ -47,19 +51,32 @@ impl HelloBench {
     }
 }
 
-#[inline]
-fn benchmark() {
-    let mut env_builder = EnvBuilder::new();
-    let _ = HelloBenchBuilder::build("benchmark", HelloBench { my_i: 0 }, None, &mut env_builder)
-        .expect("Error building top-level reactor!");
-    let (env, dep_info) = env_builder.try_into().unwrap();
-    let sched = runtime::Scheduler::new(env, dep_info, true);
-    sched.event_loop();
+fn bench(c: &mut Criterion) {
+    let mut group = c.benchmark_group("benchmark");
+
+    for count in [100 /*1000, 10000 100000, 1000000*/].into_iter() {
+        group.sample_size(count);
+        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
+            b.iter_batched(
+                || {
+                    let mut env_builder = EnvBuilder::new();
+                    let _reactor = HelloBenchBuilder::build(
+                        "benchmark",
+                        HelloBench { my_i: 0 },
+                        None,
+                        &mut env_builder,
+                    )
+                    .unwrap();
+                    runtime::Scheduler::new(env_builder.try_into().unwrap(), true, false)
+                },
+                |mut sched| {
+                    sched.event_loop();
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
 }
 
-pub fn criterion_benchmark(c: &mut Criterion) {
-    c.bench_function("benchmark", |b| b.iter(benchmark));
-}
-
-criterion_group!(benches, criterion_benchmark);
+criterion_group!(benches, bench);
 criterion_main!(benches);

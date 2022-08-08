@@ -47,7 +47,6 @@ pub enum TriggerAttr {
     Startup,
     Shutdown,
     Action(syn::Ident),
-    Timer(syn::Ident),
     Port(syn::Path),
 }
 
@@ -81,10 +80,6 @@ impl FromMeta for TriggerAttr {
                     "action" => {
                         let value = darling::FromMeta::from_value(&value.lit)?;
                         Ok(TriggerAttr::Action(value))
-                    }
-                    "timer" => {
-                        let value = darling::FromMeta::from_value(&value.lit)?;
-                        Ok(TriggerAttr::Timer(value))
                     }
                     "port" => {
                         let value = darling::FromMeta::from_value(&value.lit)?;
@@ -175,8 +170,8 @@ pub enum ReactorField<'a> {
     Timer {
         ident: &'a syn::Ident,
         name: String,
-        period: Duration,
-        offset: Duration,
+        period: Option<Duration>,
+        offset: Option<Duration>,
     },
     Input {
         ident: &'a syn::Ident,
@@ -244,8 +239,8 @@ impl<'a> From<&'a RawReactorField> for ReactorField<'a> {
                 ReactorField::Timer {
                     ident,
                     name,
-                    period: period.unwrap_or_default(),
-                    offset: offset.unwrap_or_default(),
+                    period: *period,
+                    offset: *offset,
                 }
             }
 
@@ -297,7 +292,6 @@ impl<'a> From<&'a RawReactorField> for ReactorField<'a> {
                 reaction: None,
                 ..
             } => {
-                // let ty = quote! {<#ty as ::boomerang::runtime::AssociatedItem>::Inner};
                 let name = rename.as_ref().unwrap_or(ident).to_string();
                 ReactorField::Action {
                     ident,

@@ -1,4 +1,5 @@
 use std::{
+    fmt::Debug,
     iter::Enumerate,
     marker::PhantomData,
     ops::{Index, IndexMut},
@@ -6,11 +7,17 @@ use std::{
 
 use super::Key;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TinySecondaryMap<K: Key, V> {
     data: Vec<Option<V>>,
     num_values: usize,
     _k: PhantomData<K>,
+}
+
+impl<K: Key + Debug, V: Debug> Debug for TinySecondaryMap<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_map().entries(self.iter()).finish()
+    }
 }
 
 impl<K: Key, V> Default for TinySecondaryMap<K, V> {
@@ -149,7 +156,7 @@ impl<K: Key, V> TinySecondaryMap<K, V> {
         self.data.get_mut(key.index())?.as_mut()
     }
 
-    /// Returns an iterator over the (k,v) entries in the map.
+    /// Returns an iterator over the (`K`, `V`) entries in the map.
     pub fn iter(&self) -> Iter<'_, K, V> {
         Iter {
             inner: self.data.iter().enumerate(),

@@ -28,7 +28,7 @@ impl ActionValues {
     fn reaction_startup(
         &mut self,
         ctx: &mut runtime::Context,
-        #[reactor::action(effects)] mut act: runtime::ActionMut<i32>,
+        #[reactor::action(effects)] mut act: runtime::ActionRef<i32>,
     ) {
         // scheduled in 100 ms
         ctx.schedule_action(&mut act, Some(100), None);
@@ -44,7 +44,7 @@ impl ActionValues {
     fn reaction_act(
         &mut self,
         ctx: &mut runtime::Context,
-        #[reactor::action(triggers)] act: runtime::Action<i32>,
+        #[reactor::action(triggers)] act: runtime::ActionRef<i32>,
     ) {
         let elapsed = ctx.get_elapsed_logical_time();
         let value = ctx.get_action(&act);
@@ -52,17 +52,13 @@ impl ActionValues {
         println!("[@{elapsed:?} action transmitted: {value:?}]");
 
         if elapsed.as_millis() == 100 {
-            assert_eq!(value, Some(&100), "ERROR: Expected action value to be 100");
+            assert_eq!(value, Some(100), "ERROR: Expected action value to be 100");
             self.r1done = true;
         } else {
             if elapsed.as_millis() != 150 {
                 panic!("ERROR: Unexpected reaction invocation at {elapsed:?}");
             }
-            assert_eq!(
-                value,
-                Some(&-100),
-                "ERROR: Expected action value to be -100"
-            );
+            assert_eq!(value, Some(-100), "ERROR: Expected action value to be -100");
             self.r2done = true;
         }
     }
@@ -76,14 +72,17 @@ impl ActionValues {
     }
 }
 
-fn main() {
+#[test]
+fn action_values() {
     tracing_subscriber::fmt::init();
-    let _ = run::build_and_run_reactor::<ActionValuesBuilder>(
+    let _ = run::build_and_test_reactor::<ActionValuesBuilder>(
         "action_values",
         ActionValues {
             r1done: false,
             r2done: false,
         },
+        true,
+        false,
     )
     .unwrap();
 }

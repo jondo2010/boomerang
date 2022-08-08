@@ -25,18 +25,15 @@ fn test_duplicate_ports() {
 #[test]
 fn test_duplicate_actions() {
     let mut env_builder = EnvBuilder::new();
-    let reactor_key = env_builder
-        .add_reactor("test_reactor", None, ())
-        .finish()
-        .unwrap();
+    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, ());
 
-    env_builder
-        .add_logical_action::<()>("action0", None, reactor_key)
+    reactor_builder
+        .add_logical_action::<()>("action0", None)
         .unwrap();
 
     assert!(matches!(
-        env_builder
-            .add_logical_action::<()>("action0", None, reactor_key)
+        reactor_builder
+            .add_logical_action::<()>("action0", None)
             .expect_err("Expected duplicate"),
         BuilderError::DuplicateActionDefinition {
             reactor_name,
@@ -45,12 +42,11 @@ fn test_duplicate_actions() {
     ));
 
     assert!(matches!(
-        env_builder
+        reactor_builder
             .add_timer(
                 "action0",
-                runtime::Duration::from_micros(0),
-                runtime::Duration::from_micros(0),
-                reactor_key
+                Some(runtime::Duration::from_micros(0)),
+                Some(runtime::Duration::from_micros(0)),
             )
             .expect_err("Expected duplicate"),
         BuilderError::DuplicateActionDefinition {
@@ -66,12 +62,12 @@ fn test_reactions1() {
     let mut reactor_builder = env_builder.add_reactor("test_reactor", None, ());
 
     let r0_key = reactor_builder
-        .add_reaction("test", Box::new(|_ctx, _r, _i, _o, _a, _| {}))
+        .add_reaction("test", Box::new(|_ctx, _r, _i, _o, _a| {}))
         .finish()
         .unwrap();
 
     let r1_key = reactor_builder
-        .add_reaction("test", Box::new(|_ctx, _r, _i, _o, _a, _| {}))
+        .add_reaction("test", Box::new(|_ctx, _r, _i, _o, _a| {}))
         .finish()
         .unwrap();
 
@@ -99,7 +95,7 @@ mod experiment {
     }
 
     struct SA<'a> {
-        a: &'a mut runtime::InternalAction,
+        a: &'a mut runtime::Action,
     }
 
     #[derive(Debug)]
@@ -171,7 +167,7 @@ fn test_actions1() {
             }),
         )
         .with_trigger_action(action_a, 0)
-        .with_scheduable_action(action_b, 0)
+        .with_schedulable_action(action_b, 0)
         .with_trigger_action(action_b, 1)
         .finish()
         .unwrap();
@@ -180,7 +176,7 @@ fn test_actions1() {
     let reaction_b = reactor_builder
         .add_reaction("rb", Box::new(|_, _, _, _, _, _| {}))
         .with_trigger_action(action_a, 0)
-        .with_scheduable_action(action_a, 0)
+        .with_schedulable_action(action_a, 0)
         .finish()
         .unwrap();
 

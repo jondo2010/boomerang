@@ -41,17 +41,17 @@ impl SlowingClock {
     fn reaction_startup(
         &mut self,
         ctx: &mut runtime::Context,
-        #[reactor::action(effects)] mut a: runtime::ActionMut,
+        #[reactor::action(effects)] mut a: runtime::ActionRef,
     ) {
         println!("startup");
-        ctx.schedule_action::<()>(&mut a, None, None);
+        ctx.schedule_action(&mut a, None, None);
     }
 
     #[boomerang::reaction(reactor = "SlowingClockBuilder", triggers(action = "a"))]
     fn reaction_a(
         &mut self,
         ctx: &mut runtime::Context,
-        #[reactor::action(effects)] mut a: runtime::ActionMut,
+        #[reactor::action(effects)] mut a: runtime::ActionRef,
     ) {
         let elapsed_logical_time = ctx.get_elapsed_logical_time();
         println!(
@@ -64,7 +64,7 @@ impl SlowingClock {
             self.expected_time.as_millis()
         );
 
-        ctx.schedule_action::<()>(&mut a, None, Some(self.interval));
+        ctx.schedule_action(&mut a, None, Some(self.interval));
         self.expected_time += Duration::from_millis(100) + self.interval;
         self.interval += Duration::from_millis(100);
     }
@@ -81,8 +81,14 @@ impl SlowingClock {
     }
 }
 
-fn main() {
+#[test]
+fn slowing_clock() {
     tracing_subscriber::fmt::init();
-    let _ = run::build_and_run_reactor::<SlowingClockBuilder>("slowing_clock", SlowingClock::new())
-        .unwrap();
+    let _ = run::build_and_test_reactor::<SlowingClockBuilder>(
+        "slowing_clock",
+        SlowingClock::new(),
+        true,
+        false,
+    )
+    .unwrap();
 }

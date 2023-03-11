@@ -8,9 +8,11 @@ use crate::runtime;
 use slotmap::SecondaryMap;
 
 pub trait Reactor: Sized {
-    fn build<S: runtime::ReactorState>(
+    type State: runtime::ReactorState;
+
+    fn build(
         name: &str,
-        state: S,
+        state: Self::State,
         parent: Option<runtime::ReactorKey>,
         env: &mut EnvBuilder,
     ) -> Result<Self, BuilderError>;
@@ -169,11 +171,10 @@ impl<'a, S: runtime::ReactorState> ReactorBuilderState<'a, S> {
         self.env.add_port::<T>(name, port_type, self.reactor_key)
     }
 
-    pub fn add_child_reactor<R: Reactor, CS: runtime::ReactorState>(
+    pub fn add_child_reactor<R: Reactor>(
         &mut self,
         name: &str,
-        // state: R::State,
-        state: CS,
+        state: R::State,
     ) -> Result<R, BuilderError> {
         R::build(name, state, Some(self.reactor_key), self.env)
     }

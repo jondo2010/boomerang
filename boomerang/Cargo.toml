@@ -22,20 +22,21 @@ visualization = []
 derive = ["boomerang_derive"]
 
 [dependencies]
-anyhow = "1.0.38"
+anyhow = "1.0"
 boomerang_runtime = { path = "../boomerang_runtime" }
 boomerang_derive = { optional = true, path = "../boomerang_derive" }
-derivative = "2.2.0"
-derive_more = '0.99.11'
+derivative = "2.2"
+derive_more = '0.99'
 itertools = "0.10"
 petgraph = "0.6"
-slotmap = { version = "1.0.2", features = ["unstable"] }
-thiserror = "1.0.24"
-tracing = "0.1.23"
+slotmap = { version = "1.0", features = ["unstable"] }
+thiserror = "1.0"
+tracing = "0.1"
+graphviz-rust = "0.6"
 
 [dev-dependencies]
-tracing-subscriber = { version = "0.2.15", features = ["fmt"] }
-criterion = "0.3"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+criterion = "0.4"
 boomerang_util = { path = "../boomerang_util" }
 
 [[bench]]

@@ -115,6 +115,7 @@ impl ToTokens for ReactorReceiver {
             #[automatically_derived]
             impl ::boomerang::builder::Reactor for #ident
             {
+                //type State
                 fn build<'__builder, S: ::boomerang::runtime::ReactorState>(
                     name: &str,
                     state: S,

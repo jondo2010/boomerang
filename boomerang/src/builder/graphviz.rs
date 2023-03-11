@@ -49,11 +49,7 @@ fn build_ports(
     }
 }
 
-fn build_reactions(
-    env_builder: &EnvBuilder,
-    reactor: &ReactorBuilder,
-    output: &mut Vec<String>,
-) {
+fn build_reactions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &mut Vec<String>) {
     for (reaction_key, reaction) in reactor
         .reactions
         .keys()
@@ -95,32 +91,30 @@ fn build_actions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &mu
             ActionType::Logical { min_delay } => {
                 format!("L({} ms)", min_delay.unwrap_or_default().as_millis())
             }
-            ActionType::Shutdown => {
-                "Shutdown".into()
-            }
+            ActionType::Shutdown => "shutdown".into(),
         };
 
-        output.push(format!(
-            "  a{} [label=\"{}\";xlabel=\"{}\"shape=diamond;color=4];",
-            action_id,
-            action.get_name(),
-            xlabel,
-        ));
-
-        for reaction_key in action.triggers.keys() {
-            let reaction_id =
-                reaction_key.data().as_ffi() % env_builder.reaction_builders.len() as u64;
-            output.push(format!("  a{}:e -> r{}:w;", action_id, reaction_id));
-        }
-
-        for reaction_key in action.schedulers.keys() {
-            let reaction_id =
-                reaction_key.data().as_ffi() % env_builder.reaction_builders.len() as u64;
-
+        if !action.triggers.is_empty() || !action.schedulers.is_empty() {
             output.push(format!(
-                "  r{}:e -> a{}:w [style=dashed];",
-                reaction_id, action_id
+                "  a{action_id} [label=\"{}\"; xlabel=\"{xlabel}\"shape=diamond;color=4];",
+                action.get_name(),
             ));
+
+            for reaction_key in action.triggers.keys() {
+                let reaction_id =
+                    reaction_key.data().as_ffi() % env_builder.reaction_builders.len() as u64;
+                output.push(format!("  a{}:e -> r{}:w;", action_id, reaction_id));
+            }
+
+            for reaction_key in action.schedulers.keys() {
+                let reaction_id =
+                    reaction_key.data().as_ffi() % env_builder.reaction_builders.len() as u64;
+
+                output.push(format!(
+                    "  r{}:e -> a{}:w [style=dashed];",
+                    reaction_id, action_id
+                ));
+            }
         }
     }
 }
@@ -176,13 +170,13 @@ pub fn create_full_graph(env_builder: &EnvBuilder) -> Result<String, BuilderErro
             build_actions(env_builder, reactor, &mut output);
         }
         petgraph::visit::DfsEvent::Finish(_, _) => {
-            output.push("}}".into());
+            output.push("}".into());
         }
         _ => {}
     });
 
     build_port_bindings(env_builder, &mut output);
-    output.push("}}\n".into());
+    output.push("}\n".into());
     Ok(output.join("\n"))
 }
 
@@ -221,7 +215,7 @@ pub fn create_reaction_graph(env_builder: &EnvBuilder) -> Result<String, Builder
             ));
         }
 
-        output.push("}}".into());
+        output.push("}".into());
     }
 
     for (from, to, _) in reaction_graph.all_edges() {
@@ -230,6 +224,6 @@ pub fn create_reaction_graph(env_builder: &EnvBuilder) -> Result<String, Builder
         output.push(format!("  r{} -> r{};", from_id, to_id));
     }
 
-    output.push("}}\n".into());
+    output.push("}\n".into());
     Ok(output.join("\n"))
 }

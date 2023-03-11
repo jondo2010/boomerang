@@ -1,4 +1,3 @@
-#![feature(map_first_last)]
 #![feature(new_uninit)]
 #![feature(type_alias_impl_trait)]
 
@@ -51,9 +50,9 @@ pub enum RuntimeError {
 }
 
 /// Returns a tuple of disjoint sets of (immutable, mutable) borrows from the SlotMap.
-/// 
+///
 /// # Safety
-/// 
+///
 /// This function is safe if:
 /// 1. All keys in `mut_keys` are disjoint from each other and the keys in `keys`.
 /// 2. All keys in `keys` are disjoint from those in `mut_keys`.

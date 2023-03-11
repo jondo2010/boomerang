@@ -17,6 +17,10 @@ pub struct Env {
     pub ports: SlotMap<PortKey, Box<dyn BasePort>>,
     /// The runtime set of Actions
     pub actions: SlotMap<ActionKey, InternalAction>,
+    
+    ///
+    //pub action_storage: SecondaryMap<ReactorKey, SecondaryMap<ActionKey, ()>>,
+    
     /// The runtime set of Reactions
     pub reactions: SlotMap<ReactionKey, Reaction>,
 }

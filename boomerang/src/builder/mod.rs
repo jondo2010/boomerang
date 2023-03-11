@@ -1,6 +1,5 @@
 mod action;
 mod env;
-mod macros;
 mod port;
 mod reaction;
 mod reactor;
@@ -12,7 +11,6 @@ use crate::runtime;
 
 pub use action::*;
 pub use env::*;
-pub use macros::*;
 pub use port::*;
 pub use reaction::*;
 pub use reactor::*;

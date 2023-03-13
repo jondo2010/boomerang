@@ -1,9 +1,11 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use boomerang::{boomerang_test_body, builder::BuilderPortKey, runtime, Reactor};
+use boomerang::{builder::BuilderPortKey, runtime, Reactor};
+use boomerang_util::build_and_run_reactor;
 
 #[derive(Reactor)]
+#[reactor(state = "A")]
 struct ABuilder {
     #[reactor(input())]
     x: BuilderPortKey<()>,
@@ -29,6 +31,7 @@ impl A {
 }
 
 #[derive(Reactor)]
+#[reactor(state = "B")]
 struct BBuilder {
     #[reactor(input())]
     x: BuilderPortKey<()>,
@@ -64,6 +67,7 @@ impl B {
 
 #[derive(Reactor)]
 #[reactor(
+    state = "()",
     connection(from = "a.y", to = "b.x"),
     connection(from = "b.y", to = "a.x")
 )]
@@ -74,4 +78,7 @@ struct CycleBuilder {
     b: BBuilder,
 }
 
-boomerang_test_body!(cycle, CycleBuilder, ());
+fn main() {
+    tracing_subscriber::fmt::init();
+    let _ = build_and_run_reactor::<CycleBuilder>("cycle", ()).unwrap();
+}

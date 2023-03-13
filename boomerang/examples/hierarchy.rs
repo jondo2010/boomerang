@@ -2,12 +2,14 @@
 
 use boomerang::{
     builder::{BuilderActionKey, BuilderPortKey},
-    runtime, Reactor, boomerang_test_body,
+    runtime, Reactor,
 };
+use boomerang_util::build_and_run_reactor;
 
 // Test data transport across hierarchy.
 
 #[derive(Reactor)]
+#[reactor(state = "Source")]
 struct SourceBuilder {
     #[reactor(output())]
     out: BuilderPortKey<u32>,
@@ -30,6 +32,7 @@ impl Source {
 }
 
 #[derive(Reactor)]
+#[reactor(state = "Gain")]
 struct GainBuilder {
     #[reactor(input())]
     inp: BuilderPortKey<u32>,
@@ -58,6 +61,7 @@ impl Gain {
 }
 
 #[derive(Reactor)]
+#[reactor(state = "Print")]
 struct PrintBuilder {
     #[reactor(input())]
     inp: BuilderPortKey<u32>,
@@ -84,6 +88,7 @@ impl Print {
 
 #[derive(Reactor)]
 #[reactor(
+    state = "()",
     connection(from = "inp", to = "gain.inp"),
     connection(from = "gain.out", to = "out"),
     connection(from = "gain.out", to = "out2")
@@ -101,6 +106,7 @@ struct GainContainerBuilder {
 
 #[derive(Reactor)]
 #[reactor(
+    state = "()",
     connection(from = "source.out", to = "container.inp"),
     connection(from = "container.out", to = "print.inp"),
     connection(from = "container.out2", to = "print2.inp")
@@ -116,4 +122,7 @@ struct HierarchyBuilder {
     print2: PrintBuilder,
 }
 
-boomerang_test_body!(hierarchy, HierarchyBuilder, ());
+fn main() {
+    tracing_subscriber::fmt::init();
+    let _ = build_and_run_reactor::<HierarchyBuilder>("hierarchy", ()).unwrap();
+}

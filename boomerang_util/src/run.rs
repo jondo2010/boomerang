@@ -20,11 +20,11 @@ struct Args {
 
 /// Utility method to build and run a given top-level `Reactor`. Common arguments are parsed from
 /// the command line.
-pub fn build_and_run_reactor<R: Reactor>(name: &str) -> anyhow::Result<R> {
+pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow::Result<R> {
     // build the reactor
     let mut env_builder = EnvBuilder::new();
-    let reactor =
-        R::build(name, (), None, &mut env_builder).context("Error building top-level reactor!")?;
+    let reactor = R::build(name, state, None, &mut env_builder)
+        .context("Error building top-level reactor!")?;
 
     let args = Args::parse();
 
@@ -32,12 +32,14 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str) -> anyhow::Result<R> {
         let gv = graphviz::create_full_graph(&env_builder).unwrap();
         let mut f = std::fs::File::create(format!("{}.dot", module_path!())).unwrap();
         std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
+        tracing::info!("Wrote full graph to {}.dot", module_path!());
     }
 
     if args.reaction_graph {
         let gv = graphviz::create_reaction_graph(&env_builder).unwrap();
         let mut f = std::fs::File::create(format!("{}_levels.dot", module_path!())).unwrap();
         std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
+        tracing::info!("Wrote reaction graph to {}_levels.dot", module_path!());
     }
 
     let (env, dep_info) = env_builder.try_into().unwrap();

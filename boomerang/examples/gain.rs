@@ -2,10 +2,12 @@
 
 use boomerang::{
     builder::{BuilderActionKey, BuilderPortKey},
-    runtime, Reactor, boomerang_test_body,
+    runtime, Reactor,
 };
+use boomerang_util::build_and_run_reactor;
 
 #[derive(Reactor)]
+#[reactor(state = "Scale")]
 struct ScaleBuilder {
     #[reactor(input())]
     x: BuilderPortKey<u32>,
@@ -29,6 +31,7 @@ impl Scale {
 }
 
 #[derive(Reactor)]
+#[reactor(state = "Test")]
 struct TestBuilder {
     #[reactor(input())]
     x: BuilderPortKey<u32>,
@@ -50,7 +53,7 @@ impl Test {
 }
 
 #[derive(Reactor)]
-#[reactor(connection(from = "g.y", to = "t.x"))]
+#[reactor(state = "Gain", connection(from = "g.y", to = "t.x"))]
 struct GainBuilder {
     #[reactor(child(state = "Scale(2)"))]
     g: ScaleBuilder,
@@ -79,4 +82,7 @@ impl Gain {
     }
 }
 
-boomerang_test_body!(gain, GainBuilder, Gain);
+fn main() {
+    tracing_subscriber::fmt::init();
+    let _ = build_and_run_reactor::<GainBuilder>("gain", Gain).unwrap();
+}

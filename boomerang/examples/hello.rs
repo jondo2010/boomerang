@@ -45,6 +45,7 @@ use boomerang::{
 //}
 
 #[derive(Reactor)]
+#[reactor(state = "Hello")]
 struct HelloBuilder {
     #[reactor(timer(offset = "1 sec", period = "2 sec"))]
     t: BuilderActionKey,
@@ -107,6 +108,7 @@ impl Hello {
 }
 
 #[derive(Reactor)]
+#[reactor(state = "Inside")]
 struct InsideBuilder {
     #[reactor(child(
         state = "Hello::new(Duration::from_secs(1), \"Composite default message.\")"
@@ -126,6 +128,7 @@ impl Inside {
 }
 
 #[derive(Reactor)]
+#[reactor(state = "()")]
 struct MainBuilder {
     #[reactor(child(state = "Hello::new(Duration::from_secs(4), \"Hello from first.\")"))]
     first_instance: HelloBuilder,

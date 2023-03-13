@@ -4,6 +4,7 @@ use boomerang::{builder::BuilderActionKey, runtime, Reactor};
 use boomerang_util::build_and_run_reactor;
 
 #[derive(Reactor)]
+#[reactor(state = "ActionValues")]
 struct ActionValuesBuilder {
     #[reactor(action(min_delay = "100 msec"))]
     act: BuilderActionKey<i32>,
@@ -73,17 +74,15 @@ impl ActionValues {
     }
 }
 
-boomerang_test_body!(
-    action_values,
-    ActionValuesBuilder,
-    ActionValues {
-        r1done: false,
-        r2done: false
-    }
-);
-
 fn main() {
     tracing_subscriber::fmt::init();
 
-    let _ = build_and_run_reactor::<ActionDelayBuilder>("action_delay").unwrap();
+    let _ = build_and_run_reactor::<ActionValuesBuilder>(
+        "action_values",
+        ActionValues {
+            r1done: false,
+            r2done: false,
+        },
+    )
+    .unwrap();
 }

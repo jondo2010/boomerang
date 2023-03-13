@@ -4,6 +4,7 @@ mod run;
 pub use run::build_and_run_reactor;
 
 #[derive(Reactor)]
+#[reactor(state = "Timeout")]
 pub struct TimeoutBuilder {
     #[reactor(reaction(function = "Timeout::reaction_startup"))]
     startup: runtime::ReactionKey,

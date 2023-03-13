@@ -110,15 +110,16 @@ impl ToTokens for ReactorReceiver {
 
         let bindings = build_bindings(self, &builder_ident);
         let ident = &self.ident;
+        let state = &self.state;
 
         tokens.extend(quote! {
             #[automatically_derived]
             impl ::boomerang::builder::Reactor for #ident
             {
-                //type State
-                fn build<'__builder, S: ::boomerang::runtime::ReactorState>(
+                type State = #state;
+                fn build<'__builder>(
                     name: &str,
-                    state: S,
+                    state: Self::State,
                     parent: Option<::boomerang::runtime::ReactorKey>,
                     env: &'__builder mut ::boomerang::builder::EnvBuilder,
                 ) -> Result<Self, ::boomerang::builder::BuilderError> {

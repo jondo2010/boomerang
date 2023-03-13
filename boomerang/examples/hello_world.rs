@@ -1,7 +1,9 @@
-use boomerang::{runtime, Reactor, boomerang_test_body};
+use boomerang::{runtime, Reactor};
+use boomerang_util::build_and_run_reactor;
 use std::convert::TryInto;
 
 #[derive(Reactor)]
+#[reactor(state = "HelloWorld2")]
 struct HelloWorld2Builder {
     #[reactor(reaction(function = "HelloWorld2::reaction_startup"))]
     reaction_startup: runtime::ReactionKey,
@@ -26,9 +28,13 @@ impl HelloWorld2 {
 }
 
 #[derive(Reactor)]
+#[reactor(state = "()")]
 struct HelloWorldBuilder {
     #[reactor(child(rename = "a", state = "HelloWorld2{success: false}"))]
     _a: HelloWorld2Builder,
 }
 
-boomerang_test_body!(hello_world, HelloWorldBuilder, ());
+fn main() {
+    tracing_subscriber::fmt::init();
+    let _ = build_and_run_reactor::<HelloWorldBuilder>("hello_world", ()).unwrap();
+}

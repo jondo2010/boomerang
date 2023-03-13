@@ -16,3 +16,4 @@ exclude = ['.gitignore', '.cargo/config', '.gitlab-ci.yml']
 anyhow = "1.0"
 boomerang = { path = "../boomerang" }
 clap = { version = "4.1", features = ["derive"] }
+tracing = "0.1"

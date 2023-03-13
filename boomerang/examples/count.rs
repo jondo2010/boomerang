@@ -1,7 +1,8 @@
-use boomerang::{builder::*, runtime, Reactor, boomerang_test_body};
-use boomerang_util::{Timeout, TimeoutBuilder};
+use boomerang::{builder::*, runtime, Reactor};
+use boomerang_util::{build_and_run_reactor, Timeout, TimeoutBuilder};
 
 #[derive(Reactor)]
+#[reactor(state = "Count")]
 struct CountBuilder {
     #[reactor(timer(period = "1 sec"))]
     t: BuilderActionKey,
@@ -27,4 +28,8 @@ impl Count {
     }
 }
 
-boomerang_test_body!(count, CountBuilder, Count(0));
+fn main() {
+    tracing_subscriber::fmt::init();
+
+    let _ = build_and_run_reactor::<CountBuilder>("count", Count(0)).unwrap();
+}

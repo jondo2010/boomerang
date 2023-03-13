@@ -7,6 +7,7 @@ use boomerang_util::build_and_run_reactor;
 /// Test logical action with delay.
 
 #[derive(Reactor)]
+#[reactor(state = "GeneratedDelay")]
 struct GeneratedDelayBuilder {
     #[reactor(input())]
     y_in: BuilderPortKey<u32>,
@@ -53,6 +54,7 @@ impl GeneratedDelay {
 }
 
 #[derive(Reactor)]
+#[reactor(state = "Source")]
 struct SourceBuilder {
     #[reactor(output())]
     out: BuilderPortKey<u32>,
@@ -73,6 +75,7 @@ impl Source {
 }
 
 #[derive(Reactor)]
+#[reactor(state = "Sink")]
 struct SinkBuilder {
     #[reactor(input())]
     inp: BuilderPortKey<u32>,
@@ -104,6 +107,7 @@ impl Sink {
 
 #[derive(Reactor)]
 #[reactor(
+    state = "()",
     connection(from = "source.out", to = "g.y_in"),
     connection(from = "g.y_out", to = "sink.inp")
 )]
@@ -120,5 +124,5 @@ struct ActionDelayBuilder {
 fn main() {
     tracing_subscriber::fmt::init();
 
-    let _ = build_and_run_reactor::<ActionDelayBuilder>("action_delay").unwrap();
+    let _ = build_and_run_reactor::<ActionDelayBuilder>("action_delay", ()).unwrap();
 }

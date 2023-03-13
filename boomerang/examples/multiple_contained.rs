@@ -1,7 +1,9 @@
 /// Test that a reaction can react to and send to multiple ports of a contained reactor.
-use boomerang::{builder::BuilderPortKey, runtime, Reactor, boomerang_test_body};
+use boomerang::{builder::BuilderPortKey, runtime, Reactor};
+use boomerang_util::build_and_run_reactor;
 
 #[derive(Reactor)]
+#[reactor(state = "Contained")]
 struct ContainedBuilder {
     #[reactor(output())]
     trigger: BuilderPortKey<u32>,
@@ -49,6 +51,7 @@ impl Contained {
 }
 
 #[derive(Reactor)]
+#[reactor(state = "MultipleContained")]
 struct MultipleContainedBuilder {
     #[reactor(child(state = "Contained"))]
     c: ContainedBuilder,
@@ -70,4 +73,9 @@ impl MultipleContained {
     }
 }
 
-boomerang_test_body!(multiple_contained, MultipleContainedBuilder, MultipleContained);
+fn main() {
+    tracing_subscriber::fmt::init();
+    let _ =
+        build_and_run_reactor::<MultipleContainedBuilder>("multiple_contained", MultipleContained)
+            .unwrap();
+}

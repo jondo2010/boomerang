@@ -1,3 +1,8 @@
+//! Builder for actions. This is typically done using the builder methods on [`crate::builder::env`] and [`crate::builder::reactor`].
+//! 
+//! An action, like a port (see [`crate::builder::PortBuilder`]), can carry data, but unlike a port, an action is
+//! visible only within the reactor that defines it.
+
 use std::{fmt::Debug, marker::PhantomData};
 
 use crate::runtime;

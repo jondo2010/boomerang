@@ -123,19 +123,24 @@ impl<'a, S: runtime::ReactorState> ReactorBuilderState<'a, S> {
         }
     }
 
-    /// Get the ReactorKey for this ReactorBuilder
+    /// Get the [`runtime::ReactorKey`] for this [`ReactorBuilder`]
     pub fn get_key(&self) -> runtime::ReactorKey {
         self.reactor_key
     }
 
+    /// Get the startup action for this reactor
     pub fn get_startup_action(&self) -> BuilderActionKey {
         self.startup_action
     }
 
+    /// Get the shutdown action for this reactor
     pub fn get_shutdown_action(&self) -> BuilderActionKey {
         self.shutdown_action
     }
 
+    /// Add a new timer action to the reactor.
+    /// 
+    /// This method forwards to the implementation at [`crate::builder::env::EnvBuilder::add_timer`].
     pub fn add_timer(
         &mut self,
         name: &str,
@@ -145,6 +150,9 @@ impl<'a, S: runtime::ReactorState> ReactorBuilderState<'a, S> {
         self.env.add_timer(name, period, offset, self.reactor_key)
     }
 
+    /// Add a new logical action to the reactor.
+    /// 
+    /// This method forwards to the implementation at [`crate::builder::env::EnvBuilder::add_logical_action`].
     pub fn add_logical_action<T: runtime::PortData>(
         &mut self,
         name: &str,
@@ -154,6 +162,7 @@ impl<'a, S: runtime::ReactorState> ReactorBuilderState<'a, S> {
             .add_logical_action::<T>(name, min_delay, self.reactor_key)
     }
 
+    /// Add a new reaction to this reactor.
     pub fn add_reaction(
         &mut self,
         name: &str,
@@ -163,6 +172,7 @@ impl<'a, S: runtime::ReactorState> ReactorBuilderState<'a, S> {
         ReactionBuilderState::new(name, priority, self.reactor_key, reaction_fn, self.env)
     }
 
+    /// Add a new port to this reactor.
     pub fn add_port<T: runtime::PortData>(
         &mut self,
         name: &str,
@@ -171,6 +181,7 @@ impl<'a, S: runtime::ReactorState> ReactorBuilderState<'a, S> {
         self.env.add_port::<T>(name, port_type, self.reactor_key)
     }
 
+    /// Add a new child reactor to this reactor.
     pub fn add_child_reactor<R: Reactor>(
         &mut self,
         name: &str,
@@ -179,6 +190,7 @@ impl<'a, S: runtime::ReactorState> ReactorBuilderState<'a, S> {
         R::build(name, state, Some(self.reactor_key), self.env)
     }
 
+    /// Bind 2 ports on this reactor. This has the logical meaning of "connecting" `port_a` to `port_b`.
     pub fn bind_port<T: runtime::PortData>(
         &mut self,
         port_a_key: BuilderPortKey<T>,

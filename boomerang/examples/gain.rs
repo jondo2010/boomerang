@@ -2,9 +2,8 @@
 
 use boomerang::{
     builder::{BuilderActionKey, BuilderPortKey},
-    runtime, Reactor,
+    runtime, Reactor, run
 };
-use boomerang_util::build_and_run_reactor;
 
 #[derive(Reactor)]
 #[reactor(state = "Scale")]
@@ -84,5 +83,5 @@ impl Gain {
 
 fn main() {
     tracing_subscriber::fmt::init();
-    let _ = build_and_run_reactor::<GainBuilder>("gain", Gain).unwrap();
+    let _ = run::build_and_run_reactor::<GainBuilder>("gain", Gain).unwrap();
 }

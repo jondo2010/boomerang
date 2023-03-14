@@ -3,7 +3,7 @@
 use boomerang::{
     builder::BuilderActionKey,
     runtime::{self, Duration},
-    Reactor,
+    Reactor, run
 };
 
 // This test checks that logical time is incremented an appropriate
@@ -128,7 +128,6 @@ impl Inside {
 }
 
 #[derive(Reactor)]
-#[reactor(state = "()")]
 struct MainBuilder {
     #[reactor(child(state = "Hello::new(Duration::from_secs(4), \"Hello from first.\")"))]
     first_instance: HelloBuilder,
@@ -138,5 +137,8 @@ struct MainBuilder {
     third_instance: InsideBuilder,
 }
 
-#[cfg(feature = "disabled")]
-boomerang_test_body!(hello, HelloBuilder, ());
+// TODO: Fixme
+fn main() {
+    tracing_subscriber::fmt::init();
+    let _ = run::build_and_run_reactor::<MainBuilder>("hello", ()).unwrap();
+}

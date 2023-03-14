@@ -1,8 +1,7 @@
 use boomerang::{
     builder::{BuilderActionKey, BuilderPortKey},
-    runtime, Reactor,
+    runtime, Reactor, run,
 };
-use boomerang_util::build_and_run_reactor;
 
 #[derive(Reactor)]
 #[reactor(state = "Source")]
@@ -85,11 +84,11 @@ impl Pass {
 
 #[derive(Reactor)]
 #[reactor(
-    state = "()",
     connection(from = "s.y", to = "d.y"),
     connection(from = "s.y", to = "p1.x"),
-    connection(from = "p1.y", to = "p2.x"),
-    connection(from = "p2.y", to = "d.x")
+    //connection(from = "p1.y", to = "p2.x"),
+    //connection(from = "p2.y", to = "d.x")
+    connection(from = "p1.y", to = "d.x"),
 )]
 #[allow(dead_code)]
 struct DeterminismBuilder {
@@ -99,11 +98,11 @@ struct DeterminismBuilder {
     d: DestinationBuilder,
     #[reactor(child(state = "Pass"))]
     p1: PassBuilder,
-    #[reactor(child(state = "Pass"))]
-    p2: PassBuilder,
+    //#[reactor(child(state = "Pass"))]
+    // p2: PassBuilder,
 }
 
 fn main() {
     tracing_subscriber::fmt::init();
-    let _ = build_and_run_reactor::<DeterminismBuilder>("count", ()).unwrap();
+    let _ = run::build_and_run_reactor::<DeterminismBuilder>("determinism", ()).unwrap();
 }

@@ -1,6 +1,5 @@
 /// Test that a reaction can react to and send to multiple ports of a contained reactor.
-use boomerang::{builder::BuilderPortKey, runtime, Reactor};
-use boomerang_util::build_and_run_reactor;
+use boomerang::{builder::BuilderPortKey, runtime, Reactor, run};
 
 #[derive(Reactor)]
 #[reactor(state = "Contained")]
@@ -76,6 +75,6 @@ impl MultipleContained {
 fn main() {
     tracing_subscriber::fmt::init();
     let _ =
-        build_and_run_reactor::<MultipleContainedBuilder>("multiple_contained", MultipleContained)
+        run::build_and_run_reactor::<MultipleContainedBuilder>("multiple_contained", MultipleContained)
             .unwrap();
 }

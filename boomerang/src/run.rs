@@ -1,5 +1,5 @@
 use anyhow::Context;
-use boomerang::{
+use crate::{
     builder::{graphviz, EnvBuilder, Reactor},
     runtime,
 };
@@ -28,18 +28,20 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
 
     let args = Args::parse();
 
-    if args.reaction_graph {
+    if args.full_graph {
         let gv = graphviz::create_full_graph(&env_builder).unwrap();
-        let mut f = std::fs::File::create(format!("{}.dot", module_path!())).unwrap();
+        let path = format!("{name}.dot");
+        let mut f = std::fs::File::create(&path).unwrap();
         std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
-        tracing::info!("Wrote full graph to {}.dot", module_path!());
+        tracing::info!("Wrote full graph to {path}");
     }
 
     if args.reaction_graph {
         let gv = graphviz::create_reaction_graph(&env_builder).unwrap();
-        let mut f = std::fs::File::create(format!("{}_levels.dot", module_path!())).unwrap();
+        let path = format!("{name}_levels.dot");
+        let mut f = std::fs::File::create(&path).unwrap();
         std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
-        tracing::info!("Wrote reaction graph to {}_levels.dot", module_path!());
+        tracing::info!("Wrote reaction graph to {path}");
     }
 
     let (env, dep_info) = env_builder.try_into().unwrap();

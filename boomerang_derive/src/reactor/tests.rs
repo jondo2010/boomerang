@@ -243,6 +243,7 @@ fn test0() {
     let input = syn::parse_str(
         r#"
 #[derive(Reactor)]
+#[reactor(state = "()")]
 struct Foo {
     #[reactor(reaction(function = "Count::reaction_t"))]
     reaction_t: runtime::ReactionKey,
@@ -250,4 +251,5 @@ struct Foo {
     )
     .unwrap();
     let _ret = ReactorReceiver::from_derive_input(&input).unwrap();
+    assert_eq!(_ret.state, Some(parse_quote!(())));
 }

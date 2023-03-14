@@ -1,6 +1,4 @@
-use boomerang::{runtime, Reactor};
-use boomerang_util::build_and_run_reactor;
-use std::convert::TryInto;
+use boomerang::{runtime, Reactor, run};
 
 #[derive(Reactor)]
 #[reactor(state = "HelloWorld2")]
@@ -36,5 +34,5 @@ struct HelloWorldBuilder {
 
 fn main() {
     tracing_subscriber::fmt::init();
-    let _ = build_and_run_reactor::<HelloWorldBuilder>("hello_world", ()).unwrap();
+    let _ = run::build_and_run_reactor::<HelloWorldBuilder>("hello_world", ()).unwrap();
 }

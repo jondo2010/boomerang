@@ -1,7 +1,6 @@
 // Test logical action with delay.
 
-use boomerang::{builder::BuilderActionKey, runtime, Reactor};
-use boomerang_util::build_and_run_reactor;
+use boomerang::{builder::BuilderActionKey, runtime, Reactor, run};
 
 #[derive(Reactor)]
 #[reactor(state = "ActionValues")]
@@ -76,8 +75,7 @@ impl ActionValues {
 
 fn main() {
     tracing_subscriber::fmt::init();
-
-    let _ = build_and_run_reactor::<ActionValuesBuilder>(
+    let _ = run::build_and_run_reactor::<ActionValuesBuilder>(
         "action_values",
         ActionValues {
             r1done: false,

@@ -1,8 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use boomerang::{builder::BuilderPortKey, runtime, Reactor};
-use boomerang_util::build_and_run_reactor;
+use boomerang::{builder::BuilderPortKey, runtime, Reactor, run};
 
 #[derive(Reactor)]
 #[reactor(state = "A")]
@@ -80,5 +79,5 @@ struct CycleBuilder {
 
 fn main() {
     tracing_subscriber::fmt::init();
-    let _ = build_and_run_reactor::<CycleBuilder>("cycle", ()).unwrap();
+    let _ = run::build_and_run_reactor::<CycleBuilder>("cycle", ()).unwrap();
 }

@@ -2,7 +2,10 @@
 extern crate derivative;
 
 pub mod builder;
+#[cfg(feature = "runner")]
+pub mod run;
 
+// Re-exports
 pub use boomerang_runtime as runtime;
 
 #[cfg(feature = "boomerang_derive")]

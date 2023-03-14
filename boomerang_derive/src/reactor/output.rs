@@ -110,7 +110,7 @@ impl ToTokens for ReactorReceiver {
 
         let bindings = build_bindings(self, &builder_ident);
         let ident = &self.ident;
-        let state = &self.state;
+        let state = self.state.clone().unwrap_or_else(|| syn::parse_quote!(()));
 
         tokens.extend(quote! {
             #[automatically_derived]

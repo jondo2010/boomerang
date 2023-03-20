@@ -3,4 +3,5 @@ members = [
     "boomerang",
     "boomerang_derive",
     "boomerang_runtime",
+    "boomerang_tinymap",
 ]

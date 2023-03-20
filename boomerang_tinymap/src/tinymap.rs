@@ -4,7 +4,7 @@ use std::{
     ops::{Index, IndexMut},
 };
 
-use super::Key;
+use crate::{DefaultKey, Key};
 
 #[derive(Debug)]
 pub struct TinyMap<K: Key, V> {
@@ -73,6 +73,10 @@ impl<K: Key, V> TinyMap<K, V> {
         let key = K::from(self.data.len());
         self.data.push(f(key));
         key
+    }
+
+    pub fn len(&self) -> usize {
+        self.data.len()
     }
 
     pub fn keys(&self) -> impl Iterator<Item = K> {

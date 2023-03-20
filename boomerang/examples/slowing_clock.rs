@@ -2,7 +2,7 @@
 /// msec on a logical action with a minimum delay of 100 msec.  
 /// The use of the logical action ensures the elapsed time jumps exactly from
 /// 0 to 100, 300, 600, and 1000 msec.
-use boomerang::{builder::BuilderActionKey, runtime, Reactor, run};
+use boomerang::{builder::BuilderActionKey, run, runtime, Reactor};
 use boomerang_util::{Timeout, TimeoutBuilder};
 use runtime::Duration;
 
@@ -80,6 +80,6 @@ impl SlowingClock {
 
 fn main() {
     tracing_subscriber::fmt::init();
-    let _ =
-        run::build_and_run_reactor::<SlowingClockBuilder>("slowing_clock", SlowingClock::new()).unwrap();
+    let _ = run::build_and_run_reactor::<SlowingClockBuilder>("slowing_clock", SlowingClock::new())
+        .unwrap();
 }

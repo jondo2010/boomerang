@@ -1,24 +1,23 @@
 use std::{fmt::Debug, sync::RwLock};
 
-use crate::{
-    key_set::KeySet, BasePort, Context, Duration, InternalAction, ReactorKey, ReactorState,
-};
+use crate::{key_set::KeySet, BasePort, Context, Duration, InternalAction, Reactor, ReactorKey};
 
-slotmap::new_key_type! {
-    pub struct ReactionKey;
-}
+tinymap::key_type!(pub ReactionKey);
 
 pub type ReactionSet = KeySet<ReactionKey>;
 
-pub type InputPorts<'a> = &'a [&'a dyn BasePort];
-pub type OutputPorts<'a> = &'a mut [&'a mut dyn BasePort];
+pub type IPort<'a> = &'a Box<dyn BasePort>;
+pub type OPort<'a> = &'a mut Box<dyn BasePort>;
+
+pub type InputPorts<'a> = &'a [IPort<'a>];
+pub type OutputPorts<'a> = &'a mut [OPort<'a>];
 
 pub trait ReactionFn:
     Fn(
         &mut Context,
-        &mut dyn ReactorState,
-        &[&dyn BasePort],           // Input ports
-        &mut [&mut dyn BasePort],   // Output ports
+        &mut Reactor,
+        &[IPort], // Input ports
+        &mut [OPort], // Output ports
         &[&InternalAction], // Actions
         &mut [&mut InternalAction], // Schedulable Actions
     ) + Sync
@@ -28,9 +27,9 @@ pub trait ReactionFn:
 impl<F> ReactionFn for F where
     F: Fn(
             &mut Context,
-            &mut dyn ReactorState,
-            &[&dyn BasePort],
-            &mut [&mut dyn BasePort],
+            &mut Reactor,
+            &[IPort],
+            &mut [OPort],
             &[&InternalAction],
             &mut [&mut InternalAction],
         ) + Send
@@ -88,9 +87,9 @@ impl Reaction {
     pub fn trigger(
         &self,
         ctx: &mut Context,
-        reactor: &mut dyn ReactorState,
-        inputs: &[&dyn BasePort],
-        outputs: &mut [&mut dyn BasePort],
+        reactor: &mut Reactor,
+        inputs: &[IPort<'_>],
+        outputs: &mut [OPort<'_>],
         actions: &[&InternalAction],
         schedulable_actions: &mut [&mut InternalAction],
     ) {

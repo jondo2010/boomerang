@@ -1,7 +1,7 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 
 use boomerang::{
-    builder::{BuilderActionKey, BuilderPortKey, EnvBuilder, Reactor},
+    builder::{BuilderActionKey, EnvBuilder, Reactor, TypedPortKey},
     runtime, Reactor,
 };
 
@@ -11,9 +11,9 @@ struct HelloBenchBuilder {
     #[reactor(timer(offset = "100 msec", period = "1 sec"))]
     tim1: BuilderActionKey,
     #[reactor(input())]
-    in1: BuilderPortKey<u32>,
+    in1: TypedPortKey<u32>,
     #[reactor(output())]
-    out1: BuilderPortKey<u32>,
+    out1: TypedPortKey<u32>,
     #[reactor(reaction(function = "HelloBench::foo"))]
     foo: runtime::ReactionKey,
     #[reactor(reaction(function = "HelloBench::bar"))]

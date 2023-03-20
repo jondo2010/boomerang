@@ -1,14 +1,14 @@
-use boomerang::{builder::*, runtime, Reactor, run};
+use boomerang::{builder::*, run, runtime, Reactor};
 use boomerang_util::{Timeout, TimeoutBuilder};
 
 #[derive(Reactor)]
 #[reactor(state = "Count")]
 struct CountBuilder {
     #[reactor(timer(period = "1 sec"))]
-    t: BuilderActionKey,
+    t: TypedActionKey<()>,
     #[reactor(output())]
-    c: BuilderPortKey<u32>,
-    #[reactor(child(state = "Timeout::new(runtime::Duration::from_secs(3))"))]
+    c: TypedPortKey<u32>,
+    #[reactor(child(state = "Timeout::new(runtime::Duration::from_secs(30))"))]
     _timeout: TimeoutBuilder,
     #[reactor(reaction(function = "Count::reaction_t",))]
     reaction_t: runtime::ReactionKey,

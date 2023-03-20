@@ -1,30 +1,39 @@
-//! Builder for actions. This is typically done using the builder methods on [`crate::builder::env`] and [`crate::builder::reactor`].
-//! 
-//! An action, like a port (see [`crate::builder::PortBuilder`]), can carry data, but unlike a port, an action is
-//! visible only within the reactor that defines it.
+//! Builder for actions. This is typically done using the builder methods on [`crate::builder::env`]
+//! and [`crate::builder::reactor`].
+//!
+//! An action, like a port (see [`crate::builder::PortBuilder`]), can carry data, but unlike a port,
+//! an action is visible only within the reactor that defines it.
 
 use std::{fmt::Debug, marker::PhantomData};
 
 use crate::runtime;
 use slotmap::SecondaryMap;
 
-#[derive(Clone, Copy, Debug)]
-pub struct BuilderActionKey<T: runtime::PortData = ()>(runtime::ActionKey, PhantomData<T>);
+use super::BuilderReactionKey;
 
-impl<T: runtime::PortData> runtime::InnerType for BuilderActionKey<T> {
+slotmap::new_key_type! {pub struct BuilderActionKey;}
+
+/// `TypedActionKey` is a typed wrapper around `ActionKey` that is used to associate a type with an
+/// action. This is used to ensure that the type of the action matches the type of the port that it
+/// is connected to.
+#[derive(Copy, Clone, Default, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+#[repr(transparent)]
+pub struct TypedActionKey<T: runtime::PortData = ()>(BuilderActionKey, PhantomData<T>);
+
+impl<T: runtime::PortData> From<BuilderActionKey> for TypedActionKey<T> {
+    fn from(key: BuilderActionKey) -> Self {
+        Self(key, PhantomData)
+    }
+}
+
+impl<T: runtime::PortData> From<TypedActionKey<T>> for BuilderActionKey {
+    fn from(key: TypedActionKey<T>) -> Self {
+        key.0
+    }
+}
+
+impl<T: runtime::PortData> runtime::InnerType for TypedActionKey<T> {
     type Inner = T;
-}
-
-impl<T: runtime::PortData> BuilderActionKey<T> {
-    pub fn new(action_key: runtime::ActionKey) -> Self {
-        Self(action_key, PhantomData)
-    }
-}
-
-impl<T: runtime::PortData> From<BuilderActionKey<T>> for runtime::ActionKey {
-    fn from(builder_action_key: BuilderActionKey<T>) -> Self {
-        builder_action_key.0
-    }
 }
 
 #[derive(Debug)]
@@ -39,8 +48,8 @@ pub enum ActionType {
     Shutdown,
 }
 
-pub trait ActionBuilderFn: Fn(&str, runtime::ActionKey) -> runtime::InternalAction {}
-impl<F> ActionBuilderFn for F where F: Fn(&str, runtime::ActionKey) -> runtime::InternalAction {}
+pub trait ActionBuilderFn: Fn(&str) -> runtime::InternalAction {}
+impl<F> ActionBuilderFn for F where F: Fn(&str) -> runtime::InternalAction {}
 
 impl Debug for Box<dyn ActionBuilderFn> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -54,31 +63,26 @@ pub struct ActionBuilder {
     name: String,
     /// Logical type of the action
     ty: ActionType,
-    /// The key of this action in the EnvBuilder
-    action_key: runtime::ActionKey,
-    /// The parent Reactor that owns this Action
-    reactor_key: runtime::ReactorKey,
     /// Out-going Reactions that this action triggers
-    pub triggers: SecondaryMap<runtime::ReactionKey, ()>,
+    pub triggers: SecondaryMap<BuilderReactionKey, ()>,
     /// List of Reactions that may schedule this action
-    pub schedulers: SecondaryMap<runtime::ReactionKey, ()>,
+    pub schedulers: SecondaryMap<BuilderReactionKey, ()>,
     /// User builder function for the Action
     action_builder_fn: Box<dyn ActionBuilderFn>,
 }
 
+/// Build the ActionBuilder into a runtime Action
+impl From<ActionBuilder> for runtime::InternalAction {
+    fn from(builder: ActionBuilder) -> Self {
+        (builder.action_builder_fn)(&builder.name)
+    }
+}
+
 impl ActionBuilder {
-    pub fn new(
-        name: &str,
-        ty: ActionType,
-        action_key: runtime::ActionKey,
-        reactor_key: runtime::ReactorKey,
-        action_builder_fn: Box<dyn ActionBuilderFn>,
-    ) -> Self {
+    pub fn new(name: &str, ty: ActionType, action_builder_fn: Box<dyn ActionBuilderFn>) -> Self {
         Self {
             name: name.to_owned(),
             ty,
-            action_key,
-            reactor_key,
             triggers: SecondaryMap::new(),
             schedulers: SecondaryMap::new(),
             action_builder_fn,
@@ -91,18 +95,5 @@ impl ActionBuilder {
 
     pub fn get_type(&self) -> &ActionType {
         &self.ty
-    }
-
-    pub fn get_action_key(&self) -> runtime::ActionKey {
-        self.action_key
-    }
-
-    pub fn get_reactor_key(&self) -> runtime::ReactorKey {
-        self.reactor_key
-    }
-
-    /// Build the ActionBuilder into a runtime Action
-    pub fn into_action(&self) -> runtime::InternalAction {
-        (self.action_builder_fn)(&self.name, self.action_key)
     }
 }

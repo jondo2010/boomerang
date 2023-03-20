@@ -1,6 +1,6 @@
 use boomerang::{
-    builder::{BuilderActionKey, BuilderPortKey},
-    runtime, Reactor, run,
+    builder::{BuilderActionKey, TypedPortKey},
+    run, runtime, Reactor,
 };
 
 /// Test logical action with delay.
@@ -9,9 +9,9 @@ use boomerang::{
 #[reactor(state = "GeneratedDelay")]
 struct GeneratedDelayBuilder {
     #[reactor(input())]
-    y_in: BuilderPortKey<u32>,
+    y_in: TypedPortKey<u32>,
     #[reactor(output())]
-    y_out: BuilderPortKey<u32>,
+    y_out: TypedPortKey<u32>,
     #[reactor(action(physical = "false", min_delay = "100 msec"))]
     act: BuilderActionKey,
     #[reactor(reaction(function = "GeneratedDelay::reaction_y_in"))]
@@ -56,7 +56,7 @@ impl GeneratedDelay {
 #[reactor(state = "Source")]
 struct SourceBuilder {
     #[reactor(output())]
-    out: BuilderPortKey<u32>,
+    out: TypedPortKey<u32>,
     #[reactor(reaction(function = "Source::reaction_startup",))]
     reaction_startup: runtime::ReactionKey,
 }
@@ -77,7 +77,7 @@ impl Source {
 #[reactor(state = "Sink")]
 struct SinkBuilder {
     #[reactor(input())]
-    inp: BuilderPortKey<u32>,
+    inp: TypedPortKey<u32>,
     #[reactor(reaction(function = "Sink::reaction_in"))]
     reaction_in: runtime::ReactionKey,
 }

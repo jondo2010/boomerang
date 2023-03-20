@@ -1,13 +1,13 @@
 use boomerang::{
-    builder::{BuilderActionKey, BuilderPortKey},
-    runtime, Reactor, run,
+    builder::{BuilderActionKey, TypedPortKey},
+    run, runtime, Reactor,
 };
 
 #[derive(Reactor)]
 #[reactor(state = "Source")]
 struct SourceBuilder {
     #[reactor(output())]
-    y: BuilderPortKey<i32>,
+    y: TypedPortKey<i32>,
     #[reactor(timer())]
     t: BuilderActionKey,
     #[reactor(reaction(function = "Source::reaction_t",))]
@@ -30,9 +30,9 @@ impl Source {
 #[reactor(state = "Destination")]
 struct DestinationBuilder {
     #[reactor(input())]
-    x: BuilderPortKey<i32>,
+    x: TypedPortKey<i32>,
     #[reactor(input())]
-    y: BuilderPortKey<i32>,
+    y: TypedPortKey<i32>,
     #[reactor(reaction(function = "Destination::reaction_x_y"))]
     reaction_x_y: runtime::ReactionKey,
 }
@@ -62,9 +62,9 @@ impl Destination {
 #[reactor(state = "Pass")]
 struct PassBuilder {
     #[reactor(input())]
-    x: BuilderPortKey<i32>,
+    x: TypedPortKey<i32>,
     #[reactor(output())]
-    y: BuilderPortKey<i32>,
+    y: TypedPortKey<i32>,
     #[reactor(reaction(function = "Pass::reaction_x"))]
     reaction_x: runtime::ReactionKey,
 }
@@ -86,9 +86,8 @@ impl Pass {
 #[reactor(
     connection(from = "s.y", to = "d.y"),
     connection(from = "s.y", to = "p1.x"),
-    //connection(from = "p1.y", to = "p2.x"),
-    //connection(from = "p2.y", to = "d.x")
-    connection(from = "p1.y", to = "d.x"),
+    connection(from = "p1.y", to = "p2.x"),
+    connection(from = "p2.y", to = "d.x")
 )]
 #[allow(dead_code)]
 struct DeterminismBuilder {
@@ -98,8 +97,8 @@ struct DeterminismBuilder {
     d: DestinationBuilder,
     #[reactor(child(state = "Pass"))]
     p1: PassBuilder,
-    //#[reactor(child(state = "Pass"))]
-    // p2: PassBuilder,
+    #[reactor(child(state = "Pass"))]
+    p2: PassBuilder,
 }
 
 fn main() {

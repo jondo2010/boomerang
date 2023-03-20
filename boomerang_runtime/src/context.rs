@@ -1,8 +1,8 @@
 use tracing::debug;
 
 use crate::{
-    Action, ActionMut, DepInfo, Duration, Instant, Level, PortData, ReactionKey,
-    ReactionSet, ScheduledEvent, Tag,
+    Action, ActionMut, DepInfo, Duration, Instant, Level, PortData, ReactionKey, ReactionSet,
+    ScheduledEvent, Tag,
 };
 
 /// Internal state for a context object
@@ -11,7 +11,7 @@ pub(crate) struct ContextInternal {
     /// Remaining reactions triggered at this epoch to execute
     pub(crate) reactions: Vec<(Level, ReactionKey)>,
     /// Events scheduled for a future time
-    pub(crate) events: Vec<ScheduledEvent>,
+    pub(crate) scheduled_events: Vec<ScheduledEvent>,
 }
 
 /// Scheduler context passed into reactor functions.
@@ -40,7 +40,7 @@ impl<'a> Context<'a> {
             current_level: 0,
             internal: ContextInternal {
                 reactions: Vec::new(),
-                events: Vec::new(),
+                scheduled_events: Vec::new(),
             },
         }
     }
@@ -91,11 +91,12 @@ impl<'a> Context<'a> {
         value: Option<T>,
         delay: Option<Duration>,
     ) {
-        let tag_delay = delay.map_or(*action.min_delay, |delay| delay + *action.min_delay);
-        let new_tag = self.tag.delay(Some(tag_delay));
-        action.values.set_value(value, new_tag);
-        let downstream = self.dep_info.triggered_by_action(action.key);
-        self.enqueue_later(downstream, new_tag);
+        // TODO
+        // let tag_delay = delay.map_or(*action.min_delay, |delay| delay + *action.min_delay);
+        // let new_tag = self.tag.delay(Some(tag_delay));
+        // action.values.set_value(value, new_tag);
+        // let downstream = self.dep_info.triggered_by_action(action.key);
+        // self.enqueue_later(downstream, new_tag);
     }
 
     /// Adds new reactions to execute within this cycle
@@ -115,7 +116,7 @@ impl<'a> Context<'a> {
             reactions: ReactionSet::from_iter(downstream),
             terminal: false,
         };
-        self.internal.events.push(event);
+        self.internal.scheduled_events.push(event);
     }
 
     pub fn schedule_shutdown(&mut self, offset: Option<Duration>) {
@@ -125,6 +126,6 @@ impl<'a> Context<'a> {
             reactions: ReactionSet::default(),
             terminal: true,
         };
-        self.internal.events.push(event);
+        self.internal.scheduled_events.push(event);
     }
 }

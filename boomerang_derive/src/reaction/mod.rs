@@ -255,7 +255,7 @@ impl ReactionReceiver {
             .collect_vec();
         let num_ports = port_idents.len();
         if num_ports > 0 {
-            quote! { let [#(#port_idents,)*]: &[&dyn ::boomerang::runtime::BasePort; #num_ports]
+            quote! { let [#(#port_idents,)*]: &[&Box<dyn ::boomerang::runtime::BasePort>; #num_ports]
             = ::std::convert::TryInto::try_into(inputs).unwrap(); }
         } else {
             proc_macro2::TokenStream::new()
@@ -277,7 +277,7 @@ impl ReactionReceiver {
         let num_ports = port_idents.len();
         if num_ports > 0 {
             quote! {
-                let [#(#port_idents,)*]: &mut [&mut dyn ::boomerang::runtime::BasePort; #num_ports]
+                let [#(#port_idents,)*]: &mut [&mut Box<dyn ::boomerang::runtime::BasePort>; #num_ports]
                     = ::std::convert::TryInto::try_into(outputs).unwrap();
             }
         } else {
@@ -421,9 +421,6 @@ impl ReactionReceiver {
             generics
                 .params
                 .insert(0, syn::GenericParam::Lifetime(parse_quote! {'builder}));
-            generics.params.push(syn::GenericParam::Type(
-                parse_quote! {S: runtime::ReactorState},
-            ));
             let reactor_path = &self.attr.reactor;
             syn::Signature {
                 constness: None,
@@ -437,7 +434,7 @@ impl ReactionReceiver {
                 inputs: parse_quote!(
                     name: &str,
                     reactor: &#reactor_path,
-                    builder: &'builder mut ::boomerang::builder::ReactorBuilderState<S>,
+                    builder: &'builder mut ::boomerang::builder::ReactorBuilderState,
                 ),
                 variadic: None,
                 output: parse_quote!(
@@ -462,19 +459,18 @@ impl darling::ToTokens for ReactionReceiver {
             let __wrapper: Box<dyn ::boomerang::runtime::ReactionFn> = Box::new(
                 move |
                     ctx,
-                    reactor,
+                    reactor: &mut runtime::Reactor,
                     inputs,
                     outputs,
                     trig_actions: &[&runtime::InternalAction],
                     sched_actions: &mut [&mut runtime::InternalAction]
                 | {
-                    let reactor = reactor.downcast_mut::<Self>().expect("Wrong Reactor Type!");
                     #inputs_destructure
                     #outputs_destructure
                     #trig_actions_destructure
                     #sched_actions_destructure
                     Self::#fn_ident(
-                        reactor,
+                        reactor.get_state().expect("Unable to downcast reactor state"),
                         ctx,
                         #(#fn_args,)*
                     );

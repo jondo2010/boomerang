@@ -1,12 +1,13 @@
 use super::{
     action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder, ActionBuilderFn,
-    ActionType, BuilderActionKey, BuilderError, BuilderPortKey, PortBuilder, PortType,
-    ReactorBuilder, ReactorBuilderState,
+    ActionType, BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactionKey,
+    BuilderReactorKey, PortBuilder, PortType, ReactorBuilder, ReactorBuilderState, TypedActionKey,
+    TypedPortKey,
 };
 use crate::runtime;
 use itertools::{Either, Itertools};
 use petgraph::{graphmap::DiGraphMap, EdgeDirection};
-use runtime::{ReactorKey, ValuedAction};
+use runtime::ValuedAction;
 use slotmap::{SecondaryMap, SlotMap};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -18,31 +19,29 @@ use tracing::{debug, info};
 mod tests;
 
 pub trait FindElements {
-    fn get_port_by_name(&self, port_name: &str) -> Result<runtime::PortKey, BuilderError>;
+    fn get_port_by_name(&self, port_name: &str) -> Result<BuilderPortKey, BuilderError>;
 
-    fn get_action_by_name(&self, action_name: &str) -> Result<runtime::ActionKey, BuilderError>;
+    fn get_action_by_name(&self, action_name: &str) -> Result<BuilderActionKey, BuilderError>;
 }
 
 #[derive(Default)]
 pub struct EnvBuilder {
     /// Builders for Ports
-    pub(super) port_builders: SlotMap<runtime::PortKey, Box<dyn BasePortBuilder>>,
-    /// Builders for Actions
-    pub(super) action_builders: SlotMap<runtime::ActionKey, ActionBuilder>,
+    pub(super) port_builders: SlotMap<BuilderPortKey, Box<dyn BasePortBuilder>>,
     /// Builders for Reactions
-    pub(super) reaction_builders: SlotMap<runtime::ReactionKey, ReactionBuilder>,
+    pub(super) reaction_builders: SlotMap<BuilderReactionKey, ReactionBuilder>,
     /// Builders for Reactors
-    pub(super) reactor_builders: SlotMap<runtime::ReactorKey, ReactorBuilder>,
+    pub(super) reactor_builders: SlotMap<BuilderReactorKey, ReactorBuilder>,
 }
 
 /// Return type for building runtime parts
 struct RuntimePortParts {
     /// All runtime Ports
-    ports: SlotMap<runtime::PortKey, Box<dyn runtime::BasePort>>,
+    ports: tinymap::TinyMap<runtime::PortKey, Box<dyn runtime::BasePort>>,
     /// For each Port, a set of Reactions triggered by it
-    port_triggers: SecondaryMap<runtime::PortKey, Vec<runtime::ReactionKey>>,
-    /// A mapping from builder Ports to aliased runtime Ports
-    aliases: SecondaryMap<runtime::PortKey, runtime::PortKey>,
+    port_triggers: tinymap::TinySecondaryMap<runtime::PortKey, Vec<BuilderReactionKey>>,
+    /// A mapping from `BuilderPortKey`s to aliased [`runtime::PortKey`]s.
+    aliases: SecondaryMap<BuilderPortKey, runtime::PortKey>,
 }
 
 impl EnvBuilder {
@@ -55,18 +54,18 @@ impl EnvBuilder {
     pub fn add_reactor<S: runtime::ReactorState>(
         &mut self,
         name: &str,
-        parent: Option<runtime::ReactorKey>,
+        parent: Option<BuilderReactorKey>,
         reactor: S,
-    ) -> ReactorBuilderState<S> {
-        ReactorBuilderState::new(name, parent, reactor, self)
+    ) -> ReactorBuilderState {
+        ReactorBuilderState::new(name, parent, Box::new(reactor), self)
     }
 
     pub fn add_port<T: runtime::PortData>(
         &mut self,
         name: &str,
         port_type: PortType,
-        reactor_key: runtime::ReactorKey,
-    ) -> Result<BuilderPortKey<T>, BuilderError> {
+        reactor_key: BuilderReactorKey,
+    ) -> Result<TypedPortKey<T>, BuilderError> {
         // Ensure no duplicates
         if self
             .port_builders
@@ -86,7 +85,7 @@ impl EnvBuilder {
             Box::new(PortBuilder::<T>::new(name, reactor_key, port_type))
         });
 
-        Ok(BuilderPortKey::new(key))
+        Ok(TypedPortKey::new(key))
     }
 
     pub fn add_timer(
@@ -94,15 +93,14 @@ impl EnvBuilder {
         name: &str,
         period: runtime::Duration,
         offset: runtime::Duration,
-        reactor_key: runtime::ReactorKey,
-    ) -> Result<BuilderActionKey, BuilderError> {
+        reactor_key: BuilderReactorKey,
+    ) -> Result<TypedActionKey, BuilderError> {
         self.add_action::<(), _>(
             name,
             ActionType::Timer { period, offset },
             reactor_key,
-            move |name: &'_ str, action_key| runtime::InternalAction::Timer {
+            move |name: &'_ str| runtime::InternalAction::Timer {
                 name: name.into(),
-                key: action_key,
                 offset,
                 period,
             },
@@ -112,33 +110,26 @@ impl EnvBuilder {
     pub fn add_shutdown_action(
         &mut self,
         name: &str,
-        reactor_key: runtime::ReactorKey,
-    ) -> Result<BuilderActionKey, BuilderError> {
-        self.add_action::<(), _>(
-            name,
-            ActionType::Shutdown,
-            reactor_key,
-            |name: &'_ str, action_key| runtime::InternalAction::Shutdown {
-                name: name.into(),
-                key: action_key,
-            },
-        )
+        reactor_key: BuilderReactorKey,
+    ) -> Result<TypedActionKey, BuilderError> {
+        self.add_action::<(), _>(name, ActionType::Shutdown, reactor_key, |name: &'_ str| {
+            runtime::InternalAction::Shutdown { name: name.into() }
+        })
     }
 
     pub fn add_logical_action<T: runtime::PortData>(
         &mut self,
         name: &str,
         min_delay: Option<runtime::Duration>,
-        reactor_key: runtime::ReactorKey,
-    ) -> Result<BuilderActionKey<T>, BuilderError> {
+        reactor_key: BuilderReactorKey,
+    ) -> Result<TypedActionKey<T>, BuilderError> {
         self.add_action::<T, _>(
             name,
             ActionType::Logical { min_delay },
             reactor_key,
-            move |name: &'_ str, action_key| {
+            move |name: &'_ str| {
                 runtime::InternalAction::Valued(ValuedAction::new::<T>(
                     name,
-                    action_key,
                     true,
                     min_delay.unwrap_or_default(),
                 ))
@@ -151,39 +142,40 @@ impl EnvBuilder {
         &mut self,
         name: &str,
         ty: ActionType,
-        reactor_key: runtime::ReactorKey,
+        reactor_key: BuilderReactorKey,
         action_fn: F,
-    ) -> Result<BuilderActionKey<T>, BuilderError>
+    ) -> Result<TypedActionKey<T>, BuilderError>
     where
         T: runtime::PortData,
         F: ActionBuilderFn + 'static,
     {
+        let reactor_builder = &mut self.reactor_builders[reactor_key];
+
         // Ensure no duplicates
-        if self.action_builders.values().any(|action_builder| {
-            action_builder.get_name() == name && action_builder.get_reactor_key() == reactor_key
-        }) {
+        if reactor_builder
+            .actions
+            .values()
+            .any(|action_builder| action_builder.get_name() == name)
+        {
             return Err(BuilderError::DuplicateActionDefinition {
                 reactor_name: self.reactor_builders[reactor_key].name.clone(),
                 action_name: name.into(),
             });
         }
 
-        let key = self.action_builders.insert_with_key(|action_key| {
-            self.reactor_builders[reactor_key]
-                .actions
-                .insert(action_key, ());
-            ActionBuilder::new(name, ty, action_key, reactor_key, Box::new(action_fn))
-        });
+        let key = reactor_builder
+            .actions
+            .insert(ActionBuilder::new(name, ty, Box::new(action_fn)));
 
-        Ok(BuilderActionKey::new(key))
+        Ok(key.into())
     }
 
     /// Find a Port matching a given name and ReactorKey
     pub fn get_port(
         &self,
         port_name: &str,
-        reactor_key: runtime::ReactorKey,
-    ) -> Result<runtime::PortKey, BuilderError> {
+        reactor_key: BuilderReactorKey,
+    ) -> Result<BuilderPortKey, BuilderError> {
         self.port_builders
             .iter()
             .find(|(_, port_builder)| {
@@ -195,17 +187,15 @@ impl EnvBuilder {
     }
 
     /// Find an Action matching a given name and ReactorKey
-    pub fn get_action(
+    pub fn find_action_by_name(
         &self,
         action_name: &str,
-        reactor_key: runtime::ReactorKey,
-    ) -> Result<runtime::ActionKey, BuilderError> {
-        self.action_builders
+        reactor_key: BuilderReactorKey,
+    ) -> Result<BuilderActionKey, BuilderError> {
+        self.reactor_builders[reactor_key]
+            .actions
             .iter()
-            .find(|(_, action_builder)| {
-                action_builder.get_name() == action_name
-                    && action_builder.get_reactor_key() == reactor_key
-            })
+            .find(|(_, action_builder)| action_builder.get_name() == action_name)
             .map(|(action_key, _)| action_key)
             .ok_or_else(|| BuilderError::NamedActionNotFound(action_name.to_string()))
     }
@@ -214,8 +204,8 @@ impl EnvBuilder {
     /// The nominal case is to bind Input A to Output B
     pub fn bind_port<T: runtime::PortData>(
         &mut self,
-        port_a_key: BuilderPortKey<T>,
-        port_b_key: BuilderPortKey<T>,
+        port_a_key: TypedPortKey<T>,
+        port_b_key: TypedPortKey<T>,
     ) -> Result<(), BuilderError> {
         let port_a_key = port_a_key.into();
         let port_b_key = port_b_key.into();
@@ -324,12 +314,18 @@ impl EnvBuilder {
     }
 
     /// Get a fully-qualified string name for the given ActionKey
-    pub fn action_fqn(&self, action_key: runtime::ActionKey) -> Result<String, BuilderError> {
-        self.action_builders
-            .get(action_key)
+    pub fn action_fqn(&self, action_key: BuilderActionKey) -> Result<String, BuilderError> {
+        self.reactor_builders
+            .iter()
+            .find_map(|(reactor_key, reactor_builder)| {
+                reactor_builder
+                    .actions
+                    .get(action_key)
+                    .map(|action_builder| (reactor_key, action_builder))
+            })
             .ok_or(BuilderError::ActionKeyNotFound(action_key))
-            .and_then(|action_builder| {
-                self.reactor_fqn(action_builder.get_reactor_key())
+            .and_then(|(reactor_key, action_builder)| {
+                self.reactor_fqn(reactor_key)
                     .map_err(|err| BuilderError::InconsistentBuilderState {
                         what: format!(
                             "Reactor referenced by {:?} not found: {:?}",
@@ -341,7 +337,7 @@ impl EnvBuilder {
     }
 
     /// Get a fully-qualified string for the given ReactionKey
-    pub fn reactor_fqn(&self, reactor_key: runtime::ReactorKey) -> Result<String, BuilderError> {
+    pub fn reactor_fqn(&self, reactor_key: BuilderReactorKey) -> Result<String, BuilderError> {
         self.reactor_builders
             .get(reactor_key)
             .ok_or(BuilderError::ReactorKeyNotFound(reactor_key))
@@ -357,7 +353,7 @@ impl EnvBuilder {
     }
 
     /// Get a fully-qualified string for the given ReactionKey
-    pub fn reaction_fqn(&self, reaction_key: runtime::ReactionKey) -> Result<String, BuilderError> {
+    pub fn reaction_fqn(&self, reaction_key: BuilderReactionKey) -> Result<String, BuilderError> {
         self.reaction_builders
             .get(reaction_key)
             .ok_or(BuilderError::ReactionKeyNotFound(reaction_key))
@@ -372,7 +368,7 @@ impl EnvBuilder {
     }
 
     /// Get a fully-qualified string for the given PortKey
-    pub fn port_fqn(&self, port_key: runtime::PortKey) -> Result<String, BuilderError> {
+    pub fn port_fqn(&self, port_key: BuilderPortKey) -> Result<String, BuilderError> {
         self.port_builders
             .get(port_key)
             .ok_or(BuilderError::PortKeyNotFound(port_key))
@@ -391,7 +387,7 @@ impl EnvBuilder {
     }
 
     /// Follow the inward_binding's of Ports to the source
-    pub fn follow_port_inward_binding(&self, port_key: runtime::PortKey) -> runtime::PortKey {
+    pub fn follow_port_inward_binding(&self, port_key: BuilderPortKey) -> BuilderPortKey {
         let mut cur_key = port_key;
         while let Some(new_idx) = self
             .port_builders
@@ -406,10 +402,10 @@ impl EnvBuilder {
     /// Transitively collect all Reactions triggered by this Port being set
     fn collect_transitive_port_triggers(
         &self,
-        port_key: runtime::PortKey,
-    ) -> SecondaryMap<runtime::ReactionKey, ()> {
+        port_key: BuilderPortKey,
+    ) -> SecondaryMap<BuilderReactionKey, ()> {
         let mut all_triggers = SecondaryMap::new();
-        let mut port_set = BTreeSet::<runtime::PortKey>::new();
+        let mut port_set = BTreeSet::<BuilderPortKey>::new();
         port_set.insert(port_key);
         while !port_set.is_empty() {
             let port_key = port_set.pop_first().unwrap();
@@ -422,7 +418,7 @@ impl EnvBuilder {
 
     pub fn reaction_dependency_edges<'b>(
         &'b self,
-    ) -> impl Iterator<Item = (runtime::ReactionKey, runtime::ReactionKey)> + '_ {
+    ) -> impl Iterator<Item = (BuilderReactionKey, BuilderReactionKey)> + '_ {
         let deps = self
             .reaction_builders
             .iter()
@@ -451,7 +447,7 @@ impl EnvBuilder {
     }
 
     /// Prepare the DAG of Reactions
-    pub fn get_reaction_graph(&self) -> DiGraphMap<runtime::ReactionKey, ()> {
+    pub fn get_reaction_graph(&self) -> DiGraphMap<BuilderReactionKey, ()> {
         let mut graph =
             DiGraphMap::from_edges(self.reaction_dependency_edges().map(|(a, b)| (b, a)));
         // Ensure all ReactionIndicies are represented
@@ -463,7 +459,7 @@ impl EnvBuilder {
     }
 
     /// Build a DAG of Reactors
-    pub fn build_reactor_graph(&self) -> DiGraphMap<runtime::ReactorKey, ()> {
+    pub fn build_reactor_graph(&self) -> DiGraphMap<BuilderReactorKey, ()> {
         let mut graph =
             DiGraphMap::from_edges(self.reactor_builders.iter().filter_map(|(key, reactor)| {
                 reactor
@@ -483,7 +479,7 @@ impl EnvBuilder {
     /// See https://en.m.wikipedia.org/wiki/Coffman%E2%80%93Graham_algorithm
     pub fn build_runtime_level_map(
         &self,
-    ) -> Result<SecondaryMap<runtime::ReactionKey, usize>, BuilderError> {
+    ) -> Result<SecondaryMap<BuilderReactionKey, usize>, BuilderError> {
         use petgraph::{algo::tred, graph::DefaultIx, graph::NodeIndex};
 
         let mut graph = self.get_reaction_graph().into_graph::<DefaultIx>();
@@ -524,11 +520,10 @@ impl EnvBuilder {
             .collect())
     }
 
-    /// Construct runtime structures from the builders.
-    /// Returns a tuple of (runtime_ports, runtime_port_triggers, alias_map)
+    /// Construct runtime port structures from the builders.
     fn build_runtime_ports(&self) -> RuntimePortParts {
-        let mut runtime_ports = SlotMap::with_key();
-        let mut runtime_port_triggers = SecondaryMap::new();
+        let mut runtime_ports = tinymap::TinyMap::new();
+        let mut runtime_port_triggers = tinymap::TinySecondaryMap::new();
         let mut alias_map = SecondaryMap::new();
 
         let port_groups = self
@@ -560,40 +555,25 @@ impl EnvBuilder {
         }
     }
 
-    fn build_runtime_actions(
-        &self,
-    ) -> (
-        SlotMap<runtime::ActionKey, runtime::InternalAction>,
-        SecondaryMap<runtime::ActionKey, Vec<runtime::ReactionKey>>,
-    ) {
-        let mut runtime_actions = SlotMap::with_key();
-
-        let runtime_action_triggers = self
-            .action_builders
-            .iter()
-            .map(|(action_key, action_builder)| {
-                (action_key, action_builder.triggers.keys().collect())
-            })
-            .collect();
-
-        for (action_key, builder) in self.action_builders.iter() {
-            let key = runtime_actions.insert(builder.into_action());
-            assert_eq!(key, action_key);
-        }
-
-        (runtime_actions, runtime_action_triggers)
-    }
-
     pub fn debug_info(&self) {
-        let actions = self
-            .action_builders
-            .keys()
-            .map(|action_key| {
-                let fqn = self.action_fqn(action_key).unwrap();
-                format!(" - {action_key:?}: \"{fqn}\"")
+        let reactors = self
+            .reactor_builders
+            .iter()
+            .map(|(reactor_key, reactor_builder)| {
+                let fqn = self.reactor_fqn(reactor_key).unwrap();
+                format!(" - {reactor_key:?}: \"{fqn}\"")
             })
             .join("\n");
-        info!("actions:\n{actions}");
+
+        // let actions = self
+        //    .action_builders
+        //    .keys()
+        //    .map(|action_key| {
+        //        let fqn = self.action_fqn(action_key).unwrap();
+        //        format!(" - {action_key:?}: \"{fqn}\"")
+        //    })
+        //    .join("\n");
+        // info!("actions:\n{actions}");
 
         let ports = self
             .port_builders
@@ -660,17 +640,57 @@ impl EnvBuilder {
     }
 }
 
+/// Build a new `SlotMap` of `runtime::Reactor` from `ReactorBuilder`s.
+fn build_runtime_reactors(
+    reactor_builders: SlotMap<BuilderReactorKey, ReactorBuilder>,
+    reaction_levels: &SecondaryMap<BuilderReactionKey, usize>,
+) -> (
+    tinymap::TinyMap<runtime::ReactorKey, runtime::Reactor>,
+    SecondaryMap<BuilderReactorKey, runtime::ReactorKey>,
+) {
+    let mut runtime_reactors = tinymap::TinyMap::with_capacity(reactor_builders.len());
+
+    // Mapping from builder::ReactorKey to runtime::ReactorKey
+    let mut key_map = SecondaryMap::new();
+
+    for (builder_key, reactor_builder) in reactor_builders.into_iter() {
+        let ReactorBuilder {
+            name,
+            state,
+            actions,
+            ..
+        } = reactor_builder;
+
+        let mut runtime_actions = tinymap::TinyMap::with_capacity(actions.len());
+        let mut runtime_action_triggers = tinymap::TinySecondaryMap::new();
+
+        for (builder_key, action_builder) in actions.into_iter() {
+            let triggers = action_builder
+                .triggers
+                .keys()
+                .map(|reaction_key| (reaction_levels[reaction_key], reaction_key))
+                .collect();
+            let runtime_key = runtime_actions.insert(action_builder.into());
+            runtime_action_triggers.insert(runtime_key, triggers);
+        }
+        let reactor_key = runtime_reactors.insert(runtime::Reactor::new(
+            &name,
+            state,
+            runtime_actions,
+            runtime_action_triggers,
+        ));
+        key_map.insert(builder_key, reactor_key);
+    }
+    (runtime_reactors, key_map)
+}
+
 impl TryInto<(runtime::Env, runtime::DepInfo)> for EnvBuilder {
     type Error = BuilderError;
     fn try_into(self) -> Result<(runtime::Env, runtime::DepInfo), Self::Error> {
         let reaction_levels = self.build_runtime_level_map()?;
-        let (runtime_actions, runtime_action_triggers) = self.build_runtime_actions();
         let runtime_port_parts = self.build_runtime_ports();
-
-        let mut runtime_reactors = SlotMap::<ReactorKey, _>::with_key();
-        for (_, builder) in self.reactor_builders.into_iter() {
-            runtime_reactors.insert(builder.into());
-        }
+        let (runtime_reactors, reactor_key_map) =
+            build_runtime_reactors(self.reactor_builders, &reaction_levels);
 
         // Build the SlotMap of runtime::Reaction from the ReactionBuilders.
         // This depends on iter() being stable and that inserting in the same order results in the
@@ -679,86 +699,91 @@ impl TryInto<(runtime::Env, runtime::DepInfo)> for EnvBuilder {
             reactions,
             reaction_inputs,
             reaction_outputs,
-            reaction_trig_actions,
-            reaction_sched_actions,
+            // reaction_trig_actions,
+            // reaction_sched_actions,
         ) = {
-            let mut reactions = SlotMap::with_key();
+            let mut reactions = tinymap::TinyMap::<runtime::ReactionKey, _>::with_capacity(
+                self.reaction_builders.len(),
+            );
 
-            let mut reaction_inputs = SecondaryMap::new();
-            let mut reaction_outputs = SecondaryMap::new();
+            let mut reaction_inputs = tinymap::TinySecondaryMap::new();
+            let mut reaction_outputs = tinymap::TinySecondaryMap::new();
 
-            let mut reaction_trig_actions = SecondaryMap::new();
-            let mut reaction_sched_actions = SecondaryMap::new();
+            // let mut reaction_trig_actions = SecondaryMap::new();
+            // let mut reaction_sched_actions = SecondaryMap::new();
 
-            for (key, builder) in self.reaction_builders.into_iter() {
+            for (builder_key, reaction_builder) in self.reaction_builders.into_iter() {
                 let new_key = reactions.insert_with_key(|reaction_key| {
                     // Create the Vec of input ports for this reaction sorted by order
                     reaction_inputs.insert(
                         reaction_key,
-                        builder
+                        reaction_builder
                             .input_ports
                             .iter()
                             .sorted_by_key(|(_, &order)| order)
-                            .map(|(builder_key, _)| runtime_port_parts.aliases[builder_key])
+                            .map(|(builder_port_key, _)| {
+                                runtime_port_parts.aliases[builder_port_key]
+                            })
                             .collect::<Vec<_>>(),
                     );
                     // Create the Vec of output ports for this reaction sorted by order
                     reaction_outputs.insert(
-                        key,
-                        builder
+                        reaction_key,
+                        reaction_builder
                             .output_ports
                             .iter()
                             .sorted_by_key(|(_, &order)| order)
-                            .map(|(builder_key, _)| runtime_port_parts.aliases[builder_key])
+                            .map(|(builder_port_key, _)| {
+                                runtime_port_parts.aliases[builder_port_key]
+                            })
                             .collect::<Vec<_>>(),
                     );
 
                     // Create grouped iterable of actions associated with this reaction, and whether
                     // they are schedulable or not
-                    let grouped_actions = builder
-                        .schedulable_actions
-                        .iter()
-                        .map(|(action_key, order)| (action_key, order, true))
-                        .chain(
-                            builder
-                                .trigger_actions
-                                .iter()
-                                .map(|(action_key, order)| (action_key, order, false)),
-                        )
-                        .sorted_by_key(|(action_key, _, _)| *action_key)
-                        .group_by(|(action_key, _, _)| *action_key);
+                    // let grouped_actions = reaction_builder
+                    //    .schedulable_actions
+                    //    .iter()
+                    //    .map(|(action_key, order)| (action_key, order, true))
+                    //    .chain(
+                    //        reaction_builder
+                    //            .trigger_actions
+                    //            .iter()
+                    //            .map(|(action_key, order)| (action_key, order, false)),
+                    //    )
+                    //    .sorted_by_key(|(action_key, _, _)| *action_key)
+                    //    .group_by(|(action_key, _, _)| *action_key);
 
-                    let (actions_trigger, actions_schedulable) = grouped_actions
-                        .into_iter()
-                        .filter_map(|(_, group)| {
-                            group.reduce(|acc, item| (acc.0, acc.1.max(item.1), acc.2.max(item.2)))
-                        })
-                        .sorted_by_key(|(_, &order, _)| order)
-                        .map(|(action_key, _, schedulable)| (action_key, schedulable))
-                        .partition_map(|(action_key, schedulable)| {
-                            if schedulable {
-                                Either::Right(action_key)
-                            } else {
-                                Either::Left(action_key)
-                            }
-                        });
+                    // let (actions_trigger, actions_schedulable) = grouped_actions
+                    //    .into_iter()
+                    //    .filter_map(|(_, group)| {
+                    //        group.reduce(|acc, item| (acc.0, acc.1.max(item.1),
+                    // acc.2.max(item.2)))    })
+                    //    .sorted_by_key(|(_, &order, _)| order)
+                    //    .map(|(action_key, _, schedulable)| (action_key, schedulable))
+                    //    .partition_map(|(action_key, schedulable)| {
+                    //        if schedulable {
+                    //            Either::Right(action_key)
+                    //        } else {
+                    //            Either::Left(action_key)
+                    //        }
+                    //    });
 
                     // Create the Vec of Actions that trigger this reaction
-                    reaction_trig_actions.insert(reaction_key, actions_trigger);
+                    // reaction_trig_actions.insert(reaction_key, actions_trigger);
 
                     // Create the Vec of schedulable actions for this reaction sorted by order
-                    reaction_sched_actions.insert(reaction_key, actions_schedulable);
+                    // reaction_sched_actions.insert(reaction_key, actions_schedulable);
 
-                    builder.into()
+                    reaction_builder.build_reaction(&reactor_key_map)
                 });
-                assert!(key == new_key);
             }
             (
                 reactions,
                 reaction_inputs,
                 reaction_outputs,
-                reaction_trig_actions,
-                reaction_sched_actions,
+                // reaction_trig_actions,
+                // reaction_sched_actions,
             )
         };
 
@@ -766,17 +791,15 @@ impl TryInto<(runtime::Env, runtime::DepInfo)> for EnvBuilder {
             runtime::Env {
                 reactors: runtime_reactors,
                 ports: runtime_port_parts.ports,
-                actions: runtime_actions,
                 reactions,
             },
             runtime::DepInfo {
                 port_triggers: runtime_port_parts.port_triggers,
-                action_triggers: runtime_action_triggers,
                 reaction_levels,
                 reaction_inputs,
                 reaction_outputs,
-                reaction_trig_actions,
-                reaction_sched_actions,
+                // reaction_trig_actions,
+                // reaction_sched_actions,
             },
         ))
     }

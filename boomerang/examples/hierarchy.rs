@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
 use boomerang::{
-    builder::{BuilderActionKey, BuilderPortKey},
-    runtime, Reactor, run
+    builder::{BuilderActionKey, TypedPortKey},
+    run, runtime, Reactor,
 };
 
 // Test data transport across hierarchy.
@@ -11,7 +11,7 @@ use boomerang::{
 #[reactor(state = "Source")]
 struct SourceBuilder {
     #[reactor(output())]
-    out: BuilderPortKey<u32>,
+    out: TypedPortKey<u32>,
     #[reactor(timer())]
     t: BuilderActionKey,
     #[reactor(reaction(function = "Source::reaction_out"))]
@@ -34,9 +34,9 @@ impl Source {
 #[reactor(state = "Gain")]
 struct GainBuilder {
     #[reactor(input())]
-    inp: BuilderPortKey<u32>,
+    inp: TypedPortKey<u32>,
     #[reactor(output())]
-    out: BuilderPortKey<u32>,
+    out: TypedPortKey<u32>,
     #[reactor(reaction(function = "Gain::reaction_in"))]
     reaction_in: runtime::ReactionKey,
 }
@@ -63,7 +63,7 @@ impl Gain {
 #[reactor(state = "Print")]
 struct PrintBuilder {
     #[reactor(input())]
-    inp: BuilderPortKey<u32>,
+    inp: TypedPortKey<u32>,
     #[reactor(action())]
     a: BuilderActionKey,
     #[reactor(reaction(function = "Print::reaction_in"))]
@@ -94,11 +94,11 @@ impl Print {
 )]
 struct GainContainerBuilder {
     #[reactor(input())]
-    inp: BuilderPortKey<u32>,
+    inp: TypedPortKey<u32>,
     #[reactor(output())]
-    out: BuilderPortKey<u32>,
+    out: TypedPortKey<u32>,
     #[reactor(output())]
-    out2: BuilderPortKey<u32>,
+    out2: TypedPortKey<u32>,
     #[reactor(child(state = "Gain::new(2)"))]
     gain: GainBuilder,
 }

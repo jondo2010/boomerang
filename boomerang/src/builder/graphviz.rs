@@ -1,12 +1,11 @@
-use super::{ActionType, BuilderError, EnvBuilder, PortType, ReactorBuilder};
+use super::{ActionType, BuilderError, BuilderPortKey, EnvBuilder, PortType, ReactorBuilder};
 
-use boomerang_runtime::PortKey;
 use itertools::Itertools;
 use slotmap::Key;
 use std::collections::HashMap;
 
 /// Build the node name string for a Port
-fn port_node_name(env_builder: &EnvBuilder, port_key: PortKey) -> String {
+fn port_node_name(env_builder: &EnvBuilder, port_key: BuilderPortKey) -> String {
     let port = &env_builder.port_builders[port_key];
     let port_id = port_key.data().as_ffi() % env_builder.port_builders.len() as u64;
     let port_reactor_id =
@@ -76,9 +75,8 @@ fn build_reactions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &
 }
 
 fn build_actions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &mut Vec<String>) {
-    for action_key in reactor.actions.keys() {
-        let action = &env_builder.action_builders[action_key];
-        let action_id = action_key.data().as_ffi() % env_builder.action_builders.len() as u64;
+    for (action_key, action) in reactor.actions.iter() {
+        let action_id = action_key.data().as_ffi() % reactor.actions.len() as u64;
 
         let xlabel = match action.get_type() {
             ActionType::Timer { period, offset } => {

@@ -19,14 +19,15 @@ codecov = { repository = 'jondo2010/boomerang', branch = 'master', service = 'gi
 [dependencies]
 crossbeam-channel = "0.5"
 crossbeam-utils = "0.8"
+derivative = "2.2"
 derive_more = '0.99'
 downcast-rs = "1.2"
-thiserror = "1.0"
-tracing = "0.1"
+itertools = "*"
 rayon = "1.5"
 slotmap = { version = "1.0", features = ["unstable"] }
-derivative = "2.2"
-itertools = "*"
+thiserror = "1.0"
+tinymap = { path = "../boomerang_tinymap" }
+tracing = "0.1"
 
 [dev-dependencies]
 #tracing-subscriber = { version = "0.2.15", features = ["fmt"] }

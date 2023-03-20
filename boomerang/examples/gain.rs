@@ -1,17 +1,17 @@
 // Example in the Wiki.
 
 use boomerang::{
-    builder::{BuilderActionKey, BuilderPortKey},
-    runtime, Reactor, run
+    builder::{BuilderActionKey, TypedPortKey},
+    run, runtime, Reactor,
 };
 
 #[derive(Reactor)]
 #[reactor(state = "Scale")]
 struct ScaleBuilder {
     #[reactor(input())]
-    x: BuilderPortKey<u32>,
+    x: TypedPortKey<u32>,
     #[reactor(output())]
-    y: BuilderPortKey<u32>,
+    y: TypedPortKey<u32>,
     #[reactor(reaction(function = "Scale::reaction_x"))]
     reaction_x: runtime::ReactionKey,
 }
@@ -33,7 +33,7 @@ impl Scale {
 #[reactor(state = "Test")]
 struct TestBuilder {
     #[reactor(input())]
-    x: BuilderPortKey<u32>,
+    x: TypedPortKey<u32>,
     #[reactor(reaction(function = "Test::reaction_x"))]
     reaction_x: runtime::ReactionKey,
 }

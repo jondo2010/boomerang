@@ -1,27 +1,25 @@
 use itertools::Itertools;
-use slotmap::{Key, SecondaryMap};
 
 use crate::Level;
 
 /// A set of Keys organized by level
 #[derive(Debug, Clone, Default)]
-pub struct KeySet<K: Key> {
+pub struct KeySet<K: tinymap::Key> {
     /// List of SecondaryMaps, reverse-sorted by Level
-    levels: Vec<(Level, SecondaryMap<K, ()>)>,
+    levels: Vec<(Level, tinymap::TinySecondaryMap<K, ()>)>,
 }
 
-impl<K: Key> KeySet<K> {
+impl<K: tinymap::Key> KeySet<K> {
     pub fn len(&self) -> usize {
         self.levels.len()
     }
 
     /// Build the levels structure from an iterable
-    fn build_levels<I>(keys: I) -> Vec<(usize, SecondaryMap<K, ()>)>
+    fn build_levels<I>(keys: I) -> Vec<(usize, tinymap::TinySecondaryMap<K, ()>)>
     where
         I: IntoIterator<Item = (Level, K)>,
     {
-        keys
-            .into_iter()
+        keys.into_iter()
             .sorted_by_key(|(level, _)| -(*level as isize))
             .group_by(|(level, _)| *level)
             .into_iter()
@@ -34,7 +32,9 @@ impl<K: Key> KeySet<K> {
     where
         I: IntoIterator<Item = (Level, K)>,
     {
-        Self { levels: Self::build_levels(keys) }
+        Self {
+            levels: Self::build_levels(keys),
+        }
     }
 
     /// Extend the set from `other` into `self`. Any keys at a level lower than the current
@@ -75,10 +75,15 @@ impl<K: Key> KeySet<K> {
     }
 }
 
-impl<K> Iterator for KeySet<K>
-where
-    K: Key,
-{
+impl<K: tinymap::Key> FromIterator<(Level, K)> for KeySet<K> {
+    fn from_iter<T: IntoIterator<Item = (Level, K)>>(iter: T) -> Self {
+        Self {
+            levels: Self::build_levels(iter),
+        }
+    }
+}
+
+impl<K: tinymap::Key> Iterator for KeySet<K> {
     type Item = (Level, impl ExactSizeIterator<Item = K>);
 
     /// Provides the next lowest level in the set.
@@ -91,18 +96,19 @@ where
 
 #[cfg(test)]
 mod tests {
+    use tinymap::DefaultKey;
+
     use super::*;
-    use slotmap::SlotMap;
 
     #[test]
     fn test_set1() {
-        let mut sm = SlotMap::new();
-        let key0 = sm.insert(0);
-        let key1 = sm.insert(2);
-        let key2 = sm.insert(1);
-        let key3 = sm.insert(1);
+        let mut map = tinymap::TinyMap::<DefaultKey, _>::new();
+        let key0 = map.insert(0);
+        let key1 = map.insert(2);
+        let key2 = map.insert(1);
+        let key3 = map.insert(1);
 
-        let vals = sm.iter().map(|(k, v)| (*v, k));
+        let vals = map.iter().map(|(k, v)| (*v, k));
 
         let mut rset = KeySet::from_iter(vals);
         assert_eq!(rset.levels.len(), 3);
@@ -124,10 +130,10 @@ mod tests {
 
     #[test]
     fn test_set2() {
-        let mut sm = SlotMap::new();
-        let key0 = sm.insert(());
-        let key1 = sm.insert(());
-        let key2 = sm.insert(());
+        let mut map = tinymap::TinyMap::<DefaultKey, _>::new();
+        let key0 = map.insert(());
+        let key1 = map.insert(());
+        let key2 = map.insert(());
 
         let vals1 = IntoIterator::into_iter([(2usize, key0), (1usize, key1), (2, key2)]);
         let mut rset = KeySet::from_iter(vals1);
@@ -145,11 +151,11 @@ mod tests {
 
     #[test]
     fn test_set3() {
-        let mut sm = SlotMap::new();
-        let key0 = sm.insert(());
-        let key1 = sm.insert(());
-        let key2 = sm.insert(());
-        let key3 = sm.insert(());
+        let mut map = tinymap::TinyMap::<DefaultKey, _>::new();
+        let key0 = map.insert(());
+        let key1 = map.insert(());
+        let key2 = map.insert(());
+        let key3 = map.insert(());
 
         let mut rset = KeySet::default();
 
@@ -177,11 +183,11 @@ mod tests {
 
     #[test]
     fn test_set4() {
-        let mut sm = SlotMap::new();
-        let key0 = sm.insert(());
-        let key1 = sm.insert(());
-        let key2 = sm.insert(());
-        let key3 = sm.insert(());
+        let mut map = tinymap::TinyMap::<DefaultKey, _>::new();
+        let key0 = map.insert(());
+        let key1 = map.insert(());
+        let key2 = map.insert(());
+        let key3 = map.insert(());
 
         let mut rset = KeySet::default();
 

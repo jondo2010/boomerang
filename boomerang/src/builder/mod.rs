@@ -30,16 +30,16 @@ pub enum BuilderError {
     },
 
     #[error("ActionKey not found: {}", 0)]
-    ActionKeyNotFound(runtime::ActionKey),
+    ActionKeyNotFound(BuilderActionKey),
 
     #[error("ReactorKey not found: {}", 0)]
-    ReactorKeyNotFound(runtime::ReactorKey),
+    ReactorKeyNotFound(BuilderReactorKey),
 
     #[error("PortKey not found: {}", 0)]
-    PortKeyNotFound(runtime::PortKey),
+    PortKeyNotFound(BuilderPortKey),
 
     #[error("ReactionKey not found: {}", 0)]
-    ReactionKeyNotFound(runtime::ReactionKey),
+    ReactionKeyNotFound(BuilderReactionKey),
 
     #[error("A Port named '{}' was not found.", 0)]
     NamedPortNotFound(String),
@@ -54,15 +54,15 @@ pub enum BuilderError {
     },
 
     #[error("A cycle in the Reaction graph was found.")]
-    ReactionGraphCycle { what: runtime::ReactionKey },
+    ReactionGraphCycle { what: BuilderReactionKey },
 
     #[error("A cycle in the Reactor graph was found.")]
-    ReactorGraphCycle { what: runtime::ReactorKey },
+    ReactorGraphCycle { what: BuilderReactorKey },
 
     #[error("Error binding ports ({:?}->{:?}): {}", port_a_key, port_b_key, what)]
     PortBindError {
-        port_a_key: runtime::PortKey,
-        port_b_key: runtime::PortKey,
+        port_a_key: BuilderPortKey,
+        port_b_key: BuilderPortKey,
         what: String,
     },
 

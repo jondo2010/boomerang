@@ -24,16 +24,17 @@ runner = ["clap"]
 
 [dependencies]
 anyhow = "1.0"
-boomerang_runtime = { path = "../boomerang_runtime" }
 boomerang_derive = { optional = true, path = "../boomerang_derive" }
+boomerang_runtime = { path = "../boomerang_runtime" }
 derivative = "2.2"
 derive_more = '0.99'
+graphviz-rust = "0.6"
 itertools = "0.10"
 petgraph = "0.6"
 slotmap = { version = "1.0", features = ["unstable"] }
 thiserror = "1.0"
+tinymap = { path = "../boomerang_tinymap" }
 tracing = "0.1"
-graphviz-rust = "0.6"
 
 clap = { version = "4.1", features = ["derive"], optional = true }
 

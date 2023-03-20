@@ -1,13 +1,10 @@
 use crossbeam_channel::{Receiver, RecvTimeoutError};
 use derive_more::Display;
-use rayon::iter::{ParallelBridge, ParallelIterator};
+// use rayon::iter::{ParallelBridge, ParallelIterator};
 use std::{collections::BinaryHeap, time::Duration};
 use tracing::{info, trace, warn};
 
-use crate::{
-    Context, DepInfo, Env, Instant, InternalAction, ReactionKey, ReactionSet, ReactionTriggerCtx,
-    Tag, ValuedAction,
-};
+use crate::{Context, DepInfo, Env, Instant, ReactionKey, ReactionSet, ReactionTriggerCtx, Tag};
 
 #[derive(Debug, Display, Clone)]
 #[display(fmt = "[tag={},terminal={}]", tag, terminal)]
@@ -79,19 +76,21 @@ impl Scheduler {
 
         // For all Timers, pump later events onto the queue and create an initial ReactionSet to
         // process.
-        for action in self.env.actions.values() {
-            if let InternalAction::Timer { key, offset, .. } = action {
-                let downstream = self.dep_info.triggered_by_action(*key);
-                if offset.is_zero() {
-                    reaction_set.extend_above(downstream, 0);
-                } else {
-                    let tag = tag.delay(Some(*offset));
-                    self.event_queue.push(ScheduledEvent {
-                        tag,
-                        reactions: ReactionSet::from_iter(downstream),
-                        terminal: false,
-                    });
-                }
+        for (offset, downstream) in self
+            .env
+            .reactors
+            .values()
+            .flat_map(|reactor| reactor.iter_startup_events())
+        {
+            if offset.is_zero() {
+                reaction_set.extend_above(downstream.iter().copied(), 0);
+            } else {
+                let tag = tag.delay(Some(*offset));
+                self.event_queue.push(ScheduledEvent {
+                    tag,
+                    reactions: ReactionSet::from_iter(downstream.iter().copied()),
+                    terminal: false,
+                });
             }
         }
 
@@ -99,24 +98,23 @@ impl Scheduler {
     }
 
     fn cleanup(&mut self, current_tag: Tag) {
-        for action in self.env.actions.values_mut() {
-            match action {
-                InternalAction::Timer { key, period, .. } if !period.is_zero() => {
-                    // schedule a periodic timer again
-                    let downstream = self.dep_info.triggered_by_action(*key);
-                    let tag = current_tag.delay(Some(*period));
-                    self.event_queue.push(ScheduledEvent {
-                        tag,
-                        reactions: ReactionSet::from_iter(downstream),
-                        terminal: false,
-                    });
-                }
-                InternalAction::Valued(ValuedAction { values, .. }) => {
-                    // Clear action values at the current tag
-                    values.remove(current_tag);
-                }
-                _ => {}
-            }
+        for (period, downstream) in self
+            .env
+            .reactors
+            .values()
+            .flat_map(|reactor| reactor.iter_cleanup_events())
+        {
+            // schedule a periodic timer again
+            let tag = current_tag.delay(Some(*period));
+            self.event_queue.push(ScheduledEvent {
+                tag,
+                reactions: ReactionSet::from_iter(downstream.iter().copied()),
+                terminal: false,
+            });
+        }
+
+        for reactor in self.env.reactors.values_mut() {
+            reactor.cleanup(current_tag);
         }
 
         for port in self.env.ports.values_mut() {
@@ -126,13 +124,13 @@ impl Scheduler {
 
     fn shutdown(&mut self, shutdown_tag: Tag, _reactions: Option<ReactionSet>) {
         info!("Shutting down at {shutdown_tag}");
-        let mut reaction_set = ReactionSet::default();
-        for action in self.env.actions.values() {
-            if let InternalAction::Shutdown { key, .. } = action {
-                let downstream = self.dep_info.triggered_by_action(*key);
-                reaction_set.extend_above(downstream, 0);
-            }
-        }
+        let reaction_set = self
+            .env
+            .reactors
+            .values()
+            .flat_map(|reactor| reactor.iter_shutdown_events())
+            .flat_map(|downstream_reactions| downstream_reactions.iter().copied())
+            .collect();
         self.process_tag(shutdown_tag, reaction_set);
         info!("Scheduler has been shut down.");
     }
@@ -237,28 +235,22 @@ impl Scheduler {
             let iter_ctx = self.env.iter_reaction_ctx(dep_info, reaction_keys.iter());
 
             let inner_ctxs = iter_ctx
-                .par_bridge()
+                //.par_bridge()
                 .map(|trigger_ctx| {
                     let ReactionTriggerCtx {
                         reaction,
                         reactor,
                         inputs,
                         outputs,
-                        actions,
-                        schedulable_actions,
                     } = trigger_ctx;
 
-                    trace!("    Executing {}.", reaction.get_name());
+                    let reaction_name = reaction.get_name();
+                    let reactor_name = reactor.get_name();
+                    trace!("    Executing {reactor_name}/{reaction_name}.",);
 
                     let mut ctx = Context::new(dep_info, self.start_time, tag);
-                    reaction.trigger(
-                        &mut ctx,
-                        reactor,
-                        inputs,
-                        outputs,
-                        actions,
-                        schedulable_actions,
-                    );
+
+                    reaction.trigger(&mut ctx, reactor, inputs, outputs, &[], &mut []);
 
                     // Queue downstream reactions triggered by any ports that were set.
                     for port in outputs.iter() {
@@ -274,7 +266,7 @@ impl Scheduler {
             for ctx in inner_ctxs.into_iter() {
                 reaction_set.extend_above(ctx.reactions.into_iter(), level);
 
-                for evt in ctx.events.into_iter() {
+                for evt in ctx.scheduled_events.into_iter() {
                     self.event_queue.push(evt);
                 }
             }

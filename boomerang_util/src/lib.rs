@@ -7,6 +7,7 @@ pub struct TimeoutBuilder {
     startup: runtime::ReactionKey,
 }
 
+#[derive(Debug)]
 pub struct Timeout {
     timeout: runtime::Duration,
 }

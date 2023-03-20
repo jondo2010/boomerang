@@ -1,15 +1,15 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use boomerang::{builder::BuilderPortKey, runtime, Reactor, run};
+use boomerang::{builder::TypedPortKey, run, runtime, Reactor};
 
 #[derive(Reactor)]
 #[reactor(state = "A")]
 struct ABuilder {
     #[reactor(input())]
-    x: BuilderPortKey<()>,
+    x: TypedPortKey<()>,
     #[reactor(output())]
-    y: BuilderPortKey<()>,
+    y: TypedPortKey<()>,
     #[reactor(reaction(function = "A::reaction_x"))]
     reaction_x1: runtime::ReactionKey,
     #[reactor(reaction(function = "A::reaction_x"))]
@@ -33,9 +33,9 @@ impl A {
 #[reactor(state = "B")]
 struct BBuilder {
     #[reactor(input())]
-    x: BuilderPortKey<()>,
+    x: TypedPortKey<()>,
     #[reactor(output())]
-    y: BuilderPortKey<()>,
+    y: TypedPortKey<()>,
 
     #[reactor(reaction(function = "B::reaction_x"))]
     reaction_x: runtime::ReactionKey,

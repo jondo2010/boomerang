@@ -1,9 +1,9 @@
 #![feature(new_uninit)]
 #![feature(type_alias_impl_trait)]
+#![feature(get_many_mut)]
 
 mod action;
 mod context;
-mod disjoint;
 mod env;
 mod key_set;
 mod port;
@@ -13,6 +13,7 @@ mod sched;
 mod time;
 pub mod util;
 
+// Re-exports
 pub use action::*;
 pub use context::*;
 pub use env::*;
@@ -23,8 +24,6 @@ pub use sched::*;
 pub use time::*;
 
 pub use std::time::{Duration, Instant};
-
-use slotmap::SlotMap;
 
 #[macro_use]
 extern crate derivative;
@@ -47,34 +46,4 @@ pub enum RuntimeError {
         found: &'static str,
         wanted: &'static str,
     },
-}
-
-/// Returns a tuple of disjoint sets of (immutable, mutable) borrows from the SlotMap.
-///
-/// # Safety
-///
-/// This function is safe if:
-/// 1. All keys in `mut_keys` are disjoint from each other and the keys in `keys`.
-/// 2. All keys in `keys` are disjoint from those in `mut_keys`.
-pub unsafe fn disjoint_unchecked<K, V, I1, I2>(
-    sm: &'_ mut SlotMap<K, V>,
-    keys: I1,
-    mut_keys: I2,
-) -> (Box<[&'_ V]>, Box<[&'_ mut V]>)
-where
-    K: slotmap::Key,
-    I1: ExactSizeIterator + Iterator<Item = K>,
-    I2: ExactSizeIterator + Iterator<Item = K>,
-{
-    let mut iptrs = Box::<[*const V]>::new_uninit_slice(keys.len());
-    for (ptr, key) in iptrs.iter_mut().zip(keys) {
-        ptr.as_mut_ptr().write(sm.get_unchecked(key))
-    }
-    let mut optrs = Box::<[*const V]>::new_uninit_slice(mut_keys.len());
-    for (ptr, key) in optrs.iter_mut().zip(mut_keys) {
-        ptr.as_mut_ptr().write(sm.get_unchecked_mut(key))
-    }
-    let iraw = core::mem::transmute_copy(&Box::into_raw(iptrs.assume_init()));
-    let oraw = core::mem::transmute_copy(&Box::into_raw(optrs.assume_init()));
-    (Box::from_raw(iraw), Box::from_raw(oraw))
 }

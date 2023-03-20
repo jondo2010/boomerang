@@ -120,7 +120,7 @@ impl ToTokens for ReactorReceiver {
                 fn build<'__builder>(
                     name: &str,
                     state: Self::State,
-                    parent: Option<::boomerang::runtime::ReactorKey>,
+                    parent: Option<::boomerang::builder::BuilderReactorKey>,
                     env: &'__builder mut ::boomerang::builder::EnvBuilder,
                 ) -> Result<Self, ::boomerang::builder::BuilderError> {
                     let mut #builder_ident = env.add_reactor(name, parent, state);

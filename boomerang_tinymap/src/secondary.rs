@@ -6,9 +6,10 @@ use std::{
 
 use super::Key;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TinySecondaryMap<K: Key, V> {
     data: Vec<Option<V>>,
+    num_values: usize,
     _k: PhantomData<K>,
 }
 
@@ -28,8 +29,40 @@ impl<K: Key, V> IndexMut<K> for TinySecondaryMap<K, V> {
 
 #[derive(Debug)]
 pub struct Iter<'a, K: Key, V: 'a> {
+    values_left: usize,
     inner: Enumerate<core::slice::Iter<'a, Option<V>>>,
     _k: PhantomData<K>,
+}
+
+#[derive(Debug)]
+pub struct IntoIter<K: Key, V> {
+    values_left: usize,
+    inner: Enumerate<std::vec::IntoIter<Option<V>>>,
+    _k: PhantomData<(K, V)>,
+}
+
+impl<K: Key, V> Iterator for IntoIter<K, V> {
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some((idx, v)) = self.inner.next() {
+            if let Some(v) = v {
+                self.values_left -= 1;
+                return Some((K::from(idx), v));
+            }
+        }
+        None
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.values_left, Some(self.values_left))
+    }
+}
+
+impl<K: Key, V> ExactSizeIterator for IntoIter<K, V> {
+    fn len(&self) -> usize {
+        self.values_left
+    }
 }
 
 impl<'a, K: Key, V> Iterator for Iter<'a, K, V> {
@@ -45,7 +78,7 @@ impl<'a, K: Key, V> Iterator for Iter<'a, K, V> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.inner.size_hint()
+        (self.values_left, None)
     }
 }
 
@@ -54,6 +87,7 @@ impl<K: Key, V> TinySecondaryMap<K, V> {
     pub fn new() -> Self {
         Self {
             data: Vec::new(),
+            num_values: 0,
             _k: PhantomData,
         }
     }
@@ -62,18 +96,24 @@ impl<K: Key, V> TinySecondaryMap<K, V> {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             data: Vec::with_capacity(capacity),
+            num_values: 0,
             _k: PhantomData,
         }
     }
 
-    /// Inserts a value into the secondary map at the given `key`. Returns [`None`] if the key
-    /// was not present, otherwise returns the previous value.
+    pub fn len(&self) -> usize {
+        self.num_values
+    }
+
+    /// Inserts or replaces a value into the secondary map at the given `key`. Returns [`None`] if
+    /// the key was not present, otherwise returns the previous value.
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         self.data
             .extend((self.data.len()..=key.index()).map(|_| None));
         if let Some(v) = &mut self.data[key.index()] {
             Some(std::mem::replace(v, value))
         } else {
+            self.num_values += 1;
             self.data[key.index()] = Some(value);
             None
         }
@@ -99,11 +139,29 @@ impl<K: Key, V> TinySecondaryMap<K, V> {
         self.data.get_mut(key.index())?.as_mut()
     }
 
+    /// Returns an iterator over the (k,v) entries in the map.
     pub fn iter(&self) -> Iter<'_, K, V> {
         Iter {
             inner: self.data.iter().enumerate(),
+            values_left: self.num_values,
             _k: PhantomData,
         }
+    }
+
+    /// Returns an iterator over the keys in the map.
+    pub fn keys<'a>(&'a self) -> impl Iterator<Item = K> + 'a {
+        self.data.iter().enumerate().filter_map(|(idx, v)| {
+            if v.is_some() {
+                Some(K::from(idx))
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Returns an iterator over the values in the map.
+    pub fn values(&self) -> impl Iterator<Item = &V> {
+        self.data.iter().filter_map(Option::as_ref)
     }
 }
 
@@ -112,6 +170,19 @@ impl<K: Key, V> FromIterator<(K, V)> for TinySecondaryMap<K, V> {
         let mut map = Self::new();
         map.extend(iter);
         map
+    }
+}
+
+impl<K: Key, V> IntoIterator for TinySecondaryMap<K, V> {
+    type Item = (K, V);
+    type IntoIter = IntoIter<K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        IntoIter {
+            values_left: self.num_values,
+            inner: self.data.into_iter().enumerate(),
+            _k: PhantomData,
+        }
     }
 }
 

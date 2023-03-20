@@ -1,6 +1,6 @@
 // Test logical action with delay.
 
-use boomerang::{builder::BuilderActionKey, runtime, Reactor, run};
+use boomerang::{builder::BuilderActionKey, run, runtime, Reactor};
 
 #[derive(Reactor)]
 #[reactor(state = "ActionValues")]

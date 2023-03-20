@@ -2,8 +2,9 @@
 
 use boomerang::{
     builder::BuilderActionKey,
+    run,
     runtime::{self, Duration},
-    Reactor, run
+    Reactor,
 };
 
 // This test checks that logical time is incremented an appropriate

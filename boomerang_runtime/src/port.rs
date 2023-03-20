@@ -6,9 +6,7 @@ use std::{
 
 use crate::{InnerType, PortData};
 
-slotmap::new_key_type! {
-    pub struct PortKey;
-}
+tinymap::key_type!(pub PortKey);
 
 pub trait BasePort: Debug + Display + Send + Sync + DowncastSync {
     /// Get the associated PortKey for this Port
@@ -107,7 +105,7 @@ where
 
 #[test]
 fn test_port() {
-    let key = PortKey::from(slotmap::KeyData::from_ffi(1));
+    let key = PortKey::from(1);
     let p0: Box<dyn BasePort> = Box::new(Port::<f64>::new("p0".into(), key));
     dbg!(&p0);
     let x = p0.downcast_ref::<Port<f64>>();

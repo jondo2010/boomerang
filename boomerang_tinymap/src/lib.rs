@@ -12,7 +12,7 @@ pub trait Key: From<usize> + Copy {
 #[macro_export(local_inner_macros)]
 macro_rules! key_type {
     ($vis:vis $name:ident) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
         #[repr(transparent)]
         $vis struct $name(usize);
 

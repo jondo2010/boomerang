@@ -10,13 +10,13 @@ pub fn assert_consistency(env: &Env, dep_info: &DepInfo) {
         );
     }
 
-    for action_key in env.actions.keys() {
-        assert!(
-            dep_info.action_triggers.contains_key(action_key),
-            "ActionKey {:?} missing in dep_info.action_triggers!",
-            action_key
-        );
-    }
+    // for action_key in env.actions.keys() {
+    //    assert!(
+    //        dep_info.action_triggers.contains_key(action_key),
+    //        "ActionKey {:?} missing in dep_info.action_triggers!",
+    //        action_key
+    //    );
+    //}
 
     for reaction_key in env.reactions.keys() {
         assert!(
@@ -34,27 +34,27 @@ pub fn assert_consistency(env: &Env, dep_info: &DepInfo) {
             "ReactionKey {:?} missing in dep_info.reaction_outputs!",
             reaction_key
         );
-        assert!(
-            dep_info.reaction_trig_actions.contains_key(reaction_key),
-            "ReactionKey {:?} missing in dep_info.reaction_trig_actions!",
-            reaction_key
-        );
+        // assert!(
+        //    dep_info.reaction_trig_actions.contains_key(reaction_key),
+        //    "ReactionKey {:?} missing in dep_info.reaction_trig_actions!",
+        //    reaction_key
+        //);
     }
 }
 
 /// Print debug info about an Env/DepInfo pair.
 pub fn print_debug_info(env: &Env, dep_info: &DepInfo) {
     // Which Reactions are triggered by each Action
-    for (action_key, action) in env.actions.iter() {
-        let mut action_pairs: Vec<_> = dep_info.triggered_by_action(action_key).collect();
-        if !action_pairs.is_empty() {
+    for (_reactor_key, reactor) in env.reactors.iter() {
+        println!("Reactor \"{}\"", reactor.get_name());
+        for (action_key, action) in reactor.actions.iter() {
+            println!("  {action} triggers:");
+            let mut action_pairs: Vec<_> = reactor.action_triggers[action_key].iter().collect();
             action_pairs.sort_by_key(|(level, _)| *level);
-            println!("Action {:?} ({}) triggers:", action_key, action.get_name());
-            for (level, reaction_key) in action_pairs {
+            for (level, reaction_key) in action_pairs.iter() {
                 println!(
-                    "  {level}: {:?} ({})",
-                    reaction_key,
-                    env.reactions[reaction_key].get_name()
+                    "    L{level}: {reaction_key:?} ({})",
+                    env.reactions[*reaction_key].get_name()
                 );
             }
         }
@@ -77,6 +77,7 @@ pub fn print_debug_info(env: &Env, dep_info: &DepInfo) {
     }
 
     for (reaction_key, reaction) in env.reactions.iter() {
+        let reactor = &env.reactors[reaction.get_reactor_key()];
         println!("{reaction:?}");
         if !dep_info.reaction_inputs[reaction_key].is_empty() {
             println!("  inputs:");
@@ -88,18 +89,6 @@ pub fn print_debug_info(env: &Env, dep_info: &DepInfo) {
             println!("  outputs:");
             for &port_key in dep_info.reaction_outputs[reaction_key].iter() {
                 println!("   - {}", env.ports[port_key]);
-            }
-        }
-        if !dep_info.reaction_trig_actions[reaction_key].is_empty() {
-            println!("  triggers:");
-            for &action_key in dep_info.reaction_trig_actions[reaction_key].iter() {
-                println!("   - {}", env.actions[action_key]);
-            }
-        }
-        if !dep_info.reaction_sched_actions[reaction_key].is_empty() {
-            println!("  schedulable actions:");
-            for &action_key in dep_info.reaction_sched_actions[reaction_key].iter() {
-                println!("   - {}", env.actions[action_key]);
             }
         }
     }

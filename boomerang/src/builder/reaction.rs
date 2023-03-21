@@ -3,6 +3,7 @@ use super::{
     PortType, TypedActionKey, TypedPortKey,
 };
 use crate::runtime;
+use itertools::Itertools;
 use slotmap::SecondaryMap;
 
 slotmap::new_key_type! {
@@ -36,11 +37,30 @@ impl ReactionBuilder {
     /// Build a [`runtime::Reaction`] from this `ReactionBuilder`.
     pub fn build_reaction(
         self,
-        reactor_key_map: &SecondaryMap<BuilderReactorKey, runtime::ReactorKey>,
+        reactor_key: runtime::ReactorKey,
+        port_aliases: &SecondaryMap<BuilderPortKey, runtime::PortKey>,
     ) -> runtime::Reaction {
+        // Create the Vec of input ports for this reaction sorted by order
+        let inputs = self
+            .input_ports
+            .iter()
+            .sorted_by_key(|(_, &order)| order)
+            .map(|(builder_port_key, _)| port_aliases[builder_port_key])
+            .collect();
+
+        // Create the Vec of output ports for this reaction sorted by order
+        let outputs = self
+            .output_ports
+            .iter()
+            .sorted_by_key(|(_, &order)| order)
+            .map(|(builder_port_key, _)| port_aliases[builder_port_key])
+            .collect();
+
         runtime::Reaction::new(
             self.name,
-            reactor_key_map[self.reactor_key],
+            reactor_key,
+            inputs,
+            outputs,
             self.reaction_fn,
             None,
         )

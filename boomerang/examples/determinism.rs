@@ -1,5 +1,5 @@
 use boomerang::{
-    builder::{BuilderActionKey, TypedPortKey},
+    builder::{BuilderActionKey, BuilderReactionKey, TypedActionKey, TypedPortKey},
     run, runtime, Reactor,
 };
 
@@ -9,9 +9,9 @@ struct SourceBuilder {
     #[reactor(output())]
     y: TypedPortKey<i32>,
     #[reactor(timer())]
-    t: BuilderActionKey,
+    t: TypedActionKey<()>,
     #[reactor(reaction(function = "Source::reaction_t",))]
-    reaction_t: runtime::ReactionKey,
+    reaction_t: BuilderReactionKey,
 }
 
 struct Source;
@@ -34,7 +34,7 @@ struct DestinationBuilder {
     #[reactor(input())]
     y: TypedPortKey<i32>,
     #[reactor(reaction(function = "Destination::reaction_x_y"))]
-    reaction_x_y: runtime::ReactionKey,
+    reaction_x_y: BuilderReactionKey,
 }
 
 struct Destination;
@@ -66,7 +66,7 @@ struct PassBuilder {
     #[reactor(output())]
     y: TypedPortKey<i32>,
     #[reactor(reaction(function = "Pass::reaction_x"))]
-    reaction_x: runtime::ReactionKey,
+    reaction_x: BuilderReactionKey,
 }
 
 struct Pass;

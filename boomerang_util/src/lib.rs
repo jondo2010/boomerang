@@ -1,10 +1,10 @@
-use boomerang::{reaction, runtime, Reactor};
+use boomerang::{builder, reaction, runtime, Reactor};
 
 #[derive(Reactor)]
 #[reactor(state = "Timeout")]
 pub struct TimeoutBuilder {
     #[reactor(reaction(function = "Timeout::reaction_startup"))]
-    startup: runtime::ReactionKey,
+    startup: builder::BuilderReactionKey,
 }
 
 #[derive(Debug)]

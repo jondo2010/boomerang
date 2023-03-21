@@ -1,6 +1,8 @@
 use std::{fmt::Debug, sync::RwLock};
 
-use crate::{key_set::KeySet, BasePort, Context, Duration, InternalAction, Reactor, ReactorKey};
+use crate::{
+    key_set::KeySet, BasePort, Context, Duration, InternalAction, PortKey, Reactor, ReactorKey,
+};
 
 tinymap::key_type!(pub ReactionKey);
 
@@ -53,6 +55,10 @@ pub struct Reaction {
     name: String,
     /// The Reactor containing this Reaction
     reactor_key: ReactorKey,
+    /// Input Ports that trigger this reaction
+    input_ports: Vec<PortKey>,
+    /// Output Ports that this reaction may set the value of
+    output_ports: Vec<PortKey>,
     /// Reaction closure
     #[derivative(PartialEq = "ignore")]
     #[derivative(Debug = "ignore")]
@@ -65,12 +71,16 @@ impl Reaction {
     pub fn new(
         name: String,
         reactor_key: ReactorKey,
+        input_ports: Vec<PortKey>,
+        output_ports: Vec<PortKey>,
         body: Box<dyn ReactionFn>,
         deadline: Option<Deadline>,
     ) -> Self {
         Self {
             name,
             reactor_key,
+            input_ports,
+            output_ports,
             body,
             deadline,
         }
@@ -82,6 +92,18 @@ impl Reaction {
 
     pub fn get_reactor_key(&self) -> ReactorKey {
         self.reactor_key
+    }
+
+    pub fn set_reactor_key(&mut self, reactor_key: ReactorKey) {
+        self.reactor_key = reactor_key;
+    }
+
+    pub fn iter_input_ports(&self) -> std::slice::Iter<PortKey> {
+        self.input_ports.iter()
+    }
+
+    pub fn iter_output_ports(&self) -> std::slice::Iter<PortKey> {
+        self.output_ports.iter()
     }
 
     pub fn trigger(

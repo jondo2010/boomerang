@@ -4,13 +4,16 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use crate::{InnerType, PortData};
+use crate::{InnerType, LevelReactionKey, PortData};
 
 tinymap::key_type!(pub PortKey);
 
 pub trait BasePort: Debug + Display + Send + Sync + DowncastSync {
-    /// Get the associated PortKey for this Port
-    fn get_key(&self) -> PortKey;
+    /// Return the downstream Reactions triggered by this Port
+    fn get_downstream(&self) -> core::slice::Iter<LevelReactionKey>;
+
+    /// Set the downstream 'triggered' reactions.
+    fn set_downstream(&mut self, downstream: Vec<LevelReactionKey>);
 
     /// Return true if the port contains a value
     fn is_set(&self) -> bool;
@@ -28,6 +31,8 @@ pub struct Port<T: PortData> {
     name: String,
     key: PortKey,
     value: Option<T>,
+    /// Reactions that this Port triggers when set.
+    downstream: Vec<LevelReactionKey>,
 }
 
 impl<T: PortData> Display for Port<T> {
@@ -67,6 +72,7 @@ where
             name,
             key,
             value: None,
+            downstream: Vec::new(),
         }
     }
 
@@ -85,8 +91,12 @@ impl<T> BasePort for Port<T>
 where
     T: PortData,
 {
-    fn get_key(&self) -> PortKey {
-        self.key
+    fn get_downstream(&self) -> core::slice::Iter<LevelReactionKey> {
+        self.downstream.iter()
+    }
+
+    fn set_downstream(&mut self, downstream: Vec<LevelReactionKey>) {
+        self.downstream = downstream;
     }
 
     fn is_set(&self) -> bool {

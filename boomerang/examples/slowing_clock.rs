@@ -2,7 +2,10 @@
 /// msec on a logical action with a minimum delay of 100 msec.  
 /// The use of the logical action ensures the elapsed time jumps exactly from
 /// 0 to 100, 300, 600, and 1000 msec.
-use boomerang::{builder::BuilderActionKey, run, runtime, Reactor};
+use boomerang::{
+    builder::{BuilderActionKey, BuilderReactionKey, TypedActionKey},
+    run, runtime, Reactor,
+};
 use boomerang_util::{Timeout, TimeoutBuilder};
 use runtime::Duration;
 
@@ -10,13 +13,13 @@ use runtime::Duration;
 #[reactor(state = "SlowingClock")]
 struct SlowingClockBuilder {
     #[reactor(action(min_delay = "100 msec"))]
-    a: BuilderActionKey,
+    a: TypedActionKey<()>,
     #[reactor(reaction(function = "SlowingClock::reaction_startup"))]
-    reaction_startup: runtime::ReactionKey,
+    reaction_startup: BuilderReactionKey,
     #[reactor(reaction(function = "SlowingClock::reaction_a"))]
-    reaction_a: runtime::ReactionKey,
+    reaction_a: BuilderReactionKey,
     #[reactor(reaction(function = "SlowingClock::reaction_shutdown"))]
-    reaction_shutdown: runtime::ReactionKey,
+    reaction_shutdown: BuilderReactionKey,
     #[reactor(child(state = "Timeout::new(runtime::Duration::from_secs(1))"))]
     _timeout: TimeoutBuilder,
 }

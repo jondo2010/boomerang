@@ -4,7 +4,7 @@ use derive_more::Display;
 use std::{collections::BinaryHeap, time::Duration};
 use tracing::{info, trace, warn};
 
-use crate::{Context, DepInfo, Env, Instant, ReactionKey, ReactionSet, ReactionTriggerCtx, Tag};
+use crate::{Context, Env, Instant, ReactionKey, ReactionSet, ReactionTriggerCtx, Tag};
 
 #[derive(Debug, Display, Clone)]
 #[display(fmt = "[tag={},terminal={}]", tag, terminal)]
@@ -40,8 +40,6 @@ impl Ord for ScheduledEvent {
 pub struct Scheduler {
     /// The environment state
     env: Env,
-    /// Dependency information
-    dep_info: DepInfo,
     /// Whether to skip wall-clock synchronization
     fast_forward: bool,
     /// Asynchronous events receiver
@@ -55,11 +53,10 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    pub fn new(env: Env, dep_info: DepInfo, fast_forward: bool) -> Self {
+    pub fn new(env: Env, fast_forward: bool) -> Self {
         let (_event_tx, event_rx) = crossbeam_channel::unbounded();
         Self {
             env,
-            dep_info,
             fast_forward,
             event_rx,
             event_queue: BinaryHeap::new(),
@@ -70,8 +67,9 @@ impl Scheduler {
 
     /// Execute startup of the Scheduler.
     fn startup(&mut self) {
-        trace!("Starting the execution");
         let tag = Tag::new(Duration::ZERO, 0);
+
+        info!("Starting the execution at {tag}");
         let mut reaction_set = ReactionSet::default();
 
         // For all Timers, pump later events onto the queue and create an initial ReactionSet to
@@ -224,7 +222,6 @@ impl Scheduler {
     /// Process the reactions at this tag in increasing order of level.
     /// Reactions at a level N may trigger further reactions at levels M>N
     pub fn process_tag(&mut self, tag: Tag, mut reaction_set: ReactionSet) {
-        let dep_info = &self.dep_info;
         trace!("Processing tag {tag} with {} levels:", reaction_set.len());
 
         while let Some((level, reaction_keys)) = reaction_set.next() {
@@ -232,7 +229,7 @@ impl Scheduler {
 
             let reaction_keys: Box<[ReactionKey]> = reaction_keys.collect();
 
-            let iter_ctx = self.env.iter_reaction_ctx(dep_info, reaction_keys.iter());
+            let iter_ctx = self.env.iter_reaction_ctx(reaction_keys.iter());
 
             let inner_ctxs = iter_ctx
                 //.par_bridge()
@@ -248,14 +245,14 @@ impl Scheduler {
                     let reactor_name = reactor.get_name();
                     trace!("    Executing {reactor_name}/{reaction_name}.",);
 
-                    let mut ctx = Context::new(dep_info, self.start_time, tag);
+                    let mut ctx = Context::new(self.start_time, tag);
 
                     reaction.trigger(&mut ctx, reactor, inputs, outputs, &[], &mut []);
 
                     // Queue downstream reactions triggered by any ports that were set.
                     for port in outputs.iter() {
                         if port.is_set() {
-                            ctx.enqueue_now(dep_info.triggered_by_port(port.get_key()));
+                            ctx.enqueue_now(port.get_downstream());
                         }
                     }
 

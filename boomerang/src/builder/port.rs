@@ -2,7 +2,7 @@ use crate::runtime;
 use slotmap::{secondary, Key, SecondaryMap};
 use std::{fmt::Debug, marker::PhantomData};
 
-use super::BuilderReactorKey;
+use super::{BuilderReactionKey, BuilderReactorKey};
 
 slotmap::new_key_type! {
     pub struct BuilderPortKey;
@@ -41,12 +41,12 @@ pub trait BasePortBuilder {
     fn get_outward_bindings(&self) -> secondary::Keys<BuilderPortKey, ()>;
     fn add_outward_binding(&mut self, outward_binding: BuilderPortKey);
     fn get_port_type(&self) -> &PortType;
-    fn get_deps(&self) -> Vec<ReactionKey>;
-    fn get_antideps(&self) -> secondary::Keys<ReactionKey, ()>;
+    fn get_deps(&self) -> Vec<BuilderReactionKey>;
+    fn get_antideps(&self) -> secondary::Keys<BuilderReactionKey, ()>;
     /// Get the out-going Reactions that this Port triggers
-    fn get_triggers(&self) -> Vec<ReactionKey>;
-    fn register_dependency(&mut self, reaction_key: ReactionKey, is_trigger: bool);
-    fn register_antidependency(&mut self, reaction_key: ReactionKey);
+    fn get_triggers(&self) -> Vec<BuilderReactionKey>;
+    fn register_dependency(&mut self, reaction_key: BuilderReactionKey, is_trigger: bool);
+    fn register_antidependency(&mut self, reaction_key: BuilderReactionKey);
     /// Create a runtime Port from this PortBuilder
     fn create_runtime_port(&self, runtime_key: runtime::PortKey) -> Box<dyn runtime::BasePort>;
 }
@@ -58,11 +58,11 @@ pub struct PortBuilder<T: runtime::PortData> {
     /// The type of Port to build
     port_type: PortType,
     /// Reactions that this Port depends on
-    deps: SecondaryMap<ReactionKey, ()>,
+    deps: SecondaryMap<BuilderReactionKey, ()>,
     /// Reactions that depend on this port
-    antideps: SecondaryMap<ReactionKey, ()>,
+    antideps: SecondaryMap<BuilderReactionKey, ()>,
     /// Out-going Reactions that this port triggers
-    triggers: SecondaryMap<ReactionKey, ()>,
+    triggers: SecondaryMap<BuilderReactionKey, ()>,
 
     inward_binding: Option<TypedPortKey<T>>,
     outward_bindings: SecondaryMap<BuilderPortKey, ()>,
@@ -102,15 +102,15 @@ impl<T: runtime::PortData> BasePortBuilder for PortBuilder<T> {
         &self.port_type
     }
 
-    fn get_deps(&self) -> Vec<ReactionKey> {
+    fn get_deps(&self) -> Vec<BuilderReactionKey> {
         self.deps.keys().collect()
     }
 
-    fn get_antideps(&self) -> secondary::Keys<ReactionKey, ()> {
+    fn get_antideps(&self) -> secondary::Keys<BuilderReactionKey, ()> {
         self.antideps.keys()
     }
 
-    fn get_triggers(&self) -> Vec<ReactionKey> {
+    fn get_triggers(&self) -> Vec<BuilderReactionKey> {
         self.triggers.keys().collect()
     }
 
@@ -127,7 +127,7 @@ impl<T: runtime::PortData> BasePortBuilder for PortBuilder<T> {
             .insert(outward_binding.data().into(), ());
     }
 
-    fn register_dependency(&mut self, reaction_key: ReactionKey, is_trigger: bool) {
+    fn register_dependency(&mut self, reaction_key: BuilderReactionKey, is_trigger: bool) {
         assert!(
             self.outward_bindings.is_empty(),
             "Dependencies may no be declared on ports with an outward binding!"
@@ -138,7 +138,7 @@ impl<T: runtime::PortData> BasePortBuilder for PortBuilder<T> {
         }
     }
 
-    fn register_antidependency(&mut self, reaction_key: ReactionKey) {
+    fn register_antidependency(&mut self, reaction_key: BuilderReactionKey) {
         assert!(
             self.inward_binding.is_none(),
             "Antidependencies may no be declared on ports with an inward binding!"

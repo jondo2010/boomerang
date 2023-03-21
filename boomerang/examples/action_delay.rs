@@ -1,5 +1,5 @@
 use boomerang::{
-    builder::{BuilderActionKey, TypedPortKey},
+    builder::{BuilderReactionKey, TypedActionKey, TypedPortKey},
     run, runtime, Reactor,
 };
 
@@ -13,11 +13,11 @@ struct GeneratedDelayBuilder {
     #[reactor(output())]
     y_out: TypedPortKey<u32>,
     #[reactor(action(physical = "false", min_delay = "100 msec"))]
-    act: BuilderActionKey,
+    act: TypedActionKey<()>,
     #[reactor(reaction(function = "GeneratedDelay::reaction_y_in"))]
-    reaction_y_in: runtime::ReactionKey,
+    reaction_y_in: BuilderReactionKey,
     #[reactor(reaction(function = "GeneratedDelay::reaction_act"))]
-    reaction_act: runtime::ReactionKey,
+    reaction_act: BuilderReactionKey,
 }
 
 struct GeneratedDelay {
@@ -58,7 +58,7 @@ struct SourceBuilder {
     #[reactor(output())]
     out: TypedPortKey<u32>,
     #[reactor(reaction(function = "Source::reaction_startup",))]
-    reaction_startup: runtime::ReactionKey,
+    reaction_startup: BuilderReactionKey,
 }
 
 struct Source;
@@ -79,7 +79,7 @@ struct SinkBuilder {
     #[reactor(input())]
     inp: TypedPortKey<u32>,
     #[reactor(reaction(function = "Sink::reaction_in"))]
-    reaction_in: runtime::ReactionKey,
+    reaction_in: BuilderReactionKey,
 }
 struct Sink;
 impl Sink {

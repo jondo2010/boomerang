@@ -1,7 +1,5 @@
 use std::fmt::Display;
 
-use slotmap::{SecondaryMap, SlotMap};
-
 use crate::{BasePort, PortKey, Reaction, ReactionKey, Reactor, ReactorKey};
 
 /// Execution level
@@ -106,7 +104,6 @@ impl Display for Env {
 impl Env {
     pub(crate) fn iter_reaction_ctx<'a, I>(
         &'a mut self,
-        dep_info: &'a DepInfo,
         reaction_keys: I,
     ) -> ReactionTriggerCtxIter<
         'a,
@@ -126,15 +123,16 @@ impl Env {
             .inspect(|&k| {
                 tracing::trace!("Borrowing {k:?}");
             });
+
+        let input_keys = reactions
+            .clone()
+            .map(|reaction| reaction.iter_input_ports());
+
+        let output_keys = reactions
+            .clone()
+            .map(|reaction| reaction.iter_output_ports());
+
         let reactors = self.reactors.iter_many_unchecked_mut(reactor_keys);
-
-        let input_keys = reaction_keys
-            .clone()
-            .map(|&k| dep_info.reaction_inputs[k].iter());
-
-        let output_keys = reaction_keys
-            .clone()
-            .map(|&k| dep_info.reaction_outputs[k].iter());
 
         let (inputs, outputs) = self
             .ports
@@ -179,50 +177,5 @@ impl Env {
                     None
                 }
             })
-    }
-}
-
-/// DepInfo stores immutable dependency information for triggers and reactions, calculated by the
-/// builder
-#[derive(Debug)]
-pub struct DepInfo {
-    /// For each Port, a set of Reactions triggered by it.
-    pub port_triggers: tinymap::TinySecondaryMap<PortKey, Vec<ReactionKey>>,
-    /// For each Reaction, the corresponding level.
-    pub reaction_levels: tinymap::TinySecondaryMap<ReactionKey, Level>,
-    /// For each Reaction, an ordered list of Ports provided as inputs.
-    pub reaction_inputs: tinymap::TinySecondaryMap<ReactionKey, Vec<PortKey>>,
-    /// For each Reaction, an ordered list of Ports provided as outputs.
-    pub reaction_outputs: tinymap::TinySecondaryMap<ReactionKey, Vec<PortKey>>,
-    // For each Reaction, an ordered list of associated Actions that trigger it, unless they also
-    // can be scheduled. pub reaction_trig_actions: SecondaryMap<ReactionKey, Vec<ActionKey>>,
-    // For each Reaction, an ordered list of associated Actions that can be scheduled.
-    // pub reaction_sched_actions: SecondaryMap<ReactionKey, Vec<ActionKey>>,
-}
-
-impl DepInfo {
-    /// Return the maximum reaction level
-    pub fn max_level(&self) -> Level {
-        self.reaction_levels.values().max().copied().unwrap_or(0)
-    }
-
-    /// Return an iterator of (level, ReactionKey) tuples that are triggered by the given Action
-    // pub fn triggered_by_action(
-    //    &self,
-    //    action_key: ActionKey,
-    //) -> impl Iterator<Item = (Level, ReactionKey)> + '_ {
-    //    self.action_triggers[action_key]
-    //        .iter()
-    //        .map(move |&reaction_key| (self.reaction_levels[reaction_key], reaction_key))
-    //}
-
-    /// Return an iterator of (level, ReactionKey) tuples that are triggered by the given Port
-    pub fn triggered_by_port(
-        &self,
-        port_key: PortKey,
-    ) -> impl Iterator<Item = LevelReactionKey> + '_ {
-        self.port_triggers[port_key]
-            .iter()
-            .map(move |&reaction_key| (self.reaction_levels[reaction_key], reaction_key))
     }
 }

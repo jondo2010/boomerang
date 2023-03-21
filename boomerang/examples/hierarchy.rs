@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use boomerang::{
-    builder::{BuilderActionKey, TypedPortKey},
+    builder::{BuilderReactionKey, TypedActionKey, TypedPortKey},
     run, runtime, Reactor,
 };
 
@@ -13,9 +13,9 @@ struct SourceBuilder {
     #[reactor(output())]
     out: TypedPortKey<u32>,
     #[reactor(timer())]
-    t: BuilderActionKey,
+    t: TypedActionKey<()>,
     #[reactor(reaction(function = "Source::reaction_out"))]
-    reaction_out: runtime::ReactionKey,
+    reaction_out: BuilderReactionKey,
 }
 
 struct Source;
@@ -38,7 +38,7 @@ struct GainBuilder {
     #[reactor(output())]
     out: TypedPortKey<u32>,
     #[reactor(reaction(function = "Gain::reaction_in"))]
-    reaction_in: runtime::ReactionKey,
+    reaction_in: BuilderReactionKey,
 }
 
 struct Gain {
@@ -65,9 +65,9 @@ struct PrintBuilder {
     #[reactor(input())]
     inp: TypedPortKey<u32>,
     #[reactor(action())]
-    a: BuilderActionKey,
+    a: TypedActionKey<()>,
     #[reactor(reaction(function = "Print::reaction_in"))]
-    reaction_in: runtime::ReactionKey,
+    reaction_in: BuilderReactionKey,
 }
 
 struct Print;

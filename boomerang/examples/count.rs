@@ -11,7 +11,7 @@ struct CountBuilder {
     #[reactor(child(state = "Timeout::new(runtime::Duration::from_secs(30))"))]
     _timeout: TimeoutBuilder,
     #[reactor(reaction(function = "Count::reaction_t",))]
-    reaction_t: runtime::ReactionKey,
+    reaction_t: BuilderReactionKey,
 }
 
 struct Count(u32);

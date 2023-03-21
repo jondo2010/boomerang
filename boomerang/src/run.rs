@@ -1,8 +1,8 @@
-use anyhow::Context;
 use crate::{
     builder::{graphviz, EnvBuilder, Reactor},
     runtime,
 };
+use anyhow::Context;
 use clap::Parser;
 
 #[derive(clap::Parser)]
@@ -44,15 +44,13 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
         tracing::info!("Wrote reaction graph to {path}");
     }
 
-    let (env, dep_info) = env_builder.try_into().unwrap();
+    let env = env_builder.try_into().unwrap();
 
     if args.print_debug_info {
-        runtime::util::print_debug_info(&env, &dep_info);
+        runtime::util::print_debug_info(&env);
     }
 
-    runtime::util::assert_consistency(&env, &dep_info);
-
-    let sched = runtime::Scheduler::new(env, dep_info, true);
+    let sched = runtime::Scheduler::new(env, true);
     sched.event_loop();
 
     Ok(reactor)

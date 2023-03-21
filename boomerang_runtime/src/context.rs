@@ -1,8 +1,8 @@
 use tracing::debug;
 
 use crate::{
-    Action, ActionMut, DepInfo, Duration, Instant, Level, PortData, ReactionKey, ReactionSet,
-    ScheduledEvent, Tag,
+    Action, ActionMut, Duration, Instant, Level, LevelReactionKey, PortData, ReactionKey,
+    ReactionSet, ScheduledEvent, Tag,
 };
 
 /// Internal state for a context object
@@ -16,9 +16,7 @@ pub(crate) struct ContextInternal {
 
 /// Scheduler context passed into reactor functions.
 #[derive(Debug)]
-pub struct Context<'a> {
-    pub dep_info: &'a DepInfo,
-
+pub struct Context {
     /// Physical time the Scheduler was started
     pub start_time: Instant,
 
@@ -31,10 +29,9 @@ pub struct Context<'a> {
     pub(crate) internal: ContextInternal,
 }
 
-impl<'a> Context<'a> {
-    pub(crate) fn new(dep_info: &'a DepInfo, start_time: Instant, tag: Tag) -> Self {
+impl Context {
+    pub(crate) fn new(start_time: Instant, tag: Tag) -> Self {
         Self {
-            dep_info,
             start_time,
             tag,
             current_level: 0,
@@ -100,7 +97,7 @@ impl<'a> Context<'a> {
     }
 
     /// Adds new reactions to execute within this cycle
-    pub fn enqueue_now(&mut self, downstream: impl Iterator<Item = (Level, ReactionKey)>) {
+    pub fn enqueue_now<'a>(&mut self, downstream: impl Iterator<Item = &'a LevelReactionKey>) {
         // Merge all ReactionKeys from `downstream` into the todo reactions
         self.internal.reactions.extend(downstream);
     }

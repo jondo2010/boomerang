@@ -1,12 +1,12 @@
-use boomerang::{runtime, Reactor, run};
+use boomerang::{builder::BuilderReactionKey, run, runtime, Reactor};
 
 #[derive(Reactor)]
 #[reactor(state = "HelloWorld2")]
 struct HelloWorld2Builder {
     #[reactor(reaction(function = "HelloWorld2::reaction_startup"))]
-    reaction_startup: runtime::ReactionKey,
+    reaction_startup: BuilderReactionKey,
     #[reactor(reaction(function = "HelloWorld2::reaction_shutdown"))]
-    reaction_shutdown: runtime::ReactionKey,
+    reaction_shutdown: BuilderReactionKey,
 }
 struct HelloWorld2 {
     success: bool,

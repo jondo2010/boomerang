@@ -86,7 +86,7 @@ fn test_reactions1() {
 
     // assert_eq!(env_builder.reactors[reactor_key].reactions.len(), 2);
 
-    let (env, _dep_info) = env_builder.try_into().unwrap();
+    let env: runtime::Env = env_builder.try_into().unwrap();
     assert_eq!(env.reactions.len(), 2);
 }
 

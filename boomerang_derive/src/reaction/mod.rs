@@ -459,7 +459,7 @@ impl darling::ToTokens for ReactionReceiver {
             let __wrapper: Box<dyn ::boomerang::runtime::ReactionFn> = Box::new(
                 move |
                     ctx,
-                    reactor: &mut runtime::Reactor,
+                    state: &mut dyn runtime::ReactorState,
                     inputs,
                     outputs,
                     trig_actions: &[&runtime::InternalAction],
@@ -470,7 +470,7 @@ impl darling::ToTokens for ReactionReceiver {
                     #trig_actions_destructure
                     #sched_actions_destructure
                     Self::#fn_ident(
-                        reactor.get_state().expect("Unable to downcast reactor state"),
+                        state.downcast_mut().expect("Unable to downcast reactor state"),
                         ctx,
                         #(#fn_args,)*
                     );

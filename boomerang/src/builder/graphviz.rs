@@ -159,7 +159,7 @@ pub fn create_full_graph(env_builder: &EnvBuilder) -> Result<String, BuilderErro
             output.push(format!(
                 "  label=\"{} '{}'\";",
                 reactor.type_name(),
-                reactor.name
+                reactor.get_name()
             ));
             output.push("  style=\"rounded\"; node [shape=record];".into());
 

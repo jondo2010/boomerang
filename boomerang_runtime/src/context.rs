@@ -1,8 +1,8 @@
 use tracing::debug;
 
 use crate::{
-    Action, ActionMut, Duration, Instant, Level, LevelReactionKey, PortData, ReactionKey,
-    ReactionSet, ScheduledEvent, Tag,
+    Action, ActionKey, ActionMut, Duration, Instant, Level, LevelReactionKey, PortData,
+    ReactionKey, ReactionSet, ScheduledEvent, Tag,
 };
 
 /// Internal state for a context object
@@ -16,7 +16,7 @@ pub(crate) struct ContextInternal {
 
 /// Scheduler context passed into reactor functions.
 #[derive(Debug)]
-pub struct Context {
+pub struct Context<'a> {
     /// Physical time the Scheduler was started
     pub start_time: Instant,
 
@@ -27,10 +27,17 @@ pub struct Context {
 
     /// Internal state
     pub(crate) internal: ContextInternal,
+
+    /// Downstream reactions triggered by actions
+    action_triggers: &'a tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
 }
 
-impl Context {
-    pub(crate) fn new(start_time: Instant, tag: Tag) -> Self {
+impl<'a> Context<'a> {
+    pub(crate) fn new(
+        start_time: Instant,
+        tag: Tag,
+        action_triggers: &'a tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
+    ) -> Self {
         Self {
             start_time,
             tag,
@@ -39,6 +46,7 @@ impl Context {
                 reactions: Vec::new(),
                 scheduled_events: Vec::new(),
             },
+            action_triggers,
         }
     }
 
@@ -89,25 +97,21 @@ impl Context {
         delay: Option<Duration>,
     ) {
         // TODO
-        // let tag_delay = delay.map_or(*action.min_delay, |delay| delay + *action.min_delay);
-        // let new_tag = self.tag.delay(Some(tag_delay));
-        // action.values.set_value(value, new_tag);
-        // let downstream = self.dep_info.triggered_by_action(action.key);
-        // self.enqueue_later(downstream, new_tag);
+        let tag_delay = delay.map_or(*action.min_delay, |delay| delay + *action.min_delay);
+        let new_tag = self.tag.delay(Some(tag_delay));
+        action.values.set_value(value, new_tag);
+        let downstream = self.action_triggers[action.key].iter().copied();
+        self.enqueue_later(downstream, new_tag);
     }
 
     /// Adds new reactions to execute within this cycle
-    pub fn enqueue_now<'a>(&mut self, downstream: impl Iterator<Item = &'a LevelReactionKey>) {
+    pub fn enqueue_now<'b>(&mut self, downstream: impl Iterator<Item = &'b LevelReactionKey>) {
         // Merge all ReactionKeys from `downstream` into the todo reactions
         self.internal.reactions.extend(downstream);
     }
 
     /// Adds new reactions to execute at a later cycle
-    pub fn enqueue_later(
-        &mut self,
-        downstream: impl Iterator<Item = (Level, ReactionKey)>,
-        tag: Tag,
-    ) {
+    pub fn enqueue_later(&mut self, downstream: impl Iterator<Item = LevelReactionKey>, tag: Tag) {
         let event = ScheduledEvent {
             tag,
             reactions: ReactionSet::from_iter(downstream),

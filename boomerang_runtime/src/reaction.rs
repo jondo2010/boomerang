@@ -1,7 +1,8 @@
 use std::{fmt::Debug, sync::RwLock};
 
 use crate::{
-    key_set::KeySet, BasePort, Context, Duration, InternalAction, PortKey, Reactor, ReactorKey,
+    key_set::KeySet, ActionKey, BasePort, Context, Duration, InternalAction, PortKey, Reactor,
+    ReactorKey, ReactorState, Tag,
 };
 
 tinymap::key_type!(pub ReactionKey);
@@ -17,7 +18,7 @@ pub type OutputPorts<'a> = &'a mut [OPort<'a>];
 pub trait ReactionFn:
     Fn(
         &mut Context,
-        &mut Reactor,
+        &mut dyn ReactorState,
         &[IPort], // Input ports
         &mut [OPort], // Output ports
         &[&InternalAction], // Actions
@@ -29,7 +30,7 @@ pub trait ReactionFn:
 impl<F> ReactionFn for F where
     F: Fn(
             &mut Context,
-            &mut Reactor,
+            &mut dyn ReactorState,
             &[IPort],
             &mut [OPort],
             &[&InternalAction],
@@ -59,6 +60,10 @@ pub struct Reaction {
     input_ports: Vec<PortKey>,
     /// Output Ports that this reaction may set the value of
     output_ports: Vec<PortKey>,
+    /// Actions that trigger this reaction
+    trigger_actions: Vec<ActionKey>,
+    /// Actions that can be scheduled by this reaction
+    sched_actions: Vec<ActionKey>,
     /// Reaction closure
     #[derivative(PartialEq = "ignore")]
     #[derivative(Debug = "ignore")]
@@ -73,6 +78,8 @@ impl Reaction {
         reactor_key: ReactorKey,
         input_ports: Vec<PortKey>,
         output_ports: Vec<PortKey>,
+        trigger_actions: Vec<ActionKey>,
+        sched_actions: Vec<ActionKey>,
         body: Box<dyn ReactionFn>,
         deadline: Option<Deadline>,
     ) -> Self {
@@ -81,6 +88,8 @@ impl Reaction {
             reactor_key,
             input_ports,
             output_ports,
+            trigger_actions,
+            sched_actions,
             body,
             deadline,
         }
@@ -106,15 +115,31 @@ impl Reaction {
         self.output_ports.iter()
     }
 
-    pub fn trigger(
-        &self,
-        ctx: &mut Context,
-        reactor: &mut Reactor,
+    pub fn iter_trigger_actions(&self) -> std::slice::Iter<ActionKey> {
+        self.trigger_actions.iter()
+    }
+
+    pub fn iter_sched_actions(&self) -> std::slice::Iter<ActionKey> {
+        self.sched_actions.iter()
+    }
+
+    pub fn trigger<'a>(
+        &'a self,
+        start_time: crate::Instant,
+        tag: Tag,
+        reactor: &'a mut Reactor,
         inputs: &[IPort<'_>],
         outputs: &mut [OPort<'_>],
-        actions: &[&InternalAction],
-        schedulable_actions: &mut [&mut InternalAction],
-    ) {
+    ) -> Context {
+        let Reactor {
+            state,
+            actions,
+            action_triggers,
+            ..
+        } = reactor;
+
+        let mut ctx = Context::new(start_time, tag, action_triggers);
+
         if let Some(Deadline { deadline, handler }) = self.deadline.as_ref() {
             let lag = ctx.get_physical_time() - ctx.get_logical_time();
             if lag > *deadline {
@@ -122,6 +147,24 @@ impl Reaction {
             }
         }
 
-        (self.body)(ctx, reactor, inputs, outputs, actions, schedulable_actions);
+        // Pull actions from the reaction/reactor
+        let (trigger_actions, sched_actions) = actions.iter_many_unchecked_split(
+            self.iter_trigger_actions().copied(),
+            self.iter_sched_actions().copied(),
+        );
+
+        let trigger_actions = trigger_actions.collect::<Box<[_]>>();
+        let mut sched_actions = sched_actions.collect::<Box<[_]>>();
+
+        (self.body)(
+            &mut ctx,
+            state.as_mut(),
+            inputs,
+            outputs,
+            trigger_actions.as_ref(),
+            sched_actions.as_mut(),
+        );
+
+        ctx
     }
 }

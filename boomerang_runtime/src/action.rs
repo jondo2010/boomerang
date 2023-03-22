@@ -9,11 +9,13 @@ use downcast_rs::{impl_downcast, DowncastSync};
 tinymap::key_type! { pub ActionKey }
 
 pub struct ActionMut<'a, T: PortData = ()> {
+    pub(crate) key: ActionKey,
     pub(crate) min_delay: &'a Duration,
     pub(crate) values: &'a mut ActionValues<T>,
 }
 
 pub struct Action<'a, T: PortData = ()> {
+    pub(crate) key: ActionKey,
     pub(crate) min_delay: &'a Duration,
     pub(crate) values: &'a ActionValues<T>,
 }
@@ -48,6 +50,7 @@ impl<'a, T: PortData> From<&'a mut ValuedAction> for ActionMut<'a, T> {
             .downcast_mut::<ActionValues<T>>()
             .expect("Type mismatch on ActionValues!");
         Self {
+            key: valued_action.key,
             min_delay: &valued_action.min_delay,
             values,
         }
@@ -61,6 +64,7 @@ impl<'a, T: PortData> From<&'a ValuedAction> for Action<'a, T> {
             .downcast_ref::<ActionValues<T>>()
             .expect("Type mismatch on ActionValues!");
         Self {
+            key: valued_action.key,
             min_delay: &valued_action.min_delay,
             values,
         }
@@ -108,15 +112,22 @@ impl<T: PortData> ActionValues<T> {
 #[derive(Debug)]
 pub struct ValuedAction {
     pub name: String,
+    pub key: ActionKey,
     pub logical: bool,
     pub min_delay: Duration,
     pub values: Box<dyn BaseActionValues>,
 }
 
 impl ValuedAction {
-    pub fn new<T: PortData>(name: &str, logical: bool, min_delay: Duration) -> Self {
+    pub fn new<T: PortData>(
+        name: &str,
+        key: ActionKey,
+        logical: bool,
+        min_delay: Duration,
+    ) -> Self {
         Self {
             name: name.into(),
+            key,
             logical,
             min_delay,
             values: Box::new(ActionValues::<T>(HashMap::new())),
@@ -128,12 +139,14 @@ impl ValuedAction {
 pub enum InternalAction {
     Timer {
         name: String,
+        key: ActionKey,
         offset: Duration,
         period: Duration,
     },
     /// ShutdownAction is a logical action that fires when the scheduler shuts down.
     Shutdown {
         name: String,
+        key: ActionKey,
     },
     Valued(ValuedAction),
 }
@@ -144,6 +157,14 @@ impl InternalAction {
             InternalAction::Timer { name, .. } => name.as_ref(),
             InternalAction::Shutdown { name, .. } => name.as_ref(),
             InternalAction::Valued(ValuedAction { name, .. }) => name.as_ref(),
+        }
+    }
+
+    pub fn get_key(&self) -> ActionKey {
+        match self {
+            InternalAction::Timer { key, .. } => *key,
+            InternalAction::Shutdown { key, .. } => *key,
+            InternalAction::Valued(ValuedAction { key, .. }) => *key,
         }
     }
 

@@ -7,8 +7,6 @@ mod reactor;
 #[cfg(feature = "visualization")]
 pub mod graphviz;
 
-use crate::runtime;
-
 pub use action::*;
 pub use env::*;
 pub use port::*;

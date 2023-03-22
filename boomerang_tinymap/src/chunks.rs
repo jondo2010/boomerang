@@ -127,7 +127,7 @@ impl<K: Key, V: Send> TinyMap<K, V> {
             let key_indices = keys.map(|inner| inner.len());
             Chunks::new(
                 all_keys
-                    .map(move |key| unsafe { ptr.offset(key.index() as isize).as_ref().unwrap() })
+                    .map(move |key| unsafe { ptr.add(key.index()).as_ref().unwrap() })
                     .collect(),
                 key_indices,
             )
@@ -137,7 +137,7 @@ impl<K: Key, V: Send> TinyMap<K, V> {
             let key_indices = keys_mut.map(|inner| inner.len());
             ChunksMut::new(
                 all_keys_mut
-                    .map(move |key| unsafe { ptr.offset(key.index() as isize).as_mut().unwrap() })
+                    .map(move |key| unsafe { ptr.add(key.index()).as_mut().unwrap() })
                     .collect(),
                 key_indices,
             )

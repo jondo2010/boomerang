@@ -48,8 +48,8 @@ pub enum ActionType {
     Shutdown,
 }
 
-pub trait ActionBuilderFn: Fn(&str) -> runtime::InternalAction {}
-impl<F> ActionBuilderFn for F where F: Fn(&str) -> runtime::InternalAction {}
+pub trait ActionBuilderFn: Fn(&str, runtime::ActionKey) -> runtime::InternalAction {}
+impl<F> ActionBuilderFn for F where F: Fn(&str, runtime::ActionKey) -> runtime::InternalAction {}
 
 impl Debug for Box<dyn ActionBuilderFn> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -71,13 +71,6 @@ pub struct ActionBuilder {
     action_builder_fn: Box<dyn ActionBuilderFn>,
 }
 
-/// Build the ActionBuilder into a runtime Action
-impl From<ActionBuilder> for runtime::InternalAction {
-    fn from(builder: ActionBuilder) -> Self {
-        (builder.action_builder_fn)(&builder.name)
-    }
-}
-
 impl ActionBuilder {
     pub fn new(name: &str, ty: ActionType, action_builder_fn: Box<dyn ActionBuilderFn>) -> Self {
         Self {
@@ -95,5 +88,10 @@ impl ActionBuilder {
 
     pub fn get_type(&self) -> &ActionType {
         &self.ty
+    }
+
+    /// Build the `ActionBuilder` into a [`runtime::InternalAction`]
+    pub fn build_runtime(&self, action_key: runtime::ActionKey) -> runtime::InternalAction {
+        (self.action_builder_fn)(&self.name, action_key)
     }
 }

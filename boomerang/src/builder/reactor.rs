@@ -23,11 +23,11 @@ pub trait Reactor: Sized {
 /// ReactorBuilder is the Builder-side definition of a Reactor, and is type-erased
 pub(super) struct ReactorBuilder {
     /// The instantiated/child name of the Reactor
-    pub name: String,
+    name: String,
     /// The user's Reactor
-    pub state: Box<dyn runtime::ReactorState>,
+    state: Box<dyn runtime::ReactorState>,
     /// The top-level/class name of the Reactor
-    pub type_name: String,
+    type_name: String,
     /// Optional parent reactor key
     pub parent_reactor_key: Option<BuilderReactorKey>,
     /// Reactions in this ReactorType
@@ -39,8 +39,24 @@ pub(super) struct ReactorBuilder {
 }
 
 impl ReactorBuilder {
+    pub fn get_name(&self) -> &str {
+        &self.name
+    }
+
     pub(super) fn type_name(&self) -> &str {
         self.type_name.as_ref()
+    }
+
+    /// Build this `ReactorBuilder` into a `runtime::Reactor`
+    pub fn build_runtime(
+        self,
+        actions: tinymap::TinyMap<runtime::ActionKey, runtime::InternalAction>,
+        action_triggers: tinymap::TinySecondaryMap<
+            runtime::ActionKey,
+            Vec<runtime::LevelReactionKey>,
+        >,
+    ) -> runtime::Reactor {
+        runtime::Reactor::new(&self.name, self.state, actions, action_triggers)
     }
 }
 

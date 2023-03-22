@@ -8,14 +8,17 @@ use clap::Parser;
 #[derive(clap::Parser)]
 struct Args {
     /// Generate a graphviz graph of the entire reactor hierarchy
-    #[arg(short, long)]
+    #[arg(long)]
     full_graph: bool,
 
-    #[arg(short, long)]
+    #[arg(long)]
     reaction_graph: bool,
 
     #[arg(long)]
     print_debug_info: bool,
+
+    #[arg(long, short)]
+    fast_forward: bool,
 }
 
 /// Utility method to build and run a given top-level `Reactor`. Common arguments are parsed from
@@ -44,13 +47,13 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
         tracing::info!("Wrote reaction graph to {path}");
     }
 
+    if args.print_debug_info {
+        // runtime::util::print_debug_info(&env);
+        println!("{env_builder:#?}");
+    }
     let env = env_builder.try_into().unwrap();
 
-    if args.print_debug_info {
-        runtime::util::print_debug_info(&env);
-    }
-
-    let sched = runtime::Scheduler::new(env, true);
+    let sched = runtime::Scheduler::new(env, args.fast_forward);
     sched.event_loop();
 
     Ok(reactor)

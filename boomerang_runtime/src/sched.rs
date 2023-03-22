@@ -4,7 +4,7 @@ use derive_more::Display;
 use std::{collections::BinaryHeap, time::Duration};
 use tracing::{info, trace, warn};
 
-use crate::{Context, Env, Instant, ReactionKey, ReactionSet, ReactionTriggerCtx, Tag};
+use crate::{Env, Instant, ReactionKey, ReactionSet, ReactionTriggerCtx, Tag};
 
 #[derive(Debug, Display, Clone)]
 #[display(fmt = "[tag={},terminal={}]", tag, terminal)]
@@ -245,9 +245,7 @@ impl Scheduler {
                     let reactor_name = reactor.get_name();
                     trace!("    Executing {reactor_name}/{reaction_name}.",);
 
-                    let mut ctx = Context::new(self.start_time, tag);
-
-                    reaction.trigger(&mut ctx, reactor, inputs, outputs, &[], &mut []);
+                    let mut ctx = reaction.trigger(self.start_time, tag, reactor, inputs, outputs);
 
                     // Queue downstream reactions triggered by any ports that were set.
                     for port in outputs.iter() {

@@ -13,6 +13,16 @@ pub struct TinySecondaryMap<K: Key, V> {
     _k: PhantomData<K>,
 }
 
+impl<K: Key, V> Default for TinySecondaryMap<K, V> {
+    fn default() -> Self {
+        Self {
+            data: Vec::new(),
+            num_values: 0,
+            _k: PhantomData,
+        }
+    }
+}
+
 impl<K: Key, V> Index<K> for TinySecondaryMap<K, V> {
     type Output = V;
 
@@ -45,7 +55,7 @@ impl<K: Key, V> Iterator for IntoIter<K, V> {
     type Item = (K, V);
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some((idx, v)) = self.inner.next() {
+        for (idx, v) in self.inner.by_ref() {
             if let Some(v) = v {
                 self.values_left -= 1;
                 return Some((K::from(idx), v));
@@ -69,7 +79,7 @@ impl<'a, K: Key, V> Iterator for Iter<'a, K, V> {
     type Item = (K, &'a V);
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some((idx, v)) = self.inner.next() {
+        for (idx, v) in self.inner.by_ref() {
             if let Some(v) = v {
                 return Some((K::from(idx), v));
             }
@@ -85,11 +95,7 @@ impl<'a, K: Key, V> Iterator for Iter<'a, K, V> {
 impl<K: Key, V> TinySecondaryMap<K, V> {
     /// Construct a new, empty [`TinySecondaryMap`].
     pub fn new() -> Self {
-        Self {
-            data: Vec::new(),
-            num_values: 0,
-            _k: PhantomData,
-        }
+        Self::default()
     }
 
     /// Creates an emtpy `TinySecondaryMap` with the given capacity.
@@ -103,6 +109,10 @@ impl<K: Key, V> TinySecondaryMap<K, V> {
 
     pub fn len(&self) -> usize {
         self.num_values
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.num_values == 0
     }
 
     /// Inserts or replaces a value into the secondary map at the given `key`. Returns [`None`] if
@@ -149,7 +159,7 @@ impl<K: Key, V> TinySecondaryMap<K, V> {
     }
 
     /// Returns an iterator over the keys in the map.
-    pub fn keys<'a>(&'a self) -> impl Iterator<Item = K> + 'a {
+    pub fn keys(&self) -> impl Iterator<Item = K> + '_ {
         self.data.iter().enumerate().filter_map(|(idx, v)| {
             if v.is_some() {
                 Some(K::from(idx))

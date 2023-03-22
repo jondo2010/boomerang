@@ -115,7 +115,7 @@ impl Env {
     where
         I: Iterator<Item = &'a ReactionKey> + Clone + Send + 'a,
     {
-        let reactions = reaction_keys.clone().map(|&k| &self.reactions[k]);
+        let reactions = reaction_keys.map(|&k| &self.reactions[k]);
 
         let reactor_keys = reactions
             .clone()
@@ -138,44 +138,11 @@ impl Env {
             .ports
             .iter_chunks_split_unchecked(input_keys, output_keys);
 
-        // let trig_action_keys = reaction_keys .clone() .map(|&k|
-        // dep_info.reaction_trig_actions[k].iter()); let sched_action_keys =
-        // reaction_keys.map(|&k| dep_info.reaction_sched_actions[k].iter());
-
-        // let (actions, sched_actions) = disjoint::disjoint_unchecked_chunked(
-        //    &mut self.actions,
-        //    trig_action_keys,
-        //    sched_action_keys,
-        //);
-
         ReactionTriggerCtxIter {
-            // Conversion to Vec neccessary, see https://github.com/rust-lang/rust/issues/59878
             reactors,
             reactions,
             grouped_inputs: inputs,
             grouped_outputs: outputs,
         }
-    }
-
-    // pub fn find_action_by_name(&self, name: &str) -> Option<(ActionKey, &InternalAction)> {
-    //    self.actions
-    //        .iter()
-    //        .find(|(_, action)| action.get_name().eq(name))
-    //}
-
-    /// Return the Reactions in a given Reactor
-    pub fn reactions_for_reactor(
-        &self,
-        reactor_key: ReactorKey,
-    ) -> impl Iterator<Item = ReactionKey> + '_ {
-        self.reactions
-            .iter()
-            .filter_map(move |(reaction_key, reaction)| {
-                if reaction.get_reactor_key() == reactor_key {
-                    Some(reaction_key)
-                } else {
-                    None
-                }
-            })
     }
 }

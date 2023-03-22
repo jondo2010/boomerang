@@ -25,10 +25,10 @@ pub(crate) trait ReactorElement {
 #[derivative(Debug)]
 pub struct Reactor {
     /// The reactor name
-    name: String,
+    pub(crate) name: String,
     /// The ReactorState
     #[derivative(Debug = "ignore")]
-    state: Box<dyn ReactorState>,
+    pub(crate) state: Box<dyn ReactorState>,
     /// Map of Actions for this Reactor
     pub(crate) actions: tinymap::TinyMap<ActionKey, InternalAction>,
     /// For each Action, a set of Reactions triggered by it.

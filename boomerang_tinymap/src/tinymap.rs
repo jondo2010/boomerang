@@ -4,12 +4,21 @@ use std::{
     ops::{Index, IndexMut},
 };
 
-use crate::{DefaultKey, Key};
+use crate::Key;
 
 #[derive(Debug)]
 pub struct TinyMap<K: Key, V> {
     pub(crate) data: Vec<V>,
     _k: PhantomData<K>,
+}
+
+impl<K: Key, V> Default for TinyMap<K, V> {
+    fn default() -> Self {
+        Self {
+            data: Vec::new(),
+            _k: PhantomData,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -45,10 +54,7 @@ impl<K: Key, V> IndexMut<K> for TinyMap<K, V> {
 impl<K: Key, V> TinyMap<K, V> {
     /// Creates an empty `TinyMap`.
     pub fn new() -> Self {
-        Self {
-            data: Vec::new(),
-            _k: PhantomData,
-        }
+        Self::default()
     }
 
     /// Creates an emtpy `TinyMap` with the given capacity.
@@ -77,6 +83,10 @@ impl<K: Key, V> TinyMap<K, V> {
 
     pub fn len(&self) -> usize {
         self.data.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
     }
 
     pub fn keys(&self) -> impl Iterator<Item = K> {
@@ -114,7 +124,7 @@ impl<K: Key, V> TinyMap<K, V> {
     {
         let ptr = self.data.as_mut_ptr();
         keys.into_iter()
-            .map(move |key| unsafe { ptr.offset(key.index() as isize).as_mut().unwrap() })
+            .map(move |key| unsafe { ptr.add(key.index()).as_mut().unwrap() })
     }
 
     /// Returns an tuple of 2 iterators of the items in `keys` and `keys_mut`.
@@ -148,10 +158,10 @@ impl<K: Key, V> TinyMap<K, V> {
         let ptr = self.data.as_mut_ptr();
         let iter = keys
             .into_iter()
-            .map(move |key| unsafe { ptr.offset(key.index() as isize).as_ref().unwrap() });
+            .map(move |key| unsafe { ptr.add(key.index()).as_ref().unwrap() });
         let iter_mut = keys_mut
             .into_iter()
-            .map(move |key| unsafe { ptr.offset(key.index() as isize).as_mut().unwrap() });
+            .map(move |key| unsafe { ptr.add(key.index()).as_mut().unwrap() });
         (iter, iter_mut)
     }
 

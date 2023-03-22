@@ -39,6 +39,7 @@ impl ReactionBuilder {
         self,
         reactor_key: runtime::ReactorKey,
         port_aliases: &SecondaryMap<BuilderPortKey, runtime::PortKey>,
+        action_aliases: &SecondaryMap<BuilderActionKey, runtime::ActionKey>,
     ) -> runtime::Reaction {
         // Create the Vec of input ports for this reaction sorted by order
         let inputs = self
@@ -56,11 +57,27 @@ impl ReactionBuilder {
             .map(|(builder_port_key, _)| port_aliases[builder_port_key])
             .collect();
 
+        let trigger_actions = self
+            .trigger_actions
+            .iter()
+            .sorted_by_key(|(_, &order)| order)
+            .map(|(builder_action_key, _)| action_aliases[builder_action_key])
+            .collect();
+
+        let sched_actions = self
+            .schedulable_actions
+            .iter()
+            .sorted_by_key(|(_, &order)| order)
+            .map(|(builder_action_key, _)| action_aliases[builder_action_key])
+            .collect();
+
         runtime::Reaction::new(
             self.name,
             reactor_key,
             inputs,
             outputs,
+            trigger_actions,
+            sched_actions,
             self.reaction_fn,
             None,
         )

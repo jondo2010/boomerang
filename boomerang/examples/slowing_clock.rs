@@ -3,7 +3,7 @@
 /// The use of the logical action ensures the elapsed time jumps exactly from
 /// 0 to 100, 300, 600, and 1000 msec.
 use boomerang::{
-    builder::{BuilderActionKey, BuilderReactionKey, TypedActionKey},
+    builder::{BuilderReactionKey, TypedActionKey},
     run, runtime, Reactor,
 };
 use boomerang_util::{Timeout, TimeoutBuilder};

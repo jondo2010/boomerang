@@ -1,9 +1,9 @@
 pub mod chunks;
+pub mod map;
 pub mod secondary;
-pub mod tinymap;
 
+pub use map::TinyMap;
 pub use secondary::TinySecondaryMap;
-pub use tinymap::TinyMap;
 
 pub trait Key: From<usize> + Copy {
     fn index(&self) -> usize;

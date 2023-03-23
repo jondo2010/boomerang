@@ -29,7 +29,6 @@ impl_downcast!(sync BasePort);
 #[derive(Debug)]
 pub struct Port<T: PortData> {
     name: String,
-    key: PortKey,
     value: Option<T>,
     /// Reactions that this Port triggers when set.
     downstream: Vec<LevelReactionKey>,
@@ -67,10 +66,9 @@ impl<T> Port<T>
 where
     T: PortData,
 {
-    pub fn new(name: String, key: PortKey) -> Self {
+    pub fn new(name: String) -> Self {
         Self {
             name,
-            key,
             value: None,
             downstream: Vec::new(),
         }
@@ -81,8 +79,6 @@ where
     }
 
     pub fn get_mut(&mut self) -> &mut Option<T> {
-        // let downstream = ctx.dep_info.triggered_by_port(port_key);
-        // ctx.enqueue_now(downstream)
         &mut self.value
     }
 }
@@ -115,8 +111,7 @@ where
 
 #[test]
 fn test_port() {
-    let key = PortKey::from(1);
-    let p0: Box<dyn BasePort> = Box::new(Port::<f64>::new("p0".into(), key));
+    let p0: Box<dyn BasePort> = Box::new(Port::<f64>::new("p0".into()));
     dbg!(&p0);
     let x = p0.downcast_ref::<Port<f64>>();
     dbg!(&x);

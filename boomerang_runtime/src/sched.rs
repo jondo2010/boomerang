@@ -4,7 +4,7 @@ use derive_more::Display;
 use std::{collections::BinaryHeap, time::Duration};
 use tracing::{info, trace, warn};
 
-use crate::{Env, Instant, ReactionKey, ReactionSet, ReactionTriggerCtx, Tag};
+use crate::{Env, Instant, ReactionSet, ReactionTriggerCtx, Tag};
 
 #[derive(Debug, Display, Clone)]
 #[display(fmt = "[tag={},terminal={}]", tag, terminal)]

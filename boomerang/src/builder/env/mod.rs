@@ -559,9 +559,8 @@ impl EnvBuilder {
                 .keys()
                 .collect_vec();
 
-            let runtime_port_key = runtime_ports.insert_with_key(|key| {
-                self.port_builders[inward_port_key].create_runtime_port(key)
-            });
+            let runtime_port_key =
+                runtime_ports.insert(self.port_builders[inward_port_key].create_runtime_port());
 
             port_triggers.insert(runtime_port_key, downstream_reactions);
 

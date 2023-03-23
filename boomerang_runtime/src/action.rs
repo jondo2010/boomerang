@@ -15,8 +15,6 @@ pub struct ActionMut<'a, T: PortData = ()> {
 }
 
 pub struct Action<'a, T: PortData = ()> {
-    pub(crate) key: ActionKey,
-    pub(crate) min_delay: &'a Duration,
     pub(crate) values: &'a ActionValues<T>,
 }
 
@@ -63,11 +61,7 @@ impl<'a, T: PortData> From<&'a ValuedAction> for Action<'a, T> {
             .values
             .downcast_ref::<ActionValues<T>>()
             .expect("Type mismatch on ActionValues!");
-        Self {
-            key: valued_action.key,
-            min_delay: &valued_action.min_delay,
-            values,
-        }
+        Self { values }
     }
 }
 

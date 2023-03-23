@@ -139,7 +139,7 @@ impl Scheduler {
         None
     }
 
-    pub fn event_loop(mut self) {
+    pub fn event_loop(&mut self) {
         self.startup();
         loop {
             // Push pending events into the queue

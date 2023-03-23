@@ -63,7 +63,7 @@ impl EnvBuilder {
         parent: Option<BuilderReactorKey>,
         reactor: S,
     ) -> ReactorBuilderState {
-        ReactorBuilderState::new(name, parent, Box::new(reactor), self)
+        ReactorBuilderState::new(name, parent, reactor, self)
     }
 
     pub fn add_port<T: runtime::PortData>(
@@ -461,8 +461,8 @@ impl EnvBuilder {
         deps.chain(internal)
     }
 
-    /// Prepare the DAG of Reactions
-    pub fn get_reaction_graph(&self) -> DiGraphMap<BuilderReactionKey, ()> {
+    /// Build a DAG of Reactions
+    pub fn build_reaction_graph(&self) -> DiGraphMap<BuilderReactionKey, ()> {
         let mut graph =
             DiGraphMap::from_edges(self.reaction_dependency_edges().map(|(a, b)| (b, a)));
         // Ensure all ReactionIndicies are represented
@@ -498,10 +498,14 @@ impl EnvBuilder {
     ) -> Result<SecondaryMap<BuilderReactionKey, usize>, BuilderError> {
         use petgraph::{algo::tred, graph::DefaultIx, graph::NodeIndex};
 
-        let mut graph = self.get_reaction_graph().into_graph::<DefaultIx>();
+        let mut graph = self.build_reaction_graph().into_graph::<DefaultIx>();
 
         // Transitive reduction and closures
         let toposort = petgraph::algo::toposort(&graph, None).map_err(|e| {
+            // A Cycle was found in the reaction graph.
+            // let fas = petgraph::algo::greedy_feedback_arc_set(&graph);
+            // let cycle = petgraph::prelude::DiGraphMap::<BuilderReactionKey, ()>::from_edges(fas);
+
             BuilderError::ReactionGraphCycle {
                 what: graph[e.node_id()],
             }

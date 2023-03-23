@@ -39,7 +39,7 @@ impl Debug for EnvBuilder {
             .iter()
             .map(|(key, level)| {
                 let fqn = self.reaction_fqn(key).unwrap();
-                (fqn, format!("Level({level})"))
+                (format!("{key:?}, {fqn}"), format!("Level({level})"))
             })
             .collect::<BTreeMap<_, _>>();
 

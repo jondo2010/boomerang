@@ -9,6 +9,16 @@ slotmap::new_key_type! {
     pub struct BuilderReactorKey;
 }
 
+impl petgraph::graph::GraphIndex for BuilderReactorKey {
+    fn index(&self) -> usize {
+        self.0.as_ffi() as usize
+    }
+
+    fn is_node_index() -> bool {
+        true
+    }
+}
+
 pub trait Reactor: Sized {
     type State: runtime::ReactorState;
 
@@ -93,18 +103,17 @@ impl<'a> FindElements for ReactorBuilderState<'a> {
 }
 
 impl<'a> ReactorBuilderState<'a> {
-    pub(super) fn new(
+    pub(super) fn new<S: runtime::ReactorState>(
         name: &str,
         parent: Option<BuilderReactorKey>,
-        reactor_state: Box<dyn runtime::ReactorState>,
+        reactor_state: S,
         env: &'a mut EnvBuilder,
     ) -> Self {
-        // let type_name = std::any::type_name::<S>();
-        let type_name = "TODO";
+        let type_name = std::any::type_name::<S>();
         let reactor_key = env.reactor_builders.insert({
             ReactorBuilder {
                 name: name.into(),
-                state: reactor_state,
+                state: Box::new(reactor_state),
                 type_name: type_name.into(),
                 parent_reactor_key: parent,
                 reactions: SecondaryMap::new(),

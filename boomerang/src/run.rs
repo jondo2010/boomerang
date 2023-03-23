@@ -53,7 +53,7 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
     }
     let env = env_builder.try_into().unwrap();
 
-    let sched = runtime::Scheduler::new(env, args.fast_forward);
+    let mut sched = runtime::Scheduler::new(env, args.fast_forward);
     sched.event_loop();
 
     Ok(reactor)

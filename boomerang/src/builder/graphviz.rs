@@ -145,7 +145,7 @@ pub fn create_full_graph(env_builder: &EnvBuilder) -> Result<String, BuilderErro
         "digraph G {".to_owned(),
         format!(
             "  rankdir=\"LR\";labeljust=\"l\";colorscheme=\"{}\";bgcolor=\"{}\";",
-            "greys8", "1:2"
+            "greys8", "white"
         ),
         format!("  node [style=filled;colorscheme=\"{}\"];", "accent8"),
     ];
@@ -173,6 +173,15 @@ pub fn create_full_graph(env_builder: &EnvBuilder) -> Result<String, BuilderErro
         _ => {}
     });
 
+    let reaction_graph = env_builder.build_reaction_graph();
+    for (r1, r2, _) in reaction_graph.all_edges() {
+        let r1_id = r1.data().as_ffi() % env_builder.reaction_builders.len() as u64;
+        let r2_id = r2.data().as_ffi() % env_builder.reaction_builders.len() as u64;
+        output.push(format!(
+            "r{r1_id} -> r{r2_id} [style=dashed;color=red;constraint=false];"
+        ));
+    }
+
     build_port_bindings(env_builder, &mut output);
     output.push("}\n".into());
     Ok(output.join("\n"))
@@ -182,7 +191,7 @@ pub fn create_full_graph(env_builder: &EnvBuilder) -> Result<String, BuilderErro
 /// edges are dependencies between Reactions. Reactions are clustered into their "Execution Level".
 /// Reactions within the same level can be scheduled in parallel.
 pub fn create_reaction_graph(env_builder: &EnvBuilder) -> Result<String, BuilderError> {
-    let reaction_graph = env_builder.get_reaction_graph();
+    let reaction_graph = env_builder.build_reaction_graph();
     let runtime_level_map = env_builder.build_runtime_level_map()?;
 
     // Cluster on level

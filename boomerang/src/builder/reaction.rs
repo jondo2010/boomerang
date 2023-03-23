@@ -10,6 +10,16 @@ slotmap::new_key_type! {
     pub struct BuilderReactionKey;
 }
 
+impl petgraph::graph::GraphIndex for BuilderReactionKey {
+    fn index(&self) -> usize {
+        self.0.as_ffi() as usize
+    }
+
+    fn is_node_index() -> bool {
+        true
+    }
+}
+
 #[derive(Derivative)]
 #[derivative(Debug)]
 pub struct ReactionBuilder {

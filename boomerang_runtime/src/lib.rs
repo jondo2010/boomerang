@@ -1,7 +1,3 @@
-#![feature(new_uninit)]
-#![feature(type_alias_impl_trait)]
-#![feature(get_many_mut)]
-
 mod action;
 mod context;
 mod env;

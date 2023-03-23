@@ -21,6 +21,7 @@ default = ["visualization", "derive", "runner"]
 visualization = []
 derive = ["boomerang_derive"]
 runner = ["clap"]
+profiling = ["boomerang_runtime/profiling", "dep:tracy-client"]
 
 [dependencies]
 anyhow = "1.0"
@@ -37,6 +38,7 @@ tinymap = { path = "../boomerang_tinymap" }
 tracing = "0.1"
 
 clap = { version = "4.1", features = ["derive"], optional = true }
+tracy-client = { version = "0.14.2", optional = true }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
@@ -44,8 +46,6 @@ criterion = "0.4"
 boomerang_util = { path = "../boomerang_util" }
 
 [[bench]]
-name = "benchmark"
+name = "ping_pong"
 harness = false
-
-[profile.bench]
-debug = true
+required-features = ["boomerang_runtime/profiling"]

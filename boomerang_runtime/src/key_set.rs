@@ -84,13 +84,13 @@ impl<K: tinymap::Key> FromIterator<(Level, K)> for KeySet<K> {
 }
 
 impl<K: tinymap::Key> Iterator for KeySet<K> {
-    type Item = (Level, impl ExactSizeIterator<Item = K>);
+    type Item = (Level, Vec<K>);
 
     /// Provides the next lowest level in the set.
     fn next(&mut self) -> Option<Self::Item> {
         self.levels
             .pop()
-            .map(|(level, keys)| (level, keys.into_iter().map(|(k, _)| k)))
+            .map(|(level, keys)| (level, keys.into_keys()))
     }
 }
 
@@ -117,15 +117,15 @@ mod tests {
 
         let (level, keys) = rset.next().unwrap();
         assert_eq!(level, 0);
-        assert_eq!(keys.collect_vec(), vec![key0]);
+        assert_eq!(keys, vec![key0]);
 
         let (level, keys) = rset.next().unwrap();
         assert_eq!(level, 1);
-        assert_eq!(keys.collect_vec(), vec![key2, key3]);
+        assert_eq!(keys, vec![key2, key3]);
 
         let (level, keys) = rset.next().unwrap();
         assert_eq!(level, 2);
-        assert_eq!(keys.collect_vec(), vec![key1]);
+        assert_eq!(keys, vec![key1]);
     }
 
     #[test]
@@ -142,11 +142,11 @@ mod tests {
 
         let (level, keys) = rset.next().unwrap();
         assert_eq!(level, 1);
-        assert_eq!(keys.collect_vec(), vec![key1]);
+        assert_eq!(keys, vec![key1]);
 
         let (level, keys) = rset.next().unwrap();
         assert_eq!(level, 2);
-        assert_eq!(keys.collect_vec(), vec![key0, key2]);
+        assert_eq!(keys, vec![key0, key2]);
     }
 
     #[test]
@@ -194,18 +194,18 @@ mod tests {
         rset.extend_above([(0, key0)].into_iter(), 0);
         let (level, keys) = rset.next().unwrap();
         assert_eq!(level, 0);
-        assert_eq!(keys.collect_vec(), vec![key0]);
+        assert_eq!(keys, vec![key0]);
 
         rset.extend_above([(3, key1), (1, key2)].into_iter(), 1);
         assert_eq!(rset.levels.len(), 2);
 
         // Should be (1, key2)
         let (level, keys) = rset.next().unwrap();
-        assert_eq!((level, keys.collect_vec()), (1, vec![key2]));
+        assert_eq!((level, keys), (1, vec![key2]));
         assert_eq!(rset.levels.len(), 1);
 
         rset.extend_above([(2, key3)].into_iter(), 1);
         let (level, keys) = rset.next().unwrap();
-        assert_eq!((level, keys.collect_vec()), (2, vec![key3]));
+        assert_eq!((level, keys), (2, vec![key3]));
     }
 }

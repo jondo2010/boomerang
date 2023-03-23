@@ -102,6 +102,7 @@ impl Display for Env {
 }
 
 impl Env {
+    #[cfg_attr(feature = "profiling", profiling::function)]
     pub(crate) fn iter_reaction_ctx<'a, I>(
         &'a mut self,
         reaction_keys: I,

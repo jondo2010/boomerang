@@ -50,8 +50,9 @@ impl<'a, 'b> ToTokens for ReactorFieldBuilder<'a, 'b> {
                 let min_delay = OptionalDuration(**min_delay);
                 quote! { let #ident = #builder_ident.add_logical_action::<#ty>(#name, #min_delay)?; }
             }
-            ReactorField::Child { ident, name, state, ty } => {
-                quote! { let #ident: #ty = #builder_ident.add_child_reactor(#name, #state)?; }
+            ReactorField::Child { ident, name, ty, .. } => {
+                let state_ident = format_ident!("__{ident}_state");
+                quote! { let #ident: #ty = #builder_ident.add_child_reactor(#name, #state_ident)?; }
             }
             ReactorField::Reaction { ident, path } => {
                 quote! {
@@ -108,6 +109,14 @@ impl ToTokens for ReactorReceiver {
             }
         });
 
+        let child_states = rest_fields.iter().map(|field| match field {
+            ReactorField::Child { ident, state, .. } => {
+                let state_ident = format_ident!("__{ident}_state");
+                quote! { let #state_ident = #state; }
+            }
+            _ => quote!(),
+        });
+
         let bindings = build_bindings(self, &builder_ident);
         let ident = &self.ident;
         let state = self.state.clone().unwrap_or_else(|| syn::parse_quote!(()));
@@ -123,6 +132,7 @@ impl ToTokens for ReactorReceiver {
                     parent: Option<::boomerang::builder::BuilderReactorKey>,
                     env: &'__builder mut ::boomerang::builder::EnvBuilder,
                 ) -> Result<Self, ::boomerang::builder::BuilderError> {
+                    #(#child_states)*
                     let mut #builder_ident = env.add_reactor(name, parent, state);
                     #(#field_builders)*
                     #(#bindings)*

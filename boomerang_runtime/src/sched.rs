@@ -66,6 +66,7 @@ impl Scheduler {
     }
 
     /// Execute startup of the Scheduler.
+    #[cfg_attr(feature = "profiling", profiling::function)]
     fn startup(&mut self) {
         let tag = Tag::new(Duration::ZERO, 0);
 
@@ -95,6 +96,7 @@ impl Scheduler {
         self.process_tag(tag, reaction_set);
     }
 
+    #[cfg_attr(feature = "profiling", profiling::function)]
     fn cleanup(&mut self, current_tag: Tag) {
         for (period, downstream) in self
             .env
@@ -120,6 +122,7 @@ impl Scheduler {
         }
     }
 
+    #[cfg_attr(feature = "profiling", profiling::function)]
     fn shutdown(&mut self, shutdown_tag: Tag, _reactions: Option<ReactionSet>) {
         info!("Shutting down at {shutdown_tag}");
         let reaction_set = self
@@ -139,6 +142,7 @@ impl Scheduler {
         None
     }
 
+    #[cfg_attr(feature = "profiling", profiling::function)]
     pub fn event_loop(&mut self) {
         self.startup();
         loop {
@@ -182,6 +186,9 @@ impl Scheduler {
                 trace!("No more events in queue. -> Terminate!");
                 break;
             }
+
+            #[cfg(feature = "profiling")]
+            profiling::finish_frame!();
         } // loop
 
         let shutdown_tag = self
@@ -191,6 +198,7 @@ impl Scheduler {
     }
 
     // Wait until the wall-clock time is reached
+    #[cfg_attr(feature = "profiling", profiling::function)]
     fn synchronize_wall_clock(&self, target: Instant) -> Option<ScheduledEvent> {
         let now = Instant::now();
 
@@ -221,13 +229,12 @@ impl Scheduler {
 
     /// Process the reactions at this tag in increasing order of level.
     /// Reactions at a level N may trigger further reactions at levels M>N
+    #[cfg_attr(feature = "profiling", profiling::function)]
     pub fn process_tag(&mut self, tag: Tag, mut reaction_set: ReactionSet) {
         trace!("Processing tag {tag} with {} levels:", reaction_set.len());
 
         while let Some((level, reaction_keys)) = reaction_set.next() {
             trace!("  Level {level} with {} Reaction(s)", reaction_keys.len());
-
-            let reaction_keys: Box<[ReactionKey]> = reaction_keys.collect();
 
             let iter_ctx = self.env.iter_reaction_ctx(reaction_keys.iter());
 
@@ -269,22 +276,4 @@ impl Scheduler {
 
         self.cleanup(tag);
     }
-}
-
-#[cfg(feature = "disabled")]
-fn test<'a>(
-    writable_actions: &'a mut [&'a mut ValuedAction],
-    actions: &'a [&'a InternalAction],
-    ctx: &mut Context,
-) {
-    match actions {
-        &[&InternalAction::Valued(ref action)] => {}
-        _ => panic!(),
-    }
-    // let [y]: &[_;1]=std::convert::TryInto::try_into(actions).unwrap();
-
-    let [y]: &mut [_; 1usize] = ::std::convert::TryInto::try_into(writable_actions).unwrap();
-    let mut a = crate::ActionMut::<u32>::from(y);
-    ctx.schedule_action(&mut a, Some(0), None);
-    let v = ctx.get_action(&a);
 }

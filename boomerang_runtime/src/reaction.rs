@@ -131,6 +131,7 @@ impl Reaction {
         inputs: &[IPort<'_>],
         outputs: &mut [OPort<'_>],
     ) -> Context {
+        profiling::scope!("Reaction::trigger", &self.name);
         let Reactor {
             state,
             actions,

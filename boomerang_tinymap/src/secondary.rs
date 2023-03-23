@@ -160,13 +160,19 @@ impl<K: Key, V> TinySecondaryMap<K, V> {
 
     /// Returns an iterator over the keys in the map.
     pub fn keys(&self) -> impl Iterator<Item = K> + '_ {
-        self.data.iter().enumerate().filter_map(|(idx, v)| {
-            if v.is_some() {
-                Some(K::from(idx))
-            } else {
-                None
-            }
-        })
+        self.data
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, v)| v.as_ref().map(|_| K::from(idx)))
+    }
+
+    /// Turns the map into a vector of the keys in the map.
+    pub fn into_keys(self) -> Vec<K> {
+        self.data
+            .into_iter()
+            .enumerate()
+            .filter_map(|(idx, v)| v.map(|_| K::from(idx)))
+            .collect()
     }
 
     /// Returns an iterator over the values in the map.

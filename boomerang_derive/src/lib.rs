@@ -1,6 +1,3 @@
-#![feature(assert_matches)]
-#![feature(hash_set_entry)]
-
 //! This crate provides Boomerangs' derive macro.
 
 mod reaction;

@@ -1,3 +1,5 @@
+pub mod keyboard_events;
+
 use boomerang::{builder, reaction, runtime, Reactor};
 
 #[derive(Reactor)]

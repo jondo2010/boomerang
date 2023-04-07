@@ -32,7 +32,9 @@ struct HelloWorldBuilder {
     _a: HelloWorld2Builder,
 }
 
-fn main() {
+#[test]
+fn hello_world() {
     tracing_subscriber::fmt::init();
-    let _ = run::build_and_run_reactor::<HelloWorldBuilder>("hello_world", ()).unwrap();
+    let _ =
+        run::build_and_test_reactor::<HelloWorldBuilder>("hello_world", (), true, false).unwrap();
 }

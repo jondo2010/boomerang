@@ -12,15 +12,17 @@ use boomerang::{
 struct SourceBuilder {
     #[reactor(output())]
     out: TypedPortKey<u32>,
+
     #[reactor(timer())]
     t: TypedActionKey<()>,
+
     #[reactor(reaction(function = "Source::reaction_out"))]
     reaction_out: BuilderReactionKey,
 }
 
 struct Source;
 impl Source {
-    #[boomerang::reaction(reactor = "SourceBuilder", triggers(timer = "t"))]
+    #[boomerang::reaction(reactor = "SourceBuilder", triggers(action = "t"))]
     fn reaction_out(
         &mut self,
         _ctx: &runtime::Context,
@@ -77,7 +79,7 @@ impl Print {
         &mut self,
         _ctx: &runtime::Context,
         #[reactor::port(triggers)] inp: &runtime::Port<u32>,
-        #[reactor::action(effects, rename = "a")] mut _a: runtime::ActionMut,
+        #[reactor::action(effects, rename = "a")] mut _a: runtime::ActionRef,
     ) {
         let value = inp.get();
         assert!(matches!(value, Some(2u32)));
@@ -120,7 +122,8 @@ struct HierarchyBuilder {
     print2: PrintBuilder,
 }
 
-fn main() {
+#[test]
+fn hierarchy() {
     tracing_subscriber::fmt::init();
-    let _ = run::build_and_run_reactor::<HierarchyBuilder>("hierarchy", ()).unwrap();
+    let _ = run::build_and_test_reactor::<HierarchyBuilder>("hierarchy", (), true, false).unwrap();
 }

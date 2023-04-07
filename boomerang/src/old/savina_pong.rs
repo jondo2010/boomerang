@@ -89,7 +89,7 @@ impl<S: runtime::SchedulerPoint> Reactor for Ping {
         let _ = builder
             .add_reaction("receive", Self::reaction_receive)
             .with_trigger_port(receive)
-            .with_scheduable_action(serve)
+            .with_schedulable_action(serve)
             .finish();
         let _ = builder
             .add_reaction("startup_serve", Self::reaction_startup_serve)

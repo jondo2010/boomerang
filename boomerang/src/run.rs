@@ -21,6 +21,22 @@ struct Args {
     fast_forward: bool,
 }
 
+/// Utility method to build and run a given top-level `Reactor` from tests.
+pub fn build_and_test_reactor<R: Reactor>(
+    name: &str,
+    state: R::State,
+    fast_forward: bool,
+    keep_alive: bool,
+) -> anyhow::Result<R> {
+    let mut env_builder = EnvBuilder::new();
+    let reactor = R::build(name, state, None, &mut env_builder)
+        .context("Error building top-level reactor!")?;
+    let env = env_builder.try_into().expect("Error building environment!");
+    let mut sched = runtime::Scheduler::new(env, fast_forward, keep_alive);
+    sched.event_loop();
+    Ok(reactor)
+}
+
 /// Utility method to build and run a given top-level `Reactor`. Common arguments are parsed from
 /// the command line.
 pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow::Result<R> {
@@ -56,7 +72,7 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
     }
     let env = env_builder.try_into().unwrap();
 
-    let mut sched = runtime::Scheduler::new(env, args.fast_forward);
+    let mut sched = runtime::Scheduler::new(env, false, true);
     sched.event_loop();
 
     Ok(reactor)

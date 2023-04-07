@@ -11,6 +11,7 @@ pub type LevelReactionKey = (Level, ReactionKey);
 /// `Env` stores the resolved runtime state of all the reactors.
 ///
 /// The reactor heirarchy has been flattened and build by the builder methods.
+#[derive(Debug)]
 pub struct Env {
     /// The runtime set of Reactors
     pub reactors: tinymap::TinyMap<ReactorKey, Reactor>,
@@ -118,12 +119,7 @@ impl Env {
     {
         let reactions = reaction_keys.map(|&k| &self.reactions[k]);
 
-        let reactor_keys = reactions
-            .clone()
-            .map(|reaction| reaction.get_reactor_key())
-            .inspect(|&k| {
-                tracing::trace!("Borrowing {k:?}");
-            });
+        let reactor_keys = reactions.clone().map(|reaction| reaction.get_reactor_key());
 
         let input_keys = reactions
             .clone()

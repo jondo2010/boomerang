@@ -76,11 +76,14 @@ impl MultipleContained {
     }
 }
 
-fn main() {
+#[test]
+fn multiple_contained() {
     tracing_subscriber::fmt::init();
-    let _ = run::build_and_run_reactor::<MultipleContainedBuilder>(
+    let _ = run::build_and_test_reactor::<MultipleContainedBuilder>(
         "multiple_contained",
         MultipleContained,
+        true,
+        false,
     )
     .unwrap();
 }

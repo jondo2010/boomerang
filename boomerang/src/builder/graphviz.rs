@@ -89,7 +89,11 @@ fn build_actions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &mu
             ActionType::Logical { min_delay } => {
                 format!("L({} ms)", min_delay.unwrap_or_default().as_millis())
             }
-            ActionType::Shutdown => "shutdown".into(),
+            ActionType::Physical { min_delay } => {
+                format!("P({} ms)", min_delay.unwrap_or_default().as_millis())
+            }
+            ActionType::Startup => "Startup".into(),
+            ActionType::Shutdown => "Shutdown".into(),
         };
 
         if !action.triggers.is_empty() || !action.schedulers.is_empty() {

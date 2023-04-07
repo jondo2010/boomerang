@@ -16,7 +16,7 @@ struct SourceBuilder {
 
 struct Source;
 impl Source {
-    #[boomerang::reaction(reactor = "SourceBuilder", triggers(timer = "t"))]
+    #[boomerang::reaction(reactor = "SourceBuilder", triggers(action = "t"))]
     fn reaction_t(
         &mut self,
         _ctx: &runtime::Context,
@@ -101,7 +101,9 @@ struct DeterminismBuilder {
     p2: PassBuilder,
 }
 
-fn main() {
+#[test]
+fn determinism() {
     tracing_subscriber::fmt::init();
-    let _ = run::build_and_run_reactor::<DeterminismBuilder>("determinism", ()).unwrap();
+    let _ =
+        run::build_and_test_reactor::<DeterminismBuilder>("determinism", (), true, false).unwrap();
 }

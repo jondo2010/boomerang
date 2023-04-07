@@ -1,4 +1,4 @@
-use crossbeam_channel::{Receiver, RecvTimeoutError};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use derive_more::Display;
 // use rayon::iter::{ParallelBridge, ParallelIterator};
 use std::{collections::BinaryHeap, time::Duration};
@@ -8,7 +8,7 @@ use crate::{Env, Instant, ReactionSet, ReactionTriggerCtx, Tag};
 
 #[derive(Debug, Display, Clone)]
 #[display(fmt = "[tag={},terminal={}]", tag, terminal)]
-pub(crate) struct ScheduledEvent {
+pub struct ScheduledEvent {
     pub(crate) tag: Tag,
     pub(crate) reactions: ReactionSet,
     pub(crate) terminal: bool,
@@ -37,14 +37,19 @@ impl Ord for ScheduledEvent {
     }
 }
 
+#[derive(Debug)]
 pub struct Scheduler {
     /// The environment state
     env: Env,
     /// Whether to skip wall-clock synchronization
     fast_forward: bool,
+    /// Whether to keep the scheduler alive for any possible asynchronous events
+    keep_alive: bool,
+    /// Asynchronous events sender
+    event_tx: Sender<ScheduledEvent>,
     /// Asynchronous events receiver
     event_rx: Receiver<ScheduledEvent>,
-
+    /// Current event queue
     event_queue: BinaryHeap<ScheduledEvent>,
     /// Initial wall-clock time.
     start_time: Instant,
@@ -53,11 +58,13 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    pub fn new(env: Env, fast_forward: bool) -> Self {
-        let (_event_tx, event_rx) = crossbeam_channel::unbounded();
+    pub fn new(env: Env, fast_forward: bool, keep_alive: bool) -> Self {
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
         Self {
             env,
             fast_forward,
+            keep_alive,
+            event_tx,
             event_rx,
             event_queue: BinaryHeap::new(),
             start_time: Instant::now(),
@@ -67,52 +74,29 @@ impl Scheduler {
 
     /// Execute startup of the Scheduler.
     #[cfg_attr(feature = "profiling", profiling::function)]
+    #[tracing::instrument(skip(self))]
     fn startup(&mut self) {
+        self.start_time = Instant::now();
+
         let tag = Tag::new(Duration::ZERO, 0);
 
-        info!("Starting the execution at {tag}");
-        let mut reaction_set = ReactionSet::default();
-
-        // For all Timers, pump later events onto the queue and create an initial ReactionSet to
-        // process.
-        for (offset, downstream) in self
+        // For all Timers, pump later events onto the queue and create an initial ReactionSet to process.
+        let reaction_set = self
             .env
             .reactors
             .values()
             .flat_map(|reactor| reactor.iter_startup_events())
-        {
-            if offset.is_zero() {
-                reaction_set.extend_above(downstream.iter().copied(), 0);
-            } else {
-                let tag = tag.delay(Some(*offset));
-                self.event_queue.push(ScheduledEvent {
-                    tag,
-                    reactions: ReactionSet::from_iter(downstream.iter().copied()),
-                    terminal: false,
-                });
-            }
-        }
+            .flatten()
+            .copied()
+            .collect();
 
+        info!(tag = %tag, ?reaction_set, "Starting the execution.");
         self.process_tag(tag, reaction_set);
     }
 
     #[cfg_attr(feature = "profiling", profiling::function)]
+    #[tracing::instrument(skip(self))]
     fn cleanup(&mut self, current_tag: Tag) {
-        for (period, downstream) in self
-            .env
-            .reactors
-            .values()
-            .flat_map(|reactor| reactor.iter_cleanup_events())
-        {
-            // schedule a periodic timer again
-            let tag = current_tag.delay(Some(*period));
-            self.event_queue.push(ScheduledEvent {
-                tag,
-                reactions: ReactionSet::from_iter(downstream.iter().copied()),
-                terminal: false,
-            });
-        }
-
         for reactor in self.env.reactors.values_mut() {
             reactor.cleanup(current_tag);
         }
@@ -124,7 +108,7 @@ impl Scheduler {
 
     #[cfg_attr(feature = "profiling", profiling::function)]
     fn shutdown(&mut self, shutdown_tag: Tag, _reactions: Option<ReactionSet>) {
-        info!("Shutting down at {shutdown_tag}");
+        info!(tag = %shutdown_tag, "Shutting down.");
         let reaction_set = self
             .env
             .reactors
@@ -133,16 +117,50 @@ impl Scheduler {
             .flat_map(|downstream_reactions| downstream_reactions.iter().copied())
             .collect();
         self.process_tag(shutdown_tag, reaction_set);
-        info!("Scheduler has been shut down.");
+
+        // If the event queue still has events on it, report that.
+        if !self.event_queue.is_empty() {
+            tracing::warn!(
+                "---- There are {} unprocessed future events on the event queue.",
+                self.event_queue.len()
+            );
+            let event = self.event_queue.peek().unwrap();
+            tracing::warn!(
+                "---- The first future event has timestamp {:?} after start time.",
+                event.tag.get_offset()
+            );
+        }
+
+        tracing::info!("---- Elapsed logical time: {:?}", shutdown_tag.get_offset());
+        // If physical_start_time is 0, then execution didn't get far enough along to initialize this.
+        let physical_elapsed = Instant::now().checked_duration_since(self.start_time);
+        tracing::info!("---- Elapsed physical time: {:?}", physical_elapsed);
+
+        tracing::info!("Scheduler has been shut down.");
     }
 
     /// Try to receive an asynchronous event
+    #[tracing::instrument(skip(self))]
     fn receive_event(&mut self) -> Option<ScheduledEvent> {
-        // TODO
-        None
+        if let Some(shutdown) = self.shutdown_tag {
+            let abs = shutdown.to_logical_time(self.start_time);
+            if let Some(timeout) = abs.checked_duration_since(Instant::now()) {
+                tracing::debug!(timeout = ?timeout, "Waiting for async event.");
+                self.event_rx.recv_timeout(timeout).ok()
+            } else {
+                tracing::debug!("Cannot wait, already past programmed shutdown time...");
+                None
+            }
+        } else if self.keep_alive {
+            tracing::debug!("Waiting indefinitely for async event.");
+            self.event_rx.recv().ok()
+        } else {
+            None
+        }
     }
 
     #[cfg_attr(feature = "profiling", profiling::function)]
+    #[tracing::instrument(skip(self))]
     pub fn event_loop(&mut self) {
         self.startup();
         loop {
@@ -152,12 +170,11 @@ impl Scheduler {
             }
 
             if let Some(event) = self.event_queue.pop() {
-                trace!("Handling event {}", event);
+                tracing::debug!(event = %event, reactions = ?event.reactions, "Handling event");
 
                 if !self.fast_forward {
-                    if let Some(async_event) =
-                        self.synchronize_wall_clock(event.tag.to_logical_time(self.start_time))
-                    {
+                    let target = event.tag.to_logical_time(self.start_time);
+                    if let Some(async_event) = self.synchronize_wall_clock(target) {
                         // Woken up by async event
                         if async_event.tag < event.tag {
                             // Re-insert both events to order them
@@ -199,21 +216,27 @@ impl Scheduler {
 
     // Wait until the wall-clock time is reached
     #[cfg_attr(feature = "profiling", profiling::function)]
+    #[tracing::instrument(skip(self), fields(target = ?target))]
     fn synchronize_wall_clock(&self, target: Instant) -> Option<ScheduledEvent> {
         let now = Instant::now();
 
         if now < target {
             let advance = target - now;
-            trace!("Need to sleep {}ns", advance.as_nanos());
+            tracing::debug!(advance = ?advance, "Need to sleep");
 
             match self.event_rx.recv_timeout(advance) {
                 Ok(event) => {
-                    trace!("Sleep interrupted by async event {}", event.tag);
+                    tracing::debug!(event = %event, "Sleep interrupted by async event");
                     return Some(event);
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    let remaining = target.duration_since(Instant::now());
-                    std::thread::sleep(remaining);
+                    let remaining = target.checked_duration_since(Instant::now());
+                    if let Some(remaining) = remaining {
+                        tracing::debug!(remaining = ?remaining,
+                            "Sleep interrupted disconnect, sleeping for remaining",
+                        );
+                        std::thread::sleep(remaining);
+                    }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
             }
@@ -221,7 +244,7 @@ impl Scheduler {
 
         if now > target {
             let delay = now - target;
-            warn!("running late by {}ns", delay.as_nanos());
+            tracing::warn!(delay = ?delay, "running late");
         }
 
         None
@@ -230,9 +253,8 @@ impl Scheduler {
     /// Process the reactions at this tag in increasing order of level.
     /// Reactions at a level N may trigger further reactions at levels M>N
     #[cfg_attr(feature = "profiling", profiling::function)]
+    #[tracing::instrument(skip(self), fields(tag = %tag, reaction_set = ?reaction_set))]
     pub fn process_tag(&mut self, tag: Tag, mut reaction_set: ReactionSet) {
-        trace!("Processing tag {tag} with {} levels:", reaction_set.len());
-
         while let Some((level, reaction_keys)) = reaction_set.next() {
             trace!("  Level {level} with {} Reaction(s)", reaction_keys.len());
 
@@ -252,7 +274,14 @@ impl Scheduler {
                     let reactor_name = reactor.get_name();
                     trace!("    Executing {reactor_name}/{reaction_name}.",);
 
-                    let mut ctx = reaction.trigger(self.start_time, tag, reactor, inputs, outputs);
+                    let mut ctx = reaction.trigger(
+                        self.start_time,
+                        tag,
+                        reactor,
+                        inputs,
+                        outputs,
+                        self.event_tx.clone(),
+                    );
 
                     // Queue downstream reactions triggered by any ports that were set.
                     for port in outputs.iter() {

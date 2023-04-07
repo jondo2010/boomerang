@@ -2,7 +2,6 @@
 
 use boomerang::{
     builder::{BuilderReactionKey, TypedActionKey},
-    run,
     runtime::{self, Duration},
     Reactor,
 };
@@ -76,11 +75,11 @@ impl Hello {
     }
 
     /// reaction_t is sensitive to Timer `t` and schedules Action `a`
-    #[boomerang::reaction(reactor = "HelloBuilder", triggers(timer = "t"))]
+    #[boomerang::reaction(reactor = "HelloBuilder", triggers(action = "t"))]
     fn reaction_t(
         &mut self,
         ctx: &mut runtime::Context,
-        #[reactor::action(effects)] mut a: runtime::ActionMut,
+        #[reactor::action(effects)] mut a: runtime::ActionRef,
     ) {
         // Print the current time.
         self.previous_time = ctx.get_elapsed_logical_time();
@@ -139,7 +138,9 @@ struct MainBuilder {
 }
 
 // TODO: Fixme
-fn main() {
+#[cfg(feature = "disabled")]
+#[test]
+fn hello() {
     tracing_subscriber::fmt::init();
-    let _ = run::build_and_run_reactor::<MainBuilder>("hello", ()).unwrap();
+    let _ = run::build_and_test_reactor::<MainBuilder>("hello", (), true, false).unwrap();
 }

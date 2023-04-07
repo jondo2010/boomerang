@@ -13,26 +13,34 @@ use super::BuilderReactionKey;
 
 slotmap::new_key_type! {pub struct BuilderActionKey;}
 
+#[derive(Copy, Clone, Debug)]
+pub struct Logical;
+
+#[derive(Copy, Clone, Debug)]
+pub struct Physical;
+
 /// `TypedActionKey` is a typed wrapper around `ActionKey` that is used to associate a type with an
 /// action. This is used to ensure that the type of the action matches the type of the port that it
 /// is connected to.
 #[derive(Copy, Clone, Default, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 #[repr(transparent)]
-pub struct TypedActionKey<T: runtime::PortData = ()>(BuilderActionKey, PhantomData<T>);
+pub struct TypedActionKey<T = (), Q = Logical>(BuilderActionKey, PhantomData<(T, Q)>)
+where
+    T: runtime::PortData;
 
-impl<T: runtime::PortData> From<BuilderActionKey> for TypedActionKey<T> {
+impl<T: runtime::PortData, Q> From<BuilderActionKey> for TypedActionKey<T, Q> {
     fn from(key: BuilderActionKey) -> Self {
         Self(key, PhantomData)
     }
 }
 
-impl<T: runtime::PortData> From<TypedActionKey<T>> for BuilderActionKey {
-    fn from(key: TypedActionKey<T>) -> Self {
+impl<T: runtime::PortData, Q> From<TypedActionKey<T, Q>> for BuilderActionKey {
+    fn from(key: TypedActionKey<T, Q>) -> Self {
         key.0
     }
 }
 
-impl<T: runtime::PortData> runtime::InnerType for TypedActionKey<T> {
+impl<T: runtime::PortData, Q> runtime::InnerType for TypedActionKey<T, Q> {
     type Inner = T;
 }
 
@@ -45,11 +53,15 @@ pub enum ActionType {
     Logical {
         min_delay: Option<runtime::Duration>,
     },
+    Physical {
+        min_delay: Option<runtime::Duration>,
+    },
+    Startup,
     Shutdown,
 }
 
-pub trait ActionBuilderFn: Fn(&str, runtime::ActionKey) -> runtime::InternalAction {}
-impl<F> ActionBuilderFn for F where F: Fn(&str, runtime::ActionKey) -> runtime::InternalAction {}
+pub trait ActionBuilderFn: Fn(&str, runtime::ActionKey) -> runtime::Action {}
+impl<F> ActionBuilderFn for F where F: Fn(&str, runtime::ActionKey) -> runtime::Action {}
 
 impl Debug for Box<dyn ActionBuilderFn> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -91,7 +103,7 @@ impl ActionBuilder {
     }
 
     /// Build the `ActionBuilder` into a [`runtime::InternalAction`]
-    pub fn build_runtime(&self, action_key: runtime::ActionKey) -> runtime::InternalAction {
+    pub fn build_runtime(&self, action_key: runtime::ActionKey) -> runtime::Action {
         (self.action_builder_fn)(&self.name, action_key)
     }
 }

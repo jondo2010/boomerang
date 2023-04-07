@@ -54,7 +54,7 @@ impl Ping {
     fn in_start(
         &mut self,
         ctx: &mut runtime::Context,
-        #[reactor::action(effects)] mut serve: runtime::ActionMut<()>,
+        #[reactor::action(effects)] mut serve: runtime::ActionRef<()>,
     ) {
         // reset local state
         self.pings_left = self.count;
@@ -77,7 +77,7 @@ impl Ping {
         &mut self,
         ctx: &mut runtime::Context,
         #[reactor::port(effects)] out_finished: &mut runtime::Port<()>,
-        #[reactor::action(effects)] mut serve: runtime::ActionMut<()>,
+        #[reactor::action(effects)] mut serve: runtime::ActionRef<()>,
     ) {
         if self.pings_left == 0 {
             *out_finished.get_mut() = Some(());
@@ -158,21 +158,17 @@ impl Main {
 }
 
 fn bench(c: &mut Criterion) {
-    #[cfg(feature = "profiling")]
-    let _client = tracy_client::Client::start();
-
     let mut group = c.benchmark_group("ping_pong");
 
-    for count in [1000 /*10000, 100000, 1000000*/].into_iter() {
+    for count in [100, 1000, 10000 /*100000, 1000000*/].into_iter() {
         group.sample_size(count);
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
             b.iter_batched(
                 || {
-                    tracy_client::span!("setup");
                     let mut env_builder = EnvBuilder::new();
                     let _reactor =
                         MainBuilder::build("main", Main { count }, None, &mut env_builder).unwrap();
-                    runtime::Scheduler::new(env_builder.try_into().unwrap(), true)
+                    runtime::Scheduler::new(env_builder.try_into().unwrap(), true, false)
                 },
                 |mut sched| {
                     sched.event_loop();

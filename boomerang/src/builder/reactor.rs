@@ -1,6 +1,6 @@
 use super::{
     ActionBuilder, BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactionKey, EnvBuilder,
-    FindElements, PortType, ReactionBuilderState, TypedActionKey, TypedPortKey,
+    FindElements, Logical, Physical, PortType, ReactionBuilderState, TypedActionKey, TypedPortKey,
 };
 use crate::runtime;
 use slotmap::{SecondaryMap, SlotMap};
@@ -60,7 +60,7 @@ impl ReactorBuilder {
     /// Build this `ReactorBuilder` into a `runtime::Reactor`
     pub fn build_runtime(
         self,
-        actions: tinymap::TinyMap<runtime::ActionKey, runtime::InternalAction>,
+        actions: tinymap::TinyMap<runtime::ActionKey, runtime::Action>,
         action_triggers: tinymap::TinySecondaryMap<
             runtime::ActionKey,
             Vec<runtime::LevelReactionKey>,
@@ -88,8 +88,8 @@ pub struct ReactorBuilderState<'a> {
     /// The ReactorKey of this Builder
     reactor_key: BuilderReactorKey,
     env: &'a mut EnvBuilder,
-    startup_action: TypedActionKey<()>,
-    shutdown_action: TypedActionKey<()>,
+    startup_action: TypedActionKey,
+    shutdown_action: TypedActionKey,
 }
 
 impl<'a> FindElements for ReactorBuilderState<'a> {
@@ -123,12 +123,7 @@ impl<'a> ReactorBuilderState<'a> {
         });
 
         let startup_action = env
-            .add_timer(
-                "__startup",
-                runtime::Duration::from_micros(0),
-                runtime::Duration::from_micros(0),
-                reactor_key,
-            )
+            .add_startup_action("__startup", reactor_key)
             .expect("Duplicate startup Action?");
 
         let shutdown_action = env
@@ -149,39 +144,77 @@ impl<'a> ReactorBuilderState<'a> {
     }
 
     /// Get the startup action for this reactor
-    pub fn get_startup_action(&self) -> TypedActionKey<()> {
+    pub fn get_startup_action(&self) -> TypedActionKey {
         self.startup_action
     }
 
     /// Get the shutdown action for this reactor
-    pub fn get_shutdown_action(&self) -> TypedActionKey<()> {
+    pub fn get_shutdown_action(&self) -> TypedActionKey {
         self.shutdown_action
     }
 
     /// Add a new timer action to the reactor.
-    ///
-    /// This method forwards to the implementation at
-    /// [`crate::builder::env::EnvBuilder::add_timer`].
     pub fn add_timer(
         &mut self,
         name: &str,
-        period: runtime::Duration,
-        offset: runtime::Duration,
+        period: Option<runtime::Duration>,
+        offset: Option<runtime::Duration>,
     ) -> Result<TypedActionKey, BuilderError> {
-        self.env.add_timer(name, period, offset, self.reactor_key)
+        let action_key = self.add_logical_action(name, period)?;
+
+        let startup_fn: Box<dyn runtime::ReactionFn> = Box::new(
+            move |ctx: &mut runtime::Context, _, _, _, actions: &mut [&mut runtime::Action]| {
+                let [_startup, timer]: &mut [&mut runtime::Action; 2usize] =
+                    actions.try_into().unwrap();
+                let mut timer: runtime::ActionRef = (*timer).into();
+                ctx.schedule_action(&mut timer, None, offset);
+            },
+        );
+
+        let startup_key = self.startup_action;
+        self.add_reaction(&format!("_{name}_startup"), startup_fn)
+            .with_trigger_action(startup_key, 0)
+            .with_schedulable_action(action_key, 1)
+            .finish()?;
+
+        if period.is_some() {
+            let reset_fn: Box<dyn runtime::ReactionFn> = Box::new(
+                |ctx: &mut runtime::Context, _, _, _, actions: &mut [&mut runtime::Action]| {
+                    let [timer]: &mut [&mut runtime::Action; 1usize] = actions.try_into().unwrap();
+                    let mut timer: runtime::ActionRef = (*timer).into();
+                    ctx.schedule_action(&mut timer, None, None);
+                },
+            );
+
+            self.add_reaction(&format!("_{name}_reset"), reset_fn)
+                .with_trigger_action(action_key, 0)
+                .with_schedulable_action(action_key, 0)
+                .finish()?;
+        }
+
+        Ok(action_key)
     }
 
     /// Add a new logical action to the reactor.
     ///
     /// This method forwards to the implementation at
     /// [`crate::builder::env::EnvBuilder::add_logical_action`].
-    pub fn add_logical_action<T: runtime::PortData>(
+    pub fn add_logical_action<T: runtime::ActionData>(
         &mut self,
         name: &str,
         min_delay: Option<runtime::Duration>,
-    ) -> Result<TypedActionKey<T>, BuilderError> {
+    ) -> Result<TypedActionKey<T, Logical>, BuilderError> {
         self.env
             .add_logical_action::<T>(name, min_delay, self.reactor_key)
+    }
+
+    pub fn add_physical_action<T: runtime::ActionData>(
+        &mut self,
+        name: &str,
+        min_delay: Option<runtime::Duration>,
+    ) -> Result<TypedActionKey<T, Physical>, BuilderError> {
+        self.env
+            .add_physical_action::<T>(name, min_delay, self.reactor_key)
     }
 
     /// Add a new reaction to this reactor.
@@ -190,8 +223,7 @@ impl<'a> ReactorBuilderState<'a> {
         name: &str,
         reaction_fn: Box<dyn runtime::ReactionFn>,
     ) -> ReactionBuilderState {
-        let priority = self.env.reactor_builders[self.reactor_key].reactions.len();
-        ReactionBuilderState::new(name, priority, self.reactor_key, reaction_fn, self.env)
+        self.env.add_reaction(name, self.reactor_key, reaction_fn)
     }
 
     /// Add a new port to this reactor.

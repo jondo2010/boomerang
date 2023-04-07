@@ -1,4 +1,5 @@
 use std::{
+    fmt::Debug,
     iter::Enumerate,
     marker::PhantomData,
     ops::{Index, IndexMut},
@@ -6,10 +7,15 @@ use std::{
 
 use crate::Key;
 
-#[derive(Debug)]
 pub struct TinyMap<K: Key, V> {
     pub(crate) data: Vec<V>,
     _k: PhantomData<K>,
+}
+
+impl<K: Key + Debug, V: Debug> Debug for TinyMap<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_map().entries(self.iter()).finish()
+    }
 }
 
 impl<K: Key, V> Default for TinyMap<K, V> {
@@ -165,6 +171,7 @@ impl<K: Key, V> TinyMap<K, V> {
         (iter, iter_mut)
     }
 
+    /// Returns an iterator over the (`K`, `V`) entries in the map.
     pub fn iter(&self) -> Iter<'_, K, V> {
         Iter {
             inner: self.data.iter().enumerate(),
@@ -194,13 +201,14 @@ mod tests {
             data: Vec::new(),
             _k: PhantomData,
         };
-        let k1 = map.insert(1);
-        let k2 = map.insert(2);
-        let k3 = map.insert(3);
-        let k4 = map.insert(4);
-        let k5 = map.insert(5);
+        let _k1 = map.insert(0);
+        let k2 = map.insert(1);
+        let k3 = map.insert(2);
+        let k4 = map.insert(3);
+        let k5 = map.insert(4);
+        let k6 = map.insert(5);
 
-        let values = map.iter_many_unchecked_mut([k3, k1, k5, k2, k4]).map(|x| {
+        let values = map.iter_many_unchecked_mut([k4, k2, k6, k3, k5]).map(|x| {
             *x += 1;
             *x
         });

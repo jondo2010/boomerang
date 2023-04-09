@@ -17,8 +17,9 @@ gitlab = { repository = 'jondo2010/boomerang', branch = 'master' }
 codecov = { repository = 'jondo2010/boomerang', branch = 'master', service = 'gitlab' }
 
 [features]
-default = []
+default = ["parallel"]
 profiling = ["dep:profiling", "profiling/profile-with-tracy"]
+parallel = ["rayon"]
 
 [dependencies]
 crossbeam-channel = "0.5"
@@ -27,7 +28,7 @@ derivative = "2.2"
 derive_more = '0.99'
 downcast-rs = "1.2"
 itertools = "*"
-rayon = "1.5"
+rayon = { version = "1.7", optional = true }
 slotmap = { version = "1.0", features = ["unstable"] }
 thiserror = "1.0"
 tinymap = { path = "../boomerang_tinymap" }

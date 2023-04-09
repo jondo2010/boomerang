@@ -8,7 +8,7 @@ use crate::{
 
 tinymap::key_type! { pub ReactorKey }
 
-pub trait ReactorState: DowncastSync {}
+pub trait ReactorState: DowncastSync + Send {}
 impl<T> ReactorState for T where T: DowncastSync {}
 impl_downcast!(sync ReactorState);
 

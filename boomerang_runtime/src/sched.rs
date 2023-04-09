@@ -1,6 +1,5 @@
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use derive_more::Display;
-// use rayon::iter::{ParallelBridge, ParallelIterator};
 use std::{collections::BinaryHeap, time::Duration};
 use tracing::{info, trace, warn};
 
@@ -256,12 +255,21 @@ impl Scheduler {
     #[tracing::instrument(skip(self), fields(tag = %tag, reaction_set = ?reaction_set))]
     pub fn process_tag(&mut self, tag: Tag, mut reaction_set: ReactionSet) {
         while let Some((level, reaction_keys)) = reaction_set.next() {
-            trace!("  Level {level} with {} Reaction(s)", reaction_keys.len());
+            tracing::info!("Level{level} with {} Reaction(s)", reaction_keys.len());
 
+            #[cfg(feature = "parallel")]
+            use rayon::prelude::{ParallelBridge, ParallelIterator};
+
+            #[cfg(feature = "parallel")]
+            let iter_ctx = self
+                .env
+                .iter_reaction_ctx(reaction_keys.iter())
+                .par_bridge();
+
+            #[cfg(not(feature = "parallel"))]
             let iter_ctx = self.env.iter_reaction_ctx(reaction_keys.iter());
 
             let inner_ctxs = iter_ctx
-                //.par_bridge()
                 .map(|trigger_ctx| {
                     let ReactionTriggerCtx {
                         reaction,
@@ -274,17 +282,21 @@ impl Scheduler {
                     let reactor_name = reactor.get_name();
                     trace!("    Executing {reactor_name}/{reaction_name}.",);
 
+                    //TODO: Plumb these iterators through into the generated reaction code.
+                    let inputs = inputs.collect::<Vec<_>>();
+                    let mut outputs = outputs.collect::<Vec<_>>();
+
                     let mut ctx = reaction.trigger(
                         self.start_time,
                         tag,
                         reactor,
-                        inputs,
-                        outputs,
+                        inputs.as_slice(),
+                        outputs.as_mut_slice(),
                         self.event_tx.clone(),
                     );
 
                     // Queue downstream reactions triggered by any ports that were set.
-                    for port in outputs.iter() {
+                    for port in outputs.into_iter() {
                         if port.is_set() {
                             ctx.enqueue_now(port.get_downstream());
                         }

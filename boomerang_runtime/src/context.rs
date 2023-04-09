@@ -82,9 +82,9 @@ impl<'a> Context<'a> {
     }
 
     /// Schedule the Action to trigger at some future time.
-    pub fn schedule_action<'action, T: ActionData, A: ActionRefValue<T>>(
+    pub fn schedule_action<T: ActionData, A: ActionRefValue<T>>(
         &mut self,
-        action: &'action mut A,
+        action: &mut A,
         value: Option<T>,
         delay: Option<Duration>,
     ) {

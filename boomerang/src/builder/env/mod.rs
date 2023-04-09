@@ -249,10 +249,8 @@ impl EnvBuilder {
         let port_a_fqn = self.port_fqn(port_a_key)?;
         let port_b_fqn = self.port_fqn(port_b_key)?;
 
-        let [port_a, port_b] = self
-            .port_builders
-            .get_disjoint_mut([port_a_key, port_b_key])
-            .unwrap();
+        let port_a = &self.port_builders[port_a_key];
+        let port_b = &self.port_builders[port_b_key];
 
         if port_b.get_inward_binding().is_some() {
             return Err(BuilderError::PortBindError {
@@ -343,8 +341,9 @@ impl EnvBuilder {
             }
         }?;
 
-        port_b.set_inward_binding(Some(port_a_key));
-        port_a.add_outward_binding(port_b_key);
+        // All validity checks passed, so we can now bind the ports
+        self.port_builders[port_b_key].set_inward_binding(Some(port_a_key));
+        self.port_builders[port_a_key].add_outward_binding(port_b_key);
 
         Ok(())
     }

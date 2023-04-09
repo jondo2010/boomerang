@@ -33,6 +33,12 @@ pub struct KeyboardEvents {
     raw_terminal: Option<RawTerminal<Stdout>>,
 }
 
+impl Default for KeyboardEvents {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KeyboardEvents {
     pub fn new() -> Self {
         Self { raw_terminal: None }

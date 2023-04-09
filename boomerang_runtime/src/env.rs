@@ -1,5 +1,10 @@
 use std::fmt::Display;
 
+use tinymap::{
+    chunks::{Chunks, ChunksMut},
+    map::{IterMany, IterManyMut},
+};
+
 use crate::{BasePort, PortKey, Reaction, ReactionKey, Reactor, ReactorKey};
 
 /// Execution level
@@ -22,36 +27,41 @@ pub struct Env {
 }
 
 /// Set of borrows necessary for a single Reaction triggering.
-pub(crate) struct ReactionTriggerCtx<'a> {
+pub(crate) struct ReactionTriggerCtx<'a, II>
+where
+    II: Iterator<Item = PortKey> + Send,
+{
     pub(crate) reactor: &'a mut Reactor,
     pub(crate) reaction: &'a Reaction,
-    pub(crate) inputs: &'a [&'a Box<dyn BasePort>],
-    pub(crate) outputs: &'a mut [&'a mut Box<dyn BasePort>],
+    pub(crate) inputs: IterMany<'a, PortKey, Box<dyn BasePort>, II>,
+    pub(crate) outputs: IterManyMut<'a, PortKey, Box<dyn BasePort>, II>,
 }
 
 /// Container for set of iterators used to build a `ReactionTriggerCtx`
-pub(crate) struct ReactionTriggerCtxIter<'a, IReactor, IReaction, IInputs, IOutputs>
+pub(crate) struct ReactionTriggerCtxIter<'a, IReactor, IReaction, IO1, IO2, II>
 where
     IReactor: Iterator<Item = &'a mut Reactor>,
     IReaction: Iterator<Item = &'a Reaction>,
-    IInputs: Iterator<Item = &'a [&'a Box<dyn BasePort>]>,
-    IOutputs: Iterator<Item = &'a mut [&'a mut Box<dyn BasePort>]>,
+    IO1: Iterator<Item = II> + Send,
+    IO2: Iterator<Item = II> + Send,
+    II: Iterator<Item = PortKey> + Send,
 {
     reactors: IReactor,
     reactions: IReaction,
-    grouped_inputs: IInputs,
-    grouped_outputs: IOutputs,
+    grouped_inputs: Chunks<'a, PortKey, Box<dyn BasePort>, IO1, II>,
+    grouped_outputs: ChunksMut<'a, PortKey, Box<dyn BasePort>, IO2, II>,
 }
 
-impl<'a, IReactor, IReaction, IInputs, IOutputs> Iterator
-    for ReactionTriggerCtxIter<'a, IReactor, IReaction, IInputs, IOutputs>
+impl<'a, IReactor, IReaction, IO1, IO2, II> Iterator
+    for ReactionTriggerCtxIter<'a, IReactor, IReaction, IO1, IO2, II>
 where
     IReactor: Iterator<Item = &'a mut Reactor>,
     IReaction: Iterator<Item = &'a Reaction>,
-    IInputs: Iterator<Item = &'a [&'a Box<dyn BasePort>]>,
-    IOutputs: Iterator<Item = &'a mut [&'a mut Box<dyn BasePort>]>,
+    IO1: Iterator<Item = II> + Send,
+    IO2: Iterator<Item = II> + Send,
+    II: Iterator<Item = PortKey> + Send,
 {
-    type Item = ReactionTriggerCtx<'a>;
+    type Item = ReactionTriggerCtx<'a, II>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let reactor = self.reactors.next();
@@ -76,6 +86,7 @@ where
     }
 }
 
+#[cfg(feature = "parallel2")]
 impl<'a, IReactor, IReaction, IInputs, IOutputs> rayon::iter::ParallelIterator
     for ReactionTriggerCtxIter<'a, IReactor, IReaction, IInputs, IOutputs>
 where
@@ -107,13 +118,7 @@ impl Env {
     pub(crate) fn iter_reaction_ctx<'a, I>(
         &'a mut self,
         reaction_keys: I,
-    ) -> ReactionTriggerCtxIter<
-        'a,
-        impl Iterator<Item = &'a mut Reactor> + 'a,
-        impl Iterator<Item = &'a Reaction> + 'a,
-        impl Iterator<Item = &'a [&'a Box<dyn BasePort>]> + 'a,
-        impl Iterator<Item = &'a mut [&'a mut Box<dyn BasePort>]> + 'a,
-    >
+    ) -> impl Iterator<Item = ReactionTriggerCtx<'a, impl Iterator<Item = PortKey> + Send + 'a>> + 'a
     where
         I: Iterator<Item = &'a ReactionKey> + Clone + Send + 'a,
     {
@@ -123,11 +128,11 @@ impl Env {
 
         let input_keys = reactions
             .clone()
-            .map(|reaction| reaction.iter_input_ports());
+            .map(|reaction| reaction.iter_input_ports().copied());
 
         let output_keys = reactions
             .clone()
-            .map(|reaction| reaction.iter_output_ports());
+            .map(|reaction| reaction.iter_output_ports().copied());
 
         let reactors = self.reactors.iter_many_unchecked_mut(reactor_keys);
 

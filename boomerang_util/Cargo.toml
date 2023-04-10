@@ -13,10 +13,11 @@ categories = []
 exclude = ['.gitignore', '.cargo/config', '.gitlab-ci.yml']
 
 [dependencies]
-anyhow = "1.0"
 boomerang = { path = "../boomerang" }
-termion = "2.0"
 tracing = "0.1"
+
+[target.'cfg(not(windows))'.dependencies]
+termion = "2.0"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["fmt", "json", "env-filter"] }

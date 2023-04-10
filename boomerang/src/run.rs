@@ -40,9 +40,6 @@ pub fn build_and_test_reactor<R: Reactor>(
 /// Utility method to build and run a given top-level `Reactor`. Common arguments are parsed from
 /// the command line.
 pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow::Result<R> {
-    #[cfg(feature = "profiling")]
-    let _client = tracy_client::Client::start();
-
     // build the reactor
     let mut env_builder = EnvBuilder::new();
     let reactor = R::build(name, state, None, &mut env_builder)

@@ -1,3 +1,4 @@
+#[cfg(not(windows))]
 pub mod keyboard_events;
 
 use boomerang::{builder, reaction, runtime, Reactor};

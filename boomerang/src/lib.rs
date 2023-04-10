@@ -5,7 +5,7 @@
 //! Build and run a Reactor with reactions that respond to startup and shutdown actions:
 //!
 //! ```rust
-//! use boomerang::{builder::{BuilderReactionKey, EnvBuilder}, runtime, Reactor};
+//! use boomerang::{builder::*, runtime, Reactor};
 //!
 //! #[derive(Reactor)]
 //! #[reactor(state = "HelloWorld")]
@@ -34,20 +34,18 @@
 //!     }
 //! }
 //!
-//! fn main() {
-//!     let mut env_builder = EnvBuilder::new();
-//!     let reactor = HelloWorldBuilder::build(
-//!       "hello_world",
-//!       HelloWorld {
+//! let mut env_builder = EnvBuilder::new();
+//! let reactor = HelloWorldBuilder::build(
+//!     "hello_world",
+//!     HelloWorld {
 //!         success: false
-//!       },
-//!       None,
-//!       &mut env_builder
-//!     ).unwrap()
-//!     let env = env_builder.try_into().unwrap();
-//!     let mut sched = runtime::Scheduler::new(env, true, false);
-//!     sched.event_loop();
-//! }
+//!     },
+//!     None,
+//!     &mut env_builder
+//! ).unwrap();
+//! let env = env_builder.try_into().unwrap();
+//! let mut sched = runtime::Scheduler::new(env, true, false);
+//! sched.event_loop();
 //! ```
 //!
 //! # Crate features:

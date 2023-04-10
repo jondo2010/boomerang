@@ -1,25 +1,17 @@
 [package]
 name = 'boomerang_derive'
-version = '0.1.0'
-authors = ['John Hughes <jondo2010@gmail.com>']
-edition = '2021'
-license = 'MIT OR Apache-2.0'
 description = 'Derive macro parsing, analysis and code generation for Boomerang'
-readme = 'README.md'
-keywords = ["actor", "reactor"]
-repository = "https://gitlab.com/jondo2010/boomerang"
-documentation = "https://docs.rs/boomerang_derive"
-categories = []
-exclude = [".gitignore", ".cargo/config", ".gitlab-ci.yml"]
-
-[badges]
-gitlab = { repository = "jondo2010/boomerang", branch = "master" }
-codecov = { repository = "jondo2010/boomerang", branch = "master", service = "gitlab" }
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+keywords.workspace = true
+repository.workspace = true
 
 [dependencies]
 darling = '0.14'
 derive_more = "0.99"
-itertools = "0.10"
+itertools.workspace = true
 parse_duration = "2.1"
 proc-macro2 = '1.0'
 quote = '1.0'

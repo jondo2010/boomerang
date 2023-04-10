@@ -1,3 +1,23 @@
+[workspace.package]
+name = 'boomerang'
+description = 'Rust implementation of the "Reactors" Deterministic Actor Model'
+version = "0.2.0"
+edition = "2021"
+license = 'MIT OR Apache-2.0'
+authors = ["John Hughes <jondo2010@gmail.com>"]
+repository = "https://github.com/jondo2010/boomerang"
+keywords = ["reactors", "actor", "model", "deterministic", "concurrency"]
+categories = []
+readme = "README.md"
+exclude = ['.gitignore', '.cargo/config', '.vscode', '.devcontainer', '.github']
+
+[workspace.dependencies]
+anyhow = "1.0"
+itertools = "0.10"
+thiserror = "1.0"
+tinymap = { path = "boomerang_tinymap" }
+tracing = "0.1"
+
 [workspace]
 members = [
     "boomerang",
@@ -5,3 +25,5 @@ members = [
     "boomerang_runtime",
     "boomerang_tinymap",
 ]
+
+workspace.resolver = 2

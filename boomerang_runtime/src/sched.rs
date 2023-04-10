@@ -72,7 +72,6 @@ impl Scheduler {
     }
 
     /// Execute startup of the Scheduler.
-    #[cfg_attr(feature = "profiling", profiling::function)]
     #[tracing::instrument(skip(self))]
     fn startup(&mut self) {
         self.start_time = Instant::now();
@@ -93,7 +92,6 @@ impl Scheduler {
         self.process_tag(tag, reaction_set);
     }
 
-    #[cfg_attr(feature = "profiling", profiling::function)]
     #[tracing::instrument(skip(self))]
     fn cleanup(&mut self, current_tag: Tag) {
         for reactor in self.env.reactors.values_mut() {
@@ -105,7 +103,7 @@ impl Scheduler {
         }
     }
 
-    #[cfg_attr(feature = "profiling", profiling::function)]
+    #[tracing::instrument(skip(self))]
     fn shutdown(&mut self, shutdown_tag: Tag, _reactions: Option<ReactionSet>) {
         info!(tag = %shutdown_tag, "Shutting down.");
         let reaction_set = self
@@ -158,7 +156,6 @@ impl Scheduler {
         }
     }
 
-    #[cfg_attr(feature = "profiling", profiling::function)]
     #[tracing::instrument(skip(self))]
     pub fn event_loop(&mut self) {
         self.startup();
@@ -202,9 +199,6 @@ impl Scheduler {
                 trace!("No more events in queue. -> Terminate!");
                 break;
             }
-
-            #[cfg(feature = "profiling")]
-            profiling::finish_frame!();
         } // loop
 
         let shutdown_tag = self
@@ -214,7 +208,6 @@ impl Scheduler {
     }
 
     // Wait until the wall-clock time is reached
-    #[cfg_attr(feature = "profiling", profiling::function)]
     #[tracing::instrument(skip(self), fields(target = ?target))]
     fn synchronize_wall_clock(&self, target: Instant) -> Option<ScheduledEvent> {
         let now = Instant::now();
@@ -251,7 +244,6 @@ impl Scheduler {
 
     /// Process the reactions at this tag in increasing order of level.
     /// Reactions at a level N may trigger further reactions at levels M>N
-    #[cfg_attr(feature = "profiling", profiling::function)]
     #[tracing::instrument(skip(self), fields(tag = %tag, reaction_set = ?reaction_set))]
     pub fn process_tag(&mut self, tag: Tag, mut reaction_set: ReactionSet) {
         while let Some((level, reaction_keys)) = reaction_set.next() {

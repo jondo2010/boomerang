@@ -21,7 +21,6 @@ default = ["visualization", "derive", "runner"]
 visualization = []
 derive = ["boomerang_derive"]
 runner = ["clap"]
-profiling = ["boomerang_runtime/profiling", "dep:tracy-client"]
 
 [dependencies]
 anyhow = "1.0"
@@ -51,7 +50,7 @@ rand = "0.8"
 [[bench]]
 name = "ping_pong"
 harness = false
-required-features = ["boomerang_runtime/profiling"]
+required-features = []
 
 [[example]]
 name = "snake"

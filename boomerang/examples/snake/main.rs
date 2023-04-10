@@ -4,6 +4,7 @@
 //!     Author: Clément Fournier
 //!     Git: https://github.com/lf-lang/reactor-rust/examples/src/Snake.lf
 
+#[cfg(not(windows))]
 mod support;
 
 #[cfg(not(windows))]

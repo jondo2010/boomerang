@@ -4,7 +4,7 @@
 /// 0 to 100, 300, 600, and 1000 msec.
 use boomerang::{
     builder::{BuilderReactionKey, TypedActionKey},
-    run, runtime, Reactor,
+    runtime, Reactor,
 };
 use boomerang_util::{Timeout, TimeoutBuilder};
 use runtime::Duration;
@@ -84,7 +84,7 @@ impl SlowingClock {
 #[test]
 fn slowing_clock() {
     tracing_subscriber::fmt::init();
-    let _ = run::build_and_test_reactor::<SlowingClockBuilder>(
+    let _ = boomerang_util::run::build_and_test_reactor::<SlowingClockBuilder>(
         "slowing_clock",
         SlowingClock::new(),
         true,

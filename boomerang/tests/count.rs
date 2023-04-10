@@ -1,4 +1,4 @@
-use boomerang::{builder::*, run, runtime, Reactor};
+use boomerang::{builder::*, runtime, Reactor};
 use boomerang_util::{Timeout, TimeoutBuilder};
 
 #[derive(Reactor)]
@@ -31,5 +31,7 @@ impl Count {
 #[test]
 fn count() {
     tracing_subscriber::fmt::init();
-    let _ = run::build_and_test_reactor::<CountBuilder>("count", Count(0), true, false).unwrap();
+    let _ =
+        boomerang_util::run::build_and_test_reactor::<CountBuilder>("count", Count(0), true, false)
+            .unwrap();
 }

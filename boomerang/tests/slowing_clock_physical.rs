@@ -6,7 +6,7 @@
 
 use boomerang::{
     builder::{BuilderReactionKey, Physical, TypedActionKey},
-    run, runtime, Reactor,
+    runtime, Reactor,
 };
 use boomerang_util::{Timeout, TimeoutBuilder};
 use tracing::info;
@@ -81,7 +81,7 @@ impl SlowingClockPhysical {
 #[test]
 fn slowing_clock_physical() {
     tracing_subscriber::fmt::init();
-    let _ = run::build_and_test_reactor::<SlowingClockPhysicalBuilder>(
+    let _ = boomerang_util::run::build_and_test_reactor::<SlowingClockPhysicalBuilder>(
         "slowing_clock_physical",
         SlowingClockPhysical {
             interval: runtime::Duration::from_millis(100),

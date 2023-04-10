@@ -2,7 +2,7 @@
 
 use boomerang::{
     builder::{BuilderReactionKey, TypedActionKey},
-    run, runtime, Reactor,
+    runtime, Reactor,
 };
 
 #[derive(Reactor)]
@@ -75,7 +75,7 @@ impl ActionValues {
 #[test]
 fn action_values() {
     tracing_subscriber::fmt::init();
-    let _ = run::build_and_test_reactor::<ActionValuesBuilder>(
+    let _ = boomerang_util::run::build_and_test_reactor::<ActionValuesBuilder>(
         "action_values",
         ActionValues {
             r1done: false,

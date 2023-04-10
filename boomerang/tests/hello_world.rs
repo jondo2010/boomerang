@@ -1,4 +1,4 @@
-use boomerang::{builder::BuilderReactionKey, run, runtime, Reactor};
+use boomerang::{builder::BuilderReactionKey, runtime, Reactor};
 
 #[derive(Reactor)]
 #[reactor(state = "HelloWorld2")]
@@ -35,6 +35,11 @@ struct HelloWorldBuilder {
 #[test]
 fn hello_world() {
     tracing_subscriber::fmt::init();
-    let _ =
-        run::build_and_test_reactor::<HelloWorldBuilder>("hello_world", (), true, false).unwrap();
+    let _ = boomerang_util::run::build_and_test_reactor::<HelloWorldBuilder>(
+        "hello_world",
+        (),
+        true,
+        false,
+    )
+    .unwrap();
 }

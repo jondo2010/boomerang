@@ -1,3 +1,6 @@
+//! Methods for constructing Graphviz graphs representing the `EnvBuilder` useful for debugging and
+//! understand the Reactor graph.
+
 use super::{ActionType, BuilderError, BuilderPortKey, EnvBuilder, PortType, ReactorBuilder};
 
 use itertools::Itertools;

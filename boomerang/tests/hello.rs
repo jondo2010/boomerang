@@ -142,5 +142,6 @@ struct MainBuilder {
 #[test]
 fn hello() {
     tracing_subscriber::fmt::init();
-    let _ = run::build_and_test_reactor::<MainBuilder>("hello", (), true, false).unwrap();
+    let _ = boomerang_util::run::build_and_test_reactor::<MainBuilder>("hello", (), true, false)
+        .unwrap();
 }

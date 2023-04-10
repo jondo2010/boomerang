@@ -27,8 +27,8 @@ thiserror.workspace = true
 tinymap.workspace = true
 tracing.workspace = true
 
-boomerang_derive = { path = "../boomerang_derive", optional = true }
-boomerang_runtime = { path = "../boomerang_runtime" }
+boomerang_derive = { workspace = true, optional = true }
+boomerang_runtime.workspace = true
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = [

@@ -1,4 +1,4 @@
-# Tinymap
+# Boomerang-Tinymap
 
 A tiny, fast, and simple Slotkey-type map implementation for `Boomerang`.
 

@@ -1,16 +1,11 @@
 [package]
 name = 'boomerang_util'
-description = 'Rust implementation of "Reactors" Deterministic Actor Model'
-version = '0.2.0'
-authors = ['John Hughes <jondo2010@gmail.com>']
-edition = '2021'
-license = 'MIT OR Apache-2.0'
-readme = 'README.md'
-keywords = ['actor', 'reactor']
-repository = 'https://gitlab.com/jondo2010/boomerang'
-documentation = 'https://docs.rs/boomerang'
-categories = []
-exclude = ['.gitignore', '.cargo/config', '.gitlab-ci.yml']
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
 
 [features]
 default = ["keyboard", "runner"]

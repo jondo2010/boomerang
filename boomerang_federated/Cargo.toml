@@ -1,0 +1,10 @@
+[package]
+name = "boomerang_federated"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+canary = { git = "https://github.com/znx3p0/canary", version = "0.3.3" }
+
+[dev-dependencies]
+tokio-test = "0.4.2"

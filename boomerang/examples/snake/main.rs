@@ -205,3 +205,6 @@ fn main() {
     )
     .unwrap();
 }
+
+#[cfg(windows)]
+fn main() {}

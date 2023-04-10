@@ -1,6 +1,6 @@
 use boomerang::{
     builder::{BuilderReactionKey, TypedActionKey, TypedPortKey},
-    run, runtime, Reactor,
+    runtime, Reactor,
 };
 
 #[derive(Reactor)]
@@ -104,6 +104,11 @@ struct DeterminismBuilder {
 #[test]
 fn determinism() {
     tracing_subscriber::fmt::init();
-    let _ =
-        run::build_and_test_reactor::<DeterminismBuilder>("determinism", (), true, false).unwrap();
+    let _ = boomerang_util::run::build_and_test_reactor::<DeterminismBuilder>(
+        "determinism",
+        (),
+        true,
+        false,
+    )
+    .unwrap();
 }

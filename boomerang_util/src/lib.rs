@@ -1,5 +1,8 @@
-#[cfg(not(windows))]
+#[cfg(all(feature = "keyboard", not(windows)))]
 pub mod keyboard_events;
+
+#[cfg(feature = "runner")]
+pub mod run;
 
 use boomerang::{builder, reaction, runtime, Reactor};
 

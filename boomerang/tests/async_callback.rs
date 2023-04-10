@@ -2,7 +2,7 @@
 
 use boomerang::{
     builder::{BuilderReactionKey, Physical, TypedActionKey},
-    run, runtime, Reactor,
+    runtime, Reactor,
 };
 use boomerang_util::{Timeout, TimeoutBuilder};
 use std::thread::JoinHandle;
@@ -95,7 +95,7 @@ impl AsyncCallback {
 #[test]
 fn async_callback() {
     tracing_subscriber::fmt::init();
-    let _ = run::build_and_test_reactor::<AsyncCallbackBuilder>(
+    let _ = boomerang_util::run::build_and_test_reactor::<AsyncCallbackBuilder>(
         "async_callback",
         AsyncCallback {
             thread: None,

@@ -1,20 +1,12 @@
 [package]
-name = 'boomerang_runtime'
+name = "boomerang_runtime"
 description = 'Rust implementation of "Reactors" Deterministic Actor Model'
-version = '0.1.0'
-authors = ['John Hughes <jondo2010@gmail.com>']
-edition = '2021'
-license = 'MIT OR Apache-2.0'
-readme = 'README.md'
-keywords = ['actor', 'reactor']
-repository = 'https://gitlab.com/jondo2010/boomerang'
-documentation = 'https://docs.rs/boomerang'
-categories = []
-exclude = ['.gitignore', '.cargo/config', '.gitlab-ci.yml']
-
-[badges]
-gitlab = { repository = 'jondo2010/boomerang', branch = 'master' }
-codecov = { repository = 'jondo2010/boomerang', branch = 'master', service = 'gitlab' }
+readme = "README.md"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [features]
 default = ["parallel"]
@@ -26,9 +18,8 @@ crossbeam-utils = "0.8"
 derivative = "2.2"
 derive_more = '0.99'
 downcast-rs = "1.2"
-itertools = "*"
+itertools.workspace = true
 rayon = { version = "1.7", optional = true }
-slotmap = { version = "1.0", features = ["unstable"] }
-thiserror = "1.0"
-tinymap = { path = "../boomerang_tinymap" }
-tracing = "0.1"
+thiserror.workspace = true
+tinymap.workspace = true
+tracing.workspace = true

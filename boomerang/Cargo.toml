@@ -37,13 +37,15 @@ tinymap = { path = "../boomerang_tinymap" }
 tracing = "0.1"
 
 clap = { version = "4.1", features = ["derive"], optional = true }
-tracy-client = { version = "0.14.2", optional = true }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["fmt", "json", "env-filter"] }
 criterion = "0.4"
 boomerang_util = { path = "../boomerang_util" }
 crossbeam-utils = "0.8"
+
+# Deps for Snake example
+[target.'cfg(not(windows))'.dev-dependencies]
 termcolor = "1.2"
 rand = "0.8"
 

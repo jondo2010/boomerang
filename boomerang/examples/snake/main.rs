@@ -1,8 +1,14 @@
+#![cfg(not(windows))]
+
 //! A snake terminal game. Does not support windows.
 //!
 //! Original source:
 //!     Author: Clément Fournier
 //!     Git: https://github.com/lf-lang/reactor-rust/examples/src/Snake.lf
+
+// Panic on windows, since we don't support that platform
+#[cfg(windows)]
+compile_error!("This example does not support Windows");
 
 use boomerang::{
     builder::{BuilderReactionKey, TypedActionKey},

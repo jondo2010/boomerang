@@ -2,7 +2,7 @@
 
 use boomerang::{
     builder::{BuilderReactionKey, TypedActionKey, TypedPortKey},
-    run, runtime, Reactor,
+    runtime, Reactor,
 };
 
 // Test data transport across hierarchy.
@@ -125,5 +125,11 @@ struct HierarchyBuilder {
 #[test]
 fn hierarchy() {
     tracing_subscriber::fmt::init();
-    let _ = run::build_and_test_reactor::<HierarchyBuilder>("hierarchy", (), true, false).unwrap();
+    let _ = boomerang_util::run::build_and_test_reactor::<HierarchyBuilder>(
+        "hierarchy",
+        (),
+        true,
+        false,
+    )
+    .unwrap();
 }

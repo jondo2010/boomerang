@@ -1,6 +1,6 @@
 use boomerang::{
     builder::{BuilderReactionKey, TypedActionKey, TypedPortKey},
-    run, runtime, Reactor,
+    runtime, Reactor,
 };
 
 /// Test logical action with delay.
@@ -127,6 +127,11 @@ struct ActionDelayBuilder {
 #[test]
 fn action_delay() {
     tracing_subscriber::fmt::init();
-    let _ =
-        run::build_and_test_reactor::<ActionDelayBuilder>("action_delay", (), true, false).unwrap();
+    let _ = boomerang_util::run::build_and_test_reactor::<ActionDelayBuilder>(
+        "action_delay",
+        (),
+        true,
+        false,
+    )
+    .unwrap();
 }

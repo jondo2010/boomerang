@@ -1,23 +1,27 @@
 [package]
 name = 'boomerang_util'
-description = 'Rust implementation of "Reactors" Deterministic Actor Model'
-version = '0.2.0'
-authors = ['John Hughes <jondo2010@gmail.com>']
-edition = '2021'
-license = 'MIT OR Apache-2.0'
-readme = 'README.md'
-keywords = ['actor', 'reactor']
-repository = 'https://gitlab.com/jondo2010/boomerang'
-documentation = 'https://docs.rs/boomerang'
-categories = []
-exclude = ['.gitignore', '.cargo/config', '.gitlab-ci.yml']
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+
+[features]
+default = ["keyboard", "runner"]
+# Support for keyboard input
+keyboard = ["termion"]
+# Support for built-in CLI/runner methods
+runner = ["clap", "anyhow"]
 
 [dependencies]
 boomerang = { path = "../boomerang" }
 tracing = "0.1"
+clap = { version = "4.2", features = ["derive"], optional = true }
+anyhow = { version = "1.0", optional = true }
 
 [target.'cfg(not(windows))'.dependencies]
-termion = "2.0"
+termion = {version = "2.0", optional = true}
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["fmt", "json", "env-filter"] }

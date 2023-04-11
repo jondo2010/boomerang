@@ -1,3 +1,59 @@
+//! Boomerang is a framework for building and executing stateful, deterministic Reactors.
+//!
+//! ## Example
+//!
+//! Build and run a Reactor with reactions that respond to startup and shutdown actions:
+//!
+//! ```rust
+//! use boomerang::{builder::*, runtime, Reactor};
+//!
+//! #[derive(Reactor)]
+//! #[reactor(state = "HelloWorld")]
+//! struct HelloWorldBuilder {
+//!     #[reactor(reaction(function = "HelloWorld::reaction_startup"))]
+//!     reaction_startup: BuilderReactionKey,
+//!     #[reactor(reaction(function = "HelloWorld::reaction_shutdown"))]
+//!     reaction_shutdown: BuilderReactionKey,
+//! }
+//!
+//! struct HelloWorld {
+//!     success: bool,
+//! }
+//!
+//! impl HelloWorld {
+//!     #[boomerang::reaction(reactor = "HelloWorldBuilder", triggers(startup))]
+//!     fn reaction_startup(&mut self, _ctx: &runtime::Context) {
+//!         println!("Hello World.");
+//!         self.success = true;
+//!     }
+//!
+//!     #[boomerang::reaction(reactor = "HelloWorldBuilder", triggers(shutdown))]
+//!     fn reaction_shutdown(&mut self, _ctx: &runtime::Context) {
+//!         println!("Shutdown invoked.");
+//!         assert!(self.success, "ERROR: startup reaction not executed.");
+//!     }
+//! }
+//!
+//! let mut env_builder = EnvBuilder::new();
+//! let reactor = HelloWorldBuilder::build(
+//!     "hello_world",
+//!     HelloWorld {
+//!         success: false
+//!     },
+//!     None,
+//!     &mut env_builder
+//! ).unwrap();
+//! let env = env_builder.try_into().unwrap();
+//! let mut sched = runtime::Scheduler::new(env, true, false);
+//! sched.event_loop();
+//! ```
+//!
+//! # Crate features:
+//! * **visualization** -
+//!   Defaults on. Enables the debug Graphviz functions in [`builder::graphviz`].
+//! * **derive** -
+//!   Defaults on. Enables the derive macros in [`boomerang_derive`].
+
 #[macro_use]
 extern crate derivative;
 

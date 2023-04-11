@@ -3,7 +3,7 @@
 
 use boomerang::{
     builder::{BuilderReactionKey, TypedPortKey},
-    run, runtime, Reactor,
+    runtime, Reactor,
 };
 
 #[derive(Reactor)]
@@ -81,5 +81,6 @@ struct CycleBuilder {
 #[test]
 fn cycle() {
     tracing_subscriber::fmt::init();
-    let _ = run::build_and_test_reactor::<CycleBuilder>("cycle", (), true, false).unwrap();
+    let _ = boomerang_util::run::build_and_test_reactor::<CycleBuilder>("cycle", (), true, false)
+        .unwrap();
 }

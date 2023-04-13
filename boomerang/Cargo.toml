@@ -31,13 +31,11 @@ boomerang_derive = { workspace = true, optional = true }
 boomerang_runtime.workspace = true
 
 [dev-dependencies]
-tracing-subscriber = { version = "0.3", features = [
-    "fmt",
-    "json",
-    "env-filter",
-] }
 criterion = "0.4"
 crossbeam-utils = "0.8"
+env_logger.workspace = true
+test-log.workspace = true
+tracing-subscriber = { workspace = true, features = [ "fmt", "json", "env-filter", ] }
 
 boomerang_util = { path = "../boomerang_util", features = ["runner"] }
 

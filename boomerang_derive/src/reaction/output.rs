@@ -145,25 +145,25 @@ impl ReactionReceiver {
                 ArgumentAttr::Port {
                     attrs: PortAttrs::Triggers,
                     ..
-                } => Some(quote! { .with_trigger_port::<#ty>(reactor.#expr, 0) }),
+                } => Some(quote! { .with_trigger_port::<#ty>(reactor.#expr.clone(), 0) }),
                 ArgumentAttr::Port {
                     attrs: PortAttrs::Effects,
                     ..
-                } => Some(quote! { .with_antidependency::<#ty>(reactor.#expr, 0) }),
+                } => Some(quote! { .with_antidependency::<#ty>(reactor.#expr.clone(), 0) }),
                 ArgumentAttr::Action {
                     attrs: ActionAttrs::Triggers,
                     ..
-                } => Some(quote! { .with_trigger_action::<#ty, _>(reactor.#expr, 0) }),
+                } => Some(quote! { .with_trigger_action::<#ty, _>(reactor.#expr.clone(), 0) }),
                 ArgumentAttr::Action {
                     attrs: ActionAttrs::Effects,
                     ..
-                } => Some(quote! { .with_schedulable_action::<#ty, _>(reactor.#expr, 0) }),
+                } => Some(quote! { .with_schedulable_action::<#ty, _>(reactor.#expr.clone(), 0) }),
                 ArgumentAttr::Action {
                     attrs: ActionAttrs::TriggersAndEffects,
                     ..
                 } => Some(quote! {
-                    .with_trigger_action::<#ty, _>(reactor.#expr, 0)
-                    .with_schedulable_action::<#ty, _>(reactor.#expr, 0)
+                    .with_trigger_action::<#ty, _>(reactor.#expr.clone(), 0)
+                    .with_schedulable_action::<#ty, _>(reactor.#expr.clone(), 0)
                 }),
                 _ => None,
             }

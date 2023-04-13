@@ -73,7 +73,7 @@ fn build_bindings<'b>(
     receiver.connections.iter().map(move |connection| {
         let from_port = &connection.from;
         let to_port = &connection.to;
-        quote! { #builder_ident.bind_port(#from_port, #to_port)?; }
+        quote! { #builder_ident.bind_port(#from_port.clone(), #to_port.clone())?; }
     })
 }
 

@@ -58,9 +58,9 @@ impl Display for FederateId {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tag {
-    /// The timestamp.
-    pub timestamp: u64,
-    /// The microstep.
+    /// Offset from origin of logical time
+    pub timestamp: Timestamp,
+    /// Superdense timestep.
     pub microstep: u32,
 }
 

@@ -54,35 +54,3 @@ impl Tag {
         self.offset
     }
 }
-
-#[derive(Debug, Display, PartialEq, Eq, PartialOrd, Ord, Clone)]
-#[display(fmt = "[{:?}+{}]", "time_point.elapsed()", micro_step)]
-pub struct LogicalTime {
-    time_point: Instant,
-    micro_step: usize,
-}
-
-impl Default for LogicalTime {
-    fn default() -> Self {
-        Self {
-            time_point: Instant::now(),
-            micro_step: 0,
-        }
-    }
-}
-
-impl LogicalTime {
-    pub fn get_time_point(&self) -> Instant {
-        self.time_point
-    }
-
-    pub fn get_micro_step(&self) -> usize {
-        self.micro_step
-    }
-
-    pub fn advance_to(&mut self, tag: &Tag) {
-        // assert!((self as &Self) < &tag.0);
-        // self.time_point = tag.offset;
-        self.micro_step = tag.micro_step;
-    }
-}

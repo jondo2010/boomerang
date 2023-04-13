@@ -53,6 +53,11 @@ pub struct Synchronizer {
 impl Synchronizer {
     /// Negotiate the start time from the Rti side.
     pub async fn negotiate_start_time(self) -> Timestamp {
+        tracing::debug!(
+            "Waiting for start time proposals from {} federates..",
+            self.num_federates
+        );
+
         // Receive `num_federates` start time proposals.
         let proposals = ReceiverStream::new(self.start_time_proposals)
             .take(self.num_federates)

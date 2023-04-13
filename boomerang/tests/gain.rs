@@ -81,9 +81,8 @@ impl Gain {
     }
 }
 
-#[test]
+#[test_log::test]
 fn gain() {
-    tracing_subscriber::fmt::init();
     let _ = boomerang_util::run::build_and_test_reactor::<GainBuilder>("gain", Gain, true, false)
         .unwrap();
 }

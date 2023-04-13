@@ -15,9 +15,9 @@ tokio-util = { version = "*", features = ["codec"] }
 tracing.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
-test-log = { version = "0.2", features = ["trace"] }
+test-log.workspace = true
 
 [dev-dependencies]
 tokio-test = "0.4"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-env_logger = "0.10"
+tracing-subscriber.workspace = true
+env_logger.workspace = true

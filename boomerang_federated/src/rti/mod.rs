@@ -84,9 +84,9 @@ pub struct Rti {
 }
 
 pub struct RtiHandles {
-    start_time_handle: JoinHandle<Timestamp>,
-    federate_handles: Vec<JoinHandle<()>>,
-    listener_handle: JoinHandle<()>,
+    pub(crate) start_time: Timestamp,
+    pub(crate) federate_handles: Vec<JoinHandle<()>>,
+    pub(crate) listener_handle: JoinHandle<()>,
 }
 
 impl Rti {
@@ -152,14 +152,10 @@ impl Rti {
         let (start_time_sync, synchronizer) = start_time_sync::create(self.number_of_federates);
         let start_time_handle = tokio::spawn(synchronizer.negotiate_start_time());
 
-        // Create a thread to communicate with the federate.
-        // This has to be done after clock synchronization is finished
-        // or that thread may end up attempting to handle incoming clock
-        // synchronization messages.
-
         let federate_handles = rx_map
             .into_iter()
             .map(|(federate_id, (frame, rx, neighbors, clock_sync))| {
+                // Create a tasks to communicate with the federates.
                 tokio::spawn(
                     Federate::new(
                         federate_id,
@@ -180,8 +176,13 @@ impl Rti {
         // Any additional connections are errors. Respond to them in a separate task.
         let listener_handle = tokio::spawn(erroneous_connections(listener));
 
+        let start_time = start_time_handle.await.map_err(|err| {
+            tracing::error!("RTI failed to negotiate start time: {}", err);
+            Error::Other(err.into())
+        })?;
+
         Ok(RtiHandles {
-            start_time_handle,
+            start_time,
             federate_handles,
             listener_handle,
         })

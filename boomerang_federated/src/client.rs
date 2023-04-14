@@ -1,19 +1,41 @@
 //! This module implements the federate state machine client for a connection to the RTI.
 
-use std::{net::SocketAddr, time};
+use std::{
+    net::SocketAddr,
+    time::{self, Duration},
+};
 
+use boomerang_core::keys::PortKey;
 use futures::{SinkExt, StreamExt};
+use serde::Serialize;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpStream,
     sync::mpsc,
 };
-use tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream};
+
 use tokio_util::codec::Framed;
 
-use crate::{
-    bincodec, Error, FedIds, FederateId, NeighborStructure, RejectReason, RtiMsg, Timestamp,
-};
+use crate::{bincodec, FedIds, FederateKey, NeighborStructure, RejectReason, RtiMsg, Timestamp};
+
+/// The error type for the client.
+#[derive(Debug, thiserror::Error)]
+pub enum ClientError {
+    #[error("Received an unexpected message from the RTI: {0:?}")]
+    UnexpectedMessage(RtiMsg),
+
+    #[error("The RTI rejected the federate: {0:?}")]
+    Rejected(RejectReason),
+
+    #[error("The RTI unexpectedly closed the connection")]
+    UnexpectedClose,
+
+    #[error("Serialization error")]
+    Codec(#[from] bincode::Error),
+
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
 
 /// Configuration for a federate client
 #[derive(Debug)]
@@ -23,10 +45,10 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn new(federate_id: FederateId, federation_id: &str, neighbors: NeighborStructure) -> Self {
+    pub fn new(federate: FederateKey, federation_id: &str, neighbors: NeighborStructure) -> Self {
         Config {
             fed_ids: FedIds {
-                federate_id,
+                federate,
                 federation_id: federation_id.to_owned(),
             },
             neighbors,
@@ -39,19 +61,46 @@ pub struct Client {
     sender: mpsc::UnboundedSender<RtiMsg>,
     handle: tokio::task::JoinHandle<()>,
 }
+
 impl Client {
-    /// Send the specified timestamped message to the specified port in the specified federate via the RTI or directly to a federate depending on the given socket. The timestamp is calculated as current_logical_time + additional delay which is greater than or equal to zero.  The port should be an input port of a reactor in the destination federate. This version does include the timestamp in the message.
+    /// Send the specified timestamped message to the specified port in the specified federate via
+    /// the RTI or directly to a federate depending on the given socket. The timestamp is calculated
+    /// as current_logical_time + additional delay which is greater than or equal to zero.
+    ///
+    /// The port should be an input port of a reactor in the destination federate.
     #[tracing::instrument(level = "debug", skip(self))]
-    pub fn send_timed_message(&self) {}
+    pub fn send_timed_message<T>(
+        &self,
+        federate: FederateKey,
+        port: PortKey,
+        delay: Option<Duration>,
+        message: T,
+    ) -> Result<(), ClientError>
+    where
+        T: std::fmt::Debug + Serialize,
+    {
+        if self.handle.is_finished() {
+            panic!("Federate has already shut down.");
+        }
+
+        // Apply the additional delay to the current tag and use that as the intended tag of the outgoing message
+        //tag_t current_message_intended_tag = _lf_delay_tag(lf_tag(), additional_delay);
+
+        //self.sender.send(RtiMsg::TaggedMessage((), ()));
+
+        Ok(())
+    }
 }
 
-#[tracing::instrument]
 /// Connect to an RTI and perform initial handshaking.
-pub async fn connect_to_rti(addr: SocketAddr, config: Config) -> Result<Client, Error> {
+#[tracing::instrument]
+pub async fn connect_to_rti(addr: SocketAddr, config: Config) -> Result<Client, ClientError> {
     tracing::info!("Connecting to RTI..");
+
     let client = TcpStream::connect(&addr)
         .await
-        .map_err(|err| Error::Other(err.into()))?;
+        .map_err(|err| ClientError::Other(err.into()))?;
+
     let mut frame = Framed::new(client, bincodec::create::<RtiMsg>());
 
     // Have connected to an RTI, but not sure it's the right RTI.
@@ -70,29 +119,35 @@ pub async fn connect_to_rti(addr: SocketAddr, config: Config) -> Result<Client, 
         frame
             .send(RtiMsg::FedIds(config.fed_ids))
             .await
-            .map_err(|err| Error::Other(err.into()))?;
+            .map_err(ClientError::from)?;
     }
 
     tracing::debug!("Waiting for response to federation ID from the RTI.");
 
-    match frame.next().await.ok_or(Error::HangUp)? {
-        Ok(RtiMsg::Reject(reason)) => {
+    let msg = frame
+        .next()
+        .await
+        .ok_or(ClientError::UnexpectedClose)?
+        .map_err(ClientError::from)?;
+
+    match msg {
+        RtiMsg::Reject(reason) => {
             tracing::error!("RTI rejected federate: {reason:?}");
-            Err(Error::Reject(reason))
+            Err(ClientError::Rejected(reason))
         }
-        Ok(RtiMsg::Ack) => {
+        RtiMsg::Ack => {
             tracing::debug!("Received acknowledgment from the RTI.");
             // Send neighbor information to the RTI.
             frame
                 .send(RtiMsg::NeighborStructure(config.neighbors))
                 .await
-                .map_err(|err| Error::Other(err.into()))?;
+                .map_err(ClientError::from)?;
 
             //TODO clock sync / UDP port
             frame
                 .send(RtiMsg::UdpPort(crate::ClockSyncStat::Off))
                 .await
-                .map_err(|err| Error::Other(err.into()))?;
+                .map_err(ClientError::from)?;
 
             let timestamp = get_start_time_from_rti(&mut frame).await?;
             tracing::debug!("Received start time from RTI: {timestamp:?}");
@@ -113,13 +168,9 @@ pub async fn connect_to_rti(addr: SocketAddr, config: Config) -> Result<Client, 
                 handle,
             })
         }
-        Ok(msg) => {
+        _ => {
             tracing::error!("RTI sent an unexpected message: {msg:?}");
-            Err(Error::Reject(RejectReason::UnexpectedMessage))
-        }
-        Err(err) => {
-            tracing::error!("Error in message from RTI: {err:?}");
-            Err(Error::Other(err.into()))
+            Err(ClientError::UnexpectedMessage(msg))
         }
     }
 }
@@ -127,30 +178,27 @@ pub async fn connect_to_rti(addr: SocketAddr, config: Config) -> Result<Client, 
 #[tracing::instrument(level = "debug", skip(frame))]
 async fn get_start_time_from_rti<T>(
     frame: &mut Framed<T, bincodec::BinCodec<RtiMsg, bincode::DefaultOptions>>,
-) -> Result<Timestamp, Error>
+) -> Result<Timestamp, ClientError>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
+    // Send a `Timestamp` message and wait for a reply.
     frame
         .send(RtiMsg::Timestamp(Timestamp::now()))
         .await
-        .map_err(|err| Error::Other(err.into()))?;
+        .map_err(ClientError::from)?;
 
-    let msg = match frame.next().await {
-        Some(Ok(msg)) => Ok(msg),
-        _ => {
-            tracing::warn!("RTI did not receive a message from federate.");
-            Err(RejectReason::UnexpectedMessage)
-        }
-    }?;
+    let msg = frame
+        .next()
+        .await
+        .ok_or(ClientError::UnexpectedClose)?
+        .map_err(ClientError::from)?;
 
     match msg {
         RtiMsg::Timestamp(start_time) => Ok(start_time),
         _ => {
             tracing::warn!("RTI did not return a timestamp.");
-            Err(Error::Other(anyhow::anyhow!(
-                "RTI did not return a timestamp."
-            )))
+            Err(ClientError::UnexpectedMessage(msg))
         }
     }
 }

@@ -4,7 +4,7 @@
 //! An action, like a port (see [`crate::builder::PortBuilder`]), can carry data, but unlike a port,
 //! an action is visible only within the reactor that defines it.
 
-use std::{fmt::Debug, marker::PhantomData};
+use std::{fmt::Debug, marker::PhantomData, time::Duration};
 
 use crate::runtime;
 use slotmap::SecondaryMap;
@@ -46,22 +46,15 @@ impl<T: runtime::PortData, Q> runtime::InnerType for TypedActionKey<T, Q> {
 
 #[derive(Debug)]
 pub enum ActionType {
-    Timer {
-        period: runtime::Duration,
-        offset: runtime::Duration,
-    },
-    Logical {
-        min_delay: Option<runtime::Duration>,
-    },
-    Physical {
-        min_delay: Option<runtime::Duration>,
-    },
+    Timer { period: Duration, offset: Duration },
+    Logical { min_delay: Option<Duration> },
+    Physical { min_delay: Option<Duration> },
     Startup,
     Shutdown,
 }
 
-pub trait ActionBuilderFn: Fn(&str, runtime::ActionKey) -> runtime::Action {}
-impl<F> ActionBuilderFn for F where F: Fn(&str, runtime::ActionKey) -> runtime::Action {}
+pub trait ActionBuilderFn: Fn(&str, runtime::keys::ActionKey) -> runtime::Action {}
+impl<F> ActionBuilderFn for F where F: Fn(&str, runtime::keys::ActionKey) -> runtime::Action {}
 
 impl Debug for Box<dyn ActionBuilderFn> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -103,7 +96,7 @@ impl ActionBuilder {
     }
 
     /// Build the `ActionBuilder` into a [`runtime::InternalAction`]
-    pub fn build_runtime(&self, action_key: runtime::ActionKey) -> runtime::Action {
+    pub fn build_runtime(&self, action_key: runtime::keys::ActionKey) -> runtime::Action {
         (self.action_builder_fn)(&self.name, action_key)
     }
 }

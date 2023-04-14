@@ -10,7 +10,7 @@ use tokio::{
 use tokio_util::codec::Framed;
 
 use crate::{
-    bincodec, ClockSyncStat, Error, FederateId, NeighborStructure, RejectReason, RtiMsg, Tag,
+    bincodec, ClockSyncStat, Error, FederateKey, NeighborStructure, RejectReason, RtiMsg, Tag,
     Timestamp,
 };
 
@@ -25,7 +25,7 @@ pub enum ExecutionMode {
 }
 
 type InitialMap = tinymap::TinySecondaryMap<
-    FederateId,
+    FederateKey,
     (
         Framed<TcpStream, bincodec::BinCodec<RtiMsg, bincode::DefaultOptions>>,
         NeighborStructure,
@@ -135,8 +135,8 @@ impl Rti {
 
         // For each federate, create a channel to send `RtiMsg` to it.
         let (tx_map, rx_map): (
-            tinymap::TinySecondaryMap<FederateId, _>,
-            tinymap::TinySecondaryMap<FederateId, _>,
+            tinymap::TinySecondaryMap<FederateKey, _>,
+            tinymap::TinySecondaryMap<FederateKey, _>,
         ) = initial
             .into_iter()
             .map(|(federate_id, (frame, neighbors, clock_sync))| {
@@ -249,10 +249,10 @@ async fn initialize_federates(
 async fn connect_to_federates<T>(
     federation_id: &str,
     number_of_federates: usize,
-    seen_federate_ids: impl Iterator<Item = FederateId>,
+    seen_federate_ids: impl Iterator<Item = FederateKey>,
     clock_sync_global_status: ClockSyncStat,
     frame: &mut Framed<T, bincodec::BinCodec<RtiMsg, bincode::DefaultOptions>>,
-) -> Result<(FederateId, NeighborStructure, ClockSyncStat), Error>
+) -> Result<(FederateKey, NeighborStructure, ClockSyncStat), Error>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
@@ -276,9 +276,9 @@ where
 async fn check_fed_ids<T>(
     federation_id: &str,
     number_of_federates: usize,
-    mut seen_federate_ids: impl Iterator<Item = FederateId>,
+    mut seen_federate_ids: impl Iterator<Item = FederateKey>,
     frame: &mut Framed<T, bincodec::BinCodec<RtiMsg, bincode::DefaultOptions>>,
-) -> Result<FederateId, RejectReason>
+) -> Result<FederateKey, RejectReason>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
@@ -303,19 +303,19 @@ where
                             federation_id
                         );
                 Err(RejectReason::FederationIdDoesNotMatch)
-            } else if fed_ids.federate_id.index() >= number_of_federates {
+            } else if fed_ids.federate.index() >= number_of_federates {
                 // Federate ID is out of range.
-                tracing::error!(%fed_ids.federate_id, "RTI received federate ID out of range.");
-                Err(RejectReason::FederateIdOutOfRange)
+                tracing::error!(?fed_ids.federate, "RTI received federate ID out of range.");
+                Err(RejectReason::FederateKeyOutOfRange)
             } else if seen_federate_ids
-                .find(|&seen_federate_id| seen_federate_id == fed_ids.federate_id)
+                .find(|&seen_federate_id| seen_federate_id == fed_ids.federate)
                 .is_some()
             {
                 // Federate ID has already been seen.
-                tracing::error!(%fed_ids.federate_id, "RTI received duplicate federate ID.");
-                Err(RejectReason::FederateIdInUse)
+                tracing::error!(?fed_ids.federate, "RTI received duplicate federate ID.");
+                Err(RejectReason::FederateKeyInUse)
             } else {
-                Ok(fed_ids.federate_id)
+                Ok(fed_ids.federate)
             }
         }
         RtiMsg::P2PSendingFedId(..) | RtiMsg::P2PTaggedMessage(..) => {

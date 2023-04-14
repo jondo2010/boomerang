@@ -1,8 +1,11 @@
+use std::time::Duration;
+
 use crossbeam_channel::Sender;
 
 use crate::{
-    ActionData, ActionKey, ActionRefValue, Duration, Instant, Level, LevelReactionKey,
-    PhysicalActionRef, ReactionKey, ReactionSet, ScheduledEvent, Tag,
+    keys::{ActionKey, ReactionKey},
+    ActionData, ActionRefValue, Level, LevelReactionKey, PhysicalActionRef, ReactionSet,
+    ScheduledEvent, Tag, Timestamp,
 };
 
 /// Internal state for a context object
@@ -20,7 +23,7 @@ pub(crate) struct ContextInternal {
 #[derive(Debug)]
 pub struct Context<'a> {
     /// Physical time the Scheduler was started
-    pub(crate) start_time: Instant,
+    pub(crate) start_time: Timestamp,
     /// Logical time of the currently executing epoch
     pub(crate) tag: Tag,
     /// Internal state
@@ -31,7 +34,7 @@ pub struct Context<'a> {
 
 impl<'a> Context<'a> {
     pub(crate) fn new(
-        start_time: Instant,
+        start_time: Timestamp,
         tag: Tag,
         action_triggers: &'a tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
         async_tx: Sender<ScheduledEvent>,
@@ -48,7 +51,7 @@ impl<'a> Context<'a> {
         }
     }
 
-    pub fn get_start_time(&self) -> Instant {
+    pub fn get_start_time(&self) -> Timestamp {
         self.start_time
     }
 
@@ -57,13 +60,13 @@ impl<'a> Context<'a> {
     }
 
     /// Get the current logical time, frozen during the execution of a reaction.
-    pub fn get_logical_time(&self) -> Instant {
+    pub fn get_logical_time(&self) -> Timestamp {
         self.tag.to_logical_time(self.start_time)
     }
 
     /// Get the current physical time
-    pub fn get_physical_time(&self) -> Instant {
-        Instant::now()
+    pub fn get_physical_time(&self) -> Timestamp {
+        Timestamp::now()
     }
 
     /// Get the logical time elapsed since the start of the program.
@@ -140,7 +143,7 @@ impl<'a> Context<'a> {
 /// SendContext can be shared across threads and allows asynchronous events to be scheduled.
 pub struct SendContext {
     /// Physical time the Scheduler was started
-    pub start_time: Instant,
+    pub start_time: Timestamp,
     /// Channel for asynchronous events
     pub(crate) async_tx: Sender<ScheduledEvent>,
     /// Downstream reactions triggered by actions
@@ -157,7 +160,7 @@ impl SendContext {
         delay: Option<Duration>,
     ) {
         let tag_delay = action.min_delay + delay.unwrap_or_default();
-        let new_tag = Tag::absolute(self.start_time, Instant::now() + tag_delay);
+        let new_tag = Tag::absolute(self.start_time, Timestamp::now().offset(tag_delay));
         action.set_value(value, new_tag);
         let downstream = self.action_triggers[action.key].iter().copied();
         tracing::info!(action = ?action.key, new_tag = %new_tag, downstream = ?downstream, "Scheduling Physical");
@@ -177,7 +180,10 @@ impl SendContext {
     }
 
     pub fn schedule_shutdown(&self, offset: Option<Duration>) {
-        let tag = Tag::absolute(self.start_time, Instant::now() + offset.unwrap_or_default());
+        let tag = Tag::absolute(
+            self.start_time,
+            Timestamp::now().offset(offset.unwrap_or_default()),
+        );
         self.async_tx
             .send(ScheduledEvent {
                 tag,

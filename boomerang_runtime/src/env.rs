@@ -5,7 +5,10 @@ use tinymap::{
     map::{IterMany, IterManyMut},
 };
 
-use crate::{BasePort, PortKey, Reaction, ReactionKey, Reactor, ReactorKey};
+use crate::{
+    keys::{PortKey, ReactionKey, ReactorKey},
+    BasePort, Reaction, Reactor,
+};
 
 /// Execution level
 pub type Level = usize;

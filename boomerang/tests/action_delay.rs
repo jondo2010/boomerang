@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use boomerang::{
     builder::{BuilderReactionKey, TypedActionKey, TypedPortKey},
     runtime, Reactor,
@@ -100,7 +102,7 @@ impl Sink {
         println!("physical time: {:?}", physical);
         println!("elapsed logical time: {:?}", elapsed_logical);
         assert!(
-            elapsed_logical == runtime::Duration::from_millis(100),
+            elapsed_logical == Duration::from_millis(100),
             "ERROR: Expected 100 msecs but got {:?}",
             elapsed_logical
         );
@@ -124,9 +126,8 @@ struct ActionDelayBuilder {
     g: GeneratedDelayBuilder,
 }
 
-#[test]
+#[test_log::test]
 fn action_delay() {
-    tracing_subscriber::fmt::init();
     let _ = boomerang_util::run::build_and_test_reactor::<ActionDelayBuilder>(
         "action_delay",
         (),

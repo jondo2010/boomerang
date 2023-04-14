@@ -1,13 +1,14 @@
-/// Events are scheduled with increasing additional delays of 0, 100, 300, 600
-/// msec on a logical action with a minimum delay of 100 msec.  
-/// The use of the logical action ensures the elapsed time jumps exactly from
-/// 0 to 100, 300, 600, and 1000 msec.
+//! Events are scheduled with increasing additional delays of 0, 100, 300, 600
+//! msec on a logical action with a minimum delay of 100 msec.  
+//! The use of the logical action ensures the elapsed time jumps exactly from
+//! 0 to 100, 300, 600, and 1000 msec.
+
 use boomerang::{
     builder::{BuilderReactionKey, TypedActionKey},
     runtime, Reactor,
 };
 use boomerang_util::{Timeout, TimeoutBuilder};
-use runtime::Duration;
+use std::time::Duration;
 
 #[derive(Reactor)]
 #[reactor(state = "SlowingClock")]
@@ -20,7 +21,7 @@ struct SlowingClockBuilder {
     reaction_a: BuilderReactionKey,
     #[reactor(reaction(function = "SlowingClock::reaction_shutdown"))]
     reaction_shutdown: BuilderReactionKey,
-    #[reactor(child(state = "Timeout::new(runtime::Duration::from_secs(1))"))]
+    #[reactor(child(state = "Timeout::new(Duration::from_secs(1))"))]
     _timeout: TimeoutBuilder,
 }
 
@@ -81,9 +82,8 @@ impl SlowingClock {
     }
 }
 
-#[test]
+#[test_log::test]
 fn slowing_clock() {
-    tracing_subscriber::fmt::init();
     let _ = boomerang_util::run::build_and_test_reactor::<SlowingClockBuilder>(
         "slowing_clock",
         SlowingClock::new(),

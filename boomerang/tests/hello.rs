@@ -1,9 +1,10 @@
 #![allow(dead_code)]
 
+use std::time::Duration;
+
 use boomerang::{
     builder::{BuilderReactionKey, TypedActionKey},
-    runtime::{self, Duration},
-    Reactor,
+    runtime, Reactor,
 };
 
 // This test checks that logical time is incremented an appropriate

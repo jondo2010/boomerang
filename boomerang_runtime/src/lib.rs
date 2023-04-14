@@ -6,7 +6,6 @@ mod port;
 mod reaction;
 mod reactor;
 mod sched;
-mod time;
 pub mod util;
 
 // Re-exports
@@ -17,9 +16,11 @@ pub use port::*;
 pub use reaction::*;
 pub use reactor::*;
 pub use sched::*;
-pub use time::*;
 
-pub use std::time::{Duration, Instant};
+pub use boomerang_core::{
+    keys,
+    time::{Tag, Timestamp},
+};
 
 #[macro_use]
 extern crate derivative;
@@ -35,7 +36,7 @@ pub trait InnerType {
 #[derive(thiserror::Error, Debug, Eq, PartialEq)]
 pub enum RuntimeError {
     #[error("Port Key not found: {}", 0)]
-    PortKeyNotFound(PortKey),
+    PortKeyNotFound(keys::PortKey),
 
     #[error("Mismatched Dynamic Types found {} but wanted {}", found, wanted)]
     TypeMismatch {

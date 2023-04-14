@@ -4,6 +4,8 @@ pub mod keyboard_events;
 #[cfg(feature = "runner")]
 pub mod run;
 
+use std::time::Duration;
+
 use boomerang::{builder, reaction, runtime, Reactor};
 
 #[derive(Reactor)]
@@ -15,11 +17,11 @@ pub struct TimeoutBuilder {
 
 #[derive(Debug)]
 pub struct Timeout {
-    timeout: runtime::Duration,
+    timeout: Duration,
 }
 
 impl Timeout {
-    pub fn new(timeout: runtime::Duration) -> Self {
+    pub fn new(timeout: Duration) -> Self {
         Self { timeout }
     }
 

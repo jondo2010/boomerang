@@ -4,6 +4,8 @@
 //! drifting away further with each new event. Modeled after the Lingua-Franca C version of this
 //! test. @author Maiko Brants TU Dresden
 
+use std::time::Duration;
+
 use boomerang::{
     builder::{BuilderReactionKey, Physical, TypedActionKey},
     runtime, Reactor,
@@ -26,13 +28,13 @@ struct SlowingClockPhysicalBuilder {
     #[reactor(reaction(function = "SlowingClockPhysical::reaction_shutdown"))]
     shutdown: BuilderReactionKey,
 
-    #[reactor(child(state = "Timeout::new(runtime::Duration::from_millis(1500))"))]
+    #[reactor(child(state = "Timeout::new(Duration::from_millis(1500))"))]
     _timeout: TimeoutBuilder,
 }
 
 struct SlowingClockPhysical {
-    interval: runtime::Duration,
-    expected_time: runtime::Duration,
+    interval: Duration,
+    expected_time: Duration,
 }
 
 impl SlowingClockPhysical {
@@ -42,7 +44,7 @@ impl SlowingClockPhysical {
         ctx: &mut runtime::Context,
         #[reactor::action(effects)] mut a: runtime::PhysicalActionRef,
     ) {
-        self.expected_time = runtime::Duration::from_millis(100);
+        self.expected_time = Duration::from_millis(100);
         ctx.schedule_action(&mut a, None, None);
     }
 
@@ -59,8 +61,8 @@ impl SlowingClockPhysical {
             "Expected logical time to be at least: {:?}, was {elapsed_logical_time:?}",
             self.expected_time
         );
-        self.interval += runtime::Duration::from_millis(100);
-        self.expected_time = runtime::Duration::from_millis(100) + self.interval;
+        self.interval += Duration::from_millis(100);
+        self.expected_time = Duration::from_millis(100) + self.interval;
         info!(
             "Scheduling next to occur approximately after: {:?}",
             self.interval
@@ -71,21 +73,20 @@ impl SlowingClockPhysical {
     #[boomerang::reaction(reactor = "SlowingClockPhysicalBuilder", triggers(shutdown))]
     fn reaction_shutdown(&mut self, _ctx: &mut runtime::Context) {
         assert!(
-            self.expected_time >= runtime::Duration::from_millis(500),
+            self.expected_time >= Duration::from_millis(500),
             "Expected the next expected time to be at least: 500000000 nsec. It was: {:?}",
             self.expected_time
         );
     }
 }
 
-#[test]
+#[test_log::test]
 fn slowing_clock_physical() {
-    tracing_subscriber::fmt::init();
     let _ = boomerang_util::run::build_and_test_reactor::<SlowingClockPhysicalBuilder>(
         "slowing_clock_physical",
         SlowingClockPhysical {
-            interval: runtime::Duration::from_millis(100),
-            expected_time: runtime::Duration::from_millis(200),
+            interval: Duration::from_millis(100),
+            expected_time: Duration::from_millis(200),
         },
         true,
         true,

@@ -32,9 +32,8 @@ struct HelloWorldBuilder {
     _a: HelloWorld2Builder,
 }
 
-#[test]
+#[test_log::test]
 fn hello_world() {
-    tracing_subscriber::fmt::init();
     let _ = boomerang_util::run::build_and_test_reactor::<HelloWorldBuilder>(
         "hello_world",
         (),

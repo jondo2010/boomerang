@@ -1,4 +1,4 @@
-use crate::{client, rti, FederateId, NeighborStructure};
+use crate::{client, rti, FederateKey, NeighborStructure};
 
 #[test_log::test(tokio::test)]
 async fn test1() {
@@ -11,9 +11,8 @@ async fn test1() {
         downstream: vec![],
     };
 
-    let client = client::Config::new(FederateId::from(0), "fed1", neighbors);
-    client
-        .connect_to_rti("127.0.0.1:12345".parse().unwrap())
+    let config = client::Config::new(FederateKey::from(0), "fed1", neighbors);
+    let client = client::connect_to_rti("127.0.0.1:12345".parse().unwrap(), config)
         .await
         .unwrap();
 

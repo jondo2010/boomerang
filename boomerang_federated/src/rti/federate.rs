@@ -8,7 +8,7 @@ use tokio::{
 };
 use tokio_util::codec::Framed;
 
-use crate::{bincodec, ClockSyncStat, FederateId, NeighborStructure, RtiMsg, Tag};
+use crate::{bincodec, ClockSyncStat, FederateKey, NeighborStructure, RtiMsg, Tag};
 
 use super::{start_time_sync::StartSync, ExecutionMode};
 
@@ -30,7 +30,7 @@ pub enum State {
 /// scheduling constraints.
 pub struct Federate {
     /// ID of this federate.
-    id: FederateId,
+    id: FederateKey,
 
     /// Start time synchronizer.
     start_time_sync: StartSync,
@@ -61,7 +61,7 @@ pub struct Federate {
     receiver: UnboundedReceiver<RtiMsg>,
 
     /// Sender channel endspoints for sending messages to the neighbors.
-    sender_channels: tinymap::TinySecondaryMap<FederateId, UnboundedSender<RtiMsg>>,
+    sender_channels: tinymap::TinySecondaryMap<FederateKey, UnboundedSender<RtiMsg>>,
 
     /// FAST or REALTIME.
     mode: ExecutionMode,
@@ -79,12 +79,12 @@ pub struct Federate {
 
 impl Federate {
     pub fn new(
-        id: FederateId,
+        id: FederateKey,
         start_time_sync: StartSync,
         clock_sync: ClockSyncStat,
         neighbors: NeighborStructure,
         receiver: UnboundedReceiver<RtiMsg>,
-        sender_channels: tinymap::TinySecondaryMap<FederateId, UnboundedSender<RtiMsg>>,
+        sender_channels: tinymap::TinySecondaryMap<FederateKey, UnboundedSender<RtiMsg>>,
     ) -> Self {
         Federate {
             id,
@@ -115,13 +115,13 @@ impl Federate {
                 // Messages from other federates
                 msg = self.receiver.recv() => {
                     if let Some(msg) = msg {
-                        println!("Federate {} received message {:?}", self.id, msg);
+                        println!("Federate {:?} received message {msg:?}", self.id);
                     }
                 }
                 // Message from the federate over the socket
                 msg = frame.next() => {
                     if let Some(msg) = msg {
-                        println!("Federate {} received message {:?}", self.id, msg);
+                        println!("Federate {:?} received message {msg:?}", self.id);
 
                         match msg {
                             Ok(RtiMsg::Timestamp(ts)) => {
@@ -136,7 +136,7 @@ impl Federate {
                                 frame.send(RtiMsg::Timestamp(timestamp)).await.unwrap();
                             },
                             Ok(_) => {
-                                tracing::error!(federate_id=%self.id, ?msg, "RTI received from federate an unrecognized TCP message.");
+                                tracing::error!(federate_id=?self.id, ?msg, "RTI received from federate an unrecognized TCP message.");
                             }
                             Err(err) => {
                                 tracing::error!("Error decoding message from federate: {err}");

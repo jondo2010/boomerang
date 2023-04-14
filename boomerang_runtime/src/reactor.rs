@@ -1,12 +1,9 @@
-use std::fmt::Debug;
-
 use downcast_rs::{impl_downcast, DowncastSync};
 
 use crate::{
-    Action, ActionKey, Context, LevelReactionKey, LogicalAction, ReactionSet, ScheduledEvent, Tag,
+    keys::ActionKey, Action, Context, LevelReactionKey, LogicalAction, ReactionSet, ScheduledEvent,
+    Tag,
 };
-
-tinymap::key_type! { pub ReactorKey }
 
 pub trait ReactorState: DowncastSync + Send {}
 impl<T> ReactorState for T where T: DowncastSync {}

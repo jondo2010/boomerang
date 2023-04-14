@@ -45,8 +45,8 @@ fn test_duplicate_actions() {
         reactor_builder
             .add_timer(
                 "action0",
-                Some(runtime::Duration::from_micros(0)),
-                Some(runtime::Duration::from_micros(0)),
+                Some(Duration::from_micros(0)),
+                Some(Duration::from_micros(0)),
             )
             .expect_err("Expected duplicate"),
         BuilderError::DuplicateActionDefinition {

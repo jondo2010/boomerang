@@ -12,6 +12,7 @@ use slotmap::{SecondaryMap, SlotMap};
 use std::{
     collections::{BTreeSet, HashMap},
     convert::TryInto,
+    time::Duration,
 };
 
 mod debug;
@@ -38,18 +39,18 @@ pub struct EnvBuilder {
 #[derive(Debug)]
 struct RuntimePortParts {
     /// All runtime Ports
-    ports: tinymap::TinyMap<runtime::PortKey, Box<dyn runtime::BasePort>>,
+    ports: tinymap::TinyMap<runtime::keys::PortKey, Box<dyn runtime::BasePort>>,
     /// For each Port, a set of Reactions triggered by it
-    port_triggers: tinymap::TinySecondaryMap<runtime::PortKey, Vec<BuilderReactionKey>>,
+    port_triggers: tinymap::TinySecondaryMap<runtime::keys::PortKey, Vec<BuilderReactionKey>>,
     /// A mapping from `BuilderPortKey`s to aliased [`runtime::PortKey`]s.
-    aliases: SecondaryMap<BuilderPortKey, runtime::PortKey>,
+    aliases: SecondaryMap<BuilderPortKey, runtime::keys::PortKey>,
 }
 
 #[derive(Debug)]
 struct RuntimeActionParts {
-    actions: tinymap::TinyMap<runtime::ActionKey, runtime::Action>,
-    action_triggers: tinymap::TinySecondaryMap<runtime::ActionKey, Vec<BuilderReactionKey>>,
-    aliases: SecondaryMap<BuilderActionKey, runtime::ActionKey>,
+    actions: tinymap::TinyMap<runtime::keys::ActionKey, runtime::Action>,
+    action_triggers: tinymap::TinySecondaryMap<runtime::keys::ActionKey, Vec<BuilderReactionKey>>,
+    aliases: SecondaryMap<BuilderActionKey, runtime::keys::ActionKey>,
 }
 
 impl EnvBuilder {
@@ -105,7 +106,7 @@ impl EnvBuilder {
             name,
             ActionType::Startup,
             reactor_key,
-            |_: &'_ str, _: runtime::ActionKey| runtime::Action::Startup,
+            |_: &'_ str, _: runtime::keys::ActionKey| runtime::Action::Startup,
         )
     }
 
@@ -118,21 +119,21 @@ impl EnvBuilder {
             name,
             ActionType::Shutdown,
             reactor_key,
-            |_: &'_ str, _: runtime::ActionKey| runtime::Action::Shutdown,
+            |_: &'_ str, _: runtime::keys::ActionKey| runtime::Action::Shutdown,
         )
     }
 
     pub fn add_logical_action<T: runtime::ActionData>(
         &mut self,
         name: &str,
-        min_delay: Option<runtime::Duration>,
+        min_delay: Option<Duration>,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey<T, Logical>, BuilderError> {
         self.add_action::<T, Logical, _>(
             name,
             ActionType::Logical { min_delay },
             reactor_key,
-            move |name: &'_ str, key: runtime::ActionKey| {
+            move |name: &'_ str, key: runtime::keys::ActionKey| {
                 runtime::Action::Logical(LogicalAction::new::<T>(
                     name,
                     key,
@@ -145,7 +146,7 @@ impl EnvBuilder {
     pub fn add_physical_action<T: runtime::ActionData>(
         &mut self,
         name: &str,
-        min_delay: Option<runtime::Duration>,
+        min_delay: Option<Duration>,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey<T, Physical>, BuilderError> {
         self.add_action::<T, Physical, _>(
@@ -628,11 +629,11 @@ impl EnvBuilder {
 fn build_runtime_reactors(
     reactor_builders: SlotMap<BuilderReactorKey, ReactorBuilder>,
     reaction_levels: &SecondaryMap<BuilderReactionKey, usize>,
-    reaction_aliases: &SecondaryMap<BuilderReactionKey, runtime::ReactionKey>,
+    reaction_aliases: &SecondaryMap<BuilderReactionKey, runtime::keys::ReactionKey>,
     mut action_parts: SecondaryMap<BuilderReactorKey, RuntimeActionParts>,
 ) -> (
-    tinymap::TinyMap<runtime::ReactorKey, runtime::Reactor>,
-    SecondaryMap<BuilderReactorKey, runtime::ReactorKey>,
+    tinymap::TinyMap<runtime::keys::ReactorKey, runtime::Reactor>,
+    SecondaryMap<BuilderReactorKey, runtime::keys::ReactorKey>,
 ) {
     let mut runtime_reactors = tinymap::TinyMap::with_capacity(reactor_builders.len());
     let mut reactor_alias = SecondaryMap::new();
@@ -687,7 +688,7 @@ impl TryInto<runtime::Env> for EnvBuilder {
             reaction_reactor_aliases.insert(builder_key, reaction_builder.reactor_key);
             let action_aliases = &action_parts[reaction_builder.reactor_key].aliases;
             let reaction_key = runtime_reactions.insert(reaction_builder.build_reaction(
-                runtime::ReactorKey::default(),
+                runtime::keys::ReactorKey::default(),
                 &port_aliases,
                 action_aliases,
             ));

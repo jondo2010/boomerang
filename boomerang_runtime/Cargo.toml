@@ -23,3 +23,5 @@ rayon = { version = "1.7", optional = true }
 thiserror.workspace = true
 tinymap.workspace = true
 tracing.workspace = true
+
+boomerang_core.workspace = true

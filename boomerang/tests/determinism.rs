@@ -101,9 +101,8 @@ struct DeterminismBuilder {
     p2: PassBuilder,
 }
 
-#[test]
+#[test_log::test]
 fn determinism() {
-    tracing_subscriber::fmt::init();
     let _ = boomerang_util::run::build_and_test_reactor::<DeterminismBuilder>(
         "determinism",
         (),

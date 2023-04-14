@@ -78,9 +78,8 @@ struct CycleBuilder {
     b: BBuilder,
 }
 
-#[test]
+#[test_log::test]
 fn cycle() {
-    tracing_subscriber::fmt::init();
     let _ = boomerang_util::run::build_and_test_reactor::<CycleBuilder>("cycle", (), true, false)
         .unwrap();
 }

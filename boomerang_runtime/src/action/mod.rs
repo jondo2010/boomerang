@@ -2,9 +2,10 @@ use std::{
     collections::{hash_map::Entry, HashMap},
     fmt::{Debug, Display},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
-use crate::{Duration, Tag};
+use crate::{keys::ActionKey, Tag};
 use downcast_rs::{impl_downcast, DowncastSync};
 
 mod action_ref;
@@ -12,8 +13,6 @@ pub use action_ref::*;
 
 pub trait ActionData: std::fmt::Debug + Send + Sync + Clone + 'static {}
 impl<T> ActionData for T where T: std::fmt::Debug + Send + Sync + Clone + 'static {}
-
-tinymap::key_type! { pub ActionKey }
 
 pub trait BaseActionValues: Debug + Send + Sync + DowncastSync {
     /// Remove any value at the given Tag

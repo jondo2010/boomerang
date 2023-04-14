@@ -1,5 +1,7 @@
 // Test logical action with delay.
 
+use std::time::Duration;
+
 use boomerang::{
     builder::{BuilderReactionKey, TypedActionKey},
     runtime, Reactor,
@@ -33,11 +35,7 @@ impl ActionValues {
         // scheduled in 100 ms
         ctx.schedule_action(&mut act, Some(100), None);
         // scheduled in 150 ms, value is overwritten
-        ctx.schedule_action(
-            &mut act,
-            Some(-100),
-            Some(runtime::Duration::from_millis(50)),
-        );
+        ctx.schedule_action(&mut act, Some(-100), Some(Duration::from_millis(50)));
     }
 
     #[boomerang::reaction(reactor = "ActionValuesBuilder")]
@@ -72,9 +70,8 @@ impl ActionValues {
     }
 }
 
-#[test]
+#[test_log::test]
 fn action_values() {
-    tracing_subscriber::fmt::init();
     let _ = boomerang_util::run::build_and_test_reactor::<ActionValuesBuilder>(
         "action_values",
         ActionValues {

@@ -9,6 +9,8 @@ mod support;
 
 #[cfg(not(windows))]
 mod reactor {
+    use std::time::Duration;
+
     use super::support::*;
     use boomerang::{
         builder::{BuilderReactionKey, TypedActionKey},
@@ -62,7 +64,7 @@ mod reactor {
 
         /// The game speed level
         tempo: u32,
-        tempo_step: runtime::Duration,
+        tempo_step: Duration,
 
         /// Changes with arrow key presses, might be invalid.
         /// Only committed to snake_direction on grid update.
@@ -76,7 +78,7 @@ mod reactor {
     }
 
     impl Snake {
-        pub fn new(grid_side: usize, tempo_step: runtime::Duration, food_limit: u32) -> Self {
+        pub fn new(grid_side: usize, tempo_step: Duration, food_limit: u32) -> Self {
             let snake = CircularSnake::new(grid_side);
             let grid = SnakeGrid::new(grid_side, &snake);
             Self {
@@ -102,11 +104,7 @@ mod reactor {
             output::paint_on_raw_console(&self.grid);
 
             // schedule the first one, then it reschedules itself.
-            ctx.schedule_action(
-                &mut screen_refresh,
-                None,
-                Some(runtime::Duration::from_secs(1)),
-            )
+            ctx.schedule_action(&mut screen_refresh, None, Some(Duration::from_secs(1)))
         }
 
         // @label schedule_next_tick
@@ -117,8 +115,8 @@ mod reactor {
             #[reactor::action(triggers, effects)] mut screen_refresh: runtime::ActionRef,
         ) {
             // select a delay depending on the tempo
-            let delay = runtime::Duration::from_millis(400)
-                - (self.tempo_step * self.tempo).min(runtime::Duration::from_millis(300));
+            let delay = Duration::from_millis(400)
+                - (self.tempo_step * self.tempo).min(Duration::from_millis(300));
             ctx.schedule_action(&mut screen_refresh, None, Some(delay));
         }
 
@@ -199,10 +197,12 @@ mod reactor {
 
 #[cfg(not(windows))]
 fn main() {
+    use std::time::Duration;
+
     use reactor::{Snake, SnakeBuilder};
     let _ = boomerang_util::run::build_and_run_reactor::<SnakeBuilder>(
         "multiple_contained",
-        Snake::new(32, boomerang::runtime::Duration::from_millis(40), 2),
+        Snake::new(32, Duration::from_millis(40), 2),
     )
     .unwrap();
 }

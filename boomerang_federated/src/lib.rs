@@ -1,5 +1,6 @@
 use std::{fmt::Display, time::Duration};
 
+use boomerang_core::keys::PortKey;
 use serde::{Deserialize, Serialize};
 
 mod bincodec;
@@ -9,60 +10,13 @@ mod rti;
 #[cfg(test)]
 mod tests;
 
-/// Timestamps are represented as the duration since the UNIX epoch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
-#[repr(transparent)]
-pub struct Timestamp(Duration);
+pub use boomerang_core::time::{Tag, Timestamp};
 
-impl Timestamp {
-    pub fn now() -> Self {
-        Self(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("System time before UNIX epoch"),
-        )
-    }
-
-    pub fn offset(&self, offset: Duration) -> Self {
-        Self(self.0 + offset)
-    }
-}
-
-impl From<Duration> for Timestamp {
-    fn from(duration: Duration) -> Self {
-        Self(duration)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[repr(transparent)]
-pub struct FederateId(usize);
-
-impl tinymap::Key for FederateId {
-    fn index(&self) -> usize {
-        self.0
-    }
-}
-
-impl From<usize> for FederateId {
-    fn from(value: usize) -> Self {
-        Self(value)
-    }
-}
-
-impl Display for FederateId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "FederateId({})", self.0)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Tag {
-    /// Offset from origin of logical time
-    pub timestamp: Timestamp,
-    /// Superdense timestep.
-    pub microstep: u32,
-}
+tinymap::key_type!(
+    /// Runtime key for a Federate
+    #[derive(Serialize, Deserialize)]
+    pub FederateKey
+);
 
 /// A timestamped message to forward to another federate.
 ///
@@ -74,16 +28,16 @@ pub struct Message {
     /// The ID of the destination reactor port.
     pub dest_reactor_port_id: u16,
     /// The destination federate ID.
-    pub dest_federate_id: FederateId,
+    pub dest_federate_id: FederateKey,
     pub message: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortAbsent {
-    pub port_id: u16,
+    pub port: PortKey,
     /// Federate ID of the destination federate.
     /// This is needed for the centralized coordination so that the RTI knows where to forward the message.
-    pub federate_id: FederateId,
+    pub federate: FederateKey,
     /// Intended time of the absent message
     pub tag: Tag,
 }
@@ -108,10 +62,10 @@ pub enum RejectReason {
     FederationIdDoesNotMatch = 1,
     /// Federate with the specified ID has already joined.
     #[error("Federate ID in use")]
-    FederateIdInUse,
+    FederateKeyInUse,
     /// Federate ID out of range.
     #[error("Federate ID out of range")]
-    FederateIdOutOfRange,
+    FederateKeyOutOfRange,
     /// Incoming message is not expected.
     #[error("Unexpected message")]
     UnexpectedMessage,
@@ -135,7 +89,7 @@ pub enum RejectReason {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FedIds {
     /// Federate ID.
-    pub federate_id: FederateId,
+    pub federate: FederateKey,
     /// Federation ID
     pub federation_id: String,
 }
@@ -156,9 +110,9 @@ pub struct NeighborStructure {
     /// Federate's connection to upstream federates (by direct connection).
     ///
     /// The delay is the minimum "after" delay of all connections from the upstream federate.
-    pub upstream: Vec<(FederateId, Duration)>,
+    pub upstream: Vec<(FederateKey, Duration)>,
     /// Federate's downstream federates (by direct connection).
-    pub downstream: Vec<FederateId>,
+    pub downstream: Vec<FederateKey>,
 }
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
@@ -201,7 +155,7 @@ pub struct FedResponse {
     /// Federate's nonce
     pub nonce: u64,
     /// Federate ID
-    pub federate_id: FederateId,
+    pub federate: FederateKey,
     /// HMAC tag
     pub hmac: Hmac,
 }
@@ -214,7 +168,8 @@ pub enum RtiMsg {
     /// Acknowledgment of the previously received message. This message carries no payload.
     Ack,
 
-    /// Acknowledgment of the previously received `FedIds` message sent by the RTI to the federate with a payload indicating the UDP port to use for clock synchronization.
+    /// Acknowledgment of the previously received `FedIds` message sent by the RTI to the federate
+    /// with a payload indicating the UDP port to use for clock synchronization.
     UdpPort(ClockSyncStat),
 
     /// A message from a federate to an RTI containing the federation ID and the federate ID.
@@ -316,7 +271,7 @@ pub enum RtiMsg {
     /// The reply from the RTI will a port number (an int32_t), which is `None` if the RTI does not
     /// know yet (it has not received `AddressAdvertisement` from the other federate), followed by
     /// the IP address of the other federate (an IPV4 address, which has length INET_ADDRSTRLEN).
-    AddressQuery(FederateId),
+    AddressQuery(FederateKey),
 
     /// A message advertising the port for the TCP connection server of a federate. This is utilized
     /// in decentralized coordination as well as for physical connections in centralized
@@ -327,8 +282,11 @@ pub enum RtiMsg {
     /// be processed eventually by the RTI.
     AddressAdvertisement,
 
-    /// A first message that is sent by a federate directly to another federate after establishing a socket connection to send messages directly to the federate.
-    /// The response from the remote federate is expected to be `Ack`, but if the remote federate does not expect this federate or federation to connect, it will respond instead with `Reject`.
+    /// A first message that is sent by a federate directly to another federate after establishing a
+    /// socket connection to send messages directly to the federate.
+    ///
+    /// The response from the remote federate is expected to be `Ack`, but if the remote federate
+    /// does not expect this federate or federation to connect, it will respond instead with `Reject`.
     P2PSendingFedId(FedIds),
 
     /// A message to send directly to another federate.

@@ -2,7 +2,7 @@ use boomerang::{
     builder::{BuilderReactionKey, Physical, TypedActionKey},
     runtime, Reactor,
 };
-use runtime::Duration;
+use std::time::Duration;
 
 #[derive(Reactor)]
 #[reactor(state = "Main")]
@@ -48,9 +48,8 @@ impl Main {
     }
 }
 
-#[test]
+#[test_log::test]
 fn physical_action_with_keepalive() {
-    tracing_subscriber::fmt::init();
     let _ = boomerang_util::run::build_and_test_reactor::<MainBuilder>(
         "physical_action_with_keepalive",
         Main,

@@ -47,9 +47,9 @@ impl ReactionBuilder {
     /// Build a [`runtime::Reaction`] from this `ReactionBuilder`.
     pub fn build_reaction(
         self,
-        reactor_key: runtime::ReactorKey,
-        port_aliases: &SecondaryMap<BuilderPortKey, runtime::PortKey>,
-        action_aliases: &SecondaryMap<BuilderActionKey, runtime::ActionKey>,
+        reactor_key: runtime::keys::ReactorKey,
+        port_aliases: &SecondaryMap<BuilderPortKey, runtime::keys::PortKey>,
+        action_aliases: &SecondaryMap<BuilderActionKey, runtime::keys::ActionKey>,
     ) -> runtime::Reaction {
         // Create the Vec of input ports for this reaction sorted by order
         let inputs = self

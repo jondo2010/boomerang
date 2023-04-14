@@ -6,8 +6,6 @@ use std::{
 
 use crate::{InnerType, LevelReactionKey, PortData};
 
-tinymap::key_type!(pub PortKey);
-
 pub trait BasePort: Debug + Display + Send + Sync + DowncastSync {
     /// Return the downstream Reactions triggered by this Port
     fn get_downstream(&self) -> core::slice::Iter<LevelReactionKey>;

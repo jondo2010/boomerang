@@ -1,13 +1,13 @@
-use std::{fmt::Debug, sync::RwLock};
+use std::sync::RwLock;
 
+use boomerang_core::time::Timestamp;
 use crossbeam_channel::Sender;
 
 use crate::{
-    key_set::KeySet, Action, ActionKey, BasePort, Context, Duration, PortKey, Reactor, ReactorKey,
-    ReactorState, ScheduledEvent, Tag,
+    key_set::KeySet,
+    keys::{ActionKey, PortKey, ReactionKey, ReactorKey},
+    Action, BasePort, Context, Reactor, ReactorState, ScheduledEvent, Tag,
 };
-
-tinymap::key_type!(pub ReactionKey);
 
 pub type ReactionSet = KeySet<ReactionKey>;
 
@@ -23,7 +23,7 @@ pub trait ReactionFn:
         &mut dyn ReactorState,
         &[IPort], // Input ports
         &mut [OPort], // Output ports
-        &mut [&mut Action], // Schedulable Actions
+        &mut [&mut Action], // Actions
     ) + Sync
     + Send
 {
@@ -38,7 +38,7 @@ impl<F> ReactionFn for F where
 #[derive(Derivative)]
 #[derivative(Debug, PartialEq)]
 pub struct Deadline {
-    deadline: Duration,
+    deadline: Timestamp,
     #[derivative(PartialEq = "ignore")]
     #[derivative(Debug = "ignore")]
     #[allow(dead_code)]
@@ -120,7 +120,7 @@ impl Reaction {
     )]
     pub fn trigger<'a>(
         &'a self,
-        start_time: crate::Instant,
+        start_time: Timestamp,
         tag: Tag,
         reactor: &'a mut Reactor,
         inputs: &[IPort<'_>],
@@ -138,7 +138,7 @@ impl Reaction {
 
         if let Some(Deadline { deadline, handler }) = self.deadline.as_ref() {
             let lag = ctx.get_physical_time() - ctx.get_logical_time();
-            if lag > *deadline {
+            if lag > (*deadline).into() {
                 (handler.write().unwrap())();
             }
         }

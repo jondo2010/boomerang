@@ -5,7 +5,7 @@ use boomerang::{
     runtime, Reactor,
 };
 use boomerang_util::{Timeout, TimeoutBuilder};
-use std::thread::JoinHandle;
+use std::{thread::JoinHandle, time::Duration};
 
 #[derive(Reactor)]
 #[reactor(state = "AsyncCallback")]
@@ -25,13 +25,13 @@ struct AsyncCallbackBuilder {
     #[reactor(reaction(function = "AsyncCallback::reaction_shutdown"))]
     reaction_shutdown: BuilderReactionKey,
 
-    #[reactor(child(state = "Timeout::new(runtime::Duration::from_secs(2))"))]
+    #[reactor(child(state = "Timeout::new(Duration::from_secs(2))"))]
     _timeout: TimeoutBuilder,
 }
 
 struct AsyncCallback {
     thread: Option<JoinHandle<()>>,
-    expected_time: runtime::Duration,
+    expected_time: Duration,
     toggle: bool,
     i: usize,
 }
@@ -53,7 +53,7 @@ impl AsyncCallback {
         // start new thread
         self.thread = Some(std::thread::spawn(move || {
             // Simulate time passing before a callback occurs
-            std::thread::sleep(runtime::Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(100));
             // Schedule twice. If the action is not physical, these should get consolidated into a single action
             // triggering. If it is, then they cause two separate triggerings with close but not equal time stamps.
             send_ctx.schedule_action(&mut a, Some(0), None);
@@ -77,7 +77,7 @@ impl AsyncCallback {
         }
         if self.toggle {
             self.toggle = false;
-            self.expected_time += runtime::Duration::from_millis(200);
+            self.expected_time += Duration::from_millis(200);
         } else {
             self.toggle = true;
         }
@@ -92,14 +92,13 @@ impl AsyncCallback {
     }
 }
 
-#[test]
+#[test_log::test]
 fn async_callback() {
-    tracing_subscriber::fmt::init();
     let _ = boomerang_util::run::build_and_test_reactor::<AsyncCallbackBuilder>(
         "async_callback",
         AsyncCallback {
             thread: None,
-            expected_time: runtime::Duration::from_millis(100),
+            expected_time: Duration::from_millis(100),
             toggle: false,
             i: 0,
         },

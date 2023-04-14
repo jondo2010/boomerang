@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use super::{
     ActionBuilder, BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactionKey, EnvBuilder,
     FindElements, Logical, Physical, PortType, ReactionBuilderState, TypedActionKey, TypedPortKey,
@@ -60,9 +62,9 @@ impl ReactorBuilder {
     /// Build this `ReactorBuilder` into a `runtime::Reactor`
     pub fn build_runtime(
         self,
-        actions: tinymap::TinyMap<runtime::ActionKey, runtime::Action>,
+        actions: tinymap::TinyMap<runtime::keys::ActionKey, runtime::Action>,
         action_triggers: tinymap::TinySecondaryMap<
-            runtime::ActionKey,
+            runtime::keys::ActionKey,
             Vec<runtime::LevelReactionKey>,
         >,
     ) -> runtime::Reactor {
@@ -157,8 +159,8 @@ impl<'a> ReactorBuilderState<'a> {
     pub fn add_timer(
         &mut self,
         name: &str,
-        period: Option<runtime::Duration>,
-        offset: Option<runtime::Duration>,
+        period: Option<Duration>,
+        offset: Option<Duration>,
     ) -> Result<TypedActionKey, BuilderError> {
         let action_key = self.add_logical_action(name, period)?;
 
@@ -202,7 +204,7 @@ impl<'a> ReactorBuilderState<'a> {
     pub fn add_logical_action<T: runtime::ActionData>(
         &mut self,
         name: &str,
-        min_delay: Option<runtime::Duration>,
+        min_delay: Option<Duration>,
     ) -> Result<TypedActionKey<T, Logical>, BuilderError> {
         self.env
             .add_logical_action::<T>(name, min_delay, self.reactor_key)
@@ -211,7 +213,7 @@ impl<'a> ReactorBuilderState<'a> {
     pub fn add_physical_action<T: runtime::ActionData>(
         &mut self,
         name: &str,
-        min_delay: Option<runtime::Duration>,
+        min_delay: Option<Duration>,
     ) -> Result<TypedActionKey<T, Physical>, BuilderError> {
         self.env
             .add_physical_action::<T>(name, min_delay, self.reactor_key)

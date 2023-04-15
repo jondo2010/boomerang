@@ -1,7 +1,8 @@
 [package]
 name = "boomerang_federated"
-version = "0.1.0"
-edition = "2021"
+description = "Distributed client/server framework for Boomerang."
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
 bincode = "1.3"

@@ -1,12 +1,9 @@
 //! This module implements the federate state machine client for a connection to the RTI.
 
-use std::{
-    net::SocketAddr,
-    time::{self, Duration},
-};
+use std::net::SocketAddr;
 
-use boomerang_core::keys::PortKey;
-use futures::{SinkExt, StreamExt};
+use boomerang_core::{keys::PortKey, time::Tag};
+use futures::{Sink, SinkExt, Stream, StreamExt};
 use serde::Serialize;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -14,9 +11,12 @@ use tokio::{
     sync::mpsc,
 };
 
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::codec::Framed;
 
-use crate::{bincodec, FedIds, FederateKey, NeighborStructure, RejectReason, RtiMsg, Timestamp};
+use crate::{
+    bincodec, FedIds, FederateKey, Message, NeighborStructure, RejectReason, RtiMsg, Timestamp,
+};
 
 /// The error type for the client.
 #[derive(Debug, thiserror::Error)]
@@ -59,13 +59,15 @@ impl Config {
 pub struct Client {
     start_time: Timestamp,
     sender: mpsc::UnboundedSender<RtiMsg>,
-    handle: tokio::task::JoinHandle<()>,
+    inbound_handle: tokio::task::JoinHandle<Result<(), ClientError>>,
+    outbound_handle: tokio::task::JoinHandle<Result<(), ClientError>>,
 }
 
 impl Client {
     /// Send the specified timestamped message to the specified port in the specified federate via
-    /// the RTI or directly to a federate depending on the given socket. The timestamp is calculated
-    /// as current_logical_time + additional delay which is greater than or equal to zero.
+    /// the RTI or directly to a federate depending on the given socket.
+    ///
+    /// The timestamp is calculated as current_logical_time + additional delay which is greater than or equal to zero.
     ///
     /// The port should be an input port of a reactor in the destination federate.
     #[tracing::instrument(level = "debug", skip(self))]
@@ -73,22 +75,49 @@ impl Client {
         &self,
         federate: FederateKey,
         port: PortKey,
-        delay: Option<Duration>,
+        //delay: Option<Duration>,
+        tag: Tag,
         message: T,
     ) -> Result<(), ClientError>
     where
         T: std::fmt::Debug + Serialize,
     {
-        if self.handle.is_finished() {
-            panic!("Federate has already shut down.");
+        if self.handle.is_finished() || self.sender.is_closed() {
+            tracing::error!("RTI connection closed unexpectedly");
+            return Err(ClientError::UnexpectedClose);
         }
 
         // Apply the additional delay to the current tag and use that as the intended tag of the outgoing message
         //tag_t current_message_intended_tag = _lf_delay_tag(lf_tag(), additional_delay);
 
-        //self.sender.send(RtiMsg::TaggedMessage((), ()));
+        self.sender
+            .send(RtiMsg::TaggedMessage(
+                tag,
+                Message {
+                    dest_port: port,
+                    dest_federate: federate,
+                    message: bincode::serialize(&message).map_err(ClientError::Codec)?,
+                },
+            ))
+            .map_err(|err| ClientError::Other(err.into()))
+    }
 
-        Ok(())
+    /// In a federated execution with centralized coordination, this function returns a tag that is
+    /// less than or equal to the specified tag when, as far as the federation is concerned, it is
+    /// safe to commit to advancing to the returned tag. That is, all incoming network messages
+    /// with tags less than the returned tag have been received.
+    #[tracing::instrument(level = "debug", skip(self))]
+    pub fn send_next_event_tag(&self, tag: Tag) -> Result<Tag, ClientError> {
+        if self.outbound_handle.is_finished() || self.sender.is_closed() {
+            tracing::error!("RTI connection closed unexpectedly");
+            return Err(ClientError::UnexpectedClose);
+        }
+
+        self.sender
+            .send(RtiMsg::NextEventTag(tag))
+            .map_err(|err| ClientError::Other(err.into()))?;
+
+        Ok(tag)
     }
 }
 
@@ -152,20 +181,18 @@ pub async fn connect_to_rti(addr: SocketAddr, config: Config) -> Result<Client, 
             let timestamp = get_start_time_from_rti(&mut frame).await?;
             tracing::debug!("Received start time from RTI: {timestamp:?}");
 
-            let (sender, mut receiver) = mpsc::unbounded_channel::<RtiMsg>();
+            let (sender, receiver) = mpsc::unbounded_channel::<RtiMsg>();
+            let (frame_sink, frame_stream) = frame.split();
 
-            let handle = tokio::spawn(async move {
-                while let Some(msg) = receiver.recv().await {
-                    if let Err(err) = frame.send(msg).await {
-                        tracing::error!("Error sending message to RTI: {err:?}");
-                    }
-                }
-            });
+            let outbound_handle =
+                tokio::spawn(outbound(UnboundedReceiverStream::new(receiver), frame_sink));
+            let inbound_handle = tokio::spawn(inbound(sender.clone(), frame_stream));
 
             Ok(Client {
                 start_time: timestamp,
                 sender,
-                handle,
+                inbound_handle,
+                outbound_handle,
             })
         }
         _ => {
@@ -173,6 +200,58 @@ pub async fn connect_to_rti(addr: SocketAddr, config: Config) -> Result<Client, 
             Err(ClientError::UnexpectedMessage(msg))
         }
     }
+}
+
+/// Handle piping messages from the internal `receiver` channel to the RTI via `frame_sink`.
+async fn outbound<R, S>(receiver: R, mut frame_sink: S) -> Result<(), ClientError>
+where
+    R: Stream<Item = RtiMsg> + Unpin,
+    S: Sink<RtiMsg> + Unpin,
+    <S as Sink<RtiMsg>>::Error: std::error::Error + Send + Sync + 'static,
+{
+    receiver
+        .map(|msg| Ok(msg))
+        .forward(&mut frame_sink)
+        .await
+        .map_err(|err| ClientError::Other(err.into()))
+}
+
+/// Handle receiving messages from the RTI via `frame_stream`
+async fn inbound<S>(
+    mut sender: mpsc::UnboundedSender<RtiMsg>,
+    mut frame_stream: S,
+) -> Result<(), ClientError>
+where
+    S: StreamExt<Item = Result<RtiMsg, bincode::Error>> + Unpin,
+{
+    while let Some(msg) = frame_stream.next().await {
+        let msg = msg.map_err(ClientError::from)?;
+
+        match msg {
+            RtiMsg::TaggedMessage(tag, message) => {}
+            RtiMsg::TagAdvanceGrant(tag) => {}
+            RtiMsg::ProvisionalTagAdvanceGrant(tag) => {}
+            RtiMsg::StopRequest(tag) => {}
+            RtiMsg::StopGranted(tag) => {}
+            RtiMsg::PortAbsent(port_absent) => {
+                //handle_port_absent_message(_fed.socket_TCP_RTI, -1);
+            }
+            RtiMsg::ClockSyncT1 | RtiMsg::ClockSyncT4 => {
+                tracing::error!(
+                    "Federate {:?} received unexpected clock sync message from RTI on TCP socket.",
+                    FederateKey::from(0)
+                );
+            }
+            _ => {
+                tracing::error!(
+                    "Federate {:?} received unexpected message from RTI on TCP socket: {msg:?}",
+                    FederateKey::from(0)
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[tracing::instrument(level = "debug", skip(frame))]
@@ -202,3 +281,14 @@ where
         }
     }
 }
+
+/// Handle a timed message being received from a remote federate via the RTI or directly from other federates.
+///
+/// This will read the tag encoded in the header and calculate an offset to pass to the schedule function.
+///
+/// Instead of holding the mutex lock, this function calls _lf_increment_global_tag_barrier with the
+/// tag carried in the message header as an argument. This ensures that the current tag will not
+/// advance to the tag of the message if it is in the future, or the tag will not advance at all if
+/// the tag of the message is now or in the past.
+#[tracing::instrument(level = "debug")]
+async fn handle_tagged_message(message: Message, federate: FederateKey) {}

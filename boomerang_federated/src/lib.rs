@@ -4,7 +4,7 @@ use boomerang_core::keys::PortKey;
 use serde::{Deserialize, Serialize};
 
 mod bincodec;
-mod client;
+pub mod client;
 mod clock;
 mod rti;
 #[cfg(test)]
@@ -26,9 +26,9 @@ tinymap::key_type!(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     /// The ID of the destination reactor port.
-    pub dest_reactor_port_id: u16,
+    pub dest_port: PortKey,
     /// The destination federate ID.
-    pub dest_federate_id: FederateKey,
+    pub dest_federate: FederateKey,
     pub message: Vec<u8>,
 }
 

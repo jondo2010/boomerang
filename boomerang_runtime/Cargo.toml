@@ -9,8 +9,9 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["parallel"]
+default = ["parallel", "federated"]
 parallel = ["rayon"]
+federated = ["dep:boomerang_federated"]
 
 [dependencies]
 crossbeam-channel = "0.5"
@@ -25,3 +26,4 @@ tinymap.workspace = true
 tracing.workspace = true
 
 boomerang_core.workspace = true
+boomerang_federated = { workspace = true, optional = true }

@@ -124,8 +124,8 @@ impl HelloDistributedBuilder {
                 .add_reaction(
                     "__reaction_s_out",
                     Box::new(
-                        |_,
-                         ctx,
+                        |ctx,
+                         _,
                          inputs: &[runtime::IPort],
                          outputs: &mut [runtime::OPort],
                          actions: &mut [&mut runtime::Action]| {

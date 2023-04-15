@@ -33,7 +33,7 @@ pub trait InnerType {
     type Inner: PortData;
 }
 
-#[derive(thiserror::Error, Debug, Eq, PartialEq)]
+#[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
     #[error("Port Key not found: {}", 0)]
     PortKeyNotFound(keys::PortKey),
@@ -43,4 +43,8 @@ pub enum RuntimeError {
         found: &'static str,
         wanted: &'static str,
     },
+
+    #[cfg(feature = "federated")]
+    #[error(transparent)]
+    Federate(#[from] boomerang_federated::client::ClientError),
 }

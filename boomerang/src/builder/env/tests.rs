@@ -143,60 +143,59 @@ mod experiment {
         let x = IntoReaction::into_reaction_fn(Test::reaction_a);
         let y = Test::reaction_b.into_reaction_fn();
     }
-}
 
-#[cfg(feature = "disabled")]
-#[test]
-fn test_actions1() {
-    let mut env_builder = EnvBuilder::new();
-    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, ());
+    #[test]
+    fn test_actions1() {
+        let mut env_builder = EnvBuilder::new();
+        let mut reactor_builder = env_builder.add_reactor("test_reactor", None, ());
 
-    let action_a = reactor_builder
-        .add_logical_action::<()>("a", Some(Duration::from_secs(1)))
-        .unwrap();
-    let action_b = reactor_builder.add_logical_action::<()>("b", None).unwrap();
+        let action_a = reactor_builder
+            .add_logical_action::<()>("a", Some(Duration::from_secs(1)))
+            .unwrap();
+        let action_b = reactor_builder.add_logical_action::<()>("b", None).unwrap();
 
-    // Triggered by a+b, schedules b
-    let reaction_a = reactor_builder
-        .add_reaction(
-            "ra",
-            Box::new(|_, _, _, _, _, sa| {
-                let [a]: &mut [_; 1] = ::std::convert::TryInto::try_into(sa).unwrap();
+        // Triggered by a+b, schedules b
+        let reaction_a = reactor_builder
+            .add_reaction(
+                "ra",
+                Box::new(|_, _, _, _, _, sa| {
+                    let [a]: &mut [_; 1] = ::std::convert::TryInto::try_into(sa).unwrap();
 
-                let x = SA { a };
-            }),
-        )
-        .with_trigger_action(action_a, 0)
-        .with_schedulable_action(action_b, 0)
-        .with_trigger_action(action_b, 1)
-        .finish()
-        .unwrap();
+                    let x = SA { a };
+                }),
+            )
+            .with_trigger_action(action_a, 0)
+            .with_schedulable_action(action_b, 0)
+            .with_trigger_action(action_b, 1)
+            .finish()
+            .unwrap();
 
-    // Triggered by a, schedules a
-    let reaction_b = reactor_builder
-        .add_reaction("rb", Box::new(|_, _, _, _, _, _| {}))
-        .with_trigger_action(action_a, 0)
-        .with_schedulable_action(action_a, 0)
-        .finish()
-        .unwrap();
+        // Triggered by a, schedules a
+        let reaction_b = reactor_builder
+            .add_reaction("rb", Box::new(|_, _, _, _, _, _| {}))
+            .with_trigger_action(action_a, 0)
+            .with_schedulable_action(action_a, 0)
+            .finish()
+            .unwrap();
 
-    let _reactor_key = reactor_builder.finish().unwrap();
-    let (env, dep_info) = env_builder.try_into().unwrap();
+        let _reactor_key = reactor_builder.finish().unwrap();
+        let (env, dep_info) = env_builder.try_into().unwrap();
 
-    runtime::check_consistency(&env, &dep_info);
+        runtime::check_consistency(&env, &dep_info);
 
-    assert_eq!(env.actions[action_a].get_name(), "a");
-    assert_eq!(env.actions[action_a].get_is_logical(), true);
+        assert_eq!(env.actions[action_a].get_name(), "a");
+        assert_eq!(env.actions[action_a].get_is_logical(), true);
 
-    // An action both triggered by and scheduled-by should only show up in the
-    // reaction_sched_actions
-    assert_eq!(dep_info.reaction_trig_actions[reaction_a], vec![action_a]);
-    assert_eq!(dep_info.reaction_sched_actions[reaction_a], vec![action_b]);
-    assert_eq!(dep_info.reaction_trig_actions[reaction_b], vec![]);
-    assert_eq!(dep_info.reaction_sched_actions[reaction_b], vec![action_a]);
-    assert_eq!(
-        dep_info.action_triggers[action_a],
-        vec![reaction_a, reaction_b]
-    );
-    assert_eq!(dep_info.action_triggers[action_b], vec![reaction_a]);
+        // An action both triggered by and scheduled-by should only show up in the
+        // reaction_sched_actions
+        assert_eq!(dep_info.reaction_trig_actions[reaction_a], vec![action_a]);
+        assert_eq!(dep_info.reaction_sched_actions[reaction_a], vec![action_b]);
+        assert_eq!(dep_info.reaction_trig_actions[reaction_b], vec![]);
+        assert_eq!(dep_info.reaction_sched_actions[reaction_b], vec![action_a]);
+        assert_eq!(
+            dep_info.action_triggers[action_a],
+            vec![reaction_a, reaction_b]
+        );
+        assert_eq!(dep_info.action_triggers[action_b], vec![reaction_a]);
+    }
 }

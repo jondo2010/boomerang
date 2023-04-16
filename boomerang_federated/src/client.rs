@@ -82,7 +82,7 @@ impl Client {
     where
         T: std::fmt::Debug + Serialize,
     {
-        if self.handle.is_finished() || self.sender.is_closed() {
+        if self.outbound_handle.is_finished() || self.sender.is_closed() {
             tracing::error!("RTI connection closed unexpectedly");
             return Err(ClientError::UnexpectedClose);
         }

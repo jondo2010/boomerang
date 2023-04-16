@@ -96,7 +96,7 @@ pub struct ReactorBuilderState<'a> {
 
 impl<'a> FindElements for ReactorBuilderState<'a> {
     fn get_port_by_name(&self, port_name: &str) -> Result<BuilderPortKey, BuilderError> {
-        self.env.get_port(port_name, self.reactor_key)
+        self.env.find_port_by_name(port_name, self.reactor_key)
     }
 
     fn get_action_by_name(&self, action_name: &str) -> Result<BuilderActionKey, BuilderError> {

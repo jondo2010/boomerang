@@ -1,7 +1,89 @@
+//! Debug impls for [`EnvBuilder`]
+
 use itertools::Itertools;
 use std::{collections::BTreeMap, fmt::Debug};
 
+use crate::builder::{
+    BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactionKey, BuilderReactorKey,
+};
+
 use super::EnvBuilder;
+
+/// Methods for building "fully-qualified" style names for various elements, useful for debugging output.
+impl EnvBuilder {
+    /// Get a fully-qualified string name for the given ActionKey
+    pub fn action_fqn(&self, action_key: BuilderActionKey) -> Result<String, BuilderError> {
+        self.reactor_builders
+            .iter()
+            .find_map(|(reactor_key, reactor_builder)| {
+                reactor_builder
+                    .actions
+                    .get(action_key)
+                    .map(|action_builder| (reactor_key, action_builder))
+            })
+            .ok_or(BuilderError::ActionKeyNotFound(action_key))
+            .and_then(|(reactor_key, action_builder)| {
+                self.reactor_fqn(reactor_key)
+                    .map_err(|err| BuilderError::InconsistentBuilderState {
+                        what: format!(
+                            "Reactor referenced by {:?} not found: {:?}",
+                            action_builder, err
+                        ),
+                    })
+                    .map(|reactor_fqn| format!("{}/{}", reactor_fqn, action_builder.get_name()))
+            })
+    }
+
+    /// Get a fully-qualified string for the given ReactionKey
+    pub fn reactor_fqn(&self, reactor_key: BuilderReactorKey) -> Result<String, BuilderError> {
+        self.reactor_builders
+            .get(reactor_key)
+            .ok_or(BuilderError::ReactorKeyNotFound(reactor_key))
+            .and_then(|reactor| {
+                reactor.parent_reactor_key.map_or_else(
+                    || Ok(reactor.get_name().to_owned()),
+                    |parent| {
+                        self.reactor_fqn(parent)
+                            .map(|parent| format!("{}::{}", parent, reactor.get_name()))
+                    },
+                )
+            })
+    }
+
+    /// Get a fully-qualified string for the given ReactionKey
+    pub fn reaction_fqn(&self, reaction_key: BuilderReactionKey) -> Result<String, BuilderError> {
+        self.reaction_builders
+            .get(reaction_key)
+            .ok_or(BuilderError::ReactionKeyNotFound(reaction_key))
+            .and_then(|reaction| {
+                self.reactor_fqn(reaction.reactor_key)
+                    .map_err(|err| BuilderError::InconsistentBuilderState {
+                        what: format!("Reactor referenced by {:?} not found: {:?}", reaction, err),
+                    })
+                    .map(|reactor_fqn| (reactor_fqn, reaction.name.clone()))
+            })
+            .map(|(reactor_name, reaction_name)| format!("{}::{}", reactor_name, reaction_name))
+    }
+
+    /// Get a fully-qualified string for the given PortKey
+    pub fn port_fqn(&self, port_key: BuilderPortKey) -> Result<String, BuilderError> {
+        self.port_builders
+            .get(port_key)
+            .ok_or(BuilderError::PortKeyNotFound(port_key))
+            .and_then(|port_builder| {
+                self.reactor_fqn(port_builder.get_reactor_key())
+                    .map_err(|err| BuilderError::InconsistentBuilderState {
+                        what: format!(
+                            "Reactor referenced by port {:?} not found: {:?}",
+                            port_builder.get_name(),
+                            err
+                        ),
+                    })
+                    .map(|reactor_fqn| (reactor_fqn, port_builder.get_name()))
+            })
+            .map(|(reactor_name, port_name)| format!("{}.{}", reactor_name, port_name))
+    }
+}
 
 struct Dependency(String, String);
 

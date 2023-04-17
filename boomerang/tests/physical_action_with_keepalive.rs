@@ -17,6 +17,7 @@ struct MainBuilder {
     reaction_act: BuilderReactionKey,
 }
 
+#[derive(Clone)]
 struct Main;
 impl Main {
     #[boomerang::reaction(reactor = "MainBuilder", triggers(startup))]

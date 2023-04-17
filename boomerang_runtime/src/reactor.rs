@@ -5,9 +5,12 @@ use crate::{
     Tag,
 };
 
-pub trait ReactorState: DowncastSync + Send {}
-impl<T> ReactorState for T where T: DowncastSync {}
+pub trait ReactorState: DowncastSync + Send + dyn_clone::DynClone {}
+impl<T> ReactorState for T where T: DowncastSync + Clone {}
+
 impl_downcast!(sync ReactorState);
+
+dyn_clone::clone_trait_object!(ReactorState);
 
 pub(crate) trait ReactorElement {
     fn startup(&self, _ctx: &mut Context, _key: ActionKey) {}

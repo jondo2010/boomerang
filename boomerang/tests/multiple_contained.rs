@@ -22,6 +22,7 @@ struct ContainedBuilder {
     #[reactor(reaction(function = "Contained::reaction_startup"))]
     reaction_startup: BuilderReactionKey,
 }
+#[derive(Clone)]
 struct Contained;
 impl Contained {
     #[boomerang::reaction(reactor = "ContainedBuilder", triggers(startup))]
@@ -61,6 +62,7 @@ struct MultipleContainedBuilder {
     reaction_c_trigger: BuilderReactionKey,
 }
 
+#[derive(Clone)]
 struct MultipleContained;
 impl MultipleContained {
     #[boomerang::reaction(reactor = "MultipleContainedBuilder")]

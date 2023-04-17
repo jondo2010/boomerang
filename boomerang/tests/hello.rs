@@ -58,6 +58,7 @@ struct HelloBuilder {
     reaction_a: BuilderReactionKey,
 }
 
+#[derive(Clone)]
 struct Hello {
     period: Duration,
     message: String,
@@ -117,6 +118,7 @@ struct InsideBuilder {
     _third_instance: HelloBuilder,
 }
 
+#[derive(Clone)]
 struct Inside {
     message: String,
 }

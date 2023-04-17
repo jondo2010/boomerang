@@ -1,4 +1,7 @@
-use std::sync::RwLock;
+use std::{
+    rc::Rc,
+    sync::{Arc, RwLock},
+};
 
 use boomerang_core::time::Timestamp;
 use crossbeam_channel::Sender;
@@ -60,7 +63,7 @@ pub struct Reaction {
     /// Reaction closure
     #[derivative(PartialEq = "ignore")]
     #[derivative(Debug = "ignore")]
-    body: Box<dyn ReactionFn>,
+    body: Arc<dyn ReactionFn>,
     // Local deadline relative to the time stamp for invocation of the reaction.
     deadline: Option<Deadline>,
 }
@@ -72,7 +75,7 @@ impl Reaction {
         input_ports: Vec<PortKey>,
         output_ports: Vec<PortKey>,
         actions: Vec<ActionKey>,
-        body: Box<dyn ReactionFn>,
+        body: Arc<dyn ReactionFn>,
         deadline: Option<Deadline>,
     ) -> Self {
         Self {

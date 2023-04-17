@@ -4,7 +4,7 @@
 //! An action, like a port (see [`crate::builder::PortBuilder`]), can carry data, but unlike a port,
 //! an action is visible only within the reactor that defines it.
 
-use std::{fmt::Debug, marker::PhantomData, time::Duration};
+use std::{fmt::Debug, marker::PhantomData, rc::Rc, time::Duration};
 
 use crate::runtime;
 use slotmap::SecondaryMap;
@@ -44,7 +44,7 @@ impl<T: runtime::PortData, Q> runtime::InnerType for TypedActionKey<T, Q> {
     type Inner = T;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ActionType {
     Timer { period: Duration, offset: Duration },
     Logical { min_delay: Option<Duration> },
@@ -62,22 +62,24 @@ impl Debug for Box<dyn ActionBuilderFn> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Derivative)]
+#[derivative(Debug)]
 pub struct ActionBuilder {
     /// Name of the Action
     name: String,
     /// Logical type of the action
     ty: ActionType,
     /// Out-going Reactions that this action triggers
-    pub triggers: SecondaryMap<BuilderReactionKey, ()>,
+    pub(crate) triggers: SecondaryMap<BuilderReactionKey, ()>,
     /// List of Reactions that may schedule this action
-    pub schedulers: SecondaryMap<BuilderReactionKey, ()>,
+    pub(crate) schedulers: SecondaryMap<BuilderReactionKey, ()>,
     /// User builder function for the Action
-    action_builder_fn: Box<dyn ActionBuilderFn>,
+    #[derivative(Debug = "ignore")]
+    action_builder_fn: Rc<dyn ActionBuilderFn>,
 }
 
 impl ActionBuilder {
-    pub fn new(name: &str, ty: ActionType, action_builder_fn: Box<dyn ActionBuilderFn>) -> Self {
+    pub fn new(name: &str, ty: ActionType, action_builder_fn: Rc<dyn ActionBuilderFn>) -> Self {
         Self {
             name: name.to_owned(),
             ty,

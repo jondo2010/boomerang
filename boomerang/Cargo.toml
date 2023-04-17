@@ -11,14 +11,15 @@ repository.workspace = true
 categories.workspace = true
 
 [features]
-default = ["visualization", "derive"]
-visualization = []
+default = ["visualization", "derive", "federated"]
+federated = ["boomerang_runtime/federated"]
 derive = ["boomerang_derive"]
+visualization = []
 
 [dependencies]
 anyhow.workspace = true
 derivative = "2.2"
-derive_more = '0.99'
+derive_more = "0.99"
 graphviz-rust = "0.6"
 itertools.workspace = true
 petgraph = "0.6"

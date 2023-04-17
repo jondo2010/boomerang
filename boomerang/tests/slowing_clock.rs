@@ -25,6 +25,7 @@ struct SlowingClockBuilder {
     _timeout: TimeoutBuilder,
 }
 
+#[derive(Clone)]
 struct SlowingClock {
     interval: Duration,
     expected_time: Duration,

@@ -64,6 +64,12 @@ pub enum BuilderError {
         what: String,
     },
 
+    #[error("Expected a top-level reactor, but this reactor has a parent: {parent:?}")]
+    NotTopLevelReactor { parent: BuilderReactorKey },
+
+    #[error("Expected a child reactor, but this reactor has no parent: {reactor:?}")]
+    NotChildReactor { reactor: BuilderReactorKey },
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

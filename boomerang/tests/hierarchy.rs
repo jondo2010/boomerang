@@ -20,6 +20,7 @@ struct SourceBuilder {
     reaction_out: BuilderReactionKey,
 }
 
+#[derive(Clone)]
 struct Source;
 impl Source {
     #[boomerang::reaction(reactor = "SourceBuilder", triggers(action = "t"))]
@@ -43,6 +44,7 @@ struct GainBuilder {
     reaction_in: BuilderReactionKey,
 }
 
+#[derive(Clone)]
 struct Gain {
     gain: u32,
 }
@@ -72,6 +74,7 @@ struct PrintBuilder {
     reaction_in: BuilderReactionKey,
 }
 
+#[derive(Clone)]
 struct Print;
 impl Print {
     #[boomerang::reaction(reactor = "PrintBuilder")]

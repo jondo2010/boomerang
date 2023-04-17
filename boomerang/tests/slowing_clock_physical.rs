@@ -32,6 +32,7 @@ struct SlowingClockPhysicalBuilder {
     _timeout: TimeoutBuilder,
 }
 
+#[derive(Clone)]
 struct SlowingClockPhysical {
     interval: Duration,
     expected_time: Duration,

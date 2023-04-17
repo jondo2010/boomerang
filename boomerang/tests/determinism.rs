@@ -14,6 +14,7 @@ struct SourceBuilder {
     reaction_t: BuilderReactionKey,
 }
 
+#[derive(Clone)]
 struct Source;
 impl Source {
     #[boomerang::reaction(reactor = "SourceBuilder", triggers(action = "t"))]
@@ -37,6 +38,7 @@ struct DestinationBuilder {
     reaction_x_y: BuilderReactionKey,
 }
 
+#[derive(Clone)]
 struct Destination;
 impl Destination {
     #[boomerang::reaction(reactor = "DestinationBuilder")]
@@ -69,6 +71,7 @@ struct PassBuilder {
     reaction_x: BuilderReactionKey,
 }
 
+#[derive(Clone)]
 struct Pass;
 impl Pass {
     #[boomerang::reaction(reactor = "PassBuilder")]

@@ -36,6 +36,17 @@ struct AsyncCallback {
     i: usize,
 }
 
+impl Clone for AsyncCallback {
+    fn clone(&self) -> Self {
+        Self {
+            thread: None,
+            expected_time: self.expected_time.clone(),
+            toggle: self.toggle.clone(),
+            i: self.i.clone(),
+        }
+    }
+}
+
 impl AsyncCallback {
     #[boomerang::reaction(reactor = "AsyncCallbackBuilder", triggers(action = "t"))]
     fn reaction_t(

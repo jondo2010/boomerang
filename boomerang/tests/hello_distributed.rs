@@ -5,7 +5,7 @@
 //! @author Edward A. Lee (original)
 
 use boomerang::{
-    builder::{BuilderReactionKey, EnvBuilder, Reactor, TypedPortKey},
+    builder::{graphviz, BuilderReactionKey, EnvBuilder, Reactor, TypedPortKey},
     runtime, Reactor,
 };
 
@@ -19,6 +19,7 @@ struct SourceBuilder {
     reaction_startup: BuilderReactionKey,
 }
 
+#[derive(Clone)]
 struct Source;
 impl Source {
     #[boomerang::reaction(reactor = "SourceBuilder", triggers(startup))]
@@ -46,6 +47,7 @@ struct DestinationBuilder {
     reaction_shutdown: BuilderReactionKey,
 }
 
+#[derive(Clone)]
 struct Destination {
     received: bool,
 }
@@ -104,59 +106,30 @@ impl HelloDistributed {
     }
 }
 
-impl HelloDistributedBuilder {
-    fn build_federated(
-        name: &str,
-        state: <Self as Reactor>::State,
-        env: &mut EnvBuilder,
-    ) -> Result<(), boomerang::builder::BuilderError>
-    where
-        <Self as Reactor>::State: Clone,
-    {
-        {
-            let __s_state = Source;
-            let mut __builder_s = env.add_reactor(&format!("_fed_{name}_s"), None, state.clone());
-            let outputControlReactionTrigger =
-                __builder_s.add_logical_action::<()>("__outputControlReactionTrigger", None)?;
-            let s: SourceBuilder = __builder_s.add_child_reactor("s", __s_state)?;
-
-            __builder_s
-                .add_reaction(
-                    "__reaction_s_out",
-                    Box::new(
-                        |ctx,
-                         _,
-                         inputs: &[runtime::IPort],
-                         outputs: &mut [runtime::OPort],
-                         actions: &mut [&mut runtime::Action]| {
-                            // Sending from s.out in federate s to d.in in federate d
-                        },
-                    ),
-                )
-                .with_trigger_port(s.out, 0);
-        }
-
-        {
-            let __d_state = Destination { received: false };
-            let mut __builder_d = env.add_reactor(&format!("_fed_{name}_d"), None, state.clone());
-            let d: DestinationBuilder = __builder_d.add_child_reactor("d", __d_state)?;
-        }
-
-        Ok(())
-    }
-}
-
 #[test_log::test]
 fn hello_distributed() {
     let mut env_builder = EnvBuilder::new();
-    let _reactor = HelloDistributedBuilder::build(
+    let (reactor_key, reactor) = HelloDistributedBuilder::build(
         "hello_distributed",
         HelloDistributed,
         None,
         &mut env_builder,
     )
     .unwrap();
-    let env = env_builder.try_into().expect("Error building environment!");
-    let mut sched = runtime::Scheduler::new(env, true, false);
-    sched.event_loop();
+
+    env_builder.federalize_reactor(reactor_key).unwrap();
+
+    dbg!(&env_builder);
+
+    {
+        let gv = graphviz::create_full_graph(&env_builder).unwrap();
+        let path = format!("hello_distributed.dot");
+        let mut f = std::fs::File::create(&path).unwrap();
+        std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
+        tracing::info!("Wrote full graph to {path}");
+    }
+
+    //let env = env_builder .build_runtime() .expect("Error building environment!");
+    //let mut sched = runtime::Scheduler::new(env, true, false);
+    //sched.event_loop();
 }

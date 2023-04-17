@@ -146,7 +146,6 @@ pub fn create_full_graph(env_builder: &EnvBuilder) -> Result<String, BuilderErro
     let graph = env_builder.build_reactor_graph();
     let ordered_reactors = petgraph::algo::toposort(&graph, None)
         .map_err(|e| BuilderError::ReactorGraphCycle { what: e.node_id() })?;
-    let start = *ordered_reactors.first().unwrap();
 
     let mut output = vec![
         "digraph G {".to_owned(),
@@ -157,27 +156,29 @@ pub fn create_full_graph(env_builder: &EnvBuilder) -> Result<String, BuilderErro
         format!("  node [style=filled;colorscheme=\"{}\"];", "accent8"),
     ];
 
-    petgraph::visit::depth_first_search(&graph, Some(start), |event| match event {
-        petgraph::visit::DfsEvent::Discover(key, _) => {
-            let reactor = &env_builder.reactor_builders[key];
-            let reactor_id = key.data().as_ffi() % env_builder.reactor_builders.len() as u64;
+    petgraph::visit::depth_first_search(&graph, ordered_reactors.iter().copied(), |event| {
+        match event {
+            petgraph::visit::DfsEvent::Discover(key, _) => {
+                let reactor = &env_builder.reactor_builders[key];
+                let reactor_id = key.data().as_ffi() % env_builder.reactor_builders.len() as u64;
 
-            output.push(format!("subgraph cluster{} {{", reactor_id));
-            output.push(format!(
-                "  label=\"{} '{}'\";",
-                reactor.type_name(),
-                reactor.get_name()
-            ));
-            output.push("  style=\"rounded\"; node [shape=record];".into());
+                output.push(format!("subgraph cluster{} {{", reactor_id));
+                output.push(format!(
+                    "  label=\"{} '{}'\";",
+                    reactor.type_name(),
+                    reactor.get_name()
+                ));
+                output.push("  style=\"rounded\"; node [shape=record];".into());
 
-            build_ports(env_builder, reactor, reactor_id, &mut output);
-            build_reactions(env_builder, reactor, &mut output);
-            build_actions(env_builder, reactor, &mut output);
+                build_ports(env_builder, reactor, reactor_id, &mut output);
+                build_reactions(env_builder, reactor, &mut output);
+                build_actions(env_builder, reactor, &mut output);
+            }
+            petgraph::visit::DfsEvent::Finish(_, _) => {
+                output.push("}".into());
+            }
+            _ => {}
         }
-        petgraph::visit::DfsEvent::Finish(_, _) => {
-            output.push("}".into());
-        }
-        _ => {}
     });
 
     let reaction_graph = env_builder.build_reaction_graph();

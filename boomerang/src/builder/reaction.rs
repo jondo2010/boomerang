@@ -1,6 +1,8 @@
+use std::sync::Arc;
+
 use super::{
     BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactorKey, EnvBuilder, FindElements,
-    PortType, TypedActionKey, TypedPortKey,
+    PortType,
 };
 use crate::runtime;
 use itertools::Itertools;
@@ -20,7 +22,7 @@ impl petgraph::graph::GraphIndex for BuilderReactionKey {
     }
 }
 
-#[derive(Derivative)]
+#[derive(Derivative, Clone)]
 #[derivative(Debug)]
 pub struct ReactionBuilder {
     #[derivative(Ord = "ignore")]
@@ -32,7 +34,7 @@ pub struct ReactionBuilder {
     pub(super) reactor_key: BuilderReactorKey,
     /// The Reaction function
     #[derivative(Debug = "ignore")]
-    pub(super) reaction_fn: Box<dyn runtime::ReactionFn>,
+    pub(super) reaction_fn: Arc<dyn runtime::ReactionFn>,
     /// Actions that trigger this Reaction, and their relative ordering.
     pub(super) trigger_actions: SecondaryMap<BuilderActionKey, usize>,
     /// Actions that can be scheduled by this Reaction, and their relative ordering.
@@ -46,7 +48,7 @@ pub struct ReactionBuilder {
 impl ReactionBuilder {
     /// Build a [`runtime::Reaction`] from this `ReactionBuilder`.
     pub fn build_reaction(
-        self,
+        &self,
         reactor_key: runtime::keys::ReactorKey,
         port_aliases: &SecondaryMap<BuilderPortKey, runtime::keys::PortKey>,
         action_aliases: &SecondaryMap<BuilderActionKey, runtime::keys::ActionKey>,
@@ -77,12 +79,12 @@ impl ReactionBuilder {
             .collect();
 
         runtime::Reaction::new(
-            self.name,
+            self.name.clone(),
             reactor_key,
             inputs,
             outputs,
             actions,
-            self.reaction_fn,
+            self.reaction_fn.clone(),
             None,
         )
     }
@@ -111,7 +113,7 @@ impl<'a> ReactionBuilderState<'a> {
         name: &str,
         priority: usize,
         reactor_key: BuilderReactorKey,
-        reaction_fn: Box<dyn runtime::ReactionFn>,
+        reaction_fn: Arc<dyn runtime::ReactionFn>,
         env: &'a mut EnvBuilder,
     ) -> Self {
         Self {
@@ -130,9 +132,9 @@ impl<'a> ReactionBuilderState<'a> {
     }
 
     /// Indicate that this Reaction can be triggered by the given Action
-    pub fn with_trigger_action<T: runtime::PortData, Q>(
+    pub fn with_trigger_action(
         mut self,
-        trigger_key: TypedActionKey<T, Q>,
+        trigger_key: impl Into<BuilderActionKey>,
         order: usize,
     ) -> Self {
         self.builder
@@ -142,19 +144,15 @@ impl<'a> ReactionBuilderState<'a> {
     }
 
     /// Indicate that this Reaction can be triggered by the given Port
-    pub fn with_trigger_port<T: runtime::PortData>(
-        mut self,
-        port_key: TypedPortKey<T>,
-        order: usize,
-    ) -> Self {
+    pub fn with_trigger_port(mut self, port_key: impl Into<BuilderPortKey>, order: usize) -> Self {
         self.builder.input_ports.insert(port_key.into(), order);
         self
     }
 
     /// Indicate that this Reaction may schedule the given Action
-    pub fn with_schedulable_action<T: runtime::PortData, Q>(
+    pub fn with_schedulable_action(
         mut self,
-        action_key: TypedActionKey<T, Q>,
+        action_key: impl Into<BuilderActionKey>,
         order: usize,
     ) -> Self {
         self.builder
@@ -164,9 +162,9 @@ impl<'a> ReactionBuilderState<'a> {
     }
 
     /// Indicate that this Reaction may set the value of the given Port (uses keyword).
-    pub fn with_antidependency<T: runtime::PortData>(
+    pub fn with_antidependency(
         mut self,
-        antidep_key: TypedPortKey<T>,
+        antidep_key: impl Into<BuilderPortKey>,
         order: usize,
     ) -> Self {
         self.builder.output_ports.insert(antidep_key.into(), order);
@@ -179,32 +177,35 @@ impl<'a> ReactionBuilderState<'a> {
             env,
         } = self;
 
-        let reactor = &mut env.reactor_builders[reaction_builder.reactor_key];
-        let reactions = &mut env.reaction_builders;
-        let actions = &mut reactor.actions;
-        let ports = &mut env.port_builders;
-
-        let reaction_key = reactions.insert_with_key(|key| {
-            reactor.reactions.insert(key, ());
+        let reaction_key = env.reaction_builders.insert_with_key(|key| {
+            env.reactor_builders[reaction_builder.reactor_key]
+                .reactions
+                .insert(key, ());
             reaction_builder
         });
 
-        let reaction_builder = &reactions[reaction_key];
+        let reaction_builder = &env.reaction_builders[reaction_key];
 
         for trigger_key in reaction_builder.trigger_actions.keys() {
-            let action = actions.get_mut(trigger_key).unwrap();
+            let action = env.reactor_builders[reaction_builder.reactor_key]
+                .actions
+                .get_mut(trigger_key)
+                .unwrap();
             action.triggers.insert(reaction_key, ());
         }
 
         for action_key in reaction_builder.schedulable_actions.keys() {
-            let action = actions.get_mut(action_key).unwrap();
+            let action = env.reactor_builders[reaction_builder.reactor_key]
+                .actions
+                .get_mut(action_key)
+                .unwrap();
             action.schedulers.insert(reaction_key, ());
         }
 
         for port_key in reaction_builder.output_ports.keys() {
-            let port = ports.get_mut(port_key).unwrap();
+            let port = env.port_builders.get_mut(port_key).unwrap();
 
-            if port.get_port_type() == &PortType::Output {
+            if port.get_port_type() == PortType::Output {
                 assert_eq!(
                     reaction_builder.reactor_key,
                     port.get_reactor_key(),
@@ -224,24 +225,36 @@ impl<'a> ReactionBuilderState<'a> {
         }
 
         for port_key in reaction_builder.input_ports.keys() {
-            let port = ports.get_mut(port_key).unwrap();
-            if port.get_port_type() == &PortType::Input {
+            let port = &env.port_builders[port_key];
+
+            if port.get_port_type() == PortType::Input {
                 assert_eq!(
                     reaction_builder.reactor_key,
                     port.get_reactor_key(),
                     "Input port triggers must belong to the same reactor as the triggered reaction"
                 );
             } else {
-                assert_eq!(
-                    reaction_builder.reactor_key,
-                    env.reactor_builders[port.get_reactor_key()]
-                        .parent_reactor_key
-                        .unwrap(),
-                    "Output port triggers must belong to a contained reactor"
-                );
+                let parent_reactor_key =
+                    env.reactor_builders[port.get_reactor_key()].parent_reactor_key;
+                let port_fqn = env.port_fqn(port_key)?;
+                let reactor_fqn = env.reactor_fqn(reaction_builder.reactor_key)?;
+                let reaction_fqn = env.reaction_fqn(reaction_key)?;
+
+                if let Some(parent_reactor_key) = parent_reactor_key {
+                    if parent_reactor_key != reaction_builder.reactor_key {
+                        let parent_fqn = env.reactor_fqn(parent_reactor_key)?;
+                        return Err(BuilderError::Other(anyhow::anyhow!(
+                            "Output port triggers must belong to a contained reactor. Port '{port_fqn}' is an `PortType::Output` set as a trigger for '{reaction_fqn}', but should be within '{parent_fqn}'.",
+                        )));
+                    }
+                } else {
+                    return Err(BuilderError::Other(anyhow::anyhow!(
+                        "Output port triggers must belong to a contained reactor. Port '{port_fqn}' is an output port contained in {reactor_fqn}, but it has no containing reactor.",
+                    )));
+                }
             }
 
-            port.register_dependency(reaction_key, true);
+            env.port_builders[port_key].register_dependency(reaction_key, false);
         }
 
         Ok(reaction_key)

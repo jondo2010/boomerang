@@ -34,14 +34,29 @@ pub enum PortType {
 }
 
 pub trait BasePortBuilder {
+    /// Get the name of this Port
     fn get_name(&self) -> &str;
+    /// Get the key of the Reactor that owns this PortBuilder
     fn get_reactor_key(&self) -> BuilderReactorKey;
+    /// Set the key of the Reactor that owns this PortBuilder
+    fn set_reactor_key(&mut self, reactor_key: BuilderReactorKey);
+    /// Get the key of the Port that this Port is bound to (inwards)
     fn get_inward_binding(&self) -> Option<BuilderPortKey>;
+    /// Set the key of the Port that this Port is bound to (inwards)
     fn set_inward_binding(&mut self, inward_binding: Option<BuilderPortKey>);
+    /// Clear the inward binding of this Port
+    fn clear_inward_binding(&mut self);
+    /// Get the keys of the Ports that this Port is bound to (outwards)
     fn get_outward_bindings(&self) -> secondary::Keys<BuilderPortKey, ()>;
+    /// Add a key of the Port that this Port is bound to (outwards)
     fn add_outward_binding(&mut self, outward_binding: BuilderPortKey);
-    fn get_port_type(&self) -> &PortType;
+    /// Clear the outward bindings of this Port
+    fn clear_outward_bindings(&mut self);
+    /// Get the type of this Port
+    fn get_port_type(&self) -> PortType;
+    /// Get the Reactions that this Port depends on
     fn get_deps(&self) -> Vec<BuilderReactionKey>;
+    /// Get the Reactions that depend on this Port
     fn get_antideps(&self) -> secondary::Keys<BuilderReactionKey, ()>;
     /// Get the out-going Reactions that this Port triggers
     fn get_triggers(&self) -> Vec<BuilderReactionKey>;
@@ -66,7 +81,6 @@ pub struct PortBuilder<T: runtime::PortData> {
 
     inward_binding: Option<TypedPortKey<T>>,
     outward_bindings: SecondaryMap<BuilderPortKey, ()>,
-    //_phantom: PhantomData<T>,
 }
 
 impl<T: runtime::PortData> PortBuilder<T> {
@@ -80,7 +94,6 @@ impl<T: runtime::PortData> PortBuilder<T> {
             triggers: SecondaryMap::new(),
             inward_binding: None,
             outward_bindings: SecondaryMap::new(),
-            //_phantom: PhantomData,
         }
     }
 }
@@ -94,12 +107,16 @@ impl<T: runtime::PortData> BasePortBuilder for PortBuilder<T> {
         self.reactor_key
     }
 
+    fn set_reactor_key(&mut self, reactor_key: BuilderReactorKey) {
+        self.reactor_key = reactor_key;
+    }
+
     fn get_inward_binding(&self) -> Option<BuilderPortKey> {
         self.inward_binding.as_ref().map(|port_key| port_key.0)
     }
 
-    fn get_port_type(&self) -> &PortType {
-        &self.port_type
+    fn get_port_type(&self) -> PortType {
+        self.port_type
     }
 
     fn get_deps(&self) -> Vec<BuilderReactionKey> {
@@ -118,6 +135,10 @@ impl<T: runtime::PortData> BasePortBuilder for PortBuilder<T> {
         self.inward_binding = inward_binding.map(|port_key| TypedPortKey(port_key, PhantomData));
     }
 
+    fn clear_inward_binding(&mut self) {
+        self.inward_binding = None;
+    }
+
     fn get_outward_bindings(&self) -> secondary::Keys<BuilderPortKey, ()> {
         self.outward_bindings.keys()
     }
@@ -125,6 +146,10 @@ impl<T: runtime::PortData> BasePortBuilder for PortBuilder<T> {
     fn add_outward_binding(&mut self, outward_binding: BuilderPortKey) {
         self.outward_bindings
             .insert(outward_binding.data().into(), ());
+    }
+
+    fn clear_outward_bindings(&mut self) {
+        self.outward_bindings.clear();
     }
 
     fn register_dependency(&mut self, reaction_key: BuilderReactionKey, is_trigger: bool) {

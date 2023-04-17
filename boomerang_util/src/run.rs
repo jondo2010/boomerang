@@ -1,5 +1,5 @@
 use crate::{
-    builder::{graphviz, EnvBuilder, Reactor},
+    builder::{graphviz, BuilderReactorKey, EnvBuilder, Reactor},
     runtime,
 };
 use anyhow::Context;
@@ -27,11 +27,13 @@ pub fn build_and_test_reactor<R: Reactor>(
     state: R::State,
     fast_forward: bool,
     keep_alive: bool,
-) -> anyhow::Result<R> {
+) -> anyhow::Result<(BuilderReactorKey, R)> {
     let mut env_builder = EnvBuilder::new();
     let reactor = R::build(name, state, None, &mut env_builder)
         .context("Error building top-level reactor!")?;
-    let env = env_builder.try_into().expect("Error building environment!");
+    let env = env_builder
+        .build_runtime()
+        .expect("Error building environment!");
     let mut sched = runtime::Scheduler::new(env, fast_forward, keep_alive);
     sched.event_loop();
     Ok(reactor)
@@ -39,7 +41,10 @@ pub fn build_and_test_reactor<R: Reactor>(
 
 /// Utility method to build and run a given top-level `Reactor`. Common arguments are parsed from
 /// the command line.
-pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow::Result<R> {
+pub fn build_and_run_reactor<R: Reactor>(
+    name: &str,
+    state: R::State,
+) -> anyhow::Result<(BuilderReactorKey, R)> {
     // build the reactor
     let mut env_builder = EnvBuilder::new();
     let reactor = R::build(name, state, None, &mut env_builder)
@@ -67,7 +72,7 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
         // runtime::util::print_debug_info(&env);
         println!("{env_builder:#?}");
     }
-    let env = env_builder.try_into().unwrap();
+    let env = env_builder.build_runtime().unwrap();
 
     let mut sched = runtime::Scheduler::new(env, false, true);
     sched.event_loop();

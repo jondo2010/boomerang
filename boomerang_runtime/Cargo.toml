@@ -19,6 +19,7 @@ crossbeam-utils = "0.8"
 derivative = "2.2"
 derive_more = '0.99'
 downcast-rs = "1.2"
+dyn-clone.workspace = true
 itertools.workspace = true
 rayon = { version = "1.7", optional = true }
 thiserror.workspace = true

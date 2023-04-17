@@ -15,7 +15,7 @@ pub struct TimeoutBuilder {
     startup: builder::BuilderReactionKey,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Timeout {
     timeout: Duration,
 }

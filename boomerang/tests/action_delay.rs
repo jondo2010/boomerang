@@ -26,6 +26,7 @@ struct GeneratedDelayBuilder {
     reaction_act: BuilderReactionKey,
 }
 
+#[derive(Clone)]
 struct GeneratedDelay {
     y_state: u32,
 }
@@ -67,6 +68,7 @@ struct SourceBuilder {
     reaction_startup: BuilderReactionKey,
 }
 
+#[derive(Clone)]
 struct Source;
 impl Source {
     #[boomerang::reaction(reactor = "SourceBuilder", triggers(startup))]
@@ -87,6 +89,7 @@ struct SinkBuilder {
     #[reactor(reaction(function = "Sink::reaction_in"))]
     reaction_in: BuilderReactionKey,
 }
+#[derive(Clone)]
 struct Sink;
 impl Sink {
     #[boomerang::reaction(reactor = "SinkBuilder")]

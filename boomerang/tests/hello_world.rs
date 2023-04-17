@@ -8,6 +8,7 @@ struct HelloWorld2Builder {
     #[reactor(reaction(function = "HelloWorld2::reaction_shutdown"))]
     reaction_shutdown: BuilderReactionKey,
 }
+#[derive(Clone)]
 struct HelloWorld2 {
     success: bool,
 }

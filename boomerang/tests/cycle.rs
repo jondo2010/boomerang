@@ -19,6 +19,7 @@ struct ABuilder {
     reaction_x2: BuilderReactionKey,
 }
 
+#[derive(Clone)]
 struct A;
 
 impl A {
@@ -45,6 +46,7 @@ struct BBuilder {
     reaction_startup: BuilderReactionKey,
 }
 
+#[derive(Clone)]
 struct B;
 
 impl B {

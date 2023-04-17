@@ -13,9 +13,11 @@ use super::{
 };
 use crate::runtime;
 use slotmap::SlotMap;
-use std::time::Duration;
+use std::{rc::Rc, sync::Arc, time::Duration};
 
 mod debug;
+#[cfg(feature = "federated")]
+mod federated;
 mod output;
 #[cfg(test)]
 mod tests;
@@ -157,7 +159,7 @@ impl EnvBuilder {
         &mut self,
         name: &str,
         reactor_key: BuilderReactorKey,
-        reaction_fn: Box<dyn runtime::ReactionFn>,
+        reaction_fn: Arc<dyn runtime::ReactionFn>,
     ) -> ReactionBuilderState {
         let priority = self.reactor_builders[reactor_key].reactions.len();
         ReactionBuilderState::new(name, priority, reactor_key, reaction_fn, self)
@@ -191,7 +193,7 @@ impl EnvBuilder {
 
         let key = reactor_builder
             .actions
-            .insert(ActionBuilder::new(name, ty, Box::new(action_fn)));
+            .insert(ActionBuilder::new(name, ty, Rc::new(action_fn)));
 
         Ok(key.into())
     }

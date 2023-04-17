@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use super::{
     ActionBuilder, BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactionKey, EnvBuilder,
@@ -24,30 +24,32 @@ impl petgraph::graph::GraphIndex for BuilderReactorKey {
 pub trait Reactor: Sized {
     type State: runtime::ReactorState;
 
+    /// Build a reactor into the given [`EnvBuilder`]
     fn build(
         name: &str,
         state: Self::State,
         parent: Option<BuilderReactorKey>,
         env: &mut EnvBuilder,
-    ) -> Result<Self, BuilderError>;
+    ) -> Result<(BuilderReactorKey, Self), BuilderError>;
 }
 
 /// ReactorBuilder is the Builder-side definition of a Reactor, and is type-erased
+#[derive(Clone)]
 pub(super) struct ReactorBuilder {
     /// The instantiated/child name of the Reactor
-    name: String,
+    pub(super) name: String,
     /// The user's Reactor
-    state: Box<dyn runtime::ReactorState>,
+    pub(super) state: Box<dyn runtime::ReactorState>,
     /// The top-level/class name of the Reactor
-    type_name: String,
+    pub(super) type_name: String,
     /// Optional parent reactor key
-    pub parent_reactor_key: Option<BuilderReactorKey>,
+    pub(super) parent_reactor_key: Option<BuilderReactorKey>,
     /// Reactions in this ReactorType
-    pub reactions: SecondaryMap<BuilderReactionKey, ()>,
+    pub(super) reactions: SecondaryMap<BuilderReactionKey, ()>,
     /// Ports in this Reactor
-    pub ports: SecondaryMap<BuilderPortKey, ()>,
+    pub(super) ports: SecondaryMap<BuilderPortKey, ()>,
     /// Actions in this Reactor
-    pub actions: SlotMap<BuilderActionKey, ActionBuilder>,
+    pub(super) actions: SlotMap<BuilderActionKey, ActionBuilder>,
 }
 
 impl ReactorBuilder {
@@ -59,16 +61,16 @@ impl ReactorBuilder {
         self.type_name.as_ref()
     }
 
-    /// Build this `ReactorBuilder` into a `runtime::Reactor`
+    /// Build this `ReactorBuilder` into a [`runtime::Reactor`]
     pub fn build_runtime(
-        self,
+        &self,
         actions: tinymap::TinyMap<runtime::keys::ActionKey, runtime::Action>,
         action_triggers: tinymap::TinySecondaryMap<
             runtime::keys::ActionKey,
             Vec<runtime::LevelReactionKey>,
         >,
     ) -> runtime::Reactor {
-        runtime::Reactor::new(&self.name, self.state, actions, action_triggers)
+        runtime::Reactor::new(&self.name, self.state.clone(), actions, action_triggers)
     }
 }
 
@@ -164,8 +166,12 @@ impl<'a> ReactorBuilderState<'a> {
     ) -> Result<TypedActionKey, BuilderError> {
         let action_key = self.add_logical_action(name, period)?;
 
-        let startup_fn: Box<dyn runtime::ReactionFn> = Box::new(
-            move |ctx: &mut runtime::Context, _, _, _, actions: &mut [&mut runtime::Action]| {
+        let timer_startup = Arc::new(
+            move |ctx: &mut runtime::Context,
+                  _state: &mut dyn runtime::ReactorState,
+                  _inputs: &[runtime::IPort],
+                  _outputs: &mut [runtime::OPort],
+                  actions: &mut [&mut runtime::Action]| {
                 let [_startup, timer]: &mut [&mut runtime::Action; 2usize] =
                     actions.try_into().unwrap();
                 let mut timer: runtime::ActionRef = (*timer).into();
@@ -173,22 +179,26 @@ impl<'a> ReactorBuilderState<'a> {
             },
         );
 
+        let timer_reset = Arc::new(
+            move |ctx: &mut runtime::Context,
+                  _state: &mut dyn runtime::ReactorState,
+                  _inputs: &[runtime::IPort],
+                  _outputs: &mut [runtime::OPort],
+                  actions: &mut [&mut runtime::Action]| {
+                let [timer]: &mut [&mut runtime::Action; 1usize] = actions.try_into().unwrap();
+                let mut timer: runtime::ActionRef = (*timer).into();
+                ctx.schedule_action(&mut timer, None, period);
+            },
+        );
+
         let startup_key = self.startup_action;
-        self.add_reaction(&format!("_{name}_startup"), startup_fn)
+        self.add_reaction(&format!("_{name}_startup"), timer_startup)
             .with_trigger_action(startup_key, 0)
             .with_schedulable_action(action_key, 1)
             .finish()?;
 
         if period.is_some() {
-            let reset_fn: Box<dyn runtime::ReactionFn> = Box::new(
-                |ctx: &mut runtime::Context, _, _, _, actions: &mut [&mut runtime::Action]| {
-                    let [timer]: &mut [&mut runtime::Action; 1usize] = actions.try_into().unwrap();
-                    let mut timer: runtime::ActionRef = (*timer).into();
-                    ctx.schedule_action(&mut timer, None, None);
-                },
-            );
-
-            self.add_reaction(&format!("_{name}_reset"), reset_fn)
+            self.add_reaction(&format!("_{name}_reset"), timer_reset)
                 .with_trigger_action(action_key, 0)
                 .with_schedulable_action(action_key, 0)
                 .finish()?;
@@ -223,7 +233,7 @@ impl<'a> ReactorBuilderState<'a> {
     pub fn add_reaction(
         &mut self,
         name: &str,
-        reaction_fn: Box<dyn runtime::ReactionFn>,
+        reaction_fn: Arc<dyn runtime::ReactionFn>,
     ) -> ReactionBuilderState {
         self.env.add_reaction(name, self.reactor_key, reaction_fn)
     }
@@ -242,7 +252,7 @@ impl<'a> ReactorBuilderState<'a> {
         &mut self,
         name: &str,
         state: R::State,
-    ) -> Result<R, BuilderError> {
+    ) -> Result<(BuilderReactorKey, R), BuilderError> {
         R::build(name, state, Some(self.reactor_key), self.env)
     }
 
@@ -254,6 +264,26 @@ impl<'a> ReactorBuilderState<'a> {
         port_b_key: TypedPortKey<T>,
     ) -> Result<(), BuilderError> {
         self.env.bind_port(port_a_key, port_b_key)
+    }
+
+    /// Adopt an existing child reactor into this reactor.
+    pub fn adopt_existing_child(&mut self, child_reactor_key: BuilderReactorKey) {
+        self.env.reactor_builders[child_reactor_key].parent_reactor_key = Some(self.reactor_key);
+    }
+
+    /// Clone existing reactions into this reactor.
+    pub fn clone_existing_reactions(
+        &mut self,
+        reactions: impl Iterator<Item = BuilderReactionKey>,
+    ) {
+        for reaction_key in reactions {
+            let mut reaction = self.env.reaction_builders[reaction_key].clone();
+            reaction.reactor_key = self.reactor_key;
+            let reaction_key = self.env.reaction_builders.insert(reaction);
+            self.env.reactor_builders[self.reactor_key]
+                .reactions
+                .insert(reaction_key, ());
+        }
     }
 
     pub fn finish(self) -> Result<BuilderReactorKey, BuilderError> {

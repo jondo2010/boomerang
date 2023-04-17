@@ -33,6 +33,12 @@ pub struct KeyboardEvents {
     raw_terminal: Option<RawTerminal<Stdout>>,
 }
 
+impl Clone for KeyboardEvents {
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+
 impl Default for KeyboardEvents {
     fn default() -> Self {
         Self::new()

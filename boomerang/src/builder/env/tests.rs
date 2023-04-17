@@ -62,12 +62,12 @@ fn test_reactions1() {
     let mut reactor_builder = env_builder.add_reactor("test_reactor", None, ());
 
     let r0_key = reactor_builder
-        .add_reaction("test", Box::new(|_ctx, _r, _i, _o, _a| {}))
+        .add_reaction("test", Arc::new(|_ctx, _r, _i, _o, _a| {}))
         .finish()
         .unwrap();
 
     let r1_key = reactor_builder
-        .add_reaction("test", Box::new(|_ctx, _r, _i, _o, _a| {}))
+        .add_reaction("test", Arc::new(|_ctx, _r, _i, _o, _a| {}))
         .finish()
         .unwrap();
 
@@ -82,7 +82,7 @@ fn test_reactions1() {
 
     // assert_eq!(env_builder.reactors[reactor_key].reactions.len(), 2);
 
-    let env: runtime::Env = env_builder.try_into().unwrap();
+    let env: runtime::Env = env_builder.build_runtime().unwrap();
     assert_eq!(env.reactions.len(), 2);
 }
 

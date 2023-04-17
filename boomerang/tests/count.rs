@@ -15,6 +15,7 @@ struct CountBuilder {
     reaction_t: BuilderReactionKey,
 }
 
+#[derive(Clone)]
 struct Count(u32);
 impl Count {
     #[boomerang::reaction(reactor = "CountBuilder", triggers(action = "t"))]

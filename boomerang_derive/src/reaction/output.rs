@@ -136,34 +136,36 @@ impl ReactionReceiver {
                 }
             };
 
+            /*
             let ty = {
                 let ty = &arg.ty;
                 quote! {<#ty as ::boomerang::runtime::InnerType>::Inner}
             };
+            */
 
             match &arg.attr {
                 ArgumentAttr::Port {
                     attrs: PortAttrs::Triggers,
                     ..
-                } => Some(quote! { .with_trigger_port::<#ty>(reactor.#expr.clone(), 0) }),
+                } => Some(quote! { .with_trigger_port(reactor.#expr.clone(), 0) }),
                 ArgumentAttr::Port {
                     attrs: PortAttrs::Effects,
                     ..
-                } => Some(quote! { .with_antidependency::<#ty>(reactor.#expr.clone(), 0) }),
+                } => Some(quote! { .with_antidependency(reactor.#expr.clone(), 0) }),
                 ArgumentAttr::Action {
                     attrs: ActionAttrs::Triggers,
                     ..
-                } => Some(quote! { .with_trigger_action::<#ty, _>(reactor.#expr.clone(), 0) }),
+                } => Some(quote! { .with_trigger_action(reactor.#expr.clone(), 0) }),
                 ArgumentAttr::Action {
                     attrs: ActionAttrs::Effects,
                     ..
-                } => Some(quote! { .with_schedulable_action::<#ty, _>(reactor.#expr.clone(), 0) }),
+                } => Some(quote! { .with_schedulable_action(reactor.#expr.clone(), 0) }),
                 ArgumentAttr::Action {
                     attrs: ActionAttrs::TriggersAndEffects,
                     ..
                 } => Some(quote! {
-                    .with_trigger_action::<#ty, _>(reactor.#expr.clone(), 0)
-                    .with_schedulable_action::<#ty, _>(reactor.#expr.clone(), 0)
+                    .with_trigger_action(reactor.#expr.clone(), 0)
+                    .with_schedulable_action(reactor.#expr.clone(), 0)
                 }),
                 _ => None,
             }
@@ -211,23 +213,24 @@ impl darling::ToTokens for ReactionReceiver {
         let actions_destructure = self.actions_destructure_tokens();
         let fn_args = self.fn_args_tokens();
         let wrapper_block = quote! {
-            let __wrapper: Box<dyn ::boomerang::runtime::ReactionFn> = Box::new(
-                move |
-                    ctx: &mut ::boomerang::runtime::Context,
-                    state: &mut dyn runtime::ReactorState,
-                    inputs,
-                    outputs,
-                    actions: &mut [&mut runtime::Action]
-                | {
+            let __wrapper = ::std::sync::Arc::new(
+                |ctx: &mut ::boomerang::runtime::Context,
+                 state: &mut dyn ::boomerang::runtime::ReactorState,
+                 inputs: &[::boomerang::runtime::IPort<'_>],
+                 outputs: &mut [::boomerang::runtime::OPort<'_>],
+                 actions: &mut [&mut ::boomerang::runtime::Action]| {
                     #inputs_destructure
                     #outputs_destructure
                     #actions_destructure
                     Self::#fn_ident(
-                        state.downcast_mut().expect("Unable to downcast reactor state"),
+                        state
+                            .downcast_mut()
+                            .expect("Unable to downcast reactor state"),
                         ctx,
                         #(#fn_args,)*
                     );
-                });
+                },
+            );
         };
 
         // Build the rest of the reaction declaration

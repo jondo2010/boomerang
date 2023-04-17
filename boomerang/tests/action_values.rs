@@ -20,6 +20,7 @@ struct ActionValuesBuilder {
     reaction_shutdown: BuilderReactionKey,
 }
 
+#[derive(Clone)]
 struct ActionValues {
     r1done: bool,
     r2done: bool,

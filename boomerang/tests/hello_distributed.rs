@@ -30,7 +30,7 @@ impl Source {
     ) {
         println!("Sending 'Hello World!' message from source federate.");
         *out.get_mut() = Some("Hello World!".to_string());
-        ctx.schedule_shutdown(None);
+        //ctx.schedule_shutdown(None);
     }
 }
 
@@ -117,9 +117,12 @@ fn hello_distributed() {
     )
     .unwrap();
 
-    env_builder.federalize_reactor(reactor_key).unwrap();
+    let federate_keys = env_builder.federalize_reactor(reactor_key).unwrap();
 
-    dbg!(&env_builder);
+    let f0 = federate_keys[0];
+    let f1 = federate_keys[1];
+
+    env_builder.remove_reactor(f1).unwrap();
 
     {
         let gv = graphviz::create_full_graph(
@@ -133,7 +136,12 @@ fn hello_distributed() {
         tracing::info!("Wrote full graph to {path}");
     }
 
-    //let env = env_builder .build_runtime() .expect("Error building environment!");
-    //let mut sched = runtime::Scheduler::new(env, true, false);
-    //sched.event_loop();
+    dbg!(&env_builder);
+
+    let env = env_builder
+        .build_runtime()
+        .expect("Error building environment!");
+
+    let mut sched = runtime::Scheduler::new(env, true, false);
+    sched.event_loop();
 }

@@ -117,25 +117,37 @@ impl<'a> ReactorBuilderState<'a> {
         env: &'a mut EnvBuilder,
     ) -> Self {
         let type_name = std::any::type_name::<S>();
-        let reactor_key = env.reactor_builders.insert({
-            ReactorBuilder {
-                name: name.into(),
-                state: Box::new(reactor_state),
-                type_name: type_name.into(),
-                parent_reactor_key: parent,
-                reactions: SecondaryMap::new(),
-                ports: SecondaryMap::new(),
-                actions: SlotMap::with_key(),
-            }
-        });
+        let builder = ReactorBuilder {
+            name: name.into(),
+            state: Box::new(reactor_state),
+            type_name: type_name.into(),
+            parent_reactor_key: parent,
+            reactions: SecondaryMap::new(),
+            ports: SecondaryMap::new(),
+            actions: SlotMap::with_key(),
+        };
+
+        Self::from_reactor(builder, env)
+    }
+
+    pub(super) fn from_reactor(builder: ReactorBuilder, env: &'a mut EnvBuilder) -> Self {
+        let reactor_key = env.reactor_builders.insert(builder);
 
         let startup_action = env
-            .add_startup_action("_start", reactor_key)
-            .expect("Duplicate startup Action?");
+            .find_action_by_name("_start", reactor_key)
+            .map(|action| action.into())
+            .unwrap_or_else(|_| {
+                env.add_shutdown_action("_start", reactor_key)
+                    .expect("Duplicate startup Action?")
+            });
 
         let shutdown_action = env
-            .add_shutdown_action("_stop", reactor_key)
-            .expect("Duplicate shutdown Action?");
+            .find_action_by_name("_stop", reactor_key)
+            .map(|action| action.into())
+            .unwrap_or_else(|_| {
+                env.add_shutdown_action("_stop", reactor_key)
+                    .expect("Duplicate shutdown Action?")
+            });
 
         Self {
             reactor_key,
@@ -335,7 +347,15 @@ impl<'a> ReactorBuilderState<'a> {
                 .map(|(action_key, order)| (action_mapping[action_key], *order))
                 .collect();
 
+            // replace any schedulable actions in the cloned reaction with the new action keys from `action_mapping`
+            let new_schedulable = cloned_reaction
+                .schedulable_actions
+                .iter()
+                .map(|(action_key, order)| (action_mapping[action_key], *order))
+                .collect();
+
             cloned_reaction.trigger_actions = new_triggers;
+            cloned_reaction.schedulable_actions = new_schedulable;
 
             let cloned_reaction_key = self.env.reaction_builders.insert_with_key(|reaction_key| {
                 // update the action's triggers to include the new reaction

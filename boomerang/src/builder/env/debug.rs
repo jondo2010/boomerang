@@ -4,7 +4,8 @@ use itertools::Itertools;
 use std::{collections::BTreeMap, fmt::Debug};
 
 use crate::builder::{
-    BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactionKey, BuilderReactorKey,
+    BasePortBuilder, BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactionKey,
+    BuilderReactorKey, ReactionBuilder,
 };
 
 use super::EnvBuilder;
@@ -93,13 +94,102 @@ impl Debug for Dependency {
     }
 }
 
+#[derive(Debug)]
+#[allow(dead_code)]
+struct PortDebug {
+    key: BuilderPortKey,
+    deps: Vec<String>,
+    anti_deps: Vec<String>,
+    outward_bindings: Vec<String>,
+    inward_bindings: Option<String>,
+    triggers: Vec<String>,
+}
+
+impl PortDebug {
+    fn new(key: BuilderPortKey, port: &Box<dyn BasePortBuilder>, env: &EnvBuilder) -> Self {
+        Self {
+            key,
+            deps: port
+                .get_deps()
+                .iter()
+                .map(|reaction_key| env.reaction_fqn(*reaction_key).unwrap())
+                .collect(),
+            anti_deps: port
+                .get_antideps()
+                .map(|reaction_key| env.reaction_fqn(reaction_key).unwrap())
+                .collect(),
+            outward_bindings: port
+                .get_outward_bindings()
+                .map(|port_key| env.port_fqn(port_key).unwrap())
+                .collect(),
+            inward_bindings: port
+                .get_inward_binding()
+                .map(|port_key| env.port_fqn(port_key).unwrap()),
+            triggers: port
+                .get_triggers()
+                .iter()
+                .map(|reaction_key| env.reaction_fqn(*reaction_key).unwrap())
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+struct ReactionDebug {
+    key: BuilderReactionKey,
+    level: String,
+    input_ports: Vec<String>,
+    output_ports: Vec<String>,
+    trigger_actions: Vec<String>,
+    schedulable_actions: Vec<String>,
+}
+
+impl ReactionDebug {
+    fn new(
+        key: BuilderReactionKey,
+        reaction: &ReactionBuilder,
+        level: usize,
+        env: &EnvBuilder,
+    ) -> Self {
+        Self {
+            key,
+            level: format!("Level({level})"),
+            input_ports: reaction
+                .input_ports
+                .keys()
+                .map(|port_key| env.port_fqn(port_key).unwrap())
+                .collect(),
+            output_ports: reaction
+                .output_ports
+                .keys()
+                .map(|port_key| env.port_fqn(port_key).unwrap())
+                .collect(),
+            trigger_actions: reaction
+                .trigger_actions
+                .keys()
+                .map(|action_key| env.action_fqn(action_key).unwrap())
+                .collect(),
+            schedulable_actions: reaction
+                .schedulable_actions
+                .keys()
+                .map(|action_key| env.action_fqn(action_key).unwrap())
+                .collect(),
+        }
+    }
+}
+
 impl Debug for EnvBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let ports = self
             .port_builders
-            .keys()
-            .map(|port_key| self.port_fqn(port_key).unwrap())
-            .collect_vec();
+            .iter()
+            .map(|(port_key, port)| {
+                let fqn = self.port_fqn(port_key).unwrap();
+                let debug_struct = PortDebug::new(port_key, port, self);
+                (fqn, debug_struct)
+            })
+            .collect::<BTreeMap<_, _>>();
 
         let reactors = self
             .reactor_builders
@@ -120,11 +210,14 @@ impl Debug for EnvBuilder {
             .collect_vec();
 
         let reaction_levels = self.build_runtime_level_map().unwrap();
+
         let reactions = reaction_levels
             .iter()
-            .map(|(key, level)| {
-                let fqn = self.reaction_fqn(key).unwrap();
-                (format!("{key:?}, {fqn}"), format!("Level({level})"))
+            .map(|(reaction_key, level)| {
+                let reaction = &self.reaction_builders[reaction_key];
+                let fqn = self.reaction_fqn(reaction_key).unwrap();
+                let debug_struct = ReactionDebug::new(reaction_key, reaction, *level, self);
+                (fqn, debug_struct)
             })
             .collect::<BTreeMap<_, _>>();
 
@@ -147,32 +240,5 @@ impl Debug for EnvBuilder {
             .field("reaction_dependency_edges", &edges)
             .field("reactions", &reactions)
             .finish()
-    }
-
-    #[cfg(feature = "disabled")]
-    fn debug_info(&self) {
-        for (runtime_port_key, triggers) in runtime_port_parts.port_triggers.iter() {
-            // reverse look up the builder::port_key from the runtime::port_key
-            let port_key = runtime_port_parts
-                .aliases
-                .iter()
-                .find_map(|(port_key, runtime_port_key_b)| {
-                    if &runtime_port_key == runtime_port_key_b {
-                        Some(port_key)
-                    } else {
-                        None
-                    }
-                })
-                .expect("Illegal internal state.");
-            debug!(
-                "{:?}: {:?}",
-                self.port_fqn(port_key).unwrap(),
-                triggers
-                    .iter()
-                    .map(|key| self.reaction_fqn(*key))
-                    .collect::<Result<Vec<_>, _>>()
-                    .unwrap()
-            );
-        }
     }
 }

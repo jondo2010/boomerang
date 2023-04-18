@@ -12,6 +12,16 @@ impl_downcast!(sync ReactorState);
 
 dyn_clone::clone_trait_object!(ReactorState);
 
+#[test]
+fn test_clone() {
+    #[derive(Debug, Clone, PartialEq)]
+    struct Foo;
+    let mut reactor_state = Box::new(Foo) as Box<dyn ReactorState>;
+    let mut cloned = reactor_state.clone();
+    assert_eq!(reactor_state.downcast_mut::<Foo>(), Some(Foo).as_mut());
+    assert_eq!(cloned.downcast_mut::<Foo>(), Some(Foo).as_mut());
+}
+
 pub(crate) trait ReactorElement {
     fn startup(&self, _ctx: &mut Context, _key: ActionKey) {}
     fn shutdown(&self, _reaction_set: &mut ReactionSet) {}

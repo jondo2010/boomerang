@@ -228,12 +228,10 @@ impl EnvBuilder {
             self.port_builders[*port_key].clear_inward_binding();
         }
 
-        let parent = &self.reactor_builders[parent_reactor_key];
-
         let federate_name = format!("{}-federate", child_reactor.get_name());
 
         // These reactions will be cloned to each federate from the original reactor.
-        let filtered_reactions = parent.reactions.keys().filter_map(|reaction_key| {
+        let filtered_reactions = self.reactor_builders[parent_reactor_key].reactions.keys().filter_map(|reaction_key| {
             let reaction = &self.reaction_builders[reaction_key];
 
             // If the reaction is bound to a port not in the child reactor, we need to drop it and issue a warning.
@@ -248,7 +246,7 @@ impl EnvBuilder {
             }
         }).collect_vec();
 
-        let mut builder = self.add_reactor(&federate_name, None, parent.state.clone());
+        let mut builder = self.add_reactor_cloned(&federate_name, None, parent_reactor_key);
         let action_mapping = builder.clone_reactor_actions(parent_reactor_key);
 
         builder.adopt_existing_child(child_reactor_key);
@@ -263,10 +261,11 @@ impl EnvBuilder {
     }
 
     /// Transform the top-level reactor specified into multiple federated reactors.
+    /// Returns the keys of the new federated reactors.
     pub fn federalize_reactor(
         &mut self,
         reactor_key: BuilderReactorKey,
-    ) -> Result<(), BuilderError> {
+    ) -> Result<Vec<BuilderReactorKey>, BuilderError> {
         if let Some(parent_reactor_key) = self.reactor_builders[reactor_key].parent_reactor_key {
             return Err(BuilderError::NotTopLevelReactor {
                 parent: parent_reactor_key,
@@ -286,13 +285,14 @@ impl EnvBuilder {
             })
             .collect_vec();
 
-        for child in children {
-            self.clone_reactor_as_federate(child)?;
-        }
+        let new_children = children
+            .into_iter()
+            .map(|child| self.clone_reactor_as_federate(child))
+            .collect::<Result<Vec<_>, _>>()?;
 
         // Remove the original reactor.
         self.remove_reactor(reactor_key)?;
 
-        Ok(())
+        Ok(new_children)
     }
 }

@@ -13,7 +13,7 @@ use super::{
 };
 use crate::runtime;
 use itertools::Itertools;
-use slotmap::SlotMap;
+use slotmap::{SecondaryMap, SlotMap};
 use std::{rc::Rc, sync::Arc, time::Duration};
 
 mod debug;
@@ -46,7 +46,6 @@ impl EnvBuilder {
     }
 
     /// Add a new Reactor
-    /// - name: Instance name of the reactor
     pub fn add_reactor<S: runtime::ReactorState>(
         &mut self,
         name: &str,
@@ -54,6 +53,28 @@ impl EnvBuilder {
         reactor: S,
     ) -> ReactorBuilderState {
         ReactorBuilderState::new(name, parent, reactor, self)
+    }
+
+    /// Add a new Reactor by cloning an existing one
+    pub fn add_reactor_cloned(
+        &mut self,
+        name: &str,
+        parent: Option<BuilderReactorKey>,
+        reactor_key: BuilderReactorKey,
+    ) -> ReactorBuilderState {
+        let existing = &self.reactor_builders[reactor_key];
+
+        let builder = ReactorBuilder {
+            name: name.into(),
+            state: existing.state.clone(),
+            type_name: existing.type_name.clone(),
+            parent_reactor_key: parent,
+            reactions: SecondaryMap::new(),
+            ports: SecondaryMap::new(),
+            actions: SlotMap::with_key(),
+        };
+
+        ReactorBuilderState::from_reactor(builder, self)
     }
 
     /// Add a new Port
@@ -360,7 +381,7 @@ impl EnvBuilder {
     }
 
     /// Recursively remove a reactor from the environment
-    fn remove_reactor(&mut self, reactor_key: BuilderReactorKey) -> Result<(), BuilderError> {
+    pub fn remove_reactor(&mut self, reactor_key: BuilderReactorKey) -> Result<(), BuilderError> {
         tracing::debug!(
             ?reactor_key,
             "Removing reactor {}",

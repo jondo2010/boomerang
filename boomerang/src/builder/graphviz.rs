@@ -44,27 +44,27 @@ impl Config {
     }
 }
 
-fn action_id(key: BuilderActionKey, reactor_id: u64, reactor: &ReactorBuilder) -> u64 {
-    1000 * reactor_id + (key.data().as_ffi() % (reactor.actions.len() as u64 + 1))
+fn action_id(key: BuilderActionKey, reactor_id: u64) -> u64 {
+    1000 * reactor_id + key.data().as_ffi()
 }
 
-fn reaction_id(key: BuilderReactionKey, env: &EnvBuilder) -> u64 {
-    key.data().as_ffi() % (env.reaction_builders.len() as u64 + 1)
+fn reaction_id(key: BuilderReactionKey) -> u64 {
+    key.data().as_ffi()
 }
 
-fn port_id(key: BuilderPortKey, env: &EnvBuilder) -> u64 {
-    key.data().as_ffi() % (env.port_builders.len() as u64 + 1)
+fn port_id(key: BuilderPortKey) -> u64 {
+    key.data().as_ffi()
 }
 
-fn reactor_id(key: BuilderReactorKey, env: &EnvBuilder) -> u64 {
-    key.data().as_ffi() % (env.reactor_builders.len() as u64 + 1)
+fn reactor_id(key: BuilderReactorKey) -> u64 {
+    key.data().as_ffi()
 }
 
 /// Build the node name string for a Port
 fn port_node_name(env_builder: &EnvBuilder, port_key: BuilderPortKey) -> String {
     let port = &env_builder.port_builders[port_key];
-    let port_id = port_id(port_key, env_builder);
-    let port_reactor_id = reactor_id(port.get_reactor_key(), env_builder);
+    let port_id = port_id(port_key);
+    let port_reactor_id = reactor_id(port.get_reactor_key());
     match port.get_port_type() {
         PortType::Input => format!("inputs{}:p{}", port_reactor_id, port_id),
         PortType::Output => format!("outputs{}:p{}", port_reactor_id, port_id),
@@ -78,7 +78,7 @@ fn build_ports(
     output: &mut Vec<String>,
 ) {
     let (inputs, outputs): (Vec<_>, Vec<_>) = reactor.ports.keys().partition_map(|key| {
-        let port_id = port_id(key, env_builder);
+        let port_id = port_id(key);
         let port = &env_builder.port_builders[key];
         let s = format!("<p{}> {}", port_id, port.get_name());
 
@@ -109,7 +109,7 @@ fn build_reactions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &
         .keys()
         .map(|reaction_key| (reaction_key, &env_builder.reaction_builders[reaction_key]))
     {
-        let reaction_id = reaction_id(reaction_key, env_builder);
+        let reaction_id = reaction_id(reaction_key);
         output.push(format!(
             "  r{} [label=\"{} ({})\";shape=cds;color=3];",
             reaction_id, reaction.name, reaction.priority
@@ -130,14 +130,14 @@ fn build_reactions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &
 }
 
 fn build_actions(
-    env_builder: &EnvBuilder,
+    _env_builder: &EnvBuilder,
     reactor: &ReactorBuilder,
     reactor_id: u64,
     output: &mut Vec<String>,
     hide_orphaned_actions: bool,
 ) {
     for (action_key, action) in reactor.actions.iter() {
-        let action_id = action_id(action_key, reactor_id, reactor);
+        let action_id = action_id(action_key, reactor_id);
 
         let xlabel = match action.get_type() {
             ActionType::Timer { period, offset } => {
@@ -163,12 +163,12 @@ fn build_actions(
             ));
 
             for reaction_key in action.triggers.keys() {
-                let reaction_id = reaction_id(reaction_key, env_builder);
+                let reaction_id = reaction_id(reaction_key);
                 output.push(format!("  a{action_id}:e -> r{reaction_id}:w;"));
             }
 
             for reaction_key in action.schedulers.keys() {
-                let reaction_id = reaction_id(reaction_key, env_builder);
+                let reaction_id = reaction_id(reaction_key);
                 output.push(format!(
                     "  r{reaction_id}:e -> a{action_id}:w [style=dashed];",
                 ));
@@ -217,7 +217,7 @@ pub fn create_full_graph(env_builder: &EnvBuilder, config: Config) -> Result<Str
         match event {
             petgraph::visit::DfsEvent::Discover(key, _) => {
                 let reactor = &env_builder.reactor_builders[key];
-                let reactor_id = reactor_id(key, env_builder);
+                let reactor_id = reactor_id(key);
 
                 output.push(format!("subgraph cluster{} {{", reactor_id));
                 output.push(format!(
@@ -247,8 +247,8 @@ pub fn create_full_graph(env_builder: &EnvBuilder, config: Config) -> Result<Str
     if config.show_reaction_graph_edges {
         let reaction_graph = env_builder.build_reaction_graph();
         for (r1, r2, _) in reaction_graph.all_edges() {
-            let r1_id = reaction_id(r1, env_builder);
-            let r2_id = reaction_id(r2, env_builder);
+            let r1_id = reaction_id(r1);
+            let r2_id = reaction_id(r2);
             output.push(format!(
                 "r{r1_id} -> r{r2_id} [style=dashed;color=red;constraint=false];"
             ));
@@ -287,7 +287,7 @@ pub fn create_reaction_graph(env_builder: &EnvBuilder) -> Result<String, Builder
 
         for &key in reactions.iter() {
             let _reaction = &env_builder.reaction_builders[key];
-            let reaction_id = reaction_id(key, env_builder);
+            let reaction_id = reaction_id(key);
             output.push(format!(
                 "  r{} [label=\"{}\";shape=cds;color=3];",
                 reaction_id,
@@ -299,8 +299,8 @@ pub fn create_reaction_graph(env_builder: &EnvBuilder) -> Result<String, Builder
     }
 
     for (from, to, _) in reaction_graph.all_edges() {
-        let from_id = reaction_id(from, env_builder);
-        let to_id = reaction_id(to, env_builder);
+        let from_id = reaction_id(from);
+        let to_id = reaction_id(to);
         output.push(format!("  r{} -> r{};", from_id, to_id));
     }
 

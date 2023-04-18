@@ -272,7 +272,7 @@ impl Scheduler {
 
                     let reaction_name = reaction.get_name();
                     let reactor_name = reactor.get_name();
-                    trace!("    Executing {reactor_name}/{reaction_name}.",);
+                    tracing::trace!("    Executing {reactor_name}/{reaction_name}.",);
 
                     //TODO: Plumb these iterators through into the generated reaction code.
                     let inputs = inputs.collect::<Vec<_>>();

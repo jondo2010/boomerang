@@ -266,7 +266,7 @@ impl<'a> ReactionBuilderState<'a> {
                 }
             }
 
-            env.port_builders[port_key].register_dependency(reaction_key, false);
+            env.port_builders[port_key].register_dependency(reaction_key, true);
         }
 
         Ok(reaction_key)

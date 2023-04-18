@@ -122,7 +122,11 @@ fn hello_distributed() {
     dbg!(&env_builder);
 
     {
-        let gv = graphviz::create_full_graph(&env_builder).unwrap();
+        let gv = graphviz::create_full_graph(
+            &env_builder,
+            graphviz::Config::new().hide_orphaned_actions(true),
+        )
+        .unwrap();
         let path = format!("hello_distributed.dot");
         let mut f = std::fs::File::create(&path).unwrap();
         std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();

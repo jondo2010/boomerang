@@ -4,7 +4,8 @@ use super::{
     ActionBuilder, BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactionKey, EnvBuilder,
     FindElements, Logical, Physical, PortType, ReactionBuilderState, TypedActionKey, TypedPortKey,
 };
-use crate::runtime;
+use crate::{runtime, DebugMap};
+use itertools::Itertools;
 use slotmap::{SecondaryMap, SlotMap};
 
 slotmap::new_key_type! {
@@ -52,6 +53,19 @@ pub(super) struct ReactorBuilder {
     pub(super) actions: SlotMap<BuilderActionKey, ActionBuilder>,
 }
 
+impl std::fmt::Debug for ReactorBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReactorBuilder")
+            .field("name", &self.name)
+            .field("(state) type_name", &self.type_name)
+            .field("parent_reactor_key", &self.parent_reactor_key)
+            .field("reactions", &self.reactions.keys().collect_vec())
+            .field("ports", &self.ports.keys().collect_vec())
+            .field("actions", &DebugMap(&self.actions))
+            .finish()
+    }
+}
+
 impl ReactorBuilder {
     pub fn get_name(&self) -> &str {
         &self.name
@@ -74,25 +88,14 @@ impl ReactorBuilder {
     }
 }
 
-impl std::fmt::Debug for ReactorBuilder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ReactorBuilder")
-            .field("name", &self.name)
-            .field("(state) type_name", &self.type_name)
-            .field("parent_reactor_key", &self.parent_reactor_key)
-            .field("reactions", &self.reactions)
-            .field("ports", &self.ports)
-            .field("actions", &self.actions)
-            .finish()
-    }
-}
-
 /// Builder struct used to facilitate construction of a ReactorBuilder by user/generated code.
 pub struct ReactorBuilderState<'a> {
     /// The ReactorKey of this Builder
-    reactor_key: BuilderReactorKey,
-    env: &'a mut EnvBuilder,
+    pub(crate) reactor_key: BuilderReactorKey,
+    pub(crate) env: &'a mut EnvBuilder,
+    /// The startup action for this reactor
     startup_action: TypedActionKey,
+    /// The shutdown action for this reactor
     shutdown_action: TypedActionKey,
 }
 
@@ -127,11 +130,11 @@ impl<'a> ReactorBuilderState<'a> {
         });
 
         let startup_action = env
-            .add_startup_action("__startup", reactor_key)
+            .add_startup_action("_start", reactor_key)
             .expect("Duplicate startup Action?");
 
         let shutdown_action = env
-            .add_shutdown_action("__shutdown", reactor_key)
+            .add_shutdown_action("_stop", reactor_key)
             .expect("Duplicate shutdown Action?");
 
         Self {
@@ -271,18 +274,83 @@ impl<'a> ReactorBuilderState<'a> {
         self.env.reactor_builders[child_reactor_key].parent_reactor_key = Some(self.reactor_key);
     }
 
+    /// Clone existing actions from `reactor_key` into this reactor.
+    ///
+    /// Returns a mapping of existing action keys to new action keys.
+    pub fn clone_reactor_actions(
+        &mut self,
+        reactor_key: BuilderReactorKey,
+    ) -> SecondaryMap<BuilderActionKey, BuilderActionKey> {
+        let mut mapping = SecondaryMap::new();
+
+        // Find the startup and shutdown actions in the existing reactor
+        let existing_reactor = &self.env.reactor_builders[reactor_key];
+        let existing_startup = self
+            .get_action_by_name("_start")
+            .expect("Reactor has no startup action?");
+        let existing_shutdown = self
+            .get_action_by_name("_stop")
+            .expect("Reactor has no shutdown action?");
+
+        mapping.insert(existing_startup, self.startup_action.into());
+        mapping.insert(existing_shutdown, self.shutdown_action.into());
+
+        let cloned_actions = existing_reactor
+            .actions
+            .iter()
+            .filter_map(|(action_key, action)| {
+                if action_key == existing_startup || action_key == existing_shutdown {
+                    None
+                } else {
+                    Some((action_key, action.clone()))
+                }
+            })
+            .collect_vec();
+
+        for (action_key, action) in cloned_actions {
+            let new_action_key = self.env.reactor_builders[self.reactor_key]
+                .actions
+                .insert(action);
+
+            mapping.insert(action_key, new_action_key);
+        }
+
+        mapping
+    }
+
     /// Clone existing reactions into this reactor.
     pub fn clone_existing_reactions(
         &mut self,
         reactions: impl Iterator<Item = BuilderReactionKey>,
+        action_mapping: &SecondaryMap<BuilderActionKey, BuilderActionKey>,
     ) {
         for reaction_key in reactions {
-            let mut reaction = self.env.reaction_builders[reaction_key].clone();
-            reaction.reactor_key = self.reactor_key;
-            let reaction_key = self.env.reaction_builders.insert(reaction);
+            let mut cloned_reaction = self.env.reaction_builders[reaction_key].clone();
+            cloned_reaction.reactor_key = self.reactor_key;
+
+            // replace any trigger actions in the cloned reaction with the new action keys from `action_mapping`
+            let new_triggers = cloned_reaction
+                .trigger_actions
+                .iter()
+                .map(|(action_key, order)| (action_mapping[action_key], *order))
+                .collect();
+
+            cloned_reaction.trigger_actions = new_triggers;
+
+            let cloned_reaction_key = self.env.reaction_builders.insert_with_key(|reaction_key| {
+                // update the action's triggers to include the new reaction
+                for action_key in cloned_reaction.trigger_actions.keys() {
+                    self.env.reactor_builders[self.reactor_key].actions[action_key]
+                        .triggers
+                        .insert(reaction_key, ());
+                }
+
+                cloned_reaction
+            });
+
             self.env.reactor_builders[self.reactor_key]
                 .reactions
-                .insert(reaction_key, ());
+                .insert(cloned_reaction_key, ());
         }
     }
 

@@ -57,7 +57,9 @@ impl KeyboardEvents {
         #[reactor::action(triggers)] key_press: runtime::PhysicalActionRef<Key>,
         #[reactor::port(effects)] arrow_key_pressed: &mut runtime::Port<Key>,
     ) {
-        *arrow_key_pressed.deref_mut() = ctx.get_action(&key_press);
+        ctx.read_action_with(&key_press, |key| {
+            *arrow_key_pressed.deref_mut() = key.copied();
+        });
     }
 
     #[boomerang::reaction(reactor = "KeyboardEventsBuilder", triggers(shutdown))]

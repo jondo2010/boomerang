@@ -4,12 +4,12 @@
 //! An action, like a port (see [`crate::builder::PortBuilder`]), can carry data, but unlike a port,
 //! an action is visible only within the reactor that defines it.
 
+use itertools::Itertools;
+use slotmap::SecondaryMap;
 use std::{fmt::Debug, marker::PhantomData, rc::Rc, time::Duration};
 
-use crate::runtime;
-use slotmap::SecondaryMap;
-
 use super::BuilderReactionKey;
+use crate::runtime;
 
 slotmap::new_key_type! {pub struct BuilderActionKey;}
 
@@ -63,7 +63,6 @@ impl Debug for Box<dyn ActionBuilderFn> {
 }
 
 #[derive(Clone, Derivative)]
-#[derivative(Debug)]
 pub struct ActionBuilder {
     /// Name of the Action
     name: String,
@@ -74,8 +73,18 @@ pub struct ActionBuilder {
     /// List of Reactions that may schedule this action
     pub(crate) schedulers: SecondaryMap<BuilderReactionKey, ()>,
     /// User builder function for the Action
-    #[derivative(Debug = "ignore")]
     action_builder_fn: Rc<dyn ActionBuilderFn>,
+}
+
+impl Debug for ActionBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActionBuilder")
+            .field("name", &self.name)
+            .field("ty", &self.ty)
+            .field("triggers", &self.triggers.keys().collect_vec())
+            .field("schedulers", &self.schedulers.keys().collect_vec())
+            .finish()
+    }
 }
 
 impl ActionBuilder {

@@ -89,3 +89,26 @@ pub enum BoomerangError {
     #[error(transparent)]
     Runtime(#[from] boomerang_runtime::RuntimeError),
 }
+
+/// Wrapper around [`slotmap::SlotMap`] and [`slotmap::SecondaryMap`] that implements [`Debug`] as a map.
+pub struct DebugMap<'a, T>(&'a T);
+
+impl<'a, K, V> std::fmt::Debug for DebugMap<'a, slotmap::SecondaryMap<K, V>>
+where
+    K: slotmap::Key + std::fmt::Debug,
+    V: std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_map().entries(self.0.iter()).finish()
+    }
+}
+
+impl<'a, K, V> std::fmt::Debug for DebugMap<'a, slotmap::SlotMap<K, V>>
+where
+    K: slotmap::Key + std::fmt::Debug,
+    V: std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_map().entries(self.0.iter()).finish()
+    }
+}

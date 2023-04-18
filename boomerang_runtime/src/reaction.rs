@@ -1,7 +1,4 @@
-use std::{
-    rc::Rc,
-    sync::{Arc, RwLock},
-};
+use std::sync::{Arc, RwLock};
 
 use boomerang_core::time::Timestamp;
 use crossbeam_channel::Sender;

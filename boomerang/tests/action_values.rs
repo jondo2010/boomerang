@@ -46,7 +46,7 @@ impl ActionValues {
         #[reactor::action(triggers)] act: runtime::ActionRef<i32>,
     ) {
         let elapsed = ctx.get_elapsed_logical_time();
-        let value = ctx.get_action(&act);
+        let value = ctx.read_action_with(&act, |v| v.cloned());
 
         println!("[@{elapsed:?} action transmitted: {value:?}]");
 

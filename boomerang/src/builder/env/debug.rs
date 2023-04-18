@@ -103,9 +103,12 @@ impl Debug for EnvBuilder {
 
         let reactors = self
             .reactor_builders
-            .keys()
-            .map(|reactor_key| self.reactor_fqn(reactor_key).unwrap())
-            .collect_vec();
+            .iter()
+            .map(|(reactor_key, reactor)| {
+                let fqn = self.reactor_fqn(reactor_key).unwrap();
+                (fqn, reactor)
+            })
+            .collect::<BTreeMap<_, _>>();
 
         let edges = self
             .reaction_dependency_edges()

@@ -53,7 +53,7 @@ pub fn build_and_run_reactor<R: Reactor>(
     let args = Args::parse();
 
     if args.full_graph {
-        let gv = graphviz::create_full_graph(&env_builder).unwrap();
+        let gv = graphviz::create_full_graph(&env_builder, graphviz::Config::default()).unwrap();
         let path = format!("{name}.dot");
         let mut f = std::fs::File::create(&path).unwrap();
         std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();

@@ -80,8 +80,13 @@ impl<'a> Context<'a> {
     }
 
     /// Get the value of an Action at the current Tag
-    pub fn get_action<T: ActionData, A: ActionRefValue<T>>(&self, action: &A) -> Option<T> {
-        action.get_value(self.tag)
+    pub fn read_action_with<T, A, F, R>(&self, action: &A, f: F) -> R
+    where
+        T: ActionData,
+        A: ActionRefValue<T>,
+        F: FnOnce(Option<&T>) -> R,
+    {
+        action.read_with(self.tag, f)
     }
 
     /// Schedule the Action to trigger at some future time.

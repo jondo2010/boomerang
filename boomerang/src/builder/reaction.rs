@@ -1,10 +1,10 @@
-use std::sync::Arc;
+use std::{fmt::Debug, sync::Arc};
 
 use super::{
     BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactorKey, EnvBuilder, FindElements,
     PortType,
 };
-use crate::runtime;
+use crate::{runtime, DebugMap};
 use itertools::Itertools;
 use slotmap::SecondaryMap;
 
@@ -23,7 +23,6 @@ impl petgraph::graph::GraphIndex for BuilderReactionKey {
 }
 
 #[derive(Derivative, Clone)]
-#[derivative(Debug)]
 pub struct ReactionBuilder {
     #[derivative(Ord = "ignore")]
     #[derivative(PartialEq = "ignore")]
@@ -33,7 +32,6 @@ pub struct ReactionBuilder {
     /// The owning Reactor for this Reaction
     pub(super) reactor_key: BuilderReactorKey,
     /// The Reaction function
-    #[derivative(Debug = "ignore")]
     pub(super) reaction_fn: Arc<dyn runtime::ReactionFn>,
     /// Actions that trigger this Reaction, and their relative ordering.
     pub(super) trigger_actions: SecondaryMap<BuilderActionKey, usize>,
@@ -43,6 +41,20 @@ pub struct ReactionBuilder {
     pub(super) input_ports: SecondaryMap<BuilderPortKey, usize>,
     /// Ports that this Reaction may set the value of, and their relative ordering.
     pub(super) output_ports: SecondaryMap<BuilderPortKey, usize>,
+}
+
+impl Debug for ReactionBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReactionBuilder")
+            .field("name", &self.name)
+            .field("priority", &self.priority)
+            .field("reactor_key", &self.reactor_key)
+            .field("trigger_actions", &DebugMap(&self.trigger_actions))
+            .field("schedulable_actions", &DebugMap(&self.schedulable_actions))
+            .field("input_ports", &DebugMap(&self.input_ports))
+            .field("output_ports", &DebugMap(&self.output_ports))
+            .finish()
+    }
 }
 
 impl ReactionBuilder {

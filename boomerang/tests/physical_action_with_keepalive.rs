@@ -39,7 +39,7 @@ impl Main {
         ctx: &mut runtime::Context,
         #[reactor::action(triggers)] act: runtime::PhysicalActionRef<u32>,
     ) {
-        let value = ctx.get_action(&act).unwrap();
+        let value = ctx.read_action_with(&act, |x| *x.unwrap());
         println!("---- Vu {} à {}", value, ctx.get_tag());
 
         let elapsed_time = ctx.get_elapsed_logical_time();

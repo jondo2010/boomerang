@@ -17,13 +17,16 @@ impl<'a> ReactorBuilderState<'a> {
         &mut self,
         outward_bindings: &[(BuilderPortKey, String, BuilderPortKey, String)],
     ) -> Result<(), BuilderError> {
-        let output_control_trigger =
-            self.add_logical_action::<()>("outputControlReactionTrigger", None)?;
+        if outward_bindings.is_empty() {
+            return Ok(());
+        }
+
+        let output_control_trigger = self.add_logical_action::<()>("out_ctrl_trigger", None)?;
 
         for (from_port, from_port_name, to_port, to_port_name) in outward_bindings.iter() {
-            let output_binding_reaction = {
+            {
                 let to_port = *to_port;
-                Arc::new(
+                let output_binding_reaction = Arc::new(
                     move |_ctx: &mut runtime::Context,
                           _state: &mut dyn runtime::ReactorState,
                           inputs: &[runtime::IPort],
@@ -34,20 +37,20 @@ impl<'a> ReactorBuilderState<'a> {
                             println!("send_timed_message({:?})", to_port)
                         }
                     },
-                )
-            };
+                );
 
-            let _ = self
-                .add_reaction(
-                    &(format!("{from_port_name}_{to_port_name}")),
-                    output_binding_reaction,
-                )
-                .with_trigger_port(*from_port, 0)
-                .finish()?;
+                let _ = self
+                    .add_reaction(
+                        &(format!("{from_port_name}_{to_port_name}")),
+                        output_binding_reaction,
+                    )
+                    .with_trigger_port(*from_port, 0)
+                    .finish()?;
+            }
 
-            let output_control_reaction = {
+            {
                 let to_port = *to_port;
-                Arc::new(
+                let output_control_reaction = Arc::new(
                     move |_ctx: &mut runtime::Context,
                           _state: &mut dyn runtime::ReactorState,
                           inputs: &[runtime::IPort],
@@ -58,17 +61,17 @@ impl<'a> ReactorBuilderState<'a> {
                             println!("send_port_absent_to_federate({:?})", to_port)
                         }
                     },
-                )
-            };
+                );
 
-            let _ = self
-                .add_reaction(
-                    &format!("output_control_{from_port_name}_{to_port_name}"),
-                    output_control_reaction,
-                )
-                .with_trigger_action(output_control_trigger, 0)
-                .with_trigger_port(*from_port, 0)
-                .finish()?;
+                let _ = self
+                    .add_reaction(
+                        &format!("out_ctrl_{from_port_name}_{to_port_name}"),
+                        output_control_reaction,
+                    )
+                    .with_trigger_action(output_control_trigger, 0)
+                    .with_trigger_port(*from_port, 0)
+                    .finish()?;
+            }
         }
 
         Ok(())
@@ -81,12 +84,15 @@ impl<'a> ReactorBuilderState<'a> {
         &mut self,
         inward_bindings: &[(BuilderPortKey, String)],
     ) -> Result<(), BuilderError> {
-        for (from_port, from_port_name) in inward_bindings.iter() {
-            let input_control_trigger = self
-                .add_logical_action::<()>("inputControlReactionTrigger_{from_port_name}", None)?;
+        if inward_bindings.is_empty() {
+            return Ok(());
+        }
 
-            let input_control_reaction = {
-                Arc::new(
+        for (from_port, from_port_name) in inward_bindings.iter() {
+            {
+                let input_control_trigger = self
+                    .add_logical_action::<()>(&format!("in_ctrl_trigger_{from_port_name}"), None)?;
+                let input_control_reaction = Arc::new(
                     move |_ctx: &mut runtime::Context,
                           _state: &mut dyn runtime::ReactorState,
                           _inputs: &[runtime::IPort],
@@ -97,17 +103,44 @@ impl<'a> ReactorBuilderState<'a> {
                             println!("wait_until_port_status_known");
                         }
                     },
-                )
-            };
+                );
 
-            let _ = self
-                .add_reaction(
-                    &(format!("input_control_{from_port_name}")),
-                    input_control_reaction,
-                )
-                .with_trigger_action(input_control_trigger, 0)
-                .with_antidependency(*from_port, 0)
-                .finish()?;
+                let _ = self
+                    .add_reaction(&format!("in_ctrl_{from_port_name}"), input_control_reaction)
+                    .with_trigger_action(input_control_trigger, 0)
+                    .with_antidependency(*from_port, 0)
+                    .finish()?;
+            }
+
+            {
+                let network_message_trigger = self.env.add_logical_action_from_port(
+                    &format!("network_message_{from_port_name}"),
+                    *from_port,
+                    self.reactor_key,
+                )?;
+
+                let network_reaction = Arc::new(
+                    move |_ctx: &mut runtime::Context,
+                          _state: &mut dyn runtime::ReactorState,
+                          _inputs: &[runtime::IPort],
+                          outputs: &mut [runtime::OPort],
+                          _actions: &mut [&mut runtime::Action]| {
+                        let [port]: &mut [runtime::OPort; 1] = outputs.try_into().unwrap();
+                        if port.is_set() {
+                            println!("set_port_value");
+                        }
+                    },
+                );
+
+                let _ = self
+                    .add_reaction(
+                        &format!("reaction_network_{from_port_name}"),
+                        network_reaction,
+                    )
+                    .with_trigger_action(network_message_trigger, 0)
+                    .with_antidependency(*from_port, 0)
+                    .finish()?;
+            }
         }
 
         Ok(())
@@ -176,6 +209,13 @@ impl EnvBuilder {
     ) -> Result<BuilderReactorKey, BuilderError> {
         let child_reactor = &self.reactor_builders[child_reactor_key];
 
+        let parent_reactor_key =
+            child_reactor
+                .parent_reactor_key
+                .ok_or_else(|| BuilderError::NotChildReactor {
+                    reactor: child_reactor_key,
+                })?;
+
         let outward_bindings = self.prepare_outward_bindings(child_reactor_key);
         let inward_bindings = self.prepare_inward_bindings(child_reactor_key);
 
@@ -188,12 +228,7 @@ impl EnvBuilder {
             self.port_builders[*port_key].clear_inward_binding();
         }
 
-        let parent = child_reactor
-            .parent_reactor_key
-            .ok_or_else(|| BuilderError::NotChildReactor {
-                reactor: child_reactor_key,
-            })
-            .map(|parent_key| &self.reactor_builders[parent_key])?;
+        let parent = &self.reactor_builders[parent_reactor_key];
 
         let federate_name = format!("{}-federate", child_reactor.get_name());
 
@@ -214,28 +249,15 @@ impl EnvBuilder {
         }).collect_vec();
 
         let mut builder = self.add_reactor(&federate_name, None, parent.state.clone());
+        let action_mapping = builder.clone_reactor_actions(parent_reactor_key);
 
         builder.adopt_existing_child(child_reactor_key);
-        builder.clone_existing_reactions(filtered_reactions.iter().copied());
+        builder.clone_existing_reactions(filtered_reactions.iter().copied(), &action_mapping);
 
         builder.transform_outward_bindings(&outward_bindings)?;
         builder.transform_inward_bindings(&inward_bindings)?;
 
         let new_reactor_key = builder.finish()?;
-
-        /*
-        let new_reactor_key = self
-            .reactor_builders
-            .insert_with_key(|reactor_key| ReactorBuilder {
-                name: federate_name,
-                state: parent.state.clone(),
-                type_name: parent.type_name.clone(),
-                parent_reactor_key: None,
-                reactions: filtered_reactions,
-                ports: Default::default(),
-                actions: parent.actions.clone(),
-            });
-            */
 
         Ok(new_reactor_key)
     }
@@ -250,8 +272,6 @@ impl EnvBuilder {
                 parent: parent_reactor_key,
             });
         }
-
-        let reactor = &self.reactor_builders[reactor_key];
 
         // Find all reactors that are children of this reactor.
         let children = self
@@ -269,6 +289,9 @@ impl EnvBuilder {
         for child in children {
             self.clone_reactor_as_federate(child)?;
         }
+
+        // Remove the original reactor.
+        self.remove_reactor(reactor_key)?;
 
         Ok(())
     }

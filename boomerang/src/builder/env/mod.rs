@@ -12,6 +12,7 @@ use super::{
     ReactorBuilder, ReactorBuilderState, TypedActionKey, TypedPortKey,
 };
 use crate::runtime;
+use itertools::Itertools;
 use slotmap::SlotMap;
 use std::{rc::Rc, sync::Arc, time::Duration};
 
@@ -90,12 +91,13 @@ impl EnvBuilder {
         name: &str,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey, BuilderError> {
-        self.add_action::<(), Logical, _>(
+        self.add_action(
             name,
             ActionType::Startup,
             reactor_key,
-            |_: &'_ str, _: runtime::keys::ActionKey| runtime::Action::Startup,
+            Rc::new(|_: &'_ str, _: runtime::keys::ActionKey| runtime::Action::Startup),
         )
+        .map(|key| key.into())
     }
 
     /// Add a new Shutdown Action
@@ -104,12 +106,13 @@ impl EnvBuilder {
         name: &str,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey, BuilderError> {
-        self.add_action::<(), Logical, _>(
+        self.add_action(
             name,
             ActionType::Shutdown,
             reactor_key,
-            |_: &'_ str, _: runtime::keys::ActionKey| runtime::Action::Shutdown,
+            Rc::new(|_: &'_ str, _: runtime::keys::ActionKey| runtime::Action::Shutdown),
         )
+        .map(|key| key.into())
     }
 
     /// Add a new Logical Action
@@ -119,18 +122,19 @@ impl EnvBuilder {
         min_delay: Option<Duration>,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey<T, Logical>, BuilderError> {
-        self.add_action::<T, Logical, _>(
+        self.add_action(
             name,
             ActionType::Logical { min_delay },
             reactor_key,
-            move |name: &'_ str, key: runtime::keys::ActionKey| {
+            Rc::new(move |name: &'_ str, key: runtime::keys::ActionKey| {
                 runtime::Action::Logical(runtime::LogicalAction::new::<T>(
                     name,
                     key,
                     min_delay.unwrap_or_default(),
                 ))
-            },
+            }),
         )
+        .map(|key| key.into())
     }
 
     /// Add a new Physical Action
@@ -140,17 +144,33 @@ impl EnvBuilder {
         min_delay: Option<Duration>,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey<T, Physical>, BuilderError> {
-        self.add_action::<T, Physical, _>(
+        self.add_action(
             name,
             ActionType::Physical { min_delay },
             reactor_key,
-            move |name: &'_ str, action_key| {
+            Rc::new(move |name: &'_ str, action_key| {
                 runtime::Action::Physical(runtime::PhysicalAction::new::<T>(
                     name,
                     action_key,
                     min_delay.unwrap_or_default(),
                 ))
-            },
+            }),
+        )
+        .map(|key| key.into())
+    }
+
+    /// Adds a new logical action with the same underlying type as the port.
+    pub fn add_logical_action_from_port(
+        &mut self,
+        name: &str,
+        port_key: BuilderPortKey,
+        reactor_key: BuilderReactorKey,
+    ) -> Result<BuilderActionKey, BuilderError> {
+        self.add_action(
+            name,
+            ActionType::Logical { min_delay: None },
+            reactor_key,
+            self.port_builders[port_key].create_same_typed_action_builder(None),
         )
     }
 
@@ -165,18 +185,14 @@ impl EnvBuilder {
         ReactionBuilderState::new(name, priority, reactor_key, reaction_fn, self)
     }
 
-    /// Add an Action to a given Reactor using closure F
-    pub fn add_action<T, Q, F>(
+    /// Add an Action generically to a given Reactor using the given `ActionBuilderFn`
+    pub fn add_action(
         &mut self,
         name: &str,
         ty: ActionType,
         reactor_key: BuilderReactorKey,
-        action_fn: F,
-    ) -> Result<TypedActionKey<T, Q>, BuilderError>
-    where
-        T: runtime::PortData,
-        F: ActionBuilderFn + 'static,
-    {
+        action_fn: Rc<dyn ActionBuilderFn>,
+    ) -> Result<BuilderActionKey, BuilderError> {
         let reactor_builder = &mut self.reactor_builders[reactor_key];
 
         // Ensure no duplicates
@@ -193,9 +209,9 @@ impl EnvBuilder {
 
         let key = reactor_builder
             .actions
-            .insert(ActionBuilder::new(name, ty, Rc::new(action_fn)));
+            .insert(ActionBuilder::new(name, ty, action_fn));
 
-        Ok(key.into())
+        Ok(key)
     }
 
     /// Find a Port matching a given name and ReactorKey
@@ -339,6 +355,84 @@ impl EnvBuilder {
         // All validity checks passed, so we can now bind the ports
         self.port_builders[port_b_key].set_inward_binding(Some(port_a_key));
         self.port_builders[port_a_key].add_outward_binding(port_b_key);
+
+        Ok(())
+    }
+
+    /// Recursively remove a reactor from the environment
+    fn remove_reactor(&mut self, reactor_key: BuilderReactorKey) -> Result<(), BuilderError> {
+        tracing::debug!(
+            ?reactor_key,
+            "Removing reactor {}",
+            self.reactor_fqn(reactor_key).unwrap()
+        );
+
+        // Remove any children
+        let children_keys = self
+            .reactor_builders
+            .iter()
+            .filter_map(|(key, builder)| {
+                builder
+                    .parent_reactor_key
+                    .and_then(|parent_key| (parent_key == reactor_key).then_some(key))
+            })
+            .collect_vec();
+
+        for key in children_keys {
+            self.remove_reactor(key)?;
+        }
+
+        // Remove any ports in the reactor
+        let removed_ports = self
+            .port_builders
+            .iter()
+            .filter_map(|(port_key, port)| {
+                (port.get_reactor_key() == reactor_key).then(|| port_key)
+            })
+            .collect_vec();
+
+        for port_key in removed_ports.iter() {
+            tracing::debug!(
+                ?port_key,
+                "Removing port {}",
+                self.port_fqn(*port_key).unwrap()
+            );
+            self.port_builders.remove(*port_key);
+        }
+
+        // Remove any dangling port bindings
+        for (_, port) in self.port_builders.iter_mut() {
+            for removed in removed_ports.iter() {
+                port.clear_bindings_to(*removed);
+            }
+        }
+
+        for (_, reaction) in self.reaction_builders.iter_mut() {
+            for removed in removed_ports.iter() {
+                reaction.input_ports.remove(*removed);
+                reaction.output_ports.remove(*removed);
+            }
+        }
+
+        // Remove any reactions in the reactor
+        let removed_reactions = self
+            .reaction_builders
+            .iter()
+            .filter_map(|(reaction_key, reaction)| {
+                (reaction.reactor_key == reactor_key).then(|| reaction_key)
+            })
+            .collect_vec();
+
+        for reaction_key in removed_reactions.iter() {
+            tracing::debug!(
+                ?reaction_key,
+                "Removing reaction {}",
+                self.reaction_fqn(*reaction_key).unwrap()
+            );
+            self.reaction_builders.remove(*reaction_key);
+        }
+
+        self.reactor_builders.remove(reactor_key);
 
         Ok(())
     }

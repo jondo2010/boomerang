@@ -1,7 +1,10 @@
 use std::sync::{Arc, RwLock};
 
-use boomerang_core::time::Timestamp;
 use crossbeam_channel::Sender;
+
+use boomerang_core::time::Timestamp;
+#[cfg(feature = "federated")]
+use boomerang_federated as federated;
 
 use crate::{
     key_set::KeySet,
@@ -126,6 +129,7 @@ impl Reaction {
         inputs: &[IPort<'_>],
         outputs: &mut [OPort<'_>],
         async_tx: Sender<ScheduledEvent>,
+        #[cfg(feature = "federated")] client: &'a federated::client::Client,
     ) -> Context {
         let Reactor {
             state,
@@ -134,6 +138,9 @@ impl Reaction {
             ..
         } = reactor;
 
+        #[cfg(feature = "federated")]
+        let mut ctx = Context::new(start_time, tag, action_triggers, async_tx, client);
+        #[cfg(not(feature = "federated"))]
         let mut ctx = Context::new(start_time, tag, action_triggers, async_tx);
 
         if let Some(Deadline { deadline, handler }) = self.deadline.as_ref() {

@@ -31,6 +31,7 @@ impl Count {
 }
 
 #[test_log::test]
+#[cfg(not(feature = "federated"))]
 fn count() {
     let _ =
         boomerang_util::run::build_and_test_reactor::<CountBuilder>("count", Count(0), true, false)

@@ -9,9 +9,9 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["parallel", "federated"]
+default = ["parallel"]
 parallel = ["rayon"]
-federated = ["dep:boomerang_federated"]
+federated = ["dep:boomerang_federated", "dep:serde"]
 
 [dependencies]
 crossbeam-channel = "0.5"
@@ -22,6 +22,7 @@ downcast-rs = "1.2"
 dyn-clone.workspace = true
 itertools.workspace = true
 rayon = { version = "1.7", optional = true }
+serde = { workspace = true, optional = true }
 thiserror.workspace = true
 tinymap.workspace = true
 tracing.workspace = true

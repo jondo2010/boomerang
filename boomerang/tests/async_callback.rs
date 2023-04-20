@@ -104,6 +104,7 @@ impl AsyncCallback {
 }
 
 #[test_log::test]
+#[cfg(not(feature = "federated"))]
 fn async_callback() {
     let _ = boomerang_util::run::build_and_test_reactor::<AsyncCallbackBuilder>(
         "async_callback",

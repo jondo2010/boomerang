@@ -141,6 +141,7 @@ struct MainBuilder {
 }
 
 // TODO: Fixme
+#[cfg(not(feature = "federated"))]
 #[cfg(feature = "disabled")]
 #[test]
 fn hello() {

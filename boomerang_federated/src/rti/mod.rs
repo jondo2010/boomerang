@@ -84,9 +84,9 @@ pub struct Rti {
 }
 
 pub struct RtiHandles {
-    pub(crate) start_time: Timestamp,
-    pub(crate) federate_handles: Vec<JoinHandle<()>>,
-    pub(crate) listener_handle: JoinHandle<()>,
+    pub start_time: Timestamp,
+    pub federate_handles: Vec<JoinHandle<()>>,
+    pub listener_handle: JoinHandle<()>,
 }
 
 impl Rti {
@@ -295,27 +295,27 @@ where
             tracing::debug!(?fed_ids, "RTI received FedIds.");
 
             // Compare the received federation ID to mine.
-            if federation_id != fed_ids.federation_id {
+            if federation_id != fed_ids.federation {
                 // Federation IDs do not match. Send back a `Reject` message.
                 tracing::warn!(
                             "Federate from another federation {} attempted to connect to RTI in federation {}.",
-                            fed_ids.federation_id,
+                            fed_ids.federation,
                             federation_id
                         );
                 Err(RejectReason::FederationIdDoesNotMatch)
-            } else if fed_ids.federate.index() >= number_of_federates {
+            } else if fed_ids.federate_key.index() >= number_of_federates {
                 // Federate ID is out of range.
-                tracing::error!(?fed_ids.federate, "RTI received federate ID out of range.");
+                tracing::error!(?fed_ids.federate_key, "RTI received federate ID out of range.");
                 Err(RejectReason::FederateKeyOutOfRange)
             } else if seen_federate_ids
-                .find(|&seen_federate_id| seen_federate_id == fed_ids.federate)
+                .find(|&seen_federate_id| seen_federate_id == fed_ids.federate_key)
                 .is_some()
             {
                 // Federate ID has already been seen.
-                tracing::error!(?fed_ids.federate, "RTI received duplicate federate ID.");
+                tracing::error!(?fed_ids.federate_key, "RTI received duplicate federate ID.");
                 Err(RejectReason::FederateKeyInUse)
             } else {
-                Ok(fed_ids.federate)
+                Ok(fed_ids.federate_key)
             }
         }
         RtiMsg::P2PSendingFedId(..) | RtiMsg::P2PTaggedMessage(..) => {

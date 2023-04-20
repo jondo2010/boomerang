@@ -72,6 +72,7 @@ impl ActionValues {
 }
 
 #[test_log::test]
+#[cfg(not(feature = "federated"))]
 fn action_values() {
     let _ = boomerang_util::run::build_and_test_reactor::<ActionValuesBuilder>(
         "action_values",

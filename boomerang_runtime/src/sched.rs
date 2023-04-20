@@ -3,6 +3,9 @@ use derive_more::Display;
 use std::{collections::BinaryHeap, time::Duration};
 use tracing::{info, trace, warn};
 
+#[cfg(feature = "federated")]
+use boomerang_federated as federated;
+
 use crate::{Env, ReactionSet, ReactionTriggerCtx, Tag, Timestamp};
 
 #[derive(Debug, Display, Clone)]
@@ -36,14 +39,9 @@ impl Ord for ScheduledEvent {
     }
 }
 
-#[derive(Debug)]
 pub struct Scheduler {
     /// The environment state
     env: Env,
-    /// Whether to skip wall-clock synchronization
-    fast_forward: bool,
-    /// Whether to keep the scheduler alive for any possible asynchronous events
-    keep_alive: bool,
     /// Asynchronous events sender
     event_tx: Sender<ScheduledEvent>,
     /// Asynchronous events receiver
@@ -54,20 +52,90 @@ pub struct Scheduler {
     start_time: Timestamp,
     /// A shutdown has been scheduled at this time.
     shutdown_tag: Option<Tag>,
+    /// Config
+    config: Config,
+    /// Async handles to federated tasks
+    #[cfg(feature = "federated")]
+    handles: federated::client::Handles,
+    /// Client to the federated runtime
+    #[cfg(feature = "federated")]
+    client: federated::client::Client,
+}
+
+impl std::fmt::Debug for Scheduler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Scheduler")
+            .field("env", &self.env)
+            .field("event_queue", &self.event_queue)
+            .field("start_time", &self.start_time)
+            .field("shutdown_tag", &self.shutdown_tag)
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
+#[derive(Debug)]
+pub struct Config {
+    /// Whether to skip wall-clock synchronization
+    pub fast_forward: bool,
+    /// Whether to keep the scheduler alive for any possible asynchronous events
+    pub keep_alive: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            fast_forward: true,
+            keep_alive: false,
+        }
+    }
+}
+
+impl Config {
+    pub fn with_fast_forward(mut self, fast_forward: bool) -> Self {
+        self.fast_forward = fast_forward;
+        self
+    }
+
+    pub fn with_keep_alive(mut self, keep_alive: bool) -> Self {
+        self.keep_alive = keep_alive;
+        self
+    }
 }
 
 impl Scheduler {
-    pub fn new(env: Env, fast_forward: bool, keep_alive: bool) -> Self {
+    #[cfg(feature = "federated")]
+    pub fn new(
+        env: Env,
+        config: Config,
+        handles: federated::client::Handles,
+        client: federated::client::Client,
+    ) -> Self {
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
         Self {
             env,
-            fast_forward,
-            keep_alive,
             event_tx,
             event_rx,
             event_queue: BinaryHeap::new(),
             start_time: Timestamp::now(),
             shutdown_tag: None,
+            config,
+            handles,
+            client,
+        }
+    }
+
+    #[cfg(not(feature = "federated"))]
+    pub fn new(env: Env, config: Config) -> Self {
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        Self {
+            env,
+            event_tx,
+            event_rx,
+            event_queue: BinaryHeap::new(),
+            start_time: Timestamp::now(),
+            shutdown_tag: None,
+            config,
         }
     }
 
@@ -148,7 +216,7 @@ impl Scheduler {
                 tracing::debug!("Cannot wait, already past programmed shutdown time...");
                 None
             }
-        } else if self.keep_alive {
+        } else if self.config.keep_alive {
             tracing::debug!("Waiting indefinitely for async event.");
             self.event_rx.recv().ok()
         } else {
@@ -168,7 +236,7 @@ impl Scheduler {
             if let Some(event) = self.event_queue.pop() {
                 tracing::debug!(event = %event, reactions = ?event.reactions, "Handling event");
 
-                if !self.fast_forward {
+                if !self.config.fast_forward {
                     let target = event.tag.to_logical_time(self.start_time);
                     if let Some(async_event) = self.synchronize_wall_clock(target) {
                         // Woken up by async event
@@ -285,6 +353,8 @@ impl Scheduler {
                         inputs.as_slice(),
                         outputs.as_mut_slice(),
                         self.event_tx.clone(),
+                        #[cfg(feature = "federated")]
+                        &self.client,
                     );
 
                     // Queue downstream reactions triggered by any ports that were set.

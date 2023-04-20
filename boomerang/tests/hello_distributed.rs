@@ -6,7 +6,7 @@
 
 use boomerang::{
     builder::{graphviz, BuilderReactionKey, EnvBuilder, Reactor, TypedPortKey},
-    runtime, Reactor,
+    federated, runtime, Reactor,
 };
 
 #[derive(Reactor)]
@@ -106,42 +106,15 @@ impl HelloDistributed {
     }
 }
 
-#[test_log::test]
-fn hello_distributed() {
-    let mut env_builder = EnvBuilder::new();
-    let (reactor_key, reactor) = HelloDistributedBuilder::build(
+#[cfg(feature = "federated")]
+#[test_log::test(tokio::test)]
+async fn hello_distributed() {
+    let _ = boomerang_util::run::build_and_test_federation::<HelloDistributedBuilder>(
         "hello_distributed",
         HelloDistributed,
-        None,
-        &mut env_builder,
+        false,
+        true,
     )
+    .await
     .unwrap();
-
-    let federate_keys = env_builder.federalize_reactor(reactor_key).unwrap();
-
-    let f0 = federate_keys[0];
-    let f1 = federate_keys[1];
-
-    env_builder.remove_reactor(f1).unwrap();
-
-    {
-        let gv = graphviz::create_full_graph(
-            &env_builder,
-            graphviz::Config::new().hide_orphaned_actions(true),
-        )
-        .unwrap();
-        let path = format!("hello_distributed.dot");
-        let mut f = std::fs::File::create(&path).unwrap();
-        std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
-        tracing::info!("Wrote full graph to {path}");
-    }
-
-    dbg!(&env_builder);
-
-    let env = env_builder
-        .build_runtime()
-        .expect("Error building environment!");
-
-    let mut sched = runtime::Scheduler::new(env, true, false);
-    sched.event_loop();
 }

@@ -130,6 +130,7 @@ struct ActionDelayBuilder {
 }
 
 #[test_log::test]
+#[cfg(not(feature = "federated"))]
 fn action_delay() {
     let _ = boomerang_util::run::build_and_test_reactor::<ActionDelayBuilder>(
         "action_delay",

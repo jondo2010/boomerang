@@ -2,11 +2,17 @@ use std::time::Duration;
 
 use crossbeam_channel::Sender;
 
+#[cfg(feature = "federated")]
+use boomerang_federated as federated;
+
 use crate::{
     keys::{ActionKey, ReactionKey},
     ActionData, ActionRefValue, Level, LevelReactionKey, PhysicalActionRef, ReactionSet,
     ScheduledEvent, Tag, Timestamp,
 };
+
+#[cfg(feature = "federated")]
+use crate::{keys::PortKey, RuntimeError};
 
 /// Internal state for a context object
 #[derive(Debug, Clone)]
@@ -30,9 +36,75 @@ pub struct Context<'a> {
     pub(crate) internal: ContextInternal,
     /// Downstream reactions triggered by actions
     action_triggers: &'a tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
+    #[cfg(feature = "federated")]
+    /// The federated client
+    pub(crate) client: &'a federated::client::Client,
+}
+
+#[cfg(feature = "federated")]
+/// Federated methods for Context
+impl<'a> Context<'a> {
+    pub(crate) fn new(
+        start_time: Timestamp,
+        tag: Tag,
+        action_triggers: &'a tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
+        async_tx: Sender<ScheduledEvent>,
+        client: &'a federated::client::Client,
+    ) -> Self {
+        Self {
+            start_time,
+            tag,
+            internal: ContextInternal {
+                reactions: Vec::new(),
+                scheduled_events: Vec::new(),
+                async_tx,
+            },
+            action_triggers,
+            client,
+        }
+    }
+
+    /// Send the specified timestamped message to the specified port in the specified federate via
+    /// the RTI or directly to a federate depending on the given socket.
+    ///
+    /// The timestamp is calculated as current_logical_time + additional delay which is greater than or equal to zero.
+    ///
+    /// The port should be an input port of a reactor in the destination federate.
+    pub fn send_timed_message<T>(
+        &self,
+        federate: federated::FederateKey,
+        port: PortKey,
+        offset: Option<Duration>,
+        message: T,
+    ) -> Result<(), RuntimeError>
+    where
+        T: std::fmt::Debug + serde::Serialize,
+    {
+        // Apply the additional delay to the current tag and use that as the intended tag of the outgoing message
+        let tag = self.tag.delay(offset);
+
+        self.client
+            .send_timed_message(federate, port, tag, message)
+            .map_err(|err| RuntimeError::Federate(err.into()))
+    }
+
+    pub fn send_port_absent_to_federate(
+        &self,
+        federate: federated::FederateKey,
+        port: PortKey,
+        offset: Option<Duration>,
+    ) -> Result<(), RuntimeError> {
+        // Apply the additional delay to the current tag and use that as the intended tag of the outgoing message
+        let tag = self.tag.delay(offset);
+
+        self.client
+            .send_port_absent_to_federate(federate, port, tag)
+            .map_err(|err| RuntimeError::Federate(err.into()))
+    }
 }
 
 impl<'a> Context<'a> {
+    #[cfg(not(feature = "federated"))]
     pub(crate) fn new(
         start_time: Timestamp,
         tag: Tag,

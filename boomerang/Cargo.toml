@@ -12,7 +12,7 @@ categories.workspace = true
 
 [features]
 default = ["visualization", "derive", "federated"]
-federated = ["boomerang_runtime/federated"]
+federated = ["dep:boomerang_federated", "boomerang_runtime/federated", "boomerang_util/federated"]
 derive = ["boomerang_derive"]
 visualization = []
 
@@ -29,16 +29,19 @@ tinymap.workspace = true
 tracing.workspace = true
 
 boomerang_derive = { workspace = true, optional = true }
-boomerang_runtime.workspace = true
+boomerang_runtime = { workspace = true }
+boomerang_federated = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = "0.4"
 crossbeam-utils = "0.8"
 env_logger.workspace = true
 test-log.workspace = true
+tokio-test.workspace = true
+tokio.workspace = true
 tracing-subscriber = { workspace = true, features = [ "fmt", "json", "env-filter", ] }
 
-boomerang_util = { path = "../boomerang_util", features = ["runner"] }
+boomerang_util = { workspace = true, features = ["runner"] }
 
 # Deps for Snake example
 [target.'cfg(not(windows))'.dev-dependencies]

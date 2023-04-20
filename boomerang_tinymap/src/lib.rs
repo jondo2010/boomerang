@@ -17,7 +17,7 @@ macro_rules! key_type {
         $name:ident
     ) => {
         $(#[$attr])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+        #[derive(Clone, Copy, PartialEq, Eq, Default)]
         #[repr(transparent)]
         $vis struct $name(usize);
 
@@ -32,9 +32,13 @@ macro_rules! key_type {
                 Self(value)
             }
         }
+
+        impl ::std::fmt::Debug for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                ::std::write!(f, "{}({})", ::std::stringify!($name), self.0)
+            }
+        }
     };
 }
-
-// pub(crate) use key_type;
 
 key_type!(pub DefaultKey);

@@ -1,6 +1,6 @@
 //! This module implements the federate state machine client for a connection to the RTI.
 
-use std::net::SocketAddr;
+use std::{borrow::Cow, net::SocketAddr};
 
 use boomerang_core::{keys::PortKey, time::Tag};
 use futures::{Sink, SinkExt, Stream, StreamExt};
@@ -15,7 +15,8 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::codec::Framed;
 
 use crate::{
-    bincodec, FedIds, FederateKey, Message, NeighborStructure, RejectReason, RtiMsg, Timestamp,
+    bincodec, FedIds, FederateKey, Message, NeighborStructure, PortAbsent, RejectReason, RtiMsg,
+    Timestamp,
 };
 
 /// The error type for the client.
@@ -38,7 +39,7 @@ pub enum ClientError {
 }
 
 /// Configuration for a federate client
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Config {
     fed_ids: FedIds,
     neighbors: NeighborStructure,
@@ -48,17 +49,34 @@ impl Config {
     pub fn new(federate: FederateKey, federation_id: &str, neighbors: NeighborStructure) -> Self {
         Config {
             fed_ids: FedIds {
-                federate,
-                federation_id: federation_id.to_owned(),
+                federate_key: federate,
+                federation: federation_id.to_owned(),
             },
             neighbors,
         }
     }
 }
 
+// Status of a given port at a given logical time.
+//
+// For non-network ports, unknown is unused.
+pub enum PortStatus {
+    /// The port is absent at the given logical time.
+    Absent,
+    /// The port is present at the given logical time.
+    Present,
+    /// It is unknown whether the port is present or absent (e.g., in a distributed application).
+    Unknown,
+}
+
+#[derive(Debug, Clone)]
 pub struct Client {
     start_time: Timestamp,
+    config: Config,
     sender: mpsc::UnboundedSender<RtiMsg>,
+}
+
+pub struct Handles {
     inbound_handle: tokio::task::JoinHandle<Result<(), ClientError>>,
     outbound_handle: tokio::task::JoinHandle<Result<(), ClientError>>,
 }
@@ -70,19 +88,18 @@ impl Client {
     /// The timestamp is calculated as current_logical_time + additional delay which is greater than or equal to zero.
     ///
     /// The port should be an input port of a reactor in the destination federate.
-    #[tracing::instrument(level = "debug", skip(self))]
+    #[tracing::instrument(level = "debug", skip(self), fields(fed_ids=%self.config.fed_ids, federate, port, tag))]
     pub fn send_timed_message<T>(
         &self,
         federate: FederateKey,
         port: PortKey,
-        //delay: Option<Duration>,
         tag: Tag,
         message: T,
     ) -> Result<(), ClientError>
     where
         T: std::fmt::Debug + Serialize,
     {
-        if self.outbound_handle.is_finished() || self.sender.is_closed() {
+        if self.sender.is_closed() {
             tracing::error!("RTI connection closed unexpectedly");
             return Err(ClientError::UnexpectedClose);
         }
@@ -106,9 +123,9 @@ impl Client {
     /// less than or equal to the specified tag when, as far as the federation is concerned, it is
     /// safe to commit to advancing to the returned tag. That is, all incoming network messages
     /// with tags less than the returned tag have been received.
-    #[tracing::instrument(level = "debug", skip(self))]
+    #[tracing::instrument(level = "debug", skip(self), fields(fed_ids=%self.config.fed_ids, federate, port, tag))]
     pub fn send_next_event_tag(&self, tag: Tag) -> Result<Tag, ClientError> {
-        if self.outbound_handle.is_finished() || self.sender.is_closed() {
+        if self.sender.is_closed() {
             tracing::error!("RTI connection closed unexpectedly");
             return Err(ClientError::UnexpectedClose);
         }
@@ -119,11 +136,37 @@ impl Client {
 
         Ok(tag)
     }
+
+    /// Send a port absent message to federate, informing it that the current federate will not
+    /// produce an event on this network port at the current logical time.
+    #[tracing::instrument(level = "debug", skip(self), fields(fed_ids=%self.config.fed_ids))]
+    pub fn send_port_absent_to_federate(
+        &self,
+        federate: FederateKey,
+        port: PortKey,
+        tag: Tag,
+    ) -> Result<(), ClientError> {
+        if self.sender.is_closed() {
+            tracing::error!("RTI connection closed unexpectedly");
+            return Err(ClientError::UnexpectedClose);
+        }
+
+        self.sender
+            .send(RtiMsg::PortAbsent(PortAbsent {
+                federate,
+                port,
+                tag,
+            }))
+            .map_err(|err| ClientError::Other(err.into()))
+    }
 }
 
 /// Connect to an RTI and perform initial handshaking.
 #[tracing::instrument]
-pub async fn connect_to_rti(addr: SocketAddr, config: Config) -> Result<Client, ClientError> {
+pub async fn connect_to_rti(
+    addr: SocketAddr,
+    config: Config,
+) -> Result<(Client, Handles), ClientError> {
     tracing::info!("Connecting to RTI..");
 
     let client = TcpStream::connect(&addr)
@@ -146,7 +189,7 @@ pub async fn connect_to_rti(addr: SocketAddr, config: Config) -> Result<Client, 
         tracing::info!("Connected to an RTI. Sending federation ID for authentication.");
 
         frame
-            .send(RtiMsg::FedIds(config.fed_ids))
+            .send(RtiMsg::FedIds(config.fed_ids.clone()))
             .await
             .map_err(ClientError::from)?;
     }
@@ -168,7 +211,7 @@ pub async fn connect_to_rti(addr: SocketAddr, config: Config) -> Result<Client, 
             tracing::debug!("Received acknowledgment from the RTI.");
             // Send neighbor information to the RTI.
             frame
-                .send(RtiMsg::NeighborStructure(config.neighbors))
+                .send(RtiMsg::NeighborStructure(config.neighbors.clone()))
                 .await
                 .map_err(ClientError::from)?;
 
@@ -188,12 +231,17 @@ pub async fn connect_to_rti(addr: SocketAddr, config: Config) -> Result<Client, 
                 tokio::spawn(outbound(UnboundedReceiverStream::new(receiver), frame_sink));
             let inbound_handle = tokio::spawn(inbound(sender.clone(), frame_stream));
 
-            Ok(Client {
-                start_time: timestamp,
-                sender,
-                inbound_handle,
-                outbound_handle,
-            })
+            Ok((
+                Client {
+                    start_time: timestamp,
+                    config,
+                    sender,
+                },
+                Handles {
+                    inbound_handle,
+                    outbound_handle,
+                },
+            ))
         }
         _ => {
             tracing::error!("RTI sent an unexpected message: {msg:?}");
@@ -228,7 +276,10 @@ where
         let msg = msg.map_err(ClientError::from)?;
 
         match msg {
-            RtiMsg::TaggedMessage(tag, message) => {}
+            RtiMsg::TaggedMessage(tag, message) => {
+                tracing::debug!("Received tagged message from RTI: {tag:?}");
+                todo!();
+            }
             RtiMsg::TagAdvanceGrant(tag) => {}
             RtiMsg::ProvisionalTagAdvanceGrant(tag) => {}
             RtiMsg::StopRequest(tag) => {}

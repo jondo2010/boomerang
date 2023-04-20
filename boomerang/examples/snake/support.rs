@@ -72,6 +72,7 @@ impl Cell {
 
 /// Keeps track of the positions of the snake, can update them
 /// incrementally.
+#[derive(Clone, Debug)]
 pub struct CircularSnake {
     /// Circular buffer, the head field is the first element,
     /// then they're in order when you read from right to left.
@@ -158,6 +159,7 @@ pub enum CellState {
     Free,
 }
 
+#[derive(Clone)]
 pub struct SnakeGrid {
     grid: Vec<CellState>,
     grid_side: usize,

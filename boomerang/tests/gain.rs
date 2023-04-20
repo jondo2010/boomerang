@@ -84,6 +84,7 @@ impl Gain {
 }
 
 #[test_log::test]
+#[cfg(not(feature = "federated"))]
 fn gain() {
     let _ = boomerang_util::run::build_and_test_reactor::<GainBuilder>("gain", Gain, true, false)
         .unwrap();

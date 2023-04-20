@@ -81,6 +81,7 @@ struct CycleBuilder {
 }
 
 #[test_log::test]
+#[cfg(not(feature = "federated"))]
 fn cycle() {
     let _ = boomerang_util::run::build_and_test_reactor::<CycleBuilder>("cycle", (), true, false)
         .unwrap();

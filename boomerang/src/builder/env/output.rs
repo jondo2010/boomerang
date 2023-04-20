@@ -3,14 +3,14 @@
 use std::collections::{BTreeSet, HashMap};
 
 use itertools::Itertools;
-use petgraph::{prelude::DiGraphMap, EdgeDirection};
+use petgraph::{prelude::DiGraphMap, visit::Walker, EdgeDirection};
 use slotmap::SecondaryMap;
 
 use crate::{
     builder::{
         BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactionKey, BuilderReactorKey,
     },
-    runtime,
+    runtime, DebugMap,
 };
 
 use super::EnvBuilder;
@@ -75,24 +75,26 @@ impl EnvBuilder {
         all_triggers
     }
 
-    /// Build an iterator of all Reaction dependency edges in the graph
-    pub(crate) fn reaction_dependency_edges(
-        &self,
+    /// Build an iterator of all Reaction dependency edges in the graph constrained to `reactor_set`
+    pub(crate) fn reaction_dependency_edges<'a>(
+        &'a self,
+        reactor_set: &'a [BuilderReactorKey],
     ) -> impl Iterator<Item = (BuilderReactionKey, BuilderReactionKey)> + '_ {
-        let deps = self
-            .reaction_builders
+        let reaction_keys = reactor_set
             .iter()
-            .flat_map(move |(reaction_key, reaction)| {
-                // Connect all reactions this reaction depends upon
-                reaction
-                    .input_ports
-                    .keys()
-                    .flat_map(move |port_key| {
-                        let source_port_key = self.follow_port_inward_binding(port_key);
-                        self.port_builders[source_port_key].get_antideps()
-                    })
-                    .map(move |dep_key| (reaction_key, dep_key))
-            });
+            .flat_map(|reactor_key| self.reactor_builders[*reactor_key].reactions.keys());
+
+        let deps = reaction_keys.flat_map(move |reaction_key| {
+            // Connect all reactions this reaction depends upon
+            self.reaction_builders[reaction_key]
+                .input_ports
+                .keys()
+                .flat_map(move |port_key| {
+                    let source_port_key = self.follow_port_inward_binding(port_key);
+                    self.port_builders[source_port_key].get_antideps()
+                })
+                .map(move |dep_key| (reaction_key, dep_key))
+        });
 
         // For all Reactions within a Reactor, create a chain of dependencies by priority. This
         // ensures that Reactions within a Reactor always end up at unique levels.
@@ -106,10 +108,15 @@ impl EnvBuilder {
         deps.chain(internal)
     }
 
-    /// Build a DAG of Reactions
-    pub(crate) fn build_reaction_graph(&self) -> DiGraphMap<BuilderReactionKey, ()> {
-        let mut graph =
-            DiGraphMap::from_edges(self.reaction_dependency_edges().map(|(a, b)| (b, a)));
+    /// Build a DAG of Reactions, constrained to reactors in `reactor_set`
+    pub(crate) fn build_reaction_graph(
+        &self,
+        reactor_set: &[BuilderReactorKey],
+    ) -> DiGraphMap<BuilderReactionKey, ()> {
+        let mut graph = DiGraphMap::from_edges(
+            self.reaction_dependency_edges(reactor_set)
+                .map(|(a, b)| (b, a)),
+        );
         // Ensure all ReactionIndicies are represented
         self.reaction_builders.keys().for_each(|key| {
             graph.add_node(key);
@@ -140,10 +147,13 @@ impl EnvBuilder {
     /// See https://en.m.wikipedia.org/wiki/Coffman%E2%80%93Graham_algorithm
     pub(crate) fn build_runtime_level_map(
         &self,
+        reactor_set: &[BuilderReactorKey],
     ) -> Result<SecondaryMap<BuilderReactionKey, usize>, BuilderError> {
         use petgraph::{algo::tred, graph::DefaultIx, graph::NodeIndex};
 
-        let mut graph = self.build_reaction_graph().into_graph::<DefaultIx>();
+        let mut graph = self
+            .build_reaction_graph(reactor_set)
+            .into_graph::<DefaultIx>();
 
         // Transitive reduction and closures
         let toposort = petgraph::algo::toposort(&graph, None).map_err(|e| {
@@ -185,15 +195,20 @@ impl EnvBuilder {
             .collect())
     }
 
-    /// Construct runtime port structures from the builders.
-    pub(crate) fn build_runtime_ports(&self) -> RuntimePortParts {
+    /// Construct runtime port structures from the builders, constrained to reactors in `reactor_set`.
+    pub(crate) fn build_runtime_ports(
+        &self,
+        reactor_set: impl IntoIterator<Item = BuilderReactorKey>,
+    ) -> RuntimePortParts {
         let mut runtime_ports = tinymap::TinyMap::new();
         let mut port_triggers = tinymap::TinySecondaryMap::new();
         let mut alias_map = SecondaryMap::new();
 
-        let port_groups = self
-            .port_builders
-            .keys()
+        let reactor_ports = reactor_set
+            .into_iter()
+            .flat_map(|reactor_key| self.reactor_builders[reactor_key].ports.keys());
+
+        let port_groups = reactor_ports
             .map(|port_key| (port_key, self.follow_port_inward_binding(port_key)))
             .sorted_by(|a, b| a.1.cmp(&b.1))
             .group_by(|(_port_key, inward_key)| *inward_key);
@@ -219,15 +234,20 @@ impl EnvBuilder {
         }
     }
 
-    /// Construct runtime action structures from the builders.
-    fn build_runtime_actions(&self) -> SecondaryMap<BuilderReactorKey, RuntimeActionParts> {
+    /// Construct runtime action structures from the builders, constrained to reactors in `reactor_set`.
+    fn build_runtime_actions(
+        &self,
+        reactor_set: &[BuilderReactorKey],
+    ) -> SecondaryMap<BuilderReactorKey, RuntimeActionParts> {
         let mut action_parts = SecondaryMap::new();
-        for (builder_key, reactor_builder) in self.reactor_builders.iter() {
+        for builder_key in reactor_set.iter() {
             let mut runtime_actions = tinymap::TinyMap::new();
             let mut action_triggers = tinymap::TinySecondaryMap::new();
             let mut action_alias = SecondaryMap::new();
 
-            for (builder_action_key, action_builder) in reactor_builder.actions.iter() {
+            for (builder_action_key, action_builder) in
+                self.reactor_builders[*builder_key].actions.iter()
+            {
                 let runtime_action_key = runtime_actions
                     .insert_with_key(|action_key| action_builder.build_runtime(action_key));
                 let triggers = action_builder.triggers.keys().collect();
@@ -236,7 +256,7 @@ impl EnvBuilder {
             }
 
             action_parts.insert(
-                builder_key,
+                *builder_key,
                 RuntimeActionParts {
                     actions: runtime_actions,
                     action_triggers,
@@ -247,12 +267,13 @@ impl EnvBuilder {
         action_parts
     }
 
-    /// Build `runtime::Reactor`s and a builder -> runtime mapping from the reactor builders.
+    /// Build [`runtime::Reactor`]s and a builder -> runtime mapping from the reactor builders, constrained to reactors in `reactor_set`.
     ///
     /// # Returns
     /// (runtime_reactors, reactor_alias)
     fn build_runtime_reactors(
         &self,
+        reactor_set: &[BuilderReactorKey],
         reaction_levels: &SecondaryMap<BuilderReactionKey, usize>,
         reaction_aliases: &SecondaryMap<BuilderReactionKey, runtime::keys::ReactionKey>,
         mut action_parts: SecondaryMap<BuilderReactorKey, RuntimeActionParts>,
@@ -260,15 +281,15 @@ impl EnvBuilder {
         tinymap::TinyMap<runtime::keys::ReactorKey, runtime::Reactor>,
         SecondaryMap<BuilderReactorKey, runtime::keys::ReactorKey>,
     ) {
-        let mut runtime_reactors = tinymap::TinyMap::with_capacity(self.reactor_builders.len());
+        let mut runtime_reactors = tinymap::TinyMap::with_capacity(reactor_set.len());
         let mut reactor_alias = SecondaryMap::new();
 
-        for (builder_key, reactor_builder) in self.reactor_builders.iter() {
+        for builder_key in reactor_set.iter() {
             let RuntimeActionParts {
                 actions: runtime_actions,
                 action_triggers,
                 ..
-            } = action_parts.remove(builder_key).unwrap();
+            } = action_parts.remove(*builder_key).unwrap();
 
             // Build the runtime_action_triggers from the action_triggers part, mapping
             // BuilderReactionKey -> runtime::ReactionKey
@@ -288,15 +309,19 @@ impl EnvBuilder {
                 })
                 .collect();
 
-            let reactor_key = runtime_reactors
-                .insert(reactor_builder.build_runtime(runtime_actions, runtime_action_triggers));
-            reactor_alias.insert(builder_key, reactor_key);
+            let reactor_key = runtime_reactors.insert(
+                self.reactor_builders[*builder_key]
+                    .build_runtime(runtime_actions, runtime_action_triggers),
+            );
+            reactor_alias.insert(*builder_key, reactor_key);
         }
         (runtime_reactors, reactor_alias)
     }
 
+    /// Build `RuntimeReactionParts` from the reaction builders, constrained to reactors in `reactor_set`.
     fn build_runtime_reactions(
         &self,
+        reactor_set: impl IntoIterator<Item = BuilderReactorKey>,
         action_parts: &SecondaryMap<BuilderReactorKey, RuntimeActionParts>,
         port_aliases: &SecondaryMap<BuilderPortKey, runtime::keys::PortKey>,
     ) -> RuntimeReactionParts {
@@ -304,7 +329,12 @@ impl EnvBuilder {
         let mut reactions_aliases = SecondaryMap::new();
         let mut reaction_reactor_aliases = SecondaryMap::new();
 
-        for (builder_key, reaction_builder) in self.reaction_builders.iter() {
+        let reaction_builders = reactor_set
+            .into_iter()
+            .flat_map(|reactor_key| self.reactor_builders[reactor_key].reactions.keys())
+            .map(|reaction_key| (reaction_key, &self.reaction_builders[reaction_key]));
+
+        for (builder_key, reaction_builder) in reaction_builders {
             reaction_reactor_aliases.insert(builder_key, reaction_builder.reactor_key);
             let action_aliases = &action_parts[reaction_builder.reactor_key].aliases;
             let reaction_key = runtime_reactions.insert(reaction_builder.build_reaction(
@@ -322,40 +352,69 @@ impl EnvBuilder {
         };
     }
 
-    /// Build a [`runtime::Env`] from this `EnvBuilder`.
-    pub fn build_runtime(&self) -> Result<runtime::Env, BuilderError> {
-        let reaction_levels = self.build_runtime_level_map()?;
+    /// Build a subset of nested reactors starting at `top_reactor`.
+    pub fn reactor_subset(&self, top_reactor: BuilderReactorKey) -> Vec<BuilderReactorKey> {
+        let graph = DiGraphMap::<_, ()>::from_edges(self.reactor_builders.iter().filter_map(
+            |(reactor_key, reactor)| {
+                reactor
+                    .parent_reactor_key
+                    .map(|parent| (parent, reactor_key))
+            },
+        ));
+        petgraph::visit::Dfs::new(&graph, top_reactor)
+            .iter(&graph)
+            .collect()
+    }
 
+    /// Build a [`runtime::Env`] from this `EnvBuilder`.
+    ///
+    /// If `top_reactor` is `Some`, then the runtime will only contain it and any child reactors.
+    /// Otherwise, the runtime will contain all reactors present in the [`EnvBuilder`].
+    pub fn build_runtime(
+        &self,
+        top_reactor: Option<BuilderReactorKey>,
+    ) -> Result<runtime::Env, BuilderError> {
+        // Runtime ports are always built globally
         let RuntimePortParts {
             ports: mut runtime_ports,
             port_triggers,
             aliases: port_aliases,
-        } = self.build_runtime_ports();
+        } = self.build_runtime_ports(self.reactor_builders.keys());
 
-        let action_parts = self.build_runtime_actions();
+        let reactor_set = if let Some(top_reactor) = top_reactor {
+            self.reactor_subset(top_reactor)
+        } else {
+            self.reactor_builders.keys().collect()
+        };
+
+        let reaction_levels = self.build_runtime_level_map(&reactor_set)?;
+        let action_parts = self.build_runtime_actions(&reactor_set);
 
         let RuntimeReactionParts {
             reactions: mut runtime_reactions,
             aliases: reactions_aliases,
             reaction_reactor_aliases,
-        } = self.build_runtime_reactions(&action_parts, &port_aliases);
+        } = self.build_runtime_reactions(reactor_set.iter().copied(), &action_parts, &port_aliases);
 
         // Update the the Ports with triggered downstream Reactions.
         for (port_key, triggers) in port_triggers.into_iter() {
             let downstream = triggers
                 .into_iter()
-                .map(|builder_reaction_key| {
-                    (
-                        reaction_levels[builder_reaction_key],
-                        reactions_aliases[builder_reaction_key],
-                    )
+                .filter_map(|builder_reaction_key| {
+                    reactions_aliases
+                        .get(builder_reaction_key)
+                        .map(|reaction_key| (reaction_levels[builder_reaction_key], *reaction_key))
                 })
                 .collect();
             runtime_ports[port_key].set_downstream(downstream);
         }
 
-        let (runtime_reactors, reactor_aliases) =
-            self.build_runtime_reactors(&reaction_levels, &reactions_aliases, action_parts);
+        let (runtime_reactors, reactor_aliases) = self.build_runtime_reactors(
+            &reactor_set,
+            &reaction_levels,
+            &reactions_aliases,
+            action_parts,
+        );
 
         // Update the Reactions with the Reactor keys
         for (builder_reaction_key, builder_reactor_key) in reaction_reactor_aliases {

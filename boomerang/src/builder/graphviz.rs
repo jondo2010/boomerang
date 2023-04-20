@@ -6,7 +6,7 @@ use super::{
     BuilderReactorKey, EnvBuilder, PortType, ReactorBuilder,
 };
 
-use itertools::Itertools;
+use itertools::{all, Itertools};
 use slotmap::Key;
 use std::collections::HashMap;
 
@@ -245,7 +245,7 @@ pub fn create_full_graph(env_builder: &EnvBuilder, config: Config) -> Result<Str
     });
 
     if config.show_reaction_graph_edges {
-        let reaction_graph = env_builder.build_reaction_graph();
+        let reaction_graph = env_builder.build_reaction_graph(&ordered_reactors);
         for (r1, r2, _) in reaction_graph.all_edges() {
             let r1_id = reaction_id(r1);
             let r2_id = reaction_id(r2);
@@ -264,8 +264,9 @@ pub fn create_full_graph(env_builder: &EnvBuilder, config: Config) -> Result<Str
 /// edges are dependencies between Reactions. Reactions are clustered into their "Execution Level".
 /// Reactions within the same level can be scheduled in parallel.
 pub fn create_reaction_graph(env_builder: &EnvBuilder) -> Result<String, BuilderError> {
-    let reaction_graph = env_builder.build_reaction_graph();
-    let runtime_level_map = env_builder.build_runtime_level_map()?;
+    let all_reactor_keys = env_builder.reactor_builders.keys().collect_vec();
+    let reaction_graph = env_builder.build_reaction_graph(&all_reactor_keys);
+    let runtime_level_map = env_builder.build_runtime_level_map(&all_reactor_keys)?;
 
     // Cluster on level
     let mut level_runtime_map = HashMap::new();

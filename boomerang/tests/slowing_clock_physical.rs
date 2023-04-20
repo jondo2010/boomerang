@@ -82,6 +82,7 @@ impl SlowingClockPhysical {
 }
 
 #[test_log::test]
+#[cfg(not(feature = "federated"))]
 fn slowing_clock_physical() {
     let _ = boomerang_util::run::build_and_test_reactor::<SlowingClockPhysicalBuilder>(
         "slowing_clock_physical",

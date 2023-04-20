@@ -1,5 +1,6 @@
 //! This module implements the RTI's state machine for connections to client federates.
 
+use anyhow::anyhow;
 use futures::{SinkExt, StreamExt};
 use std::time::Duration;
 use tokio::{
@@ -112,16 +113,17 @@ impl Federate {
     {
         loop {
             tokio::select! {
-                // Messages from other federates
+                // Messages from other federates forwarded by the RTI
                 msg = self.receiver.recv() => {
                     if let Some(msg) = msg {
-                        println!("Federate {:?} received message {msg:?}", self.id);
+                        tracing::debug!(?msg, "Federate {:?} received message from RTI, forwarding to client.", self.id);
+                        frame.send(msg).await.unwrap();
                     }
                 }
                 // Message from the federate over the socket
                 msg = frame.next() => {
                     if let Some(msg) = msg {
-                        println!("Federate {:?} received message {msg:?}", self.id);
+                        tracing::debug!(?msg, "Federate {:?} received message over TCP.", self.id);
 
                         match msg {
                             Ok(RtiMsg::Timestamp(ts)) => {
@@ -131,10 +133,17 @@ impl Federate {
                                     .await
                                     .expect("TODO: handle error");
 
+                                //TODO:
+                                // Record this in-transit message in federate's in-transit message queue.
+
                                 // Send back to the federate the maximum time plus an offset on a TIMESTAMP message.
                                 let timestamp = max_start_time.offset(Duration::from_secs(1));
                                 frame.send(RtiMsg::Timestamp(timestamp)).await.unwrap();
                             },
+                            Ok(RtiMsg::TaggedMessage(tag, msg)) => {
+                                let sender = self.sender_channels.get(msg.dest_federate).ok_or(anyhow!("Invalid Federate {:?}", msg.dest_federate)).unwrap();
+                                sender.send(RtiMsg::TaggedMessage(tag, msg)).unwrap();
+                            }
                             Ok(_) => {
                                 tracing::error!(federate_id=?self.id, ?msg, "RTI received from federate an unrecognized TCP message.");
                             }

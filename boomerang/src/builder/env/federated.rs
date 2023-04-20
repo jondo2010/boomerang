@@ -1,97 +1,47 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration, vec};
 
+use federated::FederateKey;
 use itertools::Itertools;
+use slotmap::SecondaryMap;
 
 use crate::{
-    builder::{BuilderError, BuilderPortKey, BuilderReactorKey, PortType, ReactorBuilderState},
-    runtime,
+    builder::{BuilderError, BuilderPortKey, BuilderReactorKey, PortType},
+    federated, runtime,
 };
 
-use super::EnvBuilder;
+use super::{output::RuntimePortParts, EnvBuilder};
 
-impl<'a> ReactorBuilderState<'a> {
-    /// For each outward binding on a port in the source `reactor`, create:
-    /// 1. a reaction to forward it with `send_timed_message`, and a
-    /// 2. a reaction sensitive to the outputControlReactonTrigger that will call `send_port_absent` if the port isn't set.
-    fn transform_outward_bindings(
-        &mut self,
-        outward_bindings: &[(BuilderPortKey, String, BuilderPortKey, String)],
-    ) -> Result<(), BuilderError> {
-        if outward_bindings.is_empty() {
-            return Ok(());
-        }
+pub struct Bindings {
+    pub inward: Vec<(BuilderPortKey, BuilderPortKey)>,
+    pub outward: Vec<(BuilderPortKey, BuilderPortKey)>,
+}
 
-        let output_control_trigger = self.add_logical_action::<()>("out_ctrl_trigger", None)?;
-
-        for (from_port, from_port_name, to_port, to_port_name) in outward_bindings.iter() {
-            {
-                let to_port = *to_port;
-                let output_binding_reaction = Arc::new(
-                    move |_ctx: &mut runtime::Context,
-                          _state: &mut dyn runtime::ReactorState,
-                          inputs: &[runtime::IPort],
-                          _outputs: &mut [runtime::OPort],
-                          _actions: &mut [&mut runtime::Action]| {
-                        let [port]: [runtime::IPort; 1] = inputs.try_into().unwrap();
-                        if port.is_set() {
-                            println!("send_timed_message({:?})", to_port)
-                        }
-                    },
-                );
-
-                let _ = self
-                    .add_reaction(
-                        &(format!("{from_port_name}_{to_port_name}")),
-                        output_binding_reaction,
-                    )
-                    .with_trigger_port(*from_port, 0)
-                    .finish()?;
-            }
-
-            {
-                let to_port = *to_port;
-                let output_control_reaction = Arc::new(
-                    move |_ctx: &mut runtime::Context,
-                          _state: &mut dyn runtime::ReactorState,
-                          inputs: &[runtime::IPort],
-                          _outputs: &mut [runtime::OPort],
-                          _actions: &mut [&mut runtime::Action]| {
-                        let [port]: &[runtime::IPort; 1] = inputs.try_into().unwrap();
-                        if !port.is_set() {
-                            println!("send_port_absent_to_federate({:?})", to_port)
-                        }
-                    },
-                );
-
-                let _ = self
-                    .add_reaction(
-                        &format!("out_ctrl_{from_port_name}_{to_port_name}"),
-                        output_control_reaction,
-                    )
-                    .with_trigger_action(output_control_trigger, 0)
-                    .with_trigger_port(*from_port, 0)
-                    .finish()?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// For each inward binding on a port in the source `reactor`, create:
+/// Transformation methods for a Federated Environment
+impl EnvBuilder {
+    /// For each inward binding on a port in the reactor, create:
     ///  1. a reaction sensitive to a new inputControlReactionTrigger that will call `wait_until_port_status_known`
     ///  2. a reaction sensitive to a new networkMessage action
     pub(crate) fn transform_inward_bindings(
         &mut self,
-        inward_bindings: &[(BuilderPortKey, String)],
+        reactor_key: BuilderReactorKey,
+        inward_bindings: &[(BuilderPortKey, BuilderPortKey)],
+        runtime_port_aliases: &SecondaryMap<BuilderPortKey, runtime::keys::PortKey>,
+        bound_ports_map: &SecondaryMap<BuilderPortKey, FederateKey>,
     ) -> Result<(), BuilderError> {
         if inward_bindings.is_empty() {
             return Ok(());
         }
 
-        for (from_port, from_port_name) in inward_bindings.iter() {
+        for (own_port, foreign_port) in inward_bindings.iter() {
+            let own_port_name = self.port_builders[*own_port].get_name().to_owned();
+            let runtime_port_key = runtime_port_aliases[*own_port];
+
             {
-                let input_control_trigger = self
-                    .add_logical_action::<()>(&format!("in_ctrl_trigger_{from_port_name}"), None)?;
+                let input_control_trigger = self.add_logical_action::<()>(
+                    &format!("in_ctrl_trigger_{own_port_name}"),
+                    None,
+                    reactor_key,
+                )?;
                 let input_control_reaction = Arc::new(
                     move |_ctx: &mut runtime::Context,
                           _state: &mut dyn runtime::ReactorState,
@@ -100,23 +50,27 @@ impl<'a> ReactorBuilderState<'a> {
                           _actions: &mut [&mut runtime::Action]| {
                         let [port]: &mut [runtime::OPort; 1] = outputs.try_into().unwrap();
                         if port.is_set() {
-                            println!("wait_until_port_status_known");
+                            println!("wait_until_port_status_known({:?})", runtime_port_key);
                         }
                     },
                 );
 
                 let _ = self
-                    .add_reaction(&format!("in_ctrl_{from_port_name}"), input_control_reaction)
+                    .add_reaction(
+                        &format!("in_ctrl_{own_port_name}"),
+                        reactor_key,
+                        input_control_reaction,
+                    )
                     .with_trigger_action(input_control_trigger, 0)
-                    .with_antidependency(*from_port, 0)
+                    .with_antidependency(*own_port, 0)
                     .finish()?;
             }
 
             {
-                let network_message_trigger = self.env.add_logical_action_from_port(
-                    &format!("network_message_{from_port_name}"),
-                    *from_port,
-                    self.reactor_key,
+                let network_message_trigger = self.add_logical_action_from_port(
+                    &format!("network_message_{own_port_name}"),
+                    *own_port,
+                    reactor_key,
                 )?;
 
                 let network_reaction = Arc::new(
@@ -127,32 +81,112 @@ impl<'a> ReactorBuilderState<'a> {
                           _actions: &mut [&mut runtime::Action]| {
                         let [port]: &mut [runtime::OPort; 1] = outputs.try_into().unwrap();
                         if port.is_set() {
-                            println!("set_port_value");
+                            println!("set_port_value({:?})", runtime_port_key);
                         }
                     },
                 );
 
                 let _ = self
                     .add_reaction(
-                        &format!("reaction_network_{from_port_name}"),
+                        &format!("reaction_network_{own_port_name}"),
+                        reactor_key,
                         network_reaction,
                     )
                     .with_trigger_action(network_message_trigger, 0)
-                    .with_antidependency(*from_port, 0)
+                    .with_antidependency(*own_port, 0)
                     .finish()?;
             }
         }
 
         Ok(())
     }
-}
 
-/// Transformation methods for a Federated Environment
-impl EnvBuilder {
+    /// For each outward binding on a port in reactor, create:
+    /// 1. a reaction to forward it with `send_timed_message`, and a
+    /// 2. a reaction sensitive to the outputControlReactonTrigger that will call `send_port_absent` if the port isn't set.
+    fn transform_outward_bindings(
+        &mut self,
+        reactor_key: BuilderReactorKey,
+        outward_bindings: &[(BuilderPortKey, BuilderPortKey)],
+        runtime_port_aliases: &SecondaryMap<BuilderPortKey, runtime::keys::PortKey>,
+        bound_ports_map: &SecondaryMap<BuilderPortKey, FederateKey>,
+    ) -> Result<(), BuilderError> {
+        if outward_bindings.is_empty() {
+            return Ok(());
+        }
+
+        let output_control_trigger =
+            self.add_logical_action::<()>("out_ctrl_trigger", None, reactor_key)?;
+
+        for (own_port, foreign_port) in outward_bindings.iter() {
+            let own_port_name = self.port_builders[*own_port].get_name().to_owned();
+            let to_port_name = self.port_builders[*foreign_port].get_name().to_owned();
+            let runtime_to_port = runtime_port_aliases[*foreign_port];
+            let foreign_federate = bound_ports_map[*foreign_port];
+
+            {
+                let output_binding_reaction = Arc::new(
+                    move |ctx: &mut runtime::Context,
+                          _state: &mut dyn runtime::ReactorState,
+                          inputs: &[runtime::IPort],
+                          _outputs: &mut [runtime::OPort],
+                          _actions: &mut [&mut runtime::Action]| {
+                        let [port]: [runtime::IPort; 1] = inputs.try_into().unwrap();
+                        if port.is_set() {
+                            ctx.send_timed_message(foreign_federate, runtime_to_port, None, ())
+                                .unwrap();
+                        }
+                    },
+                );
+
+                let _ = self
+                    .add_reaction(
+                        &(format!("{own_port_name}_{to_port_name}")),
+                        reactor_key,
+                        output_binding_reaction,
+                    )
+                    .with_trigger_port(*own_port, 0)
+                    .finish()?;
+            }
+
+            {
+                let output_control_reaction = Arc::new(
+                    move |ctx: &mut runtime::Context,
+                          _state: &mut dyn runtime::ReactorState,
+                          inputs: &[runtime::IPort],
+                          _outputs: &mut [runtime::OPort],
+                          _actions: &mut [&mut runtime::Action]| {
+                        let [port]: &[runtime::IPort; 1] = inputs.try_into().unwrap();
+                        if !port.is_set() {
+                            ctx.send_port_absent_to_federate(
+                                foreign_federate,
+                                runtime_to_port,
+                                None,
+                            )
+                            .unwrap();
+                        }
+                    },
+                );
+
+                let _ = self
+                    .add_reaction(
+                        &format!("out_ctrl_{own_port_name}_{to_port_name}"),
+                        reactor_key,
+                        output_control_reaction,
+                    )
+                    .with_trigger_action(output_control_trigger, 0)
+                    .with_trigger_port(*own_port, 0)
+                    .finish()?;
+            }
+        }
+
+        Ok(())
+    }
+
     fn prepare_outward_bindings(
         &self,
         child_reactor_key: BuilderReactorKey,
-    ) -> Vec<(BuilderPortKey, String, BuilderPortKey, String)> {
+    ) -> Vec<(BuilderPortKey, BuilderPortKey)> {
         self.reactor_builders[child_reactor_key]
             .ports
             .keys()
@@ -168,42 +202,55 @@ impl EnvBuilder {
                 port.get_outward_bindings()
                     .map(move |binding_key| (port_key, binding_key))
             })
-            .map(|(from_port, to_port)| {
-                let from_port_name = self.port_builders[from_port].get_name();
-                let to_port_name = self.port_builders[to_port].get_name();
-                (
-                    from_port,
-                    from_port_name.to_owned(),
-                    to_port,
-                    to_port_name.to_owned(),
-                )
-            })
             .collect()
     }
 
     fn prepare_inward_bindings(
         &self,
         child_reactor_key: BuilderReactorKey,
-    ) -> Vec<(BuilderPortKey, String)> {
+    ) -> Vec<(BuilderPortKey, BuilderPortKey)> {
         self.reactor_builders[child_reactor_key]
             .ports
             .keys()
-            .filter(|&port_key| {
+            .filter_map(|port_key| {
                 let port = &self.port_builders[port_key];
-                port.get_port_type() == PortType::Input && port.get_inward_binding().is_some()
-            })
-            .map(|binding_key| {
-                let port_name = self.port_builders[binding_key].get_name();
-                (binding_key, port_name.to_owned())
+                port.get_inward_binding().and_then(|binding_key| {
+                    (port.get_port_type() == PortType::Input).then(|| (port_key, binding_key))
+                })
             })
             .collect()
+    }
+
+    /// Extract (and clear) the inward and outward bindings for a federate.
+    pub fn extract_bindings_for_federate(
+        &mut self,
+        child_reactor_key: BuilderReactorKey,
+    ) -> Bindings {
+        let inward_bindings = self.prepare_inward_bindings(child_reactor_key);
+        let outward_bindings = self.prepare_outward_bindings(child_reactor_key);
+
+        // Clear the outward bindings on the ports in the parent reactor.
+        for (port_key, _) in outward_bindings.iter() {
+            self.port_builders[*port_key].clear_outward_bindings();
+        }
+
+        for (port_key, _) in inward_bindings.iter() {
+            self.port_builders[*port_key].clear_inward_binding();
+        }
+
+        Bindings {
+            inward: inward_bindings,
+            outward: outward_bindings,
+        }
     }
 
     /// Clone an existing reactor as a new Federate.
     ///
     /// This clones the parent reactor replacing any port bindings with IO using the federate
     /// infrastructure.
-    pub fn clone_reactor_as_federate(
+    ///
+    /// Returns the key of the new reactor, the inward bindings and the outward bindings.
+    pub fn clone_parent_reactor_as_federate(
         &mut self,
         child_reactor_key: BuilderReactorKey,
     ) -> Result<BuilderReactorKey, BuilderError> {
@@ -215,18 +262,6 @@ impl EnvBuilder {
                 .ok_or_else(|| BuilderError::NotChildReactor {
                     reactor: child_reactor_key,
                 })?;
-
-        let outward_bindings = self.prepare_outward_bindings(child_reactor_key);
-        let inward_bindings = self.prepare_inward_bindings(child_reactor_key);
-
-        // Clear the outward bindings on the ports in the parent reactor.
-        for (port_key, _, _, _) in outward_bindings.iter() {
-            self.port_builders[*port_key].clear_outward_bindings();
-        }
-
-        for (port_key, _) in inward_bindings.iter() {
-            self.port_builders[*port_key].clear_inward_binding();
-        }
 
         let federate_name = format!("{}-federate", child_reactor.get_name());
 
@@ -252,20 +287,87 @@ impl EnvBuilder {
         builder.adopt_existing_child(child_reactor_key);
         builder.clone_existing_reactions(filtered_reactions.iter().copied(), &action_mapping);
 
-        builder.transform_outward_bindings(&outward_bindings)?;
-        builder.transform_inward_bindings(&inward_bindings)?;
+        Ok(builder.finish()?)
+    }
 
-        let new_reactor_key = builder.finish()?;
+    /// Create the federate reactions for each child using the inward and outward bindings and the runtime ports.
+    ///
+    /// `new_parents_map` is a map from the new federate keys to the parent reactor key and the inward and outward bindings.
+    fn build_federate_runtimes(
+        &mut self,
+        new_parents_map: &tinymap::TinyMap<FederateKey, (BuilderReactorKey, Bindings)>,
+        runtime_ports: &RuntimePortParts,
+    ) -> Result<
+        tinymap::TinySecondaryMap<FederateKey, (runtime::Env, federated::NeighborStructure)>,
+        BuilderError,
+    > {
+        // Create a mapping between binding ports and the federate they are contained in.
+        let bound_ports_map: SecondaryMap<BuilderPortKey, FederateKey> = new_parents_map
+            .iter()
+            .flat_map(|(federate_key, (_, bindings))| {
+                let inward = bindings
+                    .inward
+                    .iter()
+                    .map(move |(port_key, _)| (*port_key, federate_key));
+                let outward = bindings
+                    .outward
+                    .iter()
+                    .map(move |(port_key, _)| (*port_key, federate_key));
+                inward.chain(outward)
+            })
+            .collect();
 
-        Ok(new_reactor_key)
+        let federates = new_parents_map
+            .iter()
+            .map(|(federate_key, (reactor_key, bindings))| {
+                self.transform_inward_bindings(
+                    *reactor_key,
+                    &bindings.inward,
+                    &runtime_ports.aliases,
+                    &bound_ports_map,
+                )?;
+                self.transform_outward_bindings(
+                    *reactor_key,
+                    &bindings.outward,
+                    &runtime_ports.aliases,
+                    &bound_ports_map,
+                )?;
+
+                let env = self.build_runtime(Some(*reactor_key))?;
+
+                let upstream = bindings
+                    .inward
+                    .iter()
+                    .map(|(_, port_key)| (bound_ports_map[*port_key], Duration::ZERO))
+                    .collect();
+
+                let downstream = bindings
+                    .outward
+                    .iter()
+                    .map(|(_, port_key)| bound_ports_map[*port_key])
+                    .collect();
+
+                let neighbors = federated::NeighborStructure {
+                    upstream,
+                    downstream,
+                };
+
+                Ok((federate_key, (env, neighbors)))
+            })
+            .collect::<Result<_, BuilderError>>()?;
+
+        Ok(federates)
     }
 
     /// Transform the top-level reactor specified into multiple federated reactors.
-    /// Returns the keys of the new federated reactors.
+    /// Returns a tuple of the federated reactor's [`runtime::Env`] and the [`federated::NeighborStructure`].
     pub fn federalize_reactor(
         &mut self,
         reactor_key: BuilderReactorKey,
-    ) -> Result<Vec<BuilderReactorKey>, BuilderError> {
+    ) -> Result<
+        tinymap::TinySecondaryMap<FederateKey, (runtime::Env, federated::NeighborStructure)>,
+        BuilderError,
+    > {
         if let Some(parent_reactor_key) = self.reactor_builders[reactor_key].parent_reactor_key {
             return Err(BuilderError::NotTopLevelReactor {
                 parent: parent_reactor_key,
@@ -285,14 +387,53 @@ impl EnvBuilder {
             })
             .collect_vec();
 
-        let new_children = children
-            .into_iter()
-            .map(|child| self.clone_reactor_as_federate(child))
-            .collect::<Result<Vec<_>, _>>()?;
+        tracing::info!(
+            "Preparing reactor {} for distributed execution with {} nodes.",
+            self.reactor_builders[reactor_key].get_name(),
+            children.len()
+        );
+
+        // Build the runtime ports for all reactors before any transformations.
+        let runtime_ports = self.build_runtime_ports(self.reactor_builders.keys());
+
+        // Create a new top-level federate reactor for each child.
+        // This creates a map of (parent_reactor_key, child_reactor_key)
+        let new_parents_map: tinymap::TinyMap<FederateKey, (BuilderReactorKey, Bindings)> =
+            children
+                .iter()
+                .map(|&child_key| {
+                    // Extract the inward and outward bindings for each child.
+                    let bindings = self.extract_bindings_for_federate(child_key);
+                    // Clone the parent reactor as a new federate parent for the child.
+                    let new_parent_key = self.clone_parent_reactor_as_federate(child_key)?;
+                    Ok((new_parent_key, bindings))
+                })
+                .collect::<Result<_, BuilderError>>()?;
 
         // Remove the original reactor.
         self.remove_reactor(reactor_key)?;
 
-        Ok(new_children)
+        Ok(self.build_federate_runtimes(&new_parents_map, &runtime_ports)?)
     }
+}
+
+#[test]
+fn test() {
+    use super::tests::test_reactor::*;
+    use crate::builder::{self, Reactor};
+
+    let mut env_builder = builder::EnvBuilder::new();
+    let (c_key, _) = CBuilder::build("c", (), None, &mut env_builder).unwrap();
+
+    let federates = env_builder.federalize_reactor(c_key).unwrap();
+    assert_eq!(federates.len(), 2);
+
+    // Check that the federates are connected correctly. The federate for `a` should have no upstream
+    // connections and one downstream connection to `b`. The federate for `b` should have one upstream
+    // connection from `a` and no downstream connections.
+    let (f0, f1) = federates.keys().collect_tuple().unwrap();
+    assert_eq!(federates[f0].1.upstream, vec![]);
+    assert_eq!(federates[f0].1.downstream, vec![f1]);
+    assert_eq!(federates[f1].1.upstream, vec![(f0, Duration::ZERO)]);
+    assert_eq!(federates[f1].1.downstream, vec![]);
 }

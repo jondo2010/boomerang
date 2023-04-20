@@ -200,8 +200,10 @@ impl Debug for EnvBuilder {
             })
             .collect::<BTreeMap<_, _>>();
 
+        let all_reactor_keys = self.reactor_builders.keys().collect_vec();
+
         let edges = self
-            .reaction_dependency_edges()
+            .reaction_dependency_edges(&all_reactor_keys)
             .map(|(a, b)| {
                 let a_fqn = self.reaction_fqn(a).unwrap();
                 let b_fqn = self.reaction_fqn(b).unwrap();
@@ -209,7 +211,7 @@ impl Debug for EnvBuilder {
             })
             .collect_vec();
 
-        let reaction_levels = self.build_runtime_level_map().unwrap();
+        let reaction_levels = self.build_runtime_level_map(&all_reactor_keys).unwrap();
 
         let reactions = reaction_levels
             .iter()
@@ -221,7 +223,7 @@ impl Debug for EnvBuilder {
             })
             .collect::<BTreeMap<_, _>>();
 
-        let runtime_port_parts = self.build_runtime_ports();
+        let runtime_port_parts = self.build_runtime_ports(all_reactor_keys);
         let port_aliases = runtime_port_parts
             .aliases
             .iter()

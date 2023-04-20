@@ -59,31 +59,108 @@ fn test_duplicate_actions() {
 #[test]
 fn test_reactions1() {
     let mut env_builder = EnvBuilder::new();
-    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, ());
 
-    let r0_key = reactor_builder
-        .add_reaction("test", Arc::new(|_ctx, _r, _i, _o, _a| {}))
-        .finish()
-        .unwrap();
+    let builder_closure = |reactor_name: &str, env_builder: &mut EnvBuilder| {
+        let mut reactor_builder = env_builder.add_reactor(reactor_name, None, ());
+        let r0_key = reactor_builder
+            .add_reaction("test", Arc::new(|_ctx, _r, _i, _o, _a| {}))
+            .finish()
+            .unwrap();
+        let r1_key = reactor_builder
+            .add_reaction("test", Arc::new(|_ctx, _r, _i, _o, _a| {}))
+            .finish()
+            .unwrap();
+        (reactor_builder.finish().unwrap(), vec![r0_key, r1_key])
+    };
 
-    let r1_key = reactor_builder
-        .add_reaction("test", Arc::new(|_ctx, _r, _i, _o, _a| {}))
-        .finish()
-        .unwrap();
-
-    let _reactor_key = reactor_builder.finish().unwrap();
+    let (_reactor_key, reaction_keys) = builder_closure("test_reactor", &mut env_builder);
 
     assert_eq!(env_builder.reactor_builders.len(), 1);
     assert_eq!(env_builder.reaction_builders.len(), 2);
     assert_eq!(
         env_builder.reaction_builders.keys().collect::<Vec<_>>(),
-        vec![r0_key, r1_key]
+        reaction_keys
     );
 
-    // assert_eq!(env_builder.reactors[reactor_key].reactions.len(), 2);
-
-    let env: runtime::Env = env_builder.build_runtime().unwrap();
+    let env = env_builder.build_runtime(None).unwrap();
     assert_eq!(env.reactions.len(), 2);
+
+    // Add another, completely independent reactor to the env
+    let (reactor_key2, _reaction_keys2) = builder_closure("test_reactor2", &mut env_builder);
+
+    let env = env_builder.build_runtime(Some(reactor_key2)).unwrap();
+    assert_eq!(env.reactions.len(), 2);
+}
+
+pub mod test_reactor {
+    //! A test reactor that can be used to test the federated builder methods.
+
+    use crate::builder;
+
+    pub struct ABuilder {
+        o: builder::TypedPortKey<()>,
+    }
+
+    impl builder::Reactor for ABuilder {
+        type State = ();
+        fn build(
+            name: &str,
+            state: Self::State,
+            parent: Option<builder::BuilderReactorKey>,
+            env: &mut builder::EnvBuilder,
+        ) -> Result<(builder::BuilderReactorKey, Self), builder::BuilderError> {
+            let mut __builder = env.add_reactor(name, parent, state);
+            let o = __builder.add_port::<()>("o", builder::PortType::Output)?;
+            let reactor = Self { o };
+            Ok((__builder.finish()?, reactor))
+        }
+    }
+
+    pub struct BBuilder {
+        i: builder::TypedPortKey<()>,
+    }
+
+    impl builder::Reactor for BBuilder {
+        type State = ();
+        fn build(
+            name: &str,
+            state: Self::State,
+            parent: Option<builder::BuilderReactorKey>,
+            env: &mut builder::EnvBuilder,
+        ) -> Result<(builder::BuilderReactorKey, Self), builder::BuilderError> {
+            let mut __builder = env.add_reactor(name, parent, state);
+            let i = __builder.add_port::<()>("i", builder::PortType::Input)?;
+            let reactor = Self { i };
+            Ok((__builder.finish()?, reactor))
+        }
+    }
+
+    pub struct CBuilder {
+        a: ABuilder,
+        b: BBuilder,
+    }
+
+    impl builder::Reactor for CBuilder {
+        type State = ();
+
+        fn build(
+            name: &str,
+            state: Self::State,
+            parent: Option<builder::BuilderReactorKey>,
+            env: &mut builder::EnvBuilder,
+        ) -> Result<(builder::BuilderReactorKey, Self), builder::BuilderError> {
+            let __a_state = ();
+            let __b_state = ();
+            let mut __builder = env.add_reactor(name, parent, state);
+            let (_key, a): (builder::BuilderReactorKey, ABuilder) =
+                __builder.add_child_reactor("a", __a_state)?;
+            let (_key, b): (builder::BuilderReactorKey, BBuilder) =
+                __builder.add_child_reactor("b", __b_state)?;
+            __builder.bind_port(a.o.clone(), b.i.clone())?;
+            let reactor = Self { a, b };
+            Ok((__builder.finish()?, reactor))
+        }
+    }
 }
 
 #[cfg(feature = "disabled")]

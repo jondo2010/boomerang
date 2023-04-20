@@ -105,6 +105,7 @@ struct DeterminismBuilder {
 }
 
 #[test_log::test]
+#[cfg(not(feature = "federated"))]
 fn determinism() {
     let _ = boomerang_util::run::build_and_test_reactor::<DeterminismBuilder>(
         "determinism",

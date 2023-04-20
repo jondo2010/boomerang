@@ -137,7 +137,7 @@ impl<'a> ReactorBuilderState<'a> {
             .find_action_by_name("_start", reactor_key)
             .map(|action| action.into())
             .unwrap_or_else(|_| {
-                env.add_shutdown_action("_start", reactor_key)
+                env.add_startup_action("_start", reactor_key)
                     .expect("Duplicate startup Action?")
             });
 

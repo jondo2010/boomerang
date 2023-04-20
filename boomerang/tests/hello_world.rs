@@ -34,6 +34,7 @@ struct HelloWorldBuilder {
 }
 
 #[test_log::test]
+#[cfg(not(feature = "federated"))]
 fn hello_world() {
     let _ = boomerang_util::run::build_and_test_reactor::<HelloWorldBuilder>(
         "hello_world",

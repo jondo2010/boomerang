@@ -12,7 +12,7 @@ async fn test1() {
     };
 
     let config = client::Config::new(FederateKey::from(0), "fed1", neighbors);
-    let client = client::connect_to_rti("127.0.0.1:12345".parse().unwrap(), config)
+    let (client, handles) = client::connect_to_rti("127.0.0.1:12345".parse().unwrap(), config)
         .await
         .unwrap();
 

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 mod bincodec;
 pub mod client;
 mod clock;
-mod rti;
+pub mod rti;
 #[cfg(test)]
 mod tests;
 
@@ -78,20 +78,22 @@ pub enum RejectReason {
 }
 
 /// Each federate needs to have a unique ID between 0 and NUMBER_OF_FEDERATES-1.
-///
-/// Each federate, when starting up, should send this message to the RTI. This is its first message
-/// to the RTI.
-///
-/// The RTI will respond with either `Reject`, `Ack`, or `UdpPort`.
-///
-/// If the federate is a C target LF program, the generated federate code does this by calling
-/// synchronize_with_other_federates(), passing to it its federate ID.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FedIds {
-    /// Federate ID.
-    pub federate: FederateKey,
-    /// Federation ID
-    pub federation_id: String,
+    /// Federate.
+    pub federate_key: FederateKey,
+    /// Federation
+    pub federation: String,
+}
+
+impl Display for FedIds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let FedIds {
+            federate_key,
+            federation,
+        } = &self;
+        write!(f, "FedIds({federation}::{federate_key:?})")
+    }
 }
 
 /// A message that informs the RTI about connections between this federate and other federates where
@@ -173,6 +175,14 @@ pub enum RtiMsg {
     UdpPort(ClockSyncStat),
 
     /// A message from a federate to an RTI containing the federation ID and the federate ID.
+    ///
+    /// Each federate, when starting up, should send this message to the RTI. This is its first message
+    /// to the RTI.
+    ///
+    /// The RTI will respond with either `Reject`, `Ack`, or `UdpPort`.
+    ///
+    /// The client federate code does this by calling synchronize_with_other_federates(), passing to
+    /// it its federate ID.
     FedIds(FedIds),
 
     /// Byte identifying a message from an RTI to a federate containing RTI's 8-byte random nonce
@@ -331,6 +341,9 @@ pub enum RtiMsg {
     /// A port absent message, informing the receiver that a given port will not have event for the current logical time.
     PortAbsent(PortAbsent),
 
-    /// A message that informs the RTI about connections between this federate and other federates.
+    /// A message that informs the RTI about connections between this federate and other federates where
+    /// messages are routed through the RTI. Currently, this only includes logical connections when the
+    /// coordination is centralized. This information is needed for the RTI to perform the centralized
+    /// coordination.
     NeighborStructure(NeighborStructure),
 }

@@ -235,36 +235,6 @@ impl EnvBuilder {
         Ok(key)
     }
 
-    /// Find a Port matching a given name and ReactorKey
-    pub fn find_port_by_name(
-        &self,
-        port_name: &str,
-        reactor_key: BuilderReactorKey,
-    ) -> Result<BuilderPortKey, BuilderError> {
-        self.port_builders
-            .iter()
-            .find(|(_, port_builder)| {
-                port_builder.get_name() == port_name
-                    && port_builder.get_reactor_key() == reactor_key
-            })
-            .map(|(port_key, _)| port_key)
-            .ok_or_else(|| BuilderError::NamedPortNotFound(port_name.to_string()))
-    }
-
-    /// Find an Action matching a given name and ReactorKey
-    pub fn find_action_by_name(
-        &self,
-        action_name: &str,
-        reactor_key: BuilderReactorKey,
-    ) -> Result<BuilderActionKey, BuilderError> {
-        self.reactor_builders[reactor_key]
-            .actions
-            .iter()
-            .find(|(_, action_builder)| action_builder.get_name() == action_name)
-            .map(|(action_key, _)| action_key)
-            .ok_or_else(|| BuilderError::NamedActionNotFound(action_name.to_string()))
-    }
-
     /// Bind Port A to Port B
     /// The nominal case is to bind Input A to Output B
     pub fn bind_port<T: runtime::PortData>(
@@ -456,5 +426,50 @@ impl EnvBuilder {
         self.reactor_builders.remove(reactor_key);
 
         Ok(())
+    }
+}
+
+/// Introspection methods for the environment
+impl EnvBuilder {
+    /// Find Reactors matching a given name
+    pub fn find_reactors_by_name<'a>(
+        &'a self,
+        reactor_name: &'a str,
+    ) -> impl Iterator<Item = BuilderReactorKey> + 'a {
+        self.reactor_builders
+            .iter()
+            .filter_map(move |(reactor_key, reactor)| {
+                (reactor.get_name() == reactor_name).then(|| reactor_key)
+            })
+    }
+
+    /// Find a Port matching a given name and ReactorKey
+    pub fn find_port_by_name(
+        &self,
+        port_name: &str,
+        reactor_key: BuilderReactorKey,
+    ) -> Result<BuilderPortKey, BuilderError> {
+        self.port_builders
+            .iter()
+            .find(|(_, port_builder)| {
+                port_builder.get_name() == port_name
+                    && port_builder.get_reactor_key() == reactor_key
+            })
+            .map(|(port_key, _)| port_key)
+            .ok_or_else(|| BuilderError::NamedPortNotFound(port_name.to_string()))
+    }
+
+    /// Find an Action matching a given name and ReactorKey
+    pub fn find_action_by_name(
+        &self,
+        action_name: &str,
+        reactor_key: BuilderReactorKey,
+    ) -> Result<BuilderActionKey, BuilderError> {
+        self.reactor_builders[reactor_key]
+            .actions
+            .iter()
+            .find(|(_, action_builder)| action_builder.get_name() == action_name)
+            .map(|(action_key, _)| action_key)
+            .ok_or_else(|| BuilderError::NamedActionNotFound(action_name.to_string()))
     }
 }

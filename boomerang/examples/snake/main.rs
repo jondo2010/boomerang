@@ -57,6 +57,7 @@ mod reactor {
         reaction_shutdown: BuilderReactionKey,
     }
 
+    #[derive(Clone)]
     pub struct Snake {
         // model classes for the game.
         snake: CircularSnake,

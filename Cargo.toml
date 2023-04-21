@@ -13,14 +13,13 @@ default = [
     "runner",
     "visualization",
 ]
+## Enables the derive macros in [`boomerang_derive`].
 derive = ["dep:boomerang_derive"]
-federated = [
-    "dep:boomerang_federated",
-    "dep:tokio",
-    "boomerang_runtime/federated",
-    "boomerang_builder/federated",
-]
+## Enabled the [`boomerang_federated`] module.
+federated = [ "dep:boomerang_federated", "dep:tokio", "boomerang_runtime/federated", "boomerang_builder/federated", ]
+## Enables the [`boomerang::runner`] module.
 runner = ["dep:clap", "dep:anyhow"]
+## Enables the debug Graphviz functions in [`builder::graphviz`].
 visualization = []
 
 [dependencies]
@@ -28,6 +27,7 @@ anyhow = { workspace = true, optional = true }
 clap = { version = "4.2", features = ["derive"], optional = true }
 tokio = { workspace = true, optional = true }
 tracing = { workspace = true }
+document-features = "0.2"
 
 boomerang_builder = { workspace = true }
 boomerang_core = { workspace = true }

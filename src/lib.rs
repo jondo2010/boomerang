@@ -49,11 +49,8 @@
 //! sched.event_loop();
 //! ```
 //!
-//! # Crate features:
-//! * **visualization** -
-//!   Defaults on. Enables the debug Graphviz functions in [`builder::graphviz`].
-//! * **derive** -
-//!   Defaults on. Enables the derive macros in [`boomerang_derive`].
+//! ## Feature flags
+#![doc = document_features::document_features!()]
 
 #[cfg(feature = "runner")]
 pub mod runner;

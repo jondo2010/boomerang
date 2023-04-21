@@ -113,6 +113,7 @@ impl Reaction {
         self.actions.iter()
     }
 
+    #[cfg(feature = "federated")]
     #[tracing::instrument(
         skip(self, start_time, inputs, outputs, async_tx),
         fields(
@@ -129,7 +130,7 @@ impl Reaction {
         inputs: &[IPort<'_>],
         outputs: &mut [OPort<'_>],
         async_tx: Sender<ScheduledEvent>,
-        //#[cfg(feature = "federated")] client: &'a federated::client::Client,
+        client: &'a federated::client::Client,
     ) -> Context {
         let Reactor {
             state,
@@ -138,9 +139,56 @@ impl Reaction {
             ..
         } = reactor;
 
-        #[cfg(feature = "federated")]
         let mut ctx = Context::new(start_time, tag, action_triggers, async_tx, client);
-        #[cfg(not(feature = "federated"))]
+
+        if let Some(Deadline { deadline, handler }) = self.deadline.as_ref() {
+            let lag = ctx.get_physical_time() - ctx.get_logical_time();
+            if lag > (*deadline).into() {
+                (handler.write().unwrap())();
+            }
+        }
+
+        // Pull actions from the reaction/reactor
+        let mut actions = action_keys
+            .iter_many_unchecked_mut(self.iter_actions().copied())
+            .collect::<Vec<_>>();
+
+        (self.body)(
+            &mut ctx,
+            state.as_mut(),
+            inputs,
+            outputs,
+            actions.as_mut_slice(),
+        );
+
+        ctx
+    }
+
+    #[cfg(not(feature = "federated"))]
+    #[tracing::instrument(
+        skip(self, start_time, inputs, outputs, async_tx),
+        fields(
+            reactor = reactor.name,
+            name = %self.name,
+            tag = %tag,
+        )
+    )]
+    pub fn trigger<'a>(
+        &'a self,
+        start_time: Timestamp,
+        tag: Tag,
+        reactor: &'a mut Reactor,
+        inputs: &[IPort<'_>],
+        outputs: &mut [OPort<'_>],
+        async_tx: Sender<ScheduledEvent>,
+    ) -> Context {
+        let Reactor {
+            state,
+            actions: action_keys,
+            action_triggers,
+            ..
+        } = reactor;
+
         let mut ctx = Context::new(start_time, tag, action_triggers, async_tx);
 
         if let Some(Deadline { deadline, handler }) = self.deadline.as_ref() {

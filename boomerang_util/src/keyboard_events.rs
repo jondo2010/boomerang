@@ -1,13 +1,13 @@
 //! Capture asynchronous key presses, and sends them through an output port.
-//!
-use boomerang::{
-    builder::{BuilderReactionKey, Physical, TypedActionKey, TypedPortKey},
-    runtime, Reactor,
-};
 
 use std::{io::Stdout, ops::DerefMut};
 pub use termion::event::Key;
 use termion::raw::{IntoRawMode, RawTerminal};
+
+use boomerang::{
+    builder::{BuilderReactionKey, Physical, TypedActionKey, TypedPortKey},
+    reaction, runtime, Reactor,
+};
 
 #[derive(Reactor)]
 #[reactor(state = "KeyboardEvents")]

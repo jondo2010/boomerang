@@ -377,6 +377,9 @@ impl Scheduler {
             }
         }
 
+        // Insert network-dependent events for input/output ports into the queue
+        // enqueue_network_control_reactions()
+
         self.cleanup(tag);
     }
 }

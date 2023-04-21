@@ -137,6 +137,16 @@ impl Client {
         Ok(tag)
     }
 
+    /// Enqueue network control reactions.
+    ///
+    /// that will send an [`RtiMsg::PortAbsent`] message to downstream federates if a given network port is not present.
+    pub fn enqueue_network_control_reactions(&self) {
+        if self.config.neighbors.downstream.is_empty() {
+            // No downstream federates, so no need to enqueue control reactions
+            return;
+        }
+    }
+
     /// Send a port absent message to federate, informing it that the current federate will not
     /// produce an event on this network port at the current logical time.
     #[tracing::instrument(level = "debug", skip(self), fields(fed_ids=%self.config.fed_ids))]

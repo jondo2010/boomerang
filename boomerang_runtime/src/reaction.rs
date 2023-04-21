@@ -129,7 +129,7 @@ impl Reaction {
         inputs: &[IPort<'_>],
         outputs: &mut [OPort<'_>],
         async_tx: Sender<ScheduledEvent>,
-        #[cfg(feature = "federated")] client: &'a federated::client::Client,
+        //#[cfg(feature = "federated")] client: &'a federated::client::Client,
     ) -> Context {
         let Reactor {
             state,

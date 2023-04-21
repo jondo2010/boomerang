@@ -21,6 +21,8 @@ pub type LevelReactionKey = (Level, ReactionKey);
 /// The reactor heirarchy has been flattened and build by the builder methods.
 #[derive(Debug)]
 pub struct Env {
+    /// The top-level Reactor
+    pub top_reactor: ReactorKey,
     /// The runtime set of Reactors
     pub reactors: tinymap::TinyMap<ReactorKey, Reactor>,
     /// The runtime set of Ports

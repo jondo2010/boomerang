@@ -30,18 +30,25 @@ pub(crate) trait ReactorElement {
     }
 }
 
-#[derive(Derivative)]
-#[derivative(Debug)]
 pub struct Reactor {
     /// The reactor name
     pub(crate) name: String,
     /// The ReactorState
-    #[derivative(Debug = "ignore")]
     pub(crate) state: Box<dyn ReactorState>,
     /// Map of Actions for this Reactor
-    pub actions: tinymap::TinyMap<ActionKey, Action>,
+    pub(crate) actions: tinymap::TinyMap<ActionKey, Action>,
     /// For each Action, a set of Reactions triggered by it.
     pub(crate) action_triggers: tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
+}
+
+impl std::fmt::Debug for Reactor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reactor")
+            .field("name", &self.name)
+            .field("actions", &self.actions)
+            .field("action_triggers", &self.action_triggers)
+            .finish()
+    }
 }
 
 impl Reactor {

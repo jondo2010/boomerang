@@ -1,0 +1,29 @@
+[package]
+name = "boomerang_builder"
+description = "Rust implementation of the 'Reactors' Deterministic Actor Model"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+keywords.workspace = true
+repository.workspace = true
+categories.workspace = true
+
+[features]
+default = ["visualization"]
+federated = ["dep:boomerang_federated", "boomerang_runtime/federated"]
+visualization = []
+
+[dependencies]
+anyhow.workspace = true
+derivative = "2.2"
+itertools.workspace = true
+petgraph = "0.6"
+slotmap = { version = "1.0", features = ["unstable"] }
+thiserror.workspace = true
+tinymap.workspace = true
+tracing.workspace = true
+
+boomerang_runtime = { workspace = true }
+boomerang_federated = { workspace = true, optional = true }

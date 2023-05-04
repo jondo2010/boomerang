@@ -26,20 +26,6 @@ struct OutwardControlAction {
     output_control_trigger: BuilderActionKey,
 }
 
-/// Runtime data for a Federated Environment
-pub struct FederateEnv {
-    /// The runtime environment
-    pub env: runtime::Env,
-    /// Keys for the generated input control trigger actions
-    pub input_control_triggers: Vec<runtime::keys::ActionKey>,
-    /// Keys for the generated network message actions
-    pub network_messages: Vec<runtime::keys::ActionKey>,
-    /// Key for the generated output control trigger action
-    pub output_control_trigger: runtime::keys::ActionKey,
-    /// Federated neighbor structure
-    pub neighbors: federated::NeighborStructure,
-}
-
 /// Transformation methods for a Federated Environment
 impl EnvBuilder {
     /// For each inward binding on a port in the reactor, create:
@@ -50,9 +36,9 @@ impl EnvBuilder {
         reactor_key: BuilderReactorKey,
         inward_bindings: &[(BuilderPortKey, BuilderPortKey)],
         runtime_port_aliases: &SecondaryMap<BuilderPortKey, runtime::keys::PortKey>,
-        bound_ports_map: &SecondaryMap<BuilderPortKey, FederateKey>,
+        _bound_ports_map: &SecondaryMap<BuilderPortKey, FederateKey>,
     ) -> Result<InwardControlAction, BuilderError> {
-        let control_actions = inward_bindings.iter().map(|(own_port, foreign_port)| {
+        let control_actions = inward_bindings.iter().map(|(own_port, _foreign_port)| {
             let own_port_name = self.port_builders[*own_port].get_name().to_owned();
             let runtime_port_key = runtime_port_aliases[*own_port];
 
@@ -326,7 +312,10 @@ impl EnvBuilder {
         &mut self,
         new_parents_map: &tinymap::TinyMap<FederateKey, (BuilderReactorKey, Bindings)>,
         runtime_ports: &RuntimePortParts,
-    ) -> Result<tinymap::TinySecondaryMap<FederateKey, FederateEnv>, BuilderError> {
+    ) -> Result<
+        tinymap::TinySecondaryMap<FederateKey, (runtime::Env, runtime::FederateEnv)>,
+        BuilderError,
+    > {
         // Create a mapping between binding ports and the federate they are contained in.
         let bound_ports_map: SecondaryMap<BuilderPortKey, FederateKey> = new_parents_map
             .iter()
@@ -394,13 +383,15 @@ impl EnvBuilder {
 
                 Ok((
                     federate_key,
-                    FederateEnv {
+                    (
                         env,
-                        input_control_triggers,
-                        network_messages,
-                        output_control_trigger,
-                        neighbors,
-                    },
+                        runtime::FederateEnv {
+                            input_control_triggers,
+                            network_messages,
+                            output_control_trigger,
+                            neighbors,
+                        },
+                    ),
                 ))
             })
             .collect::<Result<_, BuilderError>>()?;
@@ -414,7 +405,10 @@ impl EnvBuilder {
     pub fn federalize_reactor(
         &mut self,
         reactor_key: BuilderReactorKey,
-    ) -> Result<tinymap::TinySecondaryMap<FederateKey, FederateEnv>, BuilderError> {
+    ) -> Result<
+        tinymap::TinySecondaryMap<FederateKey, (runtime::Env, runtime::FederateEnv)>,
+        BuilderError,
+    > {
         if let Some(parent_reactor_key) = self.reactor_builders[reactor_key].parent_reactor_key {
             return Err(BuilderError::NotTopLevelReactor {
                 parent: parent_reactor_key,
@@ -479,8 +473,9 @@ fn test() {
     // connections and one downstream connection to `b`. The federate for `b` should have one upstream
     // connection from `a` and no downstream connections.
     let (f0, f1) = federates.keys().collect_tuple().unwrap();
-    assert_eq!(federates[f0].neighbors.upstream, vec![]);
-    assert_eq!(federates[f0].neighbors.downstream, vec![f1]);
-    assert_eq!(federates[f1].neighbors.upstream, vec![(f0, Duration::ZERO)]);
-    assert_eq!(federates[f1].neighbors.downstream, vec![]);
+    let neighbors = &federates[f0].1.neighbors;
+    assert_eq!(neighbors.upstream, vec![]);
+    assert_eq!(neighbors.downstream, vec![f1]);
+    assert_eq!(neighbors.upstream, vec![(f0, Duration::ZERO)]);
+    assert_eq!(neighbors.downstream, vec![]);
 }

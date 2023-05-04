@@ -10,11 +10,27 @@ use crate::{
     BasePort, Reaction, Reactor,
 };
 
+#[cfg(feature = "federated")]
+use boomerang_federated as federated;
+
 /// Execution level
 pub type Level = usize;
 
 /// A paired `ReactionKey` with it's execution level.
 pub type LevelReactionKey = (Level, ReactionKey);
+
+/// Extended data from the Federated Environment
+#[cfg(feature = "federated")]
+pub struct FederateEnv {
+    /// Keys for the generated input control trigger actions
+    pub input_control_triggers: Vec<crate::keys::ActionKey>,
+    /// Keys for the generated network message actions
+    pub network_messages: Vec<crate::keys::ActionKey>,
+    /// Key for the generated output control trigger action
+    pub output_control_trigger: crate::keys::ActionKey,
+    /// Federated neighbor structure
+    pub neighbors: federated::NeighborStructure,
+}
 
 /// `Env` stores the resolved runtime state of all the reactors.
 ///

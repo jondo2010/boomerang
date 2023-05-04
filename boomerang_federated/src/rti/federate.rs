@@ -1,15 +1,20 @@
 //! This module implements the RTI's state machine for connections to client federates.
 
 use anyhow::anyhow;
+use boomerang_core::time::Timestamp;
 use futures::{SinkExt, StreamExt};
-use std::time::Duration;
+use std::{
+    cmp::{min, Reverse},
+    collections::BinaryHeap,
+    time::Duration,
+};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    sync::mpsc::{UnboundedReceiver, UnboundedSender},
+    sync::{mpsc, watch},
 };
 use tokio_util::codec::Framed;
 
-use crate::{bincodec, ClockSyncStat, FederateKey, NeighborStructure, RtiMsg, Tag};
+use crate::{bincodec, ClockSyncStat, FederateKey, Message, NeighborStructure, RtiMsg, Tag};
 
 use super::{start_time_sync::StartSync, ExecutionMode};
 
@@ -23,6 +28,58 @@ pub enum State {
     Pending,
 }
 
+/// Update the next event tag of federate `federate_id`.
+///
+/// It will update the recorded next event tag of federate `federate_id` to the minimum of
+/// `next_event_tag` and the minimum tag of in-transit messages (if any) to the federate. Will
+/// try to see if the RTI can grant new TAG or PTAG messages to any downstream federates based
+/// on this new next event tag.
+///
+/// federate_id – The id of the federate that needs to be updated.
+/// next_event_tag – The next event tag for `federate_id`.
+async fn next_event_tag_task(
+    mut in_transit_receiver: mpsc::UnboundedReceiver<Tag>,
+    mut next_event_receiver: mpsc::UnboundedReceiver<Tag>,
+) {
+    let mut in_transit_message_tags = BinaryHeap::new();
+
+    loop {
+        tokio::select! {
+            biased;
+
+            in_transit_tag = in_transit_receiver.recv() => {
+                if let Some(in_transit_tag) = in_transit_tag {
+                    in_transit_message_tags.push(Reverse(in_transit_tag));
+                }
+            }
+
+            next_event_tag = next_event_receiver.recv() => {
+                if let Some(next_event_tag) = next_event_tag {
+                    // ported from update_federate_next_event_tag_locked()
+
+                    let next_event_tag = match in_transit_message_tags.peek() {
+                        Some(min_in_transit) => min_in_transit.0.min(next_event_tag),
+                        _ => next_event_tag,
+                    };
+
+                }
+            }
+        }
+    }
+}
+
+/// Channel endpoints for sending and receiving messages to/from a neighbor federate.
+struct NeighborEndpoint {
+    /// The largest logical tag completed by "neighbor" federate (or `None` if no LTC has been received).
+    completed: watch::Receiver<Option<Tag>>,
+
+    /// Record of in-transit messages to this federate that are not yet processed.
+    in_transit_message_tags: mpsc::UnboundedSender<Tag>,
+
+    /// Sender channel endpoint for sending messages to the "neighbor" federate.
+    sender: mpsc::UnboundedSender<RtiMsg>,
+}
+
 /// Information about a federate known to the RTI, including its runtime state, mode of execution,
 /// and connectivity with other federates.
 ///
@@ -32,21 +89,6 @@ pub enum State {
 pub struct Federate {
     /// ID of this federate.
     id: FederateKey,
-
-    /// Start time synchronizer.
-    start_time_sync: StartSync,
-
-    /// Indicates whether clock synchronization is enabled.
-    clock_sync: ClockSyncStat,
-
-    /// The largest logical tag completed by the federate (or `None` if no LTC has been received).
-    completed: Option<Tag>,
-    /// The maximum TAG that has been granted so far (or `None` if none granted)
-    last_granted: Option<Tag>,
-    /// The maximum PTAG that has been provisionally granted (or `None` if none granted)
-    last_provisionally_granted: Option<Tag>,
-    /// Most recent NET received from the federate (or `None` if none received).
-    next_event: Option<Tag>,
 
     /// Record of in-transit messages to this federate that are not yet processed.
     /// This record is ordered based on the time value of each message for a more efficient access.
@@ -58,11 +100,10 @@ pub struct Federate {
     /// The upstream and downstream connections of this federate.
     neighbors: NeighborStructure,
 
-    /// Receiver channel endpoint for receiving messages from other federates.
-    receiver: UnboundedReceiver<RtiMsg>,
+    neighbor_feds: tinymap::TinySecondaryMap<FederateKey, NeighborEndpoint>,
 
-    /// Sender channel endspoints for sending messages to the neighbors.
-    sender_channels: tinymap::TinySecondaryMap<FederateKey, UnboundedSender<RtiMsg>>,
+    /// Receiver channel endpoint for receiving messages from other federates.
+    receiver: mpsc::UnboundedReceiver<RtiMsg>,
 
     /// FAST or REALTIME.
     mode: ExecutionMode,
@@ -87,6 +128,10 @@ impl Federate {
         receiver: UnboundedReceiver<RtiMsg>,
         sender_channels: tinymap::TinySecondaryMap<FederateKey, UnboundedSender<RtiMsg>>,
     ) -> Self {
+        let (tx, mut rx): (watch::Sender<Option<Tag>>, watch::Receiver<Option<Tag>>) =
+            watch::channel(None);
+        tx.send(Some(Tag::now(Timestamp::now()))).unwrap();
+
         Federate {
             id,
             start_time_sync,
@@ -105,6 +150,7 @@ impl Federate {
     }
 
     /// This is the RTI's main loop for each Federate connected to it.
+    #[tracing::instrument(skip(self, frame), fields(federate = ?self.id))]
     pub async fn run<T>(
         mut self,
         mut frame: Framed<T, bincodec::BinCodec<RtiMsg, bincode::DefaultOptions>>,
@@ -116,14 +162,14 @@ impl Federate {
                 // Messages from other federates forwarded by the RTI
                 msg = self.receiver.recv() => {
                     if let Some(msg) = msg {
-                        tracing::debug!(?msg, "Federate {:?} received message from RTI, forwarding to client.", self.id);
+                        tracing::debug!(?msg, "Received message from RTI, forwarding to client.");
                         frame.send(msg).await.unwrap();
                     }
                 }
                 // Message from the federate over the socket
                 msg = frame.next() => {
                     if let Some(msg) = msg {
-                        tracing::debug!(?msg, "Federate {:?} received message over TCP.", self.id);
+                        tracing::debug!(?msg, "Received message over TCP.");
 
                         match msg {
                             Ok(RtiMsg::Timestamp(ts)) => {
@@ -141,9 +187,25 @@ impl Federate {
                                 frame.send(RtiMsg::Timestamp(timestamp)).await.unwrap();
                             },
                             Ok(RtiMsg::TaggedMessage(tag, msg)) => {
-                                let sender = self.sender_channels.get(msg.dest_federate).ok_or(anyhow!("Invalid Federate {:?}", msg.dest_federate)).unwrap();
-                                sender.send(RtiMsg::TaggedMessage(tag, msg)).unwrap();
+                                self.handle_tagged_message(tag, msg).await;
                             }
+
+                            Ok(RtiMsg::PortAbsent(port_absent)) => {
+                                tracing::debug!(
+                                    "RTI forwarding port absent message for port {port:?} to federate {federate:?}.",
+                                    port=port_absent.port,
+                                    federate=port_absent.federate
+                                );
+
+                                let sender = self
+                                    .sender_channels
+                                    .get(port_absent.federate)
+                                    .ok_or(anyhow!("Invalid Federate {:?}", port_absent.federate))
+                                    .unwrap();
+
+                                sender.send(RtiMsg::PortAbsent(port_absent)).unwrap();
+                            }
+
                             Ok(_) => {
                                 tracing::error!(federate_id=?self.id, ?msg, "RTI received from federate an unrecognized TCP message.");
                             }

@@ -1,5 +1,8 @@
+//! The Scheduler is the core of the runtime. It is responsible for executing the
+//! reactions in the system, and for managing the asynchronous events that may
+//! occur during the execution of the system.
+
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
-use derive_more::Display;
 use std::{collections::BinaryHeap, time::Duration};
 use tracing::{info, trace, warn};
 
@@ -8,12 +11,23 @@ use boomerang_federated as federated;
 
 use crate::{Env, ReactionSet, ReactionTriggerCtx, Tag, Timestamp};
 
-#[derive(Debug, Display, Clone)]
-#[display(fmt = "[tag={},terminal={}]", tag, terminal)]
+#[derive(Debug, Clone)]
 pub struct ScheduledEvent {
     pub(crate) tag: Tag,
     pub(crate) reactions: ReactionSet,
     pub(crate) terminal: bool,
+}
+
+impl std::fmt::Display for ScheduledEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[tag={},({}R),terminal={}]",
+            self.tag,
+            self.reactions.num_levels(),
+            self.terminal
+        )
+    }
 }
 
 impl Eq for ScheduledEvent {}
@@ -46,7 +60,7 @@ pub struct Scheduler {
     event_tx: Sender<ScheduledEvent>,
     /// Asynchronous events receiver
     event_rx: Receiver<ScheduledEvent>,
-    /// Current event queue
+    /// The main event queue, sorted by time
     event_queue: BinaryHeap<ScheduledEvent>,
     /// Initial wall-clock time.
     start_time: Timestamp,
@@ -60,6 +74,8 @@ pub struct Scheduler {
     /// Client to the federated runtime
     #[cfg(feature = "federated")]
     client: federated::client::Client,
+    #[cfg(feature = "federated")]
+    federate_env: crate::FederateEnv,
 }
 
 impl std::fmt::Debug for Scheduler {
@@ -107,6 +123,7 @@ impl Scheduler {
     #[cfg(feature = "federated")]
     pub fn new(
         env: Env,
+        federate_env: crate::FederateEnv,
         config: Config,
         handles: federated::client::Handles,
         client: federated::client::Client,
@@ -122,6 +139,7 @@ impl Scheduler {
             config,
             handles,
             client,
+            federate_env,
         }
     }
 
@@ -233,6 +251,8 @@ impl Scheduler {
                 self.event_queue.push(event);
             }
 
+            //self.event_queue.peek()
+
             if let Some(event) = self.event_queue.pop() {
                 tracing::debug!(event = %event, reactions = ?event.reactions, "Handling event");
 
@@ -311,7 +331,10 @@ impl Scheduler {
     }
 
     /// Process the reactions at this tag in increasing order of level.
-    /// Reactions at a level N may trigger further reactions at levels M>N
+    /// Reactions at a level `N` may trigger further reactions at levels `M`>`N`.
+    ///
+    /// If the feature `parallel` is enabled, then reactions within each level are executed in
+    /// parallel on the Rayon thread pool.
     #[tracing::instrument(skip(self), fields(tag = %tag, reaction_set = ?reaction_set))]
     pub fn process_tag(&mut self, tag: Tag, mut reaction_set: ReactionSet) {
         while let Some((level, reaction_keys)) = reaction_set.next() {
@@ -379,6 +402,22 @@ impl Scheduler {
 
         // Insert network-dependent events for input/output ports into the queue
         // enqueue_network_control_reactions()
+        #[cfg(feature = "federated")]
+        {
+            let top_reactor = &self.env.reactors[self.env.top_reactor];
+            let reactions = self
+                .federate_env
+                .input_control_triggers
+                .iter()
+                .flat_map(|&action_key| top_reactor.action_triggers[action_key].iter().copied())
+                .collect();
+
+            self.event_queue.push(ScheduledEvent {
+                tag: tag.delay(None::<Timestamp>),
+                reactions,
+                terminal: false,
+            });
+        }
 
         self.cleanup(tag);
     }

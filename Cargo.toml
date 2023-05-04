@@ -9,7 +9,7 @@ license.workspace = true
 [features]
 default = [
     "derive",
-    #"federated",
+    "federated",
     "runner",
     "visualization",
 ]

@@ -25,7 +25,8 @@ impl<K: tinymap::Key + Debug> Debug for KeySet<K> {
 }
 
 impl<K: tinymap::Key> KeySet<K> {
-    pub fn len(&self) -> usize {
+    /// Return the number of levels in the set
+    pub fn num_levels(&self) -> usize {
         self.levels.len()
     }
 

@@ -3,12 +3,12 @@ use std::{fmt::Display, time::Duration};
 use boomerang_core::keys::PortKey;
 use serde::{Deserialize, Serialize};
 
-mod bincodec;
 pub mod client;
 mod clock;
 pub mod rti;
 #[cfg(test)]
 mod tests;
+mod util;
 
 pub use boomerang_core::time::{Tag, Timestamp};
 
@@ -32,16 +32,6 @@ pub struct Message {
     pub message: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PortAbsent {
-    pub port: PortKey,
-    /// Federate ID of the destination federate.
-    /// This is needed for the centralized coordination so that the RTI knows where to forward the message.
-    pub federate: FederateKey,
-    /// Intended time of the absent message
-    pub tag: Tag,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
@@ -55,7 +45,7 @@ pub enum Error {
 }
 
 //// Rejection codes
-#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
+#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error, PartialEq)]
 pub enum RejectReason {
     /// Federation ID does not match.
     #[error("Federation ID does not match")]
@@ -115,6 +105,23 @@ pub struct NeighborStructure {
     pub upstream: Vec<(FederateKey, Duration)>,
     /// Federate's downstream federates (by direct connection).
     pub downstream: Vec<FederateKey>,
+}
+
+impl NeighborStructure {
+    /// Returns `true` if the neighbor structure is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.upstream.is_empty() && self.downstream.is_empty()
+    }
+}
+
+impl Default for NeighborStructure {
+    fn default() -> Self {
+        Self {
+            upstream: Vec::new(),
+            downstream: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
@@ -237,17 +244,14 @@ pub enum RtiMsg {
     /// make sure downstream federates can make progress.
     NextEventTag(Tag),
 
-    /// A time advance grant (TAG) sent by the RTI to a federate in centralized coordination.
+    /// A time advance grant (TAG) or provisional time advance grant (PTAG) sent by the RTI to a
+    /// federate in centralized coordination.
     ///
     /// This message is a promise by the RTI to the federate that no later message sent to the federate
     /// will have a tag earlier than or equal to the tag carried by this TAG message.
-    TagAdvanceGrant(Tag),
-
-    /// A provisional time advance grant (PTAG) sent by the RTI to a federate in centralized coordination.
     ///
-    /// This message is a promise by the RTI to the federate that no later message sent to the federate
-    /// will have a tag earlier than or equal to the tag carried by this TAG message.
-    ProvisionalTagAdvanceGrant(Tag),
+    /// The boolean indicates whether this is a provisional time advance grant (PTAG).
+    TagAdvanceGrant(Tag, bool),
 
     /// A logical tag complete (LTC) message sent by a federate to the RTI.
     LogicalTagComplete(Tag),
@@ -339,7 +343,7 @@ pub enum RtiMsg {
     ClockSyncCodedProbe,
 
     /// A port absent message, informing the receiver that a given port will not have event for the current logical time.
-    PortAbsent(PortAbsent),
+    PortAbsent(FederateKey, PortKey, Tag),
 
     /// A message that informs the RTI about connections between this federate and other federates where
     /// messages are routed through the RTI. Currently, this only includes logical connections when the

@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 pub struct Timestamp(Duration);
 
 impl Timestamp {
+    pub const ZERO: Self = Self(Duration::from_secs(0));
+    pub const MAX: Self = Self(Duration::from_secs(u64::MAX));
+
     pub fn now() -> Self {
         Self(
             std::time::SystemTime::now()
@@ -71,6 +74,16 @@ impl Display for Tag {
 }
 
 impl Tag {
+    pub const NEVER: Self = Self {
+        offset: Timestamp::ZERO,
+        microstep: 0,
+    };
+
+    pub const FOREVER: Self = Self {
+        offset: Timestamp::MAX,
+        microstep: usize::MAX,
+    };
+
     /// Create a new Tag given an offset from the origin, and a microstep
     pub fn new(offset: impl Into<Timestamp>, microstep: usize) -> Tag {
         Self {
@@ -93,16 +106,28 @@ impl Tag {
         }
     }
 
+    /// Calculate a `Tag` relative to the given origin
+    pub fn since(&self, t0: Timestamp) -> Self {
+        Self {
+            offset: self
+                .offset
+                .checked_duration_since(t0)
+                .unwrap_or_default()
+                .into(),
+            microstep: 0,
+        }
+    }
+
     /// Create a instant given the origin
     pub fn to_logical_time(&self, origin: Timestamp) -> Timestamp {
         origin + self.offset
     }
 
-    /// Create a new Tag offset from the current.
-    pub fn delay(&self, offset: Option<impl Into<Duration>>) -> Self {
-        if let Some(offset) = offset {
+    /// Create a new Tag strictly greater than this one
+    pub fn delay(&self, offset: impl Into<Option<Duration>>) -> Self {
+        if let Some(offset) = offset.into() {
             Self {
-                offset: self.offset + Timestamp::from(offset.into()),
+                offset: self.offset + Timestamp::from(offset),
                 microstep: 0,
             }
         } else {

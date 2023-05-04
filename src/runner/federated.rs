@@ -12,7 +12,7 @@ pub async fn build_and_test_federation<R: Reactor>(
     keep_alive: bool,
 ) -> anyhow::Result<()> {
     let mut env_builder = EnvBuilder::new();
-    let (reactor_key, reactor) = R::build(name, state, None, &mut env_builder)
+    let (reactor_key, _reactor) = R::build(name, state, None, &mut env_builder)
         .context("Error building top-level reactor!")?;
 
     let federates = env_builder
@@ -28,15 +28,15 @@ pub async fn build_and_test_federation<R: Reactor>(
 
     let clients = federates
         .into_iter()
-        .map(|(federate_key, federate_env)| {
+        .map(|(federate_key, (env, federate_env))| {
             let config = federated::client::Config::new(
                 federate_key,
                 &federation_id,
-                federate_env.neighbors,
+                federate_env.neighbors.clone(),
             );
 
             //federate_env.env.reactors
-            federate_env.output_control_trigger;
+            //federate_env.output_control_trigger;
 
             tokio::spawn(async move {
                 let (client, handles) =
@@ -45,10 +45,11 @@ pub async fn build_and_test_federation<R: Reactor>(
                         .unwrap();
 
                 let mut sched = runtime::Scheduler::new(
-                    federate_env.env,
+                    env,
+                    federate_env,
                     runtime::Config::default()
-                        .with_fast_forward(false)
-                        .with_keep_alive(true),
+                        .with_fast_forward(fast_forward)
+                        .with_keep_alive(keep_alive),
                     handles,
                     client,
                 );

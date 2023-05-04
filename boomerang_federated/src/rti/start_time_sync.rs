@@ -14,7 +14,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::Timestamp;
 
 /// The federate side of the start time negotiation.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct StartSync {
     /// Channel used to send start times from federates to the RTI.
     start_time_proposals: mpsc::Sender<Timestamp>,
@@ -38,6 +38,11 @@ impl StartSync {
             .await
             .map(|_| self.start_time.borrow().clone())
     }
+
+    /// Return a clone of the `start_time` channel's receiver.
+    pub fn watcher(&self) -> watch::Receiver<Timestamp> {
+        self.start_time.clone()
+    }
 }
 
 /// `Syncronizer` receives start time proposals from federates and selects the maximum start time.
@@ -60,6 +65,7 @@ impl Synchronizer {
 
         // Receive `num_federates` start time proposals.
         let proposals = ReceiverStream::new(self.start_time_proposals)
+            .inspect(|proposal| tracing::debug!("Received start time proposal: {proposal:?}"))
             .take(self.num_federates)
             .collect::<Vec<_>>()
             .await;
@@ -83,7 +89,7 @@ impl Synchronizer {
 /// Create a new `StartSync` and `Synchronizer` pair.
 pub fn create(num_federates: usize) -> (StartSync, Synchronizer) {
     let (proposals_tx, proposals_rx) = tokio::sync::mpsc::channel(1);
-    let (start_time_tx, start_time_rx) = tokio::sync::watch::channel(Timestamp::now());
+    let (start_time_tx, start_time_rx) = tokio::sync::watch::channel(Timestamp::ZERO);
 
     let federate = StartSync {
         start_time_proposals: proposals_tx,

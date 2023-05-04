@@ -6,7 +6,7 @@ use termion::raw::{IntoRawMode, RawTerminal};
 
 use boomerang::{
     builder::{BuilderReactionKey, Physical, TypedActionKey, TypedPortKey},
-    reaction, runtime, Reactor,
+    runtime, Reactor,
 };
 
 #[derive(Reactor)]

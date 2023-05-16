@@ -1,7 +1,5 @@
 use std::time::Duration;
 
-use crossbeam_channel::Sender;
-
 #[cfg(feature = "federated")]
 use boomerang_federated as federated;
 
@@ -12,7 +10,7 @@ use crate::{
 };
 
 #[cfg(feature = "federated")]
-use crate::{keys::PortKey, RuntimeError};
+use crate::{keys::PortKey, SchedError};
 
 /// Internal state for a context object
 #[derive(Debug, Clone)]
@@ -22,7 +20,7 @@ pub(crate) struct ContextInternal {
     /// Events scheduled for a future time
     pub(crate) scheduled_events: Vec<ScheduledEvent>,
     /// Channel for asynchronous events
-    pub(crate) async_tx: Sender<ScheduledEvent>,
+    pub(crate) async_tx: crate::sched::Sender<ScheduledEvent>,
 }
 
 /// Scheduler context passed into reactor functions.
@@ -48,7 +46,7 @@ impl<'a> Context<'a> {
         start_time: Timestamp,
         tag: Tag,
         action_triggers: &'a tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
-        async_tx: Sender<ScheduledEvent>,
+        async_tx: crate::sched::Sender<ScheduledEvent>,
         client: &'a federated::client::Client,
     ) -> Self {
         Self {
@@ -76,7 +74,7 @@ impl<'a> Context<'a> {
         port: PortKey,
         offset: Option<Duration>,
         message: T,
-    ) -> Result<(), RuntimeError>
+    ) -> Result<(), SchedError>
     where
         T: std::fmt::Debug + serde::Serialize,
     {
@@ -85,7 +83,7 @@ impl<'a> Context<'a> {
 
         self.client
             .send_timed_message(federate, port, tag, message)
-            .map_err(|err| RuntimeError::Federate(err.into()))
+            .map_err(SchedError::from)
     }
 
     pub fn send_port_absent_to_federate(
@@ -93,13 +91,13 @@ impl<'a> Context<'a> {
         federate: federated::FederateKey,
         port: PortKey,
         offset: Option<Duration>,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<(), SchedError> {
         // Apply the additional delay to the current tag and use that as the intended tag of the outgoing message
         let tag = self.tag.delay(offset);
 
         self.client
             .send_port_absent_to_federate(federate, port, tag)
-            .map_err(|err| RuntimeError::Federate(err.into()))
+            .map_err(SchedError::from)
     }
 }
 
@@ -109,7 +107,7 @@ impl<'a> Context<'a> {
         start_time: Timestamp,
         tag: Tag,
         action_triggers: &'a tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
-        async_tx: Sender<ScheduledEvent>,
+        async_tx: crate::sched::Sender<ScheduledEvent>,
     ) -> Self {
         Self {
             start_time,
@@ -222,7 +220,7 @@ pub struct SendContext {
     /// Physical time the Scheduler was started
     pub start_time: Timestamp,
     /// Channel for asynchronous events
-    pub(crate) async_tx: Sender<ScheduledEvent>,
+    pub(crate) async_tx: crate::sched::Sender<ScheduledEvent>,
     /// Downstream reactions triggered by actions
     //TODO: Move this into ActionRef
     action_triggers: tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,

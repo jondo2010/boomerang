@@ -1,7 +1,5 @@
 use std::sync::{Arc, RwLock};
 
-use crossbeam_channel::Sender;
-
 use boomerang_core::time::Timestamp;
 #[cfg(feature = "federated")]
 use boomerang_federated as federated;
@@ -129,7 +127,7 @@ impl Reaction {
         reactor: &'a mut Reactor,
         inputs: &[IPort<'_>],
         outputs: &mut [OPort<'_>],
-        async_tx: Sender<ScheduledEvent>,
+        async_tx: crate::sched::Sender<ScheduledEvent>,
         client: &'a federated::client::Client,
     ) -> Context {
         let Reactor {
@@ -180,7 +178,7 @@ impl Reaction {
         reactor: &'a mut Reactor,
         inputs: &[IPort<'_>],
         outputs: &mut [OPort<'_>],
-        async_tx: Sender<ScheduledEvent>,
+        async_tx: crate::sched::Sender<ScheduledEvent>,
     ) -> Context {
         let Reactor {
             state,

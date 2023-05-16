@@ -22,54 +22,41 @@ pub async fn build_and_test_federation<R: Reactor>(
     let federation_id = format!("{name}_federation");
 
     // Spawn the RTI server
-    let mut rti = federated::rti::Rti::new(federates.len(), &federation_id);
-    let listener = rti.create_listener(12345).await.unwrap();
-    let server_handle = tokio::spawn(async move { rti.start_server(listener).await });
+    let listener = federated::rti::create_listener(12345).await.unwrap();
+    let server_handle = tokio::spawn(federated::rti::start_rti(
+        listener,
+        federated::rti::Config::new(&federation_id).with_federates(federates.len()),
+    ));
 
-    let clients = federates
+    let sched_futs = federates
         .into_iter()
         .map(|(federate_key, (env, federate_env))| {
-            let config = federated::client::Config::new(
+            let client_config = federated::client::Config::new(
                 federate_key,
                 &federation_id,
                 federate_env.neighbors.clone(),
             );
+            let config =
+                runtime::Config::new_federated("127.0.0.1:12345".parse().unwrap(), client_config)
+                    .with_fast_forward(fast_forward)
+                    .with_keep_alive(keep_alive);
+            runtime::Scheduler::new(env, federate_env, config)
+        });
 
-            //federate_env.env.reactors
-            //federate_env.output_control_trigger;
+    let schedulers = futures::future::try_join_all(sched_futs).await.unwrap();
 
-            tokio::spawn(async move {
-                let (client, handles) =
-                    federated::client::connect_to_rti("127.0.0.1:12345".parse().unwrap(), config)
-                        .await
-                        .unwrap();
-
-                let mut sched = runtime::Scheduler::new(
-                    env,
-                    federate_env,
-                    runtime::Config::default()
-                        .with_fast_forward(fast_forward)
-                        .with_keep_alive(keep_alive),
-                    handles,
-                    client,
-                );
-
-                tokio::task::spawn_blocking(move || sched.event_loop());
-            })
+    let x = schedulers.into_iter().map(|mut sched| {
+        tokio::spawn(async move {
+            sched.startup().await;
+            //scheduler.run().await.unwrap();
         })
-        .collect::<Vec<_>>();
+    });
+
+    futures::future::try_join_all(x).await.unwrap();
 
     let handles = server_handle.await.unwrap().unwrap();
 
     // All federates have connected, and the start-time has been negotiated.
-
-    for c in clients {
-        c.await.unwrap();
-    }
-
-    for f in handles.federate_handles {
-        f.await.unwrap();
-    }
 
     Ok(())
 }

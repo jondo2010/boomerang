@@ -1,5 +1,4 @@
 mod action;
-mod context;
 mod env;
 mod key_set;
 mod port;
@@ -10,7 +9,6 @@ pub mod util;
 
 // Re-exports
 pub use action::*;
-pub use context::*;
 pub use env::*;
 pub use port::*;
 pub use reaction::*;
@@ -44,7 +42,6 @@ pub enum RuntimeError {
         wanted: &'static str,
     },
 
-    #[cfg(feature = "federated")]
     #[error(transparent)]
-    Federate(#[from] boomerang_federated::client::ClientError),
+    SchedError(#[from] SchedError),
 }

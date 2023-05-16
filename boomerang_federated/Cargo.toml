@@ -10,9 +10,9 @@ bytes = "1.4"
 futures = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 tinymap.workspace = true
-tokio = { version = "1.27", features = ["full"] }
-tokio-stream = "0.1"
-tokio-util = { version = "*", features = ["codec"] }
+tokio = { workspace = true, features = ["full"] }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true, features = ["codec"] }
 tracing.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
@@ -21,6 +21,6 @@ test-log.workspace = true
 boomerang_core = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
-tokio-test = "0.4"
+tokio-test = { workspace = true }
 tracing-subscriber.workspace = true
 env_logger.workspace = true

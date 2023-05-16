@@ -16,7 +16,13 @@ default = [
 ## Enables the derive macros in [`boomerang_derive`].
 derive = ["dep:boomerang_derive"]
 ## Enabled the [`boomerang_federated`] module.
-federated = [ "dep:boomerang_federated", "dep:tokio", "boomerang_runtime/federated", "boomerang_builder/federated", ]
+federated = [
+    "boomerang_builder/federated",
+    "boomerang_runtime/federated",
+    "dep:boomerang_federated",
+    "dep:futures",
+    "dep:tokio",
+]
 ## Enables the [`boomerang::runner`] module.
 runner = ["dep:clap", "dep:anyhow"]
 ## Enables the debug Graphviz functions in [`builder::graphviz`].
@@ -28,6 +34,7 @@ clap = { version = "4.2", features = ["derive"], optional = true }
 tokio = { workspace = true, optional = true }
 tracing = { workspace = true }
 document-features = "0.2"
+futures = { workspace = true, optional = true }
 
 boomerang_builder = { workspace = true }
 boomerang_core = { workspace = true }
@@ -41,6 +48,7 @@ env_logger.workspace = true
 test-log.workspace = true
 tokio-test.workspace = true
 tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"] }
+tracing-chrome = { workspace = true }
 
 boomerang_util = { workspace = true }
 
@@ -84,16 +92,21 @@ workspace.resolver = 2
 
 [workspace.dependencies]
 anyhow = { version = "1.0", features = ["backtrace"] }
+async-timer = { version = "1.0.0-beta.9", features = ["tokio1"] }
 dyn-clone = "1.0"
 env_logger = "0.10"
+futures = { version = "0.3" }
 itertools = "0.10"
 serde = { version = "1.0", features = ["derive"] }
 test-log = { version = "0.2", features = ["trace"] }
 thiserror = "1.0"
 tinymap = { package = "boomerang_tinymap", path = "boomerang_tinymap", version = "0.1.0" }
 tokio = { version = "1.27" }
+tokio-stream = "0.1"
 tokio-test = { version = "0.4" }
+tokio-util = { version = "0.7" }
 tracing = "0.1"
+tracing-chrome = { version = "0.7" }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 boomerang_builder = { path = "boomerang_builder", version = "0.2.0" }

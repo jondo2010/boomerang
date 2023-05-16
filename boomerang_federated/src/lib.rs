@@ -10,7 +10,7 @@ pub mod rti;
 mod tests;
 mod util;
 
-pub use boomerang_core::time::{Tag, Timestamp};
+use boomerang_core::time::{Tag, Timestamp};
 
 tinymap::key_type!(
     /// Runtime key for a Federate

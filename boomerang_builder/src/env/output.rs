@@ -434,19 +434,22 @@ impl EnvBuilder {
             runtime_reactions[runtime_reaction_key].set_reactor_key(runtime_reactor_key);
         }
 
-        Ok((
-            runtime::Env {
-                top_reactor: reactor_aliases[top_reactor],
-                reactors: runtime_reactors,
-                ports: runtime_ports,
-                reactions: runtime_reactions,
-            },
-            Aliases {
-                action_aliases,
-                port_aliases,
-                reaction_aliases: reactions_aliases,
-                reactor_aliases,
-            },
-        ))
+        let env = runtime::Env {
+            top_reactor: reactor_aliases[top_reactor],
+            reactors: runtime_reactors,
+            ports: runtime_ports,
+            reactions: runtime_reactions,
+        };
+
+        let aliases = Aliases {
+            action_aliases,
+            port_aliases,
+            reaction_aliases: reactions_aliases,
+            reactor_aliases,
+        };
+
+        tracing::info!(%env, "Built runtime", );
+
+        Ok((env, aliases))
     }
 }

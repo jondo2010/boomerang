@@ -5,7 +5,7 @@
 //! @author Edward A. Lee (original)
 
 use boomerang::{
-    builder::{BuilderReactionKey, TypedPortKey},
+    builder::{BuilderReactionKey, EnvBuilder, TypedPortKey},
     runtime, Reactor,
 };
 
@@ -107,19 +107,14 @@ impl HelloDistributed {
 }
 
 #[cfg(feature = "federated")]
-//#[test_log::test(tokio::test)]
-#[tokio::test]
+#[test_log::test(tokio::test)]
+//#[tokio::test]
 async fn hello_distributed() {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
-        .compact()
-        .try_init()
-        .unwrap();
-    let _ = boomerang::runner::build_and_test_federation::<HelloDistributedBuilder>(
-        "hello_distributed",
+    boomerang::runner::build_and_test_federation::<HelloDistributedBuilder>(
+        "he_di",
         HelloDistributed,
         false,
-        true,
+        false,
     )
     .await
     .unwrap();

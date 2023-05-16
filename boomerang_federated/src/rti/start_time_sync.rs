@@ -77,9 +77,7 @@ impl Synchronizer {
             .expect("No start time proposals received");
 
         // Send the start time to the federates.
-        self.start_time
-            .send(max_start_time)
-            .expect("Failed to send start time");
+        self.start_time.send_replace(max_start_time);
 
         tracing::debug!("Negotiated start time: {:?}", max_start_time);
         max_start_time

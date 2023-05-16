@@ -128,8 +128,12 @@ where
 
 impl Display for Env {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Environment {\n")?;
-        f.write_str("}\n")?;
+        f.debug_struct("Env")
+            .field("name", &self.reactors[self.top_reactor].get_name())
+            .field("reactors", &self.reactors.len())
+            .field("ports", &self.ports.len())
+            .field("reactions", &self.reactions.len())
+            .finish()?;
         Ok(())
     }
 }

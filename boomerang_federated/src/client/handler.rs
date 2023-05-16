@@ -2,7 +2,6 @@
 
 use std::cmp::Ordering;
 
-use bincode::config;
 use boomerang_core::{
     keys::PortKey,
     time::{Tag, Timestamp},
@@ -10,7 +9,7 @@ use boomerang_core::{
 use futures::{stream::FusedStream, StreamExt};
 use tokio::sync::{mpsc, watch};
 
-use crate::{FedIds, FederateKey, Message, NeighborStructure, RtiMsg};
+use crate::{FederateKey, Message, RtiMsg};
 
 use super::ClientError;
 
@@ -30,7 +29,7 @@ pub struct Handler {
     /// Most recent `TimeAdvanceGrant` received from the RTI, or [`Tag::NEVER`] if none has been received.
     /// This is used to communicate between the listen_to_rti_TCP thread and the main federate thread.
     /// TODO should be channel?
-    last_tag: Tag,
+    last_tag: watch::Sender<Tag>,
 
     /// Indicates whether the last TAG received is provisional or an ordinary TAG.
     /// If the last TAG has been provisional, network control reactions must be inserted.
@@ -44,6 +43,7 @@ impl Handler {
     pub fn new(
         config: &super::Config,
         start_time: watch::Sender<Timestamp>,
+        last_tag: watch::Sender<Tag>,
         sender: mpsc::UnboundedSender<RtiMsg>,
     ) -> Result<Self, ClientError> {
         Ok(Self {
@@ -52,7 +52,7 @@ impl Handler {
             last_known_port_tag: tinymap::TinySecondaryMap::new(),
             start_time,
             current_tag: Tag::NEVER,
-            last_tag: Tag::NEVER,
+            last_tag,
             is_last_tag_provisional: false,
             stop_tag: Tag::FOREVER,
         })
@@ -114,18 +114,22 @@ impl Handler {
         // to handle port statuses up until the granted tag.
         //self.update_last_known_status_on_input_ports(tag);
 
-        // It is possible for this federate to have received a PTAG earlier with the same tag as this TAG.
-        if tag >= self.last_tag {
-            self.last_tag = tag;
+        // It is possible for this federate to have received a PTAG earlier with the same tag as
+        // this TAG.
+        let last_tag = *self.last_tag.borrow();
+        if tag >= last_tag {
+            self.last_tag.send_replace(tag);
             self.is_last_tag_provisional = false;
             tracing::debug!(
                 "Received Time Advance Grant (TAG): {tag}.",
                 tag = tag.since(*self.start_time.borrow())
             );
         } else {
-            tracing::error!("Received a TAG {tag} that wasn't larger than the previous TAG or PTAG {last_tag}. Ignoring the TAG.",
-            tag = tag.since(*self.start_time.borrow()),
-            last_tag = self.last_tag.since(*self.start_time.borrow()));
+            tracing::error!(
+                "Received a TAG {tag} that wasn't larger than the previous TAG or PTAG {last_tag}. Ignoring the TAG.",
+                tag = tag.since(*self.start_time.borrow()),
+                last_tag = last_tag.since(*self.start_time.borrow())
+            );
         }
 
         //self.waiting_for_TAG = false
@@ -143,13 +147,17 @@ impl Handler {
     #[tracing::instrument(skip(self), fields(tag = %tag.since(*self.start_time.borrow())))]
     async fn handle_provisional_tag_advance_grant(&mut self, tag: Tag) -> Result<(), ClientError> {
         // Sanity check
-        if tag < self.last_tag || tag == self.last_tag && !self.is_last_tag_provisional {
-            tracing::error!("Received a PTAG {tag} that is equal or earlier than an already received TAG {last_tag}.",
-            tag = tag.since(*self.start_time.borrow()),
-            last_tag = self.last_tag.since(*self.start_time.borrow()));
+        let last_tag = *self.last_tag.borrow();
+        if tag < last_tag || tag == last_tag && !self.is_last_tag_provisional {
+            tracing::error!(
+                "Received a PTAG {tag} that is equal or earlier than an already received TAG {last_tag}.",
+                tag = tag.since(*self.start_time.borrow()),
+                last_tag = last_tag.since(*self.start_time.borrow())
+            );
+            panic!();
         }
 
-        self.last_tag = tag;
+        self.last_tag.send_replace(tag);
         self.is_last_tag_provisional = true;
         tracing::debug!(
             "At tag {current_tag}, received Provisional Tag Advance Grant (PTAG): {tag}.",

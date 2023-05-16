@@ -343,7 +343,8 @@ where
         self.federates[federate_key].next_event = next_event_tag;
 
         tracing::debug!(
-            "RTI: Updated the recorded next event tag for {federate_key:?} to {next_event_tag}"
+            "RTI: Updated the recorded next event tag for {federate_key:?} to {next_event_tag}",
+            next_event_tag = next_event_tag.since(*self.start_time.borrow()),
         );
 
         // Check to see whether we can reply now with a tag advance grant.
@@ -443,8 +444,8 @@ where
     }
 
     #[tracing::instrument(
-        skip(self),
-        fields(federate_key=?federate_key, tag=?tag.since(*self.start_time.borrow()))
+        skip(self, federate_key),
+        fields(tag=?tag.since(*self.start_time.borrow()))
     )]
     async fn handle_next_event_tag(&mut self, federate_key: FederateKey, tag: Tag) {
         tracing::debug!("RTI received `NextEventTag`");

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::{ReactionSet, ReactionTriggerCtx, ScheduledEvent};
+use crate::{LevelReactionKey, ReactionSet, ReactionTriggerCtx, ScheduledEvent};
 
 pub use super::{Receiver, Scheduler, Sender};
 
@@ -21,14 +21,12 @@ impl std::fmt::Debug for Scheduler {
 impl Scheduler {
     /// For all Timers, pump later events onto the queue and create an initial ReactionSet to
     /// process.
-    pub(crate) fn initialize_timers(&mut self) -> ReactionSet {
+    pub(crate) fn iter_startup_events(&mut self) -> impl Iterator<Item = &LevelReactionKey> {
         self.env
             .reactors
             .values()
             .flat_map(|reactor| reactor.iter_startup_events())
             .flatten()
-            .copied()
-            .collect()
     }
 
     #[tracing::instrument(skip(self))]
@@ -80,7 +78,7 @@ impl Scheduler {
     ///
     /// If the feature `parallel` is enabled, then reactions within each level are executed in
     /// parallel on the Rayon thread pool.
-    #[tracing::instrument(skip(self), fields(tag = %tag, reaction_set = ?reaction_set))]
+    #[tracing::instrument(skip(self), fields(tag = %tag.since(self.start_time), reaction_set = ?reaction_set))]
     pub fn process_tag(&mut self, tag: Tag, mut reaction_set: ReactionSet) {
         while let Some((level, reaction_keys)) = reaction_set.next() {
             tracing::info!("Level{level} with {} Reaction(s)", reaction_keys.len());

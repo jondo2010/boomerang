@@ -388,7 +388,7 @@ impl EnvBuilder {
                         runtime::FederateEnv {
                             input_control_triggers,
                             network_messages,
-                            output_control_trigger,
+                            output_control_trigger: Some(output_control_trigger), //TODO
                             neighbors,
                         },
                     ),

@@ -190,16 +190,6 @@ impl Client {
         todo!();
     }
 
-    /// Enqueue network control reactions.
-    ///
-    /// that will send an [`RtiMsg::PortAbsent`] message to downstream federates if a given network port is not present.
-    pub fn enqueue_network_control_reactions(&self) {
-        if self.config.neighbors.downstream.is_empty() {
-            // No downstream federates, so no need to enqueue control reactions
-            return;
-        }
-    }
-
     /// Send a port absent message to federate, informing it that the current federate will not
     /// produce an event on this network port at the current logical time.
     #[tracing::instrument(level = "debug", skip(self), fields(fed_ids=%self.config.fed_ids))]
@@ -256,9 +246,10 @@ pub async fn connect_to_rti<'a>(
         sender
     };
 
-    let (start_time_tx, mut start_time_rx) = watch::channel(Timestamp::ZERO);
+    let (start_time_tx, start_time_rx) = watch::channel(Timestamp::ZERO);
+    let (last_tag_tx, last_tag_rx) = watch::channel(Tag::NEVER);
 
-    let async_client = Handler::new(config, start_time_tx, sender.clone())?;
+    let async_client = Handler::new(config, start_time_tx, last_tag_tx, sender.clone())?;
 
     // Spawn a `ClientAsync` to handle messages received from the RTI.
     let handler_handle = tokio::spawn(async move {
@@ -272,8 +263,6 @@ pub async fn connect_to_rti<'a>(
         tracing::info!("Client exiting.");
         ret
     });
-
-    let (last_tag_tx, last_tag_rx) = watch::channel(Tag::NEVER);
 
     Ok(Client {
         config: config.clone(),

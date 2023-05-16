@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use boomerang_core::time::{Tag, Timestamp};
 use boomerang_federated::client::{self};
 
-use crate::{Env, FederateEnv, ReactionSet, SchedError, ScheduledEvent};
+use crate::{Env, FederateEnv, LevelReactionKey, ReactionSet, SchedError, ScheduledEvent};
 
 pub use mpsc::UnboundedReceiver as Receiver;
 pub use mpsc::UnboundedSender as Sender;
@@ -47,7 +47,9 @@ pub struct Scheduler {
     pub(super) event_rx: Receiver<ScheduledEvent>,
     /// The main event queue, sorted by time
     pub(super) event_queue: BinaryHeap<ScheduledEvent>,
-    /// Initial wall-clock time.
+    /// Physical time at the start of the execution.
+    pub(super) start_wall_time: Timestamp,
+    /// Logical time at the start of execution.
     pub(super) start_time: Timestamp,
     /// A shutdown has been scheduled at this time.
     pub(super) shutdown_tag: Option<Tag>,
@@ -72,7 +74,8 @@ impl Scheduler {
             event_tx,
             event_rx,
             event_queue: BinaryHeap::new(),
-            start_time: Timestamp::now(),
+            start_wall_time: Timestamp::ZERO,
+            start_time: Timestamp::ZERO,
             shutdown_tag: None,
             config,
             client,
@@ -82,7 +85,16 @@ impl Scheduler {
 
     /// Execute startup of the Scheduler.
     #[tracing::instrument(skip(self))]
-    pub async fn startup(&mut self) {
+    pub async fn startup(&mut self) -> Result<(), SchedError> {
+        // Reset status fields before talking to the RTI to set network port statuses to unknown
+        //reset_status_fields();
+
+        // Reset the start time to the coordinated start time for all federates.
+        // Note that this does not grant execution to this federate. In the centralized
+        // coordination, the tag (0,0) should be explicitly sent to the RTI on a Time Advance Grant
+        // message to request for permission to execute.
+        // In the decentralized coordination, either the after delay on the connection must be
+        // sufficiently large enough or the STP offset must be set globally to an accurate value.
         self.start_time = self.client.wait_for_start_time().await.unwrap();
 
         match self.start_time.checked_duration_since(Timestamp::now()) {
@@ -95,15 +107,50 @@ impl Scheduler {
             }
         }
 
-        let tag = Tag::new(Duration::ZERO, 0);
-        let initial_reaction_set = self.initialize_timers();
-        tracing::info!(tag = %tag, ?initial_reaction_set, "Starting the execution.");
+        // Reinitialize the physical start time to match the start_time.  Otherwise, reports of lf_time_physical() are not very meaningful w.r.t. logical time.
+        self.start_wall_time = self.start_time;
+
+        let tag = Tag::new(self.start_time, 0);
+
+        // Each federate executes the start tag (which is the current tag).
+        // Inform the RTI of this if needed.
+        self.send_next_event_tag(tag, true).await?;
+
+        // Depending on RTI's answer, if any, enqueue network control reactions, which will
+        // selectively block reactions that depend on network input ports until they receive further
+        // instructions (to unblock) from the RTI or the upstream federates.
+        let mut initial_reaction_set: ReactionSet =
+            self.enqueue_network_control_reactions().copied().collect();
+
+        // Add reactions invoked at tag (0,0) (including startup reactions)
+        initial_reaction_set.extend_above(self.iter_startup_events().copied(), 0usize);
+
+        tracing::info!("Starting the execution.");
+
         self.process_tag(tag, initial_reaction_set);
+
+        Ok(())
+    }
+
+    /// Enqueue network control reactions.
+    ///
+    /// that will send an [`RtiMsg::PortAbsent`] message to downstream federates if a given network port is not present.
+    #[tracing::instrument(skip(self))]
+    pub fn enqueue_network_control_reactions(&self) -> impl Iterator<Item = &LevelReactionKey> {
+        tracing::debug!("Enqueueing output control reactions.");
+
+        if let Some(output_control_trigger) = self.federate_env.output_control_trigger {
+            self.env.reactors[self.env.top_reactor].action_triggers[output_control_trigger].iter()
+        } else {
+            // There are no network output control reactions
+            tracing::debug!("No output control reactions.");
+            [].iter()
+        }
     }
 
     #[tracing::instrument(skip(self))]
     pub async fn event_loop(&mut self) {
-        self.startup().await;
+        self.startup().await.unwrap();
 
         loop {
             // Push pending events into the queue
@@ -111,7 +158,9 @@ impl Scheduler {
                 self.event_queue.push(event);
             }
 
-            let granted_tag = self.send_next_event_tag(true).await.unwrap();
+            let next_tag = self.event_queue.peek().map(|event| event.tag).unwrap();
+
+            let granted_tag = self.send_next_event_tag(next_tag, true).await.unwrap();
             tracing::debug!(
                 "Granted next event tag {}",
                 granted_tag.since(self.start_time),
@@ -212,15 +261,10 @@ impl Scheduler {
     #[tracing::instrument(skip(self), fields(tag))]
     pub(crate) async fn send_next_event_tag(
         &mut self,
+        mut tag: Tag,
         wait_for_reply: bool,
     ) -> Result<Tag, SchedError> {
         loop {
-            let tag = self
-                .event_queue
-                .peek()
-                .map(|event| event.tag)
-                .expect("Empty event queue");
-
             if !self.client.has_upstream() && !self.client.has_downstream() {
                 // No upstream or downstream federates, so no need to send a NET
                 tracing::debug!(
@@ -268,8 +312,8 @@ impl Scheduler {
                 // Wait until there is a TAG received from the RTI or an event on the event queue.
                 tokio::select! {
                     last_tag_changed = self.client.last_tag.changed() => {
-                        last_tag_changed.unwrap();
                         tracing::debug!("Received TAG while waiting for reply to NET.");
+                        last_tag_changed.unwrap();
                         return Ok(*self.client.last_tag.borrow());
                     }
                     event = self.event_rx.recv() => {
@@ -316,6 +360,11 @@ impl Scheduler {
             // NET should be sent or not.
 
             //tag = get_next_event_tag();
+            tag = self
+                .event_queue
+                .peek()
+                .map(|event| event.tag)
+                .expect("Empty event queue");
         }
     }
 

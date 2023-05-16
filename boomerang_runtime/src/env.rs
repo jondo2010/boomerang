@@ -27,7 +27,7 @@ pub struct FederateEnv {
     /// Keys for the generated network message actions
     pub network_messages: Vec<crate::keys::ActionKey>,
     /// Key for the generated output control trigger action
-    pub output_control_trigger: crate::keys::ActionKey,
+    pub output_control_trigger: Option<crate::keys::ActionKey>,
     /// Federated neighbor structure
     pub neighbors: federated::NeighborStructure,
 }

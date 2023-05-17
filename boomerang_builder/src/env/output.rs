@@ -448,8 +448,6 @@ impl EnvBuilder {
             reactor_aliases,
         };
 
-        tracing::info!(%env, "Built runtime", );
-
         Ok((env, aliases))
     }
 }

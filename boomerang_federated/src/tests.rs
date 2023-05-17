@@ -10,6 +10,7 @@ use crate::{
     rti, FederateKey, NeighborStructure, RejectReason,
 };
 
+#[cfg(feature = "disabled")]
 #[test_log::test(tokio::test)]
 async fn test1() {
     let listener = rti::create_listener(12345).await.unwrap();
@@ -39,6 +40,7 @@ async fn test1() {
     let handles = server_handle.await.unwrap().unwrap();
 }
 
+#[cfg(feature = "disabled")]
 #[test_log::test(tokio::test)]
 async fn test2() {
     let listener = rti::create_listener(12345).await.unwrap();

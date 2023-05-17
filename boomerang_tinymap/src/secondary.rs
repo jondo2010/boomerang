@@ -162,6 +162,17 @@ impl<K: Key, V> TinySecondaryMap<K, V> {
         }
     }
 
+    /// Removes a value from the secondary map at the given `key`. Returns [`None`] if the key was
+    /// not present, otherwise returns the value.
+    pub fn remove(&mut self, key: K) -> Option<V> {
+        if let Some(v) = self.data.get_mut(key.index())?.take() {
+            self.num_values -= 1;
+            Some(v)
+        } else {
+            None
+        }
+    }
+
     pub fn contains_key(&self, key: K) -> bool {
         self.data.get(key.index()).map_or(false, Option::is_some)
     }

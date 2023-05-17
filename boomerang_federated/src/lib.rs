@@ -14,9 +14,26 @@ use boomerang_core::time::{Tag, Timestamp};
 
 tinymap::key_type!(
     /// Runtime key for a Federate
-    #[derive(Serialize, Deserialize)]
+    #[derive(Serialize, Deserialize, PartialOrd, Ord, Hash)]
     pub FederateKey
 );
+
+unsafe impl petgraph::graph::IndexType for FederateKey {
+    #[inline(always)]
+    fn new(x: usize) -> Self {
+        FederateKey(x)
+    }
+
+    #[inline(always)]
+    fn index(&self) -> usize {
+        self.0
+    }
+
+    #[inline(always)]
+    fn max() -> Self {
+        FederateKey(usize::max_value())
+    }
+}
 
 /// A timestamped message to forward to another federate.
 ///

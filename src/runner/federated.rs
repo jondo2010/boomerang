@@ -31,6 +31,7 @@ pub async fn build_and_test_federation<R: Reactor>(
     let sched_futs = federates
         .into_iter()
         .map(|(federate_key, (env, federate_env))| {
+            tracing::info!(?federate_key, %env, "Starting federate.");
             let client_config = federated::client::Config::new(
                 federate_key,
                 &federation_id,

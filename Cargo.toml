@@ -97,6 +97,7 @@ dyn-clone = "1.0"
 env_logger = "0.10"
 futures = { version = "0.3" }
 itertools = "0.10"
+petgraph = { version = "0.6" }
 serde = { version = "1.0", features = ["derive"] }
 test-log = { version = "0.2", features = ["trace"] }
 thiserror = "1.0"

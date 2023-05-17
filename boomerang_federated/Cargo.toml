@@ -17,6 +17,7 @@ tracing.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 test-log.workspace = true
+petgraph.workspace = true
 
 boomerang_core = { workspace = true, features = ["serde"] }
 

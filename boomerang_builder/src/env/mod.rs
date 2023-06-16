@@ -205,7 +205,19 @@ impl EnvBuilder {
         reaction_fn: Arc<dyn runtime::ReactionFn>,
     ) -> ReactionBuilderState {
         let priority = self.reactor_builders[reactor_key].reactions.len();
-        ReactionBuilderState::new(name, priority, reactor_key, reaction_fn, self)
+        ReactionBuilderState::new(name, Some(priority), reactor_key, reaction_fn, self)
+    }
+
+    /// Add a Reaction to a given Reactor without a priority.
+    ///
+    /// This is used by control reactions when building federated reactors.
+    pub fn add_reaction_unordered(
+        &mut self,
+        name: &str,
+        reactor_key: BuilderReactorKey,
+        reaction_fn: Arc<dyn runtime::ReactionFn>,
+    ) -> ReactionBuilderState {
+        ReactionBuilderState::new(name, None, reactor_key, reaction_fn, self)
     }
 
     /// Add an Action generically to a given Reactor using the given `ActionBuilderFn`

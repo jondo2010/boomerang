@@ -107,9 +107,14 @@ impl HelloDistributed {
 }
 
 #[cfg(feature = "federated")]
-#[test_log::test(tokio::test)]
-//#[tokio::test]
+//#[test_log::test(tokio::test)]
+#[tokio::test]
 async fn hello_distributed() {
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .pretty()
+        .init();
+
     boomerang::runner::build_and_test_federation::<HelloDistributedBuilder>(
         "he_di",
         HelloDistributed,

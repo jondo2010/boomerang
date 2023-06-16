@@ -86,6 +86,7 @@ impl<'a> Context<'a> {
             .map_err(SchedError::from)
     }
 
+    #[tracing::instrument(skip(self))]
     pub fn send_port_absent_to_federate(
         &self,
         federate: federated::FederateKey,
@@ -98,6 +99,20 @@ impl<'a> Context<'a> {
         self.client
             .send_port_absent_to_federate(federate, port, tag)
             .map_err(SchedError::from)
+    }
+
+    /// Wait until the status of network port `runtime_port_key` is known.
+    ///
+    /// In decentralized coordination mode, the wait time is capped by STAA + STA, after which the
+    /// status of the port is presumed to be absent.
+    pub fn wait_until_port_status_known(&self, runtime_port_key: PortKey) -> _ {
+        todo!();
+        // Determine the wait time.
+        // In centralized coordination, the wait time is until the RTI can determine the port status
+        // and send a TAG replacing the PTAG it sent earlier or until a port absent message has been
+        // sent by an upstream federate for this port with a tag greater than the current tag. The
+        // federate will block here FOREVER, until one of the aforementioned conditions is met.
+        //self.client.
     }
 }
 

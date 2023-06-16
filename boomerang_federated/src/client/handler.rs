@@ -59,6 +59,7 @@ impl Handler {
     }
 
     /// Update the last known status tag of a network input port to the value of "tag". This is the largest tag at which the status (present or absent) of the port was known.
+    #[tracing::instrument(skip(self), fields(tag = %tag.since(*self.start_time.borrow())))]
     fn update_last_known_status_on_input_port(
         &mut self,
         tag: Tag,
@@ -68,8 +69,14 @@ impl Handler {
             .last_known_port_tag
             .get_mut(port)
             .ok_or(ClientError::Other(anyhow::anyhow!(
-                "Received port absent message for unknown port: {port:?}"
+                "Unknown port: {port:?}"
             )))?;
+
+        let (x, mut y) = tokio::sync::mpsc::unbounded_channel();
+        //y.blocking_recv();
+
+        self.
+
 
         match tag.cmp(&*tag_sender.borrow()) {
             Ordering::Less => {
@@ -165,7 +172,49 @@ impl Handler {
             tag = tag.since(*self.start_time.borrow()),
         );
 
-        //TODO handle the rest of this function
+        // Possibly insert a dummy event into the event queue if current time is behind (which it
+        // should be). Do not do this if the federate has not fully started yet.
+
+        let dummy_event_time = tag.offset;
+        let mut dummy_event_relative_microstep = tag.microstep;
+
+        if self.current_tag == tag {
+            // The current tag can equal the PTAG if we are at the start time or if this federate
+            // has been able to advance time to the current tag (e.g., it has no upstream federates).
+            // In either case, either it is already treating the current tag as PTAG cycle (e.g. at
+            // the start time) or it will be completing the current cycle and sending a LTC message
+            // shortly. In either case, there is nothing more to do.
+            return Ok(());
+        } else if self.current_tag > tag {
+            // Current tag is greater than the PTAG.
+            // It could be that we have sent an LTC that crossed with the incoming PTAG or that we
+            // have advanced to a tag greater than the PTAG.
+            // In the former case, there is nothing more to do.
+            // In the latter case, we may be blocked processing a PTAG cycle at a greater tag or we
+            // may be in the middle of processing a regular TAG. In either case, we know that at the
+            // PTAG tag, all outputs have either been sent or are absent, so we can send an LTC.
+            // Send an LTC to indicate absent outputs.
+
+            //logical_tag_complete(tag)
+            return Ok(());
+        } else if self.current_tag.offset == tag.offset {
+            // We now know current_tag < PTAG, but the times are equal.
+            // Adjust the microstep for scheduling the dummy event.
+            dummy_event_relative_microstep -= self.current_tag.microstep;
+        }
+
+        // We now know current_tag < PTAG.
+
+        if dummy_event_time != Timestamp::MAX {
+            let dummy_tag = Tag::new(dummy_event_time, dummy_event_relative_microstep);
+
+            // Schedule a dummy event at the specified time and (relative) microstep.
+            tracing::debug!(
+                "At tag {}, inserting into the event queue a dummy event at {}.",
+                self.current_tag.since(*self.start_time.borrow()),
+                dummy_tag.since(*self.start_time.borrow()),
+            );
+        }
 
         Ok(())
     }

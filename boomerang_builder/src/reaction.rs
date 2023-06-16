@@ -31,7 +31,7 @@ pub struct ReactionBuilder {
     #[derivative(PartialEq = "ignore")]
     pub(super) name: String,
     /// Unique ordering of this reaction within the reactor.
-    pub(super) priority: usize,
+    pub(super) priority: Option<usize>,
     /// The owning Reactor for this Reaction
     pub(super) reactor_key: BuilderReactorKey,
     /// The Reaction function
@@ -126,7 +126,7 @@ impl<'a> FindElements for ReactionBuilderState<'a> {
 impl<'a> ReactionBuilderState<'a> {
     pub fn new(
         name: &str,
-        priority: usize,
+        priority: Option<usize>,
         reactor_key: BuilderReactorKey,
         reaction_fn: Arc<dyn runtime::ReactionFn>,
         env: &'a mut EnvBuilder,

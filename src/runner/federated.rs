@@ -48,14 +48,14 @@ pub async fn build_and_test_federation<R: Reactor>(
 
     let x = schedulers.into_iter().map(|mut sched| {
         tokio::spawn(async move {
-            sched.startup().await;
+            sched.startup().await.unwrap();
             //scheduler.run().await.unwrap();
         })
     });
 
-    futures::future::try_join_all(x).await.unwrap();
-
     let handles = server_handle.await.unwrap().unwrap();
+
+    futures::future::try_join_all(x).await.unwrap();
 
     // All federates have connected, and the start-time has been negotiated.
 

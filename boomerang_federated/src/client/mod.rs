@@ -152,7 +152,10 @@ impl Client {
     /// The timestamp is calculated as current_logical_time + additional delay which is greater than or equal to zero.
     ///
     /// The port should be an input port of a reactor in the destination federate.
-    #[tracing::instrument(level = "debug", skip(self), fields(fed_ids=%self.config.fed_ids, federate, port, tag))]
+    #[tracing::instrument(
+        skip(self),
+        fields(fed_ids=%self.config.fed_ids, federate, port, tag)
+    )]
     pub fn send_timed_message<T>(
         &self,
         federate: FederateKey,
@@ -167,6 +170,11 @@ impl Client {
             tracing::error!("RTI connection closed unexpectedly");
             return Err(ClientError::UnexpectedClose);
         }
+
+        tracing::info!(
+            "Sending message to federate {federate:?} port {port:?} at tag {}: {message:?}",
+            tag.since(self.start_time.unwrap_or(Timestamp::ZERO))
+        );
 
         // Apply the additional delay to the current tag and use that as the intended tag of the outgoing message
         //tag_t current_message_intended_tag = _lf_delay_tag(lf_tag(), additional_delay);

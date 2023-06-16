@@ -49,20 +49,21 @@ impl EnvBuilder {
                     reactor_key,
                 )?;
                 let input_control_reaction = Arc::new(
-                    move |_ctx: &mut runtime::Context,
+                    move |ctx: &mut runtime::Context,
                           _state: &mut dyn runtime::ReactorState,
                           _inputs: &[runtime::IPort],
                           outputs: &mut [runtime::OPort],
                           _actions: &mut [&mut runtime::Action]| {
                         let [port]: &mut [runtime::OPort; 1] = outputs.try_into().unwrap();
                         if port.is_set() {
-                            println!("wait_until_port_status_known({:?})", runtime_port_key);
+                            tracing::warn!("wait_until_port_status_known({runtime_port_key:?})");
+                            ctx.wait_until_port_status_known(runtime_port_key);
                         }
                     },
                 );
 
                 let _ = self
-                    .add_reaction(
+                    .add_reaction_unordered(
                         &format!("in_ctrl_{own_port_name}"),
                         reactor_key,
                         input_control_reaction,
@@ -89,13 +90,13 @@ impl EnvBuilder {
                           _actions: &mut [&mut runtime::Action]| {
                         let [port]: &mut [runtime::OPort; 1] = outputs.try_into().unwrap();
                         if port.is_set() {
-                            println!("set_port_value({:?})", runtime_port_key);
+                            tracing::warn!("set_port_value({runtime_port_key:?})");
                         }
                     },
                 );
 
                 let _ = self
-                    .add_reaction(
+                    .add_reaction_unordered(
                         &format!("reaction_network_{own_port_name}"),
                         reactor_key,
                         network_reaction,
@@ -153,7 +154,7 @@ impl EnvBuilder {
                 );
 
                 let _ = self
-                    .add_reaction(
+                    .add_reaction_unordered(
                         &(format!("{own_port_name}_{to_port_name}")),
                         reactor_key,
                         output_binding_reaction,
@@ -182,7 +183,7 @@ impl EnvBuilder {
                 );
 
                 let _ = self
-                    .add_reaction(
+                    .add_reaction_unordered(
                         &format!("out_ctrl_{own_port_name}_{to_port_name}"),
                         reactor_key,
                         output_control_reaction,

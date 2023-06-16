@@ -84,7 +84,10 @@ impl Scheduler {
     }
 
     /// Execute startup of the Scheduler.
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(
+        skip(self),
+        fields(fed_ids=%self.config.client_config.fed_ids)
+    )]
     pub async fn startup(&mut self) -> Result<(), SchedError> {
         // Reset status fields before talking to the RTI to set network port statuses to unknown
         //reset_status_fields();
@@ -120,7 +123,7 @@ impl Scheduler {
         // selectively block reactions that depend on network input ports until they receive further
         // instructions (to unblock) from the RTI or the upstream federates.
         let mut initial_reaction_set: ReactionSet =
-            self.enqueue_network_control_reactions().copied().collect();
+            self.iter_network_control_reactions().copied().collect();
 
         // Add reactions invoked at tag (0,0) (including startup reactions)
         initial_reaction_set.extend_above(self.iter_startup_events().copied(), 0usize);
@@ -133,22 +136,38 @@ impl Scheduler {
     }
 
     /// Enqueue network control reactions.
-    ///
-    /// that will send an [`RtiMsg::PortAbsent`] message to downstream federates if a given network port is not present.
-    #[tracing::instrument(skip(self))]
-    pub fn enqueue_network_control_reactions(&self) -> impl Iterator<Item = &LevelReactionKey> {
+    #[tracing::instrument(
+        skip(self),
+        fields(fed_ids=%self.config.client_config.fed_ids)
+    )]
+    pub fn iter_network_control_reactions(&self) -> impl Iterator<Item = &LevelReactionKey> {
         tracing::debug!("Enqueueing output control reactions.");
 
-        if let Some(output_control_trigger) = self.federate_env.output_control_trigger {
-            self.env.reactors[self.env.top_reactor].action_triggers[output_control_trigger].iter()
-        } else {
-            // There are no network output control reactions
-            tracing::debug!("No output control reactions.");
-            [].iter()
-        }
+        let top_reactor = &self.env.reactors[self.env.top_reactor];
+
+        // network output control reactions that will send a [`RtiMsg::PortAbsent`] message to
+        // downstream federates if a given network output port is not present.
+        let output_reactions = self
+            .federate_env
+            .output_control_trigger
+            .into_iter()
+            .flat_map(move |action_key| top_reactor.action_triggers[action_key].iter());
+
+        // network input control reactions that determine if the trigger for a given network input
+        // port is going to be present at the current logical time or absent.
+        let input_reactions = self
+            .federate_env
+            .input_control_triggers
+            .iter()
+            .flat_map(|&action_key| top_reactor.action_triggers[action_key].iter());
+
+        output_reactions.chain(input_reactions)
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(
+        skip(self),
+        fields(fed_ids=%self.config.client_config.fed_ids)
+    )]
     pub async fn event_loop(&mut self) {
         self.startup().await.unwrap();
 

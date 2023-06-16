@@ -110,7 +110,8 @@ impl EnvBuilder {
             reactor
                 .reactions
                 .keys()
-                .sorted_by_key(|&reaction_key| self.reaction_builders[reaction_key].priority)
+                .filter_map(|reaction_key| self.reaction_builders[reaction_key].priority)
+                .sorted()
                 .tuple_windows()
         });
         deps.chain(internal)

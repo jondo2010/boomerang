@@ -194,7 +194,7 @@ where
     ///
     /// Do not send it if a previously sent PTAG was greater or if a previously sent TAG was greater
     /// or equal. This function will keep a record of this TAG in the federate's last_granted field.
-    #[tracing::instrument(skip(self, federate_key))]
+    #[tracing::instrument(skip(self, federate_key), fields(tag = ?tag.since(*self.start_time.borrow())))]
     async fn send_tag_advance_grant(&mut self, federate_key: FederateKey, tag: Tag) {
         let fed = &mut self.federates[federate_key];
         if tag <= fed.last_granted || tag < fed.last_provisionally_granted {
@@ -215,7 +215,7 @@ where
     ///
     /// Do not send it if a previously sent PTAG or TAG was greater or equal. This function will
     /// keep a record of this PTAG in the federate's last_provisionally_granted field.
-    #[tracing::instrument(skip(self, federate_key))]
+    #[tracing::instrument(skip(self, federate_key), fields(tag = ?tag.since(*self.start_time.borrow())))]
     async fn send_provisional_tag_advance_grant(&mut self, federate_key: FederateKey, tag: Tag) {
         let fed = &mut self.federates[federate_key];
         if tag <= fed.last_granted || tag < fed.last_provisionally_granted {
@@ -299,17 +299,12 @@ where
         // time of each such upstream federate, adjusted by delays on the connections.
 
         // Find the tag of the earliest possible incoming message from upstream federates.
-        let t_d = self.federates[federate_key]
-            .neighbors
-            .upstream
+        let t_d = self.transitive_upstream_neighbors[federate_key]
             .iter()
-            .map(|&(upstream_fed_key, upstream_delay)| {
-                // Find and delay the (transitive) next event tag upstream.
-                self.transitive_next_upstream_event(upstream_fed_key)
-                    .delay(upstream_delay)
-            })
+            .map(|(key, delay)| self.federates[*key].next_event.delay(*delay))
+            //.chain(std::iter::once(self.federates[federate_key].next_event))
             .min()
-            .unwrap();
+            .unwrap_or_else(|| Tag::NEVER);
 
         tracing::debug!(
             "Earliest next event upstream has tag {}.",
@@ -428,7 +423,7 @@ where
                 .push(tag);
             tracing::debug!(
                 "RTI: Adding a message with tag {tag} to the list of in-transit messages for federate {dest_fed:?}.",
-                tag=tag,
+                tag=tag.since(*self.start_time.borrow()),
                 dest_fed=dest_federate
             );
         } else {

@@ -113,7 +113,7 @@ impl Reaction {
 
     #[cfg(feature = "federated")]
     #[tracing::instrument(
-        skip(self, start_time, inputs, outputs, async_tx),
+        skip(self, start_time, inputs, outputs, async_tx, client),
         fields(
             reactor = reactor.name,
             name = %self.name,

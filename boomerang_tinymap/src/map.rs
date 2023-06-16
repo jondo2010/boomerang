@@ -27,6 +27,38 @@ impl<K: Key, V> Default for TinyMap<K, V> {
     }
 }
 
+/// An iterator that moves key-value pairs out of a [`TinyMap`].
+///
+/// This iterator is created by calling the `into_iter` method on [`Tinymap`], provided by the
+/// [`IntoIterator`] trait.
+#[derive(Debug)]
+pub struct IntoIter<K: Key, V> {
+    inner: Enumerate<std::vec::IntoIter<V>>,
+    _k: PhantomData<fn(K) -> K>,
+}
+
+impl<K: Key, V> Iterator for IntoIter<K, V> {
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner
+            .next()
+            .map(|(index, value)| (K::from(index), value))
+    }
+}
+
+impl<K: Key, V> IntoIterator for TinyMap<K, V> {
+    type Item = (K, V);
+    type IntoIter = IntoIter<K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        IntoIter {
+            inner: self.data.into_iter().enumerate(),
+            _k: PhantomData,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Iter<'a, K: Key, V> {
     inner: Enumerate<std::slice::Iter<'a, V>>,

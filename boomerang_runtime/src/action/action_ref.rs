@@ -7,7 +7,7 @@ use super::{Action, ActionData, ActionKey, ActionValues, BaseActionValues};
 use crate::{InnerType, Tag};
 
 pub trait ActionRefValue<T: ActionData> {
-    fn get_value(&self, tag: Tag) -> Option<T>;
+    fn read_with<F: FnOnce(Option<&T>) -> R, R>(&self, tag: Tag, f: F) -> R;
     fn set_value(&mut self, value: Option<T>, new_tag: Tag);
     fn get_min_delay(&self) -> Duration;
     fn get_key(&self) -> ActionKey;
@@ -21,8 +21,8 @@ pub struct ActionRef<'a, T: ActionData = ()> {
 }
 
 impl<'a, T: ActionData> ActionRefValue<T> for ActionRef<'a, T> {
-    fn get_value(&self, tag: Tag) -> Option<T> {
-        self.values.get_value(tag).cloned()
+    fn read_with<F: FnOnce(Option<&T>) -> R, R>(&self, tag: Tag, f: F) -> R {
+        (f)(self.values.get_value(tag))
     }
 
     fn set_value(&mut self, value: Option<T>, new_tag: Tag) {
@@ -51,23 +51,20 @@ pub struct PhysicalActionRef<T: ActionData = ()> {
 }
 
 impl<T: ActionData> ActionRefValue<T> for PhysicalActionRef<T> {
-    fn get_value(&self, tag: Tag) -> Option<T> {
-        self.values
-            .lock()
-            .expect("Failed to lock action values")
-            .downcast_mut::<ActionValues<T>>()
-            .expect("Type mismatch on ActionValues!")
-            .get_value(tag)
-            .cloned()
+    fn read_with<F: FnOnce(Option<&T>) -> R, R>(&self, tag: Tag, f: F) -> R {
+        let guard = self.values.lock().expect("Failed to lock action values");
+        let values = guard
+            .downcast_ref::<ActionValues<T>>()
+            .expect("Type mismatch on ActionValues");
+        (f)(values.get_value(tag))
     }
 
     fn set_value(&mut self, value: Option<T>, new_tag: Tag) {
-        self.values
-            .lock()
-            .expect("Failed to lock action values")
+        let mut guard = self.values.lock().expect("Failed to lock action values");
+        let values = guard
             .downcast_mut::<ActionValues<T>>()
-            .expect("Type mismatch on ActionValues!")
-            .set_value(value, new_tag)
+            .expect("Type mismatch on ActionValues");
+        values.set_value(value, new_tag)
     }
 
     fn get_min_delay(&self) -> Duration {

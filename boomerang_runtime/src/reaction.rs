@@ -1,13 +1,14 @@
-use std::{fmt::Debug, sync::RwLock};
+use std::sync::{Arc, RwLock};
 
-use crossbeam_channel::Sender;
+use boomerang_core::time::Timestamp;
+#[cfg(feature = "federated")]
+use boomerang_federated as federated;
 
 use crate::{
-    key_set::KeySet, Action, ActionKey, BasePort, Context, Duration, PortKey, Reactor, ReactorKey,
-    ReactorState, ScheduledEvent, Tag,
+    key_set::KeySet,
+    keys::{ActionKey, PortKey, ReactionKey, ReactorKey},
+    Action, BasePort, Context, Reactor, ReactorState, ScheduledEvent, Tag,
 };
-
-tinymap::key_type!(pub ReactionKey);
 
 pub type ReactionSet = KeySet<ReactionKey>;
 
@@ -23,7 +24,7 @@ pub trait ReactionFn:
         &mut dyn ReactorState,
         &[IPort], // Input ports
         &mut [OPort], // Output ports
-        &mut [&mut Action], // Schedulable Actions
+        &mut [&mut Action], // Actions
     ) + Sync
     + Send
 {
@@ -38,7 +39,7 @@ impl<F> ReactionFn for F where
 #[derive(Derivative)]
 #[derivative(Debug, PartialEq)]
 pub struct Deadline {
-    deadline: Duration,
+    deadline: Timestamp,
     #[derivative(PartialEq = "ignore")]
     #[derivative(Debug = "ignore")]
     #[allow(dead_code)]
@@ -60,7 +61,7 @@ pub struct Reaction {
     /// Reaction closure
     #[derivative(PartialEq = "ignore")]
     #[derivative(Debug = "ignore")]
-    body: Box<dyn ReactionFn>,
+    body: Arc<dyn ReactionFn>,
     // Local deadline relative to the time stamp for invocation of the reaction.
     deadline: Option<Deadline>,
 }
@@ -72,7 +73,7 @@ impl Reaction {
         input_ports: Vec<PortKey>,
         output_ports: Vec<PortKey>,
         actions: Vec<ActionKey>,
-        body: Box<dyn ReactionFn>,
+        body: Arc<dyn ReactionFn>,
         deadline: Option<Deadline>,
     ) -> Self {
         Self {
@@ -110,6 +111,58 @@ impl Reaction {
         self.actions.iter()
     }
 
+    #[cfg(feature = "federated")]
+    #[tracing::instrument(
+        skip(self, start_time, inputs, outputs, async_tx, client),
+        fields(
+            reactor = reactor.name,
+            name = %self.name,
+            tag = %tag,
+        )
+    )]
+    pub fn trigger<'a>(
+        &'a self,
+        start_time: Timestamp,
+        tag: Tag,
+        reactor: &'a mut Reactor,
+        inputs: &[IPort<'_>],
+        outputs: &mut [OPort<'_>],
+        async_tx: crate::sched::Sender<ScheduledEvent>,
+        client: &'a federated::client::Client,
+    ) -> Context {
+        let Reactor {
+            state,
+            actions: action_keys,
+            action_triggers,
+            ..
+        } = reactor;
+
+        let mut ctx = Context::new(start_time, tag, action_triggers, async_tx, client);
+
+        if let Some(Deadline { deadline, handler }) = self.deadline.as_ref() {
+            let lag = ctx.get_physical_time() - ctx.get_logical_time();
+            if lag > (*deadline).into() {
+                (handler.write().unwrap())();
+            }
+        }
+
+        // Pull actions from the reaction/reactor
+        let mut actions = action_keys
+            .iter_many_unchecked_mut(self.iter_actions().copied())
+            .collect::<Vec<_>>();
+
+        (self.body)(
+            &mut ctx,
+            state.as_mut(),
+            inputs,
+            outputs,
+            actions.as_mut_slice(),
+        );
+
+        ctx
+    }
+
+    #[cfg(not(feature = "federated"))]
     #[tracing::instrument(
         skip(self, start_time, inputs, outputs, async_tx),
         fields(
@@ -120,12 +173,12 @@ impl Reaction {
     )]
     pub fn trigger<'a>(
         &'a self,
-        start_time: crate::Instant,
+        start_time: Timestamp,
         tag: Tag,
         reactor: &'a mut Reactor,
         inputs: &[IPort<'_>],
         outputs: &mut [OPort<'_>],
-        async_tx: Sender<ScheduledEvent>,
+        async_tx: crate::sched::Sender<ScheduledEvent>,
     ) -> Context {
         let Reactor {
             state,
@@ -138,7 +191,7 @@ impl Reaction {
 
         if let Some(Deadline { deadline, handler }) = self.deadline.as_ref() {
             let lag = ctx.get_physical_time() - ctx.get_logical_time();
-            if lag > *deadline {
+            if lag > (*deadline).into() {
                 (handler.write().unwrap())();
             }
         }

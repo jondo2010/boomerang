@@ -5,7 +5,13 @@ use tinymap::{
     map::{IterMany, IterManyMut},
 };
 
-use crate::{BasePort, PortKey, Reaction, ReactionKey, Reactor, ReactorKey};
+use crate::{
+    keys::{PortKey, ReactionKey, ReactorKey},
+    BasePort, Reaction, Reactor,
+};
+
+#[cfg(feature = "federated")]
+use boomerang_federated as federated;
 
 /// Execution level
 pub type Level = usize;
@@ -13,11 +19,26 @@ pub type Level = usize;
 /// A paired `ReactionKey` with it's execution level.
 pub type LevelReactionKey = (Level, ReactionKey);
 
+/// Extended data from the Federated Environment
+#[cfg(feature = "federated")]
+pub struct FederateEnv {
+    /// Keys for the generated input control trigger actions
+    pub input_control_triggers: Vec<crate::keys::ActionKey>,
+    /// Keys for the generated network message actions
+    pub network_messages: Vec<crate::keys::ActionKey>,
+    /// Key for the generated output control trigger action
+    pub output_control_trigger: Option<crate::keys::ActionKey>,
+    /// Federated neighbor structure
+    pub neighbors: federated::NeighborStructure,
+}
+
 /// `Env` stores the resolved runtime state of all the reactors.
 ///
 /// The reactor heirarchy has been flattened and build by the builder methods.
 #[derive(Debug)]
 pub struct Env {
+    /// The top-level Reactor
+    pub top_reactor: ReactorKey,
     /// The runtime set of Reactors
     pub reactors: tinymap::TinyMap<ReactorKey, Reactor>,
     /// The runtime set of Ports
@@ -107,8 +128,12 @@ where
 
 impl Display for Env {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Environment {\n")?;
-        f.write_str("}\n")?;
+        f.debug_struct("Env")
+            .field("name", &self.reactors[self.top_reactor].get_name())
+            .field("reactors", &self.reactors.len())
+            .field("ports", &self.ports.len())
+            .field("reactions", &self.reactions.len())
+            .finish()?;
         Ok(())
     }
 }

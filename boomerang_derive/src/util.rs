@@ -179,7 +179,7 @@ impl<T: FromMeta> FromMeta for MetaList<T> {
 pub(crate) fn duration_quote(duration: &Duration) -> proc_macro2::TokenStream {
     let secs = duration.as_secs();
     let nanos = duration.subsec_nanos();
-    quote! {::boomerang::runtime::Duration::new(#secs, #nanos)}
+    quote! {::core::time::Duration::new(#secs, #nanos)}
 }
 
 pub struct OptionalDuration(pub Option<Duration>);

@@ -1,5 +1,5 @@
 [package]
-name = 'boomerang_util'
+name = "boomerang_util"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -8,20 +8,18 @@ readme.workspace = true
 repository.workspace = true
 
 [features]
-default = ["keyboard", "runner"]
+default = ["keyboard"]
 # Support for keyboard input
 keyboard = ["termion"]
-# Support for built-in CLI/runner methods
-runner = ["clap", "anyhow"]
 
 [dependencies]
-boomerang = { path = "../boomerang" }
+#tokio = { workspace = true, optional = true, features = ["rt"] }
 tracing = "0.1"
-clap = { version = "4.2", features = ["derive"], optional = true }
-anyhow = { version = "1.0", optional = true }
+
+boomerang = { path = "../" }
 
 [target.'cfg(not(windows))'.dependencies]
-termion = {version = "2.0", optional = true}
+termion = { version = "2.0", optional = true }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["fmt", "json", "env-filter"] }

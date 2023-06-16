@@ -1,0 +1,27 @@
+[package]
+name = "boomerang_federated"
+description = "Distributed client/server framework for Boomerang."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bincode = "1.3"
+bytes = "1.4"
+futures = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+tinymap.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true, features = ["codec"] }
+tracing.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+test-log.workspace = true
+petgraph.workspace = true
+
+boomerang_core = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+tracing-subscriber.workspace = true
+env_logger.workspace = true

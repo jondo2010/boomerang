@@ -11,15 +11,28 @@ repository.workspace = true
 [features]
 default = ["parallel"]
 parallel = ["rayon"]
+federated = [
+    "dep:async-timer",
+    "dep:boomerang_federated",
+    "dep:serde",
+    "dep:tokio"
+]
 
 [dependencies]
+async-timer = { workspace = true, optional = true }
 crossbeam-channel = "0.5"
 crossbeam-utils = "0.8"
 derivative = "2.2"
 derive_more = '0.99'
 downcast-rs = "1.2"
+dyn-clone.workspace = true
 itertools.workspace = true
 rayon = { version = "1.7", optional = true }
+serde = { workspace = true, optional = true }
 thiserror.workspace = true
 tinymap.workspace = true
+tokio = { workspace = true, optional = true, features = ["sync"] }
 tracing.workspace = true
+
+boomerang_core.workspace = true
+boomerang_federated = { workspace = true, optional = true }

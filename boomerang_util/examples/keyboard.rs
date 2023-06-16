@@ -5,7 +5,7 @@ fn main() {
     use boomerang_util::keyboard_events::{KeyboardEvents, KeyboardEventsBuilder};
 
     tracing_subscriber::fmt::init();
-    let _ = boomerang_util::run::build_and_run_reactor::<KeyboardEventsBuilder>(
+    let _ = boomerang::runner::build_and_run_reactor::<KeyboardEventsBuilder>(
         "keyboard_events",
         KeyboardEvents::new(),
     )

@@ -1,13 +1,13 @@
 //! Capture asynchronous key presses, and sends them through an output port.
-//!
-use boomerang::{
-    builder::{BuilderReactionKey, Physical, TypedActionKey, TypedPortKey},
-    runtime, Reactor,
-};
 
 use std::{io::Stdout, ops::DerefMut};
 pub use termion::event::Key;
 use termion::raw::{IntoRawMode, RawTerminal};
+
+use boomerang::{
+    builder::{BuilderReactionKey, Physical, TypedActionKey, TypedPortKey},
+    runtime, Reactor,
+};
 
 #[derive(Reactor)]
 #[reactor(state = "KeyboardEvents")]
@@ -33,6 +33,12 @@ pub struct KeyboardEvents {
     raw_terminal: Option<RawTerminal<Stdout>>,
 }
 
+impl Clone for KeyboardEvents {
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+
 impl Default for KeyboardEvents {
     fn default() -> Self {
         Self::new()
@@ -51,7 +57,9 @@ impl KeyboardEvents {
         #[reactor::action(triggers)] key_press: runtime::PhysicalActionRef<Key>,
         #[reactor::port(effects)] arrow_key_pressed: &mut runtime::Port<Key>,
     ) {
-        *arrow_key_pressed.deref_mut() = ctx.get_action(&key_press);
+        ctx.read_action_with(&key_press, |key| {
+            *arrow_key_pressed.deref_mut() = key.copied();
+        });
     }
 
     #[boomerang::reaction(reactor = "KeyboardEventsBuilder", triggers(shutdown))]

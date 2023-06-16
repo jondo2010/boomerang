@@ -14,6 +14,27 @@ pub struct TinySecondaryMap<K: Key, V> {
     _k: PhantomData<K>,
 }
 
+#[derive(Debug)]
+pub struct Iter<'a, K: Key, V: 'a> {
+    num_left: usize,
+    inner: Enumerate<core::slice::Iter<'a, Option<V>>>,
+    _k: PhantomData<K>,
+}
+
+#[derive(Debug)]
+pub struct IterMut<'a, K: Key, V: 'a> {
+    num_left: usize,
+    inner: Enumerate<core::slice::IterMut<'a, Option<V>>>,
+    _k: PhantomData<K>,
+}
+
+#[derive(Debug)]
+pub struct IntoIter<K: Key, V> {
+    num_left: usize,
+    inner: Enumerate<std::vec::IntoIter<Option<V>>>,
+    _k: PhantomData<(K, V)>,
+}
+
 impl<K: Key + Debug, V: Debug> Debug for TinySecondaryMap<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_map().entries(self.iter()).finish()
@@ -44,27 +65,13 @@ impl<K: Key, V> IndexMut<K> for TinySecondaryMap<K, V> {
     }
 }
 
-#[derive(Debug)]
-pub struct Iter<'a, K: Key, V: 'a> {
-    values_left: usize,
-    inner: Enumerate<core::slice::Iter<'a, Option<V>>>,
-    _k: PhantomData<K>,
-}
-
-#[derive(Debug)]
-pub struct IntoIter<K: Key, V> {
-    values_left: usize,
-    inner: Enumerate<std::vec::IntoIter<Option<V>>>,
-    _k: PhantomData<(K, V)>,
-}
-
 impl<K: Key, V> Iterator for IntoIter<K, V> {
     type Item = (K, V);
 
     fn next(&mut self) -> Option<Self::Item> {
         for (idx, v) in self.inner.by_ref() {
             if let Some(v) = v {
-                self.values_left -= 1;
+                self.num_left -= 1;
                 return Some((K::from(idx), v));
             }
         }
@@ -72,13 +79,13 @@ impl<K: Key, V> Iterator for IntoIter<K, V> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.values_left, Some(self.values_left))
+        (self.num_left, Some(self.num_left))
     }
 }
 
 impl<K: Key, V> ExactSizeIterator for IntoIter<K, V> {
     fn len(&self) -> usize {
-        self.values_left
+        self.num_left
     }
 }
 
@@ -88,6 +95,7 @@ impl<'a, K: Key, V> Iterator for Iter<'a, K, V> {
     fn next(&mut self) -> Option<Self::Item> {
         for (idx, v) in self.inner.by_ref() {
             if let Some(v) = v {
+                self.num_left -= 1;
                 return Some((K::from(idx), v));
             }
         }
@@ -95,7 +103,25 @@ impl<'a, K: Key, V> Iterator for Iter<'a, K, V> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.values_left, None)
+        self.inner.size_hint()
+    }
+}
+
+impl<'a, K: Key, V> Iterator for IterMut<'a, K, V> {
+    type Item = (K, &'a mut V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        for (idx, v) in self.inner.by_ref() {
+            if let Some(v) = v {
+                self.num_left -= 1;
+                return Some((K::from(idx), v));
+            }
+        }
+        None
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.num_left, Some(self.num_left))
     }
 }
 
@@ -136,9 +162,14 @@ impl<K: Key, V> TinySecondaryMap<K, V> {
         }
     }
 
-    pub fn extend(&mut self, iter: impl IntoIterator<Item = (K, V)>) {
-        for (key, value) in iter {
-            self.insert(key, value);
+    /// Removes a value from the secondary map at the given `key`. Returns [`None`] if the key was
+    /// not present, otherwise returns the value.
+    pub fn remove(&mut self, key: K) -> Option<V> {
+        if let Some(v) = self.data.get_mut(key.index())?.take() {
+            self.num_values -= 1;
+            Some(v)
+        } else {
+            None
         }
     }
 
@@ -159,8 +190,16 @@ impl<K: Key, V> TinySecondaryMap<K, V> {
     /// Returns an iterator over the (`K`, `V`) entries in the map.
     pub fn iter(&self) -> Iter<'_, K, V> {
         Iter {
+            num_left: self.num_values,
             inner: self.data.iter().enumerate(),
-            values_left: self.num_values,
+            _k: PhantomData,
+        }
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (K, &mut V)> {
+        IterMut {
+            num_left: self.num_values,
+            inner: self.data.iter_mut().enumerate(),
             _k: PhantomData,
         }
     }
@@ -202,9 +241,17 @@ impl<K: Key, V> IntoIterator for TinySecondaryMap<K, V> {
 
     fn into_iter(self) -> Self::IntoIter {
         IntoIter {
-            values_left: self.num_values,
+            num_left: self.num_values,
             inner: self.data.into_iter().enumerate(),
             _k: PhantomData,
+        }
+    }
+}
+
+impl<K: Key, V> Extend<(K, V)> for TinySecondaryMap<K, V> {
+    fn extend<T: IntoIterator<Item = (K, V)>>(&mut self, iter: T) {
+        for (key, value) in iter {
+            self.insert(key, value);
         }
     }
 }
@@ -222,6 +269,18 @@ mod tests {
         map.insert(DefaultKey(0), 1);
         map.insert(DefaultKey(2), 3);
         map.insert(DefaultKey(1), 2);
+
+        let i = map.iter();
+        assert_eq!(i.size_hint(), (4, Some(4)));
+        assert_eq!(
+            i.collect::<Vec<_>>(),
+            vec![
+                (DefaultKey(0), &1),
+                (DefaultKey(1), &2),
+                (DefaultKey(2), &3),
+                (DefaultKey(3), &4)
+            ]
+        );
 
         for i in 0..4 {
             assert_eq!(map.get(DefaultKey(i)), Some(&(i + 1)));

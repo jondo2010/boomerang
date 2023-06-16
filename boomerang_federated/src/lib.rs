@@ -1,0 +1,370 @@
+use std::{fmt::Display, time::Duration};
+
+use boomerang_core::keys::PortKey;
+use serde::{Deserialize, Serialize};
+
+pub mod client;
+mod clock;
+pub mod rti;
+#[cfg(test)]
+mod tests;
+mod util;
+
+use boomerang_core::time::{Tag, Timestamp};
+
+tinymap::key_type!(
+    /// Runtime key for a Federate
+    #[derive(Serialize, Deserialize, PartialOrd, Ord, Hash)]
+    pub FederateKey
+);
+
+unsafe impl petgraph::graph::IndexType for FederateKey {
+    #[inline(always)]
+    fn new(x: usize) -> Self {
+        FederateKey(x)
+    }
+
+    #[inline(always)]
+    fn index(&self) -> usize {
+        self.0
+    }
+
+    #[inline(always)]
+    fn max() -> Self {
+        FederateKey(usize::max_value())
+    }
+}
+
+/// A timestamped message to forward to another federate.
+///
+/// With centralized coordination, all such messages flow through the RTI.
+/// With decentralized coordination, tagged messages are sent peer-to-peer between federates and are marked with
+/// MSG_TYPE_P2P_TAGGED_MESSAGE.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    /// The ID of the destination reactor port.
+    pub dest_port: PortKey,
+    /// The destination federate ID.
+    pub dest_federate: FederateKey,
+    pub message: Vec<u8>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error(transparent)]
+    Reject(#[from] RejectReason),
+
+    #[error("Connection unexpectedly closed")]
+    HangUp,
+
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+//// Rejection codes
+#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error, PartialEq)]
+pub enum RejectReason {
+    /// Federation ID does not match.
+    #[error("Federation ID does not match")]
+    FederationIdDoesNotMatch = 1,
+    /// Federate with the specified ID has already joined.
+    #[error("Federate ID in use")]
+    FederateKeyInUse,
+    /// Federate ID out of range.
+    #[error("Federate ID out of range")]
+    FederateKeyOutOfRange,
+    /// Incoming message is not expected.
+    #[error("Unexpected message")]
+    UnexpectedMessage,
+    /// Connected to the wrong server.
+    #[error("Connected to the wrong server")]
+    WrongServer,
+    /// HMAC authentication failed.
+    #[error("HMAC authentication failed")]
+    HmacDoesNotMatch,
+}
+
+/// Each federate needs to have a unique ID between 0 and NUMBER_OF_FEDERATES-1.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FedIds {
+    /// Federate.
+    pub federate_key: FederateKey,
+    /// Federation
+    pub federation: String,
+}
+
+impl Display for FedIds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let FedIds {
+            federate_key,
+            federation,
+        } = &self;
+        write!(f, "FedIds({federation}::{federate_key:?})")
+    }
+}
+
+/// A message that informs the RTI about connections between this federate and other federates where
+/// messages are routed through the RTI. Currently, this only includes logical connections when the
+/// coordination is centralized. This information is needed for the RTI to perform the centralized
+/// coordination.
+///
+/// Note: Only information about the immediate neighbors is required. The RTI can transitively
+/// obtain the structure of the federation based on each federate's immediate neighbor information.
+///
+/// Note: The upstream and downstream connections are transmitted on the same message to prevent
+/// (at least to some degree) the scenario where the RTI has information about one, but not the
+/// other (which is a critical error).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NeighborStructure {
+    /// Federate's connection to upstream federates (by direct connection).
+    ///
+    /// The delay is the minimum "after" delay of all connections from the upstream federate.
+    pub upstream: Vec<(FederateKey, Duration)>,
+    /// Federate's downstream federates (by direct connection).
+    pub downstream: Vec<FederateKey>,
+}
+
+impl NeighborStructure {
+    /// Returns `true` if the neighbor structure is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.upstream.is_empty() && self.downstream.is_empty()
+    }
+}
+
+impl Default for NeighborStructure {
+    fn default() -> Self {
+        Self {
+            upstream: Vec::new(),
+            downstream: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+pub enum ClockSyncStat {
+    /// No synchronization should be performed at all.
+    Off,
+    /// Only the initial clock synchronization is enabled.
+    Init,
+    /// The port number for the UDP server
+    On(u16),
+}
+
+impl ClockSyncStat {
+    /// Returns `true` if the clock sync stat is [`Init`] or [`On`].
+    #[must_use]
+    pub fn is_on(&self) -> bool {
+        matches!(self, Self::Init | Self::On(_))
+    }
+
+    /// Returns `true` if the clock sync stat is [`Off`].
+    ///
+    /// [`Off`]: ClockSyncStat::Off
+    #[must_use]
+    pub fn is_off(&self) -> bool {
+        matches!(self, Self::Off)
+    }
+}
+
+/// The HMAC tag is composed of the following order:
+/// * One byte equal to MSG_TYPE_FED_RESPONSE.
+/// * Two bytes (ushort) giving the federate ID.
+/// * Eight bytes for received RTI's nonce.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Hmac {}
+
+/// A message from federate to RTI as a response to the RTI Hello message. The
+/// federate sends this message to RTI for HMAC-based authentication.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FedResponse {
+    /// Federate's nonce
+    pub nonce: u64,
+    /// Federate ID
+    pub federate: FederateKey,
+    /// HMAC tag
+    pub hmac: Hmac,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RtiMsg {
+    /// A rejection of the previously received message.
+    Reject(RejectReason),
+
+    /// Acknowledgment of the previously received message. This message carries no payload.
+    Ack,
+
+    /// Acknowledgment of the previously received `FedIds` message sent by the RTI to the federate
+    /// with a payload indicating the UDP port to use for clock synchronization.
+    UdpPort(ClockSyncStat),
+
+    /// A message from a federate to an RTI containing the federation ID and the federate ID.
+    ///
+    /// Each federate, when starting up, should send this message to the RTI. This is its first message
+    /// to the RTI.
+    ///
+    /// The RTI will respond with either `Reject`, `Ack`, or `UdpPort`.
+    ///
+    /// The client federate code does this by calling synchronize_with_other_federates(), passing to
+    /// it its federate ID.
+    FedIds(FedIds),
+
+    /// Byte identifying a message from an RTI to a federate containing RTI's 8-byte random nonce
+    /// for HMAC-based authentication. The RTI sends this message to an incoming federate when TCP
+    /// connection is established between the RTI and the federate.
+    ///
+    /// The next eight bytes are RTI's 8-byte nonce (RTI nonce).
+    RtiNonce,
+
+    /// A message from federate to RTI as a response to the RTI Hello message.
+    FedResponse(FedResponse),
+
+    /// Byte identifying a message from RTI to a federate as a response to the FED_RESPONSE message.
+    ///
+    /// The RTI sends this message to federate for HMAC-based authentication.
+    ///
+    /// The message contains, in this order:
+    /// * One byte equal to MSG_TYPE_RTI_RESPONSE.
+    /// * 32 bytes for HMAC tag based on SHA256.
+    /// The HMAC tag is composed of the following order:
+    /// * One byte equal to MSG_TYPE_RTI_RESPONSE.
+    /// * Eight bytes for received federate's nonce.
+    RtiResponse,
+
+    /// Byte identifying a timestamp message, which is 64 bits long.
+    ///
+    /// Each federate sends its starting physical time as a message of this type, and the RTI
+    /// broadcasts to all the federates the starting logical time as a message of this type.
+    Timestamp(Timestamp),
+
+    /// A message to forward to another federate.
+    ///
+    /// NOTE: This is currently not used. All messages are tagged, even on physical connections,
+    /// because if "after" is used, the message may preserve the logical timestamp rather than
+    /// using the physical time.
+    Message(Message),
+
+    /// The federate is ending its execution.
+    Resign,
+
+    TaggedMessage(Tag, Message),
+
+    /// A next event tag (NET) message sent from a federate in centralized coordination.
+    ///
+    /// This message from a federate tells the RTI the tag of the earliest event on that federate's
+    /// event queue. In other words, absent any further inputs from other federates, this will be
+    /// the least tag of the next set of reactions on that federate. If the event queue is empty and
+    /// a timeout time has been specified, then the timeout time will be sent. If there is no
+    /// timeout time, then FOREVER will be sent. Note that if there are physical actions and the
+    /// earliest event on the event queue has a tag that is ahead of physical time (or the queue is
+    /// empty), the federate should try to regularly advance its tag (and thus send NET messages) to
+    /// make sure downstream federates can make progress.
+    NextEventTag(Tag),
+
+    /// A time advance grant (TAG) or provisional time advance grant (PTAG) sent by the RTI to a
+    /// federate in centralized coordination.
+    ///
+    /// This message is a promise by the RTI to the federate that no later message sent to the federate
+    /// will have a tag earlier than or equal to the tag carried by this TAG message.
+    ///
+    /// The boolean indicates whether this is a provisional time advance grant (PTAG).
+    TagAdvanceGrant(Tag, bool),
+
+    /// A logical tag complete (LTC) message sent by a federate to the RTI.
+    LogicalTagComplete(Tag),
+
+    /// A stop request. This message is first sent to the RTI by a federate that would like to stop
+    /// execution at the specified tag. The RTI will forward the `StopRequest` to all other
+    /// federates. Those federates will either agree to the requested tag or propose a larger tag.
+    /// The RTI will collect all proposed tags and broadcast the largest of those to all federates.
+    /// All federates will then be expected to stop at the granted tag.
+    ///
+    /// NOTE: The RTI may reply with a larger tag than the one specified in this message.
+    /// It has to be that way because if any federate can send a StopRequest` message that specifies
+    /// the stop time on all other federates, then every federate depends on every other federate
+    /// and time cannot be advanced.  Hence, the actual stop time may be nondeterministic.
+    /// If, on the other hand, the federate requesting the stop is upstream of every other federate,
+    /// then it should be possible to respect its requested stop tag.
+    StopRequest(Tag),
+
+    /// A federate's reply to a `StopRequest` that was sent by the RTI. The payload is a proposed
+    /// stop tag that is at least as large as the one sent to the federate in a `StopRequest`
+    /// message.
+    StopRequestReply(Tag),
+
+    /// Sent by the RTI indicating that the stop request from some federate has been granted.
+    /// The payload is the tag at which all federates have agreed that they can stop.
+    StopGranted(Tag),
+
+    /// An address query message, sent by a federate to RTI to ask for another federate's address
+    /// and port number.
+    ///
+    /// The reply from the RTI will a port number (an int32_t), which is `None` if the RTI does not
+    /// know yet (it has not received `AddressAdvertisement` from the other federate), followed by
+    /// the IP address of the other federate (an IPV4 address, which has length INET_ADDRSTRLEN).
+    AddressQuery(FederateKey),
+
+    /// A message advertising the port for the TCP connection server of a federate. This is utilized
+    /// in decentralized coordination as well as for physical connections in centralized
+    /// coordination.
+    ///
+    /// * The next four bytes (or sizeof(int32_t)) will be the port number.
+    /// The sending federate will not wait for a response from the RTI and assumes its request will
+    /// be processed eventually by the RTI.
+    AddressAdvertisement,
+
+    /// A first message that is sent by a federate directly to another federate after establishing a
+    /// socket connection to send messages directly to the federate.
+    ///
+    /// The response from the remote federate is expected to be `Ack`, but if the remote federate
+    /// does not expect this federate or federation to connect, it will respond instead with `Reject`.
+    P2PSendingFedId(FedIds),
+
+    /// A message to send directly to another federate.
+    P2PMessage(Message),
+
+    /// A timestamped message to send directly to another federate.
+    ///
+    /// This is a variant of [`TaggedMessage`] that is used in P2P connections between federates.
+    /// Having a separate message type for P2P connections between federates will be useful in
+    /// preventing crosstalk.
+    P2PTaggedMessage(Tag, Message),
+
+    /// Byte identifying a message that a downstream federate sends to its upstream counterpart to
+    /// request that the socket connection be closed.
+    ///
+    /// This is the only message that should flow upstream on such socket connections.
+    CloseRequest,
+
+    /// A timestamp sent according to PTP.
+    /// T1 is the first message in a PTP exchange.
+    ClockSyncT1,
+
+    /// Prompts the master to send a T4.
+    ClockSyncT3,
+
+    /// A timestamp sent according to PTP.
+    ClockSyncT4,
+
+    /// Coded probe message.
+    ///
+    /// This message is sent by the server (master) right after [`ClockSyncT4`] (t1) with a
+    /// new physical clock snapshot t2.
+    ///
+    /// At the receiver, the previous [`ClockSyncT4`] message and this message are assigned a
+    /// receive timestamp r1 and r2. If |(r2 - r1) - (t2 - t1)| < GUARD_BAND, then the current
+    /// clock sync cycle is considered pure and can be processed.
+    ///
+    /// @see Geng, Yilong, et al.  "Exploiting a natural network effect for scalable, fine-grained
+    /// clock synchronization."
+    ClockSyncCodedProbe,
+
+    /// A port absent message, informing the receiver that a given port will not have event for the current logical time.
+    PortAbsent(FederateKey, PortKey, Tag),
+
+    /// A message that informs the RTI about connections between this federate and other federates where
+    /// messages are routed through the RTI. Currently, this only includes logical connections when the
+    /// coordination is centralized. This information is needed for the RTI to perform the centralized
+    /// coordination.
+    NeighborStructure(NeighborStructure),
+}

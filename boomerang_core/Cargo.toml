@@ -1,0 +1,15 @@
+[package]
+name = "boomerang_core"
+description = "Core types and functions for the Boomerang project"
+version.workspace = true
+edition.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+default = ["serde"]
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { workspace = true, optional = true, features = ["derive"]}
+tinymap.workspace = true

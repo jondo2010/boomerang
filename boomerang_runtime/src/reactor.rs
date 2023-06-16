@@ -1,16 +1,26 @@
-use std::fmt::Debug;
-
 use downcast_rs::{impl_downcast, DowncastSync};
 
 use crate::{
-    Action, ActionKey, Context, LevelReactionKey, LogicalAction, ReactionSet, ScheduledEvent, Tag,
+    keys::ActionKey, Action, Context, LevelReactionKey, LogicalAction, ReactionSet, ScheduledEvent,
+    Tag,
 };
 
-tinymap::key_type! { pub ReactorKey }
+pub trait ReactorState: DowncastSync + Send + dyn_clone::DynClone {}
+impl<T> ReactorState for T where T: DowncastSync + Clone {}
 
-pub trait ReactorState: DowncastSync + Send {}
-impl<T> ReactorState for T where T: DowncastSync {}
 impl_downcast!(sync ReactorState);
+
+dyn_clone::clone_trait_object!(ReactorState);
+
+#[test]
+fn test_clone() {
+    #[derive(Debug, Clone, PartialEq)]
+    struct Foo;
+    let mut reactor_state = Box::new(Foo) as Box<dyn ReactorState>;
+    let mut cloned = reactor_state.clone();
+    assert_eq!(reactor_state.downcast_mut::<Foo>(), Some(Foo).as_mut());
+    assert_eq!(cloned.downcast_mut::<Foo>(), Some(Foo).as_mut());
+}
 
 pub(crate) trait ReactorElement {
     fn startup(&self, _ctx: &mut Context, _key: ActionKey) {}
@@ -20,18 +30,25 @@ pub(crate) trait ReactorElement {
     }
 }
 
-#[derive(Derivative)]
-#[derivative(Debug)]
 pub struct Reactor {
     /// The reactor name
     pub(crate) name: String,
     /// The ReactorState
-    #[derivative(Debug = "ignore")]
     pub(crate) state: Box<dyn ReactorState>,
     /// Map of Actions for this Reactor
-    pub actions: tinymap::TinyMap<ActionKey, Action>,
+    pub(crate) actions: tinymap::TinyMap<ActionKey, Action>,
     /// For each Action, a set of Reactions triggered by it.
     pub(crate) action_triggers: tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
+}
+
+impl std::fmt::Debug for Reactor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reactor")
+            .field("name", &self.name)
+            .field("actions", &self.actions)
+            .field("action_triggers", &self.action_triggers)
+            .finish()
+    }
 }
 
 impl Reactor {

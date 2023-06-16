@@ -54,7 +54,7 @@ impl<'a, 'b> ToTokens for ReactorFieldBuilder<'a, 'b> {
             }
             ReactorField::Child { ident, name, ty, .. } => {
                 let state_ident = format_ident!("__{ident}_state");
-                quote! { let #ident: #ty = #builder_ident.add_child_reactor(#name, #state_ident)?; }
+                quote! { let (_key, #ident): (::boomerang::builder::BuilderReactorKey, #ty) = #builder_ident.add_child_reactor(#name, #state_ident)?; }
             }
             ReactorField::Reaction { ident, path } => {
                 quote! {
@@ -73,7 +73,7 @@ fn build_bindings<'b>(
     receiver.connections.iter().map(move |connection| {
         let from_port = &connection.from;
         let to_port = &connection.to;
-        quote! { #builder_ident.bind_port(#from_port, #to_port)?; }
+        quote! { #builder_ident.bind_port(#from_port.clone(), #to_port.clone())?; }
     })
 }
 
@@ -133,7 +133,7 @@ impl ToTokens for ReactorReceiver {
                     state: Self::State,
                     parent: Option<::boomerang::builder::BuilderReactorKey>,
                     env: &'__builder mut ::boomerang::builder::EnvBuilder,
-                ) -> Result<Self, ::boomerang::builder::BuilderError> {
+                ) -> Result<(::boomerang::builder::BuilderReactorKey, Self), ::boomerang::builder::BuilderError> {
                     #(#child_states)*
                     let mut #builder_ident = env.add_reactor(name, parent, state);
                     #(#field_builders)*
@@ -142,7 +142,7 @@ impl ToTokens for ReactorReceiver {
                         #(#field_values),*
                     };
                     #(#reaction_builders)*
-                    Ok(reactor)
+                    Ok((#builder_ident.finish()?, reactor))
                 }
             }
         });

@@ -1,6 +1,6 @@
 use super::{
     BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactorKey, EnvBuilder, FindElements,
-    PortType, TypedActionKey, TypedPortKey,
+    PortType, Reactor, ReactorBuilderState, TypedActionKey, TypedPortKey,
 };
 use crate::runtime;
 use itertools::Itertools;
@@ -17,6 +17,37 @@ impl petgraph::graph::GraphIndex for BuilderReactionKey {
 
     fn is_node_index() -> bool {
         true
+    }
+}
+
+pub trait Reaction {
+    type BuilderReactor: Reactor;
+
+    /// Build a `ReactionBuilderState` for this Reaction
+    fn build<'builder>(
+        name: &str,
+        reactor: &Self::BuilderReactor,
+        builder: &'builder mut ReactorBuilderState,
+    ) -> Result<ReactionBuilderState<'builder>, BuilderError>;
+
+    /// Marshall the runtime queried inputs, outputs, and actions into this Reaction struct
+    fn marshall(
+        inputs: &[runtime::IPort],
+        outputs: &mut [runtime::OPort],
+        actions: &mut [&mut runtime::Action],
+    ) -> Self;
+}
+
+pub trait ReactionField {
+    type Key;
+    fn build(builder: ReactionBuilderState, key: Self::Key, order: usize) -> ReactionBuilderState;
+}
+
+impl<T: runtime::ActionData> ReactionField for runtime::ActionRef<'_, T> {
+    type Key = TypedActionKey<T>;
+
+    fn build(builder: ReactionBuilderState, key: Self::Key, order: usize) -> ReactionBuilderState {
+        builder.with_trigger_action(key, order)
     }
 }
 

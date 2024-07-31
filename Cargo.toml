@@ -1,5 +1,4 @@
 [workspace.package]
-name = 'boomerang'
 description = 'Rust implementation of the "Reactors" Deterministic Actor Model'
 version = "0.2.0"
 edition = "2021"
@@ -28,8 +27,8 @@ boomerang_runtime = { path = "boomerang_runtime", version = "0.2.0" }
 members = [
     "boomerang",
     "boomerang_derive",
+    "boomerang_derive2",
     "boomerang_runtime",
     "boomerang_tinymap",
 ]
-
-workspace.resolver = 2
+resolver = "2"

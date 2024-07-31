@@ -28,6 +28,7 @@ tinymap.workspace = true
 tracing.workspace = true
 
 boomerang_derive = { workspace = true, optional = true }
+boomerang_derive2 = { path = "../boomerang_derive2" }
 boomerang_runtime.workspace = true
 
 [dev-dependencies]

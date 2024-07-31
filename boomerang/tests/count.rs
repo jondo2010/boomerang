@@ -1,4 +1,5 @@
 use boomerang::{builder::*, runtime, Reactor};
+use boomerang_derive2::Reaction;
 use boomerang_util::timeout::{Timeout, TimeoutBuilder};
 
 #[derive(Reactor)]
@@ -26,6 +27,15 @@ impl Count {
         assert!(xyc.is_none());
         *xyc.get_mut() = Some(dbg!(self.0));
     }
+}
+
+#[derive(Reaction)]
+#[reaction(reactor = "CountBuilder")]
+struct ReactionT<'a> {
+    #[reaction(triggers)]
+    t: &'a runtime::ActionRef<'a>,
+    #[reaction(effects, path = "c")]
+    xyc: &'a mut runtime::Port<u32>,
 }
 
 #[test]

@@ -251,7 +251,7 @@ impl EnvBuilder {
             .iter()
             .find(|(_, port_builder)| {
                 port_builder.get_name() == port_name
-                    && port_builder.get_reactor_key() == reactor_key
+                    && port_builder.parent_reactor_key() == Some(reactor_key)
             })
             .map(|(port_key, _)| port_key)
             .ok_or_else(|| BuilderError::NamedPortNotFound(port_name.to_string()))
@@ -267,7 +267,7 @@ impl EnvBuilder {
             .iter()
             .find(|(_, reaction_builder)| {
                 reaction_builder.get_name() == reaction_name
-                    && reaction_builder.get_reactor_key() == reactor_key
+                    && reaction_builder.parent_reactor_key() == Some(reactor_key)
             })
             .map(|(reaction_key, _)| reaction_key)
             .ok_or_else(|| BuilderError::NamedReactionNotFound(reaction_name.to_string()))

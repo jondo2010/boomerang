@@ -207,11 +207,6 @@ impl ReactionBuilder {
         &self.name
     }
 
-    /// Get the BuilderReactorKey of this Reaction
-    pub fn get_reactor_key(&self) -> BuilderReactorKey {
-        self.reactor_key
-    }
-
     pub fn get_priority(&self) -> usize {
         self.priority
     }

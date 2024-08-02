@@ -722,10 +722,17 @@ impl TryInto<runtime::Env> for EnvBuilder {
             runtime_reactions[runtime_reaction_key].set_reactor_key(runtime_reactor_key);
         }
 
+        //TODO: this is a flat mapping of the runtime_reactors maps in each Reactor, duplicated. Decide whether to keep it or not.
+        let runtime_action_triggers = runtime_reactors
+            .iter()
+            .flat_map(|(_, reactor)| reactor.action_triggers.iter().map(|(k, v)| (k, v.clone())))
+            .collect();
+
         Ok(runtime::Env {
             reactors: runtime_reactors,
             ports: runtime_ports,
             reactions: runtime_reactions,
+            action_triggers: runtime_action_triggers,
         })
     }
 }

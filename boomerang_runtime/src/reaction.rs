@@ -3,8 +3,8 @@ use std::{fmt::Debug, sync::RwLock};
 use crossbeam_channel::Sender;
 
 use crate::{
-    key_set::KeySet, Action, ActionKey, BasePort, Context, Duration, PortKey, Reactor, ReactorKey,
-    ReactorState, ScheduledEvent, Tag,
+    key_set::KeySet, Action, ActionKey, BasePort, Context, Duration, PhysicalEvent, PortKey,
+    Reactor, ReactorKey, ReactorState, Tag,
 };
 
 tinymap::key_type!(pub ReactionKey);
@@ -125,7 +125,7 @@ impl Reaction {
         reactor: &'a mut Reactor,
         inputs: &[IPort<'_>],
         outputs: &mut [OPort<'_>],
-        async_tx: Sender<ScheduledEvent>,
+        async_tx: Sender<PhysicalEvent>,
     ) -> Context {
         let Reactor {
             state,

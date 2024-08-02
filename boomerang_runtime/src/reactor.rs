@@ -31,7 +31,7 @@ pub struct Reactor {
     /// Map of Actions for this Reactor
     pub actions: tinymap::TinyMap<ActionKey, Action>,
     /// For each Action, a set of Reactions triggered by it.
-    pub(crate) action_triggers: tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
+    pub action_triggers: tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
 }
 
 impl Reactor {

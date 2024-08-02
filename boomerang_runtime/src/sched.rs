@@ -3,13 +3,16 @@ use derive_more::Display;
 use std::{collections::BinaryHeap, time::Duration};
 use tracing::{info, trace, warn};
 
-use crate::{Env, Instant, ReactionSet, ReactionTriggerCtx, Tag};
+use crate::{ActionKey, Env, Instant, ReactionSet, ReactionTriggerCtx, Tag};
 
 #[derive(Debug, Display, Clone)]
-#[display(fmt = "[tag={},terminal={}]", tag, terminal)]
+#[display(fmt = "L[tag={},terminal={}]", tag, terminal)]
 pub struct ScheduledEvent {
+    /// The [`Tag`] at which the reactions in this event should be executed.
     pub(crate) tag: Tag,
+    /// The set of Reactions to be executed at this tag.
     pub(crate) reactions: ReactionSet,
+    /// Whether the scheduler should terminate after processing this event.
     pub(crate) terminal: bool,
 }
 
@@ -36,6 +39,47 @@ impl Ord for ScheduledEvent {
     }
 }
 
+#[derive(Debug, Display, Clone)]
+#[display(fmt = "P[tag={},terminal={}]", tag, terminal)]
+pub struct PhysicalEvent {
+    /// The [`Tag`] at which the reactions in this event should be executed.
+    pub(crate) tag: Tag,
+    /// The key of the action that triggered this event.
+    pub(crate) key: ActionKey,
+    /// Whether the scheduler should terminate after processing this event.
+    pub(crate) terminal: bool,
+}
+
+impl PhysicalEvent {
+    /// Create a trigger event.
+    pub(crate) fn trigger(key: ActionKey, tag: Tag) -> Self {
+        Self {
+            tag,
+            key,
+            terminal: false,
+        }
+    }
+
+    /// Create a shutdown event.
+    pub(crate) fn shutdown(tag: Tag) -> Self {
+        Self {
+            tag,
+            key: ActionKey::default(),
+            terminal: true,
+        }
+    }
+
+    /// Convert the physical event to a scheduled event.
+    pub(crate) fn into_scheduled(self, env: &Env) -> ScheduledEvent {
+        let downstream = env.action_triggers[self.key].iter().copied();
+        ScheduledEvent {
+            tag: self.tag,
+            reactions: ReactionSet::from_iter(downstream),
+            terminal: self.terminal,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Scheduler {
     /// The environment state
@@ -45,9 +89,9 @@ pub struct Scheduler {
     /// Whether to keep the scheduler alive for any possible asynchronous events
     keep_alive: bool,
     /// Asynchronous events sender
-    event_tx: Sender<ScheduledEvent>,
+    event_tx: Sender<PhysicalEvent>,
     /// Asynchronous events receiver
-    event_rx: Receiver<ScheduledEvent>,
+    event_rx: Receiver<PhysicalEvent>,
     /// Current event queue
     event_queue: BinaryHeap<ScheduledEvent>,
     /// Initial wall-clock time.
@@ -59,6 +103,7 @@ pub struct Scheduler {
 impl Scheduler {
     pub fn new(env: Env, fast_forward: bool, keep_alive: bool) -> Self {
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
+
         Self {
             env,
             fast_forward,
@@ -138,7 +183,7 @@ impl Scheduler {
 
     /// Try to receive an asynchronous event
     #[tracing::instrument(skip(self))]
-    fn receive_event(&mut self) -> Option<ScheduledEvent> {
+    fn receive_event(&mut self) -> Option<PhysicalEvent> {
         if let Some(shutdown) = self.shutdown_tag {
             let abs = shutdown.to_logical_time(self.start_time);
             if let Some(timeout) = abs.checked_duration_since(Instant::now()) {
@@ -162,7 +207,7 @@ impl Scheduler {
         loop {
             // Push pending events into the queue
             for event in self.event_rx.try_iter() {
-                self.event_queue.push(event);
+                self.event_queue.push(event.into_scheduled(&self.env));
             }
 
             if let Some(event) = self.event_queue.pop() {
@@ -194,7 +239,7 @@ impl Scheduler {
                 }
                 self.process_tag(event.tag, event.reactions);
             } else if let Some(event) = self.receive_event() {
-                self.event_queue.push(event);
+                self.event_queue.push(event.into_scheduled(&self.env));
             } else {
                 trace!("No more events in queue. -> Terminate!");
                 break;
@@ -219,7 +264,7 @@ impl Scheduler {
             match self.event_rx.recv_timeout(advance) {
                 Ok(event) => {
                     tracing::debug!(event = %event, "Sleep interrupted by async event");
-                    return Some(event);
+                    return Some(event.into_scheduled(&self.env));
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     let remaining = target.checked_duration_since(Instant::now());

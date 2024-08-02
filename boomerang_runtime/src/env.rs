@@ -5,7 +5,7 @@ use tinymap::{
     map::{IterMany, IterManyMut},
 };
 
-use crate::{BasePort, PortKey, Reaction, ReactionKey, Reactor, ReactorKey};
+use crate::{ActionKey, BasePort, PortKey, Reaction, ReactionKey, Reactor, ReactorKey};
 
 /// Execution level
 pub type Level = usize;
@@ -24,6 +24,9 @@ pub struct Env {
     pub ports: tinymap::TinyMap<PortKey, Box<dyn BasePort>>,
     /// The runtime set of Reactions
     pub reactions: tinymap::TinyMap<ReactionKey, Reaction>,
+
+    /// Global action triggers
+    pub action_triggers: tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
 }
 
 /// Set of borrows necessary for a single Reaction triggering.

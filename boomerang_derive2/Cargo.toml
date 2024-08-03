@@ -14,7 +14,7 @@ exclude.workspace = true
 darling = "0.20"
 proc-macro2 = "1.0"
 quote = "1.0"
-syn = "2.0"
+syn = {version = "2.0", features = ["derive"]}
 
 [lib]
 name = "boomerang_derive2"

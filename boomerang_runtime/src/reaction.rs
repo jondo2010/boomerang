@@ -51,10 +51,10 @@ pub struct Reaction {
     name: String,
     /// The Reactor containing this Reaction
     reactor_key: ReactorKey,
-    /// Input Ports that trigger this reaction
-    input_ports: Vec<PortKey>,
+    /// Ports that this reaction may read from (uses)
+    use_ports: Vec<PortKey>,
     /// Output Ports that this reaction may set the value of
-    output_ports: Vec<PortKey>,
+    effect_ports: Vec<PortKey>,
     /// Actions that trigger or can be scheduled by this reaction
     actions: Vec<ActionKey>,
     /// Reaction closure
@@ -69,8 +69,8 @@ impl Reaction {
     pub fn new(
         name: String,
         reactor_key: ReactorKey,
-        input_ports: Vec<PortKey>,
-        output_ports: Vec<PortKey>,
+        use_ports: Vec<PortKey>,
+        effect_ports: Vec<PortKey>,
         actions: Vec<ActionKey>,
         body: Box<dyn ReactionFn>,
         deadline: Option<Deadline>,
@@ -78,8 +78,8 @@ impl Reaction {
         Self {
             name,
             reactor_key,
-            input_ports,
-            output_ports,
+            use_ports,
+            effect_ports,
             actions,
             body,
             deadline,
@@ -98,12 +98,14 @@ impl Reaction {
         self.reactor_key = reactor_key;
     }
 
-    pub fn iter_input_ports(&self) -> std::slice::Iter<PortKey> {
-        self.input_ports.iter()
+    /// Get an iterator over the ports that this reaction may read from.
+    pub fn iter_use_ports(&self) -> std::slice::Iter<PortKey> {
+        self.use_ports.iter()
     }
 
-    pub fn iter_output_ports(&self) -> std::slice::Iter<PortKey> {
-        self.output_ports.iter()
+    /// Get an iterator over the ports that this reaction may write to.
+    pub fn iter_effect_ports(&self) -> std::slice::Iter<PortKey> {
+        self.effect_ports.iter()
     }
 
     pub fn iter_actions(&self) -> std::slice::Iter<ActionKey> {

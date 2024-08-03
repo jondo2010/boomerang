@@ -40,14 +40,52 @@ pub trait Reaction {
 
 pub trait ReactionField {
     type Key;
-    fn build(builder: ReactionBuilderState, key: Self::Key, order: usize) -> ReactionBuilderState;
+    fn build(
+        builder: ReactionBuilderState,
+        key: Self::Key,
+        order: usize,
+        triggers: bool,
+        effects: bool,
+    ) -> ReactionBuilderState;
 }
 
 impl<T: runtime::ActionData> ReactionField for runtime::ActionRef<'_, T> {
     type Key = TypedActionKey<T>;
 
-    fn build(builder: ReactionBuilderState, key: Self::Key, order: usize) -> ReactionBuilderState {
-        builder.with_trigger_action(key, order)
+    fn build(
+        builder: ReactionBuilderState,
+        key: Self::Key,
+        order: usize,
+        triggers: bool,
+        effects: bool,
+    ) -> ReactionBuilderState {
+        match (triggers, effects) {
+            (true, false) => builder.with_trigger_action(key, order),
+            (false, true) => builder.with_effect_action(key, order),
+            (true, true) => builder
+                .with_trigger_action(key.clone(), order)
+                .with_effect_action(key, order),
+            _ => builder,
+        }
+    }
+}
+
+impl<T: runtime::PortData> ReactionField for runtime::Port<T> {
+    type Key = TypedPortKey<T>;
+
+    fn build(
+        builder: ReactionBuilderState,
+        key: Self::Key,
+        order: usize,
+        triggers: bool,
+        effects: bool,
+    ) -> ReactionBuilderState {
+        match (triggers, effects) {
+            (true, false) => builder.with_trigger_port(key, order),
+            (false, true) => builder.with_effect_port(key, order),
+            (true, true) => panic!("Cannot have a port that is both a trigger and an effect"),
+            _ => builder,
+        }
     }
 }
 
@@ -64,17 +102,33 @@ pub struct ReactionBuilder {
     /// The Reaction function
     #[derivative(Debug = "ignore")]
     pub(super) reaction_fn: Box<dyn runtime::ReactionFn>,
+
     /// Actions that trigger this Reaction, and their relative ordering.
     pub(super) trigger_actions: SecondaryMap<BuilderActionKey, usize>,
+    /// Actions that this Reaction may read the value of, and their relative ordering.
+    pub(super) use_actions: SecondaryMap<BuilderActionKey, usize>,
     /// Actions that can be scheduled by this Reaction, and their relative ordering.
-    pub(super) schedulable_actions: SecondaryMap<BuilderActionKey, usize>,
+    pub(super) effect_actions: SecondaryMap<BuilderActionKey, usize>,
+
     /// Ports that can trigger this Reaction, and their relative ordering.
-    pub(super) input_ports: SecondaryMap<BuilderPortKey, usize>,
+    pub(super) trigger_ports: SecondaryMap<BuilderPortKey, usize>,
+    /// Ports that this Reaction may read the value of, and their relative ordering.
+    pub(super) use_ports: SecondaryMap<BuilderPortKey, usize>,
     /// Ports that this Reaction may set the value of, and their relative ordering.
-    pub(super) output_ports: SecondaryMap<BuilderPortKey, usize>,
+    pub(super) effect_ports: SecondaryMap<BuilderPortKey, usize>,
 }
 
 impl ReactionBuilder {
+    /// Get the name of this Reaction
+    pub fn get_name(&self) -> &str {
+        &self.name
+    }
+
+    /// Get the BuilderReactorKey of this Reaction
+    pub fn get_reactor_key(&self) -> BuilderReactorKey {
+        self.reactor_key
+    }
+
     /// Build a [`runtime::Reaction`] from this `ReactionBuilder`.
     pub fn build_reaction(
         self,
@@ -84,7 +138,7 @@ impl ReactionBuilder {
     ) -> runtime::Reaction {
         // Create the Vec of input ports for this reaction sorted by order
         let inputs = self
-            .input_ports
+            .trigger_ports
             .iter()
             .sorted_by_key(|(_, &order)| order)
             .map(|(builder_port_key, _)| port_aliases[builder_port_key])
@@ -92,7 +146,7 @@ impl ReactionBuilder {
 
         // Create the Vec of output ports for this reaction sorted by order
         let outputs = self
-            .output_ports
+            .effect_ports
             .iter()
             .sorted_by_key(|(_, &order)| order)
             .map(|(builder_port_key, _)| port_aliases[builder_port_key])
@@ -101,7 +155,7 @@ impl ReactionBuilder {
         let actions = self
             .trigger_actions
             .iter()
-            .chain(self.schedulable_actions.iter())
+            .chain(self.effect_actions.iter())
             .sorted_by_key(|(_, &order)| order)
             .map(|(builder_action_key, _)| action_aliases[builder_action_key])
             .dedup()
@@ -151,9 +205,11 @@ impl<'a> ReactionBuilderState<'a> {
                 reactor_key,
                 reaction_fn,
                 trigger_actions: SecondaryMap::new(),
-                schedulable_actions: SecondaryMap::new(),
-                input_ports: SecondaryMap::new(),
-                output_ports: SecondaryMap::new(),
+                use_actions: SecondaryMap::new(),
+                effect_actions: SecondaryMap::new(),
+                trigger_ports: SecondaryMap::new(),
+                use_ports: SecondaryMap::new(),
+                effect_ports: SecondaryMap::new(),
             },
             env,
         }
@@ -173,29 +229,47 @@ impl<'a> ReactionBuilderState<'a> {
 
     /// Indicate that this Reaction can be triggered by the given Port
     pub fn with_trigger_port(mut self, port_key: impl Into<BuilderPortKey>, order: usize) -> Self {
-        self.builder.input_ports.insert(port_key.into(), order);
+        self.builder.trigger_ports.insert(port_key.into(), order);
         self
     }
 
-    /// Indicate that this Reaction may schedule the given Action
-    pub fn with_schedulable_action<T: runtime::PortData, Q>(
+    /// Indicate that this Reaction may read the value of the given action.
+    pub fn with_uses_action<T: runtime::ActionData, Q>(
         mut self,
         action_key: TypedActionKey<T, Q>,
         order: usize,
     ) -> Self {
-        self.builder
-            .schedulable_actions
-            .insert(action_key.into(), order);
+        self.builder.use_actions.insert(action_key.into(), order);
         self
     }
 
-    /// Indicate that this Reaction may set the value of the given Port (uses keyword).
-    pub fn with_antidependency<T: runtime::PortData>(
+    /// Indicate that this Reaction may read the value of the given port.
+    pub fn with_uses_port<T: runtime::PortData>(
+        mut self,
+        port_key: TypedPortKey<T>,
+        order: usize,
+    ) -> Self {
+        self.builder.use_ports.insert(port_key.into(), order);
+        self
+    }
+
+    /// Indicate that this Reaction may schedule the given action.
+    pub fn with_effect_action<T: runtime::PortData, Q>(
+        mut self,
+        action_key: TypedActionKey<T, Q>,
+        order: usize,
+    ) -> Self {
+        self.builder.effect_actions.insert(action_key.into(), order);
+        self
+    }
+
+    /// Indicate that this Reaction may set the value of the given port.
+    pub fn with_effect_port<T: runtime::PortData>(
         mut self,
         antidep_key: TypedPortKey<T>,
         order: usize,
     ) -> Self {
-        self.builder.output_ports.insert(antidep_key.into(), order);
+        self.builder.effect_ports.insert(antidep_key.into(), order);
         self
     }
 
@@ -222,12 +296,12 @@ impl<'a> ReactionBuilderState<'a> {
             action.triggers.insert(reaction_key, ());
         }
 
-        for action_key in reaction_builder.schedulable_actions.keys() {
+        for action_key in reaction_builder.effect_actions.keys() {
             let action = &mut actions[action_key];
             action.schedulers.insert(reaction_key, ());
         }
 
-        for port_key in reaction_builder.output_ports.keys() {
+        for port_key in reaction_builder.effect_ports.keys() {
             let port = ports.get_mut(port_key).unwrap();
 
             if port.get_port_type() == &PortType::Output {
@@ -249,7 +323,12 @@ impl<'a> ReactionBuilderState<'a> {
             port.register_antidependency(reaction_key);
         }
 
-        for port_key in reaction_builder.input_ports.keys() {
+        // Both trigger_ports and use_ports are treated as dependencies
+        for port_key in reaction_builder
+            .trigger_ports
+            .keys()
+            .chain(reaction_builder.use_ports.keys())
+        {
             let port = ports.get_mut(port_key).unwrap();
             if port.get_port_type() == &PortType::Input {
                 assert_eq!(

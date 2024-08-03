@@ -153,7 +153,7 @@ impl ReactionReceiver {
                 ArgumentAttr::Port {
                     attrs: PortAttrs::Effects,
                     ..
-                } => Some(quote! { .with_antidependency::<#ty>(reactor.#expr, 0) }),
+                } => Some(quote! { .with_effect_port::<#ty>(reactor.#expr, 0) }),
                 ArgumentAttr::Action {
                     attrs: ActionAttrs::Triggers,
                     ..
@@ -164,14 +164,14 @@ impl ReactionReceiver {
                 ArgumentAttr::Action {
                     attrs: ActionAttrs::Effects,
                     ..
-                } => Some(quote! { .with_schedulable_action::<#ty, _>(reactor.#expr, 0) }),
+                } => Some(quote! { .with_effect_action::<#ty, _>(reactor.#expr, 0) }),
                 ArgumentAttr::Action {
                     attrs: ActionAttrs::TriggersAndEffects,
                     ..
                 } => Some(quote! {
                     //.with_trigger_action::<#ty, _>(reactor.#expr, 0)
                     .with_trigger_action(reactor.#expr, 0)
-                    .with_schedulable_action::<#ty, _>(reactor.#expr, 0)
+                    .with_effect_action::<#ty, _>(reactor.#expr, 0)
                 }),
                 _ => None,
             }

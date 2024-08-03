@@ -82,7 +82,7 @@ fn test_reactions1() {
 
     // assert_eq!(env_builder.reactors[reactor_key].reactions.len(), 2);
 
-    let env: runtime::Env = env_builder.try_into().unwrap();
+    let (env, _): (runtime::Env, _) = env_builder.try_into().unwrap();
     assert_eq!(env.reactions.len(), 2);
 }
 
@@ -167,7 +167,7 @@ fn test_actions1() {
             }),
         )
         .with_trigger_action(action_a, 0)
-        .with_schedulable_action(action_b, 0)
+        .with_effect_action(action_b, 0)
         .with_trigger_action(action_b, 1)
         .finish()
         .unwrap();
@@ -176,7 +176,7 @@ fn test_actions1() {
     let reaction_b = reactor_builder
         .add_reaction("rb", Box::new(|_, _, _, _, _, _| {}))
         .with_trigger_action(action_a, 0)
-        .with_schedulable_action(action_a, 0)
+        .with_effect_action(action_a, 0)
         .finish()
         .unwrap();
 

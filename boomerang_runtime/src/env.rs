@@ -197,11 +197,11 @@ impl Env {
 
         let input_keys = reactions
             .clone()
-            .map(|reaction| reaction.iter_input_ports().copied());
+            .map(|reaction| reaction.iter_use_ports().copied());
 
         let output_keys = reactions
             .clone()
-            .map(|reaction| reaction.iter_output_ports().copied());
+            .map(|reaction| reaction.iter_effect_ports().copied());
 
         let reactors = self.reactors.iter_many_unchecked_mut(reactor_keys);
 

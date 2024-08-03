@@ -45,7 +45,7 @@ struct RuntimePortParts {
     /// For each Port, a set of Reactions triggered by it
     port_triggers: tinymap::TinySecondaryMap<runtime::PortKey, Vec<BuilderReactionKey>>,
     /// A mapping from `BuilderPortKey`s to aliased [`runtime::PortKey`]s.
-    aliases: SecondaryMap<BuilderPortKey, runtime::PortKey>,
+    port_aliases: SecondaryMap<BuilderPortKey, runtime::PortKey>,
 }
 
 #[derive(Debug)]
@@ -66,9 +66,9 @@ impl EnvBuilder {
         &mut self,
         name: &str,
         parent: Option<BuilderReactorKey>,
-        reactor: S,
+        state: S,
     ) -> ReactorBuilderState {
-        ReactorBuilderState::new(name, parent, reactor, self)
+        ReactorBuilderState::new(name, parent, state, self)
     }
 
     pub fn add_port<T: runtime::PortData>(
@@ -230,6 +230,22 @@ impl EnvBuilder {
             .ok_or_else(|| BuilderError::NamedPortNotFound(port_name.to_string()))
     }
 
+    /// Find a Reaction matching a given name and ReactorKey
+    pub fn get_reaction(
+        &self,
+        reaction_name: &str,
+        reactor_key: BuilderReactorKey,
+    ) -> Result<BuilderReactionKey, BuilderError> {
+        self.reaction_builders
+            .iter()
+            .find(|(_, reaction_builder)| {
+                reaction_builder.get_name() == reaction_name
+                    && reaction_builder.get_reactor_key() == reactor_key
+            })
+            .map(|(reaction_key, _)| reaction_key)
+            .ok_or_else(|| BuilderError::NamedReactionNotFound(reaction_name.to_string()))
+    }
+
     /// Find an Action matching a given name and ReactorKey
     pub fn find_action_by_name(
         &self,
@@ -293,11 +309,10 @@ impl EnvBuilder {
 
     /// Bind Port A to Port B
     /// The nominal case is to bind Input A to Output B
-    pub fn bind_port<T: runtime::PortData>(
-        &mut self,
-        port_a_key: TypedPortKey<T>,
-        port_b_key: TypedPortKey<T>,
-    ) -> Result<(), BuilderError> {
+    pub fn bind_port<P>(&mut self, port_a_key: P, port_b_key: P) -> Result<(), BuilderError>
+    where
+        P: Into<BuilderPortKey>,
+    {
         let port_a_key = port_a_key.into();
         let port_b_key = port_b_key.into();
 
@@ -500,7 +515,7 @@ impl EnvBuilder {
             .flat_map(move |(reaction_key, reaction)| {
                 // Connect all reactions this reaction depends upon
                 reaction
-                    .input_ports
+                    .trigger_ports
                     .keys()
                     .flat_map(move |port_key| {
                         let source_port_key = self.follow_port_inward_binding(port_key);
@@ -630,7 +645,7 @@ impl EnvBuilder {
         RuntimePortParts {
             ports: runtime_ports,
             port_triggers,
-            aliases: alias_map,
+            port_aliases: alias_map,
         }
     }
 
@@ -696,19 +711,26 @@ fn build_runtime_reactors(
     (runtime_reactors, reactor_alias)
 }
 
-impl TryInto<runtime::Env> for EnvBuilder {
+/// Aliasing maps from Builder keys to runtime keys
+pub struct BuilderAliases {
+    pub reactor_aliases: SecondaryMap<BuilderReactorKey, runtime::ReactorKey>,
+    pub reaction_aliases: SecondaryMap<BuilderReactionKey, runtime::ReactionKey>,
+    pub port_aliases: SecondaryMap<BuilderPortKey, runtime::PortKey>,
+}
+
+impl TryInto<(runtime::Env, BuilderAliases)> for EnvBuilder {
     type Error = BuilderError;
-    fn try_into(self) -> Result<runtime::Env, Self::Error> {
+    fn try_into(self) -> Result<(runtime::Env, BuilderAliases), Self::Error> {
         let reaction_levels = self.build_runtime_level_map()?;
         let RuntimePortParts {
             ports: mut runtime_ports,
             port_triggers,
-            aliases: port_aliases,
+            port_aliases,
         } = self.build_runtime_ports();
         let action_parts = self.build_runtime_actions();
 
         let mut runtime_reactions = tinymap::TinyMap::with_capacity(self.reaction_builders.len());
-        let mut reactions_aliases = SecondaryMap::new();
+        let mut reaction_aliases = SecondaryMap::new();
         let mut reaction_reactor_aliases = SecondaryMap::new();
         for (builder_key, reaction_builder) in self.reaction_builders.into_iter() {
             reaction_reactor_aliases.insert(builder_key, reaction_builder.reactor_key);
@@ -717,7 +739,7 @@ impl TryInto<runtime::Env> for EnvBuilder {
                 &port_aliases,
                 &action_parts.aliases,
             ));
-            reactions_aliases.insert(builder_key, reaction_key);
+            reaction_aliases.insert(builder_key, reaction_key);
         }
 
         // Update the the Ports with triggered downstream Reactions.
@@ -727,7 +749,7 @@ impl TryInto<runtime::Env> for EnvBuilder {
                 .map(|builder_reaction_key| {
                     (
                         reaction_levels[builder_reaction_key],
-                        reactions_aliases[builder_reaction_key],
+                        reaction_aliases[builder_reaction_key],
                     )
                 })
                 .collect();
@@ -737,29 +759,28 @@ impl TryInto<runtime::Env> for EnvBuilder {
         let (runtime_reactors, reactor_aliases) = build_runtime_reactors(
             self.reactor_builders,
             &reaction_levels,
-            &reactions_aliases,
-            &action_parts,
+            &reaction_aliases,
+            action_parts,
         );
 
         // Update the Reactions with the Reactor keys
         for (builder_reaction_key, builder_reactor_key) in reaction_reactor_aliases {
             let runtime_reactor_key = reactor_aliases[builder_reactor_key];
-            let runtime_reaction_key = reactions_aliases[builder_reaction_key];
+            let runtime_reaction_key = reaction_aliases[builder_reaction_key];
             runtime_reactions[runtime_reaction_key].set_reactor_key(runtime_reactor_key);
         }
 
-        //TODO: this is a flat mapping of the runtime_reactors maps in each Reactor, duplicated. Decide whether to keep it or not.
-        let runtime_action_triggers = runtime_reactors
-            .iter()
-            .flat_map(|(_, reactor)| reactor.action_triggers.iter().map(|(k, v)| (k, v.clone())))
-            .collect();
-
-        Ok(runtime::Env {
-            reactors: runtime_reactors,
-            actions: action_parts.actions,
-            ports: runtime_ports,
-            reactions: runtime_reactions,
-            action_triggers: runtime_action_triggers,
-        })
+        Ok((
+            runtime::Env {
+                reactors: runtime_reactors,
+                ports: runtime_ports,
+                reactions: runtime_reactions,
+            },
+            BuilderAliases {
+                reactor_aliases,
+                reaction_aliases,
+                port_aliases,
+            },
+        ))
     }
 }

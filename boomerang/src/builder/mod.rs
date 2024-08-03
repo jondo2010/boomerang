@@ -4,6 +4,8 @@ mod fqn;
 mod port;
 mod reaction;
 mod reactor;
+#[cfg(test)]
+mod tests;
 
 #[cfg(feature = "visualization")]
 pub mod graphviz;
@@ -43,6 +45,9 @@ pub enum BuilderError {
 
     #[error("A Port named '{0}' was not found.")]
     NamedPortNotFound(String),
+
+    #[error("A Reaction named '{0}' was not found.")]
+    NamedReactionNotFound(String),
 
     #[error("An Action named '{0}' was not found.")]
     NamedActionNotFound(String),

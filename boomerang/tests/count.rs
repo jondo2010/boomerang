@@ -1,5 +1,4 @@
 use boomerang::{builder::*, runtime, Reactor};
-use boomerang_derive2::Reaction;
 use boomerang_util::timeout::{Timeout, TimeoutBuilder};
 
 #[derive(Reactor)]
@@ -29,8 +28,8 @@ impl Count {
     }
 }
 
-#[derive(Reaction)]
-#[reaction(reactor = "CountBuilder")]
+#[derive(boomerang_derive2::Reaction)]
+#[reaction(reactor = "CountBuilder", triggers(startup))]
 struct ReactionT<'a> {
     #[reaction(triggers)]
     t: &'a runtime::ActionRef<'a>,

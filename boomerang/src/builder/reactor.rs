@@ -174,7 +174,7 @@ impl<'a> ReactorBuilderState<'a> {
         let startup_key = self.startup_action;
         self.add_reaction(&format!("_{name}_startup"), startup_fn)
             .with_trigger_action(startup_key, 0)
-            .with_schedulable_action(action_key, 1)
+            .with_effect_action(action_key, 1)
             .finish()?;
 
         if period.is_some() {
@@ -188,7 +188,7 @@ impl<'a> ReactorBuilderState<'a> {
 
             self.add_reaction(&format!("_{name}_reset"), reset_fn)
                 .with_trigger_action(action_key, 0)
-                .with_schedulable_action(action_key, 0)
+                .with_effect_action(action_key, 0)
                 .finish()?;
         }
 
@@ -242,6 +242,14 @@ impl<'a> ReactorBuilderState<'a> {
         state: R::State,
     ) -> Result<R, BuilderError> {
         R::build(name, state, Some(self.reactor_key), self.env)
+    }
+
+    /// Add a new child reactor using a closure to build it.
+    pub fn add_child_with<F>(&mut self, f: F) -> Result<BuilderReactorKey, BuilderError>
+    where
+        F: FnOnce(BuilderReactorKey, &mut EnvBuilder) -> Result<BuilderReactorKey, BuilderError>,
+    {
+        f(self.reactor_key, self.env)
     }
 
     /// Bind 2 ports on this reactor. This has the logical meaning of "connecting" `port_a` to

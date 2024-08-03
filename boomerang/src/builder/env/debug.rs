@@ -63,7 +63,7 @@ impl Debug for EnvBuilder {
 
         let runtime_port_parts = self.build_runtime_ports();
         let port_aliases = runtime_port_parts
-            .aliases
+            .port_aliases
             .iter()
             .map(|(builder_port_key, port_key)| {
                 (

@@ -66,11 +66,11 @@ fn build_reactions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &
         //    "  inputs{} -> r{} -> outputs{} [style=invis];",
         //    reactor_id, reaction_id, reactor_id
         //));
-        for port_key in reaction.input_ports.keys() {
+        for port_key in reaction.trigger_ports.keys() {
             let port_node = port_node_name(env_builder, port_key);
             output.push(format!("  {}:e -> r{}:w;", port_node, reaction_id));
         }
-        for port_key in reaction.output_ports.keys() {
+        for port_key in reaction.effect_ports.keys() {
             let port_node = port_node_name(env_builder, port_key);
             output.push(format!("  r{}:e -> {}:w;", reaction_id, port_node));
         }

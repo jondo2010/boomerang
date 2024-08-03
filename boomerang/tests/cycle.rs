@@ -32,6 +32,16 @@ impl A {
     }
 }
 
+
+#[derive(boomerang_derive2::Reaction)]
+#[reaction(reactor = "ABuilder")]
+struct ReactionX<'a> {
+    #[reaction(triggers)]
+    x: &'a runtime::Port<()>,
+    #[reaction(effects)]
+    y: &'a mut runtime::Port<()>,
+}
+
 #[derive(Reactor)]
 #[reactor(state = "B")]
 struct BBuilder {

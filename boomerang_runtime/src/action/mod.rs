@@ -10,14 +10,62 @@ use downcast_rs::{impl_downcast, DowncastSync};
 mod action_ref;
 pub use action_ref::*;
 
+#[cfg(not(feature = "serde"))]
 pub trait ActionData: std::fmt::Debug + Send + Sync + Clone + 'static {}
+
+#[cfg(not(feature = "serde"))]
 impl<T> ActionData for T where T: std::fmt::Debug + Send + Sync + Clone + 'static {}
 
+#[cfg(feature = "serde")]
+pub trait ActionData:
+    std::fmt::Debug
+    + Send
+    + Sync
+    + Clone
+    + erased_serde::Serialize
+    + for<'de> serde::Deserialize<'de>
+    + 'static
+{
+}
+
+#[cfg(feature = "serde")]
+impl<T> ActionData for T where
+    T: std::fmt::Debug
+        + Send
+        + Sync
+        + Clone
+        + erased_serde::Serialize
+        + for<'de> serde::Deserialize<'de>
+        + 'static
+{
+}
+
 tinymap::key_type! { pub ActionKey }
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for ActionKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
 
 pub trait BaseActionValues: Debug + Send + Sync + DowncastSync {
     /// Remove any value at the given Tag
     fn remove(&mut self, tag: Tag);
+
+    /// Serialize the value at the given Tag
+    #[cfg(feature = "serde")]
+    fn serialize_tag(
+        &self,
+        tag: Tag,
+        serializer: &mut dyn erased_serde::Serializer,
+    ) -> Result<(), erased_serde::Error>;
+
+    #[cfg(feature = "serde")]
+    fn get_serializable_value(&self, tag: Tag) -> Option<&dyn erased_serde::Serialize>;
 }
 impl_downcast!(sync BaseActionValues);
 
@@ -26,6 +74,24 @@ pub(crate) struct ActionValues<T: ActionData>(HashMap<Tag, T>);
 impl<T: ActionData> BaseActionValues for ActionValues<T> {
     fn remove(&mut self, tag: Tag) {
         self.0.remove(&tag);
+    }
+
+    #[cfg(feature = "serde")]
+    fn serialize_tag(
+        &self,
+        tag: Tag,
+        mut serializer: &mut dyn erased_serde::Serializer,
+    ) -> Result<(), erased_serde::Error> {
+        use serde::de::Error;
+        let value = self.0.get(&tag);
+        match value {
+            Some(value) => value.erased_serialize(&mut serializer),
+            None => Err(erased_serde::Error::custom("No value at tag")),
+        }
+    }
+
+    fn get_serializable_value(&self, tag: Tag) -> Option<&dyn erased_serde::Serialize> {
+        self.0.get(&tag).map(|v| v as &dyn erased_serde::Serialize)
     }
 }
 
@@ -119,7 +185,7 @@ impl Action {
         }
     }
 
-    fn as_physical(&self) -> Option<&PhysicalAction> {
+    pub fn as_physical(&self) -> Option<&PhysicalAction> {
         if let Self::Physical(v) = self {
             Some(v)
         } else {

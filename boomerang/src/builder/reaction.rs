@@ -129,9 +129,9 @@ impl<'a> ReactionBuilderState<'a> {
     }
 
     /// Indicate that this Reaction can be triggered by the given Action
-    pub fn with_trigger_action<T: runtime::PortData, Q>(
+    pub fn with_trigger_action(
         mut self,
-        trigger_key: TypedActionKey<T, Q>,
+        trigger_key: impl Into<BuilderActionKey>,
         order: usize,
     ) -> Self {
         self.builder
@@ -141,11 +141,7 @@ impl<'a> ReactionBuilderState<'a> {
     }
 
     /// Indicate that this Reaction can be triggered by the given Port
-    pub fn with_trigger_port<T: runtime::PortData>(
-        mut self,
-        port_key: TypedPortKey<T>,
-        order: usize,
-    ) -> Self {
+    pub fn with_trigger_port(mut self, port_key: impl Into<BuilderPortKey>, order: usize) -> Self {
         self.builder.input_ports.insert(port_key.into(), order);
         self
     }

@@ -1,8 +1,8 @@
 use super::{
-    action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder, ActionBuilderFn,
-    ActionType, BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactionKey,
-    BuilderReactorKey, Logical, Physical, PortBuilder, PortType, ReactionBuilderState,
-    ReactorBuilder, ReactorBuilderState, TypedActionKey, TypedPortKey,
+    action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder, reactor,
+    ActionBuilderFn, ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey,
+    BuilderReactionKey, BuilderReactorKey, Logical, Physical, PortBuilder, PortType,
+    ReactionBuilderState, ReactorBuilder, ReactorBuilderState, TypedActionKey, TypedPortKey,
 };
 use crate::runtime;
 use itertools::Itertools;
@@ -236,6 +236,50 @@ impl EnvBuilder {
             .ok_or_else(|| BuilderError::NamedActionNotFound(action_name.to_string()))
     }
 
+    /// Find a Reactor in the EnvBuilder given its fully-qualified name
+    pub fn find_reactor_by_fqn(
+        &self,
+        reactor_fqn: impl Into<BuilderFqn>,
+    ) -> Result<BuilderReactorKey, BuilderError> {
+        let reactor_fqn: BuilderFqn = reactor_fqn.into();
+        let (_, reactor_name) = reactor_fqn
+            .clone()
+            .split_last()
+            .ok_or(BuilderError::InvalidFqn(reactor_fqn.to_string()))?;
+        self.reactor_builders
+            .iter()
+            .find_map(|(reactor_key, reactor_builder)| {
+                if reactor_builder.get_name() == reactor_name {
+                    Some(reactor_key)
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| BuilderError::NamedReactorNotFound(reactor_fqn.to_string()))
+    }
+
+    /// Find a PhysicalAction globally in the EnvBuilder given its fully-qualified name
+    pub fn find_physical_action_by_fqn(
+        &self,
+        action_fqn: impl Into<BuilderFqn>,
+    ) -> Result<BuilderActionKey, BuilderError> {
+        let action_fqn: BuilderFqn = action_fqn.into();
+
+        let (reactor_fqn, action_name) = action_fqn
+            .clone()
+            .split_last()
+            .ok_or(BuilderError::InvalidFqn(action_fqn.to_string()))?;
+        let reactor = self.find_reactor_by_fqn(reactor_fqn)?;
+
+        self.reactor_builders[reactor]
+            .actions
+            .iter()
+            .find_map(|(key, action_builder)| {
+                (action_builder.get_name() == action_name).then_some(key)
+            })
+            .ok_or_else(|| BuilderError::NamedActionNotFound(action_fqn.to_string()))
+    }
+
     /// Bind Port A to Port B
     /// The nominal case is to bind Input A to Output B
     pub fn bind_port<T: runtime::PortData>(
@@ -349,8 +393,9 @@ impl EnvBuilder {
     }
 
     /// Get a fully-qualified string name for the given ActionKey
-    pub fn action_fqn(&self, action_key: BuilderActionKey) -> Result<String, BuilderError> {
-        self.reactor_builders
+    pub fn action_fqn(&self, action_key: BuilderActionKey) -> Result<BuilderFqn, BuilderError> {
+        let (reactor_key, action_builder) = self
+            .reactor_builders
             .iter()
             .find_map(|(reactor_key, reactor_builder)| {
                 reactor_builder
@@ -358,30 +403,29 @@ impl EnvBuilder {
                     .get(action_key)
                     .map(|action_builder| (reactor_key, action_builder))
             })
-            .ok_or(BuilderError::ActionKeyNotFound(action_key))
-            .and_then(|(reactor_key, action_builder)| {
-                self.reactor_fqn(reactor_key)
-                    .map_err(|err| BuilderError::InconsistentBuilderState {
-                        what: format!(
-                            "Reactor referenced by {:?} not found: {:?}",
-                            action_builder, err
-                        ),
-                    })
-                    .map(|reactor_fqn| format!("{}/{}", reactor_fqn, action_builder.get_name()))
+            .ok_or(BuilderError::ActionKeyNotFound(action_key))?;
+
+        self.reactor_fqn(reactor_key)
+            .map_err(|err| BuilderError::InconsistentBuilderState {
+                what: format!(
+                    "Reactor referenced by {:?} not found: {:?}",
+                    action_builder, err
+                ),
             })
+            .map(|reactor_fqn| reactor_fqn.append(action_builder.get_name()))
     }
 
     /// Get a fully-qualified string for the given ReactionKey
-    pub fn reactor_fqn(&self, reactor_key: BuilderReactorKey) -> Result<String, BuilderError> {
+    pub fn reactor_fqn(&self, reactor_key: BuilderReactorKey) -> Result<BuilderFqn, BuilderError> {
         self.reactor_builders
             .get(reactor_key)
             .ok_or(BuilderError::ReactorKeyNotFound(reactor_key))
             .and_then(|reactor| {
                 reactor.parent_reactor_key.map_or_else(
-                    || Ok(reactor.get_name().to_owned()),
+                    || Ok(reactor.get_name().try_into().unwrap()),
                     |parent| {
                         self.reactor_fqn(parent)
-                            .map(|parent| format!("{}::{}", parent, reactor.get_name()))
+                            .map(|parent| parent.append(reactor.get_name()))
                     },
                 )
             })

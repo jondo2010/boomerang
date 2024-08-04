@@ -3,8 +3,8 @@ use std::{fmt::Debug, sync::RwLock};
 use crossbeam_channel::Sender;
 
 use crate::{
-    key_set::KeySet, Action, ActionKey, BasePort, Context, Duration, PhysicalEvent, PortKey,
-    Reactor, ReactorKey, ReactorState, Tag,
+    keepalive, key_set::KeySet, Action, ActionKey, BasePort, Context, Duration, PhysicalEvent,
+    PortKey, Reactor, ReactorKey, ReactorState, Tag,
 };
 
 tinymap::key_type!(pub ReactionKey);
@@ -126,6 +126,7 @@ impl Reaction {
         inputs: &[IPort<'_>],
         outputs: &mut [OPort<'_>],
         async_tx: Sender<PhysicalEvent>,
+        shutdown_rx: keepalive::Receiver,
     ) -> Context {
         let Reactor {
             state,
@@ -134,7 +135,7 @@ impl Reaction {
             ..
         } = reactor;
 
-        let mut ctx = Context::new(start_time, tag, action_triggers, async_tx);
+        let mut ctx = Context::new(start_time, tag, action_triggers, async_tx, shutdown_rx);
 
         if let Some(Deadline { deadline, handler }) = self.deadline.as_ref() {
             let lag = ctx.get_physical_time() - ctx.get_logical_time();

@@ -145,7 +145,11 @@ impl ReactionReceiver {
                 ArgumentAttr::Port {
                     attrs: PortAttrs::Triggers,
                     ..
-                } => Some(quote! { .with_trigger_port::<#ty>(reactor.#expr, 0) }),
+                } => Some(quote! {
+                    //TODO losing this type information is not ideal, which was ensuring that the port types in the builder and reaction were the same
+                    //.with_trigger_port::<#ty>(reactor.#expr, 0)
+                    .with_trigger_port(reactor.#expr, 0)
+                }),
                 ArgumentAttr::Port {
                     attrs: PortAttrs::Effects,
                     ..
@@ -153,7 +157,10 @@ impl ReactionReceiver {
                 ArgumentAttr::Action {
                     attrs: ActionAttrs::Triggers,
                     ..
-                } => Some(quote! { .with_trigger_action::<#ty, _>(reactor.#expr, 0) }),
+                } => Some(quote! {
+                    //.with_trigger_action::<#ty, _>(reactor.#expr, 0)
+                    .with_trigger_action(reactor.#expr, 0)
+                }),
                 ArgumentAttr::Action {
                     attrs: ActionAttrs::Effects,
                     ..
@@ -162,7 +169,8 @@ impl ReactionReceiver {
                     attrs: ActionAttrs::TriggersAndEffects,
                     ..
                 } => Some(quote! {
-                    .with_trigger_action::<#ty, _>(reactor.#expr, 0)
+                    //.with_trigger_action::<#ty, _>(reactor.#expr, 0)
+                    .with_trigger_action(reactor.#expr, 0)
                     .with_schedulable_action::<#ty, _>(reactor.#expr, 0)
                 }),
                 _ => None,

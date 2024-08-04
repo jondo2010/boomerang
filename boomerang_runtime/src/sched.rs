@@ -3,7 +3,7 @@ use derive_more::Display;
 use std::{collections::BinaryHeap, time::Duration};
 use tracing::{info, trace, warn};
 
-use crate::{ActionKey, Env, Instant, ReactionSet, ReactionTriggerCtx, Tag};
+use crate::{keepalive, ActionKey, BasePort, Env, Instant, ReactionSet, ReactionTriggerCtx, Tag};
 
 #[derive(Debug, Display, Clone)]
 #[display(fmt = "L[tag={},terminal={}]", tag, terminal)]
@@ -98,11 +98,14 @@ pub struct Scheduler {
     start_time: Instant,
     /// A shutdown has been scheduled at this time.
     shutdown_tag: Option<Tag>,
+    /// Shutdown channel
+    shutdown_tx: keepalive::Sender,
 }
 
 impl Scheduler {
     pub fn new(env: Env, fast_forward: bool, keep_alive: bool) -> Self {
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (shutdown_tx, _) = keepalive::channel();
 
         Self {
             env,
@@ -113,6 +116,7 @@ impl Scheduler {
             event_queue: BinaryHeap::new(),
             start_time: Instant::now(),
             shutdown_tag: None,
+            shutdown_tx,
         }
     }
 
@@ -151,6 +155,10 @@ impl Scheduler {
     #[tracing::instrument(skip(self))]
     fn shutdown(&mut self, shutdown_tag: Tag, _reactions: Option<ReactionSet>) {
         info!(tag = %shutdown_tag, "Shutting down.");
+
+        // Signal to any waiting threads that the scheduler is shutting down.
+        self.shutdown_tx.shutdown();
+
         let reaction_set = self
             .env
             .reactors
@@ -321,7 +329,7 @@ impl Scheduler {
 
                     //TODO: Plumb these iterators through into the generated reaction code.
                     let inputs = inputs.collect::<Vec<_>>();
-                    let mut outputs = outputs.collect::<Vec<_>>();
+                    let mut outputs: Vec<&mut Box<dyn BasePort>> = outputs.collect::<Vec<_>>();
 
                     let mut ctx = reaction.trigger(
                         self.start_time,
@@ -330,6 +338,7 @@ impl Scheduler {
                         inputs.as_slice(),
                         outputs.as_mut_slice(),
                         self.event_tx.clone(),
+                        self.shutdown_tx.new_receiver(),
                     );
 
                     // Queue downstream reactions triggered by any ports that were set.

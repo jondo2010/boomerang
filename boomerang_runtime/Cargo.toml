@@ -9,8 +9,9 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["parallel"]
-parallel = ["rayon"]
+default = ["parallel", "serde"]
+parallel = ["dep:rayon"]
+serde = ["dep:serde", "dep:erased-serde"]
 
 [dependencies]
 crossbeam-channel = "0.5"
@@ -23,3 +24,5 @@ rayon = { version = "1.7", optional = true }
 thiserror.workspace = true
 tinymap.workspace = true
 tracing.workspace = true
+serde = { workspace = true, optional = true }
+erased-serde = { workspace = true, optional = true }

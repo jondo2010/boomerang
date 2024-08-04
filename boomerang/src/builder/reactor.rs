@@ -1,6 +1,7 @@
 use super::{
-    ActionBuilder, BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactionKey, EnvBuilder,
-    FindElements, Logical, Physical, PortType, ReactionBuilderState, TypedActionKey, TypedPortKey,
+    ActionBuilder, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
+    EnvBuilder, FindElements, Logical, Physical, PortType, ReactionBuilderState, TypedActionKey,
+    TypedPortKey,
 };
 use crate::runtime;
 use slotmap::{SecondaryMap, SlotMap};
@@ -256,5 +257,13 @@ impl<'a> ReactorBuilderState<'a> {
 
     pub fn finish(self) -> Result<BuilderReactorKey, BuilderError> {
         Ok(self.reactor_key)
+    }
+
+    /// Find a PhysicalAction globally in the EnvBuilder given its fully-qualified name
+    pub fn find_physical_action_by_fqn(
+        &self,
+        action_fqn: impl Into<BuilderFqn>,
+    ) -> Result<BuilderActionKey, BuilderError> {
+        self.env.find_physical_action_by_fqn(action_fqn)
     }
 }

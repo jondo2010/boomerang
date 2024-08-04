@@ -1,7 +1,7 @@
 use crossbeam_channel::Sender;
 
 use crate::{
-    ActionData, ActionKey, ActionRefValue, Duration, Instant, Level, LevelReactionKey,
+    keepalive, ActionData, ActionKey, ActionRefValue, Duration, Instant, Level, LevelReactionKey,
     PhysicalActionRef, PhysicalEvent, ReactionKey, ReactionSet, ScheduledEvent, Tag,
 };
 
@@ -14,6 +14,8 @@ pub(crate) struct ContextInternal {
     pub(crate) scheduled_events: Vec<ScheduledEvent>,
     /// Channel for asynchronous events
     pub(crate) async_tx: Sender<PhysicalEvent>,
+    /// Shutdown channel
+    pub(crate) shutdown_rx: keepalive::Receiver,
 }
 
 /// Scheduler context passed into reactor functions.
@@ -35,6 +37,7 @@ impl<'a> Context<'a> {
         tag: Tag,
         action_triggers: &'a tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
         async_tx: Sender<PhysicalEvent>,
+        shutdown_rx: keepalive::Receiver,
     ) -> Self {
         Self {
             start_time,
@@ -43,6 +46,7 @@ impl<'a> Context<'a> {
                 reactions: Vec::new(),
                 scheduled_events: Vec::new(),
                 async_tx,
+                shutdown_rx,
             },
             action_triggers,
         }
@@ -132,6 +136,7 @@ impl<'a> Context<'a> {
         SendContext {
             start_time: self.start_time,
             async_tx: self.internal.async_tx.clone(),
+            shutdown_rx: self.internal.shutdown_rx.clone(),
         }
     }
 }
@@ -142,6 +147,8 @@ pub struct SendContext {
     pub start_time: Instant,
     /// Channel for asynchronous events
     pub(crate) async_tx: Sender<PhysicalEvent>,
+    /// Shutdown channel
+    shutdown_rx: keepalive::Receiver,
 }
 
 impl SendContext {
@@ -161,9 +168,15 @@ impl SendContext {
         self.async_tx.send(event).unwrap();
     }
 
+    /// Schedule a shutdown event at some future time.
     pub fn schedule_shutdown(&self, offset: Option<Duration>) {
         let tag = Tag::absolute(self.start_time, Instant::now() + offset.unwrap_or_default());
         let event = PhysicalEvent::shutdown(tag);
         self.async_tx.send(event).unwrap();
+    }
+
+    /// Has the scheduler already been shutdown?
+    pub fn is_shutdown(&self) -> bool {
+        self.shutdown_rx.is_shutdwon()
     }
 }

@@ -46,9 +46,14 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
         .context("Error building top-level reactor!")?;
 
     {
+        let file = std::fs::File::create("recording.json").unwrap();
+        let writer = std::io::BufWriter::new(file);
+        let serializer = serde_json::Serializer::new(writer);
+
         let reactor_key = env_builder.find_reactor_by_fqn(name)?;
-        let recorder_state = crate::recorder::Recorder::new(["snake::keyboard::key_press"])?;
-        let recorder_builder = crate::recorder::RecorderBuilder::build(
+        let recorder_state =
+            crate::recrep::Recorder::new(name, ["snake::keyboard::key_press"], serializer)?;
+        let _recorder_builder = crate::recrep::RecorderBuilder::build(
             "recorder",
             recorder_state,
             Some(reactor_key),

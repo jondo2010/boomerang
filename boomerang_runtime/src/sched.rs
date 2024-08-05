@@ -3,13 +3,19 @@ use derive_more::Display;
 use std::{collections::BinaryHeap, time::Duration};
 use tracing::{info, trace, warn};
 
-use crate::{Env, Instant, ReactionSet, ReactionTriggerCtx, Tag};
+use crate::{
+    keepalive, Action, ActionKey, BasePort, Env, Instant, LogicalAction, ReactionSet,
+    ReactionTriggerCtx, Tag,
+};
 
 #[derive(Debug, Display, Clone)]
-#[display(fmt = "[tag={},terminal={}]", tag, terminal)]
+#[display(fmt = "L[tag={},terminal={}]", tag, terminal)]
 pub struct ScheduledEvent {
+    /// The [`Tag`] at which the reactions in this event should be executed.
     pub(crate) tag: Tag,
+    /// The set of Reactions to be executed at this tag.
     pub(crate) reactions: ReactionSet,
+    /// Whether the scheduler should terminate after processing this event.
     pub(crate) terminal: bool,
 }
 
@@ -36,6 +42,47 @@ impl Ord for ScheduledEvent {
     }
 }
 
+#[derive(Debug, Display, Clone)]
+#[display(fmt = "P[tag={},terminal={}]", tag, terminal)]
+pub struct PhysicalEvent {
+    /// The [`Tag`] at which the reactions in this event should be executed.
+    pub(crate) tag: Tag,
+    /// The key of the action that triggered this event.
+    pub(crate) key: ActionKey,
+    /// Whether the scheduler should terminate after processing this event.
+    pub(crate) terminal: bool,
+}
+
+impl PhysicalEvent {
+    /// Create a trigger event.
+    pub(crate) fn trigger(key: ActionKey, tag: Tag) -> Self {
+        Self {
+            tag,
+            key,
+            terminal: false,
+        }
+    }
+
+    /// Create a shutdown event.
+    pub(crate) fn shutdown(tag: Tag) -> Self {
+        Self {
+            tag,
+            key: ActionKey::default(),
+            terminal: true,
+        }
+    }
+
+    /// Convert the physical event to a scheduled event.
+    pub(crate) fn into_scheduled(self, env: &Env) -> ScheduledEvent {
+        let downstream = env.action_triggers[self.key].iter().copied();
+        ScheduledEvent {
+            tag: self.tag,
+            reactions: ReactionSet::from_iter(downstream),
+            terminal: self.terminal,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Scheduler {
     /// The environment state
@@ -45,20 +92,24 @@ pub struct Scheduler {
     /// Whether to keep the scheduler alive for any possible asynchronous events
     keep_alive: bool,
     /// Asynchronous events sender
-    event_tx: Sender<ScheduledEvent>,
+    event_tx: Sender<PhysicalEvent>,
     /// Asynchronous events receiver
-    event_rx: Receiver<ScheduledEvent>,
+    event_rx: Receiver<PhysicalEvent>,
     /// Current event queue
     event_queue: BinaryHeap<ScheduledEvent>,
     /// Initial wall-clock time.
     start_time: Instant,
     /// A shutdown has been scheduled at this time.
     shutdown_tag: Option<Tag>,
+    /// Shutdown channel
+    shutdown_tx: keepalive::Sender,
 }
 
 impl Scheduler {
     pub fn new(env: Env, fast_forward: bool, keep_alive: bool) -> Self {
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (shutdown_tx, _) = keepalive::channel();
+
         Self {
             env,
             fast_forward,
@@ -68,6 +119,7 @@ impl Scheduler {
             event_queue: BinaryHeap::new(),
             start_time: Instant::now(),
             shutdown_tag: None,
+            shutdown_tx,
         }
     }
 
@@ -81,11 +133,8 @@ impl Scheduler {
         // For all Timers, pump later events onto the queue and create an initial ReactionSet to process.
         let reaction_set = self
             .env
-            .reactors
-            .values()
-            .flat_map(|reactor| reactor.iter_startup_events())
-            .flatten()
-            .copied()
+            .iter_startup_events()
+            .flat_map(|downstream_reactions| downstream_reactions.iter().copied())
             .collect();
 
         info!(tag = %tag, ?reaction_set, "Starting the execution.");
@@ -93,26 +142,18 @@ impl Scheduler {
     }
 
     #[tracing::instrument(skip(self))]
-    fn cleanup(&mut self, current_tag: Tag) {
-        for reactor in self.env.reactors.values_mut() {
-            reactor.cleanup(current_tag);
-        }
-
-        for port in self.env.ports.values_mut() {
-            port.cleanup();
-        }
-    }
-
-    #[tracing::instrument(skip(self))]
     fn shutdown(&mut self, shutdown_tag: Tag, _reactions: Option<ReactionSet>) {
         info!(tag = %shutdown_tag, "Shutting down.");
+
+        // Signal to any waiting threads that the scheduler is shutting down.
+        self.shutdown_tx.shutdown();
+
         let reaction_set = self
             .env
-            .reactors
-            .values()
-            .flat_map(|reactor| reactor.iter_shutdown_events())
+            .iter_shutdown_events()
             .flat_map(|downstream_reactions| downstream_reactions.iter().copied())
             .collect();
+
         self.process_tag(shutdown_tag, reaction_set);
 
         // If the event queue still has events on it, report that.
@@ -136,9 +177,23 @@ impl Scheduler {
         tracing::info!("Scheduler has been shut down.");
     }
 
+    #[tracing::instrument(skip(self))]
+    fn cleanup(&mut self, current_tag: Tag) {
+        for action in self.env.actions.values_mut() {
+            if let Action::Logical(LogicalAction { values, .. }) = action {
+                // Clear action values at the current tag
+                values.remove(current_tag);
+            }
+        }
+
+        for port in self.env.ports.values_mut() {
+            port.cleanup();
+        }
+    }
+
     /// Try to receive an asynchronous event
     #[tracing::instrument(skip(self))]
-    fn receive_event(&mut self) -> Option<ScheduledEvent> {
+    fn receive_event(&mut self) -> Option<PhysicalEvent> {
         if let Some(shutdown) = self.shutdown_tag {
             let abs = shutdown.to_logical_time(self.start_time);
             if let Some(timeout) = abs.checked_duration_since(Instant::now()) {
@@ -162,7 +217,7 @@ impl Scheduler {
         loop {
             // Push pending events into the queue
             for event in self.event_rx.try_iter() {
-                self.event_queue.push(event);
+                self.event_queue.push(event.into_scheduled(&self.env));
             }
 
             if let Some(event) = self.event_queue.pop() {
@@ -194,7 +249,7 @@ impl Scheduler {
                 }
                 self.process_tag(event.tag, event.reactions);
             } else if let Some(event) = self.receive_event() {
-                self.event_queue.push(event);
+                self.event_queue.push(event.into_scheduled(&self.env));
             } else {
                 trace!("No more events in queue. -> Terminate!");
                 break;
@@ -219,7 +274,7 @@ impl Scheduler {
             match self.event_rx.recv_timeout(advance) {
                 Ok(event) => {
                     tracing::debug!(event = %event, "Sleep interrupted by async event");
-                    return Some(event);
+                    return Some(event.into_scheduled(&self.env));
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     let remaining = target.checked_duration_since(Instant::now());
@@ -247,7 +302,7 @@ impl Scheduler {
     #[tracing::instrument(skip(self), fields(tag = %tag, reaction_set = ?reaction_set))]
     pub fn process_tag(&mut self, tag: Tag, mut reaction_set: ReactionSet) {
         while let Some((level, reaction_keys)) = reaction_set.next() {
-            tracing::info!("Level{level} with {} Reaction(s)", reaction_keys.len());
+            tracing::info!("{level} with {} Reaction(s)", reaction_keys.len());
 
             #[cfg(feature = "parallel")]
             use rayon::prelude::{ParallelBridge, ParallelIterator};
@@ -266,6 +321,7 @@ impl Scheduler {
                     let ReactionTriggerCtx {
                         reaction,
                         reactor,
+                        actions,
                         inputs,
                         outputs,
                     } = trigger_ctx;
@@ -275,16 +331,19 @@ impl Scheduler {
                     trace!("    Executing {reactor_name}/{reaction_name}.",);
 
                     //TODO: Plumb these iterators through into the generated reaction code.
+                    let mut actions = actions.collect::<Vec<_>>();
                     let inputs = inputs.collect::<Vec<_>>();
-                    let mut outputs = outputs.collect::<Vec<_>>();
+                    let mut outputs: Vec<&mut Box<dyn BasePort>> = outputs.collect::<Vec<_>>();
 
                     let mut ctx = reaction.trigger(
                         self.start_time,
                         tag,
                         reactor,
+                        actions.as_mut_slice(),
                         inputs.as_slice(),
                         outputs.as_mut_slice(),
                         self.event_tx.clone(),
+                        self.shutdown_tx.new_receiver(),
                     );
 
                     // Queue downstream reactions triggered by any ports that were set.

@@ -78,7 +78,8 @@ fn build_reactions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &
 }
 
 fn build_actions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &mut Vec<String>) {
-    for (action_key, action) in reactor.actions.iter() {
+    for action_key in reactor.actions.keys() {
+        let action = &env_builder.action_builders[action_key];
         let action_id = action_key.data().as_ffi() % reactor.actions.len() as u64;
 
         let xlabel = match action.get_type() {

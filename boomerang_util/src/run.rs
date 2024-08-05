@@ -1,8 +1,8 @@
-use crate::{
+use anyhow::Context;
+use boomerang::{
     builder::{graphviz, EnvBuilder, Reactor},
     runtime,
 };
-use anyhow::Context;
 use clap::Parser;
 
 #[derive(clap::Parser)]
@@ -19,6 +19,16 @@ struct Args {
 
     #[arg(long, short)]
     fast_forward: bool,
+
+    /// The filename to serialize recorded actions into
+    #[cfg(feature = "rec_replay")]
+    #[arg(long, value_hint = clap::ValueHint::FilePath)]
+    record_filename: Option<std::path::PathBuf>,
+
+    /// The list of fully-qualified actions to record, e.g., "snake::keyboard::key_press"
+    #[cfg(feature = "rec_replay")]
+    #[arg(long)]
+    record_actions: Vec<String>,
 }
 
 /// Utility method to build and run a given top-level `Reactor` from tests.
@@ -47,6 +57,17 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
 
     let args = Args::parse();
 
+    #[cfg(feature = "rec_replay")]
+    if let Some(filename) = args.record_filename {
+        tracing::info!("Recording actions to {filename:?}");
+        crate::recrep::inject_recorder(
+            &mut env_builder,
+            filename,
+            name,
+            args.record_actions.iter().map(|s| s.as_str()),
+        )?;
+    }
+
     if args.full_graph {
         let gv = graphviz::create_full_graph(&env_builder).unwrap();
         let path = format!("{name}.dot");
@@ -66,6 +87,7 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
     if args.print_debug_info {
         // runtime::util::print_debug_info(&env);
         println!("{env_builder:#?}");
+        panic!("Debug info printed");
     }
     let env = env_builder.try_into().unwrap();
 

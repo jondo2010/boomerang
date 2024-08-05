@@ -3,6 +3,7 @@ use derive_more::Display;
 
 #[derive(Debug, Display, PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Hash)]
 #[display(fmt = "[{:?}+{}]", offset, micro_step)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Tag {
     /// Offset from origin of logical time
     offset: Duration,

@@ -3,8 +3,8 @@ use std::{fmt::Debug, sync::RwLock};
 use crossbeam_channel::Sender;
 
 use crate::{
-    key_set::KeySet, Action, ActionKey, BasePort, Context, Duration, PortKey, Reactor, ReactorKey,
-    ReactorState, ScheduledEvent, Tag,
+    keepalive, key_set::KeySet, Action, ActionKey, BasePort, Context, Duration, PhysicalEvent,
+    PortKey, Reactor, ReactorKey, ReactorState, Tag,
 };
 
 tinymap::key_type!(pub ReactionKey);
@@ -123,18 +123,19 @@ impl Reaction {
         start_time: crate::Instant,
         tag: Tag,
         reactor: &'a mut Reactor,
+        actions: &mut [&mut Action],
         inputs: &[IPort<'_>],
         outputs: &mut [OPort<'_>],
-        async_tx: Sender<ScheduledEvent>,
+        async_tx: Sender<PhysicalEvent>,
+        shutdown_rx: keepalive::Receiver,
     ) -> Context {
         let Reactor {
             state,
-            actions: action_keys,
             action_triggers,
             ..
         } = reactor;
 
-        let mut ctx = Context::new(start_time, tag, action_triggers, async_tx);
+        let mut ctx = Context::new(start_time, tag, action_triggers, async_tx, shutdown_rx);
 
         if let Some(Deadline { deadline, handler }) = self.deadline.as_ref() {
             let lag = ctx.get_physical_time() - ctx.get_logical_time();
@@ -143,18 +144,7 @@ impl Reaction {
             }
         }
 
-        // Pull actions from the reaction/reactor
-        let mut actions = action_keys
-            .iter_many_unchecked_mut(self.iter_actions().copied())
-            .collect::<Vec<_>>();
-
-        (self.body)(
-            &mut ctx,
-            state.as_mut(),
-            inputs,
-            outputs,
-            actions.as_mut_slice(),
-        );
+        (self.body)(&mut ctx, state.as_mut(), inputs, outputs, actions);
 
         ctx
     }

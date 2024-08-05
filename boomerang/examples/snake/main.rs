@@ -201,7 +201,7 @@ mod reactor {
 fn main() {
     use reactor::{Snake, SnakeBuilder};
     let _ = boomerang_util::run::build_and_run_reactor::<SnakeBuilder>(
-        "multiple_contained",
+        "snake",
         Snake::new(32, boomerang::runtime::Duration::from_millis(40), 2),
     )
     .unwrap();

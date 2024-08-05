@@ -1,6 +1,7 @@
 use super::{
-    ActionBuilder, BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactionKey, EnvBuilder,
-    FindElements, Logical, Physical, PortType, ReactionBuilderState, TypedActionKey, TypedPortKey,
+    ActionBuilder, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
+    EnvBuilder, FindElements, Logical, Physical, PortType, ReactionBuilderState, TypedActionKey,
+    TypedPortKey,
 };
 use crate::runtime;
 use slotmap::{SecondaryMap, SlotMap};
@@ -45,7 +46,7 @@ pub(super) struct ReactorBuilder {
     /// Ports in this Reactor
     pub ports: SecondaryMap<BuilderPortKey, ()>,
     /// Actions in this Reactor
-    pub actions: SlotMap<BuilderActionKey, ActionBuilder>,
+    pub actions: SecondaryMap<BuilderActionKey, ()>,
 }
 
 impl ReactorBuilder {
@@ -60,13 +61,12 @@ impl ReactorBuilder {
     /// Build this `ReactorBuilder` into a `runtime::Reactor`
     pub fn build_runtime(
         self,
-        actions: tinymap::TinyMap<runtime::ActionKey, runtime::Action>,
         action_triggers: tinymap::TinySecondaryMap<
             runtime::ActionKey,
             Vec<runtime::LevelReactionKey>,
         >,
     ) -> runtime::Reactor {
-        runtime::Reactor::new(&self.name, self.state, actions, action_triggers)
+        runtime::Reactor::new(&self.name, self.state, action_triggers)
     }
 }
 
@@ -118,7 +118,7 @@ impl<'a> ReactorBuilderState<'a> {
                 parent_reactor_key: parent,
                 reactions: SecondaryMap::new(),
                 ports: SecondaryMap::new(),
-                actions: SlotMap::with_key(),
+                actions: SecondaryMap::new(),
             }
         });
 
@@ -256,5 +256,13 @@ impl<'a> ReactorBuilderState<'a> {
 
     pub fn finish(self) -> Result<BuilderReactorKey, BuilderError> {
         Ok(self.reactor_key)
+    }
+
+    /// Find a PhysicalAction globally in the EnvBuilder given its fully-qualified name
+    pub fn find_physical_action_by_fqn(
+        &self,
+        action_fqn: impl Into<BuilderFqn>,
+    ) -> Result<BuilderActionKey, BuilderError> {
+        self.env.find_physical_action_by_fqn(action_fqn)
     }
 }

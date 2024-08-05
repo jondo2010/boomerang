@@ -1,8 +1,8 @@
 use crossbeam_channel::Sender;
 
 use crate::{
-    ActionData, ActionKey, ActionRefValue, Duration, Instant, Level, LevelReactionKey,
-    PhysicalActionRef, ReactionKey, ReactionSet, ScheduledEvent, Tag,
+    keepalive, ActionData, ActionKey, ActionRefValue, Duration, Instant, Level, LevelReactionKey,
+    PhysicalActionRef, PhysicalEvent, ReactionKey, ReactionSet, ScheduledEvent, Tag,
 };
 
 /// Internal state for a context object
@@ -13,7 +13,9 @@ pub(crate) struct ContextInternal {
     /// Events scheduled for a future time
     pub(crate) scheduled_events: Vec<ScheduledEvent>,
     /// Channel for asynchronous events
-    pub(crate) async_tx: Sender<ScheduledEvent>,
+    pub(crate) async_tx: Sender<PhysicalEvent>,
+    /// Shutdown channel
+    pub(crate) shutdown_rx: keepalive::Receiver,
 }
 
 /// Scheduler context passed into reactor functions.
@@ -34,7 +36,8 @@ impl<'a> Context<'a> {
         start_time: Instant,
         tag: Tag,
         action_triggers: &'a tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
-        async_tx: Sender<ScheduledEvent>,
+        async_tx: Sender<PhysicalEvent>,
+        shutdown_rx: keepalive::Receiver,
     ) -> Self {
         Self {
             start_time,
@@ -43,6 +46,7 @@ impl<'a> Context<'a> {
                 reactions: Vec::new(),
                 scheduled_events: Vec::new(),
                 async_tx,
+                shutdown_rx,
             },
             action_triggers,
         }
@@ -132,7 +136,7 @@ impl<'a> Context<'a> {
         SendContext {
             start_time: self.start_time,
             async_tx: self.internal.async_tx.clone(),
-            action_triggers: self.action_triggers.clone(),
+            shutdown_rx: self.internal.shutdown_rx.clone(),
         }
     }
 }
@@ -142,14 +146,14 @@ pub struct SendContext {
     /// Physical time the Scheduler was started
     pub start_time: Instant,
     /// Channel for asynchronous events
-    pub(crate) async_tx: Sender<ScheduledEvent>,
-    /// Downstream reactions triggered by actions
-    //TODO: Move this into ActionRef
-    action_triggers: tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
+    pub(crate) async_tx: Sender<PhysicalEvent>,
+    /// Shutdown channel
+    shutdown_rx: keepalive::Receiver,
 }
 
 impl SendContext {
     /// Schedule a PhysicalAction to trigger at some future time.
+    #[tracing::instrument(skip(self, action, value, delay))]
     pub fn schedule_action<T: ActionData>(
         &mut self,
         action: &mut PhysicalActionRef<T>,
@@ -159,31 +163,20 @@ impl SendContext {
         let tag_delay = action.min_delay + delay.unwrap_or_default();
         let new_tag = Tag::absolute(self.start_time, Instant::now() + tag_delay);
         action.set_value(value, new_tag);
-        let downstream = self.action_triggers[action.key].iter().copied();
-        tracing::info!(action = ?action.key, new_tag = %new_tag, downstream = ?downstream, "Scheduling Physical");
-        self.enqueue_async(downstream, new_tag);
+        tracing::info!(new_tag = %new_tag, key = ?action.key, "Scheduling Physical");
+        let event = PhysicalEvent::trigger(action.key, new_tag);
+        self.async_tx.send(event).unwrap();
     }
 
-    /// Adds new reactions to execute at a later cycle
-    #[inline]
-    fn enqueue_async(&self, downstream: impl Iterator<Item = (Level, ReactionKey)>, tag: Tag) {
-        self.async_tx
-            .send(ScheduledEvent {
-                tag,
-                reactions: ReactionSet::from_iter(downstream),
-                terminal: false,
-            })
-            .unwrap();
-    }
-
+    /// Schedule a shutdown event at some future time.
     pub fn schedule_shutdown(&self, offset: Option<Duration>) {
         let tag = Tag::absolute(self.start_time, Instant::now() + offset.unwrap_or_default());
-        self.async_tx
-            .send(ScheduledEvent {
-                tag,
-                reactions: ReactionSet::default(),
-                terminal: true,
-            })
-            .unwrap();
+        let event = PhysicalEvent::shutdown(tag);
+        self.async_tx.send(event).unwrap();
+    }
+
+    /// Has the scheduler already been shutdown?
+    pub fn is_shutdown(&self) -> bool {
+        self.shutdown_rx.is_shutdwon()
     }
 }

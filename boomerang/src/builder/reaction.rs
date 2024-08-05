@@ -129,9 +129,9 @@ impl<'a> ReactionBuilderState<'a> {
     }
 
     /// Indicate that this Reaction can be triggered by the given Action
-    pub fn with_trigger_action<T: runtime::PortData, Q>(
+    pub fn with_trigger_action(
         mut self,
-        trigger_key: TypedActionKey<T, Q>,
+        trigger_key: impl Into<BuilderActionKey>,
         order: usize,
     ) -> Self {
         self.builder
@@ -141,11 +141,7 @@ impl<'a> ReactionBuilderState<'a> {
     }
 
     /// Indicate that this Reaction can be triggered by the given Port
-    pub fn with_trigger_port<T: runtime::PortData>(
-        mut self,
-        port_key: TypedPortKey<T>,
-        order: usize,
-    ) -> Self {
+    pub fn with_trigger_port(mut self, port_key: impl Into<BuilderPortKey>, order: usize) -> Self {
         self.builder.input_ports.insert(port_key.into(), order);
         self
     }
@@ -180,7 +176,7 @@ impl<'a> ReactionBuilderState<'a> {
 
         let reactor = &mut env.reactor_builders[reaction_builder.reactor_key];
         let reactions = &mut env.reaction_builders;
-        let actions = &mut reactor.actions;
+        let actions = &mut env.action_builders;
         let ports = &mut env.port_builders;
 
         let reaction_key = reactions.insert_with_key(|key| {
@@ -190,13 +186,13 @@ impl<'a> ReactionBuilderState<'a> {
 
         let reaction_builder = &reactions[reaction_key];
 
-        for trigger_key in reaction_builder.trigger_actions.keys() {
-            let action = actions.get_mut(trigger_key).unwrap();
+        for action_key in reaction_builder.trigger_actions.keys() {
+            let action = &mut actions[action_key];
             action.triggers.insert(reaction_key, ());
         }
 
         for action_key in reaction_builder.schedulable_actions.keys() {
-            let action = actions.get_mut(action_key).unwrap();
+            let action = &mut actions[action_key];
             action.schedulers.insert(reaction_key, ());
         }
 

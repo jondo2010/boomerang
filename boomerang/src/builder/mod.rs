@@ -1,5 +1,6 @@
 mod action;
 mod env;
+mod fqn;
 mod port;
 mod reaction;
 mod reactor;
@@ -9,6 +10,7 @@ pub mod graphviz;
 
 pub use action::*;
 pub use env::*;
+pub use fqn::*;
 pub use port::*;
 pub use reaction::*;
 pub use reactor::*;
@@ -39,11 +41,14 @@ pub enum BuilderError {
     #[error("ReactionKey not found: {}", 0)]
     ReactionKeyNotFound(BuilderReactionKey),
 
-    #[error("A Port named '{}' was not found.", 0)]
+    #[error("A Port named '{0}' was not found.")]
     NamedPortNotFound(String),
 
-    #[error("An Action named '{}' was not found.", 0)]
+    #[error("An Action named '{0}' was not found.")]
     NamedActionNotFound(String),
+
+    #[error("A Reactor named '{0}' was not found.")]
+    NamedReactorNotFound(String),
 
     #[error("Inconsistent Builder State: {}", what)]
     InconsistentBuilderState {
@@ -64,8 +69,17 @@ pub enum BuilderError {
         what: String,
     },
 
+    #[error("Invalid fully-qualified name: {0}")]
+    InvalidFqn(String),
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+impl From<std::convert::Infallible> for BuilderError {
+    fn from(_: std::convert::Infallible) -> Self {
+        unreachable!()
+    }
 }
 
 trait TupleSlice {

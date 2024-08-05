@@ -13,17 +13,35 @@ impl Debug for Dependency {
 
 impl Debug for EnvBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let ports = self
-            .port_builders
-            .keys()
-            .map(|port_key| self.port_fqn(port_key).unwrap())
-            .collect_vec();
-
         let reactors = self
             .reactor_builders
             .keys()
-            .map(|reactor_key| self.reactor_fqn(reactor_key).unwrap())
-            .collect_vec();
+            .map(|reactor_key| {
+                let fqn = self.reactor_fqn(reactor_key).unwrap().to_string();
+                (format!("{reactor_key:?}"), format!("{fqn}"))
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let actions = self
+            .action_builders
+            .iter()
+            .map(move |(action_key, action)| {
+                let fqn = self.action_fqn(action_key).unwrap();
+                (
+                    format!("{action_key:?}"),
+                    format!("{fqn} : <{ty:?}>", ty = action.get_type()),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let ports = self
+            .port_builders
+            .keys()
+            .map(|port_key| {
+                let fqn = self.port_fqn(port_key).unwrap();
+                (format!("{port_key:?}"), format!("{fqn}"))
+            })
+            .collect::<BTreeMap<_, _>>();
 
         let edges = self
             .reaction_dependency_edges()
@@ -56,8 +74,9 @@ impl Debug for EnvBuilder {
             .collect::<BTreeMap<_, _>>();
 
         f.debug_struct("EnvBuilder")
-            .field("reactor_builders", &reactors)
-            .field("port_builders", &ports)
+            .field("reactors", &reactors)
+            .field("actions", &actions)
+            .field("ports", &ports)
             .field("runtime_port_aliases", &port_aliases)
             .field("reaction_dependency_edges", &edges)
             .field("reactions", &reactions)

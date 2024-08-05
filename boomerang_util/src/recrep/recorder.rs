@@ -1,4 +1,6 @@
 //! The Recorder reactor records PhysicalActions and serializes them to a file for later analysis or replay.
+//!
+//! Use the `inject_recorder` function to add a Recorder to an environment builder.
 
 use std::path::Path;
 
@@ -57,7 +59,7 @@ where
         reactor.record = Recorder::__build_record(stringify!(record), &reactor, &mut builder)
             .and_then(|b| b.finish())?;
 
-        //builder.finish()
+        _ = builder.finish();
 
         Ok(reactor)
     }
@@ -70,8 +72,6 @@ where
 {
     recording_name: String,
     action_fqns: Vec<BuilderFqn>,
-    //serializer: Arc<Mutex<dyn erased_serde::Serializer>>,
-    //serializer: serde_json::Serializer<std::io::BufWriter<std::fs::File>>,
     serializer: Ser,
 }
 
@@ -115,8 +115,10 @@ where
         header.serialize(&mut self.serializer).unwrap();
     }
 
-    //#[reaction(reactor = "RecorderBuilder", triggers(shutdown))]
-    //fn reaction_shutdown(&mut self, ctx: &mut runtime::Context) {}
+    #[reaction(reactor = "RecorderBuilder<Ser>", triggers(shutdown))]
+    fn reaction_shutdown(&mut self, ctx: &mut runtime::Context) {
+        //TODO: Serialize shutdown
+    }
 
     pub fn __build_record<'builder>(
         name: &str,

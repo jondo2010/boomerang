@@ -8,7 +8,6 @@ mod reaction;
 mod reactor;
 mod sched;
 mod time;
-pub mod util;
 
 // Re-exports
 pub use action::*;

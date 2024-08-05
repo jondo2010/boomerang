@@ -1,6 +1,5 @@
 use std::fmt::Display;
 
-use rayon::iter;
 use tinymap::{
     chunks::{Chunks, ChunksMut},
     map::{IterMany, IterManyMut},
@@ -175,7 +174,6 @@ impl Env {
         })
     }
 
-    #[cfg_attr(feature = "profiling", profiling::function)]
     pub(crate) fn iter_reaction_ctx<'a, I>(
         &'a mut self,
         reaction_keys: I,

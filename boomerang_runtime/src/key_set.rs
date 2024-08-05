@@ -210,12 +210,12 @@ mod tests {
 
         let mut rset = KeySet::default();
 
-        rset.extend_above([(Level(0), key0)].into_iter(), Level(0));
+        rset.extend_above([(Level(0), key0)], Level(0));
         let (level, keys) = rset.next().unwrap();
         assert_eq!(level, Level(0));
         assert_eq!(keys, vec![key0]);
 
-        rset.extend_above([(Level(3), key1), (Level(1), key2)].into_iter(), Level(1));
+        rset.extend_above([(Level(3), key1), (Level(1), key2)], Level(1));
         assert_eq!(rset.levels.len(), 2);
 
         // Should be (1, key2)
@@ -223,7 +223,7 @@ mod tests {
         assert_eq!((level, keys), (Level(1), vec![key2]));
         assert_eq!(rset.levels.len(), 1);
 
-        rset.extend_above([(Level(2), key3)].into_iter(), Level(1));
+        rset.extend_above([(Level(2), key3)], Level(1));
         let (level, keys) = rset.next().unwrap();
         assert_eq!((level, keys), (Level(2), vec![key3]));
     }

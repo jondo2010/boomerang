@@ -23,13 +23,14 @@ impl Debug for EnvBuilder {
             .collect::<BTreeMap<_, _>>();
 
         let actions = self
-            .reactor_builders
-            .values()
-            .flat_map(|reactor| {
-                reactor.actions.iter().map(move |(key, _)| {
-                    let fqn = self.action_fqn(key).unwrap();
-                    (format!("{key:?}"), format!("{fqn}"))
-                })
+            .action_builders
+            .iter()
+            .map(move |(action_key, action)| {
+                let fqn = self.action_fqn(action_key).unwrap();
+                (
+                    format!("{action_key:?}"),
+                    format!("{fqn} : <{ty:?}>", ty = action.get_type()),
+                )
             })
             .collect::<BTreeMap<_, _>>();
 

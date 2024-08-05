@@ -6,7 +6,7 @@ use boomerang::{
     builder::{BuilderReactionKey, TypedActionKey},
     runtime, Reactor,
 };
-use boomerang_util::{Timeout, TimeoutBuilder};
+use boomerang_util::timeout::{Timeout, TimeoutBuilder};
 use runtime::Duration;
 
 #[derive(Reactor)]

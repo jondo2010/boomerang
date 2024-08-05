@@ -76,6 +76,12 @@ pub enum BuilderError {
     Other(#[from] anyhow::Error),
 }
 
+impl From<std::convert::Infallible> for BuilderError {
+    fn from(_: std::convert::Infallible) -> Self {
+        unreachable!()
+    }
+}
+
 trait TupleSlice {
     type Item;
     fn tuple_at_mut(&mut self, idxs: (usize, usize)) -> (&mut Self::Item, &mut Self::Item);

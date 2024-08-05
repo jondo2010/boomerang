@@ -1,8 +1,8 @@
-use crate::{
+use anyhow::Context;
+use boomerang::{
     builder::{graphviz, EnvBuilder, Reactor},
     runtime,
 };
-use anyhow::Context;
 use clap::Parser;
 
 #[derive(clap::Parser)]
@@ -45,6 +45,17 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
     let reactor = R::build(name, state, None, &mut env_builder)
         .context("Error building top-level reactor!")?;
 
+    {
+        let reactor_key = env_builder.find_reactor_by_fqn(name)?;
+        let recorder_state = crate::recorder::Recorder::new(["snake::keyboard::key_press"])?;
+        let recorder_builder = crate::recorder::RecorderBuilder::build(
+            "recorder",
+            recorder_state,
+            Some(reactor_key),
+            &mut env_builder,
+        )?;
+    }
+
     let args = Args::parse();
 
     if args.full_graph {
@@ -66,6 +77,7 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
     if args.print_debug_info {
         // runtime::util::print_debug_info(&env);
         println!("{env_builder:#?}");
+        panic!("Debug info printed");
     }
     let env = env_builder.try_into().unwrap();
 

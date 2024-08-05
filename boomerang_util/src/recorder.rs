@@ -3,7 +3,7 @@
 use serde::{ser::SerializeStruct, Serializer};
 
 use boomerang::{
-    builder::{self, BuilderActionKey, BuilderFqn, BuilderReactionKey},
+    builder::{self, BuilderActionKey, BuilderError, BuilderFqn, BuilderReactionKey},
     reaction, runtime,
 };
 
@@ -28,7 +28,7 @@ impl builder::Reactor for RecorderBuilder {
             .map(|fqn| env.find_physical_action_by_fqn(fqn.clone()))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let mut __builder = env.add_reactor(name, parent, state);
+        let mut builder = env.add_reactor(name, parent, state);
 
         let mut reactor = Self {
             startup: Default::default(),
@@ -36,11 +36,13 @@ impl builder::Reactor for RecorderBuilder {
             actions,
         };
         reactor.startup =
-            Recorder::__build_reaction_startup(stringify!(startup), &reactor, &mut __builder)
+            Recorder::__build_reaction_startup(stringify!(startup), &reactor, &mut builder)
                 .and_then(|b| b.finish())?;
 
-        reactor.record = Recorder::__build_record(stringify!(record), &reactor, &mut __builder)
+        reactor.record = Recorder::__build_record(stringify!(record), &reactor, &mut builder)
             .and_then(|b| b.finish())?;
+
+        //builder.finish()
 
         Ok(reactor)
     }
@@ -53,21 +55,32 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    pub fn new<N: Into<BuilderFqn>>(action_fqns: impl IntoIterator<Item = N>) -> Recorder {
+    pub fn new<N, I>(action_fqns: I) -> Result<Recorder, BuilderError>
+    where
+        N: TryInto<BuilderFqn>,
+        N::Error: Into<BuilderError>,
+        I: IntoIterator<Item = N>,
+    {
         let file = std::fs::File::create("recording.json").unwrap();
         let writer = std::io::BufWriter::new(file);
 
         let serializer = serde_json::Serializer::new(writer);
 
-        let action_fqns = action_fqns.into_iter().map(|n| n.into()).collect();
-        Self {
+        let action_fqns = action_fqns
+            .into_iter()
+            .map(|n| n.try_into().map_err(Into::into))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
             action_fqns,
             serializer,
-        }
+        })
     }
 
     #[reaction(reactor = "RecorderBuilder", triggers(startup))]
     fn reaction_startup(&mut self, ctx: &mut runtime::Context) {}
+
+    #[reaction(reactor = "RecorderBuilder", triggers(shutdown))]
+    fn reaction_shutdown(&mut self, ctx: &mut runtime::Context) {}
 
     pub fn __build_record<'builder>(
         name: &str,

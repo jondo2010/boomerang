@@ -46,7 +46,7 @@ pub(super) struct ReactorBuilder {
     /// Ports in this Reactor
     pub ports: SecondaryMap<BuilderPortKey, ()>,
     /// Actions in this Reactor
-    pub actions: SlotMap<BuilderActionKey, ActionBuilder>,
+    pub actions: SecondaryMap<BuilderActionKey, ()>,
 }
 
 impl ReactorBuilder {
@@ -119,7 +119,7 @@ impl<'a> ReactorBuilderState<'a> {
                 parent_reactor_key: parent,
                 reactions: SecondaryMap::new(),
                 ports: SecondaryMap::new(),
-                actions: SlotMap::with_key(),
+                actions: SecondaryMap::new(),
             }
         });
 

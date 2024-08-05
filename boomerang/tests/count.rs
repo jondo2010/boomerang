@@ -1,5 +1,5 @@
 use boomerang::{builder::*, runtime, Reactor};
-use boomerang_util::{Timeout, TimeoutBuilder};
+use boomerang_util::timeout::{Timeout, TimeoutBuilder};
 
 #[derive(Reactor)]
 #[reactor(state = "Count")]

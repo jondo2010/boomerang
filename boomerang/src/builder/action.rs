@@ -9,7 +9,7 @@ use std::{fmt::Debug, marker::PhantomData};
 use crate::runtime;
 use slotmap::SecondaryMap;
 
-use super::BuilderReactionKey;
+use super::{BuilderReactionKey, BuilderReactorKey};
 
 slotmap::new_key_type! {pub struct BuilderActionKey;}
 
@@ -73,6 +73,8 @@ impl Debug for Box<dyn ActionBuilderFn> {
 pub struct ActionBuilder {
     /// Name of the Action
     name: String,
+    /// The key of the Reactor that owns this ActionBuilder
+    reactor_key: BuilderReactorKey,
     /// Logical type of the action
     ty: ActionType,
     /// Out-going Reactions that this action triggers
@@ -84,9 +86,15 @@ pub struct ActionBuilder {
 }
 
 impl ActionBuilder {
-    pub fn new(name: &str, ty: ActionType, action_builder_fn: Box<dyn ActionBuilderFn>) -> Self {
+    pub fn new(
+        name: &str,
+        reactor_key: BuilderReactorKey,
+        ty: ActionType,
+        action_builder_fn: Box<dyn ActionBuilderFn>,
+    ) -> Self {
         Self {
             name: name.to_owned(),
+            reactor_key,
             ty,
             triggers: SecondaryMap::new(),
             schedulers: SecondaryMap::new(),
@@ -96,6 +104,10 @@ impl ActionBuilder {
 
     pub fn get_name(&self) -> &str {
         &self.name
+    }
+
+    pub fn get_reactor_key(&self) -> BuilderReactorKey {
+        self.reactor_key
     }
 
     pub fn get_type(&self) -> &ActionType {

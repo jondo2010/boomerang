@@ -8,7 +8,7 @@ use boomerang::{
     builder::{BuilderReactionKey, Physical, TypedActionKey},
     runtime, Reactor,
 };
-use boomerang_util::{Timeout, TimeoutBuilder};
+use boomerang_util::timeout::{Timeout, TimeoutBuilder};
 use tracing::info;
 
 #[derive(Reactor)]

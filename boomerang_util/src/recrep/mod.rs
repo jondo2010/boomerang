@@ -2,7 +2,7 @@
 
 mod recorder;
 
-pub use recorder::{Recorder, RecorderBuilder};
+pub use recorder::{inject_recorder, Recorder, RecorderBuilder};
 
 use boomerang::runtime;
 

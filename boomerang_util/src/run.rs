@@ -19,6 +19,16 @@ struct Args {
 
     #[arg(long, short)]
     fast_forward: bool,
+
+    /// The filename to serialize recorded actions into
+    #[cfg(feature = "rec_replay")]
+    #[arg(long, value_hint = clap::ValueHint::FilePath)]
+    record_filename: Option<std::path::PathBuf>,
+
+    /// The list of fully-qualified actions to record, e.g., "snake::keyboard::key_press"
+    #[cfg(feature = "rec_replay")]
+    #[arg(long)]
+    record_actions: Vec<String>,
 }
 
 /// Utility method to build and run a given top-level `Reactor` from tests.
@@ -45,23 +55,18 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
     let reactor = R::build(name, state, None, &mut env_builder)
         .context("Error building top-level reactor!")?;
 
-    {
-        let file = std::fs::File::create("recording.json").unwrap();
-        let writer = std::io::BufWriter::new(file);
-        let serializer = serde_json::Serializer::new(writer);
+    let args = Args::parse();
 
-        let reactor_key = env_builder.find_reactor_by_fqn(name)?;
-        let recorder_state =
-            crate::recrep::Recorder::new(name, ["snake::keyboard::key_press"], serializer)?;
-        let _recorder_builder = crate::recrep::RecorderBuilder::build(
-            "recorder",
-            recorder_state,
-            Some(reactor_key),
+    #[cfg(feature = "rec_replay")]
+    if let Some(filename) = args.record_filename {
+        tracing::info!("Recording actions to {filename:?}");
+        crate::recrep::inject_recorder(
             &mut env_builder,
+            filename,
+            name,
+            args.record_actions.iter().map(|s| s.as_str()),
         )?;
     }
-
-    let args = Args::parse();
 
     if args.full_graph {
         let gv = graphviz::create_full_graph(&env_builder).unwrap();

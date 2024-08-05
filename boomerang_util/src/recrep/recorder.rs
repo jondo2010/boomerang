@@ -1,7 +1,9 @@
 //! The Recorder reactor records PhysicalActions and serializes them to a file for later analysis or replay.
 
+use std::path::Path;
+
 use boomerang::{
-    builder::{self, BuilderActionKey, BuilderError, BuilderFqn, BuilderReactionKey},
+    builder::{self, BuilderActionKey, BuilderError, BuilderFqn, BuilderReactionKey, Reactor},
     reaction,
     runtime::{self},
 };
@@ -164,4 +166,21 @@ where
         }
         Ok(reaction)
     }
+}
+
+/// Injects a recorder into the environment builder to serialize actions to a file.
+pub fn inject_recorder<'a, P: AsRef<Path>>(
+    env_builder: &mut builder::EnvBuilder,
+    filename: P,
+    name: &str,
+    actions: impl Iterator<Item = &'a str>,
+) -> Result<(), anyhow::Error> {
+    let file = std::fs::File::create(filename).unwrap();
+    let writer = std::io::BufWriter::new(file);
+    let serializer = serde_json::Serializer::new(writer);
+    let reactor_key = env_builder.find_reactor_by_fqn(name)?;
+    let recorder_state = crate::recrep::Recorder::new(name, actions, serializer)?;
+    let _recorder_builder =
+        RecorderBuilder::build("recorder", recorder_state, Some(reactor_key), env_builder)?;
+    Ok(())
 }

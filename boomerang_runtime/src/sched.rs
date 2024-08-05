@@ -3,7 +3,10 @@ use derive_more::Display;
 use std::{collections::BinaryHeap, time::Duration};
 use tracing::{info, trace, warn};
 
-use crate::{keepalive, ActionKey, BasePort, Env, Instant, ReactionSet, ReactionTriggerCtx, Tag};
+use crate::{
+    keepalive, Action, ActionKey, BasePort, Env, Instant, LogicalAction, ReactionSet,
+    ReactionTriggerCtx, Tag,
+};
 
 #[derive(Debug, Display, Clone)]
 #[display(fmt = "L[tag={},terminal={}]", tag, terminal)]
@@ -130,26 +133,12 @@ impl Scheduler {
         // For all Timers, pump later events onto the queue and create an initial ReactionSet to process.
         let reaction_set = self
             .env
-            .reactors
-            .values()
-            .flat_map(|reactor| reactor.iter_startup_events())
-            .flatten()
-            .copied()
+            .iter_startup_events()
+            .flat_map(|downstream_reactions| downstream_reactions.iter().copied())
             .collect();
 
         info!(tag = %tag, ?reaction_set, "Starting the execution.");
         self.process_tag(tag, reaction_set);
-    }
-
-    #[tracing::instrument(skip(self))]
-    fn cleanup(&mut self, current_tag: Tag) {
-        for reactor in self.env.reactors.values_mut() {
-            reactor.cleanup(current_tag);
-        }
-
-        for port in self.env.ports.values_mut() {
-            port.cleanup();
-        }
     }
 
     #[tracing::instrument(skip(self))]
@@ -161,11 +150,10 @@ impl Scheduler {
 
         let reaction_set = self
             .env
-            .reactors
-            .values()
-            .flat_map(|reactor| reactor.iter_shutdown_events())
+            .iter_shutdown_events()
             .flat_map(|downstream_reactions| downstream_reactions.iter().copied())
             .collect();
+
         self.process_tag(shutdown_tag, reaction_set);
 
         // If the event queue still has events on it, report that.
@@ -187,6 +175,20 @@ impl Scheduler {
         tracing::info!("---- Elapsed physical time: {:?}", physical_elapsed);
 
         tracing::info!("Scheduler has been shut down.");
+    }
+
+    #[tracing::instrument(skip(self))]
+    fn cleanup(&mut self, current_tag: Tag) {
+        for action in self.env.actions.values_mut() {
+            if let Action::Logical(LogicalAction { values, .. }) = action {
+                // Clear action values at the current tag
+                values.remove(current_tag);
+            }
+        }
+
+        for port in self.env.ports.values_mut() {
+            port.cleanup();
+        }
     }
 
     /// Try to receive an asynchronous event
@@ -300,7 +302,7 @@ impl Scheduler {
     #[tracing::instrument(skip(self), fields(tag = %tag, reaction_set = ?reaction_set))]
     pub fn process_tag(&mut self, tag: Tag, mut reaction_set: ReactionSet) {
         while let Some((level, reaction_keys)) = reaction_set.next() {
-            tracing::info!("Level{level} with {} Reaction(s)", reaction_keys.len());
+            tracing::info!("{level} with {} Reaction(s)", reaction_keys.len());
 
             #[cfg(feature = "parallel")]
             use rayon::prelude::{ParallelBridge, ParallelIterator};
@@ -319,6 +321,7 @@ impl Scheduler {
                     let ReactionTriggerCtx {
                         reaction,
                         reactor,
+                        actions,
                         inputs,
                         outputs,
                     } = trigger_ctx;
@@ -328,6 +331,7 @@ impl Scheduler {
                     trace!("    Executing {reactor_name}/{reaction_name}.",);
 
                     //TODO: Plumb these iterators through into the generated reaction code.
+                    let mut actions = actions.collect::<Vec<_>>();
                     let inputs = inputs.collect::<Vec<_>>();
                     let mut outputs: Vec<&mut Box<dyn BasePort>> = outputs.collect::<Vec<_>>();
 
@@ -335,6 +339,7 @@ impl Scheduler {
                         self.start_time,
                         tag,
                         reactor,
+                        actions.as_mut_slice(),
                         inputs.as_slice(),
                         outputs.as_mut_slice(),
                         self.event_tx.clone(),

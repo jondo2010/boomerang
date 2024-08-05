@@ -3,20 +3,21 @@ use crate::Env;
 /// Print debug info about an Env/DepInfo pair.
 pub fn print_debug_info(env: &Env) {
     // Which Reactions are triggered by each Action
-    for (_reactor_key, reactor) in env.reactors.iter() {
-        println!("Reactor \"{}\"", reactor.get_name());
-        for (action_key, action) in reactor.actions.iter() {
-            println!("  {action} triggers:");
-            let mut action_pairs: Vec<_> = reactor.action_triggers[action_key].iter().collect();
-            action_pairs.sort_by_key(|(level, _)| *level);
-            for (level, reaction_key) in action_pairs.iter() {
-                println!(
-                    "    L{level}: {reaction_key:?} ({})",
-                    env.reactions[*reaction_key].get_name()
-                );
-            }
-        }
-    }
+
+    //for (_reactor_key, reactor) in env.reactors.iter() {
+    //    println!("Reactor \"{}\"", reactor.get_name());
+    //    for (action_key, action) in reactor.actions.iter() {
+    //        println!("  {action} triggers:");
+    //        let mut action_pairs: Vec<_> = reactor.action_triggers[action_key].iter().collect();
+    //        action_pairs.sort_by_key(|(level, _)| *level);
+    //        for (level, reaction_key) in action_pairs.iter() {
+    //            println!(
+    //                "    L{level}: {reaction_key:?} ({})",
+    //                env.reactions[*reaction_key].get_name()
+    //            );
+    //        }
+    //    }
+    //}
 
     // Which Reactions are triggered by each port
     // for (port_key, port) in env.ports.iter() {

@@ -123,6 +123,7 @@ impl Reaction {
         start_time: crate::Instant,
         tag: Tag,
         reactor: &'a mut Reactor,
+        actions: &mut [&mut Action],
         inputs: &[IPort<'_>],
         outputs: &mut [OPort<'_>],
         async_tx: Sender<PhysicalEvent>,
@@ -130,7 +131,6 @@ impl Reaction {
     ) -> Context {
         let Reactor {
             state,
-            actions: action_keys,
             action_triggers,
             ..
         } = reactor;
@@ -144,18 +144,7 @@ impl Reaction {
             }
         }
 
-        // Pull actions from the reaction/reactor
-        let mut actions = action_keys
-            .iter_many_unchecked_mut(self.iter_actions().copied())
-            .collect::<Vec<_>>();
-
-        (self.body)(
-            &mut ctx,
-            state.as_mut(),
-            inputs,
-            outputs,
-            actions.as_mut_slice(),
-        );
+        (self.body)(&mut ctx, state.as_mut(), inputs, outputs, actions);
 
         ctx
     }

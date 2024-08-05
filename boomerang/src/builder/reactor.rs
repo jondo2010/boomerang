@@ -61,13 +61,12 @@ impl ReactorBuilder {
     /// Build this `ReactorBuilder` into a `runtime::Reactor`
     pub fn build_runtime(
         self,
-        actions: tinymap::TinyMap<runtime::ActionKey, runtime::Action>,
         action_triggers: tinymap::TinySecondaryMap<
             runtime::ActionKey,
             Vec<runtime::LevelReactionKey>,
         >,
     ) -> runtime::Reactor {
-        runtime::Reactor::new(&self.name, self.state, actions, action_triggers)
+        runtime::Reactor::new(&self.name, self.state, action_triggers)
     }
 }
 

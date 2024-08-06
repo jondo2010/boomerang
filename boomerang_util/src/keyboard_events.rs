@@ -16,7 +16,7 @@ pub struct KeyboardEventsBuilder {
     #[reactor(output())]
     pub arrow_key_pressed: TypedPortKey<Key>,
 
-    #[reactor(action(physical, min_delay = "100 msec"))]
+    #[reactor(action(physical, min_delay = "10 msec"))]
     key_press: TypedActionKey<Key, Physical>,
 
     #[reactor(reaction(function = "KeyboardEvents::reaction_key_press"))]

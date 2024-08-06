@@ -3,7 +3,7 @@ use std::{
     time::Duration,
 };
 
-use super::{Action, ActionData, ActionKey, ActionValues, BaseActionValues};
+use super::{Action, ActionData, ActionKey, ActionStore, BaseActionStore};
 use crate::{InnerType, Tag};
 
 pub trait ActionRefValue<T: ActionData> {
@@ -17,7 +17,7 @@ pub trait ActionRefValue<T: ActionData> {
 pub struct ActionRef<'a, T: ActionData = ()> {
     pub(crate) key: ActionKey,
     pub(crate) min_delay: Duration,
-    pub(crate) values: &'a mut ActionValues<T>,
+    pub(crate) values: &'a mut ActionStore<T>,
 }
 
 impl<'a, T: ActionData> ActionRefValue<T> for ActionRef<'a, T> {
@@ -46,7 +46,7 @@ impl<'a, T: ActionData> InnerType for ActionRef<'a, T> {
 pub struct PhysicalActionRef<T: ActionData = ()> {
     pub(crate) key: ActionKey,
     pub(crate) min_delay: Duration,
-    pub(crate) values: Arc<Mutex<dyn BaseActionValues>>,
+    pub(crate) values: Arc<Mutex<dyn BaseActionStore>>,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -55,7 +55,7 @@ impl<T: ActionData> ActionRefValue<T> for PhysicalActionRef<T> {
         self.values
             .lock()
             .expect("Failed to lock action values")
-            .downcast_mut::<ActionValues<T>>()
+            .downcast_mut::<ActionStore<T>>()
             .expect("Type mismatch on ActionValues!")
             .get_value(tag)
             .cloned()
@@ -65,7 +65,7 @@ impl<T: ActionData> ActionRefValue<T> for PhysicalActionRef<T> {
         self.values
             .lock()
             .expect("Failed to lock action values")
-            .downcast_mut::<ActionValues<T>>()
+            .downcast_mut::<ActionStore<T>>()
             .expect("Type mismatch on ActionValues!")
             .set_value(value, new_tag)
     }

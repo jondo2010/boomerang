@@ -73,6 +73,9 @@ pub enum BuilderError {
     InvalidFqn(String),
 
     #[error(transparent)]
+    IoError(#[from] std::io::Error),
+
+    #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
 

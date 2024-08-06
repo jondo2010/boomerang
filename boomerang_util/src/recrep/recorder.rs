@@ -4,8 +4,9 @@
 
 use std::path::Path;
 
+use ::boomerang::builder::{BuilderError, EnvBuilder};
 use boomerang::{
-    builder::{self, BuilderActionKey, BuilderError, BuilderFqn, BuilderReactionKey, Reactor},
+    builder::{BuilderActionKey, BuilderFqn, BuilderReactionKey, BuilderReactorKey, Reactor},
     reaction,
     runtime::{self},
 };
@@ -24,7 +25,7 @@ where
     _phantom: std::marker::PhantomData<Ser>,
 }
 
-impl<Ser> builder::Reactor for RecorderBuilder<Ser>
+impl<Ser> Reactor for RecorderBuilder<Ser>
 where
     Ser: Send + Sync + 'static,
     for<'a> &'a mut Ser: serde::Serializer,
@@ -34,9 +35,9 @@ where
     fn build(
         name: &str,
         state: Self::State,
-        parent: Option<::boomerang::builder::BuilderReactorKey>,
-        env: &mut ::boomerang::builder::EnvBuilder,
-    ) -> Result<Self, ::boomerang::builder::BuilderError> {
+        parent: Option<BuilderReactorKey>,
+        env: &mut EnvBuilder,
+    ) -> Result<Self, BuilderError> {
         // Gather all action keys that were specified by FQNs in Recorder
         let actions = state
             .action_fqns
@@ -70,8 +71,11 @@ where
     Ser: Send + Sync + 'static,
     for<'a> &'a mut Ser: serde::Serializer,
 {
+    /// Label for the recording header
     recording_name: String,
+    /// List of actions to record
     action_fqns: Vec<BuilderFqn>,
+    /// Serializer to use for recording
     serializer: Ser,
 }
 
@@ -85,6 +89,7 @@ where
     /// # Arguments
     /// - recording_name: The name of the recording.
     /// - action_fqns: The fully-qualified names of the actions to record.
+    /// - serializer: The serializer that writes the recording.
     pub fn new<N, I>(
         recording_name: &str,
         action_fqns: I,
@@ -97,8 +102,9 @@ where
     {
         let action_fqns = action_fqns
             .into_iter()
-            .map(|n| n.try_into().map_err(Into::into))
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(TryInto::try_into)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)?;
         Ok(Self {
             recording_name: recording_name.to_owned(),
             action_fqns,
@@ -124,11 +130,8 @@ where
         name: &str,
         reactor: &RecorderBuilder<Ser>,
         builder: &'builder mut ::boomerang::builder::ReactorBuilderState,
-    ) -> Result<
-        ::boomerang::builder::ReactionBuilderState<'builder>,
-        ::boomerang::builder::BuilderError,
-    > {
-        let __wrapper: Box<dyn::boomerang::runtime::ReactionFn> = Box::new(
+    ) -> Result<::boomerang::builder::ReactionBuilderState<'builder>, BuilderError> {
+        let __wrapper: Box<dyn ::boomerang::runtime::ReactionFn> = Box::new(
             move |ctx: &mut ::boomerang::runtime::Context,
                   state: &mut dyn runtime::ReactorState,
                   _inputs,
@@ -172,16 +175,16 @@ where
 
 /// Injects a recorder into the environment builder to serialize actions to a file.
 pub fn inject_recorder<'a, P: AsRef<Path>>(
-    env_builder: &mut builder::EnvBuilder,
+    env_builder: &mut EnvBuilder,
     filename: P,
     name: &str,
     actions: impl Iterator<Item = &'a str>,
 ) -> Result<(), anyhow::Error> {
-    let file = std::fs::File::create(filename).unwrap();
+    let file = std::fs::File::open(filename).map_err(BuilderError::from)?;
     let writer = std::io::BufWriter::new(file);
     let serializer = serde_json::Serializer::new(writer);
     let reactor_key = env_builder.find_reactor_by_fqn(name)?;
-    let recorder_state = crate::recrep::Recorder::new(name, actions, serializer)?;
+    let recorder_state = Recorder::new(name, actions, serializer)?;
     let _recorder_builder =
         RecorderBuilder::build("recorder", recorder_state, Some(reactor_key), env_builder)?;
     Ok(())

@@ -1,12 +1,13 @@
 //! Recording and replaying of Boomerang actions.
 
 mod recorder;
+mod replayer;
 
 pub use recorder::{inject_recorder, Recorder, RecorderBuilder};
 
 use boomerang::runtime;
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RecordingHeader<'a> {
     name: &'a str,
     start_tag: runtime::Tag,

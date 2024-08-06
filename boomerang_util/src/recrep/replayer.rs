@@ -4,15 +4,14 @@
 
 use std::path::Path;
 
+use boomerang::builder::{BuilderError, ReactionBuilderState, ReactorBuilderState};
 use boomerang::{
     builder::{
-        BuilderActionKey, BuilderError, BuilderFqn, BuilderReactionKey, BuilderReactorKey,
-        EnvBuilder, Reactor,
+        BuilderActionKey, BuilderFqn, BuilderReactionKey, BuilderReactorKey, EnvBuilder, Reactor,
     },
-    reaction, runtime,
+    runtime,
 };
-
-use super::RecordingHeader;
+use boomerang_tinymap::{TinyMap, TinySecondaryMap};
 
 pub struct ReplayerBuilder<Des>
 where
@@ -99,11 +98,49 @@ where
         })
     }
 
-    #[reaction(reactor = "ReplayerBuilder<Des>", triggers(startup))]
-    fn reaction_startup(&mut self, ctx: &mut runtime::Context) {
-        let header: RecordingHeader = serde::de::Deserialize::deserialize(&mut self.deserializer)
-            .expect("Failed to deserialize recording header");
-        println!("Replaying recording: {}", header.name);
+    pub fn __build_reaction_startup<'builder>(
+        name: &str,
+        reactor: &ReplayerBuilder<Des>,
+        builder: &'builder mut ReactorBuilderState,
+    ) -> Result<ReactionBuilderState<'builder>, BuilderError> {
+        let __wrapper: Box<dyn runtime::ReactionFn> = Box::new(
+            move |ctx: &mut runtime::Context,
+                  state: &mut dyn runtime::ReactorState,
+                  _inputs,
+                  _outputs,
+                  actions: &mut [&mut runtime::Action]| {
+                let state: &mut Self = state
+                    .downcast_mut()
+                    .expect("Unable to downcast reactor state");
+
+                // First build a Map out of the actions
+                let action_map: TinySecondaryMap<_, _> = actions
+                    .into_iter()
+                    .map(|action| {
+                        let act = action.as_physical().expect("Action is not physical");
+                        (act.key, &act.values)
+                    })
+                    .collect();
+
+                serde::Deserializer::deserialize_struct(
+                    &mut state.deserializer,
+                    "Record",
+                    &[&"name", &"key", &"tag", &"value"],
+                    visitor,
+                );
+            },
+        );
+        let __startup_action = builder.get_startup_action();
+        let __shutdown_action = builder.get_shutdown_action();
+        let mut reaction = builder
+            .add_reaction(&name, __wrapper)
+            .with_trigger_action(__startup_action, 0);
+
+        for action_key in reactor.actions.iter() {
+            reaction = reaction.with_schedulable_action(*action_key, 0);
+        }
+
+        Ok(reaction)
     }
 }
 

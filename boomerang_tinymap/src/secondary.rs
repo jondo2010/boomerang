@@ -136,12 +136,6 @@ impl<K: Key, V> TinySecondaryMap<K, V> {
         }
     }
 
-    pub fn extend(&mut self, iter: impl IntoIterator<Item = (K, V)>) {
-        for (key, value) in iter {
-            self.insert(key, value);
-        }
-    }
-
     pub fn contains_key(&self, key: K) -> bool {
         self.data.get(key.index()).map_or(false, Option::is_some)
     }
@@ -185,6 +179,14 @@ impl<K: Key, V> TinySecondaryMap<K, V> {
     /// Returns an iterator over the values in the map.
     pub fn values(&self) -> impl Iterator<Item = &V> {
         self.data.iter().filter_map(Option::as_ref)
+    }
+}
+
+impl<K: Key, V> Extend<(K, V)> for TinySecondaryMap<K, V> {
+    fn extend<T: IntoIterator<Item = (K, V)>>(&mut self, iter: T) {
+        for (key, value) in iter {
+            self.insert(key, value);
+        }
     }
 }
 

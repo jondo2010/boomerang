@@ -4,7 +4,8 @@
 
 use std::path::Path;
 
-use ::boomerang::builder::{BuilderError, EnvBuilder};
+use boomerang::builder::{BuilderError, EnvBuilder};
+use boomerang::builder::{ReactionBuilderState, ReactorBuilderState};
 use boomerang::{
     builder::{BuilderActionKey, BuilderFqn, BuilderReactionKey, BuilderReactorKey, Reactor},
     reaction,
@@ -129,10 +130,10 @@ where
     pub fn __build_record<'builder>(
         name: &str,
         reactor: &RecorderBuilder<Ser>,
-        builder: &'builder mut ::boomerang::builder::ReactorBuilderState,
-    ) -> Result<::boomerang::builder::ReactionBuilderState<'builder>, BuilderError> {
-        let __wrapper: Box<dyn ::boomerang::runtime::ReactionFn> = Box::new(
-            move |ctx: &mut ::boomerang::runtime::Context,
+        builder: &'builder mut ReactorBuilderState,
+    ) -> Result<ReactionBuilderState<'builder>, BuilderError> {
+        let __wrapper: Box<dyn runtime::ReactionFn> = Box::new(
+            move |ctx: &mut runtime::Context,
                   state: &mut dyn runtime::ReactorState,
                   _inputs,
                   _outputs,
@@ -149,7 +150,7 @@ where
                         key,
                         values,
                         ..
-                    } = act.as_physical().unwrap();
+                    } = act.as_physical().expect("Action is not physical");
 
                     let base_action_values = &values.lock().expect("lock");
                     let tagged_value = base_action_values.get_serializable_value(tag);

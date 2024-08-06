@@ -147,9 +147,9 @@ impl<'a> ReactionBuilderState<'a> {
     }
 
     /// Indicate that this Reaction may schedule the given Action
-    pub fn with_schedulable_action<T: runtime::PortData, Q>(
+    pub fn with_schedulable_action(
         mut self,
-        action_key: TypedActionKey<T, Q>,
+        action_key: impl Into<BuilderActionKey>,
         order: usize,
     ) -> Self {
         self.builder

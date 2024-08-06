@@ -164,7 +164,10 @@ impl ReactionReceiver {
                 ArgumentAttr::Action {
                     attrs: ActionAttrs::Effects,
                     ..
-                } => Some(quote! { .with_schedulable_action::<#ty, _>(reactor.#expr, 0) }),
+                } => Some(quote! {
+                    //.with_schedulable_action::<#ty, _>(reactor.#expr, 0)
+                    .with_schedulable_action(reactor.#expr, 0)
+                }),
                 ArgumentAttr::Action {
                     attrs: ActionAttrs::TriggersAndEffects,
                     ..

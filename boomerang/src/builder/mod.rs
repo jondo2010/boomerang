@@ -5,7 +5,7 @@ mod port;
 mod reaction;
 mod reactor;
 #[cfg(test)]
-mod tests;
+pub mod tests;
 
 #[cfg(feature = "visualization")]
 pub mod graphviz;
@@ -73,6 +73,9 @@ pub enum BuilderError {
         port_b_key: BuilderPortKey,
         what: String,
     },
+
+    #[error("Error building Reaction: {0}")]
+    ReactionBuilderError(String),
 
     #[error("Invalid fully-qualified name: {0}")]
     InvalidFqn(String),

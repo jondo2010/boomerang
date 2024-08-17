@@ -8,7 +8,11 @@ readme.workspace = true
 repository.workspace = true
 
 [features]
-default = ["keyboard", "runner", "rec_replay"]
+default = [
+    "keyboard",
+    "runner",
+    #"rec_replay"
+]
 # Support for keyboard input
 keyboard = ["dep:termion"]
 # Support for built-in CLI/runner methods

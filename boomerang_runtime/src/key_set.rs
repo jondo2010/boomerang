@@ -30,6 +30,7 @@ impl<K: tinymap::Key> KeySet<K> {
     }
 
     /// Build the levels structure from an iterable
+    #[inline]
     fn build_levels<I>(keys: I) -> Vec<(Level, tinymap::TinySecondaryMap<K, ()>)>
     where
         I: IntoIterator<Item = (Level, K)>,
@@ -91,6 +92,7 @@ impl<K: tinymap::Key> KeySet<K> {
 }
 
 impl<K: tinymap::Key> FromIterator<(Level, K)> for KeySet<K> {
+    #[inline]
     fn from_iter<T: IntoIterator<Item = (Level, K)>>(iter: T) -> Self {
         Self {
             levels: Self::build_levels(iter),
@@ -102,12 +104,14 @@ impl<K: tinymap::Key> Iterator for KeySet<K> {
     type Item = (Level, Vec<K>);
 
     /// Provides the next lowest level in the set.
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         self.levels
             .pop()
             .map(|(level, keys)| (level, keys.into_keys()))
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         (self.levels.len(), Some(self.levels.len()))
     }

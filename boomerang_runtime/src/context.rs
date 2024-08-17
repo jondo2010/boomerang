@@ -86,6 +86,7 @@ impl<'a> Context<'a> {
     }
 
     /// Schedule the Action to trigger at some future time.
+    #[tracing::instrument(skip(self, value), fields(action = ?action.get_key()))]
     pub fn schedule_action<T: ActionData, A: ActionRefValue<T>>(
         &mut self,
         action: &mut A,
@@ -94,7 +95,7 @@ impl<'a> Context<'a> {
     ) {
         let tag_delay = action.get_min_delay() + delay.unwrap_or_default();
         let new_tag = self.tag.delay(Some(tag_delay));
-        tracing::info!(action = ?action.get_key(), new_tag = %new_tag, "Scheduling Logical");
+        tracing::trace!(new_tag = %new_tag, "Scheduling Logical");
         action.set_value(value, new_tag);
         let downstream = self.action_triggers[action.get_key()].iter().copied();
         self.enqueue_later(downstream, new_tag);

@@ -43,3 +43,23 @@ pub enum RuntimeError {
         wanted: &'static str,
     },
 }
+
+pub mod fmt_utils {
+    //! Utility functions for formatting until [debug_closure_helpers](https://github.com/rust-lang/rust/issues/117729) lands in stable.
+    pub fn from_fn<F: Fn(&mut std::fmt::Formatter<'_>) -> std::fmt::Result>(f: F) -> FromFn<F> {
+        FromFn(f)
+    }
+
+    pub struct FromFn<F>(F)
+    where
+        F: Fn(&mut std::fmt::Formatter<'_>) -> std::fmt::Result;
+
+    impl<F> std::fmt::Debug for FromFn<F>
+    where
+        F: Fn(&mut std::fmt::Formatter<'_>) -> std::fmt::Result,
+    {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            (self.0)(f)
+        }
+    }
+}

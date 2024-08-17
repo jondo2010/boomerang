@@ -51,7 +51,7 @@ pub struct Reaction {
     name: String,
     /// The Reactor containing this Reaction
     reactor_key: ReactorKey,
-    /// Ports that this reaction may read from (uses)
+    /// Ports that this reaction may read from (uses + triggers)
     use_ports: Vec<PortKey>,
     /// Output Ports that this reaction may set the value of
     effect_ports: Vec<PortKey>,
@@ -108,12 +108,13 @@ impl Reaction {
         self.effect_ports.iter()
     }
 
+    /// Get an iterator over the actions that this reaction may trigger or receive.
     pub fn iter_actions(&self) -> std::slice::Iter<ActionKey> {
         self.actions.iter()
     }
 
     #[tracing::instrument(
-        skip(self, start_time, inputs, outputs, async_tx),
+        skip(self, start_time, inputs, outputs, actions, async_tx, shutdown_rx),
         fields(
             reactor = reactor.name,
             name = %self.name,

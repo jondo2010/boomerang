@@ -1,10 +1,9 @@
 use super::{
-    ActionBuilder, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
-    EnvBuilder, FindElements, Logical, Physical, PortType, ReactionBuilderState, TypedActionKey,
-    TypedPortKey,
+    BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey, EnvBuilder,
+    FindElements, Logical, Physical, PortType, ReactionBuilderState, TypedActionKey, TypedPortKey,
 };
 use crate::runtime;
-use slotmap::{SecondaryMap, SlotMap};
+use slotmap::SecondaryMap;
 
 slotmap::new_key_type! {
     pub struct BuilderReactorKey;
@@ -173,8 +172,8 @@ impl<'a> ReactorBuilderState<'a> {
 
         let startup_key = self.startup_action;
         self.add_reaction(&format!("_{name}_startup"), startup_fn)
-            .with_trigger_action(startup_key, 0)
-            .with_effect_action(action_key, 1)
+            .with_trigger_action(startup_key, 0)?
+            .with_effect_action(action_key, 1)?
             .finish()?;
 
         if period.is_some() {
@@ -187,8 +186,8 @@ impl<'a> ReactorBuilderState<'a> {
             );
 
             self.add_reaction(&format!("_{name}_reset"), reset_fn)
-                .with_trigger_action(action_key, 0)
-                .with_effect_action(action_key, 0)
+                .with_trigger_action(action_key, 0)?
+                .with_effect_action(action_key, 0)?
                 .finish()?;
         }
 

@@ -67,7 +67,8 @@ fn bench(c: &mut Criterion) {
                         &mut env_builder,
                     )
                     .unwrap();
-                    runtime::Scheduler::new(env_builder.try_into().unwrap(), true, false)
+                    let (env, triggers, _) = env_builder.into_runtime_parts().unwrap();
+                    runtime::Scheduler::new(env, triggers, true, false)
                 },
                 |mut sched| {
                     sched.event_loop();

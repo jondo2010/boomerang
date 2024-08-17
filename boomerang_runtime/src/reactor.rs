@@ -2,21 +2,13 @@ use std::fmt::Debug;
 
 use downcast_rs::{impl_downcast, DowncastSync};
 
-use crate::{ActionKey, Context, LevelReactionKey, ReactionSet, ScheduledEvent, Tag};
+use crate::{ActionKey, LevelReactionKey};
 
 tinymap::key_type! { pub ReactorKey }
 
 pub trait ReactorState: DowncastSync + Send {}
 impl<T> ReactorState for T where T: DowncastSync {}
 impl_downcast!(sync ReactorState);
-
-pub(crate) trait ReactorElement {
-    fn startup(&self, _ctx: &mut Context, _key: ActionKey) {}
-    fn shutdown(&self, _reaction_set: &mut ReactionSet) {}
-    fn cleanup(&self, _current_tag: Tag) -> Option<ScheduledEvent> {
-        None
-    }
-}
 
 #[derive(Derivative)]
 #[derivative(Debug)]

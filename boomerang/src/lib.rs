@@ -43,8 +43,8 @@
 //!     None,
 //!     &mut env_builder
 //! ).unwrap();
-//! let env = env_builder.try_into().unwrap();
-//! let mut sched = runtime::Scheduler::new(env, true, false);
+//! let (env, triggers, _) = env_builder.into_runtime_parts().unwrap();
+//! let mut sched = runtime::Scheduler::new(env, triggers, true, false);
 //! sched.event_loop();
 //! ```
 //!

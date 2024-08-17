@@ -1,11 +1,10 @@
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use derive_more::Display;
 use std::{collections::BinaryHeap, time::Duration};
-use tracing::{info, trace, warn};
 
 use crate::{
-    keepalive, Action, ActionKey, BasePort, Env, Instant, LogicalAction, ReactionSet,
-    ReactionTriggerCtx, Tag,
+    keepalive, Action, ActionKey, BasePort, Env, Instant, LevelReactionKey, LogicalAction,
+    ReactionSet, ReactionTriggerCtx, Tag, TriggerMap,
 };
 
 #[derive(Debug, Display, Clone)]
@@ -73,8 +72,8 @@ impl PhysicalEvent {
     }
 
     /// Convert the physical event to a scheduled event.
-    pub(crate) fn into_scheduled(self, env: &Env) -> ScheduledEvent {
-        let downstream = env.action_triggers[self.key].iter().copied();
+    pub(crate) fn into_scheduled(self, triggers: &TriggerMap) -> ScheduledEvent {
+        let downstream = triggers.action_triggers[self.key].iter().copied();
         ScheduledEvent {
             tag: self.tag,
             reactions: ReactionSet::from_iter(downstream),
@@ -87,6 +86,8 @@ impl PhysicalEvent {
 pub struct Scheduler {
     /// The environment state
     env: Env,
+    /// The trigger map
+    trigger_map: TriggerMap,
     /// Whether to skip wall-clock synchronization
     fast_forward: bool,
     /// Whether to keep the scheduler alive for any possible asynchronous events
@@ -106,12 +107,13 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    pub fn new(env: Env, fast_forward: bool, keep_alive: bool) -> Self {
+    pub fn new(env: Env, trigger_map: TriggerMap, fast_forward: bool, keep_alive: bool) -> Self {
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
         let (shutdown_tx, _) = keepalive::channel();
 
         Self {
             env,
+            trigger_map,
             fast_forward,
             keep_alive,
             event_tx,
@@ -123,6 +125,28 @@ impl Scheduler {
         }
     }
 
+    /// Return an `Iterator` of reactions sensitive to `Startup` actions.
+    fn iter_startup_events(&self) -> impl Iterator<Item = &[LevelReactionKey]> {
+        self.env.actions.iter().filter_map(|(action_key, action)| {
+            if let Action::Startup = action {
+                Some(self.trigger_map.action_triggers[action_key].as_slice())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Return an `Iterator` of reactions sensitive to `Shutdown` actions.
+    fn iter_shutdown_events(&self) -> impl Iterator<Item = &[LevelReactionKey]> {
+        self.env.actions.iter().filter_map(|(action_key, action)| {
+            if let Action::Shutdown { .. } = action {
+                Some(self.trigger_map.action_triggers[action_key].as_slice())
+            } else {
+                None
+            }
+        })
+    }
+
     /// Execute startup of the Scheduler.
     #[tracing::instrument(skip(self))]
     fn startup(&mut self) {
@@ -132,24 +156,22 @@ impl Scheduler {
 
         // For all Timers, pump later events onto the queue and create an initial ReactionSet to process.
         let reaction_set = self
-            .env
             .iter_startup_events()
             .flat_map(|downstream_reactions| downstream_reactions.iter().copied())
             .collect();
 
-        info!(tag = %tag, ?reaction_set, "Starting the execution.");
+        tracing::info!(tag = %tag, ?reaction_set, "Starting the execution.");
         self.process_tag(tag, reaction_set);
     }
 
     #[tracing::instrument(skip(self))]
     fn shutdown(&mut self, shutdown_tag: Tag, _reactions: Option<ReactionSet>) {
-        info!(tag = %shutdown_tag, "Shutting down.");
+        tracing::info!("Shutting down.");
 
         // Signal to any waiting threads that the scheduler is shutting down.
         self.shutdown_tx.shutdown();
 
         let reaction_set = self
-            .env
             .iter_shutdown_events()
             .flat_map(|downstream_reactions| downstream_reactions.iter().copied())
             .collect();
@@ -217,7 +239,8 @@ impl Scheduler {
         loop {
             // Push pending events into the queue
             for event in self.event_rx.try_iter() {
-                self.event_queue.push(event.into_scheduled(&self.env));
+                self.event_queue
+                    .push(event.into_scheduled(&self.trigger_map));
             }
 
             if let Some(event) = self.event_queue.pop() {
@@ -249,9 +272,10 @@ impl Scheduler {
                 }
                 self.process_tag(event.tag, event.reactions);
             } else if let Some(event) = self.receive_event() {
-                self.event_queue.push(event.into_scheduled(&self.env));
+                self.event_queue
+                    .push(event.into_scheduled(&self.trigger_map));
             } else {
-                trace!("No more events in queue. -> Terminate!");
+                tracing::debug!("No more events in queue. -> Terminate!");
                 break;
             }
         } // loop
@@ -274,7 +298,7 @@ impl Scheduler {
             match self.event_rx.recv_timeout(advance) {
                 Ok(event) => {
                     tracing::debug!(event = %event, "Sleep interrupted by async event");
-                    return Some(event.into_scheduled(&self.env));
+                    return Some(event.into_scheduled(&self.trigger_map));
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     let remaining = target.checked_duration_since(Instant::now());
@@ -298,23 +322,21 @@ impl Scheduler {
     }
 
     /// Process the reactions at this tag in increasing order of level.
+    ///
     /// Reactions at a level N may trigger further reactions at levels M>N
-    #[tracing::instrument(skip(self), fields(tag = %tag, reaction_set = ?reaction_set))]
+    #[tracing::instrument(skip(self, reaction_set), fields(tag = %tag))]
     pub fn process_tag(&mut self, tag: Tag, mut reaction_set: ReactionSet) {
         while let Some((level, reaction_keys)) = reaction_set.next() {
-            tracing::info!("{level} with {} Reaction(s)", reaction_keys.len());
+            tracing::trace!(level=?level, reaction_keys = ?reaction_keys, "Iter");
+
+            // Safety: reaction_keys in the same level are guaranteed to be independent of each other.
+            let iter_ctx = unsafe { self.env.iter_reaction_ctx(reaction_keys.iter()) };
 
             #[cfg(feature = "parallel")]
             use rayon::prelude::{ParallelBridge, ParallelIterator};
 
             #[cfg(feature = "parallel")]
-            let iter_ctx = self
-                .env
-                .iter_reaction_ctx(reaction_keys.iter())
-                .par_bridge();
-
-            #[cfg(not(feature = "parallel"))]
-            let iter_ctx = self.env.iter_reaction_ctx(reaction_keys.iter());
+            let iter_ctx = iter_ctx.par_bridge();
 
             let inner_ctxs = iter_ctx
                 .map(|trigger_ctx| {
@@ -326,9 +348,11 @@ impl Scheduler {
                         outputs,
                     } = trigger_ctx;
 
-                    let reaction_name = reaction.get_name();
-                    let reactor_name = reactor.get_name();
-                    trace!("    Executing {reactor_name}/{reaction_name}.",);
+                    tracing::trace!(
+                        "    Executing {reactor_name}/{reaction_name}.",
+                        reaction_name = reaction.get_name(),
+                        reactor_name = reactor.get_name()
+                    );
 
                     //TODO: Plumb these iterators through into the generated reaction code.
                     let mut actions = actions.collect::<Vec<_>>();
@@ -349,7 +373,11 @@ impl Scheduler {
                     // Queue downstream reactions triggered by any ports that were set.
                     for port in outputs.into_iter() {
                         if port.is_set() {
-                            ctx.enqueue_now(port.get_downstream());
+                            //ctx.enqueue_now(port.get_downstream());
+
+                            let downstream = self.trigger_map.port_triggers[port.get_key()].iter();
+                            // Merge all ReactionKeys from `downstream` into the todo reactions
+                            ctx.internal.reactions.extend(downstream);
                         }
                     }
 

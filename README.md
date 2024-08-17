@@ -1,4 +1,4 @@
-# Boomerang
+# 🪃 Boomerang
 
 [![crates.io](https://img.shields.io/crates/v/boomerang.svg)](https://crates.io/crates/boomerang)
 [![MIT/Apache 2.0](https://img.shields.io/badge/license-MIT%2FApache-blue.svg)](./LICENSE)

@@ -130,7 +130,7 @@ impl ToTokens for ReactionReceiver {
                             #idx,
                             #triggers,
                             #effects
-                        )
+                        )?
                     }
                 } else {
                     panic!("Only references are supported");

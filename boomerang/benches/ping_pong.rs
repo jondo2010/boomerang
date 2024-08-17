@@ -94,7 +94,6 @@ struct PongBuilder {
     in_ping: TypedPortKey<()>,
     #[reactor(output())]
     out_pong: TypedPortKey<()>,
-
     #[reactor(reaction(function = "Pong::in_ping"))]
     reaction_in_ping: BuilderReactionKey,
 }
@@ -160,7 +159,7 @@ impl Main {
 fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("ping_pong");
 
-    for count in [100, 1000, 10000 /*100000, 1000000*/].into_iter() {
+    for count in [100, 1000, 10000, 100000 /*1000000*/].into_iter() {
         group.sample_size(count);
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
             b.iter_batched(
@@ -168,7 +167,8 @@ fn bench(c: &mut Criterion) {
                     let mut env_builder = EnvBuilder::new();
                     let _reactor =
                         MainBuilder::build("main", Main { count }, None, &mut env_builder).unwrap();
-                    runtime::Scheduler::new(env_builder.try_into().unwrap(), true, false)
+                    let (env, triggers, _) = env_builder.into_runtime_parts().unwrap();
+                    runtime::Scheduler::new(env, triggers, true, false)
                 },
                 |mut sched| {
                     sched.event_loop();

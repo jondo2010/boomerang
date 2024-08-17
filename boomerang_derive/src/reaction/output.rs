@@ -115,10 +115,10 @@ impl ReactionReceiver {
     fn relations_tokens(&self) -> impl Iterator<Item = proc_macro2::TokenStream> + '_ {
         // Values from top-level attributes
         let trigger_vals = self.attr.triggers.iter().map(|trigger| match trigger {
-            TriggerAttr::Startup => quote! { .with_trigger_action(__startup_action, 0)},
-            TriggerAttr::Shutdown => quote! { .with_trigger_action(__shutdown_action, 0)},
-            TriggerAttr::Action(action) => quote! { .with_trigger_action(reactor.#action, 0)},
-            TriggerAttr::Port(port) => quote! { .with_trigger_port(reactor.#port, 0) },
+            TriggerAttr::Startup => quote! { .with_trigger_action(__startup_action, 0)? },
+            TriggerAttr::Shutdown => quote! { .with_trigger_action(__shutdown_action, 0)? },
+            TriggerAttr::Action(action) => quote! { .with_trigger_action(reactor.#action, 0)? },
+            TriggerAttr::Port(port) => quote! { .with_trigger_port(reactor.#port, 0)? },
         });
 
         // Values from argument attributes
@@ -146,32 +146,32 @@ impl ReactionReceiver {
                     attrs: PortAttrs::Triggers,
                     ..
                 } => Some(quote! {
-                    //TODO losing this type information is not ideal, which was ensuring that the port types in the builder and reaction were the same
-                    //.with_trigger_port::<#ty>(reactor.#expr, 0)
-                    .with_trigger_port(reactor.#expr, 0)
+                    .with_trigger_port(::boomerang::builder::TypedPortKey::<#ty>::from(reactor.#expr), 0)?
                 }),
                 ArgumentAttr::Port {
                     attrs: PortAttrs::Effects,
                     ..
-                } => Some(quote! { .with_effect_port::<#ty>(reactor.#expr, 0) }),
+                } => Some(quote! {
+                    .with_effect_port(::boomerang::builder::TypedPortKey::<#ty>::from(reactor.#expr), 0)?
+                }),
                 ArgumentAttr::Action {
                     attrs: ActionAttrs::Triggers,
                     ..
                 } => Some(quote! {
-                    //.with_trigger_action::<#ty, _>(reactor.#expr, 0)
-                    .with_trigger_action(reactor.#expr, 0)
+                    .with_trigger_action(::boomerang::builder::TypedActionKey::<#ty, _>::from(reactor.#expr), 0)?
                 }),
                 ArgumentAttr::Action {
                     attrs: ActionAttrs::Effects,
                     ..
-                } => Some(quote! { .with_effect_action::<#ty, _>(reactor.#expr, 0) }),
+                } => Some(quote! {
+                    .with_effect_action(::boomerang::builder::TypedActionKey::<#ty, _>::from(reactor.#expr), 0)?
+                }),
                 ArgumentAttr::Action {
                     attrs: ActionAttrs::TriggersAndEffects,
                     ..
                 } => Some(quote! {
-                    //.with_trigger_action::<#ty, _>(reactor.#expr, 0)
-                    .with_trigger_action(reactor.#expr, 0)
-                    .with_effect_action::<#ty, _>(reactor.#expr, 0)
+                    .with_trigger_action(::boomerang::builder::TypedActionKey::<#ty, _>::from(reactor.#expr), 0)?
+                    .with_effect_action(::boomerang::builder::TypedActionKey::<#ty, _>::from(reactor.#expr), 0)?
                 }),
                 _ => None,
             }

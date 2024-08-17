@@ -30,6 +30,4 @@ macro_rules! key_type {
     };
 }
 
-// pub(crate) use key_type;
-
 key_type!(pub DefaultKey);

@@ -41,8 +41,10 @@ pub fn build_and_test_reactor<R: Reactor>(
     let mut env_builder = EnvBuilder::new();
     let reactor = R::build(name, state, None, &mut env_builder)
         .context("Error building top-level reactor!")?;
-    let (env, _) = env_builder.try_into().expect("Error building environment!");
-    let mut sched = runtime::Scheduler::new(env, fast_forward, keep_alive);
+    let (env, triggers, _) = env_builder
+        .into_runtime_parts()
+        .context("Error building environment!")?;
+    let mut sched = runtime::Scheduler::new(env, triggers, fast_forward, keep_alive);
     sched.event_loop();
     Ok(reactor)
 }
@@ -85,13 +87,14 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
     }
 
     if args.print_debug_info {
-        // runtime::util::print_debug_info(&env);
         println!("{env_builder:#?}");
         panic!("Debug info printed");
     }
-    let (env, _) = env_builder.try_into().unwrap();
+    let (env, triggers, _) = env_builder
+        .into_runtime_parts()
+        .context("Error building environment!")?;
 
-    let mut sched = runtime::Scheduler::new(env, false, true);
+    let mut sched = runtime::Scheduler::new(env, triggers, false, true);
     sched.event_loop();
 
     Ok(reactor)

@@ -46,7 +46,7 @@ pub trait ReactionField {
         order: usize,
         triggers: bool,
         effects: bool,
-    ) -> ReactionBuilderState;
+    ) -> Result<ReactionBuilderState, BuilderError>;
 }
 
 impl<T: runtime::ActionData> ReactionField for runtime::ActionRef<'_, T> {
@@ -58,14 +58,14 @@ impl<T: runtime::ActionData> ReactionField for runtime::ActionRef<'_, T> {
         order: usize,
         triggers: bool,
         effects: bool,
-    ) -> ReactionBuilderState {
+    ) -> Result<ReactionBuilderState, BuilderError> {
         match (triggers, effects) {
             (true, false) => builder.with_trigger_action(key, order),
             (false, true) => builder.with_effect_action(key, order),
             (true, true) => builder
                 .with_trigger_action(key.clone(), order)
-                .with_effect_action(key, order),
-            _ => builder,
+                .and_then(|builder| builder.with_effect_action(key, order)),
+            _ => builder.with_uses_action(key, order),
         }
     }
 }
@@ -79,12 +79,15 @@ impl<T: runtime::PortData> ReactionField for runtime::Port<T> {
         order: usize,
         triggers: bool,
         effects: bool,
-    ) -> ReactionBuilderState {
+    ) -> Result<ReactionBuilderState, BuilderError> {
         match (triggers, effects) {
             (true, false) => builder.with_trigger_port(key, order),
             (false, true) => builder.with_effect_port(key, order),
-            (true, true) => panic!("Cannot have a port that is both a trigger and an effect"),
-            _ => builder,
+            (true, true) => Err(BuilderError::ReactionBuilderError(
+                "Cannot have a port that is both a trigger and an effect".to_string(),
+            )),
+            // By default, we assume the port is "used"
+            _ => builder.with_uses_port(key, order),
         }
     }
 }
@@ -130,16 +133,17 @@ impl ReactionBuilder {
     }
 
     /// Build a [`runtime::Reaction`] from this `ReactionBuilder`.
-    pub fn build_reaction(
+    pub fn build_runtime_reaction(
         self,
         reactor_key: runtime::ReactorKey,
         port_aliases: &SecondaryMap<BuilderPortKey, runtime::PortKey>,
         action_aliases: &SecondaryMap<BuilderActionKey, runtime::ActionKey>,
     ) -> runtime::Reaction {
-        // Create the Vec of input ports for this reaction sorted by order
-        let inputs = self
+        // Create the Vec of readable ports for this reaction sorted by order
+        let use_ports = self
             .trigger_ports
             .iter()
+            .chain(self.use_ports.iter())
             .sorted_by_key(|(_, &order)| order)
             .map(|(builder_port_key, _)| port_aliases[builder_port_key])
             .collect();
@@ -152,6 +156,7 @@ impl ReactionBuilder {
             .map(|(builder_port_key, _)| port_aliases[builder_port_key])
             .collect();
 
+        // Create the Vec of actions for this reaction sorted by order
         let actions = self
             .trigger_actions
             .iter()
@@ -164,7 +169,7 @@ impl ReactionBuilder {
         runtime::Reaction::new(
             self.name,
             reactor_key,
-            inputs,
+            use_ports,
             outputs,
             actions,
             self.reaction_fn,
@@ -216,61 +221,162 @@ impl<'a> ReactionBuilderState<'a> {
     }
 
     /// Indicate that this Reaction can be triggered by the given Action
+    ///
+    /// There must be at least one trigger for each reaction.
     pub fn with_trigger_action(
         mut self,
-        trigger_key: impl Into<BuilderActionKey>,
+        action_key: impl Into<BuilderActionKey>,
         order: usize,
-    ) -> Self {
-        self.builder
-            .trigger_actions
-            .insert(trigger_key.into(), order);
-        self
+    ) -> Result<Self, BuilderError> {
+        let action_key = action_key.into();
+        let action = &self.env.action_builders[action_key];
+        if action.get_reactor_key() != self.builder.reactor_key {
+            return Err(BuilderError::ReactionBuilderError(format!(
+                "Cannot 'trigger on' action '{}', it must belong to the same reactor as the reaction",
+                action.get_name()
+            )));
+        }
+        self.builder.trigger_actions.insert(action_key, order);
+        Ok(self)
     }
 
-    /// Indicate that this Reaction can be triggered by the given Port
-    pub fn with_trigger_port(mut self, port_key: impl Into<BuilderPortKey>, order: usize) -> Self {
-        self.builder.trigger_ports.insert(port_key.into(), order);
-        self
-    }
-
-    /// Indicate that this Reaction may read the value of the given action.
-    pub fn with_uses_action<T: runtime::ActionData, Q>(
+    /// Indicate that this Reaction may read the value of the given action, but is not triggered by it.
+    pub fn with_uses_action(
         mut self,
-        action_key: TypedActionKey<T, Q>,
+        action_key: impl Into<BuilderActionKey>,
         order: usize,
-    ) -> Self {
-        self.builder.use_actions.insert(action_key.into(), order);
-        self
-    }
-
-    /// Indicate that this Reaction may read the value of the given port.
-    pub fn with_uses_port<T: runtime::PortData>(
-        mut self,
-        port_key: TypedPortKey<T>,
-        order: usize,
-    ) -> Self {
-        self.builder.use_ports.insert(port_key.into(), order);
-        self
+    ) -> Result<Self, BuilderError> {
+        let action_key = action_key.into();
+        let action = &self.env.action_builders[action_key];
+        if action.get_reactor_key() != self.builder.reactor_key {
+            return Err(BuilderError::ReactionBuilderError(format!(
+                "Cannot 'use' action '{}', it must belong to the same reactor as the reaction",
+                action.get_name()
+            )));
+        }
+        self.builder.use_actions.insert(action_key, order);
+        Ok(self)
     }
 
     /// Indicate that this Reaction may schedule the given action.
-    pub fn with_effect_action<T: runtime::PortData, Q>(
+    pub fn with_effect_action(
         mut self,
-        action_key: TypedActionKey<T, Q>,
+        action_key: impl Into<BuilderActionKey>,
         order: usize,
-    ) -> Self {
+    ) -> Result<Self, BuilderError> {
+        let action_key = action_key.into();
+        let action = &self.env.action_builders[action_key];
+        if action.get_reactor_key() != self.builder.reactor_key {
+            return Err(BuilderError::ReactionBuilderError(format!(
+                "Cannot 'effect' action '{}', it must belong to the same reactor as the reaction",
+                action.get_name()
+            )));
+        }
         self.builder.effect_actions.insert(action_key.into(), order);
-        self
+        Ok(self)
+    }
+
+    /// Indicate that this Reaction can be triggered by the given Port
+    ///
+    /// Valid ports are input ports in this reactor, (or output ports of contained reactors).
+    /// There must be at least one trigger for each reaction.
+    pub fn with_trigger_port(
+        mut self,
+        port_key: impl Into<BuilderPortKey>,
+        order: usize,
+    ) -> Result<Self, BuilderError> {
+        let port_key = port_key.into();
+        let port_builder = &self.env.port_builders[port_key];
+        let port_reactor_key = port_builder.get_reactor_key();
+        let port_parent_reactor_key =
+            self.env.reactor_builders[port_reactor_key].parent_reactor_key;
+
+        match port_builder.get_port_type() {
+            PortType::Input if port_reactor_key != self.builder.reactor_key => {
+                Err(BuilderError::ReactionBuilderError(format!(
+                    "Cannot 'trigger on' input port '{}', it must belong to the same reactor as the reaction",
+                    port_builder.get_name()
+                )))
+            }
+            PortType::Output if port_parent_reactor_key != Some(self.builder.reactor_key) => {
+                Err(BuilderError::ReactionBuilderError(format!(
+                    "Cannot 'trigger on' output port '{}', it must belong to a contained reactor",
+                    port_builder.get_name()
+                )))
+            }
+            _ => {
+                self.builder.trigger_ports.insert(port_key, order);
+                Ok(self)
+            }
+        }
+    }
+
+    /// Indicate that this Reaction may read the value of the given port, but is not triggered by it.
+    ///
+    /// Valid ports are input ports in this reactor, (or output ports of contained reactors).
+    pub fn with_uses_port(
+        mut self,
+        port_key: impl Into<BuilderPortKey>,
+        order: usize,
+    ) -> Result<Self, BuilderError> {
+        let port_key = port_key.into();
+        let port_builder = &self.env.port_builders[port_key];
+        let port_reactor_key = port_builder.get_reactor_key();
+        let port_parent_reactor_key =
+            self.env.reactor_builders[port_reactor_key].parent_reactor_key;
+
+        match port_builder.get_port_type() {
+            PortType::Input if port_reactor_key != self.builder.reactor_key => {
+                Err(BuilderError::ReactionBuilderError(format!(
+                    "Cannot 'use' input port '{}', it must belong to the same reactor as the reaction",
+                    port_builder.get_name()
+                )))
+            }
+            PortType::Output if port_parent_reactor_key != Some(self.builder.reactor_key) => {
+                Err(BuilderError::ReactionBuilderError(format!(
+                    "Cannot 'use' output port '{}', it must belong to a contained reactor",
+                    port_builder.get_name()
+                )))
+            }
+            _ => {
+                self.builder.use_ports.insert(port_key, order);
+                Ok(self)
+            }
+        }
     }
 
     /// Indicate that this Reaction may set the value of the given port.
-    pub fn with_effect_port<T: runtime::PortData>(
+    ///
+    /// Valid ports are output ports in this reactor, (or input ports of contained reactors).
+    pub fn with_effect_port(
         mut self,
-        antidep_key: TypedPortKey<T>,
+        port_key: impl Into<BuilderPortKey>,
         order: usize,
-    ) -> Self {
-        self.builder.effect_ports.insert(antidep_key.into(), order);
-        self
+    ) -> Result<Self, BuilderError> {
+        let port_key = port_key.into();
+        let port_builder = &self.env.port_builders[port_key];
+        let port_reactor_key = port_builder.get_reactor_key();
+        let port_parent_reactor_key =
+            self.env.reactor_builders[port_reactor_key].parent_reactor_key;
+
+        match port_builder.get_port_type() {
+            PortType::Input if port_parent_reactor_key != Some(self.builder.reactor_key) => {
+                Err(BuilderError::ReactionBuilderError(format!(
+                    "Cannot 'effect' input port '{}', it must belong to a contained reactor",
+                    port_builder.get_name()
+                )))
+            }
+            PortType::Output if port_reactor_key != self.builder.reactor_key => {
+                Err(BuilderError::ReactionBuilderError(format!(
+                    "Cannot 'effect' output port '{}', it must belong to the same reactor as the reaction",
+                    port_builder.get_name()
+                )))
+            }
+            _ => {
+                self.builder.effect_ports.insert(port_key, order);
+                Ok(self)
+            }
+        }
     }
 
     pub fn finish(self) -> Result<BuilderReactionKey, BuilderError> {
@@ -278,6 +384,14 @@ impl<'a> ReactionBuilderState<'a> {
             builder: reaction_builder,
             env,
         } = self;
+
+        // Ensure there is at least one trigger declared
+        if reaction_builder.trigger_actions.is_empty() && reaction_builder.trigger_ports.is_empty()
+        {
+            return Err(BuilderError::ReactionBuilderError(
+                "Reactions must have at least one trigger".to_string(),
+            ));
+        }
 
         let reactor = &mut env.reactor_builders[reaction_builder.reactor_key];
         let reactions = &mut env.reaction_builders;
@@ -324,12 +438,14 @@ impl<'a> ReactionBuilderState<'a> {
         }
 
         // Both trigger_ports and use_ports are treated as dependencies
-        for port_key in reaction_builder
+        for (port_key, is_trigger) in reaction_builder
             .trigger_ports
             .keys()
-            .chain(reaction_builder.use_ports.keys())
+            .map(|key| (key, true))
+            .chain(reaction_builder.use_ports.keys().map(|key| (key, false)))
         {
             let port = ports.get_mut(port_key).unwrap();
+            // Note, these assertions are the same as the ones on the builder methods
             if port.get_port_type() == &PortType::Input {
                 assert_eq!(
                     reaction_builder.reactor_key,
@@ -346,7 +462,7 @@ impl<'a> ReactionBuilderState<'a> {
                 );
             }
 
-            port.register_dependency(reaction_key, true);
+            port.register_dependency(reaction_key, is_trigger);
         }
 
         Ok(reaction_key)

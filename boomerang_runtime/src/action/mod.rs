@@ -71,12 +71,15 @@ impl_downcast!(sync BaseActionValues);
 
 #[derive(Debug)]
 pub(crate) struct ActionValues<T: ActionData>(HashMap<Tag, T>);
+
 impl<T: ActionData> BaseActionValues for ActionValues<T> {
     fn remove(&mut self, tag: Tag) {
         self.0.remove(&tag);
     }
+}
 
-    #[cfg(feature = "serde")]
+#[cfg(feature = "serde")]
+impl<T: ActionData> BaseActionValues for ActionValues<T> {
     fn serialize_tag(
         &self,
         tag: Tag,

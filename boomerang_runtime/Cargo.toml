@@ -9,7 +9,10 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["parallel", "serde"]
+default = [
+    #"parallel",
+    #"serde"
+]
 parallel = ["dep:rayon"]
 serde = ["dep:serde", "dep:erased-serde"]
 
@@ -23,6 +26,11 @@ itertools.workspace = true
 rayon = { version = "1.7", optional = true }
 thiserror.workspace = true
 tinymap.workspace = true
-tracing.workspace = true
+tracing = { workspace = true, features = [
+    #"max_level_debug",
+    #"release_max_level_warn",
+] }
 serde = { workspace = true, optional = true }
 erased-serde = { workspace = true, optional = true }
+
+bumpalo = { version = "3.16", features = ["collections"] }

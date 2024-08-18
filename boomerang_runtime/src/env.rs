@@ -1,9 +1,4 @@
-use std::fmt::Display;
-
-use tinymap::{
-    chunks::{Chunks, ChunksMut},
-    map::{IterMany, IterManyMut},
-};
+use tinymap::chunks::{Chunks, ChunksMut};
 
 use crate::{
     fmt_utils as fmt, Action, ActionKey, BasePort, PortKey, Reaction, ReactionKey, Reactor,
@@ -183,20 +178,16 @@ impl std::fmt::Debug for TriggerMap {
 }
 
 /// Set of borrows necessary for a single Reaction triggering.
-pub(crate) struct ReactionTriggerCtx<'a, IA, IP>
-where
-    IA: Iterator<Item = ActionKey> + Send,
-    IP: Iterator<Item = PortKey> + Send,
-{
+pub(crate) struct ReactionTriggerCtx<'a> {
     pub(crate) reactor: &'a mut Reactor,
     pub(crate) reaction: &'a Reaction,
-    pub(crate) actions: IterManyMut<'a, ActionKey, Action, IA>,
-    pub(crate) inputs: IterMany<'a, PortKey, Box<dyn BasePort>, IP>,
-    pub(crate) outputs: IterManyMut<'a, PortKey, Box<dyn BasePort>, IP>,
+    pub(crate) actions: &'a mut [&'a mut Action],
+    pub(crate) inputs: &'a [&'a Box<dyn BasePort>],
+    pub(crate) outputs: &'a mut [&'a mut Box<dyn BasePort>],
 }
 
 /// Container for set of iterators used to build a `ReactionTriggerCtx`
-pub(crate) struct ReactionTriggerCtxIter<'a, IReactor, IReaction, IO1, IO2, IO3, IA, IP>
+pub(crate) struct ReactionTriggerCtxIter<'a, 'bump, IReactor, IReaction, IO1, IO2, IO3, IA, IP>
 where
     IReactor: Iterator<Item = &'a mut Reactor>,
     IReaction: Iterator<Item = &'a Reaction>,
@@ -206,6 +197,7 @@ where
     IA: Iterator<Item = ActionKey> + Send,
     IP: Iterator<Item = PortKey> + Send,
 {
+    bump: &'bump bumpalo::Bump,
     reactors: IReactor,
     reactions: IReaction,
     grouped_actions: ChunksMut<'a, ActionKey, Action, IO1, IA>,
@@ -213,18 +205,18 @@ where
     grouped_outputs: ChunksMut<'a, PortKey, Box<dyn BasePort>, IO3, IP>,
 }
 
-impl<'a, IReactor, IReaction, IO1, IO2, IO3, IA, IP> Iterator
-    for ReactionTriggerCtxIter<'a, IReactor, IReaction, IO1, IO2, IO3, IA, IP>
+impl<'a, 'bump: 'a, IReactor, IReaction, IO1, IO2, IO3, IA, IP> Iterator
+    for ReactionTriggerCtxIter<'a, 'bump, IReactor, IReaction, IO1, IO2, IO3, IA, IP>
 where
     IReactor: Iterator<Item = &'a mut Reactor>,
     IReaction: Iterator<Item = &'a Reaction>,
     IO1: Iterator<Item = IA> + Send,
     IO2: Iterator<Item = IP> + Send,
     IO3: Iterator<Item = IP> + Send,
-    IA: Iterator<Item = ActionKey> + Send,
-    IP: Iterator<Item = PortKey> + Send,
+    IA: Iterator<Item = ActionKey> + ExactSizeIterator + Send,
+    IP: Iterator<Item = PortKey> + ExactSizeIterator + Send,
 {
-    type Item = ReactionTriggerCtx<'a, IA, IP>;
+    type Item = ReactionTriggerCtx<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let reactor = self.reactors.next();
@@ -238,9 +230,9 @@ where
                 Some(ReactionTriggerCtx {
                     reactor,
                     reaction,
-                    actions,
-                    inputs,
-                    outputs,
+                    actions: self.bump.alloc_slice_fill_iter(actions),
+                    inputs: self.bump.alloc_slice_fill_iter(inputs),
+                    outputs: self.bump.alloc_slice_fill_iter(outputs),
                 })
             }
             (None, None, None, None, None) => None,
@@ -275,18 +267,13 @@ impl Env {
     ///
     /// # Safety
     /// The Reactions corresponding to `reaction_keys` must be be independent of each other.
-    pub(crate) unsafe fn iter_reaction_ctx<'a, I>(
+    pub(crate) unsafe fn iter_reaction_ctx<'a, 'bump: 'a, I>(
         &'a mut self,
+        bump: &'bump bumpalo::Bump,
         reaction_keys: I,
-    ) -> impl Iterator<
-        Item = ReactionTriggerCtx<
-            'a,
-            impl Iterator<Item = ActionKey> + Send + 'a,
-            impl Iterator<Item = PortKey> + Send + 'a,
-        >,
-    > + 'a
+    ) -> impl Iterator<Item = ReactionTriggerCtx<'a>> + 'a
     where
-        I: Iterator<Item = &'a ReactionKey> + Clone + Send + 'a,
+        I: Iterator<Item = &'a ReactionKey> + ExactSizeIterator + Clone + Send + 'a,
     {
         let reactions = reaction_keys.map(|&k| &self.reactions[k]);
 
@@ -318,6 +305,7 @@ impl Env {
         };
 
         ReactionTriggerCtxIter {
+            bump,
             reactors,
             reactions,
             grouped_actions: actions,

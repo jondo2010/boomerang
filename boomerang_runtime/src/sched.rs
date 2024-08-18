@@ -3,8 +3,8 @@ use derive_more::Display;
 use std::{collections::BinaryHeap, time::Duration};
 
 use crate::{
-    keepalive, Action, ActionKey, BasePort, Env, Instant, LevelReactionKey, LogicalAction,
-    ReactionSet, ReactionTriggerCtx, Tag, TriggerMap,
+    keepalive, Action, ActionKey, Env, Instant, LevelReactionKey, LogicalAction, ReactionSet,
+    ReactionTriggerCtx, Tag, TriggerMap,
 };
 
 #[derive(Debug, Display, Clone)]
@@ -331,58 +331,67 @@ impl<'env> Scheduler<'env> {
     /// Reactions at a level N may trigger further reactions at levels M>N
     #[tracing::instrument(skip(self, reaction_set), fields(tag = %tag))]
     pub fn process_tag(&mut self, tag: Tag, mut reaction_set: ReactionSet) {
+        let bump = bumpalo::Bump::new();
+
         while let Some((level, reaction_keys)) = reaction_set.next() {
             tracing::trace!(level=?level, reaction_keys = ?reaction_keys, "Iter");
 
             // Safety: reaction_keys in the same level are guaranteed to be independent of each other.
-            let iter_ctx = unsafe { self.env.iter_reaction_ctx(reaction_keys.iter()) };
+            let iter_ctx = unsafe { self.env.iter_reaction_ctx(&bump, reaction_keys.iter()) };
 
             #[cfg(feature = "parallel")]
-            use rayon::prelude::{ParallelBridge, ParallelIterator};
+            use rayon::prelude::ParallelIterator;
 
             #[cfg(feature = "parallel")]
-            let iter_ctx = iter_ctx.par_bridge();
+            let iter_ctx = rayon::prelude::ParallelBridge::par_bridge(iter_ctx);
 
-            let level_res = iter_ctx
-                .map(|trigger_ctx| {
-                    let ReactionTriggerCtx {
-                        reaction,
-                        reactor,
-                        actions,
-                        inputs,
-                        outputs,
-                    } = trigger_ctx;
+            let iter_ctx_res = iter_ctx.map(|trigger_ctx| {
+                let ReactionTriggerCtx {
+                    reaction,
+                    reactor,
+                    actions,
+                    inputs,
+                    outputs,
+                } = trigger_ctx;
 
-                    tracing::trace!(
-                        "    Executing {reactor_name}/{reaction_name}.",
-                        reaction_name = reaction.get_name(),
-                        reactor_name = reactor.get_name()
-                    );
+                tracing::trace!(
+                    "    Executing {reactor_name}/{reaction_name}.",
+                    reaction_name = reaction.get_name(),
+                    reactor_name = reactor.get_name()
+                );
 
-                    //TODO: Plumb these iterators through into the generated reaction code.
-                    let mut actions = actions.collect::<Vec<_>>();
-                    let inputs = inputs.collect::<Vec<_>>();
-                    let mut outputs: Vec<&mut Box<dyn BasePort>> = outputs.collect::<Vec<_>>();
+                reaction.trigger(
+                    self.start_time,
+                    tag,
+                    reactor,
+                    actions,
+                    inputs,
+                    outputs,
+                    self.event_tx.clone(),
+                    self.shutdown_tx.new_receiver(),
+                )
+            });
 
-                    reaction.trigger(
-                        self.start_time,
-                        tag,
-                        reactor,
-                        actions.as_mut_slice(),
-                        inputs.as_slice(),
-                        outputs.as_mut_slice(),
-                        self.event_tx.clone(),
-                        self.shutdown_tx.new_receiver(),
-                    )
-                })
-                .collect::<Vec<_>>();
+            iter_ctx_res.for_each(|res| {
+                // Update any earlier shutdown requested
+                self.shutdown_tag = res
+                    .scheduled_shutdown
+                    .iter()
+                    .chain(self.shutdown_tag.iter())
+                    .min()
+                    .copied();
 
-            // Update any earlier shutdown requested
-            self.shutdown_tag = level_res
-                .iter()
-                .filter_map(|ctx| ctx.scheduled_shutdown)
-                .chain(self.shutdown_tag)
-                .min();
+                // Submit events to the event queue for all scheduled actions
+                self.event_queue
+                    .extend(res.scheduled_actions.iter().map(|&(action_key, tag)| {
+                        let downstream = self.trigger_map.action_triggers[action_key].iter();
+                        ScheduledEvent {
+                            tag,
+                            reactions: ReactionSet::from_iter(downstream.copied()),
+                            terminal: false,
+                        }
+                    }));
+            });
 
             // Collect all the reactions that are triggered by the ports
             self.env.ports.iter().for_each(|(port_key, port)| {
@@ -394,19 +403,6 @@ impl<'env> Scheduler<'env> {
                     reaction_set.extend_above(downstream, level);
                 }
             });
-
-            for res in level_res.into_iter() {
-                // Submit events to the event queue for all scheduled actions
-                self.event_queue
-                    .extend(res.scheduled_actions.into_iter().map(|(action_key, tag)| {
-                        let downstream = self.trigger_map.action_triggers[action_key].iter();
-                        ScheduledEvent {
-                            tag,
-                            reactions: ReactionSet::from_iter(downstream.copied()),
-                            terminal: false,
-                        }
-                    }));
-            }
         }
 
         self.cleanup(tag);

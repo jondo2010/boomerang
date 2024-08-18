@@ -93,6 +93,15 @@ where
     }
 }
 
+impl<'a, K: Key, V, I> ExactSizeIterator for IterMany<'a, K, V, I>
+where
+    I: Iterator<Item = K> + ExactSizeIterator,
+{
+    fn len(&self) -> usize {
+        self.keys.len()
+    }
+}
+
 unsafe impl<K: Key, V: Send, I: Iterator<Item = K>> Send for IterMany<'_, K, V, I> {}
 
 pub struct IterManyMut<'a, K: Key, V, I>
@@ -128,6 +137,15 @@ where
             let ptr = self.ptr.wrapping_add(key.index());
             &mut *ptr
         })
+    }
+}
+
+impl<'a, K: Key, V, I> ExactSizeIterator for IterManyMut<'a, K, V, I>
+where
+    I: Iterator<Item = K> + ExactSizeIterator,
+{
+    fn len(&self) -> usize {
+        self.keys.len()
     }
 }
 

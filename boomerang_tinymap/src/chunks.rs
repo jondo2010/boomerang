@@ -37,6 +37,17 @@ where
     }
 }
 
+impl<'a, K, V, IO, II> ExactSizeIterator for Chunks<'a, K, V, IO, II>
+where
+    IO: Iterator<Item = II> + ExactSizeIterator + Send,
+    II: Iterator<Item = K> + ExactSizeIterator + Send,
+    K: Key,
+{
+    fn len(&self) -> usize {
+        self.keys.len()
+    }
+}
+
 /// `ChunkMut` is a mutable version of [`Chunks`].
 pub struct ChunksMut<'a, K: Key, V, IO, II>
 where
@@ -70,6 +81,17 @@ where
     }
 }
 
+impl<'a, K, V, IO, II> ExactSizeIterator for ChunksMut<'a, K, V, IO, II>
+where
+    IO: Iterator<Item = II> + ExactSizeIterator + Send,
+    II: Iterator<Item = K> + ExactSizeIterator + Send,
+    K: Key,
+{
+    fn len(&self) -> usize {
+        self.keys.len()
+    }
+}
+
 pub type SplitChunks<'a, K, V, IO1, IO2, II> =
     (Chunks<'a, K, V, IO1, II>, ChunksMut<'a, K, V, IO2, II>);
 
@@ -88,9 +110,9 @@ impl<K: Key, V: Send> TinyMap<K, V> {
         keys_mut: IO2,
     ) -> SplitChunks<'_, K, V, IO1, IO2, II>
     where
-        IO1: Iterator<Item = II> + Clone + Send,
-        IO2: Iterator<Item = II> + Clone + Send,
-        II: Iterator<Item = K> + Clone + Send,
+        IO1: Iterator<Item = II> + ExactSizeIterator + Clone + Send,
+        IO2: Iterator<Item = II> + ExactSizeIterator + Clone + Send,
+        II: Iterator<Item = K> + ExactSizeIterator + Clone + Send,
     {
         (
             Chunks {

@@ -11,20 +11,21 @@ pub trait Key: From<usize> + Copy {
 
 #[macro_export(local_inner_macros)]
 macro_rules! key_type {
-    ($vis:vis $name:ident) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    ($(#[$outer:meta])* $vis:vis $name:ident) => {
+        $(#[$outer])*
+        #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[repr(transparent)]
-        $vis struct $name(usize);
+        $vis struct $name(u64);
 
         impl $crate::Key for $name {
             fn index(&self) -> usize {
-                self.0
+                self.0 as usize
             }
         }
 
         impl From<usize> for $name {
             fn from(value: usize) -> Self {
-                Self(value)
+                Self(value as _)
             }
         }
     };

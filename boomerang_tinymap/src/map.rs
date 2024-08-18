@@ -47,13 +47,13 @@ impl<K: Key, V> Index<K> for TinyMap<K, V> {
     type Output = V;
 
     fn index(&self, key: K) -> &Self::Output {
-        &self.data[key.index()]
+        &self.data[key.index() as usize]
     }
 }
 
 impl<K: Key, V> IndexMut<K> for TinyMap<K, V> {
     fn index_mut(&mut self, key: K) -> &mut Self::Output {
-        &mut self.data[key.index()]
+        &mut self.data[key.index() as usize]
     }
 }
 
@@ -87,7 +87,7 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         self.keys.next().map(|key| unsafe {
-            let ptr = self.ptr.wrapping_add(key.index());
+            let ptr = self.ptr.wrapping_add(key.index() as usize);
             &*ptr
         })
     }

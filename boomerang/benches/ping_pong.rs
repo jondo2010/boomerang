@@ -11,7 +11,7 @@ use boomerang::{
     builder::{BuilderReactionKey, EnvBuilder, Reactor, TypedActionKey, TypedPortKey},
     runtime, Reactor,
 };
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 
 #[derive(Reactor)]
 #[reactor(state = "Ping")]
@@ -98,7 +98,10 @@ struct PongBuilder {
     reaction_in_ping: BuilderReactionKey,
 }
 
-struct Pong;
+#[derive(Default)]
+struct Pong {
+    count: usize,
+}
 
 impl Pong {
     #[boomerang::reaction(reactor = "PongBuilder", triggers(port = "in_ping"))]
@@ -108,6 +111,7 @@ impl Pong {
         #[reactor::port(effects)] out_pong: &mut runtime::Port<()>,
     ) {
         *out_pong.get_mut() = Some(());
+        self.count += 1;
     }
 }
 
@@ -121,7 +125,7 @@ struct MainBuilder {
     #[reactor(child(state = "Ping::new(state.count)"))]
     ping: PingBuilder,
 
-    #[reactor(child(state = "Pong"))]
+    #[reactor(child(state = "Pong::default()"))]
     pong: PongBuilder,
 
     #[reactor(reaction(function = "Main::startup"))]
@@ -159,8 +163,9 @@ impl Main {
 fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("ping_pong");
 
-    for count in [100, 1000, 10000, 100000 /*1000000*/].into_iter() {
-        group.sample_size(count);
+    for count in [100, 10000, 1000000].into_iter() {
+        group.sample_size(25);
+        group.throughput(Throughput::Elements(count as u64));
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
             b.iter_batched(
                 || {
@@ -168,10 +173,24 @@ fn bench(c: &mut Criterion) {
                     let _reactor =
                         MainBuilder::build("main", Main { count }, None, &mut env_builder).unwrap();
                     let (env, triggers, _) = env_builder.into_runtime_parts().unwrap();
-                    runtime::Scheduler::new(env, triggers, true, false)
+                    (env, triggers)
                 },
-                |mut sched| {
+                |(mut env, triggers)| {
+                    let mut sched = runtime::Scheduler::new(&mut env, triggers, true, false);
                     sched.event_loop();
+
+                    let ping = env
+                        .get_reactor_by_name("ping")
+                        .and_then(|reactor| reactor.get_state::<Ping>())
+                        .unwrap();
+                    assert_eq!(ping.count, count);
+                    assert_eq!(ping.pings_left, 0);
+
+                    let pong = env
+                        .get_reactor_by_name("pong")
+                        .and_then(|reactor| reactor.get_state::<Pong>())
+                        .unwrap();
+                    assert_eq!(pong.count, count);
                 },
                 BatchSize::SmallInput,
             );

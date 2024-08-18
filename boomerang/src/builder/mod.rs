@@ -89,20 +89,3 @@ impl From<std::convert::Infallible> for BuilderError {
         unreachable!()
     }
 }
-
-trait TupleSlice {
-    type Item;
-    fn tuple_at_mut(&mut self, idxs: (usize, usize)) -> (&mut Self::Item, &mut Self::Item);
-}
-
-impl<T: Sized> TupleSlice for [T] {
-    type Item = T;
-    fn tuple_at_mut(&mut self, idx: (usize, usize)) -> (&mut Self::Item, &mut Self::Item) {
-        let len = self.len();
-        assert!(idx.0 != idx.1 && idx.0 <= len && idx.1 <= len);
-        // SAFETY: [ptr; idx0] and [ptr; idx1] are non-overlapping and within `self`
-        let ptr = self.as_mut_ptr();
-        let slice = std::ptr::slice_from_raw_parts_mut(ptr, len);
-        unsafe { (&mut (*slice)[idx.0], &mut (*slice)[idx.1]) }
-    }
-}

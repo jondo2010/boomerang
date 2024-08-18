@@ -4,7 +4,7 @@ use crossbeam_channel::Sender;
 
 use crate::{
     keepalive, key_set::KeySet, Action, ActionKey, BasePort, Context, Duration, PhysicalEvent,
-    PortKey, Reactor, ReactorKey, ReactorState, Tag,
+    PortKey, Reactor, ReactorKey, ReactorState, Tag, TriggerRes,
 };
 
 tinymap::key_type!(pub ReactionKey);
@@ -131,14 +131,10 @@ impl Reaction {
         outputs: &mut [OPort<'_>],
         async_tx: Sender<PhysicalEvent>,
         shutdown_rx: keepalive::Receiver,
-    ) -> Context {
-        let Reactor {
-            state,
-            action_triggers,
-            ..
-        } = reactor;
+    ) -> TriggerRes {
+        let Reactor { state, .. } = reactor;
 
-        let mut ctx = Context::new(start_time, tag, action_triggers, async_tx, shutdown_rx);
+        let mut ctx = Context::new(start_time, tag, async_tx, shutdown_rx);
 
         if let Some(Deadline { deadline, handler }) = self.deadline.as_ref() {
             let lag = ctx.get_physical_time() - ctx.get_logical_time();
@@ -149,6 +145,6 @@ impl Reaction {
 
         (self.body)(&mut ctx, state.as_mut(), inputs, outputs, actions);
 
-        ctx
+        ctx.trigger_res
     }
 }

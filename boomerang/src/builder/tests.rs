@@ -181,9 +181,7 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
         tracing::info!("Wrote reaction graph to {path}");
     }
 
-    let (env, triggers, aliases) = env_builder.into_runtime_parts().unwrap();
-    dbg!(&env);
-    dbg!(&triggers);
+    let (mut env, triggers, aliases) = env_builder.into_runtime_parts().unwrap();
 
     // r_startup should be triggered by the startup action, but the startup action should not be in its list of actions.
     let r_startup_runtime = aliases.reaction_aliases[r_startup];
@@ -202,7 +200,7 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
         ],
     );
 
-    let mut sched = runtime::Scheduler::new(env, triggers, true, false);
+    let mut sched = runtime::Scheduler::new(&mut env, triggers, true, false);
     sched.event_loop();
 
     Ok(())
@@ -414,7 +412,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
 
     let reaction_clock_key = env_builder.get_reaction("reaction_clock", sink_reactor)?;
 
-    let (env, triggers, aliases) = env_builder.into_runtime_parts()?;
+    let (mut env, triggers, aliases) = env_builder.into_runtime_parts()?;
 
     let runtime_reaction_clock_key = aliases.reaction_aliases[reaction_clock_key];
     let reaction_clock = &env.reactions[runtime_reaction_clock_key];
@@ -442,7 +440,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
     // The clock reaction should not have any effect ports.
     itertools::assert_equal(reaction_clock.iter_effect_ports(), &[]);
 
-    let mut sched = runtime::Scheduler::new(env, triggers, true, false);
+    let mut sched = runtime::Scheduler::new(&mut env, triggers, true, false);
     sched.event_loop();
 
     Ok(())

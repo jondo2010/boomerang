@@ -1,54 +1,52 @@
 use crossbeam_channel::Sender;
 
 use crate::{
-    keepalive, ActionData, ActionKey, ActionRefValue, Duration, Instant, Level, LevelReactionKey,
-    PhysicalActionRef, PhysicalEvent, ReactionKey, ReactionSet, ScheduledEvent, Tag,
+    keepalive, ActionData, ActionKey, ActionRefValue, Duration, Instant, PhysicalActionRef,
+    PhysicalEvent, PortKey, Tag,
 };
 
-/// Internal state for a context object
+/// Result from a reaction trigger
 #[derive(Debug, Clone)]
-pub(crate) struct ContextInternal {
-    /// Remaining reactions triggered at this epoch to execute
-    pub(crate) reactions: Vec<(Level, ReactionKey)>,
-    /// Events scheduled for a future time
-    pub(crate) scheduled_events: Vec<ScheduledEvent>,
-    /// Channel for asynchronous events
-    pub(crate) async_tx: Sender<PhysicalEvent>,
-    /// Shutdown channel
-    pub(crate) shutdown_rx: keepalive::Receiver,
+pub(crate) struct TriggerRes {
+    /// Actions that have been scheduled to trigger at a future time
+    pub scheduled_actions: Vec<(ActionKey, Tag)>,
+    /// A shutdown was scheduled
+    pub scheduled_shutdown: Option<Tag>,
 }
 
 /// Scheduler context passed into reactor functions.
 #[derive(Debug)]
-pub struct Context<'a> {
+pub struct Context {
     /// Physical time the Scheduler was started
     pub(crate) start_time: Instant,
     /// Logical time of the currently executing epoch
     pub(crate) tag: Tag,
-    /// Internal state
-    pub(crate) internal: ContextInternal,
-    /// Downstream reactions triggered by actions
-    action_triggers: &'a tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
+
+    /// Channel for asynchronous events
+    pub(crate) async_tx: Sender<PhysicalEvent>,
+    /// Shutdown channel
+    pub(crate) shutdown_rx: keepalive::Receiver,
+
+    /// Trigger result
+    pub(crate) trigger_res: TriggerRes,
 }
 
-impl<'a> Context<'a> {
+impl Context {
     pub(crate) fn new(
         start_time: Instant,
         tag: Tag,
-        action_triggers: &'a tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
         async_tx: Sender<PhysicalEvent>,
         shutdown_rx: keepalive::Receiver,
     ) -> Self {
         Self {
             start_time,
             tag,
-            internal: ContextInternal {
-                reactions: Vec::new(),
-                scheduled_events: Vec::new(),
-                async_tx,
-                shutdown_rx,
+            async_tx,
+            shutdown_rx,
+            trigger_res: TriggerRes {
+                scheduled_actions: Vec::new(),
+                scheduled_shutdown: None,
             },
-            action_triggers,
         }
     }
 
@@ -97,38 +95,19 @@ impl<'a> Context<'a> {
         let new_tag = self.tag.delay(Some(tag_delay));
         tracing::trace!(new_tag = %new_tag, "Scheduling Logical");
         action.set_value(value, new_tag);
-        let downstream = self.action_triggers[action.get_key()].iter().copied();
-        self.enqueue_later(downstream, new_tag);
-    }
-
-    /// Adds new reactions to execute within this cycle
-    pub fn enqueue_now<'b>(&mut self, downstream: impl Iterator<Item = &'b LevelReactionKey>) {
-        // Merge all ReactionKeys from `downstream` into the todo reactions
-        self.internal.reactions.extend(downstream);
-    }
-
-    /// Adds new reactions to execute at a later cycle
-    pub fn enqueue_later(
-        &mut self,
-        downstream: impl Iterator<Item = (Level, ReactionKey)>,
-        tag: Tag,
-    ) {
-        let event = ScheduledEvent {
-            tag,
-            reactions: ReactionSet::from_iter(downstream),
-            terminal: false,
-        };
-        self.internal.scheduled_events.push(event);
+        self.trigger_res
+            .scheduled_actions
+            .push((action.get_key(), new_tag));
     }
 
     #[tracing::instrument]
     pub fn schedule_shutdown(&mut self, offset: Option<Duration>) {
-        let event = ScheduledEvent {
-            tag: self.tag.delay(offset),
-            reactions: ReactionSet::default(),
-            terminal: true,
-        };
-        self.internal.scheduled_events.push(event);
+        let tag = self.tag.delay(offset);
+
+        self.trigger_res.scheduled_shutdown = self
+            .trigger_res
+            .scheduled_shutdown
+            .map_or(Some(tag), |prev| Some(prev.min(tag)));
     }
 
     /// Create a new SendContext that can be shared across threads.
@@ -136,8 +115,8 @@ impl<'a> Context<'a> {
     pub fn make_send_context(&self) -> SendContext {
         SendContext {
             start_time: self.start_time,
-            async_tx: self.internal.async_tx.clone(),
-            shutdown_rx: self.internal.shutdown_rx.clone(),
+            async_tx: self.async_tx.clone(),
+            shutdown_rx: self.shutdown_rx.clone(),
         }
     }
 }

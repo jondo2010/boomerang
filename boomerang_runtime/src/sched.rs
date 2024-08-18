@@ -83,9 +83,9 @@ impl PhysicalEvent {
 }
 
 #[derive(Debug)]
-pub struct Scheduler {
+pub struct Scheduler<'env> {
     /// The environment state
-    env: Env,
+    env: &'env mut Env,
     /// The trigger map
     trigger_map: TriggerMap,
     /// Whether to skip wall-clock synchronization
@@ -106,8 +106,13 @@ pub struct Scheduler {
     shutdown_tx: keepalive::Sender,
 }
 
-impl Scheduler {
-    pub fn new(env: Env, trigger_map: TriggerMap, fast_forward: bool, keep_alive: bool) -> Self {
+impl<'env> Scheduler<'env> {
+    pub fn new(
+        env: &'env mut Env,
+        trigger_map: TriggerMap,
+        fast_forward: bool,
+        keep_alive: bool,
+    ) -> Self {
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
         let (shutdown_tx, _) = keepalive::channel();
 
@@ -338,7 +343,7 @@ impl Scheduler {
             #[cfg(feature = "parallel")]
             let iter_ctx = iter_ctx.par_bridge();
 
-            let inner_ctxs = iter_ctx
+            let level_res = iter_ctx
                 .map(|trigger_ctx| {
                     let ReactionTriggerCtx {
                         reaction,
@@ -359,7 +364,7 @@ impl Scheduler {
                     let inputs = inputs.collect::<Vec<_>>();
                     let mut outputs: Vec<&mut Box<dyn BasePort>> = outputs.collect::<Vec<_>>();
 
-                    let mut ctx = reaction.trigger(
+                    reaction.trigger(
                         self.start_time,
                         tag,
                         reactor,
@@ -368,29 +373,39 @@ impl Scheduler {
                         outputs.as_mut_slice(),
                         self.event_tx.clone(),
                         self.shutdown_tx.new_receiver(),
-                    );
-
-                    // Queue downstream reactions triggered by any ports that were set.
-                    for port in outputs.into_iter() {
-                        if port.is_set() {
-                            //ctx.enqueue_now(port.get_downstream());
-
-                            let downstream = self.trigger_map.port_triggers[port.get_key()].iter();
-                            // Merge all ReactionKeys from `downstream` into the todo reactions
-                            ctx.internal.reactions.extend(downstream);
-                        }
-                    }
-
-                    ctx.internal
+                    )
                 })
                 .collect::<Vec<_>>();
 
-            for ctx in inner_ctxs.into_iter() {
-                reaction_set.extend_above(ctx.reactions.into_iter(), level);
+            // Update any earlier shutdown requested
+            self.shutdown_tag = level_res
+                .iter()
+                .filter_map(|ctx| ctx.scheduled_shutdown)
+                .chain(self.shutdown_tag)
+                .min();
 
-                for evt in ctx.scheduled_events.into_iter() {
-                    self.event_queue.push(evt);
+            // Collect all the reactions that are triggered by the ports
+            self.env.ports.iter().for_each(|(port_key, port)| {
+                if port.is_set() {
+                    let downstream = self.trigger_map.port_triggers[port_key]
+                        .iter()
+                        .filter(|(trigger_level, _)| *trigger_level > level)
+                        .copied();
+                    reaction_set.extend_above(downstream, level);
                 }
+            });
+
+            for res in level_res.into_iter() {
+                // Submit events to the event queue for all scheduled actions
+                self.event_queue
+                    .extend(res.scheduled_actions.into_iter().map(|(action_key, tag)| {
+                        let downstream = self.trigger_map.action_triggers[action_key].iter();
+                        ScheduledEvent {
+                            tag,
+                            reactions: ReactionSet::from_iter(downstream.copied()),
+                            terminal: false,
+                        }
+                    }));
             }
         }
 

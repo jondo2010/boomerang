@@ -270,14 +270,6 @@ where
     }
 }
 
-impl Display for Env {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Environment {\n")?;
-        f.write_str("}\n")?;
-        Ok(())
-    }
-}
-
 impl Env {
     /// Returns an `Iterator` of `ReactionTriggerCtx` for each `Reaction` in the given `reaction_keys`.
     ///
@@ -332,5 +324,12 @@ impl Env {
             grouped_inputs: inputs,
             grouped_outputs: outputs,
         }
+    }
+
+    pub fn get_reactor_by_name(&self, name: &str) -> Option<&Reactor> {
+        self.reactors
+            .iter()
+            .find(|(_, reactor)| reactor.name == name)
+            .map(|(_, reactor)| reactor)
     }
 }

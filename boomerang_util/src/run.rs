@@ -37,16 +37,16 @@ pub fn build_and_test_reactor<R: Reactor>(
     state: R::State,
     fast_forward: bool,
     keep_alive: bool,
-) -> anyhow::Result<R> {
+) -> anyhow::Result<(R, runtime::Env)> {
     let mut env_builder = EnvBuilder::new();
     let reactor = R::build(name, state, None, &mut env_builder)
         .context("Error building top-level reactor!")?;
-    let (env, triggers, _) = env_builder
+    let (mut env, triggers, _) = env_builder
         .into_runtime_parts()
         .context("Error building environment!")?;
-    let mut sched = runtime::Scheduler::new(env, triggers, fast_forward, keep_alive);
+    let mut sched = runtime::Scheduler::new(&mut env, triggers, fast_forward, keep_alive);
     sched.event_loop();
-    Ok(reactor)
+    Ok((reactor, env))
 }
 
 /// Utility method to build and run a given top-level `Reactor`. Common arguments are parsed from
@@ -88,13 +88,16 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
 
     if args.print_debug_info {
         println!("{env_builder:#?}");
-        panic!("Debug info printed");
     }
-    let (env, triggers, _) = env_builder
+    let (mut env, triggers, _) = env_builder
         .into_runtime_parts()
         .context("Error building environment!")?;
+    if args.print_debug_info {
+        println!("{env:#?}");
+        println!("{triggers:#?}");
+    }
 
-    let mut sched = runtime::Scheduler::new(env, triggers, false, true);
+    let mut sched = runtime::Scheduler::new(&mut env, triggers, false, true);
     sched.event_loop();
 
     Ok(reactor)

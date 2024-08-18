@@ -39,7 +39,11 @@ impl Reactor {
         &self.name
     }
 
-    pub fn get_state<T: ReactorState>(&mut self) -> Option<&mut T> {
+    pub fn get_state<T: ReactorState>(&self) -> Option<&T> {
+        self.state.downcast_ref()
+    }
+
+    pub fn get_state_mut<T: ReactorState>(&mut self) -> Option<&mut T> {
         self.state.downcast_mut()
     }
 }

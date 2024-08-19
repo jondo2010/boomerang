@@ -1,6 +1,0 @@
-[book]
-authors = ["John Hughes"]
-language = "en"
-multilingual = false
-src = "src"
-title = "Boomerang Documentation"

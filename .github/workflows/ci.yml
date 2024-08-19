@@ -5,7 +5,7 @@ on:
   pull_request:
   push:
     branches-ignore:
-      - 'dependabot/**'
+      - "dependabot/**"
       - staging-squash-merge.tmp
 
 env:
@@ -15,7 +15,7 @@ jobs:
   test:
     strategy:
       matrix:
-        toolchain: [nightly]
+        toolchain: [stable]
         os: [windows-latest, ubuntu-latest, macos-latest]
         #exclude:
         #  - os: macos-latest
@@ -65,3 +65,26 @@ jobs:
   #      run: cargo install --force cargo-udeps
   #    - name: Run cargo udeps
   #      run: cargo udeps
+
+  miri:
+    name: "Miri"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-build-${{ matrix.toolchain }}-${{ hashFiles('**/Cargo.toml') }}
+      - name: Install Miri
+        run: |
+          rustup toolchain install nightly --component miri
+          rustup override set nightly
+          cargo miri setup
+      - name: Test with Miri
+        run: |
+          MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks" cargo miri test

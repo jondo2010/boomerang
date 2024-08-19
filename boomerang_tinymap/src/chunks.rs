@@ -101,13 +101,11 @@ impl<K: Key, V: Send> TinyMap<K, V> {
 
 #[cfg(test)]
 mod tests {
-    use rayon::prelude::ParallelBridge;
-
     use super::*;
     use crate::DefaultKey;
 
     fn make_map<const N: usize>() -> (TinyMap<DefaultKey, usize>, Vec<DefaultKey>) {
-        let map = (0..N).map(|i| i).collect();
+        let map = (0..N).collect();
         let keys = (0..N).map(DefaultKey::from).collect();
         (map, keys)
     }
@@ -115,7 +113,6 @@ mod tests {
     #[test]
     fn test_par_iter_chunks_split_unchecked() {
         use itertools::Itertools;
-        use rayon::iter::ParallelIterator;
 
         let (mut map, keys) = make_map::<20>();
         let chunked_keys = [
@@ -129,11 +126,18 @@ mod tests {
         ];
         let keys_iter = chunked_keys.iter().map(|c| c.iter().copied());
 
-        let (_, op) = map.iter_chunks_split_unchecked(std::iter::empty(), keys_iter);
+        let (_, mut op) = map.iter_chunks_split_unchecked(std::iter::empty(), keys_iter);
 
-        op.par_bridge().for_each(|chunk| {
-            let x = chunk.collect_vec();
-            dbg!(x);
+        let chunk1 = op.next().unwrap();
+        let chunk2 = op.next().unwrap();
+
+        std::thread::scope(|s| {
+            let v1 = s.spawn(move || chunk1.map(|x| *x).collect_vec());
+            let v2 = chunk2.map(|x| *x).collect_vec();
+            let v1 = v1.join().unwrap();
+
+            assert_eq!(v1, vec![0, 2, 4, 6]);
+            assert_eq!(v2, vec![1, 3, 5, 7]);
         });
     }
 
@@ -147,19 +151,8 @@ mod tests {
 
         let (_ip, mut op) = map.iter_chunks_split_unchecked(std::iter::empty(), keys_iter);
 
-        let o0 = op
-            .next()
-            .unwrap()
-            .into_iter()
-            .map(|x| *x)
-            .collect::<Vec<_>>();
-
-        let o1 = op
-            .next()
-            .unwrap()
-            .into_iter()
-            .map(|x| *x)
-            .collect::<Vec<_>>();
+        let o0 = op.next().unwrap().map(|x| *x).collect::<Vec<_>>();
+        let o1 = op.next().unwrap().map(|x| *x).collect::<Vec<_>>();
 
         assert_eq!(o0, vec![0, 5]);
         assert_eq!(o1, vec![2, 1, 0]);

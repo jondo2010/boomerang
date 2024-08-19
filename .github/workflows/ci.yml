@@ -1,12 +1,11 @@
 name: CI
 
 on:
-  workflow_dispatch:
-  pull_request:
   push:
-    branches-ignore:
-      - 'dependabot/**'
-      - staging-squash-merge.tmp
+    branches: ["main"]
+
+  pull_request:
+    branches: ["main"]
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,34 +14,40 @@ jobs:
   test:
     strategy:
       matrix:
-        toolchain: [nightly]
+        toolchain: [stable, nightly]
         os: [windows-latest, ubuntu-latest, macos-latest]
-        #exclude:
-        #  - os: macos-latest
-        #    toolchain: nightly
-        #  - os: windows-latest
-        #    toolchain: nightly
+
+        # Only test nightly on Linux
+        exclude:
+          - os: macos-latest
+            toolchain: nightly
+          - os: windows-latest
+            toolchain: nightly
+
     runs-on: ${{ matrix.os }}
+
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-build-${{ matrix.toolchain }}-${{ hashFiles('**/Cargo.toml') }}
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v4
+      - uses: swatinem/rust-cache@v2
+      - name: fetch Rust
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
-          override: true
-      - name: Build & run tests
-        run: cargo test
-        env:
-          CARGO_INCREMENTAL: 0
-          #RUSTFLAGS: "-C debuginfo=0 -D warnings"
+
+      - name: toolchain version
+        run: cargo -vV
+
+      - uses: giraffate/clippy-action@v1
+        with:
+          reporter: "github-pr-review"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          clippy_flags: -- -Dwarnings
+
+      - name: build
+        run: cargo build --all --verbose
+
+      - name: test
+        run: cargo test --all --verbose
 
   #check-unused-dependencies:
   #  runs-on: ubuntu-latest
@@ -65,3 +70,18 @@ jobs:
   #      run: cargo install --force cargo-udeps
   #    - name: Run cargo udeps
   #      run: cargo udeps
+
+  miri:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: swatinem/rust-cache@v2
+      - name: fetch Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: miri
+      - name: Test with Miri
+        run: |
+          cargo +nightly miri setup && MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks" cargo +nightly miri test

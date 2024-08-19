@@ -13,12 +13,13 @@ exclude = ['.gitignore', '.cargo/config', '.vscode', '.devcontainer', '.github']
 
 [workspace.dependencies]
 anyhow = "1.0"
-itertools = "0.10"
+itertools = "0.13"
 thiserror = "1.0"
 tinymap = { package = "boomerang_tinymap", path = "boomerang_tinymap", version = "0.1.0" }
 tracing = "0.1"
 serde = "1.0"
 erased-serde = "0.4"
+rayon = "1.10"
 
 boomerang_derive = { path = "boomerang_derive", version = "0.2.0" }
 boomerang_runtime = { path = "boomerang_runtime", version = "0.2.0" }

@@ -13,5 +13,4 @@ repository.workspace = true
 [dependencies]
 
 [dev-dependencies]
-rayon = "1.7"
-itertools = "0.10"
+itertools = { workspace = true }

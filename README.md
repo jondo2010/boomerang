@@ -5,6 +5,7 @@
 [![Crates.io](https://img.shields.io/crates/d/boomerang.svg)](https://crates.io/crates/boomerang)
 [![Rust](https://github.com/jondo2010/boomerang/workflows/CI/badge.svg)](https://github.com/jondo2010/boomerang/actions)
 [![API](https://docs.rs/boomerang/badge.svg)](https://docs.rs/boomerang)
+[![codecov](https://codecov.io/github/jondo2010/boomerang/graph/badge.svg?token=PYXF8VSNY9)](https://codecov.io/github/jondo2010/boomerang)
 
 Rust implementation of the "Reactors" Deterministic Actor Model, described by M. Lohstroh, A. Lee, et al U.C. Berlekely, [Link to paper](https://ptolemy.berkeley.edu/publications/papers/19/LohstrohEtAl_Reactors_DAC_2019.pdf).
 

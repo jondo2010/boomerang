@@ -1,0 +1,35 @@
+codecov:
+  token: 9ca1bec2-fd82-413b-90f1-bc2b709e2954
+
+comment:
+  layout: "header, diff, flags, components" # show component info in the PR comment
+
+component_management:
+  default_rules: # default rules that will be inherited by all components
+    statuses:
+      - type: project # in this case every component that doens't have a status defined will have a project type one
+        target: auto
+        branches:
+          - "!main"
+
+  individual_components:
+    - component_id: boomerang
+      paths:
+        - boomerang/**
+
+    - component_id: boomerang_derive
+      paths:
+        - boomerang_derive/**
+
+    - component_id: boomerang_runtime
+      name: boomerang_runtime
+      paths:
+        - boomerang_runtime/**
+
+    - component_id: boomerang_tinymap
+      paths:
+        - boomerang_tinymap/**
+
+    - component_id: boomerang_util
+      paths:
+        - boomerang_util/**

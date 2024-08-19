@@ -84,4 +84,4 @@ jobs:
           components: miri
       - name: Test with Miri
         run: |
-          cargo miri setup && MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks" cargo miri test
+          cargo +nightly miri setup && MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks" cargo +nightly miri test

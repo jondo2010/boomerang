@@ -118,7 +118,7 @@ where
                     .into_iter()
                     .map(|action| {
                         let act = action.as_physical().expect("Action is not physical");
-                        (act.key, &act.values)
+                        (act.key, &act.store)
                     })
                     .collect();
 

@@ -12,6 +12,7 @@ exclude = ['.gitignore', '.cargo/config', '.vscode', '.devcontainer', '.github']
 
 [workspace.dependencies]
 anyhow = "1.0"
+document-features = "0.2"
 itertools = "0.13"
 thiserror = "1.0"
 tinymap = { package = "boomerang_tinymap", path = "boomerang_tinymap", version = "0.1.0" }

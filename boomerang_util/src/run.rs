@@ -62,7 +62,7 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
     #[cfg(feature = "rec_replay")]
     if let Some(filename) = args.record_filename {
         tracing::info!("Recording actions to {filename:?}");
-        crate::recrep::inject_recorder(
+        crate::replay::inject_recorder(
             &mut env_builder,
             filename,
             name,

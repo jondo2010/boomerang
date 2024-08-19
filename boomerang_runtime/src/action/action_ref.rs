@@ -106,7 +106,7 @@ impl<'a, T: ActionData> From<&'a mut Action> for PhysicalActionRef<T> {
             .map(|physical| PhysicalActionRef {
                 key: physical.key,
                 min_delay: physical.min_delay,
-                values: Arc::clone(&physical.values),
+                values: Arc::clone(&physical.store),
                 _phantom: std::marker::PhantomData,
             })
             .expect("Action is not valued")

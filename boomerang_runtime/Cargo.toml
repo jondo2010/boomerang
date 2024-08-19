@@ -11,7 +11,7 @@ repository.workspace = true
 [features]
 default = [
     #"parallel",
-    #"serde"
+    "serde",
 ]
 parallel = ["dep:rayon"]
 serde = ["dep:serde", "dep:erased-serde"]

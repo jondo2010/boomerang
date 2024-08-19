@@ -148,12 +148,19 @@ where
                     let runtime::PhysicalAction {
                         name: action_name,
                         key,
-                        values,
+                        store: values,
                         ..
                     } = act.as_physical().expect("Action is not physical");
 
-                    let base_action_values = &values.lock().expect("lock");
-                    let tagged_value = base_action_values.serialize_value(tag);
+                    let action_store = &values.lock().expect("lock");
+
+                    runtime::SerializableActionStore::serialize_value(
+                        &mut *action_store,
+                        tag,
+                        &mut state.serializer,
+                    );
+
+                    let tagged_value = action_store.serialize_value(tag);
 
                     let r = Record {
                         name: action_name,

@@ -75,10 +75,8 @@ impl<T: ActionData> BaseActionStore for ActionStore<T> {
     fn remove(&mut self, tag: Tag) {
         self.0.remove(&tag);
     }
-}
 
     #[cfg(feature = "serde")]
-
     fn serialize_value(
         &self,
         tag: Tag,
@@ -149,7 +147,7 @@ pub struct PhysicalAction {
     pub name: String,
     pub key: ActionKey,
     pub min_delay: Duration,
-    pub values: Arc<Mutex<dyn BaseActionStore>>,
+    pub store: Arc<Mutex<dyn BaseActionStore>>,
 }
 
 impl PhysicalAction {
@@ -158,7 +156,7 @@ impl PhysicalAction {
             name: name.into(),
             key,
             min_delay,
-            values: Arc::new(Mutex::new(ActionStore::<T>(HashMap::new()))),
+            store: Arc::new(Mutex::new(ActionStore::<T>(HashMap::new()))),
         }
     }
 }

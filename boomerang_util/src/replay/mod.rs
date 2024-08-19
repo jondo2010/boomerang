@@ -3,9 +3,6 @@
 mod recorder;
 mod replayer;
 
-use std::sync::{Arc, Mutex};
-
-use boomerang_tinymap::TinySecondaryMap;
 pub use recorder::{inject_recorder, Recorder, RecorderBuilder};
 
 use boomerang::runtime;

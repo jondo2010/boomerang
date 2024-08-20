@@ -15,7 +15,7 @@ itertools.workspace = true
 parse_duration = "2.1"
 proc-macro2 = '1.0'
 quote = '1.0'
-syn = { version = '1.0', features = ['visit'] }
+syn = { version = '2.0', features = ['visit'] }
 
 [lib]
 name = 'boomerang_derive'

@@ -7,6 +7,10 @@
 [![API](https://docs.rs/boomerang/badge.svg)](https://docs.rs/boomerang)
 [![codecov](https://codecov.io/github/jondo2010/boomerang/graph/badge.svg?token=PYXF8VSNY9)](https://codecov.io/github/jondo2010/boomerang)
 
+A deterministic middleware framework for robotics and distributed systems.
+
+Boomerang is built around a Rust-first implementation of the "Reactors" Deterministic Actor Model.
+
 Rust implementation of the "Reactors" Deterministic Actor Model, described by M. Lohstroh, A. Lee, et al U.C. Berlekely, [Link to paper](https://ptolemy.berkeley.edu/publications/papers/19/LohstrohEtAl_Reactors_DAC_2019.pdf).
 
 ## Comparison to Lingua-Franca

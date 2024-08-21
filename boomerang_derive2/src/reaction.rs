@@ -1,16 +1,24 @@
+use std::{
+    collections::{BTreeMap, HashMap},
+    hash::Hash,
+};
+
 use darling::{
     ast::{self, NestedMeta},
     util, FromDeriveInput, FromField, FromMeta,
 };
 use quote::{format_ident, quote, ToTokens};
-use syn::{Generics, Ident, Path, Type, TypeReference};
+use syn::{
+    parse_quote, punctuated::Punctuated, token::Dot, Expr, ExprField, Generics, Ident, LitStr,
+    PatLit, Path, Type, TypeReference,
+};
 
 #[derive(Debug, Eq, PartialEq, Hash)]
 pub enum TriggerAttr {
     Startup,
     Shutdown,
-    Action(Ident),
-    Port(Path),
+    Action(Expr),
+    Port(Expr),
 }
 
 impl FromMeta for TriggerAttr {
@@ -62,7 +70,7 @@ impl FromMeta for TriggerAttr {
     }
 }
 
-#[derive(Debug, FromField)]
+#[derive(Clone, Debug, FromField)]
 #[darling(attributes(reaction), forward_attrs(doc, cfg, allow))]
 pub struct ReactionField {
     ident: Option<Ident>,
@@ -70,12 +78,28 @@ pub struct ReactionField {
 
     #[darling(default)]
     triggers: bool,
+
     #[darling(default)]
     effects: bool,
+
     #[darling(default)]
     uses: bool,
 
-    path: Option<Ident>,
+    path: Option<Expr>,
+}
+
+impl ReactionField {
+    /// Builds an expression for the path of this ReactionField.
+    ///
+    /// If `path` is specified (not-none), then this overrides the fallback to using `ident`;
+    fn path(&self) -> Expr {
+        if let Some(path) = &self.path {
+            parse_quote! { reactor.#path }
+        } else {
+            let ident = self.ident.as_ref().unwrap();
+            parse_quote! { reactor.#ident }
+        }
+    }
 }
 
 #[derive(Debug, FromDeriveInput)]
@@ -84,8 +108,6 @@ pub struct ReactionReceiver {
     ident: Ident,
     generics: Generics,
     data: ast::Data<util::Ignored, ReactionField>,
-    /// The reactor owning this reaction
-    reactor: Type,
 
     /// Connection definitions
     #[darling(default, multiple)]
@@ -93,55 +115,118 @@ pub struct ReactionReceiver {
     pub triggers: Vec<TriggerAttr>,
 }
 
-impl ToTokens for ReactionReceiver {
-    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
-        let ident = &self.ident;
-        let generics = &self.generics;
-        let reactor = &self.reactor;
-        let _ = self.triggers.iter().map(|trigger| match trigger {
-            TriggerAttr::Startup => quote! { .with_trigger_action(__startup_action, 0)},
-            TriggerAttr::Shutdown => quote! { .with_trigger_action(__shutdown_action, 0)},
-            TriggerAttr::Action(action) => quote! { .with_trigger_action(reactor.#action, 0)},
-            TriggerAttr::Port(port) => quote! { .with_trigger_port(reactor.#port, 0) },
-        });
+impl ReactionReceiver {
+    fn reduce(
+        &self,
+        // The ident of the Reaction builder
+        reaction_ident: &Ident,
+        startup_ident: &Ident,
+        shutdown_ident: &Ident,
+    ) -> impl Iterator<Item = proc_macro2::TokenStream> + '_ {
+        let reaction_ident = reaction_ident.clone();
 
-        let struct_fields = self
+        let mut struct_fields: HashMap<_, ReactionField> = self
             .data
             .as_ref()
             .take_struct()
             .expect("Only structs are supported")
             .fields
-            .into_iter()
-            .enumerate()
-            .map(|(idx, field)| {
-                if let Type::Reference(TypeReference { elem, .. }) = &field.ty {
-                    let key = field
-                        .path
-                        .as_ref()
-                        .or(field.ident.as_ref())
-                        .expect("No key found");
-                    let triggers = field.triggers;
-                    let effects = field.effects | field.uses;
+            .iter()
+            .map(|&field| {
+                let path = field.path();
+                (path, field.clone())
+            })
+            .collect();
 
-                    quote! {
-                        let __reaction = <#elem as ::boomerang::builder::ReactionField>::build(
-                            __reaction,
-                            reactor.#key,
-                            #idx,
-                            #triggers,
-                            #effects
-                        )?
-                    }
-                } else {
-                    panic!("Only references are supported");
+        let mut startup_shutdown = vec![];
+
+        // Update/apply the struct_fields with any triggers clauses
+        for trigger in self.triggers.iter() {
+            match trigger {
+                TriggerAttr::Startup => {
+                    startup_shutdown.push(quote! {
+                        let mut #reaction_ident = #reaction_ident.with_trigger_action(#startup_ident, 0)?
+                    });
                 }
-            });
+                TriggerAttr::Shutdown => {
+                    startup_shutdown.push(quote! {
+                        let mut #reaction_ident = #reaction_ident.with_trigger_action(#shutdown_ident, 0)?
+                    });
+                }
+                TriggerAttr::Action(path) => {
+                    struct_fields
+                        .entry(path.clone())
+                        .or_insert(ReactionField {
+                            ident: None,
+                            ty: parse_quote! { runtime::ActionRef<'a> },
+                            triggers: true,
+                            effects: false,
+                            uses: false,
+                            path: Some(path.clone()),
+                        })
+                        .triggers = true;
+                }
+
+                TriggerAttr::Port(path) => {
+                    struct_fields
+                        .entry(path.clone())
+                        .or_insert(ReactionField {
+                            ident: None,
+                            ty: parse_quote! { runtime::Port<'a, u32> },
+                            triggers: true,
+                            effects: false,
+                            uses: false,
+                            path: Some(path.clone()),
+                        })
+                        .triggers = true;
+                }
+            }
+        }
+
+        let struct_fields =
+            struct_fields
+                .into_iter()
+                .enumerate()
+                .map(move |(idx, (path, field))| {
+                    if let Type::Reference(TypeReference { elem, .. }) = &field.ty {
+                        let triggers = field.triggers;
+                        let effects = field.effects;
+                        let uses = field.uses;
+
+                        quote! {
+                            <#elem as ::boomerang::builder::ReactionField>::build(
+                                &mut #reaction_ident,
+                                #path,
+                                #idx,
+                                #triggers,
+                                #uses,
+                                #effects,
+                            )?;
+                        }
+                    } else {
+                        panic!("Only references are supported");
+                    }
+                });
+
+        startup_shutdown
+            .into_iter()
+            .chain(struct_fields.into_iter())
+    }
+}
+
+impl ToTokens for ReactionReceiver {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        let builder = format_ident!("__reaction");
+        let startup = format_ident!("__startup_action");
+        let shutdown = format_ident!("__shutdown_action");
+
+        let ident = &self.ident;
+        let generics = &self.generics;
+        let struct_fields = self.reduce(&builder, &startup, &shutdown);
 
         tokens.extend(quote! {
             #[automatically_derived]
             impl #generics ::boomerang::builder::Reaction for #ident #generics {
-                type BuilderReactor = #reactor;
-
                 fn build<'builder>(
                     name: &str,
                     reactor: &Self::BuilderReactor,
@@ -154,9 +239,9 @@ impl ToTokens for ReactionReceiver {
                     let __wrapper: Box<dyn ::boomerang::runtime::ReactionFn> = Box::new( move |ctx: &mut ::boomerang::runtime::Context, state: &mut dyn runtime::ReactorState, inputs, outputs, actions: &mut [&mut runtime::Action]| { });
                     let __startup_action = builder.get_startup_action();
                     let __shutdown_action = builder.get_shutdown_action();
-                    let __reaction = builder.add_reaction(name, __wrapper);
+                    let mut #builder = builder.add_reaction(name, __wrapper);
                     #(#struct_fields;)*
-                    Ok(__reaction)
+                    Ok(#builder)
                 }
 
                 fn marshall(
@@ -179,12 +264,13 @@ fn test_reaction() {
 #[reaction(
     reactor = "MyReactor",
     triggers(action = "x"),
+    triggers(port = "child.y"),
     triggers(startup)
 )]
 struct ReactionT<'a> {
     #[reaction(triggers)]
     t: &'a runtime::Action,
-    #[reaction(effects, path = "c")]
+    #[reaction(effects, path = "child.y.z")]
     xyc: &'a mut runtime::Port<u32>,
     #[reaction(uses)]
     fff: &'a runtime::Port<()>,
@@ -192,8 +278,6 @@ struct ReactionT<'a> {
 
     let parsed = syn::parse_str(good_input).unwrap();
     let receiver = ReactionReceiver::from_derive_input(&parsed).unwrap();
-
-    dbg!(&receiver.triggers);
 
     //let fields = receiver.data.take_struct().unwrap();
 

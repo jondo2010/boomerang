@@ -11,14 +11,19 @@ repository.workspace = true
 categories.workspace = true
 
 [features]
-default = ["visualization", "derive"]
+default = ["visualization", "derive", "serde"]
+
 visualization = []
-derive = ["boomerang_derive"]
+derive = ["dep:boomerang_derive"]
+
+## Support for serialization
+serde = ["boomerang_runtime/serde"]
 
 [dependencies]
 anyhow.workspace = true
 derivative = "2.2"
 derive_more = '0.99'
+document-features = { workspace = true }
 graphviz-rust = "0.6"
 itertools.workspace = true
 petgraph = "0.6"

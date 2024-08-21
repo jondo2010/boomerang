@@ -30,6 +30,16 @@ pub trait Reactor: Sized {
     ) -> Result<Self, BuilderError>;
 }
 
+/// This builder trait is implemented for fields in the Reactor struct.
+pub trait ReactorField {
+    /// Build a `ReactionBuilderState` for this Reaction
+    fn build<'builder>(
+        name: &str,
+        reactor: &Self::BuilderReactor,
+        builder: &'builder mut ReactorBuilderState,
+    ) -> Result<ReactionBuilderState<'builder>, BuilderError>;
+}
+
 /// ReactorBuilder is the Builder-side definition of a Reactor, and is type-erased
 pub(super) struct ReactorBuilder {
     /// The instantiated/child name of the Reactor

@@ -9,6 +9,7 @@ slotmap::new_key_type! {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[repr(transparent)]
 pub struct TypedPortKey<T: runtime::PortData>(BuilderPortKey, PhantomData<T>);
 
 impl<T: runtime::PortData> runtime::InnerType for TypedPortKey<T> {

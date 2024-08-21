@@ -185,7 +185,7 @@ impl EnvBuilder {
         action_fn: F,
     ) -> Result<TypedActionKey<T, Q>, BuilderError>
     where
-        T: runtime::PortData,
+        T: runtime::ActionData,
         F: ActionBuilderFn + 'static,
     {
         let reactor_builder = &mut self.reactor_builders[reactor_key];

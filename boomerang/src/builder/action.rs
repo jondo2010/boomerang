@@ -22,25 +22,34 @@ pub struct Physical;
 /// `TypedActionKey` is a typed wrapper around `ActionKey` that is used to associate a type with an
 /// action. This is used to ensure that the type of the action matches the type of the port that it
 /// is connected to.
-#[derive(Copy, Clone, Default, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+#[derive(Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 #[repr(transparent)]
 pub struct TypedActionKey<T = (), Q = Logical>(BuilderActionKey, PhantomData<(T, Q)>)
 where
-    T: runtime::PortData;
+    T: runtime::ActionData;
 
-impl<T: runtime::PortData, Q> From<BuilderActionKey> for TypedActionKey<T, Q> {
+impl<T, Q> Clone for TypedActionKey<T, Q>
+where
+    T: runtime::ActionData,
+{
+    fn clone(&self) -> Self {
+        Self(self.0.clone(), PhantomData::default())
+    }
+}
+
+impl<T: runtime::ActionData, Q> From<BuilderActionKey> for TypedActionKey<T, Q> {
     fn from(key: BuilderActionKey) -> Self {
         Self(key, PhantomData)
     }
 }
 
-impl<T: runtime::PortData, Q> From<TypedActionKey<T, Q>> for BuilderActionKey {
+impl<T: runtime::ActionData, Q> From<TypedActionKey<T, Q>> for BuilderActionKey {
     fn from(key: TypedActionKey<T, Q>) -> Self {
         key.0
     }
 }
 
-impl<T: runtime::PortData, Q> runtime::InnerType for TypedActionKey<T, Q> {
+impl<T: runtime::ActionData, Q> runtime::InnerType for TypedActionKey<T, Q> {
     type Inner = T;
 }
 

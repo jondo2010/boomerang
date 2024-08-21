@@ -1,4 +1,4 @@
-//! Boomerang is a framework for building and executing stateful, deterministic Reactors.
+#![doc=include_str!( "../../README.md")]
 //!
 //! ## Example
 //!
@@ -48,28 +48,25 @@
 //! sched.event_loop();
 //! ```
 //!
-//! # Crate features:
-//! * **visualization** -
-//!   Defaults on. Enables the debug Graphviz functions in [`builder::graphviz`].
-//! * **derive** -
-//!   Defaults on. Enables the derive macros in [`boomerang_derive`].
+//! ## Feature flags
+#![doc = document_features::document_features!()]
+#![deny(unsafe_code)]
+#![deny(clippy::all)]
 
 #[macro_use]
 extern crate derivative;
 
 pub mod builder;
-#[cfg(feature = "runner")]
-pub mod run;
 
 // Re-exports
 pub use boomerang_runtime as runtime;
 
-#[cfg(feature = "boomerang_derive")]
+#[cfg(feature = "derive")]
 #[allow(unused_imports)]
 #[macro_use]
 extern crate boomerang_derive;
 
-#[cfg(feature = "boomerang_derive")]
+#[cfg(feature = "derive")]
 #[doc(hidden)]
 pub use boomerang_derive::*;
 

@@ -1,6 +1,8 @@
 use boomerang::{builder::*, runtime, Reactor};
 use boomerang_util::timeout::{Timeout, TimeoutBuilder};
 
+struct Count(u32);
+
 #[derive(Reactor)]
 #[reactor(state = "Count")]
 struct CountBuilder {
@@ -16,7 +18,6 @@ struct CountBuilder {
     reaction_shutdown_t: BuilderReactionKey,
 }
 
-struct Count(u32);
 impl Count {
     #[boomerang::reaction(reactor = "CountBuilder", triggers(action = "t"))]
     fn reaction_t(
@@ -37,12 +38,26 @@ impl Count {
 }
 
 #[derive(boomerang_derive2::Reaction)]
-#[reaction(reactor = "CountBuilder", triggers(startup))]
+#[reaction(triggers(startup))]
 struct ReactionT<'a> {
     #[reaction(triggers)]
     t: &'a runtime::ActionRef<'a>,
     #[reaction(effects, path = "c")]
     xyc: &'a mut runtime::Port<u32>,
+}
+
+impl Trigger for ReactionT<'_> {
+    type BuilderReactor = CountBuilder;
+
+    fn trigger(
+        self,
+        _ctx: &mut runtime::Context,
+        state: &mut <Self::BuilderReactor as Reactor>::State,
+    ) {
+        state.0 += 1;
+        assert!(self.xyc.is_none());
+        *self.xyc.get_mut() = Some(state.0);
+    }
 }
 
 #[test]

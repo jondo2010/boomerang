@@ -1,15 +1,15 @@
 use boomerang::{
-    builder::{BuilderReactionKey, TypedActionKey, TypedPortKey},
+    builder::{BuilderReactionKey, TimerActionKey, TypedPortKey},
     runtime, Reactor,
 };
 
-#[derive(Reactor)]
+#[derive(Clone, Reactor)]
 #[reactor(state = "Source")]
 struct SourceBuilder {
     #[reactor(output())]
     y: TypedPortKey<i32>,
     #[reactor(timer())]
-    t: TypedActionKey<()>,
+    t: TimerActionKey,
     #[reactor(reaction(function = "Source::reaction_t",))]
     reaction_t: BuilderReactionKey,
 }
@@ -26,7 +26,7 @@ impl Source {
     }
 }
 
-#[derive(Reactor)]
+#[derive(Clone, Reactor)]
 #[reactor(state = "Destination")]
 struct DestinationBuilder {
     #[reactor(input())]
@@ -58,7 +58,7 @@ impl Destination {
     }
 }
 
-#[derive(Reactor)]
+#[derive(Clone, Reactor)]
 #[reactor(state = "Pass")]
 struct PassBuilder {
     #[reactor(input())]
@@ -82,7 +82,7 @@ impl Pass {
     }
 }
 
-#[derive(Reactor)]
+#[derive(Clone, Reactor)]
 #[reactor(
     connection(from = "s.y", to = "d.y"),
     connection(from = "s.y", to = "p1.x"),

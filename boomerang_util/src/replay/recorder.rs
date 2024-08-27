@@ -132,7 +132,7 @@ where
         reactor: &RecorderBuilder<Ser>,
         builder: &'builder mut ReactorBuilderState,
     ) -> Result<ReactionBuilderState<'builder>, BuilderError> {
-        let __wrapper: Box<dyn runtime::ReactionFn> = Box::new(
+        let __wrapper: runtime::ReactionFn = Box::new(
             move |ctx: &mut runtime::Context,
                   state: &mut dyn runtime::ReactorState,
                   _inputs,

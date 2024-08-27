@@ -2,13 +2,13 @@
 
 use std::io::Write;
 
-use boomerang::{builder::BuilderReactionKey, runtime};
+use boomerang::{builder::BuilderReactionKey, runtime, Reactor};
 use boomerang_util::keyboard_events::{KeyboardEvents, KeyboardEventsBuilder};
 use termion::event::Key;
 
 /// A simple Reactor that triggers on key_press events.
 /// It reads keyboard input and prints the key that was pressed.
-#[derive(boomerang::Reactor)]
+#[derive(Clone, Reactor)]
 #[reactor(state = "State")]
 struct Builder {
     /// this thing helps capturing key presses

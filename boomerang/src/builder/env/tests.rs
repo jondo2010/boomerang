@@ -1,3 +1,5 @@
+use crate::builder::TimerSpec;
+
 use super::*;
 
 #[test]
@@ -45,8 +47,10 @@ fn test_duplicate_actions() {
         reactor_builder
             .add_timer(
                 "action0",
-                Some(runtime::Duration::from_micros(0)),
-                Some(runtime::Duration::from_micros(0)),
+                TimerSpec {
+                    period: Some(runtime::Duration::from_micros(0)),
+                    offset: Some(runtime::Duration::from_micros(0)),
+                }
             )
             .expect_err("Expected duplicate"),
         BuilderError::DuplicateActionDefinition {

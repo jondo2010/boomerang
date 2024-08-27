@@ -9,7 +9,7 @@ use std::{io::Stdout, ops::DerefMut};
 pub use termion::event::Key;
 use termion::raw::{IntoRawMode, RawTerminal};
 
-#[derive(Reactor)]
+#[derive(Reactor, Clone)]
 #[reactor(state = "KeyboardEvents")]
 pub struct KeyboardEventsBuilder {
     /// The latest key press.

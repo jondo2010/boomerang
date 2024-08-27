@@ -32,7 +32,15 @@ impl<'a, 'b> ToTokens for ReactorFieldBuilder<'a, 'b> {
             ReactorField::Timer { ident, name, period, offset } => {
                 let period = OptionalDuration(*period);
                 let offset = OptionalDuration(*offset);
-                quote! { let #ident = #builder_ident.add_timer(#name, #period, #offset)?; }
+                quote! {
+                    let #ident = #builder_ident.add_timer(
+                        #name,
+                        ::boomerang::builder::TimerSpec {
+                            period: #period,
+                            offset: #offset,
+                        }
+                    )?;
+                }
             }
             ReactorField::Input { ident, name, ty } => {
                 let ty = quote! {<#ty as ::boomerang::runtime::InnerType>::Inner};

@@ -5,7 +5,7 @@ use boomerang::{
     runtime, Reactor,
 };
 
-#[derive(Reactor)]
+#[derive(Clone, Reactor)]
 #[reactor(state = "ActionValues")]
 struct ActionValuesBuilder {
     #[reactor(action(min_delay = "100 msec"))]

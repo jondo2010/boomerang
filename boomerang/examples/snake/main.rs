@@ -11,12 +11,12 @@ mod support;
 mod reactor {
     use super::support::*;
     use boomerang::{
-        builder::{BuilderReactionKey, TypedActionKey},
+        builder::{BuilderReactionKey, TimerActionKey, TypedActionKey},
         runtime, Reactor,
     };
     use boomerang_util::keyboard_events::{Key, KeyboardEvents, KeyboardEventsBuilder};
 
-    #[derive(Reactor)]
+    #[derive(Clone, Reactor)]
     #[reactor(state = "Snake")]
     pub struct SnakeBuilder {
         /// this thing helps capturing key presses
@@ -34,7 +34,7 @@ mod reactor {
 
         /// periodic
         #[reactor(timer(period = "5 sec"))]
-        add_more_food: TypedActionKey,
+        add_more_food: TimerActionKey,
 
         #[reactor(reaction(function = "Snake::reaction_startup"))]
         reaction_startup: BuilderReactionKey,

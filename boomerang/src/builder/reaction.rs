@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use super::{
     BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactorKey, EnvBuilder, FindElements,
     PortType, Reactor, ReactorBuilderState, TypedActionKey, TypedPortKey,
@@ -8,6 +10,27 @@ use slotmap::SecondaryMap;
 
 slotmap::new_key_type! {
     pub struct BuilderReactionKey;
+}
+
+#[derive(Copy, Debug)]
+pub struct TypedReactionKey<R: Reaction>(BuilderReactionKey, PhantomData<R>);
+
+impl<R: Reaction> Clone for TypedReactionKey<R> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone(), PhantomData)
+    }
+}
+
+impl<R: Reaction> Default for TypedReactionKey<R> {
+    fn default() -> Self {
+        Self(Default::default(), Default::default())
+    }
+}
+
+impl<R: Reaction> TypedReactionKey<R> {
+    pub fn new(reaction_key: BuilderReactionKey) -> Self {
+        Self(reaction_key, PhantomData::default())
+    }
 }
 
 impl petgraph::graph::GraphIndex for BuilderReactionKey {
@@ -23,12 +46,12 @@ impl petgraph::graph::GraphIndex for BuilderReactionKey {
 /// The `Trigger` trait should be implemented by the user for each Reaction struct.
 pub trait Trigger {
     /// The type of the owning Reactor
-    type BuilderReactor: Reactor;
+    type Reactor: Reactor;
 
     fn trigger(
-        self,
+        &mut self,
         ctx: &mut runtime::Context,
-        state: &mut <Self::BuilderReactor as Reactor>::State,
+        state: &mut <Self::Reactor as Reactor>::State,
     );
 }
 
@@ -37,16 +60,9 @@ pub trait Reaction: Trigger {
     /// Build a `ReactionBuilderState` for this Reaction
     fn build<'builder>(
         name: &str,
-        reactor: &Self::BuilderReactor,
+        reactor: &Self::Reactor,
         builder: &'builder mut ReactorBuilderState,
     ) -> Result<ReactionBuilderState<'builder>, BuilderError>;
-
-    /// Marshall the runtime queried inputs, outputs, and actions into this Reaction struct
-    fn marshall(
-        inputs: &[runtime::IPort],
-        outputs: &mut [runtime::OPort],
-        actions: &mut [&mut runtime::Action],
-    ) -> Self;
 }
 
 pub trait ReactionField {
@@ -57,8 +73,8 @@ pub trait ReactionField {
         key: Self::Key,
         order: usize,
         triggers: bool,
-        effects: bool,
         uses: bool,
+        effects: bool,
     ) -> Result<(), BuilderError>;
 }
 
@@ -70,8 +86,8 @@ impl<T: runtime::ActionData> ReactionField for runtime::ActionRef<'_, T> {
         key: Self::Key,
         order: usize,
         triggers: bool,
-        effects: bool,
         uses: bool,
+        effects: bool,
     ) -> Result<(), BuilderError> {
         builder.add_action(key.into(), order, triggers, uses, effects)
     }
@@ -85,9 +101,25 @@ impl<T: runtime::PortData> ReactionField for runtime::Port<T> {
         key: Self::Key,
         order: usize,
         triggers: bool,
-        effects: bool,
         uses: bool,
+        effects: bool,
     ) -> Result<(), BuilderError> {
+        builder.add_port(key.into(), order, triggers, uses, effects)
+    }
+}
+
+impl<T: runtime::PortData> ReactionField for &'_ runtime::Port<T> {
+    type Key = TypedPortKey<T>;
+
+    fn build(
+        builder: &mut ReactionBuilderState,
+        key: Self::Key,
+        order: usize,
+        triggers: bool,
+        uses: bool,
+        effects: bool,
+    ) -> Result<(), BuilderError> {
+        assert_eq!(effects, false, "Cannot use non-mut port as effect");
         builder.add_port(key.into(), order, triggers, uses, effects)
     }
 }
@@ -104,7 +136,7 @@ pub struct ReactionBuilder {
     pub(super) reactor_key: BuilderReactorKey,
     /// The Reaction function
     #[derivative(Debug = "ignore")]
-    pub(super) reaction_fn: Box<dyn runtime::ReactionFn>,
+    pub(super) reaction_fn: runtime::ReactionFn,
 
     /// Actions that trigger this Reaction, and their relative ordering.
     pub(super) trigger_actions: SecondaryMap<BuilderActionKey, usize>,
@@ -200,7 +232,7 @@ impl<'a> ReactionBuilderState<'a> {
         name: &str,
         priority: usize,
         reactor_key: BuilderReactorKey,
-        reaction_fn: Box<dyn runtime::ReactionFn>,
+        reaction_fn: runtime::ReactionFn,
         env: &'a mut EnvBuilder,
     ) -> Self {
         Self {
@@ -300,28 +332,32 @@ impl<'a> ReactionBuilderState<'a> {
         match port_builder.get_port_type() {
             PortType::Input if (triggers || uses) && (port_reactor_key != self.builder.reactor_key) => {
                 Err(BuilderError::ReactionBuilderError(format!(
-                    "Cannot 'trigger on' input port '{}', it must belong to the same reactor as the reaction",
+                    "Reaction {} cannot 'trigger on' input port '{}', it must belong to the same reactor as the reaction",
+                    self.builder.get_name(),
                     port_builder.get_name()
                 )))
             }
 
-            PortType::Output if (triggers || uses) && port_parent_reactor_key != Some(self.builder.reactor_key) => {
+            PortType::Output if (triggers || uses) && (port_parent_reactor_key != Some(self.builder.reactor_key)) => {
                 Err(BuilderError::ReactionBuilderError(format!(
-                    "Cannot 'trigger on' output port '{}', it must belong to a contained reactor",
+                    "Reaction {} cannot 'trigger on' output port '{}', it must belong to a contained reactor",
+                    self.builder.get_name(),
                     port_builder.get_name()
                 )))
             }
 
             PortType::Input if effects && port_parent_reactor_key != Some(self.builder.reactor_key) => {
                 Err(BuilderError::ReactionBuilderError(format!(
-                    "Cannot 'effect' input port '{}', it must belong to a contained reactor",
+                    "Reaction {} cannot 'effect' input port '{}', it must belong to a contained reactor",
+                    self.builder.get_name(),
                     port_builder.get_name()
                 )))
             }
 
             PortType::Output if effects && port_reactor_key != self.builder.reactor_key => {
                 Err(BuilderError::ReactionBuilderError(format!(
-                    "Cannot 'effect' output port '{}', it must belong to the same reactor as the reaction",
+                    "Reaction {} cannot 'effect' output port '{}', it must belong to the same reactor as the reaction",
+                    self.builder.get_name(),
                     port_builder.get_name()
                 )))
             }

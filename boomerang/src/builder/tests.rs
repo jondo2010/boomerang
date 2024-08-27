@@ -71,7 +71,13 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
     let mut builder_main = env_builder.add_reactor("main", None, ());
     let clock = builder_main.add_logical_action::<u32>("clock", None)?;
     let a = builder_main.add_logical_action::<()>("a", None)?;
-    let t = builder_main.add_timer("t", Some(Duration::from_millis(2)), None)?;
+    let t = builder_main.add_timer(
+        "t",
+        TimerSpec {
+            period: Some(Duration::from_millis(2)),
+            offset: None,
+        },
+    )?;
     let startup_action = builder_main.get_startup_action();
     let shutdown_action = builder_main.get_shutdown_action();
 
@@ -82,8 +88,8 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
             Box::new(
                 move |ctx: &mut runtime::Context,
                       _state: &mut dyn runtime::ReactorState,
-                      inputs: &[runtime::IPort],
-                      outputs: &mut [runtime::OPort],
+                      inputs: &[runtime::PortRef],
+                      outputs: &mut [runtime::PortRefMut],
                       actions: &mut [&mut runtime::Action]| {
                     assert_eq!(inputs.len(), 0);
                     assert_eq!(outputs.len(), 0);
@@ -222,10 +228,22 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
             let o1 = builder.add_port::<u32>("o1", PortType::Output).unwrap();
             let o2 = builder.add_port::<u32>("o2", PortType::Output).unwrap();
             let t1 = builder
-                .add_timer("t1", Some(Duration::from_millis(35)), None)
+                .add_timer(
+                    "t1",
+                    TimerSpec {
+                        period: Some(Duration::from_millis(35)),
+                        offset: None,
+                    },
+                )
                 .unwrap();
             let t2 = builder
-                .add_timer("t2", Some(Duration::from_millis(70)), None)
+                .add_timer(
+                    "t2",
+                    TimerSpec {
+                        period: Some(Duration::from_millis(70)),
+                        offset: None,
+                    },
+                )
                 .unwrap();
             let startup_action = builder.get_startup_action();
             let _ = builder
@@ -234,8 +252,8 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
                     Box::new(
                         move |ctx: &mut runtime::Context,
                               _state: &mut dyn runtime::ReactorState,
-                              _inputs: &[runtime::IPort],
-                              outputs: &mut [runtime::OPort],
+                              _inputs: &[runtime::PortRef],
+                              outputs: &mut [runtime::PortRefMut],
                               _actions: &mut [&mut runtime::Action]| {
                             //ctx.set(clock, 0);
                             let clock = outputs[0]
@@ -259,8 +277,8 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
                     Box::new(
                         move |_ctx: &mut runtime::Context,
                               _state: &mut dyn runtime::ReactorState,
-                              _inputs: &[runtime::IPort],
-                              outputs: &mut [runtime::OPort],
+                              _inputs: &[runtime::PortRef],
+                              outputs: &mut [runtime::PortRefMut],
                               actions: &mut [&mut runtime::Action]| {
                             //ctx.set(clock, 1);
                             let clock = outputs[0]
@@ -294,8 +312,8 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
                     Box::new(
                         move |_ctx: &mut runtime::Context,
                               _state: &mut dyn runtime::ReactorState,
-                              _inputs: &[runtime::IPort],
-                              outputs: &mut [runtime::OPort],
+                              _inputs: &[runtime::PortRef],
+                              outputs: &mut [runtime::PortRefMut],
                               _actions: &mut [&mut runtime::Action]| {
                             //ctx.set(clock, 2);
                             let clock = outputs[0]
@@ -334,8 +352,8 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
                 Box::new(
                     move |_ctx: &mut runtime::Context,
                           _state: &mut dyn runtime::ReactorState,
-                          inputs: &[runtime::IPort],
-                          _outputs: &mut [runtime::OPort],
+                          inputs: &[runtime::PortRef],
+                          _outputs: &mut [runtime::PortRefMut],
                           _actions: &mut [&mut runtime::Action]| {
                         let clock = inputs[0]
                             .as_any()

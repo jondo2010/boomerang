@@ -22,20 +22,10 @@ pub struct Physical;
 /// `TypedActionKey` is a typed wrapper around `ActionKey` that is used to associate a type with an
 /// action. This is used to ensure that the type of the action matches the type of the port that it
 /// is connected to.
-#[derive(Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-#[repr(transparent)]
+#[derive(Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub struct TypedActionKey<T = (), Q = Logical>(BuilderActionKey, PhantomData<(T, Q)>)
 where
     T: runtime::ActionData;
-
-impl<T, Q> Clone for TypedActionKey<T, Q>
-where
-    T: runtime::ActionData,
-{
-    fn clone(&self) -> Self {
-        Self(self.0.clone(), PhantomData::default())
-    }
-}
 
 impl<T: runtime::ActionData, Q> From<BuilderActionKey> for TypedActionKey<T, Q> {
     fn from(key: BuilderActionKey) -> Self {
@@ -53,12 +43,39 @@ impl<T: runtime::ActionData, Q> runtime::InnerType for TypedActionKey<T, Q> {
     type Inner = T;
 }
 
+#[derive(Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub struct TimerActionKey(BuilderActionKey);
+
+impl From<TimerActionKey> for BuilderActionKey {
+    fn from(value: TimerActionKey) -> Self {
+        value.0
+    }
+}
+
+impl From<TimerActionKey> for TypedActionKey<()> {
+    fn from(value: TimerActionKey) -> Self {
+        Self(value.into(), PhantomData)
+    }
+}
+
+impl From<BuilderActionKey> for TimerActionKey {
+    fn from(value: BuilderActionKey) -> Self {
+        Self(value)
+    }
+}
+
+/// TimerSpec is used to specify the period and offset of a timer action.
+#[derive(Debug)]
+pub struct TimerSpec {
+    /// Interval between timer events
+    pub period: Option<runtime::Duration>,
+    /// (logical) time interval between when the program starts executing and the first timer event
+    pub offset: Option<runtime::Duration>,
+}
+
 #[derive(Debug)]
 pub enum ActionType {
-    Timer {
-        period: runtime::Duration,
-        offset: runtime::Duration,
-    },
+    Timer(TimerSpec),
     Logical {
         min_delay: Option<runtime::Duration>,
     },

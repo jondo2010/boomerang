@@ -170,7 +170,7 @@ impl EnvBuilder {
         &mut self,
         name: &str,
         reactor_key: BuilderReactorKey,
-        reaction_fn: Box<dyn runtime::ReactionFn>,
+        reaction_fn: runtime::ReactionFn,
     ) -> ReactionBuilderState {
         let priority = self.reactor_builders[reactor_key].reactions.len();
         ReactionBuilderState::new(name, priority, reactor_key, reaction_fn, self)

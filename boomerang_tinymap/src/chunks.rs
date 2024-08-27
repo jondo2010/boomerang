@@ -160,7 +160,7 @@ mod tests {
         ];
         let keys_iter = chunked_keys.iter().map(|c| c.iter().copied());
 
-        let (_, mut op) = map.iter_chunks_split_unchecked(std::iter::empty(), keys_iter);
+        let (_, mut op) = unsafe { map.iter_chunks_split_unchecked(std::iter::empty(), keys_iter) };
 
         let chunk1 = op.next().unwrap();
         let chunk2 = op.next().unwrap();

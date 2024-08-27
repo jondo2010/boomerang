@@ -2,7 +2,7 @@
 
 use boomerang::{builder, reaction, runtime, Reactor};
 
-#[derive(Reactor)]
+#[derive(Reactor, Clone)]
 #[reactor(state = "Timeout")]
 pub struct TimeoutBuilder {
     #[reactor(reaction(function = "Timeout::reaction_startup"))]

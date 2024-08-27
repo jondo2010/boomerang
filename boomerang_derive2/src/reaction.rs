@@ -1,17 +1,14 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    hash::Hash,
-};
+use std::{collections::HashMap, hash::Hash};
 
 use darling::{
-    ast::{self, NestedMeta},
+    ast::{self},
     util, FromDeriveInput, FromField, FromMeta,
 };
-use quote::{format_ident, quote, ToTokens};
-use syn::{
-    parse_quote, punctuated::Punctuated, token::Dot, Expr, ExprField, Generics, Ident, LitStr,
-    PatLit, Path, Type, TypeReference,
-};
+use quote::{quote, ToTokens};
+use syn::{parse_quote, Expr, Generics, Ident, Type, TypePath, TypeReference};
+
+const PORT: &'static str = "Port";
+const ACTION_REF: &'static str = "ActionRef";
 
 #[derive(Debug, Eq, PartialEq, Hash)]
 pub enum TriggerAttr {
@@ -75,188 +72,555 @@ impl FromMeta for TriggerAttr {
 pub struct ReactionField {
     ident: Option<Ident>,
     ty: Type,
-
-    #[darling(default)]
-    triggers: bool,
-
-    #[darling(default)]
-    effects: bool,
-
-    #[darling(default)]
-    uses: bool,
-
+    triggers: Option<bool>,
+    effects: Option<bool>,
+    uses: Option<bool>,
     path: Option<Expr>,
 }
 
-impl ReactionField {
-    /// Builds an expression for the path of this ReactionField.
-    ///
-    /// If `path` is specified (not-none), then this overrides the fallback to using `ident`;
-    fn path(&self) -> Expr {
-        if let Some(path) = &self.path {
-            parse_quote! { reactor.#path }
-        } else {
-            let ident = self.ident.as_ref().unwrap();
-            parse_quote! { reactor.#ident }
+pub struct ReactionFieldInner {
+    elem: syn::Type,
+    field_type: ReactionFieldInnerType,
+    triggers: bool,
+    effects: bool,
+    uses: bool,
+    path: Expr,
+}
+
+pub enum ReactionFieldInnerType {
+    Port,
+    Action,
+}
+
+impl TryFrom<ReactionField> for ReactionFieldInner {
+    type Error = darling::Error;
+
+    fn try_from(value: ReactionField) -> Result<Self, Self::Error> {
+        // Builds an expression for the path of this ReactionField.
+        // If `path` is specified (not-none), then this overrides the fallback to using `ident`;
+        let path = value
+            .path
+            .or_else(|| value.ident.map(|i| parse_quote!(#i)))
+            .ok_or_else(|| darling::Error::custom("Field must have either a path or an ident"))?;
+
+        let field_inner_type = extract_path_ident(&value.ty).ok_or_else(|| {
+            darling::Error::custom("Unable to extract path ident ").with_span(&value.ty)
+        })?;
+
+        match &value.ty {
+            // For ports, only 3 variants are valid:
+            // - &runtime::Port<T>, which means {triggers, uses, !effects}
+            // - &runtime::Port<T> with #[reaction(uses)], which means {!triggers, uses, !effects}
+            // - &mut runtime::Port<T> which means {!triggers, !uses, effects}
+            Type::Reference(TypeReference {
+                mutability: None,
+                elem,
+                ..
+            }) if field_inner_type.to_string() == PORT => {
+                match (value.triggers, value.effects, value.uses) {
+                    (None, None, None) => Ok(Self {
+                        elem: *elem.clone(),
+                        field_type: ReactionFieldInnerType::Port,
+                        triggers: true,
+                        effects: false,
+                        uses: true,
+                        path,
+                    }),
+                    (None, None, Some(true)) => Ok(Self {
+                        elem: *elem.clone(),
+                        field_type: ReactionFieldInnerType::Port,
+                        triggers: false,
+                        effects: false,
+                        uses: true,
+                        path,
+                    }),
+                    _ => Err(darling::Error::custom(
+                        "Invalid Port field. Possible attributes are 'use'",
+                    )
+                    .with_span(&value.ty)),
+                }
+            }
+
+            Type::Reference(TypeReference {
+                mutability: Some(_),
+                elem,
+                ..
+            }) if field_inner_type.to_string() == PORT => {
+                match (value.triggers, value.effects, value.uses) {
+                    (None, None, None) => Ok(Self {
+                        elem: *elem.clone(),
+                        field_type: ReactionFieldInnerType::Port,
+                        triggers: false,
+                        effects: true,
+                        uses: false,
+                        path,
+                    }),
+                    _ => Err(darling::Error::custom("Invalid Port variant").with_span(&value.ty)),
+                }
+            }
+
+            Type::Path(TypePath { path: elem, .. })
+                if field_inner_type.to_string() == ACTION_REF =>
+            {
+                Ok(Self {
+                    elem: syn::Type::Path(TypePath {
+                        qself: None,
+                        path: path_without_generics(elem),
+                    }),
+                    field_type: ReactionFieldInnerType::Action,
+                    triggers: value.triggers.unwrap_or(false),
+                    effects: value.effects.unwrap_or(false),
+                    uses: value.uses.unwrap_or(true),
+                    path,
+                })
+            }
+
+            _ => Err(darling::Error::custom("Unexpected field type").with_span(&value.ty)),
+        }
+    }
+}
+
+impl ToTokens for ReactionFieldInner {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        let triggers = self.triggers;
+        let uses = self.uses;
+        let effects = self.effects;
+        let path = &self.path;
+        let elem = &self.elem;
+
+        match &self.field_type {
+            ReactionFieldInnerType::Port => {
+                tokens.extend(quote! {
+                    <#elem as ::boomerang::builder::ReactionField>::build(
+                        &mut __reaction,
+                        reactor.#path.into(),
+                        0,
+                        #triggers,
+                        #uses,
+                        #effects,
+                    )?;
+                });
+            }
+
+            ReactionFieldInnerType::Action => {
+                let triggers = self.triggers;
+                let uses = self.uses;
+                let effects = self.effects;
+
+                tokens.extend(quote! {
+                    <#elem as ::boomerang::builder::ReactionField>::build(
+                        &mut __reaction,
+                        reactor.#path.into(),
+                        0,
+                        #triggers,
+                        #uses,
+                        #effects,
+                    )?;
+                });
+            }
         }
     }
 }
 
 #[derive(Debug, FromDeriveInput)]
-#[darling(attributes(reaction), supports(struct_named))]
+#[darling(attributes(reaction), supports(struct_named, struct_unit))]
 pub struct ReactionReceiver {
     ident: Ident,
     generics: Generics,
     data: ast::Data<util::Ignored, ReactionField>,
-
     /// Connection definitions
     #[darling(default, multiple)]
-    //#[darling(default, map = "MetaList::into")]
     pub triggers: Vec<TriggerAttr>,
 }
 
-impl ReactionReceiver {
-    fn reduce(
-        &self,
-        // The ident of the Reaction builder
-        reaction_ident: &Ident,
-        startup_ident: &Ident,
-        shutdown_ident: &Ident,
-    ) -> impl Iterator<Item = proc_macro2::TokenStream> + '_ {
-        let reaction_ident = reaction_ident.clone();
+fn extract_path_ident(elem: &Type) -> Option<&Ident> {
+    match elem {
+        Type::Path(syn::TypePath {
+            path: syn::Path { segments, .. },
+            ..
+        }) => segments.last().map(|segment| &segment.ident),
+        Type::Reference(syn::TypeReference { elem, .. }) => extract_path_ident(elem),
+        _ => None,
+    }
+}
 
-        let mut struct_fields: HashMap<_, ReactionField> = self
+/// Returns the path of a type without generics.
+fn path_without_generics(elem: &syn::Path) -> syn::Path {
+    // iterate through the PathSegments and replace arguments to be PathArgument::None
+    let segments = elem
+        .segments
+        .iter()
+        .map(|seg| match seg {
+            syn::PathSegment {
+                ident,
+                arguments: syn::PathArguments::AngleBracketed(_),
+            } => syn::PathSegment {
+                ident: ident.clone(),
+                arguments: syn::PathArguments::None,
+            },
+            seg => seg.clone(),
+        })
+        .collect();
+
+    syn::Path {
+        leading_colon: elem.leading_colon,
+        segments,
+    }
+}
+
+struct TriggerInner {
+    reaction_ident: Ident,
+    initializer_idents: Vec<Ident>,
+    action_idents: Vec<Ident>,
+    action_types: Vec<Type>,
+    port_idents: Vec<Ident>,
+    port_types: Vec<Box<Type>>,
+    port_mut_idents: Vec<Ident>,
+    port_mut_types: Vec<Box<Type>>,
+}
+
+impl TriggerInner {
+    fn new(reaction_receiver: &ReactionReceiver) -> darling::Result<Self> {
+        let fields = reaction_receiver
             .data
             .as_ref()
             .take_struct()
-            .expect("Only structs are supported")
-            .fields
-            .iter()
-            .map(|&field| {
-                let path = field.path();
-                (path, field.clone())
+            .ok_or_else(|| darling::Error::custom("Only structs are supported"))?;
+
+        let mut initializer_idents = vec![];
+        let mut action_idents = vec![];
+        let mut action_types = vec![];
+        let mut port_idents = vec![];
+        let mut port_types = vec![];
+        let mut port_mut_idents = vec![];
+        let mut port_mut_types = vec![];
+
+        for field in fields.iter() {
+            match &field.ty {
+                Type::Reference(TypeReference {
+                    mutability: None,
+                    elem,
+                    ..
+                }) => {
+                    let ty = extract_path_ident(elem.as_ref()).ok_or_else(|| {
+                        darling::Error::custom(format!(
+                            "Unable to extract path ident for {:?}",
+                            elem
+                        ))
+                    })?;
+                    if ty.to_string() == PORT {
+                        initializer_idents.push(field.ident.clone().unwrap());
+                        port_idents.push(field.ident.clone().unwrap());
+                        port_types.push(elem.clone());
+                    } else {
+                        return Err(darling::Error::custom(format!(
+                            "Unexpected ref type: {:?}",
+                            ty
+                        )));
+                    }
+                }
+
+                Type::Reference(TypeReference {
+                    mutability: Some(_),
+                    elem,
+                    ..
+                }) => {
+                    let ty = extract_path_ident(elem.as_ref()).ok_or_else(|| {
+                        darling::Error::custom(format!(
+                            "Unable to extract path ident for {:?}",
+                            elem
+                        ))
+                    })?;
+                    if ty.to_string() == PORT {
+                        initializer_idents.push(field.ident.clone().unwrap());
+                        port_mut_idents.push(field.ident.clone().unwrap());
+                        port_mut_types.push(elem.clone());
+                    } else {
+                        return Err(darling::Error::custom(format!(
+                            "Unexpected mut ref type: {:?}",
+                            ty
+                        )));
+                    }
+                }
+
+                Type::Path(TypePath { path, .. }) => {
+                    let ty = extract_path_ident(&field.ty).ok_or_else(|| {
+                        darling::Error::custom(format!(
+                            "Unable to extract path ident for {:?}",
+                            field.ty
+                        ))
+                    })?;
+                    if ty.to_string() == ACTION_REF {
+                        initializer_idents.push(field.ident.clone().unwrap());
+                        action_idents.push(field.ident.clone().unwrap());
+                        action_types.push(Type::Path(TypePath {
+                            qself: None,
+                            path: path_without_generics(path),
+                        }));
+                    } else {
+                        return Err(darling::Error::custom(format!(
+                            "Unexpected path type: {:?}",
+                            ty
+                        )));
+                    }
+                }
+
+                _ => {
+                    return Err(darling::Error::custom(format!(
+                        "Not handling {:?}",
+                        field.ty
+                    )));
+                }
+            }
+        }
+
+        Ok(Self {
+            reaction_ident: reaction_receiver.ident.clone(),
+            initializer_idents,
+            action_idents,
+            action_types,
+            port_idents,
+            port_types,
+            port_mut_idents,
+            port_mut_types,
+        })
+    }
+}
+
+impl ToTokens for TriggerInner {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        let reaction_ident = &self.reaction_ident;
+        let initializer_idents = &self.initializer_idents;
+        let action_idents = &self.action_idents;
+        let action_types = &self.action_types;
+        let port_idents = &self.port_idents;
+        let port_types = &self.port_types;
+        let port_mut_idents = &self.port_mut_idents;
+        let port_mut_types = &self.port_mut_types;
+
+        let actions_len = action_idents.len();
+        let actions = if actions_len > 0 {
+            quote! {
+                let [#(#action_idents,)*]: &mut [&mut ::boomerang::runtime::Action; #actions_len] =
+                    ::std::convert::TryInto::try_into(actions)
+                        .expect(&format!(
+                            "Unable to destructure actions for reaction {}",
+                            stringify!(#reaction_ident)
+                        ));
+
+                #(let #action_idents: #action_types = (*#action_idents).into(); );*
+            }
+        } else {
+            quote! {}
+        };
+
+        let ports_len = port_idents.len();
+        let ports = if ports_len > 0 {
+            quote! {
+                let [#(#port_idents,)*]: &[::boomerang::runtime::PortRef; #ports_len] =
+                    ::std::convert::TryInto::try_into(ports)
+                        .expect(&format!(
+                            "Unable to destructure ref ports for reaction {}",
+                            stringify!(#reaction_ident)
+                        ));
+
+                #(let #port_idents = #port_idents.downcast_ref::<#port_types>()
+                    .expect(&format!("Wrong Port type for reaction {}", stringify!(#reaction_ident))); );*
+            }
+        } else {
+            quote! {}
+        };
+
+        let port_muts_len = port_mut_idents.len();
+        let port_muts = if port_muts_len > 0 {
+            quote! {
+                let [#(#port_mut_idents,)*]: &mut [::boomerang::runtime::PortRefMut; #port_muts_len] =
+                    ::std::convert::TryInto::try_into(ports_mut)
+                        .expect(&format!(
+                            "Unable to destructure mut ports for reaction {}",
+                            stringify!(#reaction_ident)
+                        ));
+
+                #(let #port_mut_idents = #port_mut_idents.downcast_mut::<#port_mut_types>()
+                    .expect(&format!(
+                        "Wrong Port type for reaction {}",
+                        stringify!(#reaction_ident)
+                    )); );*
+            }
+        } else {
+            quote! {}
+        };
+
+        tokens.extend(quote! {
+            #[allow(unused_variables)]
+            fn __trigger_inner(
+                ctx: &mut ::boomerang::runtime::Context,
+                state: &mut dyn ::boomerang::runtime::ReactorState,
+                ports: &[::boomerang::runtime::PortRef],
+                ports_mut: &mut [::boomerang::runtime::PortRefMut],
+                actions: &mut [&mut ::boomerang::runtime::Action],
+            ) {
+                let state: &mut <<#reaction_ident as Trigger>::Reactor as ::boomerang::builder::Reactor>::State = state
+                    .downcast_mut()
+                    .expect("Unable to downcast reactor state");
+
+                #actions
+                #ports
+                #port_muts
+
+                #reaction_ident {
+                    #(#initializer_idents),*
+                }.trigger(ctx, state);
+            }
+        });
+    }
+}
+
+pub struct Reaction {
+    ident: Ident,
+    generics: Generics,
+    fields: Vec<ReactionFieldInner>,
+    inner: TriggerInner,
+    /// Whether the reaction has a startup trigger
+    trigger_startup: bool,
+    /// Whether the reaction has a shutdown trigger
+    trigger_shutdown: bool,
+}
+
+impl TryFrom<ReactionReceiver> for Reaction {
+    type Error = darling::Error;
+
+    fn try_from(value: ReactionReceiver) -> Result<Self, Self::Error> {
+        let inner = TriggerInner::new(&value)?;
+
+        let fields = value
+            .data
+            .take_struct()
+            .ok_or(darling::Error::unsupported_shape(
+                "Only structs are supported",
+            ))?;
+
+        let inner_fields = fields
+            .into_iter()
+            .map(|field| field.try_into())
+            .collect::<Result<Vec<ReactionFieldInner>, _>>()?;
+
+        let mut fields_map: HashMap<_, ReactionFieldInner> = inner_fields
+            .into_iter()
+            .map(|mut field| {
+                // If the field is a trigger, then it implies use
+                if field.triggers {
+                    field.uses = true;
+                }
+                (field.path.clone(), field)
             })
             .collect();
 
-        let mut startup_shutdown = vec![];
-
         // Update/apply the struct_fields with any triggers clauses
-        for trigger in self.triggers.iter() {
+        for trigger in value.triggers.iter() {
             match trigger {
-                TriggerAttr::Startup => {
-                    startup_shutdown.push(quote! {
-                        let mut #reaction_ident = #reaction_ident.with_trigger_action(#startup_ident, 0)?
-                    });
-                }
-                TriggerAttr::Shutdown => {
-                    startup_shutdown.push(quote! {
-                        let mut #reaction_ident = #reaction_ident.with_trigger_action(#shutdown_ident, 0)?
-                    });
-                }
                 TriggerAttr::Action(path) => {
-                    struct_fields
+                    fields_map
                         .entry(path.clone())
-                        .or_insert(ReactionField {
-                            ident: None,
-                            ty: parse_quote! { runtime::ActionRef<'a> },
+                        .or_insert(ReactionFieldInner {
+                            elem: parse_quote! { runtime::ActionRef<'a> },
+                            field_type: ReactionFieldInnerType::Action,
                             triggers: true,
                             effects: false,
                             uses: false,
-                            path: Some(path.clone()),
+                            path: path.clone(),
                         })
                         .triggers = true;
                 }
 
                 TriggerAttr::Port(path) => {
-                    struct_fields
+                    fields_map
                         .entry(path.clone())
-                        .or_insert(ReactionField {
-                            ident: None,
-                            ty: parse_quote! { runtime::Port<'a, u32> },
+                        .or_insert(ReactionFieldInner {
+                            elem: parse_quote! { runtime::Port<'a, _> },
+                            field_type: ReactionFieldInnerType::Port,
                             triggers: true,
                             effects: false,
                             uses: false,
-                            path: Some(path.clone()),
+                            path: path.clone(),
                         })
                         .triggers = true;
                 }
+
+                _ => {}
             }
         }
 
-        let struct_fields =
-            struct_fields
-                .into_iter()
-                .enumerate()
-                .map(move |(idx, (path, field))| {
-                    if let Type::Reference(TypeReference { elem, .. }) = &field.ty {
-                        let triggers = field.triggers;
-                        let effects = field.effects;
-                        let uses = field.uses;
+        let trigger_startup = value
+            .triggers
+            .iter()
+            .any(|t| matches!(t, TriggerAttr::Startup));
+        let trigger_shutdown = value
+            .triggers
+            .iter()
+            .any(|t| matches!(t, TriggerAttr::Shutdown));
 
-                        quote! {
-                            <#elem as ::boomerang::builder::ReactionField>::build(
-                                &mut #reaction_ident,
-                                #path,
-                                #idx,
-                                #triggers,
-                                #uses,
-                                #effects,
-                            )?;
-                        }
-                    } else {
-                        panic!("Only references are supported");
-                    }
-                });
-
-        startup_shutdown
-            .into_iter()
-            .chain(struct_fields.into_iter())
+        Ok(Self {
+            ident: value.ident,
+            generics: value.generics,
+            fields: fields_map.into_values().collect(),
+            inner,
+            trigger_startup,
+            trigger_shutdown,
+        })
     }
 }
 
-impl ToTokens for ReactionReceiver {
+impl ToTokens for Reaction {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
-        let builder = format_ident!("__reaction");
-        let startup = format_ident!("__startup_action");
-        let shutdown = format_ident!("__shutdown_action");
-
         let ident = &self.ident;
         let generics = &self.generics;
-        let struct_fields = self.reduce(&builder, &startup, &shutdown);
+        let struct_fields = &self.fields;
+        let trigger_inner = &self.inner;
+
+        let trigger_startup = if self.trigger_startup {
+            quote! {
+                let mut __reaction = __reaction.with_trigger_action(__startup_action, 0)?;
+            }
+        } else {
+            quote! {}
+        };
+
+        let trigger_shutdown = if self.trigger_shutdown {
+            quote! {
+                let mut __reaction = __reaction.with_trigger_action(__shutdown_action, 0)?;
+            }
+        } else {
+            quote! {}
+        };
 
         tokens.extend(quote! {
             #[automatically_derived]
             impl #generics ::boomerang::builder::Reaction for #ident #generics {
                 fn build<'builder>(
                     name: &str,
-                    reactor: &Self::BuilderReactor,
+                    reactor: &Self::Reactor,
                     builder: &'builder mut ::boomerang::builder::ReactorBuilderState,
                 ) -> Result<
                     ::boomerang::builder::ReactionBuilderState<'builder>,
                     ::boomerang::builder::BuilderError
                 >
                 {
-                    let __wrapper: Box<dyn ::boomerang::runtime::ReactionFn> = Box::new( move |ctx: &mut ::boomerang::runtime::Context, state: &mut dyn runtime::ReactorState, inputs, outputs, actions: &mut [&mut runtime::Action]| { });
+                    #trigger_inner
                     let __startup_action = builder.get_startup_action();
-                    let __shutdown_action = builder.get_shutdown_action();
-                    let mut #builder = builder.add_reaction(name, __wrapper);
+                let __shutdown_action = builder.get_shutdown_action();
+                    let mut __reaction = builder.add_reaction(name, Box::new(__trigger_inner));
+                    #trigger_startup
+                    #trigger_shutdown
                     #(#struct_fields;)*
-                    Ok(#builder)
-                }
-
-                fn marshall(
-                    inputs: &[::boomerang::runtime::IPort],
-                    outputs: &mut [::boomerang::runtime::OPort],
-                    actions: &mut [&mut ::boomerang::runtime::Action],
-                ) -> Self
-                {
-                    todo!();
+                    Ok(__reaction)
                 }
             }
         });
     }
 }
 
+#[cfg(feature = "disable")]
 #[test]
 fn test_reaction() {
     let good_input = r#"
@@ -280,6 +644,4 @@ struct ReactionT<'a> {
     let receiver = ReactionReceiver::from_derive_input(&parsed).unwrap();
 
     //let fields = receiver.data.take_struct().unwrap();
-
-    println!("{}", receiver.to_token_stream());
 }

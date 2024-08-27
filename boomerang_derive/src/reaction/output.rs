@@ -219,7 +219,7 @@ impl darling::ToTokens for ReactionReceiver {
         let actions_destructure = self.actions_destructure_tokens();
         let fn_args = self.fn_args_tokens();
         let wrapper_block = quote! {
-            let __wrapper: Box<dyn ::boomerang::runtime::ReactionFn> = Box::new(
+            let __wrapper: ::boomerang::runtime::ReactionFn = Box::new(
                 move |
                     ctx: &mut ::boomerang::runtime::Context,
                     state: &mut dyn runtime::ReactorState,

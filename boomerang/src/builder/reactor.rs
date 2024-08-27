@@ -1,6 +1,7 @@
 use super::{
     BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey, EnvBuilder,
-    FindElements, Logical, Physical, PortType, ReactionBuilderState, TypedActionKey, TypedPortKey,
+    FindElements, Logical, Physical, PortType, Reaction, ReactionBuilderState, TimerActionKey,
+    TimerSpec, TypedActionKey, TypedPortKey, TypedReactionKey,
 };
 use crate::runtime;
 use slotmap::SecondaryMap;
@@ -19,7 +20,7 @@ impl petgraph::graph::GraphIndex for BuilderReactorKey {
     }
 }
 
-pub trait Reactor: Sized {
+pub trait Reactor: Clone + Sized {
     type State: runtime::ReactorState;
 
     fn build(
@@ -31,13 +32,89 @@ pub trait Reactor: Sized {
 }
 
 /// This builder trait is implemented for fields in the Reactor struct.
-pub trait ReactorField {
+pub trait ReactorField: Sized {
+    type Inner;
+
     /// Build a `ReactionBuilderState` for this Reaction
-    fn build<'builder>(
+    fn build(
         name: &str,
-        reactor: &Self::BuilderReactor,
-        builder: &'builder mut ReactorBuilderState,
-    ) -> Result<ReactionBuilderState<'builder>, BuilderError>;
+        inner: Self::Inner,
+        parent: &'_ mut ReactorBuilderState,
+    ) -> Result<Self, BuilderError>;
+}
+
+impl<R: Reaction> ReactorField for TypedReactionKey<R> {
+    type Inner = R::Reactor;
+
+    fn build(
+        name: &str,
+        inner: Self::Inner,
+        parent: &'_ mut ReactorBuilderState,
+    ) -> Result<Self, BuilderError> {
+        let reaction = <R as Reaction>::build(name, &inner, parent)?;
+        let key = reaction.finish()?;
+        Ok(Self::new(key))
+    }
+}
+
+impl<R: Reactor> ReactorField for R {
+    type Inner = R::State;
+
+    fn build(
+        name: &str,
+        inner: Self::Inner,
+        parent: &'_ mut ReactorBuilderState,
+    ) -> Result<Self, BuilderError> {
+        parent.add_child_reactor(name, inner)
+    }
+}
+
+impl<T: runtime::PortData> ReactorField for TypedPortKey<T> {
+    type Inner = PortType;
+
+    fn build(
+        name: &str,
+        inner: Self::Inner,
+        parent: &'_ mut ReactorBuilderState,
+    ) -> Result<Self, BuilderError> {
+        parent.add_port(name, inner)
+    }
+}
+
+impl ReactorField for TimerActionKey {
+    type Inner = TimerSpec;
+
+    fn build(
+        name: &str,
+        inner: Self::Inner,
+        parent: &'_ mut ReactorBuilderState,
+    ) -> Result<Self, BuilderError> {
+        parent.add_timer(name, inner)
+    }
+}
+
+impl<T: runtime::ActionData> ReactorField for TypedActionKey<T, Logical> {
+    type Inner = Option<runtime::Duration>;
+
+    fn build(
+        name: &str,
+        inner: Self::Inner,
+        parent: &'_ mut ReactorBuilderState,
+    ) -> Result<Self, BuilderError> {
+        parent.add_logical_action(name, inner)
+    }
+}
+
+impl<T: runtime::ActionData> ReactorField for TypedActionKey<T, Physical> {
+    type Inner = Option<runtime::Duration>;
+
+    fn build(
+        name: &str,
+        inner: Self::Inner,
+        parent: &'_ mut ReactorBuilderState,
+    ) -> Result<Self, BuilderError> {
+        parent.add_physical_action(name, inner)
+    }
 }
 
 /// ReactorBuilder is the Builder-side definition of a Reactor, and is type-erased
@@ -166,17 +243,16 @@ impl<'a> ReactorBuilderState<'a> {
     pub fn add_timer(
         &mut self,
         name: &str,
-        period: Option<runtime::Duration>,
-        offset: Option<runtime::Duration>,
-    ) -> Result<TypedActionKey, BuilderError> {
-        let action_key = self.add_logical_action(name, period)?;
+        spec: TimerSpec,
+    ) -> Result<TimerActionKey, BuilderError> {
+        let action_key = self.add_logical_action::<()>(name, spec.period)?;
 
-        let startup_fn: Box<dyn runtime::ReactionFn> = Box::new(
+        let startup_fn: runtime::ReactionFn = Box::new(
             move |ctx: &mut runtime::Context, _, _, _, actions: &mut [&mut runtime::Action]| {
                 let [_startup, timer]: &mut [&mut runtime::Action; 2usize] =
                     actions.try_into().unwrap();
                 let mut timer: runtime::ActionRef = (*timer).into();
-                ctx.schedule_action(&mut timer, None, offset);
+                ctx.schedule_action(&mut timer, None, spec.offset);
             },
         );
 
@@ -186,8 +262,8 @@ impl<'a> ReactorBuilderState<'a> {
             .with_effect_action(action_key, 1)?
             .finish()?;
 
-        if period.is_some() {
-            let reset_fn: Box<dyn runtime::ReactionFn> = Box::new(
+        if spec.period.is_some() {
+            let reset_fn: runtime::ReactionFn = Box::new(
                 |ctx: &mut runtime::Context, _, _, _, actions: &mut [&mut runtime::Action]| {
                     let [timer]: &mut [&mut runtime::Action; 1usize] = actions.try_into().unwrap();
                     let mut timer: runtime::ActionRef = (*timer).into();
@@ -201,7 +277,7 @@ impl<'a> ReactorBuilderState<'a> {
                 .finish()?;
         }
 
-        Ok(action_key)
+        Ok(TimerActionKey::from(BuilderActionKey::from(action_key)))
     }
 
     /// Add a new logical action to the reactor.
@@ -230,7 +306,7 @@ impl<'a> ReactorBuilderState<'a> {
     pub fn add_reaction(
         &mut self,
         name: &str,
-        reaction_fn: Box<dyn runtime::ReactionFn>,
+        reaction_fn: runtime::ReactionFn,
     ) -> ReactionBuilderState {
         self.env.add_reaction(name, self.reactor_key, reaction_fn)
     }

@@ -1,97 +1,114 @@
-use boomerang::{
-    builder::{BuilderReactionKey, TypedActionKey, TypedPortKey},
-    runtime, Reactor,
-};
+use boomerang::builder::{Reactor, Trigger, TypedActionKey, TypedPortKey, TypedReactionKey};
+use boomerang::runtime;
 
 /// Test logical action with delay.
 
-#[derive(Reactor)]
-#[reactor(state = "GeneratedDelay")]
-struct GeneratedDelayBuilder {
-    #[reactor(input())]
+#[derive(boomerang_derive2::Reactor, Clone)]
+#[reactor(state = "GeneratedDelayState")]
+struct GeneratedDelay {
+    #[reactor(port = "input")]
     y_in: TypedPortKey<u32>,
 
-    #[reactor(output())]
+    #[reactor(port = "output")]
     y_out: TypedPortKey<u32>,
 
     #[reactor(action(physical = "false", min_delay = "100 msec"))]
     act: TypedActionKey,
 
-    #[reactor(reaction(function = "GeneratedDelay::reaction_y_in"))]
-    reaction_y_in: BuilderReactionKey,
+    reaction_y_in: TypedReactionKey<ReactionYIn<'static>>,
 
-    #[reactor(reaction(function = "GeneratedDelay::reaction_act"))]
-    reaction_act: BuilderReactionKey,
+    reaction_act: TypedReactionKey<ReactionAct<'static>>,
 }
 
-struct GeneratedDelay {
+#[derive(Default)]
+struct GeneratedDelayState {
     y_state: u32,
 }
 
-impl GeneratedDelay {
-    fn new() -> Self {
-        Self { y_state: 0 }
-    }
+#[derive(boomerang_derive2::Reaction)]
+struct ReactionYIn<'a> {
+    y_in: &'a runtime::Port<u32>,
+    #[reaction(effects)]
+    act: runtime::ActionRef<'a>,
+}
 
-    /// y_in -> act
-    #[boomerang::reaction(reactor = "GeneratedDelayBuilder")]
-    fn reaction_y_in(
+impl Trigger for ReactionYIn<'_> {
+    type Reactor = GeneratedDelay;
+
+    fn trigger(
         &mut self,
         ctx: &mut runtime::Context,
-        #[reactor::port(triggers)] y_in: &runtime::Port<u32>,
-        #[reactor::action(effects)] mut act: runtime::ActionRef,
+        state: &mut <Self::Reactor as Reactor>::State,
     ) {
-        self.y_state = y_in.get().unwrap();
-        ctx.schedule_action(&mut act, None, None);
-    }
-
-    /// act -> y_out
-    #[boomerang::reaction(reactor = "GeneratedDelayBuilder", triggers(action = "act"))]
-    fn reaction_act(
-        &mut self,
-        _ctx: &runtime::Context,
-        #[reactor::port(effects)] y_out: &mut runtime::Port<u32>,
-    ) {
-        *y_out.get_mut() = Some(self.y_state);
+        state.y_state = self.y_in.get().unwrap();
+        ctx.schedule_action(&mut self.act, None, None);
     }
 }
 
-#[derive(Reactor)]
-#[reactor(state = "Source")]
+#[derive(boomerang_derive2::Reaction)]
+#[reaction(triggers(action = "act"))]
+struct ReactionAct<'a> {
+    y_out: &'a mut runtime::Port<u32>,
+}
+
+impl Trigger for ReactionAct<'_> {
+    type Reactor = GeneratedDelay;
+
+    fn trigger(
+        &mut self,
+        _ctx: &mut runtime::Context,
+        state: &mut <Self::Reactor as Reactor>::State,
+    ) {
+        *self.y_out.get_mut() = Some(state.y_state);
+    }
+}
+
+#[derive(boomerang_derive2::Reactor, Clone)]
+#[reactor(state = "()")]
 struct SourceBuilder {
-    #[reactor(output())]
+    #[reactor(port = "output")]
     out: TypedPortKey<u32>,
-    #[reactor(reaction(function = "Source::reaction_startup",))]
-    reaction_startup: BuilderReactionKey,
+    reaction_startup: TypedReactionKey<SourceReactionStartup<'static>>,
 }
 
-struct Source;
-impl Source {
-    #[boomerang::reaction(reactor = "SourceBuilder", triggers(startup))]
-    fn reaction_startup(
+#[derive(boomerang_derive2::Reaction)]
+#[reaction(triggers(startup))]
+struct SourceReactionStartup<'a> {
+    out: &'a mut runtime::Port<u32>,
+}
+
+impl Trigger for SourceReactionStartup<'_> {
+    type Reactor = SourceBuilder;
+
+    fn trigger(
         &mut self,
-        _ctx: &runtime::Context,
-        #[reactor::port(effects)] out: &mut runtime::Port<u32>,
+        _ctx: &mut runtime::Context,
+        _state: &mut <Self::Reactor as Reactor>::State,
     ) {
-        *out.get_mut() = Some(1);
+        *self.out.get_mut() = Some(1);
     }
 }
 
-#[derive(Reactor)]
-#[reactor(state = "Sink")]
-struct SinkBuilder {
-    #[reactor(input())]
+#[derive(boomerang_derive2::Reactor, Clone)]
+#[reactor(state = "()")]
+struct Sink {
+    #[reactor(port = "input")]
     inp: TypedPortKey<u32>,
-    #[reactor(reaction(function = "Sink::reaction_in"))]
-    reaction_in: BuilderReactionKey,
+    reaction_in: TypedReactionKey<SinkReactionIn<'static>>,
 }
-struct Sink;
-impl Sink {
-    #[boomerang::reaction(reactor = "SinkBuilder")]
-    fn reaction_in(
+
+#[derive(boomerang_derive2::Reaction)]
+struct SinkReactionIn<'a> {
+    inp: &'a runtime::Port<u32>,
+}
+
+impl Trigger for SinkReactionIn<'_> {
+    type Reactor = Sink;
+
+    fn trigger(
         &mut self,
-        ctx: &runtime::Context,
-        #[reactor::port(triggers, path = "inp")] _inp: &runtime::Port<u32>,
+        ctx: &mut runtime::Context,
+        state: &mut <Self::Reactor as Reactor>::State,
     ) {
         let elapsed_logical = ctx.get_elapsed_logical_time();
         let logical = ctx.get_logical_time();
@@ -108,7 +125,7 @@ impl Sink {
     }
 }
 
-#[derive(Reactor)]
+#[derive(boomerang_derive2::Reactor, Clone)]
 #[reactor(
     state = "()",
     connection(from = "source.out", to = "g.y_in"),
@@ -116,12 +133,12 @@ impl Sink {
 )]
 #[allow(dead_code)]
 struct ActionDelayBuilder {
-    #[reactor(child(state = "Source{}"))]
+    #[reactor(child = ())]
     source: SourceBuilder,
-    #[reactor(child(state = "Sink{}"))]
-    sink: SinkBuilder,
-    #[reactor(child(state = "GeneratedDelay::new()"))]
-    g: GeneratedDelayBuilder,
+    #[reactor(child = ())]
+    sink: Sink,
+    #[reactor(child = GeneratedDelayState::default())]
+    g: GeneratedDelay,
 }
 
 #[test]

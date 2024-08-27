@@ -11,29 +11,14 @@ tinymap::key_type!(pub ReactionKey);
 
 pub type ReactionSet = KeySet<ReactionKey>;
 
-pub type IPort<'a> = &'a Box<dyn BasePort>;
-pub type OPort<'a> = &'a mut Box<dyn BasePort>;
+pub type PortRef<'a> = &'a Box<dyn BasePort>;
+pub type PortRefMut<'a> = &'a mut Box<dyn BasePort>;
 
-pub type InputPorts<'a> = &'a [IPort<'a>];
-pub type OutputPorts<'a> = &'a mut [OPort<'a>];
-
-pub trait ReactionFn:
-    Fn(
-        &mut Context,
-        &mut dyn ReactorState,
-        &[IPort], // Input ports
-        &mut [OPort], // Output ports
-        &mut [&mut Action], // Schedulable Actions
-    ) + Sync
-    + Send
-{
-}
-impl<F> ReactionFn for F where
-    F: Fn(&mut Context, &mut dyn ReactorState, &[IPort], &mut [OPort], &mut [&mut Action])
-        + Send
+pub type ReactionFn = Box<
+    dyn Fn(&mut Context, &mut dyn ReactorState, &[PortRef], &mut [PortRefMut], &mut [&mut Action])
         + Sync
-{
-}
+        + Send,
+>;
 
 #[derive(Derivative)]
 #[derivative(Debug, PartialEq)]
@@ -60,7 +45,7 @@ pub struct Reaction {
     /// Reaction closure
     #[derivative(PartialEq = "ignore")]
     #[derivative(Debug = "ignore")]
-    body: Box<dyn ReactionFn>,
+    body: ReactionFn,
     // Local deadline relative to the time stamp for invocation of the reaction.
     deadline: Option<Deadline>,
 }
@@ -72,7 +57,7 @@ impl Reaction {
         use_ports: Vec<PortKey>,
         effect_ports: Vec<PortKey>,
         actions: Vec<ActionKey>,
-        body: Box<dyn ReactionFn>,
+        body: ReactionFn,
         deadline: Option<Deadline>,
     ) -> Self {
         Self {
@@ -127,8 +112,8 @@ impl Reaction {
         tag: Tag,
         reactor: &'a mut Reactor,
         actions: &mut [&mut Action],
-        inputs: &[IPort<'_>],
-        outputs: &mut [OPort<'_>],
+        inputs: &[PortRef<'_>],
+        outputs: &mut [PortRefMut<'_>],
         async_tx: Sender<PhysicalEvent>,
         shutdown_rx: keepalive::Receiver,
     ) -> TriggerRes {

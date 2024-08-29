@@ -799,7 +799,10 @@ impl EnvBuilder {
             })
             .collect();
 
-        let runtime_action_triggers = action_triggers
+        let runtime_action_triggers: tinymap::TinySecondaryMap<
+            runtime::ActionKey,
+            Vec<(Level, runtime::ReactionKey)>,
+        > = action_triggers
             .into_iter()
             .map(|(action_key, trigger)| {
                 let downstream = trigger
@@ -815,6 +818,30 @@ impl EnvBuilder {
             })
             .collect();
 
+        let startup_reactions = runtime_actions
+            .iter()
+            .filter_map(|(action_key, action)| {
+                if let runtime::Action::Startup = action {
+                    Some(runtime_action_triggers[action_key].iter().copied())
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .collect();
+
+        let shutdown_reactions = runtime_actions
+            .iter()
+            .filter_map(|(action_key, action)| {
+                if let runtime::Action::Shutdown = action {
+                    Some(runtime_action_triggers[action_key].iter().copied())
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .collect();
+
         Ok((
             runtime::Env {
                 reactors: runtime_reactors,
@@ -825,6 +852,8 @@ impl EnvBuilder {
             runtime::TriggerMap {
                 port_triggers: runtime_port_triggers,
                 action_triggers: runtime_action_triggers,
+                startup_reactions,
+                shutdown_reactions,
             },
             BuilderAliases {
                 reactor_aliases,

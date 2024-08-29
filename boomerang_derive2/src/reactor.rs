@@ -231,7 +231,7 @@ pub struct ReactorReceiver {
     // pub attrs: Vec<syn::Attribute>,
     pub data: ast::Data<darling::util::Ignored, FieldReceiver>,
     /// Type of the reactor state
-    state: syn::Type,
+    state: syn::Expr,
     /// Connection definitions
     #[darling(default, multiple, rename = "connection")]
     pub connections: Vec<ConnectionAttr>,

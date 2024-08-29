@@ -62,13 +62,8 @@ pub mod builder;
 pub use boomerang_runtime as runtime;
 
 #[cfg(feature = "derive")]
-#[allow(unused_imports)]
-#[macro_use]
-extern crate boomerang_derive;
-
-#[cfg(feature = "derive")]
 #[doc(hidden)]
-pub use boomerang_derive::*;
+pub use boomerang_derive2::*;
 
 #[derive(thiserror::Error, Debug)]
 pub enum BoomerangError {

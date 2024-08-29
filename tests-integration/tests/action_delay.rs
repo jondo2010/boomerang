@@ -1,9 +1,9 @@
 use boomerang::builder::{Reactor, Trigger, TypedActionKey, TypedPortKey, TypedReactionKey};
-use boomerang::runtime;
+use boomerang::{runtime, Reaction, Reactor};
 
 /// Test logical action with delay.
 
-#[derive(boomerang_derive2::Reactor, Clone)]
+#[derive(Reactor, Clone)]
 #[reactor(state = "GeneratedDelayState")]
 struct GeneratedDelay {
     #[reactor(port = "input")]
@@ -16,7 +16,6 @@ struct GeneratedDelay {
     act: TypedActionKey,
 
     reaction_y_in: TypedReactionKey<ReactionYIn<'static>>,
-
     reaction_act: TypedReactionKey<ReactionAct<'static>>,
 }
 
@@ -25,7 +24,7 @@ struct GeneratedDelayState {
     y_state: u32,
 }
 
-#[derive(boomerang_derive2::Reaction)]
+#[derive(Reaction)]
 struct ReactionYIn<'a> {
     y_in: &'a runtime::Port<u32>,
     #[reaction(effects)]
@@ -45,7 +44,7 @@ impl Trigger for ReactionYIn<'_> {
     }
 }
 
-#[derive(boomerang_derive2::Reaction)]
+#[derive(Reaction)]
 #[reaction(triggers(action = "act"))]
 struct ReactionAct<'a> {
     y_out: &'a mut runtime::Port<u32>,
@@ -63,7 +62,7 @@ impl Trigger for ReactionAct<'_> {
     }
 }
 
-#[derive(boomerang_derive2::Reactor, Clone)]
+#[derive(Reactor, Clone)]
 #[reactor(state = "()")]
 struct SourceBuilder {
     #[reactor(port = "output")]
@@ -71,7 +70,7 @@ struct SourceBuilder {
     reaction_startup: TypedReactionKey<SourceReactionStartup<'static>>,
 }
 
-#[derive(boomerang_derive2::Reaction)]
+#[derive(Reaction)]
 #[reaction(triggers(startup))]
 struct SourceReactionStartup<'a> {
     out: &'a mut runtime::Port<u32>,
@@ -89,7 +88,7 @@ impl Trigger for SourceReactionStartup<'_> {
     }
 }
 
-#[derive(boomerang_derive2::Reactor, Clone)]
+#[derive(Reactor, Clone)]
 #[reactor(state = "()")]
 struct Sink {
     #[reactor(port = "input")]
@@ -97,9 +96,10 @@ struct Sink {
     reaction_in: TypedReactionKey<SinkReactionIn<'static>>,
 }
 
-#[derive(boomerang_derive2::Reaction)]
+#[derive(Reaction)]
 struct SinkReactionIn<'a> {
-    inp: &'a runtime::Port<u32>,
+    #[reaction(path = inp)]
+    _inp: &'a runtime::Port<u32>,
 }
 
 impl Trigger for SinkReactionIn<'_> {
@@ -108,7 +108,7 @@ impl Trigger for SinkReactionIn<'_> {
     fn trigger(
         &mut self,
         ctx: &mut runtime::Context,
-        state: &mut <Self::Reactor as Reactor>::State,
+        _state: &mut <Self::Reactor as Reactor>::State,
     ) {
         let elapsed_logical = ctx.get_elapsed_logical_time();
         let logical = ctx.get_logical_time();
@@ -125,7 +125,7 @@ impl Trigger for SinkReactionIn<'_> {
     }
 }
 
-#[derive(boomerang_derive2::Reactor, Clone)]
+#[derive(Reactor, Clone)]
 #[reactor(
     state = "()",
     connection(from = "source.out", to = "g.y_in"),

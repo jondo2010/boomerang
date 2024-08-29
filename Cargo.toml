@@ -21,10 +21,11 @@ serde = "1.0"
 erased-serde = "0.4"
 rayon = "1.10"
 
-boomerang = { path = "boomerang", version = "0.2.0" }
-boomerang_derive = { path = "boomerang_derive", version = "0.2.0" }
-boomerang_runtime = { path = "boomerang_runtime", version = "0.2.0" }
-boomerang_tinymap = { path = "boomerang_tinymap", version = "0.1.0" }
+boomerang = { path = "boomerang" }
+boomerang_derive = { path = "boomerang_derive" }
+boomerang_runtime = { path = "boomerang_runtime" }
+boomerang_tinymap = { path = "boomerang_tinymap" }
+boomerang_util = { path = "boomerang_util" }
 
 [workspace]
 members = [
@@ -33,6 +34,7 @@ members = [
     "boomerang_derive2",
     "boomerang_runtime",
     "boomerang_tinymap",
+    "tests-integration",
 ]
 resolver = "2"
 

@@ -1,20 +1,20 @@
-use boomerang::{builder::*, runtime};
-use boomerang_util::timeout::{Timeout, TimeoutBuilder};
+use boomerang::{builder::*, runtime, Reaction, Reactor};
+use boomerang_util::timeout;
 
-#[derive(boomerang_derive2::Reactor, Clone)]
-#[reactor(state = "u32")]
+#[derive(Reactor, Clone)]
+#[reactor(state = u32)]
 struct Count {
     #[reactor(timer(period = "1 usec"))]
     t: TimerActionKey,
     #[reactor(port = "output")]
     c: TypedPortKey<u32>,
-    #[reactor(child = Timeout::new(runtime::Duration::from_secs(1)))]
-    _timeout: TimeoutBuilder,
+    #[reactor(child = runtime::Duration::from_secs(1))]
+    _timeout: timeout::Timeout,
     reaction_t: TypedReactionKey<ReactionT<'static>>,
     reaction_shutdown: TypedReactionKey<ReactionShutdown>,
 }
 
-#[derive(boomerang_derive2::Reaction)]
+#[derive(Reaction)]
 #[reaction(triggers(action = "t"))]
 struct ReactionT<'a> {
     #[reaction(path = "c")]
@@ -35,7 +35,7 @@ impl Trigger for ReactionT<'_> {
     }
 }
 
-#[derive(boomerang_derive2::Reaction)]
+#[derive(Reaction)]
 #[reaction(triggers(shutdown))]
 struct ReactionShutdown;
 
@@ -47,7 +47,7 @@ impl Trigger for ReactionShutdown {
         _ctx: &mut runtime::Context,
         state: &mut <Self::Reactor as Reactor>::State,
     ) {
-        assert_eq!(*state, 1e6 as u32 - 1, "expected 1e6, got {state}");
+        assert_eq!(*state, 1e6 as u32, "expected 1e6, got {state}");
         println!("ok");
     }
 }
@@ -62,5 +62,5 @@ fn count() {
         .get_reactor_by_name("count")
         .and_then(|r| r.get_state::<u32>())
         .unwrap();
-    assert_eq!(*count, 1e6 as u32 - 1);
+    assert_eq!(*count, 1e6 as u32);
 }

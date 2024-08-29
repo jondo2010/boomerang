@@ -9,6 +9,7 @@ use syn::{parse_quote, Expr, Generics, Ident, Type, TypePath, TypeReference};
 
 const PORT: &'static str = "Port";
 const ACTION_REF: &'static str = "ActionRef";
+const PHYSICAL_ACTION_REF: &'static str = "PhysicalActionRef";
 
 #[derive(Debug, Eq, PartialEq, Hash)]
 pub enum TriggerAttr {
@@ -78,18 +79,19 @@ pub struct ReactionField {
     path: Option<Expr>,
 }
 
-pub struct ReactionFieldInner {
-    elem: syn::Type,
-    field_type: ReactionFieldInnerType,
-    triggers: bool,
-    effects: bool,
-    uses: bool,
-    path: Expr,
-}
-
-pub enum ReactionFieldInnerType {
-    Port,
-    Action,
+pub enum ReactionFieldInner {
+    /// The definition came from a field on the struct.
+    FieldDefined {
+        elem: syn::Type,
+        triggers: bool,
+        effects: bool,
+        uses: bool,
+        path: Expr,
+    },
+    /// The definition came from a #[reaction(triggers(port = "..."))] attribute.
+    TriggerPort { port: Expr },
+    /// The definition came from a #[reaction(triggers(action = "..."))] attribute.
+    TriggerAction { action: Expr },
 }
 
 impl TryFrom<ReactionField> for ReactionFieldInner {
@@ -109,26 +111,24 @@ impl TryFrom<ReactionField> for ReactionFieldInner {
 
         match &value.ty {
             // For ports, only 3 variants are valid:
-            // - &runtime::Port<T>, which means {triggers, uses, !effects}
-            // - &runtime::Port<T> with #[reaction(uses)], which means {!triggers, uses, !effects}
-            // - &mut runtime::Port<T> which means {!triggers, !uses, effects}
+            // - &runtime::Port<T>, corresponds to TriggerMode::TriggersAndUses
+            // - &runtime::Port<T> with #[reaction(uses)], corresponds to TriggerMode::UsesOnly
+            // - &mut runtime::Port<T> corresponds to TriggerMode::EffectsOnly
             Type::Reference(TypeReference {
                 mutability: None,
                 elem,
                 ..
             }) if field_inner_type.to_string() == PORT => {
                 match (value.triggers, value.effects, value.uses) {
-                    (None, None, None) => Ok(Self {
+                    (None, None, None) => Ok(Self::FieldDefined {
                         elem: *elem.clone(),
-                        field_type: ReactionFieldInnerType::Port,
                         triggers: true,
                         effects: false,
                         uses: true,
                         path,
                     }),
-                    (None, None, Some(true)) => Ok(Self {
+                    (None, None, Some(true)) => Ok(Self::FieldDefined {
                         elem: *elem.clone(),
-                        field_type: ReactionFieldInnerType::Port,
                         triggers: false,
                         effects: false,
                         uses: true,
@@ -147,9 +147,8 @@ impl TryFrom<ReactionField> for ReactionFieldInner {
                 ..
             }) if field_inner_type.to_string() == PORT => {
                 match (value.triggers, value.effects, value.uses) {
-                    (None, None, None) => Ok(Self {
+                    (None, None, None) => Ok(Self::FieldDefined {
                         elem: *elem.clone(),
-                        field_type: ReactionFieldInnerType::Port,
                         triggers: false,
                         effects: true,
                         uses: false,
@@ -160,14 +159,14 @@ impl TryFrom<ReactionField> for ReactionFieldInner {
             }
 
             Type::Path(TypePath { path: elem, .. })
-                if field_inner_type.to_string() == ACTION_REF =>
+                if field_inner_type.to_string() == ACTION_REF
+                    || field_inner_type.to_string() == PHYSICAL_ACTION_REF =>
             {
-                Ok(Self {
+                Ok(Self::FieldDefined {
                     elem: syn::Type::Path(TypePath {
                         qself: None,
-                        path: path_without_generics(elem),
+                        path: elem.clone(),
                     }),
-                    field_type: ReactionFieldInnerType::Action,
                     triggers: value.triggers.unwrap_or(false),
                     effects: value.effects.unwrap_or(false),
                     uses: value.uses.unwrap_or(true),
@@ -182,40 +181,46 @@ impl TryFrom<ReactionField> for ReactionFieldInner {
 
 impl ToTokens for ReactionFieldInner {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
-        let triggers = self.triggers;
-        let uses = self.uses;
-        let effects = self.effects;
-        let path = &self.path;
-        let elem = &self.elem;
+        match self {
+            Self::FieldDefined {
+                path,
+                elem,
+                triggers,
+                uses,
+                effects,
+            } => {
+                let trigger_mode = match (triggers, uses, effects) {
+                    (true, true, false) => {
+                        quote! {::boomerang::builder::TriggerMode::TriggersAndUses}
+                    }
+                    (false, true, false) => quote! {::boomerang::builder::TriggerMode::UsesOnly},
+                    (false, false, true) => quote! {::boomerang::builder::TriggerMode::EffectsOnly},
 
-        match &self.field_type {
-            ReactionFieldInnerType::Port => {
+                    // Additional trigger modes for Actions
+                    (true, false, false) => {
+                        quote! {::boomerang::builder::TriggerMode::TriggersOnly}
+                    }
+                    (false, true, true) => quote! {::boomerang::builder::TriggerMode::EffectsOnly},
+                    _ => panic!("Invalid trigger mode: {:?}", (triggers, uses, effects)),
+                };
+
                 tokens.extend(quote! {
                     <#elem as ::boomerang::builder::ReactionField>::build(
                         &mut __reaction,
                         reactor.#path.into(),
                         0,
-                        #triggers,
-                        #uses,
-                        #effects,
+                        #trigger_mode,
                     )?;
                 });
             }
-
-            ReactionFieldInnerType::Action => {
-                let triggers = self.triggers;
-                let uses = self.uses;
-                let effects = self.effects;
-
+            Self::TriggerPort { port } => {
                 tokens.extend(quote! {
-                    <#elem as ::boomerang::builder::ReactionField>::build(
-                        &mut __reaction,
-                        reactor.#path.into(),
-                        0,
-                        #triggers,
-                        #uses,
-                        #effects,
-                    )?;
+                    __reaction.add_port(reactor.#port.into(), 0, ::boomerang::builder::TriggerMode::TriggersOnly)?;
+                });
+            }
+            Self::TriggerAction { action } => {
+                tokens.extend(quote! {
+                    __reaction.add_action(reactor.#action.into(), 0, ::boomerang::builder::TriggerMode::TriggersOnly)?;
                 });
             }
         }
@@ -350,18 +355,17 @@ impl TriggerInner {
                             field.ty
                         ))
                     })?;
-                    if ty.to_string() == ACTION_REF {
+                    if ty.to_string() == ACTION_REF || ty.to_string() == PHYSICAL_ACTION_REF {
                         initializer_idents.push(field.ident.clone().unwrap());
                         action_idents.push(field.ident.clone().unwrap());
                         action_types.push(Type::Path(TypePath {
                             qself: None,
-                            path: path_without_generics(path),
+                            path: path.clone(),
                         }));
                     } else {
-                        return Err(darling::Error::custom(format!(
-                            "Unexpected path type: {:?}",
-                            ty
-                        )));
+                        return Err(
+                            darling::Error::custom("Unexpected Reaction member").with_span(&ty)
+                        );
                     }
                 }
 
@@ -408,7 +412,8 @@ impl ToTokens for TriggerInner {
                             stringify!(#reaction_ident)
                         ));
 
-                #(let #action_idents: #action_types = (*#action_idents).into(); );*
+                //#(let #action_idents: #action_types = (*#action_idents).into(); );*
+                #(let #action_idents = (*#action_idents).into(); );*
             }
         } else {
             quote! {}
@@ -460,9 +465,10 @@ impl ToTokens for TriggerInner {
                 ports_mut: &mut [::boomerang::runtime::PortRefMut],
                 actions: &mut [&mut ::boomerang::runtime::Action],
             ) {
-                let state: &mut <<#reaction_ident as Trigger>::Reactor as ::boomerang::builder::Reactor>::State = state
-                    .downcast_mut()
-                    .expect("Unable to downcast reactor state");
+                let state: &mut <<#reaction_ident as Trigger>::Reactor as ::boomerang::builder::Reactor>::State =
+                    state
+                        .downcast_mut()
+                        .expect("Unable to downcast reactor state");
 
                 #actions
                 #ports
@@ -508,11 +514,21 @@ impl TryFrom<ReactionReceiver> for Reaction {
         let mut fields_map: HashMap<_, ReactionFieldInner> = inner_fields
             .into_iter()
             .map(|mut field| {
-                // If the field is a trigger, then it implies use
-                if field.triggers {
-                    field.uses = true;
+                if let ReactionFieldInner::FieldDefined {
+                    ref mut uses,
+                    triggers,
+                    path,
+                    ..
+                } = &mut field
+                {
+                    // If the field is a trigger, then it implies use
+                    if *triggers {
+                        *uses = true;
+                    }
+                    (path.clone(), field)
+                } else {
+                    panic!("Unexpected reaction field");
                 }
-                (field.path.clone(), field)
             })
             .collect();
 
@@ -522,29 +538,35 @@ impl TryFrom<ReactionReceiver> for Reaction {
                 TriggerAttr::Action(path) => {
                     fields_map
                         .entry(path.clone())
-                        .or_insert(ReactionFieldInner {
-                            elem: parse_quote! { runtime::ActionRef<'a> },
-                            field_type: ReactionFieldInnerType::Action,
-                            triggers: true,
-                            effects: false,
-                            uses: false,
-                            path: path.clone(),
+                        .and_modify(|field| {
+                            if let ReactionFieldInner::FieldDefined {
+                                ref mut triggers, ..
+                            } = field
+                            {
+                                *triggers = true;
+                            } else {
+                                panic!("Trigger action path already used");
+                            }
                         })
-                        .triggers = true;
+                        .or_insert(ReactionFieldInner::TriggerAction {
+                            action: path.clone(),
+                        });
                 }
 
                 TriggerAttr::Port(path) => {
                     fields_map
                         .entry(path.clone())
-                        .or_insert(ReactionFieldInner {
-                            elem: parse_quote! { runtime::Port<'a, _> },
-                            field_type: ReactionFieldInnerType::Port,
-                            triggers: true,
-                            effects: false,
-                            uses: false,
-                            path: path.clone(),
+                        .and_modify(|field| {
+                            if let ReactionFieldInner::FieldDefined {
+                                ref mut triggers, ..
+                            } = field
+                            {
+                                *triggers = true;
+                            } else {
+                                panic!("Trigger port path already used");
+                            }
                         })
-                        .triggers = true;
+                        .or_insert(ReactionFieldInner::TriggerPort { port: path.clone() });
                 }
 
                 _ => {}
@@ -580,7 +602,11 @@ impl ToTokens for Reaction {
 
         let trigger_startup = if self.trigger_startup {
             quote! {
-                let mut __reaction = __reaction.with_trigger_action(__startup_action, 0)?;
+                let mut __reaction = __reaction.with_action(
+                    __startup_action,
+                    0,
+                    ::boomerang::builder::TriggerMode::TriggersOnly
+                )?;
             }
         } else {
             quote! {}
@@ -588,7 +614,11 @@ impl ToTokens for Reaction {
 
         let trigger_shutdown = if self.trigger_shutdown {
             quote! {
-                let mut __reaction = __reaction.with_trigger_action(__shutdown_action, 0)?;
+                let mut __reaction = __reaction.with_action(
+                    __shutdown_action,
+                    0,
+                    ::boomerang::builder::TriggerMode::TriggersOnly
+                )?;
             }
         } else {
             quote! {}

@@ -1,0 +1,28 @@
+[package]
+name = "tests-integration"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dev-dependencies]
+boomerang.workspace = true
+boomerang_util.workspace = true
+tracing-subscriber = { version = "0.3", features = [
+    "fmt",
+    "json",
+    "env-filter",
+] }
+criterion = "0.5"
+#crossbeam-utils = "0.8"
+
+# Deps for Snake example
+[target.'cfg(not(windows))'.dev-dependencies]
+termcolor = { version = "1.2" }
+rand = { version = "0.8" }
+
+[[bench]]
+name = "ping_pong"
+harness = false
+
+[[example]]
+name = "snake"

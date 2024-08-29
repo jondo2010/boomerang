@@ -1,4 +1,4 @@
-use crate::builder::TimerSpec;
+use crate::builder::{TimerSpec, TriggerMode};
 
 use super::*;
 
@@ -82,14 +82,14 @@ fn test_reactions1() {
 
     let r0_key = reactor_builder
         .add_reaction("test", Box::new(|_ctx, _r, _i, _o, _a| {}))
-        .with_trigger_action(startup, 0)
+        .with_action(startup, 0, TriggerMode::TriggersOnly)
         .unwrap()
         .finish()
         .unwrap();
 
     let r1_key = reactor_builder
         .add_reaction("test", Box::new(|_ctx, _r, _i, _o, _a| {}))
-        .with_trigger_action(startup, 0)
+        .with_action(startup, 0, TriggerMode::TriggersOnly)
         .unwrap()
         .finish()
         .unwrap();

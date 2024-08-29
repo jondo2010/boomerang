@@ -37,25 +37,4 @@ boomerang_derive2 = { path = "../boomerang_derive2" }
 boomerang_runtime.workspace = true
 
 [dev-dependencies]
-tracing-subscriber = { version = "0.3", features = [
-    "fmt",
-    "json",
-    "env-filter",
-] }
-criterion = "0.5"
-crossbeam-utils = "0.8"
-
-boomerang_util = { path = "../boomerang_util", features = ["runner"] }
-
-# Deps for Snake example
-[target.'cfg(not(windows))'.dev-dependencies]
-termcolor = "1.2"
-rand = "0.8"
-
-[[bench]]
-name = "ping_pong"
-harness = false
-required-features = []
-
-[[example]]
-name = "snake"
+tracing-subscriber = "0.3"

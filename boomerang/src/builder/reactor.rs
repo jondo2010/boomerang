@@ -1,7 +1,7 @@
 use super::{
     BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey, EnvBuilder,
     FindElements, Logical, Physical, PortType, Reaction, ReactionBuilderState, TimerActionKey,
-    TimerSpec, TypedActionKey, TypedPortKey, TypedReactionKey,
+    TimerSpec, TriggerMode, TypedActionKey, TypedPortKey, TypedReactionKey,
 };
 use crate::runtime;
 use slotmap::SecondaryMap;
@@ -249,8 +249,7 @@ impl<'a> ReactorBuilderState<'a> {
 
         let startup_fn: runtime::ReactionFn = Box::new(
             move |ctx: &mut runtime::Context, _, _, _, actions: &mut [&mut runtime::Action]| {
-                let [_startup, timer]: &mut [&mut runtime::Action; 2usize] =
-                    actions.try_into().unwrap();
+                let [timer]: &mut [&mut runtime::Action; 1usize] = actions.try_into().unwrap();
                 let mut timer: runtime::ActionRef = (*timer).into();
                 ctx.schedule_action(&mut timer, None, spec.offset);
             },
@@ -258,8 +257,8 @@ impl<'a> ReactorBuilderState<'a> {
 
         let startup_key = self.startup_action;
         self.add_reaction(&format!("_{name}_startup"), startup_fn)
-            .with_trigger_action(startup_key, 0)?
-            .with_effect_action(action_key, 1)?
+            .with_action(startup_key, 0, TriggerMode::TriggersOnly)?
+            .with_action(action_key, 1, TriggerMode::EffectsOnly)?
             .finish()?;
 
         if spec.period.is_some() {
@@ -272,8 +271,7 @@ impl<'a> ReactorBuilderState<'a> {
             );
 
             self.add_reaction(&format!("_{name}_reset"), reset_fn)
-                .with_trigger_action(action_key, 0)?
-                .with_effect_action(action_key, 0)?
+                .with_action(action_key, 0, TriggerMode::TriggersAndEffects)?
                 .finish()?;
         }
 

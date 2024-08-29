@@ -1,51 +1,62 @@
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 
-use boomerang::{
-    builder::{BuilderReactionKey, EnvBuilder, Reactor, TypedActionKey, TypedPortKey},
-    runtime, Reactor,
-};
-
-#[derive(Reactor)]
-#[reactor(state = "HelloBench", connection(from = "out1", to = "in1"))]
-struct HelloBenchBuilder {
-    #[reactor(timer(offset = "100 msec", period = "1 sec"))]
-    tim1: TypedActionKey,
-
-    #[reactor(input())]
-    in1: TypedPortKey<u32>,
-
-    #[reactor(output())]
-    out1: TypedPortKey<u32>,
-
-    #[reactor(reaction(function = "HelloBench::foo"))]
-    foo: BuilderReactionKey,
-
-    #[reactor(reaction(function = "HelloBench::bar"))]
-    bar: BuilderReactionKey,
-}
+use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
 
 struct HelloBench {
     my_i: u32,
 }
 
-impl HelloBench {
-    #[boomerang::reaction(reactor = "HelloBenchBuilder", triggers(action = "tim1"))]
-    fn foo(
+#[derive(Clone, Reactor)]
+#[reactor(
+    state = HelloBench,
+    connection(from = "out1", to = "in1")
+)]
+struct HelloBenchBuilder {
+    #[reactor(timer(offset = "100 msec", period = "1 sec"))]
+    tim1: TimerActionKey,
+
+    #[reactor(port = "input")]
+    in1: TypedPortKey<u32>,
+
+    #[reactor(port = "output")]
+    out1: TypedPortKey<u32>,
+
+    foo: TypedReactionKey<ReactionFoo<'static>>,
+    bar: TypedReactionKey<ReactionBar<'static>>,
+}
+
+#[derive(Reaction)]
+#[reaction(triggers(action = "tim1"))]
+struct ReactionFoo<'a> {
+    out1: &'a mut runtime::Port<u32>,
+}
+
+impl Trigger for ReactionFoo<'_> {
+    type Reactor = HelloBenchBuilder;
+    fn trigger(
         &mut self,
         _ctx: &mut runtime::Context,
-        #[reactor::port(effects)] out1: &mut runtime::Port<u32>,
+        state: &mut <Self::Reactor as Reactor>::State,
     ) {
-        self.my_i += 1;
-        **out1 = Some(self.my_i);
+        state.my_i += 1;
+        **self.out1 = Some(state.my_i);
     }
+}
 
-    #[boomerang::reaction(reactor = "HelloBenchBuilder")]
-    fn bar(
+#[derive(Reaction)]
+struct ReactionBar<'a> {
+    in1: &'a runtime::Port<u32>,
+}
+
+impl Trigger for ReactionBar<'_> {
+    type Reactor = HelloBenchBuilder;
+
+    fn trigger(
         &mut self,
         ctx: &mut runtime::Context,
-        #[reactor::port(triggers)] in1: &runtime::Port<u32>,
+        _state: &mut <Self::Reactor as Reactor>::State,
     ) {
-        if in1.get().unwrap() >= 10000 {
+        if self.in1.get().unwrap() >= 10000 {
             ctx.schedule_shutdown(None);
         }
     }

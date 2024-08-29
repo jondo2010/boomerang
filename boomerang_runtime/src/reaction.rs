@@ -3,8 +3,8 @@ use std::{fmt::Debug, sync::RwLock};
 use crossbeam_channel::Sender;
 
 use crate::{
-    keepalive, key_set::KeySet, Action, ActionKey, BasePort, Context, Duration, PhysicalEvent,
-    PortKey, Reactor, ReactorKey, ReactorState, Tag, TriggerRes,
+    event::PhysicalEvent, keepalive, key_set::KeySet, Action, ActionKey, BasePort, Context,
+    Duration, PortKey, Reactor, ReactorKey, ReactorState, Tag, TriggerRes,
 };
 
 tinymap::key_type!(pub ReactionKey);

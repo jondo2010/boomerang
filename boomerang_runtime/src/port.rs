@@ -9,6 +9,9 @@ use crate::{InnerType, PortData};
 tinymap::key_type!(pub PortKey);
 
 pub trait BasePort: Debug + Display + Send + Sync + DowncastSync {
+    /// Get the name of this port
+    fn get_name(&self) -> &str;
+
     /// Get the key for this port
     fn get_key(&self) -> PortKey;
 
@@ -33,9 +36,9 @@ pub struct Port<T: PortData> {
 impl<T: PortData> Display for Port<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!(
-            "Port<{}> \"{}\"",
-            std::any::type_name::<T>(),
-            self.name
+            "{} : Port<{}>",
+            self.name,
+            std::any::type_name::<T>()
         ))
     }
 }
@@ -77,16 +80,16 @@ where
     pub fn get_mut(&mut self) -> &mut Option<T> {
         &mut self.value
     }
-
-    pub fn get_name(&self) -> &str {
-        &self.name
-    }
 }
 
 impl<T> BasePort for Port<T>
 where
     T: PortData,
 {
+    fn get_name(&self) -> &str {
+        &self.name
+    }
+
     fn get_key(&self) -> PortKey {
         self.key
     }

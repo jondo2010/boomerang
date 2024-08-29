@@ -1,8 +1,8 @@
 use crossbeam_channel::Sender;
 
 use crate::{
-    keepalive, ActionData, ActionKey, ActionRefValue, Duration, Instant, PhysicalActionRef,
-    PhysicalEvent, Tag,
+    event::PhysicalEvent, keepalive, ActionData, ActionKey, ActionRefValue, Duration, Instant,
+    PhysicalActionRef, Tag,
 };
 
 /// Result from a reaction trigger

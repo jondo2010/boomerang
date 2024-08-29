@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use super::{
     BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactorKey, EnvBuilder, FindElements,
-    PortType, Reactor, ReactorBuilderState, TypedActionKey, TypedPortKey,
+    Physical, PortType, Reactor, ReactorBuilderState, TypedActionKey, TypedPortKey,
 };
 use crate::runtime;
 use itertools::Itertools;
@@ -72,9 +72,7 @@ pub trait ReactionField {
         builder: &mut ReactionBuilderState,
         key: Self::Key,
         order: usize,
-        triggers: bool,
-        uses: bool,
-        effects: bool,
+        trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError>;
 }
 
@@ -85,11 +83,22 @@ impl<T: runtime::ActionData> ReactionField for runtime::ActionRef<'_, T> {
         builder: &mut ReactionBuilderState,
         key: Self::Key,
         order: usize,
-        triggers: bool,
-        uses: bool,
-        effects: bool,
+        trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
-        builder.add_action(key.into(), order, triggers, uses, effects)
+        builder.add_action(key.into(), order, trigger_mode)
+    }
+}
+
+impl<T: runtime::ActionData> ReactionField for runtime::PhysicalActionRef<T> {
+    type Key = TypedActionKey<T, Physical>;
+
+    fn build(
+        builder: &mut ReactionBuilderState,
+        key: Self::Key,
+        order: usize,
+        trigger_mode: TriggerMode,
+    ) -> Result<(), BuilderError> {
+        builder.add_action(key.into(), order, trigger_mode)
     }
 }
 
@@ -100,27 +109,45 @@ impl<T: runtime::PortData> ReactionField for runtime::Port<T> {
         builder: &mut ReactionBuilderState,
         key: Self::Key,
         order: usize,
-        triggers: bool,
-        uses: bool,
-        effects: bool,
+        trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
-        builder.add_port(key.into(), order, triggers, uses, effects)
+        builder.add_port(key.into(), order, trigger_mode)
     }
 }
 
-impl<T: runtime::PortData> ReactionField for &'_ runtime::Port<T> {
-    type Key = TypedPortKey<T>;
+pub struct PortOrActionTrigger;
+pub enum PortOrActionTriggerKey {
+    Port(BuilderPortKey),
+    Action(BuilderActionKey),
+}
+impl From<BuilderPortKey> for PortOrActionTriggerKey {
+    fn from(key: BuilderPortKey) -> Self {
+        Self::Port(key)
+    }
+}
+impl From<BuilderActionKey> for PortOrActionTriggerKey {
+    fn from(key: BuilderActionKey) -> Self {
+        Self::Action(key)
+    }
+}
+
+impl ReactionField for PortOrActionTrigger {
+    type Key = PortOrActionTriggerKey;
 
     fn build(
         builder: &mut ReactionBuilderState,
         key: Self::Key,
         order: usize,
-        triggers: bool,
-        uses: bool,
-        effects: bool,
+        trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
-        assert_eq!(effects, false, "Cannot use non-mut port as effect");
-        builder.add_port(key.into(), order, triggers, uses, effects)
+        match key {
+            PortOrActionTriggerKey::Port(port_key) => {
+                builder.add_port(port_key, order, trigger_mode)
+            }
+            PortOrActionTriggerKey::Action(action_key) => {
+                builder.add_action(action_key, order, trigger_mode)
+            }
+        }
     }
 }
 
@@ -140,16 +167,14 @@ pub struct ReactionBuilder {
 
     /// Actions that trigger this Reaction, and their relative ordering.
     pub(super) trigger_actions: SecondaryMap<BuilderActionKey, usize>,
-    /// Actions that this Reaction may read the value of, and their relative ordering.
-    pub(super) use_actions: SecondaryMap<BuilderActionKey, usize>,
-    /// Actions that can be scheduled by this Reaction, and their relative ordering.
-    pub(super) effect_actions: SecondaryMap<BuilderActionKey, usize>,
+    /// Actions that can be read or scheduled by this Reaction, and their relative ordering.
+    pub(super) use_effect_actions: SecondaryMap<BuilderActionKey, usize>,
 
     /// Ports that can trigger this Reaction, and their relative ordering.
     pub(super) trigger_ports: SecondaryMap<BuilderPortKey, usize>,
-    /// Ports that this Reaction may read the value of, and their relative ordering.
+    /// Ports that this Reaction may read the value of, and their relative ordering. These are used to build the array of [`runtime::PortRef`] in the reaction function.
     pub(super) use_ports: SecondaryMap<BuilderPortKey, usize>,
-    /// Ports that this Reaction may set the value of, and their relative ordering.
+    /// Ports that this Reaction may set the value of, and their relative ordering. These are used to build the array of [`runtime::PortRefMut`]` in the reaction function.
     pub(super) effect_ports: SecondaryMap<BuilderPortKey, usize>,
 }
 
@@ -173,15 +198,14 @@ impl ReactionBuilder {
     ) -> runtime::Reaction {
         // Create the Vec of readable ports for this reaction sorted by order
         let use_ports = self
-            .trigger_ports
+            .use_ports
             .iter()
-            .chain(self.use_ports.iter())
             .sorted_by_key(|(_, &order)| order)
             .map(|(builder_port_key, _)| port_aliases[builder_port_key])
             .collect();
 
-        // Create the Vec of output ports for this reaction sorted by order
-        let outputs = self
+        // Create the Vec of writable ports for this reaction sorted by order
+        let effect_ports = self
             .effect_ports
             .iter()
             .sorted_by_key(|(_, &order)| order)
@@ -190,9 +214,8 @@ impl ReactionBuilder {
 
         // Create the Vec of actions for this reaction sorted by order
         let actions = self
-            .trigger_actions
+            .use_effect_actions
             .iter()
-            .chain(self.effect_actions.iter())
             .sorted_by_key(|(_, &order)| order)
             .map(|(builder_action_key, _)| action_aliases[builder_action_key])
             .dedup()
@@ -202,7 +225,7 @@ impl ReactionBuilder {
             self.name,
             reactor_key,
             use_ports,
-            outputs,
+            effect_ports,
             actions,
             self.reaction_fn,
             None,
@@ -227,6 +250,20 @@ impl<'a> FindElements for ReactionBuilderState<'a> {
     }
 }
 
+/// Describes how an action is used by a reaction
+pub enum TriggerMode {
+    /// The action/port triggers the reaction, but is not provided as input
+    TriggersOnly,
+    /// The action/port triggers the reaction and is provided as input in the actions/ports arrays
+    TriggersAndUses,
+    /// The action/port triggers the reaction and is provided to the reaction in the actions/mut ports arrays
+    TriggersAndEffects,
+    /// The action/port does not trigger the reaction, but is provided as input in the actions/ports arrays
+    UsesOnly,
+    /// The action/port does not trigger the reaction, but is provided to the reaction in the actions/mut ports arrays
+    EffectsOnly,
+}
+
 impl<'a> ReactionBuilderState<'a> {
     pub fn new(
         name: &str,
@@ -242,8 +279,7 @@ impl<'a> ReactionBuilderState<'a> {
                 reactor_key,
                 reaction_fn,
                 trigger_actions: SecondaryMap::new(),
-                use_actions: SecondaryMap::new(),
-                effect_actions: SecondaryMap::new(),
+                use_effect_actions: SecondaryMap::new(),
                 trigger_ports: SecondaryMap::new(),
                 use_ports: SecondaryMap::new(),
                 effect_ports: SecondaryMap::new(),
@@ -252,13 +288,11 @@ impl<'a> ReactionBuilderState<'a> {
         }
     }
 
-    fn add_action(
+    pub fn add_action(
         &mut self,
         key: BuilderActionKey,
         order: usize,
-        triggers: bool,
-        uses: bool,
-        effects: bool,
+        trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
         let action = &self.env.action_builders[key];
         if action.get_reactor_key() != self.builder.reactor_key {
@@ -267,70 +301,52 @@ impl<'a> ReactionBuilderState<'a> {
                 action.get_name(), &self.builder.name
             )));
         }
-        if !triggers && !uses && !effects {
-            return Err(BuilderError::ReactionBuilderError(
-                "Actions must be marked as triggers, uses, or effects".to_string(),
-            ));
-        }
-        if triggers {
-            self.builder.trigger_actions.insert(key, order);
-        }
-        if uses {
-            self.builder.use_actions.insert(key, order);
-        }
-        if effects {
-            self.builder.effect_actions.insert(key, order);
+
+        match trigger_mode {
+            TriggerMode::TriggersOnly => {
+                self.builder.trigger_actions.insert(key, order);
+            }
+            TriggerMode::TriggersAndEffects | TriggerMode::TriggersAndUses => {
+                self.builder.trigger_actions.insert(key, order);
+                self.builder.use_effect_actions.insert(key, order);
+            }
+            TriggerMode::UsesOnly | TriggerMode::EffectsOnly => {
+                self.builder.use_effect_actions.insert(key, order);
+            }
         }
         Ok(())
     }
 
-    /// Indicate that this Reaction can be triggered by the given Action
+    /// Indicate how this Reaction interacts with the given Action
     ///
     /// There must be at least one trigger for each reaction.
-    pub fn with_trigger_action(
+    pub fn with_action(
         mut self,
         action_key: impl Into<BuilderActionKey>,
         order: usize,
+        trigger_mode: TriggerMode,
     ) -> Result<Self, BuilderError> {
-        self.add_action(action_key.into(), order, true, false, false)?;
+        self.add_action(action_key.into(), order, trigger_mode)?;
         Ok(self)
     }
 
-    /// Indicate that this Reaction may read the value of the given action, but is not triggered by it.
-    pub fn with_uses_action(
-        mut self,
-        action_key: impl Into<BuilderActionKey>,
-        order: usize,
-    ) -> Result<Self, BuilderError> {
-        self.add_action(action_key.into(), order, false, true, false)?;
-        Ok(self)
-    }
-
-    /// Indicate that this Reaction may schedule the given action.
-    pub fn with_effect_action(
-        mut self,
-        action_key: impl Into<BuilderActionKey>,
-        order: usize,
-    ) -> Result<Self, BuilderError> {
-        self.add_action(action_key.into(), order, false, false, true)?;
-        Ok(self)
-    }
-
-    fn add_port(
+    /// For triggers: valid ports are input ports in this reactor, (or output ports of contained reactors).
+    /// For uses: valid ports are input ports in this reactor, (or output ports of contained reactors).
+    /// for effects: valid ports are output ports in this reactor, (or input ports of contained reactors).
+    pub fn add_port(
         &mut self,
         key: BuilderPortKey,
         order: usize,
-        triggers: bool,
-        uses: bool,
-        effects: bool,
+        trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
         let port_builder = &self.env.port_builders[key];
         let port_reactor_key = port_builder.get_reactor_key();
         let port_parent_reactor_key =
             self.env.reactor_builders[port_reactor_key].parent_reactor_key;
 
-        match port_builder.get_port_type() {
-            PortType::Input if (triggers || uses) && (port_reactor_key != self.builder.reactor_key) => {
+        #[cfg(feature = "fixme")]
+        match (port_builder.get_port_type(), trigger_mode) {
+            (PortType::Input, TriggerMode::TriggersOnly | TriggerMode::TriggersAndUses | TriggerMode::TriggersAndEffects) if port_reactor_key != self.builder.reactor_key => {
                 Err(BuilderError::ReactionBuilderError(format!(
                     "Reaction {} cannot 'trigger on' input port '{}', it must belong to the same reactor as the reaction",
                     self.builder.get_name(),
@@ -362,65 +378,49 @@ impl<'a> ReactionBuilderState<'a> {
                 )))
             }
 
-            _ if !triggers && !uses && !effects => {
-                Err(BuilderError::ReactionBuilderError(
-                    "Ports must be marked as triggers, uses, or effects".to_string(),
-                ))
-            }
+            _ => Ok(())
+        }?;
 
-            _ if triggers => {
+        match trigger_mode {
+            TriggerMode::TriggersOnly => {
                 self.builder.trigger_ports.insert(key, order);
                 Ok(())
             }
 
-            _ if uses => {
+            TriggerMode::TriggersAndUses => {
+                self.builder.trigger_ports.insert(key, order);
                 self.builder.use_ports.insert(key, order);
                 Ok(())
             }
 
-            _ if effects => {
+            TriggerMode::TriggersAndEffects => {
+                self.builder.trigger_ports.insert(key, order);
                 self.builder.effect_ports.insert(key, order);
                 Ok(())
             }
 
-            _ => unreachable!(),
+            TriggerMode::UsesOnly => {
+                self.builder.use_ports.insert(key, order);
+                Ok(())
+            }
+
+            TriggerMode::EffectsOnly => {
+                self.builder.effect_ports.insert(key, order);
+                Ok(())
+            }
         }
     }
 
-    /// Indicate that this Reaction can be triggered by the given Port
+    /// Indicate how this Reaction interacts with the given Port
     ///
-    /// Valid ports are input ports in this reactor, (or output ports of contained reactors).
     /// There must be at least one trigger for each reaction.
-    pub fn with_trigger_port(
+    pub fn with_port(
         mut self,
         port_key: impl Into<BuilderPortKey>,
         order: usize,
+        trigger_mode: TriggerMode,
     ) -> Result<Self, BuilderError> {
-        self.add_port(port_key.into(), order, true, false, false)?;
-        Ok(self)
-    }
-
-    /// Indicate that this Reaction may read the value of the given port, but is not triggered by it.
-    ///
-    /// Valid ports are input ports in this reactor, (or output ports of contained reactors).
-    pub fn with_uses_port(
-        mut self,
-        port_key: impl Into<BuilderPortKey>,
-        order: usize,
-    ) -> Result<Self, BuilderError> {
-        self.add_port(port_key.into(), order, false, true, false)?;
-        Ok(self)
-    }
-
-    /// Indicate that this Reaction may set the value of the given port.
-    ///
-    /// Valid ports are output ports in this reactor, (or input ports of contained reactors).
-    pub fn with_effect_port(
-        mut self,
-        port_key: impl Into<BuilderPortKey>,
-        order: usize,
-    ) -> Result<Self, BuilderError> {
-        self.add_port(port_key.into(), order, false, false, true)?;
+        self.add_port(port_key.into(), order, trigger_mode)?;
         Ok(self)
     }
 
@@ -455,7 +455,7 @@ impl<'a> ReactionBuilderState<'a> {
             action.triggers.insert(reaction_key, ());
         }
 
-        for action_key in reaction_builder.effect_actions.keys() {
+        for action_key in reaction_builder.use_effect_actions.keys() {
             let action = &mut actions[action_key];
             action.schedulers.insert(reaction_key, ());
         }

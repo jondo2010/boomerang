@@ -55,6 +55,10 @@ pub struct TriggerMap {
     pub action_triggers: tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
     /// Global port triggers
     pub port_triggers: tinymap::TinySecondaryMap<PortKey, Vec<LevelReactionKey>>,
+    /// Global startup reactions
+    pub startup_reactions: Vec<LevelReactionKey>,
+    /// Global shutdown reactions
+    pub shutdown_reactions: Vec<LevelReactionKey>,
 }
 
 impl std::fmt::Debug for Env {
@@ -82,7 +86,7 @@ impl std::fmt::Debug for Env {
                 .entries(
                     self.ports
                         .iter()
-                        .map(|(k, v)| (format!("{k:?}"), format!("{v:?}"))),
+                        .map(|(k, v)| (format!("{k:?}"), v.to_string())),
                 )
                 .finish()
         });

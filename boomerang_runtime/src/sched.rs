@@ -1,86 +1,11 @@
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
-use derive_more::Display;
 use std::{collections::BinaryHeap, time::Duration};
 
 use crate::{
-    keepalive, Action, ActionKey, Env, Instant, LevelReactionKey, LogicalAction, ReactionSet,
-    ReactionTriggerCtx, Tag, TriggerMap,
+    event::{PhysicalEvent, ScheduledEvent},
+    keepalive, Action, Env, Instant, LogicalAction, ReactionSet, ReactionTriggerCtx, Tag,
+    TriggerMap,
 };
-
-#[derive(Debug, Display, Clone)]
-#[display(fmt = "L[tag={},terminal={}]", tag, terminal)]
-pub struct ScheduledEvent {
-    /// The [`Tag`] at which the reactions in this event should be executed.
-    pub(crate) tag: Tag,
-    /// The set of Reactions to be executed at this tag.
-    pub(crate) reactions: ReactionSet,
-    /// Whether the scheduler should terminate after processing this event.
-    pub(crate) terminal: bool,
-}
-
-impl Eq for ScheduledEvent {}
-
-impl PartialEq for ScheduledEvent {
-    fn eq(&self, other: &Self) -> bool {
-        self.tag == other.tag && self.terminal == other.terminal
-    }
-}
-
-impl PartialOrd for ScheduledEvent {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for ScheduledEvent {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.tag
-            .cmp(&other.tag)
-            .then(self.terminal.cmp(&other.terminal))
-            .reverse()
-    }
-}
-
-#[derive(Debug, Display, Clone)]
-#[display(fmt = "P[tag={},terminal={}]", tag, terminal)]
-pub struct PhysicalEvent {
-    /// The [`Tag`] at which the reactions in this event should be executed.
-    pub(crate) tag: Tag,
-    /// The key of the action that triggered this event.
-    pub(crate) key: ActionKey,
-    /// Whether the scheduler should terminate after processing this event.
-    pub(crate) terminal: bool,
-}
-
-impl PhysicalEvent {
-    /// Create a trigger event.
-    pub(crate) fn trigger(key: ActionKey, tag: Tag) -> Self {
-        Self {
-            tag,
-            key,
-            terminal: false,
-        }
-    }
-
-    /// Create a shutdown event.
-    pub(crate) fn shutdown(tag: Tag) -> Self {
-        Self {
-            tag,
-            key: ActionKey::default(),
-            terminal: true,
-        }
-    }
-
-    /// Convert the physical event to a scheduled event.
-    pub(crate) fn into_scheduled(self, triggers: &TriggerMap) -> ScheduledEvent {
-        let downstream = triggers.action_triggers[self.key].iter().copied();
-        ScheduledEvent {
-            tag: self.tag,
-            reactions: ReactionSet::from_iter(downstream),
-            terminal: self.terminal,
-        }
-    }
-}
 
 #[derive(Debug)]
 pub struct Scheduler<'env> {
@@ -130,28 +55,6 @@ impl<'env> Scheduler<'env> {
         }
     }
 
-    /// Return an `Iterator` of reactions sensitive to `Startup` actions.
-    fn iter_startup_events(&self) -> impl Iterator<Item = &[LevelReactionKey]> {
-        self.env.actions.iter().filter_map(|(action_key, action)| {
-            if let Action::Startup = action {
-                Some(self.trigger_map.action_triggers[action_key].as_slice())
-            } else {
-                None
-            }
-        })
-    }
-
-    /// Return an `Iterator` of reactions sensitive to `Shutdown` actions.
-    fn iter_shutdown_events(&self) -> impl Iterator<Item = &[LevelReactionKey]> {
-        self.env.actions.iter().filter_map(|(action_key, action)| {
-            if let Action::Shutdown { .. } = action {
-                Some(self.trigger_map.action_triggers[action_key].as_slice())
-            } else {
-                None
-            }
-        })
-    }
-
     /// Execute startup of the Scheduler.
     #[tracing::instrument(skip(self))]
     fn startup(&mut self) {
@@ -160,28 +63,20 @@ impl<'env> Scheduler<'env> {
         let tag = Tag::new(Duration::ZERO, 0);
 
         // For all Timers, pump later events onto the queue and create an initial ReactionSet to process.
-        let reaction_set = self
-            .iter_startup_events()
-            .flat_map(|downstream_reactions| downstream_reactions.iter().copied())
-            .collect();
+        let reaction_set =
+            ReactionSet::from_iter(self.trigger_map.startup_reactions.clone().into_iter());
 
         tracing::info!(tag = %tag, ?reaction_set, "Starting the execution.");
         self.process_tag(tag, reaction_set);
     }
 
+    /// Final shutdown of the Scheduler. The last tag has already been processed.
     #[tracing::instrument(skip(self))]
-    fn shutdown(&mut self, shutdown_tag: Tag, _reactions: Option<ReactionSet>) {
+    fn shutdown(&mut self) {
         tracing::info!("Shutting down.");
 
         // Signal to any waiting threads that the scheduler is shutting down.
         self.shutdown_tx.shutdown();
-
-        let reaction_set = self
-            .iter_shutdown_events()
-            .flat_map(|downstream_reactions| downstream_reactions.iter().copied())
-            .collect();
-
-        self.process_tag(shutdown_tag, reaction_set);
 
         // If the event queue still has events on it, report that.
         if !self.event_queue.is_empty() {
@@ -196,7 +91,10 @@ impl<'env> Scheduler<'env> {
             );
         }
 
-        tracing::info!("---- Elapsed logical time: {:?}", shutdown_tag.get_offset());
+        tracing::info!(
+            "---- Elapsed logical time: {:?}",
+            self.shutdown_tag.unwrap().get_offset()
+        );
         // If physical_start_time is 0, then execution didn't get far enough along to initialize this.
         let physical_elapsed = Instant::now().checked_duration_since(self.start_time);
         tracing::info!("---- Elapsed physical time: {:?}", physical_elapsed);
@@ -266,29 +164,26 @@ impl<'env> Scheduler<'env> {
                     }
                 }
 
-                if self
-                    .shutdown_tag
-                    .as_ref()
-                    .map(|shutdown_tag| shutdown_tag == &event.tag)
-                    .unwrap_or(event.terminal)
-                {
-                    self.shutdown_tag = Some(event.tag);
+                self.process_tag(event.tag, event.reactions);
+
+                if event.terminal {
+                    // Break out of the event loop;
                     break;
                 }
-                self.process_tag(event.tag, event.reactions);
             } else if let Some(event) = self.receive_event() {
                 self.event_queue
                     .push(event.into_scheduled(&self.trigger_map));
             } else {
                 tracing::debug!("No more events in queue. -> Terminate!");
-                break;
+                // Shutdown event will be processed at the next event loop iteration
+                let tag = Tag::now(self.start_time);
+                self.shutdown_tag = Some(tag);
+                self.event_queue
+                    .push(ScheduledEvent::shutdown(tag, &self.trigger_map));
             }
         } // loop
 
-        let shutdown_tag = self
-            .shutdown_tag
-            .unwrap_or_else(|| Tag::now(self.start_time));
-        self.shutdown(shutdown_tag, None);
+        self.shutdown();
     }
 
     // Wait until the wall-clock time is reached
@@ -373,13 +268,15 @@ impl<'env> Scheduler<'env> {
             });
 
             iter_ctx_res.for_each(|res| {
-                // Update any earlier shutdown requested
-                self.shutdown_tag = res
-                    .scheduled_shutdown
-                    .iter()
-                    .chain(self.shutdown_tag.iter())
-                    .min()
-                    .copied();
+                if let Some(shutdown_tag) = res.scheduled_shutdown {
+                    // if the new shutdown tag is earlier than the current shutdown tag, update the shutdown tag and
+                    // schedule a shutdown event
+                    if self.shutdown_tag.map(|t| shutdown_tag < t).unwrap_or(true) {
+                        self.shutdown_tag = Some(shutdown_tag);
+                        self.event_queue
+                            .push(ScheduledEvent::shutdown(shutdown_tag, &self.trigger_map));
+                    }
+                }
 
                 // Submit events to the event queue for all scheduled actions
                 self.event_queue

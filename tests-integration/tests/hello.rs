@@ -1,10 +1,6 @@
 #![allow(dead_code)]
 
-use boomerang::{
-    builder::{BuilderReactionKey, TypedActionKey},
-    runtime::{self, Duration},
-    Reactor,
-};
+use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
 
 // This test checks that logical time is incremented an appropriate
 // amount as a result of an invocation of the schedule() function at
@@ -58,10 +54,10 @@ struct HelloBuilder {
 }
 
 struct Hello {
-    period: Duration,
+    period: runtime::Duration,
     message: String,
     count: usize,
-    previous_time: Duration,
+    previous_time: runtime::Duration,
 }
 
 impl Hello {

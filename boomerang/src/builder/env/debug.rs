@@ -93,31 +93,4 @@ impl Debug for EnvBuilder {
             .field("reactions", &reactions)
             .finish()
     }
-
-    #[cfg(feature = "disabled")]
-    fn debug_info(&self) {
-        for (runtime_port_key, triggers) in runtime_port_parts.port_triggers.iter() {
-            // reverse look up the builder::port_key from the runtime::port_key
-            let port_key = runtime_port_parts
-                .aliases
-                .iter()
-                .find_map(|(port_key, runtime_port_key_b)| {
-                    if &runtime_port_key == runtime_port_key_b {
-                        Some(port_key)
-                    } else {
-                        None
-                    }
-                })
-                .expect("Illegal internal state.");
-            debug!(
-                "{:?}: {:?}",
-                self.port_fqn(port_key).unwrap(),
-                triggers
-                    .iter()
-                    .map(|key| self.reaction_fqn(*key))
-                    .collect::<Result<Vec<_>, _>>()
-                    .unwrap()
-            );
-        }
-    }
 }

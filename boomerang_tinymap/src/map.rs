@@ -237,8 +237,8 @@ impl<K: Key, V> TinyMap<K, V> {
         keys: I,
         keys_mut: IM,
     ) -> (
-        impl Iterator<Item = &V> + 'a,
-        impl Iterator<Item = &mut V> + 'a,
+        impl Iterator<Item = &'a V> + 'a,
+        impl Iterator<Item = &'a mut V> + 'a,
     )
     where
         I: IntoIterator<Item = K>,

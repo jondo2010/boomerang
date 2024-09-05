@@ -2,7 +2,7 @@ use crate::Level;
 
 impl tinymap::Key for Level {
     fn index(&self) -> usize {
-        self.0 as usize
+        self.0
     }
 }
 

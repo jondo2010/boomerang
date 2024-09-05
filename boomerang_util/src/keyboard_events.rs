@@ -25,14 +25,9 @@ pub struct KeyboardEventsBuilder {
     startup_reaction: TypedReactionKey<ReactionStartup>,
 }
 
+#[derive(Default)]
 pub struct KeyboardEvents {
     raw_terminal: Option<RawTerminal<Stdout>>,
-}
-
-impl Default for KeyboardEvents {
-    fn default() -> Self {
-        Self { raw_terminal: None }
-    }
 }
 
 #[derive(Reaction)]

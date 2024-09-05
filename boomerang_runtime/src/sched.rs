@@ -351,11 +351,8 @@ impl<'env> Scheduler<'env> {
                 .env
                 .ports
                 .iter()
-                .filter_map(|(port_key, port)| {
-                    port.is_set()
-                        .then(|| self.trigger_map.port_triggers[port_key].iter())
-                })
-                .flatten();
+                .filter(|&(_, port)| port.is_set())
+                .flat_map(|(port_key, _)| self.trigger_map.port_triggers[port_key].iter());
 
             if let Some(mut next_levels) = next_levels {
                 next_levels.extend_above(downstream.copied());

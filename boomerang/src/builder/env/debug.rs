@@ -1,5 +1,6 @@
-use itertools::Itertools;
 use std::{collections::BTreeMap, fmt::Debug};
+
+use itertools::Itertools;
 
 use super::EnvBuilder;
 

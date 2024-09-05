@@ -12,7 +12,7 @@ default = [
     "keyboard",
     "runner",
     #"replay"
-    #"serde",
+    "serde",
 ]
 
 ## Support for keyboard input
@@ -22,9 +22,9 @@ keyboard = ["dep:termion"]
 runner = ["dep:clap", "dep:anyhow"]
 
 ## Support for serde serialization
-#serde = ["dep:serde", "dep:erased-serde", "termion/serde", "boomerang/serde"]
+serde = ["dep:serde", "dep:erased-serde", "termion/serde", "boomerang/serde"]
 
-## Support for recording and replaying
+# Support for recording and replaying
 #replay = ["serde", "dep:bincode"]
 
 [dependencies]

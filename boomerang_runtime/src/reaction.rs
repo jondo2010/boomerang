@@ -11,8 +11,8 @@ tinymap::key_type!(pub ReactionKey);
 
 pub type ReactionSet = KeySet<ReactionKey>;
 
-pub type PortRef<'a> = &'a Box<dyn BasePort>;
-pub type PortRefMut<'a> = &'a mut Box<dyn BasePort>;
+pub type PortRef<'a> = &'a dyn BasePort;
+pub type PortRefMut<'a> = &'a mut dyn BasePort;
 
 pub type ReactionFn = Box<
     dyn Fn(&mut Context, &mut dyn ReactorState, &[PortRef], &mut [PortRefMut], &mut [&mut Action])
@@ -98,6 +98,7 @@ impl Reaction {
         self.actions.iter()
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(
         skip(self, start_time, inputs, outputs, actions, async_tx, shutdown_rx),
         fields(

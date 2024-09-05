@@ -200,8 +200,8 @@ pub(crate) struct ReactionTriggerCtx<'a> {
     pub(crate) reactor: &'a mut Reactor,
     pub(crate) reaction: &'a Reaction,
     pub(crate) actions: &'a mut [&'a mut Action],
-    pub(crate) inputs: &'a [&'a Box<dyn BasePort>],
-    pub(crate) outputs: &'a mut [&'a mut Box<dyn BasePort>],
+    pub(crate) inputs: &'a [&'a dyn BasePort],
+    pub(crate) outputs: &'a mut [&'a mut dyn BasePort],
 }
 
 /// Container for set of iterators used to build a `ReactionTriggerCtx`
@@ -219,8 +219,8 @@ where
     reactors: IReactor,
     reactions: IReaction,
     grouped_actions: ChunksMut<'a, ActionKey, Action, IO1, IA>,
-    grouped_inputs: Chunks<'a, PortKey, Box<dyn BasePort>, IO2, IP>,
-    grouped_outputs: ChunksMut<'a, PortKey, Box<dyn BasePort>, IO3, IP>,
+    grouped_ref_ports: Chunks<'a, PortKey, Box<dyn BasePort>, IO2, IP>,
+    grouped_mut_ports: ChunksMut<'a, PortKey, Box<dyn BasePort>, IO3, IP>,
 }
 
 impl<'a, 'bump: 'a, IReactor, IReaction, IO1, IO2, IO3, IA, IP> Iterator
@@ -240,8 +240,8 @@ where
         let reactor = self.reactors.next();
         let reaction = self.reactions.next();
         let actions = self.grouped_actions.next();
-        let inputs = self.grouped_inputs.next();
-        let outputs = self.grouped_outputs.next();
+        let inputs = self.grouped_ref_ports.next();
+        let outputs = self.grouped_mut_ports.next();
 
         match (reactor, reaction, actions, inputs, outputs) {
             (Some(reactor), Some(reaction), Some(actions), Some(inputs), Some(outputs)) => {
@@ -249,8 +249,8 @@ where
                     reactor,
                     reaction,
                     actions: self.bump.alloc_slice_fill_iter(actions),
-                    inputs: self.bump.alloc_slice_fill_iter(inputs),
-                    outputs: self.bump.alloc_slice_fill_iter(outputs),
+                    inputs: self.bump.alloc_slice_fill_iter(inputs.map(|p| &**p)),
+                    outputs: self.bump.alloc_slice_fill_iter(outputs.map(|p| &mut **p)),
                 })
             }
             (None, None, None, None, None) => None,
@@ -293,12 +293,12 @@ impl Env {
         let reactors = self.reactors.iter_many_unchecked_mut(reactor_keys);
 
         // SAFETY: `action_keys` are guaranteed to guaranteed to be disjoint chunks
-        let (_, actions) = unsafe {
+        let (_, grouped_actions) = unsafe {
             self.actions
                 .iter_chunks_split_unchecked(std::iter::empty(), action_keys)
         };
 
-        let (inputs, outputs) = unsafe {
+        let (grouped_ref_ports, grouped_mut_ports) = unsafe {
             self.ports
                 .iter_chunks_split_unchecked(port_keys, mut_port_keys)
         };
@@ -307,9 +307,9 @@ impl Env {
             bump,
             reactors,
             reactions,
-            grouped_actions: actions,
-            grouped_inputs: inputs,
-            grouped_outputs: outputs,
+            grouped_actions,
+            grouped_ref_ports,
+            grouped_mut_ports,
         }
     }
 

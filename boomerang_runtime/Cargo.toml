@@ -15,8 +15,7 @@ default = [
 ]
 #TODO: re-enable parallel execution with bumpalo-herd
 #parallel = ["dep:rayon", "dep:bumpalo-herd"]
-#TODO: re-enable serde with working serialization
-#serde = ["dep:serde", "dep:erased-serde"]
+serde = ["dep:serde", "dep:erased-serde"]
 
 [dependencies]
 crossbeam-channel = "0.5"

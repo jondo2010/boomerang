@@ -6,7 +6,11 @@ publish = false
 
 [dev-dependencies]
 boomerang.workspace = true
-boomerang_util.workspace = true
+boomerang_util = { workspace = true, features = [
+    "keyboard",
+    "runner",
+    "serde",
+] }
 tracing-subscriber = { version = "0.3", features = [
     "fmt",
     "json",

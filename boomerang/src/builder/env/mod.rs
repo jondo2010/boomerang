@@ -42,7 +42,7 @@ mod util {
                     }
                     stack.pop();
                 }
-                return stack.iter().copied().collect();
+                return stack.to_vec();
             }
             visited.insert(nx);
             stack.push(nx);

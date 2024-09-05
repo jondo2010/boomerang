@@ -7,9 +7,9 @@ use darling::{
 use quote::{quote, ToTokens};
 use syn::{parse_quote, Expr, Generics, Ident, Type, TypePath, TypeReference};
 
-const PORT: &'static str = "Port";
-const ACTION_REF: &'static str = "ActionRef";
-const PHYSICAL_ACTION_REF: &'static str = "PhysicalActionRef";
+const PORT: &str = "Port";
+const ACTION_REF: &str = "ActionRef";
+const PHYSICAL_ACTION_REF: &str = "PhysicalActionRef";
 
 #[derive(Debug, Eq, PartialEq, Hash)]
 pub enum TriggerAttr {
@@ -118,49 +118,44 @@ impl TryFrom<ReactionField> for ReactionFieldInner {
                 mutability: None,
                 elem,
                 ..
-            }) if field_inner_type.to_string() == PORT => {
-                match (value.triggers, value.effects, value.uses) {
-                    (None, None, None) => Ok(Self::FieldDefined {
-                        elem: *elem.clone(),
-                        triggers: true,
-                        effects: false,
-                        uses: true,
-                        path,
-                    }),
-                    (None, None, Some(true)) => Ok(Self::FieldDefined {
-                        elem: *elem.clone(),
-                        triggers: false,
-                        effects: false,
-                        uses: true,
-                        path,
-                    }),
-                    _ => Err(darling::Error::custom(
-                        "Invalid Port field. Possible attributes are 'use'",
-                    )
-                    .with_span(&value.ty)),
-                }
-            }
+            }) if *field_inner_type == PORT => match (value.triggers, value.effects, value.uses) {
+                (None, None, None) => Ok(Self::FieldDefined {
+                    elem: *elem.clone(),
+                    triggers: true,
+                    effects: false,
+                    uses: true,
+                    path,
+                }),
+                (None, None, Some(true)) => Ok(Self::FieldDefined {
+                    elem: *elem.clone(),
+                    triggers: false,
+                    effects: false,
+                    uses: true,
+                    path,
+                }),
+                _ => Err(darling::Error::custom(
+                    "Invalid Port field. Possible attributes are 'use'",
+                )
+                .with_span(&value.ty)),
+            },
 
             Type::Reference(TypeReference {
                 mutability: Some(_),
                 elem,
                 ..
-            }) if field_inner_type.to_string() == PORT => {
-                match (value.triggers, value.effects, value.uses) {
-                    (None, None, None) => Ok(Self::FieldDefined {
-                        elem: *elem.clone(),
-                        triggers: false,
-                        effects: true,
-                        uses: false,
-                        path,
-                    }),
-                    _ => Err(darling::Error::custom("Invalid Port variant").with_span(&value.ty)),
-                }
-            }
+            }) if *field_inner_type == PORT => match (value.triggers, value.effects, value.uses) {
+                (None, None, None) => Ok(Self::FieldDefined {
+                    elem: *elem.clone(),
+                    triggers: false,
+                    effects: true,
+                    uses: false,
+                    path,
+                }),
+                _ => Err(darling::Error::custom("Invalid Port variant").with_span(&value.ty)),
+            },
 
             Type::Path(TypePath { path: elem, .. })
-                if field_inner_type.to_string() == ACTION_REF
-                    || field_inner_type.to_string() == PHYSICAL_ACTION_REF =>
+                if *field_inner_type == ACTION_REF || *field_inner_type == PHYSICAL_ACTION_REF =>
             {
                 Ok(Self::FieldDefined {
                     elem: syn::Type::Path(TypePath {
@@ -256,9 +251,9 @@ struct TriggerInner {
     #[allow(dead_code)]
     action_types: Vec<Type>,
     port_idents: Vec<Ident>,
-    port_types: Vec<Box<Type>>,
+    port_types: Vec<Type>,
     port_mut_idents: Vec<Ident>,
-    port_mut_types: Vec<Box<Type>>,
+    port_mut_types: Vec<Type>,
 }
 
 impl TriggerInner {
@@ -290,10 +285,10 @@ impl TriggerInner {
                             elem
                         ))
                     })?;
-                    if ty.to_string() == PORT {
+                    if *ty == PORT {
                         initializer_idents.push(field.ident.clone().unwrap());
                         port_idents.push(field.ident.clone().unwrap());
-                        port_types.push(elem.clone());
+                        port_types.push(*elem.clone());
                     } else {
                         return Err(darling::Error::custom(format!(
                             "Unexpected ref type: {:?}",
@@ -313,10 +308,10 @@ impl TriggerInner {
                             elem
                         ))
                     })?;
-                    if ty.to_string() == PORT {
+                    if *ty == PORT {
                         initializer_idents.push(field.ident.clone().unwrap());
                         port_mut_idents.push(field.ident.clone().unwrap());
-                        port_mut_types.push(elem.clone());
+                        port_mut_types.push(*elem.clone());
                     } else {
                         return Err(darling::Error::custom(format!(
                             "Unexpected mut ref type: {:?}",
@@ -332,7 +327,7 @@ impl TriggerInner {
                             field.ty
                         ))
                     })?;
-                    if ty.to_string() == ACTION_REF || ty.to_string() == PHYSICAL_ACTION_REF {
+                    if *ty == ACTION_REF || *ty == PHYSICAL_ACTION_REF {
                         initializer_idents.push(field.ident.clone().unwrap());
                         action_idents.push(field.ident.clone().unwrap());
                         action_types.push(Type::Path(TypePath {

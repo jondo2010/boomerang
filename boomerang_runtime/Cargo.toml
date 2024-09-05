@@ -13,8 +13,10 @@ default = [
     #"parallel",
     #"serde",
 ]
-parallel = ["dep:rayon"]
-serde = ["dep:serde", "dep:erased-serde"]
+#TODO: re-enable parallel execution with bumpalo-herd
+#parallel = ["dep:rayon", "dep:bumpalo-herd"]
+#TODO: re-enable serde with working serialization
+#serde = ["dep:serde", "dep:erased-serde"]
 
 [dependencies]
 crossbeam-channel = "0.5"
@@ -34,6 +36,7 @@ serde = { workspace = true, optional = true, features = ["derive"] }
 erased-serde = { workspace = true, optional = true }
 
 bumpalo = { version = "3.16", features = ["collections"] }
+bumpalo-herd = { version = "0.1", optional = true }
 
 [dev-dependencies]
 serde_json = "1.0"

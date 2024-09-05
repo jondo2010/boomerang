@@ -1,5 +1,5 @@
 [package]
-name = "boomerang_derive2"
+name = "boomerang_derive"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -18,5 +18,5 @@ quote = "1.0"
 syn = { version = "2.0", features = ["derive"] }
 
 [lib]
-name = "boomerang_derive2"
+name = "boomerang_derive"
 proc-macro = true

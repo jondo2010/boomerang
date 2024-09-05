@@ -63,7 +63,7 @@ pub use boomerang_runtime as runtime;
 
 #[cfg(feature = "derive")]
 #[doc(hidden)]
-pub use boomerang_derive2::*;
+pub use boomerang_derive::*;
 
 #[derive(thiserror::Error, Debug)]
 pub enum BoomerangError {

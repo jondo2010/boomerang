@@ -31,7 +31,6 @@ boomerang_util = { path = "boomerang_util" }
 members = [
     "boomerang",
     "boomerang_derive",
-    "boomerang_derive2",
     "boomerang_runtime",
     "boomerang_tinymap",
     "tests-integration",

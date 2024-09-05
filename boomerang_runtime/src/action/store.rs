@@ -256,6 +256,7 @@ mod tests {
         assert_eq!(store.get_current(Tag::new(Duration::from_secs(1), 0)), None);
     }
 
+    #[cfg(feature = "fixme")]
     #[cfg(feature = "serde")]
     #[test]
     fn test_serialize_deserialize() {

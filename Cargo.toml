@@ -42,4 +42,4 @@ inherits = "release"
 debug = true
 
 [patch.crates-io]
-#fixedbitset = { path = "../fixedbitset" }
+fixedbitset = { git = "https://github.com/jondo2010/fixedbitset", branch = "ones_derive_clone" }

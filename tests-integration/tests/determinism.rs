@@ -1,5 +1,5 @@
 use boomerang::{
-    builder::{BuilderReactionKey, TimerActionKey, Trigger, TypedPortKey, TypedReactionKey},
+    builder::{TimerActionKey, Trigger, TypedPortKey, TypedReactionKey},
     runtime, Reaction, Reactor,
 };
 
@@ -75,7 +75,7 @@ struct PassReactionX<'a> {
 
 impl Trigger for PassReactionX<'_> {
     type Reactor = PassBuilder;
-    fn trigger(&mut self, _ctx: &mut runtime::Context, state: &mut ()) {
+    fn trigger(&mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
         *self.y.get_mut() = *self.x.get();
     }
 }

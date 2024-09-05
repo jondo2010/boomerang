@@ -72,7 +72,7 @@ struct ReactionShutdown;
 
 impl Trigger for ReactionShutdown {
     type Reactor = SlowingClockPhysical;
-    fn trigger(&mut self, ctx: &mut runtime::Context, state: &mut State) {
+    fn trigger(&mut self, _ctx: &mut runtime::Context, state: &mut State) {
         assert!(
             state.expected_time >= runtime::Duration::from_millis(500),
             "Expected the next expected time to be at least: 500000000 nsec. It was: {:?}",

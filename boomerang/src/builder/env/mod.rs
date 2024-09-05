@@ -42,7 +42,7 @@ mod util {
                     }
                     stack.pop();
                 }
-                return stack.iter().map(|&node_index| node_index).collect();
+                return stack.iter().copied().collect();
             }
             visited.insert(nx);
             stack.push(nx);
@@ -662,7 +662,7 @@ impl EnvBuilder {
             .keys()
             .map(|port_key| (port_key, self.follow_port_inward_binding(port_key)))
             .sorted_by(|a, b| a.1.cmp(&b.1))
-            .group_by(|(_port_key, inward_key)| *inward_key);
+            .chunk_by(|(_port_key, inward_key)| *inward_key);
 
         for (inward_port_key, group) in port_groups.into_iter() {
             let downstream_reactions = self

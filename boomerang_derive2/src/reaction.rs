@@ -249,34 +249,11 @@ fn extract_path_ident(elem: &Type) -> Option<&Ident> {
     }
 }
 
-/// Returns the path of a type without generics.
-fn path_without_generics(elem: &syn::Path) -> syn::Path {
-    // iterate through the PathSegments and replace arguments to be PathArgument::None
-    let segments = elem
-        .segments
-        .iter()
-        .map(|seg| match seg {
-            syn::PathSegment {
-                ident,
-                arguments: syn::PathArguments::AngleBracketed(_),
-            } => syn::PathSegment {
-                ident: ident.clone(),
-                arguments: syn::PathArguments::None,
-            },
-            seg => seg.clone(),
-        })
-        .collect();
-
-    syn::Path {
-        leading_colon: elem.leading_colon,
-        segments,
-    }
-}
-
 struct TriggerInner {
     reaction_ident: Ident,
     initializer_idents: Vec<Ident>,
     action_idents: Vec<Ident>,
+    #[allow(dead_code)]
     action_types: Vec<Type>,
     port_idents: Vec<Ident>,
     port_types: Vec<Box<Type>>,
@@ -396,7 +373,6 @@ impl ToTokens for TriggerInner {
         let reaction_ident = &self.reaction_ident;
         let initializer_idents = &self.initializer_idents;
         let action_idents = &self.action_idents;
-        let action_types = &self.action_types;
         let port_idents = &self.port_idents;
         let port_types = &self.port_types;
         let port_mut_idents = &self.port_mut_idents;
@@ -409,7 +385,6 @@ impl ToTokens for TriggerInner {
                     ::std::convert::TryInto::try_into(actions)
                         .expect("Unable to destructure actions for reaction");
 
-                //#(let #action_idents: #action_types = (*#action_idents).into(); );*
                 #(let #action_idents = (*#action_idents).into(); );*
             }
         } else {

@@ -17,7 +17,7 @@ pub struct TypedReactionKey<R: Reaction>(BuilderReactionKey, PhantomData<R>);
 
 impl<R: Reaction> Clone for TypedReactionKey<R> {
     fn clone(&self) -> Self {
-        Self(self.0.clone(), PhantomData)
+        Self(self.0, PhantomData)
     }
 }
 
@@ -29,7 +29,7 @@ impl<R: Reaction> Default for TypedReactionKey<R> {
 
 impl<R: Reaction> TypedReactionKey<R> {
     pub fn new(reaction_key: BuilderReactionKey) -> Self {
-        Self(reaction_key, PhantomData::default())
+        Self(reaction_key, PhantomData)
     }
 }
 
@@ -264,6 +264,28 @@ pub enum TriggerMode {
     EffectsOnly,
 }
 
+impl TriggerMode {
+    pub fn is_triggers(&self) -> bool {
+        matches!(
+            self,
+            TriggerMode::TriggersOnly
+                | TriggerMode::TriggersAndUses
+                | TriggerMode::TriggersAndEffects
+        )
+    }
+
+    pub fn is_uses(&self) -> bool {
+        matches!(self, TriggerMode::UsesOnly | TriggerMode::TriggersAndUses)
+    }
+
+    pub fn is_effects(&self) -> bool {
+        matches!(
+            self,
+            TriggerMode::EffectsOnly | TriggerMode::TriggersAndEffects
+        )
+    }
+}
+
 impl<'a> ReactionBuilderState<'a> {
     pub fn new(
         name: &str,
@@ -344,42 +366,51 @@ impl<'a> ReactionBuilderState<'a> {
         let port_parent_reactor_key =
             self.env.reactor_builders[port_reactor_key].parent_reactor_key;
 
-        #[cfg(feature = "fixme")]
-        match (port_builder.get_port_type(), trigger_mode) {
-            (PortType::Input, TriggerMode::TriggersOnly | TriggerMode::TriggersAndUses | TriggerMode::TriggersAndEffects) if port_reactor_key != self.builder.reactor_key => {
-                Err(BuilderError::ReactionBuilderError(format!(
-                    "Reaction {} cannot 'trigger on' input port '{}', it must belong to the same reactor as the reaction",
-                    self.builder.get_name(),
-                    port_builder.get_name()
-                )))
+        // Validity checks:
+        match port_builder.get_port_type() {
+            PortType::Input => {
+                // triggers and uses are valid for input ports on the same reactor
+                if (trigger_mode.is_triggers() || trigger_mode.is_uses())
+                    && port_reactor_key != self.builder.reactor_key
+                {
+                    return Err(BuilderError::ReactionBuilderError(format!(
+                        "Reaction {} cannot 'trigger on' or 'use' input port '{}', it must belong to the same reactor as the reaction",
+                        self.builder.get_name(),
+                        self.env.port_fqn(key).unwrap()
+                    )));
+                }
+                // effects are valid for input ports on contained reactors
+                if trigger_mode.is_effects()
+                    && port_parent_reactor_key != Some(self.builder.reactor_key)
+                {
+                    return Err(BuilderError::ReactionBuilderError(format!(
+                        "Reaction {} cannot 'effect' input port '{}', it must belong to a contained reactor",
+                        self.builder.get_name(),
+                        port_builder.get_name()
+                    )));
+                }
             }
-
-            PortType::Output if (triggers || uses) && (port_parent_reactor_key != Some(self.builder.reactor_key)) => {
-                Err(BuilderError::ReactionBuilderError(format!(
-                    "Reaction {} cannot 'trigger on' output port '{}', it must belong to a contained reactor",
-                    self.builder.get_name(),
-                    port_builder.get_name()
-                )))
+            PortType::Output => {
+                // triggers and uses are valid for output ports on contained reactors
+                if (trigger_mode.is_triggers() || trigger_mode.is_uses())
+                    && port_parent_reactor_key != Some(self.builder.reactor_key)
+                {
+                    return Err(BuilderError::ReactionBuilderError(format!(
+                        "Reaction {} cannot 'trigger on' or 'use' output port '{}', it must belong to a contained reactor",
+                        self.builder.get_name(),
+                        port_builder.get_name()
+                    )));
+                }
+                // effects are valid for output ports on the same reactor
+                if trigger_mode.is_effects() && port_reactor_key != self.builder.reactor_key {
+                    return Err(BuilderError::ReactionBuilderError(format!(
+                        "Reaction {} cannot 'effect' output port '{}', it must belong to the same reactor as the reaction",
+                        self.builder.get_name(),
+                        port_builder.get_name()
+                    )));
+                }
             }
-
-            PortType::Input if effects && port_parent_reactor_key != Some(self.builder.reactor_key) => {
-                Err(BuilderError::ReactionBuilderError(format!(
-                    "Reaction {} cannot 'effect' input port '{}', it must belong to a contained reactor",
-                    self.builder.get_name(),
-                    port_builder.get_name()
-                )))
-            }
-
-            PortType::Output if effects && port_reactor_key != self.builder.reactor_key => {
-                Err(BuilderError::ReactionBuilderError(format!(
-                    "Reaction {} cannot 'effect' output port '{}', it must belong to the same reactor as the reaction",
-                    self.builder.get_name(),
-                    port_builder.get_name()
-                )))
-            }
-
-            _ => Ok(())
-        }?;
+        }
 
         match trigger_mode {
             TriggerMode::TriggersOnly => {

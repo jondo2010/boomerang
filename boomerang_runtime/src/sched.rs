@@ -283,7 +283,7 @@ impl<'env> Scheduler<'env> {
     ///
     /// Reactions at a level N may trigger further reactions at levels M>N
     #[tracing::instrument(skip(self, reaction_view), fields(tag = %tag))]
-    pub fn process_tag(&mut self, tag: Tag, mut reaction_view: KeySetView<ReactionKey>) {
+    pub fn process_tag(&mut self, tag: Tag, reaction_view: KeySetView<ReactionKey>) {
         let bump = bumpalo::Bump::new();
 
         reaction_view.for_each_level(|level, reaction_keys, next_levels| {

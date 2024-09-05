@@ -1,5 +1,5 @@
 use crate::{
-    key_set::KeySetLimits, ActionKey, LevelReactionKey, Reaction, ReactionSet, Tag, TriggerMap,
+    ActionKey, LevelReactionKey, ReactionSet, Tag, TriggerMap,
 };
 
 #[derive(Debug, Clone)]

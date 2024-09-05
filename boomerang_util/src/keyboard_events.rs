@@ -45,7 +45,7 @@ struct ReactionKeyPress<'a> {
 impl<'a> Trigger for ReactionKeyPress<'a> {
     type Reactor = KeyboardEventsBuilder;
 
-    fn trigger(&mut self, ctx: &mut runtime::Context, state: &mut KeyboardEvents) {
+    fn trigger(&mut self, ctx: &mut runtime::Context, _state: &mut KeyboardEvents) {
         *self.arrow_key_pressed.deref_mut() = ctx.get_action(&mut self.key_press);
     }
 }

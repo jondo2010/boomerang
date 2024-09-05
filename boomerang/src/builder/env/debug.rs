@@ -18,7 +18,7 @@ impl Debug for EnvBuilder {
             .keys()
             .map(|reactor_key| {
                 let fqn = self.reactor_fqn(reactor_key).unwrap().to_string();
-                (format!("{reactor_key:?}"), format!("{fqn}"))
+                (format!("{reactor_key:?}"), fqn.to_string())
             })
             .collect::<BTreeMap<_, _>>();
 
@@ -39,7 +39,7 @@ impl Debug for EnvBuilder {
             .keys()
             .map(|port_key| {
                 let fqn = self.port_fqn(port_key).unwrap();
-                (format!("{port_key:?}"), format!("{fqn}"))
+                (format!("{port_key:?}"), fqn.to_string())
             })
             .collect::<BTreeMap<_, _>>();
 
@@ -66,7 +66,7 @@ impl Debug for EnvBuilder {
                 .keys()
                 .map(|key| {
                     let fqn = self.reaction_fqn(key).unwrap();
-                    (format!("{key:?}"), format!("{fqn}"))
+                    (format!("{key:?}"), fqn.to_string())
                 })
                 .collect::<BTreeMap<_, _>>()
         };

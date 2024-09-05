@@ -407,10 +407,7 @@ impl ToTokens for TriggerInner {
             quote! {
                 let [#(#action_idents,)*]: &mut [&mut ::boomerang::runtime::Action; #actions_len] =
                     ::std::convert::TryInto::try_into(actions)
-                        .expect(&format!(
-                            "Unable to destructure actions for reaction {}",
-                            stringify!(#reaction_ident)
-                        ));
+                        .expect("Unable to destructure actions for reaction");
 
                 //#(let #action_idents: #action_types = (*#action_idents).into(); );*
                 #(let #action_idents = (*#action_idents).into(); );*
@@ -424,13 +421,10 @@ impl ToTokens for TriggerInner {
             quote! {
                 let [#(#port_idents,)*]: &[::boomerang::runtime::PortRef; #ports_len] =
                     ::std::convert::TryInto::try_into(ports)
-                        .expect(&format!(
-                            "Unable to destructure ref ports for reaction {}",
-                            stringify!(#reaction_ident)
-                        ));
+                        .expect("Unable to destructure ref ports for reaction");
 
                 #(let #port_idents = #port_idents.downcast_ref::<#port_types>()
-                    .expect(&format!("Wrong Port type for reaction {}", stringify!(#reaction_ident))); );*
+                    .expect("Wrong Port type for reaction"); );*
             }
         } else {
             quote! {}
@@ -441,16 +435,10 @@ impl ToTokens for TriggerInner {
             quote! {
                 let [#(#port_mut_idents,)*]: &mut [::boomerang::runtime::PortRefMut; #port_muts_len] =
                     ::std::convert::TryInto::try_into(ports_mut)
-                        .expect(&format!(
-                            "Unable to destructure mut ports for reaction {}",
-                            stringify!(#reaction_ident)
-                        ));
+                        .expect("Unable to destructure mut ports for reaction");
 
                 #(let #port_mut_idents = #port_mut_idents.downcast_mut::<#port_mut_types>()
-                    .expect(&format!(
-                        "Wrong Port type for reaction {}",
-                        stringify!(#reaction_ident)
-                    )); );*
+                    .expect("Wrong Port type for reaction"); );*
             }
         } else {
             quote! {}

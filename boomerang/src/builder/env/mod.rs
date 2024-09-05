@@ -8,7 +8,7 @@ use crate::runtime;
 use boomerang_runtime::Level;
 use itertools::Itertools;
 use petgraph::{graphmap::DiGraphMap, EdgeDirection};
-use runtime::{LogicalAction, PhysicalAction};
+use runtime::{LogicalAction, PhysicalAction, ReactionSetLimits};
 use slotmap::{SecondaryMap, SlotMap};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -18,6 +18,40 @@ use std::{
 mod debug;
 #[cfg(test)]
 mod tests;
+
+mod util {
+    use petgraph::visit::{IntoNeighborsDirected, IntoNodeIdentifiers, Visitable};
+    use std::hash::Hash;
+
+    /// Find a minimal cycle in a graph using DFS
+    pub fn find_minimal_cycle<G>(graph: G, start_node: G::NodeId) -> Vec<G::NodeId>
+    where
+        G: IntoNeighborsDirected + IntoNodeIdentifiers + Visitable,
+        G::NodeId: Hash + Eq,
+    {
+        let mut dfs = petgraph::visit::Dfs::new(&graph, start_node);
+        let mut stack = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+
+        while let Some(nx) = dfs.next(&graph) {
+            if visited.contains(&nx) {
+                // We've found a cycle, backtrack to find the minimal cycle
+                while let Some(&last) = stack.last() {
+                    if last == nx {
+                        break;
+                    }
+                    stack.pop();
+                }
+                return stack.iter().map(|&node_index| node_index).collect();
+            }
+            visited.insert(nx);
+            stack.push(nx);
+        }
+
+        // This shouldn't happen if there's definitely a cycle
+        vec![start_node]
+    }
+}
 
 pub trait FindElements {
     fn get_port_by_name(&self, port_name: &str) -> Result<BuilderPortKey, BuilderError>;
@@ -576,14 +610,16 @@ impl EnvBuilder {
         let mut graph = self.build_reaction_graph().into_graph::<DefaultIx>();
 
         // Transitive reduction and closures
-        let toposort = petgraph::algo::toposort(&graph, None).map_err(|e| {
+        let toposort = petgraph::algo::toposort(&graph, None).map_err(|cycle_error| {
             // A Cycle was found in the reaction graph.
             // let fas = petgraph::algo::greedy_feedback_arc_set(&graph);
             // let cycle = petgraph::prelude::DiGraphMap::<BuilderReactionKey, ()>::from_edges(fas);
+            let cycle = util::find_minimal_cycle(&graph, cycle_error.node_id())
+                .into_iter()
+                .map(|node_index| graph[node_index])
+                .collect_vec();
 
-            BuilderError::ReactionGraphCycle {
-                what: graph[e.node_id()],
-            }
+            BuilderError::ReactionGraphCycle { what: cycle }
         })?;
 
         let (res, _) = tred::dag_to_toposorted_adjacency_list::<_, NodeIndex>(&graph, &toposort);
@@ -842,6 +878,11 @@ impl EnvBuilder {
             .flatten()
             .collect();
 
+        let reaction_set_limits = ReactionSetLimits {
+            max_level: reaction_levels.values().copied().max().unwrap_or_default(),
+            num_keys: runtime_reactions.len(),
+        };
+
         Ok((
             runtime::Env {
                 reactors: runtime_reactors,
@@ -854,6 +895,7 @@ impl EnvBuilder {
                 action_triggers: runtime_action_triggers,
                 startup_reactions,
                 shutdown_reactions,
+                reaction_set_limits,
             },
             BuilderAliases {
                 reactor_aliases,

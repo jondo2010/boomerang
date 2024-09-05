@@ -1,6 +1,9 @@
 #![allow(dead_code)]
 
+use std::time::Duration;
+
 use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
+use boomerang_util::timeout;
 
 // This test checks that logical time is incremented an appropriate
 // amount as a result of an invocation of the schedule() function at
@@ -40,19 +43,6 @@ use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
 //    composite_instance = new Inside(message = "Hello from composite_instance.");
 //}
 
-#[derive(Reactor)]
-#[reactor(state = "Hello")]
-struct HelloBuilder {
-    #[reactor(timer(offset = "1 sec", period = "2 sec"))]
-    t: TypedActionKey<()>,
-    #[reactor(action())]
-    a: TypedActionKey<()>,
-    #[reactor(reaction(function = "Hello::reaction_t",))]
-    reaction_t: BuilderReactionKey,
-    #[reactor(reaction(function = "Hello::reaction_a"))]
-    reaction_a: BuilderReactionKey,
-}
-
 struct Hello {
     period: runtime::Duration,
     message: String,
@@ -69,31 +59,51 @@ impl Hello {
             previous_time: Duration::default(),
         }
     }
+}
 
-    /// reaction_t is sensitive to Timer `t` and schedules Action `a`
-    #[boomerang::reaction(reactor = "HelloBuilder", triggers(action = "t"))]
-    fn reaction_t(
-        &mut self,
-        ctx: &mut runtime::Context,
-        #[reactor::action(effects)] mut a: runtime::ActionRef,
-    ) {
+#[derive(Clone, Reactor)]
+#[reactor(state = Hello)]
+struct HelloBuilder {
+    #[reactor(timer(offset = "1 sec", period = "2 sec"))]
+    t: TimerActionKey,
+    #[reactor(action())]
+    a: TypedActionKey<()>,
+    reaction_t: TypedReactionKey<ReactionT<'static>>,
+    reaction_a: TypedReactionKey<ReactionA>,
+}
+
+/// ReactionT is sensitive to Timer `t` and schedules Action `a`
+#[derive(Reaction)]
+#[reaction(triggers(action = "t"))]
+struct ReactionT<'a> {
+    a: runtime::ActionRef<'a, ()>,
+}
+
+impl Trigger for ReactionT<'_> {
+    type Reactor = HelloBuilder;
+    fn trigger(&mut self, ctx: &mut runtime::Context, state: &mut Hello) {
         // Print the current time.
-        self.previous_time = ctx.get_elapsed_logical_time();
-        ctx.schedule_action(&mut a, None, Some(Duration::from_millis(200))); // No payload.
-        println!("{} Current time is {:?}", self.message, self.previous_time);
+        state.previous_time = ctx.get_elapsed_logical_time();
+        ctx.schedule_action(&mut self.a, None, Some(Duration::from_millis(200))); // No payload.
+        println!(
+            "{} Current time is {:?}",
+            state.message, state.previous_time
+        );
     }
+}
 
-    /// reaction_a is sensetive to Action `a`
-    #[boomerang::reaction(reactor = "HelloBuilder", triggers(action = "a"))]
-    fn reaction_a(
-        &mut self,
-        ctx: &runtime::Context,
-        //#[reactor::action(triggers)] a: runtime::Action,
-    ) {
-        self.count += 1;
+/// ReactionA is sensetive to Action `a`
+#[derive(Reaction)]
+#[reaction(triggers(action = "a"))]
+struct ReactionA;
+
+impl Trigger for ReactionA {
+    type Reactor = HelloBuilder;
+    fn trigger(&mut self, ctx: &mut runtime::Context, state: &mut Hello) {
+        state.count += 1;
         let time = ctx.get_elapsed_logical_time();
-        println!("***** action {} at time {:?}", self.count, time);
-        let diff = time - self.previous_time;
+        println!("***** action {} at time {:?}", state.count, time);
+        let diff = time - state.previous_time;
         assert_eq!(
             diff,
             Duration::from_millis(200),
@@ -101,15 +111,6 @@ impl Hello {
             diff
         );
     }
-}
-
-#[derive(Reactor)]
-#[reactor(state = "Inside")]
-struct InsideBuilder {
-    #[reactor(child(
-        state = "Hello::new(Duration::from_secs(1), \"Composite default message.\")"
-    ))]
-    _third_instance: HelloBuilder,
 }
 
 struct Inside {
@@ -123,18 +124,27 @@ impl Inside {
     }
 }
 
-#[derive(Reactor)]
-struct MainBuilder {
-    #[reactor(child(state = "Hello::new(Duration::from_secs(4), \"Hello from first.\")"))]
-    first_instance: HelloBuilder,
-    #[reactor(child(state = "Hello::new(Duration::from_secs(2), \"Hello from second.\")"))]
-    second_instance: HelloBuilder,
-    #[reactor(child(state = "Inside::new(\"Hello from composite.\")"))]
-    third_instance: InsideBuilder,
+#[derive(Clone, Reactor)]
+#[reactor(state = Inside)]
+struct InsideBuilder {
+    #[reactor(child = Hello::new(Duration::from_secs(1), "Composite default message."))]
+    _third_instance: HelloBuilder,
 }
 
-// TODO: Fixme
-#[cfg(feature = "disabled")]
+#[derive(Clone, Reactor)]
+#[reactor(state = ())]
+struct MainBuilder {
+    #[reactor(child = Hello::new(Duration::from_secs(4), "Hello from first."))]
+    first_instance: HelloBuilder,
+    #[reactor(child = Hello::new(Duration::from_secs(2), "Hello from second."))]
+    second_instance: HelloBuilder,
+    #[reactor(child = Inside::new("Hello from composite."))]
+    third_instance: InsideBuilder,
+
+    #[reactor(child = runtime::Duration::from_secs(10))]
+    _timeout: timeout::Timeout,
+}
+
 #[test]
 fn hello() {
     tracing_subscriber::fmt::init();

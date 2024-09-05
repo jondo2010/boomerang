@@ -14,6 +14,7 @@ mod time;
 pub use action::*;
 pub use context::*;
 pub use env::*;
+pub use key_set::KeySetLimits as ReactionSetLimits;
 pub use port::*;
 pub use reaction::*;
 pub use reactor::*;

@@ -3,9 +3,74 @@ use std::{collections::BinaryHeap, time::Duration};
 
 use crate::{
     event::{PhysicalEvent, ScheduledEvent},
-    keepalive, Action, Env, Instant, LogicalAction, ReactionSet, ReactionTriggerCtx, Tag,
+    keepalive,
+    key_set::KeySetView,
+    Env, Instant, Level, ReactionKey, ReactionSet, ReactionSetLimits, ReactionTriggerCtx, Tag,
     TriggerMap,
 };
+
+#[derive(Debug)]
+struct EventQueue {
+    /// Current event queue
+    event_queue: BinaryHeap<ScheduledEvent>,
+    /// Recycled ReactionSets to avoid allocations
+    free_reaction_sets: Vec<ReactionSet>,
+    /// Limits for the reaction sets
+    reaction_set_limits: ReactionSetLimits,
+}
+
+impl EventQueue {
+    fn new(reaction_set_limits: ReactionSetLimits) -> Self {
+        Self {
+            event_queue: BinaryHeap::new(),
+            free_reaction_sets: Vec::new(),
+            reaction_set_limits,
+        }
+    }
+
+    /// Push an event into the event queue
+    ///
+    /// A free event is pulled from the `free_events` vector and then modified with the provided function.
+    fn push_event<I>(&mut self, tag: Tag, reactions: I, terminal: bool)
+    where
+        I: IntoIterator<Item = (Level, ReactionKey)>,
+    {
+        let mut reaction_set = self.next_reaction_set();
+        reaction_set.extend_above(reactions);
+        let event = ScheduledEvent {
+            tag,
+            reactions: reaction_set,
+            terminal,
+        };
+        self.event_queue.push(event);
+    }
+
+    /// Get a free [`ReactionSet`] or create a new one if none are available.
+    fn next_reaction_set(&mut self) -> ReactionSet {
+        self.free_reaction_sets
+            .pop()
+            .map(|mut reaction_set| {
+                reaction_set.clear();
+                reaction_set
+            })
+            .unwrap_or_else(|| ReactionSet::new(&self.reaction_set_limits))
+    }
+
+    /// If the event queue still has events on it, report that.
+    fn shutdown(&mut self) {
+        if !self.event_queue.is_empty() {
+            tracing::warn!(
+                "---- There are {} unprocessed future events on the event queue.",
+                self.event_queue.len()
+            );
+            let event = self.event_queue.peek().unwrap();
+            tracing::warn!(
+                "---- The first future event has timestamp {:?} after start time.",
+                event.tag.get_offset()
+            );
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct Scheduler<'env> {
@@ -21,8 +86,8 @@ pub struct Scheduler<'env> {
     event_tx: Sender<PhysicalEvent>,
     /// Asynchronous events receiver
     event_rx: Receiver<PhysicalEvent>,
-    /// Current event queue
-    event_queue: BinaryHeap<ScheduledEvent>,
+    /// Event queue
+    events: EventQueue,
     /// Initial wall-clock time.
     start_time: Instant,
     /// A shutdown has been scheduled at this time.
@@ -40,6 +105,7 @@ impl<'env> Scheduler<'env> {
     ) -> Self {
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
         let (shutdown_tx, _) = keepalive::channel();
+        let events = EventQueue::new(trigger_map.reaction_set_limits.clone());
 
         Self {
             env,
@@ -48,7 +114,7 @@ impl<'env> Scheduler<'env> {
             keep_alive,
             event_tx,
             event_rx,
-            event_queue: BinaryHeap::new(),
+            events,
             start_time: Instant::now(),
             shutdown_tag: None,
             shutdown_tx,
@@ -63,11 +129,11 @@ impl<'env> Scheduler<'env> {
         let tag = Tag::new(Duration::ZERO, 0);
 
         // For all Timers, pump later events onto the queue and create an initial ReactionSet to process.
-        let reaction_set =
-            ReactionSet::from_iter(self.trigger_map.startup_reactions.clone().into_iter());
+        let mut reaction_set = self.events.next_reaction_set();
+        reaction_set.extend_above(self.trigger_map.startup_reactions.iter().copied());
 
         tracing::info!(tag = %tag, ?reaction_set, "Starting the execution.");
-        self.process_tag(tag, reaction_set);
+        self.process_tag(tag, reaction_set.view());
     }
 
     /// Final shutdown of the Scheduler. The last tag has already been processed.
@@ -77,19 +143,7 @@ impl<'env> Scheduler<'env> {
 
         // Signal to any waiting threads that the scheduler is shutting down.
         self.shutdown_tx.shutdown();
-
-        // If the event queue still has events on it, report that.
-        if !self.event_queue.is_empty() {
-            tracing::warn!(
-                "---- There are {} unprocessed future events on the event queue.",
-                self.event_queue.len()
-            );
-            let event = self.event_queue.peek().unwrap();
-            tracing::warn!(
-                "---- The first future event has timestamp {:?} after start time.",
-                event.tag.get_offset()
-            );
-        }
+        self.events.shutdown();
 
         tracing::info!(
             "---- Elapsed logical time: {:?}",
@@ -100,20 +154,6 @@ impl<'env> Scheduler<'env> {
         tracing::info!("---- Elapsed physical time: {:?}", physical_elapsed);
 
         tracing::info!("Scheduler has been shut down.");
-    }
-
-    #[tracing::instrument(skip(self))]
-    fn cleanup(&mut self, current_tag: Tag) {
-        for action in self.env.actions.values_mut() {
-            if let Action::Logical(LogicalAction { values, .. }) = action {
-                // Clear action values at the current tag
-                values.remove(current_tag);
-            }
-        }
-
-        for port in self.env.ports.values_mut() {
-            port.cleanup();
-        }
     }
 
     /// Try to receive an asynchronous event
@@ -141,12 +181,15 @@ impl<'env> Scheduler<'env> {
         self.startup();
         loop {
             // Push pending events into the queue
-            for event in self.event_rx.try_iter() {
-                self.event_queue
-                    .push(event.into_scheduled(&self.trigger_map));
+            for physical_event in self.event_rx.try_iter() {
+                self.events.push_event(
+                    physical_event.tag,
+                    physical_event.downstream_reactions(&self.trigger_map),
+                    physical_event.terminal,
+                );
             }
 
-            if let Some(event) = self.event_queue.pop() {
+            if let Some(mut event) = self.events.event_queue.pop() {
                 tracing::debug!(event = %event, reactions = ?event.reactions, "Handling event");
 
                 if !self.fast_forward {
@@ -155,31 +198,40 @@ impl<'env> Scheduler<'env> {
                         // Woken up by async event
                         if async_event.tag < event.tag {
                             // Re-insert both events to order them
-                            self.event_queue.push(event);
-                            self.event_queue.push(async_event);
+                            self.events.event_queue.push(event);
+                            self.events.event_queue.push(async_event);
                             continue;
                         } else {
-                            self.event_queue.push(async_event);
+                            self.events.event_queue.push(async_event);
                         }
                     }
                 }
 
-                self.process_tag(event.tag, event.reactions);
+                self.process_tag(event.tag, event.reactions.view());
+
+                // Return the ReactionSet to the free pool
+                self.events.free_reaction_sets.push(event.reactions);
 
                 if event.terminal {
                     // Break out of the event loop;
                     break;
                 }
             } else if let Some(event) = self.receive_event() {
-                self.event_queue
-                    .push(event.into_scheduled(&self.trigger_map));
+                self.events.push_event(
+                    event.tag,
+                    event.downstream_reactions(&self.trigger_map),
+                    event.terminal,
+                );
             } else {
                 tracing::debug!("No more events in queue. -> Terminate!");
                 // Shutdown event will be processed at the next event loop iteration
                 let tag = Tag::now(self.start_time);
                 self.shutdown_tag = Some(tag);
-                self.event_queue
-                    .push(ScheduledEvent::shutdown(tag, &self.trigger_map));
+                self.events.push_event(
+                    tag,
+                    self.trigger_map.shutdown_reactions.iter().copied(),
+                    true,
+                );
             }
         } // loop
 
@@ -188,7 +240,7 @@ impl<'env> Scheduler<'env> {
 
     // Wait until the wall-clock time is reached
     #[tracing::instrument(skip(self), fields(target = ?target))]
-    fn synchronize_wall_clock(&self, target: Instant) -> Option<ScheduledEvent> {
+    fn synchronize_wall_clock(&mut self, target: Instant) -> Option<ScheduledEvent> {
         let now = Instant::now();
 
         if now < target {
@@ -198,10 +250,16 @@ impl<'env> Scheduler<'env> {
             match self.event_rx.recv_timeout(advance) {
                 Ok(event) => {
                     tracing::debug!(event = %event, "Sleep interrupted by async event");
-                    return Some(event.into_scheduled(&self.trigger_map));
+                    let mut reactions = self.events.next_reaction_set();
+                    reactions.extend_above(event.downstream_reactions(&self.trigger_map));
+                    return Some(ScheduledEvent {
+                        tag: event.tag,
+                        reactions,
+                        terminal: event.terminal,
+                    });
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    let remaining = target.checked_duration_since(Instant::now());
+                    let remaining: Option<Duration> = target.checked_duration_since(Instant::now());
                     if let Some(remaining) = remaining {
                         tracing::debug!(remaining = ?remaining,
                             "Sleep interrupted disconnect, sleeping for remaining",
@@ -224,15 +282,15 @@ impl<'env> Scheduler<'env> {
     /// Process the reactions at this tag in increasing order of level.
     ///
     /// Reactions at a level N may trigger further reactions at levels M>N
-    #[tracing::instrument(skip(self, reaction_set), fields(tag = %tag))]
-    pub fn process_tag(&mut self, tag: Tag, mut reaction_set: ReactionSet) {
+    #[tracing::instrument(skip(self, reaction_view), fields(tag = %tag))]
+    pub fn process_tag(&mut self, tag: Tag, mut reaction_view: KeySetView<ReactionKey>) {
         let bump = bumpalo::Bump::new();
 
-        while let Some((level, reaction_keys)) = reaction_set.next() {
-            tracing::trace!(level=?level, reaction_keys = ?reaction_keys, "Iter");
+        reaction_view.for_each_level(|level, reaction_keys, next_levels| {
+            tracing::trace!(level=?level, "Iter");
 
             // Safety: reaction_keys in the same level are guaranteed to be independent of each other.
-            let iter_ctx = unsafe { self.env.iter_reaction_ctx(&bump, reaction_keys.iter()) };
+            let iter_ctx = unsafe { self.env.iter_reaction_ctx(&bump, reaction_keys) };
 
             #[cfg(feature = "parallel")]
             use rayon::prelude::ParallelIterator;
@@ -273,35 +331,39 @@ impl<'env> Scheduler<'env> {
                     // schedule a shutdown event
                     if self.shutdown_tag.map(|t| shutdown_tag < t).unwrap_or(true) {
                         self.shutdown_tag = Some(shutdown_tag);
-                        self.event_queue
-                            .push(ScheduledEvent::shutdown(shutdown_tag, &self.trigger_map));
+                        self.events.push_event(
+                            shutdown_tag,
+                            self.trigger_map.shutdown_reactions.iter().copied(),
+                            true,
+                        );
                     }
                 }
 
                 // Submit events to the event queue for all scheduled actions
-                self.event_queue
-                    .extend(res.scheduled_actions.iter().map(|&(action_key, tag)| {
-                        let downstream = self.trigger_map.action_triggers[action_key].iter();
-                        ScheduledEvent {
-                            tag,
-                            reactions: ReactionSet::from_iter(downstream.copied()),
-                            terminal: false,
-                        }
-                    }));
+                for &(action_key, tag) in res.scheduled_actions.iter() {
+                    let downstream = self.trigger_map.action_triggers[action_key].iter().copied();
+                    self.events.push_event(tag, downstream, false);
+                }
             });
 
             // Collect all the reactions that are triggered by the ports
-            self.env.ports.iter().for_each(|(port_key, port)| {
-                if port.is_set() {
-                    let downstream = self.trigger_map.port_triggers[port_key]
-                        .iter()
-                        .filter(|(trigger_level, _)| *trigger_level > level)
-                        .copied();
-                    reaction_set.extend_above(downstream, level);
-                }
-            });
-        }
+            let downstream = self
+                .env
+                .ports
+                .iter()
+                .filter_map(|(port_key, port)| {
+                    port.is_set()
+                        .then(|| self.trigger_map.port_triggers[port_key].iter())
+                })
+                .flatten();
 
-        self.cleanup(tag);
+            if let Some(mut next_levels) = next_levels {
+                next_levels.extend_above(downstream.copied());
+            }
+        });
+
+        for port in self.env.ports.values_mut() {
+            port.cleanup();
+        }
     }
 }

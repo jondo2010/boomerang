@@ -89,7 +89,7 @@ impl Trigger for SourceReactionStartup<'_> {
 }
 
 #[derive(Reactor, Clone)]
-#[reactor(state = "()")]
+#[reactor(state = bool)]
 struct Sink {
     #[reactor(port = "input")]
     inp: TypedPortKey<u32>,
@@ -108,7 +108,7 @@ impl Trigger for SinkReactionIn<'_> {
     fn trigger(
         &mut self,
         ctx: &mut runtime::Context,
-        _state: &mut <Self::Reactor as Reactor>::State,
+        state: &mut <Self::Reactor as Reactor>::State,
     ) {
         let elapsed_logical = ctx.get_elapsed_logical_time();
         let logical = ctx.get_logical_time();
@@ -122,12 +122,13 @@ impl Trigger for SinkReactionIn<'_> {
             elapsed_logical
         );
         println!("SUCCESS. Elapsed logical time is 100 msec.");
+        *state = true;
     }
 }
 
 #[derive(Reactor, Clone)]
 #[reactor(
-    state = "()",
+    state = (),
     connection(from = "source.out", to = "g.y_in"),
     connection(from = "g.y_out", to = "sink.inp")
 )]
@@ -135,7 +136,7 @@ impl Trigger for SinkReactionIn<'_> {
 struct ActionDelayBuilder {
     #[reactor(child = ())]
     source: SourceBuilder,
-    #[reactor(child = ())]
+    #[reactor(child = false)]
     sink: Sink,
     #[reactor(child = GeneratedDelayState::default())]
     g: GeneratedDelay,
@@ -144,11 +145,17 @@ struct ActionDelayBuilder {
 #[test]
 fn action_delay() {
     tracing_subscriber::fmt::init();
-    let _ = boomerang_util::run::build_and_test_reactor::<ActionDelayBuilder>(
+    let (_, env) = boomerang_util::run::build_and_test_reactor::<ActionDelayBuilder>(
         "action_delay",
         (),
         true,
         false,
     )
     .unwrap();
+
+    let sink_state = env
+        .get_reactor_by_name("sink")
+        .and_then(|reactor| reactor.get_state::<bool>())
+        .unwrap();
+    assert!(sink_state, "SinkReactionIn did not trigger");
 }

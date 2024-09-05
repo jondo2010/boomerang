@@ -68,8 +68,8 @@ pub enum BuilderError {
         // sub_error: String, //Option<BuilderError>,
     },
 
-    #[error("A cycle in the Reaction graph was found.")]
-    ReactionGraphCycle { what: BuilderReactionKey },
+    #[error("A cycle in the Reaction graph was found: {what:?}.")]
+    ReactionGraphCycle { what: Vec<BuilderReactionKey> },
 
     #[error("A cycle in the Reactor graph was found.")]
     ReactorGraphCycle { what: BuilderReactorKey },

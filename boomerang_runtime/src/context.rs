@@ -79,7 +79,7 @@ impl Context {
     }
 
     /// Get the value of an Action at the current Tag
-    pub fn get_action<T: ActionData, A: ActionRefValue<T>>(&self, action: &A) -> Option<T> {
+    pub fn get_action<T: ActionData, A: ActionRefValue<T>>(&self, action: &mut A) -> Option<T> {
         action.get_value(self.tag)
     }
 

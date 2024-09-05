@@ -41,3 +41,6 @@ resolver = "2"
 [profile.profiling]
 inherits = "release"
 debug = true
+
+[patch.crates-io]
+#fixedbitset = { path = "../fixedbitset" }

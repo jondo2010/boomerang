@@ -52,14 +52,24 @@ impl Debug for EnvBuilder {
             })
             .collect_vec();
 
-        let reaction_levels = self.build_runtime_level_map().unwrap();
-        let reactions = reaction_levels
-            .iter()
-            .map(|(key, level)| {
-                let fqn = self.reaction_fqn(key).unwrap();
-                (format!("{key:?}, {fqn}"), format!("Level({level})"))
-            })
-            .collect::<BTreeMap<_, _>>();
+        let reactions = if let Ok(reaction_levels) = self.build_runtime_level_map() {
+            reaction_levels
+                .iter()
+                .map(|(key, level)| {
+                    let fqn = self.reaction_fqn(key).unwrap();
+                    (format!("{key:?}, {fqn}"), format!("Level({level})"))
+                })
+                .collect::<BTreeMap<_, _>>()
+        } else {
+            // There was a cycle in the reaction graph, so don't show the reaction levels.
+            self.reaction_builders
+                .keys()
+                .map(|key| {
+                    let fqn = self.reaction_fqn(key).unwrap();
+                    (format!("{key:?}"), format!("{fqn}"))
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
 
         let runtime_port_parts = self.build_runtime_ports();
         let port_aliases = runtime_port_parts

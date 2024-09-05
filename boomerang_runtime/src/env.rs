@@ -1,8 +1,8 @@
 use tinymap::chunks::{Chunks, ChunksMut};
 
 use crate::{
-    fmt_utils as fmt, Action, ActionKey, BasePort, PortKey, Reaction, ReactionKey, Reactor,
-    ReactorKey,
+    fmt_utils as fmt, key_set::KeySetLimits, Action, ActionKey, BasePort, PortKey, Reaction,
+    ReactionKey, Reactor, ReactorKey,
 };
 
 /// Execution level
@@ -16,11 +16,23 @@ impl std::fmt::Display for Level {
     }
 }
 
+impl From<usize> for Level {
+    fn from(value: usize) -> Self {
+        Self(value)
+    }
+}
+
 impl std::ops::Add<usize> for Level {
     type Output = Self;
 
     fn add(self, rhs: usize) -> Self::Output {
         Self(self.0 + rhs)
+    }
+}
+
+impl std::ops::AddAssign<usize> for Level {
+    fn add_assign(&mut self, rhs: usize) {
+        self.0 += rhs;
     }
 }
 
@@ -59,6 +71,8 @@ pub struct TriggerMap {
     pub startup_reactions: Vec<LevelReactionKey>,
     /// Global shutdown reactions
     pub shutdown_reactions: Vec<LevelReactionKey>,
+    /// The maximum level of any reaction, and the total number of reactions. This is used to allocate the reaction set.
+    pub reaction_set_limits: KeySetLimits,
 }
 
 impl std::fmt::Debug for Env {
@@ -247,25 +261,6 @@ where
     }
 }
 
-#[cfg(feature = "parallel2")]
-impl<'a, IReactor, IReaction, IInputs, IOutputs> rayon::iter::ParallelIterator
-    for ReactionTriggerCtxIter<'a, IReactor, IReaction, IInputs, IOutputs>
-where
-    IReactor: Iterator<Item = &'a mut Reactor> + Send,
-    IReaction: Iterator<Item = &'a Reaction> + Send,
-    IInputs: Iterator<Item = &'a [&'a Box<dyn BasePort>]> + Send,
-    IOutputs: Iterator<Item = &'a mut [&'a mut Box<dyn BasePort>]> + Send,
-{
-    type Item = ReactionTriggerCtx<'a>;
-
-    fn drive_unindexed<C>(self, _consumer: C) -> C::Result
-    where
-        C: rayon::iter::plumbing::UnindexedConsumer<Self::Item>,
-    {
-        todo!()
-    }
-}
-
 impl Env {
     /// Returns an `Iterator` of `ReactionTriggerCtx` for each `Reaction` in the given `reaction_keys`.
     ///
@@ -277,9 +272,9 @@ impl Env {
         reaction_keys: I,
     ) -> impl Iterator<Item = ReactionTriggerCtx<'a>> + 'a
     where
-        I: Iterator<Item = &'a ReactionKey> + ExactSizeIterator + Clone + Send + 'a,
+        I: Iterator<Item = ReactionKey> + ExactSizeIterator + Clone + Send + 'a,
     {
-        let reactions = reaction_keys.map(|&k| &self.reactions[k]);
+        let reactions = reaction_keys.map(|k| &self.reactions[k]);
 
         let reactor_keys = reactions.clone().map(|reaction| reaction.get_reactor_key());
 

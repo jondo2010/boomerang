@@ -52,7 +52,7 @@ impl<'a> Trigger for ReactionAct<'a> {
 
     fn trigger(&mut self, ctx: &mut runtime::Context, state: &mut ActionValues) {
         let elapsed = ctx.get_elapsed_logical_time();
-        let value = ctx.get_action(&self.act);
+        let value = ctx.get_action(&mut self.act);
 
         println!("[@{elapsed:?} action transmitted: {value:?}]");
 

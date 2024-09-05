@@ -1,4 +1,6 @@
-use crate::{ActionKey, ReactionSet, Tag, TriggerMap};
+use crate::{
+    key_set::KeySetLimits, ActionKey, LevelReactionKey, Reaction, ReactionSet, Tag, TriggerMap,
+};
 
 #[derive(Debug, Clone)]
 pub struct ScheduledEvent {
@@ -39,17 +41,6 @@ impl Ord for ScheduledEvent {
     }
 }
 
-impl ScheduledEvent {
-    /// Create a shutdown event.
-    pub(crate) fn shutdown(tag: Tag, triggers: &TriggerMap) -> Self {
-        Self {
-            tag,
-            reactions: ReactionSet::from_iter(triggers.shutdown_reactions.iter().copied()),
-            terminal: true,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct PhysicalEvent {
     /// The [`Tag`] at which the reactions in this event should be executed.
@@ -85,14 +76,11 @@ impl PhysicalEvent {
         }
     }
 
-    /// Convert the physical event to a scheduled event.
-    pub(crate) fn into_scheduled(self, triggers: &TriggerMap) -> ScheduledEvent {
-        let downstream = triggers.action_triggers[self.key].iter().copied();
-        ScheduledEvent {
-            tag: self.tag,
-            reactions: ReactionSet::from_iter(downstream),
-            terminal: self.terminal,
-        }
+    pub fn downstream_reactions<'a>(
+        &'a self,
+        triggers: &'a TriggerMap,
+    ) -> impl Iterator<Item = LevelReactionKey> + 'a {
+        triggers.action_triggers[self.key].iter().copied()
     }
 }
 

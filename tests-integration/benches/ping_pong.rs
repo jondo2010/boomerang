@@ -69,7 +69,7 @@ struct ReactionServe<'a> {
 
 impl Trigger for ReactionServe<'_> {
     type Reactor = PingBuilder;
-    fn trigger(&mut self, ctx: &mut runtime::Context, state: &mut Ping) {
+    fn trigger(&mut self, _ctx: &mut runtime::Context, state: &mut Ping) {
         *self.out_ping.get_mut() = Some(());
         state.pings_left -= 1;
     }
@@ -116,7 +116,7 @@ struct ReactionInPing<'a> {
 
 impl Trigger for ReactionInPing<'_> {
     type Reactor = PongBuilder;
-    fn trigger(&mut self, ctx: &mut runtime::Context, state: &mut Pong) {
+    fn trigger(&mut self, _ctx: &mut runtime::Context, state: &mut Pong) {
         *self.out_pong.get_mut() = Some(());
         state.count += 1;
     }
@@ -153,7 +153,7 @@ struct ReactionStartup<'a> {
 
 impl Trigger for ReactionStartup<'_> {
     type Reactor = MainBuilder;
-    fn trigger(&mut self, ctx: &mut runtime::Context, state: &mut Main) {
+    fn trigger(&mut self, _ctx: &mut runtime::Context, _state: &mut Main) {
         *self.in_start.get_mut() = Some(());
     }
 }
@@ -166,7 +166,7 @@ struct ReactionDone<'a> {
 
 impl Trigger for ReactionDone<'_> {
     type Reactor = MainBuilder;
-    fn trigger(&mut self, ctx: &mut runtime::Context, state: &mut Main) {
+    fn trigger(&mut self, ctx: &mut runtime::Context, _state: &mut Main) {
         ctx.schedule_shutdown(None);
     }
 }

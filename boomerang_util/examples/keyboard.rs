@@ -6,7 +6,6 @@ use std::io::Write;
 
 use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
 use boomerang_util::keyboard_events::{KeyboardEvents, KeyboardEventsBuilder};
-use termion::event::Key;
 
 /// A simple Reactor that triggers on key_press events.
 /// It reads keyboard input and prints the key that was pressed.
@@ -23,7 +22,7 @@ struct Builder {
 #[derive(Reaction)]
 struct ReactionKeyPress<'a> {
     #[reaction(path = "keyboard.arrow_key_pressed")]
-    arrow_key_pressed: &'a runtime::Port<Key>,
+    arrow_key_pressed: &'a runtime::Port<termion::event::Key>,
 }
 
 impl Trigger for ReactionKeyPress<'_> {
@@ -34,10 +33,10 @@ impl Trigger for ReactionKeyPress<'_> {
 
         // this might be overwritten several times, only committed on screen refreshes
         let c = match self.arrow_key_pressed.get().unwrap() {
-            Key::Left => '←',
-            Key::Right => '→',
-            Key::Up => '↑',
-            Key::Down => '↓',
+            termion::event::Key::Left => '←',
+            termion::event::Key::Right => '→',
+            termion::event::Key::Up => '↑',
+            termion::event::Key::Down => '↓',
             _ => unreachable!(),
         };
 

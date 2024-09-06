@@ -1,75 +1,75 @@
-//! Boomerang is a framework for building and executing stateful, deterministic Reactors.
+#![doc=include_str!( "../../README.md")]
 //!
 //! ## Example
 //!
 //! Build and run a Reactor with reactions that respond to startup and shutdown actions:
 //!
 //! ```rust
-//! use boomerang::{builder::*, runtime, Reactor};
+//! use boomerang::{builder::prelude::*, runtime, Reactor, Reaction};
 //!
-//! #[derive(Reactor)]
-//! #[reactor(state = "HelloWorld")]
-//! struct HelloWorldBuilder {
-//!     #[reactor(reaction(function = "HelloWorld::reaction_startup"))]
-//!     reaction_startup: BuilderReactionKey,
-//!     #[reactor(reaction(function = "HelloWorld::reaction_shutdown"))]
-//!     reaction_shutdown: BuilderReactionKey,
-//! }
-//!
-//! struct HelloWorld {
+//! struct State {
 //!     success: bool,
 //! }
 //!
-//! impl HelloWorld {
-//!     #[boomerang::reaction(reactor = "HelloWorldBuilder", triggers(startup))]
-//!     fn reaction_startup(&mut self, _ctx: &runtime::Context) {
-//!         println!("Hello World.");
-//!         self.success = true;
-//!     }
+//! #[derive(Reactor, Clone)]
+//! #[reactor(state = State)]
+//! struct HelloWorld {
+//!     reaction_startup: TypedReactionKey<ReactionStartup>,
+//!     reaction_shutdown: TypedReactionKey<ReactionShutdown>,
+//! }
 //!
-//!     #[boomerang::reaction(reactor = "HelloWorldBuilder", triggers(shutdown))]
-//!     fn reaction_shutdown(&mut self, _ctx: &runtime::Context) {
+//! #[derive(Reaction)]
+//! #[reaction(triggers(startup))]
+//! struct ReactionStartup;
+//!
+//! impl Trigger for ReactionStartup {
+//!     type Reactor = HelloWorld;
+//!     fn trigger(&mut self, _ctx: &mut runtime::Context, state: &mut State) {
+//!         println!("Hello World.");
+//!         state.success = true;
+//!     }
+//! }
+//!
+//! #[derive(Reaction)]
+//! #[reaction(triggers(shutdown))]
+//! struct ReactionShutdown;
+//!
+//! impl Trigger for ReactionShutdown {
+//!     type Reactor = HelloWorld;
+//!     fn trigger(&mut self, _ctx: &mut runtime::Context, state: &mut State) {
 //!         println!("Shutdown invoked.");
-//!         assert!(self.success, "ERROR: startup reaction not executed.");
+//!         assert!(state.success, "ERROR: startup reaction not executed.");
 //!     }
 //! }
 //!
 //! let mut env_builder = EnvBuilder::new();
-//! let reactor = HelloWorldBuilder::build(
+//! let reactor = HelloWorld::build(
 //!     "hello_world",
-//!     HelloWorld {
+//!     State {
 //!         success: false
 //!     },
 //!     None,
 //!     &mut env_builder
 //! ).unwrap();
-//! let env = env_builder.try_into().unwrap();
-//! let mut sched = runtime::Scheduler::new(env, true, false);
+//! let (mut env, triggers, _) = env_builder.into_runtime_parts().unwrap();
+//! let mut sched = runtime::Scheduler::new(&mut env, triggers, true, false);
 //! sched.event_loop();
 //! ```
 //!
-//! # Crate features:
-//! * **visualization** -
-//!   Defaults on. Enables the debug Graphviz functions in [`builder::graphviz`].
-//! * **derive** -
-//!   Defaults on. Enables the derive macros in [`boomerang_derive`].
+//! ## Feature flags
+#![doc = document_features::document_features!()]
+#![deny(unsafe_code)]
+#![deny(clippy::all)]
 
 #[macro_use]
 extern crate derivative;
 
 pub mod builder;
-#[cfg(feature = "runner")]
-pub mod run;
 
 // Re-exports
 pub use boomerang_runtime as runtime;
 
-#[cfg(feature = "boomerang_derive")]
-#[allow(unused_imports)]
-#[macro_use]
-extern crate boomerang_derive;
-
-#[cfg(feature = "boomerang_derive")]
+#[cfg(feature = "derive")]
 #[doc(hidden)]
 pub use boomerang_derive::*;
 

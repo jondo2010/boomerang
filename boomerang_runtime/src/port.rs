@@ -4,16 +4,16 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use crate::{InnerType, LevelReactionKey, PortData};
+use crate::{InnerType, PortData};
 
 tinymap::key_type!(pub PortKey);
 
 pub trait BasePort: Debug + Display + Send + Sync + DowncastSync {
-    /// Return the downstream Reactions triggered by this Port
-    fn get_downstream(&self) -> core::slice::Iter<LevelReactionKey>;
+    /// Get the name of this port
+    fn get_name(&self) -> &str;
 
-    /// Set the downstream 'triggered' reactions.
-    fn set_downstream(&mut self, downstream: Vec<LevelReactionKey>);
+    /// Get the key for this port
+    fn get_key(&self) -> PortKey;
 
     /// Return true if the port contains a value
     fn is_set(&self) -> bool;
@@ -29,17 +29,16 @@ impl_downcast!(sync BasePort);
 #[derive(Debug)]
 pub struct Port<T: PortData> {
     name: String,
+    key: PortKey,
     value: Option<T>,
-    /// Reactions that this Port triggers when set.
-    downstream: Vec<LevelReactionKey>,
 }
 
 impl<T: PortData> Display for Port<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!(
-            "Port<{}> \"{}\"",
-            std::any::type_name::<T>(),
-            self.name
+            "{} : Port<{}>",
+            self.name,
+            std::any::type_name::<T>()
         ))
     }
 }
@@ -66,11 +65,11 @@ impl<T> Port<T>
 where
     T: PortData,
 {
-    pub fn new(name: String) -> Self {
+    pub fn new(name: String, key: PortKey) -> Self {
         Self {
             name,
+            key,
             value: None,
-            downstream: Vec::new(),
         }
     }
 
@@ -87,12 +86,12 @@ impl<T> BasePort for Port<T>
 where
     T: PortData,
 {
-    fn get_downstream(&self) -> core::slice::Iter<LevelReactionKey> {
-        self.downstream.iter()
+    fn get_name(&self) -> &str {
+        &self.name
     }
 
-    fn set_downstream(&mut self, downstream: Vec<LevelReactionKey>) {
-        self.downstream = downstream;
+    fn get_key(&self) -> PortKey {
+        self.key
     }
 
     fn is_set(&self) -> bool {
@@ -100,19 +99,10 @@ where
     }
 
     fn cleanup(&mut self) {
-        // event!(tracing::Level::DEBUG, ?self.name, "cleanup()");
         self.value = None;
     }
 
     fn type_name(&self) -> &'static str {
         std::any::type_name::<T>()
     }
-}
-
-#[test]
-fn test_port() {
-    let p0: Box<dyn BasePort> = Box::new(Port::<f64>::new("p0".into()));
-    dbg!(&p0);
-    let x = p0.downcast_ref::<Port<f64>>();
-    dbg!(&x);
 }

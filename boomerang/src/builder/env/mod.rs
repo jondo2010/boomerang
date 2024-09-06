@@ -8,7 +8,7 @@ use crate::runtime;
 use boomerang_runtime::Level;
 use itertools::Itertools;
 use petgraph::{graphmap::DiGraphMap, EdgeDirection};
-use runtime::{LogicalAction, PhysicalAction};
+use runtime::{LogicalAction, PhysicalAction, ReactionSetLimits};
 use slotmap::{SecondaryMap, SlotMap};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -18,6 +18,40 @@ use std::{
 mod debug;
 #[cfg(test)]
 mod tests;
+
+mod util {
+    use petgraph::visit::{IntoNeighborsDirected, IntoNodeIdentifiers, Visitable};
+    use std::hash::Hash;
+
+    /// Find a minimal cycle in a graph using DFS
+    pub fn find_minimal_cycle<G>(graph: G, start_node: G::NodeId) -> Vec<G::NodeId>
+    where
+        G: IntoNeighborsDirected + IntoNodeIdentifiers + Visitable,
+        G::NodeId: Hash + Eq,
+    {
+        let mut dfs = petgraph::visit::Dfs::new(&graph, start_node);
+        let mut stack = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+
+        while let Some(nx) = dfs.next(&graph) {
+            if visited.contains(&nx) {
+                // We've found a cycle, backtrack to find the minimal cycle
+                while let Some(&last) = stack.last() {
+                    if last == nx {
+                        break;
+                    }
+                    stack.pop();
+                }
+                return stack.to_vec();
+            }
+            visited.insert(nx);
+            stack.push(nx);
+        }
+
+        // This shouldn't happen if there's definitely a cycle
+        vec![start_node]
+    }
+}
 
 pub trait FindElements {
     fn get_port_by_name(&self, port_name: &str) -> Result<BuilderPortKey, BuilderError>;
@@ -45,7 +79,7 @@ struct RuntimePortParts {
     /// For each Port, a set of Reactions triggered by it
     port_triggers: tinymap::TinySecondaryMap<runtime::PortKey, Vec<BuilderReactionKey>>,
     /// A mapping from `BuilderPortKey`s to aliased [`runtime::PortKey`]s.
-    aliases: SecondaryMap<BuilderPortKey, runtime::PortKey>,
+    port_aliases: SecondaryMap<BuilderPortKey, runtime::PortKey>,
 }
 
 #[derive(Debug)]
@@ -66,9 +100,9 @@ impl EnvBuilder {
         &mut self,
         name: &str,
         parent: Option<BuilderReactorKey>,
-        reactor: S,
+        state: S,
     ) -> ReactorBuilderState {
-        ReactorBuilderState::new(name, parent, reactor, self)
+        ReactorBuilderState::new(name, parent, state, self)
     }
 
     pub fn add_port<T: runtime::PortData>(
@@ -170,7 +204,7 @@ impl EnvBuilder {
         &mut self,
         name: &str,
         reactor_key: BuilderReactorKey,
-        reaction_fn: Box<dyn runtime::ReactionFn>,
+        reaction_fn: runtime::ReactionFn,
     ) -> ReactionBuilderState {
         let priority = self.reactor_builders[reactor_key].reactions.len();
         ReactionBuilderState::new(name, priority, reactor_key, reaction_fn, self)
@@ -185,7 +219,7 @@ impl EnvBuilder {
         action_fn: F,
     ) -> Result<TypedActionKey<T, Q>, BuilderError>
     where
-        T: runtime::PortData,
+        T: runtime::ActionData,
         F: ActionBuilderFn + 'static,
     {
         let reactor_builder = &mut self.reactor_builders[reactor_key];
@@ -228,6 +262,22 @@ impl EnvBuilder {
             })
             .map(|(port_key, _)| port_key)
             .ok_or_else(|| BuilderError::NamedPortNotFound(port_name.to_string()))
+    }
+
+    /// Find a Reaction matching a given name and ReactorKey
+    pub fn get_reaction(
+        &self,
+        reaction_name: &str,
+        reactor_key: BuilderReactorKey,
+    ) -> Result<BuilderReactionKey, BuilderError> {
+        self.reaction_builders
+            .iter()
+            .find(|(_, reaction_builder)| {
+                reaction_builder.get_name() == reaction_name
+                    && reaction_builder.get_reactor_key() == reactor_key
+            })
+            .map(|(reaction_key, _)| reaction_key)
+            .ok_or_else(|| BuilderError::NamedReactionNotFound(reaction_name.to_string()))
     }
 
     /// Find an Action matching a given name and ReactorKey
@@ -293,11 +343,10 @@ impl EnvBuilder {
 
     /// Bind Port A to Port B
     /// The nominal case is to bind Input A to Output B
-    pub fn bind_port<T: runtime::PortData>(
-        &mut self,
-        port_a_key: TypedPortKey<T>,
-        port_b_key: TypedPortKey<T>,
-    ) -> Result<(), BuilderError> {
+    pub fn bind_port<P>(&mut self, port_a_key: P, port_b_key: P) -> Result<(), BuilderError>
+    where
+        P: Into<BuilderPortKey>,
+    {
         let port_a_key = port_a_key.into();
         let port_b_key = port_b_key.into();
 
@@ -500,7 +549,7 @@ impl EnvBuilder {
             .flat_map(move |(reaction_key, reaction)| {
                 // Connect all reactions this reaction depends upon
                 reaction
-                    .input_ports
+                    .trigger_ports
                     .keys()
                     .flat_map(move |port_key| {
                         let source_port_key = self.follow_port_inward_binding(port_key);
@@ -561,14 +610,16 @@ impl EnvBuilder {
         let mut graph = self.build_reaction_graph().into_graph::<DefaultIx>();
 
         // Transitive reduction and closures
-        let toposort = petgraph::algo::toposort(&graph, None).map_err(|e| {
+        let toposort = petgraph::algo::toposort(&graph, None).map_err(|cycle_error| {
             // A Cycle was found in the reaction graph.
             // let fas = petgraph::algo::greedy_feedback_arc_set(&graph);
             // let cycle = petgraph::prelude::DiGraphMap::<BuilderReactionKey, ()>::from_edges(fas);
+            let cycle = util::find_minimal_cycle(&graph, cycle_error.node_id())
+                .into_iter()
+                .map(|node_index| graph[node_index])
+                .collect_vec();
 
-            BuilderError::ReactionGraphCycle {
-                what: graph[e.node_id()],
-            }
+            BuilderError::ReactionGraphCycle { what: cycle }
         })?;
 
         let (res, _) = tred::dag_to_toposorted_adjacency_list::<_, NodeIndex>(&graph, &toposort);
@@ -611,7 +662,7 @@ impl EnvBuilder {
             .keys()
             .map(|port_key| (port_key, self.follow_port_inward_binding(port_key)))
             .sorted_by(|a, b| a.1.cmp(&b.1))
-            .group_by(|(_port_key, inward_key)| *inward_key);
+            .chunk_by(|(_port_key, inward_key)| *inward_key);
 
         for (inward_port_key, group) in port_groups.into_iter() {
             let downstream_reactions = self
@@ -619,8 +670,9 @@ impl EnvBuilder {
                 .keys()
                 .collect_vec();
 
-            let runtime_port_key =
-                runtime_ports.insert(self.port_builders[inward_port_key].create_runtime_port());
+            let runtime_port_key = runtime_ports.insert_with_key(|key| {
+                self.port_builders[inward_port_key].create_runtime_port(key)
+            });
 
             port_triggers.insert(runtime_port_key, downstream_reactions);
 
@@ -630,7 +682,7 @@ impl EnvBuilder {
         RuntimePortParts {
             ports: runtime_ports,
             port_triggers,
-            aliases: alias_map,
+            port_aliases: alias_map,
         }
     }
 
@@ -656,12 +708,40 @@ impl EnvBuilder {
     }
 }
 
-/// Build a new `SlotMap` of `runtime::Reactor` from `ReactorBuilder`s.
+fn build_runtime_reactions(
+    reaction_builders: SlotMap<BuilderReactionKey, ReactionBuilder>,
+    port_aliases: &SecondaryMap<BuilderPortKey, boomerang_runtime::PortKey>,
+    action_aliases: &SecondaryMap<BuilderActionKey, boomerang_runtime::ActionKey>,
+) -> (
+    tinymap::TinyMap<boomerang_runtime::ReactionKey, boomerang_runtime::Reaction>,
+    SecondaryMap<BuilderReactionKey, boomerang_runtime::ReactionKey>,
+    SecondaryMap<BuilderReactionKey, BuilderReactorKey>,
+) {
+    let mut runtime_reactions = tinymap::TinyMap::with_capacity(reaction_builders.len());
+    let mut reaction_aliases = SecondaryMap::new();
+    let mut reaction_reactor_aliases = SecondaryMap::new();
+
+    for (builder_key, reaction_builder) in reaction_builders.into_iter() {
+        reaction_reactor_aliases.insert(builder_key, reaction_builder.reactor_key);
+        let reaction_key = runtime_reactions.insert(reaction_builder.build_runtime_reaction(
+            runtime::ReactorKey::default(),
+            port_aliases,
+            action_aliases,
+        ));
+        reaction_aliases.insert(builder_key, reaction_key);
+    }
+    (
+        runtime_reactions,
+        reaction_aliases,
+        reaction_reactor_aliases,
+    )
+}
+
 fn build_runtime_reactors(
     reactor_builders: SlotMap<BuilderReactorKey, ReactorBuilder>,
     reaction_levels: &SecondaryMap<BuilderReactionKey, Level>,
     reaction_aliases: &SecondaryMap<BuilderReactionKey, runtime::ReactionKey>,
-    action_parts: &RuntimeActionParts,
+    action_triggers: &tinymap::TinySecondaryMap<runtime::ActionKey, Vec<BuilderReactionKey>>,
 ) -> (
     tinymap::TinyMap<runtime::ReactorKey, runtime::Reactor>,
     SecondaryMap<BuilderReactorKey, runtime::ReactorKey>,
@@ -672,8 +752,7 @@ fn build_runtime_reactors(
     for (builder_key, reactor_builder) in reactor_builders.into_iter() {
         // Build the runtime_action_triggers from the action_triggers part, mapping
         // BuilderReactionKey -> runtime::ReactionKey
-        let runtime_action_triggers = action_parts
-            .action_triggers
+        let runtime_action_triggers = action_triggers
             .iter()
             .map(|(action_key, triggers)| {
                 let downstream = triggers
@@ -696,70 +775,134 @@ fn build_runtime_reactors(
     (runtime_reactors, reactor_alias)
 }
 
-impl TryInto<runtime::Env> for EnvBuilder {
-    type Error = BuilderError;
-    fn try_into(self) -> Result<runtime::Env, Self::Error> {
+/// Aliasing maps from Builder keys to runtime keys
+pub struct BuilderAliases {
+    pub reactor_aliases: SecondaryMap<BuilderReactorKey, runtime::ReactorKey>,
+    pub reaction_aliases: SecondaryMap<BuilderReactionKey, runtime::ReactionKey>,
+    pub action_aliases: SecondaryMap<BuilderActionKey, runtime::ActionKey>,
+    pub port_aliases: SecondaryMap<BuilderPortKey, runtime::PortKey>,
+}
+
+impl EnvBuilder {
+    /// Convert the `EnvBuilder` into a [`runtime::Env`], [`runtime::TriggerMap`] and [`BuilderAliases`]
+    pub fn into_runtime_parts(
+        self,
+    ) -> Result<(runtime::Env, runtime::TriggerMap, BuilderAliases), BuilderError> {
         let reaction_levels = self.build_runtime_level_map()?;
+
         let RuntimePortParts {
-            ports: mut runtime_ports,
+            ports: runtime_ports,
             port_triggers,
-            aliases: port_aliases,
+            port_aliases,
         } = self.build_runtime_ports();
-        let action_parts = self.build_runtime_actions();
 
-        let mut runtime_reactions = tinymap::TinyMap::with_capacity(self.reaction_builders.len());
-        let mut reactions_aliases = SecondaryMap::new();
-        let mut reaction_reactor_aliases = SecondaryMap::new();
-        for (builder_key, reaction_builder) in self.reaction_builders.into_iter() {
-            reaction_reactor_aliases.insert(builder_key, reaction_builder.reactor_key);
-            let reaction_key = runtime_reactions.insert(reaction_builder.build_reaction(
-                runtime::ReactorKey::default(),
-                &port_aliases,
-                &action_parts.aliases,
-            ));
-            reactions_aliases.insert(builder_key, reaction_key);
-        }
+        let RuntimeActionParts {
+            actions: runtime_actions,
+            action_triggers,
+            aliases: action_aliases,
+        } = self.build_runtime_actions();
 
-        // Update the the Ports with triggered downstream Reactions.
-        for (port_key, triggers) in port_triggers.into_iter() {
-            let downstream = triggers
-                .into_iter()
-                .map(|builder_reaction_key| {
-                    (
-                        reaction_levels[builder_reaction_key],
-                        reactions_aliases[builder_reaction_key],
-                    )
-                })
-                .collect();
-            runtime_ports[port_key].set_downstream(downstream);
-        }
+        let (mut runtime_reactions, reaction_aliases, reaction_reactor_aliases) =
+            build_runtime_reactions(self.reaction_builders, &port_aliases, &action_aliases);
 
         let (runtime_reactors, reactor_aliases) = build_runtime_reactors(
             self.reactor_builders,
             &reaction_levels,
-            &reactions_aliases,
-            &action_parts,
+            &reaction_aliases,
+            &action_triggers,
         );
 
         // Update the Reactions with the Reactor keys
         for (builder_reaction_key, builder_reactor_key) in reaction_reactor_aliases {
             let runtime_reactor_key = reactor_aliases[builder_reactor_key];
-            let runtime_reaction_key = reactions_aliases[builder_reaction_key];
+            let runtime_reaction_key = reaction_aliases[builder_reaction_key];
             runtime_reactions[runtime_reaction_key].set_reactor_key(runtime_reactor_key);
         }
 
-        //TODO: this is a flat mapping of the runtime_reactors maps in each Reactor, duplicated. Decide whether to keep it or not.
-        let runtime_action_triggers = runtime_reactors
-            .iter()
-            .flat_map(|(_, reactor)| reactor.action_triggers.iter().map(|(k, v)| (k, v.clone())))
+        let runtime_port_triggers = port_triggers
+            .into_iter()
+            .map(|(port_key, triggers)| {
+                let downstream = triggers
+                    .into_iter()
+                    .map(|builder_reaction_key| {
+                        (
+                            reaction_levels[builder_reaction_key],
+                            reaction_aliases[builder_reaction_key],
+                        )
+                    })
+                    .collect();
+                (port_key, downstream)
+            })
             .collect();
 
-        Ok(runtime::Env {
-            reactors: runtime_reactors,
-            actions: action_parts.actions,
-            ports: runtime_ports,
-            reactions: runtime_reactions,
-            action_triggers: runtime_action_triggers,
-        })
+        let runtime_action_triggers: tinymap::TinySecondaryMap<
+            runtime::ActionKey,
+            Vec<(Level, runtime::ReactionKey)>,
+        > = action_triggers
+            .into_iter()
+            .map(|(action_key, trigger)| {
+                let downstream = trigger
+                    .into_iter()
+                    .map(|builder_reaction_key| {
+                        (
+                            reaction_levels[builder_reaction_key],
+                            reaction_aliases[builder_reaction_key],
+                        )
+                    })
+                    .collect();
+                (action_key, downstream)
+            })
+            .collect();
+
+        let startup_reactions = runtime_actions
+            .iter()
+            .filter_map(|(action_key, action)| {
+                if let runtime::Action::Startup = action {
+                    Some(runtime_action_triggers[action_key].iter().copied())
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .collect();
+
+        let shutdown_reactions = runtime_actions
+            .iter()
+            .filter_map(|(action_key, action)| {
+                if let runtime::Action::Shutdown = action {
+                    Some(runtime_action_triggers[action_key].iter().copied())
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .collect();
+
+        let reaction_set_limits = ReactionSetLimits {
+            max_level: reaction_levels.values().copied().max().unwrap_or_default(),
+            num_keys: runtime_reactions.len(),
+        };
+
+        Ok((
+            runtime::Env {
+                reactors: runtime_reactors,
+                actions: runtime_actions,
+                ports: runtime_ports,
+                reactions: runtime_reactions,
+            },
+            runtime::TriggerMap {
+                port_triggers: runtime_port_triggers,
+                action_triggers: runtime_action_triggers,
+                startup_reactions,
+                shutdown_reactions,
+                reaction_set_limits,
+            },
+            BuilderAliases {
+                reactor_aliases,
+                reaction_aliases,
+                action_aliases,
+                port_aliases,
+            },
+        ))
     }
 }

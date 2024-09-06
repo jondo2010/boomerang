@@ -3,37 +3,22 @@ use std::{fmt::Debug, sync::RwLock};
 use crossbeam_channel::Sender;
 
 use crate::{
-    keepalive, key_set::KeySet, Action, ActionKey, BasePort, Context, Duration, PhysicalEvent,
-    PortKey, Reactor, ReactorKey, ReactorState, Tag,
+    event::PhysicalEvent, keepalive, key_set::KeySet, Action, ActionKey, BasePort, Context,
+    Duration, PortKey, Reactor, ReactorKey, ReactorState, Tag, TriggerRes,
 };
 
 tinymap::key_type!(pub ReactionKey);
 
 pub type ReactionSet = KeySet<ReactionKey>;
 
-pub type IPort<'a> = &'a Box<dyn BasePort>;
-pub type OPort<'a> = &'a mut Box<dyn BasePort>;
+pub type PortRef<'a> = &'a dyn BasePort;
+pub type PortRefMut<'a> = &'a mut dyn BasePort;
 
-pub type InputPorts<'a> = &'a [IPort<'a>];
-pub type OutputPorts<'a> = &'a mut [OPort<'a>];
-
-pub trait ReactionFn:
-    Fn(
-        &mut Context,
-        &mut dyn ReactorState,
-        &[IPort], // Input ports
-        &mut [OPort], // Output ports
-        &mut [&mut Action], // Schedulable Actions
-    ) + Sync
-    + Send
-{
-}
-impl<F> ReactionFn for F where
-    F: Fn(&mut Context, &mut dyn ReactorState, &[IPort], &mut [OPort], &mut [&mut Action])
-        + Send
+pub type ReactionFn = Box<
+    dyn Fn(&mut Context, &mut dyn ReactorState, &[PortRef], &mut [PortRefMut], &mut [&mut Action])
         + Sync
-{
-}
+        + Send,
+>;
 
 #[derive(Derivative)]
 #[derivative(Debug, PartialEq)]
@@ -51,16 +36,16 @@ pub struct Reaction {
     name: String,
     /// The Reactor containing this Reaction
     reactor_key: ReactorKey,
-    /// Input Ports that trigger this reaction
-    input_ports: Vec<PortKey>,
+    /// Ports that this reaction may read from (uses + triggers)
+    use_ports: Vec<PortKey>,
     /// Output Ports that this reaction may set the value of
-    output_ports: Vec<PortKey>,
+    effect_ports: Vec<PortKey>,
     /// Actions that trigger or can be scheduled by this reaction
     actions: Vec<ActionKey>,
     /// Reaction closure
     #[derivative(PartialEq = "ignore")]
     #[derivative(Debug = "ignore")]
-    body: Box<dyn ReactionFn>,
+    body: ReactionFn,
     // Local deadline relative to the time stamp for invocation of the reaction.
     deadline: Option<Deadline>,
 }
@@ -69,17 +54,17 @@ impl Reaction {
     pub fn new(
         name: String,
         reactor_key: ReactorKey,
-        input_ports: Vec<PortKey>,
-        output_ports: Vec<PortKey>,
+        use_ports: Vec<PortKey>,
+        effect_ports: Vec<PortKey>,
         actions: Vec<ActionKey>,
-        body: Box<dyn ReactionFn>,
+        body: ReactionFn,
         deadline: Option<Deadline>,
     ) -> Self {
         Self {
             name,
             reactor_key,
-            input_ports,
-            output_ports,
+            use_ports,
+            effect_ports,
             actions,
             body,
             deadline,
@@ -98,20 +83,24 @@ impl Reaction {
         self.reactor_key = reactor_key;
     }
 
-    pub fn iter_input_ports(&self) -> std::slice::Iter<PortKey> {
-        self.input_ports.iter()
+    /// Get an iterator over the ports that this reaction may read from.
+    pub fn iter_use_ports(&self) -> std::slice::Iter<PortKey> {
+        self.use_ports.iter()
     }
 
-    pub fn iter_output_ports(&self) -> std::slice::Iter<PortKey> {
-        self.output_ports.iter()
+    /// Get an iterator over the ports that this reaction may write to.
+    pub fn iter_effect_ports(&self) -> std::slice::Iter<PortKey> {
+        self.effect_ports.iter()
     }
 
+    /// Get an iterator over the actions that this reaction may trigger or receive.
     pub fn iter_actions(&self) -> std::slice::Iter<ActionKey> {
         self.actions.iter()
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(
-        skip(self, start_time, inputs, outputs, async_tx),
+        skip(self, start_time, inputs, outputs, actions, async_tx, shutdown_rx),
         fields(
             reactor = reactor.name,
             name = %self.name,
@@ -124,18 +113,14 @@ impl Reaction {
         tag: Tag,
         reactor: &'a mut Reactor,
         actions: &mut [&mut Action],
-        inputs: &[IPort<'_>],
-        outputs: &mut [OPort<'_>],
+        inputs: &[PortRef<'_>],
+        outputs: &mut [PortRefMut<'_>],
         async_tx: Sender<PhysicalEvent>,
         shutdown_rx: keepalive::Receiver,
-    ) -> Context {
-        let Reactor {
-            state,
-            action_triggers,
-            ..
-        } = reactor;
+    ) -> TriggerRes {
+        let Reactor { state, .. } = reactor;
 
-        let mut ctx = Context::new(start_time, tag, action_triggers, async_tx, shutdown_rx);
+        let mut ctx = Context::new(start_time, tag, async_tx, shutdown_rx);
 
         if let Some(Deadline { deadline, handler }) = self.deadline.as_ref() {
             let lag = ctx.get_physical_time() - ctx.get_logical_time();
@@ -146,6 +131,6 @@ impl Reaction {
 
         (self.body)(&mut ctx, state.as_mut(), inputs, outputs, actions);
 
-        ctx
+        ctx.trigger_res
     }
 }

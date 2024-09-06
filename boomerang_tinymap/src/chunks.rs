@@ -37,6 +37,17 @@ where
     }
 }
 
+impl<'a, K, V, IO, II> ExactSizeIterator for Chunks<'a, K, V, IO, II>
+where
+    IO: Iterator<Item = II> + ExactSizeIterator + Send,
+    II: Iterator<Item = K> + ExactSizeIterator + Send,
+    K: Key,
+{
+    fn len(&self) -> usize {
+        self.keys.len()
+    }
+}
+
 /// `ChunkMut` is a mutable version of [`Chunks`].
 pub struct ChunksMut<'a, K: Key, V, IO, II>
 where
@@ -70,19 +81,38 @@ where
     }
 }
 
+impl<'a, K, V, IO, II> ExactSizeIterator for ChunksMut<'a, K, V, IO, II>
+where
+    IO: Iterator<Item = II> + ExactSizeIterator + Send,
+    II: Iterator<Item = K> + ExactSizeIterator + Send,
+    K: Key,
+{
+    fn len(&self) -> usize {
+        self.keys.len()
+    }
+}
+
 pub type SplitChunks<'a, K, V, IO1, IO2, II> =
     (Chunks<'a, K, V, IO1, II>, ChunksMut<'a, K, V, IO2, II>);
 
 impl<K: Key, V: Send> TinyMap<K, V> {
-    pub fn iter_chunks_split_unchecked<IO1, IO2, II>(
+    /// Returns a tuple of two iterators over chunks of the map's data buffer. The first iterator
+    /// yields immutable slices of the data buffer, while the second iterator yields mutable slices
+    /// of the data buffer. The keys for each chunk are provided by the given iterators `keys` and
+    /// `keys_mut`, respectively.
+    ///
+    /// # Safety
+    /// - `keys` and `keys_mut` must not overlap with each other.
+    /// - the keys in `keys_mut` must not repeat or overlap with itself.
+    pub unsafe fn iter_chunks_split_unchecked<IO1, IO2, II>(
         &mut self,
         keys: IO1,
         keys_mut: IO2,
     ) -> SplitChunks<'_, K, V, IO1, IO2, II>
     where
-        IO1: Iterator<Item = II> + Clone + Send,
-        IO2: Iterator<Item = II> + Clone + Send,
-        II: Iterator<Item = K> + Clone + Send,
+        IO1: Iterator<Item = II> + ExactSizeIterator + Clone + Send,
+        IO2: Iterator<Item = II> + ExactSizeIterator + Clone + Send,
+        II: Iterator<Item = K> + ExactSizeIterator + Clone + Send,
     {
         (
             Chunks {
@@ -104,6 +134,7 @@ mod tests {
     use super::*;
     use crate::DefaultKey;
 
+    /// Make a map containing `N` elements and a vector of keys.
     fn make_map<const N: usize>() -> (TinyMap<DefaultKey, usize>, Vec<DefaultKey>) {
         let map = (0..N).collect();
         let keys = (0..N).map(DefaultKey::from).collect();
@@ -115,8 +146,11 @@ mod tests {
         use itertools::Itertools;
 
         let (mut map, keys) = make_map::<20>();
+
         let chunked_keys = [
+            // Even keys 0,2,4,6
             keys.iter().step_by(2).take(4).copied().collect_vec(),
+            // Odd keys 1,3,5,7
             keys.iter()
                 .skip(1)
                 .step_by(2)
@@ -126,7 +160,7 @@ mod tests {
         ];
         let keys_iter = chunked_keys.iter().map(|c| c.iter().copied());
 
-        let (_, mut op) = map.iter_chunks_split_unchecked(std::iter::empty(), keys_iter);
+        let (_, mut op) = unsafe { map.iter_chunks_split_unchecked(std::iter::empty(), keys_iter) };
 
         let chunk1 = op.next().unwrap();
         let chunk2 = op.next().unwrap();
@@ -149,7 +183,8 @@ mod tests {
         let keys_select = [c0, c1];
         let keys_iter = keys_select.iter().map(|c| c.iter().copied());
 
-        let (_ip, mut op) = map.iter_chunks_split_unchecked(std::iter::empty(), keys_iter);
+        let (_ip, mut op) =
+            unsafe { map.iter_chunks_split_unchecked(std::iter::empty(), keys_iter) };
 
         let o0 = op.next().unwrap().map(|x| *x).collect::<Vec<_>>();
         let o1 = op.next().unwrap().map(|x| *x).collect::<Vec<_>>();

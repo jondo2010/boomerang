@@ -1,77 +1,81 @@
 //! Capture asynchronous key presses, and sends them through an output port.
-//!
 use boomerang::{
-    builder::{BuilderReactionKey, Physical, TypedActionKey, TypedPortKey},
-    runtime, Reactor,
+    builder::{Physical, Trigger, TypedActionKey, TypedPortKey, TypedReactionKey},
+    runtime, Reaction, Reactor,
 };
 
 use std::{io::Stdout, ops::DerefMut};
 pub use termion::event::Key;
 use termion::raw::{IntoRawMode, RawTerminal};
 
-#[derive(Reactor)]
-#[reactor(state = "KeyboardEvents")]
+#[derive(Reactor, Clone)]
+#[reactor(state = KeyboardEvents)]
 pub struct KeyboardEventsBuilder {
     /// The latest key press.
-    #[reactor(output())]
+    #[reactor(port = "output")]
     pub arrow_key_pressed: TypedPortKey<Key>,
 
-    #[reactor(action(physical, min_delay = "100 msec"))]
+    #[reactor(action(physical, min_delay = "10 msec"))]
     key_press: TypedActionKey<Key, Physical>,
 
-    #[reactor(reaction(function = "KeyboardEvents::reaction_key_press"))]
-    key_press_reaction: BuilderReactionKey,
+    key_press_reaction: TypedReactionKey<ReactionKeyPress<'static>>,
 
-    #[reactor(reaction(function = "KeyboardEvents::reaction_shutdown"))]
-    shutdown_reaction: BuilderReactionKey,
+    shutdown_reaction: TypedReactionKey<ReactionShutdown>,
 
-    #[reactor(reaction(function = "KeyboardEvents::reaction_startup"))]
-    startup_reaction: BuilderReactionKey,
+    startup_reaction: TypedReactionKey<ReactionStartup>,
 }
 
+#[derive(Default)]
 pub struct KeyboardEvents {
     raw_terminal: Option<RawTerminal<Stdout>>,
 }
 
-impl Default for KeyboardEvents {
-    fn default() -> Self {
-        Self::new()
+#[derive(Reaction)]
+struct ReactionKeyPress<'a> {
+    #[reaction(triggers)]
+    key_press: runtime::PhysicalActionRef<Key>,
+    arrow_key_pressed: &'a mut runtime::Port<Key>,
+}
+
+impl<'a> Trigger for ReactionKeyPress<'a> {
+    type Reactor = KeyboardEventsBuilder;
+
+    fn trigger(&mut self, ctx: &mut runtime::Context, _state: &mut KeyboardEvents) {
+        *self.arrow_key_pressed.deref_mut() = ctx.get_action(&mut self.key_press);
     }
 }
 
-impl KeyboardEvents {
-    pub fn new() -> Self {
-        Self { raw_terminal: None }
-    }
+#[derive(Reaction)]
+#[reaction(triggers(shutdown))]
+struct ReactionShutdown;
 
-    #[boomerang::reaction(reactor = "KeyboardEventsBuilder")]
-    fn reaction_key_press(
-        &mut self,
-        ctx: &mut runtime::Context,
-        #[reactor::action(triggers)] key_press: runtime::PhysicalActionRef<Key>,
-        #[reactor::port(effects)] arrow_key_pressed: &mut runtime::Port<Key>,
-    ) {
-        *arrow_key_pressed.deref_mut() = ctx.get_action(&key_press);
-    }
+impl Trigger for ReactionShutdown {
+    type Reactor = KeyboardEventsBuilder;
 
-    #[boomerang::reaction(reactor = "KeyboardEventsBuilder", triggers(shutdown))]
-    fn reaction_shutdown(&mut self, _ctx: &mut runtime::Context) {
-        drop(self.raw_terminal.take()); // exit raw mode
+    fn trigger(&mut self, _ctx: &mut runtime::Context, state: &mut KeyboardEvents) {
+        drop(state.raw_terminal.take()); // exit raw mode
     }
+}
 
-    #[boomerang::reaction(reactor = "KeyboardEventsBuilder", triggers(startup))]
-    fn reaction_startup(
-        &mut self,
-        ctx: &mut runtime::Context,
-        #[reactor::action(effects)] mut key_press: runtime::PhysicalActionRef<Key>,
-    ) {
+#[derive(Reaction)]
+#[reaction(triggers(startup))]
+struct ReactionStartup {
+    key_press: runtime::PhysicalActionRef<Key>,
+}
+
+impl Trigger for ReactionStartup {
+    type Reactor = KeyboardEventsBuilder;
+
+    fn trigger(&mut self, ctx: &mut runtime::Context, state: &mut KeyboardEvents) {
         let stdin = std::io::stdin();
 
         // enter raw mode, to get key presses one by one
         // this will stay so until this variable is dropped
-        self.raw_terminal = Some(std::io::stdout().into_raw_mode().unwrap());
+        state.raw_terminal = Some(std::io::stdout().into_raw_mode().unwrap());
 
         let mut send_ctx = ctx.make_send_context();
+        let mut key_press = self.key_press.clone();
+
         std::thread::spawn(move || {
             use termion::input::TermRead;
 

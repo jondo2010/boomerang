@@ -1,14 +1,15 @@
 use std::{
-    collections::{hash_map::Entry, HashMap},
     fmt::{Debug, Display},
     sync::{Arc, Mutex},
 };
 
-use crate::{Duration, Tag};
-use downcast_rs::{impl_downcast, DowncastSync};
+use crate::Duration;
 
 mod action_ref;
+mod store;
+
 pub use action_ref::*;
+use store::{ActionStore, BaseActionStore};
 
 #[cfg(not(feature = "serde"))]
 pub trait ActionData: std::fmt::Debug + Send + Sync + Clone + 'static {}
@@ -22,7 +23,7 @@ pub trait ActionData:
     + Send
     + Sync
     + Clone
-    + erased_serde::Serialize
+    + serde::Serialize
     + for<'de> serde::Deserialize<'de>
     + 'static
 {
@@ -34,89 +35,15 @@ impl<T> ActionData for T where
         + Send
         + Sync
         + Clone
-        + erased_serde::Serialize
+        + serde::Serialize
         + for<'de> serde::Deserialize<'de>
         + 'static
 {
 }
 
-tinymap::key_type! { pub ActionKey }
-
-#[cfg(feature = "serde")]
-impl serde::Serialize for ActionKey {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.0.serialize(serializer)
-    }
-}
-
-pub trait BaseActionValues: Debug + Send + Sync + DowncastSync {
-    /// Remove any value at the given Tag
-    fn remove(&mut self, tag: Tag);
-
-    /// Serialize the value at the given Tag
-    #[cfg(feature = "serde")]
-    fn serialize_tag(
-        &self,
-        tag: Tag,
-        serializer: &mut dyn erased_serde::Serializer,
-    ) -> Result<(), erased_serde::Error>;
-
-    #[cfg(feature = "serde")]
-    fn get_serializable_value(&self, tag: Tag) -> Option<&dyn erased_serde::Serialize>;
-}
-impl_downcast!(sync BaseActionValues);
-
-#[derive(Debug)]
-pub(crate) struct ActionValues<T: ActionData>(HashMap<Tag, T>);
-impl<T: ActionData> BaseActionValues for ActionValues<T> {
-    fn remove(&mut self, tag: Tag) {
-        self.0.remove(&tag);
-    }
-
-    #[cfg(feature = "serde")]
-    fn serialize_tag(
-        &self,
-        tag: Tag,
-        mut serializer: &mut dyn erased_serde::Serializer,
-    ) -> Result<(), erased_serde::Error> {
-        use serde::de::Error;
-        let value = self.0.get(&tag);
-        match value {
-            Some(value) => value.erased_serialize(&mut serializer),
-            None => Err(erased_serde::Error::custom("No value at tag")),
-        }
-    }
-
-    fn get_serializable_value(&self, tag: Tag) -> Option<&dyn erased_serde::Serialize> {
-        self.0.get(&tag).map(|v| v as &dyn erased_serde::Serialize)
-    }
-}
-
-impl<T: ActionData> ActionValues<T> {
-    pub fn get_value(&self, tag: Tag) -> Option<&T> {
-        self.0.get(&tag)
-    }
-
-    pub fn set_value(&mut self, value: Option<T>, new_tag: Tag) {
-        match (self.0.entry(new_tag), value) {
-            // Replace the previous value with a new one
-            (Entry::Occupied(mut entry), Some(value)) => {
-                entry.insert(value);
-            }
-            // Remove a previous value
-            (Entry::Occupied(entry), None) => {
-                entry.remove();
-            }
-            // Insert a new value
-            (Entry::Vacant(entry), Some(value)) => {
-                entry.insert(value);
-            }
-            _ => {}
-        }
-    }
+tinymap::key_type! {
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    pub ActionKey
 }
 
 /// Typed Action state, storing potentially different values at different Tags.
@@ -125,16 +52,17 @@ pub struct LogicalAction {
     pub name: String,
     pub key: ActionKey,
     pub min_delay: Duration,
-    pub values: Box<dyn BaseActionValues>,
+    pub store: Box<dyn BaseActionStore>,
 }
 
 impl LogicalAction {
     pub fn new<T: ActionData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
+        let store = ActionStore::<T>::new();
         Self {
             name: name.into(),
             key,
             min_delay,
-            values: Box::new(ActionValues::<T>(HashMap::new())),
+            store: Box::new(store),
         }
     }
 }
@@ -144,16 +72,17 @@ pub struct PhysicalAction {
     pub name: String,
     pub key: ActionKey,
     pub min_delay: Duration,
-    pub values: Arc<Mutex<dyn BaseActionValues>>,
+    pub store: Arc<Mutex<dyn BaseActionStore>>,
 }
 
 impl PhysicalAction {
     pub fn new<T: ActionData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
+        let store = ActionStore::<T>::new();
         Self {
             name: name.into(),
             key,
             min_delay,
-            values: Arc::new(Mutex::new(ActionValues::<T>(HashMap::new()))),
+            store: Arc::new(Mutex::new(store)),
         }
     }
 }

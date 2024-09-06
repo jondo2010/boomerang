@@ -4,6 +4,8 @@ mod fqn;
 mod port;
 mod reaction;
 mod reactor;
+#[cfg(test)]
+pub mod tests;
 
 #[cfg(feature = "visualization")]
 pub mod graphviz;
@@ -14,6 +16,13 @@ pub use fqn::*;
 pub use port::*;
 pub use reaction::*;
 pub use reactor::*;
+
+pub mod prelude {
+    pub use super::{
+        EnvBuilder, Logical, Physical, Reactor, TimerActionKey, Trigger, TypedActionKey,
+        TypedPortKey, TypedReactionKey,
+    };
+}
 
 #[derive(thiserror::Error, Debug)]
 pub enum BuilderError {
@@ -44,6 +53,9 @@ pub enum BuilderError {
     #[error("A Port named '{0}' was not found.")]
     NamedPortNotFound(String),
 
+    #[error("A Reaction named '{0}' was not found.")]
+    NamedReactionNotFound(String),
+
     #[error("An Action named '{0}' was not found.")]
     NamedActionNotFound(String),
 
@@ -56,8 +68,8 @@ pub enum BuilderError {
         // sub_error: String, //Option<BuilderError>,
     },
 
-    #[error("A cycle in the Reaction graph was found.")]
-    ReactionGraphCycle { what: BuilderReactionKey },
+    #[error("A cycle in the Reaction graph was found: {what:?}.")]
+    ReactionGraphCycle { what: Vec<BuilderReactionKey> },
 
     #[error("A cycle in the Reactor graph was found.")]
     ReactorGraphCycle { what: BuilderReactorKey },
@@ -69,8 +81,14 @@ pub enum BuilderError {
         what: String,
     },
 
+    #[error("Error building Reaction: {0}")]
+    ReactionBuilderError(String),
+
     #[error("Invalid fully-qualified name: {0}")]
     InvalidFqn(String),
+
+    #[error(transparent)]
+    IoError(#[from] std::io::Error),
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -79,22 +97,5 @@ pub enum BuilderError {
 impl From<std::convert::Infallible> for BuilderError {
     fn from(_: std::convert::Infallible) -> Self {
         unreachable!()
-    }
-}
-
-trait TupleSlice {
-    type Item;
-    fn tuple_at_mut(&mut self, idxs: (usize, usize)) -> (&mut Self::Item, &mut Self::Item);
-}
-
-impl<T: Sized> TupleSlice for [T] {
-    type Item = T;
-    fn tuple_at_mut(&mut self, idx: (usize, usize)) -> (&mut Self::Item, &mut Self::Item) {
-        let len = self.len();
-        assert!(idx.0 != idx.1 && idx.0 <= len && idx.1 <= len);
-        // SAFETY: [ptr; idx0] and [ptr; idx1] are non-overlapping and within `self`
-        let ptr = self.as_mut_ptr();
-        let slice = std::ptr::slice_from_raw_parts_mut(ptr, len);
-        unsafe { (&mut (*slice)[idx.0], &mut (*slice)[idx.1]) }
     }
 }

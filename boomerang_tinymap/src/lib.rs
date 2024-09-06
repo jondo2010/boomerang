@@ -1,35 +1,42 @@
 pub mod chunks;
 pub mod map;
-pub mod secondary;
+pub mod secondary_map;
+pub mod secondary_set;
 
 pub use map::TinyMap;
-pub use secondary::TinySecondaryMap;
+pub use secondary_map::TinySecondaryMap;
+pub use secondary_set::TinySecondarySet;
 
-pub trait Key: From<usize> + Copy {
+pub trait Key: From<usize> + Copy + Ord {
     fn index(&self) -> usize;
 }
 
-#[macro_export(local_inner_macros)]
+#[macro_export]
 macro_rules! key_type {
-    ($vis:vis $name:ident) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    ($(#[$outer:meta])* $vis:vis $name:ident) => {
+        $(#[$outer])*
+        #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[repr(transparent)]
-        $vis struct $name(usize);
+        $vis struct $name(u64);
 
         impl $crate::Key for $name {
             fn index(&self) -> usize {
-                self.0
+                self.0 as usize
             }
         }
 
         impl From<usize> for $name {
             fn from(value: usize) -> Self {
-                Self(value)
+                Self(value as _)
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}({})", stringify!($name), self.0)
             }
         }
     };
 }
-
-// pub(crate) use key_type;
 
 key_type!(pub DefaultKey);

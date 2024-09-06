@@ -1,5 +1,4 @@
 [workspace.package]
-name = 'boomerang'
 description = 'Rust implementation of the "Reactors" Deterministic Actor Model'
 version = "0.2.0"
 edition = "2021"
@@ -13,6 +12,7 @@ exclude = ['.gitignore', '.cargo/config', '.vscode', '.devcontainer', '.github']
 
 [workspace.dependencies]
 anyhow = "1.0"
+document-features = "0.2"
 itertools = "0.13"
 thiserror = "1.0"
 tinymap = { package = "boomerang_tinymap", path = "boomerang_tinymap", version = "0.1.0" }
@@ -21,8 +21,11 @@ serde = "1.0"
 erased-serde = "0.4"
 rayon = "1.10"
 
-boomerang_derive = { path = "boomerang_derive", version = "0.2.0" }
-boomerang_runtime = { path = "boomerang_runtime", version = "0.2.0" }
+boomerang = { path = "boomerang" }
+boomerang_derive = { path = "boomerang_derive" }
+boomerang_runtime = { path = "boomerang_runtime" }
+boomerang_tinymap = { path = "boomerang_tinymap" }
+boomerang_util = { path = "boomerang_util" }
 
 [workspace]
 members = [
@@ -30,6 +33,13 @@ members = [
     "boomerang_derive",
     "boomerang_runtime",
     "boomerang_tinymap",
+    "tests-integration",
 ]
+resolver = "2"
 
-workspace.resolver = 2
+[profile.profiling]
+inherits = "release"
+debug = true
+
+[patch.crates-io]
+fixedbitset = { git = "https://github.com/jondo2010/fixedbitset", branch = "ones_derive_clone" }

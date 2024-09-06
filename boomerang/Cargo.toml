@@ -11,14 +11,19 @@ repository.workspace = true
 categories.workspace = true
 
 [features]
-default = ["visualization", "derive"]
+default = ["visualization", "derive", "serde"]
+
 visualization = []
-derive = ["boomerang_derive"]
+derive = ["dep:boomerang_derive"]
+
+## Support for serialization
+serde = ["boomerang_runtime/serde"]
 
 [dependencies]
 anyhow.workspace = true
 derivative = "2.2"
 derive_more = '0.99'
+document-features = { workspace = true }
 graphviz-rust = "0.6"
 itertools.workspace = true
 petgraph = "0.6"
@@ -31,25 +36,4 @@ boomerang_derive = { workspace = true, optional = true }
 boomerang_runtime.workspace = true
 
 [dev-dependencies]
-tracing-subscriber = { version = "0.3", features = [
-    "fmt",
-    "json",
-    "env-filter",
-] }
-criterion = "0.5"
-crossbeam-utils = "0.8"
-
-boomerang_util = { path = "../boomerang_util", features = ["runner"] }
-
-# Deps for Snake example
-[target.'cfg(not(windows))'.dev-dependencies]
-termcolor = "1.2"
-rand = "0.8"
-
-[[bench]]
-name = "ping_pong"
-harness = false
-required-features = []
-
-[[example]]
-name = "snake"
+tracing-subscriber = "0.3"

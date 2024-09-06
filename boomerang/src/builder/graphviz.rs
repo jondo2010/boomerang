@@ -1,7 +1,9 @@
 //! Methods for constructing Graphviz graphs representing the `EnvBuilder` useful for debugging and
 //! understand the Reactor graph.
 
-use super::{ActionType, BuilderError, BuilderPortKey, EnvBuilder, PortType, ReactorBuilder};
+use super::{
+    ActionType, BuilderError, BuilderPortKey, EnvBuilder, PortType, ReactorBuilder, TimerSpec,
+};
 
 use itertools::Itertools;
 use slotmap::Key;
@@ -66,11 +68,11 @@ fn build_reactions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &
         //    "  inputs{} -> r{} -> outputs{} [style=invis];",
         //    reactor_id, reaction_id, reactor_id
         //));
-        for port_key in reaction.input_ports.keys() {
+        for port_key in reaction.trigger_ports.keys() {
             let port_node = port_node_name(env_builder, port_key);
             output.push(format!("  {}:e -> r{}:w;", port_node, reaction_id));
         }
-        for port_key in reaction.output_ports.keys() {
+        for port_key in reaction.effect_ports.keys() {
             let port_node = port_node_name(env_builder, port_key);
             output.push(format!("  r{}:e -> {}:w;", reaction_id, port_node));
         }
@@ -83,11 +85,15 @@ fn build_actions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &mu
         let action_id = action_key.data().as_ffi() % reactor.actions.len() as u64;
 
         let xlabel = match action.get_type() {
-            ActionType::Timer { period, offset } => {
-                if offset.is_zero() {
+            ActionType::Timer(TimerSpec { period, offset }) => {
+                if offset.unwrap_or_default().is_zero() {
                     "⏲ (startup)".into()
                 } else {
-                    format!("⏲ ({} ms, {} ms)", offset.as_millis(), period.as_millis())
+                    format!(
+                        "⏲ ({} ms, {} ms)",
+                        offset.unwrap_or_default().as_millis(),
+                        period.unwrap_or_default().as_millis()
+                    )
                 }
             }
             ActionType::Logical { min_delay } => {

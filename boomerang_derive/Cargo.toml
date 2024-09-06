@@ -1,22 +1,22 @@
 [package]
-name = 'boomerang_derive'
-description = 'Derive macro parsing, analysis and code generation for Boomerang'
+name = "boomerang_derive"
 version.workspace = true
-authors.workspace = true
 edition.workspace = true
 license.workspace = true
-keywords.workspace = true
+authors.workspace = true
 repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+exclude.workspace = true
 
 [dependencies]
-darling = '0.14'
-derive_more = "0.99"
-itertools.workspace = true
+darling = "0.20"
 parse_duration = "2.1"
-proc-macro2 = '1.0'
-quote = '1.0'
-syn = { version = '1.0', features = ['visit'] }
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["derive"] }
 
 [lib]
-name = 'boomerang_derive'
+name = "boomerang_derive"
 proc-macro = true

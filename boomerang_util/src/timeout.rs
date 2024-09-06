@@ -1,26 +1,24 @@
 //! Timeout reactor that schedules a shutdown after a specified duration.
 
-use boomerang::{builder, reaction, runtime, Reactor};
+use boomerang::{
+    builder::{self, Trigger},
+    runtime, Reaction, Reactor,
+};
 
-#[derive(Reactor)]
-#[reactor(state = "Timeout")]
-pub struct TimeoutBuilder {
-    #[reactor(reaction(function = "Timeout::reaction_startup"))]
-    startup: builder::BuilderReactionKey,
-}
-
-#[derive(Debug)]
+#[derive(Reactor, Clone)]
+#[reactor(state = runtime::Duration)]
 pub struct Timeout {
-    timeout: runtime::Duration,
+    startup: builder::TypedReactionKey<ReactionStartup>,
 }
 
-impl Timeout {
-    pub fn new(timeout: runtime::Duration) -> Self {
-        Self { timeout }
-    }
+#[derive(Reaction)]
+#[reaction(triggers(startup))]
+struct ReactionStartup;
 
-    #[reaction(reactor = "TimeoutBuilder", triggers(startup))]
-    fn reaction_startup(&mut self, ctx: &mut runtime::Context) {
-        ctx.schedule_shutdown(Some(self.timeout))
+impl Trigger for ReactionStartup {
+    type Reactor = Timeout;
+
+    fn trigger(&mut self, ctx: &mut runtime::Context, state: &mut runtime::Duration) {
+        ctx.schedule_shutdown(Some(*state))
     }
 }

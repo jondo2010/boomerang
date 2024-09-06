@@ -9,8 +9,12 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["parallel", "serde"]
-parallel = ["dep:rayon"]
+default = [
+    #"parallel",
+    #"serde",
+]
+#TODO: re-enable parallel execution with bumpalo-herd
+#parallel = ["dep:rayon", "dep:bumpalo-herd"]
 serde = ["dep:serde", "dep:erased-serde"]
 
 [dependencies]
@@ -23,6 +27,15 @@ itertools.workspace = true
 rayon = { version = "1.7", optional = true }
 thiserror.workspace = true
 tinymap.workspace = true
-tracing.workspace = true
-serde = { workspace = true, optional = true }
+tracing = { workspace = true, features = [
+    #"max_level_debug",
+    #"release_max_level_warn",
+] }
+serde = { workspace = true, optional = true, features = ["derive"] }
 erased-serde = { workspace = true, optional = true }
+
+bumpalo = { version = "3.16", features = ["collections"] }
+bumpalo-herd = { version = "0.1", optional = true }
+
+[dev-dependencies]
+serde_json = "1.0"

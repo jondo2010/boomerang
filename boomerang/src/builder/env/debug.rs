@@ -1,5 +1,6 @@
-use itertools::Itertools;
 use std::{collections::BTreeMap, fmt::Debug};
+
+use itertools::Itertools;
 
 use super::EnvBuilder;
 
@@ -18,7 +19,7 @@ impl Debug for EnvBuilder {
             .keys()
             .map(|reactor_key| {
                 let fqn = self.reactor_fqn(reactor_key).unwrap().to_string();
-                (format!("{reactor_key:?}"), format!("{fqn}"))
+                (format!("{reactor_key:?}"), fqn.to_string())
             })
             .collect::<BTreeMap<_, _>>();
 
@@ -39,7 +40,7 @@ impl Debug for EnvBuilder {
             .keys()
             .map(|port_key| {
                 let fqn = self.port_fqn(port_key).unwrap();
-                (format!("{port_key:?}"), format!("{fqn}"))
+                (format!("{port_key:?}"), fqn.to_string())
             })
             .collect::<BTreeMap<_, _>>();
 
@@ -52,18 +53,28 @@ impl Debug for EnvBuilder {
             })
             .collect_vec();
 
-        let reaction_levels = self.build_runtime_level_map().unwrap();
-        let reactions = reaction_levels
-            .iter()
-            .map(|(key, level)| {
-                let fqn = self.reaction_fqn(key).unwrap();
-                (format!("{key:?}, {fqn}"), format!("Level({level})"))
-            })
-            .collect::<BTreeMap<_, _>>();
+        let reactions = if let Ok(reaction_levels) = self.build_runtime_level_map() {
+            reaction_levels
+                .iter()
+                .map(|(key, level)| {
+                    let fqn = self.reaction_fqn(key).unwrap();
+                    (format!("{key:?}, {fqn}"), format!("Level({level})"))
+                })
+                .collect::<BTreeMap<_, _>>()
+        } else {
+            // There was a cycle in the reaction graph, so don't show the reaction levels.
+            self.reaction_builders
+                .keys()
+                .map(|key| {
+                    let fqn = self.reaction_fqn(key).unwrap();
+                    (format!("{key:?}"), fqn.to_string())
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
 
         let runtime_port_parts = self.build_runtime_ports();
         let port_aliases = runtime_port_parts
-            .aliases
+            .port_aliases
             .iter()
             .map(|(builder_port_key, port_key)| {
                 (
@@ -81,32 +92,5 @@ impl Debug for EnvBuilder {
             .field("reaction_dependency_edges", &edges)
             .field("reactions", &reactions)
             .finish()
-    }
-
-    #[cfg(feature = "disabled")]
-    fn debug_info(&self) {
-        for (runtime_port_key, triggers) in runtime_port_parts.port_triggers.iter() {
-            // reverse look up the builder::port_key from the runtime::port_key
-            let port_key = runtime_port_parts
-                .aliases
-                .iter()
-                .find_map(|(port_key, runtime_port_key_b)| {
-                    if &runtime_port_key == runtime_port_key_b {
-                        Some(port_key)
-                    } else {
-                        None
-                    }
-                })
-                .expect("Illegal internal state.");
-            debug!(
-                "{:?}: {:?}",
-                self.port_fqn(port_key).unwrap(),
-                triggers
-                    .iter()
-                    .map(|key| self.reaction_fqn(*key))
-                    .collect::<Result<Vec<_>, _>>()
-                    .unwrap()
-            );
-        }
     }
 }

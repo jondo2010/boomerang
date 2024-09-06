@@ -1,3 +1,5 @@
+use crate::builder::{TimerSpec, TriggerMode};
+
 use super::*;
 
 #[test]
@@ -45,8 +47,10 @@ fn test_duplicate_actions() {
         reactor_builder
             .add_timer(
                 "action0",
-                Some(runtime::Duration::from_micros(0)),
-                Some(runtime::Duration::from_micros(0)),
+                TimerSpec {
+                    period: Some(runtime::Duration::from_micros(0)),
+                    offset: Some(runtime::Duration::from_micros(0)),
+                }
             )
             .expect_err("Expected duplicate"),
         BuilderError::DuplicateActionDefinition {
@@ -56,18 +60,37 @@ fn test_duplicate_actions() {
     ));
 }
 
+/// Assert that building a reaction without any triggers is an error
+#[test]
+fn test_reactions_with_trigger() {
+    let mut env_builder = EnvBuilder::new();
+    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, ());
+
+    let res = reactor_builder
+        .add_reaction("test", Box::new(|_ctx, _r, _i, _o, _a| {}))
+        .finish();
+
+    assert!(matches!(res, Err(BuilderError::ReactionBuilderError(_))));
+}
+
 #[test]
 fn test_reactions1() {
     let mut env_builder = EnvBuilder::new();
     let mut reactor_builder = env_builder.add_reactor("test_reactor", None, ());
 
+    let startup = reactor_builder.get_startup_action();
+
     let r0_key = reactor_builder
         .add_reaction("test", Box::new(|_ctx, _r, _i, _o, _a| {}))
+        .with_action(startup, 0, TriggerMode::TriggersOnly)
+        .unwrap()
         .finish()
         .unwrap();
 
     let r1_key = reactor_builder
         .add_reaction("test", Box::new(|_ctx, _r, _i, _o, _a| {}))
+        .with_action(startup, 0, TriggerMode::TriggersOnly)
+        .unwrap()
         .finish()
         .unwrap();
 
@@ -80,69 +103,8 @@ fn test_reactions1() {
         vec![r0_key, r1_key]
     );
 
-    // assert_eq!(env_builder.reactors[reactor_key].reactions.len(), 2);
-
-    let env: runtime::Env = env_builder.try_into().unwrap();
+    let (env, _, _) = env_builder.into_runtime_parts().unwrap();
     assert_eq!(env.reactions.len(), 2);
-}
-
-#[cfg(feature = "disabled")]
-mod experiment {
-    trait IntoReaction {
-        type Reactor;
-        // type Actions;
-        fn into_reaction_fn(self) -> Box<dyn runtime::ReactionFn>;
-    }
-
-    struct SA<'a> {
-        a: &'a mut runtime::Action,
-    }
-
-    #[derive(Debug)]
-    struct Test {}
-    impl Test {
-        fn reaction_a(&mut self, ctx: &mut runtime::Context, actions: SA) {}
-
-        fn reaction_b(&mut self, ctx: &mut runtime::Context, actions: SA) {}
-
-        fn reaction_c<const N: usize>(&mut self, ctx: &mut runtime::Context) {}
-    }
-
-    trait TestA {
-        fn reaction_a(&mut self, ctx: &mut runtime::Context, actions: SA);
-    }
-
-    impl TestA for Test {
-        fn reaction_a(&mut self, ctx: &mut runtime::Context, actions: SA) {
-            todo!()
-        }
-    }
-
-    impl<F> IntoReaction for F
-    where
-        F: for<'a> Fn(&mut Test, &mut runtime::Context, SA<'a>) + Send + Sync + 'static,
-    {
-        type Reactor = Test;
-        // type Actions = SA<'a>;
-        fn into_reaction_fn(self) -> Box<dyn runtime::ReactionFn> {
-            Box::new(
-                move |ctx, reactor, inputs, outputs, trig_actions, sched_actions| {
-                    let reactor = reactor.downcast_mut().unwrap();
-                    let [a]: &mut [_; 1usize] =
-                        std::convert::TryInto::try_into(sched_actions).unwrap();
-                    let actions = SA { a };
-                    (self)(reactor, ctx, actions);
-                },
-            )
-        }
-    }
-
-    #[test]
-    fn tester() {
-        let t = Test {};
-        let x = IntoReaction::into_reaction_fn(Test::reaction_a);
-        let y = Test::reaction_b.into_reaction_fn();
-    }
 }
 
 #[cfg(feature = "disabled")]
@@ -167,7 +129,7 @@ fn test_actions1() {
             }),
         )
         .with_trigger_action(action_a, 0)
-        .with_schedulable_action(action_b, 0)
+        .with_effect_action(action_b, 0)
         .with_trigger_action(action_b, 1)
         .finish()
         .unwrap();
@@ -176,7 +138,7 @@ fn test_actions1() {
     let reaction_b = reactor_builder
         .add_reaction("rb", Box::new(|_, _, _, _, _, _| {}))
         .with_trigger_action(action_a, 0)
-        .with_schedulable_action(action_a, 0)
+        .with_effect_action(action_a, 0)
         .finish()
         .unwrap();
 

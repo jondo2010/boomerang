@@ -48,7 +48,7 @@ pub trait BasePortBuilder {
     fn register_dependency(&mut self, reaction_key: BuilderReactionKey, is_trigger: bool);
     fn register_antidependency(&mut self, reaction_key: BuilderReactionKey);
     /// Create a runtime Port from this PortBuilder
-    fn create_runtime_port(&self) -> Box<dyn runtime::BasePort>;
+    fn create_runtime_port(&self, key: runtime::PortKey) -> Box<dyn runtime::BasePort>;
 }
 
 pub struct PortBuilder<T: runtime::PortData> {
@@ -147,7 +147,7 @@ impl<T: runtime::PortData> BasePortBuilder for PortBuilder<T> {
     }
 
     /// Build the PortBuilder into a runtime Port
-    fn create_runtime_port(&self) -> Box<dyn runtime::BasePort> {
-        Box::new(runtime::Port::<T>::new(self.name.clone()))
+    fn create_runtime_port(&self, key: runtime::PortKey) -> Box<dyn runtime::BasePort> {
+        Box::new(runtime::Port::<T>::new(self.name.clone(), key))
     }
 }

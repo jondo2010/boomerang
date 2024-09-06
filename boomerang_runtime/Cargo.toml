@@ -19,9 +19,6 @@ serde = ["dep:serde", "dep:erased-serde"]
 
 [dependencies]
 crossbeam-channel = "0.5"
-crossbeam-utils = "0.8"
-derivative = "2.2"
-derive_more = '0.99'
 downcast-rs = "1.2"
 itertools.workspace = true
 rayon = { version = "1.7", optional = true }

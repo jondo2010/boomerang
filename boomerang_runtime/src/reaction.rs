@@ -20,18 +20,23 @@ pub type ReactionFn = Box<
         + Send,
 >;
 
-#[derive(Derivative)]
-#[derivative(Debug, PartialEq)]
+pub type HandlerFn = Box<dyn Fn() + Send + Sync>;
+
 pub struct Deadline {
     deadline: Duration,
-    #[derivative(PartialEq = "ignore")]
-    #[derivative(Debug = "ignore")]
     #[allow(dead_code)]
-    handler: RwLock<Box<dyn Fn() + Sync + Send>>,
+    handler: RwLock<HandlerFn>,
 }
 
-#[derive(Derivative)]
-#[derivative(Debug, PartialEq)]
+impl Debug for Deadline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Deadline")
+            .field("deadline", &self.deadline)
+            .field("handler", &"HandlerFn()")
+            .finish()
+    }
+}
+
 pub struct Reaction {
     name: String,
     /// The Reactor containing this Reaction
@@ -43,11 +48,23 @@ pub struct Reaction {
     /// Actions that trigger or can be scheduled by this reaction
     actions: Vec<ActionKey>,
     /// Reaction closure
-    #[derivative(PartialEq = "ignore")]
-    #[derivative(Debug = "ignore")]
     body: ReactionFn,
     // Local deadline relative to the time stamp for invocation of the reaction.
     deadline: Option<Deadline>,
+}
+
+impl Debug for Reaction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reaction")
+            .field("name", &self.name)
+            .field("reactor_key", &self.reactor_key)
+            .field("use_ports", &self.use_ports)
+            .field("effect_ports", &self.effect_ports)
+            .field("actions", &self.actions)
+            .field("body", &"ReactionFn()")
+            .field("deadline", &self.deadline)
+            .finish()
+    }
 }
 
 impl Reaction {

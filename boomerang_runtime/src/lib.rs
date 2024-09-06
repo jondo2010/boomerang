@@ -23,9 +23,6 @@ pub use time::*;
 
 pub use std::time::{Duration, Instant};
 
-#[macro_use]
-extern crate derivative;
-
 pub trait PortData: std::fmt::Debug + Send + Sync + 'static {}
 impl<T> PortData for T where T: std::fmt::Debug + Send + Sync + 'static {}
 

@@ -4,7 +4,7 @@ use boomerang_util::timeout;
 #[derive(Reactor, Clone)]
 #[reactor(state = u32)]
 struct Count {
-    #[reactor(timer(period = "1 usec"))]
+    #[reactor(timer(period = "1 msec"))]
     t: TimerActionKey,
     #[reactor(port = "output")]
     c: TypedPortKey<u32>,
@@ -47,7 +47,7 @@ impl Trigger for ReactionShutdown {
         _ctx: &mut runtime::Context,
         state: &mut <Self::Reactor as Reactor>::State,
     ) {
-        assert_eq!(*state, 1e6 as u32, "expected 1e6, got {state}");
+        assert_eq!(*state, 1e3 as u32, "expected 1e3, got {state}");
         println!("ok");
     }
 }
@@ -62,5 +62,5 @@ fn count() {
         .get_reactor_by_name("count")
         .and_then(|r| r.get_state::<u32>())
         .unwrap();
-    assert_eq!(*count, 1e6 as u32);
+    assert_eq!(*count, 1e3 as u32);
 }

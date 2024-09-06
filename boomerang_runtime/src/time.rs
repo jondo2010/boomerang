@@ -1,14 +1,18 @@
 use super::{Duration, Instant};
-use derive_more::Display;
 
-#[derive(Debug, Display, PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Hash)]
-#[display(fmt = "[{:?}+{}]", offset, micro_step)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Tag {
     /// Offset from origin of logical time
     offset: Duration,
     /// Superdense-timestep
     micro_step: usize,
+}
+
+impl std::fmt::Display for Tag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{:?}+{}]", self.offset, self.micro_step)
+    }
 }
 
 impl Tag {
@@ -56,11 +60,16 @@ impl Tag {
     }
 }
 
-#[derive(Debug, Display, PartialEq, Eq, PartialOrd, Ord, Clone)]
-#[display(fmt = "[{:?}+{}]", "time_point.elapsed()", micro_step)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub struct LogicalTime {
     time_point: Instant,
     micro_step: usize,
+}
+
+impl std::fmt::Display for LogicalTime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{:?}+{}]", self.time_point.elapsed(), self.micro_step)
+    }
 }
 
 impl Default for LogicalTime {

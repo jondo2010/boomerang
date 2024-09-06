@@ -151,18 +151,13 @@ impl ReactionField for PortOrActionTrigger {
     }
 }
 
-#[derive(Derivative)]
-#[derivative(Debug)]
 pub struct ReactionBuilder {
-    #[derivative(Ord = "ignore")]
-    #[derivative(PartialEq = "ignore")]
     pub(super) name: String,
     /// Unique ordering of this reaction within the reactor.
     pub(super) priority: usize,
     /// The owning Reactor for this Reaction
     pub(super) reactor_key: BuilderReactorKey,
     /// The Reaction function
-    #[derivative(Debug = "ignore")]
     pub(super) reaction_fn: runtime::ReactionFn,
 
     /// Actions that trigger this Reaction, and their relative ordering.
@@ -176,6 +171,22 @@ pub struct ReactionBuilder {
     pub(super) use_ports: SecondaryMap<BuilderPortKey, usize>,
     /// Ports that this Reaction may set the value of, and their relative ordering. These are used to build the array of [`runtime::PortRefMut`]` in the reaction function.
     pub(super) effect_ports: SecondaryMap<BuilderPortKey, usize>,
+}
+
+impl std::fmt::Debug for ReactionBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReactionBuilder")
+            .field("name", &self.name)
+            .field("priority", &self.priority)
+            .field("reactor_key", &self.reactor_key)
+            .field("reaction_fn", &"ReactionFn()")
+            .field("trigger_actions", &self.trigger_actions)
+            .field("use_effect_actions", &self.use_effect_actions)
+            .field("trigger_ports", &self.trigger_ports)
+            .field("use_ports", &self.use_ports)
+            .field("effect_ports", &self.effect_ports)
+            .finish()
+    }
 }
 
 impl ReactionBuilder {

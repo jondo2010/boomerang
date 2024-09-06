@@ -10,16 +10,23 @@ pub trait ReactorState: DowncastSync + Send {}
 impl<T> ReactorState for T where T: DowncastSync {}
 impl_downcast!(sync ReactorState);
 
-#[derive(Derivative)]
-#[derivative(Debug)]
 pub struct Reactor {
     /// The reactor name
     pub(crate) name: String,
     /// The ReactorState
-    #[derivative(Debug = "ignore")]
     pub(crate) state: Box<dyn ReactorState>,
     /// For each Action, a set of Reactions triggered by it.
     pub action_triggers: tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
+}
+
+impl Debug for Reactor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reactor")
+            .field("name", &self.name)
+            .field("state", &"Box<dyn ReactorState>")
+            .field("action_triggers", &self.action_triggers)
+            .finish()
+    }
 }
 
 impl Reactor {

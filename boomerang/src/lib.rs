@@ -61,9 +61,6 @@
 #![deny(unsafe_code)]
 #![deny(clippy::all)]
 
-#[macro_use]
-extern crate derivative;
-
 pub mod builder;
 
 // Re-exports

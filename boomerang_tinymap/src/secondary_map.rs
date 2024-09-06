@@ -239,5 +239,72 @@ mod tests {
         for i in 0..4 {
             assert_eq!(map.get(DefaultKey(i)), Some(&(i + 1)));
         }
+
+        // test insert with existing key
+        assert_eq!(map.insert(DefaultKey(0), 10), Some(1));
+        assert_eq!(map.get(DefaultKey(0)), Some(&10));
+
+        // test contains_key
+        assert!(map.contains_key(DefaultKey(0)));
+        assert!(!map.contains_key(DefaultKey(4)));
+
+        // test first_key
+        assert_eq!(map.first_key(), Some(DefaultKey(0)));
+
+        // test iter()
+        let keys: Vec<_> = map.iter().map(|(k, _)| k).collect();
+        assert_eq!(
+            keys,
+            vec![DefaultKey(0), DefaultKey(1), DefaultKey(2), DefaultKey(3)]
+        );
+
+        // test keys()
+        let keys: Vec<_> = map.keys().collect();
+        assert_eq!(
+            keys,
+            vec![DefaultKey(0), DefaultKey(1), DefaultKey(2), DefaultKey(3)]
+        );
+
+        // test values()
+        let values: Vec<_> = map.values().collect();
+        assert_eq!(values, vec![&10, &2, &3, &4]);
+
+        // test into_keys()
+        let keys: Vec<_> = map.into_keys();
+        assert_eq!(
+            keys,
+            vec![DefaultKey(0), DefaultKey(1), DefaultKey(2), DefaultKey(3)]
+        );
+    }
+
+    #[test]
+    fn test_with_capacity() {
+        let mut map = TinySecondaryMap::<DefaultKey, _>::with_capacity(10);
+        assert!(map.is_empty());
+        map.insert(DefaultKey(3), 4);
+        map.insert(DefaultKey(0), 1);
+        map.insert(DefaultKey(2), 3);
+        map.insert(DefaultKey(1), 2);
+        assert_eq!(map.len(), 4);
+
+        // test get_mut
+        assert_eq!(map.get_mut(DefaultKey(0)), Some(&mut 1));
+        assert_eq!(map.get_mut(DefaultKey(1)), Some(&mut 2));
+        assert_eq!(map.get_mut(DefaultKey(2)), Some(&mut 3));
+        assert_eq!(map.get_mut(DefaultKey(3)), Some(&mut 4));
+    }
+
+    #[test]
+    fn test_extend() {
+        let mut map = TinySecondaryMap::<DefaultKey, _>::new();
+        map.extend(vec![
+            (DefaultKey(0), 1),
+            (DefaultKey(1), 2),
+            (DefaultKey(2), 3),
+        ]);
+        assert_eq!(map.len(), 3);
+        assert_eq!(map.get(DefaultKey(0)), Some(&1));
+        assert_eq!(map.get(DefaultKey(1)), Some(&2));
+        assert_eq!(map.get(DefaultKey(2)), Some(&3));
     }
 }

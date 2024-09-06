@@ -22,7 +22,7 @@ serde = ["boomerang_runtime/serde"]
 [dependencies]
 anyhow.workspace = true
 derivative = "2.2"
-derive_more = '0.99'
+derive_more = '1.0'
 document-features = { workspace = true }
 graphviz-rust = "0.6"
 itertools.workspace = true

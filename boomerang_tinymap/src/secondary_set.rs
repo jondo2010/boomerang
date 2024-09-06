@@ -51,6 +51,7 @@ impl<K: Key> TinySecondarySet<K> {
     pub fn iter(&self) -> Iter<'_, K> {
         Iter {
             inner: self.data.ones(),
+            count: self.data.count_ones(..),
             _k: PhantomData,
         }
     }
@@ -67,6 +68,7 @@ impl<K: Key + std::fmt::Display> std::fmt::Display for TinySecondarySet<K> {
 #[derive(Clone)]
 pub struct Iter<'a, K: Key> {
     inner: Ones<'a>,
+    count: usize,
     _k: PhantomData<K>,
 }
 
@@ -81,7 +83,7 @@ impl<'a, K: Key> Iterator for Iter<'a, K> {
 
 impl<'a, K: Key> ExactSizeIterator for Iter<'a, K> {
     fn len(&self) -> usize {
-        self.inner.size_hint().1.unwrap()
+        self.count
     }
 }
 
@@ -162,5 +164,22 @@ mod tests {
     fn test_empty_iter() {
         let set: TinySecondarySet<DefaultKey> = TinySecondarySet::with_capacity(10);
         assert!(set.iter().next().is_none());
+    }
+
+    #[test]
+    fn test_extend() {
+        let mut set = TinySecondarySet::with_capacity(10);
+        set.extend(vec![DefaultKey::from(0), DefaultKey::from(1)]);
+        assert_eq!(
+            set.iter().collect::<Vec<DefaultKey>>(),
+            vec![DefaultKey::from(0), DefaultKey::from(1)]
+        );
+    }
+
+    #[test]
+    fn test_exact_size_iter() {
+        let mut set = TinySecondarySet::with_capacity(10);
+        set.extend(vec![DefaultKey::from(0), DefaultKey::from(1)]);
+        assert_eq!(set.iter().len(), 2);
     }
 }

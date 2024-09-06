@@ -1,3 +1,6 @@
 {
     "lldb.verboseLogging": true,
+    "rust-analyzer.cargo.buildScripts.overrideCommand": [
+        "clippy"
+    ],
 }

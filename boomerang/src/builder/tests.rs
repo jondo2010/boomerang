@@ -20,18 +20,18 @@ fn test_reaction_ports() -> anyhow::Result<()> {
         .with_port(port_c, 0, TriggerMode::UsesOnly)?
         .finish()?;
 
-    let (env, triggers, aliases) = env_builder.into_runtime_parts().unwrap();
+    let (_env, triggers, aliases) = env_builder.into_runtime_parts().unwrap();
 
     // reactionA should "use" (be able to read from) portC
     itertools::assert_equal(
-        env.reactions[aliases.reaction_aliases[reaction_a]].iter_use_ports(),
-        &[aliases.port_aliases[port_c.into()]],
+        triggers.reaction_use_ports[aliases.reaction_aliases[reaction_a]].iter(),
+        iter::once(aliases.port_aliases[port_c.into()]),
     );
 
     // reactionA should "effect" (be able to write to) portB
     itertools::assert_equal(
-        env.reactions[aliases.reaction_aliases[reaction_a]].iter_effect_ports(),
-        &[aliases.port_aliases[port_b.into()]],
+        triggers.reaction_effect_ports[aliases.reaction_aliases[reaction_a]].iter(),
+        iter::once(aliases.port_aliases[port_b.into()]),
     );
 
     // portA should trigger only reactionA
@@ -426,23 +426,25 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
     }
     */
 
-    let reaction_source_startup_key = env_builder.get_reaction("startup", source_reactor)?;
-    let _reaction_source_t1_key = env_builder.get_reaction("reaction_t1", source_reactor)?;
-    let _reaction_source_t2_key = env_builder.get_reaction("reaction_t2", source_reactor)?;
-    let reaction_sink_clock_key = env_builder.get_reaction("reaction_clock", sink_reactor)?;
+    let reaction_source_startup_key =
+        env_builder.find_reaction_by_name("startup", source_reactor)?;
+    let _reaction_source_t1_key =
+        env_builder.find_reaction_by_name("reaction_t1", source_reactor)?;
+    let _reaction_source_t2_key =
+        env_builder.find_reaction_by_name("reaction_t2", source_reactor)?;
+    let reaction_sink_clock_key =
+        env_builder.find_reaction_by_name("reaction_clock", sink_reactor)?;
 
     let (mut env, triggers, aliases) = env_builder.into_runtime_parts()?;
 
     // the Source startup reaction should trigger on startup and effect the clock port
     let runtime_reaction_source_startup_key = aliases.reaction_aliases[reaction_source_startup_key];
-    let reaction_source_startup = &env.reactions[runtime_reaction_source_startup_key];
     itertools::assert_equal(
-        reaction_source_startup.iter_effect_ports(),
-        &[aliases.port_aliases[clock_source]],
+        triggers.reaction_effect_ports[runtime_reaction_source_startup_key].iter(),
+        [aliases.port_aliases[clock_source]],
     );
 
     let runtime_reaction_sink_clock_key = aliases.reaction_aliases[reaction_sink_clock_key];
-    let reaction_sink_clock = &env.reactions[runtime_reaction_sink_clock_key];
 
     // The clock reaction should only be triggered by the `clock` port, not the `in1` or `in2` ports.
     itertools::assert_equal(
@@ -454,8 +456,8 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
 
     // The clock reaction should have the `clock`, `in1`, and `in2` ports as use ports.
     itertools::assert_equal(
-        reaction_sink_clock.iter_use_ports(),
-        &[
+        triggers.reaction_use_ports[runtime_reaction_sink_clock_key].iter(),
+        [
             aliases.port_aliases[clock_source],
             aliases.port_aliases[in1_sink],
             aliases.port_aliases[in2_sink],
@@ -463,7 +465,10 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
     );
 
     // The clock reaction should not have any effect ports.
-    itertools::assert_equal(reaction_sink_clock.iter_effect_ports(), &[]);
+    itertools::assert_equal(
+        triggers.reaction_effect_ports[runtime_reaction_sink_clock_key].iter(),
+        [],
+    );
 
     let mut sched = runtime::Scheduler::new(&mut env, triggers, true, false);
     sched.event_loop();

@@ -58,6 +58,12 @@ pub struct IntoIter<K: Key, V> {
     _k: PhantomData<(K, V)>,
 }
 
+#[derive(Debug)]
+pub struct ValuesIter<'a, V: 'a> {
+    num_values: usize,
+    inner: std::iter::Flatten<std::slice::Iter<'a, Option<V>>>,
+}
+
 impl<K: Key, V> Iterator for IntoIter<K, V> {
     type Item = (K, V);
 
@@ -96,6 +102,20 @@ impl<'a, K: Key, V> Iterator for Iter<'a, K, V> {
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         (self.values_left, None)
+    }
+}
+
+impl<'a, V: 'a> Iterator for ValuesIter<'a, V> {
+    type Item = &'a V;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+}
+
+impl<'a, V: 'a> ExactSizeIterator for ValuesIter<'a, V> {
+    fn len(&self) -> usize {
+        self.num_values
     }
 }
 
@@ -187,9 +207,12 @@ impl<K: Key, V> TinySecondaryMap<K, V> {
             .collect()
     }
 
-    /// Returns an iterator over the values in the map.
-    pub fn values(&self) -> impl Iterator<Item = &V> {
-        self.data.iter().filter_map(Option::as_ref)
+    /// Returns an iterator over the values in the map, ordered by key.
+    pub fn values(&self) -> ValuesIter<V> {
+        ValuesIter {
+            num_values: self.num_values,
+            inner: self.data.iter().flatten(),
+        }
     }
 }
 
@@ -306,5 +329,22 @@ mod tests {
         assert_eq!(map.get(DefaultKey(0)), Some(&1));
         assert_eq!(map.get(DefaultKey(1)), Some(&2));
         assert_eq!(map.get(DefaultKey(2)), Some(&3));
+    }
+
+    #[test]
+    fn test_values_iter() {
+        let mut map = TinySecondaryMap::<DefaultKey, _>::with_capacity(10);
+        map.insert(DefaultKey(3), 4);
+        map.insert(DefaultKey(0), 1);
+        map.insert(DefaultKey(2), 3);
+        map.insert(DefaultKey(1), 2);
+
+        let mut vals = map.values();
+        assert_eq!(vals.len(), 4);
+        assert_eq!(vals.next(), Some(&1));
+        assert_eq!(vals.next(), Some(&2));
+        assert_eq!(vals.next(), Some(&3));
+        assert_eq!(vals.next(), Some(&4));
+        assert_eq!(vals.next(), None);
     }
 }

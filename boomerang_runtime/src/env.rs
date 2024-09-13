@@ -61,9 +61,11 @@ pub struct Env {
     pub reactions: tinymap::TinyMap<ReactionKey, Reaction>,
 }
 
+/// Invariant data for the runtime, describing the resolved reaction graph and it's dependencies.
+///
 /// Maps of triggers for actions and ports. This data is statically resolved by the builder from the reaction graph.
-pub struct TriggerMap {
-    /// Global action triggers
+pub struct ReactionGraph {
+    /// For each Action, a set of Reactions triggered by it.
     pub action_triggers: tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
     /// Global port triggers
     pub port_triggers: tinymap::TinySecondaryMap<PortKey, Vec<LevelReactionKey>>,
@@ -73,6 +75,17 @@ pub struct TriggerMap {
     pub shutdown_reactions: Vec<LevelReactionKey>,
     /// The maximum level of any reaction, and the total number of reactions. This is used to allocate the reaction set.
     pub reaction_set_limits: KeySetLimits,
+    /// For each reaction, the set of 'use' ports
+    pub reaction_use_ports:
+        tinymap::TinySecondaryMap<ReactionKey, tinymap::TinySecondarySet<PortKey>>,
+    /// For each reaction, the set of 'effect' ports
+    pub reaction_effect_ports:
+        tinymap::TinySecondaryMap<ReactionKey, tinymap::TinySecondarySet<PortKey>>,
+    /// For each reaction, the set of 'use/effect' actions
+    pub reaction_actions:
+        tinymap::TinySecondaryMap<ReactionKey, tinymap::TinySecondarySet<ActionKey>>,
+    /// For each reaction, the reactor it belongs to
+    pub reaction_reactors: tinymap::TinySecondaryMap<ReactionKey, ReactorKey>,
 }
 
 impl std::fmt::Debug for Env {
@@ -107,45 +120,11 @@ impl std::fmt::Debug for Env {
 
         let reactions = fmt::from_fn(|f| {
             f.debug_map()
-                .entries(self.reactions.iter().map(|(reaction_key, reaction)| {
-                    let reaction_dbg = fmt::from_fn(|f| {
-                        let use_ports = fmt::from_fn(|f| {
-                            f.debug_list()
-                                .entries(
-                                    reaction
-                                        .iter_use_ports()
-                                        .map(|port_key| self.ports[*port_key].to_string()),
-                                )
-                                .finish()
-                        });
-                        let effect_ports = fmt::from_fn(|f| {
-                            f.debug_list()
-                                .entries(
-                                    reaction
-                                        .iter_effect_ports()
-                                        .map(|port_key| self.ports[*port_key].to_string()),
-                                )
-                                .finish()
-                        });
-                        let actions = fmt::from_fn(|f| {
-                            f.debug_list()
-                                .entries(
-                                    reaction
-                                        .iter_actions()
-                                        .map(|action_key| self.actions[*action_key].to_string()),
-                                )
-                                .finish()
-                        });
-
-                        f.debug_struct(reaction.get_name())
-                            .field("reactor", &self.reactors[reaction.get_reactor_key()].name)
-                            .field("use_ports", &use_ports)
-                            .field("effect_ports", &effect_ports)
-                            .field("actions", &actions)
-                            .finish()
-                    });
-                    (format!("{reaction_key:?}"), reaction_dbg)
-                }))
+                .entries(
+                    self.reactions
+                        .iter()
+                        .map(|(reaction_key, reaction)| (format!("{reaction_key:?}"), reaction)),
+                )
                 .finish()
         });
 
@@ -158,7 +137,7 @@ impl std::fmt::Debug for Env {
     }
 }
 
-impl std::fmt::Debug for TriggerMap {
+impl std::fmt::Debug for ReactionGraph {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let action_triggers = fmt::from_fn(|f| {
             let e = self.action_triggers.iter().map(|(action_key, v)| {
@@ -191,6 +170,12 @@ impl std::fmt::Debug for TriggerMap {
         f.debug_struct("TriggerMap")
             .field("action_triggers", &action_triggers)
             .field("port_triggers", &port_triggers)
+            .field("startup_reactions", &self.startup_reactions)
+            .field("shutdown_reactions", &self.shutdown_reactions)
+            .field("reaction_set_limits", &self.reaction_set_limits)
+            .field("reaction_use_ports", &self.reaction_use_ports)
+            .field("reaction_effect_ports", &self.reaction_effect_ports)
+            .field("reaction_actions", &self.reaction_actions)
             .finish()
     }
 }
@@ -198,7 +183,7 @@ impl std::fmt::Debug for TriggerMap {
 /// Set of borrows necessary for a single Reaction triggering.
 pub(crate) struct ReactionTriggerCtx<'a> {
     pub(crate) reactor: &'a mut Reactor,
-    pub(crate) reaction: &'a Reaction,
+    pub(crate) reaction: &'a mut Reaction,
     pub(crate) actions: &'a mut [&'a mut Action],
     pub(crate) inputs: &'a [&'a dyn BasePort],
     pub(crate) outputs: &'a mut [&'a mut dyn BasePort],
@@ -208,7 +193,7 @@ pub(crate) struct ReactionTriggerCtx<'a> {
 pub(crate) struct ReactionTriggerCtxIter<'a, 'bump, IReactor, IReaction, IO1, IO2, IO3, IA, IP>
 where
     IReactor: Iterator<Item = &'a mut Reactor>,
-    IReaction: Iterator<Item = &'a Reaction>,
+    IReaction: Iterator<Item = &'a mut Reaction>,
     IO1: Iterator<Item = IA> + Send,
     IO2: Iterator<Item = IP> + Send,
     IO3: Iterator<Item = IP> + Send,
@@ -227,7 +212,7 @@ impl<'a, 'bump: 'a, IReactor, IReaction, IO1, IO2, IO3, IA, IP> Iterator
     for ReactionTriggerCtxIter<'a, 'bump, IReactor, IReaction, IO1, IO2, IO3, IA, IP>
 where
     IReactor: Iterator<Item = &'a mut Reactor>,
-    IReaction: Iterator<Item = &'a Reaction>,
+    IReaction: Iterator<Item = &'a mut Reaction>,
     IO1: Iterator<Item = IA> + Send,
     IO2: Iterator<Item = IP> + Send,
     IO3: Iterator<Item = IP> + Send,
@@ -265,34 +250,39 @@ impl Env {
     /// Returns an `Iterator` of `ReactionTriggerCtx` for each `Reaction` in the given `reaction_keys`.
     ///
     /// # Safety
-    /// The Reactions corresponding to `reaction_keys` must be be independent of each other.
+    /// The Reactions in `reaction_keys` must be be independent of each other (disjoint).
     pub(crate) unsafe fn iter_reaction_ctx<'a, 'bump: 'a, I>(
         &'a mut self,
+        reaction_graph: &'a ReactionGraph,
         bump: &'bump bumpalo::Bump,
         reaction_keys: I,
     ) -> impl Iterator<Item = ReactionTriggerCtx<'a>> + 'a
     where
         I: Iterator<Item = ReactionKey> + ExactSizeIterator + Clone + Send + 'a,
     {
-        let reactions = reaction_keys.map(|k| &self.reactions[k]);
-
-        let reactor_keys = reactions.clone().map(|reaction| reaction.get_reactor_key());
-
-        let action_keys = reactions
+        let port_keys = reaction_keys
             .clone()
-            .map(|reaction| reaction.iter_actions().copied());
+            .map(|reaction_key| reaction_graph.reaction_use_ports[reaction_key].iter());
 
-        let port_keys = reactions
+        let mut_port_keys = reaction_keys
             .clone()
-            .map(|reaction| reaction.iter_use_ports().copied());
+            .map(|reaction_key| reaction_graph.reaction_effect_ports[reaction_key].iter());
 
-        let mut_port_keys = reactions
+        let action_keys = reaction_keys
             .clone()
-            .map(|reaction| reaction.iter_effect_ports().copied());
+            .map(|reaction_key| reaction_graph.reaction_actions[reaction_key].iter());
 
+        let reactor_keys = reaction_keys
+            .clone()
+            .map(|reaction_key| reaction_graph.reaction_reactors[reaction_key]);
+
+        // SAFETY: reactor_keys are guaranteed to be disjoint
         let reactors = self.reactors.iter_many_unchecked_mut(reactor_keys);
 
-        // SAFETY: `action_keys` are guaranteed to guaranteed to be disjoint chunks
+        // SAFETY: reaction_keys are guaranteed to be disjoint
+        let reactions = self.reactions.iter_many_unchecked_mut(reaction_keys);
+
+        // SAFETY: action_keys are guaranteed to be disjoint chunks
         let (_, grouped_actions) = unsafe {
             self.actions
                 .iter_chunks_split_unchecked(std::iter::empty(), action_keys)

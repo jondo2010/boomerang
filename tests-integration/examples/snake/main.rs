@@ -22,7 +22,6 @@ mod reactor {
 
         /// Triggers a screen refresh, not a timer because we can
         /// shrink the period over time to speed up the game.
-        #[reactor(action(physical = "false"))]
         screen_refresh: TypedActionKey,
 
         /// manually triggered
@@ -70,8 +69,8 @@ mod reactor {
                 grid,
                 tempo: 1,
                 tempo_step,
-                pending_direction: Direction::RIGHT,
-                snake_direction: Direction::RIGHT,
+                pending_direction: Direction::Right,
+                snake_direction: Direction::Right,
                 food_on_grid: 0,
                 max_food_on_grid: food_limit,
             }
@@ -178,10 +177,10 @@ mod reactor {
         ) {
             // this might be overwritten several times, only committed on screen refreshes
             state.pending_direction = match self.arrow_key_pressed.get().unwrap() {
-                Key::Left => Direction::LEFT,
-                Key::Right => Direction::RIGHT,
-                Key::Up => Direction::UP,
-                Key::Down => Direction::DOWN,
+                Key::Left => Direction::Left,
+                Key::Right => Direction::Right,
+                Key::Up => Direction::Up,
+                Key::Down => Direction::Down,
                 _ => unreachable!(),
             };
         }

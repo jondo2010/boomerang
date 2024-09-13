@@ -209,7 +209,7 @@ mod tests {
                     }
                     Level(2) => {
                         itertools::assert_equal(keys, vec![key1, key2]);
-                        assert!(!remaining.is_some());
+                        assert!(remaining.is_none());
                     }
                     _ => unreachable!(),
                 }

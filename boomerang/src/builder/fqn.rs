@@ -16,6 +16,10 @@ impl BuilderFqn {
         self.0.pop()
     }
 
+    pub fn peek(&self) -> Option<&str> {
+        self.0.last().map(String::as_str)
+    }
+
     /// Split the last element from the FQN, returning the new FQN and the last element.
     pub fn split_last(mut self) -> Option<(Self, String)> {
         self.0.pop().map(|last| (self, last))

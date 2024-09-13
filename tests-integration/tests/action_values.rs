@@ -5,19 +5,19 @@ use boomerang::{
     runtime, Reaction, Reactor,
 };
 
+struct State {
+    r1done: bool,
+    r2done: bool,
+}
+
 #[derive(Clone, Reactor)]
-#[reactor(state = ActionValues)]
-struct ActionValuesBuilder {
+#[reactor(state = State)]
+struct ActionValues {
     #[reactor(action(min_delay = "100 msec"))]
     act: TypedActionKey<i32>,
     reaction_startup: TypedReactionKey<ReactionStartup<'static>>,
     reaction_act: TypedReactionKey<ReactionAct<'static>>,
     reaction_shutdown: TypedReactionKey<ReactionShutdown>,
-}
-
-struct ActionValues {
-    r1done: bool,
-    r2done: bool,
 }
 
 #[derive(Reaction)]
@@ -27,9 +27,9 @@ struct ReactionStartup<'a> {
 }
 
 impl<'a> Trigger for ReactionStartup<'a> {
-    type Reactor = ActionValuesBuilder;
+    type Reactor = ActionValues;
 
-    fn trigger(&mut self, ctx: &mut runtime::Context, _state: &mut ActionValues) {
+    fn trigger(&mut self, ctx: &mut runtime::Context, _state: &mut State) {
         // scheduled in 100 ms
         ctx.schedule_action(&mut self.act, Some(100), None);
         // scheduled in 150 ms, value is overwritten
@@ -48,9 +48,9 @@ struct ReactionAct<'a> {
 }
 
 impl<'a> Trigger for ReactionAct<'a> {
-    type Reactor = ActionValuesBuilder;
+    type Reactor = ActionValues;
 
-    fn trigger(&mut self, ctx: &mut runtime::Context, state: &mut ActionValues) {
+    fn trigger(&mut self, ctx: &mut runtime::Context, state: &mut State) {
         let elapsed = ctx.get_elapsed_logical_time();
         let value = ctx.get_action(&mut self.act);
 
@@ -74,9 +74,9 @@ impl<'a> Trigger for ReactionAct<'a> {
 struct ReactionShutdown;
 
 impl Trigger for ReactionShutdown {
-    type Reactor = ActionValuesBuilder;
+    type Reactor = ActionValues;
 
-    fn trigger(&mut self, _ctx: &mut runtime::Context, state: &mut ActionValues) {
+    fn trigger(&mut self, _ctx: &mut runtime::Context, state: &mut State) {
         assert!(
             state.r1done && state.r2done,
             "ERROR: Expected 2 reaction invocations\n"
@@ -88,9 +88,9 @@ impl Trigger for ReactionShutdown {
 #[test]
 fn action_values() {
     tracing_subscriber::fmt::init();
-    let _ = boomerang_util::run::build_and_test_reactor::<ActionValuesBuilder>(
+    let _ = boomerang_util::run::build_and_test_reactor::<ActionValues>(
         "action_values",
-        ActionValues {
+        State {
             r1done: false,
             r2done: false,
         },

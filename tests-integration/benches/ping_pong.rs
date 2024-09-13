@@ -37,7 +37,6 @@ struct PingBuilder {
     #[reactor(port = "output")]
     out_finished: TypedPortKey<()>,
 
-    #[reactor(action(physical = "false"))]
     serve: TypedActionKey,
 
     reaction_in_start: TypedReactionKey<ReactionInStart<'static>>,

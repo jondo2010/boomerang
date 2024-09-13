@@ -110,9 +110,9 @@ impl<K: Key, V: Send> TinyMap<K, V> {
         keys_mut: IO2,
     ) -> SplitChunks<'_, K, V, IO1, IO2, II>
     where
-        IO1: Iterator<Item = II> + ExactSizeIterator + Clone + Send,
-        IO2: Iterator<Item = II> + ExactSizeIterator + Clone + Send,
-        II: Iterator<Item = K> + ExactSizeIterator + Clone + Send,
+        IO1: Iterator<Item = II> + ExactSizeIterator + Send,
+        IO2: Iterator<Item = II> + ExactSizeIterator + Send,
+        II: Iterator<Item = K> + ExactSizeIterator + Send,
     {
         (
             Chunks {

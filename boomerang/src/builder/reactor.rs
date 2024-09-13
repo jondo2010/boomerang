@@ -1,7 +1,8 @@
 use super::{
-    BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey, EnvBuilder,
-    FindElements, Logical, Physical, PortType, Reaction, ReactionBuilderState, TimerActionKey,
-    TimerSpec, TriggerMode, TypedActionKey, TypedPortKey, TypedReactionKey,
+    ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
+    EnvBuilder, FindElements, Logical, Physical, PhysicalActionKey, PortType, Reaction,
+    ReactionBuilderState, TimerActionKey, TimerSpec, TriggerMode, TypedActionKey, TypedPortKey,
+    TypedReactionKey,
 };
 use crate::runtime;
 use slotmap::SecondaryMap;
@@ -117,6 +118,20 @@ impl<T: runtime::ActionData> ReactorField for TypedActionKey<T, Physical> {
     }
 }
 
+impl ReactorField for PhysicalActionKey {
+    type Inner = Option<runtime::Duration>;
+
+    fn build(
+        name: &str,
+        inner: Self::Inner,
+        parent: &'_ mut ReactorBuilderState,
+    ) -> Result<Self, BuilderError> {
+        parent
+            .add_physical_action::<()>(name, inner)
+            .map(Into::into)
+    }
+}
+
 /// ReactorBuilder is the Builder-side definition of a Reactor, and is type-erased
 pub(super) struct ReactorBuilder {
     /// The instantiated/child name of the Reactor
@@ -140,19 +155,13 @@ impl ReactorBuilder {
         &self.name
     }
 
-    pub(super) fn type_name(&self) -> &str {
+    pub fn type_name(&self) -> &str {
         self.type_name.as_ref()
     }
 
     /// Build this `ReactorBuilder` into a `runtime::Reactor`
-    pub fn build_runtime(
-        self,
-        action_triggers: tinymap::TinySecondaryMap<
-            runtime::ActionKey,
-            Vec<runtime::LevelReactionKey>,
-        >,
-    ) -> runtime::Reactor {
-        runtime::Reactor::new(&self.name, self.state, action_triggers)
+    pub fn build_runtime(self) -> runtime::Reactor {
+        runtime::Reactor::new(&self.name, self.state)
     }
 }
 
@@ -221,6 +230,39 @@ impl<'a> ReactorBuilderState<'a> {
             env,
             startup_action,
             shutdown_action,
+        }
+    }
+
+    /// Create a new `ReactorBuilderState` for a pre-existing reactor
+    pub(super) fn from_pre_existing(
+        reactor_key: BuilderReactorKey,
+        env: &'a mut EnvBuilder,
+    ) -> Self {
+        // Find the startup and shutdown actions for this reactor
+        let startup_action = env
+            .action_builders
+            .iter()
+            .find(|(_, action)| {
+                action.get_reactor_key() == reactor_key && *action.get_type() == ActionType::Startup
+            })
+            .map(|(action_key, _)| action_key)
+            .expect("Startup action not found");
+
+        let shutdown_action = env
+            .action_builders
+            .iter()
+            .find(|(_, action)| {
+                action.get_reactor_key() == reactor_key
+                    && *action.get_type() == ActionType::Shutdown
+            })
+            .map(|(action_key, _)| action_key)
+            .expect("Shutdown action not found");
+
+        Self {
+            reactor_key,
+            env,
+            startup_action: TypedActionKey::from(startup_action),
+            shutdown_action: TypedActionKey::from(shutdown_action),
         }
     }
 

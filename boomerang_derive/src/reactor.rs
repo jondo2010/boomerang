@@ -3,33 +3,19 @@ use std::time::Duration;
 use darling::{ast, FromDeriveInput, FromField, FromMeta};
 use quote::quote;
 use quote::ToTokens;
+use syn::Type;
+use syn::TypePath;
 
-fn handle_duration(value: String) -> Option<Duration> {
-    Some(parse_duration::parse(&value).unwrap())
-}
+use crate::util::OptionalDuration;
+use crate::util::{extract_path_ident, handle_duration};
 
-/// Generate a TokenStream from an Option<Duration>
-pub(crate) fn duration_quote(duration: &Duration) -> proc_macro2::TokenStream {
-    let secs = duration.as_secs();
-    let nanos = duration.subsec_nanos();
-    quote! {::boomerang::runtime::Duration::new(#secs, #nanos)}
-}
+const TIMER_ACTION_KEY: &str = "TimerActionKey";
+const TYPED_ACTION_KEY: &str = "TypedActionKey";
+const TYPED_PORT_KEY: &str = "TypedPortKey";
+const TYPED_REACTION_KEY: &str = "TypedReactionKey";
+const PHYSICAL_ACTION_KEY: &str = "PhysicalActionKey";
 
-pub struct OptionalDuration(pub Option<Duration>);
-
-impl ToTokens for OptionalDuration {
-    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
-        tokens.extend(match self.0 {
-            Some(duration) => {
-                let duration = duration_quote(&duration);
-                quote! {Some(#duration)}
-            }
-            None => quote! {None},
-        });
-    }
-}
-
-#[derive(Clone, Debug, FromMeta, PartialEq, Eq)]
+#[derive(Default, Clone, Debug, FromMeta, PartialEq, Eq)]
 pub struct TimerAttr {
     #[darling(default, map = "handle_duration")]
     pub offset: Option<Duration>,
@@ -52,8 +38,8 @@ pub enum ActionAttrPolicy {
 
 #[derive(Clone, Debug, FromMeta, PartialEq, Eq)]
 pub struct ActionAttr {
-    #[darling(default)]
-    pub physical: bool,
+    //#[darling(default)]
+    //pub physical: bool,
     #[darling(default, map = "handle_duration")]
     pub min_delay: Option<Duration>,
     #[darling(default)]
@@ -143,64 +129,80 @@ impl TryFrom<FieldReceiver> for ReactorField {
         let name = value.rename.unwrap_or_else(|| ident.clone());
         let ty = value.ty;
 
-        match (value.timer, value.port, value.action, value.child) {
-            (Some(timer), None, None, None) => Ok(ReactorField {
-                ident,
-                name,
-                ty,
-                kind: ReactorFieldKind::Timer {
-                    period: timer.period,
-                    offset: timer.offset,
-                },
-            }),
-            (None, Some(port), None, None) => Ok(ReactorField {
-                ident,
-                name,
-                ty,
-                kind: match port {
-                    PortAttr::Input => ReactorFieldKind::Input,
-                    PortAttr::Output => ReactorFieldKind::Output,
-                },
-            }),
-            (None, None, Some(action), None) => Ok(ReactorField {
-                ident,
-                name,
-                ty,
-                kind: ReactorFieldKind::Action {
-                    min_delay: action.min_delay,
-                    policy: action.policy.unwrap_or_default(),
-                },
-            }),
-            (None, None, None, Some(child)) => Ok(ReactorField {
-                ident,
-                name,
-                ty,
-                kind: ReactorFieldKind::Child { state: child },
-            }),
-            (None, None, None, None) => {
-                // Check if the type is a TypedReactionKey<...>
-                if let syn::Type::Path(type_path) = &ty {
-                    if let Some(segment) = type_path.path.segments.last() {
-                        if segment.ident == "TypedReactionKey" {
-                            return Ok(ReactorField {
-                                ident,
-                                name,
-                                ty,
-                                kind: ReactorFieldKind::Reaction,
-                            });
-                        }
-                    }
+        let field_inner_type = extract_path_ident(&ty).ok_or_else(|| {
+            darling::Error::custom("Unable to extract path ident ").with_span(&ty)
+        })?;
+
+        // Heuristic to determine the field type based on the inner type and attributes
+        match &ty {
+            Type::Path(TypePath { path: _, .. }) => match field_inner_type.to_string().as_ref() {
+                TIMER_ACTION_KEY => {
+                    let timer = value.timer.unwrap_or_default();
+                    Ok(ReactorField {
+                        ident,
+                        name,
+                        ty,
+                        kind: ReactorFieldKind::Timer {
+                            period: timer.period,
+                            offset: timer.offset,
+                        },
+                    })
                 }
 
-                // If not a TypedReactionKey, return an error
-                Err(
-                    darling::Error::custom("Reaction field must be of type TypedReactionKey<...>")
-                        .with_span(&ty),
-                )
-            }
-            _ => Err(darling::Error::unsupported_format(
-                "Only one of timer, port, action, or child attributes can be specified",
-            )),
+                TYPED_ACTION_KEY | PHYSICAL_ACTION_KEY => {
+                    //let action = value.action.unwrap_or_default();
+                    let min_delay = value.action.as_ref().and_then(|attr| attr.min_delay);
+                    let policy = value.action.as_ref().and_then(|attr| attr.policy.clone());
+                    Ok(ReactorField {
+                        ident,
+                        name,
+                        ty,
+                        kind: ReactorFieldKind::Action {
+                            min_delay,
+                            policy: policy.unwrap_or_default(),
+                        },
+                    })
+                }
+
+                TYPED_PORT_KEY => {
+                    let kind = match value.port {
+                        Some(PortAttr::Input) => ReactorFieldKind::Input,
+                        Some(PortAttr::Output) => ReactorFieldKind::Output,
+                        None => {
+                            return Err(darling::Error::custom("Port attribute must be specified")
+                                .with_span(&ty))
+                        }
+                    };
+                    Ok(ReactorField {
+                        ident,
+                        name,
+                        ty,
+                        kind,
+                    })
+                }
+
+                TYPED_REACTION_KEY => Ok(ReactorField {
+                    ident,
+                    name,
+                    ty,
+                    kind: ReactorFieldKind::Reaction,
+                }),
+
+                _ if matches!(value.child, Some(..)) => Ok(ReactorField {
+                    ident,
+                    name,
+                    ty,
+                    kind: ReactorFieldKind::Child {
+                        state: value.child.unwrap(),
+                    },
+                }),
+
+                _ => Err(darling::Error::custom("Unrecognized field type").with_span(&ident)),
+            },
+
+            _ => Err(
+                darling::Error::custom("Unrecognized field type. Expected a path.").with_span(&ty),
+            ),
         }
     }
 }
@@ -316,39 +318,108 @@ impl ToTokens for ReactorReceiver {
     }
 }
 
-#[test]
-fn test_reactor() {
-    let good_input = r#"
+#[cfg(test)]
+mod tests {
+    use syn::parse_quote;
+
+    use super::*;
+
+    #[test]
+    fn test_struct_attrs() {
+        let input = r#"
 #[derive(Reactor, Clone)]
-#[reactor(state = "u32")]
+#[reactor(
+    state = MyType::Foo::<f32>,
+    connection(from = "inp", to = "gain.inp"),
+    connection(from = "gain.out", to = "out", after = "1 usec"),
+)]
+struct Test {}"#;
+
+        let parsed = syn::parse_str(input).unwrap();
+        let receiver = ReactorReceiver::from_derive_input(&parsed).unwrap();
+
+        assert_eq!(receiver.ident.to_string(), "Test");
+        assert_eq!(receiver.state, parse_quote! {MyType::Foo::<f32>});
+        assert_eq!(receiver.connections.len(), 2);
+        assert_eq!(
+            receiver.connections[0],
+            ConnectionAttr {
+                from: parse_quote! {inp},
+                to: parse_quote! {gain.inp},
+                after: None
+            }
+        );
+        assert_eq!(
+            receiver.connections[1],
+            ConnectionAttr {
+                from: parse_quote! {gain.out},
+                to: parse_quote! {out},
+                after: Some(Duration::from_micros(1))
+            }
+        )
+    }
+
+    #[test]
+    fn test_actions() {
+        let good_input = r#"
+#[derive(Reactor, Clone)]
+#[reactor(state = u32)]
 struct Count {
     #[reactor(rename = "foo", timer(period = "1 usec"))]
     timer: TimerActionKey,
-    #[reactor(rename = "p0", port = "output")]
-    output: TypedPortKey<u32>,
-
-    #[reactor(action(min_delay = "1 usec", policy = "drop"))]
-    action: TypedActionKey<u32, Physical>,
-
-    #[reactor(child = "Timeout::new(runtime::Duration::from_secs(1))")]
-    _timeout: TimeoutBuilder,
-    //#[reactor(reaction)]
-    //reaction_t: TypedReactionKey<ReactionT<'static>>,
-    //#[reactor(reaction)]
-    //reaction_shutdown: TypedReactionKey<ReactionShutdown>,
+    action: TypedActionKey<u32>,
+    #[reactor(action(min_delay = "1 usec"))]
+    phys_action: PhysicalActionKey,
 }"#;
 
-    let parsed = syn::parse_str(good_input).unwrap();
-    let receiver = ReactorReceiver::from_derive_input(&parsed).unwrap();
+        let parsed = syn::parse_str(good_input).unwrap();
+        let receiver = ReactorReceiver::from_derive_input(&parsed).unwrap();
 
-    let fields = receiver.data.take_struct().unwrap();
+        let fields = receiver.data.take_struct().unwrap();
 
-    let fields = fields
-        .into_iter()
-        .map(ReactorField::try_from)
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+        let fields = fields
+            .into_iter()
+            .map(ReactorField::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
 
-    dbg!(&fields);
-    //println!("{}", receiver.to_token_stream());
+        assert_eq!(
+            fields[0],
+            ReactorField {
+                ident: parse_quote! {timer},
+                name: parse_quote! {foo},
+                ty: parse_quote! {TimerActionKey},
+                kind: ReactorFieldKind::Timer {
+                    period: Some(Duration::from_micros(1)),
+                    offset: None,
+                }
+            }
+        );
+
+        assert_eq!(
+            fields[1],
+            ReactorField {
+                ident: parse_quote! {action},
+                name: parse_quote! {action},
+                ty: parse_quote! {TypedActionKey<u32>},
+                kind: ReactorFieldKind::Action {
+                    min_delay: None,
+                    policy: ActionAttrPolicy::Defer,
+                }
+            }
+        );
+
+        assert_eq!(
+            fields[2],
+            ReactorField {
+                ident: parse_quote! {phys_action},
+                name: parse_quote! {phys_action},
+                ty: parse_quote! {PhysicalActionKey},
+                kind: ReactorFieldKind::Action {
+                    min_delay: Some(Duration::from_micros(1)),
+                    policy: ActionAttrPolicy::Defer,
+                }
+            }
+        );
+    }
 }

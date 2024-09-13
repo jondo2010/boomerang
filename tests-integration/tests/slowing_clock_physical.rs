@@ -15,7 +15,7 @@ struct State {
 #[derive(Clone, Reactor)]
 #[reactor(state = State)]
 struct SlowingClockPhysical {
-    #[reactor(action(physical, min_delay = "100 msec"))]
+    #[reactor(action(min_delay = "100 msec"))]
     a: TypedActionKey<(), Physical>,
 
     startup: TypedReactionKey<ReactionStartup>,

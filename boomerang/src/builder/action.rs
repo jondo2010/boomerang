@@ -19,7 +19,7 @@ pub struct Logical;
 #[derive(Copy, Clone, Debug)]
 pub struct Physical;
 
-/// `TypedActionKey` is a typed wrapper around `ActionKey` that is used to associate a type with an
+/// `TypedActionKey` is a typed wrapper around [`BuilderActionKey`] that is used to associate a type with an
 /// action. This is used to ensure that the type of the action matches the type of the port that it
 /// is connected to.
 #[derive(Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
@@ -39,10 +39,35 @@ impl<T: runtime::ActionData, Q> From<TypedActionKey<T, Q>> for BuilderActionKey 
     }
 }
 
-impl<T: runtime::ActionData, Q> runtime::InnerType for TypedActionKey<T, Q> {
-    type Inner = T;
+/// `PhysicalActionKey` is a type-erased physical Action.
+#[derive(Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub struct PhysicalActionKey(BuilderActionKey);
+
+impl From<BuilderActionKey> for PhysicalActionKey {
+    fn from(value: BuilderActionKey) -> Self {
+        Self(value)
+    }
 }
 
+impl From<PhysicalActionKey> for TypedActionKey<(), Physical> {
+    fn from(value: PhysicalActionKey) -> Self {
+        Self(value.0, PhantomData)
+    }
+}
+
+impl<T: runtime::ActionData> From<TypedActionKey<T, Physical>> for PhysicalActionKey {
+    fn from(value: TypedActionKey<T, Physical>) -> Self {
+        Self(value.0)
+    }
+}
+
+impl From<PhysicalActionKey> for BuilderActionKey {
+    fn from(value: PhysicalActionKey) -> Self {
+        value.0
+    }
+}
+
+/// `TimerActionKey` is an wrapper around [`BuilderActionKey`] for timer Actions.
 #[derive(Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub struct TimerActionKey(BuilderActionKey);
 
@@ -65,7 +90,7 @@ impl From<BuilderActionKey> for TimerActionKey {
 }
 
 /// TimerSpec is used to specify the period and offset of a timer action.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct TimerSpec {
     /// Interval between timer events
     pub period: Option<runtime::Duration>,
@@ -73,7 +98,7 @@ pub struct TimerSpec {
     pub offset: Option<runtime::Duration>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ActionType {
     Timer(TimerSpec),
     Logical {

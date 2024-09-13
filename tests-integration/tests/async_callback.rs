@@ -10,7 +10,6 @@ struct AsyncCallback {
     #[reactor(timer(period = "200 msec"))]
     t: TimerActionKey,
 
-    #[reactor(action(physical))]
     a: TypedActionKey<usize, Physical>,
 
     reaction_t: TypedReactionKey<ReactionT>,

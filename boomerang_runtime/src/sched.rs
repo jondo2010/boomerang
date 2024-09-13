@@ -5,8 +5,8 @@ use crate::{
     event::{PhysicalEvent, ScheduledEvent},
     keepalive,
     key_set::KeySetView,
-    Env, Instant, Level, ReactionKey, ReactionSet, ReactionSetLimits, ReactionTriggerCtx, Tag,
-    TriggerMap,
+    Env, Instant, Level, ReactionGraph, ReactionKey, ReactionSet, ReactionSetLimits,
+    ReactionTriggerCtx, Tag,
 };
 
 #[derive(Debug)]
@@ -76,8 +76,8 @@ impl EventQueue {
 pub struct Scheduler<'env> {
     /// The environment state
     env: &'env mut Env,
-    /// The trigger map
-    trigger_map: TriggerMap,
+    /// The reaction graph containing all static dependency and relationship information
+    reaction_graph: ReactionGraph,
     /// Whether to skip wall-clock synchronization
     fast_forward: bool,
     /// Whether to keep the scheduler alive for any possible asynchronous events
@@ -99,17 +99,17 @@ pub struct Scheduler<'env> {
 impl<'env> Scheduler<'env> {
     pub fn new(
         env: &'env mut Env,
-        trigger_map: TriggerMap,
+        reaction_graph: ReactionGraph,
         fast_forward: bool,
         keep_alive: bool,
     ) -> Self {
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
         let (shutdown_tx, _) = keepalive::channel();
-        let events = EventQueue::new(trigger_map.reaction_set_limits.clone());
+        let events = EventQueue::new(reaction_graph.reaction_set_limits.clone());
 
         Self {
             env,
-            trigger_map,
+            reaction_graph,
             fast_forward,
             keep_alive,
             event_tx,
@@ -130,7 +130,7 @@ impl<'env> Scheduler<'env> {
 
         // For all Timers, pump later events onto the queue and create an initial ReactionSet to process.
         let mut reaction_set = self.events.next_reaction_set();
-        reaction_set.extend_above(self.trigger_map.startup_reactions.iter().copied());
+        reaction_set.extend_above(self.reaction_graph.startup_reactions.iter().copied());
 
         tracing::info!(tag = %tag, ?reaction_set, "Starting the execution.");
         self.process_tag(tag, reaction_set.view());
@@ -184,7 +184,7 @@ impl<'env> Scheduler<'env> {
             for physical_event in self.event_rx.try_iter() {
                 self.events.push_event(
                     physical_event.tag,
-                    physical_event.downstream_reactions(&self.trigger_map),
+                    physical_event.downstream_reactions(&self.reaction_graph),
                     physical_event.terminal,
                 );
             }
@@ -219,7 +219,7 @@ impl<'env> Scheduler<'env> {
             } else if let Some(event) = self.receive_event() {
                 self.events.push_event(
                     event.tag,
-                    event.downstream_reactions(&self.trigger_map),
+                    event.downstream_reactions(&self.reaction_graph),
                     event.terminal,
                 );
             } else {
@@ -229,7 +229,7 @@ impl<'env> Scheduler<'env> {
                 self.shutdown_tag = Some(tag);
                 self.events.push_event(
                     tag,
-                    self.trigger_map.shutdown_reactions.iter().copied(),
+                    self.reaction_graph.shutdown_reactions.iter().copied(),
                     true,
                 );
             }
@@ -251,7 +251,7 @@ impl<'env> Scheduler<'env> {
                 Ok(event) => {
                     tracing::debug!(event = %event, "Sleep interrupted by async event");
                     let mut reactions = self.events.next_reaction_set();
-                    reactions.extend_above(event.downstream_reactions(&self.trigger_map));
+                    reactions.extend_above(event.downstream_reactions(&self.reaction_graph));
                     return Some(ScheduledEvent {
                         tag: event.tag,
                         reactions,
@@ -290,7 +290,10 @@ impl<'env> Scheduler<'env> {
             tracing::trace!(level=?level, "Iter");
 
             // Safety: reaction_keys in the same level are guaranteed to be independent of each other.
-            let iter_ctx = unsafe { self.env.iter_reaction_ctx(&bump, reaction_keys) };
+            let iter_ctx = unsafe {
+                self.env
+                    .iter_reaction_ctx(&self.reaction_graph, &bump, reaction_keys)
+            };
 
             #[cfg(feature = "parallel")]
             use rayon::prelude::ParallelIterator;
@@ -333,7 +336,7 @@ impl<'env> Scheduler<'env> {
                         self.shutdown_tag = Some(shutdown_tag);
                         self.events.push_event(
                             shutdown_tag,
-                            self.trigger_map.shutdown_reactions.iter().copied(),
+                            self.reaction_graph.shutdown_reactions.iter().copied(),
                             true,
                         );
                     }
@@ -341,7 +344,9 @@ impl<'env> Scheduler<'env> {
 
                 // Submit events to the event queue for all scheduled actions
                 for &(action_key, tag) in res.scheduled_actions.iter() {
-                    let downstream = self.trigger_map.action_triggers[action_key].iter().copied();
+                    let downstream = self.reaction_graph.action_triggers[action_key]
+                        .iter()
+                        .copied();
                     self.events.push_event(tag, downstream, false);
                 }
             });
@@ -352,7 +357,7 @@ impl<'env> Scheduler<'env> {
                 .ports
                 .iter()
                 .filter(|&(_, port)| port.is_set())
-                .flat_map(|(port_key, _)| self.trigger_map.port_triggers[port_key].iter());
+                .flat_map(|(port_key, _)| self.reaction_graph.port_triggers[port_key].iter());
 
             if let Some(mut next_levels) = next_levels {
                 next_levels.extend_above(downstream.copied());

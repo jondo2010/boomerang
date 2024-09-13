@@ -4,7 +4,6 @@ use runtime::Duration;
 #[derive(Clone, Reactor)]
 #[reactor(state = ())]
 struct MainBuilder {
-    #[reactor(action(physical))]
     act: TypedActionKey<u32, Physical>,
 
     reaction_startup: TypedReactionKey<ReactionStartup>,

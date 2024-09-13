@@ -19,8 +19,8 @@ pub use reactor::*;
 
 pub mod prelude {
     pub use super::{
-        EnvBuilder, Logical, Physical, Reactor, TimerActionKey, Trigger, TypedActionKey,
-        TypedPortKey, TypedReactionKey,
+        BuilderError, BuilderFqn, EnvBuilder, Logical, Physical, Reactor, TimerActionKey, Trigger,
+        TypedActionKey, TypedPortKey, TypedReactionKey,
     };
 }
 

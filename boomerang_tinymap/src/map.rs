@@ -207,7 +207,7 @@ impl<K: Key, V> TinyMap<K, V> {
     ///
     /// The caller must ensure that the keys are valid and unique, otherwise the returned
     /// references will UB.
-    pub fn iter_many_unchecked_mut<'a, I>(
+    pub unsafe fn iter_many_unchecked_mut<'a, I>(
         &'a mut self,
         keys: I,
     ) -> IterManyMut<'a, K, V, I::IntoIter>
@@ -294,10 +294,12 @@ mod tests {
         let k5 = map.insert(4);
         let k6 = map.insert(5);
 
-        let values = map.iter_many_unchecked_mut([k4, k2, k6, k3, k5]).map(|x| {
-            *x += 1;
-            *x
-        });
+        let values = unsafe {
+            map.iter_many_unchecked_mut([k4, k2, k6, k3, k5]).map(|x| {
+                *x += 1;
+                *x
+            })
+        };
 
         assert_eq!(values.collect::<Vec<_>>(), vec![4, 2, 6, 3, 5]);
     }
@@ -315,7 +317,7 @@ mod tests {
 
         let map = std::thread::scope(|scope| {
             let thread = scope.spawn(move || {
-                for v in map.iter_many_unchecked_mut(keys) {
+                for v in unsafe { map.iter_many_unchecked_mut(keys) } {
                     *v += 1;
                 }
                 map

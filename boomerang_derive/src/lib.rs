@@ -3,7 +3,7 @@ use quote::ToTokens;
 
 mod reaction;
 mod reactor;
-//mod util;
+mod util;
 
 #[proc_macro_derive(Reaction, attributes(reaction))]
 pub fn derive_reaction(input: proc_macro::TokenStream) -> proc_macro::TokenStream {

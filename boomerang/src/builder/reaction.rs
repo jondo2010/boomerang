@@ -5,7 +5,6 @@ use super::{
     Physical, PortType, Reactor, ReactorBuilderState, TypedActionKey, TypedPortKey,
 };
 use crate::runtime;
-use itertools::Itertools;
 use slotmap::SecondaryMap;
 
 slotmap::new_key_type! {
@@ -74,6 +73,19 @@ pub trait ReactionField {
         order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError>;
+}
+
+impl ReactionField for runtime::Action {
+    type Key = BuilderActionKey;
+
+    fn build(
+        builder: &mut ReactionBuilderState,
+        key: Self::Key,
+        order: usize,
+        trigger_mode: TriggerMode,
+    ) -> Result<(), BuilderError> {
+        builder.add_action(key, order, trigger_mode)
+    }
 }
 
 impl<T: runtime::ActionData> ReactionField for runtime::ActionRef<'_, T> {
@@ -198,49 +210,6 @@ impl ReactionBuilder {
     /// Get the BuilderReactorKey of this Reaction
     pub fn get_reactor_key(&self) -> BuilderReactorKey {
         self.reactor_key
-    }
-
-    /// Build a [`runtime::Reaction`] from this `ReactionBuilder`.
-    pub fn build_runtime_reaction(
-        self,
-        reactor_key: runtime::ReactorKey,
-        port_aliases: &SecondaryMap<BuilderPortKey, runtime::PortKey>,
-        action_aliases: &SecondaryMap<BuilderActionKey, runtime::ActionKey>,
-    ) -> runtime::Reaction {
-        // Create the Vec of readable ports for this reaction sorted by order
-        let use_ports = self
-            .use_ports
-            .iter()
-            .sorted_by_key(|(_, &order)| order)
-            .map(|(builder_port_key, _)| port_aliases[builder_port_key])
-            .collect();
-
-        // Create the Vec of writable ports for this reaction sorted by order
-        let effect_ports = self
-            .effect_ports
-            .iter()
-            .sorted_by_key(|(_, &order)| order)
-            .map(|(builder_port_key, _)| port_aliases[builder_port_key])
-            .collect();
-
-        // Create the Vec of actions for this reaction sorted by order
-        let actions = self
-            .use_effect_actions
-            .iter()
-            .sorted_by_key(|(_, &order)| order)
-            .map(|(builder_action_key, _)| action_aliases[builder_action_key])
-            .dedup()
-            .collect();
-
-        runtime::Reaction::new(
-            self.name,
-            reactor_key,
-            use_ports,
-            effect_ports,
-            actions,
-            self.reaction_fn,
-            None,
-        )
     }
 }
 

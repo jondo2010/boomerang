@@ -15,13 +15,11 @@ pub struct KeyboardEventsBuilder {
     #[reactor(port = "output")]
     pub arrow_key_pressed: TypedPortKey<Key>,
 
-    #[reactor(action(physical, min_delay = "10 msec"))]
+    #[reactor(action(min_delay = "10 msec"))]
     key_press: TypedActionKey<Key, Physical>,
 
     key_press_reaction: TypedReactionKey<ReactionKeyPress<'static>>,
-
     shutdown_reaction: TypedReactionKey<ReactionShutdown>,
-
     startup_reaction: TypedReactionKey<ReactionStartup>,
 }
 

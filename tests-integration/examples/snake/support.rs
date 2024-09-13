@@ -15,19 +15,19 @@ pub fn cell(row: usize, col: usize) -> Cell {
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub enum Direction {
-    UP,
-    RIGHT,
-    DOWN,
-    LEFT,
+    Up,
+    Right,
+    Down,
+    Left,
 }
 
 impl Direction {
     pub fn opposite(&self) -> Self {
         match *self {
-            Self::UP => Self::DOWN,
-            Self::DOWN => Self::UP,
-            Self::RIGHT => Self::LEFT,
-            Self::LEFT => Self::RIGHT,
+            Self::Up => Self::Down,
+            Self::Down => Self::Up,
+            Self::Right => Self::Left,
+            Self::Left => Self::Right,
         }
     }
 }
@@ -50,19 +50,19 @@ impl Cell {
     fn shift(self, direction: Direction, grid_side: usize) -> Cell {
         let Cell { row, col } = self;
         match direction {
-            Direction::UP => Cell {
+            Direction::Up => Cell {
                 row: Self::wrap_add(row, false, grid_side),
                 col,
             },
-            Direction::RIGHT => Cell {
+            Direction::Right => Cell {
                 row,
                 col: Self::wrap_add(col, true, grid_side),
             },
-            Direction::DOWN => Cell {
+            Direction::Down => Cell {
                 row: Self::wrap_add(row, true, grid_side),
                 col,
             },
-            Direction::LEFT => Cell {
+            Direction::Left => Cell {
                 row,
                 col: Self::wrap_add(col, false, grid_side),
             },
@@ -113,7 +113,7 @@ impl CircularSnake {
         snake_heading: Direction,
         grid: &mut SnakeGrid,
     ) -> UpdateResult {
-        let old_head = *&self.snake_positions[self.head];
+        let old_head = self.snake_positions[self.head];
         let new_head = old_head.shift(snake_heading, self.grid_side);
         match grid[new_head] {
             // we're eating our tail, move is illegal
@@ -121,7 +121,7 @@ impl CircularSnake {
             CellState::Food => {
                 // then the tail is not moving, we increase size of the snake
                 self.snake_positions.insert(self.head + 1, new_head);
-                self.head = self.head + 1;
+                self.head += 1;
                 grid[old_head] = CellState::Snake;
                 grid[new_head] = CellState::SnakeHead;
                 UpdateResult::FoodEaten

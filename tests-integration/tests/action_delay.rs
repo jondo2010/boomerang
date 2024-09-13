@@ -12,7 +12,7 @@ struct GeneratedDelay {
     #[reactor(port = "output")]
     y_out: TypedPortKey<u32>,
 
-    #[reactor(action(physical = "false", min_delay = "100 msec"))]
+    #[reactor(action(min_delay = "100 msec"))]
     act: TypedActionKey,
 
     reaction_y_in: TypedReactionKey<ReactionYIn<'static>>,

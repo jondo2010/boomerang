@@ -1,22 +1,18 @@
 use std::fmt::Debug;
 
-use downcast_rs::{impl_downcast, DowncastSync};
-
-use crate::{ActionKey, LevelReactionKey};
+use downcast_rs::{impl_downcast, Downcast};
 
 tinymap::key_type! { pub ReactorKey }
 
-pub trait ReactorState: DowncastSync + Send {}
-impl<T> ReactorState for T where T: DowncastSync {}
-impl_downcast!(sync ReactorState);
+pub trait ReactorState: Downcast {}
+impl<T> ReactorState for T where T: Downcast {}
+impl_downcast!(ReactorState);
 
 pub struct Reactor {
     /// The reactor name
     pub(crate) name: String,
     /// The ReactorState
     pub(crate) state: Box<dyn ReactorState>,
-    /// For each Action, a set of Reactions triggered by it.
-    pub action_triggers: tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
 }
 
 impl Debug for Reactor {
@@ -24,21 +20,15 @@ impl Debug for Reactor {
         f.debug_struct("Reactor")
             .field("name", &self.name)
             .field("state", &"Box<dyn ReactorState>")
-            .field("action_triggers", &self.action_triggers)
             .finish()
     }
 }
 
 impl Reactor {
-    pub fn new(
-        name: &str,
-        state: Box<dyn ReactorState>,
-        action_triggers: tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
-    ) -> Self {
+    pub fn new(name: &str, state: Box<dyn ReactorState>) -> Self {
         Self {
             name: name.to_owned(),
             state,
-            action_triggers,
         }
     }
 

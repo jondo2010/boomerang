@@ -19,12 +19,14 @@ readme = "README.md"
 exclude = ['.gitignore', '.cargo/config', '.vscode', '.devcontainer', '.github']
 
 [workspace.dependencies]
+arrow = { version = "52", default-features = false }
 anyhow = "1.0"
 document-features = "0.2"
 itertools = "0.13"
 thiserror = "1.0"
 tracing = "0.1"
 serde = "1.0"
+serde_arrow = { version = "0.11", features = ["arrow-52"] }
 erased-serde = "0.4"
 rayon = "1.10"
 

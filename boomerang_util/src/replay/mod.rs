@@ -1,9 +1,9 @@
-//! Recording and replaying of Boomerang actions.
+#![doc=include_str!("README.md")]
 
 mod recorder;
-mod replayer;
+//mod replayer;
 
-pub use recorder::{inject_recorder, Recorder, RecorderBuilder};
+pub use recorder::inject_recorder;
 
 use boomerang::runtime;
 

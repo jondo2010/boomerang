@@ -21,12 +21,12 @@ struct Args {
     fast_forward: bool,
 
     /// The filename to serialize recorded actions into
-    #[cfg(feature = "rec_replay")]
+    #[cfg(feature = "replay")]
     #[arg(long, value_hint = clap::ValueHint::FilePath)]
     record_filename: Option<std::path::PathBuf>,
 
     /// The list of fully-qualified actions to record, e.g., "snake::keyboard::key_press"
-    #[cfg(feature = "rec_replay")]
+    #[cfg(feature = "replay")]
     #[arg(long)]
     record_actions: Vec<String>,
 }
@@ -59,7 +59,7 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
 
     let args = Args::parse();
 
-    #[cfg(feature = "rec_replay")]
+    #[cfg(feature = "replay")]
     if let Some(filename) = args.record_filename {
         tracing::info!("Recording actions to {filename:?}");
         crate::replay::inject_recorder(

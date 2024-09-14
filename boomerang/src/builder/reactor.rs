@@ -26,7 +26,7 @@ pub trait Reactor: Clone + Sized {
 
     fn build(
         name: &str,
-        state: State,
+        state: Self::State,
         parent: Option<BuilderReactorKey>,
         env: &mut EnvBuilder,
     ) -> Result<Self, BuilderError>;

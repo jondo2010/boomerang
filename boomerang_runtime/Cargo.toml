@@ -11,13 +11,14 @@ repository.workspace = true
 [features]
 default = [
     #"parallel",
-    #"serde",
+    "serde",
 ]
 #TODO: re-enable parallel execution with bumpalo-herd
 #parallel = ["dep:rayon", "dep:bumpalo-herd"]
-serde = ["dep:serde", "dep:erased-serde"]
+serde = ["dep:arrow", "dep:erased-serde", "dep:serde", "dep:serde_arrow"]
 
 [dependencies]
+arrow = { workspace = true, optional = true, features = ["prettyprint"] }
 crossbeam-channel = "0.5"
 downcast-rs = "1.2"
 itertools.workspace = true
@@ -29,6 +30,7 @@ tracing = { workspace = true, features = [
     #"release_max_level_warn",
 ] }
 serde = { workspace = true, optional = true, features = ["derive"] }
+serde_arrow = { workspace = true, features = ["arrow-52"], optional = true }
 erased-serde = { workspace = true, optional = true }
 
 bumpalo = { version = "3.16", features = ["collections"] }

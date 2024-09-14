@@ -10,9 +10,9 @@ use crate::runtime;
 fn test_reaction_ports() -> anyhow::Result<()> {
     let mut env_builder = EnvBuilder::new();
     let mut builder_a = env_builder.add_reactor("reactorA", None, ());
-    let port_a = builder_a.add_port::<()>("portA", PortType::Input).unwrap();
-    let port_b = builder_a.add_port::<()>("portB", PortType::Output).unwrap();
-    let port_c = builder_a.add_port::<()>("portC", PortType::Input).unwrap();
+    let port_a = builder_a.add_input_port::<()>("portA").unwrap();
+    let port_b = builder_a.add_output_port::<()>("portB").unwrap();
+    let port_c = builder_a.add_input_port::<()>("portC").unwrap();
     let reaction_a = builder_a
         .add_reaction("reactionA", Box::new(|_, _, _, _, _| {}))
         .with_port(port_a, 0, TriggerMode::TriggersOnly)?
@@ -222,9 +222,9 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
     let source_reactor = builder
         .add_child_with(|parent, env| {
             let mut builder = env.add_reactor("Source", Some(parent), ());
-            let clock = builder.add_port::<u32>("clock", PortType::Output)?;
-            let o1 = builder.add_port::<u32>("o1", PortType::Output)?;
-            let o2 = builder.add_port::<u32>("o2", PortType::Output)?;
+            let clock = builder.add_output_port::<u32>("clock")?;
+            let o1 = builder.add_output_port::<u32>("o1")?;
+            let o2 = builder.add_output_port::<u32>("o2")?;
             let t1 = builder
                 .add_timer(
                     "t1",
@@ -341,9 +341,9 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
 
     let sink_reactor = builder.add_child_with(|parent, env| {
         let mut builder = env.add_reactor("Sink", Some(parent), ());
-        let clock = builder.add_port::<u32>("clock", PortType::Input).unwrap();
-        let in1 = builder.add_port::<u32>("in1", PortType::Input).unwrap();
-        let in2 = builder.add_port::<u32>("in2", PortType::Input).unwrap();
+        let clock = builder.add_input_port::<u32>("clock").unwrap();
+        let in1 = builder.add_input_port::<u32>("in1").unwrap();
+        let in2 = builder.add_input_port::<u32>("in2").unwrap();
         let _ = builder
             .add_reaction(
                 "reaction_clock",

@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use super::{
     BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactorKey, EnvBuilder, FindElements,
-    Physical, PortType, Reactor, ReactorBuilderState, TypedActionKey, TypedPortKey,
+    Physical, PortType, Reactor, ReactorBuilderState, TypedActionKey,
 };
 use crate::runtime;
 use slotmap::SecondaryMap;
@@ -12,21 +12,21 @@ slotmap::new_key_type! {
 }
 
 #[derive(Copy, Debug)]
-pub struct TypedReactionKey<R: Reaction>(BuilderReactionKey, PhantomData<R>);
+pub struct TypedReactionKey<R>(BuilderReactionKey, PhantomData<R>);
 
-impl<R: Reaction> Clone for TypedReactionKey<R> {
+impl<R> Clone for TypedReactionKey<R> {
     fn clone(&self) -> Self {
         Self(self.0, PhantomData)
     }
 }
 
-impl<R: Reaction> Default for TypedReactionKey<R> {
+impl<R> Default for TypedReactionKey<R> {
     fn default() -> Self {
         Self(Default::default(), Default::default())
     }
 }
 
-impl<R: Reaction> TypedReactionKey<R> {
+impl<R> TypedReactionKey<R> {
     pub fn new(reaction_key: BuilderReactionKey) -> Self {
         Self(reaction_key, PhantomData)
     }
@@ -114,8 +114,8 @@ impl<T: runtime::ActionData> ReactionField for runtime::PhysicalActionRef<T> {
     }
 }
 
-impl<T: runtime::PortData> ReactionField for runtime::Port<T> {
-    type Key = TypedPortKey<T>;
+impl<'a, T: runtime::PortData> ReactionField for runtime::InputRef<'a, T> {
+    type Key = BuilderPortKey;
 
     fn build(
         builder: &mut ReactionBuilderState,
@@ -123,7 +123,20 @@ impl<T: runtime::PortData> ReactionField for runtime::Port<T> {
         order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
-        builder.add_port(key.into(), order, trigger_mode)
+        builder.add_port(key, order, trigger_mode)
+    }
+}
+
+impl<'a, T: runtime::PortData> ReactionField for runtime::OutputRef<'a, T> {
+    type Key = BuilderPortKey;
+
+    fn build(
+        builder: &mut ReactionBuilderState,
+        key: Self::Key,
+        order: usize,
+        trigger_mode: TriggerMode,
+    ) -> Result<(), BuilderError> {
+        builder.add_port(key, order, trigger_mode)
     }
 }
 

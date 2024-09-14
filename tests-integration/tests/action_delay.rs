@@ -1,32 +1,26 @@
-use boomerang::builder::{Reactor, Trigger, TypedActionKey, TypedPortKey, TypedReactionKey};
-use boomerang::{runtime, Reaction, Reactor};
-
-/// Test logical action with delay.
-
-#[derive(Reactor, Clone)]
-#[reactor(state = "GeneratedDelayState")]
-struct GeneratedDelay {
-    #[reactor(port = "input")]
-    y_in: TypedPortKey<u32>,
-
-    #[reactor(port = "output")]
-    y_out: TypedPortKey<u32>,
-
-    #[reactor(action(min_delay = "100 msec"))]
-    act: TypedActionKey,
-
-    reaction_y_in: TypedReactionKey<ReactionYIn<'static>>,
-    reaction_act: TypedReactionKey<ReactionAct<'static>>,
-}
+use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
 
 #[derive(Default)]
 struct GeneratedDelayState {
     y_state: u32,
 }
 
+/// Test logical action with delay.
+
+#[derive(Reactor, Clone)]
+#[reactor(state = GeneratedDelayState)]
+struct GeneratedDelay {
+    y_in: TypedPortKey<u32, Input>,
+    y_out: TypedPortKey<u32, Output>,
+    #[reactor(action(min_delay = "100 msec"))]
+    act: TypedActionKey,
+    reaction_y_in: TypedReactionKey<ReactionYIn<'static>>,
+    reaction_act: TypedReactionKey<ReactionAct<'static>>,
+}
+
 #[derive(Reaction)]
 struct ReactionYIn<'a> {
-    y_in: &'a runtime::Port<u32>,
+    y_in: runtime::InputRef<'a, u32>,
     #[reaction(effects)]
     act: runtime::ActionRef<'a>,
 }
@@ -39,7 +33,7 @@ impl Trigger for ReactionYIn<'_> {
         ctx: &mut runtime::Context,
         state: &mut <Self::Reactor as Reactor>::State,
     ) {
-        state.y_state = self.y_in.get().unwrap();
+        state.y_state = self.y_in.unwrap();
         ctx.schedule_action(&mut self.act, None, None);
     }
 }
@@ -47,7 +41,7 @@ impl Trigger for ReactionYIn<'_> {
 #[derive(Reaction)]
 #[reaction(triggers(action = "act"))]
 struct ReactionAct<'a> {
-    y_out: &'a mut runtime::Port<u32>,
+    y_out: runtime::OutputRef<'a, u32>,
 }
 
 impl Trigger for ReactionAct<'_> {
@@ -58,22 +52,21 @@ impl Trigger for ReactionAct<'_> {
         _ctx: &mut runtime::Context,
         state: &mut <Self::Reactor as Reactor>::State,
     ) {
-        *self.y_out.get_mut() = Some(state.y_state);
+        *self.y_out = Some(state.y_state);
     }
 }
 
 #[derive(Reactor, Clone)]
 #[reactor(state = "()")]
 struct SourceBuilder {
-    #[reactor(port = "output")]
-    out: TypedPortKey<u32>,
+    out: TypedPortKey<u32, Output>,
     reaction_startup: TypedReactionKey<SourceReactionStartup<'static>>,
 }
 
 #[derive(Reaction)]
 #[reaction(triggers(startup))]
 struct SourceReactionStartup<'a> {
-    out: &'a mut runtime::Port<u32>,
+    out: runtime::OutputRef<'a, u32>,
 }
 
 impl Trigger for SourceReactionStartup<'_> {
@@ -84,22 +77,21 @@ impl Trigger for SourceReactionStartup<'_> {
         _ctx: &mut runtime::Context,
         _state: &mut <Self::Reactor as Reactor>::State,
     ) {
-        *self.out.get_mut() = Some(1);
+        *self.out = Some(1);
     }
 }
 
 #[derive(Reactor, Clone)]
 #[reactor(state = bool)]
 struct Sink {
-    #[reactor(port = "input")]
-    inp: TypedPortKey<u32>,
+    inp: TypedPortKey<u32, Input>,
     reaction_in: TypedReactionKey<SinkReactionIn<'static>>,
 }
 
 #[derive(Reaction)]
 struct SinkReactionIn<'a> {
     #[reaction(path = inp)]
-    _inp: &'a runtime::Port<u32>,
+    _inp: runtime::InputRef<'a, u32>,
 }
 
 impl Trigger for SinkReactionIn<'_> {

@@ -2,25 +2,23 @@
 #![allow(unused_variables)]
 
 use boomerang::{
-    builder::{Trigger, TypedPortKey, TypedReactionKey},
+    builder::{Input, Output, Trigger, TypedPortKey, TypedReactionKey},
     runtime, Reaction, Reactor,
 };
 
 #[derive(Clone, Reactor)]
 #[reactor(state = ())]
 struct ABuilder {
-    #[reactor(port = "input")]
-    x: TypedPortKey<()>,
-    #[reactor(port = "output")]
-    y: TypedPortKey<()>,
+    x: TypedPortKey<(), Input>,
+    y: TypedPortKey<(), Output>,
     reaction_x1: TypedReactionKey<AReactionX<'static>>,
     reaction_x2: TypedReactionKey<AReactionX<'static>>,
 }
 
 #[derive(Reaction)]
 struct AReactionX<'a> {
-    x: &'a runtime::Port<()>,
-    y: &'a mut runtime::Port<()>,
+    x: runtime::InputRef<'a, ()>,
+    y: runtime::OutputRef<'a, ()>,
 }
 
 impl<'a> Trigger for AReactionX<'a> {
@@ -31,10 +29,8 @@ impl<'a> Trigger for AReactionX<'a> {
 #[derive(Clone, Reactor)]
 #[reactor(state = ())]
 struct BBuilder {
-    #[reactor(port = "input")]
-    x: TypedPortKey<()>,
-    #[reactor(port = "output")]
-    y: TypedPortKey<()>,
+    x: TypedPortKey<(), Input>,
+    y: TypedPortKey<(), Output>,
     reaction_x: TypedReactionKey<BReactionX>,
     reaction_startup: TypedReactionKey<BReactionStartup<'static>>,
 }
@@ -51,7 +47,7 @@ impl Trigger for BReactionX {
 #[derive(Reaction)]
 #[reaction(triggers(startup))]
 struct BReactionStartup<'a> {
-    y: &'a mut runtime::Port<()>,
+    y: runtime::OutputRef<'a, ()>,
 }
 
 impl Trigger for BReactionStartup<'_> {

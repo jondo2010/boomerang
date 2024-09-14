@@ -15,11 +15,8 @@ struct HelloBenchBuilder {
     #[reactor(timer(offset = "100 msec", period = "1 sec"))]
     tim1: TimerActionKey,
 
-    #[reactor(port = "input")]
-    in1: TypedPortKey<u32>,
-
-    #[reactor(port = "output")]
-    out1: TypedPortKey<u32>,
+    in1: TypedPortKey<u32, Input>,
+    out1: TypedPortKey<u32, Output>,
 
     foo: TypedReactionKey<ReactionFoo<'static>>,
     bar: TypedReactionKey<ReactionBar<'static>>,
@@ -28,7 +25,7 @@ struct HelloBenchBuilder {
 #[derive(Reaction)]
 #[reaction(triggers(action = "tim1"))]
 struct ReactionFoo<'a> {
-    out1: &'a mut runtime::Port<u32>,
+    out1: runtime::OutputRef<'a, u32>,
 }
 
 impl Trigger for ReactionFoo<'_> {
@@ -39,13 +36,13 @@ impl Trigger for ReactionFoo<'_> {
         state: &mut <Self::Reactor as Reactor>::State,
     ) {
         state.my_i += 1;
-        **self.out1 = Some(state.my_i);
+        *self.out1 = Some(state.my_i);
     }
 }
 
 #[derive(Reaction)]
 struct ReactionBar<'a> {
-    in1: &'a runtime::Port<u32>,
+    in1: runtime::InputRef<'a, u32>,
 }
 
 impl Trigger for ReactionBar<'_> {
@@ -56,7 +53,7 @@ impl Trigger for ReactionBar<'_> {
         ctx: &mut runtime::Context,
         _state: &mut <Self::Reactor as Reactor>::State,
     ) {
-        if self.in1.get().unwrap() >= 10000 {
+        if self.in1.unwrap() >= 10000 {
             ctx.schedule_shutdown(None);
         }
     }

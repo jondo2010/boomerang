@@ -3,7 +3,7 @@ use syn::{Ident, Type, TypePath, TypeReference};
 
 use crate::util::extract_path_ident;
 
-use super::{ReactionReceiver, ACTION, ACTION_REF, PHYSICAL_ACTION_REF, PORT};
+use super::{ReactionReceiver, ACTION, ACTION_REF, INPUT_REF, OUTPUT_REF, PHYSICAL_ACTION_REF};
 
 pub struct TriggerInner {
     reaction_ident: Ident,
@@ -46,11 +46,7 @@ impl TriggerInner {
                             elem
                         ))
                     })?;
-                    if *ty == PORT {
-                        initializer_idents.push(field.ident.clone().unwrap());
-                        port_idents.push(field.ident.clone().unwrap());
-                        port_types.push(*elem.clone());
-                    } else if *ty == ACTION {
+                    if *ty == ACTION {
                         initializer_idents.push(field.ident.clone().unwrap());
                         action_idents.push(field.ident.clone().unwrap());
                     } else {
@@ -72,11 +68,7 @@ impl TriggerInner {
                             elem
                         ))
                     })?;
-                    if *ty == PORT {
-                        initializer_idents.push(field.ident.clone().unwrap());
-                        port_mut_idents.push(field.ident.clone().unwrap());
-                        port_mut_types.push(*elem.clone());
-                    } else if *ty == ACTION {
+                    if *ty == ACTION {
                         initializer_idents.push(field.ident.clone().unwrap());
                         action_idents.push(field.ident.clone().unwrap());
                     } else {
@@ -94,13 +86,19 @@ impl TriggerInner {
                             field.ty
                         ))
                     })?;
-                    if *ty == ACTION_REF || *ty == PHYSICAL_ACTION_REF {
+
+                    if *ty == INPUT_REF {
+                        initializer_idents.push(field.ident.clone().unwrap());
+                        port_idents.push(field.ident.clone().unwrap());
+                        port_types.push(field.ty.clone());
+                    } else if *ty == OUTPUT_REF {
+                        initializer_idents.push(field.ident.clone().unwrap());
+                        port_mut_idents.push(field.ident.clone().unwrap());
+                        port_mut_types.push(field.ty.clone());
+                    } else if *ty == ACTION_REF || *ty == PHYSICAL_ACTION_REF {
                         initializer_idents.push(field.ident.clone().unwrap());
                         action_idents.push(field.ident.clone().unwrap());
-                        action_types.push(Type::Path(TypePath {
-                            qself: None,
-                            path: path.clone(),
-                        }));
+                        action_types.push(field.ty.clone());
                     } else {
                         return Err(
                             darling::Error::custom("Unexpected Reaction member").with_span(&ty)
@@ -160,7 +158,8 @@ impl ToTokens for TriggerInner {
                     ::std::convert::TryInto::try_into(ports)
                         .expect("Unable to destructure ref ports for reaction");
 
-                #(let #port_idents = #port_idents.downcast_ref::<#port_types>()
+                #(let #port_idents = #port_idents.downcast_ref::<::boomerang::runtime::Port<_>>()
+                    .map(Into::into)
                     .expect("Wrong Port type for reaction"); );*
             }
         } else {
@@ -174,7 +173,8 @@ impl ToTokens for TriggerInner {
                     ::std::convert::TryInto::try_into(ports_mut)
                         .expect("Unable to destructure mut ports for reaction");
 
-                #(let #port_mut_idents = #port_mut_idents.downcast_mut::<#port_mut_types>()
+                #(let #port_mut_idents = #port_mut_idents.downcast_mut::<::boomerang::runtime::Port<_>>()
+                    .map(Into::into)
                     .expect("Wrong Port type for reaction"); );*
             }
         } else {

@@ -13,7 +13,8 @@ mod trigger_inner;
 use reaction_field_inner::ReactionFieldInner;
 use trigger_inner::TriggerInner;
 
-const PORT: &str = "Port";
+const INPUT_REF: &str = "InputRef";
+const OUTPUT_REF: &str = "OutputRef";
 const ACTION: &str = "Action";
 const ACTION_REF: &str = "ActionRef";
 const PHYSICAL_ACTION_REF: &str = "PhysicalActionRef";

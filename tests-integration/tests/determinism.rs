@@ -1,13 +1,12 @@
 use boomerang::{
-    builder::{TimerActionKey, Trigger, TypedPortKey, TypedReactionKey},
+    builder::{Input, Output, TimerActionKey, Trigger, TypedPortKey, TypedReactionKey},
     runtime, Reaction, Reactor,
 };
 
 #[derive(Clone, Reactor)]
 #[reactor(state = ())]
 struct SourceBuilder {
-    #[reactor(port = "output")]
-    y: TypedPortKey<i32>,
+    y: TypedPortKey<i32, Output>,
     #[reactor(timer())]
     t: TimerActionKey,
     reaction_t: TypedReactionKey<SourceReactionT<'static>>,
@@ -16,40 +15,39 @@ struct SourceBuilder {
 #[derive(Reaction)]
 #[reaction(triggers(action = "t"))]
 struct SourceReactionT<'a> {
-    y: &'a mut runtime::Port<i32>,
+    y: runtime::OutputRef<'a, i32>,
 }
 
 impl Trigger for SourceReactionT<'_> {
     type Reactor = SourceBuilder;
     fn trigger(&mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
-        *self.y.get_mut() = Some(1);
+        *self.y = Some(1);
     }
 }
 
 #[derive(Clone, Reactor)]
 #[reactor(state = ())]
 struct DestinationBuilder {
+    x: TypedPortKey<i32, Input>,
     #[reactor(port = "input")]
-    x: TypedPortKey<i32>,
-    #[reactor(port = "input")]
-    y: TypedPortKey<i32>,
+    y: TypedPortKey<i32, Input>,
     reaction_x_y: TypedReactionKey<DestReactionXY<'static>>,
 }
 
 #[derive(Reaction)]
 struct DestReactionXY<'a> {
-    x: &'a runtime::Port<i32>,
-    y: &'a runtime::Port<i32>,
+    x: runtime::InputRef<'a, i32>,
+    y: runtime::InputRef<'a, i32>,
 }
 
 impl Trigger for DestReactionXY<'_> {
     type Reactor = DestinationBuilder;
     fn trigger(&mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
         let mut sum = 0;
-        if let Some(x) = *self.x.get() {
+        if let Some(x) = *self.x {
             sum += x;
         }
-        if let Some(y) = *self.y.get() {
+        if let Some(y) = *self.y {
             sum += y;
         }
         println!("Received {}", sum);
@@ -60,23 +58,21 @@ impl Trigger for DestReactionXY<'_> {
 #[derive(Clone, Reactor)]
 #[reactor(state = ())]
 struct PassBuilder {
-    #[reactor(port = "input")]
-    x: TypedPortKey<i32>,
-    #[reactor(port = "output")]
-    y: TypedPortKey<i32>,
+    x: TypedPortKey<i32, Input>,
+    y: TypedPortKey<i32, Output>,
     reaction_x: TypedReactionKey<PassReactionX<'static>>,
 }
 
 #[derive(Reaction)]
 struct PassReactionX<'a> {
-    x: &'a runtime::Port<i32>,
-    y: &'a mut runtime::Port<i32>,
+    x: runtime::InputRef<'a, i32>,
+    y: runtime::OutputRef<'a, i32>,
 }
 
 impl Trigger for PassReactionX<'_> {
     type Reactor = PassBuilder;
     fn trigger(&mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
-        *self.y.get_mut() = *self.x.get();
+        *self.y = *self.x;
     }
 }
 

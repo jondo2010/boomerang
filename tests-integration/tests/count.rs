@@ -2,12 +2,15 @@ use boomerang::{builder::*, runtime, Reaction, Reactor};
 use boomerang_util::timeout;
 
 #[derive(Reactor, Clone)]
-#[reactor(state = u32)]
+#[reactor(
+    state = u32,
+    reaction=ReactionT,
+    reaction=ReactionShutdown,
+)]
 struct Count {
     #[reactor(timer(period = "1 msec"))]
     t: TimerActionKey,
-    #[reactor(port = "output")]
-    c: TypedPortKey<u32>,
+    c: TypedPortKey<u32, Output>,
     #[reactor(child = runtime::Duration::from_secs(1))]
     _timeout: timeout::Timeout,
     reaction_t: TypedReactionKey<ReactionT<'static>>,
@@ -18,7 +21,7 @@ struct Count {
 #[reaction(triggers(action = "t"))]
 struct ReactionT<'a> {
     #[reaction(path = "c")]
-    xyc: &'a mut runtime::Port<u32>,
+    xyc: runtime::OutputRef<'a, u32>,
 }
 
 impl Trigger for ReactionT<'_> {
@@ -31,7 +34,7 @@ impl Trigger for ReactionT<'_> {
     ) {
         *state += 1;
         assert!(self.xyc.is_none());
-        *self.xyc.get_mut() = Some(*state);
+        *self.xyc = Some(*state);
     }
 }
 

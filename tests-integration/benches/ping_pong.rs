@@ -27,15 +27,11 @@ impl Ping {
 #[derive(Clone, Reactor)]
 #[reactor(state = Ping)]
 struct PingBuilder {
-    #[reactor(port = "input")]
-    in_start: TypedPortKey<()>,
-    #[reactor(port = "input")]
-    in_pong: TypedPortKey<()>,
+    in_start: TypedPortKey<(), Input>,
+    in_pong: TypedPortKey<(), Input>,
 
-    #[reactor(port = "output")]
-    out_ping: TypedPortKey<()>,
-    #[reactor(port = "output")]
-    out_finished: TypedPortKey<()>,
+    out_ping: TypedPortKey<(), Output>,
+    out_finished: TypedPortKey<(), Output>,
 
     serve: TypedActionKey,
 
@@ -63,13 +59,13 @@ impl Trigger for ReactionInStart<'_> {
 #[derive(Reaction)]
 #[reaction(triggers(action = "serve"))]
 struct ReactionServe<'a> {
-    out_ping: &'a mut runtime::Port<()>,
+    out_ping: runtime::OutputRef<'a>,
 }
 
 impl Trigger for ReactionServe<'_> {
     type Reactor = PingBuilder;
     fn trigger(&mut self, _ctx: &mut runtime::Context, state: &mut Ping) {
-        *self.out_ping.get_mut() = Some(());
+        *self.out_ping = Some(());
         state.pings_left -= 1;
     }
 }
@@ -77,7 +73,7 @@ impl Trigger for ReactionServe<'_> {
 #[derive(Reaction)]
 #[reaction(triggers(port = "in_pong"))]
 struct ReactionInPong<'a> {
-    out_finished: &'a mut runtime::Port<()>,
+    out_finished: runtime::OutputRef<'a>,
     serve: runtime::ActionRef<'a>,
 }
 
@@ -85,7 +81,7 @@ impl Trigger for ReactionInPong<'_> {
     type Reactor = PingBuilder;
     fn trigger(&mut self, ctx: &mut runtime::Context, state: &mut Ping) {
         if state.pings_left == 0 {
-            *self.out_finished.get_mut() = Some(());
+            *self.out_finished = Some(());
         } else {
             ctx.schedule_action(&mut self.serve, None, None);
         }
@@ -100,23 +96,21 @@ struct Pong {
 #[derive(Clone, Reactor)]
 #[reactor(state = Pong)]
 struct PongBuilder {
-    #[reactor(port = "input")]
-    in_ping: TypedPortKey<()>,
-    #[reactor(port = "output")]
-    out_pong: TypedPortKey<()>,
+    in_ping: TypedPortKey<(), Input>,
+    out_pong: TypedPortKey<(), Output>,
     reaction_in_ping: TypedReactionKey<ReactionInPing<'static>>,
 }
 
 #[derive(Reaction)]
 #[reaction(triggers(port = "in_ping"))]
 struct ReactionInPing<'a> {
-    out_pong: &'a mut runtime::Port<()>,
+    out_pong: runtime::OutputRef<'a>,
 }
 
 impl Trigger for ReactionInPing<'_> {
     type Reactor = PongBuilder;
     fn trigger(&mut self, _ctx: &mut runtime::Context, state: &mut Pong) {
-        *self.out_pong.get_mut() = Some(());
+        *self.out_pong = Some(());
         state.count += 1;
     }
 }
@@ -147,20 +141,20 @@ struct MainBuilder {
 #[reaction(triggers(startup))]
 struct ReactionStartup<'a> {
     #[reaction(path = "ping.in_start")]
-    in_start: &'a mut runtime::Port<()>,
+    in_start: runtime::OutputRef<'a>,
 }
 
 impl Trigger for ReactionStartup<'_> {
     type Reactor = MainBuilder;
     fn trigger(&mut self, _ctx: &mut runtime::Context, _state: &mut Main) {
-        *self.in_start.get_mut() = Some(());
+        *self.in_start = Some(());
     }
 }
 
 #[derive(Reaction)]
 struct ReactionDone<'a> {
     #[reaction(path = "ping.out_finished")]
-    _out: &'a runtime::Port<()>,
+    _out: runtime::InputRef<'a>,
 }
 
 impl Trigger for ReactionDone<'_> {

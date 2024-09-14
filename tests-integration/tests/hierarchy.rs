@@ -7,8 +7,7 @@ use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
 #[derive(Clone, Reactor)]
 #[reactor(state = ())]
 struct SourceBuilder {
-    #[reactor(port = "output")]
-    out: TypedPortKey<u32>,
+    out: TypedPortKey<u32, Output>,
     #[reactor(timer())]
     t: TimerActionKey,
     reaction_out: TypedReactionKey<SourceReactionOut<'static>>,
@@ -17,13 +16,13 @@ struct SourceBuilder {
 #[derive(Reaction)]
 #[reaction(triggers(action = "t"))]
 struct SourceReactionOut<'a> {
-    out: &'a mut runtime::Port<u32>,
+    out: runtime::OutputRef<'a, u32>,
 }
 
 impl Trigger for SourceReactionOut<'_> {
     type Reactor = SourceBuilder;
     fn trigger(&mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
-        *self.out.get_mut() = Some(1);
+        *self.out = Some(1);
     }
 }
 
@@ -40,31 +39,28 @@ impl Gain {
 #[derive(Clone, Reactor)]
 #[reactor(state = Gain)]
 struct GainBuilder {
-    #[reactor(port = "input")]
-    inp: TypedPortKey<u32>,
-    #[reactor(port = "output")]
-    out: TypedPortKey<u32>,
+    inp: TypedPortKey<u32, Input>,
+    out: TypedPortKey<u32, Output>,
     reaction_in: TypedReactionKey<GainReactionIn<'static>>,
 }
 
 #[derive(Reaction)]
 struct GainReactionIn<'a> {
-    inp: &'a runtime::Port<u32>,
-    out: &'a mut runtime::Port<u32>,
+    inp: runtime::InputRef<'a, u32>,
+    out: runtime::OutputRef<'a, u32>,
 }
 
 impl Trigger for GainReactionIn<'_> {
     type Reactor = GainBuilder;
     fn trigger(&mut self, _ctx: &mut runtime::Context, state: &mut Gain) {
-        *self.out.get_mut() = self.inp.map(|inp| inp * state.gain);
+        *self.out = self.inp.map(|inp| inp * state.gain);
     }
 }
 
 #[derive(Clone, Reactor)]
 #[reactor(state = ())]
 struct PrintBuilder {
-    #[reactor(port = "input")]
-    inp: TypedPortKey<u32>,
+    inp: TypedPortKey<u32, Input>,
     #[reactor(action())]
     a: TypedActionKey<()>,
     reaction_in: TypedReactionKey<PrintReactionIn<'static>>,
@@ -72,7 +68,7 @@ struct PrintBuilder {
 
 #[derive(Reaction)]
 struct PrintReactionIn<'a> {
-    inp: &'a runtime::Port<u32>,
+    inp: runtime::InputRef<'a, u32>,
     #[reaction(path = "a")]
     _a: runtime::ActionRef<'a>,
 }
@@ -80,7 +76,7 @@ struct PrintReactionIn<'a> {
 impl Trigger for PrintReactionIn<'_> {
     type Reactor = PrintBuilder;
     fn trigger(&mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
-        let value = self.inp.get();
+        let value = *self.inp;
         assert!(matches!(value, Some(2u32)));
         println!("Received {}", value.unwrap());
     }
@@ -94,12 +90,9 @@ impl Trigger for PrintReactionIn<'_> {
     connection(from = "gain.out", to = "out2")
 )]
 struct GainContainerBuilder {
-    #[reactor(port = "input")]
-    inp: TypedPortKey<u32>,
-    #[reactor(port = "output")]
-    out: TypedPortKey<u32>,
-    #[reactor(port = "output")]
-    out2: TypedPortKey<u32>,
+    inp: TypedPortKey<u32, Input>,
+    out: TypedPortKey<u32, Output>,
+    out2: TypedPortKey<u32, Output>,
     #[reactor(child= Gain::new(2))]
     gain: GainBuilder,
 }

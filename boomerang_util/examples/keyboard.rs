@@ -23,7 +23,7 @@ mod example {
     #[derive(Reaction)]
     struct ReactionKeyPress<'a> {
         #[reaction(path = "keyboard.arrow_key_pressed")]
-        arrow_key_pressed: &'a runtime::Port<termion::event::Key>,
+        arrow_key_pressed: runtime::InputRef<'a, termion::event::Key>,
     }
 
     impl Trigger for ReactionKeyPress<'_> {
@@ -33,11 +33,11 @@ mod example {
             let mut stdout = stdout.lock();
 
             // this might be overwritten several times, only committed on screen refreshes
-            let c = match self.arrow_key_pressed.get().unwrap() {
-                termion::event::Key::Left => '←',
-                termion::event::Key::Right => '→',
-                termion::event::Key::Up => '↑',
-                termion::event::Key::Down => '↓',
+            let c = match *self.arrow_key_pressed {
+                Some(termion::event::Key::Left) => '←',
+                Some(termion::event::Key::Right) => '→',
+                Some(termion::event::Key::Up) => '↑',
+                Some(termion::event::Key::Down) => '↓',
                 _ => unreachable!(),
             };
 

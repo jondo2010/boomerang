@@ -1,8 +1,8 @@
 use super::{
     ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
-    EnvBuilder, FindElements, Logical, Physical, PhysicalActionKey, PortType, Reaction,
-    ReactionBuilderState, TimerActionKey, TimerSpec, TriggerMode, TypedActionKey, TypedPortKey,
-    TypedReactionKey,
+    EnvBuilder, FindElements, Input, Logical, Output, Physical, PhysicalActionKey, PortType,
+    Reaction, ReactionBuilderState, TimerActionKey, TimerSpec, TriggerMode, TypedActionKey,
+    TypedPortKey, TypedReactionKey,
 };
 use crate::runtime;
 use slotmap::SecondaryMap;
@@ -26,7 +26,7 @@ pub trait Reactor: Clone + Sized {
 
     fn build(
         name: &str,
-        state: Self::State,
+        state: State,
         parent: Option<BuilderReactorKey>,
         env: &mut EnvBuilder,
     ) -> Result<Self, BuilderError>;
@@ -70,15 +70,27 @@ impl<R: Reactor> ReactorField for R {
     }
 }
 
-impl<T: runtime::PortData> ReactorField for TypedPortKey<T> {
-    type Inner = PortType;
+impl<T: runtime::PortData> ReactorField for TypedPortKey<T, Input> {
+    type Inner = ();
 
     fn build(
         name: &str,
-        inner: Self::Inner,
+        _inner: Self::Inner,
         parent: &'_ mut ReactorBuilderState,
     ) -> Result<Self, BuilderError> {
-        parent.add_port(name, inner)
+        parent.add_input_port(name)
+    }
+}
+
+impl<T: runtime::PortData> ReactorField for TypedPortKey<T, Output> {
+    type Inner = ();
+
+    fn build(
+        name: &str,
+        _inner: Self::Inner,
+        parent: &'_ mut ReactorBuilderState,
+    ) -> Result<Self, BuilderError> {
+        parent.add_output_port(name)
     }
 }
 
@@ -351,13 +363,20 @@ impl<'a> ReactorBuilderState<'a> {
         self.env.add_reaction(name, self.reactor_key, reaction_fn)
     }
 
-    /// Add a new port to this reactor.
-    pub fn add_port<T: runtime::PortData>(
+    /// Add a new input port to this reactor.
+    pub fn add_input_port<T: runtime::PortData>(
         &mut self,
         name: &str,
-        port_type: PortType,
-    ) -> Result<TypedPortKey<T>, BuilderError> {
-        self.env.add_port::<T>(name, port_type, self.reactor_key)
+    ) -> Result<TypedPortKey<T, Input>, BuilderError> {
+        self.env.add_input_port::<T>(name, self.reactor_key)
+    }
+
+    /// Add a new output port to this reactor.
+    pub fn add_output_port<T: runtime::PortData>(
+        &mut self,
+        name: &str,
+    ) -> Result<TypedPortKey<T, Output>, BuilderError> {
+        self.env.add_output_port::<T>(name, self.reactor_key)
     }
 
     /// Add a new child reactor to this reactor.
@@ -379,10 +398,10 @@ impl<'a> ReactorBuilderState<'a> {
 
     /// Bind 2 ports on this reactor. This has the logical meaning of "connecting" `port_a` to
     /// `port_b`.
-    pub fn bind_port<T: runtime::PortData>(
+    pub fn bind_port<T: runtime::PortData, Q1, Q2>(
         &mut self,
-        port_a_key: TypedPortKey<T>,
-        port_b_key: TypedPortKey<T>,
+        port_a_key: TypedPortKey<T, Q1>,
+        port_b_key: TypedPortKey<T, Q2>,
     ) -> Result<(), BuilderError> {
         self.env.bind_port(port_a_key, port_b_key)
     }

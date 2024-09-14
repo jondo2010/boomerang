@@ -1,8 +1,8 @@
 use super::{
     action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder, ActionBuilderFn,
     ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
-    BuilderReactorKey, Logical, Physical, PortBuilder, PortType, ReactionBuilderState,
-    ReactorBuilder, ReactorBuilderState, TypedActionKey, TypedPortKey,
+    BuilderReactorKey, Input, Logical, Output, Physical, PortBuilder, PortType, PortType2,
+    ReactionBuilderState, ReactorBuilder, ReactorBuilderState, TypedActionKey, TypedPortKey,
 };
 use crate::runtime;
 use boomerang_runtime::Level;
@@ -99,12 +99,31 @@ impl EnvBuilder {
         Ok(ReactorBuilderState::from_pre_existing(reactor_key, self))
     }
 
-    pub fn add_port<T: runtime::PortData>(
+    /// Add an Input port to the Reactor
+    pub fn add_input_port<T: runtime::PortData>(
         &mut self,
         name: &str,
-        port_type: PortType,
         reactor_key: BuilderReactorKey,
-    ) -> Result<TypedPortKey<T>, BuilderError> {
+    ) -> Result<TypedPortKey<T, Input>, BuilderError> {
+        self.internal_add_port::<T, Input>(name, reactor_key)
+            .map(From::from)
+    }
+
+    /// Add an Output port to the Reactor
+    pub fn add_output_port<T: runtime::PortData>(
+        &mut self,
+        name: &str,
+        reactor_key: BuilderReactorKey,
+    ) -> Result<TypedPortKey<T, Output>, BuilderError> {
+        self.internal_add_port::<T, Output>(name, reactor_key)
+            .map(From::from)
+    }
+
+    fn internal_add_port<T: runtime::PortData, Q: PortType2 + 'static>(
+        &mut self,
+        name: &str,
+        reactor_key: BuilderReactorKey,
+    ) -> Result<BuilderPortKey, BuilderError> {
         // Ensure no duplicates
         if self
             .port_builders
@@ -121,10 +140,10 @@ impl EnvBuilder {
             self.reactor_builders[reactor_key]
                 .ports
                 .insert(port_key, ());
-            Box::new(PortBuilder::<T>::new(name, reactor_key, port_type))
+            Box::new(PortBuilder::<T, Q>::new(name, reactor_key))
         });
 
-        Ok(TypedPortKey::new(key))
+        Ok(key)
     }
 
     pub fn add_startup_action(
@@ -344,9 +363,10 @@ impl EnvBuilder {
 
     /// Bind Port A to Port B
     /// The nominal case is to bind Input A to Output B
-    pub fn bind_port<P>(&mut self, port_a_key: P, port_b_key: P) -> Result<(), BuilderError>
+    pub fn bind_port<P1, P2>(&mut self, port_a_key: P1, port_b_key: P2) -> Result<(), BuilderError>
     where
-        P: Into<BuilderPortKey>,
+        P1: Into<BuilderPortKey>,
+        P2: Into<BuilderPortKey>,
     {
         let port_a_key = port_a_key.into();
         let port_b_key = port_b_key.into();

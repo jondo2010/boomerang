@@ -165,7 +165,7 @@ mod reactor {
     #[derive(Reaction)]
     struct ReactionKeyboard<'a> {
         #[reaction(path = "keyboard.arrow_key_pressed")]
-        arrow_key_pressed: &'a runtime::Port<Key>,
+        arrow_key_pressed: runtime::InputRef<'a, Key>,
     }
 
     impl Trigger for ReactionKeyboard<'_> {
@@ -176,7 +176,7 @@ mod reactor {
             state: &mut <Self::Reactor as Reactor>::State,
         ) {
             // this might be overwritten several times, only committed on screen refreshes
-            state.pending_direction = match self.arrow_key_pressed.get().unwrap() {
+            state.pending_direction = match self.arrow_key_pressed.unwrap() {
                 Key::Left => Direction::Left,
                 Key::Right => Direction::Right,
                 Key::Up => Direction::Up,

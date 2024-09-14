@@ -74,8 +74,7 @@ pub enum ReactorFieldKind {
         period: Option<Duration>,
         offset: Option<Duration>,
     },
-    Input,
-    Output,
+    Port,
     Action {
         min_delay: Option<Duration>,
         policy: ActionAttrPolicy,
@@ -97,11 +96,8 @@ impl ToTokens for ReactorField {
                 let offset = OptionalDuration(*offset);
                 quote! { let __inner = ::boomerang::builder::TimerSpec { period: #period, offset: #offset, }; }
             }
-            ReactorFieldKind::Input => {
-                quote! { let __inner = ::boomerang::builder::PortType::Input; }
-            },
-            ReactorFieldKind::Output => {
-                quote! { let __inner = ::boomerang::builder::PortType::Output; }
+            ReactorFieldKind::Port => {
+                quote! { let __inner = (); }
             },
             ReactorFieldKind::Action { min_delay, policy: _ } => {
                 let min_delay = OptionalDuration(*min_delay);
@@ -150,7 +146,6 @@ impl TryFrom<FieldReceiver> for ReactorField {
                 }
 
                 TYPED_ACTION_KEY | PHYSICAL_ACTION_KEY => {
-                    //let action = value.action.unwrap_or_default();
                     let min_delay = value.action.as_ref().and_then(|attr| attr.min_delay);
                     let policy = value.action.as_ref().and_then(|attr| attr.policy.clone());
                     Ok(ReactorField {
@@ -164,22 +159,12 @@ impl TryFrom<FieldReceiver> for ReactorField {
                     })
                 }
 
-                TYPED_PORT_KEY => {
-                    let kind = match value.port {
-                        Some(PortAttr::Input) => ReactorFieldKind::Input,
-                        Some(PortAttr::Output) => ReactorFieldKind::Output,
-                        None => {
-                            return Err(darling::Error::custom("Port attribute must be specified")
-                                .with_span(&ty))
-                        }
-                    };
-                    Ok(ReactorField {
-                        ident,
-                        name,
-                        ty,
-                        kind,
-                    })
-                }
+                TYPED_PORT_KEY => Ok(ReactorField {
+                    ident,
+                    name,
+                    ty,
+                    kind: ReactorFieldKind::Port,
+                }),
 
                 TYPED_REACTION_KEY => Ok(ReactorField {
                     ident,
@@ -234,7 +219,10 @@ pub struct ReactorReceiver {
     pub data: ast::Data<darling::util::Ignored, FieldReceiver>,
     /// Type of the reactor state
     state: syn::Expr,
-    /// Connection definitions
+    /// Reaction declarations
+    #[darling(default, multiple, rename = "reaction")]
+    pub reactions: Vec<syn::Expr>,
+    /// Connection declarations
     #[darling(default, multiple, rename = "connection")]
     pub connections: Vec<ConnectionAttr>,
 }
@@ -332,6 +320,8 @@ mod tests {
     state = MyType::Foo::<f32>,
     connection(from = "inp", to = "gain.inp"),
     connection(from = "gain.out", to = "out", after = "1 usec"),
+    reaction = Reaction1,
+    reaction = Reaction2,
 )]
 struct Test {}"#;
 
@@ -356,7 +346,10 @@ struct Test {}"#;
                 to: parse_quote! {out},
                 after: Some(Duration::from_micros(1))
             }
-        )
+        );
+        assert_eq!(receiver.reactions.len(), 2);
+        assert_eq!(receiver.reactions[0], parse_quote! {Reaction1});
+        assert_eq!(receiver.reactions[1], parse_quote! {Reaction2});
     }
 
     #[test]

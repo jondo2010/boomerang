@@ -1,8 +1,5 @@
 //! Capture asynchronous key presses, and sends them through an output port.
-use boomerang::{
-    builder::{Physical, Trigger, TypedActionKey, TypedPortKey, TypedReactionKey},
-    runtime, Reaction, Reactor,
-};
+use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
 
 use std::{io::Stdout, ops::DerefMut};
 pub use termion::event::Key;
@@ -12,8 +9,7 @@ use termion::raw::{IntoRawMode, RawTerminal};
 #[reactor(state = KeyboardEvents)]
 pub struct KeyboardEventsBuilder {
     /// The latest key press.
-    #[reactor(port = "output")]
-    pub arrow_key_pressed: TypedPortKey<Key>,
+    pub arrow_key_pressed: TypedPortKey<Key, Output>,
 
     #[reactor(action(min_delay = "10 msec"))]
     key_press: TypedActionKey<Key, Physical>,
@@ -32,7 +28,7 @@ pub struct KeyboardEvents {
 struct ReactionKeyPress<'a> {
     #[reaction(triggers)]
     key_press: runtime::PhysicalActionRef<Key>,
-    arrow_key_pressed: &'a mut runtime::Port<Key>,
+    arrow_key_pressed: runtime::OutputRef<'a, Key>,
 }
 
 impl<'a> Trigger for ReactionKeyPress<'a> {
@@ -95,4 +91,30 @@ impl Trigger for ReactionStartup {
             }
         });
     }
+}
+
+fn __trigger_inner(
+    ctx: &mut ::boomerang::runtime::Context,
+    state: &mut dyn ::boomerang::runtime::ReactorState,
+    ports: &[::boomerang::runtime::PortRef],
+    ports_mut: &mut [::boomerang::runtime::PortRefMut],
+    actions: &mut [&mut ::boomerang::runtime::Action],
+) {
+    let state: &mut <<ReactionKeyPress as Trigger> ::Reactor as ::boomerang::builder::Reactor> ::State = state.downcast_mut().expect("Unable to downcast reactor state");
+    let [key_press]: &mut [&mut ::boomerang::runtime::Action; 1usize] =
+        ::std::convert::TryInto::try_into(actions)
+            .expect("Unable to destructure actions for reaction");
+    let key_press = (*key_press).into();
+    let [arrow_key_pressed]: &mut [::boomerang::runtime::PortRefMut; 1usize] =
+        ::std::convert::TryInto::try_into(ports_mut)
+            .expect("Unable to destructure mut ports for reaction");
+    let arrow_key_pressed = arrow_key_pressed
+        .downcast_mut::<runtime::Port<_>>()
+        .map(Into::into)
+        .expect("Wrong Port type for reaction");
+    ReactionKeyPress {
+        key_press,
+        arrow_key_pressed,
+    }
+    .trigger(ctx, state);
 }

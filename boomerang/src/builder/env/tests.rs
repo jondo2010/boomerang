@@ -10,12 +10,12 @@ fn test_duplicate_ports() {
         .finish()
         .unwrap();
     let _ = env_builder
-        .add_port::<()>("port0", PortType::Input, reactor_key)
+        .add_input_port::<()>("port0", reactor_key)
         .unwrap();
 
     assert!(matches!(
         env_builder
-            .add_port::<()>("port0", PortType::Output, reactor_key)
+            .add_output_port::<()>("port0", reactor_key)
             .expect_err("Expected duplicate"),
         BuilderError::DuplicatePortDefinition {
             reactor_name,

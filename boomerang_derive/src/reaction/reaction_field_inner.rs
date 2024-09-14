@@ -3,7 +3,7 @@ use syn::{parse_quote, Expr, Type, TypePath, TypeReference};
 
 use crate::util::extract_path_ident;
 
-use super::{ReactionField, ACTION, ACTION_REF, PHYSICAL_ACTION_REF, PORT};
+use super::{ReactionField, ACTION, ACTION_REF, INPUT_REF, OUTPUT_REF, PHYSICAL_ACTION_REF};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ReactionFieldInner {
@@ -38,48 +38,44 @@ impl TryFrom<ReactionField> for ReactionFieldInner {
 
         match &value.ty {
             // For ports, only 3 variants are valid:
-            // - &runtime::Port<T>, corresponds to TriggerMode::TriggersAndUses
-            // - &runtime::Port<T> with #[reaction(uses)], corresponds to TriggerMode::UsesOnly
-            // - &mut runtime::Port<T> corresponds to TriggerMode::EffectsOnly
-            Type::Reference(TypeReference {
-                mutability: None,
-                elem,
-                ..
-            }) if *field_inner_type == PORT => match (value.triggers, value.effects, value.uses) {
-                (None, None, None) => Ok(Self::FieldDefined {
-                    elem: *elem.clone(),
-                    triggers: true,
-                    effects: false,
-                    uses: true,
-                    path,
-                }),
-                (None, None, Some(true)) => Ok(Self::FieldDefined {
-                    elem: *elem.clone(),
-                    triggers: false,
-                    effects: false,
-                    uses: true,
-                    path,
-                }),
-                _ => Err(darling::Error::custom(
-                    "Invalid Port field. Possible attributes are 'use'",
-                )
-                .with_span(&value.ty)),
-            },
+            // - runtime::InputRef<T>, corresponds to TriggerMode::TriggersAndUses
+            // - runtime::InputRef<T> with #[reaction(uses)], corresponds to TriggerMode::UsesOnly
+            // - runtime::OutputRef<T> corresponds to TriggerMode::EffectsOnly
+            Type::Path(TypePath { .. }) if *field_inner_type == INPUT_REF => {
+                match (value.triggers, value.effects, value.uses) {
+                    (None, None, None) => Ok(Self::FieldDefined {
+                        elem: value.ty.clone(),
+                        triggers: true,
+                        effects: false,
+                        uses: true,
+                        path,
+                    }),
+                    (None, None, Some(true)) => Ok(Self::FieldDefined {
+                        elem: value.ty.clone(),
+                        triggers: false,
+                        effects: false,
+                        uses: true,
+                        path,
+                    }),
+                    _ => Err(darling::Error::custom(
+                        "Invalid Port field. Possible attributes are 'use'",
+                    )
+                    .with_span(&value.ty)),
+                }
+            }
 
-            Type::Reference(TypeReference {
-                mutability: Some(_),
-                elem,
-                ..
-            }) if *field_inner_type == PORT => match (value.triggers, value.effects, value.uses) {
-                (None, None, None) => Ok(Self::FieldDefined {
-                    elem: *elem.clone(),
-                    triggers: false,
-                    effects: true,
-                    uses: false,
-                    path,
-                }),
-                _ => Err(darling::Error::custom("Invalid Port variant").with_span(&value.ty)),
-            },
+            Type::Path(TypePath { .. }) if *field_inner_type == OUTPUT_REF => {
+                match (value.triggers, value.effects, value.uses) {
+                    (None, None, None) => Ok(Self::FieldDefined {
+                        elem: value.ty.clone(),
+                        triggers: false,
+                        effects: true,
+                        uses: false,
+                        path,
+                    }),
+                    _ => Err(darling::Error::custom("Invalid Port variant").with_span(&value.ty)),
+                }
+            }
 
             Type::Reference(TypeReference {
                 mutability, elem, ..

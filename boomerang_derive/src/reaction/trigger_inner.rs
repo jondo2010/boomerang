@@ -1,5 +1,5 @@
 use quote::{quote, ToTokens};
-use syn::{Ident, Type, TypePath, TypeReference};
+use syn::{Generics, Ident, Type, TypePath, TypeReference};
 
 use crate::util::extract_path_ident;
 
@@ -7,14 +7,12 @@ use super::{ReactionReceiver, ACTION, ACTION_REF, INPUT_REF, OUTPUT_REF, PHYSICA
 
 pub struct TriggerInner {
     reaction_ident: Ident,
+    reaction_generics: Generics,
+    reactor: Type,
     initializer_idents: Vec<Ident>,
     action_idents: Vec<Ident>,
-    #[allow(dead_code)]
-    action_types: Vec<Type>,
     port_idents: Vec<Ident>,
-    port_types: Vec<Type>,
     port_mut_idents: Vec<Ident>,
-    port_mut_types: Vec<Type>,
 }
 
 impl TriggerInner {
@@ -27,11 +25,8 @@ impl TriggerInner {
 
         let mut initializer_idents = vec![];
         let mut action_idents = vec![];
-        let mut action_types = vec![];
         let mut port_idents = vec![];
-        let mut port_types = vec![];
         let mut port_mut_idents = vec![];
-        let mut port_mut_types = vec![];
 
         for field in fields.iter() {
             match &field.ty {
@@ -90,15 +85,12 @@ impl TriggerInner {
                     if *ty == INPUT_REF {
                         initializer_idents.push(field.ident.clone().unwrap());
                         port_idents.push(field.ident.clone().unwrap());
-                        port_types.push(field.ty.clone());
                     } else if *ty == OUTPUT_REF {
                         initializer_idents.push(field.ident.clone().unwrap());
                         port_mut_idents.push(field.ident.clone().unwrap());
-                        port_mut_types.push(field.ty.clone());
                     } else if *ty == ACTION_REF || *ty == PHYSICAL_ACTION_REF {
                         initializer_idents.push(field.ident.clone().unwrap());
                         action_idents.push(field.ident.clone().unwrap());
-                        action_types.push(field.ty.clone());
                     } else {
                         return Err(
                             darling::Error::custom("Unexpected Reaction member").with_span(&ty)
@@ -117,13 +109,12 @@ impl TriggerInner {
 
         Ok(Self {
             reaction_ident: reaction_receiver.ident.clone(),
+            reaction_generics: reaction_receiver.generics.clone(),
+            reactor: reaction_receiver.reactor.clone(),
             initializer_idents,
             action_idents,
-            action_types,
             port_idents,
-            port_types,
             port_mut_idents,
-            port_mut_types,
         })
     }
 }
@@ -131,12 +122,19 @@ impl TriggerInner {
 impl ToTokens for TriggerInner {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
         let reaction_ident = &self.reaction_ident;
+
+        let reaction_generics = self
+            .reaction_generics
+            .const_params()
+            .map(|ty| &ty.ident)
+            .chain(self.reaction_generics.type_params().map(|ty| &ty.ident));
+        let reaction_generics = quote! { <#(#reaction_generics),*> };
+
+        let reactor = &self.reactor;
         let initializer_idents = &self.initializer_idents;
         let action_idents = &self.action_idents;
         let port_idents = &self.port_idents;
-        let port_types = &self.port_types;
         let port_mut_idents = &self.port_mut_idents;
-        let port_mut_types = &self.port_mut_types;
 
         let actions_len = action_idents.len();
         let actions = if actions_len > 0 {
@@ -182,27 +180,28 @@ impl ToTokens for TriggerInner {
         };
 
         tokens.extend(quote! {
-        #[allow(unused_variables)]
-        fn __trigger_inner(
-            ctx: &mut ::boomerang::runtime::Context,
-            state: &mut dyn ::boomerang::runtime::ReactorState,
-            ports: &[::boomerang::runtime::PortRef],
-            ports_mut: &mut [::boomerang::runtime::PortRefMut],
-            actions: &mut [&mut ::boomerang::runtime::Action],
-        ) {
-            let state: &mut <<#reaction_ident as Trigger>::Reactor as ::boomerang::builder::Reactor>::State =
-                state
+            #[allow(unused_variables)]
+            let __trigger_inner = |
+                ctx: &mut ::boomerang::runtime::Context,
+                state: &mut dyn ::boomerang::runtime::ReactorState,
+                ports: &[::boomerang::runtime::PortRef],
+                ports_mut: &mut [::boomerang::runtime::PortRefMut],
+                actions: &mut [&mut ::boomerang::runtime::Action],
+            | {
+                let state: &mut <#reactor as ::boomerang::builder::Reactor>::State = state
                     .downcast_mut()
                     .expect("Unable to downcast reactor state");
 
-            #actions
-            #ports
-            #port_muts
+                #actions
+                #ports
+                #port_muts
 
-            #reaction_ident {
-                #(#initializer_idents),*
-            }.trigger(ctx, state);
-        }
-    });
+                <#reaction_ident #reaction_generics as ::boomerang::builder::Trigger<#reactor>>::trigger(
+                    #reaction_ident { #(#initializer_idents),* },
+                    ctx,
+                    state
+                );
+            };
+        });
     }
 }

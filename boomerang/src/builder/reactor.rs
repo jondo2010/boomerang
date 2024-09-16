@@ -1,8 +1,7 @@
 use super::{
     ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
-    EnvBuilder, FindElements, Input, Logical, Output, Physical, PhysicalActionKey, PortType,
-    Reaction, ReactionBuilderState, TimerActionKey, TimerSpec, TriggerMode, TypedActionKey,
-    TypedPortKey, TypedReactionKey,
+    EnvBuilder, FindElements, Input, Logical, Output, Physical, PhysicalActionKey, PortType2,
+    ReactionBuilderState, TimerActionKey, TimerSpec, TriggerMode, TypedActionKey, TypedPortKey,
 };
 use crate::runtime;
 use slotmap::SecondaryMap;
@@ -21,7 +20,7 @@ impl petgraph::graph::GraphIndex for BuilderReactorKey {
     }
 }
 
-pub trait Reactor: Clone + Sized {
+pub trait Reactor: Sized {
     type State: runtime::ReactorState;
 
     fn build(
@@ -42,20 +41,6 @@ pub trait ReactorField: Sized {
         inner: Self::Inner,
         parent: &'_ mut ReactorBuilderState,
     ) -> Result<Self, BuilderError>;
-}
-
-impl<R: Reaction> ReactorField for TypedReactionKey<R> {
-    type Inner = R::Reactor;
-
-    fn build(
-        name: &str,
-        inner: Self::Inner,
-        parent: &'_ mut ReactorBuilderState,
-    ) -> Result<Self, BuilderError> {
-        let reaction = <R as Reaction>::build(name, &inner, parent)?;
-        let key = reaction.finish()?;
-        Ok(Self::new(key))
-    }
 }
 
 impl<R: Reactor> ReactorField for R {
@@ -82,6 +67,18 @@ impl<T: runtime::PortData> ReactorField for TypedPortKey<T, Input> {
     }
 }
 
+impl<T: runtime::PortData, const N: usize> ReactorField for [TypedPortKey<T, Input>; N] {
+    type Inner = ();
+
+    fn build(
+        name: &str,
+        _inner: Self::Inner,
+        parent: &'_ mut ReactorBuilderState,
+    ) -> Result<Self, BuilderError> {
+        parent.add_input_ports(name)
+    }
+}
+
 impl<T: runtime::PortData> ReactorField for TypedPortKey<T, Output> {
     type Inner = ();
 
@@ -91,6 +88,18 @@ impl<T: runtime::PortData> ReactorField for TypedPortKey<T, Output> {
         parent: &'_ mut ReactorBuilderState,
     ) -> Result<Self, BuilderError> {
         parent.add_output_port(name)
+    }
+}
+
+impl<T: runtime::PortData, const N: usize> ReactorField for [TypedPortKey<T, Output>; N] {
+    type Inner = ();
+
+    fn build(
+        name: &str,
+        _inner: Self::Inner,
+        parent: &'_ mut ReactorBuilderState,
+    ) -> Result<Self, BuilderError> {
+        parent.add_output_ports(name)
     }
 }
 
@@ -371,12 +380,38 @@ impl<'a> ReactorBuilderState<'a> {
         self.env.add_input_port::<T>(name, self.reactor_key)
     }
 
+    /// Adds a bus of input ports to this reactor.
+    pub fn add_input_ports<T: runtime::PortData, const N: usize>(
+        &mut self,
+        name: &str,
+    ) -> Result<[TypedPortKey<T, Input>; N], BuilderError> {
+        let mut ports = Vec::with_capacity(N);
+        for i in 0..N {
+            let port = self.add_input_port::<T>(&format!("{name}{i}"))?;
+            ports.push(port);
+        }
+        Ok(ports.try_into().expect("Error converting Vec to array"))
+    }
+
     /// Add a new output port to this reactor.
     pub fn add_output_port<T: runtime::PortData>(
         &mut self,
         name: &str,
     ) -> Result<TypedPortKey<T, Output>, BuilderError> {
         self.env.add_output_port::<T>(name, self.reactor_key)
+    }
+
+    /// Adds a bus of output ports to this reactor.
+    pub fn add_output_ports<T: runtime::PortData, const N: usize>(
+        &mut self,
+        name: &str,
+    ) -> Result<[TypedPortKey<T, Output>; N], BuilderError> {
+        let mut ports = Vec::with_capacity(N);
+        for i in 0..N {
+            let port = self.add_output_port::<T>(&format!("{name}{i}"))?;
+            ports.push(port);
+        }
+        Ok(ports.try_into().expect("Error converting Vec to array"))
     }
 
     /// Add a new child reactor to this reactor.
@@ -398,7 +433,7 @@ impl<'a> ReactorBuilderState<'a> {
 
     /// Bind 2 ports on this reactor. This has the logical meaning of "connecting" `port_a` to
     /// `port_b`.
-    pub fn bind_port<T: runtime::PortData, Q1, Q2>(
+    pub fn bind_port<T: runtime::PortData, Q1: PortType2, Q2: PortType2>(
         &mut self,
         port_a_key: TypedPortKey<T, Q1>,
         port_b_key: TypedPortKey<T, Q2>,

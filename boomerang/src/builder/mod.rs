@@ -20,7 +20,7 @@ pub use reactor::*;
 pub mod prelude {
     pub use super::{
         BuilderError, BuilderFqn, EnvBuilder, Input, Logical, Output, Physical, Reactor,
-        TimerActionKey, Trigger, TypedActionKey, TypedPortKey, TypedReactionKey,
+        TimerActionKey, Trigger, TypedActionKey, TypedPortKey,
     };
 }
 

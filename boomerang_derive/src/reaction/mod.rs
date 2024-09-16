@@ -5,7 +5,7 @@ use darling::{
     util, FromDeriveInput, FromField, FromMeta,
 };
 use quote::{quote, ToTokens};
-use syn::{Expr, Generics, Ident, Type};
+use syn::{Expr, GenericParam, Generics, Ident, Type};
 
 mod reaction_field_inner;
 mod trigger_inner;
@@ -93,14 +93,23 @@ pub struct ReactionReceiver {
     ident: Ident,
     generics: Generics,
     data: ast::Data<util::Ignored, ReactionField>,
+
+    /// Type of the reactor
+    reactor: syn::Type,
+
+    #[darling(default, multiple, rename = "bound")]
+    bounds: Vec<syn::TypeParam>,
+
     /// Connection definitions
     #[darling(default, multiple)]
-    pub triggers: Vec<TriggerAttr>,
+    triggers: Vec<TriggerAttr>,
 }
 
 pub struct Reaction {
     ident: Ident,
     generics: Generics,
+    bounds: Vec<syn::TypeParam>,
+    reactor: Type,
     fields: Vec<ReactionFieldInner>,
     inner: TriggerInner,
     /// Whether the reaction has a startup trigger
@@ -220,6 +229,8 @@ impl TryFrom<ReactionReceiver> for Reaction {
         Ok(Self {
             ident: value.ident,
             generics: value.generics,
+            bounds: value.bounds,
+            reactor: value.reactor,
             fields,
             inner,
             trigger_startup,
@@ -231,9 +242,20 @@ impl TryFrom<ReactionReceiver> for Reaction {
 impl ToTokens for Reaction {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
         let ident = &self.ident;
-        let generics = &self.generics;
+        let reactor = &self.reactor;
         let struct_fields = &self.fields;
         let trigger_inner = &self.inner;
+
+        // Combine the bounds with the generics
+        let mut combined_generics = self.generics.clone();
+        combined_generics
+            .params
+            .extend(self.bounds.iter().cloned().map(GenericParam::from));
+
+        // We use impl_generics from `combined_generics` to allow additional bounds to be added, but type and where come
+        // from the original generics
+        let (impl_generics, _, _) = combined_generics.split_for_impl();
+        let (_, type_generics, where_clause) = self.generics.split_for_impl();
 
         let trigger_startup = if self.trigger_startup {
             quote! {
@@ -261,10 +283,10 @@ impl ToTokens for Reaction {
 
         tokens.extend(quote! {
             #[automatically_derived]
-            impl #generics ::boomerang::builder::Reaction for #ident #generics {
+            impl #impl_generics ::boomerang::builder::Reaction<#reactor> for #ident #type_generics #where_clause {
                 fn build<'builder>(
                     name: &str,
-                    reactor: &Self::Reactor,
+                    reactor: &#reactor,
                     builder: &'builder mut ::boomerang::builder::ReactorBuilderState,
                 ) -> Result<
                     ::boomerang::builder::ReactionBuilderState<'builder>,
@@ -287,23 +309,33 @@ impl ToTokens for Reaction {
 
 #[cfg(test)]
 mod tests {
-    use syn::parse_quote;
+    use syn::{parse_quote, DeriveInput};
 
     use super::*;
+
+    #[test]
+    fn test() {
+        let xxx: syn::Expr = parse_quote! {Inner::Count<T: runtime::PortData>};
+        dbg!(&xxx);
+    }
 
     #[test]
     fn test_struct_attrs() {
         let input = r#"
 #[derive(Reaction)]
 #[reaction(
+    reactor = "Inner::Count<T>",
+    bound = "T: runtime::PortData",
     triggers(action = "x"),
     triggers(port = "child.y"),
     triggers(startup),
-    triggers(shutdown)
+    triggers(shutdown),
 )]
 struct ReactionT;"#;
-        let parsed = syn::parse_str(input).unwrap();
+        let parsed: DeriveInput = syn::parse_str(input).unwrap();
         let receiver = ReactionReceiver::from_derive_input(&parsed).unwrap();
+        assert_eq!(receiver.reactor, parse_quote! {Inner::Count<T>});
+        assert_eq!(receiver.bounds, vec![parse_quote! {T: runtime::PortData}]);
         assert_eq!(
             receiver.triggers.iter().collect::<Vec<_>>(),
             vec![

@@ -12,7 +12,7 @@ slotmap::new_key_type! {
 }
 
 #[derive(Copy, Debug)]
-pub struct TypedReactionKey<R>(BuilderReactionKey, PhantomData<R>);
+struct TypedReactionKey<R>(BuilderReactionKey, PhantomData<R>);
 
 impl<R> Clone for TypedReactionKey<R> {
     fn clone(&self) -> Self {
@@ -43,23 +43,18 @@ impl petgraph::graph::GraphIndex for BuilderReactionKey {
 }
 
 /// The `Trigger` trait should be implemented by the user for each Reaction struct.
-pub trait Trigger {
-    /// The type of the owning Reactor
-    type Reactor: Reactor;
-
-    fn trigger(
-        &mut self,
-        ctx: &mut runtime::Context,
-        state: &mut <Self::Reactor as Reactor>::State,
-    );
+///
+/// Type parameter `R` is the owning Reactor.
+pub trait Trigger<R: Reactor> {
+    fn trigger(self, ctx: &mut runtime::Context, state: &mut R::State);
 }
 
 /// The Reaction trait should be automatically derived for each Reaction struct.
-pub trait Reaction: Trigger {
+pub trait Reaction<R: Reactor>: Trigger<R> {
     /// Build a `ReactionBuilderState` for this Reaction
     fn build<'builder>(
         name: &str,
-        reactor: &Self::Reactor,
+        reactor: &R,
         builder: &'builder mut ReactorBuilderState,
     ) -> Result<ReactionBuilderState<'builder>, BuilderError>;
 }

@@ -10,6 +10,8 @@ pub fn extract_path_ident(elem: &Type) -> Option<&Ident> {
             ..
         }) => segments.last().map(|segment| &segment.ident),
         Type::Reference(syn::TypeReference { elem, .. }) => extract_path_ident(elem),
+
+        Type::Array(syn::TypeArray { elem, .. }) => extract_path_ident(elem),
         _ => None,
     }
 }

@@ -1,9 +1,6 @@
 // Test logical action with delay.
 
-use boomerang::{
-    builder::{Trigger, TypedActionKey, TypedReactionKey},
-    runtime, Reaction, Reactor,
-};
+use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
 
 struct State {
     r1done: bool,
@@ -11,25 +8,25 @@ struct State {
 }
 
 #[derive(Clone, Reactor)]
-#[reactor(state = State)]
+#[reactor(
+    state = "State",
+    reaction = "ReactionStartup",
+    reaction = "ReactionAct",
+    reaction = "ReactionShutdown"
+)]
 struct ActionValues {
     #[reactor(action(min_delay = "100 msec"))]
     act: TypedActionKey<i32>,
-    reaction_startup: TypedReactionKey<ReactionStartup<'static>>,
-    reaction_act: TypedReactionKey<ReactionAct<'static>>,
-    reaction_shutdown: TypedReactionKey<ReactionShutdown>,
 }
 
 #[derive(Reaction)]
-#[reaction(triggers(startup))]
+#[reaction(reactor = "ActionValues", triggers(startup))]
 struct ReactionStartup<'a> {
     act: runtime::ActionRef<'a, i32>,
 }
 
-impl<'a> Trigger for ReactionStartup<'a> {
-    type Reactor = ActionValues;
-
-    fn trigger(&mut self, ctx: &mut runtime::Context, _state: &mut State) {
+impl<'a> Trigger<ActionValues> for ReactionStartup<'a> {
+    fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut State) {
         // scheduled in 100 ms
         ctx.schedule_action(&mut self.act, Some(100), None);
         // scheduled in 150 ms, value is overwritten
@@ -42,15 +39,14 @@ impl<'a> Trigger for ReactionStartup<'a> {
 }
 
 #[derive(Reaction)]
+#[reaction(reactor = "ActionValues")]
 struct ReactionAct<'a> {
     #[reaction(triggers)]
     act: runtime::ActionRef<'a, i32>,
 }
 
-impl<'a> Trigger for ReactionAct<'a> {
-    type Reactor = ActionValues;
-
-    fn trigger(&mut self, ctx: &mut runtime::Context, state: &mut State) {
+impl<'a> Trigger<ActionValues> for ReactionAct<'a> {
+    fn trigger(mut self, ctx: &mut runtime::Context, state: &mut State) {
         let elapsed = ctx.get_elapsed_logical_time();
         let value = ctx.get_action(&mut self.act);
 
@@ -70,13 +66,11 @@ impl<'a> Trigger for ReactionAct<'a> {
 }
 
 #[derive(Reaction)]
-#[reaction(triggers(shutdown))]
+#[reaction(reactor = "ActionValues", triggers(shutdown))]
 struct ReactionShutdown;
 
-impl Trigger for ReactionShutdown {
-    type Reactor = ActionValues;
-
-    fn trigger(&mut self, _ctx: &mut runtime::Context, state: &mut State) {
+impl Trigger<ActionValues> for ReactionShutdown {
+    fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
         assert!(
             state.r1done && state.r2done,
             "ERROR: Expected 2 reaction invocations\n"

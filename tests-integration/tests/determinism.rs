@@ -1,48 +1,41 @@
-use boomerang::{
-    builder::{Input, Output, TimerActionKey, Trigger, TypedPortKey, TypedReactionKey},
-    runtime, Reaction, Reactor,
-};
+use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
 
-#[derive(Clone, Reactor)]
-#[reactor(state = ())]
+#[derive(Reactor)]
+#[reactor(state = "()", reaction = "SourceReactionT")]
 struct SourceBuilder {
     y: TypedPortKey<i32, Output>,
     #[reactor(timer())]
     t: TimerActionKey,
-    reaction_t: TypedReactionKey<SourceReactionT<'static>>,
 }
 
 #[derive(Reaction)]
-#[reaction(triggers(action = "t"))]
+#[reaction(reactor = "SourceBuilder", triggers(action = "t"))]
 struct SourceReactionT<'a> {
     y: runtime::OutputRef<'a, i32>,
 }
 
-impl Trigger for SourceReactionT<'_> {
-    type Reactor = SourceBuilder;
-    fn trigger(&mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
+impl Trigger<SourceBuilder> for SourceReactionT<'_> {
+    fn trigger(mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
         *self.y = Some(1);
     }
 }
 
-#[derive(Clone, Reactor)]
-#[reactor(state = ())]
+#[derive(Reactor)]
+#[reactor(state = "()", reaction = "DestReactionXY")]
 struct DestinationBuilder {
     x: TypedPortKey<i32, Input>,
-    #[reactor(port = "input")]
     y: TypedPortKey<i32, Input>,
-    reaction_x_y: TypedReactionKey<DestReactionXY<'static>>,
 }
 
 #[derive(Reaction)]
+#[reaction(reactor = "DestinationBuilder")]
 struct DestReactionXY<'a> {
     x: runtime::InputRef<'a, i32>,
     y: runtime::InputRef<'a, i32>,
 }
 
-impl Trigger for DestReactionXY<'_> {
-    type Reactor = DestinationBuilder;
-    fn trigger(&mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
+impl Trigger<DestinationBuilder> for DestReactionXY<'_> {
+    fn trigger(self, _ctx: &mut runtime::Context, _state: &mut ()) {
         let mut sum = 0;
         if let Some(x) = *self.x {
             sum += x;
@@ -55,30 +48,29 @@ impl Trigger for DestReactionXY<'_> {
     }
 }
 
-#[derive(Clone, Reactor)]
-#[reactor(state = ())]
+#[derive(Reactor)]
+#[reactor(state = "()", reaction = "PassReactionX")]
 struct PassBuilder {
     x: TypedPortKey<i32, Input>,
     y: TypedPortKey<i32, Output>,
-    reaction_x: TypedReactionKey<PassReactionX<'static>>,
 }
 
 #[derive(Reaction)]
+#[reaction(reactor = "PassBuilder")]
 struct PassReactionX<'a> {
     x: runtime::InputRef<'a, i32>,
     y: runtime::OutputRef<'a, i32>,
 }
 
-impl Trigger for PassReactionX<'_> {
-    type Reactor = PassBuilder;
-    fn trigger(&mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
+impl Trigger<PassBuilder> for PassReactionX<'_> {
+    fn trigger(mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
         *self.y = *self.x;
     }
 }
 
-#[derive(Clone, Reactor)]
+#[derive(Reactor)]
 #[reactor(
-    state = (),
+    state = "()",
     connection(from = "s.y", to = "d.y"),
     connection(from = "s.y", to = "p1.x"),
     connection(from = "p1.y", to = "p2.x"),
@@ -86,13 +78,13 @@ impl Trigger for PassReactionX<'_> {
 )]
 #[allow(dead_code)]
 struct DeterminismBuilder {
-    #[reactor(child = ())]
+    #[reactor(child = "()")]
     s: SourceBuilder,
-    #[reactor(child = ())]
+    #[reactor(child = "()")]
     d: DestinationBuilder,
-    #[reactor(child = ())]
+    #[reactor(child = "()")]
     p1: PassBuilder,
-    #[reactor(child = ())]
+    #[reactor(child = "()")]
     p2: PassBuilder,
 }
 

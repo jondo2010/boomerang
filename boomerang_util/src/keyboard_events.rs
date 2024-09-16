@@ -5,62 +5,58 @@ use std::{io::Stdout, ops::DerefMut};
 pub use termion::event::Key;
 use termion::raw::{IntoRawMode, RawTerminal};
 
+#[derive(Default)]
+pub struct KeyboardEvents {
+    raw_terminal: Option<RawTerminal<Stdout>>,
+}
+
 #[derive(Reactor, Clone)]
-#[reactor(state = KeyboardEvents)]
+#[reactor(
+    state = "KeyboardEvents",
+    reaction = "ReactionKeyPress",
+    reaction = "ReactionShutdown",
+    reaction = "ReactionStartup"
+)]
 pub struct KeyboardEventsBuilder {
     /// The latest key press.
     pub arrow_key_pressed: TypedPortKey<Key, Output>,
 
     #[reactor(action(min_delay = "10 msec"))]
     key_press: TypedActionKey<Key, Physical>,
-
-    key_press_reaction: TypedReactionKey<ReactionKeyPress<'static>>,
-    shutdown_reaction: TypedReactionKey<ReactionShutdown>,
-    startup_reaction: TypedReactionKey<ReactionStartup>,
-}
-
-#[derive(Default)]
-pub struct KeyboardEvents {
-    raw_terminal: Option<RawTerminal<Stdout>>,
 }
 
 #[derive(Reaction)]
+#[reaction(reactor = "KeyboardEventsBuilder")]
 struct ReactionKeyPress<'a> {
     #[reaction(triggers)]
     key_press: runtime::PhysicalActionRef<Key>,
     arrow_key_pressed: runtime::OutputRef<'a, Key>,
 }
 
-impl<'a> Trigger for ReactionKeyPress<'a> {
-    type Reactor = KeyboardEventsBuilder;
-
-    fn trigger(&mut self, ctx: &mut runtime::Context, _state: &mut KeyboardEvents) {
+impl<'a> Trigger<KeyboardEventsBuilder> for ReactionKeyPress<'a> {
+    fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut KeyboardEvents) {
         *self.arrow_key_pressed.deref_mut() = ctx.get_action(&mut self.key_press);
     }
 }
 
 #[derive(Reaction)]
-#[reaction(triggers(shutdown))]
+#[reaction(reactor = "KeyboardEventsBuilder", triggers(shutdown))]
 struct ReactionShutdown;
 
-impl Trigger for ReactionShutdown {
-    type Reactor = KeyboardEventsBuilder;
-
-    fn trigger(&mut self, _ctx: &mut runtime::Context, state: &mut KeyboardEvents) {
+impl Trigger<KeyboardEventsBuilder> for ReactionShutdown {
+    fn trigger(self, _ctx: &mut runtime::Context, state: &mut KeyboardEvents) {
         drop(state.raw_terminal.take()); // exit raw mode
     }
 }
 
 #[derive(Reaction)]
-#[reaction(triggers(startup))]
+#[reaction(reactor = "KeyboardEventsBuilder", triggers(startup))]
 struct ReactionStartup {
     key_press: runtime::PhysicalActionRef<Key>,
 }
 
-impl Trigger for ReactionStartup {
-    type Reactor = KeyboardEventsBuilder;
-
-    fn trigger(&mut self, ctx: &mut runtime::Context, state: &mut KeyboardEvents) {
+impl Trigger<KeyboardEventsBuilder> for ReactionStartup {
+    fn trigger(self, ctx: &mut runtime::Context, state: &mut KeyboardEvents) {
         let stdin = std::io::stdin();
 
         // enter raw mode, to get key presses one by one
@@ -91,30 +87,4 @@ impl Trigger for ReactionStartup {
             }
         });
     }
-}
-
-fn __trigger_inner(
-    ctx: &mut ::boomerang::runtime::Context,
-    state: &mut dyn ::boomerang::runtime::ReactorState,
-    ports: &[::boomerang::runtime::PortRef],
-    ports_mut: &mut [::boomerang::runtime::PortRefMut],
-    actions: &mut [&mut ::boomerang::runtime::Action],
-) {
-    let state: &mut <<ReactionKeyPress as Trigger> ::Reactor as ::boomerang::builder::Reactor> ::State = state.downcast_mut().expect("Unable to downcast reactor state");
-    let [key_press]: &mut [&mut ::boomerang::runtime::Action; 1usize] =
-        ::std::convert::TryInto::try_into(actions)
-            .expect("Unable to destructure actions for reaction");
-    let key_press = (*key_press).into();
-    let [arrow_key_pressed]: &mut [::boomerang::runtime::PortRefMut; 1usize] =
-        ::std::convert::TryInto::try_into(ports_mut)
-            .expect("Unable to destructure mut ports for reaction");
-    let arrow_key_pressed = arrow_key_pressed
-        .downcast_mut::<runtime::Port<_>>()
-        .map(Into::into)
-        .expect("Wrong Port type for reaction");
-    ReactionKeyPress {
-        key_press,
-        arrow_key_pressed,
-    }
-    .trigger(ctx, state);
 }

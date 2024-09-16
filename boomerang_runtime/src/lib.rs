@@ -1,5 +1,6 @@
 mod action;
 mod context;
+mod destructure;
 mod env;
 mod event;
 pub mod keepalive;
@@ -40,6 +41,9 @@ pub enum RuntimeError {
     #[cfg(feature = "serde")]
     #[error("Serialization error: {0}")]
     SerializationError(#[from] serde_arrow::Error),
+
+    #[error("Destructuring error")]
+    DestrError,
 }
 
 pub mod fmt_utils {

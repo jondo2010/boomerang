@@ -37,43 +37,52 @@ impl TryFrom<ReactionField> for ReactionFieldInner {
         })?;
 
         match &value.ty {
-            // For ports, only 3 variants are valid:
-            // - runtime::InputRef<T>, corresponds to TriggerMode::TriggersAndUses
-            // - runtime::InputRef<T> with #[reaction(uses)], corresponds to TriggerMode::UsesOnly
-            // - runtime::OutputRef<T> corresponds to TriggerMode::EffectsOnly
-            Type::Path(TypePath { .. }) if *field_inner_type == INPUT_REF => {
-                match (value.triggers, value.effects, value.uses) {
-                    (None, None, None) => Ok(Self::FieldDefined {
+            Type::Path(_) | Type::Array(_) => {
+                match (
+                    field_inner_type.to_string().as_ref(),
+                    value.triggers,
+                    value.effects,
+                    value.uses,
+                ) {
+                    // For ports, only 3 variants are valid:
+                    // - runtime::InputRef<T>, corresponds to TriggerMode::TriggersAndUses
+                    // - runtime::InputRef<T> with #[reaction(uses)], corresponds to TriggerMode::UsesOnly
+                    // - runtime::OutputRef<T> corresponds to TriggerMode::EffectsOnly
+                    (INPUT_REF, None, None, None) => Ok(Self::FieldDefined {
                         elem: value.ty.clone(),
                         triggers: true,
                         effects: false,
                         uses: true,
                         path,
                     }),
-                    (None, None, Some(true)) => Ok(Self::FieldDefined {
+                    (INPUT_REF, None, None, Some(true)) => Ok(Self::FieldDefined {
                         elem: value.ty.clone(),
                         triggers: false,
                         effects: false,
                         uses: true,
                         path,
                     }),
-                    _ => Err(darling::Error::custom(
-                        "Invalid Port field. Possible attributes are 'use'",
-                    )
-                    .with_span(&value.ty)),
-                }
-            }
-
-            Type::Path(TypePath { .. }) if *field_inner_type == OUTPUT_REF => {
-                match (value.triggers, value.effects, value.uses) {
-                    (None, None, None) => Ok(Self::FieldDefined {
+                    (OUTPUT_REF, None, None, None) => Ok(Self::FieldDefined {
                         elem: value.ty.clone(),
                         triggers: false,
                         effects: true,
                         uses: false,
                         path,
                     }),
-                    _ => Err(darling::Error::custom("Invalid Port variant").with_span(&value.ty)),
+                    (ACTION_REF, _, _, _) | (PHYSICAL_ACTION_REF, _, _, _) => {
+                        Ok(Self::FieldDefined {
+                            elem: value.ty.clone(),
+                            triggers: value.triggers.unwrap_or(false),
+                            effects: value.effects.unwrap_or(false),
+                            uses: value.uses.unwrap_or(true),
+                            path,
+                        })
+                    }
+
+                    _ => Err(darling::Error::custom(
+                        "Invalid Port field. Possible attributes are 'use'",
+                    )
+                    .with_span(&value.ty)),
                 }
             }
 
@@ -86,21 +95,6 @@ impl TryFrom<ReactionField> for ReactionFieldInner {
                 uses: value.uses.unwrap_or(true),
                 path,
             }),
-
-            Type::Path(TypePath { path: elem, .. })
-                if *field_inner_type == ACTION_REF || *field_inner_type == PHYSICAL_ACTION_REF =>
-            {
-                Ok(Self::FieldDefined {
-                    elem: syn::Type::Path(TypePath {
-                        qself: None,
-                        path: elem.clone(),
-                    }),
-                    triggers: value.triggers.unwrap_or(false),
-                    effects: value.effects.unwrap_or(false),
-                    uses: value.uses.unwrap_or(true),
-                    path,
-                })
-            }
 
             _ => Err(darling::Error::custom("Unexpected field type").with_span(&value.ty)),
         }

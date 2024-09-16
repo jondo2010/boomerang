@@ -11,24 +11,23 @@ mod example {
 
     /// A simple Reactor that triggers on key_press events.
     /// It reads keyboard input and prints the key that was pressed.
-    #[derive(Clone, Reactor)]
-    #[reactor(state = ())]
+    #[derive(Reactor)]
+    #[reactor(state = "()", reaction = "ReactionKeyPress")]
     pub struct Example {
         /// this thing helps capturing key presses
         #[reactor(child = KeyboardEvents::default())]
         keyboard: KeyboardEventsBuilder,
-        key_press_reaction: TypedReactionKey<ReactionKeyPress<'static>>,
     }
 
     #[derive(Reaction)]
+    #[reaction(reactor = "Example")]
     struct ReactionKeyPress<'a> {
         #[reaction(path = "keyboard.arrow_key_pressed")]
         arrow_key_pressed: runtime::InputRef<'a, termion::event::Key>,
     }
 
-    impl Trigger for ReactionKeyPress<'_> {
-        type Reactor = Example;
-        fn trigger(&mut self, _ctx: &mut runtime::Context, _: &mut ()) {
+    impl Trigger<Example> for ReactionKeyPress<'_> {
+        fn trigger(self, _ctx: &mut runtime::Context, _: &mut ()) {
             let stdout = std::io::stdout();
             let mut stdout = stdout.lock();
 

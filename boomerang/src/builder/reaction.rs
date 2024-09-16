@@ -122,6 +122,19 @@ impl<'a, T: runtime::PortData> ReactionField for runtime::InputRef<'a, T> {
     }
 }
 
+impl<'a, T: runtime::PortData, const N: usize> ReactionField for [runtime::InputRef<'a, T>; N] {
+    type Key = [BuilderPortKey; N];
+
+    fn build(
+        builder: &mut ReactionBuilderState,
+        key: Self::Key,
+        order: usize,
+        trigger_mode: TriggerMode,
+    ) -> Result<(), BuilderError> {
+        builder.add_ports(key, order, trigger_mode)
+    }
+}
+
 impl<'a, T: runtime::PortData> ReactionField for runtime::OutputRef<'a, T> {
     type Key = BuilderPortKey;
 
@@ -132,6 +145,19 @@ impl<'a, T: runtime::PortData> ReactionField for runtime::OutputRef<'a, T> {
         trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
         builder.add_port(key, order, trigger_mode)
+    }
+}
+
+impl<'a, T: runtime::PortData, const N: usize> ReactionField for [runtime::OutputRef<'a, T>; N] {
+    type Key = [BuilderPortKey; N];
+
+    fn build(
+        builder: &mut ReactionBuilderState,
+        key: Self::Key,
+        order: usize,
+        trigger_mode: TriggerMode,
+    ) -> Result<(), BuilderError> {
+        builder.add_ports(key, order, trigger_mode)
     }
 }
 
@@ -238,6 +264,7 @@ impl<'a> FindElements for ReactionBuilderState<'a> {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 /// Describes how an action is used by a reaction
 pub enum TriggerMode {
     /// The action/port triggers the reaction, but is not provided as input
@@ -428,6 +455,18 @@ impl<'a> ReactionBuilderState<'a> {
                 Ok(())
             }
         }
+    }
+
+    pub fn add_ports(
+        &mut self,
+        keys: impl IntoIterator<Item = BuilderPortKey>,
+        order: usize,
+        trigger_mode: TriggerMode,
+    ) -> Result<(), BuilderError> {
+        for key in keys {
+            self.add_port(key, order, trigger_mode)?;
+        }
+        Ok(())
     }
 
     /// Indicate how this Reaction interacts with the given Port

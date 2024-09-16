@@ -1,5 +1,5 @@
 use quote::{quote, ToTokens};
-use syn::{Generics, Ident, Type, TypePath, TypeReference};
+use syn::{Generics, Ident, Type, TypeArray, TypePath, TypeReference};
 
 use crate::util::extract_path_ident;
 
@@ -29,6 +29,10 @@ impl TriggerInner {
         let mut port_mut_idents = vec![];
 
         for field in fields.iter() {
+            let field_inner_type = extract_path_ident(&field.ty).ok_or_else(|| {
+                darling::Error::custom("Unable to extract path ident ").with_span(&field.ty)
+            })?;
+
             match &field.ty {
                 Type::Reference(TypeReference {
                     mutability: None,
@@ -74,29 +78,25 @@ impl TriggerInner {
                     }
                 }
 
-                Type::Path(TypePath { path, .. }) => {
-                    let ty = extract_path_ident(&field.ty).ok_or_else(|| {
-                        darling::Error::custom(format!(
-                            "Unable to extract path ident for {:?}",
-                            field.ty
-                        ))
-                    })?;
-
-                    if *ty == INPUT_REF {
+                Type::Path(_) | Type::Array(_) => match field_inner_type.to_string().as_ref() {
+                    INPUT_REF => {
                         initializer_idents.push(field.ident.clone().unwrap());
                         port_idents.push(field.ident.clone().unwrap());
-                    } else if *ty == OUTPUT_REF {
+                    }
+                    OUTPUT_REF => {
                         initializer_idents.push(field.ident.clone().unwrap());
                         port_mut_idents.push(field.ident.clone().unwrap());
-                    } else if *ty == ACTION_REF || *ty == PHYSICAL_ACTION_REF {
+                    }
+                    ACTION_REF | PHYSICAL_ACTION_REF => {
                         initializer_idents.push(field.ident.clone().unwrap());
                         action_idents.push(field.ident.clone().unwrap());
-                    } else {
-                        return Err(
-                            darling::Error::custom("Unexpected Reaction member").with_span(&ty)
-                        );
                     }
-                }
+
+                    _ => {
+                        return Err(darling::Error::custom("Unexpected Reaction member")
+                            .with_span(&field.ty));
+                    }
+                },
 
                 _ => {
                     return Err(darling::Error::custom(format!(

@@ -62,26 +62,23 @@ impl Hello {
 }
 
 #[derive(Clone, Reactor)]
-#[reactor(state = Hello)]
+#[reactor(state = "Hello", reaction = "ReactionT", reaction = "ReactionA")]
 struct HelloBuilder {
     #[reactor(timer(offset = "1 sec", period = "2 sec"))]
     t: TimerActionKey,
     #[reactor(action())]
     a: TypedActionKey<()>,
-    reaction_t: TypedReactionKey<ReactionT<'static>>,
-    reaction_a: TypedReactionKey<ReactionA>,
 }
 
 /// ReactionT is sensitive to Timer `t` and schedules Action `a`
 #[derive(Reaction)]
-#[reaction(triggers(action = "t"))]
+#[reaction(reactor = "HelloBuilder", triggers(action = "t"))]
 struct ReactionT<'a> {
     a: runtime::ActionRef<'a, ()>,
 }
 
-impl Trigger for ReactionT<'_> {
-    type Reactor = HelloBuilder;
-    fn trigger(&mut self, ctx: &mut runtime::Context, state: &mut Hello) {
+impl Trigger<HelloBuilder> for ReactionT<'_> {
+    fn trigger(mut self, ctx: &mut runtime::Context, state: &mut Hello) {
         // Print the current time.
         state.previous_time = ctx.get_elapsed_logical_time();
         ctx.schedule_action(&mut self.a, None, Some(Duration::from_millis(200))); // No payload.
@@ -94,12 +91,11 @@ impl Trigger for ReactionT<'_> {
 
 /// ReactionA is sensetive to Action `a`
 #[derive(Reaction)]
-#[reaction(triggers(action = "a"))]
+#[reaction(reactor = "HelloBuilder", triggers(action = "a"))]
 struct ReactionA;
 
-impl Trigger for ReactionA {
-    type Reactor = HelloBuilder;
-    fn trigger(&mut self, ctx: &mut runtime::Context, state: &mut Hello) {
+impl Trigger<HelloBuilder> for ReactionA {
+    fn trigger(self, ctx: &mut runtime::Context, state: &mut Hello) {
         state.count += 1;
         let time = ctx.get_elapsed_logical_time();
         println!("***** action {} at time {:?}", state.count, time);

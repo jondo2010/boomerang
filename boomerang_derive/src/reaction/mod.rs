@@ -87,6 +87,25 @@ pub struct ReactionField {
     path: Option<Expr>,
 }
 
+fn parse_bound(item: &syn::Meta) -> Result<syn::GenericParam, darling::Error> {
+    match item {
+        syn::Meta::NameValue(syn::MetaNameValue { value, .. }) => match value {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(lit_str),
+                ..
+            }) => syn::parse_str(lit_str.value().as_str())
+                .map_err(|e| darling::Error::custom(format!("Failed to parse bound: {}", e))),
+
+            _ => Err(darling::Error::unsupported_shape(
+                "Only string literals are supported",
+            )),
+        },
+        _ => Err(darling::Error::unsupported_shape(
+            "Only name value pairs are supported",
+        )),
+    }
+}
+
 #[derive(Debug, FromDeriveInput)]
 #[darling(attributes(reaction), supports(struct_named, struct_unit))]
 pub struct ReactionReceiver {
@@ -97,8 +116,8 @@ pub struct ReactionReceiver {
     /// Type of the reactor
     reactor: syn::Type,
 
-    #[darling(default, multiple, rename = "bound")]
-    bounds: Vec<syn::TypeParam>,
+    #[darling(default, multiple, rename = "bound", with = "parse_bound")]
+    bounds: Vec<syn::GenericParam>,
 
     /// Connection definitions
     #[darling(default, multiple)]
@@ -108,7 +127,7 @@ pub struct ReactionReceiver {
 pub struct Reaction {
     ident: Ident,
     generics: Generics,
-    bounds: Vec<syn::TypeParam>,
+    bounds: Vec<syn::GenericParam>,
     reactor: Type,
     fields: Vec<ReactionFieldInner>,
     inner: TriggerInner,
@@ -326,6 +345,7 @@ mod tests {
 #[reaction(
     reactor = "Inner::Count<T>",
     bound = "T: runtime::PortData",
+    bound = "const N: usize",
     triggers(action = "x"),
     triggers(port = "child.y"),
     triggers(startup),
@@ -335,7 +355,13 @@ struct ReactionT;"#;
         let parsed: DeriveInput = syn::parse_str(input).unwrap();
         let receiver = ReactionReceiver::from_derive_input(&parsed).unwrap();
         assert_eq!(receiver.reactor, parse_quote! {Inner::Count<T>});
-        assert_eq!(receiver.bounds, vec![parse_quote! {T: runtime::PortData}]);
+        assert_eq!(
+            receiver.bounds,
+            vec![
+                parse_quote! {T: runtime::PortData},
+                parse_quote! {const N: usize}
+            ]
+        );
         assert_eq!(
             receiver.triggers.iter().collect::<Vec<_>>(),
             vec![

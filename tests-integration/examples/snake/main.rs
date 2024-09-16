@@ -13,8 +13,16 @@ mod reactor {
     use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
     use boomerang_util::keyboard_events::{Key, KeyboardEvents, KeyboardEventsBuilder};
 
-    #[derive(Clone, Reactor)]
-    #[reactor(state = Snake)]
+    #[derive(Reactor)]
+    #[reactor(
+        state = "Snake",
+        reaction = "ReactionStartup",
+        reaction = "ReactionScreenRefresh",
+        reaction = "ReactionMoreFood",
+        reaction = "ReactionKeyboard",
+        reaction = "ReactionAddFood",
+        reaction = "ReactionShutdown"
+    )]
     pub struct SnakeBuilder {
         /// this thing helps capturing key presses
         #[reactor(child= KeyboardEvents::default())]
@@ -31,13 +39,6 @@ mod reactor {
         /// periodic
         #[reactor(timer(period = "5 sec"))]
         add_more_food: TimerActionKey,
-
-        reaction_startup: TypedReactionKey<ReactionStartup<'static>>,
-        reaction_screen_refresh: TypedReactionKey<ReactionScreenRefresh<'static>>,
-        reaction_more_food: TypedReactionKey<ReactionMoreFood<'static>>,
-        reaction_keyboard: TypedReactionKey<ReactionKeyboard<'static>>,
-        reaction_add_food: TypedReactionKey<ReactionAddFood>,
-        reaction_shutdown: TypedReactionKey<ReactionShutdown>,
     }
 
     pub struct Snake {
@@ -78,17 +79,16 @@ mod reactor {
     }
 
     #[derive(Reaction)]
-    #[reaction(triggers(startup))]
+    #[reaction(reactor = "SnakeBuilder", triggers(startup))]
     struct ReactionStartup<'a> {
         screen_refresh: runtime::ActionRef<'a>,
     }
 
-    impl Trigger for ReactionStartup<'_> {
-        type Reactor = SnakeBuilder;
+    impl Trigger<SnakeBuilder> for ReactionStartup<'_> {
         fn trigger(
-            &mut self,
+            mut self,
             ctx: &mut runtime::Context,
-            state: &mut <Self::Reactor as Reactor>::State,
+            state: &mut <SnakeBuilder as Reactor>::State,
         ) {
             // KeyboardEvents makes stdout raw on startup so this is safe
             output::paint_on_raw_console(&state.grid);
@@ -103,17 +103,17 @@ mod reactor {
     }
 
     #[derive(Reaction)]
+    #[reaction(reactor = "SnakeBuilder")]
     struct ReactionScreenRefresh<'a> {
         #[reaction(triggers)]
         screen_refresh: runtime::ActionRef<'a>,
     }
 
-    impl Trigger for ReactionScreenRefresh<'_> {
-        type Reactor = SnakeBuilder;
+    impl Trigger<SnakeBuilder> for ReactionScreenRefresh<'_> {
         fn trigger(
-            &mut self,
+            mut self,
             ctx: &mut runtime::Context,
-            state: &mut <Self::Reactor as Reactor>::State,
+            state: &mut <SnakeBuilder as Reactor>::State,
         ) {
             // select a delay depending on the tempo
             let delay = runtime::Duration::from_millis(400)
@@ -123,17 +123,16 @@ mod reactor {
     }
 
     #[derive(Reaction)]
-    #[reaction(triggers(action = "screen_refresh"))]
+    #[reaction(reactor = "SnakeBuilder", triggers(action = "screen_refresh"))]
     struct ReactionMoreFood<'a> {
         manually_add_more_food: runtime::ActionRef<'a>,
     }
 
-    impl Trigger for ReactionMoreFood<'_> {
-        type Reactor = SnakeBuilder;
+    impl Trigger<SnakeBuilder> for ReactionMoreFood<'_> {
         fn trigger(
-            &mut self,
+            mut self,
             ctx: &mut runtime::Context,
-            state: &mut <Self::Reactor as Reactor>::State,
+            state: &mut <SnakeBuilder as Reactor>::State,
         ) {
             // check that the user's command is valid
             if state.pending_direction != state.snake_direction.opposite() {
@@ -163,17 +162,17 @@ mod reactor {
     }
 
     #[derive(Reaction)]
+    #[reaction(reactor = "SnakeBuilder")]
     struct ReactionKeyboard<'a> {
         #[reaction(path = "keyboard.arrow_key_pressed")]
         arrow_key_pressed: runtime::InputRef<'a, Key>,
     }
 
-    impl Trigger for ReactionKeyboard<'_> {
-        type Reactor = SnakeBuilder;
+    impl Trigger<SnakeBuilder> for ReactionKeyboard<'_> {
         fn trigger(
-            &mut self,
+            mut self,
             _ctx: &mut runtime::Context,
-            state: &mut <Self::Reactor as Reactor>::State,
+            state: &mut <SnakeBuilder as Reactor>::State,
         ) {
             // this might be overwritten several times, only committed on screen refreshes
             state.pending_direction = match self.arrow_key_pressed.unwrap() {
@@ -188,17 +187,17 @@ mod reactor {
 
     #[derive(Reaction)]
     #[reaction(
+        reactor = "SnakeBuilder",
         triggers(action = "manually_add_more_food"),
         triggers(action = "add_more_food")
     )]
     struct ReactionAddFood;
 
-    impl Trigger for ReactionAddFood {
-        type Reactor = SnakeBuilder;
+    impl Trigger<SnakeBuilder> for ReactionAddFood {
         fn trigger(
-            &mut self,
+            self,
             _ctx: &mut runtime::Context,
-            state: &mut <Self::Reactor as Reactor>::State,
+            state: &mut <SnakeBuilder as Reactor>::State,
         ) {
             if state.food_on_grid >= state.max_food_on_grid {
                 return; // there's enough food there
@@ -212,15 +211,14 @@ mod reactor {
     }
 
     #[derive(Reaction)]
-    #[reaction(triggers(shutdown))]
+    #[reaction(reactor = "SnakeBuilder", triggers(shutdown))]
     struct ReactionShutdown;
 
-    impl Trigger for ReactionShutdown {
-        type Reactor = SnakeBuilder;
+    impl Trigger<SnakeBuilder> for ReactionShutdown {
         fn trigger(
-            &mut self,
+            self,
             _ctx: &mut runtime::Context,
-            state: &mut <Self::Reactor as Reactor>::State,
+            state: &mut <SnakeBuilder as Reactor>::State,
         ) {
             println!("Game over! Your score was: {}", state.snake.len());
         }

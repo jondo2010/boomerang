@@ -8,19 +8,19 @@ struct State {
 #[derive(Reactor)]
 #[reactor(
   state = "State",
-  //reaction = "ReactionStartup"
+  reaction = "ReactionStartup",
+  //reaction = "ReactionIn",
+  //reaction = "ReactionShutdown",
 )]
 struct Node<const NUM_NODES: usize> {
     inp: [TypedPortKey<i32, Input>; NUM_NODES],
     out: TypedPortKey<i32, Output>,
-    //reaction_in: TypedReactionKey<ReactionIn<'static>>,
-    //reaction_shutdown: TypedReactionKey<ReactionShutdown>,
 }
 
 #[derive(Reaction)]
 #[reaction(
     reactor = "Node<NUM_NODES>",
-    //bound = "const NUM_NODES: usize",
+    bound = "const NUM_NODES: usize",
     triggers(startup)
 )]
 struct ReactionStartup<'a> {
@@ -35,34 +35,32 @@ impl<const NUM_NODES: usize> Trigger<Node<NUM_NODES>> for ReactionStartup<'_> {
     }
 }
 
-/*
 #[derive(Reaction)]
-struct ReactionIn<'a> {
-    inp: &'a [runtime::Port<i32>],
+#[reaction(reactor = "Node<NUM_NODES>")]
+struct ReactionIn<'a, const NUM_NODES: usize> {
+    inp: [runtime::InputRef<'a, i32>; NUM_NODES],
 }
 
-impl Trigger for ReactionIn<'_> {
-    type Reactor = Node<4>;
-
-    fn trigger(&mut self, ctx: &mut runtime::Context, state: &mut State) {
-        /*
-        println!("Node {} received messages from ", ctx.reactor().bank_index);
+impl<const NUM_NODES: usize> Trigger<Node<NUM_NODES>> for ReactionIn<'_, NUM_NODES> {
+    fn trigger(mut self, ctx: &mut runtime::Context, state: &mut State) {
+        //println!("Node {} received messages from ", ctx.reactor().bank_index);
         let mut count = 0;
+
         for i in 0..self.inp.len() {
-            if self.inp[i].is_present {
+            if let Some(val) = self.inp[i] {
                 state.received = true;
                 count += 1;
-                print!("{}, ", self.inp[i].value);
+                print!("{val}, ");
             }
         }
-        println!();
+
         if count != ctx.reactor().num_nodes {
             panic!("Received fewer messages than expected!");
         }
-        */
     }
 }
 
+/*
 #[derive(Reaction)]
 struct ReactionShutdown;
 
@@ -124,3 +122,56 @@ reactor Node(num_nodes: size_t = 4, bank_index: int = 0) {
     (nodes.out)+ -> nodes.in
   }
 */
+
+impl<'a, const NUM_NODES: usize> ::boomerang::builder::Reaction<Node<NUM_NODES>>
+    for ReactionIn<'a, NUM_NODES>
+{
+    fn build<'builder>(
+        name: &str,
+        reactor: &Node<NUM_NODES>,
+        builder: &'builder mut ::boomerang::builder::ReactorBuilderState,
+    ) -> Result<
+        ::boomerang::builder::ReactionBuilderState<'builder>,
+        ::boomerang::builder::BuilderError,
+    > {
+        #[allow(unused_variables)]
+        let __trigger_inner =
+            |ctx: &mut ::boomerang::runtime::Context,
+             state: &mut dyn::boomerang::runtime::ReactorState,
+             ports: &[::boomerang::runtime::PortRef],
+             ports_mut: &mut [::boomerang::runtime::PortRefMut],
+             actions: &mut [&mut ::boomerang::runtime::Action]| {
+                let state: &mut <Node<NUM_NODES> as ::boomerang::builder::Reactor>::State = state
+                    .downcast_mut()
+                    .expect("Unable to downcast reactor state");
+
+                let (inp, ports) = ports
+                    .split_first_chunk::<NUM_NODES>()
+                    .expect("Unable to destructure ports");
+
+                //let [inp]: &[::boomerang::runtime::PortRef; 1usize] =
+                //    ::std::convert::TryInto::try_into(ports)
+                //        .expect("Unable to destructure ref ports for reaction");
+
+                let inp = inp
+                    .downcast_ref::<[::boomerang::runtime::Port<_>; NUM_NODES]>()
+                    .map(Into::into)
+                    .expect("Wrong Port type for reaction");
+                <ReactionIn<NUM_NODES> as ::boomerang::builder::Trigger<Node<NUM_NODES>>>::trigger(
+                    ReactionIn { inp },
+                    ctx,
+                    state,
+                );
+            };
+        let __startup_action = builder.get_startup_action();
+        let __shutdown_action = builder.get_shutdown_action();
+        let mut __reaction = builder.add_reaction(name, Box::new(__trigger_inner));
+        <[runtime::InputRef<'a, i32>; NUM_NODES] as ::boomerang::builder::ReactionField>::build(
+            &mut __reaction,
+            reactor.inp.into(),
+            0,
+            ::boomerang::builder::TriggerMode::TriggersAndUses,
+        )?;
+        Ok(__reaction)
+    }
+}

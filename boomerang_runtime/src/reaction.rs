@@ -77,7 +77,7 @@ impl Reaction {
 
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(
-        skip(self, start_time, inputs, outputs, actions, async_tx, shutdown_rx),
+        skip(self, start_time, ref_ports, mut_ports, actions, async_tx, shutdown_rx),
         fields(
             reactor = reactor.name,
             name = %self.name,
@@ -90,8 +90,8 @@ impl Reaction {
         tag: Tag,
         reactor: &'a mut Reactor,
         actions: &mut [&mut Action],
-        inputs: &[PortRef<'_>],
-        outputs: &mut [PortRefMut<'_>],
+        ref_ports: &[PortRef<'_>],
+        mut_ports: &mut [PortRefMut<'_>],
         async_tx: Sender<PhysicalEvent>,
         shutdown_rx: keepalive::Receiver,
     ) -> TriggerRes {
@@ -106,7 +106,7 @@ impl Reaction {
             }
         }
 
-        (self.body)(&mut ctx, state.as_mut(), inputs, outputs, actions);
+        (self.body)(&mut ctx, state.as_mut(), ref_ports, mut_ports, actions);
 
         ctx.trigger_res
     }

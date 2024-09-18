@@ -185,8 +185,8 @@ pub(crate) struct ReactionTriggerCtx<'a> {
     pub(crate) reactor: &'a mut Reactor,
     pub(crate) reaction: &'a mut Reaction,
     pub(crate) actions: &'a mut [&'a mut Action],
-    pub(crate) inputs: &'a [&'a dyn BasePort],
-    pub(crate) outputs: &'a mut [&'a mut dyn BasePort],
+    pub(crate) ref_ports: &'a [&'a dyn BasePort],
+    pub(crate) mut_ports: &'a mut [&'a mut dyn BasePort],
 }
 
 /// Container for set of iterators used to build a `ReactionTriggerCtx`
@@ -225,17 +225,17 @@ where
         let reactor = self.reactors.next();
         let reaction = self.reactions.next();
         let actions = self.grouped_actions.next();
-        let inputs = self.grouped_ref_ports.next();
-        let outputs = self.grouped_mut_ports.next();
+        let ref_ports = self.grouped_ref_ports.next();
+        let mut_ports = self.grouped_mut_ports.next();
 
-        match (reactor, reaction, actions, inputs, outputs) {
-            (Some(reactor), Some(reaction), Some(actions), Some(inputs), Some(outputs)) => {
+        match (reactor, reaction, actions, ref_ports, mut_ports) {
+            (Some(reactor), Some(reaction), Some(actions), Some(ref_ports), Some(mut_ports)) => {
                 Some(ReactionTriggerCtx {
                     reactor,
                     reaction,
                     actions: self.bump.alloc_slice_fill_iter(actions),
-                    inputs: self.bump.alloc_slice_fill_iter(inputs.map(|p| &**p)),
-                    outputs: self.bump.alloc_slice_fill_iter(outputs.map(|p| &mut **p)),
+                    ref_ports: self.bump.alloc_slice_fill_iter(ref_ports.map(|p| &**p)),
+                    mut_ports: self.bump.alloc_slice_fill_iter(mut_ports.map(|p| &mut **p)),
                 })
             }
             (None, None, None, None, None) => None,

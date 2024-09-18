@@ -1,6 +1,5 @@
 mod action;
 mod context;
-mod destructure;
 mod env;
 mod event;
 pub mod keepalive;
@@ -9,6 +8,7 @@ mod port;
 mod reaction;
 mod reactor;
 mod sched;
+mod split;
 mod time;
 
 // Re-exports

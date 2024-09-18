@@ -306,8 +306,8 @@ impl<'env> Scheduler<'env> {
                     reaction,
                     reactor,
                     actions,
-                    inputs,
-                    outputs,
+                    ref_ports,
+                    mut_ports,
                 } = trigger_ctx;
 
                 tracing::trace!(
@@ -321,8 +321,8 @@ impl<'env> Scheduler<'env> {
                     tag,
                     reactor,
                     actions,
-                    inputs,
-                    outputs,
+                    ref_ports,
+                    mut_ports,
                     self.event_tx.clone(),
                     self.shutdown_tx.new_receiver(),
                 )

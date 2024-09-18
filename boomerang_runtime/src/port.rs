@@ -105,6 +105,16 @@ where
 
 pub struct InputRef<'a, T: PortData = ()>(&'a Port<T>);
 
+impl<'a, T: PortData> InputRef<'a, T> {
+    pub fn name(&self) -> &str {
+        self.0.get_name()
+    }
+
+    pub fn key(&self) -> PortKey {
+        self.0.get_key()
+    }
+}
+
 impl<'a, T: PortData> From<&'a Port<T>> for InputRef<'a, T> {
     fn from(port: &'a Port<T>) -> Self {
         Self(port)
@@ -120,6 +130,16 @@ impl<'a, T: PortData> Deref for InputRef<'a, T> {
 }
 
 pub struct OutputRef<'a, T: PortData = ()>(&'a mut Port<T>);
+
+impl<'a, T: PortData> OutputRef<'a, T> {
+    pub fn name(&self) -> &str {
+        self.0.get_name()
+    }
+
+    pub fn key(&self) -> PortKey {
+        self.0.get_key()
+    }
+}
 
 impl<'a, T: PortData> From<&'a mut Port<T>> for OutputRef<'a, T> {
     fn from(port: &'a mut Port<T>) -> Self {

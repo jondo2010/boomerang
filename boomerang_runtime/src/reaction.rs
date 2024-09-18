@@ -17,12 +17,12 @@ pub type PortRef<'a> = &'a (dyn BasePort + 'static);
 pub type PortRefMut<'a> = &'a mut (dyn BasePort + 'static);
 
 pub type ReactionFn = Box<
-    dyn FnMut(
+    dyn for<'a> FnMut(
             &mut Context,
-            &mut dyn ReactorState,
-            &[PortRef],
-            &mut [PortRefMut],
-            &mut [&mut Action],
+            &'a mut dyn ReactorState,
+            &'a [PortRef<'a>],
+            &'a mut [PortRefMut<'a>],
+            &'a mut [&'a mut Action],
         ) + Sync
         + Send,
 >;
@@ -89,9 +89,9 @@ impl Reaction {
         start_time: crate::Instant,
         tag: Tag,
         reactor: &'a mut Reactor,
-        actions: &mut [&mut Action],
-        ref_ports: &[PortRef<'_>],
-        mut_ports: &mut [PortRefMut<'_>],
+        actions: &'a mut [&'a mut Action],
+        ref_ports: &'a [PortRef<'a>],
+        mut_ports: &'a mut [PortRefMut<'a>],
         async_tx: Sender<PhysicalEvent>,
         shutdown_rx: keepalive::Receiver,
     ) -> TriggerRes {

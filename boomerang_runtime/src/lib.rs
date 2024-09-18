@@ -4,11 +4,11 @@ mod env;
 mod event;
 pub mod keepalive;
 mod key_set;
+mod partition;
 mod port;
 mod reaction;
 mod reactor;
 mod sched;
-mod split;
 mod time;
 
 // Re-exports
@@ -16,6 +16,7 @@ pub use action::*;
 pub use context::*;
 pub use env::*;
 pub use key_set::KeySetLimits as ReactionSetLimits;
+pub use partition::{partition, partition_mut, Partition, PartitionMut};
 pub use port::*;
 pub use reaction::*;
 pub use reactor::*;

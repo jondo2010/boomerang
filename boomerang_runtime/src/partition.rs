@@ -1,36 +1,42 @@
+//! This module contains partitioning logic for type-erased slices.
+//!
+//! The partitioning logic is used to destructure a slice of type-erased references into a tuple of concrete types. The
+//! partitioning logic is implemented using the `Partition` and `PartitionMut` traits, which are implemented for tuples of
+//! concrete types. The `part` and `part_mut` functions are used to perform the dynamic destructuring.
+//!
+//! # Example
+//!
+//! ```rust
+//! use boomerang_runtime::partition::{part, part_mut};
+//! use boomerang_runtime::PortRef;
+//!
+//! let ports: Vec<PortRef> = vec![/* ... */];
+//!
+//! // Destructure the slice of type-erased references into a tuple of concrete types
+//! let (port0, port1, array0): (PortRef<i32>, PortRef<bool>, [PortRef<()>; 2]) = part(ports.as_slice()).unwrap();
+//! ```
+
 use crate::{BasePort, InputRef, OutputRef, Port, PortData, PortRef, PortRefMut};
 
-pub trait SplitMap<'a, T, F>: Sized
-where
-    F: FnOnce(&T) -> Self,
-{
-    fn split_map(slice: &'a [T], f: F) -> Option<(Self, &'a [T])>;
+pub type PortSlice<'a> = &'a [&'a (dyn BasePort + 'static)];
+
+pub type PortSliceMut<'a> = &'a [&'a mut (dyn BasePort + 'static)];
+
+pub trait Partition<'a, T>: Sized {
+    fn part(slice: &'a [T]) -> Option<(Self, &'a [T])>;
 }
 
-impl<'a, T, U, F> SplitMap<'a, T, F> for U
-where
-    F: FnOnce(&T) -> U,
-{
-    fn split_map(slice: &'a [T], f: F) -> Option<(U, &'a [T])> {
-        slice.split_first().map(|(first, rest)| (f(first), rest))
-    }
+pub trait PartitionMut<'a, T>: Sized {
+    fn part_mut(slice: &'a mut [T]) -> Option<(Self, &'a mut [T])>;
 }
 
-pub trait Split<'a, T>: Sized {
-    fn split(slice: &'a [T]) -> Option<(Self, &'a [T])>;
-}
-
-pub trait SplitMut<'a, T>: Sized {
-    fn dest_mut(slice: &'a mut [T]) -> Option<(Self, &'a mut [T])>;
-}
-
-macro_rules! impl_dest_for_tuples {
+macro_rules! impl_part_for_tuples {
     ($($S:ident),+) => {
-        impl<'a, T, $($S),+> Split<'a, T> for ($($S),+)
+        impl<'a, T, $($S),+> Partition<'a, T> for ($($S),+,)
         where
-            $($S: Split<'a, T>),+
+            $($S: Partition<'a, T>),+
         {
-            fn split(
+            fn part(
                 slice: &'a [T]
             ) -> Option<(Self, &'a [T])> {
                 let (elements, rest) = {
@@ -38,22 +44,22 @@ macro_rules! impl_dest_for_tuples {
                     (
                         ($(
                             {
-                                let (elem, new_rest) = $S::split(rest)?;
+                                let (elem, new_rest) = $S::part(rest)?;
                                 rest = new_rest;
                                 elem
                             }
-                        ),+)
+                        ),+,)
                     , rest)
                 };
                 Some((elements, rest))
             }
         }
 
-        impl<'a, T, $($S),+> SplitMut<'a, T> for ($($S),+)
+        impl<'a, T, $($S),+> PartitionMut<'a, T> for ($($S),+,)
         where
-            $($S: SplitMut<'a, T>),+
+            $($S: PartitionMut<'a, T>),+
         {
-            fn dest_mut(
+            fn part_mut(
                 slice: &'a mut [T],
             ) -> Option<(Self, &'a mut [T])> {
                 let (elements, rest) = {
@@ -61,11 +67,11 @@ macro_rules! impl_dest_for_tuples {
                     (
                         ($(
                             {
-                                let (elem, new_rest) = $S::dest_mut(rest)?;
+                                let (elem, new_rest) = $S::part_mut(rest)?;
                                 rest = new_rest;
                                 elem
                             }
-                        ),+)
+                        ),+,)
                     , rest)
                 };
                 Some((elements, rest))
@@ -74,21 +80,22 @@ macro_rules! impl_dest_for_tuples {
     };
 }
 
-// Implement the macro for tuples of length 2,3,4,5
-impl_dest_for_tuples!(T0, T1);
-impl_dest_for_tuples!(T0, T1, T2);
-impl_dest_for_tuples!(T0, T1, T2, T3);
-impl_dest_for_tuples!(T0, T1, T2, T3, T4);
+// Implement the macro for tuples of length 1 through 5
+impl_part_for_tuples!(T0);
+impl_part_for_tuples!(T0, T1);
+impl_part_for_tuples!(T0, T1, T2);
+impl_part_for_tuples!(T0, T1, T2, T3);
+impl_part_for_tuples!(T0, T1, T2, T3, T4);
 
 /// Wrapper function for dynamic destructuring.
 ///
 /// This function is used to destructure a slice of type-erased references into a tuple of concrete types. The function
 /// will panic if the slice is not fully consumed.
-pub fn split<'a, T, S>(slice: &'a [T]) -> Option<S>
+pub fn partition<'a, T, S>(slice: &'a [T]) -> Option<S>
 where
-    S: Split<'a, T>,
+    S: Partition<'a, T>,
 {
-    if let Some((result, rest)) = S::split(slice) {
+    if let Some((result, rest)) = S::part(slice) {
         assert!(rest.is_empty(), "Destructuring error");
         Some(result)
     } else {
@@ -100,11 +107,12 @@ where
 ///
 /// This function is used to destructure a slice of type-erased mutable references into a tuple of concrete types. The function
 /// will return an error if the slice is not fully consumed.
-pub fn split_mut<'a, T, S>(slice: &'a mut [T]) -> Option<S>
+//pub fn partition_mut<'a, T, S>(slice: &'a mut [T]) -> Option<S>
+pub fn partition_mut<'a, T, S>(slice: &'a mut [T]) -> Option<S>
 where
-    S: SplitMut<'a, T>,
+    S: PartitionMut<'a, T>,
 {
-    if let Some((result, rest)) = S::dest_mut(slice) {
+    if let Some((result, rest)) = S::part_mut(slice) {
         assert!(rest.is_empty(), "Destructuring error");
         Some(result)
     } else {
@@ -131,11 +139,11 @@ impl<'a, T: PortData> From<&'a mut PortRefMut<'a>> for OutputRef<'a, T> {
 }
 
 // Split for BasePort scalars
-impl<'a, P> Split<'a, PortRef<'a>> for P
+impl<'a, P> Partition<'a, PortRef<'a>> for P
 where
     P: From<PortRef<'a>>,
 {
-    fn split(slice: &'a [PortRef<'a>]) -> Option<(Self, &'a [PortRef<'a>])> {
+    fn part(slice: &'a [PortRef<'a>]) -> Option<(Self, &'a [PortRef<'a>])> {
         slice
             .split_first()
             .map(|(&first, rest)| (P::from(first), rest))
@@ -143,44 +151,23 @@ where
 }
 
 // SplitMut for BasePort scalars
-impl<'a, P> SplitMut<'a, PortRefMut<'a>> for P
+impl<'a, P> PartitionMut<'a, PortRefMut<'a>> for P
 where
     P: From<&'a mut PortRefMut<'a>>,
 {
-    fn dest_mut(slice: &'a mut [PortRefMut<'a>]) -> Option<(Self, &'a mut [PortRefMut<'a>])> {
+    fn part_mut(slice: &'a mut [PortRefMut<'a>]) -> Option<(Self, &'a mut [PortRefMut<'a>])> {
         slice
             .split_first_mut()
             .map(|(first, rest)| (P::from(first), rest))
     }
 }
 
-/*
-impl<'a, T: BasePort + 'static> Split<'a, PortRef<'a>> for &'a T {
-    fn split(
-        slice: &'a [&'a (dyn BasePort + 'static)],
-    ) -> Option<(Self, &'a [&'a (dyn BasePort + 'static)])> {
-        slice
-            .split_first()
-            .and_then(|(first, rest)| first.downcast_ref::<T>().map(|value| (value, rest)))
-    }
-}
-
-impl<'a, T: BasePort + 'static> SplitMut<'a, &'a mut dyn BasePort> for &'a mut T {
-    fn dest_mut(
-        slice: &'a mut [&'a mut (dyn BasePort + 'static)],
-    ) -> Option<(Self, &'a mut [&'a mut (dyn BasePort + 'static)])> {
-        slice
-            .split_first_mut()
-            .and_then(|(first, rest)| first.downcast_mut().map(|value| (value, rest)))
-    }
-}
-    */
-
 // Split for BasePort arrays
-impl<'a, T: BasePort + 'static, const N: usize> Split<'a, &'a dyn BasePort> for [&'a T; N] {
-    fn split(
-        slice: &'a [&'a (dyn BasePort + 'static)],
-    ) -> Option<(Self, &'a [&'a (dyn BasePort + 'static)])> {
+impl<'a, P, const N: usize> Partition<'a, PortRef<'a>> for [P; N]
+where
+    P: From<PortRef<'a>>,
+{
+    fn part(slice: &'a [PortRef<'a>]) -> Option<(Self, &'a [PortRef<'a>])> {
         if slice.len() < N {
             return None;
         }
@@ -188,15 +175,13 @@ impl<'a, T: BasePort + 'static, const N: usize> Split<'a, &'a dyn BasePort> for 
         slice.split_first_chunk::<N>().map(|(array_slice, rest)| {
             // SAFETY: We know that the slice has the correct length, since split_first_chunk would return None otherwise
             let array = unsafe {
-                let mut array = std::mem::MaybeUninit::<[&T; N]>::uninit();
+                let mut array = std::mem::MaybeUninit::<[P; N]>::uninit();
                 array
                     .assume_init_mut()
                     .iter_mut()
                     .zip(array_slice.iter())
                     .for_each(|(elem, value)| {
-                        *elem = value
-                            .downcast_ref()
-                            .expect("Downcast failed during destructure");
+                        *elem = P::from(*value);
                     });
                 array.assume_init()
             };
@@ -206,10 +191,11 @@ impl<'a, T: BasePort + 'static, const N: usize> Split<'a, &'a dyn BasePort> for 
 }
 
 // SplitMut for BasePort arrays
-impl<'a, T: BasePort, const N: usize> SplitMut<'a, &'a mut dyn BasePort> for [&'a mut T; N] {
-    fn dest_mut(
-        slice: &'a mut [&'a mut (dyn BasePort + 'static)],
-    ) -> Option<(Self, &'a mut [&'a mut (dyn BasePort + 'static)])> {
+impl<'a, P, const N: usize> PartitionMut<'a, PortRefMut<'a>> for [P; N]
+where
+    P: From<&'a mut PortRefMut<'a>>,
+{
+    fn part_mut(slice: &'a mut [PortRefMut<'a>]) -> Option<(Self, &'a mut [PortRefMut<'a>])> {
         if slice.len() < N {
             return None;
         }
@@ -219,15 +205,13 @@ impl<'a, T: BasePort, const N: usize> SplitMut<'a, &'a mut dyn BasePort> for [&'
             .map(|(array_slice, rest)| {
                 // SAFETY: We know that the slice has the correct length, since split_first_chunk would return None otherwise
                 let array = unsafe {
-                    let mut array = std::mem::MaybeUninit::<[&mut T; N]>::uninit();
+                    let mut array = std::mem::MaybeUninit::<[P; N]>::uninit();
                     array
                         .assume_init_mut()
                         .iter_mut()
                         .zip(array_slice.iter_mut())
                         .for_each(|(elem, value)| {
-                            *elem = value
-                                .downcast_mut()
-                                .expect("Downcast failed during destructure");
+                            *elem = P::from(value);
                         });
                     array.assume_init()
                 };
@@ -238,7 +222,7 @@ impl<'a, T: BasePort, const N: usize> SplitMut<'a, &'a mut dyn BasePort> for [&'
 
 #[cfg(test)]
 mod tests {
-    use crate::Port;
+    use crate::{BasePort, Port};
 
     use super::*;
 
@@ -255,25 +239,23 @@ mod tests {
         let (refs, _) = ports.iter_many_unchecked_split([k0, k1, k2, k3], []);
         let refs: Vec<&dyn BasePort> = refs.into_iter().map(AsRef::as_ref).collect();
 
-        let (i, _): (InputRef<i32>, _) = Split::split(refs.as_slice()).unwrap();
-
-        let (p0, p1, p2a): (InputRef<i32>, &Port<u32>, [&Port<bool>; 2]) =
-            split(refs.as_slice()).unwrap();
-        assert_eq!(p0.get_name(), "p0");
-        assert_eq!(p1.get_name(), "p1");
-        assert_eq!(p2a[0].get_name(), "p2a");
-        assert_eq!(p2a[1].get_name(), "p2b");
+        let (p0, p1, p2a): (InputRef<i32>, InputRef<u32>, [InputRef<bool>; 2]) =
+            partition(refs.as_slice()).unwrap();
+        assert_eq!(p0.name(), "p0");
+        assert_eq!(p1.name(), "p1");
+        assert_eq!(p2a[0].name(), "p2a");
+        assert_eq!(p2a[1].name(), "p2b");
 
         // Test the split_mut function
         let (_, refs_mut) = ports.iter_many_unchecked_split([k0], [k1, k2, k3]);
         let mut refs_mut: Vec<&mut dyn BasePort> =
             refs_mut.into_iter().map(AsMut::as_mut).collect();
 
-        let (p1, p2a): (&mut Port<u32>, [&mut Port<bool>; 2]) =
-            split_mut(refs_mut.as_mut_slice()).unwrap();
+        let (p1, p2a): (OutputRef<u32>, [OutputRef<bool>; 2]) =
+            partition_mut(refs_mut.as_mut_slice()).unwrap();
 
-        assert_eq!(p1.get_name(), "p1");
-        assert_eq!(p2a[0].get_name(), "p2a");
-        assert_eq!(p2a[1].get_name(), "p2b");
+        assert_eq!(p1.name(), "p1");
+        assert_eq!(p2a[0].name(), "p2a");
+        assert_eq!(p2a[1].name(), "p2b");
     }
 }

@@ -149,31 +149,19 @@ impl ToTokens for TriggerInner {
             quote! {}
         };
 
-        let ports_len = port_idents.len();
-        let ports = if ports_len > 0 {
+        let ports = if !port_idents.is_empty() {
             quote! {
-                let [#(#port_idents,)*]: &[::boomerang::runtime::PortRef; #ports_len] =
-                    ::std::convert::TryInto::try_into(ports)
-                        .expect("Unable to destructure ref ports for reaction");
-
-                #(let #port_idents = #port_idents.downcast_ref::<::boomerang::runtime::Port<_>>()
-                    .map(Into::into)
-                    .expect("Wrong Port type for reaction"); );*
+                let (#(#port_idents,)*) = ::boomerang::runtime::partition(ports)
+                    .expect("Unable to destructure ref ports for reaction");
             }
         } else {
             quote! {}
         };
 
-        let port_muts_len = port_mut_idents.len();
-        let port_muts = if port_muts_len > 0 {
+        let port_muts = if !port_mut_idents.is_empty() {
             quote! {
-                let [#(#port_mut_idents,)*]: &mut [::boomerang::runtime::PortRefMut; #port_muts_len] =
-                    ::std::convert::TryInto::try_into(ports_mut)
-                        .expect("Unable to destructure mut ports for reaction");
-
-                #(let #port_mut_idents = #port_mut_idents.downcast_mut::<::boomerang::runtime::Port<_>>()
-                    .map(Into::into)
-                    .expect("Wrong Port type for reaction"); );*
+                let (#(#port_mut_idents,)*) = ::boomerang::runtime::partition_mut(ports_mut)
+                    .expect("Unable to destructure mut ports for reaction");
             }
         } else {
             quote! {}
@@ -181,13 +169,13 @@ impl ToTokens for TriggerInner {
 
         tokens.extend(quote! {
             #[allow(unused_variables)]
-            let __trigger_inner = |
+            fn __trigger_inner<'inner>(
                 ctx: &mut ::boomerang::runtime::Context,
-                state: &mut dyn ::boomerang::runtime::ReactorState,
-                ports: &[::boomerang::runtime::PortRef],
-                ports_mut: &mut [::boomerang::runtime::PortRefMut],
-                actions: &mut [&mut ::boomerang::runtime::Action],
-            | {
+                state: &'inner mut dyn ::boomerang::runtime::ReactorState,
+                ports: &'inner [::boomerang::runtime::PortRef<'inner>],
+                ports_mut: &'inner mut [::boomerang::runtime::PortRefMut<'inner>],
+                actions: &'inner mut [&'inner mut ::boomerang::runtime::Action],
+            ) {
                 let state: &mut <#reactor as ::boomerang::builder::Reactor>::State = state
                     .downcast_mut()
                     .expect("Unable to downcast reactor state");

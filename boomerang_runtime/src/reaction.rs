@@ -12,9 +12,9 @@ tinymap::key_type!(pub ReactionKey);
 pub type ReactionSet = KeySet<ReactionKey>;
 
 /// PortRef is the type-erased ref argument passed to the ReactionFn
-pub type PortRef<'a> = &'a dyn BasePort;
+pub type PortRef<'a> = &'a (dyn BasePort + 'static);
 /// PortRefMut is the mutable type-erased ref argument passed to the ReactionFn
-pub type PortRefMut<'a> = &'a mut dyn BasePort;
+pub type PortRefMut<'a> = &'a mut (dyn BasePort + 'static);
 
 pub type ReactionFn = Box<
     dyn FnMut(

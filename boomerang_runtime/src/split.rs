@@ -1,4 +1,4 @@
-use crate::BasePort;
+use crate::{BasePort, InputRef, OutputRef, Port, PortData, PortRef, PortRefMut};
 
 pub trait SplitMap<'a, T, F>: Sized
 where
@@ -112,8 +112,50 @@ where
     }
 }
 
+impl<'a, T: PortData> From<PortRef<'a>> for InputRef<'a, T> {
+    fn from(port: PortRef<'a>) -> Self {
+        InputRef::from(
+            port.downcast_ref::<Port<T>>()
+                .expect("Downcast failed during conversion"),
+        )
+    }
+}
+
+impl<'a, T: PortData> From<&'a mut PortRefMut<'a>> for OutputRef<'a, T> {
+    fn from(port: &'a mut PortRefMut<'a>) -> Self {
+        OutputRef::from(
+            port.downcast_mut::<Port<T>>()
+                .expect("Downcast failed during conversion"),
+        )
+    }
+}
+
 // Split for BasePort scalars
-impl<'a, T: BasePort + 'static> Split<'a, &'a dyn BasePort> for &'a T {
+impl<'a, P> Split<'a, PortRef<'a>> for P
+where
+    P: From<PortRef<'a>>,
+{
+    fn split(slice: &'a [PortRef<'a>]) -> Option<(Self, &'a [PortRef<'a>])> {
+        slice
+            .split_first()
+            .map(|(&first, rest)| (P::from(first), rest))
+    }
+}
+
+// SplitMut for BasePort scalars
+impl<'a, P> SplitMut<'a, PortRefMut<'a>> for P
+where
+    P: From<&'a mut PortRefMut<'a>>,
+{
+    fn dest_mut(slice: &'a mut [PortRefMut<'a>]) -> Option<(Self, &'a mut [PortRefMut<'a>])> {
+        slice
+            .split_first_mut()
+            .map(|(first, rest)| (P::from(first), rest))
+    }
+}
+
+/*
+impl<'a, T: BasePort + 'static> Split<'a, PortRef<'a>> for &'a T {
     fn split(
         slice: &'a [&'a (dyn BasePort + 'static)],
     ) -> Option<(Self, &'a [&'a (dyn BasePort + 'static)])> {
@@ -123,7 +165,6 @@ impl<'a, T: BasePort + 'static> Split<'a, &'a dyn BasePort> for &'a T {
     }
 }
 
-// SplitMut for BasePort scalars
 impl<'a, T: BasePort + 'static> SplitMut<'a, &'a mut dyn BasePort> for &'a mut T {
     fn dest_mut(
         slice: &'a mut [&'a mut (dyn BasePort + 'static)],
@@ -133,6 +174,7 @@ impl<'a, T: BasePort + 'static> SplitMut<'a, &'a mut dyn BasePort> for &'a mut T
             .and_then(|(first, rest)| first.downcast_mut().map(|value| (value, rest)))
     }
 }
+    */
 
 // Split for BasePort arrays
 impl<'a, T: BasePort + 'static, const N: usize> Split<'a, &'a dyn BasePort> for [&'a T; N] {
@@ -213,7 +255,9 @@ mod tests {
         let (refs, _) = ports.iter_many_unchecked_split([k0, k1, k2, k3], []);
         let refs: Vec<&dyn BasePort> = refs.into_iter().map(AsRef::as_ref).collect();
 
-        let (p0, p1, p2a): (&Port<i32>, &Port<u32>, [&Port<bool>; 2]) =
+        let (i, _): (InputRef<i32>, _) = Split::split(refs.as_slice()).unwrap();
+
+        let (p0, p1, p2a): (InputRef<i32>, &Port<u32>, [&Port<bool>; 2]) =
             split(refs.as_slice()).unwrap();
         assert_eq!(p0.get_name(), "p0");
         assert_eq!(p1.get_name(), "p1");

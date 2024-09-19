@@ -1,5 +1,5 @@
 use quote::{quote, ToTokens};
-use syn::{GenericParam, Generics, Ident, Type, TypeArray, TypePath, TypeReference};
+use syn::{GenericParam, Generics, Ident, Type, TypeReference};
 
 use crate::util::extract_path_ident;
 
@@ -137,9 +137,11 @@ impl ToTokens for TriggerInner {
             .chain(self.reaction_generics.type_params().map(|ty| &ty.ident));
         let reaction_generics = quote! { <#(#reaction_generics),*> };
 
-        let const_generics = {
+        // We pass through the const and type generics from the reactor to parameters of the trigger function
+        let inner_generics = {
             let const_generics = self.combined_generics.const_params();
-            quote! { #(#const_generics),* }
+            let type_params = self.combined_generics.type_params();
+            quote! { #(#const_generics),* #(#type_params),* }
         };
 
         let reactor = &self.reactor;
@@ -181,7 +183,7 @@ impl ToTokens for TriggerInner {
 
         tokens.extend(quote! {
             #[allow(unused_variables)]
-            fn __trigger_inner<'inner, #const_generics>(
+            fn __trigger_inner<'inner, #inner_generics>(
                 ctx: &mut ::boomerang::runtime::Context,
                 state: &'inner mut dyn ::boomerang::runtime::ReactorState,
                 ports: &'inner [::boomerang::runtime::PortRef<'inner>],

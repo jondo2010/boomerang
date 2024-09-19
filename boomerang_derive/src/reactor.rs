@@ -302,11 +302,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_connection_attrs() {
+        let input = r#"
+#[derive(Reactor)]
+#[reactor(
+    state = "()",
+    connection(from = "child.a[..]", to = "b[..3]")
+)]
+struct Test;"#;
+
+        let parsed = syn::parse_str(input).unwrap();
+        let receiver = ReactorReceiver::from_derive_input(&parsed).unwrap();
+        dbg!(receiver.connections);
+
+        let q = [1, 2, 3, 4];
+
+        let v = &q[..3];
+    }
+
+    #[test]
     fn test_struct_attrs() {
         let input = r#"
 #[derive(Reactor, Clone)]
 #[reactor(
-    state = MyType::Foo::<f32>,
+    state = "MyType::Foo::<f32>",
+    connection(from = "a.b", to = "c.d"),
     connection(from = "inp", to = "gain.inp"),
     connection(from = "gain.out", to = "out", after = "1 usec"),
     reaction = "Reaction1",
@@ -315,15 +335,20 @@ mod tests {
 struct Test {}"#;
 
         let parsed = syn::parse_str(input).unwrap();
-        
-
         let receiver = ReactorReceiver::from_derive_input(&parsed).unwrap();
 
         assert_eq!(receiver.ident.to_string(), "Test");
         assert_eq!(receiver.state, parse_quote! {MyType::Foo::<f32>});
-        assert_eq!(receiver.connections.len(), 2);
         assert_eq!(
             receiver.connections[0],
+            ConnectionAttr {
+                from: parse_quote! {a.b},
+                to: parse_quote! {c.d},
+                after: None
+            }
+        );
+        assert_eq!(
+            receiver.connections[1],
             ConnectionAttr {
                 from: parse_quote! {inp},
                 to: parse_quote! {gain.inp},
@@ -331,7 +356,7 @@ struct Test {}"#;
             }
         );
         assert_eq!(
-            receiver.connections[1],
+            receiver.connections[2],
             ConnectionAttr {
                 from: parse_quote! {gain.out},
                 to: parse_quote! {out},

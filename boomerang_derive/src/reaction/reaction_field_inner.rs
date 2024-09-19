@@ -1,5 +1,5 @@
 use quote::{quote, ToTokens};
-use syn::{parse_quote, Expr, Type, TypePath, TypeReference};
+use syn::{parse_quote, Expr, Type, TypeReference};
 
 use crate::util::extract_path_ident;
 
@@ -135,10 +135,18 @@ impl ToTokens for ReactionFieldInner {
                     _ => panic!("Invalid trigger mode: {:?}", (triggers, uses, effects)),
                 };
 
+                // For single elements, we can use the `From` trait to convert the element to the
+                // correct type. Otherwise, we need to use the map/`Into` trait.
+                let elem_path = if matches!(elem, Type::Array(..)) {
+                    quote! { reactor.#path.map(From::from) }
+                } else {
+                    quote! { reactor.#path.into() }
+                };
+
                 tokens.extend(quote! {
                     <#elem as ::boomerang::builder::ReactionField>::build(
                         &mut __reaction,
-                        reactor.#path.into(),
+                        #elem_path,
                         0,
                         #trigger_mode,
                     )?;

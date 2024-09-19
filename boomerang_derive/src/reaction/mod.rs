@@ -278,7 +278,11 @@ impl ToTokens for Reaction {
         let (impl_generics, _, _) = self.combined_generics.split_for_impl();
         let (_, type_generics, where_clause) = self.generics.split_for_impl();
         let inner_type_generics = {
-            let g = self.combined_generics.const_params().map(|ty| &ty.ident);
+            let g = self
+                .combined_generics
+                .const_params()
+                .map(|ty| &ty.ident)
+                .chain(self.combined_generics.type_params().map(|ty| &ty.ident));
             quote! { ::<#(#g),*> }
         };
 
@@ -321,7 +325,10 @@ impl ToTokens for Reaction {
                     #trigger_inner
                     let __startup_action = builder.get_startup_action();
                 let __shutdown_action = builder.get_shutdown_action();
-                    let mut __reaction = builder.add_reaction(name, Box::new(__trigger_inner #inner_type_generics));
+                    let mut __reaction = builder.add_reaction(
+                        name,
+                        Box::new(__trigger_inner #inner_type_generics)
+                    );
 
                     #trigger_startup
                     #trigger_shutdown

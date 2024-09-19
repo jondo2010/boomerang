@@ -55,6 +55,22 @@ impl<R: Reactor> ReactorField for R {
     }
 }
 
+impl<R, const N: usize> ReactorField for [R; N]
+where
+    R: Reactor + std::fmt::Debug,
+    R::State: Clone,
+{
+    type Inner = R::State;
+
+    fn build(
+        name: &str,
+        inner: Self::Inner,
+        parent: &'_ mut ReactorBuilderState,
+    ) -> Result<Self, BuilderError> {
+        parent.add_child_reactors(name, inner)
+    }
+}
+
 impl<T: runtime::PortData> ReactorField for TypedPortKey<T, Input> {
     type Inner = ();
 
@@ -401,7 +417,7 @@ impl<'a> ReactorBuilderState<'a> {
         self.env.add_output_port::<T>(name, self.reactor_key)
     }
 
-    /// Adds a bus of output ports to this reactor.
+    /// Adds a bus of output port(s) to this reactor.
     pub fn add_output_ports<T: runtime::PortData, const N: usize>(
         &mut self,
         name: &str,
@@ -421,6 +437,24 @@ impl<'a> ReactorBuilderState<'a> {
         state: R::State,
     ) -> Result<R, BuilderError> {
         R::build(name, state, Some(self.reactor_key), self.env)
+    }
+
+    /// Add multiple child reactors to this reactor.
+    pub fn add_child_reactors<R, const N: usize>(
+        &mut self,
+        name: &str,
+        state: R::State,
+    ) -> Result<[R; N], BuilderError>
+    where
+        R: Reactor + std::fmt::Debug,
+        R::State: Clone,
+    {
+        let mut reactors = Vec::with_capacity(N);
+        for i in 0..N {
+            let reactor = self.add_child_reactor::<R>(&format!("{name}{i}"), state.clone())?;
+            reactors.push(reactor);
+        }
+        Ok(reactors.try_into().expect("Error converting Vec to array"))
     }
 
     /// Add a new child reactor using a closure to build it.

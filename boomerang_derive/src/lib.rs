@@ -7,11 +7,6 @@ mod util;
 
 #[proc_macro_derive(Reaction, attributes(reaction))]
 pub fn derive_reaction(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    #[cfg(feature = "logging")]
-    INIT_LOGGER.call_once(|| {
-        env_logger::init().unwrap();
-    });
-
     let ast = syn::parse_macro_input!(input as syn::DeriveInput);
     let reaction: Result<reaction::Reaction, _> =
         reaction::ReactionReceiver::from_derive_input(&ast).and_then(TryFrom::try_from);

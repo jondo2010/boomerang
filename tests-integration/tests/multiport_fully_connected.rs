@@ -35,8 +35,8 @@ impl<const NUM_NODES: usize> Trigger<Node<NUM_NODES>> for ReactionStartup<'_> {
     }
 }
 
-#[derive(Reaction)]
-#[reaction(reactor = "Node<NUM_NODES>")]
+//#[derive(Reaction)]
+//#[reaction(reactor = "Node<NUM_NODES>")]
 struct ReactionIn<'a, const NUM_NODES: usize> {
     inp: [runtime::InputRef<'a, i32>; NUM_NODES],
 }
@@ -47,7 +47,7 @@ impl<const NUM_NODES: usize> Trigger<Node<NUM_NODES>> for ReactionIn<'_, NUM_NOD
         let mut count = 0;
 
         for i in 0..self.inp.len() {
-            if let Some(val) = self.inp[i] {
+            if let Some(val) = *self.inp[i] {
                 state.received = true;
                 count += 1;
                 print!("{val}, ");
@@ -135,40 +135,34 @@ impl<'a, const NUM_NODES: usize> ::boomerang::builder::Reaction<Node<NUM_NODES>>
         ::boomerang::builder::BuilderError,
     > {
         #[allow(unused_variables)]
-        let __trigger_inner =
-            |ctx: &mut ::boomerang::runtime::Context,
-             state: &mut dyn::boomerang::runtime::ReactorState,
-             ports: &[::boomerang::runtime::PortRef],
-             ports_mut: &mut [::boomerang::runtime::PortRefMut],
-             actions: &mut [&mut ::boomerang::runtime::Action]| {
-                let state: &mut <Node<NUM_NODES> as ::boomerang::builder::Reactor>::State = state
-                    .downcast_mut()
-                    .expect("Unable to downcast reactor state");
-
-                let (inp, ports) = ports
-                    .split_first_chunk::<NUM_NODES>()
-                    .expect("Unable to destructure ports");
-
-                //let [inp]: &[::boomerang::runtime::PortRef; 1usize] =
-                //    ::std::convert::TryInto::try_into(ports)
-                //        .expect("Unable to destructure ref ports for reaction");
-
-                let inp = inp
-                    .downcast_ref::<[::boomerang::runtime::Port<_>; NUM_NODES]>()
-                    .map(Into::into)
-                    .expect("Wrong Port type for reaction");
-                <ReactionIn<NUM_NODES> as ::boomerang::builder::Trigger<Node<NUM_NODES>>>::trigger(
-                    ReactionIn { inp },
-                    ctx,
-                    state,
-                );
-            };
+        fn __trigger_inner<'inner, const NUM_NODES: usize>(
+            ctx: &mut ::boomerang::runtime::Context,
+            state: &'inner mut dyn ::boomerang::runtime::ReactorState,
+            ports: &'inner [::boomerang::runtime::PortRef<'inner>],
+            ports_mut: &'inner mut [::boomerang::runtime::PortRefMut<'inner>],
+            actions: &'inner mut [&'inner mut ::boomerang::runtime::Action],
+        ) {
+            let state: &mut <Node<NUM_NODES> as ::boomerang::builder::Reactor>::State = state
+                .downcast_mut()
+                .expect("Unable to downcast reactor state");
+            let (inp,) = ::boomerang::runtime::partition(ports)
+                .expect("Unable to destructure ref ports for reaction");
+            <ReactionIn<NUM_NODES> as ::boomerang::builder::Trigger<Node<NUM_NODES>>>::trigger(
+                ReactionIn { inp },
+                ctx,
+                state,
+            );
+        }
         let __startup_action = builder.get_startup_action();
         let __shutdown_action = builder.get_shutdown_action();
-        let mut __reaction = builder.add_reaction(name, Box::new(__trigger_inner));
+        let mut __reaction = builder.add_reaction(name, Box::new(__trigger_inner::<NUM_NODES>));
+
+        let x = reactor.inp.map(From::from);
+
         <[runtime::InputRef<'a, i32>; NUM_NODES] as ::boomerang::builder::ReactionField>::build(
             &mut __reaction,
-            reactor.inp.into(),
+            //reactor.inp.into(),
+            x,
             0,
             ::boomerang::builder::TriggerMode::TriggersAndUses,
         )?;

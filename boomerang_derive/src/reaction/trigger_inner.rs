@@ -1,5 +1,5 @@
 use quote::{quote, ToTokens};
-use syn::{Generics, Ident, Type, TypeArray, TypePath, TypeReference};
+use syn::{GenericParam, Generics, Ident, Type, TypeArray, TypePath, TypeReference};
 
 use crate::util::extract_path_ident;
 
@@ -8,7 +8,9 @@ use super::{ReactionReceiver, ACTION, ACTION_REF, INPUT_REF, OUTPUT_REF, PHYSICA
 pub struct TriggerInner {
     reaction_ident: Ident,
     reaction_generics: Generics,
+    combined_generics: Generics,
     reactor: Type,
+    bounds: Vec<GenericParam>,
     initializer_idents: Vec<Ident>,
     action_idents: Vec<Ident>,
     port_idents: Vec<Ident>,
@@ -16,7 +18,10 @@ pub struct TriggerInner {
 }
 
 impl TriggerInner {
-    pub fn new(reaction_receiver: &ReactionReceiver) -> darling::Result<Self> {
+    pub fn new(
+        reaction_receiver: &ReactionReceiver,
+        combined_generics: &Generics,
+    ) -> darling::Result<Self> {
         let fields = reaction_receiver
             .data
             .as_ref()
@@ -110,7 +115,9 @@ impl TriggerInner {
         Ok(Self {
             reaction_ident: reaction_receiver.ident.clone(),
             reaction_generics: reaction_receiver.generics.clone(),
+            combined_generics: combined_generics.clone(),
             reactor: reaction_receiver.reactor.clone(),
+            bounds: reaction_receiver.bounds.clone(),
             initializer_idents,
             action_idents,
             port_idents,
@@ -129,6 +136,11 @@ impl ToTokens for TriggerInner {
             .map(|ty| &ty.ident)
             .chain(self.reaction_generics.type_params().map(|ty| &ty.ident));
         let reaction_generics = quote! { <#(#reaction_generics),*> };
+
+        let const_generics = {
+            let const_generics = self.combined_generics.const_params();
+            quote! { #(#const_generics),* }
+        };
 
         let reactor = &self.reactor;
         let initializer_idents = &self.initializer_idents;
@@ -169,7 +181,7 @@ impl ToTokens for TriggerInner {
 
         tokens.extend(quote! {
             #[allow(unused_variables)]
-            fn __trigger_inner<'inner>(
+            fn __trigger_inner<'inner, #const_generics>(
                 ctx: &mut ::boomerang::runtime::Context,
                 state: &'inner mut dyn ::boomerang::runtime::ReactorState,
                 ports: &'inner [::boomerang::runtime::PortRef<'inner>],
@@ -189,7 +201,7 @@ impl ToTokens for TriggerInner {
                     ctx,
                     state
                 );
-            };
+            }
         });
     }
 }

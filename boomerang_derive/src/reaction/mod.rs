@@ -127,6 +127,7 @@ pub struct ReactionReceiver {
 pub struct Reaction {
     ident: Ident,
     generics: Generics,
+    combined_generics: Generics,
     bounds: Vec<syn::GenericParam>,
     reactor: Type,
     fields: Vec<ReactionFieldInner>,
@@ -141,7 +142,13 @@ impl TryFrom<ReactionReceiver> for Reaction {
     type Error = darling::Error;
 
     fn try_from(value: ReactionReceiver) -> Result<Self, Self::Error> {
-        let inner = TriggerInner::new(&value)?;
+        // Combine the bounds with the generics
+        let mut combined_generics = value.generics.clone();
+        combined_generics
+            .params
+            .extend(value.bounds.iter().cloned().map(GenericParam::from));
+
+        let inner = TriggerInner::new(&value, &combined_generics)?;
 
         let fields = value
             .data
@@ -248,6 +255,7 @@ impl TryFrom<ReactionReceiver> for Reaction {
         Ok(Self {
             ident: value.ident,
             generics: value.generics,
+            combined_generics,
             bounds: value.bounds,
             reactor: value.reactor,
             fields,
@@ -265,16 +273,14 @@ impl ToTokens for Reaction {
         let struct_fields = &self.fields;
         let trigger_inner = &self.inner;
 
-        // Combine the bounds with the generics
-        let mut combined_generics = self.generics.clone();
-        combined_generics
-            .params
-            .extend(self.bounds.iter().cloned().map(GenericParam::from));
-
         // We use impl_generics from `combined_generics` to allow additional bounds to be added, but type and where come
         // from the original generics
-        let (impl_generics, _, _) = combined_generics.split_for_impl();
+        let (impl_generics, _, _) = self.combined_generics.split_for_impl();
         let (_, type_generics, where_clause) = self.generics.split_for_impl();
+        let inner_type_generics = {
+            let g = self.combined_generics.const_params().map(|ty| &ty.ident);
+            quote! { ::<#(#g),*> }
+        };
 
         let trigger_startup = if self.trigger_startup {
             quote! {
@@ -315,7 +321,8 @@ impl ToTokens for Reaction {
                     #trigger_inner
                     let __startup_action = builder.get_startup_action();
                 let __shutdown_action = builder.get_shutdown_action();
-                    let mut __reaction = builder.add_reaction(name, Box::new(__trigger_inner));
+                    let mut __reaction = builder.add_reaction(name, Box::new(__trigger_inner #inner_type_generics));
+
                     #trigger_startup
                     #trigger_shutdown
                     #(#struct_fields;)*

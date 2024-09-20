@@ -395,16 +395,16 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
 
     let _main_reactor = builder.finish()?;
 
-    let clock_source = env_builder.get_port("clock", source_reactor)?;
-    let clock_sink = env_builder.get_port("clock", sink_reactor)?;
+    let clock_source = env_builder.find_port_by_name("clock", source_reactor)?;
+    let clock_sink = env_builder.find_port_by_name("clock", sink_reactor)?;
     env_builder.bind_port(clock_source, clock_sink)?;
 
-    let o1_source = env_builder.get_port("o1", source_reactor)?;
-    let in1_sink = env_builder.get_port("in1", sink_reactor)?;
+    let o1_source = env_builder.find_port_by_name("o1", source_reactor)?;
+    let in1_sink = env_builder.find_port_by_name("in1", sink_reactor)?;
     env_builder.bind_port(o1_source, in1_sink)?;
 
-    let o2_source = env_builder.get_port("o2", source_reactor)?;
-    let in2_sink = env_builder.get_port("in2", sink_reactor)?;
+    let o2_source = env_builder.find_port_by_name("o2", source_reactor)?;
+    let in2_sink = env_builder.find_port_by_name("in2", sink_reactor)?;
     env_builder.bind_port(o2_source, in2_sink)?;
 
     /*

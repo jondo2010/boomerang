@@ -29,6 +29,10 @@ pub trait Reactor: Sized {
         parent: Option<BuilderReactorKey>,
         env: &mut EnvBuilder,
     ) -> Result<Self, BuilderError>;
+
+    fn iter(&self) -> impl Iterator<Item = &Self> {
+        std::iter::once(self)
+    }
 }
 
 /// This builder trait is implemented for fields in the Reactor struct.
@@ -226,7 +230,7 @@ pub struct ReactorBuilderState<'a> {
 
 impl<'a> FindElements for ReactorBuilderState<'a> {
     fn get_port_by_name(&self, port_name: &str) -> Result<BuilderPortKey, BuilderError> {
-        self.env.get_port(port_name, self.reactor_key)
+        self.env.find_port_by_name(port_name, self.reactor_key)
     }
 
     fn get_action_by_name(&self, action_name: &str) -> Result<BuilderActionKey, BuilderError> {
@@ -473,6 +477,18 @@ impl<'a> ReactorBuilderState<'a> {
         port_b_key: TypedPortKey<T, Q2>,
     ) -> Result<(), BuilderError> {
         self.env.bind_port(port_a_key, port_b_key)
+    }
+
+    /// Bind multiple ports on this reactor. This has the logical meaning of "connecting" `ports_from` to `ports_to`.
+    pub fn bind_ports<T: runtime::PortData, Q1: PortType2, Q2: PortType2>(
+        &mut self,
+        ports_from: impl Iterator<Item = TypedPortKey<T, Q1>>,
+        ports_to: impl Iterator<Item = TypedPortKey<T, Q2>>,
+    ) -> Result<(), BuilderError> {
+        for (port_from, port_to) in ports_from.zip(ports_to) {
+            self.env.bind_port(port_from, port_to)?;
+        }
+        Ok(())
     }
 
     pub fn finish(self) -> Result<BuilderReactorKey, BuilderError> {

@@ -2,8 +2,6 @@
 //!
 //! Ported from LF https://github.com/lf-lang/lingua-franca/blob/master/test/C/src/concurrent/ThreadedMultiport.lf
 
-//timeout: 2 sec
-
 use boomerang::builder::prelude::*;
 use boomerang::{runtime, Reaction, Reactor};
 
@@ -44,8 +42,8 @@ mod computation {
     #[derive(Reactor, Debug)]
     #[reactor(state = "()", reaction = "ReactionIn")]
     pub struct Computation<const ITERS: usize> {
-        in_: TypedPortKey<i32, Input>,
-        out: TypedPortKey<i32, Output>,
+        pub in_: TypedPortKey<i32, Input>,
+        pub out: TypedPortKey<i32, Output>,
     }
 
     #[derive(Reaction)]
@@ -60,6 +58,7 @@ mod computation {
             let mut offset = 0;
             for _ in 0..ITERS {
                 offset += 1;
+                std::thread::sleep(std::time::Duration::from_nanos(1));
             }
             *self.out = self.in_.map(|x| x + offset);
         }
@@ -76,7 +75,7 @@ mod destination {
         reaction = "ReactionShutdown"
     )]
     pub struct Destination<const WIDTH: usize, const ITERS: usize = 100_000_000> {
-        in_: [TypedPortKey<i32, Input>; WIDTH],
+        pub in_: [TypedPortKey<i32, Input>; WIDTH],
     }
 
     #[derive(Reaction)]
@@ -119,7 +118,7 @@ mod destination {
 #[derive(Reactor)]
 #[reactor(
     state = "()",
-    connection(from = "a.out[..]", to = "t2.in_"),
+    connection(from = "a.out", to = "t.in_"),
     connection(from = "t.out", to = "b.in_")
 )]
 struct ThreadedMultiport<const WIDTH: usize = 4, const ITERS: usize = 100_000_000> {
@@ -129,12 +128,14 @@ struct ThreadedMultiport<const WIDTH: usize = 4, const ITERS: usize = 100_000_00
     t: [computation::Computation<ITERS>; WIDTH],
     #[reactor(child = "State{s: 0}")]
     b: destination::Destination<WIDTH, ITERS>,
+    #[reactor(child = "runtime::Duration::from_secs(2)")]
+    _timeout: boomerang_util::timeout::Timeout,
 }
 
 #[test]
 fn threading_multiport() {
     tracing_subscriber::fmt::init();
-    let _ = boomerang_util::run::build_and_test_reactor::<ThreadedMultiport>(
+    let _ = boomerang_util::run::build_and_test_reactor::<ThreadedMultiport<4, 10_000>>(
         "threaded_multiport",
         (),
         true,

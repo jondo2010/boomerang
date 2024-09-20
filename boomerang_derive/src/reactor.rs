@@ -188,16 +188,44 @@ impl TryFrom<FieldReceiver> for ReactorField {
 pub struct ConnectionAttr {
     from: syn::Expr,
     to: syn::Expr,
+
+    #[darling(default)]
+    broadcast: bool,
+    #[darling(default)]
+    transposed: bool,
     #[darling(default, map = "handle_duration")]
-    pub after: Option<Duration>,
+    after: Option<Duration>,
 }
 
 impl ToTokens for ConnectionAttr {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
-        let from_port = &self.from;
-        let to_port = &self.to;
+        let expand_port = |port: &syn::Expr| {
+            let mut idents = Vec::new();
+            crate::util::expand_expr(port, &mut idents);
+            if let Some((&first, rest)) = idents.split_first() {
+                let rest = rest.iter().map(|ident| {
+                    quote! {
+                        .map(|child| child.#ident.iter()).flatten()
+                    }
+                });
+
+                quote! {
+                    __reactor.#first.iter()
+                    #(#rest)*
+                    .copied()
+                }
+            } else {
+                quote! {
+                    __reactor.#port.iter().copied(),
+                }
+            }
+        };
+
+        let from_port = expand_port(&self.from);
+        let to_port = expand_port(&self.to);
+
         tokens.extend(quote! {
-            __builder.bind_port(__reactor.#from_port, __reactor.#to_port)?;
+            __builder.bind_ports(#from_port, #to_port)?;
         });
     }
 }
@@ -302,25 +330,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_connection_attrs() {
-        let input = r#"
-#[derive(Reactor)]
-#[reactor(
-    state = "()",
-    connection(from = "child.a[..]", to = "b[..3]")
-)]
-struct Test;"#;
-
-        let parsed = syn::parse_str(input).unwrap();
-        let receiver = ReactorReceiver::from_derive_input(&parsed).unwrap();
-        dbg!(receiver.connections);
-
-        let q = [1, 2, 3, 4];
-
-        let v = &q[..3];
-    }
-
-    #[test]
     fn test_struct_attrs() {
         let input = r#"
 #[derive(Reactor, Clone)]
@@ -344,6 +353,8 @@ struct Test {}"#;
             ConnectionAttr {
                 from: parse_quote! {a.b},
                 to: parse_quote! {c.d},
+                broadcast: false,
+                transposed: false,
                 after: None
             }
         );
@@ -352,6 +363,8 @@ struct Test {}"#;
             ConnectionAttr {
                 from: parse_quote! {inp},
                 to: parse_quote! {gain.inp},
+                broadcast: false,
+                transposed: false,
                 after: None
             }
         );
@@ -360,6 +373,8 @@ struct Test {}"#;
             ConnectionAttr {
                 from: parse_quote! {gain.out},
                 to: parse_quote! {out},
+                broadcast: false,
+                transposed: false,
                 after: Some(Duration::from_micros(1))
             }
         );

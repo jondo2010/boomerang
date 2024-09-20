@@ -16,12 +16,16 @@ pub type PortRef<'a> = &'a (dyn BasePort + 'static);
 /// PortRefMut is the mutable type-erased ref argument passed to the ReactionFn
 pub type PortRefMut<'a> = &'a mut (dyn BasePort + 'static);
 
+pub type PortSlice<'a> = &'a [PortRef<'a>];
+
+pub type PortSliceMut<'a> = &'a mut [PortRefMut<'a>];
+
 pub type ReactionFn = Box<
     dyn for<'a> FnMut(
             &mut Context,
             &'a mut dyn ReactorState,
-            &'a [PortRef<'a>],
-            &'a mut [PortRefMut<'a>],
+            PortSlice<'a>,
+            PortSliceMut<'a>,
             &'a mut [&'a mut Action],
         ) + Sync
         + Send,
@@ -90,8 +94,8 @@ impl Reaction {
         tag: Tag,
         reactor: &'a mut Reactor,
         actions: &'a mut [&'a mut Action],
-        ref_ports: &'a [PortRef<'a>],
-        mut_ports: &'a mut [PortRefMut<'a>],
+        ref_ports: PortSlice<'a>,
+        mut_ports: PortSliceMut<'a>,
         async_tx: Sender<PhysicalEvent>,
         shutdown_rx: keepalive::Receiver,
     ) -> TriggerRes {

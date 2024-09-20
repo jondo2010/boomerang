@@ -268,8 +268,16 @@ impl EnvBuilder {
             .ok_or(BuilderError::ActionKeyNotFound(action_key))
     }
 
+    /// Get a previously built port
+    pub fn get_port(&self, port_key: BuilderPortKey) -> Result<&dyn BasePortBuilder, BuilderError> {
+        self.port_builders
+            .get(port_key)
+            .map(|builder| builder.as_ref())
+            .ok_or(BuilderError::PortKeyNotFound(port_key))
+    }
+
     /// Find a Port matching a given name and ReactorKey
-    pub fn get_port(
+    pub fn find_port_by_name(
         &self,
         port_name: &str,
         reactor_key: BuilderReactorKey,
@@ -373,6 +381,8 @@ impl EnvBuilder {
 
         let port_a_fqn = self.port_fqn(port_a_key)?;
         let port_b_fqn = self.port_fqn(port_b_key)?;
+
+        tracing::debug!("Binding ports: {port_a_fqn:?} -> {port_b_fqn:?}",);
 
         let port_a = &self.port_builders[port_a_key];
         let port_b = &self.port_builders[port_b_key];

@@ -16,11 +16,7 @@
 //! let (port0, port1, array0): (PortRef<i32>, PortRef<bool>, [PortRef<()>; 2]) = part(ports.as_slice()).unwrap();
 //! ```
 
-use crate::{BasePort, InputRef, OutputRef, Port, PortData, PortRef, PortRefMut};
-
-pub type PortSlice<'a> = &'a [&'a (dyn BasePort + 'static)];
-
-pub type PortSliceMut<'a> = &'a [&'a mut (dyn BasePort + 'static)];
+use crate::{InputRef, OutputRef, Port, PortData, PortRef, PortRefMut};
 
 pub trait Partition<'a, T>: Sized {
     fn part(slice: &'a [T]) -> Option<(Self, &'a [T])>;

@@ -95,7 +95,7 @@ struct GainContainerBuilder {
 
 #[derive(Reactor)]
 #[reactor(
-    state = (),
+    state = "()",
     connection(from = "source.out", to = "container.inp"),
     connection(from = "container.out", to = "print.inp"),
     connection(from = "container.out2", to = "print2.inp")

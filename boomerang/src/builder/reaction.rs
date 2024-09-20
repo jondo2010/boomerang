@@ -255,7 +255,8 @@ pub struct ReactionBuilderState<'a> {
 impl<'a> FindElements for ReactionBuilderState<'a> {
     /// Find the PortKey with a given name within the parent Reactor
     fn get_port_by_name(&self, port_name: &str) -> Result<BuilderPortKey, BuilderError> {
-        self.env.get_port(port_name, self.builder.reactor_key)
+        self.env
+            .find_port_by_name(port_name, self.builder.reactor_key)
     }
 
     fn get_action_by_name(&self, action_name: &str) -> Result<BuilderActionKey, BuilderError> {

@@ -41,6 +41,10 @@ impl<T: runtime::PortData, Q: PortType2> TypedPortKey<T, Q> {
     pub fn new(port_key: BuilderPortKey) -> Self {
         Self(port_key, PhantomData)
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Self> {
+        std::iter::once(self)
+    }
 }
 
 impl<T: runtime::PortData, Q: PortType2> From<BuilderPortKey> for TypedPortKey<T, Q> {

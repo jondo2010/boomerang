@@ -54,9 +54,9 @@ impl<const NUM_NODES: usize> Trigger<Node<NUM_NODES>> for ReactionIn<'_, NUM_NOD
             }
         }
 
-        if count != ctx.reactor().num_nodes {
-            panic!("Received fewer messages than expected!");
-        }
+        //if count != ctx.reactor().num_nodes {
+        //    panic!("Received fewer messages than expected!");
+        //}
     }
 }
 

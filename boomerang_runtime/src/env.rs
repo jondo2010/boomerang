@@ -1,8 +1,8 @@
 use tinymap::chunks::{Chunks, ChunksMut};
 
 use crate::{
-    fmt_utils as fmt, key_set::KeySetLimits, Action, ActionKey, BasePort, PortKey, Reaction,
-    ReactionKey, Reactor, ReactorKey,
+    fmt_utils as fmt, key_set::KeySetLimits, Action, ActionKey, BasePort, PortKey, PortSlice,
+    PortSliceMut, Reaction, ReactionKey, Reactor, ReactorKey,
 };
 
 /// Execution level
@@ -185,8 +185,8 @@ pub(crate) struct ReactionTriggerCtx<'a> {
     pub(crate) reactor: &'a mut Reactor,
     pub(crate) reaction: &'a mut Reaction,
     pub(crate) actions: &'a mut [&'a mut Action],
-    pub(crate) ref_ports: &'a [&'a dyn BasePort],
-    pub(crate) mut_ports: &'a mut [&'a mut dyn BasePort],
+    pub(crate) ref_ports: PortSlice<'a>,
+    pub(crate) mut_ports: PortSliceMut<'a>,
 }
 
 /// Container for set of iterators used to build a `ReactionTriggerCtx`

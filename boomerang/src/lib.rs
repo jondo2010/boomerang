@@ -62,6 +62,7 @@
 #![deny(clippy::all)]
 
 pub mod builder;
+pub mod flatten_transposed;
 
 // Re-exports
 pub use boomerang_runtime as runtime;

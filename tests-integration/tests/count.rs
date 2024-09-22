@@ -58,9 +58,14 @@ fn count() {
     //let (_, env) = boomerang_util::run::build_and_test_reactor::<Count<u32>>("count", 0, true, false).unwrap();
 
     let mut env_builder = EnvBuilder::new();
-    let reactor =
-        <Count<i32> as boomerang::builder::Reactor>::build("count", 0, None, &mut env_builder)
-            .unwrap();
+    let reactor = <Count<i32> as boomerang::builder::Reactor>::build(
+        "count",
+        0,
+        None,
+        None,
+        &mut env_builder,
+    )
+    .unwrap();
     let (mut env, triggers, _) = env_builder.into_runtime_parts().unwrap();
     let mut sched = runtime::Scheduler::new(&mut env, triggers, true, false);
     sched.event_loop();

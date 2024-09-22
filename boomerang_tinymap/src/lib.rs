@@ -1,4 +1,6 @@
-pub mod chunks;
+#![doc=include_str!( "../README.md")]
+#![deny(clippy::all)]
+
 pub mod map;
 pub mod secondary_map;
 pub mod secondary_set;

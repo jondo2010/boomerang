@@ -21,6 +21,8 @@ pub struct Context {
     pub(crate) start_time: Instant,
     /// Logical time of the currently executing epoch
     pub(crate) tag: Tag,
+    /// Bank index for a multi-bank reactor
+    pub(crate) bank_index: Option<usize>,
 
     /// Channel for asynchronous events
     pub(crate) async_tx: Sender<PhysicalEvent>,
@@ -34,13 +36,14 @@ pub struct Context {
 impl Context {
     pub(crate) fn new(
         start_time: Instant,
-        tag: Tag,
+        bank_index: Option<usize>,
         async_tx: Sender<PhysicalEvent>,
         shutdown_rx: keepalive::Receiver,
     ) -> Self {
         Self {
             start_time,
-            tag,
+            tag: Tag::now(start_time),
+            bank_index,
             async_tx,
             shutdown_rx,
             trigger_res: TriggerRes {
@@ -48,6 +51,17 @@ impl Context {
                 scheduled_shutdown: None,
             },
         }
+    }
+
+    pub(crate) fn reset_for_reaction(&mut self, tag: Tag) {
+        self.tag = tag;
+        self.trigger_res.scheduled_actions.clear();
+        self.trigger_res.scheduled_shutdown = None;
+    }
+
+    /// Get the bank index for a multi-bank reactor
+    pub fn get_bank_index(&self) -> Option<usize> {
+        self.bank_index
     }
 
     pub fn get_start_time(&self) -> Instant {

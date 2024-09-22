@@ -6,7 +6,7 @@ use super::*;
 fn test_duplicate_ports() {
     let mut env_builder = EnvBuilder::new();
     let reactor_key = env_builder
-        .add_reactor("test_reactor", None, ())
+        .add_reactor("test_reactor", None, None, ())
         .finish()
         .unwrap();
     let _ = env_builder
@@ -27,7 +27,7 @@ fn test_duplicate_ports() {
 #[test]
 fn test_duplicate_actions() {
     let mut env_builder = EnvBuilder::new();
-    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, ());
+    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, ());
 
     reactor_builder
         .add_logical_action::<()>("action0", None)
@@ -64,7 +64,7 @@ fn test_duplicate_actions() {
 #[test]
 fn test_reactions_with_trigger() {
     let mut env_builder = EnvBuilder::new();
-    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, ());
+    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, ());
 
     let res = reactor_builder
         .add_reaction("test", Box::new(|_ctx, _r, _i, _o, _a| {}))
@@ -76,7 +76,7 @@ fn test_reactions_with_trigger() {
 #[test]
 fn test_reactions1() {
     let mut env_builder = EnvBuilder::new();
-    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, ());
+    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, ());
 
     let startup = reactor_builder.get_startup_action();
 

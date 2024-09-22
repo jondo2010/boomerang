@@ -9,7 +9,7 @@ use crate::runtime;
 #[test]
 fn test_reaction_ports() -> anyhow::Result<()> {
     let mut env_builder = EnvBuilder::new();
-    let mut builder_a = env_builder.add_reactor("reactorA", None, ());
+    let mut builder_a = env_builder.add_reactor("reactorA", None, None, ());
     let port_a = builder_a.add_input_port::<()>("portA").unwrap();
     let port_b = builder_a.add_output_port::<()>("portB").unwrap();
     let port_c = builder_a.add_input_port::<()>("portC").unwrap();
@@ -217,11 +217,11 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let mut env_builder = EnvBuilder::new();
-    let mut builder = env_builder.add_reactor("main", None, ());
+    let mut builder = env_builder.add_reactor("main", None, None, ());
 
     let source_reactor = builder
         .add_child_with(|parent, env| {
-            let mut builder = env.add_reactor("Source", Some(parent), ());
+            let mut builder = env.add_reactor("Source", Some(parent), None, ());
             let clock = builder.add_output_port::<u32>("clock")?;
             let o1 = builder.add_output_port::<u32>("o1")?;
             let o2 = builder.add_output_port::<u32>("o2")?;
@@ -340,7 +340,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
         .unwrap();
 
     let sink_reactor = builder.add_child_with(|parent, env| {
-        let mut builder = env.add_reactor("Sink", Some(parent), ());
+        let mut builder = env.add_reactor("Sink", Some(parent), None, ());
         let clock = builder.add_input_port::<u32>("clock").unwrap();
         let in1 = builder.add_input_port::<u32>("in1").unwrap();
         let in2 = builder.add_input_port::<u32>("in2").unwrap();

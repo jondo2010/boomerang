@@ -300,9 +300,10 @@ impl ToTokens for Reactor {
                     name: &str,
                     state: Self::State,
                     parent: Option<::boomerang::builder::BuilderReactorKey>,
+                    bank_index: Option<usize>,
                     env: &'__builder mut ::boomerang::builder::EnvBuilder,
                 ) -> Result<Self, ::boomerang::builder::BuilderError> {
-                    let mut __builder = env.add_reactor(name, parent, state);
+                    let mut __builder = env.add_reactor(name, parent, bank_index, state);
 
                     #(#fields)*
 

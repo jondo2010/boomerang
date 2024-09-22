@@ -1,11 +1,6 @@
 use std::{fmt::Debug, sync::RwLock};
 
-use crossbeam_channel::Sender;
-
-use crate::{
-    event::PhysicalEvent, keepalive, key_set::KeySet, Action, BasePort, Context, Duration, Reactor,
-    ReactorState, Tag, TriggerRes,
-};
+use crate::{key_set::KeySet, Action, BasePort, Context, Duration, Reactor, ReactorState};
 
 tinymap::key_type!(pub ReactionKey);
 
@@ -20,13 +15,15 @@ pub type PortSlice<'a> = &'a [PortRef<'a>];
 
 pub type PortSliceMut<'a> = &'a mut [PortRefMut<'a>];
 
+pub type ActionSliceMut<'a> = &'a mut [&'a mut Action];
+
 pub type ReactionFn = Box<
     dyn for<'a> FnMut(
             &mut Context,
             &'a mut dyn ReactorState,
             PortSlice<'a>,
             PortSliceMut<'a>,
-            &'a mut [&'a mut Action],
+            ActionSliceMut<'a>,
         ) + Sync
         + Send,
 >;
@@ -52,7 +49,7 @@ pub struct Reaction {
     name: String,
     /// Reaction closure
     body: ReactionFn,
-    // Local deadline relative to the time stamp for invocation of the reaction.
+    /// Local deadline relative to the time stamp for invocation of the reaction.
     deadline: Option<Deadline>,
 }
 
@@ -81,27 +78,22 @@ impl Reaction {
 
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(
-        skip(self, start_time, ref_ports, mut_ports, actions, async_tx, shutdown_rx),
+        skip(self, ref_ports, mut_ports, actions),
         fields(
-            reactor = reactor.name,
+            reactor = reactor.get_name(),
             name = %self.name,
-            tag = %tag,
+            tag = %ctx.tag,
         )
     )]
     pub fn trigger<'a>(
-        &'a mut self,
-        start_time: crate::Instant,
-        tag: Tag,
+        &mut self,
+        ctx: &mut Context,
         reactor: &'a mut Reactor,
-        actions: &'a mut [&'a mut Action],
+        actions: ActionSliceMut<'a>,
         ref_ports: PortSlice<'a>,
         mut_ports: PortSliceMut<'a>,
-        async_tx: Sender<PhysicalEvent>,
-        shutdown_rx: keepalive::Receiver,
-    ) -> TriggerRes {
+    ) {
         let Reactor { state, .. } = reactor;
-
-        let mut ctx = Context::new(start_time, tag, async_tx, shutdown_rx);
 
         if let Some(Deadline { deadline, handler }) = self.deadline.as_ref() {
             let lag = ctx.get_physical_time() - ctx.get_logical_time();
@@ -110,8 +102,6 @@ impl Reaction {
             }
         }
 
-        (self.body)(&mut ctx, state.as_mut(), ref_ports, mut_ports, actions);
-
-        ctx.trigger_res
+        (self.body)(ctx, state.as_mut(), ref_ports, mut_ports, actions);
     }
 }

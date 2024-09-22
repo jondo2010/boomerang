@@ -169,7 +169,8 @@ fn bench(c: &mut Criterion) {
                 || {
                     let mut env_builder = EnvBuilder::new();
                     let _reactor =
-                        MainBuilder::build("main", Main { count }, None, &mut env_builder).unwrap();
+                        MainBuilder::build("main", Main { count }, None, None, &mut env_builder)
+                            .unwrap();
                     let (env, triggers, _) = env_builder.into_runtime_parts().unwrap();
                     (env, triggers)
                 },

@@ -27,6 +27,7 @@ pub trait Reactor: Sized {
         name: &str,
         state: Self::State,
         parent: Option<BuilderReactorKey>,
+        bank_index: Option<usize>,
         env: &mut EnvBuilder,
     ) -> Result<Self, BuilderError>;
 
@@ -189,6 +190,8 @@ pub(super) struct ReactorBuilder {
     pub ports: SecondaryMap<BuilderPortKey, ()>,
     /// Actions in this Reactor
     pub actions: SecondaryMap<BuilderActionKey, ()>,
+    /// The index of the bank that this Reactor belongs to, if any.
+    pub bank_index: Option<usize>,
 }
 
 impl ReactorBuilder {
@@ -215,6 +218,7 @@ impl std::fmt::Debug for ReactorBuilder {
             .field("reactions", &self.reactions)
             .field("ports", &self.ports)
             .field("actions", &self.actions)
+            .field("bank_index", &self.bank_index)
             .finish()
     }
 }
@@ -242,6 +246,7 @@ impl<'a> ReactorBuilderState<'a> {
     pub(super) fn new<S: runtime::ReactorState>(
         name: &str,
         parent: Option<BuilderReactorKey>,
+        bank_index: Option<usize>,
         reactor_state: S,
         env: &'a mut EnvBuilder,
     ) -> Self {
@@ -255,6 +260,7 @@ impl<'a> ReactorBuilderState<'a> {
                 reactions: SecondaryMap::new(),
                 ports: SecondaryMap::new(),
                 actions: SecondaryMap::new(),
+                bank_index,
             }
         });
 
@@ -440,7 +446,7 @@ impl<'a> ReactorBuilderState<'a> {
         name: &str,
         state: R::State,
     ) -> Result<R, BuilderError> {
-        R::build(name, state, Some(self.reactor_key), self.env)
+        R::build(name, state, Some(self.reactor_key), None, self.env)
     }
 
     /// Add multiple child reactors to this reactor.
@@ -453,11 +459,17 @@ impl<'a> ReactorBuilderState<'a> {
         R: Reactor + std::fmt::Debug,
         R::State: Clone,
     {
-        let mut reactors = Vec::with_capacity(N);
-        for i in 0..N {
-            let reactor = self.add_child_reactor::<R>(&format!("{name}{i}"), state.clone())?;
-            reactors.push(reactor);
-        }
+        let reactors = (0..N)
+            .map(|i| {
+                R::build(
+                    &format!("{name}{i}"),
+                    state.clone(),
+                    Some(self.reactor_key),
+                    Some(i),
+                    self.env,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(reactors.try_into().expect("Error converting Vec to array"))
     }
 

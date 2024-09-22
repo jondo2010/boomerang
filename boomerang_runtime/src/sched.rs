@@ -1,11 +1,12 @@
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
+use crossbeam_channel::{Receiver, RecvTimeoutError};
 use std::{collections::BinaryHeap, time::Duration};
 
 use crate::{
+    env::InnerEnv,
     event::{PhysicalEvent, ScheduledEvent},
     keepalive,
     key_set::KeySetView,
-    Env, Instant, Level, ReactionGraph, ReactionKey, ReactionSet, ReactionSetLimits,
+    Context, Env, Instant, Level, ReactionGraph, ReactionKey, ReactionSet, ReactionSetLimits,
     ReactionTriggerCtx, Tag,
 };
 
@@ -75,15 +76,13 @@ impl EventQueue {
 #[derive(Debug)]
 pub struct Scheduler<'env> {
     /// The environment state
-    env: &'env mut Env,
+    env: InnerEnv<'env>,
     /// The reaction graph containing all static dependency and relationship information
     reaction_graph: ReactionGraph,
     /// Whether to skip wall-clock synchronization
     fast_forward: bool,
     /// Whether to keep the scheduler alive for any possible asynchronous events
     keep_alive: bool,
-    /// Asynchronous events sender
-    event_tx: Sender<PhysicalEvent>,
     /// Asynchronous events receiver
     event_rx: Receiver<PhysicalEvent>,
     /// Event queue
@@ -104,18 +103,37 @@ impl<'env> Scheduler<'env> {
         keep_alive: bool,
     ) -> Self {
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
-        let (shutdown_tx, _) = keepalive::channel();
+        let (shutdown_tx, shutdown_rx) = keepalive::channel();
         let events = EventQueue::new(reaction_graph.reaction_set_limits.clone());
 
+        let start_time = Instant::now();
+
+        // Build contexts for each reaction
+        let contexts = reaction_graph
+            .reaction_reactors
+            .iter()
+            .map(|(reaction_key, reactor_key)| {
+                let bank_index = reaction_graph.reactor_bank_indices[*reactor_key];
+                let ctx = Context::new(
+                    start_time,
+                    bank_index,
+                    event_tx.clone(),
+                    shutdown_rx.clone(),
+                );
+                (reaction_key, ctx)
+            })
+            .collect();
+
+        let inner_env = InnerEnv { env, contexts };
+
         Self {
-            env,
+            env: inner_env,
             reaction_graph,
             fast_forward,
             keep_alive,
-            event_tx,
             event_rx,
             events,
-            start_time: Instant::now(),
+            start_time,
             shutdown_tag: None,
             shutdown_tx,
         }
@@ -303,6 +321,7 @@ impl<'env> Scheduler<'env> {
 
             let iter_ctx_res = iter_ctx.map(|trigger_ctx| {
                 let ReactionTriggerCtx {
+                    context,
                     reaction,
                     reactor,
                     actions,
@@ -316,19 +335,14 @@ impl<'env> Scheduler<'env> {
                     reactor_name = reactor.get_name()
                 );
 
-                reaction.trigger(
-                    self.start_time,
-                    tag,
-                    reactor,
-                    actions,
-                    ref_ports,
-                    mut_ports,
-                    self.event_tx.clone(),
-                    self.shutdown_tx.new_receiver(),
-                )
+                context.reset_for_reaction(tag);
+
+                reaction.trigger(context, reactor, actions, ref_ports, mut_ports);
+
+                &context.trigger_res
             });
 
-            iter_ctx_res.for_each(|res| {
+            for res in iter_ctx_res {
                 if let Some(shutdown_tag) = res.scheduled_shutdown {
                     // if the new shutdown tag is earlier than the current shutdown tag, update the shutdown tag and
                     // schedule a shutdown event
@@ -349,14 +363,12 @@ impl<'env> Scheduler<'env> {
                         .copied();
                     self.events.push_event(tag, downstream, false);
                 }
-            });
+            }
 
             // Collect all the reactions that are triggered by the ports
             let downstream = self
                 .env
-                .ports
-                .iter()
-                .filter(|&(_, port)| port.is_set())
+                .iter_set_ports()
                 .flat_map(|(port_key, _)| self.reaction_graph.port_triggers[port_key].iter());
 
             if let Some(mut next_levels) = next_levels {
@@ -364,8 +376,6 @@ impl<'env> Scheduler<'env> {
             }
         });
 
-        for port in self.env.ports.values_mut() {
-            port.cleanup();
-        }
+        self.env.reset_ports();
     }
 }

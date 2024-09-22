@@ -1,61 +1,6 @@
-use std::{
-    fmt::Debug,
-    iter::Enumerate,
-    marker::PhantomData,
-    ops::{Index, IndexMut},
-};
+use std::marker::PhantomData;
 
-use crate::Key;
-
-pub struct TinyMap<K: Key, V> {
-    pub(crate) data: Vec<V>,
-    _k: PhantomData<K>,
-}
-
-impl<K: Key + Debug, V: Debug> Debug for TinyMap<K, V> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_map().entries(self.iter()).finish()
-    }
-}
-
-impl<K: Key, V> Default for TinyMap<K, V> {
-    fn default() -> Self {
-        Self {
-            data: Vec::new(),
-            _k: PhantomData,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct Iter<'a, K: Key, V> {
-    inner: Enumerate<std::slice::Iter<'a, V>>,
-    _k: PhantomData<K>,
-}
-
-impl<'a, K: Key, V> Iterator for Iter<'a, K, V> {
-    type Item = (K, &'a V);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.inner
-            .next()
-            .map(|(index, value)| (K::from(index), value))
-    }
-}
-
-impl<K: Key, V> Index<K> for TinyMap<K, V> {
-    type Output = V;
-
-    fn index(&self, key: K) -> &Self::Output {
-        &self.data[key.index()]
-    }
-}
-
-impl<K: Key, V> IndexMut<K> for TinyMap<K, V> {
-    fn index_mut(&mut self, key: K) -> &mut Self::Output {
-        &mut self.data[key.index()]
-    }
-}
+use super::{Key, TinyMap};
 
 pub struct IterMany<'a, K: Key, V, I>
 where
@@ -152,55 +97,6 @@ where
 unsafe impl<K: Key, V: Send, I: Iterator<Item = K>> Send for IterManyMut<'_, K, V, I> {}
 
 impl<K: Key, V> TinyMap<K, V> {
-    /// Creates an empty `TinyMap`.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Creates an emtpy `TinyMap` with the given capacity.
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            data: Vec::with_capacity(capacity),
-            _k: PhantomData,
-        }
-    }
-
-    /// Inserts a new value into the map and returns the key.
-    pub fn insert(&mut self, value: V) -> K {
-        let key = K::from(self.data.len());
-        self.data.push(value);
-        key
-    }
-
-    pub fn insert_with_key<F>(&mut self, f: F) -> K
-    where
-        F: FnOnce(K) -> V,
-    {
-        let key = K::from(self.data.len());
-        self.data.push(f(key));
-        key
-    }
-
-    pub fn len(&self) -> usize {
-        self.data.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
-
-    pub fn keys(&self) -> impl Iterator<Item = K> {
-        (0..self.data.len()).map(K::from)
-    }
-
-    pub fn values(&self) -> impl Iterator<Item = &V> {
-        self.data.iter()
-    }
-
-    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
-        self.data.iter_mut()
-    }
-
     /// Returns an iterator of mutable references to the values corresponding to the keys.
     ///
     /// # Safety
@@ -258,23 +154,6 @@ impl<K: Key, V> TinyMap<K, V> {
         };
 
         (iter, iter_mut)
-    }
-
-    /// Returns an iterator over the (`K`, `V`) entries in the map.
-    pub fn iter(&self) -> Iter<'_, K, V> {
-        Iter {
-            inner: self.data.iter().enumerate(),
-            _k: PhantomData,
-        }
-    }
-}
-
-impl<K: Key, V> FromIterator<V> for TinyMap<K, V> {
-    fn from_iter<T: IntoIterator<Item = V>>(iter: T) -> Self {
-        Self {
-            data: iter.into_iter().collect(),
-            _k: PhantomData,
-        }
     }
 }
 

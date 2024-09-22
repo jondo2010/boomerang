@@ -1,14 +1,12 @@
 [package]
 name = "boomerang_tinymap"
 description = "A tiny, fast, and simple Slotkey-type map implementation for Boomerang."
-version = "0.1.0"
+version = "0.2.0"
 readme = "README.md"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 fixedbitset = "0.5"

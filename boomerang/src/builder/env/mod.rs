@@ -83,9 +83,10 @@ impl EnvBuilder {
         &mut self,
         name: &str,
         parent: Option<BuilderReactorKey>,
+        bank_index: Option<usize>,
         state: S,
     ) -> ReactorBuilderState {
-        ReactorBuilderState::new(name, parent, state, self)
+        ReactorBuilderState::new(name, parent, bank_index, state, self)
     }
 
     /// Get a previously built reactor

@@ -10,7 +10,7 @@
 //! ## Example
 //!
 //! ```rust
-//! use flatten_transposed::FlattenTransposedExt;
+//! use boomerang::flatten_transposed::FlattenTransposedExt;
 //!
 //! let nested = [
 //!     vec![1, 2, 3],
@@ -20,13 +20,13 @@
 //!
 //! let flattened: Vec<_> = nested
 //!     .into_iter()
-//!     .lazy_flatten_transposed()
+//!     .flatten_transposed()
 //!     .collect();
 //!
 //! assert_eq!(flattened, vec![1, 4, 6, 2, 5, 7, 3, 8, 9]);
 //! ```
 //!
-//! In this example, the `lazy_flatten_transposed()` method is called on an iterator
+//! In this example, the `flatten_transposed()` method is called on an iterator
 //! of vectors. The resulting iterator yields elements in a transposed order,
 //! effectively "zipping" the inner vectors together and then flattening the result.
 

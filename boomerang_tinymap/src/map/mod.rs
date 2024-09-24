@@ -9,9 +9,9 @@
 //! # Examples
 //!
 //! ```
-//! use boomerang_tinymap::TinyMap;
+//! use boomerang_tinymap::{DefaultKey, TinyMap};
 //!
-//! let mut map = TinyMap::<_, i32>::new();
+//! let mut map = TinyMap::<DefaultKey, i32>::new();
 //! let key1 = map.insert(10);
 //! let key2 = map.insert(20);
 //!

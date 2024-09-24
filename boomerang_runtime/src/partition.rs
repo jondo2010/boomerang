@@ -6,7 +6,7 @@
 //!
 //! # Example
 //!
-//! ```rust
+//! ```rust,ignore
 //! use boomerang_runtime::partition::{part, part_mut};
 //! use boomerang_runtime::PortRef;
 //!

@@ -11,32 +11,37 @@
 //!     success: bool,
 //! }
 //!
-//! #[derive(Reactor, Clone)]
-//! #[reactor(state = State)]
-//! struct HelloWorld {
-//!     reaction_startup: TypedReactionKey<ReactionStartup>,
-//!     reaction_shutdown: TypedReactionKey<ReactionShutdown>,
-//! }
+//! #[derive(Reactor)]
+//! #[reactor(
+//!     state = "State",
+//!     reaction = "ReactionStartup",
+//!     reaction = "ReactionShutdown"
+//! )]
+//! struct HelloWorld;
 //!
 //! #[derive(Reaction)]
-//! #[reaction(triggers(startup))]
+//! #[reaction(
+//!     reactor = "HelloWorld",
+//!     triggers(startup)
+//! )]
 //! struct ReactionStartup;
 //!
-//! impl Trigger for ReactionStartup {
-//!     type Reactor = HelloWorld;
-//!     fn trigger(&mut self, _ctx: &mut runtime::Context, state: &mut State) {
+//! impl Trigger<HelloWorld> for ReactionStartup {
+//!     fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
 //!         println!("Hello World.");
 //!         state.success = true;
 //!     }
 //! }
 //!
 //! #[derive(Reaction)]
-//! #[reaction(triggers(shutdown))]
+//! #[reaction(
+//!     reactor = "HelloWorld",
+//!     triggers(shutdown)
+//! )]
 //! struct ReactionShutdown;
 //!
-//! impl Trigger for ReactionShutdown {
-//!     type Reactor = HelloWorld;
-//!     fn trigger(&mut self, _ctx: &mut runtime::Context, state: &mut State) {
+//! impl Trigger<HelloWorld> for ReactionShutdown {
+//!     fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
 //!         println!("Shutdown invoked.");
 //!         assert!(state.success, "ERROR: startup reaction not executed.");
 //!     }
@@ -48,6 +53,7 @@
 //!     State {
 //!         success: false
 //!     },
+//!     None,
 //!     None,
 //!     &mut env_builder
 //! ).unwrap();

@@ -89,7 +89,7 @@ impl std::fmt::Debug for ReactionGraph {
             .field("reaction_use_ports", &self.reaction_use_ports)
             .field("reaction_effect_ports", &self.reaction_effect_ports)
             .field("reaction_actions", &self.reaction_actions)
-            .field("reactor_bank_index", &self.reactor_bank_indices)
+            .field("reactor_bank_infos", &self.reactor_bank_infos)
             .finish()
     }
 }

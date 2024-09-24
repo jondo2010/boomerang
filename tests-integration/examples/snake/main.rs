@@ -170,7 +170,7 @@ mod reactor {
 
     impl Trigger<SnakeBuilder> for ReactionKeyboard<'_> {
         fn trigger(
-            mut self,
+            self,
             _ctx: &mut runtime::Context,
             state: &mut <SnakeBuilder as Reactor>::State,
         ) {

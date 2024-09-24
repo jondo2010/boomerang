@@ -87,6 +87,9 @@ pub enum BuilderError {
     #[error("Invalid fully-qualified name: {0}")]
     InvalidFqn(String),
 
+    #[error("Internal Error: {0}")]
+    InternalError(String),
+
     #[error(transparent)]
     IoError(#[from] std::io::Error),
 

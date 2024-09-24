@@ -1,6 +1,6 @@
-use boomerang::builder::prelude::*;
-use boomerang::{runtime, Reaction, Reactor};
+use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
 
+#[derive(Clone)]
 struct State {
     received: bool,
 }
@@ -28,7 +28,7 @@ struct ReactionStartup<'a> {
 }
 
 impl<const NUM_NODES: usize> Trigger<Node<NUM_NODES>> for ReactionStartup<'_> {
-    fn trigger(mut self, ctx: &mut runtime::Context, state: &mut State) {
+    fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut State) {
         println!("Hello from node {}!", ctx.get_bank_index().unwrap());
         // broadcast my ID to everyone
         *self.out = ctx.get_bank_index().map(|x| x as i32);
@@ -42,29 +42,37 @@ struct ReactionIn<'a, const NUM_NODES: usize> {
 }
 
 impl<const NUM_NODES: usize> Trigger<Node<NUM_NODES>> for ReactionIn<'_, NUM_NODES> {
-    fn trigger(mut self, ctx: &mut runtime::Context, state: &mut State) {
-        println!(
-            "Node {} received messages from ",
-            ctx.get_bank_index().unwrap()
-        );
+    fn trigger(self, ctx: &mut runtime::Context, state: &mut State) {
         let mut count = 0;
-
-        for i in 0..self.inp.len() {
-            if let Some(val) = *self.inp[i] {
+        let mut vals = vec![];
+        for p in &self.inp {
+            if let Some(val) = **p {
                 state.received = true;
                 count += 1;
-                print!("{val}, ");
+                vals.push(val.to_string());
             }
         }
 
-        //if count != ctx.reactor().num_nodes {
-        //    panic!("Received fewer messages than expected!");
-        //}
+        println!(
+            "Node {} received messages from {}.",
+            ctx.get_bank_index().unwrap(),
+            vals.join(" "),
+        );
+
+        assert_eq!(
+            Some(count),
+            ctx.get_bank_total(),
+            "Received fewer messages than expected!"
+        );
     }
 }
 
 #[derive(Reaction)]
-#[reaction(reactor = "Node<NUM_NODES>", bound = "const NUM_NODES: usize")]
+#[reaction(
+    reactor = "Node<NUM_NODES>",
+    bound = "const NUM_NODES: usize",
+    triggers(shutdown)
+)]
 struct ReactionShutdown;
 
 impl<const NUM_NODES: usize> Trigger<Node<NUM_NODES>> for ReactionShutdown {
@@ -76,51 +84,21 @@ impl<const NUM_NODES: usize> Trigger<Node<NUM_NODES>> for ReactionShutdown {
 #[derive(Reactor)]
 #[reactor(
     state = "()",
-    connection(from = "nodes.inp", to = "nodes.out", broadcast)
+    connection(from = "nodes.out", to = "nodes.inp", broadcast)
 )]
-struct MainReactor<const NUM_NODES: usize> {
+struct MainReactor<const NUM_NODES: usize = 4> {
     #[reactor(child = "State{received: false}")]
     nodes: [Node<NUM_NODES>; NUM_NODES],
 }
 
-/*
-reactor Node(num_nodes: size_t = 4, bank_index: int = 0) {
-    input[num_nodes] in: int
-    output out: int
-
-    state received: bool = false
-
-    reaction(startup) -> out {=
-      lf_print("Hello from node %d!", self->bank_index);
-      // broadcast my ID to everyone
-      lf_set(out, self->bank_index);
-    =}
-
-    reaction(in) {=
-      printf("Node %d received messages from ", self->bank_index);
-      size_t count = 0;
-      for (int i = 0; i < in_width; i++) {
-        if (in[i]->is_present) {
-          self->received = true;
-          count++;
-          printf("%d, ", in[i]->value);
-        }
-      }
-      printf("\n");
-      if (count != self->num_nodes) {
-        lf_print_error_and_exit("Received fewer messages than expected!");
-      }
-    =}
-
-    reaction(shutdown) {=
-      if (!self->received) {
-        lf_print_error_and_exit("Received no input!");
-      }
-    =}
-  }
-
-  main reactor(num_nodes: size_t = 4) {
-    nodes = new[num_nodes] Node(num_nodes=num_nodes)
-    (nodes.out)+ -> nodes.in
-  }
-*/
+#[test]
+fn mutliport_fully_connected() {
+    tracing_subscriber::fmt::init();
+    let _ = boomerang_util::run::build_and_test_reactor::<MainReactor>(
+        "multiport_fully_connected",
+        (),
+        true,
+        false,
+    )
+    .unwrap();
+}

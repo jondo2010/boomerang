@@ -1,5 +1,5 @@
 use quote::{quote, ToTokens};
-use syn::{GenericParam, Generics, Ident, Type, TypeReference};
+use syn::{Generics, Ident, Type, TypeReference};
 
 use crate::util::extract_path_ident;
 
@@ -10,7 +10,6 @@ pub struct TriggerInner {
     reaction_generics: Generics,
     combined_generics: Generics,
     reactor: Type,
-    bounds: Vec<GenericParam>,
     initializer_idents: Vec<Ident>,
     action_idents: Vec<Ident>,
     port_idents: Vec<Ident>,
@@ -117,7 +116,6 @@ impl TriggerInner {
             reaction_generics: reaction_receiver.generics.clone(),
             combined_generics: combined_generics.clone(),
             reactor: reaction_receiver.reactor.clone(),
-            bounds: reaction_receiver.bounds.clone(),
             initializer_idents,
             action_idents,
             port_idents,

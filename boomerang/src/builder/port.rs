@@ -42,7 +42,7 @@ impl<T: runtime::PortData, Q: PortType2> TypedPortKey<T, Q> {
         Self(port_key, PhantomData)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &Self> {
+    pub fn iter(&self) -> impl Iterator<Item = &Self> + Clone {
         std::iter::once(self)
     }
 }

@@ -51,7 +51,7 @@ struct RuntimeReactionParts {
 struct RuntimeReactorParts {
     runtime_reactors: tinymap::TinyMap<runtime::ReactorKey, runtime::Reactor>,
     reactor_aliases: SecondaryMap<BuilderReactorKey, runtime::ReactorKey>,
-    reactor_bank_indices: tinymap::TinySecondaryMap<runtime::ReactorKey, Option<usize>>,
+    reactor_bank_indices: tinymap::TinySecondaryMap<runtime::ReactorKey, Option<runtime::BankInfo>>,
 }
 
 fn build_runtime_reactions(
@@ -120,10 +120,10 @@ fn build_runtime_reactors(
     let mut reactor_bank_indices = tinymap::TinySecondaryMap::with_capacity(reactor_builders.len());
 
     for (builder_key, reactor_builder) in reactor_builders.into_iter() {
-        let bank_index = reactor_builder.bank_index;
+        let bank_info = reactor_builder.bank_info.clone();
         let reactor_key = runtime_reactors.insert(reactor_builder.build_runtime());
         reactor_aliases.insert(builder_key, reactor_key);
-        reactor_bank_indices.insert(reactor_key, bank_index);
+        reactor_bank_indices.insert(reactor_key, bank_info);
     }
 
     RuntimeReactorParts {
@@ -337,7 +337,7 @@ impl EnvBuilder {
                 reaction_effect_ports,
                 reaction_actions,
                 reaction_reactors,
-                reactor_bank_indices,
+                reactor_bank_infos: reactor_bank_indices,
             },
             BuilderAliases {
                 reactor_aliases,

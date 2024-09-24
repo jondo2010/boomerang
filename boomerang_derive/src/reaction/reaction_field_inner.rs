@@ -79,10 +79,11 @@ impl TryFrom<ReactionField> for ReactionFieldInner {
                         })
                     }
 
-                    _ => Err(darling::Error::custom(
-                        "Invalid Port field. Possible attributes are 'use'",
-                    )
-                    .with_span(&value.ty)),
+                    (_, _, _, Some(true)) => Err(darling::Error::custom(
+                        "Invalid Port field attributes: 'uses' is only valid for InputRef",
+                    )),
+
+                    _ => Err(darling::Error::custom("Invalid Port field.").with_span(&value.ty)),
                 }
             }
 

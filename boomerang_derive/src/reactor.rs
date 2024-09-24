@@ -191,41 +191,99 @@ pub struct ConnectionAttr {
 
     #[darling(default)]
     broadcast: bool,
-    #[darling(default)]
-    transposed: bool,
+
     #[darling(default, map = "handle_duration")]
     after: Option<Duration>,
 }
 
-impl ToTokens for ConnectionAttr {
-    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
-        let expand_port = |port: &syn::Expr| {
-            let mut idents = Vec::new();
-            crate::util::expand_expr(port, &mut idents);
-            if let Some((&first, rest)) = idents.split_first() {
-                let rest = rest.iter().map(|ident| {
-                    quote! {
-                        .map(|child| child.#ident.iter()).flatten()
-                    }
-                });
+#[derive(Debug, Eq, PartialEq)]
+struct PortDef {
+    parts: Vec<syn::Ident>,
+    transposed: bool,
+}
 
-                quote! {
-                    __reactor.#first.iter()
-                    #(#rest)*
-                    .copied()
+struct Connection {
+    from: PortDef,
+    to: PortDef,
+    broadcast: bool,
+    after: Option<Duration>,
+}
+
+impl TryFrom<syn::Expr> for PortDef {
+    type Error = darling::Error;
+
+    fn try_from(expr: syn::Expr) -> Result<Self, Self::Error> {
+        match expr {
+            syn::Expr::Call(syn::ExprCall { func, args, .. }) => match func.as_ref() {
+                syn::Expr::Path(syn::ExprPath { path, .. })
+                    if path.get_ident().is_some_and(|p| *p == "transposed") && args.len() == 1 =>
+                {
+                    let mut idents = Vec::new();
+                    crate::util::expand_expr(&args[0], &mut idents)?;
+                    Ok(PortDef {
+                        parts: idents,
+                        transposed: true,
+                    })
                 }
+                _ => Err(darling::Error::custom("Expected 'transposed'").with_span(&func)),
+            },
+            _ => {
+                let mut idents = Vec::new();
+                crate::util::expand_expr(&expr, &mut idents)?;
+                Ok(PortDef {
+                    parts: idents,
+                    transposed: false,
+                })
+            }
+        }
+    }
+}
+
+impl TryFrom<ConnectionAttr> for Connection {
+    type Error = darling::Error;
+
+    fn try_from(value: ConnectionAttr) -> Result<Self, Self::Error> {
+        let from = value.from.try_into()?;
+        let to = value.to.try_into()?;
+
+        Ok(Self {
+            from,
+            to,
+            broadcast: value.broadcast,
+            after: value.after,
+        })
+    }
+}
+
+impl ToTokens for Connection {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        let port_output = |port_def: &PortDef| {
+            let flatten = if port_def.transposed {
+                quote! { .flatten_transposed() }
             } else {
+                quote! { .flatten() }
+            };
+            let (first, rest) = port_def.parts.split_first().expect("empty");
+            let rest = rest.iter().map(|ident| {
                 quote! {
-                    __reactor.#port.iter().copied(),
+                    .map(|child| child.#ident.iter()) #flatten
                 }
+            });
+
+            quote! {
+                __reactor.#first.iter()
+                #(#rest)*
+                .copied()
             }
         };
 
-        let from_port = expand_port(&self.from);
-        let to_port = expand_port(&self.to);
+        let from_port = port_output(&self.from);
+        let to_port = port_output(&self.to);
+        //let transpoed = self.transposed.then_some(quote! { .transpose() });
+        let broadcast = self.broadcast.then_some(quote! { .cycle() });
 
         tokens.extend(quote! {
-            __builder.bind_ports(#from_port, #to_port)?;
+            __builder.bind_ports(#from_port #broadcast, #to_port)?;
         });
     }
 }
@@ -253,7 +311,7 @@ pub struct Reactor {
     generics: syn::Generics,
     fields: Vec<ReactorField>,
     reactions: Vec<syn::Type>,
-    connections: Vec<ConnectionAttr>,
+    connections: Vec<Connection>,
 }
 
 impl TryFrom<ReactorReceiver> for Reactor {
@@ -271,13 +329,19 @@ impl TryFrom<ReactorReceiver> for Reactor {
             .map(ReactorField::try_from)
             .collect::<Result<Vec<_>, _>>()?;
 
+        let connections = value
+            .connections
+            .into_iter()
+            .map(Connection::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+
         Ok(Self {
             ident: value.ident,
             state: value.state,
             generics: value.generics,
             fields,
             reactions: value.reactions,
-            connections: value.connections,
+            connections,
         })
     }
 }
@@ -300,16 +364,15 @@ impl ToTokens for Reactor {
                     name: &str,
                     state: Self::State,
                     parent: Option<::boomerang::builder::BuilderReactorKey>,
-                    bank_index: Option<usize>,
+                    bank_info: Option<::boomerang::runtime::BankInfo>,
                     env: &'__builder mut ::boomerang::builder::EnvBuilder,
                 ) -> Result<Self, ::boomerang::builder::BuilderError> {
-                    let mut __builder = env.add_reactor(name, parent, bank_index, state);
+                    use ::boomerang::flatten_transposed::FlattenTransposedExt;
+
+                    let mut __builder = env.add_reactor(name, parent, bank_info, state);
 
                     #(#fields)*
-
-                    let mut __reactor = Self {
-                        #(#field_idents),*
-                    };
+                    let mut __reactor = Self { #(#field_idents),* };
 
                     #(let _ = <#reactions as ::boomerang::builder::Reaction<Self>>::build(
                         stringify!(#reactions), &__reactor, &mut __builder)?.finish()?;
@@ -329,6 +392,33 @@ mod tests {
     use syn::parse_quote;
 
     use super::*;
+
+    #[test]
+    fn test_connections() {
+        let input = r#"
+    #[derive(Reactor, Clone)]
+    #[reactor(
+        state = "MyType::Foo::<f32>",
+        connection(from = "transposed(a.b)", to = "c.d"),
+    )] struct Test {}"#;
+        let parsed = syn::parse_str(input).unwrap();
+        let receiver = ReactorReceiver::from_derive_input(&parsed).unwrap();
+        let reactor = Reactor::try_from(receiver).unwrap();
+        assert_eq!(
+            reactor.connections[0].from,
+            PortDef {
+                parts: vec![parse_quote! {a}, parse_quote! {b}],
+                transposed: true
+            }
+        );
+        assert_eq!(
+            reactor.connections[0].to,
+            PortDef {
+                parts: vec![parse_quote! {c}, parse_quote! {d}],
+                transposed: false
+            }
+        );
+    }
 
     #[test]
     fn test_struct_attrs() {
@@ -355,7 +445,6 @@ struct Test {}"#;
                 from: parse_quote! {a.b},
                 to: parse_quote! {c.d},
                 broadcast: false,
-                transposed: false,
                 after: None
             }
         );
@@ -365,7 +454,6 @@ struct Test {}"#;
                 from: parse_quote! {inp},
                 to: parse_quote! {gain.inp},
                 broadcast: false,
-                transposed: false,
                 after: None
             }
         );
@@ -375,7 +463,6 @@ struct Test {}"#;
                 from: parse_quote! {gain.out},
                 to: parse_quote! {out},
                 broadcast: false,
-                transposed: false,
                 after: Some(Duration::from_micros(1))
             }
         );
@@ -457,6 +544,6 @@ struct Count {
                 inp: [TypedPortKey<i32, Input>; 3],
             }"#;
         let parsed = syn::parse_str(good_input).unwrap();
-        let receiver = ReactorReceiver::from_derive_input(&parsed).unwrap();
+        let _receiver = ReactorReceiver::from_derive_input(&parsed).unwrap();
     }
 }

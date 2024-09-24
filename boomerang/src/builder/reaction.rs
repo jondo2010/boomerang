@@ -1,5 +1,3 @@
-use std::marker::PhantomData;
-
 use super::{
     BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactorKey, EnvBuilder, FindElements,
     Physical, PortType, Reactor, ReactorBuilderState, TypedActionKey,
@@ -9,27 +7,6 @@ use slotmap::SecondaryMap;
 
 slotmap::new_key_type! {
     pub struct BuilderReactionKey;
-}
-
-#[derive(Copy, Debug)]
-struct TypedReactionKey<R>(BuilderReactionKey, PhantomData<R>);
-
-impl<R> Clone for TypedReactionKey<R> {
-    fn clone(&self) -> Self {
-        Self(self.0, PhantomData)
-    }
-}
-
-impl<R> Default for TypedReactionKey<R> {
-    fn default() -> Self {
-        Self(Default::default(), Default::default())
-    }
-}
-
-impl<R> TypedReactionKey<R> {
-    pub fn new(reaction_key: BuilderReactionKey) -> Self {
-        Self(reaction_key, PhantomData)
-    }
 }
 
 impl petgraph::graph::GraphIndex for BuilderReactionKey {
@@ -244,6 +221,10 @@ impl ReactionBuilder {
     /// Get the BuilderReactorKey of this Reaction
     pub fn get_reactor_key(&self) -> BuilderReactorKey {
         self.reactor_key
+    }
+
+    pub fn get_priority(&self) -> usize {
+        self.priority
     }
 }
 
@@ -492,9 +473,10 @@ impl<'a> ReactionBuilderState<'a> {
         // Ensure there is at least one trigger declared
         if reaction_builder.trigger_actions.is_empty() && reaction_builder.trigger_ports.is_empty()
         {
-            return Err(BuilderError::ReactionBuilderError(
-                "Reactions must have at least one trigger".to_string(),
-            ));
+            return Err(BuilderError::ReactionBuilderError(format!(
+                "Reaction '{}' has no triggers defined",
+                &reaction_builder.name
+            )));
         }
 
         let reactor = &mut env.reactor_builders[reaction_builder.reactor_key];

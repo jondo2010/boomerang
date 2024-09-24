@@ -83,10 +83,10 @@ impl EnvBuilder {
         &mut self,
         name: &str,
         parent: Option<BuilderReactorKey>,
-        bank_index: Option<usize>,
+        bank_info: Option<runtime::BankInfo>,
         state: S,
     ) -> ReactorBuilderState {
-        ReactorBuilderState::new(name, parent, bank_index, state, self)
+        ReactorBuilderState::new(name, parent, bank_info, state, self)
     }
 
     /// Get a previously built reactor
@@ -439,14 +439,6 @@ impl EnvBuilder {
                         what: format!("An output port ({}) can only be bound to an input port ({}) if both ports belong to reactors in the same hierarichal level", port_a_fqn, port_b_fqn),
                     })
                 }
-                // VALIDATE(this->container() != port->container(), );
-                else if port_a.get_reactor_key() == port_b.get_reactor_key() {
-                    Err(BuilderError::PortBindError{
-                        port_a_key,
-                        port_b_key,
-                        what: format!("An output port ({}) can only be bound to an input port ({}) if both ports belong to different reactors!", port_a_fqn, port_b_fqn),
-                    })
-                }
                 else {
                     Ok(())
                 }
@@ -597,6 +589,7 @@ impl EnvBuilder {
                 .reactions
                 .keys()
                 .sorted_by_key(|&reaction_key| self.reaction_builders[reaction_key].priority)
+                .rev()
                 .tuple_windows()
         });
         deps.chain(internal)
@@ -644,6 +637,16 @@ impl EnvBuilder {
         // Transitive reduction and closures
         let toposort = petgraph::algo::toposort(&graph, None).map_err(|cycle_error| {
             // A Cycle was found in the reaction graph.
+
+            let res = petgraph::algo::astar(
+                &graph,
+                cycle_error.node_id(),
+                |finish| finish == cycle_error.node_id(),
+                |_| 1,
+                |_| 0,
+            );
+            dbg!(res);
+
             // let fas = petgraph::algo::greedy_feedback_arc_set(&graph);
             // let cycle = petgraph::prelude::DiGraphMap::<BuilderReactionKey, ()>::from_edges(fas);
             let cycle = util::find_minimal_cycle(&graph, cycle_error.node_id())

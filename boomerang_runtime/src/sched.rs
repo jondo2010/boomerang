@@ -113,10 +113,10 @@ impl<'env> Scheduler<'env> {
             .reaction_reactors
             .iter()
             .map(|(reaction_key, reactor_key)| {
-                let bank_index = reaction_graph.reactor_bank_indices[*reactor_key];
+                let bank_info = &reaction_graph.reactor_bank_infos[*reactor_key];
                 let ctx = Context::new(
                     start_time,
-                    bank_index,
+                    bank_info.clone(),
                     event_tx.clone(),
                     shutdown_rx.clone(),
                 );

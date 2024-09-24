@@ -27,7 +27,7 @@ pub trait Reactor: Sized {
         name: &str,
         state: Self::State,
         parent: Option<BuilderReactorKey>,
-        bank_index: Option<usize>,
+        bank_info: Option<runtime::BankInfo>,
         env: &mut EnvBuilder,
     ) -> Result<Self, BuilderError>;
 
@@ -62,7 +62,7 @@ impl<R: Reactor> ReactorField for R {
 
 impl<R, const N: usize> ReactorField for [R; N]
 where
-    R: Reactor + std::fmt::Debug,
+    R: Reactor,
     R::State: Clone,
 {
     type Inner = R::State;
@@ -190,8 +190,8 @@ pub(super) struct ReactorBuilder {
     pub ports: SecondaryMap<BuilderPortKey, ()>,
     /// Actions in this Reactor
     pub actions: SecondaryMap<BuilderActionKey, ()>,
-    /// The index of the bank that this Reactor belongs to, if any.
-    pub bank_index: Option<usize>,
+    /// The bank info of the bank that this Reactor belongs to, if any.
+    pub bank_info: Option<runtime::BankInfo>,
 }
 
 impl ReactorBuilder {
@@ -218,7 +218,7 @@ impl std::fmt::Debug for ReactorBuilder {
             .field("reactions", &self.reactions)
             .field("ports", &self.ports)
             .field("actions", &self.actions)
-            .field("bank_index", &self.bank_index)
+            .field("bank_info", &self.bank_info)
             .finish()
     }
 }
@@ -246,7 +246,7 @@ impl<'a> ReactorBuilderState<'a> {
     pub(super) fn new<S: runtime::ReactorState>(
         name: &str,
         parent: Option<BuilderReactorKey>,
-        bank_index: Option<usize>,
+        bank_info: Option<runtime::BankInfo>,
         reactor_state: S,
         env: &'a mut EnvBuilder,
     ) -> Self {
@@ -260,7 +260,7 @@ impl<'a> ReactorBuilderState<'a> {
                 reactions: SecondaryMap::new(),
                 ports: SecondaryMap::new(),
                 actions: SecondaryMap::new(),
-                bank_index,
+                bank_info,
             }
         });
 
@@ -456,7 +456,7 @@ impl<'a> ReactorBuilderState<'a> {
         state: R::State,
     ) -> Result<[R; N], BuilderError>
     where
-        R: Reactor + std::fmt::Debug,
+        R: Reactor,
         R::State: Clone,
     {
         let reactors = (0..N)
@@ -465,12 +465,14 @@ impl<'a> ReactorBuilderState<'a> {
                     &format!("{name}{i}"),
                     state.clone(),
                     Some(self.reactor_key),
-                    Some(i),
+                    Some(runtime::BankInfo { idx: i, total: N }),
                     self.env,
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(reactors.try_into().expect("Error converting Vec to array"))
+        reactors
+            .try_into()
+            .map_err(|_| BuilderError::InternalError("Error converting Vec to array".to_owned()))
     }
 
     /// Add a new child reactor using a closure to build it.

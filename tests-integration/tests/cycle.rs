@@ -22,7 +22,7 @@ impl<'a> Trigger<ABuilder> for AReactionX<'a> {
 }
 
 #[derive(Reactor)]
-#[reactor(state = "()", reaction = "BReactionX", reaction = "BReactionStartup")]
+#[reactor(state = "()", reaction = "BReactionStartup", reaction = "BReactionX")]
 struct BBuilder {
     x: TypedPortKey<(), Input>,
     y: TypedPortKey<(), Output>,
@@ -53,9 +53,9 @@ impl Trigger<BBuilder> for BReactionStartup<'_> {
     connection(from = "b.y", to = "a.x")
 )]
 struct CycleBuilder {
-    #[reactor(child = ())]
+    #[reactor(child = "()")]
     a: ABuilder,
-    #[reactor(child = ())]
+    #[reactor(child = "()")]
     b: BBuilder,
 }
 

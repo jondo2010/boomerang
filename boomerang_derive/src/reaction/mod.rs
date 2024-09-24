@@ -128,7 +128,6 @@ pub struct Reaction {
     ident: Ident,
     generics: Generics,
     combined_generics: Generics,
-    bounds: Vec<syn::GenericParam>,
     reactor: Type,
     fields: Vec<ReactionFieldInner>,
     inner: TriggerInner,
@@ -256,7 +255,6 @@ impl TryFrom<ReactionReceiver> for Reaction {
             ident: value.ident,
             generics: value.generics,
             combined_generics,
-            bounds: value.bounds,
             reactor: value.reactor,
             fields,
             inner,
@@ -347,12 +345,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test() {
-        let xxx: syn::Expr = parse_quote! {Inner::Count<T: runtime::PortData>};
-        dbg!(&xxx);
-    }
-
-    #[test]
     fn test_struct_attrs() {
         let input = r#"
 #[derive(Reaction)]
@@ -391,13 +383,14 @@ struct ReactionT;"#;
     fn test_port_fields() {
         let input = r#"
 #[derive(Reaction)]
+#[reaction(reactor = "Foo")]
 struct ReactionT<'a> {
-    ref_port: &'a runtime::Port<()>,
-    mut_port: &'a mut runtime::Port<()>,
+    ref_port: runtime::InputRef<'a, ()>,
+    mut_port: runtime::OutputRef<'a, ()>,
     #[reaction(uses)]
-    uses_only_port: &'a runtime::Port<()>,
+    uses_only_port: runtime::InputRef<'a, ()>,
     #[reaction(path = "child.y.z")]
-    renamed_port: &'a mut runtime::Port<u32>,
+    renamed_port: runtime::OutputRef<'a, u32>,
 }"#;
 
         let parsed = syn::parse_str(input).unwrap();
@@ -406,7 +399,7 @@ struct ReactionT<'a> {
         assert_eq!(
             reaction.fields[0],
             ReactionFieldInner::FieldDefined {
-                elem: parse_quote! {runtime::Port<()>},
+                elem: parse_quote! {runtime::InputRef<'a, ()>},
                 triggers: true,
                 effects: false,
                 uses: true,
@@ -416,7 +409,7 @@ struct ReactionT<'a> {
         assert_eq!(
             reaction.fields[1],
             ReactionFieldInner::FieldDefined {
-                elem: parse_quote! {runtime::Port<()>},
+                elem: parse_quote! {runtime::OutputRef<'a, ()>},
                 triggers: false,
                 effects: true,
                 uses: false,
@@ -426,7 +419,7 @@ struct ReactionT<'a> {
         assert_eq!(
             reaction.fields[2],
             ReactionFieldInner::FieldDefined {
-                elem: parse_quote! {runtime::Port<()>},
+                elem: parse_quote! {runtime::InputRef<'a, ()>},
                 triggers: false,
                 effects: false,
                 uses: true,
@@ -436,7 +429,7 @@ struct ReactionT<'a> {
         assert_eq!(
             reaction.fields[3],
             ReactionFieldInner::FieldDefined {
-                elem: parse_quote! {runtime::Port<u32>},
+                elem: parse_quote! {runtime::OutputRef<'a, u32>},
                 triggers: false,
                 effects: true,
                 uses: false,
@@ -449,8 +442,8 @@ struct ReactionT<'a> {
     fn test_action_fields() {
         let input = r#"
 #[derive(Reaction)]
+#[reaction(reactor = "Foo")]
 struct ReactionT<'a> {
-    //act: runtime::ActionRef<'a, i32>,
     #[reaction(triggers)]
     raw_action: &'a runtime::Action,
 }"#;

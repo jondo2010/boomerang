@@ -1,9 +1,6 @@
 //! Timeout reactor that schedules a shutdown after a specified duration.
 
-use boomerang::{
-    builder::{self, Trigger},
-    runtime, Reaction, Reactor,
-};
+use boomerang::{builder::Trigger, runtime, Reaction, Reactor};
 
 #[derive(Reactor, Clone)]
 #[reactor(state = "runtime::Duration", reaction = "ReactionStartup")]

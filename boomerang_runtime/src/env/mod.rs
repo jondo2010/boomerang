@@ -74,6 +74,15 @@ impl Env {
     }
 }
 
+/// Bank information for a multi-bank reactor
+#[derive(Debug, Clone)]
+pub struct BankInfo {
+    /// The index of this reactor within the bank
+    pub idx: usize,
+    /// The total number of reactors in the bank
+    pub total: usize,
+}
+
 /// Invariant data for the runtime, describing the resolved reaction graph and it's dependencies.
 ///
 /// Maps of triggers for actions and ports. This data is statically resolved by the builder from the reaction graph.
@@ -100,5 +109,5 @@ pub struct ReactionGraph {
     /// For each reaction, the reactor it belongs to
     pub reaction_reactors: tinymap::TinySecondaryMap<ReactionKey, ReactorKey>,
     /// Bank index for a multi-bank reactor
-    pub reactor_bank_indices: tinymap::TinySecondaryMap<ReactorKey, Option<usize>>,
+    pub reactor_bank_infos: tinymap::TinySecondaryMap<ReactorKey, Option<BankInfo>>,
 }

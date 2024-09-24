@@ -4,10 +4,9 @@ use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
 #[derive(Reactor)]
 #[reactor(
     state = "()",
+    reaction = "ReactionStartup",
     reaction = "ReactionIn1",
-    reaction = "ReactionIn2",
-    // ReactionStartup needs to be last due to implicit dependency on all reactions before it.
-    reaction = "ReactionStartup"
+    reaction = "ReactionIn2"
 )]
 struct Contained {
     in1: TypedPortKey<u32, Input>,

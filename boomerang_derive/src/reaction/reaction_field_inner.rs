@@ -1,9 +1,9 @@
 use quote::{quote, ToTokens};
-use syn::{parse_quote, Expr, Type, TypePath, TypeReference};
+use syn::{parse_quote, Expr, Type, TypeReference};
 
 use crate::util::extract_path_ident;
 
-use super::{ReactionField, ACTION, ACTION_REF, PHYSICAL_ACTION_REF, PORT};
+use super::{ReactionField, ACTION, ACTION_REF, INPUT_REF, OUTPUT_REF, PHYSICAL_ACTION_REF};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ReactionFieldInner {
@@ -37,49 +37,55 @@ impl TryFrom<ReactionField> for ReactionFieldInner {
         })?;
 
         match &value.ty {
-            // For ports, only 3 variants are valid:
-            // - &runtime::Port<T>, corresponds to TriggerMode::TriggersAndUses
-            // - &runtime::Port<T> with #[reaction(uses)], corresponds to TriggerMode::UsesOnly
-            // - &mut runtime::Port<T> corresponds to TriggerMode::EffectsOnly
-            Type::Reference(TypeReference {
-                mutability: None,
-                elem,
-                ..
-            }) if *field_inner_type == PORT => match (value.triggers, value.effects, value.uses) {
-                (None, None, None) => Ok(Self::FieldDefined {
-                    elem: *elem.clone(),
-                    triggers: true,
-                    effects: false,
-                    uses: true,
-                    path,
-                }),
-                (None, None, Some(true)) => Ok(Self::FieldDefined {
-                    elem: *elem.clone(),
-                    triggers: false,
-                    effects: false,
-                    uses: true,
-                    path,
-                }),
-                _ => Err(darling::Error::custom(
-                    "Invalid Port field. Possible attributes are 'use'",
-                )
-                .with_span(&value.ty)),
-            },
+            Type::Path(_) | Type::Array(_) => {
+                match (
+                    field_inner_type.to_string().as_ref(),
+                    value.triggers,
+                    value.effects,
+                    value.uses,
+                ) {
+                    // For ports, only 3 variants are valid:
+                    // - runtime::InputRef<T>, corresponds to TriggerMode::TriggersAndUses
+                    // - runtime::InputRef<T> with #[reaction(uses)], corresponds to TriggerMode::UsesOnly
+                    // - runtime::OutputRef<T> corresponds to TriggerMode::EffectsOnly
+                    (INPUT_REF, None, None, None) => Ok(Self::FieldDefined {
+                        elem: value.ty.clone(),
+                        triggers: true,
+                        effects: false,
+                        uses: true,
+                        path,
+                    }),
+                    (INPUT_REF, None, None, Some(true)) => Ok(Self::FieldDefined {
+                        elem: value.ty.clone(),
+                        triggers: false,
+                        effects: false,
+                        uses: true,
+                        path,
+                    }),
+                    (OUTPUT_REF, None, None, None) => Ok(Self::FieldDefined {
+                        elem: value.ty.clone(),
+                        triggers: false,
+                        effects: true,
+                        uses: false,
+                        path,
+                    }),
+                    (ACTION_REF, _, _, _) | (PHYSICAL_ACTION_REF, _, _, _) => {
+                        Ok(Self::FieldDefined {
+                            elem: value.ty.clone(),
+                            triggers: value.triggers.unwrap_or(false),
+                            effects: value.effects.unwrap_or(false),
+                            uses: value.uses.unwrap_or(true),
+                            path,
+                        })
+                    }
 
-            Type::Reference(TypeReference {
-                mutability: Some(_),
-                elem,
-                ..
-            }) if *field_inner_type == PORT => match (value.triggers, value.effects, value.uses) {
-                (None, None, None) => Ok(Self::FieldDefined {
-                    elem: *elem.clone(),
-                    triggers: false,
-                    effects: true,
-                    uses: false,
-                    path,
-                }),
-                _ => Err(darling::Error::custom("Invalid Port variant").with_span(&value.ty)),
-            },
+                    (_, _, _, Some(true)) => Err(darling::Error::custom(
+                        "Invalid Port field attributes: 'uses' is only valid for InputRef",
+                    )),
+
+                    _ => Err(darling::Error::custom("Invalid Port field.").with_span(&value.ty)),
+                }
+            }
 
             Type::Reference(TypeReference {
                 mutability, elem, ..
@@ -90,21 +96,6 @@ impl TryFrom<ReactionField> for ReactionFieldInner {
                 uses: value.uses.unwrap_or(true),
                 path,
             }),
-
-            Type::Path(TypePath { path: elem, .. })
-                if *field_inner_type == ACTION_REF || *field_inner_type == PHYSICAL_ACTION_REF =>
-            {
-                Ok(Self::FieldDefined {
-                    elem: syn::Type::Path(TypePath {
-                        qself: None,
-                        path: elem.clone(),
-                    }),
-                    triggers: value.triggers.unwrap_or(false),
-                    effects: value.effects.unwrap_or(false),
-                    uses: value.uses.unwrap_or(true),
-                    path,
-                })
-            }
 
             _ => Err(darling::Error::custom("Unexpected field type").with_span(&value.ty)),
         }
@@ -145,10 +136,18 @@ impl ToTokens for ReactionFieldInner {
                     _ => panic!("Invalid trigger mode: {:?}", (triggers, uses, effects)),
                 };
 
+                // For single elements, we can use the `From` trait to convert the element to the
+                // correct type. Otherwise, we need to use the map/`Into` trait.
+                let elem_path = if matches!(elem, Type::Array(..)) {
+                    quote! { reactor.#path.map(From::from) }
+                } else {
+                    quote! { reactor.#path.into() }
+                };
+
                 tokens.extend(quote! {
                     <#elem as ::boomerang::builder::ReactionField>::build(
                         &mut __reaction,
-                        reactor.#path.into(),
+                        #elem_path,
                         0,
                         #trigger_mode,
                     )?;

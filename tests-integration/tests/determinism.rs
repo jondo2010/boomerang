@@ -1,55 +1,46 @@
-use boomerang::{
-    builder::{TimerActionKey, Trigger, TypedPortKey, TypedReactionKey},
-    runtime, Reaction, Reactor,
-};
+use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
 
-#[derive(Clone, Reactor)]
-#[reactor(state = ())]
+#[derive(Reactor)]
+#[reactor(state = "()", reaction = "SourceReactionT")]
 struct SourceBuilder {
-    #[reactor(port = "output")]
-    y: TypedPortKey<i32>,
+    y: TypedPortKey<i32, Output>,
     #[reactor(timer())]
     t: TimerActionKey,
-    reaction_t: TypedReactionKey<SourceReactionT<'static>>,
 }
 
 #[derive(Reaction)]
-#[reaction(triggers(action = "t"))]
+#[reaction(reactor = "SourceBuilder", triggers(action = "t"))]
 struct SourceReactionT<'a> {
-    y: &'a mut runtime::Port<i32>,
+    y: runtime::OutputRef<'a, i32>,
 }
 
-impl Trigger for SourceReactionT<'_> {
-    type Reactor = SourceBuilder;
-    fn trigger(&mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
-        *self.y.get_mut() = Some(1);
+impl Trigger<SourceBuilder> for SourceReactionT<'_> {
+    fn trigger(mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
+        *self.y = Some(1);
     }
 }
 
-#[derive(Clone, Reactor)]
-#[reactor(state = ())]
+#[derive(Reactor)]
+#[reactor(state = "()", reaction = "DestReactionXY")]
 struct DestinationBuilder {
-    #[reactor(port = "input")]
-    x: TypedPortKey<i32>,
-    #[reactor(port = "input")]
-    y: TypedPortKey<i32>,
-    reaction_x_y: TypedReactionKey<DestReactionXY<'static>>,
+    x: TypedPortKey<i32, Input>,
+    y: TypedPortKey<i32, Input>,
 }
 
 #[derive(Reaction)]
+#[reaction(reactor = "DestinationBuilder")]
 struct DestReactionXY<'a> {
-    x: &'a runtime::Port<i32>,
-    y: &'a runtime::Port<i32>,
+    x: runtime::InputRef<'a, i32>,
+    y: runtime::InputRef<'a, i32>,
 }
 
-impl Trigger for DestReactionXY<'_> {
-    type Reactor = DestinationBuilder;
-    fn trigger(&mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
+impl Trigger<DestinationBuilder> for DestReactionXY<'_> {
+    fn trigger(self, _ctx: &mut runtime::Context, _state: &mut ()) {
         let mut sum = 0;
-        if let Some(x) = *self.x.get() {
+        if let Some(x) = *self.x {
             sum += x;
         }
-        if let Some(y) = *self.y.get() {
+        if let Some(y) = *self.y {
             sum += y;
         }
         println!("Received {}", sum);
@@ -57,32 +48,29 @@ impl Trigger for DestReactionXY<'_> {
     }
 }
 
-#[derive(Clone, Reactor)]
-#[reactor(state = ())]
+#[derive(Reactor)]
+#[reactor(state = "()", reaction = "PassReactionX")]
 struct PassBuilder {
-    #[reactor(port = "input")]
-    x: TypedPortKey<i32>,
-    #[reactor(port = "output")]
-    y: TypedPortKey<i32>,
-    reaction_x: TypedReactionKey<PassReactionX<'static>>,
+    x: TypedPortKey<i32, Input>,
+    y: TypedPortKey<i32, Output>,
 }
 
 #[derive(Reaction)]
+#[reaction(reactor = "PassBuilder")]
 struct PassReactionX<'a> {
-    x: &'a runtime::Port<i32>,
-    y: &'a mut runtime::Port<i32>,
+    x: runtime::InputRef<'a, i32>,
+    y: runtime::OutputRef<'a, i32>,
 }
 
-impl Trigger for PassReactionX<'_> {
-    type Reactor = PassBuilder;
-    fn trigger(&mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
-        *self.y.get_mut() = *self.x.get();
+impl Trigger<PassBuilder> for PassReactionX<'_> {
+    fn trigger(mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
+        *self.y = *self.x;
     }
 }
 
-#[derive(Clone, Reactor)]
+#[derive(Reactor)]
 #[reactor(
-    state = (),
+    state = "()",
     connection(from = "s.y", to = "d.y"),
     connection(from = "s.y", to = "p1.x"),
     connection(from = "p1.y", to = "p2.x"),
@@ -90,13 +78,13 @@ impl Trigger for PassReactionX<'_> {
 )]
 #[allow(dead_code)]
 struct DeterminismBuilder {
-    #[reactor(child = ())]
+    #[reactor(child = "()")]
     s: SourceBuilder,
-    #[reactor(child = ())]
+    #[reactor(child = "()")]
     d: DestinationBuilder,
-    #[reactor(child = ())]
+    #[reactor(child = "()")]
     p1: PassBuilder,
-    #[reactor(child = ())]
+    #[reactor(child = "()")]
     p2: PassBuilder,
 }
 

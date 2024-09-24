@@ -3,6 +3,29 @@ use std::time::Duration;
 use quote::{quote, ToTokens};
 use syn::{Ident, Type};
 
+/// Recursively expand an expression into a list of identifiers from the Path and Field expressions
+pub fn expand_expr(expr: &syn::Expr, idents: &mut Vec<syn::Ident>) -> Result<(), darling::Error> {
+    match expr {
+        syn::Expr::Field(field) => {
+            expand_expr(&field.base, idents)?;
+            if let syn::Member::Named(ident) = &field.member {
+                idents.push(ident.clone())
+            }
+        }
+        syn::Expr::Path(path) => {
+            if let Some(ident) = path.path.get_ident() {
+                idents.push(ident.clone());
+            }
+        }
+        _ => {
+            return Err(darling::Error::custom(
+                "Unsupported expression type {expr:?}",
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn extract_path_ident(elem: &Type) -> Option<&Ident> {
     match elem {
         Type::Path(syn::TypePath {
@@ -10,6 +33,8 @@ pub fn extract_path_ident(elem: &Type) -> Option<&Ident> {
             ..
         }) => segments.last().map(|segment| &segment.ident),
         Type::Reference(syn::TypeReference { elem, .. }) => extract_path_ident(elem),
+
+        Type::Array(syn::TypeArray { elem, .. }) => extract_path_ident(elem),
         _ => None,
     }
 }

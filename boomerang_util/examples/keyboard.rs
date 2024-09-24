@@ -11,33 +11,32 @@ mod example {
 
     /// A simple Reactor that triggers on key_press events.
     /// It reads keyboard input and prints the key that was pressed.
-    #[derive(Clone, Reactor)]
-    #[reactor(state = ())]
+    #[derive(Reactor)]
+    #[reactor(state = "()", reaction = "ReactionKeyPress")]
     pub struct Example {
         /// this thing helps capturing key presses
         #[reactor(child = KeyboardEvents::default())]
         keyboard: KeyboardEventsBuilder,
-        key_press_reaction: TypedReactionKey<ReactionKeyPress<'static>>,
     }
 
     #[derive(Reaction)]
+    #[reaction(reactor = "Example")]
     struct ReactionKeyPress<'a> {
         #[reaction(path = "keyboard.arrow_key_pressed")]
-        arrow_key_pressed: &'a runtime::Port<termion::event::Key>,
+        arrow_key_pressed: runtime::InputRef<'a, termion::event::Key>,
     }
 
-    impl Trigger for ReactionKeyPress<'_> {
-        type Reactor = Example;
-        fn trigger(&mut self, _ctx: &mut runtime::Context, _: &mut ()) {
+    impl Trigger<Example> for ReactionKeyPress<'_> {
+        fn trigger(self, _ctx: &mut runtime::Context, _: &mut ()) {
             let stdout = std::io::stdout();
             let mut stdout = stdout.lock();
 
             // this might be overwritten several times, only committed on screen refreshes
-            let c = match self.arrow_key_pressed.get().unwrap() {
-                termion::event::Key::Left => '←',
-                termion::event::Key::Right => '→',
-                termion::event::Key::Up => '↑',
-                termion::event::Key::Down => '↓',
+            let c = match *self.arrow_key_pressed {
+                Some(termion::event::Key::Left) => '←',
+                Some(termion::event::Key::Right) => '→',
+                Some(termion::event::Key::Up) => '↑',
+                Some(termion::event::Key::Down) => '↓',
                 _ => unreachable!(),
             };
 

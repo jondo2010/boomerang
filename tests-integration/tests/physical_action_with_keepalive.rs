@@ -1,25 +1,20 @@
 use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
 use runtime::Duration;
 
-#[derive(Clone, Reactor)]
-#[reactor(state = ())]
+#[derive(Reactor)]
+#[reactor(state = "()", reaction = "ReactionStartup", reaction = "ReactionAct")]
 struct MainBuilder {
     act: TypedActionKey<u32, Physical>,
-
-    reaction_startup: TypedReactionKey<ReactionStartup>,
-    reaction_act: TypedReactionKey<ReactionAct>,
 }
 
 #[derive(Reaction)]
-#[reaction(triggers(startup))]
+#[reaction(reactor = "MainBuilder", triggers(startup))]
 struct ReactionStartup {
     act: runtime::PhysicalActionRef<u32>,
 }
 
-impl Trigger for ReactionStartup {
-    type Reactor = MainBuilder;
-
-    fn trigger(&mut self, ctx: &mut runtime::Context, _state: &mut ()) {
+impl Trigger<MainBuilder> for ReactionStartup {
+    fn trigger(self, ctx: &mut runtime::Context, _state: &mut ()) {
         let mut send_ctx = ctx.make_send_context();
         let mut act = self.act.clone();
         std::thread::spawn(move || {
@@ -30,15 +25,14 @@ impl Trigger for ReactionStartup {
 }
 
 #[derive(Reaction)]
+#[reaction(reactor = "MainBuilder")]
 struct ReactionAct {
     #[reaction(triggers)]
     act: runtime::PhysicalActionRef<u32>,
 }
 
-impl Trigger for ReactionAct {
-    type Reactor = MainBuilder;
-
-    fn trigger(&mut self, ctx: &mut runtime::Context, _state: &mut ()) {
+impl Trigger<MainBuilder> for ReactionAct {
+    fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut ()) {
         let value = ctx.get_action(&mut self.act).unwrap();
         println!("---- Vu {} à {}", value, ctx.get_tag());
 

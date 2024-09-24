@@ -4,25 +4,57 @@ use std::{fmt::Debug, marker::PhantomData};
 
 use super::{BuilderReactionKey, BuilderReactorKey};
 
-slotmap::new_key_type! {
-    pub struct BuilderPortKey;
+slotmap::new_key_type! { pub struct BuilderPortKey; }
+
+/// Input tag
+#[derive(Copy, Clone, Debug)]
+pub struct Input;
+
+/// Output tag
+#[derive(Copy, Clone, Debug)]
+pub struct Output;
+
+pub trait PortType2: Copy + Clone + Debug {
+    const TYPE: PortType;
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct TypedPortKey<T: runtime::PortData>(BuilderPortKey, PhantomData<T>);
-
-impl<T: runtime::PortData> runtime::InnerType for TypedPortKey<T> {
-    type Inner = T;
+impl PortType2 for Input {
+    const TYPE: PortType = PortType::Input;
 }
 
-impl<T: runtime::PortData> TypedPortKey<T> {
-    pub fn new(port_key: BuilderPortKey) -> Self {
-        Self(port_key, PhantomData)
+impl PortType2 for Output {
+    const TYPE: PortType = PortType::Output;
+}
+
+#[derive(Debug)]
+pub struct TypedPortKey<T: runtime::PortData, Q: PortType2>(BuilderPortKey, PhantomData<(T, Q)>);
+
+impl<T: runtime::PortData, Q: PortType2> Copy for TypedPortKey<T, Q> {}
+
+impl<T: runtime::PortData, Q: PortType2> Clone for TypedPortKey<T, Q> {
+    fn clone(&self) -> Self {
+        *self
     }
 }
 
-impl<T: runtime::PortData> From<TypedPortKey<T>> for BuilderPortKey {
-    fn from(builder_port_key: TypedPortKey<T>) -> Self {
+impl<T: runtime::PortData, Q: PortType2> TypedPortKey<T, Q> {
+    pub fn new(port_key: BuilderPortKey) -> Self {
+        Self(port_key, PhantomData)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Self> + Clone {
+        std::iter::once(self)
+    }
+}
+
+impl<T: runtime::PortData, Q: PortType2> From<BuilderPortKey> for TypedPortKey<T, Q> {
+    fn from(value: BuilderPortKey) -> Self {
+        Self(value, PhantomData)
+    }
+}
+
+impl<T: runtime::PortData, Q: PortType2> From<TypedPortKey<T, Q>> for BuilderPortKey {
+    fn from(builder_port_key: TypedPortKey<T, Q>) -> Self {
         builder_port_key.0
     }
 }
@@ -51,7 +83,7 @@ pub trait BasePortBuilder {
     fn create_runtime_port(&self, key: runtime::PortKey) -> Box<dyn runtime::BasePort>;
 }
 
-pub struct PortBuilder<T: runtime::PortData> {
+pub struct PortBuilder<T: runtime::PortData, Q: PortType2> {
     name: String,
     /// The key of the Reactor that owns this PortBuilder
     reactor_key: BuilderReactorKey,
@@ -64,28 +96,27 @@ pub struct PortBuilder<T: runtime::PortData> {
     /// Out-going Reactions that this port triggers
     triggers: SecondaryMap<BuilderReactionKey, ()>,
 
-    inward_binding: Option<TypedPortKey<T>>,
+    inward_binding: Option<TypedPortKey<T, Q>>,
     outward_bindings: SecondaryMap<BuilderPortKey, ()>,
     //_phantom: PhantomData<T>,
 }
 
-impl<T: runtime::PortData> PortBuilder<T> {
-    pub fn new(name: &str, reactor_key: BuilderReactorKey, port_type: PortType) -> Self {
+impl<T: runtime::PortData, Q: PortType2> PortBuilder<T, Q> {
+    pub fn new(name: &str, reactor_key: BuilderReactorKey) -> Self {
         Self {
             name: name.into(),
             reactor_key,
-            port_type,
+            port_type: Q::TYPE,
             deps: SecondaryMap::new(),
             antideps: SecondaryMap::new(),
             triggers: SecondaryMap::new(),
             inward_binding: None,
             outward_bindings: SecondaryMap::new(),
-            //_phantom: PhantomData,
         }
     }
 }
 
-impl<T: runtime::PortData> BasePortBuilder for PortBuilder<T> {
+impl<T: runtime::PortData, Q: PortType2> BasePortBuilder for PortBuilder<T, Q> {
     fn get_name(&self) -> &str {
         &self.name
     }

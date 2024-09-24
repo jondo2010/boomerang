@@ -1,6 +1,8 @@
 use std::marker::PhantomData;
 
-use crate::{map, Key, TinyMap};
+use crate::{Key, TinyMap};
+
+use super::{iter_many::IterMany, IterManyMut};
 
 /// `Chunks` is an iterator over slices of a given owned data buffer. Each call to `next` returns a
 /// slice of the data buffer, starting at the index specified by the next element of the given
@@ -28,12 +30,10 @@ where
     II: Iterator<Item = K> + Send,
     K: Key,
 {
-    type Item = map::IterMany<'a, K, V, II>;
+    type Item = IterMany<'a, K, V, II>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.keys
-            .next()
-            .map(|keys| map::IterMany::new(self.ptr, keys))
+        self.keys.next().map(|keys| IterMany::new(self.ptr, keys))
     }
 }
 
@@ -72,12 +72,12 @@ where
     II: Iterator<Item = K> + Send,
     K: Key,
 {
-    type Item = map::IterManyMut<'a, K, V, II>;
+    type Item = IterManyMut<'a, K, V, II>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.keys
             .next()
-            .map(|keys| map::IterManyMut::new(self.ptr, keys))
+            .map(|keys| IterManyMut::new(self.ptr, keys))
     }
 }
 
@@ -133,6 +133,7 @@ impl<K: Key, V: Send> TinyMap<K, V> {
 mod tests {
     use super::*;
     use crate::DefaultKey;
+    use itertools::Itertools;
 
     /// Make a map containing `N` elements and a vector of keys.
     fn make_map<const N: usize>() -> (TinyMap<DefaultKey, usize>, Vec<DefaultKey>) {
@@ -143,8 +144,6 @@ mod tests {
 
     #[test]
     fn test_par_iter_chunks_split_unchecked() {
-        use itertools::Itertools;
-
         let (mut map, keys) = make_map::<20>();
 
         let chunked_keys = [

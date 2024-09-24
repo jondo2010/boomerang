@@ -1,6 +1,6 @@
 //! This module provides an implementation of an `ActionStore` for managing actions in a reactor system.
 //!
-//! The `ActionStore` is a data structure that efficiently stores and retrieves actions based on their
+//! The [`ActionStore`] is a data structure that efficiently stores and retrieves actions based on their
 //! associated [`Tag`]s. It uses a binary heap internally to maintain the actions
 //! in a priority queue, ensuring that actions can be processed in the correct order.
 //!
@@ -61,21 +61,17 @@ pub trait BaseActionStore: std::fmt::Debug + Send + Sync + downcast_rs::Downcast
     /// Remove any value at the given Tag
     fn clear_older_than(&mut self, tag: Tag);
 
-    /// Try to serialize a value at the given Tag
+    /// Create a new Arrow ArrayBuilder for the data stored in this store
     #[cfg(feature = "serde")]
-    fn serialize_value(
-        &mut self,
-        tag: Tag,
-        ser: &mut dyn erased_serde::Serializer,
-    ) -> Result<(), erased_serde::Error>;
+    fn new_builder(&self) -> Result<serde_arrow::ArrayBuilder, crate::RuntimeError>;
 
-    /// Try to pull a value from the deserializer and store it at the given Tag
+    /// Serialize the latest value in the store to the given `ArrayBuilder`.
     #[cfg(feature = "serde")]
-    fn deserialize_value(
+    fn build_value_at(
         &mut self,
+        builder: &mut serde_arrow::ArrayBuilder,
         tag: Tag,
-        des: &mut dyn erased_serde::Deserializer<'_>,
-    ) -> Result<(), erased_serde::Error>;
+    ) -> Result<(), crate::RuntimeError>;
 }
 downcast_rs::impl_downcast!(sync BaseActionStore);
 
@@ -144,30 +140,39 @@ where
     }
 }
 
+#[cfg(feature = "serde")]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+struct TaggedActionRecord<T> {
+    tag: Tag,
+    value: Option<T>,
+}
+
 impl<T: ActionData> BaseActionStore for ActionStore<T> {
     fn clear_older_than(&mut self, tag: Tag) {
         self.clear_older_than(tag)
     }
 
     #[cfg(feature = "serde")]
-    fn serialize_value(
-        &mut self,
-        tag: Tag,
-        ser: &mut dyn erased_serde::Serializer,
-    ) -> Result<(), erased_serde::Error> {
-        let value = self.get_current(tag);
-        erased_serde::Serialize::erased_serialize(&value, ser)
+    fn new_builder(&self) -> Result<serde_arrow::ArrayBuilder, crate::RuntimeError> {
+        use arrow::datatypes::Field;
+        use serde_arrow::schema::{SchemaLike, SerdeArrowSchema, TracingOptions};
+        let fields = Vec::<Field>::from_type::<TaggedActionRecord<T>>(
+            TracingOptions::default().allow_null_fields(true),
+        )?;
+        let schema = SerdeArrowSchema::from_arrow_fields(fields.as_slice())?;
+        serde_arrow::ArrayBuilder::new(schema).map_err(crate::RuntimeError::from)
     }
 
     #[cfg(feature = "serde")]
-    fn deserialize_value(
+    fn build_value_at(
         &mut self,
+        builder: &mut serde_arrow::ArrayBuilder,
         tag: Tag,
-        des: &mut dyn erased_serde::Deserializer<'_>,
-    ) -> Result<(), erased_serde::Error> {
-        let value = <Option<T> as serde::Deserialize>::deserialize(des)?;
-        self.push(tag, value);
-        Ok(())
+    ) -> Result<(), crate::RuntimeError> {
+        let value = self.get_current(tag);
+        builder
+            .push(&TaggedActionRecord { tag, value })
+            .map_err(crate::RuntimeError::from)
     }
 }
 
@@ -256,40 +261,28 @@ mod tests {
         assert_eq!(store.get_current(Tag::new(Duration::from_secs(1), 0)), None);
     }
 
-    #[cfg(feature = "fixme")]
     #[cfg(feature = "serde")]
     #[test]
-    fn test_serialize_deserialize() {
-        use serde_json;
-
-        let mut store = ActionStore::<u32>::new();
-        let tags = build_tags::<3>();
-
-        store.push(tags[0], Some(10));
-        store.push(tags[1], Some(20));
-        store.push(tags[2], Some(30));
-
-        // Serialize
-        let mut serialized = Vec::new();
-        {
-            let mut json = serde_json::Serializer::new(&mut serialized);
-            let mut ser = Box::new(<dyn erased_serde::Serializer>::erase(&mut json));
-
-            store.serialize_value(tags[1], &mut ser).unwrap();
-            store.serialize_value(tags[2], &mut ser).unwrap();
+    fn test_arrow() {
+        #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+        struct TestStruct {
+            name: String,
+            data: u32,
         }
+        let mut store = ActionStore::<TestStruct>::new();
+        let tag = Tag::now(crate::Instant::now());
+        store.push(
+            tag,
+            Some(TestStruct {
+                name: "test".to_string(),
+                data: 42,
+            }),
+        );
 
-        println!("serialized: {}", String::from_utf8_lossy(&serialized));
+        let mut builder = store.new_builder().unwrap();
+        store.build_value_at(&mut builder, tag).unwrap();
+        store.build_value_at(&mut builder, tag.delay(None)).unwrap();
 
-        // Deserialize into a new store
-        let mut new_store = ActionStore::<u32>::new();
-        {
-            let mut deserializer = serde_json::Deserializer::from_slice(&serialized);
-            let mut des = Box::new(<dyn erased_serde::Deserializer>::erase(&mut deserializer));
-            new_store.deserialize_value(tags[1], &mut des).unwrap();
-        }
-
-        // Check that the deserialized value is correct
-        assert_eq!(new_store.get_current(tags[1]), Some(&20));
+        arrow::util::pretty::print_batches(&[builder.to_record_batch().unwrap()]).unwrap();
     }
 }

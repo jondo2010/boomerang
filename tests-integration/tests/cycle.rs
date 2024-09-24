@@ -1,74 +1,61 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use boomerang::{
-    builder::{Trigger, TypedPortKey, TypedReactionKey},
-    runtime, Reaction, Reactor,
-};
+use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
 
-#[derive(Clone, Reactor)]
-#[reactor(state = ())]
+#[derive(Reactor)]
+#[reactor(state = "()", reaction = "AReactionX")]
 struct ABuilder {
-    #[reactor(port = "input")]
-    x: TypedPortKey<()>,
-    #[reactor(port = "output")]
-    y: TypedPortKey<()>,
-    reaction_x1: TypedReactionKey<AReactionX<'static>>,
-    reaction_x2: TypedReactionKey<AReactionX<'static>>,
+    x: TypedPortKey<(), Input>,
+    y: TypedPortKey<(), Output>,
 }
 
 #[derive(Reaction)]
+#[reaction(reactor = "ABuilder")]
 struct AReactionX<'a> {
-    x: &'a runtime::Port<()>,
-    y: &'a mut runtime::Port<()>,
+    x: runtime::InputRef<'a, ()>,
+    y: runtime::OutputRef<'a, ()>,
 }
 
-impl<'a> Trigger for AReactionX<'a> {
-    type Reactor = ABuilder;
-    fn trigger(&mut self, ctx: &mut runtime::Context, state: &mut ()) {}
+impl<'a> Trigger<ABuilder> for AReactionX<'a> {
+    fn trigger(self, ctx: &mut runtime::Context, state: &mut ()) {}
 }
 
-#[derive(Clone, Reactor)]
-#[reactor(state = ())]
+#[derive(Reactor)]
+#[reactor(state = "()", reaction = "BReactionStartup", reaction = "BReactionX")]
 struct BBuilder {
-    #[reactor(port = "input")]
-    x: TypedPortKey<()>,
-    #[reactor(port = "output")]
-    y: TypedPortKey<()>,
-    reaction_x: TypedReactionKey<BReactionX>,
-    reaction_startup: TypedReactionKey<BReactionStartup<'static>>,
+    x: TypedPortKey<(), Input>,
+    y: TypedPortKey<(), Output>,
 }
 
 #[derive(Reaction)]
-#[reaction(triggers(port = "x"))]
+#[reaction(reactor = "BBuilder", triggers(port = "x"))]
 struct BReactionX;
 
-impl Trigger for BReactionX {
-    type Reactor = BBuilder;
-    fn trigger(&mut self, ctx: &mut runtime::Context, state: &mut ()) {}
+impl Trigger<BBuilder> for BReactionX {
+    fn trigger(self, ctx: &mut runtime::Context, state: &mut ()) {}
 }
 
 #[derive(Reaction)]
-#[reaction(triggers(startup))]
+#[reaction(reactor = "BBuilder", triggers(startup))]
 struct BReactionStartup<'a> {
-    y: &'a mut runtime::Port<()>,
+    y: runtime::OutputRef<'a, ()>,
 }
 
-impl Trigger for BReactionStartup<'_> {
-    type Reactor = BBuilder;
-    fn trigger(&mut self, ctx: &mut runtime::Context, state: &mut ()) {}
+impl Trigger<BBuilder> for BReactionStartup<'_> {
+    fn trigger(self, ctx: &mut runtime::Context, state: &mut ()) {}
 }
 
-#[derive(Clone, Reactor)]
+#[derive(Reactor)]
 #[reactor(
     state = "()",
     connection(from = "a.y", to = "b.x"),
     connection(from = "b.y", to = "a.x")
 )]
 struct CycleBuilder {
-    #[reactor(child = ())]
+    #[reactor(child = "()")]
     a: ABuilder,
-    #[reactor(child = ())]
+    #[reactor(child = "()")]
     b: BBuilder,
 }
 

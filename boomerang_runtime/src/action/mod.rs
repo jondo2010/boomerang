@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::Duration;
+use crate::{Duration, Tag};
 
 mod action_ref;
 mod store;
@@ -85,6 +85,25 @@ impl PhysicalAction {
             store: Arc::new(Mutex::new(store)),
         }
     }
+
+    /// Create a new Arrow ArrayBuilder for the data stored in this store
+    #[cfg(feature = "serde")]
+    pub fn new_builder(&self) -> Result<serde_arrow::ArrayBuilder, crate::RuntimeError> {
+        self.store.lock().expect("lock").new_builder()
+    }
+
+    /// Serialize the latest value in the store to the given `ArrayBuilder`.
+    #[cfg(feature = "serde")]
+    pub fn build_value_at(
+        &mut self,
+        builder: &mut serde_arrow::ArrayBuilder,
+        tag: Tag,
+    ) -> Result<(), crate::RuntimeError> {
+        self.store
+            .lock()
+            .expect("lock")
+            .build_value_at(builder, tag)
+    }
 }
 
 #[derive(Debug)]
@@ -114,7 +133,7 @@ impl Action {
         }
     }
 
-    pub fn as_physical(&self) -> Option<&PhysicalAction> {
+    pub fn as_physical(&mut self) -> Option<&mut PhysicalAction> {
         if let Self::Physical(v) = self {
             Some(v)
         } else {

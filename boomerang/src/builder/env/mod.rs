@@ -1,8 +1,8 @@
 use super::{
     action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder, ActionBuilderFn,
     ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
-    BuilderReactorKey, Logical, Physical, PortBuilder, PortType, ReactionBuilderState,
-    ReactorBuilder, ReactorBuilderState, TypedActionKey, TypedPortKey,
+    BuilderReactorKey, Input, Logical, Output, Physical, PortBuilder, PortType, PortType2,
+    ReactionBuilderState, ReactorBuilder, ReactorBuilderState, TypedActionKey, TypedPortKey,
 };
 use crate::runtime;
 use boomerang_runtime::Level;
@@ -83,9 +83,10 @@ impl EnvBuilder {
         &mut self,
         name: &str,
         parent: Option<BuilderReactorKey>,
+        bank_info: Option<runtime::BankInfo>,
         state: S,
     ) -> ReactorBuilderState {
-        ReactorBuilderState::new(name, parent, state, self)
+        ReactorBuilderState::new(name, parent, bank_info, state, self)
     }
 
     /// Get a previously built reactor
@@ -99,12 +100,31 @@ impl EnvBuilder {
         Ok(ReactorBuilderState::from_pre_existing(reactor_key, self))
     }
 
-    pub fn add_port<T: runtime::PortData>(
+    /// Add an Input port to the Reactor
+    pub fn add_input_port<T: runtime::PortData>(
         &mut self,
         name: &str,
-        port_type: PortType,
         reactor_key: BuilderReactorKey,
-    ) -> Result<TypedPortKey<T>, BuilderError> {
+    ) -> Result<TypedPortKey<T, Input>, BuilderError> {
+        self.internal_add_port::<T, Input>(name, reactor_key)
+            .map(From::from)
+    }
+
+    /// Add an Output port to the Reactor
+    pub fn add_output_port<T: runtime::PortData>(
+        &mut self,
+        name: &str,
+        reactor_key: BuilderReactorKey,
+    ) -> Result<TypedPortKey<T, Output>, BuilderError> {
+        self.internal_add_port::<T, Output>(name, reactor_key)
+            .map(From::from)
+    }
+
+    fn internal_add_port<T: runtime::PortData, Q: PortType2 + 'static>(
+        &mut self,
+        name: &str,
+        reactor_key: BuilderReactorKey,
+    ) -> Result<BuilderPortKey, BuilderError> {
         // Ensure no duplicates
         if self
             .port_builders
@@ -121,10 +141,10 @@ impl EnvBuilder {
             self.reactor_builders[reactor_key]
                 .ports
                 .insert(port_key, ());
-            Box::new(PortBuilder::<T>::new(name, reactor_key, port_type))
+            Box::new(PortBuilder::<T, Q>::new(name, reactor_key))
         });
 
-        Ok(TypedPortKey::new(key))
+        Ok(key)
     }
 
     pub fn add_startup_action(
@@ -249,8 +269,16 @@ impl EnvBuilder {
             .ok_or(BuilderError::ActionKeyNotFound(action_key))
     }
 
+    /// Get a previously built port
+    pub fn get_port(&self, port_key: BuilderPortKey) -> Result<&dyn BasePortBuilder, BuilderError> {
+        self.port_builders
+            .get(port_key)
+            .map(|builder| builder.as_ref())
+            .ok_or(BuilderError::PortKeyNotFound(port_key))
+    }
+
     /// Find a Port matching a given name and ReactorKey
-    pub fn get_port(
+    pub fn find_port_by_name(
         &self,
         port_name: &str,
         reactor_key: BuilderReactorKey,
@@ -344,15 +372,18 @@ impl EnvBuilder {
 
     /// Bind Port A to Port B
     /// The nominal case is to bind Input A to Output B
-    pub fn bind_port<P>(&mut self, port_a_key: P, port_b_key: P) -> Result<(), BuilderError>
+    pub fn bind_port<P1, P2>(&mut self, port_a_key: P1, port_b_key: P2) -> Result<(), BuilderError>
     where
-        P: Into<BuilderPortKey>,
+        P1: Into<BuilderPortKey>,
+        P2: Into<BuilderPortKey>,
     {
         let port_a_key = port_a_key.into();
         let port_b_key = port_b_key.into();
 
         let port_a_fqn = self.port_fqn(port_a_key)?;
         let port_b_fqn = self.port_fqn(port_b_key)?;
+
+        tracing::debug!("Binding ports: {port_a_fqn:?} -> {port_b_fqn:?}",);
 
         let port_a = &self.port_builders[port_a_key];
         let port_b = &self.port_builders[port_b_key];
@@ -406,14 +437,6 @@ impl EnvBuilder {
                         port_a_key,
                         port_b_key,
                         what: format!("An output port ({}) can only be bound to an input port ({}) if both ports belong to reactors in the same hierarichal level", port_a_fqn, port_b_fqn),
-                    })
-                }
-                // VALIDATE(this->container() != port->container(), );
-                else if port_a.get_reactor_key() == port_b.get_reactor_key() {
-                    Err(BuilderError::PortBindError{
-                        port_a_key,
-                        port_b_key,
-                        what: format!("An output port ({}) can only be bound to an input port ({}) if both ports belong to different reactors!", port_a_fqn, port_b_fqn),
                     })
                 }
                 else {
@@ -566,6 +589,7 @@ impl EnvBuilder {
                 .reactions
                 .keys()
                 .sorted_by_key(|&reaction_key| self.reaction_builders[reaction_key].priority)
+                .rev()
                 .tuple_windows()
         });
         deps.chain(internal)
@@ -613,6 +637,16 @@ impl EnvBuilder {
         // Transitive reduction and closures
         let toposort = petgraph::algo::toposort(&graph, None).map_err(|cycle_error| {
             // A Cycle was found in the reaction graph.
+
+            let res = petgraph::algo::astar(
+                &graph,
+                cycle_error.node_id(),
+                |finish| finish == cycle_error.node_id(),
+                |_| 1,
+                |_| 0,
+            );
+            dbg!(res);
+
             // let fas = petgraph::algo::greedy_feedback_arc_set(&graph);
             // let cycle = petgraph::prelude::DiGraphMap::<BuilderReactionKey, ()>::from_edges(fas);
             let cycle = util::find_minimal_cycle(&graph, cycle_error.node_id())

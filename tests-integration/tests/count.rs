@@ -1,53 +1,49 @@
-use boomerang::{builder::*, runtime, Reaction, Reactor};
+use boomerang::{
+    builder::*,
+    runtime::{self},
+    Reaction, Reactor,
+};
 use boomerang_util::timeout;
 
+trait CountData:
+    Copy + runtime::PortData + std::ops::AddAssign<i32> + std::cmp::PartialEq<i32>
+{
+}
+
+impl CountData for i32 {}
+
 #[derive(Reactor, Clone)]
-#[reactor(state = u32)]
-struct Count {
+#[reactor(state = "T", reaction = "ReactionT<T>", reaction = "ReactionShutdown")]
+struct Count<T: CountData> {
     #[reactor(timer(period = "1 msec"))]
     t: TimerActionKey,
-    #[reactor(port = "output")]
-    c: TypedPortKey<u32>,
+    c: TypedPortKey<T, Output>,
     #[reactor(child = runtime::Duration::from_secs(1))]
     _timeout: timeout::Timeout,
-    reaction_t: TypedReactionKey<ReactionT<'static>>,
-    reaction_shutdown: TypedReactionKey<ReactionShutdown>,
 }
 
 #[derive(Reaction)]
-#[reaction(triggers(action = "t"))]
-struct ReactionT<'a> {
+#[reaction(reactor = "Count::<T>", triggers(action = "t"))]
+struct ReactionT<'a, T: CountData> {
     #[reaction(path = "c")]
-    xyc: &'a mut runtime::Port<u32>,
+    xyc: runtime::OutputRef<'a, T>,
 }
 
-impl Trigger for ReactionT<'_> {
-    type Reactor = Count;
-
-    fn trigger(
-        &mut self,
-        _ctx: &mut runtime::Context,
-        state: &mut <Self::Reactor as Reactor>::State,
-    ) {
+impl<T: CountData> Trigger<Count<T>> for ReactionT<'_, T> {
+    fn trigger(mut self, _ctx: &mut runtime::Context, state: &mut <Count<T> as Reactor>::State) {
         *state += 1;
         assert!(self.xyc.is_none());
-        *self.xyc.get_mut() = Some(*state);
+        *self.xyc = Some(*state);
     }
 }
 
 #[derive(Reaction)]
-#[reaction(triggers(shutdown))]
+#[reaction(reactor = "Count::<T>", bound = "T: CountData", triggers(shutdown))]
 struct ReactionShutdown;
 
-impl Trigger for ReactionShutdown {
-    type Reactor = Count;
-
-    fn trigger(
-        &mut self,
-        _ctx: &mut runtime::Context,
-        state: &mut <Self::Reactor as Reactor>::State,
-    ) {
-        assert_eq!(*state, 1e3 as u32, "expected 1e3, got {state}");
+impl<T: CountData> Trigger<Count<T>> for ReactionShutdown {
+    fn trigger(self, _ctx: &mut runtime::Context, state: &mut <Count<T> as Reactor>::State) {
+        assert_eq!(*state, 1e3 as i32, "expected 1e3, got {state:?}");
         println!("ok");
     }
 }
@@ -56,11 +52,10 @@ impl Trigger for ReactionShutdown {
 fn count() {
     tracing_subscriber::fmt::init();
     let (_, env) =
-        boomerang_util::run::build_and_test_reactor::<Count>("count", 0, true, false).unwrap();
-
+        boomerang_util::run::build_and_test_reactor::<Count<i32>>("count", 0, true, false).unwrap();
     let count = env
         .get_reactor_by_name("count")
-        .and_then(|r| r.get_state::<u32>())
+        .and_then(|r| r.get_state::<i32>())
         .unwrap();
-    assert_eq!(*count, 1e3 as u32);
+    assert_eq!(*count, 1e3 as i32);
 }

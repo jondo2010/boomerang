@@ -4,6 +4,7 @@ use darling::{ast, FromDeriveInput, FromField, FromMeta};
 use quote::quote;
 use quote::ToTokens;
 use syn::Type;
+use syn::TypeArray;
 use syn::TypePath;
 
 use crate::util::OptionalDuration;
@@ -12,7 +13,6 @@ use crate::util::{extract_path_ident, handle_duration};
 const TIMER_ACTION_KEY: &str = "TimerActionKey";
 const TYPED_ACTION_KEY: &str = "TypedActionKey";
 const TYPED_PORT_KEY: &str = "TypedPortKey";
-const TYPED_REACTION_KEY: &str = "TypedReactionKey";
 const PHYSICAL_ACTION_KEY: &str = "PhysicalActionKey";
 
 #[derive(Default, Clone, Debug, FromMeta, PartialEq, Eq)]
@@ -74,8 +74,7 @@ pub enum ReactorFieldKind {
         period: Option<Duration>,
         offset: Option<Duration>,
     },
-    Input,
-    Output,
+    Port,
     Action {
         min_delay: Option<Duration>,
         policy: ActionAttrPolicy,
@@ -83,7 +82,6 @@ pub enum ReactorFieldKind {
     Child {
         state: syn::Expr,
     },
-    Reaction,
 }
 
 impl ToTokens for ReactorField {
@@ -97,11 +95,8 @@ impl ToTokens for ReactorField {
                 let offset = OptionalDuration(*offset);
                 quote! { let __inner = ::boomerang::builder::TimerSpec { period: #period, offset: #offset, }; }
             }
-            ReactorFieldKind::Input => {
-                quote! { let __inner = ::boomerang::builder::PortType::Input; }
-            },
-            ReactorFieldKind::Output => {
-                quote! { let __inner = ::boomerang::builder::PortType::Output; }
+            ReactorFieldKind::Port => {
+                quote! { let __inner = (); }
             },
             ReactorFieldKind::Action { min_delay, policy: _ } => {
                 let min_delay = OptionalDuration(*min_delay);
@@ -109,9 +104,6 @@ impl ToTokens for ReactorField {
             },
             ReactorFieldKind::Child { state } => {
                 quote! { let __inner = #state; }
-            }
-            ReactorFieldKind::Reaction => {
-                quote! { let __inner = __reactor.clone(); }
             }
         });
 
@@ -135,73 +127,58 @@ impl TryFrom<FieldReceiver> for ReactorField {
 
         // Heuristic to determine the field type based on the inner type and attributes
         match &ty {
-            Type::Path(TypePath { path: _, .. }) => match field_inner_type.to_string().as_ref() {
-                TIMER_ACTION_KEY => {
-                    let timer = value.timer.unwrap_or_default();
-                    Ok(ReactorField {
+            Type::Path(TypePath { path: _, .. }) | Type::Array(TypeArray { .. }) => {
+                match field_inner_type.to_string().as_ref() {
+                    TIMER_ACTION_KEY => {
+                        let timer = value.timer.unwrap_or_default();
+                        Ok(ReactorField {
+                            ident,
+                            name,
+                            ty,
+                            kind: ReactorFieldKind::Timer {
+                                period: timer.period,
+                                offset: timer.offset,
+                            },
+                        })
+                    }
+
+                    TYPED_ACTION_KEY | PHYSICAL_ACTION_KEY => {
+                        let min_delay = value.action.as_ref().and_then(|attr| attr.min_delay);
+                        let policy = value.action.as_ref().and_then(|attr| attr.policy.clone());
+                        Ok(ReactorField {
+                            ident,
+                            name,
+                            ty,
+                            kind: ReactorFieldKind::Action {
+                                min_delay,
+                                policy: policy.unwrap_or_default(),
+                            },
+                        })
+                    }
+
+                    TYPED_PORT_KEY => Ok(ReactorField {
                         ident,
                         name,
                         ty,
-                        kind: ReactorFieldKind::Timer {
-                            period: timer.period,
-                            offset: timer.offset,
+                        kind: ReactorFieldKind::Port,
+                    }),
+
+                    _ if matches!(value.child, Some(..)) => Ok(ReactorField {
+                        ident,
+                        name,
+                        ty,
+                        kind: ReactorFieldKind::Child {
+                            state: value.child.unwrap(),
                         },
-                    })
+                    }),
+
+                    _ => Err(darling::Error::custom("Unrecognized field type").with_span(&ident)),
                 }
-
-                TYPED_ACTION_KEY | PHYSICAL_ACTION_KEY => {
-                    //let action = value.action.unwrap_or_default();
-                    let min_delay = value.action.as_ref().and_then(|attr| attr.min_delay);
-                    let policy = value.action.as_ref().and_then(|attr| attr.policy.clone());
-                    Ok(ReactorField {
-                        ident,
-                        name,
-                        ty,
-                        kind: ReactorFieldKind::Action {
-                            min_delay,
-                            policy: policy.unwrap_or_default(),
-                        },
-                    })
-                }
-
-                TYPED_PORT_KEY => {
-                    let kind = match value.port {
-                        Some(PortAttr::Input) => ReactorFieldKind::Input,
-                        Some(PortAttr::Output) => ReactorFieldKind::Output,
-                        None => {
-                            return Err(darling::Error::custom("Port attribute must be specified")
-                                .with_span(&ty))
-                        }
-                    };
-                    Ok(ReactorField {
-                        ident,
-                        name,
-                        ty,
-                        kind,
-                    })
-                }
-
-                TYPED_REACTION_KEY => Ok(ReactorField {
-                    ident,
-                    name,
-                    ty,
-                    kind: ReactorFieldKind::Reaction,
-                }),
-
-                _ if matches!(value.child, Some(..)) => Ok(ReactorField {
-                    ident,
-                    name,
-                    ty,
-                    kind: ReactorFieldKind::Child {
-                        state: value.child.unwrap(),
-                    },
-                }),
-
-                _ => Err(darling::Error::custom("Unrecognized field type").with_span(&ident)),
-            },
+            }
 
             _ => Err(
-                darling::Error::custom("Unrecognized field type. Expected a path.").with_span(&ty),
+                darling::Error::custom("Unrecognized field type. Expected a Path or Array.")
+                    .with_span(&ty),
             ),
         }
     }
@@ -211,22 +188,108 @@ impl TryFrom<FieldReceiver> for ReactorField {
 pub struct ConnectionAttr {
     from: syn::Expr,
     to: syn::Expr,
+
+    #[darling(default)]
+    broadcast: bool,
+
     #[darling(default, map = "handle_duration")]
-    pub after: Option<Duration>,
+    after: Option<Duration>,
 }
 
-impl ToTokens for ConnectionAttr {
+#[derive(Debug, Eq, PartialEq)]
+struct PortDef {
+    parts: Vec<syn::Ident>,
+    transposed: bool,
+}
+
+struct Connection {
+    from: PortDef,
+    to: PortDef,
+    broadcast: bool,
+    after: Option<Duration>,
+}
+
+impl TryFrom<syn::Expr> for PortDef {
+    type Error = darling::Error;
+
+    fn try_from(expr: syn::Expr) -> Result<Self, Self::Error> {
+        match expr {
+            syn::Expr::Call(syn::ExprCall { func, args, .. }) => match func.as_ref() {
+                syn::Expr::Path(syn::ExprPath { path, .. })
+                    if path.get_ident().is_some_and(|p| *p == "transposed") && args.len() == 1 =>
+                {
+                    let mut idents = Vec::new();
+                    crate::util::expand_expr(&args[0], &mut idents)?;
+                    Ok(PortDef {
+                        parts: idents,
+                        transposed: true,
+                    })
+                }
+                _ => Err(darling::Error::custom("Expected 'transposed'").with_span(&func)),
+            },
+            _ => {
+                let mut idents = Vec::new();
+                crate::util::expand_expr(&expr, &mut idents)?;
+                Ok(PortDef {
+                    parts: idents,
+                    transposed: false,
+                })
+            }
+        }
+    }
+}
+
+impl TryFrom<ConnectionAttr> for Connection {
+    type Error = darling::Error;
+
+    fn try_from(value: ConnectionAttr) -> Result<Self, Self::Error> {
+        let from = value.from.try_into()?;
+        let to = value.to.try_into()?;
+
+        Ok(Self {
+            from,
+            to,
+            broadcast: value.broadcast,
+            after: value.after,
+        })
+    }
+}
+
+impl ToTokens for Connection {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
-        let from_port = &self.from;
-        let to_port = &self.to;
+        let port_output = |port_def: &PortDef| {
+            let flatten = if port_def.transposed {
+                quote! { .flatten_transposed() }
+            } else {
+                quote! { .flatten() }
+            };
+            let (first, rest) = port_def.parts.split_first().expect("empty");
+            let rest = rest.iter().map(|ident| {
+                quote! {
+                    .map(|child| child.#ident.iter()) #flatten
+                }
+            });
+
+            quote! {
+                __reactor.#first.iter()
+                #(#rest)*
+                .copied()
+            }
+        };
+
+        let from_port = port_output(&self.from);
+        let to_port = port_output(&self.to);
+        //let transpoed = self.transposed.then_some(quote! { .transpose() });
+        let broadcast = self.broadcast.then_some(quote! { .cycle() });
+
         tokens.extend(quote! {
-            __builder.bind_port(__reactor.#from_port, __reactor.#to_port)?;
+            __builder.bind_ports(#from_port #broadcast, #to_port)?;
         });
     }
 }
 
 #[derive(Debug, FromDeriveInput)]
-#[darling(attributes(reactor), supports(struct_named))]
+#[darling(attributes(reactor), supports(struct_named, struct_unit))]
 pub struct ReactorReceiver {
     pub ident: syn::Ident,
     pub generics: syn::Generics,
@@ -234,18 +297,28 @@ pub struct ReactorReceiver {
     pub data: ast::Data<darling::util::Ignored, FieldReceiver>,
     /// Type of the reactor state
     state: syn::Expr,
-    /// Connection definitions
+    /// Reaction declarations
+    #[darling(default, multiple, rename = "reaction")]
+    pub reactions: Vec<syn::Type>,
+    /// Connection declarations
     #[darling(default, multiple, rename = "connection")]
     pub connections: Vec<ConnectionAttr>,
 }
 
-impl ToTokens for ReactorReceiver {
-    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
-        let ident = &self.ident;
-        let state = &self.state;
-        let generics = &self.generics;
+pub struct Reactor {
+    ident: syn::Ident,
+    state: syn::Expr,
+    generics: syn::Generics,
+    fields: Vec<ReactorField>,
+    reactions: Vec<syn::Type>,
+    connections: Vec<Connection>,
+}
 
-        let fields = self
+impl TryFrom<ReactorReceiver> for Reactor {
+    type Error = darling::Error;
+
+    fn try_from(value: ReactorReceiver) -> Result<Self, Self::Error> {
+        let fields = value
             .data
             .as_ref()
             .take_struct()
@@ -254,60 +327,56 @@ impl ToTokens for ReactorReceiver {
             .into_iter()
             .cloned()
             .map(ReactorField::try_from)
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+            .collect::<Result<Vec<_>, _>>()?;
 
-        let non_reaction_fields = fields
-            .iter()
-            .filter(|field| !matches!(field.kind, ReactorFieldKind::Reaction));
+        let connections = value
+            .connections
+            .into_iter()
+            .map(Connection::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
 
-        let reaction_fields = fields
-            .iter()
-            .filter(|field| matches!(field.kind, ReactorFieldKind::Reaction));
+        Ok(Self {
+            ident: value.ident,
+            state: value.state,
+            generics: value.generics,
+            fields,
+            reactions: value.reactions,
+            connections,
+        })
+    }
+}
 
-        let field_idents = fields.iter().map(|field| {
-            let ident = &field.ident;
-            if let ReactorFieldKind::Reaction = field.kind {
-                quote! { #ident: Default::default() }
-            } else {
-                quote! { #ident }
-            }
-        });
-
-        let reaction_assignments = fields.iter().filter_map(|field| {
-            let ident = &field.ident;
-            if let ReactorFieldKind::Reaction = field.kind {
-                Some(quote! {
-                    __reactor.#ident = #ident;
-                })
-            } else {
-                None
-            }
-        });
-
+impl ToTokens for Reactor {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        let ident = &self.ident;
+        let state = &self.state;
+        let (impl_generics, type_generics, where_clause) = self.generics.split_for_impl();
+        let fields = &self.fields;
+        let field_idents = self.fields.iter().map(|field| &field.ident);
+        let reactions = &self.reactions;
         let connections = &self.connections;
 
         tokens.extend(quote! {
-            impl ::boomerang::builder::Reactor for #ident #generics {
+            impl #impl_generics ::boomerang::builder::Reactor for #ident #type_generics #where_clause{
                 type State = #state;
 
                 fn build<'__builder>(
                     name: &str,
                     state: Self::State,
                     parent: Option<::boomerang::builder::BuilderReactorKey>,
+                    bank_info: Option<::boomerang::runtime::BankInfo>,
                     env: &'__builder mut ::boomerang::builder::EnvBuilder,
                 ) -> Result<Self, ::boomerang::builder::BuilderError> {
-                    let mut __builder = env.add_reactor(name, parent, state);
+                    use ::boomerang::flatten_transposed::FlattenTransposedExt;
 
-                    #(#non_reaction_fields)*
+                    let mut __builder = env.add_reactor(name, parent, bank_info, state);
 
-                    let mut __reactor = Self {
-                        #(#field_idents),*
-                    };
+                    #(#fields)*
+                    let mut __reactor = Self { #(#field_idents),* };
 
-                    #(#reaction_fields)*
-
-                    #(#reaction_assignments)*
+                    #(let _ = <#reactions as ::boomerang::builder::Reaction<Self>>::build(
+                        stringify!(#reactions), &__reactor, &mut __builder)?.finish()?;
+                    )*
 
                     #(#connections)*
 
@@ -325,13 +394,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_connections() {
+        let input = r#"
+    #[derive(Reactor, Clone)]
+    #[reactor(
+        state = "MyType::Foo::<f32>",
+        connection(from = "transposed(a.b)", to = "c.d"),
+    )] struct Test {}"#;
+        let parsed = syn::parse_str(input).unwrap();
+        let receiver = ReactorReceiver::from_derive_input(&parsed).unwrap();
+        let reactor = Reactor::try_from(receiver).unwrap();
+        assert_eq!(
+            reactor.connections[0].from,
+            PortDef {
+                parts: vec![parse_quote! {a}, parse_quote! {b}],
+                transposed: true
+            }
+        );
+        assert_eq!(
+            reactor.connections[0].to,
+            PortDef {
+                parts: vec![parse_quote! {c}, parse_quote! {d}],
+                transposed: false
+            }
+        );
+    }
+
+    #[test]
     fn test_struct_attrs() {
         let input = r#"
 #[derive(Reactor, Clone)]
 #[reactor(
-    state = MyType::Foo::<f32>,
+    state = "MyType::Foo::<f32>",
+    connection(from = "a.b", to = "c.d"),
     connection(from = "inp", to = "gain.inp"),
     connection(from = "gain.out", to = "out", after = "1 usec"),
+    reaction = "Reaction1",
+    reaction = "Reaction2<WIDTH>"
 )]
 struct Test {}"#;
 
@@ -340,23 +439,36 @@ struct Test {}"#;
 
         assert_eq!(receiver.ident.to_string(), "Test");
         assert_eq!(receiver.state, parse_quote! {MyType::Foo::<f32>});
-        assert_eq!(receiver.connections.len(), 2);
         assert_eq!(
             receiver.connections[0],
             ConnectionAttr {
-                from: parse_quote! {inp},
-                to: parse_quote! {gain.inp},
+                from: parse_quote! {a.b},
+                to: parse_quote! {c.d},
+                broadcast: false,
                 after: None
             }
         );
         assert_eq!(
             receiver.connections[1],
             ConnectionAttr {
+                from: parse_quote! {inp},
+                to: parse_quote! {gain.inp},
+                broadcast: false,
+                after: None
+            }
+        );
+        assert_eq!(
+            receiver.connections[2],
+            ConnectionAttr {
                 from: parse_quote! {gain.out},
                 to: parse_quote! {out},
+                broadcast: false,
                 after: Some(Duration::from_micros(1))
             }
-        )
+        );
+        assert_eq!(receiver.reactions.len(), 2);
+        assert_eq!(receiver.reactions[0], parse_quote! {Reaction1});
+        assert_eq!(receiver.reactions[1], parse_quote! {Reaction2<WIDTH>});
     }
 
     #[test]
@@ -421,5 +533,17 @@ struct Count {
                 }
             }
         );
+    }
+
+    #[test]
+    fn test_arrays() {
+        let good_input = r#"
+            #[derive(Reactor, Clone)]
+            #[reactor(state = ())]
+            struct Test {
+                inp: [TypedPortKey<i32, Input>; 3],
+            }"#;
+        let parsed = syn::parse_str(good_input).unwrap();
+        let _receiver = ReactorReceiver::from_derive_input(&parsed).unwrap();
     }
 }

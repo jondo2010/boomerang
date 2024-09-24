@@ -4,7 +4,7 @@ use std::{
 };
 
 use super::{Action, ActionData, ActionKey, ActionStore, BaseActionStore};
-use crate::{InnerType, Tag};
+use crate::Tag;
 
 pub trait ActionRefValue<T: ActionData> {
     fn get_value(&mut self, tag: Tag) -> Option<T>;
@@ -36,10 +36,6 @@ impl<'a, T: ActionData> ActionRefValue<T> for ActionRef<'a, T> {
     fn get_key(&self) -> ActionKey {
         self.key
     }
-}
-
-impl<'a, T: ActionData> InnerType for ActionRef<'a, T> {
-    type Inner = T;
 }
 
 #[derive(Debug, Clone)]
@@ -74,10 +70,6 @@ impl<T: ActionData> ActionRefValue<T> for PhysicalActionRef<T> {
     fn get_key(&self) -> ActionKey {
         self.key
     }
-}
-
-impl<T: ActionData> InnerType for PhysicalActionRef<T> {
-    type Inner = T;
 }
 
 impl<'a, T: ActionData> From<&'a mut Action> for ActionRef<'a, T> {

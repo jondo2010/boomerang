@@ -4,22 +4,6 @@ use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
 use boomerang_util::timeout;
 use std::thread::JoinHandle;
 
-#[derive(Clone, Reactor)]
-#[reactor(state = State)]
-struct AsyncCallback {
-    #[reactor(timer(period = "200 msec"))]
-    t: TimerActionKey,
-
-    a: TypedActionKey<usize, Physical>,
-
-    reaction_t: TypedReactionKey<ReactionT>,
-    reaction_a: TypedReactionKey<ReactionA>,
-    reaction_shutdown: TypedReactionKey<ReactionShutdown>,
-
-    #[reactor(child = runtime::Duration::from_secs(2))]
-    _timeout: timeout::Timeout,
-}
-
 struct State {
     thread: Option<JoinHandle<()>>,
     expected_time: runtime::Duration,
@@ -27,20 +11,31 @@ struct State {
     i: usize,
 }
 
+#[derive(Clone, Reactor)]
+#[reactor(
+    state = "State",
+    reaction = "ReactionT",
+    reaction = "ReactionA",
+    reaction = "ReactionShutdown"
+)]
+struct AsyncCallback {
+    #[reactor(timer(period = "200 msec"))]
+    t: TimerActionKey,
+
+    a: TypedActionKey<usize, Physical>,
+
+    #[reactor(child = runtime::Duration::from_secs(2))]
+    _timeout: timeout::Timeout,
+}
+
 #[derive(Reaction)]
-#[reaction(triggers(action = "t"))]
+#[reaction(reactor = "AsyncCallback", triggers(action = "t"))]
 struct ReactionT {
     a: runtime::PhysicalActionRef<usize>,
 }
 
-impl Trigger for ReactionT {
-    type Reactor = AsyncCallback;
-
-    fn trigger(
-        &mut self,
-        ctx: &mut runtime::Context,
-        state: &mut <Self::Reactor as Reactor>::State,
-    ) {
+impl Trigger<AsyncCallback> for ReactionT {
+    fn trigger(self, ctx: &mut runtime::Context, state: &mut <AsyncCallback as Reactor>::State) {
         // make sure to join the old thread first
         if let Some(thread) = state.thread.take() {
             thread.join().unwrap();
@@ -62,17 +57,11 @@ impl Trigger for ReactionT {
 }
 
 #[derive(Reaction)]
-#[reaction(triggers(action = "a"))]
+#[reaction(reactor = "AsyncCallback", triggers(action = "a"))]
 struct ReactionA;
 
-impl Trigger for ReactionA {
-    type Reactor = AsyncCallback;
-
-    fn trigger(
-        &mut self,
-        ctx: &mut runtime::Context,
-        state: &mut <Self::Reactor as Reactor>::State,
-    ) {
+impl Trigger<AsyncCallback> for ReactionA {
+    fn trigger(self, ctx: &mut runtime::Context, state: &mut <AsyncCallback as Reactor>::State) {
         let elapsed_time = ctx.get_elapsed_logical_time();
         state.i += 1;
         eprintln!(
@@ -95,17 +84,11 @@ impl Trigger for ReactionA {
 }
 
 #[derive(Reaction)]
-#[reaction(triggers(shutdown))]
+#[reaction(reactor = "AsyncCallback", triggers(shutdown))]
 struct ReactionShutdown;
 
-impl Trigger for ReactionShutdown {
-    type Reactor = AsyncCallback;
-
-    fn trigger(
-        &mut self,
-        _ctx: &mut runtime::Context,
-        state: &mut <Self::Reactor as Reactor>::State,
-    ) {
+impl Trigger<AsyncCallback> for ReactionShutdown {
+    fn trigger(self, _ctx: &mut runtime::Context, state: &mut <AsyncCallback as Reactor>::State) {
         // make sure to join the thread before shutting down
         if state.thread.is_some() {
             std::mem::take(&mut state.thread).unwrap().join().unwrap();

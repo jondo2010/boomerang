@@ -19,8 +19,8 @@ pub use reactor::*;
 
 pub mod prelude {
     pub use super::{
-        BuilderError, BuilderFqn, EnvBuilder, Logical, Physical, Reactor, TimerActionKey, Trigger,
-        TypedActionKey, TypedPortKey, TypedReactionKey,
+        BuilderError, BuilderFqn, EnvBuilder, Input, Logical, Output, Physical, Reactor,
+        TimerActionKey, Trigger, TypedActionKey, TypedPortKey,
     };
 }
 
@@ -86,6 +86,9 @@ pub enum BuilderError {
 
     #[error("Invalid fully-qualified name: {0}")]
     InvalidFqn(String),
+
+    #[error("Internal Error: {0}")]
+    InternalError(String),
 
     #[error(transparent)]
     IoError(#[from] std::io::Error),

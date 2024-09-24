@@ -1,8 +1,7 @@
 use super::{
     ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
-    EnvBuilder, FindElements, Logical, Physical, PhysicalActionKey, PortType, Reaction,
+    EnvBuilder, FindElements, Input, Logical, Output, Physical, PhysicalActionKey, PortType2,
     ReactionBuilderState, TimerActionKey, TimerSpec, TriggerMode, TypedActionKey, TypedPortKey,
-    TypedReactionKey,
 };
 use crate::runtime;
 use slotmap::SecondaryMap;
@@ -21,15 +20,20 @@ impl petgraph::graph::GraphIndex for BuilderReactorKey {
     }
 }
 
-pub trait Reactor: Clone + Sized {
+pub trait Reactor: Sized {
     type State: runtime::ReactorState;
 
     fn build(
         name: &str,
         state: Self::State,
         parent: Option<BuilderReactorKey>,
+        bank_info: Option<runtime::BankInfo>,
         env: &mut EnvBuilder,
     ) -> Result<Self, BuilderError>;
+
+    fn iter(&self) -> impl Iterator<Item = &Self> {
+        std::iter::once(self)
+    }
 }
 
 /// This builder trait is implemented for fields in the Reactor struct.
@@ -44,20 +48,6 @@ pub trait ReactorField: Sized {
     ) -> Result<Self, BuilderError>;
 }
 
-impl<R: Reaction> ReactorField for TypedReactionKey<R> {
-    type Inner = R::Reactor;
-
-    fn build(
-        name: &str,
-        inner: Self::Inner,
-        parent: &'_ mut ReactorBuilderState,
-    ) -> Result<Self, BuilderError> {
-        let reaction = <R as Reaction>::build(name, &inner, parent)?;
-        let key = reaction.finish()?;
-        Ok(Self::new(key))
-    }
-}
-
 impl<R: Reactor> ReactorField for R {
     type Inner = R::State;
 
@@ -70,15 +60,67 @@ impl<R: Reactor> ReactorField for R {
     }
 }
 
-impl<T: runtime::PortData> ReactorField for TypedPortKey<T> {
-    type Inner = PortType;
+impl<R, const N: usize> ReactorField for [R; N]
+where
+    R: Reactor,
+    R::State: Clone,
+{
+    type Inner = R::State;
 
     fn build(
         name: &str,
         inner: Self::Inner,
         parent: &'_ mut ReactorBuilderState,
     ) -> Result<Self, BuilderError> {
-        parent.add_port(name, inner)
+        parent.add_child_reactors(name, inner)
+    }
+}
+
+impl<T: runtime::PortData> ReactorField for TypedPortKey<T, Input> {
+    type Inner = ();
+
+    fn build(
+        name: &str,
+        _inner: Self::Inner,
+        parent: &'_ mut ReactorBuilderState,
+    ) -> Result<Self, BuilderError> {
+        parent.add_input_port(name)
+    }
+}
+
+impl<T: runtime::PortData, const N: usize> ReactorField for [TypedPortKey<T, Input>; N] {
+    type Inner = ();
+
+    fn build(
+        name: &str,
+        _inner: Self::Inner,
+        parent: &'_ mut ReactorBuilderState,
+    ) -> Result<Self, BuilderError> {
+        parent.add_input_ports(name)
+    }
+}
+
+impl<T: runtime::PortData> ReactorField for TypedPortKey<T, Output> {
+    type Inner = ();
+
+    fn build(
+        name: &str,
+        _inner: Self::Inner,
+        parent: &'_ mut ReactorBuilderState,
+    ) -> Result<Self, BuilderError> {
+        parent.add_output_port(name)
+    }
+}
+
+impl<T: runtime::PortData, const N: usize> ReactorField for [TypedPortKey<T, Output>; N] {
+    type Inner = ();
+
+    fn build(
+        name: &str,
+        _inner: Self::Inner,
+        parent: &'_ mut ReactorBuilderState,
+    ) -> Result<Self, BuilderError> {
+        parent.add_output_ports(name)
     }
 }
 
@@ -148,6 +190,8 @@ pub(super) struct ReactorBuilder {
     pub ports: SecondaryMap<BuilderPortKey, ()>,
     /// Actions in this Reactor
     pub actions: SecondaryMap<BuilderActionKey, ()>,
+    /// The bank info of the bank that this Reactor belongs to, if any.
+    pub bank_info: Option<runtime::BankInfo>,
 }
 
 impl ReactorBuilder {
@@ -174,6 +218,7 @@ impl std::fmt::Debug for ReactorBuilder {
             .field("reactions", &self.reactions)
             .field("ports", &self.ports)
             .field("actions", &self.actions)
+            .field("bank_info", &self.bank_info)
             .finish()
     }
 }
@@ -189,7 +234,7 @@ pub struct ReactorBuilderState<'a> {
 
 impl<'a> FindElements for ReactorBuilderState<'a> {
     fn get_port_by_name(&self, port_name: &str) -> Result<BuilderPortKey, BuilderError> {
-        self.env.get_port(port_name, self.reactor_key)
+        self.env.find_port_by_name(port_name, self.reactor_key)
     }
 
     fn get_action_by_name(&self, action_name: &str) -> Result<BuilderActionKey, BuilderError> {
@@ -201,6 +246,7 @@ impl<'a> ReactorBuilderState<'a> {
     pub(super) fn new<S: runtime::ReactorState>(
         name: &str,
         parent: Option<BuilderReactorKey>,
+        bank_info: Option<runtime::BankInfo>,
         reactor_state: S,
         env: &'a mut EnvBuilder,
     ) -> Self {
@@ -214,6 +260,7 @@ impl<'a> ReactorBuilderState<'a> {
                 reactions: SecondaryMap::new(),
                 ports: SecondaryMap::new(),
                 actions: SecondaryMap::new(),
+                bank_info,
             }
         });
 
@@ -351,13 +398,46 @@ impl<'a> ReactorBuilderState<'a> {
         self.env.add_reaction(name, self.reactor_key, reaction_fn)
     }
 
-    /// Add a new port to this reactor.
-    pub fn add_port<T: runtime::PortData>(
+    /// Add a new input port to this reactor.
+    pub fn add_input_port<T: runtime::PortData>(
         &mut self,
         name: &str,
-        port_type: PortType,
-    ) -> Result<TypedPortKey<T>, BuilderError> {
-        self.env.add_port::<T>(name, port_type, self.reactor_key)
+    ) -> Result<TypedPortKey<T, Input>, BuilderError> {
+        self.env.add_input_port::<T>(name, self.reactor_key)
+    }
+
+    /// Adds a bus of input ports to this reactor.
+    pub fn add_input_ports<T: runtime::PortData, const N: usize>(
+        &mut self,
+        name: &str,
+    ) -> Result<[TypedPortKey<T, Input>; N], BuilderError> {
+        let mut ports = Vec::with_capacity(N);
+        for i in 0..N {
+            let port = self.add_input_port::<T>(&format!("{name}{i}"))?;
+            ports.push(port);
+        }
+        Ok(ports.try_into().expect("Error converting Vec to array"))
+    }
+
+    /// Add a new output port to this reactor.
+    pub fn add_output_port<T: runtime::PortData>(
+        &mut self,
+        name: &str,
+    ) -> Result<TypedPortKey<T, Output>, BuilderError> {
+        self.env.add_output_port::<T>(name, self.reactor_key)
+    }
+
+    /// Adds a bus of output port(s) to this reactor.
+    pub fn add_output_ports<T: runtime::PortData, const N: usize>(
+        &mut self,
+        name: &str,
+    ) -> Result<[TypedPortKey<T, Output>; N], BuilderError> {
+        let mut ports = Vec::with_capacity(N);
+        for i in 0..N {
+            let port = self.add_output_port::<T>(&format!("{name}{i}"))?;
+            ports.push(port);
+        }
+        Ok(ports.try_into().expect("Error converting Vec to array"))
     }
 
     /// Add a new child reactor to this reactor.
@@ -366,7 +446,33 @@ impl<'a> ReactorBuilderState<'a> {
         name: &str,
         state: R::State,
     ) -> Result<R, BuilderError> {
-        R::build(name, state, Some(self.reactor_key), self.env)
+        R::build(name, state, Some(self.reactor_key), None, self.env)
+    }
+
+    /// Add multiple child reactors to this reactor.
+    pub fn add_child_reactors<R, const N: usize>(
+        &mut self,
+        name: &str,
+        state: R::State,
+    ) -> Result<[R; N], BuilderError>
+    where
+        R: Reactor,
+        R::State: Clone,
+    {
+        let reactors = (0..N)
+            .map(|i| {
+                R::build(
+                    &format!("{name}{i}"),
+                    state.clone(),
+                    Some(self.reactor_key),
+                    Some(runtime::BankInfo { idx: i, total: N }),
+                    self.env,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        reactors
+            .try_into()
+            .map_err(|_| BuilderError::InternalError("Error converting Vec to array".to_owned()))
     }
 
     /// Add a new child reactor using a closure to build it.
@@ -379,12 +485,24 @@ impl<'a> ReactorBuilderState<'a> {
 
     /// Bind 2 ports on this reactor. This has the logical meaning of "connecting" `port_a` to
     /// `port_b`.
-    pub fn bind_port<T: runtime::PortData>(
+    pub fn bind_port<T: runtime::PortData, Q1: PortType2, Q2: PortType2>(
         &mut self,
-        port_a_key: TypedPortKey<T>,
-        port_b_key: TypedPortKey<T>,
+        port_a_key: TypedPortKey<T, Q1>,
+        port_b_key: TypedPortKey<T, Q2>,
     ) -> Result<(), BuilderError> {
         self.env.bind_port(port_a_key, port_b_key)
+    }
+
+    /// Bind multiple ports on this reactor. This has the logical meaning of "connecting" `ports_from` to `ports_to`.
+    pub fn bind_ports<T: runtime::PortData, Q1: PortType2, Q2: PortType2>(
+        &mut self,
+        ports_from: impl Iterator<Item = TypedPortKey<T, Q1>>,
+        ports_to: impl Iterator<Item = TypedPortKey<T, Q2>>,
+    ) -> Result<(), BuilderError> {
+        for (port_from, port_to) in ports_from.zip(ports_to) {
+            self.env.bind_port(port_from, port_to)?;
+        }
+        Ok(())
     }
 
     pub fn finish(self) -> Result<BuilderReactorKey, BuilderError> {

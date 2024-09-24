@@ -21,12 +21,12 @@ struct Args {
     fast_forward: bool,
 
     /// The filename to serialize recorded actions into
-    #[cfg(feature = "rec_replay")]
+    #[cfg(feature = "replay")]
     #[arg(long, value_hint = clap::ValueHint::FilePath)]
     record_filename: Option<std::path::PathBuf>,
 
     /// The list of fully-qualified actions to record, e.g., "snake::keyboard::key_press"
-    #[cfg(feature = "rec_replay")]
+    #[cfg(feature = "replay")]
     #[arg(long)]
     record_actions: Vec<String>,
 }
@@ -39,7 +39,7 @@ pub fn build_and_test_reactor<R: Reactor>(
     keep_alive: bool,
 ) -> anyhow::Result<(R, runtime::Env)> {
     let mut env_builder = EnvBuilder::new();
-    let reactor = R::build(name, state, None, &mut env_builder)
+    let reactor = R::build(name, state, None, None, &mut env_builder)
         .context("Error building top-level reactor!")?;
     let (mut env, triggers, _) = env_builder
         .into_runtime_parts()
@@ -54,12 +54,12 @@ pub fn build_and_test_reactor<R: Reactor>(
 pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow::Result<R> {
     // build the reactor
     let mut env_builder = EnvBuilder::new();
-    let reactor = R::build(name, state, None, &mut env_builder)
+    let reactor = R::build(name, state, None, None, &mut env_builder)
         .context("Error building top-level reactor!")?;
 
     let args = Args::parse();
 
-    #[cfg(feature = "rec_replay")]
+    #[cfg(feature = "replay")]
     if let Some(filename) = args.record_filename {
         tracing::info!("Recording actions to {filename:?}");
         crate::replay::inject_recorder(

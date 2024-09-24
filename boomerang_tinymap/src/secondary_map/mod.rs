@@ -7,6 +7,10 @@ use std::{
 
 use super::Key;
 
+mod iter_many;
+
+pub use iter_many::IterManyMut;
+
 #[derive(Clone)]
 pub struct TinySecondaryMap<K: Key, V> {
     data: Vec<Option<V>>,

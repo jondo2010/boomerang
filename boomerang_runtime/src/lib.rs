@@ -4,6 +4,7 @@ mod env;
 mod event;
 pub mod keepalive;
 mod key_set;
+mod partition;
 mod port;
 mod reaction;
 mod reactor;
@@ -15,6 +16,7 @@ pub use action::*;
 pub use context::*;
 pub use env::*;
 pub use key_set::KeySetLimits as ReactionSetLimits;
+pub use partition::{partition, partition_mut, Partition, PartitionMut};
 pub use port::*;
 pub use reaction::*;
 pub use reactor::*;
@@ -26,21 +28,23 @@ pub use std::time::{Duration, Instant};
 pub trait PortData: std::fmt::Debug + Send + Sync + 'static {}
 impl<T> PortData for T where T: std::fmt::Debug + Send + Sync + 'static {}
 
-/// Used to get access to the inner type from Port, Action, etc.
-pub trait InnerType {
-    type Inner: PortData;
-}
-
-#[derive(thiserror::Error, Debug, Eq, PartialEq)]
+#[derive(thiserror::Error, Debug)]
 pub enum RuntimeError {
     #[error("Port Key not found: {}", 0)]
     PortKeyNotFound(PortKey),
 
-    #[error("Mismatched Dynamic Types found {} but wanted {}", found, wanted)]
+    #[error("Mismatched Dynamic Types found {found} but wanted {wanted}")]
     TypeMismatch {
         found: &'static str,
         wanted: &'static str,
     },
+
+    #[cfg(feature = "serde")]
+    #[error("Serialization error: {0}")]
+    SerializationError(#[from] serde_arrow::Error),
+
+    #[error("Destructuring error")]
+    DestrError,
 }
 
 pub mod fmt_utils {

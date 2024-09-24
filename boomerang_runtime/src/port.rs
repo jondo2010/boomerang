@@ -1,14 +1,14 @@
-use downcast_rs::{impl_downcast, DowncastSync};
+use downcast_rs::{impl_downcast, Downcast};
 use std::{
     fmt::{Debug, Display},
     ops::{Deref, DerefMut},
 };
 
-use crate::{InnerType, PortData};
+use crate::PortData;
 
 tinymap::key_type!(pub PortKey);
 
-pub trait BasePort: Debug + Display + Send + Sync + DowncastSync {
+pub trait BasePort: Debug + Display + Send + Sync + Downcast {
     /// Get the name of this port
     fn get_name(&self) -> &str;
 
@@ -24,7 +24,7 @@ pub trait BasePort: Debug + Display + Send + Sync + DowncastSync {
     /// Get the internal type name str
     fn type_name(&self) -> &'static str;
 }
-impl_downcast!(sync BasePort);
+impl_downcast!(BasePort);
 
 #[derive(Debug)]
 pub struct Port<T: PortData> {
@@ -55,10 +55,6 @@ impl<T: PortData> DerefMut for Port<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.value
     }
-}
-
-impl<T: PortData> InnerType for Port<T> {
-    type Inner = T;
 }
 
 impl<T> Port<T>
@@ -104,5 +100,63 @@ where
 
     fn type_name(&self) -> &'static str {
         std::any::type_name::<T>()
+    }
+}
+
+pub struct InputRef<'a, T: PortData = ()>(&'a Port<T>);
+
+impl<'a, T: PortData> InputRef<'a, T> {
+    pub fn name(&self) -> &str {
+        self.0.get_name()
+    }
+
+    pub fn key(&self) -> PortKey {
+        self.0.get_key()
+    }
+}
+
+impl<'a, T: PortData> From<&'a Port<T>> for InputRef<'a, T> {
+    fn from(port: &'a Port<T>) -> Self {
+        Self(port)
+    }
+}
+
+impl<'a, T: PortData> Deref for InputRef<'a, T> {
+    type Target = <Port<T> as Deref>::Target;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.deref()
+    }
+}
+
+pub struct OutputRef<'a, T: PortData = ()>(&'a mut Port<T>);
+
+impl<'a, T: PortData> OutputRef<'a, T> {
+    pub fn name(&self) -> &str {
+        self.0.get_name()
+    }
+
+    pub fn key(&self) -> PortKey {
+        self.0.get_key()
+    }
+}
+
+impl<'a, T: PortData> From<&'a mut Port<T>> for OutputRef<'a, T> {
+    fn from(port: &'a mut Port<T>) -> Self {
+        Self(port)
+    }
+}
+
+impl<'a, T: PortData> Deref for OutputRef<'a, T> {
+    type Target = <Port<T> as Deref>::Target;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.deref()
+    }
+}
+
+impl<'a, T: PortData> DerefMut for OutputRef<'a, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.deref_mut()
     }
 }

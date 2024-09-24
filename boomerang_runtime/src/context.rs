@@ -1,8 +1,8 @@
 use crossbeam_channel::Sender;
 
 use crate::{
-    event::PhysicalEvent, keepalive, ActionData, ActionKey, ActionRefValue, Duration, Instant,
-    PhysicalActionRef, Tag,
+    event::PhysicalEvent, keepalive, ActionData, ActionKey, ActionRefValue, BankInfo, Duration,
+    Instant, PhysicalActionRef, Tag,
 };
 
 /// Result from a reaction trigger
@@ -21,6 +21,8 @@ pub struct Context {
     pub(crate) start_time: Instant,
     /// Logical time of the currently executing epoch
     pub(crate) tag: Tag,
+    /// Bank index and node count for a multi-bank reactor
+    pub(crate) bank_info: Option<BankInfo>,
 
     /// Channel for asynchronous events
     pub(crate) async_tx: Sender<PhysicalEvent>,
@@ -34,13 +36,14 @@ pub struct Context {
 impl Context {
     pub(crate) fn new(
         start_time: Instant,
-        tag: Tag,
+        bank_info: Option<BankInfo>,
         async_tx: Sender<PhysicalEvent>,
         shutdown_rx: keepalive::Receiver,
     ) -> Self {
         Self {
             start_time,
-            tag,
+            tag: Tag::now(start_time),
+            bank_info,
             async_tx,
             shutdown_rx,
             trigger_res: TriggerRes {
@@ -48,6 +51,22 @@ impl Context {
                 scheduled_shutdown: None,
             },
         }
+    }
+
+    pub(crate) fn reset_for_reaction(&mut self, tag: Tag) {
+        self.tag = tag;
+        self.trigger_res.scheduled_actions.clear();
+        self.trigger_res.scheduled_shutdown = None;
+    }
+
+    /// Get the bank index for a multi-bank reactor
+    pub fn get_bank_index(&self) -> Option<usize> {
+        self.bank_info.as_ref().map(|BankInfo { idx, .. }| *idx)
+    }
+
+    /// Get the number of nodes in a multi-bank reactor
+    pub fn get_bank_total(&self) -> Option<usize> {
+        self.bank_info.as_ref().map(|BankInfo { total, .. }| *total)
     }
 
     pub fn get_start_time(&self) -> Instant {

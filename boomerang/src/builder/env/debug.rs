@@ -58,16 +58,17 @@ impl Debug for EnvBuilder {
                 .iter()
                 .map(|(key, level)| {
                     let fqn = self.reaction_fqn(key).unwrap();
-                    (format!("{key:?}, {fqn}"), format!("Level({level})"))
+                    (format!("{key:?}, prio:{fqn}"), format!("Level({level})"))
                 })
                 .collect::<BTreeMap<_, _>>()
         } else {
             // There was a cycle in the reaction graph, so don't show the reaction levels.
             self.reaction_builders
-                .keys()
-                .map(|key| {
+                .iter()
+                .map(|(key, builder)| {
                     let fqn = self.reaction_fqn(key).unwrap();
-                    (format!("{key:?}"), fqn.to_string())
+                    let priority = builder.get_priority();
+                    (format!("{key:?}, {priority}"), fqn.to_string())
                 })
                 .collect::<BTreeMap<_, _>>()
         };

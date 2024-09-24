@@ -5,7 +5,7 @@ use darling::{
     util, FromDeriveInput, FromField, FromMeta,
 };
 use quote::{quote, ToTokens};
-use syn::{Expr, Generics, Ident, Type};
+use syn::{Expr, GenericParam, Generics, Ident, Type};
 
 mod reaction_field_inner;
 mod trigger_inner;
@@ -13,7 +13,8 @@ mod trigger_inner;
 use reaction_field_inner::ReactionFieldInner;
 use trigger_inner::TriggerInner;
 
-const PORT: &str = "Port";
+const INPUT_REF: &str = "InputRef";
+const OUTPUT_REF: &str = "OutputRef";
 const ACTION: &str = "Action";
 const ACTION_REF: &str = "ActionRef";
 const PHYSICAL_ACTION_REF: &str = "PhysicalActionRef";
@@ -86,20 +87,48 @@ pub struct ReactionField {
     path: Option<Expr>,
 }
 
+fn parse_bound(item: &syn::Meta) -> Result<syn::GenericParam, darling::Error> {
+    match item {
+        syn::Meta::NameValue(syn::MetaNameValue { value, .. }) => match value {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(lit_str),
+                ..
+            }) => syn::parse_str(lit_str.value().as_str())
+                .map_err(|e| darling::Error::custom(format!("Failed to parse bound: {}", e))),
+
+            _ => Err(darling::Error::unsupported_shape(
+                "Only string literals are supported",
+            )),
+        },
+        _ => Err(darling::Error::unsupported_shape(
+            "Only name value pairs are supported",
+        )),
+    }
+}
+
 #[derive(Debug, FromDeriveInput)]
 #[darling(attributes(reaction), supports(struct_named, struct_unit))]
 pub struct ReactionReceiver {
     ident: Ident,
     generics: Generics,
     data: ast::Data<util::Ignored, ReactionField>,
+
+    /// Type of the reactor
+    reactor: syn::Type,
+
+    #[darling(default, multiple, rename = "bound", with = "parse_bound")]
+    bounds: Vec<syn::GenericParam>,
+
     /// Connection definitions
     #[darling(default, multiple)]
-    pub triggers: Vec<TriggerAttr>,
+    triggers: Vec<TriggerAttr>,
 }
 
 pub struct Reaction {
     ident: Ident,
     generics: Generics,
+    combined_generics: Generics,
+    reactor: Type,
     fields: Vec<ReactionFieldInner>,
     inner: TriggerInner,
     /// Whether the reaction has a startup trigger
@@ -112,7 +141,13 @@ impl TryFrom<ReactionReceiver> for Reaction {
     type Error = darling::Error;
 
     fn try_from(value: ReactionReceiver) -> Result<Self, Self::Error> {
-        let inner = TriggerInner::new(&value)?;
+        // Combine the bounds with the generics
+        let mut combined_generics = value.generics.clone();
+        combined_generics
+            .params
+            .extend(value.bounds.iter().cloned().map(GenericParam::from));
+
+        let inner = TriggerInner::new(&value, &combined_generics)?;
 
         let fields = value
             .data
@@ -219,6 +254,8 @@ impl TryFrom<ReactionReceiver> for Reaction {
         Ok(Self {
             ident: value.ident,
             generics: value.generics,
+            combined_generics,
+            reactor: value.reactor,
             fields,
             inner,
             trigger_startup,
@@ -230,9 +267,22 @@ impl TryFrom<ReactionReceiver> for Reaction {
 impl ToTokens for Reaction {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
         let ident = &self.ident;
-        let generics = &self.generics;
+        let reactor = &self.reactor;
         let struct_fields = &self.fields;
         let trigger_inner = &self.inner;
+
+        // We use impl_generics from `combined_generics` to allow additional bounds to be added, but type and where come
+        // from the original generics
+        let (impl_generics, _, _) = self.combined_generics.split_for_impl();
+        let (_, type_generics, where_clause) = self.generics.split_for_impl();
+        let inner_type_generics = {
+            let g = self
+                .combined_generics
+                .const_params()
+                .map(|ty| &ty.ident)
+                .chain(self.combined_generics.type_params().map(|ty| &ty.ident));
+            quote! { ::<#(#g),*> }
+        };
 
         let trigger_startup = if self.trigger_startup {
             quote! {
@@ -260,10 +310,10 @@ impl ToTokens for Reaction {
 
         tokens.extend(quote! {
             #[automatically_derived]
-            impl #generics ::boomerang::builder::Reaction for #ident #generics {
+            impl #impl_generics ::boomerang::builder::Reaction<#reactor> for #ident #type_generics #where_clause {
                 fn build<'builder>(
                     name: &str,
-                    reactor: &Self::Reactor,
+                    reactor: &#reactor,
                     builder: &'builder mut ::boomerang::builder::ReactorBuilderState,
                 ) -> Result<
                     ::boomerang::builder::ReactionBuilderState<'builder>,
@@ -273,7 +323,11 @@ impl ToTokens for Reaction {
                     #trigger_inner
                     let __startup_action = builder.get_startup_action();
                 let __shutdown_action = builder.get_shutdown_action();
-                    let mut __reaction = builder.add_reaction(name, Box::new(__trigger_inner));
+                    let mut __reaction = builder.add_reaction(
+                        name,
+                        Box::new(__trigger_inner #inner_type_generics)
+                    );
+
                     #trigger_startup
                     #trigger_shutdown
                     #(#struct_fields;)*
@@ -286,7 +340,7 @@ impl ToTokens for Reaction {
 
 #[cfg(test)]
 mod tests {
-    use syn::parse_quote;
+    use syn::{parse_quote, DeriveInput};
 
     use super::*;
 
@@ -295,14 +349,25 @@ mod tests {
         let input = r#"
 #[derive(Reaction)]
 #[reaction(
+    reactor = "Inner::Count<T>",
+    bound = "T: runtime::PortData",
+    bound = "const N: usize",
     triggers(action = "x"),
     triggers(port = "child.y"),
     triggers(startup),
-    triggers(shutdown)
+    triggers(shutdown),
 )]
 struct ReactionT;"#;
-        let parsed = syn::parse_str(input).unwrap();
+        let parsed: DeriveInput = syn::parse_str(input).unwrap();
         let receiver = ReactionReceiver::from_derive_input(&parsed).unwrap();
+        assert_eq!(receiver.reactor, parse_quote! {Inner::Count<T>});
+        assert_eq!(
+            receiver.bounds,
+            vec![
+                parse_quote! {T: runtime::PortData},
+                parse_quote! {const N: usize}
+            ]
+        );
         assert_eq!(
             receiver.triggers.iter().collect::<Vec<_>>(),
             vec![
@@ -318,13 +383,14 @@ struct ReactionT;"#;
     fn test_port_fields() {
         let input = r#"
 #[derive(Reaction)]
+#[reaction(reactor = "Foo")]
 struct ReactionT<'a> {
-    ref_port: &'a runtime::Port<()>,
-    mut_port: &'a mut runtime::Port<()>,
+    ref_port: runtime::InputRef<'a, ()>,
+    mut_port: runtime::OutputRef<'a, ()>,
     #[reaction(uses)]
-    uses_only_port: &'a runtime::Port<()>,
+    uses_only_port: runtime::InputRef<'a, ()>,
     #[reaction(path = "child.y.z")]
-    renamed_port: &'a mut runtime::Port<u32>,
+    renamed_port: runtime::OutputRef<'a, u32>,
 }"#;
 
         let parsed = syn::parse_str(input).unwrap();
@@ -333,7 +399,7 @@ struct ReactionT<'a> {
         assert_eq!(
             reaction.fields[0],
             ReactionFieldInner::FieldDefined {
-                elem: parse_quote! {runtime::Port<()>},
+                elem: parse_quote! {runtime::InputRef<'a, ()>},
                 triggers: true,
                 effects: false,
                 uses: true,
@@ -343,7 +409,7 @@ struct ReactionT<'a> {
         assert_eq!(
             reaction.fields[1],
             ReactionFieldInner::FieldDefined {
-                elem: parse_quote! {runtime::Port<()>},
+                elem: parse_quote! {runtime::OutputRef<'a, ()>},
                 triggers: false,
                 effects: true,
                 uses: false,
@@ -353,7 +419,7 @@ struct ReactionT<'a> {
         assert_eq!(
             reaction.fields[2],
             ReactionFieldInner::FieldDefined {
-                elem: parse_quote! {runtime::Port<()>},
+                elem: parse_quote! {runtime::InputRef<'a, ()>},
                 triggers: false,
                 effects: false,
                 uses: true,
@@ -363,7 +429,7 @@ struct ReactionT<'a> {
         assert_eq!(
             reaction.fields[3],
             ReactionFieldInner::FieldDefined {
-                elem: parse_quote! {runtime::Port<u32>},
+                elem: parse_quote! {runtime::OutputRef<'a, u32>},
                 triggers: false,
                 effects: true,
                 uses: false,
@@ -376,8 +442,8 @@ struct ReactionT<'a> {
     fn test_action_fields() {
         let input = r#"
 #[derive(Reaction)]
+#[reaction(reactor = "Foo")]
 struct ReactionT<'a> {
-    //act: runtime::ActionRef<'a, i32>,
     #[reaction(triggers)]
     raw_action: &'a runtime::Action,
 }"#;

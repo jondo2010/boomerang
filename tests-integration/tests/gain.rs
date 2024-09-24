@@ -1,63 +1,56 @@
 // Example in the Wiki.
 
-use boomerang::{
-    builder::{TimerActionKey, Trigger, TypedPortKey, TypedReactionKey},
-    runtime, Reaction, Reactor,
-};
+use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
 
 struct Scale(u32);
 
-#[derive(Clone, Reactor)]
-#[reactor(state = Scale)]
+#[derive(Reactor)]
+#[reactor(state = "Scale", reaction = "ScaleReactionX")]
 struct ScaleBuilder {
-    #[reactor(port = "input")]
-    x: TypedPortKey<u32>,
-    #[reactor(port = "output")]
-    y: TypedPortKey<u32>,
-    reaction_x: TypedReactionKey<ScaleReactionX<'static>>,
+    x: TypedPortKey<u32, Input>,
+    y: TypedPortKey<u32, Output>,
 }
 
 #[derive(Reaction)]
+#[reaction(reactor = "ScaleBuilder")]
 struct ScaleReactionX<'a> {
-    x: &'a runtime::Port<u32>,
-    y: &'a mut runtime::Port<u32>,
+    x: runtime::InputRef<'a, u32>,
+    y: runtime::OutputRef<'a, u32>,
 }
 
-impl Trigger for ScaleReactionX<'_> {
-    type Reactor = ScaleBuilder;
-    fn trigger(&mut self, _ctx: &mut runtime::Context, state: &mut Scale) {
-        *self.y.get_mut() = Some(state.0 * self.x.get().unwrap());
+impl Trigger<ScaleBuilder> for ScaleReactionX<'_> {
+    fn trigger(mut self, _ctx: &mut runtime::Context, state: &mut Scale) {
+        *self.y = Some(state.0 * self.x.unwrap());
     }
 }
 
-#[derive(Clone, Reactor)]
-#[reactor(state = ())]
+#[derive(Reactor)]
+#[reactor(state = "()", reaction = "TestReactionX")]
 struct TestBuilder {
-    #[reactor(port = "input")]
-    x: TypedPortKey<u32>,
-    reaction_x: TypedReactionKey<TestReactionX<'static>>,
+    x: TypedPortKey<u32, Input>,
 }
 
 #[derive(Reaction)]
+#[reaction(reactor = "TestBuilder")]
 struct TestReactionX<'a> {
-    x: &'a runtime::Port<u32>,
+    x: runtime::InputRef<'a, u32>,
 }
 
-impl Trigger for TestReactionX<'_> {
-    type Reactor = TestBuilder;
-    fn trigger(&mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
-        println!("Received {:?}", self.x.get());
-        assert_eq!(*self.x.get(), Some(2), "Expected Some(2)!");
+impl Trigger<TestBuilder> for TestReactionX<'_> {
+    fn trigger(self, _ctx: &mut runtime::Context, _state: &mut ()) {
+        println!("Received {:?}", *self.x);
+        assert_eq!(*self.x, Some(2), "Expected Some(2)!");
     }
 }
 
-#[derive(Clone, Reactor)]
+#[derive(Reactor)]
 #[reactor(
-    state = (),
+    state = "()",
+    reaction = "GainReactionTim",
     connection(from = "g.y", to = "t.x")
 )]
 struct GainBuilder {
-    #[reactor(child= Scale(2))]
+    #[reactor(child = "Scale(2)")]
     g: ScaleBuilder,
 
     #[reactor(child = ())]
@@ -66,21 +59,18 @@ struct GainBuilder {
 
     #[reactor(timer())]
     tim: TimerActionKey,
-
-    reaction_tim: TypedReactionKey<GainReactionTim<'static>>,
 }
 
 #[derive(Reaction)]
-#[reaction(triggers(action = "tim"))]
+#[reaction(reactor = "GainBuilder", triggers(action = "tim"))]
 struct GainReactionTim<'a> {
     #[reaction(path = "g.x")]
-    g_x: &'a mut runtime::Port<u32>,
+    g_x: runtime::OutputRef<'a, u32>,
 }
 
-impl Trigger for GainReactionTim<'_> {
-    type Reactor = GainBuilder;
-    fn trigger(&mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
-        *self.g_x.get_mut() = Some(1);
+impl Trigger<GainBuilder> for GainReactionTim<'_> {
+    fn trigger(mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
+        *self.g_x = Some(1);
     }
 }
 

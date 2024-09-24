@@ -13,42 +13,42 @@ struct State {
 }
 
 #[derive(Clone, Reactor)]
-#[reactor(state = State)]
+#[reactor(
+    state = "State",
+    reaction = "ReactionStartup",
+    reaction = "ReactionA",
+    reaction = "ReactionShutdown"
+)]
 struct SlowingClockPhysical {
     #[reactor(action(min_delay = "100 msec"))]
     a: TypedActionKey<(), Physical>,
 
-    startup: TypedReactionKey<ReactionStartup>,
-    reaction_a: TypedReactionKey<ReactionA>,
-    shutdown: TypedReactionKey<ReactionShutdown>,
-
-    #[reactor(child = runtime::Duration::from_millis(1500))]
+    #[reactor(child = "runtime::Duration::from_millis(1500)")]
     _timeout: timeout::Timeout,
 }
 
 #[derive(Reaction)]
-#[reaction(triggers(startup))]
+#[reaction(reactor = "SlowingClockPhysical", triggers(startup))]
 struct ReactionStartup {
     a: runtime::PhysicalActionRef,
 }
 
-impl Trigger for ReactionStartup {
-    type Reactor = SlowingClockPhysical;
-    fn trigger(&mut self, ctx: &mut runtime::Context, state: &mut State) {
+impl Trigger<SlowingClockPhysical> for ReactionStartup {
+    fn trigger(mut self, ctx: &mut runtime::Context, state: &mut State) {
         state.expected_time = runtime::Duration::from_millis(100);
         ctx.schedule_action(&mut self.a, None, None);
     }
 }
 
 #[derive(Reaction)]
+#[reaction(reactor = "SlowingClockPhysical")]
 struct ReactionA {
     #[reaction(triggers)]
     a: runtime::PhysicalActionRef,
 }
 
-impl Trigger for ReactionA {
-    type Reactor = SlowingClockPhysical;
-    fn trigger(&mut self, ctx: &mut runtime::Context, state: &mut State) {
+impl Trigger<SlowingClockPhysical> for ReactionA {
+    fn trigger(mut self, ctx: &mut runtime::Context, state: &mut State) {
         let elapsed_logical_time = ctx.get_elapsed_logical_time();
         println!("Logical time since start: {elapsed_logical_time:?}");
         assert!(
@@ -67,12 +67,11 @@ impl Trigger for ReactionA {
 }
 
 #[derive(Reaction)]
-#[reaction(triggers(shutdown))]
+#[reaction(reactor = "SlowingClockPhysical", triggers(shutdown))]
 struct ReactionShutdown;
 
-impl Trigger for ReactionShutdown {
-    type Reactor = SlowingClockPhysical;
-    fn trigger(&mut self, _ctx: &mut runtime::Context, state: &mut State) {
+impl Trigger<SlowingClockPhysical> for ReactionShutdown {
+    fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
         assert!(
             state.expected_time >= runtime::Duration::from_millis(500),
             "Expected the next expected time to be at least: 500000000 nsec. It was: {:?}",

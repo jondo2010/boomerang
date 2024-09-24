@@ -1,35 +1,12 @@
-use std::marker::PhantomData;
-
 use super::{
     BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactorKey, EnvBuilder, FindElements,
-    Physical, PortType, Reactor, ReactorBuilderState, TypedActionKey, TypedPortKey,
+    Physical, PortType, Reactor, ReactorBuilderState, TypedActionKey,
 };
 use crate::runtime;
 use slotmap::SecondaryMap;
 
 slotmap::new_key_type! {
     pub struct BuilderReactionKey;
-}
-
-#[derive(Copy, Debug)]
-pub struct TypedReactionKey<R: Reaction>(BuilderReactionKey, PhantomData<R>);
-
-impl<R: Reaction> Clone for TypedReactionKey<R> {
-    fn clone(&self) -> Self {
-        Self(self.0, PhantomData)
-    }
-}
-
-impl<R: Reaction> Default for TypedReactionKey<R> {
-    fn default() -> Self {
-        Self(Default::default(), Default::default())
-    }
-}
-
-impl<R: Reaction> TypedReactionKey<R> {
-    pub fn new(reaction_key: BuilderReactionKey) -> Self {
-        Self(reaction_key, PhantomData)
-    }
 }
 
 impl petgraph::graph::GraphIndex for BuilderReactionKey {
@@ -43,23 +20,18 @@ impl petgraph::graph::GraphIndex for BuilderReactionKey {
 }
 
 /// The `Trigger` trait should be implemented by the user for each Reaction struct.
-pub trait Trigger {
-    /// The type of the owning Reactor
-    type Reactor: Reactor;
-
-    fn trigger(
-        &mut self,
-        ctx: &mut runtime::Context,
-        state: &mut <Self::Reactor as Reactor>::State,
-    );
+///
+/// Type parameter `R` is the owning Reactor.
+pub trait Trigger<R: Reactor> {
+    fn trigger(self, ctx: &mut runtime::Context, state: &mut R::State);
 }
 
 /// The Reaction trait should be automatically derived for each Reaction struct.
-pub trait Reaction: Trigger {
+pub trait Reaction<R: Reactor>: Trigger<R> {
     /// Build a `ReactionBuilderState` for this Reaction
     fn build<'builder>(
         name: &str,
-        reactor: &Self::Reactor,
+        reactor: &R,
         builder: &'builder mut ReactorBuilderState,
     ) -> Result<ReactionBuilderState<'builder>, BuilderError>;
 }
@@ -114,8 +86,8 @@ impl<T: runtime::ActionData> ReactionField for runtime::PhysicalActionRef<T> {
     }
 }
 
-impl<T: runtime::PortData> ReactionField for runtime::Port<T> {
-    type Key = TypedPortKey<T>;
+impl<'a, T: runtime::PortData> ReactionField for runtime::InputRef<'a, T> {
+    type Key = BuilderPortKey;
 
     fn build(
         builder: &mut ReactionBuilderState,
@@ -123,7 +95,46 @@ impl<T: runtime::PortData> ReactionField for runtime::Port<T> {
         order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
-        builder.add_port(key.into(), order, trigger_mode)
+        builder.add_port(key, order, trigger_mode)
+    }
+}
+
+impl<'a, T: runtime::PortData, const N: usize> ReactionField for [runtime::InputRef<'a, T>; N] {
+    type Key = [BuilderPortKey; N];
+
+    fn build(
+        builder: &mut ReactionBuilderState,
+        key: Self::Key,
+        order: usize,
+        trigger_mode: TriggerMode,
+    ) -> Result<(), BuilderError> {
+        builder.add_ports(key, order, trigger_mode)
+    }
+}
+
+impl<'a, T: runtime::PortData> ReactionField for runtime::OutputRef<'a, T> {
+    type Key = BuilderPortKey;
+
+    fn build(
+        builder: &mut ReactionBuilderState,
+        key: Self::Key,
+        order: usize,
+        trigger_mode: TriggerMode,
+    ) -> Result<(), BuilderError> {
+        builder.add_port(key, order, trigger_mode)
+    }
+}
+
+impl<'a, T: runtime::PortData, const N: usize> ReactionField for [runtime::OutputRef<'a, T>; N] {
+    type Key = [BuilderPortKey; N];
+
+    fn build(
+        builder: &mut ReactionBuilderState,
+        key: Self::Key,
+        order: usize,
+        trigger_mode: TriggerMode,
+    ) -> Result<(), BuilderError> {
+        builder.add_ports(key, order, trigger_mode)
     }
 }
 
@@ -211,6 +222,10 @@ impl ReactionBuilder {
     pub fn get_reactor_key(&self) -> BuilderReactorKey {
         self.reactor_key
     }
+
+    pub fn get_priority(&self) -> usize {
+        self.priority
+    }
 }
 
 pub struct ReactionBuilderState<'a> {
@@ -221,7 +236,8 @@ pub struct ReactionBuilderState<'a> {
 impl<'a> FindElements for ReactionBuilderState<'a> {
     /// Find the PortKey with a given name within the parent Reactor
     fn get_port_by_name(&self, port_name: &str) -> Result<BuilderPortKey, BuilderError> {
-        self.env.get_port(port_name, self.builder.reactor_key)
+        self.env
+            .find_port_by_name(port_name, self.builder.reactor_key)
     }
 
     fn get_action_by_name(&self, action_name: &str) -> Result<BuilderActionKey, BuilderError> {
@@ -230,6 +246,7 @@ impl<'a> FindElements for ReactionBuilderState<'a> {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 /// Describes how an action is used by a reaction
 pub enum TriggerMode {
     /// The action/port triggers the reaction, but is not provided as input
@@ -422,6 +439,18 @@ impl<'a> ReactionBuilderState<'a> {
         }
     }
 
+    pub fn add_ports(
+        &mut self,
+        keys: impl IntoIterator<Item = BuilderPortKey>,
+        order: usize,
+        trigger_mode: TriggerMode,
+    ) -> Result<(), BuilderError> {
+        for key in keys {
+            self.add_port(key, order, trigger_mode)?;
+        }
+        Ok(())
+    }
+
     /// Indicate how this Reaction interacts with the given Port
     ///
     /// There must be at least one trigger for each reaction.
@@ -444,9 +473,10 @@ impl<'a> ReactionBuilderState<'a> {
         // Ensure there is at least one trigger declared
         if reaction_builder.trigger_actions.is_empty() && reaction_builder.trigger_ports.is_empty()
         {
-            return Err(BuilderError::ReactionBuilderError(
-                "Reactions must have at least one trigger".to_string(),
-            ));
+            return Err(BuilderError::ReactionBuilderError(format!(
+                "Reaction '{}' has no triggers defined",
+                &reaction_builder.name
+            )));
         }
 
         let reactor = &mut env.reactor_builders[reaction_builder.reactor_key];

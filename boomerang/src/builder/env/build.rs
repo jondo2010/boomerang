@@ -47,6 +47,13 @@ struct RuntimeReactionParts {
     reaction_reactor_aliases: SecondaryMap<BuilderReactionKey, BuilderReactorKey>,
 }
 
+#[derive(Debug)]
+struct RuntimeReactorParts {
+    runtime_reactors: tinymap::TinyMap<runtime::ReactorKey, runtime::Reactor>,
+    reactor_aliases: SecondaryMap<BuilderReactorKey, runtime::ReactorKey>,
+    reactor_bank_indices: tinymap::TinySecondaryMap<runtime::ReactorKey, Option<runtime::BankInfo>>,
+}
+
 fn build_runtime_reactions(
     reaction_builders: SlotMap<BuilderReactionKey, ReactionBuilder>,
     port_aliases: &SecondaryMap<BuilderPortKey, runtime::PortKey>,
@@ -107,18 +114,23 @@ fn build_runtime_reactions(
 
 fn build_runtime_reactors(
     reactor_builders: SlotMap<BuilderReactorKey, ReactorBuilder>,
-) -> (
-    tinymap::TinyMap<runtime::ReactorKey, runtime::Reactor>,
-    SecondaryMap<BuilderReactorKey, runtime::ReactorKey>,
-) {
+) -> RuntimeReactorParts {
     let mut runtime_reactors = tinymap::TinyMap::with_capacity(reactor_builders.len());
-    let mut reactor_alias = SecondaryMap::new();
+    let mut reactor_aliases = SecondaryMap::new();
+    let mut reactor_bank_indices = tinymap::TinySecondaryMap::with_capacity(reactor_builders.len());
 
     for (builder_key, reactor_builder) in reactor_builders.into_iter() {
+        let bank_info = reactor_builder.bank_info.clone();
         let reactor_key = runtime_reactors.insert(reactor_builder.build_runtime());
-        reactor_alias.insert(builder_key, reactor_key);
+        reactor_aliases.insert(builder_key, reactor_key);
+        reactor_bank_indices.insert(reactor_key, bank_info);
     }
-    (runtime_reactors, reactor_alias)
+
+    RuntimeReactorParts {
+        runtime_reactors,
+        reactor_aliases,
+        reactor_bank_indices,
+    }
 }
 
 /// Aliasing maps from Builder keys to runtime keys
@@ -213,7 +225,11 @@ impl EnvBuilder {
             reaction_reactor_aliases,
         } = build_runtime_reactions(self.reaction_builders, &port_aliases, &action_aliases);
 
-        let (runtime_reactors, reactor_aliases) = build_runtime_reactors(self.reactor_builders);
+        let RuntimeReactorParts {
+            runtime_reactors,
+            reactor_aliases,
+            reactor_bank_indices,
+        } = build_runtime_reactors(self.reactor_builders);
 
         // Mapping of Reaction to its owning Reactor
         let reaction_reactors: tinymap::TinySecondaryMap<
@@ -321,6 +337,7 @@ impl EnvBuilder {
                 reaction_effect_ports,
                 reaction_actions,
                 reaction_reactors,
+                reactor_bank_infos: reactor_bank_indices,
             },
             BuilderAliases {
                 reactor_aliases,

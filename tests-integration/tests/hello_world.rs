@@ -5,31 +5,30 @@ struct State {
 }
 
 #[derive(Clone, Reactor)]
-#[reactor(state = State)]
-struct HelloWorld2 {
-    reaction_startup: TypedReactionKey<HelloWorld2ReactionStartup>,
-    reaction_shutdown: TypedReactionKey<HelloWorld2ReactionShutdown>,
-}
+#[reactor(
+    state = "State",
+    reaction = "HelloWorld2ReactionStartup",
+    reaction = "HelloWorld2ReactionShutdown"
+)]
+struct HelloWorld2;
 
 #[derive(Reaction)]
-#[reaction(triggers(startup))]
+#[reaction(reactor = "HelloWorld2", triggers(startup))]
 struct HelloWorld2ReactionStartup;
 
-impl Trigger for HelloWorld2ReactionStartup {
-    type Reactor = HelloWorld2;
-    fn trigger(&mut self, _ctx: &mut runtime::Context, state: &mut State) {
+impl Trigger<HelloWorld2> for HelloWorld2ReactionStartup {
+    fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
         println!("Hello World.");
         state.success = true;
     }
 }
 
 #[derive(Reaction)]
-#[reaction(triggers(shutdown))]
+#[reaction(reactor = "HelloWorld2", triggers(shutdown))]
 struct HelloWorld2ReactionShutdown;
 
-impl Trigger for HelloWorld2ReactionShutdown {
-    type Reactor = HelloWorld2;
-    fn trigger(&mut self, _ctx: &mut runtime::Context, state: &mut State) {
+impl Trigger<HelloWorld2> for HelloWorld2ReactionShutdown {
+    fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
         println!("Shutdown invoked.");
         state.success = false;
     }

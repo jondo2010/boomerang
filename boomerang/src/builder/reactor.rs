@@ -1,6 +1,6 @@
 use super::{
     ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
-    EnvBuilder, FindElements, Input, Logical, Output, Physical, PhysicalActionKey, PortType2,
+    EnvBuilder, FindElements, Input, Logical, Output, Physical, PhysicalActionKey, PortTag,
     ReactionBuilderState, TimerActionKey, TimerSpec, TriggerMode, TypedActionKey, TypedPortKey,
 };
 use crate::runtime;
@@ -485,7 +485,7 @@ impl<'a> ReactorBuilderState<'a> {
 
     /// Bind 2 ports on this reactor. This has the logical meaning of "connecting" `port_a` to
     /// `port_b`.
-    pub fn bind_port<T: runtime::PortData, Q1: PortType2, Q2: PortType2>(
+    pub fn bind_port<T: runtime::PortData, Q1: PortTag, Q2: PortTag>(
         &mut self,
         port_a_key: TypedPortKey<T, Q1>,
         port_b_key: TypedPortKey<T, Q2>,
@@ -494,7 +494,7 @@ impl<'a> ReactorBuilderState<'a> {
     }
 
     /// Bind multiple ports on this reactor. This has the logical meaning of "connecting" `ports_from` to `ports_to`.
-    pub fn bind_ports<T: runtime::PortData, Q1: PortType2, Q2: PortType2>(
+    pub fn bind_ports<T: runtime::PortData, Q1: PortTag, Q2: PortTag>(
         &mut self,
         ports_from: impl Iterator<Item = TypedPortKey<T, Q1>>,
         ports_to: impl Iterator<Item = TypedPortKey<T, Q2>>,

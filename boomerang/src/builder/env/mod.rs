@@ -1,7 +1,7 @@
 use super::{
     action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder, ActionBuilderFn,
     ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
-    BuilderReactorKey, Input, Logical, Output, Physical, PortBuilder, PortType, PortType2,
+    BuilderReactorKey, Input, Logical, Output, Physical, PortBuilder, PortTag, PortType,
     ReactionBuilderState, ReactorBuilder, ReactorBuilderState, TypedActionKey, TypedPortKey,
 };
 use crate::runtime;
@@ -120,7 +120,7 @@ impl EnvBuilder {
             .map(From::from)
     }
 
-    fn internal_add_port<T: runtime::PortData, Q: PortType2 + 'static>(
+    fn internal_add_port<T: runtime::PortData, Q: PortTag + 'static>(
         &mut self,
         name: &str,
         reactor_key: BuilderReactorKey,

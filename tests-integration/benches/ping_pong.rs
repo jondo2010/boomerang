@@ -27,9 +27,9 @@ impl Ping {
 #[derive(Clone, Reactor)]
 #[reactor(
     state = "Ping",
+    reaction = "ReactionServe",
     reaction = "ReactionInStart",
-    reaction = "ReactionInPong",
-    reaction = "ReactionServe"
+    reaction = "ReactionInPong"
 )]
 struct PingBuilder {
     in_start: TypedPortKey<(), Input>,

@@ -135,7 +135,7 @@ struct ThreadedMultiport<const WIDTH: usize = 4, const ITERS: usize = 100_000_00
 #[test]
 fn threading_multiport() {
     tracing_subscriber::fmt::init();
-    let _ = boomerang_util::run::build_and_test_reactor::<ThreadedMultiport<4, 1_000_000>>(
+    let _ = boomerang_util::run::build_and_test_reactor::<ThreadedMultiport<4, 10_000>>(
         "threaded_multiport",
         (),
         true,

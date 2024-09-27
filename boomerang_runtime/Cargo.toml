@@ -9,12 +9,8 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = [
-    #"parallel",
-    "serde",
-]
-#TODO: re-enable parallel execution with bumpalo-herd
-#parallel = ["dep:rayon", "dep:bumpalo-herd"]
+default = ["parallel", "serde"]
+parallel = ["dep:rayon"]
 serde = ["dep:arrow", "dep:erased-serde", "dep:serde", "dep:serde_arrow"]
 
 [dependencies]
@@ -32,9 +28,6 @@ tracing = { workspace = true, features = [
 serde = { workspace = true, optional = true, features = ["derive"] }
 serde_arrow = { workspace = true, features = ["arrow-52"], optional = true }
 erased-serde = { workspace = true, optional = true }
-
-bumpalo = { version = "3.16", features = ["collections"] }
-bumpalo-herd = { version = "0.1", optional = true }
 
 [dev-dependencies]
 serde_json = "1.0"

@@ -1,10 +1,10 @@
 //! Inner module for `Env` and `ReactionGraph` implementation details.
 
-use tinymap::map;
+use std::{marker::PhantomPinned, pin::Pin, ptr::NonNull};
 
 use crate::{
     Action, ActionKey, ActionSliceMut, BasePort, Context, PortKey, PortSlice, PortSliceMut,
-    Reaction, ReactionKey, Reactor,
+    Reaction, ReactionKey, Reactor, ReactorKey,
 };
 
 use super::{Env, ReactionGraph};
@@ -19,158 +19,201 @@ pub struct ReactionTriggerCtx<'a> {
     pub mut_ports: PortSliceMut<'a>,
 }
 
-/// Container for set of iterators used to build a `ReactionTriggerCtx`
-pub(crate) struct ReactionTriggerCtxIter<
-    'a,
-    'bump,
-    IContext,
-    IReactor,
-    IReaction,
-    IO1,
-    IO2,
-    IO3,
-    IA,
-    IP,
-> where
-    IContext: Iterator<Item = &'a mut Context>,
-    IReactor: Iterator<Item = &'a mut Reactor>,
-    IReaction: Iterator<Item = &'a mut Reaction>,
-    IO1: Iterator<Item = IA> + Send,
-    IO2: Iterator<Item = IP> + Send,
-    IO3: Iterator<Item = IP> + Send,
-    IA: Iterator<Item = ActionKey> + Send,
-    IP: Iterator<Item = PortKey> + Send,
-{
-    bump: &'bump bumpalo::Bump,
-    contexts: IContext,
-    reactors: IReactor,
-    reactions: IReaction,
-    grouped_actions: map::ChunksMut<'a, ActionKey, Action, IO1, IA>,
-    grouped_ref_ports: map::Chunks<'a, PortKey, Box<dyn BasePort>, IO2, IP>,
-    grouped_mut_ports: map::ChunksMut<'a, PortKey, Box<dyn BasePort>, IO3, IP>,
-}
+impl<'a> From<&'a mut ReactionTriggerCtxPtrs> for ReactionTriggerCtx<'a> {
+    fn from(ptrs: &'a mut ReactionTriggerCtxPtrs) -> Self {
+        unsafe {
+            let context = ptrs.context.as_mut();
+            let reactor = ptrs.reactor.as_mut();
+            let reaction = ptrs.reaction.as_mut();
 
-impl<'a, 'bump: 'a, IContext, IReactor, IReaction, IO1, IO2, IO3, IA, IP> Iterator
-    for ReactionTriggerCtxIter<'a, 'bump, IContext, IReactor, IReaction, IO1, IO2, IO3, IA, IP>
-where
-    IContext: Iterator<Item = &'a mut Context>,
-    IReactor: Iterator<Item = &'a mut Reactor>,
-    IReaction: Iterator<Item = &'a mut Reaction>,
-    IO1: Iterator<Item = IA> + Send,
-    IO2: Iterator<Item = IP> + Send,
-    IO3: Iterator<Item = IP> + Send,
-    IA: Iterator<Item = ActionKey> + ExactSizeIterator + Send,
-    IP: Iterator<Item = PortKey> + ExactSizeIterator + Send,
-{
-    type Item = ReactionTriggerCtx<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let context = self.contexts.next();
-        let reactor = self.reactors.next();
-        let reaction = self.reactions.next();
-        let actions = self.grouped_actions.next();
-        let ref_ports = self.grouped_ref_ports.next();
-        let mut_ports = self.grouped_mut_ports.next();
-
-        match (context, reactor, reaction, actions, ref_ports, mut_ports) {
-            (
-                Some(context),
-                Some(reactor),
-                Some(reaction),
-                Some(actions),
-                Some(ref_ports),
-                Some(mut_ports),
-            ) => Some(ReactionTriggerCtx {
+            let actions = std::slice::from_raw_parts_mut::<&mut Action>(
+                ptrs.actions.as_mut_ptr() as *mut &mut _,
+                ptrs.actions.len(),
+            );
+            let ref_ports = std::slice::from_raw_parts(
+                ptrs.ref_ports.as_ptr() as *const &_,
+                ptrs.ref_ports.len(),
+            );
+            let mut_ports = std::slice::from_raw_parts_mut(
+                ptrs.mut_ports.as_mut_ptr() as *mut &mut _,
+                ptrs.mut_ports.len(),
+            );
+            ReactionTriggerCtx {
                 context,
                 reactor,
                 reaction,
-                actions: self.bump.alloc_slice_fill_iter(actions),
-                ref_ports: self.bump.alloc_slice_fill_iter(ref_ports.map(|p| &**p)),
-                mut_ports: self.bump.alloc_slice_fill_iter(mut_ports.map(|p| &mut **p)),
-            }),
-            (None, None, None, None, None, None) => None,
-            _ => {
-                unreachable!("Mismatched iterators in ReactionTriggerCtxIter");
+                actions,
+                ref_ports,
+                mut_ports,
             }
         }
     }
 }
 
+/// Lifetime-erased version of [`ReactionTriggerCtx`]
 #[derive(Debug)]
-pub struct InnerEnv<'env> {
-    pub env: &'env mut Env,
-    pub contexts: tinymap::TinySecondaryMap<ReactionKey, Context>,
+struct ReactionTriggerCtxPtrs {
+    context: NonNull<Context>,
+    reactor: NonNull<Reactor>,
+    reaction: NonNull<Reaction>,
+    actions: Vec<NonNull<Action>>,
+    ref_ports: Vec<NonNull<dyn BasePort>>,
+    mut_ports: Vec<NonNull<dyn BasePort>>,
 }
 
-impl<'env> InnerEnv<'env> {
-    /// Returns an `Iterator` of `ReactionTriggerCtx` for each `Reaction` in the given `reaction_keys`.
-    ///
-    /// # Safety
-    /// The Reactions in `reaction_keys` must be be independent of each other (disjoint).
-    pub unsafe fn iter_reaction_ctx<'a, 'bump: 'a, I>(
-        &'a mut self,
-        reaction_graph: &'a ReactionGraph,
-        bump: &'bump bumpalo::Bump,
-        reaction_keys: I,
-    ) -> impl Iterator<Item = ReactionTriggerCtx<'a>> + 'a
-    where
-        I: Iterator<Item = ReactionKey> + ExactSizeIterator + Clone + Send + 'a,
-    {
-        let port_keys = reaction_keys
-            .clone()
-            .map(|reaction_key| reaction_graph.reaction_use_ports[reaction_key].iter());
+impl Default for ReactionTriggerCtxPtrs {
+    fn default() -> Self {
+        Self {
+            context: NonNull::dangling(),
+            reactor: NonNull::dangling(),
+            reaction: NonNull::dangling(),
+            actions: Vec::new(),
+            ref_ports: Vec::new(),
+            mut_ports: Vec::new(),
+        }
+    }
+}
 
-        let mut_port_keys = reaction_keys
-            .clone()
-            .map(|reaction_key| reaction_graph.reaction_effect_ports[reaction_key].iter());
+unsafe impl Send for ReactionTriggerCtxPtrs {}
 
-        let action_keys = reaction_keys
-            .clone()
-            .map(|reaction_key| reaction_graph.reaction_actions[reaction_key].iter());
+#[derive(Debug)]
+struct Inner {
+    contexts: tinymap::TinySecondaryMap<ReactionKey, Context>,
+    reactors: tinymap::TinyMap<ReactorKey, Reactor>,
+    reactions: tinymap::TinyMap<ReactionKey, Reaction>,
+    actions: tinymap::TinyMap<ActionKey, Action>,
+    ports: tinymap::TinyMap<PortKey, Box<dyn BasePort>>,
+}
 
-        let reactor_keys = reaction_keys
-            .clone()
+#[derive(Debug)]
+pub struct Store {
+    inner: Inner,
+    /// Internal caches of `ReactionTriggerCtxPtrs`
+    caches: tinymap::TinySecondaryMap<ReactionKey, ReactionTriggerCtxPtrs>,
+    _pin: PhantomPinned,
+}
+
+impl Store {
+    pub fn new(
+        env: Env,
+        contexts: tinymap::TinySecondaryMap<ReactionKey, Context>,
+        reaction_graph: &ReactionGraph,
+    ) -> Pin<Box<Self>> {
+        // Create a default `ReactionTriggerCtxPtrs` for each reaction
+        let ptrs = env
+            .reactions
+            .keys()
+            .map(|reaction_key| (reaction_key, Default::default()))
+            .collect();
+
+        let res = Self {
+            inner: Inner {
+                contexts,
+                reactors: env.reactors,
+                reactions: env.reactions,
+                actions: env.actions,
+                ports: env.ports,
+            },
+            caches: ptrs,
+            _pin: PhantomPinned,
+        };
+
+        let mut boxed = Box::new(res);
+
+        let contexts = unsafe {
+            boxed
+                .inner
+                .contexts
+                .iter_many_unchecked_mut(boxed.inner.reactions.keys())
+        };
+
+        let reactor_keys = boxed
+            .inner
+            .reactions
+            .keys()
             .map(|reaction_key| reaction_graph.reaction_reactors[reaction_key]);
 
-        let contexts = self.contexts.iter_many_unchecked_mut(reaction_keys.clone());
+        let reactors = unsafe { boxed.inner.reactors.iter_many_unchecked_mut(reactor_keys) };
 
-        // SAFETY: reactor_keys are guaranteed to be disjoint
-        let reactors = self.env.reactors.iter_many_unchecked_mut(reactor_keys);
+        let reactions = unsafe {
+            boxed
+                .inner
+                .reactions
+                .iter_many_unchecked_mut(boxed.inner.reactions.keys())
+        };
 
-        // SAFETY: reaction_keys are guaranteed to be disjoint
-        let reactions = self.env.reactions.iter_many_unchecked_mut(reaction_keys);
+        let action_keys = reaction_graph
+            .reaction_actions
+            .values()
+            .map(|actions| actions.iter());
 
-        // SAFETY: action_keys are guaranteed to be disjoint chunks
         let (_, grouped_actions) = unsafe {
-            self.env
+            boxed
+                .inner
                 .actions
                 .iter_chunks_split_unchecked(std::iter::empty(), action_keys)
         };
 
+        let port_ref_keys = reaction_graph
+            .reaction_use_ports
+            .values()
+            .map(|ports| ports.iter());
+
+        let port_mut_keys = reaction_graph
+            .reaction_effect_ports
+            .values()
+            .map(|ports| ports.iter());
+
         let (grouped_ref_ports, grouped_mut_ports) = unsafe {
-            self.env
+            boxed
+                .inner
                 .ports
-                .iter_chunks_split_unchecked(port_keys, mut_port_keys)
+                .iter_chunks_split_unchecked(port_ref_keys, port_mut_keys)
         };
 
-        ReactionTriggerCtxIter {
-            bump,
+        for ((_, cache), context, reactor, reaction, actions, ref_ports, mut_ports) in itertools::izip!(
+            boxed.caches.iter_mut(),
             contexts,
             reactors,
             reactions,
             grouped_actions,
             grouped_ref_ports,
             grouped_mut_ports,
+        ) {
+            cache.context = NonNull::from(context);
+            cache.reactor = NonNull::from(reactor);
+            cache.reaction = NonNull::from(reaction);
+            cache.actions = actions.map(NonNull::from).collect();
+            cache.ref_ports = ref_ports.map(|p| NonNull::from(p.as_ref())).collect();
+            cache.mut_ports = mut_ports.map(|p| NonNull::from(p.as_mut())).collect();
         }
+
+        Box::into_pin(boxed)
     }
 
-    pub fn iter_set_ports(&self) -> impl Iterator<Item = (PortKey, &Box<dyn BasePort>)> {
-        self.env.ports.iter().filter(|&(_, port)| port.is_set())
+    /// Returns an `Iterator` of `ReactionTriggerCtx` for each `Reaction` in the given `reaction_keys`.
+    ///
+    /// This uses the previously stored `ReactionTriggerCtxPtrs`.
+    pub unsafe fn iter_borrow_storage<'a>(
+        self: &'a mut Pin<Box<Self>>,
+        keys: impl Iterator<Item = ReactionKey> + 'a,
+    ) -> impl Iterator<Item = ReactionTriggerCtx<'a>> + 'a {
+        let ptrs = &mut self.as_mut().get_unchecked_mut().caches;
+        ptrs.iter_many_unchecked_mut(keys)
+            .map(ReactionTriggerCtx::from)
     }
 
-    pub fn reset_ports(&mut self) {
-        for p in self.env.ports.values_mut() {
-            p.cleanup();
-        }
+    /// Returns an `Iterator` of `PortKey`s that currently have a value set.
+    pub fn iter_set_port_keys(self: &Pin<Box<Self>>) -> impl Iterator<Item = PortKey> + '_ {
+        self.inner
+            .ports
+            .iter()
+            .filter(|&(_, port)| port.is_set())
+            .map(|(key, _)| key)
+    }
+
+    pub fn reset_ports(self: &mut Pin<Box<Self>>) {
+        let store = unsafe { self.as_mut().get_unchecked_mut() };
+        store.inner.ports.values_mut().for_each(|p| p.cleanup());
     }
 }

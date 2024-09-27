@@ -6,7 +6,7 @@ use crate::{
 mod debug;
 mod inner;
 
-pub(crate) use inner::{InnerEnv, ReactionTriggerCtx};
+pub(crate) use inner::{ReactionTriggerCtx, Store};
 
 /// Execution level
 #[repr(transparent)]

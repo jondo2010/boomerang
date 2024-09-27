@@ -470,7 +470,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
         [],
     );
 
-    let mut sched = runtime::Scheduler::new(&mut env, triggers, true, false);
+    let mut sched = runtime::Scheduler::new(env, triggers, true, false);
     sched.event_loop();
 
     Ok(())

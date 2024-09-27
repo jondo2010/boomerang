@@ -2,12 +2,11 @@ use crossbeam_channel::{Receiver, RecvTimeoutError};
 use std::{collections::BinaryHeap, pin::Pin, time::Duration};
 
 use crate::{
-    env::Store,
     event::{PhysicalEvent, ScheduledEvent},
     keepalive,
     key_set::KeySetView,
-    Context, Env, Instant, Level, ReactionGraph, ReactionKey, ReactionSet, ReactionSetLimits,
-    ReactionTriggerCtx, Tag,
+    store::{ReactionTriggerCtx, Store},
+    Context, Env, Instant, Level, ReactionGraph, ReactionKey, ReactionSet, ReactionSetLimits, Tag,
 };
 
 #[derive(Debug)]
@@ -312,11 +311,7 @@ impl Scheduler {
             tracing::trace!(level=?level, "Iter");
 
             // Safety: reaction_keys in the same level are guaranteed to be independent of each other.
-            let iter_ctx = unsafe {
-                self.store
-                    //.iter_reaction_ctx2(&self.reaction_graph, reaction_keys)
-                    .iter_borrow_storage(reaction_keys)
-            };
+            let iter_ctx = unsafe { self.store.iter_borrow_storage(reaction_keys) };
 
             #[cfg(feature = "parallel")]
             use rayon::prelude::ParallelIterator;

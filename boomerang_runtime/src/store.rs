@@ -1,4 +1,4 @@
-//! Inner module for `Env` and `ReactionGraph` implementation details.
+//! Runtime data storage
 
 use std::{marker::PhantomPinned, pin::Pin, ptr::NonNull};
 

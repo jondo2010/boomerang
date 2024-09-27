@@ -2,11 +2,12 @@ use crossbeam_channel::{Receiver, RecvTimeoutError};
 use std::{collections::BinaryHeap, pin::Pin, time::Duration};
 
 use crate::{
+    build_reaction_contexts,
     event::{PhysicalEvent, ScheduledEvent},
     keepalive,
     key_set::KeySetView,
     store::{ReactionTriggerCtx, Store},
-    Context, Env, Instant, Level, ReactionGraph, ReactionKey, ReactionSet, ReactionSetLimits, Tag,
+    Env, Instant, Level, ReactionGraph, ReactionKey, ReactionSet, ReactionSetLimits, Tag,
 };
 
 #[derive(Debug)]
@@ -95,6 +96,17 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
+    /// Create a new Scheduler instance.
+    ///
+    /// The Scheduler will be initialized with the provided environment and reaction graph.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The environment containing all the runtime data structures.
+    /// * `reaction_graph` - The reaction graph containing all static dependency and relationship information.
+    /// * `fast_forward` - Whether to skip wall-clock synchronization.
+    /// * `keep_alive` - Whether to keep the scheduler alive for any possible asynchronous events. If `false`, the
+    ///    scheduler will terminate when there are no more events to process.
     pub fn new(
         env: Env,
         reaction_graph: ReactionGraph,
@@ -103,28 +115,13 @@ impl Scheduler {
     ) -> Self {
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
         let (shutdown_tx, shutdown_rx) = keepalive::channel();
-        let events = EventQueue::new(reaction_graph.reaction_set_limits.clone());
-
         let start_time = Instant::now();
 
         // Build contexts for each reaction
-        let contexts = reaction_graph
-            .reaction_reactors
-            .iter()
-            .map(|(reaction_key, reactor_key)| {
-                let bank_info = &reaction_graph.reactor_bank_infos[*reactor_key];
-                let ctx = Context::new(
-                    start_time,
-                    bank_info.clone(),
-                    event_tx.clone(),
-                    shutdown_rx.clone(),
-                );
-                (reaction_key, ctx)
-            })
-            .collect();
+        let contexts = build_reaction_contexts(&reaction_graph, start_time, event_tx, shutdown_rx);
 
         let store = Store::new(env, contexts, &reaction_graph);
-
+        let events = EventQueue::new(reaction_graph.reaction_set_limits.clone());
         Self {
             store,
             reaction_graph,

@@ -2,7 +2,10 @@ use std::marker::PhantomData;
 
 use crate::{Key, TinyMap};
 
-use super::{iter_many::IterMany, IterManyMut};
+use super::{
+    iter_many::{IterMany, IterManyPtr, IterManyPtrMut},
+    IterManyMut,
+};
 
 /// `Chunks` is an iterator over slices of a given owned data buffer. Each call to `next` returns a
 /// slice of the data buffer, starting at the index specified by the next element of the given
@@ -45,6 +48,26 @@ where
 {
     fn len(&self) -> usize {
         self.keys.len()
+    }
+}
+
+pub struct PtrChunks<'a, K: Key, V, IO, II>(Chunks<'a, K, V, IO, II>)
+where
+    IO: Iterator<Item = II> + Send,
+    II: Iterator<Item = K> + Send;
+
+impl<'a, K: Key, V, IO, II> Iterator for PtrChunks<'a, K, V, IO, II>
+where
+    IO: Iterator<Item = II> + Send,
+    II: Iterator<Item = K> + Send,
+{
+    type Item = IterManyPtr<'a, K, V, II>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0
+            .keys
+            .next()
+            .map(|keys| IterManyPtr(IterMany::new(self.0.ptr, keys)))
     }
 }
 
@@ -92,8 +115,33 @@ where
     }
 }
 
+pub struct PtrChunksMut<'a, K: Key, V, IO, II>(ChunksMut<'a, K, V, IO, II>)
+where
+    IO: Iterator<Item = II> + Send,
+    II: Iterator<Item = K> + Send;
+
+impl<'a, K: Key, V, IO, II> Iterator for PtrChunksMut<'a, K, V, IO, II>
+where
+    IO: Iterator<Item = II> + Send,
+    II: Iterator<Item = K> + Send,
+{
+    type Item = IterManyPtrMut<'a, K, V, II>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0
+            .keys
+            .next()
+            .map(|keys| IterManyPtrMut(IterManyMut::new(self.0.ptr, keys)))
+    }
+}
+
 pub type SplitChunks<'a, K, V, IO1, IO2, II> =
     (Chunks<'a, K, V, IO1, II>, ChunksMut<'a, K, V, IO2, II>);
+
+pub type SplitPtrChunks<'a, K, V, IO1, IO2, II> = (
+    PtrChunksMut<'a, K, V, IO1, II>,
+    PtrChunksMut<'a, K, V, IO2, II>,
+);
 
 impl<K: Key, V: Send> TinyMap<K, V> {
     /// Returns a tuple of two iterators over chunks of the map's data buffer. The first iterator
@@ -125,6 +173,40 @@ impl<K: Key, V: Send> TinyMap<K, V> {
                 keys: keys_mut,
                 _marker: PhantomData,
             },
+        )
+    }
+
+    /// Returns a tuple of two iterators over chunks of the map's data buffer. The first iterator
+    /// yields immutable slices of the data buffer, while the second iterator yields mutable slices
+    /// of the data buffer. The keys for each chunk are provided by the given iterators `keys` and
+    /// `keys_mut`, respectively.
+    ///
+    /// # Safety
+    ///
+    /// This function is highly unsafe, and it is the caller's responsibility to ensure that the
+    /// keys provided by the iterators are valid and unique. Rust's aliasing rules must be
+    /// respected.
+    pub unsafe fn iter_ptr_chunks_split_unchecked<IO1, IO2, II>(
+        &mut self,
+        keys: IO1,
+        keys_mut: IO2,
+    ) -> SplitPtrChunks<'_, K, V, IO1, IO2, II>
+    where
+        IO1: Iterator<Item = II> + ExactSizeIterator + Send,
+        IO2: Iterator<Item = II> + ExactSizeIterator + Send,
+        II: Iterator<Item = K> + ExactSizeIterator + Send,
+    {
+        (
+            PtrChunksMut(ChunksMut {
+                ptr: self.data.as_mut_ptr(),
+                keys,
+                _marker: PhantomData,
+            }),
+            PtrChunksMut(ChunksMut {
+                ptr: self.data.as_mut_ptr(),
+                keys: keys_mut,
+                _marker: PhantomData,
+            }),
         )
     }
 }

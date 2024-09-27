@@ -51,6 +51,8 @@ impl<'a> From<&'a mut ReactionTriggerCtxPtrs> for ReactionTriggerCtx<'a> {
 }
 
 /// Lifetime-erased version of [`ReactionTriggerCtx`]
+///
+/// This is used to pre-calculate and cache the necessary pointers for each reaction's trigger data.
 #[derive(Debug)]
 struct ReactionTriggerCtxPtrs {
     context: NonNull<Context>,
@@ -94,6 +96,7 @@ pub struct Store {
 }
 
 impl Store {
+    /// Create a new `Store` from the given `Env`, `Contexts`, and `ReactionGraph`.
     pub fn new(
         env: Env,
         contexts: tinymap::TinySecondaryMap<ReactionKey, Context>,
@@ -125,6 +128,7 @@ impl Store {
                 .inner
                 .contexts
                 .iter_many_unchecked_mut(boxed.inner.reactions.keys())
+                .map(|c| NonNull::new_unchecked(c))
         };
 
         let reactor_keys = boxed
@@ -133,13 +137,20 @@ impl Store {
             .keys()
             .map(|reaction_key| reaction_graph.reaction_reactors[reaction_key]);
 
-        let reactors = unsafe { boxed.inner.reactors.iter_many_unchecked_mut(reactor_keys) };
+        let reactors = unsafe {
+            boxed
+                .inner
+                .reactors
+                .iter_many_unchecked_ptrs_mut(reactor_keys)
+                .map(|r| NonNull::new_unchecked(r))
+        };
 
         let reactions = unsafe {
             boxed
                 .inner
                 .reactions
                 .iter_many_unchecked_mut(boxed.inner.reactions.keys())
+                .map(|r| NonNull::new_unchecked(r))
         };
 
         let action_keys = reaction_graph
@@ -147,11 +158,15 @@ impl Store {
             .values()
             .map(|actions| actions.iter());
 
-        let (_, grouped_actions) = unsafe {
-            boxed
-                .inner
-                .actions
-                .iter_chunks_split_unchecked(std::iter::empty(), action_keys)
+        let grouped_actions = unsafe {
+            action_keys.map(|keys| {
+                boxed
+                    .inner
+                    .actions
+                    .iter_many_unchecked_ptrs_mut(keys)
+                    .map(|a| NonNull::new_unchecked(a))
+                    .collect::<Vec<_>>()
+            })
         };
 
         let port_ref_keys = reaction_graph
@@ -168,7 +183,7 @@ impl Store {
             boxed
                 .inner
                 .ports
-                .iter_chunks_split_unchecked(port_ref_keys, port_mut_keys)
+                .iter_ptr_chunks_split_unchecked(port_ref_keys, port_mut_keys)
         };
 
         for ((_, cache), context, reactor, reaction, actions, ref_ports, mut_ports) in itertools::izip!(
@@ -180,12 +195,18 @@ impl Store {
             grouped_ref_ports,
             grouped_mut_ports,
         ) {
-            cache.context = NonNull::from(context);
-            cache.reactor = NonNull::from(reactor);
-            cache.reaction = NonNull::from(reaction);
-            cache.actions = actions.map(NonNull::from).collect();
-            cache.ref_ports = ref_ports.map(|p| NonNull::from(p.as_ref())).collect();
-            cache.mut_ports = mut_ports.map(|p| NonNull::from(p.as_mut())).collect();
+            unsafe {
+                cache.context = context;
+                cache.reactor = reactor;
+                cache.reaction = reaction;
+                cache.actions = actions;
+                cache.ref_ports = ref_ports
+                    .map(|p| NonNull::new_unchecked(&mut **p as *mut _))
+                    .collect();
+                cache.mut_ports = mut_ports
+                    .map(|p| NonNull::new_unchecked(&mut **p as *mut _))
+                    .collect();
+            }
         }
 
         Box::into_pin(boxed)

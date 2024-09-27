@@ -49,6 +49,24 @@ where
 
 unsafe impl<K: Key, V: Send, I: Iterator<Item = K>> Send for IterMany<'_, K, V, I> {}
 
+pub struct IterManyPtr<'a, K: Key, V, I>(pub IterMany<'a, K, V, I>)
+where
+    I: Iterator<Item = K>;
+
+impl<'a, K: Key, V, I> Iterator for IterManyPtr<'a, K, V, I>
+where
+    I: Iterator<Item = K>,
+{
+    type Item = *const V;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0
+            .keys
+            .next()
+            .map(|key| self.0.ptr.wrapping_add(key.index()))
+    }
+}
+
 pub struct IterManyMut<'a, K: Key, V, I>
 where
     I: Iterator<Item = K>,
@@ -96,6 +114,24 @@ where
 
 unsafe impl<K: Key, V: Send, I: Iterator<Item = K>> Send for IterManyMut<'_, K, V, I> {}
 
+pub struct IterManyPtrMut<'a, K: Key, V, I>(pub IterManyMut<'a, K, V, I>)
+where
+    I: Iterator<Item = K>;
+
+impl<'a, K: Key, V, I> Iterator for IterManyPtrMut<'a, K, V, I>
+where
+    I: Iterator<Item = K>,
+{
+    type Item = *mut V;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0
+            .keys
+            .next()
+            .map(|key| self.0.ptr.wrapping_add(key.index()))
+    }
+}
+
 impl<K: Key, V> TinyMap<K, V> {
     /// Returns an iterator of mutable references to the values corresponding to the keys.
     ///
@@ -112,6 +148,42 @@ impl<K: Key, V> TinyMap<K, V> {
         <I as IntoIterator>::IntoIter: 'a,
     {
         IterManyMut::new(self.data.as_mut_ptr(), keys.into_iter())
+    }
+
+    /// Iterate raw pointers to the values corresponding to the keys.
+    ///
+    /// # Safety
+    ///
+    /// This method is very unsafe, and the caller must take full responsibility for ensuring that
+    /// aliasing rules are not violated. Also, the caller must ensure that the keys are valid.
+    pub unsafe fn iter_many_unchecked_ptrs<'a, I>(
+        &'a self,
+        keys: I,
+    ) -> impl Iterator<Item = *const V> + 'a
+    where
+        I: IntoIterator<Item = K>,
+        <I as IntoIterator>::IntoIter: 'a,
+    {
+        keys.into_iter()
+            .map(move |key| self.data.as_ptr().wrapping_add(key.index()))
+    }
+
+    /// Iterate raw mutable pointers to the values corresponding to the keys.
+    ///
+    /// # Safety
+    ///
+    /// This method is very unsafe, and the caller must take full responsibility for ensuring that
+    /// aliasing rules are not violated. Also, the caller must ensure that the keys are valid.
+    pub unsafe fn iter_many_unchecked_ptrs_mut<'a, I>(
+        &'a mut self,
+        keys: I,
+    ) -> impl Iterator<Item = *mut V> + 'a
+    where
+        I: IntoIterator<Item = K>,
+        <I as IntoIterator>::IntoIter: 'a,
+    {
+        keys.into_iter()
+            .map(|key| self.data.as_mut_ptr().wrapping_add(key.index()))
     }
 
     /// Returns an tuple of 2 iterators of the items in `keys` and `keys_mut`.

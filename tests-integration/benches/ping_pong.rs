@@ -174,7 +174,7 @@ fn bench(c: &mut Criterion) {
                     let (env, triggers, _) = env_builder.into_runtime_parts().unwrap();
                     (env, triggers)
                 },
-                |(mut env, triggers)| {
+                |(env, triggers)| {
                     let mut sched = runtime::Scheduler::new(env, triggers, true, false);
                     sched.event_loop();
 

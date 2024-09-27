@@ -1,13 +1,13 @@
 use crossbeam_channel::{Receiver, RecvTimeoutError};
-use std::{collections::BinaryHeap, time::Duration};
+use std::{collections::BinaryHeap, pin::Pin, time::Duration};
 
 use crate::{
-    env::InnerEnv,
+    build_reaction_contexts,
     event::{PhysicalEvent, ScheduledEvent},
     keepalive,
     key_set::KeySetView,
-    Context, Env, Instant, Level, ReactionGraph, ReactionKey, ReactionSet, ReactionSetLimits,
-    ReactionTriggerCtx, Tag,
+    store::{ReactionTriggerCtx, Store},
+    Env, Instant, Level, ReactionGraph, ReactionKey, ReactionSet, ReactionSetLimits, Tag,
 };
 
 #[derive(Debug)]
@@ -74,9 +74,9 @@ impl EventQueue {
 }
 
 #[derive(Debug)]
-pub struct Scheduler<'env> {
-    /// The environment state
-    env: InnerEnv<'env>,
+pub struct Scheduler {
+    /// The reactor runtime store
+    store: Pin<Box<Store>>,
     /// The reaction graph containing all static dependency and relationship information
     reaction_graph: ReactionGraph,
     /// Whether to skip wall-clock synchronization
@@ -95,39 +95,35 @@ pub struct Scheduler<'env> {
     shutdown_tx: keepalive::Sender,
 }
 
-impl<'env> Scheduler<'env> {
+impl Scheduler {
+    /// Create a new Scheduler instance.
+    ///
+    /// The Scheduler will be initialized with the provided environment and reaction graph.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The environment containing all the runtime data structures.
+    /// * `reaction_graph` - The reaction graph containing all static dependency and relationship information.
+    /// * `fast_forward` - Whether to skip wall-clock synchronization.
+    /// * `keep_alive` - Whether to keep the scheduler alive for any possible asynchronous events. If `false`, the
+    ///    scheduler will terminate when there are no more events to process.
     pub fn new(
-        env: &'env mut Env,
+        env: Env,
         reaction_graph: ReactionGraph,
         fast_forward: bool,
         keep_alive: bool,
     ) -> Self {
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
         let (shutdown_tx, shutdown_rx) = keepalive::channel();
-        let events = EventQueue::new(reaction_graph.reaction_set_limits.clone());
-
         let start_time = Instant::now();
 
         // Build contexts for each reaction
-        let contexts = reaction_graph
-            .reaction_reactors
-            .iter()
-            .map(|(reaction_key, reactor_key)| {
-                let bank_info = &reaction_graph.reactor_bank_infos[*reactor_key];
-                let ctx = Context::new(
-                    start_time,
-                    bank_info.clone(),
-                    event_tx.clone(),
-                    shutdown_rx.clone(),
-                );
-                (reaction_key, ctx)
-            })
-            .collect();
+        let contexts = build_reaction_contexts(&reaction_graph, start_time, event_tx, shutdown_rx);
 
-        let inner_env = InnerEnv { env, contexts };
-
+        let store = Store::new(env, contexts, &reaction_graph);
+        let events = EventQueue::new(reaction_graph.reaction_set_limits.clone());
         Self {
-            env: inner_env,
+            store,
             reaction_graph,
             fast_forward,
             keep_alive,
@@ -142,6 +138,12 @@ impl<'env> Scheduler<'env> {
     /// Execute startup of the Scheduler.
     #[tracing::instrument(skip(self))]
     fn startup(&mut self) {
+        //#[cfg(feature = "parallel")]
+        //rayon::ThreadPoolBuilder::new()
+        //    .num_threads(4)
+        //    .build_global()
+        //    .unwrap();
+
         self.start_time = Instant::now();
 
         let tag = Tag::new(Duration::ZERO, 0);
@@ -150,7 +152,7 @@ impl<'env> Scheduler<'env> {
         let mut reaction_set = self.events.next_reaction_set();
         reaction_set.extend_above(self.reaction_graph.startup_reactions.iter().copied());
 
-        tracing::info!(tag = %tag, ?reaction_set, "Starting the execution.");
+        tracing::info!(tag = %tag, "Starting the execution.");
         self.process_tag(tag, reaction_set.view());
     }
 
@@ -208,7 +210,7 @@ impl<'env> Scheduler<'env> {
             }
 
             if let Some(mut event) = self.events.event_queue.pop() {
-                tracing::debug!(event = %event, reactions = ?event.reactions, "Handling event");
+                tracing::debug!(event = %event, "Handling event");
 
                 if !self.fast_forward {
                     let target = event.tag.to_logical_time(self.start_time);
@@ -302,16 +304,11 @@ impl<'env> Scheduler<'env> {
     /// Reactions at a level N may trigger further reactions at levels M>N
     #[tracing::instrument(skip(self, reaction_view), fields(tag = %tag))]
     pub fn process_tag(&mut self, tag: Tag, reaction_view: KeySetView<ReactionKey>) {
-        let bump = bumpalo::Bump::new();
-
         reaction_view.for_each_level(|level, reaction_keys, next_levels| {
             tracing::trace!(level=?level, "Iter");
 
             // Safety: reaction_keys in the same level are guaranteed to be independent of each other.
-            let iter_ctx = unsafe {
-                self.env
-                    .iter_reaction_ctx(&self.reaction_graph, &bump, reaction_keys)
-            };
+            let iter_ctx = unsafe { self.store.iter_borrow_storage(reaction_keys) };
 
             #[cfg(feature = "parallel")]
             use rayon::prelude::ParallelIterator;
@@ -342,6 +339,9 @@ impl<'env> Scheduler<'env> {
                 &context.trigger_res
             });
 
+            #[cfg(feature = "parallel")]
+            let iter_ctx_res = iter_ctx_res.collect::<Vec<_>>();
+
             for res in iter_ctx_res {
                 if let Some(shutdown_tag) = res.scheduled_shutdown {
                     // if the new shutdown tag is earlier than the current shutdown tag, update the shutdown tag and
@@ -367,15 +367,15 @@ impl<'env> Scheduler<'env> {
 
             // Collect all the reactions that are triggered by the ports
             let downstream = self
-                .env
-                .iter_set_ports()
-                .flat_map(|(port_key, _)| self.reaction_graph.port_triggers[port_key].iter());
+                .store
+                .iter_set_port_keys()
+                .flat_map(|port_key| self.reaction_graph.port_triggers[port_key].iter());
 
             if let Some(mut next_levels) = next_levels {
                 next_levels.extend_above(downstream.copied());
             }
         });
 
-        self.env.reset_ports();
+        self.store.reset_ports();
     }
 }

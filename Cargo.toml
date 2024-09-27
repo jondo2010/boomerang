@@ -33,7 +33,7 @@ rayon = "1.10"
 # Local crates
 boomerang = { path = "boomerang" }
 boomerang_derive = { path = "boomerang_derive" }
-boomerang_runtime = { path = "boomerang_runtime" }
+boomerang_runtime = { path = "boomerang_runtime", default-features = false }
 boomerang_tinymap = { path = "boomerang_tinymap" }
 boomerang_util = { path = "boomerang_util" }
 tinymap = { package = "boomerang_tinymap", path = "boomerang_tinymap" }

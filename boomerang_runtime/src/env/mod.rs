@@ -4,9 +4,6 @@ use crate::{
 };
 
 mod debug;
-mod inner;
-
-pub(crate) use inner::{InnerEnv, ReactionTriggerCtx};
 
 /// Execution level
 #[repr(transparent)]

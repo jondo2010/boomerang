@@ -435,7 +435,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
     let reaction_sink_clock_key =
         env_builder.find_reaction_by_name("reaction_clock", sink_reactor)?;
 
-    let (mut env, triggers, aliases) = env_builder.into_runtime_parts()?;
+    let (env, triggers, aliases) = env_builder.into_runtime_parts()?;
 
     // the Source startup reaction should trigger on startup and effect the clock port
     let runtime_reaction_source_startup_key = aliases.reaction_aliases[reaction_source_startup_key];
@@ -470,7 +470,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
         [],
     );
 
-    let mut sched = runtime::Scheduler::new(&mut env, triggers, true, false);
+    let mut sched = runtime::Scheduler::new(env, triggers, true, false);
     sched.event_loop();
 
     Ok(())

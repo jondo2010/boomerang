@@ -9,6 +9,7 @@ mod port;
 mod reaction;
 mod reactor;
 mod sched;
+mod store;
 mod time;
 
 // Re-exports

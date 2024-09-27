@@ -19,6 +19,9 @@ derive = ["dep:boomerang_derive"]
 ## Support for serialization
 serde = ["boomerang_runtime/serde"]
 
+## Support for parallel execution
+parallel = ["boomerang_runtime/parallel"]
+
 [dependencies]
 anyhow.workspace = true
 document-features = { workspace = true }
@@ -31,7 +34,7 @@ tinymap.workspace = true
 tracing.workspace = true
 
 boomerang_derive = { workspace = true, optional = true }
-boomerang_runtime.workspace = true
+boomerang_runtime = { workspace = true, default-features = false }
 
 [dev-dependencies]
 tracing-subscriber = "0.3"

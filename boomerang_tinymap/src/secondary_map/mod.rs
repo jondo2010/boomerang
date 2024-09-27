@@ -56,6 +56,13 @@ pub struct Iter<'a, K: Key, V: 'a> {
 }
 
 #[derive(Debug)]
+pub struct IterMut<'a, K: Key, V: 'a> {
+    values_left: usize,
+    inner: Enumerate<core::slice::IterMut<'a, Option<V>>>,
+    _k: PhantomData<K>,
+}
+
+#[derive(Debug)]
 pub struct IntoIter<K: Key, V> {
     values_left: usize,
     inner: Enumerate<std::vec::IntoIter<Option<V>>>,
@@ -98,6 +105,7 @@ impl<'a, K: Key, V> Iterator for Iter<'a, K, V> {
     fn next(&mut self) -> Option<Self::Item> {
         for (idx, v) in self.inner.by_ref() {
             if let Some(v) = v {
+                self.values_left -= 1;
                 return Some((K::from(idx), v));
             }
         }
@@ -106,6 +114,32 @@ impl<'a, K: Key, V> Iterator for Iter<'a, K, V> {
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         (self.values_left, None)
+    }
+}
+
+impl<'a, K: Key, V> ExactSizeIterator for Iter<'a, K, V> {
+    fn len(&self) -> usize {
+        self.values_left
+    }
+}
+
+impl<'a, K: Key, V> Iterator for IterMut<'a, K, V> {
+    type Item = (K, &'a mut V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        for (idx, v) in self.inner.by_ref() {
+            if let Some(v) = v {
+                self.values_left -= 1;
+                return Some((K::from(idx), v));
+            }
+        }
+        None
+    }
+}
+
+impl<'a, K: Key, V> ExactSizeIterator for IterMut<'a, K, V> {
+    fn len(&self) -> usize {
+        self.values_left
     }
 }
 
@@ -189,6 +223,14 @@ impl<K: Key, V> TinySecondaryMap<K, V> {
     pub fn iter(&self) -> Iter<'_, K, V> {
         Iter {
             inner: self.data.iter().enumerate(),
+            values_left: self.num_values,
+            _k: PhantomData,
+        }
+    }
+
+    pub fn iter_mut(&mut self) -> IterMut<'_, K, V> {
+        IterMut {
+            inner: self.data.iter_mut().enumerate(),
             values_left: self.num_values,
             _k: PhantomData,
         }
@@ -350,5 +392,34 @@ mod tests {
         assert_eq!(vals.next(), Some(&3));
         assert_eq!(vals.next(), Some(&4));
         assert_eq!(vals.next(), None);
+    }
+
+    #[test]
+    fn test_iter() {
+        let mut map = TinySecondaryMap::<DefaultKey, _>::new();
+        map.insert(DefaultKey(3), 4);
+        map.insert(DefaultKey(0), 1);
+        map.insert(DefaultKey(2), 3);
+        map.insert(DefaultKey(1), 2);
+
+        let mut iter = map.iter();
+        assert_eq!(iter.len(), 4);
+        assert_eq!(iter.next(), Some((DefaultKey(0), &1)));
+        assert_eq!(iter.next(), Some((DefaultKey(1), &2)));
+        assert_eq!(iter.len(), 2);
+        assert_eq!(iter.next(), Some((DefaultKey(2), &3)));
+        assert_eq!(iter.next(), Some((DefaultKey(3), &4)));
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.len(), 0);
+
+        let mut iter_mut = map.iter_mut();
+        assert_eq!(iter_mut.len(), 4);
+        assert_eq!(iter_mut.next(), Some((DefaultKey(0), &mut 1)));
+        assert_eq!(iter_mut.next(), Some((DefaultKey(1), &mut 2)));
+        assert_eq!(iter_mut.len(), 2);
+        assert_eq!(iter_mut.next(), Some((DefaultKey(2), &mut 3)));
+        assert_eq!(iter_mut.next(), Some((DefaultKey(3), &mut 4)));
+        assert_eq!(iter_mut.next(), None);
+        assert_eq!(iter_mut.len(), 0);
     }
 }

@@ -206,6 +206,7 @@ struct Connection {
     from: PortDef,
     to: PortDef,
     broadcast: bool,
+    #[allow(dead_code)] // TODO: Implement
     after: Option<Duration>,
 }
 

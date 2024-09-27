@@ -2,7 +2,7 @@ use crossbeam_channel::Sender;
 
 use crate::{
     event::PhysicalEvent, keepalive, ActionData, ActionKey, ActionRefValue, BankInfo, Duration,
-    Instant, PhysicalActionRef, Tag,
+    Instant, PhysicalActionRef, ReactionGraph, ReactionKey, Tag,
 };
 
 /// Result from a reaction trigger
@@ -178,4 +178,27 @@ impl SendContext {
     pub fn is_shutdown(&self) -> bool {
         self.shutdown_rx.is_shutdwon()
     }
+}
+
+/// Build contexts for each reaction
+pub fn build_reaction_contexts(
+    reaction_graph: &ReactionGraph,
+    start_time: Instant,
+    event_tx: crossbeam_channel::Sender<PhysicalEvent>,
+    shutdown_rx: keepalive::Receiver,
+) -> tinymap::TinySecondaryMap<ReactionKey, Context> {
+    reaction_graph
+        .reaction_reactors
+        .iter()
+        .map(|(reaction_key, reactor_key)| {
+            let bank_info = &reaction_graph.reactor_bank_infos[*reactor_key];
+            let ctx = Context::new(
+                start_time,
+                bank_info.clone(),
+                event_tx.clone(),
+                shutdown_rx.clone(),
+            );
+            (reaction_key, ctx)
+        })
+        .collect()
 }

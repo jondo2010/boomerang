@@ -4,8 +4,18 @@ use downcast_rs::{impl_downcast, Downcast};
 
 tinymap::key_type! { pub ReactorKey }
 
+#[cfg(feature = "parallel")]
+pub trait ReactorState: Downcast + Send + Sync {}
+
+#[cfg(feature = "parallel")]
+impl<T> ReactorState for T where T: Downcast + Send + Sync {}
+
+#[cfg(not(feature = "parallel"))]
 pub trait ReactorState: Downcast {}
+
+#[cfg(not(feature = "parallel"))]
 impl<T> ReactorState for T where T: Downcast {}
+
 impl_downcast!(ReactorState);
 
 pub struct Reactor {

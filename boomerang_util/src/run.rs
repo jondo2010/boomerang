@@ -89,7 +89,7 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
     if args.print_debug_info {
         println!("{env_builder:#?}");
     }
-    let (mut env, triggers, _) = env_builder
+    let (env, triggers, _) = env_builder
         .into_runtime_parts()
         .context("Error building environment!")?;
     if args.print_debug_info {

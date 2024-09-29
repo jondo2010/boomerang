@@ -77,6 +77,6 @@ impl Trigger<GainBuilder> for GainReactionTim<'_> {
 #[test]
 fn gain() {
     tracing_subscriber::fmt::init();
-    let _ = boomerang_util::run::build_and_test_reactor::<GainBuilder>("gain", (), true, false)
+    let _ = boomerang_util::runner::build_and_test_reactor::<GainBuilder>("gain", (), true, false)
         .unwrap();
 }

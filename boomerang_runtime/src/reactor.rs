@@ -20,7 +20,7 @@ impl_downcast!(ReactorState);
 
 pub struct Reactor {
     /// The reactor name
-    pub(crate) name: String,
+    name: String,
     /// The ReactorState
     pub(crate) state: Box<dyn ReactorState>,
 }

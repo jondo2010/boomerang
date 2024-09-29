@@ -1,5 +1,6 @@
 [package]
-name = 'boomerang_util'
+name = "boomerang_util"
+description = "Utilities for Boomerang"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -14,12 +15,12 @@ default = ["keyboard", "runner", "replay", "serde"]
 keyboard = ["dep:termion"]
 
 ## Support for built-in CLI/runner methods
-runner = ["dep:clap", "dep:anyhow"]
+runner = ["dep:clap", "dep:anyhow", "boomerang/graphviz"]
 
 ## Support for serde serialization
 serde = ["dep:serde", "dep:erased-serde", "termion/serde", "boomerang/serde"]
 
-# Support for recording and replaying
+## Support for recording and replaying
 replay = ["serde", "dep:bincode"]
 
 [dependencies]
@@ -29,7 +30,7 @@ clap = { version = "4.2", features = ["derive"], optional = true }
 document-features = { workspace = true }
 erased-serde = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
-tracing = "0.1"
+tracing.workspace = true
 
 serde_json = { version = "1.0" }
 serde_arrow = { version = "0.11", features = ["arrow-52"] }

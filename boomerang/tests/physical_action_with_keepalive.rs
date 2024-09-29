@@ -46,7 +46,7 @@ impl Trigger<MainBuilder> for ReactionAct {
 #[test]
 fn physical_action_with_keepalive() {
     tracing_subscriber::fmt::init();
-    let _ = boomerang_util::run::build_and_test_reactor::<MainBuilder>(
+    let _ = boomerang_util::runner::build_and_test_reactor::<MainBuilder>(
         "physical_action_with_keepalive",
         (),
         true,

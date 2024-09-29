@@ -1,6 +1,6 @@
 [workspace.package]
 description = "Deterministic Middleware for Robotics"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["John Hughes <jondo2010@gmail.com>"]
@@ -36,15 +36,16 @@ boomerang_derive = { path = "boomerang_derive" }
 boomerang_runtime = { path = "boomerang_runtime", default-features = false }
 boomerang_tinymap = { path = "boomerang_tinymap" }
 boomerang_util = { path = "boomerang_util" }
+boomerang_builder = { path = "boomerang_builder" }
 tinymap = { package = "boomerang_tinymap", path = "boomerang_tinymap" }
 
 [workspace]
 members = [
     "boomerang",
+    "boomerang_builder",
     "boomerang_derive",
     "boomerang_runtime",
     "boomerang_tinymap",
-    "tests-integration",
 ]
 resolver = "2"
 
@@ -53,4 +54,3 @@ inherits = "release"
 debug = true
 
 [patch.crates-io]
-fixedbitset = { git = "https://github.com/jondo2010/fixedbitset", branch = "ones_derive_clone" }

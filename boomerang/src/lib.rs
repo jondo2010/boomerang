@@ -67,29 +67,22 @@
 #![deny(unsafe_code)]
 #![deny(clippy::all)]
 
-pub mod builder;
 pub mod flatten_transposed;
 
 // Re-exports
+pub use boomerang_builder as builder;
 pub use boomerang_runtime as runtime;
 
 #[cfg(feature = "derive")]
 #[doc(hidden)]
 pub use boomerang_derive::*;
 
+/// Top-level error type for Boomerang
 #[derive(thiserror::Error, Debug)]
 pub enum BoomerangError {
-    /// An internal builder error
-    #[error("Internal Builder Error")]
-    BuilderInternal,
-
-    /// An arbitrary error message.
-    #[error("{0}")]
-    Custom(String),
-
     #[error(transparent)]
     Builder(#[from] builder::BuilderError),
 
     #[error(transparent)]
-    Runtime(#[from] boomerang_runtime::RuntimeError),
+    Runtime(#[from] runtime::RuntimeError),
 }

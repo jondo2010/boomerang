@@ -99,7 +99,7 @@ impl Trigger<AsyncCallback> for ReactionShutdown {
 #[test]
 fn async_callback() {
     tracing_subscriber::fmt::init();
-    let _ = boomerang_util::run::build_and_test_reactor::<AsyncCallback>(
+    let _ = boomerang_util::runner::build_and_test_reactor::<AsyncCallback>(
         "async_callback",
         State {
             thread: None,

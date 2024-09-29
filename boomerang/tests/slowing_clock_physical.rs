@@ -83,7 +83,7 @@ impl Trigger<SlowingClockPhysical> for ReactionShutdown {
 #[test]
 fn slowing_clock_physical() {
     tracing_subscriber::fmt::init();
-    let _ = boomerang_util::run::build_and_test_reactor::<SlowingClockPhysical>(
+    let _ = boomerang_util::runner::build_and_test_reactor::<SlowingClockPhysical>(
         "slowing_clock_physical",
         State {
             interval: runtime::Duration::from_millis(100),

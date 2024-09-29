@@ -1,8 +1,8 @@
-/// Events are scheduled with increasing additional delays of 0, 100, 300, 600 msec on a logical action with a minimum delay of 100 msec.  
-///
-/// The use of the logical action ensures the elapsed time jumps exactly from 0 to 100, 300, 600, and 1000 msec.
-///
-/// Ported from https://github.com/lf-lang/lingua-franca/blob/master/test/C/src/SlowingClock.lf
+//! Events are scheduled with increasing additional delays of 0, 100, 300, 600 msec on a logical action with a minimum delay of 100 msec.  
+//!
+//! The use of the logical action ensures the elapsed time jumps exactly from 0 to 100, 300, 600, and 1000 msec.
+//!
+//! Ported from https://github.com/lf-lang/lingua-franca/blob/master/test/C/src/SlowingClock.lf
 use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
 use boomerang_util::timeout;
 use runtime::Duration;
@@ -94,7 +94,7 @@ impl Trigger<SlowingClockBuilder> for ReactionShutdown {
 #[test]
 fn slowing_clock() {
     tracing_subscriber::fmt::init();
-    let _ = boomerang_util::run::build_and_test_reactor::<SlowingClockBuilder>(
+    let _ = boomerang_util::runner::build_and_test_reactor::<SlowingClockBuilder>(
         "slowing_clock",
         SlowingClock::default(),
         true,

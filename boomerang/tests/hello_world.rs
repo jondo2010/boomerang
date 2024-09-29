@@ -44,7 +44,11 @@ struct HelloWorld {
 #[test]
 fn hello_world() {
     tracing_subscriber::fmt::init();
-    let _ =
-        boomerang_util::run::build_and_test_reactor::<HelloWorld>("hello_world", (), true, false)
-            .unwrap();
+    let _ = boomerang_util::runner::build_and_test_reactor::<HelloWorld>(
+        "hello_world",
+        (),
+        true,
+        false,
+    )
+    .unwrap();
 }

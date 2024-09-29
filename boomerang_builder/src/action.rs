@@ -6,10 +6,10 @@
 
 use std::{fmt::Debug, marker::PhantomData};
 
-use crate::runtime;
-use slotmap::SecondaryMap;
-
 use super::{BuilderReactionKey, BuilderReactorKey};
+use crate::runtime;
+
+use slotmap::SecondaryMap;
 
 slotmap::new_key_type! {pub struct BuilderActionKey;}
 
@@ -165,7 +165,7 @@ impl ActionBuilder {
         &self.ty
     }
 
-    /// Build the `ActionBuilder` into a [`runtime::InternalAction`]
+    /// Build the `ActionBuilder` into a [`runtime::Action`]
     pub fn build_runtime(&self, action_key: runtime::ActionKey) -> runtime::Action {
         (self.action_builder_fn)(&self.name, action_key)
     }

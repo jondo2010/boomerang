@@ -1,3 +1,9 @@
+#![doc=include_str!( "../README.md")]
+//! ## Feature flags
+#![doc = document_features::document_features!()]
+#![deny(unsafe_code)]
+#![deny(clippy::all)]
+
 mod action;
 mod env;
 mod fqn;
@@ -7,7 +13,7 @@ mod reactor;
 #[cfg(test)]
 pub mod tests;
 
-#[cfg(feature = "visualization")]
+#[cfg(feature = "graphviz")]
 pub mod graphviz;
 
 pub use action::*;
@@ -16,6 +22,8 @@ pub use fqn::*;
 pub use port::*;
 pub use reaction::*;
 pub use reactor::*;
+
+use boomerang_runtime as runtime;
 
 pub mod prelude {
     pub use super::{
@@ -92,9 +100,6 @@ pub enum BuilderError {
 
     #[error(transparent)]
     IoError(#[from] std::io::Error),
-
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
 }
 
 impl From<std::convert::Infallible> for BuilderError {

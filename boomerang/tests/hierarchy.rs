@@ -1,8 +1,6 @@
-//#![allow(dead_code)]
+//! Test data transport across hierarchy.
 
 use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
-
-// Test data transport across hierarchy.
 
 #[derive(Reactor)]
 #[reactor(state = "()", reaction = "SourceReactionOut")]
@@ -114,7 +112,7 @@ struct HierarchyBuilder {
 #[test]
 fn hierarchy() {
     tracing_subscriber::fmt::init();
-    let _ = boomerang_util::run::build_and_test_reactor::<HierarchyBuilder>(
+    let _ = boomerang_util::runner::build_and_test_reactor::<HierarchyBuilder>(
         "hierarchy",
         (),
         true,

@@ -626,7 +626,7 @@ impl EnvBuilder {
     /// schedule
     ///
     /// This implements the Coffman-Graham algorithm for job scheduling.
-    /// See https://en.m.wikipedia.org/wiki/Coffman%E2%80%93Graham_algorithm
+    /// See <https://en.m.wikipedia.org/wiki/Coffman%E2%80%93Graham_algorithm>
     pub fn build_runtime_level_map(
         &self,
     ) -> Result<SecondaryMap<BuilderReactionKey, Level>, BuilderError> {

@@ -2,7 +2,7 @@ use boomerang_runtime::{self as runtime, LevelReactionKey};
 use itertools::Itertools;
 use slotmap::{SecondaryMap, SlotMap};
 
-use crate::builder::{
+use crate::{
     BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactionKey, BuilderReactorKey,
     ReactionBuilder, ReactorBuilder,
 };
@@ -32,15 +32,15 @@ struct RuntimeReactionParts {
     reactions: tinymap::TinyMap<runtime::ReactionKey, runtime::Reaction>,
     use_ports: tinymap::TinySecondaryMap<
         runtime::ReactionKey,
-        tinymap::TinySecondarySet<runtime::PortKey>,
+        tinymap::KeySet<runtime::PortKey>,
     >,
     effect_ports: tinymap::TinySecondaryMap<
         runtime::ReactionKey,
-        tinymap::TinySecondarySet<runtime::PortKey>,
+        tinymap::KeySet<runtime::PortKey>,
     >,
     actions: tinymap::TinySecondaryMap<
         runtime::ReactionKey,
-        tinymap::TinySecondarySet<runtime::ActionKey>,
+        tinymap::KeySet<runtime::ActionKey>,
     >,
     /// Aliases from BuilderReactionKey to runtime::ReactionKey
     reaction_aliases: SecondaryMap<BuilderReactionKey, runtime::ReactionKey>,

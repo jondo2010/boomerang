@@ -94,7 +94,7 @@ struct MainReactor<const NUM_NODES: usize = 4> {
 #[test]
 fn mutliport_fully_connected() {
     tracing_subscriber::fmt::init();
-    let _ = boomerang_util::run::build_and_test_reactor::<MainReactor>(
+    let _ = boomerang_util::runner::build_and_test_reactor::<MainReactor>(
         "multiport_fully_connected",
         (),
         true,

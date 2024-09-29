@@ -102,7 +102,7 @@ struct Main<const NUM_NODES: usize = 4> {
 #[test]
 fn fully_connected_addressable() {
     tracing_subscriber::fmt::init();
-    let _ = boomerang_util::run::build_and_test_reactor::<Main>(
+    let _ = boomerang_util::runner::build_and_test_reactor::<Main>(
         "fully_connected_addressable",
         (),
         true,

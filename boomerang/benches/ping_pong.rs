@@ -161,7 +161,7 @@ impl Trigger<MainBuilder> for ReactionDone<'_> {
 fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("ping_pong");
 
-    for count in [100, 10000, 1000000].into_iter() {
+    for count in [100, 10_000, 1_000_000].into_iter() {
         group.sample_size(25);
         group.throughput(Throughput::Elements(count as u64));
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
@@ -178,20 +178,20 @@ fn bench(c: &mut Criterion) {
                     let mut sched = runtime::Scheduler::new(env, triggers, true, false);
                     sched.event_loop();
 
-                    /*
+                    // validate the end state
+                    let env = sched.into_env();
                     let ping = env
-                        .get_reactor_by_name("ping")
+                        .find_reactor_by_name("ping")
                         .and_then(|reactor| reactor.get_state::<Ping>())
                         .unwrap();
                     assert_eq!(ping.count, count);
                     assert_eq!(ping.pings_left, 0);
 
                     let pong = env
-                        .get_reactor_by_name("pong")
+                        .find_reactor_by_name("pong")
                         .and_then(|reactor| reactor.get_state::<Pong>())
                         .unwrap();
                     assert_eq!(pong.count, count);
-                    */
                 },
                 BatchSize::SmallInput,
             );

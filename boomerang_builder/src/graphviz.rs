@@ -1,4 +1,4 @@
-//! Methods for constructing Graphviz graphs representing the `EnvBuilder` useful for debugging and
+//! Methods for constructing Graphviz graphs representing the [`EnvBuilder`] useful for debugging and
 //! understand the Reactor graph.
 
 use super::{

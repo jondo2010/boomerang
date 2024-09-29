@@ -1,4 +1,4 @@
-use crate::builder::{TimerSpec, TriggerMode};
+use crate::{TimerSpec, TriggerMode};
 
 use super::*;
 

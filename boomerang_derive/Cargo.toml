@@ -1,5 +1,6 @@
 [package]
 name = "boomerang_derive"
+description = "Derive macros for Boomerang"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -103,6 +103,11 @@ where
     }
 }
 
+/// A reference to an input port.
+///
+/// `InputRef` is the type that Reaction functions receive for their input ports.
+///
+/// See also: [`OutputRef`]
 pub struct InputRef<'a, T: PortData = ()>(&'a Port<T>);
 
 impl<'a, T: PortData> InputRef<'a, T> {
@@ -129,6 +134,11 @@ impl<'a, T: PortData> Deref for InputRef<'a, T> {
     }
 }
 
+/// A reference to an output port.
+///
+/// `OutputRef` is the type that Reaction functions receive for their input ports.
+///
+/// See also: [`InputRef`]
 pub struct OutputRef<'a, T: PortData = ()>(&'a mut Port<T>);
 
 impl<'a, T: PortData> OutputRef<'a, T> {

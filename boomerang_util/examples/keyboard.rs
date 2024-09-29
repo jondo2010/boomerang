@@ -50,7 +50,8 @@ mod example {
 #[cfg(not(windows))]
 fn main() {
     tracing_subscriber::fmt::init();
-    let _ = boomerang_util::run::build_and_run_reactor::<example::Example>("printer", ()).unwrap();
+    let _ =
+        boomerang_util::runner::build_and_run_reactor::<example::Example>("printer", ()).unwrap();
 }
 
 #[cfg(windows)]

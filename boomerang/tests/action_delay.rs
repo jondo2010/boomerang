@@ -123,7 +123,7 @@ struct ActionDelayBuilder {
 #[test]
 fn action_delay() {
     tracing_subscriber::fmt::init();
-    let (_, env) = boomerang_util::run::build_and_test_reactor::<ActionDelayBuilder>(
+    let (_, sched) = boomerang_util::runner::build_and_test_reactor::<ActionDelayBuilder>(
         "action_delay",
         (),
         true,
@@ -131,9 +131,10 @@ fn action_delay() {
     )
     .unwrap();
 
-    //let sink_state = env
-    //    .get_reactor_by_name("sink")
-    //    .and_then(|reactor| reactor.get_state::<bool>())
-    //    .unwrap();
-    //assert!(sink_state, "SinkReactionIn did not trigger");
+    let env = sched.into_env();
+    let sink_state = env
+        .find_reactor_by_name("sink")
+        .and_then(|reactor| reactor.get_state::<bool>())
+        .unwrap();
+    assert!(sink_state, "SinkReactionIn did not trigger");
 }

@@ -199,6 +199,7 @@ impl ReactorBuilder {
         &self.name
     }
 
+    #[allow(dead_code)] //TODO: use or remove this
     pub fn type_name(&self) -> &str {
         self.type_name.as_ref()
     }
@@ -313,7 +314,7 @@ impl<'a> ReactorBuilderState<'a> {
         }
     }
 
-    /// Get the [`ReactorKey`] for this [`ReactorBuilder`]
+    /// Get the [`BuilderReactorKey`] for this `ReactorBuilder`
     pub fn get_key(&self) -> BuilderReactorKey {
         self.reactor_key
     }
@@ -369,8 +370,7 @@ impl<'a> ReactorBuilderState<'a> {
 
     /// Add a new logical action to the reactor.
     ///
-    /// This method forwards to the implementation at
-    /// [`crate::builder::env::EnvBuilder::add_logical_action`].
+    /// This method forwards to the implementation at [`crate::env::EnvBuilder::add_logical_action`].
     pub fn add_logical_action<T: runtime::ActionData>(
         &mut self,
         name: &str,

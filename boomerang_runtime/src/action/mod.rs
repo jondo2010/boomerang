@@ -78,11 +78,12 @@ pub struct PhysicalAction {
 impl PhysicalAction {
     pub fn new<T: ActionData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
         let store = ActionStore::<T>::new();
+        let store: Arc<Mutex<dyn BaseActionStore>> = Arc::new(Mutex::new(store));
         Self {
             name: name.into(),
             key,
             min_delay,
-            store: Arc::new(Mutex::new(store)),
+            store,
         }
     }
 

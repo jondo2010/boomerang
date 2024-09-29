@@ -91,7 +91,7 @@ struct DeterminismBuilder {
 #[test]
 fn determinism() {
     tracing_subscriber::fmt::init();
-    let _ = boomerang_util::run::build_and_test_reactor::<DeterminismBuilder>(
+    let _ = boomerang_util::runner::build_and_test_reactor::<DeterminismBuilder>(
         "determinism",
         (),
         true,

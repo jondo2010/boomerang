@@ -228,7 +228,7 @@ mod reactor {
 #[cfg(not(windows))]
 fn main() {
     use reactor::{Snake, SnakeBuilder};
-    let _ = boomerang_util::run::build_and_run_reactor::<SnakeBuilder>(
+    let _ = boomerang_util::runner::build_and_run_reactor::<SnakeBuilder>(
         "snake",
         Snake::new(32, boomerang::runtime::Duration::from_millis(40), 2),
     )

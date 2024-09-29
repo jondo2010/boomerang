@@ -34,7 +34,7 @@ boomerang_derive = { workspace = true, optional = true }
 boomerang_runtime = { workspace = true, default-features = false }
 
 [dev-dependencies]
-boomerang_util = { workspace = true, features = [
+boomerang_util = { path = "../boomerang_util", features = [
     "keyboard",
     "runner",
     "serde",

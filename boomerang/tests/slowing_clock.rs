@@ -21,7 +21,7 @@ impl Default for SlowingClock {
     }
 }
 
-#[derive(Clone, Reactor)]
+#[derive(Reactor)]
 #[reactor(
     state = "SlowingClock",
     reaction = "ReactionStartup",

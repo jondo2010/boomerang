@@ -11,7 +11,7 @@ struct State {
     i: usize,
 }
 
-#[derive(Clone, Reactor)]
+#[derive(Reactor)]
 #[reactor(
     state = "State",
     reaction = "ReactionT",

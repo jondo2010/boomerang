@@ -12,7 +12,7 @@ struct State {
     expected_time: runtime::Duration,
 }
 
-#[derive(Clone, Reactor)]
+#[derive(Reactor)]
 #[reactor(
     state = "State",
     reaction = "ReactionStartup",

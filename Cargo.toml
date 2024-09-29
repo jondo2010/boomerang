@@ -31,13 +31,13 @@ erased-serde = "0.4"
 rayon = "1.10"
 
 # Local crates
-boomerang = { path = "boomerang" }
-boomerang_derive = { path = "boomerang_derive" }
-boomerang_runtime = { path = "boomerang_runtime", default-features = false }
-boomerang_tinymap = { path = "boomerang_tinymap" }
-boomerang_util = { path = "boomerang_util" }
-boomerang_builder = { path = "boomerang_builder" }
-tinymap = { package = "boomerang_tinymap", path = "boomerang_tinymap" }
+boomerang = { path = "boomerang", version = "0.3.0" }
+boomerang_derive = { path = "boomerang_derive", version = "0.3.0" }
+boomerang_runtime = { path = "boomerang_runtime", version = "0.3.0", default-features = false }
+boomerang_tinymap = { path = "boomerang_tinymap", version = "0.3.0" }
+boomerang_util = { path = "boomerang_util", version = "0.3.0" }
+boomerang_builder = { path = "boomerang_builder", version = "0.3.0" }
+tinymap = { package = "boomerang_tinymap", path = "boomerang_tinymap", version = "0.3.0" }
 
 [workspace]
 members = [

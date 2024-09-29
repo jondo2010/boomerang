@@ -12,7 +12,7 @@ trait CountData:
 
 impl CountData for i32 {}
 
-#[derive(Reactor, Clone)]
+#[derive(Reactor)]
 #[reactor(state = "T", reaction = "ReactionT<T>", reaction = "ReactionShutdown")]
 struct Count<T: CountData> {
     #[reactor(timer(period = "1 msec"))]

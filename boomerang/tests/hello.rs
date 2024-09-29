@@ -25,7 +25,7 @@ impl Hello {
     }
 }
 
-#[derive(Clone, Reactor)]
+#[derive(Reactor)]
 #[reactor(state = "Hello", reaction = "ReactionT", reaction = "ReactionA")]
 struct HelloBuilder {
     #[reactor(timer(offset = "1 sec", period = "2 sec"))]
@@ -84,14 +84,14 @@ impl Inside {
     }
 }
 
-#[derive(Clone, Reactor)]
+#[derive(Reactor)]
 #[reactor(state = Inside)]
 struct InsideBuilder {
     #[reactor(child = Hello::new(Duration::from_secs(1), "Composite default message."))]
     _third_instance: HelloBuilder,
 }
 
-#[derive(Clone, Reactor)]
+#[derive(Reactor)]
 #[reactor(state = ())]
 struct MainBuilder {
     #[reactor(child = Hello::new(Duration::from_secs(4), "Hello from first."))]

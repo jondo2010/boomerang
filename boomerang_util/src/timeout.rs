@@ -1,8 +1,8 @@
 //! Timeout reactor that schedules a shutdown after a specified duration.
 
-use boomerang::{builder::Trigger, runtime, Reaction, Reactor};
+use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
 
-#[derive(Reactor, Clone)]
+#[derive(Reactor)]
 #[reactor(state = "runtime::Duration", reaction = "ReactionStartup")]
 pub struct Timeout;
 

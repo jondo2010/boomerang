@@ -1,19 +1,19 @@
 [package]
 name = "boomerang"
-description = "Rust implementation of the 'Reactors' Deterministic Actor Model"
+description.workspace = true
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
-readme.workspace = true
+readme = "README.md"
 keywords.workspace = true
 repository.workspace = true
 categories.workspace = true
 
 [features]
-default = ["visualization", "derive", "serde"]
+default = ["derive"]
 
-visualization = []
+## Procedural macro support for generating code from reactor models
 derive = ["dep:boomerang_derive"]
 
 ## Support for serialization
@@ -22,19 +22,38 @@ serde = ["boomerang_runtime/serde"]
 ## Support for parallel execution
 parallel = ["boomerang_runtime/parallel"]
 
-[dependencies]
-anyhow.workspace = true
-document-features = { workspace = true }
-graphviz-rust = "0.6"
-itertools.workspace = true
-petgraph = "0.6"
-slotmap = { version = "1.0", features = ["unstable"] }
-thiserror.workspace = true
-tinymap.workspace = true
-tracing.workspace = true
+## Support generating graphviz diagrams from reactor models
+graphviz = ["boomerang_builder/graphviz"]
 
+[dependencies]
+document-features = { workspace = true }
+thiserror.workspace = true
+
+boomerang_builder = { workspace = true }
 boomerang_derive = { workspace = true, optional = true }
 boomerang_runtime = { workspace = true, default-features = false }
 
 [dev-dependencies]
-tracing-subscriber = "0.3"
+boomerang_util = { path = "../boomerang_util", features = [
+    "keyboard",
+    "runner",
+    "serde",
+] }
+tracing-subscriber = { version = "0.3", features = [
+    "fmt",
+    "json",
+    "env-filter",
+] }
+criterion = "0.5"
+
+# Deps for Snake example
+[target.'cfg(not(windows))'.dev-dependencies]
+termcolor = { version = "1.2" }
+rand = { version = "0.8" }
+
+[[bench]]
+name = "ping_pong"
+harness = false
+
+[[example]]
+name = "snake"

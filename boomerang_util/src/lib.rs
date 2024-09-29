@@ -9,5 +9,5 @@ pub mod keyboard_events;
 #[cfg(feature = "replay")]
 pub mod replay;
 #[cfg(feature = "runner")]
-pub mod run;
+pub mod runner;
 pub mod timeout;

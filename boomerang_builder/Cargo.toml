@@ -1,0 +1,35 @@
+[package]
+name = "boomerang_builder"
+description = "The Reactor assembly API for Boomerang."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+exclude.workspace = true
+
+[features]
+default = []
+
+## Support generating graphviz diagrams from reactor models
+graphviz = ["dep:graphviz-rust"]
+
+[dependencies]
+document-features = { workspace = true }
+graphviz-rust = { version = "0.6", optional = true }
+itertools.workspace = true
+petgraph = "0.6"
+slotmap = { version = "1.0", features = ["unstable"] }
+thiserror.workspace = true
+tracing.workspace = true
+
+boomerang_derive = { workspace = true, optional = true }
+boomerang_runtime = { workspace = true, default-features = false }
+tinymap.workspace = true
+
+[dev-dependencies]
+tracing-subscriber = "0.3"
+anyhow.workspace = true

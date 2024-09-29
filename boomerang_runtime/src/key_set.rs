@@ -10,7 +10,7 @@ impl tinymap::Key for Level {
 #[derive(Default, Debug, Clone)]
 pub struct KeySet<K: tinymap::Key> {
     /// The set of keys at each level.
-    levels: Vec<tinymap::TinySecondarySet<K>>,
+    levels: Vec<tinymap::KeySet<K>>,
 }
 
 impl<K: tinymap::Key + std::fmt::Display> std::fmt::Display for KeySet<K> {
@@ -43,7 +43,7 @@ impl<K: tinymap::Key> KeySet<K> {
         }: &KeySetLimits,
     ) -> Self {
         Self {
-            levels: vec![tinymap::TinySecondarySet::with_capacity(*num_keys); max_level.0 + 1],
+            levels: vec![tinymap::KeySet::with_capacity(*num_keys); max_level.0 + 1],
         }
     }
 
@@ -77,7 +77,7 @@ impl<K: tinymap::Key> KeySet<K> {
 }
 
 pub struct KeySetView<'a, K: tinymap::Key> {
-    levels: &'a mut [tinymap::TinySecondarySet<K>],
+    levels: &'a mut [tinymap::KeySet<K>],
     /// Indicates the implicit level at levels[0].
     current_level: Level,
 }
@@ -96,7 +96,7 @@ impl<'a, K: tinymap::Key> KeySetView<'a, K> {
     /// mutable reference to the remaining levels. Empty levels are skipped.
     pub fn for_each_level<F>(mut self, mut f: F)
     where
-        F: FnMut(Level, tinymap::secondary_set::Iter<'_, K>, Option<KeySetViewMut<'_, K>>),
+        F: FnMut(Level, tinymap::key_set::Iter<'_, K>, Option<KeySetViewMut<'_, K>>),
     {
         while self.current_level.0 < self.levels.len() {
             // skip empty levels
@@ -123,7 +123,7 @@ impl<'a, K: tinymap::Key> KeySetView<'a, K> {
 }
 
 pub struct KeySetViewMut<'a, K: tinymap::Key> {
-    levels: &'a mut [tinymap::TinySecondarySet<K>],
+    levels: &'a mut [tinymap::KeySet<K>],
     /// Indicates the implicit level at levels[0].
     current_level: Level,
 }

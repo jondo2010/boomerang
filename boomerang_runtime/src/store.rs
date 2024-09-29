@@ -237,4 +237,16 @@ impl Store {
         let store = unsafe { self.as_mut().get_unchecked_mut() };
         store.inner.ports.values_mut().for_each(|p| p.cleanup());
     }
+
+    /// Turn this `Store` back into the `Env` it was built from.
+    pub fn into_env(self: Pin<Box<Self>>) -> Env {
+        // SAFETY: We are the only owner of the `Store` and we are consuming it, and immediately dropping all the cached pointers.
+        let store = unsafe { Pin::into_inner_unchecked(self) };
+        Env {
+            reactors: store.inner.reactors,
+            reactions: store.inner.reactions,
+            actions: store.inner.actions,
+            ports: store.inner.ports,
+        }
+    }
 }

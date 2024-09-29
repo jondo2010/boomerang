@@ -1,33 +1,33 @@
 [package]
 name = "boomerang_runtime"
-description = 'Rust implementation of "Reactors" Deterministic Actor Model'
+description = "Runtime types and discrete event executor for Boomerang."
 readme = "README.md"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+exclude.workspace = true
 
 [features]
-default = ["parallel", "serde"]
+default = []
+## Support for parallel execution
 parallel = ["dep:rayon"]
+## Support for serialization
 serde = ["dep:arrow", "dep:erased-serde", "dep:serde", "dep:serde_arrow"]
 
 [dependencies]
 arrow = { workspace = true, optional = true, features = ["prettyprint"] }
 crossbeam-channel = "0.5"
+document-features = { workspace = true }
 downcast-rs = "1.2"
+erased-serde = { workspace = true, optional = true }
 itertools.workspace = true
 rayon = { version = "1.7", optional = true }
-thiserror.workspace = true
-tinymap.workspace = true
-tracing = { workspace = true, features = [
-    #"max_level_debug",
-    #"release_max_level_warn",
-] }
 serde = { workspace = true, optional = true, features = ["derive"] }
 serde_arrow = { workspace = true, features = ["arrow-52"], optional = true }
-erased-serde = { workspace = true, optional = true }
-
-[dev-dependencies]
-serde_json = "1.0"
+thiserror.workspace = true
+tinymap.workspace = true
+tracing = { workspace = true }

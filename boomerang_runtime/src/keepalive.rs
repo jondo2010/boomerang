@@ -1,6 +1,6 @@
 //! A simple channel for signalling a shutdown event to threads.
 //!
-//! Originally from https://users.rust-lang.org/t/using-arc-to-terminate-a-thread/81533/15
+//! Originally from <https://users.rust-lang.org/t/using-arc-to-terminate-a-thread/81533/15>
 
 use std::sync::{
     atomic::{AtomicBool, Ordering::Relaxed},

@@ -1,7 +1,8 @@
 //! A map that uses a custom key type to index its values.
 //!
-//! `TinyMap` is a map that uses a custom key type to index its values. It is more efficient than a
-//! `HashMap` or `BTreeMap` as the keys are known at compile time and are small integers.
+//! [`TinyMap`] is a map that uses a custom key type to index its values. It is more efficient than a
+//! [`std::collections::HashMap`] or [`std::collections::BTreeMap`] as the keys are known at compile time and are small
+//! integers.
 //!
 //! Key values are not created by the user, but are instead created by the `TinyMap` itself when
 //! inserting values.
@@ -18,7 +19,6 @@
 //! assert_eq!(map[key1], 10);
 //! assert_eq!(map[key2], 20);
 //! ```
-
 use std::{
     fmt::Debug,
     iter::Enumerate,
@@ -34,6 +34,9 @@ mod iter_many;
 pub use chunks::{Chunks, ChunksMut, SplitChunks};
 pub use iter_many::IterManyMut;
 
+/// A map that uses a custom key type to index its values.
+///
+/// See the [module-level documentation](index.html) for more information.
 pub struct TinyMap<K: Key, V> {
     pub(crate) data: Vec<V>,
     _k: PhantomData<K>,

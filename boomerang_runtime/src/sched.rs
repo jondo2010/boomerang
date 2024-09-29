@@ -378,4 +378,12 @@ impl Scheduler {
 
         self.store.reset_ports();
     }
+
+    /// Consume the scheduler and return the `Env` instance.
+    ///
+    /// This method is useful for testing purposes, as it allows the caller to inspect reactor states after the
+    /// scheduler has been run.
+    pub fn into_env(self) -> Env {
+        self.store.into_env()
+    }
 }

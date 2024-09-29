@@ -63,10 +63,10 @@ pub struct Env {
 
 impl Env {
     /// Get a reactor by it's name
-    pub fn get_reactor_by_name(&self, name: &str) -> Option<&Reactor> {
+    pub fn find_reactor_by_name(&self, name: &str) -> Option<&Reactor> {
         self.reactors
             .iter()
-            .find(|(_, reactor)| reactor.name == name)
+            .find(|(_, reactor)| reactor.get_name() == name)
             .map(|(_, reactor)| reactor)
     }
 }
@@ -95,14 +95,11 @@ pub struct ReactionGraph {
     /// The maximum level of any reaction, and the total number of reactions. This is used to allocate the reaction set.
     pub reaction_set_limits: KeySetLimits,
     /// For each reaction, the set of 'use' ports
-    pub reaction_use_ports:
-        tinymap::TinySecondaryMap<ReactionKey, tinymap::TinySecondarySet<PortKey>>,
+    pub reaction_use_ports: tinymap::TinySecondaryMap<ReactionKey, tinymap::KeySet<PortKey>>,
     /// For each reaction, the set of 'effect' ports
-    pub reaction_effect_ports:
-        tinymap::TinySecondaryMap<ReactionKey, tinymap::TinySecondarySet<PortKey>>,
+    pub reaction_effect_ports: tinymap::TinySecondaryMap<ReactionKey, tinymap::KeySet<PortKey>>,
     /// For each reaction, the set of 'use/effect' actions
-    pub reaction_actions:
-        tinymap::TinySecondaryMap<ReactionKey, tinymap::TinySecondarySet<ActionKey>>,
+    pub reaction_actions: tinymap::TinySecondaryMap<ReactionKey, tinymap::KeySet<ActionKey>>,
     /// For each reaction, the reactor it belongs to
     pub reaction_reactors: tinymap::TinySecondaryMap<ReactionKey, ReactorKey>,
     /// Bank index for a multi-bank reactor

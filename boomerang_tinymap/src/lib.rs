@@ -1,13 +1,13 @@
 #![doc=include_str!( "../README.md")]
 #![deny(clippy::all)]
 
+pub mod key_set;
 pub mod map;
 pub mod secondary_map;
-pub mod secondary_set;
 
+pub use key_set::KeySet;
 pub use map::TinyMap;
 pub use secondary_map::TinySecondaryMap;
-pub use secondary_set::TinySecondarySet;
 
 pub trait Key: From<usize> + Copy + Ord {
     fn index(&self) -> usize;

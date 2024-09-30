@@ -12,7 +12,13 @@ categories.workspace = true
 exclude.workspace = true
 
 [features]
-default = ["keyboard", "runner", "replay", "serde", "lidar"]
+default = [
+    "keyboard",
+    "runner",
+    #"replay",
+    #"serde",
+    "lidar",
+]
 
 ## Support for keyboard input
 keyboard = ["dep:termion"]

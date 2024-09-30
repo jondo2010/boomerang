@@ -5,7 +5,7 @@
 use ::std::convert::TryInto;
 use std::{path::Path, sync::Mutex};
 
-use boomerang::{builder::prelude::*, runtime};
+use boomerang::prelude::*;
 
 struct ArrayBuilder(serde_arrow::ArrayBuilder);
 #[allow(unsafe_code)]

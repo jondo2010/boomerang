@@ -1,7 +1,7 @@
 //! Capture asynchronous key presses, and sends them through an output port.
-use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
+use boomerang::prelude::*;
 
-use std::{io::Stdout, ops::DerefMut};
+use std::io::Stdout;
 pub use termion::event::Key;
 use termion::raw::{IntoRawMode, RawTerminal};
 
@@ -35,7 +35,9 @@ struct ReactionKeyPress<'a> {
 
 impl<'a> Trigger<KeyboardEventsBuilder> for ReactionKeyPress<'a> {
     fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut KeyboardEvents) {
-        *self.arrow_key_pressed.deref_mut() = ctx.get_action(&mut self.key_press);
+        ctx.get_action_with(&mut self.key_press, |value| {
+            *self.arrow_key_pressed = value.cloned();
+        });
     }
 }
 

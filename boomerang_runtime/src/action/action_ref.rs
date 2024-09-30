@@ -7,7 +7,9 @@ use super::{Action, ActionData, ActionKey, ActionStore, BaseActionStore};
 use crate::Tag;
 
 pub trait ActionRefValue<T: ActionData> {
-    fn get_value(&mut self, tag: Tag) -> Option<T>;
+    /// Access the current Action value at the given Tag using a closure `f`.
+    fn get_value_with<F: FnOnce(Option<&T>) -> U, U>(&mut self, tag: Tag, f: F) -> U;
+    /// Set the Action value at the given Tag.
     fn set_value(&mut self, value: Option<T>, new_tag: Tag);
     fn get_min_delay(&self) -> Duration;
     fn get_key(&self) -> ActionKey;
@@ -21,8 +23,9 @@ pub struct ActionRef<'a, T: ActionData = ()> {
 }
 
 impl<'a, T: ActionData> ActionRefValue<T> for ActionRef<'a, T> {
-    fn get_value(&mut self, tag: Tag) -> Option<T> {
-        self.store.get_current(tag).cloned()
+    fn get_value_with<F: FnOnce(Option<&T>) -> U, U>(&mut self, tag: Tag, f: F) -> U {
+        let value = self.store.get_current(tag);
+        f(value)
     }
 
     fn set_value(&mut self, value: Option<T>, new_tag: Tag) {
@@ -38,7 +41,7 @@ impl<'a, T: ActionData> ActionRefValue<T> for ActionRef<'a, T> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PhysicalActionRef<T: ActionData = ()> {
     pub(crate) key: ActionKey,
     pub(crate) min_delay: Duration,
@@ -46,13 +49,25 @@ pub struct PhysicalActionRef<T: ActionData = ()> {
     _phantom: std::marker::PhantomData<T>,
 }
 
+impl<T: ActionData> Clone for PhysicalActionRef<T> {
+    fn clone(&self) -> Self {
+        Self {
+            key: self.key,
+            min_delay: self.min_delay,
+            values: self.values.clone(),
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
 impl<T: ActionData> ActionRefValue<T> for PhysicalActionRef<T> {
-    fn get_value(&mut self, tag: Tag) -> Option<T> {
+    fn get_value_with<F: FnOnce(Option<&T>) -> U, U>(&mut self, tag: Tag, f: F) -> U {
         let mut store = self.values.lock().expect("Failed to lock action store");
         let store = store
             .downcast_mut::<ActionStore<T>>()
             .expect("Type mismatch on ActionValues!");
-        store.get_current(tag).cloned()
+        let value = store.get_current(tag);
+        f(value)
     }
 
     fn set_value(&mut self, value: Option<T>, new_tag: Tag) {

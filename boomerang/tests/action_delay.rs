@@ -1,11 +1,11 @@
-use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
+//! Test logical action with delay.
+
+use boomerang::prelude::*;
 
 #[derive(Default)]
 struct GeneratedDelayState {
     y_state: u32,
 }
-
-/// Test logical action with delay.
 
 #[derive(Reactor, Clone)]
 #[reactor(state = GeneratedDelayState, reaction = "ReactionYIn", reaction = "ReactionAct")]
@@ -123,11 +123,11 @@ struct ActionDelayBuilder {
 #[test]
 fn action_delay() {
     tracing_subscriber::fmt::init();
+    let config = runtime::Config::default().with_fast_forward(true);
     let (_, sched) = boomerang_util::runner::build_and_test_reactor::<ActionDelayBuilder>(
         "action_delay",
         (),
-        true,
-        false,
+        config,
     )
     .unwrap();
 

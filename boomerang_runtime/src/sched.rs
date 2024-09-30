@@ -74,15 +74,54 @@ impl EventQueue {
 }
 
 #[derive(Debug)]
+pub struct Config {
+    /// Whether to skip wall-clock synchronization (execute as fast as possible)
+    pub fast_forward: bool,
+    /// Whether to keep the scheduler alive for any possible asynchronous events.
+    /// If `false`, the scheduler will terminate when there are no more events to process.
+    pub keep_alive: bool,
+    /// The size of the physical event queue.
+    pub physical_event_q_size: usize,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            fast_forward: false,
+            keep_alive: false,
+            physical_event_q_size: 1024,
+        }
+    }
+}
+
+impl Config {
+    pub fn with_fast_forward(mut self, fast_forward: bool) -> Self {
+        self.fast_forward = fast_forward;
+        self
+    }
+
+    pub fn with_keep_alive(mut self, keep_alive: bool) -> Self {
+        self.keep_alive = keep_alive;
+        self
+    }
+
+    /// Set the capacity of the physical event queue.
+    ///
+    /// If the queue is full, this call will block until there is space available.
+    pub fn with_queue_size(mut self, physical_event_q_size: usize) -> Self {
+        self.physical_event_q_size = physical_event_q_size;
+        self
+    }
+}
+
+#[derive(Debug)]
 pub struct Scheduler {
+    /// The scheduler config
+    config: Config,
     /// The reactor runtime store
     store: Pin<Box<Store>>,
     /// The reaction graph containing all static dependency and relationship information
     reaction_graph: ReactionGraph,
-    /// Whether to skip wall-clock synchronization
-    fast_forward: bool,
-    /// Whether to keep the scheduler alive for any possible asynchronous events
-    keep_alive: bool,
     /// Asynchronous events receiver
     event_rx: Receiver<PhysicalEvent>,
     /// Event queue
@@ -104,16 +143,8 @@ impl Scheduler {
     ///
     /// * `env` - The environment containing all the runtime data structures.
     /// * `reaction_graph` - The reaction graph containing all static dependency and relationship information.
-    /// * `fast_forward` - Whether to skip wall-clock synchronization.
-    /// * `keep_alive` - Whether to keep the scheduler alive for any possible asynchronous events. If `false`, the
-    ///    scheduler will terminate when there are no more events to process.
-    pub fn new(
-        env: Env,
-        reaction_graph: ReactionGraph,
-        fast_forward: bool,
-        keep_alive: bool,
-    ) -> Self {
-        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    pub fn new(env: Env, reaction_graph: ReactionGraph, config: Config) -> Self {
+        let (event_tx, event_rx) = crossbeam_channel::bounded(config.physical_event_q_size);
         let (shutdown_tx, shutdown_rx) = keepalive::channel();
         let start_time = Instant::now();
 
@@ -123,10 +154,9 @@ impl Scheduler {
         let store = Store::new(env, contexts, &reaction_graph);
         let events = EventQueue::new(reaction_graph.reaction_set_limits.clone());
         Self {
+            config,
             store,
             reaction_graph,
-            fast_forward,
-            keep_alive,
             event_rx,
             events,
             start_time,
@@ -188,7 +218,7 @@ impl Scheduler {
                 tracing::debug!("Cannot wait, already past programmed shutdown time...");
                 None
             }
-        } else if self.keep_alive {
+        } else if self.config.keep_alive {
             tracing::debug!("Waiting indefinitely for async event.");
             self.event_rx.recv().ok()
         } else {
@@ -212,7 +242,7 @@ impl Scheduler {
             if let Some(mut event) = self.events.event_queue.pop() {
                 tracing::debug!(event = %event, "Handling event");
 
-                if !self.fast_forward {
+                if !self.config.fast_forward {
                     let target = event.tag.to_logical_time(self.start_time);
                     if let Some(async_event) = self.synchronize_wall_clock(target) {
                         // Woken up by async event

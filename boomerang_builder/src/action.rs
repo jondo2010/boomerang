@@ -22,10 +22,18 @@ pub struct Physical;
 /// `TypedActionKey` is a typed wrapper around [`BuilderActionKey`] that is used to associate a type with an
 /// action. This is used to ensure that the type of the action matches the type of the port that it
 /// is connected to.
-#[derive(Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+#[derive(Default, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub struct TypedActionKey<T = (), Q = Logical>(BuilderActionKey, PhantomData<(T, Q)>)
 where
     T: runtime::ActionData;
+
+impl<T: runtime::ActionData, Q> Copy for TypedActionKey<T, Q> {}
+
+impl<T: runtime::ActionData, Q> Clone for TypedActionKey<T, Q> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
 
 impl<T: runtime::ActionData, Q> From<BuilderActionKey> for TypedActionKey<T, Q> {
     fn from(key: BuilderActionKey) -> Self {

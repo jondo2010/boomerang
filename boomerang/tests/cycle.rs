@@ -1,7 +1,6 @@
-#![allow(dead_code)]
-#![allow(unused_variables)]
+#![allow(unused)]
 
-use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
+use boomerang::prelude::*;
 
 #[derive(Reactor)]
 #[reactor(state = "()", reaction = "AReactionX")]
@@ -18,7 +17,7 @@ struct AReactionX<'a> {
 }
 
 impl<'a> Trigger<ABuilder> for AReactionX<'a> {
-    fn trigger(self, ctx: &mut runtime::Context, state: &mut ()) {}
+    fn trigger(self, _ctx: &mut runtime::Context, _state: &mut ()) {}
 }
 
 #[derive(Reactor)]
@@ -33,7 +32,7 @@ struct BBuilder {
 struct BReactionX;
 
 impl Trigger<BBuilder> for BReactionX {
-    fn trigger(self, ctx: &mut runtime::Context, state: &mut ()) {}
+    fn trigger(self, _ctx: &mut runtime::Context, _state: &mut ()) {}
 }
 
 #[derive(Reaction)]
@@ -43,7 +42,7 @@ struct BReactionStartup<'a> {
 }
 
 impl Trigger<BBuilder> for BReactionStartup<'_> {
-    fn trigger(self, ctx: &mut runtime::Context, state: &mut ()) {}
+    fn trigger(self, _ctx: &mut runtime::Context, _state: &mut ()) {}
 }
 
 #[derive(Reactor)]
@@ -62,7 +61,7 @@ struct CycleBuilder {
 #[test]
 fn cycle() {
     tracing_subscriber::fmt::init();
-    let _ =
-        boomerang_util::runner::build_and_test_reactor::<CycleBuilder>("cycle", (), true, false)
-            .unwrap();
+    let config = runtime::Config::default().with_fast_forward(true);
+    let _ = boomerang_util::runner::build_and_test_reactor::<CycleBuilder>("cycle", (), config)
+        .unwrap();
 }

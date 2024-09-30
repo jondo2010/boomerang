@@ -33,6 +33,23 @@ pub struct Context {
     pub(crate) trigger_res: TriggerRes,
 }
 
+pub trait ContextCommon {
+    /// Get the start time of the scheduler
+    fn get_start_time(&self) -> Instant;
+
+    /// Get the current physical time
+    fn get_physical_time(&self) -> Instant {
+        Instant::now()
+    }
+
+    /// Get the physical time elapsed since the start of the program.
+    fn get_elapsed_physical_time(&self) -> Duration {
+        self.get_physical_time() - self.get_start_time()
+    }
+
+    fn schedule_shutdown(&mut self, offset: Option<Duration>);
+}
+
 impl Context {
     pub(crate) fn new(
         start_time: Instant,
@@ -69,10 +86,6 @@ impl Context {
         self.bank_info.as_ref().map(|BankInfo { total, .. }| *total)
     }
 
-    pub fn get_start_time(&self) -> Instant {
-        self.start_time
-    }
-
     pub fn get_tag(&self) -> Tag {
         self.tag
     }
@@ -82,24 +95,19 @@ impl Context {
         self.tag.to_logical_time(self.start_time)
     }
 
-    /// Get the current physical time
-    pub fn get_physical_time(&self) -> Instant {
-        Instant::now()
-    }
-
     /// Get the logical time elapsed since the start of the program.
     pub fn get_elapsed_logical_time(&self) -> Duration {
         self.get_logical_time() - self.get_start_time()
     }
 
-    /// Get the physical time elapsed since the start of the program.
-    pub fn get_elapsed_physical_time(&self) -> Duration {
-        self.get_physical_time() - self.get_start_time()
-    }
-
     /// Get the value of an Action at the current Tag
-    pub fn get_action<T: ActionData, A: ActionRefValue<T>>(&self, action: &mut A) -> Option<T> {
-        action.get_value(self.tag)
+    pub fn get_action_with<T, A, F, U>(&self, action: &mut A, f: F) -> U
+    where
+        T: ActionData,
+        A: ActionRefValue<T>,
+        F: FnOnce(Option<&T>) -> U,
+    {
+        action.get_value_with::<F, U>(self.tag, f)
     }
 
     /// Schedule the Action to trigger at some future time.
@@ -119,16 +127,6 @@ impl Context {
             .push((action.get_key(), new_tag));
     }
 
-    #[tracing::instrument]
-    pub fn schedule_shutdown(&mut self, offset: Option<Duration>) {
-        let tag = self.tag.delay(offset);
-
-        self.trigger_res.scheduled_shutdown = self
-            .trigger_res
-            .scheduled_shutdown
-            .map_or(Some(tag), |prev| Some(prev.min(tag)));
-    }
-
     /// Create a new SendContext that can be shared across threads.
     /// This is used to schedule asynchronous events.
     pub fn make_send_context(&self) -> SendContext {
@@ -137,6 +135,22 @@ impl Context {
             async_tx: self.async_tx.clone(),
             shutdown_rx: self.shutdown_rx.clone(),
         }
+    }
+}
+
+impl ContextCommon for Context {
+    fn get_start_time(&self) -> Instant {
+        self.start_time
+    }
+
+    #[tracing::instrument]
+    fn schedule_shutdown(&mut self, offset: Option<Duration>) {
+        let tag = self.tag.delay(offset);
+
+        self.trigger_res.scheduled_shutdown = self
+            .trigger_res
+            .scheduled_shutdown
+            .map_or(Some(tag), |prev| Some(prev.min(tag)));
     }
 }
 
@@ -167,16 +181,22 @@ impl SendContext {
         self.async_tx.send(event).unwrap();
     }
 
-    /// Schedule a shutdown event at some future time.
-    pub fn schedule_shutdown(&self, offset: Option<Duration>) {
-        let tag = Tag::absolute(self.start_time, Instant::now() + offset.unwrap_or_default());
-        let event = PhysicalEvent::shutdown(tag);
-        self.async_tx.send(event).unwrap();
-    }
-
     /// Has the scheduler already been shutdown?
     pub fn is_shutdown(&self) -> bool {
         self.shutdown_rx.is_shutdwon()
+    }
+}
+
+impl ContextCommon for SendContext {
+    fn get_start_time(&self) -> Instant {
+        self.start_time
+    }
+
+    /// Schedule a shutdown event at some future time.
+    fn schedule_shutdown(&mut self, offset: Option<Duration>) {
+        let tag = Tag::absolute(self.start_time, Instant::now() + offset.unwrap_or_default());
+        let event = PhysicalEvent::shutdown(tag);
+        self.async_tx.send(event).unwrap();
     }
 }
 

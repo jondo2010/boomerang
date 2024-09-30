@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
+use boomerang::prelude::*;
 use boomerang_util::timeout;
 
 struct Hello {
@@ -108,6 +108,7 @@ struct MainBuilder {
 #[test]
 fn hello() {
     tracing_subscriber::fmt::init();
-    let _ = boomerang_util::runner::build_and_test_reactor::<MainBuilder>("hello", (), true, false)
-        .unwrap();
+    let config = runtime::Config::default().with_fast_forward(true);
+    let _ =
+        boomerang_util::runner::build_and_test_reactor::<MainBuilder>("hello", (), config).unwrap();
 }

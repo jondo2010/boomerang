@@ -1,6 +1,6 @@
 // Example in the Wiki.
 
-use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
+use boomerang::prelude::*;
 
 struct Scale(u32);
 
@@ -77,6 +77,7 @@ impl Trigger<GainBuilder> for GainReactionTim<'_> {
 #[test]
 fn gain() {
     tracing_subscriber::fmt::init();
-    let _ = boomerang_util::runner::build_and_test_reactor::<GainBuilder>("gain", (), true, false)
-        .unwrap();
+    let config = runtime::Config::default().with_fast_forward(true);
+    let _ =
+        boomerang_util::runner::build_and_test_reactor::<GainBuilder>("gain", (), config).unwrap();
 }

@@ -1,6 +1,6 @@
 //! test a connection from a multiport to another multiport of the same reactor
 
-use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
+use boomerang::prelude::*;
 
 #[derive(Reactor)]
 #[reactor(
@@ -51,11 +51,11 @@ struct Main<const NUM_NODES: usize> {
 #[test]
 fn action_values() {
     tracing_subscriber::fmt::init();
+    let config = runtime::Config::default().with_fast_forward(true);
     let _ = boomerang_util::runner::build_and_test_reactor::<Main<4>>(
         "connection_to_self_multiport",
         (),
-        true,
-        false,
+        config,
     )
     .unwrap();
 }

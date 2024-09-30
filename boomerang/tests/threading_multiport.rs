@@ -2,8 +2,8 @@
 //!
 //! Ported from LF https://github.com/lf-lang/lingua-franca/blob/master/test/C/src/concurrent/ThreadedMultiport.lf
 
-use boomerang::builder::prelude::*;
-use boomerang::{runtime, Reaction, Reactor};
+use boomerang::prelude::*;
+use boomerang_runtime::Config;
 
 pub struct State {
     s: i32,
@@ -135,11 +135,11 @@ struct ThreadedMultiport<const WIDTH: usize = 4, const ITERS: usize = 100_000_00
 #[test]
 fn threading_multiport() {
     tracing_subscriber::fmt::init();
+    let config = runtime::Config::default().with_fast_forward(true);
     let _ = boomerang_util::runner::build_and_test_reactor::<ThreadedMultiport<4, 10_000>>(
         "threaded_multiport",
         (),
-        true,
-        false,
+        config,
     )
     .unwrap();
 }

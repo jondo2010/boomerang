@@ -1,8 +1,4 @@
-use boomerang::{
-    builder::*,
-    runtime::{self},
-    Reaction, Reactor,
-};
+use boomerang::prelude::*;
 use boomerang_util::timeout;
 
 trait CountData:
@@ -51,9 +47,9 @@ impl<T: CountData> Trigger<Count<T>> for ReactionShutdown {
 #[test]
 fn count() {
     tracing_subscriber::fmt::init();
+    let config = runtime::Config::default().with_fast_forward(true);
     let (_, sched) =
-        boomerang_util::runner::build_and_test_reactor::<Count<i32>>("count", 0, true, false)
-            .unwrap();
+        boomerang_util::runner::build_and_test_reactor::<Count<i32>>("count", 0, config).unwrap();
     let env = sched.into_env();
     let count = env
         .find_reactor_by_name("count")

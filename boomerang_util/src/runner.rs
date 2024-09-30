@@ -46,8 +46,7 @@ struct Args {
 pub fn build_and_test_reactor<R: Reactor>(
     name: &str,
     state: R::State,
-    fast_forward: bool,
-    keep_alive: bool,
+    config: runtime::Config,
 ) -> anyhow::Result<(R, runtime::Scheduler)> {
     let mut env_builder = EnvBuilder::new();
     let reactor = R::build(name, state, None, None, &mut env_builder)
@@ -55,7 +54,7 @@ pub fn build_and_test_reactor<R: Reactor>(
     let (env, graph, _) = env_builder
         .into_runtime_parts()
         .context("Error building environment!")?;
-    let mut sched = runtime::Scheduler::new(env, graph, fast_forward, keep_alive);
+    let mut sched = runtime::Scheduler::new(env, graph, config);
     sched.event_loop();
     Ok((reactor, sched))
 }
@@ -123,7 +122,12 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
         println!("{triggers:#?}");
     }
 
-    let mut sched = runtime::Scheduler::new(env, triggers, false, true);
+    let config = runtime::Config {
+        fast_forward: args.fast_forward,
+        ..Default::default()
+    };
+
+    let mut sched = runtime::Scheduler::new(env, triggers, config);
     sched.event_loop();
 
     Ok(reactor)

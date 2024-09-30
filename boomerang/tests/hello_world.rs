@@ -1,4 +1,4 @@
-use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
+use boomerang::prelude::*;
 
 struct State {
     success: bool,
@@ -44,11 +44,7 @@ struct HelloWorld {
 #[test]
 fn hello_world() {
     tracing_subscriber::fmt::init();
-    let _ = boomerang_util::runner::build_and_test_reactor::<HelloWorld>(
-        "hello_world",
-        (),
-        true,
-        false,
-    )
-    .unwrap();
+    let config = runtime::Config::default().with_fast_forward(true);
+    let _ = boomerang_util::runner::build_and_test_reactor::<HelloWorld>("hello_world", (), config)
+        .unwrap();
 }

@@ -3,7 +3,7 @@
 //! The use of the logical action ensures the elapsed time jumps exactly from 0 to 100, 300, 600, and 1000 msec.
 //!
 //! Ported from https://github.com/lf-lang/lingua-franca/blob/master/test/C/src/SlowingClock.lf
-use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
+use boomerang::prelude::*;
 use boomerang_util::timeout;
 use runtime::Duration;
 
@@ -94,11 +94,11 @@ impl Trigger<SlowingClockBuilder> for ReactionShutdown {
 #[test]
 fn slowing_clock() {
     tracing_subscriber::fmt::init();
+    let config = runtime::Config::default().with_fast_forward(true);
     let _ = boomerang_util::runner::build_and_test_reactor::<SlowingClockBuilder>(
         "slowing_clock",
         SlowingClock::default(),
-        true,
-        false,
+        config,
     )
     .unwrap();
 }

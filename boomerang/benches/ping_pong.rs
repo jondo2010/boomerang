@@ -7,7 +7,7 @@
 //!
 //! @author Clément Fournier
 
-use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
+use boomerang::prelude::*;
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 
 struct Ping {
@@ -175,7 +175,8 @@ fn bench(c: &mut Criterion) {
                     (env, triggers)
                 },
                 |(env, triggers)| {
-                    let mut sched = runtime::Scheduler::new(env, triggers, true, false);
+                    let config = runtime::Config::default().with_fast_forward(true);
+                    let mut sched = runtime::Scheduler::new(env, triggers, config);
                     sched.event_loop();
 
                     // validate the end state

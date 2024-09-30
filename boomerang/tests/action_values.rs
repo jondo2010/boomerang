@@ -1,6 +1,6 @@
-// Test logical action with delay.
+//! Test logical action with delay.
 
-use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
+use boomerang::prelude::*;
 
 struct State {
     r1done: bool,
@@ -48,7 +48,7 @@ struct ReactionAct<'a> {
 impl<'a> Trigger<ActionValues> for ReactionAct<'a> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut State) {
         let elapsed = ctx.get_elapsed_logical_time();
-        let value = ctx.get_action(&mut self.act);
+        let value = ctx.get_action_with(&mut self.act, |value| value.cloned());
 
         println!("[@{elapsed:?} action transmitted: {value:?}]");
 
@@ -82,14 +82,14 @@ impl Trigger<ActionValues> for ReactionShutdown {
 #[test]
 fn action_values() {
     tracing_subscriber::fmt::init();
+    let config = runtime::Config::default().with_fast_forward(true);
     let _ = boomerang_util::runner::build_and_test_reactor::<ActionValues>(
         "action_values",
         State {
             r1done: false,
             r2done: false,
         },
-        true,
-        false,
+        config,
     )
     .unwrap();
 }

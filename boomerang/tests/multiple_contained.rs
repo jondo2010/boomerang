@@ -1,6 +1,6 @@
 //! Test that a reaction can react to and send to multiple ports of a contained reactor.
 
-use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
+use boomerang::prelude::*;
 
 #[derive(Reactor)]
 #[reactor(
@@ -81,11 +81,11 @@ impl Trigger<MultipleContained> for ReactionCTrigger<'_> {
 #[test]
 fn multiple_contained() {
     tracing_subscriber::fmt::init();
+    let config = runtime::Config::default().with_fast_forward(true);
     let _ = boomerang_util::runner::build_and_test_reactor::<MultipleContained>(
         "multiple_contained",
         (),
-        true,
-        false,
+        config,
     )
     .unwrap();
 }

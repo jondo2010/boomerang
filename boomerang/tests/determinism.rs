@@ -1,4 +1,4 @@
-use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
+use boomerang::prelude::*;
 
 #[derive(Reactor)]
 #[reactor(state = "()", reaction = "SourceReactionT")]
@@ -91,11 +91,11 @@ struct DeterminismBuilder {
 #[test]
 fn determinism() {
     tracing_subscriber::fmt::init();
+    let config = runtime::Config::default().with_fast_forward(true);
     let _ = boomerang_util::runner::build_and_test_reactor::<DeterminismBuilder>(
         "determinism",
         (),
-        true,
-        false,
+        config,
     )
     .unwrap();
 }

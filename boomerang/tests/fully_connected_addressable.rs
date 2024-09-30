@@ -2,7 +2,7 @@
 //!
 //! Ported from <https://github.com/lf-lang/lingua-franca/blob/master/test/Rust/src/multiport/FullyConnectedAddressable.lf>
 
-use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
+use boomerang::prelude::*;
 
 #[derive(Reactor)]
 #[reactor(
@@ -102,11 +102,11 @@ struct Main<const NUM_NODES: usize = 4> {
 #[test]
 fn fully_connected_addressable() {
     tracing_subscriber::fmt::init();
+    let config = runtime::Config::default().with_fast_forward(true);
     let _ = boomerang_util::runner::build_and_test_reactor::<Main>(
         "fully_connected_addressable",
         (),
-        true,
-        false,
+        config,
     )
     .unwrap();
 }

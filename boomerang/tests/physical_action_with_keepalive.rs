@@ -1,4 +1,4 @@
-use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
+use boomerang::prelude::*;
 use runtime::Duration;
 
 #[derive(Reactor)]
@@ -48,7 +48,9 @@ impl Trigger<MainBuilder> for ReactionAct {
 #[test]
 fn physical_action_with_keepalive() {
     tracing_subscriber::fmt::init();
-    let config = runtime::Config::default().with_fast_forward(true);
+    let config = runtime::Config::default()
+        .with_fast_forward(true)
+        .with_keep_alive(true);
     let _ = boomerang_util::runner::build_and_test_reactor::<MainBuilder>(
         "physical_action_with_keepalive",
         (),

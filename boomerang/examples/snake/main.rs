@@ -10,7 +10,7 @@ mod support;
 #[cfg(not(windows))]
 mod reactor {
     use super::support::*;
-    use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
+    use boomerang::prelude::*;
     use boomerang_util::keyboard_events::{Key, KeyboardEvents, KeyboardEventsBuilder};
 
     #[derive(Reactor)]

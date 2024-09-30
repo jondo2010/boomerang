@@ -4,7 +4,7 @@
 //! drifting away further with each new event. Modeled after the Lingua-Franca C version of this
 //! test. @author Maiko Brants TU Dresden
 
-use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
+use boomerang::prelude::*;
 use boomerang_util::timeout;
 
 struct State {
@@ -83,14 +83,16 @@ impl Trigger<SlowingClockPhysical> for ReactionShutdown {
 #[test]
 fn slowing_clock_physical() {
     tracing_subscriber::fmt::init();
+    let config = runtime::Config::default()
+        .with_fast_forward(true)
+        .with_keep_alive(true);
     let _ = boomerang_util::runner::build_and_test_reactor::<SlowingClockPhysical>(
         "slowing_clock_physical",
         State {
             interval: runtime::Duration::from_millis(100),
             expected_time: runtime::Duration::from_millis(200),
         },
-        true,
-        true,
+        config,
     )
     .unwrap();
 }

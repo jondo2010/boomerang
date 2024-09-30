@@ -1,6 +1,6 @@
 use std::thread::JoinHandle;
 
-use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
+use boomerang::prelude::*;
 
 use lidar_utils::ouster::{self};
 
@@ -54,10 +54,15 @@ impl<const N: usize> Trigger<OusterLidar<N>> for ReactionStartup<N> {
             while let Ok(packet) = cap.next_packet() {
                 let packet_ts = std::time::Duration::new(
                     packet.header.ts.tv_sec as u64,
-                    (packet.header.ts.tv_usec * 1000 as i64) as u32,
+                    packet.header.ts.tv_usec as u32 * 1000,
                 );
 
-                let delay = packet_ts.checked_sub(*first_ts.get_or_insert_with(|| packet_ts));
+                let delay = packet_ts
+                    .checked_sub(*first_ts.get_or_insert_with(|| packet_ts))
+                    .inspect(|delay| {
+                        tracing::info!("Delay: {:?}", delay);
+                    })
+                    .and_then(|delay| delay.checked_sub(send_ctx.get_elapsed_physical_time()));
                 if delay.is_none() {
                     eprintln!("Timestamps are not monotonically increasing");
                 }
@@ -81,7 +86,9 @@ mod tests {
     fn test_ouster() {
         tracing_subscriber::fmt::init();
         let state = State::new_offline("../ouster_example.json", "../ouster_example.pcap").unwrap();
-        let config = runtime::Config::default().with_keep_alive(true);
+        let config = runtime::Config::default()
+            .with_keep_alive(true)
+            .with_queue_size(5);
         let _ = crate::runner::build_and_test_reactor::<OusterLidar<1024>>("lidar", state, config);
     }
 }

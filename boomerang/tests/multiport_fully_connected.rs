@@ -1,4 +1,4 @@
-use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
+use boomerang::prelude::*;
 
 #[derive(Clone)]
 struct State {
@@ -94,11 +94,11 @@ struct MainReactor<const NUM_NODES: usize = 4> {
 #[test]
 fn mutliport_fully_connected() {
     tracing_subscriber::fmt::init();
+    let config = runtime::Config::default().with_fast_forward(true);
     let _ = boomerang_util::runner::build_and_test_reactor::<MainReactor>(
         "multiport_fully_connected",
         (),
-        true,
-        false,
+        config,
     )
     .unwrap();
 }

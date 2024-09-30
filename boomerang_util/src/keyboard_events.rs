@@ -1,7 +1,7 @@
 //! Capture asynchronous key presses, and sends them through an output port.
-use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
+use boomerang::prelude::*;
 
-use std::{io::Stdout, ops::DerefMut};
+use std::io::Stdout;
 pub use termion::event::Key;
 use termion::raw::{IntoRawMode, RawTerminal};
 

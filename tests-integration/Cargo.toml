@@ -1,8 +1,0 @@
-[package]
-name = "tests-integration"
-version.workspace = true
-edition.workspace = true
-publish = false
-
-[dev-dependencies]
-boomerang.workspace = true

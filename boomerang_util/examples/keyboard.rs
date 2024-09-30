@@ -6,7 +6,7 @@
 mod example {
     use std::io::Write;
 
-    use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
+    use boomerang::prelude::*;
     use boomerang_util::keyboard_events::{KeyboardEvents, KeyboardEventsBuilder};
 
     /// A simple Reactor that triggers on key_press events.

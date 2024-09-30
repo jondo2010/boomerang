@@ -105,7 +105,10 @@ impl Config {
         self
     }
 
-    pub fn with_physical_event_q_size(mut self, physical_event_q_size: usize) -> Self {
+    /// Set the capacity of the physical event queue.
+    ///
+    /// If the queue is full, this call will block until there is space available.
+    pub fn with_queue_size(mut self, physical_event_q_size: usize) -> Self {
         self.physical_event_q_size = physical_event_q_size;
         self
     }

@@ -1,11 +1,11 @@
-use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
+//! Test logical action with delay.
+
+use boomerang::prelude::*;
 
 #[derive(Default)]
 struct GeneratedDelayState {
     y_state: u32,
 }
-
-/// Test logical action with delay.
 
 #[derive(Reactor, Clone)]
 #[reactor(state = GeneratedDelayState, reaction = "ReactionYIn", reaction = "ReactionAct")]

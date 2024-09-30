@@ -5,7 +5,7 @@
 //! Build and run a Reactor with reactions that respond to startup and shutdown actions:
 //!
 //! ```rust
-//! use boomerang::{builder::prelude::*, runtime, Reactor, Reaction};
+//! use boomerang::prelude::*;
 //!
 //! struct State {
 //!     success: bool,
@@ -58,7 +58,8 @@
 //!     &mut env_builder
 //! ).unwrap();
 //! let (mut env, triggers, _) = env_builder.into_runtime_parts().unwrap();
-//! let mut sched = runtime::Scheduler::new(env, triggers, true, false);
+//! let config = runtime::Config::default().with_fast_forward(true);
+//! let mut sched = runtime::Scheduler::new(env, triggers, config);
 //! sched.event_loop();
 //! ```
 //!
@@ -72,6 +73,19 @@ pub mod flatten_transposed;
 // Re-exports
 pub use boomerang_builder as builder;
 pub use boomerang_runtime as runtime;
+
+pub mod prelude {
+    //! Re-exported common types and traits for Boomerang
+
+    pub use super::builder::{
+        BuilderError, BuilderFqn, EnvBuilder, Input, Logical, Output, Physical, Reactor,
+        TimerActionKey, Trigger, TypedActionKey, TypedPortKey,
+    };
+
+    pub use super::runtime::{self, ContextCommon};
+
+    pub use boomerang_derive::{Reaction, Reactor};
+}
 
 #[cfg(feature = "derive")]
 #[doc(hidden)]

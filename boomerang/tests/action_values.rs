@@ -1,6 +1,6 @@
-// Test logical action with delay.
+//! Test logical action with delay.
 
-use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
+use boomerang::prelude::*;
 
 struct State {
     r1done: bool,

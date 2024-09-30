@@ -1,6 +1,6 @@
 //! Test asynchronous callbacks that trigger a physical action.
 
-use boomerang::{builder::prelude::*, runtime, Reaction, Reactor};
+use boomerang::prelude::*;
 use boomerang_util::timeout;
 use std::thread::JoinHandle;
 
@@ -99,7 +99,7 @@ impl Trigger<AsyncCallback> for ReactionShutdown {
 #[test]
 fn async_callback() {
     tracing_subscriber::fmt::init();
-    let config = runtime::Config::default().with_fast_forward(true);
+    let config = runtime::Config::default().with_fast_forward(false);
     let _ = boomerang_util::runner::build_and_test_reactor::<AsyncCallback>(
         "async_callback",
         State {

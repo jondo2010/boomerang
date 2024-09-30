@@ -6,6 +6,8 @@
 
 #[cfg(all(feature = "keyboard", not(windows)))]
 pub mod keyboard_events;
+#[cfg(feature = "lidar")]
+pub mod lidar;
 #[cfg(feature = "replay")]
 pub mod replay;
 #[cfg(feature = "runner")]

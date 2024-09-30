@@ -123,11 +123,11 @@ struct ActionDelayBuilder {
 #[test]
 fn action_delay() {
     tracing_subscriber::fmt::init();
+    let config = runtime::Config::default().with_fast_forward(true);
     let (_, sched) = boomerang_util::runner::build_and_test_reactor::<ActionDelayBuilder>(
         "action_delay",
         (),
-        true,
-        false,
+        config,
     )
     .unwrap();
 

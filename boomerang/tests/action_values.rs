@@ -82,14 +82,14 @@ impl Trigger<ActionValues> for ReactionShutdown {
 #[test]
 fn action_values() {
     tracing_subscriber::fmt::init();
+    let config = runtime::Config::default().with_fast_forward(true);
     let _ = boomerang_util::runner::build_and_test_reactor::<ActionValues>(
         "action_values",
         State {
             r1done: false,
             r2done: false,
         },
-        true,
-        false,
+        config,
     )
     .unwrap();
 }

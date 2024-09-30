@@ -12,20 +12,14 @@ pub use action_ref::*;
 use store::{ActionStore, BaseActionStore};
 
 #[cfg(not(feature = "serde"))]
-pub trait ActionData: std::fmt::Debug + Send + Sync + Clone + 'static {}
+pub trait ActionData: std::fmt::Debug + Send + Sync + 'static {}
 
 #[cfg(not(feature = "serde"))]
-impl<T> ActionData for T where T: std::fmt::Debug + Send + Sync + Clone + 'static {}
+impl<T> ActionData for T where T: std::fmt::Debug + Send + Sync + 'static {}
 
 #[cfg(feature = "serde")]
 pub trait ActionData:
-    std::fmt::Debug
-    + Send
-    + Sync
-    + Clone
-    + serde::Serialize
-    + for<'de> serde::Deserialize<'de>
-    + 'static
+    std::fmt::Debug + Send + Sync + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static
 {
 }
 
@@ -34,7 +28,6 @@ impl<T> ActionData for T where
     T: std::fmt::Debug
         + Send
         + Sync
-        + Clone
         + serde::Serialize
         + for<'de> serde::Deserialize<'de>
         + 'static

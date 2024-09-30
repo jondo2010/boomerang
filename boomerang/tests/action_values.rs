@@ -48,7 +48,7 @@ struct ReactionAct<'a> {
 impl<'a> Trigger<ActionValues> for ReactionAct<'a> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut State) {
         let elapsed = ctx.get_elapsed_logical_time();
-        let value = ctx.get_action(&mut self.act);
+        let value = ctx.get_action_with(&mut self.act, |value| value.cloned());
 
         println!("[@{elapsed:?} action transmitted: {value:?}]");
 

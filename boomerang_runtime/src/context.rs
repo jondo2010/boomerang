@@ -98,8 +98,13 @@ impl Context {
     }
 
     /// Get the value of an Action at the current Tag
-    pub fn get_action<T: ActionData, A: ActionRefValue<T>>(&self, action: &mut A) -> Option<T> {
-        action.get_value(self.tag)
+    pub fn get_action_with<T, A, F, U>(&self, action: &mut A, f: F) -> U
+    where
+        T: ActionData,
+        A: ActionRefValue<T>,
+        F: FnOnce(Option<&T>) -> U,
+    {
+        action.get_value_with::<F, U>(self.tag, f)
     }
 
     /// Schedule the Action to trigger at some future time.

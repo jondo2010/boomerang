@@ -33,7 +33,9 @@ struct ReactionAct {
 
 impl Trigger<MainBuilder> for ReactionAct {
     fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut ()) {
-        let value = ctx.get_action(&mut self.act).unwrap();
+        let value = ctx
+            .get_action_with(&mut self.act, |value| value.cloned())
+            .unwrap();
         println!("---- Vu {} à {}", value, ctx.get_tag());
 
         let elapsed_time = ctx.get_elapsed_logical_time();
@@ -46,11 +48,11 @@ impl Trigger<MainBuilder> for ReactionAct {
 #[test]
 fn physical_action_with_keepalive() {
     tracing_subscriber::fmt::init();
+    let config = runtime::Config::default().with_fast_forward(true);
     let _ = boomerang_util::runner::build_and_test_reactor::<MainBuilder>(
         "physical_action_with_keepalive",
         (),
-        true,
-        true,
+        config,
     )
     .unwrap();
 }

@@ -3,8 +3,8 @@
 use std::{marker::PhantomPinned, pin::Pin, ptr::NonNull};
 
 use crate::{
-    Action, ActionKey, ActionSliceMut, BasePort, Context, PortKey, PortSlice, PortSliceMut,
-    Reaction, ReactionKey, Reactor, ReactorKey,
+    Action, ActionKey, ActionRefMut, BasePort, Context, PortKey, PortRef, PortRefMut, Reaction,
+    ReactionKey, Reactor, ReactorKey,
 };
 
 use super::{Env, ReactionGraph};
@@ -14,9 +14,22 @@ pub struct ReactionTriggerCtx<'a> {
     pub context: &'a mut Context,
     pub reactor: &'a mut Reactor,
     pub reaction: &'a mut Reaction,
-    pub actions: ActionSliceMut<'a>,
-    pub ref_ports: PortSlice<'a>,
-    pub mut_ports: PortSliceMut<'a>,
+    pub ref_ports: &'a [PortRef<'a>],
+    pub mut_ports: &'a mut [PortRefMut<'a>],
+    pub actions: &'a mut [ActionRefMut<'a>],
+}
+
+impl<'a> ReactionTriggerCtx<'a> {
+    /// Trigger the reaction with the given context and state.
+    pub fn trigger(&mut self) {
+        (self.reaction.body)(
+            self.context,
+            &mut self.reactor.state,
+            self.ref_ports,
+            self.mut_ports,
+            self.actions,
+        );
+    }
 }
 
 impl<'a> From<&'a mut ReactionTriggerCtxPtrs> for ReactionTriggerCtx<'a> {
@@ -42,9 +55,9 @@ impl<'a> From<&'a mut ReactionTriggerCtxPtrs> for ReactionTriggerCtx<'a> {
                 context,
                 reactor,
                 reaction,
-                actions,
                 ref_ports,
                 mut_ports,
+                actions,
             }
         }
     }
@@ -58,9 +71,9 @@ struct ReactionTriggerCtxPtrs {
     context: NonNull<Context>,
     reactor: NonNull<Reactor>,
     reaction: NonNull<Reaction>,
-    actions: Vec<NonNull<Action>>,
     ref_ports: Vec<NonNull<dyn BasePort>>,
     mut_ports: Vec<NonNull<dyn BasePort>>,
+    actions: Vec<NonNull<Action>>,
 }
 
 impl Default for ReactionTriggerCtxPtrs {
@@ -69,9 +82,9 @@ impl Default for ReactionTriggerCtxPtrs {
             context: NonNull::dangling(),
             reactor: NonNull::dangling(),
             reaction: NonNull::dangling(),
-            actions: Vec::new(),
             ref_ports: Vec::new(),
             mut_ports: Vec::new(),
+            actions: Vec::new(),
         }
     }
 }

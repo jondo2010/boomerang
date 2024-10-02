@@ -15,15 +15,17 @@ pub type PortSlice<'a> = &'a [PortRef<'a>];
 
 pub type PortSliceMut<'a> = &'a mut [PortRefMut<'a>];
 
-pub type ActionSliceMut<'a> = &'a mut [&'a mut Action];
+pub type ActionRefMut<'a> = &'a mut Action;
+
+pub type ActionSliceMut<'a> = &'a mut [ActionRefMut<'a>];
 
 pub type ReactionFn = Box<
     dyn for<'a> FnMut(
             &mut Context,
-            &'a mut dyn ReactorState,
-            PortSlice<'a>,
-            PortSliceMut<'a>,
-            ActionSliceMut<'a>,
+            &mut dyn ReactorState,
+            &[PortRef<'a>],
+            &mut [PortRefMut<'a>],
+            &mut [ActionRefMut<'a>],
         ) + Sync
         + Send,
 >;
@@ -48,7 +50,7 @@ impl Debug for Deadline {
 pub struct Reaction {
     name: String,
     /// Reaction closure
-    body: ReactionFn,
+    pub(crate) body: ReactionFn,
     /// Local deadline relative to the time stamp for invocation of the reaction.
     deadline: Option<Deadline>,
 }
@@ -87,7 +89,7 @@ impl Reaction {
     )]
     pub fn trigger<'a>(
         &mut self,
-        ctx: &mut Context,
+        ctx: &'a mut Context,
         reactor: &'a mut Reactor,
         actions: ActionSliceMut<'a>,
         ref_ports: PortSlice<'a>,

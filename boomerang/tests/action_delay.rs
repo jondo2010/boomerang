@@ -81,10 +81,10 @@ struct Sink {
     inp: TypedPortKey<u32, Input>,
 }
 
-#[derive(Reaction)]
-#[reaction(reactor = "Sink")]
+//#[derive(Reaction)]
+//#[reaction(reactor = "Sink")]
 struct SinkReactionIn<'a> {
-    #[reaction(path = inp)]
+    //#[reaction(path = inp)]
     _inp: runtime::InputRef<'a, u32>,
 }
 
@@ -139,4 +139,65 @@ fn action_delay() {
         .and_then(|reactor| reactor.get_state::<bool>())
         .unwrap();
     assert!(sink_state, "SinkReactionIn did not trigger");
+
+    dbg!(std::any::type_name_of_val(&GeneratedDelayState::default()));
+}
+
+trait ReactionParts<'inner> {
+    fn from_parts(
+        ports: &'inner [::boomerang::runtime::PortRef<'inner>],
+        ports_mut: &'inner mut [::boomerang::runtime::PortRefMut<'inner>],
+        actions: &'inner mut [&'inner mut ::boomerang::runtime::Action],
+    ) -> Self;
+}
+
+impl<'inner> ReactionParts<'inner> for SinkReactionIn<'inner> {
+    #[allow(unused_variables)]
+    fn from_parts(
+        ports: &'inner [::boomerang::runtime::PortRef<'inner>],
+        ports_mut: &'inner mut [::boomerang::runtime::PortRefMut<'inner>],
+        actions: &'inner mut [&'inner mut ::boomerang::runtime::Action],
+    ) -> Self {
+        let (_inp,) = ::boomerang::runtime::partition(ports)
+            .expect("Unable to destructure ref ports for reaction");
+        SinkReactionIn { _inp }
+    }
+}
+
+fn trigger_wrapper<'inner, Ra: Reactor, Rn: Trigger<Ra> + ReactionParts<'inner>>(
+    ctx: &'inner mut ::boomerang::runtime::Context,
+    state: &'inner mut dyn::boomerang::runtime::ReactorState,
+    ports: &'inner [::boomerang::runtime::PortRef<'inner>],
+    ports_mut: &'inner mut [::boomerang::runtime::PortRefMut<'inner>],
+    actions: &'inner mut [&'inner mut ::boomerang::runtime::Action],
+) {
+    let state: &mut Ra::State = state
+        .downcast_mut()
+        .expect("Unable to downcast reactor state");
+
+    let reaction = Rn::from_parts(ports, ports_mut, actions);
+    reaction.trigger(ctx, state);
+}
+
+impl<'a> ::boomerang::builder::Reaction<Sink> for SinkReactionIn<'a> {
+    fn build<'builder>(
+        name: &str,
+        reactor: &Sink,
+        builder: &'builder mut ::boomerang::builder::ReactorBuilderState,
+    ) -> Result<
+        ::boomerang::builder::ReactionBuilderState<'builder>,
+        ::boomerang::builder::BuilderError,
+    > {
+        let __startup_action = builder.get_startup_action();
+        let __shutdown_action = builder.get_shutdown_action();
+        let mut __reaction =
+            builder.add_reaction(name, Box::new(trigger_wrapper::<Sink, SinkReactionIn>));
+        <runtime::InputRef<'a, u32> as ::boomerang::builder::ReactionField>::build(
+            &mut __reaction,
+            reactor.inp.into(),
+            0,
+            ::boomerang::builder::TriggerMode::TriggersAndUses,
+        )?;
+        Ok(__reaction)
+    }
 }

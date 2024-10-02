@@ -1,9 +1,10 @@
 use std::{
     fmt::{Debug, Display},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
-use crate::{Duration, Tag};
+use crate::Tag;
 
 mod action_ref;
 mod store;

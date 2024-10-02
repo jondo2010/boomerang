@@ -1,5 +1,7 @@
 //! Test logical action with delay.
 
+use std::time::Duration;
+
 use boomerang::prelude::*;
 
 #[derive(Default)]
@@ -95,7 +97,7 @@ impl Trigger<Sink> for SinkReactionIn<'_> {
         println!("physical time: {:?}", physical);
         println!("elapsed logical time: {:?}", elapsed_logical);
         assert!(
-            elapsed_logical == runtime::Duration::from_millis(100),
+            elapsed_logical == Duration::from_millis(100),
             "ERROR: Expected 100 msecs but got {:?}",
             elapsed_logical
         );

@@ -1,8 +1,10 @@
+use std::time::Duration;
+
 use crossbeam_channel::Sender;
 
 use crate::{
-    event::PhysicalEvent, keepalive, ActionData, ActionKey, ActionRefValue, BankInfo, Duration,
-    Instant, PhysicalActionRef, ReactionGraph, ReactionKey, Tag,
+    event::PhysicalEvent, keepalive, ActionData, ActionKey, ActionRefValue, BankInfo,
+    PhysicalActionRef, ReactionGraph, ReactionKey, Tag, Timestamp,
 };
 
 /// Result from a reaction trigger
@@ -18,7 +20,7 @@ pub(crate) struct TriggerRes {
 #[derive(Debug)]
 pub struct Context {
     /// Physical time the Scheduler was started
-    pub(crate) start_time: Instant,
+    pub(crate) start_time: Timestamp,
     /// Logical time of the currently executing epoch
     pub(crate) tag: Tag,
     /// Bank index and node count for a multi-bank reactor
@@ -35,16 +37,11 @@ pub struct Context {
 
 pub trait ContextCommon {
     /// Get the start time of the scheduler
-    fn get_start_time(&self) -> Instant;
+    fn get_start_time(&self) -> Timestamp;
 
     /// Get the current physical time
-    fn get_physical_time(&self) -> Instant {
-        Instant::now()
-    }
-
-    /// Get the physical time elapsed since the start of the program.
-    fn get_elapsed_physical_time(&self) -> Duration {
-        self.get_physical_time() - self.get_start_time()
+    fn get_physical_time(&self) -> Timestamp {
+        Timestamp::now()
     }
 
     fn schedule_shutdown(&mut self, offset: Option<Duration>);
@@ -52,7 +49,7 @@ pub trait ContextCommon {
 
 impl Context {
     pub(crate) fn new(
-        start_time: Instant,
+        start_time: Timestamp,
         bank_info: Option<BankInfo>,
         async_tx: Sender<PhysicalEvent>,
         shutdown_rx: keepalive::Receiver,
@@ -91,7 +88,7 @@ impl Context {
     }
 
     /// Get the current logical time, frozen during the execution of a reaction.
-    pub fn get_logical_time(&self) -> Instant {
+    pub fn get_logical_time(&self) -> Timestamp {
         self.tag.to_logical_time(self.start_time)
     }
 
@@ -119,7 +116,7 @@ impl Context {
         delay: Option<Duration>,
     ) {
         let tag_delay = action.get_min_delay() + delay.unwrap_or_default();
-        let new_tag = self.tag.delay(Some(tag_delay));
+        let new_tag = self.tag.delay(tag_delay);
         tracing::trace!(new_tag = %new_tag, "Scheduling Logical");
         action.set_value(value, new_tag);
         self.trigger_res
@@ -139,13 +136,13 @@ impl Context {
 }
 
 impl ContextCommon for Context {
-    fn get_start_time(&self) -> Instant {
+    fn get_start_time(&self) -> Timestamp {
         self.start_time
     }
 
     #[tracing::instrument]
     fn schedule_shutdown(&mut self, offset: Option<Duration>) {
-        let tag = self.tag.delay(offset);
+        let tag = self.tag.delay(offset.unwrap_or_default());
 
         self.trigger_res.scheduled_shutdown = self
             .trigger_res
@@ -157,7 +154,7 @@ impl ContextCommon for Context {
 /// SendContext can be shared across threads and allows asynchronous events to be scheduled.
 pub struct SendContext {
     /// Physical time the Scheduler was started
-    pub start_time: Instant,
+    pub start_time: Timestamp,
     /// Channel for asynchronous events
     pub(crate) async_tx: Sender<PhysicalEvent>,
     /// Shutdown channel
@@ -174,7 +171,7 @@ impl SendContext {
         delay: Option<Duration>,
     ) {
         let tag_delay = action.min_delay + delay.unwrap_or_default();
-        let new_tag = Tag::absolute(self.start_time, Instant::now() + tag_delay);
+        let new_tag = Tag::absolute(self.start_time, Timestamp::now().offset(tag_delay));
         action.set_value(value, new_tag);
         tracing::info!(new_tag = %new_tag, key = ?action.key, "Scheduling Physical");
         let event = PhysicalEvent::trigger(action.key, new_tag);
@@ -188,13 +185,16 @@ impl SendContext {
 }
 
 impl ContextCommon for SendContext {
-    fn get_start_time(&self) -> Instant {
+    fn get_start_time(&self) -> Timestamp {
         self.start_time
     }
 
     /// Schedule a shutdown event at some future time.
     fn schedule_shutdown(&mut self, offset: Option<Duration>) {
-        let tag = Tag::absolute(self.start_time, Instant::now() + offset.unwrap_or_default());
+        let tag = Tag::absolute(
+            self.start_time,
+            Timestamp::now().offset(offset.unwrap_or_default()),
+        );
         let event = PhysicalEvent::shutdown(tag);
         self.async_tx.send(event).unwrap();
     }
@@ -203,7 +203,7 @@ impl ContextCommon for SendContext {
 /// Build contexts for each reaction
 pub fn build_reaction_contexts(
     reaction_graph: &ReactionGraph,
-    start_time: Instant,
+    start_time: Timestamp,
     event_tx: crossbeam_channel::Sender<PhysicalEvent>,
     shutdown_rx: keepalive::Receiver,
 ) -> tinymap::TinySecondaryMap<ReactionKey, Context> {

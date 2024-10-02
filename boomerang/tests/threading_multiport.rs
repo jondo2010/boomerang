@@ -3,7 +3,7 @@
 //! Ported from LF https://github.com/lf-lang/lingua-franca/blob/master/test/C/src/concurrent/ThreadedMultiport.lf
 
 use boomerang::prelude::*;
-use boomerang_runtime::Config;
+use std::time::Duration;
 
 pub struct State {
     s: i32,
@@ -128,7 +128,7 @@ struct ThreadedMultiport<const WIDTH: usize = 4, const ITERS: usize = 100_000_00
     t: [computation::Computation<ITERS>; WIDTH],
     #[reactor(child = "State{s: 0}")]
     b: destination::Destination<WIDTH, ITERS>,
-    #[reactor(child = "runtime::Duration::from_secs(2)")]
+    #[reactor(child = "Duration::from_secs(2)")]
     _timeout: boomerang_util::timeout::Timeout,
 }
 

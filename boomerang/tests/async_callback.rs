@@ -2,11 +2,11 @@
 
 use boomerang::prelude::*;
 use boomerang_util::timeout;
-use std::thread::JoinHandle;
+use std::{thread::JoinHandle, time::Duration};
 
 struct State {
     thread: Option<JoinHandle<()>>,
-    expected_time: runtime::Duration,
+    expected_time: Duration,
     toggle: bool,
     i: usize,
 }
@@ -24,7 +24,7 @@ struct AsyncCallback {
 
     a: TypedActionKey<usize, Physical>,
 
-    #[reactor(child = runtime::Duration::from_secs(2))]
+    #[reactor(child = Duration::from_secs(2))]
     _timeout: timeout::Timeout,
 }
 
@@ -47,7 +47,7 @@ impl Trigger<AsyncCallback> for ReactionT {
         // start new thread
         state.thread = Some(std::thread::spawn(move || {
             // Simulate time passing before a callback occurs
-            std::thread::sleep(runtime::Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(100));
             // Schedule twice. If the action is not physical, these should get consolidated into a single action
             // triggering. If it is, then they cause two separate triggerings with close but not equal time stamps.
             send_ctx.schedule_action(&mut a, Some(0), None);
@@ -76,7 +76,7 @@ impl Trigger<AsyncCallback> for ReactionA {
         }
         if state.toggle {
             state.toggle = false;
-            state.expected_time += runtime::Duration::from_millis(200);
+            state.expected_time += Duration::from_millis(200);
         } else {
             state.toggle = true;
         }
@@ -104,7 +104,7 @@ fn async_callback() {
         "async_callback",
         State {
             thread: None,
-            expected_time: runtime::Duration::from_millis(100),
+            expected_time: Duration::from_millis(100),
             toggle: false,
             i: 0,
         },

@@ -1,10 +1,58 @@
-use super::{Duration, Instant};
+use std::time::{Duration, Instant};
+
+/// Timestamps are represented as the `Duration` since the UNIX epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Timestamp(Duration);
+
+impl From<Duration> for Timestamp {
+    fn from(duration: Duration) -> Self {
+        Self(duration)
+    }
+}
+
+impl Timestamp {
+    pub const ZERO: Self = Self(Duration::ZERO);
+    pub const MAX: Self = Self(Duration::MAX);
+
+    pub fn now() -> Self {
+        Self(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("System time before UNIX epoch"),
+        )
+    }
+
+    pub fn offset(&self, offset: impl Into<Duration>) -> Self {
+        Self(self.0 + offset.into())
+    }
+
+    pub fn checked_duration_since(&self, earlier: Self) -> Option<Duration> {
+        self.0.checked_sub(earlier.0)
+    }
+}
+
+impl std::ops::Sub for Timestamp {
+    type Output = Duration;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        self.0 - rhs.0
+    }
+}
+
+impl std::ops::Add<Timestamp> for Timestamp {
+    type Output = Self;
+
+    fn add(self, rhs: Timestamp) -> Self::Output {
+        Self(self.0 + rhs.0)
+    }
+}
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Tag {
     /// Offset from origin of logical time
-    offset: Duration,
+    offset: Timestamp,
     /// Superdense-timestep
     micro_step: usize,
 }
@@ -16,46 +64,64 @@ impl std::fmt::Display for Tag {
 }
 
 impl Tag {
+    pub const NEVER: Self = Self {
+        offset: Timestamp::ZERO,
+        micro_step: 0,
+    };
+
+    pub const FOREVER: Self = Self {
+        offset: Timestamp::MAX,
+        micro_step: usize::MAX,
+    };
+
     /// Create a new Tag given an offset from the origin, and a microstep
-    pub fn new(offset: Duration, micro_step: usize) -> Tag {
-        Self { offset, micro_step }
+    pub fn new(offset: impl Into<Timestamp>, micro_step: usize) -> Tag {
+        Self {
+            offset: offset.into(),
+            micro_step,
+        }
     }
 
-    pub fn absolute(t0: Instant, instant: Instant) -> Self {
+    pub fn absolute(t0: Timestamp, instant: Timestamp) -> Self {
         Self {
-            offset: instant - t0,
+            offset: (instant - t0).into(),
             micro_step: 0,
         }
     }
 
-    pub fn now(t0: Instant) -> Self {
+    pub fn now(t0: Timestamp) -> Self {
         Self {
-            offset: Instant::now() - t0,
+            offset: (Timestamp::now() - t0).into(),
+            micro_step: 0,
+        }
+    }
+
+    /// Calculate a `Tag` relative to the given origin `t0`.
+    pub fn since(&self, t0: Timestamp) -> Self {
+        Self {
+            offset: self
+                .offset
+                .checked_duration_since(t0)
+                .unwrap_or_default()
+                .into(),
             micro_step: 0,
         }
     }
 
     /// Create a instant given the origin
-    pub fn to_logical_time(&self, origin: Instant) -> Instant {
+    pub fn to_logical_time(&self, origin: Timestamp) -> Timestamp {
         origin + self.offset
     }
 
     /// Create a new Tag offset from the current.
-    pub fn delay(&self, offset: Option<Duration>) -> Self {
-        if let Some(offset) = offset {
-            Self {
-                offset: self.offset + offset,
-                micro_step: 0,
-            }
-        } else {
-            Self {
-                offset: self.offset,
-                micro_step: self.micro_step + 1,
-            }
+    pub fn delay(&self, offset: impl Into<Timestamp>) -> Self {
+        Self {
+            offset: self.offset + offset.into(),
+            micro_step: 0,
         }
     }
 
-    pub fn get_offset(&self) -> Duration {
+    pub fn get_offset(&self) -> Timestamp {
         self.offset
     }
 }

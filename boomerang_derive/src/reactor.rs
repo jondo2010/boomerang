@@ -358,6 +358,7 @@ impl ToTokens for Reactor {
         let connections = &self.connections;
 
         tokens.extend(quote! {
+            #[automatically_derived]
             impl #impl_generics ::boomerang::builder::Reactor for #ident #type_generics #where_clause{
                 type State = #state;
 

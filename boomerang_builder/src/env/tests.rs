@@ -48,8 +48,8 @@ fn test_duplicate_actions() {
             .add_timer(
                 "action0",
                 TimerSpec {
-                    period: Some(runtime::Duration::from_micros(0)),
-                    offset: Some(runtime::Duration::from_micros(0)),
+                    period: Some(Duration::ZERO),
+                    offset: Some(Duration::ZERO),
                 }
             )
             .expect_err("Expected duplicate"),

@@ -7,7 +7,7 @@ use crate::{
     keepalive,
     key_set::KeySetView,
     store::{ReactionTriggerCtx, Store},
-    Env, Instant, Level, ReactionGraph, ReactionKey, ReactionSet, ReactionSetLimits, Tag,
+    Env, Level, ReactionGraph, ReactionKey, ReactionSet, ReactionSetLimits, Tag, Timestamp,
 };
 
 #[derive(Debug)]
@@ -127,7 +127,7 @@ pub struct Scheduler {
     /// Event queue
     events: EventQueue,
     /// Initial wall-clock time.
-    start_time: Instant,
+    start_time: Timestamp,
     /// A shutdown has been scheduled at this time.
     shutdown_tag: Option<Tag>,
     /// Shutdown channel
@@ -146,7 +146,7 @@ impl Scheduler {
     pub fn new(env: Env, reaction_graph: ReactionGraph, config: Config) -> Self {
         let (event_tx, event_rx) = crossbeam_channel::bounded(config.physical_event_q_size);
         let (shutdown_tx, shutdown_rx) = keepalive::channel();
-        let start_time = Instant::now();
+        let start_time = Timestamp::now();
 
         // Build contexts for each reaction
         let contexts = build_reaction_contexts(&reaction_graph, start_time, event_tx, shutdown_rx);
@@ -174,7 +174,7 @@ impl Scheduler {
         //    .build_global()
         //    .unwrap();
 
-        self.start_time = Instant::now();
+        self.start_time = Timestamp::now();
 
         let tag = Tag::new(Duration::ZERO, 0);
 
@@ -200,7 +200,7 @@ impl Scheduler {
             self.shutdown_tag.unwrap().get_offset()
         );
         // If physical_start_time is 0, then execution didn't get far enough along to initialize this.
-        let physical_elapsed = Instant::now().checked_duration_since(self.start_time);
+        let physical_elapsed = Timestamp::now().checked_duration_since(self.start_time);
         tracing::info!("---- Elapsed physical time: {:?}", physical_elapsed);
 
         tracing::info!("Scheduler has been shut down.");
@@ -211,7 +211,7 @@ impl Scheduler {
     fn receive_event(&mut self) -> Option<PhysicalEvent> {
         if let Some(shutdown) = self.shutdown_tag {
             let abs = shutdown.to_logical_time(self.start_time);
-            if let Some(timeout) = abs.checked_duration_since(Instant::now()) {
+            if let Some(timeout) = abs.checked_duration_since(Timestamp::now()) {
                 tracing::debug!(timeout = ?timeout, "Waiting for async event.");
                 self.event_rx.recv_timeout(timeout).ok()
             } else {
@@ -290,8 +290,8 @@ impl Scheduler {
 
     // Wait until the wall-clock time is reached
     #[tracing::instrument(skip(self), fields(target = ?target))]
-    fn synchronize_wall_clock(&mut self, target: Instant) -> Option<ScheduledEvent> {
-        let now = Instant::now();
+    fn synchronize_wall_clock(&mut self, target: Timestamp) -> Option<ScheduledEvent> {
+        let now = Timestamp::now();
 
         if now < target {
             let advance = target - now;
@@ -309,7 +309,8 @@ impl Scheduler {
                     });
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    let remaining: Option<Duration> = target.checked_duration_since(Instant::now());
+                    let remaining: Option<Duration> =
+                        target.checked_duration_since(Timestamp::now());
                     if let Some(remaining) = remaining {
                         tracing::debug!(remaining = ?remaining,
                             "Sleep interrupted disconnect, sleeping for remaining",

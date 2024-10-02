@@ -29,8 +29,6 @@ pub use reactor::*;
 pub use sched::*;
 pub use time::*;
 
-pub use std::time::{Duration, Instant};
-
 pub trait PortData: std::fmt::Debug + Send + Sync + 'static {}
 impl<T> PortData for T where T: std::fmt::Debug + Send + Sync + 'static {}
 

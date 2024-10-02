@@ -1,5 +1,5 @@
 use boomerang::prelude::*;
-use runtime::Duration;
+use std::time::Duration;
 
 #[derive(Reactor)]
 #[reactor(state = "()", reaction = "ReactionStartup", reaction = "ReactionAct")]

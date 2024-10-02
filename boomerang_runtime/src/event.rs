@@ -111,13 +111,13 @@ mod tests {
 
         // The top event should NOT be the shutdown event
         let ev0 = heap.pop().unwrap();
-        assert_eq!(ev0.tag.get_offset(), Duration::from_secs(0));
+        assert_eq!(ev0.tag.get_offset(), Duration::from_secs(0).into());
         assert!(!ev0.terminal);
         let ev1 = heap.pop().unwrap();
         assert!(!ev1.terminal);
-        assert_eq!(ev1.tag.get_offset(), Duration::from_secs(1));
+        assert_eq!(ev1.tag.get_offset(), Duration::from_secs(1).into());
         let ev2 = heap.pop().unwrap();
         assert!(ev2.terminal);
-        assert_eq!(ev2.tag.get_offset(), Duration::from_secs(1));
+        assert_eq!(ev2.tag.get_offset(), Duration::from_secs(1).into());
     }
 }

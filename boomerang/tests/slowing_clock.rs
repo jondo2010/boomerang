@@ -5,7 +5,7 @@
 //! Ported from https://github.com/lf-lang/lingua-franca/blob/master/test/C/src/SlowingClock.lf
 use boomerang::prelude::*;
 use boomerang_util::timeout;
-use runtime::Duration;
+use std::time::Duration;
 
 struct SlowingClock {
     interval: Duration,
@@ -32,7 +32,7 @@ struct SlowingClockBuilder {
     #[reactor(action(min_delay = "100 msec"))]
     a: TypedActionKey<()>,
 
-    #[reactor(child = "runtime::Duration::from_secs(1)")]
+    #[reactor(child = "Duration::from_secs(1)")]
     _timeout: timeout::Timeout,
 }
 

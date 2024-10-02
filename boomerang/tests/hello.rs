@@ -8,10 +8,10 @@ use boomerang::prelude::*;
 use boomerang_util::timeout;
 
 struct Hello {
-    period: runtime::Duration,
+    period: Duration,
     message: String,
     count: usize,
-    previous_time: runtime::Duration,
+    previous_time: Duration,
 }
 
 impl Hello {
@@ -101,7 +101,7 @@ struct MainBuilder {
     #[reactor(child = Inside::new("Hello from composite."))]
     third_instance: InsideBuilder,
 
-    #[reactor(child = runtime::Duration::from_secs(10))]
+    #[reactor(child = Duration::from_secs(10))]
     _timeout: timeout::Timeout,
 }
 

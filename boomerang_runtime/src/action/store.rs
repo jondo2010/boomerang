@@ -270,7 +270,7 @@ mod tests {
             data: u32,
         }
         let mut store = ActionStore::<TestStruct>::new();
-        let tag = Tag::now(crate::Instant::now());
+        let tag = Tag::now(crate::Timestamp::now());
         store.push(
             tag,
             Some(TestStruct {
@@ -281,7 +281,9 @@ mod tests {
 
         let mut builder = store.new_builder().unwrap();
         store.build_value_at(&mut builder, tag).unwrap();
-        store.build_value_at(&mut builder, tag.delay(None)).unwrap();
+        store
+            .build_value_at(&mut builder, tag.delay(Duration::ZERO))
+            .unwrap();
 
         arrow::util::pretty::print_batches(&[builder.to_record_batch().unwrap()]).unwrap();
     }

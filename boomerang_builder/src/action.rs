@@ -4,7 +4,7 @@
 //! An action, like a port (see [`crate::builder::PortBuilder`]), can carry data, but unlike a port,
 //! an action is visible only within the reactor that defines it.
 
-use std::{fmt::Debug, marker::PhantomData};
+use std::{fmt::Debug, marker::PhantomData, time::Duration};
 
 use super::{BuilderReactionKey, BuilderReactorKey};
 use crate::runtime;
@@ -101,20 +101,16 @@ impl From<BuilderActionKey> for TimerActionKey {
 #[derive(Debug, PartialEq, Eq)]
 pub struct TimerSpec {
     /// Interval between timer events
-    pub period: Option<runtime::Duration>,
+    pub period: Option<Duration>,
     /// (logical) time interval between when the program starts executing and the first timer event
-    pub offset: Option<runtime::Duration>,
+    pub offset: Option<Duration>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ActionType {
     Timer(TimerSpec),
-    Logical {
-        min_delay: Option<runtime::Duration>,
-    },
-    Physical {
-        min_delay: Option<runtime::Duration>,
-    },
+    Logical { min_delay: Option<Duration> },
+    Physical { min_delay: Option<Duration> },
     Startup,
     Shutdown,
 }

@@ -1,5 +1,7 @@
 //! Test logical action with delay.
 
+use std::time::Duration;
+
 use boomerang::prelude::*;
 
 struct State {
@@ -30,11 +32,7 @@ impl<'a> Trigger<ActionValues> for ReactionStartup<'a> {
         // scheduled in 100 ms
         ctx.schedule_action(&mut self.act, Some(100), None);
         // scheduled in 150 ms, value is overwritten
-        ctx.schedule_action(
-            &mut self.act,
-            Some(-100),
-            Some(runtime::Duration::from_millis(50)),
-        );
+        ctx.schedule_action(&mut self.act, Some(-100), Some(Duration::from_millis(50)));
     }
 }
 

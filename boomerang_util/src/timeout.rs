@@ -2,8 +2,10 @@
 
 use boomerang::prelude::*;
 
+use std::time::Duration;
+
 #[derive(Reactor)]
-#[reactor(state = "runtime::Duration", reaction = "ReactionStartup")]
+#[reactor(state = "Duration", reaction = "ReactionStartup")]
 pub struct Timeout;
 
 #[derive(Reaction)]
@@ -11,7 +13,7 @@ pub struct Timeout;
 struct ReactionStartup;
 
 impl Trigger<Timeout> for ReactionStartup {
-    fn trigger(self, ctx: &mut runtime::Context, state: &mut runtime::Duration) {
+    fn trigger(self, ctx: &mut runtime::Context, state: &mut Duration) {
         ctx.schedule_shutdown(Some(*state))
     }
 }

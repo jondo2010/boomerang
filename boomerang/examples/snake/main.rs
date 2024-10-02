@@ -9,6 +9,8 @@ mod support;
 
 #[cfg(not(windows))]
 mod reactor {
+    use std::time::Duration;
+
     use super::support::*;
     use boomerang::prelude::*;
     use boomerang_util::keyboard_events::{Key, KeyboardEvents, KeyboardEventsBuilder};
@@ -48,7 +50,7 @@ mod reactor {
 
         /// The game speed level
         tempo: u32,
-        tempo_step: runtime::Duration,
+        tempo_step: Duration,
 
         /// Changes with arrow key presses, might be invalid.
         /// Only committed to snake_direction on grid update.
@@ -62,7 +64,7 @@ mod reactor {
     }
 
     impl Snake {
-        pub fn new(grid_side: usize, tempo_step: runtime::Duration, food_limit: u32) -> Self {
+        pub fn new(grid_side: usize, tempo_step: Duration, food_limit: u32) -> Self {
             let snake = CircularSnake::new(grid_side);
             let grid = SnakeGrid::new(grid_side, &snake);
             Self {
@@ -97,7 +99,7 @@ mod reactor {
             ctx.schedule_action(
                 &mut self.screen_refresh,
                 None,
-                Some(runtime::Duration::from_millis(1000)),
+                Some(Duration::from_millis(1000)),
             );
         }
     }
@@ -116,8 +118,8 @@ mod reactor {
             state: &mut <SnakeBuilder as Reactor>::State,
         ) {
             // select a delay depending on the tempo
-            let delay = runtime::Duration::from_millis(400)
-                - (state.tempo_step * state.tempo).min(runtime::Duration::from_millis(300));
+            let delay = Duration::from_millis(400)
+                - (state.tempo_step * state.tempo).min(Duration::from_millis(300));
             ctx.schedule_action(&mut self.screen_refresh, None, Some(delay));
         }
     }
@@ -227,10 +229,12 @@ mod reactor {
 
 #[cfg(not(windows))]
 fn main() {
+    use std::time::Duration;
+
     use reactor::{Snake, SnakeBuilder};
     let _ = boomerang_util::runner::build_and_run_reactor::<SnakeBuilder>(
         "snake",
-        Snake::new(32, boomerang::runtime::Duration::from_millis(40), 2),
+        Snake::new(32, Duration::from_millis(40), 2),
     )
     .unwrap();
 }

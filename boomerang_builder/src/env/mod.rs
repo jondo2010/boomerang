@@ -13,6 +13,7 @@ use slotmap::{SecondaryMap, SlotMap};
 use std::{
     collections::{BTreeSet, HashMap},
     convert::TryInto,
+    time::Duration,
 };
 
 mod build;
@@ -176,7 +177,7 @@ impl EnvBuilder {
     pub fn add_logical_action<T: runtime::ActionData>(
         &mut self,
         name: &str,
-        min_delay: Option<runtime::Duration>,
+        min_delay: Option<Duration>,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey<T, Logical>, BuilderError> {
         self.add_action::<T, Logical, _>(
@@ -196,7 +197,7 @@ impl EnvBuilder {
     pub fn add_physical_action<T: runtime::ActionData>(
         &mut self,
         name: &str,
-        min_delay: Option<runtime::Duration>,
+        min_delay: Option<Duration>,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey<T, Physical>, BuilderError> {
         self.add_action::<T, Physical, _>(

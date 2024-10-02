@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use super::{
     ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
     EnvBuilder, FindElements, Input, Logical, Output, Physical, PhysicalActionKey, PortTag,
@@ -137,7 +139,7 @@ impl ReactorField for TimerActionKey {
 }
 
 impl<T: runtime::ActionData> ReactorField for TypedActionKey<T, Logical> {
-    type Inner = Option<runtime::Duration>;
+    type Inner = Option<Duration>;
 
     fn build(
         name: &str,
@@ -149,7 +151,7 @@ impl<T: runtime::ActionData> ReactorField for TypedActionKey<T, Logical> {
 }
 
 impl<T: runtime::ActionData> ReactorField for TypedActionKey<T, Physical> {
-    type Inner = Option<runtime::Duration>;
+    type Inner = Option<Duration>;
 
     fn build(
         name: &str,
@@ -161,7 +163,7 @@ impl<T: runtime::ActionData> ReactorField for TypedActionKey<T, Physical> {
 }
 
 impl ReactorField for PhysicalActionKey {
-    type Inner = Option<runtime::Duration>;
+    type Inner = Option<Duration>;
 
     fn build(
         name: &str,
@@ -374,7 +376,7 @@ impl<'a> ReactorBuilderState<'a> {
     pub fn add_logical_action<T: runtime::ActionData>(
         &mut self,
         name: &str,
-        min_delay: Option<runtime::Duration>,
+        min_delay: Option<Duration>,
     ) -> Result<TypedActionKey<T, Logical>, BuilderError> {
         self.env
             .add_logical_action::<T>(name, min_delay, self.reactor_key)
@@ -383,7 +385,7 @@ impl<'a> ReactorBuilderState<'a> {
     pub fn add_physical_action<T: runtime::ActionData>(
         &mut self,
         name: &str,
-        min_delay: Option<runtime::Duration>,
+        min_delay: Option<Duration>,
     ) -> Result<TypedActionKey<T, Physical>, BuilderError> {
         self.env
             .add_physical_action::<T>(name, min_delay, self.reactor_key)

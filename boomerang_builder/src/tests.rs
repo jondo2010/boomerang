@@ -17,33 +17,39 @@ fn test_reaction_ports() -> anyhow::Result<()> {
         .add_reaction("reactionA", reaction_closure!())
         .with_port(port_a, 0, TriggerMode::TriggersOnly)?
         .with_port(port_b, 0, TriggerMode::EffectsOnly)?
+        .with_port(port_c, 0, TriggerMode::UsesOnly)?
         .finish()?;
 
     let (_env, triggers, aliases) = env_builder.into_runtime_parts().unwrap();
 
+    let reaction_a = aliases.reaction_aliases[reaction_a];
+    let port_a = aliases.port_aliases[port_a.into()];
+    let port_b = aliases.port_aliases[port_b.into()];
+    let port_c = aliases.port_aliases[port_c.into()];
+
     // reactionA should "use" (be able to read from) portC
     itertools::assert_equal(
-        triggers.reaction_use_ports[aliases.reaction_aliases[reaction_a]].iter(),
-        iter::once(aliases.port_aliases[port_c.into()]),
+        triggers.reaction_use_ports[reaction_a].iter(),
+        iter::once(port_c),
     );
 
     // reactionA should "effect" (be able to write to) portB
     itertools::assert_equal(
-        triggers.reaction_effect_ports[aliases.reaction_aliases[reaction_a]].iter(),
-        iter::once(aliases.port_aliases[port_b.into()]),
+        triggers.reaction_effect_ports[reaction_a].iter(),
+        iter::once(port_b),
     );
 
     // portA should trigger only reactionA
     itertools::assert_equal(
-        triggers.port_triggers[aliases.port_aliases[port_a.into()]]
+        triggers.port_triggers[port_a]
             .iter()
             .map(|(_, reaction_key)| reaction_key),
-        iter::once(&aliases.reaction_aliases[reaction_a]),
+        iter::once(&reaction_a),
     );
 
     // portB should not trigger any reactions
     itertools::assert_equal(
-        triggers.port_triggers[aliases.port_aliases[port_b.into()]]
+        triggers.port_triggers[port_b]
             .iter()
             .map(|(_, reaction_key)| reaction_key),
         iter::empty::<&runtime::ReactionKey>(),
@@ -51,7 +57,7 @@ fn test_reaction_ports() -> anyhow::Result<()> {
 
     // portC should not trigger any reactions
     itertools::assert_equal(
-        triggers.port_triggers[aliases.port_aliases[port_c.into()]]
+        triggers.port_triggers[port_c]
             .iter()
             .map(|(_, reaction_key)| reaction_key),
         iter::empty::<&runtime::ReactionKey>(),
@@ -282,7 +288,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
             let _ = builder
                 .add_reaction(
                     "reaction_t2",
-                    reaction_closure!(ctx, _state, _ref_ports, mut_ports, _actions => {
+                    reaction_closure!(_ctx, _state, _ref_ports, mut_ports, _actions => {
                         let [mut clock, o2]: [runtime::OutputRef<u32>; 2] =
                             mut_ports.partition_mut().unwrap();
 
@@ -310,7 +316,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
         let _ = builder
             .add_reaction(
                 "reaction_clock",
-                reaction_closure!(ctx, _state, ref_ports, _mut_ports, _actions => {
+                reaction_closure!(_ctx, _state, ref_ports, _mut_ports, _actions => {
                     let [clock, in1, in2]: [runtime::InputRef<u32>; 3] =
                         ref_ports.partition().unwrap();
                     assert_eq!(clock.name(), "clock");

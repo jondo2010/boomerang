@@ -95,11 +95,11 @@ struct InsideBuilder {
 #[reactor(state = ())]
 struct MainBuilder {
     #[reactor(child = Hello::new(Duration::from_secs(4), "Hello from first."))]
-    first_instance: HelloBuilder,
+    _first_instance: HelloBuilder,
     #[reactor(child = Hello::new(Duration::from_secs(2), "Hello from second."))]
-    second_instance: HelloBuilder,
+    _second_instance: HelloBuilder,
     #[reactor(child = Inside::new("Hello from composite."))]
-    third_instance: InsideBuilder,
+    _third_instance: InsideBuilder,
 
     #[reactor(child = Duration::from_secs(10))]
     _timeout: timeout::Timeout,

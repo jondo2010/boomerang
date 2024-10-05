@@ -20,6 +20,8 @@ pub struct ReactionTriggerCtx<'store> {
     pub actions: RefsMut<'store, Action>,
 }
 
+unsafe impl Send for ReactionTriggerCtx<'_> {}
+
 impl<'a> From<&'a mut ReactionTriggerCtxPtrs> for ReactionTriggerCtx<'a> {
     fn from(ptrs: &mut ReactionTriggerCtxPtrs) -> Self {
         let context = unsafe { ptrs.context.as_mut() };

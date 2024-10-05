@@ -1,3 +1,5 @@
+//! Generate the `FromRefs` implementation for a reaction
+
 use quote::{quote, ToTokens};
 use syn::{Generics, Ident, Type, TypeReference};
 
@@ -5,7 +7,7 @@ use crate::util::extract_path_ident;
 
 use super::{ReactionReceiver, ACTION, ACTION_REF, INPUT_REF, OUTPUT_REF, PHYSICAL_ACTION_REF};
 
-pub struct TriggerInner {
+pub struct FromDefsImpl {
     reaction_ident: Ident,
     reaction_generics: Generics,
     combined_generics: Generics,
@@ -16,7 +18,7 @@ pub struct TriggerInner {
     port_mut_idents: Vec<Ident>,
 }
 
-impl TriggerInner {
+impl FromDefsImpl {
     pub fn new(
         reaction_receiver: &ReactionReceiver,
         combined_generics: &Generics,
@@ -124,7 +126,7 @@ impl TriggerInner {
     }
 }
 
-impl ToTokens for TriggerInner {
+impl ToTokens for FromDefsImpl {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
         let reaction_ident = &self.reaction_ident;
 
@@ -133,12 +135,28 @@ impl ToTokens for TriggerInner {
             .const_params()
             .map(|ty| &ty.ident)
             .chain(self.reaction_generics.type_params().map(|ty| &ty.ident));
-        let reaction_generics = quote! { <#(#reaction_generics),*> };
+        let reaction_generics = quote! { #(#reaction_generics),* };
+
+        let lifetimes = self.reaction_generics.lifetimes().collect::<Vec<_>>();
+        assert!(lifetimes.len() <= 1, "Expected at most one lifetime");
+
+        let anon_lt = if lifetimes.is_empty() {
+            reaction_generics.clone()
+        } else {
+            quote! { '_, #reaction_generics }
+        };
+        let marker_lt = if lifetimes.is_empty() {
+            reaction_generics.clone()
+        } else {
+            quote! { 's, #reaction_generics }
+        };
 
         // We pass through the const and type generics from the reactor to parameters of the trigger function
         let inner_generics = {
-            let const_generics = self.combined_generics.const_params();
-            let type_params = self.combined_generics.type_params();
+            //let const_generics = self.combined_generics.const_params();
+            //let type_params = self.combined_generics.type_params();
+            let const_generics = self.reaction_generics.const_params();
+            let type_params = self.reaction_generics.type_params();
             quote! { #(#const_generics),* #(#type_params),* }
         };
 
@@ -148,59 +166,44 @@ impl ToTokens for TriggerInner {
         let port_idents = &self.port_idents;
         let port_mut_idents = &self.port_mut_idents;
 
-        let actions_len = action_idents.len();
-        let actions = if actions_len > 0 {
+        let actions = (!action_idents.is_empty()).then(|| {
             quote! {
-                let [#(#action_idents,)*]: &mut [&mut ::boomerang::runtime::Action; #actions_len] =
-                    ::std::convert::TryInto::try_into(actions)
-                        .expect("Unable to destructure actions for reaction");
-
-                #(let #action_idents = (*#action_idents).into(); );*
+                let (#(#action_idents,)*) = actions.partition_mut()
+                    .expect("Unable to destructure actions for reaction");
             }
-        } else {
-            quote! {}
-        };
+        });
 
-        let ports = if !port_idents.is_empty() {
+        let ports = (!port_idents.is_empty()).then(|| {
             quote! {
-                let (#(#port_idents,)*) = ::boomerang::runtime::partition(ports)
+                let (#(#port_idents,)*) = ports.partition()
                     .expect("Unable to destructure ref ports for reaction");
             }
-        } else {
-            quote! {}
-        };
+        });
 
-        let port_muts = if !port_mut_idents.is_empty() {
+        let port_muts = (!port_mut_idents.is_empty()).then(|| {
             quote! {
-                let (#(#port_mut_idents,)*) = ::boomerang::runtime::partition_mut(ports_mut)
+                let (#(#port_mut_idents,)*) = ports_mut.partition_mut()
                     .expect("Unable to destructure mut ports for reaction");
             }
-        } else {
-            quote! {}
-        };
+        });
 
         tokens.extend(quote! {
-            #[allow(unused_variables)]
-            fn __trigger_inner<'inner, #inner_generics>(
-                ctx: &mut ::boomerang::runtime::Context,
-                state: &'inner mut dyn ::boomerang::runtime::ReactorState,
-                ports: &'inner [::boomerang::runtime::PortRef<'inner>],
-                ports_mut: &'inner mut [::boomerang::runtime::PortRefMut<'inner>],
-                actions: &'inner mut [&'inner mut ::boomerang::runtime::Action],
-            ) {
-                let state: &mut <#reactor as ::boomerang::builder::Reactor>::State = state
-                    .downcast_mut()
-                    .expect("Unable to downcast reactor state");
+            #[automatically_derived]
+            impl <#inner_generics> ::boomerang::runtime::FromRefs for #reaction_ident <#anon_lt> {
+                type Marker<'s> = #reaction_ident <#marker_lt>;
 
-                #actions
-                #ports
-                #port_muts
+                #[allow(unused_variables)]
+                fn from_refs<'store>(
+                    ports: ::boomerang::runtime::Refs<'store, dyn ::boomerang::runtime::BasePort>,
+                    ports_mut: ::boomerang::runtime::RefsMut<'store, dyn ::boomerang::runtime::BasePort>,
+                    actions: ::boomerang::runtime::RefsMut<'store, ::boomerang::runtime::Action>,
+                ) -> Self::Marker<'store> {
+                    #actions
+                    #ports
+                    #port_muts
 
-                <#reaction_ident #reaction_generics as ::boomerang::builder::Trigger<#reactor>>::trigger(
-                    #reaction_ident { #(#initializer_idents),* },
-                    ctx,
-                    state
-                );
+                    #reaction_ident { #(#initializer_idents),* }
+                }
             }
         });
     }

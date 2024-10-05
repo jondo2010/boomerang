@@ -22,7 +22,7 @@ struct ReactionStartup<'a, const NUM_NODES: usize> {
     output: [runtime::OutputRef<'a, i32>; NUM_NODES],
 }
 
-impl<const NUM_NODES: usize> Trigger<Node<NUM_NODES>> for ReactionStartup<'_, NUM_NODES> {
+impl<const NUM_NODES: usize> runtime::Trigger<bool> for ReactionStartup<'_, NUM_NODES> {
     fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut bool) {
         let bank_index = ctx.get_bank_index().unwrap();
         println!("Hello from node {}!", bank_index);
@@ -37,7 +37,7 @@ struct ReactionInput<'a, const NUM_NODES: usize> {
     input: [runtime::InputRef<'a, i32>; NUM_NODES],
 }
 
-impl<const NUM_NODES: usize> Trigger<Node<NUM_NODES>> for ReactionInput<'_, NUM_NODES> {
+impl<const NUM_NODES: usize> runtime::Trigger<bool> for ReactionInput<'_, NUM_NODES> {
     fn trigger(self, ctx: &mut runtime::Context, state: &mut bool) {
         let bank_index = ctx.get_bank_index().unwrap();
 
@@ -80,8 +80,8 @@ impl<const NUM_NODES: usize> Trigger<Node<NUM_NODES>> for ReactionInput<'_, NUM_
 )]
 struct ReactionShutdown;
 
-impl<const NUM_NODES: usize> Trigger<Node<NUM_NODES>> for ReactionShutdown {
-    fn trigger(self, _ctx: &mut runtime::Context, state: &mut <Node<NUM_NODES> as Reactor>::State) {
+impl runtime::Trigger<bool> for ReactionShutdown {
+    fn trigger(self, _ctx: &mut runtime::Context, state: &mut bool) {
         assert!(*state, "Error: received no input!");
     }
 }

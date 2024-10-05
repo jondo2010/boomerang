@@ -41,7 +41,7 @@ struct ReactionT<'a> {
     a: runtime::ActionRef<'a, ()>,
 }
 
-impl Trigger<HelloBuilder> for ReactionT<'_> {
+impl runtime::Trigger<Hello> for ReactionT<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut Hello) {
         // Print the current time.
         state.previous_time = ctx.get_elapsed_logical_time();
@@ -58,7 +58,7 @@ impl Trigger<HelloBuilder> for ReactionT<'_> {
 #[reaction(reactor = "HelloBuilder", triggers(action = "a"))]
 struct ReactionA;
 
-impl Trigger<HelloBuilder> for ReactionA {
+impl runtime::Trigger<Hello> for ReactionA {
     fn trigger(self, ctx: &mut runtime::Context, state: &mut Hello) {
         state.count += 1;
         let time = ctx.get_elapsed_logical_time();

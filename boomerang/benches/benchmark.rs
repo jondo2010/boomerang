@@ -27,7 +27,7 @@ struct ReactionFoo<'a> {
     out1: runtime::OutputRef<'a, u32>,
 }
 
-impl Trigger<HelloBenchBuilder> for ReactionFoo<'_> {
+impl runtime::Trigger<HelloBench> for ReactionFoo<'_> {
     fn trigger(mut self, _ctx: &mut runtime::Context, state: &mut HelloBench) {
         state.my_i += 1;
         *self.out1 = Some(state.my_i);
@@ -40,7 +40,7 @@ struct ReactionBar<'a> {
     in1: runtime::InputRef<'a, u32>,
 }
 
-impl Trigger<HelloBenchBuilder> for ReactionBar<'_> {
+impl runtime::Trigger<HelloBench> for ReactionBar<'_> {
     fn trigger(self, ctx: &mut runtime::Context, _state: &mut HelloBench) {
         if self.in1.unwrap() >= 10000 {
             ctx.schedule_shutdown(None);

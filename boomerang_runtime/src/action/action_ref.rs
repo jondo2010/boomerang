@@ -17,9 +17,20 @@ pub trait ActionRefValue<T: ActionData> {
 
 /// An `ActionRef` is a reference to an `Action` that can be scheduled.
 pub struct ActionRef<'a, T: ActionData = ()> {
+    pub(crate) name: &'a str,
     pub(crate) key: ActionKey,
     pub(crate) min_delay: Duration,
     pub(crate) store: &'a mut ActionStore<T>,
+}
+
+impl ActionRef<'_, ()> {
+    pub fn name(&self) -> &str {
+        self.name
+    }
+
+    pub fn key(&self) -> ActionKey {
+        self.key
+    }
 }
 
 impl<'a, T: ActionData> ActionRefValue<T> for ActionRef<'a, T> {
@@ -90,8 +101,9 @@ impl<T: ActionData> ActionRefValue<T> for PhysicalActionRef<T> {
 impl<'a, T: ActionData> From<&'a mut Action> for ActionRef<'a, T> {
     fn from(value: &'a mut Action) -> Self {
         value
-            .as_valued_mut()
+            .as_logical_mut()
             .map(|logical| ActionRef {
+                name: logical.name.as_str(),
                 key: logical.key,
                 min_delay: logical.min_delay,
                 store: logical

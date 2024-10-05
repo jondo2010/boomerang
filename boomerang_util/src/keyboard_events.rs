@@ -33,7 +33,7 @@ struct ReactionKeyPress<'a> {
     arrow_key_pressed: runtime::OutputRef<'a, Key>,
 }
 
-impl<'a> Trigger<KeyboardEventsBuilder> for ReactionKeyPress<'a> {
+impl<'a> runtime::Trigger<KeyboardEvents> for ReactionKeyPress<'a> {
     fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut KeyboardEvents) {
         ctx.get_action_with(&mut self.key_press, |value| {
             *self.arrow_key_pressed = value.cloned();
@@ -45,7 +45,7 @@ impl<'a> Trigger<KeyboardEventsBuilder> for ReactionKeyPress<'a> {
 #[reaction(reactor = "KeyboardEventsBuilder", triggers(shutdown))]
 struct ReactionShutdown;
 
-impl Trigger<KeyboardEventsBuilder> for ReactionShutdown {
+impl runtime::Trigger<KeyboardEvents> for ReactionShutdown {
     fn trigger(self, _ctx: &mut runtime::Context, state: &mut KeyboardEvents) {
         drop(state.raw_terminal.take()); // exit raw mode
     }
@@ -57,7 +57,7 @@ struct ReactionStartup {
     key_press: runtime::PhysicalActionRef<Key>,
 }
 
-impl Trigger<KeyboardEventsBuilder> for ReactionStartup {
+impl runtime::Trigger<KeyboardEvents> for ReactionStartup {
     fn trigger(self, ctx: &mut runtime::Context, state: &mut KeyboardEvents) {
         let stdin = std::io::stdin();
 

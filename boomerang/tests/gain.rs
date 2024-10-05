@@ -18,7 +18,7 @@ struct ScaleReactionX<'a> {
     y: runtime::OutputRef<'a, u32>,
 }
 
-impl Trigger<ScaleBuilder> for ScaleReactionX<'_> {
+impl runtime::Trigger<Scale> for ScaleReactionX<'_> {
     fn trigger(mut self, _ctx: &mut runtime::Context, state: &mut Scale) {
         *self.y = Some(state.0 * self.x.unwrap());
     }
@@ -36,7 +36,7 @@ struct TestReactionX<'a> {
     x: runtime::InputRef<'a, u32>,
 }
 
-impl Trigger<TestBuilder> for TestReactionX<'_> {
+impl runtime::Trigger<()> for TestReactionX<'_> {
     fn trigger(self, _ctx: &mut runtime::Context, _state: &mut ()) {
         println!("Received {:?}", *self.x);
         assert_eq!(*self.x, Some(2), "Expected Some(2)!");
@@ -68,7 +68,7 @@ struct GainReactionTim<'a> {
     g_x: runtime::OutputRef<'a, u32>,
 }
 
-impl Trigger<GainBuilder> for GainReactionTim<'_> {
+impl runtime::Trigger<()> for GainReactionTim<'_> {
     fn trigger(mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
         *self.g_x = Some(1);
     }

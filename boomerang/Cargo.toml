@@ -34,11 +34,7 @@ boomerang_derive = { workspace = true, optional = true }
 boomerang_runtime = { workspace = true, default-features = false }
 
 [dev-dependencies]
-boomerang_util = { path = "../boomerang_util", features = [
-    "keyboard",
-    "runner",
-    "serde",
-] }
+boomerang_util = { path = "../boomerang_util", features = ["runner", "serde"] }
 tracing-subscriber = { version = "0.3", features = [
     "fmt",
     "json",

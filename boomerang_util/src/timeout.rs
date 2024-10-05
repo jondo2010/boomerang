@@ -12,7 +12,7 @@ pub struct Timeout;
 #[reaction(triggers(startup), reactor = "Timeout")]
 struct ReactionStartup;
 
-impl Trigger<Timeout> for ReactionStartup {
+impl runtime::Trigger<Duration> for ReactionStartup {
     fn trigger(self, ctx: &mut runtime::Context, state: &mut Duration) {
         ctx.schedule_shutdown(Some(*state))
     }

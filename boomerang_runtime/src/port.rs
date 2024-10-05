@@ -61,9 +61,9 @@ impl<T> Port<T>
 where
     T: PortData,
 {
-    pub fn new(name: String, key: PortKey) -> Self {
+    pub fn new(name: &str, key: PortKey) -> Self {
         Self {
-            name,
+            name: name.to_owned(),
             key,
             value: None,
         }
@@ -75,6 +75,10 @@ where
 
     pub fn get_mut(&mut self) -> &mut Option<T> {
         &mut self.value
+    }
+
+    pub fn boxed(self) -> Box<dyn BasePort> {
+        Box::new(self)
     }
 }
 
@@ -134,6 +138,15 @@ impl<'a, T: PortData> Deref for InputRef<'a, T> {
     }
 }
 
+impl<'a, T: PortData> From<&'a (dyn BasePort)> for InputRef<'a, T> {
+    fn from(port: &'a dyn BasePort) -> Self {
+        InputRef::from(
+            port.downcast_ref::<Port<T>>()
+                .expect("Downcast failed during conversion"),
+        )
+    }
+}
+
 /// A reference to an output port.
 ///
 /// `OutputRef` is the type that Reaction functions receive for their input ports.
@@ -168,5 +181,14 @@ impl<'a, T: PortData> Deref for OutputRef<'a, T> {
 impl<'a, T: PortData> DerefMut for OutputRef<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.0.deref_mut()
+    }
+}
+
+impl<'a, T: PortData> From<&'a mut dyn BasePort> for OutputRef<'a, T> {
+    fn from(port: &'a mut dyn BasePort) -> Self {
+        OutputRef::from(
+            port.downcast_mut::<Port<T>>()
+                .expect("Downcast failed during conversion"),
+        )
     }
 }

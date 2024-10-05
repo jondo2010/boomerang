@@ -79,10 +79,10 @@ pub mod prelude {
 
     pub use super::builder::{
         BuilderError, BuilderFqn, EnvBuilder, Input, Logical, Output, Physical, Reactor,
-        TimerActionKey, Trigger, TypedActionKey, TypedPortKey,
+        TimerActionKey, TypedActionKey, TypedPortKey,
     };
 
-    pub use super::runtime::{self, ContextCommon};
+    pub use super::runtime::{self, ContextCommon, FromRefs};
 
     pub use boomerang_derive::{Reaction, Reactor};
 }

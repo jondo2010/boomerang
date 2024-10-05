@@ -19,15 +19,8 @@ impl petgraph::graph::GraphIndex for BuilderReactionKey {
     }
 }
 
-/// The `Trigger` trait should be implemented by the user for each Reaction struct.
-///
-/// Type parameter `R` is the owning Reactor.
-pub trait Trigger<R: Reactor> {
-    fn trigger(self, ctx: &mut runtime::Context, state: &mut R::State);
-}
-
 /// The Reaction trait should be automatically derived for each Reaction struct.
-pub trait Reaction<R: Reactor>: Trigger<R> {
+pub trait Reaction<R: Reactor> {
     /// Build a `ReactionBuilderState` for this Reaction
     fn build<'builder>(
         name: &str,
@@ -181,7 +174,7 @@ pub struct ReactionBuilder {
     /// The owning Reactor for this Reaction
     pub(super) reactor_key: BuilderReactorKey,
     /// The Reaction function
-    pub(super) reaction_fn: runtime::ReactionFn,
+    pub(super) reaction_fn: runtime::BoxedReactionFn,
 
     /// Actions that trigger this Reaction, and their relative ordering.
     pub(super) trigger_actions: SecondaryMap<BuilderActionKey, usize>,
@@ -288,7 +281,7 @@ impl<'a> ReactionBuilderState<'a> {
         name: &str,
         priority: usize,
         reactor_key: BuilderReactorKey,
-        reaction_fn: runtime::ReactionFn,
+        reaction_fn: runtime::BoxedReactionFn,
         env: &'a mut EnvBuilder,
     ) -> Self {
         Self {

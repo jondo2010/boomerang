@@ -35,7 +35,7 @@ struct ReactionStartup {
     a: runtime::PhysicalActionRef,
 }
 
-impl Trigger<SlowingClockPhysical> for ReactionStartup {
+impl runtime::Trigger<State> for ReactionStartup {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut State) {
         state.expected_time = Duration::from_millis(100);
         ctx.schedule_action(&mut self.a, None, None);
@@ -49,7 +49,7 @@ struct ReactionA {
     a: runtime::PhysicalActionRef,
 }
 
-impl Trigger<SlowingClockPhysical> for ReactionA {
+impl runtime::Trigger<State> for ReactionA {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut State) {
         let elapsed_logical_time = ctx.get_elapsed_logical_time();
         println!("Logical time since start: {elapsed_logical_time:?}");
@@ -72,7 +72,7 @@ impl Trigger<SlowingClockPhysical> for ReactionA {
 #[reaction(reactor = "SlowingClockPhysical", triggers(shutdown))]
 struct ReactionShutdown;
 
-impl Trigger<SlowingClockPhysical> for ReactionShutdown {
+impl runtime::Trigger<State> for ReactionShutdown {
     fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
         assert!(
             state.expected_time >= Duration::from_millis(500),

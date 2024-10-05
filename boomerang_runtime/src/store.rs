@@ -3,63 +3,71 @@
 use std::{marker::PhantomPinned, pin::Pin, ptr::NonNull};
 
 use crate::{
-    Action, ActionKey, ActionRefMut, BasePort, Context, PortKey, PortRef, PortRefMut, Reaction,
-    ReactionKey, Reactor, ReactorKey,
+    refs::{Refs, RefsMut},
+    Action, ActionKey, BasePort, Context, ContextCommon, Deadline, PortKey, Reaction, ReactionKey,
+    Reactor, ReactorKey, Tag, TriggerRes,
 };
 
 use super::{Env, ReactionGraph};
 
 /// Set of borrows necessary for a single Reaction triggering.
-pub struct ReactionTriggerCtx<'a> {
-    pub context: &'a mut Context,
-    pub reactor: &'a mut Reactor,
-    pub reaction: &'a mut Reaction,
-    pub ref_ports: &'a [PortRef<'a>],
-    pub mut_ports: &'a mut [PortRefMut<'a>],
-    pub actions: &'a mut [ActionRefMut<'a>],
+pub struct ReactionTriggerCtx<'store> {
+    pub context: &'store mut Context,
+    pub reactor: &'store mut Reactor,
+    pub reaction: &'store mut Reaction,
+    pub ref_ports: Refs<'store, dyn BasePort>,
+    pub mut_ports: RefsMut<'store, dyn BasePort>,
+    pub actions: RefsMut<'store, Action>,
+}
+
+impl<'a> From<&'a mut ReactionTriggerCtxPtrs> for ReactionTriggerCtx<'a> {
+    fn from(ptrs: &mut ReactionTriggerCtxPtrs) -> Self {
+        let context = unsafe { ptrs.context.as_mut() };
+        let reactor = unsafe { ptrs.reactor.as_mut() };
+        let reaction = unsafe { ptrs.reaction.as_mut() };
+
+        let ref_ports = Refs::new(&mut ptrs.ref_ports);
+        let mut_ports = RefsMut::new(&mut ptrs.mut_ports);
+        let actions = RefsMut::new(&mut ptrs.actions);
+
+        Self {
+            context,
+            reactor,
+            reaction,
+            ref_ports,
+            mut_ports,
+            actions,
+        }
+    }
 }
 
 impl<'a> ReactionTriggerCtx<'a> {
     /// Trigger the reaction with the given context and state.
-    pub fn trigger(&mut self) {
-        (self.reaction.body)(
+    pub fn trigger(self, tag: Tag) -> &'a TriggerRes {
+        tracing::trace!(
+            "    Executing {reactor_name}/{reaction_name}.",
+            reaction_name = self.reaction.get_name(),
+            reactor_name = self.reactor.get_name()
+        );
+
+        if let Some(Deadline { deadline, handler }) = self.reaction.deadline.as_ref() {
+            let lag = self.context.get_physical_time() - self.context.get_logical_time();
+            if lag > *deadline {
+                (handler.write().unwrap())();
+            }
+        }
+
+        self.context.reset_for_reaction(tag);
+
+        self.reaction.body.trigger(
             self.context,
-            &mut self.reactor.state,
+            self.reactor.state.as_mut(),
             self.ref_ports,
             self.mut_ports,
             self.actions,
         );
-    }
-}
 
-impl<'a> From<&'a mut ReactionTriggerCtxPtrs> for ReactionTriggerCtx<'a> {
-    fn from(ptrs: &'a mut ReactionTriggerCtxPtrs) -> Self {
-        unsafe {
-            let context = ptrs.context.as_mut();
-            let reactor = ptrs.reactor.as_mut();
-            let reaction = ptrs.reaction.as_mut();
-
-            let actions = std::slice::from_raw_parts_mut::<&mut Action>(
-                ptrs.actions.as_mut_ptr() as *mut &mut _,
-                ptrs.actions.len(),
-            );
-            let ref_ports = std::slice::from_raw_parts(
-                ptrs.ref_ports.as_ptr() as *const &_,
-                ptrs.ref_ports.len(),
-            );
-            let mut_ports = std::slice::from_raw_parts_mut(
-                ptrs.mut_ports.as_mut_ptr() as *mut &mut _,
-                ptrs.mut_ports.len(),
-            );
-            ReactionTriggerCtx {
-                context,
-                reactor,
-                reaction,
-                ref_ports,
-                mut_ports,
-                actions,
-            }
-        }
+        &self.context.trigger_res
     }
 }
 
@@ -260,6 +268,60 @@ impl Store {
             reactions: store.inner.reactions,
             actions: store.inner.actions,
             ports: store.inner.ports,
+        }
+    }
+}
+
+#[cfg(test)]
+pub mod tests {
+    use itertools::Itertools;
+
+    use crate::{keepalive, ActionRef, InputRef, OutputRef, Timestamp};
+
+    use super::*;
+
+    /// Create a dummy `Store` for testing containing `Action`s.
+    pub fn create_dummy_store(env: Env, reaction_graph: &ReactionGraph) -> Pin<Box<Store>> {
+        let reaction_key = env.reactions.keys().next().unwrap();
+
+        let (event_tx, _) = crossbeam_channel::bounded(0);
+        let (_, shutdown_rx) = keepalive::channel();
+
+        let contexts = [(
+            reaction_key,
+            Context::new(Timestamp::now(), None, event_tx, shutdown_rx),
+        )]
+        .into_iter()
+        .collect();
+
+        Store::new(env, contexts, reaction_graph)
+    }
+
+    #[test]
+    fn test_iter_borrow_storage() {
+        let (env, reaction_graph) = crate::env::tests::create_dummy_env();
+        let reaction_keys = reaction_graph.reaction_actions.keys().collect_vec();
+
+        let mut store = create_dummy_store(env, &reaction_graph);
+
+        {
+            let mut ctx_iter = unsafe { store.iter_borrow_storage(reaction_keys.iter().cloned()) };
+            let ctx = ctx_iter.next().unwrap();
+
+            let [a0, a1]: [ActionRef; 2] = ctx.actions.partition_mut().unwrap();
+            assert_eq!(a0.name(), "action0");
+            assert_eq!(a1.name(), "action1");
+
+            let [p0]: [InputRef<u32>; 1] = ctx.ref_ports.partition().unwrap();
+            assert_eq!(p0.name(), "port0");
+
+            let mut p1: OutputRef<u32> = ctx.mut_ports.partition_mut().unwrap();
+            assert_eq!(p1.name(), "port1");
+            *p1 = Some(42);
+        }
+        {
+            let mut ctx_iter = unsafe { store.iter_borrow_storage(reaction_keys.iter().cloned()) };
+            let _res = ctx_iter.next().unwrap().trigger(Tag::now(Timestamp::now()));
         }
     }
 }

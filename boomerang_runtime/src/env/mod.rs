@@ -7,10 +7,10 @@ mod debug;
 
 /// Execution level
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
 pub struct Level(pub(crate) usize);
 
-impl std::fmt::Display for Level {
+impl std::fmt::Debug for Level {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "L{}", self.0)
     }
@@ -104,4 +104,73 @@ pub struct ReactionGraph {
     pub reaction_reactors: tinymap::TinySecondaryMap<ReactionKey, ReactorKey>,
     /// Bank index for a multi-bank reactor
     pub reactor_bank_infos: tinymap::TinySecondaryMap<ReactorKey, Option<BankInfo>>,
+}
+
+#[cfg(test)]
+pub mod tests {
+    use itertools::Itertools;
+
+    use crate::{Context, Port, ReactionSetLimits, ReactorState};
+
+    use super::*;
+
+    /// An empty reaction function for testing.
+    pub fn dummy_reaction_fn<'a>(
+        _context: &'a mut Context,
+        _state: &'a mut dyn ReactorState,
+        _ref_ports: crate::refs::Refs<'a, dyn BasePort>,
+        _mut_ports: crate::refs::RefsMut<'a, dyn BasePort>,
+        _actions: crate::refs::RefsMut<'a, Action>,
+    ) {
+    }
+
+    /// Create a dummy `Env` and `ReactionGraph` for testing.
+    pub fn create_dummy_env() -> (Env, ReactionGraph) {
+        let env = Env {
+            reactors: [Reactor::new("dummy", Box::new(()))].into_iter().collect(),
+            reactions: [Reaction::new("dummy", Box::new(dummy_reaction_fn), None)]
+                .into_iter()
+                .collect(),
+            actions: [
+                Action::new_logical::<()>("action0", ActionKey::from(0), Default::default()),
+                Action::new_logical::<()>("action1", ActionKey::from(1), Default::default()),
+            ]
+            .into_iter()
+            .collect(),
+            ports: [
+                Port::<u32>::new("port0", PortKey::from(0)).boxed(),
+                Port::<u32>::new("port1", PortKey::from(1)).boxed(),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let reactor_key = env.reactors.keys().next().unwrap();
+        let reaction_key = env.reactions.keys().next().unwrap();
+        let action_keys = env.actions.keys().collect_vec();
+        let port_keys = env.ports.keys().collect_vec();
+
+        let reaction_graph = ReactionGraph {
+            action_triggers: tinymap::TinySecondaryMap::new(),
+            port_triggers: tinymap::TinySecondaryMap::new(),
+            startup_reactions: Vec::new(),
+            shutdown_reactions: Vec::new(),
+            reaction_set_limits: ReactionSetLimits {
+                max_level: 0.into(),
+                num_keys: 0,
+            },
+            reaction_use_ports: [(reaction_key, std::iter::once(port_keys[0]).collect())]
+                .into_iter()
+                .collect(),
+            reaction_effect_ports: [(reaction_key, std::iter::once(port_keys[1]).collect())]
+                .into_iter()
+                .collect(),
+            reaction_actions: [(reaction_key, action_keys.into_iter().collect())]
+                .into_iter()
+                .collect(),
+            reaction_reactors: [(reaction_key, reactor_key)].into_iter().collect(),
+            reactor_bank_infos: tinymap::TinySecondaryMap::new(),
+        };
+        (env, reaction_graph)
+    }
 }

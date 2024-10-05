@@ -9,10 +9,16 @@ use fixedbitset::{FixedBitSet, Ones};
 use super::Key;
 
 /// A unique set of keys.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct KeySet<K: Key> {
     data: FixedBitSet,
     _k: PhantomData<K>,
+}
+
+impl<K: Key + std::fmt::Debug> std::fmt::Debug for KeySet<K> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_set().entries(self.iter()).finish()
+    }
 }
 
 impl<K: Key> KeySet<K> {

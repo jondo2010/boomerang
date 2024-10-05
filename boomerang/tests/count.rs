@@ -27,8 +27,8 @@ struct ReactionT<'a, T: CountData> {
     xyc: runtime::OutputRef<'a, T>,
 }
 
-impl<T: CountData> Trigger<Count<T>> for ReactionT<'_, T> {
-    fn trigger(mut self, _ctx: &mut runtime::Context, state: &mut <Count<T> as Reactor>::State) {
+impl<T: CountData> runtime::Trigger<T> for ReactionT<'_, T> {
+    fn trigger(mut self, _ctx: &mut runtime::Context, state: &mut T) {
         *state += 1;
         assert!(self.xyc.is_none());
         *self.xyc = Some(*state);
@@ -39,8 +39,8 @@ impl<T: CountData> Trigger<Count<T>> for ReactionT<'_, T> {
 #[reaction(reactor = "Count::<T>", bound = "T: CountData", triggers(shutdown))]
 struct ReactionShutdown;
 
-impl<T: CountData> Trigger<Count<T>> for ReactionShutdown {
-    fn trigger(self, _ctx: &mut runtime::Context, state: &mut <Count<T> as Reactor>::State) {
+impl<T: CountData> runtime::Trigger<T> for ReactionShutdown {
+    fn trigger(self, _ctx: &mut runtime::Context, state: &mut T) {
         assert_eq!(*state, 1e3 as i32, "expected 1e3, got {state:?}");
         println!("ok");
     }

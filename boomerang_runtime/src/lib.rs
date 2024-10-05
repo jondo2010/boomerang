@@ -9,10 +9,10 @@ mod env;
 mod event;
 pub mod keepalive;
 mod key_set;
-mod partition;
 mod port;
 mod reaction;
 mod reactor;
+mod refs;
 mod sched;
 mod store;
 mod time;
@@ -20,12 +20,13 @@ mod time;
 // Re-exports
 pub use action::*;
 pub use context::*;
-pub use env::*;
+pub use env::{BankInfo, Env, Level, LevelReactionKey, ReactionGraph};
 pub use key_set::KeySetLimits as ReactionSetLimits;
-pub use partition::{partition, partition_mut, Partition, PartitionMut};
+//pub use partition::{partition, partition_mut, Partition, PartitionMut};
 pub use port::*;
 pub use reaction::*;
 pub use reactor::*;
+pub use refs::{Refs, RefsMut};
 pub use sched::*;
 pub use time::*;
 

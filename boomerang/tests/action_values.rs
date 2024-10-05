@@ -27,7 +27,7 @@ struct ReactionStartup<'a> {
     act: runtime::ActionRef<'a, i32>,
 }
 
-impl<'a> Trigger<ActionValues> for ReactionStartup<'a> {
+impl<'a> runtime::Trigger<State> for ReactionStartup<'a> {
     fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut State) {
         // scheduled in 100 ms
         ctx.schedule_action(&mut self.act, Some(100), None);
@@ -43,7 +43,7 @@ struct ReactionAct<'a> {
     act: runtime::ActionRef<'a, i32>,
 }
 
-impl<'a> Trigger<ActionValues> for ReactionAct<'a> {
+impl<'a> runtime::Trigger<State> for ReactionAct<'a> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut State) {
         let elapsed = ctx.get_elapsed_logical_time();
         let value = ctx.get_action_with(&mut self.act, |value| value.cloned());
@@ -67,7 +67,7 @@ impl<'a> Trigger<ActionValues> for ReactionAct<'a> {
 #[reaction(reactor = "ActionValues", triggers(shutdown))]
 struct ReactionShutdown;
 
-impl Trigger<ActionValues> for ReactionShutdown {
+impl runtime::Trigger<State> for ReactionShutdown {
     fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
         assert!(
             state.r1done && state.r2done,

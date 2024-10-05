@@ -223,8 +223,8 @@ pub fn create_reaction_graph(env_builder: &EnvBuilder) -> Result<String, Builder
     let mut output = vec!["digraph G {".to_owned()];
 
     for (level, reactions) in level_runtime_map.iter() {
-        output.push(format!("subgraph cluster{} {{", level));
-        output.push(format!("  label=\"level{}\";", level));
+        output.push(format!("subgraph cluster{level:?} {{"));
+        output.push(format!("  label=\"level{level:?}\";"));
 
         for &key in reactions.iter() {
             let _reaction = &env_builder.reaction_builders[key];

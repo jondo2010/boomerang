@@ -42,7 +42,7 @@ struct ReactionStartup<'a> {
     a: runtime::ActionRef<'a>,
 }
 
-impl Trigger<SlowingClockBuilder> for ReactionStartup<'_> {
+impl runtime::Trigger<SlowingClock> for ReactionStartup<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut SlowingClock) {
         println!("startup");
         ctx.schedule_action(&mut self.a, None, None);
@@ -56,7 +56,7 @@ struct ReactionA<'a> {
     a: runtime::ActionRef<'a>,
 }
 
-impl Trigger<SlowingClockBuilder> for ReactionA<'_> {
+impl runtime::Trigger<SlowingClock> for ReactionA<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut SlowingClock) {
         let elapsed_logical_time = ctx.get_elapsed_logical_time();
         println!(
@@ -79,7 +79,7 @@ impl Trigger<SlowingClockBuilder> for ReactionA<'_> {
 #[reaction(reactor = "SlowingClockBuilder", triggers(shutdown))]
 struct ReactionShutdown;
 
-impl Trigger<SlowingClockBuilder> for ReactionShutdown {
+impl runtime::Trigger<SlowingClock> for ReactionShutdown {
     fn trigger(self, _ctx: &mut runtime::Context, state: &mut SlowingClock) {
         assert_eq!(
             state.expected_time,

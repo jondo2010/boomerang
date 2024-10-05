@@ -5,7 +5,7 @@
 use ::std::convert::TryInto;
 use std::{path::Path, sync::Mutex};
 
-use boomerang::prelude::*;
+use boomerang::{builder::reaction_closure, prelude::*};
 
 struct ArrayBuilder(serde_arrow::ArrayBuilder);
 #[allow(unsafe_code)]
@@ -49,37 +49,27 @@ fn inject_recorder_reaction(
 
     let __trigger_inner = {
         let mut rec_state = RecState::new("recorder", action_fqn)?;
-        Box::new(
-            move |ctx: &mut runtime::Context,
-                  _state: &mut dyn runtime::ReactorState,
-                  _ports: &[runtime::PortRef],
-                  _ports_mut: &mut [runtime::PortRefMut],
-                  actions: &mut [&mut runtime::Action]| {
-                let [action]: &mut [&mut runtime::Action; 1usize] = actions
-                    .try_into()
-                    .expect("Unable to destructure actions for reaction");
+        reaction_closure!(ctx, _state, _ref_ports, _mut_ports, actions => {
+            let action: &mut runtime::PhysicalAction = actions.partition_mut().unwrap();
 
-                let action = action.as_physical().expect("Action is not physical");
+            let builder = rec_state.array_builder.get_or_insert_with(|| {
+                Mutex::new(ArrayBuilder(
+                    action.new_builder().expect("Failed to create builder"),
+                ))
+            });
 
-                let builder = rec_state.array_builder.get_or_insert_with(|| {
-                    Mutex::new(ArrayBuilder(
-                        action.new_builder().expect("Failed to create builder"),
-                    ))
-                });
+            let lock = builder.get_mut().expect("Failed to lock builder");
+            action
+                .build_value_at(&mut lock.0, ctx.get_tag())
+                .expect("Failed to build value");
 
-                let lock = builder.get_mut().expect("Failed to lock builder");
-                action
-                    .build_value_at(&mut lock.0, ctx.get_tag())
-                    .expect("Failed to build value");
+            rec_state.record_count += 1;
 
-                rec_state.record_count += 1;
-
-                if rec_state.record_count % 10 == 0 {
-                    let batch = lock.0.to_record_batch().unwrap();
-                    arrow::util::pretty::print_batches(&[batch]).unwrap();
-                }
-            },
-        )
+            if rec_state.record_count % 10 == 0 {
+                let batch = lock.0.to_record_batch().unwrap();
+                arrow::util::pretty::print_batches(&[batch]).unwrap();
+            }
+        })
     };
 
     parent_builder

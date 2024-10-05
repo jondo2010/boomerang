@@ -13,7 +13,7 @@ struct ReactionStartup {
     act: runtime::PhysicalActionRef<u32>,
 }
 
-impl Trigger<MainBuilder> for ReactionStartup {
+impl runtime::Trigger<()> for ReactionStartup {
     fn trigger(self, ctx: &mut runtime::Context, _state: &mut ()) {
         let mut send_ctx = ctx.make_send_context();
         let mut act = self.act.clone();
@@ -31,7 +31,7 @@ struct ReactionAct {
     act: runtime::PhysicalActionRef<u32>,
 }
 
-impl Trigger<MainBuilder> for ReactionAct {
+impl runtime::Trigger<()> for ReactionAct {
     fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut ()) {
         let value = ctx
             .get_action_with(&mut self.act, |value| value.cloned())

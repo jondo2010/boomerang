@@ -26,7 +26,7 @@ mod source {
         out: [runtime::OutputRef<'a, i32>; WIDTH],
     }
 
-    impl<const WIDTH: usize> Trigger<Source<WIDTH>> for ReactionT<'_, WIDTH> {
+    impl<const WIDTH: usize> runtime::Trigger<State> for ReactionT<'_, WIDTH> {
         fn trigger(mut self, _ctx: &mut runtime::Context, state: &mut State) {
             for o in self.out.iter_mut() {
                 **o = Some(state.s);
@@ -40,7 +40,7 @@ mod computation {
     use super::*;
 
     #[derive(Reactor, Debug)]
-    #[reactor(state = "()", reaction = "ReactionIn")]
+    #[reactor(state = "usize", reaction = "ReactionIn")]
     pub struct Computation<const ITERS: usize> {
         pub in_: TypedPortKey<i32, Input>,
         pub out: TypedPortKey<i32, Output>,
@@ -53,10 +53,10 @@ mod computation {
         out: runtime::OutputRef<'a, i32>,
     }
 
-    impl<const ITERS: usize> Trigger<Computation<ITERS>> for ReactionIn<'_> {
-        fn trigger(mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
+    impl runtime::Trigger<usize> for ReactionIn<'_> {
+        fn trigger(mut self, _ctx: &mut runtime::Context, state: &mut usize) {
             let mut offset = 0;
-            for _ in 0..ITERS {
+            for _ in 0..*state {
                 offset += 1;
                 //std::thread::sleep(std::time::Duration::from_nanos(1));
             }
@@ -84,7 +84,7 @@ mod destination {
         in_: [runtime::InputRef<'a, i32>; WIDTH],
     }
 
-    impl<const WIDTH: usize, const ITERS: usize> Trigger<Destination<WIDTH, ITERS>>
+    impl<const WIDTH: usize, const ITERS: usize> runtime::Trigger<State>
         for ReactionIn<'_, WIDTH, ITERS>
     {
         fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
@@ -105,9 +105,7 @@ mod destination {
     )]
     struct ReactionShutdown;
 
-    impl<const WIDTH: usize, const ITERS: usize> Trigger<Destination<WIDTH, ITERS>>
-        for ReactionShutdown
-    {
+    impl runtime::Trigger<State> for ReactionShutdown {
         fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
             assert!(state.s > 0, "ERROR: Destination received no input!");
             println!("Success.");
@@ -124,7 +122,7 @@ mod destination {
 struct ThreadedMultiport<const WIDTH: usize = 4, const ITERS: usize = 100_000_000> {
     #[reactor(child = "State{s: 0}")]
     a: source::Source<WIDTH>,
-    #[reactor(child = "()")]
+    #[reactor(child = "ITERS")]
     t: [computation::Computation<ITERS>; WIDTH],
     #[reactor(child = "State{s: 0}")]
     b: destination::Destination<WIDTH, ITERS>,

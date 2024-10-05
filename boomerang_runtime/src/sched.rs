@@ -6,9 +6,8 @@ use crate::{
     event::{PhysicalEvent, ScheduledEvent},
     keepalive,
     key_set::KeySetView,
-    store::{ReactionTriggerCtx, Store},
+    store::Store,
     Env, Level, ReactionGraph, ReactionKey, ReactionSet, ReactionSetLimits, Tag, Timestamp,
-    TriggerRes,
 };
 
 #[derive(Debug)]
@@ -348,37 +347,13 @@ impl Scheduler {
             #[cfg(feature = "parallel")]
             let iter_ctx = rayon::prelude::ParallelBridge::par_bridge(iter_ctx);
 
-            let iter_ctx_res = iter_ctx.map(|mut trigger_ctx| {
-                //let ReactionTriggerCtx {
-                //    context,
-                //    reaction,
-                //    reactor,
-                //    actions,
-                //    ref_ports,
-                //    mut_ports,
-                //} = trigger_ctx;
-
-                //tracing::trace!(
-                //    "    Executing {reactor_name}/{reaction_name}.",
-                //    reaction_name = reaction.get_name(),
-                //    reactor_name = reactor.get_name()
-                //);
-
-                //context.reset_for_reaction(tag);
-
-                //reaction.trigger(context, reactor, actions, ref_ports, mut_ports);
-                //(reaction.body)(context, &mut reactor.state, ref_ports, mut_ports, actions);
-                trigger_ctx.trigger();
-
-                //&context.trigger_res
-                &trigger_ctx.context.trigger_res
-            });
+            let iter_ctx_res = iter_ctx.map(|trigger_ctx| trigger_ctx.trigger(tag));
 
             #[cfg(feature = "parallel")]
             let iter_ctx_res = iter_ctx_res.collect::<Vec<_>>();
 
-            for ctx in iter_ctx_res {
-                if let Some(shutdown_tag) = ctx.scheduled_shutdown {
+            for trigger_res in iter_ctx_res {
+                if let Some(shutdown_tag) = trigger_res.scheduled_shutdown {
                     // if the new shutdown tag is earlier than the current shutdown tag, update the shutdown tag and
                     // schedule a shutdown event
                     if self.shutdown_tag.map(|t| shutdown_tag < t).unwrap_or(true) {
@@ -392,7 +367,7 @@ impl Scheduler {
                 }
 
                 // Submit events to the event queue for all scheduled actions
-                for &(action_key, tag) in ctx.scheduled_actions.iter() {
+                for &(action_key, tag) in trigger_res.scheduled_actions.iter() {
                     let downstream = self.reaction_graph.action_triggers[action_key]
                         .iter()
                         .copied();

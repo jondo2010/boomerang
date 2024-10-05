@@ -86,7 +86,7 @@ mod reactor {
         screen_refresh: runtime::ActionRef<'a>,
     }
 
-    impl Trigger<SnakeBuilder> for ReactionStartup<'_> {
+    impl runtime::Trigger<Snake> for ReactionStartup<'_> {
         fn trigger(
             mut self,
             ctx: &mut runtime::Context,
@@ -111,7 +111,7 @@ mod reactor {
         screen_refresh: runtime::ActionRef<'a>,
     }
 
-    impl Trigger<SnakeBuilder> for ReactionScreenRefresh<'_> {
+    impl runtime::Trigger<Snake> for ReactionScreenRefresh<'_> {
         fn trigger(
             mut self,
             ctx: &mut runtime::Context,
@@ -130,7 +130,7 @@ mod reactor {
         manually_add_more_food: runtime::ActionRef<'a>,
     }
 
-    impl Trigger<SnakeBuilder> for ReactionMoreFood<'_> {
+    impl runtime::Trigger<Snake> for ReactionMoreFood<'_> {
         fn trigger(
             mut self,
             ctx: &mut runtime::Context,
@@ -170,7 +170,7 @@ mod reactor {
         arrow_key_pressed: runtime::InputRef<'a, Key>,
     }
 
-    impl Trigger<SnakeBuilder> for ReactionKeyboard<'_> {
+    impl runtime::Trigger<Snake> for ReactionKeyboard<'_> {
         fn trigger(
             self,
             _ctx: &mut runtime::Context,
@@ -195,7 +195,7 @@ mod reactor {
     )]
     struct ReactionAddFood;
 
-    impl Trigger<SnakeBuilder> for ReactionAddFood {
+    impl runtime::Trigger<Snake> for ReactionAddFood {
         fn trigger(
             self,
             _ctx: &mut runtime::Context,
@@ -216,7 +216,7 @@ mod reactor {
     #[reaction(reactor = "SnakeBuilder", triggers(shutdown))]
     struct ReactionShutdown;
 
-    impl Trigger<SnakeBuilder> for ReactionShutdown {
+    impl runtime::Trigger<Snake> for ReactionShutdown {
         fn trigger(
             self,
             _ctx: &mut runtime::Context,

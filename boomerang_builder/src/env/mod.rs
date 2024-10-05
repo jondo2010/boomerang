@@ -185,11 +185,7 @@ impl EnvBuilder {
             ActionType::Logical { min_delay },
             reactor_key,
             move |name: &'_ str, key: runtime::ActionKey| {
-                runtime::Action::Logical(LogicalAction::new::<T>(
-                    name,
-                    key,
-                    min_delay.unwrap_or_default(),
-                ))
+                runtime::Action::new_logical::<T>(name, key, min_delay.unwrap_or_default())
             },
         )
     }
@@ -205,11 +201,7 @@ impl EnvBuilder {
             ActionType::Physical { min_delay },
             reactor_key,
             move |name: &'_ str, action_key| {
-                runtime::Action::Physical(PhysicalAction::new::<T>(
-                    name,
-                    action_key,
-                    min_delay.unwrap_or_default(),
-                ))
+                runtime::Action::new_physical::<T>(name, action_key, min_delay.unwrap_or_default())
             },
         )
     }
@@ -219,7 +211,7 @@ impl EnvBuilder {
         &mut self,
         name: &str,
         reactor_key: BuilderReactorKey,
-        reaction_fn: runtime::ReactionFn,
+        reaction_fn: runtime::BoxedReactionFn,
     ) -> ReactionBuilderState {
         let priority = self.reactor_builders[reactor_key].reactions.len();
         ReactionBuilderState::new(name, priority, reactor_key, reaction_fn, self)

@@ -16,7 +16,7 @@ struct AReactionX<'a> {
     y: runtime::OutputRef<'a, ()>,
 }
 
-impl<'a> Trigger<ABuilder> for AReactionX<'a> {
+impl<'a> runtime::Trigger<()> for AReactionX<'a> {
     fn trigger(self, _ctx: &mut runtime::Context, _state: &mut ()) {}
 }
 
@@ -31,7 +31,7 @@ struct BBuilder {
 #[reaction(reactor = "BBuilder", triggers(port = "x"))]
 struct BReactionX;
 
-impl Trigger<BBuilder> for BReactionX {
+impl runtime::Trigger<()> for BReactionX {
     fn trigger(self, _ctx: &mut runtime::Context, _state: &mut ()) {}
 }
 
@@ -41,7 +41,7 @@ struct BReactionStartup<'a> {
     y: runtime::OutputRef<'a, ()>,
 }
 
-impl Trigger<BBuilder> for BReactionStartup<'_> {
+impl runtime::Trigger<()> for BReactionStartup<'_> {
     fn trigger(self, _ctx: &mut runtime::Context, _state: &mut ()) {}
 }
 

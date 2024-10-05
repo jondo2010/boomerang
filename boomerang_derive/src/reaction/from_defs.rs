@@ -153,14 +153,12 @@ impl ToTokens for FromDefsImpl {
 
         // We pass through the const and type generics from the reactor to parameters of the trigger function
         let inner_generics = {
-            //let const_generics = self.combined_generics.const_params();
-            //let type_params = self.combined_generics.type_params();
             let const_generics = self.reaction_generics.const_params();
             let type_params = self.reaction_generics.type_params();
             quote! { #(#const_generics),* #(#type_params),* }
         };
 
-        let reactor = &self.reactor;
+        let _reactor = &self.reactor;
         let initializer_idents = &self.initializer_idents;
         let action_idents = &self.action_idents;
         let port_idents = &self.port_idents;

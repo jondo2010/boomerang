@@ -8,7 +8,6 @@ use crate::runtime;
 use boomerang_runtime::Level;
 use itertools::Itertools;
 use petgraph::{graphmap::DiGraphMap, EdgeDirection};
-use runtime::{LogicalAction, PhysicalAction};
 use slotmap::{SecondaryMap, SlotMap};
 use std::{
     collections::{BTreeSet, HashMap},

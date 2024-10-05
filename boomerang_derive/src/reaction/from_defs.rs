@@ -10,6 +10,7 @@ use super::{ReactionReceiver, ACTION, ACTION_REF, INPUT_REF, OUTPUT_REF, PHYSICA
 pub struct FromDefsImpl {
     reaction_ident: Ident,
     reaction_generics: Generics,
+    #[allow(dead_code)]
     combined_generics: Generics,
     reactor: Type,
     initializer_idents: Vec<Ident>,

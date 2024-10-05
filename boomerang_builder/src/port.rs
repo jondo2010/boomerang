@@ -179,6 +179,6 @@ impl<T: runtime::PortData, Q: PortTag> BasePortBuilder for PortBuilder<T, Q> {
 
     /// Build the PortBuilder into a runtime Port
     fn create_runtime_port(&self, key: runtime::PortKey) -> Box<dyn runtime::BasePort> {
-        Box::new(runtime::Port::<T>::new(self.name.clone(), key))
+        Box::new(runtime::Port::<T>::new(&self.name, key))
     }
 }

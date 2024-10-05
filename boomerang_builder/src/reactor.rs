@@ -5,7 +5,7 @@ use super::{
     EnvBuilder, FindElements, Input, Logical, Output, Physical, PhysicalActionKey, PortTag,
     ReactionBuilderState, TimerActionKey, TimerSpec, TriggerMode, TypedActionKey, TypedPortKey,
 };
-use crate::runtime;
+use crate::{reaction_closure, runtime};
 use slotmap::SecondaryMap;
 
 slotmap::new_key_type! {
@@ -339,13 +339,10 @@ impl<'a> ReactorBuilderState<'a> {
     ) -> Result<TimerActionKey, BuilderError> {
         let action_key = self.add_logical_action::<()>(name, spec.period)?;
 
-        let startup_fn: runtime::ReactionFn = Box::new(
-            move |ctx: &mut runtime::Context, _, _, _, actions: &mut [&mut runtime::Action]| {
-                let [timer]: &mut [&mut runtime::Action; 1usize] = actions.try_into().unwrap();
-                let mut timer: runtime::ActionRef = (*timer).into();
-                ctx.schedule_action(&mut timer, None, spec.offset);
-            },
-        );
+        let startup_fn = reaction_closure!(ctx, _state, _ref_ports, _mut_ports, actions => {
+            let mut timer: runtime::ActionRef = actions.partition_mut().unwrap();
+            ctx.schedule_action(&mut timer, None, spec.offset);
+        });
 
         let startup_key = self.startup_action;
         self.add_reaction(&format!("_{name}_startup"), startup_fn)
@@ -354,13 +351,10 @@ impl<'a> ReactorBuilderState<'a> {
             .finish()?;
 
         if spec.period.is_some() {
-            let reset_fn: runtime::ReactionFn = Box::new(
-                |ctx: &mut runtime::Context, _, _, _, actions: &mut [&mut runtime::Action]| {
-                    let [timer]: &mut [&mut runtime::Action; 1usize] = actions.try_into().unwrap();
-                    let mut timer: runtime::ActionRef = (*timer).into();
-                    ctx.schedule_action(&mut timer, None, None);
-                },
-            );
+            let reset_fn = reaction_closure!(ctx, _state, _ref_ports, _mut_ports, actions => {
+                let mut timer: runtime::ActionRef = actions.partition_mut().unwrap();
+                ctx.schedule_action(&mut timer, None, None);
+            });
 
             self.add_reaction(&format!("_{name}_reset"), reset_fn)
                 .with_action(action_key, 0, TriggerMode::TriggersAndEffects)?
@@ -395,7 +389,7 @@ impl<'a> ReactorBuilderState<'a> {
     pub fn add_reaction(
         &mut self,
         name: &str,
-        reaction_fn: runtime::ReactionFn,
+        reaction_fn: runtime::BoxedReactionFn,
     ) -> ReactionBuilderState {
         self.env.add_reaction(name, self.reactor_key, reaction_fn)
     }

@@ -17,7 +17,7 @@ pub trait Key: From<usize> + Copy + Ord {
 macro_rules! key_type {
     ($(#[$outer:meta])* $vis:vis $name:ident) => {
         $(#[$outer])*
-        #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[repr(transparent)]
         $vis struct $name(u64);
 
@@ -33,7 +33,7 @@ macro_rules! key_type {
             }
         }
 
-        impl std::fmt::Display for $name {
+        impl std::fmt::Debug for $name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 write!(f, "{}({})", stringify!($name), self.0)
             }

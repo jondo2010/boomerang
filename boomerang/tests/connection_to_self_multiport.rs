@@ -19,7 +19,7 @@ struct ReactionStartup<'a, const NUM_NODES: usize> {
     output: [runtime::OutputRef<'a, i32>; NUM_NODES],
 }
 
-impl<const NUM_NODES: usize> Trigger<Node<NUM_NODES>> for ReactionStartup<'_, NUM_NODES> {
+impl<const NUM_NODES: usize> runtime::Trigger<usize> for ReactionStartup<'_, NUM_NODES> {
     fn trigger(mut self, _ctx: &mut runtime::Context, _state: &mut usize) {
         for (i, out) in self.output.iter_mut().enumerate() {
             **out = Some(i as i32);
@@ -33,7 +33,7 @@ struct ReactionIn<'a, const NUM_NODES: usize> {
     input: [runtime::InputRef<'a, i32>; NUM_NODES],
 }
 
-impl<const NUM_NODES: usize> Trigger<Node<NUM_NODES>> for ReactionIn<'_, NUM_NODES> {
+impl<const NUM_NODES: usize> runtime::Trigger<usize> for ReactionIn<'_, NUM_NODES> {
     fn trigger(self, _ctx: &mut runtime::Context, _state: &mut usize) {
         let count = self.input.iter().filter(|x| x.is_some()).count();
         assert_eq!(count, NUM_NODES);

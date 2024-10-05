@@ -26,12 +26,8 @@ struct ReactionYIn<'a> {
     act: runtime::ActionRef<'a>,
 }
 
-impl Trigger<GeneratedDelay> for ReactionYIn<'_> {
-    fn trigger(
-        mut self,
-        ctx: &mut runtime::Context,
-        state: &mut <GeneratedDelay as Reactor>::State,
-    ) {
+impl runtime::Trigger<GeneratedDelayState> for ReactionYIn<'_> {
+    fn trigger(mut self, ctx: &mut runtime::Context, state: &mut GeneratedDelayState) {
         state.y_state = self.y_in.unwrap();
         ctx.schedule_action(&mut self.act, None, None);
     }
@@ -43,12 +39,8 @@ struct ReactionAct<'a> {
     y_out: runtime::OutputRef<'a, u32>,
 }
 
-impl Trigger<GeneratedDelay> for ReactionAct<'_> {
-    fn trigger(
-        mut self,
-        _ctx: &mut runtime::Context,
-        state: &mut <GeneratedDelay as Reactor>::State,
-    ) {
+impl runtime::Trigger<GeneratedDelayState> for ReactionAct<'_> {
+    fn trigger(mut self, _ctx: &mut runtime::Context, state: &mut GeneratedDelayState) {
         *self.y_out = Some(state.y_state);
     }
 }
@@ -65,12 +57,8 @@ struct SourceReactionStartup<'a> {
     out: runtime::OutputRef<'a, u32>,
 }
 
-impl Trigger<SourceBuilder> for SourceReactionStartup<'_> {
-    fn trigger(
-        mut self,
-        _ctx: &mut runtime::Context,
-        _state: &mut <SourceBuilder as Reactor>::State,
-    ) {
+impl runtime::Trigger<()> for SourceReactionStartup<'_> {
+    fn trigger(mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
         *self.out = Some(1);
     }
 }
@@ -88,8 +76,8 @@ struct SinkReactionIn<'a> {
     _inp: runtime::InputRef<'a, u32>,
 }
 
-impl Trigger<Sink> for SinkReactionIn<'_> {
-    fn trigger(self, ctx: &mut runtime::Context, state: &mut <Sink as Reactor>::State) {
+impl runtime::Trigger<bool> for SinkReactionIn<'_> {
+    fn trigger(self, ctx: &mut runtime::Context, state: &mut bool) {
         let elapsed_logical = ctx.get_elapsed_logical_time();
         let logical = ctx.get_logical_time();
         let physical = ctx.get_physical_time();
@@ -139,4 +127,6 @@ fn action_delay() {
         .and_then(|reactor| reactor.get_state::<bool>())
         .unwrap();
     assert!(sink_state, "SinkReactionIn did not trigger");
+
+    dbg!(std::any::type_name_of_val(&GeneratedDelayState::default()));
 }

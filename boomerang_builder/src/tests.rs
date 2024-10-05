@@ -1,7 +1,6 @@
 use std::{iter, time::Duration};
 
 use boomerang_runtime::ContextCommon;
-use runtime::BasePort;
 
 use super::*;
 use crate::runtime;
@@ -15,7 +14,7 @@ fn test_reaction_ports() -> anyhow::Result<()> {
     let port_b = builder_a.add_output_port::<()>("portB").unwrap();
     let port_c = builder_a.add_input_port::<()>("portC").unwrap();
     let reaction_a = builder_a
-        .add_reaction("reactionA", Box::new(|_, _, _, _, _| {}))
+        .add_reaction("reactionA", reaction_closure!())
         .with_port(port_a, 0, TriggerMode::TriggersOnly)?
         .with_port(port_b, 0, TriggerMode::EffectsOnly)?
         .with_port(port_c, 0, TriggerMode::UsesOnly)?
@@ -23,29 +22,34 @@ fn test_reaction_ports() -> anyhow::Result<()> {
 
     let (_env, triggers, aliases) = env_builder.into_runtime_parts().unwrap();
 
+    let reaction_a = aliases.reaction_aliases[reaction_a];
+    let port_a = aliases.port_aliases[port_a.into()];
+    let port_b = aliases.port_aliases[port_b.into()];
+    let port_c = aliases.port_aliases[port_c.into()];
+
     // reactionA should "use" (be able to read from) portC
     itertools::assert_equal(
-        triggers.reaction_use_ports[aliases.reaction_aliases[reaction_a]].iter(),
-        iter::once(aliases.port_aliases[port_c.into()]),
+        triggers.reaction_use_ports[reaction_a].iter(),
+        iter::once(port_c),
     );
 
     // reactionA should "effect" (be able to write to) portB
     itertools::assert_equal(
-        triggers.reaction_effect_ports[aliases.reaction_aliases[reaction_a]].iter(),
-        iter::once(aliases.port_aliases[port_b.into()]),
+        triggers.reaction_effect_ports[reaction_a].iter(),
+        iter::once(port_b),
     );
 
     // portA should trigger only reactionA
     itertools::assert_equal(
-        triggers.port_triggers[aliases.port_aliases[port_a.into()]]
+        triggers.port_triggers[port_a]
             .iter()
             .map(|(_, reaction_key)| reaction_key),
-        iter::once(&aliases.reaction_aliases[reaction_a]),
+        iter::once(&reaction_a),
     );
 
     // portB should not trigger any reactions
     itertools::assert_equal(
-        triggers.port_triggers[aliases.port_aliases[port_b.into()]]
+        triggers.port_triggers[port_b]
             .iter()
             .map(|(_, reaction_key)| reaction_key),
         iter::empty::<&runtime::ReactionKey>(),
@@ -53,7 +57,7 @@ fn test_reaction_ports() -> anyhow::Result<()> {
 
     // portC should not trigger any reactions
     itertools::assert_equal(
-        triggers.port_triggers[aliases.port_aliases[port_c.into()]]
+        triggers.port_triggers[port_c]
             .iter()
             .map(|(_, reaction_key)| reaction_key),
         iter::empty::<&runtime::ReactionKey>(),
@@ -248,23 +252,12 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
             let _ = builder
                 .add_reaction(
                     "startup",
-                    Box::new(
-                        move |ctx: &mut runtime::Context,
-                              _state: &mut dyn runtime::ReactorState,
-                              _ports: &[runtime::PortRef],
-                              ports_mut: &mut [runtime::PortRefMut],
-                              _actions: &mut [&mut runtime::Action]| {
-                            //ctx.set(clock, 0);
-                            let clock = ports_mut[0]
-                                .as_any_mut()
-                                .downcast_mut::<runtime::Port<u32>>()
-                                .unwrap();
-                            assert_eq!(clock.get_name(), "clock");
-                            **clock = Some(0);
-
-                            ctx.schedule_shutdown(Some(Duration::from_millis(140)));
-                        },
-                    ),
+                    reaction_closure!(ctx, _state, _ref_ports, mut_ports, _actions => {
+                        let mut clock: runtime::OutputRef<u32> = mut_ports.partition_mut().unwrap();
+                        assert_eq!(clock.name(), "clock");
+                        *clock = Some(0);
+                        ctx.schedule_shutdown(Some(Duration::from_millis(140)));
+                    }),
                 )
                 .with_action(startup_action, 0, TriggerMode::TriggersOnly)?
                 .with_port(clock, 0, TriggerMode::EffectsOnly)?
@@ -273,32 +266,19 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
             let _ = builder
                 .add_reaction(
                     "reaction_t1",
-                    Box::new(
-                        move |_ctx: &mut runtime::Context,
-                              _state: &mut dyn runtime::ReactorState,
-                              _ports: &[runtime::PortRef],
-                              ports_mut: &mut [runtime::PortRefMut],
-                              actions: &mut [&mut runtime::Action]| {
-                            //ctx.set(clock, 1);
-                            let clock = ports_mut[0]
-                                .as_any_mut()
-                                .downcast_mut::<runtime::Port<u32>>()
-                                .unwrap();
-                            assert_eq!(clock.get_name(), "clock");
-                            **clock = Some(1);
+                    reaction_closure!(_ctx, _state, _ref_ports, mut_ports, actions => {
+                        let [mut clock, mut o1]: [runtime::OutputRef<u32>; 2] =
+                            mut_ports.partition_mut().unwrap();
 
-                            //ctx.set(o1, 10);
-                            let o1 = ports_mut[1]
-                                .as_any_mut()
-                                .downcast_mut::<runtime::Port<u32>>()
-                                .unwrap();
-                            assert_eq!(o1.get_name(), "o1");
-                            **o1 = Some(10);
+                        assert_eq!(clock.name(), "clock");
+                        *clock = Some(1);
 
-                            let t1 = &actions[0];
-                            tracing::debug!(?t1, "t1");
-                        },
-                    ),
+                        assert_eq!(o1.name(), "o1");
+                        *o1 = Some(10);
+
+                        let t1: runtime::ActionRef = actions.partition_mut().unwrap();
+                        assert_eq!(t1.name(), "t1");
+                    }),
                 )
                 .with_action(t1, 0, TriggerMode::TriggersAndUses)?
                 .with_port(clock, 0, TriggerMode::EffectsOnly)?
@@ -308,28 +288,16 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
             let _ = builder
                 .add_reaction(
                     "reaction_t2",
-                    Box::new(
-                        move |_ctx: &mut runtime::Context,
-                              _state: &mut dyn runtime::ReactorState,
-                              _ports: &[runtime::PortRef],
-                              ports_mut: &mut [runtime::PortRefMut],
-                              _actions: &mut [&mut runtime::Action]| {
-                            //ctx.set(clock, 2);
-                            let clock = ports_mut[0]
-                                .as_any_mut()
-                                .downcast_mut::<runtime::Port<u32>>()
-                                .unwrap();
-                            assert_eq!(clock.get_name(), "clock");
-                            **clock = Some(2);
+                    reaction_closure!(_ctx, _state, _ref_ports, mut_ports, _actions => {
+                        let [mut clock, o2]: [runtime::OutputRef<u32>; 2] =
+                            mut_ports.partition_mut().unwrap();
 
-                            let o2 = ports_mut[1]
-                                .as_any_mut()
-                                .downcast_mut::<runtime::Port<u32>>()
-                                .unwrap();
-                            assert_eq!(o2.get_name(), "o2");
-                            // we purposefully do not set o2
-                        },
-                    ),
+                        assert_eq!(clock.name(), "clock");
+                        *clock = Some(2);
+
+                        assert_eq!(o2.name(), "o2");
+                        // we purposefully do not set o2
+                    }),
                 )
                 .with_action(t2, 0, TriggerMode::TriggersOnly)?
                 .with_port(clock, 0, TriggerMode::EffectsOnly)?
@@ -348,43 +316,25 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
         let _ = builder
             .add_reaction(
                 "reaction_clock",
-                Box::new(
-                    move |_ctx: &mut runtime::Context,
-                          _state: &mut dyn runtime::ReactorState,
-                          ports: &[runtime::PortRef],
-                          _ports_mut: &mut [runtime::PortRefMut],
-                          _actions: &mut [&mut runtime::Action]| {
-                        let clock = ports[0]
-                            .as_any()
-                            .downcast_ref::<runtime::Port<u32>>()
-                            .unwrap();
-                        assert_eq!(clock.get_name(), "clock");
+                reaction_closure!(_ctx, _state, ref_ports, _mut_ports, _actions => {
+                    let [clock, in1, in2]: [runtime::InputRef<u32>; 3] =
+                        ref_ports.partition().unwrap();
+                    assert_eq!(clock.name(), "clock");
+                    assert_eq!(in1.name(), "o1");
+                    assert_eq!(in2.name(), "o2");
 
-                        let in1 = ports[1]
-                            .as_any()
-                            .downcast_ref::<runtime::Port<u32>>()
-                            .unwrap();
-                        assert_eq!(in1.get_name(), "o1");
-
-                        let in2 = ports[2]
-                            .as_any()
-                            .downcast_ref::<runtime::Port<u32>>()
-                            .unwrap();
-                        assert_eq!(in2.get_name(), "o2");
-
-                        match **clock {
-                            Some(0) | Some(2) => {
-                                assert_eq!(None, **in1);
-                                assert_eq!(None, **in2);
-                            }
-                            Some(1) => {
-                                assert_eq!(Some(10), **in1);
-                                assert_eq!(None, **in2);
-                            }
-                            c => panic!("No such signal expected {:?}", c),
+                    match *clock {
+                        Some(0) | Some(2) => {
+                            assert_eq!(None, *in1);
+                            assert_eq!(None, *in2);
                         }
-                    },
-                ),
+                        Some(1) => {
+                            assert_eq!(Some(10), *in1);
+                            assert_eq!(None, *in2);
+                        }
+                        c => panic!("No such signal expected {:?}", c),
+                    }
+                }),
             )
             .with_port(clock, 0, TriggerMode::TriggersAndUses)?
             .with_port(in1, 0, TriggerMode::UsesOnly)?

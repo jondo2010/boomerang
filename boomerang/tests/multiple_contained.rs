@@ -21,7 +21,7 @@ struct ReactionStartup<'a> {
     trigger: runtime::OutputRef<'a, u32>,
 }
 
-impl Trigger<Contained> for ReactionStartup<'_> {
+impl runtime::Trigger<()> for ReactionStartup<'_> {
     fn trigger(mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
         *self.trigger = Some(42);
     }
@@ -33,7 +33,7 @@ struct ReactionIn1<'a> {
     in1: runtime::InputRef<'a, u32>,
 }
 
-impl Trigger<Contained> for ReactionIn1<'_> {
+impl runtime::Trigger<()> for ReactionIn1<'_> {
     fn trigger(self, _ctx: &mut runtime::Context, _state: &mut ()) {
         //println!("{} received {:?}", self.in1.get_name(), *self.in1);
         assert_eq!(*self.in1, Some(42), "FAILED: Expected 42.");
@@ -46,7 +46,7 @@ struct ReactionIn2<'a> {
     in2: runtime::InputRef<'a, u32>,
 }
 
-impl Trigger<Contained> for ReactionIn2<'_> {
+impl runtime::Trigger<()> for ReactionIn2<'_> {
     fn trigger(self, _ctx: &mut runtime::Context, _state: &mut ()) {
         //println!("{} received {:?}", self.in2.get_name(), *self.in2.get());
         assert_eq!(*self.in2, Some(42), "FAILED: Expected 42.");
@@ -71,7 +71,7 @@ struct ReactionCTrigger<'a> {
     c_in2: runtime::OutputRef<'a, u32>,
 }
 
-impl Trigger<MultipleContained> for ReactionCTrigger<'_> {
+impl runtime::Trigger<()> for ReactionCTrigger<'_> {
     fn trigger(mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
         *self.c_in1 = *self.c_trigger;
         *self.c_in2 = *self.c_trigger;

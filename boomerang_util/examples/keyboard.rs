@@ -26,7 +26,7 @@ mod example {
         arrow_key_pressed: runtime::InputRef<'a, termion::event::Key>,
     }
 
-    impl Trigger<Example> for ReactionKeyPress<'_> {
+    impl runtime::Trigger<()> for ReactionKeyPress<'_> {
         fn trigger(self, _ctx: &mut runtime::Context, _: &mut ()) {
             let stdout = std::io::stdout();
             let mut stdout = stdout.lock();

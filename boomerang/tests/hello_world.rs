@@ -4,7 +4,7 @@ struct State {
     success: bool,
 }
 
-#[derive(Clone, Reactor)]
+#[derive(Reactor)]
 #[reactor(
     state = "State",
     reaction = "HelloWorld2ReactionStartup",
@@ -16,7 +16,7 @@ struct HelloWorld2;
 #[reaction(reactor = "HelloWorld2", triggers(startup))]
 struct HelloWorld2ReactionStartup;
 
-impl Trigger<HelloWorld2> for HelloWorld2ReactionStartup {
+impl runtime::Trigger<State> for HelloWorld2ReactionStartup {
     fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
         println!("Hello World.");
         state.success = true;
@@ -27,17 +27,17 @@ impl Trigger<HelloWorld2> for HelloWorld2ReactionStartup {
 #[reaction(reactor = "HelloWorld2", triggers(shutdown))]
 struct HelloWorld2ReactionShutdown;
 
-impl Trigger<HelloWorld2> for HelloWorld2ReactionShutdown {
+impl runtime::Trigger<State> for HelloWorld2ReactionShutdown {
     fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
         println!("Shutdown invoked.");
         state.success = false;
     }
 }
 
-#[derive(Clone, Reactor)]
-#[reactor(state = ())]
+#[derive(Reactor)]
+#[reactor(state = "()")]
 struct HelloWorld {
-    #[reactor(child = State{success: false})]
+    #[reactor(child = "State{success: false}")]
     _a: HelloWorld2,
 }
 

@@ -49,18 +49,6 @@ pub struct LogicalAction {
     pub store: Box<dyn BaseActionStore>,
 }
 
-impl LogicalAction {
-    pub fn new<T: ActionData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
-        let store = ActionStore::<T>::new();
-        Self {
-            name: name.into(),
-            key,
-            min_delay,
-            store: Box::new(store),
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct PhysicalAction {
     pub name: String,
@@ -70,17 +58,6 @@ pub struct PhysicalAction {
 }
 
 impl PhysicalAction {
-    pub fn new<T: ActionData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
-        let store = ActionStore::<T>::new();
-        let store: Arc<Mutex<dyn BaseActionStore>> = Arc::new(Mutex::new(store));
-        Self {
-            name: name.into(),
-            key,
-            min_delay,
-            store,
-        }
-    }
-
     /// Create a new Arrow ArrayBuilder for the data stored in this store
     #[cfg(feature = "serde")]
     pub fn new_builder(&self) -> Result<serde_arrow::ArrayBuilder, crate::RuntimeError> {
@@ -101,6 +78,12 @@ impl PhysicalAction {
     }
 }
 
+impl<'a> From<&'a mut Action> for &'a mut PhysicalAction {
+    fn from(value: &'a mut Action) -> Self {
+        value.as_physical().expect("Action is not physical")
+    }
+}
+
 #[derive(Debug)]
 pub enum Action {
     /// Startup is a special action that fires when the scheduler starts up.
@@ -112,7 +95,28 @@ pub enum Action {
 }
 
 impl Action {
-    pub fn as_valued(&self) -> Option<&LogicalAction> {
+    pub fn new_logical<T: ActionData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
+        let store = ActionStore::<T>::new();
+        Self::Logical(LogicalAction {
+            name: name.into(),
+            key,
+            min_delay,
+            store: Box::new(store),
+        })
+    }
+
+    pub fn new_physical<T: ActionData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
+        let store = ActionStore::<T>::new();
+        let store: Arc<Mutex<dyn BaseActionStore>> = Arc::new(Mutex::new(store));
+        Self::Physical(PhysicalAction {
+            name: name.into(),
+            key,
+            min_delay,
+            store,
+        })
+    }
+
+    pub fn as_logical(&self) -> Option<&LogicalAction> {
         if let Self::Logical(v) = self {
             Some(v)
         } else {
@@ -120,7 +124,7 @@ impl Action {
         }
     }
 
-    pub fn as_valued_mut(&mut self) -> Option<&mut LogicalAction> {
+    pub fn as_logical_mut(&mut self) -> Option<&mut LogicalAction> {
         if let Self::Logical(v) = self {
             Some(v)
         } else {
@@ -161,5 +165,39 @@ impl AsRef<Action> for Action {
 impl AsMut<Action> for Action {
     fn as_mut(&mut self) -> &mut Action {
         self
+    }
+}
+
+pub trait ActionCommon {
+    fn name(&self) -> &str;
+    fn key(&self) -> ActionKey;
+    fn min_delay(&self) -> Duration;
+}
+
+impl ActionCommon for LogicalAction {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn key(&self) -> ActionKey {
+        self.key
+    }
+
+    fn min_delay(&self) -> Duration {
+        self.min_delay
+    }
+}
+
+impl ActionCommon for PhysicalAction {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn key(&self) -> ActionKey {
+        self.key
+    }
+
+    fn min_delay(&self) -> Duration {
+        self.min_delay
     }
 }

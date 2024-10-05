@@ -7,11 +7,11 @@ use darling::{
 use quote::{quote, ToTokens};
 use syn::{Expr, GenericParam, Generics, Ident, Type};
 
+mod from_defs;
 mod reaction_field_inner;
-mod trigger_inner;
 
+use from_defs::FromDefsImpl;
 use reaction_field_inner::ReactionFieldInner;
-use trigger_inner::TriggerInner;
 
 const INPUT_REF: &str = "InputRef";
 const OUTPUT_REF: &str = "OutputRef";
@@ -130,7 +130,7 @@ pub struct Reaction {
     combined_generics: Generics,
     reactor: Type,
     fields: Vec<ReactionFieldInner>,
-    inner: TriggerInner,
+    fromdefs: FromDefsImpl,
     /// Whether the reaction has a startup trigger
     trigger_startup: bool,
     /// Whether the reaction has a shutdown trigger
@@ -147,7 +147,7 @@ impl TryFrom<ReactionReceiver> for Reaction {
             .params
             .extend(value.bounds.iter().cloned().map(GenericParam::from));
 
-        let inner = TriggerInner::new(&value, &combined_generics)?;
+        let fromdefs = FromDefsImpl::new(&value, &combined_generics)?;
 
         let fields = value
             .data
@@ -257,7 +257,7 @@ impl TryFrom<ReactionReceiver> for Reaction {
             combined_generics,
             reactor: value.reactor,
             fields,
-            inner,
+            fromdefs,
             trigger_startup,
             trigger_shutdown,
         })
@@ -269,7 +269,7 @@ impl ToTokens for Reaction {
         let ident = &self.ident;
         let reactor = &self.reactor;
         let struct_fields = &self.fields;
-        let trigger_inner = &self.inner;
+        let fromdefs_impl = &self.fromdefs;
 
         // We use impl_generics from `combined_generics` to allow additional bounds to be added, but type and where come
         // from the original generics
@@ -277,10 +277,10 @@ impl ToTokens for Reaction {
         let (_, type_generics, where_clause) = self.generics.split_for_impl();
         let inner_type_generics = {
             let g = self
-                .combined_generics
+                .generics
                 .const_params()
                 .map(|ty| &ty.ident)
-                .chain(self.combined_generics.type_params().map(|ty| &ty.ident));
+                .chain(self.generics.type_params().map(|ty| &ty.ident));
             quote! { ::<#(#g),*> }
         };
 
@@ -309,6 +309,8 @@ impl ToTokens for Reaction {
         };
 
         tokens.extend(quote! {
+            #fromdefs_impl
+
             #[automatically_derived]
             impl #impl_generics ::boomerang::builder::Reaction<#reactor> for #ident #type_generics #where_clause {
                 fn build<'builder>(
@@ -320,13 +322,15 @@ impl ToTokens for Reaction {
                     ::boomerang::builder::BuilderError
                 >
                 {
-                    #trigger_inner
                     let __startup_action = builder.get_startup_action();
-                let __shutdown_action = builder.get_shutdown_action();
-                    let mut __reaction = builder.add_reaction(
-                        name,
-                        Box::new(__trigger_inner #inner_type_generics)
-                    );
+                    let __shutdown_action = builder.get_shutdown_action();
+                    let mut __reaction = {
+                        let wrapper = Box::new(runtime::ReactionWrapper::<
+                            #ident #inner_type_generics,
+                            <#reactor as ::boomerang::builder::Reactor>::State
+                        >::default());
+                        builder.add_reaction(name, wrapper)
+                    };
 
                     #trigger_startup
                     #trigger_shutdown

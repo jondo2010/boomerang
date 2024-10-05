@@ -30,18 +30,10 @@ struct RuntimeActionParts {
 #[derive(Debug)]
 struct RuntimeReactionParts {
     reactions: tinymap::TinyMap<runtime::ReactionKey, runtime::Reaction>,
-    use_ports: tinymap::TinySecondaryMap<
-        runtime::ReactionKey,
-        tinymap::KeySet<runtime::PortKey>,
-    >,
-    effect_ports: tinymap::TinySecondaryMap<
-        runtime::ReactionKey,
-        tinymap::KeySet<runtime::PortKey>,
-    >,
-    actions: tinymap::TinySecondaryMap<
-        runtime::ReactionKey,
-        tinymap::KeySet<runtime::ActionKey>,
-    >,
+    use_ports: tinymap::TinySecondaryMap<runtime::ReactionKey, tinymap::KeySet<runtime::PortKey>>,
+    effect_ports:
+        tinymap::TinySecondaryMap<runtime::ReactionKey, tinymap::KeySet<runtime::PortKey>>,
+    actions: tinymap::TinySecondaryMap<runtime::ReactionKey, tinymap::KeySet<runtime::ActionKey>>,
     /// Aliases from BuilderReactionKey to runtime::ReactionKey
     reaction_aliases: SecondaryMap<BuilderReactionKey, runtime::ReactionKey>,
     reaction_reactor_aliases: SecondaryMap<BuilderReactionKey, BuilderReactorKey>,
@@ -94,7 +86,7 @@ fn build_runtime_reactions(
             .collect();
 
         let reaction_key = runtime_reactions.insert({
-            runtime::Reaction::new(reaction_builder.name, reaction_builder.reaction_fn, None)
+            runtime::Reaction::new(&reaction_builder.name, reaction_builder.reaction_fn, None)
         });
         reaction_use_ports.insert(reaction_key, use_port_set);
         reaction_effect_ports.insert(reaction_key, effect_port_set);

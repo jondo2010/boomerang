@@ -47,7 +47,7 @@ struct ReactionInStart<'a> {
     serve: runtime::ActionRef<'a>,
 }
 
-impl Trigger<PingBuilder> for ReactionInStart<'_> {
+impl runtime::Trigger<Ping> for ReactionInStart<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut Ping) {
         // reset local state
         state.pings_left = state.count;
@@ -62,7 +62,7 @@ struct ReactionServe<'a> {
     out_ping: runtime::OutputRef<'a>,
 }
 
-impl Trigger<PingBuilder> for ReactionServe<'_> {
+impl runtime::Trigger<Ping> for ReactionServe<'_> {
     fn trigger(mut self, _ctx: &mut runtime::Context, state: &mut Ping) {
         *self.out_ping = Some(());
         state.pings_left -= 1;
@@ -76,7 +76,7 @@ struct ReactionInPong<'a> {
     serve: runtime::ActionRef<'a>,
 }
 
-impl Trigger<PingBuilder> for ReactionInPong<'_> {
+impl runtime::Trigger<Ping> for ReactionInPong<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut Ping) {
         if state.pings_left == 0 {
             *self.out_finished = Some(());
@@ -104,7 +104,7 @@ struct ReactionInPing<'a> {
     out_pong: runtime::OutputRef<'a>,
 }
 
-impl Trigger<PongBuilder> for ReactionInPing<'_> {
+impl runtime::Trigger<Pong> for ReactionInPing<'_> {
     fn trigger(mut self, _ctx: &mut runtime::Context, state: &mut Pong) {
         *self.out_pong = Some(());
         state.count += 1;
@@ -139,7 +139,7 @@ struct ReactionStartup<'a> {
     in_start: runtime::OutputRef<'a>,
 }
 
-impl Trigger<MainBuilder> for ReactionStartup<'_> {
+impl runtime::Trigger<Main> for ReactionStartup<'_> {
     fn trigger(mut self, _ctx: &mut runtime::Context, _state: &mut Main) {
         *self.in_start = Some(());
     }
@@ -152,7 +152,7 @@ struct ReactionDone<'a> {
     _out: runtime::InputRef<'a>,
 }
 
-impl Trigger<MainBuilder> for ReactionDone<'_> {
+impl runtime::Trigger<Main> for ReactionDone<'_> {
     fn trigger(self, ctx: &mut runtime::Context, _state: &mut Main) {
         ctx.schedule_shutdown(None);
     }

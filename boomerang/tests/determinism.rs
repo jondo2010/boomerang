@@ -14,7 +14,7 @@ struct SourceReactionT<'a> {
     y: runtime::OutputRef<'a, i32>,
 }
 
-impl Trigger<SourceBuilder> for SourceReactionT<'_> {
+impl runtime::Trigger<()> for SourceReactionT<'_> {
     fn trigger(mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
         *self.y = Some(1);
     }
@@ -34,7 +34,7 @@ struct DestReactionXY<'a> {
     y: runtime::InputRef<'a, i32>,
 }
 
-impl Trigger<DestinationBuilder> for DestReactionXY<'_> {
+impl runtime::Trigger<()> for DestReactionXY<'_> {
     fn trigger(self, _ctx: &mut runtime::Context, _state: &mut ()) {
         let mut sum = 0;
         if let Some(x) = *self.x {
@@ -62,7 +62,7 @@ struct PassReactionX<'a> {
     y: runtime::OutputRef<'a, i32>,
 }
 
-impl Trigger<PassBuilder> for PassReactionX<'_> {
+impl runtime::Trigger<()> for PassReactionX<'_> {
     fn trigger(mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
         *self.y = *self.x;
     }

@@ -26,7 +26,7 @@
 //! )]
 //! struct ReactionStartup;
 //!
-//! impl Trigger<HelloWorld> for ReactionStartup {
+//! impl runtime::Trigger<State> for ReactionStartup {
 //!     fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
 //!         println!("Hello World.");
 //!         state.success = true;
@@ -40,7 +40,7 @@
 //! )]
 //! struct ReactionShutdown;
 //!
-//! impl Trigger<HelloWorld> for ReactionShutdown {
+//! impl runtime::Trigger<State> for ReactionShutdown {
 //!     fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
 //!         println!("Shutdown invoked.");
 //!         assert!(state.success, "ERROR: startup reaction not executed.");
@@ -79,10 +79,10 @@ pub mod prelude {
 
     pub use super::builder::{
         BuilderError, BuilderFqn, EnvBuilder, Input, Logical, Output, Physical, Reactor,
-        TimerActionKey, Trigger, TypedActionKey, TypedPortKey,
+        TimerActionKey, TypedActionKey, TypedPortKey,
     };
 
-    pub use super::runtime::{self, ContextCommon};
+    pub use super::runtime::{self, ContextCommon, FromRefs};
 
     pub use boomerang_derive::{Reaction, Reactor};
 }

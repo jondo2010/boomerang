@@ -1,4 +1,6 @@
-use crate::{TimerSpec, TriggerMode};
+use runtime::ActionCommon;
+
+use crate::{reaction_closure, TimerSpec, TriggerMode};
 
 use super::*;
 
@@ -67,7 +69,7 @@ fn test_reactions_with_trigger() {
     let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, ());
 
     let res = reactor_builder
-        .add_reaction("test", Box::new(|_ctx, _r, _i, _o, _a| {}))
+        .add_reaction("test", reaction_closure!())
         .finish();
 
     assert!(matches!(res, Err(BuilderError::ReactionBuilderError(_))));
@@ -81,14 +83,14 @@ fn test_reactions1() {
     let startup = reactor_builder.get_startup_action();
 
     let r0_key = reactor_builder
-        .add_reaction("test", Box::new(|_ctx, _r, _i, _o, _a| {}))
+        .add_reaction("test", reaction_closure!())
         .with_action(startup, 0, TriggerMode::TriggersOnly)
         .unwrap()
         .finish()
         .unwrap();
 
     let r1_key = reactor_builder
-        .add_reaction("test", Box::new(|_ctx, _r, _i, _o, _a| {}))
+        .add_reaction("test", reaction_closure!())
         .with_action(startup, 0, TriggerMode::TriggersOnly)
         .unwrap()
         .finish()
@@ -107,11 +109,10 @@ fn test_reactions1() {
     assert_eq!(env.reactions.len(), 2);
 }
 
-#[cfg(feature = "disabled")]
 #[test]
 fn test_actions1() {
     let mut env_builder = EnvBuilder::new();
-    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, ());
+    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, ());
 
     let action_a = reactor_builder
         .add_logical_action::<()>("a", Some(Duration::from_secs(1)))
@@ -120,45 +121,47 @@ fn test_actions1() {
 
     // Triggered by a+b, schedules b
     let reaction_a = reactor_builder
-        .add_reaction(
-            "ra",
-            Box::new(|_, _, _, _, _, sa| {
-                let [a]: &mut [_; 1] = ::std::convert::TryInto::try_into(sa).unwrap();
-
-                let x = SA { a };
-            }),
-        )
-        .with_trigger_action(action_a, 0)
-        .with_effect_action(action_b, 0)
-        .with_trigger_action(action_b, 1)
+        .add_reaction("ra", reaction_closure!())
+        .with_action(action_a, 0, TriggerMode::TriggersOnly)
+        .unwrap()
+        .with_action(action_b, 1, TriggerMode::TriggersAndEffects)
+        .unwrap()
         .finish()
         .unwrap();
 
     // Triggered by a, schedules a
     let reaction_b = reactor_builder
-        .add_reaction("rb", Box::new(|_, _, _, _, _, _| {}))
-        .with_trigger_action(action_a, 0)
-        .with_effect_action(action_a, 0)
+        .add_reaction("rb", reaction_closure!())
+        .with_action(action_a, 0, TriggerMode::TriggersAndEffects)
+        .unwrap()
         .finish()
         .unwrap();
 
     let _reactor_key = reactor_builder.finish().unwrap();
-    let (env, dep_info) = env_builder.try_into().unwrap();
+    let (env, dep_info, aliases) = env_builder.into_runtime_parts().unwrap();
 
-    runtime::check_consistency(&env, &dep_info);
+    //runtime::check_consistency(&env, &dep_info);
 
-    assert_eq!(env.actions[action_a].get_name(), "a");
-    assert_eq!(env.actions[action_a].get_is_logical(), true);
+    let reaction_a = aliases.reaction_aliases[reaction_a];
+    let reaction_b = aliases.reaction_aliases[reaction_b];
+    let action_a = aliases.action_aliases[action_a.into()];
+    let action_b = aliases.action_aliases[action_b.into()];
 
-    // An action both triggered by and scheduled-by should only show up in the
-    // reaction_sched_actions
-    assert_eq!(dep_info.reaction_trig_actions[reaction_a], vec![action_a]);
-    assert_eq!(dep_info.reaction_sched_actions[reaction_a], vec![action_b]);
-    assert_eq!(dep_info.reaction_trig_actions[reaction_b], vec![]);
-    assert_eq!(dep_info.reaction_sched_actions[reaction_b], vec![action_a]);
     assert_eq!(
-        dep_info.action_triggers[action_a],
-        vec![reaction_a, reaction_b]
+        env.actions[action_a]
+            .as_logical()
+            .expect("Action a should be logical")
+            .name(),
+        "a"
     );
-    assert_eq!(dep_info.action_triggers[action_b], vec![reaction_a]);
+
+    // action_a is TriggersOnly on reaction_a, so should not be in the `reaction_actions`
+    itertools::assert_equal(dep_info.reaction_actions[reaction_a].iter(), [action_b]);
+
+    itertools::assert_equal(
+        dep_info.action_triggers[action_a].iter().map(|&(_, r)| r),
+        [reaction_a, reaction_b],
+    );
+
+    itertools::assert_equal(dep_info.reaction_actions[reaction_b].iter(), [action_a]);
 }

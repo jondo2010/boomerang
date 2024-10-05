@@ -16,7 +16,7 @@ struct SourceReactionOut<'a> {
     out: runtime::OutputRef<'a, u32>,
 }
 
-impl Trigger<SourceBuilder> for SourceReactionOut<'_> {
+impl runtime::Trigger<()> for SourceReactionOut<'_> {
     fn trigger(mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
         *self.out = Some(1);
     }
@@ -46,7 +46,7 @@ struct GainReactionIn<'a> {
     out: runtime::OutputRef<'a, u32>,
 }
 
-impl Trigger<GainBuilder> for GainReactionIn<'_> {
+impl runtime::Trigger<Gain> for GainReactionIn<'_> {
     fn trigger(mut self, _ctx: &mut runtime::Context, state: &mut Gain) {
         *self.out = self.inp.map(|inp| inp * state.gain);
     }
@@ -68,7 +68,7 @@ struct PrintReactionIn<'a> {
     _a: runtime::ActionRef<'a>,
 }
 
-impl Trigger<PrintBuilder> for PrintReactionIn<'_> {
+impl runtime::Trigger<()> for PrintReactionIn<'_> {
     fn trigger(self, _ctx: &mut runtime::Context, _state: &mut ()) {
         let value = *self.inp;
         assert!(matches!(value, Some(2u32)));

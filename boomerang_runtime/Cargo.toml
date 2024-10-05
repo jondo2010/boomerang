@@ -16,7 +16,13 @@ default = []
 ## Support for parallel execution
 parallel = ["dep:rayon"]
 ## Support for serialization
-serde = ["dep:arrow", "dep:erased-serde", "dep:serde", "dep:serde_arrow"]
+serde = [
+    "dep:arrow",
+    "dep:erased-serde",
+    "dep:serde",
+    "dep:serde_arrow",
+    "dep:serde_closure",
+]
 
 [dependencies]
 arrow = { workspace = true, optional = true, features = ["prettyprint"] }
@@ -31,3 +37,5 @@ serde_arrow = { workspace = true, features = ["arrow-52"], optional = true }
 thiserror.workspace = true
 tinymap.workspace = true
 tracing = { workspace = true }
+
+serde_closure = { version = "0.3", optional = true }

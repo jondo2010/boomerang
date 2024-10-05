@@ -27,7 +27,7 @@ struct ReactionStartup<'a> {
     out: runtime::OutputRef<'a, i32>,
 }
 
-impl<const NUM_NODES: usize> Trigger<Node<NUM_NODES>> for ReactionStartup<'_> {
+impl runtime::Trigger<State> for ReactionStartup<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut State) {
         println!("Hello from node {}!", ctx.get_bank_index().unwrap());
         // broadcast my ID to everyone
@@ -41,7 +41,7 @@ struct ReactionIn<'a, const NUM_NODES: usize> {
     inp: [runtime::InputRef<'a, i32>; NUM_NODES],
 }
 
-impl<const NUM_NODES: usize> Trigger<Node<NUM_NODES>> for ReactionIn<'_, NUM_NODES> {
+impl<const NUM_NODES: usize> runtime::Trigger<State> for ReactionIn<'_, NUM_NODES> {
     fn trigger(self, ctx: &mut runtime::Context, state: &mut State) {
         let mut count = 0;
         let mut vals = vec![];
@@ -75,7 +75,7 @@ impl<const NUM_NODES: usize> Trigger<Node<NUM_NODES>> for ReactionIn<'_, NUM_NOD
 )]
 struct ReactionShutdown;
 
-impl<const NUM_NODES: usize> Trigger<Node<NUM_NODES>> for ReactionShutdown {
+impl runtime::Trigger<State> for ReactionShutdown {
     fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
         assert!(state.received, "Received no input!");
     }

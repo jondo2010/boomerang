@@ -34,7 +34,7 @@ struct ReactionT {
     a: runtime::PhysicalActionRef<usize>,
 }
 
-impl Trigger<AsyncCallback> for ReactionT {
+impl runtime::Trigger<State> for ReactionT {
     fn trigger(self, ctx: &mut runtime::Context, state: &mut <AsyncCallback as Reactor>::State) {
         // make sure to join the old thread first
         if let Some(thread) = state.thread.take() {
@@ -60,7 +60,7 @@ impl Trigger<AsyncCallback> for ReactionT {
 #[reaction(reactor = "AsyncCallback", triggers(action = "a"))]
 struct ReactionA;
 
-impl Trigger<AsyncCallback> for ReactionA {
+impl runtime::Trigger<State> for ReactionA {
     fn trigger(self, ctx: &mut runtime::Context, state: &mut <AsyncCallback as Reactor>::State) {
         let elapsed_time = ctx.get_elapsed_logical_time();
         state.i += 1;
@@ -87,7 +87,7 @@ impl Trigger<AsyncCallback> for ReactionA {
 #[reaction(reactor = "AsyncCallback", triggers(shutdown))]
 struct ReactionShutdown;
 
-impl Trigger<AsyncCallback> for ReactionShutdown {
+impl runtime::Trigger<State> for ReactionShutdown {
     fn trigger(self, _ctx: &mut runtime::Context, state: &mut <AsyncCallback as Reactor>::State) {
         // make sure to join the thread before shutting down
         if state.thread.is_some() {

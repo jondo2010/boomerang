@@ -11,7 +11,7 @@ readme = "README.md"
 exclude = ['.gitignore', '.cargo/config', '.vscode', '.devcontainer', '.github']
 
 [workspace.dependencies]
-arrow = { version = "52", default-features = false }
+arrow = { version = "53", default-features = false }
 anyhow = "1.0"
 document-features = "0.2"
 itertools = "0.13"

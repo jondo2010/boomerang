@@ -4,7 +4,7 @@ use boomerang_util::timeout;
 use std::time::Duration;
 
 trait CountData:
-    Copy + runtime::PortData + std::ops::AddAssign<i32> + std::cmp::PartialEq<i32>
+    Copy + runtime::ReactorData + std::ops::AddAssign<i32> + std::cmp::PartialEq<i32>
 {
 }
 

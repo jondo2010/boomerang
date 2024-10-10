@@ -1,88 +1,61 @@
-use downcast_rs::{impl_downcast, Downcast};
+//! Trait definitions for user data types that can be used in Reactor items such as ports, actions,
+//! and reactors.
+//!
+//! - [`crate::Reactor`] has user defined data in its `state` field, which is of type [`Box<dyn
+//!   ReactorData>`].
+//! - [`crate::Port<T: ReactorData>`] and it's corresponding [`crate::BasePort`] have user defined
+//!   data in its `value` field, which is of type [`Option<T>`].
+//! - [`crate::action::store::ActionStore<T: ActionData>`] and it's corresponding
+//!   [`crate::action::store::BaseActionStore`]
 
-use crate::declare_registry;
+use std::fmt::Debug;
 
 #[cfg(feature = "serde")]
 mod serde_impl {
-    pub trait PortData:
-        std::fmt::Debug
-        + Send
-        + Sync
-        + serde::Serialize
-        + for<'de> serde::Deserialize<'de>
-        + serde_flexitos::id::Id
-        + 'static
+    pub trait SerdeData:
+        serde::Serialize + for<'de> serde::Deserialize<'de> + serde_flexitos::id::Id
+    {
+    }
+    impl<T> SerdeData for T where
+        T: serde::Serialize + for<'de> serde::Deserialize<'de> + serde_flexitos::id::Id
     {
     }
 
-    impl<T> PortData for T where
-        T: std::fmt::Debug
-            + Send
-            + Sync
-            + serde::Serialize
-            + for<'de> serde::Deserialize<'de>
-            + serde_flexitos::id::Id
-            + 'static
-    {
-    }
-
-    pub trait ActionData:
-        std::fmt::Debug
-        + Send
-        + Sync
-        + serde::Serialize
-        + for<'de> serde::Deserialize<'de>
-        + serde_flexitos::id::Id
-        + 'static
-    {
-    }
-
-    impl<T> ActionData for T where
-        T: std::fmt::Debug
-            + Send
-            + Sync
-            + serde::Serialize
-            + for<'de> serde::Deserialize<'de>
-            + serde_flexitos::id::Id
-            + 'static
-    {
-    }
+    pub trait SerdeDataObj: erased_serde::Serialize + serde_flexitos::id::IdObj {}
+    impl<T> SerdeDataObj for T where T: erased_serde::Serialize + serde_flexitos::id::IdObj {}
 }
 
 #[cfg(not(feature = "serde"))]
-mod non_serde_impl {
-    pub trait PortData: std::fmt::Debug + Send + Sync + 'static {}
-    impl<T> PortData for T where T: std::fmt::Debug + Send + Sync + 'static {}
+mod serde_impl {
+    pub trait SerdeData {}
+    impl SerdeData for () {}
 
-    pub trait ActionData: std::fmt::Debug + Send + Sync + 'static {}
-
-    impl<T> ActionData for T where T: std::fmt::Debug + Send + Sync + 'static {}
+    pub trait SerdeDataObj {}
+    impl SerdeDataObj for () {}
 }
 
 #[cfg(feature = "parallel")]
-pub trait ReactorState: Downcast + Send + Sync {
-    fn type_name(&self) -> &'static str {
-        std::any::type_name::<Self>()
-    }
-}
-
-#[cfg(feature = "parallel")]
-impl<T> ReactorState for T where T: Downcast + Send + Sync {}
-
-#[cfg(not(feature = "parallel"))]
-pub trait ReactorState: Downcast {
-    fn type_name(&self) -> &'static str {
-        std::any::type_name::<Self>()
-    }
+mod parallel_impl {
+    pub trait ParallelData: Send + Sync {}
+    impl<T> ParallelData for T where T: Send + Sync {}
 }
 
 #[cfg(not(feature = "parallel"))]
-impl<T> ReactorState for T where T: Downcast {}
+mod parallel_impl {
+    pub trait ParallelData {}
+    impl<T> ParallelData for T {}
+}
 
-impl_downcast!(ReactorState);
+pub use parallel_impl::*;
+pub use serde_impl::*;
 
-declare_registry!(
-    ReactorState,
-    REACTOR_STATE_DESERIALIZE_REGISTRY,
-    REACTOR_STATE_DESERIALIZE_REGISTRY_DISTRIBUTED_SLICE
-);
+/// Types implementing this trait can be used as data in ports, actions, and reactors.
+pub trait ReactorData: Debug + SerdeData + ParallelData + 'static {}
+
+impl<T> ReactorData for T where T: Debug + SerdeData + ParallelData + 'static {}
+
+// declare_registry!(
+//    ReactorData,
+//    REACTOR_DATA_DESERIALIZE_REGISTRY,
+//    REACTOR_DATA_DESERIALIZE_REGISTRY_DISTRIBUTED_SLICE
+//);

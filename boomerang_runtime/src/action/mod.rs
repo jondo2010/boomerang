@@ -4,9 +4,10 @@ use std::{
     time::Duration,
 };
 
-use crate::{ActionData, Tag};
+use crate::{ReactorData, Tag};
 
 mod action_ref;
+#[cfg(feature = "serde")]
 mod registry;
 pub mod store;
 
@@ -26,8 +27,8 @@ pub struct LogicalAction {
 }
 
 impl LogicalAction {
-    pub fn new<T: ActionData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
-        let store = ActionStore::<T>::new();
+    pub fn new<T: ReactorData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
+        let store = ActionStore::<T>::default();
         Self {
             name: name.into(),
             key,
@@ -47,6 +48,7 @@ pub struct PhysicalAction {
     pub store: Arc<Mutex<dyn BaseActionStore>>,
 }
 
+#[cfg(feature = "serde")]
 mod serialize_physical_action_store {
     use std::sync::{Arc, Mutex};
 
@@ -75,8 +77,8 @@ mod serialize_physical_action_store {
 }
 
 impl PhysicalAction {
-    pub fn new<T: ActionData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
-        let store = ActionStore::<T>::new();
+    pub fn new<T: ReactorData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
+        let store = ActionStore::<T>::default();
         let store: Arc<Mutex<dyn BaseActionStore>> = Arc::new(Mutex::new(store));
         Self {
             name: name.into(),
@@ -124,11 +126,11 @@ pub enum Action {
 }
 
 impl Action {
-    pub fn new_logical<T: ActionData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
+    pub fn new_logical<T: ReactorData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
         Self::Logical(LogicalAction::new::<T>(name, key, min_delay))
     }
 
-    pub fn new_physical<T: ActionData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
+    pub fn new_physical<T: ReactorData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
         Self::Physical(PhysicalAction::new::<T>(name, key, min_delay))
     }
 

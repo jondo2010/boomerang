@@ -4,8 +4,8 @@ use std::{marker::PhantomPinned, pin::Pin, ptr::NonNull};
 
 use crate::{
     refs::{Refs, RefsMut},
-    Action, ActionKey, BasePort, Context, ContextCommon, Deadline, PortKey, Reaction, ReactionKey,
-    Reactor, ReactorKey, Tag, TriggerRes,
+    Action, ActionKey, BasePort, BaseReactor, Context, ContextCommon, Deadline, PortKey, Reaction,
+    ReactionKey, ReactorKey, Tag, TriggerRes,
 };
 
 use super::{Env, ReactionGraph};
@@ -13,19 +13,20 @@ use super::{Env, ReactionGraph};
 /// Set of borrows necessary for a single Reaction triggering.
 pub struct ReactionTriggerCtx<'store> {
     pub context: &'store mut Context,
-    pub reactor: &'store mut Reactor,
+    pub reactor: &'store mut dyn BaseReactor,
     pub reaction: &'store mut Reaction,
     pub ref_ports: Refs<'store, dyn BasePort>,
     pub mut_ports: RefsMut<'store, dyn BasePort>,
     pub actions: RefsMut<'store, Action>,
 }
 
+#[cfg(feature = "parallel")]
 unsafe impl Send for ReactionTriggerCtx<'_> {}
 
 impl<'a> From<&'a mut ReactionTriggerCtxPtrs> for ReactionTriggerCtx<'a> {
     fn from(ptrs: &mut ReactionTriggerCtxPtrs) -> Self {
         let context = unsafe { ptrs.context.as_mut() };
-        let reactor = unsafe { ptrs.reactor.as_mut() };
+        let reactor = unsafe { ptrs.reactor.unwrap().as_mut() };
         let reaction = unsafe { ptrs.reaction.as_mut() };
 
         let ref_ports = Refs::new(&mut ptrs.ref_ports);
@@ -49,7 +50,7 @@ impl<'a> ReactionTriggerCtx<'a> {
         tracing::trace!(
             "    Executing {reactor_name}/{reaction_name}.",
             reaction_name = self.reaction.get_name(),
-            reactor_name = self.reactor.get_name()
+            reactor_name = self.reactor.name()
         );
 
         if let Some(Deadline { deadline, handler }) = self.reaction.deadline.as_ref() {
@@ -63,7 +64,7 @@ impl<'a> ReactionTriggerCtx<'a> {
 
         self.reaction.body.trigger(
             self.context,
-            self.reactor.state.as_mut(),
+            self.reactor,
             self.ref_ports,
             self.mut_ports,
             self.actions,
@@ -79,7 +80,7 @@ impl<'a> ReactionTriggerCtx<'a> {
 #[derive(Debug)]
 struct ReactionTriggerCtxPtrs {
     context: NonNull<Context>,
-    reactor: NonNull<Reactor>,
+    reactor: Option<NonNull<dyn BaseReactor>>,
     reaction: NonNull<Reaction>,
     ref_ports: Vec<NonNull<dyn BasePort>>,
     mut_ports: Vec<NonNull<dyn BasePort>>,
@@ -90,7 +91,7 @@ impl Default for ReactionTriggerCtxPtrs {
     fn default() -> Self {
         Self {
             context: NonNull::dangling(),
-            reactor: NonNull::dangling(),
+            reactor: None,
             reaction: NonNull::dangling(),
             ref_ports: Vec::new(),
             mut_ports: Vec::new(),
@@ -99,12 +100,13 @@ impl Default for ReactionTriggerCtxPtrs {
     }
 }
 
+#[cfg(feature = "parallel")]
 unsafe impl Send for ReactionTriggerCtxPtrs {}
 
 #[derive(Debug)]
 struct Inner {
     contexts: tinymap::TinySecondaryMap<ReactionKey, Context>,
-    reactors: tinymap::TinyMap<ReactorKey, Reactor>,
+    reactors: tinymap::TinyMap<ReactorKey, Box<dyn BaseReactor>>,
     reactions: tinymap::TinyMap<ReactionKey, Reaction>,
     actions: tinymap::TinyMap<ActionKey, Action>,
     ports: tinymap::TinyMap<PortKey, Box<dyn BasePort>>,
@@ -165,7 +167,7 @@ impl Store {
                 .inner
                 .reactors
                 .iter_many_unchecked_ptrs_mut(reactor_keys)
-                .map(|r| NonNull::new_unchecked(r))
+                .map(|r| NonNull::new_unchecked(&mut **r as *mut _))
         };
 
         let reactions = unsafe {
@@ -220,7 +222,7 @@ impl Store {
         ) {
             unsafe {
                 cache.context = context;
-                cache.reactor = reactor;
+                cache.reactor = Some(reactor);
                 cache.reaction = reaction;
                 cache.actions = actions;
                 cache.ref_ports = ref_ports
@@ -235,7 +237,8 @@ impl Store {
         Box::into_pin(boxed)
     }
 
-    /// Returns an `Iterator` of `ReactionTriggerCtx` for each `Reaction` in the given `reaction_keys`.
+    /// Returns an `Iterator` of `ReactionTriggerCtx` for each `Reaction` in the given
+    /// `reaction_keys`.
     ///
     /// This uses the previously stored `ReactionTriggerCtxPtrs`.
     ///
@@ -266,7 +269,8 @@ impl Store {
 
     /// Turn this `Store` back into the `Env` it was built from.
     pub fn into_env(self: Pin<Box<Self>>) -> Env {
-        // SAFETY: We are the only owner of the `Store` and we are consuming it, and immediately dropping all the cached pointers.
+        // SAFETY: We are the only owner of the `Store` and we are consuming it, and immediately
+        // dropping all the cached pointers.
         let store = unsafe { Pin::into_inner_unchecked(self) };
         Env {
             reactors: store.inner.reactors,

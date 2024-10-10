@@ -1,7 +1,7 @@
 //! Serde serialization and deserialization for `KeySet`.
 //!
-//! We provide a custom implementation for `KeySet` serialization and deserialization instead of exposing the internal
-//! representation of the set.
+//! We provide a custom implementation for `KeySet` serialization and deserialization instead of
+//! exposing the internal representation of the set.
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
 use super::*;

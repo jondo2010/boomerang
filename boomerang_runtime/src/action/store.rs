@@ -1,11 +1,13 @@
-//! This module provides an implementation of an `ActionStore` for managing actions in a reactor system.
+//! This module provides an implementation of an `ActionStore` for managing actions in a reactor
+//! system.
 //!
-//! The [`ActionStore`] is a data structure that efficiently stores and retrieves actions based on their
-//! associated [`Tag`]s. It uses a binary heap internally to maintain the actions
+//! The [`ActionStore`] is a data structure that efficiently stores and retrieves actions based on
+//! their associated [`Tag`]s. It uses a binary heap internally to maintain the actions
 //! in a priority queue, ensuring that actions can be processed in the correct order.
 //!
 //! Key features:
-//! - Out-of-order insertion and update. Pushing a new value for a tag will semantically replace the old value.
+//! - Out-of-order insertion and update. Pushing a new value for a tag will semantically replace the
+//!   old value.
 //! - Retrieval follows the monotonically increasing tag order of the scheduler.
 //! - Requests for the same current tag will return the same value.
 
@@ -14,22 +16,21 @@ use std::fmt::Debug;
 use std::sync::Mutex;
 use std::{cmp::Ordering, sync::Arc};
 
-use crate::{ActionData, Tag};
+use downcast_rs::Downcast;
+
+use crate::data::{ParallelData, SerdeDataObj};
+use crate::{ReactorData, Tag};
 
 #[derive(Debug)]
-struct ActionEntry<T>
-where
-    T: ActionData,
-{
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+struct ActionEntry<T: ReactorData> {
     tag: Tag,
     sequence: usize,
+    #[cfg_attr(feature = "serde", serde(skip))]
     data: Option<T>,
 }
 
-impl<T> Ord for ActionEntry<T>
-where
-    T: ActionData,
-{
+impl<T: ReactorData> Ord for ActionEntry<T> {
     fn cmp(&self, other: &Self) -> Ordering {
         // This is set up so that in ties on the tag, the higher sequence number comes first
         self.tag
@@ -39,34 +40,21 @@ where
     }
 }
 
-impl<T> PartialOrd for ActionEntry<T>
-where
-    T: ActionData,
-{
+impl<T: ReactorData> PartialOrd for ActionEntry<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<T> Eq for ActionEntry<T> where T: ActionData {}
+impl<T: ReactorData> Eq for ActionEntry<T> {}
 
-impl<T> PartialEq for ActionEntry<T>
-where
-    T: ActionData,
-{
+impl<T: ReactorData> PartialEq for ActionEntry<T> {
     fn eq(&self, other: &Self) -> bool {
         self.tag == other.tag && self.sequence == other.sequence
     }
 }
 
-pub trait BaseActionStore:
-    Debug
-    + Send
-    + Sync
-    + downcast_rs::DowncastSync
-    + erased_serde::Serialize
-    + serde_flexitos::id::IdObj
-{
+pub trait BaseActionStore: Debug + ParallelData + Downcast + SerdeDataObj {
     /// Remove any value at the given Tag
     fn clear_older_than(&mut self, tag: Tag);
 
@@ -86,31 +74,27 @@ pub trait BaseActionStore:
     fn boxed_to_mutex(self: Box<Self>) -> Arc<Mutex<dyn BaseActionStore>>;
 }
 
-downcast_rs::impl_downcast!(sync BaseActionStore);
+downcast_rs::impl_downcast!(BaseActionStore);
 
 #[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct ActionStore<T>
-where
-    T: ActionData,
-{
+pub struct ActionStore<T: ReactorData> {
     #[cfg_attr(feature = "serde", serde(skip))]
     heap: BinaryHeap<ActionEntry<T>>,
     #[cfg_attr(feature = "serde", serde(skip))]
     counter: usize,
 }
 
-impl<T> ActionStore<T>
-where
-    T: ActionData,
-{
-    pub fn new() -> Self {
+impl<T: ReactorData> Default for ActionStore<T> {
+    fn default() -> Self {
         ActionStore {
             heap: BinaryHeap::new(),
             counter: 0,
         }
     }
+}
 
+impl<T: ReactorData> ActionStore<T> {
     /// Add a new action to the store.
     #[inline]
     pub fn push(&mut self, tag: Tag, data: Option<T>) {
@@ -163,7 +147,7 @@ struct TaggedActionRecord<T> {
     value: Option<T>,
 }
 
-impl<T: ActionData> BaseActionStore for ActionStore<T> {
+impl<T: ReactorData> BaseActionStore for ActionStore<T> {
     fn clear_older_than(&mut self, tag: Tag) {
         self.clear_older_than(tag)
     }
@@ -227,7 +211,7 @@ mod tests {
 
     #[test]
     fn test_heap_ordering() {
-        let mut store = ActionStore::<u32>::new();
+        let mut store = ActionStore::<u32>::default();
 
         let tags = build_tags::<5>();
         // The first 3 tags should come out in tag order
@@ -249,7 +233,7 @@ mod tests {
 
     #[test]
     fn test_out_of_order_get_current() {
-        let mut store = ActionStore::<u32>::new();
+        let mut store = ActionStore::<u32>::default();
 
         let tags = build_tags::<6>();
         store.push(tags[3], Some(30));
@@ -277,7 +261,7 @@ mod tests {
 
     #[test]
     fn test_empty_store() {
-        let mut store = ActionStore::<u32>::new();
+        let mut store = ActionStore::<u32>::default();
         assert_eq!(store.get_current(Tag::new(Duration::from_secs(1), 0)), None);
     }
 
@@ -309,7 +293,7 @@ mod tests {
             const ID: serde_flexitos::id::Ident<'static> =
                 serde_flexitos::id::Ident::I1("TestStruct");
         }
-        let mut store = ActionStore::<TestStruct>::new();
+        let mut store = ActionStore::<TestStruct>::default();
         let tag = Tag::now(crate::Timestamp::now());
         store.push(
             tag,

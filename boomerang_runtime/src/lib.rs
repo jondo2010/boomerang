@@ -24,7 +24,7 @@ pub use action::{
     Action, ActionKey, ActionRef, ActionRefValue, LogicalAction, PhysicalAction, PhysicalActionRef,
 };
 pub use context::*;
-pub use data::{ActionData, PortData, ReactorState};
+pub use data::ReactorData;
 pub use env::{BankInfo, Env, Level, LevelReactionKey, ReactionGraph};
 pub use key_set::KeySetLimits as ReactionSetLimits;
 pub use port::*;

@@ -271,8 +271,8 @@ impl ToTokens for Reaction {
         let struct_fields = &self.fields;
         let fromdefs_impl = &self.fromdefs;
 
-        // We use impl_generics from `combined_generics` to allow additional bounds to be added, but type and where come
-        // from the original generics
+        // We use impl_generics from `combined_generics` to allow additional bounds to be added, but
+        // type and where come from the original generics
         let (impl_generics, _, _) = self.combined_generics.split_for_impl();
         let (_, type_generics, where_clause) = self.generics.split_for_impl();
         let inner_type_generics = {
@@ -351,7 +351,7 @@ mod tests {
 #[derive(Reaction)]
 #[reaction(
     reactor = "Inner::Count<T>",
-    bound = "T: runtime::PortData",
+    bound = "T: runtime::ReactorData",
     bound = "const N: usize",
     triggers(action = "x"),
     triggers(port = "child.y"),
@@ -365,7 +365,7 @@ struct ReactionT;"#;
         assert_eq!(
             receiver.bounds,
             vec![
-                parse_quote! {T: runtime::PortData},
+                parse_quote! {T: runtime::ReactorData},
                 parse_quote! {const N: usize}
             ]
         );

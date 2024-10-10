@@ -2,10 +2,10 @@ use std::path::PathBuf;
 
 use crate::{
     action::store::{ActionStore, BaseActionStore},
-    declare_registry, ActionData,
+    declare_registry, ReactorData,
 };
 
-//declare_registry!(
+// declare_registry!(
 //    ActionData,
 //    ACTION_DATA_DESERIALIZE_REGISTRY,
 //    ACTION_DATA_DESERIALIZE_REGISTRY_DISTRIBUTED_SLICE
@@ -42,12 +42,12 @@ macro_rules! register_action_data {
     };
 }
 
-impl<T: ActionData> serde_flexitos::id::Id<serde_flexitos::id::Ident<'static>> for ActionStore<T> {
+impl<T: ReactorData> serde_flexitos::id::Id<serde_flexitos::id::Ident<'static>> for ActionStore<T> {
     const ID: serde_flexitos::id::Ident<'static> =
         serde_flexitos::id::Ident::I1("ActionStore").extend(T::ID);
 }
 
-impl<T: ActionData> From<ActionStore<T>> for Box<dyn BaseActionStore> {
+impl<T: ReactorData> From<ActionStore<T>> for Box<dyn BaseActionStore> {
     #[inline]
     fn from(val: ActionStore<T>) -> Self {
         Box::new(val)
@@ -80,9 +80,9 @@ fn __register_builtins(
     registry.register_id_type::<ActionStore<isize>>();
     registry.register_id_type::<ActionStore<f32>>();
     registry.register_id_type::<ActionStore<f64>>();
-    //registry.register_id_type::<ActionStore<&str>>();
+    // registry.register_id_type::<ActionStore<&str>>();
     registry.register_id_type::<ActionStore<String>>();
     registry.register_id_type::<ActionStore<PathBuf>>();
-    //registry.register_id_type::<ActionStore<Path>>();
-    //registry.register_id_type::<ActionStore<SystemTime>>();
+    // registry.register_id_type::<ActionStore<Path>>();
+    // registry.register_id_type::<ActionStore<SystemTime>>();
 }

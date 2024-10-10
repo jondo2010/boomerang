@@ -27,17 +27,17 @@ impl PortTag for Output {
 }
 
 #[derive(Debug)]
-pub struct TypedPortKey<T: runtime::PortData, Q: PortTag>(BuilderPortKey, PhantomData<(T, Q)>);
+pub struct TypedPortKey<T: runtime::ReactorData, Q: PortTag>(BuilderPortKey, PhantomData<(T, Q)>);
 
-impl<T: runtime::PortData, Q: PortTag> Copy for TypedPortKey<T, Q> {}
+impl<T: runtime::ReactorData, Q: PortTag> Copy for TypedPortKey<T, Q> {}
 
-impl<T: runtime::PortData, Q: PortTag> Clone for TypedPortKey<T, Q> {
+impl<T: runtime::ReactorData, Q: PortTag> Clone for TypedPortKey<T, Q> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T: runtime::PortData, Q: PortTag> TypedPortKey<T, Q> {
+impl<T: runtime::ReactorData, Q: PortTag> TypedPortKey<T, Q> {
     pub fn new(port_key: BuilderPortKey) -> Self {
         Self(port_key, PhantomData)
     }
@@ -47,13 +47,13 @@ impl<T: runtime::PortData, Q: PortTag> TypedPortKey<T, Q> {
     }
 }
 
-impl<T: runtime::PortData, Q: PortTag> From<BuilderPortKey> for TypedPortKey<T, Q> {
+impl<T: runtime::ReactorData, Q: PortTag> From<BuilderPortKey> for TypedPortKey<T, Q> {
     fn from(value: BuilderPortKey) -> Self {
         Self(value, PhantomData)
     }
 }
 
-impl<T: runtime::PortData, Q: PortTag> From<TypedPortKey<T, Q>> for BuilderPortKey {
+impl<T: runtime::ReactorData, Q: PortTag> From<TypedPortKey<T, Q>> for BuilderPortKey {
     fn from(builder_port_key: TypedPortKey<T, Q>) -> Self {
         builder_port_key.0
     }
@@ -83,7 +83,7 @@ pub trait BasePortBuilder {
     fn create_runtime_port(&self, key: runtime::PortKey) -> Box<dyn runtime::BasePort>;
 }
 
-pub struct PortBuilder<T: runtime::PortData, Q: PortTag> {
+pub struct PortBuilder<T: runtime::ReactorData, Q: PortTag> {
     name: String,
     /// The key of the Reactor that owns this PortBuilder
     reactor_key: BuilderReactorKey,
@@ -101,7 +101,7 @@ pub struct PortBuilder<T: runtime::PortData, Q: PortTag> {
     //_phantom: PhantomData<T>,
 }
 
-impl<T: runtime::PortData, Q: PortTag> PortBuilder<T, Q> {
+impl<T: runtime::ReactorData, Q: PortTag> PortBuilder<T, Q> {
     pub fn new(name: &str, reactor_key: BuilderReactorKey) -> Self {
         Self {
             name: name.into(),
@@ -116,7 +116,7 @@ impl<T: runtime::PortData, Q: PortTag> PortBuilder<T, Q> {
     }
 }
 
-impl<T: runtime::PortData, Q: PortTag> BasePortBuilder for PortBuilder<T, Q> {
+impl<T: runtime::ReactorData, Q: PortTag> BasePortBuilder for PortBuilder<T, Q> {
     fn get_name(&self) -> &str {
         &self.name
     }

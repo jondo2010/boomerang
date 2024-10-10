@@ -7,7 +7,7 @@ use std::{
 use crate::{
     key_set::KeySet,
     refs::{Refs, RefsMut},
-    Action, BasePort, Context, ReactorState,
+    Action, BasePort, BaseReactor, Context,
 };
 
 tinymap::key_type!(pub ReactionKey);
@@ -18,7 +18,7 @@ pub trait ReactionFn<'store> {
     fn trigger(
         &mut self,
         ctx: &'store mut Context,
-        state: &'store mut dyn ReactorState,
+        state: &'store mut dyn BaseReactor,
         ports: Refs<'store, dyn BasePort>,
         ports_mut: RefsMut<'store, dyn BasePort>,
         actions: RefsMut<'store, Action>,
@@ -32,7 +32,7 @@ pub trait ReactionFn<'store> {
 /// An empty reaction function that does nothing.
 pub fn empty_reaction(
     _ctx: &mut Context,
-    _state: &mut dyn ReactorState,
+    _state: &mut dyn BaseReactor,
     _ref_ports: Refs<dyn BasePort>,
     _mut_ports: RefsMut<dyn BasePort>,
     _actions: RefsMut<Action>,
@@ -59,8 +59,8 @@ pub trait FromRefs {
 /// The `Trigger` trait should be implemented by the user for each Reaction struct.
 ///
 /// Type parameter `S` is the state type of the Reactor.
-pub trait Trigger<S: ReactorState> {
-    fn trigger(self, ctx: &mut Context, state: &mut S);
+pub trait Trigger<R: BaseReactor> {
+    fn trigger(self, ctx: &mut Context, state: &mut R);
 }
 
 /// Wrapper struct for implementing the `ReactionFn` trait for a Reaction struct.
@@ -72,21 +72,21 @@ impl<Reaction, S> Default for ReactionWrapper<Reaction, S> {
     }
 }
 
-impl<'store, Reaction, S> ReactionFn<'store> for ReactionWrapper<Reaction, S>
+impl<'store, Reaction, Reactor> ReactionFn<'store> for ReactionWrapper<Reaction, Reactor>
 where
     Reaction: FromRefs,
-    Reaction::Marker<'store>: 'store + Trigger<S>,
-    S: ReactorState,
+    Reaction::Marker<'store>: 'store + Trigger<Reactor>,
+    Reactor: BaseReactor,
 {
     fn trigger(
         &mut self,
         ctx: &'store mut Context,
-        state: &'store mut dyn ReactorState,
+        state: &'store mut dyn BaseReactor,
         ports: Refs<'store, dyn BasePort>,
         ports_mut: RefsMut<'store, dyn BasePort>,
         actions: RefsMut<'store, Action>,
     ) {
-        let state: &mut S = state
+        let state: &mut Reactor = state
             .downcast_mut()
             .expect("Unable to downcast reactor state");
 
@@ -99,7 +99,7 @@ impl<'store, F> ReactionFn<'store> for F
 where
     F: FnMut(
             &'store mut Context,
-            &'store mut dyn ReactorState,
+            &'store mut dyn BaseReactor,
             Refs<'store, dyn BasePort>,
             RefsMut<'store, dyn BasePort>,
             RefsMut<'store, Action>,
@@ -109,7 +109,7 @@ where
     fn trigger(
         &mut self,
         ctx: &'store mut Context,
-        state: &'store mut dyn ReactorState,
+        state: &'store mut dyn BaseReactor,
         ports: Refs<'store, dyn BasePort>,
         ports_mut: RefsMut<'store, dyn BasePort>,
         actions: RefsMut<'store, Action>,

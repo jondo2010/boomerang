@@ -23,7 +23,7 @@ pub use port::*;
 pub use reaction::*;
 pub use reactor::*;
 
-use boomerang_runtime as runtime;
+use boomerang_runtime::{self as runtime, ReactorState};
 
 #[derive(thiserror::Error, Debug)]
 pub enum BuilderError {
@@ -106,13 +106,7 @@ impl From<std::convert::Infallible> for BuilderError {
 macro_rules! reaction_closure {
     // empty closure case
     () => {
-        Box::new(
-            |_ctx: &mut runtime::Context,
-             _state: &mut dyn runtime::ReactorState,
-             _ref_ports: runtime::Refs<dyn runtime::BasePort>,
-             _mut_ports: runtime::RefsMut<dyn runtime::BasePort>,
-             _actions: runtime::RefsMut<runtime::Action>| {},
-        )
+        Box::new(runtime::reaction::empty_reaction)
     };
     // closure with body
     ( $ctx:ident, $state:ident, $ref_ports:ident, $mut_ports:ident, $actions:ident => $body:block ) => {

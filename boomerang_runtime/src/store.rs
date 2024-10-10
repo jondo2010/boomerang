@@ -45,7 +45,7 @@ impl<'a> From<&'a mut ReactionTriggerCtxPtrs> for ReactionTriggerCtx<'a> {
 
 impl<'a> ReactionTriggerCtx<'a> {
     /// Trigger the reaction with the given context and state.
-    pub fn trigger(self, tag: Tag) -> &'a TriggerRes {
+    pub(crate) fn trigger(self, tag: Tag) -> &'a TriggerRes {
         tracing::trace!(
             "    Executing {reactor_name}/{reaction_name}.",
             reaction_name = self.reaction.get_name(),
@@ -238,6 +238,9 @@ impl Store {
     /// Returns an `Iterator` of `ReactionTriggerCtx` for each `Reaction` in the given `reaction_keys`.
     ///
     /// This uses the previously stored `ReactionTriggerCtxPtrs`.
+    ///
+    /// # Safety
+    /// TODO: Document safety
     pub unsafe fn iter_borrow_storage<'a>(
         self: &'a mut Pin<Box<Self>>,
         keys: impl Iterator<Item = ReactionKey> + 'a,

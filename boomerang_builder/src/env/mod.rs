@@ -17,6 +17,8 @@ use std::{
 
 mod build;
 mod debug;
+//#[cfg(feature = "serde")]
+//mod serializer;
 #[cfg(test)]
 mod tests;
 
@@ -206,13 +208,17 @@ impl EnvBuilder {
     }
 
     /// Add a Reaction to a given Reactor
-    pub fn add_reaction(
+    pub fn add_reaction<F>(
         &mut self,
         name: &str,
         reactor_key: BuilderReactorKey,
-        reaction_fn: runtime::BoxedReactionFn,
-    ) -> ReactionBuilderState {
+        reaction_fn: F,
+    ) -> ReactionBuilderState
+    where
+        F: for<'store> runtime::ReactionFn<'store> + Send + Sync + 'static,
+    {
         let priority = self.reactor_builders[reactor_key].reactions.len();
+        let reaction_fn = Box::new(reaction_fn);
         ReactionBuilderState::new(name, priority, reactor_key, reaction_fn, self)
     }
 

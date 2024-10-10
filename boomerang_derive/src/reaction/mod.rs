@@ -284,7 +284,7 @@ impl ToTokens for Reaction {
             quote! { ::<#(#g),*> }
         };
 
-        let trigger_startup = if self.trigger_startup {
+        let trigger_startup = self.trigger_startup.then(|| {
             quote! {
                 let mut __reaction = __reaction.with_action(
                     __startup_action,
@@ -292,11 +292,9 @@ impl ToTokens for Reaction {
                     ::boomerang::builder::TriggerMode::TriggersOnly
                 )?;
             }
-        } else {
-            quote! {}
-        };
+        });
 
-        let trigger_shutdown = if self.trigger_shutdown {
+        let trigger_shutdown = self.trigger_shutdown.then(|| {
             quote! {
                 let mut __reaction = __reaction.with_action(
                     __shutdown_action,
@@ -304,9 +302,7 @@ impl ToTokens for Reaction {
                     ::boomerang::builder::TriggerMode::TriggersOnly
                 )?;
             }
-        } else {
-            quote! {}
-        };
+        });
 
         tokens.extend(quote! {
             #fromdefs_impl
@@ -324,11 +320,12 @@ impl ToTokens for Reaction {
                 {
                     let __startup_action = builder.get_startup_action();
                     let __shutdown_action = builder.get_shutdown_action();
+
                     let mut __reaction = {
-                        let wrapper = Box::new(runtime::ReactionWrapper::<
+                        let wrapper = ::boomerang::runtime::ReactionWrapper::<
                             #ident #inner_type_generics,
                             <#reactor as ::boomerang::builder::Reactor>::State
-                        >::default());
+                        >::default();
                         builder.add_reaction(name, wrapper)
                     };
 

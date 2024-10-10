@@ -1,4 +1,8 @@
-use std::{fmt::Debug, sync::RwLock, time::Duration};
+use std::{
+    fmt::{Debug, Display},
+    sync::RwLock,
+    time::Duration,
+};
 
 use crate::{
     key_set::KeySet,
@@ -19,6 +23,20 @@ pub trait ReactionFn<'store> {
         ports_mut: RefsMut<'store, dyn BasePort>,
         actions: RefsMut<'store, Action>,
     );
+
+    fn type_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+}
+
+/// An empty reaction function that does nothing.
+pub fn empty_reaction(
+    _ctx: &mut Context,
+    _state: &mut dyn ReactorState,
+    _ref_ports: Refs<dyn BasePort>,
+    _mut_ports: RefsMut<dyn BasePort>,
+    _actions: RefsMut<Action>,
+) {
 }
 
 pub type BoxedReactionFn = Box<dyn for<'store> ReactionFn<'store> + Send + Sync>;
@@ -133,6 +151,20 @@ impl Debug for Reaction {
     }
 }
 
+impl Display for Reaction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.deadline.is_some() {
+            todo!("support for deadline")
+        }
+        write!(
+            f,
+            "runtime::Reaction::new(\"{name}\", Box::new({ty}), None)",
+            name = self.name,
+            ty = self.reaction_type_name(),
+        )
+    }
+}
+
 impl Reaction {
     pub fn new(name: &str, body: BoxedReactionFn, deadline: Option<Deadline>) -> Self {
         Self {
@@ -144,5 +176,9 @@ impl Reaction {
 
     pub fn get_name(&self) -> &str {
         &self.name
+    }
+
+    pub fn reaction_type_name(&self) -> &'static str {
+        self.body.type_name()
     }
 }

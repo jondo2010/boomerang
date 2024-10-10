@@ -9,8 +9,10 @@
 //! - Retrieval follows the monotonically increasing tag order of the scheduler.
 //! - Requests for the same current tag will return the same value.
 
-use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::fmt::Debug;
+use std::sync::Mutex;
+use std::{cmp::Ordering, sync::Arc};
 
 use crate::{ActionData, Tag};
 
@@ -57,7 +59,14 @@ where
     }
 }
 
-pub trait BaseActionStore: std::fmt::Debug + Send + Sync + downcast_rs::DowncastSync {
+pub trait BaseActionStore:
+    Debug
+    + Send
+    + Sync
+    + downcast_rs::DowncastSync
+    + erased_serde::Serialize
+    + serde_flexitos::id::IdObj
+{
     /// Remove any value at the given Tag
     fn clear_older_than(&mut self, tag: Tag);
 
@@ -72,15 +81,22 @@ pub trait BaseActionStore: std::fmt::Debug + Send + Sync + downcast_rs::Downcast
         builder: &mut serde_arrow::ArrayBuilder,
         tag: Tag,
     ) -> Result<(), crate::RuntimeError>;
+
+    /// Convert a Boxed store into an Arc-Mutex-protected version
+    fn boxed_to_mutex(self: Box<Self>) -> Arc<Mutex<dyn BaseActionStore>>;
 }
+
 downcast_rs::impl_downcast!(sync BaseActionStore);
 
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ActionStore<T>
 where
     T: ActionData,
 {
+    #[cfg_attr(feature = "serde", serde(skip))]
     heap: BinaryHeap<ActionEntry<T>>,
+    #[cfg_attr(feature = "serde", serde(skip))]
     counter: usize,
 }
 
@@ -174,6 +190,10 @@ impl<T: ActionData> BaseActionStore for ActionStore<T> {
             .push(&TaggedActionRecord { tag, value })
             .map_err(crate::RuntimeError::from)
     }
+
+    fn boxed_to_mutex(self: Box<Self>) -> Arc<Mutex<dyn BaseActionStore>> {
+        Arc::new(Mutex::new(*self))
+    }
 }
 
 #[cfg(test)]
@@ -263,11 +283,31 @@ mod tests {
 
     #[cfg(feature = "serde")]
     #[test]
+    fn test_serialize() {
+        use crate::{Action, ActionKey};
+
+        let actions = tinymap::TinyMap::<ActionKey, _>::from_iter([
+            Action::Startup,
+            Action::Shutdown,
+            Action::new_logical::<i32>("a0", ActionKey::from(1), Default::default()),
+            Action::new_physical::<bool>("a1", ActionKey::from(2), Default::default()),
+        ]);
+
+        let json = serde_json::to_string(&actions).unwrap();
+        let _roundtrip: tinymap::TinyMap<ActionKey, Action> = serde_json::from_str(&json).unwrap();
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
     fn test_arrow() {
         #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
         struct TestStruct {
             name: String,
             data: u32,
+        }
+        impl serde_flexitos::id::Id for TestStruct {
+            const ID: serde_flexitos::id::Ident<'static> =
+                serde_flexitos::id::Ident::I1("TestStruct");
         }
         let mut store = ActionStore::<TestStruct>::new();
         let tag = Tag::now(crate::Timestamp::now());

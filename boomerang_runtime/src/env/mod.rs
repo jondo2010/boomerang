@@ -6,8 +6,8 @@ use crate::{
 mod debug;
 
 /// Execution level
-#[repr(transparent)]
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Level(pub(crate) usize);
 
 impl std::fmt::Debug for Level {
@@ -50,14 +50,17 @@ pub type LevelReactionKey = (Level, ReactionKey);
 /// `Env` stores the resolved runtime state of all the reactors.
 ///
 /// The reactor heirarchy has been flattened and build by the builder methods.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Env {
     /// The runtime set of Reactors
     pub reactors: tinymap::TinyMap<ReactorKey, Reactor>,
     /// The runtime set of Actions
     pub actions: tinymap::TinyMap<ActionKey, Action>,
     /// The runtime set of Ports
+    #[serde(skip)]
     pub ports: tinymap::TinyMap<PortKey, Box<dyn BasePort>>,
     /// The runtime set of Reactions
+    #[serde(skip)]
     pub reactions: tinymap::TinyMap<ReactionKey, Reaction>,
 }
 
@@ -73,6 +76,7 @@ impl Env {
 
 /// Bank information for a multi-bank reactor
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BankInfo {
     /// The index of this reactor within the bank
     pub idx: usize,
@@ -83,6 +87,7 @@ pub struct BankInfo {
 /// Invariant data for the runtime, describing the resolved reaction graph and it's dependencies.
 ///
 /// Maps of triggers for actions and ports. This data is statically resolved by the builder from the reaction graph.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ReactionGraph {
     /// For each Action, a set of Reactions triggered by it.
     pub action_triggers: tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
@@ -172,5 +177,22 @@ pub mod tests {
             reactor_bank_infos: tinymap::TinySecondaryMap::new(),
         };
         (env, reaction_graph)
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_serialize_roundtrip() {
+        let (env, reaction_graph) = create_dummy_env();
+
+        let serialized_env = serde_json::to_string_pretty(&env).unwrap();
+        println!("{serialized_env}");
+        //let deserialized_env: Env = serde_json::from_str(&serialized_env).unwrap();
+        //assert_eq!(env, deserialized_env);
+
+        let serialized_reaction_graph = serde_json::to_string_pretty(&reaction_graph).unwrap();
+        println!("{serialized_reaction_graph}");
+        let deserialized_reaction_graph: ReactionGraph =
+            serde_json::from_str(&serialized_reaction_graph).unwrap();
+        //assert_eq!(reaction_graph, deserialized_reaction_graph);
     }
 }

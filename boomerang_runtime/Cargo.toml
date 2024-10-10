@@ -12,7 +12,7 @@ categories.workspace = true
 exclude.workspace = true
 
 [features]
-default = []
+default = ["serde"]
 ## Support for parallel execution
 parallel = ["dep:rayon"]
 ## Support for serialization
@@ -21,7 +21,7 @@ serde = [
     "dep:erased-serde",
     "dep:serde",
     "dep:serde_arrow",
-    "dep:serde_closure",
+    "dep:serde_flexitos",
 ]
 
 [dependencies]
@@ -37,5 +37,8 @@ serde_arrow = { workspace = true, features = ["arrow-52"], optional = true }
 thiserror.workspace = true
 tinymap.workspace = true
 tracing = { workspace = true }
+serde_flexitos = { version = "0.2", optional = true, features = ["id_trait"] }
 
-serde_closure = { version = "0.3", optional = true }
+serde_json = { version = "*" }
+linkme = "0.3"
+paste = "1"

@@ -6,6 +6,7 @@ use super::{
     ReactionBuilderState, TimerActionKey, TimerSpec, TriggerMode, TypedActionKey, TypedPortKey,
 };
 use crate::{reaction_closure, runtime};
+use boomerang_runtime::BasePort;
 use slotmap::SecondaryMap;
 
 slotmap::new_key_type! {
@@ -245,6 +246,30 @@ impl<'a> FindElements for ReactorBuilderState<'a> {
     }
 }
 
+/// Utility startup function for a timer action
+pub fn _startup_fn(
+    ctx: &mut runtime::Context,
+    _state: &mut dyn runtime::ReactorState,
+    _ref_ports: runtime::Refs<dyn runtime::BasePort>,
+    _mut_ports: runtime::RefsMut<dyn runtime::BasePort>,
+    actions: runtime::RefsMut<runtime::Action>,
+) {
+    let mut timer: runtime::ActionRef = actions.partition_mut().unwrap();
+    ctx.schedule_action(&mut timer, None, None);
+}
+
+/// Utility reset function for a timer action
+pub fn _reset_fn(
+    ctx: &mut runtime::Context,
+    _state: &mut dyn runtime::ReactorState,
+    _ref_ports: runtime::Refs<dyn runtime::BasePort>,
+    _mut_ports: runtime::RefsMut<dyn runtime::BasePort>,
+    actions: runtime::RefsMut<runtime::Action>,
+) {
+    let mut timer: runtime::ActionRef = actions.partition_mut().unwrap();
+    ctx.schedule_action(&mut timer, None, None);
+}
+
 impl<'a> ReactorBuilderState<'a> {
     pub(super) fn new<S: runtime::ReactorState>(
         name: &str,
@@ -338,25 +363,16 @@ impl<'a> ReactorBuilderState<'a> {
         spec: TimerSpec,
     ) -> Result<TimerActionKey, BuilderError> {
         let action_key = self.add_logical_action::<()>(name, spec.period)?;
-
-        let startup_fn = reaction_closure!(ctx, _state, _ref_ports, _mut_ports, actions => {
-            let mut timer: runtime::ActionRef = actions.partition_mut().unwrap();
-            ctx.schedule_action(&mut timer, None, spec.offset);
-        });
-
         let startup_key = self.startup_action;
-        self.add_reaction(&format!("_{name}_startup"), startup_fn)
+
+        //self.add_reaction(&format!("_{name}_startup"), Box::new(startup_fn))
+        self.add_reaction(&format!("_{name}_startup"), _startup_fn)
             .with_action(startup_key, 0, TriggerMode::TriggersOnly)?
             .with_action(action_key, 1, TriggerMode::EffectsOnly)?
             .finish()?;
 
         if spec.period.is_some() {
-            let reset_fn = reaction_closure!(ctx, _state, _ref_ports, _mut_ports, actions => {
-                let mut timer: runtime::ActionRef = actions.partition_mut().unwrap();
-                ctx.schedule_action(&mut timer, None, None);
-            });
-
-            self.add_reaction(&format!("_{name}_reset"), reset_fn)
+            self.add_reaction(&format!("_{name}_reset"), _reset_fn)
                 .with_action(action_key, 0, TriggerMode::TriggersAndEffects)?
                 .finish()?;
         }
@@ -386,11 +402,10 @@ impl<'a> ReactorBuilderState<'a> {
     }
 
     /// Add a new reaction to this reactor.
-    pub fn add_reaction(
-        &mut self,
-        name: &str,
-        reaction_fn: runtime::BoxedReactionFn,
-    ) -> ReactionBuilderState {
+    pub fn add_reaction<F>(&mut self, name: &str, reaction_fn: F) -> ReactionBuilderState
+    where
+        F: for<'store> runtime::ReactionFn<'store> + Send + Sync + 'static,
+    {
         self.env.add_reaction(name, self.reactor_key, reaction_fn)
     }
 

@@ -3,35 +3,39 @@
 #![doc = document_features::document_features!()]
 #![deny(clippy::all)]
 
-mod action;
+pub mod action;
 mod context;
+pub mod data;
 mod env;
 mod event;
 pub mod keepalive;
 mod key_set;
-mod port;
-mod reaction;
+pub mod port;
+pub mod reaction;
 mod reactor;
 mod refs;
+mod registry;
 mod sched;
-mod store;
+pub mod store;
 mod time;
 
 // Re-exports
-pub use action::*;
+pub use action::{
+    Action, ActionKey, ActionRef, ActionRefValue, LogicalAction, PhysicalAction, PhysicalActionRef,
+};
 pub use context::*;
+pub use data::{ActionData, PortData, ReactorState};
 pub use env::{BankInfo, Env, Level, LevelReactionKey, ReactionGraph};
 pub use key_set::KeySetLimits as ReactionSetLimits;
-//pub use partition::{partition, partition_mut, Partition, PartitionMut};
 pub use port::*;
-pub use reaction::*;
+pub use reaction::{
+    BoxedReactionFn, Deadline, FromRefs, Reaction, ReactionFn, ReactionKey, ReactionSet,
+    ReactionWrapper, Trigger,
+};
 pub use reactor::*;
 pub use refs::{Refs, RefsMut};
 pub use sched::*;
 pub use time::*;
-
-pub trait PortData: std::fmt::Debug + Send + Sync + 'static {}
-impl<T> PortData for T where T: std::fmt::Debug + Send + Sync + 'static {}
 
 #[derive(thiserror::Error, Debug)]
 pub enum RuntimeError {

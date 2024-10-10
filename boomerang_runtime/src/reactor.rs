@@ -1,23 +1,10 @@
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 
-use downcast_rs::{impl_downcast, Downcast};
+use crate::ReactorState;
 
 tinymap::key_type! { pub ReactorKey }
 
-#[cfg(feature = "parallel")]
-pub trait ReactorState: Downcast + Send + Sync {}
-
-#[cfg(feature = "parallel")]
-impl<T> ReactorState for T where T: Downcast + Send + Sync {}
-
-#[cfg(not(feature = "parallel"))]
-pub trait ReactorState: Downcast {}
-
-#[cfg(not(feature = "parallel"))]
-impl<T> ReactorState for T where T: Downcast {}
-
-impl_downcast!(ReactorState);
-
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Reactor {
     /// The reactor name
     name: String,
@@ -27,10 +14,21 @@ pub struct Reactor {
 
 impl Debug for Reactor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Reactor")
-            .field("name", &self.name)
-            .field("state", &"Box<dyn ReactorState>")
-            .finish()
+        let mut debug_struct = f.debug_struct("Reactor");
+        debug_struct.field("name", &self.name);
+        debug_struct.field("state", &"Box<dyn ReactorState>");
+        debug_struct.finish()
+    }
+}
+
+impl Display for Reactor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "runtime::Reactor::new(\"{name}\", Box::new({ty}))",
+            name = self.name,
+            ty = (*self.state).type_name()
+        )
     }
 }
 
@@ -54,4 +52,3 @@ impl Reactor {
         self.state.downcast_mut()
     }
 }
-

@@ -35,11 +35,13 @@ pub struct Port<T: PortData> {
 
 impl<T: PortData> Display for Port<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!(
-            "{} : Port<{}>",
-            self.name,
-            std::any::type_name::<T>()
-        ))
+        write!(
+            f,
+            "runtime::Port::<{ty}>::new(\"{name}\", {key}).boxed()",
+            ty = std::any::type_name::<T>(),
+            name = &self.name,
+            key = self.key
+        )
     }
 }
 

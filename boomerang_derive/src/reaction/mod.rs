@@ -322,7 +322,7 @@ impl ToTokens for Reaction {
                     let __shutdown_action = builder.get_shutdown_action();
 
                     let mut __reaction = {
-                        let wrapper = ::boomerang::runtime::ReactionWrapper::<
+                        let wrapper = ::boomerang::runtime::ReactionAdapter::<
                             #ident #inner_type_generics,
                             <#reactor as ::boomerang::builder::Reactor>::State
                         >::default();

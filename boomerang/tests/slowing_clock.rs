@@ -32,7 +32,7 @@ struct SlowingClockBuilder {
     #[reactor(action(min_delay = "100 msec"))]
     a: TypedActionKey<()>,
 
-    #[reactor(child = "Duration::from_secs(1)")]
+    #[reactor(child = "Duration::from_secs(1).into()")]
     _timeout: timeout::Timeout,
 }
 

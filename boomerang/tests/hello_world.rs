@@ -1,8 +1,12 @@
 use boomerang::prelude::*;
 
+#[derive(Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct State {
     success: bool,
 }
+
+register_type!(State);
 
 #[derive(Reactor)]
 #[reactor(

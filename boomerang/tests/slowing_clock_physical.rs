@@ -25,7 +25,7 @@ struct SlowingClockPhysical {
     #[reactor(action(min_delay = "100 msec"))]
     a: TypedActionKey<(), Physical>,
 
-    #[reactor(child = "Duration::from_millis(1500)")]
+    #[reactor(child = "Duration::from_millis(1500).into()")]
     _timeout: timeout::Timeout,
 }
 

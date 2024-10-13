@@ -5,20 +5,21 @@ use std::{
 };
 
 use crate::{
+    data::{ParallelData, SerdeDataObj},
     key_set::KeySet,
     refs::{Refs, RefsMut},
-    Action, BasePort, BaseReactor, Context,
+    Action, ActionRef, BasePort, BaseReactor, Context, Reactor, ReactorData,
 };
 
 tinymap::key_type!(pub ReactionKey);
 
 pub type ReactionSet = KeySet<ReactionKey>;
 
-pub trait ReactionFn<'store> {
+pub trait ReactionFn<'store>: ParallelData + SerdeDataObj {
     fn trigger(
         &mut self,
         ctx: &'store mut Context,
-        state: &'store mut dyn BaseReactor,
+        reactor: &'store mut dyn BaseReactor,
         ports: Refs<'store, dyn BasePort>,
         ports_mut: RefsMut<'store, dyn BasePort>,
         actions: RefsMut<'store, Action>,
@@ -29,19 +30,33 @@ pub trait ReactionFn<'store> {
     }
 }
 
+impl Debug for dyn for<'store> ReactionFn<'store> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ReactionFn<{}>", self.type_name())
+    }
+}
+
 /// An empty reaction function that does nothing.
 pub fn empty_reaction(
     _ctx: &mut Context,
-    _state: &mut dyn BaseReactor,
+    _reactor: &mut dyn BaseReactor,
     _ref_ports: Refs<dyn BasePort>,
     _mut_ports: RefsMut<dyn BasePort>,
     _actions: RefsMut<Action>,
 ) {
 }
 
+#[cfg(feature = "parallel")]
 pub type BoxedReactionFn = Box<dyn for<'store> ReactionFn<'store> + Send + Sync>;
 
+#[cfg(not(feature = "parallel"))]
+pub type BoxedReactionFn = Box<dyn for<'store> ReactionFn<'store>>;
+
+#[cfg(feature = "parallel")]
 pub type BoxedHandlerFn = Box<dyn Fn() + Send + Sync>;
+
+#[cfg(not(feature = "parallel"))]
+pub type BoxedHandlerFn = Box<dyn Fn()>;
 
 /// Conversion trait for creating a Reaction struct from port and action references.
 ///
@@ -58,53 +73,121 @@ pub trait FromRefs {
 
 /// The `Trigger` trait should be implemented by the user for each Reaction struct.
 ///
-/// Type parameter `S` is the state type of the Reactor.
-pub trait Trigger<R: BaseReactor> {
+/// Type parameter `R` is the state data type of the Reactor.
+pub trait Trigger<R: ReactorData> {
     fn trigger(self, ctx: &mut Context, state: &mut R);
 }
 
-/// Wrapper struct for implementing the `ReactionFn` trait for a Reaction struct.
-pub struct ReactionWrapper<Reaction, S>(std::marker::PhantomData<(Reaction, S)>);
+/// Adapter struct for implementing the `ReactionFn` trait for a Reaction struct.
+///
+/// The `ReactionAdapter` struct is used to convert a Reaction struct to a `Box<dyn ReactionFn>`. This is the mechanism
+/// used by the derive-generated code to implement the Reaction trigger interface.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ReactionAdapter<Reaction, T>(std::marker::PhantomData<fn() -> (Reaction, T)>);
 
-impl<Reaction, S> Default for ReactionWrapper<Reaction, S> {
+#[cfg(feature = "serde")]
+impl<Reaction, T: ReactorData> serde_flexitos::id::IdObj for ReactionAdapter<Reaction, T> {
+    fn id(&self) -> serde_flexitos::id::Ident<'static> {
+        serde_flexitos::id::Ident::I1("ReactionAdapter").extend(T::ID)
+    }
+}
+
+impl<Reaction, T> Default for ReactionAdapter<Reaction, T> {
     fn default() -> Self {
         Self(Default::default())
     }
 }
 
-impl<'store, Reaction, Reactor> ReactionFn<'store> for ReactionWrapper<Reaction, Reactor>
+impl<Reaction, T> From<ReactionAdapter<Reaction, T>> for Box<dyn for<'store> ReactionFn<'store>>
+where
+    Reaction: FromRefs + 'static,
+    for<'store> Reaction::Marker<'store>: 'store + Trigger<T>,
+    T: ReactorData,
+{
+    fn from(adapter: ReactionAdapter<Reaction, T>) -> Self {
+        Box::new(adapter)
+    }
+}
+
+impl<'store, Reaction, T> ReactionFn<'store> for ReactionAdapter<Reaction, T>
 where
     Reaction: FromRefs,
-    Reaction::Marker<'store>: 'store + Trigger<Reactor>,
-    Reactor: BaseReactor,
+    Reaction::Marker<'store>: 'store + Trigger<T>,
+    T: ReactorData,
 {
     fn trigger(
         &mut self,
         ctx: &'store mut Context,
-        state: &'store mut dyn BaseReactor,
+        reactor: &'store mut dyn BaseReactor,
         ports: Refs<'store, dyn BasePort>,
         ports_mut: RefsMut<'store, dyn BasePort>,
         actions: RefsMut<'store, Action>,
     ) {
-        let state: &mut Reactor = state
+        let reactor: &mut Reactor<T> = reactor
             .downcast_mut()
             .expect("Unable to downcast reactor state");
 
         let reaction = Reaction::from_refs(ports, ports_mut, actions);
-        reaction.trigger(ctx, state);
+        reaction.trigger(ctx, &mut reactor.state);
     }
 }
 
-impl<'store, F> ReactionFn<'store> for F
+/// Wrapper struct for implementing the `ReactionFn` trait for a generic FnMut function.
+///
+/// An `FnWrapper` can be created from a closure or function pointer and then converted to a `Box<dyn ReactionFn>`.
+pub struct FnWrapper<F>(F);
+
+#[cfg(feature = "serde")]
+impl<F> serde::Serialize for FnWrapper<F> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_unit_struct("FnWrapper")
+    }
+}
+
+impl<F> From<F> for Box<dyn for<'store> ReactionFn<'store>>
 where
-    F: FnMut(
+    F: for<'store> Fn(
             &'store mut Context,
             &'store mut dyn BaseReactor,
             Refs<'store, dyn BasePort>,
             RefsMut<'store, dyn BasePort>,
             RefsMut<'store, Action>,
-        ) + Sync
-        + Send,
+        ) + ParallelData
+        + 'static,
+{
+    fn from(wrapper: F) -> Self {
+        Box::new(FnWrapper(wrapper))
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'store, F> serde_flexitos::id::IdObj for FnWrapper<F>
+where
+    F: Fn(
+            &'store mut Context,
+            &'store mut dyn BaseReactor,
+            Refs<'store, dyn BasePort>,
+            RefsMut<'store, dyn BasePort>,
+            RefsMut<'store, Action>,
+        ) + ParallelData,
+{
+    fn id(&self) -> serde_flexitos::id::Ident<'static> {
+        serde_flexitos::id::Ident::I2("FnWrapper", std::any::type_name::<F>())
+    }
+}
+
+impl<'store, F> ReactionFn<'store> for FnWrapper<F>
+where
+    F: Fn(
+            &'store mut Context,
+            &'store mut dyn BaseReactor,
+            Refs<'store, dyn BasePort>,
+            RefsMut<'store, dyn BasePort>,
+            RefsMut<'store, Action>,
+        ) + ParallelData,
 {
     fn trigger(
         &mut self,
@@ -114,7 +197,7 @@ where
         ports_mut: RefsMut<'store, dyn BasePort>,
         actions: RefsMut<'store, Action>,
     ) {
-        (self)(ctx, state, ports, ports_mut, actions);
+        (self.0)(ctx, state, ports, ports_mut, actions);
     }
 }
 
@@ -133,22 +216,15 @@ impl Debug for Deadline {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug)]
 pub struct Reaction {
     name: String,
     /// Reaction closure
     pub(crate) body: BoxedReactionFn,
     /// Local deadline relative to the time stamp for invocation of the reaction.
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) deadline: Option<Deadline>,
-}
-
-impl Debug for Reaction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Reaction")
-            .field("name", &self.name)
-            .field("body", &"ReactionFn()")
-            .field("deadline", &self.deadline)
-            .finish()
-    }
 }
 
 impl Display for Reaction {
@@ -166,10 +242,10 @@ impl Display for Reaction {
 }
 
 impl Reaction {
-    pub fn new(name: &str, body: BoxedReactionFn, deadline: Option<Deadline>) -> Self {
+    pub fn new(name: &str, body: impl Into<BoxedReactionFn>, deadline: Option<Deadline>) -> Self {
         Self {
             name: name.to_owned(),
-            body,
+            body: body.into(),
             deadline,
         }
     }
@@ -180,5 +256,75 @@ impl Reaction {
 
     pub fn reaction_type_name(&self) -> &'static str {
         self.body.type_name()
+    }
+}
+
+/// Utility startup function for a timer action
+pub fn timer_startup_fn(
+    ctx: &mut Context,
+    _state: &mut dyn BaseReactor,
+    _ref_ports: Refs<dyn BasePort>,
+    _mut_ports: RefsMut<dyn BasePort>,
+    actions: RefsMut<Action>,
+) {
+    let mut timer: ActionRef = actions.partition_mut().expect("Expected a timer action");
+    ctx.schedule_action(&mut timer, None, None);
+}
+
+#[cfg(feature = "serde")]
+crate::register_reaction_fn!(FnWrapper<timer_startup_fn>);
+
+/// Utility reset function for a timer action
+pub fn timer_reset_fn(
+    ctx: &mut Context,
+    _state: &mut dyn BaseReactor,
+    _ref_ports: Refs<dyn BasePort>,
+    _mut_ports: RefsMut<dyn BasePort>,
+    actions: RefsMut<Action>,
+) {
+    let mut timer: ActionRef = actions.partition_mut().expect("Expected a timer action");
+    ctx.schedule_action(&mut timer, None, None);
+}
+
+#[cfg(feature = "serde")]
+crate::register_reaction_fn!(FnWrapper<timer_reset_fn>);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test the ReactionAdapter struct.
+    #[test]
+    fn test_reaction_adapter() {
+        struct TestReaction;
+
+        impl FromRefs for TestReaction {
+            type Marker<'store> = ();
+
+            fn from_refs<'store>(
+                _ports: Refs<'store, dyn BasePort>,
+                _ports_mut: RefsMut<'store, dyn BasePort>,
+                _actions: RefsMut<'store, Action>,
+            ) -> Self::Marker<'store> {
+            }
+        }
+
+        impl Trigger<()> for () {
+            fn trigger(self, _ctx: &mut Context, _state: &mut ()) {}
+        }
+
+        let adapter = ReactionAdapter::<TestReaction, ()>::default();
+        let _reaction = Reaction::new("dummy", adapter, None);
+    }
+
+    /// Test the FnWrapper struct.
+    #[test]
+    fn test_fn_wrapper() {
+        let test_fn = |_: &mut Context,
+                       _: &mut dyn BaseReactor,
+                       _: Refs<'_, dyn BasePort>,
+                       _: RefsMut<'_, dyn BasePort>,
+                       _: RefsMut<'_, Action>| {};
+        let _reaction = Reaction::new("dummy", test_fn, None);
     }
 }

@@ -53,14 +53,12 @@ pub type LevelReactionKey = (Level, ReactionKey);
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Env {
     /// The runtime set of Reactors
-    #[serde(skip)]
     pub reactors: tinymap::TinyMap<ReactorKey, Box<dyn BaseReactor>>,
     /// The runtime set of Actions
     pub actions: tinymap::TinyMap<ActionKey, Action>,
     /// The runtime set of Ports
     pub ports: tinymap::TinyMap<PortKey, Box<dyn BasePort>>,
     /// The runtime set of Reactions
-    #[serde(skip)]
     pub reactions: tinymap::TinyMap<ReactionKey, Reaction>,
 }
 
@@ -117,7 +115,7 @@ pub struct ReactionGraph {
 pub mod tests {
     use itertools::Itertools;
 
-    use crate::{BaseReactor, Context, Port, ReactionSetLimits, Reactor};
+    use crate::{register_reaction_fn, BaseReactor, Context, Port, ReactionSetLimits, Reactor};
 
     use super::*;
 
@@ -131,11 +129,13 @@ pub mod tests {
     ) {
     }
 
+    register_reaction_fn!(FnWrapper<dummy_reaction_fn>);
+
     /// Create a dummy `Env` and `ReactionGraph` for testing.
     pub fn create_dummy_env() -> (Env, ReactionGraph) {
         let env = Env {
             reactors: [Reactor::new("dummy", ()).boxed()].into_iter().collect(),
-            reactions: [Reaction::new("dummy", Box::new(dummy_reaction_fn), None)]
+            reactions: [Reaction::new("dummy", dummy_reaction_fn, None)]
                 .into_iter()
                 .collect(),
             actions: [
@@ -188,11 +188,12 @@ pub mod tests {
 
         let serialized_env = serde_json::to_string_pretty(&env).unwrap();
         println!("{serialized_env}");
-        // let deserialized_env: Env = serde_json::from_str(&serialized_env).unwrap();
+        let deserialized_env: Env = serde_json::from_str(&serialized_env).unwrap();
         // assert_eq!(env, deserialized_env);
+        dbg!(deserialized_env);
 
         let serialized_reaction_graph = serde_json::to_string_pretty(&reaction_graph).unwrap();
-        println!("{serialized_reaction_graph}");
+        //println!("{serialized_reaction_graph}");
         let deserialized_reaction_graph: ReactionGraph =
             serde_json::from_str(&serialized_reaction_graph).unwrap();
         // assert_eq!(reaction_graph, deserialized_reaction_graph);

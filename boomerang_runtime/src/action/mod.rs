@@ -4,11 +4,9 @@ use std::{
     time::Duration,
 };
 
-use crate::{ReactorData, Tag};
+use crate::ReactorData;
 
 mod action_ref;
-#[cfg(feature = "serde")]
-mod registry;
 pub mod store;
 
 pub use action_ref::*;
@@ -99,7 +97,7 @@ impl PhysicalAction {
     pub fn build_value_at(
         &mut self,
         builder: &mut serde_arrow::ArrayBuilder,
-        tag: Tag,
+        tag: crate::Tag,
     ) -> Result<(), crate::RuntimeError> {
         self.store
             .lock()

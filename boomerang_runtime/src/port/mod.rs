@@ -9,9 +9,6 @@ use crate::{
     ReactorData,
 };
 
-#[cfg(feature = "serde")]
-mod registry;
-
 tinymap::key_type!(pub PortKey);
 
 pub trait BasePort: Debug + Display + ParallelData + Downcast + SerdeDataObj {

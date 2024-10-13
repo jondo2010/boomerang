@@ -2,16 +2,25 @@ use std::fmt::{Debug, Display};
 
 use downcast_rs::{impl_downcast, Downcast};
 
-use crate::{data::ParallelData, ReactorData};
+use crate::{
+    data::{ParallelData, SerdeDataObj},
+    ReactorData,
+};
 
 tinymap::key_type! { pub ReactorKey }
 
-pub trait BaseReactor: Debug + ParallelData + Downcast {
+pub trait BaseReactor: Debug + ParallelData + Downcast + SerdeDataObj {
     /// Get the name of the reactor
     fn name(&self) -> &str;
 }
 
 impl_downcast!(BaseReactor);
+
+impl dyn BaseReactor {
+    pub fn get_state<T: ReactorData>(&self) -> Option<&T> {
+        self.downcast_ref::<Reactor<T>>().map(|r| &r.state)
+    }
+}
 
 #[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

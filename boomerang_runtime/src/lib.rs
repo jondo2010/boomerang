@@ -14,7 +14,6 @@ pub mod port;
 pub mod reaction;
 mod reactor;
 mod refs;
-mod registry;
 mod sched;
 pub mod store;
 mod time;
@@ -29,8 +28,8 @@ pub use env::{BankInfo, Env, Level, LevelReactionKey, ReactionGraph};
 pub use key_set::KeySetLimits as ReactionSetLimits;
 pub use port::*;
 pub use reaction::{
-    BoxedReactionFn, Deadline, FromRefs, Reaction, ReactionFn, ReactionKey, ReactionSet,
-    ReactionWrapper, Trigger,
+    BoxedReactionFn, Deadline, FromRefs, Reaction, ReactionAdapter, ReactionFn, ReactionKey,
+    ReactionSet, Trigger,
 };
 pub use reactor::*;
 pub use refs::{Refs, RefsMut};

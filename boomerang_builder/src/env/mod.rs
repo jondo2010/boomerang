@@ -208,17 +208,13 @@ impl EnvBuilder {
     }
 
     /// Add a Reaction to a given Reactor
-    pub fn add_reaction<F>(
+    pub fn add_reaction(
         &mut self,
         name: &str,
         reactor_key: BuilderReactorKey,
-        reaction_fn: F,
-    ) -> ReactionBuilderState
-    where
-        F: for<'store> runtime::ReactionFn<'store> + Send + Sync + 'static,
-    {
+        reaction_fn: runtime::BoxedReactionFn,
+    ) -> ReactionBuilderState {
         let priority = self.reactor_builders[reactor_key].reactions.len();
-        let reaction_fn = Box::new(reaction_fn);
         ReactionBuilderState::new(name, priority, reactor_key, reaction_fn, self)
     }
 

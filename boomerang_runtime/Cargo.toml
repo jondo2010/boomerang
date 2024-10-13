@@ -22,6 +22,8 @@ serde = [
     "dep:serde",
     "dep:serde_arrow",
     "dep:serde_flexitos",
+    "dep:linkme",
+    "dep:paste",
 ]
 
 [dependencies]
@@ -31,14 +33,15 @@ document-features = { workspace = true }
 downcast-rs = "1.2"
 erased-serde = { workspace = true, optional = true }
 itertools.workspace = true
+linkme = { workspace = true, optional = true }
+paste = { version = "1", optional = true }
 rayon = { version = "1.7", optional = true }
 serde = { workspace = true, optional = true, features = ["derive"] }
 serde_arrow = { workspace = true, features = ["arrow-52"], optional = true }
+serde_flexitos = { workspace = true, optional = true, features = ["id_trait"] }
 thiserror.workspace = true
 tinymap.workspace = true
 tracing = { workspace = true }
-serde_flexitos = { version = "0.2", optional = true, features = ["id_trait"] }
 
+serde_closure = "*"
 serde_json = { version = "*" }
-linkme = "0.3"
-paste = "1"

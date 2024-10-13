@@ -7,12 +7,17 @@ use std::time::Duration;
 use boomerang::prelude::*;
 use boomerang_util::timeout;
 
+#[derive(Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct Hello {
     period: Duration,
     message: String,
     count: usize,
     previous_time: Duration,
 }
+
+#[cfg(feature = "serde")]
+register_type!(Hello);
 
 impl Hello {
     fn new(period: Duration, message: &str) -> Self {
@@ -73,9 +78,15 @@ impl runtime::Trigger<Hello> for ReactionA {
     }
 }
 
+#[derive(Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct Inside {
     message: String,
 }
+
+#[cfg(feature = "serde")]
+register_type!(Inside);
+
 impl Inside {
     fn new(message: &str) -> Self {
         Self {
@@ -101,7 +112,7 @@ struct MainBuilder {
     #[reactor(child = Inside::new("Hello from composite."))]
     _third_instance: InsideBuilder,
 
-    #[reactor(child = Duration::from_secs(10))]
+    #[reactor(child = "Duration::from_secs(10).into()")]
     _timeout: timeout::Timeout,
 }
 

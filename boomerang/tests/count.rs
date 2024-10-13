@@ -16,7 +16,7 @@ struct Count<T: CountData> {
     #[reactor(timer(period = "1 msec"))]
     t: TimerActionKey,
     c: TypedPortKey<T, Output>,
-    #[reactor(child = "Duration::from_secs(1)")]
+    #[reactor(child = "Duration::from_secs(1).into()")]
     _timeout: timeout::Timeout,
 }
 

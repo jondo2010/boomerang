@@ -43,6 +43,7 @@ mod reactor {
         add_more_food: TimerActionKey,
     }
 
+    #[derive(Debug)]
     pub struct Snake {
         // model classes for the game.
         snake: CircularSnake,

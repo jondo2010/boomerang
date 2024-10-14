@@ -63,6 +63,7 @@ impl<R: Reactor> ReactorField for R {
     }
 }
 
+/// NOTE: `R::State: Clone` is required because state is cloned for each child reactor.
 impl<R, const N: usize> ReactorField for [R; N]
 where
     R: Reactor,

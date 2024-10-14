@@ -9,6 +9,8 @@ use std::time::Duration;
 use boomerang::prelude::*;
 use boomerang_util::timeout;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Default)]
 struct State {
     interval: Duration,
     expected_time: Duration,

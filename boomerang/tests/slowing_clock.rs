@@ -7,6 +7,8 @@ use boomerang::prelude::*;
 use boomerang_util::timeout;
 use std::time::Duration;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug)]
 struct SlowingClock {
     interval: Duration,
     expected_time: Duration,

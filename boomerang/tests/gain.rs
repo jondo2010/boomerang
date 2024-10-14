@@ -6,6 +6,7 @@ use boomerang::prelude::*;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct Scale(u32);
 
+#[cfg(feature = "serde")]
 register_type!(Scale);
 
 #[derive(Reactor)]

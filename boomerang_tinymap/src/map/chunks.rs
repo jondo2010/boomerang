@@ -12,8 +12,8 @@ use super::{
 /// indices iterator.
 pub struct Chunks<'a, K: Key, V, IO, II>
 where
-    IO: Iterator<Item = II> + Send,
-    II: Iterator<Item = K> + Send,
+    IO: Iterator<Item = II>,
+    II: Iterator<Item = K>,
 {
     ptr: *const V,
     keys: IO,
@@ -29,8 +29,8 @@ where
 
 impl<'a, K, V, IO, II> Iterator for Chunks<'a, K, V, IO, II>
 where
-    IO: Iterator<Item = II> + Send,
-    II: Iterator<Item = K> + Send,
+    IO: Iterator<Item = II>,
+    II: Iterator<Item = K>,
     K: Key,
 {
     type Item = IterMany<'a, K, V, II>;
@@ -42,8 +42,8 @@ where
 
 impl<'a, K, V, IO, II> ExactSizeIterator for Chunks<'a, K, V, IO, II>
 where
-    IO: Iterator<Item = II> + ExactSizeIterator + Send,
-    II: Iterator<Item = K> + ExactSizeIterator + Send,
+    IO: Iterator<Item = II> + ExactSizeIterator,
+    II: Iterator<Item = K> + ExactSizeIterator,
     K: Key,
 {
     fn len(&self) -> usize {
@@ -53,13 +53,13 @@ where
 
 pub struct PtrChunks<'a, K: Key, V, IO, II>(Chunks<'a, K, V, IO, II>)
 where
-    IO: Iterator<Item = II> + Send,
-    II: Iterator<Item = K> + Send;
+    IO: Iterator<Item = II>,
+    II: Iterator<Item = K>;
 
 impl<'a, K: Key, V, IO, II> Iterator for PtrChunks<'a, K, V, IO, II>
 where
-    IO: Iterator<Item = II> + Send,
-    II: Iterator<Item = K> + Send,
+    IO: Iterator<Item = II>,
+    II: Iterator<Item = K>,
 {
     type Item = IterManyPtr<'a, K, V, II>;
 
@@ -74,8 +74,8 @@ where
 /// `ChunkMut` is a mutable version of [`Chunks`].
 pub struct ChunksMut<'a, K: Key, V, IO, II>
 where
-    IO: Iterator<Item = II> + Send,
-    II: Iterator<Item = K> + Send,
+    IO: Iterator<Item = II>,
+    II: Iterator<Item = K>,
 {
     ptr: *mut V,
     keys: IO,
@@ -91,8 +91,8 @@ where
 
 impl<'a, K, V, IO, II> Iterator for ChunksMut<'a, K, V, IO, II>
 where
-    IO: Iterator<Item = II> + Send,
-    II: Iterator<Item = K> + Send,
+    IO: Iterator<Item = II>,
+    II: Iterator<Item = K>,
     K: Key,
 {
     type Item = IterManyMut<'a, K, V, II>;
@@ -106,8 +106,8 @@ where
 
 impl<'a, K, V, IO, II> ExactSizeIterator for ChunksMut<'a, K, V, IO, II>
 where
-    IO: Iterator<Item = II> + ExactSizeIterator + Send,
-    II: Iterator<Item = K> + ExactSizeIterator + Send,
+    IO: Iterator<Item = II> + ExactSizeIterator,
+    II: Iterator<Item = K> + ExactSizeIterator,
     K: Key,
 {
     fn len(&self) -> usize {
@@ -117,13 +117,13 @@ where
 
 pub struct PtrChunksMut<'a, K: Key, V, IO, II>(ChunksMut<'a, K, V, IO, II>)
 where
-    IO: Iterator<Item = II> + Send,
-    II: Iterator<Item = K> + Send;
+    IO: Iterator<Item = II>,
+    II: Iterator<Item = K>;
 
 impl<'a, K: Key, V, IO, II> Iterator for PtrChunksMut<'a, K, V, IO, II>
 where
-    IO: Iterator<Item = II> + Send,
-    II: Iterator<Item = K> + Send,
+    IO: Iterator<Item = II>,
+    II: Iterator<Item = K>,
 {
     type Item = IterManyPtrMut<'a, K, V, II>;
 
@@ -143,7 +143,7 @@ pub type SplitPtrChunks<'a, K, V, IO1, IO2, II> = (
     PtrChunksMut<'a, K, V, IO2, II>,
 );
 
-impl<K: Key, V: Send> TinyMap<K, V> {
+impl<K: Key, V> TinyMap<K, V> {
     /// Returns a tuple of two iterators over chunks of the map's data buffer. The first iterator
     /// yields immutable slices of the data buffer, while the second iterator yields mutable slices
     /// of the data buffer. The keys for each chunk are provided by the given iterators `keys` and
@@ -192,9 +192,9 @@ impl<K: Key, V: Send> TinyMap<K, V> {
         keys_mut: IO2,
     ) -> SplitPtrChunks<'_, K, V, IO1, IO2, II>
     where
-        IO1: Iterator<Item = II> + Send,
-        IO2: Iterator<Item = II> + Send,
-        II: Iterator<Item = K> + Send,
+        IO1: Iterator<Item = II>,
+        IO2: Iterator<Item = II>,
+        II: Iterator<Item = K>,
     {
         (
             PtrChunksMut(ChunksMut {

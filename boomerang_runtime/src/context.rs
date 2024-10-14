@@ -3,8 +3,8 @@ use std::time::Duration;
 use crossbeam_channel::Sender;
 
 use crate::{
-    event::PhysicalEvent, keepalive, ActionData, ActionKey, ActionRefValue, BankInfo,
-    PhysicalActionRef, ReactionGraph, ReactionKey, Tag, Timestamp,
+    event::PhysicalEvent, keepalive, ActionKey, ActionRefValue, BankInfo, PhysicalActionRef,
+    ReactionGraph, ReactionKey, ReactorData, Tag, Timestamp,
 };
 
 /// Result from a reaction trigger
@@ -100,7 +100,7 @@ impl Context {
     /// Get the value of an Action at the current Tag
     pub fn get_action_with<T, A, F, U>(&self, action: &mut A, f: F) -> U
     where
-        T: ActionData,
+        T: ReactorData,
         A: ActionRefValue<T>,
         F: FnOnce(Option<&T>) -> U,
     {
@@ -109,7 +109,7 @@ impl Context {
 
     /// Schedule the Action to trigger at some future time.
     #[tracing::instrument(skip(self, value), fields(action = ?action.get_key()))]
-    pub fn schedule_action<T: ActionData, A: ActionRefValue<T>>(
+    pub fn schedule_action<T: ReactorData, A: ActionRefValue<T>>(
         &mut self,
         action: &mut A,
         value: Option<T>,
@@ -164,7 +164,7 @@ pub struct SendContext {
 impl SendContext {
     /// Schedule a PhysicalAction to trigger at some future time.
     #[tracing::instrument(skip(self, action, value, delay))]
-    pub fn schedule_action<T: ActionData>(
+    pub fn schedule_action<T: ReactorData>(
         &mut self,
         action: &mut PhysicalActionRef<T>,
         value: Option<T>,

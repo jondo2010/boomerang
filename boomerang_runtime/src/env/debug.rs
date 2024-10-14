@@ -8,7 +8,7 @@ impl std::fmt::Debug for Env {
                 .entries(
                     self.reactors
                         .iter()
-                        .map(|(k, reactor)| (format!("{k:?}"), reactor.get_name())),
+                        .map(|(k, reactor)| (format!("{k:?}"), reactor.name())),
                 )
                 .finish()
         });

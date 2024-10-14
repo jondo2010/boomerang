@@ -1,4 +1,6 @@
 #![doc=include_str!( "../README.md")]
+//! ## Feature flags
+#![doc = document_features::document_features!()]
 #![deny(clippy::all)]
 
 pub mod key_set;
@@ -19,6 +21,7 @@ macro_rules! key_type {
         $(#[$outer])*
         #[derive(Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[repr(transparent)]
+        #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
         $vis struct $name(u64);
 
         impl $crate::Key for $name {
@@ -36,6 +39,13 @@ macro_rules! key_type {
         impl std::fmt::Debug for $name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 write!(f, "{}({})", stringify!($name), self.0)
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let ty = std::any::type_name::<Self>();
+                write!(f, "{ty}::from({})", $crate::Key::index(self))
             }
         }
     };

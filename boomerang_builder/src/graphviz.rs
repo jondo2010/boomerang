@@ -1,5 +1,5 @@
-//! Methods for constructing Graphviz graphs representing the [`EnvBuilder`] useful for debugging and
-//! understand the Reactor graph.
+//! Methods for constructing Graphviz graphs representing the [`EnvBuilder`] useful for debugging
+//! and understand the Reactor graph.
 
 use super::{
     ActionType, BuilderError, BuilderPortKey, EnvBuilder, PortType, ReactorBuilder, TimerSpec,
@@ -173,7 +173,7 @@ pub fn create_full_graph(env_builder: &EnvBuilder) -> Result<String, BuilderErro
             output.push(format!(
                 "  label=\"{} '{}'\";",
                 reactor.type_name(),
-                reactor.get_name()
+                reactor.name()
             ));
             output.push("  style=\"rounded\"; node [shape=record];".into());
 

@@ -19,29 +19,29 @@ pub struct Logical;
 #[derive(Copy, Clone, Debug)]
 pub struct Physical;
 
-/// `TypedActionKey` is a typed wrapper around [`BuilderActionKey`] that is used to associate a type with an
-/// action. This is used to ensure that the type of the action matches the type of the port that it
-/// is connected to.
+/// `TypedActionKey` is a typed wrapper around [`BuilderActionKey`] that is used to associate a type
+/// with an action. This is used to ensure that the type of the action matches the type of the port
+/// that it is connected to.
 #[derive(Default, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub struct TypedActionKey<T = (), Q = Logical>(BuilderActionKey, PhantomData<(T, Q)>)
 where
-    T: runtime::ActionData;
+    T: runtime::ReactorData;
 
-impl<T: runtime::ActionData, Q> Copy for TypedActionKey<T, Q> {}
+impl<T: runtime::ReactorData, Q> Copy for TypedActionKey<T, Q> {}
 
-impl<T: runtime::ActionData, Q> Clone for TypedActionKey<T, Q> {
+impl<T: runtime::ReactorData, Q> Clone for TypedActionKey<T, Q> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T: runtime::ActionData, Q> From<BuilderActionKey> for TypedActionKey<T, Q> {
+impl<T: runtime::ReactorData, Q> From<BuilderActionKey> for TypedActionKey<T, Q> {
     fn from(key: BuilderActionKey) -> Self {
         Self(key, PhantomData)
     }
 }
 
-impl<T: runtime::ActionData, Q> From<TypedActionKey<T, Q>> for BuilderActionKey {
+impl<T: runtime::ReactorData, Q> From<TypedActionKey<T, Q>> for BuilderActionKey {
     fn from(key: TypedActionKey<T, Q>) -> Self {
         key.0
     }
@@ -63,7 +63,7 @@ impl From<PhysicalActionKey> for TypedActionKey<(), Physical> {
     }
 }
 
-impl<T: runtime::ActionData> From<TypedActionKey<T, Physical>> for PhysicalActionKey {
+impl<T: runtime::ReactorData> From<TypedActionKey<T, Physical>> for PhysicalActionKey {
     fn from(value: TypedActionKey<T, Physical>) -> Self {
         Self(value.0)
     }

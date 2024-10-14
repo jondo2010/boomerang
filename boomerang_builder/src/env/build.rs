@@ -41,7 +41,7 @@ struct RuntimeReactionParts {
 
 #[derive(Debug)]
 struct RuntimeReactorParts {
-    runtime_reactors: tinymap::TinyMap<runtime::ReactorKey, runtime::Reactor>,
+    runtime_reactors: tinymap::TinyMap<runtime::ReactorKey, Box<dyn runtime::BaseReactor>>,
     reactor_aliases: SecondaryMap<BuilderReactorKey, runtime::ReactorKey>,
     reactor_bank_indices: tinymap::TinySecondaryMap<runtime::ReactorKey, Option<runtime::BankInfo>>,
 }
@@ -113,7 +113,7 @@ fn build_runtime_reactors(
 
     for (builder_key, reactor_builder) in reactor_builders.into_iter() {
         let bank_info = reactor_builder.bank_info.clone();
-        let reactor_key = runtime_reactors.insert(reactor_builder.build_runtime());
+        let reactor_key = runtime_reactors.insert(reactor_builder.into_runtime());
         reactor_aliases.insert(builder_key, reactor_key);
         reactor_bank_indices.insert(reactor_key, bank_info);
     }
@@ -190,7 +190,8 @@ impl EnvBuilder {
         }
     }
 
-    /// Convert the `EnvBuilder` into a [`runtime::Env`], [`runtime::ReactionGraph`] and [`BuilderAliases`]
+    /// Convert the `EnvBuilder` into a [`runtime::Env`], [`runtime::ReactionGraph`] and
+    /// [`BuilderAliases`]
     pub fn into_runtime_parts(
         self,
     ) -> Result<(runtime::Env, runtime::ReactionGraph, BuilderAliases), BuilderError> {

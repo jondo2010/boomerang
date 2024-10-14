@@ -4,13 +4,21 @@ use std::time::Duration;
 
 use boomerang::prelude::*;
 
-#[derive(Default)]
+#[derive(Default, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct GeneratedDelayState {
     y_state: u32,
 }
 
+#[cfg(feature = "serde")]
+register_type!(GeneratedDelayState);
+
 #[derive(Reactor, Clone)]
-#[reactor(state = GeneratedDelayState, reaction = "ReactionYIn", reaction = "ReactionAct")]
+#[reactor(
+    state = "GeneratedDelayState",
+    reaction = "ReactionYIn",
+    reaction = "ReactionAct"
+)]
 struct GeneratedDelay {
     y_in: TypedPortKey<u32, Input>,
     y_out: TypedPortKey<u32, Output>,

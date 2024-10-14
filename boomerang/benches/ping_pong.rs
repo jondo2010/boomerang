@@ -10,6 +10,7 @@
 use boomerang::prelude::*;
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 
+#[derive(Debug)]
 struct Ping {
     count: usize,
     pings_left: usize,
@@ -86,7 +87,7 @@ impl runtime::Trigger<Ping> for ReactionInPong<'_> {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct Pong {
     count: usize,
 }
@@ -111,12 +112,12 @@ impl runtime::Trigger<Pong> for ReactionInPing<'_> {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct Main {
     count: usize,
 }
 
-#[derive(Clone, Reactor)]
+#[derive(Reactor)]
 #[reactor(
     state = "Main",
     reaction = "ReactionStartup",
@@ -125,10 +126,10 @@ struct Main {
     connection(from = "pong.out_pong", to = "ping.in_pong")
 )]
 struct MainBuilder {
-    #[reactor(child= Ping::new(state.count))]
+    #[reactor(child = "Ping::new(state.count)")]
     ping: PingBuilder,
 
-    #[reactor(child= Pong::default())]
+    #[reactor(child = "Pong::default()")]
     pong: PongBuilder,
 }
 

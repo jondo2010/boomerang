@@ -27,6 +27,7 @@ impl<K: tinymap::Key + std::fmt::Display> std::fmt::Display for KeySet<K> {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct KeySetLimits {
     /// The maximum level of any reaction in the trigger map.
     pub max_level: Level,

@@ -1,6 +1,8 @@
 use boomerang::prelude::*;
 
-#[derive(Clone)]
+/// NOTE: `State: Clone` is required because state is cloned for each child reactor.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Default, Clone)]
 struct State {
     received: bool,
 }

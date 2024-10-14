@@ -12,7 +12,7 @@ categories.workspace = true
 exclude.workspace = true
 
 [features]
-default = ["keyboard", "runner", "replay", "serde"]
+default = []
 
 ## Support for keyboard input
 keyboard = ["dep:termion"]
@@ -21,7 +21,13 @@ keyboard = ["dep:termion"]
 runner = ["dep:clap", "dep:anyhow", "boomerang/graphviz"]
 
 ## Support for serde serialization
-serde = ["dep:serde", "dep:erased-serde", "termion/serde", "boomerang/serde"]
+serde = [
+    "boomerang/serde",
+    "dep:erased-serde",
+    "dep:linkme",
+    "dep:serde",
+    "termion/serde",
+]
 
 ## Support for recording and replaying
 replay = ["serde", "dep:bincode"]
@@ -34,6 +40,7 @@ document-features = { workspace = true }
 erased-serde = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 tracing.workspace = true
+linkme = { workspace = true, optional = true }
 
 serde_json = { version = "1.0" }
 serde_arrow = { version = "0.11", features = ["arrow-52"] }

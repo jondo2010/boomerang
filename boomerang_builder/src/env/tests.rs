@@ -1,4 +1,4 @@
-use runtime::ActionCommon;
+use runtime::action::ActionCommon;
 
 use crate::{reaction_closure, TimerSpec, TriggerMode};
 

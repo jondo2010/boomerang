@@ -22,6 +22,7 @@ impl runtime::Trigger<()> for SourceReactionOut<'_> {
     }
 }
 
+#[derive(Debug, Default)]
 struct Gain {
     gain: u32,
 }

@@ -106,21 +106,27 @@ pub struct TimerSpec {
     pub offset: Option<Duration>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum ActionType {
-    Timer(TimerSpec),
-    Logical { min_delay: Option<Duration> },
-    Physical { min_delay: Option<Duration> },
     Startup,
     Shutdown,
+    Timer(TimerSpec),
+    Standard {
+        /// Whether the action is logical or physical
+        is_logical: bool,
+        /// Minimum delay between
+        min_delay: Option<Duration>,
+        /// Builder function that creates the runtime action
+        build_fn: Box<dyn ActionBuilderFn>,
+    },
 }
 
-pub trait ActionBuilderFn: Fn(&str, runtime::ActionKey) -> runtime::Action {}
-impl<F> ActionBuilderFn for F where F: Fn(&str, runtime::ActionKey) -> runtime::Action {}
+pub trait ActionBuilderFn: Fn(&str, runtime::ActionKey) -> Box<dyn runtime::BaseAction> {}
+impl<F> ActionBuilderFn for F where F: Fn(&str, runtime::ActionKey) -> Box<dyn runtime::BaseAction> {}
 
-impl Debug for Box<dyn ActionBuilderFn> {
+impl Debug for dyn ActionBuilderFn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("Box<dyn ActionBuilderFn>").finish()
+        f.debug_tuple("dyn ActionBuilderFn").finish()
     }
 }
 
@@ -131,46 +137,33 @@ pub struct ActionBuilder {
     /// The key of the Reactor that owns this ActionBuilder
     reactor_key: BuilderReactorKey,
     /// Logical type of the action
-    ty: ActionType,
+    r#type: ActionType,
     /// Out-going Reactions that this action triggers
     pub triggers: SecondaryMap<BuilderReactionKey, ()>,
     /// List of Reactions that may schedule this action
     pub schedulers: SecondaryMap<BuilderReactionKey, ()>,
-    /// User builder function for the Action
-    action_builder_fn: Box<dyn ActionBuilderFn>,
 }
 
 impl ActionBuilder {
-    pub fn new(
-        name: &str,
-        reactor_key: BuilderReactorKey,
-        ty: ActionType,
-        action_builder_fn: Box<dyn ActionBuilderFn>,
-    ) -> Self {
+    pub fn new(name: &str, reactor_key: BuilderReactorKey, r#type: ActionType) -> Self {
         Self {
             name: name.to_owned(),
             reactor_key,
-            ty,
+            r#type,
             triggers: SecondaryMap::new(),
             schedulers: SecondaryMap::new(),
-            action_builder_fn,
         }
     }
 
-    pub fn get_name(&self) -> &str {
+    pub fn name(&self) -> &str {
         &self.name
     }
 
-    pub fn get_reactor_key(&self) -> BuilderReactorKey {
+    pub fn reactor_key(&self) -> BuilderReactorKey {
         self.reactor_key
     }
 
-    pub fn get_type(&self) -> &ActionType {
-        &self.ty
-    }
-
-    /// Build the `ActionBuilder` into a [`runtime::Action`]
-    pub fn build_runtime(&self, action_key: runtime::ActionKey) -> runtime::Action {
-        (self.action_builder_fn)(&self.name, action_key)
+    pub fn r#type(&self) -> &ActionType {
+        &self.r#type
     }
 }

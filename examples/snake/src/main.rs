@@ -94,11 +94,8 @@ mod reactor {
             output::paint_on_raw_console(&state.grid);
 
             // schedule the first one, then it reschedules itself.
-            ctx.schedule_action(
-                &mut self.screen_refresh,
-                None,
-                Some(Duration::from_millis(1000)),
-            );
+            self.screen_refresh
+                .schedule(ctx, (), Some(Duration::from_millis(1000)));
         }
     }
 
@@ -118,7 +115,7 @@ mod reactor {
             // select a delay depending on the tempo
             let delay = Duration::from_millis(400)
                 - (state.tempo_step * state.tempo).min(Duration::from_millis(300));
-            ctx.schedule_action(&mut self.screen_refresh, None, Some(delay));
+            self.screen_refresh.schedule(ctx, (), Some(delay));
         }
     }
 
@@ -150,7 +147,7 @@ mod reactor {
                 UpdateResult::FoodEaten => {
                     state.food_on_grid -= 1;
                     if state.food_on_grid == 0 {
-                        ctx.schedule_action(&mut self.manually_add_more_food, None, None);
+                        self.manually_add_more_food.schedule(ctx, (), None);
                     }
                     state.tempo += 1;
                 }

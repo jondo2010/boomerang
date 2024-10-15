@@ -1,4 +1,4 @@
-use runtime::action::ActionCommon;
+use runtime::BaseAction;
 
 use crate::{reaction_closure, TimerSpec, TriggerMode};
 
@@ -69,7 +69,7 @@ fn test_reactions_with_trigger() {
     let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, ());
 
     let res = reactor_builder
-        .add_reaction("test", reaction_closure!())
+        .add_reaction("test", Box::new(reaction_closure!()))
         .finish();
 
     assert!(matches!(res, Err(BuilderError::ReactionBuilderError(_))));
@@ -149,8 +149,8 @@ fn test_actions1() {
 
     assert_eq!(
         env.actions[action_a]
-            .as_logical()
-            .expect("Action a should be logical")
+            .downcast_ref::<runtime::Action>()
+            .expect("Action")
             .name(),
         "a"
     );

@@ -3,8 +3,7 @@ use std::time::Duration;
 use crossbeam_channel::Sender;
 
 use crate::{
-    event::PhysicalEvent, keepalive, ActionKey, ActionRefValue, BankInfo, PhysicalActionRef,
-    ReactionGraph, ReactionKey, ReactorData, Tag, Timestamp,
+    event::AsyncEvent, keepalive, ActionKey, BankInfo, ReactionGraph, ReactionKey, Tag, Timestamp,
 };
 
 /// Result from a reaction trigger
@@ -27,7 +26,7 @@ pub struct Context {
     pub(crate) bank_info: Option<BankInfo>,
 
     /// Channel for asynchronous events
-    pub(crate) async_tx: Sender<PhysicalEvent>,
+    pub(crate) async_tx: Sender<AsyncEvent>,
     /// Shutdown channel
     pub(crate) shutdown_rx: keepalive::Receiver,
 
@@ -51,7 +50,7 @@ impl Context {
     pub(crate) fn new(
         start_time: Timestamp,
         bank_info: Option<BankInfo>,
-        async_tx: Sender<PhysicalEvent>,
+        async_tx: Sender<AsyncEvent>,
         shutdown_rx: keepalive::Receiver,
     ) -> Self {
         Self {
@@ -97,33 +96,6 @@ impl Context {
         self.get_logical_time() - self.get_start_time()
     }
 
-    /// Get the value of an Action at the current Tag
-    pub fn get_action_with<T, A, F, U>(&self, action: &mut A, f: F) -> U
-    where
-        T: ReactorData,
-        A: ActionRefValue<T>,
-        F: FnOnce(Option<&T>) -> U,
-    {
-        action.get_value_with::<F, U>(self.tag, f)
-    }
-
-    /// Schedule the Action to trigger at some future time.
-    #[tracing::instrument(skip(self, value), fields(action = ?action.get_key()))]
-    pub fn schedule_action<T: ReactorData, A: ActionRefValue<T>>(
-        &mut self,
-        action: &mut A,
-        value: Option<T>,
-        delay: Option<Duration>,
-    ) {
-        let tag_delay = action.get_min_delay() + delay.unwrap_or_default();
-        let new_tag = self.tag.delay(tag_delay);
-        tracing::trace!(new_tag = %new_tag, "Scheduling Logical");
-        action.set_value(value, new_tag);
-        self.trigger_res
-            .scheduled_actions
-            .push((action.get_key(), new_tag));
-    }
-
     /// Create a new SendContext that can be shared across threads.
     /// This is used to schedule asynchronous events.
     pub fn make_send_context(&self) -> SendContext {
@@ -156,28 +128,12 @@ pub struct SendContext {
     /// Physical time the Scheduler was started
     pub start_time: Timestamp,
     /// Channel for asynchronous events
-    pub(crate) async_tx: Sender<PhysicalEvent>,
+    pub(crate) async_tx: Sender<AsyncEvent>,
     /// Shutdown channel
     shutdown_rx: keepalive::Receiver,
 }
 
 impl SendContext {
-    /// Schedule a PhysicalAction to trigger at some future time.
-    #[tracing::instrument(skip(self, action, value, delay))]
-    pub fn schedule_action<T: ReactorData>(
-        &mut self,
-        action: &mut PhysicalActionRef<T>,
-        value: Option<T>,
-        delay: Option<Duration>,
-    ) {
-        let tag_delay = action.min_delay + delay.unwrap_or_default();
-        let new_tag = Tag::absolute(self.start_time, Timestamp::now().offset(tag_delay));
-        action.set_value(value, new_tag);
-        tracing::info!(new_tag = %new_tag, key = ?action.key, "Scheduling Physical");
-        let event = PhysicalEvent::trigger(action.key, new_tag);
-        self.async_tx.send(event).unwrap();
-    }
-
     /// Has the scheduler already been shutdown?
     pub fn is_shutdown(&self) -> bool {
         self.shutdown_rx.is_shutdwon()
@@ -195,7 +151,7 @@ impl ContextCommon for SendContext {
             self.start_time,
             Timestamp::now().offset(offset.unwrap_or_default()),
         );
-        let event = PhysicalEvent::shutdown(tag);
+        let event = AsyncEvent::shutdown(tag);
         self.async_tx.send(event).unwrap();
     }
 }
@@ -204,7 +160,7 @@ impl ContextCommon for SendContext {
 pub fn build_reaction_contexts(
     reaction_graph: &ReactionGraph,
     start_time: Timestamp,
-    event_tx: crossbeam_channel::Sender<PhysicalEvent>,
+    event_tx: crossbeam_channel::Sender<AsyncEvent>,
     shutdown_rx: keepalive::Receiver,
 ) -> tinymap::TinySecondaryMap<ReactionKey, Context> {
     reaction_graph

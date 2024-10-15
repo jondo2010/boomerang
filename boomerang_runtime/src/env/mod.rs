@@ -1,5 +1,5 @@
 use crate::{
-    key_set::KeySetLimits, Action, ActionKey, BasePort, BaseReactor, PortKey, Reaction,
+    key_set::KeySetLimits, ActionKey, BaseAction, BasePort, BaseReactor, PortKey, Reaction,
     ReactionKey, ReactorKey,
 };
 
@@ -54,7 +54,7 @@ pub struct Env {
     /// The runtime set of Reactors
     pub reactors: tinymap::TinyMap<ReactorKey, Box<dyn BaseReactor>>,
     /// The runtime set of Actions
-    pub actions: tinymap::TinyMap<ActionKey, Action>,
+    pub actions: tinymap::TinyMap<ActionKey, Box<dyn BaseAction>>,
     /// The runtime set of Ports
     pub ports: tinymap::TinyMap<PortKey, Box<dyn BasePort>>,
     /// The runtime set of Reactions
@@ -114,17 +114,17 @@ pub struct ReactionGraph {
 pub mod tests {
     use itertools::Itertools;
 
-    use crate::{BaseReactor, Context, Port, ReactionSetLimits, Reactor};
+    use crate::{Action, BaseReactor, Context, Port, ReactionSetLimits, Reactor};
 
     use super::*;
 
     /// An empty reaction function for testing.
     pub fn dummy_reaction_fn<'a>(
         _context: &'a mut Context,
-        _state: &'a mut dyn BaseReactor,
+        _reactor: &'a mut dyn BaseReactor,
         _ref_ports: crate::refs::Refs<'a, dyn BasePort>,
         _mut_ports: crate::refs::RefsMut<'a, dyn BasePort>,
-        _actions: crate::refs::RefsMut<'a, Action>,
+        _actions: crate::refs::RefsMut<'a, dyn BaseAction>,
     ) {
     }
 
@@ -132,12 +132,12 @@ pub mod tests {
     pub fn create_dummy_env() -> (Env, ReactionGraph) {
         let env = Env {
             reactors: [Reactor::new("dummy", ()).boxed()].into_iter().collect(),
-            reactions: [Reaction::new("dummy", dummy_reaction_fn, None)]
+            reactions: [Reaction::new("dummy", Box::new(dummy_reaction_fn), None)]
                 .into_iter()
                 .collect(),
             actions: [
-                Action::new_logical::<()>("action0", ActionKey::from(0), Default::default()),
-                Action::new_logical::<()>("action1", ActionKey::from(1), Default::default()),
+                Action::<()>::new("action0", ActionKey::from(0), Default::default(), true).boxed(),
+                Action::<()>::new("action1", ActionKey::from(1), Default::default(), true).boxed(),
             ]
             .into_iter()
             .collect(),

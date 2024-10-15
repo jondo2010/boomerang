@@ -6,7 +6,7 @@ use crate::ReactorData;
 
 tinymap::key_type! { pub ReactorKey }
 
-pub trait BaseReactor: Downcast + Send + Sync {
+pub trait BaseReactor: Debug + Downcast + Send + Sync {
     /// Get the name of the reactor
     fn name(&self) -> &str;
 }
@@ -19,20 +19,10 @@ impl dyn BaseReactor {
     }
 }
 
-impl std::fmt::Debug for dyn BaseReactor {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BaseReactor")
-            .field("name", &self.name())
-            .finish()
-    }
-}
-
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Reactor<T: ReactorData> {
     /// The reactor name
     name: String,
     /// The ReactorState
-    #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) state: T,
 }
 

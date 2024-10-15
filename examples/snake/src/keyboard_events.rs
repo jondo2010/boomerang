@@ -35,15 +35,13 @@ pub struct KeyboardEventsBuilder {
 #[reaction(reactor = "KeyboardEventsBuilder")]
 struct ReactionKeyPress<'a> {
     #[reaction(triggers)]
-    key_press: runtime::PhysicalActionRef<Key>,
+    key_press: runtime::ActionRef<'a, Key>,
     arrow_key_pressed: runtime::OutputRef<'a, Key>,
 }
 
 impl<'a> runtime::Trigger<KeyboardEvents> for ReactionKeyPress<'a> {
     fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut KeyboardEvents) {
-        ctx.get_action_with(&mut self.key_press, |value| {
-            *self.arrow_key_pressed = value.cloned();
-        });
+        *self.arrow_key_pressed = self.key_press.get_value(ctx).cloned();
     }
 }
 
@@ -60,7 +58,7 @@ impl runtime::Trigger<KeyboardEvents> for ReactionShutdown {
 #[derive(Reaction)]
 #[reaction(reactor = "KeyboardEventsBuilder", triggers(startup))]
 struct ReactionStartup {
-    key_press: runtime::PhysicalActionRef<Key>,
+    key_press: runtime::AsyncActionRef<Key>,
 }
 
 impl runtime::Trigger<KeyboardEvents> for ReactionStartup {
@@ -72,7 +70,6 @@ impl runtime::Trigger<KeyboardEvents> for ReactionStartup {
         state.raw_terminal = Some(std::io::stdout().into_raw_mode().unwrap());
 
         let mut send_ctx = ctx.make_send_context();
-        let mut key_press = self.key_press.clone();
 
         std::thread::spawn(move || {
             use termion::input::TermRead;
@@ -81,7 +78,7 @@ impl runtime::Trigger<KeyboardEvents> for ReactionStartup {
                 match c.unwrap() {
                     k @ (Key::Left | Key::Right | Key::Up | Key::Down) => {
                         tracing::debug!("received {:?}", k);
-                        send_ctx.schedule_action(&mut key_press, Some(k), None);
+                        self.key_press.schedule(&send_ctx, k, None);
                     }
                     Key::Ctrl('c') => {
                         tracing::debug!("Ctrl-C received, shutting down.");

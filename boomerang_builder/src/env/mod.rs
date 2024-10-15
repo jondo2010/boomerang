@@ -1,13 +1,13 @@
+use crate::{PortType, TriggerMode};
+
 use super::{
-    action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder, ActionBuilderFn,
-    ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
-    BuilderReactorKey, Input, Logical, Output, Physical, PortBuilder, PortTag, PortType,
+    action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder, runtime, ActionType,
+    BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
+    BuilderReactorKey, Input, Logical, Output, Physical, PortBuilder, PortTag,
     ReactionBuilderState, ReactorBuilder, ReactorBuilderState, TypedActionKey, TypedPortKey,
 };
-use crate::runtime;
-use boomerang_runtime::Level;
 use itertools::Itertools;
-use petgraph::{graphmap::DiGraphMap, EdgeDirection};
+use petgraph::{prelude::DiGraphMap, EdgeDirection};
 use slotmap::{SecondaryMap, SlotMap};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -152,12 +152,7 @@ impl EnvBuilder {
         name: &str,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey, BuilderError> {
-        self.add_action::<(), Logical, _>(
-            name,
-            ActionType::Startup,
-            reactor_key,
-            |_: &'_ str, _: runtime::ActionKey| runtime::Action::Startup,
-        )
+        self.add_action::<(), Logical>(name, reactor_key, ActionType::Startup)
     }
 
     pub fn add_shutdown_action(
@@ -165,12 +160,7 @@ impl EnvBuilder {
         name: &str,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey, BuilderError> {
-        self.add_action::<(), Logical, _>(
-            name,
-            ActionType::Shutdown,
-            reactor_key,
-            |_: &'_ str, _: runtime::ActionKey| runtime::Action::Shutdown,
-        )
+        self.add_action::<(), Logical>(name, reactor_key, ActionType::Shutdown)
     }
 
     pub fn add_logical_action<T: runtime::ReactorData>(
@@ -179,12 +169,15 @@ impl EnvBuilder {
         min_delay: Option<Duration>,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey<T, Logical>, BuilderError> {
-        self.add_action::<T, Logical, _>(
+        self.add_action::<T, Logical>(
             name,
-            ActionType::Logical { min_delay },
             reactor_key,
-            move |name: &'_ str, key: runtime::ActionKey| {
-                runtime::Action::new_logical::<T>(name, key, min_delay.unwrap_or_default())
+            ActionType::Standard {
+                is_logical: true,
+                min_delay,
+                build_fn: Box::new(move |name, key| {
+                    runtime::Action::<T>::new(name, key, min_delay, true).boxed()
+                }),
             },
         )
     }
@@ -195,12 +188,15 @@ impl EnvBuilder {
         min_delay: Option<Duration>,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey<T, Physical>, BuilderError> {
-        self.add_action::<T, Physical, _>(
+        self.add_action::<T, Physical>(
             name,
-            ActionType::Physical { min_delay },
             reactor_key,
-            move |name: &'_ str, action_key| {
-                runtime::Action::new_physical::<T>(name, action_key, min_delay.unwrap_or_default())
+            ActionType::Standard {
+                is_logical: false,
+                min_delay,
+                build_fn: Box::new(move |name, key| {
+                    runtime::Action::<T>::new(name, key, min_delay, false).boxed()
+                }),
             },
         )
     }
@@ -217,16 +213,14 @@ impl EnvBuilder {
     }
 
     /// Add an Action to a given Reactor using closure F
-    pub fn add_action<T, Q, F>(
+    pub fn add_action<T, Q>(
         &mut self,
         name: &str,
-        ty: ActionType,
         reactor_key: BuilderReactorKey,
-        action_fn: F,
+        r#type: ActionType,
     ) -> Result<TypedActionKey<T, Q>, BuilderError>
     where
         T: runtime::ReactorData,
-        F: ActionBuilderFn + 'static,
     {
         let reactor_builder = &mut self.reactor_builders[reactor_key];
 
@@ -234,7 +228,7 @@ impl EnvBuilder {
         if reactor_builder
             .actions
             .keys()
-            .any(|action_key| self.action_builders[action_key].get_name() == name)
+            .any(|action_key| self.action_builders[action_key].name() == name)
         {
             return Err(BuilderError::DuplicateActionDefinition {
                 reactor_name: reactor_builder.name().to_owned(),
@@ -242,12 +236,9 @@ impl EnvBuilder {
             });
         }
 
-        let key = self.action_builders.insert(ActionBuilder::new(
-            name,
-            reactor_key,
-            ty,
-            Box::new(action_fn),
-        ));
+        let key = self
+            .action_builders
+            .insert(ActionBuilder::new(name, reactor_key, r#type));
 
         reactor_builder.actions.insert(key, ());
 
@@ -310,7 +301,7 @@ impl EnvBuilder {
         self.reactor_builders[reactor_key]
             .actions
             .keys()
-            .find(|action_key| self.action_builders[*action_key].get_name() == action_name)
+            .find(|action_key| self.action_builders[*action_key].name() == action_name)
             .ok_or_else(|| BuilderError::NamedActionNotFound(action_name.to_string()))
     }
 
@@ -358,8 +349,86 @@ impl EnvBuilder {
         self.reactor_builders[reactor]
             .actions
             .keys()
-            .find(|action_key| self.action_builders[*action_key].get_name() == action_name)
+            .find(|action_key| self.action_builders[*action_key].name() == action_name)
             .ok_or_else(|| BuilderError::NamedActionNotFound(action_fqn.to_string()))
+    }
+
+    /// Connect two ports together
+    ///
+    /// ## Arguments
+    ///
+    /// * `source_key` - The key of the first port to connect
+    /// * `target_key` - The key of the second port to connect
+    /// * `after` - An optional delay to wait before triggering the downstream ports.
+    /// * `physical` - Whether the connection is physical (or logical). Logical connections will trigger any downstream
+    ///     ports at the current logical time (with any `after` delay), while physical connections will trigger the
+    ///     downstream ports at the current physical time (with any `after` delay).
+    pub fn connect_ports<T, P1, P2>(
+        &mut self,
+        source_key: P1,
+        target_key: P2,
+        after: Option<Duration>,
+        physical: bool,
+    ) -> Result<(), BuilderError>
+    where
+        T: runtime::ReactorData + Clone,
+        P1: Into<BuilderPortKey>,
+        P2: Into<BuilderPortKey>,
+    {
+        if after.is_none() && !physical {
+            self.bind_port(source_key, target_key)
+        } else {
+            // Ports connected with a delay and/or physical connections are implemented as a pair of Reactions that trigger and react to an action.
+
+            let source_key = source_key.into();
+            let target_key = target_key.into();
+
+            let source_port = &self.port_builders[source_key];
+            let target_port = &self.port_builders[target_key];
+
+            let source_reactor_key = source_port.get_reactor_key();
+            let target_reactor_key = target_port.get_reactor_key();
+
+            // 1. create a new action on the reactor of the target port
+            let action_name = format!("{}->{}", source_port.get_name(), target_port.get_name());
+            let action_key: BuilderActionKey = if physical {
+                self.add_physical_action::<T>(&action_name, after, target_port.get_reactor_key())?
+                    .into()
+            } else {
+                self.add_logical_action::<T>(&action_name, after, target_port.get_reactor_key())?
+                    .into()
+            };
+
+            // 2. create a new reaction on the reactor of the source port, triggered by the source port, that schedules the action
+            let sender_wrapper = runtime::ReactionAdapter::<
+                crate::connection::ConnectionSenderReaction<T>,
+                (),
+            >::default();
+
+            let _sender = self
+                .add_reaction("sender", source_reactor_key, Box::new(sender_wrapper) as _)
+                .with_port(source_key, 0, TriggerMode::TriggersAndUses)?
+                .with_action(action_key, 0, TriggerMode::EffectsOnly)?
+                .finish()?;
+
+            // 3. create a new reaction on the reactor of the target port, triggered by the action, that sets the target port
+            let receiver_wrapper = runtime::ReactionAdapter::<
+                crate::connection::ConnectionReceiverReaction<T>,
+                (),
+            >::default();
+
+            let _receiver = self
+                .add_reaction(
+                    "receiver",
+                    target_reactor_key,
+                    Box::new(receiver_wrapper) as _,
+                )
+                .with_port(target_key, 0, TriggerMode::EffectsOnly)?
+                .with_action(action_key, 0, TriggerMode::TriggersAndUses)?
+                .finish()?;
+
+            Ok(())
+        }
     }
 
     /// Bind Port A to Port B
@@ -471,8 +540,8 @@ impl EnvBuilder {
     /// Get a fully-qualified string name for the given ActionKey
     pub fn action_fqn(&self, action_key: BuilderActionKey) -> Result<BuilderFqn, BuilderError> {
         let action = &self.action_builders[action_key];
-        let reactor_fqn = self.reactor_fqn(action.get_reactor_key())?;
-        Ok(reactor_fqn.append(action.get_name()))
+        let reactor_fqn = self.reactor_fqn(action.reactor_key())?;
+        Ok(reactor_fqn.append(action.name()))
     }
 
     /// Get a fully-qualified string for the given ReactionKey
@@ -621,7 +690,7 @@ impl EnvBuilder {
     /// See <https://en.m.wikipedia.org/wiki/Coffman%E2%80%93Graham_algorithm>
     pub fn build_runtime_level_map(
         &self,
-    ) -> Result<SecondaryMap<BuilderReactionKey, Level>, BuilderError> {
+    ) -> Result<SecondaryMap<BuilderReactionKey, runtime::Level>, BuilderError> {
         use petgraph::{algo::tred, graph::DefaultIx, graph::NodeIndex};
 
         let mut graph = self.build_reaction_graph().into_graph::<DefaultIx>();
@@ -660,7 +729,7 @@ impl EnvBuilder {
                 .map(|(a, b)| (toposort[a.index()], toposort[b.index()]))
         }));
 
-        let mut levels: HashMap<_, Level> = HashMap::new();
+        let mut levels: HashMap<_, runtime::Level> = HashMap::new();
         for &idx in toposort.iter() {
             let max_neighbor = graph
                 .neighbors_directed(idx, EdgeDirection::Incoming)

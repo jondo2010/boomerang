@@ -4,8 +4,8 @@ use std::{marker::PhantomPinned, pin::Pin, ptr::NonNull};
 
 use crate::{
     refs::{Refs, RefsMut},
-    Action, ActionKey, BasePort, BaseReactor, Context, ContextCommon, Deadline, PortKey, Reaction,
-    ReactionKey, ReactorKey, Tag, TriggerRes,
+    ActionKey, BaseAction, BasePort, BaseReactor, Context, ContextCommon, Deadline, PortKey,
+    Reaction, ReactionKey, ReactorData, ReactorKey, Tag, TriggerRes,
 };
 
 use super::{Env, ReactionGraph};
@@ -15,9 +15,9 @@ pub struct ReactionTriggerCtx<'store> {
     pub context: &'store mut Context,
     pub reactor: &'store mut dyn BaseReactor,
     pub reaction: &'store mut Reaction,
+    pub actions: RefsMut<'store, dyn BaseAction>,
     pub ref_ports: Refs<'store, dyn BasePort>,
     pub mut_ports: RefsMut<'store, dyn BasePort>,
-    pub actions: RefsMut<'store, Action>,
 }
 
 #[cfg(feature = "parallel")]
@@ -29,17 +29,17 @@ impl<'a> From<&'a mut ReactionTriggerCtxPtrs> for ReactionTriggerCtx<'a> {
         let reactor = unsafe { ptrs.reactor.unwrap().as_mut() };
         let reaction = unsafe { ptrs.reaction.as_mut() };
 
+        let actions = RefsMut::new(&mut ptrs.actions);
         let ref_ports = Refs::new(&mut ptrs.ref_ports);
         let mut_ports = RefsMut::new(&mut ptrs.mut_ports);
-        let actions = RefsMut::new(&mut ptrs.actions);
 
         Self {
             context,
             reactor,
             reaction,
+            actions,
             ref_ports,
             mut_ports,
-            actions,
         }
     }
 }
@@ -82,9 +82,9 @@ struct ReactionTriggerCtxPtrs {
     context: NonNull<Context>,
     reactor: Option<NonNull<dyn BaseReactor>>,
     reaction: NonNull<Reaction>,
+    actions: Vec<NonNull<dyn BaseAction>>,
     ref_ports: Vec<NonNull<dyn BasePort>>,
     mut_ports: Vec<NonNull<dyn BasePort>>,
-    actions: Vec<NonNull<Action>>,
 }
 
 impl Default for ReactionTriggerCtxPtrs {
@@ -93,9 +93,9 @@ impl Default for ReactionTriggerCtxPtrs {
             context: NonNull::dangling(),
             reactor: None,
             reaction: NonNull::dangling(),
+            actions: Vec::new(),
             ref_ports: Vec::new(),
             mut_ports: Vec::new(),
-            actions: Vec::new(),
         }
     }
 }
@@ -108,7 +108,7 @@ struct Inner {
     contexts: tinymap::TinySecondaryMap<ReactionKey, Context>,
     reactors: tinymap::TinyMap<ReactorKey, Box<dyn BaseReactor>>,
     reactions: tinymap::TinyMap<ReactionKey, Reaction>,
-    actions: tinymap::TinyMap<ActionKey, Action>,
+    actions: tinymap::TinyMap<ActionKey, Box<dyn BaseAction>>,
     ports: tinymap::TinyMap<PortKey, Box<dyn BasePort>>,
 }
 
@@ -183,15 +183,11 @@ impl Store {
             .values()
             .map(|actions| actions.iter());
 
-        let grouped_actions = unsafe {
-            action_keys.map(|keys| {
-                boxed
-                    .inner
-                    .actions
-                    .iter_many_unchecked_ptrs_mut(keys)
-                    .map(|a| NonNull::new_unchecked(a))
-                    .collect::<Vec<_>>()
-            })
+        let (_, grouped_actions) = unsafe {
+            boxed
+                .inner
+                .actions
+                .iter_ptr_chunks_split_unchecked(std::iter::empty(), action_keys)
         };
 
         let port_ref_keys = reaction_graph
@@ -224,7 +220,9 @@ impl Store {
                 cache.context = context;
                 cache.reactor = Some(reactor);
                 cache.reaction = reaction;
-                cache.actions = actions;
+                cache.actions = actions
+                    .map(|a| NonNull::new_unchecked(&mut **a as *mut _))
+                    .collect();
                 cache.ref_ports = ref_ports
                     .map(|p| NonNull::new_unchecked(&mut **p as *mut _))
                     .collect();
@@ -235,6 +233,17 @@ impl Store {
         }
 
         Box::into_pin(boxed)
+    }
+
+    pub fn push_action_value(
+        self: &mut Pin<Box<Self>>,
+        action_key: ActionKey,
+        tag: Tag,
+        value: Box<dyn ReactorData>,
+    ) {
+        // SAFETY: we are not moving anything from self
+        let actions = &mut unsafe { self.as_mut().get_unchecked_mut() }.inner.actions;
+        actions[action_key].push_value(tag, value);
     }
 
     /// Returns an `Iterator` of `ReactionTriggerCtx` for each `Reaction` in the given
@@ -285,7 +294,7 @@ impl Store {
 pub mod tests {
     use itertools::Itertools;
 
-    use crate::{keepalive, ActionRef, InputRef, OutputRef, Timestamp};
+    use crate::{action::ActionCommon, keepalive, ActionRef, InputRef, OutputRef, Timestamp};
 
     use super::*;
 
@@ -317,7 +326,7 @@ pub mod tests {
             let mut ctx_iter = unsafe { store.iter_borrow_storage(reaction_keys.iter().cloned()) };
             let ctx = ctx_iter.next().unwrap();
 
-            let [a0, a1]: [ActionRef; 2] = ctx.actions.partition_mut().unwrap();
+            let (a0, a1): (ActionRef, ActionRef) = ctx.actions.partition_mut().unwrap();
             assert_eq!(a0.name(), "action0");
             assert_eq!(a1.name(), "action1");
 

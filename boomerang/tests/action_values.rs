@@ -32,9 +32,10 @@ struct ReactionStartup<'a> {
 impl<'a> runtime::Trigger<State> for ReactionStartup<'a> {
     fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut State) {
         // scheduled in 100 ms
-        ctx.schedule_action(&mut self.act, Some(100), None);
+        self.act.schedule(ctx, 100, None);
         // scheduled in 150 ms, value is overwritten
-        ctx.schedule_action(&mut self.act, Some(-100), Some(Duration::from_millis(50)));
+        self.act
+            .schedule(ctx, -100, Some(Duration::from_millis(50)));
     }
 }
 
@@ -48,18 +49,22 @@ struct ReactionAct<'a> {
 impl<'a> runtime::Trigger<State> for ReactionAct<'a> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut State) {
         let elapsed = ctx.get_elapsed_logical_time();
-        let value = ctx.get_action_with(&mut self.act, |value| value.cloned());
+        let value = self.act.get_value(ctx);
 
         println!("[@{elapsed:?} action transmitted: {value:?}]");
 
         if elapsed.as_millis() == 100 {
-            assert_eq!(value, Some(100), "ERROR: Expected action value to be 100");
+            assert_eq!(value, Some(&100), "ERROR: Expected action value to be 100");
             state.r1done = true;
         } else {
             if elapsed.as_millis() != 150 {
                 panic!("ERROR: Unexpected reaction invocation at {elapsed:?}");
             }
-            assert_eq!(value, Some(-100), "ERROR: Expected action value to be -100");
+            assert_eq!(
+                value,
+                Some(&-100),
+                "ERROR: Expected action value to be -100"
+            );
             state.r2done = true;
         }
     }

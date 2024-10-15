@@ -34,7 +34,7 @@ struct ReactionYIn<'a> {
 impl runtime::Trigger<GeneratedDelayState> for ReactionYIn<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut GeneratedDelayState) {
         state.y_state = self.y_in.unwrap();
-        ctx.schedule_action(&mut self.act, None, None);
+        self.act.schedule(ctx, (), None);
     }
 }
 

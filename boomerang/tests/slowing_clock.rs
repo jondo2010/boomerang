@@ -47,7 +47,7 @@ struct ReactionStartup<'a> {
 impl runtime::Trigger<SlowingClock> for ReactionStartup<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut SlowingClock) {
         println!("startup");
-        ctx.schedule_action(&mut self.a, None, None);
+        self.a.schedule(ctx, (), None);
     }
 }
 
@@ -71,7 +71,7 @@ impl runtime::Trigger<SlowingClock> for ReactionA<'_> {
             state.expected_time.as_millis()
         );
 
-        ctx.schedule_action(&mut self.a, None, Some(state.interval));
+        self.a.schedule(ctx, (), Some(state.interval));
         state.expected_time += Duration::from_millis(100) + state.interval;
         state.interval += Duration::from_millis(100);
     }

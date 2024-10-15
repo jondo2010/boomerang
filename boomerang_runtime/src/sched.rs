@@ -3,7 +3,7 @@ use std::{collections::BinaryHeap, pin::Pin, time::Duration};
 
 use crate::{
     build_reaction_contexts,
-    event::{PhysicalEvent, ScheduledEvent},
+    event::{AsyncEvent, ScheduledEvent},
     keepalive,
     key_set::KeySetView,
     store::Store,
@@ -55,6 +55,11 @@ impl EventQueue {
                 reaction_set
             })
             .unwrap_or_else(|| ReactionSet::new(&self.reaction_set_limits))
+    }
+
+    /// Peek the tag of the next event in the queue
+    fn peek_tag(&self) -> Option<Tag> {
+        self.event_queue.peek().map(|event| event.tag)
     }
 
     /// If the event queue still has events on it, report that.
@@ -123,7 +128,7 @@ pub struct Scheduler {
     /// The reaction graph containing all static dependency and relationship information
     reaction_graph: ReactionGraph,
     /// Asynchronous events receiver
-    event_rx: Receiver<PhysicalEvent>,
+    event_rx: Receiver<AsyncEvent>,
     /// Event queue
     events: EventQueue,
     /// Initial wall-clock time.
@@ -165,9 +170,35 @@ impl Scheduler {
         }
     }
 
+    /// Handle an asynchronous event from the event queue
+    fn handle_async_event(
+        event: AsyncEvent,
+        tag: Tag,
+        events: &mut EventQueue,
+        store: &mut Pin<Box<Store>>,
+        reaction_graph: &ReactionGraph,
+    ) {
+        let reactions = event.downstream_reactions(reaction_graph);
+        match event {
+            AsyncEvent::Logical { delay, key, value } => {
+                let tag = tag.delay(delay);
+                events.push_event(tag, reactions, false);
+                store.push_action_value(key, tag, value);
+            }
+            AsyncEvent::Physical { tag, key, value } => {
+                events.push_event(tag, reactions, false);
+                store.push_action_value(key, tag, value);
+            }
+            AsyncEvent::Shutdown { tag } => {
+                events.push_event(tag, reactions, true);
+                //self.shutdown_tag = Some(tag);
+            }
+        }
+    }
+
     /// Execute startup of the Scheduler.
     #[tracing::instrument(skip(self))]
-    fn startup(&mut self) {
+    fn startup(&mut self) -> Tag {
         //#[cfg(feature = "parallel")]
         //rayon::ThreadPoolBuilder::new()
         //    .num_threads(4)
@@ -184,6 +215,8 @@ impl Scheduler {
 
         tracing::info!(tag = %tag, "Starting the execution.");
         self.process_tag(tag, reaction_set.view());
+
+        tag
     }
 
     /// Final shutdown of the Scheduler. The last tag has already been processed.
@@ -208,7 +241,7 @@ impl Scheduler {
 
     /// Try to receive an asynchronous event
     #[tracing::instrument(skip(self))]
-    fn receive_event(&mut self) -> Option<PhysicalEvent> {
+    fn receive_event(&mut self) -> Option<AsyncEvent> {
         if let Some(shutdown) = self.shutdown_tag {
             let abs = shutdown.to_logical_time(self.start_time);
             if let Some(timeout) = abs.checked_duration_since(Timestamp::now()) {
@@ -228,19 +261,41 @@ impl Scheduler {
 
     #[tracing::instrument(skip(self))]
     pub fn event_loop(&mut self) {
-        self.startup();
+        let mut current_tag = self.startup();
+
         loop {
             // Push pending events into the queue
-            for physical_event in self.event_rx.try_iter() {
-                self.events.push_event(
-                    physical_event.tag,
-                    physical_event.downstream_reactions(&self.reaction_graph),
-                    physical_event.terminal,
+            for async_event in self.event_rx.try_iter() {
+                Self::handle_async_event(
+                    async_event,
+                    current_tag,
+                    &mut self.events,
+                    &mut self.store,
+                    &self.reaction_graph,
                 );
             }
 
+            //let next_tag = self.events.peek_tag();
+            //tracing::debug!("acquire tag {next_tag:?} from physical time barrier");
+            //let result = PhysicalTimeBarrier::acquire_tag(next_tag, lock, this, [&t_next, this]() { return t_next != event_queue_.next_tag(); });
+
             if let Some(mut event) = self.events.event_queue.pop() {
                 tracing::debug!(event = %event, "Handling event");
+
+                if Some(event.tag) == self.events.peek_tag() {
+                    // The next event is at the same time as the one we are processing
+                    // This can happen if the event we are processing triggers a new event at the same time
+                    // We need to process all events at the same time before moving on
+                    //while let Some(next_event) = self.events.event_queue.pop() {
+                    //    if next_event.tag == event.tag {
+                    //        event.reactions.extend_above(next_event.reactions.view());
+                    //    } else {
+                    //        self.events.event_queue.push(next_event);
+                    //        break;
+                    //    }
+                    //}
+                    tracing::warn!("Next event is at the same time as the one we are processing");
+                }
 
                 if !self.config.fast_forward {
                     let target = event.tag.to_logical_time(self.start_time);
@@ -262,15 +317,19 @@ impl Scheduler {
                 // Return the ReactionSet to the free pool
                 self.events.free_reaction_sets.push(event.reactions);
 
+                current_tag = event.tag;
+
                 if event.terminal {
                     // Break out of the event loop;
                     break;
                 }
-            } else if let Some(event) = self.receive_event() {
-                self.events.push_event(
-                    event.tag,
-                    event.downstream_reactions(&self.reaction_graph),
-                    event.terminal,
+            } else if let Some(async_event) = self.receive_event() {
+                Self::handle_async_event(
+                    async_event,
+                    current_tag,
+                    &mut self.events,
+                    &mut self.store,
+                    &self.reaction_graph,
                 );
             } else {
                 tracing::debug!("No more events in queue. -> Terminate!");
@@ -302,11 +361,11 @@ impl Scheduler {
                     tracing::debug!(event = %event, "Sleep interrupted by async event");
                     let mut reactions = self.events.next_reaction_set();
                     reactions.extend_above(event.downstream_reactions(&self.reaction_graph));
-                    return Some(ScheduledEvent {
-                        tag: event.tag,
-                        reactions,
-                        terminal: event.terminal,
-                    });
+                    //return Some(ScheduledEvent {
+                    //    tag: event.tag,
+                    //    reactions,
+                    //    terminal: event.terminal,
+                    //});
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     let remaining: Option<Duration> =

@@ -30,7 +30,7 @@ impl Debug for EnvBuilder {
                 let fqn = self.action_fqn(action_key).unwrap();
                 (
                     format!("{action_key:?}"),
-                    format!("{fqn} : <{ty:?}>", ty = action.get_type()),
+                    format!("{fqn} : <{ty:?}>", ty = action.r#type()),
                 )
             })
             .collect::<BTreeMap<_, _>>();

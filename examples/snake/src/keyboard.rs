@@ -52,9 +52,19 @@ mod example {
 
 #[cfg(not(windows))]
 fn main() {
+    use boomerang::prelude::*;
     tracing_subscriber::fmt::init();
-    let _ =
-        boomerang_util::runner::build_and_run_reactor::<example::Example>("printer", ()).unwrap();
+
+    let mut env_builder = EnvBuilder::new();
+    let _reactor = example::Example::build("printer", (), None, None, &mut env_builder).unwrap();
+
+    let (env, triggers, _) = env_builder.into_runtime_parts().unwrap();
+
+    let config = runtime::Config::default()
+        .with_fast_forward(false)
+        .with_keep_alive(true);
+    let mut sched = runtime::Scheduler::new(env, triggers, config);
+    sched.event_loop();
 }
 
 #[cfg(windows)]

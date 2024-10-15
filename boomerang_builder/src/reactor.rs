@@ -5,7 +5,7 @@ use super::{
     EnvBuilder, FindElements, Input, Logical, Output, Physical, PhysicalActionKey, PortTag,
     ReactionBuilderState, TimerActionKey, TimerSpec, TriggerMode, TypedActionKey, TypedPortKey,
 };
-use crate::runtime;
+use crate::{reaction_closure, runtime};
 use boomerang_runtime::BoxedReactionFn;
 use slotmap::SecondaryMap;
 
@@ -301,7 +301,8 @@ impl<'a> ReactorBuilderState<'a> {
             .action_builders
             .iter()
             .find(|(_, action)| {
-                action.get_reactor_key() == reactor_key && *action.get_type() == ActionType::Startup
+                matches!(action.r#type(), ActionType::Startup)
+                    && action.reactor_key() == reactor_key
             })
             .map(|(action_key, _)| action_key)
             .expect("Startup action not found");
@@ -310,8 +311,8 @@ impl<'a> ReactorBuilderState<'a> {
             .action_builders
             .iter()
             .find(|(_, action)| {
-                action.get_reactor_key() == reactor_key
-                    && *action.get_type() == ActionType::Shutdown
+                matches!(action.r#type(), ActionType::Shutdown)
+                    && action.reactor_key() == reactor_key
             })
             .map(|(action_key, _)| action_key)
             .expect("Shutdown action not found");
@@ -346,6 +347,12 @@ impl<'a> ReactorBuilderState<'a> {
         spec: TimerSpec,
     ) -> Result<TimerActionKey, BuilderError> {
         let action_key = self.add_logical_action::<()>(name, spec.period)?;
+
+        let startup_fn = reaction_closure!(ctx, _state, _ref_ports, _mut_ports, actions => {
+            let mut timer: runtime::ActionRef = actions.partition_mut().unwrap();
+            timer.schedule(ctx, (), spec.offset);
+        });
+
         let startup_key = self.startup_action;
 
         // self.add_reaction(&format!("_{name}_startup"), Box::new(startup_fn))
@@ -358,7 +365,12 @@ impl<'a> ReactorBuilderState<'a> {
         .finish()?;
 
         if spec.period.is_some() {
-            self.add_reaction(&format!("_{name}_reset"), runtime::reaction::timer_reset_fn)
+            let reset_fn = reaction_closure!(ctx, _state, _ref_ports, _mut_ports, actions => {
+                let mut timer: runtime::ActionRef = actions.partition_mut().unwrap();
+                timer.schedule(ctx, (), None);
+            });
+
+            self.add_reaction(&format!("_{name}_reset"), reset_fn)
                 .with_action(action_key, 0, TriggerMode::TriggersAndEffects)?
                 .finish()?;
         }
@@ -483,25 +495,29 @@ impl<'a> ReactorBuilderState<'a> {
         f(self.reactor_key, self.env)
     }
 
-    /// Bind 2 ports on this reactor. This has the logical meaning of "connecting" `port_a` to
+    /// Connect 2 ports on this reactor. This has the logical meaning of "connecting" `port_a` to
     /// `port_b`.
-    pub fn bind_port<T: runtime::ReactorData, Q1: PortTag, Q2: PortTag>(
+    pub fn connect_port<T: runtime::ReactorData + Clone, Q1: PortTag, Q2: PortTag>(
         &mut self,
         port_a_key: TypedPortKey<T, Q1>,
         port_b_key: TypedPortKey<T, Q2>,
+        after: Option<Duration>,
+        physical: bool,
     ) -> Result<(), BuilderError> {
-        self.env.bind_port(port_a_key, port_b_key)
+        self.env
+            .connect_ports::<T, _, _>(port_a_key, port_b_key, after, physical)
     }
 
-    /// Bind multiple ports on this reactor. This has the logical meaning of "connecting"
-    /// `ports_from` to `ports_to`.
-    pub fn bind_ports<T: runtime::ReactorData, Q1: PortTag, Q2: PortTag>(
+    /// Connect multiple ports on this reactor. This has the logical meaning of "connecting" `ports_from` to `ports_to`.
+    pub fn connect_ports<T: runtime::ReactorData + Clone, Q1: PortTag, Q2: PortTag>(
         &mut self,
         ports_from: impl Iterator<Item = TypedPortKey<T, Q1>>,
         ports_to: impl Iterator<Item = TypedPortKey<T, Q2>>,
+        after: Option<Duration>,
+        physical: bool,
     ) -> Result<(), BuilderError> {
         for (port_from, port_to) in ports_from.zip(ports_to) {
-            self.env.bind_port(port_from, port_to)?;
+            self.connect_port::<T, _, _>(port_from, port_to, after, physical)?;
         }
         Ok(())
     }

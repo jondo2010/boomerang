@@ -33,25 +33,25 @@ struct SlowingClockPhysical {
 
 #[derive(Reaction)]
 #[reaction(reactor = "SlowingClockPhysical", triggers(startup))]
-struct ReactionStartup {
-    a: runtime::PhysicalActionRef,
+struct ReactionStartup<'a> {
+    a: runtime::ActionRef<'a>,
 }
 
-impl runtime::Trigger<State> for ReactionStartup {
+impl runtime::Trigger<State> for ReactionStartup<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut State) {
         state.expected_time = Duration::from_millis(100);
-        ctx.schedule_action(&mut self.a, None, None);
+        self.a.schedule(ctx, (), None);
     }
 }
 
 #[derive(Reaction)]
 #[reaction(reactor = "SlowingClockPhysical")]
-struct ReactionA {
+struct ReactionA<'a> {
     #[reaction(triggers)]
-    a: runtime::PhysicalActionRef,
+    a: runtime::ActionRef<'a>,
 }
 
-impl runtime::Trigger<State> for ReactionA {
+impl runtime::Trigger<State> for ReactionA<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut State) {
         let elapsed_logical_time = ctx.get_elapsed_logical_time();
         println!("Logical time since start: {elapsed_logical_time:?}");
@@ -66,7 +66,7 @@ impl runtime::Trigger<State> for ReactionA {
             "Scheduling next to occur approximately after: {:?}",
             state.interval
         );
-        ctx.schedule_action(&mut self.a, None, Some(state.interval));
+        self.a.schedule(ctx, (), Some(state.interval));
     }
 }
 

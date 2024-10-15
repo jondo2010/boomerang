@@ -57,6 +57,11 @@ impl EventQueue {
             .unwrap_or_else(|| ReactionSet::new(&self.reaction_set_limits))
     }
 
+    /// Peek the tag of the next event in the queue
+    fn peek_tag(&self) -> Option<Tag> {
+        self.event_queue.peek().map(|event| event.tag)
+    }
+
     /// If the event queue still has events on it, report that.
     fn shutdown(&mut self) {
         if !self.event_queue.is_empty() {
@@ -238,6 +243,11 @@ impl Scheduler {
                     physical_event.terminal,
                 );
             }
+
+
+            let next_tag = self.events.peek_tag();
+            tracing::debug!("acquire tag {next_tag:?} from physical time barrier");
+            //let result = PhysicalTimeBarrier::acquire_tag(next_tag, lock, this, [&t_next, this]() { return t_next != event_queue_.next_tag(); });
 
             if let Some(mut event) = self.events.event_queue.pop() {
                 tracing::debug!(event = %event, "Handling event");

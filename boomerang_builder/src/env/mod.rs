@@ -362,6 +362,14 @@ impl EnvBuilder {
             .ok_or_else(|| BuilderError::NamedActionNotFound(action_fqn.to_string()))
     }
 
+    /// Connect two ports together
+    pub fn connect_ports<P1, P2>(&mut self, port_a_key: P1, port_b_key: P2, after: Option<Duration>) -> Result<(), BuilderError>
+    where
+        P1: Into<BuilderPortKey>,
+        P2: Into<BuilderPortKey>,
+    {
+    }
+
     /// Bind Port A to Port B
     /// The nominal case is to bind Input A to Output B
     pub fn bind_port<P1, P2>(&mut self, port_a_key: P1, port_b_key: P2) -> Result<(), BuilderError>

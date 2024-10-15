@@ -4,6 +4,7 @@
 #![deny(clippy::all)]
 
 mod action;
+pub mod connection;
 mod context;
 mod env;
 mod event;

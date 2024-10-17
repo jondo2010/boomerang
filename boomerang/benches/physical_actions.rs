@@ -40,7 +40,7 @@ impl<T: ActionData + Default> runtime::Trigger<State> for ReactionRun<T> {
         }
 
         let mut send_ctx = ctx.make_send_context();
-        let mut a = self.a.clone();
+        let mut a = self.a; //.clone();
 
         // start new thread
         state.thread = Some(std::thread::spawn(move || {

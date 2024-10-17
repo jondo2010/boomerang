@@ -3,7 +3,7 @@ use std::{collections::BinaryHeap, pin::Pin, time::Duration};
 
 use crate::{
     build_reaction_contexts,
-    event::{PhysicalEvent, ScheduledEvent},
+    event::{AsyncEvent, ScheduledEvent},
     keepalive,
     key_set::KeySetView,
     store::Store,
@@ -128,7 +128,7 @@ pub struct Scheduler {
     /// The reaction graph containing all static dependency and relationship information
     reaction_graph: ReactionGraph,
     /// Asynchronous events receiver
-    event_rx: Receiver<PhysicalEvent>,
+    event_rx: Receiver<AsyncEvent>,
     /// Event queue
     events: EventQueue,
     /// Initial wall-clock time.
@@ -169,6 +169,24 @@ impl Scheduler {
             shutdown_tx,
         }
     }
+
+
+    /// Handle an asynchronous event from the event queue
+    fn handle_async_event(&mut self, event: AsyncEvent, reaction_graph: &ReactionGraph) {
+        let reactions = event.downstream_reactions(reaction_graph);
+        match event {
+            AsyncEvent::Logical { delay, key, value } => todo!(),
+            AsyncEvent::Physical { tag, key, value } => {
+                self.events.push_event(tag, reactions, false);
+                self.store.push_action_value(key, tag, value);
+            },
+            AsyncEvent::Shutdown { tag } => {
+                self.shutdown_tag = Some(tag);
+                self.events.push_event(tag, reactions, true);
+            },
+        }
+    }
+
 
     /// Execute startup of the Scheduler.
     #[tracing::instrument(skip(self))]
@@ -213,7 +231,7 @@ impl Scheduler {
 
     /// Try to receive an asynchronous event
     #[tracing::instrument(skip(self))]
-    fn receive_event(&mut self) -> Option<PhysicalEvent> {
+    fn receive_event(&mut self) -> Option<AsyncEvent> {
         if let Some(shutdown) = self.shutdown_tag {
             let abs = shutdown.to_logical_time(self.start_time);
             if let Some(timeout) = abs.checked_duration_since(Timestamp::now()) {
@@ -236,14 +254,16 @@ impl Scheduler {
         self.startup();
         loop {
             // Push pending events into the queue
-            for physical_event in self.event_rx.try_iter() {
+            for async_event in self.event_rx.try_iter() {
+                let action = &self.store.
+                async_event.key
+
                 self.events.push_event(
-                    physical_event.tag,
-                    physical_event.downstream_reactions(&self.reaction_graph),
-                    physical_event.terminal,
+                    async_event.tag,
+                    async_event.downstream_reactions(&self.reaction_graph),
+                    async_event.terminal,
                 );
             }
-
 
             let next_tag = self.events.peek_tag();
             tracing::debug!("acquire tag {next_tag:?} from physical time barrier");

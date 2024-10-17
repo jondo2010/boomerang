@@ -1,5 +1,8 @@
-use crate::{ActionKey, LevelReactionKey, ReactionGraph, ReactionSet, Tag};
+use std::time::Duration;
 
+use crate::{ActionData, ActionKey, LevelReactionKey, ReactionGraph, ReactionSet, Tag};
+
+/// `ScheduledEvent` is used internally by the scheduler loop in the event queue. The dependent reactions are already expanded into a single reaction set.
 #[derive(Debug, Clone)]
 pub struct ScheduledEvent {
     /// The [`Tag`] at which the reactions in this event should be executed.
@@ -39,46 +42,98 @@ impl Ord for ScheduledEvent {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct PhysicalEvent {
-    /// The [`Tag`] at which the reactions in this event should be executed.
-    pub(crate) tag: Tag,
-    /// The key of the action that triggered this event.
-    pub(crate) key: ActionKey,
-    /// Whether the scheduler should terminate after processing this event.
-    pub(crate) terminal: bool,
+/// `AsyncEvent` is used to inject events into the scheduler from outside of the normal event loop.
+#[derive(Debug)]
+pub enum AsyncEvent {
+    /// A Logical event should execute at the current logical time (+ an optional delay). The current logical time of
+    /// the scheduler is not available to the caller, so the scheduler adds this when pulling the event from the
+    /// channel.
+    Logical {
+        /// The delay that should be applied to this event. This will be added to the current logical time to determine
+        /// the tag.
+        delay: Duration,
+        /// The key of the action that triggered this event.
+        key: ActionKey,
+        /// The value associated with this event.
+        value: Option<Box<dyn ActionData>>,
+    },
+
+    /// A Physical event has its `tag` set to the current physical time (+ an optional delay).
+    Physical {
+        /// The [`Tag`] at which the reactions in this event should be executed.
+        tag: Tag,
+        /// The [`ActionKey`] of the action that triggered this event.
+        key: ActionKey,
+        /// The value associated with this event.
+        value: Option<Box<dyn ActionData>>,
+    },
+
+    /// The scheduler should terminate after processing this event.
+    Shutdown {
+        /// The [`Tag`] at which the reactions in this event should be executed.
+        tag: Tag,
+    },
 }
 
-impl std::fmt::Display for PhysicalEvent {
+impl std::fmt::Display for AsyncEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "P[tag={},terminal={}]", self.tag, self.terminal)
+        match self {
+            AsyncEvent::Logical { delay, key, value } => {
+                write!(
+                    f,
+                    "AsyncLogical[delay={delay},key={key:?},value={value:?}]",
+                    delay = delay.as_secs_f64()
+                )
+            }
+            AsyncEvent::Physical { tag, key, value } => {
+                write!(
+                    f,
+                    "AsyncPhysical[tag={tag},key={key:?},value={value:?}]",
+                    tag = tag,
+                    key = key
+                )
+            }
+            AsyncEvent::Shutdown { tag } => {
+                write!(f, "AsyncShutdown[tag={tag}]")
+            }
+        }
     }
 }
 
-impl PhysicalEvent {
-    /// Create a trigger event.
-    pub(crate) fn trigger(key: ActionKey, tag: Tag) -> Self {
-        Self {
-            tag,
+impl AsyncEvent {
+    /// Create a logical event.
+    pub(crate) fn logical(
+        key: ActionKey,
+        delay: Duration,
+        value: Option<Box<dyn ActionData>>,
+    ) -> Self {
+        AsyncEvent::Logical {
+            delay,
             key,
-            terminal: false,
+            value,
         }
+    }
+
+    /// Create a physical event.
+    pub(crate) fn physical(key: ActionKey, tag: Tag, value: Option<Box<dyn ActionData>>) -> Self {
+        AsyncEvent::Physical { tag, key, value }
     }
 
     /// Create a shutdown event.
     pub(crate) fn shutdown(tag: Tag) -> Self {
-        Self {
-            tag,
-            key: ActionKey::default(),
-            terminal: true,
-        }
+        AsyncEvent::Shutdown { tag }
     }
 
+    /// Get an iterator over the downstream reactions of this event.
     pub fn downstream_reactions<'a>(
         &'a self,
         reaction_graph: &'a ReactionGraph,
     ) -> impl Iterator<Item = LevelReactionKey> + 'a {
-        reaction_graph.action_triggers[self.key].iter().copied()
+        match self {
+            AsyncEvent::Logical { key, .. } => reaction_graph.action_triggers[*key].iter().copied(),
+            AsyncEvent::Physical { key, .. } => reaction_graph.action_triggers[*key].iter().copied(),
+            AsyncEvent::Shutdown { .. } => reaction_graph.shutdown_reactions.iter().copied(),
+        }
     }
 }
 

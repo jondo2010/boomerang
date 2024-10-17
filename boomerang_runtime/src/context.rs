@@ -3,7 +3,7 @@ use std::time::Duration;
 use crossbeam_channel::Sender;
 
 use crate::{
-    event::PhysicalEvent, keepalive, ActionData, ActionKey, ActionRefValue, BankInfo,
+    event::AsyncEvent, keepalive, ActionData, ActionKey, ActionRefValue, BankInfo,
     PhysicalActionRef, ReactionGraph, ReactionKey, Tag, Timestamp,
 };
 
@@ -27,7 +27,7 @@ pub struct Context {
     pub(crate) bank_info: Option<BankInfo>,
 
     /// Channel for asynchronous events
-    pub(crate) async_tx: Sender<PhysicalEvent>,
+    pub(crate) async_tx: Sender<AsyncEvent>,
     /// Shutdown channel
     pub(crate) shutdown_rx: keepalive::Receiver,
 
@@ -51,7 +51,7 @@ impl Context {
     pub(crate) fn new(
         start_time: Timestamp,
         bank_info: Option<BankInfo>,
-        async_tx: Sender<PhysicalEvent>,
+        async_tx: Sender<AsyncEvent>,
         shutdown_rx: keepalive::Receiver,
     ) -> Self {
         Self {
@@ -156,7 +156,7 @@ pub struct SendContext {
     /// Physical time the Scheduler was started
     pub start_time: Timestamp,
     /// Channel for asynchronous events
-    pub(crate) async_tx: Sender<PhysicalEvent>,
+    pub(crate) async_tx: Sender<AsyncEvent>,
     /// Shutdown channel
     shutdown_rx: keepalive::Receiver,
 }
@@ -174,7 +174,7 @@ impl SendContext {
         let new_tag = Tag::absolute(self.start_time, Timestamp::now().offset(tag_delay));
         action.set_value(value, new_tag);
         tracing::info!(new_tag = %new_tag, key = ?action.key, "Scheduling Physical");
-        let event = PhysicalEvent::trigger(action.key, new_tag);
+        let event = AsyncEvent::trigger(action.key, new_tag, None);
         self.async_tx.send(event).unwrap();
     }
 
@@ -195,7 +195,7 @@ impl ContextCommon for SendContext {
             self.start_time,
             Timestamp::now().offset(offset.unwrap_or_default()),
         );
-        let event = PhysicalEvent::shutdown(tag);
+        let event = AsyncEvent::shutdown(tag);
         self.async_tx.send(event).unwrap();
     }
 }
@@ -204,7 +204,7 @@ impl ContextCommon for SendContext {
 pub fn build_reaction_contexts(
     reaction_graph: &ReactionGraph,
     start_time: Timestamp,
-    event_tx: crossbeam_channel::Sender<PhysicalEvent>,
+    event_tx: crossbeam_channel::Sender<AsyncEvent>,
     shutdown_rx: keepalive::Receiver,
 ) -> tinymap::TinySecondaryMap<ReactionKey, Context> {
     reaction_graph

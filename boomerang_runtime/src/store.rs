@@ -4,8 +4,8 @@ use std::{marker::PhantomPinned, pin::Pin, ptr::NonNull};
 
 use crate::{
     refs::{Refs, RefsMut},
-    Action, ActionKey, BasePort, Context, ContextCommon, Deadline, PortKey, Reaction, ReactionKey,
-    Reactor, ReactorKey, Tag, TriggerRes,
+    Action, Action2, ActionData, ActionKey, BaseAction, BasePort, Context, ContextCommon, Deadline,
+    PortKey, Reaction, ReactionKey, Reactor, ReactorKey, Tag, TriggerRes,
 };
 
 use super::{Env, ReactionGraph};
@@ -107,6 +107,7 @@ struct Inner {
     reactors: tinymap::TinyMap<ReactorKey, Reactor>,
     reactions: tinymap::TinyMap<ReactionKey, Reaction>,
     actions: tinymap::TinyMap<ActionKey, Action>,
+    actions2: tinymap::TinyMap<ActionKey, Box<dyn BaseAction>>,
     ports: tinymap::TinyMap<PortKey, Box<dyn BasePort>>,
 }
 
@@ -233,6 +234,17 @@ impl Store {
         }
 
         Box::into_pin(boxed)
+    }
+
+    pub fn push_action_value(
+        self: &mut Pin<Box<Self>>,
+        action_key: ActionKey,
+        tag: Tag,
+        value: Option<Box<dyn ActionData>>,
+    ) {
+        // SAFETY: we are not moving anything from self
+        let actions = &mut unsafe { self.as_mut().get_unchecked_mut() }.inner.actions2;
+        actions[action_key].push_value(tag, value);
     }
 
     /// Returns an `Iterator` of `ReactionTriggerCtx` for each `Reaction` in the given `reaction_keys`.

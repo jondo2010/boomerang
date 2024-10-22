@@ -27,7 +27,7 @@ linkme = { version = "0.3" }
 # Local crates
 boomerang = { path = "boomerang", version = "0.3.0" }
 boomerang_derive = { path = "boomerang_derive", version = "0.3.0" }
-boomerang_runtime = { path = "boomerang_runtime", version = "0.3.0", default-features = false }
+boomerang_runtime = { path = "boomerang_runtime", version = "0.3.0" }
 boomerang_tinymap = { path = "boomerang_tinymap", version = "0.3.0" }
 boomerang_util = { path = "boomerang_util", version = "0.3.0" }
 boomerang_builder = { path = "boomerang_builder", version = "0.3.0" }

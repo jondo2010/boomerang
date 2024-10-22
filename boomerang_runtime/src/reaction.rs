@@ -30,9 +30,9 @@ pub trait ReactionFn<'store>: SerdeDataObj + Send + Sync {
     }
 }
 
-impl Debug for dyn for<'store> ReactionFn<'store> {
+impl Debug for BoxedReactionFn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ReactionFn<{}>", self.type_name())
+        write!(f, "BoxedReactionFn<{}>", self.type_name())
     }
 }
 
@@ -46,16 +46,8 @@ pub fn empty_reaction(
 ) {
 }
 
-#[cfg(feature = "parallel")]
-pub type BoxedReactionFn = Box<dyn for<'store> ReactionFn<'store> + Send + Sync>;
-
-#[cfg(not(feature = "parallel"))]
 pub type BoxedReactionFn = Box<dyn for<'store> ReactionFn<'store>>;
 
-#[cfg(feature = "parallel")]
-pub type BoxedHandlerFn = Box<dyn Fn() + Send + Sync>;
-
-#[cfg(not(feature = "parallel"))]
 pub type BoxedHandlerFn = Box<dyn Fn()>;
 
 /// Conversion trait for creating a Reaction struct from port and action references.
@@ -173,7 +165,8 @@ where
             Refs<'store, dyn BasePort>,
             RefsMut<'store, dyn BasePort>,
             RefsMut<'store, Action>,
-        ) + ParallelData,
+        ) + Send
+        + Sync,
 {
     fn id(&self) -> serde_flexitos::id::Ident<'static> {
         serde_flexitos::id::Ident::I2("FnWrapper", std::any::type_name::<F>())

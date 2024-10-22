@@ -17,11 +17,11 @@ default = []
 ## Support for built-in CLI/runner methods
 runner = ["dep:clap", "dep:anyhow", "boomerang/graphviz"]
 
-## Support for serde serialization
+# Support for serde serialization
 #serde = ["boomerang/serde", "dep:erased-serde", "dep:linkme", "dep:serde"]
 
-## Support for recording and replaying
-replay = ["serde", "dep:bincode"]
+# Support for recording and replaying
+#replay = ["serde", "dep:bincode"]
 
 [dependencies]
 anyhow = { version = "1.0", optional = true }

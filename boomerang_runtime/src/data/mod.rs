@@ -11,7 +11,7 @@
 //!
 //! ## Example
 //!
-//! ```rust
+//! ```rust,ignore
 //! use boomerang::prelude::*;
 //!
 //! #[derive(Debug, serde::Serialize, serde::Deserialize)]

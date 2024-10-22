@@ -115,7 +115,7 @@ pub struct ReactionGraph {
 pub mod tests {
     use itertools::Itertools;
 
-    use crate::{register_reaction_fn, BaseReactor, Context, Port, ReactionSetLimits, Reactor};
+    use crate::{BaseReactor, Context, Port, ReactionSetLimits, Reactor};
 
     use super::*;
 
@@ -129,7 +129,8 @@ pub mod tests {
     ) {
     }
 
-    register_reaction_fn!(FnWrapper<dummy_reaction_fn>);
+    #[cfg(feature = "serde")]
+    crate::register_reaction_fn!(FnWrapper<dummy_reaction_fn>);
 
     /// Create a dummy `Env` and `ReactionGraph` for testing.
     pub fn create_dummy_env() -> (Env, ReactionGraph) {

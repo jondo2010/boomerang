@@ -18,7 +18,7 @@ use std::{cmp::Ordering, sync::Arc};
 
 use downcast_rs::Downcast;
 
-use crate::data::{ParallelData, SerdeDataObj};
+use crate::data::SerdeDataObj;
 use crate::{ReactorData, Tag};
 
 #[derive(Debug)]
@@ -54,7 +54,7 @@ impl<T: ReactorData> PartialEq for ActionEntry<T> {
     }
 }
 
-pub trait BaseActionStore: Debug + ParallelData + Downcast + SerdeDataObj {
+pub trait BaseActionStore: Debug + Downcast + SerdeDataObj + Send + Sync {
     /// Remove any value at the given Tag
     fn clear_older_than(&mut self, tag: Tag);
 
@@ -76,13 +76,21 @@ pub trait BaseActionStore: Debug + ParallelData + Downcast + SerdeDataObj {
 
 downcast_rs::impl_downcast!(BaseActionStore);
 
-#[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ActionStore<T: ReactorData> {
     #[cfg_attr(feature = "serde", serde(skip))]
     heap: BinaryHeap<ActionEntry<T>>,
     #[cfg_attr(feature = "serde", serde(skip))]
     counter: usize,
+}
+
+impl<T: ReactorData> Debug for ActionStore<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActionStore")
+            //.field("heap", &self.heap)
+            .field("counter", &self.counter)
+            .finish()
+    }
 }
 
 impl<T: ReactorData> Default for ActionStore<T> {
@@ -176,7 +184,7 @@ impl<T: ReactorData> BaseActionStore for ActionStore<T> {
     }
 
     fn boxed_to_mutex(self: Box<Self>) -> Arc<Mutex<dyn BaseActionStore>> {
-        Arc::new(Mutex::new(*self))
+        Arc::new(Mutex::new(*self)) as _
     }
 }
 

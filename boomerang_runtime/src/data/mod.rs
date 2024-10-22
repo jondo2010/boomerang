@@ -44,8 +44,6 @@
 //! - [`String`]
 //! - [`std::path::PathBuf`]
 
-use std::fmt::Debug;
-
 #[cfg(feature = "serde")]
 pub mod macros;
 
@@ -80,22 +78,9 @@ mod serde_impl {
     impl<T> SerdeDataObj for T {}
 }
 
-//#[cfg(feature = "parallel")]
-mod parallel_impl {
-    pub trait ParallelData: Send + Sync {}
-    impl<T> ParallelData for T where T: Send + Sync {}
-}
-
-//#[cfg(not(feature = "parallel"))]
-//mod parallel_impl {
-//    pub trait ParallelData {}
-//    impl<T> ParallelData for T {}
-//}
-
-pub use parallel_impl::*;
 pub use serde_impl::*;
 
 /// Types implementing this trait can be used as data in ports, actions, and reactors.
-pub trait ReactorData: Debug + SerdeData + ParallelData + 'static {}
+pub trait ReactorData: SerdeData + Send + Sync + 'static {}
 
-impl<T> ReactorData for T where T: Debug + SerdeData + ParallelData + 'static {}
+impl<T> ReactorData for T where T: SerdeData + Send + Sync + 'static {}

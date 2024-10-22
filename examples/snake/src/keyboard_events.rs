@@ -6,9 +6,7 @@ pub use termion::event::Key;
 use termion::raw::{IntoRawMode, RawTerminal};
 
 #[derive(Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct KeyboardEvents {
-    #[cfg_attr(feature = "serde", serde(skip))]
     raw_terminal: Option<RawTerminal<Stdout>>,
 }
 
@@ -17,11 +15,6 @@ impl std::fmt::Debug for KeyboardEvents {
         f.debug_struct("KeyboardEvents").finish()
     }
 }
-
-#[cfg(feature = "serde")]
-register_type!(KeyboardEvents);
-#[cfg(feature = "serde")]
-register_type!(Key);
 
 #[derive(Reactor, Clone)]
 #[reactor(

@@ -26,8 +26,16 @@ impl PortTag for Output {
     const TYPE: PortType = PortType::Output;
 }
 
-#[derive(Debug)]
 pub struct TypedPortKey<T: runtime::ReactorData, Q: PortTag>(BuilderPortKey, PhantomData<(T, Q)>);
+
+impl<T: runtime::ReactorData, Q: PortTag> Debug for TypedPortKey<T, Q> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("TypedPortKey")
+            .field(&self.0)
+            .field(&self.1)
+            .finish()
+    }
+}
 
 impl<T: runtime::ReactorData, Q: PortTag> Copy for TypedPortKey<T, Q> {}
 

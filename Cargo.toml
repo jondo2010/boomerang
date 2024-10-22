@@ -40,6 +40,7 @@ members = [
     "boomerang_derive",
     "boomerang_runtime",
     "boomerang_tinymap",
+    "examples/snake",
 ]
 resolver = "2"
 

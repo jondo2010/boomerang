@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{fmt::Debug, time::Duration};
 
 use super::{
     ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
@@ -178,16 +178,22 @@ impl ReactorField for PhysicalActionKey {
     }
 }
 
-#[derive(Debug)]
 pub(super) struct ReactorState<T: runtime::ReactorData>(T);
 
-pub(super) trait BaseReactorState: std::fmt::Debug {
+pub(super) trait BaseReactorState: Debug {
     fn into_runtime(self: Box<Self>, name: &str) -> Box<dyn runtime::BaseReactor>;
 }
 
 impl<T: runtime::ReactorData> BaseReactorState for ReactorState<T> {
     fn into_runtime(self: Box<Self>, name: &str) -> Box<dyn runtime::BaseReactor> {
         runtime::Reactor::new(name, self.0).boxed()
+    }
+}
+
+impl<T: runtime::ReactorData> Debug for ReactorState<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct(&format!("ReactorState<{}>", std::any::type_name::<T>()))
+            .finish()
     }
 }
 

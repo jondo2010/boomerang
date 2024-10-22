@@ -1,9 +1,3 @@
-//! A snake terminal game. Does not support windows.
-//!
-//! Original source:
-//!     Author: Clément Fournier
-//!     Git: https://github.com/lf-lang/reactor-rust/examples/src/Snake.lf
-
 #[cfg(not(windows))]
 mod support;
 
@@ -13,7 +7,7 @@ mod reactor {
 
     use super::support::*;
     use boomerang::prelude::*;
-    use boomerang_util::keyboard_events::{Key, KeyboardEvents, KeyboardEventsBuilder};
+    use keyboard_events::{Key, KeyboardEvents, KeyboardEventsBuilder};
 
     #[derive(Reactor)]
     #[reactor(

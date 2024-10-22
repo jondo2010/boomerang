@@ -4,14 +4,11 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use crate::{
-    data::{ParallelData, SerdeDataObj},
-    ReactorData,
-};
+use crate::{data::SerdeDataObj, ReactorData};
 
 tinymap::key_type!(pub PortKey);
 
-pub trait BasePort: Debug + Display + ParallelData + Downcast + SerdeDataObj {
+pub trait BasePort: Debug + Display + Downcast + SerdeDataObj + Send + Sync {
     /// Get the name of this port
     fn get_name(&self) -> &str;
 
@@ -29,12 +26,21 @@ pub trait BasePort: Debug + Display + ParallelData + Downcast + SerdeDataObj {
 }
 impl_downcast!(BasePort);
 
-#[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Port<T: ReactorData> {
     name: String,
     key: PortKey,
     value: Option<T>,
+}
+
+impl<T: ReactorData> Debug for Port<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Port")
+            .field("name", &self.name)
+            .field("key", &self.key)
+            //.field("value", &self.value)
+            .finish()
+    }
 }
 
 #[cfg(feature = "serde")]

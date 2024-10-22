@@ -12,9 +12,11 @@ categories.workspace = true
 exclude.workspace = true
 
 [features]
-default = ["serde"]
+default = []
+
 ## Support for parallel execution
 parallel = ["dep:rayon"]
+
 ## Support for serialization
 serde = [
     "dep:arrow",

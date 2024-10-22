@@ -1,5 +1,5 @@
 use std::{
-    fmt::{Debug, Display},
+    fmt::Display,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -77,7 +77,7 @@ mod serialize_physical_action_store {
 impl PhysicalAction {
     pub fn new<T: ReactorData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
         let store = ActionStore::<T>::default();
-        let store: Arc<Mutex<dyn BaseActionStore>> = Arc::new(Mutex::new(store));
+        let store = Arc::new(Mutex::new(store)) as Arc<Mutex<dyn BaseActionStore>>;
         Self {
             name: name.into(),
             key,

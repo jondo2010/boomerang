@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    data::{ParallelData, SerdeDataObj},
+    data::SerdeDataObj,
     key_set::KeySet,
     refs::{Refs, RefsMut},
     Action, ActionRef, BasePort, BaseReactor, Context, Reactor, ReactorData,
@@ -15,7 +15,7 @@ tinymap::key_type!(pub ReactionKey);
 
 pub type ReactionSet = KeySet<ReactionKey>;
 
-pub trait ReactionFn<'store>: ParallelData + SerdeDataObj {
+pub trait ReactionFn<'store>: SerdeDataObj + Send + Sync {
     fn trigger(
         &mut self,
         ctx: &'store mut Context,
@@ -155,7 +155,8 @@ where
             Refs<'store, dyn BasePort>,
             RefsMut<'store, dyn BasePort>,
             RefsMut<'store, Action>,
-        ) + ParallelData
+        ) + Send
+        + Sync
         + 'static,
 {
     fn from(wrapper: F) -> Self {
@@ -187,7 +188,8 @@ where
             Refs<'store, dyn BasePort>,
             RefsMut<'store, dyn BasePort>,
             RefsMut<'store, Action>,
-        ) + ParallelData,
+        ) + Send
+        + Sync,
 {
     fn trigger(
         &mut self,

@@ -293,7 +293,8 @@ impl<'a> ReactorBuilderState<'a> {
             .action_builders
             .iter()
             .find(|(_, action)| {
-                action.get_reactor_key() == reactor_key && *action.get_type() == ActionType::Startup
+                matches!(action.r#type(), ActionType::Startup)
+                    && action.reactor_key() == reactor_key
             })
             .map(|(action_key, _)| action_key)
             .expect("Startup action not found");
@@ -302,8 +303,8 @@ impl<'a> ReactorBuilderState<'a> {
             .action_builders
             .iter()
             .find(|(_, action)| {
-                action.get_reactor_key() == reactor_key
-                    && *action.get_type() == ActionType::Shutdown
+                matches!(action.r#type(), ActionType::Shutdown)
+                    && action.reactor_key() == reactor_key
             })
             .map(|(action_key, _)| action_key)
             .expect("Shutdown action not found");
@@ -341,7 +342,7 @@ impl<'a> ReactorBuilderState<'a> {
 
         let startup_fn = reaction_closure!(ctx, _state, _ref_ports, _mut_ports, actions => {
             let mut timer: runtime::ActionRef = actions.partition_mut().unwrap();
-            ctx.schedule_action(&mut timer, None, spec.offset);
+            timer.schedule(ctx, (), spec.offset);
         });
 
         let startup_key = self.startup_action;
@@ -353,7 +354,7 @@ impl<'a> ReactorBuilderState<'a> {
         if spec.period.is_some() {
             let reset_fn = reaction_closure!(ctx, _state, _ref_ports, _mut_ports, actions => {
                 let mut timer: runtime::ActionRef = actions.partition_mut().unwrap();
-                ctx.schedule_action(&mut timer, None, None);
+                timer.schedule(ctx, (), None);
             });
 
             self.add_reaction(&format!("_{name}_reset"), reset_fn)

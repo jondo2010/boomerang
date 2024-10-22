@@ -5,7 +5,7 @@ use syn::{Generics, Ident, Type, TypeReference};
 
 use crate::util::extract_path_ident;
 
-use super::{ReactionReceiver, ACTION, ACTION_REF, INPUT_REF, OUTPUT_REF, PHYSICAL_ACTION_REF};
+use super::{ReactionReceiver, ACTION, ACTION_REF, ASYNC_ACTION_REF, INPUT_REF, OUTPUT_REF};
 
 pub struct FromDefsImpl {
     reaction_ident: Ident,
@@ -94,7 +94,7 @@ impl FromDefsImpl {
                         initializer_idents.push(field.ident.clone().unwrap());
                         port_mut_idents.push(field.ident.clone().unwrap());
                     }
-                    ACTION_REF | PHYSICAL_ACTION_REF => {
+                    ACTION_REF | ASYNC_ACTION_REF => {
                         initializer_idents.push(field.ident.clone().unwrap());
                         action_idents.push(field.ident.clone().unwrap());
                     }
@@ -195,7 +195,7 @@ impl ToTokens for FromDefsImpl {
                 fn from_refs<'store>(
                     ports: ::boomerang::runtime::Refs<'store, dyn ::boomerang::runtime::BasePort>,
                     ports_mut: ::boomerang::runtime::RefsMut<'store, dyn ::boomerang::runtime::BasePort>,
-                    actions: ::boomerang::runtime::RefsMut<'store, ::boomerang::runtime::Action>,
+                    actions: ::boomerang::runtime::RefsMut<'store, dyn ::boomerang::runtime::BaseAction>,
                 ) -> Self::Marker<'store> {
                     #actions
                     #ports

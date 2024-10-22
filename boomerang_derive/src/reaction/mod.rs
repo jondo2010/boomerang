@@ -17,7 +17,7 @@ const INPUT_REF: &str = "InputRef";
 const OUTPUT_REF: &str = "OutputRef";
 const ACTION: &str = "Action";
 const ACTION_REF: &str = "ActionRef";
-const PHYSICAL_ACTION_REF: &str = "PhysicalActionRef";
+const ASYNC_ACTION_REF: &str = "AsyncActionRef";
 
 #[derive(Debug, Eq, PartialEq, Hash)]
 pub enum TriggerAttr {

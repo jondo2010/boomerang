@@ -1,6 +1,6 @@
 use crate::{
-    key_set::KeySetLimits, Action, ActionKey, BasePort, PortKey, Reaction, ReactionKey, Reactor,
-    ReactorKey,
+    key_set::KeySetLimits, ActionKey, BaseAction, BasePort, PortKey, Reaction, ReactionKey,
+    Reactor, ReactorKey,
 };
 
 mod debug;
@@ -54,7 +54,7 @@ pub struct Env {
     /// The runtime set of Reactors
     pub reactors: tinymap::TinyMap<ReactorKey, Reactor>,
     /// The runtime set of Actions
-    pub actions: tinymap::TinyMap<ActionKey, Action>,
+    pub actions: tinymap::TinyMap<ActionKey, Box<dyn BaseAction>>,
     /// The runtime set of Ports
     pub ports: tinymap::TinyMap<PortKey, Box<dyn BasePort>>,
     /// The runtime set of Reactions
@@ -110,7 +110,7 @@ pub struct ReactionGraph {
 pub mod tests {
     use itertools::Itertools;
 
-    use crate::{Context, Port, ReactionSetLimits, ReactorState};
+    use crate::{Action, Context, Port, ReactionSetLimits, ReactorState};
 
     use super::*;
 
@@ -120,7 +120,7 @@ pub mod tests {
         _state: &'a mut dyn ReactorState,
         _ref_ports: crate::refs::Refs<'a, dyn BasePort>,
         _mut_ports: crate::refs::RefsMut<'a, dyn BasePort>,
-        _actions: crate::refs::RefsMut<'a, Action>,
+        _actions: crate::refs::RefsMut<'a, dyn BaseAction>,
     ) {
     }
 
@@ -132,8 +132,8 @@ pub mod tests {
                 .into_iter()
                 .collect(),
             actions: [
-                Action::new_logical::<()>("action0", ActionKey::from(0), Default::default()),
-                Action::new_logical::<()>("action1", ActionKey::from(1), Default::default()),
+                Action::<()>::new("action0", ActionKey::from(0), Default::default(), true).boxed(),
+                Action::<()>::new("action1", ActionKey::from(1), Default::default(), true).boxed(),
             ]
             .into_iter()
             .collect(),

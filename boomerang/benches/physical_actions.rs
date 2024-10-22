@@ -29,7 +29,7 @@ struct AsyncCallback<T: ActionData + Default> {
 #[derive(Reaction)]
 #[reaction(reactor = "AsyncCallback<T>", triggers(startup))]
 struct ReactionRun<T: ActionData + Default> {
-    a: runtime::PhysicalActionRef<T>,
+    a: runtime::AsyncActionRef<T>,
 }
 
 impl<T: ActionData + Default> runtime::Trigger<State> for ReactionRun<T> {
@@ -39,14 +39,14 @@ impl<T: ActionData + Default> runtime::Trigger<State> for ReactionRun<T> {
             thread.join().unwrap();
         }
 
-        let mut send_ctx = ctx.make_send_context();
-        let mut a = self.a; //.clone();
+        let send_ctx = ctx.make_send_context();
+        let a = self.a; //.clone();
 
         // start new thread
         state.thread = Some(std::thread::spawn(move || {
             let mut count = 0;
             while !send_ctx.is_shutdown() {
-                send_ctx.schedule_action(&mut a, Some(T::default()), None);
+                a.schedule(&send_ctx, T::default(), None);
                 count += 1;
             }
             count
@@ -58,7 +58,7 @@ impl<T: ActionData + Default> runtime::Trigger<State> for ReactionRun<T> {
 #[derive(Reaction)]
 #[reaction(reactor = "AsyncCallback<T>")]
 struct ReactionProc<T: ActionData + Default> {
-    a: runtime::PhysicalActionRef<T>,
+    a: runtime::AsyncActionRef<T>,
 }
 
 impl<T: ActionData + Default> runtime::Trigger<State> for ReactionProc<T> {

@@ -19,7 +19,7 @@
 
 use std::{marker::PhantomData, mem::MaybeUninit, ptr::NonNull};
 
-use crate::{Action, BasePort};
+use crate::{BaseAction, BasePort};
 
 /// Iterator over references to elements in a `Vec<NonNull<T>>`.
 pub struct Refs<'a, T: 'a + ?Sized> {
@@ -243,22 +243,26 @@ where
     }
 }
 
-// PartitionMut for Action scalars
-impl<'a, A> PartitionMut<'a, Action> for A
+// PartitionMut for BaseAction scalars
+impl<'a, A> PartitionMut<'a, dyn BaseAction> for A
 where
-    A: From<&'a mut Action>,
+    A: From<&'a mut dyn BaseAction>,
 {
-    fn part_mut(mut refs: RefsMut<'a, Action>) -> Option<(Self, RefsMut<'a, Action>)> {
+    fn part_mut(
+        mut refs: RefsMut<'a, dyn BaseAction>,
+    ) -> Option<(Self, RefsMut<'a, dyn BaseAction>)> {
         refs.next().map(|a| (Self::from(a), refs))
     }
 }
 
-// PartitionMut for Action arrays
-impl<'a, A, const N: usize> PartitionMut<'a, Action> for [A; N]
+// PartitionMut for BaseAction arrays
+impl<'a, A, const N: usize> PartitionMut<'a, dyn BaseAction> for [A; N]
 where
-    A: From<&'a mut Action>,
+    A: From<&'a mut dyn BaseAction>,
 {
-    fn part_mut(mut refs: RefsMut<'a, Action>) -> Option<(Self, RefsMut<'a, Action>)> {
+    fn part_mut(
+        mut refs: RefsMut<'a, dyn BaseAction>,
+    ) -> Option<(Self, RefsMut<'a, dyn BaseAction>)> {
         if refs.len() < N {
             return None;
         }

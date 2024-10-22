@@ -21,7 +21,7 @@ where
 {
     tag: Tag,
     sequence: usize,
-    data: Option<T>,
+    data: T,
 }
 
 impl<T> Ord for ActionEntry<T>
@@ -97,7 +97,7 @@ where
 
     /// Add a new action to the store.
     #[inline]
-    pub fn push(&mut self, tag: Tag, data: Option<T>) {
+    pub fn push(&mut self, tag: Tag, data: T) {
         self.heap.push(ActionEntry {
             tag,
             sequence: self.counter,
@@ -132,7 +132,7 @@ where
         // Return Some only if the top entry's tag matches the given tag
         self.heap.peek().and_then(|entry| {
             if entry.tag == tag {
-                entry.data.as_ref()
+                Some(&entry.data)
             } else {
                 None
             }
@@ -195,12 +195,12 @@ mod tests {
         let entry1 = ActionEntry::<()> {
             tag: Tag::new(Duration::from_secs(1), 0),
             sequence: 40,
-            data: None,
+            data: (),
         };
         let entry2 = ActionEntry::<()> {
             tag: Tag::new(Duration::from_secs(1), 0),
             sequence: 41,
-            data: None,
+            data: (),
         };
         assert!(entry2 > entry1);
     }
@@ -211,20 +211,20 @@ mod tests {
 
         let tags = build_tags::<5>();
         // The first 3 tags should come out in tag order
-        store.push(tags[3], Some(30));
-        store.push(tags[1], Some(10));
-        store.push(tags[2], Some(20));
+        store.push(tags[3], 30);
+        store.push(tags[1], 10);
+        store.push(tags[2], 20);
         // The last 3 tags with the same value, should come out in reverse push order
-        store.push(tags[4], Some(41));
-        store.push(tags[4], Some(40));
-        store.push(tags[4], Some(42));
+        store.push(tags[4], 41);
+        store.push(tags[4], 40);
+        store.push(tags[4], 42);
 
-        assert_eq!(store.heap.pop().unwrap().data, Some(10));
-        assert_eq!(store.heap.pop().unwrap().data, Some(20));
-        assert_eq!(store.heap.pop().unwrap().data, Some(30));
-        assert_eq!(store.heap.pop().unwrap().data, Some(42));
-        assert_eq!(store.heap.pop().unwrap().data, Some(40));
-        assert_eq!(store.heap.pop().unwrap().data, Some(41));
+        assert_eq!(store.heap.pop().unwrap().data, 10);
+        assert_eq!(store.heap.pop().unwrap().data, 20);
+        assert_eq!(store.heap.pop().unwrap().data, 30);
+        assert_eq!(store.heap.pop().unwrap().data, 42);
+        assert_eq!(store.heap.pop().unwrap().data, 40);
+        assert_eq!(store.heap.pop().unwrap().data, 41);
     }
 
     #[test]
@@ -232,16 +232,16 @@ mod tests {
         let mut store = ActionStore::<u32>::new();
 
         let tags = build_tags::<6>();
-        store.push(tags[3], Some(30));
-        store.push(tags[1], Some(10));
-        store.push(tags[2], Some(20));
+        store.push(tags[3], 30);
+        store.push(tags[1], 10);
+        store.push(tags[2], 20);
 
         // We now update the value of tag4 3 times, so the last one should be the one that comes out
-        store.push(tags[4], Some(41));
-        store.push(tags[4], Some(40));
-        store.push(tags[4], Some(42));
+        store.push(tags[4], 41);
+        store.push(tags[4], 40);
+        store.push(tags[4], 42);
 
-        store.push(tags[5], Some(50));
+        store.push(tags[5], 50);
 
         assert_eq!(store.get_current(tags[0]), None);
         assert_eq!(store.get_current(tags[1]), Some(&10));

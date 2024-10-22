@@ -1,6 +1,6 @@
 use super::{
-    action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder, ActionBuilderFn,
-    ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
+    action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder, ActionType,
+    BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
     BuilderReactorKey, Input, Logical, Output, Physical, PortBuilder, PortTag, PortType,
     ReactionBuilderState, ReactorBuilder, ReactorBuilderState, TypedActionKey, TypedPortKey,
 };
@@ -152,12 +152,7 @@ impl EnvBuilder {
         name: &str,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey, BuilderError> {
-        self.add_action::<(), Logical, _>(
-            name,
-            ActionType::Startup,
-            reactor_key,
-            |_: &'_ str, _: runtime::ActionKey| runtime::Action::Startup,
-        )
+        self.add_action::<(), Logical>(name, reactor_key, ActionType::Startup)
     }
 
     pub fn add_shutdown_action(
@@ -165,12 +160,7 @@ impl EnvBuilder {
         name: &str,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey, BuilderError> {
-        self.add_action::<(), Logical, _>(
-            name,
-            ActionType::Shutdown,
-            reactor_key,
-            |_: &'_ str, _: runtime::ActionKey| runtime::Action::Shutdown,
-        )
+        self.add_action::<(), Logical>(name, reactor_key, ActionType::Shutdown)
     }
 
     pub fn add_logical_action<T: runtime::ActionData>(
@@ -179,12 +169,15 @@ impl EnvBuilder {
         min_delay: Option<Duration>,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey<T, Logical>, BuilderError> {
-        self.add_action::<T, Logical, _>(
+        self.add_action::<T, Logical>(
             name,
-            ActionType::Logical { min_delay },
             reactor_key,
-            move |name: &'_ str, key: runtime::ActionKey| {
-                runtime::Action::new_logical::<T>(name, key, min_delay.unwrap_or_default())
+            ActionType::Standard {
+                is_logical: true,
+                min_delay,
+                build_fn: Box::new(move |name, key| {
+                    runtime::Action::<T>::new(name, key, min_delay, true).boxed()
+                }),
             },
         )
     }
@@ -195,12 +188,15 @@ impl EnvBuilder {
         min_delay: Option<Duration>,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey<T, Physical>, BuilderError> {
-        self.add_action::<T, Physical, _>(
+        self.add_action::<T, Physical>(
             name,
-            ActionType::Physical { min_delay },
             reactor_key,
-            move |name: &'_ str, action_key| {
-                runtime::Action::new_physical::<T>(name, action_key, min_delay.unwrap_or_default())
+            ActionType::Standard {
+                is_logical: false,
+                min_delay,
+                build_fn: Box::new(move |name, key| {
+                    runtime::Action::<T>::new(name, key, min_delay, false).boxed()
+                }),
             },
         )
     }
@@ -217,16 +213,14 @@ impl EnvBuilder {
     }
 
     /// Add an Action to a given Reactor using closure F
-    pub fn add_action<T, Q, F>(
+    pub fn add_action<T, Q>(
         &mut self,
         name: &str,
-        ty: ActionType,
         reactor_key: BuilderReactorKey,
-        action_fn: F,
+        r#type: ActionType,
     ) -> Result<TypedActionKey<T, Q>, BuilderError>
     where
         T: runtime::ActionData,
-        F: ActionBuilderFn + 'static,
     {
         let reactor_builder = &mut self.reactor_builders[reactor_key];
 
@@ -234,7 +228,7 @@ impl EnvBuilder {
         if reactor_builder
             .actions
             .keys()
-            .any(|action_key| self.action_builders[action_key].get_name() == name)
+            .any(|action_key| self.action_builders[action_key].name() == name)
         {
             return Err(BuilderError::DuplicateActionDefinition {
                 reactor_name: reactor_builder.get_name().to_owned(),
@@ -242,12 +236,9 @@ impl EnvBuilder {
             });
         }
 
-        let key = self.action_builders.insert(ActionBuilder::new(
-            name,
-            reactor_key,
-            ty,
-            Box::new(action_fn),
-        ));
+        let key = self
+            .action_builders
+            .insert(ActionBuilder::new(name, reactor_key, r#type));
 
         reactor_builder.actions.insert(key, ());
 
@@ -310,7 +301,7 @@ impl EnvBuilder {
         self.reactor_builders[reactor_key]
             .actions
             .keys()
-            .find(|action_key| self.action_builders[*action_key].get_name() == action_name)
+            .find(|action_key| self.action_builders[*action_key].name() == action_name)
             .ok_or_else(|| BuilderError::NamedActionNotFound(action_name.to_string()))
     }
 
@@ -358,16 +349,22 @@ impl EnvBuilder {
         self.reactor_builders[reactor]
             .actions
             .keys()
-            .find(|action_key| self.action_builders[*action_key].get_name() == action_name)
+            .find(|action_key| self.action_builders[*action_key].name() == action_name)
             .ok_or_else(|| BuilderError::NamedActionNotFound(action_fqn.to_string()))
     }
 
     /// Connect two ports together
-    pub fn connect_ports<P1, P2>(&mut self, port_a_key: P1, port_b_key: P2, after: Option<Duration>) -> Result<(), BuilderError>
+    pub fn connect_ports<P1, P2>(
+        &mut self,
+        port_a_key: P1,
+        port_b_key: P2,
+        after: Option<Duration>,
+    ) -> Result<(), BuilderError>
     where
         P1: Into<BuilderPortKey>,
         P2: Into<BuilderPortKey>,
     {
+        todo!();
     }
 
     /// Bind Port A to Port B
@@ -479,8 +476,8 @@ impl EnvBuilder {
     /// Get a fully-qualified string name for the given ActionKey
     pub fn action_fqn(&self, action_key: BuilderActionKey) -> Result<BuilderFqn, BuilderError> {
         let action = &self.action_builders[action_key];
-        let reactor_fqn = self.reactor_fqn(action.get_reactor_key())?;
-        Ok(reactor_fqn.append(action.get_name()))
+        let reactor_fqn = self.reactor_fqn(action.reactor_key())?;
+        Ok(reactor_fqn.append(action.name()))
     }
 
     /// Get a fully-qualified string for the given ReactionKey

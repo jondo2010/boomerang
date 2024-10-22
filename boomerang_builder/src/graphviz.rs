@@ -84,7 +84,7 @@ fn build_actions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &mu
         let action = &env_builder.action_builders[action_key];
         let action_id = action_key.data().as_ffi() % reactor.actions.len() as u64;
 
-        let xlabel = match action.get_type() {
+        let xlabel = match action.r#type() {
             ActionType::Timer(TimerSpec { period, offset }) => {
                 if offset.unwrap_or_default().is_zero() {
                     "⏲ (startup)".into()
@@ -96,11 +96,16 @@ fn build_actions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &mu
                     )
                 }
             }
-            ActionType::Logical { min_delay } => {
-                format!("L({} ms)", min_delay.unwrap_or_default().as_millis())
-            }
-            ActionType::Physical { min_delay } => {
-                format!("P({} ms)", min_delay.unwrap_or_default().as_millis())
+            ActionType::Standard {
+                is_logical,
+                min_delay,
+                ..
+            } => {
+                if *is_logical {
+                    format!("L({} ms)", min_delay.unwrap_or_default().as_millis())
+                } else {
+                    format!("P({} ms)", min_delay.unwrap_or_default().as_millis())
+                }
             }
             ActionType::Startup => "Startup".into(),
             ActionType::Shutdown => "Shutdown".into(),
@@ -109,7 +114,7 @@ fn build_actions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &mu
         if !action.triggers.is_empty() || !action.schedulers.is_empty() {
             output.push(format!(
                 "  a{action_id} [label=\"{}\"; xlabel=\"{xlabel}\"shape=diamond;color=4];",
-                action.get_name(),
+                action.name(),
             ));
 
             for reaction_key in action.triggers.keys() {

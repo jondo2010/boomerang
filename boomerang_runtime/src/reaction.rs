@@ -3,7 +3,7 @@ use std::{fmt::Debug, sync::RwLock, time::Duration};
 use crate::{
     key_set::KeySet,
     refs::{Refs, RefsMut},
-    Action, BasePort, Context, ReactorState,
+    BaseAction, BasePort, Context, ReactorState,
 };
 
 tinymap::key_type!(pub ReactionKey);
@@ -17,7 +17,7 @@ pub trait ReactionFn<'store> {
         state: &'store mut dyn ReactorState,
         ports: Refs<'store, dyn BasePort>,
         ports_mut: RefsMut<'store, dyn BasePort>,
-        actions: RefsMut<'store, Action>,
+        actions: RefsMut<'store, dyn BaseAction>,
     );
 }
 
@@ -34,7 +34,7 @@ pub trait FromRefs {
     fn from_refs<'store>(
         ports: Refs<'store, dyn BasePort>,
         ports_mut: RefsMut<'store, dyn BasePort>,
-        actions: RefsMut<'store, Action>,
+        actions: RefsMut<'store, dyn BaseAction>,
     ) -> Self::Marker<'store>;
 }
 
@@ -66,7 +66,7 @@ where
         state: &'store mut dyn ReactorState,
         ports: Refs<'store, dyn BasePort>,
         ports_mut: RefsMut<'store, dyn BasePort>,
-        actions: RefsMut<'store, Action>,
+        actions: RefsMut<'store, dyn BaseAction>,
     ) {
         let state: &mut S = state
             .downcast_mut()
@@ -84,7 +84,7 @@ where
             &'store mut dyn ReactorState,
             Refs<'store, dyn BasePort>,
             RefsMut<'store, dyn BasePort>,
-            RefsMut<'store, Action>,
+            RefsMut<'store, dyn BaseAction>,
         ) + Sync
         + Send,
 {
@@ -94,7 +94,7 @@ where
         state: &'store mut dyn ReactorState,
         ports: Refs<'store, dyn BasePort>,
         ports_mut: RefsMut<'store, dyn BasePort>,
-        actions: RefsMut<'store, Action>,
+        actions: RefsMut<'store, dyn BaseAction>,
     ) {
         (self)(ctx, state, ports, ports_mut, actions);
     }

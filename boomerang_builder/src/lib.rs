@@ -111,7 +111,7 @@ macro_rules! reaction_closure {
              _state: &mut dyn runtime::ReactorState,
              _ref_ports: runtime::Refs<dyn runtime::BasePort>,
              _mut_ports: runtime::RefsMut<dyn runtime::BasePort>,
-             _actions: runtime::RefsMut<runtime::Action>| {},
+             _actions: runtime::RefsMut<dyn runtime::BaseAction>| {},
         )
     };
     // closure with body
@@ -121,7 +121,7 @@ macro_rules! reaction_closure {
                   $state: &mut dyn runtime::ReactorState,
                   $ref_ports: runtime::Refs<dyn runtime::BasePort>,
                   $mut_ports: runtime::RefsMut<dyn runtime::BasePort>,
-                  $actions: runtime::RefsMut<runtime::Action>| { $body },
+                  $actions: runtime::RefsMut<dyn runtime::BaseAction>| { $body },
         )
     };
 }

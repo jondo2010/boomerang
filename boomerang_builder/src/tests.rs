@@ -1,6 +1,6 @@
 use std::{iter, time::Duration};
 
-use boomerang_runtime::ContextCommon;
+use boomerang_runtime::{ActionCommon, ContextCommon};
 
 use super::*;
 use crate::runtime;
@@ -67,11 +67,11 @@ fn test_reaction_ports() -> anyhow::Result<()> {
 }
 
 /// Test that use-dependencies may be declared on logical actions and timers.
-#[cfg(feature = "fixme")]
 #[test]
 fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
     let mut env_builder = EnvBuilder::new();
-    let mut builder_main = env_builder.add_reactor("main", None, ());
+
+    let mut builder_main = env_builder.add_reactor("main", None, None, 0u32);
     let clock = builder_main.add_logical_action::<u32>("clock", None)?;
     let a = builder_main.add_logical_action::<()>("a", None)?;
     let t = builder_main.add_timer(
@@ -84,75 +84,57 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
     let startup_action = builder_main.get_startup_action();
     let shutdown_action = builder_main.get_shutdown_action();
 
-    // reaction(startup) -> clock, a {= =}
-    let r_startup = builder_main
+    // reaction(startup) -> clock, a
+    let _r_startup = builder_main
         .add_reaction(
             "startup",
-            Box::new(
-                move |ctx: &mut runtime::Context,
-                      _state: &mut dyn runtime::ReactorState,
-                      ports: &[runtime::PortRef],
-                      ports_mut: &mut [runtime::PortRefMut],
-                      actions: &mut [&mut runtime::Action]| {
-                    assert_eq!(ports.len(), 0);
-                    assert_eq!(ports_mut.len(), 0);
-                    assert_eq!(actions.len(), 3);
+            reaction_closure!(ctx, _state, inputs, outputs, actions => {
+                    assert_eq!(inputs.len(), 0);
+                    assert_eq!(outputs.len(), 0);
+                    assert_eq!(actions.len(), 2);
 
-                    dbg!(&actions);
+                    let (mut clock, mut a): (runtime::ActionRef<u32>, runtime::ActionRef<()>) = actions.partition_mut().unwrap();
 
-                    // destructure the actions array into the clock and a actions
-                    let [startup, clock, a]: &mut [&mut _; 3] = actions.try_into().unwrap();
-
-                    let mut clock: runtime::ActionRef<u32> = (*clock).into();
-                    let mut a: runtime::ActionRef = (*a).into();
-
-                    ctx.schedule_action(&mut a, None, Some(Duration::from_millis(3))); // out of order on purpose
-                    ctx.schedule_action(&mut a, None, Some(Duration::from_millis(1)));
-                    ctx.schedule_action(&mut a, None, Some(Duration::from_millis(5)));
+                    a.schedule(ctx, (), Some(Duration::from_millis(3))); // out of order on purpose
+                    a.schedule(ctx, (), Some(Duration::from_millis(1)));
+                    a.schedule(ctx, (), Some(Duration::from_millis(5)));
 
                     // not scheduled on milli 1 (action is)
-                    ctx.schedule_action(&mut clock, Some(2), Some(Duration::from_millis(2)));
-                    ctx.schedule_action(&mut clock, Some(3), Some(Duration::from_millis(3)));
-                    ctx.schedule_action(&mut clock, Some(4), Some(Duration::from_millis(4)));
-                    ctx.schedule_action(&mut clock, Some(5), Some(Duration::from_millis(5)));
+                    clock.schedule(ctx, 2, Some(Duration::from_millis(2)));
+                    clock.schedule(ctx, 3, Some(Duration::from_millis(3)));
+                    clock.schedule(ctx, 4, Some(Duration::from_millis(4)));
+                    clock.schedule(ctx, 5, Some(Duration::from_millis(5)));
                     // not scheduled on milli 6 (timer is)
-                },
+                }
             ),
         )
-        .with_action(startup_action, 0, TriggerMode::TriggersAndUses)?
+        .with_action(startup_action, 0, TriggerMode::TriggersOnly)?
         .with_action(clock, 0, TriggerMode::EffectsOnly)?
         .with_action(a, 0, TriggerMode::EffectsOnly)?
         .finish()?;
 
     //reaction(clock) a, t {= =}
-    let r_clock = builder_main
+    let _r_clock = builder_main
         .add_reaction(
             "clock",
-            Box::new(
-                |ctx: &mut runtime::Context,
-                 state,
-                 inputs,
-                 outputs,
-                 actions: &mut [&mut runtime::Action]| {
-                    let [clock, a, t]: &mut [&mut _; 3] = actions.try_into().unwrap();
+            reaction_closure!(ctx, _state, _inputs, _outputs, actions => {
+                let (mut clock, mut a, mut t): (runtime::ActionRef<u32>, runtime::ActionRef<()>, runtime::ActionRef<()>) = actions.partition_mut().unwrap();
+                let state: &mut u32 = _state.downcast_mut().unwrap();
 
-                    todo!();
-                    /*
-                    match ctx.get(clock) {
-                        Some(2) | Some(4) => {
-                            assert!(ctx.is_present(t)); // t is there on even millis
-                            assert!(!ctx.is_present(a)); //
-                        }
-                        Some(3) | Some(5) => {
-                            assert!(!ctx.is_present(t));
-                            assert!(ctx.is_present(a));
-                        }
-                        it => unreachable!("{:?}", it),
+                match clock.get_value(ctx) {
+                    Some(2) | Some(4) => {
+                        assert!(t.is_present(ctx)); // t is there on even millis
+                        assert!(!a.is_present(ctx)); //
                     }
-                    self.tick += 1;
-                    */
-                },
-            ),
+                    Some(3) | Some(5) => {
+                        assert!(!t.is_present(ctx));
+                        assert!(a.is_present(ctx));
+                    }
+                    it => unreachable!("{:?}", it),
+                }
+
+                *state += 1;
+            }),
         )
         .with_action(clock, 0, TriggerMode::TriggersAndUses)?
         .with_action(a, 0, TriggerMode::UsesOnly)?
@@ -160,57 +142,61 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
         .finish()?;
 
     // reaction(shutdown) {= =}
-    let r_shutdown = builder_main
+    let _r_shutdown = builder_main
         .add_reaction(
             "shutdown",
-            Box::new(|_, _, _, _, _| {
-                /*
-                assert_eq!(self.tick, 4);
+            reaction_closure!(_ctx, _state, _inputs, _outputs, _actions => {
+                let state: &mut u32 = _state.downcast_mut().unwrap();
+                assert_eq!(*state, 4);
                 println!("success");
-                 */
             }),
         )
         .with_action(shutdown_action, 0, TriggerMode::TriggersOnly)?
         .finish()?;
 
-    let name = "test_dependency_use_on_logical_action";
-    {
-        let gv = graphviz::create_full_graph(&env_builder).unwrap();
-        let path = format!("{name}.dot");
-        let mut f = std::fs::File::create(&path).unwrap();
-        std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
-        tracing::info!("Wrote full graph to {path}");
-    }
+    builder_main.finish()?;
 
+    #[cfg(feature = "graphviz")]
     {
-        let gv = graphviz::create_reaction_graph(&env_builder).unwrap();
+        let name = "test_dependency_use_on_logical_action";
+
+        let gv = graphviz::create_full_graph(&env_builder)?;
+        let path = format!("{name}.dot");
+        let mut f = std::fs::File::create(&path)?;
+        std::io::Write::write_all(&mut f, gv.as_bytes())?;
+        tracing::info!("Wrote full graph to {path}");
+
+        let gv = graphviz::create_reaction_graph(&env_builder)?;
         let path = format!("{name}_levels.dot");
-        let mut f = std::fs::File::create(&path).unwrap();
-        std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
+        let mut f = std::fs::File::create(&path)?;
+        std::io::Write::write_all(&mut f, gv.as_bytes())?;
         tracing::info!("Wrote reaction graph to {path}");
     }
 
-    let (mut env, triggers, aliases) = env_builder.into_runtime_parts().unwrap();
+    let (env, reaction_graph, aliases) = env_builder.into_runtime_parts()?;
 
     // r_startup should be triggered by the startup action, but the startup action should not be in its list of actions.
-    let r_startup_runtime = aliases.reaction_aliases[r_startup];
-    assert!(
-        triggers.action_triggers[aliases.action_aliases[startup_action.into()]]
-            .iter()
-            .map(|(_, x)| x)
-            .contains(&r_startup_runtime),
-        "startup action should trigger r_startup"
-    );
-    itertools::assert_equal(
-        env.reactions[r_startup_runtime].iter_actions(),
-        &[
-            aliases.action_aliases[startup_action.into()],
-            aliases.action_aliases[clock.into()],
-            aliases.action_aliases[a.into()],
-        ],
-    );
+    /*
+       let r_startup_runtime = aliases.reaction_aliases[r_startup];
+       assert!(
+           reaction_graph.action_triggers[aliases.action_aliases[startup_action.into()]]
+               .iter()
+               .map(|(_, x)| x)
+               .contains(&r_startup_runtime),
+           "startup action should trigger r_startup"
+       );
+       itertools::assert_equal(
+           env.reactions[r_startup_runtime].iter_actions(),
+           &[
+               aliases.action_aliases[startup_action.into()],
+               aliases.action_aliases[clock.into()],
+               aliases.action_aliases[a.into()],
+           ],
+       );
+    */
 
-    let mut sched = runtime::Scheduler::new(&mut env, triggers, true, false);
+    let config = runtime::Config::default().with_fast_forward(true);
+    let mut sched = runtime::Scheduler::new(env, reaction_graph, config);
     sched.event_loop();
 
     Ok(())

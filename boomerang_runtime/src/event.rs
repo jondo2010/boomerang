@@ -55,7 +55,7 @@ pub enum AsyncEvent {
         /// The key of the action that triggered this event.
         key: ActionKey,
         /// The value associated with this event.
-        value: Option<Box<dyn ActionData>>,
+        value: Box<dyn ActionData>,
     },
 
     /// A Physical event has its `tag` set to the current physical time (+ an optional delay).
@@ -65,7 +65,7 @@ pub enum AsyncEvent {
         /// The [`ActionKey`] of the action that triggered this event.
         key: ActionKey,
         /// The value associated with this event.
-        value: Option<Box<dyn ActionData>>,
+        value: Box<dyn ActionData>,
     },
 
     /// The scheduler should terminate after processing this event.
@@ -102,20 +102,12 @@ impl std::fmt::Display for AsyncEvent {
 
 impl AsyncEvent {
     /// Create a logical event.
-    pub(crate) fn logical(
-        key: ActionKey,
-        delay: Duration,
-        value: Option<Box<dyn ActionData>>,
-    ) -> Self {
-        AsyncEvent::Logical {
-            delay,
-            key,
-            value,
-        }
+    pub(crate) fn logical(key: ActionKey, delay: Duration, value: Box<dyn ActionData>) -> Self {
+        AsyncEvent::Logical { delay, key, value }
     }
 
     /// Create a physical event.
-    pub(crate) fn physical(key: ActionKey, tag: Tag, value: Option<Box<dyn ActionData>>) -> Self {
+    pub(crate) fn physical(key: ActionKey, tag: Tag, value: Box<dyn ActionData>) -> Self {
         AsyncEvent::Physical { tag, key, value }
     }
 
@@ -126,12 +118,14 @@ impl AsyncEvent {
 
     /// Get an iterator over the downstream reactions of this event.
     pub fn downstream_reactions<'a>(
-        &'a self,
+        &self,
         reaction_graph: &'a ReactionGraph,
     ) -> impl Iterator<Item = LevelReactionKey> + 'a {
         match self {
             AsyncEvent::Logical { key, .. } => reaction_graph.action_triggers[*key].iter().copied(),
-            AsyncEvent::Physical { key, .. } => reaction_graph.action_triggers[*key].iter().copied(),
+            AsyncEvent::Physical { key, .. } => {
+                reaction_graph.action_triggers[*key].iter().copied()
+            }
             AsyncEvent::Shutdown { .. } => reaction_graph.shutdown_reactions.iter().copied(),
         }
     }

@@ -1,4 +1,4 @@
-use runtime::ActionCommon;
+use boomerang_runtime::BaseAction;
 
 use crate::{reaction_closure, TimerSpec, TriggerMode};
 
@@ -149,8 +149,8 @@ fn test_actions1() {
 
     assert_eq!(
         env.actions[action_a]
-            .as_logical()
-            .expect("Action a should be logical")
+            .downcast_ref::<runtime::Action>()
+            .expect("Action")
             .name(),
         "a"
     );

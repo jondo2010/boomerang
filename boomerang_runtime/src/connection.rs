@@ -1,6 +1,6 @@
 use crate::{
-    Action, ActionData, ActionRef, ActionRefValue, BasePort, FromRefs, InputRef, OutputRef,
-    PortData, Refs, RefsMut, Trigger,
+    ActionData, ActionRef, BaseAction, BasePort, FromRefs, InputRef, OutputRef, PortData, Refs,
+    RefsMut, Trigger,
 };
 
 /// A Reaction that connects an Input to an Action for a delayed connection.
@@ -15,7 +15,7 @@ impl<T: PortData + ActionData> FromRefs for ConnectionSenderReaction<'_, T> {
     fn from_refs<'store>(
         ports: Refs<'store, dyn BasePort>,
         _ports_mut: RefsMut<'store, dyn BasePort>,
-        actions: RefsMut<'store, Action>,
+        actions: RefsMut<'store, dyn BaseAction>,
     ) -> Self::Marker<'store> {
         let act = actions.partition_mut().expect("Action not found");
         let input = ports.partition().expect("Input not found");
@@ -25,7 +25,7 @@ impl<T: PortData + ActionData> FromRefs for ConnectionSenderReaction<'_, T> {
 
 impl<T: PortData + ActionData + Clone> Trigger<()> for ConnectionSenderReaction<'_, T> {
     fn trigger(mut self, ctx: &mut crate::Context, _state: &mut ()) {
-        self.act.set_value(self.input.clone(), ctx.get_tag());
+        self.act.schedule(ctx, self.input.clone().unwrap(), None);
     }
 }
 
@@ -41,7 +41,7 @@ impl<T: PortData + ActionData> FromRefs for ConnectionReceiverReaction<'_, T> {
     fn from_refs<'store>(
         _ports: Refs<'store, dyn BasePort>,
         ports_mut: RefsMut<'store, dyn BasePort>,
-        actions: RefsMut<'store, Action>,
+        actions: RefsMut<'store, dyn BaseAction>,
     ) -> Self::Marker<'store> {
         let act = actions.partition_mut().expect("Action not found");
         let output = ports_mut.partition_mut().expect("Output not found");
@@ -51,8 +51,6 @@ impl<T: PortData + ActionData> FromRefs for ConnectionReceiverReaction<'_, T> {
 
 impl<T: PortData + ActionData + Clone> Trigger<()> for ConnectionReceiverReaction<'_, T> {
     fn trigger(mut self, ctx: &mut crate::Context, _state: &mut ()) {
-        self.act.get_value_with(ctx.get_tag(), |value| {
-            *self.output = value.cloned();
-        });
+        *self.output = self.act.get_value(ctx).cloned();
     }
 }

@@ -4,7 +4,7 @@ use super::{
     BuilderReactorKey, Input, Logical, Output, Physical, PortBuilder, PortTag, PortType,
     ReactionBuilderState, ReactorBuilder, ReactorBuilderState, TypedActionKey, TypedPortKey,
 };
-use crate::runtime;
+use crate::{runtime, TriggerMode};
 use boomerang_runtime::Level;
 use itertools::Itertools;
 use petgraph::{graphmap::DiGraphMap, EdgeDirection};
@@ -354,17 +354,72 @@ impl EnvBuilder {
     }
 
     /// Connect two ports together
-    pub fn connect_ports<P1, P2>(
+    ///
+    /// ## Arguments
+    ///
+    /// * `source_key` - The key of the first port to connect
+    /// * `target_key` - The key of the second port to connect
+    /// * `after` - An optional delay to wait before triggering the downstream ports.
+    /// * `physical` - Whether the connection is physical (or logical). Logical connections will trigger any downstream
+    ///     ports at the current logical time (with any `after` delay), while physical connections will trigger the
+    ///     downstream ports at the current physical time (with any `after` delay).
+    pub fn connect_ports<T, P1, P2>(
         &mut self,
-        port_a_key: P1,
-        port_b_key: P2,
+        source_key: P1,
+        target_key: P2,
         after: Option<Duration>,
+        physical: bool,
     ) -> Result<(), BuilderError>
     where
+        T: runtime::ActionData + runtime::PortData + Clone,
         P1: Into<BuilderPortKey>,
         P2: Into<BuilderPortKey>,
     {
-        todo!();
+        if after.is_none() && !physical {
+            self.bind_port(source_key, target_key)
+        } else {
+            // Ports connected with a delay and/or physical connections are implemented as a pair of Reactions that trigger and react to an action.
+
+            let source_key = source_key.into();
+            let target_key = target_key.into();
+
+            let source_port = &self.port_builders[source_key];
+            let target_port = &self.port_builders[target_key];
+
+            let source_reactor_key = source_port.get_reactor_key();
+            let target_reactor_key = target_port.get_reactor_key();
+
+            // 1. create a new action on the reactor of the target port
+            let action_name = format!("{}->{}", source_port.get_name(), target_port.get_name());
+            let action_key: BuilderActionKey = if physical {
+                self.add_physical_action::<T>(&action_name, after, target_port.get_reactor_key())?.into()
+            } else {
+                self.add_logical_action::<T>(&action_name, after, target_port.get_reactor_key())?.into()
+            };
+
+            // 2. create a new reaction on the reactor of the source port, triggered by the source port, that schedules the action
+            let sender_wrapper = runtime::ReactionWrapper::<
+                crate::connection::ConnectionSenderReaction<T>,
+                (),
+            >::default();
+
+            let _sender = self
+                .add_reaction("sender", source_reactor_key, Box::new(sender_wrapper))
+                .with_port(source_key, 0, TriggerMode::TriggersAndUses)?
+                .with_action(action_key, 0, TriggerMode::EffectsOnly)?.finish()?;
+
+            // 3. create a new reaction on the reactor of the target port, triggered by the action, that sets the target port
+            let receiver_wrapper = runtime::ReactionWrapper::<
+                crate::connection::ConnectionReceiverReaction<T>,
+                (),
+            >::default();
+
+            let _receiver = self.add_reaction("receiver", target_reactor_key, Box::new(receiver_wrapper))
+                .with_port(target_key, 0, TriggerMode::EffectsOnly)?
+                .with_action(action_key, 0, TriggerMode::TriggersAndUses)?.finish()?;
+
+            Ok(())
+        }
     }
 
     /// Bind Port A to Port B

@@ -192,6 +192,7 @@ impl ToTokens for FromDefsImpl {
                 type Marker<'s> = #reaction_ident <#marker_lt>;
 
                 #[allow(unused_variables)]
+                #[inline(always)]
                 fn from_refs<'store>(
                     ports: ::boomerang::runtime::Refs<'store, dyn ::boomerang::runtime::BasePort>,
                     ports_mut: ::boomerang::runtime::RefsMut<'store, dyn ::boomerang::runtime::BasePort>,

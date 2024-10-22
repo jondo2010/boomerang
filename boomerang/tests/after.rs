@@ -87,7 +87,7 @@ impl runtime::Trigger<PrintState> for ReactionPrintShutdown<'_> {
 #[reactor(
     state = "()",
     reaction = "ReactionMainT",
-    connection(from = "f.x", to = "p.x", after = "10 msec")
+    connection(from = "f.y", to = "p.x", after = "10 msec")
 )]
 struct Main {
     #[reactor(child = "()")]

@@ -12,6 +12,7 @@ mod reaction;
 mod reactor;
 #[cfg(test)]
 pub mod tests;
+mod connection;
 
 #[cfg(feature = "graphviz")]
 pub mod graphviz;

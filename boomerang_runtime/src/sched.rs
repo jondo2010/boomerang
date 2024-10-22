@@ -282,6 +282,21 @@ impl Scheduler {
             if let Some(mut event) = self.events.event_queue.pop() {
                 tracing::debug!(event = %event, "Handling event");
 
+                if Some(event.tag) == self.events.peek_tag() {
+                    // The next event is at the same time as the one we are processing
+                    // This can happen if the event we are processing triggers a new event at the same time
+                    // We need to process all events at the same time before moving on
+                    //while let Some(next_event) = self.events.event_queue.pop() {
+                    //    if next_event.tag == event.tag {
+                    //        event.reactions.extend_above(next_event.reactions.view());
+                    //    } else {
+                    //        self.events.event_queue.push(next_event);
+                    //        break;
+                    //    }
+                    //}
+                    tracing::warn!("Next event is at the same time as the one we are processing");
+                }
+
                 if !self.config.fast_forward {
                     let target = event.tag.to_logical_time(self.start_time);
                     if let Some(async_event) = self.synchronize_wall_clock(target) {

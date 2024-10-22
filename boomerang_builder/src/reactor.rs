@@ -480,24 +480,28 @@ impl<'a> ReactorBuilderState<'a> {
         f(self.reactor_key, self.env)
     }
 
-    /// Bind 2 ports on this reactor. This has the logical meaning of "connecting" `port_a` to
+    /// Connect 2 ports on this reactor. This has the logical meaning of "connecting" `port_a` to
     /// `port_b`.
-    pub fn bind_port<T: runtime::PortData, Q1: PortTag, Q2: PortTag>(
+    pub fn connect_port<T: runtime::PortData, Q1: PortTag, Q2: PortTag>(
         &mut self,
         port_a_key: TypedPortKey<T, Q1>,
         port_b_key: TypedPortKey<T, Q2>,
+        after: Option<Duration>,
+        physical: bool,
     ) -> Result<(), BuilderError> {
-        self.env.bind_port(port_a_key, port_b_key)
+        self.env.connect_ports(port_a_key, port_b_key, after, physical)
     }
 
-    /// Bind multiple ports on this reactor. This has the logical meaning of "connecting" `ports_from` to `ports_to`.
-    pub fn bind_ports<T: runtime::PortData, Q1: PortTag, Q2: PortTag>(
+    /// Connect multiple ports on this reactor. This has the logical meaning of "connecting" `ports_from` to `ports_to`.
+    pub fn connect_ports<T: runtime::PortData, Q1: PortTag, Q2: PortTag>(
         &mut self,
         ports_from: impl Iterator<Item = TypedPortKey<T, Q1>>,
         ports_to: impl Iterator<Item = TypedPortKey<T, Q2>>,
+        after: Option<Duration>,
+        physical: bool,
     ) -> Result<(), BuilderError> {
         for (port_from, port_to) in ports_from.zip(ports_to) {
-            self.env.bind_port(port_from, port_to)?;
+            self.connect_port(port_from, port_to, after, physical)?;
         }
         Ok(())
     }

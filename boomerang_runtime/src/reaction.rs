@@ -60,6 +60,7 @@ where
     Reaction::Marker<'store>: 'store + Trigger<S>,
     S: ReactorState,
 {
+    #[inline(always)]
     fn trigger(
         &mut self,
         ctx: &'store mut Context,

@@ -14,9 +14,6 @@ impl From<Duration> for TimeoutDuration {
     }
 }
 
-#[cfg(feature = "serde")]
-runtime::register_type!(TimeoutDuration);
-
 #[derive(Reactor)]
 #[reactor(state = "TimeoutDuration", reaction = "ReactionStartup")]
 pub struct Timeout;

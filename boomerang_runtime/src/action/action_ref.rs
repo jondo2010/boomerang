@@ -3,10 +3,10 @@ use std::{
     time::Duration,
 };
 
-use super::{Action, ActionData, ActionKey, ActionStore, BaseActionStore};
-use crate::Tag;
+use super::{Action, ActionKey, ActionStore, BaseActionStore};
+use crate::{ReactorData, Tag};
 
-pub trait ActionRefValue<T: ActionData> {
+pub trait ActionRefValue<T: ReactorData> {
     /// Access the current Action value at the given Tag using a closure `f`.
     fn get_value_with<F: FnOnce(Option<&T>) -> U, U>(&mut self, tag: Tag, f: F) -> U;
     /// Set the Action value at the given Tag.
@@ -16,7 +16,7 @@ pub trait ActionRefValue<T: ActionData> {
 }
 
 /// An `ActionRef` is a reference to an `Action` that can be scheduled.
-pub struct ActionRef<'a, T: ActionData = ()> {
+pub struct ActionRef<'a, T: ReactorData = ()> {
     pub(crate) name: &'a str,
     pub(crate) key: ActionKey,
     pub(crate) min_delay: Duration,
@@ -33,7 +33,7 @@ impl ActionRef<'_, ()> {
     }
 }
 
-impl<'a, T: ActionData> ActionRefValue<T> for ActionRef<'a, T> {
+impl<'a, T: ReactorData> ActionRefValue<T> for ActionRef<'a, T> {
     fn get_value_with<F: FnOnce(Option<&T>) -> U, U>(&mut self, tag: Tag, f: F) -> U {
         let value = self.store.get_current(tag);
         f(value)
@@ -53,14 +53,14 @@ impl<'a, T: ActionData> ActionRefValue<T> for ActionRef<'a, T> {
 }
 
 #[derive(Debug)]
-pub struct PhysicalActionRef<T: ActionData = ()> {
+pub struct PhysicalActionRef<T: ReactorData = ()> {
     pub(crate) key: ActionKey,
     pub(crate) min_delay: Duration,
     pub(crate) values: Arc<Mutex<dyn BaseActionStore>>,
     _phantom: std::marker::PhantomData<T>,
 }
 
-impl<T: ActionData> Clone for PhysicalActionRef<T> {
+impl<T: ReactorData> Clone for PhysicalActionRef<T> {
     fn clone(&self) -> Self {
         Self {
             key: self.key,
@@ -71,7 +71,7 @@ impl<T: ActionData> Clone for PhysicalActionRef<T> {
     }
 }
 
-impl<T: ActionData> ActionRefValue<T> for PhysicalActionRef<T> {
+impl<T: ReactorData> ActionRefValue<T> for PhysicalActionRef<T> {
     fn get_value_with<F: FnOnce(Option<&T>) -> U, U>(&mut self, tag: Tag, f: F) -> U {
         let mut store = self.values.lock().expect("Failed to lock action store");
         let store = store
@@ -98,7 +98,7 @@ impl<T: ActionData> ActionRefValue<T> for PhysicalActionRef<T> {
     }
 }
 
-impl<'a, T: ActionData> From<&'a mut Action> for ActionRef<'a, T> {
+impl<'a, T: ReactorData> From<&'a mut Action> for ActionRef<'a, T> {
     fn from(value: &'a mut Action) -> Self {
         value
             .as_logical_mut()
@@ -115,7 +115,7 @@ impl<'a, T: ActionData> From<&'a mut Action> for ActionRef<'a, T> {
     }
 }
 
-impl<'a, T: ActionData> From<&'a mut Action> for PhysicalActionRef<T> {
+impl<'a, T: ReactorData> From<&'a mut Action> for PhysicalActionRef<T> {
     fn from(value: &'a mut Action) -> Self {
         value
             .as_physical()

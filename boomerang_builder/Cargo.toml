@@ -14,6 +14,9 @@ exclude.workspace = true
 [features]
 default = []
 
+# Support for codegen
+#serde = ["dep:serde", "boomerang_runtime/serde"]
+
 ## Support generating graphviz diagrams from reactor models
 graphviz = ["dep:graphviz-rust"]
 
@@ -25,6 +28,7 @@ petgraph = "0.6"
 slotmap = { version = "1.0", features = ["unstable"] }
 thiserror.workspace = true
 tracing.workspace = true
+#serde = { workspace = true, optional = true }
 
 boomerang_derive = { workspace = true, optional = true }
 boomerang_runtime = { workspace = true, default-features = false }

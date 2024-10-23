@@ -16,8 +16,8 @@ default = ["derive"]
 ## Procedural macro support for generating code from reactor models
 derive = ["dep:boomerang_derive"]
 
-## Support for serialization
-serde = ["boomerang_runtime/serde"]
+# Support for serialization
+#serde = ["boomerang_runtime/serde", "boomerang_util/serde"]
 
 ## Support for parallel execution
 parallel = ["boomerang_runtime/parallel"]
@@ -34,13 +34,16 @@ boomerang_derive = { workspace = true, optional = true }
 boomerang_runtime = { workspace = true, default-features = false }
 
 [dev-dependencies]
-boomerang_util = { path = "../boomerang_util", features = ["runner", "serde"] }
+boomerang_util = { path = "../boomerang_util", features = ["runner"] }
+criterion = "0.5"
+#serde = { workspace = true }
+#serde_json = "*"
+linkme = { workspace = true }
 tracing-subscriber = { version = "0.3", features = [
     "fmt",
     "json",
     "env-filter",
 ] }
-criterion = "0.5"
 
 # Deps for Snake example
 [target.'cfg(not(windows))'.dev-dependencies]
@@ -50,6 +53,3 @@ rand = { version = "0.8" }
 [[bench]]
 name = "ping_pong"
 harness = false
-
-[[example]]
-name = "snake"

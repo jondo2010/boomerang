@@ -20,7 +20,7 @@
 //! assert_eq!(map[key2], 20);
 //! ```
 use std::{
-    fmt::Debug,
+    fmt::{Debug, Display},
     iter::Enumerate,
     marker::PhantomData,
     ops::{Index, IndexMut},
@@ -37,14 +37,28 @@ pub use iter_many::IterManyMut;
 /// A map that uses a custom key type to index its values.
 ///
 /// See the [module-level documentation](index.html) for more information.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TinyMap<K: Key, V> {
     pub(crate) data: Vec<V>,
+    #[cfg_attr(feature = "serde", serde(skip))]
     _k: PhantomData<K>,
 }
 
 impl<K: Key + Debug, V: Debug> Debug for TinyMap<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_map().entries(self.iter()).finish()
+    }
+}
+
+impl<K: Key + Display, V: Display> Display for TinyMap<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ty = std::any::type_name::<Self>();
+        let vals = self
+            .values()
+            .map(|v| format!("{v}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        write!(f, "[{vals}].into_iter().collect::<{ty}>()")
     }
 }
 

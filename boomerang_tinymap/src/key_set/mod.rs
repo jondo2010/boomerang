@@ -8,6 +8,9 @@ use fixedbitset::{FixedBitSet, Ones};
 
 use super::Key;
 
+#[cfg(feature = "serde")]
+mod serde_impl;
+
 /// A unique set of keys.
 #[derive(Clone)]
 pub struct KeySet<K: Key> {
@@ -186,5 +189,24 @@ mod tests {
         let mut set = KeySet::with_capacity(10);
         set.extend(vec![DefaultKey::from(0), DefaultKey::from(1)]);
         assert_eq!(set.iter().len(), 2);
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn test_serialize_roundtrip() {
+        let mut set = KeySet::with_capacity(10);
+        set.extend(vec![
+            DefaultKey::from(0),
+            DefaultKey::from(1),
+            DefaultKey::from(10),
+        ]);
+
+        let serialized = serde_json::to_string(&set).unwrap();
+        let deserialized: KeySet<DefaultKey> = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            set.iter().collect::<Vec<DefaultKey>>(),
+            deserialized.iter().collect::<Vec<_>>()
+        );
     }
 }

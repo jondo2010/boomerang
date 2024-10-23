@@ -1,41 +1,55 @@
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 
 use downcast_rs::{impl_downcast, Downcast};
 
+use crate::{data::SerdeDataObj, ReactorData};
+
 tinymap::key_type! { pub ReactorKey }
 
-#[cfg(feature = "parallel")]
-pub trait ReactorState: Downcast + Send + Sync {}
+pub trait BaseReactor: Debug + Downcast + SerdeDataObj + Send + Sync {
+    /// Get the name of the reactor
+    fn name(&self) -> &str;
+}
 
-#[cfg(feature = "parallel")]
-impl<T> ReactorState for T where T: Downcast + Send + Sync {}
+impl_downcast!(BaseReactor);
 
-#[cfg(not(feature = "parallel"))]
-pub trait ReactorState: Downcast {}
+impl dyn BaseReactor {
+    pub fn get_state<T: ReactorData>(&self) -> Option<&T> {
+        self.downcast_ref::<Reactor<T>>().map(|r| &r.state)
+    }
+}
 
-#[cfg(not(feature = "parallel"))]
-impl<T> ReactorState for T where T: Downcast {}
-
-impl_downcast!(ReactorState);
-
-pub struct Reactor {
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Reactor<T: ReactorData> {
     /// The reactor name
     name: String,
     /// The ReactorState
-    pub(crate) state: Box<dyn ReactorState>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) state: T,
 }
 
-impl Debug for Reactor {
+impl<T: ReactorData> Debug for Reactor<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Reactor")
             .field("name", &self.name)
-            .field("state", &"Box<dyn ReactorState>")
+            .field("state", &std::any::type_name::<T>())
             .finish()
     }
 }
 
-impl Reactor {
-    pub fn new(name: &str, state: Box<dyn ReactorState>) -> Self {
+impl<T: ReactorData> Display for Reactor<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Reactor<{ty}>(\"{name}\")",
+            name = self.name,
+            ty = std::any::type_name::<T>()
+        )
+    }
+}
+
+impl<T: ReactorData> Reactor<T> {
+    pub fn new(name: &str, state: T) -> Self {
         Self {
             name: name.to_owned(),
             state,
@@ -46,12 +60,13 @@ impl Reactor {
         &self.name
     }
 
-    pub fn get_state<T: ReactorState>(&self) -> Option<&T> {
-        self.state.downcast_ref()
-    }
-
-    pub fn get_state_mut<T: ReactorState>(&mut self) -> Option<&mut T> {
-        self.state.downcast_mut()
+    pub fn boxed(self) -> Box<dyn BaseReactor> {
+        Box::new(self)
     }
 }
 
+impl<T: ReactorData> BaseReactor for Reactor<T> {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}

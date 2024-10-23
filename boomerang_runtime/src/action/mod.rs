@@ -1,47 +1,22 @@
 use std::{
-    fmt::{Debug, Display},
+    fmt::Display,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
-use crate::Tag;
+use crate::ReactorData;
 
 mod action_ref;
-mod store;
+pub mod store;
 
 pub use action_ref::*;
 use store::{ActionStore, BaseActionStore};
 
-#[cfg(not(feature = "serde"))]
-pub trait ActionData: std::fmt::Debug + Send + Sync + 'static {}
-
-#[cfg(not(feature = "serde"))]
-impl<T> ActionData for T where T: std::fmt::Debug + Send + Sync + 'static {}
-
-#[cfg(feature = "serde")]
-pub trait ActionData:
-    std::fmt::Debug + Send + Sync + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static
-{
-}
-
-#[cfg(feature = "serde")]
-impl<T> ActionData for T where
-    T: std::fmt::Debug
-        + Send
-        + Sync
-        + serde::Serialize
-        + for<'de> serde::Deserialize<'de>
-        + 'static
-{
-}
-
-tinymap::key_type! {
-    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-    pub ActionKey
-}
+tinymap::key_type! { pub ActionKey }
 
 /// Typed Action state, storing potentially different values at different Tags.
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LogicalAction {
     pub name: String,
     pub key: ActionKey,
@@ -49,15 +24,68 @@ pub struct LogicalAction {
     pub store: Box<dyn BaseActionStore>,
 }
 
+impl LogicalAction {
+    pub fn new<T: ReactorData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
+        let store = ActionStore::<T>::default();
+        Self {
+            name: name.into(),
+            key,
+            min_delay,
+            store: Box::new(store),
+        }
+    }
+}
+
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PhysicalAction {
     pub name: String,
     pub key: ActionKey,
     pub min_delay: Duration,
+    #[cfg_attr(feature = "serde", serde(with = "serialize_physical_action_store"))]
     pub store: Arc<Mutex<dyn BaseActionStore>>,
 }
 
+#[cfg(feature = "serde")]
+mod serialize_physical_action_store {
+    use std::sync::{Arc, Mutex};
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::BaseActionStore;
+
+    pub fn serialize<S>(
+        store: &Arc<Mutex<dyn BaseActionStore>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let store = store.lock().expect("Failed to lock action store");
+        store.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<Mutex<dyn BaseActionStore>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let store = Box::<dyn BaseActionStore>::deserialize(deserializer)?;
+        Ok(store.boxed_to_mutex())
+    }
+}
+
 impl PhysicalAction {
+    pub fn new<T: ReactorData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
+        let store = ActionStore::<T>::default();
+        let store = Arc::new(Mutex::new(store)) as Arc<Mutex<dyn BaseActionStore>>;
+        Self {
+            name: name.into(),
+            key,
+            min_delay,
+            store,
+        }
+    }
+
     /// Create a new Arrow ArrayBuilder for the data stored in this store
     #[cfg(feature = "serde")]
     pub fn new_builder(&self) -> Result<serde_arrow::ArrayBuilder, crate::RuntimeError> {
@@ -69,7 +97,7 @@ impl PhysicalAction {
     pub fn build_value_at(
         &mut self,
         builder: &mut serde_arrow::ArrayBuilder,
-        tag: Tag,
+        tag: crate::Tag,
     ) -> Result<(), crate::RuntimeError> {
         self.store
             .lock()
@@ -85,6 +113,7 @@ impl<'a> From<&'a mut Action> for &'a mut PhysicalAction {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Action {
     /// Startup is a special action that fires when the scheduler starts up.
     Startup,
@@ -95,25 +124,12 @@ pub enum Action {
 }
 
 impl Action {
-    pub fn new_logical<T: ActionData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
-        let store = ActionStore::<T>::new();
-        Self::Logical(LogicalAction {
-            name: name.into(),
-            key,
-            min_delay,
-            store: Box::new(store),
-        })
+    pub fn new_logical<T: ReactorData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
+        Self::Logical(LogicalAction::new::<T>(name, key, min_delay))
     }
 
-    pub fn new_physical<T: ActionData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
-        let store = ActionStore::<T>::new();
-        let store: Arc<Mutex<dyn BaseActionStore>> = Arc::new(Mutex::new(store));
-        Self::Physical(PhysicalAction {
-            name: name.into(),
-            key,
-            min_delay,
-            store,
-        })
+    pub fn new_physical<T: ReactorData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
+        Self::Physical(PhysicalAction::new::<T>(name, key, min_delay))
     }
 
     pub fn as_logical(&self) -> Option<&LogicalAction> {
@@ -144,13 +160,11 @@ impl Action {
 impl Display for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Action::Startup => f.write_fmt(format_args!("Action::Startup")),
-            Action::Shutdown => f.write_fmt(format_args!("Action::Shutdown")),
-            Action::Logical(LogicalAction { name, .. }) => {
-                f.write_fmt(format_args!("Action::Logical<{name}>"))
-            }
-            Action::Physical(PhysicalAction { name, .. }) => {
-                f.write_fmt(format_args!("Action::Physical<{name}>"))
+            Action::Startup => write!(f, "Action::Startup"),
+            Action::Shutdown => write!(f, "Action::Shutdown"),
+            Action::Logical(logical) => write!(f, "Action::Logical({name})", name = logical.name),
+            Action::Physical(physical) => {
+                write!(f, "Action::Physical({name})", name = physical.name)
             }
         }
     }

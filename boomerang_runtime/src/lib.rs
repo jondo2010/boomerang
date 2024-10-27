@@ -5,7 +5,6 @@
 
 pub mod action;
 mod context;
-pub mod data;
 mod env;
 mod event;
 pub mod keepalive;
@@ -23,7 +22,6 @@ pub use action::{
     Action, ActionKey, ActionRef, ActionRefValue, LogicalAction, PhysicalAction, PhysicalActionRef,
 };
 pub use context::*;
-pub use data::ReactorData;
 pub use env::{BankInfo, Env, Level, LevelReactionKey, ReactionGraph};
 pub use key_set::KeySetLimits as ReactionSetLimits;
 pub use port::*;
@@ -35,6 +33,11 @@ pub use reactor::*;
 pub use refs::{Refs, RefsMut};
 pub use sched::*;
 pub use time::*;
+
+/// Types implementing this trait can be used as data in ports, actions, and reactors.
+pub trait ReactorData: Send + Sync + 'static {}
+
+impl<T> ReactorData for T where T: Send + Sync + 'static {}
 
 #[derive(thiserror::Error, Debug)]
 pub enum RuntimeError {

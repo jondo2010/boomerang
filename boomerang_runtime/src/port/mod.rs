@@ -4,11 +4,11 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use crate::{data::SerdeDataObj, ReactorData};
+use crate::ReactorData;
 
 tinymap::key_type!(pub PortKey);
 
-pub trait BasePort: Debug + Display + Downcast + SerdeDataObj + Send + Sync {
+pub trait BasePort: Debug + Display + Downcast + Send + Sync {
     /// Get the name of this port
     fn get_name(&self) -> &str;
 

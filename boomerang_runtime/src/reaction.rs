@@ -5,7 +5,6 @@ use std::{
 };
 
 use crate::{
-    data::SerdeDataObj,
     key_set::KeySet,
     refs::{Refs, RefsMut},
     Action, ActionRef, BasePort, BaseReactor, Context, Reactor, ReactorData,
@@ -15,7 +14,7 @@ tinymap::key_type!(pub ReactionKey);
 
 pub type ReactionSet = KeySet<ReactionKey>;
 
-pub trait ReactionFn<'store>: SerdeDataObj + Send + Sync {
+pub trait ReactionFn<'store>: Send + Sync {
     fn trigger(
         &mut self,
         ctx: &'store mut Context,

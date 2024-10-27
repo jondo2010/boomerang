@@ -2,11 +2,11 @@ use std::fmt::{Debug, Display};
 
 use downcast_rs::{impl_downcast, Downcast};
 
-use crate::{data::SerdeDataObj, ReactorData};
+use crate::ReactorData;
 
 tinymap::key_type! { pub ReactorKey }
 
-pub trait BaseReactor: Debug + Downcast + SerdeDataObj + Send + Sync {
+pub trait BaseReactor: Downcast + Send + Sync {
     /// Get the name of the reactor
     fn name(&self) -> &str;
 }
@@ -16,6 +16,14 @@ impl_downcast!(BaseReactor);
 impl dyn BaseReactor {
     pub fn get_state<T: ReactorData>(&self) -> Option<&T> {
         self.downcast_ref::<Reactor<T>>().map(|r| &r.state)
+    }
+}
+
+impl std::fmt::Debug for dyn BaseReactor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BaseReactor")
+            .field("name", &self.name())
+            .finish()
     }
 }
 

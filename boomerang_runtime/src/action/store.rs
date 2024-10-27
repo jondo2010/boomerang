@@ -18,7 +18,6 @@ use std::{cmp::Ordering, sync::Arc};
 
 use downcast_rs::Downcast;
 
-use crate::data::SerdeDataObj;
 use crate::{ReactorData, Tag};
 
 #[derive(Debug)]
@@ -54,7 +53,7 @@ impl<T: ReactorData> PartialEq for ActionEntry<T> {
     }
 }
 
-pub trait BaseActionStore: Debug + Downcast + SerdeDataObj + Send + Sync {
+pub trait BaseActionStore: Debug + Downcast + Send + Sync {
     /// Remove any value at the given Tag
     fn clear_older_than(&mut self, tag: Tag);
 

@@ -18,7 +18,12 @@ default = []
 runner = ["dep:clap", "dep:anyhow", "boomerang/graphviz"]
 
 # Support for serde serialization
-#serde = ["boomerang/serde", "dep:erased-serde", "dep:linkme", "dep:serde"]
+serde = [
+    "boomerang/serde",
+    #"dep:erased-serde",
+    #"dep:linkme",
+    "dep:serde",
+]
 
 # Support for recording and replaying
 #replay = ["serde", "dep:bincode"]

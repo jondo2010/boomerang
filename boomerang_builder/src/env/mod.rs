@@ -17,8 +17,6 @@ use std::{
 
 mod build;
 mod debug;
-//#[cfg(feature = "serde")]
-// mod serializer;
 #[cfg(test)]
 mod tests;
 

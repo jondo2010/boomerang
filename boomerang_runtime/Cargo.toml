@@ -17,16 +17,16 @@ default = []
 ## Support for parallel execution
 parallel = ["dep:rayon"]
 
-# Support for serialization
-#serde = [
-#    "dep:arrow",
-#    "dep:erased-serde",
-#    "dep:serde",
-#    "dep:serde_arrow",
-#    "dep:serde_flexitos",
-#    "dep:linkme",
-#    "dep:paste",
-#]
+## Support for serialization
+serde = [
+    #    "dep:arrow",
+    #    "dep:erased-serde",
+    "dep:serde",
+    #    "dep:serde_arrow",
+    #    "dep:serde_flexitos",
+    #    "dep:linkme",
+    #    "dep:paste",
+]
 
 [dependencies]
 #arrow = { workspace = true, optional = true, features = ["prettyprint"] }
@@ -38,7 +38,7 @@ itertools.workspace = true
 linkme = { workspace = true, optional = true }
 paste = { version = "1", optional = true }
 rayon = { version = "1.7", optional = true }
-#serde = { workspace = true, optional = true, features = ["derive"] }
+serde = { workspace = true, optional = true, features = ["derive"] }
 #serde_arrow = { workspace = true, optional = true, features = ["arrow-52"] }
 #serde_flexitos = { workspace = true, optional = true, features = ["id_trait"] }
 thiserror.workspace = true

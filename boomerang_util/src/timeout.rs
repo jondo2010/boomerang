@@ -4,16 +4,26 @@ use boomerang::prelude::*;
 
 use std::time::Duration;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Default, Debug)]
+pub struct TimeoutDuration(Duration);
+
+impl From<Duration> for TimeoutDuration {
+    fn from(value: Duration) -> Self {
+        Self(value)
+    }
+}
+
 #[derive(Reactor)]
-#[reactor(state = "Duration", reaction = "ReactionStartup")]
+#[reactor(state = "TimeoutDuration", reaction = "ReactionStartup")]
 pub struct Timeout;
 
 #[derive(Reaction)]
 #[reaction(triggers(startup), reactor = "Timeout")]
 struct ReactionStartup;
 
-impl runtime::Trigger<Duration> for ReactionStartup {
-    fn trigger(self, ctx: &mut runtime::Context, state: &mut Duration) {
-        ctx.schedule_shutdown(Some(*state))
+impl runtime::Trigger<TimeoutDuration> for ReactionStartup {
+    fn trigger(self, ctx: &mut runtime::Context, state: &mut TimeoutDuration) {
+        ctx.schedule_shutdown(Some(state.0))
     }
 }

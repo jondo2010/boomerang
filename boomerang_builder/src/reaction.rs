@@ -53,7 +53,7 @@ impl ReactionField for runtime::Action {
     }
 }
 
-impl<T: runtime::ActionData> ReactionField for runtime::ActionRef<'_, T> {
+impl<T: runtime::ReactorData> ReactionField for runtime::ActionRef<'_, T> {
     type Key = TypedActionKey<T>;
 
     fn build(
@@ -66,7 +66,7 @@ impl<T: runtime::ActionData> ReactionField for runtime::ActionRef<'_, T> {
     }
 }
 
-impl<T: runtime::ActionData> ReactionField for runtime::PhysicalActionRef<T> {
+impl<T: runtime::ReactorData> ReactionField for runtime::PhysicalActionRef<T> {
     type Key = TypedActionKey<T, Physical>;
 
     fn build(
@@ -79,7 +79,7 @@ impl<T: runtime::ActionData> ReactionField for runtime::PhysicalActionRef<T> {
     }
 }
 
-impl<'a, T: runtime::PortData> ReactionField for runtime::InputRef<'a, T> {
+impl<'a, T: runtime::ReactorData> ReactionField for runtime::InputRef<'a, T> {
     type Key = BuilderPortKey;
 
     fn build(
@@ -92,7 +92,7 @@ impl<'a, T: runtime::PortData> ReactionField for runtime::InputRef<'a, T> {
     }
 }
 
-impl<'a, T: runtime::PortData, const N: usize> ReactionField for [runtime::InputRef<'a, T>; N] {
+impl<'a, T: runtime::ReactorData, const N: usize> ReactionField for [runtime::InputRef<'a, T>; N] {
     type Key = [BuilderPortKey; N];
 
     fn build(
@@ -105,7 +105,7 @@ impl<'a, T: runtime::PortData, const N: usize> ReactionField for [runtime::Input
     }
 }
 
-impl<'a, T: runtime::PortData> ReactionField for runtime::OutputRef<'a, T> {
+impl<'a, T: runtime::ReactorData> ReactionField for runtime::OutputRef<'a, T> {
     type Key = BuilderPortKey;
 
     fn build(
@@ -118,7 +118,7 @@ impl<'a, T: runtime::PortData> ReactionField for runtime::OutputRef<'a, T> {
     }
 }
 
-impl<'a, T: runtime::PortData, const N: usize> ReactionField for [runtime::OutputRef<'a, T>; N] {
+impl<'a, T: runtime::ReactorData, const N: usize> ReactionField for [runtime::OutputRef<'a, T>; N] {
     type Key = [BuilderPortKey; N];
 
     fn build(
@@ -183,9 +183,11 @@ pub struct ReactionBuilder {
 
     /// Ports that can trigger this Reaction, and their relative ordering.
     pub(super) trigger_ports: SecondaryMap<BuilderPortKey, usize>,
-    /// Ports that this Reaction may read the value of, and their relative ordering. These are used to build the array of [`runtime::PortRef`] in the reaction function.
+    /// Ports that this Reaction may read the value of, and their relative ordering. These are used
+    /// to build the array of [`runtime::PortRef`] in the reaction function.
     pub(super) use_ports: SecondaryMap<BuilderPortKey, usize>,
-    /// Ports that this Reaction may set the value of, and their relative ordering. These are used to build the array of [`runtime::PortRefMut`]` in the reaction function.
+    /// Ports that this Reaction may set the value of, and their relative ordering. These are used
+    /// to build the array of [`runtime::PortRefMut`]` in the reaction function.
     pub(super) effect_ports: SecondaryMap<BuilderPortKey, usize>,
 }
 
@@ -246,11 +248,14 @@ pub enum TriggerMode {
     TriggersOnly,
     /// The action/port triggers the reaction and is provided as input in the actions/ports arrays
     TriggersAndUses,
-    /// The action/port triggers the reaction and is provided to the reaction in the actions/mut ports arrays
+    /// The action/port triggers the reaction and is provided to the reaction in the actions/mut
+    /// ports arrays
     TriggersAndEffects,
-    /// The action/port does not trigger the reaction, but is provided as input in the actions/ports arrays
+    /// The action/port does not trigger the reaction, but is provided as input in the
+    /// actions/ports arrays
     UsesOnly,
-    /// The action/port does not trigger the reaction, but is provided to the reaction in the actions/mut ports arrays
+    /// The action/port does not trigger the reaction, but is provided to the reaction in the
+    /// actions/mut ports arrays
     EffectsOnly,
 }
 
@@ -342,9 +347,10 @@ impl<'a> ReactionBuilderState<'a> {
         Ok(self)
     }
 
-    /// For triggers: valid ports are input ports in this reactor, (or output ports of contained reactors).
-    /// For uses: valid ports are input ports in this reactor, (or output ports of contained reactors).
-    /// for effects: valid ports are output ports in this reactor, (or input ports of contained reactors).
+    /// For triggers: valid ports are input ports in this reactor, (or output ports of contained
+    /// reactors). For uses: valid ports are input ports in this reactor, (or output ports of
+    /// contained reactors). for effects: valid ports are output ports in this reactor, (or
+    /// input ports of contained reactors).
     pub fn add_port(
         &mut self,
         key: BuilderPortKey,

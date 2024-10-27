@@ -1,10 +1,10 @@
 use boomerang::prelude::*;
 use boomerang_util::timeout;
 
-use std::time::Duration;
+use std::{fmt::Debug, time::Duration};
 
 trait CountData:
-    Copy + runtime::PortData + std::ops::AddAssign<i32> + std::cmp::PartialEq<i32>
+    Debug + Copy + runtime::ReactorData + std::ops::AddAssign<i32> + std::cmp::PartialEq<i32>
 {
 }
 
@@ -16,7 +16,7 @@ struct Count<T: CountData> {
     #[reactor(timer(period = "1 msec"))]
     t: TimerActionKey,
     c: TypedPortKey<T, Output>,
-    #[reactor(child = "Duration::from_secs(1)")]
+    #[reactor(child = "Duration::from_secs(1).into()")]
     _timeout: timeout::Timeout,
 }
 

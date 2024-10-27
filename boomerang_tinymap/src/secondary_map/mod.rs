@@ -8,10 +8,12 @@ use std::{
 use super::Key;
 
 mod iter_many;
+#[cfg(feature = "serde")]
+mod serde_impl;
 
 pub use iter_many::IterManyMut;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TinySecondaryMap<K: Key, V> {
     data: Vec<Option<V>>,
     num_values: usize,
@@ -421,5 +423,20 @@ mod tests {
         assert_eq!(iter_mut.next(), Some((DefaultKey(3), &mut 4)));
         assert_eq!(iter_mut.next(), None);
         assert_eq!(iter_mut.len(), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn test_serialize_roundtrip() {
+        let mut map = TinySecondaryMap::<DefaultKey, _>::new();
+        map.insert(DefaultKey(3), 4);
+        map.insert(DefaultKey(0), 1);
+        map.insert(DefaultKey(2), 3);
+        map.insert(DefaultKey(1), 2);
+
+        let serialized = serde_json::to_string(&map).unwrap();
+        let deserialized: TinySecondaryMap<DefaultKey, i32> =
+            serde_json::from_str(&serialized).unwrap();
+        assert_eq!(map, deserialized);
     }
 }

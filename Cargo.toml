@@ -11,21 +11,23 @@ readme = "README.md"
 exclude = ['.gitignore', '.cargo/config', '.vscode', '.devcontainer', '.github']
 
 [workspace.dependencies]
-arrow = { version = "52", default-features = false }
 anyhow = "1.0"
+arrow = { version = "52", default-features = false }
 document-features = "0.2"
+erased-serde = "0.4"
 itertools = "0.13"
-thiserror = "1.0"
-tracing = "0.1"
+rayon = "1.10"
 serde = "1.0"
 serde_arrow = { version = "0.11", features = ["arrow-52"] }
-erased-serde = "0.4"
-rayon = "1.10"
+serde_flexitos = { version = "0.2", features = ["id_trait"] }
+thiserror = "1.0"
+tracing = "0.1"
+linkme = { version = "0.3" }
 
 # Local crates
 boomerang = { path = "boomerang", version = "0.3.0" }
 boomerang_derive = { path = "boomerang_derive", version = "0.3.0" }
-boomerang_runtime = { path = "boomerang_runtime", version = "0.3.0", default-features = false }
+boomerang_runtime = { path = "boomerang_runtime", version = "0.3.0" }
 boomerang_tinymap = { path = "boomerang_tinymap", version = "0.3.0" }
 boomerang_util = { path = "boomerang_util", version = "0.3.0" }
 boomerang_builder = { path = "boomerang_builder", version = "0.3.0" }
@@ -38,11 +40,17 @@ members = [
     "boomerang_derive",
     "boomerang_runtime",
     "boomerang_tinymap",
+    "examples/snake",
 ]
 resolver = "2"
 
 [profile.profiling]
 inherits = "release"
 debug = true
+
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = 3
 
 [patch.crates-io]

@@ -8,7 +8,7 @@ struct HelloBench {
 
 #[derive(Reactor)]
 #[reactor(
-    state = HelloBench,
+    state = "HelloBench",
     connection(from = "out1", to = "in1"),
     reaction = "ReactionFoo",
     reaction = "ReactionBar"

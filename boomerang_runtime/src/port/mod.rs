@@ -4,11 +4,11 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use crate::PortData;
+use crate::ReactorData;
 
 tinymap::key_type!(pub PortKey);
 
-pub trait BasePort: Debug + Display + Send + Sync + Downcast {
+pub trait BasePort: Debug + Display + Downcast + Send + Sync {
     /// Get the name of this port
     fn get_name(&self) -> &str;
 
@@ -26,24 +26,35 @@ pub trait BasePort: Debug + Display + Send + Sync + Downcast {
 }
 impl_downcast!(BasePort);
 
-#[derive(Debug)]
-pub struct Port<T: PortData> {
+pub struct Port<T: ReactorData> {
     name: String,
     key: PortKey,
     value: Option<T>,
 }
 
-impl<T: PortData> Display for Port<T> {
+impl<T: ReactorData> Debug for Port<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!(
-            "{} : Port<{}>",
-            self.name,
-            std::any::type_name::<T>()
-        ))
+        f.debug_struct("Port")
+            .field("name", &self.name)
+            .field("key", &self.key)
+            //.field("value", &self.value)
+            .finish()
     }
 }
 
-impl<T: PortData> Deref for Port<T> {
+impl<T: ReactorData> Display for Port<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Port<{ty}>(\"{name}\", {key})",
+            ty = std::any::type_name::<T>(),
+            name = &self.name,
+            key = self.key
+        )
+    }
+}
+
+impl<T: ReactorData> Deref for Port<T> {
     type Target = Option<T>;
 
     fn deref(&self) -> &Self::Target {
@@ -51,16 +62,13 @@ impl<T: PortData> Deref for Port<T> {
     }
 }
 
-impl<T: PortData> DerefMut for Port<T> {
+impl<T: ReactorData> DerefMut for Port<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.value
     }
 }
 
-impl<T> Port<T>
-where
-    T: PortData,
-{
+impl<T: ReactorData> Port<T> {
     pub fn new(name: &str, key: PortKey) -> Self {
         Self {
             name: name.to_owned(),
@@ -82,10 +90,7 @@ where
     }
 }
 
-impl<T> BasePort for Port<T>
-where
-    T: PortData,
-{
+impl<T: ReactorData> BasePort for Port<T> {
     fn get_name(&self) -> &str {
         &self.name
     }
@@ -112,9 +117,9 @@ where
 /// `InputRef` is the type that Reaction functions receive for their input ports.
 ///
 /// See also: [`OutputRef`]
-pub struct InputRef<'a, T: PortData = ()>(&'a Port<T>);
+pub struct InputRef<'a, T: ReactorData = ()>(&'a Port<T>);
 
-impl<'a, T: PortData> InputRef<'a, T> {
+impl<'a, T: ReactorData> InputRef<'a, T> {
     pub fn name(&self) -> &str {
         self.0.get_name()
     }
@@ -124,13 +129,13 @@ impl<'a, T: PortData> InputRef<'a, T> {
     }
 }
 
-impl<'a, T: PortData> From<&'a Port<T>> for InputRef<'a, T> {
+impl<'a, T: ReactorData> From<&'a Port<T>> for InputRef<'a, T> {
     fn from(port: &'a Port<T>) -> Self {
         Self(port)
     }
 }
 
-impl<'a, T: PortData> Deref for InputRef<'a, T> {
+impl<'a, T: ReactorData> Deref for InputRef<'a, T> {
     type Target = <Port<T> as Deref>::Target;
 
     fn deref(&self) -> &Self::Target {
@@ -138,7 +143,7 @@ impl<'a, T: PortData> Deref for InputRef<'a, T> {
     }
 }
 
-impl<'a, T: PortData> From<&'a (dyn BasePort)> for InputRef<'a, T> {
+impl<'a, T: ReactorData> From<&'a (dyn BasePort)> for InputRef<'a, T> {
     fn from(port: &'a dyn BasePort) -> Self {
         InputRef::from(
             port.downcast_ref::<Port<T>>()
@@ -152,9 +157,9 @@ impl<'a, T: PortData> From<&'a (dyn BasePort)> for InputRef<'a, T> {
 /// `OutputRef` is the type that Reaction functions receive for their input ports.
 ///
 /// See also: [`InputRef`]
-pub struct OutputRef<'a, T: PortData = ()>(&'a mut Port<T>);
+pub struct OutputRef<'a, T: ReactorData = ()>(&'a mut Port<T>);
 
-impl<'a, T: PortData> OutputRef<'a, T> {
+impl<'a, T: ReactorData> OutputRef<'a, T> {
     pub fn name(&self) -> &str {
         self.0.get_name()
     }
@@ -164,13 +169,13 @@ impl<'a, T: PortData> OutputRef<'a, T> {
     }
 }
 
-impl<'a, T: PortData> From<&'a mut Port<T>> for OutputRef<'a, T> {
+impl<'a, T: ReactorData> From<&'a mut Port<T>> for OutputRef<'a, T> {
     fn from(port: &'a mut Port<T>) -> Self {
         Self(port)
     }
 }
 
-impl<'a, T: PortData> Deref for OutputRef<'a, T> {
+impl<'a, T: ReactorData> Deref for OutputRef<'a, T> {
     type Target = <Port<T> as Deref>::Target;
 
     fn deref(&self) -> &Self::Target {
@@ -178,13 +183,13 @@ impl<'a, T: PortData> Deref for OutputRef<'a, T> {
     }
 }
 
-impl<'a, T: PortData> DerefMut for OutputRef<'a, T> {
+impl<'a, T: ReactorData> DerefMut for OutputRef<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.0.deref_mut()
     }
 }
 
-impl<'a, T: PortData> From<&'a mut dyn BasePort> for OutputRef<'a, T> {
+impl<'a, T: ReactorData> From<&'a mut dyn BasePort> for OutputRef<'a, T> {
     fn from(port: &'a mut dyn BasePort) -> Self {
         OutputRef::from(
             port.downcast_mut::<Port<T>>()

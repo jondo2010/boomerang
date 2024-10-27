@@ -4,6 +4,8 @@ use std::time::Duration;
 
 use boomerang::prelude::*;
 
+#[derive(Default, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct State {
     r1done: bool,
     r2done: bool,

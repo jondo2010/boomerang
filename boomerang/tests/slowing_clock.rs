@@ -7,6 +7,8 @@ use boomerang::prelude::*;
 use boomerang_util::timeout;
 use std::time::Duration;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug)]
 struct SlowingClock {
     interval: Duration,
     expected_time: Duration,
@@ -32,7 +34,7 @@ struct SlowingClockBuilder {
     #[reactor(action(min_delay = "100 msec"))]
     a: TypedActionKey<()>,
 
-    #[reactor(child = "Duration::from_secs(1)")]
+    #[reactor(child = "Duration::from_secs(1).into()")]
     _timeout: timeout::Timeout,
 }
 

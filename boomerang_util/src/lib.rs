@@ -4,8 +4,6 @@
 #![deny(unsafe_code)]
 #![deny(clippy::all)]
 
-#[cfg(all(feature = "keyboard", not(windows)))]
-pub mod keyboard_events;
 #[cfg(feature = "replay")]
 pub mod replay;
 #[cfg(feature = "runner")]

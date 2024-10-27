@@ -3,35 +3,41 @@
 #![doc = document_features::document_features!()]
 #![deny(clippy::all)]
 
-mod action;
+pub mod action;
 mod context;
 mod env;
 mod event;
 pub mod keepalive;
 mod key_set;
-mod port;
-mod reaction;
+pub mod port;
+pub mod reaction;
 mod reactor;
 mod refs;
 mod sched;
-mod store;
+pub mod store;
 mod time;
 
 // Re-exports
-pub use action::*;
+pub use action::{
+    Action, ActionKey, ActionRef, ActionRefValue, LogicalAction, PhysicalAction, PhysicalActionRef,
+};
 pub use context::*;
 pub use env::{BankInfo, Env, Level, LevelReactionKey, ReactionGraph};
 pub use key_set::KeySetLimits as ReactionSetLimits;
-//pub use partition::{partition, partition_mut, Partition, PartitionMut};
 pub use port::*;
-pub use reaction::*;
+pub use reaction::{
+    BoxedReactionFn, Deadline, FromRefs, Reaction, ReactionAdapter, ReactionFn, ReactionKey,
+    ReactionSet, Trigger,
+};
 pub use reactor::*;
 pub use refs::{Refs, RefsMut};
 pub use sched::*;
 pub use time::*;
 
-pub trait PortData: std::fmt::Debug + Send + Sync + 'static {}
-impl<T> PortData for T where T: std::fmt::Debug + Send + Sync + 'static {}
+/// Types implementing this trait can be used as data in ports, actions, and reactors.
+pub trait ReactorData: Send + Sync + 'static {}
+
+impl<T> ReactorData for T where T: Send + Sync + 'static {}
 
 #[derive(thiserror::Error, Debug)]
 pub enum RuntimeError {
@@ -43,10 +49,6 @@ pub enum RuntimeError {
         found: &'static str,
         wanted: &'static str,
     },
-
-    #[cfg(feature = "serde")]
-    #[error("Serialization error: {0}")]
-    SerializationError(#[from] serde_arrow::Error),
 
     #[error("Destructuring error")]
     DestrError,

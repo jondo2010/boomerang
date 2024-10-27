@@ -5,6 +5,7 @@
 use boomerang::prelude::*;
 use std::time::Duration;
 
+#[derive(Debug)]
 pub struct State {
     s: i32,
 }
@@ -126,7 +127,7 @@ struct ThreadedMultiport<const WIDTH: usize = 4, const ITERS: usize = 100_000_00
     t: [computation::Computation<ITERS>; WIDTH],
     #[reactor(child = "State{s: 0}")]
     b: destination::Destination<WIDTH, ITERS>,
-    #[reactor(child = "Duration::from_secs(2)")]
+    #[reactor(child = "Duration::from_secs(2).into()")]
     _timeout: boomerang_util::timeout::Timeout,
 }
 

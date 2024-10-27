@@ -10,6 +10,12 @@ pub struct KeyboardEvents {
     raw_terminal: Option<RawTerminal<Stdout>>,
 }
 
+impl std::fmt::Debug for KeyboardEvents {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeyboardEvents").finish()
+    }
+}
+
 #[derive(Reactor, Clone)]
 #[reactor(
     state = "KeyboardEvents",

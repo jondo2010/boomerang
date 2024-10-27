@@ -4,7 +4,10 @@ use boomerang::prelude::*;
 use boomerang_util::timeout;
 use std::{thread::JoinHandle, time::Duration};
 
+#[derive(Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct State {
+    #[cfg_attr(feature = "serde", serde(skip))]
     thread: Option<JoinHandle<()>>,
     expected_time: Duration,
     toggle: bool,
@@ -24,7 +27,7 @@ struct AsyncCallback {
 
     a: TypedActionKey<usize, Physical>,
 
-    #[reactor(child = Duration::from_secs(2))]
+    #[reactor(child = "Duration::from_secs(2).into()")]
     _timeout: timeout::Timeout,
 }
 

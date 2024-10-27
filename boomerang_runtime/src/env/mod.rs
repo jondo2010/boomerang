@@ -1,13 +1,13 @@
 use crate::{
-    key_set::KeySetLimits, Action, ActionKey, BasePort, PortKey, Reaction, ReactionKey, Reactor,
-    ReactorKey,
+    key_set::KeySetLimits, Action, ActionKey, BasePort, BaseReactor, PortKey, Reaction,
+    ReactionKey, ReactorKey,
 };
 
 mod debug;
 
 /// Execution level
-#[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Level(pub(crate) usize);
 
 impl std::fmt::Debug for Level {
@@ -52,7 +52,7 @@ pub type LevelReactionKey = (Level, ReactionKey);
 /// The reactor heirarchy has been flattened and build by the builder methods.
 pub struct Env {
     /// The runtime set of Reactors
-    pub reactors: tinymap::TinyMap<ReactorKey, Reactor>,
+    pub reactors: tinymap::TinyMap<ReactorKey, Box<dyn BaseReactor>>,
     /// The runtime set of Actions
     pub actions: tinymap::TinyMap<ActionKey, Action>,
     /// The runtime set of Ports
@@ -63,16 +63,17 @@ pub struct Env {
 
 impl Env {
     /// Get a reactor by it's name
-    pub fn find_reactor_by_name(&self, name: &str) -> Option<&Reactor> {
+    pub fn find_reactor_by_name(&self, name: &str) -> Option<&dyn BaseReactor> {
         self.reactors
             .iter()
-            .find(|(_, reactor)| reactor.get_name() == name)
-            .map(|(_, reactor)| reactor)
+            .find(|(_, reactor)| reactor.name() == name)
+            .map(|(_, reactor)| reactor.as_ref())
     }
 }
 
 /// Bank information for a multi-bank reactor
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BankInfo {
     /// The index of this reactor within the bank
     pub idx: usize,
@@ -82,7 +83,9 @@ pub struct BankInfo {
 
 /// Invariant data for the runtime, describing the resolved reaction graph and it's dependencies.
 ///
-/// Maps of triggers for actions and ports. This data is statically resolved by the builder from the reaction graph.
+/// Maps of triggers for actions and ports. This data is statically resolved by the builder from the
+/// reaction graph.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ReactionGraph {
     /// For each Action, a set of Reactions triggered by it.
     pub action_triggers: tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
@@ -92,7 +95,8 @@ pub struct ReactionGraph {
     pub startup_reactions: Vec<LevelReactionKey>,
     /// Global shutdown reactions
     pub shutdown_reactions: Vec<LevelReactionKey>,
-    /// The maximum level of any reaction, and the total number of reactions. This is used to allocate the reaction set.
+    /// The maximum level of any reaction, and the total number of reactions. This is used to
+    /// allocate the reaction set.
     pub reaction_set_limits: KeySetLimits,
     /// For each reaction, the set of 'use' ports
     pub reaction_use_ports: tinymap::TinySecondaryMap<ReactionKey, tinymap::KeySet<PortKey>>,
@@ -110,14 +114,14 @@ pub struct ReactionGraph {
 pub mod tests {
     use itertools::Itertools;
 
-    use crate::{Context, Port, ReactionSetLimits, ReactorState};
+    use crate::{BaseReactor, Context, Port, ReactionSetLimits, Reactor};
 
     use super::*;
 
     /// An empty reaction function for testing.
     pub fn dummy_reaction_fn<'a>(
         _context: &'a mut Context,
-        _state: &'a mut dyn ReactorState,
+        _state: &'a mut dyn BaseReactor,
         _ref_ports: crate::refs::Refs<'a, dyn BasePort>,
         _mut_ports: crate::refs::RefsMut<'a, dyn BasePort>,
         _actions: crate::refs::RefsMut<'a, Action>,
@@ -127,8 +131,8 @@ pub mod tests {
     /// Create a dummy `Env` and `ReactionGraph` for testing.
     pub fn create_dummy_env() -> (Env, ReactionGraph) {
         let env = Env {
-            reactors: [Reactor::new("dummy", Box::new(()))].into_iter().collect(),
-            reactions: [Reaction::new("dummy", Box::new(dummy_reaction_fn), None)]
+            reactors: [Reactor::new("dummy", ()).boxed()].into_iter().collect(),
+            reactions: [Reaction::new("dummy", dummy_reaction_fn, None)]
                 .into_iter()
                 .collect(),
             actions: [

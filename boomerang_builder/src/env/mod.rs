@@ -79,7 +79,7 @@ impl EnvBuilder {
 
     /// Add a new Reactor
     /// - name: Instance name of the reactor
-    pub fn add_reactor<S: runtime::ReactorState>(
+    pub fn add_reactor<S: runtime::ReactorData>(
         &mut self,
         name: &str,
         parent: Option<BuilderReactorKey>,
@@ -101,7 +101,7 @@ impl EnvBuilder {
     }
 
     /// Add an Input port to the Reactor
-    pub fn add_input_port<T: runtime::PortData>(
+    pub fn add_input_port<T: runtime::ReactorData>(
         &mut self,
         name: &str,
         reactor_key: BuilderReactorKey,
@@ -111,7 +111,7 @@ impl EnvBuilder {
     }
 
     /// Add an Output port to the Reactor
-    pub fn add_output_port<T: runtime::PortData>(
+    pub fn add_output_port<T: runtime::ReactorData>(
         &mut self,
         name: &str,
         reactor_key: BuilderReactorKey,
@@ -120,7 +120,7 @@ impl EnvBuilder {
             .map(From::from)
     }
 
-    fn internal_add_port<T: runtime::PortData, Q: PortTag + 'static>(
+    fn internal_add_port<T: runtime::ReactorData, Q: PortTag + 'static>(
         &mut self,
         name: &str,
         reactor_key: BuilderReactorKey,
@@ -132,7 +132,7 @@ impl EnvBuilder {
             .any(|port| port.get_name() == name && port.get_reactor_key() == reactor_key)
         {
             return Err(BuilderError::DuplicatePortDefinition {
-                reactor_name: self.reactor_builders[reactor_key].get_name().to_owned(),
+                reactor_name: self.reactor_builders[reactor_key].name().to_owned(),
                 port_name: name.into(),
             });
         }
@@ -173,7 +173,7 @@ impl EnvBuilder {
         )
     }
 
-    pub fn add_logical_action<T: runtime::ActionData>(
+    pub fn add_logical_action<T: runtime::ReactorData>(
         &mut self,
         name: &str,
         min_delay: Option<Duration>,
@@ -189,7 +189,7 @@ impl EnvBuilder {
         )
     }
 
-    pub fn add_physical_action<T: runtime::ActionData>(
+    pub fn add_physical_action<T: runtime::ReactorData>(
         &mut self,
         name: &str,
         min_delay: Option<Duration>,
@@ -225,7 +225,7 @@ impl EnvBuilder {
         action_fn: F,
     ) -> Result<TypedActionKey<T, Q>, BuilderError>
     where
-        T: runtime::ActionData,
+        T: runtime::ReactorData,
         F: ActionBuilderFn + 'static,
     {
         let reactor_builder = &mut self.reactor_builders[reactor_key];
@@ -237,7 +237,7 @@ impl EnvBuilder {
             .any(|action_key| self.action_builders[action_key].get_name() == name)
         {
             return Err(BuilderError::DuplicateActionDefinition {
-                reactor_name: reactor_builder.get_name().to_owned(),
+                reactor_name: reactor_builder.name().to_owned(),
                 action_name: name.into(),
             });
         }
@@ -328,7 +328,7 @@ impl EnvBuilder {
         self.reactor_builders
             .iter()
             .find_map(|(reactor_key, reactor_builder)| {
-                if reactor_builder.get_name() == reactor_name {
+                if reactor_builder.name() == reactor_name {
                     Some(reactor_key)
                 } else {
                     None
@@ -482,10 +482,10 @@ impl EnvBuilder {
             .ok_or(BuilderError::ReactorKeyNotFound(reactor_key))
             .and_then(|reactor| {
                 reactor.parent_reactor_key.map_or_else(
-                    || Ok(reactor.get_name().try_into().unwrap()),
+                    || Ok(reactor.name().try_into().unwrap()),
                     |parent| {
                         self.reactor_fqn(parent)
-                            .map(|parent| parent.append(reactor.get_name()))
+                            .map(|parent| parent.append(reactor.name()))
                     },
                 )
             })

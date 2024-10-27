@@ -1,19 +1,16 @@
-//! A snake terminal game. Does not support windows.
-//!
-//! Original source:
-//!     Author: Clément Fournier
-//!     Git: https://github.com/lf-lang/reactor-rust/examples/src/Snake.lf
-
 #[cfg(not(windows))]
 mod support;
+
+#[cfg(not(windows))]
+mod keyboard_events;
 
 #[cfg(not(windows))]
 mod reactor {
     use std::time::Duration;
 
     use super::support::*;
+    use crate::keyboard_events::{Key, KeyboardEvents, KeyboardEventsBuilder};
     use boomerang::prelude::*;
-    use boomerang_util::keyboard_events::{Key, KeyboardEvents, KeyboardEventsBuilder};
 
     #[derive(Reactor)]
     #[reactor(
@@ -43,6 +40,7 @@ mod reactor {
         add_more_food: TimerActionKey,
     }
 
+    #[derive(Debug)]
     pub struct Snake {
         // model classes for the game.
         snake: CircularSnake,

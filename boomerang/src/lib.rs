@@ -84,9 +84,6 @@ pub mod prelude {
 
     pub use super::runtime::{self, ContextCommon, FromRefs};
 
-    #[cfg(feature = "serde")]
-    pub use runtime::{register_reaction_fn, register_type};
-
     pub use boomerang_derive::{Reaction, Reactor};
 }
 

@@ -16,7 +16,6 @@ tinymap::key_type! { pub ActionKey }
 
 /// Typed Action state, storing potentially different values at different Tags.
 #[derive(Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LogicalAction {
     pub name: String,
     pub key: ActionKey,
@@ -37,41 +36,11 @@ impl LogicalAction {
 }
 
 #[derive(Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PhysicalAction {
     pub name: String,
     pub key: ActionKey,
     pub min_delay: Duration,
-    #[cfg_attr(feature = "serde", serde(with = "serialize_physical_action_store"))]
     pub store: Arc<Mutex<dyn BaseActionStore>>,
-}
-
-#[cfg(feature = "serde")]
-mod serialize_physical_action_store {
-    use std::sync::{Arc, Mutex};
-
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    use super::BaseActionStore;
-
-    pub fn serialize<S>(
-        store: &Arc<Mutex<dyn BaseActionStore>>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let store = store.lock().expect("Failed to lock action store");
-        store.serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<Mutex<dyn BaseActionStore>>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let store = Box::<dyn BaseActionStore>::deserialize(deserializer)?;
-        Ok(store.boxed_to_mutex())
-    }
 }
 
 impl PhysicalAction {
@@ -85,25 +54,6 @@ impl PhysicalAction {
             store,
         }
     }
-
-    /// Create a new Arrow ArrayBuilder for the data stored in this store
-    #[cfg(feature = "serde")]
-    pub fn new_builder(&self) -> Result<serde_arrow::ArrayBuilder, crate::RuntimeError> {
-        self.store.lock().expect("lock").new_builder()
-    }
-
-    /// Serialize the latest value in the store to the given `ArrayBuilder`.
-    #[cfg(feature = "serde")]
-    pub fn build_value_at(
-        &mut self,
-        builder: &mut serde_arrow::ArrayBuilder,
-        tag: crate::Tag,
-    ) -> Result<(), crate::RuntimeError> {
-        self.store
-            .lock()
-            .expect("lock")
-            .build_value_at(builder, tag)
-    }
 }
 
 impl<'a> From<&'a mut Action> for &'a mut PhysicalAction {
@@ -113,7 +63,6 @@ impl<'a> From<&'a mut Action> for &'a mut PhysicalAction {
 }
 
 #[derive(Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Action {
     /// Startup is a special action that fires when the scheduler starts up.
     Startup,

@@ -57,18 +57,6 @@ pub trait BaseActionStore: Debug + Downcast + Send + Sync {
     /// Remove any value at the given Tag
     fn clear_older_than(&mut self, tag: Tag);
 
-    /// Create a new Arrow ArrayBuilder for the data stored in this store
-    #[cfg(feature = "serde")]
-    fn new_builder(&self) -> Result<serde_arrow::ArrayBuilder, crate::RuntimeError>;
-
-    /// Serialize the latest value in the store to the given `ArrayBuilder`.
-    #[cfg(feature = "serde")]
-    fn build_value_at(
-        &mut self,
-        builder: &mut serde_arrow::ArrayBuilder,
-        tag: Tag,
-    ) -> Result<(), crate::RuntimeError>;
-
     /// Convert a Boxed store into an Arc-Mutex-protected version
     fn boxed_to_mutex(self: Box<Self>) -> Arc<Mutex<dyn BaseActionStore>>;
 }
@@ -147,39 +135,9 @@ impl<T: ReactorData> ActionStore<T> {
     }
 }
 
-#[cfg(feature = "serde")]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-struct TaggedActionRecord<T> {
-    tag: Tag,
-    value: Option<T>,
-}
-
 impl<T: ReactorData> BaseActionStore for ActionStore<T> {
     fn clear_older_than(&mut self, tag: Tag) {
         self.clear_older_than(tag)
-    }
-
-    #[cfg(feature = "serde")]
-    fn new_builder(&self) -> Result<serde_arrow::ArrayBuilder, crate::RuntimeError> {
-        use arrow::datatypes::Field;
-        use serde_arrow::schema::{SchemaLike, SerdeArrowSchema, TracingOptions};
-        let fields = Vec::<Field>::from_type::<TaggedActionRecord<T>>(
-            TracingOptions::default().allow_null_fields(true),
-        )?;
-        let schema = SerdeArrowSchema::from_arrow_fields(fields.as_slice())?;
-        serde_arrow::ArrayBuilder::new(schema).map_err(crate::RuntimeError::from)
-    }
-
-    #[cfg(feature = "serde")]
-    fn build_value_at(
-        &mut self,
-        builder: &mut serde_arrow::ArrayBuilder,
-        tag: Tag,
-    ) -> Result<(), crate::RuntimeError> {
-        let value = self.get_current(tag);
-        builder
-            .push(&TaggedActionRecord { tag, value })
-            .map_err(crate::RuntimeError::from)
     }
 
     fn boxed_to_mutex(self: Box<Self>) -> Arc<Mutex<dyn BaseActionStore>> {
@@ -270,52 +228,5 @@ mod tests {
     fn test_empty_store() {
         let mut store = ActionStore::<u32>::default();
         assert_eq!(store.get_current(Tag::new(Duration::from_secs(1), 0)), None);
-    }
-
-    #[cfg(feature = "serde")]
-    #[test]
-    fn test_serialize() {
-        use crate::{Action, ActionKey};
-
-        let actions = tinymap::TinyMap::<ActionKey, _>::from_iter([
-            Action::Startup,
-            Action::Shutdown,
-            Action::new_logical::<i32>("a0", ActionKey::from(1), Default::default()),
-            Action::new_physical::<bool>("a1", ActionKey::from(2), Default::default()),
-        ]);
-
-        let json = serde_json::to_string(&actions).unwrap();
-        let _roundtrip: tinymap::TinyMap<ActionKey, Action> = serde_json::from_str(&json).unwrap();
-    }
-
-    #[cfg(feature = "serde")]
-    #[test]
-    fn test_arrow() {
-        #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-        struct TestStruct {
-            name: String,
-            data: u32,
-        }
-        impl serde_flexitos::id::Id for TestStruct {
-            const ID: serde_flexitos::id::Ident<'static> =
-                serde_flexitos::id::Ident::I1("TestStruct");
-        }
-        let mut store = ActionStore::<TestStruct>::default();
-        let tag = Tag::now(crate::Timestamp::now());
-        store.push(
-            tag,
-            Some(TestStruct {
-                name: "test".to_string(),
-                data: 42,
-            }),
-        );
-
-        let mut builder = store.new_builder().unwrap();
-        store.build_value_at(&mut builder, tag).unwrap();
-        store
-            .build_value_at(&mut builder, tag.delay(Duration::ZERO))
-            .unwrap();
-
-        arrow::util::pretty::print_batches(&[builder.to_record_batch().unwrap()]).unwrap();
     }
 }

@@ -6,9 +6,6 @@ struct State {
     success: bool,
 }
 
-#[cfg(feature = "serde")]
-register_type!(State);
-
 #[derive(Reactor)]
 #[reactor(
     state = "State",

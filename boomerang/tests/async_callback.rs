@@ -14,9 +14,6 @@ struct State {
     i: usize,
 }
 
-#[cfg(feature = "serde")]
-register_type!(State);
-
 #[derive(Reactor)]
 #[reactor(
     state = "State",

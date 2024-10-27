@@ -11,9 +11,6 @@ struct State {
     r2done: bool,
 }
 
-#[cfg(feature = "serde")]
-register_type!(State);
-
 #[derive(Clone, Reactor)]
 #[reactor(
     state = "State",

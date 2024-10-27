@@ -76,13 +76,6 @@ pub trait Trigger<R: ReactorData> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ReactionAdapter<Reaction, T>(std::marker::PhantomData<fn() -> (Reaction, T)>);
 
-#[cfg(feature = "serde")]
-impl<Reaction, T: ReactorData> serde_flexitos::id::IdObj for ReactionAdapter<Reaction, T> {
-    fn id(&self) -> serde_flexitos::id::Ident<'static> {
-        serde_flexitos::id::Ident::I1("ReactionAdapter").extend(T::ID)
-    }
-}
-
 impl<Reaction, T> Default for ReactionAdapter<Reaction, T> {
     fn default() -> Self {
         Self(Default::default())
@@ -155,23 +148,6 @@ where
     }
 }
 
-#[cfg(feature = "serde")]
-impl<'store, F> serde_flexitos::id::IdObj for FnWrapper<F>
-where
-    F: Fn(
-            &'store mut Context,
-            &'store mut dyn BaseReactor,
-            Refs<'store, dyn BasePort>,
-            RefsMut<'store, dyn BasePort>,
-            RefsMut<'store, Action>,
-        ) + Send
-        + Sync,
-{
-    fn id(&self) -> serde_flexitos::id::Ident<'static> {
-        serde_flexitos::id::Ident::I2("FnWrapper", std::any::type_name::<F>())
-    }
-}
-
 impl<'store, F> ReactionFn<'store> for FnWrapper<F>
 where
     F: Fn(
@@ -210,14 +186,12 @@ impl Debug for Deadline {
     }
 }
 
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug)]
 pub struct Reaction {
     name: String,
     /// Reaction closure
     pub(crate) body: BoxedReactionFn,
     /// Local deadline relative to the time stamp for invocation of the reaction.
-    #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) deadline: Option<Deadline>,
 }
 
@@ -265,9 +239,6 @@ pub fn timer_startup_fn(
     ctx.schedule_action(&mut timer, None, None);
 }
 
-#[cfg(feature = "serde")]
-crate::register_reaction_fn!(FnWrapper<timer_startup_fn>);
-
 /// Utility reset function for a timer action
 pub fn timer_reset_fn(
     ctx: &mut Context,
@@ -279,9 +250,6 @@ pub fn timer_reset_fn(
     let mut timer: ActionRef = actions.partition_mut().expect("Expected a timer action");
     ctx.schedule_action(&mut timer, None, None);
 }
-
-#[cfg(feature = "serde")]
-crate::register_reaction_fn!(FnWrapper<timer_reset_fn>);
 
 #[cfg(test)]
 mod tests {

@@ -50,7 +50,6 @@ pub type LevelReactionKey = (Level, ReactionKey);
 /// `Env` stores the resolved runtime state of all the reactors.
 ///
 /// The reactor heirarchy has been flattened and build by the builder methods.
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Env {
     /// The runtime set of Reactors
     pub reactors: tinymap::TinyMap<ReactorKey, Box<dyn BaseReactor>>,
@@ -129,9 +128,6 @@ pub mod tests {
     ) {
     }
 
-    #[cfg(feature = "serde")]
-    crate::register_reaction_fn!(FnWrapper<dummy_reaction_fn>);
-
     /// Create a dummy `Env` and `ReactionGraph` for testing.
     pub fn create_dummy_env() -> (Env, ReactionGraph) {
         let env = Env {
@@ -180,23 +176,5 @@ pub mod tests {
             reactor_bank_infos: tinymap::TinySecondaryMap::new(),
         };
         (env, reaction_graph)
-    }
-
-    #[cfg(feature = "serde")]
-    #[test]
-    fn test_serialize_roundtrip() {
-        let (env, reaction_graph) = create_dummy_env();
-
-        let serialized_env = serde_json::to_string_pretty(&env).unwrap();
-        println!("{serialized_env}");
-        let deserialized_env: Env = serde_json::from_str(&serialized_env).unwrap();
-        // assert_eq!(env, deserialized_env);
-        dbg!(deserialized_env);
-
-        let serialized_reaction_graph = serde_json::to_string_pretty(&reaction_graph).unwrap();
-        //println!("{serialized_reaction_graph}");
-        let deserialized_reaction_graph: ReactionGraph =
-            serde_json::from_str(&serialized_reaction_graph).unwrap();
-        // assert_eq!(reaction_graph, deserialized_reaction_graph);
     }
 }

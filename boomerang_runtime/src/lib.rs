@@ -50,10 +50,6 @@ pub enum RuntimeError {
         wanted: &'static str,
     },
 
-    #[cfg(feature = "serde")]
-    #[error("Serialization error: {0}")]
-    SerializationError(#[from] serde_arrow::Error),
-
     #[error("Destructuring error")]
     DestrError,
 }

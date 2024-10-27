@@ -16,9 +16,6 @@ struct Hello {
     previous_time: Duration,
 }
 
-#[cfg(feature = "serde")]
-register_type!(Hello);
-
 impl Hello {
     fn new(period: Duration, message: &str) -> Self {
         Self {
@@ -83,9 +80,6 @@ impl runtime::Trigger<Hello> for ReactionA {
 struct Inside {
     message: String,
 }
-
-#[cfg(feature = "serde")]
-register_type!(Inside);
 
 impl Inside {
     fn new(message: &str) -> Self {

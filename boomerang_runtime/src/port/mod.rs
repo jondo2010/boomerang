@@ -26,7 +26,6 @@ pub trait BasePort: Debug + Display + Downcast + Send + Sync {
 }
 impl_downcast!(BasePort);
 
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Port<T: ReactorData> {
     name: String,
     key: PortKey,
@@ -40,72 +39,6 @@ impl<T: ReactorData> Debug for Port<T> {
             .field("key", &self.key)
             //.field("value", &self.value)
             .finish()
-    }
-}
-
-#[cfg(feature = "serde")]
-impl<'de, T: ReactorData> serde::Deserialize<'de> for Port<T> {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(serde::Deserialize)]
-        #[serde(field_identifier, rename_all = "lowercase")]
-        enum Field {
-            Name,
-            Key,
-            Value,
-        }
-
-        struct PortVisitor<T: ReactorData>(std::marker::PhantomData<T>);
-
-        impl<'de, T: ReactorData> serde::de::Visitor<'de> for PortVisitor<T> {
-            type Value = Port<T>;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("a struct with fields `name`, `key`, and `value`")
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: serde::de::MapAccess<'de>,
-            {
-                let mut name = None;
-                let mut key = None;
-                let mut value = None;
-                while let Some(map_key) = map.next_key()? {
-                    match map_key {
-                        Field::Name => {
-                            if name.is_some() {
-                                return Err(serde::de::Error::duplicate_field("name"));
-                            }
-                            name = Some(map.next_value()?);
-                        }
-                        Field::Key => {
-                            if key.is_some() {
-                                return Err(serde::de::Error::duplicate_field("key"));
-                            }
-                            key = Some(map.next_value()?);
-                        }
-                        Field::Value => {
-                            if value.is_some() {
-                                return Err(serde::de::Error::duplicate_field("value"));
-                            }
-                            value = Some(map.next_value()?);
-                        }
-                    }
-                }
-
-                let name = name.ok_or_else(|| serde::de::Error::missing_field("name"))?;
-                let key = key.ok_or_else(|| serde::de::Error::missing_field("key"))?;
-                let value = value.ok_or_else(|| serde::de::Error::missing_field("value"))?;
-
-                Ok(Port { name, key, value })
-            }
-        }
-
-        const FIELDS: &[&str] = &["name", "key", "value"];
-        deserializer.deserialize_struct("Port", FIELDS, PortVisitor::<T>(std::marker::PhantomData))
     }
 }
 

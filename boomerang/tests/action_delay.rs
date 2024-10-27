@@ -10,9 +10,6 @@ struct GeneratedDelayState {
     y_state: u32,
 }
 
-#[cfg(feature = "serde")]
-register_type!(GeneratedDelayState);
-
 #[derive(Reactor, Clone)]
 #[reactor(
     state = "GeneratedDelayState",

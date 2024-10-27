@@ -3,11 +3,14 @@
 //! Pressing arrow keys will print them to the terminal.
 
 #[cfg(not(windows))]
+mod keyboard_events;
+
+#[cfg(not(windows))]
 mod example {
     use std::io::Write;
 
+    use crate::keyboard_events::{KeyboardEvents, KeyboardEventsBuilder};
     use boomerang::prelude::*;
-    use keyboard_events::{KeyboardEvents, KeyboardEventsBuilder};
 
     /// A simple Reactor that triggers on key_press events.
     /// It reads keyboard input and prints the key that was pressed.

@@ -2,12 +2,15 @@
 mod support;
 
 #[cfg(not(windows))]
+mod keyboard_events;
+
+#[cfg(not(windows))]
 mod reactor {
     use std::time::Duration;
 
     use super::support::*;
+    use crate::keyboard_events::{Key, KeyboardEvents, KeyboardEventsBuilder};
     use boomerang::prelude::*;
-    use keyboard_events::{Key, KeyboardEvents, KeyboardEventsBuilder};
 
     #[derive(Reactor)]
     #[reactor(

@@ -11,6 +11,7 @@
 //! **Asynchronous**: Actions are scheduled asynchronously from oustide of the scheduler thread. This is useful when the
 //!     Action needs to be scheduled from a different thread. An `AsyncEvent` is created and pushed onto the `async_tx`
 //!     channel.
+
 use std::{
     fmt::{Debug, Display},
     time::Duration,
@@ -31,10 +32,7 @@ pub trait ActionCommon {
     fn min_delay(&self) -> Duration;
 }
 
-tinymap::key_type! {
-    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-    pub ActionKey
-}
+tinymap::key_type! { pub ActionKey }
 
 pub trait BaseAction: Debug + Downcast + Send + Sync {
     /// Get the name of this action
@@ -99,8 +97,11 @@ impl<T: ReactorData> BaseAction for Action<T> {
     }
 
     fn push_value(&mut self, tag: Tag, value: Box<dyn ReactorData>) {
-        todo!();
-        //self.store.push(tag, *value.downcast().unwrap());
+        if let Ok(v) = value.downcast() {
+            self.store.push(tag, *v);
+        } else {
+            panic!("Type mismatch");
+        }
     }
 }
 

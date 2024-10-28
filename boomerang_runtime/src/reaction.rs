@@ -6,7 +6,7 @@ use crate::{
     ActionRef, BaseAction, BasePort, BaseReactor, Context, Reactor, ReactorData,
 };
 
-tinymap::key_type!(pub ReactionKey);
+tinymap::key_type!{ pub ReactionKey }
 
 pub type ReactionSet = KeySet<ReactionKey>;
 

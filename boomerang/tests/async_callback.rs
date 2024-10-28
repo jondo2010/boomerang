@@ -1,7 +1,6 @@
 //! Test asynchronous callbacks that trigger a physical action.
 
 use boomerang::prelude::*;
-use boomerang_util::timeout;
 use std::{thread::JoinHandle, time::Duration};
 
 #[derive(Debug, Default)]
@@ -24,11 +23,7 @@ struct State {
 struct AsyncCallback {
     #[reactor(timer(period = "200 msec"))]
     t: TimerActionKey,
-
     a: TypedActionKey<usize, Physical>,
-
-    #[reactor(child = "Duration::from_secs(2).into()")]
-    _timeout: timeout::Timeout,
 }
 
 #[derive(Reaction)]
@@ -102,7 +97,9 @@ impl runtime::Trigger<State> for ReactionShutdown {
 #[test]
 fn async_callback() {
     tracing_subscriber::fmt::init();
-    let config = runtime::Config::default().with_fast_forward(false);
+    let config = runtime::Config::default()
+        .with_fast_forward(false)
+        .with_timeout(Duration::from_secs(2));
     let _ = boomerang_util::runner::build_and_test_reactor::<AsyncCallback>(
         "async_callback",
         State {

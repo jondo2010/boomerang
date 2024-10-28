@@ -98,8 +98,6 @@ struct Main {
     p: Print,
     #[reactor(timer(period = "1 sec"))]
     t: TimerActionKey,
-    #[reactor(child = "Duration::from_secs(3).into()")]
-    _timeout: boomerang_util::timeout::Timeout,
 }
 
 #[derive(Reaction)]
@@ -120,6 +118,8 @@ impl runtime::Trigger<()> for ReactionMainT<'_> {
 #[test]
 fn after() {
     tracing_subscriber::fmt::init();
-    let config = runtime::Config::default().with_fast_forward(true);
+    let config = runtime::Config::default()
+        .with_fast_forward(true)
+        .with_timeout(Duration::from_secs(3));
     let _ = boomerang_util::runner::build_and_test_reactor::<Main>("after", (), config).unwrap();
 }

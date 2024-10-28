@@ -87,6 +87,8 @@ pub struct Config {
     pub keep_alive: bool,
     /// The size of the physical event queue.
     pub physical_event_q_size: usize,
+    /// Stop the scheduler after a certain amount of time has passed.
+    pub timeout: Option<Duration>,
 }
 
 impl Default for Config {
@@ -95,6 +97,7 @@ impl Default for Config {
             fast_forward: false,
             keep_alive: false,
             physical_event_q_size: 1024,
+            timeout: None,
         }
     }
 }
@@ -115,6 +118,13 @@ impl Config {
     /// If the queue is full, this call will block until there is space available.
     pub fn with_queue_size(mut self, physical_event_q_size: usize) -> Self {
         self.physical_event_q_size = physical_event_q_size;
+        self
+    }
+
+    /// Set a timeout for the scheduler.
+    /// The scheduler will terminate after the given duration has passed.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
         self
     }
 }
@@ -152,6 +162,12 @@ impl Scheduler {
         let (event_tx, event_rx) = crossbeam_channel::bounded(config.physical_event_q_size);
         let (shutdown_tx, shutdown_rx) = keepalive::channel();
         let start_time = Timestamp::now();
+
+        if let Some(timeout) = config.timeout {
+            let shutdown_tag = Tag::new(timeout, 0);
+            let shutdown_event = AsyncEvent::Shutdown { tag: shutdown_tag };
+            event_tx.send(shutdown_event).unwrap();
+        }
 
         // Build contexts for each reaction
         let contexts = build_reaction_contexts(&reaction_graph, start_time, event_tx, shutdown_rx);
@@ -275,9 +291,15 @@ impl Scheduler {
                 );
             }
 
-            //let next_tag = self.events.peek_tag();
-            //tracing::debug!("acquire tag {next_tag:?} from physical time barrier");
-            //let result = PhysicalTimeBarrier::acquire_tag(next_tag, lock, this, [&t_next, this]() { return t_next != event_queue_.next_tag(); });
+            if let Some(next_tag) = self.events.peek_tag() {
+                if !self.config.fast_forward {
+                    let target = next_tag.to_logical_time(self.start_time);
+                    if self.synchronize_wall_clock(target, current_tag) {
+                        // Woken up by async event
+                        continue;
+                    }
+                }
+            }
 
             if let Some(mut event) = self.events.event_queue.pop() {
                 tracing::debug!(event = %event, "Handling event");
@@ -297,21 +319,6 @@ impl Scheduler {
                     tracing::warn!("Next event is at the same time as the one we are processing");
                 }
 
-                if !self.config.fast_forward {
-                    let target = event.tag.to_logical_time(self.start_time);
-                    if let Some(async_event) = self.synchronize_wall_clock(target) {
-                        // Woken up by async event
-                        if async_event.tag < event.tag {
-                            // Re-insert both events to order them
-                            self.events.event_queue.push(event);
-                            self.events.event_queue.push(async_event);
-                            continue;
-                        } else {
-                            self.events.event_queue.push(async_event);
-                        }
-                    }
-                }
-
                 self.process_tag(event.tag, event.reactions.view());
 
                 // Return the ReactionSet to the free pool
@@ -321,6 +328,7 @@ impl Scheduler {
 
                 if event.terminal {
                     // Break out of the event loop;
+                    self.shutdown_tag = Some(current_tag);
                     break;
                 }
             } else if let Some(async_event) = self.receive_event() {
@@ -349,7 +357,7 @@ impl Scheduler {
 
     // Wait until the wall-clock time is reached
     #[tracing::instrument(skip(self), fields(target = ?target))]
-    fn synchronize_wall_clock(&mut self, target: Timestamp) -> Option<ScheduledEvent> {
+    fn synchronize_wall_clock(&mut self, target: Timestamp, current_tag: Tag) -> bool {
         let now = Timestamp::now();
 
         if now < target {
@@ -358,14 +366,15 @@ impl Scheduler {
 
             match self.event_rx.recv_timeout(advance) {
                 Ok(event) => {
-                    tracing::debug!(event = %event, "Sleep interrupted by async event");
-                    let mut reactions = self.events.next_reaction_set();
-                    reactions.extend_above(event.downstream_reactions(&self.reaction_graph));
-                    //return Some(ScheduledEvent {
-                    //    tag: event.tag,
-                    //    reactions,
-                    //    terminal: event.terminal,
-                    //});
+                    tracing::debug!(event = %event, "Sleep interrupted by");
+                    Self::handle_async_event(
+                        event,
+                        current_tag,
+                        &mut self.events,
+                        &mut self.store,
+                        &self.reaction_graph,
+                    );
+                    return true;
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     let remaining: Option<Duration> =
@@ -386,7 +395,7 @@ impl Scheduler {
             tracing::warn!(delay = ?delay, "running late");
         }
 
-        None
+        false
     }
 
     /// Process the reactions at this tag in increasing order of level.

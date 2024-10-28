@@ -1,5 +1,4 @@
 use boomerang::prelude::*;
-use boomerang_util::timeout;
 
 use std::{fmt::Debug, time::Duration};
 
@@ -16,8 +15,6 @@ struct Count<T: CountData> {
     #[reactor(timer(period = "1 msec"))]
     t: TimerActionKey,
     c: TypedPortKey<T, Output>,
-    #[reactor(child = "Duration::from_secs(1).into()")]
-    _timeout: timeout::Timeout,
 }
 
 #[derive(Reaction)]
@@ -49,7 +46,9 @@ impl<T: CountData> runtime::Trigger<T> for ReactionShutdown {
 #[test]
 fn count() {
     tracing_subscriber::fmt::init();
-    let config = runtime::Config::default().with_fast_forward(true);
+    let config = runtime::Config::default()
+        .with_fast_forward(true)
+        .with_timeout(Duration::from_secs(1));
     let (_, sched) =
         boomerang_util::runner::build_and_test_reactor::<Count<i32>>("count", 0, config).unwrap();
     let env = sched.into_env();

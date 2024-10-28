@@ -10,9 +10,9 @@ use crate::runtime;
 fn test_reaction_ports() -> anyhow::Result<()> {
     let mut env_builder = EnvBuilder::new();
     let mut builder_a = env_builder.add_reactor("reactorA", None, None, ());
-    let port_a = builder_a.add_port::<(), Input>("portA").unwrap();
+    let port_a = builder_a.add_input_port::<()>("portA").unwrap();
     let port_b = builder_a.add_output_port::<()>("portB").unwrap();
-    let port_c = builder_a.add_port::<(), Output>("portC").unwrap();
+    let port_c = builder_a.add_input_port::<()>("portC").unwrap();
     let reaction_a = builder_a
         .add_reaction("reactionA", reaction_closure!())
         .with_port(port_a, 0, TriggerMode::TriggersOnly)?
@@ -195,7 +195,9 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
        );
     */
 
-    let config = runtime::Config::default().with_fast_forward(true);
+    let config = runtime::Config::default()
+        .with_fast_forward(true)
+        .with_timeout(Duration::from_secs(1));
     let mut sched = runtime::Scheduler::new(env, reaction_graph, config);
     sched.event_loop();
 
@@ -205,8 +207,6 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
 /// Test that use-dependencies may be absent within a reaction.
 #[test]
 fn test_dependency_use_accessible() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
-
     let mut env_builder = EnvBuilder::new();
     let mut builder = env_builder.add_reactor("main", None, None, ());
 
@@ -296,9 +296,9 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
 
     let sink_reactor = builder.add_child_with(|parent, env| {
         let mut builder = env.add_reactor("Sink", Some(parent), None, ());
-        let clock = builder.add_port::<u32, Input>("clock").unwrap();
-        let in1 = builder.add_port::<u32, Input>("in1").unwrap();
-        let in2 = builder.add_port::<u32, Input>("in2").unwrap();
+        let clock = builder.add_input_port::<u32>("clock").unwrap();
+        let in1 = builder.add_input_port::<u32>("in1").unwrap();
+        let in2 = builder.add_input_port::<u32>("in2").unwrap();
         let _ = builder
             .add_reaction(
                 "reaction_clock",

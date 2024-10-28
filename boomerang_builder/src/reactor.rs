@@ -5,7 +5,7 @@ use super::{
     EnvBuilder, FindElements, Logical, Output, Physical, PhysicalActionKey, PortTag,
     ReactionBuilderState, TimerActionKey, TimerSpec, TriggerMode, TypedActionKey, TypedPortKey,
 };
-use crate::{runtime, ActionTag};
+use crate::{runtime, ActionTag, Input};
 use boomerang_runtime::BoxedReactionFn;
 use slotmap::SecondaryMap;
 
@@ -411,12 +411,28 @@ impl<'a> ReactorBuilderState<'a> {
         Ok(ports.try_into().expect("Error converting Vec to array"))
     }
 
+    /// Add a new input port to this reactor.
+    pub fn add_input_port<T: runtime::ReactorData>(
+        &mut self,
+        name: &str,
+    ) -> Result<TypedPortKey<T, Input>, BuilderError> {
+        self.add_port::<T, Input>(name)
+    }
+
     /// Add a new output port to this reactor.
     pub fn add_output_port<T: runtime::ReactorData>(
         &mut self,
         name: &str,
     ) -> Result<TypedPortKey<T, Output>, BuilderError> {
-        self.env.add_output_port::<T>(name, self.reactor_key)
+        self.add_port::<T, Output>(name)
+    }
+
+    /// Adds a bus of input port(s) to this reactor.
+    pub fn add_input_ports<T: runtime::ReactorData, const N: usize>(
+        &mut self,
+        name: &str,
+    ) -> Result<[TypedPortKey<T, Input>; N], BuilderError> {
+        self.add_ports(name)
     }
 
     /// Adds a bus of output port(s) to this reactor.
@@ -424,12 +440,7 @@ impl<'a> ReactorBuilderState<'a> {
         &mut self,
         name: &str,
     ) -> Result<[TypedPortKey<T, Output>; N], BuilderError> {
-        let mut ports = Vec::with_capacity(N);
-        for i in 0..N {
-            let port = self.add_output_port::<T>(&format!("{name}{i}"))?;
-            ports.push(port);
-        }
-        Ok(ports.try_into().expect("Error converting Vec to array"))
+        self.add_ports(name)
     }
 
     /// Add a new child reactor to this reactor.

@@ -127,14 +127,14 @@ struct ThreadedMultiport<const WIDTH: usize = 4, const ITERS: usize = 100_000_00
     t: [computation::Computation<ITERS>; WIDTH],
     #[reactor(child = "State{s: 0}")]
     b: destination::Destination<WIDTH, ITERS>,
-    #[reactor(child = "Duration::from_secs(2).into()")]
-    _timeout: boomerang_util::timeout::Timeout,
 }
 
 #[test]
 fn threading_multiport() {
     tracing_subscriber::fmt::init();
-    let config = runtime::Config::default().with_fast_forward(true);
+    let config = runtime::Config::default()
+        .with_fast_forward(true)
+        .with_timeout(Duration::from_secs(2));
     let _ = boomerang_util::runner::build_and_test_reactor::<ThreadedMultiport<4, 10_000>>(
         "threaded_multiport",
         (),

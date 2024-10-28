@@ -7,7 +7,6 @@
 use std::time::Duration;
 
 use boomerang::prelude::*;
-use boomerang_util::timeout;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Default)]
@@ -26,9 +25,6 @@ struct State {
 struct SlowingClockPhysical {
     #[reactor(action(min_delay = "100 msec"))]
     a: TypedActionKey<(), Physical>,
-
-    #[reactor(child = "Duration::from_millis(1500).into()")]
-    _timeout: timeout::Timeout,
 }
 
 #[derive(Reaction)]
@@ -89,7 +85,8 @@ fn slowing_clock_physical() {
     tracing_subscriber::fmt::init();
     let config = runtime::Config::default()
         .with_fast_forward(true)
-        .with_keep_alive(true);
+        .with_keep_alive(true)
+        .with_timeout(Duration::from_millis(1500));
     let _ = boomerang_util::runner::build_and_test_reactor::<SlowingClockPhysical>(
         "slowing_clock_physical",
         State {

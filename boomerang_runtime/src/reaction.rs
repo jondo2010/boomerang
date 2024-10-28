@@ -6,7 +6,7 @@ use crate::{
     ActionRef, BaseAction, BasePort, BaseReactor, Context, Reactor, ReactorData,
 };
 
-tinymap::key_type!{ pub ReactionKey }
+tinymap::key_type! { pub ReactionKey }
 
 pub type ReactionSet = KeySet<ReactionKey>;
 
@@ -216,8 +216,7 @@ impl From<TimerFn> for BoxedReactionFn {
     }
 }
 
-impl<'store> ReactionFn<'store> for TimerFn
-{
+impl<'store> ReactionFn<'store> for TimerFn {
     fn trigger(
         &mut self,
         ctx: &'store mut Context,

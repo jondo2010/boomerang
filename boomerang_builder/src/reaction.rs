@@ -2,7 +2,7 @@ use super::{
     BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactorKey, EnvBuilder, FindElements,
     PortType, Reactor, ReactorBuilderState,
 };
-use crate::runtime;
+use crate::{runtime, ParentReactorBuilder};
 use slotmap::SecondaryMap;
 
 slotmap::new_key_type! {
@@ -177,6 +177,12 @@ pub struct ReactionBuilder {
     /// Ports that this Reaction may set the value of, and their relative ordering. These are used
     /// to build the array of [`runtime::PortRefMut`]` in the reaction function.
     pub(super) effect_ports: SecondaryMap<BuilderPortKey, usize>,
+}
+
+impl ParentReactorBuilder for ReactionBuilder {
+    fn parent_reactor_key(&self) -> Option<BuilderReactorKey> {
+        Some(self.reactor_key)
+    }
 }
 
 impl std::fmt::Debug for ReactionBuilder {

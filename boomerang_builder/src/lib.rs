@@ -77,7 +77,7 @@ pub enum BuilderError {
     ReactorGraphCycle { what: BuilderReactorKey },
 
     #[error("Error binding ports ({:?}->{:?}): {}", port_a_key, port_b_key, what)]
-    PortBindError {
+    PortConnectionError {
         port_a_key: BuilderPortKey,
         port_b_key: BuilderPortKey,
         what: String,

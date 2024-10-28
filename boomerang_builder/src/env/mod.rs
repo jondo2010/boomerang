@@ -1,4 +1,4 @@
-use crate::{PortType, TriggerMode};
+use crate::{ActionTag, ParentReactorBuilder, PortType};
 
 use super::{
     action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder, runtime, ActionType,
@@ -120,7 +120,7 @@ impl EnvBuilder {
             .map(From::from)
     }
 
-    fn internal_add_port<T: runtime::ReactorData, Q: PortTag + 'static>(
+    pub fn internal_add_port<T: runtime::ReactorData, Q: PortTag>(
         &mut self,
         name: &str,
         reactor_key: BuilderReactorKey,
@@ -163,39 +163,20 @@ impl EnvBuilder {
         self.add_action::<(), Logical>(name, reactor_key, ActionType::Shutdown)
     }
 
-    pub fn add_logical_action<T: runtime::ReactorData>(
+    pub fn internal_add_action<T: runtime::ReactorData, Q: ActionTag>(
         &mut self,
         name: &str,
         min_delay: Option<Duration>,
         reactor_key: BuilderReactorKey,
-    ) -> Result<TypedActionKey<T, Logical>, BuilderError> {
-        self.add_action::<T, Logical>(
+    ) -> Result<TypedActionKey<T, Q>, BuilderError> {
+        self.add_action::<T, Q>(
             name,
             reactor_key,
             ActionType::Standard {
-                is_logical: true,
+                is_logical: Q::IS_LOGICAL,
                 min_delay,
                 build_fn: Box::new(move |name, key| {
-                    runtime::Action::<T>::new(name, key, min_delay, true).boxed()
-                }),
-            },
-        )
-    }
-
-    pub fn add_physical_action<T: runtime::ReactorData>(
-        &mut self,
-        name: &str,
-        min_delay: Option<Duration>,
-        reactor_key: BuilderReactorKey,
-    ) -> Result<TypedActionKey<T, Physical>, BuilderError> {
-        self.add_action::<T, Physical>(
-            name,
-            reactor_key,
-            ActionType::Standard {
-                is_logical: false,
-                min_delay,
-                build_fn: Box::new(move |name, key| {
-                    runtime::Action::<T>::new(name, key, min_delay, false).boxed()
+                    runtime::Action::<T>::new(name, key, min_delay, Q::IS_LOGICAL).boxed()
                 }),
             },
         )
@@ -206,14 +187,14 @@ impl EnvBuilder {
         &mut self,
         name: &str,
         reactor_key: BuilderReactorKey,
-        reaction_fn: runtime::BoxedReactionFn,
+        reaction_fn: impl Into<runtime::BoxedReactionFn>,
     ) -> ReactionBuilderState {
         let priority = self.reactor_builders[reactor_key].reactions.len();
-        ReactionBuilderState::new(name, priority, reactor_key, reaction_fn, self)
+        ReactionBuilderState::new(name, priority, reactor_key, reaction_fn.into(), self)
     }
 
     /// Add an Action to a given Reactor using closure F
-    pub fn add_action<T, Q>(
+    pub fn add_action<T, Q: ActionTag>(
         &mut self,
         name: &str,
         reactor_key: BuilderReactorKey,
@@ -353,6 +334,26 @@ impl EnvBuilder {
             .ok_or_else(|| BuilderError::NamedActionNotFound(action_fqn.to_string()))
     }
 
+    /// Find a possible common parent Reactor for two Reactor elements in the EnvBuilder (if it exists).
+    pub fn common_reactor_key<E0, E1>(&self, e0: &E0, e1: &E1) -> Option<BuilderReactorKey>
+    where
+        E0: ParentReactorBuilder,
+        E1: ParentReactorBuilder,
+    {
+        let mut e0_key = e0.parent_reactor_key();
+        let mut e1_key = e1.parent_reactor_key();
+        while e0_key != e1_key {
+            match (e0_key, e1_key) {
+                (Some(key0), Some(key1)) => {
+                    e0_key = self.reactor_builders[key0].parent_reactor_key;
+                    e1_key = self.reactor_builders[key1].parent_reactor_key;
+                }
+                _ => return None,
+            }
+        }
+        e0_key
+    }
+
     /// Connect two ports together
     ///
     /// ## Arguments
@@ -383,49 +384,47 @@ impl EnvBuilder {
             let source_key = source_key.into();
             let target_key = target_key.into();
 
-            let source_port = &self.port_builders[source_key];
-            let target_port = &self.port_builders[target_key];
+            let parent_reactor_key = self
+                .common_reactor_key(
+                    &self.port_builders[source_key],
+                    &self.port_builders[target_key],
+                )
+                .ok_or(BuilderError::PortConnectionError {
+                    port_a_key: source_key,
+                    port_b_key: target_key,
+                    what: "Ports must belong to the same reactor or a common parent reactor to be connected".to_owned(),
+                })?;
 
-            let source_reactor_key = source_port.get_reactor_key();
-            let target_reactor_key = target_port.get_reactor_key();
+            let source_fqn = self.port_fqn(source_key)?;
+            let target_fqn = self.port_fqn(target_key)?;
+            let reactor_name = format!("connection_{source_fqn}->{target_fqn}");
 
-            // 1. create a new action on the reactor of the target port
-            let action_name = format!("{}->{}", source_port.get_name(), target_port.get_name());
-            let action_key: BuilderActionKey = if physical {
-                self.add_physical_action::<T>(&action_name, after, target_port.get_reactor_key())?
-                    .into()
+            // 1. create a new reactor to hold the action and reactions
+            let (input_port, output_port) = if physical {
+                let reactor =
+                    <crate::connection::ConnectionBuilder<T, Physical> as crate::Reactor>::build(
+                        &reactor_name,
+                        after.unwrap_or_default(),
+                        Some(parent_reactor_key),
+                        None,
+                        self,
+                    )?;
+                (reactor.input, reactor.output)
             } else {
-                self.add_logical_action::<T>(&action_name, after, target_port.get_reactor_key())?
-                    .into()
+                let reactor =
+                    <crate::connection::ConnectionBuilder<T, Logical> as crate::Reactor>::build(
+                        &reactor_name,
+                        after.unwrap_or_default(),
+                        Some(parent_reactor_key),
+                        None,
+                        self,
+                    )?;
+                (reactor.input, reactor.output)
             };
 
-            // 2. create a new reaction on the reactor of the source port, triggered by the source port, that schedules the action
-            let sender_wrapper = runtime::ReactionAdapter::<
-                crate::connection::ConnectionSenderReaction<T>,
-                (),
-            >::default();
-
-            let _sender = self
-                .add_reaction("sender", source_reactor_key, Box::new(sender_wrapper) as _)
-                .with_port(source_key, 0, TriggerMode::TriggersAndUses)?
-                .with_action(action_key, 0, TriggerMode::EffectsOnly)?
-                .finish()?;
-
-            // 3. create a new reaction on the reactor of the target port, triggered by the action, that sets the target port
-            let receiver_wrapper = runtime::ReactionAdapter::<
-                crate::connection::ConnectionReceiverReaction<T>,
-                (),
-            >::default();
-
-            let _receiver = self
-                .add_reaction(
-                    "receiver",
-                    target_reactor_key,
-                    Box::new(receiver_wrapper) as _,
-                )
-                .with_port(target_key, 0, TriggerMode::EffectsOnly)?
-                .with_action(action_key, 0, TriggerMode::TriggersAndUses)?
-                .finish()?;
+            // Bind the input and output ports to the source and target ports
+            self.bind_port(source_key, input_port)?;
+            self.bind_port(output_port, target_key)?;
 
             Ok(())
         }
@@ -450,7 +449,7 @@ impl EnvBuilder {
         let port_b = &self.port_builders[port_b_key];
 
         if port_b.get_inward_binding().is_some() {
-            return Err(BuilderError::PortBindError {
+            return Err(BuilderError::PortConnectionError {
                 port_a_key,
                 port_b_key,
                 what: format!(
@@ -461,7 +460,7 @@ impl EnvBuilder {
         }
 
         if !port_a.get_deps().is_empty() {
-            return Err(BuilderError::PortBindError {
+            return Err(BuilderError::PortConnectionError {
                 port_a_key,
                 port_b_key,
                 what: "Ports with dependencies may not be connected to other ports".to_owned(),
@@ -469,7 +468,7 @@ impl EnvBuilder {
         }
 
         if port_b.get_antideps().len() > 0 {
-            return Err(BuilderError::PortBindError {
+            return Err(BuilderError::PortConnectionError {
                 port_a_key,
                 port_b_key,
                 what: "Ports with antidependencies may not be connected to other ports".to_owned(),
@@ -483,7 +482,7 @@ impl EnvBuilder {
                     .and_then(|parent_key| {
                         if port_a.get_reactor_key() == parent_key { Some(()) } else { None }
                      }).ok_or(
-                        BuilderError::PortBindError{
+                        BuilderError::PortConnectionError{
                                 port_a_key,
                                 port_b_key,
                                 what: "An input port A may only be bound to another input port B if B is contained by a reactor that in turn is contained by the reactor of A.".into()
@@ -494,7 +493,7 @@ impl EnvBuilder {
                 let port_b_grandparent = self.reactor_builders[port_b.get_reactor_key()].parent_reactor_key;
                 // VALIDATE(this->container()->container() == port->container()->container(), 
                 if !matches!((port_a_grandparent, port_b_grandparent), (Some(key_a), Some(key_b)) if key_a == key_b) {
-                    Err(BuilderError::PortBindError{
+                    Err(BuilderError::PortConnectionError{
                         port_a_key,
                         port_b_key,
                         what: format!("An output port ({}) can only be bound to an input port ({}) if both ports belong to reactors in the same hierarichal level", port_a_fqn, port_b_fqn),
@@ -515,14 +514,14 @@ impl EnvBuilder {
                             None
                         }
                     }).ok_or(
-                        BuilderError::PortBindError {
+                        BuilderError::PortConnectionError {
                                 port_a_key,
                                 port_b_key,
                                 what: "An output port A may only be bound to another output port B if A is contained by a reactor that in turn is contained by the reactor of B".to_owned()
                             })
             }
             (PortType::Input, PortType::Output) =>  {
-                Err(BuilderError::PortBindError {
+                Err(BuilderError::PortConnectionError {
                     port_a_key,
                     port_b_key,
                     what: "Unexpected case: can't bind an input Port to an output Port.".to_owned()

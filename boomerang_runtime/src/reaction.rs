@@ -10,7 +10,7 @@ tinymap::key_type!(pub ReactionKey);
 
 pub type ReactionSet = KeySet<ReactionKey>;
 
-pub trait ReactionFn<'store> {
+pub trait ReactionFn<'store>: Send + Sync {
     fn trigger(
         &mut self,
         ctx: &'store mut Context,
@@ -58,6 +58,17 @@ impl<Reaction, State> Default for ReactionAdapter<Reaction, State> {
     }
 }
 
+impl<Reaction, State> From<ReactionAdapter<Reaction, State>> for BoxedReactionFn
+where
+    Reaction: FromRefs + 'static,
+    for<'store> Reaction::Marker<'store>: 'store + Trigger<State>,
+    State: ReactorData,
+{
+    fn from(adapter: ReactionAdapter<Reaction, State>) -> Self {
+        Box::new(adapter)
+    }
+}
+
 impl<'store, Reaction, S> ReactionFn<'store> for ReactionAdapter<Reaction, S>
 where
     Reaction: FromRefs,
@@ -82,9 +93,31 @@ where
     }
 }
 
-impl<'store, F> ReactionFn<'store> for F
+/// Wrapper struct for implementing the `ReactionFn` trait for a generic FnMut function.
+///
+/// An `FnAdapter` can be created from a closure or function pointer and then converted to a `Box<dyn ReactionFn>`.
+pub struct FnAdapter<F>(F);
+
+impl<F> From<F> for BoxedReactionFn
 where
-    F: FnMut(
+    F: for<'store> Fn(
+            &'store mut Context,
+            &'store mut dyn BaseReactor,
+            Refs<'store, dyn BasePort>,
+            RefsMut<'store, dyn BasePort>,
+            RefsMut<'store, dyn BaseAction>,
+        ) + Send
+        + Sync
+        + 'static,
+{
+    fn from(f: F) -> Self {
+        Box::new(FnAdapter(f))
+    }
+}
+
+impl<'store, F> ReactionFn<'store> for FnAdapter<F>
+where
+    F: Fn(
             &'store mut Context,
             &'store mut dyn BaseReactor,
             Refs<'store, dyn BasePort>,
@@ -101,7 +134,7 @@ where
         ports_mut: RefsMut<'store, dyn BasePort>,
         actions: RefsMut<'store, dyn BaseAction>,
     ) {
-        (self)(ctx, state, ports, ports_mut, actions);
+        (self.0)(ctx, state, ports, ports_mut, actions);
     }
 }
 
@@ -139,10 +172,10 @@ impl Debug for Reaction {
 }
 
 impl Reaction {
-    pub fn new(name: &str, body: BoxedReactionFn, deadline: Option<Deadline>) -> Self {
+    pub fn new(name: &str, body: impl Into<BoxedReactionFn>, deadline: Option<Deadline>) -> Self {
         Self {
             name: name.to_owned(),
-            body,
+            body: body.into(),
             deadline,
         }
     }
@@ -174,16 +207,33 @@ pub fn timer_startup_fn(
     timer.schedule(ctx, (), None);
 }
 
-/// Utility reset function for a timer action
-pub fn timer_reset_fn(
-    ctx: &mut Context,
-    _reactor: &mut dyn BaseReactor,
-    _ref_ports: Refs<dyn BasePort>,
-    _mut_ports: RefsMut<dyn BasePort>,
-    actions: RefsMut<dyn BaseAction>,
-) {
-    let mut timer: ActionRef = actions.partition_mut().expect("Expected a timer action");
-    timer.schedule(ctx, (), None);
+/// Timer ReactionFn for timer actions
+pub struct TimerFn(pub Option<Duration>);
+
+impl From<TimerFn> for BoxedReactionFn {
+    fn from(value: TimerFn) -> Self {
+        Box::new(value)
+    }
+}
+
+impl<'store> ReactionFn<'store> for TimerFn
+{
+    fn trigger(
+        &mut self,
+        ctx: &'store mut Context,
+        _state: &'store mut dyn BaseReactor,
+        _ports: Refs<'store, dyn BasePort>,
+        _ports_mut: RefsMut<'store, dyn BasePort>,
+        actions: RefsMut<'store, dyn BaseAction>,
+    ) {
+        let mut timer: ActionRef = actions.partition_mut().expect("Expected a timer action");
+
+        if timer.is_present(ctx) {
+            timer.schedule(ctx, (), self.0);
+        } else {
+            timer.schedule(ctx, (), None);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -211,10 +261,10 @@ mod tests {
         }
 
         let adapter = ReactionAdapter::<TestReaction, ()>::default();
-        let _reaction = Reaction::new("dummy", Box::new(adapter), None);
+        let _reaction = Reaction::new("dummy", adapter, None);
     }
 
-    /// Test the FnWrapper struct.
+    /// Test the FnAdapter struct.
     #[test]
     fn test_fn_wrapper() {
         let test_fn = |_: &mut Context,
@@ -222,6 +272,6 @@ mod tests {
                        _: Refs<'_, dyn BasePort>,
                        _: RefsMut<'_, dyn BasePort>,
                        _: RefsMut<'_, dyn BaseAction>| {};
-        let _reaction = Reaction::new("dummy", Box::new(test_fn), None);
+        let _reaction = Reaction::new("dummy", test_fn, None);
     }
 }

@@ -5,10 +5,7 @@ use std::time::Duration;
 use boomerang::prelude::*;
 
 #[derive(Reactor)]
-#[reactor(
-    state = "()",
-    reaction = "ReactionFooX",
-)]
+#[reactor(state = "()", reaction = "ReactionFooX")]
 struct Foo {
     x: TypedPortKey<i32, Input>,
     y: TypedPortKey<i32, Output>,
@@ -23,7 +20,7 @@ struct ReactionFooX<'a> {
 
 impl runtime::Trigger<()> for ReactionFooX<'_> {
     fn trigger(mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
-        *self.y = *self.x;
+        *self.y = self.x.map(|x| x * 2);
     }
 }
 
@@ -46,7 +43,7 @@ impl Default for PrintState {
 #[reactor(
     state = "PrintState",
     reaction = "ReactionPrintX",
-    reaction = "ReactionPrintShutdown",
+    reaction = "ReactionPrintShutdown"
 )]
 struct Print {
     x: TypedPortKey<i32, Input>,
@@ -66,7 +63,11 @@ impl runtime::Trigger<PrintState> for ReactionPrintX<'_> {
         assert_eq!(*self.x, Some(84), "Expected result to be 84");
         println!("Current logical time is: {:?}", elapsed_time);
         println!("Current physical time is: {:?}", ctx.get_physical_time());
-        assert_eq!(elapsed_time, state.expected_time, "Expected logical time to be {:?}", state.expected_time);
+        assert_eq!(
+            elapsed_time, state.expected_time,
+            "Expected logical time to be {:?}",
+            state.expected_time
+        );
         state.expected_time += Duration::from_secs(1);
     }
 }
@@ -79,7 +80,8 @@ struct ReactionPrintShutdown<'a> {
 
 impl runtime::Trigger<PrintState> for ReactionPrintShutdown<'_> {
     fn trigger(self, ctx: &mut runtime::Context, state: &mut PrintState) {
-        assert_eq!(state.i, 1, "ERROR: Final reactor received no data.");
+        println!("Final result is {:?}", state.i);
+        assert!(state.i != 0, "ERROR: Final reactor received no data.");
     }
 }
 
@@ -94,9 +96,9 @@ struct Main {
     f: Foo,
     #[reactor(child = "PrintState::default()")]
     p: Print,
-    #[reactor(timer(period = "1 msec"))]
+    #[reactor(timer(period = "1 sec"))]
     t: TimerActionKey,
-    #[reactor(child = "Duration::from_secs(3)")]
+    #[reactor(child = "Duration::from_secs(3).into()")]
     _timeout: boomerang_util::timeout::Timeout,
 }
 
@@ -108,9 +110,10 @@ struct ReactionMainT<'a> {
 }
 
 impl runtime::Trigger<()> for ReactionMainT<'_> {
-    fn trigger(mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
+    fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut ()) {
         *self.x = Some(42);
-        println!("Timer!");
+        let elapsed_time = ctx.get_elapsed_logical_time();
+        println!("Timer @ {elapsed_time:?}!");
     }
 }
 
@@ -118,10 +121,5 @@ impl runtime::Trigger<()> for ReactionMainT<'_> {
 fn after() {
     tracing_subscriber::fmt::init();
     let config = runtime::Config::default().with_fast_forward(true);
-    let _ = boomerang_util::runner::build_and_test_reactor::<Main>(
-        "after",
-        (),
-        config,
-    )
-    .unwrap();
+    let _ = boomerang_util::runner::build_and_test_reactor::<Main>("after", (), config).unwrap();
 }

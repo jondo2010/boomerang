@@ -7,7 +7,7 @@
 use std::{fmt::Debug, marker::PhantomData, time::Duration};
 
 use super::{BuilderReactionKey, BuilderReactorKey};
-use crate::runtime;
+use crate::{runtime, ParentReactorBuilder};
 
 use slotmap::SecondaryMap;
 
@@ -19,29 +19,42 @@ pub struct Logical;
 #[derive(Copy, Clone, Debug)]
 pub struct Physical;
 
+pub trait ActionTag: Copy + Clone + Debug + 'static {
+    const IS_LOGICAL: bool;
+}
+
+impl ActionTag for Logical {
+    const IS_LOGICAL: bool = true;
+}
+
+impl ActionTag for Physical {
+    const IS_LOGICAL: bool = false;
+}
+
 /// `TypedActionKey` is a typed wrapper around [`BuilderActionKey`] that is used to associate a type
 /// with an action. This is used to ensure that the type of the action matches the type of the port
 /// that it is connected to.
 #[derive(Default, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub struct TypedActionKey<T = (), Q = Logical>(BuilderActionKey, PhantomData<(T, Q)>)
 where
-    T: runtime::ReactorData;
+    T: runtime::ReactorData,
+    Q: ActionTag;
 
-impl<T: runtime::ReactorData, Q> Copy for TypedActionKey<T, Q> {}
+impl<T: runtime::ReactorData, Q: ActionTag> Copy for TypedActionKey<T, Q> {}
 
-impl<T: runtime::ReactorData, Q> Clone for TypedActionKey<T, Q> {
+impl<T: runtime::ReactorData, Q: ActionTag> Clone for TypedActionKey<T, Q> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T: runtime::ReactorData, Q> From<BuilderActionKey> for TypedActionKey<T, Q> {
+impl<T: runtime::ReactorData, Q: ActionTag> From<BuilderActionKey> for TypedActionKey<T, Q> {
     fn from(key: BuilderActionKey) -> Self {
         Self(key, PhantomData)
     }
 }
 
-impl<T: runtime::ReactorData, Q> From<TypedActionKey<T, Q>> for BuilderActionKey {
+impl<T: runtime::ReactorData, Q: ActionTag> From<TypedActionKey<T, Q>> for BuilderActionKey {
     fn from(key: TypedActionKey<T, Q>) -> Self {
         key.0
     }
@@ -142,6 +155,12 @@ pub struct ActionBuilder {
     pub triggers: SecondaryMap<BuilderReactionKey, ()>,
     /// List of Reactions that may schedule this action
     pub schedulers: SecondaryMap<BuilderReactionKey, ()>,
+}
+
+impl ParentReactorBuilder for ActionBuilder {
+    fn parent_reactor_key(&self) -> Option<BuilderReactorKey> {
+        Some(self.reactor_key)
+    }
 }
 
 impl ActionBuilder {

@@ -10,9 +10,9 @@ use crate::runtime;
 fn test_reaction_ports() -> anyhow::Result<()> {
     let mut env_builder = EnvBuilder::new();
     let mut builder_a = env_builder.add_reactor("reactorA", None, None, ());
-    let port_a = builder_a.add_input_port::<()>("portA").unwrap();
+    let port_a = builder_a.add_port::<(), Input>("portA").unwrap();
     let port_b = builder_a.add_output_port::<()>("portB").unwrap();
-    let port_c = builder_a.add_input_port::<()>("portC").unwrap();
+    let port_c = builder_a.add_port::<(), Output>("portC").unwrap();
     let reaction_a = builder_a
         .add_reaction("reactionA", reaction_closure!())
         .with_port(port_a, 0, TriggerMode::TriggersOnly)?
@@ -117,9 +117,9 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
     let _r_clock = builder_main
         .add_reaction(
             "clock",
-            reaction_closure!(ctx, _state, _inputs, _outputs, actions => {
+            reaction_closure!(ctx, reactor, _inputs, _outputs, actions => {
                 let (mut clock, mut a, mut t): (runtime::ActionRef<u32>, runtime::ActionRef<()>, runtime::ActionRef<()>) = actions.partition_mut().unwrap();
-                let state: &mut u32 = _state.downcast_mut().unwrap();
+                let reactor: &mut runtime::Reactor<u32> = reactor.downcast_mut().unwrap();
 
                 match clock.get_value(ctx) {
                     Some(2) | Some(4) => {
@@ -133,7 +133,7 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
                     it => unreachable!("{:?}", it),
                 }
 
-                *state += 1;
+                reactor.state += 1;
             }),
         )
         .with_action(clock, 0, TriggerMode::TriggersAndUses)?
@@ -145,9 +145,9 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
     let _r_shutdown = builder_main
         .add_reaction(
             "shutdown",
-            reaction_closure!(_ctx, _state, _inputs, _outputs, _actions => {
-                let state: &mut u32 = _state.downcast_mut().unwrap();
-                assert_eq!(*state, 4);
+            reaction_closure!(_ctx, reactor, _inputs, _outputs, _actions => {
+                let reactor: &mut runtime::Reactor<u32> = reactor.downcast_mut().unwrap();
+                assert_eq!(reactor.state, 4);
                 println!("success");
             }),
         )
@@ -296,9 +296,9 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
 
     let sink_reactor = builder.add_child_with(|parent, env| {
         let mut builder = env.add_reactor("Sink", Some(parent), None, ());
-        let clock = builder.add_input_port::<u32>("clock").unwrap();
-        let in1 = builder.add_input_port::<u32>("in1").unwrap();
-        let in2 = builder.add_input_port::<u32>("in2").unwrap();
+        let clock = builder.add_port::<u32, Input>("clock").unwrap();
+        let in1 = builder.add_port::<u32, Input>("in1").unwrap();
+        let in2 = builder.add_port::<u32, Input>("in2").unwrap();
         let _ = builder
             .add_reaction(
                 "reaction_clock",

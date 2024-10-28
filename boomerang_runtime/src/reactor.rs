@@ -23,7 +23,7 @@ pub struct Reactor<T: ReactorData> {
     /// The reactor name
     name: String,
     /// The ReactorState
-    pub(crate) state: T,
+    pub state: T,
 }
 
 impl<T: ReactorData> Debug for Reactor<T> {

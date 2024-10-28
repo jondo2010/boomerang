@@ -2,10 +2,10 @@ use std::{fmt::Debug, time::Duration};
 
 use super::{
     ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
-    EnvBuilder, FindElements, Input, Logical, Output, Physical, PhysicalActionKey, PortTag,
+    EnvBuilder, FindElements, Logical, Output, Physical, PhysicalActionKey, PortTag,
     ReactionBuilderState, TimerActionKey, TimerSpec, TriggerMode, TypedActionKey, TypedPortKey,
 };
-use crate::{reaction_closure, runtime};
+use crate::{runtime, ActionTag};
 use boomerang_runtime::BoxedReactionFn;
 use slotmap::SecondaryMap;
 
@@ -80,7 +80,7 @@ where
     }
 }
 
-impl<T: runtime::ReactorData> ReactorField for TypedPortKey<T, Input> {
+impl<T: runtime::ReactorData, Q: PortTag> ReactorField for TypedPortKey<T, Q> {
     type Inner = ();
 
     fn build(
@@ -88,11 +88,11 @@ impl<T: runtime::ReactorData> ReactorField for TypedPortKey<T, Input> {
         _inner: Self::Inner,
         parent: &'_ mut ReactorBuilderState,
     ) -> Result<Self, BuilderError> {
-        parent.add_input_port(name)
+        parent.add_port::<T, Q>(name)
     }
 }
 
-impl<T: runtime::ReactorData, const N: usize> ReactorField for [TypedPortKey<T, Input>; N] {
+impl<T: runtime::ReactorData, Q: PortTag, const N: usize> ReactorField for [TypedPortKey<T, Q>; N] {
     type Inner = ();
 
     fn build(
@@ -100,31 +100,7 @@ impl<T: runtime::ReactorData, const N: usize> ReactorField for [TypedPortKey<T, 
         _inner: Self::Inner,
         parent: &'_ mut ReactorBuilderState,
     ) -> Result<Self, BuilderError> {
-        parent.add_input_ports(name)
-    }
-}
-
-impl<T: runtime::ReactorData> ReactorField for TypedPortKey<T, Output> {
-    type Inner = ();
-
-    fn build(
-        name: &str,
-        _inner: Self::Inner,
-        parent: &'_ mut ReactorBuilderState,
-    ) -> Result<Self, BuilderError> {
-        parent.add_output_port(name)
-    }
-}
-
-impl<T: runtime::ReactorData, const N: usize> ReactorField for [TypedPortKey<T, Output>; N] {
-    type Inner = ();
-
-    fn build(
-        name: &str,
-        _inner: Self::Inner,
-        parent: &'_ mut ReactorBuilderState,
-    ) -> Result<Self, BuilderError> {
-        parent.add_output_ports(name)
+        parent.add_ports::<T, Q, N>(name)
     }
 }
 
@@ -140,7 +116,7 @@ impl ReactorField for TimerActionKey {
     }
 }
 
-impl<T: runtime::ReactorData> ReactorField for TypedActionKey<T, Logical> {
+impl<T: runtime::ReactorData, Q: ActionTag> ReactorField for TypedActionKey<T, Q> {
     type Inner = Option<Duration>;
 
     fn build(
@@ -148,19 +124,7 @@ impl<T: runtime::ReactorData> ReactorField for TypedActionKey<T, Logical> {
         inner: Self::Inner,
         parent: &'_ mut ReactorBuilderState,
     ) -> Result<Self, BuilderError> {
-        parent.add_logical_action(name, inner)
-    }
-}
-
-impl<T: runtime::ReactorData> ReactorField for TypedActionKey<T, Physical> {
-    type Inner = Option<Duration>;
-
-    fn build(
-        name: &str,
-        inner: Self::Inner,
-        parent: &'_ mut ReactorBuilderState,
-    ) -> Result<Self, BuilderError> {
-        parent.add_physical_action(name, inner)
+        parent.add_action(name, inner)
     }
 }
 
@@ -197,6 +161,11 @@ impl<T: runtime::ReactorData> Debug for ReactorState<T> {
     }
 }
 
+/// `ParentReactorBuilder` is implemented for Reactor elements that can have a parent Reactor
+pub trait ParentReactorBuilder {
+    fn parent_reactor_key(&self) -> Option<BuilderReactorKey>;
+}
+
 /// ReactorBuilder is the Builder-side definition of a Reactor, and is type-erased
 #[derive(Debug)]
 pub(super) struct ReactorBuilder {
@@ -216,6 +185,12 @@ pub(super) struct ReactorBuilder {
     pub actions: SecondaryMap<BuilderActionKey, ()>,
     /// The bank info of the bank that this Reactor belongs to, if any.
     pub bank_info: Option<runtime::BankInfo>,
+}
+
+impl ParentReactorBuilder for ReactorBuilder {
+    fn parent_reactor_key(&self) -> Option<BuilderReactorKey> {
+        self.parent_reactor_key
+    }
 }
 
 impl ReactorBuilder {
@@ -346,36 +321,39 @@ impl<'a> ReactorBuilderState<'a> {
         name: &str,
         spec: TimerSpec,
     ) -> Result<TimerActionKey, BuilderError> {
-        let action_key = self.add_logical_action::<()>(name, spec.period)?;
-
-        let startup_fn = reaction_closure!(ctx, _state, _ref_ports, _mut_ports, actions => {
-            let mut timer: runtime::ActionRef = actions.partition_mut().unwrap();
-            timer.schedule(ctx, (), spec.offset);
-        });
+        let action_key = self.add_logical_action::<()>(name, None)?;
 
         let startup_key = self.startup_action;
 
-        // self.add_reaction(&format!("_{name}_startup"), Box::new(startup_fn))
+        let trigger_mode = if spec.period.is_some() {
+            // If the timer has a period, it should be triggered by the action_key
+            TriggerMode::TriggersAndEffects
+        } else {
+            // Otherwise, it should only be triggered by the startup action
+            TriggerMode::EffectsOnly
+        };
+
         self.add_reaction(
             &format!("_{name}_startup"),
-            runtime::reaction::timer_startup_fn,
+            runtime::reaction::TimerFn(spec.period),
         )
         .with_action(startup_key, 0, TriggerMode::TriggersOnly)?
-        .with_action(action_key, 1, TriggerMode::EffectsOnly)?
+        .with_action(action_key, 1, trigger_mode)?
         .finish()?;
 
-        if spec.period.is_some() {
-            let reset_fn = reaction_closure!(ctx, _state, _ref_ports, _mut_ports, actions => {
-                let mut timer: runtime::ActionRef = actions.partition_mut().unwrap();
-                timer.schedule(ctx, (), None);
-            });
-
-            self.add_reaction(&format!("_{name}_reset"), reset_fn)
-                .with_action(action_key, 0, TriggerMode::TriggersAndEffects)?
-                .finish()?;
-        }
-
         Ok(TimerActionKey::from(BuilderActionKey::from(action_key)))
+    }
+
+    /// Add a new action to the reactor.
+    ///
+    /// This method forwards to the implementation at [`crate::env::EnvBuilder::internal_add_action`].
+    pub fn add_action<T: runtime::ReactorData, Q: ActionTag>(
+        &mut self,
+        name: &str,
+        min_delay: Option<Duration>,
+    ) -> Result<TypedActionKey<T, Q>, BuilderError> {
+        self.env
+            .internal_add_action::<T, Q>(name, min_delay, self.reactor_key)
     }
 
     /// Add a new logical action to the reactor.
@@ -388,7 +366,7 @@ impl<'a> ReactorBuilderState<'a> {
         min_delay: Option<Duration>,
     ) -> Result<TypedActionKey<T, Logical>, BuilderError> {
         self.env
-            .add_logical_action::<T>(name, min_delay, self.reactor_key)
+            .internal_add_action::<T, Logical>(name, min_delay, self.reactor_key)
     }
 
     pub fn add_physical_action<T: runtime::ReactorData>(
@@ -397,7 +375,7 @@ impl<'a> ReactorBuilderState<'a> {
         min_delay: Option<Duration>,
     ) -> Result<TypedActionKey<T, Physical>, BuilderError> {
         self.env
-            .add_physical_action::<T>(name, min_delay, self.reactor_key)
+            .internal_add_action::<T, Physical>(name, min_delay, self.reactor_key)
     }
 
     /// Add a new reaction to this reactor.
@@ -411,21 +389,23 @@ impl<'a> ReactorBuilderState<'a> {
     }
 
     /// Add a new input port to this reactor.
-    pub fn add_input_port<T: runtime::ReactorData>(
+    pub fn add_port<T: runtime::ReactorData, Q: PortTag>(
         &mut self,
         name: &str,
-    ) -> Result<TypedPortKey<T, Input>, BuilderError> {
-        self.env.add_input_port::<T>(name, self.reactor_key)
+    ) -> Result<TypedPortKey<T, Q>, BuilderError> {
+        self.env
+            .internal_add_port::<T, Q>(name, self.reactor_key)
+            .map(Into::into)
     }
 
     /// Adds a bus of input ports to this reactor.
-    pub fn add_input_ports<T: runtime::ReactorData, const N: usize>(
+    pub fn add_ports<T: runtime::ReactorData, Q: PortTag, const N: usize>(
         &mut self,
         name: &str,
-    ) -> Result<[TypedPortKey<T, Input>; N], BuilderError> {
+    ) -> Result<[TypedPortKey<T, Q>; N], BuilderError> {
         let mut ports = Vec::with_capacity(N);
         for i in 0..N {
-            let port = self.add_input_port::<T>(&format!("{name}{i}"))?;
+            let port = self.add_port::<T, Q>(&format!("{name}{i}"))?;
             ports.push(port);
         }
         Ok(ports.try_into().expect("Error converting Vec to array"))

@@ -106,17 +106,21 @@ impl Debug for AsyncEvent {
 impl Display for AsyncEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AsyncEvent::Logical { delay, key, value } => {
+            AsyncEvent::Logical {
+                delay,
+                key,
+                value: _,
+            } => {
                 write!(
                     f,
-                    "AsyncLogical[delay={delay},key={key:?},value=]",
+                    "AsyncLogical[delay={delay},key={key:?},value=..]",
                     delay = delay.as_secs_f64()
                 )
             }
-            AsyncEvent::Physical { tag, key, value } => {
+            AsyncEvent::Physical { tag, key, value: _ } => {
                 write!(
                     f,
-                    "AsyncPhysical[tag={tag},key={key:?},value=]",
+                    "AsyncPhysical[tag={tag},key={key:?},value=..]",
                     tag = tag,
                     key = key
                 )

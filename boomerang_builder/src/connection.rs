@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use crate::{
-    runtime, ActionTag, BuilderError, BuilderReactorKey, EnvBuilder, Input, Logical, Output, Reaction, ReactionBuilderState, ReactionField, ReactorBuilderState, ReactorField, TriggerMode, TypedActionKey, TypedPortKey
+    runtime, ActionTag, BuilderError, BuilderReactorKey, EnvBuilder, Input, Output, Reaction,
+    ReactionBuilderState, ReactionField, ReactorBuilderState, ReactorField, TriggerMode,
+    TypedActionKey, TypedPortKey,
 };
 
 pub struct ConnectionBuilder<T: runtime::ReactorData, Q: ActionTag> {

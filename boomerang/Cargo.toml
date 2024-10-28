@@ -52,3 +52,7 @@ rand = { version = "0.8" }
 [[bench]]
 name = "ping_pong"
 harness = false
+
+[[bench]]
+name = "physical_actions"
+harness = false

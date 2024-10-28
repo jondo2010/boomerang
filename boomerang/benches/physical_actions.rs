@@ -2,9 +2,10 @@
 
 use boomerang::prelude::*;
 use boomerang_runtime::ReactorData;
-use boomerang_util::timeout;
+use criterion::{criterion_group, criterion_main, Criterion};
 use std::{thread::JoinHandle, time::Duration};
 
+#[derive(Debug, Default)]
 struct State {
     thread: Option<JoinHandle<usize>>,
     sent: usize,
@@ -20,9 +21,6 @@ struct State {
 )]
 struct AsyncCallback<T: ReactorData + Default> {
     a: TypedActionKey<T, Physical>,
-
-    #[reactor(child = Duration::from_secs(2))]
-    _timeout: timeout::Timeout,
 }
 
 /// The Run reaction starts a new thread that sends as many actions as possible until requested to shut down. Upon shutdown, it returns the number of actions sent.
@@ -56,7 +54,7 @@ impl<T: ReactorData + Default> runtime::Trigger<State> for ReactionRun<T> {
 
 /// The Proc reaction processes the actions by incrementing the count of actions sent.
 #[derive(Reaction)]
-#[reaction(reactor = "AsyncCallback<T>")]
+#[reaction(reactor = "AsyncCallback<T>", triggers(action = "a"))]
 struct ReactionProc<T: ReactorData + Default> {
     a: runtime::AsyncActionRef<T>,
 }
@@ -83,3 +81,34 @@ impl runtime::Trigger<State> for ReactionShutdown {
         }
     }
 }
+
+fn bench(c: &mut Criterion) {
+    c.bench_function("Physical Actions", |b| {
+        b.iter_batched(
+            || {
+                let mut env_builder = EnvBuilder::new();
+                let _reactor = AsyncCallback::<u32>::build(
+                    "main",
+                    State::default(),
+                    None,
+                    None,
+                    &mut env_builder,
+                )
+                .unwrap();
+                let (env, triggers, _) = env_builder.into_runtime_parts().unwrap();
+                (env, triggers)
+            },
+            |(env, triggers)| {
+                let config = runtime::Config::default()
+                    .with_fast_forward(false)
+                    .with_timeout(Duration::from_secs(1));
+                let mut sched = runtime::Scheduler::new(env, triggers, config);
+                sched.event_loop();
+            },
+            criterion::BatchSize::NumIterations(10),
+        );
+    });
+}
+
+criterion_group!(benches, bench);
+criterion_main!(benches);

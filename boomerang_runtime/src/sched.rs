@@ -3,7 +3,7 @@ use std::{collections::BinaryHeap, pin::Pin, time::Duration};
 
 use crate::{
     build_reaction_contexts,
-    event::{PhysicalEvent, ScheduledEvent},
+    event::{AsyncEvent, ScheduledEvent},
     keepalive,
     key_set::KeySetView,
     store::Store,
@@ -57,6 +57,11 @@ impl EventQueue {
             .unwrap_or_else(|| ReactionSet::new(&self.reaction_set_limits))
     }
 
+    /// Peek the tag of the next event in the queue
+    fn peek_tag(&self) -> Option<Tag> {
+        self.event_queue.peek().map(|event| event.tag)
+    }
+
     /// If the event queue still has events on it, report that.
     fn shutdown(&mut self) {
         if !self.event_queue.is_empty() {
@@ -82,6 +87,8 @@ pub struct Config {
     pub keep_alive: bool,
     /// The size of the physical event queue.
     pub physical_event_q_size: usize,
+    /// Stop the scheduler after a certain amount of time has passed.
+    pub timeout: Option<Duration>,
 }
 
 impl Default for Config {
@@ -90,6 +97,7 @@ impl Default for Config {
             fast_forward: false,
             keep_alive: false,
             physical_event_q_size: 1024,
+            timeout: None,
         }
     }
 }
@@ -112,6 +120,13 @@ impl Config {
         self.physical_event_q_size = physical_event_q_size;
         self
     }
+
+    /// Set a timeout for the scheduler.
+    /// The scheduler will terminate after the given duration has passed.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
 }
 
 #[derive(Debug)]
@@ -123,7 +138,7 @@ pub struct Scheduler {
     /// The reaction graph containing all static dependency and relationship information
     reaction_graph: ReactionGraph,
     /// Asynchronous events receiver
-    event_rx: Receiver<PhysicalEvent>,
+    event_rx: Receiver<AsyncEvent>,
     /// Event queue
     events: EventQueue,
     /// Initial wall-clock time.
@@ -148,6 +163,12 @@ impl Scheduler {
         let (shutdown_tx, shutdown_rx) = keepalive::channel();
         let start_time = Timestamp::now();
 
+        if let Some(timeout) = config.timeout {
+            let shutdown_tag = Tag::new(timeout, 0);
+            let shutdown_event = AsyncEvent::Shutdown { tag: shutdown_tag };
+            event_tx.send(shutdown_event).unwrap();
+        }
+
         // Build contexts for each reaction
         let contexts = build_reaction_contexts(&reaction_graph, start_time, event_tx, shutdown_rx);
 
@@ -165,9 +186,35 @@ impl Scheduler {
         }
     }
 
+    /// Handle an asynchronous event from the event queue
+    fn handle_async_event(
+        event: AsyncEvent,
+        tag: Tag,
+        events: &mut EventQueue,
+        store: &mut Pin<Box<Store>>,
+        reaction_graph: &ReactionGraph,
+    ) {
+        let reactions = event.downstream_reactions(reaction_graph);
+        match event {
+            AsyncEvent::Logical { delay, key, value } => {
+                let tag = tag.delay(delay);
+                events.push_event(tag, reactions, false);
+                store.push_action_value(key, tag, value);
+            }
+            AsyncEvent::Physical { tag, key, value } => {
+                events.push_event(tag, reactions, false);
+                store.push_action_value(key, tag, value);
+            }
+            AsyncEvent::Shutdown { tag } => {
+                events.push_event(tag, reactions, true);
+                //self.shutdown_tag = Some(tag);
+            }
+        }
+    }
+
     /// Execute startup of the Scheduler.
     #[tracing::instrument(skip(self))]
-    fn startup(&mut self) {
+    fn startup(&mut self) -> Tag {
         //#[cfg(feature = "parallel")]
         //rayon::ThreadPoolBuilder::new()
         //    .num_threads(4)
@@ -184,6 +231,8 @@ impl Scheduler {
 
         tracing::info!(tag = %tag, "Starting the execution.");
         self.process_tag(tag, reaction_set.view());
+
+        tag
     }
 
     /// Final shutdown of the Scheduler. The last tag has already been processed.
@@ -208,7 +257,7 @@ impl Scheduler {
 
     /// Try to receive an asynchronous event
     #[tracing::instrument(skip(self))]
-    fn receive_event(&mut self) -> Option<PhysicalEvent> {
+    fn receive_event(&mut self) -> Option<AsyncEvent> {
         if let Some(shutdown) = self.shutdown_tag {
             let abs = shutdown.to_logical_time(self.start_time);
             if let Some(timeout) = abs.checked_duration_since(Timestamp::now()) {
@@ -228,33 +277,46 @@ impl Scheduler {
 
     #[tracing::instrument(skip(self))]
     pub fn event_loop(&mut self) {
-        self.startup();
+        let mut current_tag = self.startup();
+
         loop {
             // Push pending events into the queue
-            for physical_event in self.event_rx.try_iter() {
-                self.events.push_event(
-                    physical_event.tag,
-                    physical_event.downstream_reactions(&self.reaction_graph),
-                    physical_event.terminal,
+            for async_event in self.event_rx.try_iter() {
+                Self::handle_async_event(
+                    async_event,
+                    current_tag,
+                    &mut self.events,
+                    &mut self.store,
+                    &self.reaction_graph,
                 );
+            }
+
+            if let Some(next_tag) = self.events.peek_tag() {
+                if !self.config.fast_forward {
+                    let target = next_tag.to_logical_time(self.start_time);
+                    if self.synchronize_wall_clock(target, current_tag) {
+                        // Woken up by async event
+                        continue;
+                    }
+                }
             }
 
             if let Some(mut event) = self.events.event_queue.pop() {
                 tracing::debug!(event = %event, "Handling event");
 
-                if !self.config.fast_forward {
-                    let target = event.tag.to_logical_time(self.start_time);
-                    if let Some(async_event) = self.synchronize_wall_clock(target) {
-                        // Woken up by async event
-                        if async_event.tag < event.tag {
-                            // Re-insert both events to order them
-                            self.events.event_queue.push(event);
-                            self.events.event_queue.push(async_event);
-                            continue;
-                        } else {
-                            self.events.event_queue.push(async_event);
-                        }
-                    }
+                if Some(event.tag) == self.events.peek_tag() {
+                    // The next event is at the same time as the one we are processing
+                    // This can happen if the event we are processing triggers a new event at the same time
+                    // We need to process all events at the same time before moving on
+                    //while let Some(next_event) = self.events.event_queue.pop() {
+                    //    if next_event.tag == event.tag {
+                    //        event.reactions.extend_above(next_event.reactions.view());
+                    //    } else {
+                    //        self.events.event_queue.push(next_event);
+                    //        break;
+                    //    }
+                    //}
+                    tracing::warn!("Next event is at the same time as the one we are processing");
                 }
 
                 self.process_tag(event.tag, event.reactions.view());
@@ -262,15 +324,20 @@ impl Scheduler {
                 // Return the ReactionSet to the free pool
                 self.events.free_reaction_sets.push(event.reactions);
 
+                current_tag = event.tag;
+
                 if event.terminal {
                     // Break out of the event loop;
+                    self.shutdown_tag = Some(current_tag);
                     break;
                 }
-            } else if let Some(event) = self.receive_event() {
-                self.events.push_event(
-                    event.tag,
-                    event.downstream_reactions(&self.reaction_graph),
-                    event.terminal,
+            } else if let Some(async_event) = self.receive_event() {
+                Self::handle_async_event(
+                    async_event,
+                    current_tag,
+                    &mut self.events,
+                    &mut self.store,
+                    &self.reaction_graph,
                 );
             } else {
                 tracing::debug!("No more events in queue. -> Terminate!");
@@ -290,7 +357,7 @@ impl Scheduler {
 
     // Wait until the wall-clock time is reached
     #[tracing::instrument(skip(self), fields(target = ?target))]
-    fn synchronize_wall_clock(&mut self, target: Timestamp) -> Option<ScheduledEvent> {
+    fn synchronize_wall_clock(&mut self, target: Timestamp, current_tag: Tag) -> bool {
         let now = Timestamp::now();
 
         if now < target {
@@ -299,14 +366,15 @@ impl Scheduler {
 
             match self.event_rx.recv_timeout(advance) {
                 Ok(event) => {
-                    tracing::debug!(event = %event, "Sleep interrupted by async event");
-                    let mut reactions = self.events.next_reaction_set();
-                    reactions.extend_above(event.downstream_reactions(&self.reaction_graph));
-                    return Some(ScheduledEvent {
-                        tag: event.tag,
-                        reactions,
-                        terminal: event.terminal,
-                    });
+                    tracing::debug!(event = %event, "Sleep interrupted by");
+                    Self::handle_async_event(
+                        event,
+                        current_tag,
+                        &mut self.events,
+                        &mut self.store,
+                        &self.reaction_graph,
+                    );
+                    return true;
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     let remaining: Option<Duration> =
@@ -327,7 +395,7 @@ impl Scheduler {
             tracing::warn!(delay = ?delay, "running late");
         }
 
-        None
+        false
     }
 
     /// Process the reactions at this tag in increasing order of level.

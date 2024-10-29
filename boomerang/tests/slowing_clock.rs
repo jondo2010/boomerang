@@ -4,7 +4,6 @@
 //!
 //! Ported from https://github.com/lf-lang/lingua-franca/blob/master/test/C/src/SlowingClock.lf
 use boomerang::prelude::*;
-use boomerang_util::timeout;
 use std::time::Duration;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -33,9 +32,6 @@ impl Default for SlowingClock {
 struct SlowingClockBuilder {
     #[reactor(action(min_delay = "100 msec"))]
     a: TypedActionKey<()>,
-
-    #[reactor(child = "Duration::from_secs(1).into()")]
-    _timeout: timeout::Timeout,
 }
 
 #[derive(Reaction)]
@@ -47,7 +43,7 @@ struct ReactionStartup<'a> {
 impl runtime::Trigger<SlowingClock> for ReactionStartup<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut SlowingClock) {
         println!("startup");
-        ctx.schedule_action(&mut self.a, None, None);
+        self.a.schedule(ctx, (), None);
     }
 }
 
@@ -71,7 +67,7 @@ impl runtime::Trigger<SlowingClock> for ReactionA<'_> {
             state.expected_time.as_millis()
         );
 
-        ctx.schedule_action(&mut self.a, None, Some(state.interval));
+        self.a.schedule(ctx, (), Some(state.interval));
         state.expected_time += Duration::from_millis(100) + state.interval;
         state.interval += Duration::from_millis(100);
     }
@@ -96,7 +92,9 @@ impl runtime::Trigger<SlowingClock> for ReactionShutdown {
 #[test]
 fn slowing_clock() {
     tracing_subscriber::fmt::init();
-    let config = runtime::Config::default().with_fast_forward(true);
+    let config = runtime::Config::default()
+        .with_fast_forward(true)
+        .with_timeout(Duration::from_secs(1));
     let _ = boomerang_util::runner::build_and_test_reactor::<SlowingClockBuilder>(
         "slowing_clock",
         SlowingClock::default(),

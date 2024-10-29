@@ -7,7 +7,6 @@
 use std::time::Duration;
 
 use boomerang::prelude::*;
-use boomerang_util::timeout;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Default)]
@@ -26,32 +25,29 @@ struct State {
 struct SlowingClockPhysical {
     #[reactor(action(min_delay = "100 msec"))]
     a: TypedActionKey<(), Physical>,
-
-    #[reactor(child = "Duration::from_millis(1500).into()")]
-    _timeout: timeout::Timeout,
 }
 
 #[derive(Reaction)]
 #[reaction(reactor = "SlowingClockPhysical", triggers(startup))]
-struct ReactionStartup {
-    a: runtime::PhysicalActionRef,
+struct ReactionStartup<'a> {
+    a: runtime::ActionRef<'a>,
 }
 
-impl runtime::Trigger<State> for ReactionStartup {
+impl runtime::Trigger<State> for ReactionStartup<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut State) {
         state.expected_time = Duration::from_millis(100);
-        ctx.schedule_action(&mut self.a, None, None);
+        self.a.schedule(ctx, (), None);
     }
 }
 
 #[derive(Reaction)]
 #[reaction(reactor = "SlowingClockPhysical")]
-struct ReactionA {
+struct ReactionA<'a> {
     #[reaction(triggers)]
-    a: runtime::PhysicalActionRef,
+    a: runtime::ActionRef<'a>,
 }
 
-impl runtime::Trigger<State> for ReactionA {
+impl runtime::Trigger<State> for ReactionA<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut State) {
         let elapsed_logical_time = ctx.get_elapsed_logical_time();
         println!("Logical time since start: {elapsed_logical_time:?}");
@@ -66,7 +62,7 @@ impl runtime::Trigger<State> for ReactionA {
             "Scheduling next to occur approximately after: {:?}",
             state.interval
         );
-        ctx.schedule_action(&mut self.a, None, Some(state.interval));
+        self.a.schedule(ctx, (), Some(state.interval));
     }
 }
 
@@ -89,7 +85,8 @@ fn slowing_clock_physical() {
     tracing_subscriber::fmt::init();
     let config = runtime::Config::default()
         .with_fast_forward(true)
-        .with_keep_alive(true);
+        .with_keep_alive(true)
+        .with_timeout(Duration::from_millis(1500));
     let _ = boomerang_util::runner::build_and_test_reactor::<SlowingClockPhysical>(
         "slowing_clock_physical",
         State {

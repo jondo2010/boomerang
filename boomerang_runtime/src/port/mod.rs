@@ -6,7 +6,7 @@ use std::{
 
 use crate::ReactorData;
 
-tinymap::key_type!(pub PortKey);
+tinymap::key_type! { pub PortKey }
 
 pub trait BasePort: Debug + Display + Downcast + Send + Sync {
     /// Get the name of this port

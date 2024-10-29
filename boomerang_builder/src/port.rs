@@ -1,4 +1,4 @@
-use crate::runtime;
+use crate::{runtime, ParentReactorBuilder};
 use slotmap::{secondary, Key, SecondaryMap};
 use std::{fmt::Debug, marker::PhantomData};
 
@@ -14,7 +14,7 @@ pub struct Input;
 #[derive(Copy, Clone, Debug)]
 pub struct Output;
 
-pub trait PortTag: Copy + Clone + Debug {
+pub trait PortTag: Copy + Clone + Debug + 'static {
     const TYPE: PortType;
 }
 
@@ -88,7 +88,13 @@ pub trait BasePortBuilder {
     fn register_dependency(&mut self, reaction_key: BuilderReactionKey, is_trigger: bool);
     fn register_antidependency(&mut self, reaction_key: BuilderReactionKey);
     /// Create a runtime Port from this PortBuilder
-    fn create_runtime_port(&self, key: runtime::PortKey) -> Box<dyn runtime::BasePort>;
+    fn build_runtime_port(&self, key: runtime::PortKey) -> Box<dyn runtime::BasePort>;
+}
+
+impl ParentReactorBuilder for Box<dyn BasePortBuilder> {
+    fn parent_reactor_key(&self) -> Option<BuilderReactorKey> {
+        Some(self.get_reactor_key())
+    }
 }
 
 pub struct PortBuilder<T: runtime::ReactorData, Q: PortTag> {
@@ -186,7 +192,7 @@ impl<T: runtime::ReactorData, Q: PortTag> BasePortBuilder for PortBuilder<T, Q> 
     }
 
     /// Build the PortBuilder into a runtime Port
-    fn create_runtime_port(&self, key: runtime::PortKey) -> Box<dyn runtime::BasePort> {
+    fn build_runtime_port(&self, key: runtime::PortKey) -> Box<dyn runtime::BasePort> {
         Box::new(runtime::Port::<T>::new(&self.name, key))
     }
 }

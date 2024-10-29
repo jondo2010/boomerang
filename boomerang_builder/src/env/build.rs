@@ -3,8 +3,8 @@ use itertools::Itertools;
 use slotmap::{SecondaryMap, SlotMap};
 
 use crate::{
-    BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactionKey, BuilderReactorKey,
-    ReactionBuilder, ReactorBuilder,
+    ActionType, BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactionKey,
+    BuilderReactorKey, ReactionBuilder, ReactorBuilder,
 };
 
 use super::EnvBuilder;
@@ -22,8 +22,10 @@ pub(crate) struct RuntimePortParts {
 
 #[derive(Debug)]
 struct RuntimeActionParts {
-    actions: tinymap::TinyMap<runtime::ActionKey, runtime::Action>,
+    actions: tinymap::TinyMap<runtime::ActionKey, Box<dyn runtime::BaseAction>>,
     action_triggers: tinymap::TinySecondaryMap<runtime::ActionKey, Vec<BuilderReactionKey>>,
+    startup_actions: Vec<BuilderReactionKey>,
+    shutdown_actions: Vec<BuilderReactionKey>,
     aliases: SecondaryMap<BuilderActionKey, runtime::ActionKey>,
 }
 
@@ -153,9 +155,8 @@ impl EnvBuilder {
                 .keys()
                 .collect_vec();
 
-            let runtime_port_key = runtime_ports.insert_with_key(|key| {
-                self.port_builders[inward_port_key].create_runtime_port(key)
-            });
+            let runtime_port_key = runtime_ports
+                .insert_with_key(|key| self.port_builders[inward_port_key].build_runtime_port(key));
 
             port_triggers.insert(runtime_port_key, downstream_reactions);
 
@@ -173,19 +174,29 @@ impl EnvBuilder {
     fn build_runtime_actions(&self) -> RuntimeActionParts {
         let mut runtime_actions = tinymap::TinyMap::new();
         let mut action_triggers = tinymap::TinySecondaryMap::new();
+        let mut startup_actions = Vec::new();
+        let mut shutdown_actions = Vec::new();
         let mut action_alias = SecondaryMap::new();
 
         for (builder_action_key, action_builder) in self.action_builders.iter() {
-            let runtime_action_key = runtime_actions
-                .insert_with_key(|action_key| action_builder.build_runtime(action_key));
-            let triggers = action_builder.triggers.keys().collect();
-            action_triggers.insert(runtime_action_key, triggers);
-            action_alias.insert(builder_action_key, runtime_action_key);
+            match action_builder.r#type() {
+                ActionType::Startup => startup_actions.extend(action_builder.triggers.keys()),
+                ActionType::Shutdown => shutdown_actions.extend(action_builder.triggers.keys()),
+                ActionType::Standard { build_fn, .. } => {
+                    let action_key = runtime_actions
+                        .insert_with_key(|key| (build_fn)(action_builder.name(), key));
+                    action_triggers.insert(action_key, action_builder.triggers.keys().collect());
+                    action_alias.insert(builder_action_key, action_key);
+                }
+                _ => {}
+            }
         }
 
         RuntimeActionParts {
             actions: runtime_actions,
             action_triggers,
+            startup_actions,
+            shutdown_actions,
             aliases: action_alias,
         }
     }
@@ -206,6 +217,8 @@ impl EnvBuilder {
         let RuntimeActionParts {
             actions: runtime_actions,
             action_triggers,
+            startup_actions,
+            shutdown_actions,
             aliases: action_aliases,
         } = self.build_runtime_actions();
 
@@ -276,28 +289,22 @@ impl EnvBuilder {
             })
             .collect();
 
-        let startup_reactions = runtime_actions
+        let startup_reactions = startup_actions
             .iter()
-            .filter_map(|(action_key, action)| {
-                if let runtime::Action::Startup = action {
-                    Some(runtime_action_triggers[action_key].iter().copied())
-                } else {
-                    None
-                }
+            .map(|builder_reaction_key| {
+                let level = reaction_levels[*builder_reaction_key];
+                let reaction_key = reaction_aliases[*builder_reaction_key];
+                (level, reaction_key)
             })
-            .flatten()
             .collect();
 
-        let shutdown_reactions = runtime_actions
+        let shutdown_reactions = shutdown_actions
             .iter()
-            .filter_map(|(action_key, action)| {
-                if let runtime::Action::Shutdown = action {
-                    Some(runtime_action_triggers[action_key].iter().copied())
-                } else {
-                    None
-                }
+            .map(|builder_reaction_key| {
+                let level = reaction_levels[*builder_reaction_key];
+                let reaction_key = reaction_aliases[*builder_reaction_key];
+                (level, reaction_key)
             })
-            .flatten()
             .collect();
 
         let reaction_set_limits = runtime::ReactionSetLimits {

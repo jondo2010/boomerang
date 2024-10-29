@@ -1,8 +1,8 @@
 use super::{
     BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactorKey, EnvBuilder, FindElements,
-    Physical, PortType, Reactor, ReactorBuilderState, TypedActionKey,
+    PortType, Reactor, ReactorBuilderState,
 };
-use crate::runtime;
+use crate::{runtime, ParentReactorBuilder};
 use slotmap::SecondaryMap;
 
 slotmap::new_key_type! {
@@ -40,7 +40,8 @@ pub trait ReactionField {
     ) -> Result<(), BuilderError>;
 }
 
-impl ReactionField for runtime::Action {
+impl<T: runtime::ReactorData> ReactionField for runtime::ActionRef<'_, T> {
+    //type Key = TypedActionKey<T>;
     type Key = BuilderActionKey;
 
     fn build(
@@ -53,8 +54,8 @@ impl ReactionField for runtime::Action {
     }
 }
 
-impl<T: runtime::ReactorData> ReactionField for runtime::ActionRef<'_, T> {
-    type Key = TypedActionKey<T>;
+impl<T: runtime::ReactorData> ReactionField for runtime::AsyncActionRef<T> {
+    type Key = BuilderActionKey;
 
     fn build(
         builder: &mut ReactionBuilderState,
@@ -62,20 +63,7 @@ impl<T: runtime::ReactorData> ReactionField for runtime::ActionRef<'_, T> {
         order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
-        builder.add_action(key.into(), order, trigger_mode)
-    }
-}
-
-impl<T: runtime::ReactorData> ReactionField for runtime::PhysicalActionRef<T> {
-    type Key = TypedActionKey<T, Physical>;
-
-    fn build(
-        builder: &mut ReactionBuilderState,
-        key: Self::Key,
-        order: usize,
-        trigger_mode: TriggerMode,
-    ) -> Result<(), BuilderError> {
-        builder.add_action(key.into(), order, trigger_mode)
+        builder.add_action(key, order, trigger_mode)
     }
 }
 
@@ -189,6 +177,12 @@ pub struct ReactionBuilder {
     /// Ports that this Reaction may set the value of, and their relative ordering. These are used
     /// to build the array of [`runtime::PortRefMut`]` in the reaction function.
     pub(super) effect_ports: SecondaryMap<BuilderPortKey, usize>,
+}
+
+impl ParentReactorBuilder for ReactionBuilder {
+    fn parent_reactor_key(&self) -> Option<BuilderReactorKey> {
+        Some(self.reactor_key)
+    }
 }
 
 impl std::fmt::Debug for ReactionBuilder {
@@ -312,10 +306,10 @@ impl<'a> ReactionBuilderState<'a> {
         trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
         let action = &self.env.action_builders[key];
-        if action.get_reactor_key() != self.builder.reactor_key {
+        if action.reactor_key() != self.builder.reactor_key {
             return Err(BuilderError::ReactionBuilderError(format!(
                 "Cannot add action '{}' to ReactionBuilder '{}', it must belong to the same reactor as the reaction",
-                action.get_name(), &self.builder.name
+                action.name(), &self.builder.name
             )));
         }
 

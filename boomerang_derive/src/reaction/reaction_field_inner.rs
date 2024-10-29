@@ -3,7 +3,7 @@ use syn::{parse_quote, Expr, Type, TypeReference};
 
 use crate::util::extract_path_ident;
 
-use super::{ReactionField, ACTION, ACTION_REF, INPUT_REF, OUTPUT_REF, PHYSICAL_ACTION_REF};
+use super::{ReactionField, ACTION, ACTION_REF, ASYNC_ACTION_REF, INPUT_REF, OUTPUT_REF};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ReactionFieldInner {
@@ -69,15 +69,13 @@ impl TryFrom<ReactionField> for ReactionFieldInner {
                         uses: false,
                         path,
                     }),
-                    (ACTION_REF, _, _, _) | (PHYSICAL_ACTION_REF, _, _, _) => {
-                        Ok(Self::FieldDefined {
-                            elem: value.ty.clone(),
-                            triggers: value.triggers.unwrap_or(false),
-                            effects: value.effects.unwrap_or(false),
-                            uses: value.uses.unwrap_or(true),
-                            path,
-                        })
-                    }
+                    (ACTION_REF, _, _, _) | (ASYNC_ACTION_REF, _, _, _) => Ok(Self::FieldDefined {
+                        elem: value.ty.clone(),
+                        triggers: value.triggers.unwrap_or(false),
+                        effects: value.effects.unwrap_or(false),
+                        uses: value.uses.unwrap_or(true),
+                        path,
+                    }),
 
                     (_, _, _, Some(true)) => Err(darling::Error::custom(
                         "Invalid Port field attributes: 'uses' is only valid for InputRef",

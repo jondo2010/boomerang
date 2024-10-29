@@ -53,7 +53,7 @@ impl runtime::Trigger<Ping> for ReactionInStart<'_> {
         // reset local state
         state.pings_left = state.count;
         // start execution
-        ctx.schedule_action(&mut self.serve, None, None);
+        self.serve.schedule(ctx, (), None);
     }
 }
 
@@ -82,7 +82,7 @@ impl runtime::Trigger<Ping> for ReactionInPong<'_> {
         if state.pings_left == 0 {
             *self.out_finished = Some(());
         } else {
-            ctx.schedule_action(&mut self.serve, None, None);
+            self.serve.schedule(ctx, (), None);
         }
     }
 }

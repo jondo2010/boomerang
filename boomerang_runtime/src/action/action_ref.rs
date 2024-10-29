@@ -1,130 +1,127 @@
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::time::Duration;
 
-use super::{Action, ActionKey, ActionStore, BaseActionStore};
-use crate::{ReactorData, Tag};
+use crate::{event::AsyncEvent, Context, SendContext, Tag, Timestamp};
 
-pub trait ActionRefValue<T: ReactorData> {
-    /// Access the current Action value at the given Tag using a closure `f`.
-    fn get_value_with<F: FnOnce(Option<&T>) -> U, U>(&mut self, tag: Tag, f: F) -> U;
-    /// Set the Action value at the given Tag.
-    fn set_value(&mut self, value: Option<T>, new_tag: Tag);
-    fn get_min_delay(&self) -> Duration;
-    fn get_key(&self) -> ActionKey;
-}
+use super::{Action, ActionCommon, ActionKey, BaseAction, ReactorData};
 
-/// An `ActionRef` is a reference to an `Action` that can be scheduled.
-pub struct ActionRef<'a, T: ReactorData = ()> {
-    pub(crate) name: &'a str,
-    pub(crate) key: ActionKey,
-    pub(crate) min_delay: Duration,
-    pub(crate) store: &'a mut ActionStore<T>,
-}
+/// [`ActionRef`] is the type received by a user Reaction when they want to interact with an Action. It is the
+/// synchronous version of [`AsyncActionRef`].
+pub struct ActionRef<'a, T: ReactorData = ()>(&'a mut Action<T>);
 
-impl ActionRef<'_, ()> {
-    pub fn name(&self) -> &str {
-        self.name
-    }
-
-    pub fn key(&self) -> ActionKey {
-        self.key
+impl<'a, T: ReactorData> From<&'a mut dyn BaseAction> for ActionRef<'a, T> {
+    fn from(value: &'a mut dyn BaseAction) -> Self {
+        Self(value.downcast_mut().expect("Type mismatch on ActionRef2"))
     }
 }
 
-impl<'a, T: ReactorData> ActionRefValue<T> for ActionRef<'a, T> {
-    fn get_value_with<F: FnOnce(Option<&T>) -> U, U>(&mut self, tag: Tag, f: F) -> U {
-        let value = self.store.get_current(tag);
-        f(value)
+impl<'a, T: ReactorData> ActionRef<'a, T> {
+    /// Return true if the action is present at the current tag
+    pub fn is_present(&mut self, context: &Context) -> bool {
+        self.0.store.get_current(context.tag).is_some()
     }
 
-    fn set_value(&mut self, value: Option<T>, new_tag: Tag) {
-        self.store.push(new_tag, value);
+    /// Get the current value for this action
+    pub fn get_value(&mut self, context: &Context) -> Option<&T> {
+        self.0.store.get_current(context.tag)
     }
 
-    fn get_min_delay(&self) -> Duration {
-        self.min_delay
-    }
+    /// Schedule a new value for this action
+    pub fn schedule(&mut self, context: &mut Context, value: T, delay: Option<Duration>) {
+        let action = &mut self.0;
 
-    fn get_key(&self) -> ActionKey {
-        self.key
+        let tag_delay = action.min_delay.unwrap_or_default() + delay.unwrap_or_default();
+
+        let new_tag = if action.is_logical {
+            // Logical actions are scheduled at the current logical time + tag_delay
+            context.tag.delay(tag_delay)
+        } else {
+            // Physical actions are scheduled at the current physical time + tag_delay
+            Tag::absolute(context.start_time, Timestamp::now().offset(tag_delay))
+        };
+
+        // Push the new value into the store
+        action.store.push(new_tag, value);
+
+        // Schedule the action to trigger at the new tag
+        context
+            .trigger_res
+            .scheduled_actions
+            .push((action.key, new_tag));
     }
 }
 
-#[derive(Debug)]
-pub struct PhysicalActionRef<T: ReactorData = ()> {
-    pub(crate) key: ActionKey,
-    pub(crate) min_delay: Duration,
-    pub(crate) values: Arc<Mutex<dyn BaseActionStore>>,
-    _phantom: std::marker::PhantomData<T>,
+impl<'a, T: ReactorData> ActionCommon for ActionRef<'a, T> {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+
+    fn key(&self) -> ActionKey {
+        self.0.key()
+    }
+
+    fn min_delay(&self) -> Duration {
+        self.0.min_delay.unwrap_or_default()
+    }
 }
 
-impl<T: ReactorData> Clone for PhysicalActionRef<T> {
-    fn clone(&self) -> Self {
+/// [`AsyncActionRef`] is the type received by a user Reaction when they want to interact with an Action asynchronously.
+/// It is the asynchronous version of [`ActionRef`].
+#[derive(Clone)]
+pub struct AsyncActionRef<T: ReactorData = ()> {
+    name: String,
+    key: ActionKey,
+    min_delay: Option<Duration>,
+    is_logical: bool,
+    _phantom: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<'a, T: ReactorData> From<&'a mut dyn BaseAction> for AsyncActionRef<T> {
+    fn from(value: &'a mut dyn BaseAction) -> Self {
+        let action: &Action<T> = value.downcast_ref().expect("Type mismatch on ActionRef2");
         Self {
-            key: self.key,
-            min_delay: self.min_delay,
-            values: self.values.clone(),
-            _phantom: std::marker::PhantomData,
+            name: action.name().into(),
+            key: action.key(),
+            min_delay: action.min_delay(),
+            is_logical: action.is_logical(),
+            _phantom: Default::default(),
         }
     }
 }
 
-impl<T: ReactorData> ActionRefValue<T> for PhysicalActionRef<T> {
-    fn get_value_with<F: FnOnce(Option<&T>) -> U, U>(&mut self, tag: Tag, f: F) -> U {
-        let mut store = self.values.lock().expect("Failed to lock action store");
-        let store = store
-            .downcast_mut::<ActionStore<T>>()
-            .expect("Type mismatch on ActionValues!");
-        let value = store.get_current(tag);
-        f(value)
+impl<T: ReactorData> AsyncActionRef<T> {
+    /// Schedule a new value for this action
+    pub fn schedule(&self, context: &SendContext, value: T, delay: Option<Duration>) {
+        let tag_delay = self.min_delay.unwrap_or_default() + delay.unwrap_or_default();
+        let value = Box::new(value) as Box<dyn ReactorData>;
+
+        let event = if self.is_logical {
+            // Logical actions are scheduled at the current logical time + tag_delay
+            tracing::info!(tag_delay = ?tag_delay, key = ?self.key, "Scheduling Async LogicalAction");
+            AsyncEvent::logical(self.key, tag_delay, value)
+        } else {
+            // Physical actions are scheduled at the current physical time + tag_delay
+            let new_tag = Tag::absolute(context.start_time, Timestamp::now().offset(tag_delay));
+            tracing::info!(new_tag = %new_tag, key = ?self.key, "Scheduling Async PhysicalAction");
+            AsyncEvent::physical(self.key, new_tag, value)
+        };
+
+        context
+            .async_tx
+            .send(event)
+            .expect("Failed to send async event");
+    }
+}
+
+impl<T: ReactorData> ActionCommon for AsyncActionRef<T> {
+    fn name(&self) -> &str {
+        &self.name
     }
 
-    fn set_value(&mut self, value: Option<T>, new_tag: Tag) {
-        let mut store = self.values.lock().expect("Failed to lock action store");
-        let store = store
-            .downcast_mut::<ActionStore<T>>()
-            .expect("Type mismatch on ActionValues!");
-        store.push(new_tag, value);
-    }
-
-    fn get_min_delay(&self) -> Duration {
-        self.min_delay
-    }
-
-    fn get_key(&self) -> ActionKey {
+    fn key(&self) -> ActionKey {
         self.key
     }
-}
 
-impl<'a, T: ReactorData> From<&'a mut Action> for ActionRef<'a, T> {
-    fn from(value: &'a mut Action) -> Self {
-        value
-            .as_logical_mut()
-            .map(|logical| ActionRef {
-                name: logical.name.as_str(),
-                key: logical.key,
-                min_delay: logical.min_delay,
-                store: logical
-                    .store
-                    .downcast_mut()
-                    .expect("Type mismatch on ActionValues!"),
-            })
-            .expect("Action is not valued")
-    }
-}
-
-impl<'a, T: ReactorData> From<&'a mut Action> for PhysicalActionRef<T> {
-    fn from(value: &'a mut Action) -> Self {
-        value
-            .as_physical()
-            .map(|physical| PhysicalActionRef {
-                key: physical.key,
-                min_delay: physical.min_delay,
-                values: Arc::clone(&physical.store),
-                _phantom: std::marker::PhantomData,
-            })
-            .expect("Action is not valued")
+    fn min_delay(&self) -> Duration {
+        self.min_delay.unwrap_or_default()
     }
 }

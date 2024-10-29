@@ -8,4 +8,3 @@
 pub mod replay;
 #[cfg(feature = "runner")]
 pub mod runner;
-pub mod timeout;

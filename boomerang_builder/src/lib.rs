@@ -5,6 +5,7 @@
 #![deny(clippy::all)]
 
 mod action;
+mod connection;
 mod env;
 mod fqn;
 mod port;
@@ -76,7 +77,7 @@ pub enum BuilderError {
     ReactorGraphCycle { what: BuilderReactorKey },
 
     #[error("Error binding ports ({:?}->{:?}): {}", port_a_key, port_b_key, what)]
-    PortBindError {
+    PortConnectionError {
         port_a_key: BuilderPortKey,
         port_b_key: BuilderPortKey,
         what: String,
@@ -109,13 +110,13 @@ macro_rules! reaction_closure {
         Box::new(runtime::reaction::empty_reaction)
     };
     // closure with body
-    ( $ctx:ident, $state:ident, $ref_ports:ident, $mut_ports:ident, $actions:ident => $body:block ) => {
+    ( $ctx:ident, $reactor:ident, $ref_ports:ident, $mut_ports:ident, $actions:ident => $body:block ) => {
         Box::new(
             move |$ctx: &mut runtime::Context,
-                  $state: &mut dyn runtime::BaseReactor,
+                  $reactor: &mut dyn runtime::BaseReactor,
                   $ref_ports: runtime::Refs<dyn runtime::BasePort>,
                   $mut_ports: runtime::RefsMut<dyn runtime::BasePort>,
-                  $actions: runtime::RefsMut<runtime::Action>| { $body },
+                  $actions: runtime::RefsMut<dyn runtime::BaseAction>| { $body },
         )
     };
 }

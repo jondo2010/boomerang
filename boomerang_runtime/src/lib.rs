@@ -18,10 +18,9 @@ pub mod store;
 mod time;
 
 // Re-exports
-pub use action::{
-    Action, ActionKey, ActionRef, ActionRefValue, LogicalAction, PhysicalAction, PhysicalActionRef,
-};
+pub use action::{Action, ActionCommon, ActionKey, ActionRef, AsyncActionRef, BaseAction};
 pub use context::*;
+use downcast_rs::Downcast;
 pub use env::{BankInfo, Env, Level, LevelReactionKey, ReactionGraph};
 pub use key_set::KeySetLimits as ReactionSetLimits;
 pub use port::*;
@@ -35,9 +34,11 @@ pub use sched::*;
 pub use time::*;
 
 /// Types implementing this trait can be used as data in ports, actions, and reactors.
-pub trait ReactorData: Send + Sync + 'static {}
+pub trait ReactorData: Downcast + Send + Sync + 'static {}
 
 impl<T> ReactorData for T where T: Send + Sync + 'static {}
+
+downcast_rs::impl_downcast!(ReactorData);
 
 #[derive(thiserror::Error, Debug)]
 pub enum RuntimeError {

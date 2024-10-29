@@ -1,7 +1,6 @@
 //! Test asynchronous callbacks that trigger a physical action.
 
 use boomerang::prelude::*;
-use boomerang_util::timeout;
 use std::{thread::JoinHandle, time::Duration};
 
 #[derive(Debug, Default)]
@@ -24,17 +23,13 @@ struct State {
 struct AsyncCallback {
     #[reactor(timer(period = "200 msec"))]
     t: TimerActionKey,
-
     a: TypedActionKey<usize, Physical>,
-
-    #[reactor(child = "Duration::from_secs(2).into()")]
-    _timeout: timeout::Timeout,
 }
 
 #[derive(Reaction)]
 #[reaction(reactor = "AsyncCallback", triggers(action = "t"))]
 struct ReactionT {
-    a: runtime::PhysicalActionRef<usize>,
+    a: runtime::AsyncActionRef<usize>,
 }
 
 impl runtime::Trigger<State> for ReactionT {
@@ -44,8 +39,8 @@ impl runtime::Trigger<State> for ReactionT {
             thread.join().unwrap();
         }
 
-        let mut send_ctx = ctx.make_send_context();
-        let mut a = self.a.clone();
+        let send_ctx = ctx.make_send_context();
+        let a = self.a.clone();
 
         // start new thread
         state.thread = Some(std::thread::spawn(move || {
@@ -53,8 +48,8 @@ impl runtime::Trigger<State> for ReactionT {
             std::thread::sleep(Duration::from_millis(100));
             // Schedule twice. If the action is not physical, these should get consolidated into a single action
             // triggering. If it is, then they cause two separate triggerings with close but not equal time stamps.
-            send_ctx.schedule_action(&mut a, Some(0), None);
-            send_ctx.schedule_action(&mut a, Some(0), None);
+            a.schedule(&send_ctx, 0, None);
+            a.schedule(&send_ctx, 0, None);
         }));
     }
 }
@@ -102,7 +97,9 @@ impl runtime::Trigger<State> for ReactionShutdown {
 #[test]
 fn async_callback() {
     tracing_subscriber::fmt::init();
-    let config = runtime::Config::default().with_fast_forward(false);
+    let config = runtime::Config::default()
+        .with_fast_forward(false)
+        .with_timeout(Duration::from_secs(2));
     let _ = boomerang_util::runner::build_and_test_reactor::<AsyncCallback>(
         "async_callback",
         State {

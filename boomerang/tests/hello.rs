@@ -5,7 +5,6 @@
 use std::time::Duration;
 
 use boomerang::prelude::*;
-use boomerang_util::timeout;
 
 #[derive(Debug, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -47,7 +46,7 @@ impl runtime::Trigger<Hello> for ReactionT<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut Hello) {
         // Print the current time.
         state.previous_time = ctx.get_elapsed_logical_time();
-        ctx.schedule_action(&mut self.a, None, Some(Duration::from_millis(200))); // No payload.
+        self.a.schedule(ctx, (), Some(Duration::from_millis(200))); // No payload.
         println!(
             "{} Current time is {:?}",
             state.message, state.previous_time
@@ -105,15 +104,14 @@ struct MainBuilder {
     _second_instance: HelloBuilder,
     #[reactor(child = Inside::new("Hello from composite."))]
     _third_instance: InsideBuilder,
-
-    #[reactor(child = "Duration::from_secs(10).into()")]
-    _timeout: timeout::Timeout,
 }
 
 #[test]
 fn hello() {
     tracing_subscriber::fmt::init();
-    let config = runtime::Config::default().with_fast_forward(true);
+    let config = runtime::Config::default()
+        .with_fast_forward(true)
+        .with_timeout(Duration::from_secs(10));
     let _ =
         boomerang_util::runner::build_and_test_reactor::<MainBuilder>("hello", (), config).unwrap();
 }

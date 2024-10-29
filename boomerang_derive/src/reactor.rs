@@ -7,8 +7,7 @@ use syn::Type;
 use syn::TypeArray;
 use syn::TypePath;
 
-use crate::util::OptionalDuration;
-use crate::util::{extract_path_ident, handle_duration};
+use crate::util::{extract_path_ident, handle_duration, OptionalDuration};
 
 const TIMER_ACTION_KEY: &str = "TimerActionKey";
 const TYPED_ACTION_KEY: &str = "TypedActionKey";
@@ -188,12 +187,12 @@ impl TryFrom<FieldReceiver> for ReactorField {
 pub struct ConnectionAttr {
     from: syn::Expr,
     to: syn::Expr,
-
     #[darling(default)]
     broadcast: bool,
-
     #[darling(default, map = "handle_duration")]
     after: Option<Duration>,
+    #[darling(default)]
+    physical: bool,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -206,8 +205,8 @@ struct Connection {
     from: PortDef,
     to: PortDef,
     broadcast: bool,
-    #[allow(dead_code)] // TODO: Implement
     after: Option<Duration>,
+    physical: bool,
 }
 
 impl TryFrom<syn::Expr> for PortDef {
@@ -252,6 +251,7 @@ impl TryFrom<ConnectionAttr> for Connection {
             to,
             broadcast: value.broadcast,
             after: value.after,
+            physical: value.physical,
         })
     }
 }
@@ -282,9 +282,11 @@ impl ToTokens for Connection {
         let to_port = port_output(&self.to);
         //let transpoed = self.transposed.then_some(quote! { .transpose() });
         let broadcast = self.broadcast.then_some(quote! { .cycle() });
+        let after = OptionalDuration(self.after);
+        let physical = self.physical;
 
         tokens.extend(quote! {
-            __builder.bind_ports(#from_port #broadcast, #to_port)?;
+            __builder.connect_ports(#from_port #broadcast, #to_port, #after, #physical)?;
         });
     }
 }
@@ -430,7 +432,7 @@ mod tests {
     state = "MyType::Foo::<f32>",
     connection(from = "a.b", to = "c.d"),
     connection(from = "inp", to = "gain.inp"),
-    connection(from = "gain.out", to = "out", after = "1 usec"),
+    connection(from = "gain.out", to = "out", after = "1 usec", physical = true),
     reaction = "Reaction1",
     reaction = "Reaction2<WIDTH>"
 )]
@@ -447,7 +449,8 @@ struct Test {}"#;
                 from: parse_quote! {a.b},
                 to: parse_quote! {c.d},
                 broadcast: false,
-                after: None
+                after: None,
+                physical: false,
             }
         );
         assert_eq!(
@@ -456,7 +459,8 @@ struct Test {}"#;
                 from: parse_quote! {inp},
                 to: parse_quote! {gain.inp},
                 broadcast: false,
-                after: None
+                after: None,
+                physical: false,
             }
         );
         assert_eq!(
@@ -465,7 +469,8 @@ struct Test {}"#;
                 from: parse_quote! {gain.out},
                 to: parse_quote! {out},
                 broadcast: false,
-                after: Some(Duration::from_micros(1))
+                after: Some(Duration::from_micros(1)),
+                physical: true,
             }
         );
         assert_eq!(receiver.reactions.len(), 2);

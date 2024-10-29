@@ -1,135 +1,30 @@
+//! Actions are Reactor elements that can be scheduled. When an Action triggers, all Reactions dependent on that Action are executed.
+//!
+//! Actions come in two flavours that specify their scheduling behavior:
+//! - `LogicalAction`: Logical Actions are scheduled with a [`Tag`] equal to the current *logical time* + optional delay.
+//! - `PhysicalAction`: Physical Actions are scheduled with a [`Tag`] equal to the current *physical time* + optional delay.
+//!
+//! Actions can be scheduled in two ways:
+//! **Synchronous**: Actions are scheduled synchronously from within a Reaction using an `ActionRef`. This is the most common
+//!     way to schedule Actions. A future `Tag` for the event is calculated for both Logical and Physical Actions, and the
+//!     `ReactorData` is pushed directly into the Action's store.
+//! **Asynchronous**: Actions are scheduled asynchronously from oustide of the scheduler thread. This is useful when the
+//!     Action needs to be scheduled from a different thread. An `AsyncEvent` is created and pushed onto the `async_tx`
+//!     channel.
+
 use std::{
-    fmt::Display,
-    sync::{Arc, Mutex},
+    fmt::{Debug, Display},
     time::Duration,
 };
 
-use crate::ReactorData;
+use crate::{ReactorData, Tag};
 
 mod action_ref;
 pub mod store;
 
 pub use action_ref::*;
-use store::{ActionStore, BaseActionStore};
-
-tinymap::key_type! { pub ActionKey }
-
-/// Typed Action state, storing potentially different values at different Tags.
-#[derive(Debug)]
-pub struct LogicalAction {
-    pub name: String,
-    pub key: ActionKey,
-    pub min_delay: Duration,
-    pub store: Box<dyn BaseActionStore>,
-}
-
-impl LogicalAction {
-    pub fn new<T: ReactorData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
-        let store = ActionStore::<T>::default();
-        Self {
-            name: name.into(),
-            key,
-            min_delay,
-            store: Box::new(store),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct PhysicalAction {
-    pub name: String,
-    pub key: ActionKey,
-    pub min_delay: Duration,
-    pub store: Arc<Mutex<dyn BaseActionStore>>,
-}
-
-impl PhysicalAction {
-    pub fn new<T: ReactorData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
-        let store = ActionStore::<T>::default();
-        let store = Arc::new(Mutex::new(store)) as Arc<Mutex<dyn BaseActionStore>>;
-        Self {
-            name: name.into(),
-            key,
-            min_delay,
-            store,
-        }
-    }
-}
-
-impl<'a> From<&'a mut Action> for &'a mut PhysicalAction {
-    fn from(value: &'a mut Action) -> Self {
-        value.as_physical().expect("Action is not physical")
-    }
-}
-
-#[derive(Debug)]
-pub enum Action {
-    /// Startup is a special action that fires when the scheduler starts up.
-    Startup,
-    /// Shutdown is a special action that fires when the scheduler shuts down.
-    Shutdown,
-    Logical(LogicalAction),
-    Physical(PhysicalAction),
-}
-
-impl Action {
-    pub fn new_logical<T: ReactorData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
-        Self::Logical(LogicalAction::new::<T>(name, key, min_delay))
-    }
-
-    pub fn new_physical<T: ReactorData>(name: &str, key: ActionKey, min_delay: Duration) -> Self {
-        Self::Physical(PhysicalAction::new::<T>(name, key, min_delay))
-    }
-
-    pub fn as_logical(&self) -> Option<&LogicalAction> {
-        if let Self::Logical(v) = self {
-            Some(v)
-        } else {
-            None
-        }
-    }
-
-    pub fn as_logical_mut(&mut self) -> Option<&mut LogicalAction> {
-        if let Self::Logical(v) = self {
-            Some(v)
-        } else {
-            None
-        }
-    }
-
-    pub fn as_physical(&mut self) -> Option<&mut PhysicalAction> {
-        if let Self::Physical(v) = self {
-            Some(v)
-        } else {
-            None
-        }
-    }
-}
-
-impl Display for Action {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Action::Startup => write!(f, "Action::Startup"),
-            Action::Shutdown => write!(f, "Action::Shutdown"),
-            Action::Logical(logical) => write!(f, "Action::Logical({name})", name = logical.name),
-            Action::Physical(physical) => {
-                write!(f, "Action::Physical({name})", name = physical.name)
-            }
-        }
-    }
-}
-
-impl AsRef<Action> for Action {
-    fn as_ref(&self) -> &Self {
-        self
-    }
-}
-
-impl AsMut<Action> for Action {
-    fn as_mut(&mut self) -> &mut Action {
-        self
-    }
-}
+use downcast_rs::Downcast;
+use store::ActionStore;
 
 pub trait ActionCommon {
     fn name(&self) -> &str;
@@ -137,21 +32,54 @@ pub trait ActionCommon {
     fn min_delay(&self) -> Duration;
 }
 
-impl ActionCommon for LogicalAction {
-    fn name(&self) -> &str {
-        &self.name
-    }
+tinymap::key_type! { pub ActionKey }
 
-    fn key(&self) -> ActionKey {
-        self.key
-    }
+pub trait BaseAction: Debug + Downcast + Send + Sync {
+    /// Get the name of this action
+    fn name(&self) -> &str;
 
-    fn min_delay(&self) -> Duration {
-        self.min_delay
+    /// Get the key for this action
+    fn key(&self) -> ActionKey;
+
+    /// Get the minimum delay for this action
+    fn min_delay(&self) -> Option<Duration>;
+
+    /// Return true if the action is logical
+    fn is_logical(&self) -> bool;
+
+    /// Push a new value onto the action store. If the underlying types are not the same, this will panic.
+    fn push_value(&mut self, tag: Tag, value: Box<dyn ReactorData>);
+}
+
+downcast_rs::impl_downcast!(BaseAction);
+
+impl Display for dyn BaseAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Action({})", self.name())
     }
 }
 
-impl ActionCommon for PhysicalAction {
+pub struct Action<T: ReactorData = ()> {
+    name: String,
+    key: ActionKey,
+    min_delay: Option<Duration>,
+    store: ActionStore<T>,
+    is_logical: bool,
+}
+
+impl<T: ReactorData> Debug for Action<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Action")
+            .field("name", &self.name)
+            .field("key", &self.key)
+            .field("min_delay", &self.min_delay)
+            .field("store", &self.store)
+            .field("is_logical", &self.is_logical)
+            .finish()
+    }
+}
+
+impl<T: ReactorData> BaseAction for Action<T> {
     fn name(&self) -> &str {
         &self.name
     }
@@ -160,7 +88,52 @@ impl ActionCommon for PhysicalAction {
         self.key
     }
 
-    fn min_delay(&self) -> Duration {
+    fn min_delay(&self) -> Option<Duration> {
         self.min_delay
+    }
+
+    fn is_logical(&self) -> bool {
+        self.is_logical
+    }
+
+    fn push_value(&mut self, tag: Tag, value: Box<dyn ReactorData>) {
+        if let Ok(v) = value.downcast() {
+            self.store.push(tag, *v);
+        } else {
+            panic!("Type mismatch");
+        }
+    }
+}
+
+impl<T: ReactorData> Action<T> {
+    pub fn new(name: &str, key: ActionKey, min_delay: Option<Duration>, is_logical: bool) -> Self {
+        Self {
+            name: name.into(),
+            key,
+            min_delay,
+            store: ActionStore::new(),
+            is_logical,
+        }
+    }
+
+    pub fn boxed(self) -> Box<dyn BaseAction> {
+        Box::new(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_action2() {
+        let actions =
+            tinymap::TinyMap::<ActionKey, Box<dyn BaseAction>>::from_iter([Action::<i32>::new(
+                "action0",
+                ActionKey::from(0),
+                None,
+                true,
+            )
+            .boxed()]);
     }
 }

@@ -23,6 +23,12 @@ serde_arrow = { version = "0.11", features = ["arrow-52"] }
 serde_flexitos = { version = "0.2", features = ["id_trait"] }
 thiserror = "1.0"
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = [
+    "fmt",
+    "json",
+    "env-filter",
+] }
+tracing-tracy = { version = "0.11", features = ["flush-on-exit"] }
 linkme = { version = "0.3" }
 
 # Local crates

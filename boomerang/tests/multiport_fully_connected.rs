@@ -85,11 +85,11 @@ impl runtime::Trigger<State> for ReactionShutdown {
 
 #[derive(Reactor)]
 #[reactor(
-    state = "()",
+    state = (),
     connection(from = "nodes.out", to = "nodes.inp", broadcast)
 )]
 struct MainReactor<const NUM_NODES: usize = 4> {
-    #[reactor(child = "State{received: false}")]
+    #[reactor(child(state = State{received: false}))]
     nodes: [Node<NUM_NODES>; NUM_NODES],
 }
 

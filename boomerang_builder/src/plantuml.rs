@@ -41,7 +41,7 @@ impl ElemId for BuilderReactorKey {
     /// Build a unique identifier for a reactor node in the PlantUML graph.
     fn elem_id(&self, env_builder: &EnvBuilder) -> String {
         let id = self.data().as_ffi() % env_builder.reactor_builders.len() as u64;
-        format!("r{id}")
+        format!("rtr{id}")
     }
 }
 
@@ -115,43 +115,41 @@ impl EnvBuilder {
         reactor: &ReactorBuilder,
         buf: &mut W,
     ) -> std::io::Result<()> {
-        for (reaction_id, reaction) in reactor.reactions.keys().map(|reaction_key| {
-            (
-                self.node_id(reaction_key),
-                &self.reaction_builders[reaction_key],
-            )
-        }) {
+        for (reaction_key, reaction) in reactor
+            .reactions
+            .keys()
+            .map(|reaction_key| (reaction_key, &self.reaction_builders[reaction_key]))
+        {
             for (port_key, last_port_key, _) in
-                self.ports_debug_grouped(reaction.trigger_ports.keys())
+                self.ports_debug_grouped(reaction.port_relations.keys())
             {
-                let port_node = self.node_id(port_key);
+                let reaction_id = self.node_id(reaction_key);
+                let port_id = self.node_id(port_key);
                 let props = if last_port_key.is_some() {
                     Self::BANK_EDGE
                 } else {
                     ""
                 };
-                writeln!(buf, "{port_node} .{props}> {reaction_id} : trig")?;
-            }
-            for (port_key, last_port_key, _) in
-                self.ports_debug_grouped(reaction.effect_ports.keys())
-            {
-                let port_node = self.node_id(port_key);
-                let props = if last_port_key.is_some() {
-                    Self::BANK_EDGE
-                } else {
-                    ""
-                };
-                writeln!(buf, "{reaction_id} .{props}> {port_node} : eff")?;
-            }
-            for (port_key, last_port_key, _) in self.ports_debug_grouped(reaction.use_ports.keys())
-            {
-                let port_node = self.node_id(port_key);
-                let props = if last_port_key.is_some() {
-                    Self::BANK_EDGE
-                } else {
-                    ""
-                };
-                writeln!(buf, "{port_node} .{props}> {reaction_id} : use")?;
+
+                let trigger_mode = reaction.port_relations[port_key];
+                match trigger_mode {
+                    crate::TriggerMode::TriggersOnly => {
+                        writeln!(buf, "{port_id} .{props}-> {reaction_id} : trig_only")?;
+                    }
+                    crate::TriggerMode::TriggersAndUses => {
+                        writeln!(buf, "{port_id} .{props}-> {reaction_id} : trig")?;
+                    }
+                    crate::TriggerMode::TriggersAndEffects => {
+                        writeln!(buf, "{port_id} .{props}-> {reaction_id} : trig")?;
+                        writeln!(buf, "{reaction_id} .{props}-> {port_id} : eff")?;
+                    }
+                    crate::TriggerMode::UsesOnly => {
+                        writeln!(buf, "{port_id} .{props}-> {reaction_id} : use_only")?;
+                    }
+                    crate::TriggerMode::EffectsOnly => {
+                        writeln!(buf, "{reaction_id} .{props}-> {port_id} : eff")?;
+                    }
+                }
             }
         }
         Ok(())
@@ -162,12 +160,16 @@ impl EnvBuilder {
         reactor: &ReactorBuilder,
         buf: &mut W,
     ) -> std::io::Result<()> {
-        for (action_id, action) in reactor
+        for (action_key, action) in reactor
             .actions
             .keys()
-            .map(|action_key| (self.node_id(action_key), &self.action_builders[action_key]))
+            .map(|action_key| (action_key, &self.action_builders[action_key]))
         {
+            let action_id = self.node_id(action_key);
             let (xlabel, tooltip): (String, String) = match action.r#type() {
+                ActionType::Timer(timer_spec) if timer_spec == &TimerSpec::STARTUP => {
+                    ("\u{2600}".into(), "Startup".into())
+                }
                 ActionType::Timer(TimerSpec { period, offset }) => {
                     let label = "\u{23f2}".into();
                     let tt = if offset.unwrap_or_default().is_zero() {
@@ -197,11 +199,15 @@ impl EnvBuilder {
                         format!("{} ({:?})", action.name(), min_delay.unwrap_or_default()),
                     )
                 }
-                ActionType::Startup => ("\u{2600}".into(), "Startup".into()),
                 ActionType::Shutdown => ("\u{263d}".into(), "Shutdown".into()),
             };
 
-            if !action.triggers.is_empty() || !action.schedulers.is_empty() {
+            // Only show if this action shows up in any Reaction's `action_relations`
+            if self
+                .reaction_builders
+                .iter()
+                .any(|(_, reaction)| reaction.action_relations.contains_key(action_key))
+            {
                 writeln!(
                     buf,
                     "hexagon \"{label}[[{{{tooltip}}}]]\" as {id}",
@@ -219,36 +225,41 @@ impl EnvBuilder {
         reactor: &ReactorBuilder,
         buf: &mut W,
     ) -> std::io::Result<()> {
-        for (action_id, action) in reactor
-            .actions
+        for (reaction_key, reaction) in reactor
+            .reactions
             .keys()
-            .map(|action_key| (self.node_id(action_key), &self.action_builders[action_key]))
+            .map(|reaction_key| (reaction_key, &self.reaction_builders[reaction_key]))
         {
-            if !action.triggers.is_empty() || !action.schedulers.is_empty() {
-                for reaction_key in action.triggers.keys() {
-                    let reaction_id = self.node_id(reaction_key);
-                    writeln!(buf, "{action_id} .> {reaction_id} : trig")?;
-                }
-
-                for reaction_key in action.schedulers.keys() {
-                    let reaction_id = self.node_id(reaction_key);
-                    writeln!(buf, "{reaction_id} .> {action_id} : sched")?;
+            let reaction_id = self.node_id(reaction_key);
+            for (action_key, trigger_mode) in reaction.action_relations.iter() {
+                let action_id = self.node_id(action_key);
+                match trigger_mode {
+                    crate::TriggerMode::TriggersOnly | crate::TriggerMode::TriggersAndUses => {
+                        writeln!(buf, "{action_id} .-> {reaction_id} : trig")?;
+                    }
+                    crate::TriggerMode::TriggersAndEffects => {
+                        writeln!(buf, "{action_id} .-> {reaction_id} : trig")?;
+                        writeln!(buf, "{reaction_id} .-> {action_id} : sched")?;
+                    }
+                    crate::TriggerMode::UsesOnly => {
+                        writeln!(buf, "{action_id} .-> {reaction_id} : use")?;
+                    }
+                    crate::TriggerMode::EffectsOnly => {
+                        writeln!(buf, "{reaction_id} .-> {action_id} : sched")?;
+                    }
                 }
             }
         }
+
         Ok(())
     }
 
     fn build_port_bindings<W: std::io::Write>(&self, buf: &mut W) -> std::io::Result<()> {
         //TODO: this is a naive implementation, we should group by bank
-        for (from, to) in self.port_builders.iter().flat_map(|(port_key, port)| {
-            port.get_outward_bindings().map(move |binding_key| {
-                let from = self.node_id(port_key);
-                let to = self.node_id(binding_key);
-                (from, to)
-            })
-        }) {
-            writeln!(buf, "{from} --> {to}")?;
+        for connection in &self.connection_builders {
+            let source_id = self.node_id(connection.source_key());
+            let target_id = self.node_id(connection.target_key());
+            writeln!(buf, "{source_id} --> {target_id}")?;
         }
         Ok(())
     }
@@ -292,11 +303,14 @@ skinparam arrowThickness 1
                 let bank = reactor
                     .bank_info()
                     .map(|bi| format!("[0..{}]", bi.total - 1));
+
+                let enclave = if reactor.is_enclave { "📦 " } else { "" };
                 let stereotype = if bank.is_some() { " <<bank>> " } else { "" };
 
+                let reactor_id = self.node_id(reactor_key);
                 writeln!(
                     &mut buf,
-                    "component reactor_{name} as \"{name}{bank}\"{stereotype}{{",
+                    "component {reactor_id} as \"{enclave}{name}{bank}\"{stereotype}{{",
                     name = reactor.name(),
                     bank = bank.unwrap_or_default(),
                 )

@@ -39,7 +39,7 @@ impl runtime::Trigger<State> for HelloWorld2ReactionShutdown {
 #[derive(Reactor)]
 #[reactor(state = "()")]
 struct HelloWorld {
-    #[reactor(child = "State{success: false}")]
+    #[reactor(child(state = State{success: false}))]
     _a: HelloWorld2,
 }
 

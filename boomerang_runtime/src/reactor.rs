@@ -14,8 +14,14 @@ pub trait BaseReactor: Debug + Downcast + Send + Sync {
 impl_downcast!(BaseReactor);
 
 impl dyn BaseReactor {
+    /// Get a reference to the state of the reactor
     pub fn get_state<T: ReactorData>(&self) -> Option<&T> {
         self.downcast_ref::<Reactor<T>>().map(|r| &r.state)
+    }
+
+    /// Get a mutable reference to the state of the reactor
+    pub fn get_state_mut<T: ReactorData>(&mut self) -> Option<&mut T> {
+        self.downcast_mut::<Reactor<T>>().map(|r| &mut r.state)
     }
 }
 

@@ -40,6 +40,14 @@ impl std::ops::Sub for Timestamp {
     }
 }
 
+impl std::ops::Sub<Duration> for Timestamp {
+    type Output = Self;
+
+    fn sub(self, rhs: Duration) -> Self::Output {
+        Self(self.0 - rhs)
+    }
+}
+
 impl std::ops::Add<Timestamp> for Timestamp {
     type Output = Self;
 
@@ -48,6 +56,9 @@ impl std::ops::Add<Timestamp> for Timestamp {
     }
 }
 
+/// A tag is a logical time point in the system.
+///
+/// Internally, a Tag is represented as an offset from the origin of logical time, and a superdense-timestep.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Tag {
@@ -82,28 +93,10 @@ impl Tag {
         }
     }
 
-    pub fn absolute(t0: Timestamp, instant: Timestamp) -> Self {
+    /// Create a new Tag given a physical time and the start time
+    pub fn from_physical_time(start_time: Timestamp, time: Timestamp) -> Self {
         Self {
-            offset: (instant - t0).into(),
-            micro_step: 0,
-        }
-    }
-
-    pub fn now(t0: Timestamp) -> Self {
-        Self {
-            offset: (Timestamp::now() - t0).into(),
-            micro_step: 0,
-        }
-    }
-
-    /// Calculate a `Tag` relative to the given origin `t0`.
-    pub fn since(&self, t0: Timestamp) -> Self {
-        Self {
-            offset: self
-                .offset
-                .checked_duration_since(t0)
-                .unwrap_or_default()
-                .into(),
+            offset: (time - start_time).into(),
             micro_step: 0,
         }
     }
@@ -124,7 +117,32 @@ impl Tag {
     pub fn get_offset(&self) -> Timestamp {
         self.offset
     }
+
+    pub fn decrement(&self) -> Self {
+        if self.micro_step == 0 {
+            Self {
+                offset: self.offset - Duration::new(0, 1),
+                micro_step: usize::MAX,
+            }
+        } else {
+            Self {
+                offset: self.offset,
+                micro_step: self.micro_step - 1,
+            }
+        }
+    }
 }
+
+/*
+impl From<Timestamp> for Tag {
+    fn from(timestamp: Timestamp) -> Self {
+        Self {
+            offset: timestamp,
+            micro_step: 0,
+        }
+    }
+}
+    */
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub struct LogicalTime {

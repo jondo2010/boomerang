@@ -6,10 +6,8 @@
 
 use std::{fmt::Debug, marker::PhantomData, time::Duration};
 
-use super::{BuilderReactionKey, BuilderReactorKey};
+use super::BuilderReactorKey;
 use crate::{runtime, ParentReactorBuilder};
-
-use slotmap::SecondaryMap;
 
 slotmap::new_key_type! {pub struct BuilderActionKey;}
 
@@ -151,10 +149,6 @@ pub struct ActionBuilder {
     reactor_key: BuilderReactorKey,
     /// Logical type of the action
     r#type: ActionType,
-    /// Out-going Reactions that this action triggers
-    pub triggers: SecondaryMap<BuilderReactionKey, ()>,
-    /// List of Reactions that may schedule this action
-    pub schedulers: SecondaryMap<BuilderReactionKey, ()>,
 }
 
 impl ParentReactorBuilder for ActionBuilder {
@@ -169,8 +163,6 @@ impl ActionBuilder {
             name: name.to_owned(),
             reactor_key,
             r#type,
-            triggers: SecondaryMap::new(),
-            schedulers: SecondaryMap::new(),
         }
     }
 

@@ -128,7 +128,7 @@ pub struct Reaction {
     ident: Ident,
     generics: Generics,
     combined_generics: Generics,
-    reactor: Type,
+    reactor: syn::Type,
     fields: Vec<ReactionFieldInner>,
     fromdefs: FromDefsImpl,
     /// Whether the reaction has a startup trigger

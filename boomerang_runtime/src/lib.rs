@@ -20,6 +20,7 @@ mod time;
 // Re-exports
 pub use action::{Action, ActionCommon, ActionKey, ActionRef, AsyncActionRef, BaseAction};
 pub use context::*;
+pub use crossbeam_channel::{Receiver, Sender};
 use downcast_rs::Downcast;
 pub use env::{BankInfo, Env, Level, LevelReactionKey, ReactionGraph};
 pub use key_set::KeySetLimits as ReactionSetLimits;

@@ -4,7 +4,7 @@ use std::{marker::PhantomPinned, pin::Pin, ptr::NonNull};
 
 use crate::{
     refs::{Refs, RefsMut},
-    ActionKey, BaseAction, BasePort, BaseReactor, Context, ContextCommon, Deadline, PortKey,
+    ActionKey, BaseAction, BasePort, BaseReactor, CommonContext, Context, Deadline, PortKey,
     Reaction, ReactionKey, ReactorData, ReactorKey, Tag, TriggerRes,
 };
 
@@ -127,6 +127,8 @@ impl Store {
         contexts: tinymap::TinySecondaryMap<ReactionKey, Context>,
         reaction_graph: &ReactionGraph,
     ) -> Pin<Box<Self>> {
+        debug_assert!(contexts.len() == env.reactions.len());
+
         // Create a default `ReactionTriggerCtxPtrs` for each reaction
         let ptrs = env
             .reactions
@@ -339,7 +341,10 @@ pub mod tests {
         }
         {
             let mut ctx_iter = unsafe { store.iter_borrow_storage(reaction_keys.iter().cloned()) };
-            let _res = ctx_iter.next().unwrap().trigger(Tag::now(Timestamp::now()));
+            let _res = ctx_iter
+                .next()
+                .unwrap()
+                .trigger(Tag::new(Timestamp::now(), 0));
         }
     }
 }

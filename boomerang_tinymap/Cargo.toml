@@ -12,15 +12,17 @@ categories.workspace = true
 exclude.workspace = true
 
 [features]
-default = ["serde"]
+default = ["serde", "rayon"]
 
 ## Support for serialization
 serde = ["dep:serde"]
+rayon = ["dep:rayon"]
 
 [dependencies]
 document-features = { workspace = true }
 fixedbitset = { version = "0.5" }
 serde = { workspace = true, optional = true, features = ["derive"] }
+rayon = { workspace = true, optional = true }
 
 [dev-dependencies]
 itertools = { workspace = true }

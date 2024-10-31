@@ -24,7 +24,7 @@ mod reactor {
     )]
     pub struct SnakeBuilder {
         /// this thing helps capturing key presses
-        #[reactor(child= KeyboardEvents::default())]
+        #[reactor(child(state = KeyboardEvents::default()))]
         keyboard: KeyboardEventsBuilder,
 
         /// Triggers a screen refresh, not a timer because we can

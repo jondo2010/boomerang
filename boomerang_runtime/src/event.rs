@@ -1,6 +1,8 @@
 use std::fmt::{Debug, Display};
 
-use crate::{ActionKey, Duration, LevelReactionKey, ReactionGraph, ReactionSet, ReactorData, Tag};
+use crate::{
+    ActionKey, Duration, EnclaveKey, LevelReactionKey, ReactionGraph, ReactionSet, ReactorData, Tag,
+};
 
 /// `ScheduledEvent` is used internally by the scheduler loop in the event queue. The dependent reactions are already expanded into a single reaction set.
 #[derive(Debug, Clone)]
@@ -44,13 +46,24 @@ impl Ord for ScheduledEvent {
 
 /// `AsyncEvent` is used to inject events into the scheduler from outside of the normal event loop.
 pub enum AsyncEvent {
-    /// A Logical event should execute at the current logical time (+ an optional delay). The current logical time of
-    /// the scheduler is not available to the caller, so the scheduler adds this when pulling the event from the
-    /// channel.
+    /// A release event is used by upstream enclaves to signal that they have completed processing the tag.
+    TagRelease {
+        /// The key of the enclave that is releasing the `Tag``.
+        enclave: EnclaveKey,
+        /// The tag that is being released.
+        tag: Tag,
+    },
+    /// An empty event is used by upstream enclaves to signal that they are ready to process the next event.
+    TagReleaseProvisional {
+        /// The key of the enclave that is waiting
+        enclave: EnclaveKey,
+        /// The tag that is being waited on.
+        tag: Tag,
+    },
+    /// A Logical event has its `tag` set to the current logical time (+ an optional delay).
     Logical {
-        /// The delay that should be applied to this event. This will be added to the current logical time to determine
-        /// the tag.
-        delay: Duration,
+        /// The tag at which the Action should be executed
+        tag: Tag,
         /// The key of the action that triggered this event.
         key: ActionKey,
         /// The value associated with this event.
@@ -59,8 +72,8 @@ pub enum AsyncEvent {
 
     /// A Physical event has its `tag` set to the current physical time (+ an optional delay).
     Physical {
-        /// The [`Tag`] at which the reactions in this event should be executed.
-        tag: Tag,
+        /// The instant at which the Action should be executed
+        time: std::time::Instant,
         /// The [`ActionKey`] of the action that triggered this event.
         key: ActionKey,
         /// The value associated with this event.
@@ -69,25 +82,26 @@ pub enum AsyncEvent {
 
     /// The scheduler should terminate after processing this event.
     Shutdown {
-        /// The [`Tag`] at which the reactions in this event should be executed.
-        tag: Tag,
+        /// The delay after which the scheduler should terminate.
+        delay: Duration,
     },
 }
 
 impl Debug for AsyncEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Logical { delay, key, value } => f
-                .debug_struct("Logical")
-                .field("delay", delay)
-                .field("key", key)
-                .field(
-                    "value",
-                    &format!("Box<{}>", std::any::type_name_of_val(&**value)),
-                )
+            Self::TagRelease { enclave, tag } => f
+                .debug_struct("TagRelease")
+                .field("enclave", enclave)
+                .field("tag", tag)
                 .finish(),
-            Self::Physical { tag, key, value } => f
-                .debug_struct("Physical")
+            Self::TagReleaseProvisional { enclave, tag } => f
+                .debug_struct("TagReleaseProvisional")
+                .field("enclave", enclave)
+                .field("tag", tag)
+                .finish(),
+            Self::Logical { tag, key, value } => f
+                .debug_struct("Logical")
                 .field("tag", tag)
                 .field("key", key)
                 .field(
@@ -95,7 +109,16 @@ impl Debug for AsyncEvent {
                     &format!("Box<{}>", std::any::type_name_of_val(&**value)),
                 )
                 .finish(),
-            Self::Shutdown { tag } => f.debug_struct("Shutdown").field("tag", tag).finish(),
+            Self::Physical { time, key, value } => f
+                .debug_struct("Physical")
+                .field("time", time)
+                .field("key", key)
+                .field(
+                    "value",
+                    &format!("Box<{}>", std::any::type_name_of_val(&**value)),
+                )
+                .finish(),
+            Self::Shutdown { delay } => f.debug_struct("Shutdown").field("delay", delay).finish(),
         }
     }
 }
@@ -103,46 +126,57 @@ impl Debug for AsyncEvent {
 impl Display for AsyncEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AsyncEvent::Logical {
-                delay,
+            AsyncEvent::TagRelease { enclave, tag } => {
+                write!(f, "TagRelease[enclave={enclave:?},tag={tag:.3}]")
+            }
+            AsyncEvent::TagReleaseProvisional { enclave, tag } => {
+                write!(f, "TagReleaseProvisional[enclave={enclave:?},tag={tag:.3}]")
+            }
+            AsyncEvent::Logical { tag, key, value: _ } => {
+                write!(f, "Logical[tag={tag:.3},key={key:?},value=..]",)
+            }
+            AsyncEvent::Physical {
+                time,
                 key,
                 value: _,
             } => {
-                write!(
-                    f,
-                    "AsyncLogical[delay={delay},key={key:?},value=..]",
-                    delay = delay.as_seconds_f64()
-                )
+                write!(f, "Physical[tag={time:?},key={key:?},value=..]",)
             }
-            AsyncEvent::Physical { tag, key, value: _ } => {
-                write!(
-                    f,
-                    "AsyncPhysical[tag={tag},key={key:?},value=..]",
-                    tag = tag,
-                    key = key
-                )
-            }
-            AsyncEvent::Shutdown { tag } => {
-                write!(f, "AsyncShutdown[tag={tag}]")
+            AsyncEvent::Shutdown { delay } => {
+                write!(f, "Shutdown[delay={delay:.3}]")
             }
         }
     }
 }
 
 impl AsyncEvent {
+    /// Create a release event.
+    pub(crate) fn release(enclave: EnclaveKey, tag: Tag) -> Self {
+        AsyncEvent::TagRelease { enclave, tag }
+    }
+
+    /// Create a provisional release event.
+    pub(crate) fn provisional(enclave: EnclaveKey, tag: Tag) -> Self {
+        AsyncEvent::TagReleaseProvisional { enclave, tag }
+    }
+
     /// Create a logical event.
-    pub(crate) fn logical(key: ActionKey, delay: Duration, value: Box<dyn ReactorData>) -> Self {
-        AsyncEvent::Logical { delay, key, value }
+    pub(crate) fn logical(key: ActionKey, tag: Tag, value: Box<dyn ReactorData>) -> Self {
+        AsyncEvent::Logical { tag, key, value }
     }
 
     /// Create a physical event.
-    pub(crate) fn physical(key: ActionKey, tag: Tag, value: Box<dyn ReactorData>) -> Self {
-        AsyncEvent::Physical { tag, key, value }
+    pub(crate) fn physical(
+        key: ActionKey,
+        time: std::time::Instant,
+        value: Box<dyn ReactorData>,
+    ) -> Self {
+        AsyncEvent::Physical { time, key, value }
     }
 
     /// Create a shutdown event.
-    pub(crate) fn shutdown(tag: Tag) -> Self {
-        AsyncEvent::Shutdown { tag }
+    pub(crate) fn shutdown(delay: Duration) -> Self {
+        AsyncEvent::Shutdown { delay }
     }
 
     /// Get an iterator over the downstream reactions of this event.
@@ -151,6 +185,8 @@ impl AsyncEvent {
         reaction_graph: &'a ReactionGraph,
     ) -> impl Iterator<Item = LevelReactionKey> + 'a {
         match self {
+            AsyncEvent::TagRelease { .. } => [].iter().copied(),
+            AsyncEvent::TagReleaseProvisional { .. } => [].iter().copied(),
             AsyncEvent::Logical { key, .. } => reaction_graph.action_triggers[*key].iter().copied(),
             AsyncEvent::Physical { key, .. } => {
                 reaction_graph.action_triggers[*key].iter().copied()

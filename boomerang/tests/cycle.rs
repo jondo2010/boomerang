@@ -47,14 +47,14 @@ impl runtime::Trigger<()> for BReactionStartup<'_> {
 
 #[derive(Reactor)]
 #[reactor(
-    state = "()",
+    state = (),
     connection(from = "a.y", to = "b.x"),
     connection(from = "b.y", to = "a.x")
 )]
 struct CycleBuilder {
-    #[reactor(child = "()")]
+    #[reactor(child(state = ()))]
     a: ABuilder,
-    #[reactor(child = "()")]
+    #[reactor(child(state = ()))]
     b: BBuilder,
 }
 

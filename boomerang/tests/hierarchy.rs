@@ -88,25 +88,25 @@ struct GainContainerBuilder {
     inp: TypedPortKey<u32, Input>,
     out: TypedPortKey<u32, Output>,
     out2: TypedPortKey<u32, Output>,
-    #[reactor(child = "Gain::new(2)")]
+    #[reactor(child(state = Gain::new(2)))]
     gain: GainBuilder,
 }
 
 #[derive(Reactor)]
 #[reactor(
-    state = "()",
+    state = (),
     connection(from = "source.out", to = "container.inp"),
     connection(from = "container.out", to = "print.inp"),
     connection(from = "container.out2", to = "print2.inp")
 )]
 struct HierarchyBuilder {
-    #[reactor(child = "()")]
+    #[reactor(child(state = ()))]
     source: SourceBuilder,
-    #[reactor(child = "()")]
+    #[reactor(child(state = ()))]
     container: GainContainerBuilder,
-    #[reactor(child = "()")]
+    #[reactor(child(state = ()))]
     print: PrintBuilder,
-    #[reactor(child = "()")]
+    #[reactor(child(state = ()))]
     print2: PrintBuilder,
 }
 

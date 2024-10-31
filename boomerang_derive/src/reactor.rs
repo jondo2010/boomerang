@@ -45,6 +45,13 @@ pub struct ActionAttr {
     pub policy: Option<ActionAttrPolicy>,
 }
 
+#[derive(Clone, Debug, FromMeta, PartialEq, Eq)]
+pub struct ChildAttr {
+    pub state: syn::Expr,
+    #[darling(default)]
+    pub enclave: bool,
+}
+
 /// Attributes on fields in a Reactor
 #[derive(Clone, Debug, FromField, PartialEq, Eq)]
 #[darling(attributes(reactor), forward_attrs(doc, cfg, allow))]
@@ -56,7 +63,7 @@ pub struct FieldReceiver {
     pub timer: Option<TimerAttr>,
     pub port: Option<PortAttr>,
     pub action: Option<ActionAttr>,
-    pub child: Option<syn::Expr>,
+    pub child: Option<ChildAttr>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,6 +87,7 @@ pub enum ReactorFieldKind {
     },
     Child {
         state: syn::Expr,
+        enclave: bool,
     },
 }
 
@@ -101,8 +109,8 @@ impl ToTokens for ReactorField {
                 let min_delay = OptionalDuration(*min_delay);
                 quote! { let __inner = #min_delay; }
             },
-            ReactorFieldKind::Child { state } => {
-                quote! { let __inner = #state; }
+            ReactorFieldKind::Child { state, enclave } => {
+                quote! { let __inner = (#state, #enclave); }
             }
         });
 
@@ -162,14 +170,18 @@ impl TryFrom<FieldReceiver> for ReactorField {
                         kind: ReactorFieldKind::Port,
                     }),
 
-                    _ if matches!(value.child, Some(..)) => Ok(ReactorField {
-                        ident,
-                        name,
-                        ty,
-                        kind: ReactorFieldKind::Child {
-                            state: value.child.unwrap(),
-                        },
-                    }),
+                    _ if matches!(value.child, Some(..)) => {
+                        let child = value.child.unwrap();
+                        Ok(ReactorField {
+                            ident,
+                            name,
+                            ty,
+                            kind: ReactorFieldKind::Child {
+                                state: child.state,
+                                enclave: child.enclave,
+                            },
+                        })
+                    }
 
                     _ => Err(darling::Error::custom("Unrecognized field type").with_span(&ident)),
                 }
@@ -302,7 +314,7 @@ pub struct ReactorReceiver {
     state: syn::Expr,
     /// Reaction declarations
     #[darling(default, multiple, rename = "reaction")]
-    pub reactions: Vec<syn::Type>,
+    pub reactions: Vec<syn::Path>,
     /// Connection declarations
     #[darling(default, multiple, rename = "connection")]
     pub connections: Vec<ConnectionAttr>,
@@ -313,7 +325,7 @@ pub struct Reactor {
     state: syn::Expr,
     generics: syn::Generics,
     fields: Vec<ReactorField>,
-    reactions: Vec<syn::Type>,
+    reactions: Vec<syn::Path>,
     connections: Vec<Connection>,
 }
 
@@ -369,11 +381,12 @@ impl ToTokens for Reactor {
                     state: Self::State,
                     parent: Option<::boomerang::builder::BuilderReactorKey>,
                     bank_info: Option<::boomerang::runtime::BankInfo>,
+                    is_enclave: bool,
                     env: &'__builder mut ::boomerang::builder::EnvBuilder,
                 ) -> Result<Self, ::boomerang::builder::BuilderError> {
                     use ::boomerang::flatten_transposed::FlattenTransposedExt;
 
-                    let mut __builder = env.add_reactor(name, parent, bank_info, state);
+                    let mut __builder = env.add_reactor(name, parent, bank_info, state, is_enclave);
 
                     #(#fields)*
                     let mut __reactor = Self { #(#field_idents),* };
@@ -398,16 +411,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_child_attrs() {
+        let input = r#"
+#[derive(Reactor, Clone)]
+#[reactor(state = u32)]
+struct Count {
+    #[reactor(child(state = ChildState(0), enclave = true))]
+    child: Child,
+}"#;
+
+        let parsed = syn::parse_str(input).unwrap();
+        let receiver = ReactorReceiver::from_derive_input(&parsed).unwrap();
+        let reactor = Reactor::try_from(receiver).unwrap();
+        assert_eq!(reactor.fields.len(), 1);
+        assert_eq!(
+            reactor.fields[0],
+            ReactorField {
+                ident: parse_quote! {child},
+                name: parse_quote! {child},
+                ty: parse_quote! {Child},
+                kind: ReactorFieldKind::Child {
+                    state: parse_quote! {ChildState(0)},
+                    enclave: true,
+                }
+            }
+        );
+    }
+
+    #[test]
     fn test_connections() {
         let input = r#"
     #[derive(Reactor, Clone)]
     #[reactor(
-        state = "MyType::Foo::<f32>",
+        state = MyType::Foo::<f32>::default(),
         connection(from = "transposed(a.b)", to = "c.d"),
     )] struct Test {}"#;
         let parsed = syn::parse_str(input).unwrap();
         let receiver = ReactorReceiver::from_derive_input(&parsed).unwrap();
         let reactor = Reactor::try_from(receiver).unwrap();
+        assert_eq!(reactor.state, parse_quote! {MyType::Foo::<f32>::default()});
         assert_eq!(
             reactor.connections[0].from,
             PortDef {
@@ -433,7 +475,7 @@ mod tests {
     connection(from = "a.b", to = "c.d"),
     connection(from = "inp", to = "gain.inp"),
     connection(from = "gain.out", to = "out", after = "1 usec", physical = true),
-    reaction = "Reaction1",
+    reaction = Reaction1,
     reaction = "Reaction2<WIDTH>"
 )]
 struct Test {}"#;

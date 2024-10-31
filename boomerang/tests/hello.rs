@@ -44,7 +44,7 @@ impl runtime::Trigger<Hello> for ReactionT<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut Hello) {
         // Print the current time.
         state.previous_time = ctx.get_elapsed_logical_time();
-        self.a.schedule(ctx, (), Some(Duration::milliseconds(200))); // No payload.
+        ctx.schedule_action(&mut self.a, (), Some(Duration::milliseconds(200))); // No payload.
         println!(
             "{} Current time is {:?}",
             state.message, state.previous_time
@@ -89,18 +89,18 @@ impl Inside {
 #[derive(Reactor)]
 #[reactor(state = Inside)]
 struct InsideBuilder {
-    #[reactor(child = Hello::new(Duration::seconds(1), "Composite default message."))]
+    #[reactor(child(state = Hello::new(Duration::seconds(1), "Composite default message.")))]
     _third_instance: HelloBuilder,
 }
 
 #[derive(Reactor)]
 #[reactor(state = ())]
 struct MainBuilder {
-    #[reactor(child = Hello::new(Duration::seconds(4), "Hello from first."))]
+    #[reactor(child(state = Hello::new(Duration::seconds(4), "Hello from first.")))]
     _first_instance: HelloBuilder,
-    #[reactor(child = Hello::new(Duration::seconds(2), "Hello from second."))]
+    #[reactor(child(state = Hello::new(Duration::seconds(2), "Hello from second.")))]
     _second_instance: HelloBuilder,
-    #[reactor(child = Inside::new("Hello from composite."))]
+    #[reactor(child(state = Inside::new("Hello from composite.")))]
     _third_instance: InsideBuilder,
 }
 

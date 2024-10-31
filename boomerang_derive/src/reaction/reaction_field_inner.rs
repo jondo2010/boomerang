@@ -153,12 +153,12 @@ impl ToTokens for ReactionFieldInner {
             }
             Self::TriggerPort { port } => {
                 tokens.extend(quote! {
-                __reaction.add_port(reactor.#port.into(), 0, ::boomerang::builder::TriggerMode::TriggersOnly)?;
+                __reaction.add_port_relation(reactor.#port.into(), 0, ::boomerang::builder::TriggerMode::TriggersOnly)?;
             });
             }
             Self::TriggerAction { action } => {
                 tokens.extend(quote! {
-                __reaction.add_action(reactor.#action.into(), 0, ::boomerang::builder::TriggerMode::TriggersOnly)?;
+                __reaction.add_action_relation(reactor.#action.into(), 0, ::boomerang::builder::TriggerMode::TriggersOnly)?;
             });
             }
         }

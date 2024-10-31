@@ -88,14 +88,14 @@ impl runtime::Trigger<bool> for ReactionShutdown {
 
 #[derive(Reactor)]
 #[reactor(
-    state = "()",
+    state = (),
     connection(from = "nodes1.output", to = "transposed(nodes2.input)"),
     connection(from = "transposed(nodes2.output)", to = "nodes1.input")
 )]
 struct Main<const NUM_NODES: usize = 4> {
-    #[reactor(child = "false")]
+    #[reactor(child(state = false))]
     nodes1: [Node<NUM_NODES>; NUM_NODES],
-    #[reactor(child = "false")]
+    #[reactor(child(state = false))]
     nodes2: [Node<NUM_NODES>; NUM_NODES],
 }
 

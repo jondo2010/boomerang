@@ -53,7 +53,7 @@ impl runtime::Trigger<Ping> for ReactionInStart<'_> {
         // reset local state
         state.pings_left = state.count;
         // start execution
-        self.serve.schedule(ctx, (), None);
+        ctx.schedule_action(&mut self.serve, (), None);
     }
 }
 
@@ -82,7 +82,7 @@ impl runtime::Trigger<Ping> for ReactionInPong<'_> {
         if state.pings_left == 0 {
             *self.out_finished = Some(());
         } else {
-            self.serve.schedule(ctx, (), None);
+            ctx.schedule_action(&mut self.serve, (), None);
         }
     }
 }
@@ -126,10 +126,10 @@ struct Main {
     connection(from = "pong.out_pong", to = "ping.in_pong")
 )]
 struct MainBuilder {
-    #[reactor(child = "Ping::new(state.count)")]
+    #[reactor(child(state = Ping::new(state.count)))]
     ping: PingBuilder,
 
-    #[reactor(child = "Pong::default()")]
+    #[reactor(child(state = Pong::default()))]
     pong: PongBuilder,
 }
 
@@ -160,6 +160,11 @@ impl runtime::Trigger<Main> for ReactionDone<'_> {
 }
 
 fn bench(c: &mut Criterion) {
+    #[cfg(feature = "parallel")]
+    {
+        eprintln!("Parallel runtime is enabled, expect poor performance.");
+    }
+
     let mut group = c.benchmark_group("ping_pong");
 
     for count in [100, 10_000, 1_000_000].into_iter() {
@@ -169,28 +174,37 @@ fn bench(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     let mut env_builder = EnvBuilder::new();
-                    let _reactor =
-                        MainBuilder::build("main", Main { count }, None, None, &mut env_builder)
-                            .unwrap();
-                    let (env, triggers, _) = env_builder.into_runtime_parts().unwrap();
-                    (env, triggers)
-                },
-                |(env, triggers)| {
+                    let _reactor = MainBuilder::build(
+                        "main",
+                        Main { count },
+                        None,
+                        None,
+                        false,
+                        &mut env_builder,
+                    )
+                    .unwrap();
+                    let BuilderRuntimeParts {
+                        enclaves,
+                        aliases: _,
+                    } = env_builder.into_runtime_parts().unwrap();
+                    let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
                     let config = runtime::Config::default().with_fast_forward(true);
-                    let mut sched = runtime::Scheduler::new(env, triggers, config);
+                    runtime::Scheduler::new(enclave_key, enclave, config)
+                },
+                |mut sched| {
                     sched.event_loop();
 
                     // validate the end state
                     let env = sched.into_env();
                     let ping = env
-                        .find_reactor_by_name("ping")
+                        .find_reactor_by_name("main::ping")
                         .and_then(|reactor| reactor.get_state::<Ping>())
                         .unwrap();
                     assert_eq!(ping.count, count);
                     assert_eq!(ping.pings_left, 0);
 
                     let pong = env
-                        .find_reactor_by_name("pong")
+                        .find_reactor_by_name("main::pong")
                         .and_then(|reactor| reactor.get_state::<Pong>())
                         .unwrap();
                     assert_eq!(pong.count, count);

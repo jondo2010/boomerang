@@ -1,7 +1,6 @@
-use crossbeam_channel::Sender;
-
 use crate::{
-    event::AsyncEvent, keepalive, ActionKey, BankInfo, Duration, ReactionGraph, ReactionKey, Tag,
+    event::AsyncEvent, keepalive, ActionCommon, ActionKey, ActionRef, BankInfo, Duration,
+    EnclaveKey, ReactionGraph, ReactionKey, ReactorData, Tag,
 };
 
 /// Result from a reaction trigger
@@ -16,6 +15,8 @@ pub(crate) struct TriggerRes {
 /// Scheduler context passed into reactor functions.
 #[derive(Debug)]
 pub struct Context {
+    /// The EnclaveId of this context
+    enclave_key: EnclaveKey,
     /// Physical time the Scheduler was started
     pub(crate) start_time: std::time::Instant,
     /// Logical time of the currently executing epoch
@@ -24,7 +25,7 @@ pub struct Context {
     pub(crate) bank_info: Option<BankInfo>,
 
     /// Channel for asynchronous events
-    pub(crate) async_tx: Sender<AsyncEvent>,
+    pub(crate) async_tx: crate::Sender<AsyncEvent>,
     /// Shutdown channel
     pub(crate) shutdown_rx: keepalive::Receiver,
 
@@ -32,26 +33,75 @@ pub struct Context {
     pub(crate) trigger_res: TriggerRes,
 }
 
-pub trait ContextCommon {
-    /// Get the start time of the scheduler
-    fn get_start_time(&self) -> std::time::Instant;
+/// Common methods for both `Context` and `SendContext`
+pub trait CommonContext {
+    /// Get this Enclave ID
+    fn enclave_id(&self) -> EnclaveKey;
 
     /// Get the current physical time
     fn get_physical_time(&self) -> std::time::Instant {
         std::time::Instant::now()
     }
 
+    /// Has the scheduler already been shutdown?
+    fn is_shutdown(&self) -> bool;
+
+    /// Schedule a shutdown event at some future time.
     fn schedule_shutdown(&mut self, offset: Option<Duration>);
+
+    /// Schedule an asynchronous event
+    ///
+    /// Returns true if the event was successfully scheduled, false if the channel was disconnected.
+    fn schedule_async(&self, event: AsyncEvent) -> bool;
+
+    /// Try to schedule an asynchronous event without blocking
+    ///
+    /// Returns `Some(true)` if the event was successfully scheduled, `Some(false)` if the channel was disconnected, and `None` if the channel would have blocked.
+    fn try_schedule_async(&self, event: AsyncEvent) -> Option<bool>;
+
+    /// Schedule a new value for this action asynchronously
+    ///
+    /// Returns true if the event was successfully scheduled, false if the channel was disconnected.
+    #[tracing::instrument(skip(self, action, value, delay), fields(logical = action.is_logical()))]
+    fn schedule_action_async<T: ReactorData>(
+        &self,
+        action: &impl ActionCommon<T>,
+        value: T,
+        delay: Option<Duration>,
+    ) -> bool {
+        let tag_delay = action.min_delay() + delay.unwrap_or_default();
+        let value = Box::new(value) as Box<dyn ReactorData>;
+
+        let event = if action.is_logical() {
+            // Logical actions are scheduled at the current logical time + tag_delay
+            //tracing::info!(tag_delay = %tag_delay, key = ?action.key(), "Sched");
+            //AsyncEvent::logical(action.key(), tag_delay, value)
+            todo!("Logical actions are not supported here");
+        } else {
+            // Physical actions are scheduled at the current physical time + tag_delay
+            let time = self.get_physical_time() + tag_delay;
+            tracing::info!(time = ?time, key = ?action.key(), "Sched");
+            AsyncEvent::physical(action.key(), time, value)
+        };
+
+        self.schedule_async(event)
+    }
+
+    fn release_provisional(&self, enclave: EnclaveKey, tag: Tag) -> bool {
+        self.schedule_async(AsyncEvent::provisional(enclave, tag))
+    }
 }
 
 impl Context {
     pub(crate) fn new(
+        enclave_key: EnclaveKey,
         start_time: std::time::Instant,
         bank_info: Option<BankInfo>,
-        async_tx: Sender<AsyncEvent>,
+        async_tx: crate::Sender<AsyncEvent>,
         shutdown_rx: keepalive::Receiver,
     ) -> Self {
         Self {
+            enclave_key,
             start_time,
             tag: Tag::NEVER,
             bank_info,
@@ -68,6 +118,11 @@ impl Context {
         self.tag = tag;
         self.trigger_res.scheduled_actions.clear();
         self.trigger_res.scheduled_shutdown = None;
+    }
+
+    /// Get the physical start time of the scheduler
+    pub fn get_start_time(&self) -> std::time::Instant {
+        self.start_time
     }
 
     /// Get the bank index for a multi-bank reactor
@@ -94,20 +149,64 @@ impl Context {
         self.tag.offset()
     }
 
+    pub fn get_microstep(&self) -> usize {
+        self.tag.microstep()
+    }
+
     /// Create a new SendContext that can be shared across threads.
     /// This is used to schedule asynchronous events.
     pub fn make_send_context(&self) -> SendContext {
         SendContext {
-            start_time: self.start_time,
+            enclave_key: self.enclave_key,
             async_tx: self.async_tx.clone(),
             shutdown_rx: self.shutdown_rx.clone(),
         }
     }
+
+    /// Get value for an action at the current logical time
+    pub fn get_action_value<'a, T: ReactorData>(
+        &self,
+        action: &'a mut ActionRef<T>,
+    ) -> Option<&'a T> {
+        action.get_value_at(self.tag)
+    }
+
+    /// Schedule a new value for this action
+    pub fn schedule_action<T: ReactorData>(
+        &mut self,
+        action: &mut ActionRef<T>,
+        value: T,
+        delay: Option<Duration>,
+    ) {
+        let tag_delay = action.min_delay() + delay.unwrap_or_default();
+
+        let new_tag = if action.is_logical() {
+            // Logical actions are scheduled at the current logical time + tag_delay
+            self.tag.delay(tag_delay)
+        } else {
+            // Physical actions are scheduled at the current physical time + tag_delay
+            Tag::from_physical_time(self.get_start_time(), self.get_physical_time())
+                .delay(tag_delay)
+        };
+
+        // Push the new value into the store
+        action.set_value(new_tag, value);
+
+        // Schedule the action to trigger at the new tag
+        self.trigger_res
+            .scheduled_actions
+            .push((action.key(), new_tag));
+    }
 }
 
-impl ContextCommon for Context {
-    fn get_start_time(&self) -> std::time::Instant {
-        self.start_time
+impl CommonContext for Context {
+    fn enclave_id(&self) -> EnclaveKey {
+        self.enclave_key
+    }
+
+    /// Has the scheduler already been shutdown?
+    fn is_shutdown(&self) -> bool {
+        self.shutdown_rx.is_shutdwon()
     }
 
     #[tracing::instrument]
@@ -119,44 +218,76 @@ impl ContextCommon for Context {
             .scheduled_shutdown
             .map_or(Some(tag), |prev| Some(prev.min(tag)));
     }
-}
 
-/// SendContext can be shared across threads and allows asynchronous events to be scheduled.
-pub struct SendContext {
-    /// Physical time the Scheduler was started
-    pub start_time: std::time::Instant,
-    /// Channel for asynchronous events
-    pub(crate) async_tx: Sender<AsyncEvent>,
-    /// Shutdown channel
-    shutdown_rx: keepalive::Receiver,
-}
+    /// Schedule an asynchronous event
+    #[tracing::instrument(skip(self), fields(enclave = %self.enclave_id(), event = %event))]
+    fn schedule_async(&self, event: AsyncEvent) -> bool {
+        if self.shutdown_rx.is_shutdwon() {
+            return false;
+        }
+        self.async_tx.send(event).is_ok()
+    }
 
-impl SendContext {
-    /// Has the scheduler already been shutdown?
-    pub fn is_shutdown(&self) -> bool {
-        self.shutdown_rx.is_shutdwon()
+    fn try_schedule_async(&self, event: AsyncEvent) -> Option<bool> {
+        if self.is_shutdown() {
+            return Some(false);
+        }
+
+        self.async_tx.try_send(event).map(|_| true).ok()
     }
 }
 
-impl ContextCommon for SendContext {
-    fn get_start_time(&self) -> std::time::Instant {
-        self.start_time
+/// SendContext can be shared across threads and allows asynchronous events to be scheduled.
+#[derive(Debug)]
+pub struct SendContext {
+    /// Enclave ID for this context
+    pub(crate) enclave_key: EnclaveKey,
+    /// Channel for asynchronous events
+    pub(crate) async_tx: crate::Sender<AsyncEvent>,
+    /// Shutdown channel
+    pub(crate) shutdown_rx: keepalive::Receiver,
+}
+
+impl CommonContext for SendContext {
+    fn enclave_id(&self) -> EnclaveKey {
+        self.enclave_key
+    }
+
+    /// Has the scheduler already been shutdown?
+    fn is_shutdown(&self) -> bool {
+        self.shutdown_rx.is_shutdwon()
     }
 
     /// Schedule a shutdown event at some future time.
     fn schedule_shutdown(&mut self, offset: Option<Duration>) {
-        let tag = Tag::from_physical_time(self.start_time, std::time::Instant::now())
-            .delay(offset.unwrap_or_default());
-        let event = AsyncEvent::shutdown(tag);
+        let event = AsyncEvent::shutdown(offset.unwrap_or_default());
         self.async_tx.send(event).unwrap();
+    }
+
+    /// Send an asynchronous event to the scheduler.
+    #[tracing::instrument(skip(self), fields(enclave = %self.enclave_id(), event = %event))]
+    fn schedule_async(&self, event: AsyncEvent) -> bool {
+        if self.is_shutdown() {
+            return false;
+        }
+        self.async_tx.send(event).is_ok()
+    }
+
+    fn try_schedule_async(&self, event: AsyncEvent) -> Option<bool> {
+        if self.is_shutdown() {
+            return Some(false);
+        }
+
+        self.async_tx.try_send(event).map(|_| true).ok()
     }
 }
 
 /// Build contexts for each reaction
 pub fn build_reaction_contexts(
+    enclave_key: EnclaveKey,
     reaction_graph: &ReactionGraph,
     start_time: std::time::Instant,
-    event_tx: crossbeam_channel::Sender<AsyncEvent>,
+    event_tx: crate::Sender<AsyncEvent>,
     shutdown_rx: keepalive::Receiver,
 ) -> tinymap::TinySecondaryMap<ReactionKey, Context> {
     reaction_graph
@@ -165,6 +296,7 @@ pub fn build_reaction_contexts(
         .map(|(reaction_key, reactor_key)| {
             let bank_info = &reaction_graph.reactor_bank_infos[*reactor_key];
             let ctx = Context::new(
+                enclave_key,
                 start_time,
                 bank_info.clone(),
                 event_tx.clone(),

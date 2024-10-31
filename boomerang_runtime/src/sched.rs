@@ -1,13 +1,16 @@
-use crossbeam_channel::{Receiver, RecvTimeoutError};
 use std::{collections::BinaryHeap, pin::Pin};
+
+use crossbeam_channel::RecvTimeoutError;
 
 use crate::{
     build_reaction_contexts,
+    env::{Enclave, EnclaveKey},
     event::{AsyncEvent, ScheduledEvent},
     keepalive,
     key_set::KeySetView,
     store::Store,
-    Duration, Env, Level, ReactionGraph, ReactionKey, ReactionSet, ReactionSetLimits, Tag,
+    CommonContext, Duration, Env, Level, ReactionGraph, ReactionKey, ReactionSet,
+    ReactionSetLimits, SendContext, Tag,
 };
 
 #[derive(Debug)]
@@ -36,14 +39,47 @@ impl EventQueue {
     where
         I: IntoIterator<Item = (Level, ReactionKey)>,
     {
-        let mut reaction_set = self.next_reaction_set();
-        reaction_set.extend_above(reactions);
-        let event = ScheduledEvent {
-            tag,
-            reactions: reaction_set,
-            terminal,
-        };
-        self.event_queue.push(event);
+        if self.peek_tag() == Some(tag) {
+            // If the tag is the same as the next event, merge the reactions
+            let mut event = self.event_queue.peek_mut().unwrap();
+            event.reactions.extend_above(reactions);
+            event.terminal = event.terminal || terminal;
+        } else {
+            // Otherwise, push a new event
+            let mut reaction_set = self.next_reaction_set();
+            reaction_set.extend_above(reactions);
+            let event = ScheduledEvent {
+                tag,
+                reactions: reaction_set,
+                terminal,
+            };
+            self.event_queue.push(event);
+        }
+    }
+
+    /// Pop the next event from the event queue.
+    ///
+    /// Any subsequent events with the same tag are merged into the returned event.
+    fn pop_next_event(&mut self) -> Option<ScheduledEvent> {
+        if let Some(mut event) = self.event_queue.pop() {
+            // Merge events with the same tag
+            while let Some(next_event) = self.event_queue.peek() {
+                if next_event.tag == event.tag {
+                    let next_event = self.event_queue.pop().unwrap();
+                    event.reactions.merge(&next_event.reactions);
+                    event.terminal = event.terminal || next_event.terminal;
+
+                    // Return the ReactionSet to the free pool
+                    self.free_reaction_sets.push(next_event.reactions);
+                } else {
+                    break;
+                }
+            }
+
+            return Some(event);
+        }
+
+        None
     }
 
     /// Get a free [`ReactionSet`] or create a new one if none are available.
@@ -71,14 +107,14 @@ impl EventQueue {
             );
             let event = self.event_queue.peek().unwrap();
             tracing::warn!(
-                "---- The first future event has timestamp {:?} after start time.",
+                "---- The first future event has timestamp {} after start time.",
                 event.tag.offset()
             );
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Config {
     /// Whether to skip wall-clock synchronization (execute as fast as possible)
     pub fast_forward: bool,
@@ -130,7 +166,135 @@ impl Config {
 }
 
 #[derive(Debug)]
+struct LogicalTimeBarrier {
+    /// The last released tag
+    released_tag: Tag,
+    provisional_tag: Tag,
+    /// The send context for the upstream enclave
+    upstream_ctx: SendContext,
+    /// Optional delay for the upstream connection
+    upstream_delay: Option<Duration>,
+}
+
+impl LogicalTimeBarrier {
+    #[tracing::instrument(skip(self), fields(tag = %tag, released = %self.released_tag))]
+    pub fn release_tag(&mut self, tag: Tag) {
+        tracing::trace!("Release");
+
+        if tag < self.released_tag {
+            tracing::warn!(
+                "Cannot release a tag ({tag}) earlier than the last released tag {}",
+                self.released_tag
+            );
+        }
+        self.released_tag = tag;
+        // Reset the provisional tag
+        self.provisional_tag = Tag::NEVER;
+    }
+
+    pub fn release_tag_provisional(&mut self, tag: Tag) {
+        if tag <= self.provisional_tag {
+            self.release_tag(tag);
+        }
+    }
+
+    #[inline]
+    /// Try to acquire the given tag without blocking.
+    pub fn try_acquire_tag(&mut self, tag: Tag) -> bool {
+        tag <= self.released_tag
+    }
+
+    /// Acquire the given tag, blocking until it is released, or an [`AsyncEvent`] is received.
+    ///
+    /// If an async event is received, it is returned to the caller. A return value of `None` indicates that the tag has been released.
+    #[inline]
+    #[tracing::instrument(skip(self, tag, this_enclave, event_rx), fields(tag = %tag))]
+    pub fn acquire_tag(
+        &mut self,
+        tag: Tag,
+        this_enclave: EnclaveKey,
+        event_rx: &crate::Receiver<AsyncEvent>,
+    ) -> Option<AsyncEvent> {
+        // Since this is a delayed connection, we can go back in time and need to
+        // acquire the latest upstream tag that can create an event at the given
+        // tag.
+        let upstream_tag = if let Some(delay) = self.upstream_delay {
+            tag.pre(delay)
+        } else {
+            tag
+        };
+
+        tracing::trace!(upstream_tag = %upstream_tag, "Try acquire");
+        if self.try_acquire_tag(upstream_tag) {
+            return None;
+        }
+
+        tracing::trace!(%upstream_tag, "Releasing provisional tag");
+        self.provisional_tag = upstream_tag;
+        if !self
+            .upstream_ctx
+            .release_provisional(this_enclave, upstream_tag)
+        {
+            // The upstream has terminated try to return a queued event here. If the upstream terminated, we probably
+            // have an event queued from it. This prevents pre-mature termination of this enclave.
+            tracing::warn!("Upstream has terminated");
+            return event_rx.try_recv().ok();
+        }
+
+        // Block until the tag is released
+        tracing::trace!("Blocking");
+        event_rx.recv().ok()
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct Stats {
+    /// Number of `tag`s processed
+    processed_tags: usize,
+    /// Number of reactions processed
+    processed_reactions: usize,
+    /// Number of scheduled async events
+    processed_events: usize,
+    /// Number of ports set
+    set_ports: usize,
+    /// Number of scheduled, sync actions
+    scheduled_actions: usize,
+}
+
+impl Stats {
+    pub fn increment_processed_tags(&mut self) {
+        self.processed_tags += 1;
+    }
+    pub fn increment_processed_reactions(&mut self, count: usize) {
+        self.processed_reactions += count;
+    }
+    pub fn increment_processed_events(&mut self) {
+        self.processed_events += 1;
+    }
+    pub fn increment_set_ports(&mut self) {
+        self.set_ports += 1;
+    }
+    pub fn increment_scheduled_actions(&mut self, count: usize) {
+        self.scheduled_actions += count;
+    }
+}
+
+impl std::fmt::Display for Stats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Stats")
+            .field("Processed tags", &self.processed_tags)
+            .field("Processed reactions", &self.processed_reactions)
+            .field("Processed events", &self.processed_events)
+            .field("Set ports", &self.set_ports)
+            .field("Scheduled actions", &self.scheduled_actions)
+            .finish()
+    }
+}
+
+#[derive(Debug)]
 pub struct Scheduler {
+    /// The enclave key
+    key: EnclaveKey,
     /// The scheduler config
     config: Config,
     /// The reactor runtime store
@@ -138,15 +302,23 @@ pub struct Scheduler {
     /// The reaction graph containing all static dependency and relationship information
     reaction_graph: ReactionGraph,
     /// Asynchronous events receiver
-    event_rx: Receiver<AsyncEvent>,
+    event_rx: crate::Receiver<AsyncEvent>,
     /// Event queue
     events: EventQueue,
-    /// Initial wall-clock time.
+    /// Initial physical time.
     start_time: std::time::Instant,
+    /// Current tag
+    current_tag: Tag,
     /// A shutdown has been scheduled at this time.
     shutdown_tag: Option<Tag>,
     /// Shutdown channel
     shutdown_tx: keepalive::Sender,
+    /// Logical time barriers for each upstream enclave
+    upstream_enclaves: tinymap::TinySecondaryMap<EnclaveKey, LogicalTimeBarrier>,
+    /// The senders for downstream enclaves
+    downstream_enclaves: tinymap::TinySecondaryMap<EnclaveKey, SendContext>,
+    /// Runtime statistics
+    stats: Stats,
 }
 
 impl Scheduler {
@@ -158,55 +330,121 @@ impl Scheduler {
     ///
     /// * `env` - The environment containing all the runtime data structures.
     /// * `reaction_graph` - The reaction graph containing all static dependency and relationship information.
-    pub fn new(env: Env, reaction_graph: ReactionGraph, config: Config) -> Self {
-        let (event_tx, event_rx) = crossbeam_channel::bounded(config.physical_event_q_size);
-        let (shutdown_tx, shutdown_rx) = keepalive::channel();
+    pub fn new(key: EnclaveKey, enclave: Enclave, config: Config) -> Self {
+        let Enclave {
+            env,
+            graph,
+            event_tx,
+            event_rx,
+            downstream_enclaves,
+            upstream_enclaves,
+            shutdown_tx,
+            shutdown_rx,
+        } = enclave;
+
         let start_time = std::time::Instant::now();
 
-        if let Some(timeout) = config.timeout {
-            let shutdown_tag = Tag::new(timeout, 0);
-            let shutdown_event = AsyncEvent::Shutdown { tag: shutdown_tag };
-            event_tx.send(shutdown_event).unwrap();
-        }
+        // Find the maximum level in the reaction graph
+        let max_level = graph
+            .action_triggers
+            .values()
+            .chain(graph.port_triggers.values())
+            .flat_map(|level_reactions| level_reactions.iter().map(|(level, _)| level))
+            .max()
+            .copied()
+            .unwrap_or_default();
+
+        let reaction_set_limits = ReactionSetLimits {
+            max_level,
+            num_keys: env.reactions.len(),
+        };
+        let events = EventQueue::new(reaction_set_limits);
 
         // Build contexts for each reaction
-        let contexts = build_reaction_contexts(&reaction_graph, start_time, event_tx, shutdown_rx);
+        let contexts = build_reaction_contexts(key, &graph, start_time, event_tx, shutdown_rx);
 
-        let store = Store::new(env, contexts, &reaction_graph);
-        let events = EventQueue::new(reaction_graph.reaction_set_limits.clone());
+        let store = Store::new(env, contexts, &graph);
+
+        let upstream_enclaves = upstream_enclaves
+            .into_iter()
+            .map(|(enclave_key, upstream_ref)| {
+                (
+                    enclave_key,
+                    LogicalTimeBarrier {
+                        released_tag: Tag::NEVER,
+                        provisional_tag: Tag::NEVER,
+                        upstream_ctx: upstream_ref.send_ctx,
+                        upstream_delay: upstream_ref.delay,
+                    },
+                )
+            })
+            .collect();
+
+        let downstream_enclaves = downstream_enclaves
+            .into_iter()
+            .map(|(enclave_key, downstream_ref)| (enclave_key, downstream_ref.send_ctx))
+            .collect();
+
         Self {
+            key,
             config,
             store,
-            reaction_graph,
+            reaction_graph: graph,
             event_rx,
             events,
             start_time,
+            current_tag: Tag::NEVER,
             shutdown_tag: None,
             shutdown_tx,
+            upstream_enclaves,
+            downstream_enclaves,
+            stats: Stats::default(),
         }
     }
 
     /// Handle an asynchronous event from the event queue
-    fn handle_async_event(
-        event: AsyncEvent,
-        tag: Tag,
-        events: &mut EventQueue,
-        store: &mut Pin<Box<Store>>,
-        reaction_graph: &ReactionGraph,
-    ) {
-        let reactions = event.downstream_reactions(reaction_graph);
+    #[tracing::instrument(skip(self, ), fields(event = %event))]
+    fn handle_async_event(&mut self, event: AsyncEvent) {
+        self.stats.increment_processed_events();
+        tracing::trace!("Handling");
+        let reactions = event.downstream_reactions(&self.reaction_graph);
         match event {
-            AsyncEvent::Logical { delay, key, value } => {
-                let tag = tag.delay(delay);
-                events.push_event(tag, reactions, false);
-                store.push_action_value(key, tag, value);
+            AsyncEvent::TagRelease { enclave, tag } => {
+                self.upstream_enclaves
+                    .get_mut(enclave)
+                    .expect("Unknown upstream enclave")
+                    .release_tag(tag);
             }
-            AsyncEvent::Physical { tag, key, value } => {
-                events.push_event(tag, reactions, false);
-                store.push_action_value(key, tag, value);
+            AsyncEvent::TagReleaseProvisional { enclave, tag } => {
+                if tag <= self.current_tag {
+                    if tag < self.current_tag {
+                        tracing::warn!(tag = %tag, "Ignoring empty event in the past");
+                    }
+                    return;
+                }
+                // TagReleaseProvisional events are coming from downstream enclaves. If this enclave is also an upstream
+                // (cycle), then also release it provisionally.
+                if let Some(barrier) = self.upstream_enclaves.get_mut(enclave) {
+                    barrier.release_tag_provisional(tag);
+                }
+                self.events.push_event(tag, reactions, false);
             }
-            AsyncEvent::Shutdown { tag } => {
-                events.push_event(tag, reactions, true);
+            AsyncEvent::Logical { tag, key, value } => {
+                if tag <= self.current_tag {
+                    tracing::warn!(tag = %tag, "Ignoring empty event in the past");
+                    return;
+                }
+                self.events.push_event(tag, reactions, false);
+                self.store.push_action_value(key, tag, value);
+            }
+            AsyncEvent::Physical { time, key, value } => {
+                let tag = Tag::from_physical_time(self.start_time, time);
+                self.events.push_event(tag, reactions, false);
+                self.store.push_action_value(key, tag, value);
+            }
+            AsyncEvent::Shutdown { delay } => {
+                self.events
+                    .push_event(self.current_tag.delay(delay), reactions, true);
                 //self.shutdown_tag = Some(tag);
             }
         }
@@ -214,25 +452,37 @@ impl Scheduler {
 
     /// Execute startup of the Scheduler.
     #[tracing::instrument(skip(self))]
-    fn startup(&mut self) -> Tag {
-        //#[cfg(feature = "parallel")]
-        //rayon::ThreadPoolBuilder::new()
-        //    .num_threads(4)
-        //    .build_global()
-        //    .unwrap();
+    pub fn startup(&mut self) {
+        let tag = Tag::ZERO;
 
-        self.start_time = std::time::Instant::now();
+        // Set up the startup reactions
+        for (delay, level_reactions) in &self.reaction_graph.startup_reactions {
+            let t = Tag::new(*delay, 0);
+            self.events
+                .push_event(t, level_reactions.iter().inspect(|(lvl, reaction_key)| {
+                    tracing::trace!(level = %lvl, reaction = %reaction_key, tag = %t, "Startup reaction");
+                }).copied(), false);
+        }
 
-        let tag = Tag::new(Duration::ZERO, 0);
-
-        // For all Timers, pump later events onto the queue and create an initial ReactionSet to process.
-        let mut reaction_set = self.events.next_reaction_set();
-        reaction_set.extend_above(self.reaction_graph.startup_reactions.iter().copied());
+        // Schedule a shutdown event if a timeout is set
+        if let Some(timeout) = self.config.timeout {
+            let t = tag.delay(timeout);
+            tracing::info!(tag = %t, "Scheduling shutdown");
+            self.events.push_event(
+                t,
+                self.reaction_graph.shutdown_reactions.iter().copied(),
+                true,
+            );
+        }
 
         tracing::info!(tag = %tag, "Starting the execution.");
-        self.process_tag(tag, reaction_set.view());
 
-        tag
+        self.current_tag = tag.decrement();
+
+        // Release the current tag to downstream reactors
+        self.release_tag_downstream(self.current_tag);
+
+        self.start_time = std::time::Instant::now();
     }
 
     /// Final shutdown of the Scheduler. The last tag has already been processed.
@@ -240,24 +490,20 @@ impl Scheduler {
     fn shutdown(&mut self) {
         tracing::info!("Shutting down.");
 
-        // Signal to any waiting threads that the scheduler is shutting down.
-        self.shutdown_tx.shutdown();
         self.events.shutdown();
 
-        tracing::info!(
-            "---- Elapsed logical time: {:?}",
-            self.shutdown_tag.unwrap().offset()
-        );
+        let logical_elapsed = self.shutdown_tag.unwrap().offset();
+        tracing::info!("---- Elapsed logical time: {logical_elapsed}",);
         // If physical_start_time is 0, then execution didn't get far enough along to initialize this.
         let physical_elapsed = std::time::Instant::now() - self.start_time;
         tracing::info!("---- Elapsed physical time: {physical_elapsed:?}");
 
-        tracing::info!("Scheduler has been shut down.");
+        tracing::info!(stats = %self.stats, "Scheduler has been shut down.");
     }
 
     /// Try to receive an asynchronous event
     #[tracing::instrument(skip(self))]
-    fn receive_event(&mut self) -> Option<AsyncEvent> {
+    fn receive_event_async(&mut self) -> Option<AsyncEvent> {
         if let Some(shutdown) = self.shutdown_tag {
             let abs = shutdown.to_logical_time(self.start_time);
             if let Some(timeout) = abs.checked_duration_since(std::time::Instant::now()) {
@@ -275,122 +521,134 @@ impl Scheduler {
         }
     }
 
+    /// Release the current tag to downstream reactors
+    #[tracing::instrument(skip(self, current_tag), fields(tag = %current_tag))]
+    fn release_tag_downstream(&self, current_tag: Tag) {
+        for (key, ctx) in self.downstream_enclaves.iter() {
+            let event = AsyncEvent::release(self.key, current_tag);
+            tracing::trace!(downstream = %key, event = %event, "Releasing downstream");
+            if !ctx.schedule_async(event) && self.shutdown_tag.is_none() {
+                tracing::warn!(
+                    "Failed to send tag downstream, downstream has unexpectedly terminated."
+                );
+            }
+        }
+    }
+
+    #[tracing::instrument(skip(self), fields(tag = %self.current_tag))]
+    pub fn next(&mut self) -> bool {
+        // Pump the event queue
+        while let Ok(async_event) = self.event_rx.try_recv() {
+            self.handle_async_event(async_event);
+        }
+
+        if let Some(next_tag) = self.events.peek_tag() {
+            tracing::trace!(next_tag = %next_tag, "Trying next tag");
+
+            // Wait until all upstream barriers are released
+            for (_upstream_enclave_key, barrier) in self.upstream_enclaves.iter_mut() {
+                if let Some(async_event) = barrier.acquire_tag(next_tag, self.key, &self.event_rx) {
+                    self.handle_async_event(async_event);
+                    // Returned early due to async event
+                    return true;
+                }
+            }
+
+            if !self.config.fast_forward {
+                let target = next_tag.to_logical_time(self.start_time);
+                if self.synchronize_wall_clock(target) {
+                    // Woken up by async event
+                    return true;
+                }
+            }
+
+            //if let Some(mut event) = self.events.pop_next_event() {
+            let mut event = self.events.pop_next_event().unwrap();
+
+            tracing::debug!(event = %event, "Processing");
+
+            if event.terminal {
+                // Signal to any waiting threads that the scheduler is shutting down.
+                self.shutdown_tx.shutdown();
+            }
+
+            self.process_tag(event.tag, event.reactions.view());
+
+            // Return the ReactionSet to the free pool
+            self.events.free_reaction_sets.push(event.reactions);
+
+            self.current_tag = event.tag;
+
+            // Release the current tag to downstream reactors
+            self.release_tag_downstream(self.current_tag);
+
+            self.stats.increment_processed_tags();
+
+            if event.terminal {
+                // Break out of the event loop;
+                self.shutdown_tag = Some(self.current_tag);
+                return false;
+            }
+        } else if let Some(async_event) = self.receive_event_async() {
+            self.handle_async_event(async_event);
+        } else {
+            tracing::debug!("No more events in queue. -> Terminate!");
+            // Shutdown event will be processed at the next event loop iteration
+            self.shutdown_tag = Some(self.current_tag);
+            self.events.push_event(
+                self.current_tag,
+                self.reaction_graph.shutdown_reactions.iter().copied(),
+                true,
+            );
+        }
+
+        true
+    }
+
     #[tracing::instrument(skip(self))]
     pub fn event_loop(&mut self) {
-        let mut current_tag = self.startup();
+        self.startup();
 
-        loop {
-            // Push pending events into the queue
-            for async_event in self.event_rx.try_iter() {
-                Self::handle_async_event(
-                    async_event,
-                    current_tag,
-                    &mut self.events,
-                    &mut self.store,
-                    &self.reaction_graph,
-                );
-            }
-
-            if let Some(next_tag) = self.events.peek_tag() {
-                if !self.config.fast_forward {
-                    let target = next_tag.to_logical_time(self.start_time);
-                    if self.synchronize_wall_clock(target, current_tag) {
-                        // Woken up by async event
-                        continue;
-                    }
-                }
-            }
-
-            if let Some(mut event) = self.events.event_queue.pop() {
-                tracing::debug!(event = %event, "Handling event");
-
-                if Some(event.tag) == self.events.peek_tag() {
-                    // The next event is at the same time as the one we are processing
-                    // This can happen if the event we are processing triggers a new event at the same time
-                    // We need to process all events at the same time before moving on
-                    //while let Some(next_event) = self.events.event_queue.pop() {
-                    //    if next_event.tag == event.tag {
-                    //        event.reactions.extend_above(next_event.reactions.view());
-                    //    } else {
-                    //        self.events.event_queue.push(next_event);
-                    //        break;
-                    //    }
-                    //}
-                    tracing::warn!("Next event is at the same time as the one we are processing");
-                }
-
-                self.process_tag(event.tag, event.reactions.view());
-
-                // Return the ReactionSet to the free pool
-                self.events.free_reaction_sets.push(event.reactions);
-
-                current_tag = event.tag;
-
-                if event.terminal {
-                    // Break out of the event loop;
-                    self.shutdown_tag = Some(current_tag);
-                    break;
-                }
-            } else if let Some(async_event) = self.receive_event() {
-                Self::handle_async_event(
-                    async_event,
-                    current_tag,
-                    &mut self.events,
-                    &mut self.store,
-                    &self.reaction_graph,
-                );
-            } else {
-                tracing::debug!("No more events in queue. -> Terminate!");
-                // Shutdown event will be processed at the next event loop iteration
-                let tag = Tag::ZERO;
-                self.shutdown_tag = Some(tag);
-                self.events.push_event(
-                    tag,
-                    self.reaction_graph.shutdown_reactions.iter().copied(),
-                    true,
-                );
-            }
-        } // loop
+        while self.next() {}
 
         self.shutdown();
     }
 
     // Wait until the wall-clock time is reached
-    #[tracing::instrument(skip(self), fields(target = ?target))]
-    fn synchronize_wall_clock(&mut self, target: std::time::Instant, current_tag: Tag) -> bool {
+    #[tracing::instrument(skip(self, target))]
+    fn synchronize_wall_clock(&mut self, target: std::time::Instant) -> bool {
         let now = std::time::Instant::now();
-        if now < target {
-            let advance = target - now;
-            tracing::debug!(advance = ?advance, "Need to sleep");
 
-            match self.event_rx.recv_timeout(advance) {
-                Ok(event) => {
-                    tracing::debug!(event = %event, "Sleep interrupted by");
-                    Self::handle_async_event(
-                        event,
-                        current_tag,
-                        &mut self.events,
-                        &mut self.store,
-                        &self.reaction_graph,
-                    );
-                    return true;
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    let remaining = target.checked_duration_since(std::time::Instant::now());
-                    if let Some(remaining) = remaining {
-                        tracing::debug!(remaining = ?remaining,
-                            "Sleep interrupted disconnect, sleeping for remaining",
-                        );
-                        std::thread::sleep(remaining);
+        match now.cmp(&target) {
+            std::cmp::Ordering::Less => {
+                let advance = target - now;
+                tracing::trace!(advance = ?advance, "Need to sleep");
+
+                match self.event_rx.recv_timeout(advance) {
+                    Ok(event) => {
+                        tracing::debug!(event = %event, "Sleep interrupted by");
+                        self.handle_async_event(event);
+                        return true;
                     }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        let remaining = target.checked_duration_since(std::time::Instant::now());
+                        if let Some(remaining) = remaining {
+                            tracing::debug!(remaining = ?remaining,
+                                "Sleep interrupted disconnect, sleeping for remaining",
+                            );
+                            std::thread::sleep(remaining);
+                        }
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
                 }
-                Err(RecvTimeoutError::Timeout) => {}
             }
-        }
 
-        if now > target {
-            let delay = now - target;
-            tracing::warn!(delay = ?delay, "running late");
+            std::cmp::Ordering::Greater => {
+                let delay = now - target;
+                tracing::warn!(delay = ?delay, "running late");
+            }
+
+            std::cmp::Ordering::Equal => {}
         }
 
         false
@@ -403,6 +661,9 @@ impl Scheduler {
     pub fn process_tag(&mut self, tag: Tag, reaction_view: KeySetView<ReactionKey>) {
         reaction_view.for_each_level(|level, reaction_keys, next_levels| {
             tracing::trace!(level=?level, "Iter");
+
+            self.stats
+                .increment_processed_reactions(reaction_keys.len());
 
             // Safety: reaction_keys in the same level are guaranteed to be independent of each other.
             let iter_ctx = unsafe { self.store.iter_borrow_storage(reaction_keys) };
@@ -433,6 +694,8 @@ impl Scheduler {
                 }
 
                 // Submit events to the event queue for all scheduled actions
+                self.stats
+                    .increment_scheduled_actions(trigger_res.scheduled_actions.len());
                 for &(action_key, tag) in trigger_res.scheduled_actions.iter() {
                     let downstream = self.reaction_graph.action_triggers[action_key]
                         .iter()
@@ -442,10 +705,10 @@ impl Scheduler {
             }
 
             // Collect all the reactions that are triggered by the ports
-            let downstream = self
-                .store
-                .iter_set_port_keys()
-                .flat_map(|port_key| self.reaction_graph.port_triggers[port_key].iter());
+            let downstream = self.store.iter_set_port_keys().flat_map(|port_key| {
+                self.stats.increment_set_ports();
+                self.reaction_graph.port_triggers[port_key].iter()
+            });
 
             if let Some(mut next_levels) = next_levels {
                 next_levels.extend_above(downstream.copied());
@@ -462,4 +725,52 @@ impl Scheduler {
     pub fn into_env(self) -> Env {
         self.store.into_env()
     }
+}
+
+/// Execute the given enclaves with the provided configuration.
+///
+/// This function will create a new `Scheduler` thread for each enclave and run its event loop.
+///
+/// # Arguments
+///
+/// * `enclaves` - An iterator over the enclaves to be executed.
+/// * `config` - The configuration to be used for the schedulers.
+///
+/// # Returns
+///
+/// A vector of `Env` instances, one for each executed enclave.
+///
+/// # Panics
+///
+/// Panics if there is an error during the execution of any enclave.
+pub fn execute_enclaves(
+    #[allow(unused_mut)] mut enclaves: impl Iterator<Item = (EnclaveKey, Enclave)> + Send,
+    config: Config,
+) -> tinymap::TinySecondaryMap<EnclaveKey, Env> {
+    let handles: Vec<_> = enclaves
+        .filter_map(move |(enclave_key, enclave)| {
+            if enclave.env.reactions.is_empty() {
+                // If there are no reactions, there is nothing to do
+                tracing::info!("No reactions to execute for enclave {enclave_key:?}");
+                None
+            } else {
+                tracing::info!("Starting scheduler for enclave {enclave_key:?}");
+                Some(Scheduler::new(enclave_key, enclave, config.clone()))
+            }
+        })
+        .map(|mut sched| {
+            std::thread::Builder::new()
+                .name(sched.key.to_string())
+                .spawn(move || {
+                    sched.event_loop();
+                    (sched.key, sched.into_env())
+                })
+                .unwrap()
+        })
+        .collect();
+
+    handles
+        .into_iter()
+        .map(|handle| handle.join().expect("Thread panicked"))
+        .collect()
 }

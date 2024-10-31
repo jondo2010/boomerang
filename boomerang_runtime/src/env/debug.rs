@@ -85,7 +85,6 @@ impl std::fmt::Debug for ReactionGraph {
             .field("port_triggers", &port_triggers)
             .field("startup_reactions", &self.startup_reactions)
             .field("shutdown_reactions", &self.shutdown_reactions)
-            .field("reaction_set_limits", &self.reaction_set_limits)
             .field("reaction_use_ports", &self.reaction_use_ports)
             .field("reaction_effect_ports", &self.reaction_effect_ports)
             .field("reaction_actions", &self.reaction_actions)

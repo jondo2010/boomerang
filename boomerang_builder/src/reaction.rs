@@ -2,7 +2,7 @@ use super::{
     BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactorKey, EnvBuilder, FindElements,
     PortType, Reactor, ReactorBuilderState,
 };
-use crate::{runtime, ParentReactorBuilder};
+use crate::{runtime, BuilderRuntimeParts, ParentReactorBuilder};
 use slotmap::SecondaryMap;
 
 slotmap::new_key_type! {
@@ -50,7 +50,7 @@ impl<T: runtime::ReactorData> ReactionField for runtime::ActionRef<'_, T> {
         order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
-        builder.add_action(key, order, trigger_mode)
+        builder.add_action_relation(key, order, trigger_mode)
     }
 }
 
@@ -63,7 +63,7 @@ impl<T: runtime::ReactorData> ReactionField for runtime::AsyncActionRef<T> {
         order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
-        builder.add_action(key, order, trigger_mode)
+        builder.add_action_relation(key, order, trigger_mode)
     }
 }
 
@@ -76,7 +76,7 @@ impl<'a, T: runtime::ReactorData> ReactionField for runtime::InputRef<'a, T> {
         order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
-        builder.add_port(key, order, trigger_mode)
+        builder.add_port_relation(key, order, trigger_mode)
     }
 }
 
@@ -89,7 +89,7 @@ impl<'a, T: runtime::ReactorData, const N: usize> ReactionField for [runtime::In
         order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
-        builder.add_ports(key, order, trigger_mode)
+        builder.add_port_relations(key, order, trigger_mode)
     }
 }
 
@@ -102,7 +102,7 @@ impl<'a, T: runtime::ReactorData> ReactionField for runtime::OutputRef<'a, T> {
         order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
-        builder.add_port(key, order, trigger_mode)
+        builder.add_port_relation(key, order, trigger_mode)
     }
 }
 
@@ -115,7 +115,7 @@ impl<'a, T: runtime::ReactorData, const N: usize> ReactionField for [runtime::Ou
         order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
-        builder.add_ports(key, order, trigger_mode)
+        builder.add_port_relations(key, order, trigger_mode)
     }
 }
 
@@ -146,10 +146,10 @@ impl ReactionField for PortOrActionTrigger {
     ) -> Result<(), BuilderError> {
         match key {
             PortOrActionTriggerKey::Port(port_key) => {
-                builder.add_port(port_key, order, trigger_mode)
+                builder.add_port_relation(port_key, order, trigger_mode)
             }
             PortOrActionTriggerKey::Action(action_key) => {
-                builder.add_action(action_key, order, trigger_mode)
+                builder.add_action_relation(action_key, order, trigger_mode)
             }
         }
     }
@@ -162,21 +162,12 @@ pub struct ReactionBuilder {
     /// The owning Reactor for this Reaction
     pub(super) reactor_key: BuilderReactorKey,
     /// The Reaction function
-    pub(super) reaction_fn: runtime::BoxedReactionFn,
+    pub(super) reaction_fn: Box<dyn FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn>,
 
-    /// Actions that trigger this Reaction, and their relative ordering.
-    pub(super) trigger_actions: SecondaryMap<BuilderActionKey, usize>,
-    /// Actions that can be read or scheduled by this Reaction, and their relative ordering.
-    pub(super) use_effect_actions: SecondaryMap<BuilderActionKey, usize>,
-
-    /// Ports that can trigger this Reaction, and their relative ordering.
-    pub(super) trigger_ports: SecondaryMap<BuilderPortKey, usize>,
-    /// Ports that this Reaction may read the value of, and their relative ordering. These are used
-    /// to build the array of [`runtime::PortRef`] in the reaction function.
-    pub(super) use_ports: SecondaryMap<BuilderPortKey, usize>,
-    /// Ports that this Reaction may set the value of, and their relative ordering. These are used
-    /// to build the array of [`runtime::PortRefMut`]` in the reaction function.
-    pub(super) effect_ports: SecondaryMap<BuilderPortKey, usize>,
+    /// Relations between this Reaction and Actions
+    pub(super) action_relations: SecondaryMap<BuilderActionKey, TriggerMode>,
+    /// Relations between this Reaction and Ports
+    pub(super) port_relations: SecondaryMap<BuilderPortKey, TriggerMode>,
 }
 
 impl ParentReactorBuilder for ReactionBuilder {
@@ -192,11 +183,8 @@ impl std::fmt::Debug for ReactionBuilder {
             .field("priority", &self.priority)
             .field("reactor_key", &self.reactor_key)
             .field("reaction_fn", &"ReactionFn()")
-            .field("trigger_actions", &self.trigger_actions)
-            .field("use_effect_actions", &self.use_effect_actions)
-            .field("trigger_ports", &self.trigger_ports)
-            .field("use_ports", &self.use_ports)
-            .field("effect_ports", &self.effect_ports)
+            .field("action_relations", &self.action_relations)
+            .field("port_relations", &self.port_relations)
             .finish()
     }
 }
@@ -275,7 +263,7 @@ impl<'a> ReactionBuilderState<'a> {
         name: &str,
         priority: usize,
         reactor_key: BuilderReactorKey,
-        reaction_fn: runtime::BoxedReactionFn,
+        reaction_fn: Box<dyn FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn>,
         env: &'a mut EnvBuilder,
     ) -> Self {
         Self {
@@ -284,17 +272,15 @@ impl<'a> ReactionBuilderState<'a> {
                 priority,
                 reactor_key,
                 reaction_fn,
-                trigger_actions: SecondaryMap::new(),
-                use_effect_actions: SecondaryMap::new(),
-                trigger_ports: SecondaryMap::new(),
-                use_ports: SecondaryMap::new(),
-                effect_ports: SecondaryMap::new(),
+                action_relations: SecondaryMap::new(),
+                port_relations: SecondaryMap::new(),
             },
             env,
         }
     }
 
-    pub fn add_action(
+    /// Declare a relation between this Reaction and the given Action
+    pub fn add_action_relation(
         &mut self,
         key: BuilderActionKey,
         order: usize,
@@ -307,19 +293,7 @@ impl<'a> ReactionBuilderState<'a> {
                 action.name(), &self.builder.name
             )));
         }
-
-        match trigger_mode {
-            TriggerMode::TriggersOnly => {
-                self.builder.trigger_actions.insert(key, order);
-            }
-            TriggerMode::TriggersAndEffects | TriggerMode::TriggersAndUses => {
-                self.builder.trigger_actions.insert(key, order);
-                self.builder.use_effect_actions.insert(key, order);
-            }
-            TriggerMode::UsesOnly | TriggerMode::EffectsOnly => {
-                self.builder.use_effect_actions.insert(key, order);
-            }
-        }
+        self.builder.action_relations.insert(key, trigger_mode);
         Ok(())
     }
 
@@ -332,15 +306,17 @@ impl<'a> ReactionBuilderState<'a> {
         order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<Self, BuilderError> {
-        self.add_action(action_key.into(), order, trigger_mode)?;
+        self.add_action_relation(action_key.into(), order, trigger_mode)?;
         Ok(self)
     }
 
-    /// For triggers: valid ports are input ports in this reactor, (or output ports of contained
-    /// reactors). For uses: valid ports are input ports in this reactor, (or output ports of
-    /// contained reactors). for effects: valid ports are output ports in this reactor, (or
-    /// input ports of contained reactors).
-    pub fn add_port(
+    /// Delcare a relation between this Reaction and the given Port
+    ///
+    /// Constraints on valid ports for each `trigger_mode`:
+    ///  - For triggers: valid ports are input ports in this reactor, (or output ports of contained reactors).
+    ///  - For uses: valid ports are input ports in this reactor, (or output ports of contained reactors).
+    ///  - For effects: valid ports are output ports in this reactor, (or input ports of contained reactors).
+    pub fn add_port_relation(
         &mut self,
         key: BuilderPortKey,
         order: usize,
@@ -396,45 +372,21 @@ impl<'a> ReactionBuilderState<'a> {
                 }
             }
         }
-
-        match trigger_mode {
-            TriggerMode::TriggersOnly => {
-                self.builder.trigger_ports.insert(key, order);
-                Ok(())
-            }
-
-            TriggerMode::TriggersAndUses => {
-                self.builder.trigger_ports.insert(key, order);
-                self.builder.use_ports.insert(key, order);
-                Ok(())
-            }
-
-            TriggerMode::TriggersAndEffects => {
-                self.builder.trigger_ports.insert(key, order);
-                self.builder.effect_ports.insert(key, order);
-                Ok(())
-            }
-
-            TriggerMode::UsesOnly => {
-                self.builder.use_ports.insert(key, order);
-                Ok(())
-            }
-
-            TriggerMode::EffectsOnly => {
-                self.builder.effect_ports.insert(key, order);
-                Ok(())
-            }
-        }
+        self.builder.port_relations.insert(key, trigger_mode);
+        Ok(())
     }
 
-    pub fn add_ports(
+    /// Declare relations between this Reaction and the given Ports
+    ///
+    /// See [`Self::add_port_relation`] for constraints on valid ports for each `trigger_mode`.
+    pub fn add_port_relations(
         &mut self,
         keys: impl IntoIterator<Item = BuilderPortKey>,
         order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
         for key in keys {
-            self.add_port(key, order, trigger_mode)?;
+            self.add_port_relation(key, order, trigger_mode)?;
         }
         Ok(())
     }
@@ -448,7 +400,7 @@ impl<'a> ReactionBuilderState<'a> {
         order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<Self, BuilderError> {
-        self.add_port(port_key.into(), order, trigger_mode)?;
+        self.add_port_relation(port_key.into(), order, trigger_mode)?;
         Ok(self)
     }
 
@@ -459,7 +411,14 @@ impl<'a> ReactionBuilderState<'a> {
         } = self;
 
         // Ensure there is at least one trigger declared
-        if reaction_builder.trigger_actions.is_empty() && reaction_builder.trigger_ports.is_empty()
+        if !reaction_builder
+            .action_relations
+            .values()
+            .any(|&mode| mode.is_triggers())
+            && !reaction_builder
+                .port_relations
+                .values()
+                .any(|&mode| mode.is_triggers())
         {
             return Err(BuilderError::ReactionBuilderError(format!(
                 "Reaction '{}' has no triggers defined",
@@ -479,16 +438,8 @@ impl<'a> ReactionBuilderState<'a> {
 
         let reaction_builder = &reactions[reaction_key];
 
-        for action_key in reaction_builder.trigger_actions.keys() {
-            let action = &mut actions[action_key];
-            action.triggers.insert(reaction_key, ());
-        }
-
-        for action_key in reaction_builder.use_effect_actions.keys() {
-            let action = &mut actions[action_key];
-            action.schedulers.insert(reaction_key, ());
-        }
-
+        /*
+        TODO: Move this check somewhere else?
         for port_key in reaction_builder.effect_ports.keys() {
             let port = ports.get_mut(port_key).unwrap();
 
@@ -507,19 +458,14 @@ impl<'a> ReactionBuilderState<'a> {
                     "Antidependent input ports must belong to a contained reactor"
                 );
             }
-
-            port.register_antidependency(reaction_key);
         }
+        */
 
-        // Both trigger_ports and use_ports are treated as dependencies
-        for (port_key, is_trigger) in reaction_builder
-            .trigger_ports
-            .keys()
-            .map(|key| (key, true))
-            .chain(reaction_builder.use_ports.keys().map(|key| (key, false)))
-        {
+        for (port_key, trigger_mode) in &reaction_builder.port_relations {
             let port = ports.get_mut(port_key).unwrap();
+
             // Note, these assertions are the same as the ones on the builder methods
+            /*
             if port.port_type() == &PortType::Input {
                 assert_eq!(
                     reaction_builder.reactor_key,
@@ -535,8 +481,11 @@ impl<'a> ReactionBuilderState<'a> {
                     "Output port triggers must belong to a contained reactor"
                 );
             }
+            */
 
-            port.register_dependency(reaction_key, is_trigger);
+            if trigger_mode.is_triggers() {
+                port.register_trigger(reaction_key);
+            }
         }
 
         Ok(reaction_key)

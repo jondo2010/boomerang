@@ -16,6 +16,8 @@ pub mod tests;
 
 #[cfg(feature = "graphviz")]
 pub mod graphviz;
+#[cfg(feature = "graphviz")]
+pub mod plantuml;
 
 pub use action::*;
 pub use env::*;

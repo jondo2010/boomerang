@@ -51,6 +51,15 @@ pub fn build_and_test_reactor<R: Reactor>(
     let mut env_builder = EnvBuilder::new();
     let reactor = R::build(name, state, None, None, &mut env_builder)
         .context("Error building top-level reactor!")?;
+
+    if std::env::var("PUML").is_ok() {
+        let gv = env_builder.create_plantuml_graph()?;
+        let path = format!("{name}.puml");
+        let mut f = std::fs::File::create(&path)?;
+        std::io::Write::write_all(&mut f, gv.as_bytes())?;
+        tracing::info!("Wrote plantuml graph to {path}");
+    }
+
     let (env, graph, _) = env_builder
         .into_runtime_parts()
         .context("Error building environment!")?;
@@ -109,6 +118,12 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
         let mut f = std::fs::File::create(&path).unwrap();
         std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
         tracing::info!("Wrote reaction graph to {path}");
+
+        let gv = env_builder.create_plantuml_graph()?;
+        let path = format!("{name}.puml");
+        let mut f = std::fs::File::create(&path)?;
+        std::io::Write::write_all(&mut f, gv.as_bytes())?;
+        tracing::info!("Wrote plantuml graph to {path}");
     }
 
     if args.print_debug_info {

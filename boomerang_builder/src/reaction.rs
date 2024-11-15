@@ -203,16 +203,11 @@ impl std::fmt::Debug for ReactionBuilder {
 
 impl ReactionBuilder {
     /// Get the name of this Reaction
-    pub fn get_name(&self) -> &str {
+    pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Get the BuilderReactorKey of this Reaction
-    pub fn get_reactor_key(&self) -> BuilderReactorKey {
-        self.reactor_key
-    }
-
-    pub fn get_priority(&self) -> usize {
+    pub fn priority(&self) -> usize {
         self.priority
     }
 }
@@ -357,7 +352,7 @@ impl<'a> ReactionBuilderState<'a> {
             self.env.reactor_builders[port_reactor_key].parent_reactor_key;
 
         // Validity checks:
-        match port_builder.get_port_type() {
+        match port_builder.port_type() {
             PortType::Input => {
                 // triggers and uses are valid for input ports on the same reactor
                 if (trigger_mode.is_triggers() || trigger_mode.is_uses())
@@ -365,8 +360,8 @@ impl<'a> ReactionBuilderState<'a> {
                 {
                     return Err(BuilderError::ReactionBuilderError(format!(
                         "Reaction {} cannot 'trigger on' or 'use' input port '{}', it must belong to the same reactor as the reaction",
-                        self.builder.get_name(),
-                        self.env.port_fqn(key).unwrap()
+                        self.builder.name(),
+                        self.env.port_fqn(key, false).unwrap()
                     )));
                 }
                 // effects are valid for input ports on contained reactors
@@ -375,8 +370,8 @@ impl<'a> ReactionBuilderState<'a> {
                 {
                     return Err(BuilderError::ReactionBuilderError(format!(
                         "Reaction {} cannot 'effect' input port '{}', it must belong to a contained reactor",
-                        self.builder.get_name(),
-                        port_builder.get_name()
+                        self.builder.name(),
+                        port_builder.name()
                     )));
                 }
             }
@@ -387,16 +382,16 @@ impl<'a> ReactionBuilderState<'a> {
                 {
                     return Err(BuilderError::ReactionBuilderError(format!(
                         "Reaction {} cannot 'trigger on' or 'use' output port '{}', it must belong to a contained reactor",
-                        self.builder.get_name(),
-                        port_builder.get_name()
+                        self.builder.name(),
+                        port_builder.name()
                     )));
                 }
                 // effects are valid for output ports on the same reactor
                 if trigger_mode.is_effects() && port_reactor_key != self.builder.reactor_key {
                     return Err(BuilderError::ReactionBuilderError(format!(
                         "Reaction {} cannot 'effect' output port '{}', it must belong to the same reactor as the reaction",
-                        self.builder.get_name(),
-                        port_builder.get_name()
+                        self.builder.name(),
+                        port_builder.name()
                     )));
                 }
             }
@@ -497,7 +492,7 @@ impl<'a> ReactionBuilderState<'a> {
         for port_key in reaction_builder.effect_ports.keys() {
             let port = ports.get_mut(port_key).unwrap();
 
-            if port.get_port_type() == &PortType::Output {
+            if port.port_type() == &PortType::Output {
                 assert_eq!(
                     reaction_builder.reactor_key,
                     port.get_reactor_key(),
@@ -525,7 +520,7 @@ impl<'a> ReactionBuilderState<'a> {
         {
             let port = ports.get_mut(port_key).unwrap();
             // Note, these assertions are the same as the ones on the builder methods
-            if port.get_port_type() == &PortType::Input {
+            if port.port_type() == &PortType::Input {
                 assert_eq!(
                     reaction_builder.reactor_key,
                     port.get_reactor_key(),

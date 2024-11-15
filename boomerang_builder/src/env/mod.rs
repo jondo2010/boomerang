@@ -1,4 +1,4 @@
-use crate::{ActionTag, ParentReactorBuilder, PortType};
+use crate::{ActionTag, BuilderFqnSegment, ParentReactorBuilder, PortType};
 
 use super::{
     action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder, runtime, ActionType,
@@ -106,7 +106,7 @@ impl EnvBuilder {
         name: &str,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedPortKey<T, Input>, BuilderError> {
-        self.internal_add_port::<T, Input>(name, reactor_key)
+        self.internal_add_port::<T, Input>(name, reactor_key, None)
             .map(From::from)
     }
 
@@ -116,7 +116,7 @@ impl EnvBuilder {
         name: &str,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedPortKey<T, Output>, BuilderError> {
-        self.internal_add_port::<T, Output>(name, reactor_key)
+        self.internal_add_port::<T, Output>(name, reactor_key, None)
             .map(From::from)
     }
 
@@ -124,13 +124,14 @@ impl EnvBuilder {
         &mut self,
         name: &str,
         reactor_key: BuilderReactorKey,
+        bank_info: Option<runtime::BankInfo>,
     ) -> Result<BuilderPortKey, BuilderError> {
-        // Ensure no duplicates
-        if self
-            .port_builders
-            .values()
-            .any(|port| port.get_name() == name && port.get_reactor_key() == reactor_key)
-        {
+        // Ensure no duplicates on (name, reactor_key, bank_info)
+        if self.port_builders.values().any(|port| {
+            port.name() == name
+                && port.get_reactor_key() == reactor_key
+                && port.bank_info() == bank_info.as_ref()
+        }) {
             return Err(BuilderError::DuplicatePortDefinition {
                 reactor_name: self.reactor_builders[reactor_key].name().to_owned(),
                 port_name: name.into(),
@@ -141,7 +142,7 @@ impl EnvBuilder {
             self.reactor_builders[reactor_key]
                 .ports
                 .insert(port_key, ());
-            Box::new(PortBuilder::<T, Q>::new(name, reactor_key))
+            Box::new(PortBuilder::<T, Q>::new(name, reactor_key, bank_info))
         });
 
         Ok(key)
@@ -250,8 +251,8 @@ impl EnvBuilder {
         self.port_builders
             .iter()
             .find(|(_, port_builder)| {
-                port_builder.get_name() == port_name
-                    && port_builder.get_reactor_key() == reactor_key
+                port_builder.name() == port_name
+                    && port_builder.parent_reactor_key() == Some(reactor_key)
             })
             .map(|(port_key, _)| port_key)
             .ok_or_else(|| BuilderError::NamedPortNotFound(port_name.to_string()))
@@ -266,8 +267,8 @@ impl EnvBuilder {
         self.reaction_builders
             .iter()
             .find(|(_, reaction_builder)| {
-                reaction_builder.get_name() == reaction_name
-                    && reaction_builder.get_reactor_key() == reactor_key
+                reaction_builder.name() == reaction_name
+                    && reaction_builder.parent_reactor_key() == Some(reactor_key)
             })
             .map(|(reaction_key, _)| reaction_key)
             .ok_or_else(|| BuilderError::NamedReactionNotFound(reaction_name.to_string()))
@@ -293,14 +294,14 @@ impl EnvBuilder {
         T::Error: Into<BuilderError>,
     {
         let reactor_fqn: BuilderFqn = reactor_fqn.try_into().map_err(Into::into)?;
-        let (_, reactor_name) = reactor_fqn
+        let (_, segment) = reactor_fqn
             .clone()
             .split_last()
             .ok_or(BuilderError::InvalidFqn(reactor_fqn.to_string()))?;
         self.reactor_builders
             .iter()
             .find_map(|(reactor_key, reactor_builder)| {
-                if reactor_builder.name() == reactor_name {
+                if BuilderFqnSegment::from_reactor(reactor_builder, false) == segment {
                     Some(reactor_key)
                 } else {
                     None
@@ -320,7 +321,7 @@ impl EnvBuilder {
     {
         let action_fqn: BuilderFqn = action_fqn.try_into().map_err(Into::into)?;
 
-        let (reactor_fqn, action_name) = action_fqn
+        let (reactor_fqn, segment) = action_fqn
             .clone()
             .split_last()
             .ok_or(BuilderError::InvalidFqn(action_fqn.to_string()))?;
@@ -330,7 +331,9 @@ impl EnvBuilder {
         self.reactor_builders[reactor]
             .actions
             .keys()
-            .find(|action_key| self.action_builders[*action_key].name() == action_name)
+            .find(|action_key| {
+                BuilderFqnSegment::from_action(&self.action_builders[*action_key], false) == segment
+            })
             .ok_or_else(|| BuilderError::NamedActionNotFound(action_fqn.to_string()))
     }
 
@@ -395,8 +398,8 @@ impl EnvBuilder {
                     what: "Ports must belong to the same reactor or a common parent reactor to be connected".to_owned(),
                 })?;
 
-            let source_fqn = self.port_fqn(source_key)?;
-            let target_fqn = self.port_fqn(target_key)?;
+            let source_fqn = self.port_fqn(source_key, false)?;
+            let target_fqn = self.port_fqn(target_key, false)?;
             let reactor_name = format!("connection_{source_fqn}->{target_fqn}");
 
             // 1. create a new reactor to hold the action and reactions
@@ -440,8 +443,8 @@ impl EnvBuilder {
         let port_a_key = port_a_key.into();
         let port_b_key = port_b_key.into();
 
-        let port_a_fqn = self.port_fqn(port_a_key)?;
-        let port_b_fqn = self.port_fqn(port_b_key)?;
+        let port_a_fqn = self.port_fqn(port_a_key, false)?;
+        let port_b_fqn = self.port_fqn(port_b_key, false)?;
 
         tracing::debug!("Binding ports: {port_a_fqn:?} -> {port_b_fqn:?}",);
 
@@ -459,7 +462,7 @@ impl EnvBuilder {
             });
         }
 
-        if !port_a.get_deps().is_empty() {
+        if !port_a.deps().is_empty() {
             return Err(BuilderError::PortConnectionError {
                 port_a_key,
                 port_b_key,
@@ -467,7 +470,7 @@ impl EnvBuilder {
             });
         }
 
-        if port_b.get_antideps().len() > 0 {
+        if port_b.antideps().len() > 0 {
             return Err(BuilderError::PortConnectionError {
                 port_a_key,
                 port_b_key,
@@ -475,7 +478,7 @@ impl EnvBuilder {
             });
         }
 
-        match (port_a.get_port_type(), port_b.get_port_type()) {
+        match (port_a.port_type(), port_b.port_type()) {
             (PortType::Input, PortType::Input) => {
                 self.reactor_builders[port_b.get_reactor_key()]
                     .parent_reactor_key
@@ -537,60 +540,75 @@ impl EnvBuilder {
     }
 
     /// Get a fully-qualified string name for the given ActionKey
-    pub fn action_fqn(&self, action_key: BuilderActionKey) -> Result<BuilderFqn, BuilderError> {
-        let action = &self.action_builders[action_key];
-        let reactor_fqn = self.reactor_fqn(action.reactor_key())?;
-        Ok(reactor_fqn.append(action.name()))
+    ///
+    /// If `grouped` is true, the returned Fqn will be grouped by bank
+    pub fn action_fqn(
+        &self,
+        action_key: BuilderActionKey,
+        grouped: bool,
+    ) -> Result<BuilderFqn, BuilderError> {
+        let action = self
+            .action_builders
+            .get(action_key)
+            .ok_or(BuilderError::ActionKeyNotFound(action_key))?;
+        let segment = BuilderFqnSegment::from_action(action, grouped);
+        self.reactor_fqn(action.reactor_key(), true)?
+            .append(segment)
     }
 
     /// Get a fully-qualified string for the given ReactionKey
-    pub fn reactor_fqn(&self, reactor_key: BuilderReactorKey) -> Result<BuilderFqn, BuilderError> {
-        self.reactor_builders
+    ///
+    /// If `grouped` is true, the returned Fqn will be grouped by bank
+    pub fn reactor_fqn(
+        &self,
+        reactor_key: BuilderReactorKey,
+        grouped: bool,
+    ) -> Result<BuilderFqn, BuilderError> {
+        let reactor = self
+            .reactor_builders
             .get(reactor_key)
-            .ok_or(BuilderError::ReactorKeyNotFound(reactor_key))
-            .and_then(|reactor| {
-                reactor.parent_reactor_key.map_or_else(
-                    || Ok(reactor.name().try_into().unwrap()),
-                    |parent| {
-                        self.reactor_fqn(parent)
-                            .map(|parent| parent.append(reactor.name()))
-                    },
-                )
-            })
+            .ok_or(BuilderError::ReactorKeyNotFound(reactor_key))?;
+
+        let segment = BuilderFqnSegment::from_reactor(reactor, grouped);
+        if let Some(parent) = reactor.parent_reactor_key() {
+            self.reactor_fqn(parent, grouped)?.append(segment)
+        } else {
+            Ok(std::iter::once(segment).collect())
+        }
     }
 
     /// Get a fully-qualified string for the given ReactionKey
-    pub fn reaction_fqn(&self, reaction_key: BuilderReactionKey) -> Result<String, BuilderError> {
-        self.reaction_builders
+    ///
+    /// If `grouped` is true, the returned Fqn will be grouped by bank
+    pub fn reaction_fqn(
+        &self,
+        reaction_key: BuilderReactionKey,
+        grouped: bool,
+    ) -> Result<BuilderFqn, BuilderError> {
+        let reaction = self
+            .reaction_builders
             .get(reaction_key)
-            .ok_or(BuilderError::ReactionKeyNotFound(reaction_key))
-            .and_then(|reaction| {
-                self.reactor_fqn(reaction.reactor_key)
-                    .map_err(|err| BuilderError::InconsistentBuilderState {
-                        what: format!("Reactor referenced by {:?} not found: {:?}", reaction, err),
-                    })
-                    .map(|reactor_fqn| (reactor_fqn, reaction.name.clone()))
-            })
-            .map(|(reactor_name, reaction_name)| format!("{}::{}", reactor_name, reaction_name))
+            .ok_or(BuilderError::ReactionKeyNotFound(reaction_key))?;
+        let segment = BuilderFqnSegment::from_reaction(reaction);
+        self.reactor_fqn(reaction.reactor_key, grouped)?
+            .append(segment)
     }
 
     /// Get a fully-qualified string for the given PortKey
-    pub fn port_fqn(&self, port_key: BuilderPortKey) -> Result<String, BuilderError> {
-        self.port_builders
+    ///
+    /// If `grouped` is true, the returned Fqn will be grouped by bank
+    pub fn port_fqn(
+        &self,
+        port_key: BuilderPortKey,
+        grouped: bool,
+    ) -> Result<BuilderFqn, BuilderError> {
+        let port = self
+            .port_builders
             .get(port_key)
-            .ok_or(BuilderError::PortKeyNotFound(port_key))
-            .and_then(|port_builder| {
-                self.reactor_fqn(port_builder.get_reactor_key())
-                    .map_err(|err| BuilderError::InconsistentBuilderState {
-                        what: format!(
-                            "Reactor referenced by port {:?} not found: {:?}",
-                            port_builder.get_name(),
-                            err
-                        ),
-                    })
-                    .map(|reactor_fqn| (reactor_fqn, port_builder.get_name()))
-            })
-            .map(|(reactor_name, port_name)| format!("{}.{}", reactor_name, port_name))
+            .ok_or(BuilderError::PortKeyNotFound(port_key))?;
+        let segment = BuilderFqnSegment::from_port(port.as_ref(), grouped);
+        self.reactor_fqn(port.get_reactor_key(), grouped)?
+            .append(segment)
     }
 
     /// Follow the inward_binding's of Ports to the source
@@ -617,7 +635,7 @@ impl EnvBuilder {
         while !port_set.is_empty() {
             let port_key = port_set.pop_first().unwrap();
             let port_builder = &self.port_builders[port_key];
-            all_triggers.extend(port_builder.get_triggers().iter().map(|&key| (key, ())));
+            all_triggers.extend(port_builder.triggers().iter().map(|&key| (key, ())));
             port_set.extend(port_builder.get_outward_bindings());
         }
         all_triggers
@@ -637,7 +655,7 @@ impl EnvBuilder {
                     .keys()
                     .flat_map(move |port_key| {
                         let source_port_key = self.follow_port_inward_binding(port_key);
-                        self.port_builders[source_port_key].get_antideps()
+                        self.port_builders[source_port_key].antideps()
                     })
                     .map(move |dep_key| (reaction_key, dep_key))
             });

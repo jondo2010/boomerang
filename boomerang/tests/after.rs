@@ -79,7 +79,7 @@ struct ReactionPrintShutdown<'a> {
 }
 
 impl runtime::Trigger<PrintState> for ReactionPrintShutdown<'_> {
-    fn trigger(self, ctx: &mut runtime::Context, state: &mut PrintState) {
+    fn trigger(self, _ctx: &mut runtime::Context, state: &mut PrintState) {
         println!("Final result is {:?}", state.i);
         assert!(state.i != 0, "ERROR: Final reactor received no data.");
     }

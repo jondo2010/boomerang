@@ -71,13 +71,13 @@ impl Env {
     }
 }
 
-/// Bank information for a multi-bank reactor
-#[derive(Debug, Clone)]
+/// Bank information for a multi-bank port/reactor
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BankInfo {
-    /// The index of this reactor within the bank
+    /// The index of this port/reactor within the bank
     pub idx: usize,
-    /// The total number of reactors in the bank
+    /// The total number of ports/reactors in the bank
     pub total: usize,
 }
 

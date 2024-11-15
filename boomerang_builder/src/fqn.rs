@@ -1,3 +1,5 @@
+//! Fully-qualified names for elements in the system.
+
 use std::{fmt::Display, ops::Index};
 
 use crate::{ActionBuilder, BasePortBuilder, ReactionBuilder, ReactorBuilder};
@@ -138,7 +140,7 @@ impl Display for BuilderFqnSegment {
             BuilderFqnSegmentIndex::None => write!(f, "{}", self.name),
             BuilderFqnSegmentIndex::Index(index) => write!(f, "{}[{}]", self.name, index),
             BuilderFqnSegmentIndex::Range(from, to) => {
-                write!(f, "{}[{}..{}]", self.name, from, to - 1)
+                write!(f, "{}[{}..{}]", self.name, from, to)
             }
         }
     }

@@ -88,7 +88,7 @@ impl<T: runtime::ReactorData, Q: PortTag> ReactorField for TypedPortKey<T, Q> {
         _inner: Self::Inner,
         parent: &'_ mut ReactorBuilderState,
     ) -> Result<Self, BuilderError> {
-        parent.add_port::<T, Q>(name)
+        parent.add_port::<T, Q>(name, None)
     }
 }
 
@@ -196,6 +196,10 @@ impl ParentReactorBuilder for ReactorBuilder {
 impl ReactorBuilder {
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn bank_info(&self) -> Option<&runtime::BankInfo> {
+        self.bank_info.as_ref()
     }
 
     #[allow(dead_code)] // TODO: use or remove this
@@ -392,9 +396,10 @@ impl<'a> ReactorBuilderState<'a> {
     pub fn add_port<T: runtime::ReactorData, Q: PortTag>(
         &mut self,
         name: &str,
+        bank_info: Option<runtime::BankInfo>,
     ) -> Result<TypedPortKey<T, Q>, BuilderError> {
         self.env
-            .internal_add_port::<T, Q>(name, self.reactor_key)
+            .internal_add_port::<T, Q>(name, self.reactor_key, bank_info)
             .map(Into::into)
     }
 
@@ -405,7 +410,7 @@ impl<'a> ReactorBuilderState<'a> {
     ) -> Result<[TypedPortKey<T, Q>; N], BuilderError> {
         let mut ports = Vec::with_capacity(N);
         for i in 0..N {
-            let port = self.add_port::<T, Q>(&format!("{name}{i}"))?;
+            let port = self.add_port::<T, Q>(name, Some(runtime::BankInfo { idx: i, total: N }))?;
             ports.push(port);
         }
         Ok(ports.try_into().expect("Error converting Vec to array"))
@@ -416,7 +421,7 @@ impl<'a> ReactorBuilderState<'a> {
         &mut self,
         name: &str,
     ) -> Result<TypedPortKey<T, Input>, BuilderError> {
-        self.add_port::<T, Input>(name)
+        self.add_port::<T, Input>(name, None)
     }
 
     /// Add a new output port to this reactor.
@@ -424,7 +429,7 @@ impl<'a> ReactorBuilderState<'a> {
         &mut self,
         name: &str,
     ) -> Result<TypedPortKey<T, Output>, BuilderError> {
-        self.add_port::<T, Output>(name)
+        self.add_port::<T, Output>(name, None)
     }
 
     /// Adds a bus of input port(s) to this reactor.
@@ -465,7 +470,7 @@ impl<'a> ReactorBuilderState<'a> {
         let reactors = (0..N)
             .map(|i| {
                 R::build(
-                    &format!("{name}{i}"),
+                    name,
                     state.clone(),
                     Some(self.reactor_key),
                     Some(runtime::BankInfo { idx: i, total: N }),

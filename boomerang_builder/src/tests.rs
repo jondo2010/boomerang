@@ -171,6 +171,12 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
         let mut f = std::fs::File::create(&path)?;
         std::io::Write::write_all(&mut f, gv.as_bytes())?;
         tracing::info!("Wrote reaction graph to {path}");
+
+        let graph = env_builder.create_plantuml_graph()?;
+        let path = format!("{name}.puml");
+        let mut f = std::fs::File::create(&path)?;
+        std::io::Write::write_all(&mut f, graph.as_bytes())?;
+        tracing::info!("Wrote plantuml graph to {path}");
     }
 
     let (env, reaction_graph, aliases) = env_builder.into_runtime_parts()?;
@@ -343,6 +349,15 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
     let o2_source = env_builder.find_port_by_name("o2", source_reactor)?;
     let in2_sink = env_builder.find_port_by_name("in2", sink_reactor)?;
     env_builder.bind_port(o2_source, in2_sink)?;
+
+    #[cfg(feature = "graphviz")]
+    {
+        let graph = env_builder.create_plantuml_graph()?;
+        let path = "test_dependency_use_accessible.puml";
+        let mut f = std::fs::File::create(path)?;
+        std::io::Write::write_all(&mut f, graph.as_bytes())?;
+        tracing::info!("Wrote plantuml graph to {path}");
+    }
 
     /*
     reactor Source {

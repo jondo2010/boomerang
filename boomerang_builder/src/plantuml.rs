@@ -1,220 +1,334 @@
 use std::io::Write;
 
+use itertools::Itertools;
+use petgraph::prelude::DiGraphMap;
 use slotmap::Key;
 
-use crate::ParentReactorBuilder;
+use crate::{reactor, BuilderActionKey, BuilderReactorKey, ParentReactorBuilder, TimerSpec};
 
 use super::{
     ActionType, BuilderError, BuilderPortKey, BuilderReactionKey, EnvBuilder, PortType,
     ReactorBuilder,
 };
 
-macro_rules! calculate_action_id {
-    ($key:expr, $env_builder:expr, $reactor_id:expr) => {
-        format!(
-            "a{}",
-            $key.data().as_ffi() % $env_builder.reactor_builders.len() as u64 + ($reactor_id << 4)
-        )
-    };
+trait ElemId {
+    fn elem_id(&self, env_builder: &EnvBuilder) -> String;
 }
 
-fn reaction_node_name(env_builder: &EnvBuilder, reaction_key: BuilderReactionKey) -> String {
-    let reaction = &env_builder.reaction_builders[reaction_key];
-    let reaction_id = reaction_key.data().as_ffi() % env_builder.reaction_builders.len() as u64;
-    let reaction_reactor_id = reaction.parent_reactor_key().unwrap().data().as_ffi()
-        % env_builder.reactor_builders.len() as u64;
-    format!("r{}", reaction_id + (reaction_reactor_id << 4))
-}
-
-/// Build the node name string for a Port
-fn port_node_name(env_builder: &EnvBuilder, port_key: BuilderPortKey) -> String {
-    let port = &env_builder.port_builders[port_key];
-    let port_id = port_key.data().as_ffi() % env_builder.port_builders.len() as u64;
-    let port_reactor_id = port.parent_reactor_key().unwrap().data().as_ffi()
-        % env_builder.reactor_builders.len() as u64;
-    format!("p{}", port_id + (port_reactor_id << 4))
-}
-
-fn build_ports<W: std::io::Write>(
-    env_builder: &EnvBuilder,
-    reactor: &ReactorBuilder,
-    buf: &mut W,
-) -> std::io::Result<()> {
-    for key in reactor.ports.keys() {
-        let port_id = port_node_name(env_builder, key);
-        let port = &env_builder.port_builders[key];
-        let port_name = port.get_name();
-        let port_type = match port.get_port_type() {
-            PortType::Input => "portin",
-            PortType::Output => "portout",
-        };
-        writeln!(buf, "{port_type} {port_name} as {port_id}")?;
+impl ElemId for BuilderReactionKey {
+    /// Build a unique identifier for a reaction node in the PlantUML graph.
+    fn elem_id(&self, env_builder: &EnvBuilder) -> String {
+        let id = self.data().as_ffi() % env_builder.reaction_builders.len() as u64;
+        format!("r{id}")
     }
-    Ok(())
 }
 
-fn build_reactions<W: std::io::Write>(
-    env_builder: &EnvBuilder,
-    reactor: &ReactorBuilder,
-    reactor_id: u64,
-    buf: &mut W,
-) -> std::io::Result<()> {
-    for (reaction_key, reaction) in reactor
-        .reactions
-        .keys()
-        .map(|reaction_key| (reaction_key, &env_builder.reaction_builders[reaction_key]))
-    {
-        let reaction_id = reaction_node_name(env_builder, reaction_key);
-        writeln!(
-            buf,
-            "action \"{priority}[[{{{name}}}]]\" as {id}",
-            priority = reaction.priority,
-            name = reaction.name,
-            id = reaction_id
-        )?;
-
-        for port_key in reaction.input_ports.keys() {
-            let port_node = port_node_name(env_builder, port_key);
-            writeln!(buf, "{port_node} .> {reaction_id}")?;
-        }
-        for port_key in reaction.output_ports.keys() {
-            let port_node = port_node_name(env_builder, port_key);
-            writeln!(buf, "{reaction_id} .> {port_node}")?;
-        }
+impl ElemId for BuilderPortKey {
+    /// Build a unique identifier for a port node in the PlantUML graph.
+    fn elem_id(&self, env_builder: &EnvBuilder) -> String {
+        let id = self.data().as_ffi() % env_builder.port_builders.len() as u64;
+        format!("p{id}")
     }
-    Ok(())
 }
 
-fn build_actions<W: std::io::Write>(
-    env_builder: &EnvBuilder,
-    reactor: &ReactorBuilder,
-    reactor_id: u64,
-    buf: &mut W,
-) -> std::io::Result<()> {
-    for (action_key, action) in reactor.actions.iter() {
-        let action_id = calculate_action_id!(action_key, env_builder, reactor_id);
+impl ElemId for BuilderActionKey {
+    /// Build a unique identifier for an action node in the PlantUML graph.
+    fn elem_id(&self, env_builder: &EnvBuilder) -> String {
+        let id = self.data().as_ffi() % env_builder.action_builders.len() as u64;
+        format!("a{id}")
+    }
+}
 
-        let (xlabel, tooltip): (String, String) = match action.get_type() {
-            ActionType::Timer { period, offset } => {
-                let label = "\u{23f2}".into();
-                let tt = if offset.is_zero() {
-                    "Startup".into()
-                } else {
-                    format!(
-                        "{} ({} ms, {} ms)",
-                        action.get_name(),
-                        offset.as_millis(),
-                        period.as_millis()
-                    )
-                };
-                (label, tt)
+impl ElemId for BuilderReactorKey {
+    /// Build a unique identifier for a reactor node in the PlantUML graph.
+    fn elem_id(&self, env_builder: &EnvBuilder) -> String {
+        let id = self.data().as_ffi() % env_builder.reactor_builders.len() as u64;
+        format!("r{id}")
+    }
+}
+
+impl EnvBuilder {
+    const BANK_EDGE: &str = "[thickness=2]";
+
+    fn node_id(&self, key: impl ElemId) -> String {
+        key.elem_id(self)
+    }
+
+    fn puml_write_ports<W: std::io::Write>(
+        &self,
+        reactor: &ReactorBuilder,
+        buf: &mut W,
+    ) -> std::io::Result<()> {
+        let ports = reactor.ports.keys();
+        let ports_grouped = self
+            .ports_debug_grouped(ports)
+            .into_iter()
+            .map(|(first_key, _, _)| {
+                let port = &self.port_builders[first_key];
+                (port, self.node_id(first_key), port.bank_info().is_some())
+            });
+        for (port, port_id, is_bank) in ports_grouped {
+            let port_name = port.name();
+            let port_type = match port.port_type() {
+                PortType::Input => "portin",
+                PortType::Output => "portout",
+            };
+
+            if is_bank {
+                // we assume now that this port is banked, we generate an output only for the first key
+                let bank_info = port.bank_info().unwrap();
+                let bank = format!("[0..{}]", bank_info.total - 1);
+
+                writeln!(
+                    buf,
+                    "{port_type} \"{port_name}{bank}\" <<bank>> as {port_id}"
+                )?;
+            } else {
+                writeln!(buf, "{port_type} \"{port_name}\" as {port_id}")?;
             }
-            ActionType::Logical { min_delay } => (
-                "L".into(),
-                format!(
-                    "{} ({} ms)",
-                    action.get_name(),
-                    min_delay.unwrap_or_default().as_millis()
-                ),
-            ),
-            ActionType::Physical { min_delay } => (
-                "P".into(),
-                format!(
-                    "{} ({} ms)",
-                    action.get_name(),
-                    min_delay.unwrap_or_default().as_millis()
-                ),
-            ),
-            ActionType::Startup => ("\u{2600}".into(), "Startup".into()),
-            ActionType::Shutdown => ("\u{263d}".into(), "Shutdown".into()),
-        };
+        }
+        Ok(())
+    }
 
-        if !action.triggers.is_empty() || !action.schedulers.is_empty() {
+    fn puml_write_reaction_nodes<W: std::io::Write>(
+        &self,
+        reactor: &ReactorBuilder,
+        buf: &mut W,
+    ) -> std::io::Result<()> {
+        for (reaction_id, reaction) in reactor.reactions.keys().map(|reaction_key| {
+            (
+                self.node_id(reaction_key),
+                &self.reaction_builders[reaction_key],
+            )
+        }) {
             writeln!(
                 buf,
-                "hexagon \"{label}[[{{{tooltip}}}]]\" as {id}",
-                label = xlabel,
-                tooltip = tooltip,
-                id = action_id
+                "action \"{name}({priority})[[{{{name}}}]]\" as {id}",
+                priority = reaction.priority,
+                name = reaction.name,
+                id = reaction_id
             )?;
+        }
+        Ok(())
+    }
 
-            for reaction_key in action.triggers.keys() {
-                let reaction_id = reaction_node_name(env_builder, reaction_key);
-                writeln!(buf, "{action_id} .> {reaction_id}")?;
+    fn puml_write_reaction_edges<W: std::io::Write>(
+        &self,
+        reactor: &ReactorBuilder,
+        buf: &mut W,
+    ) -> std::io::Result<()> {
+        for (reaction_id, reaction) in reactor.reactions.keys().map(|reaction_key| {
+            (
+                self.node_id(reaction_key),
+                &self.reaction_builders[reaction_key],
+            )
+        }) {
+            for (port_key, last_port_key, _) in
+                self.ports_debug_grouped(reaction.trigger_ports.keys())
+            {
+                let port_node = self.node_id(port_key);
+                let props = if last_port_key.is_some() {
+                    Self::BANK_EDGE
+                } else {
+                    ""
+                };
+                writeln!(buf, "{port_node} .{props}> {reaction_id} : trig")?;
             }
-
-            for reaction_key in action.schedulers.keys() {
-                let reaction_id = reaction_node_name(env_builder, reaction_key);
-                writeln!(buf, "{reaction_id} .> {action_id}")?;
+            for (port_key, last_port_key, _) in
+                self.ports_debug_grouped(reaction.effect_ports.keys())
+            {
+                let port_node = self.node_id(port_key);
+                let props = if last_port_key.is_some() {
+                    Self::BANK_EDGE
+                } else {
+                    ""
+                };
+                writeln!(buf, "{reaction_id} .{props}> {port_node} : eff")?;
+            }
+            for (port_key, last_port_key, _) in self.ports_debug_grouped(reaction.use_ports.keys())
+            {
+                let port_node = self.node_id(port_key);
+                let props = if last_port_key.is_some() {
+                    Self::BANK_EDGE
+                } else {
+                    ""
+                };
+                writeln!(buf, "{port_node} .{props}> {reaction_id} : use")?;
             }
         }
+        Ok(())
     }
-    Ok(())
-}
 
-fn build_port_bindings<W: std::io::Write>(
-    env_builder: &EnvBuilder,
-    buf: &mut W,
-) -> std::io::Result<()> {
-    for (from, to) in env_builder
-        .port_builders
-        .iter()
-        .flat_map(|(port_key, port)| {
+    fn puml_write_action_nodes<W: std::io::Write>(
+        &self,
+        reactor: &ReactorBuilder,
+        buf: &mut W,
+    ) -> std::io::Result<()> {
+        for (action_id, action) in reactor
+            .actions
+            .keys()
+            .map(|action_key| (self.node_id(action_key), &self.action_builders[action_key]))
+        {
+            let (xlabel, tooltip): (String, String) = match action.r#type() {
+                ActionType::Timer(TimerSpec { period, offset }) => {
+                    let label = "\u{23f2}".into();
+                    let tt = if offset.unwrap_or_default().is_zero() {
+                        "Timer".into()
+                    } else {
+                        format!(
+                            "{} ({:?}, {:?})",
+                            action.name(),
+                            offset.unwrap_or_default(),
+                            period.unwrap_or_default()
+                        )
+                    };
+                    (label, tt)
+                }
+                ActionType::Standard {
+                    is_logical,
+                    min_delay,
+                    ..
+                } => {
+                    let xlabel = if *is_logical {
+                        format!("L({})", action.name())
+                    } else {
+                        format!("P({})", action.name())
+                    };
+                    (
+                        xlabel,
+                        format!("{} ({:?})", action.name(), min_delay.unwrap_or_default()),
+                    )
+                }
+                ActionType::Startup => ("\u{2600}".into(), "Startup".into()),
+                ActionType::Shutdown => ("\u{263d}".into(), "Shutdown".into()),
+            };
+
+            if !action.triggers.is_empty() || !action.schedulers.is_empty() {
+                writeln!(
+                    buf,
+                    "hexagon \"{label}[[{{{tooltip}}}]]\" as {id}",
+                    label = xlabel,
+                    tooltip = tooltip,
+                    id = action_id
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn puml_write_action_edges<W: std::io::Write>(
+        &self,
+        reactor: &ReactorBuilder,
+        buf: &mut W,
+    ) -> std::io::Result<()> {
+        for (action_id, action) in reactor
+            .actions
+            .keys()
+            .map(|action_key| (self.node_id(action_key), &self.action_builders[action_key]))
+        {
+            if !action.triggers.is_empty() || !action.schedulers.is_empty() {
+                for reaction_key in action.triggers.keys() {
+                    let reaction_id = self.node_id(reaction_key);
+                    writeln!(buf, "{action_id} .> {reaction_id} : trig")?;
+                }
+
+                for reaction_key in action.schedulers.keys() {
+                    let reaction_id = self.node_id(reaction_key);
+                    writeln!(buf, "{reaction_id} .> {action_id} : sched")?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn build_port_bindings<W: std::io::Write>(&self, buf: &mut W) -> std::io::Result<()> {
+        //TODO: this is a naive implementation, we should group by bank
+        for (from, to) in self.port_builders.iter().flat_map(|(port_key, port)| {
             port.get_outward_bindings().map(move |binding_key| {
-                let from = port_node_name(env_builder, port_key);
-                let to = port_node_name(env_builder, binding_key);
+                let from = self.node_id(port_key);
+                let to = self.node_id(binding_key);
                 (from, to)
             })
-        })
-    {
-        writeln!(buf, "{from} -down-> {to}")?;
-    }
-    Ok(())
-}
-
-/// Build a GraphViz representation of the entire Reactor environment. This creates a top-level view
-/// of all defined Reactors and any nested children.
-pub fn create_full_graph(env_builder: &EnvBuilder) -> Result<String, BuilderError> {
-    let graph = env_builder.build_reactor_graph();
-    let ordered_reactors = petgraph::algo::toposort(&graph, None)
-        .map_err(|e| BuilderError::ReactorGraphCycle { what: e.node_id() })?;
-    let start = *ordered_reactors.first().unwrap();
-
-    let mut buf = Vec::new();
-    writeln!(&mut buf, "@startuml\nleft to right direction").unwrap();
-
-    petgraph::visit::depth_first_search(&graph, Some(start), |event| match event {
-        petgraph::visit::DfsEvent::Discover(key, _) => {
-            let reactor = &env_builder.reactor_builders[key];
-            let reactor_id = key.data().as_ffi() % env_builder.reactor_builders.len() as u64;
-
-            writeln!(
-                &mut buf,
-                "component {name} <<{type_name}>> {{",
-                name = reactor.get_name(),
-                type_name = reactor.type_name()
-            )
-            .unwrap();
-
-            build_ports(env_builder, reactor, &mut buf).unwrap();
-            build_reactions(env_builder, reactor, reactor_id, &mut buf).unwrap();
-            build_actions(env_builder, reactor, reactor_id, &mut buf).unwrap();
+        }) {
+            writeln!(buf, "{from} --> {to}")?;
         }
-        petgraph::visit::DfsEvent::Finish(_, _) => {
-            writeln!(&mut buf, "}}").unwrap();
-        }
-        _ => {}
-    });
-
-    let reaction_graph = env_builder.build_reaction_graph();
-    for (r1, r2, _) in reaction_graph.all_edges() {
-        let r1_id = reaction_node_name(env_builder, r1);
-        let r2_id = reaction_node_name(env_builder, r2);
-        //writeln!(&mut buf, "{r1_id} -> {r2_id}").unwrap();
+        Ok(())
     }
 
-    build_port_bindings(env_builder, &mut buf).unwrap();
+    /// Build a PlantUML representation of the entire Reactor environment. This creates a top-level view
+    /// of all defined Reactors and any nested children.
+    pub fn create_plantuml_graph(&self) -> Result<String, BuilderError> {
+        let graph = self.build_reactor_graph_grouped();
+        let ordered_reactors = petgraph::algo::toposort(&graph, None)
+            .map_err(|e| BuilderError::ReactorGraphCycle { what: e.node_id() })?;
+        let start = *ordered_reactors.first().unwrap();
 
-    writeln!(&mut buf, "@enduml").unwrap();
-    Ok(String::from_utf8(buf).unwrap())
+        const PREAMBLE: &str = r#"
+left to right direction
+!theme sandstone
+skinparam componentStyle rectangle
+skinparam shadowing<<bank>> true
+skinparam arrowThickness 1
+<style>
+    .bank {
+        lineThickness 2
+        fontStyle bold
+    }
+    component {
+    }
+    hexagon {
+        'LineColor LightCyan
+    }
+    action {
+        'LineColor LightYellow
+    }
+</style>"#;
+
+        let mut buf = Vec::new();
+        let mut edge_buf = Vec::new();
+        writeln!(&mut buf, "@startuml{PREAMBLE}").unwrap();
+
+        petgraph::visit::depth_first_search(&graph, Some(start), |event| match event {
+            petgraph::visit::DfsEvent::Discover(reactor_key, _) => {
+                let reactor = &self.reactor_builders[reactor_key];
+                let bank = reactor
+                    .bank_info()
+                    .map(|bi| format!("[0..{}]", bi.total - 1));
+                let stereotype = if bank.is_some() { " <<bank>> " } else { "" };
+
+                writeln!(
+                    &mut buf,
+                    "component reactor_{name} as \"{name}{bank}\"{stereotype}{{",
+                    name = reactor.name(),
+                    bank = bank.unwrap_or_default(),
+                )
+                .unwrap();
+
+                self.puml_write_ports(reactor, &mut buf).unwrap();
+                self.puml_write_reaction_nodes(reactor, &mut buf).unwrap();
+                self.puml_write_action_nodes(reactor, &mut buf).unwrap();
+                self.puml_write_reaction_edges(reactor, &mut edge_buf)
+                    .unwrap();
+                self.puml_write_action_edges(reactor, &mut edge_buf)
+                    .unwrap();
+            }
+            petgraph::visit::DfsEvent::Finish(_, _) => {
+                writeln!(&mut buf, "}}").unwrap();
+            }
+            _ => {}
+        });
+
+        let reaction_graph = self.build_reaction_graph();
+        for (r1, r2, _) in reaction_graph.all_edges() {
+            let r1_id = self.node_id(r1);
+            let r2_id = self.node_id(r2);
+            //writeln!(&mut buf, "{r1_id} -> {r2_id}").unwrap();
+        }
+
+        buf.write_all(&edge_buf).unwrap();
+        self.build_port_bindings(&mut buf).unwrap();
+
+        writeln!(&mut buf, "@enduml").unwrap();
+        Ok(String::from_utf8(buf).unwrap())
+    }
 }

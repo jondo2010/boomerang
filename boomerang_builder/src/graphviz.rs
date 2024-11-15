@@ -15,7 +15,7 @@ fn port_node_name(env_builder: &EnvBuilder, port_key: BuilderPortKey) -> String 
     let port_id = port_key.data().as_ffi() % env_builder.port_builders.len() as u64;
     let port_reactor_id =
         port.get_reactor_key().data().as_ffi() % env_builder.reactor_builders.len() as u64;
-    match port.get_port_type() {
+    match port.port_type() {
         PortType::Input => format!("inputs{}:p{}", port_reactor_id, port_id),
         PortType::Output => format!("outputs{}:p{}", port_reactor_id, port_id),
     }
@@ -30,9 +30,9 @@ fn build_ports(
     let (inputs, outputs): (Vec<_>, Vec<_>) = reactor.ports.keys().partition_map(|key| {
         let port_id = key.data().as_ffi() % env_builder.port_builders.len() as u64;
         let port = &env_builder.port_builders[key];
-        let s = format!("<p{}> {}", port_id, port.get_name());
+        let s = format!("<p{}> {}", port_id, port.name());
 
-        match port.get_port_type() {
+        match port.port_type() {
             PortType::Input => itertools::Either::Left(s),
             PortType::Output => itertools::Either::Right(s),
         }
@@ -237,7 +237,7 @@ pub fn create_reaction_graph(env_builder: &EnvBuilder) -> Result<String, Builder
             output.push(format!(
                 "  r{} [label=\"{}\";shape=cds;color=3];",
                 reaction_id,
-                env_builder.reaction_fqn(key).unwrap()
+                env_builder.reaction_fqn(key, false).unwrap()
             ));
         }
 

@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn test_action2() {
-        let actions =
+        let _actions =
             tinymap::TinyMap::<ActionKey, Box<dyn BaseAction>>::from_iter([Action::<i32>::new(
                 "action0",
                 ActionKey::from(0),

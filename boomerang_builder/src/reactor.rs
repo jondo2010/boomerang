@@ -168,7 +168,7 @@ pub trait ParentReactorBuilder {
 
 /// ReactorBuilder is the Builder-side definition of a Reactor, and is type-erased
 #[derive(Debug)]
-pub(super) struct ReactorBuilder {
+pub struct ReactorBuilder {
     /// The instantiated/child name of the Reactor
     name: String,
     /// The user's Reactor

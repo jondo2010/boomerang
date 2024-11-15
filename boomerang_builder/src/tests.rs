@@ -179,7 +179,7 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
         tracing::info!("Wrote plantuml graph to {path}");
     }
 
-    let (env, reaction_graph, aliases) = env_builder.into_runtime_parts()?;
+    let (env, reaction_graph, _aliases) = env_builder.into_runtime_parts()?;
 
     // r_startup should be triggered by the startup action, but the startup action should not be in its list of actions.
     /*

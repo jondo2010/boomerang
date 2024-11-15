@@ -1,10 +1,8 @@
 use std::io::Write;
 
-use itertools::Itertools;
-use petgraph::prelude::DiGraphMap;
 use slotmap::Key;
 
-use crate::{reactor, BuilderActionKey, BuilderReactorKey, ParentReactorBuilder, TimerSpec};
+use crate::{BuilderActionKey, BuilderReactorKey, TimerSpec};
 
 use super::{
     ActionType, BuilderError, BuilderPortKey, BuilderReactionKey, EnvBuilder, PortType,
@@ -318,12 +316,13 @@ skinparam arrowThickness 1
             _ => {}
         });
 
-        let reaction_graph = self.build_reaction_graph();
-        for (r1, r2, _) in reaction_graph.all_edges() {
-            let r1_id = self.node_id(r1);
-            let r2_id = self.node_id(r2);
-            //writeln!(&mut buf, "{r1_id} -> {r2_id}").unwrap();
-        }
+        //TODO: fix or remove
+        //let reaction_graph = self.build_reaction_graph();
+        //for (r1, r2, _) in reaction_graph.all_edges() {
+        //    let r1_id = self.node_id(r1);
+        //    let r2_id = self.node_id(r2);
+        //    writeln!(&mut buf, "{r1_id} -> {r2_id}").unwrap();
+        //}
 
         buf.write_all(&edge_buf).unwrap();
         self.build_port_bindings(&mut buf).unwrap();

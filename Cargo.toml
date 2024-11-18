@@ -12,7 +12,7 @@ exclude = ['.gitignore', '.cargo/config', '.vscode', '.devcontainer', '.github']
 
 [workspace.dependencies]
 anyhow = "1.0"
-arrow = { version = "52", default-features = false }
+arrow = { version = "53", default-features = false }
 document-features = "0.2"
 erased-serde = "0.4"
 itertools = "0.13"

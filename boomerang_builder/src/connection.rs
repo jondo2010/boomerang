@@ -205,11 +205,12 @@ impl<T: runtime::ReactorData + Clone> BaseConnectionBuilder for ConnectionBuilde
         let target_reactor = &env.reactor_builders[target_port.parent_reactor_key().unwrap()];
 
         // Does the connection cross an enclave boundary?
+        //TODO: This heuristic is not correct for nested enclaves, use the partition map instead.
         let is_enclave = source_port.parent_reactor_key() != target_port.parent_reactor_key()
             && (source_reactor.is_enclave || target_reactor.is_enclave);
 
         if self.after.is_none() && !self.physical && !is_enclave {
-            // Simple case: if the ports are in the same reactor, we can just bind them directly
+            // Simple case, we can just bind them directly
             port_bindings.bind(self.source_key, self.target_key, env)?;
         } else {
             // Ports connected with a delay and/or physical connections are implemented as a pair of Reactions that trigger and react to an action.
@@ -420,7 +421,7 @@ impl<'a, T: runtime::ReactorData + Clone, Q: ActionTag, const ENCLAVE: bool>
             let wrapper = runtime::ReactionAdapter::<ConnectionReceiverReaction<T>, ()>::default();
             builder.add_reaction(name, wrapper)
         };
-        <runtime::InputRef<'a, u32> as ReactionField>::build(
+        <runtime::OutputRef<'a, T> as ReactionField>::build(
             &mut __reaction,
             reactor.output.into(),
             0,

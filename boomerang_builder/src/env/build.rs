@@ -439,9 +439,9 @@ impl EnvBuilder {
 
     /// Convert the [`EnvBuilder`] into a  Vec of [`EnclaveParts`], one for each partition.
     pub fn into_runtime_parts(mut self) -> Result<Vec<EnclaveParts>, BuilderError> {
-        let port_bindings = self.reduce_connections()?;
-
         let partition_map = self.build_partition_map();
+
+        let port_bindings = self.reduce_connections()?;
 
         let reaction_levels = self.build_runtime_level_map(&port_bindings)?;
 
@@ -457,6 +457,7 @@ impl EnvBuilder {
         let mut partitioned_reactors =
             partition_reactor_builders(self.reactor_builders, &partition_map);
 
+        #[cfg(feature = "disable")]
         partition_map
             .iter()
             .map(|(key, _partition)| {

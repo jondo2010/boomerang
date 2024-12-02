@@ -238,8 +238,8 @@ fn test_enclave1() {
     assert_eq!(runtime_parts[1].env.reactors[hello2_key].name(), "hello2");
 }
 
-#[test]
-fn test_enclave2() {
+/// Create a simple ping-pong system with two child enclaves
+fn create_ping_pong() -> EnvBuilder {
     fn ping_pong(
         name: &str,
         is_enclave: bool,
@@ -291,7 +291,7 @@ fn test_enclave2() {
     // build ping and pong as child enclave reactors of main
     let ping = builder.add_child_with(ping_pong("Ping", true)).unwrap();
     let pong = builder.add_child_with(ping_pong("Pong", true)).unwrap();
-    let main = builder.finish().unwrap();
+    let _main = builder.finish().unwrap();
 
     let ping_i1 = env_builder.find_port_by_name("i1", ping).unwrap();
     let ping_o1 = env_builder.find_port_by_name("o1", ping).unwrap();
@@ -305,11 +305,16 @@ fn test_enclave2() {
         .add_port_connection::<(), _, _>(pong_o1, ping_i1, Some(Duration::from_millis(50)), false)
         .unwrap();
 
-    dbg!(&env_builder);
+    env_builder
+}
 
-    let gv = env_builder.create_plantuml_graph().unwrap();
-    let mut f = std::fs::File::create("test_enclave2.puml").unwrap();
-    std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
+#[test]
+fn test_build_partition_map() {
+    let env_builder = create_ping_pong();
+
+    let main = env_builder.find_reactor_by_fqn("main").unwrap();
+    let ping = env_builder.find_reactor_by_fqn("main::Ping").unwrap();
+    let pong = env_builder.find_reactor_by_fqn("main::Pong").unwrap();
 
     let partition_map = env_builder.build_partition_map();
     assert_eq!(partition_map.len(), 3);
@@ -317,6 +322,18 @@ fn test_enclave2() {
     assert_eq!(partition_map[main].first(), Some(&main));
     assert_eq!(partition_map[ping], vec![ping]);
     assert_eq!(partition_map[pong], vec![pong]);
+}
+
+#[cfg(feature = "disable")]
+#[test]
+fn test_enclave2() {
+    let env_builder = create_ping_pong();
+
+    dbg!(&env_builder);
+
+    let gv = env_builder.create_plantuml_graph().unwrap();
+    let mut f = std::fs::File::create("test_enclave2.puml").unwrap();
+    std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
 
     //let reaction_levels = self.build_runtime_level_map()?;
 

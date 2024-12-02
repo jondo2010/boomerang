@@ -548,7 +548,7 @@ impl EnvBuilder {
         graph
     }
 
-    /// Build a DAG of Reactors
+    /// Build a DAG of Reactors from the parent-child relationships
     pub fn build_reactor_graph(&self) -> DiGraphMap<BuilderReactorKey, ()> {
         let mut graph =
             DiGraphMap::from_edges(self.reactor_builders.iter().filter_map(|(key, reactor)| {

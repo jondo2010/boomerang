@@ -8,9 +8,10 @@ use boomerang_runtime::CommonContext;
 use slotmap::SecondaryMap;
 
 use crate::{
-    runtime, ActionTag, BuilderError, BuilderPortKey, BuilderReactorKey, EnvBuilder, Input,
-    Logical, Output, ParentReactorBuilder, Physical, PortType, Reaction, ReactionBuilderState,
-    ReactionField, ReactorBuilderState, ReactorField, TriggerMode, TypedActionKey, TypedPortKey,
+    runtime, ActionTag, BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactorKey,
+    EnvBuilder, Input, Logical, Output, ParentReactorBuilder, Physical, PortType, Reaction,
+    ReactionBuilderState, ReactionField, ReactorBuilderState, ReactorField, TriggerMode,
+    TypedActionKey, TypedPortKey,
 };
 
 #[derive(Debug, Default)]
@@ -214,7 +215,7 @@ impl<T: runtime::ReactorData + Clone> BaseConnectionBuilder for ConnectionBuilde
             port_bindings.bind(self.source_key, self.target_key, env)?;
         } else {
             // Ports connected with a delay and/or physical connections are implemented as a pair of Reactions that trigger and react to an action.
-            let (input_port, output_port) = self.build_delayed_connection(env)?;
+            let (input_port, output_port) = self.build_enclave_receiver(env)?;
             port_bindings.bind(self.source_key, input_port.into(), env)?;
             port_bindings.bind(output_port.into(), self.target_key, env)?;
         }
@@ -224,10 +225,10 @@ impl<T: runtime::ReactorData + Clone> BaseConnectionBuilder for ConnectionBuilde
 }
 
 impl<T: runtime::ReactorData + Clone> ConnectionBuilder<T> {
-    fn build_delayed_connection(
+    fn build_enclave_receiver(
         &self,
         env: &mut EnvBuilder,
-    ) -> Result<(TypedPortKey<T, Input>, TypedPortKey<T, Output>), BuilderError> {
+    ) -> Result<BuilderActionKey, BuilderError> {
         let source_port = &env.port_builders[self.source_key];
         let target_port = &env.port_builders[self.target_key];
 
@@ -241,33 +242,32 @@ impl<T: runtime::ReactorData + Clone> ConnectionBuilder<T> {
                     .to_owned(),
         })?;
 
-        let source_fqn = env.port_fqn(self.source_key, false)?;
-        let target_fqn = env.port_fqn(self.target_key, false)?;
-        let reactor_name = format!("connection_{source_fqn}->{target_fqn}");
+        //let source_fqn = env.port_fqn(self.source_key, false)?;
+        //let target_fqn = env.port_fqn(self.target_key, false)?;
+        //let reactor_name = format!("connection_{source_fqn}->{target_fqn}");
 
-        let (input_port, output_port) = if self.physical {
-            let reactor = <DelayedConnectionBuilder<T, Physical, false> as crate::Reactor>::build(
-                &reactor_name,
-                self.after.unwrap_or_default(),
-                Some(parent_reactor_key),
-                None,
-                false,
-                env,
-            )?;
-            (reactor.input, reactor.output)
+        let mut builder = env.get_reactor_builder(parent_reactor_key)?;
+
+        let action_key: BuilderActionKey = if self.physical {
+            builder
+                .add_physical_action::<T>("con_act", self.after)?
+                .into()
         } else {
-            let reactor = <DelayedConnectionBuilder<T, Logical, false> as crate::Reactor>::build(
-                &reactor_name,
-                self.after.unwrap_or_default(),
-                Some(parent_reactor_key),
-                None,
-                false,
-                env,
-            )?;
-            (reactor.input, reactor.output)
+            builder
+                .add_logical_action::<T>("con_act", self.after)?
+                .into()
         };
 
-        Ok((input_port, output_port))
+        let reaction_key = builder
+            .add_reaction(
+                "con_react",
+                runtime::EnclaveReceiverReactionFn::<T>::default(),
+            )
+            .with_action(action_key, 0, TriggerMode::TriggersAndUses)?
+            .with_port(self.target_key, 0, TriggerMode::EffectsOnly)?
+            .finish()?;
+
+        Ok(action_key)
     }
 }
 

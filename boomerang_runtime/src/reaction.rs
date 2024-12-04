@@ -197,10 +197,17 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for EnclaveSenderReactio
 /// Special type implementing [`ReactionFn`] for receiving data from an another Enclave.
 ///
 /// This is used to implement connections between Ports in different Enclaves.
-#[derive(Default)]
 pub struct EnclaveReceiverReactionFn<T: ReactorData + Clone> {
     /// Marker for the type of data being sent.
     _marker: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T: ReactorData + Clone> Default for EnclaveReceiverReactionFn<T> {
+    fn default() -> Self {
+        Self {
+            _marker: Default::default(),
+        }
+    }
 }
 
 impl<'store, T: ReactorData + Clone> ReactionFn<'store> for EnclaveReceiverReactionFn<T> {

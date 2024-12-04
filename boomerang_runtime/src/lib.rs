@@ -26,8 +26,8 @@ pub use env::{BankInfo, Env, Level, LevelReactionKey, ReactionGraph};
 pub use key_set::KeySetLimits as ReactionSetLimits;
 pub use port::*;
 pub use reaction::{
-    BoxedReactionFn, Deadline, FromRefs, Reaction, ReactionAdapter, ReactionFn, ReactionKey,
-    ReactionSet, Trigger,
+    BoxedReactionFn, Deadline, EnclaveReceiverReactionFn, EnclaveSenderReactionFn, FromRefs,
+    Reaction, ReactionAdapter, ReactionFn, ReactionKey, ReactionSet, Trigger,
 };
 pub use reactor::*;
 pub use refs::{Refs, RefsMut};

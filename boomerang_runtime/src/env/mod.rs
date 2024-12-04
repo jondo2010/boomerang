@@ -1,6 +1,5 @@
 use crate::{
-    event::AsyncEvent, keepalive, ActionKey, BaseAction, BasePort, BaseReactor, PortKey, Reaction,
-    ReactionKey, ReactorKey, SendContext, Tag,
+    event::AsyncEvent, keepalive, ActionKey, AsyncActionRef, BaseAction, BasePort, BaseReactor, PortKey, Reaction, ReactionKey, ReactorData, ReactorKey, SendContext, Tag
 };
 
 mod debug;
@@ -230,6 +229,11 @@ impl Enclave {
         }
     }
 
+    /// Create an [`AsyncActionRef`] for interacting with an action asynchronously.
+    pub fn create_async_action_ref<T: ReactorData>(&self, action_key: ActionKey) -> AsyncActionRef<T> {
+        self.env.actions[action_key].as_ref().into()
+    }
+
     fn validate(&self) {
         itertools::assert_equal(self.env.actions.keys(), self.graph.action_triggers.keys());
         itertools::assert_equal(self.env.ports.keys(), self.graph.port_triggers.keys());
@@ -407,7 +411,7 @@ pub mod tests {
                 "reactionA",
                 EnclaveSenderReactionFn::<u32>::new(
                     enclave_b.create_send_context(),
-                    enclave_b.env.actions[action_b].as_ref().into(),
+                    enclave_b.create_async_action_ref(action_b),
                     Some(Duration::from_millis(500)),
                 ),
                 None,

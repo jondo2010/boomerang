@@ -457,6 +457,8 @@ impl EnvBuilder {
         let mut partitioned_reactors =
             partition_reactor_builders(self.reactor_builders, &partition_map);
 
+        todo!();
+
         #[cfg(feature = "disable")]
         partition_map
             .iter()
@@ -553,7 +555,6 @@ impl EnvBuilder {
                         (level, reaction_key)
                     })
                     .collect();
-
 
                 // Sanity checks:
                 assert_eq!(runtime_port_triggers.len(), runtime_ports.len());

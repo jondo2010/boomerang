@@ -441,6 +441,11 @@ impl EnvBuilder {
     pub fn into_runtime_parts(mut self) -> Result<Vec<EnclaveParts>, BuilderError> {
         let partition_map = self.build_partition_map();
 
+        let partitions: SecondaryMap<BuilderReactorKey, runtime::Enclave> = partition_map
+            .keys()
+            .map(|reactor_key| (reactor_key, runtime::Enclave::default()))
+            .collect();
+
         let port_bindings = self.reduce_connections()?;
 
         let reaction_levels = self.build_runtime_level_map(&port_bindings)?;

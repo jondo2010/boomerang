@@ -225,13 +225,9 @@ impl<T: runtime::ReactorData + Clone> BaseConnectionBuilder for ConnectionBuilde
 }
 
 impl<T: runtime::ReactorData + Clone> ConnectionBuilder<T> {
-    fn build_enclave_receiver(
-        &self,
-        env: &mut EnvBuilder,
-    ) -> Result<BuilderActionKey, BuilderError> {
+    fn parent_reactor(&self, env: &mut EnvBuilder) -> Result<BuilderReactorKey, BuilderError> {
         let source_port = &env.port_builders[self.source_key];
         let target_port = &env.port_builders[self.target_key];
-
         let parent_reactor_key = env
             .common_reactor_key(source_port, target_port)
             .ok_or(BuilderError::PortConnectionError {
@@ -241,11 +237,21 @@ impl<T: runtime::ReactorData + Clone> ConnectionBuilder<T> {
                 "Ports must belong to the same reactor or a common parent reactor to be connected"
                     .to_owned(),
         })?;
+        Ok(parent_reactor_key)
+    }
 
+    /// Add the receiver-side of an Enclave connection into the `EnvBuilder`.
+    ///
+    /// This consists of an Action that triggers a Reaction that writes to the target port.
+    fn build_enclave_receiver(
+        &self,
+        env: &mut EnvBuilder,
+    ) -> Result<BuilderActionKey, BuilderError> {
         //let source_fqn = env.port_fqn(self.source_key, false)?;
         //let target_fqn = env.port_fqn(self.target_key, false)?;
         //let reactor_name = format!("connection_{source_fqn}->{target_fqn}");
 
+        let parent_reactor_key = self.parent_reactor(env)?;
         let mut builder = env.get_reactor_builder(parent_reactor_key)?;
 
         let action_key: BuilderActionKey = if self.physical {
@@ -268,6 +274,26 @@ impl<T: runtime::ReactorData + Clone> ConnectionBuilder<T> {
             .finish()?;
 
         Ok(action_key)
+    }
+
+    /// Add the sender-side of an Enclave connection into the `EnvBuilder`.
+    fn build_enclave_sender(&self, env: &mut EnvBuilder, enclaves: &SecondaryMap<BuilderReactorKey, runtime::Enclave>) -> Result<(), BuilderError> {
+        let parent_reactor_key = self.parent_reactor(env)?;
+        let mut builder = env.get_reactor_builder(parent_reactor_key)?;
+
+        let reaction_key = builder
+            .add_reaction(
+                "con_react2",
+                runtime::EnclaveSenderReactionFn::<T>::new(
+                    enclave_b.create_send_context(),
+                    enclave_b.create_async_action_ref(action_b),
+                    Some(Duration::from_millis(500)),
+                ),
+            )
+            .with_port(self.source_key, 0, TriggerMode::TriggersAndUses)?
+            .finish()?;
+
+        Ok(())
     }
 }
 

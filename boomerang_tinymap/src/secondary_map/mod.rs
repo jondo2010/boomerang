@@ -8,6 +8,8 @@ use std::{
 use super::Key;
 
 mod iter_many;
+//#[cfg(feature = "rayon")]
+//mod par_iter;
 #[cfg(feature = "serde")]
 mod serde_impl;
 

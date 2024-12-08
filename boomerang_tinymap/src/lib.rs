@@ -44,8 +44,7 @@ macro_rules! key_type {
 
         impl std::fmt::Display for $name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                let ty = std::any::type_name::<Self>();
-                write!(f, "{ty}::from({})", $crate::Key::index(self))
+                write!(f, "{}({})", stringify!($name), self.0)
             }
         }
     };

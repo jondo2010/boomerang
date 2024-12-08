@@ -1,6 +1,6 @@
 use std::{iter, time::Duration};
 
-use boomerang_runtime::{ActionCommon, ContextCommon};
+use boomerang_runtime::{ActionCommon, CommonContext};
 
 use super::*;
 use crate::runtime;
@@ -9,18 +9,20 @@ use crate::runtime;
 #[test]
 fn test_reaction_ports() -> anyhow::Result<()> {
     let mut env_builder = EnvBuilder::new();
-    let mut builder_a = env_builder.add_reactor("reactorA", None, None, ());
+    let mut builder_a = env_builder.add_reactor("reactorA", None, None, (), false);
     let port_a = builder_a.add_input_port::<()>("portA").unwrap();
     let port_b = builder_a.add_output_port::<()>("portB").unwrap();
     let port_c = builder_a.add_input_port::<()>("portC").unwrap();
     let reaction_a = builder_a
-        .add_reaction("reactionA", reaction_closure!())
+        .add_reaction("reactionA", |_| runtime::reaction_closure!().into())
         .with_port(port_a, 0, TriggerMode::TriggersOnly)?
         .with_port(port_b, 0, TriggerMode::EffectsOnly)?
         .with_port(port_c, 0, TriggerMode::UsesOnly)?
         .finish()?;
+    let reactor_a = builder_a.finish()?;
 
-    let (_env, triggers, aliases) = env_builder.into_runtime_parts().unwrap();
+    let runtime_parts = env_builder.into_runtime_parts().unwrap();
+    let EnclaveParts { enclave, aliases } = &runtime_parts[0];
 
     let reaction_a = aliases.reaction_aliases[reaction_a];
     let port_a = aliases.port_aliases[port_a.into()];
@@ -29,19 +31,19 @@ fn test_reaction_ports() -> anyhow::Result<()> {
 
     // reactionA should "use" (be able to read from) portC
     itertools::assert_equal(
-        triggers.reaction_use_ports[reaction_a].iter(),
+        enclave.graph.reaction_use_ports[reaction_a].iter(),
         iter::once(port_c),
     );
 
     // reactionA should "effect" (be able to write to) portB
     itertools::assert_equal(
-        triggers.reaction_effect_ports[reaction_a].iter(),
+        enclave.graph.reaction_effect_ports[reaction_a].iter(),
         iter::once(port_b),
     );
 
     // portA should trigger only reactionA
     itertools::assert_equal(
-        triggers.port_triggers[port_a]
+        enclave.graph.port_triggers[port_a]
             .iter()
             .map(|(_, reaction_key)| reaction_key),
         iter::once(&reaction_a),
@@ -49,7 +51,7 @@ fn test_reaction_ports() -> anyhow::Result<()> {
 
     // portB should not trigger any reactions
     itertools::assert_equal(
-        triggers.port_triggers[port_b]
+        enclave.graph.port_triggers[port_b]
             .iter()
             .map(|(_, reaction_key)| reaction_key),
         iter::empty::<&runtime::ReactionKey>(),
@@ -57,7 +59,7 @@ fn test_reaction_ports() -> anyhow::Result<()> {
 
     // portC should not trigger any reactions
     itertools::assert_equal(
-        triggers.port_triggers[port_c]
+        enclave.graph.port_triggers[port_c]
             .iter()
             .map(|(_, reaction_key)| reaction_key),
         iter::empty::<&runtime::ReactionKey>(),
@@ -71,7 +73,7 @@ fn test_reaction_ports() -> anyhow::Result<()> {
 fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
     let mut env_builder = EnvBuilder::new();
 
-    let mut builder_main = env_builder.add_reactor("main", None, None, 0u32);
+    let mut builder_main = env_builder.add_reactor("main", None, None, 0u32, false);
     let clock = builder_main.add_logical_action::<u32>("clock", None)?;
     let a = builder_main.add_logical_action::<()>("a", None)?;
     let t = builder_main.add_timer(
@@ -88,25 +90,26 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
     let _r_startup = builder_main
         .add_reaction(
             "startup",
-            reaction_closure!(ctx, _state, inputs, outputs, actions => {
-                    assert_eq!(inputs.len(), 0);
-                    assert_eq!(outputs.len(), 0);
-                    assert_eq!(actions.len(), 2);
+            |_|
+            runtime::reaction_closure!(ctx, _state, inputs, outputs, actions => {
+                assert_eq!(inputs.len(), 0);
+                assert_eq!(outputs.len(), 0);
+                assert_eq!(actions.len(), 2);
 
-                    let (mut clock, mut a): (runtime::ActionRef<u32>, runtime::ActionRef<()>) = actions.partition_mut().unwrap();
+                println!("startup");
+                let (mut clock, mut a): (runtime::ActionRef<u32>, runtime::ActionRef<()>) = actions.partition_mut().unwrap();
 
-                    a.schedule(ctx, (), Some(Duration::from_millis(3))); // out of order on purpose
-                    a.schedule(ctx, (), Some(Duration::from_millis(1)));
-                    a.schedule(ctx, (), Some(Duration::from_millis(5)));
+                ctx.schedule_action(&mut a, (), Some(Duration::from_millis(3))); // out of order on purpose
+                ctx.schedule_action(&mut a, (), Some(Duration::from_millis(1)));
+                ctx.schedule_action(&mut a, (), Some(Duration::from_millis(5)));
 
-                    // not scheduled on milli 1 (action is)
-                    clock.schedule(ctx, 2, Some(Duration::from_millis(2)));
-                    clock.schedule(ctx, 3, Some(Duration::from_millis(3)));
-                    clock.schedule(ctx, 4, Some(Duration::from_millis(4)));
-                    clock.schedule(ctx, 5, Some(Duration::from_millis(5)));
-                    // not scheduled on milli 6 (timer is)
-                }
-            ),
+                // not scheduled on milli 1 (action is)
+                ctx.schedule_action(&mut clock, 2, Some(Duration::from_millis(2)));
+                ctx.schedule_action(&mut clock, 3, Some(Duration::from_millis(3)));
+                ctx.schedule_action(&mut clock, 4, Some(Duration::from_millis(4)));
+                ctx.schedule_action(&mut clock, 5, Some(Duration::from_millis(5)));
+                // not scheduled on milli 6 (timer is)
+            }).into(),
         )
         .with_action(startup_action, 0, TriggerMode::TriggersOnly)?
         .with_action(clock, 0, TriggerMode::EffectsOnly)?
@@ -117,11 +120,11 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
     let _r_clock = builder_main
         .add_reaction(
             "clock",
-            reaction_closure!(ctx, reactor, _inputs, _outputs, actions => {
+            |_| runtime::reaction_closure!(ctx, reactor, _inputs, _outputs, actions => {
                 let (mut clock, mut a, mut t): (runtime::ActionRef<u32>, runtime::ActionRef<()>, runtime::ActionRef<()>) = actions.partition_mut().unwrap();
                 let reactor: &mut runtime::Reactor<u32> = reactor.downcast_mut().unwrap();
 
-                match clock.get_value(ctx) {
+                match ctx.get_action_value(&mut clock) {
                     Some(2) | Some(4) => {
                         assert!(t.is_present(ctx)); // t is there on even millis
                         assert!(!a.is_present(ctx)); //
@@ -134,7 +137,7 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
                 }
 
                 reactor.state += 1;
-            }),
+            }).into(),
         )
         .with_action(clock, 0, TriggerMode::TriggersAndUses)?
         .with_action(a, 0, TriggerMode::UsesOnly)?
@@ -143,14 +146,14 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
 
     // reaction(shutdown) {= =}
     let _r_shutdown = builder_main
-        .add_reaction(
-            "shutdown",
-            reaction_closure!(_ctx, reactor, _inputs, _outputs, _actions => {
+        .add_reaction("shutdown", |_| {
+            runtime::reaction_closure!(_ctx, reactor, _inputs, _outputs, _actions => {
                 let reactor: &mut runtime::Reactor<u32> = reactor.downcast_mut().unwrap();
                 assert_eq!(reactor.state, 4);
                 println!("success");
-            }),
-        )
+            })
+            .into()
+        })
         .with_action(shutdown_action, 0, TriggerMode::TriggersOnly)?
         .finish()?;
 
@@ -160,17 +163,17 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
     {
         let name = "test_dependency_use_on_logical_action";
 
-        let gv = graphviz::create_full_graph(&env_builder)?;
-        let path = format!("{name}.dot");
-        let mut f = std::fs::File::create(&path)?;
-        std::io::Write::write_all(&mut f, gv.as_bytes())?;
-        tracing::info!("Wrote full graph to {path}");
+        //let gv = graphviz::create_full_graph(&env_builder)?;
+        //let path = format!("{name}.dot");
+        //let mut f = std::fs::File::create(&path)?;
+        //std::io::Write::write_all(&mut f, gv.as_bytes())?;
+        //tracing::info!("Wrote full graph to {path}");
 
-        let gv = graphviz::create_reaction_graph(&env_builder)?;
-        let path = format!("{name}_levels.dot");
-        let mut f = std::fs::File::create(&path)?;
-        std::io::Write::write_all(&mut f, gv.as_bytes())?;
-        tracing::info!("Wrote reaction graph to {path}");
+        //let gv = graphviz::create_reaction_graph(&env_builder)?;
+        //let path = format!("{name}_levels.dot");
+        //let mut f = std::fs::File::create(&path)?;
+        //std::io::Write::write_all(&mut f, gv.as_bytes())?;
+        //tracing::info!("Wrote reaction graph to {path}");
 
         let graph = env_builder.create_plantuml_graph()?;
         let path = format!("{name}.puml");
@@ -179,7 +182,8 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
         tracing::info!("Wrote plantuml graph to {path}");
     }
 
-    let (env, reaction_graph, _aliases) = env_builder.into_runtime_parts()?;
+    let mut runtime_parts = env_builder.into_runtime_parts()?;
+    let EnclaveParts { enclave, aliases } = runtime_parts.remove(0);
 
     // r_startup should be triggered by the startup action, but the startup action should not be in its list of actions.
     /*
@@ -204,7 +208,7 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(Duration::from_secs(1));
-    let mut sched = runtime::Scheduler::new(env, reaction_graph, config);
+    let mut sched = runtime::Scheduler::new(enclave, config);
     sched.event_loop();
 
     Ok(())
@@ -214,11 +218,11 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
 #[test]
 fn test_dependency_use_accessible() -> anyhow::Result<()> {
     let mut env_builder = EnvBuilder::new();
-    let mut builder = env_builder.add_reactor("main", None, None, ());
+    let mut builder = env_builder.add_reactor("main", None, None, (), false);
 
     let source_reactor = builder
         .add_child_with(|parent, env| {
-            let mut builder = env.add_reactor("Source", Some(parent), None, ());
+            let mut builder = env.add_reactor("Source", Some(parent), None, (), false);
             let clock = builder.add_output_port::<u32>("clock")?;
             let o1 = builder.add_output_port::<u32>("o1")?;
             let o2 = builder.add_output_port::<u32>("o2")?;
@@ -242,23 +246,22 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
                 .unwrap();
             let startup_action = builder.get_startup_action();
             let _ = builder
-                .add_reaction(
-                    "startup",
-                    reaction_closure!(ctx, _state, _ref_ports, mut_ports, _actions => {
+                .add_reaction("startup", |_| {
+                    runtime::reaction_closure!(ctx, _state, _ref_ports, mut_ports, _actions => {
                         let mut clock: runtime::OutputRef<u32> = mut_ports.partition_mut().unwrap();
                         assert_eq!(clock.name(), "clock");
                         *clock = Some(0);
                         ctx.schedule_shutdown(Some(Duration::from_millis(140)));
-                    }),
-                )
+                    })
+                    .into()
+                })
                 .with_action(startup_action, 0, TriggerMode::TriggersOnly)?
                 .with_port(clock, 0, TriggerMode::EffectsOnly)?
                 .finish()?;
 
             let _ = builder
-                .add_reaction(
-                    "reaction_t1",
-                    reaction_closure!(_ctx, _state, _ref_ports, mut_ports, actions => {
+                .add_reaction("reaction_t1", |_| {
+                    runtime::reaction_closure!(_ctx, _state, _ref_ports, mut_ports, actions => {
                         let [mut clock, mut o1]: [runtime::OutputRef<u32>; 2] =
                             mut_ports.partition_mut().unwrap();
 
@@ -270,17 +273,17 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
 
                         let t1: runtime::ActionRef = actions.partition_mut().unwrap();
                         assert_eq!(t1.name(), "t1");
-                    }),
-                )
+                    })
+                    .into()
+                })
                 .with_action(t1, 0, TriggerMode::TriggersAndUses)?
                 .with_port(clock, 0, TriggerMode::EffectsOnly)?
                 .with_port(o1, 0, TriggerMode::EffectsOnly)?
                 .finish()?;
 
             let _ = builder
-                .add_reaction(
-                    "reaction_t2",
-                    reaction_closure!(_ctx, _state, _ref_ports, mut_ports, _actions => {
+                .add_reaction("reaction_t2", |_| {
+                    runtime::reaction_closure!(_ctx, _state, _ref_ports, mut_ports, _actions => {
                         let [mut clock, o2]: [runtime::OutputRef<u32>; 2] =
                             mut_ports.partition_mut().unwrap();
 
@@ -289,8 +292,9 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
 
                         assert_eq!(o2.name(), "o2");
                         // we purposefully do not set o2
-                    }),
-                )
+                    })
+                    .into()
+                })
                 .with_action(t2, 0, TriggerMode::TriggersOnly)?
                 .with_port(clock, 0, TriggerMode::EffectsOnly)?
                 .with_port(o2, 0, TriggerMode::EffectsOnly)?
@@ -301,14 +305,13 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
         .unwrap();
 
     let sink_reactor = builder.add_child_with(|parent, env| {
-        let mut builder = env.add_reactor("Sink", Some(parent), None, ());
+        let mut builder = env.add_reactor("Sink", Some(parent), None, (), false);
         let clock = builder.add_input_port::<u32>("clock").unwrap();
         let in1 = builder.add_input_port::<u32>("in1").unwrap();
         let in2 = builder.add_input_port::<u32>("in2").unwrap();
         let _ = builder
-            .add_reaction(
-                "reaction_clock",
-                reaction_closure!(_ctx, _state, ref_ports, _mut_ports, _actions => {
+            .add_reaction("reaction_clock", |_| {
+                runtime::reaction_closure!(_ctx, _state, ref_ports, _mut_ports, _actions => {
                     let [clock, in1, in2]: [runtime::InputRef<u32>; 3] =
                         ref_ports.partition().unwrap();
                     assert_eq!(clock.name(), "clock");
@@ -326,8 +329,9 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
                         }
                         c => panic!("No such signal expected {:?}", c),
                     }
-                }),
-            )
+                })
+                .into()
+            })
             .with_port(clock, 0, TriggerMode::TriggersAndUses)?
             .with_port(in1, 0, TriggerMode::UsesOnly)?
             .with_port(in2, 0, TriggerMode::UsesOnly)?
@@ -340,15 +344,15 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
 
     let clock_source = env_builder.find_port_by_name("clock", source_reactor)?;
     let clock_sink = env_builder.find_port_by_name("clock", sink_reactor)?;
-    env_builder.bind_port(clock_source, clock_sink)?;
+    env_builder.add_port_connection::<u32, _, _>(clock_source, clock_sink, None, false)?;
 
     let o1_source = env_builder.find_port_by_name("o1", source_reactor)?;
     let in1_sink = env_builder.find_port_by_name("in1", sink_reactor)?;
-    env_builder.bind_port(o1_source, in1_sink)?;
+    env_builder.add_port_connection::<u32, _, _>(o1_source, in1_sink, None, false)?;
 
     let o2_source = env_builder.find_port_by_name("o2", source_reactor)?;
     let in2_sink = env_builder.find_port_by_name("in2", sink_reactor)?;
-    env_builder.bind_port(o2_source, in2_sink)?;
+    env_builder.add_port_connection::<u32, _, _>(o2_source, in2_sink, None, false)?;
 
     #[cfg(feature = "graphviz")]
     {
@@ -387,12 +391,13 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
     let reaction_sink_clock_key =
         env_builder.find_reaction_by_name("reaction_clock", sink_reactor)?;
 
-    let (env, triggers, aliases) = env_builder.into_runtime_parts()?;
+    let mut runtime_parts = env_builder.into_runtime_parts()?;
+    let EnclaveParts { enclave, aliases } = runtime_parts.remove(0);
 
     // the Source startup reaction should trigger on startup and effect the clock port
     let runtime_reaction_source_startup_key = aliases.reaction_aliases[reaction_source_startup_key];
     itertools::assert_equal(
-        triggers.reaction_effect_ports[runtime_reaction_source_startup_key].iter(),
+        enclave.graph.reaction_effect_ports[runtime_reaction_source_startup_key].iter(),
         [aliases.port_aliases[clock_source]],
     );
 
@@ -400,7 +405,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
 
     // The clock reaction should only be triggered by the `clock` port, not the `in1` or `in2` ports.
     itertools::assert_equal(
-        triggers.port_triggers[aliases.port_aliases[clock_sink]]
+        enclave.graph.port_triggers[aliases.port_aliases[clock_sink]]
             .iter()
             .map(|(_, reaction_key)| reaction_key),
         &[runtime_reaction_sink_clock_key],
@@ -408,7 +413,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
 
     // The clock reaction should have the `clock`, `in1`, and `in2` ports as use ports.
     itertools::assert_equal(
-        triggers.reaction_use_ports[runtime_reaction_sink_clock_key].iter(),
+        enclave.graph.reaction_use_ports[runtime_reaction_sink_clock_key].iter(),
         [
             aliases.port_aliases[clock_source],
             aliases.port_aliases[in1_sink],
@@ -418,12 +423,12 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
 
     // The clock reaction should not have any effect ports.
     itertools::assert_equal(
-        triggers.reaction_effect_ports[runtime_reaction_sink_clock_key].iter(),
+        enclave.graph.reaction_effect_ports[runtime_reaction_sink_clock_key].iter(),
         [],
     );
 
     let config = runtime::Config::default().with_fast_forward(true);
-    let mut sched = runtime::Scheduler::new(env, triggers, config);
+    let mut sched = runtime::Scheduler::new(enclave, config);
     sched.event_loop();
 
     Ok(())

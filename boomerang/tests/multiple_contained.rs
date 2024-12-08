@@ -35,7 +35,7 @@ struct ReactionIn1<'a> {
 
 impl runtime::Trigger<()> for ReactionIn1<'_> {
     fn trigger(self, _ctx: &mut runtime::Context, _state: &mut ()) {
-        //println!("{} received {:?}", self.in1.get_name(), *self.in1);
+        println!("{} received {:?}", self.in1.name(), *self.in1);
         assert_eq!(*self.in1, Some(42), "FAILED: Expected 42.");
     }
 }
@@ -48,15 +48,15 @@ struct ReactionIn2<'a> {
 
 impl runtime::Trigger<()> for ReactionIn2<'_> {
     fn trigger(self, _ctx: &mut runtime::Context, _state: &mut ()) {
-        //println!("{} received {:?}", self.in2.get_name(), *self.in2.get());
+        println!("{} received {:?}", self.in2.name(), *self.in2);
         assert_eq!(*self.in2, Some(42), "FAILED: Expected 42.");
     }
 }
 
 #[derive(Reactor)]
-#[reactor(state = "()", reaction = "ReactionCTrigger")]
+#[reactor(state = (), reaction = ReactionCTrigger)]
 struct MultipleContained {
-    #[reactor(child = "()")]
+    #[reactor(child(state = ()))]
     c: Contained,
 }
 

@@ -1,9 +1,13 @@
+use std::{collections::BTreeMap, time::Duration};
+
 use crate::{
-    key_set::KeySetLimits, ActionKey, BaseAction, BasePort, BaseReactor, PortKey, Reaction,
-    ReactionKey, ReactorKey,
+    event::AsyncEvent, keepalive, ActionKey, AsyncActionRef, BaseAction, BasePort, BaseReactor,
+    PortKey, Reaction, ReactionKey, ReactorData, ReactorKey, SendContext, Tag,
 };
 
 mod debug;
+#[cfg(test)]
+pub mod tests;
 
 /// Execution level
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
@@ -50,6 +54,7 @@ pub type LevelReactionKey = (Level, ReactionKey);
 /// `Env` stores the resolved runtime state of all the reactors.
 ///
 /// The reactor heirarchy has been flattened and build by the builder methods.
+#[derive(Default)]
 pub struct Env {
     /// The runtime set of Reactors
     pub reactors: tinymap::TinyMap<ReactorKey, Box<dyn BaseReactor>>,
@@ -86,18 +91,19 @@ pub struct BankInfo {
 /// Maps of triggers for actions and ports. This data is statically resolved by the builder from the
 /// reaction graph.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Default)]
 pub struct ReactionGraph {
-    /// For each Action, a set of Reactions triggered by it.
+    /// For each Action, a set of Reactions it triggers
     pub action_triggers: tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
-    /// Global port triggers
+    /// For each Port, a set of Reactions it triggers
     pub port_triggers: tinymap::TinySecondaryMap<PortKey, Vec<LevelReactionKey>>,
-    /// Global startup reactions
-    pub startup_reactions: Vec<LevelReactionKey>,
+
+    /// Global startup reactions, keyed by delay
+    pub startup_reactions: BTreeMap<Duration, Vec<LevelReactionKey>>,
+
     /// Global shutdown reactions
     pub shutdown_reactions: Vec<LevelReactionKey>,
-    /// The maximum level of any reaction, and the total number of reactions. This is used to
-    /// allocate the reaction set.
-    pub reaction_set_limits: KeySetLimits,
+
     /// For each reaction, the set of 'use' ports
     pub reaction_use_ports: tinymap::TinySecondaryMap<ReactionKey, tinymap::KeySet<PortKey>>,
     /// For each reaction, the set of 'effect' ports
@@ -110,71 +116,179 @@ pub struct ReactionGraph {
     pub reactor_bank_infos: tinymap::TinySecondaryMap<ReactorKey, Option<BankInfo>>,
 }
 
-#[cfg(test)]
-pub mod tests {
-    use itertools::Itertools;
+/// An Enclave is the self-contained runtime data fed into a single scheduler instance.
+#[derive(Debug)]
+pub struct Enclave {
+    /// The runtime environment
+    pub env: Env,
+    /// The reaction graph
+    pub graph: ReactionGraph,
+    /// The event channel for injecting events into the scheduler
+    pub event_tx: crate::Sender<AsyncEvent>,
+    /// The event receiver for receiving events into the scheduler
+    pub event_rx: crate::Receiver<AsyncEvent>,
+    /// The senders to downstream enclaves for granted tag advances
+    pub downstream_tx: Vec<crate::Sender<Tag>>,
+    /// The receivers from upstream enclaves for for granted tag advances
+    pub upstream_rx: Vec<crate::Receiver<Tag>>,
+    /// The shutdown channel for the scheduler
+    pub shutdown_tx: keepalive::Sender,
+    /// The shutdown receiver for the scheduler
+    pub shutdown_rx: keepalive::Receiver,
+}
 
-    use crate::{Action, BaseReactor, Context, Port, ReactionSetLimits, Reactor};
+impl Default for Enclave {
+    fn default() -> Self {
+        let (event_tx, event_rx) = crossbeam_channel::bounded(1);
+        let (shutdown_tx, shutdown_rx) = keepalive::channel();
+        Self {
+            env: Default::default(),
+            graph: Default::default(),
+            event_tx,
+            event_rx,
+            downstream_tx: vec![],
+            upstream_rx: vec![],
+            shutdown_tx,
+            shutdown_rx,
+        }
+    }
+}
 
-    use super::*;
-
-    /// An empty reaction function for testing.
-    pub fn dummy_reaction_fn<'a>(
-        _context: &'a mut Context,
-        _reactor: &'a mut dyn BaseReactor,
-        _ref_ports: crate::refs::Refs<'a, dyn BasePort>,
-        _mut_ports: crate::refs::RefsMut<'a, dyn BasePort>,
-        _actions: crate::refs::RefsMut<'a, dyn BaseAction>,
-    ) {
+impl Enclave {
+    pub fn insert_reactor(
+        &mut self,
+        reactor: Box<dyn BaseReactor>,
+        bank_info: Option<BankInfo>,
+    ) -> ReactorKey {
+        let reactor_key = self.env.reactors.insert(reactor);
+        self.graph.reactor_bank_infos.insert(reactor_key, bank_info);
+        reactor_key
     }
 
-    /// Create a dummy `Env` and `ReactionGraph` for testing.
-    pub fn create_dummy_env() -> (Env, ReactionGraph) {
-        let env = Env {
-            reactors: [Reactor::new("dummy", ()).boxed()].into_iter().collect(),
-            reactions: [Reaction::new("dummy", Box::new(dummy_reaction_fn), None)]
-                .into_iter()
-                .collect(),
-            actions: [
-                Action::<()>::new("action0", ActionKey::from(0), Default::default(), true).boxed(),
-                Action::<()>::new("action1", ActionKey::from(1), Default::default(), true).boxed(),
-            ]
-            .into_iter()
-            .collect(),
-            ports: [
-                Port::<u32>::new("port0", PortKey::from(0)).boxed(),
-                Port::<u32>::new("port1", PortKey::from(1)).boxed(),
-            ]
-            .into_iter()
-            .collect(),
-        };
+    pub fn insert_action<F>(&mut self, action_fn: F) -> ActionKey
+    where
+        F: FnOnce(ActionKey) -> Box<dyn BaseAction>,
+    {
+        let action_key = self.env.actions.insert_with_key(action_fn);
+        self.graph.action_triggers.insert(action_key, vec![]);
+        action_key
+    }
 
-        let reactor_key = env.reactors.keys().next().unwrap();
-        let reaction_key = env.reactions.keys().next().unwrap();
-        let action_keys = env.actions.keys().collect_vec();
-        let port_keys = env.ports.keys().collect_vec();
+    pub fn insert_port<F>(&mut self, port_fn: F) -> PortKey
+    where
+        F: FnOnce(PortKey) -> Box<dyn BasePort>,
+    {
+        let port_key = self.env.ports.insert_with_key(port_fn);
+        self.graph.port_triggers.insert(port_key, vec![]);
+        port_key
+    }
 
-        let reaction_graph = ReactionGraph {
-            action_triggers: tinymap::TinySecondaryMap::new(),
-            port_triggers: tinymap::TinySecondaryMap::new(),
-            startup_reactions: Vec::new(),
-            shutdown_reactions: Vec::new(),
-            reaction_set_limits: ReactionSetLimits {
-                max_level: 0.into(),
-                num_keys: 0,
-            },
-            reaction_use_ports: [(reaction_key, std::iter::once(port_keys[0]).collect())]
-                .into_iter()
-                .collect(),
-            reaction_effect_ports: [(reaction_key, std::iter::once(port_keys[1]).collect())]
-                .into_iter()
-                .collect(),
-            reaction_actions: [(reaction_key, action_keys.into_iter().collect())]
-                .into_iter()
-                .collect(),
-            reaction_reactors: [(reaction_key, reactor_key)].into_iter().collect(),
-            reactor_bank_infos: tinymap::TinySecondaryMap::new(),
-        };
-        (env, reaction_graph)
+    pub fn insert_reaction(
+        &mut self,
+        reaction: Reaction,
+        reactor_key: ReactorKey,
+        use_ports: impl IntoIterator<Item = PortKey>,
+        effect_ports: impl IntoIterator<Item = PortKey>,
+        actions: impl IntoIterator<Item = ActionKey>,
+    ) -> ReactionKey {
+        let reaction_key = self.env.reactions.insert(reaction);
+        self.graph
+            .reaction_use_ports
+            .insert(reaction_key, use_ports.into_iter().collect());
+        self.graph
+            .reaction_effect_ports
+            .insert(reaction_key, effect_ports.into_iter().collect());
+        self.graph
+            .reaction_actions
+            .insert(reaction_key, actions.into_iter().collect());
+        self.graph
+            .reaction_reactors
+            .insert(reaction_key, reactor_key);
+        reaction_key
+    }
+
+    pub fn insert_startup_reaction(
+        &mut self,
+        level_reaction_key: LevelReactionKey,
+        delay: Option<Duration>,
+    ) {
+        self.graph
+            .startup_reactions
+            .entry(delay.unwrap_or_default())
+            .or_default()
+            .push(level_reaction_key);
+    }
+
+    /// Insert a `LevelReactionKey` that is triggered on shutdown.
+    pub fn insert_shutdown_reaction(&mut self, level_reaction_key: LevelReactionKey) {
+        self.graph.shutdown_reactions.push(level_reaction_key);
+    }
+
+    /// Insert a `LevelReactionKey` that is triggered by a port.
+    pub fn insert_port_trigger(&mut self, port_key: PortKey, trigger: LevelReactionKey) {
+        let triggers = self
+            .graph
+            .port_triggers
+            .get_mut(port_key)
+            .expect("port not found");
+        triggers.push(trigger);
+    }
+
+    /// Insert a `LevelReactionKey` that is triggered by an action.
+    pub fn insert_action_trigger(&mut self, action_key: ActionKey, trigger: LevelReactionKey) {
+        let triggers = self
+            .graph
+            .action_triggers
+            .get_mut(action_key)
+            .expect("action not found");
+        triggers.push(trigger);
+    }
+
+    /// Link this enclave to an upstream enclave.
+    pub fn link_upstream(&mut self, upstream: &mut Self) {
+        let (tag_tx, tag_rx) = crossbeam_channel::bounded(1);
+        upstream.downstream_tx.push(tag_tx);
+        self.upstream_rx.push(tag_rx);
+    }
+
+    /// Create a [`SendContext`] for sending events into the scheduler.
+    pub fn create_send_context(&self) -> SendContext {
+        SendContext {
+            async_tx: self.event_tx.clone(),
+            shutdown_rx: self.shutdown_rx.clone(),
+        }
+    }
+
+    /// Create an [`AsyncActionRef`] for interacting with an action asynchronously.
+    pub fn create_async_action_ref<T: ReactorData>(
+        &self,
+        action_key: ActionKey,
+    ) -> AsyncActionRef<T> {
+        self.env.actions[action_key].as_ref().into()
+    }
+
+    fn validate(&self) {
+        itertools::assert_equal(self.env.actions.keys(), self.graph.action_triggers.keys());
+        itertools::assert_equal(self.env.ports.keys(), self.graph.port_triggers.keys());
+        itertools::assert_equal(
+            self.env.reactions.keys(),
+            self.graph.reaction_use_ports.keys(),
+        );
+        itertools::assert_equal(
+            self.env.reactions.keys(),
+            self.graph.reaction_effect_ports.keys(),
+        );
+        itertools::assert_equal(
+            self.env.reactions.keys(),
+            self.graph.reaction_actions.keys(),
+        );
+        itertools::assert_equal(
+            self.env.reactions.keys(),
+            self.graph.reaction_reactors.keys(),
+        );
+        itertools::assert_equal(
+            self.env.reactors.keys(),
+            self.graph.reactor_bank_infos.keys(),
+        );
     }
 }

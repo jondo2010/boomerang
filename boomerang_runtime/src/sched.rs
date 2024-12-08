@@ -1,8 +1,11 @@
-use crossbeam_channel::{Receiver, RecvTimeoutError};
 use std::{collections::BinaryHeap, pin::Pin, time::Duration};
+
+use crossbeam_channel::RecvTimeoutError;
+use itertools::Itertools;
 
 use crate::{
     build_reaction_contexts,
+    env::Enclave,
     event::{AsyncEvent, ScheduledEvent},
     keepalive,
     key_set::KeySetView,
@@ -78,7 +81,7 @@ impl EventQueue {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Config {
     /// Whether to skip wall-clock synchronization (execute as fast as possible)
     pub fast_forward: bool,
@@ -130,6 +133,73 @@ impl Config {
 }
 
 #[derive(Debug)]
+struct LogicalTimeBarrier {
+    /// The last released tag
+    released_tag: Tag,
+    /// Receiver for upstream released tags
+    upstream_rx: crate::Receiver<Tag>,
+}
+
+impl LogicalTimeBarrier {
+    pub fn release_tag(&mut self, tag: Tag) {
+        tracing::trace!(tag = %tag, "Release tag");
+        assert!(
+            tag >= self.released_tag,
+            "Cannot release a tag earlier than the last released tag"
+        );
+        self.released_tag = tag;
+    }
+
+    #[inline]
+    /// Try to acquire the given tag without blocking.
+    pub fn try_acquire_tag(&mut self, tag: Tag) -> bool {
+        // First check if this tag is already released
+        if tag <= self.released_tag {
+            return true;
+        }
+        // Check if there are any upstream tags that have been released
+        if let Ok(released_tag) = self.upstream_rx.try_recv() {
+            self.release_tag(released_tag);
+            return tag <= self.released_tag;
+        }
+        false
+    }
+
+    /// Acquire the given tag, blocking until it is released, or an [`AsyncEvent`] is received.
+    ///
+    /// If an async event is received, it is returned to the caller. A return value of `None` indicates that the tag has been released.
+    #[inline]
+    pub fn acquire_tag(
+        &mut self,
+        tag: Tag,
+        event_rx: &crate::Receiver<AsyncEvent>,
+    ) -> Option<AsyncEvent> {
+        tracing::trace!(tag = %tag, "Acquiring tag");
+
+        if self.try_acquire_tag(tag) {
+            return None;
+        }
+
+        // Block until the tag is released
+        loop {
+            crossbeam_channel::select! {
+                recv(self.upstream_rx) -> msg => {
+                    if let Ok(released_tag) = msg {
+                        self.release_tag(released_tag);
+                        if tag <= self.released_tag {
+                            return None;
+                        }
+                    }
+                }
+                recv(event_rx) -> msg => {
+                    return msg.ok();
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Scheduler {
     /// The scheduler config
     config: Config,
@@ -138,15 +208,20 @@ pub struct Scheduler {
     /// The reaction graph containing all static dependency and relationship information
     reaction_graph: ReactionGraph,
     /// Asynchronous events receiver
-    event_rx: Receiver<AsyncEvent>,
+    event_rx: crate::Receiver<AsyncEvent>,
     /// Event queue
     events: EventQueue,
-    /// Initial wall-clock time.
+    /// Initial physical time.
     start_time: Timestamp,
     /// A shutdown has been scheduled at this time.
     shutdown_tag: Option<Tag>,
     /// Shutdown channel
     shutdown_tx: keepalive::Sender,
+    /// Logical time barriers for each upstream source
+    upstream_barriers: Vec<LogicalTimeBarrier>,
+
+    /// The senders for downstream tags
+    downstream_tx: Vec<crate::Sender<Tag>>,
 }
 
 impl Scheduler {
@@ -158,31 +233,65 @@ impl Scheduler {
     ///
     /// * `env` - The environment containing all the runtime data structures.
     /// * `reaction_graph` - The reaction graph containing all static dependency and relationship information.
-    pub fn new(env: Env, reaction_graph: ReactionGraph, config: Config) -> Self {
-        let (event_tx, event_rx) = crossbeam_channel::bounded(config.physical_event_q_size);
-        let (shutdown_tx, shutdown_rx) = keepalive::channel();
+    pub fn new(enclave: Enclave, config: Config) -> Self {
+        let Enclave {
+            env,
+            graph,
+            event_tx,
+            event_rx,
+            downstream_tx,
+            upstream_rx,
+            shutdown_tx,
+            shutdown_rx,
+        } = enclave;
+
         let start_time = Timestamp::now();
 
+        let upstream_barriers = upstream_rx
+            .into_iter()
+            .map(|upstream_rx| LogicalTimeBarrier {
+                released_tag: Tag::new(Duration::ZERO, 0),
+                upstream_rx,
+            })
+            .collect();
+
         if let Some(timeout) = config.timeout {
-            let shutdown_tag = Tag::new(timeout, 0);
-            let shutdown_event = AsyncEvent::Shutdown { tag: shutdown_tag };
+            let shutdown_event = AsyncEvent::Shutdown { delay: timeout };
             event_tx.send(shutdown_event).unwrap();
         }
 
-        // Build contexts for each reaction
-        let contexts = build_reaction_contexts(&reaction_graph, start_time, event_tx, shutdown_rx);
+        // Find the maximum level in the reaction graph
+        let max_level = graph
+            .action_triggers
+            .values()
+            .chain(graph.port_triggers.values())
+            .flat_map(|level_reactions| level_reactions.iter().map(|(level, _)| level))
+            .max()
+            .copied()
+            .unwrap_or_default();
 
-        let store = Store::new(env, contexts, &reaction_graph);
-        let events = EventQueue::new(reaction_graph.reaction_set_limits.clone());
+        let reaction_set_limits = ReactionSetLimits {
+            max_level,
+            num_keys: env.reactions.len(),
+        };
+        let events = EventQueue::new(reaction_set_limits);
+
+        // Build contexts for each reaction
+        let contexts = build_reaction_contexts(&graph, start_time, event_tx, shutdown_rx);
+
+        let store = Store::new(env, contexts, &graph);
+
         Self {
             config,
             store,
-            reaction_graph,
+            reaction_graph: graph,
             event_rx,
             events,
             start_time,
             shutdown_tag: None,
             shutdown_tx,
+            upstream_barriers,
+            downstream_tx,
         }
     }
 
@@ -190,6 +299,7 @@ impl Scheduler {
     fn handle_async_event(
         event: AsyncEvent,
         tag: Tag,
+        start_time: Timestamp,
         events: &mut EventQueue,
         store: &mut Pin<Box<Store>>,
         reaction_graph: &ReactionGraph,
@@ -201,12 +311,13 @@ impl Scheduler {
                 events.push_event(tag, reactions, false);
                 store.push_action_value(key, tag, value);
             }
-            AsyncEvent::Physical { tag, key, value } => {
+            AsyncEvent::Physical { time, key, value } => {
+                let tag = Tag::from_physical_time(start_time, time);
                 events.push_event(tag, reactions, false);
                 store.push_action_value(key, tag, value);
             }
-            AsyncEvent::Shutdown { tag } => {
-                events.push_event(tag, reactions, true);
+            AsyncEvent::Shutdown { delay } => {
+                events.push_event(tag.delay(delay), reactions, true);
                 //self.shutdown_tag = Some(tag);
             }
         }
@@ -215,23 +326,16 @@ impl Scheduler {
     /// Execute startup of the Scheduler.
     #[tracing::instrument(skip(self))]
     fn startup(&mut self) -> Tag {
-        //#[cfg(feature = "parallel")]
-        //rayon::ThreadPoolBuilder::new()
-        //    .num_threads(4)
-        //    .build_global()
-        //    .unwrap();
+        let tag = Tag::new(Duration::ZERO, 1);
+
+        for (delay, level_reactions) in &self.reaction_graph.startup_reactions {
+            self.events
+                .push_event(tag.delay(*delay), level_reactions.iter().copied(), false);
+        }
 
         self.start_time = Timestamp::now();
 
-        let tag = Tag::new(Duration::ZERO, 0);
-
-        // For all Timers, pump later events onto the queue and create an initial ReactionSet to process.
-        let mut reaction_set = self.events.next_reaction_set();
-        reaction_set.extend_above(self.reaction_graph.startup_reactions.iter().copied());
-
         tracing::info!(tag = %tag, "Starting the execution.");
-        self.process_tag(tag, reaction_set.view());
-
         tag
     }
 
@@ -275,16 +379,28 @@ impl Scheduler {
         }
     }
 
+    /// Release the current tag to downstream reactors
+    fn release_tag(&self, current_tag: Tag) {
+        tracing::trace!(tag = %current_tag, "Releasing tag downstream");
+        for sender in &self.downstream_tx {
+            sender.send(current_tag).unwrap();
+        }
+    }
+
     #[tracing::instrument(skip(self))]
     pub fn event_loop(&mut self) {
-        let mut current_tag = self.startup();
+        let mut current_tag = self.startup().decrement();
 
         loop {
+            // Release the current tag to downstream reactors
+            self.release_tag(current_tag);
+
             // Push pending events into the queue
             for async_event in self.event_rx.try_iter() {
                 Self::handle_async_event(
                     async_event,
                     current_tag,
+                    self.start_time,
                     &mut self.events,
                     &mut self.store,
                     &self.reaction_graph,
@@ -297,6 +413,20 @@ impl Scheduler {
                     if self.synchronize_wall_clock(target, current_tag) {
                         // Woken up by async event
                         continue;
+                    }
+                }
+
+                // Wait until all upstream barriers are released
+                for barrier in self.upstream_barriers.iter_mut() {
+                    if let Some(async_event) = barrier.acquire_tag(next_tag, &self.event_rx) {
+                        Self::handle_async_event(
+                            async_event,
+                            current_tag,
+                            self.start_time,
+                            &mut self.events,
+                            &mut self.store,
+                            &self.reaction_graph,
+                        );
                     }
                 }
             }
@@ -335,6 +465,7 @@ impl Scheduler {
                 Self::handle_async_event(
                     async_event,
                     current_tag,
+                    self.start_time,
                     &mut self.events,
                     &mut self.store,
                     &self.reaction_graph,
@@ -342,15 +473,17 @@ impl Scheduler {
             } else {
                 tracing::debug!("No more events in queue. -> Terminate!");
                 // Shutdown event will be processed at the next event loop iteration
-                let tag = Tag::now(self.start_time);
-                self.shutdown_tag = Some(tag);
+                self.shutdown_tag = Some(current_tag);
                 self.events.push_event(
-                    tag,
+                    current_tag,
                     self.reaction_graph.shutdown_reactions.iter().copied(),
                     true,
                 );
             }
         } // loop
+
+        // Release the current tag to downstream reactors
+        self.release_tag(current_tag);
 
         self.shutdown();
     }
@@ -370,6 +503,7 @@ impl Scheduler {
                     Self::handle_async_event(
                         event,
                         current_tag,
+                        self.start_time,
                         &mut self.events,
                         &mut self.store,
                         &self.reaction_graph,

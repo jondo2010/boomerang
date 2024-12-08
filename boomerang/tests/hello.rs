@@ -91,18 +91,18 @@ impl Inside {
 #[derive(Reactor)]
 #[reactor(state = Inside)]
 struct InsideBuilder {
-    #[reactor(child = Hello::new(Duration::from_secs(1), "Composite default message."))]
+    #[reactor(child(state = Hello::new(Duration::from_secs(1), "Composite default message.")))]
     _third_instance: HelloBuilder,
 }
 
 #[derive(Reactor)]
 #[reactor(state = ())]
 struct MainBuilder {
-    #[reactor(child = Hello::new(Duration::from_secs(4), "Hello from first."))]
+    #[reactor(child(state = Hello::new(Duration::from_secs(4), "Hello from first.")))]
     _first_instance: HelloBuilder,
-    #[reactor(child = Hello::new(Duration::from_secs(2), "Hello from second."))]
+    #[reactor(child(state  = Hello::new(Duration::from_secs(2), "Hello from second.")))]
     _second_instance: HelloBuilder,
-    #[reactor(child = Inside::new("Hello from composite."))]
+    #[reactor(child(state  = Inside::new("Hello from composite.")))]
     _third_instance: InsideBuilder,
 }
 

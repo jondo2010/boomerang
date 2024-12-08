@@ -351,7 +351,7 @@ macro_rules! reaction_closure {
         Box::new(runtime::reaction::empty_reaction)
     };
     // closure with body
-    ( $ctx:ident, $reactor:ident, $ref_ports:ident, $mut_ports:ident, $actions:ident => $body:block ) => {
+    ( $ctx:ident, $reactor:ident, $ref_ports:ident, $mut_ports:ident, $actions:ident => $body:block ) => {{
         Box::new(
             move |$ctx: &mut $crate::Context,
                   $reactor: &mut dyn $crate::BaseReactor,
@@ -359,7 +359,7 @@ macro_rules! reaction_closure {
                   $mut_ports: $crate::RefsMut<dyn $crate::BasePort>,
                   $actions: $crate::RefsMut<dyn $crate::BaseAction>| { $body },
         )
-    };
+    }};
 }
 
 #[cfg(test)]

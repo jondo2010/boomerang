@@ -33,3 +33,4 @@ tinymap.workspace = true
 [dev-dependencies]
 tracing-subscriber = "0.3"
 anyhow.workspace = true
+rayon = { workspace = true }

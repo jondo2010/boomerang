@@ -7,7 +7,7 @@
 use std::{fmt::Debug, marker::PhantomData, time::Duration};
 
 use super::BuilderReactorKey;
-use crate::{runtime, ParentReactorBuilder};
+use crate::{runtime, EnclaveParts, ParentReactorBuilder};
 
 slotmap::new_key_type! {pub struct BuilderActionKey;}
 
@@ -109,6 +109,8 @@ impl From<BuilderActionKey> for TimerActionKey {
 }
 
 /// TimerSpec is used to specify the period and offset of a timer action.
+///
+/// If the period is `None`, then the timer event occurs only once. If neither an offset nor a period is specified, then one timer event occurs at program start.
 #[derive(Debug, PartialEq, Eq)]
 pub struct TimerSpec {
     /// Interval between timer events
@@ -117,10 +119,15 @@ pub struct TimerSpec {
     pub offset: Option<Duration>,
 }
 
+impl TimerSpec {
+    pub const STARTUP: Self = Self {
+        period: None,
+        offset: None,
+    };
+}
+
 #[derive(Debug)]
 pub enum ActionType {
-    Startup,
-    Shutdown,
     Timer(TimerSpec),
     Standard {
         /// Whether the action is logical or physical
@@ -130,6 +137,7 @@ pub enum ActionType {
         /// Builder function that creates the runtime action
         build_fn: Box<dyn ActionBuilderFn>,
     },
+    Shutdown,
 }
 
 pub trait ActionBuilderFn: Fn(&str, runtime::ActionKey) -> Box<dyn runtime::BaseAction> {}

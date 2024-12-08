@@ -2,7 +2,7 @@ use super::{
     BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactorKey, EnvBuilder, FindElements,
     PortType, Reactor, ReactorBuilderState,
 };
-use crate::{runtime, ParentReactorBuilder};
+use crate::{runtime, EnclaveParts, EnclavePartsMap, ParentReactorBuilder};
 use slotmap::SecondaryMap;
 
 slotmap::new_key_type! {
@@ -162,7 +162,7 @@ pub struct ReactionBuilder {
     /// The owning Reactor for this Reaction
     pub(super) reactor_key: BuilderReactorKey,
     /// The Reaction function
-    pub(super) reaction_fn: runtime::BoxedReactionFn,
+    pub(super) reaction_fn: Box<dyn FnOnce(&EnclavePartsMap) -> runtime::BoxedReactionFn>,
 
     /// Relations between this Reaction and Actions
     pub(super) action_relations: SecondaryMap<BuilderActionKey, TriggerMode>,
@@ -280,7 +280,7 @@ impl<'a> ReactionBuilderState<'a> {
         name: &str,
         priority: usize,
         reactor_key: BuilderReactorKey,
-        reaction_fn: runtime::BoxedReactionFn,
+        reaction_fn: Box<dyn FnOnce(&EnclavePartsMap) -> runtime::BoxedReactionFn>,
         env: &'a mut EnvBuilder,
     ) -> Self {
         Self {

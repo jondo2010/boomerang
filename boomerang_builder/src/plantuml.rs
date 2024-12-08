@@ -167,6 +167,9 @@ impl EnvBuilder {
         {
             let action_id = self.node_id(action_key);
             let (xlabel, tooltip): (String, String) = match action.r#type() {
+                ActionType::Timer(timer_spec) if timer_spec == &TimerSpec::STARTUP => {
+                    ("\u{2600}".into(), "Startup".into())
+                }
                 ActionType::Timer(TimerSpec { period, offset }) => {
                     let label = "\u{23f2}".into();
                     let tt = if offset.unwrap_or_default().is_zero() {
@@ -196,7 +199,6 @@ impl EnvBuilder {
                         format!("{} ({:?})", action.name(), min_delay.unwrap_or_default()),
                     )
                 }
-                ActionType::Startup => ("\u{2600}".into(), "Startup".into()),
                 ActionType::Shutdown => ("\u{263d}".into(), "Shutdown".into()),
             };
 

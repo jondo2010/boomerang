@@ -2,26 +2,55 @@
 //!
 //! Non-port-binding connections are connections with a specified delay or between enclaves.
 
-use std::{collections::BTreeSet, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    time::Duration,
+};
 
 use boomerang_runtime::CommonContext;
 use slotmap::SecondaryMap;
 
 use crate::{
     runtime, ActionTag, BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactorKey,
-    EnvBuilder, Input, Logical, Output, ParentReactorBuilder, Physical, PortType, Reaction,
-    ReactionBuilderState, ReactionField, ReactorBuilderState, ReactorField, TriggerMode,
-    TypedActionKey, TypedPortKey,
+    EnclaveParts, EnvBuilder, Input, Logical, Output, ParentReactorBuilder, PartitionMap, Physical,
+    PortType, Reaction, ReactionBuilderState, ReactionField, ReactorBuilderState, ReactorField,
+    TriggerMode, TypedActionKey, TypedPortKey,
 };
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct PortBindings {
     inward: SecondaryMap<BuilderPortKey, BuilderPortKey>,
     outward: SecondaryMap<BuilderPortKey, BTreeSet<BuilderPortKey>>,
 }
 
+impl std::fmt::Debug for PortBindings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let inward = self
+            .inward
+            .iter()
+            .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
+            .collect::<HashMap<String, String>>();
+
+        let outward = self
+            .outward
+            .iter()
+            .map(|(k, v)| {
+                (
+                    format!("{k:?}"),
+                    v.iter().map(|k| format!("{k:?}")).collect::<Vec<_>>(),
+                )
+            })
+            .collect::<HashMap<String, Vec<String>>>();
+
+        f.debug_struct("PortBindings")
+            .field("inward", &inward)
+            .field("outward", &outward)
+            .finish()
+    }
+}
+
 impl PortBindings {
-    fn bind(
+    pub fn bind(
         &mut self,
         source_key: BuilderPortKey,
         target_key: BuilderPortKey,
@@ -169,6 +198,7 @@ pub trait BaseConnectionBuilder {
     fn build(
         &self,
         env: &mut EnvBuilder,
+        partition_map: &mut PartitionMap,
         port_bindings: &mut PortBindings,
     ) -> Result<(), BuilderError>;
 }
@@ -197,274 +227,295 @@ impl<T: runtime::ReactorData + Clone> BaseConnectionBuilder for ConnectionBuilde
     fn build(
         &self,
         env: &mut EnvBuilder,
+        partition_map: &mut PartitionMap,
         port_bindings: &mut PortBindings,
     ) -> Result<(), BuilderError> {
-        let source_port = &env.port_builders[self.source_key];
-        let target_port = &env.port_builders[self.target_key];
+        let source_port = &env.port_builders[self.source_key()];
+        let target_port = &env.port_builders[self.target_key()];
 
-        let source_reactor = &env.reactor_builders[source_port.parent_reactor_key().unwrap()];
-        let target_reactor = &env.reactor_builders[target_port.parent_reactor_key().unwrap()];
+        let source_reactor_key = source_port.parent_reactor_key().unwrap();
+        let target_reactor_key = target_port.parent_reactor_key().unwrap();
+
+        let source_partition = partition_map[source_reactor_key];
+        let target_partition = partition_map[target_reactor_key];
 
         // Does the connection cross an enclave boundary?
-        //TODO: This heuristic is not correct for nested enclaves, use the partition map instead.
-        let is_enclave = source_port.parent_reactor_key() != target_port.parent_reactor_key()
-            && (source_reactor.is_enclave || target_reactor.is_enclave);
-
-        if self.after.is_none() && !self.physical && !is_enclave {
+        if source_partition == target_partition {
             // Simple case, we can just bind them directly
             port_bindings.bind(self.source_key, self.target_key, env)?;
         } else {
             // Ports connected with a delay and/or physical connections are implemented as a pair of Reactions that trigger and react to an action.
-            let (input_port, output_port) = self.build_enclave_receiver(env)?;
-            port_bindings.bind(self.source_key, input_port.into(), env)?;
+
+            let target_parent_reactor_key =
+                env.reactor_builders[target_reactor_key].parent_reactor_key();
+            let (target_reactor_key, output_port, target_action_key) =
+                build_enclave_connection_target::<T>(
+                    env,
+                    target_parent_reactor_key,
+                    self.physical,
+                    self.after,
+                )?;
+            partition_map.insert(target_reactor_key, target_partition);
             port_bindings.bind(output_port.into(), self.target_key, env)?;
+
+            let source_parent_reactor_key =
+                env.reactor_builders[source_reactor_key].parent_reactor_key();
+            let (source_reactor_key, input_port) = build_enclave_connection_source::<T>(
+                env,
+                source_parent_reactor_key,
+                target_partition,
+                target_action_key,
+            )?;
+            partition_map.insert(source_reactor_key, source_partition);
+            port_bindings.bind(self.source_key, input_port.into(), env)?;
         }
 
         Ok(())
     }
 }
 
-impl<T: runtime::ReactorData + Clone> ConnectionBuilder<T> {
-    fn parent_reactor(&self, env: &mut EnvBuilder) -> Result<BuilderReactorKey, BuilderError> {
-        let source_port = &env.port_builders[self.source_key];
-        let target_port = &env.port_builders[self.target_key];
-        let parent_reactor_key = env
-            .common_reactor_key(source_port, target_port)
-            .ok_or(BuilderError::PortConnectionError {
-            source_key: self.source_key,
-            target_key: self.target_key,
-            what:
-                "Ports must belong to the same reactor or a common parent reactor to be connected"
-                    .to_owned(),
-        })?;
-        Ok(parent_reactor_key)
-    }
-
-    /// Add the receiver-side of an Enclave connection into the `EnvBuilder`.
-    ///
-    /// This consists of an Action that triggers a Reaction that writes to the target port.
-    fn build_enclave_receiver(
-        &self,
-        env: &mut EnvBuilder,
-    ) -> Result<BuilderActionKey, BuilderError> {
-        //let source_fqn = env.port_fqn(self.source_key, false)?;
-        //let target_fqn = env.port_fqn(self.target_key, false)?;
-        //let reactor_name = format!("connection_{source_fqn}->{target_fqn}");
-
-        let parent_reactor_key = self.parent_reactor(env)?;
-        let mut builder = env.get_reactor_builder(parent_reactor_key)?;
-
-        let action_key: BuilderActionKey = if self.physical {
-            builder
-                .add_physical_action::<T>("con_act", self.after)?
-                .into()
-        } else {
-            builder
-                .add_logical_action::<T>("con_act", self.after)?
-                .into()
-        };
-
-        let reaction_key = builder
-            .add_reaction(
-                "con_react",
-                runtime::EnclaveReceiverReactionFn::<T>::default(),
+/// Build the source portion
+///
+/// The sender-side is build deferred by returning a closure. The BuilderAction must be turned into a runtime Action before the closure is called.
+fn build_enclave_connection_source<T: runtime::ReactorData + Clone>(
+    env: &mut EnvBuilder,
+    parent_key: Option<BuilderReactorKey>,
+    target_partition: BuilderReactorKey,
+    target_action_key: BuilderActionKey,
+) -> Result<(BuilderReactorKey, TypedPortKey<T, Input>), BuilderError> {
+    let mut source_builder = env.add_reactor("con_reactor_src", parent_key, None, (), false);
+    let input_port = source_builder.add_input_port::<T>("con_in")?;
+    let _ = source_builder
+        .add_reaction("con_react_src", move |partitions| {
+            let partition = partitions.get(target_partition).expect("Target partition");
+            let runtime_action_key = partition
+                .aliases
+                .action_aliases
+                .get(target_action_key)
+                .expect("Runtime action key");
+            let remote_context = partition.enclave.create_send_context();
+            let remote_action_ref = partition
+                .enclave
+                .create_async_action_ref(*runtime_action_key);
+            runtime::EnclaveSenderReactionFn::<T>::new(
+                remote_context,
+                remote_action_ref,
+                Some(Duration::from_millis(500)),
             )
-            .with_action(action_key, 0, TriggerMode::TriggersAndUses)?
-            .with_port(self.target_key, 0, TriggerMode::EffectsOnly)?
-            .finish()?;
-
-        Ok(action_key)
-    }
-
-    /// Add the sender-side of an Enclave connection into the `EnvBuilder`.
-    fn build_enclave_sender(&self, env: &mut EnvBuilder, enclaves: &SecondaryMap<BuilderReactorKey, runtime::Enclave>) -> Result<(), BuilderError> {
-        let parent_reactor_key = self.parent_reactor(env)?;
-        let mut builder = env.get_reactor_builder(parent_reactor_key)?;
-
-        let reaction_key = builder
-            .add_reaction(
-                "con_react2",
-                runtime::EnclaveSenderReactionFn::<T>::new(
-                    enclave_b.create_send_context(),
-                    enclave_b.create_async_action_ref(action_b),
-                    Some(Duration::from_millis(500)),
-                ),
-            )
-            .with_port(self.source_key, 0, TriggerMode::TriggersAndUses)?
-            .finish()?;
-
-        Ok(())
-    }
-}
-
-pub struct DelayedConnectionBuilder<T: runtime::ReactorData, Q: ActionTag, const ENCLAVE: bool> {
-    pub(crate) input: TypedPortKey<T, Input>,
-    pub(crate) output: TypedPortKey<T, Output>,
-    pub(crate) action: TypedActionKey<T, Q>,
-}
-
-/// We use the `state` to pass the delay duration for the connection.
-impl<T: runtime::ReactorData + Clone, Q: ActionTag, const ENCLAVE: bool> crate::Reactor
-    for DelayedConnectionBuilder<T, Q, ENCLAVE>
-{
-    type State = Duration;
-
-    fn build(
-        name: &str,
-        state: Self::State,
-        parent: Option<BuilderReactorKey>,
-        bank_info: Option<runtime::BankInfo>,
-        is_enclave: bool,
-        env: &mut EnvBuilder,
-    ) -> Result<Self, BuilderError> {
-        let mut __builder = env.add_reactor(name, parent, bank_info, (), is_enclave);
-        let input = <TypedPortKey<T, Input> as ReactorField>::build("input", (), &mut __builder)?;
-        let output =
-            <TypedPortKey<T, Output> as ReactorField>::build("output", (), &mut __builder)?;
-        let action =
-            <TypedActionKey<T, Q> as ReactorField>::build("act", Some(state), &mut __builder)?;
-        let mut __reactor = Self {
-            input,
-            output,
-            action,
-        };
-        let _ = <ConnectionSenderReaction<T, ENCLAVE> as Reaction<Self>>::build(
-            stringify!(ReactionYIn),
-            &__reactor,
-            &mut __builder,
-        )?
+            .into()
+        })
+        .with_port(input_port, 0, TriggerMode::TriggersAndUses)?
         .finish()?;
-        let _ = <ConnectionReceiverReaction<T> as Reaction<Self>>::build(
-            stringify!(ReactionAct),
-            &__reactor,
-            &mut __builder,
-        )?
+
+    let reactor_key = source_builder.finish()?;
+    Ok((reactor_key, input_port))
+}
+
+/// Build the target portion
+///
+/// The receiver-side of is built immediately into the `EnvBuilder`, and consists of an Action that triggers a Reaction that writes to the target port.
+fn build_enclave_connection_target<T: runtime::ReactorData + Clone>(
+    env: &mut EnvBuilder,
+    parent_key: Option<BuilderReactorKey>,
+    physical: bool,
+    after: Option<Duration>,
+) -> Result<(BuilderReactorKey, TypedPortKey<T, Output>, BuilderActionKey), BuilderError> {
+    let mut target_builder = env.add_reactor("con_reactor_tgt", parent_key, None, (), false);
+    let output_port = target_builder.add_output_port::<T>("con_out")?;
+    let action_key: BuilderActionKey = if physical {
+        target_builder
+            .add_physical_action::<T>("con_act", after)?
+            .into()
+    } else {
+        target_builder
+            .add_logical_action::<T>("con_act", after)?
+            .into()
+    };
+    let _ = target_builder
+        .add_reaction("con_react_tgt", |_| {
+            runtime::EnclaveReceiverReactionFn::<T>::default().into()
+        })
+        .with_action(action_key, 0, TriggerMode::TriggersAndUses)?
+        .with_port(output_port, 0, TriggerMode::EffectsOnly)?
         .finish()?;
-        Ok(__reactor)
+    let reactor_key = target_builder.finish()?;
+    Ok((reactor_key, output_port, action_key))
+}
+
+#[cfg(feature = "disable")]
+mod old {
+    pub struct DelayedConnectionBuilder<T: runtime::ReactorData, Q: ActionTag, const ENCLAVE: bool> {
+        pub(crate) input: TypedPortKey<T, Input>,
+        pub(crate) output: TypedPortKey<T, Output>,
+        pub(crate) action: TypedActionKey<T, Q>,
     }
-}
 
-/// A Reaction that connects an Input to an Action for a delayed connection.
-struct ConnectionSenderReaction<'a, T: runtime::ReactorData + Clone, const ENCLAVE: bool> {
-    input: runtime::InputRef<'a, T>,
-    act: runtime::ActionRef<'a, T>,
-}
+    /// We use the `state` to pass the delay duration for the connection.
+    impl<T: runtime::ReactorData + Clone, Q: ActionTag, const ENCLAVE: bool> crate::Reactor
+        for DelayedConnectionBuilder<T, Q, ENCLAVE>
+    {
+        type State = Duration;
 
-impl<T: runtime::ReactorData + Clone, const ENCLAVE: bool> runtime::FromRefs
-    for ConnectionSenderReaction<'_, T, ENCLAVE>
-{
-    type Marker<'s> = ConnectionSenderReaction<'s, T, ENCLAVE>;
-
-    fn from_refs<'store>(
-        ports: boomerang_runtime::Refs<'store, dyn boomerang_runtime::BasePort>,
-        _ports_mut: boomerang_runtime::RefsMut<'store, dyn boomerang_runtime::BasePort>,
-        actions: boomerang_runtime::RefsMut<'store, dyn boomerang_runtime::BaseAction>,
-    ) -> Self::Marker<'store> {
-        let input = ports.partition().expect("Input not found");
-        let act = actions.partition_mut().expect("Action not found");
-        ConnectionSenderReaction { input, act }
-    }
-}
-
-impl<'a, T: runtime::ReactorData + Clone, Q: ActionTag, const ENCLAVE: bool>
-    Reaction<DelayedConnectionBuilder<T, Q, ENCLAVE>> for ConnectionSenderReaction<'a, T, ENCLAVE>
-{
-    fn build<'builder>(
-        name: &str,
-        reactor: &DelayedConnectionBuilder<T, Q, ENCLAVE>,
-        builder: &'builder mut ReactorBuilderState,
-    ) -> Result<ReactionBuilderState<'builder>, BuilderError> {
-        let mut __reaction = {
-            let wrapper =
-                runtime::ReactionAdapter::<ConnectionSenderReaction<T, ENCLAVE>, ()>::default();
-            builder.add_reaction(name, wrapper)
-        };
-        <runtime::InputRef<'a, u32> as ReactionField>::build(
-            &mut __reaction,
-            reactor.input.into(),
-            0,
-            TriggerMode::TriggersAndUses,
-        )?;
-        <runtime::ActionRef<'a> as ReactionField>::build(
-            &mut __reaction,
-            reactor.action.into(),
-            0,
-            TriggerMode::EffectsOnly,
-        )?;
-        Ok(__reaction)
-    }
-}
-
-impl<T: runtime::ReactorData + Clone, const ENCLAVE: bool> runtime::Trigger<()>
-    for ConnectionSenderReaction<'_, T, ENCLAVE>
-{
-    fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut ()) {
-        if ENCLAVE {
-            ctx.schedule_action_async(
-                &mut self.act,
-                self.input.clone().expect("Input value not set"),
-                None,
-            );
-        } else {
-            ctx.schedule_action(
-                &mut self.act,
-                self.input.clone().expect("Input value not set"),
-                None,
-            );
+        fn build(
+            name: &str,
+            state: Self::State,
+            parent: Option<BuilderReactorKey>,
+            bank_info: Option<runtime::BankInfo>,
+            is_enclave: bool,
+            env: &mut EnvBuilder,
+        ) -> Result<Self, BuilderError> {
+            let mut __builder = env.add_reactor(name, parent, bank_info, (), is_enclave);
+            let input =
+                <TypedPortKey<T, Input> as ReactorField>::build("input", (), &mut __builder)?;
+            let output =
+                <TypedPortKey<T, Output> as ReactorField>::build("output", (), &mut __builder)?;
+            let action =
+                <TypedActionKey<T, Q> as ReactorField>::build("act", Some(state), &mut __builder)?;
+            let mut __reactor = Self {
+                input,
+                output,
+                action,
+            };
+            let _ = <ConnectionSenderReaction<T, ENCLAVE> as Reaction<Self>>::build(
+                stringify!(ReactionYIn),
+                &__reactor,
+                &mut __builder,
+            )?
+            .finish()?;
+            let _ = <ConnectionReceiverReaction<T> as Reaction<Self>>::build(
+                stringify!(ReactionAct),
+                &__reactor,
+                &mut __builder,
+            )?
+            .finish()?;
+            Ok(__reactor)
         }
     }
-}
 
-/// A Reaction that connects an Action to an Output for a delayed connection.
-struct ConnectionReceiverReaction<'a, T: runtime::ReactorData> {
-    act: runtime::ActionRef<'a, T>,
-    output: runtime::OutputRef<'a, T>,
-}
-
-impl<T: runtime::ReactorData> runtime::FromRefs for ConnectionReceiverReaction<'_, T> {
-    type Marker<'s> = ConnectionReceiverReaction<'s, T>;
-
-    fn from_refs<'store>(
-        _ports: runtime::Refs<'store, dyn runtime::BasePort>,
-        ports_mut: runtime::RefsMut<'store, dyn runtime::BasePort>,
-        actions: runtime::RefsMut<'store, dyn runtime::BaseAction>,
-    ) -> Self::Marker<'store> {
-        let act = actions.partition_mut().expect("Action not found");
-        let output = ports_mut.partition_mut().expect("Output not found");
-        ConnectionReceiverReaction { act, output }
+    /// A Reaction that connects an Input to an Action for a delayed connection.
+    struct ConnectionSenderReaction<'a, T: runtime::ReactorData + Clone, const ENCLAVE: bool> {
+        input: runtime::InputRef<'a, T>,
+        act: runtime::ActionRef<'a, T>,
     }
-}
 
-impl<'a, T: runtime::ReactorData + Clone, Q: ActionTag, const ENCLAVE: bool>
-    Reaction<DelayedConnectionBuilder<T, Q, ENCLAVE>> for ConnectionReceiverReaction<'a, T>
-{
-    fn build<'builder>(
-        name: &str,
-        reactor: &DelayedConnectionBuilder<T, Q, ENCLAVE>,
-        builder: &'builder mut ReactorBuilderState,
-    ) -> Result<ReactionBuilderState<'builder>, BuilderError> {
-        let mut __reaction = {
-            let wrapper = runtime::ReactionAdapter::<ConnectionReceiverReaction<T>, ()>::default();
-            builder.add_reaction(name, wrapper)
-        };
-        <runtime::OutputRef<'a, T> as ReactionField>::build(
-            &mut __reaction,
-            reactor.output.into(),
-            0,
-            TriggerMode::EffectsOnly,
-        )?;
-        <runtime::ActionRef<'a> as ReactionField>::build(
-            &mut __reaction,
-            reactor.action.into(),
-            0,
-            TriggerMode::TriggersAndUses,
-        )?;
-        Ok(__reaction)
+    impl<T: runtime::ReactorData + Clone, const ENCLAVE: bool> runtime::FromRefs
+        for ConnectionSenderReaction<'_, T, ENCLAVE>
+    {
+        type Marker<'s> = ConnectionSenderReaction<'s, T, ENCLAVE>;
+
+        fn from_refs<'store>(
+            ports: boomerang_runtime::Refs<'store, dyn boomerang_runtime::BasePort>,
+            _ports_mut: boomerang_runtime::RefsMut<'store, dyn boomerang_runtime::BasePort>,
+            actions: boomerang_runtime::RefsMut<'store, dyn boomerang_runtime::BaseAction>,
+        ) -> Self::Marker<'store> {
+            let input = ports.partition().expect("Input not found");
+            let act = actions.partition_mut().expect("Action not found");
+            ConnectionSenderReaction { input, act }
+        }
     }
-}
 
-impl<T: runtime::ReactorData + Clone> runtime::Trigger<()> for ConnectionReceiverReaction<'_, T> {
-    fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut ()) {
-        *self.output = ctx.get_action_value(&mut self.act).cloned();
+    impl<'a, T: runtime::ReactorData + Clone, Q: ActionTag, const ENCLAVE: bool>
+        Reaction<DelayedConnectionBuilder<T, Q, ENCLAVE>>
+        for ConnectionSenderReaction<'a, T, ENCLAVE>
+    {
+        fn build<'builder>(
+            name: &str,
+            reactor: &DelayedConnectionBuilder<T, Q, ENCLAVE>,
+            builder: &'builder mut ReactorBuilderState,
+        ) -> Result<ReactionBuilderState<'builder>, BuilderError> {
+            let mut __reaction = {
+                let wrapper =
+                    runtime::ReactionAdapter::<ConnectionSenderReaction<T, ENCLAVE>, ()>::default();
+                builder.add_reaction(name, wrapper)
+            };
+            <runtime::InputRef<'a, u32> as ReactionField>::build(
+                &mut __reaction,
+                reactor.input.into(),
+                0,
+                TriggerMode::TriggersAndUses,
+            )?;
+            <runtime::ActionRef<'a> as ReactionField>::build(
+                &mut __reaction,
+                reactor.action.into(),
+                0,
+                TriggerMode::EffectsOnly,
+            )?;
+            Ok(__reaction)
+        }
+    }
+
+    impl<T: runtime::ReactorData + Clone, const ENCLAVE: bool> runtime::Trigger<()>
+        for ConnectionSenderReaction<'_, T, ENCLAVE>
+    {
+        fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut ()) {
+            if ENCLAVE {
+                ctx.schedule_action_async(
+                    &mut self.act,
+                    self.input.clone().expect("Input value not set"),
+                    None,
+                );
+            } else {
+                ctx.schedule_action(
+                    &mut self.act,
+                    self.input.clone().expect("Input value not set"),
+                    None,
+                );
+            }
+        }
+    }
+
+    /// A Reaction that connects an Action to an Output for a delayed connection.
+    struct ConnectionReceiverReaction<'a, T: runtime::ReactorData> {
+        act: runtime::ActionRef<'a, T>,
+        output: runtime::OutputRef<'a, T>,
+    }
+
+    impl<T: runtime::ReactorData> runtime::FromRefs for ConnectionReceiverReaction<'_, T> {
+        type Marker<'s> = ConnectionReceiverReaction<'s, T>;
+
+        fn from_refs<'store>(
+            _ports: runtime::Refs<'store, dyn runtime::BasePort>,
+            ports_mut: runtime::RefsMut<'store, dyn runtime::BasePort>,
+            actions: runtime::RefsMut<'store, dyn runtime::BaseAction>,
+        ) -> Self::Marker<'store> {
+            let act = actions.partition_mut().expect("Action not found");
+            let output = ports_mut.partition_mut().expect("Output not found");
+            ConnectionReceiverReaction { act, output }
+        }
+    }
+
+    impl<'a, T: runtime::ReactorData + Clone, Q: ActionTag, const ENCLAVE: bool>
+        Reaction<DelayedConnectionBuilder<T, Q, ENCLAVE>> for ConnectionReceiverReaction<'a, T>
+    {
+        fn build<'builder>(
+            name: &str,
+            reactor: &DelayedConnectionBuilder<T, Q, ENCLAVE>,
+            builder: &'builder mut ReactorBuilderState,
+        ) -> Result<ReactionBuilderState<'builder>, BuilderError> {
+            let mut __reaction = {
+                let wrapper =
+                    runtime::ReactionAdapter::<ConnectionReceiverReaction<T>, ()>::default();
+                builder.add_reaction(name, wrapper)
+            };
+            <runtime::OutputRef<'a, T> as ReactionField>::build(
+                &mut __reaction,
+                reactor.output.into(),
+                0,
+                TriggerMode::EffectsOnly,
+            )?;
+            <runtime::ActionRef<'a> as ReactionField>::build(
+                &mut __reaction,
+                reactor.action.into(),
+                0,
+                TriggerMode::TriggersAndUses,
+            )?;
+            Ok(__reaction)
+        }
+    }
+
+    impl<T: runtime::ReactorData + Clone> runtime::Trigger<()> for ConnectionReceiverReaction<'_, T> {
+        fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut ()) {
+            *self.output = ctx.get_action_value(&mut self.act).cloned();
+        }
     }
 }

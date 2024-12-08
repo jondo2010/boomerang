@@ -1,6 +1,7 @@
 use std::{collections::BinaryHeap, pin::Pin, time::Duration};
 
 use crossbeam_channel::RecvTimeoutError;
+use itertools::Itertools;
 
 use crate::{
     build_reaction_contexts,
@@ -325,17 +326,14 @@ impl Scheduler {
     /// Execute startup of the Scheduler.
     #[tracing::instrument(skip(self))]
     fn startup(&mut self) -> Tag {
-        self.start_time = Timestamp::now();
-
-        // Logical time starts at 0
         let tag = Tag::new(Duration::ZERO, 1);
 
-        // For all Timers, pump later events onto the queue and create an initial ReactionSet to process.
-        self.events.push_event(
-            tag,
-            self.reaction_graph.startup_reactions.iter().copied(),
-            false,
-        );
+        for (delay, level_reactions) in &self.reaction_graph.startup_reactions {
+            self.events
+                .push_event(tag.delay(*delay), level_reactions.iter().copied(), false);
+        }
+
+        self.start_time = Timestamp::now();
 
         tracing::info!(tag = %tag, "Starting the execution.");
         tag

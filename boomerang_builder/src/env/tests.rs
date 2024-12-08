@@ -1,3 +1,4 @@
+use rayon::iter::IntoParallelRefIterator;
 use runtime::BaseAction;
 
 use crate::{TimerSpec, TriggerMode};
@@ -69,7 +70,7 @@ fn test_reactions_with_trigger() {
     let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, (), false);
 
     let res = reactor_builder
-        .add_reaction("test", runtime::reaction_closure!())
+        .add_reaction("test", |_| runtime::reaction_closure!().into())
         .finish();
 
     assert!(matches!(res, Err(BuilderError::ReactionBuilderError(_))));
@@ -83,14 +84,14 @@ fn test_reactions1() {
     let startup = reactor_builder.get_startup_action();
 
     let r0_key = reactor_builder
-        .add_reaction("test", runtime::reaction_closure!())
+        .add_reaction("test", |_| runtime::reaction_closure!().into())
         .with_action(startup, 0, TriggerMode::TriggersOnly)
         .unwrap()
         .finish()
         .unwrap();
 
     let r1_key = reactor_builder
-        .add_reaction("test", runtime::reaction_closure!())
+        .add_reaction("test", |_| runtime::reaction_closure!().into())
         .with_action(startup, 0, TriggerMode::TriggersOnly)
         .unwrap()
         .finish()
@@ -106,7 +107,17 @@ fn test_reactions1() {
     );
 
     let runtime_parts = env_builder.into_runtime_parts().unwrap();
-    assert_eq!(runtime_parts[0].env.reactions.len(), 2);
+    let r0_key = runtime_parts[0].aliases.reaction_aliases[r0_key];
+    let r1_key = runtime_parts[0].aliases.reaction_aliases[r1_key];
+
+    assert_eq!(runtime_parts[0].enclave.env.reactions.len(), 2);
+    assert_eq!(
+        runtime_parts[0].enclave.graph.startup_reactions[&Duration::ZERO],
+        vec![
+            (runtime::Level::from(0), r0_key),
+            (runtime::Level::from(1), r1_key),
+        ]
+    );
 }
 
 #[test]
@@ -121,7 +132,7 @@ fn test_actions1() {
 
     // Triggered by a+b, schedules b
     let reaction_a = reactor_builder
-        .add_reaction("ra", runtime::reaction_closure!())
+        .add_reaction("ra", |_| runtime::reaction_closure!().into())
         .with_action(action_a, 0, TriggerMode::TriggersOnly)
         .unwrap()
         .with_action(action_b, 1, TriggerMode::TriggersAndEffects)
@@ -131,7 +142,7 @@ fn test_actions1() {
 
     // Triggered by a, schedules a
     let reaction_b = reactor_builder
-        .add_reaction("rb", runtime::reaction_closure!())
+        .add_reaction("rb", |_| runtime::reaction_closure!().into())
         .with_action(action_a, 0, TriggerMode::TriggersAndEffects)
         .unwrap()
         .finish()
@@ -139,11 +150,7 @@ fn test_actions1() {
 
     let _reactor_key = reactor_builder.finish().unwrap();
     let runtime_parts = env_builder.into_runtime_parts().unwrap();
-    let EnclaveParts {
-        env,
-        graph,
-        aliases,
-    } = &runtime_parts[0];
+    let EnclaveParts { enclave, aliases } = &runtime_parts[0];
 
     //runtime::check_consistency(&env, &dep_info);
 
@@ -153,7 +160,7 @@ fn test_actions1() {
     let action_b = aliases.action_aliases[action_b.into()];
 
     assert_eq!(
-        env.actions[action_a]
+        enclave.env.actions[action_a]
             .downcast_ref::<runtime::Action>()
             .expect("Action")
             .name(),
@@ -161,14 +168,22 @@ fn test_actions1() {
     );
 
     // action_a is TriggersOnly on reaction_a, so should not be in the `reaction_actions`
-    itertools::assert_equal(graph.reaction_actions[reaction_a].iter(), [action_b]);
+    itertools::assert_equal(
+        enclave.graph.reaction_actions[reaction_a].iter(),
+        [action_b],
+    );
 
     itertools::assert_equal(
-        graph.action_triggers[action_a].iter().map(|&(_, r)| r),
+        enclave.graph.action_triggers[action_a]
+            .iter()
+            .map(|&(_, r)| r),
         [reaction_a, reaction_b],
     );
 
-    itertools::assert_equal(graph.reaction_actions[reaction_b].iter(), [action_a]);
+    itertools::assert_equal(
+        enclave.graph.reaction_actions[reaction_b].iter(),
+        [action_a],
+    );
 }
 
 #[test]
@@ -182,12 +197,12 @@ fn test_enclave1() {
                 builder.add_reactor("hello1", Some(builder_reactor_key), None, (), false);
             let startup = reactor.get_startup_action();
             let _ = reactor
-                .add_reaction(
-                    "startup",
+                .add_reaction("startup", |_| {
                     runtime::reaction_closure!(_ctx, _state, _inputs, _outputs, _actions => {
                         println!("Hello, world!");
-                    }),
-                )
+                    })
+                    .into()
+                })
                 .with_action(startup, 0, TriggerMode::TriggersOnly)
                 .unwrap()
                 .finish()
@@ -202,12 +217,12 @@ fn test_enclave1() {
                 builder.add_reactor("hello2", Some(builder_reactor_key), None, (), true);
             let startup = reactor.get_startup_action();
             let _ = reactor
-                .add_reaction(
-                    "startup",
+                .add_reaction("startup", |_| {
                     runtime::reaction_closure!(_ctx, _state, _inputs, _outputs, _actions => {
                         println!("Hello, enclave!");
-                    }),
-                )
+                    })
+                    .into()
+                })
                 .with_action(startup, 0, TriggerMode::TriggersOnly)
                 .unwrap()
                 .finish()
@@ -228,14 +243,23 @@ fn test_enclave1() {
     // the first enclave should contain the world and hello1 reactors
     let world_key = runtime_parts[0].aliases.reactor_aliases[world];
     let hello1_key = runtime_parts[0].aliases.reactor_aliases[hello1];
-    assert_eq!(runtime_parts[0].env.reactors.len(), 2);
-    assert_eq!(runtime_parts[0].env.reactors[world_key].name(), "world");
-    assert_eq!(runtime_parts[0].env.reactors[hello1_key].name(), "hello1");
+    assert_eq!(runtime_parts[0].enclave.env.reactors.len(), 2);
+    assert_eq!(
+        runtime_parts[0].enclave.env.reactors[world_key].name(),
+        "world"
+    );
+    assert_eq!(
+        runtime_parts[0].enclave.env.reactors[hello1_key].name(),
+        "hello1"
+    );
 
     // the second enclave should contain the hello2 reactor
     let hello2_key = runtime_parts[1].aliases.reactor_aliases[hello2];
-    assert_eq!(runtime_parts[1].env.reactors.len(), 1);
-    assert_eq!(runtime_parts[1].env.reactors[hello2_key].name(), "hello2");
+    assert_eq!(runtime_parts[1].enclave.env.reactors.len(), 1);
+    assert_eq!(
+        runtime_parts[1].enclave.env.reactors[hello2_key].name(),
+        "hello2"
+    );
 }
 
 /// Create a simple ping-pong system with two child enclaves
@@ -261,24 +285,24 @@ fn create_ping_pong() -> EnvBuilder {
             let o1 = builder.add_output_port::<()>("o1")?;
 
             let _ = builder
-                .add_reaction(
-                    "reaction_t1",
+                .add_reaction("reaction_t1", |_| {
                     runtime::reaction_closure!(_ctx, _reactor, _ref_ports, mut_ports, _actions => {
                         let mut o1: runtime::OutputRef<()> = mut_ports.partition_mut().unwrap();
                         *o1 = Some(());
-                    }),
-                )
+                    })
+                    .into()
+                })
                 .with_action(t1, 0, TriggerMode::TriggersOnly)?
                 .with_port(o1, 0, TriggerMode::EffectsOnly)?
                 .finish()?;
             let _ = builder
-                .add_reaction(
-                    "reaction_i1",
+                .add_reaction("reaction_i1", |_| {
                     runtime::reaction_closure!(_ctx, _reactor, ref_ports, _mut_ports, _actions => {
                         let _i1: runtime::InputRef<()> = ref_ports.partition().unwrap();
                         println!("{greeting}");
-                    }),
-                )
+                    })
+                    .into()
+                })
                 .with_port(i1, 0, TriggerMode::TriggersAndUses)?
                 .finish()?;
             builder.finish()
@@ -318,83 +342,41 @@ fn test_build_partition_map() {
 
     let partition_map = env_builder.build_partition_map();
     assert_eq!(partition_map.len(), 3);
-    // The main partition will contain the main reactor, but also the enclave connection aux reactors
-    assert_eq!(partition_map[main].first(), Some(&main));
-    assert_eq!(partition_map[ping], vec![ping]);
-    assert_eq!(partition_map[pong], vec![pong]);
+
+    assert_eq!(partition_map[main], main);
+    assert_eq!(partition_map[ping], ping);
+    assert_eq!(partition_map[pong], pong);
 }
 
-#[cfg(feature = "disable")]
 #[test]
 fn test_enclave2() {
+    tracing_subscriber::fmt()
+        .with_thread_ids(true)
+        .with_max_level(tracing::Level::TRACE)
+        .compact()
+        .init();
+
     let env_builder = create_ping_pong();
 
-    dbg!(&env_builder);
+    let enclaves = env_builder.into_runtime_parts().unwrap();
+    assert_eq!(enclaves.len(), 3);
 
-    let gv = env_builder.create_plantuml_graph().unwrap();
-    let mut f = std::fs::File::create("test_enclave2.puml").unwrap();
-    std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build_global()
+        .unwrap();
 
-    //let reaction_levels = self.build_runtime_level_map()?;
+    use rayon::iter::IntoParallelIterator;
+    use rayon::iter::ParallelIterator;
 
-    let mut partitioned_port_keys =
-        build::partition_port_builders(&env_builder.port_builders, &partition_map);
+    let config = runtime::Config::default()
+        .with_fast_forward(false)
+        .with_timeout(Duration::from_secs(1));
 
-    assert_eq!(partitioned_port_keys.len(), 3);
-    // The main partition will contain ports from the enclave connection aux reactors
-    assert_eq!(partitioned_port_keys[main].len(), 4);
-    assert_eq!(partitioned_port_keys[ping].len(), 2);
-    assert_eq!(partitioned_port_keys[ping], vec![ping_i1, ping_o1]);
-    assert_eq!(partitioned_port_keys[pong].len(), 2);
-    assert_eq!(partitioned_port_keys[pong], vec![pong_i1, pong_o1]);
-
-    let mut partitioned_reactions =
-        build::partition_reaction_builders(env_builder.reaction_builders, &partition_map);
-
-    assert_eq!(partitioned_reactions.len(), 3);
-    // The main partition will contain the main reactor, but also the enclave connection aux reactors
-    assert_eq!(partitioned_reactions[main].len(), 4);
-    /*
-    dbg!(&partitioned_reactions[ping]
-        .iter()
-        .map(|(k, v)| (k, &v.name))
-        .collect::<Vec<_>>());
-    dbg!(&partitioned_reactions[pong]
-        .iter()
-        .map(|(k, v)| (k, &v.name))
-        .collect::<Vec<_>>());
-    */
-
-    let reactions_partition = partitioned_reactions.remove(main).unwrap();
-    /*
-    let build::RuntimeReactionParts {
-        reactions: runtime_reactions,
-        use_ports: reaction_use_ports,
-        effect_ports: reaction_effect_ports,
-        actions: reaction_actions,
-        reaction_aliases,
-        reaction_reactor_aliases,
-    } = build::build_runtime_reactions(reactions_partition, &port_aliases, &action_aliases);
-     */
-
-    let mut partitioned_reactors =
-        build::partition_reactor_builders(env_builder.reactor_builders, &partition_map);
-    assert_eq!(partitioned_reactors.len(), 3);
-    // The main partition will contain the main reactor, but also the enclave connection aux reactors
-    assert_eq!(partitioned_reactors[main].len(), 3);
-    assert_eq!(partitioned_reactors[ping].len(), 1);
-    assert_eq!(partitioned_reactors[pong].len(), 1);
-
-    let reactor_partition = partitioned_reactors.remove(main).unwrap();
-    let build::RuntimeReactorParts {
-        runtime_reactors,
-        reactor_aliases,
-        reactor_bank_indices,
-    } = build::build_runtime_reactors(reactor_partition);
-
-    reactor_aliases.iter().for_each(|(k, v)| {
-        println!("{:?}: {:?}", k, v);
-    });
-
-    //let enclave_parts = env_builder.into_runtime_parts().unwrap();
+    enclaves
+        .into_par_iter()
+        .for_each(|EnclaveParts { enclave, aliases }| {
+            let mut sched = runtime::Scheduler::new(enclave, config.clone());
+            sched.event_loop();
+        });
 }

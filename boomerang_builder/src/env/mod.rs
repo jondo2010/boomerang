@@ -1,7 +1,6 @@
 use crate::{
     connection::{BaseConnectionBuilder, ConnectionBuilder, PortBindings},
-    ActionTag, BuilderFqnSegment, ParentReactorBuilder, PortType, TimerActionKey, TimerSpec,
-    TriggerMode,
+    ActionTag, BuilderFqnSegment, ParentReactorBuilder, TimerActionKey, TimerSpec, TriggerMode,
 };
 
 use super::{
@@ -24,7 +23,7 @@ mod debug;
 #[cfg(test)]
 mod tests;
 
-pub use build::EnclaveParts;
+pub use build::{EnclaveParts, EnclavePartsMap, PartitionMap};
 
 mod util {
     use petgraph::visit::{IntoNeighborsDirected, IntoNodeIdentifiers, Visitable};
@@ -162,7 +161,11 @@ impl EnvBuilder {
         name: &str,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey, BuilderError> {
-        self.add_action_impl::<(), Logical>(name, reactor_key, ActionType::Startup)
+        self.add_action_impl::<(), Logical>(
+            name,
+            reactor_key,
+            ActionType::Timer(TimerSpec::STARTUP),
+        )
     }
 
     pub fn add_shutdown_action(
@@ -239,14 +242,23 @@ impl EnvBuilder {
     }
 
     /// Add a Reaction to a given Reactor
-    pub fn add_reaction(
+    pub fn add_reaction<F>(
         &mut self,
         name: &str,
         reactor_key: BuilderReactorKey,
-        reaction_fn: impl Into<runtime::BoxedReactionFn>,
-    ) -> ReactionBuilderState {
+        reaction_builder_fn: F,
+    ) -> ReactionBuilderState
+    where
+        F: FnOnce(&EnclavePartsMap) -> runtime::BoxedReactionFn + 'static,
+    {
         let priority = self.reactor_builders[reactor_key].reactions.len();
-        ReactionBuilderState::new(name, priority, reactor_key, reaction_fn.into(), self)
+        ReactionBuilderState::new(
+            name,
+            priority,
+            reactor_key,
+            Box::new(reaction_builder_fn),
+            self,
+        )
     }
 
     /// Get a previously built action
@@ -636,15 +648,14 @@ fn collect_transitive_port_triggers(
     port_key: BuilderPortKey,
     port_builders: &SlotMap<BuilderPortKey, Box<dyn BasePortBuilder>>,
     port_bindings: &PortBindings,
-) -> SecondaryMap<BuilderReactionKey, ()> {
-    let mut all_triggers = SecondaryMap::new();
+) -> Vec<BuilderReactionKey> {
+    let mut all_triggers = Vec::new();
     let mut port_set = BTreeSet::<BuilderPortKey>::new();
     port_set.insert(port_key);
     while !port_set.is_empty() {
         let port_key = port_set.pop_first().unwrap();
         let port_builder = &port_builders[port_key];
-        all_triggers.extend(port_builder.triggers().iter().map(|&key| (key, ())));
-
+        all_triggers.extend(port_builder.triggers().iter());
         port_set.extend(port_bindings.get_outward_bindings(port_key))
     }
     all_triggers

@@ -1,8 +1,13 @@
+use std::{collections::BTreeMap, time::Duration};
+
 use crate::{
-    event::AsyncEvent, keepalive, ActionKey, AsyncActionRef, BaseAction, BasePort, BaseReactor, PortKey, Reaction, ReactionKey, ReactorData, ReactorKey, SendContext, Tag
+    event::AsyncEvent, keepalive, ActionKey, AsyncActionRef, BaseAction, BasePort, BaseReactor,
+    PortKey, Reaction, ReactionKey, ReactorData, ReactorKey, SendContext, Tag,
 };
 
 mod debug;
+#[cfg(test)]
+pub mod tests;
 
 /// Execution level
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
@@ -92,10 +97,13 @@ pub struct ReactionGraph {
     pub action_triggers: tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
     /// For each Port, a set of Reactions it triggers
     pub port_triggers: tinymap::TinySecondaryMap<PortKey, Vec<LevelReactionKey>>,
-    /// Global startup reactions
-    pub startup_reactions: Vec<LevelReactionKey>,
+
+    /// Global startup reactions, keyed by delay
+    pub startup_reactions: BTreeMap<Duration, Vec<LevelReactionKey>>,
+
     /// Global shutdown reactions
     pub shutdown_reactions: Vec<LevelReactionKey>,
+
     /// For each reaction, the set of 'use' ports
     pub reaction_use_ports: tinymap::TinySecondaryMap<ReactionKey, tinymap::KeySet<PortKey>>,
     /// For each reaction, the set of 'effect' ports
@@ -109,6 +117,7 @@ pub struct ReactionGraph {
 }
 
 /// An Enclave is the self-contained runtime data fed into a single scheduler instance.
+#[derive(Debug)]
 pub struct Enclave {
     /// The runtime environment
     pub env: Env,
@@ -146,20 +155,30 @@ impl Default for Enclave {
 }
 
 impl Enclave {
-    pub fn insert_reactor(&mut self, reactor: Box<dyn BaseReactor>) -> ReactorKey {
+    pub fn insert_reactor(
+        &mut self,
+        reactor: Box<dyn BaseReactor>,
+        bank_info: Option<BankInfo>,
+    ) -> ReactorKey {
         let reactor_key = self.env.reactors.insert(reactor);
-        self.graph.reactor_bank_infos.insert(reactor_key, None);
+        self.graph.reactor_bank_infos.insert(reactor_key, bank_info);
         reactor_key
     }
 
-    pub fn insert_action(&mut self, action: Box<dyn BaseAction>) -> ActionKey {
-        let action_key = self.env.actions.insert(action);
+    pub fn insert_action<F>(&mut self, action_fn: F) -> ActionKey
+    where
+        F: FnOnce(ActionKey) -> Box<dyn BaseAction>,
+    {
+        let action_key = self.env.actions.insert_with_key(action_fn);
         self.graph.action_triggers.insert(action_key, vec![]);
         action_key
     }
 
-    pub fn insert_port(&mut self, port: Box<dyn BasePort>) -> PortKey {
-        let port_key = self.env.ports.insert(port);
+    pub fn insert_port<F>(&mut self, port_fn: F) -> PortKey
+    where
+        F: FnOnce(PortKey) -> Box<dyn BasePort>,
+    {
+        let port_key = self.env.ports.insert_with_key(port_fn);
         self.graph.port_triggers.insert(port_key, vec![]);
         port_key
     }
@@ -188,14 +207,24 @@ impl Enclave {
         reaction_key
     }
 
-    pub fn insert_startup_reaction(&mut self, level_reaction_key: LevelReactionKey) {
-        self.graph.startup_reactions.push(level_reaction_key);
+    pub fn insert_startup_reaction(
+        &mut self,
+        level_reaction_key: LevelReactionKey,
+        delay: Option<Duration>,
+    ) {
+        self.graph
+            .startup_reactions
+            .entry(delay.unwrap_or_default())
+            .or_default()
+            .push(level_reaction_key);
     }
 
+    /// Insert a `LevelReactionKey` that is triggered on shutdown.
     pub fn insert_shutdown_reaction(&mut self, level_reaction_key: LevelReactionKey) {
         self.graph.shutdown_reactions.push(level_reaction_key);
     }
 
+    /// Insert a `LevelReactionKey` that is triggered by a port.
     pub fn insert_port_trigger(&mut self, port_key: PortKey, trigger: LevelReactionKey) {
         let triggers = self
             .graph
@@ -205,6 +234,7 @@ impl Enclave {
         triggers.push(trigger);
     }
 
+    /// Insert a `LevelReactionKey` that is triggered by an action.
     pub fn insert_action_trigger(&mut self, action_key: ActionKey, trigger: LevelReactionKey) {
         let triggers = self
             .graph
@@ -230,7 +260,10 @@ impl Enclave {
     }
 
     /// Create an [`AsyncActionRef`] for interacting with an action asynchronously.
-    pub fn create_async_action_ref<T: ReactorData>(&self, action_key: ActionKey) -> AsyncActionRef<T> {
+    pub fn create_async_action_ref<T: ReactorData>(
+        &self,
+        action_key: ActionKey,
+    ) -> AsyncActionRef<T> {
         self.env.actions[action_key].as_ref().into()
     }
 
@@ -257,231 +290,5 @@ impl Enclave {
             self.env.reactors.keys(),
             self.graph.reactor_bank_infos.keys(),
         );
-    }
-}
-
-#[cfg(test)]
-pub mod tests {
-    use std::time::Duration;
-
-    use tinymap::DefaultKey;
-
-    use crate::{
-        reaction::{EnclaveReceiverReactionFn, EnclaveSenderReactionFn},
-        reaction_closure, Action, BaseReactor, Config, Context, InputRef, OutputRef, Port, Reactor,
-        Scheduler,
-    };
-
-    use super::*;
-
-    /// An empty reaction function for testing.
-    pub fn dummy_reaction_fn<'a>(
-        _context: &'a mut Context,
-        _reactor: &'a mut dyn BaseReactor,
-        _ref_ports: crate::refs::Refs<'a, dyn BasePort>,
-        _mut_ports: crate::refs::RefsMut<'a, dyn BasePort>,
-        _actions: crate::refs::RefsMut<'a, dyn BaseAction>,
-    ) {
-    }
-
-    /// Create a dummy `Env` and `ReactionGraph` for testing.
-    pub fn create_dummy_env() -> (Env, ReactionGraph) {
-        let mut env = Env::default();
-        let reactor_key = env.reactors.insert(Reactor::new("dummy", ()).boxed());
-        let reaction_key =
-            env.reactions
-                .insert(Reaction::new("dummy", Box::new(dummy_reaction_fn), None));
-        let action_key0 = env.actions.insert(
-            Action::<()>::new("action0", ActionKey::from(0), Default::default(), true).boxed(),
-        );
-        let action_key1 = env.actions.insert(
-            Action::<()>::new("action1", ActionKey::from(1), Default::default(), true).boxed(),
-        );
-        let port_key0 = env
-            .ports
-            .insert(Port::<u32>::new("port0", PortKey::from(0)).boxed());
-        let port_key1 = env
-            .ports
-            .insert(Port::<u32>::new("port1", PortKey::from(1)).boxed());
-
-        let mut reaction_graph = ReactionGraph::default();
-        reaction_graph
-            .reaction_use_ports
-            .insert(reaction_key, std::iter::once(port_key0).collect());
-        reaction_graph
-            .reaction_effect_ports
-            .insert(reaction_key, std::iter::once(port_key1).collect());
-        reaction_graph.reaction_actions.insert(
-            reaction_key,
-            [action_key0, action_key1].into_iter().collect(),
-        );
-        reaction_graph
-            .reaction_reactors
-            .insert(reaction_key, reactor_key);
-
-        (env, reaction_graph)
-    }
-
-    /// Create a test pair of `Env` and `ReactionGraph` with an Enclave connection between them.
-    ///
-    /// In the builder/logically: The top-level reactor has a `Connection` between two ports 'portA' and 'portB'.
-    pub fn create_enclave_pair() -> tinymap::TinyMap<DefaultKey, Enclave> {
-        let mut enclaves = tinymap::TinyMap::default();
-
-        // receiver-side
-        let mut enclave_b = Enclave::default();
-        let reactor_b = enclave_b.insert_reactor(Reactor::new("reactorB", false).boxed());
-        let port_b = enclave_b.insert_port(Port::<u32>::new("portB", PortKey::from(0)).boxed());
-        let action_b = enclave_b.insert_action(
-            Action::<u32>::new(
-                "actionB",
-                ActionKey::from(0),
-                Some(Duration::from_secs(1)),
-                true,
-            )
-            .boxed(),
-        );
-
-        // receiver-side has a reaction that reads the value from 'portB' and prints it.
-        let reaction_output = enclave_b.insert_reaction(
-            Reaction::new(
-                "reactionOut",
-                reaction_closure!(
-                _ctx, reactor, ref_ports, _mut_ports, _actions => {
-                    let state = reactor.get_state_mut::<bool>().unwrap();
-                    *state = true;
-                    let port: InputRef<u32> = ref_ports.partition().unwrap();
-                    tracing::info!("portB value: {:?}", *port);
-                }),
-                None,
-            ),
-            reactor_b,
-            std::iter::once(port_b),
-            std::iter::empty(),
-            std::iter::empty(),
-        );
-
-        // portB triggers reactionOutput
-        enclave_b.insert_port_trigger(port_b, (Level::from(1), reaction_output));
-
-        // receiver-side has an Action 'actionB' that triggers a reaction which effects 'portB' (writes the value from the action to the port).
-        let reaction_b = enclave_b.insert_reaction(
-            Reaction::new(
-                "reactionB",
-                EnclaveReceiverReactionFn::<u32>::default(),
-                None,
-            ),
-            reactor_b,
-            std::iter::empty(),
-            std::iter::once(port_b),
-            std::iter::once(action_b),
-        );
-
-        // actionB triggers reactionB
-        enclave_b.insert_action_trigger(action_b, (Level::from(0), reaction_b));
-
-        // sender-side enclave
-        let mut enclave_a = Enclave::default();
-        let reactor_a = enclave_a.insert_reactor(Reactor::new("reactorA", ()).boxed());
-        // sender-side has a startup reaction that sets the value of 'portA' to 42.
-        let port_a = enclave_a.insert_port(Port::<u32>::new("portA", PortKey::from(0)).boxed());
-
-        let reaction_startup = enclave_a.insert_reaction(
-            Reaction::new(
-                "startup",
-                reaction_closure!(
-                _ctx, _state, _ref_ports, mut_ports, _actions => {
-                    let mut port: OutputRef<u32> = mut_ports.partition_mut().unwrap();
-                    *port = Some(42);
-                }),
-                None,
-            ),
-            reactor_a,
-            std::iter::empty(),
-            // portA is effected by reactionStartup
-            std::iter::once(port_a),
-            std::iter::empty(),
-        );
-
-        enclave_a.insert_startup_reaction((Level::from(0), reaction_startup));
-
-        // The sender-side has a reaction that is triggered by 'portA' and sends an async event to the receiver-side.
-        let reaction_a = enclave_a.insert_reaction(
-            Reaction::new(
-                "reactionA",
-                EnclaveSenderReactionFn::<u32>::new(
-                    enclave_b.create_send_context(),
-                    enclave_b.create_async_action_ref(action_b),
-                    Some(Duration::from_millis(500)),
-                ),
-                None,
-            ),
-            reactor_a,
-            // reactionA uses portA
-            std::iter::once(port_a),
-            std::iter::empty(),
-            std::iter::empty(),
-        );
-
-        // portA triggers reactionA
-        enclave_a.insert_port_trigger(port_a, (Level::from(1), reaction_a));
-
-        // link the two enclaves
-        enclave_b.link_upstream(&mut enclave_a);
-
-        enclaves.insert(enclave_a);
-        enclaves.insert(enclave_b);
-
-        enclaves
-    }
-
-    #[test]
-    #[cfg(feature = "parallel")]
-    fn test_enclave0() {
-        use rayon::iter::{ParallelBridge, ParallelIterator};
-
-        tracing_subscriber::fmt()
-            .with_thread_ids(true)
-            .with_max_level(tracing::Level::TRACE)
-            .compact()
-            .init();
-
-        let enclaves = create_enclave_pair();
-        assert_eq!(enclaves.len(), 2);
-
-        for enclave in enclaves.values() {
-            enclave.validate();
-        }
-
-        let config = Config::default()
-            .with_fast_forward(false)
-            .with_timeout(Duration::from_secs(3));
-
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(4)
-            .build_global()
-            .unwrap();
-
-        let envs_out = enclaves
-            .into_iter()
-            .par_bridge()
-            .map(|(reactor_key, enclave)| {
-                let mut sched = Scheduler::new(enclave, config.clone());
-
-                tracing::info!("Starting scheduler for reactor {reactor_key:?}");
-                sched.event_loop();
-                let env = sched.into_env();
-
-                (reactor_key, env)
-            });
-
-        envs_out.for_each(|(reactor_key, env)| {
-            if let Some(state) = env
-                .find_reactor_by_name("reactorB")
-                .and_then(|r| r.get_state::<bool>())
-            {
-                assert!(*state, "Expected state to be true");
-            }
-        });
     }
 }

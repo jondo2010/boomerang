@@ -5,8 +5,7 @@ use super::{
     EnvBuilder, FindElements, Logical, Output, Physical, PhysicalActionKey, PortTag,
     ReactionBuilderState, TimerActionKey, TimerSpec, TriggerMode, TypedActionKey, TypedPortKey,
 };
-use crate::{runtime, ActionTag, Input};
-use boomerang_runtime::BoxedReactionFn;
+use crate::{runtime, ActionTag, EnclavePartsMap, Input};
 use slotmap::SecondaryMap;
 
 slotmap::new_key_type! {
@@ -287,7 +286,7 @@ impl<'a> ReactorBuilderState<'a> {
             .action_builders
             .iter()
             .find(|(_, action)| {
-                matches!(action.r#type(), ActionType::Startup)
+                matches!(action.r#type(), ActionType::Timer(TimerSpec { period, offset }) if period.is_none() && offset.is_none())
                     && action.reactor_key() == reactor_key
             })
             .map(|(action_key, _)| action_key)
@@ -332,11 +331,6 @@ impl<'a> ReactorBuilderState<'a> {
         name: &str,
         spec: TimerSpec,
     ) -> Result<TimerActionKey, BuilderError> {
-        todo!("Finish fixing this");
-        self.env.add_timer_action(name, self.reactor_key, spec)
-        /*
-        let action_key = self.add_logical_action::<()>(name, None)?;
-        let startup_key = self.startup_action;
         let trigger_mode = if spec.period.is_some() {
             // If the timer has a period, it should be triggered by the action_key
             TriggerMode::TriggersAndEffects
@@ -345,16 +339,14 @@ impl<'a> ReactorBuilderState<'a> {
             TriggerMode::EffectsOnly
         };
 
-        self.add_reaction(
-            &format!("_{name}_startup"),
-            runtime::reaction::TimerFn(spec.period),
-        )
-        .with_action(startup_key, 0, TriggerMode::TriggersOnly)?
-        .with_action(action_key, 1, trigger_mode)?
-        .finish()?;
+        let timer_fn = runtime::reaction::TimerFn(spec.period);
+        let action_key = self.env.add_timer_action(name, self.reactor_key, spec)?;
+        let _ = self
+            .add_reaction(&format!("_{name}_timer"), move |_| timer_fn.into())
+            .with_action(action_key, 0, trigger_mode)?
+            .finish()?;
 
-        Ok(TimerActionKey::from(BuilderActionKey::from(action_key)))
-        */
+        Ok(action_key)
     }
 
     /// Add a new action to the reactor.
@@ -392,13 +384,12 @@ impl<'a> ReactorBuilderState<'a> {
     }
 
     /// Add a new reaction to this reactor.
-    pub fn add_reaction(
-        &mut self,
-        name: &str,
-        reaction_fn: impl Into<BoxedReactionFn>,
-    ) -> ReactionBuilderState {
+    pub fn add_reaction<F>(&mut self, name: &str, reaction_builder_fn: F) -> ReactionBuilderState
+    where
+        F: for<'any> FnOnce(&'any EnclavePartsMap) -> runtime::BoxedReactionFn + 'static,
+    {
         self.env
-            .add_reaction(name, self.reactor_key, reaction_fn.into())
+            .add_reaction(name, self.reactor_key, reaction_builder_fn)
     }
 
     /// Add a new input port to this reactor.

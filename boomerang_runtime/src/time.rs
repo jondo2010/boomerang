@@ -106,11 +106,19 @@ impl Tag {
         origin + self.offset
     }
 
-    /// Create a new Tag offset from the current.
+    /// Create a new Tag strictly offset from the current.
     pub fn delay(&self, offset: impl Into<Timestamp>) -> Self {
-        Self {
-            offset: self.offset + offset.into(),
-            micro_step: 0,
+        let offset: Timestamp = offset.into();
+        if offset.0.is_zero() {
+            Self {
+                offset: self.offset,
+                micro_step: self.micro_step + 1,
+            }
+        } else {
+            Self {
+                offset: self.offset + offset,
+                micro_step: 0,
+            }
         }
     }
 

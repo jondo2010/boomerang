@@ -107,11 +107,11 @@ impl runtime::Trigger<bool> for SinkReactionIn<'_> {
 )]
 #[allow(dead_code)]
 struct ActionDelayBuilder {
-    #[reactor(child = ())]
+    #[reactor(child(state = ()))]
     source: SourceBuilder,
-    #[reactor(child = false)]
+    #[reactor(child(state = false))]
     sink: Sink,
-    #[reactor(child = GeneratedDelayState::default())]
+    #[reactor(child(state = GeneratedDelayState::default()))]
     g: GeneratedDelay,
 }
 

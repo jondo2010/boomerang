@@ -42,9 +42,9 @@ impl<const NUM_NODES: usize> runtime::Trigger<usize> for ReactionIn<'_, NUM_NODE
 }
 
 #[derive(Reactor)]
-#[reactor(state = "()", connection(from = "nodes.output", to = "nodes.input"))]
+#[reactor(state = (), connection(from = "nodes.output", to = "nodes.input"))]
 struct Main<const NUM_NODES: usize> {
-    #[reactor(child = "NUM_NODES")]
+    #[reactor(child(state = NUM_NODES))]
     nodes: Node<NUM_NODES>,
 }
 

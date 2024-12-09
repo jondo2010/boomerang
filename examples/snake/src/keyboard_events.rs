@@ -78,7 +78,7 @@ impl runtime::Trigger<KeyboardEvents> for ReactionStartup {
                 match c.unwrap() {
                     k @ (Key::Left | Key::Right | Key::Up | Key::Down) => {
                         tracing::debug!("received {:?}", k);
-                        self.key_press.schedule(&send_ctx, k, None);
+                        self.key_press.schedule_async(&send_ctx, k, None);
                     }
                     Key::Ctrl('c') => {
                         tracing::debug!("Ctrl-C received, shutting down.");

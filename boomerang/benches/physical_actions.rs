@@ -44,7 +44,7 @@ impl<T: ReactorData + Default> runtime::Trigger<State> for ReactionRun<T> {
         state.thread = Some(std::thread::spawn(move || {
             let mut count = 0;
             while !send_ctx.is_shutdown() {
-                a.schedule(&send_ctx, T::default(), None);
+                a.schedule_async(&send_ctx, T::default(), None);
                 count += 1;
             }
             count

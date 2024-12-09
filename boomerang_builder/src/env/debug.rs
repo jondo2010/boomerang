@@ -4,10 +4,13 @@ use std::{collections::HashMap, fmt::Debug};
 
 use itertools::Itertools;
 use petgraph::prelude::DiGraphMap;
+use slotmap::SecondaryMap;
 
-use crate::{BuilderFqn, BuilderPortKey, BuilderReactorKey};
+use crate::{BuilderFqn, BuilderPortKey, BuilderReactionKey, BuilderReactorKey};
 
-use super::EnvBuilder;
+use super::{build::BuilderAliases, EnvBuilder};
+
+use boomerang_runtime::fmt_utils as fmt;
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Dependency(BuilderFqn, BuilderFqn);
@@ -82,10 +85,15 @@ impl EnvBuilder {
         reactors_chunked
             .into_iter()
             .map(|(first_key, last_key, fqn)| {
+                let reactor = &self.reactor_builders[first_key];
+                let enclave = if reactor.is_enclave { " <Enclave>" } else { "" };
                 if let Some(last_key) = last_key {
-                    (format!("{first_key:?}..{last_key:?}"), fqn.to_string())
+                    (
+                        format!("{first_key:?}..{last_key:?}"),
+                        format!("{fqn}{enclave}"),
+                    )
                 } else {
-                    (format!("{first_key:?}"), fqn.to_string())
+                    (format!("{first_key:?}"), format!("{fqn}{enclave}"))
                 }
             })
             .collect()
@@ -139,7 +147,8 @@ impl EnvBuilder {
             .sorted_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)))
             .chunk_by(|(_, fqn)| fqn.clone());
 
-        let level_map = self.build_runtime_level_map().ok();
+        //let level_map = self.build_runtime_level_map().ok();
+        let level_map: Option<SecondaryMap<BuilderReactionKey, boomerang_runtime::Level>> = None;
 
         reactions_chunked
             .into_iter()
@@ -169,6 +178,7 @@ impl EnvBuilder {
             .collect()
     }
 
+    /*
     fn reaction_edges_debug_map(&self) -> Vec<Dependency> {
         let edges = self
             .reaction_dependency_edges()
@@ -184,6 +194,7 @@ impl EnvBuilder {
             .collect_vec();
         edges
     }
+    */
 }
 
 impl Debug for EnvBuilder {
@@ -191,7 +202,7 @@ impl Debug for EnvBuilder {
         let reactors = self.reactors_debug_map();
         let actions = self.actions_debug_map();
         let ports = self.ports_debug_map();
-        let edges = self.reaction_edges_debug_map();
+        //let edges = self.reaction_edges_debug_map();
         let reactions = self.reactions_debug_map();
 
         //let runtime_port_parts = self.build_runtime_ports();
@@ -211,8 +222,59 @@ impl Debug for EnvBuilder {
             .field("actions", &actions)
             .field("ports", &ports)
             //.field("runtime_port_aliases", &port_aliases)
-            .field("reaction_dependency_edges", &edges)
+            //.field("reaction_dependency_edges", &edges)
             .field("reactions", &reactions)
+            .finish()
+    }
+}
+
+impl Debug for BuilderAliases {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let reactor_aliases = fmt::from_fn(|f| {
+            f.debug_map()
+                .entries(
+                    self.reactor_aliases
+                        .iter()
+                        .map(|(k, v)| (format!("{k:?}"), v.to_string())),
+                )
+                .finish()
+        });
+
+        let reaction_aliases = fmt::from_fn(|f| {
+            f.debug_map()
+                .entries(
+                    self.reaction_aliases
+                        .iter()
+                        .map(|(k, v)| (format!("{k:?}"), v.to_string())),
+                )
+                .finish()
+        });
+
+        let action_aliases = fmt::from_fn(|f| {
+            f.debug_map()
+                .entries(
+                    self.action_aliases
+                        .iter()
+                        .map(|(k, v)| (format!("{k:?}"), v.to_string())),
+                )
+                .finish()
+        });
+
+        let port_aliases = fmt::from_fn(|f| {
+            f.debug_map()
+                .entries(
+                    self.port_aliases
+                        .iter()
+                        .map(|(k, v)| (format!("{k:?}"), v.to_string())),
+                )
+                .finish()
+        });
+
+        f.debug_struct("BuilderAliases")
+            .field("reactor_aliases", &reactor_aliases)
+            .field("reaction_aliases", &reaction_aliases)
+            .field("action_aliases", &action_aliases)
+            .field("port_aliases", &port_aliases)
             .finish()
     }
 }

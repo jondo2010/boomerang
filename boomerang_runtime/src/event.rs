@@ -3,7 +3,7 @@ use std::{
     time::Duration,
 };
 
-use crate::{ActionKey, LevelReactionKey, ReactionGraph, ReactionSet, ReactorData, Tag};
+use crate::{ActionKey, LevelReactionKey, ReactionGraph, ReactionSet, ReactorData, Tag, Timestamp};
 
 /// `ScheduledEvent` is used internally by the scheduler loop in the event queue. The dependent reactions are already expanded into a single reaction set.
 #[derive(Debug, Clone)]
@@ -62,8 +62,8 @@ pub enum AsyncEvent {
 
     /// A Physical event has its `tag` set to the current physical time (+ an optional delay).
     Physical {
-        /// The [`Tag`] at which the reactions in this event should be executed.
-        tag: Tag,
+        /// The [`Timestamp`] at which the reactions in this event should be executed.
+        time: Timestamp,
         /// The [`ActionKey`] of the action that triggered this event.
         key: ActionKey,
         /// The value associated with this event.
@@ -72,8 +72,8 @@ pub enum AsyncEvent {
 
     /// The scheduler should terminate after processing this event.
     Shutdown {
-        /// The [`Tag`] at which the reactions in this event should be executed.
-        tag: Tag,
+        /// The delay after which the scheduler should terminate.
+        delay: Duration,
     },
 }
 
@@ -89,16 +89,16 @@ impl Debug for AsyncEvent {
                     &format!("Box<{}>", std::any::type_name_of_val(&**value)),
                 )
                 .finish(),
-            Self::Physical { tag, key, value } => f
+            Self::Physical { time, key, value } => f
                 .debug_struct("Physical")
-                .field("tag", tag)
+                .field("time", time)
                 .field("key", key)
                 .field(
                     "value",
                     &format!("Box<{}>", std::any::type_name_of_val(&**value)),
                 )
                 .finish(),
-            Self::Shutdown { tag } => f.debug_struct("Shutdown").field("tag", tag).finish(),
+            Self::Shutdown { delay } => f.debug_struct("Shutdown").field("delay", delay).finish(),
         }
     }
 }
@@ -111,22 +111,17 @@ impl Display for AsyncEvent {
                 key,
                 value: _,
             } => {
-                write!(
-                    f,
-                    "AsyncLogical[delay={delay},key={key:?},value=..]",
-                    delay = delay.as_secs_f64()
-                )
+                write!(f, "AsyncLogical[delay={delay:?},key={key:?},value=..]",)
             }
-            AsyncEvent::Physical { tag, key, value: _ } => {
-                write!(
-                    f,
-                    "AsyncPhysical[tag={tag},key={key:?},value=..]",
-                    tag = tag,
-                    key = key
-                )
+            AsyncEvent::Physical {
+                time,
+                key,
+                value: _,
+            } => {
+                write!(f, "AsyncPhysical[tag={time:?},key={key:?},value=..]",)
             }
-            AsyncEvent::Shutdown { tag } => {
-                write!(f, "AsyncShutdown[tag={tag}]")
+            AsyncEvent::Shutdown { delay } => {
+                write!(f, "AsyncShutdown[delay={delay:?}]")
             }
         }
     }
@@ -139,13 +134,13 @@ impl AsyncEvent {
     }
 
     /// Create a physical event.
-    pub(crate) fn physical(key: ActionKey, tag: Tag, value: Box<dyn ReactorData>) -> Self {
-        AsyncEvent::Physical { tag, key, value }
+    pub(crate) fn physical(key: ActionKey, time: Timestamp, value: Box<dyn ReactorData>) -> Self {
+        AsyncEvent::Physical { time, key, value }
     }
 
     /// Create a shutdown event.
-    pub(crate) fn shutdown(tag: Tag) -> Self {
-        AsyncEvent::Shutdown { tag }
+    pub(crate) fn shutdown(delay: Duration) -> Self {
+        AsyncEvent::Shutdown { delay }
     }
 
     /// Get an iterator over the downstream reactions of this event.

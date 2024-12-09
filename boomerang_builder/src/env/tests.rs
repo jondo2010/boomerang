@@ -1,5 +1,6 @@
 use rayon::iter::IntoParallelRefIterator;
 use runtime::BaseAction;
+use tracing::{instrument::WithSubscriber, Subscriber};
 
 use crate::{TimerSpec, TriggerMode};
 
@@ -350,11 +351,13 @@ fn test_build_partition_map() {
 
 #[test]
 fn test_enclave2() {
-    tracing_subscriber::fmt()
-        .with_thread_ids(true)
-        .with_max_level(tracing::Level::TRACE)
-        .compact()
-        .init();
+    use tracing_subscriber::layer::SubscriberExt;
+    let stdout_log = tracing_subscriber::fmt::layer().compact().pretty();
+    let subscriber = tracing_subscriber::Registry::default().with(stdout_log);
+    #[cfg(feature = "tracy")]
+    let subscriber = subscriber.with(tracing_tracy::TracyLayer::default());
+
+    tracing::subscriber::set_global_default(subscriber).unwrap();
 
     let env_builder = create_ping_pong();
 
@@ -370,8 +373,8 @@ fn test_enclave2() {
     use rayon::iter::ParallelIterator;
 
     let config = runtime::Config::default()
-        .with_fast_forward(false)
-        .with_timeout(Duration::from_secs(1));
+        .with_fast_forward(true)
+        .with_timeout(Duration::from_millis(100));
 
     enclaves
         .into_par_iter()

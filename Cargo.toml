@@ -27,6 +27,7 @@ tracing-subscriber = { version = "0.3", features = [
     "json",
     "env-filter",
 ] }
+tracing-tracy = { version = "0.11", features = ["flush-on-exit"] }
 linkme = { version = "0.3" }
 
 # Local crates

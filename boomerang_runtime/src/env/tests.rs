@@ -170,11 +170,17 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<DefaultKey, Enclave> {
 fn test_enclave0() {
     use rayon::iter::{ParallelBridge, ParallelIterator};
 
-    tracing_subscriber::fmt()
-        .with_thread_ids(true)
-        .with_max_level(tracing::Level::TRACE)
-        .compact()
-        .init();
+    //tracing_subscriber::fmt()
+    //    .with_thread_ids(true)
+    //    .with_max_level(tracing::Level::TRACE)
+    //    .compact()
+    //    .init();
+
+    use tracing_subscriber::layer::SubscriberExt;
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::registry().with(tracing_tracy::TracyLayer::default()),
+    )
+    .expect("setup tracy layer");
 
     let enclaves = create_enclave_pair();
     assert_eq!(enclaves.len(), 2);

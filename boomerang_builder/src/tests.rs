@@ -1,6 +1,7 @@
 use std::{iter, time::Duration};
 
 use boomerang_runtime::{ActionCommon, CommonContext};
+use itertools::Itertools;
 
 use super::*;
 use crate::runtime;
@@ -394,31 +395,46 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
     let mut runtime_parts = env_builder.into_runtime_parts()?;
     let EnclaveParts { enclave, aliases } = runtime_parts.remove(0);
 
+    for (k,v) in enclave.env.ports.iter() {
+        println!("{}: {}", k, v.get_name());
+    }
+
     // the Source startup reaction should trigger on startup and effect the clock port
     let runtime_reaction_source_startup_key = aliases.reaction_aliases[reaction_source_startup_key];
-    itertools::assert_equal(
-        enclave.graph.reaction_effect_ports[runtime_reaction_source_startup_key].iter(),
+    let actual = enclave.graph.reaction_effect_ports[runtime_reaction_source_startup_key]
+        .iter()
+        .collect_vec();
+    assert_eq!(
+        actual,
         [aliases.port_aliases[clock_source]],
+        "Source startup reaction should have clock as effect port"
     );
 
     let runtime_reaction_sink_clock_key = aliases.reaction_aliases[reaction_sink_clock_key];
 
     // The clock reaction should only be triggered by the `clock` port, not the `in1` or `in2` ports.
-    itertools::assert_equal(
-        enclave.graph.port_triggers[aliases.port_aliases[clock_sink]]
-            .iter()
-            .map(|(_, reaction_key)| reaction_key),
-        &[runtime_reaction_sink_clock_key],
+    let actual = enclave.graph.port_triggers[aliases.port_aliases[clock_sink]]
+        .iter()
+        .map(|(_, reaction_key)| *reaction_key)
+        .collect_vec();
+    assert_eq!(
+        actual,
+        [runtime_reaction_sink_clock_key],
+        "clock port should trigger clock reaction"
     );
 
     // The clock reaction should have the `clock`, `in1`, and `in2` ports as use ports.
-    itertools::assert_equal(
-        enclave.graph.reaction_use_ports[runtime_reaction_sink_clock_key].iter(),
-        [
+    let actual = enclave.graph.reaction_use_ports[runtime_reaction_sink_clock_key]
+        .iter()
+        .collect_vec();
+    assert_eq!(
+        actual,
+        vec![
             aliases.port_aliases[clock_source],
             aliases.port_aliases[in1_sink],
             aliases.port_aliases[in2_sink],
         ],
+        "clock reaction should have clock, in1, and in2 as use ports"
     );
 
     // The clock reaction should not have any effect ports.

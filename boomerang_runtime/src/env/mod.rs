@@ -97,13 +97,10 @@ pub struct ReactionGraph {
     pub action_triggers: tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
     /// For each Port, a set of Reactions it triggers
     pub port_triggers: tinymap::TinySecondaryMap<PortKey, Vec<LevelReactionKey>>,
-
     /// Global startup reactions, keyed by delay
     pub startup_reactions: BTreeMap<Duration, Vec<LevelReactionKey>>,
-
     /// Global shutdown reactions
     pub shutdown_reactions: Vec<LevelReactionKey>,
-
     /// For each reaction, the set of 'use' ports
     pub reaction_use_ports: tinymap::TinySecondaryMap<ReactionKey, tinymap::KeySet<PortKey>>,
     /// For each reaction, the set of 'effect' ports

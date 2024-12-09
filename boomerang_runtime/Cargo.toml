@@ -43,7 +43,8 @@ serde = { workspace = true, optional = true, features = ["derive"] }
 #serde_flexitos = { workspace = true, optional = true, features = ["id_trait"] }
 thiserror.workspace = true
 tinymap.workspace = true
-tracing = { workspace = true }
+tracing.workspace = true
 
 [dev-dependencies]
-tracing-subscriber = { workspace = true }
+tracing-subscriber.workspace = true
+tracing-tracy.workspace = true

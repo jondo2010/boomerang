@@ -117,11 +117,21 @@ impl PortBindings {
             }
             (PortType::Output, PortType::Input) => {
                 // VALIDATE(this->container()->container() == port->container()->container(),
+                if source_ancestor != target_ancestor {
+                    return Err(BuilderError::PortConnectionError {
+                        source_key,
+                        target_key,
+                        what: "An output port A may only be bound to an input port B if both ports belong to reactors in the same hierarichal level.".into(),
+                    });
+                }
+
+                /*
                 match (source_ancestor, target_ancestor) {
                     (Some(key_a), Some(key_b)) if key_a == key_b => {
                         // Valid
                     }
                     _ => {
+                        dbg!(source_ancestor, target_ancestor);
                         return Err(BuilderError::PortConnectionError {
                             source_key,
                             target_key,
@@ -129,6 +139,7 @@ impl PortBindings {
                         });
                     }
                 }
+                */
             }
             (PortType::Output, PortType::Output) => {
                 // VALIDATE( this->container()->container() == port->container(),

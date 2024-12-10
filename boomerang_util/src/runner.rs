@@ -64,11 +64,10 @@ pub fn build_and_test_reactor<R: Reactor>(
         .into_runtime_parts()
         .context("Error building environment!")?;
     let EnclaveParts {
-        env,
-        graph,
+        enclave,
         aliases: _,
     } = runtime_parts.remove(0);
-    let mut sched = runtime::Scheduler::new(env, graph, config);
+    let mut sched = runtime::Scheduler::new(enclave, config);
     sched.event_loop();
     Ok((reactor, sched))
 }
@@ -139,14 +138,12 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
         .context("Error building environment!")?;
 
     let EnclaveParts {
-        env,
-        graph: triggers,
+        enclave,
         aliases: _,
     } = enclave_parts.into_iter().next().unwrap();
 
     if args.print_debug_info {
-        println!("{env:#?}");
-        println!("{triggers:#?}");
+        println!("{enclave:#?}");
     }
 
     let config = runtime::Config {
@@ -154,7 +151,7 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
         ..Default::default()
     };
 
-    let mut sched = runtime::Scheduler::new(env, triggers, config);
+    let mut sched = runtime::Scheduler::new(enclave, config);
     sched.event_loop();
 
     Ok(reactor)

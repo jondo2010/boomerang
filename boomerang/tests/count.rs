@@ -12,7 +12,7 @@ impl CountData for i32 {}
 #[derive(Reactor)]
 #[reactor(state = "T", reaction = "ReactionT<T>", reaction = "ReactionShutdown")]
 struct Count<T: CountData> {
-    #[reactor(timer(period = "1 msec"))]
+    #[reactor(timer(period = "100 msec"))]
     t: TimerActionKey,
     c: TypedPortKey<T, Output>,
 }

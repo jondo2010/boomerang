@@ -11,7 +11,7 @@
 
 use anyhow::Context;
 use boomerang::{
-    builder::{graphviz, EnvBuilder, Reactor},
+    builder::{EnclaveParts, EnvBuilder, Reactor},
     runtime,
 };
 use clap::Parser;
@@ -49,7 +49,7 @@ pub fn build_and_test_reactor<R: Reactor>(
     config: runtime::Config,
 ) -> anyhow::Result<(R, runtime::Scheduler)> {
     let mut env_builder = EnvBuilder::new();
-    let reactor = R::build(name, state, None, None, &mut env_builder)
+    let reactor = R::build(name, state, None, None, false, &mut env_builder)
         .context("Error building top-level reactor!")?;
 
     if std::env::var("PUML").is_ok() {
@@ -60,10 +60,14 @@ pub fn build_and_test_reactor<R: Reactor>(
         tracing::info!("Wrote plantuml graph to {path}");
     }
 
-    let (env, graph, _) = env_builder
+    let mut runtime_parts = env_builder
         .into_runtime_parts()
         .context("Error building environment!")?;
-    let mut sched = runtime::Scheduler::new(env, graph, config);
+    let EnclaveParts {
+        enclave,
+        aliases: _,
+    } = runtime_parts.remove(0);
+    let mut sched = runtime::Scheduler::new(enclave, config);
     sched.event_loop();
     Ok((reactor, sched))
 }
@@ -88,7 +92,7 @@ pub fn build_and_test_reactor<R: Reactor>(
 pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow::Result<R> {
     // build the reactor
     let mut env_builder = EnvBuilder::new();
-    let reactor = R::build(name, state, None, None, &mut env_builder)
+    let reactor = R::build(name, state, None, None, false, &mut env_builder)
         .context("Error building top-level reactor!")?;
 
     let args = Args::parse();
@@ -105,19 +109,19 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
     }
 
     if args.full_graph {
-        let gv = graphviz::create_full_graph(&env_builder).unwrap();
-        let path = format!("{name}.dot");
-        let mut f = std::fs::File::create(&path).unwrap();
-        std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
-        tracing::info!("Wrote full graph to {path}");
+        //let gv = graphviz::create_full_graph(&env_builder).unwrap();
+        //let path = format!("{name}.dot");
+        //let mut f = std::fs::File::create(&path).unwrap();
+        //std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
+        //tracing::info!("Wrote full graph to {path}");
     }
 
     if args.reaction_graph {
-        let gv = graphviz::create_reaction_graph(&env_builder).unwrap();
-        let path = format!("{name}_levels.dot");
-        let mut f = std::fs::File::create(&path).unwrap();
-        std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
-        tracing::info!("Wrote reaction graph to {path}");
+        //let gv = graphviz::create_reaction_graph(&env_builder).unwrap();
+        //let path = format!("{name}_levels.dot");
+        //let mut f = std::fs::File::create(&path).unwrap();
+        //std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
+        //tracing::info!("Wrote reaction graph to {path}");
 
         let gv = env_builder.create_plantuml_graph()?;
         let path = format!("{name}.puml");
@@ -129,12 +133,17 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
     if args.print_debug_info {
         println!("{env_builder:#?}");
     }
-    let (env, triggers, _) = env_builder
+    let enclave_parts = env_builder
         .into_runtime_parts()
         .context("Error building environment!")?;
+
+    let EnclaveParts {
+        enclave,
+        aliases: _,
+    } = enclave_parts.into_iter().next().unwrap();
+
     if args.print_debug_info {
-        println!("{env:#?}");
-        println!("{triggers:#?}");
+        println!("{enclave:#?}");
     }
 
     let config = runtime::Config {
@@ -142,7 +151,7 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
         ..Default::default()
     };
 
-    let mut sched = runtime::Scheduler::new(env, triggers, config);
+    let mut sched = runtime::Scheduler::new(enclave, config);
     sched.event_loop();
 
     Ok(reactor)

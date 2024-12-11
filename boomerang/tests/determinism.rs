@@ -78,13 +78,13 @@ impl runtime::Trigger<()> for PassReactionX<'_> {
 )]
 #[allow(dead_code)]
 struct DeterminismBuilder {
-    #[reactor(child = "()")]
+    #[reactor(child(state = ()))]
     s: SourceBuilder,
-    #[reactor(child = "()")]
+    #[reactor(child(state = ()))]
     d: DestinationBuilder,
-    #[reactor(child = "()")]
+    #[reactor(child(state = ()))]
     p1: PassBuilder,
-    #[reactor(child = "()")]
+    #[reactor(child(state = ()))]
     p2: PassBuilder,
 }
 

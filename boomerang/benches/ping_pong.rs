@@ -8,6 +8,7 @@
 //! @author Clément Fournier
 
 use boomerang::prelude::*;
+use boomerang_builder::EnclaveParts;
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 
 #[derive(Debug)]
@@ -126,10 +127,10 @@ struct Main {
     connection(from = "pong.out_pong", to = "ping.in_pong")
 )]
 struct MainBuilder {
-    #[reactor(child = "Ping::new(state.count)")]
+    #[reactor(child(state = Ping::new(state.count)))]
     ping: PingBuilder,
 
-    #[reactor(child = "Pong::default()")]
+    #[reactor(child(state = Pong::default()))]
     pong: PongBuilder,
 }
 
@@ -169,15 +170,24 @@ fn bench(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     let mut env_builder = EnvBuilder::new();
-                    let _reactor =
-                        MainBuilder::build("main", Main { count }, None, None, &mut env_builder)
-                            .unwrap();
-                    let (env, triggers, _) = env_builder.into_runtime_parts().unwrap();
-                    (env, triggers)
+                    let _reactor = MainBuilder::build(
+                        "main",
+                        Main { count },
+                        None,
+                        None,
+                        false,
+                        &mut env_builder,
+                    )
+                    .unwrap();
+                    let enclave_parts = env_builder.into_runtime_parts().unwrap();
+                    enclave_parts.into_iter().next().unwrap()
                 },
-                |(env, triggers)| {
+                |enclave| {
                     let config = runtime::Config::default().with_fast_forward(true);
-                    let mut sched = runtime::Scheduler::new(env, triggers, config);
+
+                    let EnclaveParts { env, graph, .. } = enclave;
+
+                    let mut sched = runtime::Scheduler::new(env, graph, config);
                     sched.event_loop();
 
                     // validate the end state

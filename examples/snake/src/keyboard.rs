@@ -15,10 +15,10 @@ mod example {
     /// A simple Reactor that triggers on key_press events.
     /// It reads keyboard input and prints the key that was pressed.
     #[derive(Reactor)]
-    #[reactor(state = "()", reaction = "ReactionKeyPress")]
+    #[reactor(state = (), reaction = "ReactionKeyPress")]
     pub struct Example {
         /// this thing helps capturing key presses
-        #[reactor(child = KeyboardEvents::default())]
+        #[reactor(child(state = KeyboardEvents::default()))]
         keyboard: KeyboardEventsBuilder,
     }
 
@@ -52,18 +52,21 @@ mod example {
 
 #[cfg(not(windows))]
 fn main() {
-    use boomerang::prelude::*;
+    use boomerang::{builder::EnclaveParts, prelude::*};
     tracing_subscriber::fmt::init();
 
     let mut env_builder = EnvBuilder::new();
-    let _reactor = example::Example::build("printer", (), None, None, &mut env_builder).unwrap();
+    let _reactor =
+        example::Example::build("printer", (), None, None, false, &mut env_builder).unwrap();
 
-    let (env, triggers, _) = env_builder.into_runtime_parts().unwrap();
+    let enclave_parts = env_builder.into_runtime_parts().unwrap();
+
+    let EnclaveParts { env, graph, .. } = enclave_parts.into_iter().next().unwrap();
 
     let config = runtime::Config::default()
         .with_fast_forward(false)
         .with_keep_alive(true);
-    let mut sched = runtime::Scheduler::new(env, triggers, config);
+    let mut sched = runtime::Scheduler::new(env, graph, config);
     sched.event_loop();
 }
 

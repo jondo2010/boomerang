@@ -1,28 +1,27 @@
 //! Generate the `FromRefs` implementation for a reaction
 
 use quote::{quote, ToTokens};
-use syn::{Generics, Ident, Type, TypeReference};
 
 use crate::util::extract_path_ident;
 
 use super::{ReactionReceiver, ACTION, ACTION_REF, ASYNC_ACTION_REF, INPUT_REF, OUTPUT_REF};
 
 pub struct FromDefsImpl {
-    reaction_ident: Ident,
-    reaction_generics: Generics,
+    reaction_ident: syn::Ident,
+    reaction_generics: syn::Generics,
     #[allow(dead_code)]
-    combined_generics: Generics,
-    reactor: Type,
-    initializer_idents: Vec<Ident>,
-    action_idents: Vec<Ident>,
-    port_idents: Vec<Ident>,
-    port_mut_idents: Vec<Ident>,
+    combined_generics: syn::Generics,
+    reactor: syn::Type,
+    initializer_idents: Vec<syn::Ident>,
+    action_idents: Vec<syn::Ident>,
+    port_idents: Vec<syn::Ident>,
+    port_mut_idents: Vec<syn::Ident>,
 }
 
 impl FromDefsImpl {
     pub fn new(
         reaction_receiver: &ReactionReceiver,
-        combined_generics: &Generics,
+        combined_generics: &syn::Generics,
     ) -> darling::Result<Self> {
         let fields = reaction_receiver
             .data
@@ -41,7 +40,7 @@ impl FromDefsImpl {
             })?;
 
             match &field.ty {
-                Type::Reference(TypeReference {
+                syn::Type::Reference(syn::TypeReference {
                     mutability: None,
                     elem,
                     ..
@@ -63,7 +62,7 @@ impl FromDefsImpl {
                     }
                 }
 
-                Type::Reference(TypeReference {
+                syn::Type::Reference(syn::TypeReference {
                     mutability: Some(_),
                     elem,
                     ..
@@ -85,25 +84,27 @@ impl FromDefsImpl {
                     }
                 }
 
-                Type::Path(_) | Type::Array(_) => match field_inner_type.to_string().as_ref() {
-                    INPUT_REF => {
-                        initializer_idents.push(field.ident.clone().unwrap());
-                        port_idents.push(field.ident.clone().unwrap());
-                    }
-                    OUTPUT_REF => {
-                        initializer_idents.push(field.ident.clone().unwrap());
-                        port_mut_idents.push(field.ident.clone().unwrap());
-                    }
-                    ACTION_REF | ASYNC_ACTION_REF => {
-                        initializer_idents.push(field.ident.clone().unwrap());
-                        action_idents.push(field.ident.clone().unwrap());
-                    }
+                syn::Type::Path(_) | syn::Type::Array(_) => {
+                    match field_inner_type.to_string().as_ref() {
+                        INPUT_REF => {
+                            initializer_idents.push(field.ident.clone().unwrap());
+                            port_idents.push(field.ident.clone().unwrap());
+                        }
+                        OUTPUT_REF => {
+                            initializer_idents.push(field.ident.clone().unwrap());
+                            port_mut_idents.push(field.ident.clone().unwrap());
+                        }
+                        ACTION_REF | ASYNC_ACTION_REF => {
+                            initializer_idents.push(field.ident.clone().unwrap());
+                            action_idents.push(field.ident.clone().unwrap());
+                        }
 
-                    _ => {
-                        return Err(darling::Error::custom("Unexpected Reaction member")
-                            .with_span(&field.ty));
+                        _ => {
+                            return Err(darling::Error::custom("Unexpected Reaction member")
+                                .with_span(&field.ty));
+                        }
                     }
-                },
+                }
 
                 _ => {
                     return Err(darling::Error::custom(format!(

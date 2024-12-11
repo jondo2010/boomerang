@@ -19,7 +19,7 @@ impl runtime::Trigger<bool> for ReactionStartup {
         let act = self.act.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(20));
-            act.schedule(&send_ctx, 434, None);
+            act.schedule_async(&send_ctx, 434, None);
         });
     }
 }

@@ -324,11 +324,11 @@ impl<'store> ReactionFn<'store> for TimerFn {
     ) {
         let mut timer: ActionRef = actions.partition_mut().expect("Expected a timer action");
 
-        if timer.is_present(ctx) {
-            ctx.schedule_action(&mut timer, (), self.0);
-        } else {
-            ctx.schedule_action(&mut timer, (), None);
-        }
+        //if timer.is_present(ctx) {
+        ctx.schedule_action(&mut timer, (), self.0);
+        //} else {
+        //ctx.schedule_action(&mut timer, (), None);
+        //}
     }
 }
 

@@ -23,7 +23,7 @@ mod debug;
 #[cfg(test)]
 mod tests;
 
-pub use build::{EnclaveParts, EnclavePartsMap, PartitionMap};
+pub use build::{DeferedBuild, EnclaveParts, EnclavePartsMap, PartitionMap};
 
 mod util {
     use petgraph::visit::{IntoNeighborsDirected, IntoNodeIdentifiers, Visitable};
@@ -511,9 +511,12 @@ impl EnvBuilder {
             .flat_map(move |(reaction_key, reaction)| {
                 // Connect all reactions this reaction depends upon
                 reaction
-                    .trigger_ports
-                    .keys()
-                    .flat_map(move |port_key| {
+                    .port_relations
+                    .iter()
+                    .filter_map(|(port_key, trigger_mode)| {
+                        trigger_mode.is_triggers().then_some(port_key)
+                    })
+                    .flat_map(|port_key| {
                         let source_port_key = port_bindings.follow_port_inward(port_key);
 
                         // all reactions that can set this port

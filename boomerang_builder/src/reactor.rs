@@ -3,7 +3,7 @@ use std::{fmt::Debug, time::Duration};
 use super::{
     ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
     EnvBuilder, FindElements, Logical, Output, Physical, PhysicalActionKey, PortTag,
-    ReactionBuilderState, TimerActionKey, TimerSpec, TriggerMode, TypedActionKey, TypedPortKey,
+    ReactionBuilderState, TimerActionKey, TimerSpec, TypedActionKey, TypedPortKey,
 };
 use crate::{runtime, ActionTag, EnclavePartsMap, Input};
 use slotmap::SecondaryMap;
@@ -331,22 +331,7 @@ impl<'a> ReactorBuilderState<'a> {
         name: &str,
         spec: TimerSpec,
     ) -> Result<TimerActionKey, BuilderError> {
-        let trigger_mode = if spec.period.is_some() {
-            // If the timer has a period, it should be triggered by the action_key
-            TriggerMode::TriggersAndEffects
-        } else {
-            // Otherwise, it should only be triggered by the startup action
-            TriggerMode::EffectsOnly
-        };
-
-        let timer_fn = runtime::reaction::TimerFn(spec.period);
-        let action_key = self.env.add_timer_action(name, self.reactor_key, spec)?;
-        let _ = self
-            .add_reaction(&format!("_{name}_timer"), move |_| timer_fn.into())
-            .with_action(action_key, 0, trigger_mode)?
-            .finish()?;
-
-        Ok(action_key)
+        self.env.add_timer_action(name, self.reactor_key, spec)
     }
 
     /// Add a new action to the reactor.

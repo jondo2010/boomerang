@@ -4,7 +4,7 @@ use slotmap::SecondaryMap;
 
 use crate::{
     connection::PortBindings, ActionType, BuilderActionKey, BuilderError, BuilderPortKey,
-    BuilderReactionKey, BuilderReactorKey, ParentReactorBuilder,
+    BuilderReactionKey, BuilderReactorKey, ParentReactorBuilder, TriggerMode,
 };
 
 use super::{collect_transitive_port_triggers, EnvBuilder};
@@ -19,6 +19,33 @@ pub struct EnclaveParts {
 }
 
 pub type EnclavePartsMap = SecondaryMap<BuilderReactorKey, EnclaveParts>;
+
+/// A trait used to defer the building of until the enclave parts are available.
+pub trait DeferedBuild {
+    type Output;
+
+    fn defer(self) -> impl FnOnce(&EnclavePartsMap) -> Self::Output + 'static;
+}
+
+//F: for<'any> FnOnce(&'any EnclavePartsMap) -> runtime::BoxedReactionFn + 'static,
+impl<Reaction, State> DeferedBuild for runtime::ReactionAdapter<Reaction, State>
+where
+    Reaction: runtime::FromRefs + 'static,
+    for<'store> Reaction::Marker<'store>: 'store + runtime::Trigger<State>,
+    State: runtime::ReactorData,
+{
+    type Output = runtime::BoxedReactionFn;
+    fn defer(self) -> impl FnOnce(&EnclavePartsMap) -> Self::Output + 'static {
+        move |_| runtime::BoxedReactionFn::from(self)
+    }
+}
+
+impl DeferedBuild for runtime::reaction::TimerFn {
+    type Output = runtime::BoxedReactionFn;
+    fn defer(self) -> impl FnOnce(&EnclavePartsMap) -> Self::Output + 'static {
+        move |_| runtime::BoxedReactionFn::from(self)
+    }
+}
 
 /// Aliasing maps from Builder keys to runtime keys
 #[derive(Default)]
@@ -97,16 +124,37 @@ impl EnvBuilder {
         partition_map: &PartitionMap,
         partitions: &mut SecondaryMap<BuilderReactorKey, EnclaveParts>,
     ) -> Result<(), BuilderError> {
+        let mut new_reactions = Vec::new();
+
         for (builder_action_key, action) in &self.action_builders {
             let partition_key = partition_map[action.parent_reactor_key().unwrap()];
             let partition = &mut partitions[partition_key];
 
             match action.r#type() {
-                ActionType::Timer(_) | ActionType::Shutdown => {
+                ActionType::Timer(spec) => {
                     let runtime_action_key = partition.enclave.insert_action(|key| {
                         runtime::Action::<()>::new(action.name(), key, None, true).boxed()
                     });
+                    partition
+                        .aliases
+                        .action_aliases
+                        .insert(builder_action_key, runtime_action_key);
 
+                    if spec.period.is_some() {
+                        // Periodic timers need a reset reaction
+                        new_reactions.push((
+                            format!("{}_reset", action.name()),
+                            runtime::reaction::TimerFn(spec.period),
+                            action.reactor_key(),
+                            builder_action_key,
+                        ));
+                    }
+                }
+
+                ActionType::Shutdown => {
+                    let runtime_action_key = partition.enclave.insert_action(|key| {
+                        runtime::Action::<()>::new(action.name(), key, None, true).boxed()
+                    });
                     partition
                         .aliases
                         .action_aliases
@@ -128,6 +176,14 @@ impl EnvBuilder {
                         .insert(builder_action_key, runtime_action_key);
                 }
             }
+        }
+
+        // Now create the reset reactions for periodic timers, since we can now get &mut self.
+        for (name, reaction_fn, reactor_key, action_key) in new_reactions {
+            let _ = self
+                .add_reaction(&name, reactor_key, reaction_fn.defer())
+                .with_action(action_key, 0, TriggerMode::TriggersAndEffects)?
+                .finish()?;
         }
 
         Ok(())
@@ -260,11 +316,13 @@ impl EnvBuilder {
             .map(|reactor_key| (*reactor_key, EnclaveParts::default()))
             .collect();
 
-        let reaction_levels = self.build_runtime_level_map(&port_bindings)?;
-
-        self.build_runtime_reactors(&partition_map, &mut partitions)?;
         self.build_runtime_actions(&partition_map, &mut partitions)?;
         self.build_runtime_ports(&partition_map, &mut partitions, &port_bindings)?;
+
+        self.build_runtime_reactors(&partition_map, &mut partitions)?;
+
+        // must be done last, since building other parts may add new reactions
+        let reaction_levels = self.build_runtime_level_map(&port_bindings)?;
         self.build_runtime_reactions(&partition_map, &mut partitions, &reaction_levels)?;
 
         /*

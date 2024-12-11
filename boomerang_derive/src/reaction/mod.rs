@@ -318,6 +318,8 @@ impl ToTokens for Reaction {
                     ::boomerang::builder::BuilderError
                 >
                 {
+                    use ::boomerang::builder::DeferedBuild;
+
                     let __startup_action = builder.get_startup_action();
                     let __shutdown_action = builder.get_shutdown_action();
 
@@ -326,7 +328,7 @@ impl ToTokens for Reaction {
                             #ident #inner_type_generics,
                             <#reactor as ::boomerang::builder::Reactor>::State
                         >::default();
-                        builder.add_reaction(name, wrapper)
+                        builder.add_reaction(name, wrapper.defer())
                     };
 
                     #trigger_startup

@@ -70,7 +70,7 @@ pub struct Tag {
 
 impl std::fmt::Display for Tag {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "[{:?}+{}]", self.offset, self.micro_step)
+        write!(f, "[{:?}+{}]", self.offset.0, self.micro_step)
     }
 }
 

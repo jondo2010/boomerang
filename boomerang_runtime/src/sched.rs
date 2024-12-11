@@ -1,7 +1,6 @@
 use std::{collections::BinaryHeap, pin::Pin, time::Duration};
 
 use crossbeam_channel::RecvTimeoutError;
-use itertools::Itertools;
 
 use crate::{
     build_reaction_contexts,
@@ -47,6 +46,31 @@ impl EventQueue {
             terminal,
         };
         self.event_queue.push(event);
+    }
+
+    /// Pop the next event from the event queue.
+    ///
+    /// Any subsequent events with the same tag are merged into the returned event.
+    fn pop_next_event(&mut self) -> Option<ScheduledEvent> {
+        if let Some(mut event) = self.event_queue.pop() {
+            // Merge events with the same tag
+            while let Some(next_event) = self.event_queue.peek() {
+                if next_event.tag == event.tag {
+                    let next_event = self.event_queue.pop().unwrap();
+                    event.reactions.merge(&next_event.reactions);
+                    event.terminal = event.terminal || next_event.terminal;
+
+                    // Return the ReactionSet to the free pool
+                    self.free_reaction_sets.push(next_event.reactions);
+                } else {
+                    break;
+                }
+            }
+
+            return Some(event);
+        }
+
+        None
     }
 
     /// Get a free [`ReactionSet`] or create a new one if none are available.
@@ -431,23 +455,8 @@ impl Scheduler {
                 }
             }
 
-            if let Some(mut event) = self.events.event_queue.pop() {
+            if let Some(mut event) = self.events.pop_next_event() {
                 tracing::debug!(event = %event, "Handling event");
-
-                if Some(event.tag) == self.events.peek_tag() {
-                    // The next event is at the same time as the one we are processing
-                    // This can happen if the event we are processing triggers a new event at the same time
-                    // We need to process all events at the same time before moving on
-                    //while let Some(next_event) = self.events.event_queue.pop() {
-                    //    if next_event.tag == event.tag {
-                    //        event.reactions.extend_above(next_event.reactions.view());
-                    //    } else {
-                    //        self.events.event_queue.push(next_event);
-                    //        break;
-                    //    }
-                    //}
-                    tracing::warn!("Next event is at the same time as the one we are processing");
-                }
 
                 self.process_tag(event.tag, event.reactions.view());
 
@@ -462,6 +471,7 @@ impl Scheduler {
                     break;
                 }
             } else if let Some(async_event) = self.receive_event() {
+                // No event was processed in the queue, wait for async events
                 Self::handle_async_event(
                     async_event,
                     current_tag,

@@ -310,6 +310,8 @@ impl EnvBuilder {
         let mut partition_map = self.build_partition_map();
         let port_bindings = self.build_connections(&mut partition_map)?;
 
+        dbg!(&port_bindings);
+
         let mut partitions: SecondaryMap<BuilderReactorKey, EnclaveParts> = partition_map
             .values()
             .unique()

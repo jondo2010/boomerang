@@ -899,3 +899,79 @@ fn test_enclave2() {
             sched.event_loop();
         });
 }
+
+/// Test binding of ports between two child reactors
+#[test]
+fn test_port_binding() {
+    let mut env_builder = EnvBuilder::new();
+    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+
+
+    let child1 = builder
+        .add_child_with(|parent, env| {
+            let mut builder = env.add_reactor("child1", Some(parent), None, (), false);
+            let i1 = builder.add_input_port::<()>("i1").unwrap();
+            let o1 = builder.add_output_port::<()>("o1").unwrap();
+            let _ = builder
+                .add_reaction("reaction", |_| {
+                    runtime::reaction_closure!(_ctx, _state, ref_ports, mut_ports, _actions => {
+                        let i1: runtime::InputRef<()> = ref_ports.partition().unwrap();
+                        let mut o1: runtime::OutputRef<()> = mut_ports.partition_mut().unwrap();
+                        *o1 = *i1;
+                    })
+                    .into()
+                })
+                .with_port(i1, 0, TriggerMode::TriggersAndUses)?
+                .with_port(o1, 0, TriggerMode::EffectsOnly)?
+                .finish()?;
+            builder.finish()
+        })
+        .unwrap();
+
+    let child2 = builder
+        .add_child_with(|parent, env| {
+            let mut builder = env.add_reactor("child2", Some(parent), None, (), false);
+            let i2 = builder.add_input_port::<()>("i2").unwrap();
+            let _ = builder
+                .add_reaction("reaction", |_| {
+                    runtime::reaction_closure!(_ctx, _state, ref_ports, mut_ports, _actions => {
+                        let i2: runtime::InputRef<()> = ref_ports.partition().unwrap();
+                        assert_eq!(*i2, Some(()));
+                    })
+                    .into()
+                })
+                .with_port(i2, 0, TriggerMode::TriggersAndUses)?
+                .finish()?;
+            builder.finish()
+        })
+        .unwrap();
+
+    //builder.get_port_by_name(port_name)
+
+    let _main = builder.finish().unwrap();
+
+    
+
+    //let i1 = env_builder.find_port_by_name("i1", child1).unwrap();
+    //let o1 = env_builder.find_port_by_name("o1", child1).unwrap();
+    //let i2 = env_builder.find_port_by_name("i2", child2).unwrap();
+
+    let startup_key = builder.get_startup_action();
+    let _ = builder
+        .add_reaction("start", |_| {
+            runtime::reaction_closure!(_ctx, _state, _ref_ports, _mut_ports, _actions => {
+                println!("start");
+            })
+            .into()
+        })
+        .with_action(startup_key, 0, TriggerMode::TriggersOnly)
+        .unwrap()
+        .finish()
+        .unwrap();
+
+    env_builder
+        .add_port_connection::<(), _, _>(o1, i1, None, false)
+        .unwrap();
+
+    let enclaves = env_builder.into_runtime_parts().unwrap();
+}

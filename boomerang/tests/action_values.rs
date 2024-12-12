@@ -32,10 +32,9 @@ struct ReactionStartup<'a> {
 impl<'a> runtime::Trigger<State> for ReactionStartup<'a> {
     fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut State) {
         // scheduled in 100 ms
-        self.act.schedule(ctx, 100, None);
+        ctx.schedule_action(&mut self.act, 100, None);
         // scheduled in 150 ms, value is overwritten
-        self.act
-            .schedule(ctx, -100, Some(Duration::from_millis(50)));
+        ctx.schedule_action(&mut self.act, -100, Some(Duration::from_millis(50)));
     }
 }
 
@@ -49,7 +48,7 @@ struct ReactionAct<'a> {
 impl<'a> runtime::Trigger<State> for ReactionAct<'a> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut State) {
         let elapsed = ctx.get_elapsed_logical_time();
-        let value = self.act.get_value(ctx);
+        let value =ctx.get_action_value(&mut self.act);
 
         println!("[@{elapsed:?} action transmitted: {value:?}]");
 

@@ -43,7 +43,7 @@ struct ReactionStartup<'a> {
 impl runtime::Trigger<SlowingClock> for ReactionStartup<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut SlowingClock) {
         println!("startup");
-        self.a.schedule(ctx, (), None);
+        ctx.schedule_action(&mut self.a, (), None);
     }
 }
 
@@ -67,7 +67,7 @@ impl runtime::Trigger<SlowingClock> for ReactionA<'_> {
             state.expected_time.as_millis()
         );
 
-        self.a.schedule(ctx, (), Some(state.interval));
+        ctx.schedule_action(&mut self.a, (), Some(state.interval));
         state.expected_time += Duration::from_millis(100) + state.interval;
         state.interval += Duration::from_millis(100);
     }
@@ -80,10 +80,10 @@ struct ReactionShutdown;
 impl runtime::Trigger<SlowingClock> for ReactionShutdown {
     fn trigger(self, _ctx: &mut runtime::Context, state: &mut SlowingClock) {
         assert_eq!(
-            state.expected_time,
-            Duration::from_millis(1500),
-            "ERROR: Expected the next expected_time to be: 1500ms. It was: {}ms.",
-            state.expected_time.as_millis()
+            state.expected_time.as_millis(),
+            1500,
+            "ERROR: Expected the next expected_time to be: 1500ms. It was: {:?}.",
+            state.expected_time
         );
         println!("Test passes.");
     }
@@ -94,7 +94,7 @@ fn slowing_clock() {
     tracing_subscriber::fmt::init();
     let config = runtime::Config::default()
         .with_fast_forward(true)
-        .with_timeout(Duration::from_secs(1));
+        .with_timeout(Duration::from_millis(1000));
     let _ = boomerang_util::runner::build_and_test_reactor::<SlowingClockBuilder>(
         "slowing_clock",
         SlowingClock::default(),

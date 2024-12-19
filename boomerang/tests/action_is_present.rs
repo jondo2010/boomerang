@@ -32,7 +32,7 @@ impl runtime::Trigger<ActionIsPresentState> for ReactionStartup<'_> {
         if !self.a.is_present(ctx) {
             assert!(!state.success, "Unexpected");
             println!("Hello startup!");
-            self.a.schedule(ctx, (), Some(Duration::from_nanos(1)));
+            ctx.schedule_action(&mut self.a, (), Some(Duration::from_nanos(1)));
         } else {
             println!("Hello a!");
             state.success = true;

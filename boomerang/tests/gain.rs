@@ -7,7 +7,7 @@ use boomerang::prelude::*;
 struct Scale(u32);
 
 #[derive(Reactor)]
-#[reactor(state = "Scale", reaction = "ScaleReactionX")]
+#[reactor(state = Scale, reaction = "ScaleReactionX")]
 struct ScaleBuilder {
     x: TypedPortKey<u32, Input>,
     y: TypedPortKey<u32, Output>,
@@ -27,7 +27,7 @@ impl runtime::Trigger<Scale> for ScaleReactionX<'_> {
 }
 
 #[derive(Reactor)]
-#[reactor(state = "()", reaction = "TestReactionX")]
+#[reactor(state = (), reaction = "TestReactionX")]
 struct TestBuilder {
     x: TypedPortKey<u32, Input>,
 }
@@ -47,15 +47,15 @@ impl runtime::Trigger<()> for TestReactionX<'_> {
 
 #[derive(Reactor)]
 #[reactor(
-    state = "()",
+    state = (),
     reaction = "GainReactionTim",
     connection(from = "g.y", to = "t.x")
 )]
 struct GainBuilder {
-    #[reactor(child = "Scale(2)")]
+    #[reactor(child(state = Scale(2)))]
     g: ScaleBuilder,
 
-    #[reactor(child = ())]
+    #[reactor(child(state = ()))]
     #[allow(dead_code)]
     t: TestBuilder,
 

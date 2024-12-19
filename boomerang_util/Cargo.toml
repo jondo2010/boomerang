@@ -45,8 +45,4 @@ linkme = { workspace = true, optional = true }
 boomerang.workspace = true
 
 [dev-dependencies]
-tracing-subscriber = { version = "0.3", features = [
-    "fmt",
-    "json",
-    "env-filter",
-] }
+tracing-subscriber = { workspace = true }

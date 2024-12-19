@@ -1,9 +1,8 @@
 use std::time::Duration;
 
-use crossbeam_channel::Sender;
-
 use crate::{
-    event::AsyncEvent, keepalive, ActionKey, BankInfo, ReactionGraph, ReactionKey, Tag, Timestamp,
+    event::AsyncEvent, keepalive, ActionCommon, ActionKey, ActionRef, BankInfo, ReactionGraph,
+    ReactionKey, ReactorData, Tag, Timestamp,
 };
 
 /// Result from a reaction trigger
@@ -26,7 +25,7 @@ pub struct Context {
     pub(crate) bank_info: Option<BankInfo>,
 
     /// Channel for asynchronous events
-    pub(crate) async_tx: Sender<AsyncEvent>,
+    pub(crate) async_tx: crate::Sender<AsyncEvent>,
     /// Shutdown channel
     pub(crate) shutdown_rx: keepalive::Receiver,
 
@@ -34,28 +33,62 @@ pub struct Context {
     pub(crate) trigger_res: TriggerRes,
 }
 
-pub trait ContextCommon {
-    /// Get the start time of the scheduler
-    fn get_start_time(&self) -> Timestamp;
-
+/// Common methods for both `Context` and `SendContext`
+pub trait CommonContext {
     /// Get the current physical time
     fn get_physical_time(&self) -> Timestamp {
         Timestamp::now()
     }
 
+    /// Has the scheduler already been shutdown?
+    fn is_shutdown(&self) -> bool;
+
+    /// Schedule a shutdown event at some future time.
     fn schedule_shutdown(&mut self, offset: Option<Duration>);
+
+    /// Schedule an asynchronous event
+    ///
+    /// Returns true if the event was successfully scheduled, false if the channel was disconnected.
+    fn schedule_async(&self, event: AsyncEvent) -> bool;
+
+    /// Schedule a new value for this action asynchronously
+    ///
+    /// Returns true if the event was successfully scheduled, false if the channel was disconnected.
+    #[tracing::instrument(skip(self, action, value), fields(logical = action.is_logical()))]
+    fn schedule_action_async<T: ReactorData>(
+        &self,
+        action: &impl ActionCommon<T>,
+        value: T,
+        delay: Option<Duration>,
+    ) -> bool {
+        let tag_delay = action.min_delay() + delay.unwrap_or_default();
+        let value = Box::new(value) as Box<dyn ReactorData>;
+
+        let event = if action.is_logical() {
+            // Logical actions are scheduled at the current logical time + tag_delay
+            tracing::info!(tag_delay = ?tag_delay, key = ?action.key(), "Scheduling Async LogicalAction");
+            AsyncEvent::logical(action.key(), tag_delay, value)
+        } else {
+            // Physical actions are scheduled at the current physical time + tag_delay
+            let time = self.get_physical_time().offset(tag_delay);
+            tracing::info!(time = ?time, key = ?action.key(), "Scheduling Async PhysicalAction");
+            AsyncEvent::physical(action.key(), time, value)
+        };
+
+        self.schedule_async(event)
+    }
 }
 
 impl Context {
     pub(crate) fn new(
         start_time: Timestamp,
         bank_info: Option<BankInfo>,
-        async_tx: Sender<AsyncEvent>,
+        async_tx: crate::Sender<AsyncEvent>,
         shutdown_rx: keepalive::Receiver,
     ) -> Self {
         Self {
             start_time,
-            tag: Tag::now(start_time),
+            tag: Tag::new(start_time, 0),
             bank_info,
             async_tx,
             shutdown_rx,
@@ -70,6 +103,11 @@ impl Context {
         self.tag = tag;
         self.trigger_res.scheduled_actions.clear();
         self.trigger_res.scheduled_shutdown = None;
+    }
+
+    /// Get the start time of the scheduler
+    pub fn get_start_time(&self) -> Timestamp {
+        self.start_time
     }
 
     /// Get the bank index for a multi-bank reactor
@@ -100,16 +138,53 @@ impl Context {
     /// This is used to schedule asynchronous events.
     pub fn make_send_context(&self) -> SendContext {
         SendContext {
-            start_time: self.start_time,
             async_tx: self.async_tx.clone(),
             shutdown_rx: self.shutdown_rx.clone(),
         }
     }
+
+    /// Get value for an action at the current logical time
+    pub fn get_action_value<'a, T: ReactorData>(
+        &self,
+        action: &'a mut ActionRef<T>,
+    ) -> Option<&'a T> {
+        action.get_value_at(self.tag)
+    }
+
+    /// Schedule a new value for this action
+    pub fn schedule_action<T: ReactorData>(
+        &mut self,
+        action: &mut ActionRef<T>,
+        value: T,
+        delay: Option<Duration>,
+    ) {
+        //let action = &mut self.0;
+
+        let tag_delay = action.min_delay() + delay.unwrap_or_default();
+
+        let new_tag = if action.is_logical() {
+            // Logical actions are scheduled at the current logical time + tag_delay
+            self.tag.delay(tag_delay)
+        } else {
+            // Physical actions are scheduled at the current physical time + tag_delay
+            Tag::from_physical_time(self.get_start_time(), self.get_physical_time())
+                .delay(tag_delay)
+        };
+
+        // Push the new value into the store
+        action.set_value(new_tag, value);
+
+        // Schedule the action to trigger at the new tag
+        self.trigger_res
+            .scheduled_actions
+            .push((action.key(), new_tag));
+    }
 }
 
-impl ContextCommon for Context {
-    fn get_start_time(&self) -> Timestamp {
-        self.start_time
+impl CommonContext for Context {
+    /// Has the scheduler already been shutdown?
+    fn is_shutdown(&self) -> bool {
+        self.shutdown_rx.is_shutdwon()
     }
 
     #[tracing::instrument]
@@ -121,38 +196,42 @@ impl ContextCommon for Context {
             .scheduled_shutdown
             .map_or(Some(tag), |prev| Some(prev.min(tag)));
     }
+
+    /// Schedule an asynchronous event
+    fn schedule_async(&self, event: AsyncEvent) -> bool {
+        if self.shutdown_rx.is_shutdwon() {
+            return false;
+        }
+        self.async_tx.send(event).is_ok()
+    }
 }
 
 /// SendContext can be shared across threads and allows asynchronous events to be scheduled.
 pub struct SendContext {
-    /// Physical time the Scheduler was started
-    pub start_time: Timestamp,
     /// Channel for asynchronous events
-    pub(crate) async_tx: Sender<AsyncEvent>,
+    pub(crate) async_tx: crate::Sender<AsyncEvent>,
     /// Shutdown channel
-    shutdown_rx: keepalive::Receiver,
+    pub(crate) shutdown_rx: keepalive::Receiver,
 }
 
-impl SendContext {
+impl CommonContext for SendContext {
     /// Has the scheduler already been shutdown?
-    pub fn is_shutdown(&self) -> bool {
+    fn is_shutdown(&self) -> bool {
         self.shutdown_rx.is_shutdwon()
-    }
-}
-
-impl ContextCommon for SendContext {
-    fn get_start_time(&self) -> Timestamp {
-        self.start_time
     }
 
     /// Schedule a shutdown event at some future time.
     fn schedule_shutdown(&mut self, offset: Option<Duration>) {
-        let tag = Tag::absolute(
-            self.start_time,
-            Timestamp::now().offset(offset.unwrap_or_default()),
-        );
-        let event = AsyncEvent::shutdown(tag);
+        let event = AsyncEvent::shutdown(offset.unwrap_or_default());
         self.async_tx.send(event).unwrap();
+    }
+
+    /// Send an asynchronous event to the scheduler.
+    fn schedule_async(&self, event: AsyncEvent) -> bool {
+        if self.is_shutdown() {
+            return false;
+        }
+        self.async_tx.send(event).is_ok()
     }
 }
 
@@ -160,7 +239,7 @@ impl ContextCommon for SendContext {
 pub fn build_reaction_contexts(
     reaction_graph: &ReactionGraph,
     start_time: Timestamp,
-    event_tx: crossbeam_channel::Sender<AsyncEvent>,
+    event_tx: crate::Sender<AsyncEvent>,
     shutdown_rx: keepalive::Receiver,
 ) -> tinymap::TinySecondaryMap<ReactionKey, Context> {
     reaction_graph

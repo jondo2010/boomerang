@@ -34,7 +34,7 @@ struct ReactionYIn<'a> {
 impl runtime::Trigger<GeneratedDelayState> for ReactionYIn<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut GeneratedDelayState) {
         state.y_state = self.y_in.unwrap();
-        self.act.schedule(ctx, (), None);
+        ctx.schedule_action(&mut self.act, (), None);
     }
 }
 
@@ -107,11 +107,11 @@ impl runtime::Trigger<bool> for SinkReactionIn<'_> {
 )]
 #[allow(dead_code)]
 struct ActionDelayBuilder {
-    #[reactor(child = ())]
+    #[reactor(child(state = ()))]
     source: SourceBuilder,
-    #[reactor(child = false)]
+    #[reactor(child(state = false))]
     sink: Sink,
-    #[reactor(child = GeneratedDelayState::default())]
+    #[reactor(child(state = GeneratedDelayState::default()))]
     g: GeneratedDelay,
 }
 

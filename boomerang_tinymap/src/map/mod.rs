@@ -77,6 +77,12 @@ pub struct Iter<'a, K: Key, V> {
     _k: PhantomData<K>,
 }
 
+#[derive(Debug)]
+pub struct IntoIter<K: Key, V> {
+    inner: Enumerate<std::vec::IntoIter<V>>,
+    _k: PhantomData<K>,
+}
+
 impl<'a, K: Key, V> Iterator for Iter<'a, K, V> {
     type Item = (K, &'a V);
 
@@ -84,6 +90,20 @@ impl<'a, K: Key, V> Iterator for Iter<'a, K, V> {
         self.inner
             .next()
             .map(|(index, value)| (K::from(index), value))
+    }
+}
+
+impl<K: Key, V> Iterator for IntoIter<K, V> {
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner
+            .next()
+            .map(|(index, value)| (K::from(index), value))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
     }
 }
 
@@ -164,6 +184,18 @@ impl<K: Key, V> FromIterator<V> for TinyMap<K, V> {
     fn from_iter<T: IntoIterator<Item = V>>(iter: T) -> Self {
         Self {
             data: iter.into_iter().collect(),
+            _k: PhantomData,
+        }
+    }
+}
+
+impl<K: Key, V> IntoIterator for TinyMap<K, V> {
+    type Item = (K, V);
+    type IntoIter = IntoIter<K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        IntoIter {
+            inner: self.data.into_iter().enumerate(),
             _k: PhantomData,
         }
     }
@@ -250,5 +282,18 @@ mod tests {
         assert_eq!(map[TestKey::from(0)], 10);
         assert_eq!(map[TestKey::from(1)], 20);
         assert_eq!(map[TestKey::from(2)], 30);
+    }
+
+    #[test]
+    fn test_into_iter() {
+        let mut map = TinyMap::<TestKey, i32>::default();
+        map.insert(10);
+        map.insert(20);
+
+        let entries: Vec<_> = map.into_iter().collect();
+        assert_eq!(
+            entries,
+            vec![(TestKey::from(0), 10), (TestKey::from(1), 20)]
+        );
     }
 }

@@ -906,7 +906,6 @@ fn test_port_binding() {
     let mut env_builder = EnvBuilder::new();
     let mut builder = env_builder.add_reactor("main", None, None, (), false);
 
-
     let child1 = builder
         .add_child_with(|parent, env| {
             let mut builder = env.add_reactor("child1", Some(parent), None, (), false);
@@ -928,10 +927,10 @@ fn test_port_binding() {
         })
         .unwrap();
 
-    let child2 = builder
+    let child2a = builder
         .add_child_with(|parent, env| {
-            let mut builder = env.add_reactor("child2", Some(parent), None, (), false);
-            let i2 = builder.add_input_port::<()>("i2").unwrap();
+            let mut builder = env.add_reactor("child2a", Some(parent), None, (), false);
+            let i2 = builder.add_input_port::<()>("i2a").unwrap();
             let _ = builder
                 .add_reaction("reaction", |_| {
                     runtime::reaction_closure!(_ctx, _state, ref_ports, mut_ports, _actions => {
@@ -946,32 +945,71 @@ fn test_port_binding() {
         })
         .unwrap();
 
-    //builder.get_port_by_name(port_name)
-
-    let _main = builder.finish().unwrap();
-
-    
-
-    //let i1 = env_builder.find_port_by_name("i1", child1).unwrap();
-    //let o1 = env_builder.find_port_by_name("o1", child1).unwrap();
-    //let i2 = env_builder.find_port_by_name("i2", child2).unwrap();
+    let child2b = builder
+        .add_child_with(|parent, env| {
+            let mut builder = env.add_reactor("child2b", Some(parent), None, (), false);
+            let i2 = builder.add_input_port::<()>("i2b").unwrap();
+            let _ = builder
+                .add_reaction("reaction", |_| {
+                    runtime::reaction_closure!(_ctx, _state, ref_ports, mut_ports, _actions => {
+                        let i2: runtime::InputRef<()> = ref_ports.partition().unwrap();
+                        assert_eq!(*i2, Some(()));
+                    })
+                    .into()
+                })
+                .with_port(i2, 0, TriggerMode::TriggersAndUses)?
+                .finish()?;
+            builder.finish()
+        })
+        .unwrap();
 
     let startup_key = builder.get_startup_action();
-    let _ = builder
-        .add_reaction("start", |_| {
+    let _main = builder.finish().unwrap();
+
+    let i1 = env_builder.find_port_by_name("i1", child1).unwrap();
+    let o1 = env_builder.find_port_by_name("o1", child1).unwrap();
+    let i2a = env_builder.find_port_by_name("i2a", child2a).unwrap();
+    let i2b = env_builder.find_port_by_name("i2b", child2b).unwrap();
+
+    let _ = env_builder
+        .add_reaction("start", _main, |_| {
             runtime::reaction_closure!(_ctx, _state, _ref_ports, _mut_ports, _actions => {
                 println!("start");
+                let mut i1: runtime::OutputRef<()> = _mut_ports.partition_mut().unwrap();
+                *i1 = Some(());
             })
             .into()
         })
         .with_action(startup_key, 0, TriggerMode::TriggersOnly)
         .unwrap()
+        .with_port(i1, 0, TriggerMode::EffectsOnly)
+        .unwrap()
         .finish()
         .unwrap();
 
     env_builder
-        .add_port_connection::<(), _, _>(o1, i1, None, false)
+        .add_port_connection::<(), _, _>(o1, i2a, None, false)
+        .unwrap();
+    env_builder
+        .add_port_connection::<(), _, _>(o1, i2b, None, false)
         .unwrap();
 
-    let enclaves = env_builder.into_runtime_parts().unwrap();
+    dbg!(&env_builder);
+
+    let mut enclaves = env_builder.into_runtime_parts().unwrap();
+    let EnclaveParts { enclave, aliases } = enclaves.remove(0);
+
+    let i1 = aliases.port_aliases[i1];
+    let o1 = aliases.port_aliases[o1];
+    let i2a = aliases.port_aliases[i2a];
+    let i2b = aliases.port_aliases[i2b];
+
+    dbg!(&enclave.env.ports);
+
+    // Port o1 should alias to Port i2
+    assert_eq!(enclave.env.ports.len(), 2);
+    assert_eq!(o1, i2a);
+
+    dbg!(&enclave.graph.port_triggers[o1]);
+    dbg!(&enclave.graph);
 }

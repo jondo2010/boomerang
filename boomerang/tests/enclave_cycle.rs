@@ -150,11 +150,7 @@ fn enclave_cycle() {
     //std::fs::write("enclave_cycle.dot", gv).unwrap();
 
     let mut runtime_parts = env_builder.into_runtime_parts().unwrap();
-    let boomerang_builder::EnclaveParts {
-        env,
-        graph,
-        aliases: _,
-    } = runtime_parts.remove(0);
-    let mut sched = boomerang_runtime::Scheduler::new(env, graph, config);
+    let boomerang_builder::EnclaveParts { enclave, aliases } = runtime_parts.remove(0);
+    let mut sched = boomerang_runtime::Scheduler::new(enclave, config);
     sched.event_loop();
 }

@@ -179,11 +179,7 @@ impl PortBindings {
     /// Follow the inward bindings of a Port to the source
     pub fn follow_port_inward(&self, port_key: BuilderPortKey) -> BuilderPortKey {
         let mut cur_key = port_key;
-        while let Some(new_idx) = self
-            .inward
-            .get(cur_key)
-            .and_then(|inward_key| self.inward.get(*inward_key))
-        {
+        while let Some(new_idx) = self.inward.get(cur_key) {
             cur_key = *new_idx;
         }
         cur_key

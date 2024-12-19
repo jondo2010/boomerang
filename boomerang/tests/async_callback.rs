@@ -48,8 +48,8 @@ impl runtime::Trigger<State> for ReactionT {
             std::thread::sleep(Duration::from_millis(100));
             // Schedule twice. If the action is not physical, these should get consolidated into a single action
             // triggering. If it is, then they cause two separate triggerings with close but not equal time stamps.
-            a.schedule_async(&send_ctx, 0, None);
-            a.schedule_async(&send_ctx, 0, None);
+            send_ctx.schedule_action_async(&a, 0, None);
+            send_ctx.schedule_action_async(&a, 0, None);
         }));
     }
 }

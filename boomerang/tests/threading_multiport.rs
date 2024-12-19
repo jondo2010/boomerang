@@ -135,7 +135,7 @@ fn threading_multiport() {
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(Duration::from_secs(2));
-    let _ = boomerang_util::runner::build_and_test_reactor::<ThreadedMultiport<4, 10_000>>(
+    let _ = boomerang_util::runner::build_and_test_reactor::<ThreadedMultiport<4, 100_000>>(
         "threaded_multiport",
         (),
         config,

@@ -177,6 +177,8 @@ fn test_enclave0() {
     //    .init();
 
     use tracing_subscriber::layer::SubscriberExt;
+
+    use crate::Execute;
     tracing::subscriber::set_global_default(
         tracing_subscriber::registry().with(tracing_tracy::TracyLayer::default()),
     )
@@ -200,18 +202,11 @@ fn test_enclave0() {
 
     let envs_out = enclaves
         .into_iter()
+        .map(|(_, enclave)| enclave)
         .par_bridge()
-        .map(|(reactor_key, enclave)| {
-            let mut sched = Scheduler::new(enclave, config.clone());
+        .execute(config);
 
-            tracing::info!("Starting scheduler for reactor {reactor_key:?}");
-            sched.event_loop();
-            let env = sched.into_env();
-
-            (reactor_key, env)
-        });
-
-    envs_out.for_each(|(reactor_key, env)| {
+    envs_out.for_each(|env| {
         if let Some(state) = env
             .find_reactor_by_name("reactorB")
             .and_then(|r| r.get_state::<bool>())

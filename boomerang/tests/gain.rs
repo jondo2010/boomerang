@@ -52,7 +52,7 @@ impl runtime::Trigger<()> for TestReactionX<'_> {
     connection(from = "g.y", to = "t.x")
 )]
 struct GainBuilder {
-    #[reactor(child(state = Scale(2), enclave = true))]
+    #[reactor(child(state = Scale(2)))]
     g: ScaleBuilder,
 
     #[reactor(child(state = ()))]

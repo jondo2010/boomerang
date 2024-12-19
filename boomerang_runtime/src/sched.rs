@@ -368,8 +368,6 @@ impl Scheduler {
     fn shutdown(&mut self) {
         tracing::info!("Shutting down.");
 
-        // Signal to any waiting threads that the scheduler is shutting down.
-        self.shutdown_tx.shutdown();
         self.events.shutdown();
 
         tracing::info!(
@@ -458,6 +456,11 @@ impl Scheduler {
             if let Some(mut event) = self.events.pop_next_event() {
                 tracing::debug!(event = %event, "Handling event");
 
+                if event.terminal {
+                    // Signal to any waiting threads that the scheduler is shutting down.
+                    self.shutdown_tx.shutdown();
+                }
+
                 self.process_tag(event.tag, event.reactions.view());
 
                 // Return the ReactionSet to the free pool
@@ -505,7 +508,7 @@ impl Scheduler {
 
         if now < target {
             let advance = target - now;
-            tracing::debug!(advance = ?advance, "Need to sleep");
+            tracing::trace!(advance = ?advance, "Need to sleep");
 
             match self.event_rx.recv_timeout(advance) {
                 Ok(event) => {
@@ -607,5 +610,25 @@ impl Scheduler {
     /// scheduler has been run.
     pub fn into_env(self) -> Env {
         self.store.into_env()
+    }
+}
+
+use rayon::iter::ParallelIterator;
+
+pub trait Execute {
+    fn execute(self, config: Config) -> impl ParallelIterator<Item = Env>;
+}
+
+impl<I> Execute for I
+where
+    I: ParallelIterator<Item = Enclave> + Send,
+{
+    fn execute(self, config: Config) -> impl ParallelIterator<Item = Env> {
+        self.map(move |enclave| {
+            let mut sched = Scheduler::new(enclave, config.clone());
+            //tracing::info!("Starting scheduler for reactor {reactor_key:?}");
+            sched.event_loop();
+            sched.into_env()
+        })
     }
 }

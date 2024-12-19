@@ -81,6 +81,13 @@ impl<'a, T: ReactorData> From<&'a dyn BaseAction> for AsyncActionRef<T> {
     }
 }
 
+//NOTE: The following is implemented to satisty PartitionMut in the generated code
+impl<'a, T: ReactorData> From<&'a mut dyn BaseAction> for AsyncActionRef<T> {
+    fn from(value: &'a mut dyn BaseAction) -> Self {
+        (&*value).into()
+    }
+}
+
 impl<T: ReactorData> ActionCommon<T> for AsyncActionRef<T> {
     fn name(&self) -> &str {
         &self.name

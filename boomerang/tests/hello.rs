@@ -46,7 +46,7 @@ impl runtime::Trigger<Hello> for ReactionT<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut Hello) {
         // Print the current time.
         state.previous_time = ctx.get_elapsed_logical_time();
-        self.a.schedule(ctx, (), Some(Duration::from_millis(200))); // No payload.
+        ctx.schedule_action(&mut self.a, (), Some(Duration::from_millis(200))); // No payload.
         println!(
             "{} Current time is {:?}",
             state.message, state.previous_time

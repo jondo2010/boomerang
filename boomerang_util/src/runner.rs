@@ -63,6 +63,21 @@ pub fn build_and_test_reactor<R: Reactor>(
     let mut runtime_parts = env_builder
         .into_runtime_parts()
         .context("Error building environment!")?;
+
+
+    let envs_out = enclaves
+        .into_iter()
+        .par_bridge()
+        .map(|(reactor_key, enclave)| {
+            let mut sched = Scheduler::new(enclave, config.clone());
+
+            tracing::info!("Starting scheduler for reactor {reactor_key:?}");
+            sched.event_loop();
+            let env = sched.into_env();
+
+            (reactor_key, env)
+        });
+
     let EnclaveParts {
         enclave,
         aliases: _,

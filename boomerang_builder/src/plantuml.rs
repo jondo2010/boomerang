@@ -303,12 +303,14 @@ skinparam arrowThickness 1
                 let bank = reactor
                     .bank_info()
                     .map(|bi| format!("[0..{}]", bi.total - 1));
+
+                let enclave = if reactor.is_enclave { "📦 " } else { "" };
                 let stereotype = if bank.is_some() { " <<bank>> " } else { "" };
 
                 let reactor_id = self.node_id(reactor_key);
                 writeln!(
                     &mut buf,
-                    "component {reactor_id} as \"{name}{bank}\"{stereotype}{{",
+                    "component {reactor_id} as \"{enclave}{name}{bank}\"{stereotype}{{",
                     name = reactor.name(),
                     bank = bank.unwrap_or_default(),
                 )

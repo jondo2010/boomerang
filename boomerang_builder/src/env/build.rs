@@ -199,7 +199,7 @@ impl EnvBuilder {
             .port_builders
             .keys()
             .map(|port_key| (port_key, port_bindings.follow_port_inward(port_key)))
-            .sorted_by(|a, b| a.1.cmp(&b.1))
+            .sorted_by(|key_a, key_b| key_a.1.cmp(&key_b.1))
             .chunk_by(|(_port_key, inward_key)| *inward_key);
 
         for (inward_port_key, group) in port_groups.into_iter() {
@@ -310,8 +310,6 @@ impl EnvBuilder {
         let mut partition_map = self.build_partition_map();
         let port_bindings = self.build_connections(&mut partition_map)?;
 
-        dbg!(&port_bindings);
-
         let mut partitions: SecondaryMap<BuilderReactorKey, EnclaveParts> = partition_map
             .values()
             .unique()
@@ -321,10 +319,12 @@ impl EnvBuilder {
         self.build_runtime_actions(&partition_map, &mut partitions)?;
         self.build_runtime_ports(&partition_map, &mut partitions, &port_bindings)?;
 
+        // this must be done before build_runtime_reactors, since that drains self.reaction_builders
+        let reaction_levels = self.build_runtime_level_map(&port_bindings)?;
+
         self.build_runtime_reactors(&partition_map, &mut partitions)?;
 
         // must be done last, since building other parts may add new reactions
-        let reaction_levels = self.build_runtime_level_map(&port_bindings)?;
         self.build_runtime_reactions(&partition_map, &mut partitions, &reaction_levels)?;
 
         /*

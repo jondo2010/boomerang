@@ -40,6 +40,10 @@ pub trait CommonContext {
         Timestamp::now()
     }
 
+    /// Has the scheduler already been shutdown?
+    fn is_shutdown(&self) -> bool;
+
+    /// Schedule a shutdown event at some future time.
     fn schedule_shutdown(&mut self, offset: Option<Duration>);
 
     /// Schedule an asynchronous event
@@ -48,12 +52,15 @@ pub trait CommonContext {
     fn schedule_async(&self, event: AsyncEvent) -> bool;
 
     /// Schedule a new value for this action asynchronously
+    ///
+    /// Returns true if the event was successfully scheduled, false if the channel was disconnected.
+    #[tracing::instrument(skip(self, action, value), fields(logical = action.is_logical()))]
     fn schedule_action_async<T: ReactorData>(
         &self,
         action: &impl ActionCommon<T>,
         value: T,
         delay: Option<Duration>,
-    ) {
+    ) -> bool {
         let tag_delay = action.min_delay() + delay.unwrap_or_default();
         let value = Box::new(value) as Box<dyn ReactorData>;
 
@@ -68,7 +75,7 @@ pub trait CommonContext {
             AsyncEvent::physical(action.key(), time, value)
         };
 
-        assert!(self.schedule_async(event), "Failed to send async event");
+        self.schedule_async(event)
     }
 }
 
@@ -175,6 +182,11 @@ impl Context {
 }
 
 impl CommonContext for Context {
+    /// Has the scheduler already been shutdown?
+    fn is_shutdown(&self) -> bool {
+        self.shutdown_rx.is_shutdwon()
+    }
+
     #[tracing::instrument]
     fn schedule_shutdown(&mut self, offset: Option<Duration>) {
         let tag = self.tag.delay(offset.unwrap_or_default());
@@ -187,6 +199,9 @@ impl CommonContext for Context {
 
     /// Schedule an asynchronous event
     fn schedule_async(&self, event: AsyncEvent) -> bool {
+        if self.shutdown_rx.is_shutdwon() {
+            return false;
+        }
         self.async_tx.send(event).is_ok()
     }
 }
@@ -199,14 +214,12 @@ pub struct SendContext {
     pub(crate) shutdown_rx: keepalive::Receiver,
 }
 
-impl SendContext {
+impl CommonContext for SendContext {
     /// Has the scheduler already been shutdown?
-    pub fn is_shutdown(&self) -> bool {
+    fn is_shutdown(&self) -> bool {
         self.shutdown_rx.is_shutdwon()
     }
-}
 
-impl CommonContext for SendContext {
     /// Schedule a shutdown event at some future time.
     fn schedule_shutdown(&mut self, offset: Option<Duration>) {
         let event = AsyncEvent::shutdown(offset.unwrap_or_default());
@@ -215,6 +228,9 @@ impl CommonContext for SendContext {
 
     /// Send an asynchronous event to the scheduler.
     fn schedule_async(&self, event: AsyncEvent) -> bool {
+        if self.is_shutdown() {
+            return false;
+        }
         self.async_tx.send(event).is_ok()
     }
 }

@@ -19,7 +19,7 @@ impl runtime::Trigger<bool> for ReactionStartup {
         let act = self.act.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(20));
-            act.schedule_async(&send_ctx, 434, None);
+            send_ctx.schedule_action_async(&act, 434, None);
         });
     }
 }
@@ -33,7 +33,7 @@ struct ReactionAct<'a> {
 
 impl runtime::Trigger<bool> for ReactionAct<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut bool) {
-        let value = self.act.get_value(ctx).unwrap();
+        let value = ctx.get_action_value(&mut self.act).unwrap();
         println!("---- Vu {} à {}", value, ctx.get_tag());
 
         let elapsed_time = ctx.get_elapsed_logical_time();

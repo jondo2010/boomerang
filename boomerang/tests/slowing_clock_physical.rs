@@ -4,8 +4,6 @@
 //! drifting away further with each new event. Modeled after the Lingua-Franca C version of this
 //! test. @author Maiko Brants TU Dresden
 
-use std::time::Duration;
-
 use boomerang::prelude::*;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -35,7 +33,7 @@ struct ReactionStartup<'a> {
 
 impl runtime::Trigger<State> for ReactionStartup<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut State) {
-        state.expected_time = Duration::from_millis(100);
+        state.expected_time = Duration::milliseconds(100);
         self.a.schedule(ctx, (), None);
     }
 }
@@ -56,8 +54,8 @@ impl runtime::Trigger<State> for ReactionA<'_> {
             "Expected logical time to be at least: {:?}, was {elapsed_logical_time:?}",
             state.expected_time
         );
-        state.interval += Duration::from_millis(100);
-        state.expected_time = Duration::from_millis(100) + state.interval;
+        state.interval += Duration::milliseconds(100);
+        state.expected_time = Duration::milliseconds(100) + state.interval;
         println!(
             "Scheduling next to occur approximately after: {:?}",
             state.interval
@@ -73,7 +71,7 @@ struct ReactionShutdown;
 impl runtime::Trigger<State> for ReactionShutdown {
     fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
         assert!(
-            state.expected_time >= Duration::from_millis(500),
+            state.expected_time >= Duration::milliseconds(500),
             "Expected the next expected time to be at least: 500000000 nsec. It was: {:?}",
             state.expected_time
         );
@@ -86,12 +84,12 @@ fn slowing_clock_physical() {
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_keep_alive(true)
-        .with_timeout(Duration::from_millis(1500));
+        .with_timeout(Duration::milliseconds(1500));
     let _ = boomerang_util::runner::build_and_test_reactor::<SlowingClockPhysical>(
         "slowing_clock_physical",
         State {
-            interval: Duration::from_millis(100),
-            expected_time: Duration::from_millis(200),
+            interval: Duration::milliseconds(100),
+            expected_time: Duration::milliseconds(200),
         },
         config,
     )

@@ -1,7 +1,7 @@
 //! Test asynchronous callbacks that trigger a physical action.
 
 use boomerang::prelude::*;
-use std::{thread::JoinHandle, time::Duration};
+use std::thread::JoinHandle;
 
 #[derive(Debug, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -45,7 +45,7 @@ impl runtime::Trigger<State> for ReactionT {
         // start new thread
         state.thread = Some(std::thread::spawn(move || {
             // Simulate time passing before a callback occurs
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(std::time::Duration::from_millis(100));
             // Schedule twice. If the action is not physical, these should get consolidated into a single action
             // triggering. If it is, then they cause two separate triggerings with close but not equal time stamps.
             a.schedule(&send_ctx, 0, None);
@@ -74,7 +74,7 @@ impl runtime::Trigger<State> for ReactionA {
         }
         if state.toggle {
             state.toggle = false;
-            state.expected_time += Duration::from_millis(200);
+            state.expected_time += Duration::milliseconds(200);
         } else {
             state.toggle = true;
         }
@@ -99,12 +99,12 @@ fn async_callback() {
     tracing_subscriber::fmt::init();
     let config = runtime::Config::default()
         .with_fast_forward(false)
-        .with_timeout(Duration::from_secs(2));
+        .with_timeout(Duration::seconds(2));
     let _ = boomerang_util::runner::build_and_test_reactor::<AsyncCallback>(
         "async_callback",
         State {
             thread: None,
-            expected_time: Duration::from_millis(100),
+            expected_time: Duration::milliseconds(100),
             toggle: false,
             i: 0,
         },

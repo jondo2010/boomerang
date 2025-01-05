@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use crate::{
     runtime, ActionTag, BuilderError, BuilderReactorKey, EnvBuilder, Input, Output, Reaction,
     ReactionBuilderState, ReactionField, ReactorBuilderState, ReactorField, TriggerMode,
@@ -14,7 +12,7 @@ pub struct ConnectionBuilder<T: runtime::ReactorData, Q: ActionTag> {
 
 /// We use the `state` to pass the delay duration for the connection.
 impl<T: runtime::ReactorData + Clone, Q: ActionTag> crate::Reactor for ConnectionBuilder<T, Q> {
-    type State = Duration;
+    type State = runtime::Duration;
 
     fn build(
         name: &str,

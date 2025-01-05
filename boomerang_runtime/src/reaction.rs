@@ -1,9 +1,9 @@
-use std::{fmt::Debug, sync::RwLock, time::Duration};
+use std::{fmt::Debug, sync::RwLock};
 
 use crate::{
     key_set::KeySet,
     refs::{Refs, RefsMut},
-    ActionRef, BaseAction, BasePort, BaseReactor, Context, Reactor, ReactorData,
+    ActionRef, BaseAction, BasePort, BaseReactor, Context, Duration, Reactor, ReactorData,
 };
 
 tinymap::key_type! { pub ReactionKey }

@@ -3,7 +3,6 @@
 //! Ported from LF https://github.com/lf-lang/lingua-franca/blob/master/test/C/src/concurrent/ThreadedMultiport.lf
 
 use boomerang::prelude::*;
-use std::time::Duration;
 
 #[derive(Debug)]
 pub struct State {
@@ -59,7 +58,7 @@ mod computation {
             let mut offset = 0;
             for _ in 0..*state {
                 offset += 1;
-                //std::thread::sleep(std::time::Duration::from_nanos(1));
+                //std::thread::sleep(std::time::Duration::nanosecondss(1));
             }
             *self.out = self.in_.map(|x| x + offset);
         }
@@ -134,7 +133,7 @@ fn threading_multiport() {
     tracing_subscriber::fmt::init();
     let config = runtime::Config::default()
         .with_fast_forward(true)
-        .with_timeout(Duration::from_secs(2));
+        .with_timeout(Duration::seconds(2));
     let _ = boomerang_util::runner::build_and_test_reactor::<ThreadedMultiport<4, 10_000>>(
         "threaded_multiport",
         (),

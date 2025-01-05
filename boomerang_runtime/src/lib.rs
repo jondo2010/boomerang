@@ -18,6 +18,8 @@ pub mod store;
 mod time;
 
 // Re-exports
+pub use ::time::Duration;
+
 pub use action::{Action, ActionCommon, ActionKey, ActionRef, AsyncActionRef, BaseAction};
 pub use context::*;
 use downcast_rs::Downcast;

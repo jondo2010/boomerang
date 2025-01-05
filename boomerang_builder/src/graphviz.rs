@@ -90,9 +90,9 @@ fn build_actions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &mu
                     "⏲ (startup)".into()
                 } else {
                     format!(
-                        "⏲ ({} ms, {} ms)",
-                        offset.unwrap_or_default().as_millis(),
-                        period.unwrap_or_default().as_millis()
+                        "⏲ ({}, {})",
+                        offset.unwrap_or_default(),
+                        period.unwrap_or_default()
                     )
                 }
             }
@@ -102,9 +102,9 @@ fn build_actions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &mu
                 ..
             } => {
                 if *is_logical {
-                    format!("L({} ms)", min_delay.unwrap_or_default().as_millis())
+                    format!("L({})", min_delay.unwrap_or_default())
                 } else {
-                    format!("P({} ms)", min_delay.unwrap_or_default().as_millis())
+                    format!("P({} ms)", min_delay.unwrap_or_default())
                 }
             }
             ActionType::Startup => "Startup".into(),

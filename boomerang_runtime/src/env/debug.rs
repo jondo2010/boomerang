@@ -56,7 +56,7 @@ impl std::fmt::Debug for ReactionGraph {
             let e = self.action_triggers.iter().map(|(action_key, v)| {
                 let v = fmt::from_fn(|f| {
                     let e = v.iter().map(|(level, reaction_key)| {
-                        (format!("{level:?}"), format!("{reaction_key:?}"))
+                        (format!("{level}"), format!("{reaction_key:?}"))
                     });
                     f.debug_map().entries(e).finish()
                 });
@@ -70,7 +70,7 @@ impl std::fmt::Debug for ReactionGraph {
             let e = self.port_triggers.iter().map(|(port_key, v)| {
                 let v = fmt::from_fn(|f| {
                     let e = v.iter().map(|(level, reaction_key)| {
-                        (format!("{level:?}"), format!("{reaction_key:?}"))
+                        (format!("{level}"), format!("{reaction_key:?}"))
                     });
                     f.debug_map().entries(e).finish()
                 });

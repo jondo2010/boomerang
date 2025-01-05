@@ -1,5 +1,4 @@
 use boomerang::prelude::*;
-use std::time::Duration;
 
 #[derive(Reactor)]
 #[reactor(state = "bool", reaction = "ReactionStartup", reaction = "ReactionAct")]
@@ -18,7 +17,7 @@ impl runtime::Trigger<bool> for ReactionStartup {
         let send_ctx = ctx.make_send_context();
         let act = self.act.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(std::time::Duration::from_millis(20));
             act.schedule(&send_ctx, 434, None);
         });
     }
@@ -37,7 +36,7 @@ impl runtime::Trigger<bool> for ReactionAct<'_> {
         println!("---- Vu {} à {}", value, ctx.get_tag());
 
         let elapsed_time = ctx.get_elapsed_logical_time();
-        assert!(elapsed_time >= Duration::from_millis(20));
+        assert!(elapsed_time >= Duration::milliseconds(20));
         println!("success");
         *_state = true;
         ctx.schedule_shutdown(None);

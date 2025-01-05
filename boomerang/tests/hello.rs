@@ -2,8 +2,6 @@
 //! schedule_action() function at runtime. It also performs various smoke tests of timing aligned reactions. The first
 //! instance has a period of 4 seconds, the second of 2 seconds, and the third (composite) or 1 second.
 
-use std::time::Duration;
-
 use boomerang::prelude::*;
 
 #[derive(Debug, Default)]
@@ -46,7 +44,7 @@ impl runtime::Trigger<Hello> for ReactionT<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut Hello) {
         // Print the current time.
         state.previous_time = ctx.get_elapsed_logical_time();
-        self.a.schedule(ctx, (), Some(Duration::from_millis(200))); // No payload.
+        self.a.schedule(ctx, (), Some(Duration::milliseconds(200))); // No payload.
         println!(
             "{} Current time is {:?}",
             state.message, state.previous_time
@@ -67,7 +65,7 @@ impl runtime::Trigger<Hello> for ReactionA {
         let diff = time - state.previous_time;
         assert_eq!(
             diff,
-            Duration::from_millis(200),
+            Duration::milliseconds(200),
             "FAILURE: Expected 200 msecs of logical time to elapse but got {:?}",
             diff
         );
@@ -91,16 +89,16 @@ impl Inside {
 #[derive(Reactor)]
 #[reactor(state = Inside)]
 struct InsideBuilder {
-    #[reactor(child = Hello::new(Duration::from_secs(1), "Composite default message."))]
+    #[reactor(child = Hello::new(Duration::seconds(1), "Composite default message."))]
     _third_instance: HelloBuilder,
 }
 
 #[derive(Reactor)]
 #[reactor(state = ())]
 struct MainBuilder {
-    #[reactor(child = Hello::new(Duration::from_secs(4), "Hello from first."))]
+    #[reactor(child = Hello::new(Duration::seconds(4), "Hello from first."))]
     _first_instance: HelloBuilder,
-    #[reactor(child = Hello::new(Duration::from_secs(2), "Hello from second."))]
+    #[reactor(child = Hello::new(Duration::seconds(2), "Hello from second."))]
     _second_instance: HelloBuilder,
     #[reactor(child = Inside::new("Hello from composite."))]
     _third_instance: InsideBuilder,
@@ -111,7 +109,7 @@ fn hello() {
     tracing_subscriber::fmt::init();
     let config = runtime::Config::default()
         .with_fast_forward(true)
-        .with_timeout(Duration::from_secs(10));
+        .with_timeout(Duration::seconds(10));
     let _ =
         boomerang_util::runner::build_and_test_reactor::<MainBuilder>("hello", (), config).unwrap();
 }

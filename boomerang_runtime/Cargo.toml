@@ -26,6 +26,7 @@ serde = [
     #    "dep:serde_flexitos",
     #    "dep:linkme",
     #    "dep:paste",
+    "time/serde",
 ]
 
 [dependencies]
@@ -42,5 +43,6 @@ serde = { workspace = true, optional = true, features = ["derive"] }
 #serde_arrow = { workspace = true, optional = true, features = ["arrow-52"] }
 #serde_flexitos = { workspace = true, optional = true, features = ["id_trait"] }
 thiserror.workspace = true
+time.workspace = true
 tinymap.workspace = true
 tracing = { workspace = true }

@@ -1,6 +1,6 @@
-use std::{iter, time::Duration};
+use std::iter;
 
-use boomerang_runtime::{ActionCommon, ContextCommon};
+use boomerang_runtime::{ActionCommon, ContextCommon, Duration};
 
 use super::*;
 use crate::runtime;
@@ -77,7 +77,7 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
     let t = builder_main.add_timer(
         "t",
         TimerSpec {
-            period: Some(Duration::from_millis(2)),
+            period: Some(Duration::milliseconds(2)),
             offset: None,
         },
     )?;
@@ -95,15 +95,15 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
 
                     let (mut clock, mut a): (runtime::ActionRef<u32>, runtime::ActionRef<()>) = actions.partition_mut().unwrap();
 
-                    a.schedule(ctx, (), Some(Duration::from_millis(3))); // out of order on purpose
-                    a.schedule(ctx, (), Some(Duration::from_millis(1)));
-                    a.schedule(ctx, (), Some(Duration::from_millis(5)));
+                    a.schedule(ctx, (), Some(Duration::milliseconds(3))); // out of order on purpose
+                    a.schedule(ctx, (), Some(Duration::milliseconds(1)));
+                    a.schedule(ctx, (), Some(Duration::milliseconds(5)));
 
                     // not scheduled on milli 1 (action is)
-                    clock.schedule(ctx, 2, Some(Duration::from_millis(2)));
-                    clock.schedule(ctx, 3, Some(Duration::from_millis(3)));
-                    clock.schedule(ctx, 4, Some(Duration::from_millis(4)));
-                    clock.schedule(ctx, 5, Some(Duration::from_millis(5)));
+                    clock.schedule(ctx, 2, Some(Duration::milliseconds(2)));
+                    clock.schedule(ctx, 3, Some(Duration::milliseconds(3)));
+                    clock.schedule(ctx, 4, Some(Duration::milliseconds(4)));
+                    clock.schedule(ctx, 5, Some(Duration::milliseconds(5)));
                     // not scheduled on milli 6 (timer is)
                 }
             ),
@@ -203,7 +203,7 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
 
     let config = runtime::Config::default()
         .with_fast_forward(true)
-        .with_timeout(Duration::from_secs(1));
+        .with_timeout(Duration::seconds(1));
     let mut sched = runtime::Scheduler::new(env, reaction_graph, config);
     sched.event_loop();
 
@@ -226,7 +226,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
                 .add_timer(
                     "t1",
                     TimerSpec {
-                        period: Some(Duration::from_millis(35)),
+                        period: Some(Duration::milliseconds(35)),
                         offset: None,
                     },
                 )
@@ -235,7 +235,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
                 .add_timer(
                     "t2",
                     TimerSpec {
-                        period: Some(Duration::from_millis(70)),
+                        period: Some(Duration::milliseconds(70)),
                         offset: None,
                     },
                 )
@@ -248,7 +248,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
                         let mut clock: runtime::OutputRef<u32> = mut_ports.partition_mut().unwrap();
                         assert_eq!(clock.name(), "clock");
                         *clock = Some(0);
-                        ctx.schedule_shutdown(Some(Duration::from_millis(140)));
+                        ctx.schedule_shutdown(Some(Duration::milliseconds(140)));
                     }),
                 )
                 .with_action(startup_action, 0, TriggerMode::TriggersOnly)?

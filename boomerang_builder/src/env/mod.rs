@@ -12,7 +12,6 @@ use slotmap::{SecondaryMap, SlotMap};
 use std::{
     collections::{BTreeSet, HashMap},
     convert::TryInto,
-    time::Duration,
 };
 
 mod build;
@@ -167,7 +166,7 @@ impl EnvBuilder {
     pub fn internal_add_action<T: runtime::ReactorData, Q: ActionTag>(
         &mut self,
         name: &str,
-        min_delay: Option<Duration>,
+        min_delay: Option<runtime::Duration>,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey<T, Q>, BuilderError> {
         self.add_action::<T, Q>(
@@ -371,7 +370,7 @@ impl EnvBuilder {
         &mut self,
         source_key: P1,
         target_key: P2,
-        after: Option<Duration>,
+        after: Option<runtime::Duration>,
         physical: bool,
     ) -> Result<(), BuilderError>
     where

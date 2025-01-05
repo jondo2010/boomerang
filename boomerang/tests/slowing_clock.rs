@@ -4,7 +4,6 @@
 //!
 //! Ported from https://github.com/lf-lang/lingua-franca/blob/master/test/C/src/SlowingClock.lf
 use boomerang::prelude::*;
-use std::time::Duration;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug)]
@@ -16,8 +15,8 @@ struct SlowingClock {
 impl Default for SlowingClock {
     fn default() -> Self {
         Self {
-            interval: Duration::from_millis(100),
-            expected_time: Duration::from_millis(100),
+            interval: Duration::milliseconds(100),
+            expected_time: Duration::milliseconds(100),
         }
     }
 }
@@ -57,19 +56,16 @@ struct ReactionA<'a> {
 impl runtime::Trigger<SlowingClock> for ReactionA<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut SlowingClock) {
         let elapsed_logical_time = ctx.get_elapsed_logical_time();
-        println!(
-            "Logical time since start: {}ms.",
-            elapsed_logical_time.as_millis()
-        );
+        println!("Logical time since start: {elapsed_logical_time}.",);
         assert!(
             elapsed_logical_time == state.expected_time,
-            "ERROR: Expected time to be: {}ms.",
-            state.expected_time.as_millis()
+            "ERROR: Expected time to be: {}.",
+            state.expected_time
         );
 
         self.a.schedule(ctx, (), Some(state.interval));
-        state.expected_time += Duration::from_millis(100) + state.interval;
-        state.interval += Duration::from_millis(100);
+        state.expected_time += Duration::milliseconds(100) + state.interval;
+        state.interval += Duration::milliseconds(100);
     }
 }
 
@@ -80,10 +76,10 @@ struct ReactionShutdown;
 impl runtime::Trigger<SlowingClock> for ReactionShutdown {
     fn trigger(self, _ctx: &mut runtime::Context, state: &mut SlowingClock) {
         assert_eq!(
-            state.expected_time,
-            Duration::from_millis(1500),
-            "ERROR: Expected the next expected_time to be: 1500ms. It was: {}ms.",
-            state.expected_time.as_millis()
+            state.expected_time.whole_milliseconds(),
+            1500,
+            "ERROR: Expected the next expected_time to be: 1500ms. It was: {}.",
+            state.expected_time
         );
         println!("Test passes.");
     }
@@ -94,7 +90,7 @@ fn slowing_clock() {
     tracing_subscriber::fmt::init();
     let config = runtime::Config::default()
         .with_fast_forward(true)
-        .with_timeout(Duration::from_secs(1));
+        .with_timeout(Duration::milliseconds(1000));
     let _ = boomerang_util::runner::build_and_test_reactor::<SlowingClockBuilder>(
         "slowing_clock",
         SlowingClock::default(),

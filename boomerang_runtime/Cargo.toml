@@ -33,7 +33,7 @@ serde = [
 #arrow = { workspace = true, optional = true, features = ["prettyprint"] }
 crossbeam-channel = "0.5"
 document-features = { workspace = true }
-downcast-rs = "1.2"
+downcast-rs = "2.0"
 erased-serde = { workspace = true, optional = true }
 itertools.workspace = true
 linkme = { workspace = true, optional = true }

@@ -232,9 +232,10 @@ impl LogicalTimeBarrier {
             .upstream_ctx
             .release_provisional(this_enclave, upstream_tag)
         {
-            // The upstream has terminated
+            // The upstream has terminated try to return a queued event here. If the upstream terminated, we probably
+            // have an event queued from it. This prevents pre-mature termination of this enclave.
             tracing::warn!("Upstream has terminated");
-            return None;
+            return event_rx.try_recv().ok();
         }
 
         // Block until the tag is released

@@ -153,12 +153,7 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
 
 #[test]
 fn test_enclave0() {
-    use tracing_subscriber::{fmt, layer::SubscriberExt, Registry};
-    let stdout_log = fmt::layer().compact().with_thread_names(true);
-    let subscriber = Registry::default().with(stdout_log);
-    let subscriber = subscriber.with(tracing_tracy::TracyLayer::default());
-    tracing::subscriber::set_global_default(subscriber).unwrap();
-
+    tracing_subscriber::fmt::init();
     let enclaves = create_enclave_pair();
     assert_eq!(enclaves.len(), 2);
 

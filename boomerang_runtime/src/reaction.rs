@@ -341,7 +341,7 @@ impl Reaction {
     }
 }
 
-/// An empty reaction function that does nothing.
+/// An empty reaction function that does nothing. Used by the [`reaction_closure`] macro.
 pub fn empty_reaction(
     _ctx: &mut Context,
     _reactor: &mut dyn BaseReactor,
@@ -370,12 +370,7 @@ impl<'store> ReactionFn<'store> for TimerFn {
         actions: RefsMut<'store, dyn BaseAction>,
     ) {
         let mut timer: ActionRef = actions.partition_mut().expect("Expected a timer action");
-
-        //if timer.is_present(ctx) {
         ctx.schedule_action(&mut timer, (), self.0);
-        //} else {
-        //ctx.schedule_action(&mut timer, (), None);
-        //}
     }
 }
 

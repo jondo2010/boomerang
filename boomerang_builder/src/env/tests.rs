@@ -50,8 +50,8 @@ fn test_duplicate_actions() {
             .add_timer(
                 "action0",
                 TimerSpec {
-                    period: Some(Duration::ZERO),
-                    offset: Some(Duration::ZERO),
+                    period: Some(runtime::Duration::ZERO),
+                    offset: Some(runtime::Duration::ZERO),
                 }
             )
             .expect_err("Expected duplicate"),
@@ -115,7 +115,7 @@ fn test_actions1() {
     let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, ());
 
     let action_a = reactor_builder
-        .add_logical_action::<()>("a", Some(Duration::from_secs(1)))
+        .add_logical_action::<()>("a", Some(runtime::Duration::seconds(1)))
         .unwrap();
     let action_b = reactor_builder.add_logical_action::<()>("b", None).unwrap();
 

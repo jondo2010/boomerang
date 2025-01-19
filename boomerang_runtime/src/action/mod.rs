@@ -12,12 +12,9 @@
 //!     Action needs to be scheduled from a different thread. An `AsyncEvent` is created and pushed onto the `async_tx`
 //!     channel.
 
-use std::{
-    fmt::{Debug, Display},
-    time::Duration,
-};
+use std::fmt::{Debug, Display};
 
-use crate::{ReactorData, Tag};
+use crate::{Duration, ReactorData, Tag};
 
 mod action_ref;
 pub mod store;

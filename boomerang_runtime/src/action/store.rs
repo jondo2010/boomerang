@@ -147,13 +147,13 @@ impl<T: ReactorData> BaseActionStore for ActionStore<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use crate::Duration;
 
     use super::*;
 
     fn build_tags<const N: usize>() -> [Tag; N] {
         (0..N)
-            .map(|i| Tag::new(Duration::from_secs(i as u64), 0))
+            .map(|i| Tag::new(Duration::seconds(i as _), 0))
             .collect::<Vec<_>>()
             .try_into()
             .unwrap()
@@ -162,12 +162,12 @@ mod tests {
     #[test]
     fn test_action_entry_ordering() {
         let entry1 = ActionEntry::<()> {
-            tag: Tag::new(Duration::from_secs(1), 0),
+            tag: Tag::new(Duration::seconds(1), 0),
             sequence: 40,
             data: (),
         };
         let entry2 = ActionEntry::<()> {
-            tag: Tag::new(Duration::from_secs(1), 0),
+            tag: Tag::new(Duration::seconds(1), 0),
             sequence: 41,
             data: (),
         };
@@ -227,6 +227,6 @@ mod tests {
     #[test]
     fn test_empty_store() {
         let mut store = ActionStore::<u32>::new();
-        assert_eq!(store.get_current(Tag::new(Duration::from_secs(1), 0)), None);
+        assert_eq!(store.get_current(Tag::new(Duration::seconds(1), 0)), None);
     }
 }

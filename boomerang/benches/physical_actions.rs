@@ -101,7 +101,7 @@ fn bench(c: &mut Criterion) {
             |(env, triggers)| {
                 let config = runtime::Config::default()
                     .with_fast_forward(false)
-                    .with_timeout(Duration::from_secs(1));
+                    .with_timeout(Duration::seconds(1));
                 let mut sched = runtime::Scheduler::new(env, triggers, config);
                 sched.event_loop();
             },

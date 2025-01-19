@@ -1,7 +1,5 @@
 //! Tests is_present
 
-use std::time::Duration;
-
 use boomerang::prelude::*;
 
 #[derive(Default)]
@@ -32,7 +30,7 @@ impl runtime::Trigger<ActionIsPresentState> for ReactionStartup<'_> {
         if !self.a.is_present(ctx) {
             assert!(!state.success, "Unexpected");
             println!("Hello startup!");
-            self.a.schedule(ctx, (), Some(Duration::from_nanos(1)));
+            self.a.schedule(ctx, (), Some(Duration::nanoseconds(1)));
         } else {
             println!("Hello a!");
             state.success = true;

@@ -1,4 +1,4 @@
-use std::{fmt::Debug, time::Duration};
+use std::fmt::Debug;
 
 use super::{
     ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
@@ -6,7 +6,6 @@ use super::{
     ReactionBuilderState, TimerActionKey, TimerSpec, TriggerMode, TypedActionKey, TypedPortKey,
 };
 use crate::{runtime, ActionTag, Input};
-use boomerang_runtime::BoxedReactionFn;
 use slotmap::SecondaryMap;
 
 slotmap::new_key_type! {
@@ -117,7 +116,7 @@ impl ReactorField for TimerActionKey {
 }
 
 impl<T: runtime::ReactorData, Q: ActionTag> ReactorField for TypedActionKey<T, Q> {
-    type Inner = Option<Duration>;
+    type Inner = Option<runtime::Duration>;
 
     fn build(
         name: &str,
@@ -129,7 +128,7 @@ impl<T: runtime::ReactorData, Q: ActionTag> ReactorField for TypedActionKey<T, Q
 }
 
 impl ReactorField for PhysicalActionKey {
-    type Inner = Option<Duration>;
+    type Inner = Option<runtime::Duration>;
 
     fn build(
         name: &str,
@@ -354,7 +353,7 @@ impl<'a> ReactorBuilderState<'a> {
     pub fn add_action<T: runtime::ReactorData, Q: ActionTag>(
         &mut self,
         name: &str,
-        min_delay: Option<Duration>,
+        min_delay: Option<runtime::Duration>,
     ) -> Result<TypedActionKey<T, Q>, BuilderError> {
         self.env
             .internal_add_action::<T, Q>(name, min_delay, self.reactor_key)
@@ -367,7 +366,7 @@ impl<'a> ReactorBuilderState<'a> {
     pub fn add_logical_action<T: runtime::ReactorData>(
         &mut self,
         name: &str,
-        min_delay: Option<Duration>,
+        min_delay: Option<runtime::Duration>,
     ) -> Result<TypedActionKey<T, Logical>, BuilderError> {
         self.env
             .internal_add_action::<T, Logical>(name, min_delay, self.reactor_key)
@@ -376,7 +375,7 @@ impl<'a> ReactorBuilderState<'a> {
     pub fn add_physical_action<T: runtime::ReactorData>(
         &mut self,
         name: &str,
-        min_delay: Option<Duration>,
+        min_delay: Option<runtime::Duration>,
     ) -> Result<TypedActionKey<T, Physical>, BuilderError> {
         self.env
             .internal_add_action::<T, Physical>(name, min_delay, self.reactor_key)
@@ -386,7 +385,7 @@ impl<'a> ReactorBuilderState<'a> {
     pub fn add_reaction(
         &mut self,
         name: &str,
-        reaction_fn: impl Into<BoxedReactionFn>,
+        reaction_fn: impl Into<runtime::BoxedReactionFn>,
     ) -> ReactionBuilderState {
         self.env
             .add_reaction(name, self.reactor_key, reaction_fn.into())
@@ -497,7 +496,7 @@ impl<'a> ReactorBuilderState<'a> {
         &mut self,
         port_a_key: TypedPortKey<T, Q1>,
         port_b_key: TypedPortKey<T, Q2>,
-        after: Option<Duration>,
+        after: Option<runtime::Duration>,
         physical: bool,
     ) -> Result<(), BuilderError> {
         self.env
@@ -509,7 +508,7 @@ impl<'a> ReactorBuilderState<'a> {
         &mut self,
         ports_from: impl Iterator<Item = TypedPortKey<T, Q1>>,
         ports_to: impl Iterator<Item = TypedPortKey<T, Q2>>,
-        after: Option<Duration>,
+        after: Option<runtime::Duration>,
         physical: bool,
     ) -> Result<(), BuilderError> {
         for (port_from, port_to) in ports_from.zip(ports_to) {

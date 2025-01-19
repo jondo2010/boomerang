@@ -1,9 +1,6 @@
-use std::{
-    fmt::{Debug, Display},
-    time::Duration,
-};
+use std::fmt::{Debug, Display};
 
-use crate::{ActionKey, LevelReactionKey, ReactionGraph, ReactionSet, ReactorData, Tag};
+use crate::{ActionKey, Duration, LevelReactionKey, ReactionGraph, ReactionSet, ReactorData, Tag};
 
 /// `ScheduledEvent` is used internally by the scheduler loop in the event queue. The dependent reactions are already expanded into a single reaction set.
 #[derive(Debug, Clone)]
@@ -114,7 +111,7 @@ impl Display for AsyncEvent {
                 write!(
                     f,
                     "AsyncLogical[delay={delay},key={key:?},value=..]",
-                    delay = delay.as_secs_f64()
+                    delay = delay.as_seconds_f64()
                 )
             }
             AsyncEvent::Physical { tag, key, value: _ } => {
@@ -166,7 +163,7 @@ impl AsyncEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{collections::BinaryHeap, time::Duration};
+    use std::collections::BinaryHeap;
 
     #[test]
     fn test_scheduled_event_order() {
@@ -175,30 +172,30 @@ mod tests {
         // Additionally, we want to ensure that shutdown events are processed last given multiple events with the same tag.
         let mut heap = BinaryHeap::new();
         heap.push(ScheduledEvent {
-            tag: Tag::new(Duration::from_secs(1), 0),
+            tag: Tag::new(Duration::seconds(1), 0),
             reactions: ReactionSet::default(),
             terminal: false,
         });
         heap.push(ScheduledEvent {
-            tag: Tag::new(Duration::from_secs(1), 0),
+            tag: Tag::new(Duration::seconds(1), 0),
             reactions: ReactionSet::default(),
             terminal: true,
         });
         heap.push(ScheduledEvent {
-            tag: Tag::new(Duration::from_secs(0), 0),
+            tag: Tag::new(Duration::seconds(0), 0),
             reactions: ReactionSet::default(),
             terminal: false,
         });
 
         // The top event should NOT be the shutdown event
         let ev0 = heap.pop().unwrap();
-        assert_eq!(ev0.tag.get_offset(), Duration::from_secs(0).into());
+        assert_eq!(ev0.tag.offset(), Duration::seconds(0));
         assert!(!ev0.terminal);
         let ev1 = heap.pop().unwrap();
         assert!(!ev1.terminal);
-        assert_eq!(ev1.tag.get_offset(), Duration::from_secs(1).into());
+        assert_eq!(ev1.tag.offset(), Duration::seconds(1));
         let ev2 = heap.pop().unwrap();
         assert!(ev2.terminal);
-        assert_eq!(ev2.tag.get_offset(), Duration::from_secs(1).into());
+        assert_eq!(ev2.tag.offset(), Duration::seconds(1));
     }
 }

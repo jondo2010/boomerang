@@ -44,10 +44,10 @@ pub fn handle_duration(value: String) -> Option<Duration> {
 }
 
 /// Generate a TokenStream from an Option<Duration>
-pub fn duration_quote(duration: &std::time::Duration) -> proc_macro2::TokenStream {
+pub fn duration_quote(duration: &Duration) -> proc_macro2::TokenStream {
     let secs = duration.as_secs();
     let nanos = duration.subsec_nanos();
-    quote! {::std::time::Duration::new(#secs, #nanos)}
+    quote! {::boomerang::runtime::Duration::new(#secs as _, #nanos as _)}
 }
 
 pub struct OptionalDuration(pub Option<Duration>);

@@ -1,6 +1,6 @@
 use boomerang::prelude::*;
 
-use std::{fmt::Debug, time::Duration};
+use std::fmt::Debug;
 
 trait CountData:
     Debug + Copy + runtime::ReactorData + std::ops::AddAssign<i32> + std::cmp::PartialEq<i32>
@@ -48,7 +48,7 @@ fn count() {
     tracing_subscriber::fmt::init();
     let config = runtime::Config::default()
         .with_fast_forward(true)
-        .with_timeout(Duration::from_secs(1));
+        .with_timeout(Duration::seconds(1));
     let (_, sched) =
         boomerang_util::runner::build_and_test_reactor::<Count<i32>>("count", 0, config).unwrap();
     let env = sched.into_env();

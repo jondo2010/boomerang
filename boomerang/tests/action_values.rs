@@ -1,7 +1,5 @@
 //! Test logical action with delay.
 
-use std::time::Duration;
-
 use boomerang::prelude::*;
 
 #[derive(Default, Debug)]
@@ -35,7 +33,7 @@ impl<'a> runtime::Trigger<State> for ReactionStartup<'a> {
         self.act.schedule(ctx, 100, None);
         // scheduled in 150 ms, value is overwritten
         self.act
-            .schedule(ctx, -100, Some(Duration::from_millis(50)));
+            .schedule(ctx, -100, Some(Duration::milliseconds(50)));
     }
 }
 
@@ -53,11 +51,11 @@ impl<'a> runtime::Trigger<State> for ReactionAct<'a> {
 
         println!("[@{elapsed:?} action transmitted: {value:?}]");
 
-        if elapsed.as_millis() == 100 {
+        if elapsed.whole_milliseconds() == 100 {
             assert_eq!(value, Some(&100), "ERROR: Expected action value to be 100");
             state.r1done = true;
         } else {
-            if elapsed.as_millis() != 150 {
+            if elapsed.whole_milliseconds() != 150 {
                 panic!("ERROR: Unexpected reaction invocation at {elapsed:?}");
             }
             assert_eq!(

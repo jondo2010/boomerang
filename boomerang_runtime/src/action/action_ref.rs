@@ -1,6 +1,4 @@
-use std::time::Duration;
-
-use crate::{event::AsyncEvent, Context, SendContext, Tag, Timestamp};
+use crate::{event::AsyncEvent, Context, Duration, SendContext, Tag};
 
 use super::{Action, ActionCommon, ActionKey, BaseAction, ReactorData};
 
@@ -36,7 +34,7 @@ impl<'a, T: ReactorData> ActionRef<'a, T> {
             context.tag.delay(tag_delay)
         } else {
             // Physical actions are scheduled at the current physical time + tag_delay
-            Tag::absolute(context.start_time, Timestamp::now().offset(tag_delay))
+            Tag::from_physical_time(context.start_time, std::time::Instant::now()).delay(tag_delay)
         };
 
         // Push the new value into the store
@@ -100,7 +98,8 @@ impl<T: ReactorData> AsyncActionRef<T> {
             AsyncEvent::logical(self.key, tag_delay, value)
         } else {
             // Physical actions are scheduled at the current physical time + tag_delay
-            let new_tag = Tag::absolute(context.start_time, Timestamp::now().offset(tag_delay));
+            let new_tag = Tag::from_physical_time(context.start_time, std::time::Instant::now())
+                .delay(tag_delay);
             tracing::info!(new_tag = %new_tag, key = ?self.key, "Scheduling Async PhysicalAction");
             AsyncEvent::physical(self.key, new_tag, value)
         };

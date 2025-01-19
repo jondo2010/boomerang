@@ -16,6 +16,12 @@ impl std::fmt::Debug for Level {
     }
 }
 
+impl std::fmt::Display for Level {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "L{}", self.0)
+    }
+}
+
 impl From<usize> for Level {
     fn from(value: usize) -> Self {
         Self(value)

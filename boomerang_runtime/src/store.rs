@@ -294,7 +294,7 @@ impl Store {
 pub mod tests {
     use itertools::Itertools;
 
-    use crate::{action::ActionCommon, keepalive, ActionRef, InputRef, OutputRef, Timestamp};
+    use crate::{action::ActionCommon, keepalive, ActionRef, InputRef, OutputRef};
 
     use super::*;
 
@@ -307,7 +307,7 @@ pub mod tests {
 
         let contexts = [(
             reaction_key,
-            Context::new(Timestamp::now(), None, event_tx, shutdown_rx),
+            Context::new(std::time::Instant::now(), None, event_tx, shutdown_rx),
         )]
         .into_iter()
         .collect();
@@ -339,7 +339,7 @@ pub mod tests {
         }
         {
             let mut ctx_iter = unsafe { store.iter_borrow_storage(reaction_keys.iter().cloned()) };
-            let _res = ctx_iter.next().unwrap().trigger(Tag::now(Timestamp::now()));
+            let _res = ctx_iter.next().unwrap().trigger(Tag::ZERO);
         }
     }
 }

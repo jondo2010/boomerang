@@ -1,7 +1,5 @@
 //! This checks that the after keyword adjusts logical time, not using physical time.
 
-use std::time::Duration;
-
 use boomerang::prelude::*;
 
 #[derive(Reactor)]
@@ -33,7 +31,7 @@ struct PrintState {
 impl Default for PrintState {
     fn default() -> Self {
         Self {
-            expected_time: Duration::from_millis(10),
+            expected_time: Duration::milliseconds(10),
             i: 0,
         }
     }
@@ -68,7 +66,7 @@ impl runtime::Trigger<PrintState> for ReactionPrintX<'_> {
             "Expected logical time to be {:?}",
             state.expected_time
         );
-        state.expected_time += Duration::from_secs(1);
+        state.expected_time += Duration::seconds(1);
     }
 }
 
@@ -120,6 +118,6 @@ fn after() {
     tracing_subscriber::fmt::init();
     let config = runtime::Config::default()
         .with_fast_forward(true)
-        .with_timeout(Duration::from_secs(3));
+        .with_timeout(Duration::seconds(3));
     let _ = boomerang_util::runner::build_and_test_reactor::<Main>("after", (), config).unwrap();
 }

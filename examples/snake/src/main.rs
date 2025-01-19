@@ -6,8 +6,6 @@ mod keyboard_events;
 
 #[cfg(not(windows))]
 mod reactor {
-    use std::time::Duration;
-
     use super::support::*;
     use crate::keyboard_events::{Key, KeyboardEvents, KeyboardEventsBuilder};
     use boomerang::prelude::*;
@@ -95,7 +93,7 @@ mod reactor {
 
             // schedule the first one, then it reschedules itself.
             self.screen_refresh
-                .schedule(ctx, (), Some(Duration::from_millis(1000)));
+                .schedule(ctx, (), Some(Duration::milliseconds(1000)));
         }
     }
 
@@ -113,8 +111,8 @@ mod reactor {
             state: &mut <SnakeBuilder as Reactor>::State,
         ) {
             // select a delay depending on the tempo
-            let delay = Duration::from_millis(400)
-                - (state.tempo_step * state.tempo).min(Duration::from_millis(300));
+            let delay = Duration::milliseconds(400)
+                - (state.tempo_step * state.tempo).min(Duration::milliseconds(300));
             self.screen_refresh.schedule(ctx, (), Some(delay));
         }
     }
@@ -224,12 +222,10 @@ mod reactor {
 
 #[cfg(not(windows))]
 fn main() {
-    use std::time::Duration;
-
     use reactor::{Snake, SnakeBuilder};
     let _ = boomerang_util::runner::build_and_run_reactor::<SnakeBuilder>(
         "snake",
-        Snake::new(32, Duration::from_millis(40), 2),
+        Snake::new(32, boomerang::runtime::Duration::milliseconds(40), 2),
     )
     .unwrap();
 }

@@ -82,7 +82,7 @@ pub mod prelude {
         TimerActionKey, TypedActionKey, TypedPortKey,
     };
 
-    pub use super::runtime::{self, ContextCommon, FromRefs};
+    pub use super::runtime::{self, ContextCommon, Duration, FromRefs};
 
     pub use boomerang_derive::{Reaction, Reactor};
 }

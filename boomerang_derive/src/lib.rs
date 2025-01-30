@@ -30,3 +30,27 @@ pub fn derive_reactor(input: proc_macro::TokenStream) -> proc_macro::TokenStream
     }
     .into()
 }
+
+mod reactor2 {
+    use syn::{Ident, ItemFn, ReturnType, Visibility};
+
+    pub struct Model {
+        //docs: Docs,
+        //unknown_attrs: UnknownAttrs,
+        vis: Visibility,
+        name: Ident,
+        //props: Vec<Prop>,
+        body: ItemFn,
+        ret: ReturnType,
+    }
+}
+
+#[proc_macro_error2::proc_macro_error]
+#[proc_macro_attribute]
+pub fn reactor2(
+    args: proc_macro::TokenStream,
+    s: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    //let mut dummy = syn::parse::<DummyModel>(s.clone());
+    let parse_result = syn::parse::<reactor2::Model>(s);
+}

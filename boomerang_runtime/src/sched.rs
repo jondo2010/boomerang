@@ -182,7 +182,8 @@ impl LogicalTimeBarrier {
         tracing::trace!("Release");
         assert!(
             tag >= self.released_tag,
-            "Cannot release a tag earlier than the last released tag"
+            "Cannot release a tag ({tag}) earlier than the last released tag {}",
+            self.released_tag
         );
         self.released_tag = tag;
         // Reset the provisional tag

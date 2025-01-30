@@ -309,10 +309,10 @@ impl ToTokens for Reaction {
 
             #[automatically_derived]
             impl #impl_generics ::boomerang::builder::Reaction<#reactor> for #ident #type_generics #where_clause {
-                fn build<'builder>(
+                fn build<'builder, S: runtime::ReactorData>(
                     name: &str,
                     reactor: &#reactor,
-                    builder: &'builder mut ::boomerang::builder::ReactorBuilderState,
+                    builder: &'builder mut ::boomerang::builder::ReactorBuilderState<S>,
                 ) -> Result<
                     ::boomerang::builder::ReactionBuilderState<'builder>,
                     ::boomerang::builder::BuilderError

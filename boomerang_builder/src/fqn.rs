@@ -3,7 +3,7 @@
 use std::{fmt::Display, ops::Index};
 
 use crate::{
-    ActionBuilder, BasePortBuilder, BuilderActionKey, BuilderPortKey, BuilderReactionKey,
+    port::BasePortBuilder, ActionBuilder, BuilderActionKey, BuilderPortKey, BuilderReactionKey,
     BuilderReactorKey, EnvBuilder, ParentReactorBuilder, ReactionBuilder, ReactorBuilder,
 };
 
@@ -75,7 +75,7 @@ impl FqnSegment for ReactorBuilder {
 impl FqnSegment for ReactionBuilder {
     /// Create a new segment from a reaction.
     fn fqn_segment(&self, _grouped: bool) -> BuilderFqnSegment {
-        let name = self.name().to_string();
+        let name = self.name().unwrap_or("<unnamed_reaction>").to_string();
         BuilderFqnSegment {
             name,
             index: BuilderFqnSegmentIndex::None,

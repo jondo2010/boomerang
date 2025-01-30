@@ -357,8 +357,13 @@ impl EnvBuilder {
                     builder_parts.aliases.action_aliases[builder_action_key].1
                 });
 
+            let reaction_name = reaction.name.unwrap_or_else(|| {
+                let reaction_u64 = slotmap::Key::data(&builder_reaction_key).as_ffi();
+                format!("reaction{reaction_u64}")
+            });
+
             let runtime_reaction_key = enclave.insert_reaction(
-                runtime::Reaction::new(&reaction.name, reaction_body, None),
+                runtime::Reaction::new(&reaction_name, reaction_body, None),
                 runtime_reactor_key,
                 use_ports,
                 effect_ports,

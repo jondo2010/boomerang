@@ -40,6 +40,9 @@ boomerang_builder = { workspace = true }
 boomerang_derive = { workspace = true, optional = true }
 boomerang_runtime = { workspace = true }
 
+typed-builder = "0.20"
+typed-builder-macro = "0.20"
+
 [dev-dependencies]
 boomerang_util = { path = "../boomerang_util", features = ["runner"] }
 criterion = "0.5"

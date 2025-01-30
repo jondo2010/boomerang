@@ -1,9 +1,10 @@
 use std::fmt::Debug;
 
 use super::{
-    ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
-    EnvBuilder, FindElements, Logical, Output, Physical, PhysicalActionKey, PortTag,
-    ReactionBuilderState, TimerActionKey, TimerSpec, TypedActionKey, TypedPortKey,
+    ActionTag, ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey,
+    BuilderReactionKey, BuilderRuntimeParts, EnvBuilder, FindElements, Input, Logical, Output,
+    Physical, PhysicalActionKey, PortTag, ReactionBuilderState, TimerActionKey, TimerSpec,
+    TypedActionKey, TypedPortKey,
 };
 use crate::{runtime, ActionTag, BuilderRuntimeParts, Input, TriggerMode};
 use slotmap::SecondaryMap;
@@ -39,25 +40,76 @@ pub trait Reactor: Sized {
     }
 }
 
+pub trait Reactor2<State: runtime::ReactorData = ()>: Sized {
+    type Ports;
+    fn build(
+        self,
+        name: &str,
+        state: State,
+        parent: Option<BuilderReactorKey>,
+        bank_info: Option<runtime::BankInfo>,
+        is_enclave: bool,
+        env: &mut EnvBuilder,
+    ) -> Result<Self::Ports, BuilderError>;
+}
+
+impl<F, State, Ports> Reactor2<State> for F
+where
+    F: FnOnce(
+            /*name*/ &str,
+            /*state*/ State,
+            /*parent*/ Option<BuilderReactorKey>,
+            /*bank_info*/ Option<boomerang_runtime::BankInfo>,
+            /*is_enclave*/ bool,
+            /*env*/ &mut EnvBuilder,
+        ) -> Result<Ports, BuilderError>
+        + 'static,
+    State: runtime::ReactorData,
+{
+    type Ports = Ports;
+    fn build(
+        self,
+        name: &str,
+        state: State,
+        parent: Option<BuilderReactorKey>,
+        bank_info: Option<boomerang_runtime::BankInfo>,
+        is_enclave: bool,
+        env: &mut EnvBuilder,
+    ) -> Result<Self::Ports, BuilderError> {
+        (self)(name, state, parent, bank_info, is_enclave, env)
+    }
+}
+
+/// ReactorPorts is implemented for the Ports struct of a Reactor. This trait is typically automatically derived.
+pub trait ReactorPorts {
+    /// The fields of the Ports struct (e.g. the ports)
+    type Fields;
+    /// Build the reactor with the given closure
+    fn build_with<F, S>(f: F) -> impl Reactor2<S, Ports = Self>
+    where
+        F: FnOnce(&mut ReactorBuilderState<S>, Self::Fields) -> Result<(), BuilderError> + 'static,
+        S: runtime::ReactorData;
+}
+
 /// This builder trait is implemented for fields in the Reactor struct.
 pub trait ReactorField: Sized {
     type Inner;
 
     /// Build a `ReactionBuilderState` for this Reaction
-    fn build(
+    fn build<S: runtime::ReactorData>(
         name: &str,
         inner: Self::Inner,
-        parent: &'_ mut ReactorBuilderState,
+        parent: &'_ mut ReactorBuilderState<S>,
     ) -> Result<Self, BuilderError>;
 }
 
 impl<R: Reactor> ReactorField for R {
     type Inner = (R::State, bool);
 
-    fn build(
+    fn build<S: runtime::ReactorData>(
         name: &str,
         inner: Self::Inner,
-        parent: &'_ mut ReactorBuilderState,
+        parent: &'_ mut ReactorBuilderState<S>,
     ) -> Result<Self, BuilderError> {
         let (state, is_enclave) = inner;
         parent.add_child_reactor(name, state, is_enclave)
@@ -72,10 +124,10 @@ where
 {
     type Inner = (R::State, bool);
 
-    fn build(
+    fn build<S: runtime::ReactorData>(
         name: &str,
         inner: Self::Inner,
-        parent: &'_ mut ReactorBuilderState,
+        parent: &'_ mut ReactorBuilderState<S>,
     ) -> Result<Self, BuilderError> {
         let (state, is_enclave) = inner;
         parent.add_child_reactors(name, state, is_enclave)
@@ -85,10 +137,10 @@ where
 impl<T: runtime::ReactorData, Q: PortTag> ReactorField for TypedPortKey<T, Q> {
     type Inner = ();
 
-    fn build(
+    fn build<S: runtime::ReactorData>(
         name: &str,
         _inner: Self::Inner,
-        parent: &'_ mut ReactorBuilderState,
+        parent: &'_ mut ReactorBuilderState<S>,
     ) -> Result<Self, BuilderError> {
         parent.add_port::<T, Q>(name, None)
     }
@@ -97,10 +149,10 @@ impl<T: runtime::ReactorData, Q: PortTag> ReactorField for TypedPortKey<T, Q> {
 impl<T: runtime::ReactorData, Q: PortTag, const N: usize> ReactorField for [TypedPortKey<T, Q>; N] {
     type Inner = ();
 
-    fn build(
+    fn build<S: runtime::ReactorData>(
         name: &str,
         _inner: Self::Inner,
-        parent: &'_ mut ReactorBuilderState,
+        parent: &'_ mut ReactorBuilderState<S>,
     ) -> Result<Self, BuilderError> {
         parent.add_ports::<T, Q, N>(name)
     }
@@ -109,10 +161,10 @@ impl<T: runtime::ReactorData, Q: PortTag, const N: usize> ReactorField for [Type
 impl ReactorField for TimerActionKey {
     type Inner = TimerSpec;
 
-    fn build(
+    fn build<S: runtime::ReactorData>(
         name: &str,
         inner: Self::Inner,
-        parent: &'_ mut ReactorBuilderState,
+        parent: &'_ mut ReactorBuilderState<S>,
     ) -> Result<Self, BuilderError> {
         parent.add_timer(name, inner)
     }
@@ -121,10 +173,10 @@ impl ReactorField for TimerActionKey {
 impl<T: runtime::ReactorData, Q: ActionTag> ReactorField for TypedActionKey<T, Q> {
     type Inner = Option<runtime::Duration>;
 
-    fn build(
+    fn build<S: runtime::ReactorData>(
         name: &str,
         min_delay: Self::Inner,
-        parent: &'_ mut ReactorBuilderState,
+        parent: &'_ mut ReactorBuilderState<S>,
     ) -> Result<Self, BuilderError> {
         parent.add_action(name, min_delay)
     }
@@ -133,10 +185,10 @@ impl<T: runtime::ReactorData, Q: ActionTag> ReactorField for TypedActionKey<T, Q
 impl ReactorField for PhysicalActionKey {
     type Inner = Option<runtime::Duration>;
 
-    fn build(
+    fn build<S: runtime::ReactorData>(
         name: &str,
         inner: Self::Inner,
-        parent: &'_ mut ReactorBuilderState,
+        parent: &'_ mut ReactorBuilderState<S>,
     ) -> Result<Self, BuilderError> {
         parent
             .add_physical_action::<()>(name, inner)
@@ -218,26 +270,31 @@ impl ReactorBuilder {
 }
 
 /// Builder struct used to facilitate construction of a ReactorBuilder by user/generated code.
-pub struct ReactorBuilderState<'a> {
+#[derive(Debug)]
+pub struct ReactorBuilderState<'a, S: runtime::ReactorData = ()> {
     /// The ReactorKey of this Builder
     reactor_key: BuilderReactorKey,
     env: &'a mut EnvBuilder,
     startup_action: TypedActionKey,
     shutdown_action: TypedActionKey,
+    phantom: std::marker::PhantomData<S>,
 }
 
+/*
 impl<'a> FindElements for ReactorBuilderState<'a> {
     fn get_port_by_name(&self, port_name: &str) -> Result<BuilderPortKey, BuilderError> {
-        self.env.find_port_by_name(port_name, self.reactor_key)
+        //self.env.find_port_by_name(port_name, self.reactor_key)
+        todo!();
     }
 
     fn get_action_by_name(&self, action_name: &str) -> Result<BuilderActionKey, BuilderError> {
         self.env.find_action_by_name(action_name, self.reactor_key)
     }
 }
+    */
 
-impl<'a> ReactorBuilderState<'a> {
-    pub(super) fn new<S: runtime::ReactorData>(
+impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
+    pub(super) fn new(
         name: &str,
         parent: Option<BuilderReactorKey>,
         bank_info: Option<runtime::BankInfo>,
@@ -273,6 +330,7 @@ impl<'a> ReactorBuilderState<'a> {
             env,
             startup_action,
             shutdown_action,
+            phantom: std::marker::PhantomData,
         }
     }
 
@@ -285,10 +343,7 @@ impl<'a> ReactorBuilderState<'a> {
         let startup_action = env
             .action_builders
             .iter()
-            .find(|(_, action)| {
-                matches!(action.r#type(), ActionType::Timer(TimerSpec { period, offset }) if period.is_none() && offset.is_none())
-                    && action.reactor_key() == reactor_key
-            })
+            .find(|(_, action)| matches!(action.r#type(), ActionType::Timer(TimerSpec { period, offset }) if period.is_none() && offset.is_none()) && action.reactor_key() == reactor_key)
             .map(|(action_key, _)| action_key)
             .expect("Startup action not found");
 
@@ -307,11 +362,17 @@ impl<'a> ReactorBuilderState<'a> {
             env,
             startup_action: TypedActionKey::from(startup_action),
             shutdown_action: TypedActionKey::from(shutdown_action),
+            phantom: std::marker::PhantomData,
         }
     }
 
+    /// Get the [`EnvBuilder`] for this `ReactorBuilder`
+    pub fn env(&mut self) -> &mut EnvBuilder {
+        self.env
+    }
+
     /// Get the [`BuilderReactorKey`] for this `ReactorBuilder`
-    pub fn get_key(&self) -> BuilderReactorKey {
+    pub fn key(&self) -> BuilderReactorKey {
         self.reactor_key
     }
 
@@ -370,12 +431,17 @@ impl<'a> ReactorBuilderState<'a> {
     }
 
     /// Add a new reaction to this reactor.
+    #[deprecated(note = "Please use `add_reaction2` instead, which provides a more ergonomic API.")]
     pub fn add_reaction<F>(&mut self, name: &str, reaction_builder_fn: F) -> ReactionBuilderState
     where
-        F: for<'any> FnOnce(&'any BuilderRuntimeParts) -> runtime::BoxedReactionFn + 'static,
+        F: FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn + 'static,
     {
         self.env
             .add_reaction(name, self.reactor_key, reaction_builder_fn)
+    }
+
+    pub fn add_reaction2(&mut self, name: Option<&str>) -> crate::builder2::ReactionBuilder<S> {
+        self.env.add_reaction2(name, self.reactor_key)
     }
 
     /// Add a new input port to this reactor.
@@ -384,6 +450,7 @@ impl<'a> ReactorBuilderState<'a> {
         name: &str,
         bank_info: Option<runtime::BankInfo>,
     ) -> Result<TypedPortKey<T, Q>, BuilderError> {
+        tracing::debug!("Adding port: {name}");
         self.env
             .internal_add_port::<T, Q>(name, self.reactor_key, bank_info)
             .map(Into::into)
@@ -451,6 +518,23 @@ impl<'a> ReactorBuilderState<'a> {
         )
     }
 
+    pub fn add_child_reactor2<ChildState: runtime::ReactorData, R: Reactor2<ChildState>>(
+        &mut self,
+        reactor: R,
+        name: &str,
+        state: ChildState,
+        is_enclave: bool,
+    ) -> Result<R::Ports, BuilderError> {
+        reactor.build(
+            name,
+            state,
+            Some(self.reactor_key),
+            None,
+            is_enclave,
+            self.env,
+        )
+    }
+
     /// Add multiple child reactors to this reactor.
     pub fn add_child_reactors<R, const N: usize>(
         &mut self,
@@ -489,13 +573,18 @@ impl<'a> ReactorBuilderState<'a> {
 
     /// Connect 2 ports on this reactor. This has the logical meaning of "connecting" `port_a` to
     /// `port_b`.
-    pub fn connect_port<T: runtime::ReactorData + Clone, Q1: PortTag, Q2: PortTag>(
+    pub fn connect_port<T, Q1, Q2, A1, A2>(
         &mut self,
-        port_a_key: TypedPortKey<T, Q1>,
-        port_b_key: TypedPortKey<T, Q2>,
+        port_a_key: TypedPortKey<T, Q1, A1>,
+        port_b_key: TypedPortKey<T, Q2, A2>,
         after: Option<runtime::Duration>,
         physical: bool,
-    ) -> Result<(), BuilderError> {
+    ) -> Result<(), BuilderError>
+    where
+        T: runtime::ReactorData + Clone,
+        Q1: PortTag,
+        Q2: PortTag,
+    {
         self.env
             .add_port_connection::<T, _, _>(port_a_key, port_b_key, after, physical)
     }
@@ -510,12 +599,13 @@ impl<'a> ReactorBuilderState<'a> {
         physical: bool,
     ) -> Result<(), BuilderError> {
         for (port_from, port_to) in ports_from.zip(ports_to) {
-            self.connect_port::<T, _, _>(port_from, port_to, after, physical)?;
+            self.connect_port::<T, _, _, _, _>(port_from, port_to, after, physical)?;
         }
         Ok(())
     }
 
     pub fn finish(self) -> Result<BuilderReactorKey, BuilderError> {
+        self.env.validate_reactions()?;
         Ok(self.reactor_key)
     }
 

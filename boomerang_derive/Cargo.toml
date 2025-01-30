@@ -13,10 +13,14 @@ exclude.workspace = true
 
 [dependencies]
 darling = "0.20"
+
+attribute-derive = { version = "0.10", features = ["syn-full"] }
+convert_case = "0.6"
 parse_duration = "2.1"
+proc-macro-error2 = { version = "2", default-features = false }
 proc-macro2 = "1.0"
 quote = "1.0"
-syn = { version = "2.0", features = ["derive"] }
+syn = { version = "2.0", features = ["full"] }
 
 [lib]
 name = "boomerang_derive"

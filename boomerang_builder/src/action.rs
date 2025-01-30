@@ -80,6 +80,13 @@ impl<T: runtime::ReactorData> From<TypedActionKey<T, Physical>> for PhysicalActi
     }
 }
 
+impl<T: runtime::ReactorData> runtime::ReactionRefsExtract for TypedActionKey<T, Logical> {
+    type Ref<'store> = runtime::ActionRef<'store, T> where Self: 'store;
+    fn extract<'store>(refs: &mut runtime::ReactionRefs<'store>) -> Self::Ref<'store> {
+        refs.actions.next().map(Self::Ref::from).unwrap()
+    }
+}
+
 impl From<PhysicalActionKey> for BuilderActionKey {
     fn from(value: PhysicalActionKey) -> Self {
         value.0
@@ -108,10 +115,17 @@ impl From<BuilderActionKey> for TimerActionKey {
     }
 }
 
+impl runtime::ReactionRefsExtract for TimerActionKey {
+    type Ref<'store> = runtime::ActionRef<'store> where Self: 'store;
+    fn extract<'store>(refs: &mut runtime::ReactionRefs<'store>) -> Self::Ref<'store> {
+        refs.actions.next().map(Self::Ref::from).unwrap()
+    }
+}
+
 /// TimerSpec is used to specify the period and offset of a timer action.
 ///
 /// If the period is `None`, then the timer event occurs only once. If neither an offset nor a period is specified, then one timer event occurs at program start.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Default)]
 pub struct TimerSpec {
     /// Interval between timer events
     pub period: Option<runtime::Duration>,
@@ -124,6 +138,18 @@ impl TimerSpec {
         period: None,
         offset: None,
     };
+    pub fn with_period(self, period: runtime::Duration) -> Self {
+        Self {
+            period: Some(period),
+            ..self
+        }
+    }
+    pub fn with_offset(self, offset: runtime::Duration) -> Self {
+        Self {
+            offset: Some(offset),
+            ..self
+        }
+    }
 }
 
 #[derive(Debug)]

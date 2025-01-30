@@ -22,7 +22,7 @@ pub mod plantuml;
 pub use action::*;
 pub use env::*;
 pub use fqn::*;
-pub use port::*;
+pub use port::{BuilderPortKey, Contained, Input, Local, Output, PortTag, PortType, TypedPortKey};
 pub use reaction::*;
 pub use reactor::*;
 

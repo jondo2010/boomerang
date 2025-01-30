@@ -22,10 +22,10 @@ impl petgraph::graph::GraphIndex for BuilderReactionKey {
 /// The Reaction trait should be automatically derived for each Reaction struct.
 pub trait Reaction<R: Reactor> {
     /// Build a `ReactionBuilderState` for this Reaction
-    fn build<'builder>(
+    fn build<'builder, S: runtime::ReactorData>(
         name: &str,
         reactor: &R,
-        builder: &'builder mut ReactorBuilderState,
+        builder: &'builder mut ReactorBuilderState<S>,
     ) -> Result<ReactionBuilderState<'builder>, BuilderError>;
 }
 
@@ -155,15 +155,17 @@ impl ReactionField for PortOrActionTrigger {
     }
 }
 
+/// A boxed deferred Reaction builder function
+pub type BoxedBuilderReactionFn = Box<dyn FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn>;
+
 pub struct ReactionBuilder {
-    pub(super) name: String,
+    pub(super) name: Option<String>,
     /// Unique ordering of this reaction within the reactor.
     pub(super) priority: usize,
     /// The owning Reactor for this Reaction
     pub(super) reactor_key: BuilderReactorKey,
     /// The Reaction function
-    pub(super) reaction_fn: Box<dyn FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn>,
-
+    pub(super) reaction_fn: BoxedBuilderReactionFn,
     /// Relations between this Reaction and Actions
     pub(super) action_relations: SecondaryMap<BuilderActionKey, TriggerMode>,
     /// Relations between this Reaction and Ports
@@ -191,8 +193,8 @@ impl std::fmt::Debug for ReactionBuilder {
 
 impl ReactionBuilder {
     /// Get the name of this Reaction
-    pub fn name(&self) -> &str {
-        &self.name
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 
     pub fn priority(&self) -> usize {
@@ -208,8 +210,8 @@ pub struct ReactionBuilderState<'a> {
 impl<'a> FindElements for ReactionBuilderState<'a> {
     /// Find the PortKey with a given name within the parent Reactor
     fn get_port_by_name(&self, port_name: &str) -> Result<BuilderPortKey, BuilderError> {
-        self.env
-            .find_port_by_name(port_name, self.builder.reactor_key)
+        //self.env .find_port_by_name(port_name, self.builder.reactor_key)
+        todo!()
     }
 
     fn get_action_by_name(&self, action_name: &str) -> Result<BuilderActionKey, BuilderError> {
@@ -225,14 +227,12 @@ pub enum TriggerMode {
     TriggersOnly,
     /// The action/port triggers the reaction and is provided as input in the actions/ports arrays
     TriggersAndUses,
-    /// The action/port triggers the reaction and is provided to the reaction in the actions/mut
-    /// ports arrays
+
+    /// The port triggers the reaction and is provided to the reaction as an input/output
     TriggersAndEffects,
-    /// The action/port does not trigger the reaction, but is provided as input in the
-    /// actions/ports arrays
+    /// The port does not trigger the reaction, but is provided to the reaction as an input
     UsesOnly,
-    /// The action/port does not trigger the reaction, but is provided to the reaction in the
-    /// actions/mut ports arrays
+    /// The port does not trigger the reaction, but is provided to the reaction as an output
     EffectsOnly,
 }
 
@@ -263,12 +263,12 @@ impl<'a> ReactionBuilderState<'a> {
         name: &str,
         priority: usize,
         reactor_key: BuilderReactorKey,
-        reaction_fn: Box<dyn FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn>,
+        reaction_fn: BoxedBuilderReactionFn,
         env: &'a mut EnvBuilder,
     ) -> Self {
         Self {
             builder: ReactionBuilder {
-                name: name.into(),
+                name: Some(name.into()),
                 priority,
                 reactor_key,
                 reaction_fn,
@@ -289,7 +289,7 @@ impl<'a> ReactionBuilderState<'a> {
         let action = &self.env.action_builders[key];
         if action.reactor_key() != self.builder.reactor_key {
             return Err(BuilderError::ReactionBuilderError(format!(
-                "Cannot add action '{}' to ReactionBuilder '{}', it must belong to the same reactor as the reaction",
+                "Cannot add action '{}' to ReactionBuilder '{:?}', it must belong to the same reactor as the reaction",
                 action.name(), &self.builder.name
             )));
         }
@@ -335,7 +335,7 @@ impl<'a> ReactionBuilderState<'a> {
                     && port_reactor_key != self.builder.reactor_key
                 {
                     return Err(BuilderError::ReactionBuilderError(format!(
-                        "Reaction {} cannot 'trigger on' or 'use' input port '{}', it must belong to the same reactor as the reaction",
+                        "Reaction {:?} cannot 'trigger on' or 'use' input port '{}', it must belong to the same reactor as the reaction",
                         self.builder.name(),
                         self.env.port_fqn(key, false).unwrap()
                     )));
@@ -345,7 +345,7 @@ impl<'a> ReactionBuilderState<'a> {
                     && port_parent_reactor_key != Some(self.builder.reactor_key)
                 {
                     return Err(BuilderError::ReactionBuilderError(format!(
-                        "Reaction {} cannot 'effect' input port '{}', it must belong to a contained reactor",
+                        "Reaction {:?} cannot 'effect' input port '{}', it must belong to a contained reactor",
                         self.builder.name(),
                         port_builder.name()
                     )));
@@ -357,7 +357,7 @@ impl<'a> ReactionBuilderState<'a> {
                     && port_parent_reactor_key != Some(self.builder.reactor_key)
                 {
                     return Err(BuilderError::ReactionBuilderError(format!(
-                        "Reaction {} cannot 'trigger on' or 'use' output port '{}', it must belong to a contained reactor",
+                        "Reaction {:?} cannot 'trigger on' or 'use' output port '{}', it must belong to a contained reactor",
                         self.builder.name(),
                         port_builder.name()
                     )));
@@ -365,7 +365,7 @@ impl<'a> ReactionBuilderState<'a> {
                 // effects are valid for output ports on the same reactor
                 if trigger_mode.is_effects() && port_reactor_key != self.builder.reactor_key {
                     return Err(BuilderError::ReactionBuilderError(format!(
-                        "Reaction {} cannot 'effect' output port '{}', it must belong to the same reactor as the reaction",
+                        "Reaction {:?} cannot 'effect' output port '{}', it must belong to the same reactor as the reaction",
                         self.builder.name(),
                         port_builder.name()
                     )));
@@ -421,73 +421,327 @@ impl<'a> ReactionBuilderState<'a> {
                 .any(|&mode| mode.is_triggers())
         {
             return Err(BuilderError::ReactionBuilderError(format!(
-                "Reaction '{}' has no triggers defined",
+                "Reaction '{:?}' has no triggers defined",
                 &reaction_builder.name
             )));
         }
 
         let reactor = &mut env.reactor_builders[reaction_builder.reactor_key];
         let reactions = &mut env.reaction_builders;
-        let actions = &mut env.action_builders;
-        let ports = &mut env.port_builders;
 
         let reaction_key = reactions.insert_with_key(|key| {
             reactor.reactions.insert(key, ());
             reaction_builder
         });
 
-        let reaction_builder = &reactions[reaction_key];
-
-        /*
-        TODO: Move this check somewhere else?
-        for port_key in reaction_builder.effect_ports.keys() {
-            let port = ports.get_mut(port_key).unwrap();
-
-            if port.port_type() == &PortType::Output {
-                assert_eq!(
-                    reaction_builder.reactor_key,
-                    port.get_reactor_key(),
-                    "Antidependent output ports must belong to the same reactor as the reaction"
-                );
-            } else {
-                assert_eq!(
-                    reaction_builder.reactor_key,
-                    env.reactor_builders[port.get_reactor_key()]
-                        .parent_reactor_key
-                        .unwrap(),
-                    "Antidependent input ports must belong to a contained reactor"
-                );
-            }
-        }
-        */
-
-        for (port_key, trigger_mode) in &reaction_builder.port_relations {
-            let port = ports.get_mut(port_key).unwrap();
-
-            // Note, these assertions are the same as the ones on the builder methods
-            /*
-            if port.port_type() == &PortType::Input {
-                assert_eq!(
-                    reaction_builder.reactor_key,
-                    port.get_reactor_key(),
-                    "Input port triggers must belong to the same reactor as the triggered reaction"
-                );
-            } else {
-                assert_eq!(
-                    reaction_builder.reactor_key,
-                    env.reactor_builders[port.get_reactor_key()]
-                        .parent_reactor_key
-                        .unwrap(),
-                    "Output port triggers must belong to a contained reactor"
-                );
-            }
-            */
-
-            if trigger_mode.is_triggers() {
-                port.register_trigger(reaction_key);
-            }
-        }
-
         Ok(reaction_key)
+    }
+}
+
+pub mod builder2 {
+    use super::{BoxedBuilderReactionFn, BuilderReactionKey, TriggerMode};
+    use crate::{
+        runtime, ActionTag, BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactorKey,
+        BuilderRuntimeParts, EnvBuilder, PortTag, TimerActionKey, TypedActionKey, TypedPortKey,
+    };
+
+    pub trait ReactionBuilderField: runtime::ReactionRefsExtract {
+        fn extend_builder<S: runtime::ReactorData, Fields: Copy, ReactionFn>(
+            &self,
+            builder: &mut ReactionBuilder<S, Fields, ReactionFn>,
+            trigger_mode: TriggerMode,
+        );
+    }
+
+    impl<T, Q, A> ReactionBuilderField for TypedPortKey<T, Q, A>
+    where
+        T: runtime::ReactorData,
+        Q: PortTag,
+        TypedPortKey<T, Q, A>: runtime::ReactionRefsExtract,
+    {
+        fn extend_builder<S: runtime::ReactorData, Fields: Copy, ReactionFn>(
+            &self,
+            builder: &mut ReactionBuilder<S, Fields, ReactionFn>,
+            trigger_mode: TriggerMode,
+        ) {
+            let port_key = BuilderPortKey::from(*self);
+            builder.port_relations.insert(port_key, trigger_mode);
+        }
+    }
+
+    impl<T, Q> ReactionBuilderField for TypedActionKey<T, Q>
+    where
+        T: runtime::ReactorData,
+        Q: ActionTag,
+        TypedActionKey<T, Q>: runtime::ReactionRefsExtract,
+    {
+        fn extend_builder<S: runtime::ReactorData, Fields: Copy, ReactionFn>(
+            &self,
+            builder: &mut ReactionBuilder<S, Fields, ReactionFn>,
+            trigger_mode: TriggerMode,
+        ) {
+            let action_key = BuilderActionKey::from(*self);
+            builder.action_relations.insert(action_key, trigger_mode);
+        }
+    }
+
+    impl ReactionBuilderField for TimerActionKey {
+        fn extend_builder<S: runtime::ReactorData, Fields: Copy, ReactionFn>(
+            &self,
+            builder: &mut ReactionBuilder<S, Fields, ReactionFn>,
+            trigger_mode: TriggerMode,
+        ) {
+            let action_key = BuilderActionKey::from(*self);
+            builder.action_relations.insert(action_key, trigger_mode);
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct ReactionBuilder<'a, S: runtime::ReactorData, Fields: Copy = (), ReactionFn = ()> {
+        name: Option<String>,
+        reaction_fn: ReactionFn,
+        port_relations: slotmap::SecondaryMap<BuilderPortKey, TriggerMode>,
+        action_relations: slotmap::SecondaryMap<BuilderActionKey, TriggerMode>,
+        reactor_key: BuilderReactorKey,
+        env: &'a mut EnvBuilder,
+        phantom: std::marker::PhantomData<(S, Fields, ReactionFn)>,
+    }
+
+    impl<'a, S: runtime::ReactorData> ReactionBuilder<'a, S, (), ()> {
+        pub fn new(
+            name: Option<&str>,
+            reactor_key: BuilderReactorKey,
+            env: &'a mut EnvBuilder,
+        ) -> Self {
+            Self {
+                name: name.map(|s| s.to_string()),
+                reaction_fn: (),
+                port_relations: slotmap::SecondaryMap::new(),
+                action_relations: slotmap::SecondaryMap::new(),
+                reactor_key,
+                env,
+                phantom: std::marker::PhantomData,
+            }
+        }
+    }
+
+    macro_rules! impl_with_field {
+        ($($Fn:ident),*) => {
+            impl<'a, S, $($Fn,)*> ReactionBuilder<'a, S, ($($Fn,)*)>
+            where
+                S: runtime::ReactorData,
+                $($Fn: runtime::ReactionRefsExtract,)*
+            {
+                /// Triggers can be input ports, output ports of contained reactors, timers, actions.
+                /// There must be at least one trigger for each reaction.
+                pub fn with_trigger<F>(mut self, field: F) -> ReactionBuilder<'a, S, ($($Fn,)* F,)>
+                where
+                    F: ReactionBuilderField
+                {
+                    field.extend_builder(&mut self, TriggerMode::TriggersAndUses);
+                    #[allow(non_snake_case)]
+                    let Self {
+                        name,
+                        port_relations,
+                        action_relations,
+                        reactor_key,
+                        env,
+                        ..
+                    } = self;
+                    ReactionBuilder {
+                        name,
+                        reaction_fn: (),
+                        port_relations,
+                        action_relations,
+                        reactor_key,
+                        env,
+                        phantom: std::marker::PhantomData,
+                    }
+                }
+
+                /// Use specifies input ports (or output ports of contained reactors) that do not trigger execution of
+                /// the reaction but may be read by the reaction.
+                pub fn with_use<F>(mut self, field: F) -> ReactionBuilder<'a, S, ($($Fn,)* F,)>
+                where
+                    F: ReactionBuilderField
+                {
+                    field.extend_builder(&mut self, TriggerMode::UsesOnly);
+                    #[allow(non_snake_case)]
+                    let Self {
+                        name,
+                        port_relations,
+                        action_relations,
+                        reactor_key,
+                        env,
+                        ..
+                    } = self;
+                    ReactionBuilder {
+                        name,
+                        reaction_fn: (),
+                        port_relations,
+                        action_relations,
+                        reactor_key,
+                        env,
+                        phantom: std::marker::PhantomData,
+                    }
+                }
+
+                /// Specify an effect field, which can be an output port, input port of contained reactors, or actions.
+                pub fn with_effect<F>(mut self, field: F) -> ReactionBuilder<'a, S, ($($Fn,)* F,)>
+                where
+                    F: ReactionBuilderField
+                {
+                    field.extend_builder(&mut self, TriggerMode::EffectsOnly);
+                    #[allow(non_snake_case)]
+                    let Self {
+                        name,
+                        port_relations,
+                        action_relations,
+                        reactor_key,
+                        env,
+                        ..
+                    } = self;
+                    ReactionBuilder {
+                        name,
+                        reaction_fn: (),
+                        port_relations,
+                        action_relations,
+                        reactor_key,
+                        env,
+                        phantom: std::marker::PhantomData,
+                    }
+                }
+            }
+        };
+    }
+
+    // Generate implementations for tuples of size 1 to 8
+    impl_with_field!();
+    impl_with_field!(F0);
+    impl_with_field!(F0, F1);
+    impl_with_field!(F0, F1, F2);
+    impl_with_field!(F0, F1, F2, F3);
+    impl_with_field!(F0, F1, F2, F3, F4);
+    impl_with_field!(F0, F1, F2, F3, F4, F5);
+    impl_with_field!(F0, F1, F2, F3, F4, F5, F6);
+    impl_with_field!(F0, F1, F2, F3, F4, F5, F6, F7);
+
+    impl<'a, S, Fields> ReactionBuilder<'a, S, Fields>
+    where
+        S: runtime::ReactorData,
+        Fields: runtime::ReactionRefsExtract,
+    {
+        pub fn with_reaction_fn<F>(
+            self,
+            f: F,
+        ) -> ReactionBuilder<'a, S, Fields, BoxedBuilderReactionFn>
+        where
+            F: for<'store> Fn(&mut runtime::Context, &mut S, Fields::Ref<'store>)
+                + Send
+                + Sync
+                + 'static,
+        {
+            let Self {
+                name,
+                port_relations,
+                action_relations,
+                reactor_key,
+                env,
+                ..
+            } = self;
+            let reaction_fn: BoxedBuilderReactionFn = Box::new(|_: &BuilderRuntimeParts| {
+                Box::new(
+                    move |ctx: &mut runtime::Context,
+                          reactor: &mut dyn runtime::BaseReactor,
+                          mut refs: runtime::ReactionRefs| {
+                        let state = reactor.get_state_mut::<S>().expect("state");
+                        let fields = Fields::extract(&mut refs);
+                        f(ctx, state, fields)
+                    },
+                )
+            });
+            ReactionBuilder {
+                name,
+                reaction_fn,
+                port_relations,
+                action_relations,
+                reactor_key,
+                env,
+                phantom: std::marker::PhantomData,
+            }
+        }
+
+        pub fn with_defered_reaction_fn<F>(
+            self,
+            f: F,
+        ) -> ReactionBuilder<'a, S, Fields, BoxedBuilderReactionFn>
+        where
+            F: FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn + 'static,
+        {
+            let Self {
+                name,
+                port_relations,
+                action_relations,
+                reactor_key,
+                env,
+                ..
+            } = self;
+            ReactionBuilder {
+                name,
+                reaction_fn: Box::new(f),
+                port_relations,
+                action_relations,
+                reactor_key,
+                env,
+                phantom: std::marker::PhantomData,
+            }
+        }
+    }
+
+    impl<'a, S, Fields> ReactionBuilder<'a, S, Fields, BoxedBuilderReactionFn>
+    where
+        S: runtime::ReactorData,
+        Fields: runtime::ReactionRefsExtract,
+    {
+        /// Finish building the Reaction and add it to the Environment
+        pub fn finish(self) -> Result<BuilderReactionKey, BuilderError> {
+            let Self {
+                name,
+                port_relations,
+                action_relations,
+                reaction_fn,
+                reactor_key,
+                env,
+                ..
+            } = self;
+
+            // Ensure there is at least one trigger declared
+            if !action_relations.values().any(|&mode| mode.is_triggers())
+                && !port_relations.values().any(|&mode| mode.is_triggers())
+            {
+                return Err(BuilderError::ReactionBuilderError(format!(
+                    "Reaction '{name:?}' has no triggers defined"
+                )));
+            }
+
+            let reactor = &mut env.reactor_builders[reactor_key];
+            let reactions = &mut env.reaction_builders;
+
+            let reaction_builder = super::ReactionBuilder {
+                name,
+                priority: reactor.reactions.len(),
+                reactor_key,
+                reaction_fn,
+                action_relations,
+                port_relations,
+            };
+
+            let reaction_key = reactions.insert_with_key(|key| {
+                reactor.reactions.insert(key, ());
+                reaction_builder
+            });
+
+            Ok(reaction_key)
+        }
     }
 }

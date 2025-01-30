@@ -4,7 +4,7 @@ use crate::{
     key_set::KeySet,
     refs::{Refs, RefsMut},
     ActionCommon, ActionRef, AsyncActionRef, BaseAction, BasePort, BaseReactor, CommonContext,
-    Context, Duration, InputRef, OutputRef, Reactor, ReactorData, SendContext,
+    Context, Duration, InputRef, OutputRef, ReactionRefs, Reactor, ReactorData, SendContext,
 };
 
 tinymap::key_type! { pub ReactionKey }
@@ -19,6 +19,15 @@ pub trait ReactionFn<'store>: Send + Sync {
         ports: Refs<'store, dyn BasePort>,
         ports_mut: RefsMut<'store, dyn BasePort>,
         actions: RefsMut<'store, dyn BaseAction>,
+    );
+}
+
+pub trait ReactionFn2<'store>: Send + Sync {
+    fn trigger(
+        &mut self,
+        ctx: &'store mut Context,
+        reactor: &'store mut dyn BaseReactor,
+        refs: ReactionRefs<'store>,
     );
 }
 
@@ -136,6 +145,27 @@ where
         actions: RefsMut<'store, dyn BaseAction>,
     ) {
         (self.0)(ctx, state, ports, ports_mut, actions);
+    }
+}
+
+impl<'store, F> ReactionFn<'store> for F
+where
+    F: for<'any> Fn(&'any mut Context, &'any mut dyn BaseReactor, ReactionRefs<'any>) + Sync + Send,
+{
+    fn trigger(
+        &mut self,
+        ctx: &'store mut Context,
+        reactor: &'store mut dyn BaseReactor,
+        ports: Refs<'store, dyn BasePort>,
+        ports_mut: RefsMut<'store, dyn BasePort>,
+        actions: RefsMut<'store, dyn BaseAction>,
+    ) {
+        let refs = ReactionRefs {
+            ports,
+            ports_mut,
+            actions,
+        };
+        (self)(ctx, reactor, refs);
     }
 }
 

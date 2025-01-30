@@ -77,18 +77,26 @@ pub mod prelude {
     //! Re-exported common types and traits for Boomerang
 
     pub use super::builder::{
-        BuilderError, BuilderFqn, BuilderRuntimeParts, EnvBuilder, Input, Logical, Output,
-        Physical, Reactor, TimerActionKey, TypedActionKey, TypedPortKey,
+        BuilderError, BuilderFqn, BuilderRuntimeParts, Contained, EnvBuilder, Input, Local,
+        Logical, Output, Physical, Reactor, Reactor2, ReactorPorts, TimerActionKey, TimerSpec,
+        TypedActionKey, TypedPortKey,
     };
 
     pub use super::runtime::{self, CommonContext, Duration, FromRefs, Tag};
 
-    pub use boomerang_derive::{Reaction, Reactor};
+    pub use boomerang_derive::{reactor, reactor_ports, Reaction, Reactor};
 }
 
 #[cfg(feature = "derive")]
 #[doc(hidden)]
 pub use boomerang_derive::*;
+
+#[cfg(feature = "derive")]
+#[doc(hidden)]
+pub use typed_builder;
+#[cfg(feature = "derive")]
+#[doc(hidden)]
+pub use typed_builder_macro;
 
 /// Top-level error type for Boomerang
 #[derive(thiserror::Error, Debug)]

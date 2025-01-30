@@ -12,6 +12,7 @@
 use anyhow::Context;
 use boomerang::{
     builder::{BuilderRuntimeParts, EnvBuilder, Reactor},
+    prelude::Reactor2,
     runtime,
 };
 use clap::Parser;
@@ -82,6 +83,29 @@ pub fn build_and_test_reactor<R: Reactor>(
         std::io::Write::write_all(&mut f, gv.as_bytes())?;
         tracing::info!("Wrote plantuml graph to {path}");
     }
+
+    let BuilderRuntimeParts {
+        enclaves,
+        aliases: _,
+    } = env_builder
+        .into_runtime_parts()
+        .context("Error building environment!")?;
+
+    let envs_out = runtime::execute_enclaves(enclaves.into_iter(), config);
+    let envs_out = envs_out.into_iter().map(|(_, env)| env).collect();
+    Ok((reactor, envs_out))
+}
+
+pub fn build_and_test_reactor2<S: runtime::ReactorData, R: Reactor2<S>>(
+    reactor: R,
+    name: &str,
+    state: S,
+    config: runtime::Config,
+) -> anyhow::Result<(R::Ports, Vec<runtime::Env>)> {
+    let mut env_builder = EnvBuilder::new();
+    let reactor = reactor
+        .build(name, state, None, None, false, &mut env_builder)
+        .context("Error building top-level reactor!")?;
 
     let BuilderRuntimeParts {
         enclaves,

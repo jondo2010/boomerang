@@ -26,7 +26,25 @@ impl PortTag for Output {
     const TYPE: PortType = PortType::Output;
 }
 
-pub struct TypedPortKey<T: runtime::ReactorData, Q: PortTag>(BuilderPortKey, PhantomData<(T, Q)>);
+/// A port that is local to the Reactor
+#[derive(Copy, Clone, Debug)]
+pub struct Local;
+
+/// A port of a contained Reactor
+#[derive(Copy, Clone, Debug)]
+pub struct Contained;
+
+pub struct TypedPortKey<T: runtime::ReactorData, Q: PortTag, A = Local>(
+    BuilderPortKey,
+    PhantomData<(T, Q, A)>,
+);
+
+impl<T: runtime::ReactorData, Q: PortTag> TypedPortKey<T, Q, Local> {
+    /// Convert this port to a contained port
+    pub fn contained(self) -> TypedPortKey<T, Q, Contained> {
+        TypedPortKey(self.0, PhantomData)
+    }
+}
 
 impl<T: runtime::ReactorData, Q: PortTag> Debug for TypedPortKey<T, Q> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -37,11 +55,11 @@ impl<T: runtime::ReactorData, Q: PortTag> Debug for TypedPortKey<T, Q> {
     }
 }
 
-impl<T: runtime::ReactorData, Q: PortTag> Copy for TypedPortKey<T, Q> {}
+impl<T: runtime::ReactorData, Q: PortTag, A: Copy> Copy for TypedPortKey<T, Q, A> {}
 
-impl<T: runtime::ReactorData, Q: PortTag> Clone for TypedPortKey<T, Q> {
+impl<T: runtime::ReactorData, Q: PortTag, A: Clone> Clone for TypedPortKey<T, Q, A> {
     fn clone(&self) -> Self {
-        *self
+        Self(self.0, PhantomData)
     }
 }
 
@@ -55,15 +73,59 @@ impl<T: runtime::ReactorData, Q: PortTag> TypedPortKey<T, Q> {
     }
 }
 
-impl<T: runtime::ReactorData, Q: PortTag> From<BuilderPortKey> for TypedPortKey<T, Q> {
+impl<T: runtime::ReactorData, Q: PortTag, A> From<BuilderPortKey> for TypedPortKey<T, Q, A> {
     fn from(value: BuilderPortKey) -> Self {
         Self(value, PhantomData)
     }
 }
 
-impl<T: runtime::ReactorData, Q: PortTag> From<TypedPortKey<T, Q>> for BuilderPortKey {
-    fn from(builder_port_key: TypedPortKey<T, Q>) -> Self {
+impl<T: runtime::ReactorData, Q: PortTag, A> From<TypedPortKey<T, Q, A>> for BuilderPortKey {
+    fn from(builder_port_key: TypedPortKey<T, Q, A>) -> Self {
         builder_port_key.0
+    }
+}
+
+impl<T: runtime::ReactorData> runtime::ReactionRefsExtract for TypedPortKey<T, Input, Local> {
+    type Ref<'store>
+        = runtime::InputRef<'store, T>
+    where
+        Self: 'store;
+    fn extract<'store>(refs: &mut runtime::ReactionRefs<'store>) -> Self::Ref<'store> {
+        refs.ports.next().map(Self::Ref::from).unwrap()
+    }
+}
+
+/// An input port on a contained reactor extracts as an output port in a parent
+/// reaction.
+impl<T: runtime::ReactorData> runtime::ReactionRefsExtract for TypedPortKey<T, Input, Contained> {
+    type Ref<'store>
+        = runtime::OutputRef<'store, T>
+    where
+        Self: 'store;
+    fn extract<'store>(refs: &mut runtime::ReactionRefs<'store>) -> Self::Ref<'store> {
+        refs.ports_mut.next().map(Self::Ref::from).unwrap()
+    }
+}
+
+impl<T: runtime::ReactorData> runtime::ReactionRefsExtract for TypedPortKey<T, Output, Local> {
+    type Ref<'store>
+        = runtime::OutputRef<'store, T>
+    where
+        Self: 'store;
+    fn extract<'store>(refs: &mut runtime::ReactionRefs<'store>) -> Self::Ref<'store> {
+        refs.ports_mut.next().map(Self::Ref::from).unwrap()
+    }
+}
+
+/// An output port on a contained reactor extracts as an input port in a parent
+/// reaction.
+impl<T: runtime::ReactorData> runtime::ReactionRefsExtract for TypedPortKey<T, Output, Contained> {
+    type Ref<'store>
+        = runtime::InputRef<'store, T>
+    where
+        Self: 'store;
+    fn extract<'store>(refs: &mut runtime::ReactionRefs<'store>) -> Self::Ref<'store> {
+        refs.ports.next().map(Self::Ref::from).unwrap()
     }
 }
 
@@ -78,12 +140,9 @@ pub trait BasePortBuilder {
     fn get_reactor_key(&self) -> BuilderReactorKey;
     fn port_type(&self) -> &PortType;
     fn bank_info(&self) -> Option<&runtime::BankInfo>;
-    /// Get the out-going Reactions that this Port triggers
-    fn triggers(&self) -> Vec<BuilderReactionKey>;
-    /// This port may trigger the given reaction.
-    fn register_trigger(&mut self, reaction_key: BuilderReactionKey);
     /// Create a runtime Port from this PortBuilder
     fn build_runtime_port(&self, key: runtime::PortKey) -> Box<dyn runtime::BasePort>;
+    fn inner_type_id(&self) -> std::any::TypeId;
 }
 
 impl ParentReactorBuilder for Box<dyn BasePortBuilder> {
@@ -140,16 +199,12 @@ impl<T: runtime::ReactorData, Q: PortTag> BasePortBuilder for PortBuilder<T, Q> 
         self.bank_info.as_ref()
     }
 
-    fn triggers(&self) -> Vec<BuilderReactionKey> {
-        self.triggers.keys().collect()
-    }
-
-    fn register_trigger(&mut self, reaction_key: BuilderReactionKey) {
-        self.triggers.insert(reaction_key, ());
-    }
-
     /// Build the PortBuilder into a runtime Port
     fn build_runtime_port(&self, key: runtime::PortKey) -> Box<dyn runtime::BasePort> {
         Box::new(runtime::Port::<T>::new(&self.name, key))
+    }
+
+    fn inner_type_id(&self) -> std::any::TypeId {
+        std::any::TypeId::of::<(T, Q)>()
     }
 }

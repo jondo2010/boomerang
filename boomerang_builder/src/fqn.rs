@@ -2,7 +2,7 @@
 
 use std::{fmt::Display, ops::Index};
 
-use crate::{ActionBuilder, BasePortBuilder, ReactionBuilder, ReactorBuilder};
+use crate::{port::BasePortBuilder, ActionBuilder, ReactionBuilder, ReactorBuilder};
 
 use super::BuilderError;
 
@@ -53,7 +53,7 @@ impl BuilderFqnSegment {
 
     /// Create a new segment from a reaction.
     pub fn from_reaction(reaction: &ReactionBuilder) -> Self {
-        let name = reaction.name().to_string();
+        let name = reaction.name().unwrap_or("<unnamed_reaction>").to_string();
         Self {
             name,
             index: BuilderFqnSegmentIndex::None,

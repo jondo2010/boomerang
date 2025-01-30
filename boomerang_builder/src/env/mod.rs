@@ -1,12 +1,11 @@
 use crate::{
-    connection::{BaseConnectionBuilder, ConnectionBuilder, PortBindings},
-    ActionTag, BuilderFqnSegment, ParentReactorBuilder, TimerActionKey, TimerSpec, TriggerMode,
+    connection::{BaseConnectionBuilder, ConnectionBuilder, PortBindings}, port::Contained, ActionTag, BuilderFqnSegment, ParentReactorBuilder, PortType, TimerActionKey, TimerSpec, TriggerMode
 };
 
 use super::{
-    action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder, runtime, ActionType,
-    BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
-    BuilderReactorKey, Input, Logical, Output, PortBuilder, PortTag, ReactionBuilderState,
+    action::ActionBuilder, port::BasePortBuilder, port::PortBuilder, reaction::ReactionBuilder,
+    runtime, ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey,
+    BuilderReactionKey, BuilderReactorKey, Input, Logical, Output, PortTag, ReactionBuilderState,
     ReactorBuilder, ReactorBuilderState, TypedActionKey, TypedPortKey,
 };
 use itertools::Itertools;
@@ -89,7 +88,8 @@ impl EnvBuilder {
         bank_info: Option<runtime::BankInfo>,
         state: S,
         is_enclave: bool,
-    ) -> ReactorBuilderState {
+    ) -> ReactorBuilderState<S> {
+        tracing::debug!("Adding Reactor: {name}");
         ReactorBuilderState::new(name, parent, bank_info, state, is_enclave, self)
     }
 
@@ -257,6 +257,14 @@ impl EnvBuilder {
         )
     }
 
+    pub fn add_reaction2<S: runtime::ReactorData>(
+        &mut self,
+        name: Option<&str>,
+        reactor_key: BuilderReactorKey,
+    ) -> crate::builder2::ReactionBuilder<'_, S> {
+        crate::builder2::ReactionBuilder::new(name, reactor_key, self)
+    }
+
     /// Get a previously built action
     pub fn get_action(&self, action_key: BuilderActionKey) -> Result<&ActionBuilder, BuilderError> {
         self.action_builders
@@ -272,20 +280,22 @@ impl EnvBuilder {
             .ok_or(BuilderError::PortKeyNotFound(port_key))
     }
 
-    /// Find a Port matching a given name and ReactorKey
-    pub fn find_port_by_name(
+    /// Find a port in a child Reactor given it's name and the parent ReactorKey.
+    /// 
+    /// The port data type and tag must be provided as type parameters.
+    pub fn find_port_by_name<T: runtime::ReactorData, Q: PortTag>(
         &self,
         port_name: &str,
         reactor_key: BuilderReactorKey,
-    ) -> Result<BuilderPortKey, BuilderError> {
+    ) -> Option<TypedPortKey<T, Q, Contained>> {
         self.port_builders
             .iter()
             .find(|(_, port_builder)| {
                 port_builder.name() == port_name
                     && port_builder.parent_reactor_key() == Some(reactor_key)
+                    && port_builder.inner_type_id() == std::any::TypeId::of::<(T, Q)>()
             })
-            .map(|(port_key, _)| port_key)
-            .ok_or_else(|| BuilderError::NamedPortNotFound(port_name.to_string()))
+            .map(|(port_key, _)| port_key.into())
     }
 
     /// Find a Reaction matching a given name and ReactorKey
@@ -297,7 +307,10 @@ impl EnvBuilder {
         self.reaction_builders
             .iter()
             .find(|(_, reaction_builder)| {
-                reaction_builder.name() == reaction_name
+                reaction_builder
+                    .name()
+                    .map(|name| name == reaction_name)
+                    .unwrap_or_default()
                     && reaction_builder.parent_reactor_key() == Some(reactor_key)
             })
             .map(|(reaction_key, _)| reaction_key)
@@ -367,7 +380,8 @@ impl EnvBuilder {
             .ok_or_else(|| BuilderError::NamedActionNotFound(action_fqn.to_string()))
     }
 
-    /// Find a possible common parent Reactor for two Reactor elements in the EnvBuilder (if it exists).
+    /// Find a possible common parent Reactor for two Reactor elements in the EnvBuilder (if it
+    /// exists).
     pub fn common_reactor_key<E0, E1>(&self, e0: &E0, e1: &E1) -> Option<BuilderReactorKey>
     where
         E0: ParentReactorBuilder,
@@ -395,8 +409,10 @@ impl EnvBuilder {
     /// * `target_key` - The key of the second port to connect
     /// * `after` - An optional delay to wait before triggering the downstream ports.
     /// * `physical` - Whether the connection is physical (or logical).
-    ///     * Logical connections will trigger any downstream ports at the current logical time (with any `after` delay).
-    ///     * Physical connections will trigger the downstream ports at the current physical time (with any `after` delay).
+    ///     * Logical connections will trigger any downstream ports at the current logical time
+    ///       (with any `after` delay).
+    ///     * Physical connections will trigger the downstream ports at the current physical time
+    ///       (with any `after` delay).
     pub fn add_port_connection<T, P1, P2>(
         &mut self,
         source_key: P1,
@@ -494,6 +510,68 @@ impl EnvBuilder {
         let segment = BuilderFqnSegment::from_port(port.as_ref(), grouped);
         self.reactor_fqn(port.get_reactor_key(), grouped)?
             .append(segment)
+    }
+
+    /// Validate the reactions in the environment
+    pub fn validate_reactions(&self) -> Result<(), BuilderError> {
+        for (_reaction_key, reaction) in &self.reaction_builders {
+            // Validate the port dependencies of each Reaction
+            for (port_key, trigger_mode) in &reaction.port_relations {
+                let port = &self.port_builders[port_key];
+                let port_reactor_key = port.get_reactor_key();
+                let port_parent_reactor_key =
+                    self.reactor_builders[port_reactor_key].parent_reactor_key;
+                match port.port_type() {
+                    PortType::Input => {
+                        // triggers and uses are valid for input ports on the same reactor
+                        if (trigger_mode.is_triggers() || trigger_mode.is_uses())
+                            && port_reactor_key != reaction.reactor_key
+                        {
+                            return Err(BuilderError::ReactionBuilderError(format!(
+                                "Reaction {:?} cannot 'trigger on' or 'use' input port '{}', it \
+                                 must belong to the same reactor as the reaction",
+                                reaction.name(),
+                                self.port_fqn(port_key, false).unwrap()
+                            )));
+                        }
+                        // effects are valid for input ports on contained reactors
+                        if trigger_mode.is_effects()
+                            && port_parent_reactor_key != Some(reaction.reactor_key)
+                        {
+                            return Err(BuilderError::ReactionBuilderError(format!(
+                                "Reaction {:?} cannot 'effect' input port '{}', it must belong to \
+                                 a contained reactor",
+                                reaction.name(),
+                                port.name()
+                            )));
+                        }
+                    }
+                    PortType::Output => {
+                        // triggers and uses are valid for output ports on contained reactors
+                        if (trigger_mode.is_triggers() || trigger_mode.is_uses())
+                            && port_parent_reactor_key != Some(reaction.reactor_key)
+                        {
+                            return Err(BuilderError::ReactionBuilderError(format!(
+                                "Reaction {:?} cannot 'trigger on' or 'use' output port '{}', it \
+                                 must belong to a contained reactor",
+                                reaction.name(),
+                                port.name()
+                            )));
+                        }
+                        // effects are valid for output ports on the same reactor
+                        if trigger_mode.is_effects() && port_reactor_key != reaction.reactor_key {
+                            return Err(BuilderError::ReactionBuilderError(format!(
+                                "Reaction {:?} cannot 'effect' output port '{}', it must belong \
+                                 to the same reactor as the reaction",
+                                reaction.name(),
+                                port.name()
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Build an iterator of all Reaction dependency edges in the graph

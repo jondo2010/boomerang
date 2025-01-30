@@ -2,22 +2,17 @@ use boomerang::builder::{TimerActionKey, TypedPortKey};
 use boomerang::prelude::*;
 use boomerang::runtime;
 use boomerang_builder::ReactorBuilderState;
+use boomerang_derive::reactor2;
 
 type Input<T> = TypedPortKey<T, boomerang::builder::Input>;
 type Output<T> = TypedPortKey<T, boomerang::builder::Output>;
 type Timer = TimerActionKey;
 
+#[reactor2]
+fn Scale(#[prop(default = 2)] scale: u32, #[input] x: u32, #[output] y: u32) {}
+
 #[test]
 fn gain2() {
-    //#[reactor]
-    fn Scale(
-        //#[prop(default = 2)] scale: u32,
-        //#[input] x: u32,
-        //#[output] y: u32,
-        props: ScaleProps,
-    ) {
-    }
-
     #[automatically_derived]
     struct ScaleProps {
         scale: u32,
@@ -92,6 +87,8 @@ fn gain2() {
     struct TestProps {
         pub x: Input<u32>,
     }
+
+    struct GainProps {}
 
     fn Gain(props: GainProps) {
         //g: Scale,

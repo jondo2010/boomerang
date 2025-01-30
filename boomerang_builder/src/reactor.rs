@@ -3,9 +3,9 @@ use std::fmt::Debug;
 use super::{
     ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
     EnvBuilder, FindElements, Logical, Output, Physical, PhysicalActionKey, PortTag,
-    ReactionBuilderState, TimerActionKey, TimerSpec, TriggerMode, TypedActionKey, TypedPortKey,
+    ReactionBuilderState, TimerActionKey, TimerSpec, TypedActionKey, TypedPortKey,
 };
-use crate::{runtime, ActionTag, Input};
+use crate::{runtime, ActionTag, BuilderRuntimeParts, Input};
 use slotmap::SecondaryMap;
 
 slotmap::new_key_type! {
@@ -30,6 +30,7 @@ pub trait Reactor: Sized {
         state: Self::State,
         parent: Option<BuilderReactorKey>,
         bank_info: Option<runtime::BankInfo>,
+        is_enclave: bool,
         env: &mut EnvBuilder,
     ) -> Result<Self, BuilderError>;
 
@@ -51,14 +52,15 @@ pub trait ReactorField: Sized {
 }
 
 impl<R: Reactor> ReactorField for R {
-    type Inner = R::State;
+    type Inner = (R::State, bool);
 
     fn build(
         name: &str,
         inner: Self::Inner,
         parent: &'_ mut ReactorBuilderState,
     ) -> Result<Self, BuilderError> {
-        parent.add_child_reactor(name, inner)
+        let (state, is_enclave) = inner;
+        parent.add_child_reactor(name, state, is_enclave)
     }
 }
 
@@ -68,14 +70,15 @@ where
     R: Reactor,
     R::State: Clone,
 {
-    type Inner = R::State;
+    type Inner = (R::State, bool);
 
     fn build(
         name: &str,
         inner: Self::Inner,
         parent: &'_ mut ReactorBuilderState,
     ) -> Result<Self, BuilderError> {
-        parent.add_child_reactors(name, inner)
+        let (state, is_enclave) = inner;
+        parent.add_child_reactors(name, state, is_enclave)
     }
 }
 
@@ -184,6 +187,8 @@ pub struct ReactorBuilder {
     pub actions: SecondaryMap<BuilderActionKey, ()>,
     /// The bank info of the bank that this Reactor belongs to, if any.
     pub bank_info: Option<runtime::BankInfo>,
+    /// Whether this Reactor is an enclave
+    pub is_enclave: bool,
 }
 
 impl ParentReactorBuilder for ReactorBuilder {
@@ -207,8 +212,8 @@ impl ReactorBuilder {
     }
 
     /// Build this [`ReactorBuilder`] into a [`Box<dyn runtime::BaseReactor>`]
-    pub fn into_runtime(self) -> Box<dyn runtime::BaseReactor> {
-        self.state.into_runtime(&self.name)
+    pub fn into_runtime(self, name: &str) -> Box<dyn runtime::BaseReactor> {
+        self.state.into_runtime(name)
     }
 }
 
@@ -237,6 +242,7 @@ impl<'a> ReactorBuilderState<'a> {
         parent: Option<BuilderReactorKey>,
         bank_info: Option<runtime::BankInfo>,
         reactor_state: S,
+        is_enclave: bool,
         env: &'a mut EnvBuilder,
     ) -> Self {
         let type_name = std::any::type_name::<S>();
@@ -250,6 +256,7 @@ impl<'a> ReactorBuilderState<'a> {
                 ports: SecondaryMap::new(),
                 actions: SecondaryMap::new(),
                 bank_info,
+                is_enclave,
             }
         });
 
@@ -279,7 +286,7 @@ impl<'a> ReactorBuilderState<'a> {
             .action_builders
             .iter()
             .find(|(_, action)| {
-                matches!(action.r#type(), ActionType::Startup)
+                matches!(action.r#type(), ActionType::Timer(TimerSpec { period, offset }) if period.is_none() && offset.is_none())
                     && action.reactor_key() == reactor_key
             })
             .map(|(action_key, _)| action_key)
@@ -324,27 +331,7 @@ impl<'a> ReactorBuilderState<'a> {
         name: &str,
         spec: TimerSpec,
     ) -> Result<TimerActionKey, BuilderError> {
-        let action_key = self.add_logical_action::<()>(name, None)?;
-
-        let startup_key = self.startup_action;
-
-        let trigger_mode = if spec.period.is_some() {
-            // If the timer has a period, it should be triggered by the action_key
-            TriggerMode::TriggersAndEffects
-        } else {
-            // Otherwise, it should only be triggered by the startup action
-            TriggerMode::EffectsOnly
-        };
-
-        self.add_reaction(
-            &format!("_{name}_startup"),
-            runtime::reaction::TimerFn(spec.period),
-        )
-        .with_action(startup_key, 0, TriggerMode::TriggersOnly)?
-        .with_action(action_key, 1, trigger_mode)?
-        .finish()?;
-
-        Ok(TimerActionKey::from(BuilderActionKey::from(action_key)))
+        self.env.add_timer_action(name, self.reactor_key, spec)
     }
 
     /// Add a new action to the reactor.
@@ -356,7 +343,7 @@ impl<'a> ReactorBuilderState<'a> {
         min_delay: Option<runtime::Duration>,
     ) -> Result<TypedActionKey<T, Q>, BuilderError> {
         self.env
-            .internal_add_action::<T, Q>(name, min_delay, self.reactor_key)
+            .add_action::<T, Q>(name, min_delay, self.reactor_key)
     }
 
     /// Add a new logical action to the reactor.
@@ -369,7 +356,7 @@ impl<'a> ReactorBuilderState<'a> {
         min_delay: Option<runtime::Duration>,
     ) -> Result<TypedActionKey<T, Logical>, BuilderError> {
         self.env
-            .internal_add_action::<T, Logical>(name, min_delay, self.reactor_key)
+            .add_action::<T, Logical>(name, min_delay, self.reactor_key)
     }
 
     pub fn add_physical_action<T: runtime::ReactorData>(
@@ -378,17 +365,16 @@ impl<'a> ReactorBuilderState<'a> {
         min_delay: Option<runtime::Duration>,
     ) -> Result<TypedActionKey<T, Physical>, BuilderError> {
         self.env
-            .internal_add_action::<T, Physical>(name, min_delay, self.reactor_key)
+            .add_action::<T, Physical>(name, min_delay, self.reactor_key)
     }
 
     /// Add a new reaction to this reactor.
-    pub fn add_reaction(
-        &mut self,
-        name: &str,
-        reaction_fn: impl Into<runtime::BoxedReactionFn>,
-    ) -> ReactionBuilderState {
+    pub fn add_reaction<F>(&mut self, name: &str, reaction_builder_fn: F) -> ReactionBuilderState
+    where
+        F: for<'any> FnOnce(&'any BuilderRuntimeParts) -> runtime::BoxedReactionFn + 'static,
+    {
         self.env
-            .add_reaction(name, self.reactor_key, reaction_fn.into())
+            .add_reaction(name, self.reactor_key, reaction_builder_fn)
     }
 
     /// Add a new input port to this reactor.
@@ -452,8 +438,16 @@ impl<'a> ReactorBuilderState<'a> {
         &mut self,
         name: &str,
         state: R::State,
+        is_enclave: bool,
     ) -> Result<R, BuilderError> {
-        R::build(name, state, Some(self.reactor_key), None, self.env)
+        R::build(
+            name,
+            state,
+            Some(self.reactor_key),
+            None,
+            is_enclave,
+            self.env,
+        )
     }
 
     /// Add multiple child reactors to this reactor.
@@ -461,6 +455,7 @@ impl<'a> ReactorBuilderState<'a> {
         &mut self,
         name: &str,
         state: R::State,
+        is_enclave: bool,
     ) -> Result<[R; N], BuilderError>
     where
         R: Reactor,
@@ -473,6 +468,7 @@ impl<'a> ReactorBuilderState<'a> {
                     state.clone(),
                     Some(self.reactor_key),
                     Some(runtime::BankInfo { idx: i, total: N }),
+                    is_enclave,
                     self.env,
                 )
             })
@@ -500,7 +496,7 @@ impl<'a> ReactorBuilderState<'a> {
         physical: bool,
     ) -> Result<(), BuilderError> {
         self.env
-            .connect_ports::<T, _, _>(port_a_key, port_b_key, after, physical)
+            .add_port_connection::<T, _, _>(port_a_key, port_b_key, after, physical)
     }
 
     /// Connect multiple ports on this reactor. This has the logical meaning of "connecting" `ports_from` to `ports_to`.

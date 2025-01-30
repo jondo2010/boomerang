@@ -18,7 +18,7 @@ impl runtime::Trigger<bool> for ReactionStartup {
         let act = self.act.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(20));
-            act.schedule(&send_ctx, 434, None);
+            send_ctx.schedule_action_async(&act, 434, None);
         });
     }
 }
@@ -32,7 +32,7 @@ struct ReactionAct<'a> {
 
 impl runtime::Trigger<bool> for ReactionAct<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut bool) {
-        let value = self.act.get_value(ctx).unwrap();
+        let value = ctx.get_action_value(&mut self.act).unwrap();
         println!("---- Vu {} à {}", value, ctx.get_tag());
 
         let elapsed_time = ctx.get_elapsed_logical_time();
@@ -49,15 +49,14 @@ fn physical_action_with_keepalive() {
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_keep_alive(true);
-    let (_, sched) = boomerang_util::runner::build_and_test_reactor::<MainBuilder>(
+    let (_, envs) = boomerang_util::runner::build_and_test_reactor::<MainBuilder>(
         "physical_action_with_keepalive",
         false,
         config,
     )
     .unwrap();
 
-    let env = sched.into_env();
-    let reactor = env
+    let reactor = envs[0]
         .find_reactor_by_name("physical_action_with_keepalive")
         .unwrap();
     assert_eq!(reactor.get_state(), Some(&true));

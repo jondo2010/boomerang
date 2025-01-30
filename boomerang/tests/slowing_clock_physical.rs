@@ -34,7 +34,7 @@ struct ReactionStartup<'a> {
 impl runtime::Trigger<State> for ReactionStartup<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut State) {
         state.expected_time = Duration::milliseconds(100);
-        self.a.schedule(ctx, (), None);
+        ctx.schedule_action(&mut self.a, (), None);
     }
 }
 
@@ -60,7 +60,7 @@ impl runtime::Trigger<State> for ReactionA<'_> {
             "Scheduling next to occur approximately after: {:?}",
             state.interval
         );
-        self.a.schedule(ctx, (), Some(state.interval));
+        ctx.schedule_action(&mut self.a, (), Some(state.interval));
     }
 }
 

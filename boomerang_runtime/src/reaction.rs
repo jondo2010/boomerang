@@ -3,7 +3,8 @@ use std::{fmt::Debug, sync::RwLock};
 use crate::{
     key_set::KeySet,
     refs::{Refs, RefsMut},
-    ActionRef, BaseAction, BasePort, BaseReactor, Context, Duration, Reactor, ReactorData,
+    ActionCommon, ActionRef, AsyncActionRef, BaseAction, BasePort, BaseReactor, CommonContext,
+    Context, Duration, InputRef, OutputRef, Reactor, ReactorData, SendContext,
 };
 
 tinymap::key_type! { pub ReactionKey }
@@ -138,6 +139,161 @@ where
     }
 }
 
+/// Special type implementing [`ReactionFn`] for sending data to an another Enclave.
+///
+/// This is used to implement connections between Ports in different Enclaves.
+/// The Reaction using this function should be 'triggered' by the sending side port only.
+pub struct EnclaveSenderReactionFn<T: ReactorData + Clone> {
+    /// A clone of the sender side context
+    remote_context: SendContext,
+    /// The remote action that we're sending data to.
+    remote_action_ref: AsyncActionRef<T>,
+    /// The optional delay to apply to the event.
+    delay: Option<Duration>,
+}
+
+impl<T: ReactorData + Clone> From<EnclaveSenderReactionFn<T>> for BoxedReactionFn {
+    fn from(value: EnclaveSenderReactionFn<T>) -> Self {
+        Box::new(value)
+    }
+}
+
+impl<T: ReactorData + Clone> EnclaveSenderReactionFn<T> {
+    pub fn new(
+        remote_context: SendContext,
+        remote_action_ref: AsyncActionRef<T>,
+        delay: Option<Duration>,
+    ) -> Self {
+        Self {
+            remote_context,
+            remote_action_ref,
+            delay,
+        }
+    }
+}
+
+impl<'store, T: ReactorData + Clone> ReactionFn<'store> for EnclaveSenderReactionFn<T> {
+    fn trigger(
+        &mut self,
+        ctx: &'store mut Context,
+        _state: &'store mut dyn BaseReactor,
+        ports: Refs<'store, dyn BasePort>,
+        _ports_mut: RefsMut<'store, dyn BasePort>,
+        _actions: RefsMut<'store, dyn BaseAction>,
+    ) {
+        let port: InputRef<T> = ports.partition().expect("Expected a port");
+        if let Some(value) = (*port).as_ref() {
+            //TODO something nicer here
+            if self.remote_action_ref.is_logical() {
+                let current_tag = ctx.get_tag();
+
+                let delay = self.remote_action_ref.min_delay();
+
+                let tag = if delay.is_zero() {
+                    current_tag
+                } else {
+                    current_tag.delay(delay)
+                };
+
+                self.remote_context
+                    .schedule_async(crate::event::AsyncEvent::Logical {
+                        tag,
+                        key: self.remote_action_ref.key(),
+                        value: Box::new(value.clone()),
+                    });
+            } else {
+                self.remote_context.schedule_action_async(
+                    &self.remote_action_ref,
+                    value.clone(),
+                    self.delay,
+                );
+            }
+        } else {
+            tracing::warn!("Port is empty, skipping event send");
+        }
+    }
+}
+
+/// Special type implementing [`ReactionFn`] for sending data across a non-trivial connection (enclave, physical or delayed).
+pub struct ConnectionSenderReactionFn<T: ReactorData + Clone> {
+    /// Marker for the type of data being sent.
+    _marker: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T: ReactorData + Clone> Default for ConnectionSenderReactionFn<T> {
+    fn default() -> Self {
+        Self {
+            _marker: Default::default(),
+        }
+    }
+}
+
+impl<'store, T: ReactorData + Clone> ReactionFn<'store> for ConnectionSenderReactionFn<T> {
+    fn trigger(
+        &mut self,
+        ctx: &'store mut Context,
+        _reactor: &'store mut dyn BaseReactor,
+        ports: Refs<'store, dyn BasePort>,
+        _ports_mut: RefsMut<'store, dyn BasePort>,
+        actions: RefsMut<'store, dyn BaseAction>,
+    ) {
+        let mut action: ActionRef<T> = actions.partition_mut().unwrap();
+        let port: InputRef<T> = ports.partition().unwrap();
+        if let Some(value) = (*port).as_ref() {
+            ctx.schedule_action(&mut action, value.clone(), None);
+        } else {
+            tracing::warn!("Port is empty, skipping action send");
+        }
+    }
+}
+
+impl<T: ReactorData + Clone> From<ConnectionSenderReactionFn<T>> for BoxedReactionFn {
+    fn from(value: ConnectionSenderReactionFn<T>) -> Self {
+        Box::new(value)
+    }
+}
+
+/// Special type implementing [`ReactionFn`] for receiving data across a non-trivial connection (enclave, physical or delayed).
+///
+/// This is used to implement connections between Ports in different Enclaves.
+pub struct ConnectionReceiverReactionFn<T: ReactorData + Clone> {
+    /// Marker for the type of data being sent.
+    _marker: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T: ReactorData + Clone> Default for ConnectionReceiverReactionFn<T> {
+    fn default() -> Self {
+        Self {
+            _marker: Default::default(),
+        }
+    }
+}
+
+impl<'store, T: ReactorData + Clone> ReactionFn<'store> for ConnectionReceiverReactionFn<T> {
+    fn trigger(
+        &mut self,
+        ctx: &'store mut Context,
+        _reactor: &'store mut dyn BaseReactor,
+        _ports: Refs<'store, dyn BasePort>,
+        ports_mut: RefsMut<'store, dyn BasePort>,
+        actions: RefsMut<'store, dyn BaseAction>,
+    ) {
+        let mut action: ActionRef<T> = actions.partition_mut().unwrap();
+        let mut port: OutputRef<T> = ports_mut.partition_mut().unwrap();
+        if let Some(value) = ctx.get_action_value(&mut action) {
+            *port = Some(value.clone());
+        } else {
+            tracing::warn!("Action is empty, skipping port update");
+        }
+    }
+}
+
+impl<T: ReactorData + Clone> From<ConnectionReceiverReactionFn<T>> for BoxedReactionFn {
+    fn from(value: ConnectionReceiverReactionFn<T>) -> Self {
+        Box::new(value)
+    }
+}
+
 pub struct Deadline {
     pub(crate) deadline: Duration,
     #[allow(dead_code)]
@@ -185,7 +341,7 @@ impl Reaction {
     }
 }
 
-/// An empty reaction function that does nothing.
+/// An empty reaction function that does nothing. Used by the [`reaction_closure`] macro.
 pub fn empty_reaction(
     _ctx: &mut Context,
     _reactor: &mut dyn BaseReactor,
@@ -193,18 +349,6 @@ pub fn empty_reaction(
     _mut_ports: RefsMut<dyn BasePort>,
     _actions: RefsMut<dyn BaseAction>,
 ) {
-}
-
-/// Utility startup function for a timer action
-pub fn timer_startup_fn(
-    ctx: &mut Context,
-    _reactor: &mut dyn BaseReactor,
-    _ref_ports: Refs<dyn BasePort>,
-    _mut_ports: RefsMut<dyn BasePort>,
-    actions: RefsMut<dyn BaseAction>,
-) {
-    let mut timer: ActionRef = actions.partition_mut().expect("Expected a timer action");
-    timer.schedule(ctx, (), None);
 }
 
 /// Timer ReactionFn for timer actions
@@ -220,19 +364,44 @@ impl<'store> ReactionFn<'store> for TimerFn {
     fn trigger(
         &mut self,
         ctx: &'store mut Context,
-        _state: &'store mut dyn BaseReactor,
+        _reactor: &'store mut dyn BaseReactor,
         _ports: Refs<'store, dyn BasePort>,
         _ports_mut: RefsMut<'store, dyn BasePort>,
         actions: RefsMut<'store, dyn BaseAction>,
     ) {
         let mut timer: ActionRef = actions.partition_mut().expect("Expected a timer action");
-
-        if timer.is_present(ctx) {
-            timer.schedule(ctx, (), self.0);
-        } else {
-            timer.schedule(ctx, (), None);
-        }
+        ctx.schedule_action(&mut timer, (), self.0);
     }
+}
+
+/// A macro to create a new reaction closure.
+///
+/// The macro takes a block of code and creates a new reaction closure from it.
+///
+/// # Example
+///
+/// ```rust
+/// # use boomerang_runtime::reaction_closure;
+/// let closure = reaction_closure!(ctx, _reactor, _ref_ports, _mut_ports, _actions => {
+///    ctx.get_elapsed_logical_time();
+/// });
+/// ```
+#[macro_export]
+macro_rules! reaction_closure {
+    // empty closure case
+    () => {
+        Box::new($crate::reaction::empty_reaction)
+    };
+    // closure with body
+    ( $ctx:ident, $reactor:ident, $ref_ports:ident, $mut_ports:ident, $actions:ident => $body:block ) => {{
+        Box::new(
+            move |$ctx: &mut $crate::Context,
+                  $reactor: &mut dyn $crate::BaseReactor,
+                  $ref_ports: $crate::Refs<dyn $crate::BasePort>,
+                  $mut_ports: $crate::RefsMut<dyn $crate::BasePort>,
+                  $actions: $crate::RefsMut<dyn $crate::BaseAction>| { $body },
+        )
+    }};
 }
 
 #[cfg(test)]
@@ -272,5 +441,12 @@ mod tests {
                        _: RefsMut<'_, dyn BasePort>,
                        _: RefsMut<'_, dyn BaseAction>| {};
         let _reaction = Reaction::new("dummy", test_fn, None);
+    }
+
+    #[test]
+    fn test_reaction_closure() {
+        let _closure = reaction_closure!(ctx, _state, _ref_ports, _mut_ports, _actions => {
+            ctx.get_elapsed_logical_time();
+        });
     }
 }

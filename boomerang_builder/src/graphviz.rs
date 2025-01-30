@@ -82,7 +82,7 @@ fn build_reactions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &
 fn build_actions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &mut Vec<String>) {
     for action_key in reactor.actions.keys() {
         let action = &env_builder.action_builders[action_key];
-        let action_id = action_key.data().as_ffi() % reactor.actions.len() as u64;
+        let action_id = action_key.data().as_ffi(); //% reactor.actions.len() as u64;
 
         let xlabel = match action.r#type() {
             ActionType::Timer(TimerSpec { period, offset }) => {
@@ -90,9 +90,9 @@ fn build_actions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &mu
                     "⏲ (startup)".into()
                 } else {
                     format!(
-                        "⏲ ({}, {})",
-                        offset.unwrap_or_default(),
-                        period.unwrap_or_default()
+                        "⏲ ({} ms, {} ms)",
+                        offset.unwrap_or_default().as_millis(),
+                        period.unwrap_or_default().as_millis()
                     )
                 }
             }
@@ -102,21 +102,28 @@ fn build_actions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &mu
                 ..
             } => {
                 if *is_logical {
-                    format!("L({})", min_delay.unwrap_or_default())
+                    format!("L({} ms)", min_delay.unwrap_or_default().as_millis())
                 } else {
-                    format!("P({} ms)", min_delay.unwrap_or_default())
+                    format!("P({} ms)", min_delay.unwrap_or_default().as_millis())
                 }
             }
             ActionType::Startup => "Startup".into(),
             ActionType::Shutdown => "Shutdown".into(),
         };
 
-        if !action.triggers.is_empty() || !action.schedulers.is_empty() {
+        // Only show if this action shows up in any Reaction's `action_relations`
+        if env_builder
+            .reaction_builders
+            .iter()
+            .any(|(_, reaction)| reaction.action_relations.contains_key(action_key))
+        {
             output.push(format!(
                 "  a{action_id} [label=\"{}\"; xlabel=\"{xlabel}\"shape=diamond;color=4];",
                 action.name(),
             ));
 
+            /*
+            TODO: Fix this
             for reaction_key in action.triggers.keys() {
                 let reaction_id =
                     reaction_key.data().as_ffi() % env_builder.reaction_builders.len() as u64;
@@ -132,6 +139,7 @@ fn build_actions(env_builder: &EnvBuilder, reactor: &ReactorBuilder, output: &mu
                     reaction_id, action_id
                 ));
             }
+            */
         }
     }
 }

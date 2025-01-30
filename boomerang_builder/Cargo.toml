@@ -12,10 +12,13 @@ readme = "README.md"
 exclude.workspace = true
 
 [features]
-default = []
+default = ["graphviz"]
 
 ## Support generating graphviz diagrams from reactor models
 graphviz = ["dep:graphviz-rust"]
+
+## Support for tracing with Tracy
+tracy = ["tracing-tracy/enable"]
 
 [dependencies]
 document-features = { workspace = true }
@@ -27,9 +30,13 @@ thiserror.workspace = true
 tracing.workspace = true
 
 boomerang_derive = { workspace = true, optional = true }
-boomerang_runtime = { workspace = true, default-features = false }
+boomerang_runtime = { workspace = true }
 tinymap.workspace = true
 
 [dev-dependencies]
-tracing-subscriber = "0.3"
 anyhow.workspace = true
+rayon.workspace = true
+tracing-subscriber.workspace = true
+tracing-tracy = { workspace = true }
+
+boomerang_runtime = { workspace = true }

@@ -32,7 +32,7 @@ struct ReactionYIn<'a> {
 impl runtime::Trigger<GeneratedDelayState> for ReactionYIn<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut GeneratedDelayState) {
         state.y_state = self.y_in.unwrap();
-        self.act.schedule(ctx, (), None);
+        ctx.schedule_action(&mut self.act, (), None);
     }
 }
 
@@ -105,11 +105,11 @@ impl runtime::Trigger<bool> for SinkReactionIn<'_> {
 )]
 #[allow(dead_code)]
 struct ActionDelayBuilder {
-    #[reactor(child = ())]
+    #[reactor(child(state = ()))]
     source: SourceBuilder,
-    #[reactor(child = false)]
+    #[reactor(child(state = false))]
     sink: Sink,
-    #[reactor(child = GeneratedDelayState::default())]
+    #[reactor(child(state = GeneratedDelayState::default()))]
     g: GeneratedDelay,
 }
 
@@ -117,18 +117,17 @@ struct ActionDelayBuilder {
 fn action_delay() {
     tracing_subscriber::fmt::init();
     let config = runtime::Config::default().with_fast_forward(true);
-    let (_, sched) = boomerang_util::runner::build_and_test_reactor::<ActionDelayBuilder>(
+    let (_, env) = boomerang_util::runner::build_and_test_reactor::<ActionDelayBuilder>(
         "action_delay",
         (),
         config,
     )
     .unwrap();
 
-    let env = sched.into_env();
-    let sink_state = env
-        .find_reactor_by_name("sink")
-        .and_then(|reactor| reactor.get_state::<bool>())
-        .unwrap();
+    let sink = env[0]
+        .find_reactor_by_name("action_delay::sink")
+        .expect("Sink not found");
+    let sink_state = sink.get_state::<bool>().expect("Sink state not found");
     assert!(sink_state, "SinkReactionIn did not trigger");
 
     dbg!(std::any::type_name_of_val(&GeneratedDelayState::default()));

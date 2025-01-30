@@ -115,16 +115,16 @@ mod destination {
 
 #[derive(Reactor)]
 #[reactor(
-    state = "()",
+    state = (),
     connection(from = "a.out", to = "t.in_"),
     connection(from = "t.out", to = "b.in_")
 )]
 struct ThreadedMultiport<const WIDTH: usize = 4, const ITERS: usize = 100_000_000> {
-    #[reactor(child = "State{s: 0}")]
+    #[reactor(child(state = State{s: 0}))]
     a: source::Source<WIDTH>,
-    #[reactor(child = "ITERS")]
+    #[reactor(child(state = ITERS))]
     t: [computation::Computation<ITERS>; WIDTH],
-    #[reactor(child = "State{s: 0}")]
+    #[reactor(child(state = State{s: 0}))]
     b: destination::Destination<WIDTH, ITERS>,
 }
 
@@ -134,7 +134,7 @@ fn threading_multiport() {
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(Duration::seconds(2));
-    let _ = boomerang_util::runner::build_and_test_reactor::<ThreadedMultiport<4, 10_000>>(
+    let _ = boomerang_util::runner::build_and_test_reactor::<ThreadedMultiport<4, 100_000>>(
         "threaded_multiport",
         (),
         config,

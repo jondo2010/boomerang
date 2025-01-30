@@ -41,7 +41,7 @@ struct ReactionKeyPress<'a> {
 
 impl<'a> runtime::Trigger<KeyboardEvents> for ReactionKeyPress<'a> {
     fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut KeyboardEvents) {
-        *self.arrow_key_pressed = self.key_press.get_value(ctx).cloned();
+        *self.arrow_key_pressed = ctx.get_action_value(&mut self.key_press).cloned();
     }
 }
 
@@ -78,7 +78,7 @@ impl runtime::Trigger<KeyboardEvents> for ReactionStartup {
                 match c.unwrap() {
                     k @ (Key::Left | Key::Right | Key::Up | Key::Down) => {
                         tracing::debug!("received {:?}", k);
-                        self.key_press.schedule(&send_ctx, k, None);
+                        send_ctx.schedule_action_async(&self.key_press, k, None);
                     }
                     Key::Ctrl('c') => {
                         tracing::debug!("Ctrl-C received, shutting down.");

@@ -33,7 +33,7 @@ struct ReactionT {
 }
 
 impl runtime::Trigger<State> for ReactionT {
-    fn trigger(self, ctx: &mut runtime::Context, state: &mut <AsyncCallback as Reactor>::State) {
+    fn trigger(self, ctx: &mut runtime::Context, state: &mut State) {
         // make sure to join the old thread first
         if let Some(thread) = state.thread.take() {
             thread.join().unwrap();
@@ -48,8 +48,8 @@ impl runtime::Trigger<State> for ReactionT {
             std::thread::sleep(std::time::Duration::from_millis(100));
             // Schedule twice. If the action is not physical, these should get consolidated into a single action
             // triggering. If it is, then they cause two separate triggerings with close but not equal time stamps.
-            a.schedule(&send_ctx, 0, None);
-            a.schedule(&send_ctx, 0, None);
+            send_ctx.schedule_action_async(&a, 0, None);
+            send_ctx.schedule_action_async(&a, 0, None);
         }));
     }
 }
@@ -59,7 +59,7 @@ impl runtime::Trigger<State> for ReactionT {
 struct ReactionA;
 
 impl runtime::Trigger<State> for ReactionA {
-    fn trigger(self, ctx: &mut runtime::Context, state: &mut <AsyncCallback as Reactor>::State) {
+    fn trigger(self, ctx: &mut runtime::Context, state: &mut State) {
         let elapsed_time = ctx.get_elapsed_logical_time();
         state.i += 1;
         eprintln!(
@@ -86,7 +86,7 @@ impl runtime::Trigger<State> for ReactionA {
 struct ReactionShutdown;
 
 impl runtime::Trigger<State> for ReactionShutdown {
-    fn trigger(self, _ctx: &mut runtime::Context, state: &mut <AsyncCallback as Reactor>::State) {
+    fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
         // make sure to join the thread before shutting down
         if state.thread.is_some() {
             std::mem::take(&mut state.thread).unwrap().join().unwrap();

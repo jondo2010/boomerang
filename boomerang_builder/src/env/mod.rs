@@ -1,23 +1,25 @@
-use crate::{ActionTag, BuilderFqnSegment, ParentReactorBuilder, PortType};
+use crate::{
+    connection::{BaseConnectionBuilder, ConnectionBuilder, PortBindings},
+    ActionTag, BuilderFqnSegment, ParentReactorBuilder, TimerActionKey, TimerSpec, TriggerMode,
+};
 
 use super::{
     action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder, runtime, ActionType,
     BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
-    BuilderReactorKey, Input, Logical, Output, Physical, PortBuilder, PortTag,
-    ReactionBuilderState, ReactorBuilder, ReactorBuilderState, TypedActionKey, TypedPortKey,
+    BuilderReactorKey, Input, Logical, Output, PortBuilder, PortTag, ReactionBuilderState,
+    ReactorBuilder, ReactorBuilderState, TypedActionKey, TypedPortKey,
 };
 use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, EdgeDirection};
 use slotmap::{SecondaryMap, SlotMap};
-use std::{
-    collections::{BTreeSet, HashMap},
-    convert::TryInto,
-};
+use std::{collections::HashMap, convert::TryInto};
 
 mod build;
 mod debug;
 #[cfg(test)]
 mod tests;
+
+pub use build::{BuilderRuntimeParts, DeferedBuild, EnclaveDep, PartitionMap};
 
 mod util {
     use petgraph::visit::{IntoNeighborsDirected, IntoNodeIdentifiers, Visitable};
@@ -69,6 +71,8 @@ pub struct EnvBuilder {
     pub(super) reaction_builders: SlotMap<BuilderReactionKey, ReactionBuilder>,
     /// Builders for Reactors
     pub(super) reactor_builders: SlotMap<BuilderReactorKey, ReactorBuilder>,
+    /// Builders for Connections
+    pub(super) connection_builders: Vec<Box<dyn BaseConnectionBuilder>>,
 }
 
 impl EnvBuilder {
@@ -84,8 +88,9 @@ impl EnvBuilder {
         parent: Option<BuilderReactorKey>,
         bank_info: Option<runtime::BankInfo>,
         state: S,
+        is_enclave: bool,
     ) -> ReactorBuilderState {
-        ReactorBuilderState::new(name, parent, bank_info, state, self)
+        ReactorBuilderState::new(name, parent, bank_info, state, is_enclave, self)
     }
 
     /// Get a previously built reactor
@@ -152,7 +157,11 @@ impl EnvBuilder {
         name: &str,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey, BuilderError> {
-        self.add_action::<(), Logical>(name, reactor_key, ActionType::Startup)
+        self.add_action_impl::<(), Logical>(
+            name,
+            reactor_key,
+            ActionType::Timer(TimerSpec::STARTUP),
+        )
     }
 
     pub fn add_shutdown_action(
@@ -160,16 +169,29 @@ impl EnvBuilder {
         name: &str,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey, BuilderError> {
-        self.add_action::<(), Logical>(name, reactor_key, ActionType::Shutdown)
+        self.add_action_impl::<(), Logical>(name, reactor_key, ActionType::Shutdown)
     }
 
-    pub fn internal_add_action<T: runtime::ReactorData, Q: ActionTag>(
+    /// Add a Timer Action to the given Reactor
+    pub fn add_timer_action(
+        &mut self,
+        name: &str,
+        reactor_key: BuilderReactorKey,
+        timer_spec: TimerSpec,
+    ) -> Result<TimerActionKey, BuilderError> {
+        let action_key =
+            self.add_action_impl::<(), Logical>(name, reactor_key, ActionType::Timer(timer_spec))?;
+        Ok(TimerActionKey::from(BuilderActionKey::from(action_key)))
+    }
+
+    /// Add a user Action to the given Reactor.
+    pub fn add_action<T: runtime::ReactorData, Q: ActionTag>(
         &mut self,
         name: &str,
         min_delay: Option<runtime::Duration>,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey<T, Q>, BuilderError> {
-        self.add_action::<T, Q>(
+        self.add_action_impl::<T, Q>(
             name,
             reactor_key,
             ActionType::Standard {
@@ -182,19 +204,8 @@ impl EnvBuilder {
         )
     }
 
-    /// Add a Reaction to a given Reactor
-    pub fn add_reaction(
-        &mut self,
-        name: &str,
-        reactor_key: BuilderReactorKey,
-        reaction_fn: impl Into<runtime::BoxedReactionFn>,
-    ) -> ReactionBuilderState {
-        let priority = self.reactor_builders[reactor_key].reactions.len();
-        ReactionBuilderState::new(name, priority, reactor_key, reaction_fn.into(), self)
-    }
-
-    /// Add an Action to a given Reactor using closure F
-    pub fn add_action<T, Q: ActionTag>(
+    /// Internal implementation for adding an Action to a Reactor
+    fn add_action_impl<T, Q: ActionTag>(
         &mut self,
         name: &str,
         reactor_key: BuilderReactorKey,
@@ -224,6 +235,26 @@ impl EnvBuilder {
         reactor_builder.actions.insert(key, ());
 
         Ok(key.into())
+    }
+
+    /// Add a Reaction to a given Reactor
+    pub fn add_reaction<F>(
+        &mut self,
+        name: &str,
+        reactor_key: BuilderReactorKey,
+        reaction_builder_fn: F,
+    ) -> ReactionBuilderState
+    where
+        F: FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn + 'static,
+    {
+        let priority = self.reactor_builders[reactor_key].reactions.len();
+        ReactionBuilderState::new(
+            name,
+            priority,
+            reactor_key,
+            Box::new(reaction_builder_fn),
+            self,
+        )
     }
 
     /// Get a previously built action
@@ -363,10 +394,10 @@ impl EnvBuilder {
     /// * `source_key` - The key of the first port to connect
     /// * `target_key` - The key of the second port to connect
     /// * `after` - An optional delay to wait before triggering the downstream ports.
-    /// * `physical` - Whether the connection is physical (or logical). Logical connections will trigger any downstream
-    ///     ports at the current logical time (with any `after` delay), while physical connections will trigger the
-    ///     downstream ports at the current physical time (with any `after` delay).
-    pub fn connect_ports<T, P1, P2>(
+    /// * `physical` - Whether the connection is physical (or logical).
+    ///     * Logical connections will trigger any downstream ports at the current logical time (with any `after` delay).
+    ///     * Physical connections will trigger the downstream ports at the current physical time (with any `after` delay).
+    pub fn add_port_connection<T, P1, P2>(
         &mut self,
         source_key: P1,
         target_key: P2,
@@ -378,162 +409,17 @@ impl EnvBuilder {
         P1: Into<BuilderPortKey>,
         P2: Into<BuilderPortKey>,
     {
-        if after.is_none() && !physical {
-            self.bind_port(source_key, target_key)
-        } else {
-            // Ports connected with a delay and/or physical connections are implemented as a pair of Reactions that trigger and react to an action.
+        let source_key = source_key.into();
+        let target_key = target_key.into();
 
-            let source_key = source_key.into();
-            let target_key = target_key.into();
-
-            let parent_reactor_key = self
-                .common_reactor_key(
-                    &self.port_builders[source_key],
-                    &self.port_builders[target_key],
-                )
-                .ok_or(BuilderError::PortConnectionError {
-                    port_a_key: source_key,
-                    port_b_key: target_key,
-                    what: "Ports must belong to the same reactor or a common parent reactor to be connected".to_owned(),
-                })?;
-
-            let source_fqn = self.port_fqn(source_key, false)?;
-            let target_fqn = self.port_fqn(target_key, false)?;
-            let reactor_name = format!("connection_{source_fqn}->{target_fqn}");
-
-            // 1. create a new reactor to hold the action and reactions
-            let (input_port, output_port) = if physical {
-                let reactor =
-                    <crate::connection::ConnectionBuilder<T, Physical> as crate::Reactor>::build(
-                        &reactor_name,
-                        after.unwrap_or_default(),
-                        Some(parent_reactor_key),
-                        None,
-                        self,
-                    )?;
-                (reactor.input, reactor.output)
-            } else {
-                let reactor =
-                    <crate::connection::ConnectionBuilder<T, Logical> as crate::Reactor>::build(
-                        &reactor_name,
-                        after.unwrap_or_default(),
-                        Some(parent_reactor_key),
-                        None,
-                        self,
-                    )?;
-                (reactor.input, reactor.output)
-            };
-
-            // Bind the input and output ports to the source and target ports
-            self.bind_port(source_key, input_port)?;
-            self.bind_port(output_port, target_key)?;
-
-            Ok(())
-        }
-    }
-
-    /// Bind Port A to Port B
-    /// The nominal case is to bind Input A to Output B
-    pub fn bind_port<P1, P2>(&mut self, port_a_key: P1, port_b_key: P2) -> Result<(), BuilderError>
-    where
-        P1: Into<BuilderPortKey>,
-        P2: Into<BuilderPortKey>,
-    {
-        let port_a_key = port_a_key.into();
-        let port_b_key = port_b_key.into();
-
-        let port_a_fqn = self.port_fqn(port_a_key, false)?;
-        let port_b_fqn = self.port_fqn(port_b_key, false)?;
-
-        tracing::debug!("Binding ports: {port_a_fqn:?} -> {port_b_fqn:?}",);
-
-        let port_a = &self.port_builders[port_a_key];
-        let port_b = &self.port_builders[port_b_key];
-
-        if port_b.get_inward_binding().is_some() {
-            return Err(BuilderError::PortConnectionError {
-                port_a_key,
-                port_b_key,
-                what: format!(
-                    "Ports may only be connected once, but B is already connected to {:?}",
-                    port_b.get_inward_binding()
-                ),
-            });
-        }
-
-        if !port_a.deps().is_empty() {
-            return Err(BuilderError::PortConnectionError {
-                port_a_key,
-                port_b_key,
-                what: "Ports with dependencies may not be connected to other ports".to_owned(),
-            });
-        }
-
-        if port_b.antideps().len() > 0 {
-            return Err(BuilderError::PortConnectionError {
-                port_a_key,
-                port_b_key,
-                what: "Ports with antidependencies may not be connected to other ports".to_owned(),
-            });
-        }
-
-        match (port_a.port_type(), port_b.port_type()) {
-            (PortType::Input, PortType::Input) => {
-                self.reactor_builders[port_b.get_reactor_key()]
-                    .parent_reactor_key
-                    .and_then(|parent_key| {
-                        if port_a.get_reactor_key() == parent_key { Some(()) } else { None }
-                     }).ok_or(
-                        BuilderError::PortConnectionError{
-                                port_a_key,
-                                port_b_key,
-                                what: "An input port A may only be bound to another input port B if B is contained by a reactor that in turn is contained by the reactor of A.".into()
-                            })
-            }
-            (PortType::Output, PortType::Input) => {
-                let port_a_grandparent = self.reactor_builders[port_a.get_reactor_key()].parent_reactor_key;
-                let port_b_grandparent = self.reactor_builders[port_b.get_reactor_key()].parent_reactor_key;
-                // VALIDATE(this->container()->container() == port->container()->container(), 
-                if !matches!((port_a_grandparent, port_b_grandparent), (Some(key_a), Some(key_b)) if key_a == key_b) {
-                    Err(BuilderError::PortConnectionError{
-                        port_a_key,
-                        port_b_key,
-                        what: format!("An output port ({}) can only be bound to an input port ({}) if both ports belong to reactors in the same hierarichal level", port_a_fqn, port_b_fqn),
-                    })
-                }
-                else {
-                    Ok(())
-                }
-            }
-            (PortType::Output, PortType::Output) => {
-                // VALIDATE( this->container()->container() == port->container(),
-                self.reactor_builders[port_a.get_reactor_key()]
-                    .parent_reactor_key
-                    .and_then(|parent_key| {
-                        if parent_key == port_b.get_reactor_key() {
-                            Some(())
-                        } else {
-                            None
-                        }
-                    }).ok_or(
-                        BuilderError::PortConnectionError {
-                                port_a_key,
-                                port_b_key,
-                                what: "An output port A may only be bound to another output port B if A is contained by a reactor that in turn is contained by the reactor of B".to_owned()
-                            })
-            }
-            (PortType::Input, PortType::Output) =>  {
-                Err(BuilderError::PortConnectionError {
-                    port_a_key,
-                    port_b_key,
-                    what: "Unexpected case: can't bind an input Port to an output Port.".to_owned()
-                })
-            }
-        }?;
-
-        // All validity checks passed, so we can now bind the ports
-        self.port_builders[port_b_key].set_inward_binding(Some(port_a_key));
-        self.port_builders[port_a_key].add_outward_binding(port_b_key);
+        self.connection_builders
+            .push(Box::new(ConnectionBuilder::<T> {
+                source_key,
+                target_key,
+                after,
+                physical,
+                _phantom: Default::default(),
+            }));
 
         Ok(())
     }
@@ -610,51 +496,35 @@ impl EnvBuilder {
             .append(segment)
     }
 
-    /// Follow the inward_binding's of Ports to the source
-    pub fn follow_port_inward_binding(&self, port_key: BuilderPortKey) -> BuilderPortKey {
-        let mut cur_key = port_key;
-        while let Some(new_idx) = self
-            .port_builders
-            .get(cur_key)
-            .and_then(|port| port.get_inward_binding())
-        {
-            cur_key = new_idx;
-        }
-        cur_key
-    }
-
-    /// Transitively collect all Reactions triggered by this Port being set
-    fn collect_transitive_port_triggers(
-        &self,
-        port_key: BuilderPortKey,
-    ) -> SecondaryMap<BuilderReactionKey, ()> {
-        let mut all_triggers = SecondaryMap::new();
-        let mut port_set = BTreeSet::<BuilderPortKey>::new();
-        port_set.insert(port_key);
-        while !port_set.is_empty() {
-            let port_key = port_set.pop_first().unwrap();
-            let port_builder = &self.port_builders[port_key];
-            all_triggers.extend(port_builder.triggers().iter().map(|&key| (key, ())));
-            port_set.extend(port_builder.get_outward_bindings());
-        }
-        all_triggers
-    }
-
     /// Build an iterator of all Reaction dependency edges in the graph
-    pub fn reaction_dependency_edges(
-        &self,
-    ) -> impl Iterator<Item = (BuilderReactionKey, BuilderReactionKey)> + '_ {
+    pub fn reaction_dependency_edges<'a, 'b: 'a>(
+        &'a self,
+        port_bindings: &'b PortBindings,
+    ) -> impl Iterator<Item = (BuilderReactionKey, BuilderReactionKey)> + 'a {
         let deps = self
             .reaction_builders
             .iter()
             .flat_map(move |(reaction_key, reaction)| {
                 // Connect all reactions this reaction depends upon
                 reaction
-                    .trigger_ports
-                    .keys()
-                    .flat_map(move |port_key| {
-                        let source_port_key = self.follow_port_inward_binding(port_key);
-                        self.port_builders[source_port_key].antideps()
+                    .port_relations
+                    .iter()
+                    .filter_map(|(port_key, trigger_mode)| {
+                        trigger_mode.is_triggers().then_some(port_key)
+                    })
+                    .flat_map(|port_key| {
+                        let source_port_key = port_bindings.follow_port_inward(port_key);
+
+                        // all reactions that can set this port
+                        self.reaction_builders
+                            .iter()
+                            .filter_map(move |(reaction_key, reaction)| {
+                                match reaction.port_relations.get(source_port_key) {
+                                    Some(TriggerMode::EffectsOnly)
+                                    | Some(TriggerMode::TriggersAndEffects) => Some(reaction_key),
+                                    _ => None,
+                                }
+                            })
                     })
                     .map(move |dep_key| (reaction_key, dep_key))
             });
@@ -673,9 +543,14 @@ impl EnvBuilder {
     }
 
     /// Build a DAG of Reactions
-    pub fn build_reaction_graph(&self) -> DiGraphMap<BuilderReactionKey, ()> {
-        let mut graph =
-            DiGraphMap::from_edges(self.reaction_dependency_edges().map(|(a, b)| (b, a)));
+    pub fn build_reaction_graph(
+        &self,
+        port_bindings: &PortBindings,
+    ) -> DiGraphMap<BuilderReactionKey, ()> {
+        let mut graph = DiGraphMap::from_edges(
+            self.reaction_dependency_edges(port_bindings)
+                .map(|(a, b)| (b, a)),
+        );
         // Ensure all ReactionIndicies are represented
         self.reaction_builders.keys().for_each(|key| {
             graph.add_node(key);
@@ -684,7 +559,7 @@ impl EnvBuilder {
         graph
     }
 
-    /// Build a DAG of Reactors
+    /// Build a DAG of Reactors from the parent-child relationships
     pub fn build_reactor_graph(&self) -> DiGraphMap<BuilderReactorKey, ()> {
         let mut graph =
             DiGraphMap::from_edges(self.reactor_builders.iter().filter_map(|(key, reactor)| {
@@ -706,10 +581,13 @@ impl EnvBuilder {
     /// See <https://en.m.wikipedia.org/wiki/Coffman%E2%80%93Graham_algorithm>
     pub fn build_runtime_level_map(
         &self,
+        port_bindings: &PortBindings,
     ) -> Result<SecondaryMap<BuilderReactionKey, runtime::Level>, BuilderError> {
         use petgraph::{algo::tred, graph::DefaultIx, graph::NodeIndex};
 
-        let mut graph = self.build_reaction_graph().into_graph::<DefaultIx>();
+        let mut graph = self
+            .build_reaction_graph(port_bindings)
+            .into_graph::<DefaultIx>();
 
         // Transitive reduction and closures
         let toposort = petgraph::algo::toposort(&graph, None).map_err(|cycle_error| {

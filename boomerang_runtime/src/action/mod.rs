@@ -23,12 +23,6 @@ pub use action_ref::*;
 use downcast_rs::Downcast;
 use store::ActionStore;
 
-pub trait ActionCommon {
-    fn name(&self) -> &str;
-    fn key(&self) -> ActionKey;
-    fn min_delay(&self) -> Duration;
-}
-
 tinymap::key_type! { pub ActionKey }
 
 pub trait BaseAction: Debug + Downcast + Send + Sync {

@@ -8,40 +8,78 @@ type Input<T> = TypedPortKey<T, boomerang::builder::Input>;
 type Output<T> = TypedPortKey<T, boomerang::builder::Output>;
 type Timer = TimerActionKey;
 
-#[reactor2]
-fn Scale(#[prop(default = 2)] scale: u32, #[input] x: u32, #[output] y: u32) {}
+
+#[derive(::boomerang::typed_builder_macro::TypedBuilder)]
+#[builder(
+    crate_module_path = ::boomerang::typed_builder,
+    mutators(
+        fn build_ports(&mut self, builder: &mut ReactorBuilderState) {
+            self.x = <Input<u32> as boomerang::builder::ReactorField>::build("x", (), builder).unwrap();
+            self.y = <Output<u32> as boomerang::builder::ReactorField>::build("y", (), builder).unwrap();
+        }
+    )
+)]
+#[allow(non_snake_case)]
+pub struct ScaleProps {
+    #[builder(setter(doc = "**scale**: [`u32`]"), default = 2)]
+    pub scale: u32,
+    #[builder(via_mutators)]
+    pub x: Input<u32>,
+    #[builder(via_mutators)]
+    pub y: Output<u32>,
+}
+
+trait ScaleTypes {
+    type X;
+    type Y;
+}
+
+impl ScaleTypes for Scale {
+    type X = u32;
+    type Y = u32;
+}
+
+pub trait ReactorProps {
+    type Builder: ::boomerang::typed_builder::TypedBuilder;
+    fn builder(
+            name: &str,
+            env: &mut boomerang::builder::EnvBuilder,
+            parent: Option<::boomerang::builder::BuilderReactorKey>,
+            bank_info: Option<::boomerang::runtime::BankInfo>,
+            is_enclave: bool,
+    ) -> Self::Builder;
+}
+
+impl ReactorProps for ScaleProps {
+    type Builder = ScalePropsBuilder;
+    fn builder(
+            name: &str,
+            env: &mut boomerang::builder::EnvBuilder,
+            parent: Option<::boomerang::builder::BuilderReactorKey>,
+            bank_info: Option<::boomerang::runtime::BankInfo>,
+            is_enclave: bool,
+    ) -> Self::Builder {
+        ScaleProps::builder()
+
+    let mut reactor_builder = env.add_reactor(name, parent, bank_info, (), is_enclave);
+    let props = props_builder.build_ports(&mut reactor_builder).build();
+    }
+}
+
+//#[reactor2]
+fn Scale(//#[prop(default = 2)]
+    //scale: u32,
+    //#[input]
+    //x: u32,
+    //#[output]
+    //y: u32,
+    props_builder: ScalePropsBuilder
+) -> ScaleProps {
+    todo!()
+}
 
 #[test]
 fn gain2() {
-    #[automatically_derived]
-    struct ScaleProps {
-        scale: u32,
-        pub x: Input<u32>,
-        pub y: Output<u32>,
-    }
-
-    #[automatically_derived]
-    impl ScaleProps {
-        fn build(
-            builder: &mut ReactorBuilderState,
-        ) -> Result<Self, boomerang::builder::BuilderError> {
-            let x = <Input<u32> as boomerang::builder::ReactorField>::build("x", (), builder)?;
-            let y = <Output<u32> as boomerang::builder::ReactorField>::build("y", (), builder)?;
-            Ok(Self { x, y })
-        }
-    }
-
-    #[automatically_derived]
-    trait ScaleTypes {
-        type X;
-        type Y;
-    }
-
-    #[automatically_derived]
-    impl ScaleTypes for Scale {
-        type X = u32;
-        type Y = u32;
-    }
 
     impl Scale {
         fn assemble(

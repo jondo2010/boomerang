@@ -90,6 +90,13 @@ pub mod prelude {
 #[doc(hidden)]
 pub use boomerang_derive::*;
 
+#[cfg(feature = "derive")]
+#[doc(hidden)]
+pub use typed_builder;
+#[cfg(feature = "derive")]
+#[doc(hidden)]
+pub use typed_builder_macro;
+
 /// Top-level error type for Boomerang
 #[derive(thiserror::Error, Debug)]
 pub enum BoomerangError {

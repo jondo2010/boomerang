@@ -3,6 +3,7 @@ use quote::{quote, ToTokens};
 
 mod reaction;
 mod reactor;
+mod reactor_macro;
 mod util;
 
 #[proc_macro_derive(Reaction, attributes(reaction))]
@@ -152,7 +153,8 @@ mod reactor2 {
                 ret,
             } = self;
 
-            quote! {}
+            todo!();
+            //quote! {}
         }
     }
 }
@@ -174,6 +176,17 @@ pub fn reactor2(
         }
     } else {
         quote! {}
+    }
+    .into()
+}
+
+#[proc_macro_error2::proc_macro_error]
+#[proc_macro]
+pub fn reactor(tokens: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let model = syn::parse_macro_input!(tokens as reactor_macro::Reactor);
+
+    quote! {
+        #model
     }
     .into()
 }

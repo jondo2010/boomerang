@@ -2,6 +2,41 @@
 
 use boomerang::prelude::*;
 
+mod test2 {
+    use boomerang_derive::reactor;
+
+    reactor! {
+        Scale(scale: u32 = 2) {
+            input x: u32;
+            output y: u32;
+
+            reaction(x) -> y { y = scale * x; }
+        }
+    }
+
+    reactor! {
+        Test {
+            input x: u32;
+
+            reaction(x) {
+                println!("Received {:?}", x);
+                assert_eq!(x, Some(2), "Expected Some(2)!");
+            }
+        }
+    }
+
+    reactor! {
+        Gain {
+            child g: Scale(scale = 2);
+            child t: Test;
+            g.y -> t.x;
+            timer tim;
+
+            //reaction(tim) -> g.x { g.x = 1; }
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct Scale(u32);

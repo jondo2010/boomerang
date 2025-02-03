@@ -15,10 +15,74 @@ mod kw {
 }
 
 mod render {
+    use proc_macro2::TokenStream;
     use quote::{format_ident, quote, ToTokens, TokenStreamExt};
-    use syn::LitStr;
+    use syn::{LitStr, Visibility};
 
-    use super::Reactor;
+    use crate::reactor_macro::{Child, State, Timer};
+
+    use super::{Input, Output, Param, Reactor, ReactorStmt};
+
+    fn param_builder_fields(vis: &Visibility, params: &[Param]) -> TokenStream {
+        params
+            .iter()
+            .map(|param| {
+                let Param { name, ty, default } = param;
+                let field_name = format_ident!("{}", name);
+                let field_ty = ty;
+
+                // add an optional attribute if default is Some: #[builder(default=20)]
+                let field_default_attr = default
+                    .as_ref()
+                    .map(|default| quote! { #[builder(default = #default)] });
+
+                quote! {
+                    #field_default_attr
+                    #vis #field_name: #field_ty,
+                }
+            })
+            .collect()
+    }
+
+    fn state_fields(stmts: &[ReactorStmt]) -> TokenStream {
+        stmts
+            .iter()
+            .map(|stmt| match stmt {
+                ReactorStmt::State(state) => {
+                    let State {
+                        name, ty, default, ..
+                    } = state;
+                    let field_name = format_ident!("{}", name);
+                    let field_ty = ty;
+
+                    quote! {
+                        #field_name: #field_ty,
+                    }
+                }
+                _ => quote! {},
+            })
+            .collect()
+    }
+
+    fn builder_fields(stmts: &[ReactorStmt]) -> TokenStream {
+        stmts
+            .iter()
+            .filter_map(|stmt| match stmt {
+                ReactorStmt::Input(Input { name, ty }) => {
+                    Some(quote! { #name: ::boomerang::builder::Input<#ty>, })
+                }
+                ReactorStmt::Output(Output { name, ty }) => {
+                    Some(quote! { #name: ::boomerang::builder::Output<#ty>, })
+                }
+                ReactorStmt::Timer(Timer { name, spec }) => Some(quote! { #name: TimerKey, }),
+                ReactorStmt::Child(Child { name, ty, args }) => Some(quote! {
+                    #[reactor(child())]
+                    #name: #ty,
+                }),
+                _ => None,
+            })
+            .collect()
+    }
 
     impl ToTokens for Reactor {
         fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
@@ -29,15 +93,30 @@ mod render {
                 ..
             } = self;
 
-            let builder_name_doc = LitStr::new(
-                &format!(" Props for the [`{ident}`] component."),
-                ident.span(),
-            );
-
+            let builder_name_doc =
+                LitStr::new(&format!("Props for the [`{ident}`] reactor."), ident.span());
             let props_name = format_ident!("{ident}Props");
-            let impl_generics = quote! {};
-            let where_clause = quote! {};
-            let prop_builder_fields = quote! {};
+            let prop_builder_fields = param_builder_fields(&Visibility::Inherited, params);
+
+            let state_doc =
+                LitStr::new(&format!("State for the [`{ident}`] reactor."), ident.span());
+            let state_name = format_ident!("{ident}State");
+            let state_fields = state_fields(&block.stmts);
+
+            let builder_name = format_ident!("{ident}Builder");
+            let builder_fields = builder_fields(&block.stmts);
+
+            let reaction_names = block
+                .stmts
+                .iter()
+                .filter_map(|stmt| match stmt {
+                    ReactorStmt::Reaction(reaction) => Some(reaction),
+                    _ => None,
+                })
+                .map(|reaction| {
+                    let name = reaction.name.as_ref().unwrap_or(ident);
+                    quote! { reaction = #name }
+                });
 
             let output = quote! {
                 #[doc = #builder_name_doc]
@@ -46,8 +125,24 @@ mod render {
                 #[derive(::boomerang::typed_builder_macro::TypedBuilder)]
                 #[builder(crate_module_path = ::boomerang::typed_builder)]
                 #[allow(non_snake_case)]
-                pub struct #props_name #impl_generics #where_clause {
+                pub struct #props_name {
                     #prop_builder_fields
+                }
+
+                #[doc = #state_doc]
+                #[derive(Debug, Default)]
+                #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+                pub struct #state_name {
+                    #state_fields
+                }
+
+                #[derive(::boomerang::Reactor)]
+                #[reactor(
+                    state = #state_name,
+                    #(#reaction_names,)*
+                )]
+                struct #builder_name {
+                    #builder_fields
                 }
             };
 
@@ -66,8 +161,7 @@ mod render {
 #[derive(Debug)]
 pub struct Reactor {
     pub ident: Ident,
-    paren_token: Option<token::Paren>,
-    params: Option<Punctuated<Param, Token![,]>>,
+    params: Vec<Param>,
     block: ReactorBlock,
 }
 
@@ -75,19 +169,19 @@ impl Parse for Reactor {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let ident = input.parse()?;
 
-        let (paren_token, params) = if input.peek(token::Paren) {
+        let params = if input.peek(token::Paren) {
             let args_content;
-            let paren = parenthesized!(args_content in input);
-            let params = args_content.parse_terminated(Param::parse, Token![,])?;
-            (Some(paren), Some(params))
+            let _paren = parenthesized!(args_content in input);
+            let params: Punctuated<Param, Token![,]> =
+                args_content.parse_terminated(Param::parse, Token![,])?;
+            Some(params)
         } else {
-            (None, None)
+            None
         };
 
         Ok(Reactor {
             ident,
-            paren_token,
-            params,
+            params: params.unwrap_or_default().into_iter().collect(),
             block: input.parse()?,
         })
     }
@@ -100,16 +194,14 @@ impl Parse for Reactor {
 #[derive(Debug, PartialEq)]
 struct Param {
     name: Ident,
-    colon_token: Token![:],
     ty: Type,
-    eq_token: Option<Token![=]>,
     default: Option<syn::Expr>,
 }
 
 impl Parse for Param {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let name = input.parse()?;
-        let colon_token = input.parse()?;
+        let _colon_token: Token![:] = input.parse()?;
         let ty = input.parse()?;
         let eq_token: Option<Token![=]> = input.parse()?;
         let default = if eq_token.is_some() {
@@ -118,20 +210,13 @@ impl Parse for Param {
             None
         };
 
-        Ok(Self {
-            name,
-            colon_token,
-            ty,
-            eq_token,
-            default,
-        })
+        Ok(Self { name, ty, default })
     }
 }
 
 /// Parse a block of statements within a reactor definition
 #[derive(Debug)]
 pub struct ReactorBlock {
-    pub brace_token: token::Brace,
     /// Statements in a block
     pub stmts: Vec<ReactorStmt>,
 }
@@ -162,10 +247,9 @@ impl ReactorBlock {
 impl Parse for ReactorBlock {
     fn parse(input: ParseStream) -> Result<Self, Error> {
         let content;
-        Ok(ReactorBlock {
-            brace_token: braced!(content in input),
-            stmts: content.call(Self::parse_within)?,
-        })
+        let _brace_token = braced!(content in input);
+        let stmts = content.call(Self::parse_within)?;
+        Ok(ReactorBlock { stmts })
     }
 }
 
@@ -182,39 +266,33 @@ enum ReactorStmt {
 
 #[derive(Debug)]
 struct Input {
-    input: kw::input,
     name: Ident,
-    colon_token: Token![:],
     ty: Type,
 }
 
 impl Parse for Input {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        Ok(Input {
-            input: input.parse()?,
-            name: input.parse()?,
-            colon_token: input.parse()?,
-            ty: input.parse()?,
-        })
+        let _input = input.parse::<kw::input>()?;
+        let name = input.parse()?;
+        let _colon_token = input.parse::<Token![:]>()?;
+        let ty = input.parse()?;
+        Ok(Input { name, ty })
     }
 }
 
 #[derive(Debug)]
 struct Output {
-    output: kw::output,
     name: Ident,
-    colon_token: Token![:],
     ty: Type,
 }
 
 impl Parse for Output {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        Ok(Output {
-            output: input.parse()?,
-            name: input.parse()?,
-            colon_token: input.parse()?,
-            ty: input.parse()?,
-        })
+        let _output = input.parse::<kw::output>()?;
+        let name = input.parse()?;
+        let _colon_token = input.parse::<Token![:]>()?;
+        let ty = input.parse()?;
+        Ok(Output { name, ty })
     }
 }
 
@@ -249,30 +327,23 @@ impl Parse for TimerSpec {
 ///    timer t_spec(0, 1 sec);
 #[derive(Debug)]
 struct Timer {
-    timer: kw::timer,
     name: Ident,
-    paren_token: Option<token::Paren>,
     spec: Option<Punctuated<Expr, Token![,]>>,
 }
 
 impl Parse for Timer {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let timer = input.parse()?;
+        let _timer = input.parse::<kw::timer>()?;
         let name = input.parse()?;
-        let (paren_token, spec) = if input.peek(token::Paren) {
+        let spec = if input.peek(token::Paren) {
             let spec_content;
-            let paren_token = parenthesized!(spec_content in input);
+            let _paren_token = parenthesized!(spec_content in input);
             let spec = spec_content.parse_terminated(Expr::parse, Token![,])?;
-            (Some(paren_token), Some(spec))
+            Some(spec)
         } else {
-            (None, None)
+            None
         };
-        Ok(Timer {
-            timer,
-            name,
-            paren_token,
-            spec,
-        })
+        Ok(Timer { name, spec })
     }
 }
 
@@ -305,29 +376,29 @@ impl Parse for State {
 
 #[derive(Debug)]
 struct Child {
-    child: kw::child,
     name: Ident,
-    colon_token: Token![:],
     ty: Ident,
-    args: Option<(token::Paren, Punctuated<ChildParam, Token![,]>)>,
+    args: Vec<ChildParam>,
 }
 
 impl Parse for Child {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let content;
+        let _child = input.parse::<kw::child>()?;
+        let name = input.parse()?;
+        let _colon_token = input.parse::<Token![:]>()?;
+        let ty = input.parse()?;
+        let args = if input.peek(token::Paren) {
+            let _paren = parenthesized!(content in input);
+            let param = content.parse_terminated(ChildParam::parse, Token![,])?;
+            Some(param)
+        } else {
+            None
+        };
         Ok(Child {
-            child: input.parse()?,
-            name: input.parse()?,
-            colon_token: input.parse()?,
-            ty: input.parse()?,
-            args: if input.peek(token::Paren) {
-                Some((
-                    parenthesized!(content in input),
-                    content.parse_terminated(ChildParam::parse, Token![,])?,
-                ))
-            } else {
-                None
-            },
+            name,
+            ty,
+            args: args.unwrap_or_default().into_iter().collect(),
         })
     }
 }
@@ -396,19 +467,17 @@ impl Parse for Connection {
 ///     reaction (t1) u1, u2 -> e1, e2 { ... }
 #[derive(Debug)]
 struct Reaction {
-    reaction: kw::reaction,
     name: Option<Ident>,
-    paren_token: token::Paren,
-    triggers: Punctuated<Ident, Token![,]>,
-    uses: Punctuated<Ident, Token![,]>,
-    effects: Option<(Token![->], Punctuated<Ident, Token![,]>)>,
+    triggers: Vec<Ident>,
+    uses: Vec<Ident>,
+    effects: Vec<Ident>,
     code: syn::Block,
 }
 
 impl Parse for Reaction {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         // Parse: reaction
-        let reaction = input.parse::<kw::reaction>()?;
+        let _reaction = input.parse::<kw::reaction>()?;
 
         // Parse optional name
         let name = if input.peek(token::Paren) {
@@ -419,11 +488,11 @@ impl Parse for Reaction {
 
         // Parse triggers in parentheses
         let content;
-        let paren_token = parenthesized!(content in input);
+        let _paren_token = parenthesized!(content in input);
         let triggers = content.parse_terminated(Ident::parse, Token![,])?;
 
         // Parse uses (if any identifiers before -> or {)
-        let mut uses = Punctuated::new();
+        let mut uses: Punctuated<Ident, token::Comma> = Punctuated::new();
         while !input.peek(Token![->]) && !input.peek(token::Brace) {
             uses.push_value(input.parse()?);
             if !input.peek(Token![,]) {
@@ -434,9 +503,9 @@ impl Parse for Reaction {
 
         // Parse optional effects (outputs)
         let effects = if input.peek(Token![->]) {
-            let arrow = input.parse()?;
+            let _arrow = input.parse::<Token![->]>()?;
             // Parse effects (if any identifiers before {)
-            let mut effects = Punctuated::new();
+            let mut effects: Punctuated<Ident, token::Comma> = Punctuated::new();
             while !input.peek(token::Brace) {
                 effects.push_value(input.parse()?);
                 if !input.peek(Token![,]) {
@@ -444,7 +513,7 @@ impl Parse for Reaction {
                 }
                 effects.push_punct(input.parse()?);
             }
-            Some((arrow, effects))
+            Some(effects)
         } else {
             None
         };
@@ -453,12 +522,10 @@ impl Parse for Reaction {
         let code = input.parse()?;
 
         Ok(Reaction {
-            reaction,
             name,
-            paren_token,
-            triggers,
-            uses,
-            effects,
+            triggers: triggers.into_iter().collect(),
+            uses: uses.into_iter().collect(),
+            effects: effects.map(|e| e.into_iter().collect()).unwrap_or_default(),
             code,
         })
     }
@@ -536,42 +603,44 @@ mod test {
         // Test basic reaction
         let reaction = syn::parse_str::<Reaction>("reaction(x) { }").unwrap();
         assert!(reaction.name.is_none());
-        assert_eq!(reaction.triggers, parse_quote!(x));
+        assert_eq!(reaction.triggers[0], format_ident!("x"));
         assert!(reaction.uses.is_empty());
-        assert!(reaction.effects.is_none());
+        assert!(reaction.effects.is_empty());
 
         // Test reaction with uses and effects
         let reaction = syn::parse_str::<Reaction>("reaction foo(t1) u1, u2 -> e1, e2 { }").unwrap();
         assert_eq!(reaction.name, parse_quote!(foo));
-        assert_eq!(reaction.triggers, parse_quote!(t1));
-        assert_eq!(reaction.uses, parse_quote!(u1, u2));
-        assert_eq!(reaction.effects.as_ref().unwrap().1, parse_quote!(e1, e2));
+        assert_eq!(reaction.triggers[0], format_ident!("t1"));
+        assert_eq!(reaction.uses[0], format_ident!("u1"));
+        assert_eq!(reaction.uses[1], format_ident!("u2"));
+        assert_eq!(reaction.effects[0], format_ident!("e1"));
+        assert_eq!(reaction.effects[1], format_ident!("e2"));
 
         // Test reaction with just uses
         let reaction = syn::parse_str::<Reaction>("reaction(x) y, z { }").unwrap();
         assert!(reaction.name.is_none());
         assert_eq!(reaction.triggers.len(), 1);
         assert_eq!(reaction.uses.len(), 2);
-        assert!(reaction.effects.is_none());
+        assert!(reaction.effects.is_empty());
     }
 
     #[test]
     fn test_parse_reactor() {
         let reactor = syn::parse_str::<Reactor>("Test {}").unwrap();
         assert_eq!(reactor.ident, format_ident!("Test"));
-        assert!(reactor.params.is_none());
+        assert!(reactor.params.is_empty());
 
         let reactor = syn::parse_str::<Reactor>("Scale() {}").unwrap();
         assert_eq!(reactor.ident, format_ident!("Scale"));
-        assert!(reactor.params.unwrap().is_empty());
+        assert!(reactor.params.is_empty());
 
         let reactor = syn::parse_str::<Reactor>("Scale(scale: u32 = 2) {}").unwrap();
         assert_eq!(reactor.ident, format_ident!("Scale"));
-        assert_eq!(reactor.params.unwrap(), parse_quote!(scale: u32 = 2));
+        assert_eq!(reactor.params[0], parse_quote!(scale: u32 = 2));
 
         let reactor = syn::parse_str::<Reactor>("Scale() { input x: u32; }").unwrap();
         assert_eq!(reactor.ident, format_ident!("Scale"));
-        assert!(reactor.params.unwrap().is_empty());
+        assert!(reactor.params.is_empty());
 
         let reactor = syn::parse_str::<Reactor>(
             r#"Scale(scale: u32 = 2) {
@@ -582,7 +651,7 @@ mod test {
         )
         .unwrap();
         assert_eq!(reactor.ident, format_ident!("Scale"));
-        assert_eq!(reactor.params.unwrap(), parse_quote!(scale: u32 = 2));
+        assert_eq!(reactor.params[0], parse_quote!(scale: u32 = 2));
         assert_eq!(reactor.block.stmts.len(), 3);
     }
 }

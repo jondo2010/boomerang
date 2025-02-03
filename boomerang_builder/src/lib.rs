@@ -22,9 +22,12 @@ pub mod plantuml;
 pub use action::*;
 pub use env::*;
 pub use fqn::*;
-pub use port::*;
+pub use port::{BuilderPortKey, TypedPortKey};
 pub use reaction::*;
 pub use reactor::*;
+
+pub type Input<T> = TypedPortKey<T, port::Input>;
+pub type Output<T> = TypedPortKey<T, port::Output>;
 
 use boomerang_runtime::{self as runtime};
 

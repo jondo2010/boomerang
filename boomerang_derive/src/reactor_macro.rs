@@ -17,11 +17,11 @@ mod kw {
 mod render {
     use proc_macro2::TokenStream;
     use quote::{format_ident, quote, ToTokens, TokenStreamExt};
-    use syn::{LitStr, Visibility};
+    use syn::{Ident, LitStr, Visibility};
 
     use crate::reactor_macro::{Child, State, Timer};
 
-    use super::{Input, Output, Param, Reactor, ReactorStmt};
+    use super::{Input, Output, Param, Reaction, Reactor, ReactorStmt};
 
     fn param_builder_fields(vis: &Visibility, params: &[Param]) -> TokenStream {
         params
@@ -84,6 +84,41 @@ mod render {
             .collect()
     }
 
+    /// Extract reactions and pair them with their names
+    fn named_reactions<'a>(
+        stmts: &'a [ReactorStmt],
+        reactor_ident: &Ident,
+    ) -> Vec<(Ident, &'a Reaction)> {
+        stmts
+            .iter()
+            .filter_map(|stmt| match stmt {
+                ReactorStmt::Reaction(reaction) => Some(reaction),
+                _ => None,
+            })
+            .enumerate()
+            .map(|(idx, reaction)| {
+                let name = reaction
+                    .name
+                    .clone()
+                    .map(|name| format_ident!("{reactor_ident}{name}"))
+                    .unwrap_or_else(|| format_ident!("{reactor_ident}Reaction{idx}"));
+                (name, reaction)
+            })
+            .collect()
+    }
+
+    fn reaction_structs(named_reactions: &[(Ident, &Reaction)]) -> TokenStream {
+        named_reactions
+            .iter()
+            .map(|(name, reaction)| {
+                quote! {
+                    #[derive(::boomerang::Reaction)]
+                    struct #name;
+                }
+            })
+            .collect()
+    }
+
     impl ToTokens for Reactor {
         fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
             let Self {
@@ -106,17 +141,12 @@ mod render {
             let builder_name = format_ident!("{ident}Builder");
             let builder_fields = builder_fields(&block.stmts);
 
-            let reaction_names = block
-                .stmts
-                .iter()
-                .filter_map(|stmt| match stmt {
-                    ReactorStmt::Reaction(reaction) => Some(reaction),
-                    _ => None,
-                })
-                .map(|reaction| {
-                    let name = reaction.name.as_ref().unwrap_or(ident);
-                    quote! { reaction = #name }
-                });
+            let named_reactions = named_reactions(&block.stmts, ident);
+            let reaction_names = named_reactions.iter().map(|(name, _)| {
+                quote! { reaction = #name }
+            });
+
+            let reaction_structs = reaction_structs(&named_reactions);
 
             let output = quote! {
                 #[doc = #builder_name_doc]
@@ -144,6 +174,8 @@ mod render {
                 struct #builder_name {
                     #builder_fields
                 }
+
+                #reaction_structs
             };
 
             tokens.append_all(output);

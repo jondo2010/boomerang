@@ -9,7 +9,7 @@ mod test2 {
         Scale(scale: u32 = 2) {
             input x: u32;
             output y: u32;
-            reaction ScaleReaction (x) -> y { y = scale * x; }
+            reaction (x) -> y { y = scale * x; }
         }
     }
 

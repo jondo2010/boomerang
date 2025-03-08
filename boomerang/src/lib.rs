@@ -47,20 +47,19 @@
 //!     }
 //! }
 //!
-//! let mut env_builder = EnvBuilder::new();
-//! let reactor = HelloWorld::build(
-//!     "hello_world",
-//!     State {
-//!         success: false
-//!     },
-//!     None,
-//!     None,
-//!     &mut env_builder
-//! ).unwrap();
-//! let (mut env, triggers, _) = env_builder.into_runtime_parts().unwrap();
 //! let config = runtime::Config::default().with_fast_forward(true);
-//! let mut sched = runtime::Scheduler::new(env, triggers, config);
-//! sched.event_loop();
+//! let (_, envs) = boomerang_util::runner::build_and_test_reactor::<HelloWorld>(
+//!     "hello_world",
+//!     State { success: false },
+//!     config,
+//! )
+//! .unwrap();
+//!
+//! assert!(envs[0]
+//!     .find_reactor_by_name("hello_world")
+//!     .and_then(|reactor| reactor.get_state::<State>())
+//!     .unwrap().success,
+//! );
 //! ```
 //!
 //! ## Feature flags
@@ -78,11 +77,11 @@ pub mod prelude {
     //! Re-exported common types and traits for Boomerang
 
     pub use super::builder::{
-        BuilderError, BuilderFqn, EnvBuilder, Input, Logical, Output, Physical, Reactor,
-        TimerActionKey, TypedActionKey, TypedPortKey,
+        BuilderError, BuilderFqn, BuilderRuntimeParts, EnvBuilder, Input, Logical, Output,
+        Physical, Reactor, TimerActionKey, TypedActionKey, TypedPortKey,
     };
 
-    pub use super::runtime::{self, ContextCommon, Duration, FromRefs};
+    pub use super::runtime::{self, CommonContext, Duration, FromRefs, Tag};
 
     pub use boomerang_derive::{Reaction, Reactor};
 }

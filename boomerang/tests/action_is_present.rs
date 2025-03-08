@@ -30,7 +30,7 @@ impl runtime::Trigger<ActionIsPresentState> for ReactionStartup<'_> {
         if !self.a.is_present(ctx) {
             assert!(!state.success, "Unexpected");
             println!("Hello startup!");
-            self.a.schedule(ctx, (), Some(Duration::nanoseconds(1)));
+            ctx.schedule_action(&mut self.a, (), Some(Duration::nanoseconds(1)));
         } else {
             println!("Hello a!");
             state.success = true;
@@ -52,15 +52,14 @@ impl runtime::Trigger<ActionIsPresentState> for ReactionShutdown {
 fn action_is_present() {
     tracing_subscriber::fmt::init();
     let config = runtime::Config::default().with_fast_forward(true);
-    let (_, sched) = boomerang_util::runner::build_and_test_reactor::<ActionIsPresent>(
+    let (_, envs) = boomerang_util::runner::build_and_test_reactor::<ActionIsPresent>(
         "action_is_present",
         ActionIsPresentState::default(),
         config,
     )
     .unwrap();
 
-    let env = sched.into_env();
-    let state = env
+    let state = envs[0]
         .find_reactor_by_name("action_is_present")
         .and_then(|reactor| reactor.get_state::<ActionIsPresentState>())
         .unwrap();

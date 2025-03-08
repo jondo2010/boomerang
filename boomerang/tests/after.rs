@@ -90,9 +90,9 @@ impl runtime::Trigger<PrintState> for ReactionPrintShutdown<'_> {
     connection(from = "f.y", to = "p.x", after = "10 msec")
 )]
 struct Main {
-    #[reactor(child = "()")]
+    #[reactor(child(state = ()))]
     f: Foo,
-    #[reactor(child = "PrintState::default()")]
+    #[reactor(child(state = PrintState::default()))]
     p: Print,
     #[reactor(timer(period = "1 sec"))]
     t: TimerActionKey,

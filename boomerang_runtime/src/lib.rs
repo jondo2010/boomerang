@@ -22,12 +22,16 @@ pub use ::time::Duration;
 
 pub use action::{Action, ActionCommon, ActionKey, ActionRef, AsyncActionRef, BaseAction};
 pub use context::*;
+pub use crossbeam_channel::{Receiver, Sender};
 use downcast_rs::Downcast;
-pub use env::{BankInfo, Env, Level, LevelReactionKey, ReactionGraph};
+pub use env::{
+    crosslink_enclaves, BankInfo, Enclave, EnclaveKey, Env, Level, LevelReactionKey, ReactionGraph,
+};
 pub use key_set::KeySetLimits as ReactionSetLimits;
 pub use port::*;
 pub use reaction::{
-    BoxedReactionFn, Deadline, FromRefs, Reaction, ReactionAdapter, ReactionFn, ReactionKey,
+    BoxedReactionFn, ConnectionReceiverReactionFn, ConnectionSenderReactionFn, Deadline,
+    EnclaveSenderReactionFn, FromRefs, Reaction, ReactionAdapter, ReactionFn, ReactionKey,
     ReactionSet, Trigger,
 };
 pub use reactor::*;

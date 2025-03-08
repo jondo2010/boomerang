@@ -22,7 +22,7 @@ mod reactor {
     )]
     pub struct SnakeBuilder {
         /// this thing helps capturing key presses
-        #[reactor(child= KeyboardEvents::default())]
+        #[reactor(child(state = KeyboardEvents::default()))]
         keyboard: KeyboardEventsBuilder,
 
         /// Triggers a screen refresh, not a timer because we can
@@ -92,8 +92,11 @@ mod reactor {
             output::paint_on_raw_console(&state.grid);
 
             // schedule the first one, then it reschedules itself.
-            self.screen_refresh
-                .schedule(ctx, (), Some(Duration::milliseconds(1000)));
+            ctx.schedule_action(
+                &mut self.screen_refresh,
+                (),
+                Some(Duration::milliseconds(1000)),
+            );
         }
     }
 
@@ -113,7 +116,7 @@ mod reactor {
             // select a delay depending on the tempo
             let delay = Duration::milliseconds(400)
                 - (state.tempo_step * state.tempo).min(Duration::milliseconds(300));
-            self.screen_refresh.schedule(ctx, (), Some(delay));
+            ctx.schedule_action(&mut self.screen_refresh, (), Some(delay));
         }
     }
 
@@ -145,7 +148,7 @@ mod reactor {
                 UpdateResult::FoodEaten => {
                     state.food_on_grid -= 1;
                     if state.food_on_grid == 0 {
-                        self.manually_add_more_food.schedule(ctx, (), None);
+                        ctx.schedule_action(&mut self.manually_add_more_food, (), None);
                     }
                     state.tempo += 1;
                 }

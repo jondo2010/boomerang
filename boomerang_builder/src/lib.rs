@@ -14,8 +14,8 @@ mod reactor;
 #[cfg(test)]
 pub mod tests;
 
-#[cfg(feature = "graphviz")]
-pub mod graphviz;
+//#[cfg(feature = "graphviz")]
+//pub mod graphviz;
 #[cfg(feature = "graphviz")]
 pub mod plantuml;
 
@@ -78,10 +78,10 @@ pub enum BuilderError {
     #[error("A cycle in the Reactor graph was found.")]
     ReactorGraphCycle { what: BuilderReactorKey },
 
-    #[error("Error binding ports ({:?}->{:?}): {}", port_a_key, port_b_key, what)]
+    #[error("Error binding ports ({source_key:?}->{target_key:?}): {what}")]
     PortConnectionError {
-        port_a_key: BuilderPortKey,
-        port_b_key: BuilderPortKey,
+        source_key: BuilderPortKey,
+        target_key: BuilderPortKey,
         what: String,
     },
 
@@ -102,30 +102,4 @@ impl From<std::convert::Infallible> for BuilderError {
     fn from(_: std::convert::Infallible) -> Self {
         unreachable!()
     }
-}
-
-/// A macro to create a new reaction closure.
-#[macro_export]
-macro_rules! reaction_closure {
-    // empty closure case
-    () => {
-        Box::new(runtime::reaction::empty_reaction)
-    };
-    // closure with body
-    ( $ctx:ident, $reactor:ident, $ref_ports:ident, $mut_ports:ident, $actions:ident => $body:block ) => {
-        Box::new(
-            move |$ctx: &mut runtime::Context,
-                  $reactor: &mut dyn runtime::BaseReactor,
-                  $ref_ports: runtime::Refs<dyn runtime::BasePort>,
-                  $mut_ports: runtime::RefsMut<dyn runtime::BasePort>,
-                  $actions: runtime::RefsMut<dyn runtime::BaseAction>| { $body },
-        )
-    };
-}
-
-#[test]
-fn test_reaction_closure() {
-    let _closure = reaction_closure!(ctx, _state, _ref_ports, _mut_ports, _actions => {
-        ctx.get_elapsed_logical_time();
-    });
 }

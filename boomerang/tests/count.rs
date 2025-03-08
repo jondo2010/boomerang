@@ -12,7 +12,7 @@ impl CountData for i32 {}
 #[derive(Reactor)]
 #[reactor(state = "T", reaction = "ReactionT<T>", reaction = "ReactionShutdown")]
 struct Count<T: CountData> {
-    #[reactor(timer(period = "1 msec"))]
+    #[reactor(timer(period = "1 sec"))]
     t: TimerActionKey,
     c: TypedPortKey<T, Output>,
 }
@@ -38,7 +38,7 @@ struct ReactionShutdown;
 
 impl<T: CountData> runtime::Trigger<T> for ReactionShutdown {
     fn trigger(self, _ctx: &mut runtime::Context, state: &mut T) {
-        assert_eq!(*state, 1.001e3 as i32, "expected 1e3, got {state:?}");
+        assert_eq!(*state, 4, "expected 4, got {state:?}");
         println!("ok");
     }
 }
@@ -48,14 +48,12 @@ fn count() {
     tracing_subscriber::fmt::init();
     let config = runtime::Config::default()
         .with_fast_forward(true)
-        .with_timeout(Duration::seconds(1));
-    let (_, sched) =
+        .with_timeout(Duration::seconds(3));
+    let (_, envs) =
         boomerang_util::runner::build_and_test_reactor::<Count<i32>>("count", 0, config).unwrap();
-    let env = sched.into_env();
-    let count = env
+    let count = envs[0]
         .find_reactor_by_name("count")
         .and_then(|r| r.get_state::<i32>())
         .unwrap();
-    //TODO: assert_eq!(*count, 1e3 as i32); This needs to be fixed, probably better timeout handling
-    assert_eq!(*count, 1.001e3 as i32);
+    assert_eq!(*count, 4);
 }

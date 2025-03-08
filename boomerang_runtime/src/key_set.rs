@@ -61,6 +61,15 @@ impl<K: tinymap::Key> KeySet<K> {
         }
     }
 
+    pub fn merge(&mut self, other: &Self) {
+        self.levels
+            .iter_mut()
+            .zip(other.levels.iter())
+            .for_each(|(lhs, rhs)| {
+                lhs.extend(rhs.iter());
+            });
+    }
+
     /// Returns a view of the levels in the set, starting at level 0.
     pub fn view(&mut self) -> KeySetView<'_, K> {
         KeySetView {
@@ -249,6 +258,46 @@ mod tests {
                 }
                 Level(5) => {
                     itertools::assert_equal(keys, vec![key2]);
+                    expected_level = Level(6);
+                }
+                _ => unreachable!(),
+            }
+        });
+    }
+
+    #[test]
+    fn test_merge() {
+        let limits = KeySetLimits {
+            max_level: Level(5),
+            num_keys: 10,
+        };
+
+        let mut rset1 = KeySet::new(&limits);
+        let mut rset2 = KeySet::new(&limits);
+
+        let key0 = DefaultKey::from(0);
+        let key1 = DefaultKey::from(1);
+        let key2 = DefaultKey::from(2);
+
+        rset1.extend_above([(Level(0), key0), (Level(3), key1)]);
+        rset2.extend_above([(Level(1), key2)]);
+
+        rset1.merge(&rset2);
+
+        let mut expected_level = Level(0);
+        rset1.view().for_each_level(|level, keys, _remaining| {
+            assert_eq!(level, expected_level);
+            match expected_level {
+                Level(0) => {
+                    itertools::assert_equal(keys, vec![key0]);
+                    expected_level = Level(1);
+                }
+                Level(1) => {
+                    itertools::assert_equal(keys, vec![key2]);
+                    expected_level = Level(3);
+                }
+                Level(3) => {
+                    itertools::assert_equal(keys, vec![key1]);
                     expected_level = Level(6);
                 }
                 _ => unreachable!(),

@@ -4,7 +4,7 @@ use std::{marker::PhantomPinned, pin::Pin, ptr::NonNull};
 
 use crate::{
     refs::{Refs, RefsMut},
-    ActionKey, BaseAction, BasePort, BaseReactor, Context, ContextCommon, Deadline, PortKey,
+    ActionKey, BaseAction, BasePort, BaseReactor, CommonContext, Context, Deadline, PortKey,
     Reaction, ReactionKey, ReactorData, ReactorKey, Tag, TriggerRes,
 };
 
@@ -20,7 +20,6 @@ pub struct ReactionTriggerCtx<'store> {
     pub mut_ports: RefsMut<'store, dyn BasePort>,
 }
 
-#[cfg(feature = "parallel")]
 unsafe impl Send for ReactionTriggerCtx<'_> {}
 
 impl<'a> From<&'a mut ReactionTriggerCtxPtrs> for ReactionTriggerCtx<'a> {
@@ -46,12 +45,9 @@ impl<'a> From<&'a mut ReactionTriggerCtxPtrs> for ReactionTriggerCtx<'a> {
 
 impl<'a> ReactionTriggerCtx<'a> {
     /// Trigger the reaction with the given context and state.
+    #[tracing::instrument(level = "trace", skip(self, tag), fields(reactor = self.reactor.name(), reaction = self.reaction.get_name()))]
     pub(crate) fn trigger(self, tag: Tag) -> &'a TriggerRes {
-        tracing::trace!(
-            "    Executing {reactor_name}/{reaction_name}.",
-            reaction_name = self.reaction.get_name(),
-            reactor_name = self.reactor.name()
-        );
+        tracing::trace!("Exec");
 
         if let Some(Deadline { deadline, handler }) = self.reaction.deadline.as_ref() {
             let lag = self.context.get_physical_time() - self.context.get_logical_time();
@@ -100,7 +96,6 @@ impl Default for ReactionTriggerCtxPtrs {
     }
 }
 
-#[cfg(feature = "parallel")]
 unsafe impl Send for ReactionTriggerCtxPtrs {}
 
 #[derive(Debug)]
@@ -127,6 +122,8 @@ impl Store {
         contexts: tinymap::TinySecondaryMap<ReactionKey, Context>,
         reaction_graph: &ReactionGraph,
     ) -> Pin<Box<Self>> {
+        debug_assert!(contexts.len() == env.reactions.len());
+
         // Create a default `ReactionTriggerCtxPtrs` for each reaction
         let ptrs = env
             .reactions
@@ -294,7 +291,7 @@ impl Store {
 pub mod tests {
     use itertools::Itertools;
 
-    use crate::{action::ActionCommon, keepalive, ActionRef, InputRef, OutputRef};
+    use crate::{action::ActionCommon, keepalive, ActionRef, EnclaveKey, InputRef, OutputRef};
 
     use super::*;
 
@@ -307,7 +304,13 @@ pub mod tests {
 
         let contexts = [(
             reaction_key,
-            Context::new(std::time::Instant::now(), None, event_tx, shutdown_rx),
+            Context::new(
+                EnclaveKey::default(),
+                std::time::Instant::now(),
+                None,
+                event_tx,
+                shutdown_rx,
+            ),
         )]
         .into_iter()
         .collect();

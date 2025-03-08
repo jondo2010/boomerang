@@ -12,7 +12,9 @@ categories.workspace = true
 exclude.workspace = true
 
 [features]
-default = []
+default = [
+    #"parallel"
+]
 
 ## Support for parallel execution
 parallel = ["dep:rayon"]
@@ -45,4 +47,8 @@ serde = { workspace = true, optional = true, features = ["derive"] }
 thiserror.workspace = true
 time.workspace = true
 tinymap.workspace = true
-tracing = { workspace = true }
+tracing.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
+tracing-tracy.workspace = true

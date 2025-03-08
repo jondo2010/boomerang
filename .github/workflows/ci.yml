@@ -37,7 +37,9 @@ jobs:
       - name: toolchain version
         run: cargo -vV
 
-      - uses: giraffate/clippy-action@v1
+      - name: Clippy
+        if: github.event_name == 'pull_request'
+        uses: giraffate/clippy-action@v1
         with:
           reporter: "github-pr-review"
           github_token: ${{ secrets.GITHUB_TOKEN }}

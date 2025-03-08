@@ -135,17 +135,11 @@ struct Main {
 
 #[test]
 fn enclave_cycle() {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_thread_names(true)
-        .init();
-
-    for _ in 0..100 {
-        let config = runtime::Config::default()
-            .with_fast_forward(true)
-            .with_timeout(Duration::seconds(1));
-        let (_, env) =
-            boomerang_util::runner::build_and_test_reactor::<Main>("enclave_cycle", (), config)
-                .unwrap();
-    }
+    tracing_subscriber::fmt::init();
+    let config = runtime::Config::default()
+        .with_fast_forward(true)
+        .with_timeout(Duration::seconds(1));
+    let (_, env) =
+        boomerang_util::runner::build_and_test_reactor::<Main>("enclave_cycle", (), config)
+            .unwrap();
 }

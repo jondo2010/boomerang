@@ -223,10 +223,13 @@ impl SnakeGrid {
 
 pub mod output {
     use super::*;
-    use std::io::{Result, Write};
     use crossterm::{
-        cursor::MoveTo, execute, style::Stylize, terminal::{Clear, ClearType}
+        cursor::MoveTo,
+        execute,
+        style::Stylize,
+        terminal::{Clear, ClearType},
     };
+    use std::io::{Result, Write};
 
     pub fn paint_on_raw_console(grid: &SnakeGrid) {
         let str = format_for_raw_console(grid).unwrap();
@@ -265,14 +268,14 @@ pub mod output {
                     CellState::Food => "x ",
                     CellState::Free => "  ",
                 };
-                
+
                 // Colorize text based on cell state
                 let colored_str = match grid[cell(row, col)] {
                     CellState::SnakeHead | CellState::Snake => cell_str.green(),
                     CellState::Food => cell_str.yellow(),
                     CellState::Free => cell_str.reset(),
                 };
-                
+
                 buf.push_str(&format!("{}", colored_str));
             }
             buf.push_str("|\n\r");

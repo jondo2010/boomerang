@@ -73,22 +73,20 @@ impl runtime::Trigger<KeyboardEvents> for ReactionStartup {
 
         let mut send_ctx = ctx.make_send_context();
 
-        std::thread::spawn(move || {
-            loop {
-                if let Ok(Event::Key(key_event)) = event::read() {
-                    match (key_event.code, key_event.modifiers) {
-                        (KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down, _) => {
-                            tracing::debug!("received {:?}", key_event);
-                            send_ctx.schedule_action_async(&self.key_press, key_event, None);
-                        }
-                        (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                            tracing::debug!("Ctrl-C received, shutting down.");
-                            send_ctx.schedule_shutdown(None);
-                            break;
-                        }
-                        _ => {
-                            tracing::trace!("received {:?}", key_event);
-                        }
+        std::thread::spawn(move || loop {
+            if let Ok(Event::Key(key_event)) = event::read() {
+                match (key_event.code, key_event.modifiers) {
+                    (KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down, _) => {
+                        tracing::debug!("received {:?}", key_event);
+                        send_ctx.schedule_action_async(&self.key_press, key_event, None);
+                    }
+                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                        tracing::debug!("Ctrl-C received, shutting down.");
+                        send_ctx.schedule_shutdown(None);
+                        break;
+                    }
+                    _ => {
+                        tracing::trace!("received {:?}", key_event);
                     }
                 }
             }

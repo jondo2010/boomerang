@@ -1,14 +1,11 @@
-#[cfg(not(windows))]
+mod keyboard_events;
 mod support;
 
-#[cfg(not(windows))]
-mod keyboard_events;
-
-#[cfg(not(windows))]
 mod reactor {
     use super::support::*;
-    use crate::keyboard_events::{Key, KeyboardEvents, KeyboardEventsBuilder};
+    use crate::keyboard_events::{KeyboardEvents, KeyboardEventsBuilder};
     use boomerang::prelude::*;
+    use crossterm::event::{KeyCode, KeyEvent};
 
     #[derive(Reactor)]
     #[reactor(
@@ -163,7 +160,7 @@ mod reactor {
     #[reaction(reactor = "SnakeBuilder")]
     struct ReactionKeyboard<'a> {
         #[reaction(path = "keyboard.arrow_key_pressed")]
-        arrow_key_pressed: runtime::InputRef<'a, Key>,
+        arrow_key_pressed: runtime::InputRef<'a, KeyEvent>,
     }
 
     impl runtime::Trigger<Snake> for ReactionKeyboard<'_> {
@@ -173,11 +170,11 @@ mod reactor {
             state: &mut <SnakeBuilder as Reactor>::State,
         ) {
             // this might be overwritten several times, only committed on screen refreshes
-            state.pending_direction = match self.arrow_key_pressed.unwrap() {
-                Key::Left => Direction::Left,
-                Key::Right => Direction::Right,
-                Key::Up => Direction::Up,
-                Key::Down => Direction::Down,
+            state.pending_direction = match self.arrow_key_pressed.as_ref().map(|k| k.code) {
+                Some(KeyCode::Left) => Direction::Left,
+                Some(KeyCode::Right) => Direction::Right,
+                Some(KeyCode::Up) => Direction::Up,
+                Some(KeyCode::Down) => Direction::Down,
                 _ => unreachable!(),
             };
         }
@@ -223,7 +220,6 @@ mod reactor {
     }
 }
 
-#[cfg(not(windows))]
 fn main() {
     use reactor::{Snake, SnakeBuilder};
     let _ = boomerang_util::runner::build_and_run_reactor::<SnakeBuilder>(
@@ -232,6 +228,3 @@ fn main() {
     )
     .unwrap();
 }
-
-#[cfg(windows)]
-fn main() {}

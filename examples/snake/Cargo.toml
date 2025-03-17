@@ -13,10 +13,8 @@ boomerang_util = { workspace = true, features = ["runner"] }
 tracing = { workspace = true }
 
 # Deps for Snake example
-[target.'cfg(not(windows))'.dependencies]
 rand = { version = "0.8" }
-termcolor = { version = "1.2" }
-termion = { version = "2.0" }
+crossterm = { version = "0.28"}
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

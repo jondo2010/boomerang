@@ -223,48 +223,35 @@ impl SnakeGrid {
 
 pub mod output {
     use super::*;
-    use std::io::{Error, ErrorKind, Result, Write};
-    use termcolor::{Buffer, BufferWriter, Color, ColorChoice, ColorSpec, WriteColor};
+    use crossterm::{
+        cursor::MoveTo,
+        execute,
+        style::Stylize,
+        terminal::{Clear, ClearType},
+    };
+    use std::io::{Result, Write};
 
     pub fn paint_on_raw_console(grid: &SnakeGrid) {
         let str = format_for_raw_console(grid).unwrap();
-        let stdout = std::io::stdout();
-        let mut stdout = stdout.lock();
+        let mut stdout = std::io::stdout();
 
-        // this escape char clears the terminal
-        write!(stdout, "\x1B[2J\n\r{}", str).unwrap();
+        // Clear the terminal and write the new grid
+        execute!(stdout, Clear(ClearType::All), MoveTo(0, 0)).unwrap();
+        write!(stdout, "{}", str).unwrap();
         stdout.flush().unwrap();
     }
 
-    fn print_fence(buf: &mut Buffer, side: usize) -> Result<()> {
-        write!(buf, "+")?;
+    fn print_fence(buf: &mut String, side: usize) -> Result<()> {
+        buf.push('+');
         for _ in 0..side {
-            write!(buf, "~~")?;
+            buf.push_str("~~");
         }
-        write!(buf, "+\n\r")
-    }
-
-    fn write_colored(buf: &mut Buffer, string: &str, color: &ColorSpec) -> Result<()> {
-        buf.set_color(color)?;
-        write!(buf, "{}", string)?;
-        buf.set_color(&ColorSpec::new())
+        buf.push_str("+\n\r");
+        Ok(())
     }
 
     fn format_for_raw_console(grid: &SnakeGrid) -> Result<String> {
-        let bufwtr = BufferWriter::stdout(ColorChoice::Always);
-        let mut buf = bufwtr.buffer();
-
-        let snake_color = {
-            let mut it = ColorSpec::new();
-            it.set_fg(Some(Color::Green));
-            it
-        };
-
-        let food_color = {
-            let mut it = ColorSpec::new();
-            it.set_fg(Some(Color::Yellow));
-            it
-        };
+        let mut buf = String::new();
 
         print_fence(&mut buf, grid.grid_side())?;
 
@@ -273,20 +260,29 @@ pub mod output {
         // way vertical/horizontal speed is not warped.
 
         for row in 0..grid.grid_side() {
-            write!(&mut buf, "|").unwrap();
+            buf.push('|');
             for col in 0..grid.grid_side() {
-                match grid[cell(row, col)] {
-                    CellState::SnakeHead => write_colored(&mut buf, "@ ", &snake_color)?,
-                    CellState::Snake => write_colored(&mut buf, "o ", &snake_color)?,
-                    CellState::Food => write_colored(&mut buf, "x ", &food_color)?,
-                    CellState::Free => write!(&mut buf, "  ")?,
-                }
+                let cell_str = match grid[cell(row, col)] {
+                    CellState::SnakeHead => "@ ",
+                    CellState::Snake => "o ",
+                    CellState::Food => "x ",
+                    CellState::Free => "  ",
+                };
+
+                // Colorize text based on cell state
+                let colored_str = match grid[cell(row, col)] {
+                    CellState::SnakeHead | CellState::Snake => cell_str.green(),
+                    CellState::Food => cell_str.yellow(),
+                    CellState::Free => cell_str.reset(),
+                };
+
+                buf.push_str(&format!("{}", colored_str));
             }
-            write!(&mut buf, "|\n\r")?;
+            buf.push_str("|\n\r");
         }
 
         print_fence(&mut buf, grid.grid_side())?;
 
-        String::from_utf8(buf.into_inner()).map_err(|e| Error::new(ErrorKind::Other, e))
+        Ok(buf)
     }
 }

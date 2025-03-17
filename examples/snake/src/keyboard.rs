@@ -2,15 +2,21 @@
 //!
 //! Pressing arrow keys will print them to the terminal.
 
-#[cfg(not(windows))]
+#[cfg(any(unix, windows))]
 mod keyboard_events;
 
-#[cfg(not(windows))]
+#[cfg(any(unix, windows))]
 mod example {
     use std::io::Write;
 
     use crate::keyboard_events::{KeyboardEvents, KeyboardEventsBuilder};
     use boomerang::prelude::*;
+    use crossterm::{
+        cursor::MoveLeft,
+        event::{KeyCode, KeyEvent},
+        execute,
+        terminal::{Clear, ClearType},
+    };
 
     /// A simple Reactor that triggers on key_press events.
     /// It reads keyboard input and prints the key that was pressed.
@@ -26,31 +32,30 @@ mod example {
     #[reaction(reactor = "Example")]
     struct ReactionKeyPress<'a> {
         #[reaction(path = "keyboard.arrow_key_pressed")]
-        arrow_key_pressed: runtime::InputRef<'a, termion::event::Key>,
+        arrow_key_pressed: runtime::InputRef<'a, KeyEvent>,
     }
 
     impl runtime::Trigger<()> for ReactionKeyPress<'_> {
         fn trigger(self, _ctx: &mut runtime::Context, _: &mut ()) {
-            let stdout = std::io::stdout();
-            let mut stdout = stdout.lock();
+            let mut stdout = std::io::stdout();
 
             // this might be overwritten several times, only committed on screen refreshes
-            let c = match *self.arrow_key_pressed {
-                Some(termion::event::Key::Left) => '←',
-                Some(termion::event::Key::Right) => '→',
-                Some(termion::event::Key::Up) => '↑',
-                Some(termion::event::Key::Down) => '↓',
+            let c = match self.arrow_key_pressed.as_ref().map(|k| k.code) {
+                Some(KeyCode::Left) => '←',
+                Some(KeyCode::Right) => '→',
+                Some(KeyCode::Up) => '↑',
+                Some(KeyCode::Down) => '↓',
                 _ => unreachable!(),
             };
 
             // Move cursor back one position and clear the last character
-            write!(stdout, "\x1B[1D\x1B[K{c}").unwrap();
+            execute!(stdout, MoveLeft(1), Clear(ClearType::UntilNewLine)).unwrap();
+            write!(stdout, "{c}").unwrap();
             stdout.flush().unwrap();
         }
     }
 }
 
-#[cfg(not(windows))]
 fn main() {
     use boomerang::prelude::*;
     tracing_subscriber::fmt::init();
@@ -71,6 +76,3 @@ fn main() {
     let mut sched = runtime::Scheduler::new(enclave_key, enclave, config);
     sched.event_loop();
 }
-
-#[cfg(windows)]
-fn main() {}

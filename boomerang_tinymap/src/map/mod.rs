@@ -178,6 +178,11 @@ impl<K: Key, V> TinyMap<K, V> {
             _k: PhantomData,
         }
     }
+
+    /// Returns a reference to the value corresponding to the key.
+    pub fn get(&self, key: K) -> Option<&V> {
+        self.data.get(key.index())
+    }
 }
 
 impl<K: Key, V> FromIterator<V> for TinyMap<K, V> {

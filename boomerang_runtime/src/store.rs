@@ -299,7 +299,7 @@ pub mod tests {
     pub fn create_dummy_store(env: Env, reaction_graph: &ReactionGraph) -> Pin<Box<Store>> {
         let reaction_key = env.reactions.keys().next().unwrap();
 
-        let (event_tx, _) = crossbeam_channel::bounded(0);
+        let (event_tx, _) = kanal::bounded(0);
         let (_, shutdown_rx) = keepalive::channel();
 
         let contexts = [(

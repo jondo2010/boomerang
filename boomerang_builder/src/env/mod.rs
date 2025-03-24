@@ -73,6 +73,12 @@ pub struct EnvBuilder {
     pub(super) reactor_builders: SlotMap<BuilderReactorKey, ReactorBuilder>,
     /// Builders for Connections
     pub(super) connection_builders: Vec<Box<dyn BaseConnectionBuilder>>,
+    #[cfg(feature = "replay")]
+    /// Builders for Replay functions
+    pub(super) replay_builders: SecondaryMap<
+        BuilderActionKey,
+        Box<dyn FnOnce(&BuilderRuntimeParts) -> Box<dyn runtime::replay::ReplayFn>>,
+    >,
 }
 
 impl EnvBuilder {
@@ -257,6 +263,29 @@ impl EnvBuilder {
         )
     }
 
+    /// Add a replay function for a given Action
+    #[cfg(feature = "replay")]
+    pub fn add_replayer<T, Q, F>(
+        &mut self,
+        action_key: TypedActionKey<T, Q>,
+        replayer_builder_fn: F,
+    ) -> Result<(), BuilderError>
+    where
+        T: boomerang_runtime::ReactorData + for<'de> serde::Deserialize<'de>,
+        Q: ActionTag,
+        F: FnOnce(&BuilderRuntimeParts) -> Box<dyn runtime::replay::ReplayFn> + 'static,
+    {
+        let action_key = action_key.into();
+        if self.replay_builders.contains_key(action_key) {
+            return Err(BuilderError::ReplayKeyAlreadyExists(action_key));
+        }
+
+        self.replay_builders
+            .insert(action_key, Box::new(replayer_builder_fn));
+
+        Ok(())
+    }
+
     /// Get a previously built action
     pub fn get_action(&self, action_key: BuilderActionKey) -> Result<&ActionBuilder, BuilderError> {
         self.action_builders
@@ -367,7 +396,8 @@ impl EnvBuilder {
             .ok_or_else(|| BuilderError::NamedActionNotFound(action_fqn.to_string()))
     }
 
-    /// Find a possible common parent Reactor for two Reactor elements in the EnvBuilder (if it exists).
+    /// Find a possible common parent Reactor for two Reactor elements in the EnvBuilder (if it
+    /// exists).
     pub fn common_reactor_key<E0, E1>(&self, e0: &E0, e1: &E1) -> Option<BuilderReactorKey>
     where
         E0: ParentReactorBuilder,
@@ -395,8 +425,10 @@ impl EnvBuilder {
     /// * `target_key` - The key of the second port to connect
     /// * `after` - An optional delay to wait before triggering the downstream ports.
     /// * `physical` - Whether the connection is physical (or logical).
-    ///     * Logical connections will trigger any downstream ports at the current logical time (with any `after` delay).
-    ///     * Physical connections will trigger the downstream ports at the current physical time (with any `after` delay).
+    ///     * Logical connections will trigger any downstream ports at the current logical time
+    ///       (with any `after` delay).
+    ///     * Physical connections will trigger the downstream ports at the current physical time
+    ///       (with any `after` delay).
     pub fn add_port_connection<T, P1, P2>(
         &mut self,
         source_key: P1,

@@ -49,10 +49,13 @@ pub trait CommonContext {
     /// Schedule a shutdown event at some future time.
     fn schedule_shutdown(&mut self, offset: Option<Duration>);
 
-    /// Schedule an asynchronous event
+    /// Schedule an event externally by sending it to the scheduler through a channel.
     ///
     /// Returns true if the event was successfully scheduled, false if the channel was disconnected.
-    fn schedule_async(&self, event: AsyncEvent) -> bool;
+    fn schedule_external(&self, event: AsyncEvent) -> bool;
+
+    /// Schedule an event externally by sending it to the scheduler through a channel.
+    async fn schedule_external_async(&self, event: AsyncEvent) -> bool;
 
     /// Try to schedule an asynchronous event without blocking
     ///
@@ -84,11 +87,11 @@ pub trait CommonContext {
             AsyncEvent::physical(action.key(), time, value)
         };
 
-        self.schedule_async(event)
+        self.schedule_external(event)
     }
 
     fn release_provisional(&self, enclave: EnclaveKey, tag: Tag) -> bool {
-        self.schedule_async(AsyncEvent::provisional(enclave, tag))
+        self.schedule_external(AsyncEvent::provisional(enclave, tag))
     }
 }
 
@@ -221,11 +224,18 @@ impl CommonContext for Context {
 
     /// Schedule an asynchronous event
     #[tracing::instrument(skip(self), fields(enclave = %self.enclave_id(), event = %event))]
-    fn schedule_async(&self, event: AsyncEvent) -> bool {
+    fn schedule_external(&self, event: AsyncEvent) -> bool {
         if self.shutdown_rx.is_shutdwon() {
             return false;
         }
         self.async_tx.send(event).is_ok()
+    }
+
+    async fn schedule_external_async(&self, event: AsyncEvent) -> bool {
+        if self.is_shutdown() {
+            return false;
+        }
+        self.async_tx.as_async().send(event).await.is_ok()
     }
 
     fn try_schedule_async(&self, event: AsyncEvent) -> Option<bool> {
@@ -264,13 +274,20 @@ impl CommonContext for SendContext {
         self.async_tx.send(event).unwrap();
     }
 
-    /// Send an asynchronous event to the scheduler.
+    /// Send an external event to the scheduler.
     #[tracing::instrument(skip(self), fields(enclave = %self.enclave_id(), event = %event))]
-    fn schedule_async(&self, event: AsyncEvent) -> bool {
+    fn schedule_external(&self, event: AsyncEvent) -> bool {
         if self.is_shutdown() {
             return false;
         }
         self.async_tx.send(event).is_ok()
+    }
+
+    async fn schedule_external_async(&self, event: AsyncEvent) -> bool {
+        if self.is_shutdown() {
+            return false;
+        }
+        self.async_tx.as_async().send(event).await.is_ok()
     }
 
     fn try_schedule_async(&self, event: AsyncEvent) -> Option<bool> {

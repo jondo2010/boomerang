@@ -28,6 +28,11 @@ parallel = ["boomerang_runtime/parallel"]
 ## Support generating graphviz diagrams from reactor models
 graphviz = ["boomerang_builder/graphviz"]
 
+## Support for recording and replaying
+replay = [
+    "boomerang_runtime/replay",
+]
+
 [dependencies]
 document-features = { workspace = true }
 thiserror.workspace = true

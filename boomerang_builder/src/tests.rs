@@ -105,7 +105,11 @@ fn test_reactions1() {
         vec![r0_key, r1_key]
     );
 
-    let BuilderRuntimeParts { enclaves, aliases } = env_builder.into_runtime_parts().unwrap();
+    let BuilderRuntimeParts {
+        enclaves,
+        aliases,
+        replayers: _,
+    } = env_builder.into_runtime_parts().unwrap();
     let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();
     let r0_key = aliases.reaction_aliases[r0_key].1;
     let r1_key = aliases.reaction_aliases[r1_key].1;
@@ -149,7 +153,11 @@ fn test_actions1() {
         .unwrap();
 
     let _reactor_key = reactor_builder.finish().unwrap();
-    let BuilderRuntimeParts { enclaves, aliases } = env_builder.into_runtime_parts().unwrap();
+    let BuilderRuntimeParts {
+        enclaves,
+        aliases,
+        replayers: _,
+    } = env_builder.into_runtime_parts().unwrap();
     let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();
 
     let reaction_a = aliases.reaction_aliases[reaction_a].1;
@@ -241,7 +249,11 @@ fn test_nested_reactor() {
         )
         .unwrap();
 
-    let BuilderRuntimeParts { enclaves, aliases } = env_builder.into_runtime_parts().unwrap();
+    let BuilderRuntimeParts {
+        enclaves,
+        aliases,
+        replayers: _,
+    } = env_builder.into_runtime_parts().unwrap();
     assert_eq!(enclaves.len(), 1);
 
     assert_eq!(
@@ -280,7 +292,11 @@ fn test_reaction_ports() -> anyhow::Result<()> {
         .finish()?;
     let _reactor_a = builder_a.finish()?;
 
-    let BuilderRuntimeParts { enclaves, aliases } = env_builder.into_runtime_parts().unwrap();
+    let BuilderRuntimeParts {
+        enclaves,
+        aliases,
+        replayers: _,
+    } = env_builder.into_runtime_parts().unwrap();
     assert_eq!(enclaves.len(), 1);
     let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();
 
@@ -419,7 +435,11 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
 
     builder_main.finish()?;
 
-    let BuilderRuntimeParts { enclaves, aliases } = env_builder.into_runtime_parts()?;
+    let BuilderRuntimeParts {
+        enclaves,
+        aliases,
+        replayers: _,
+    } = env_builder.into_runtime_parts()?;
     assert_eq!(enclaves.len(), 1);
     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
 
@@ -630,7 +650,11 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
     let reaction_sink_clock_key =
         env_builder.find_reaction_by_name("reaction_clock", sink_reactor)?;
 
-    let BuilderRuntimeParts { enclaves, aliases } = env_builder.into_runtime_parts()?;
+    let BuilderRuntimeParts {
+        enclaves,
+        aliases,
+        replayers: _,
+    } = env_builder.into_runtime_parts()?;
     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
 
     // the Source startup reaction should trigger on startup and effect the clock port
@@ -877,6 +901,7 @@ fn test_enclave2() {
     let BuilderRuntimeParts {
         enclaves,
         aliases: _,
+        replayers: _,
     } = env_builder.into_runtime_parts().unwrap();
     assert_eq!(enclaves.len(), 3);
 
@@ -981,7 +1006,11 @@ fn test_port_binding() {
         .add_port_connection::<(), _, _>(o1, i2b, None, false)
         .unwrap();
 
-    let BuilderRuntimeParts { enclaves, aliases } = env_builder.into_runtime_parts().unwrap();
+    let BuilderRuntimeParts {
+        enclaves,
+        aliases,
+        replayers: _,
+    } = env_builder.into_runtime_parts().unwrap();
     assert_eq!(enclaves.len(), 1);
     let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();
     assert_eq!(enclave.env.reactors.len(), 4);

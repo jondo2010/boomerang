@@ -13,6 +13,8 @@ pub mod port;
 pub mod reaction;
 mod reactor;
 mod refs;
+#[cfg(feature = "replay")]
+pub mod replay;
 mod sched;
 pub mod store;
 mod time;
@@ -22,11 +24,11 @@ pub use ::time::Duration;
 
 pub use action::{Action, ActionCommon, ActionKey, ActionRef, AsyncActionRef, BaseAction};
 pub use context::*;
-pub use crossbeam_channel::{Receiver, Sender};
 use downcast_rs::Downcast;
 pub use env::{
     crosslink_enclaves, BankInfo, Enclave, EnclaveKey, Env, Level, LevelReactionKey, ReactionGraph,
 };
+pub use kanal::{Receiver, Sender};
 pub use key_set::KeySetLimits as ReactionSetLimits;
 pub use port::*;
 pub use reaction::{
@@ -59,6 +61,12 @@ pub enum RuntimeError {
 
     #[error("Destructuring error")]
     DestrError,
+
+    #[error("Encode error {error}")]
+    EncodeError { error: String },
+
+    #[error(transparent)]
+    ReplayError(#[from] replay::ReplayError),
 }
 
 pub mod fmt_utils {

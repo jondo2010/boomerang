@@ -28,7 +28,7 @@ pub struct KeyboardEventsBuilder {
     /// The latest key press.
     pub arrow_key_pressed: TypedPortKey<KeyEvent, Output>,
 
-    #[reactor(action(min_delay = "10 msec"))]
+    #[reactor(action(min_delay = "10 msec", replay = "record-replay"))]
     key_press: TypedActionKey<KeyEvent, Physical>,
 }
 

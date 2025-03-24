@@ -12,13 +12,16 @@ readme = "README.md"
 exclude.workspace = true
 
 [features]
-default = ["graphviz"]
+default = ["graphviz", "replay"]
 
 ## Support generating graphviz diagrams from reactor models
 graphviz = ["dep:graphviz-rust"]
 
 ## Support for tracing with Tracy
 tracy = ["tracing-tracy/enable"]
+
+## Support for recording and replaying events
+replay = ["dep:serde"]
 
 [dependencies]
 document-features = { workspace = true }
@@ -28,6 +31,7 @@ petgraph = "0.6"
 slotmap = { version = "1.0", features = ["unstable"] }
 thiserror.workspace = true
 tracing.workspace = true
+serde = { workspace = true, optional = true }
 
 boomerang_derive = { workspace = true, optional = true }
 boomerang_runtime = { workspace = true }

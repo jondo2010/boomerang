@@ -96,6 +96,9 @@ pub enum BuilderError {
 
     #[error(transparent)]
     IoError(#[from] std::io::Error),
+
+    #[error("ReplayKey already exists: {}", 0)]
+    ReplayKeyAlreadyExists(BuilderActionKey),
 }
 
 impl From<std::convert::Infallible> for BuilderError {

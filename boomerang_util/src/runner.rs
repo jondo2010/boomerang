@@ -86,6 +86,7 @@ pub fn build_and_test_reactor<R: Reactor>(
     let BuilderRuntimeParts {
         enclaves,
         aliases: _,
+        replayers: _,
     } = env_builder
         .into_runtime_parts()
         .context("Error building environment!")?;
@@ -121,15 +122,18 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
     let args = Args::parse();
 
     #[cfg(feature = "replay")]
-    if let Some(filename) = args.record_filename {
-        tracing::info!("Recording actions to {filename:?}");
-        crate::replay::inject_recorder(
-            &mut env_builder,
-            filename,
-            name,
-            args.record_actions.iter().map(|s| s.as_str()),
-        )?;
-    }
+    let recording_handle = match &args.record_filename {
+        Some(filename) => {
+            tracing::info!("Recording actions to {filename:?}");
+
+            let opts = runtime::replay::foxglove::McapWriteOptions::new()
+                .library(String::from("boomerang-") + env!("CARGO_PKG_VERSION"));
+            runtime::replay::foxglove::McapWriter::with_options(opts)
+                .create_new_buffered_file(filename)
+                .map(Some)?
+        }
+        None => None,
+    };
 
     if args.full_graph {
         //let gv = graphviz::create_full_graph(&env_builder).unwrap();
@@ -159,6 +163,7 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
     let BuilderRuntimeParts {
         enclaves,
         aliases: _,
+        replayers: _,
     } = env_builder
         .into_runtime_parts()
         .context("Error building environment!")?;
@@ -173,6 +178,11 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
     };
 
     let _envs_out = runtime::execute_enclaves(enclaves.into_iter(), config);
+
+    #[cfg(feature = "replay")]
+    if let Some(handle) = recording_handle {
+        handle.close()?;
+    }
 
     Ok(reactor)
 }

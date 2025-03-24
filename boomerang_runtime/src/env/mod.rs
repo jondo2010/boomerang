@@ -148,7 +148,8 @@ pub struct Enclave {
     pub event_tx: crate::Sender<AsyncEvent>,
     /// The event receiver for receiving events into the scheduler
     pub event_rx: crate::Receiver<AsyncEvent>,
-    /// The receivers from upstream enclaves for for granted tag advances, and the upstream `SendContext`
+    /// The receivers from upstream enclaves for for granted tag advances, and the upstream
+    /// `SendContext`
     pub upstream_enclaves: tinymap::TinySecondaryMap<EnclaveKey, UpstreamRef>,
     /// The senders to downstream enclaves for granted tag advances
     pub downstream_enclaves: tinymap::TinySecondaryMap<EnclaveKey, DownstreamRef>,
@@ -160,7 +161,7 @@ pub struct Enclave {
 
 impl Default for Enclave {
     fn default() -> Self {
-        let (event_tx, event_rx) = crossbeam_channel::bounded(2);
+        let (event_tx, event_rx) = kanal::bounded(2);
         let (shutdown_tx, shutdown_rx) = keepalive::channel();
         Self {
             env: Default::default(),

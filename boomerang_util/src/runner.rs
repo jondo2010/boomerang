@@ -142,10 +142,15 @@ pub fn build_and_test_reactor2<S: runtime::ReactorData, R: Reactor2<S>>(
 /// * `--fast-forward`: Run the scheduler in fast-forward mode
 /// * `--record-filename`: The filename to serialize recorded actions into
 /// * `--record-actions`: The list of fully-qualified actions to record, e.g., "snake::keyboard::key_press"
-pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow::Result<R> {
+pub fn build_and_run_reactor<S, R>(reactor: R, name: &str, state: S) -> anyhow::Result<R::Ports>
+where
+    S: runtime::ReactorData,
+    R: Reactor2<S>,
+{
     // build the reactor
     let mut env_builder = EnvBuilder::new();
-    let reactor = R::build(name, state, None, None, false, &mut env_builder)
+    let reactor = reactor
+        .build(name, state, None, None, false, &mut env_builder)
         .context("Error building top-level reactor!")?;
 
     let args = Args::parse();

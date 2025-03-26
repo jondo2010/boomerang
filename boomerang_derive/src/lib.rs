@@ -50,7 +50,7 @@ pub fn reactor_ports(
 /// The `#[reactor]` macro allows you to annotate plain Rust functions as reactor builders. The reactor function takes
 /// any number of other arguments.
 ///
-/// Here’s how you would define and use a simple Boomerang reactor which has one input, and a delay parameter:
+/// Here’s how you would define and use a simple Boomerang reactor which has one input, a delay parameter, and a boolean state:
 /// ```rust
 /// # use boomerang::prelude::*;
 ///
@@ -58,7 +58,27 @@ pub fn reactor_ports(
 /// pub fn MyComponent(
 ///     #[input] x: u32,
 ///     #[default(Duration::seconds(1))] delay: Duration,
+///     #[state] is_good: bool,
 /// ) -> impl IntoView {
+///    // Your reactor implementation goes here
+/// }
+/// ```
+///
+/// ### Using your own `state` struct
+///
+/// By default the macro will generate a state struct definition for you (e.g., `MyComponentState`) consisting of all
+/// the function arguments tagged with `#[state]` attributes.
+///
+/// If you want to instead use your own state struct, you can do so with the `state` argument to the `reactor` macro:
+/// ```rust
+/// # use boomerang::prelude::*;
+///
+/// struct MyState {
+///    is_good: bool,
+/// }
+///
+/// #[reactor(state = MyState)]
+/// pub fn MyComponent() -> impl Reactor2<MyState> {
 ///    // Your reactor implementation goes here
 /// }
 /// ```
@@ -68,42 +88,18 @@ pub fn reactor(
     args: proc_macro::TokenStream,
     s: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
-    let mut dummy = syn::parse::<reactor2::DummyModel>(s.clone());
-    let parse_result = syn::parse::<reactor2::Model>(s);
+    let args = syn::parse_macro_input!(args as reactor2::ReactorArgs);
 
-    if let (
-        Ok(ref mut unexpanded),
-        Ok(model)
-    ) = (
-        &mut dummy,
-        parse_result
-    ) {
-        let expanded = model.into_token_stream();
-        if !matches!(unexpanded.vis, syn::Visibility::Public(_)) {
-            //unexpanded.vis = syn::Visibility::Public(syn::token::Pub { span: unexpanded.vis.span(), })
-        }
-        //unexpanded.sig.ident = unmodified_fn_name_from_fn_name(&unexpanded.sig.ident);
-        quote! {
-            #[allow(non_snake_case)]
-            #expanded
-
-            //#[doc(hidden)]
-            //#[allow(non_snake_case, dead_code, clippy::too_many_arguments, clippy::needless_lifetimes)]
-            //#unexpanded
-        }
-    } else {
-        match dummy {
-            Ok(mut dummy) => {
-                //dummy.sig.ident = unmodified_fn_name_from_fn_name(&dummy.sig.ident);
-                quote! {
-                    #[doc(hidden)]
-                    #[allow(non_snake_case, dead_code, clippy::too_many_arguments, clippy::needless_lifetimes)]
-                    #dummy
-                }
-            }
-            Err(e) => {
-                proc_macro_error2::abort!(e.span(), e);
+    match syn::parse::<reactor2::Model>(s) {
+        Ok(model) => {
+            let args_model = reactor2::ArgsModel(args, model);
+            quote! {
+                #args_model
             }
         }
-    }.into()
+        Err(e) => {
+            proc_macro_error2::abort!(e.span(), e);
+        }
+    }
+    .into()
 }

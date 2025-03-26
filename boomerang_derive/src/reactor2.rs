@@ -1,95 +1,18 @@
-use attribute_derive::FromAttr;
-use convert_case::{Case, Casing};
 use proc_macro2::{Span, TokenStream};
 use proc_macro_error2::abort;
 use quote::{format_ident, quote, quote_spanned, ToTokens, TokenStreamExt};
 use syn::{
-    parse::{Parse, ParseStream},
-    parse_quote,
-    spanned::Spanned,
-    Attribute, Block, FnArg, Ident, ItemFn, LitStr, Meta, Pat, PatIdent, ReturnType, Signature,
-    Type, Visibility,
+    parse::Parse, parse_quote, spanned::Spanned, Attribute, Block, FnArg, Ident, ItemFn, LitStr,
+    Meta, Pat, PatIdent, ReturnType, Type, TypePath, Visibility,
 };
 
 use crate::util::convert_from_snake_case;
 
-/// A model that is more lenient in case of a syntax error in the function body,
-/// but does not actually implement the behavior of the real model. This is
-/// used to improve IDEs and rust-analyzer's auto-completion behavior in case
-/// of a syntax error.
-#[derive(Debug)]
-pub struct DummyModel {
-    pub attrs: Vec<Attribute>,
-    pub vis: Visibility,
-    pub sig: Signature,
-    pub body: proc_macro2::TokenStream,
-}
-
-impl Parse for DummyModel {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
-        let mut attrs = input.call(Attribute::parse_outer)?;
-        // Drop unknown attributes like #[deprecated]
-        attrs.retain(|attr| attr.path().is_ident("doc"));
-
-        let vis: Visibility = input.parse()?;
-        let sig: Signature = input.parse()?;
-
-        // The body is left untouched, so it will not cause an error
-        // even if the syntax is invalid.
-        let body: proc_macro2::TokenStream = input.parse()?;
-
-        Ok(Self {
-            attrs,
-            vis,
-            sig,
-            body,
-        })
-    }
-}
-
-impl ToTokens for DummyModel {
-    fn to_tokens(&self, tokens: &mut TokenStream) {
-        let Self {
-            attrs,
-            vis,
-            sig,
-            body,
-        } = self;
-
-        // Strip attributes like documentation comments and #[prop]
-        // from the signature, so as to not confuse the user with incorrect
-        // error messages.
-        let sig = {
-            let mut sig = sig.clone();
-            sig.inputs.iter_mut().for_each(|arg| {
-                if let FnArg::Typed(ty) = arg {
-                    ty.attrs.retain(|attr| match &attr.meta {
-                        Meta::List(list) => list
-                            .path
-                            .segments
-                            .first()
-                            .map(|n| n.ident != "prop")
-                            .unwrap_or(true),
-                        Meta::NameValue(name_value) => name_value
-                            .path
-                            .segments
-                            .first()
-                            .map(|n| n.ident != "doc")
-                            .unwrap_or(true),
-                        _ => true,
-                    });
-                }
-            });
-            sig
-        };
-
-        let output = quote! {
-            #(#attrs)*
-            #vis #sig #body
-        };
-
-        tokens.append_all(output)
-    }
+/// Top-level arguments for the #[reactor] macro
+#[derive(attribute_derive::FromAttr)]
+pub struct ReactorArgs {
+    /// The name of the state type to use. If not provided, a state struct will be generated.
+    state: Option<TypePath>,
 }
 
 #[derive(Clone, Debug)]
@@ -423,26 +346,59 @@ impl Parse for Model {
     }
 }
 
-impl ToTokens for Model {
+pub struct ArgsModel(pub ReactorArgs, pub Model);
+
+impl ToTokens for ArgsModel {
     fn to_tokens(&self, tokens: &mut TokenStream) {
-        let Self {
-            docs,
-            unknown_attrs,
-            vis,
-            name,
-            generics,
-            args,
-            body,
-            ret,
-        } = self;
+        let Self(
+            reactor_args,
+            Model {
+                docs,
+                unknown_attrs,
+                vis,
+                name,
+                generics,
+                args,
+                body,
+                ret,
+            },
+        ) = self;
 
         // Extract generics parts
         let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
         // name of the generated Ports struct
         let ports_name = format_ident!("{name}Ports");
-        // name of the generted State strut
-        let state_name = format_ident!("{name}State");
+
+        let state_args = args
+            .iter()
+            .filter_map(
+                |Arg {
+                     docs,
+                     kind,
+                     name,
+                     ty,
+                 }| match *kind {
+                    ArgKind::State => Some(quote! { #docs pub #name: #ty }),
+                    _ => None,
+                },
+            )
+            .collect::<Vec<_>>();
+
+        if !state_args.is_empty() && reactor_args.state.is_some() {
+            abort!(
+                reactor_args.state,
+                "cannot use both #[reactor(state = ..)] and `#[state]` arguments at the same time."
+            );
+        }
+
+        // name of the State struct
+        let state_ident = format_ident!("{name}State");
+        let state_type_path = if let Some(state) = &reactor_args.state {
+            state.path.clone()
+        } else {
+            parse_quote! { #state_ident #ty_generics }
+        };
 
         let port_args = args.iter().filter_map(
             |Arg {
@@ -451,8 +407,8 @@ impl ToTokens for Model {
                  name,
                  ty,
              }| match *kind {
-                ArgKind::Input => Some(quote! { #[input] #docs #name: #ty }),
-                ArgKind::Output => Some(quote! { #[output] #docs #name: #ty }),
+                ArgKind::Input => Some(quote! { #[input] #docs pub #name: #ty }),
+                ArgKind::Output => Some(quote! { #[output] #docs pub #name: #ty }),
                 _ => None,
             },
         );
@@ -464,31 +420,21 @@ impl ToTokens for Model {
             }
         };
 
-        let state_args = args
-            .iter()
-            .filter_map(
-                |Arg {
-                     docs,
-                     kind,
-                     name,
-                     ty,
-                 }| match *kind {
-                    ArgKind::State => Some(quote! { #docs #name: #ty }),
-                    _ => None,
-                },
-            )
-            .collect::<Vec<_>>();
-
-        let state_struct = if state_args.is_empty() {
-            quote! {
-                #vis type #state_name = ();
-            }
-        } else {
-            quote! {
-                #vis struct #state_name #impl_generics #where_clause {
-                    #(#state_args),*
+        let state_struct = if reactor_args.state.is_none() {
+            let state_struct = if state_args.is_empty() {
+                quote! {
+                    #vis type #state_ident = ();
                 }
-            }
+            } else {
+                quote! {
+                    #vis struct #state_ident #impl_generics #where_clause {
+                        #(#state_args),*
+                    }
+                }
+            };
+            Some(state_struct)
+        } else {
+            None
         };
 
         let port_idents = args
@@ -498,15 +444,16 @@ impl ToTokens for Model {
                 _ => None,
             });
 
-        let ret = quote! { -> impl ::boomerang::builder::Reactor2<#state_name #ty_generics, Ports = #ports_name #ty_generics> };
+        let ret = quote! { -> impl ::boomerang::builder::Reactor2<#state_type_path, Ports = #ports_name #ty_generics> };
 
         let output = quote! {
             #port_struct
             #state_struct
 
+            #[allow(non_snake_case)]
             #docs
             #vis fn #name #impl_generics() #ret #where_clause {
-                <#ports_name #ty_generics as ::boomerang::builder::ReactorPorts>::build_with::<_, #state_name #ty_generics>(
+                <#ports_name #ty_generics as ::boomerang::builder::ReactorPorts>::build_with::<_, #state_type_path>(
                     |builder, (#(#port_idents,)*)| {
                         #body
                         Ok(())
@@ -516,4 +463,12 @@ impl ToTokens for Model {
 
         tokens.append_all(output)
     }
+}
+
+#[test]
+fn test() {
+    let parsed: TypePath = parse_quote! {
+        CountPorts<T>
+    };
+    dbg!(parsed);
 }

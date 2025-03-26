@@ -80,8 +80,13 @@ impl<T: runtime::ReactorData> From<TypedActionKey<T, Physical>> for PhysicalActi
     }
 }
 
-impl<T: runtime::ReactorData> runtime::ReactionRefsExtract for TypedActionKey<T, Logical> {
-    type Ref<'store> = runtime::ActionRef<'store, T> where Self: 'store;
+impl<T: runtime::ReactorData, Q: ActionTag + Send + Sync> runtime::ReactionRefsExtract
+    for TypedActionKey<T, Q>
+{
+    type Ref<'store>
+        = runtime::ActionRef<'store, T>
+    where
+        Self: 'store;
     fn extract<'store>(refs: &mut runtime::ReactionRefs<'store>) -> Self::Ref<'store> {
         refs.actions.next().map(Self::Ref::from).unwrap()
     }
@@ -116,7 +121,10 @@ impl From<BuilderActionKey> for TimerActionKey {
 }
 
 impl runtime::ReactionRefsExtract for TimerActionKey {
-    type Ref<'store> = runtime::ActionRef<'store> where Self: 'store;
+    type Ref<'store>
+        = runtime::ActionRef<'store>
+    where
+        Self: 'store;
     fn extract<'store>(refs: &mut runtime::ReactionRefs<'store>) -> Self::Ref<'store> {
         refs.actions.next().map(Self::Ref::from).unwrap()
     }

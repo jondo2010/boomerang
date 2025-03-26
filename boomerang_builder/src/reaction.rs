@@ -532,6 +532,26 @@ pub mod builder2 {
                 S: runtime::ReactorData,
                 $($Fn: runtime::ReactionRefsExtract,)*
             {
+                /// Trigger this reaction on the startup of the reactor
+                pub fn with_startup_trigger(self) -> ReactionBuilder<'a, S, ($($Fn,)* TypedActionKey,)> {
+                    let startup = self
+                        .env
+                        .get_reactor_builder(self.reactor_key)
+                        .unwrap()
+                        .get_startup_action();
+                    self.with_trigger(startup)
+                }
+
+                /// Trigger this reaction on the shutdown of the reactor
+                pub fn with_shutdown_trigger(self) -> ReactionBuilder<'a, S, ($($Fn,)* TypedActionKey,)> {
+                    let shutdown = self
+                        .env
+                        .get_reactor_builder(self.reactor_key)
+                        .unwrap()
+                        .get_shutdown_action();
+                    self.with_trigger(shutdown)
+                }
+
                 /// Triggers can be input ports, output ports of contained reactors, timers, actions.
                 /// There must be at least one trigger for each reaction.
                 pub fn with_trigger<F>(mut self, field: F) -> ReactionBuilder<'a, S, ($($Fn,)* F,)>

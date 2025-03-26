@@ -1,6 +1,6 @@
 use proc_macro2::TokenStream;
 use quote::{quote, ToTokens};
-use syn::{parse::Parse, Data, DeriveInput, Fields, FieldsNamed};
+use syn::{parse::Parse, Data, DeriveInput, Fields, FieldsNamed, Visibility};
 
 #[derive(Debug)]
 pub enum PortType {
@@ -10,12 +10,14 @@ pub enum PortType {
 
 #[derive(Debug)]
 pub struct PortField {
+    vis: Visibility,
     ident: syn::Ident,
     ty: syn::Type,
     port_type: PortType,
 }
 
 pub struct Model {
+    vis: Visibility,
     name: syn::Ident,
     generics: syn::Generics,
     fields: Vec<PortField>,
@@ -38,6 +40,7 @@ impl PortField {
         })?;
 
         Ok(PortField {
+            vis: field.vis.clone(),
             ident: field.ident.clone().unwrap(),
             ty: field.ty.clone(),
             port_type,
@@ -69,10 +72,11 @@ impl Parse for Model {
 
         let fields = fields
             .into_iter()
-            .map(|field| PortField::from_field(&field))
+            .map(PortField::from_field)
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Model {
+            vis: input.vis.clone(),
             name: input.ident,
             generics: input.generics,
             fields,
@@ -82,18 +86,17 @@ impl Parse for Model {
 
 impl ToTokens for Model {
     fn to_tokens(&self, tokens: &mut TokenStream) {
+        let vis = &self.vis;
         let struct_name = &self.name;
         let (impl_generics, ty_generics, where_clause) = self.generics.split_for_impl();
 
         // Generate the modified struct fields
-        let struct_fields = self.fields.iter().map(|f| {
-            let name = &f.ident;
-            let ty = &f.ty;
-            let dir = match f.port_type {
+        let struct_fields = self.fields.iter().map(|PortField { vis, ident, ty, port_type }| {
+            let dir = match *port_type {
                 PortType::Input => quote!(::boomerang::builder::Input),
                 PortType::Output => quote!(::boomerang::builder::Output),
             };
-            quote!(#name: ::boomerang::builder::TypedPortKey<#ty, #dir, ::boomerang::builder::Contained>)
+            quote!(#vis #ident: ::boomerang::builder::TypedPortKey<#ty, #dir, ::boomerang::builder::Contained>)
         });
 
         // Generate implementation details as before
@@ -108,16 +111,21 @@ impl ToTokens for Model {
 
         let local_names = self.fields.iter().map(|f| &f.ident);
 
-        let create_ports = self.fields.iter().map(|f| {
-            let name = &f.ident;
-            let name_str = name.to_string();
-            let ty = &f.ty;
-            let dir = match f.port_type {
-                PortType::Input => quote!(::boomerang::builder::Input),
-                PortType::Output => quote!(::boomerang::builder::Output),
-            };
-            quote!(let #name = builder.add_port::<#ty, #dir>(#name_str, None)?;)
-        });
+        let create_ports = self.fields.iter().map(
+            |PortField {
+                 vis: _,
+                 ident,
+                 ty,
+                 port_type,
+             }| {
+                let name_str = ident.to_string();
+                let dir = match *port_type {
+                    PortType::Input => quote!(::boomerang::builder::Input),
+                    PortType::Output => quote!(::boomerang::builder::Output),
+                };
+                quote!(let #ident = builder.add_port::<#ty, #dir>(#name_str, None)?;)
+            },
+        );
 
         let field_inits = self.fields.iter().map(|f| {
             let name = &f.ident;
@@ -125,7 +133,7 @@ impl ToTokens for Model {
         });
 
         let expanded = quote! {
-            struct #struct_name #impl_generics {
+            #vis struct #struct_name #impl_generics {
                 #(#struct_fields,)*
             }
 

@@ -9,6 +9,8 @@
 //! }
 //! ```
 
+use std::env;
+
 use anyhow::Context;
 use boomerang::{
     builder::{BuilderRuntimeParts, EnvBuilder, Reactor},
@@ -113,12 +115,17 @@ pub fn build_and_test_reactor2<S: runtime::ReactorData, R: Reactor2<S>>(
         .build(name, state, None, None, false, &mut env_builder)
         .context("Error building top-level reactor!")?;
 
+    env_builder.validate_reactions()?;
+
     let BuilderRuntimeParts {
         enclaves,
         aliases: _,
     } = env_builder
         .into_runtime_parts()
         .context("Error building environment!")?;
+
+    dbg!(&enclaves.iter().next().unwrap());
+    dbg!(&enclaves.iter().next().unwrap().1.graph.action_triggers);
 
     let envs_out = runtime::execute_enclaves(enclaves.into_iter(), config);
     let envs_out = envs_out.into_iter().map(|(_, env)| env).collect();

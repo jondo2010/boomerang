@@ -1,7 +1,7 @@
 //! Example ported from https://github.com/lf-lang/lingua-franca/blob/master/test/Cpp/src/Microsteps.lf
 use boomerang::prelude::*;
 
-#[boomerang_derive::reactor]
+#[reactor]
 fn Destination(#[input] x: u32, #[input] y: u32) -> impl Reactor2 {
     builder
         .add_reaction2(None)
@@ -25,8 +25,8 @@ fn Destination(#[input] x: u32, #[input] y: u32) -> impl Reactor2 {
         .finish()?;
 }
 
-#[boomerang_derive::reactor]
-fn Microsteps() -> impl Reactor2<()> {
+#[reactor]
+fn Microsteps() -> impl Reactor2 {
     let start = builder.add_timer("start", TimerSpec::STARTUP)?;
     let repeat = builder.add_logical_action::<()>("repeat", None)?;
     let d = builder.add_child_reactor2(Destination(), "d", (), false)?;

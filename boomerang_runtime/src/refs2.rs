@@ -7,7 +7,7 @@ pub struct ReactionRefs<'store> {
     pub actions: RefsMut<'store, dyn BaseAction>,
 }
 
-pub trait ReactionRefsExtract: Copy + Send + Sync + 'static {
+pub trait ReactionRefsExtract: Copy + 'static {
     type Ref<'store>
     where
         Self: 'store;

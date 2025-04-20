@@ -108,37 +108,6 @@ impl Docs {
 
         Self(attrs)
     }
-
-    pub fn padded(&self) -> TokenStream {
-        self.0
-            .iter()
-            .enumerate()
-            .map(|(idx, (doc, span))| {
-                let doc = if idx == 0 {
-                    format!("    - {doc}")
-                } else {
-                    format!("      {doc}")
-                };
-
-                let doc = LitStr::new(&doc, *span);
-
-                quote! { #[doc = #doc] }
-            })
-            .collect()
-    }
-
-    pub fn typed_builder(&self) -> String {
-        todo!();
-        /*
-        let doc_str = self.0.iter().map(|s| s.0.as_str()).join("\n");
-
-        if doc_str.chars().filter(|c| *c != '\n').count() != 0 {
-            format!("\n\n{doc_str}")
-        } else {
-            String::new()
-        }
-        */
-    }
 }
 
 impl ToTokens for Docs {
@@ -267,30 +236,8 @@ impl From<FnArg> for Arg {
 }
 
 #[derive(Debug)]
-pub struct UnknownAttrs(Vec<(TokenStream, Span)>);
-
-impl UnknownAttrs {
-    pub fn new(attrs: &[Attribute]) -> Self {
-        let attrs = attrs
-            .iter()
-            .filter_map(|attr| {
-                if attr.path().is_ident("doc") {
-                    if let Meta::NameValue(_) = &attr.meta {
-                        return None;
-                    }
-                }
-
-                Some((attr.into_token_stream(), attr.span()))
-            })
-            .collect();
-        Self(attrs)
-    }
-}
-
-#[derive(Debug)]
 pub struct Model {
     docs: Docs,
-    unknown_attrs: UnknownAttrs,
     vis: Visibility,
     name: Ident,
     generics: syn::Generics, // Added generics field
@@ -305,7 +252,6 @@ impl Parse for Model {
         //convert_impl_trait_to_generic(&mut item.sig);
 
         let docs = Docs::new(&item.attrs);
-        let unknown_attrs = UnknownAttrs::new(&item.attrs);
 
         let props = item
             .sig
@@ -335,7 +281,6 @@ impl Parse for Model {
 
         Ok(Self {
             docs,
-            unknown_attrs,
             vis: item.vis.clone(),
             name: convert_from_snake_case(&item.sig.ident),
             generics: item.sig.generics.clone(), // Extract generics
@@ -354,13 +299,12 @@ impl ToTokens for ArgsModel {
             reactor_args,
             Model {
                 docs,
-                unknown_attrs,
                 vis,
                 name,
                 generics,
                 args,
                 body,
-                ret,
+                ret: _,
             },
         ) = self;
 
@@ -396,8 +340,11 @@ impl ToTokens for ArgsModel {
         let state_ident = format_ident!("{name}State");
         let state_type_path = if let Some(state) = &reactor_args.state {
             state.path.clone()
-        } else {
+        } else if !state_args.is_empty() {
             parse_quote! { #state_ident #ty_generics }
+        } else {
+            // If there are no state args, then we exclude type generics here
+            parse_quote! { #state_ident }
         };
 
         let port_args = args.iter().filter_map(
@@ -444,6 +391,14 @@ impl ToTokens for ArgsModel {
                 _ => None,
             });
 
+        //TODO for now param args are just re-built into the output function signature. In the future, I may want to generate a builder type instead to support defaults.
+        let param_args = args
+            .iter()
+            .filter_map(|Arg { kind, name, ty, .. }| match kind {
+                ArgKind::Param { default: _default } => Some(quote! { #name: #ty }),
+                _ => None,
+            });
+
         let ret = quote! { -> impl ::boomerang::builder::Reactor2<#state_type_path, Ports = #ports_name #ty_generics> };
 
         let output = quote! {
@@ -452,9 +407,9 @@ impl ToTokens for ArgsModel {
 
             #[allow(non_snake_case)]
             #docs
-            #vis fn #name #impl_generics() #ret #where_clause {
+            #vis fn #name #impl_generics(#(#param_args,)*) #ret #where_clause {
                 <#ports_name #ty_generics as ::boomerang::builder::ReactorPorts>::build_with::<_, #state_type_path>(
-                    |builder, (#(#port_idents,)*)| {
+                    move |builder, (#(#port_idents,)*)| {
                         #body
                         Ok(())
                     })

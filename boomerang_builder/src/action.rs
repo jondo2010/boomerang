@@ -80,9 +80,7 @@ impl<T: runtime::ReactorData> From<TypedActionKey<T, Physical>> for PhysicalActi
     }
 }
 
-impl<T: runtime::ReactorData, Q: ActionTag + Send + Sync> runtime::ReactionRefsExtract
-    for TypedActionKey<T, Q>
-{
+impl<T: runtime::ReactorData, Q: ActionTag> runtime::ReactionRefsExtract for TypedActionKey<T, Q> {
     type Ref<'store>
         = runtime::ActionRef<'store, T>
     where

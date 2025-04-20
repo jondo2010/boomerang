@@ -248,23 +248,20 @@ impl Parse for Param {
 
 /// Parse a block of statements within a reactor definition
 #[derive(Debug)]
-pub struct ReactorBlock {
+struct ReactorBlock {
     /// Statements in a block
-    pub stmts: Vec<ReactorStmt>,
+    stmts: Vec<ReactorStmt>,
 }
 
 impl ReactorBlock {
-    pub fn parse_within(input: ParseStream) -> Result<Vec<ReactorStmt>, Error> {
+    fn parse_within(input: ParseStream) -> Result<Vec<ReactorStmt>, Error> {
         let mut stmts = Vec::new();
         loop {
             if input.is_empty() {
                 break;
             }
             let stmt = parse_stmt(input)?;
-            let requires_semicolon = match &stmt {
-                ReactorStmt::Reaction(..) => false,
-                _ => true,
-            };
+            let requires_semicolon = !matches!(&stmt, ReactorStmt::Reaction(..));
             stmts.push(stmt);
             if input.is_empty() {
                 break;

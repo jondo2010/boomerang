@@ -1,5 +1,8 @@
 use crate::{
-    connection::{BaseConnectionBuilder, ConnectionBuilder, PortBindings}, port::Contained, ActionTag, Fqn, FqnSegment, ParentReactorBuilder, PortType, TimerActionKey, TimerSpec, TriggerMode
+    connection::{BaseConnectionBuilder, ConnectionBuilder, PortBindings},
+    port::Contained,
+    ActionTag, Fqn, FqnSegment, ParentReactorBuilder, Physical, PortType, TimerActionKey,
+    TimerSpec, TriggerMode,
 };
 
 use super::{
@@ -11,7 +14,7 @@ use super::{
 use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, EdgeDirection};
 use slotmap::{SecondaryMap, SlotMap};
-use std::{collections::HashMap, convert::TryInto};
+use std::{collections::HashMap, convert::TryInto, default, marker::PhantomData};
 
 mod build;
 mod debug;
@@ -310,7 +313,7 @@ impl EnvBuilder {
     }
 
     /// Find a port in a child Reactor given it's name and the parent ReactorKey.
-    /// 
+    ///
     /// The port data type and tag must be provided as type parameters.
     pub fn find_port_by_name<T: runtime::ReactorData, Q: PortTag>(
         &self,
@@ -455,14 +458,21 @@ impl EnvBuilder {
         let source_key = source_key.into();
         let target_key = target_key.into();
 
-        self.connection_builders
-            .push(Box::new(ConnectionBuilder::<T> {
+        self.connection_builders.push(if physical {
+            Box::new(ConnectionBuilder::<T, Physical> {
                 source_key,
                 target_key,
                 after,
-                physical,
                 _phantom: Default::default(),
-            }));
+            })
+        } else {
+            Box::new(ConnectionBuilder::<T, Logical> {
+                source_key,
+                target_key,
+                after,
+                _phantom: Default::default(),
+            })
+        });
 
         Ok(())
     }

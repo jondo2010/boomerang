@@ -9,8 +9,6 @@
 //! }
 //! ```
 
-use std::env;
-
 use anyhow::Context;
 use boomerang::{
     builder::{BuilderRuntimeParts, EnvBuilder, Reactor},

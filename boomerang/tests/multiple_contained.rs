@@ -4,10 +4,9 @@ use boomerang::prelude::*;
 
 #[reactor]
 fn Contained(#[input] in1: u32, #[input] in2: u32, #[output] trigger: u32) -> impl Reactor2 {
-    let startup = builder.get_startup_action();
     builder
         .add_reaction2(Some("ReactionStartup"))
-        .with_trigger(startup)
+        .with_startup_trigger()
         .with_effect(trigger)
         .with_reaction_fn(|_ctx, _state, (_startup, mut trigger)| {
             *trigger = Some(42);

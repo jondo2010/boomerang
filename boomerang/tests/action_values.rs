@@ -2,22 +2,16 @@
 
 use boomerang::prelude::*;
 
-#[reactor_ports]
-struct ChildPorts {}
-
+#[reactor]
 fn Child(act: TypedActionKey<i32>) -> impl Reactor2<(), Ports = ChildPorts> {
-    ChildPorts::build_with(move |builder, ()| {
-        builder
-            .add_reaction2(None)
-            .with_trigger(act)
-            .with_reaction_fn(|ctx, _state, (mut act,)| {
-                let value = ctx.get_action_value(&mut act);
-                println!("[child received: {value:?}]");
-            })
-            .finish()?;
-
-        Ok(())
-    })
+    builder
+        .add_reaction2(None)
+        .with_trigger(act)
+        .with_reaction_fn(|ctx, _state, (mut act,)| {
+            let value = ctx.get_action_value(&mut act);
+            println!("[child received: {value:?}]");
+        })
+        .finish()?;
 }
 
 #[reactor]

@@ -1,52 +1,36 @@
 use boomerang::prelude::*;
 
-#[derive(Debug, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-struct State {
-    success: bool,
+#[reactor]
+fn HelloWorld2(#[state] success: bool) -> impl Reactor2 {
+    builder
+        .add_reaction2(None)
+        .with_startup_trigger()
+        .with_reaction_fn(|_ctx, state, (startup)| {
+            println!("Hello World.");
+            state.success = true;
+        })
+        .finish()?;
+
+    builder
+        .add_reaction2(None)
+        .with_shutdown_trigger()
+        .with_reaction_fn(|_ctx, state, (shutdown)| {
+            println!("Shutdown invoked.");
+            state.success = false;
+        })
+        .finish()?;
 }
 
-#[derive(Reactor)]
-#[reactor(
-    state = "State",
-    reaction = "HelloWorld2ReactionStartup",
-    reaction = "HelloWorld2ReactionShutdown"
-)]
-struct HelloWorld2;
-
-#[derive(Reaction)]
-#[reaction(reactor = "HelloWorld2", triggers(startup))]
-struct HelloWorld2ReactionStartup;
-
-impl runtime::Trigger<State> for HelloWorld2ReactionStartup {
-    fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
-        println!("Hello World.");
-        state.success = true;
-    }
-}
-
-#[derive(Reaction)]
-#[reaction(reactor = "HelloWorld2", triggers(shutdown))]
-struct HelloWorld2ReactionShutdown;
-
-impl runtime::Trigger<State> for HelloWorld2ReactionShutdown {
-    fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
-        println!("Shutdown invoked.");
-        state.success = false;
-    }
-}
-
-#[derive(Reactor)]
-#[reactor(state = "()")]
-struct HelloWorld {
-    #[reactor(child(state = State{success: false}))]
-    _a: HelloWorld2,
+#[reactor]
+fn HelloWorld() -> impl Reactor2 {
+    builder.add_child_reactor2(HelloWorld2(), "_a", Default::default(), false)?;
 }
 
 #[test]
 fn hello_world() {
     tracing_subscriber::fmt::init();
     let config = runtime::Config::default().with_fast_forward(true);
-    let _ = boomerang_util::runner::build_and_test_reactor::<HelloWorld>("hello_world", (), config)
-        .unwrap();
+    let _ =
+        boomerang_util::runner::build_and_test_reactor2(HelloWorld(), "hello_world", (), config)
+            .unwrap();
 }

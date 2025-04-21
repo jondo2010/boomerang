@@ -134,16 +134,37 @@ struct Arg {
 enum ArgKind {
     Input,
     Output,
-    State,
+    State { default: Option<syn::Expr> },
     Param { default: Option<syn::Expr> },
 }
 
 impl ArgKind {
     fn from_attributes(attrs: &[Attribute]) -> syn::Result<Self> {
         let mut kind = None;
-        let mut default = None;
 
         for attr in attrs {
+            // Check if the param attribute has arguments (for default value)
+            let default = if let Meta::List(meta_list) = &attr.meta {
+                if !meta_list.tokens.is_empty() {
+                    // Parse param(default = value)
+                    let nested_meta: Meta = syn::parse2(meta_list.tokens.clone())?;
+                    if let Meta::NameValue(nv) = nested_meta {
+                        if nv.path.is_ident("default") {
+                            //if default.is_some() { abort!(attr, "duplicate default value"); }
+                            Some(nv.value)
+                        } else {
+                            abort!(attr, "expected 'default' in param attribute");
+                        }
+                    } else {
+                        abort!(attr, "expected #[param(default = ...)]");
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             if attr.path().is_ident("input") {
                 if kind.is_some() {
                     abort!(attr, "duplicate argument kind");
@@ -158,28 +179,12 @@ impl ArgKind {
                 if kind.is_some() {
                     abort!(attr, "duplicate argument kind");
                 }
-                kind = Some(ArgKind::State);
+                kind = Some(ArgKind::State { default });
             } else if attr.path().is_ident("param") {
-                if default.is_some() {
-                    abort!(attr, "duplicate default value");
+                if kind.is_some() {
+                    abort!(attr, "duplicate argument kind");
                 }
-
-                // Check if the param attribute has arguments (for default value)
-                if let Meta::List(meta_list) = &attr.meta {
-                    if !meta_list.tokens.is_empty() {
-                        // Parse param(default = value)
-                        let nested_meta: Meta = syn::parse2(meta_list.tokens.clone())?;
-                        if let Meta::NameValue(nv) = nested_meta {
-                            if nv.path.is_ident("default") {
-                                default = Some(nv.value);
-                            } else {
-                                abort!(attr, "expected 'default' in param attribute");
-                            }
-                        } else {
-                            abort!(attr, "expected #[param(default = ...)]");
-                        }
-                    }
-                }
+                kind = Some(ArgKind::Param { default });
             } else {
                 abort!(
                     attr,
@@ -190,7 +195,7 @@ impl ArgKind {
 
         Ok(match kind {
             Some(k) => k,
-            None => ArgKind::Param { default },
+            None => ArgKind::Param { default: None },
         })
     }
 }
@@ -322,8 +327,8 @@ impl ToTokens for ArgsModel {
                      kind,
                      name,
                      ty,
-                 }| match *kind {
-                    ArgKind::State => Some(quote! { #docs pub #name: #ty }),
+                 }| match kind {
+                    ArgKind::State { default } => Some(quote! { #docs pub #name: #ty }),
                     _ => None,
                 },
             )
@@ -367,6 +372,22 @@ impl ToTokens for ArgsModel {
             }
         };
 
+        // Default initialization for state fields
+        let state_args_default = args
+            .iter()
+            .filter_map(|Arg { kind, name, .. }| match kind {
+                ArgKind::State { default } => {
+                    let val = default.clone().unwrap_or_else(|| {
+                        parse_quote! {
+                            ::core::default::Default::default()
+                        }
+                    });
+                    Some(quote! { #name: #val })
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
         let state_struct = if reactor_args.state.is_none() {
             let state_struct = if state_args.is_empty() {
                 quote! {
@@ -374,13 +395,26 @@ impl ToTokens for ArgsModel {
                 }
             } else {
                 quote! {
-                    #[derive(Debug, Default)]
                     #vis struct #state_ident #impl_generics #where_clause {
                         #(#state_args),*
                     }
                 }
             };
             Some(state_struct)
+        } else {
+            None
+        };
+
+        let state_impl = if reactor_args.state.is_none() && !state_args.is_empty() {
+            Some(quote! {
+                impl #impl_generics ::core::default::Default for #state_ident {
+                    fn default() -> Self {
+                        Self {
+                            #(#state_args_default),*
+                        }
+                    }
+                }
+            })
         } else {
             None
         };
@@ -405,6 +439,7 @@ impl ToTokens for ArgsModel {
         let output = quote! {
             #port_struct
             #state_struct
+            #state_impl
 
             #[allow(non_snake_case)]
             #docs

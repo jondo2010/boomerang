@@ -15,7 +15,11 @@ fn Foo(#[input] x: i32, #[output] y: i32) -> impl Reactor2 {
 }
 
 #[reactor]
-fn Print(#[state] expected_time: Duration, #[state] i: usize, #[input] x: i32) -> impl Reactor2 {
+fn Print(
+    #[state(default = Duration::milliseconds(10))] expected_time: Duration,
+    #[state] i: usize,
+    #[input] x: i32,
+) -> impl Reactor2 {
     builder
         .add_reaction2(None)
         .with_trigger(x)
@@ -48,15 +52,7 @@ fn Print(#[state] expected_time: Duration, #[state] i: usize, #[input] x: i32) -
 #[reactor]
 fn After() -> impl Reactor2 {
     let f = builder.add_child_reactor2(Foo(), "foo", Default::default(), false)?;
-    let p = builder.add_child_reactor2(
-        Print(),
-        "print",
-        PrintState {
-            expected_time: Duration::milliseconds(10),
-            i: 0,
-        },
-        false,
-    )?;
+    let p = builder.add_child_reactor2(Print(), "print", Default::default(), false)?;
     let t = builder.add_timer("t", TimerSpec::default().with_period(Duration::SECOND))?;
     builder.connect_port(f.y, p.x, Some(Duration::milliseconds(10)), false)?;
 

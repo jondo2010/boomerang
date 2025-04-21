@@ -33,7 +33,7 @@ fn Delay(
 #[reactor]
 pub fn Test(
     #[input] in_: u32,
-    #[state] start_time: std::time::Instant,
+    #[state(default = std::time::Instant::now())] start_time: std::time::Instant,
 ) -> impl Reactor2<TestState, Ports = TestPorts> {
     builder
         .add_reaction2(None)
@@ -64,14 +64,7 @@ pub fn Test(
 fn DelayInt() -> impl Reactor2<(), Ports = DelayIntPorts> {
     let t = builder.get_startup_action();
     let d = builder.add_child_reactor2(Delay(Duration::milliseconds(100)), "d", (), false)?;
-    let test = builder.add_child_reactor2(
-        Test(),
-        "test",
-        TestState {
-            start_time: std::time::Instant::now(),
-        },
-        false,
-    )?;
+    let test = builder.add_child_reactor2(Test(), "test", TestState::default(), false)?;
     builder.connect_port(d.out, test.in_, None, false)?;
     builder
         .add_reaction2(None)

@@ -44,7 +44,7 @@ fn main() {
     let (_, envs) = boomerang_util::runner::build_and_test_reactor2(
         Count(),
         "count",
-        CountState { count: 0 },
+        Default::default(),
         config,
     )
     .unwrap();

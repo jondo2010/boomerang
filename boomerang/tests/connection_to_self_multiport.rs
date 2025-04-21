@@ -2,6 +2,15 @@
 
 use boomerang::prelude::*;
 
+//TODO multiport support for the `reactor` macro
+#[reactor]
+fn Node<const NUM_NODES: usize>(
+    #[state] size: usize,
+    #[input] input: [i32; NUM_NODES],
+    #[output] output: [i32; NUM_NODES],
+) -> impl Reactor2 {
+}
+
 #[derive(Reactor)]
 #[reactor(
     state = "usize",

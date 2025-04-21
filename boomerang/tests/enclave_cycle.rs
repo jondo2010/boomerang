@@ -4,15 +4,6 @@
 
 use boomerang::prelude::*;
 
-impl Default for PingState {
-    fn default() -> Self {
-        Self {
-            counter: 0,
-            received: false,
-        }
-    }
-}
-
 #[reactor]
 fn Ping(
     #[input] input: i32,
@@ -65,12 +56,6 @@ fn Ping(
         .finish()?;
 }
 
-impl Default for PongState {
-    fn default() -> Self {
-        Self { received: false }
-    }
-}
-
 #[reactor]
 fn Pong(
     #[input] input: i32,
@@ -108,22 +93,17 @@ fn Pong(
         .finish()?;
 }
 
-#[reactor_ports]
-struct MainPorts {}
-
-fn main_reactor() -> impl Reactor2 {
-    MainPorts::build_with(|builder, ()| {
-        let ping = builder.add_child_reactor2(Ping(), "ping", PingState::default(), true)?;
-        let pong = builder.add_child_reactor2(Pong(), "pong", PongState::default(), true)?;
-        builder.connect_port(ping.output, pong.input, None, false)?;
-        builder.connect_port(
-            pong.output,
-            ping.input,
-            Some(Duration::milliseconds(50)),
-            false,
-        )?;
-        Ok(())
-    })
+#[reactor]
+fn MainReactor() -> impl Reactor2 {
+    let ping = builder.add_child_reactor2(Ping(), "ping", PingState::default(), true)?;
+    let pong = builder.add_child_reactor2(Pong(), "pong", PongState::default(), true)?;
+    builder.connect_port(ping.output, pong.input, None, false)?;
+    builder.connect_port(
+        pong.output,
+        ping.input,
+        Some(Duration::milliseconds(50)),
+        false,
+    )?;
 }
 
 #[test]
@@ -132,11 +112,7 @@ fn enclave_cycle() {
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(Duration::seconds(1));
-    let (_, env) = boomerang_util::runner::build_and_test_reactor2(
-        main_reactor(),
-        "enclave_cycle",
-        (),
-        config,
-    )
-    .unwrap();
+    let (_, env) =
+        boomerang_util::runner::build_and_test_reactor2(MainReactor(), "enclave_cycle", (), config)
+            .unwrap();
 }

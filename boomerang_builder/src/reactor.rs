@@ -539,7 +539,8 @@ impl<'a> ReactorBuilderState<'a> {
     {
         // Add a recorder builder
         let action_key = action_key.into();
-        let topic = self.env.action_fqn(action_key, false)?.to_string();
+        let topic = self.env.fqn_for(action_key, false)?.to_string();
+        tracing::debug!("Adding recorder for action {action_key:?} with topic {topic}",);
         let _ = self
             .add_reaction("recorder", move |runtime_parts| {
                 let (enclave_key, action_key) = runtime_parts.aliases.action_aliases[action_key];

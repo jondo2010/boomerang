@@ -177,7 +177,7 @@ impl EnvBuilder {
             .reactor_builders
             .keys()
             .map(|reactor_key| {
-                self.reactor_fqn(reactor_key, false)
+                self.fqn_for(reactor_key, false)
                     .map(|fqn| (reactor_key, fqn.to_string()))
             })
             .collect::<Result<_, _>>()?;
@@ -266,7 +266,7 @@ impl EnvBuilder {
                 _ => {
                     tracing::info!(
                         "Action {} is unused, won't build",
-                        self.action_fqn(builder_action_key, false).unwrap()
+                        self.fqn_for(builder_action_key, false).unwrap()
                     );
                 }
             }

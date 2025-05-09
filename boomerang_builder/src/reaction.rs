@@ -337,7 +337,7 @@ impl<'a> ReactionBuilderState<'a> {
                     return Err(BuilderError::ReactionBuilderError(format!(
                         "Reaction {} cannot 'trigger on' or 'use' input port '{}', it must belong to the same reactor as the reaction",
                         self.builder.name(),
-                        self.env.port_fqn(key, false).unwrap()
+                        self.env.fqn_for(key, false).unwrap()
                     )));
                 }
                 // effects are valid for input ports on contained reactors

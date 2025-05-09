@@ -33,6 +33,7 @@ thiserror.workspace = true
 tracing.workspace = true
 serde = { workspace = true, optional = true }
 
+# repo dependencies
 boomerang_derive = { workspace = true, optional = true }
 boomerang_runtime = { workspace = true }
 tinymap.workspace = true

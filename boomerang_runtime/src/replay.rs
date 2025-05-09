@@ -177,8 +177,6 @@ where
     let fd = std::fs::File::open(path.as_ref())?;
     let mapped = unsafe { memmap2::Mmap::map(&fd) }?;
 
-    tracing::info!("Reading replay from {}", path.as_ref().display());
-
     let summary = mcap::Summary::read(&mapped)?
         .ok_or_else(|| ReplayError::Format("Missing summary in MCAP file".to_string()))?;
 

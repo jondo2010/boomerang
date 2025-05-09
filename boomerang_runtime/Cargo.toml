@@ -24,15 +24,20 @@ parallel = ["dep:rayon"]
 serde = ["dep:serde", "time/serde"]
 
 ## Support for recording and replaying events
-replay = ["serde"]
+replay = [
+    "serde",
+    "dep:mcap",
+    "dep:foxglove",
+    "dep:memmap2",
+    "dep:serde_json",
+    "dep:bytes",
+]
 
 [dependencies]
 kanal = "0.1"
 document-features = { workspace = true }
 downcast-rs = "1.2"
 itertools.workspace = true
-linkme = { workspace = true, optional = true }
-paste = { version = "1", optional = true }
 rayon = { version = "1.7", optional = true }
 serde = { workspace = true, optional = true, features = ["derive"] }
 thiserror.workspace = true
@@ -40,17 +45,12 @@ time = { workspace = true }
 tinymap.workspace = true
 tracing.workspace = true
 
-tokio = { version = "1.0", features = ["full"] }
-tokio-serde = { version = "0.9", features = ["json"] }
-tokio-util = { version = "*" }
-serde_json = "*"
-futures = "*"
-
-mcap = "0.18"
-foxglove = "0.7"
-memmap2 = "0.9"
-bytes = "1.10"
-schemars = "0.8"
+# replay dependencies
+bytes = { version = "1.10", optional = true }
+mcap = { version = "0.18", optional = true }
+foxglove = { version = "0.7", optional = true }
+memmap2 = { version = "0.9", optional = true }
+serde_json = { version = "1.0", optional = true }
 
 [dev-dependencies]
 tracing-subscriber.workspace = true

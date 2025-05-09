@@ -60,8 +60,6 @@ fn main() {
     use boomerang::prelude::*;
     tracing_subscriber::fmt::init();
 
-    use crossterm::event::KeyEvent;
-
     let mut env_builder = EnvBuilder::new();
     let _reactor =
         example::Example::build("printer", (), None, None, false, &mut env_builder).unwrap();
@@ -69,10 +67,9 @@ fn main() {
     let BuilderRuntimeParts {
         enclaves,
         aliases: _,
-        replayers,
+        ..
     } = env_builder.into_runtime_parts().unwrap();
 
-    //runtime::replay::create_replayer("test.mcap", replayers, &enclaves).unwrap();
     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
     let config = runtime::Config::default()
         .with_fast_forward(false)

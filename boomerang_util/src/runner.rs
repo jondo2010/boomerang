@@ -40,6 +40,11 @@ struct Args {
     #[cfg(feature = "replay")]
     #[arg(long)]
     record_actions: Vec<String>,
+
+    /// The filename to replay serialized data from
+    #[cfg(feature = "replay")]
+    #[arg(long, value_hint = clap::ValueHint::FilePath, conflicts_with = "record_filename")]
+    replay_filename: Option<std::path::PathBuf>,
 }
 
 /// Utility method to build and run a given top-level `Reactor` from tests.
@@ -160,16 +165,24 @@ pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow:
     if args.print_debug_info {
         println!("{env_builder:#?}");
     }
+
     let BuilderRuntimeParts {
         enclaves,
         aliases: _,
-        replayers: _,
+        #[cfg(feature = "replay")]
+        replayers,
     } = env_builder
         .into_runtime_parts()
         .context("Error building environment!")?;
 
     if args.print_debug_info {
         println!("{enclaves:#?}");
+    }
+
+    #[cfg(feature = "replay")]
+    if let Some(filename) = args.replay_filename {
+        tracing::info!("Reading replay from {}", filename.display());
+        runtime::replay::create_replayer(filename, replayers, &enclaves)?;
     }
 
     let config = runtime::Config {

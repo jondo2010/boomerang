@@ -40,7 +40,6 @@ tinymap.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
-rayon.workspace = true
 tracing-subscriber.workspace = true
 tracing-tracy = { workspace = true }
 

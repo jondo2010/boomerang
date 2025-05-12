@@ -221,10 +221,11 @@ mod reactor {
 }
 
 fn main() {
+    tracing_subscriber::fmt::init();
     use reactor::{Snake, SnakeBuilder};
     let _ = boomerang_util::runner::build_and_run_reactor::<SnakeBuilder>(
         "snake",
-        Snake::new(32, boomerang::runtime::Duration::milliseconds(40), 2),
+        Snake::new(16, boomerang::runtime::Duration::milliseconds(40), 2),
     )
     .unwrap();
 }

@@ -2,9 +2,29 @@
 
 use std::{fmt::Display, ops::Index};
 
-use crate::{ActionBuilder, BasePortBuilder, ReactionBuilder, ReactorBuilder};
+use crate::{
+    ActionBuilder, BasePortBuilder, BuilderActionKey, BuilderPortKey, BuilderReactionKey,
+    BuilderReactorKey, EnvBuilder, ParentReactorBuilder, ReactionBuilder, ReactorBuilder,
+};
 
 use super::BuilderError;
+
+pub trait FqnSegment {
+    /// Create a new segment from a reactor.
+    ///
+    /// If `grouped` is true, a banked reactor will be represented as a ranged index.
+    fn fqn_segment(&self, grouped: bool) -> BuilderFqnSegment;
+}
+
+pub trait Fqn: Copy {
+    /// Get a fully-qualified name for self
+    ///
+    /// If `grouped` is true, the returned Fqn will be grouped by bank
+    fn fqn(self, env: &EnvBuilder, grouped: bool) -> Result<BuilderFqn, BuilderError>;
+}
+
+/// The separator for segments in a fully-qualified name.
+const FQN_SEGMENT: &str = "/";
 
 /// An index for a segment of a fully-qualified name.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -32,13 +52,13 @@ pub struct BuilderFqnSegment {
     index: BuilderFqnSegmentIndex,
 }
 
-impl BuilderFqnSegment {
+impl FqnSegment for ReactorBuilder {
     /// Create a new segment from a reactor.
     ///
     /// If `grouped` is true, a banked reactor will be represented as a ranged index.
-    pub fn from_reactor(reactor: &ReactorBuilder, grouped: bool) -> Self {
-        let name = reactor.name().to_string();
-        let index = reactor
+    fn fqn_segment(&self, grouped: bool) -> BuilderFqnSegment {
+        let name = self.name().to_string();
+        let index = self
             .bank_info()
             .map(|bi| {
                 if grouped {
@@ -48,23 +68,27 @@ impl BuilderFqnSegment {
                 }
             })
             .unwrap_or_default();
-        Self { name, index }
+        BuilderFqnSegment { name, index }
     }
+}
 
+impl FqnSegment for ReactionBuilder {
     /// Create a new segment from a reaction.
-    pub fn from_reaction(reaction: &ReactionBuilder) -> Self {
-        let name = reaction.name().to_string();
-        Self {
+    fn fqn_segment(&self, _grouped: bool) -> BuilderFqnSegment {
+        let name = self.name().to_string();
+        BuilderFqnSegment {
             name,
             index: BuilderFqnSegmentIndex::None,
         }
     }
+}
 
+impl FqnSegment for dyn BasePortBuilder {
     /// Create a new segment from an action.
     ///
     /// If `grouped` is true, a banked action will be represented as a ranged index.
-    pub fn from_port(port: &dyn BasePortBuilder, grouped: bool) -> Self {
-        let index = port
+    fn fqn_segment(&self, grouped: bool) -> BuilderFqnSegment {
+        let index = self
             .bank_info()
             .map(|bi| {
                 if grouped {
@@ -74,19 +98,23 @@ impl BuilderFqnSegment {
                 }
             })
             .unwrap_or_default();
-        Self {
-            name: port.name().to_string(),
+        BuilderFqnSegment {
+            name: self.name().to_string(),
             index,
         }
     }
+}
 
-    pub fn from_action(action: &ActionBuilder, _grouped: bool) -> Self {
-        Self {
-            name: action.name().to_string(),
+impl FqnSegment for ActionBuilder {
+    fn fqn_segment(&self, _grouped: bool) -> BuilderFqnSegment {
+        BuilderFqnSegment {
+            name: self.name().to_string(),
             index: BuilderFqnSegmentIndex::None,
         }
     }
+}
 
+impl BuilderFqnSegment {
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -175,7 +203,7 @@ impl TryFrom<&str> for BuilderFqn {
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         let inner = value
-            .split("::")
+            .split(FQN_SEGMENT)
             .map(BuilderFqnSegment::try_from)
             .collect::<Result<Vec<_>, _>>()?;
         if inner.is_empty() {
@@ -196,7 +224,7 @@ impl std::fmt::Display for BuilderFqn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (i, segment) in self.0.iter().enumerate() {
             if i > 0 {
-                write!(f, "::")?;
+                write!(f, "{FQN_SEGMENT}")?;
             }
             write!(f, "{}", segment)?;
         }
@@ -212,43 +240,97 @@ impl Index<usize> for BuilderFqn {
     }
 }
 
-#[test]
-fn test_fqn() {
-    let fqn = BuilderFqn::try_from("boomerang::builder::fqn").unwrap();
-    assert_eq!(fqn.to_string(), "boomerang::builder::fqn");
-    assert_eq!(fqn[0].to_string(), "boomerang");
-    assert_eq!(fqn[1].to_string(), "builder");
-    assert_eq!(fqn[2].to_string(), "fqn");
+impl Fqn for BuilderReactorKey {
+    fn fqn(self, env: &EnvBuilder, grouped: bool) -> Result<BuilderFqn, BuilderError> {
+        let reactor = env
+            .reactor_builders
+            .get(self)
+            .ok_or(BuilderError::ReactorKeyNotFound(self))?;
+
+        let segment = reactor.fqn_segment(grouped);
+        if let Some(parent) = reactor.parent_reactor_key() {
+            parent.fqn(env, grouped)?.append(segment)
+        } else {
+            Ok(std::iter::once(segment).collect())
+        }
+    }
 }
 
-#[test]
-fn test_fqn_segment() {
-    let segment = BuilderFqnSegment::try_from("fqn").unwrap();
-    assert_eq!(segment.to_string(), "fqn");
-    assert_eq!(segment.index, BuilderFqnSegmentIndex::None);
+impl Fqn for BuilderActionKey {
+    fn fqn(self, env: &EnvBuilder, grouped: bool) -> Result<BuilderFqn, BuilderError> {
+        let action = env
+            .action_builders
+            .get(self)
+            .ok_or(BuilderError::ActionKeyNotFound(self))?;
+        let segment = action.fqn_segment(grouped);
+        action.reactor_key().fqn(env, true)?.append(segment)
+    }
+}
 
-    let segment = BuilderFqnSegment::try_from("fqn[0]").unwrap();
-    assert_eq!(segment.to_string(), "fqn[0]");
-    assert_eq!(segment.index, BuilderFqnSegmentIndex::Index(0));
+impl Fqn for BuilderReactionKey {
+    fn fqn(self, env: &EnvBuilder, grouped: bool) -> Result<BuilderFqn, BuilderError> {
+        let reaction = env
+            .reaction_builders
+            .get(self)
+            .ok_or(BuilderError::ReactionKeyNotFound(self))?;
+        let segment = reaction.fqn_segment(false);
+        reaction.reactor_key.fqn(env, grouped)?.append(segment)
+    }
+}
 
-    let segment = BuilderFqnSegment::try_from("fqn[1..3]").unwrap();
-    assert_eq!(segment.to_string(), "fqn[1..3]");
-    assert_eq!(segment.index, BuilderFqnSegmentIndex::Range(1, 3));
+impl Fqn for BuilderPortKey {
+    fn fqn(self, env: &EnvBuilder, grouped: bool) -> Result<BuilderFqn, BuilderError> {
+        let port = env
+            .port_builders
+            .get(self)
+            .ok_or(BuilderError::PortKeyNotFound(self))?;
+        let segment = port.fqn_segment(grouped);
+        port.get_reactor_key().fqn(env, grouped)?.append(segment)
+    }
+}
 
-    let fqn = BuilderFqn::try_from("boomerang::fqn[1]::test").unwrap();
-    assert_eq!(fqn.to_string(), "boomerang::fqn[1]::test");
-    assert_eq!(fqn[0].to_string(), "boomerang");
-    assert_eq!(fqn[1].to_string(), "fqn[1]");
-    assert_eq!(fqn[1].index, BuilderFqnSegmentIndex::Index(1));
-    assert_eq!(fqn[2].to_string(), "test");
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    // test empty segments
-    assert!(BuilderFqnSegment::try_from("").is_err());
+    #[test]
+    fn test_fqn() {
+        let fqn = BuilderFqn::try_from("boomerang/builder/fqn").unwrap();
+        assert_eq!(fqn.to_string(), "boomerang/builder/fqn");
+        assert_eq!(fqn[0].to_string(), "boomerang");
+        assert_eq!(fqn[1].to_string(), "builder");
+        assert_eq!(fqn[2].to_string(), "fqn");
+    }
 
-    assert!(BuilderFqn::try_from("boomerang::fqn[1]::").is_err());
+    #[test]
+    fn test_fqn_segment() {
+        let segment = BuilderFqnSegment::try_from("fqn").unwrap();
+        assert_eq!(segment.to_string(), "fqn");
+        assert_eq!(segment.index, BuilderFqnSegmentIndex::None);
 
-    assert_eq!(
-        BuilderFqn::try_from("boomerang::fqn[1]::test").unwrap(),
-        BuilderFqn::try_from("boomerang::fqn[1]::test").unwrap()
-    );
+        let segment = BuilderFqnSegment::try_from("fqn[0]").unwrap();
+        assert_eq!(segment.to_string(), "fqn[0]");
+        assert_eq!(segment.index, BuilderFqnSegmentIndex::Index(0));
+
+        let segment = BuilderFqnSegment::try_from("fqn[1..3]").unwrap();
+        assert_eq!(segment.to_string(), "fqn[1..3]");
+        assert_eq!(segment.index, BuilderFqnSegmentIndex::Range(1, 3));
+
+        let fqn = BuilderFqn::try_from("boomerang/fqn[1]/test").unwrap();
+        assert_eq!(fqn.to_string(), "boomerang/fqn[1]/test");
+        assert_eq!(fqn[0].to_string(), "boomerang");
+        assert_eq!(fqn[1].to_string(), "fqn[1]");
+        assert_eq!(fqn[1].index, BuilderFqnSegmentIndex::Index(1));
+        assert_eq!(fqn[2].to_string(), "test");
+
+        // test empty segments
+        assert!(BuilderFqnSegment::try_from("").is_err());
+
+        assert!(BuilderFqn::try_from("boomerang/fqn[1]/").is_err());
+
+        assert_eq!(
+            BuilderFqn::try_from("boomerang/fqn[1]/test").unwrap(),
+            BuilderFqn::try_from("boomerang/fqn[1]/test").unwrap()
+        );
+    }
 }

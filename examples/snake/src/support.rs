@@ -196,10 +196,10 @@ impl SnakeGrid {
     }
 
     pub fn find_random_free_cell(&self) -> Option<Cell> {
-        use rand::Rng;
+        use rand::{rngs::StdRng, Rng, SeedableRng};
 
         // find a random free cell that will become food
-        let mut rng = rand::thread_rng();
+        let mut rng = StdRng::seed_from_u64(1234);
         for _ in 0..60 {
             // don't loop infinitely
             let row = rng.gen_range(0..self.grid_side);

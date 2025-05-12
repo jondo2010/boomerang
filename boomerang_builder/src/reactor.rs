@@ -5,7 +5,7 @@ use super::{
     EnvBuilder, FindElements, Logical, Output, Physical, PhysicalActionKey, PortTag,
     ReactionBuilderState, TimerActionKey, TimerSpec, TypedActionKey, TypedPortKey,
 };
-use crate::{runtime, ActionTag, BuilderRuntimeParts, Input};
+use crate::{runtime, ActionTag, BuilderRuntimeParts, Input, TriggerMode};
 use slotmap::SecondaryMap;
 
 slotmap::new_key_type! {
@@ -123,10 +123,10 @@ impl<T: runtime::ReactorData, Q: ActionTag> ReactorField for TypedActionKey<T, Q
 
     fn build(
         name: &str,
-        inner: Self::Inner,
+        min_delay: Self::Inner,
         parent: &'_ mut ReactorBuilderState,
     ) -> Result<Self, BuilderError> {
-        parent.add_action(name, inner)
+        parent.add_action(name, min_delay)
     }
 }
 
@@ -336,7 +336,8 @@ impl<'a> ReactorBuilderState<'a> {
 
     /// Add a new action to the reactor.
     ///
-    /// This method forwards to the implementation at [`crate::env::EnvBuilder::internal_add_action`].
+    /// This method forwards to the implementation at
+    /// [`crate::env::EnvBuilder::internal_add_action`].
     pub fn add_action<T: runtime::ReactorData, Q: ActionTag>(
         &mut self,
         name: &str,
@@ -499,7 +500,8 @@ impl<'a> ReactorBuilderState<'a> {
             .add_port_connection::<T, _, _>(port_a_key, port_b_key, after, physical)
     }
 
-    /// Connect multiple ports on this reactor. This has the logical meaning of "connecting" `ports_from` to `ports_to`.
+    /// Connect multiple ports on this reactor. This has the logical meaning of "connecting"
+    /// `ports_from` to `ports_to`.
     pub fn connect_ports<T: runtime::ReactorData + Clone, Q1: PortTag, Q2: PortTag>(
         &mut self,
         ports_from: impl Iterator<Item = TypedPortKey<T, Q1>>,
@@ -523,5 +525,51 @@ impl<'a> ReactorBuilderState<'a> {
         action_fqn: impl Into<BuilderFqn>,
     ) -> Result<BuilderActionKey, BuilderError> {
         self.env.find_physical_action_by_fqn(action_fqn)
+    }
+
+    /// Add a recorder for the given action key.
+    #[cfg(feature = "replay")]
+    pub fn add_action_recorder<T, Q>(
+        &mut self,
+        action_key: TypedActionKey<T, Q>,
+    ) -> Result<(), BuilderError>
+    where
+        T: runtime::ReactorData + serde::Serialize,
+        Q: ActionTag,
+    {
+        // Add a recorder builder
+        let action_key = action_key.into();
+        let topic = self.env.fqn_for(action_key, false)?.to_string();
+        tracing::debug!("Adding recorder for action {action_key:?} with topic {topic}",);
+        let _ = self
+            .add_reaction("recorder", move |runtime_parts| {
+                let (enclave_key, action_key) = runtime_parts.aliases.action_aliases[action_key];
+                Box::new(
+                    runtime::replay::RecorderFn::<T>::new(&topic, enclave_key, action_key).unwrap(),
+                )
+            })
+            .with_action(action_key, 0, TriggerMode::TriggersAndUses)?
+            .finish()?;
+
+        Ok(())
+    }
+
+    /// Add a replayer for the given action key.
+    #[cfg(feature = "replay")]
+    pub fn add_action_replayer<T, Q>(
+        &mut self,
+        action_key: TypedActionKey<T, Q>,
+    ) -> Result<(), BuilderError>
+    where
+        T: runtime::ReactorData + for<'de> serde::de::Deserialize<'de>,
+        Q: ActionTag,
+    {
+        // Add a replayer builder
+        self.env.add_replayer(action_key, move |runtime_parts| {
+            let (_enclave_key, action_key) =
+                runtime_parts.aliases.action_aliases[action_key.into()];
+            Box::new(runtime::replay::TypedReplayer::<T>::new(action_key))
+        })?;
+        Ok(())
     }
 }

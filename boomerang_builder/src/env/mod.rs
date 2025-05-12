@@ -1,6 +1,6 @@
 use crate::{
     connection::{BaseConnectionBuilder, ConnectionBuilder, PortBindings},
-    ActionTag, BuilderFqnSegment, ParentReactorBuilder, TimerActionKey, TimerSpec, TriggerMode,
+    ActionTag, Fqn, FqnSegment, ParentReactorBuilder, TimerActionKey, TimerSpec, TriggerMode,
 };
 
 use super::{
@@ -73,6 +73,12 @@ pub struct EnvBuilder {
     pub(super) reactor_builders: SlotMap<BuilderReactorKey, ReactorBuilder>,
     /// Builders for Connections
     pub(super) connection_builders: Vec<Box<dyn BaseConnectionBuilder>>,
+    #[cfg(feature = "replay")]
+    /// Builders for Replay functions
+    pub(super) replay_builders: SecondaryMap<
+        BuilderActionKey,
+        Box<dyn FnOnce(&BuilderRuntimeParts) -> Box<dyn runtime::replay::ReplayFn>>,
+    >,
 }
 
 impl EnvBuilder {
@@ -257,6 +263,29 @@ impl EnvBuilder {
         )
     }
 
+    /// Add a replay function for a given Action
+    #[cfg(feature = "replay")]
+    pub fn add_replayer<T, Q, F>(
+        &mut self,
+        action_key: TypedActionKey<T, Q>,
+        replayer_builder_fn: F,
+    ) -> Result<(), BuilderError>
+    where
+        T: boomerang_runtime::ReactorData + for<'de> serde::Deserialize<'de>,
+        Q: ActionTag,
+        F: FnOnce(&BuilderRuntimeParts) -> Box<dyn runtime::replay::ReplayFn> + 'static,
+    {
+        let action_key = action_key.into();
+        if self.replay_builders.contains_key(action_key) {
+            return Err(BuilderError::ReplayKeyAlreadyExists(action_key));
+        }
+
+        self.replay_builders
+            .insert(action_key, Box::new(replayer_builder_fn));
+
+        Ok(())
+    }
+
     /// Get a previously built action
     pub fn get_action(&self, action_key: BuilderActionKey) -> Result<&ActionBuilder, BuilderError> {
         self.action_builders
@@ -331,7 +360,7 @@ impl EnvBuilder {
         self.reactor_builders
             .iter()
             .find_map(|(reactor_key, reactor_builder)| {
-                if BuilderFqnSegment::from_reactor(reactor_builder, false) == segment {
+                if reactor_builder.fqn_segment(false) == segment {
                     Some(reactor_key)
                 } else {
                     None
@@ -361,13 +390,12 @@ impl EnvBuilder {
         self.reactor_builders[reactor]
             .actions
             .keys()
-            .find(|action_key| {
-                BuilderFqnSegment::from_action(&self.action_builders[*action_key], false) == segment
-            })
+            .find(|action_key| self.action_builders[*action_key].fqn_segment(false) == segment)
             .ok_or_else(|| BuilderError::NamedActionNotFound(action_fqn.to_string()))
     }
 
-    /// Find a possible common parent Reactor for two Reactor elements in the EnvBuilder (if it exists).
+    /// Find a possible common parent Reactor for two Reactor elements in the EnvBuilder (if it
+    /// exists).
     pub fn common_reactor_key<E0, E1>(&self, e0: &E0, e1: &E1) -> Option<BuilderReactorKey>
     where
         E0: ParentReactorBuilder,
@@ -395,8 +423,10 @@ impl EnvBuilder {
     /// * `target_key` - The key of the second port to connect
     /// * `after` - An optional delay to wait before triggering the downstream ports.
     /// * `physical` - Whether the connection is physical (or logical).
-    ///     * Logical connections will trigger any downstream ports at the current logical time (with any `after` delay).
-    ///     * Physical connections will trigger the downstream ports at the current physical time (with any `after` delay).
+    ///     * Logical connections will trigger any downstream ports at the current logical time
+    ///       (with any `after` delay).
+    ///     * Physical connections will trigger the downstream ports at the current physical time
+    ///       (with any `after` delay).
     pub fn add_port_connection<T, P1, P2>(
         &mut self,
         source_key: P1,
@@ -424,76 +454,9 @@ impl EnvBuilder {
         Ok(())
     }
 
-    /// Get a fully-qualified string name for the given ActionKey
-    ///
-    /// If `grouped` is true, the returned Fqn will be grouped by bank
-    pub fn action_fqn(
-        &self,
-        action_key: BuilderActionKey,
-        grouped: bool,
-    ) -> Result<BuilderFqn, BuilderError> {
-        let action = self
-            .action_builders
-            .get(action_key)
-            .ok_or(BuilderError::ActionKeyNotFound(action_key))?;
-        let segment = BuilderFqnSegment::from_action(action, grouped);
-        self.reactor_fqn(action.reactor_key(), true)?
-            .append(segment)
-    }
-
-    /// Get a fully-qualified string for the given ReactionKey
-    ///
-    /// If `grouped` is true, the returned Fqn will be grouped by bank
-    pub fn reactor_fqn(
-        &self,
-        reactor_key: BuilderReactorKey,
-        grouped: bool,
-    ) -> Result<BuilderFqn, BuilderError> {
-        let reactor = self
-            .reactor_builders
-            .get(reactor_key)
-            .ok_or(BuilderError::ReactorKeyNotFound(reactor_key))?;
-
-        let segment = BuilderFqnSegment::from_reactor(reactor, grouped);
-        if let Some(parent) = reactor.parent_reactor_key() {
-            self.reactor_fqn(parent, grouped)?.append(segment)
-        } else {
-            Ok(std::iter::once(segment).collect())
-        }
-    }
-
-    /// Get a fully-qualified string for the given ReactionKey
-    ///
-    /// If `grouped` is true, the returned Fqn will be grouped by bank
-    pub fn reaction_fqn(
-        &self,
-        reaction_key: BuilderReactionKey,
-        grouped: bool,
-    ) -> Result<BuilderFqn, BuilderError> {
-        let reaction = self
-            .reaction_builders
-            .get(reaction_key)
-            .ok_or(BuilderError::ReactionKeyNotFound(reaction_key))?;
-        let segment = BuilderFqnSegment::from_reaction(reaction);
-        self.reactor_fqn(reaction.reactor_key, grouped)?
-            .append(segment)
-    }
-
-    /// Get a fully-qualified string for the given PortKey
-    ///
-    /// If `grouped` is true, the returned Fqn will be grouped by bank
-    pub fn port_fqn(
-        &self,
-        port_key: BuilderPortKey,
-        grouped: bool,
-    ) -> Result<BuilderFqn, BuilderError> {
-        let port = self
-            .port_builders
-            .get(port_key)
-            .ok_or(BuilderError::PortKeyNotFound(port_key))?;
-        let segment = BuilderFqnSegment::from_port(port.as_ref(), grouped);
-        self.reactor_fqn(port.get_reactor_key(), grouped)?
-            .append(segment)
+    /// Get a fully-qualified name for a given key
+    pub fn fqn_for(&self, key: impl Fqn, grouped: bool) -> Result<BuilderFqn, BuilderError> {
+        key.fqn(self, grouped)
     }
 
     /// Build an iterator of all Reaction dependency edges in the graph

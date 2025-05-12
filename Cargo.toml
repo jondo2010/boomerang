@@ -12,16 +12,13 @@ exclude = ['.gitignore', '.cargo/config', '.vscode', '.devcontainer', '.github']
 
 [workspace.dependencies]
 anyhow = "1.0"
-arrow = { version = "52", default-features = false }
 time = { version = "0.3", features = [] }
 document-features = "0.2"
 erased-serde = "0.4"
 itertools = "0.13"
 rayon = "1.10"
 serde = "1.0"
-serde_arrow = { version = "0.11", features = ["arrow-52"] }
-serde_flexitos = { version = "0.2", features = ["id_trait"] }
-thiserror = "1.0"
+thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = [
     "fmt",
@@ -29,7 +26,6 @@ tracing-subscriber = { version = "0.3", features = [
     "env-filter",
 ] }
 tracing-tracy = { version = "0.11", features = ["flush-on-exit"] }
-linkme = { version = "0.3" }
 
 # Local crates
 boomerang = { path = "boomerang", version = "0.3.0" }

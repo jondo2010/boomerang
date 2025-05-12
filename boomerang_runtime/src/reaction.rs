@@ -196,7 +196,7 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for EnclaveSenderReactio
                 };
 
                 self.remote_context
-                    .schedule_async(crate::event::AsyncEvent::Logical {
+                    .schedule_external(crate::event::AsyncEvent::Logical {
                         tag,
                         key: self.remote_action_ref.key(),
                         value: Box::new(value.clone()),

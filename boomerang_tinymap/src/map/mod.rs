@@ -178,6 +178,11 @@ impl<K: Key, V> TinyMap<K, V> {
             _k: PhantomData,
         }
     }
+
+    /// Returns a reference to the value corresponding to the key.
+    pub fn get(&self, key: K) -> Option<&V> {
+        self.data.get(key.index())
+    }
 }
 
 impl<K: Key, V> FromIterator<V> for TinyMap<K, V> {
@@ -217,6 +222,10 @@ mod tests {
 
         assert_eq!(map[key1], 10);
         assert_eq!(map[key2], 20);
+
+        assert_eq!(map.get(key1), Some(&10));
+        assert_eq!(map.get(key2), Some(&20));
+        assert_eq!(map.get(TestKey::from(2)), None);
     }
 
     #[test]

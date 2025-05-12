@@ -13,41 +13,44 @@ exclude.workspace = true
 
 [features]
 default = [
-    #"parallel"
+    #"parallel",
+    "replay",
 ]
 
 ## Support for parallel execution
 parallel = ["dep:rayon"]
 
 ## Support for serialization
-serde = [
-    #    "dep:arrow",
-    #    "dep:erased-serde",
-    "dep:serde",
-    #    "dep:serde_arrow",
-    #    "dep:serde_flexitos",
-    #    "dep:linkme",
-    #    "dep:paste",
-    "time/serde",
+serde = ["dep:serde", "time/serde"]
+
+## Support for recording and replaying events
+replay = [
+    "serde",
+    "dep:mcap",
+    "dep:foxglove",
+    "dep:memmap2",
+    "dep:serde_json",
+    "dep:bytes",
 ]
 
 [dependencies]
-#arrow = { workspace = true, optional = true, features = ["prettyprint"] }
-crossbeam-channel = "0.5"
+kanal = "0.1"
 document-features = { workspace = true }
 downcast-rs = "1.2"
-erased-serde = { workspace = true, optional = true }
 itertools.workspace = true
-linkme = { workspace = true, optional = true }
-paste = { version = "1", optional = true }
 rayon = { version = "1.7", optional = true }
 serde = { workspace = true, optional = true, features = ["derive"] }
-#serde_arrow = { workspace = true, optional = true, features = ["arrow-52"] }
-#serde_flexitos = { workspace = true, optional = true, features = ["id_trait"] }
 thiserror.workspace = true
-time.workspace = true
+time = { workspace = true }
 tinymap.workspace = true
 tracing.workspace = true
+
+# replay dependencies
+bytes = { version = "1.10", optional = true }
+mcap = { version = "0.18", optional = true }
+foxglove = { version = "0.7", optional = true }
+memmap2 = { version = "0.9", optional = true }
+serde_json = { version = "1.0", optional = true }
 
 [dev-dependencies]
 tracing-subscriber.workspace = true

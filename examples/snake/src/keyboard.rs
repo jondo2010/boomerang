@@ -67,9 +67,10 @@ fn main() {
     let BuilderRuntimeParts {
         enclaves,
         aliases: _,
+        ..
     } = env_builder.into_runtime_parts().unwrap();
-    let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
 
+    let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
     let config = runtime::Config::default()
         .with_fast_forward(false)
         .with_keep_alive(true);

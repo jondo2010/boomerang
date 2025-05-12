@@ -1,6 +1,6 @@
 use std::{collections::BinaryHeap, pin::Pin};
 
-use crossbeam_channel::RecvTimeoutError;
+use kanal::ReceiveErrorTimeout;
 
 use crate::{
     build_reaction_contexts,
@@ -238,7 +238,7 @@ impl LogicalTimeBarrier {
             // The upstream has terminated try to return a queued event here. If the upstream terminated, we probably
             // have an event queued from it. This prevents pre-mature termination of this enclave.
             tracing::warn!("Upstream has terminated");
-            return event_rx.try_recv().ok();
+            return event_rx.try_recv().expect("Upstream terminated");
         }
 
         // Block until the tag is released
@@ -527,7 +527,7 @@ impl Scheduler {
         for (key, ctx) in self.downstream_enclaves.iter() {
             let event = AsyncEvent::release(self.key, current_tag);
             tracing::trace!(downstream = %key, event = %event, "Releasing downstream");
-            if !ctx.schedule_async(event) && self.shutdown_tag.is_none() {
+            if !ctx.schedule_external(event) && self.shutdown_tag.is_none() {
                 tracing::warn!(
                     "Failed to send tag downstream, downstream has unexpectedly terminated."
                 );
@@ -538,7 +538,7 @@ impl Scheduler {
     #[tracing::instrument(skip(self), fields(tag = %self.current_tag))]
     pub fn next(&mut self) -> bool {
         // Pump the event queue
-        while let Ok(async_event) = self.event_rx.try_recv() {
+        while let Ok(Some(async_event)) = self.event_rx.try_recv() {
             self.handle_async_event(async_event);
         }
 
@@ -630,7 +630,7 @@ impl Scheduler {
                         self.handle_async_event(event);
                         return true;
                     }
-                    Err(RecvTimeoutError::Disconnected) => {
+                    Err(ReceiveErrorTimeout::Closed) | Err(ReceiveErrorTimeout::SendClosed) => {
                         let remaining = target.checked_duration_since(std::time::Instant::now());
                         if let Some(remaining) = remaining {
                             tracing::debug!(remaining = ?remaining,
@@ -639,7 +639,7 @@ impl Scheduler {
                             std::thread::sleep(remaining);
                         }
                     }
-                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(ReceiveErrorTimeout::Timeout) => {}
                 }
             }
 

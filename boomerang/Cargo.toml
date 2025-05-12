@@ -20,7 +20,7 @@ default = [
 derive = ["dep:boomerang_derive"]
 
 # Support for serialization
-serde = ["boomerang_runtime/serde", "boomerang_util/serde"]
+serde = ["boomerang_runtime/serde"]
 
 ## Execute reactors in parallel on a thread pool
 parallel = ["boomerang_runtime/parallel"]
@@ -28,10 +28,14 @@ parallel = ["boomerang_runtime/parallel"]
 ## Support generating graphviz diagrams from reactor models
 graphviz = ["boomerang_builder/graphviz"]
 
+## Support for recording and replaying
+replay = ["boomerang_runtime/replay"]
+
 [dependencies]
 document-features = { workspace = true }
 thiserror.workspace = true
 
+# repo dependencies
 boomerang_builder = { workspace = true }
 boomerang_derive = { workspace = true, optional = true }
 boomerang_runtime = { workspace = true }
@@ -40,7 +44,6 @@ boomerang_runtime = { workspace = true }
 boomerang_util = { path = "../boomerang_util", features = ["runner"] }
 criterion = "0.5"
 serde = { workspace = true }
-linkme = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-tracy = { workspace = true }
 

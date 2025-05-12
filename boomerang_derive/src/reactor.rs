@@ -35,6 +35,20 @@ pub enum ActionAttrPolicy {
     Drop,
 }
 
+#[derive(Clone, Debug, FromMeta, PartialEq, Eq, Default)]
+pub enum ReplayMode {
+    /// No replay support
+    #[default]
+    None,
+    /// Record only
+    Record,
+    /// Replay only
+    Replay,
+    /// Record and replay
+    #[darling(rename = "record-replay")]
+    RecPlay,
+}
+
 #[derive(Clone, Debug, FromMeta, PartialEq, Eq)]
 pub struct ActionAttr {
     //#[darling(default)]
@@ -43,6 +57,8 @@ pub struct ActionAttr {
     pub min_delay: Option<Duration>,
     #[darling(default)]
     pub policy: Option<ActionAttrPolicy>,
+    #[darling(default)]
+    pub replay: ReplayMode,
 }
 
 #[derive(Clone, Debug, FromMeta, PartialEq, Eq)]
@@ -84,6 +100,7 @@ pub enum ReactorFieldKind {
     Action {
         min_delay: Option<Duration>,
         policy: ActionAttrPolicy,
+        replay: ReplayMode,
     },
     Child {
         state: syn::Expr,
@@ -100,22 +117,45 @@ impl ToTokens for ReactorField {
             ReactorFieldKind::Timer { period, offset } => {
                 let period = OptionalDuration(*period);
                 let offset = OptionalDuration(*offset);
-                quote! { let __inner = ::boomerang::builder::TimerSpec { period: #period, offset: #offset, }; }
+                quote! {
+                    let #ident = <#ty as ::boomerang::builder::ReactorField>::build(
+                        #name,
+                        ::boomerang::builder::TimerSpec {
+                            period: #period,
+                            offset: #offset
+                        },
+                        &mut __builder
+                    )?;
+                }
             }
             ReactorFieldKind::Port => {
-                quote! { let __inner = (); }
-            },
-            ReactorFieldKind::Action { min_delay, policy: _ } => {
-                let min_delay = OptionalDuration(*min_delay);
-                quote! { let __inner = #min_delay; }
-            },
-            ReactorFieldKind::Child { state, enclave } => {
-                quote! { let __inner = (#state, #enclave); }
+                quote! { let #ident = <#ty as ::boomerang::builder::ReactorField>::build(#name, (), &mut __builder)?; }
             }
-        });
-
-        tokens.extend(quote! {
-            let #ident = <#ty as ::boomerang::builder::ReactorField>::build(#name, __inner, &mut __builder)?;
+            ReactorFieldKind::Action {
+                min_delay,
+                policy: _,
+                replay,
+            } => {
+                let min_delay = OptionalDuration(*min_delay);
+                let replay = match replay {
+                    ReplayMode::None => quote! {},
+                    ReplayMode::Record => quote! { __builder.add_action_recorder(#ident)?; },
+                    ReplayMode::Replay => quote! { __builder.add_action_replayer(#ident)?; },
+                    ReplayMode::RecPlay => quote! {
+                        __builder.add_action_recorder(#ident)?;
+                        __builder.add_action_replayer(#ident)?;
+                    }
+                };
+                quote! {
+                    let #ident = <#ty as ::boomerang::builder::ReactorField>::build(#name, #min_delay, &mut __builder)?;
+                    #replay
+                }
+            }
+            ReactorFieldKind::Child { state, enclave } => {
+                quote! {
+                    let #ident = <#ty as ::boomerang::builder::ReactorField>::build(#name, (#state, #enclave), &mut __builder)?;
+                }
+            }
         });
     }
 }
@@ -150,15 +190,17 @@ impl TryFrom<FieldReceiver> for ReactorField {
                     }
 
                     TYPED_ACTION_KEY | PHYSICAL_ACTION_KEY => {
-                        let min_delay = value.action.as_ref().and_then(|attr| attr.min_delay);
-                        let policy = value.action.as_ref().and_then(|attr| attr.policy.clone());
+                        let action = value.action.as_ref();
                         Ok(ReactorField {
                             ident,
                             name,
                             ty,
                             kind: ReactorFieldKind::Action {
-                                min_delay,
-                                policy: policy.unwrap_or_default(),
+                                min_delay: action.and_then(|attr| attr.min_delay),
+                                policy: action
+                                    .and_then(|attr| attr.policy.clone())
+                                    .unwrap_or_default(),
+                                replay: action.map(|attr| attr.replay.clone()).unwrap_or_default(),
                             },
                         })
                     }
@@ -529,7 +571,7 @@ struct Count {
     #[reactor(rename = "foo", timer(period = "1 usec"))]
     timer: TimerActionKey,
     action: TypedActionKey<u32>,
-    #[reactor(action(min_delay = "1 usec"))]
+    #[reactor(action(min_delay = "1 usec", replay = "record-replay"))]
     phys_action: PhysicalActionKey,
 }"#;
 
@@ -566,6 +608,7 @@ struct Count {
                 kind: ReactorFieldKind::Action {
                     min_delay: None,
                     policy: ActionAttrPolicy::Defer,
+                    replay: ReplayMode::None,
                 }
             }
         );
@@ -579,6 +622,7 @@ struct Count {
                 kind: ReactorFieldKind::Action {
                     min_delay: Some(Duration::from_micros(1)),
                     policy: ActionAttrPolicy::Defer,
+                    replay: ReplayMode::RecPlay,
                 }
             }
         );

@@ -44,7 +44,7 @@ impl EnvBuilder {
         let reactors_chunked = self
             .reactor_builders
             .keys()
-            .map(|reactor_key| (self.reactor_fqn(reactor_key, true).unwrap(), reactor_key))
+            .map(|reactor_key| (self.fqn_for(reactor_key, true).unwrap(), reactor_key))
             .sorted()
             .chunk_by(|(fqn, _)| fqn.clone());
         reactors_chunked
@@ -63,7 +63,7 @@ impl EnvBuilder {
         ports: impl Iterator<Item = BuilderPortKey>,
     ) -> Vec<(BuilderPortKey, Option<BuilderPortKey>, BuilderFqn)> {
         let ports_chunked = ports
-            .map(|port_key| (self.port_fqn(port_key, true).unwrap(), port_key))
+            .map(|port_key| (self.fqn_for(port_key, true).unwrap(), port_key))
             .sorted()
             .chunk_by(|(fqn, _)| fqn.clone());
         ports_chunked
@@ -133,7 +133,7 @@ impl EnvBuilder {
         let actions_chunked = self
             .action_builders
             .keys()
-            .map(|action_key| (action_key, self.action_fqn(action_key, true).unwrap()))
+            .map(|action_key| (action_key, self.fqn_for(action_key, true).unwrap()))
             .sorted_by(|a, b| a.1.cmp(&b.1))
             .chunk_by(|(_, fqn)| fqn.clone());
 
@@ -158,7 +158,7 @@ impl EnvBuilder {
         let reactions_chunked = self
             .reaction_builders
             .keys()
-            .map(|reaction_key| (reaction_key, self.reaction_fqn(reaction_key, true).unwrap()))
+            .map(|reaction_key| (reaction_key, self.fqn_for(reaction_key, true).unwrap()))
             .sorted_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)))
             .chunk_by(|(_, fqn)| fqn.clone());
 
@@ -197,8 +197,8 @@ impl EnvBuilder {
         self.connection_builders
             .iter()
             .map(|connection| {
-                let source = self.port_fqn(connection.source_key(), false).unwrap();
-                let target = self.port_fqn(connection.target_key(), false).unwrap();
+                let source = self.fqn_for(connection.source_key(), false).unwrap();
+                let target = self.fqn_for(connection.target_key(), false).unwrap();
                 Connection {
                     source,
                     target,

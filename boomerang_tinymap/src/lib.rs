@@ -47,7 +47,39 @@ macro_rules! key_type {
                 write!(f, "{}({})", stringify!($name), self.0)
             }
         }
+
+        impl std::str::FromStr for $name {
+            type Err = String;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                const PREFIX: &str = concat!(stringify!($name), "(");
+                if s.starts_with(PREFIX) && s.ends_with(')') {
+                    let inner = &s[PREFIX.len()..s.len() - 1];
+                    inner
+                        .parse::<u64>()
+                        .map(Self)
+                        .map_err(|_| format!("Failed to parse inner value: {}", inner))
+                } else {
+                    Err(format!("Invalid format for {}: {}", stringify!($name), s))
+                }
+            }
+        }
     };
 }
 
 key_type!(pub DefaultKey);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_key_type() {
+        let key = DefaultKey(42);
+        assert_eq!(key.index(), 42);
+        assert_eq!(DefaultKey::from(42), key);
+        assert_eq!(key.to_string(), "DefaultKey(42)");
+        assert_eq!(DefaultKey::from_str("DefaultKey(42)").unwrap(), key);
+    }
+}

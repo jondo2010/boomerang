@@ -166,6 +166,7 @@ where
 pub type ReplayersMap =
     tinymap::TinySecondaryMap<EnclaveKey, tinymap::TinySecondaryMap<ActionKey, Box<dyn ReplayFn>>>;
 
+/// Replay the recorded messages from an MCAP file (`path`) using the provided replayers.
 pub fn create_replayer<P>(
     path: P,
     replayers: ReplayersMap,

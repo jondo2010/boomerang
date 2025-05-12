@@ -54,9 +54,6 @@ pub trait CommonContext {
     /// Returns true if the event was successfully scheduled, false if the channel was disconnected.
     fn schedule_external(&self, event: AsyncEvent) -> bool;
 
-    /// Schedule an event externally by sending it to the scheduler through a channel.
-    async fn schedule_external_async(&self, event: AsyncEvent) -> bool;
-
     /// Try to schedule an asynchronous event without blocking
     ///
     /// Returns `Some(true)` if the event was successfully scheduled, `Some(false)` if the channel was disconnected, and `None` if the channel would have blocked.
@@ -231,13 +228,6 @@ impl CommonContext for Context {
         self.async_tx.send(event).is_ok()
     }
 
-    async fn schedule_external_async(&self, event: AsyncEvent) -> bool {
-        if self.is_shutdown() {
-            return false;
-        }
-        self.async_tx.as_async().send(event).await.is_ok()
-    }
-
     fn try_schedule_async(&self, event: AsyncEvent) -> Option<bool> {
         if self.is_shutdown() {
             return Some(false);
@@ -281,13 +271,6 @@ impl CommonContext for SendContext {
             return false;
         }
         self.async_tx.send(event).is_ok()
-    }
-
-    async fn schedule_external_async(&self, event: AsyncEvent) -> bool {
-        if self.is_shutdown() {
-            return false;
-        }
-        self.async_tx.as_async().send(event).await.is_ok()
     }
 
     fn try_schedule_async(&self, event: AsyncEvent) -> Option<bool> {

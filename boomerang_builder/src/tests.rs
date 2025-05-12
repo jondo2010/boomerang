@@ -266,7 +266,7 @@ fn test_nested_reactor() {
     let inner_reactor_key = aliases.reactor_aliases[inner_reactor].1;
     assert_eq!(
         enclave.env.reactors[inner_reactor_key].name(),
-        "outer::inner"
+        "outer/inner"
     );
 }
 

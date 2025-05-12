@@ -3,28 +3,22 @@
 use std::{collections::HashMap, path::Path};
 
 use crate::{
-    event::AsyncEvent, ActionKey, ActionRef, CommonContext, Enclave, EnclaveKey, ReactionFn,
-    ReactorData, RuntimeError, SendContext, Tag,
+    event::AsyncEvent, ActionKey, ActionRef, CommonContext, Duration, Enclave, EnclaveKey,
+    ReactionFn, ReactorData, RuntimeError, SendContext, Tag,
 };
 
-use time::Duration;
-use tinymap::TinyMap;
-use tinymap::{DefaultKey, TinySecondaryMap};
 /// Re-export the `foxglove` and `mcap` crates for use in this module.
 pub use {foxglove, mcap};
 
 #[derive(thiserror::Error, Debug)]
-#[error("...")]
+#[error("Replay error")]
 pub enum ReplayError {
     Io(#[from] std::io::Error),
 
     Mcap(#[from] mcap::McapError),
 
-    #[error("MCAP Format error: {0}")]
     Format(String),
-    SerializationError {
-        error: String,
-    },
+    SerializationError { error: String },
 }
 
 const ENCLAVE: &str = "enclave";
@@ -233,7 +227,7 @@ where
         if let Some(ch) = channels.get(&(enclave_key, action_key)) {
             let enclave = enclaves.get(enclave_key).expect("Enclave not found");
             tracing::info!("Replaying channel {}", summary.channels[ch].topic);
-            Some((DefaultKey::from(*ch as usize), ReplayContext {
+            Some((tinymap::DefaultKey::from(*ch as usize), ReplayContext {
                 context: enclave.create_send_context(enclave_key),
                 replayer
             }))
@@ -241,14 +235,14 @@ where
             tracing::warn!("No replay channel found for enclave_key: {enclave_key}, action_key: {action_key}");
             None
         }
-    }).collect::<TinySecondaryMap<DefaultKey, ReplayContext>>();
+    }).collect::<tinymap::TinySecondaryMap<tinymap::DefaultKey, ReplayContext>>();
 
     std::thread::spawn(move || {
         let message_stream = mcap::MessageStream::new(&mapped).unwrap();
         for msg in message_stream {
             let inner = msg.unwrap();
 
-            let key = DefaultKey::from(inner.channel.id as usize);
+            let key = tinymap::DefaultKey::from(inner.channel.id as usize);
             if let Some(replay_ctx) = replayers.get(key) {
                 replay_ctx
                     .replayer

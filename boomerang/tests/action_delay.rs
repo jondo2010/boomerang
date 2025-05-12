@@ -125,7 +125,7 @@ fn action_delay() {
     .unwrap();
 
     let sink = env[0]
-        .find_reactor_by_name("action_delay::sink")
+        .find_reactor_by_name("action_delay/sink")
         .expect("Sink not found");
     let sink_state = sink.get_state::<bool>().expect("Sink state not found");
     assert!(sink_state, "SinkReactionIn did not trigger");

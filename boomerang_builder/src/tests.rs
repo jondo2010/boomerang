@@ -106,9 +106,7 @@ fn test_reactions1() {
     );
 
     let BuilderRuntimeParts {
-        enclaves,
-        aliases,
-        replayers: _,
+        enclaves, aliases, ..
     } = env_builder.into_runtime_parts().unwrap();
     let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();
     let r0_key = aliases.reaction_aliases[r0_key].1;
@@ -154,9 +152,7 @@ fn test_actions1() {
 
     let _reactor_key = reactor_builder.finish().unwrap();
     let BuilderRuntimeParts {
-        enclaves,
-        aliases,
-        replayers: _,
+        enclaves, aliases, ..
     } = env_builder.into_runtime_parts().unwrap();
     let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();
 
@@ -250,9 +246,7 @@ fn test_nested_reactor() {
         .unwrap();
 
     let BuilderRuntimeParts {
-        enclaves,
-        aliases,
-        replayers: _,
+        enclaves, aliases, ..
     } = env_builder.into_runtime_parts().unwrap();
     assert_eq!(enclaves.len(), 1);
 
@@ -293,9 +287,7 @@ fn test_reaction_ports() -> anyhow::Result<()> {
     let _reactor_a = builder_a.finish()?;
 
     let BuilderRuntimeParts {
-        enclaves,
-        aliases,
-        replayers: _,
+        enclaves, aliases, ..
     } = env_builder.into_runtime_parts().unwrap();
     assert_eq!(enclaves.len(), 1);
     let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();
@@ -436,9 +428,7 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
     builder_main.finish()?;
 
     let BuilderRuntimeParts {
-        enclaves,
-        aliases,
-        replayers: _,
+        enclaves, aliases, ..
     } = env_builder.into_runtime_parts()?;
     assert_eq!(enclaves.len(), 1);
     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
@@ -651,9 +641,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
         env_builder.find_reaction_by_name("reaction_clock", sink_reactor)?;
 
     let BuilderRuntimeParts {
-        enclaves,
-        aliases,
-        replayers: _,
+        enclaves, aliases, ..
     } = env_builder.into_runtime_parts()?;
     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
 
@@ -901,7 +889,7 @@ fn test_enclave2() {
     let BuilderRuntimeParts {
         enclaves,
         aliases: _,
-        replayers: _,
+        ..
     } = env_builder.into_runtime_parts().unwrap();
     assert_eq!(enclaves.len(), 3);
 
@@ -1007,9 +995,7 @@ fn test_port_binding() {
         .unwrap();
 
     let BuilderRuntimeParts {
-        enclaves,
-        aliases,
-        replayers: _,
+        enclaves, aliases, ..
     } = env_builder.into_runtime_parts().unwrap();
     assert_eq!(enclaves.len(), 1);
     let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();

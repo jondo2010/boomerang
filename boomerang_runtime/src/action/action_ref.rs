@@ -20,7 +20,7 @@ impl<'a, T: ReactorData> From<&'a mut dyn BaseAction> for ActionRef<'a, T> {
     }
 }
 
-impl<'a, T: ReactorData> ActionRef<'a, T> {
+impl<T: ReactorData> ActionRef<'_, T> {
     /// Return true if the action is present at the current tag
     pub fn is_present(&mut self, context: &Context) -> bool {
         self.0.store.get_current(context.tag).is_some()
@@ -42,7 +42,7 @@ impl<'a, T: ReactorData> ActionRef<'a, T> {
     }
 }
 
-impl<'a, T: ReactorData> ActionCommon<T> for ActionRef<'a, T> {
+impl<T: ReactorData> ActionCommon<T> for ActionRef<'_, T> {
     fn name(&self) -> &str {
         self.0.name()
     }

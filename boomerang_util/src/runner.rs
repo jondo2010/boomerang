@@ -118,6 +118,7 @@ pub fn build_and_test_reactor2<S: runtime::ReactorData, R: Reactor2<S>>(
     let BuilderRuntimeParts {
         enclaves,
         aliases: _,
+        ..
     } = env_builder
         .into_runtime_parts()
         .context("Error building environment!")?;

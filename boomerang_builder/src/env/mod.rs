@@ -14,7 +14,7 @@ use super::{
 use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, EdgeDirection};
 use slotmap::{SecondaryMap, SlotMap};
-use std::{collections::HashMap, convert::TryInto, default, marker::PhantomData};
+use std::{collections::HashMap, convert::TryInto};
 
 mod build;
 mod debug;
@@ -57,11 +57,7 @@ mod util {
     }
 }
 
-pub trait FindElements {
-    fn get_port_by_name(&self, port_name: &str) -> Result<BuilderPortKey, BuilderError>;
-
-    fn get_action_by_name(&self, action_name: &str) -> Result<BuilderActionKey, BuilderError>;
-}
+type ReplayFunctionBuilder = dyn FnOnce(&BuilderRuntimeParts) -> Box<dyn runtime::replay::ReplayFn>;
 
 #[derive(Default)]
 pub struct EnvBuilder {
@@ -77,10 +73,7 @@ pub struct EnvBuilder {
     pub(super) connection_builders: Vec<Box<dyn BaseConnectionBuilder>>,
     #[cfg(feature = "replay")]
     /// Builders for Replay functions
-    pub(super) replay_builders: SecondaryMap<
-        BuilderActionKey,
-        Box<dyn FnOnce(&BuilderRuntimeParts) -> Box<dyn runtime::replay::ReplayFn>>,
-    >,
+    pub(super) replay_builders: SecondaryMap<BuilderActionKey, Box<ReplayFunctionBuilder>>,
 }
 
 impl EnvBuilder {
@@ -501,7 +494,7 @@ impl EnvBuilder {
                                 "Reaction {:?} cannot 'trigger on' or 'use' input port '{}', it \
                                  must belong to the same reactor as the reaction",
                                 reaction.name(),
-                                self.port_fqn(port_key, false).unwrap()
+                                self.fqn_for(port_key, false).unwrap()
                             )));
                         }
                         // effects are valid for input ports on contained reactors

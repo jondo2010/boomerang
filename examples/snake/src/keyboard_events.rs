@@ -6,14 +6,6 @@ use crossterm::{
     terminal,
 };
 
-impl Default for KeyboardEventsState {
-    fn default() -> Self {
-        Self {
-            raw_terminal: false,
-        }
-    }
-}
-
 #[reactor]
 pub fn KeyboardEvents(
     #[output] arrow_key_pressed: KeyEvent,

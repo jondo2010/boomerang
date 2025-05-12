@@ -1,6 +1,6 @@
 use super::{
-    BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactorKey, EnvBuilder, FindElements,
-    PortType, Reactor, ReactorBuilderState,
+    BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactorKey, EnvBuilder, PortType,
+    Reactor, ReactorBuilderState,
 };
 use crate::{runtime, BuilderRuntimeParts, ParentReactorBuilder};
 use slotmap::SecondaryMap;
@@ -67,7 +67,7 @@ impl<T: runtime::ReactorData> ReactionField for runtime::AsyncActionRef<T> {
     }
 }
 
-impl<'a, T: runtime::ReactorData> ReactionField for runtime::InputRef<'a, T> {
+impl<T: runtime::ReactorData> ReactionField for runtime::InputRef<'_, T> {
     type Key = BuilderPortKey;
 
     fn build(
@@ -80,7 +80,7 @@ impl<'a, T: runtime::ReactorData> ReactionField for runtime::InputRef<'a, T> {
     }
 }
 
-impl<'a, T: runtime::ReactorData, const N: usize> ReactionField for [runtime::InputRef<'a, T>; N] {
+impl<T: runtime::ReactorData, const N: usize> ReactionField for [runtime::InputRef<'_, T>; N] {
     type Key = [BuilderPortKey; N];
 
     fn build(
@@ -93,7 +93,7 @@ impl<'a, T: runtime::ReactorData, const N: usize> ReactionField for [runtime::In
     }
 }
 
-impl<'a, T: runtime::ReactorData> ReactionField for runtime::OutputRef<'a, T> {
+impl<T: runtime::ReactorData> ReactionField for runtime::OutputRef<'_, T> {
     type Key = BuilderPortKey;
 
     fn build(
@@ -106,7 +106,7 @@ impl<'a, T: runtime::ReactorData> ReactionField for runtime::OutputRef<'a, T> {
     }
 }
 
-impl<'a, T: runtime::ReactorData, const N: usize> ReactionField for [runtime::OutputRef<'a, T>; N] {
+impl<T: runtime::ReactorData, const N: usize> ReactionField for [runtime::OutputRef<'_, T>; N] {
     type Key = [BuilderPortKey; N];
 
     fn build(
@@ -205,19 +205,6 @@ impl ReactionBuilder {
 pub struct ReactionBuilderState<'a> {
     builder: ReactionBuilder,
     env: &'a mut EnvBuilder,
-}
-
-impl<'a> FindElements for ReactionBuilderState<'a> {
-    /// Find the PortKey with a given name within the parent Reactor
-    fn get_port_by_name(&self, port_name: &str) -> Result<BuilderPortKey, BuilderError> {
-        //self.env .find_port_by_name(port_name, self.builder.reactor_key)
-        todo!()
-    }
-
-    fn get_action_by_name(&self, action_name: &str) -> Result<BuilderActionKey, BuilderError> {
-        self.env
-            .find_action_by_name(action_name, self.builder.reactor_key)
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -718,7 +705,7 @@ pub mod builder2 {
         }
     }
 
-    impl<'a, S, Fields> ReactionBuilder<'a, S, Fields, BoxedBuilderReactionFn>
+    impl<S, Fields> ReactionBuilder<'_, S, Fields, BoxedBuilderReactionFn>
     where
         S: runtime::ReactorData,
         Fields: runtime::ReactionRefsExtract,

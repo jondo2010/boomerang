@@ -47,7 +47,7 @@ where
     }
 }
 
-impl<'store, T> ReactionFn<'store> for RecorderFn<T>
+impl<T> ReactionFn<'_> for RecorderFn<T>
 where
     T: ReactorData + serde::Serialize,
 {

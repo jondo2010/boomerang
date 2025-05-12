@@ -80,7 +80,7 @@ pub struct Iter<'a, K: Key> {
     _k: PhantomData<K>,
 }
 
-impl<'a, K: Key> Iterator for Iter<'a, K> {
+impl<K: Key> Iterator for Iter<'_, K> {
     type Item = K;
 
     #[inline]
@@ -89,7 +89,7 @@ impl<'a, K: Key> Iterator for Iter<'a, K> {
     }
 }
 
-impl<'a, K: Key> ExactSizeIterator for Iter<'a, K> {
+impl<K: Key> ExactSizeIterator for Iter<'_, K> {
     fn len(&self) -> usize {
         self.count
     }

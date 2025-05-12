@@ -44,7 +44,7 @@ typed-builder = "0.20"
 typed-builder-macro = "0.20"
 
 [dev-dependencies]
-boomerang_util = { path = "../boomerang_util", features = ["runner"] }
+boomerang_util = { path = "../boomerang_util", features = ["runner", "replay"] }
 criterion = "0.5"
 serde = { workspace = true }
 tracing-subscriber = { workspace = true }

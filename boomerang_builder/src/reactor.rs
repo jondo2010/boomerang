@@ -2,11 +2,11 @@ use std::fmt::Debug;
 
 use super::{
     ActionTag, ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey,
-    BuilderReactionKey, BuilderRuntimeParts, EnvBuilder, FindElements, Input, Logical, Output,
-    Physical, PhysicalActionKey, PortTag, ReactionBuilderState, TimerActionKey, TimerSpec,
+    BuilderReactionKey, BuilderRuntimeParts, EnvBuilder, Input, Logical, Output, Physical,
+    PhysicalActionKey, PortTag, ReactionBuilderState, TimerActionKey, TimerSpec, TriggerMode,
     TypedActionKey, TypedPortKey,
 };
-use crate::{runtime, ActionTag, BuilderRuntimeParts, Input, TriggerMode};
+use crate::runtime;
 use slotmap::SecondaryMap;
 
 slotmap::new_key_type! {
@@ -87,7 +87,7 @@ pub trait ReactorPorts {
     /// Build the reactor with the given closure
     fn build_with<F, S>(f: F) -> impl Reactor2<S, Ports = Self>
     where
-        F: FnOnce(&mut ReactorBuilderState<S>, Self::Fields) -> Result<(), BuilderError> + 'static,
+        F: for<'a> FnOnce(&mut ReactorBuilderState<'a, S>, Self::Fields) -> Result<(), BuilderError> + 'static,
         S: runtime::ReactorData;
 }
 

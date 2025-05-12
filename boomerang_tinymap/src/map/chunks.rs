@@ -20,7 +20,7 @@ where
     _marker: PhantomData<&'a V>,
 }
 
-unsafe impl<'a, K: Key, V, IO, II> Send for Chunks<'a, K, V, IO, II>
+unsafe impl<K: Key, V, IO, II> Send for Chunks<'_, K, V, IO, II>
 where
     IO: Iterator<Item = II> + Send,
     II: Iterator<Item = K> + Send,
@@ -40,7 +40,7 @@ where
     }
 }
 
-impl<'a, K, V, IO, II> ExactSizeIterator for Chunks<'a, K, V, IO, II>
+impl<K, V, IO, II> ExactSizeIterator for Chunks<'_, K, V, IO, II>
 where
     IO: Iterator<Item = II> + ExactSizeIterator,
     II: Iterator<Item = K> + ExactSizeIterator,
@@ -82,7 +82,7 @@ where
     _marker: PhantomData<&'a mut V>,
 }
 
-unsafe impl<'a, K: Key, V, IO, II> Send for ChunksMut<'a, K, V, IO, II>
+unsafe impl<K: Key, V, IO, II> Send for ChunksMut<'_, K, V, IO, II>
 where
     IO: Iterator<Item = II> + Send,
     II: Iterator<Item = K> + Send,
@@ -104,7 +104,7 @@ where
     }
 }
 
-impl<'a, K, V, IO, II> ExactSizeIterator for ChunksMut<'a, K, V, IO, II>
+impl<K, V, IO, II> ExactSizeIterator for ChunksMut<'_, K, V, IO, II>
 where
     IO: Iterator<Item = II> + ExactSizeIterator,
     II: Iterator<Item = K> + ExactSizeIterator,

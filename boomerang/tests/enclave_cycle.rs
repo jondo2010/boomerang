@@ -62,8 +62,6 @@ fn Pong(
     #[output] output: i32,
     #[state] received: bool,
 ) -> impl Reactor2<PongState, Ports = PongPorts> {
-    let shutdown = builder.get_shutdown_action();
-
     builder
         .add_reaction2(Some("RectionIn"))
         .with_trigger(input)
@@ -84,7 +82,7 @@ fn Pong(
 
     builder
         .add_reaction2(None)
-        .with_trigger(shutdown)
+        .with_shutdown_trigger()
         .with_reaction_fn(|_ctx, state, _| {
             if !state.received {
                 panic!("Nothing received.");

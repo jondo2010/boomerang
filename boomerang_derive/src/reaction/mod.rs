@@ -116,7 +116,7 @@ pub struct ReactionReceiver {
     /// Type of the reactor
     reactor: syn::Type,
 
-    #[darling(default, multiple, rename = "bound", with = "parse_bound")]
+    #[darling(default, multiple, rename = "bound", with = parse_bound)]
     bounds: Vec<syn::GenericParam>,
 
     /// Connection definitions

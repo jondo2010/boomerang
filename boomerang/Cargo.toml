@@ -42,7 +42,7 @@ boomerang_runtime = { workspace = true }
 
 [dev-dependencies]
 boomerang_util = { path = "../boomerang_util", features = ["runner"] }
-criterion = "0.5"
+criterion = "0.6"
 serde = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-tracy = { workspace = true }

@@ -407,7 +407,7 @@ impl ToTokens for ArgsModel {
 
         let state_impl = if reactor_args.state.is_none() && !state_args.is_empty() {
             Some(quote! {
-                impl #impl_generics ::core::default::Default for #state_ident {
+                impl #impl_generics ::core::default::Default for #state_ident #ty_generics {
                     fn default() -> Self {
                         Self {
                             #(#state_args_default),*

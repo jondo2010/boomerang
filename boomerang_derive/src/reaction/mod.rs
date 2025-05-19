@@ -5,7 +5,7 @@ use darling::{
     util, FromDeriveInput, FromField, FromMeta,
 };
 use quote::{quote, ToTokens};
-use syn::{Expr, GenericParam, Generics, Ident, Type};
+use syn::{Expr, Generics, Ident, Type};
 
 mod from_defs;
 mod reaction_field_inner;
@@ -145,7 +145,7 @@ impl TryFrom<ReactionReceiver> for Reaction {
         let mut combined_generics = value.generics.clone();
         combined_generics
             .params
-            .extend(value.bounds.iter().cloned().map(GenericParam::from));
+            .extend(value.bounds.iter().cloned());
 
         let fromdefs = FromDefsImpl::new(&value, &combined_generics)?;
 

@@ -656,17 +656,10 @@ pub mod builder2 {
                 env,
                 ..
             } = self;
-            let reaction_fn: BoxedBuilderReactionFn = Box::new(|_: &BuilderRuntimeParts| {
-                Box::new(
-                    move |ctx: &mut runtime::Context,
-                          reactor: &mut dyn runtime::BaseReactor,
-                          mut refs: runtime::ReactionRefs| {
-                        let state = reactor.get_state_mut::<S>().expect("state");
-                        let fields = Fields::extract(&mut refs);
-                        f(ctx, state, fields)
-                    },
-                )
-            });
+            let reaction_fn: BoxedBuilderReactionFn =
+                Box::new(|_: &BuilderRuntimeParts| -> runtime::BoxedReactionFn {
+                    Box::new(runtime::reaction::FnRefsAdapter::new(f))
+                });
             ReactionBuilder {
                 name,
                 reaction_fn,

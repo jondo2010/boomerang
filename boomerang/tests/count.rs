@@ -1,6 +1,8 @@
+use std::fmt::Debug;
+
 use boomerang::prelude::*;
 trait CountData:
-    std::fmt::Debug + Copy + runtime::ReactorData + std::ops::AddAssign<i32> + std::cmp::PartialEq<i32>
+    Default + Debug + Copy + runtime::ReactorData + std::ops::AddAssign<i32> + std::cmp::PartialEq<i32>
 {
 }
 
@@ -42,7 +44,7 @@ fn main() {
         .with_fast_forward(true)
         .with_timeout(Duration::seconds(3));
     let (_, envs) = boomerang_util::runner::build_and_test_reactor2(
-        Count(),
+        Count::<i32>(),
         "count",
         Default::default(),
         config,

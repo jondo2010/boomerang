@@ -25,7 +25,7 @@ fn ActionIsPresent(#[state] success: bool) -> impl Reactor2 {
     builder
         .add_reaction2(None)
         .with_shutdown_trigger()
-        .with_reaction_fn(|ctx, state, (shutdown)| {
+        .with_reaction_fn(|ctx, state, shutdown| {
             assert!(state.success, "Failed to print 'Hello World!'");
         })
         .finish()?;

@@ -168,21 +168,21 @@ impl ToTokens for FromDefsImpl {
 
         let actions = (!action_idents.is_empty()).then(|| {
             quote! {
-                let (#(#action_idents,)*) = actions.partition_mut()
+                let (#(#action_idents,)*) = refs.actions.partition_mut()
                     .expect("Unable to destructure actions for reaction");
             }
         });
 
         let ports = (!port_idents.is_empty()).then(|| {
             quote! {
-                let (#(#port_idents,)*) = ports.partition()
+                let (#(#port_idents,)*) = refs.ports.partition()
                     .expect("Unable to destructure ref ports for reaction");
             }
         });
 
         let port_muts = (!port_mut_idents.is_empty()).then(|| {
             quote! {
-                let (#(#port_mut_idents,)*) = ports_mut.partition_mut()
+                let (#(#port_mut_idents,)*) = refs.ports_mut.partition_mut()
                     .expect("Unable to destructure mut ports for reaction");
             }
         });
@@ -195,9 +195,7 @@ impl ToTokens for FromDefsImpl {
                 #[allow(unused_variables)]
                 #[inline(always)]
                 fn from_refs<'store>(
-                    ports: ::boomerang::runtime::Refs<'store, dyn ::boomerang::runtime::BasePort>,
-                    ports_mut: ::boomerang::runtime::RefsMut<'store, dyn ::boomerang::runtime::BasePort>,
-                    actions: ::boomerang::runtime::RefsMut<'store, dyn ::boomerang::runtime::BaseAction>,
+                    refs: ::boomerang::runtime::ReactionRefs<'store>,
                 ) -> Self::Marker<'store> {
                     #actions
                     #ports

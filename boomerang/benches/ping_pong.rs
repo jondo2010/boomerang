@@ -186,6 +186,7 @@ fn bench(c: &mut Criterion) {
                     let BuilderRuntimeParts {
                         enclaves,
                         aliases: _,
+                        ..,
                     } = env_builder.into_runtime_parts().unwrap();
                     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
                     let config = runtime::Config::default().with_fast_forward(true);

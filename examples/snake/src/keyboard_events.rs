@@ -14,6 +14,9 @@ pub fn KeyboardEvents(
     let key_press =
         builder.add_physical_action::<KeyEvent>("key_press", Some(Duration::milliseconds(10)))?;
 
+    builder.add_action_recorder(key_press)?;
+    builder.add_action_replayer(key_press)?;
+
     builder
         .add_reaction2(Some("ReactionKeyPress"))
         .with_trigger(key_press)

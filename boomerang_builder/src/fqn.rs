@@ -3,8 +3,9 @@
 use std::{fmt::Display, ops::Index};
 
 use crate::{
-    port::BasePortBuilder, ActionBuilder, BuilderActionKey, BuilderPortKey, BuilderReactionKey,
-    BuilderReactorKey, EnvBuilder, ParentReactorBuilder, ReactionBuilder, ReactorBuilder,
+    port::BasePortBuilder, runtime, ActionBuilder, ActionTag, BuilderActionKey, BuilderPortKey,
+    BuilderReactionKey, BuilderReactorKey, EnvBuilder, ParentReactorBuilder, PortTag,
+    ReactionBuilder, ReactorBuilder, TypedActionKey, TypedPortKey,
 };
 
 use super::BuilderError;
@@ -267,6 +268,16 @@ impl Fqn for BuilderActionKey {
     }
 }
 
+impl<T, Q> Fqn for TypedActionKey<T, Q>
+where
+    T: runtime::ReactorData,
+    Q: ActionTag,
+{
+    fn fqn(self, env: &EnvBuilder, grouped: bool) -> Result<BuilderFqn, BuilderError> {
+        BuilderActionKey::from(self).fqn(env, grouped)
+    }
+}
+
 impl Fqn for BuilderReactionKey {
     fn fqn(self, env: &EnvBuilder, grouped: bool) -> Result<BuilderFqn, BuilderError> {
         let reaction = env
@@ -286,6 +297,17 @@ impl Fqn for BuilderPortKey {
             .ok_or(BuilderError::PortKeyNotFound(self))?;
         let segment = port.fqn_segment(grouped);
         port.get_reactor_key().fqn(env, grouped)?.append(segment)
+    }
+}
+
+impl<T, Q, A> Fqn for TypedPortKey<T, Q, A>
+where
+    T: runtime::ReactorData,
+    Q: PortTag,
+    A: Copy,
+{
+    fn fqn(self, env: &EnvBuilder, grouped: bool) -> Result<BuilderFqn, BuilderError> {
+        BuilderPortKey::from(self).fqn(env, grouped)
     }
 }
 

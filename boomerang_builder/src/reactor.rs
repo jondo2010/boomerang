@@ -3,8 +3,8 @@ use std::fmt::Debug;
 use super::{
     ActionTag, ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey,
     BuilderReactionKey, BuilderRuntimeParts, EnvBuilder, Input, Logical, Output, Physical,
-    PhysicalActionKey, PortTag, ReactionBuilderState, TimerActionKey, TimerSpec, TriggerMode,
-    TypedActionKey, TypedPortKey,
+    PhysicalActionKey, PortTag, ReactionBuilderState, TimerActionKey, TimerSpec, TypedActionKey,
+    TypedPortKey,
 };
 use crate::runtime;
 use slotmap::SecondaryMap;
@@ -87,7 +87,11 @@ pub trait ReactorPorts {
     /// Build the reactor with the given closure
     fn build_with<F, S>(f: F) -> impl Reactor2<S, Ports = Self>
     where
-        F: for<'a> FnOnce(&mut ReactorBuilderState<'a, S>, Self::Fields) -> Result<(), BuilderError> + 'static,
+        F: for<'a> FnOnce(
+                &mut ReactorBuilderState<'a, S>,
+                Self::Fields,
+            ) -> Result<(), BuilderError>
+            + 'static,
         S: runtime::ReactorData;
 }
 
@@ -627,18 +631,18 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         T: runtime::ReactorData + serde::Serialize,
         Q: ActionTag,
     {
-        // Add a recorder builder
-        let action_key = action_key.into();
         let topic = self.env.fqn_for(action_key, false)?.to_string();
-        tracing::debug!("Adding recorder for action {action_key:?} with topic {topic}",);
+        tracing::debug!("Adding recorder for action {topic}",);
         let _ = self
-            .add_reaction("recorder", move |runtime_parts| {
-                let (enclave_key, action_key) = runtime_parts.aliases.action_aliases[action_key];
+            .add_reaction2(Some("recorder"))
+            .with_trigger(action_key)
+            .with_defered_reaction_fn(move |runtime_parts| {
+                let (enclave_key, action_key) =
+                    runtime_parts.aliases.action_aliases[action_key.into()];
                 Box::new(
                     runtime::replay::RecorderFn::<T>::new(&topic, enclave_key, action_key).unwrap(),
                 )
             })
-            .with_action(action_key, 0, TriggerMode::TriggersAndUses)?
             .finish()?;
 
         Ok(())

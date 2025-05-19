@@ -1,8 +1,6 @@
-use crate::{runtime, ParentReactorBuilder};
-use slotmap::SecondaryMap;
 use std::{fmt::Debug, marker::PhantomData};
 
-use super::{BuilderReactionKey, BuilderReactorKey};
+use crate::{runtime, BuilderReactorKey, ParentReactorBuilder};
 
 slotmap::new_key_type! { pub struct BuilderPortKey; }
 
@@ -159,9 +157,6 @@ pub struct PortBuilder<T: runtime::ReactorData, Q: PortTag> {
     port_type: PortType,
     /// Optional BankInfo for this Port
     bank_info: Option<runtime::BankInfo>,
-    /// Out-going Reactions that this port triggers
-    triggers: SecondaryMap<BuilderReactionKey, ()>,
-
     _phantom: PhantomData<fn() -> (T, Q)>,
 }
 
@@ -176,7 +171,6 @@ impl<T: runtime::ReactorData, Q: PortTag> PortBuilder<T, Q> {
             reactor_key,
             port_type: Q::TYPE,
             bank_info,
-            triggers: SecondaryMap::new(),
             _phantom: PhantomData,
         }
     }

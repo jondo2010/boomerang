@@ -271,24 +271,31 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
             // and react to an Action.
             let target_parent_reactor_key =
                 env.reactor_builders[target_reactor_key].parent_reactor_key();
-            let (target_reactor_key, output_port, target_action_key) =
-                build_enclave_connection_target::<T, Q>(
-                    env,
-                    target_parent_reactor_key,
-                    self.after,
-                )?;
-            partition_map.insert(target_reactor_key, target_partition);
+
+            let EnclaveConnectionTarget {
+                reactor_key,
+                output_port,
+                action_key,
+            } = build_enclave_connection_target::<T, Q>(
+                env,
+                target_parent_reactor_key,
+                self.after,
+            )?;
+            partition_map.insert(reactor_key, target_partition);
             port_bindings.bind(output_port.into(), self.target_key, env)?;
 
             let source_parent_reactor_key =
                 env.reactor_builders[source_reactor_key].parent_reactor_key();
-            let (source_reactor_key, input_port) = build_enclave_connection_source::<T>(
+            let EnclaveConnectionSource {
+                reactor_key,
+                input_port,
+            } = build_enclave_connection_source::<T>(
                 env,
                 source_parent_reactor_key,
                 target_partition,
-                target_action_key.into(),
+                action_key.into(),
             )?;
-            partition_map.insert(source_reactor_key, source_partition);
+            partition_map.insert(reactor_key, source_partition);
             port_bindings.bind(self.source_key, input_port.into(), env)?;
 
             enclave_deps.push(EnclaveDep {
@@ -343,6 +350,11 @@ fn build_delayed_connection<T: runtime::ReactorData + Clone, Q: ActionTag>(
     Ok((reactor_key, input_port, output_port))
 }
 
+struct EnclaveConnectionSource<T: runtime::ReactorData + Clone> {
+    reactor_key: BuilderReactorKey,
+    input_port: TypedPortKey<T, Input>,
+}
+
 /// Build the source portion
 ///
 /// The sender-side is build-deferred by returning a closure. The BuilderAction must be turned into a runtime Action before the closure is called.
@@ -351,7 +363,7 @@ fn build_enclave_connection_source<T: runtime::ReactorData + Clone>(
     parent_key: Option<BuilderReactorKey>,
     target_partition: BuilderReactorKey,
     target_action_key: BuilderActionKey,
-) -> Result<(BuilderReactorKey, TypedPortKey<T, Input>), BuilderError> {
+) -> Result<EnclaveConnectionSource<T>, BuilderError> {
     let mut source_builder = env.add_reactor("con_reactor_src", parent_key, None, (), false);
     let input_port = source_builder.add_input_port::<T>("con_in")?;
     source_builder
@@ -376,28 +388,27 @@ fn build_enclave_connection_source<T: runtime::ReactorData + Clone>(
         })
         .finish()?;
     let reactor_key = source_builder.finish()?;
-    Ok((reactor_key, input_port))
+    Ok(EnclaveConnectionSource {
+        reactor_key,
+        input_port,
+    })
+}
+
+struct EnclaveConnectionTarget<T: runtime::ReactorData, Q: ActionTag> {
+    reactor_key: BuilderReactorKey,
+    output_port: TypedPortKey<T, Output>,
+    action_key: TypedActionKey<T, Q>,
 }
 
 /// Build the target portion
 ///
 /// The receiver-side of is built immediately into the `EnvBuilder`, and consists of an Action that triggers a Reaction
 /// that writes to the target port.
-///
-/// ## Output
-/// The function returns a tuple `(reactor_key, output_port, action_key)`
 fn build_enclave_connection_target<T: runtime::ReactorData + Clone, Q: ActionTag>(
     env: &mut EnvBuilder,
     parent_key: Option<BuilderReactorKey>,
     after: Option<runtime::Duration>,
-) -> Result<
-    (
-        BuilderReactorKey,
-        TypedPortKey<T, Output>,
-        TypedActionKey<T, Q>,
-    ),
-    BuilderError,
-> {
+) -> Result<EnclaveConnectionTarget<T, Q>, BuilderError> {
     let mut target_builder = env.add_reactor("con_reactor_tgt", parent_key, None, (), false);
     let action_key = target_builder.add_action::<T, Q>("con_act", after)?;
     let output_port = target_builder.add_output_port::<T>("con_out")?;
@@ -412,5 +423,9 @@ fn build_enclave_connection_target<T: runtime::ReactorData + Clone, Q: ActionTag
         .finish()?;
 
     let reactor_key = target_builder.finish()?;
-    Ok((reactor_key, output_port, action_key))
+    Ok(EnclaveConnectionTarget {
+        reactor_key,
+        output_port,
+        action_key,
+    })
 }

@@ -56,7 +56,7 @@ struct Args {
 ///
 /// * `name` - The name of the top-level reactor instance
 /// * `state` - The initial state of the top-level reactor -- this must match the associated `State` type of the
-///     reactor ([`Reactor::State`])
+///   reactor ([`Reactor::State`])
 /// * `config` - The runtime configuration for the reactor
 ///
 /// # Environment Variables
@@ -103,13 +103,13 @@ pub fn build_and_test_reactor<R: Reactor>(
 }
 
 pub fn build_and_test_reactor2<S: runtime::ReactorData, R: Reactor2<S>>(
-    reactor: R,
+    reactor_builder: R,
     name: &str,
     state: S,
     config: runtime::Config,
 ) -> anyhow::Result<(R::Ports, Vec<runtime::Env>)> {
     let mut env_builder = EnvBuilder::new();
-    let reactor = reactor
+    let reactor = reactor_builder
         .build(name, state, None, None, false, &mut env_builder)
         .context("Error building top-level reactor!")?;
 
@@ -136,7 +136,7 @@ pub fn build_and_test_reactor2<S: runtime::ReactorData, R: Reactor2<S>>(
 ///
 /// * `name` - The name of the top-level reactor instance
 /// * `state` - The initial state of the top-level reactor -- this must match the associated `State` type of the
-///     reactor ([`Reactor::State`])
+///   reactor ([`Reactor::State`])
 ///
 /// Common arguments are parsed from the command line and passed to the scheduler:
 /// * `--full-graph`: Generate a graphviz graph of the entire reactor hierarchy

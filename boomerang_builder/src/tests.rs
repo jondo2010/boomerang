@@ -33,7 +33,7 @@ fn test_reaction_builder2() {
     let p0 = reactor.add_input_port::<u32>("p0").unwrap();
     let p1 = reactor.add_output_port::<bool>("p1").unwrap();
 
-    let r0 = reactor
+    let _r0 = reactor
         .add_reaction2(Some("test_reaction"))
         .with_trigger(p0)
         .with_effect(p1)
@@ -84,12 +84,18 @@ fn test_duplicate_actions() {
 
 /// Assert that building a reaction without any triggers is an error
 #[test]
-fn test_reactions_with_trigger() {
+fn test_reactions_without_trigger() {
     let mut env_builder = EnvBuilder::new();
     let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, (), false);
 
+    let x = reactor_builder
+        .add_logical_action::<()>("test", None)
+        .unwrap();
+
     let res = reactor_builder
-        .add_reaction("test", |_| runtime::reaction_closure!().into())
+        .add_reaction2(None)
+        .with_effect(x)
+        .with_reaction_fn(|_ctx, _state, (_x,)| {})
         .finish();
 
     assert!(matches!(res, Err(BuilderError::ReactionBuilderError(_))));
@@ -100,19 +106,16 @@ fn test_reactions_startup_shutdown() {
     let mut env_builder = EnvBuilder::new();
     let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, (), false);
 
-    let startup = reactor_builder.get_startup_action();
-    let shutdown = reactor_builder.get_shutdown_action();
-
     let r0_key = reactor_builder
         .add_reaction2(Some("test"))
-        .with_trigger(startup)
+        .with_startup_trigger()
         .with_reaction_fn(|_ctx, _state, (_startup,)| {})
         .finish()
         .unwrap();
 
     let r1_key = reactor_builder
         .add_reaction2(Some("test"))
-        .with_trigger(shutdown)
+        .with_shutdown_trigger()
         .with_reaction_fn(|_ctx, _state, (_shutdown,)| {})
         .finish()
         .unwrap();
@@ -160,7 +163,7 @@ fn test_actions1() {
         .add_reaction2(Some("ra"))
         .with_trigger(action_a)
         .with_effect(action_b)
-        .with_reaction_fn(|_ctx, _state, (a, mut b)| {
+        .with_reaction_fn(|_ctx, _state, (_a, mut b)| {
             _ctx.schedule_action(&mut b, (), None);
         })
         .finish()
@@ -170,7 +173,7 @@ fn test_actions1() {
     let reaction_b = reactor_builder
         .add_reaction2(Some("rb"))
         .with_trigger(action_a)
-        .with_reaction_fn(|_ctx, _state, (a,)| {})
+        .with_reaction_fn(|_ctx, _state, (_a,)| {})
         .finish()
         .unwrap();
 
@@ -375,12 +378,11 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
         },
     )?;
     let startup_action = builder_main.get_startup_action();
-    let shutdown_action = builder_main.get_shutdown_action();
 
     // reaction(startup) -> clock, a
     let _r_startup = builder_main
         .add_reaction2(Some("startup"))
-        .with_trigger(startup_action)
+        .with_startup_trigger()
         .with_effect(clock)
         .with_effect(a)
         .with_reaction_fn(|ctx, _state, (_startup, mut clock, mut a)| {
@@ -424,7 +426,7 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
     // reaction(shutdown) {= =}
     let _r_shutdown = builder_main
         .add_reaction2(Some("shutdown"))
-        .with_trigger(shutdown_action)
+        .with_shutdown_trigger()
         .with_reaction_fn(|_ctx, state, (_shutdown,)| {
             assert_eq!(*state, 4);
             println!("success");
@@ -545,7 +547,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
                 .with_trigger(t1)
                 .with_effect(clock)
                 .with_effect(o1)
-                .with_reaction_fn(|ctx, state, (t1, mut clock, mut o1)| {
+                .with_reaction_fn(|_ctx, _state, (t1, mut clock, mut o1)| {
                     assert_eq!(clock.name(), "clock");
                     *clock = Some(1);
                     assert_eq!(o1.name(), "o1");
@@ -559,7 +561,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
                 .with_trigger(t2)
                 .with_effect(clock)
                 .with_effect(o2)
-                .with_reaction_fn(|_ctx, _state, (_t2, mut clock, mut o2)| {
+                .with_reaction_fn(|_ctx, _state, (_t2, mut clock, o2)| {
                     assert_eq!(clock.name(), "clock");
                     *clock = Some(2);
                     assert_eq!(o2.name(), "o2");

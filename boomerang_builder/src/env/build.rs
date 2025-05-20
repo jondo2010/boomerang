@@ -16,7 +16,6 @@ pub trait DeferedBuild {
     fn defer(self) -> impl FnOnce(&BuilderRuntimeParts) -> Self::Output + 'static;
 }
 
-//F: for<'any> FnOnce(&'any EnclavePartsMap) -> runtime::BoxedReactionFn + 'static,
 impl<Reaction, State> DeferedBuild for runtime::ReactionAdapter<Reaction, State>
 where
     Reaction: runtime::FromRefs + 'static,

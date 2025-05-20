@@ -10,7 +10,7 @@ fn ActionIsPresent(#[state] success: bool) -> impl Reactor2 {
         .add_reaction2(None)
         .with_startup_trigger()
         .with_trigger(a)
-        .with_reaction_fn(|ctx, state, (startup, mut a)| {
+        .with_reaction_fn(|ctx, state, (_startup, mut a)| {
             if !a.is_present(ctx) {
                 assert!(!state.success, "Unexpected");
                 println!("Hello startup!");
@@ -25,7 +25,7 @@ fn ActionIsPresent(#[state] success: bool) -> impl Reactor2 {
     builder
         .add_reaction2(None)
         .with_shutdown_trigger()
-        .with_reaction_fn(|ctx, state, shutdown| {
+        .with_reaction_fn(|_ctx, state, _shutdownn| {
             assert!(state.success, "Failed to print 'Hello World!'");
         })
         .finish()?;

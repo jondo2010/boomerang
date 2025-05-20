@@ -18,13 +18,13 @@ fn Child(act: TypedActionKey<i32>) -> impl Reactor2<(), Ports = ChildPorts> {
 fn ActionValues(#[state] r1done: bool, #[state] r2done: bool) -> Reactor2 {
     let act = builder.add_logical_action::<i32>("act", Some(Duration::milliseconds(100)))?;
 
-    let child = builder.add_child_reactor2(Child(act), "child", (), false)?;
+    let _child = builder.add_child_reactor2(Child(act), "child", (), false)?;
 
     builder
         .add_reaction2(Some("Startup"))
         .with_startup_trigger()
         .with_effect(act)
-        .with_reaction_fn(|ctx, state, (startup, mut act)| {
+        .with_reaction_fn(|ctx, _state, (_startup, mut act)| {
             println!("Startup reaction");
             ctx.schedule_action(&mut act, 100, None);
             ctx.schedule_action(&mut act, -100, Some(Duration::milliseconds(50)));
@@ -60,7 +60,7 @@ fn ActionValues(#[state] r1done: bool, #[state] r2done: bool) -> Reactor2 {
     builder
         .add_reaction2(Some("Shutdown"))
         .with_shutdown_trigger()
-        .with_reaction_fn(|_ctx, state, (shutdown,)| {
+        .with_reaction_fn(|_ctx, state, (_shutdown,)| {
             assert!(
                 state.r1done && state.r2done,
                 "ERROR: Expected 2 reaction invocations\n"

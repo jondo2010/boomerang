@@ -78,7 +78,6 @@ fn DelayInt() -> impl Reactor2<(), Ports = DelayIntPorts> {
 
 #[test]
 fn delay_int() {
-    tracing_subscriber::fmt::init();
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(Duration::seconds(1));

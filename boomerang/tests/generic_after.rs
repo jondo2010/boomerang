@@ -16,7 +16,7 @@ fn Delay<T: runtime::ReactorData + Clone>(
         .add_reaction2(None)
         .with_trigger(a)
         .with_effect(out)
-        .with_reaction_fn(|ctx, state, (mut a, mut out)| {
+        .with_reaction_fn(|ctx, _state, (mut a, mut out)| {
             *out = ctx.get_action_value(&mut a).cloned();
         })
         .finish()?;
@@ -25,7 +25,7 @@ fn Delay<T: runtime::ReactorData + Clone>(
         .add_reaction2(None)
         .with_trigger(in_)
         .with_effect(a)
-        .with_reaction_fn(|ctx, state, (in_, mut a)| {
+        .with_reaction_fn(|ctx, _state, (in_, mut a)| {
             ctx.schedule_action(&mut a, in_.clone().unwrap(), None);
         })
         .finish()?;
@@ -51,7 +51,7 @@ fn GenericAfter() -> impl Reactor2 {
         .add_reaction2(None)
         .with_startup_trigger()
         .with_effect(d.in_)
-        .with_reaction_fn(move |ctx, state, (_, mut d_in)| {
+        .with_reaction_fn(move |_ctx, _state, (_, mut d_in)| {
             *d_in = Some(42);
         })
         .finish()?;
@@ -59,11 +59,10 @@ fn GenericAfter() -> impl Reactor2 {
 
 #[test]
 fn generic_after() {
-    tracing_subscriber::fmt::init();
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(Duration::seconds(1));
-    let (_, env) = boomerang_util::runner::build_and_test_reactor2(
+    let (_, _env) = boomerang_util::runner::build_and_test_reactor2(
         GenericAfter(),
         "generic_after",
         (),

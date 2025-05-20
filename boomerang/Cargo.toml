@@ -39,6 +39,7 @@ thiserror.workspace = true
 boomerang_builder = { workspace = true }
 boomerang_derive = { workspace = true, optional = true }
 boomerang_runtime = { workspace = true }
+boomerang_macros = { workspace = true }
 
 typed-builder = "0.20"
 typed-builder-macro = "0.20"

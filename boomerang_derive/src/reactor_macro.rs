@@ -628,32 +628,6 @@ mod test {
     }
 
     #[test]
-    fn test_parse_reaction() {
-        // Test basic reaction
-        let reaction = syn::parse_str::<Reaction>("reaction(x) { }").unwrap();
-        assert!(reaction.name.is_none());
-        assert_eq!(reaction.triggers[0], format_ident!("x"));
-        assert!(reaction.uses.is_empty());
-        assert!(reaction.effects.is_empty());
-
-        // Test reaction with uses and effects
-        let reaction = syn::parse_str::<Reaction>("reaction foo(t1) u1, u2 -> e1, e2 { }").unwrap();
-        assert_eq!(reaction.name, parse_quote!(foo));
-        assert_eq!(reaction.triggers[0], format_ident!("t1"));
-        assert_eq!(reaction.uses[0], format_ident!("u1"));
-        assert_eq!(reaction.uses[1], format_ident!("u2"));
-        assert_eq!(reaction.effects[0], format_ident!("e1"));
-        assert_eq!(reaction.effects[1], format_ident!("e2"));
-
-        // Test reaction with just uses
-        let reaction = syn::parse_str::<Reaction>("reaction(x) y, z { }").unwrap();
-        assert!(reaction.name.is_none());
-        assert_eq!(reaction.triggers.len(), 1);
-        assert_eq!(reaction.uses.len(), 2);
-        assert!(reaction.effects.is_empty());
-    }
-
-    #[test]
     fn test_parse_reactor() {
         let reactor = syn::parse_str::<Reactor>("Test {}").unwrap();
         assert_eq!(reactor.ident, format_ident!("Test"));

@@ -84,7 +84,9 @@ pub mod prelude {
 
     pub use super::runtime::{self, CommonContext, Duration, FromRefs, Tag};
 
-    pub use boomerang_derive::{reactor, reactor_ports, Reaction, Reactor};
+    pub use boomerang_derive::{Reaction, Reactor};
+
+    pub use boomerang_macros::{reaction, reactor, reactor_ports};
 }
 
 #[cfg(feature = "derive")]

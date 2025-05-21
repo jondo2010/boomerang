@@ -110,7 +110,7 @@ fn enclave_cycle() {
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(Duration::seconds(1));
-    let (_, env) =
+    let (_, _env) =
         boomerang_util::runner::build_and_test_reactor2(MainReactor(), "enclave_cycle", (), config)
             .unwrap();
 }

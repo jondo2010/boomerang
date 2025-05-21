@@ -44,7 +44,7 @@ pub fn Test(
     builder
         .add_reaction2(None)
         .with_trigger(in_)
-        .with_reaction_fn(|ctx, state, (mut in_,)| {
+        .with_reaction_fn(|ctx, state, (in_,)| {
             println!("Received: {}", in_.unwrap());
             // Check the time of the input.
             let current_time = ctx.get_logical_time();
@@ -81,7 +81,7 @@ fn delay_int() {
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(Duration::seconds(1));
-    let (_, env) =
+    let (_, _env) =
         boomerang_util::runner::build_and_test_reactor2(DelayInt(), "delay_int", (), config)
             .unwrap();
 }

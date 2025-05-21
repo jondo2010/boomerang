@@ -5,7 +5,9 @@ fn HelloWorld2(#[state] success: bool) -> impl Reactor2 {
     builder
         .add_reaction2(None)
         .with_startup_trigger()
-        .with_reaction_fn(|_ctx, state, (startup)| {
+        .with_reaction_fn(|ctx, state, (mut startup,)| {
+            dbg!(startup.key());
+            assert!(startup.is_present(ctx));
             println!("Hello World.");
             state.success = true;
         })
@@ -14,7 +16,8 @@ fn HelloWorld2(#[state] success: bool) -> impl Reactor2 {
     builder
         .add_reaction2(None)
         .with_shutdown_trigger()
-        .with_reaction_fn(|_ctx, state, (shutdown)| {
+        .with_reaction_fn(|ctx, state, (mut shutdown,)| {
+            assert!(shutdown.is_present(ctx));
             println!("Shutdown invoked.");
             state.success = false;
         })

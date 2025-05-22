@@ -13,7 +13,7 @@ mod example {
     use boomerang::prelude::*;
     use crossterm::{
         cursor::MoveLeft,
-        event::{KeyCode, KeyEvent},
+        event::KeyCode,
         execute,
         terminal::{Clear, ClearType},
     };

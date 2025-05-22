@@ -126,7 +126,11 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
         std::iter::empty(),
     );
 
-    enclave_a.insert_startup_reaction((Level::from(0), reaction_startup), None);
+    let startup_action =
+        enclave_a.insert_action(|key| Action::<()>::new("startup", key, None, true).boxed());
+
+    // startup action triggers reactionStartup
+    enclave_a.insert_action_trigger(startup_action, (Level::from(0), reaction_startup));
 
     // The sender-side has a reaction that is triggered by 'portA' and sends an async event to the receiver-side.
     let reaction_a = enclave_a.insert_reaction(

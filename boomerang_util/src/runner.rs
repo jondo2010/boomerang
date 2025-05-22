@@ -123,8 +123,6 @@ pub fn build_and_test_reactor2<S: runtime::ReactorData, R: Reactor2<S>>(
         .into_runtime_parts()
         .context("Error building environment!")?;
 
-    dbg!(&enclaves);
-
     let envs_out = runtime::execute_enclaves(enclaves.into_iter(), config);
     let envs_out = envs_out.into_iter().map(|(_, env)| env).collect();
     Ok((reactor, envs_out))

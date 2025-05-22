@@ -385,10 +385,11 @@ impl EnvBuilder {
 
                     match self.action_builders[builder_action_key].r#type() {
                         ActionType::Timer(timer_spec) => {
-                            enclave.insert_startup_reaction(level_reaction, timer_spec.offset);
+                            let tag = runtime::Tag::new(timer_spec.offset.unwrap_or_default(), 0);
+                            enclave.insert_startup_action(action_key, tag);
                         }
                         ActionType::Shutdown => {
-                            enclave.insert_shutdown_reaction(level_reaction);
+                            enclave.insert_shutdown_action(action_key);
                         }
                         _ => {}
                     }

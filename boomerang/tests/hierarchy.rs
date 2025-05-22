@@ -15,12 +15,6 @@ fn Source(#[output] out: u32) -> impl Reactor2 {
         .finish()?;
 }
 
-#[derive(typed_builder::TypedBuilder)]
-struct GainParams {
-    #[builder(default = 1)]
-    gain: u32,
-}
-
 #[reactor]
 fn Gain(#[input] inp: u32, #[output] out: u32, #[param(default = 1)] gain: u32) -> impl Reactor2 {
     builder

@@ -120,6 +120,9 @@ fn test_reactions_startup_shutdown() {
         .finish()
         .unwrap();
 
+    let startup_action = reactor_builder.get_startup_action();
+    let shutdown_action = reactor_builder.get_shutdown_action();
+
     let _reactor_key = reactor_builder.finish().unwrap();
 
     assert_eq!(env_builder.reactor_builders.len(), 1);
@@ -136,16 +139,27 @@ fn test_reactions_startup_shutdown() {
     let r0_key = aliases.reaction_aliases[r0_key].1;
     let r1_key = aliases.reaction_aliases[r1_key].1;
 
+    let startup_key = aliases.action_aliases[startup_action.into()].1;
+    let shutdown_key = aliases.action_aliases[shutdown_action.into()].1;
+
     assert_eq!(enclave.env.reactions.len(), 2);
     assert_eq!(
-        enclave.graph.startup_reactions[&runtime::Duration::ZERO],
-        vec![(runtime::Level::from(0), r0_key),]
+        enclave.graph.reaction_actions[r0_key]
+            .iter()
+            .collect::<Vec<_>>(),
+        vec![startup_key]
     );
-
     assert_eq!(
-        enclave.graph.shutdown_reactions,
-        vec![(runtime::Level::from(1), r1_key),]
-    )
+        enclave.graph.reaction_actions[r1_key]
+            .iter()
+            .collect::<Vec<_>>(),
+        vec![shutdown_key]
+    );
+    assert_eq!(
+        enclave.graph.startup_actions,
+        vec![(startup_key, runtime::Tag::ZERO)]
+    );
+    assert_eq!(enclave.graph.shutdown_actions, vec![shutdown_key])
 }
 
 #[test]

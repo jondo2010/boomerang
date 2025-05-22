@@ -21,7 +21,7 @@ pub fn KeyboardEvents(
         .add_reaction2(Some("ReactionKeyPress"))
         .with_trigger(key_press)
         .with_effect(arrow_key_pressed)
-        .with_reaction_fn(|_ctx, state, (mut key_event, mut arrow_key_pressed)| {
+        .with_reaction_fn(|_ctx, _state, (mut key_event, mut arrow_key_pressed)| {
             *arrow_key_pressed = _ctx.get_action_value(&mut key_event).cloned();
         })
         .finish()?;

@@ -451,6 +451,12 @@ impl EnvBuilder {
         let source_key = source_key.into();
         let target_key = target_key.into();
 
+        tracing::debug!(
+            "Adding connection from {} to {} with after={after:?} and physical={physical}",
+            source_key.fqn(self, false)?,
+            target_key.fqn(self, false)?,
+        );
+
         self.connection_builders.push(if physical {
             Box::new(ConnectionBuilder::<T, Physical> {
                 source_key,

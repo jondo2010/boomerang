@@ -61,7 +61,7 @@ impl<T: runtime::ReactorData, Q: PortTag, A: Clone> Clone for TypedPortKey<T, Q,
     }
 }
 
-impl<T: runtime::ReactorData, Q: PortTag> TypedPortKey<T, Q> {
+impl<T: runtime::ReactorData, Q: PortTag, A: Copy> TypedPortKey<T, Q, A> {
     pub fn new(port_key: BuilderPortKey) -> Self {
         Self(port_key, PhantomData)
     }

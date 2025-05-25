@@ -6,7 +6,7 @@ use boomerang::prelude::*;
 
 #[reactor]
 fn Hello(
-    period: Duration,
+    _period: Duration,
     message: String,
     #[state] count: usize,
     #[state] previous_time: Duration,
@@ -19,6 +19,7 @@ fn Hello(
     )?;
     let a = builder.add_logical_action::<()>("a", None)?;
 
+    let message = message.clone();
     builder
         .add_reaction2(Some("T"))
         .with_trigger(t)
@@ -34,7 +35,7 @@ fn Hello(
     builder
         .add_reaction2(Some("A"))
         .with_trigger(a)
-        .with_reaction_fn(|ctx, state, (a,)| {
+        .with_reaction_fn(|ctx, state, (_a,)| {
             state.count += 1;
             let time = ctx.get_elapsed_logical_time();
             println!("***** action {} at time {:?}", state.count, time);
@@ -52,7 +53,7 @@ fn Hello(
 #[reactor]
 fn Inside(message: String) -> impl Reactor2 {
     let _third_instance = builder.add_child_reactor2(
-        Hello(Duration::seconds(1), message),
+        Hello(Duration::seconds(1), message.clone()),
         "hello",
         Default::default(),
         false,

@@ -43,7 +43,7 @@ pub trait Reactor: Sized {
 pub trait Reactor2<State: runtime::ReactorData = ()>: Sized {
     type Ports;
     fn build(
-        self,
+        &self,
         name: &str,
         state: State,
         parent: Option<BuilderReactorKey>,
@@ -55,7 +55,7 @@ pub trait Reactor2<State: runtime::ReactorData = ()>: Sized {
 
 impl<F, State, Ports> Reactor2<State> for F
 where
-    F: FnOnce(
+    F: Fn(
             /*name*/ &str,
             /*state*/ State,
             /*parent*/ Option<BuilderReactorKey>,
@@ -68,7 +68,7 @@ where
 {
     type Ports = Ports;
     fn build(
-        self,
+        &self,
         name: &str,
         state: State,
         parent: Option<BuilderReactorKey>,
@@ -87,10 +87,7 @@ pub trait ReactorPorts {
     /// Build the reactor with the given closure
     fn build_with<F, S>(f: F) -> impl Reactor2<S, Ports = Self>
     where
-        F: for<'a> FnOnce(
-                &mut ReactorBuilderState<'a, S>,
-                Self::Fields,
-            ) -> Result<(), BuilderError>
+        F: for<'a> Fn(&mut ReactorBuilderState<'a, S>, Self::Fields) -> Result<(), BuilderError>
             + 'static,
         S: runtime::ReactorData;
 }
@@ -522,13 +519,17 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         )
     }
 
-    pub fn add_child_reactor2<ChildState: runtime::ReactorData, R: Reactor2<ChildState>>(
+    pub fn add_child_reactor2<ChildState, R>(
         &mut self,
         reactor: R,
         name: &str,
         state: ChildState,
         is_enclave: bool,
-    ) -> Result<R::Ports, BuilderError> {
+    ) -> Result<R::Ports, BuilderError>
+    where
+        ChildState: runtime::ReactorData,
+        R: Reactor2<ChildState>,
+    {
         reactor.build(
             name,
             state,
@@ -537,6 +538,34 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
             is_enclave,
             self.env,
         )
+    }
+
+    pub fn add_child_reactors2<R, ChildState, const N: usize>(
+        &mut self,
+        reactor: R,
+        name: &str,
+        state: ChildState,
+        is_enclave: bool,
+    ) -> Result<[R::Ports; N], BuilderError>
+    where
+        R: Reactor2<ChildState>,
+        ChildState: runtime::ReactorData + Clone,
+    {
+        let reactors = (0..N)
+            .map(|i| {
+                reactor.build(
+                    &format!("{name}_{i}"),
+                    state.clone(),
+                    Some(self.reactor_key),
+                    Some(runtime::BankInfo { idx: i, total: N }),
+                    is_enclave,
+                    self.env,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        reactors
+            .try_into()
+            .map_err(|_| BuilderError::InternalError("Error converting Vec to array".to_owned()))
     }
 
     /// Add multiple child reactors to this reactor.
@@ -595,13 +624,18 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
 
     /// Connect multiple ports on this reactor. This has the logical meaning of "connecting"
     /// `ports_from` to `ports_to`.
-    pub fn connect_ports<T: runtime::ReactorData + Clone, Q1: PortTag, Q2: PortTag>(
+    pub fn connect_ports<T, Q1, Q2, A1, A2>(
         &mut self,
-        ports_from: impl Iterator<Item = TypedPortKey<T, Q1>>,
-        ports_to: impl Iterator<Item = TypedPortKey<T, Q2>>,
+        ports_from: impl Iterator<Item = TypedPortKey<T, Q1, A1>>,
+        ports_to: impl Iterator<Item = TypedPortKey<T, Q2, A2>>,
         after: Option<runtime::Duration>,
         physical: bool,
-    ) -> Result<(), BuilderError> {
+    ) -> Result<(), BuilderError>
+    where
+        T: runtime::ReactorData + Clone,
+        Q1: PortTag,
+        Q2: PortTag,
+    {
         for (port_from, port_to) in ports_from.zip(ports_to) {
             self.connect_port::<T, _, _, _, _>(port_from, port_to, after, physical)?;
         }

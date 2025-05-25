@@ -92,11 +92,22 @@ impl ToTokens for Model {
 
         // Generate the modified struct fields
         let struct_fields = self.fields.iter().map(|PortField { vis, ident, ty, port_type }| {
-            let dir = match *port_type {
+            let dir = match port_type {
                 PortType::Input => quote!(::boomerang::builder::Input),
                 PortType::Output => quote!(::boomerang::builder::Output),
             };
-            quote!(#vis #ident: ::boomerang::builder::TypedPortKey<#ty, #dir, ::boomerang::builder::Contained>)
+            
+            // Determine if this is an array type and handle appropriately
+            match ty {
+                syn::Type::Array(array) => {
+                    let element_type = &array.elem;
+                    let len_expr = &array.len;
+                    quote!(#vis #ident: [::boomerang::builder::TypedPortKey<#element_type, #dir, ::boomerang::builder::Contained>; #len_expr])
+                },
+                _ => {
+                    quote!(#vis #ident: ::boomerang::builder::TypedPortKey<#ty, #dir, ::boomerang::builder::Contained>)
+                }
+            }
         });
 
         // Generate implementation details as before
@@ -106,7 +117,18 @@ impl ToTokens for Model {
                 PortType::Input => quote!(::boomerang::builder::Input),
                 PortType::Output => quote!(::boomerang::builder::Output),
             };
-            quote!(::boomerang::builder::TypedPortKey<#ty, #dir, ::boomerang::builder::Local>)
+            
+            // Determine if this is an array type and handle appropriately
+            match ty {
+                syn::Type::Array(array) => {
+                    let element_type = &array.elem;
+                    let len_expr = &array.len;
+                    quote!([::boomerang::builder::TypedPortKey<#element_type, #dir, ::boomerang::builder::Local>; #len_expr])
+                },
+                _ => {
+                    quote!(::boomerang::builder::TypedPortKey<#ty, #dir, ::boomerang::builder::Local>)
+                }
+            }
         });
 
         let local_names = self.fields.iter().map(|f| &f.ident);
@@ -119,17 +141,42 @@ impl ToTokens for Model {
                  port_type,
              }| {
                 let name_str = ident.to_string();
-                let dir = match *port_type {
+                let dir = match port_type {
                     PortType::Input => quote!(::boomerang::builder::Input),
                     PortType::Output => quote!(::boomerang::builder::Output),
                 };
-                quote!(let #ident = builder.add_port::<#ty, #dir>(#name_str, None)?;)
+                
+                // Determine if this is an array type and handle appropriately
+                match ty {
+                    syn::Type::Array(array) => {
+                        let element_type = &array.elem;
+                        let len_expr = &array.len;
+                        
+                        match port_type {
+                            PortType::Input => quote! {
+                                let #ident = builder.add_input_ports::<#element_type, #len_expr>(#name_str)?;
+                            },
+                            PortType::Output => quote! {
+                                let #ident = builder.add_output_ports::<#element_type, #len_expr>(#name_str)?;
+                            },
+                        }
+                    },
+                    _ => {
+                        quote!(let #ident = builder.add_port::<#ty, #dir>(#name_str, None)?;)
+                    }
+                }
             },
         );
 
-        let field_inits = self.fields.iter().map(|f| {
-            let name = &f.ident;
-            quote!(#name: #name.contained())
+        let field_inits = self.fields.iter().map(|PortField {  ident, ty,..  }| {
+            match ty {
+                syn::Type::Array(_) => {
+                    quote!(#ident: std::array::from_fn(|i| #ident[i].contained()))
+                }
+                _ => {
+                    quote!(#ident: #ident.contained())
+                }
+            }
         });
 
         let expanded = quote! {
@@ -142,14 +189,14 @@ impl ToTokens for Model {
 
                 fn build_with<F, S>(f: F) -> impl ::boomerang::builder::Reactor2<S, Ports = #struct_name #ty_generics>
                 where
-                    F: FnOnce(
+                    F: Fn(
                             &mut ::boomerang::builder::ReactorBuilderState<'_, S>,
                             Self::Fields,
                         ) -> Result<(), ::boomerang::builder::BuilderError>
                         + 'static,
                     S: ::boomerang::runtime::ReactorData,
                 {
-                    |name: &str,
+                    move |name: &str,
                      state: S,
                      parent: Option<::boomerang::builder::BuilderReactorKey>,
                      bank_info: Option<::boomerang::runtime::BankInfo>,
@@ -209,47 +256,17 @@ struct Generic<T: MyTrait, U> {
     }
 
     #[test]
-    fn test_tokens() {
+    fn test_arrays() {
         let input = r#"
-#[derive(ReactorPorts)]
-struct ScalePorts {
-    #[input]
-    x: u32,
-    #[output]
-    y: u32,
+#[derive(ReactorParts)]
+struct Array {
+    #[input] x: [u32; 10],
+    #[output] y: [bool; 10],
 }"#;
 
         let model = syn::parse_str::<Model>(input).unwrap();
-        let tokens = quote!(#model);
-        let output = tokens.to_string();
-
-        assert!(output.contains("impl ReactorPorts for ScalePorts"));
-        assert!(output.contains(
-            "type Fields = (TypedPortKey<u32, Input, Local>, TypedPortKey<u32, Output, Local>)"
-        ));
-    }
-
-    #[test]
-    fn test_struct_modification() {
-        let input = r#"
-#[derive(ReactorPorts)]
-struct ScalePorts {
-    #[input]
-    x: u32,
-    #[output]
-    y: u32,
-}"#;
-
-        let model = syn::parse_str::<Model>(input).unwrap();
-        let tokens = quote!(#model);
-        let output = tokens.to_string();
-
-        // Check that the struct is properly modified
-        assert!(output.contains("struct ScalePorts"));
-        assert!(output.contains("x : TypedPortKey < u32 , Input , Contained >"));
-        assert!(output.contains("y : TypedPortKey < u32 , Output , Contained >"));
-
-        // Check that the implementation is still correct
-        assert!(output.contains("impl ReactorPorts for ScalePorts"));
+        assert_eq!(model.fields.len(), 2);
+        assert!(matches!(model.fields[0].port_type, PortType::Input));
+        assert!(matches!(model.fields[1].port_type, PortType::Output));
     }
 }

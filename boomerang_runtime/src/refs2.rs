@@ -14,6 +14,18 @@ pub trait ReactionRefsExtract: Copy + 'static {
     fn extract<'store>(refs: &mut ReactionRefs<'store>) -> Self::Ref<'store>;
 }
 
+// Blanket impl for arrays of `ReactionRefsExtract` types
+impl<T: ReactionRefsExtract, const N: usize> ReactionRefsExtract for [T; N] {
+    type Ref<'store>
+        = [T::Ref<'store>; N]
+    where
+        Self: 'store;
+    fn extract<'store>(refs: &mut ReactionRefs<'store>) -> Self::Ref<'store> {
+        std::array::from_fn(|_i| T::extract(refs))
+    }
+}
+
+// Blanket impl for slices of `ReactionRefsExtract` types
 macro_rules! impl_reaction_refs_extract {
     ($($T:ident),*) => {
         impl<$($T,)*> ReactionRefsExtract for ($($T,)*)

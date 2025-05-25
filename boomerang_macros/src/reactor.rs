@@ -395,6 +395,7 @@ impl ToTokens for ArgsModel {
                 }
             } else {
                 quote! {
+                    #[derive(Clone)]
                     #vis struct #state_ident #impl_generics #where_clause {
                         #(#state_args),*
                     }

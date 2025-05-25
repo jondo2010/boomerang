@@ -456,6 +456,23 @@ pub mod builder2 {
         }
     }
 
+    impl<T, Q, A, const N: usize> ReactionBuilderField for [TypedPortKey<T, Q, A>; N]
+    where
+        T: runtime::ReactorData,
+        Q: PortTag,
+        TypedPortKey<T, Q, A>: runtime::ReactionRefsExtract,
+    {
+        fn extend_builder<S: runtime::ReactorData, Fields: Copy, ReactionFn>(
+            &self,
+            builder: &mut ReactionBuilder<S, Fields, ReactionFn>,
+            trigger_mode: TriggerMode,
+        ) {
+            self.iter().for_each(|port| {
+                port.extend_builder(builder, trigger_mode);
+            })
+        }
+    }
+
     impl<T, Q> ReactionBuilderField for TypedActionKey<T, Q>
     where
         T: runtime::ReactorData,

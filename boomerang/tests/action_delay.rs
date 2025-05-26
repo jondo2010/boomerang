@@ -10,44 +10,33 @@ fn GeneratedDelay(
 ) -> impl Reactor2 {
     let act = builder.add_logical_action::<()>("act", Some(Duration::milliseconds(100)))?;
 
-    builder
-        .add_reaction2(Some("YIn"))
-        .with_trigger(y_in)
-        .with_effect(act)
-        .with_reaction_fn(|ctx, state, (y_in, mut act)| {
+    reaction! {
+        YIn (y_in) -> act {
             state.y_state = y_in.unwrap();
             ctx.schedule_action(&mut act, (), None);
-        })
-        .finish()?;
+        }
+    };
 
-    builder
-        .add_reaction2(Some("Act"))
-        .with_trigger(act)
-        .with_effect(y_out)
-        .with_reaction_fn(|_ctx, state, (_act, mut y_out)| {
+    reaction! {
+        Act (act) -> y_out {
             *y_out = Some(state.y_state);
-        })
-        .finish()?;
+        }
+    };
 }
 
 #[reactor]
 fn Source(#[output] out: u32) -> impl Reactor2 {
-    builder
-        .add_reaction2(Some("Startup"))
-        .with_startup_trigger()
-        .with_effect(out)
-        .with_reaction_fn(|_ctx, _state, (_startup, mut out)| {
+    reaction! {
+        Startup (startup) -> out {
             *out = Some(1);
-        })
-        .finish()?;
+        }
+    }
 }
 
 #[reactor]
 fn Sink(#[state] success: bool, #[input] inp: u32) -> impl Reactor2 {
-    builder
-        .add_reaction2(Some("SinkReactionIn"))
-        .with_trigger(inp)
-        .with_reaction_fn(|ctx, state, (_inp,)| {
+    reaction! {
+        SinkReactionInt (inp) {
             let elapsed_logical = ctx.get_elapsed_logical_time();
             let logical = ctx.get_logical_time();
             let physical = ctx.get_physical_time();
@@ -60,8 +49,8 @@ fn Sink(#[state] success: bool, #[input] inp: u32) -> impl Reactor2 {
             );
             println!("SUCCESS. Elapsed logical time is 100 msec.");
             state.success = true;
-        })
-        .finish()?;
+        }
+    }
 }
 
 #[reactor]

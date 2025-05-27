@@ -3,11 +3,8 @@ use boomerang::prelude::*;
 
 #[reactor]
 fn Destination(#[input] x: u32, #[input] y: u32) -> impl Reactor2 {
-    builder
-        .add_reaction2(None)
-        .with_trigger(x)
-        .with_trigger(y)
-        .with_reaction_fn(move |ctx, _state, (x, y)| {
+    reaction! {
+        (x, y) {
             let elapsed = ctx.get_elapsed_logical_time();
             println!("Time since start: {elapsed:?}");
             assert!(elapsed.is_zero(), "Expected zero elapsed time!");
@@ -21,8 +18,8 @@ fn Destination(#[input] x: u32, #[input] y: u32) -> impl Reactor2 {
                 count += 1;
             }
             assert_eq!(count, 1, "Expected exactly one input!");
-        })
-        .finish()?;
+        }
+    }
 }
 
 #[reactor]

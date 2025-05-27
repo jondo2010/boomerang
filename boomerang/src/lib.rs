@@ -86,7 +86,7 @@ pub mod prelude {
 
     pub use boomerang_derive::{Reaction, Reactor};
 
-    pub use boomerang_macros::{reaction, reactor, reactor_ports};
+    pub use boomerang_macros::{reaction, reactor, reactor_ports, timer};
 
     pub use crate::flatten_transposed::FlattenTransposedExt;
 }

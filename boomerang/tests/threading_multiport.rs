@@ -11,10 +11,7 @@ pub struct State {
 
 #[reactor(state = State)]
 fn Source<const WIDTH: usize>(#[output] out: [i32; WIDTH]) -> impl Reactor2 {
-    let t = builder.add_timer(
-        "t",
-        TimerSpec::default().with_period(Duration::milliseconds(200)),
-    )?;
+    timer! { t(200 msec) };
 
     builder
         .add_reaction2(None)

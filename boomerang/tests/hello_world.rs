@@ -2,23 +2,19 @@ use boomerang::prelude::*;
 
 #[reactor]
 fn HelloWorld2(#[state] success: bool) -> impl Reactor2 {
-    builder
-        .add_reaction2(None)
-        .with_startup_trigger()
-        .with_reaction_fn(|ctx, state, (mut startup,)| {
+    reaction! {
+        (startup) {
             assert!(
                 startup.is_present(ctx),
                 "The startup action should be present."
             );
             println!("Hello World.");
             state.success = true;
-        })
-        .finish()?;
+        }
+    }
 
-    builder
-        .add_reaction2(None)
-        .with_shutdown_trigger()
-        .with_reaction_fn(|ctx, state, (mut shutdown,)| {
+    reaction! {
+        (shutdown) {
             assert!(
                 shutdown.is_present(ctx),
                 "The shutdown action should be present."
@@ -29,8 +25,8 @@ fn HelloWorld2(#[state] success: bool) -> impl Reactor2 {
                 "The startup action should have set the state to true."
             );
             state.success = false;
-        })
-        .finish()?;
+        }
+    }
 }
 
 #[reactor]

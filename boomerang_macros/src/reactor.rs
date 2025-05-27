@@ -2,8 +2,8 @@ use proc_macro2::{Span, TokenStream};
 use proc_macro_error2::abort;
 use quote::{format_ident, quote, quote_spanned, ToTokens, TokenStreamExt};
 use syn::{
-    parse::Parse, parse_quote, spanned::Spanned, Attribute, Block, FnArg, Ident, ItemFn, LitStr,
-    Meta, Pat, PatIdent, ReturnType, Type, TypePath, Visibility,
+    parse::Parse, parse_quote, spanned::Spanned, Attribute, Block, FnArg, Ident, ItemFn, Meta, Pat,
+    PatIdent, Type, TypePath, Visibility,
 };
 
 use crate::util::convert_from_snake_case;
@@ -20,62 +20,7 @@ pub struct Docs(Vec<(String, Span)>);
 
 impl Docs {
     pub fn new(attrs: &[Attribute]) -> Self {
-        #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-        enum ViewCodeFenceState {
-            Outside,
-            Rust,
-            Rsx,
-        }
-        let mut quotes = "```".to_string();
-        let mut quote_ws = "".to_string();
-        let mut view_code_fence_state = ViewCodeFenceState::Outside;
-        // todo fix docs stuff
-        const RSX_START: &str = "# ::leptos::view! {";
-        const RSX_END: &str = "# };";
-
-        // Separated out of chain to allow rustfmt to work
-        let map = |(doc, span): (String, Span)| {
-            doc.split('\n')
-                .map(str::trim_end)
-                .flat_map(|doc| {
-                    let trimmed_doc = doc.trim_start();
-                    let leading_ws = &doc[..doc.len() - trimmed_doc.len()];
-                    let trimmed_doc = trimmed_doc.trim_end();
-                    match view_code_fence_state {
-                        ViewCodeFenceState::Outside
-                            if trimmed_doc.starts_with("```")
-                                && trimmed_doc.trim_start_matches('`').starts_with("view") =>
-                        {
-                            view_code_fence_state = ViewCodeFenceState::Rust;
-                            let view = trimmed_doc.find('v').unwrap();
-                            trimmed_doc[..view].clone_into(&mut quotes);
-                            leading_ws.clone_into(&mut quote_ws);
-                            let rust_options = &trimmed_doc[view + "view".len()..].trim_start();
-                            vec![
-                                format!("{leading_ws}{quotes}{rust_options}"),
-                                format!("{leading_ws}"),
-                            ]
-                        }
-                        ViewCodeFenceState::Rust if trimmed_doc == quotes => {
-                            view_code_fence_state = ViewCodeFenceState::Outside;
-                            vec![format!("{leading_ws}"), doc.to_owned()]
-                        }
-                        ViewCodeFenceState::Rust if trimmed_doc.starts_with('<') => {
-                            view_code_fence_state = ViewCodeFenceState::Rsx;
-                            vec![format!("{leading_ws}{RSX_START}"), doc.to_owned()]
-                        }
-                        ViewCodeFenceState::Rsx if trimmed_doc == quotes => {
-                            view_code_fence_state = ViewCodeFenceState::Outside;
-                            vec![format!("{leading_ws}{RSX_END}"), doc.to_owned()]
-                        }
-                        _ => vec![doc.to_string()],
-                    }
-                })
-                .map(|l| (l, span))
-                .collect::<Vec<_>>()
-        };
-
-        let mut attrs = attrs
+        let docs = attrs
             .iter()
             .filter_map(|attr| {
                 let Meta::NameValue(attr) = &attr.meta else {
@@ -85,28 +30,22 @@ impl Docs {
                     return None;
                 }
 
-                /*
-                let Some(val) = value_to_string(&attr.value) else {
-                    abort!(attr, "expected string literal in value of doc comment");
+                // Extract the string value from the doc attribute
+                let val = match &attr.value {
+                    syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(lit_str),
+                        ..
+                    }) => lit_str.value(),
+                    _ => {
+                        abort!(attr, "expected string literal in value of doc comment");
+                    }
                 };
-                */
 
-                //Some((val, attr.path.span()))
-                todo!();
+                Some((val, attr.path.span()))
             })
-            .flat_map(map)
             .collect::<Vec<_>>();
 
-        if view_code_fence_state != ViewCodeFenceState::Outside {
-            if view_code_fence_state == ViewCodeFenceState::Rust {
-                attrs.push((quote_ws.clone(), Span::call_site()))
-            } else {
-                attrs.push((format!("{quote_ws}{RSX_END}"), Span::call_site()))
-            }
-            attrs.push((format!("{quote_ws}{quotes}"), Span::call_site()))
-        }
-
-        Self(attrs)
+        Self(docs)
     }
 }
 
@@ -248,7 +187,6 @@ pub struct Model {
     generics: syn::Generics, // Added generics field
     args: Vec<Arg>,
     body: Box<Block>,
-    ret: ReturnType,
 }
 
 impl Parse for Model {
@@ -290,7 +228,6 @@ impl Parse for Model {
             name: convert_from_snake_case(&item.sig.ident),
             generics: item.sig.generics.clone(), // Extract generics
             args: props,
-            ret: item.sig.output.clone(),
             body: item.block,
         })
     }
@@ -309,7 +246,6 @@ impl ToTokens for ArgsModel {
                 generics,
                 args,
                 body,
-                ret: _,
             },
         ) = self;
 
@@ -328,7 +264,7 @@ impl ToTokens for ArgsModel {
                      name,
                      ty,
                  }| match kind {
-                    ArgKind::State { default } => Some(quote! { #docs pub #name: #ty }),
+                    ArgKind::State { default: _ } => Some(quote! { #docs pub #name: #ty }),
                     _ => None,
                 },
             )

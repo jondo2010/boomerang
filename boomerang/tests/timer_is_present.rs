@@ -4,16 +4,8 @@ use boomerang::prelude::*;
 
 #[reactor]
 fn Main() -> impl Reactor2 {
-    let t1 = builder.add_timer(
-        "t1",
-        TimerSpec::default().with_period(Duration::milliseconds(50)),
-    )?;
-    let t2 = builder.add_timer(
-        "t2",
-        TimerSpec::default()
-            .with_offset(Duration::milliseconds(33))
-            .with_period(Duration::milliseconds(33)),
-    )?;
+    timer! { t1(50 msec) };
+    timer! { t2(33 msec, 33 msec) };
 
     reaction! {
         (startup) t1, t2 {

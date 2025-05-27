@@ -5,7 +5,7 @@ use syn::{parse::Parse, Ident};
 
 /// Parse a reaction definition like:
 ///
-/// ```
+/// ```no_run
 /// timer! { <name>(<offset>, <period>) };
 /// ```
 ///
@@ -15,7 +15,7 @@ use syn::{parse::Parse, Ident};
 /// one timer event occurs at program start, simultaneous with the startup event.
 ///
 /// ## Example
-/// ```
+/// ```no_run
 /// // A timer that triggers after 10 seconds and then every 50 milliseconds.
 /// timer! { t1(10 sec, 50 msec) };
 /// ```
@@ -78,15 +78,31 @@ impl Parse for Model {
 impl ToTokens for Model {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
         let name = &self.name;
-        let offset = self.offset.map(|d| d.as_millis() as u64);
-        let period = self.period.as_millis() as u64;
+        let name_str = name.to_string();
+
+        // Convert periods to milliseconds for the runtime Duration type
+        let period_ms = self.period.as_millis() as i64;
+
+        let mut timer_spec = quote::quote! {
+            ::boomerang::prelude::TimerSpec::default()
+                .with_period(::boomerang::runtime::Duration::milliseconds(#period_ms))
+        };
+
+        // Add offset if present
+        if let Some(offset) = self.offset {
+            let offset_ms = offset.as_millis() as i64;
+            timer_spec = quote::quote! {
+                ::boomerang::prelude::TimerSpec::default()
+                    .with_offset(::boomerang::runtime::Duration::milliseconds(#offset_ms))
+                    .with_period(::boomerang::runtime::Duration::milliseconds(#period_ms))
+            };
+        }
 
         tokens.extend(quote::quote! {
-            ::boomerang::timer::Timer {
-                name: #name,
-                offset: #offset,
-                period: #period,
-            }
+            let #name = builder.add_timer(
+                #name_str,
+                #timer_spec,
+            )?;
         });
     }
 }

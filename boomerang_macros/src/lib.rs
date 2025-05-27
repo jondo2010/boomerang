@@ -97,11 +97,13 @@ pub fn reaction(s: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
 /// Creates a timer within a reactor function.
 ///
+/// ## Usage
 /// ```rust
 /// # use boomerang::prelude::*;
 /// fn MyReactor() -> impl Reactor2 {
 ///    // Create a timer named `t1` that triggers every 50 milliseconds
 ///    timer! { t1(0, 50 msec) };
+/// }
 /// ```
 #[proc_macro_error2::proc_macro_error]
 #[proc_macro]

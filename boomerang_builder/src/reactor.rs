@@ -87,8 +87,7 @@ pub trait ReactorPorts {
     /// Build the reactor with the given closure
     fn build_with<F, S>(f: F) -> impl Reactor2<S, Ports = Self>
     where
-        F: for<'a> Fn(&mut ReactorBuilderState<'a, S>, Self::Fields) -> Result<(), BuilderError>
-            + 'static,
+        F: Fn(&mut ReactorBuilderState<'_, S>, Self::Fields) -> Result<(), BuilderError> + 'static,
         S: runtime::ReactorData;
 }
 

@@ -3,6 +3,8 @@ use quote::quote;
 mod ports;
 mod reaction;
 mod reactor;
+mod time;
+mod timer;
 mod util;
 
 #[proc_macro_error2::proc_macro_error]
@@ -76,12 +78,13 @@ pub fn reactor(
 ///
 /// ```rust
 /// # use boomerang::prelude::*;
-///
 /// fn MyReactor(
 ///     #[output] x: u32,
 /// ) -> impl Reactor2 {
-///     reaction! starting_reaction (startup) -> x {
-///         // Your reaction implementation goes here
+///     reaction! {
+///         starting_reaction (startup) -> x {
+///             // Your reaction implementation goes here
+///         }
 ///     }
 /// }
 /// ```
@@ -89,5 +92,20 @@ pub fn reactor(
 #[proc_macro]
 pub fn reaction(s: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let model = syn::parse_macro_input!(s as reaction::Model);
+    quote! { #model }.into()
+}
+
+/// Creates a timer within a reactor function.
+///
+/// ```rust
+/// # use boomerang::prelude::*;
+/// fn MyReactor() -> impl Reactor2 {
+///    // Create a timer named `t1` that triggers every 50 milliseconds
+///    timer! { t1(0, 50 msec) };
+/// ```
+#[proc_macro_error2::proc_macro_error]
+#[proc_macro]
+pub fn timer(s: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let model = syn::parse_macro_input!(s as timer::Model);
     quote! { #model }.into()
 }

@@ -617,7 +617,7 @@ impl Scheduler {
         true
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(skip(self), fields(key = %self.key))]
     pub fn event_loop(&mut self) {
         self.startup();
 

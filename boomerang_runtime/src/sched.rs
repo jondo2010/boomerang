@@ -506,7 +506,7 @@ impl Scheduler {
         let physical_elapsed = std::time::Instant::now() - self.start_time;
         tracing::info!("---- Elapsed physical time: {physical_elapsed:?}");
 
-        tracing::info!(stats = %self.stats, "Scheduler has been shut down.");
+        tracing::info!(stats = ?self.stats, "Scheduler has been shut down.");
     }
 
     /// Try to receive an asynchronous event
@@ -600,18 +600,16 @@ impl Scheduler {
         } else if let Some(async_event) = self.receive_event_async() {
             self.handle_async_event(async_event);
         } else {
-            tracing::debug!("No more events in queue. -> Terminate!");
+            tracing::debug!("No more events in queue, pushing a shutdown event.");
             // Shutdown event will be processed at the next event loop iteration
-            self.shutdown_tag = Some(self.current_tag);
+            let shutdown = self.current_tag.delay(Duration::ZERO);
+            self.shutdown_tag = Some(shutdown);
             for action_key in &self.reaction_graph.shutdown_actions {
                 self.store
-                    .push_action_value(*action_key, self.current_tag, Box::new(()));
+                    .push_action_value(*action_key, shutdown, Box::new(()));
             }
-            self.events.push_event(
-                self.current_tag,
-                self.reaction_graph.shutdown_reactions(),
-                true,
-            );
+            self.events
+                .push_event(shutdown, self.reaction_graph.shutdown_reactions(), true);
         }
 
         true

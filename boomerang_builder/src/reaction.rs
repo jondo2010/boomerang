@@ -35,7 +35,6 @@ pub trait ReactionField {
     fn build(
         builder: &mut ReactionBuilderState,
         key: Self::Key,
-        order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError>;
 }
@@ -47,10 +46,9 @@ impl<T: runtime::ReactorData> ReactionField for runtime::ActionRef<'_, T> {
     fn build(
         builder: &mut ReactionBuilderState,
         key: Self::Key,
-        order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
-        builder.add_action_relation(key, order, trigger_mode)
+        builder.add_action_relation(key, trigger_mode)
     }
 }
 
@@ -60,10 +58,9 @@ impl<T: runtime::ReactorData> ReactionField for runtime::AsyncActionRef<T> {
     fn build(
         builder: &mut ReactionBuilderState,
         key: Self::Key,
-        order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
-        builder.add_action_relation(key, order, trigger_mode)
+        builder.add_action_relation(key, trigger_mode)
     }
 }
 
@@ -73,10 +70,9 @@ impl<T: runtime::ReactorData> ReactionField for runtime::InputRef<'_, T> {
     fn build(
         builder: &mut ReactionBuilderState,
         key: Self::Key,
-        order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
-        builder.add_port_relation(key, order, trigger_mode)
+        builder.add_port_relation(key, trigger_mode)
     }
 }
 
@@ -86,10 +82,9 @@ impl<T: runtime::ReactorData, const N: usize> ReactionField for [runtime::InputR
     fn build(
         builder: &mut ReactionBuilderState,
         key: Self::Key,
-        order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
-        builder.add_port_relations(key, order, trigger_mode)
+        builder.add_port_relations(key, trigger_mode)
     }
 }
 
@@ -99,10 +94,9 @@ impl<T: runtime::ReactorData> ReactionField for runtime::OutputRef<'_, T> {
     fn build(
         builder: &mut ReactionBuilderState,
         key: Self::Key,
-        order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
-        builder.add_port_relation(key, order, trigger_mode)
+        builder.add_port_relation(key, trigger_mode)
     }
 }
 
@@ -112,10 +106,9 @@ impl<T: runtime::ReactorData, const N: usize> ReactionField for [runtime::Output
     fn build(
         builder: &mut ReactionBuilderState,
         key: Self::Key,
-        order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
-        builder.add_port_relations(key, order, trigger_mode)
+        builder.add_port_relations(key, trigger_mode)
     }
 }
 
@@ -141,15 +134,14 @@ impl ReactionField for PortOrActionTrigger {
     fn build(
         builder: &mut ReactionBuilderState,
         key: Self::Key,
-        order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
         match key {
             PortOrActionTriggerKey::Port(port_key) => {
-                builder.add_port_relation(port_key, order, trigger_mode)
+                builder.add_port_relation(port_key, trigger_mode)
             }
             PortOrActionTriggerKey::Action(action_key) => {
-                builder.add_action_relation(action_key, order, trigger_mode)
+                builder.add_action_relation(action_key, trigger_mode)
             }
         }
     }
@@ -160,8 +152,6 @@ pub type BoxedBuilderReactionFn = Box<dyn FnOnce(&BuilderRuntimeParts) -> runtim
 
 pub struct ReactionBuilder {
     pub(super) name: Option<String>,
-    /// Unique ordering of this reaction within the reactor.
-    pub(super) priority: usize,
     /// The owning Reactor for this Reaction
     pub(super) reactor_key: BuilderReactorKey,
     /// The Reaction function
@@ -182,7 +172,6 @@ impl std::fmt::Debug for ReactionBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReactionBuilder")
             .field("name", &self.name)
-            .field("priority", &self.priority)
             .field("reactor_key", &self.reactor_key)
             .field("reaction_fn", &"ReactionFn()")
             .field("action_relations", &self.action_relations)
@@ -195,10 +184,6 @@ impl ReactionBuilder {
     /// Get the name of this Reaction
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
-    }
-
-    pub fn priority(&self) -> usize {
-        self.priority
     }
 }
 
@@ -248,7 +233,6 @@ impl TriggerMode {
 impl<'a> ReactionBuilderState<'a> {
     pub fn new(
         name: &str,
-        priority: usize,
         reactor_key: BuilderReactorKey,
         reaction_fn: BoxedBuilderReactionFn,
         env: &'a mut EnvBuilder,
@@ -256,7 +240,6 @@ impl<'a> ReactionBuilderState<'a> {
         Self {
             builder: ReactionBuilder {
                 name: Some(name.into()),
-                priority,
                 reactor_key,
                 reaction_fn,
                 action_relations: SecondaryMap::new(),
@@ -270,7 +253,6 @@ impl<'a> ReactionBuilderState<'a> {
     pub fn add_action_relation(
         &mut self,
         key: BuilderActionKey,
-        order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
         let action = &self.env.action_builders[key];
@@ -290,10 +272,9 @@ impl<'a> ReactionBuilderState<'a> {
     pub fn with_action(
         mut self,
         action_key: impl Into<BuilderActionKey>,
-        order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<Self, BuilderError> {
-        self.add_action_relation(action_key.into(), order, trigger_mode)?;
+        self.add_action_relation(action_key.into(), trigger_mode)?;
         Ok(self)
     }
 
@@ -306,7 +287,6 @@ impl<'a> ReactionBuilderState<'a> {
     pub fn add_port_relation(
         &mut self,
         key: BuilderPortKey,
-        order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
         let port_builder = &self.env.port_builders[key];
@@ -369,11 +349,10 @@ impl<'a> ReactionBuilderState<'a> {
     pub fn add_port_relations(
         &mut self,
         keys: impl IntoIterator<Item = BuilderPortKey>,
-        order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<(), BuilderError> {
         for key in keys {
-            self.add_port_relation(key, order, trigger_mode)?;
+            self.add_port_relation(key, trigger_mode)?;
         }
         Ok(())
     }
@@ -384,10 +363,9 @@ impl<'a> ReactionBuilderState<'a> {
     pub fn with_port(
         mut self,
         port_key: impl Into<BuilderPortKey>,
-        order: usize,
         trigger_mode: TriggerMode,
     ) -> Result<Self, BuilderError> {
-        self.add_port_relation(port_key.into(), order, trigger_mode)?;
+        self.add_port_relation(port_key.into(), trigger_mode)?;
         Ok(self)
     }
 
@@ -746,7 +724,6 @@ pub mod builder2 {
 
             let reaction_builder = super::ReactionBuilder {
                 name,
-                priority: reactor.reactions.len(),
                 reactor_key,
                 reaction_fn,
                 action_relations,

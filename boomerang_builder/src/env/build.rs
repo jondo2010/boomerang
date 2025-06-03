@@ -275,7 +275,7 @@ impl EnvBuilder {
         for (name, reaction_fn, reactor_key, action_key) in new_reactions {
             let _ = self
                 .add_reaction(&name, reactor_key, reaction_fn.defer())
-                .with_action(action_key, 0, TriggerMode::TriggersAndEffects)?
+                .with_action(action_key, TriggerMode::TriggersAndEffects)?
                 .finish()?;
         }
 

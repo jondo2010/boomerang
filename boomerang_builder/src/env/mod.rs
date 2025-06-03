@@ -13,7 +13,7 @@ use super::{
 };
 use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, EdgeDirection};
-use slotmap::{SecondaryMap, SlotMap};
+use slotmap::{Key, SecondaryMap, SlotMap};
 use std::{collections::HashMap, convert::TryInto};
 
 mod build;
@@ -249,14 +249,7 @@ impl EnvBuilder {
     where
         F: FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn + 'static,
     {
-        let priority = self.reactor_builders[reactor_key].reactions.len();
-        ReactionBuilderState::new(
-            name,
-            priority,
-            reactor_key,
-            Box::new(reaction_builder_fn),
-            self,
-        )
+        ReactionBuilderState::new(name, reactor_key, Box::new(reaction_builder_fn), self)
     }
 
     pub fn add_reaction2<S: runtime::ReactorData>(
@@ -582,7 +575,10 @@ impl EnvBuilder {
             reactor
                 .reactions
                 .keys()
-                .sorted_by_key(|&reaction_key| self.reaction_builders[reaction_key].priority)
+                .sorted_by_key(|&reaction_key| {
+                    //self.reaction_builders[reaction_key].priority
+                    reaction_key.data().as_ffi()
+                })
                 .rev()
                 .tuple_windows()
         });

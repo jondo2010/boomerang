@@ -184,8 +184,7 @@ impl EnvBuilder {
                     }
                 } else {
                     // There was a cycle in the reaction graph, so don't show the reaction levels.
-                    let priority = self.reaction_builders[first_key].priority();
-                    format!("{priority}")
+                    format!("{first_key:?}")
                 };
 
                 (format!("{res_key}, {res_level}"), fqn.to_string())

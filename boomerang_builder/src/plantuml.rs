@@ -101,8 +101,7 @@ impl EnvBuilder {
         }) {
             writeln!(
                 buf,
-                "action \"{name}({priority})[[{{{name}}}]]\" as {id}",
-                priority = reaction.priority,
+                "action \"{name}[[{{{name}}}]]\" as {id}",
                 name = reaction.name().unwrap_or("<unnamed_reaction>"),
                 id = reaction_id
             )?;

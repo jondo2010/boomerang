@@ -23,6 +23,7 @@ impl petgraph::graph::GraphIndex for BuilderReactorKey {
     }
 }
 
+#[deprecated]
 pub trait Reactor: Sized {
     type State: runtime::ReactorData;
 
@@ -279,19 +280,6 @@ pub struct ReactorBuilderState<'a, S: runtime::ReactorData = ()> {
     shutdown_action: TypedActionKey,
     phantom: std::marker::PhantomData<S>,
 }
-
-/*
-impl<'a> FindElements for ReactorBuilderState<'a> {
-    fn get_port_by_name(&self, port_name: &str) -> Result<BuilderPortKey, BuilderError> {
-        //self.env.find_port_by_name(port_name, self.reactor_key)
-        todo!();
-    }
-
-    fn get_action_by_name(&self, action_name: &str) -> Result<BuilderActionKey, BuilderError> {
-        self.env.find_action_by_name(action_name, self.reactor_key)
-    }
-}
-    */
 
 impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
     pub(super) fn new(

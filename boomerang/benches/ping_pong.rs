@@ -186,7 +186,7 @@ fn bench(c: &mut Criterion) {
                     let BuilderRuntimeParts {
                         enclaves,
                         aliases: _,
-                        ..,
+                        ..
                     } = env_builder.into_runtime_parts().unwrap();
                     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
                     let config = runtime::Config::default().with_fast_forward(true);
@@ -198,14 +198,14 @@ fn bench(c: &mut Criterion) {
                     // validate the end state
                     let env = sched.into_env();
                     let ping = env
-                        .find_reactor_by_name("main::ping")
+                        .find_reactor_by_name("main/ping")
                         .and_then(|reactor| reactor.get_state::<Ping>())
                         .unwrap();
                     assert_eq!(ping.count, count);
                     assert_eq!(ping.pings_left, 0);
 
                     let pong = env
-                        .find_reactor_by_name("main::pong")
+                        .find_reactor_by_name("main/pong")
                         .and_then(|reactor| reactor.get_state::<Pong>())
                         .unwrap();
                     assert_eq!(pong.count, count);

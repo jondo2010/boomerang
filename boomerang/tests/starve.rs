@@ -3,6 +3,7 @@ use boomerang::prelude::*;
 #[reactor]
 fn Main() -> impl Reactor2 {
     timer! { t(1 s) };
+
     let after_shutdown = builder.add_logical_action::<()>("after_shutdown", None)?;
 
     reaction! {
@@ -14,18 +15,15 @@ fn Main() -> impl Reactor2 {
     reaction! {
         (shutdown) -> after_shutdown {
             println!("Shutdown triggered at {}", ctx.get_tag());
-            if ctx.get_elapsed_logical_time() != Duration::seconds(1) || ctx.get_microstep() != 1 {
-                eprintln!("Shutdown invoked at wrong tag");
-                std::process::exit(2);
-            }
+            // Ensure that the shutdown is invoked at the correct tag
+            assert_eq!(ctx.get_tag(), Tag::new(Duration::seconds(1), 1), "Shutdown invoked at wrong tag");
             ctx.schedule_action(&mut after_shutdown, (), None);
         }
     }
 
     reaction! {
         (after_shutdown) {
-            eprintln!("Executed a reaction after shutdown");
-            std::process::exit(1);
+            panic!("Executed a reaction after shutdown");
         }
     }
 }

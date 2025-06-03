@@ -6,6 +6,8 @@
 
 mod action;
 mod connection;
+#[cfg(feature = "derive")]
+pub mod derive;
 mod env;
 mod fqn;
 mod port;

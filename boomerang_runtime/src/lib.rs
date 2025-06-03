@@ -34,8 +34,7 @@ pub use key_set::KeySetLimits as ReactionSetLimits;
 pub use port::*;
 pub use reaction::{
     BoxedReactionFn, ConnectionReceiverReactionFn, ConnectionSenderReactionFn, Deadline,
-    EnclaveSenderReactionFn, FromRefs, Reaction, ReactionAdapter, ReactionKey, ReactionSet,
-    Trigger,
+    EnclaveSenderReactionFn, FromRefs, Reaction, ReactionFn, ReactionKey, ReactionSet,
 };
 pub use reactor::*;
 pub use refs::{Refs, RefsMut};

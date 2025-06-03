@@ -26,7 +26,7 @@
 //! )]
 //! struct ReactionStartup;
 //!
-//! impl runtime::Trigger<State> for ReactionStartup {
+//! impl derive::Trigger<State> for ReactionStartup {
 //!     fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
 //!         println!("Hello World.");
 //!         state.success = true;
@@ -40,7 +40,7 @@
 //! )]
 //! struct ReactionShutdown;
 //!
-//! impl runtime::Trigger<State> for ReactionShutdown {
+//! impl derive::Trigger<State> for ReactionShutdown {
 //!     fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
 //!         println!("Shutdown invoked.");
 //!         assert!(state.success, "ERROR: startup reaction not executed.");
@@ -78,12 +78,16 @@ pub mod prelude {
 
     pub use super::builder::{
         BuilderError, BuilderFqn, BuilderRuntimeParts, Contained, EnvBuilder, Input, Local,
-        Logical, Output, Physical, Reactor, Reactor2, ReactorPorts, TimerActionKey, TimerSpec,
+        Logical, Output, Physical, Reactor2, ReactorPorts, TimerActionKey, TimerSpec,
         TypedActionKey, TypedPortKey,
     };
 
+    #[cfg(feature = "derive")]
+    pub use super::builder::derive;
+
     pub use super::runtime::{self, action::ActionCommon, CommonContext, Duration, FromRefs, Tag};
 
+    #[cfg(feature = "derive")]
     pub use boomerang_derive::{Reaction, Reactor};
 
     pub use boomerang_macros::{reaction, reactor, reactor_ports, timer};
@@ -91,9 +95,9 @@ pub mod prelude {
     pub use crate::flatten_transposed::FlattenTransposedExt;
 }
 
-#[cfg(feature = "derive")]
-#[doc(hidden)]
-pub use boomerang_derive::*;
+//#[cfg(feature = "derive")]
+//#[doc(hidden)]
+//pub use boomerang_derive::*;
 
 #[cfg(feature = "derive")]
 #[doc(hidden)]

@@ -1,10 +1,8 @@
 use darling::FromDeriveInput;
 use quote::ToTokens;
 
-//mod fn_reactor;
 mod reaction;
 mod reactor;
-//mod reactor_macro;
 mod util;
 
 #[proc_macro_derive(Reaction, attributes(reaction))]

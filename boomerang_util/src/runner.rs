@@ -11,7 +11,7 @@
 
 use anyhow::Context;
 use boomerang::{
-    builder::{BuilderRuntimeParts, EnvBuilder, Reactor},
+    builder::{derive::Reactor, BuilderRuntimeParts, EnvBuilder},
     prelude::Reactor2,
     runtime,
 };

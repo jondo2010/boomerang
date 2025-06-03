@@ -16,18 +16,6 @@ pub trait DeferedBuild {
     fn defer(self) -> impl FnOnce(&BuilderRuntimeParts) -> Self::Output + 'static;
 }
 
-impl<Reaction, State> DeferedBuild for runtime::ReactionAdapter<Reaction, State>
-where
-    Reaction: runtime::FromRefs + 'static,
-    for<'store> Reaction::Marker<'store>: 'store + runtime::Trigger<State>,
-    State: runtime::ReactorData,
-{
-    type Output = runtime::BoxedReactionFn;
-    fn defer(self) -> impl FnOnce(&BuilderRuntimeParts) -> Self::Output + 'static {
-        move |_| runtime::BoxedReactionFn::from(self)
-    }
-}
-
 impl DeferedBuild for runtime::reaction::TimerFn {
     type Output = runtime::BoxedReactionFn;
     fn defer(self) -> impl FnOnce(&BuilderRuntimeParts) -> Self::Output + 'static {

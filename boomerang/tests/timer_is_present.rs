@@ -4,7 +4,7 @@ use boomerang::prelude::*;
 
 #[reactor]
 fn Main() -> impl Reactor2 {
-    timer! { t1(50 msec) };
+    timer! { t1(0 s, 50 msec) };
     timer! { t2(33 msec, 33 msec) };
 
     reaction! {

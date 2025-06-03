@@ -5,7 +5,7 @@ use syn::{parse::Parse, Ident};
 
 /// Parse a reaction definition like:
 ///
-/// ```no_run
+/// ```rust,ignore
 /// timer! { <name>(<offset>, <period>) };
 /// ```
 ///
@@ -15,12 +15,15 @@ use syn::{parse::Parse, Ident};
 /// one timer event occurs at program start, simultaneous with the startup event.
 ///
 /// ## Example
-/// ```no_run
+/// ```rust,ignore
 /// // A timer that triggers after 10 seconds and then every 50 milliseconds.
 /// timer! { t1(10 sec, 50 msec) };
 ///
 /// // A one-shot timer that triggers after 100 milliseconds.
 /// timer! { t2(100 msec) };
+///
+/// // A one-second periodic timer with no offset.
+/// timer! { t3(0, 1 s) };
 ///
 /// // A one-shot timer that triggers at program start.
 /// timer! { t3() };

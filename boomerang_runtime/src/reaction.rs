@@ -2,8 +2,7 @@ use std::{fmt::Debug, sync::RwLock};
 
 use crate::{
     key_set::KeySet, ActionCommon, ActionRef, AsyncActionRef, BaseReactor, CommonContext, Context,
-    Duration, InputRef, OutputRef, ReactionRefs, ReactionRefsExtract, Reactor, ReactorData,
-    SendContext,
+    Duration, InputRef, OutputRef, ReactionRefs, ReactionRefsExtract, ReactorData, SendContext,
 };
 
 tinymap::key_type! { pub ReactionKey }
@@ -29,49 +28,6 @@ pub type BoxedHandlerFn = Box<dyn Fn() + Send + Sync>;
 pub trait FromRefs {
     type Marker<'store>;
     fn from_refs(refs: ReactionRefs<'_>) -> Self::Marker<'_>;
-}
-
-/// The `Trigger` trait should be implemented by the user for each Reaction struct.
-///
-/// Type parameter `S` is the state type of the Reactor.
-pub trait Trigger<S: ReactorData> {
-    fn trigger(self, ctx: &mut Context, state: &mut S);
-}
-
-/// Adapter struct for implementing the `ReactionFn` trait for a Reaction struct.
-///
-/// The `ReactionAdapter` struct is used to convert a Reaction struct to a `Box<dyn ReactionFn>`. This is the mechanism
-/// used by the derive-generated code to implement the Reaction trigger interface.
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[deprecated(note = "Use `RnRefsAdapter` instead")]
-pub struct ReactionAdapter<Reaction, State>(std::marker::PhantomData<fn() -> (Reaction, State)>);
-
-impl<Reaction, State> Default for ReactionAdapter<Reaction, State> {
-    fn default() -> Self {
-        Self(Default::default())
-    }
-}
-
-impl<'store, Reaction, S> ReactionFn<'store> for ReactionAdapter<Reaction, S>
-where
-    Reaction: FromRefs,
-    Reaction::Marker<'store>: 'store + Trigger<S>,
-    S: ReactorData,
-{
-    #[inline(always)]
-    fn trigger(
-        &mut self,
-        ctx: &'store mut Context,
-        reactor: &'store mut dyn BaseReactor,
-        refs: ReactionRefs<'store>,
-    ) {
-        let reactor: &mut Reactor<S> = reactor
-            .downcast_mut()
-            .expect("Unable to downcast reactor state");
-
-        let reaction = Reaction::from_refs(refs);
-        reaction.trigger(ctx, &mut reactor.state);
-    }
 }
 
 /// We implement [`ReactionFn`] for any `Fn` that straightforwardly matches the signature.
@@ -361,25 +317,6 @@ macro_rules! reaction_closure {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Test the ReactionAdapter struct.
-    #[test]
-    fn test_reaction_adapter() {
-        struct TestReaction;
-
-        impl FromRefs for TestReaction {
-            type Marker<'store> = ();
-
-            fn from_refs(_: ReactionRefs<'_>) -> Self::Marker<'_> {}
-        }
-
-        impl Trigger<()> for () {
-            fn trigger(self, _ctx: &mut Context, _state: &mut ()) {}
-        }
-
-        let adapter = ReactionAdapter::<TestReaction, ()>::default();
-        let _reaction = Reaction::new("dummy", adapter, None);
-    }
 
     /// Test the FnAdapter struct.
     #[test]

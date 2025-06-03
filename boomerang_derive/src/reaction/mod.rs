@@ -288,7 +288,6 @@ impl ToTokens for Reaction {
             quote! {
                 let mut __reaction = __reaction.with_action(
                     __startup_action,
-                    0,
                     ::boomerang::builder::TriggerMode::TriggersOnly
                 )?;
             }
@@ -298,7 +297,6 @@ impl ToTokens for Reaction {
             quote! {
                 let mut __reaction = __reaction.with_action(
                     __shutdown_action,
-                    0,
                     ::boomerang::builder::TriggerMode::TriggersOnly
                 )?;
             }
@@ -308,7 +306,7 @@ impl ToTokens for Reaction {
             #fromdefs_impl
 
             #[automatically_derived]
-            impl #impl_generics ::boomerang::builder::Reaction<#reactor> for #ident #type_generics #where_clause {
+            impl #impl_generics ::boomerang::builder::derive::Reaction<#reactor> for #ident #type_generics #where_clause {
                 fn build<'builder, S: runtime::ReactorData>(
                     name: &str,
                     reactor: &#reactor,
@@ -324,11 +322,11 @@ impl ToTokens for Reaction {
                     let __shutdown_action = builder.get_shutdown_action();
 
                     let mut __reaction = {
-                        let wrapper = ::boomerang::runtime::ReactionAdapter::<
+                        let wrapper = ::boomerang::builder::derive::ReactionAdapter::<
                             #ident #inner_type_generics,
-                            <#reactor as ::boomerang::builder::Reactor>::State
+                            <#reactor as ::boomerang::builder::derive::Reactor>::State
                         >::default();
-                        builder.add_reaction(name, wrapper.defer())
+                        builder.add_derive_reaction(name, wrapper.defer())
                     };
 
                     #trigger_startup

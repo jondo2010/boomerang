@@ -2,9 +2,8 @@ use std::fmt::Debug;
 
 use super::{
     ActionTag, ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey,
-    BuilderReactionKey, BuilderRuntimeParts, EnvBuilder, Input, Logical, Output, Physical,
-    PhysicalActionKey, PortTag, ReactionBuilderState, TimerActionKey, TimerSpec, TypedActionKey,
-    TypedPortKey,
+    BuilderReactionKey, EnvBuilder, Input, Logical, Output, Physical, PortTag, TimerActionKey,
+    TimerSpec, TypedActionKey, TypedPortKey,
 };
 use crate::runtime;
 use slotmap::SecondaryMap;
@@ -20,24 +19,6 @@ impl petgraph::graph::GraphIndex for BuilderReactorKey {
 
     fn is_node_index() -> bool {
         true
-    }
-}
-
-#[deprecated]
-pub trait Reactor: Sized {
-    type State: runtime::ReactorData;
-
-    fn build(
-        name: &str,
-        state: Self::State,
-        parent: Option<BuilderReactorKey>,
-        bank_info: Option<runtime::BankInfo>,
-        is_enclave: bool,
-        env: &mut EnvBuilder,
-    ) -> Result<Self, BuilderError>;
-
-    fn iter(&self) -> impl Iterator<Item = &Self> {
-        std::iter::once(self)
     }
 }
 
@@ -90,111 +71,6 @@ pub trait ReactorPorts {
     where
         F: Fn(&mut ReactorBuilderState<'_, S>, Self::Fields) -> Result<(), BuilderError> + 'static,
         S: runtime::ReactorData;
-}
-
-/// This builder trait is implemented for fields in the Reactor struct.
-pub trait ReactorField: Sized {
-    type Inner;
-
-    /// Build a `ReactionBuilderState` for this Reaction
-    fn build<S: runtime::ReactorData>(
-        name: &str,
-        inner: Self::Inner,
-        parent: &'_ mut ReactorBuilderState<S>,
-    ) -> Result<Self, BuilderError>;
-}
-
-impl<R: Reactor> ReactorField for R {
-    type Inner = (R::State, bool);
-
-    fn build<S: runtime::ReactorData>(
-        name: &str,
-        inner: Self::Inner,
-        parent: &'_ mut ReactorBuilderState<S>,
-    ) -> Result<Self, BuilderError> {
-        let (state, is_enclave) = inner;
-        parent.add_child_reactor(name, state, is_enclave)
-    }
-}
-
-/// NOTE: `R::State: Clone` is required because state is cloned for each child reactor.
-impl<R, const N: usize> ReactorField for [R; N]
-where
-    R: Reactor,
-    R::State: Clone,
-{
-    type Inner = (R::State, bool);
-
-    fn build<S: runtime::ReactorData>(
-        name: &str,
-        inner: Self::Inner,
-        parent: &'_ mut ReactorBuilderState<S>,
-    ) -> Result<Self, BuilderError> {
-        let (state, is_enclave) = inner;
-        parent.add_child_reactors(name, state, is_enclave)
-    }
-}
-
-impl<T: runtime::ReactorData, Q: PortTag> ReactorField for TypedPortKey<T, Q> {
-    type Inner = ();
-
-    fn build<S: runtime::ReactorData>(
-        name: &str,
-        _inner: Self::Inner,
-        parent: &'_ mut ReactorBuilderState<S>,
-    ) -> Result<Self, BuilderError> {
-        parent.add_port::<T, Q>(name, None)
-    }
-}
-
-impl<T: runtime::ReactorData, Q: PortTag, const N: usize> ReactorField for [TypedPortKey<T, Q>; N] {
-    type Inner = ();
-
-    fn build<S: runtime::ReactorData>(
-        name: &str,
-        _inner: Self::Inner,
-        parent: &'_ mut ReactorBuilderState<S>,
-    ) -> Result<Self, BuilderError> {
-        parent.add_ports::<T, Q, N>(name)
-    }
-}
-
-impl ReactorField for TimerActionKey {
-    type Inner = TimerSpec;
-
-    fn build<S: runtime::ReactorData>(
-        name: &str,
-        inner: Self::Inner,
-        parent: &'_ mut ReactorBuilderState<S>,
-    ) -> Result<Self, BuilderError> {
-        parent.add_timer(name, inner)
-    }
-}
-
-impl<T: runtime::ReactorData, Q: ActionTag> ReactorField for TypedActionKey<T, Q> {
-    type Inner = Option<runtime::Duration>;
-
-    fn build<S: runtime::ReactorData>(
-        name: &str,
-        min_delay: Self::Inner,
-        parent: &'_ mut ReactorBuilderState<S>,
-    ) -> Result<Self, BuilderError> {
-        parent.add_action(name, min_delay)
-    }
-}
-
-impl ReactorField for PhysicalActionKey {
-    type Inner = Option<runtime::Duration>;
-
-    fn build<S: runtime::ReactorData>(
-        name: &str,
-        inner: Self::Inner,
-        parent: &'_ mut ReactorBuilderState<S>,
-    ) -> Result<Self, BuilderError> {
-        parent
-            .add_physical_action::<()>(name, inner)
-            .map(Into::into)
-    }
 }
 
 pub(super) struct ReactorState<T: runtime::ReactorData>(T);
@@ -418,16 +294,6 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
             .add_action::<T, Physical>(name, min_delay, self.reactor_key)
     }
 
-    /// Add a new reaction to this reactor.
-    #[deprecated(note = "Please use `add_reaction2` instead, which provides a more ergonomic API.")]
-    pub fn add_reaction<F>(&mut self, name: &str, reaction_builder_fn: F) -> ReactionBuilderState
-    where
-        F: FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn + 'static,
-    {
-        self.env
-            .add_reaction(name, self.reactor_key, reaction_builder_fn)
-    }
-
     pub fn add_reaction2(&mut self, name: Option<&str>) -> crate::builder2::ReactionBuilder<S> {
         self.env.add_reaction2(name, self.reactor_key)
     }
@@ -489,23 +355,6 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         self.add_ports(name)
     }
 
-    /// Add a new child reactor to this reactor.
-    pub fn add_child_reactor<R: Reactor>(
-        &mut self,
-        name: &str,
-        state: R::State,
-        is_enclave: bool,
-    ) -> Result<R, BuilderError> {
-        R::build(
-            name,
-            state,
-            Some(self.reactor_key),
-            None,
-            is_enclave,
-            self.env,
-        )
-    }
-
     pub fn add_child_reactor2<ChildState, R>(
         &mut self,
         reactor: R,
@@ -542,34 +391,6 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
             .map(|i| {
                 reactor.build(
                     &format!("{name}_{i}"),
-                    state.clone(),
-                    Some(self.reactor_key),
-                    Some(runtime::BankInfo { idx: i, total: N }),
-                    is_enclave,
-                    self.env,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        reactors
-            .try_into()
-            .map_err(|_| BuilderError::InternalError("Error converting Vec to array".to_owned()))
-    }
-
-    /// Add multiple child reactors to this reactor.
-    pub fn add_child_reactors<R, const N: usize>(
-        &mut self,
-        name: &str,
-        state: R::State,
-        is_enclave: bool,
-    ) -> Result<[R; N], BuilderError>
-    where
-        R: Reactor,
-        R::State: Clone,
-    {
-        let reactors = (0..N)
-            .map(|i| {
-                R::build(
-                    name,
                     state.clone(),
                     Some(self.reactor_key),
                     Some(runtime::BankInfo { idx: i, total: N }),

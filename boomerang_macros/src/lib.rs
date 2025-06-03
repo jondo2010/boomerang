@@ -23,7 +23,7 @@ pub fn reactor_ports(
 /// any number of other arguments.
 ///
 /// Here’s how you would define and use a simple Boomerang reactor which has one input, a delay parameter, and a boolean state:
-/// ```rust
+/// ```rust,no_run
 /// # use boomerang::prelude::*;
 ///
 /// #[reactor]
@@ -42,7 +42,7 @@ pub fn reactor_ports(
 /// the function arguments tagged with `#[state]` attributes.
 ///
 /// If you want to instead use your own state struct, you can do so with the `state` argument to the `reactor` macro:
-/// ```rust
+/// ```rust,no_run
 /// # use boomerang::prelude::*;
 ///
 /// struct MyState {
@@ -76,7 +76,7 @@ pub fn reactor(
 
 /// Creates a reaction within a reactor function.
 ///
-/// ```rust
+/// ```rust,no_run
 /// # use boomerang::prelude::*;
 /// fn MyReactor(
 ///     #[output] x: u32,
@@ -98,7 +98,7 @@ pub fn reaction(s: proc_macro::TokenStream) -> proc_macro::TokenStream {
 /// Creates a timer within a reactor function.
 ///
 /// ## Usage
-/// ```rust
+/// ```rust,no_run
 /// # use boomerang::prelude::*;
 /// fn MyReactor() -> impl Reactor2 {
 ///    // Create a timer named `t1` that triggers every 50 milliseconds

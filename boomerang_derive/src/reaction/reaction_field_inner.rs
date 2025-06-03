@@ -143,22 +143,21 @@ impl ToTokens for ReactionFieldInner {
                 };
 
                 tokens.extend(quote! {
-                    <#elem as ::boomerang::builder::ReactionField>::build(
+                    <#elem as ::boomerang::builder::derive::ReactionField>::build(
                         &mut __reaction,
                         #elem_path,
-                        0,
                         #trigger_mode,
                     )?;
                 });
             }
             Self::TriggerPort { port } => {
                 tokens.extend(quote! {
-                __reaction.add_port_relation(reactor.#port.into(), 0, ::boomerang::builder::TriggerMode::TriggersOnly)?;
+                __reaction.add_port_relation(reactor.#port.into(), ::boomerang::builder::TriggerMode::TriggersOnly)?;
             });
             }
             Self::TriggerAction { action } => {
                 tokens.extend(quote! {
-                __reaction.add_action_relation(reactor.#action.into(), 0, ::boomerang::builder::TriggerMode::TriggersOnly)?;
+                __reaction.add_action_relation(reactor.#action.into(), ::boomerang::builder::TriggerMode::TriggersOnly)?;
             });
             }
         }

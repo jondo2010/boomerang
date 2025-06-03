@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn test_hours() {
         let parse: Dur = parse_quote!(1 h);
-        assert_eq!(parse.0, StdDuration::from_secs(1 * SECONDS_PER_HOUR));
+        assert_eq!(parse.0, StdDuration::from_secs(SECONDS_PER_HOUR));
         let parse: Dur = parse_quote!(2 hour);
         assert_eq!(parse.0, StdDuration::from_secs(2 * SECONDS_PER_HOUR));
         let parse: Dur = parse_quote!(3 hours);
@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn test_days() {
         let parse: Dur = parse_quote!(1 d);
-        assert_eq!(parse.0, StdDuration::from_secs(1 * SECONDS_PER_DAY));
+        assert_eq!(parse.0, StdDuration::from_secs(SECONDS_PER_DAY));
         let parse: Dur = parse_quote!(2 day);
         assert_eq!(parse.0, StdDuration::from_secs(2 * SECONDS_PER_DAY));
         let parse: Dur = parse_quote!(3 days);
@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn test_weeks() {
         let parse: Dur = parse_quote!(1 week);
-        assert_eq!(parse.0, StdDuration::from_secs(1 * SECONDS_PER_WEEK));
+        assert_eq!(parse.0, StdDuration::from_secs(SECONDS_PER_WEEK));
         let parse: Dur = parse_quote!(2 weeks);
         assert_eq!(parse.0, StdDuration::from_secs(2 * SECONDS_PER_WEEK));
     }

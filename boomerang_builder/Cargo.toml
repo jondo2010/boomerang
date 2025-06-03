@@ -12,7 +12,7 @@ readme = "README.md"
 exclude.workspace = true
 
 [features]
-default = ["graphviz", "replay"]
+default = ["graphviz", "replay", "derive"]
 
 ## Support generating graphviz diagrams from reactor models
 graphviz = ["dep:graphviz-rust"]
@@ -22,6 +22,9 @@ tracy = ["tracing-tracy/enable"]
 
 ## Support for recording and replaying events
 replay = ["dep:serde"]
+
+## Support for the Boomerang derive macros
+derive = []
 
 [dependencies]
 document-features = { workspace = true }

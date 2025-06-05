@@ -11,13 +11,10 @@ repository.workspace = true
 categories.workspace = true
 
 [features]
-default = [
-    "derive",
-    #"parallel"
-]
+default = []
 
 ## Procedural macro support for generating code from reactor models
-derive = ["dep:boomerang_derive"]
+derive = ["dep:boomerang_derive", "boomerang_builder/derive"]
 
 # Support for serialization
 serde = ["boomerang_runtime/serde"]
@@ -59,6 +56,7 @@ rand = { version = "0.8" }
 [[bench]]
 name = "ping_pong"
 harness = false
+required-features = ["derive"]
 
 [[bench]]
 name = "physical_actions"

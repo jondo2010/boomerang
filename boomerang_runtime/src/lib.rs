@@ -13,7 +13,7 @@ pub mod port;
 pub mod reaction;
 mod reactor;
 pub mod refs;
-mod refs2;
+mod refs_extract;
 #[cfg(feature = "replay")]
 pub mod replay;
 mod sched;
@@ -38,7 +38,7 @@ pub use reaction::{
 };
 pub use reactor::*;
 pub use refs::{Refs, RefsMut};
-pub use refs2::{ReactionRefs, ReactionRefsExtract};
+pub use refs_extract::{ReactionRefs, ReactionRefsExtract};
 pub use sched::*;
 pub use time::*;
 

@@ -5,7 +5,7 @@ use boomerang::prelude::*;
 #[reactor]
 fn A(#[input] x: (), #[output] y: ()) -> impl Reactor2 {
     builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_trigger(x)
         .with_effect(y)
         .with_reaction_fn(|_, _, _| {})
@@ -16,14 +16,14 @@ fn A(#[input] x: (), #[output] y: ()) -> impl Reactor2 {
 fn B(#[input] x: (), #[output] y: ()) -> impl Reactor2 {
     // The startup reaction needs to be defined first
     builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_startup_trigger()
         .with_effect(y)
         .with_reaction_fn(|ctx, state, (startup, mut y)| {})
         .finish()?;
 
     builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_trigger(x)
         .with_reaction_fn(|_, _, _| {})
         .finish()?;
@@ -31,8 +31,8 @@ fn B(#[input] x: (), #[output] y: ()) -> impl Reactor2 {
 
 #[reactor]
 fn Cycle() -> impl Reactor2 {
-    let a = builder.add_child_reactor2(A(), "a", Default::default(), false)?;
-    let b = builder.add_child_reactor2(B(), "b", Default::default(), false)?;
+    let a = builder.add_child_reactor(A(), "a", Default::default(), false)?;
+    let b = builder.add_child_reactor(B(), "b", Default::default(), false)?;
     builder.connect_port(a.y, b.x, None, false)?;
     builder.connect_port(b.y, a.x, None, false)?;
 }

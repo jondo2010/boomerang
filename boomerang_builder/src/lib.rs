@@ -7,7 +7,7 @@
 mod action;
 mod connection;
 #[cfg(feature = "derive")]
-pub mod derive;
+pub mod derive_support;
 mod env;
 mod fqn;
 mod port;
@@ -15,6 +15,9 @@ mod reaction;
 mod reactor;
 #[cfg(test)]
 pub mod tests;
+
+mod macro_support;
+pub use macro_support::{Reactor2, ReactorPorts};
 
 //#[cfg(feature = "graphviz")]
 //pub mod graphviz;

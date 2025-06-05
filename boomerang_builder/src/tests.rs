@@ -34,7 +34,7 @@ fn test_reaction_builder2() {
     let p1 = reactor.add_output_port::<bool>("p1").unwrap();
 
     let _r0 = reactor
-        .add_reaction2(Some("test_reaction"))
+        .add_reaction(Some("test_reaction"))
         .with_trigger(p0)
         .with_effect(p1)
         .with_reaction_fn(|_ctx, _state, (p0, mut p1)| {
@@ -93,7 +93,7 @@ fn test_reactions_without_trigger() {
         .unwrap();
 
     let res = reactor_builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_effect(x)
         .with_reaction_fn(|_ctx, _state, (_x,)| {})
         .finish();
@@ -107,14 +107,14 @@ fn test_reactions_startup_shutdown() {
     let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, (), false);
 
     let r0_key = reactor_builder
-        .add_reaction2(Some("test"))
+        .add_reaction(Some("test"))
         .with_startup_trigger()
         .with_reaction_fn(|_ctx, _state, (_startup,)| {})
         .finish()
         .unwrap();
 
     let r1_key = reactor_builder
-        .add_reaction2(Some("test"))
+        .add_reaction(Some("test"))
         .with_shutdown_trigger()
         .with_reaction_fn(|_ctx, _state, (_shutdown,)| {})
         .finish()
@@ -174,7 +174,7 @@ fn test_actions1() {
 
     // Triggered by a+b, schedules b
     let reaction_a = reactor_builder
-        .add_reaction2(Some("ra"))
+        .add_reaction(Some("ra"))
         .with_trigger(action_a)
         .with_effect(action_b)
         .with_reaction_fn(|_ctx, _state, (_a, mut b)| {
@@ -185,7 +185,7 @@ fn test_actions1() {
 
     // Triggered by a, schedules a
     let reaction_b = reactor_builder
-        .add_reaction2(Some("rb"))
+        .add_reaction(Some("rb"))
         .with_trigger(action_a)
         .with_reaction_fn(|_ctx, _state, (_a,)| {})
         .finish()
@@ -244,7 +244,7 @@ fn test_nested_reactor() {
             let output_port = inner_builder.add_output_port::<()>("output").unwrap();
 
             let _ = inner_builder
-                .add_reaction2(Some("reaction"))
+                .add_reaction(Some("reaction"))
                 .with_trigger(input_port)
                 .with_effect(output_port)
                 .with_reaction_fn(|_ctx, _state, (_input, mut output)| {
@@ -317,7 +317,7 @@ fn test_reaction_ports() -> anyhow::Result<()> {
     let port_c = builder_a.add_input_port::<()>("portC").unwrap();
 
     let reaction_a = builder_a
-        .add_reaction2(Some("reactionA"))
+        .add_reaction(Some("reactionA"))
         .with_trigger(port_a)
         .with_effect(port_b)
         .with_use(port_c)
@@ -395,7 +395,7 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
 
     // reaction(startup) -> clock, a
     let _r_startup = builder_main
-        .add_reaction2(Some("startup"))
+        .add_reaction(Some("startup"))
         .with_startup_trigger()
         .with_effect(clock)
         .with_effect(a)
@@ -416,7 +416,7 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
 
     //reaction(clock) a, t {= =}
     let _r_clock = builder_main
-        .add_reaction2(Some("clock"))
+        .add_reaction(Some("clock"))
         .with_trigger(clock)
         .with_use(a)
         .with_use(t)
@@ -439,7 +439,7 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
 
     // reaction(shutdown) {= =}
     let _r_shutdown = builder_main
-        .add_reaction2(Some("shutdown"))
+        .add_reaction(Some("shutdown"))
         .with_shutdown_trigger()
         .with_reaction_fn(|_ctx, state, (_shutdown,)| {
             assert_eq!(*state, 4);
@@ -546,7 +546,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
                 .unwrap();
             let startup_action = builder.get_startup_action();
             let _ = builder
-                .add_reaction2(Some("startup"))
+                .add_reaction(Some("startup"))
                 .with_trigger(startup_action)
                 .with_effect(clock)
                 .with_reaction_fn(|ctx, _state, (_startup, mut clock)| {
@@ -557,7 +557,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
                 .finish()?;
 
             let _ = builder
-                .add_reaction2(Some("reaction_t1"))
+                .add_reaction(Some("reaction_t1"))
                 .with_trigger(t1)
                 .with_effect(clock)
                 .with_effect(o1)
@@ -571,7 +571,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
                 .finish()?;
 
             let _ = builder
-                .add_reaction2(Some("reaction_t2"))
+                .add_reaction(Some("reaction_t2"))
                 .with_trigger(t2)
                 .with_effect(clock)
                 .with_effect(o2)
@@ -593,7 +593,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
         let in1 = builder.add_input_port::<u32>("in1").unwrap();
         let in2 = builder.add_input_port::<u32>("in2").unwrap();
         let _ = builder
-            .add_reaction2(Some("reaction_clock"))
+            .add_reaction(Some("reaction_clock"))
             .with_trigger(clock)
             .with_use(in1)
             .with_use(in2)
@@ -725,7 +725,7 @@ fn test_enclave_partitioning() {
                 builder.add_reactor("hello1", Some(builder_reactor_key), None, (), false);
             let startup = reactor.get_startup_action();
             let _ = reactor
-                .add_reaction2(Some("startup"))
+                .add_reaction(Some("startup"))
                 .with_trigger(startup)
                 .with_reaction_fn(|_ctx, _state, (_startup,)| {
                     println!("Hello, world!");
@@ -742,7 +742,7 @@ fn test_enclave_partitioning() {
                 builder.add_reactor("hello2", Some(builder_reactor_key), None, (), true);
             let startup = reactor.get_startup_action();
             let _ = reactor
-                .add_reaction2(Some("startup"))
+                .add_reaction(Some("startup"))
                 .with_trigger(startup)
                 .with_reaction_fn(|_ctx, _state, (_startup,)| {
                     println!("Hello, world!");
@@ -820,7 +820,7 @@ pub fn create_ping_pong() -> PingPong {
             let o1 = builder.add_output_port::<()>("o1")?;
 
             let _ = builder
-                .add_reaction2(Some("reaction_t1"))
+                .add_reaction(Some("reaction_t1"))
                 .with_trigger(t1)
                 .with_effect(o1)
                 .with_reaction_fn(|_ctx, _state, (_t1, mut o1)| {
@@ -829,7 +829,7 @@ pub fn create_ping_pong() -> PingPong {
                 .finish()?;
 
             let _ = builder
-                .add_reaction2(Some("reaction_i1"))
+                .add_reaction(Some("reaction_i1"))
                 .with_trigger(i1)
                 .with_reaction_fn(move |_ctx, _state, (i1,)| {
                     assert_eq!(*i1, Some(()));
@@ -924,7 +924,7 @@ fn test_port_binding() {
             let i1 = builder.add_input_port::<()>("i1").unwrap();
             let o1 = builder.add_output_port::<()>("o1").unwrap();
             let _ = builder
-                .add_reaction2(Some("reaction"))
+                .add_reaction(Some("reaction"))
                 .with_trigger(i1)
                 .with_effect(o1)
                 .with_reaction_fn(|_ctx, _state, (i1, mut o1)| {
@@ -940,7 +940,7 @@ fn test_port_binding() {
             let mut builder = env.add_reactor("child2a", Some(parent), None, (), false);
             let i2 = builder.add_input_port::<()>("i2a").unwrap();
             let _ = builder
-                .add_reaction2(Some("reaction"))
+                .add_reaction(Some("reaction"))
                 .with_trigger(i2)
                 .with_reaction_fn(|_ctx, _state, (i2,)| {
                     assert_eq!(*i2, Some(()));
@@ -955,7 +955,7 @@ fn test_port_binding() {
             let mut builder = env.add_reactor("child2b", Some(parent), None, (), false);
             let i2 = builder.add_input_port::<()>("i2b").unwrap();
             let _ = builder
-                .add_reaction2(Some("reaction"))
+                .add_reaction(Some("reaction"))
                 .with_trigger(i2)
                 .with_reaction_fn(|_ctx, _state, (i2,)| {
                     assert_eq!(*i2, Some(()));
@@ -981,11 +981,11 @@ fn test_port_binding() {
         .find_port_by_name::<(), Input>("i2b", child2b)
         .unwrap();
 
-    let _ = env_builder
-        .add_reaction2::<()>(Some("start"), _main)
+    let _ = ReactorBuilderState::from_pre_existing(_main, &mut env_builder)
+        .add_reaction(Some("start"))
         .with_trigger(startup_key)
         .with_effect(i1)
-        .with_reaction_fn(|_ctx, _state, (_startup, mut i1)| {
+        .with_reaction_fn(|_ctx, _state: &mut (), (_startup, mut i1)| {
             println!("start");
             *i1 = Some(());
         })

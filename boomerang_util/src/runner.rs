@@ -11,8 +11,7 @@
 
 use anyhow::Context;
 use boomerang::{
-    builder::{derive::Reactor, BuilderRuntimeParts, EnvBuilder},
-    prelude::Reactor2,
+    builder::{derive_support::Reactor, BuilderRuntimeParts, EnvBuilder, Reactor2},
     runtime,
 };
 use clap::Parser;

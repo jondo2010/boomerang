@@ -18,7 +18,7 @@ fn Ping(
     let shutdown = builder.get_shutdown_action();
 
     builder
-        .add_reaction2(Some("ReactionT"))
+        .add_reaction(Some("ReactionT"))
         .with_trigger(t)
         .with_effect(output)
         .with_reaction_fn(|_ctx, state, (_t, mut output)| {
@@ -30,7 +30,7 @@ fn Ping(
         .finish()?;
 
     builder
-        .add_reaction2(Some("ReactionIn"))
+        .add_reaction(Some("ReactionIn"))
         .with_trigger(input)
         .with_reaction_fn(|ctx, state, (input,)| {
             state.received = true;
@@ -46,7 +46,7 @@ fn Ping(
         .finish()?;
 
     builder
-        .add_reaction2(Some("ReactionShutdown"))
+        .add_reaction(Some("ReactionShutdown"))
         .with_trigger(shutdown)
         .with_reaction_fn(|_ctx, state, _| {
             if !state.received {
@@ -63,7 +63,7 @@ fn Pong(
     #[state] received: bool,
 ) -> impl Reactor2<PongState, Ports = PongPorts> {
     builder
-        .add_reaction2(Some("RectionIn"))
+        .add_reaction(Some("RectionIn"))
         .with_trigger(input)
         .with_effect(output)
         .with_reaction_fn(|_ctx, state, (input, mut output)| {
@@ -81,7 +81,7 @@ fn Pong(
         .finish()?;
 
     builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_shutdown_trigger()
         .with_reaction_fn(|_ctx, state, _| {
             if !state.received {
@@ -93,8 +93,8 @@ fn Pong(
 
 #[reactor]
 fn MainReactor() -> impl Reactor2 {
-    let ping = builder.add_child_reactor2(Ping(), "ping", PingState::default(), true)?;
-    let pong = builder.add_child_reactor2(Pong(), "pong", PongState::default(), true)?;
+    let ping = builder.add_child_reactor(Ping(), "ping", PingState::default(), true)?;
+    let pong = builder.add_child_reactor(Pong(), "pong", PongState::default(), true)?;
     builder.connect_port(ping.output, pong.input, None, false)?;
     builder.connect_port(
         pong.output,

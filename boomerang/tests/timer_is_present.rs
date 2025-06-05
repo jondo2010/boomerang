@@ -9,6 +9,7 @@ fn Main() -> impl Reactor2 {
 
     reaction! {
         (startup) t1, t2 {
+            println!("Startup reaction triggered.");
             assert!(startup.is_present(ctx), "Startup is not present.");
             assert!(t1.is_present(ctx), "t1 is not present at startup.");
             assert!(!t2.is_present(ctx), "t2 is present at startup.");

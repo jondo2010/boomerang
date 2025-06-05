@@ -31,7 +31,7 @@ fn HelloWorld2(#[state] success: bool) -> impl Reactor2 {
 
 #[reactor]
 fn HelloWorld() -> impl Reactor2 {
-    builder.add_child_reactor2(HelloWorld2(), "_a", Default::default(), false)?;
+    builder.add_child_reactor(HelloWorld2(), "_a", Default::default(), false)?;
 }
 
 #[test]

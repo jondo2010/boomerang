@@ -22,57 +22,6 @@ impl petgraph::graph::GraphIndex for BuilderReactorKey {
     }
 }
 
-pub trait Reactor2<State: runtime::ReactorData = ()>: Sized {
-    type Ports;
-    fn build(
-        &self,
-        name: &str,
-        state: State,
-        parent: Option<BuilderReactorKey>,
-        bank_info: Option<runtime::BankInfo>,
-        is_enclave: bool,
-        env: &mut EnvBuilder,
-    ) -> Result<Self::Ports, BuilderError>;
-}
-
-impl<F, State, Ports> Reactor2<State> for F
-where
-    F: Fn(
-            /*name*/ &str,
-            /*state*/ State,
-            /*parent*/ Option<BuilderReactorKey>,
-            /*bank_info*/ Option<boomerang_runtime::BankInfo>,
-            /*is_enclave*/ bool,
-            /*env*/ &mut EnvBuilder,
-        ) -> Result<Ports, BuilderError>
-        + 'static,
-    State: runtime::ReactorData,
-{
-    type Ports = Ports;
-    fn build(
-        &self,
-        name: &str,
-        state: State,
-        parent: Option<BuilderReactorKey>,
-        bank_info: Option<boomerang_runtime::BankInfo>,
-        is_enclave: bool,
-        env: &mut EnvBuilder,
-    ) -> Result<Self::Ports, BuilderError> {
-        (self)(name, state, parent, bank_info, is_enclave, env)
-    }
-}
-
-/// ReactorPorts is implemented for the Ports struct of a Reactor. This trait is typically automatically derived.
-pub trait ReactorPorts {
-    /// The fields of the Ports struct (e.g. the ports)
-    type Fields;
-    /// Build the reactor with the given closure
-    fn build_with<F, S>(f: F) -> impl Reactor2<S, Ports = Self>
-    where
-        F: Fn(&mut ReactorBuilderState<'_, S>, Self::Fields) -> Result<(), BuilderError> + 'static,
-        S: runtime::ReactorData;
-}
-
 pub(super) struct ReactorState<T: runtime::ReactorData>(T);
 
 pub(super) trait BaseReactorState: Debug {
@@ -294,10 +243,6 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
             .add_action::<T, Physical>(name, min_delay, self.reactor_key)
     }
 
-    pub fn add_reaction2(&mut self, name: Option<&str>) -> crate::builder2::ReactionBuilder<S> {
-        self.env.add_reaction2(name, self.reactor_key)
-    }
-
     /// Add a new input port to this reactor.
     pub fn add_port<T: runtime::ReactorData, Q: PortTag>(
         &mut self,
@@ -353,55 +298,6 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         name: &str,
     ) -> Result<[TypedPortKey<T, Output>; N], BuilderError> {
         self.add_ports(name)
-    }
-
-    pub fn add_child_reactor2<ChildState, R>(
-        &mut self,
-        reactor: R,
-        name: &str,
-        state: ChildState,
-        is_enclave: bool,
-    ) -> Result<R::Ports, BuilderError>
-    where
-        ChildState: runtime::ReactorData,
-        R: Reactor2<ChildState>,
-    {
-        reactor.build(
-            name,
-            state,
-            Some(self.reactor_key),
-            None,
-            is_enclave,
-            self.env,
-        )
-    }
-
-    pub fn add_child_reactors2<R, ChildState, const N: usize>(
-        &mut self,
-        reactor: R,
-        name: &str,
-        state: ChildState,
-        is_enclave: bool,
-    ) -> Result<[R::Ports; N], BuilderError>
-    where
-        R: Reactor2<ChildState>,
-        ChildState: runtime::ReactorData + Clone,
-    {
-        let reactors = (0..N)
-            .map(|i| {
-                reactor.build(
-                    &format!("{name}_{i}"),
-                    state.clone(),
-                    Some(self.reactor_key),
-                    Some(runtime::BankInfo { idx: i, total: N }),
-                    is_enclave,
-                    self.env,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        reactors
-            .try_into()
-            .map_err(|_| BuilderError::InternalError("Error converting Vec to array".to_owned()))
     }
 
     /// Add a new child reactor using a closure to build it.
@@ -476,7 +372,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         let topic = self.env.fqn_for(action_key, false)?.to_string();
         tracing::debug!("Adding recorder for action {topic}",);
         let _ = self
-            .add_reaction2(Some("recorder"))
+            .add_reaction(Some("recorder"))
             .with_trigger(action_key)
             .with_defered_reaction_fn(move |runtime_parts| {
                 let (enclave_key, action_key) =

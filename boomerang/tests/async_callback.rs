@@ -22,7 +22,7 @@ fn AsyncCallback() -> impl Reactor2 {
     let a = builder.add_physical_action::<usize>("a", None)?;
 
     builder
-        .add_reaction2(Some("T"))
+        .add_reaction(Some("T"))
         .with_trigger(t)
         .with_effect(a)
         .with_reaction_fn(|ctx, state, (_t, a)| {
@@ -46,7 +46,7 @@ fn AsyncCallback() -> impl Reactor2 {
         })
         .finish()?;
 
-    builder.add_reaction2(Some("A")).with_trigger(a)
+    builder.add_reaction(Some("A")).with_trigger(a)
     .with_reaction_fn(|ctx, state, (_a, )|{
         let elapsed_time = ctx.get_elapsed_logical_time();
         state.i += 1;
@@ -70,7 +70,7 @@ fn AsyncCallback() -> impl Reactor2 {
     .finish()?;
 
     builder
-        .add_reaction2(Some("Shutdown"))
+        .add_reaction(Some("Shutdown"))
         .with_shutdown_trigger()
         .with_reaction_fn(|_ctx, state, _| {
             // make sure to join the thread before shutting down

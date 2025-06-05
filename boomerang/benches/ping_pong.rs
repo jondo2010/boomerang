@@ -48,7 +48,7 @@ struct ReactionInStart<'a> {
     serve: runtime::ActionRef<'a>,
 }
 
-impl derive::Trigger<Ping> for ReactionInStart<'_> {
+impl derive_support::Trigger<Ping> for ReactionInStart<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut Ping) {
         // reset local state
         state.pings_left = state.count;
@@ -63,7 +63,7 @@ struct ReactionServe<'a> {
     out_ping: runtime::OutputRef<'a>,
 }
 
-impl derive::Trigger<Ping> for ReactionServe<'_> {
+impl derive_support::Trigger<Ping> for ReactionServe<'_> {
     fn trigger(mut self, _ctx: &mut runtime::Context, state: &mut Ping) {
         *self.out_ping = Some(());
         state.pings_left -= 1;
@@ -77,7 +77,7 @@ struct ReactionInPong<'a> {
     serve: runtime::ActionRef<'a>,
 }
 
-impl derive::Trigger<Ping> for ReactionInPong<'_> {
+impl derive_support::Trigger<Ping> for ReactionInPong<'_> {
     fn trigger(mut self, ctx: &mut runtime::Context, state: &mut Ping) {
         if state.pings_left == 0 {
             *self.out_finished = Some(());
@@ -105,7 +105,7 @@ struct ReactionInPing<'a> {
     out_pong: runtime::OutputRef<'a>,
 }
 
-impl derive::Trigger<Pong> for ReactionInPing<'_> {
+impl derive_support::Trigger<Pong> for ReactionInPing<'_> {
     fn trigger(mut self, _ctx: &mut runtime::Context, state: &mut Pong) {
         *self.out_pong = Some(());
         state.count += 1;
@@ -140,7 +140,7 @@ struct ReactionStartup<'a> {
     in_start: runtime::OutputRef<'a>,
 }
 
-impl derive::Trigger<Main> for ReactionStartup<'_> {
+impl derive_support::Trigger<Main> for ReactionStartup<'_> {
     fn trigger(mut self, _ctx: &mut runtime::Context, _state: &mut Main) {
         *self.in_start = Some(());
     }
@@ -153,7 +153,7 @@ struct ReactionDone<'a> {
     _out: runtime::InputRef<'a>,
 }
 
-impl derive::Trigger<Main> for ReactionDone<'_> {
+impl derive_support::Trigger<Main> for ReactionDone<'_> {
     fn trigger(self, ctx: &mut runtime::Context, _state: &mut Main) {
         ctx.schedule_shutdown(None);
     }
@@ -174,7 +174,7 @@ fn bench(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     let mut env_builder = EnvBuilder::new();
-                    use derive::Reactor;
+                    use derive_support::Reactor;
                     let _reactor = MainBuilder::build(
                         "main",
                         Main { count },

@@ -4,7 +4,8 @@ use slotmap::SecondaryMap;
 
 use crate::{
     connection::PortBindings, ActionType, BuilderActionKey, BuilderError, BuilderPortKey,
-    BuilderReactionKey, BuilderReactorKey, ParentReactorBuilder, TriggerMode,
+    BuilderReactionKey, BuilderReactorKey, ParentReactorBuilder, PartialReactionBuilder,
+    TimerActionKey,
 };
 
 use super::EnvBuilder;
@@ -221,7 +222,7 @@ impl EnvBuilder {
                             format!("{}_reset", action.name()),
                             runtime::reaction::TimerFn(spec.period),
                             action.reactor_key(),
-                            builder_action_key,
+                            TimerActionKey::from(builder_action_key),
                         ));
                     }
                 }
@@ -261,9 +262,9 @@ impl EnvBuilder {
 
         // Now create the reset reactions for periodic timers, since we can now get &mut self.
         for (name, reaction_fn, reactor_key, action_key) in new_reactions {
-            let _ = self
-                .add_reaction(&name, reactor_key, reaction_fn.defer())
-                .with_action(action_key, TriggerMode::TriggersAndEffects)?
+            let _ = PartialReactionBuilder::<()>::new(Some(&name), reactor_key, self)
+                .with_trigger(action_key)
+                .with_defered_reaction_fn(reaction_fn.defer())
                 .finish()?;
         }
 

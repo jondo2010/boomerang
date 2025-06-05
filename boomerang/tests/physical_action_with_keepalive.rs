@@ -4,7 +4,7 @@ use boomerang::prelude::*;
 fn Main(#[state] success: bool) -> impl Reactor2 {
     let act = builder.add_physical_action::<u32>("act", None)?;
     builder
-        .add_reaction2(Some("Startup"))
+        .add_reaction(Some("Startup"))
         .with_startup_trigger()
         .with_effect(act)
         .with_reaction_fn(|ctx, _state, (_startup, act)| {
@@ -18,7 +18,7 @@ fn Main(#[state] success: bool) -> impl Reactor2 {
         .finish()?;
 
     builder
-        .add_reaction2(Some("Act"))
+        .add_reaction(Some("Act"))
         .with_trigger(act)
         .with_reaction_fn(|ctx, mut _state, (mut act,)| {
             let value = ctx.get_action_value(&mut act).unwrap();

@@ -13,7 +13,7 @@ fn Delay<T: runtime::ReactorData + Clone>(
     let a = builder.add_logical_action("a", Some(delay))?;
 
     let _ = builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_trigger(a)
         .with_effect(out)
         .with_reaction_fn(|ctx, _state, (mut a, mut out)| {
@@ -22,7 +22,7 @@ fn Delay<T: runtime::ReactorData + Clone>(
         .finish()?;
 
     let _ = builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_trigger(in_)
         .with_effect(a)
         .with_reaction_fn(|ctx, _state, (in_, mut a)| {
@@ -34,9 +34,9 @@ fn Delay<T: runtime::ReactorData + Clone>(
 #[reactor]
 fn GenericAfter() -> impl Reactor2 {
     let d =
-        builder.add_child_reactor2(Delay::<u32>(Duration::milliseconds(50)), "delay", (), false)?;
+        builder.add_child_reactor(Delay::<u32>(Duration::milliseconds(50)), "delay", (), false)?;
 
-    let test = builder.add_child_reactor2(
+    let test = builder.add_child_reactor(
         delay_int::Test(),
         "test",
         delay_int::TestState {
@@ -48,7 +48,7 @@ fn GenericAfter() -> impl Reactor2 {
     builder.connect_port(d.out, test.in_, Some(Duration::milliseconds(50)), false)?;
 
     builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_startup_trigger()
         .with_effect(d.in_)
         .with_reaction_fn(move |_ctx, _state, (_, mut d_in)| {

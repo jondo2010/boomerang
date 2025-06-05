@@ -18,7 +18,7 @@ pub fn KeyboardEvents(
     builder.add_action_replayer(key_press)?;
 
     builder
-        .add_reaction2(Some("ReactionKeyPress"))
+        .add_reaction(Some("ReactionKeyPress"))
         .with_trigger(key_press)
         .with_effect(arrow_key_pressed)
         .with_reaction_fn(|_ctx, _state, (mut key_event, mut arrow_key_pressed)| {
@@ -27,7 +27,7 @@ pub fn KeyboardEvents(
         .finish()?;
 
     builder
-        .add_reaction2(Some("ReactionShutdown"))
+        .add_reaction(Some("ReactionShutdown"))
         .with_shutdown_trigger()
         .with_reaction_fn(|_ctx, state, _| {
             if state.raw_terminal {
@@ -38,7 +38,7 @@ pub fn KeyboardEvents(
         .finish()?;
 
     builder
-        .add_reaction2(Some("ReactionStartup"))
+        .add_reaction(Some("ReactionStartup"))
         .with_startup_trigger()
         .with_effect(key_press)
         .with_reaction_fn(|_ctx, state, (_, key_press)| {

@@ -8,8 +8,8 @@ use crate::{
 use super::{
     action::ActionBuilder, port::BasePortBuilder, port::PortBuilder, reaction::ReactionBuilder,
     runtime, ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey,
-    BuilderReactionKey, BuilderReactorKey, Input, Logical, Output, PortTag, ReactionBuilderState,
-    ReactorBuilder, ReactorBuilderState, TypedActionKey, TypedPortKey,
+    BuilderReactionKey, BuilderReactorKey, Input, Logical, Output, PortTag, ReactorBuilder,
+    ReactorBuilderState, TypedActionKey, TypedPortKey,
 };
 use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, EdgeDirection};
@@ -237,27 +237,6 @@ impl EnvBuilder {
         reactor_builder.actions.insert(key, ());
 
         Ok(key.into())
-    }
-
-    /// Add a Reaction to a given Reactor
-    pub fn add_reaction<F>(
-        &mut self,
-        name: &str,
-        reactor_key: BuilderReactorKey,
-        reaction_builder_fn: F,
-    ) -> ReactionBuilderState
-    where
-        F: FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn + 'static,
-    {
-        ReactionBuilderState::new(name, reactor_key, Box::new(reaction_builder_fn), self)
-    }
-
-    pub fn add_reaction2<S: runtime::ReactorData>(
-        &mut self,
-        name: Option<&str>,
-        reactor_key: BuilderReactorKey,
-    ) -> crate::builder2::ReactionBuilder<'_, S> {
-        crate::builder2::ReactionBuilder::new(name, reactor_key, self)
     }
 
     /// Add a replay function for a given Action

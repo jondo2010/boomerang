@@ -29,9 +29,9 @@ pub fn reactor_ports(
 /// #[reactor]
 /// pub fn MyComponent(
 ///     #[input] x: u32,
-///     #[default(Duration::seconds(1))] delay: Duration,
+///     #[param(default = Duration::seconds(1))] delay: Duration,
 ///     #[state] is_good: bool,
-/// ) -> impl IntoView {
+/// ) -> impl Reactor2 {
 ///    // Your reactor implementation goes here
 /// }
 /// ```
@@ -78,6 +78,8 @@ pub fn reactor(
 ///
 /// ```rust,no_run
 /// # use boomerang::prelude::*;
+///
+/// #[reactor]
 /// fn MyReactor(
 ///     #[output] x: u32,
 /// ) -> impl Reactor2 {
@@ -100,9 +102,11 @@ pub fn reaction(s: proc_macro::TokenStream) -> proc_macro::TokenStream {
 /// ## Usage
 /// ```rust,no_run
 /// # use boomerang::prelude::*;
+///
+/// #[reactor]
 /// fn MyReactor() -> impl Reactor2 {
 ///    // Create a timer named `t1` that triggers every 50 milliseconds
-///    timer! { t1(0, 50 msec) };
+///    timer! { t1(0 sec, 50 msec) };
 /// }
 /// ```
 #[proc_macro_error2::proc_macro_error]

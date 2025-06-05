@@ -294,7 +294,7 @@ impl<'store> ReactionFn<'store> for TimerFn {
 ///
 /// ```rust
 /// # use boomerang_runtime::reaction_closure;
-/// let closure = reaction_closure!(ctx, _reactor, _ref_ports, _mut_ports, _actions => {
+/// let closure = reaction_closure!(ctx, _reactor, _refs => {
 ///    ctx.get_elapsed_logical_time();
 /// });
 /// ```

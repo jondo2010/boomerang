@@ -5,7 +5,7 @@ use boomerang::prelude::*;
 #[reactor]
 fn Foo(#[input] x: i32, #[output] y: i32) -> impl Reactor2 {
     builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_trigger(x)
         .with_effect(y)
         .with_reaction_fn(|_ctx, _state, (x, mut y)| {
@@ -21,7 +21,7 @@ fn Print(
     #[input] x: i32,
 ) -> impl Reactor2 {
     builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_trigger(x)
         .with_reaction_fn(|ctx, state, (x,)| {
             state.i += 1;
@@ -40,7 +40,7 @@ fn Print(
         .finish()?;
 
     builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_shutdown_trigger()
         .with_reaction_fn(|_ctx, state, _| {
             println!("Final result is {}", state.i);
@@ -51,13 +51,13 @@ fn Print(
 
 #[reactor]
 fn After() -> impl Reactor2 {
-    let f = builder.add_child_reactor2(Foo(), "foo", Default::default(), false)?;
-    let p = builder.add_child_reactor2(Print(), "print", Default::default(), false)?;
+    let f = builder.add_child_reactor(Foo(), "foo", Default::default(), false)?;
+    let p = builder.add_child_reactor(Print(), "print", Default::default(), false)?;
     let t = builder.add_timer("t", TimerSpec::default().with_period(Duration::SECOND))?;
     builder.connect_port(f.y, p.x, Some(Duration::milliseconds(10)), false)?;
 
     builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_trigger(t)
         .with_effect(f.x)
         .with_reaction_fn(|ctx, _state, (_t, mut x)| {

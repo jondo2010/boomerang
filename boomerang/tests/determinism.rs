@@ -4,7 +4,7 @@ use boomerang::prelude::*;
 fn Source(#[output] y: i32) -> impl Reactor2 {
     let t = builder.add_timer("t", TimerSpec::STARTUP)?;
     builder
-        .add_reaction2(Some("SourceReactonT"))
+        .add_reaction(Some("SourceReactonT"))
         .with_trigger(t)
         .with_effect(y)
         .with_reaction_fn(|_ctx, _state, (_t, mut y)| {
@@ -16,7 +16,7 @@ fn Source(#[output] y: i32) -> impl Reactor2 {
 #[reactor]
 fn Destination(#[input] x: i32, #[input] y: i32) -> impl Reactor2 {
     builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_trigger(x)
         .with_trigger(y)
         .with_reaction_fn(|_ctx, _state, (x, y)| {
@@ -36,7 +36,7 @@ fn Destination(#[input] x: i32, #[input] y: i32) -> impl Reactor2 {
 #[reactor]
 fn Pass(#[input] x: i32, #[output] y: i32) -> impl Reactor2<(), Ports = PassPorts> {
     builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_trigger(x)
         .with_effect(y)
         .with_reaction_fn(|_ctx, _state, (x, mut y)| {
@@ -47,10 +47,10 @@ fn Pass(#[input] x: i32, #[output] y: i32) -> impl Reactor2<(), Ports = PassPort
 
 #[reactor]
 fn Determinism() -> impl Reactor2 {
-    let s = builder.add_child_reactor2(Source(), "s", (), false)?;
-    let d = builder.add_child_reactor2(Destination(), "d", (), false)?;
-    let p1 = builder.add_child_reactor2(Pass(), "p1", (), false)?;
-    let p2 = builder.add_child_reactor2(Pass(), "p2", (), false)?;
+    let s = builder.add_child_reactor(Source(), "s", (), false)?;
+    let d = builder.add_child_reactor(Destination(), "d", (), false)?;
+    let p1 = builder.add_child_reactor(Pass(), "p1", (), false)?;
+    let p2 = builder.add_child_reactor(Pass(), "p2", (), false)?;
     builder.connect_port(s.y, d.y, None, false)?;
     builder.connect_port(s.y, p1.x, None, false)?;
     builder.connect_port(p1.y, p2.x, None, false)?;

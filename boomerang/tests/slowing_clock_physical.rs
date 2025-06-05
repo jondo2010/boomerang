@@ -14,7 +14,7 @@ fn SlowingClockPhysical(
     let a = builder.add_physical_action::<()>("a", Some(Duration::milliseconds(100)))?;
 
     builder
-        .add_reaction2(Some("startup"))
+        .add_reaction(Some("startup"))
         .with_startup_trigger()
         .with_effect(a)
         .with_reaction_fn(|ctx, state, (_startup, mut a)| {
@@ -24,7 +24,7 @@ fn SlowingClockPhysical(
         .finish()?;
 
     builder
-        .add_reaction2(Some("A"))
+        .add_reaction(Some("A"))
         .with_trigger(a)
         .with_reaction_fn(|ctx, state, (mut a,)| {
             let elapsed_logical_time = ctx.get_elapsed_logical_time();
@@ -45,7 +45,7 @@ fn SlowingClockPhysical(
         .finish()?;
 
     builder
-        .add_reaction2(Some("Shutdown"))
+        .add_reaction(Some("Shutdown"))
         .with_shutdown_trigger()
         .with_reaction_fn(|_ctx, state, _| {
             assert!(

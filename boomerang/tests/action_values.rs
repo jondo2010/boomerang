@@ -5,7 +5,7 @@ use boomerang::prelude::*;
 #[reactor]
 fn Child(act: TypedActionKey<i32>) -> impl Reactor2<(), Ports = ChildPorts> {
     builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_trigger(act)
         .with_reaction_fn(|ctx, _state, (mut act,)| {
             let value = ctx.get_action_value(&mut act);
@@ -18,10 +18,10 @@ fn Child(act: TypedActionKey<i32>) -> impl Reactor2<(), Ports = ChildPorts> {
 fn ActionValues(#[state] r1done: bool, #[state] r2done: bool) -> Reactor2 {
     let act = builder.add_logical_action::<i32>("act", Some(Duration::milliseconds(100)))?;
 
-    let _child = builder.add_child_reactor2(Child(act), "child", (), false)?;
+    let _child = builder.add_child_reactor(Child(act), "child", (), false)?;
 
     builder
-        .add_reaction2(Some("Startup"))
+        .add_reaction(Some("Startup"))
         .with_startup_trigger()
         .with_effect(act)
         .with_reaction_fn(|ctx, _state, (_startup, mut act)| {
@@ -32,7 +32,7 @@ fn ActionValues(#[state] r1done: bool, #[state] r2done: bool) -> Reactor2 {
         .finish()?;
 
     builder
-        .add_reaction2(Some("Act"))
+        .add_reaction(Some("Act"))
         .with_trigger(act)
         .with_reaction_fn(|ctx, state, (mut act,)| {
             let elapsed = ctx.get_elapsed_logical_time();
@@ -58,7 +58,7 @@ fn ActionValues(#[state] r1done: bool, #[state] r2done: bool) -> Reactor2 {
         .finish()?;
 
     builder
-        .add_reaction2(Some("Shutdown"))
+        .add_reaction(Some("Shutdown"))
         .with_shutdown_trigger()
         .with_reaction_fn(|_ctx, state, (_shutdown,)| {
             assert!(

@@ -12,7 +12,7 @@ fn Delay(
 ) -> impl Reactor2<(), Ports = DelayPorts> {
     let d = builder.add_logical_action::<u32>("d", None)?;
     builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_trigger(in_)
         .with_effect(d)
         .with_reaction_fn(move |ctx, _state, (in_, mut d)| {
@@ -21,7 +21,7 @@ fn Delay(
         .finish()?;
 
     builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_trigger(d)
         .with_effect(out)
         .with_reaction_fn(|ctx, _state, (mut d, mut out)| {
@@ -36,13 +36,13 @@ pub fn Test(
     #[state(default = std::time::Instant::now())] start_time: std::time::Instant,
 ) -> impl Reactor2<TestState, Ports = TestPorts> {
     builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_startup_trigger()
         .with_reaction_fn(move |ctx, state, _| state.start_time = ctx.get_logical_time())
         .finish()?;
 
     builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_trigger(in_)
         .with_reaction_fn(|ctx, state, (in_,)| {
             println!("Received: {}", in_.unwrap());
@@ -63,11 +63,11 @@ pub fn Test(
 #[reactor]
 fn DelayInt() -> impl Reactor2<(), Ports = DelayIntPorts> {
     let t = builder.get_startup_action();
-    let d = builder.add_child_reactor2(Delay(Duration::milliseconds(100)), "d", (), false)?;
-    let test = builder.add_child_reactor2(Test(), "test", TestState::default(), false)?;
+    let d = builder.add_child_reactor(Delay(Duration::milliseconds(100)), "d", (), false)?;
+    let test = builder.add_child_reactor(Test(), "test", TestState::default(), false)?;
     builder.connect_port(d.out, test.in_, None, false)?;
     builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_trigger(t)
         .with_effect(d.in_)
         .with_reaction_fn(|_ctx, _state, (_t, mut d_in)| {

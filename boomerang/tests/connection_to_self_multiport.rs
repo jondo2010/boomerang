@@ -9,7 +9,7 @@ fn Node<const NUM_NODES: usize>(
     #[output] output: [i32; NUM_NODES],
 ) -> impl Reactor2 {
     builder
-        .add_reaction2(Some("Startup"))
+        .add_reaction(Some("Startup"))
         .with_startup_trigger()
         .with_effect(output)
         .with_reaction_fn(|_ctx, _state, (_startup, mut output)| {
@@ -20,7 +20,7 @@ fn Node<const NUM_NODES: usize>(
         .finish()?;
 
     builder
-        .add_reaction2(Some("In"))
+        .add_reaction(Some("In"))
         .with_trigger(input)
         .with_reaction_fn(|_ctx, _state, (input,)| {
             let count = input.iter().filter(|x| x.is_some()).count();
@@ -33,7 +33,7 @@ fn Node<const NUM_NODES: usize>(
 #[reactor]
 fn Main<const NUM_NODES: usize>() -> impl Reactor2 {
     let nodes: [_; NUM_NODES] =
-        builder.add_child_reactors2(Node::<NUM_NODES>(), "nodes", Default::default(), false)?;
+        builder.add_child_reactors(Node::<NUM_NODES>(), "nodes", Default::default(), false)?;
     builder.connect_ports(
         nodes.iter().flat_map(|child| child.output.iter().copied()),
         nodes.iter().flat_map(|child| child.input.iter().copied()),

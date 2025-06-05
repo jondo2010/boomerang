@@ -17,7 +17,7 @@ fn Count<T: CountData>(
     let shutdown = builder.get_shutdown_action();
 
     builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_trigger(t)
         .with_effect(c)
         .with_reaction_fn(|_ctx, state, (_t, mut c)| {
@@ -28,7 +28,7 @@ fn Count<T: CountData>(
         .finish()?;
 
     builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_trigger(shutdown)
         .with_reaction_fn(|_ctx, state, _| {
             assert_eq!(state.count, 4, "expected 4, got {:?}", state.count);

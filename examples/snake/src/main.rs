@@ -48,7 +48,7 @@ impl SnakeState {
 #[reactor(state = SnakeState)]
 fn Snake() -> impl Reactor2 {
     // this thing helps capturing key presses
-    let keyboard = builder.add_child_reactor2(
+    let keyboard = builder.add_child_reactor(
         KeyboardEvents(),
         "keyboard",
         KeyboardEventsState::default(),
@@ -68,7 +68,7 @@ fn Snake() -> impl Reactor2 {
     )?;
 
     builder
-        .add_reaction2(Some("Startup"))
+        .add_reaction(Some("Startup"))
         .with_startup_trigger()
         .with_effect(screen_refresh)
         .with_reaction_fn(|_ctx, state, (_, mut screen_refresh)| {
@@ -81,7 +81,7 @@ fn Snake() -> impl Reactor2 {
         .finish()?;
 
     builder
-        .add_reaction2(Some("ScreenRefresh"))
+        .add_reaction(Some("ScreenRefresh"))
         .with_trigger(screen_refresh)
         .with_reaction_fn(|_ctx, state, (mut screen_refresh,)| {
             // select a delay depending on the tempo
@@ -92,7 +92,7 @@ fn Snake() -> impl Reactor2 {
         .finish()?;
 
     builder
-        .add_reaction2(Some("MoreFood"))
+        .add_reaction(Some("MoreFood"))
         .with_trigger(screen_refresh)
         .with_effect(manually_add_more_food)
         .with_reaction_fn(|ctx, state, (_, mut manually_add_more_food)| {
@@ -124,7 +124,7 @@ fn Snake() -> impl Reactor2 {
         .finish()?;
 
     builder
-        .add_reaction2(Some("Keyboard"))
+        .add_reaction(Some("Keyboard"))
         .with_trigger(keyboard.arrow_key_pressed)
         .with_reaction_fn(|_ctx, state, (key_event,)| {
             // this might be overwritten several times, only committed on screen refreshes
@@ -139,7 +139,7 @@ fn Snake() -> impl Reactor2 {
         .finish()?;
 
     builder
-        .add_reaction2(Some("AddFood"))
+        .add_reaction(Some("AddFood"))
         .with_trigger(manually_add_more_food)
         .with_trigger(add_more_food)
         .with_reaction_fn(|_ctx, state, (_, _)| {
@@ -155,7 +155,7 @@ fn Snake() -> impl Reactor2 {
         .finish()?;
 
     builder
-        .add_reaction2(Some("Shutdown"))
+        .add_reaction(Some("Shutdown"))
         .with_shutdown_trigger()
         .with_reaction_fn(|_ctx, state, (_,)| {
             println!("Game over! Your score was: {}", state.snake.len());

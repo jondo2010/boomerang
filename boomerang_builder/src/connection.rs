@@ -330,7 +330,7 @@ fn build_delayed_connection<T: runtime::ReactorData + Clone, Q: ActionTag>(
     let action_key = builder.add_action::<T, Q>("con_act", after)?;
     // The target reaction is triggered by the action, and writes to the output port
     let _ = builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_trigger(action_key)
         .with_effect(output_port)
         .with_defered_reaction_fn(move |_| {
@@ -339,7 +339,7 @@ fn build_delayed_connection<T: runtime::ReactorData + Clone, Q: ActionTag>(
         .finish()?;
     // The source reaction is triggered by the input port, and schedules the action
     let _ = builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_effect(action_key)
         .with_trigger(input_port)
         .with_defered_reaction_fn(move |_| {
@@ -367,7 +367,7 @@ fn build_enclave_connection_source<T: runtime::ReactorData + Clone>(
     let mut source_builder = env.add_reactor("con_reactor_src", parent_key, None, (), false);
     let input_port = source_builder.add_input_port::<T>("con_in")?;
     source_builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_trigger(input_port)
         .with_defered_reaction_fn(move |builder_parts| {
             let (enclave_key, runtime_action_key) = builder_parts
@@ -414,7 +414,7 @@ fn build_enclave_connection_target<T: runtime::ReactorData + Clone, Q: ActionTag
     let output_port = target_builder.add_output_port::<T>("con_out")?;
 
     target_builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_trigger(action_key)
         .with_effect(output_port)
         .with_defered_reaction_fn(move |_builder_parts| {

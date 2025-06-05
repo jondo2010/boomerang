@@ -26,10 +26,10 @@ fn Destination(#[input] x: u32, #[input] y: u32) -> impl Reactor2 {
 fn Microsteps() -> impl Reactor2 {
     let start = builder.add_timer("start", TimerSpec::STARTUP)?;
     let repeat = builder.add_logical_action::<()>("repeat", None)?;
-    let d = builder.add_child_reactor2(Destination(), "d", (), false)?;
+    let d = builder.add_child_reactor(Destination(), "d", (), false)?;
 
     builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_trigger(start)
         .with_effect(d.x)
         .with_effect(repeat)
@@ -40,7 +40,7 @@ fn Microsteps() -> impl Reactor2 {
         .finish()?;
 
     builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_trigger(repeat)
         .with_effect(d.y)
         .with_reaction_fn(|_ctx, _state, (_repeat, mut d_y)| {

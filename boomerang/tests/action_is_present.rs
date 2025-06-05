@@ -7,7 +7,7 @@ fn ActionIsPresent(#[state] success: bool) -> impl Reactor2 {
     let a = builder.add_logical_action::<()>("a", None)?;
 
     builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_startup_trigger()
         .with_trigger(a)
         .with_reaction_fn(|ctx, state, (_startup, mut a)| {
@@ -23,7 +23,7 @@ fn ActionIsPresent(#[state] success: bool) -> impl Reactor2 {
         .finish()?;
 
     builder
-        .add_reaction2(None)
+        .add_reaction(None)
         .with_shutdown_trigger()
         .with_reaction_fn(|_ctx, state, _shutdownn| {
             assert!(state.success, "Failed to print 'Hello World!'");

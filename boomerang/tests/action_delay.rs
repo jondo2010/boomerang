@@ -55,9 +55,9 @@ fn Sink(#[state] success: bool, #[input] inp: u32) -> impl Reactor2 {
 
 #[reactor]
 fn ActionDelay() -> impl Reactor2 {
-    let source = builder.add_child_reactor2(Source(), "source", (), false)?;
-    let sink = builder.add_child_reactor2(Sink(), "sink", Default::default(), false)?;
-    let g = builder.add_child_reactor2(GeneratedDelay(), "g", Default::default(), false)?;
+    let source = builder.add_child_reactor(Source(), "source", (), false)?;
+    let sink = builder.add_child_reactor(Sink(), "sink", Default::default(), false)?;
+    let g = builder.add_child_reactor(GeneratedDelay(), "g", Default::default(), false)?;
 
     builder.connect_port(source.out, g.y_in, None, false)?;
     builder.connect_port(g.y_out, sink.inp, None, false)?;

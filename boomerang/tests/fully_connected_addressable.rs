@@ -11,7 +11,7 @@ fn Node<const NUM_NODES: usize>(
     #[output] output: [i32; NUM_NODES],
 ) -> impl Reactor2 {
     builder
-        .add_reaction2(Some("Startup"))
+        .add_reaction(Some("Startup"))
         .with_startup_trigger()
         .with_effect(output)
         .with_reaction_fn(|ctx, _state, (_startup, mut output)| {
@@ -23,7 +23,7 @@ fn Node<const NUM_NODES: usize>(
         .finish()?;
 
     builder
-        .add_reaction2(Some("Input"))
+        .add_reaction(Some("Input"))
         .with_trigger(input)
         .with_reaction_fn(|ctx, state, (input,)| {
             let bank_index = ctx.get_bank_index().unwrap();
@@ -60,7 +60,7 @@ fn Node<const NUM_NODES: usize>(
         .finish()?;
 
     builder
-        .add_reaction2(Some("Shutdown"))
+        .add_reaction(Some("Shutdown"))
         .with_shutdown_trigger()
         .with_reaction_fn(|_ctx, state, (_shutdown,)| {
             assert!(state.received, "Received no input!");
@@ -71,9 +71,9 @@ fn Node<const NUM_NODES: usize>(
 #[reactor]
 fn Main<const NUM_NODES: usize = 4>() -> impl Reactor2 {
     let nodes1: [_; NUM_NODES] =
-        builder.add_child_reactors2(Node::<NUM_NODES>(), "nodes1", Default::default(), false)?;
+        builder.add_child_reactors(Node::<NUM_NODES>(), "nodes1", Default::default(), false)?;
     let nodes2: [_; NUM_NODES] =
-        builder.add_child_reactors2(Node::<NUM_NODES>(), "nodes2", Default::default(), false)?;
+        builder.add_child_reactors(Node::<NUM_NODES>(), "nodes2", Default::default(), false)?;
 
     builder.connect_ports(
         nodes1.iter().flat_map(|child| child.output.iter()).copied(),

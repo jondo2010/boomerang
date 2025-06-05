@@ -143,7 +143,7 @@ impl ToTokens for ReactionFieldInner {
                 };
 
                 tokens.extend(quote! {
-                    <#elem as ::boomerang::builder::derive::ReactionField>::build(
+                    <#elem as ::boomerang::builder::derive_support::ReactionField>::build(
                         &mut __reaction,
                         #elem_path,
                         #trigger_mode,

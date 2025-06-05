@@ -52,8 +52,10 @@ impl ToTokens for TriggerType {
 
 /// Parse a reaction definition like:
 ///
-///     reaction [name] (triggers) [uses] [-> effects] { ... }
-///     reaction (t1) u1, u2 -> e1, e2 { ... }
+/// ```ignore
+/// reaction [name] (triggers) [uses] [-> effects] { ... }
+/// reaction (t1) u1, u2 -> e1, e2 { ... }
+/// ```
 #[derive(Debug)]
 pub struct Model {
     name: Option<Ident>,
@@ -136,7 +138,7 @@ impl ToTokens for Model {
         let mut reaction = quote! {
             #[allow(unused_variables)]
             let _ = builder
-                .add_reaction2(#name)
+                .add_reaction(#name)
         };
 
         // Add appropriate trigger methods based on trigger type

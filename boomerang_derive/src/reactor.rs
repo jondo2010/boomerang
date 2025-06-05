@@ -118,7 +118,7 @@ impl ToTokens for ReactorField {
                 let period = OptionalDuration(*period);
                 let offset = OptionalDuration(*offset);
                 quote! {
-                    let #ident = <#ty as ::boomerang::builder::derive::ReactorField>::build(
+                    let #ident = <#ty as ::boomerang::builder::derive_support::ReactorField>::build(
                         #name,
                         ::boomerang::builder::TimerSpec {
                             period: #period,
@@ -129,7 +129,7 @@ impl ToTokens for ReactorField {
                 }
             }
             ReactorFieldKind::Port => {
-                quote! { let #ident = <#ty as ::boomerang::builder::derive::ReactorField>::build(#name, (), &mut __builder)?; }
+                quote! { let #ident = <#ty as ::boomerang::builder::derive_support::ReactorField>::build(#name, (), &mut __builder)?; }
             }
             ReactorFieldKind::Action {
                 min_delay,
@@ -147,13 +147,13 @@ impl ToTokens for ReactorField {
                     }
                 };
                 quote! {
-                    let #ident = <#ty as ::boomerang::builder::derive::ReactorField>::build(#name, #min_delay, &mut __builder)?;
+                    let #ident = <#ty as ::boomerang::builder::derive_support::ReactorField>::build(#name, #min_delay, &mut __builder)?;
                     #replay
                 }
             }
             ReactorFieldKind::Child { state, enclave } => {
                 quote! {
-                    let #ident = <#ty as ::boomerang::builder::derive::ReactorField>::build(#name, (#state, #enclave), &mut __builder)?;
+                    let #ident = <#ty as ::boomerang::builder::derive_support::ReactorField>::build(#name, (#state, #enclave), &mut __builder)?;
                 }
             }
         });
@@ -415,7 +415,7 @@ impl ToTokens for Reactor {
 
         tokens.extend(quote! {
             #[automatically_derived]
-            impl #impl_generics ::boomerang::builder::derive::Reactor for #ident #type_generics #where_clause{
+            impl #impl_generics ::boomerang::builder::derive_support::Reactor for #ident #type_generics #where_clause{
                 type State = #state;
 
                 fn build<'__builder>(
@@ -433,7 +433,7 @@ impl ToTokens for Reactor {
                     #(#fields)*
                     let mut __reactor = Self { #(#field_idents),* };
 
-                    #(let _ = <#reactions as ::boomerang::builder::derive::Reaction<Self>>::build(
+                    #(let _ = <#reactions as ::boomerang::builder::derive_support::Reaction<Self>>::build(
                         stringify!(#reactions), &__reactor, &mut __builder)?.finish()?;
                     )*
 

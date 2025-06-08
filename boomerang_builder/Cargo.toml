@@ -25,7 +25,7 @@ replay = ["dep:serde"]
 
 [dependencies]
 document-features = { workspace = true }
-graphviz-rust = { version = "0.6", optional = true }
+graphviz-rust = { version = "0.9", optional = true }
 itertools.workspace = true
 petgraph = "0.6"
 slotmap = { version = "1.0", features = ["unstable"] }

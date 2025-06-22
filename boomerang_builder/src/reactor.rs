@@ -198,6 +198,28 @@ impl ParentReactorBuilder for ReactorBuilder {
 }
 
 impl ReactorBuilder {
+    /// Create a new `ReactorBuilder` with the given parameters.
+    pub fn new<S: runtime::ReactorData>(
+        name: &str,
+        type_name: &'static str,
+        reactor_state: S,
+        parent: Option<BuilderReactorKey>,
+        bank_info: Option<runtime::BankInfo>,
+        is_enclave: bool,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            state: Box::new(ReactorState(reactor_state)),
+            type_name: type_name.into(),
+            parent_reactor_key: parent,
+            reactions: SecondaryMap::new(),
+            ports: SecondaryMap::new(),
+            actions: SecondaryMap::new(),
+            bank_info,
+            is_enclave,
+        }
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -246,19 +268,14 @@ impl<'a> ReactorBuilderState<'a> {
         env: &'a mut EnvBuilder,
     ) -> Self {
         let type_name = std::any::type_name::<S>();
-        let reactor_key = env.reactor_builders.insert({
-            ReactorBuilder {
-                name: name.into(),
-                state: Box::new(ReactorState(reactor_state)),
-                type_name: type_name.into(),
-                parent_reactor_key: parent,
-                reactions: SecondaryMap::new(),
-                ports: SecondaryMap::new(),
-                actions: SecondaryMap::new(),
-                bank_info,
-                is_enclave,
-            }
-        });
+        let reactor_key = env.reactor_builders.insert(ReactorBuilder::new(
+            name,
+            type_name,
+            reactor_state,
+            parent,
+            bank_info,
+            is_enclave,
+        ));
 
         let startup_action = env
             .add_startup_action("__startup", reactor_key)

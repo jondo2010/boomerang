@@ -170,6 +170,25 @@ pub struct ReactionBuilder {
     pub(super) port_relations: SecondaryMap<BuilderPortKey, TriggerMode>,
 }
 
+impl ReactionBuilder {
+    /// Create a new ReactionBuilder
+    pub fn new(
+        name: &str,
+        priority: usize,
+        parent_key: BuilderReactorKey,
+        reaction_fn: Box<dyn FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn>,
+    ) -> Self {
+        ReactionBuilder {
+            name: name.into(),
+            priority,
+            reactor_key: parent_key,
+            reaction_fn,
+            action_relations: SecondaryMap::new(),
+            port_relations: SecondaryMap::new(),
+        }
+    }
+}
+
 impl ParentReactorBuilder for ReactionBuilder {
     fn parent_reactor_key(&self) -> Option<BuilderReactorKey> {
         Some(self.reactor_key)
@@ -267,14 +286,7 @@ impl<'a> ReactionBuilderState<'a> {
         env: &'a mut EnvBuilder,
     ) -> Self {
         Self {
-            builder: ReactionBuilder {
-                name: name.into(),
-                priority,
-                reactor_key,
-                reaction_fn,
-                action_relations: SecondaryMap::new(),
-                port_relations: SecondaryMap::new(),
-            },
+            builder: ReactionBuilder::new(name, priority, reactor_key, reaction_fn),
             env,
         }
     }

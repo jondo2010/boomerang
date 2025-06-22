@@ -5,7 +5,7 @@
 //! Build and run a Reactor with reactions that respond to startup and shutdown actions:
 //!
 //! ```rust
-//! use boomerang::prelude::*;
+//! #use boomerang::prelude::*;
 //!
 //! struct State {
 //!     success: bool,

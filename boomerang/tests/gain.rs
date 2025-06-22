@@ -4,26 +4,23 @@ use boomerang::prelude::*;
 
 #[reactor]
 fn Scale(#[input] x: u32, #[output] y: u32, scale: u32) -> impl Reactor2 {
-    builder
-        .add_reaction(None)
-        .with_trigger(x)
-        .with_effect(y)
-        .with_reaction_fn(move |_ctx, _state, (x, mut y)| {
+    reaction! {
+        (x) -> y {
+            // Scale the input value by the specified scale factor
             *y = Some(scale * x.unwrap());
-        })
-        .finish()?;
+        }
+    }
 }
 
 #[reactor]
+/// This reactor simply receives a value and prints it
 fn Test(#[input] x: u32) -> impl Reactor2 {
-    builder
-        .add_reaction(None)
-        .with_trigger(x)
-        .with_reaction_fn(move |_ctx, _state, (x,)| {
-            println!("Received {:?}", *x);
-            assert_eq!(*x, Some(2), "Expected Some(2)!");
-        })
-        .finish()?;
+    reaction! {
+        (x) {
+            println!("Received value: {:?}", *x);
+            assert_eq!(*x, Some(2), "Expected value to be 2!");
+        }
+    }
 }
 
 #[reactor]
@@ -32,6 +29,13 @@ fn Gain() -> impl Reactor2 {
     let t = builder.add_child_reactor(Test(), "t", (), false)?;
     let tim = builder.add_timer("tim", TimerSpec::STARTUP)?;
     builder.connect_port(g.y, t.x, None, false)?;
+
+    reaction! {
+        (tim) -> g.x {
+            *g_x = Some(1);
+        }
+    }
+
     builder
         .add_reaction(None)
         .with_trigger(tim)

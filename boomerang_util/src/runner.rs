@@ -10,8 +10,10 @@
 //! ```
 
 use anyhow::Context;
+#[cfg(feature = "derive")]
+use boomerang::derive_support::Reactor;
 use boomerang::{
-    builder::{derive_support::Reactor, BuilderRuntimeParts, EnvBuilder, Reactor2},
+    builder::{BuilderRuntimeParts, EnvBuilder, Reactor2},
     runtime,
 };
 use clap::Parser;
@@ -71,6 +73,7 @@ struct Args {
 /// # Returns
 ///
 /// This function returns a tuple containing the built reactor and a vector of runtime environments.
+#[cfg(feature = "derive")]
 pub fn build_and_test_reactor<R: Reactor>(
     name: &str,
     state: R::State,

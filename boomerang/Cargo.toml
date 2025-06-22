@@ -13,13 +13,14 @@ categories.workspace = true
 [features]
 default = []
 
-## Procedural macro support for generating code from reactor models
+## Alternative procedural macro support for generating code from reactor models.
+## See [`boomerang_derive::Reactor`]
 derive = ["dep:boomerang_derive", "boomerang_builder/derive"]
 
 # Support for serialization
 serde = ["boomerang_runtime/serde"]
 
-## Execute reactors in parallel on a thread pool
+## Execute reactions in parallel on a thread pool
 parallel = ["boomerang_runtime/parallel"]
 
 ## Support generating graphviz diagrams from reactor models

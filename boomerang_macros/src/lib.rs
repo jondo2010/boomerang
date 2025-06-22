@@ -98,8 +98,13 @@ pub fn reaction(s: proc_macro::TokenStream) -> proc_macro::TokenStream {
 }
 
 /// Creates a timer within a reactor function.
+/// 
+/// `timer! { <name>(<offset>, <period>) }`
+/// 
+/// - `offset` specifies an optional (logical) delay from the start of execution before this timer starts triggering.
+/// - `period` specifies the optional 
 ///
-/// ## Usage
+/// ## Example
 /// ```rust,no_run
 /// # use boomerang::prelude::*;
 ///

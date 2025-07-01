@@ -91,7 +91,8 @@ pub fn build_and_test_reactor<R: Reactor>(
     let BuilderRuntimeParts {
         enclaves,
         aliases: _,
-        replayers: _,
+        #[cfg(feature = "replay")]
+            replayers: _,
     } = env_builder
         .into_runtime_parts()
         .context("Error building environment!")?;

@@ -65,6 +65,7 @@ pub enum RuntimeError {
     #[error("Encode error {error}")]
     EncodeError { error: String },
 
+    #[cfg(feature = "replay")]
     #[error(transparent)]
     ReplayError(#[from] replay::ReplayError),
 }

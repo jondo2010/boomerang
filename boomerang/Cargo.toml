@@ -29,7 +29,7 @@ parallel = ["boomerang_runtime/parallel"]
 graphviz = ["boomerang_builder/graphviz"]
 
 ## Support for recording and replaying
-replay = ["boomerang_runtime/replay"]
+replay = ["boomerang_runtime/replay", "boomerang_builder/replay"]
 
 [dependencies]
 document-features = { workspace = true }

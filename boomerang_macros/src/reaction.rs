@@ -1,6 +1,6 @@
 use quote::quote;
 use quote::{ToTokens, TokenStreamExt};
-use syn::PatPath;
+use syn::spanned::Spanned;
 use syn::{
     parenthesized,
     parse::{Parse, ParseStream},
@@ -71,31 +71,35 @@ impl ToTokens for PathOrIdent {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
         match self {
             PathOrIdent::Simple(ident) => ident.to_tokens(tokens),
-            PathOrIdent::Field(field) => {
-                let id = camelcase_field(field);
-                id.to_tokens(tokens);
-            }
+            PathOrIdent::Field(field) => field.to_tokens(tokens),
         }
     }
 }
 
-/// For field access expressions, convert a.b to a_b format
-/// Fallback to the default field expression rendering if not a simple field access.
+/// For field access expressions, convert a.b.c to a_b_c format.
+/// Fallback to "field" if not a chain of field accesses.
 fn camelcase_field(field: &ExprField) -> Ident {
-    if let Expr::Path(base_path) = &*field.base {
-        if base_path.path.segments.len() == 1 {
-            let base_ident = &base_path.path.segments.first().unwrap().ident;
-            let member_str = match &field.member {
-                syn::Member::Named(ident) => ident.to_string(),
-                syn::Member::Unnamed(index) => index.index.to_string(),
-            };
-
-            // Create a new identifier by combining the base and member
-            return proc_macro2::Ident::new(
-                &format!("{}_{}", base_ident, member_str),
-                base_ident.span(),
-            );
+    fn flatten(expr: &Expr, out: &mut Vec<String>) {
+        match expr {
+            Expr::Field(f) => {
+                flatten(&f.base, out);
+                match &f.member {
+                    syn::Member::Named(ident) => out.push(ident.to_string()),
+                    syn::Member::Unnamed(idx) => out.push(idx.index.to_string()),
+                }
+            }
+            Expr::Path(p) if p.path.segments.len() == 1 => {
+                out.push(p.path.segments[0].ident.to_string());
+            }
+            _ => {}
         }
+    }
+    let mut parts = Vec::new();
+    flatten(&Expr::Field(field.clone()), &mut parts);
+    if parts.len() > 1 {
+        proc_macro2::Ident::new(&parts.join("_"), field.span())
+    } else {
+        proc_macro2::Ident::new("field", proc_macro2::Span::call_site())
     }
 }
 
@@ -253,7 +257,31 @@ impl ToTokens for Model {
         let trigger_args = triggers.iter().map(|t| match t {
             TriggerType::Startup => quote!(startup),
             TriggerType::Shutdown => quote!(shutdown),
-            TriggerType::Regular(path_or_ident) => quote!(#path_or_ident),
+            TriggerType::Regular(path_or_ident) => {
+                let id = match path_or_ident {
+                    PathOrIdent::Simple(ident) => ident,
+                    PathOrIdent::Field(field) => &camelcase_field(field),
+                };
+                quote!(#id)
+            }
+        });
+
+        // Add uses arguments for the reaction_fn closure
+        let uses_args = uses.iter().map(|u| match u {
+            PathOrIdent::Simple(ident) => quote!(#ident),
+            PathOrIdent::Field(field) => {
+                let id = &camelcase_field(field);
+                quote!(#id)
+            }
+        });
+
+        // Add effects arguments for the reaction_fn closure
+        let effects_args = effects.iter().map(|e| match e {
+            PathOrIdent::Simple(ident) => quote!(#ident),
+            PathOrIdent::Field(field) => {
+                let id = &camelcase_field(field);
+                quote!(#id)
+            }
         });
 
         // Add uses and effects
@@ -264,8 +292,8 @@ impl ToTokens for Model {
                 ctx,
                 state, (
                     #(mut #trigger_args,)*
-                    #(mut #uses,)*
-                    #(mut #effects,)*
+                    #(mut #uses_args,)*
+                    #(mut #effects_args,)*
                 )| #code
             )
             .finish()?;

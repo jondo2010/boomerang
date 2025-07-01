@@ -35,15 +35,6 @@ fn Gain() -> impl Reactor2 {
             *g_x = Some(1);
         }
     }
-
-    builder
-        .add_reaction(None)
-        .with_trigger(tim)
-        .with_effect(g.x)
-        .with_reaction_fn(move |_ctx, _state, (_tim, mut g_x)| {
-            *g_x = Some(1);
-        })
-        .finish()?;
 }
 
 #[test]

@@ -387,4 +387,42 @@ mod tests {
         assert_eq!(p2a[0].name(), "p2a");
         assert_eq!(p2a[1].name(), "p2b");
     }
+
+    /// Test partitioning with empty refs.
+    #[test]
+    fn test_empty_refs() {
+        // Trying to partition an empty refs should return None
+        let mut empty_vec: Vec<NonNull<dyn BasePort>> = Vec::new();
+        let refs = Refs::new(&mut empty_vec);
+        let result: Option<InputRef<i32>> = refs.partition();
+        assert!(result.is_none());
+
+        // Testing with arrays
+        let mut empty_vec: Vec<NonNull<dyn BasePort>> = Vec::new();
+        let refs = Refs::new(&mut empty_vec);
+        let result: Option<[InputRef<i32>; 2]> = refs.partition();
+        assert!(result.is_none());
+
+        // Testing with tuples
+        let mut empty_vec: Vec<NonNull<dyn BasePort>> = Vec::new();
+        let refs = Refs::new(&mut empty_vec);
+        let result: Option<(InputRef<i32>, InputRef<u32>)> = refs.partition();
+        assert!(result.is_none());
+
+        // Test for RefsMut
+        let mut empty_vec: Vec<NonNull<dyn BasePort>> = Vec::new();
+        let refs_mut = RefsMut::new(&mut empty_vec);
+        let result: Option<OutputRef<i32>> = refs_mut.partition_mut();
+        assert!(result.is_none());
+
+        let mut empty_vec: Vec<NonNull<dyn BasePort>> = Vec::new();
+        let refs_mut = RefsMut::new(&mut empty_vec);
+        let result: Option<[OutputRef<i32>; 2]> = refs_mut.partition_mut();
+        assert!(result.is_none());
+
+        let mut empty_vec: Vec<NonNull<dyn BasePort>> = Vec::new();
+        let refs_mut = RefsMut::new(&mut empty_vec);
+        let result: Option<(OutputRef<i32>, OutputRef<u32>)> = refs_mut.partition_mut();
+        assert!(result.is_none());
+    }
 }

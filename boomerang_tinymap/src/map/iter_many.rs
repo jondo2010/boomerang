@@ -302,4 +302,24 @@ mod tests {
         }
         assert_eq!(map.values().collect::<Vec<_>>(), vec![&1, &3, &3, &5, &5]);
     }
+
+    #[test]
+    fn test_iter_many_unchecked_ptrs() {
+        let mut map = TinyMap::<DefaultKey, usize>::new();
+        let k1 = map.insert(10);
+        let k2 = map.insert(20);
+        let k3 = map.insert(30);
+        let k4 = map.insert(40);
+
+        // Collect the raw pointers
+        let ptrs = unsafe {
+            map.iter_many_unchecked_ptrs([k3, k1, k4, k2])
+                .collect::<Vec<_>>()
+        };
+
+        // Verify pointer values by dereferencing them
+        let values: Vec<usize> = unsafe { ptrs.iter().map(|&ptr| *ptr).collect() };
+
+        assert_eq!(values, vec![30, 10, 40, 20]);
+    }
 }

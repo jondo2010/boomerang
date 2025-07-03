@@ -3,6 +3,11 @@ codecov:
 
 coverage:
   status:
+    project:
+      default:   # default is the status check's name, not default settings
+        target: auto 
+        threshold: 5
+        base: auto
     patch:
       default:
         target: auto

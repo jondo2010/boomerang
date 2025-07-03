@@ -12,10 +12,7 @@ categories.workspace = true
 exclude.workspace = true
 
 [features]
-default = [
-    #"parallel",
-    "replay",
-]
+default = []
 
 ## Support for parallel execution
 parallel = ["dep:rayon"]

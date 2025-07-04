@@ -12,7 +12,7 @@ readme = "README.md"
 exclude.workspace = true
 
 [features]
-default = ["graphviz", "replay"]
+default = ["graphviz"]
 
 ## Support generating graphviz diagrams from reactor models
 graphviz = ["dep:graphviz-rust"]

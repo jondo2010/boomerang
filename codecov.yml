@@ -1,6 +1,18 @@
 codecov:
   token: 9ca1bec2-fd82-413b-90f1-bc2b709e2954
 
+coverage:
+  status:
+    project:
+      default:   # default is the status check's name, not default settings
+        target: auto 
+        threshold: 5
+        base: auto
+    patch:
+      default:
+        target: auto
+        threshold: 1%
+
 comment:
   layout: "header, diff, flags, components" # show component info in the PR comment
 
@@ -9,6 +21,7 @@ component_management:
     statuses:
       - type: project # in this case every component that doens't have a status defined will have a project type one
         target: auto
+        threshold: 1%
         branches:
           - "!main"
 
@@ -16,6 +29,10 @@ component_management:
     - component_id: boomerang
       paths:
         - boomerang/**
+
+    - component_id: boomerang_builder
+      paths:
+        - boomerang_builder/**
 
     - component_id: boomerang_derive
       paths:

@@ -57,6 +57,7 @@ mod util {
     }
 }
 
+#[cfg(feature = "replay")]
 type ReplayFunctionBuilder = dyn FnOnce(&BuilderRuntimeParts) -> Box<dyn runtime::replay::ReplayFn>;
 
 #[derive(Default)]

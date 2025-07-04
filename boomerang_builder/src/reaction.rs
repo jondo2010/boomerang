@@ -78,7 +78,7 @@ impl ReactionBuilder {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Describes how an action is used by a reaction
 pub enum TriggerMode {
     /// The action/port triggers the reaction, but is not provided as input
@@ -428,7 +428,13 @@ where
         let reactor = &mut env.reactor_builders[reactor_key];
         let reactions = &mut env.reaction_builders;
 
-        let reaction_builder = super::ReactionBuilder::new(name, reactor_key, reaction_fn);
+        let reaction_builder = ReactionBuilder {
+            name,
+            reactor_key,
+            reaction_fn,
+            action_relations,
+            port_relations,
+        };
 
         let reaction_key = reactions.insert_with_key(|key| {
             reactor.reactions.insert(key, ());

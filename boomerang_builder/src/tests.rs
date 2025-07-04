@@ -132,6 +132,26 @@ fn test_reactions_startup_shutdown() {
         vec![r0_key, r1_key]
     );
 
+    assert_eq!(
+        env_builder.reaction_builders[r0_key]
+            .action_relations
+            .iter()
+            .next(),
+        Some((startup_action.into(), &TriggerMode::TriggersAndUses)),
+        "Startup reaction should have the startup action as a trigger"
+    );
+
+    assert_eq!(
+        env_builder.reaction_builders[r1_key]
+            .action_relations
+            .iter()
+            .next(),
+        Some((shutdown_action.into(), &TriggerMode::TriggersAndUses)),
+        "Shutdown reaction should have the shutdown action as a trigger"
+    );
+
+    env_builder.validate_reactions().unwrap();
+
     let BuilderRuntimeParts {
         enclaves, aliases, ..
     } = env_builder.into_runtime_parts().unwrap();

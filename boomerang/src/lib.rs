@@ -5,7 +5,7 @@
 //! Build and run a Reactor with reactions that respond to startup and shutdown actions:
 //!
 //! ```rust
-//! #use boomerang::prelude::*;
+//! use boomerang::prelude::*;
 //!
 //! struct State {
 //!     success: bool,
@@ -48,7 +48,7 @@
 //! }
 //!
 //! let config = runtime::Config::default().with_fast_forward(true);
-//! let (_, envs) = boomerang_util::runner::build_and_test_reactor::<HelloWorld>(
+//! let (_, envs) = boomerang_util::runner::build_and_test_reactor2::<HelloWorld>(
 //!     "hello_world",
 //!     State { success: false },
 //!     config,

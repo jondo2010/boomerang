@@ -11,7 +11,7 @@ where
     _marker: PhantomData<&'a mut V>,
 }
 
-impl<'a, K: Key, V, I> IterManyMut<'a, K, V, I>
+impl<K: Key, V, I> IterManyMut<'_, K, V, I>
 where
     I: Iterator<Item = K>,
 {
@@ -38,7 +38,7 @@ where
     }
 }
 
-impl<'a, K: Key, V, I> ExactSizeIterator for IterManyMut<'a, K, V, I>
+impl<K: Key, V, I> ExactSizeIterator for IterManyMut<'_, K, V, I>
 where
     I: Iterator<Item = K> + ExactSizeIterator,
 {

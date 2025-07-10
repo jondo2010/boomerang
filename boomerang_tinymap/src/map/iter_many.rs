@@ -11,7 +11,7 @@ where
     _marker: PhantomData<&'a V>,
 }
 
-impl<'a, K: Key, V, I> IterMany<'a, K, V, I>
+impl<K: Key, V, I> IterMany<'_, K, V, I>
 where
     I: Iterator<Item = K>,
 {
@@ -38,7 +38,7 @@ where
     }
 }
 
-impl<'a, K: Key, V, I> ExactSizeIterator for IterMany<'a, K, V, I>
+impl<K: Key, V, I> ExactSizeIterator for IterMany<'_, K, V, I>
 where
     I: Iterator<Item = K> + ExactSizeIterator,
 {
@@ -53,7 +53,7 @@ pub struct IterManyPtr<'a, K: Key, V, I>(pub IterMany<'a, K, V, I>)
 where
     I: Iterator<Item = K>;
 
-impl<'a, K: Key, V, I> Iterator for IterManyPtr<'a, K, V, I>
+impl<K: Key, V, I> Iterator for IterManyPtr<'_, K, V, I>
 where
     I: Iterator<Item = K>,
 {
@@ -76,7 +76,7 @@ where
     _marker: PhantomData<&'a mut V>,
 }
 
-impl<'a, K: Key, V, I> IterManyMut<'a, K, V, I>
+impl<K: Key, V, I> IterManyMut<'_, K, V, I>
 where
     I: Iterator<Item = K>,
 {
@@ -103,7 +103,7 @@ where
     }
 }
 
-impl<'a, K: Key, V, I> ExactSizeIterator for IterManyMut<'a, K, V, I>
+impl<K: Key, V, I> ExactSizeIterator for IterManyMut<'_, K, V, I>
 where
     I: Iterator<Item = K> + ExactSizeIterator,
 {
@@ -118,7 +118,7 @@ pub struct IterManyPtrMut<'a, K: Key, V, I>(pub IterManyMut<'a, K, V, I>)
 where
     I: Iterator<Item = K>;
 
-impl<'a, K: Key, V, I> Iterator for IterManyPtrMut<'a, K, V, I>
+impl<K: Key, V, I> Iterator for IterManyPtrMut<'_, K, V, I>
 where
     I: Iterator<Item = K>,
 {

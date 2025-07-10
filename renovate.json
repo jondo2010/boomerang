@@ -1,6 +1,30 @@
 {
-  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "config:recommended"
-  ]
+    "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+    "extends": [
+        "config:recommended",
+        ":automergeAll",
+        ":automergeBranch",
+        ":automergeRequireAllStatusChecks",
+        ":semanticCommits",
+        "schedule:weekly",
+        "schedule:automergeWeekly"
+    ],
+    "packageRules": [
+        {
+            "groupName": "rust dependencies",
+            "groupSlug": "rust",
+            "matchDatasources": [
+                "crate"
+            ]
+        },
+        {
+            "groupName": "github ci dependencies",
+            "groupSlug": "ci",
+            "matchDatasources": [
+                "github-tags",
+                "gitea-tags",
+                "github-runners"
+            ]
+        }
+    ]
 }

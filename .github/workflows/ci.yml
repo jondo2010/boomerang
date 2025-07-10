@@ -11,6 +11,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  commitlint:
+    runs-on: ubuntu-latest
+    name: Commitlint
+    steps:
+      - name: Run commitlint
+        uses: opensource-nepal/commitlint@v1
+
   test:
     strategy:
       matrix:

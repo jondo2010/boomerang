@@ -7,9 +7,9 @@ use std::collections::{BTreeSet, HashMap};
 use slotmap::SecondaryMap;
 
 use crate::{
-    runtime, BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactorKey, EnclaveDep,
-    EnvBuilder, Input, Output, ParentReactorBuilder, PartitionMap, PortType, TriggerMode,
-    TypedPortKey,
+    runtime, ActionTag, BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactorKey,
+    EnclaveDep, EnvBuilder, Input, Output, ParentReactorBuilder, PartitionMap, PortType,
+    TriggerMode, TypedActionKey, TypedPortKey,
 };
 
 #[derive(Default)]
@@ -207,15 +207,16 @@ pub trait BaseConnectionBuilder {
     ) -> Result<(), BuilderError>;
 }
 
-pub struct ConnectionBuilder<T: runtime::ReactorData> {
+pub struct ConnectionBuilder<T: runtime::ReactorData, Q: ActionTag> {
     pub(crate) source_key: BuilderPortKey,
     pub(crate) target_key: BuilderPortKey,
     pub(crate) after: Option<runtime::Duration>,
-    pub(crate) physical: bool,
-    pub(crate) _phantom: std::marker::PhantomData<fn() -> T>,
+    pub(crate) _phantom: std::marker::PhantomData<fn() -> (T, Q)>,
 }
 
-impl<T: runtime::ReactorData + Clone> BaseConnectionBuilder for ConnectionBuilder<T> {
+impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
+    for ConnectionBuilder<T, Q>
+{
     fn source_key(&self) -> BuilderPortKey {
         self.source_key
     }
@@ -226,7 +227,7 @@ impl<T: runtime::ReactorData + Clone> BaseConnectionBuilder for ConnectionBuilde
         self.after
     }
     fn physical(&self) -> bool {
-        self.physical
+        !Q::IS_LOGICAL
     }
     fn build(
         &self,
@@ -245,8 +246,9 @@ impl<T: runtime::ReactorData + Clone> BaseConnectionBuilder for ConnectionBuilde
         let target_partition = partition_map[target_reactor_key];
 
         if source_partition == target_partition {
-            // Ports connected with a delay and/or physical connections are implemented as a pair of Reactions that trigger and react to an action.
-            if self.physical || self.after.is_some() {
+            // Ports connected with a delay and/or physical connections are implemented as a pair of Reactions that
+            // trigger and react to an action.
+            if !Q::IS_LOGICAL || self.after.is_some() {
                 let source_parent_reactor_key =
                     env.reactor_builders[source_reactor_key].parent_reactor_key();
                 let target_parent_reactor_key =
@@ -255,12 +257,8 @@ impl<T: runtime::ReactorData + Clone> BaseConnectionBuilder for ConnectionBuilde
                     source_parent_reactor_key, target_parent_reactor_key,
                     "Delayed connections between same ancestor?"
                 );
-                let (reactor_key, input_port, output_port) = build_delayed_connection::<T>(
-                    env,
-                    source_parent_reactor_key,
-                    self.physical,
-                    self.after,
-                )?;
+                let (reactor_key, input_port, output_port) =
+                    build_delayed_connection::<T, Q>(env, source_parent_reactor_key, self.after)?;
                 partition_map.insert(reactor_key, source_partition);
                 port_bindings.bind(self.source_key, input_port.into(), env)?;
                 port_bindings.bind(output_port.into(), self.target_key, env)?;
@@ -269,28 +267,35 @@ impl<T: runtime::ReactorData + Clone> BaseConnectionBuilder for ConnectionBuilde
                 port_bindings.bind(self.source_key, self.target_key, env)?;
             }
         } else {
-            // The connection is between two different partitions, so we need to build a pair of Reactions that trigger and react to an Action.
+            // The connection is between two different partitions, so we need to build a pair of Reactions that trigger
+            // and react to an Action.
             let target_parent_reactor_key =
                 env.reactor_builders[target_reactor_key].parent_reactor_key();
-            let (target_reactor_key, output_port, target_action_key) =
-                build_enclave_connection_target::<T>(
-                    env,
-                    target_parent_reactor_key,
-                    self.physical,
-                    self.after,
-                )?;
-            partition_map.insert(target_reactor_key, target_partition);
+
+            let EnclaveConnectionTarget {
+                reactor_key,
+                output_port,
+                action_key,
+            } = build_enclave_connection_target::<T, Q>(
+                env,
+                target_parent_reactor_key,
+                self.after,
+            )?;
+            partition_map.insert(reactor_key, target_partition);
             port_bindings.bind(output_port.into(), self.target_key, env)?;
 
             let source_parent_reactor_key =
                 env.reactor_builders[source_reactor_key].parent_reactor_key();
-            let (source_reactor_key, input_port) = build_enclave_connection_source::<T>(
+            let EnclaveConnectionSource {
+                reactor_key,
+                input_port,
+            } = build_enclave_connection_source::<T>(
                 env,
                 source_parent_reactor_key,
                 target_partition,
-                target_action_key,
+                action_key.into(),
             )?;
-            partition_map.insert(source_reactor_key, source_partition);
+            partition_map.insert(reactor_key, source_partition);
             port_bindings.bind(self.source_key, input_port.into(), env)?;
 
             enclave_deps.push(EnclaveDep {
@@ -307,10 +312,9 @@ impl<T: runtime::ReactorData + Clone> BaseConnectionBuilder for ConnectionBuilde
 ///
 /// The connection is built as a pair of Reactions that trigger and react to an Action.
 #[allow(clippy::type_complexity)]
-fn build_delayed_connection<T: runtime::ReactorData + Clone>(
+fn build_delayed_connection<T: runtime::ReactorData + Clone, Q: ActionTag>(
     env: &mut EnvBuilder,
     parent_key: Option<BuilderReactorKey>,
-    physical: bool,
     after: Option<runtime::Duration>,
 ) -> Result<
     (
@@ -323,29 +327,32 @@ fn build_delayed_connection<T: runtime::ReactorData + Clone>(
     let mut builder = env.add_reactor("con_reactor", parent_key, None, (), false);
     let input_port = builder.add_input_port::<T>("con_in")?;
     let output_port = builder.add_output_port::<T>("con_out")?;
-    let action_key: BuilderActionKey = if physical {
-        builder.add_physical_action::<T>("con_act", after)?.into()
-    } else {
-        builder.add_logical_action::<T>("con_act", after)?.into()
-    };
+    let action_key = builder.add_action::<T, Q>("con_act", after)?;
     // The target reaction is triggered by the action, and writes to the output port
     let _ = builder
-        .add_reaction("con_tgt", |_| {
+        .add_reaction(None)
+        .with_trigger(action_key)
+        .with_effect(output_port)
+        .with_defered_reaction_fn(move |_| {
             runtime::ConnectionReceiverReactionFn::<T>::default().into()
         })
-        .with_action(action_key, 0, TriggerMode::TriggersAndUses)?
-        .with_port(output_port, 0, TriggerMode::EffectsOnly)?
         .finish()?;
     // The source reaction is triggered by the input port, and schedules the action
     let _ = builder
-        .add_reaction("con_src", |_| {
+        .add_reaction(None)
+        .with_effect(action_key)
+        .with_trigger(input_port)
+        .with_defered_reaction_fn(move |_| {
             runtime::ConnectionSenderReactionFn::<T>::default().into()
         })
-        .with_action(action_key, 0, TriggerMode::EffectsOnly)?
-        .with_port(input_port, 0, TriggerMode::TriggersAndUses)?
         .finish()?;
     let reactor_key = builder.finish()?;
     Ok((reactor_key, input_port, output_port))
+}
+
+struct EnclaveConnectionSource<T: runtime::ReactorData + Clone> {
+    reactor_key: BuilderReactorKey,
+    input_port: TypedPortKey<T, Input>,
 }
 
 /// Build the source portion
@@ -356,11 +363,13 @@ fn build_enclave_connection_source<T: runtime::ReactorData + Clone>(
     parent_key: Option<BuilderReactorKey>,
     target_partition: BuilderReactorKey,
     target_action_key: BuilderActionKey,
-) -> Result<(BuilderReactorKey, TypedPortKey<T, Input>), BuilderError> {
+) -> Result<EnclaveConnectionSource<T>, BuilderError> {
     let mut source_builder = env.add_reactor("con_reactor_src", parent_key, None, (), false);
     let input_port = source_builder.add_input_port::<T>("con_in")?;
-    let _ = source_builder
-        .add_reaction("con_react_src", move |builder_parts| {
+    source_builder
+        .add_reaction(None)
+        .with_trigger(input_port)
+        .with_defered_reaction_fn(move |builder_parts| {
             let (enclave_key, runtime_action_key) = builder_parts
                 .aliases
                 .action_aliases
@@ -374,48 +383,49 @@ fn build_enclave_connection_source<T: runtime::ReactorData + Clone>(
 
             let remote_context = enclave.create_send_context(*enclave_key);
             let remote_action_ref = enclave.create_async_action_ref(*runtime_action_key);
-            runtime::EnclaveSenderReactionFn::<T>::new(
-                remote_context,
-                remote_action_ref,
-                None,
-                //Some(runtime::Duration::milliseconds(500)),
-            )
-            .into()
+            runtime::EnclaveSenderReactionFn::<T>::new(remote_context, remote_action_ref, None)
+                .into()
         })
-        .with_port(input_port, 0, TriggerMode::TriggersAndUses)?
         .finish()?;
-
     let reactor_key = source_builder.finish()?;
-    Ok((reactor_key, input_port))
+    Ok(EnclaveConnectionSource {
+        reactor_key,
+        input_port,
+    })
+}
+
+struct EnclaveConnectionTarget<T: runtime::ReactorData, Q: ActionTag> {
+    reactor_key: BuilderReactorKey,
+    output_port: TypedPortKey<T, Output>,
+    action_key: TypedActionKey<T, Q>,
 }
 
 /// Build the target portion
 ///
-/// The receiver-side of is built immediately into the `EnvBuilder`, and consists of an Action that triggers a Reaction that writes to the target port.
-fn build_enclave_connection_target<T: runtime::ReactorData + Clone>(
+/// The receiver-side of is built immediately into the `EnvBuilder`, and consists of an Action that triggers a Reaction
+/// that writes to the target port.
+fn build_enclave_connection_target<T: runtime::ReactorData + Clone, Q: ActionTag>(
     env: &mut EnvBuilder,
     parent_key: Option<BuilderReactorKey>,
-    physical: bool,
     after: Option<runtime::Duration>,
-) -> Result<(BuilderReactorKey, TypedPortKey<T, Output>, BuilderActionKey), BuilderError> {
+) -> Result<EnclaveConnectionTarget<T, Q>, BuilderError> {
     let mut target_builder = env.add_reactor("con_reactor_tgt", parent_key, None, (), false);
+    let action_key = target_builder.add_action::<T, Q>("con_act", after)?;
     let output_port = target_builder.add_output_port::<T>("con_out")?;
-    let action_key: BuilderActionKey = if physical {
-        target_builder
-            .add_physical_action::<T>("con_act", after)?
-            .into()
-    } else {
-        target_builder
-            .add_logical_action::<T>("con_act", after)?
-            .into()
-    };
-    let _ = target_builder
-        .add_reaction("con_react_tgt", |_| {
+
+    target_builder
+        .add_reaction(None)
+        .with_trigger(action_key)
+        .with_effect(output_port)
+        .with_defered_reaction_fn(move |_builder_parts| {
             runtime::ConnectionReceiverReactionFn::<T>::default().into()
         })
-        .with_action(action_key, 0, TriggerMode::TriggersAndUses)?
-        .with_port(output_port, 0, TriggerMode::EffectsOnly)?
         .finish()?;
+
     let reactor_key = target_builder.finish()?;
-    Ok((reactor_key, output_port, action_key))
+    Ok(EnclaveConnectionTarget {
+        reactor_key,
+        output_port,
+        action_key,
+    })
 }

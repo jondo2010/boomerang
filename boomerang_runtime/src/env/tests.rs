@@ -63,11 +63,11 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
         Reaction::new(
             "reactionOut",
             reaction_closure!(
-            ctx, reactor, ref_ports, _mut_ports, _actions => {
+            ctx, reactor, refs => {
                 assert_eq!(ctx.get_elapsed_logical_time(), Duration::ZERO);
                 let state = reactor.get_state_mut::<bool>().unwrap();
                 *state = true;
-                let port: InputRef<u32> = ref_ports.partition().unwrap();
+                let port: InputRef<u32> = refs.ports.partition().unwrap();
                 tracing::info!("portB value: {:?}", *port);
             }),
             None,
@@ -112,9 +112,9 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
         Reaction::new(
             "startup",
             reaction_closure!(
-            ctx, _state, _ref_ports, mut_ports, _actions => {
+            ctx, _state, refs=> {
                 assert_eq!(ctx.get_elapsed_logical_time(), Duration::ZERO);
-                let mut port: OutputRef<u32> = mut_ports.partition_mut().unwrap();
+                let mut port: OutputRef<u32> = refs.ports_mut.partition_mut().unwrap();
                 *port = Some(42);
             }),
             None,
@@ -126,7 +126,11 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
         std::iter::empty(),
     );
 
-    enclave_a.insert_startup_reaction((Level::from(0), reaction_startup), None);
+    // startup action triggers reactionStartup
+    let startup_action =
+        enclave_a.insert_action(|key| Action::<()>::new("startup", key, None, true).boxed());
+    enclave_a.insert_startup_action(startup_action, Tag::ZERO);
+    enclave_a.insert_action_trigger(startup_action, (Level::from(0), reaction_startup));
 
     // The sender-side has a reaction that is triggered by 'portA' and sends an async event to the receiver-side.
     let reaction_a = enclave_a.insert_reaction(

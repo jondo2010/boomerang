@@ -20,7 +20,7 @@ impl<'a, T: ReactorData> From<&'a mut dyn BaseAction> for ActionRef<'a, T> {
     }
 }
 
-impl<'a, T: ReactorData> ActionRef<'a, T> {
+impl<T: ReactorData> ActionRef<'_, T> {
     /// Return true if the action is present at the current tag
     pub fn is_present(&mut self, context: &Context) -> bool {
         self.0.store.get_current(context.tag).is_some()
@@ -35,9 +35,14 @@ impl<'a, T: ReactorData> ActionRef<'a, T> {
     pub fn set_value(&mut self, tag: Tag, value: T) {
         self.0.store.push(tag, value);
     }
+
+    /// Convert this [`ActionRef`] to an [`AsyncActionRef`]
+    pub fn to_async(self) -> AsyncActionRef<T> {
+        AsyncActionRef::from(self.0 as &dyn BaseAction)
+    }
 }
 
-impl<'a, T: ReactorData> ActionCommon<T> for ActionRef<'a, T> {
+impl<T: ReactorData> ActionCommon<T> for ActionRef<'_, T> {
     fn name(&self) -> &str {
         self.0.name()
     }
@@ -56,7 +61,7 @@ impl<'a, T: ReactorData> ActionCommon<T> for ActionRef<'a, T> {
 }
 
 /// [`AsyncActionRef`] is the type received by a user Reaction when they want to interact with an Action asynchronously.
-/// It is the asynchronous version of [`ActionRefMut`].
+/// It is the asynchronous version of [`ActionRef`].
 #[derive(Clone)]
 pub struct AsyncActionRef<T: ReactorData = ()> {
     name: String,

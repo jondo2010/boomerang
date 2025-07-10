@@ -12,7 +12,8 @@ mod key_set;
 pub mod port;
 pub mod reaction;
 mod reactor;
-mod refs;
+pub mod refs;
+mod refs_extract;
 #[cfg(feature = "replay")]
 pub mod replay;
 mod sched;
@@ -33,11 +34,11 @@ pub use key_set::KeySetLimits as ReactionSetLimits;
 pub use port::*;
 pub use reaction::{
     BoxedReactionFn, ConnectionReceiverReactionFn, ConnectionSenderReactionFn, Deadline,
-    EnclaveSenderReactionFn, FromRefs, Reaction, ReactionAdapter, ReactionFn, ReactionKey,
-    ReactionSet, Trigger,
+    EnclaveSenderReactionFn, FromRefs, Reaction, ReactionFn, ReactionKey, ReactionSet,
 };
 pub use reactor::*;
 pub use refs::{Refs, RefsMut};
+pub use refs_extract::{ReactionRefs, ReactionRefsExtract};
 pub use sched::*;
 pub use time::*;
 

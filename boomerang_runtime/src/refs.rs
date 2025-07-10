@@ -17,7 +17,7 @@
 //! });
 //! ```
 
-use std::{marker::PhantomData, mem::MaybeUninit, ptr::NonNull};
+use std::{fmt::Debug, marker::PhantomData, mem::MaybeUninit, ptr::NonNull};
 
 use crate::{BaseAction, BasePort};
 
@@ -29,7 +29,7 @@ pub struct Refs<'a, T: 'a + ?Sized> {
     _marker: PhantomData<&'a T>,
 }
 
-impl<T: std::fmt::Debug> std::fmt::Debug for Refs<'_, T> {
+impl<T: Debug> Debug for Refs<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let len = self.len();
         let slice = unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), len) };
@@ -96,7 +96,7 @@ pub struct RefsMut<'a, T: 'a + ?Sized> {
     _marker: PhantomData<&'a mut T>,
 }
 
-impl<T: std::fmt::Debug> std::fmt::Debug for RefsMut<'_, T> {
+impl<T: Debug> Debug for RefsMut<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let len = self.len();
         let slice = unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), len) };

@@ -23,6 +23,9 @@ tracy = ["tracing-tracy/enable"]
 ## Support for recording and replaying events
 replay = ["dep:serde"]
 
+## Support for the Boomerang derive macros
+derive = []
+
 [dependencies]
 document-features = { workspace = true }
 graphviz-rust = { version = "0.6", optional = true }

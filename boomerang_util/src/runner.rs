@@ -10,8 +10,10 @@
 //! ```
 
 use anyhow::Context;
+#[cfg(feature = "derive")]
+use boomerang::derive_support::Reactor;
 use boomerang::{
-    builder::{BuilderRuntimeParts, EnvBuilder, Reactor},
+    builder::{BuilderRuntimeParts, EnvBuilder, Reactor2},
     runtime,
 };
 use clap::Parser;
@@ -55,7 +57,7 @@ struct Args {
 ///
 /// * `name` - The name of the top-level reactor instance
 /// * `state` - The initial state of the top-level reactor -- this must match the associated `State` type of the
-///     reactor ([`Reactor::State`])
+///   reactor ([`Reactor::State`])
 /// * `config` - The runtime configuration for the reactor
 ///
 /// # Environment Variables
@@ -71,6 +73,7 @@ struct Args {
 /// # Returns
 ///
 /// This function returns a tuple containing the built reactor and a vector of runtime environments.
+#[cfg(feature = "derive")]
 pub fn build_and_test_reactor<R: Reactor>(
     name: &str,
     state: R::State,
@@ -102,6 +105,32 @@ pub fn build_and_test_reactor<R: Reactor>(
     Ok((reactor, envs_out))
 }
 
+pub fn build_and_test_reactor2<S: runtime::ReactorData, R: Reactor2<S>>(
+    reactor_builder: R,
+    name: &str,
+    state: S,
+    config: runtime::Config,
+) -> anyhow::Result<(R::Ports, Vec<runtime::Env>)> {
+    let mut env_builder = EnvBuilder::new();
+    let reactor = reactor_builder
+        .build(name, state, None, None, false, &mut env_builder)
+        .context("Error building top-level reactor!")?;
+
+    env_builder.validate_reactions()?;
+
+    let BuilderRuntimeParts {
+        enclaves,
+        aliases: _,
+        ..
+    } = env_builder
+        .into_runtime_parts()
+        .context("Error building environment!")?;
+
+    let envs_out = runtime::execute_enclaves(enclaves.into_iter(), config);
+    let envs_out = envs_out.into_iter().map(|(_, env)| env).collect();
+    Ok((reactor, envs_out))
+}
+
 /// Utility method to build and run a given top-level `Reactor`.
 ///
 /// This method is intended to be used from the `main` function of a binary.
@@ -110,7 +139,7 @@ pub fn build_and_test_reactor<R: Reactor>(
 ///
 /// * `name` - The name of the top-level reactor instance
 /// * `state` - The initial state of the top-level reactor -- this must match the associated `State` type of the
-///     reactor ([`Reactor::State`])
+///   reactor ([`Reactor::State`])
 ///
 /// Common arguments are parsed from the command line and passed to the scheduler:
 /// * `--full-graph`: Generate a graphviz graph of the entire reactor hierarchy
@@ -119,10 +148,15 @@ pub fn build_and_test_reactor<R: Reactor>(
 /// * `--fast-forward`: Run the scheduler in fast-forward mode
 /// * `--record-filename`: The filename to serialize recorded actions into
 /// * `--record-actions`: The list of fully-qualified actions to record, e.g., "snake::keyboard::key_press"
-pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow::Result<R> {
+pub fn build_and_run_reactor<S, R>(reactor: R, name: &str, state: S) -> anyhow::Result<R::Ports>
+where
+    S: runtime::ReactorData,
+    R: Reactor2<S>,
+{
     // build the reactor
     let mut env_builder = EnvBuilder::new();
-    let reactor = R::build(name, state, None, None, false, &mut env_builder)
+    let reactor = reactor
+        .build(name, state, None, None, false, &mut env_builder)
         .context("Error building top-level reactor!")?;
 
     let args = Args::parse();

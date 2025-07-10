@@ -119,7 +119,7 @@ impl<T: ReactorData> BasePort for Port<T> {
 /// See also: [`OutputRef`]
 pub struct InputRef<'a, T: ReactorData = ()>(&'a Port<T>);
 
-impl<'a, T: ReactorData> InputRef<'a, T> {
+impl<T: ReactorData> InputRef<'_, T> {
     pub fn name(&self) -> &str {
         self.0.get_name()
     }
@@ -135,7 +135,7 @@ impl<'a, T: ReactorData> From<&'a Port<T>> for InputRef<'a, T> {
     }
 }
 
-impl<'a, T: ReactorData> Deref for InputRef<'a, T> {
+impl<T: ReactorData> Deref for InputRef<'_, T> {
     type Target = <Port<T> as Deref>::Target;
 
     fn deref(&self) -> &Self::Target {
@@ -159,7 +159,7 @@ impl<'a, T: ReactorData> From<&'a (dyn BasePort)> for InputRef<'a, T> {
 /// See also: [`InputRef`]
 pub struct OutputRef<'a, T: ReactorData = ()>(&'a mut Port<T>);
 
-impl<'a, T: ReactorData> OutputRef<'a, T> {
+impl<T: ReactorData> OutputRef<'_, T> {
     pub fn name(&self) -> &str {
         self.0.get_name()
     }
@@ -175,7 +175,7 @@ impl<'a, T: ReactorData> From<&'a mut Port<T>> for OutputRef<'a, T> {
     }
 }
 
-impl<'a, T: ReactorData> Deref for OutputRef<'a, T> {
+impl<T: ReactorData> Deref for OutputRef<'_, T> {
     type Target = <Port<T> as Deref>::Target;
 
     fn deref(&self) -> &Self::Target {
@@ -183,7 +183,7 @@ impl<'a, T: ReactorData> Deref for OutputRef<'a, T> {
     }
 }
 
-impl<'a, T: ReactorData> DerefMut for OutputRef<'a, T> {
+impl<T: ReactorData> DerefMut for OutputRef<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.0.deref_mut()
     }

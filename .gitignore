@@ -1,6 +1,5 @@
-/target
-/boomerang/target
+target
+boomerang/target
 Cargo.lock
 *.svg
-*.dot
 *.docs-cache/

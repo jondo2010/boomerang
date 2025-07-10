@@ -5,7 +5,7 @@ use std::{marker::PhantomPinned, pin::Pin, ptr::NonNull};
 use crate::{
     refs::{Refs, RefsMut},
     ActionKey, BaseAction, BasePort, BaseReactor, CommonContext, Context, Deadline, PortKey,
-    Reaction, ReactionKey, ReactorData, ReactorKey, Tag, TriggerRes,
+    Reaction, ReactionKey, ReactionRefs, ReactorData, ReactorKey, Tag, TriggerRes,
 };
 
 use super::{Env, ReactionGraph};
@@ -58,13 +58,13 @@ impl<'a> ReactionTriggerCtx<'a> {
 
         self.context.reset_for_reaction(tag);
 
-        self.reaction.body.trigger(
-            self.context,
-            self.reactor,
-            self.ref_ports,
-            self.mut_ports,
-            self.actions,
-        );
+        let refs = ReactionRefs {
+            ports: self.ref_ports,
+            ports_mut: self.mut_ports,
+            actions: self.actions,
+        };
+
+        self.reaction.body.trigger(self.context, self.reactor, refs);
 
         &self.context.trigger_res
     }

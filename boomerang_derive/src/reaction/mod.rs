@@ -5,7 +5,7 @@ use darling::{
     util, FromDeriveInput, FromField, FromMeta,
 };
 use quote::{quote, ToTokens};
-use syn::{Expr, GenericParam, Generics, Ident, Type};
+use syn::{Expr, Generics, Ident, Type};
 
 mod from_defs;
 mod reaction_field_inner;
@@ -145,7 +145,7 @@ impl TryFrom<ReactionReceiver> for Reaction {
         let mut combined_generics = value.generics.clone();
         combined_generics
             .params
-            .extend(value.bounds.iter().cloned().map(GenericParam::from));
+            .extend(value.bounds.iter().cloned());
 
         let fromdefs = FromDefsImpl::new(&value, &combined_generics)?;
 
@@ -288,7 +288,6 @@ impl ToTokens for Reaction {
             quote! {
                 let mut __reaction = __reaction.with_action(
                     __startup_action,
-                    0,
                     ::boomerang::builder::TriggerMode::TriggersOnly
                 )?;
             }
@@ -298,7 +297,6 @@ impl ToTokens for Reaction {
             quote! {
                 let mut __reaction = __reaction.with_action(
                     __shutdown_action,
-                    0,
                     ::boomerang::builder::TriggerMode::TriggersOnly
                 )?;
             }
@@ -308,13 +306,13 @@ impl ToTokens for Reaction {
             #fromdefs_impl
 
             #[automatically_derived]
-            impl #impl_generics ::boomerang::builder::Reaction<#reactor> for #ident #type_generics #where_clause {
-                fn build<'builder>(
+            impl #impl_generics ::boomerang::builder::derive_support::Reaction<#reactor> for #ident #type_generics #where_clause {
+                fn build<'builder, S: runtime::ReactorData>(
                     name: &str,
                     reactor: &#reactor,
-                    builder: &'builder mut ::boomerang::builder::ReactorBuilderState,
+                    builder: &'builder mut ::boomerang::builder::ReactorBuilderState<S>,
                 ) -> Result<
-                    ::boomerang::builder::ReactionBuilderState<'builder>,
+                    ::boomerang::builder::derive_support::DeriveReactionBuilder<'builder>,
                     ::boomerang::builder::BuilderError
                 >
                 {
@@ -324,11 +322,11 @@ impl ToTokens for Reaction {
                     let __shutdown_action = builder.get_shutdown_action();
 
                     let mut __reaction = {
-                        let wrapper = ::boomerang::runtime::ReactionAdapter::<
+                        let wrapper = ::boomerang::builder::derive_support::ReactionAdapter::<
                             #ident #inner_type_generics,
-                            <#reactor as ::boomerang::builder::Reactor>::State
+                            <#reactor as ::boomerang::builder::derive_support::Reactor>::State
                         >::default();
-                        builder.add_reaction(name, wrapper.defer())
+                        builder.add_derive_reaction(name, wrapper.defer())
                     };
 
                     #trigger_startup

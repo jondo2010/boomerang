@@ -119,7 +119,7 @@ impl<'a, K: Key, V> Iterator for Iter<'a, K, V> {
     }
 }
 
-impl<'a, K: Key, V> ExactSizeIterator for Iter<'a, K, V> {
+impl<K: Key, V> ExactSizeIterator for Iter<'_, K, V> {
     fn len(&self) -> usize {
         self.values_left
     }
@@ -139,7 +139,7 @@ impl<'a, K: Key, V> Iterator for IterMut<'a, K, V> {
     }
 }
 
-impl<'a, K: Key, V> ExactSizeIterator for IterMut<'a, K, V> {
+impl<K: Key, V> ExactSizeIterator for IterMut<'_, K, V> {
     fn len(&self) -> usize {
         self.values_left
     }
@@ -203,7 +203,7 @@ impl<K: Key, V> TinySecondaryMap<K, V> {
     }
 
     pub fn contains_key(&self, key: K) -> bool {
-        self.data.get(key.index()).map_or(false, Option::is_some)
+        self.data.get(key.index()).is_some_and(Option::is_some)
     }
 
     /// Returns a reference to the value corresponding to the key.

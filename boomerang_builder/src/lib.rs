@@ -24,6 +24,8 @@ pub use macro_support::{Reactor2, ReactorPorts};
 #[cfg(feature = "graphviz")]
 pub mod plantuml;
 
+pub mod foo;
+
 pub use action::*;
 pub use env::*;
 pub use fqn::*;

@@ -34,7 +34,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: swatinem/rust-cache@v2
       - name: fetch Rust
         uses: dtolnay/rust-toolchain@master
@@ -84,7 +84,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: swatinem/rust-cache@v2
       - name: fetch Rust
         uses: dtolnay/rust-toolchain@master

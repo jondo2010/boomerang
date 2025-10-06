@@ -147,19 +147,16 @@ impl Store {
         // Pin the Box first, then use projection for safe access
         let mut pinned = Box::pin(res);
 
+        // Use pin-project's projection to safely access the pinned fields
+        let this = pinned.as_mut().project();
+        let inner = this.inner.get_mut();
+        let caches = this.caches.get_mut();
+
         // SAFETY: We're initializing the caches with self-references. This is safe because:
         // 1. The data is already pinned and won't move
         // 2. We're creating pointers to pinned data
         // 3. The Store will remain pinned for its entire lifetime
         unsafe {
-            // Get a mutable reference to the pinned struct through projection
-            let pin_mut = pinned.as_mut();
-            let ptr = pin_mut.get_unchecked_mut() as *mut Store;
-            
-            // Access fields through the raw pointer for initialization
-            let inner = &mut (*ptr).inner;
-            let caches = &mut (*ptr).caches;
-            
             let contexts = inner
                 .contexts
                 .iter_many_unchecked_mut(inner.reactions.keys())
@@ -282,13 +279,13 @@ impl Store {
         self: &'a mut Pin<Box<Self>>,
         keys: impl Iterator<Item = ReactionKey> + 'a,
     ) -> impl Iterator<Item = ReactionTriggerCtx<'a>> + 'a {
-        // SAFETY: We use get_unchecked_mut to extend the lifetime of the mutable reference
-        // to the caches from the projection's temporary scope to 'a. This is safe because:
+        // SAFETY: We use pin-project's projection to safely access the caches field.
+        // The lifetime 'a properly represents the borrow of the Store. This is safe because:
         // 1. The Store is pinned and won't move
         // 2. The caller must uphold the safety requirements documented above
         // 3. The returned ReactionTriggerCtx instances borrow from data that lives as long as
         //    the Store itself (lifetime 'a)
-        let caches = self.as_mut().project().caches.get_unchecked_mut();
+        let caches = self.as_mut().project().caches.get_mut();
         caches
             .iter_many_unchecked_mut(keys)
             .map(ReactionTriggerCtx::from)

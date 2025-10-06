@@ -3,7 +3,7 @@
 use std::{fmt::Display, ops::Index};
 
 use crate::{
-    runtime, ActionBuilder, BasePortBuilder, BuilderActionKey, BuilderPortKey, BuilderReactionKey,
+    ActionBuilder, BasePortBuilder, BuilderActionKey, BuilderPortKey, BuilderReactionKey,
     BuilderReactorKey, EnvBuilder, ParentReactorBuilder, ReactionBuilder, ReactorBuilder,
 };
 
@@ -291,7 +291,7 @@ impl Fqn for BuilderPortKey {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Input, PortBuilder};
+    use crate::{runtime, Input, PortBuilder};
 
     use super::*;
 

@@ -387,7 +387,7 @@ impl<'a> ReactorBuilderState<'a> {
     }
 
     /// Add a new reaction to this reactor.
-    pub fn add_reaction<F>(&mut self, name: &str, reaction_builder_fn: F) -> ReactionBuilderState
+    pub fn add_reaction<F>(&mut self, name: &str, reaction_builder_fn: F) -> ReactionBuilderState<'_>
     where
         F: for<'any> FnOnce(&'any BuilderRuntimeParts) -> runtime::BoxedReactionFn + 'static,
     {

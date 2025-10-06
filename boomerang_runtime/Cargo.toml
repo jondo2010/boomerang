@@ -35,6 +35,7 @@ kanal = "0.1"
 document-features = { workspace = true }
 downcast-rs = "1.2"
 itertools.workspace = true
+pin-project = "1.1"
 rayon = { version = "1.7", optional = true }
 serde = { workspace = true, optional = true, features = ["derive"] }
 thiserror.workspace = true

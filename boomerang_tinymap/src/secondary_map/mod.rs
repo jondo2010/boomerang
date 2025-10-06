@@ -256,7 +256,7 @@ impl<K: Key, V> TinySecondaryMap<K, V> {
     }
 
     /// Returns an iterator over the values in the map, ordered by key.
-    pub fn values(&self) -> ValuesIter<V> {
+    pub fn values(&self) -> ValuesIter<'_, V> {
         ValuesIter {
             num_values: self.num_values,
             inner: self.data.iter().flatten(),

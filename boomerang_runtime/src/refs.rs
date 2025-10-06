@@ -216,7 +216,7 @@ where
 // PartitionMut for BasePort arrays
 impl<'a, P, const N: usize> PartitionMut<'a, dyn BasePort> for [P; N]
 where
-    P: From<&'a mut (dyn BasePort)>,
+    P: From<&'a mut dyn BasePort>,
 {
     fn part_mut(mut refs: RefsMut<'a, dyn BasePort>) -> Option<(Self, RefsMut<'a, dyn BasePort>)> {
         if refs.len() < N {

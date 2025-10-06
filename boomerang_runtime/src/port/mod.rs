@@ -143,7 +143,7 @@ impl<'a, T: ReactorData> Deref for InputRef<'a, T> {
     }
 }
 
-impl<'a, T: ReactorData> From<&'a (dyn BasePort)> for InputRef<'a, T> {
+impl<'a, T: ReactorData> From<&'a dyn BasePort> for InputRef<'a, T> {
     fn from(port: &'a dyn BasePort) -> Self {
         InputRef::from(
             port.downcast_ref::<Port<T>>()

@@ -95,7 +95,7 @@ impl EnvBuilder {
         bank_info: Option<runtime::BankInfo>,
         state: S,
         is_enclave: bool,
-    ) -> ReactorBuilderState {
+    ) -> ReactorBuilderState<'_> {
         ReactorBuilderState::new(name, parent, bank_info, state, is_enclave, self)
     }
 
@@ -103,7 +103,7 @@ impl EnvBuilder {
     pub fn get_reactor_builder(
         &mut self,
         reactor_key: BuilderReactorKey,
-    ) -> Result<ReactorBuilderState, BuilderError> {
+    ) -> Result<ReactorBuilderState<'_>, BuilderError> {
         if !self.reactor_builders.contains_key(reactor_key) {
             return Err(BuilderError::ReactorKeyNotFound(reactor_key));
         }
@@ -249,7 +249,7 @@ impl EnvBuilder {
         name: &str,
         reactor_key: BuilderReactorKey,
         reaction_builder_fn: F,
-    ) -> ReactionBuilderState
+    ) -> ReactionBuilderState<'_>
     where
         F: FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn + 'static,
     {

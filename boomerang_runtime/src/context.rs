@@ -180,7 +180,10 @@ impl Context {
     ) {
         let tag_delay = action.min_delay() + delay.unwrap_or_default();
 
-        let new_tag = if action.is_logical() {
+        // Compute the base tag for this scheduling request using the existing
+        // semantics, then advance the microstep if there are already entries at
+        // the same logical offset.
+        let base_tag = if action.is_logical() {
             // Logical actions are scheduled at the current logical time + tag_delay
             self.tag.delay(tag_delay)
         } else {
@@ -188,6 +191,8 @@ impl Context {
             Tag::from_physical_time(self.get_start_time(), self.get_physical_time())
                 .delay(tag_delay)
         };
+
+        let new_tag = action.next_tag_for_offset(base_tag);
 
         // Push the new value into the store
         action.set_value(new_tag, value);
@@ -305,4 +310,43 @@ pub fn build_reaction_contexts(
             (reaction_key, ctx)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{action::Action, event::AsyncEvent, ActionKey, BaseAction};
+
+    #[test]
+    fn schedule_action_advances_microsteps_for_same_delay() {
+        let (async_tx, _async_rx) = kanal::unbounded::<AsyncEvent>();
+        let (_shutdown_tx, shutdown_rx) = keepalive::channel();
+
+        let mut ctx = Context::new(
+            EnclaveKey::from(0),
+            std::time::Instant::now(),
+            None,
+            async_tx,
+            shutdown_rx,
+        );
+
+        ctx.reset_for_reaction(Tag::ZERO);
+
+        let mut action = Action::<u32>::new("test", ActionKey::from(0), None, true);
+        let mut action_ref = ActionRef::<u32>::from(&mut action as &mut dyn BaseAction);
+
+        ctx.schedule_action(&mut action_ref, 1, None);
+        ctx.schedule_action(&mut action_ref, 2, None);
+
+        let tags: Vec<Tag> = ctx
+            .trigger_res
+            .scheduled_actions
+            .iter()
+            .map(|(_, tag)| *tag)
+            .collect();
+
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags[0].offset(), tags[1].offset());
+        assert_eq!(tags[1].microstep(), tags[0].microstep() + 1);
+    }
 }

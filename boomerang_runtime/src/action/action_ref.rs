@@ -51,6 +51,18 @@ impl<T: ReactorData> ActionRef<'_, T> {
         self.0.store.push(tag, value);
     }
 
+    /// Determine the next tag for the given base tag, advancing the microstep
+    /// to avoid overwriting values scheduled at the same offset.
+    pub fn next_tag_for_offset(&mut self, base: Tag) -> Tag {
+        let offset = base.offset();
+        let microstep = self
+            .0
+            .store
+            .next_microstep_for_offset(offset, base.microstep());
+
+        Tag::new(offset, microstep)
+    }
+
     /// Convert this [`ActionRef`] to an [`AsyncActionRef`]
     pub fn to_async(self) -> AsyncActionRef<T> {
         AsyncActionRef::try_from(DynActionRef(self.0 as &dyn BaseAction))
@@ -97,11 +109,11 @@ impl<'a, T: ReactorData> TryFrom<DynActionRef<'a>> for AsyncActionRef<T> {
             .0
             .downcast_ref::<Action<T>>()
             .map(|action| Self {
-            name: action.name().into(),
-            key: action.key(),
-            min_delay: action.min_delay(),
-            is_logical: action.is_logical(),
-            _phantom: Default::default(),
+                name: action.name().into(),
+                key: action.key(),
+                min_delay: action.min_delay(),
+                is_logical: action.is_logical(),
+                _phantom: Default::default(),
             })
             .ok_or_else(|| ReactionRefsError::type_mismatch("action", std::any::type_name::<T>(), found))
     }

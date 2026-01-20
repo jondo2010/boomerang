@@ -11,14 +11,14 @@
 //! - Retrieval follows the monotonically increasing tag order of the scheduler.
 //! - Requests for the same current tag will return the same value.
 
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::fmt::Debug;
 use std::sync::Mutex;
 use std::{cmp::Ordering, sync::Arc};
 
 use downcast_rs::Downcast;
 
-use crate::{ReactorData, Tag};
+use crate::{Duration, ReactorData, Tag};
 
 #[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -65,6 +65,8 @@ downcast_rs::impl_downcast!(BaseActionStore);
 pub struct ActionStore<T: ReactorData> {
     heap: BinaryHeap<ActionEntry<T>>,
     counter: usize,
+    /// Tracks the next microstep to use for a given logical offset.
+    next_microstep: HashMap<Duration, usize>,
 }
 
 impl<T: ReactorData> Debug for ActionStore<T> {
@@ -81,6 +83,7 @@ impl<T: ReactorData> ActionStore<T> {
         ActionStore {
             heap: BinaryHeap::new(),
             counter: 0,
+            next_microstep: HashMap::new(),
         }
     }
 
@@ -93,6 +96,26 @@ impl<T: ReactorData> ActionStore<T> {
             data,
         });
         self.counter += 1;
+
+        // Track the next microstep to allocate for this offset.
+        let entry = self
+            .next_microstep
+            .entry(tag.offset())
+            .or_insert(tag.microstep().saturating_add(1));
+        *entry = (*entry).max(tag.microstep().saturating_add(1));
+    }
+
+    /// Compute the next microstep for a given logical offset, ensuring it is at
+    /// least `min_microstep` and greater than any existing entry at the same
+    /// offset.
+    #[inline]
+    pub fn next_microstep_for_offset(&self, offset: Duration, min_microstep: usize) -> usize {
+        self
+            .next_microstep
+            .get(&offset)
+            .copied()
+            .unwrap_or(min_microstep)
+            .max(min_microstep)
     }
 
     pub fn clear_older_than(&mut self, clear_tag: Tag) {

@@ -1,8 +1,6 @@
 use std::fmt::{Debug, Display};
 
-use crate::{
-    ActionKey, Duration, EnclaveKey, LevelReactionKey, ReactionGraph, ReactionSet, ReactorData, Tag,
-};
+use crate::{ActionKey, Duration, EnclaveKey, ReactionSet, ReactorData, Tag};
 
 /// `ScheduledEvent` is used internally by the scheduler loop in the event queue. The dependent reactions are already expanded into a single reaction set.
 #[derive(Debug, Clone)]
@@ -161,6 +159,7 @@ impl AsyncEvent {
     }
 
     /// Create a logical event.
+    #[allow(dead_code)]
     pub(crate) fn logical(key: ActionKey, tag: Tag, value: Box<dyn ReactorData>) -> Self {
         AsyncEvent::Logical { tag, key, value }
     }
@@ -177,22 +176,6 @@ impl AsyncEvent {
     /// Create a shutdown event.
     pub(crate) fn shutdown(delay: Duration) -> Self {
         AsyncEvent::Shutdown { delay }
-    }
-
-    /// Get an iterator over the downstream reactions of this event.
-    pub fn downstream_reactions<'a>(
-        &self,
-        reaction_graph: &'a ReactionGraph,
-    ) -> impl Iterator<Item = LevelReactionKey> + 'a {
-        match self {
-            AsyncEvent::TagRelease { .. } => [].iter().copied(),
-            AsyncEvent::TagReleaseProvisional { .. } => [].iter().copied(),
-            AsyncEvent::Logical { key, .. } => reaction_graph.action_triggers[*key].iter().copied(),
-            AsyncEvent::Physical { key, .. } => {
-                reaction_graph.action_triggers[*key].iter().copied()
-            }
-            AsyncEvent::Shutdown { .. } => reaction_graph.shutdown_reactions.iter().copied(),
-        }
     }
 }
 

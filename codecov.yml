@@ -34,10 +34,6 @@ component_management:
       paths:
         - boomerang_builder/**
 
-    - component_id: boomerang_derive
-      paths:
-        - boomerang_derive/**
-
     - component_id: boomerang_runtime
       name: boomerang_runtime
       paths:

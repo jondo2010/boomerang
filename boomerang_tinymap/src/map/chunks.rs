@@ -51,6 +51,7 @@ where
     }
 }
 
+#[allow(dead_code)]
 pub struct PtrChunks<'a, K: Key, V, IO, II>(Chunks<'a, K, V, IO, II>)
 where
     IO: Iterator<Item = II>,

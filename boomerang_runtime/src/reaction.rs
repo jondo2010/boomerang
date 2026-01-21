@@ -1,10 +1,8 @@
 use std::{fmt::Debug, sync::RwLock};
 
 use crate::{
-    key_set::KeySet,
-    refs::{Refs, RefsMut},
-    ActionCommon, ActionRef, AsyncActionRef, BaseAction, BasePort, BaseReactor, CommonContext,
-    Context, Duration, InputRef, OutputRef, Reactor, ReactorData, SendContext,
+    key_set::KeySet, ActionCommon, ActionRef, AsyncActionRef, BaseReactor, CommonContext, Context,
+    Duration, InputRef, OutputRef, ReactionRefs, ReactionRefsExtract, ReactorData, SendContext,
 };
 
 tinymap::key_type! { pub ReactionKey }
@@ -16,9 +14,7 @@ pub trait ReactionFn<'store>: Send + Sync {
         &mut self,
         ctx: &'store mut Context,
         reactor: &'store mut dyn BaseReactor,
-        ports: Refs<'store, dyn BasePort>,
-        ports_mut: RefsMut<'store, dyn BasePort>,
-        actions: RefsMut<'store, dyn BaseAction>,
+        refs: ReactionRefs<'store>,
     );
 }
 
@@ -28,114 +24,73 @@ pub type BoxedHandlerFn = Box<dyn Fn() + Send + Sync>;
 
 /// Conversion trait for creating a Reaction struct from port and action references.
 ///
-/// This trait is typically automatically implemented by the derive macro.
+/// This trait is typically implemented by macro-generated code.
 pub trait FromRefs {
     type Marker<'store>;
-
-    fn from_refs<'store>(
-        ports: Refs<'store, dyn BasePort>,
-        ports_mut: RefsMut<'store, dyn BasePort>,
-        actions: RefsMut<'store, dyn BaseAction>,
-    ) -> Self::Marker<'store>;
+    fn from_refs(refs: ReactionRefs<'_>) -> Self::Marker<'_>;
 }
 
-/// The `Trigger` trait should be implemented by the user for each Reaction struct.
-///
-/// Type parameter `S` is the state type of the Reactor.
-pub trait Trigger<S: ReactorData> {
-    fn trigger(self, ctx: &mut Context, state: &mut S);
-}
-
-/// Adapter struct for implementing the `ReactionFn` trait for a Reaction struct.
-///
-/// The `ReactionAdapter` struct is used to convert a Reaction struct to a `Box<dyn ReactionFn>`. This is the mechanism
-/// used by the derive-generated code to implement the Reaction trigger interface.
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct ReactionAdapter<Reaction, State>(std::marker::PhantomData<fn() -> (Reaction, State)>);
-
-impl<Reaction, State> Default for ReactionAdapter<Reaction, State> {
-    fn default() -> Self {
-        Self(Default::default())
-    }
-}
-
-impl<Reaction, State> From<ReactionAdapter<Reaction, State>> for BoxedReactionFn
+/// We implement [`ReactionFn`] for any `Fn` that straightforwardly matches the signature.
+impl<F> ReactionFn<'_> for F
 where
-    Reaction: FromRefs + 'static,
-    for<'store> Reaction::Marker<'store>: 'store + Trigger<State>,
-    State: ReactorData,
+    F: for<'any> Fn(&mut Context, &mut dyn BaseReactor, ReactionRefs<'any>) + Send + Sync + 'static,
 {
-    fn from(adapter: ReactionAdapter<Reaction, State>) -> Self {
-        Box::new(adapter)
+    fn trigger(&mut self, ctx: &mut Context, reactor: &mut dyn BaseReactor, refs: ReactionRefs) {
+        (self)(ctx, reactor, refs)
     }
 }
 
-impl<'store, Reaction, S> ReactionFn<'store> for ReactionAdapter<Reaction, S>
+/// Anything that implements [`ReactionFn`] can be converted to a [`BoxedReactionFn`].
+impl<T> From<T> for BoxedReactionFn
 where
-    Reaction: FromRefs,
-    Reaction::Marker<'store>: 'store + Trigger<S>,
+    T: for<'any> ReactionFn<'any> + 'static,
+{
+    fn from(value: T) -> Self {
+        Box::new(value)
+    }
+}
+
+/// Adapter struct for implementing the [`ReactionFn`] trait for a generic FnMut with fields that implement `ReactionRefsExtract`.
+pub struct FnRefsAdapter<S, Fields, F>(F, std::marker::PhantomData<fn() -> (S, Fields)>)
+where
     S: ReactorData,
-{
-    #[inline(always)]
-    fn trigger(
-        &mut self,
-        ctx: &'store mut Context,
-        reactor: &'store mut dyn BaseReactor,
-        ports: Refs<'store, dyn BasePort>,
-        ports_mut: RefsMut<'store, dyn BasePort>,
-        actions: RefsMut<'store, dyn BaseAction>,
-    ) {
-        let reactor: &mut Reactor<S> = reactor
-            .downcast_mut()
-            .expect("Unable to downcast reactor state");
+    Fields: ReactionRefsExtract,
+    F: for<'any> Fn(&mut Context, &mut S, Fields::Ref<'any>) + Send + Sync + 'static;
 
-        let reaction = Reaction::from_refs(ports, ports_mut, actions);
-        reaction.trigger(ctx, &mut reactor.state);
+impl<S, Fields, F> FnRefsAdapter<S, Fields, F>
+where
+    S: ReactorData,
+    Fields: ReactionRefsExtract,
+    F: for<'any> Fn(&mut Context, &mut S, Fields::Ref<'any>) + Send + Sync + 'static,
+{
+    pub fn new(f: F) -> Self {
+        Self(f, Default::default())
     }
 }
 
-/// Wrapper struct for implementing the `ReactionFn` trait for a generic FnMut function.
-///
-/// An `FnAdapter` can be created from a closure or function pointer and then converted to a `Box<dyn ReactionFn>`.
-pub struct FnAdapter<F>(F);
-
-impl<F> From<F> for BoxedReactionFn
+impl<S, Fields, F> ReactionFn<'_> for FnRefsAdapter<S, Fields, F>
 where
-    F: for<'store> Fn(
-            &'store mut Context,
-            &'store mut dyn BaseReactor,
-            Refs<'store, dyn BasePort>,
-            RefsMut<'store, dyn BasePort>,
-            RefsMut<'store, dyn BaseAction>,
-        ) + Send
-        + Sync
-        + 'static,
-{
-    fn from(f: F) -> Self {
-        Box::new(FnAdapter(f))
-    }
-}
-
-impl<'store, F> ReactionFn<'store> for FnAdapter<F>
-where
-    F: Fn(
-            &'store mut Context,
-            &'store mut dyn BaseReactor,
-            Refs<'store, dyn BasePort>,
-            RefsMut<'store, dyn BasePort>,
-            RefsMut<'store, dyn BaseAction>,
-        ) + Sync
-        + Send,
+    S: ReactorData,
+    Fields: ReactionRefsExtract,
+    F: for<'any> Fn(&mut Context, &mut S, Fields::Ref<'any>) + Send + Sync + 'static,
 {
     fn trigger(
         &mut self,
-        ctx: &'store mut Context,
-        state: &'store mut dyn BaseReactor,
-        ports: Refs<'store, dyn BasePort>,
-        ports_mut: RefsMut<'store, dyn BasePort>,
-        actions: RefsMut<'store, dyn BaseAction>,
+        ctx: &mut Context,
+        reactor: &mut dyn BaseReactor,
+        mut refs: ReactionRefs,
     ) {
-        (self.0)(ctx, state, ports, ports_mut, actions);
+        let state = reactor.get_state_mut::<S>().expect("state");
+
+        let fields = match Fields::extract(&mut refs) {
+            Ok(fields) => fields,
+            Err(error) => {
+                let fields_type = std::any::type_name::<Fields>();
+                panic!("Failed to extract reaction references ({fields_type}): {error}")
+            }
+        };
+
+        (self.0)(ctx, state, fields)
     }
 }
 
@@ -150,12 +105,6 @@ pub struct EnclaveSenderReactionFn<T: ReactorData + Clone> {
     remote_action_ref: AsyncActionRef<T>,
     /// The optional delay to apply to the event.
     delay: Option<Duration>,
-}
-
-impl<T: ReactorData + Clone> From<EnclaveSenderReactionFn<T>> for BoxedReactionFn {
-    fn from(value: EnclaveSenderReactionFn<T>) -> Self {
-        Box::new(value)
-    }
 }
 
 impl<T: ReactorData + Clone> EnclaveSenderReactionFn<T> {
@@ -177,11 +126,15 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for EnclaveSenderReactio
         &mut self,
         ctx: &'store mut Context,
         _state: &'store mut dyn BaseReactor,
-        ports: Refs<'store, dyn BasePort>,
-        _ports_mut: RefsMut<'store, dyn BasePort>,
-        _actions: RefsMut<'store, dyn BaseAction>,
+        refs: ReactionRefs<'store>,
     ) {
-        let port: InputRef<T> = ports.partition().expect("Expected a port");
+        let port: InputRef<T> = match refs.ports.partition() {
+            Ok(port) => port,
+            Err(error) => {
+                tracing::error!(?error, "Failed to destructure ports");
+                return;
+            }
+        };
         if let Some(value) = (*port).as_ref() {
             //TODO something nicer here
             if self.remote_action_ref.is_logical() {
@@ -233,23 +186,28 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for ConnectionSenderReac
         &mut self,
         ctx: &'store mut Context,
         _reactor: &'store mut dyn BaseReactor,
-        ports: Refs<'store, dyn BasePort>,
-        _ports_mut: RefsMut<'store, dyn BasePort>,
-        actions: RefsMut<'store, dyn BaseAction>,
+        refs: ReactionRefs<'store>,
     ) {
-        let mut action: ActionRef<T> = actions.partition_mut().unwrap();
-        let port: InputRef<T> = ports.partition().unwrap();
+        let mut action: ActionRef<T> = match refs.actions.partition_mut() {
+            Ok(action) => action,
+            Err(error) => {
+                tracing::error!(?error, "Failed to destructure actions");
+                return;
+            }
+        };
+
+        let port: InputRef<T> = match refs.ports.partition() {
+            Ok(port) => port,
+            Err(error) => {
+                tracing::error!(?error, "Failed to destructure ports");
+                return;
+            }
+        };
         if let Some(value) = (*port).as_ref() {
             ctx.schedule_action(&mut action, value.clone(), None);
         } else {
             tracing::warn!("Port is empty, skipping action send");
         }
-    }
-}
-
-impl<T: ReactorData + Clone> From<ConnectionSenderReactionFn<T>> for BoxedReactionFn {
-    fn from(value: ConnectionSenderReactionFn<T>) -> Self {
-        Box::new(value)
     }
 }
 
@@ -274,23 +232,28 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for ConnectionReceiverRe
         &mut self,
         ctx: &'store mut Context,
         _reactor: &'store mut dyn BaseReactor,
-        _ports: Refs<'store, dyn BasePort>,
-        ports_mut: RefsMut<'store, dyn BasePort>,
-        actions: RefsMut<'store, dyn BaseAction>,
+        refs: ReactionRefs<'store>,
     ) {
-        let mut action: ActionRef<T> = actions.partition_mut().unwrap();
-        let mut port: OutputRef<T> = ports_mut.partition_mut().unwrap();
+        let mut action: ActionRef<T> = match refs.actions.partition_mut() {
+            Ok(action) => action,
+            Err(error) => {
+                tracing::error!(?error, "Failed to destructure actions");
+                return;
+            }
+        };
+
+        let mut port: OutputRef<T> = match refs.ports_mut.partition_mut() {
+            Ok(port) => port,
+            Err(error) => {
+                tracing::error!(?error, "Failed to destructure ports");
+                return;
+            }
+        };
         if let Some(value) = ctx.get_action_value(&mut action) {
             *port = Some(value.clone());
         } else {
             tracing::warn!("Action is empty, skipping port update");
         }
-    }
-}
-
-impl<T: ReactorData + Clone> From<ConnectionReceiverReactionFn<T>> for BoxedReactionFn {
-    fn from(value: ConnectionReceiverReactionFn<T>) -> Self {
-        Box::new(value)
     }
 }
 
@@ -342,34 +305,26 @@ impl Reaction {
 }
 
 /// An empty reaction function that does nothing. Used by the [`reaction_closure`] macro.
-pub fn empty_reaction(
-    _ctx: &mut Context,
-    _reactor: &mut dyn BaseReactor,
-    _ref_ports: Refs<dyn BasePort>,
-    _mut_ports: RefsMut<dyn BasePort>,
-    _actions: RefsMut<dyn BaseAction>,
-) {
+pub fn empty_reaction(_ctx: &mut Context, _reactor: &mut dyn BaseReactor, _refs: ReactionRefs<'_>) {
 }
 
 /// Timer ReactionFn for timer actions
 pub struct TimerFn(pub Option<Duration>);
-
-impl From<TimerFn> for BoxedReactionFn {
-    fn from(value: TimerFn) -> Self {
-        Box::new(value)
-    }
-}
 
 impl<'store> ReactionFn<'store> for TimerFn {
     fn trigger(
         &mut self,
         ctx: &'store mut Context,
         _reactor: &'store mut dyn BaseReactor,
-        _ports: Refs<'store, dyn BasePort>,
-        _ports_mut: RefsMut<'store, dyn BasePort>,
-        actions: RefsMut<'store, dyn BaseAction>,
+        refs: ReactionRefs<'store>,
     ) {
-        let mut timer: ActionRef = actions.partition_mut().expect("Expected a timer action");
+        let mut timer: ActionRef = match refs.actions.partition_mut() {
+            Ok(timer) => timer,
+            Err(error) => {
+                tracing::error!(?error, "Failed to destructure timer action");
+                return;
+            }
+        };
         ctx.schedule_action(&mut timer, (), self.0);
     }
 }
@@ -382,7 +337,7 @@ impl<'store> ReactionFn<'store> for TimerFn {
 ///
 /// ```rust
 /// # use boomerang_runtime::reaction_closure;
-/// let closure = reaction_closure!(ctx, _reactor, _ref_ports, _mut_ports, _actions => {
+/// let closure = reaction_closure!(ctx, _reactor, _refs => {
 ///    ctx.get_elapsed_logical_time();
 /// });
 /// ```
@@ -393,13 +348,11 @@ macro_rules! reaction_closure {
         Box::new($crate::reaction::empty_reaction)
     };
     // closure with body
-    ( $ctx:ident, $reactor:ident, $ref_ports:ident, $mut_ports:ident, $actions:ident => $body:block ) => {{
+    ( $ctx:ident, $reactor:ident, $refs:ident => $body:block ) => {{
         Box::new(
             move |$ctx: &mut $crate::Context,
                   $reactor: &mut dyn $crate::BaseReactor,
-                  $ref_ports: $crate::Refs<dyn $crate::BasePort>,
-                  $mut_ports: $crate::RefsMut<dyn $crate::BasePort>,
-                  $actions: $crate::RefsMut<dyn $crate::BaseAction>| { $body },
+                  $refs: $crate::ReactionRefs<'_>| { $body },
         )
     }};
 }
@@ -408,44 +361,16 @@ macro_rules! reaction_closure {
 mod tests {
     use super::*;
 
-    /// Test the ReactionAdapter struct.
-    #[test]
-    fn test_reaction_adapter() {
-        struct TestReaction;
-
-        impl FromRefs for TestReaction {
-            type Marker<'store> = ();
-
-            fn from_refs<'store>(
-                _ports: Refs<'store, dyn BasePort>,
-                _ports_mut: RefsMut<'store, dyn BasePort>,
-                _actions: RefsMut<'store, dyn BaseAction>,
-            ) -> Self::Marker<'store> {
-            }
-        }
-
-        impl Trigger<()> for () {
-            fn trigger(self, _ctx: &mut Context, _state: &mut ()) {}
-        }
-
-        let adapter = ReactionAdapter::<TestReaction, ()>::default();
-        let _reaction = Reaction::new("dummy", adapter, None);
-    }
-
     /// Test the FnAdapter struct.
     #[test]
     fn test_fn_wrapper() {
-        let test_fn = |_: &mut Context,
-                       _: &mut dyn BaseReactor,
-                       _: Refs<'_, dyn BasePort>,
-                       _: RefsMut<'_, dyn BasePort>,
-                       _: RefsMut<'_, dyn BaseAction>| {};
+        let test_fn = |_: &mut Context, _: &mut dyn BaseReactor, _: ReactionRefs<'_>| {};
         let _reaction = Reaction::new("dummy", test_fn, None);
     }
 
     #[test]
     fn test_reaction_closure() {
-        let _closure = reaction_closure!(ctx, _state, _ref_ports, _mut_ports, _actions => {
+        let _closure = reaction_closure!(ctx, _state, _refs => {
             ctx.get_elapsed_logical_time();
         });
     }

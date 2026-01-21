@@ -4,128 +4,90 @@
 
 use boomerang::prelude::*;
 
-#[derive(Debug)]
+#[derive(Debug, Default, Clone)]
 pub struct State {
     s: i32,
 }
 
-mod source {
-    use super::*;
+#[reactor(state = State)]
+fn Source<const WIDTH: usize>(#[output] out: [i32; WIDTH]) -> impl Reactor {
+    timer! { t(200 msec) };
 
-    #[derive(Reactor)]
-    #[reactor(state = "State", reaction = "ReactionT<WIDTH>")]
-    pub struct Source<const WIDTH: usize> {
-        #[reactor(timer(period = "200 msec"))]
-        t: TimerActionKey,
-        pub out: [TypedPortKey<i32, Output>; WIDTH],
-    }
-
-    #[derive(Reaction)]
-    #[reaction(reactor = "Source<WIDTH>", triggers(action = "t"))]
-    struct ReactionT<'a, const WIDTH: usize> {
-        out: [runtime::OutputRef<'a, i32>; WIDTH],
-    }
-
-    impl<const WIDTH: usize> runtime::Trigger<State> for ReactionT<'_, WIDTH> {
-        fn trigger(mut self, _ctx: &mut runtime::Context, state: &mut State) {
-            for o in self.out.iter_mut() {
+    builder
+        .add_reaction(None)
+        .with_trigger(t)
+        .with_effect(out)
+        .with_reaction_fn(|_ctx, state, (_t, mut out)| {
+            for o in out.iter_mut() {
                 **o = Some(state.s);
             }
             state.s += 1;
-        }
-    }
+        })
+        .finish()?;
 }
 
-mod computation {
-    use super::*;
-
-    #[derive(Reactor, Debug)]
-    #[reactor(state = "usize", reaction = "ReactionIn")]
-    pub struct Computation<const ITERS: usize> {
-        pub in_: TypedPortKey<i32, Input>,
-        pub out: TypedPortKey<i32, Output>,
-    }
-
-    #[derive(Reaction)]
-    #[reaction(reactor = "Computation<ITERS>", bound = "const ITERS: usize")]
-    struct ReactionIn<'a> {
-        in_: runtime::InputRef<'a, i32>,
-        out: runtime::OutputRef<'a, i32>,
-    }
-
-    impl runtime::Trigger<usize> for ReactionIn<'_> {
-        fn trigger(mut self, _ctx: &mut runtime::Context, state: &mut usize) {
+#[reactor]
+fn Computation<const ITERS: usize>(#[input] in_: i32, #[output] out: i32) -> impl Reactor {
+    builder
+        .add_reaction(None)
+        .with_trigger(in_)
+        .with_effect(out)
+        .with_reaction_fn(move |_ctx, _state, (in_, mut out)| {
             let mut offset = 0;
-            for _ in 0..*state {
+            //std::thread::sleep(std::time::Duration::nanosecondss(1));
+            for _ in 0..ITERS {
                 offset += 1;
-                //std::thread::sleep(std::time::Duration::nanosecondss(1));
             }
-            *self.out = self.in_.map(|x| x + offset);
-        }
-    }
+            *out = in_.map(|x| x + offset);
+        })
+        .finish()?;
 }
 
-mod destination {
-    use super::*;
-
-    #[derive(Reactor)]
-    #[reactor(
-        state = "State",
-        reaction = "ReactionIn<WIDTH, ITERS>",
-        reaction = "ReactionShutdown"
-    )]
-    pub struct Destination<const WIDTH: usize, const ITERS: usize = 100_000_000> {
-        pub in_: [TypedPortKey<i32, Input>; WIDTH],
-    }
-
-    #[derive(Reaction)]
-    #[reaction(reactor = "Destination<WIDTH, ITERS>")]
-    struct ReactionIn<'a, const WIDTH: usize, const ITERS: usize> {
-        in_: [runtime::InputRef<'a, i32>; WIDTH],
-    }
-
-    impl<const WIDTH: usize, const ITERS: usize> runtime::Trigger<State>
-        for ReactionIn<'_, WIDTH, ITERS>
-    {
-        fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
+#[reactor(state = State)]
+fn Destination<const WIDTH: usize, const ITERS: usize = 100_000_000>(
+    #[input] in_: [i32; WIDTH],
+) -> impl Reactor {
+    builder
+        .add_reaction(None)
+        .with_trigger(in_)
+        .with_reaction_fn(move |_ctx, state, (in_,)| {
             let expected = ITERS as i32 * WIDTH as i32 + state.s;
-            let sum = self.in_.iter().filter_map(|x| x.as_ref()).sum::<i32>();
+            let sum = in_.iter().filter_map(|x| x.as_ref()).sum::<i32>();
             println!("Sum of received: {}.", sum);
-            assert_eq!(sum, expected, "Expected {}.", expected);
+            assert_eq!(sum, expected, "Expected {expected}.");
             state.s += WIDTH as i32;
-        }
-    }
+        })
+        .finish()?;
 
-    #[derive(Reaction)]
-    #[reaction(
-        reactor = "Destination<WIDTH, ITERS>",
-        bound = "const WIDTH: usize",
-        bound = "const ITERS: usize",
-        triggers(shutdown)
-    )]
-    struct ReactionShutdown;
-
-    impl runtime::Trigger<State> for ReactionShutdown {
-        fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
+    builder
+        .add_reaction(None)
+        .with_shutdown_trigger()
+        .with_reaction_fn(move |_ctx, state, (_shutdown,)| {
             assert!(state.s > 0, "ERROR: Destination received no input!");
             println!("Success.");
-        }
-    }
+        })
+        .finish()?;
 }
 
-#[derive(Reactor)]
-#[reactor(
-    state = (),
-    connection(from = "a.out", to = "t.in_"),
-    connection(from = "t.out", to = "b.in_")
-)]
-struct ThreadedMultiport<const WIDTH: usize = 4, const ITERS: usize = 100_000_000> {
-    #[reactor(child(state = State{s: 0}))]
-    a: source::Source<WIDTH>,
-    #[reactor(child(state = ITERS))]
-    t: [computation::Computation<ITERS>; WIDTH],
-    #[reactor(child(state = State{s: 0}))]
-    b: destination::Destination<WIDTH, ITERS>,
+#[reactor]
+fn ThreadingMultiport<const WIDTH: usize = 4, const ITERS: usize = 100_000_000>() -> impl Reactor {
+    let a = builder.add_child_reactor(Source::<WIDTH>(), "a", Default::default(), false)?;
+    let t: [_; WIDTH] =
+        builder.add_child_reactors(Computation::<ITERS>(), "t", Default::default(), false)?;
+    let b = builder.add_child_reactor(
+        Destination::<WIDTH, ITERS>(),
+        "b",
+        Default::default(),
+        false,
+    )?;
+
+    builder.connect_ports(a.out.iter().copied(), t.iter().map(|c| c.in_), None, false)?;
+    builder.connect_ports(
+        t.iter().flat_map(|c| c.out.iter()).copied(),
+        b.in_.iter().copied(),
+        None,
+        false,
+    )?;
 }
 
 #[test]
@@ -134,8 +96,9 @@ fn threading_multiport() {
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(Duration::seconds(2));
-    let _ = boomerang_util::runner::build_and_test_reactor::<ThreadedMultiport<4, 100_000>>(
-        "threaded_multiport",
+    let _ = boomerang_util::runner::build_and_test_reactor(
+        ThreadingMultiport::<4, 100_000>(),
+        "threading_multiport",
         (),
         config,
     )

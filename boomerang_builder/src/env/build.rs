@@ -4,7 +4,8 @@ use slotmap::SecondaryMap;
 
 use crate::{
     connection::PortBindings, ActionType, BuilderActionKey, BuilderError, BuilderPortKey,
-    BuilderReactionKey, BuilderReactorKey, ParentReactorBuilder, TriggerMode,
+    BuilderReactionKey, BuilderReactorKey, ParentReactorBuilder, PartialReactionBuilder,
+    TimerActionKey,
 };
 
 use super::EnvBuilder;
@@ -14,19 +15,6 @@ pub trait DeferedBuild {
     type Output;
 
     fn defer(self) -> impl FnOnce(&BuilderRuntimeParts) -> Self::Output + 'static;
-}
-
-//F: for<'any> FnOnce(&'any EnclavePartsMap) -> runtime::BoxedReactionFn + 'static,
-impl<Reaction, State> DeferedBuild for runtime::ReactionAdapter<Reaction, State>
-where
-    Reaction: runtime::FromRefs + 'static,
-    for<'store> Reaction::Marker<'store>: 'store + runtime::Trigger<State>,
-    State: runtime::ReactorData,
-{
-    type Output = runtime::BoxedReactionFn;
-    fn defer(self) -> impl FnOnce(&BuilderRuntimeParts) -> Self::Output + 'static {
-        move |_| runtime::BoxedReactionFn::from(self)
-    }
 }
 
 impl DeferedBuild for runtime::reaction::TimerFn {
@@ -234,7 +222,7 @@ impl EnvBuilder {
                             format!("{}_reset", action.name()),
                             runtime::reaction::TimerFn(spec.period),
                             action.reactor_key(),
-                            builder_action_key,
+                            TimerActionKey::from(builder_action_key),
                         ));
                     }
                 }
@@ -274,9 +262,9 @@ impl EnvBuilder {
 
         // Now create the reset reactions for periodic timers, since we can now get &mut self.
         for (name, reaction_fn, reactor_key, action_key) in new_reactions {
-            let _ = self
-                .add_reaction(&name, reactor_key, reaction_fn.defer())
-                .with_action(action_key, 0, TriggerMode::TriggersAndEffects)?
+            let _ = PartialReactionBuilder::<()>::new(Some(&name), reactor_key, self)
+                .with_trigger(action_key)
+                .with_defered_reaction_fn(reaction_fn.defer())
                 .finish()?;
         }
 
@@ -325,6 +313,11 @@ impl EnvBuilder {
         for (builder_reaction_key, reaction) in self.reaction_builders.drain() {
             let reaction_body = (reaction.reaction_fn)(builder_parts);
 
+            let reaction_name = reaction.name.clone().unwrap_or_else(|| {
+                let reaction_u64 = slotmap::Key::data(&builder_reaction_key).as_ffi();
+                format!("reaction{reaction_u64}")
+            });
+
             let partition_key = partition_map[reaction.reactor_key];
             let enclave_key = builder_parts.aliases.enclave_aliases[partition_key];
             let enclave = &mut builder_parts.enclaves[enclave_key];
@@ -335,30 +328,63 @@ impl EnvBuilder {
                 reactor_key
             };
 
-            let use_ports = reaction
-                .port_relations
+            let use_port_keys: Vec<_> = reaction
+                .port_order
                 .iter()
-                .filter_map(|(port_key, tm)| tm.is_uses().then_some(port_key))
-                .map(|builder_port_key| builder_parts.aliases.port_aliases[builder_port_key].1);
-
-            let effect_ports = reaction
-                .port_relations
-                .iter()
-                .filter_map(|(port_key, tm)| tm.is_effects().then_some(port_key))
-                .map(|builder_port_key| builder_parts.aliases.port_aliases[builder_port_key].1);
-
-            let actions = reaction
-                .action_relations
-                .iter()
-                .filter_map(|(action_key, tm)| {
-                    (tm.is_effects() || tm.is_uses()).then_some(action_key)
+                .filter_map(|port_key| {
+                    reaction
+                        .port_relations
+                        .get(*port_key)
+                        .and_then(|tm| tm.is_uses().then_some(*port_key))
                 })
-                .map(|builder_action_key| {
-                    builder_parts.aliases.action_aliases[builder_action_key].1
-                });
+                .collect();
+
+            let effect_port_keys: Vec<_> = reaction
+                .port_order
+                .iter()
+                .filter_map(|port_key| {
+                    reaction
+                        .port_relations
+                        .get(*port_key)
+                        .and_then(|tm| tm.is_effects().then_some(*port_key))
+                })
+                .collect();
+
+            let action_keys: Vec<_> = reaction
+                .action_order
+                .iter()
+                .filter_map(|action_key| {
+                    reaction
+                        .action_relations
+                        .get(*action_key)
+                        .and_then(|tm| (tm.is_effects() || tm.is_uses()).then_some(*action_key))
+                })
+                .collect();
+
+            if tracing::enabled!(tracing::Level::TRACE) {
+                tracing::trace!(
+                    reaction = %reaction_name,
+                    ?use_port_keys,
+                    ?effect_port_keys,
+                    ?action_keys,
+                    "Assigning reaction dependencies"
+                );
+            }
+
+            let use_ports = use_port_keys
+                .iter()
+                .map(|builder_port_key| builder_parts.aliases.port_aliases[*builder_port_key].1);
+
+            let effect_ports = effect_port_keys
+                .iter()
+                .map(|builder_port_key| builder_parts.aliases.port_aliases[*builder_port_key].1);
+
+            let actions = action_keys
+                .iter()
+                .map(|builder_action_key| builder_parts.aliases.action_aliases[*builder_action_key].1);
 
             let runtime_reaction_key = enclave.insert_reaction(
-                runtime::Reaction::new(&reaction.name, reaction_body, None),
+                runtime::Reaction::new(&reaction_name, reaction_body, None),
                 runtime_reactor_key,
                 use_ports,
                 effect_ports,
@@ -381,10 +407,11 @@ impl EnvBuilder {
 
                     match self.action_builders[builder_action_key].r#type() {
                         ActionType::Timer(timer_spec) => {
-                            enclave.insert_startup_reaction(level_reaction, timer_spec.offset);
+                            let tag = runtime::Tag::new(timer_spec.offset.unwrap_or_default(), 0);
+                            enclave.insert_startup_action(action_key, tag);
                         }
                         ActionType::Shutdown => {
-                            enclave.insert_shutdown_reaction(level_reaction);
+                            enclave.insert_shutdown_action(action_key);
                         }
                         _ => {}
                     }

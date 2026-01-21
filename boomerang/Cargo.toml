@@ -11,18 +11,12 @@ repository.workspace = true
 categories.workspace = true
 
 [features]
-default = [
-    "derive",
-    #"parallel"
-]
-
-## Procedural macro support for generating code from reactor models
-derive = ["dep:boomerang_derive"]
+default = []
 
 # Support for serialization
 serde = ["boomerang_runtime/serde"]
 
-## Execute reactors in parallel on a thread pool
+## Execute reactions in parallel on a thread pool
 parallel = ["boomerang_runtime/parallel"]
 
 ## Support generating graphviz diagrams from reactor models
@@ -37,11 +31,12 @@ thiserror.workspace = true
 
 # repo dependencies
 boomerang_builder = { workspace = true }
-boomerang_derive = { workspace = true, optional = true }
 boomerang_runtime = { workspace = true }
+boomerang_macros = { workspace = true }
+
 
 [dev-dependencies]
-boomerang_util = { path = "../boomerang_util", features = ["runner"] }
+boomerang_util = { path = "../boomerang_util", features = ["runner", "replay"] }
 criterion = "0.5"
 serde = { workspace = true }
 tracing-subscriber = { workspace = true }

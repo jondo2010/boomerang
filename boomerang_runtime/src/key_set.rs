@@ -92,7 +92,7 @@ pub struct KeySetView<'a, K: tinymap::Key> {
     current_level: Level,
 }
 
-impl<'a, K: tinymap::Key> KeySetView<'a, K> {
+impl<K: tinymap::Key> KeySetView<'_, K> {
     /// Returns true if there are remaining levels to process.
     pub fn levels_remaining(&self) -> bool {
         self.levels[self.current_level.0..]
@@ -138,7 +138,7 @@ pub struct KeySetViewMut<'a, K: tinymap::Key> {
     current_level: Level,
 }
 
-impl<'a, K: tinymap::Key> KeySetViewMut<'a, K> {
+impl<K: tinymap::Key> KeySetViewMut<'_, K> {
     /// Extend the levels structure from an iterable, inserting keys at levels above the current level.
     pub fn extend_above(&mut self, keys: impl IntoIterator<Item = (Level, K)>) {
         for (level, key) in keys.into_iter() {

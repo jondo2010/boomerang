@@ -49,6 +49,7 @@ where
 
 unsafe impl<K: Key, V: Send, I: Iterator<Item = K>> Send for IterMany<'_, K, V, I> {}
 
+#[allow(dead_code)]
 pub struct IterManyPtr<'a, K: Key, V, I>(pub IterMany<'a, K, V, I>)
 where
     I: Iterator<Item = K>;

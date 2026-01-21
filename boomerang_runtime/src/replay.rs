@@ -3,8 +3,9 @@
 use std::{collections::HashMap, path::Path};
 
 use crate::{
-    event::AsyncEvent, ActionKey, ActionRef, CommonContext, Duration, Enclave, EnclaveKey,
-    ReactionFn, ReactorData, RuntimeError, SendContext, Tag,
+    event::AsyncEvent, reaction::ReactionFn, ActionKey, ActionRef, BaseReactor, CommonContext,
+    Context, Duration, Enclave, EnclaveKey, ReactionRefs, ReactorData, RuntimeError, SendContext,
+    Tag,
 };
 
 /// Re-export the `foxglove` and `mcap` crates for use in this module.
@@ -47,19 +48,20 @@ where
     }
 }
 
-impl<'store, T> ReactionFn<'store> for RecorderFn<T>
+impl<T> ReactionFn<'_> for RecorderFn<T>
 where
     T: ReactorData + serde::Serialize,
 {
     fn trigger(
         &mut self,
-        ctx: &mut crate::Context,
-        _reactor: &mut dyn crate::BaseReactor,
-        _ports: crate::Refs<dyn crate::BasePort>,
-        _ports_mut: crate::RefsMut<dyn crate::BasePort>,
-        actions: crate::RefsMut<dyn crate::BaseAction>,
+        ctx: &mut Context,
+        _reactor: &mut dyn BaseReactor,
+        refs: ReactionRefs<'_>,
     ) {
-        let mut action: ActionRef<T> = actions.partition_mut().expect("Expected a typed action");
+        let mut action: ActionRef<T> = refs
+            .actions
+            .partition_mut()
+            .expect("Expected a typed action");
         let val = ctx
             .get_action_value::<T>(&mut action)
             .expect("Failed to get action value");

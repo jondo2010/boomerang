@@ -12,7 +12,8 @@ mod key_set;
 pub mod port;
 pub mod reaction;
 mod reactor;
-mod refs;
+pub mod refs;
+mod refs_extract;
 #[cfg(feature = "replay")]
 pub mod replay;
 mod sched;
@@ -22,7 +23,10 @@ mod time;
 // Re-exports
 pub use ::time::Duration;
 
-pub use action::{Action, ActionCommon, ActionKey, ActionRef, AsyncActionRef, BaseAction};
+pub use action::{
+    Action, ActionCommon, ActionKey, ActionRef, AsyncActionRef, BaseAction, DynActionRef,
+    DynActionRefMut,
+};
 pub use context::*;
 use downcast_rs::Downcast;
 pub use env::{
@@ -30,14 +34,14 @@ pub use env::{
 };
 pub use kanal::{Receiver, Sender};
 pub use key_set::KeySetLimits as ReactionSetLimits;
-pub use port::*;
+pub use port::{DynPortRef, DynPortRefMut, *};
 pub use reaction::{
     BoxedReactionFn, ConnectionReceiverReactionFn, ConnectionSenderReactionFn, Deadline,
-    EnclaveSenderReactionFn, FromRefs, Reaction, ReactionAdapter, ReactionFn, ReactionKey,
-    ReactionSet, Trigger,
+    EnclaveSenderReactionFn, FromRefs, Reaction, ReactionFn, ReactionKey, ReactionSet,
 };
 pub use reactor::*;
 pub use refs::{Refs, RefsMut};
+pub use refs_extract::{ReactionRefs, ReactionRefsError, ReactionRefsExtract};
 pub use sched::*;
 pub use time::*;
 

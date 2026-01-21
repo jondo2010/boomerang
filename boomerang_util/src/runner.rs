@@ -47,52 +47,23 @@ struct Args {
     replay_filename: Option<std::path::PathBuf>,
 }
 
-/// Utility method to build and run a given top-level `Reactor` from tests.
-///
-/// This method is intended to be used from test functions to build and run a reactor instance.
-///
-/// # Arguments
-///
-/// * `name` - The name of the top-level reactor instance
-/// * `state` - The initial state of the top-level reactor -- this must match the associated `State` type of the
-///     reactor ([`Reactor::State`])
-/// * `config` - The runtime configuration for the reactor
-///
-/// # Environment Variables
-///
-/// * `PUML` - If this environment variable is set, a PlantUML graph of the reactor hierarchy will be generated
-///   and saved to a file named `{name}.puml`.
-///
-/// # Errors
-///
-/// This function will return an error if the reactor or environment cannot be built, or if there is an issue
-/// writing the PlantUML graph to a file.
-///
-/// # Returns
-///
-/// This function returns a tuple containing the built reactor and a vector of runtime environments.
-pub fn build_and_test_reactor<R: Reactor>(
+pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
+    reactor_builder: R,
     name: &str,
-    state: R::State,
+    state: S,
     config: runtime::Config,
-) -> anyhow::Result<(R, Vec<runtime::Env>)> {
+) -> anyhow::Result<(R::Ports, Vec<runtime::Env>)> {
     let mut env_builder = EnvBuilder::new();
-    let reactor = R::build(name, state, None, None, false, &mut env_builder)
+    let reactor = reactor_builder
+        .build(name, state, None, None, false, &mut env_builder)
         .context("Error building top-level reactor!")?;
 
-    if std::env::var("PUML").is_ok() {
-        let gv = env_builder.create_plantuml_graph()?;
-        let path = format!("{name}.puml");
-        let mut f = std::fs::File::create(&path)?;
-        std::io::Write::write_all(&mut f, gv.as_bytes())?;
-        tracing::info!("Wrote plantuml graph to {path}");
-    }
+    env_builder.validate_reactions()?;
 
     let BuilderRuntimeParts {
         enclaves,
         aliases: _,
-        #[cfg(feature = "replay")]
-            replayers: _,
+        ..
     } = env_builder
         .into_runtime_parts()
         .context("Error building environment!")?;
@@ -109,8 +80,7 @@ pub fn build_and_test_reactor<R: Reactor>(
 /// # Arguments
 ///
 /// * `name` - The name of the top-level reactor instance
-/// * `state` - The initial state of the top-level reactor -- this must match the associated `State` type of the
-///     reactor ([`Reactor::State`])
+/// * `state` - The initial state of the top-level reactor; this must match the state type the reactor expects.
 ///
 /// Common arguments are parsed from the command line and passed to the scheduler:
 /// * `--full-graph`: Generate a graphviz graph of the entire reactor hierarchy
@@ -119,10 +89,15 @@ pub fn build_and_test_reactor<R: Reactor>(
 /// * `--fast-forward`: Run the scheduler in fast-forward mode
 /// * `--record-filename`: The filename to serialize recorded actions into
 /// * `--record-actions`: The list of fully-qualified actions to record, e.g., "snake::keyboard::key_press"
-pub fn build_and_run_reactor<R: Reactor>(name: &str, state: R::State) -> anyhow::Result<R> {
+pub fn build_and_run_reactor<S, R>(reactor: R, name: &str, state: S) -> anyhow::Result<R::Ports>
+where
+    S: runtime::ReactorData,
+    R: Reactor<S>,
+{
     // build the reactor
     let mut env_builder = EnvBuilder::new();
-    let reactor = R::build(name, state, None, None, false, &mut env_builder)
+    let reactor = reactor
+        .build(name, state, None, None, false, &mut env_builder)
         .context("Error building top-level reactor!")?;
 
     let args = Args::parse();

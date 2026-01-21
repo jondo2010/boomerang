@@ -2,87 +2,57 @@
 
 use boomerang::prelude::*;
 
-#[derive(Reactor)]
-#[reactor(
-    state = "()",
-    reaction = "ReactionStartup",
-    reaction = "ReactionIn1",
-    reaction = "ReactionIn2"
-)]
-struct Contained {
-    in1: TypedPortKey<u32, Input>,
-    in2: TypedPortKey<u32, Input>,
-    trigger: TypedPortKey<u32, Output>,
+#[reactor]
+fn Contained(#[input] in1: u32, #[input] in2: u32, #[output] trigger: u32) -> impl Reactor {
+    builder
+        .add_reaction(Some("ReactionStartup"))
+        .with_startup_trigger()
+        .with_effect(trigger)
+        .with_reaction_fn(|_ctx, _state, (_startup, mut trigger)| {
+            *trigger = Some(42);
+        })
+        .finish()?;
+
+    builder
+        .add_reaction(Some("ReactionIn1"))
+        .with_trigger(in1)
+        .with_reaction_fn(|_ctx, _state, (in1,)| {
+            println!("{} received {:?}", in1.name(), *in1);
+            assert_eq!(*in1, Some(42), "FAILED: Expected 42.");
+        })
+        .finish()?;
+
+    builder
+        .add_reaction(Some("ReactionIn2"))
+        .with_trigger(in2)
+        .with_reaction_fn(|_ctx, _state, (in2,)| {
+            println!("{} received {:?}", in2.name(), *in2);
+            assert_eq!(*in2, Some(42), "FAILED: Expected 42.");
+        })
+        .finish()?;
 }
 
-#[derive(Reaction)]
-#[reaction(reactor = "Contained", triggers(startup))]
-struct ReactionStartup<'a> {
-    trigger: runtime::OutputRef<'a, u32>,
-}
-
-impl runtime::Trigger<()> for ReactionStartup<'_> {
-    fn trigger(mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
-        *self.trigger = Some(42);
-    }
-}
-
-#[derive(Reaction)]
-#[reaction(reactor = "Contained")]
-struct ReactionIn1<'a> {
-    in1: runtime::InputRef<'a, u32>,
-}
-
-impl runtime::Trigger<()> for ReactionIn1<'_> {
-    fn trigger(self, _ctx: &mut runtime::Context, _state: &mut ()) {
-        println!("{} received {:?}", self.in1.name(), *self.in1);
-        assert_eq!(*self.in1, Some(42), "FAILED: Expected 42.");
-    }
-}
-
-#[derive(Reaction)]
-#[reaction(reactor = "Contained")]
-struct ReactionIn2<'a> {
-    in2: runtime::InputRef<'a, u32>,
-}
-
-impl runtime::Trigger<()> for ReactionIn2<'_> {
-    fn trigger(self, _ctx: &mut runtime::Context, _state: &mut ()) {
-        println!("{} received {:?}", self.in2.name(), *self.in2);
-        assert_eq!(*self.in2, Some(42), "FAILED: Expected 42.");
-    }
-}
-
-#[derive(Reactor)]
-#[reactor(state = (), reaction = ReactionCTrigger)]
-struct MultipleContained {
-    #[reactor(child(state = ()))]
-    c: Contained,
-}
-
-#[derive(Reaction)]
-#[reaction(reactor = "MultipleContained")]
-struct ReactionCTrigger<'a> {
-    #[reaction(path = "c.trigger")]
-    c_trigger: runtime::InputRef<'a, u32>,
-    #[reaction(path = "c.in1")]
-    c_in1: runtime::OutputRef<'a, u32>,
-    #[reaction(path = "c.in2")]
-    c_in2: runtime::OutputRef<'a, u32>,
-}
-
-impl runtime::Trigger<()> for ReactionCTrigger<'_> {
-    fn trigger(mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
-        *self.c_in1 = *self.c_trigger;
-        *self.c_in2 = *self.c_trigger;
-    }
+#[reactor]
+fn MultipleContained() -> impl Reactor {
+    let c = builder.add_child_reactor(Contained(), "c", (), false)?;
+    builder
+        .add_reaction(None)
+        .with_trigger(c.trigger)
+        .with_effect(c.in1)
+        .with_effect(c.in2)
+        .with_reaction_fn(|_ctx, _state, (c_trigger, mut c_in1, mut c_in2)| {
+            *c_in1 = *c_trigger;
+            *c_in2 = *c_trigger;
+        })
+        .finish()?;
 }
 
 #[test]
 fn multiple_contained() {
     tracing_subscriber::fmt::init();
     let config = runtime::Config::default().with_fast_forward(true);
-    let _ = boomerang_util::runner::build_and_test_reactor::<MultipleContained>(
+    let _ = boomerang_util::runner::build_and_test_reactor(
+        MultipleContained(),
         "multiple_contained",
         (),
         config,

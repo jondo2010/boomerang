@@ -5,84 +5,54 @@
 //! Ported from https://github.com/lf-lang/lingua-franca/blob/master/test/C/src/SlowingClock.lf
 use boomerang::prelude::*;
 
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Debug)]
-struct SlowingClock {
-    interval: Duration,
-    expected_time: Duration,
-}
+#[reactor]
+fn SlowingClock(
+    #[state(default = Duration::milliseconds(100))] interval: Duration,
+    #[state(default = Duration::milliseconds(100))] expected_time: Duration,
+) -> impl Reactor {
+    let a = builder.add_logical_action("a", Some(Duration::milliseconds(100)))?;
 
-impl Default for SlowingClock {
-    fn default() -> Self {
-        Self {
-            interval: Duration::milliseconds(100),
-            expected_time: Duration::milliseconds(100),
-        }
-    }
-}
+    builder
+        .add_reaction(Some("Startup"))
+        .with_startup_trigger()
+        .with_effect(a)
+        .with_reaction_fn(|ctx, _state, (_startup, mut a)| {
+            println!("startup");
+            ctx.schedule_action(&mut a, (), None);
+        })
+        .finish()?;
 
-#[derive(Reactor)]
-#[reactor(
-    state = "SlowingClock",
-    reaction = "ReactionStartup",
-    reaction = "ReactionA",
-    reaction = "ReactionShutdown"
-)]
-struct SlowingClockBuilder {
-    #[reactor(action(min_delay = "100 msec"))]
-    a: TypedActionKey<()>,
-}
+    builder
+        .add_reaction(Some("A"))
+        .with_trigger(a)
+        .with_reaction_fn(|ctx, state, (mut a,)| {
+            let elapsed_logical_time = ctx.get_elapsed_logical_time();
+            println!("Logical time since start: {elapsed_logical_time}.",);
+            assert!(
+                elapsed_logical_time == state.expected_time,
+                "ERROR: Expected time to be: {}.",
+                state.expected_time
+            );
 
-#[derive(Reaction)]
-#[reaction(reactor = "SlowingClockBuilder", triggers(startup))]
-struct ReactionStartup<'a> {
-    a: runtime::ActionRef<'a>,
-}
+            ctx.schedule_action(&mut a, (), Some(state.interval));
+            state.expected_time += Duration::milliseconds(100) + state.interval;
+            state.interval += Duration::milliseconds(100);
+        })
+        .finish()?;
 
-impl runtime::Trigger<SlowingClock> for ReactionStartup<'_> {
-    fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut SlowingClock) {
-        println!("startup");
-        ctx.schedule_action(&mut self.a, (), None);
-    }
-}
-
-#[derive(Reaction)]
-#[reaction(reactor = "SlowingClockBuilder")]
-struct ReactionA<'a> {
-    #[reaction(triggers)]
-    a: runtime::ActionRef<'a>,
-}
-
-impl runtime::Trigger<SlowingClock> for ReactionA<'_> {
-    fn trigger(mut self, ctx: &mut runtime::Context, state: &mut SlowingClock) {
-        let elapsed_logical_time = ctx.get_elapsed_logical_time();
-        println!("Logical time since start: {elapsed_logical_time}.",);
-        assert!(
-            elapsed_logical_time == state.expected_time,
-            "ERROR: Expected time to be: {}.",
-            state.expected_time
-        );
-
-        ctx.schedule_action(&mut self.a, (), Some(state.interval));
-        state.expected_time += Duration::milliseconds(100) + state.interval;
-        state.interval += Duration::milliseconds(100);
-    }
-}
-
-#[derive(Reaction)]
-#[reaction(reactor = "SlowingClockBuilder", triggers(shutdown))]
-struct ReactionShutdown;
-
-impl runtime::Trigger<SlowingClock> for ReactionShutdown {
-    fn trigger(self, _ctx: &mut runtime::Context, state: &mut SlowingClock) {
-        assert_eq!(
-            state.expected_time.whole_milliseconds(),
-            1500,
-            "ERROR: Expected the next expected_time to be: 1500ms. It was: {}.",
-            state.expected_time
-        );
-        println!("Test passes.");
-    }
+    builder
+        .add_reaction(Some("Shutdown"))
+        .with_shutdown_trigger()
+        .with_reaction_fn(|_ctx, state, (_shutdown,)| {
+            assert_eq!(
+                state.expected_time.whole_milliseconds(),
+                1500,
+                "ERROR: Expected the next expected_time to be: 1500ms. It was: {}.",
+                state.expected_time
+            );
+            println!("Test passes.");
+        })
+        .finish()?;
 }
 
 #[test]
@@ -91,9 +61,10 @@ fn slowing_clock() {
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(Duration::milliseconds(1000));
-    let _ = boomerang_util::runner::build_and_test_reactor::<SlowingClockBuilder>(
+    let _ = boomerang_util::runner::build_and_test_reactor(
+        SlowingClock(),
         "slowing_clock",
-        SlowingClock::default(),
+        Default::default(),
         config,
     )
     .unwrap();

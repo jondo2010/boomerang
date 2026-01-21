@@ -14,6 +14,9 @@ mod reactor;
 #[cfg(test)]
 pub mod tests;
 
+mod macro_support;
+pub use macro_support::{Reactor, ReactorPorts};
+
 //#[cfg(feature = "graphviz")]
 //pub mod graphviz;
 #[cfg(feature = "graphviz")]
@@ -22,7 +25,9 @@ pub mod plantuml;
 pub use action::*;
 pub use env::*;
 pub use fqn::*;
-pub use port::*;
+pub use port::{
+    BuilderPortKey, Contained, Input, Local, Output, PortBuilder, PortTag, PortType, TypedPortKey,
+};
 pub use reaction::*;
 pub use reactor::*;
 

@@ -38,6 +38,7 @@ boomerang_macros = { workspace = true }
 [dev-dependencies]
 boomerang_util = { path = "../boomerang_util", features = ["runner", "replay"] }
 criterion = "0.5"
+pprof = { version = "0.13", features = ["criterion", "flamegraph"] }
 serde = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-tracy = { workspace = true }

@@ -9,6 +9,7 @@
 
 use boomerang::prelude::*;
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
+use pprof::criterion::{Output, PProfProfiler};
 
 #[derive(Debug)]
 struct Ping {
@@ -149,5 +150,17 @@ fn bench(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench);
+fn criterion_config() -> Criterion {
+    let mut criterion = Criterion::default();
+    if std::env::var_os("BOOMERANG_PROFILE").is_some() {
+        criterion = criterion.with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
+    }
+    criterion
+}
+
+criterion_group! {
+    name = benches;
+    config = criterion_config();
+    targets = bench
+}
 criterion_main!(benches);

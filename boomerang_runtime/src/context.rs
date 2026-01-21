@@ -315,7 +315,7 @@ pub fn build_reaction_contexts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{action::Action, event::AsyncEvent, ActionKey, BaseAction};
+    use crate::{action::Action, event::AsyncEvent, ActionKey, BaseAction, DynActionRefMut};
 
     #[test]
     fn schedule_action_advances_microsteps_for_same_delay() {
@@ -333,7 +333,10 @@ mod tests {
         ctx.reset_for_reaction(Tag::ZERO);
 
         let mut action = Action::<u32>::new("test", ActionKey::from(0), None, true);
-        let mut action_ref = ActionRef::<u32>::from(&mut action as &mut dyn BaseAction);
+        let mut action_ref = ActionRef::<u32>::try_from(DynActionRefMut(
+            &mut action as &mut dyn BaseAction,
+        ))
+        .expect("action ref");
 
         ctx.schedule_action(&mut action_ref, 1, None);
         ctx.schedule_action(&mut action_ref, 2, None);

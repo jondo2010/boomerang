@@ -6,76 +6,55 @@
 
 use boomerang::prelude::*;
 
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Debug, Default)]
-struct State {
-    interval: Duration,
-    expected_time: Duration,
-}
+#[reactor]
+fn SlowingClockPhysical(
+    #[state] interval: Duration,
+    #[state] expected_time: Duration,
+) -> impl Reactor {
+    let a = builder.add_physical_action::<()>("a", Some(Duration::milliseconds(100)))?;
 
-#[derive(Reactor)]
-#[reactor(
-    state = "State",
-    reaction = "ReactionStartup",
-    reaction = "ReactionA",
-    reaction = "ReactionShutdown"
-)]
-struct SlowingClockPhysical {
-    #[reactor(action(min_delay = "100 msec"))]
-    a: TypedActionKey<(), Physical>,
-}
+    builder
+        .add_reaction(Some("startup"))
+        .with_startup_trigger()
+        .with_effect(a)
+        .with_reaction_fn(|ctx, state, (_startup, mut a)| {
+            state.expected_time = Duration::milliseconds(100);
+            ctx.schedule_action(&mut a, (), None);
+        })
+        .finish()?;
 
-#[derive(Reaction)]
-#[reaction(reactor = "SlowingClockPhysical", triggers(startup))]
-struct ReactionStartup<'a> {
-    a: runtime::ActionRef<'a>,
-}
+    builder
+        .add_reaction(Some("A"))
+        .with_trigger(a)
+        .with_reaction_fn(|ctx, state, (mut a,)| {
+            let elapsed_logical_time = ctx.get_elapsed_logical_time();
+            println!("Logical time since start: {elapsed_logical_time:?}");
+            assert!(
+                elapsed_logical_time >= state.expected_time,
+                "Expected logical time to be at least: {:?}, was {elapsed_logical_time:?}",
+                state.expected_time
+            );
+            state.interval += Duration::milliseconds(100);
+            state.expected_time = Duration::milliseconds(100) + state.interval;
+            println!(
+                "Scheduling next to occur approximately after: {:?}",
+                state.interval
+            );
+            ctx.schedule_action(&mut a, (), Some(state.interval));
+        })
+        .finish()?;
 
-impl runtime::Trigger<State> for ReactionStartup<'_> {
-    fn trigger(mut self, ctx: &mut runtime::Context, state: &mut State) {
-        state.expected_time = Duration::milliseconds(100);
-        ctx.schedule_action(&mut self.a, (), None);
-    }
-}
-
-#[derive(Reaction)]
-#[reaction(reactor = "SlowingClockPhysical")]
-struct ReactionA<'a> {
-    #[reaction(triggers)]
-    a: runtime::ActionRef<'a>,
-}
-
-impl runtime::Trigger<State> for ReactionA<'_> {
-    fn trigger(mut self, ctx: &mut runtime::Context, state: &mut State) {
-        let elapsed_logical_time = ctx.get_elapsed_logical_time();
-        println!("Logical time since start: {elapsed_logical_time:?}");
-        assert!(
-            elapsed_logical_time >= state.expected_time,
-            "Expected logical time to be at least: {:?}, was {elapsed_logical_time:?}",
-            state.expected_time
-        );
-        state.interval += Duration::milliseconds(100);
-        state.expected_time = Duration::milliseconds(100) + state.interval;
-        println!(
-            "Scheduling next to occur approximately after: {:?}",
-            state.interval
-        );
-        ctx.schedule_action(&mut self.a, (), Some(state.interval));
-    }
-}
-
-#[derive(Reaction)]
-#[reaction(reactor = "SlowingClockPhysical", triggers(shutdown))]
-struct ReactionShutdown;
-
-impl runtime::Trigger<State> for ReactionShutdown {
-    fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
-        assert!(
-            state.expected_time >= Duration::milliseconds(500),
-            "Expected the next expected time to be at least: 500000000 nsec. It was: {:?}",
-            state.expected_time
-        );
-    }
+    builder
+        .add_reaction(Some("Shutdown"))
+        .with_shutdown_trigger()
+        .with_reaction_fn(|_ctx, state, _| {
+            assert!(
+                state.expected_time >= Duration::milliseconds(500),
+                "Expected the next expected time to be at least: 500 msec. It was: {:?}",
+                state.expected_time
+            );
+        })
+        .finish()?;
 }
 
 #[test]
@@ -85,9 +64,10 @@ fn slowing_clock_physical() {
         .with_fast_forward(true)
         .with_keep_alive(true)
         .with_timeout(Duration::milliseconds(1500));
-    let _ = boomerang_util::runner::build_and_test_reactor::<SlowingClockPhysical>(
+    let _ = boomerang_util::runner::build_and_test_reactor(
+        SlowingClockPhysical(),
         "slowing_clock_physical",
-        State {
+        SlowingClockPhysicalState {
             interval: Duration::milliseconds(100),
             expected_time: Duration::milliseconds(200),
         },

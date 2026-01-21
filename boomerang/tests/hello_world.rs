@@ -1,52 +1,44 @@
 use boomerang::prelude::*;
 
-#[derive(Debug, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-struct State {
-    success: bool,
-}
+#[reactor]
+fn HelloWorld2(#[state] success: bool) -> impl Reactor {
+    reaction! {
+        (startup) {
+            assert!(
+                startup.is_present(ctx),
+                "The startup action should be present."
+            );
+            println!("Hello World.");
+            state.success = true;
+        }
+    }
 
-#[derive(Reactor)]
-#[reactor(
-    state = "State",
-    reaction = "HelloWorld2ReactionStartup",
-    reaction = "HelloWorld2ReactionShutdown"
-)]
-struct HelloWorld2;
-
-#[derive(Reaction)]
-#[reaction(reactor = "HelloWorld2", triggers(startup))]
-struct HelloWorld2ReactionStartup;
-
-impl runtime::Trigger<State> for HelloWorld2ReactionStartup {
-    fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
-        println!("Hello World.");
-        state.success = true;
+    reaction! {
+        (shutdown) {
+            assert!(
+                shutdown.is_present(ctx),
+                "The shutdown action should be present."
+            );
+            println!("Shutdown invoked.");
+            assert!(
+                state.success,
+                "The startup action should have set the state to true."
+            );
+            state.success = false;
+        }
     }
 }
 
-#[derive(Reaction)]
-#[reaction(reactor = "HelloWorld2", triggers(shutdown))]
-struct HelloWorld2ReactionShutdown;
-
-impl runtime::Trigger<State> for HelloWorld2ReactionShutdown {
-    fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
-        println!("Shutdown invoked.");
-        state.success = false;
-    }
-}
-
-#[derive(Reactor)]
-#[reactor(state = "()")]
-struct HelloWorld {
-    #[reactor(child(state = State{success: false}))]
-    _a: HelloWorld2,
+#[reactor]
+fn HelloWorld() -> impl Reactor {
+    builder.add_child_reactor(HelloWorld2(), "_a", Default::default(), false)?;
 }
 
 #[test]
 fn hello_world() {
     tracing_subscriber::fmt::init();
     let config = runtime::Config::default().with_fast_forward(true);
-    let _ = boomerang_util::runner::build_and_test_reactor::<HelloWorld>("hello_world", (), config)
-        .unwrap();
+    let _ =
+        boomerang_util::runner::build_and_test_reactor(HelloWorld(), "hello_world", (), config)
+            .unwrap();
 }

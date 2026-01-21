@@ -38,6 +38,9 @@ pub trait BaseAction: Debug + Downcast + Send + Sync {
     /// Return true if the action is logical
     fn is_logical(&self) -> bool;
 
+    /// Get the concrete type name carried by this action
+    fn type_name(&self) -> &'static str;
+
     /// Push a new value onto the action store. If the underlying types are not the same, this will panic.
     fn push_value(&mut self, tag: Tag, value: Box<dyn ReactorData>);
 }
@@ -85,6 +88,10 @@ impl<T: ReactorData> BaseAction for Action<T> {
 
     fn is_logical(&self) -> bool {
         self.is_logical
+    }
+
+    fn type_name(&self) -> &'static str {
+        std::any::type_name::<T>()
     }
 
     fn push_value(&mut self, tag: Tag, value: Box<dyn ReactorData>) {

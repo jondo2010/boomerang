@@ -25,64 +25,38 @@ impl Ping {
     }
 }
 
-#[derive(Clone, Reactor)]
-#[reactor(
-    state = "Ping",
-    reaction = "ReactionServe",
-    reaction = "ReactionInStart",
-    reaction = "ReactionInPong"
-)]
-struct PingBuilder {
-    in_start: TypedPortKey<(), Input>,
-    in_pong: TypedPortKey<(), Input>,
+#[reactor(state = Ping)]
+fn PingReactor(
+    #[input] in_start: (),
+    #[input] in_pong: (),
+    #[output] out_ping: (),
+    #[output] out_finished: (),
+) -> impl Reactor {
+    let serve = builder.add_action::<(), Logical>("serve", None)?;
 
-    out_ping: TypedPortKey<(), Output>,
-    out_finished: TypedPortKey<(), Output>,
-
-    serve: TypedActionKey,
-}
-
-#[derive(Reaction)]
-#[reaction(reactor = "PingBuilder", triggers(port = "in_start"))]
-struct ReactionInStart<'a> {
-    serve: runtime::ActionRef<'a>,
-}
-
-impl runtime::Trigger<Ping> for ReactionInStart<'_> {
-    fn trigger(mut self, ctx: &mut runtime::Context, state: &mut Ping) {
-        // reset local state
-        state.pings_left = state.count;
-        // start execution
-        ctx.schedule_action(&mut self.serve, (), None);
+    reaction! {
+        InStart (in_start) serve {
+            // reset local state
+            state.pings_left = state.count;
+            // start execution
+            ctx.schedule_action(&mut serve, (), None);
+        }
     }
-}
 
-#[derive(Reaction)]
-#[reaction(reactor = "PingBuilder", triggers(action = "serve"))]
-struct ReactionServe<'a> {
-    out_ping: runtime::OutputRef<'a>,
-}
-
-impl runtime::Trigger<Ping> for ReactionServe<'_> {
-    fn trigger(mut self, _ctx: &mut runtime::Context, state: &mut Ping) {
-        *self.out_ping = Some(());
-        state.pings_left -= 1;
+    reaction! {
+        Serve (serve) -> out_ping {
+            *out_ping = Some(());
+            state.pings_left -= 1;
+        }
     }
-}
 
-#[derive(Reaction)]
-#[reaction(reactor = "PingBuilder", triggers(port = "in_pong"))]
-struct ReactionInPong<'a> {
-    out_finished: runtime::OutputRef<'a>,
-    serve: runtime::ActionRef<'a>,
-}
-
-impl runtime::Trigger<Ping> for ReactionInPong<'_> {
-    fn trigger(mut self, ctx: &mut runtime::Context, state: &mut Ping) {
-        if state.pings_left == 0 {
-            *self.out_finished = Some(());
-        } else {
-            ctx.schedule_action(&mut self.serve, (), None);
+    reaction! {
+        InPong (in_pong) serve -> out_finished {
+            if state.pings_left == 0 {
+                *out_finished = Some(());
+            } else {
+                ctx.schedule_action(&mut serve, (), None);
+            }
         }
     }
 }
@@ -92,70 +66,34 @@ struct Pong {
     count: usize,
 }
 
-#[derive(Clone, Reactor)]
-#[reactor(state = "Pong", reaction = "ReactionInPing")]
-struct PongBuilder {
-    in_ping: TypedPortKey<(), Input>,
-    out_pong: TypedPortKey<(), Output>,
-}
-
-#[derive(Reaction)]
-#[reaction(reactor = "PongBuilder", triggers(port = "in_ping"))]
-struct ReactionInPing<'a> {
-    out_pong: runtime::OutputRef<'a>,
-}
-
-impl runtime::Trigger<Pong> for ReactionInPing<'_> {
-    fn trigger(mut self, _ctx: &mut runtime::Context, state: &mut Pong) {
-        *self.out_pong = Some(());
-        state.count += 1;
+#[reactor(state = Pong)]
+fn PongReactor(#[input] in_ping: (), #[output] out_pong: ()) -> impl Reactor {
+    reaction! {
+        InPing (in_ping) -> out_pong {
+            *out_pong = Some(());
+            state.count += 1;
+        }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct Main {
-    count: usize,
-}
+#[reactor]
+fn Main(count: usize) -> impl Reactor {
+    let ping = builder.add_child_reactor(PingReactor(), "ping", Ping::new(count), false)?;
+    let pong = builder.add_child_reactor(PongReactor(), "pong", Pong::default(), false)?;
 
-#[derive(Reactor)]
-#[reactor(
-    state = "Main",
-    reaction = "ReactionStartup",
-    reaction = "ReactionDone",
-    connection(from = "ping.out_ping", to = "pong.in_ping"),
-    connection(from = "pong.out_pong", to = "ping.in_pong")
-)]
-struct MainBuilder {
-    #[reactor(child(state = Ping::new(state.count)))]
-    ping: PingBuilder,
+    builder.connect_port(ping.out_ping, pong.in_ping, None, false)?;
+    builder.connect_port(pong.out_pong, ping.in_pong, None, false)?;
 
-    #[reactor(child(state = Pong::default()))]
-    pong: PongBuilder,
-}
-
-#[derive(Reaction)]
-#[reaction(reactor = "MainBuilder", triggers(startup))]
-struct ReactionStartup<'a> {
-    #[reaction(path = "ping.in_start")]
-    in_start: runtime::OutputRef<'a>,
-}
-
-impl runtime::Trigger<Main> for ReactionStartup<'_> {
-    fn trigger(mut self, _ctx: &mut runtime::Context, _state: &mut Main) {
-        *self.in_start = Some(());
+    reaction! {
+        Startup (startup) -> ping.in_start {
+            *ping_in_start = Some(());
+        }
     }
-}
 
-#[derive(Reaction)]
-#[reaction(reactor = "MainBuilder")]
-struct ReactionDone<'a> {
-    #[reaction(path = "ping.out_finished")]
-    _out: runtime::InputRef<'a>,
-}
-
-impl runtime::Trigger<Main> for ReactionDone<'_> {
-    fn trigger(self, ctx: &mut runtime::Context, _state: &mut Main) {
-        ctx.schedule_shutdown(None);
+    reaction! {
+        Done (ping.out_finished) {
+            ctx.schedule_shutdown(None);
+        }
     }
 }
 
@@ -174,18 +112,14 @@ fn bench(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     let mut env_builder = EnvBuilder::new();
-                    let _reactor = MainBuilder::build(
-                        "main",
-                        Main { count },
-                        None,
-                        None,
-                        false,
-                        &mut env_builder,
-                    )
-                    .unwrap();
+                    let reactor = Main(count);
+                    let _reactor = reactor
+                        .build("main", (), None, None, false, &mut env_builder)
+                        .unwrap();
                     let BuilderRuntimeParts {
                         enclaves,
                         aliases: _,
+                        ..
                     } = env_builder.into_runtime_parts().unwrap();
                     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
                     let config = runtime::Config::default().with_fast_forward(true);
@@ -197,14 +131,14 @@ fn bench(c: &mut Criterion) {
                     // validate the end state
                     let env = sched.into_env();
                     let ping = env
-                        .find_reactor_by_name("main::ping")
+                        .find_reactor_by_name("main/ping")
                         .and_then(|reactor| reactor.get_state::<Ping>())
                         .unwrap();
                     assert_eq!(ping.count, count);
                     assert_eq!(ping.pings_left, 0);
 
                     let pong = env
-                        .find_reactor_by_name("main::pong")
+                        .find_reactor_by_name("main/pong")
                         .and_then(|reactor| reactor.get_state::<Pong>())
                         .unwrap();
                     assert_eq!(pong.count, count);

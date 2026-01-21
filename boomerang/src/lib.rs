@@ -2,7 +2,7 @@
 //!
 //! ## Example
 //!
-//! Build and run a Reactor with reactions that respond to startup and shutdown actions:
+//! Build and run a Reactor with a startup reaction:
 //!
 //! ```rust
 //! use boomerang::prelude::*;
@@ -11,44 +11,20 @@
 //!     success: bool,
 //! }
 //!
-//! #[derive(Reactor)]
-//! #[reactor(
-//!     state = "State",
-//!     reaction = "ReactionStartup",
-//!     reaction = "ReactionShutdown"
-//! )]
-//! struct HelloWorld;
-//!
-//! #[derive(Reaction)]
-//! #[reaction(
-//!     reactor = "HelloWorld",
-//!     triggers(startup)
-//! )]
-//! struct ReactionStartup;
-//!
-//! impl runtime::Trigger<State> for ReactionStartup {
-//!     fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
-//!         println!("Hello World.");
-//!         state.success = true;
-//!     }
-//! }
-//!
-//! #[derive(Reaction)]
-//! #[reaction(
-//!     reactor = "HelloWorld",
-//!     triggers(shutdown)
-//! )]
-//! struct ReactionShutdown;
-//!
-//! impl runtime::Trigger<State> for ReactionShutdown {
-//!     fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
-//!         println!("Shutdown invoked.");
-//!         assert!(state.success, "ERROR: startup reaction not executed.");
+//! #[reactor(state = State)]
+//! fn HelloWorld() -> impl Reactor {
+//!     reaction! {
+//!         Startup (startup) {
+//!             println!("Hello World.");
+//!             state.success = true;
+//!             ctx.schedule_shutdown(None);
+//!         }
 //!     }
 //! }
 //!
 //! let config = runtime::Config::default().with_fast_forward(true);
-//! let (_, envs) = boomerang_util::runner::build_and_test_reactor::<HelloWorld>(
+//! let (_, envs) = boomerang_util::runner::build_and_test_reactor(
+//!     HelloWorld(),
 //!     "hello_world",
 //!     State { success: false },
 //!     config,
@@ -58,7 +34,8 @@
 //! assert!(envs[0]
 //!     .find_reactor_by_name("hello_world")
 //!     .and_then(|reactor| reactor.get_state::<State>())
-//!     .unwrap().success,
+//!     .unwrap()
+//!     .success,
 //! );
 //! ```
 //!
@@ -77,18 +54,18 @@ pub mod prelude {
     //! Re-exported common types and traits for Boomerang
 
     pub use super::builder::{
-        BuilderError, BuilderFqn, BuilderRuntimeParts, EnvBuilder, Input, Logical, Output,
-        Physical, Reactor, TimerActionKey, TypedActionKey, TypedPortKey,
+        BuilderError, BuilderFqn, BuilderRuntimeParts, Contained, EnvBuilder, Input, Local,
+        Logical, Output, Physical, Reactor, TimerActionKey, TimerSpec, TypedActionKey,
+        TypedPortKey,
     };
 
-    pub use super::runtime::{self, CommonContext, Duration, FromRefs, Tag};
+    pub use super::runtime::{self, action::ActionCommon, CommonContext, Duration, FromRefs, Tag};
 
-    pub use boomerang_derive::{Reaction, Reactor};
+    pub use boomerang_macros::{reaction, reactor, reactor_ports, timer};
+
+    pub use crate::flatten_transposed::FlattenTransposedExt;
 }
 
-#[cfg(feature = "derive")]
-#[doc(hidden)]
-pub use boomerang_derive::*;
 
 /// Top-level error type for Boomerang
 #[derive(thiserror::Error, Debug)]

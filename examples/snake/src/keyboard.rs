@@ -2,57 +2,52 @@
 //!
 //! Pressing arrow keys will print them to the terminal.
 
-#[cfg(any(unix, windows))]
 mod keyboard_events;
 
-#[cfg(any(unix, windows))]
+/// A simple Reactor that triggers on key_press events.
+/// It reads keyboard input and prints the key that was pressed.
 mod example {
     use std::io::Write;
 
-    use crate::keyboard_events::{KeyboardEvents, KeyboardEventsBuilder};
+    use crate::keyboard_events::{KeyboardEvents, KeyboardEventsState};
     use boomerang::prelude::*;
     use crossterm::{
         cursor::MoveLeft,
-        event::{KeyCode, KeyEvent},
+        event::KeyCode,
         execute,
         terminal::{Clear, ClearType},
     };
 
-    /// A simple Reactor that triggers on key_press events.
-    /// It reads keyboard input and prints the key that was pressed.
-    #[derive(Reactor)]
-    #[reactor(state = (), reaction = "ReactionKeyPress")]
-    pub struct Example {
-        /// this thing helps capturing key presses
-        #[reactor(child(state = KeyboardEvents::default()))]
-        keyboard: KeyboardEventsBuilder,
-    }
+    #[reactor]
+    pub fn Example() -> impl Reactor<()> {
+        let keyboard = builder.add_child_reactor(
+            KeyboardEvents(),
+            "keyboard",
+            KeyboardEventsState::default(),
+            false,
+        )?;
 
-    #[derive(Reaction)]
-    #[reaction(reactor = "Example")]
-    struct ReactionKeyPress<'a> {
-        #[reaction(path = "keyboard.arrow_key_pressed")]
-        arrow_key_pressed: runtime::InputRef<'a, KeyEvent>,
-    }
+        builder
+            .add_reaction(Some("ReactionKeyPress"))
+            .with_trigger(keyboard.arrow_key_pressed)
+            .with_reaction_fn(|_ctx, _state, (key_event,)| {
+                let mut stdout = std::io::stdout();
 
-    impl runtime::Trigger<()> for ReactionKeyPress<'_> {
-        fn trigger(self, _ctx: &mut runtime::Context, _: &mut ()) {
-            let mut stdout = std::io::stdout();
+                // this might be overwritten several times, only committed on screen refreshes
+                let c = match key_event.as_ref().map(|k| k.code) {
+                    Some(KeyCode::Left) => '←',
+                    Some(KeyCode::Right) => '→',
+                    Some(KeyCode::Up) => '↑',
+                    Some(KeyCode::Down) => '↓',
+                    _ => unreachable!(),
+                };
 
-            // this might be overwritten several times, only committed on screen refreshes
-            let c = match self.arrow_key_pressed.as_ref().map(|k| k.code) {
-                Some(KeyCode::Left) => '←',
-                Some(KeyCode::Right) => '→',
-                Some(KeyCode::Up) => '↑',
-                Some(KeyCode::Down) => '↓',
-                _ => unreachable!(),
-            };
-
-            // Move cursor back one position and clear the last character
-            execute!(stdout, MoveLeft(1), Clear(ClearType::UntilNewLine)).unwrap();
-            write!(stdout, "{c}").unwrap();
-            stdout.flush().unwrap();
-        }
+                // Move cursor back one position and clear the last character
+                execute!(stdout, MoveLeft(1), Clear(ClearType::UntilNewLine)).unwrap();
+                write!(stdout, "{c}").unwrap();
+                stdout.flush().unwrap();
+            })
+            .finish()?;
     }
 }
 
@@ -61,8 +56,9 @@ fn main() {
     tracing_subscriber::fmt::init();
 
     let mut env_builder = EnvBuilder::new();
-    let _reactor =
-        example::Example::build("printer", (), None, None, false, &mut env_builder).unwrap();
+    let _ = example::Example()
+        .build("printer", (), None, None, false, &mut env_builder)
+        .unwrap();
 
     let BuilderRuntimeParts {
         enclaves,

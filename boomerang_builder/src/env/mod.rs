@@ -1,17 +1,19 @@
 use crate::{
     connection::{BaseConnectionBuilder, ConnectionBuilder, PortBindings},
-    ActionTag, Fqn, FqnSegment, ParentReactorBuilder, TimerActionKey, TimerSpec, TriggerMode,
+    port::Contained,
+    ActionTag, Fqn, FqnSegment, ParentReactorBuilder, Physical, PortType, TimerActionKey,
+    TimerSpec, TriggerMode,
 };
 
 use super::{
-    action::ActionBuilder, port::BasePortBuilder, reaction::ReactionBuilder, runtime, ActionType,
-    BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey, BuilderReactionKey,
-    BuilderReactorKey, Input, Logical, Output, PortBuilder, PortTag, ReactionBuilderState,
-    ReactorBuilder, ReactorBuilderState, TypedActionKey, TypedPortKey,
+    action::ActionBuilder, port::BasePortBuilder, port::PortBuilder, reaction::ReactionBuilder,
+    runtime, ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey,
+    BuilderReactionKey, BuilderReactorKey, Input, Logical, Output, PortTag, ReactorBuilder,
+    ReactorBuilderState, TypedActionKey, TypedPortKey,
 };
 use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, EdgeDirection};
-use slotmap::{SecondaryMap, SlotMap};
+use slotmap::{Key, SecondaryMap, SlotMap};
 use std::{collections::HashMap, convert::TryInto};
 
 mod build;
@@ -55,11 +57,8 @@ mod util {
     }
 }
 
-pub trait FindElements {
-    fn get_port_by_name(&self, port_name: &str) -> Result<BuilderPortKey, BuilderError>;
-
-    fn get_action_by_name(&self, action_name: &str) -> Result<BuilderActionKey, BuilderError>;
-}
+#[cfg(feature = "replay")]
+type ReplayFunctionBuilder = dyn FnOnce(&BuilderRuntimeParts) -> Box<dyn runtime::replay::ReplayFn>;
 
 #[derive(Default)]
 pub struct EnvBuilder {
@@ -75,10 +74,7 @@ pub struct EnvBuilder {
     pub(super) connection_builders: Vec<Box<dyn BaseConnectionBuilder>>,
     #[cfg(feature = "replay")]
     /// Builders for Replay functions
-    pub(super) replay_builders: SecondaryMap<
-        BuilderActionKey,
-        Box<dyn FnOnce(&BuilderRuntimeParts) -> Box<dyn runtime::replay::ReplayFn>>,
-    >,
+    pub(super) replay_builders: SecondaryMap<BuilderActionKey, Box<ReplayFunctionBuilder>>,
 }
 
 impl EnvBuilder {
@@ -95,7 +91,8 @@ impl EnvBuilder {
         bank_info: Option<runtime::BankInfo>,
         state: S,
         is_enclave: bool,
-    ) -> ReactorBuilderState<'_> {
+    ) -> ReactorBuilderState<'_, S> {
+        tracing::debug!("Adding Reactor: {name}");
         ReactorBuilderState::new(name, parent, bank_info, state, is_enclave, self)
     }
 
@@ -243,26 +240,6 @@ impl EnvBuilder {
         Ok(key.into())
     }
 
-    /// Add a Reaction to a given Reactor
-    pub fn add_reaction<F>(
-        &mut self,
-        name: &str,
-        reactor_key: BuilderReactorKey,
-        reaction_builder_fn: F,
-    ) -> ReactionBuilderState<'_>
-    where
-        F: FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn + 'static,
-    {
-        let priority = self.reactor_builders[reactor_key].reactions.len();
-        ReactionBuilderState::new(
-            name,
-            priority,
-            reactor_key,
-            Box::new(reaction_builder_fn),
-            self,
-        )
-    }
-
     /// Add a replay function for a given Action
     #[cfg(feature = "replay")]
     pub fn add_replayer<T, Q, F>(
@@ -301,20 +278,22 @@ impl EnvBuilder {
             .ok_or(BuilderError::PortKeyNotFound(port_key))
     }
 
-    /// Find a Port matching a given name and ReactorKey
-    pub fn find_port_by_name(
+    /// Find a port in a child Reactor given it's name and the parent ReactorKey.
+    ///
+    /// The port data type and tag must be provided as type parameters.
+    pub fn find_port_by_name<T: runtime::ReactorData, Q: PortTag>(
         &self,
         port_name: &str,
         reactor_key: BuilderReactorKey,
-    ) -> Result<BuilderPortKey, BuilderError> {
+    ) -> Option<TypedPortKey<T, Q, Contained>> {
         self.port_builders
             .iter()
             .find(|(_, port_builder)| {
                 port_builder.name() == port_name
                     && port_builder.parent_reactor_key() == Some(reactor_key)
+                    && port_builder.inner_type_id() == std::any::TypeId::of::<(T, Q)>()
             })
-            .map(|(port_key, _)| port_key)
-            .ok_or_else(|| BuilderError::NamedPortNotFound(port_name.to_string()))
+            .map(|(port_key, _)| port_key.into())
     }
 
     /// Find a Reaction matching a given name and ReactorKey
@@ -326,7 +305,10 @@ impl EnvBuilder {
         self.reaction_builders
             .iter()
             .find(|(_, reaction_builder)| {
-                reaction_builder.name() == reaction_name
+                reaction_builder
+                    .name()
+                    .map(|name| name == reaction_name)
+                    .unwrap_or_default()
                     && reaction_builder.parent_reactor_key() == Some(reactor_key)
             })
             .map(|(reaction_key, _)| reaction_key)
@@ -442,14 +424,27 @@ impl EnvBuilder {
         let source_key = source_key.into();
         let target_key = target_key.into();
 
-        self.connection_builders
-            .push(Box::new(ConnectionBuilder::<T> {
+        tracing::debug!(
+            "Adding connection from {} to {} with after={after:?} and physical={physical}",
+            source_key.fqn(self, false)?,
+            target_key.fqn(self, false)?,
+        );
+
+        self.connection_builders.push(if physical {
+            Box::new(ConnectionBuilder::<T, Physical> {
                 source_key,
                 target_key,
                 after,
-                physical,
                 _phantom: Default::default(),
-            }));
+            })
+        } else {
+            Box::new(ConnectionBuilder::<T, Logical> {
+                source_key,
+                target_key,
+                after,
+                _phantom: Default::default(),
+            })
+        });
 
         Ok(())
     }
@@ -457,6 +452,68 @@ impl EnvBuilder {
     /// Get a fully-qualified name for a given key
     pub fn fqn_for(&self, key: impl Fqn, grouped: bool) -> Result<BuilderFqn, BuilderError> {
         key.fqn(self, grouped)
+    }
+
+    /// Validate the reactions in the environment
+    pub fn validate_reactions(&self) -> Result<(), BuilderError> {
+        for (_reaction_key, reaction) in &self.reaction_builders {
+            // Validate the port dependencies of each Reaction
+            for (port_key, trigger_mode) in &reaction.port_relations {
+                let port = &self.port_builders[port_key];
+                let port_reactor_key = port.get_reactor_key();
+                let port_parent_reactor_key =
+                    self.reactor_builders[port_reactor_key].parent_reactor_key;
+                match port.port_type() {
+                    PortType::Input => {
+                        // triggers and uses are valid for input ports on the same reactor
+                        if (trigger_mode.is_triggers() || trigger_mode.is_uses())
+                            && port_reactor_key != reaction.reactor_key
+                        {
+                            return Err(BuilderError::ReactionBuilderError(format!(
+                                "Reaction {:?} cannot 'trigger on' or 'use' input port '{}', it \
+                                 must belong to the same reactor as the reaction",
+                                reaction.name(),
+                                self.fqn_for(port_key, false).unwrap()
+                            )));
+                        }
+                        // effects are valid for input ports on contained reactors
+                        if trigger_mode.is_effects()
+                            && port_parent_reactor_key != Some(reaction.reactor_key)
+                        {
+                            return Err(BuilderError::ReactionBuilderError(format!(
+                                "Reaction {:?} cannot 'effect' input port '{}', it must belong to \
+                                 a contained reactor",
+                                reaction.name(),
+                                port.name()
+                            )));
+                        }
+                    }
+                    PortType::Output => {
+                        // triggers and uses are valid for output ports on contained reactors
+                        if (trigger_mode.is_triggers() || trigger_mode.is_uses())
+                            && port_parent_reactor_key != Some(reaction.reactor_key)
+                        {
+                            return Err(BuilderError::ReactionBuilderError(format!(
+                                "Reaction {:?} cannot 'trigger on' or 'use' output port '{}', it \
+                                 must belong to a contained reactor",
+                                reaction.name(),
+                                port.name()
+                            )));
+                        }
+                        // effects are valid for output ports on the same reactor
+                        if trigger_mode.is_effects() && port_reactor_key != reaction.reactor_key {
+                            return Err(BuilderError::ReactionBuilderError(format!(
+                                "Reaction {:?} cannot 'effect' output port '{}', it must belong \
+                                 to the same reactor as the reaction",
+                                reaction.name(),
+                                port.name()
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Build an iterator of all Reaction dependency edges in the graph
@@ -498,7 +555,10 @@ impl EnvBuilder {
             reactor
                 .reactions
                 .keys()
-                .sorted_by_key(|&reaction_key| self.reaction_builders[reaction_key].priority)
+                .sorted_by_key(|&reaction_key| {
+                    //self.reaction_builders[reaction_key].priority
+                    reaction_key.data().as_ffi()
+                })
                 .rev()
                 .tuple_windows()
         });

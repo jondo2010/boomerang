@@ -13,7 +13,6 @@ fn test_build_partition_map() {
 
     let partition_map = env_builder.build_partition_map();
     assert_eq!(partition_map.len(), 3);
-
     assert_eq!(partition_map[main], main);
     assert_eq!(partition_map[ping], ping);
     assert_eq!(partition_map[pong], pong);

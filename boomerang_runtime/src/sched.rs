@@ -407,7 +407,6 @@ impl Scheduler {
     fn handle_async_event(&mut self, event: AsyncEvent) {
         self.stats.increment_processed_events();
         tracing::trace!("Handling");
-        let reactions = event.downstream_reactions(&self.reaction_graph);
         match event {
             AsyncEvent::TagRelease { enclave, tag } => {
                 self.upstream_enclaves
@@ -422,29 +421,35 @@ impl Scheduler {
                     }
                     return;
                 }
-                // TagReleaseProvisional events are coming from downstream enclaves. If this enclave is also an upstream
-                // (cycle), then also release it provisionally.
+                // TagReleaseProvisional events are coming from downstream enclaves.
+                // If this enclave is also an upstream (cycle), then also release it provisionally.
                 if let Some(barrier) = self.upstream_enclaves.get_mut(enclave) {
                     barrier.release_tag_provisional(tag);
                 }
-                self.events.push_event(tag, reactions, false);
+                self.events.push_event(tag, std::iter::empty(), false);
             }
             AsyncEvent::Logical { tag, key, value } => {
                 if tag <= self.current_tag {
                     tracing::warn!(tag = %tag, "Ignoring empty event in the past");
                     return;
                 }
-                self.events.push_event(tag, reactions, false);
+                let downstream = self.reaction_graph.action_triggers[key].iter().copied();
+                self.events.push_event(tag, downstream, false);
                 self.store.push_action_value(key, tag, value);
             }
             AsyncEvent::Physical { time, key, value } => {
                 let tag = Tag::from_physical_time(self.start_time, time);
-                self.events.push_event(tag, reactions, false);
+                let downstream = self.reaction_graph.action_triggers[key].iter().copied();
+                self.events.push_event(tag, downstream, false);
                 self.store.push_action_value(key, tag, value);
             }
             AsyncEvent::Shutdown { delay } => {
-                self.events
-                    .push_event(self.current_tag.delay(delay), reactions, true);
+                let tag = self.current_tag.delay(delay);
+                for action_key in &self.reaction_graph.shutdown_actions {
+                    self.store.push_action_value(*action_key, tag, Box::new(()));
+                }
+                let downstream = self.reaction_graph.shutdown_reactions();
+                self.events.push_event(tag, downstream, true);
                 //self.shutdown_tag = Some(tag);
             }
         }
@@ -455,24 +460,27 @@ impl Scheduler {
     pub fn startup(&mut self) {
         let tag = Tag::ZERO;
 
-        // Set up the startup reactions
-        for (delay, level_reactions) in &self.reaction_graph.startup_reactions {
-            let t = Tag::new(*delay, 0);
-            self.events
-                .push_event(t, level_reactions.iter().inspect(|(lvl, reaction_key)| {
-                    tracing::trace!(level = %lvl, reaction = %reaction_key, tag = %t, "Startup reaction");
-                }).copied(), false);
+        // Initialize the event queue with the startup actions
+        for &(action_key, tag) in &self.reaction_graph.startup_actions {
+            self.store.push_action_value(action_key, tag, Box::new(()));
+            let downstream = self.reaction_graph.action_triggers[action_key]
+                .iter()
+                .inspect(|(lvl, reaction_key)| {
+                    tracing::trace!(level = %lvl, reaction = %reaction_key, tag = %tag, "Startup reaction");
+                })
+                .copied();
+            self.events.push_event(tag, downstream, false);
         }
 
         // Schedule a shutdown event if a timeout is set
         if let Some(timeout) = self.config.timeout {
-            let t = tag.delay(timeout);
-            tracing::info!(tag = %t, "Scheduling shutdown");
-            self.events.push_event(
-                t,
-                self.reaction_graph.shutdown_reactions.iter().copied(),
-                true,
-            );
+            let tag = tag.delay(timeout);
+            for action_key in &self.reaction_graph.shutdown_actions {
+                self.store.push_action_value(*action_key, tag, Box::new(()));
+            }
+            tracing::info!(tag = %tag, "Timeout set, scheduling shutdown");
+            self.events
+                .push_event(tag, self.reaction_graph.shutdown_reactions(), true);
         }
 
         tracing::info!(tag = %tag, "Starting the execution.");
@@ -498,7 +506,7 @@ impl Scheduler {
         let physical_elapsed = std::time::Instant::now() - self.start_time;
         tracing::info!("---- Elapsed physical time: {physical_elapsed:?}");
 
-        tracing::info!(stats = %self.stats, "Scheduler has been shut down.");
+        tracing::info!(stats = ?self.stats, "Scheduler has been shut down.");
     }
 
     /// Try to receive an asynchronous event
@@ -536,6 +544,7 @@ impl Scheduler {
     }
 
     #[tracing::instrument(skip(self), fields(tag = %self.current_tag))]
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> bool {
         // Pump the event queue
         while let Ok(Some(async_event)) = self.event_rx.try_recv() {
@@ -592,20 +601,22 @@ impl Scheduler {
         } else if let Some(async_event) = self.receive_event_async() {
             self.handle_async_event(async_event);
         } else {
-            tracing::debug!("No more events in queue. -> Terminate!");
+            tracing::debug!("No more events in queue, pushing a shutdown event.");
             // Shutdown event will be processed at the next event loop iteration
-            self.shutdown_tag = Some(self.current_tag);
-            self.events.push_event(
-                self.current_tag,
-                self.reaction_graph.shutdown_reactions.iter().copied(),
-                true,
-            );
+            let shutdown = self.current_tag.delay(Duration::ZERO);
+            self.shutdown_tag = Some(shutdown);
+            for action_key in &self.reaction_graph.shutdown_actions {
+                self.store
+                    .push_action_value(*action_key, shutdown, Box::new(()));
+            }
+            self.events
+                .push_event(shutdown, self.reaction_graph.shutdown_reactions(), true);
         }
 
         true
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(skip(self), fields(key = %self.key))]
     pub fn event_loop(&mut self) {
         self.startup();
 
@@ -685,9 +696,14 @@ impl Scheduler {
                     // schedule a shutdown event
                     if self.shutdown_tag.map(|t| shutdown_tag < t).unwrap_or(true) {
                         self.shutdown_tag = Some(shutdown_tag);
+
+                        //for action_key in &self.reaction_graph.shutdown_actions {
+                        //    self.store
+                        //        .push_action_value(*action_key, shutdown_tag, Box::new(()));
+                        //}
                         self.events.push_event(
                             shutdown_tag,
-                            self.reaction_graph.shutdown_reactions.iter().copied(),
+                            self.reaction_graph.shutdown_reactions(),
                             true,
                         );
                     }

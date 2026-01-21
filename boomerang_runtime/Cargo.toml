@@ -42,6 +42,7 @@ thiserror.workspace = true
 time = { workspace = true }
 tinymap.workspace = true
 tracing.workspace = true
+variadics_please.workspace = true
 
 # replay dependencies
 bytes = { version = "1.10", optional = true }

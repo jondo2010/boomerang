@@ -2,92 +2,82 @@
 
 use boomerang::prelude::*;
 
-#[derive(Default, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-struct State {
-    r1done: bool,
-    r2done: bool,
+#[reactor]
+fn Child(act: TypedActionKey<i32>) -> impl Reactor<(), Ports = ChildPorts> {
+    builder
+        .add_reaction(None)
+        .with_trigger(act)
+        .with_reaction_fn(|ctx, _state, (mut act,)| {
+            let value = ctx.get_action_value(&mut act);
+            println!("[child received: {value:?}]");
+        })
+        .finish()?;
 }
 
-#[derive(Clone, Reactor)]
-#[reactor(
-    state = "State",
-    reaction = "ReactionStartup",
-    reaction = "ReactionAct",
-    reaction = "ReactionShutdown"
-)]
-struct ActionValues {
-    #[reactor(action(min_delay = "100 msec"))]
-    act: TypedActionKey<i32>,
-}
+#[reactor]
+fn ActionValues(#[state] r1done: bool, #[state] r2done: bool) -> Reactor {
+    let act = builder.add_logical_action::<i32>("act", Some(Duration::milliseconds(100)))?;
 
-#[derive(Reaction)]
-#[reaction(reactor = "ActionValues", triggers(startup))]
-struct ReactionStartup<'a> {
-    act: runtime::ActionRef<'a, i32>,
-}
+    let _child = builder.add_child_reactor(Child(act), "child", (), false)?;
 
-impl<'a> runtime::Trigger<State> for ReactionStartup<'a> {
-    fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut State) {
-        // scheduled in 100 ms
-        ctx.schedule_action(&mut self.act, 100, None);
-        // scheduled in 150 ms, value is overwritten
-        ctx.schedule_action(&mut self.act, -100, Some(Duration::milliseconds(50)));
-    }
-}
+    builder
+        .add_reaction(Some("Startup"))
+        .with_startup_trigger()
+        .with_effect(act)
+        .with_reaction_fn(|ctx, _state, (_startup, mut act)| {
+            println!("Startup reaction");
+            ctx.schedule_action(&mut act, 100, None);
+            ctx.schedule_action(&mut act, -100, Some(Duration::milliseconds(50)));
+        })
+        .finish()?;
 
-#[derive(Reaction)]
-#[reaction(reactor = "ActionValues")]
-struct ReactionAct<'a> {
-    #[reaction(triggers)]
-    act: runtime::ActionRef<'a, i32>,
-}
+    builder
+        .add_reaction(Some("Act"))
+        .with_trigger(act)
+        .with_reaction_fn(|ctx, state, (mut act,)| {
+            let elapsed = ctx.get_elapsed_logical_time();
+            let value = ctx.get_action_value(&mut act);
 
-impl<'a> runtime::Trigger<State> for ReactionAct<'a> {
-    fn trigger(mut self, ctx: &mut runtime::Context, state: &mut State) {
-        let elapsed = ctx.get_elapsed_logical_time();
-        let value = ctx.get_action_value(&mut self.act);
+            println!("[@{elapsed:?} action transmitted: {value:?}]");
 
-        println!("[@{elapsed:?} action transmitted: {value:?}]");
-
-        if elapsed.whole_milliseconds() == 100 {
-            assert_eq!(value, Some(&100), "ERROR: Expected action value to be 100");
-            state.r1done = true;
-        } else {
-            if elapsed.whole_milliseconds() != 150 {
-                panic!("ERROR: Unexpected reaction invocation at {elapsed:?}");
+            if elapsed.whole_milliseconds() == 100 {
+                assert_eq!(value, Some(&100), "ERROR: Expected action value to be 100");
+                state.r1done = true;
+            } else {
+                if elapsed.whole_milliseconds() != 150 {
+                    panic!("ERROR: Unexpected reaction invocation at {elapsed:?}");
+                }
+                assert_eq!(
+                    value,
+                    Some(&-100),
+                    "ERROR: Expected action value to be -100"
+                );
+                state.r2done = true;
             }
-            assert_eq!(
-                value,
-                Some(&-100),
-                "ERROR: Expected action value to be -100"
+        })
+        .finish()?;
+
+    builder
+        .add_reaction(Some("Shutdown"))
+        .with_shutdown_trigger()
+        .with_reaction_fn(|_ctx, state, (_shutdown,)| {
+            assert!(
+                state.r1done && state.r2done,
+                "ERROR: Expected 2 reaction invocations\n"
             );
-            state.r2done = true;
-        }
-    }
-}
-
-#[derive(Reaction)]
-#[reaction(reactor = "ActionValues", triggers(shutdown))]
-struct ReactionShutdown;
-
-impl runtime::Trigger<State> for ReactionShutdown {
-    fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
-        assert!(
-            state.r1done && state.r2done,
-            "ERROR: Expected 2 reaction invocations\n"
-        );
-        println!("Ok.");
-    }
+            println!("Ok.");
+        })
+        .finish()?;
 }
 
 #[test]
 fn action_values() {
     tracing_subscriber::fmt::init();
     let config = runtime::Config::default().with_fast_forward(true);
-    let _ = boomerang_util::runner::build_and_test_reactor::<ActionValues>(
+    let _ = boomerang_util::runner::build_and_test_reactor(
+        ActionValues(),
         "action_values",
-        State {
+        ActionValuesState {
             r1done: false,
             r2done: false,
         },

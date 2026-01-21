@@ -5,7 +5,7 @@ use std::{pin::Pin, ptr::NonNull};
 use crate::{
     refs::{Refs, RefsMut},
     ActionKey, BaseAction, BasePort, BaseReactor, CommonContext, Context, Deadline, PortKey,
-    Reaction, ReactionKey, ReactorData, ReactorKey, Tag, TriggerRes,
+    Reaction, ReactionKey, ReactionRefs, ReactorData, ReactorKey, Tag, TriggerRes,
 };
 
 use super::{Env, ReactionGraph};
@@ -58,13 +58,13 @@ impl<'a> ReactionTriggerCtx<'a> {
 
         self.context.reset_for_reaction(tag);
 
-        self.reaction.body.trigger(
-            self.context,
-            self.reactor,
-            self.ref_ports,
-            self.mut_ports,
-            self.actions,
-        );
+        let refs = ReactionRefs {
+            ports: self.ref_ports,
+            ports_mut: self.mut_ports,
+            actions: self.actions,
+        };
+
+        self.reaction.body.trigger(self.context, self.reactor, refs);
 
         &self.context.trigger_res
     }
@@ -177,24 +177,24 @@ impl Store {
                 .iter_many_unchecked_mut(inner.reactions.keys())
                 .map(|r| NonNull::new_unchecked(r));
 
-            let action_keys = reaction_graph
-                .reaction_actions
-                .values()
-                .map(|actions| actions.iter());
+        let action_keys = reaction_graph
+            .reaction_actions
+            .values()
+            .map(|actions| actions.iter().copied());
 
             let (_, grouped_actions) = inner
                 .actions
                 .iter_ptr_chunks_split_unchecked(std::iter::empty(), action_keys);
 
-            let port_ref_keys = reaction_graph
-                .reaction_use_ports
-                .values()
-                .map(|ports| ports.iter());
+        let port_ref_keys = reaction_graph
+            .reaction_use_ports
+            .values()
+            .map(|ports| ports.iter().copied());
 
-            let port_mut_keys = reaction_graph
-                .reaction_effect_ports
-                .values()
-                .map(|ports| ports.iter());
+        let port_mut_keys = reaction_graph
+            .reaction_effect_ports
+            .values()
+            .map(|ports| ports.iter().copied());
 
             let (grouped_ref_ports, grouped_mut_ports) = inner
                 .ports
@@ -367,14 +367,14 @@ pub mod tests {
             let mut ctx_iter = unsafe { store.iter_borrow_storage(reaction_keys.iter().cloned()) };
             let ctx = ctx_iter.next().unwrap();
 
-            let (a0, a1): (ActionRef, ActionRef) = ctx.actions.partition_mut().unwrap();
+            let (a0, a1): (ActionRef, ActionRef) = ctx.actions.partition_mut().expect("actions");
             assert_eq!(a0.name(), "action0");
             assert_eq!(a1.name(), "action1");
 
-            let [p0]: [InputRef<u32>; 1] = ctx.ref_ports.partition().unwrap();
+            let [p0]: [InputRef<u32>; 1] = ctx.ref_ports.partition().expect("ref port");
             assert_eq!(p0.name(), "port0");
 
-            let mut p1: OutputRef<u32> = ctx.mut_ports.partition_mut().unwrap();
+            let mut p1: OutputRef<u32> = ctx.mut_ports.partition_mut().expect("mut port");
             assert_eq!(p1.name(), "port1");
             *p1 = Some(42);
         }

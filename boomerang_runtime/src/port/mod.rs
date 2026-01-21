@@ -4,7 +4,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use crate::ReactorData;
+use crate::{refs_extract::ReactionRefsError, ReactorData};
 
 tinymap::key_type! { pub PortKey }
 
@@ -25,6 +25,12 @@ pub trait BasePort: Debug + Display + Downcast + Send + Sync {
     fn type_name(&self) -> &'static str;
 }
 impl_downcast!(BasePort);
+
+/// Wrapper for dynamic immutable port references to support fallible conversions.
+pub struct DynPortRef<'a>(pub &'a dyn BasePort);
+
+/// Wrapper for dynamic mutable port references to support fallible conversions.
+pub struct DynPortRefMut<'a>(pub &'a mut dyn BasePort);
 
 pub struct Port<T: ReactorData> {
     name: String,
@@ -119,7 +125,7 @@ impl<T: ReactorData> BasePort for Port<T> {
 /// See also: [`OutputRef`]
 pub struct InputRef<'a, T: ReactorData = ()>(&'a Port<T>);
 
-impl<'a, T: ReactorData> InputRef<'a, T> {
+impl<T: ReactorData> InputRef<'_, T> {
     pub fn name(&self) -> &str {
         self.0.get_name()
     }
@@ -135,11 +141,24 @@ impl<'a, T: ReactorData> From<&'a Port<T>> for InputRef<'a, T> {
     }
 }
 
-impl<'a, T: ReactorData> Deref for InputRef<'a, T> {
+impl<T: ReactorData> Deref for InputRef<'_, T> {
     type Target = <Port<T> as Deref>::Target;
 
     fn deref(&self) -> &Self::Target {
         self.0.deref()
+    }
+}
+
+impl<'a, T: ReactorData> TryFrom<DynPortRef<'a>> for InputRef<'a, T> {
+    type Error = ReactionRefsError;
+
+    fn try_from(port: DynPortRef<'a>) -> Result<Self, Self::Error> {
+        let found = port.0.type_name();
+
+        port.0
+            .downcast_ref::<Port<T>>()
+            .map(InputRef::from)
+            .ok_or_else(|| ReactionRefsError::type_mismatch("input port", std::any::type_name::<T>(), found))
     }
 }
 
@@ -159,7 +178,7 @@ impl<'a, T: ReactorData> From<&'a dyn BasePort> for InputRef<'a, T> {
 /// See also: [`InputRef`]
 pub struct OutputRef<'a, T: ReactorData = ()>(&'a mut Port<T>);
 
-impl<'a, T: ReactorData> OutputRef<'a, T> {
+impl<T: ReactorData> OutputRef<'_, T> {
     pub fn name(&self) -> &str {
         self.0.get_name()
     }
@@ -175,7 +194,7 @@ impl<'a, T: ReactorData> From<&'a mut Port<T>> for OutputRef<'a, T> {
     }
 }
 
-impl<'a, T: ReactorData> Deref for OutputRef<'a, T> {
+impl<T: ReactorData> Deref for OutputRef<'_, T> {
     type Target = <Port<T> as Deref>::Target;
 
     fn deref(&self) -> &Self::Target {
@@ -183,17 +202,22 @@ impl<'a, T: ReactorData> Deref for OutputRef<'a, T> {
     }
 }
 
-impl<'a, T: ReactorData> DerefMut for OutputRef<'a, T> {
+impl<T: ReactorData> DerefMut for OutputRef<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.0.deref_mut()
     }
 }
 
-impl<'a, T: ReactorData> From<&'a mut dyn BasePort> for OutputRef<'a, T> {
-    fn from(port: &'a mut dyn BasePort) -> Self {
-        OutputRef::from(
-            port.downcast_mut::<Port<T>>()
-                .expect("Downcast failed during conversion"),
-        )
+impl<'a, T: ReactorData> TryFrom<DynPortRefMut<'a>> for OutputRef<'a, T> {
+    type Error = ReactionRefsError;
+
+    fn try_from(port: DynPortRefMut<'a>) -> Result<Self, Self::Error> {
+        let found = port.0.type_name();
+
+        port
+            .0
+            .downcast_mut::<Port<T>>()
+            .map(OutputRef::from)
+            .ok_or_else(|| ReactionRefsError::type_mismatch("output port", std::any::type_name::<T>(), found))
     }
 }

@@ -1,6 +1,13 @@
 use crate::{Context, Duration, Tag};
 
 use super::{Action, ActionKey, BaseAction, ReactorData};
+use crate::refs_extract::ReactionRefsError;
+
+/// Wrapper for dynamic mutable action references to support fallible conversions.
+pub struct DynActionRefMut<'a>(pub &'a mut dyn BaseAction);
+
+/// Wrapper for dynamic immutable action references to support fallible conversions.
+pub struct DynActionRef<'a>(pub &'a dyn BaseAction);
 
 /*: From<&'a mut dyn BaseAction> */
 pub trait ActionCommon<T: ReactorData> {
@@ -14,13 +21,21 @@ pub trait ActionCommon<T: ReactorData> {
 /// synchronous version of [`AsyncActionRef`].
 pub struct ActionRef<'a, T: ReactorData = ()>(&'a mut Action<T>);
 
-impl<'a, T: ReactorData> From<&'a mut dyn BaseAction> for ActionRef<'a, T> {
-    fn from(value: &'a mut dyn BaseAction) -> Self {
-        Self(value.downcast_mut().expect("Type mismatch on ActionRefMut"))
+impl<'a, T: ReactorData> TryFrom<DynActionRefMut<'a>> for ActionRef<'a, T> {
+    type Error = ReactionRefsError;
+
+    fn try_from(value: DynActionRefMut<'a>) -> Result<Self, Self::Error> {
+        let found = value.0.type_name();
+
+        value
+            .0
+            .downcast_mut::<Action<T>>()
+            .map(ActionRef)
+            .ok_or_else(|| ReactionRefsError::type_mismatch("action", std::any::type_name::<T>(), found))
     }
 }
 
-impl<'a, T: ReactorData> ActionRef<'a, T> {
+impl<T: ReactorData> ActionRef<'_, T> {
     /// Return true if the action is present at the current tag
     pub fn is_present(&mut self, context: &Context) -> bool {
         self.0.store.get_current(context.tag).is_some()
@@ -35,9 +50,15 @@ impl<'a, T: ReactorData> ActionRef<'a, T> {
     pub fn set_value(&mut self, tag: Tag, value: T) {
         self.0.store.push(tag, value);
     }
+
+    /// Convert this [`ActionRef`] to an [`AsyncActionRef`]
+    pub fn to_async(self) -> AsyncActionRef<T> {
+        AsyncActionRef::try_from(DynActionRef(self.0 as &dyn BaseAction))
+            .expect("Type mismatch on ActionRef2")
+    }
 }
 
-impl<'a, T: ReactorData> ActionCommon<T> for ActionRef<'a, T> {
+impl<T: ReactorData> ActionCommon<T> for ActionRef<'_, T> {
     fn name(&self) -> &str {
         self.0.name()
     }
@@ -56,7 +77,7 @@ impl<'a, T: ReactorData> ActionCommon<T> for ActionRef<'a, T> {
 }
 
 /// [`AsyncActionRef`] is the type received by a user Reaction when they want to interact with an Action asynchronously.
-/// It is the asynchronous version of [`ActionRefMut`].
+/// It is the asynchronous version of [`ActionRef`].
 #[derive(Clone)]
 pub struct AsyncActionRef<T: ReactorData = ()> {
     name: String,
@@ -66,23 +87,23 @@ pub struct AsyncActionRef<T: ReactorData = ()> {
     _phantom: std::marker::PhantomData<fn() -> T>,
 }
 
-impl<'a, T: ReactorData> From<&'a dyn BaseAction> for AsyncActionRef<T> {
-    fn from(value: &'a dyn BaseAction) -> Self {
-        let action: &Action<T> = value.downcast_ref().expect("Type mismatch on ActionRef2");
-        Self {
+impl<'a, T: ReactorData> TryFrom<DynActionRef<'a>> for AsyncActionRef<T> {
+    type Error = ReactionRefsError;
+
+    fn try_from(value: DynActionRef<'a>) -> Result<Self, Self::Error> {
+        let found = value.0.type_name();
+
+        value
+            .0
+            .downcast_ref::<Action<T>>()
+            .map(|action| Self {
             name: action.name().into(),
             key: action.key(),
             min_delay: action.min_delay(),
             is_logical: action.is_logical(),
             _phantom: Default::default(),
-        }
-    }
-}
-
-//NOTE: The following is implemented to satisty PartitionMut in the generated code
-impl<'a, T: ReactorData> From<&'a mut dyn BaseAction> for AsyncActionRef<T> {
-    fn from(value: &'a mut dyn BaseAction) -> Self {
-        (&*value).into()
+            })
+            .ok_or_else(|| ReactionRefsError::type_mismatch("action", std::any::type_name::<T>(), found))
     }
 }
 

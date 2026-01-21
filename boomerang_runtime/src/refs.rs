@@ -4,8 +4,8 @@
 //! The `Partition` and `PartitionMut` traits are implemented for tuples of concrete types.
 //! The `part` and `part_mut` functions are used to perform the dynamic destructuring.
 //!
-//! This module is *not* necessary When using derived Reaction implementations (e.g. `#[derive(Reaction)]`), as the
-//! generated code will handle the partitioning logic under the hood.
+//! This module is typically not necessary when using the `#[reactor]` and `reaction!` macros, as the generated code
+//! handles partitioning under the hood.
 //!
 //! # Example
 //!
@@ -17,9 +17,10 @@
 //! });
 //! ```
 
-use std::{marker::PhantomData, mem::MaybeUninit, ptr::NonNull};
+use std::{fmt::Debug, marker::PhantomData, mem::MaybeUninit, ptr::NonNull};
 
-use crate::{BaseAction, BasePort};
+use crate::{BaseAction, BasePort, DynActionRefMut, DynPortRef, DynPortRefMut, ReactionRefsError};
+use variadics_please::all_tuples;
 
 /// Iterator over references to elements in a `Vec<NonNull<T>>`.
 pub struct Refs<'a, T: 'a + ?Sized> {
@@ -29,7 +30,7 @@ pub struct Refs<'a, T: 'a + ?Sized> {
     _marker: PhantomData<&'a T>,
 }
 
-impl<T: std::fmt::Debug> std::fmt::Debug for Refs<'_, T> {
+impl<T: Debug> Debug for Refs<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let len = self.len();
         let slice = unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), len) };
@@ -38,7 +39,7 @@ impl<T: std::fmt::Debug> std::fmt::Debug for Refs<'_, T> {
 }
 
 impl<'a, T: 'a + ?Sized> Refs<'a, T> {
-    pub(crate) fn new(vec: &mut Vec<NonNull<T>>) -> Self {
+    pub fn new(vec: &mut Vec<NonNull<T>>) -> Self {
         // SAFETY: `vec` is guaranteed to be non-empty.
         let ptr: NonNull<NonNull<T>> = unsafe { NonNull::new_unchecked(vec.as_mut_ptr()) };
         let len = vec.len();
@@ -53,17 +54,17 @@ impl<'a, T: 'a + ?Sized> Refs<'a, T> {
     /// Wrapper function for dynamic destructuring.
     ///
     /// This function is used to destructure `Refs` into a tuple of concrete types.
-    /// The function will panic if not fully consumed.
-    pub fn partition<S>(self) -> Option<S>
+    /// Returns an error if the iterator is not fully consumed or a conversion fails.
+    pub fn partition<S>(self) -> Result<S, ReactionRefsError>
     where
         S: Partition<'a, T>,
     {
-        if let Some((result, rest)) = S::part(self) {
-            assert_eq!(rest.len(), 0, "Partition error");
-            Some(result)
-        } else {
-            None
+        let (result, rest) = S::part(self)?;
+        if rest.len() != 0 {
+            return Err(ReactionRefsError::destructure_remaining(rest.len()));
         }
+
+        Ok(result)
     }
 }
 
@@ -96,7 +97,7 @@ pub struct RefsMut<'a, T: 'a + ?Sized> {
     _marker: PhantomData<&'a mut T>,
 }
 
-impl<T: std::fmt::Debug> std::fmt::Debug for RefsMut<'_, T> {
+impl<T: Debug> Debug for RefsMut<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let len = self.len();
         let slice = unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), len) };
@@ -105,7 +106,7 @@ impl<T: std::fmt::Debug> std::fmt::Debug for RefsMut<'_, T> {
 }
 
 impl<'a, T: 'a + ?Sized> RefsMut<'a, T> {
-    pub(crate) fn new(vec: &mut Vec<NonNull<T>>) -> Self {
+    pub fn new(vec: &mut Vec<NonNull<T>>) -> Self {
         // SAFETY: `vec` is guaranteed to be non-empty.
         let ptr: NonNull<NonNull<T>> = unsafe { NonNull::new_unchecked(vec.as_mut_ptr()) };
         let len = vec.len();
@@ -120,17 +121,17 @@ impl<'a, T: 'a + ?Sized> RefsMut<'a, T> {
     /// Wrapper function for dynamic destructuring with mutable references.
     ///
     /// This function is used to destructure `RefsMut` into a tuple of concrete types.
-    /// The function will panic if not fully consumed.
-    pub fn partition_mut<S>(self) -> Option<S>
+    /// Returns an error if the iterator is not fully consumed or a conversion fails.
+    pub fn partition_mut<S>(self) -> Result<S, ReactionRefsError>
     where
         S: PartitionMut<'a, T>,
     {
-        if let Some((result, rest)) = S::part_mut(self) {
-            assert_eq!(rest.len(), 0, "Destructuring error");
-            Some(result)
-        } else {
-            None
+        let (result, rest) = S::part_mut(self)?;
+        if rest.len() != 0 {
+            return Err(ReactionRefsError::destructure_remaining(rest.len()));
         }
+
+        Ok(result)
     }
 }
 
@@ -156,134 +157,151 @@ impl<'a, T: 'a + ?Sized> ExactSizeIterator for RefsMut<'a, T> {
 }
 
 pub trait Partition<'a, T: ?Sized>: Sized {
-    fn part(refs: Refs<'a, T>) -> Option<(Self, Refs<'a, T>)>;
+    fn part(refs: Refs<'a, T>) -> Result<(Self, Refs<'a, T>), ReactionRefsError>;
 }
 
 pub trait PartitionMut<'a, T: ?Sized>: Sized {
-    fn part_mut(refs: RefsMut<'a, T>) -> Option<(Self, RefsMut<'a, T>)>;
+    fn part_mut(refs: RefsMut<'a, T>) -> Result<(Self, RefsMut<'a, T>), ReactionRefsError>;
 }
 
 // Partition for BasePort scalars
 impl<'a, P> Partition<'a, dyn BasePort> for P
 where
-    P: From<&'a dyn BasePort>,
+    P: TryFrom<DynPortRef<'a>, Error = ReactionRefsError>,
 {
-    fn part(mut refs: Refs<'a, dyn BasePort>) -> Option<(Self, Refs<'a, dyn BasePort>)> {
-        refs.next().map(|p| (Self::from(p), refs))
+    fn part(mut refs: Refs<'a, dyn BasePort>) -> Result<(Self, Refs<'a, dyn BasePort>), ReactionRefsError> {
+        let port = refs
+            .next()
+            .ok_or_else(|| ReactionRefsError::missing("port"))?;
+
+        Ok((Self::try_from(DynPortRef(port))?, refs))
     }
 }
 
 // Partition for BasePort arrays
 impl<'a, P, const N: usize> Partition<'a, dyn BasePort> for [P; N]
 where
-    P: From<&'a dyn BasePort>,
+    P: TryFrom<DynPortRef<'a>, Error = ReactionRefsError>,
 {
-    fn part(mut refs: Refs<'a, dyn BasePort>) -> Option<(Self, Refs<'a, dyn BasePort>)> {
+    fn part(mut refs: Refs<'a, dyn BasePort>) -> Result<(Self, Refs<'a, dyn BasePort>), ReactionRefsError> {
         if refs.len() < N {
-            return None;
+            return Err(ReactionRefsError::missing("port"));
         }
 
         let mut array = MaybeUninit::<[P; N]>::uninit();
 
         for i in 0..N {
-            if let Some(r) = refs.next() {
-                // Safety: should be safe since we have checked the length of the iterator and are not reading from
-                // uninitialized memory.
-                unsafe {
-                    (*array.as_mut_ptr()).as_mut_ptr().add(i).write(P::from(r));
-                }
-            } else {
-                // Not enough elements in the iterator.
-                return None;
+            let r = refs
+                .next()
+                .ok_or_else(|| ReactionRefsError::missing("port"))?;
+
+            // Safety: length pre-checked; writing sequentially initialized.
+            unsafe {
+                (*array.as_mut_ptr())
+                    .as_mut_ptr()
+                    .add(i)
+                    .write(P::try_from(DynPortRef(r))?);
             }
         }
 
         // Safety: we have initialized all elements of the array.
-        Some((unsafe { array.assume_init() }, refs))
+        Ok((unsafe { array.assume_init() }, refs))
     }
 }
 
 // PartitionMut for BasePort scalars
 impl<'a, P> PartitionMut<'a, dyn BasePort> for P
 where
-    P: From<&'a mut dyn BasePort>,
+    P: TryFrom<DynPortRefMut<'a>, Error = ReactionRefsError>,
 {
-    fn part_mut(mut refs: RefsMut<'a, dyn BasePort>) -> Option<(Self, RefsMut<'a, dyn BasePort>)> {
-        refs.next().map(|p| (Self::from(p), refs))
+    fn part_mut(mut refs: RefsMut<'a, dyn BasePort>) -> Result<(Self, RefsMut<'a, dyn BasePort>), ReactionRefsError> {
+        let port = refs
+            .next()
+            .ok_or_else(|| ReactionRefsError::missing("port"))?;
+
+        Ok((Self::try_from(DynPortRefMut(port))?, refs))
     }
 }
 
 // PartitionMut for BasePort arrays
 impl<'a, P, const N: usize> PartitionMut<'a, dyn BasePort> for [P; N]
 where
-    P: From<&'a mut dyn BasePort>,
+    P: TryFrom<DynPortRefMut<'a>, Error = ReactionRefsError>,
 {
-    fn part_mut(mut refs: RefsMut<'a, dyn BasePort>) -> Option<(Self, RefsMut<'a, dyn BasePort>)> {
+    fn part_mut(mut refs: RefsMut<'a, dyn BasePort>) -> Result<(Self, RefsMut<'a, dyn BasePort>), ReactionRefsError> {
         if refs.len() < N {
-            return None;
+            return Err(ReactionRefsError::missing("port"));
         }
 
         let mut array = MaybeUninit::<[P; N]>::uninit();
 
         for i in 0..N {
-            if let Some(r) = refs.next() {
-                // Safety: should be safe since we have checked the length of the iterator and are not reading from
-                // uninitialized memory.
-                unsafe {
-                    (*array.as_mut_ptr()).as_mut_ptr().add(i).write(P::from(r));
-                }
-            } else {
-                // Not enough elements in the iterator.
-                return None;
+            let r = refs
+                .next()
+                .ok_or_else(|| ReactionRefsError::missing("port"))?;
+
+            // Safety: should be safe since we have checked the length of the iterator and are not reading from
+            // uninitialized memory.
+            unsafe {
+                (*array.as_mut_ptr())
+                    .as_mut_ptr()
+                    .add(i)
+                    .write(P::try_from(DynPortRefMut(r))?);
             }
         }
 
         // Safety: we have initialized all elements of the array.
-        Some((unsafe { array.assume_init() }, refs))
+        Ok((unsafe { array.assume_init() }, refs))
     }
 }
 
 // PartitionMut for BaseAction scalars
 impl<'a, A> PartitionMut<'a, dyn BaseAction> for A
 where
-    A: From<&'a mut dyn BaseAction>,
+    A: TryFrom<DynActionRefMut<'a>, Error = ReactionRefsError>,
 {
     fn part_mut(
         mut refs: RefsMut<'a, dyn BaseAction>,
-    ) -> Option<(Self, RefsMut<'a, dyn BaseAction>)> {
-        refs.next().map(|a| (Self::from(a), refs))
+    ) -> Result<(Self, RefsMut<'a, dyn BaseAction>), ReactionRefsError> {
+        let action = refs
+            .next()
+            .ok_or_else(|| ReactionRefsError::missing("action"))?;
+
+        Ok((Self::try_from(DynActionRefMut(action))?, refs))
     }
 }
 
 // PartitionMut for BaseAction arrays
 impl<'a, A, const N: usize> PartitionMut<'a, dyn BaseAction> for [A; N]
 where
-    A: From<&'a mut dyn BaseAction>,
+    A: TryFrom<DynActionRefMut<'a>, Error = ReactionRefsError>,
 {
     fn part_mut(
         mut refs: RefsMut<'a, dyn BaseAction>,
-    ) -> Option<(Self, RefsMut<'a, dyn BaseAction>)> {
+    ) -> Result<(Self, RefsMut<'a, dyn BaseAction>), ReactionRefsError> {
         if refs.len() < N {
-            return None;
+            return Err(ReactionRefsError::missing("action"));
         }
 
         let mut array = MaybeUninit::<[A; N]>::uninit();
 
         for i in 0..N {
-            if let Some(a) = refs.next() {
-                // Safety: should be safe since we have checked the length of the iterator and are not reading from
-                // uninitialized memory.
-                unsafe {
-                    (*array.as_mut_ptr()).as_mut_ptr().add(i).write(A::from(a));
-                }
-            } else {
-                // Not enough elements in the iterator.
-                return None;
+            let a = refs
+                .next()
+                .ok_or_else(|| ReactionRefsError::missing("action"))?;
+
+            // Safety: should be safe since we have checked the length of the iterator and are not reading from
+            // uninitialized memory.
+            unsafe {
+                (*array.as_mut_ptr())
+                    .as_mut_ptr()
+                    .add(i)
+                    .write(A::try_from(DynActionRefMut(a))?);
             }
         }
 
         // Safety: we have initialized all elements of the array.
-        Some((unsafe { array.assume_init() }, refs))
+        Ok((unsafe { array.assume_init() }, refs))
     }
 }
 
@@ -293,7 +311,7 @@ macro_rules! impl_part_for_tuples {
         where
             $($S: Partition<'a, T>),+
         {
-            fn part(refs: Refs<'a, T>) -> Option<(Self, Refs<'a, T>)> {
+            fn part(refs: Refs<'a, T>) -> Result<(Self, Refs<'a, T>), ReactionRefsError> {
                 let (elements, rest) = {
                     let mut rest = refs;
                     (
@@ -306,7 +324,7 @@ macro_rules! impl_part_for_tuples {
                         ),+,)
                     , rest)
                 };
-                Some((elements, rest))
+                Ok((elements, rest))
             }
         }
 
@@ -314,7 +332,7 @@ macro_rules! impl_part_for_tuples {
         where
             $($S: PartitionMut<'a, T>),+
         {
-            fn part_mut(refs: RefsMut<'a, T>) -> Option<(Self, RefsMut<'a, T>)> {
+            fn part_mut(refs: RefsMut<'a, T>) -> Result<(Self, RefsMut<'a, T>), ReactionRefsError> {
                 let (elements, rest) = {
                     let mut rest = refs;
                     (
@@ -327,18 +345,14 @@ macro_rules! impl_part_for_tuples {
                         ),+,)
                     , rest)
                 };
-                Some((elements, rest))
+                Ok((elements, rest))
             }
         }
     };
 }
 
-// Implement the macro for tuples of length 1 through 5
-impl_part_for_tuples!(T0);
-impl_part_for_tuples!(T0, T1);
-impl_part_for_tuples!(T0, T1, T2);
-impl_part_for_tuples!(T0, T1, T2, T3);
-impl_part_for_tuples!(T0, T1, T2, T3, T4);
+// Implement the macro for tuples of length 1 through 10
+all_tuples!(impl_part_for_tuples, 1, 10, S);
 
 #[cfg(test)]
 mod tests {
@@ -365,7 +379,7 @@ mod tests {
 
         // Test the partition function
         let (p0, p1, p2a): (InputRef<i32>, InputRef<u32>, [InputRef<bool>; 2]) =
-            refs.partition().unwrap();
+            refs.partition().expect("partition");
 
         assert_eq!(p0.name(), "p0");
         assert_eq!(p1.name(), "p1");
@@ -381,7 +395,7 @@ mod tests {
         };
 
         let refs_mut = RefsMut::new(&mut ptrs);
-        let (p1, p2a): (OutputRef<u32>, [OutputRef<bool>; 2]) = refs_mut.partition_mut().unwrap();
+        let (p1, p2a): (OutputRef<u32>, [OutputRef<bool>; 2]) = refs_mut.partition_mut().expect("partition_mut");
 
         assert_eq!(p1.name(), "p1");
         assert_eq!(p2a[0].name(), "p2a");
@@ -394,35 +408,35 @@ mod tests {
         // Trying to partition an empty refs should return None
         let mut empty_vec: Vec<NonNull<dyn BasePort>> = Vec::new();
         let refs = Refs::new(&mut empty_vec);
-        let result: Option<InputRef<i32>> = refs.partition();
-        assert!(result.is_none());
+        let result: Result<InputRef<i32>, ReactionRefsError> = refs.partition();
+        assert!(matches!(result, Err(ReactionRefsError::Missing { .. })));
 
         // Testing with arrays
         let mut empty_vec: Vec<NonNull<dyn BasePort>> = Vec::new();
         let refs = Refs::new(&mut empty_vec);
-        let result: Option<[InputRef<i32>; 2]> = refs.partition();
-        assert!(result.is_none());
+        let result: Result<[InputRef<i32>; 2], ReactionRefsError> = refs.partition();
+        assert!(matches!(result, Err(ReactionRefsError::Missing { .. })));
 
         // Testing with tuples
         let mut empty_vec: Vec<NonNull<dyn BasePort>> = Vec::new();
         let refs = Refs::new(&mut empty_vec);
-        let result: Option<(InputRef<i32>, InputRef<u32>)> = refs.partition();
-        assert!(result.is_none());
+        let result: Result<(InputRef<i32>, InputRef<u32>), ReactionRefsError> = refs.partition();
+        assert!(matches!(result, Err(ReactionRefsError::Missing { .. })));
 
         // Test for RefsMut
         let mut empty_vec: Vec<NonNull<dyn BasePort>> = Vec::new();
         let refs_mut = RefsMut::new(&mut empty_vec);
-        let result: Option<OutputRef<i32>> = refs_mut.partition_mut();
-        assert!(result.is_none());
+        let result: Result<OutputRef<i32>, ReactionRefsError> = refs_mut.partition_mut();
+        assert!(matches!(result, Err(ReactionRefsError::Missing { .. })));
 
         let mut empty_vec: Vec<NonNull<dyn BasePort>> = Vec::new();
         let refs_mut = RefsMut::new(&mut empty_vec);
-        let result: Option<[OutputRef<i32>; 2]> = refs_mut.partition_mut();
-        assert!(result.is_none());
+        let result: Result<[OutputRef<i32>; 2], ReactionRefsError> = refs_mut.partition_mut();
+        assert!(matches!(result, Err(ReactionRefsError::Missing { .. })));
 
         let mut empty_vec: Vec<NonNull<dyn BasePort>> = Vec::new();
         let refs_mut = RefsMut::new(&mut empty_vec);
-        let result: Option<(OutputRef<i32>, OutputRef<u32>)> = refs_mut.partition_mut();
-        assert!(result.is_none());
+        let result: Result<(OutputRef<i32>, OutputRef<u32>), ReactionRefsError> = refs_mut.partition_mut();
+        assert!(matches!(result, Err(ReactionRefsError::Missing { .. })));
     }
 }

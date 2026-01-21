@@ -1,103 +1,81 @@
 use boomerang::prelude::*;
 
-/// NOTE: `State: Clone` is required because state is cloned for each child reactor.
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Debug, Default, Clone)]
-struct State {
-    received: bool,
-}
+#[reactor]
+fn Node<const NUM_NODES: usize>(
+    #[state] received: bool,
+    #[input] inp: [i32; NUM_NODES],
+    #[output] out: i32,
+) -> impl Reactor {
+    builder
+        .add_reaction(Some("Startup"))
+        .with_startup_trigger()
+        .with_effect(out)
+        .with_reaction_fn(|ctx, _state, (_startup, mut out)| {
+            println!("Hello from node {}!", ctx.get_bank_index().unwrap());
+            // broadcast my ID to everyone
+            *out = ctx.get_bank_index().map(|x| x as i32);
+        })
+        .finish()?;
 
-#[derive(Reactor)]
-#[reactor(
-    state = "State",
-    reaction = "ReactionStartup",
-    reaction = "ReactionIn<NUM_NODES>",
-    reaction = "ReactionShutdown"
-)]
-struct Node<const NUM_NODES: usize> {
-    inp: [TypedPortKey<i32, Input>; NUM_NODES],
-    out: TypedPortKey<i32, Output>,
-}
-
-#[derive(Reaction)]
-#[reaction(
-    reactor = "Node<NUM_NODES>",
-    bound = "const NUM_NODES: usize",
-    triggers(startup)
-)]
-struct ReactionStartup<'a> {
-    out: runtime::OutputRef<'a, i32>,
-}
-
-impl runtime::Trigger<State> for ReactionStartup<'_> {
-    fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut State) {
-        println!("Hello from node {}!", ctx.get_bank_index().unwrap());
-        // broadcast my ID to everyone
-        *self.out = ctx.get_bank_index().map(|x| x as i32);
-    }
-}
-
-#[derive(Reaction)]
-#[reaction(reactor = "Node<NUM_NODES>")]
-struct ReactionIn<'a, const NUM_NODES: usize> {
-    inp: [runtime::InputRef<'a, i32>; NUM_NODES],
-}
-
-impl<const NUM_NODES: usize> runtime::Trigger<State> for ReactionIn<'_, NUM_NODES> {
-    fn trigger(self, ctx: &mut runtime::Context, state: &mut State) {
-        let mut count = 0;
-        let mut vals = vec![];
-        for p in &self.inp {
-            if let Some(val) = **p {
-                state.received = true;
-                count += 1;
-                vals.push(val.to_string());
+    builder
+        .add_reaction(Some("In"))
+        .with_trigger(inp)
+        .with_reaction_fn(|ctx, state, (inp,)| {
+            let mut count = 0;
+            let mut vals = vec![];
+            for p in &inp {
+                if let Some(val) = **p {
+                    state.received = true;
+                    count += 1;
+                    vals.push(val.to_string());
+                }
             }
-        }
 
-        println!(
-            "Node {} received messages from {}.",
-            ctx.get_bank_index().unwrap(),
-            vals.join(" "),
-        );
+            println!(
+                "Node {} received messages from {}.",
+                ctx.get_bank_index().unwrap(),
+                vals.join(" "),
+            );
 
-        assert_eq!(
-            Some(count),
-            ctx.get_bank_total(),
-            "Received fewer messages than expected!"
-        );
-    }
+            assert_eq!(
+                Some(count),
+                ctx.get_bank_total(),
+                "Received fewer messages than expected!"
+            );
+        })
+        .finish()?;
+
+    builder
+        .add_reaction(Some("Shutdown"))
+        .with_shutdown_trigger()
+        .with_reaction_fn(|_ctx, state, (_shutdown,)| {
+            assert!(state.received, "Received no input!");
+        })
+        .finish()?;
 }
 
-#[derive(Reaction)]
-#[reaction(
-    reactor = "Node<NUM_NODES>",
-    bound = "const NUM_NODES: usize",
-    triggers(shutdown)
-)]
-struct ReactionShutdown;
-
-impl runtime::Trigger<State> for ReactionShutdown {
-    fn trigger(self, _ctx: &mut runtime::Context, state: &mut State) {
-        assert!(state.received, "Received no input!");
-    }
-}
-
-#[derive(Reactor)]
-#[reactor(
-    state = (),
-    connection(from = "nodes.out", to = "nodes.inp", broadcast)
-)]
-struct MainReactor<const NUM_NODES: usize = 4> {
-    #[reactor(child(state = State{received: false}))]
-    nodes: [Node<NUM_NODES>; NUM_NODES],
+#[reactor]
+fn Main<const NUM_NODES: usize = 4>() -> impl Reactor {
+    let nodes: [_; NUM_NODES] =
+        builder.add_child_reactors(Node::<4>(), "nodes", Default::default(), false)?;
+    builder.connect_ports(
+        nodes
+            .iter()
+            .flat_map(|child| child.out.iter())
+            .copied()
+            .cycle(),
+        nodes.iter().flat_map(|child| child.inp.iter()).copied(),
+        None,
+        false,
+    )?;
 }
 
 #[test]
 fn mutliport_fully_connected() {
     tracing_subscriber::fmt::init();
     let config = runtime::Config::default().with_fast_forward(true);
-    let _ = boomerang_util::runner::build_and_test_reactor::<MainReactor>(
+    let _ = boomerang_util::runner::build_and_test_reactor(
+        Main::<4>(),
         "multiport_fully_connected",
         (),
         config,

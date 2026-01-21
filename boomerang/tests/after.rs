@@ -2,122 +2,83 @@
 
 use boomerang::prelude::*;
 
-#[derive(Reactor)]
-#[reactor(state = "()", reaction = "ReactionFooX")]
-struct Foo {
-    x: TypedPortKey<i32, Input>,
-    y: TypedPortKey<i32, Output>,
+#[reactor]
+fn Foo(#[input] x: i32, #[output] y: i32) -> impl Reactor {
+    builder
+        .add_reaction(None)
+        .with_trigger(x)
+        .with_effect(y)
+        .with_reaction_fn(|_ctx, _state, (x, mut y)| {
+            *y = x.map(|x| 2 * x);
+        })
+        .finish()?;
 }
 
-#[derive(Reaction)]
-#[reaction(reactor = "Foo")]
-struct ReactionFooX<'a> {
-    x: runtime::InputRef<'a, i32>,
-    y: runtime::OutputRef<'a, i32>,
+#[reactor]
+fn Print(
+    #[state(default = Duration::milliseconds(10))] expected_time: Duration,
+    #[state] i: usize,
+    #[input] x: i32,
+) -> impl Reactor {
+    builder
+        .add_reaction(None)
+        .with_trigger(x)
+        .with_reaction_fn(|ctx, state, (x,)| {
+            state.i += 1;
+            let elapsed_time = ctx.get_elapsed_logical_time();
+            println!("Result is {:?}", *x);
+            assert_eq!(*x, Some(84), "Expected result to be 84");
+            println!("Current logical time is: {}", elapsed_time);
+            println!("Current physical time is: {:?}", ctx.get_physical_time());
+            assert_eq!(
+                elapsed_time, state.expected_time,
+                "Expected logical time to be {}",
+                state.expected_time
+            );
+            state.expected_time += Duration::seconds(1);
+        })
+        .finish()?;
+
+    builder
+        .add_reaction(None)
+        .with_shutdown_trigger()
+        .with_reaction_fn(|_ctx, state, _| {
+            println!("Final result is {}", state.i);
+            assert!(state.i != 0, "ERROR: Final reactor received no data.");
+        })
+        .finish()?;
 }
 
-impl runtime::Trigger<()> for ReactionFooX<'_> {
-    fn trigger(mut self, _ctx: &mut runtime::Context, _state: &mut ()) {
-        *self.y = self.x.map(|x| x * 2);
-    }
-}
+#[reactor]
+fn After() -> impl Reactor {
+    let f = builder.add_child_reactor(Foo(), "foo", Default::default(), false)?;
+    let p = builder.add_child_reactor(Print(), "print", Default::default(), false)?;
+    let t = builder.add_timer("t", TimerSpec::default().with_period(Duration::SECOND))?;
+    builder.connect_port(f.y, p.x, Some(Duration::milliseconds(10)), false)?;
 
-#[derive(Debug)]
-struct PrintState {
-    expected_time: Duration,
-    i: usize,
-}
-
-impl Default for PrintState {
-    fn default() -> Self {
-        Self {
-            expected_time: Duration::milliseconds(10),
-            i: 0,
-        }
-    }
-}
-
-#[derive(Reactor)]
-#[reactor(
-    state = "PrintState",
-    reaction = "ReactionPrintX",
-    reaction = "ReactionPrintShutdown"
-)]
-struct Print {
-    x: TypedPortKey<i32, Input>,
-}
-
-#[derive(Reaction)]
-#[reaction(reactor = "Print")]
-struct ReactionPrintX<'a> {
-    x: runtime::InputRef<'a, i32>,
-}
-
-impl runtime::Trigger<PrintState> for ReactionPrintX<'_> {
-    fn trigger(self, ctx: &mut runtime::Context, state: &mut PrintState) {
-        state.i += 1;
-        let elapsed_time = ctx.get_elapsed_logical_time();
-        println!("Result is {:?}", *self.x);
-        assert_eq!(*self.x, Some(84), "Expected result to be 84");
-        println!("Current logical time is: {:?}", elapsed_time);
-        println!("Current physical time is: {:?}", ctx.get_physical_time());
-        assert_eq!(
-            elapsed_time, state.expected_time,
-            "Expected logical time to be {:?}",
-            state.expected_time
-        );
-        state.expected_time += Duration::seconds(1);
-    }
-}
-
-#[derive(Reaction)]
-#[reaction(reactor = "Print")]
-struct ReactionPrintShutdown<'a> {
-    x: runtime::InputRef<'a, i32>,
-}
-
-impl runtime::Trigger<PrintState> for ReactionPrintShutdown<'_> {
-    fn trigger(self, _ctx: &mut runtime::Context, state: &mut PrintState) {
-        println!("Final result is {:?}", state.i);
-        assert!(state.i != 0, "ERROR: Final reactor received no data.");
-    }
-}
-
-#[derive(Reactor)]
-#[reactor(
-    state = "()",
-    reaction = "ReactionMainT",
-    connection(from = "f.y", to = "p.x", after = "10 msec")
-)]
-struct Main {
-    #[reactor(child(state = ()))]
-    f: Foo,
-    #[reactor(child(state = PrintState::default()))]
-    p: Print,
-    #[reactor(timer(period = "1 sec"))]
-    t: TimerActionKey,
-}
-
-#[derive(Reaction)]
-#[reaction(reactor = "Main", triggers(action = "t"))]
-struct ReactionMainT<'a> {
-    #[reaction(path = "f.x")]
-    x: runtime::OutputRef<'a, i32>,
-}
-
-impl runtime::Trigger<()> for ReactionMainT<'_> {
-    fn trigger(mut self, ctx: &mut runtime::Context, _state: &mut ()) {
-        *self.x = Some(42);
-        let elapsed_time = ctx.get_elapsed_logical_time();
-        println!("Timer @ {elapsed_time:?}!");
-    }
+    builder
+        .add_reaction(None)
+        .with_trigger(t)
+        .with_effect(f.x)
+        .with_reaction_fn(|ctx, _state, (_t, mut x)| {
+            *x = Some(42);
+            let elapsed_time = ctx.get_elapsed_logical_time();
+            println!("Timer @ {elapsed_time}!");
+        })
+        .finish()?;
 }
 
 #[test]
-fn after() {
+fn main() {
     tracing_subscriber::fmt::init();
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(Duration::seconds(3));
-    let _ = boomerang_util::runner::build_and_test_reactor::<Main>("after", (), config).unwrap();
+    let _ = boomerang_util::runner::build_and_test_reactor(
+        After(),
+        "after",
+        Default::default(),
+        config,
+    )
+    .unwrap();
 }

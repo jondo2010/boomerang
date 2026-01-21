@@ -9,6 +9,17 @@
 
 A deterministic middleware framework for robotics and distributed systems.
 
+## Getting Started
+
+```rust
+use boomerang::prelude::*;
+
+#[reactor]
+fn HelloWorld() -> impl Reactor {
+    timer! { t(1 s) };
+}
+```
+
 ## License
 
 Licensed under either of

@@ -1,8 +1,7 @@
-use std::collections::BTreeMap;
-
 use crate::{
     event::AsyncEvent, keepalive, ActionKey, AsyncActionRef, BaseAction, BasePort, BaseReactor,
-    Duration, PortKey, Reaction, ReactionKey, ReactorData, ReactorKey, SendContext,
+    Duration, DynActionRef, PortKey, Reaction, ReactionKey, ReactorData, ReactorKey, SendContext,
+    Tag,
 };
 
 mod debug;
@@ -103,20 +102,29 @@ pub struct ReactionGraph {
     pub action_triggers: tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
     /// For each Port, a set of Reactions it triggers
     pub port_triggers: tinymap::TinySecondaryMap<PortKey, Vec<LevelReactionKey>>,
-    /// Global startup reactions, keyed by delay
-    pub startup_reactions: BTreeMap<Duration, Vec<LevelReactionKey>>,
-    /// Global shutdown reactions
-    pub shutdown_reactions: Vec<LevelReactionKey>,
-    /// For each reaction, the set of 'use' ports
-    pub reaction_use_ports: tinymap::TinySecondaryMap<ReactionKey, tinymap::KeySet<PortKey>>,
-    /// For each reaction, the set of 'effect' ports
-    pub reaction_effect_ports: tinymap::TinySecondaryMap<ReactionKey, tinymap::KeySet<PortKey>>,
-    /// For each reaction, the set of 'use/effect' actions
-    pub reaction_actions: tinymap::TinySecondaryMap<ReactionKey, tinymap::KeySet<ActionKey>>,
+    /// Global startup actions
+    pub startup_actions: Vec<(ActionKey, Tag)>,
+    /// Global shutdown actions
+    pub shutdown_actions: Vec<ActionKey>,
+    /// For each reaction, the ordered 'use' ports in declaration order
+    pub reaction_use_ports: tinymap::TinySecondaryMap<ReactionKey, Vec<PortKey>>,
+    /// For each reaction, the ordered 'effect' ports in declaration order
+    pub reaction_effect_ports: tinymap::TinySecondaryMap<ReactionKey, Vec<PortKey>>,
+    /// For each reaction, the ordered 'use/effect' actions in declaration order
+    pub reaction_actions: tinymap::TinySecondaryMap<ReactionKey, Vec<ActionKey>>,
     /// For each reaction, the reactor it belongs to
     pub reaction_reactors: tinymap::TinySecondaryMap<ReactionKey, ReactorKey>,
     /// Bank index for a multi-bank reactor
     pub reactor_bank_infos: tinymap::TinySecondaryMap<ReactorKey, Option<BankInfo>>,
+}
+
+impl ReactionGraph {
+    /// Get an iterator over all the shutdown reactions
+    pub fn shutdown_reactions(&self) -> impl Iterator<Item = LevelReactionKey> + '_ {
+        self.shutdown_actions
+            .iter()
+            .flat_map(|&action_key| self.action_triggers[action_key].iter().copied())
+    }
 }
 
 tinymap::key_type! { pub EnclaveKey }
@@ -229,21 +237,14 @@ impl Enclave {
         reaction_key
     }
 
-    pub fn insert_startup_reaction(
-        &mut self,
-        level_reaction_key: LevelReactionKey,
-        delay: Option<Duration>,
-    ) {
-        self.graph
-            .startup_reactions
-            .entry(delay.unwrap_or_default())
-            .or_default()
-            .push(level_reaction_key);
+    /// Insert an `ActionKey` that is triggered on startup.
+    pub fn insert_startup_action(&mut self, action_key: ActionKey, tag: Tag) {
+        self.graph.startup_actions.push((action_key, tag));
     }
 
-    /// Insert a `LevelReactionKey` that is triggered on shutdown.
-    pub fn insert_shutdown_reaction(&mut self, level_reaction_key: LevelReactionKey) {
-        self.graph.shutdown_reactions.push(level_reaction_key);
+    /// Insert an `ActionKey` that is triggered on shutdown.
+    pub fn insert_shutdown_action(&mut self, action_key: ActionKey) {
+        self.graph.shutdown_actions.push(action_key);
     }
 
     /// Insert a `LevelReactionKey` that is triggered by a port.
@@ -280,7 +281,8 @@ impl Enclave {
         &self,
         action_key: ActionKey,
     ) -> AsyncActionRef<T> {
-        self.env.actions[action_key].as_ref().into()
+        AsyncActionRef::try_from(DynActionRef(self.env.actions[action_key].as_ref()))
+            .expect("type mismatch creating AsyncActionRef")
     }
 
     /// Validate the lengths of the runtime data structures.

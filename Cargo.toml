@@ -26,21 +26,22 @@ tracing-subscriber = { version = "0.3", features = [
     "env-filter",
 ] }
 tracing-tracy = { version = "0.11", features = ["flush-on-exit"] }
+variadics_please = "1.1"
 
 # Local crates
 boomerang = { path = "boomerang", version = "0.3.0" }
-boomerang_derive = { path = "boomerang_derive", version = "0.3.0" }
 boomerang_runtime = { path = "boomerang_runtime", version = "0.3.0" }
 boomerang_tinymap = { path = "boomerang_tinymap", version = "0.3.0" }
 boomerang_util = { path = "boomerang_util", version = "0.3.0" }
 boomerang_builder = { path = "boomerang_builder", version = "0.3.0" }
+boomerang_macros = { path = "boomerang_macros", version = "0.3.0" }
 tinymap = { package = "boomerang_tinymap", path = "boomerang_tinymap", version = "0.3.0" }
 
 [workspace]
 members = [
     "boomerang",
     "boomerang_builder",
-    "boomerang_derive",
+    "boomerang_macros",
     "boomerang_runtime",
     "boomerang_tinymap",
     "examples/snake",

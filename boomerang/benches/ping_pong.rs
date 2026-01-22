@@ -9,6 +9,7 @@
 
 use boomerang::prelude::*;
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
+#[cfg(not(windows))]
 use pprof::criterion::{Output, PProfProfiler};
 
 #[derive(Debug)]
@@ -152,6 +153,7 @@ fn bench(c: &mut Criterion) {
 
 fn criterion_config() -> Criterion {
     let mut criterion = Criterion::default();
+    #[cfg(not(windows))]
     if std::env::var_os("BOOMERANG_PROFILE").is_some() {
         criterion = criterion.with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
     }

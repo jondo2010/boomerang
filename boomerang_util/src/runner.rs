@@ -15,6 +15,7 @@ use boomerang::{
     runtime,
 };
 use clap::Parser;
+use std::path::PathBuf;
 
 #[derive(clap::Parser)]
 struct Args {
@@ -47,6 +48,46 @@ struct Args {
     replay_filename: Option<std::path::PathBuf>,
 }
 
+fn sanitize_diagram_stem(name: &str) -> String {
+    let mut sanitized = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            sanitized.push(ch);
+        } else {
+            sanitized.push('_');
+        }
+    }
+    if sanitized.is_empty() {
+        "reactor".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn diagram_output_path(name: &str, extension: &str) -> anyhow::Result<PathBuf> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir
+        .parent()
+        .unwrap_or(manifest_dir.as_path())
+        .to_path_buf();
+    let mut path = workspace_root;
+    path.push("target");
+    path.push("boomerang");
+    path.push("diagrams");
+    std::fs::create_dir_all(&path).context("Failed to create diagram output directory")?;
+    path.push(format!("{}.{}", sanitize_diagram_stem(name), extension));
+    Ok(path)
+}
+
+fn env_flag_enabled(var: &str) -> bool {
+    let value = match std::env::var(var) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    let value = value.trim().to_ascii_lowercase();
+    matches!(value.as_str(), "1" | "true" | "yes" | "on")
+}
+
 pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
     reactor_builder: R,
     name: &str,
@@ -59,6 +100,14 @@ pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
         .context("Error building top-level reactor!")?;
 
     env_builder.validate_reactions()?;
+
+    if env_flag_enabled("BOOMERANG_REACTION_GRAPH") {
+        let gv = env_builder.create_plantuml_graph()?;
+        let path = diagram_output_path(name, "puml")?;
+        let mut f = std::fs::File::create(&path)?;
+        std::io::Write::write_all(&mut f, gv.as_bytes())?;
+        tracing::info!("Wrote plantuml graph to {}", path.display());
+    }
 
     let BuilderRuntimeParts {
         enclaves,
@@ -132,10 +181,10 @@ where
         //tracing::info!("Wrote reaction graph to {path}");
 
         let gv = env_builder.create_plantuml_graph()?;
-        let path = format!("{name}.puml");
+        let path = diagram_output_path(name, "puml")?;
         let mut f = std::fs::File::create(&path)?;
         std::io::Write::write_all(&mut f, gv.as_bytes())?;
-        tracing::info!("Wrote plantuml graph to {path}");
+        tracing::info!("Wrote plantuml graph to {}", path.display());
     }
 
     if args.print_debug_info {

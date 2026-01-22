@@ -1,4 +1,7 @@
-use std::io::Write;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Write,
+};
 
 use slotmap::Key;
 
@@ -9,39 +12,52 @@ use super::{
     ReactorBuilder,
 };
 
+fn escape_puml_label(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped.replace("]]", "] ]")
+}
+
 trait ElemId {
-    fn elem_id(&self, env_builder: &EnvBuilder) -> String;
+    fn elem_id(&self) -> String;
 }
 
 impl ElemId for BuilderReactionKey {
     /// Build a unique identifier for a reaction node in the PlantUML graph.
-    fn elem_id(&self, env_builder: &EnvBuilder) -> String {
-        let id = self.data().as_ffi() % env_builder.reaction_builders.len() as u64;
-        format!("r{id}")
+    fn elem_id(&self) -> String {
+        let id = self.data().as_ffi();
+        format!("r{id:x}")
     }
 }
 
 impl ElemId for BuilderPortKey {
     /// Build a unique identifier for a port node in the PlantUML graph.
-    fn elem_id(&self, env_builder: &EnvBuilder) -> String {
-        let id = self.data().as_ffi() % env_builder.port_builders.len() as u64;
-        format!("p{id}")
+    fn elem_id(&self) -> String {
+        let id = self.data().as_ffi();
+        format!("p{id:x}")
     }
 }
 
 impl ElemId for BuilderActionKey {
     /// Build a unique identifier for an action node in the PlantUML graph.
-    fn elem_id(&self, env_builder: &EnvBuilder) -> String {
-        let id = self.data().as_ffi() % env_builder.action_builders.len() as u64;
-        format!("a{id}")
+    fn elem_id(&self) -> String {
+        let id = self.data().as_ffi();
+        format!("a{id:x}")
     }
 }
 
 impl ElemId for BuilderReactorKey {
     /// Build a unique identifier for a reactor node in the PlantUML graph.
-    fn elem_id(&self, env_builder: &EnvBuilder) -> String {
-        let id = self.data().as_ffi() % env_builder.reactor_builders.len() as u64;
-        format!("rtr{id}")
+    fn elem_id(&self) -> String {
+        let id = self.data().as_ffi();
+        format!("rtr{id:x}")
     }
 }
 
@@ -49,7 +65,7 @@ impl EnvBuilder {
     const BANK_EDGE: &str = "[thickness=2]";
 
     fn node_id(&self, key: impl ElemId) -> String {
-        key.elem_id(self)
+        key.elem_id()
     }
 
     fn puml_write_ports<W: std::io::Write>(
@@ -66,7 +82,7 @@ impl EnvBuilder {
                 (port, self.node_id(first_key), port.bank_info().is_some())
             });
         for (port, port_id, is_bank) in ports_grouped {
-            let port_name = port.name();
+            let port_name = escape_puml_label(port.name());
             let port_type = match port.port_type() {
                 PortType::Input => "portin",
                 PortType::Output => "portout",
@@ -99,10 +115,11 @@ impl EnvBuilder {
                 &self.reaction_builders[reaction_key],
             )
         }) {
+            let reaction_name = escape_puml_label(reaction.name().unwrap_or("<unnamed_reaction>"));
             writeln!(
                 buf,
                 "action \"{name}[[{{{name}}}]]\" as {id}",
-                name = reaction.name().unwrap_or("<unnamed_reaction>"),
+                name = reaction_name,
                 id = reaction_id
             )?;
         }
@@ -210,8 +227,8 @@ impl EnvBuilder {
                 writeln!(
                     buf,
                     "hexagon \"{label}[[{{{tooltip}}}]]\" as {id}",
-                    label = xlabel,
-                    tooltip = tooltip,
+                    label = escape_puml_label(&xlabel),
+                    tooltip = escape_puml_label(&tooltip),
                     id = action_id
                 )?;
             }
@@ -254,11 +271,37 @@ impl EnvBuilder {
     }
 
     fn build_port_bindings<W: std::io::Write>(&self, buf: &mut W) -> std::io::Result<()> {
-        //TODO: this is a naive implementation, we should group by bank
+        let ports_grouped = self.ports_debug_grouped(self.port_builders.keys());
+        let mut grouped_ports = BTreeMap::new();
+        for (first_key, last_key, fqn) in ports_grouped {
+            grouped_ports.insert(fqn, (first_key, last_key.is_some()));
+        }
+
+        let mut emitted: BTreeSet<(String, String, String)> = BTreeSet::new();
         for connection in &self.connection_builders {
-            let source_id = self.node_id(connection.source_key());
-            let target_id = self.node_id(connection.target_key());
-            writeln!(buf, "{source_id} --> {target_id}")?;
+            let source_fqn = self.fqn_for(connection.source_key(), true).unwrap();
+            let target_fqn = self.fqn_for(connection.target_key(), true).unwrap();
+            let (source_key, source_banked) = grouped_ports
+                .get(&source_fqn)
+                .copied()
+                .unwrap_or((connection.source_key(), false));
+            let (target_key, target_banked) = grouped_ports
+                .get(&target_fqn)
+                .copied()
+                .unwrap_or((connection.target_key(), false));
+
+            let source_id = self.node_id(source_key);
+            let target_id = self.node_id(target_key);
+            let props = if source_banked || target_banked {
+                Self::BANK_EDGE
+            } else {
+                ""
+            };
+            let props_key = props.to_string();
+
+            if emitted.insert((source_id.clone(), target_id.clone(), props_key)) {
+                writeln!(buf, "{source_id} -{props}-> {target_id}")?;
+            }
         }
         Ok(())
     }
@@ -269,7 +312,16 @@ impl EnvBuilder {
         let graph = self.build_reactor_graph_grouped();
         let ordered_reactors = petgraph::algo::toposort(&graph, None)
             .map_err(|e| BuilderError::ReactorGraphCycle { what: e.node_id() })?;
-        let start = *ordered_reactors.first().unwrap();
+        let roots: Vec<_> = ordered_reactors
+            .iter()
+            .copied()
+            .filter(|node| {
+                graph
+                    .neighbors_directed(*node, petgraph::Direction::Incoming)
+                    .next()
+                    .is_none()
+            })
+            .collect();
 
         const PREAMBLE: &str = r#"
 left to right direction
@@ -296,38 +348,41 @@ skinparam arrowThickness 1
         let mut edge_buf = Vec::new();
         writeln!(&mut buf, "@startuml{PREAMBLE}").unwrap();
 
-        petgraph::visit::depth_first_search(&graph, Some(start), |event| match event {
-            petgraph::visit::DfsEvent::Discover(reactor_key, _) => {
-                let reactor = &self.reactor_builders[reactor_key];
-                let bank = reactor
-                    .bank_info()
-                    .map(|bi| format!("[0..{}]", bi.total - 1));
+        for start in roots {
+            petgraph::visit::depth_first_search(&graph, Some(start), |event| match event {
+                petgraph::visit::DfsEvent::Discover(reactor_key, _) => {
+                    let reactor = &self.reactor_builders[reactor_key];
+                    let bank = reactor
+                        .bank_info()
+                        .map(|bi| format!("[0..{}]", bi.total - 1));
 
-                let enclave = if reactor.is_enclave { "📦 " } else { "" };
-                let stereotype = if bank.is_some() { " <<bank>> " } else { "" };
+                    let enclave = if reactor.is_enclave { "📦 " } else { "" };
+                    let stereotype = if bank.is_some() { " <<bank>> " } else { "" };
 
-                let reactor_id = self.node_id(reactor_key);
-                writeln!(
-                    &mut buf,
-                    "component {reactor_id} as \"{enclave}{name}{bank}\"{stereotype}{{",
-                    name = reactor.name(),
-                    bank = bank.unwrap_or_default(),
-                )
-                .unwrap();
-
-                self.puml_write_ports(reactor, &mut buf).unwrap();
-                self.puml_write_reaction_nodes(reactor, &mut buf).unwrap();
-                self.puml_write_action_nodes(reactor, &mut buf).unwrap();
-                self.puml_write_reaction_edges(reactor, &mut edge_buf)
+                    let reactor_id = self.node_id(reactor_key);
+                    let reactor_name = escape_puml_label(reactor.name());
+                    writeln!(
+                        &mut buf,
+                        "component {reactor_id} as \"{enclave}{name}{bank}\"{stereotype}{{",
+                        name = reactor_name,
+                        bank = bank.unwrap_or_default(),
+                    )
                     .unwrap();
-                self.puml_write_action_edges(reactor, &mut edge_buf)
-                    .unwrap();
-            }
-            petgraph::visit::DfsEvent::Finish(_, _) => {
-                writeln!(&mut buf, "}}").unwrap();
-            }
-            _ => {}
-        });
+
+                    self.puml_write_ports(reactor, &mut buf).unwrap();
+                    self.puml_write_reaction_nodes(reactor, &mut buf).unwrap();
+                    self.puml_write_action_nodes(reactor, &mut buf).unwrap();
+                    self.puml_write_reaction_edges(reactor, &mut edge_buf)
+                        .unwrap();
+                    self.puml_write_action_edges(reactor, &mut edge_buf)
+                        .unwrap();
+                }
+                petgraph::visit::DfsEvent::Finish(_, _) => {
+                    writeln!(&mut buf, "}}").unwrap();
+                }
+                _ => {}
+            });
+        }
 
         //TODO: fix or remove
         //let reaction_graph = self.build_reaction_graph();
@@ -342,5 +397,56 @@ skinparam arrowThickness 1
 
         writeln!(&mut buf, "@enduml").unwrap();
         Ok(String::from_utf8(buf).unwrap())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plantuml_includes_all_roots() {
+        let mut env_builder = EnvBuilder::new();
+        env_builder
+            .add_reactor("RootA", None, None, (), false)
+            .finish()
+            .unwrap();
+        env_builder
+            .add_reactor("RootB", None, None, (), false)
+            .finish()
+            .unwrap();
+
+        let graph = env_builder.create_plantuml_graph().unwrap();
+        assert!(graph.contains("RootA"));
+        assert!(graph.contains("RootB"));
+    }
+
+    #[test]
+    fn plantuml_escapes_labels() {
+        let mut env_builder = EnvBuilder::new();
+        let mut reactor = env_builder.add_reactor("reactor\"name]]", None, None, (), false);
+        reactor.add_input_port::<()>("port\"name]]").unwrap();
+        reactor.finish().unwrap();
+
+        let graph = env_builder.create_plantuml_graph().unwrap();
+        assert!(graph.contains("reactor\\\"name] ]"));
+        assert!(graph.contains("port\\\"name] ]"));
+    }
+
+    #[test]
+    fn plantuml_groups_banked_connections() {
+        let mut env_builder = EnvBuilder::new();
+        let mut reactor = env_builder.add_reactor("Banked", None, None, (), false);
+        let outputs = reactor.add_output_ports::<u8, 2>("out").unwrap();
+        let inputs = reactor.add_input_ports::<u8, 2>("in").unwrap();
+        for i in 0..2 {
+            reactor
+                .connect_port(outputs[i], inputs[i], None, false)
+                .unwrap();
+        }
+        reactor.finish().unwrap();
+
+        let graph = env_builder.create_plantuml_graph().unwrap();
+        assert_eq!(graph.matches("-[thickness=2]->").count(), 1);
     }
 }

@@ -71,7 +71,7 @@ fn Main<const NUM_NODES: usize = 4>() -> impl Reactor {
 }
 
 #[test]
-fn mutliport_fully_connected() {
+fn multiport_fully_connected() {
     tracing_subscriber::fmt::init();
     let config = runtime::Config::default().with_fast_forward(true);
     let _ = boomerang_util::runner::build_and_test_reactor(

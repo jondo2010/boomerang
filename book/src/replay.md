@@ -1,16 +1,21 @@
 # Recording and Replay
 
-The requirement is the ability to record necessary inputs and states of a running system, serialize it into one or more files on disk, and then be able to deterministically replay that recording back into the runtime "offline", at potentially faster-than-realtime speed.
+Recording and replay lets you capture external inputs and reproduce a run deterministically. In Boomerang, the boundary between deterministic execution and the outside world is the physical action.
 
-The determinism in Boomerang here means that a system being fed recorded data should repeatably achieve the exact same state and provide the same bitwise-exact outputs as if it was running with real inputs.
+## What gets recorded
 
-In Boomerang, `PhysicalAction`s are the boundary between the deterministic runtime and the non-deterministic outside world. Any external sensor or data inputs to the system *must* enter through a `PhysicalAction`. This means to achieve a perfect replay capability, it is only necessary to record the time (`Tag`) and values of the `PhysicalActions` of the system. This is what the recording and replay infrastructure is centered around.
+To replay a run, Boomerang only needs the values and tags of physical actions. If those inputs arrive with the same tags in the same order, the runtime produces the same internal state and outputs.
 
-# Design
+## How it works
 
-Actions in Boomerang are (logically) local to the Reactor that contains them, and are not accesible to other Reactors.
+Actions in Boomerang are local to the reactor that owns them. The recorder injects an additional reaction into each reactor that owns a physical action. That reaction captures the action value and the tag at which it arrives.
 
-The Recorder works by injecting an additional Reaction into the containing Reactor for each `PhysicalAction` that should be recorded.
+## Design constraints
 
-# Serialization Data Model
+- Only physical actions need to be recorded.
+- Logical actions, timers, and internal reactions remain deterministic and do not require recording.
+- Replays can run faster than wall clock time when using fast-forward configuration.
 
+## Current status
+
+The recording and replay infrastructure is still evolving. When implementing or extending it, use the existing runtime modules as the source of truth. If a feature is missing, document the gap and add a minimal test that fails before the change and passes after.

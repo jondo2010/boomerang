@@ -1,13 +1,13 @@
 # Introduction
 
-Boomerang is built around a Rust-first implementation of the "Reactors" Deterministic Actor Model, described by M. Lohstroh, A. Lee, et al U.C. Berlekely, [Link to paper](https://ptolemy.berkeley.edu/publications/papers/19/LohstrohEtAl_Reactors_DAC_2019.pdf).
+Boomerang is a deterministic middleware framework for robotics and distributed systems. It provides a Rust-first implementation of the Reactors deterministic actor model, with macros that let you describe reactors directly in Rust code.
 
-## Comparison to Lingua-Franca
+The goal of Boomerang is to make concurrent, time-sensitive systems easier to reason about by enforcing deterministic execution. Given the same sequence of inputs, Boomerang produces the same sequence of outputs and state transitions.
 
-The `Lingua-Franca` project (https://github.com/icyphy/lingua-franca/wiki) serves as a point of reference for `Boomerang`.
+## Relation to Lingua Franca
 
-The `Boomerang` scheduler started out as a direct Rust port of the `Lingua-Franca` Discrete-Event scheduler runtime. Instead of using a distinct "compositional language" like Lingua-Franca, Boomerang leverages the power of Rust derive-macros to directly annotate the Reactor semantics and composition. The resultant DAG is analyzed and used to generate implementation primitives for the Scheduler.
+Lingua Franca (https://github.com/icyphy/lingua-franca/wiki) is a close point of reference for Boomerang. The Boomerang runtime started as a Rust port of the Lingua Franca discrete-event scheduler. Instead of a separate language, Boomerang uses Rust derive macros to express reactor semantics and composition.
 
-This project is still in the very early stages, but intends to implement as much of the [language specification](https://github.com/icyphy/lingua-franca/wiki/Language-Specification) and features from `Lingua-Franca` as possible.
+Boomerang aims to implement as much of the Lingua Franca language specification as is practical in a Rust-first system. Unsupported features are called out explicitly in this book.
 
-See also [Reactor Cpp](https://github.com/tud-ccc/reactor-cpp)
+See also Reactor Cpp: https://github.com/tud-ccc/reactor-cpp

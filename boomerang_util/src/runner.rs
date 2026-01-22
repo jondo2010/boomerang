@@ -19,7 +19,11 @@ use std::path::PathBuf;
 
 #[derive(clap::Parser)]
 struct Args {
-    #[arg(long)]
+    #[arg(
+        long,
+        env = "BOOMERANG_REACTION_GRAPH",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     reaction_graph: bool,
 
     #[arg(long)]
@@ -75,15 +79,6 @@ fn diagram_output_path(name: &str, extension: &str) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
-fn env_flag_enabled(var: &str) -> bool {
-    let value = match std::env::var(var) {
-        Ok(value) => value,
-        Err(_) => return false,
-    };
-    let value = value.trim().to_ascii_lowercase();
-    matches!(value.as_str(), "1" | "true" | "yes" | "on")
-}
-
 pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
     reactor_builder: R,
     name: &str,
@@ -97,7 +92,8 @@ pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
 
     env_builder.validate_reactions()?;
 
-    if env_flag_enabled("BOOMERANG_REACTION_GRAPH") {
+    let args = Args::parse_from(["boomerang-test"]);
+    if args.reaction_graph {
         let gv = env_builder.create_plantuml_graph()?;
         let path = diagram_output_path(name, "puml")?;
         let mut f = std::fs::File::create(&path)?;

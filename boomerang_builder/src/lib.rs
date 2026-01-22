@@ -17,9 +17,6 @@ pub mod tests;
 mod macro_support;
 pub use macro_support::{Reactor, ReactorPorts};
 
-//#[cfg(feature = "graphviz")]
-//pub mod graphviz;
-#[cfg(feature = "graphviz")]
 pub mod plantuml;
 
 pub use action::*;

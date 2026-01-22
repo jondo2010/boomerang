@@ -15,14 +15,15 @@ use boomerang::{
     runtime,
 };
 use clap::Parser;
+use std::path::PathBuf;
 
 #[derive(clap::Parser)]
 struct Args {
-    /// Generate a graphviz graph of the entire reactor hierarchy
-    #[arg(long)]
-    full_graph: bool,
-
-    #[arg(long)]
+    #[arg(
+        long,
+        env = "BOOMERANG_REACTION_GRAPH",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     reaction_graph: bool,
 
     #[arg(long)]
@@ -47,6 +48,37 @@ struct Args {
     replay_filename: Option<std::path::PathBuf>,
 }
 
+fn sanitize_diagram_stem(name: &str) -> String {
+    let mut sanitized = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            sanitized.push(ch);
+        } else {
+            sanitized.push('_');
+        }
+    }
+    if sanitized.is_empty() {
+        "reactor".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn diagram_output_path(name: &str, extension: &str) -> anyhow::Result<PathBuf> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir
+        .parent()
+        .unwrap_or(manifest_dir.as_path())
+        .to_path_buf();
+    let mut path = workspace_root;
+    path.push("target");
+    path.push("boomerang");
+    path.push("diagrams");
+    std::fs::create_dir_all(&path).context("Failed to create diagram output directory")?;
+    path.push(format!("{}.{}", sanitize_diagram_stem(name), extension));
+    Ok(path)
+}
+
 pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
     reactor_builder: R,
     name: &str,
@@ -59,6 +91,15 @@ pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
         .context("Error building top-level reactor!")?;
 
     env_builder.validate_reactions()?;
+
+    let args = Args::parse_from(["boomerang-test"]);
+    if args.reaction_graph {
+        let gv = env_builder.create_plantuml_graph()?;
+        let path = diagram_output_path(name, "puml")?;
+        let mut f = std::fs::File::create(&path)?;
+        std::io::Write::write_all(&mut f, gv.as_bytes())?;
+        tracing::info!("Wrote plantuml graph to {}", path.display());
+    }
 
     let BuilderRuntimeParts {
         enclaves,
@@ -83,8 +124,7 @@ pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
 /// * `state` - The initial state of the top-level reactor; this must match the state type the reactor expects.
 ///
 /// Common arguments are parsed from the command line and passed to the scheduler:
-/// * `--full-graph`: Generate a graphviz graph of the entire reactor hierarchy
-/// * `--reaction-graph`: Generate a graphviz graph of the reaction hierarchy
+/// * `--reaction-graph`: Generate a PlantUML graph of the reactor hierarchy
 /// * `--print-debug-info`: Print debug information about the environment and triggers
 /// * `--fast-forward`: Run the scheduler in fast-forward mode
 /// * `--record-filename`: The filename to serialize recorded actions into
@@ -116,26 +156,12 @@ where
         None => None,
     };
 
-    if args.full_graph {
-        //let gv = graphviz::create_full_graph(&env_builder).unwrap();
-        //let path = format!("{name}.dot");
-        //let mut f = std::fs::File::create(&path).unwrap();
-        //std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
-        //tracing::info!("Wrote full graph to {path}");
-    }
-
     if args.reaction_graph {
-        //let gv = graphviz::create_reaction_graph(&env_builder).unwrap();
-        //let path = format!("{name}_levels.dot");
-        //let mut f = std::fs::File::create(&path).unwrap();
-        //std::io::Write::write_all(&mut f, gv.as_bytes()).unwrap();
-        //tracing::info!("Wrote reaction graph to {path}");
-
         let gv = env_builder.create_plantuml_graph()?;
-        let path = format!("{name}.puml");
+        let path = diagram_output_path(name, "puml")?;
         let mut f = std::fs::File::create(&path)?;
         std::io::Write::write_all(&mut f, gv.as_bytes())?;
-        tracing::info!("Wrote plantuml graph to {path}");
+        tracing::info!("Wrote plantuml graph to {}", path.display());
     }
 
     if args.print_debug_info {

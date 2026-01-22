@@ -19,8 +19,6 @@ serde = ["boomerang_runtime/serde"]
 ## Execute reactions in parallel on a thread pool
 parallel = ["boomerang_runtime/parallel"]
 
-## Support generating graphviz diagrams from reactor models
-graphviz = ["boomerang_builder/graphviz"]
 
 ## Support for recording and replaying
 replay = ["boomerang_runtime/replay", "boomerang_builder/replay"]

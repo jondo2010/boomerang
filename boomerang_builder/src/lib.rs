@@ -23,7 +23,8 @@ pub use action::*;
 pub use env::*;
 pub use fqn::*;
 pub use port::{
-    BuilderPortKey, Contained, Input, Local, Output, PortBuilder, PortTag, PortType, TypedPortKey,
+    BuilderPortKey, Contained, Input, Local, Output, PortBank, PortBuilder, PortTag, PortType,
+    TypedPortKey,
 };
 pub use reaction::*;
 pub use reactor::*;
@@ -86,6 +87,9 @@ pub enum BuilderError {
         target_key: BuilderPortKey,
         what: String,
     },
+
+    #[error("Port connection length mismatch: {from} -> {to}")]
+    PortConnectionLengthMismatch { from: usize, to: usize },
 
     #[error("Error building Reaction: {0}")]
     ReactionBuilderError(String),

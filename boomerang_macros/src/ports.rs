@@ -1,5 +1,5 @@
 use proc_macro2::TokenStream;
-use quote::{quote, ToTokens};
+use quote::{format_ident, quote, ToTokens};
 use syn::{parse::Parse, Data, DeriveInput, Fields, FieldsNamed, Visibility};
 
 #[derive(Debug)]
@@ -14,6 +14,7 @@ pub struct PortField {
     ident: syn::Ident,
     ty: syn::Type,
     port_type: PortType,
+    len: Option<syn::Expr>,
 }
 
 pub struct Model {
@@ -26,12 +27,15 @@ pub struct Model {
 impl PortField {
     fn from_field(field: &syn::Field) -> syn::Result<Self> {
         let mut port_type = None;
+        let mut len = None;
 
         for attr in &field.attrs {
             if attr.path().is_ident("input") {
                 port_type = Some(PortType::Input);
+                len = parse_len_attr(attr)?;
             } else if attr.path().is_ident("output") {
                 port_type = Some(PortType::Output);
+                len = parse_len_attr(attr)?;
             }
         }
 
@@ -39,12 +43,46 @@ impl PortField {
             syn::Error::new_spanned(field, "Field must be annotated with #[input] or #[output]")
         })?;
 
+        if len.is_some() && matches!(field.ty, syn::Type::Array(_)) {
+            return Err(syn::Error::new_spanned(
+                field,
+                "banked ports cannot be declared as arrays",
+            ));
+        }
+
         Ok(PortField {
             vis: field.vis.clone(),
             ident: field.ident.clone().unwrap(),
             ty: field.ty.clone(),
             port_type,
+            len,
         })
+    }
+}
+
+fn parse_len_attr(attr: &syn::Attribute) -> syn::Result<Option<syn::Expr>> {
+    let meta = match &attr.meta {
+        syn::Meta::Path(_) => return Ok(None),
+        syn::Meta::List(list) => list,
+        _ => {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "expected #[input] or #[input(len = ...)]",
+            ))
+        }
+    };
+
+    if meta.tokens.is_empty() {
+        return Ok(None);
+    }
+
+    let nested_meta: syn::Meta = syn::parse2(meta.tokens.clone())?;
+    match nested_meta {
+        syn::Meta::NameValue(nv) if nv.path.is_ident("len") => Ok(Some(nv.value)),
+        _ => Err(syn::Error::new_spanned(
+            attr,
+            "expected #[input(len = ...)] or #[output(len = ...)]",
+        )),
     }
 }
 
@@ -91,7 +129,10 @@ impl ToTokens for Model {
         let (impl_generics, ty_generics, where_clause) = self.generics.split_for_impl();
 
         // Generate the modified struct fields
-        let struct_fields = self.fields.iter().map(|PortField { vis, ident, ty, port_type }| {
+        let struct_fields = self
+            .fields
+            .iter()
+            .map(|PortField { vis, ident, ty, port_type, len }| {
             let dir = match port_type {
                 PortType::Input => quote!(::boomerang::builder::Input),
                 PortType::Output => quote!(::boomerang::builder::Output),
@@ -104,6 +145,9 @@ impl ToTokens for Model {
                     let len_expr = &array.len;
                     quote!(#vis #ident: [::boomerang::builder::TypedPortKey<#element_type, #dir, ::boomerang::builder::Contained>; #len_expr])
                 },
+                _ if len.is_some() => {
+                    quote!(#vis #ident: ::boomerang::builder::PortBank<#ty, #dir, ::boomerang::builder::Contained>)
+                }
                 _ => {
                     quote!(#vis #ident: ::boomerang::builder::TypedPortKey<#ty, #dir, ::boomerang::builder::Contained>)
                 }
@@ -125,13 +169,22 @@ impl ToTokens for Model {
                     let len_expr = &array.len;
                     quote!([::boomerang::builder::TypedPortKey<#element_type, #dir, ::boomerang::builder::Local>; #len_expr])
                 },
+                _ if f.len.is_some() => {
+                    quote!(::boomerang::builder::PortBank<#ty, #dir, ::boomerang::builder::Local>)
+                }
                 _ => {
                     quote!(::boomerang::builder::TypedPortKey<#ty, #dir, ::boomerang::builder::Local>)
                 }
             }
         });
 
-        let local_names = self.fields.iter().map(|f| &f.ident);
+        let local_names = self.fields.iter().map(|f| {
+            if f.len.is_some() {
+                format_ident!("{}_for_fn", f.ident)
+            } else {
+                f.ident.clone()
+            }
+        });
 
         let create_ports = self.fields.iter().map(
             |PortField {
@@ -139,8 +192,10 @@ impl ToTokens for Model {
                  ident,
                  ty,
                  port_type,
+                 len,
              }| {
                 let name_str = ident.to_string();
+                let for_fn_ident = format_ident!("{}_for_fn", ident);
                 let dir = match port_type {
                     PortType::Input => quote!(::boomerang::builder::Input),
                     PortType::Output => quote!(::boomerang::builder::Output),
@@ -151,8 +206,8 @@ impl ToTokens for Model {
                     syn::Type::Array(array) => {
                         let element_type = &array.elem;
                         let len_expr = &array.len;
-                        
-                        match port_type {
+                    
+                    match port_type {
                             PortType::Input => quote! {
                                 let #ident = builder.add_input_ports::<#element_type, #len_expr>(#name_str)?;
                             },
@@ -161,6 +216,19 @@ impl ToTokens for Model {
                             },
                         }
                     },
+                    _ if len.is_some() => {
+                        let len_expr = len.as_ref().expect("len expr");
+                        match port_type {
+                            PortType::Input => quote! {
+                                let #ident = builder.add_input_bank::<#ty>(#name_str, #len_expr)?;
+                                let #for_fn_ident = #ident.clone();
+                            },
+                            PortType::Output => quote! {
+                                let #ident = builder.add_output_bank::<#ty>(#name_str, #len_expr)?;
+                                let #for_fn_ident = #ident.clone();
+                            },
+                        }
+                    }
                     _ => {
                         quote!(let #ident = builder.add_port::<#ty, #dir>(#name_str, None)?;)
                     }
@@ -168,10 +236,13 @@ impl ToTokens for Model {
             },
         );
 
-        let field_inits = self.fields.iter().map(|PortField {  ident, ty,..  }| {
+        let field_inits = self.fields.iter().map(|PortField {  ident, ty, len, ..  }| {
             match ty {
                 syn::Type::Array(_) => {
                     quote!(#ident: std::array::from_fn(|i| #ident[i].contained()))
+                }
+                _ if len.is_some() => {
+                    quote!(#ident: #ident.contained())
                 }
                 _ => {
                     quote!(#ident: #ident.contained())
@@ -268,5 +339,23 @@ struct Array {
         assert_eq!(model.fields.len(), 2);
         assert!(matches!(model.fields[0].port_type, PortType::Input));
         assert!(matches!(model.fields[1].port_type, PortType::Output));
+    }
+
+    #[test]
+    fn test_banked_ports() {
+        let input = r#"
+#[derive(ReactorParts)]
+struct Banked {
+    #[input(len = 3)]
+    x: u32,
+    #[output(len = 4)]
+    y: bool,
+}"#;
+
+        let model = syn::parse_str::<Model>(input).unwrap();
+        let tokens = quote::quote!(#model).to_string();
+
+        assert!(tokens.contains("add_input_bank"));
+        assert!(tokens.contains("add_output_bank"));
     }
 }

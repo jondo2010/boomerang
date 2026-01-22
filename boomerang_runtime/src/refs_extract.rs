@@ -40,11 +40,14 @@ pub struct ReactionRefs<'store> {
     pub actions: RefsMut<'store, dyn BaseAction>,
 }
 
-pub trait ReactionRefsExtract: Copy + 'static {
+pub trait ReactionRefsExtract: 'static {
     type Ref<'store>
     where
         Self: 'store;
-    fn extract<'store>(refs: &mut ReactionRefs<'store>) -> Result<Self::Ref<'store>, ReactionRefsError>;
+    fn extract<'store>(
+        &self,
+        refs: &mut ReactionRefs<'store>,
+    ) -> Result<Self::Ref<'store>, ReactionRefsError>;
 }
 
 // Blanket impl for arrays of `ReactionRefsExtract` types
@@ -53,12 +56,15 @@ impl<T: ReactionRefsExtract, const N: usize> ReactionRefsExtract for [T; N] {
         = [T::Ref<'store>; N]
     where
         Self: 'store;
-    fn extract<'store>(refs: &mut ReactionRefs<'store>) -> Result<Self::Ref<'store>, ReactionRefsError> {
+    fn extract<'store>(
+        &self,
+        refs: &mut ReactionRefs<'store>,
+    ) -> Result<Self::Ref<'store>, ReactionRefsError> {
         // Manual, allocation-free equivalent of std::array::try_from_fn
         let mut array: [MaybeUninit<T::Ref<'store>>; N] = unsafe { MaybeUninit::uninit().assume_init() };
 
         for idx in 0..N {
-            match T::extract(refs) {
+            match self[idx].extract(refs) {
                 Ok(value) => {
                     array[idx].write(value);
                 }
@@ -86,8 +92,10 @@ macro_rules! impl_reaction_refs_extract {
             $($T: ReactionRefsExtract,)*
         {
             type Ref<'store> = ($($T::Ref<'store>,)*) where $($T: 'store,)*;
-            fn extract<'store>(refs: &mut ReactionRefs<'store>) -> Result<Self::Ref<'store>, ReactionRefsError> {
-                Ok(($($T::extract(refs)?,)*))
+            fn extract<'store>(&self, refs: &mut ReactionRefs<'store>) -> Result<Self::Ref<'store>, ReactionRefsError> {
+                #[allow(non_snake_case)]
+                let ($($T,)*) = self;
+                Ok(($($T.extract(refs)?,)*))
             }
         }
     };

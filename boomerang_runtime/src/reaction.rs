@@ -51,27 +51,36 @@ where
 }
 
 /// Adapter struct for implementing the [`ReactionFn`] trait for a generic FnMut with fields that implement `ReactionRefsExtract`.
-pub struct FnRefsAdapter<S, Fields, F>(F, std::marker::PhantomData<fn() -> (S, Fields)>)
+pub struct FnRefsAdapter<S, Fields, F>
 where
     S: ReactorData,
-    Fields: ReactionRefsExtract,
-    F: for<'any> Fn(&mut Context, &mut S, Fields::Ref<'any>) + Send + Sync + 'static;
+    Fields: ReactionRefsExtract + Send + Sync,
+    F: for<'any> Fn(&mut Context, &mut S, Fields::Ref<'any>) + Send + Sync + 'static,
+{
+    fields: Fields,
+    f: F,
+    _phantom: std::marker::PhantomData<fn() -> S>,
+}
 
 impl<S, Fields, F> FnRefsAdapter<S, Fields, F>
 where
     S: ReactorData,
-    Fields: ReactionRefsExtract,
+    Fields: ReactionRefsExtract + Send + Sync,
     F: for<'any> Fn(&mut Context, &mut S, Fields::Ref<'any>) + Send + Sync + 'static,
 {
-    pub fn new(f: F) -> Self {
-        Self(f, Default::default())
+    pub fn new(fields: Fields, f: F) -> Self {
+        Self {
+            fields,
+            f,
+            _phantom: Default::default(),
+        }
     }
 }
 
 impl<S, Fields, F> ReactionFn<'_> for FnRefsAdapter<S, Fields, F>
 where
     S: ReactorData,
-    Fields: ReactionRefsExtract,
+    Fields: ReactionRefsExtract + Send + Sync,
     F: for<'any> Fn(&mut Context, &mut S, Fields::Ref<'any>) + Send + Sync + 'static,
 {
     fn trigger(
@@ -82,7 +91,7 @@ where
     ) {
         let state = reactor.get_state_mut::<S>().expect("state");
 
-        let fields = match Fields::extract(&mut refs) {
+        let fields = match self.fields.extract(&mut refs) {
             Ok(fields) => fields,
             Err(error) => {
                 let fields_type = std::any::type_name::<Fields>();
@@ -90,7 +99,7 @@ where
             }
         };
 
-        (self.0)(ctx, state, fields)
+        (self.f)(ctx, state, fields)
     }
 }
 

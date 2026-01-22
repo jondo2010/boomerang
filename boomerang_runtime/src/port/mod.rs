@@ -221,3 +221,65 @@ impl<'a, T: ReactorData> TryFrom<DynPortRefMut<'a>> for OutputRef<'a, T> {
             .ok_or_else(|| ReactionRefsError::type_mismatch("output port", std::any::type_name::<T>(), found))
     }
 }
+
+/// A reference to a bank of input ports.
+pub struct InputBankRef<'a, T: ReactorData = ()> {
+    ports: Vec<InputRef<'a, T>>,
+}
+
+impl<'a, T: ReactorData> InputBankRef<'a, T> {
+    pub fn new(ports: Vec<InputRef<'a, T>>) -> Self {
+        Self { ports }
+    }
+
+    pub fn len(&self) -> usize {
+        self.ports.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ports.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &InputRef<'a, T>> {
+        self.ports.iter()
+    }
+
+    pub fn get(&self, idx: usize) -> Option<&InputRef<'a, T>> {
+        self.ports.get(idx)
+    }
+}
+
+/// A reference to a bank of output ports.
+pub struct OutputBankRef<'a, T: ReactorData = ()> {
+    ports: Vec<OutputRef<'a, T>>,
+}
+
+impl<'a, T: ReactorData> OutputBankRef<'a, T> {
+    pub fn new(ports: Vec<OutputRef<'a, T>>) -> Self {
+        Self { ports }
+    }
+
+    pub fn len(&self) -> usize {
+        self.ports.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ports.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &OutputRef<'a, T>> {
+        self.ports.iter()
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut OutputRef<'a, T>> {
+        self.ports.iter_mut()
+    }
+
+    pub fn get(&self, idx: usize) -> Option<&OutputRef<'a, T>> {
+        self.ports.get(idx)
+    }
+
+    pub fn get_mut(&mut self, idx: usize) -> Option<&mut OutputRef<'a, T>> {
+        self.ports.get_mut(idx)
+    }
+}

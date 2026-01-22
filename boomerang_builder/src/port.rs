@@ -44,7 +44,7 @@ impl<T: runtime::ReactorData, Q: PortTag> TypedPortKey<T, Q, Local> {
     }
 }
 
-impl<T: runtime::ReactorData, Q: PortTag> Debug for TypedPortKey<T, Q> {
+impl<T: runtime::ReactorData, Q: PortTag, A> Debug for TypedPortKey<T, Q, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("TypedPortKey")
             .field(&self.0)
@@ -53,9 +53,9 @@ impl<T: runtime::ReactorData, Q: PortTag> Debug for TypedPortKey<T, Q> {
     }
 }
 
-impl<T: runtime::ReactorData, Q: PortTag, A: Copy> Copy for TypedPortKey<T, Q, A> {}
+impl<T: runtime::ReactorData, Q: PortTag, A> Copy for TypedPortKey<T, Q, A> {}
 
-impl<T: runtime::ReactorData, Q: PortTag, A: Clone> Clone for TypedPortKey<T, Q, A> {
+impl<T: runtime::ReactorData, Q: PortTag, A> Clone for TypedPortKey<T, Q, A> {
     fn clone(&self) -> Self {
         Self(self.0, PhantomData)
     }
@@ -88,7 +88,10 @@ impl<T: runtime::ReactorData> runtime::ReactionRefsExtract for TypedPortKey<T, I
         = runtime::InputRef<'store, T>
     where
         Self: 'store;
-    fn extract<'store>(refs: &mut runtime::ReactionRefs<'store>) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
+    fn extract<'store>(
+        &self,
+        refs: &mut runtime::ReactionRefs<'store>,
+    ) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
         let port = refs
             .ports
             .next()
@@ -105,7 +108,10 @@ impl<T: runtime::ReactorData> runtime::ReactionRefsExtract for TypedPortKey<T, I
         = runtime::OutputRef<'store, T>
     where
         Self: 'store;
-    fn extract<'store>(refs: &mut runtime::ReactionRefs<'store>) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
+    fn extract<'store>(
+        &self,
+        refs: &mut runtime::ReactionRefs<'store>,
+    ) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
         let port = refs
             .ports_mut
             .next()
@@ -120,7 +126,10 @@ impl<T: runtime::ReactorData> runtime::ReactionRefsExtract for TypedPortKey<T, O
         = runtime::OutputRef<'store, T>
     where
         Self: 'store;
-    fn extract<'store>(refs: &mut runtime::ReactionRefs<'store>) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
+    fn extract<'store>(
+        &self,
+        refs: &mut runtime::ReactionRefs<'store>,
+    ) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
         let port = refs
             .ports_mut
             .next()
@@ -137,13 +146,145 @@ impl<T: runtime::ReactorData> runtime::ReactionRefsExtract for TypedPortKey<T, O
         = runtime::InputRef<'store, T>
     where
         Self: 'store;
-    fn extract<'store>(refs: &mut runtime::ReactionRefs<'store>) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
+    fn extract<'store>(
+        &self,
+        refs: &mut runtime::ReactionRefs<'store>,
+    ) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
         let port = refs
             .ports
             .next()
             .ok_or_else(|| runtime::ReactionRefsError::missing("contained output port"))?;
 
         runtime::InputRef::try_from(runtime::DynPortRef(port))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PortBank<T: runtime::ReactorData, Q: PortTag, A = Local> {
+    ports: Vec<TypedPortKey<T, Q, A>>,
+}
+
+impl<T: runtime::ReactorData, Q: PortTag, A> PortBank<T, Q, A> {
+    pub fn new(ports: Vec<TypedPortKey<T, Q, A>>) -> Self {
+        Self { ports }
+    }
+
+    pub fn len(&self) -> usize {
+        self.ports.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ports.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = TypedPortKey<T, Q, A>> + Clone + '_
+    where
+        TypedPortKey<T, Q, A>: Copy,
+    {
+        self.ports.iter().copied()
+    }
+
+    pub fn get(&self, idx: usize) -> Option<TypedPortKey<T, Q, A>>
+    where
+        TypedPortKey<T, Q, A>: Copy,
+    {
+        self.ports.get(idx).copied()
+    }
+
+    pub fn into_vec(self) -> Vec<TypedPortKey<T, Q, A>> {
+        self.ports
+    }
+}
+
+impl<T: runtime::ReactorData, Q: PortTag> PortBank<T, Q, Local> {
+    pub fn contained(&self) -> PortBank<T, Q, Contained> {
+        PortBank {
+            ports: self.ports.iter().copied().map(|p| p.contained()).collect(),
+        }
+    }
+}
+
+impl<T: runtime::ReactorData> runtime::ReactionRefsExtract for PortBank<T, Input, Local> {
+    type Ref<'store>
+        = runtime::InputBankRef<'store, T>
+    where
+        Self: 'store;
+    fn extract<'store>(
+        &self,
+        refs: &mut runtime::ReactionRefs<'store>,
+    ) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
+        let mut ports = Vec::with_capacity(self.len());
+        for _ in 0..self.len() {
+            let port = refs
+                .ports
+                .next()
+                .ok_or_else(|| runtime::ReactionRefsError::missing("input port bank"))?;
+            ports.push(runtime::InputRef::try_from(runtime::DynPortRef(port))?);
+        }
+        Ok(runtime::InputBankRef::new(ports))
+    }
+}
+
+impl<T: runtime::ReactorData> runtime::ReactionRefsExtract for PortBank<T, Input, Contained> {
+    type Ref<'store>
+        = runtime::OutputBankRef<'store, T>
+    where
+        Self: 'store;
+    fn extract<'store>(
+        &self,
+        refs: &mut runtime::ReactionRefs<'store>,
+    ) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
+        let mut ports = Vec::with_capacity(self.len());
+        for _ in 0..self.len() {
+            let port = refs
+                .ports_mut
+                .next()
+                .ok_or_else(|| runtime::ReactionRefsError::missing("contained input port bank"))?;
+            ports.push(runtime::OutputRef::try_from(runtime::DynPortRefMut(port))?);
+        }
+        Ok(runtime::OutputBankRef::new(ports))
+    }
+}
+
+impl<T: runtime::ReactorData> runtime::ReactionRefsExtract for PortBank<T, Output, Local> {
+    type Ref<'store>
+        = runtime::OutputBankRef<'store, T>
+    where
+        Self: 'store;
+    fn extract<'store>(
+        &self,
+        refs: &mut runtime::ReactionRefs<'store>,
+    ) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
+        let mut ports = Vec::with_capacity(self.len());
+        for _ in 0..self.len() {
+            let port = refs
+                .ports_mut
+                .next()
+                .ok_or_else(|| runtime::ReactionRefsError::missing("output port bank"))?;
+            ports.push(runtime::OutputRef::try_from(runtime::DynPortRefMut(port))?);
+        }
+        Ok(runtime::OutputBankRef::new(ports))
+    }
+}
+
+impl<T: runtime::ReactorData> runtime::ReactionRefsExtract for PortBank<T, Output, Contained> {
+    type Ref<'store>
+        = runtime::InputBankRef<'store, T>
+    where
+        Self: 'store;
+    fn extract<'store>(
+        &self,
+        refs: &mut runtime::ReactionRefs<'store>,
+    ) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
+        let mut ports = Vec::with_capacity(self.len());
+        for _ in 0..self.len() {
+            let port = refs
+                .ports
+                .next()
+                .ok_or_else(|| runtime::ReactionRefsError::missing("contained output port bank"))?;
+            ports.push(runtime::InputRef::try_from(runtime::DynPortRef(port))?);
+        }
+        Ok(runtime::InputBankRef::new(ports))
     }
 }
 

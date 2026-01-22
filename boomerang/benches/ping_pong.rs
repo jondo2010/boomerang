@@ -117,13 +117,13 @@ fn bench(c: &mut Criterion) {
                     let _reactor = reactor
                         .build("main", (), None, None, false, &mut env_builder)
                         .unwrap();
+                    let config = runtime::Config::default().with_fast_forward(true);
                     let BuilderRuntimeParts {
                         enclaves,
                         aliases: _,
                         ..
-                    } = env_builder.into_runtime_parts().unwrap();
+                    } = env_builder.into_runtime_parts(&config).unwrap();
                     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
-                    let config = runtime::Config::default().with_fast_forward(true);
                     runtime::Scheduler::new(enclave_key, enclave, config)
                 },
                 |mut sched| {

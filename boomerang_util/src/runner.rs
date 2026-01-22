@@ -65,7 +65,7 @@ pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
         aliases: _,
         ..
     } = env_builder
-        .into_runtime_parts()
+        .into_runtime_parts(&config)
         .context("Error building environment!")?;
 
     let envs_out = runtime::execute_enclaves(enclaves.into_iter(), config);
@@ -142,13 +142,18 @@ where
         println!("{env_builder:#?}");
     }
 
+    let config = runtime::Config {
+        fast_forward: args.fast_forward,
+        ..Default::default()
+    };
+
     let BuilderRuntimeParts {
         enclaves,
         aliases: _,
         #[cfg(feature = "replay")]
         replayers,
     } = env_builder
-        .into_runtime_parts()
+        .into_runtime_parts(&config)
         .context("Error building environment!")?;
 
     if args.print_debug_info {
@@ -160,11 +165,6 @@ where
         tracing::info!("Reading replay from {}", filename.display());
         runtime::replay::create_replayer(filename, replayers, &enclaves)?;
     }
-
-    let config = runtime::Config {
-        fast_forward: args.fast_forward,
-        ..Default::default()
-    };
 
     let _envs_out = runtime::execute_enclaves(enclaves.into_iter(), config);
 

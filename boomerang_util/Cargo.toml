@@ -15,7 +15,7 @@ exclude.workspace = true
 default = []
 
 ## Support for built-in CLI/runner methods
-runner = ["dep:clap", "dep:anyhow", "boomerang/graphviz"]
+runner = ["dep:clap", "dep:anyhow"]
 
 ## Support for recording and replaying
 replay = ["boomerang/replay"]

@@ -12,10 +12,7 @@ readme = "README.md"
 exclude.workspace = true
 
 [features]
-default = ["graphviz"]
-
-## Support generating graphviz diagrams from reactor models
-graphviz = ["dep:graphviz-rust"]
+default = []
 
 ## Support for tracing with Tracy
 tracy = ["tracing-tracy/enable"]
@@ -26,7 +23,6 @@ replay = ["dep:serde"]
 
 [dependencies]
 document-features = { workspace = true }
-graphviz-rust = { version = "0.6", optional = true }
 itertools.workspace = true
 petgraph = "0.6"
 slotmap = { version = "1.0", features = ["unstable"] }

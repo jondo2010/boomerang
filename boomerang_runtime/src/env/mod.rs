@@ -185,6 +185,22 @@ impl Default for Enclave {
 }
 
 impl Enclave {
+    pub fn with_event_q_size(physical_event_q_size: usize) -> Self {
+        let size = physical_event_q_size.max(1);
+        let (event_tx, event_rx) = kanal::bounded(size);
+        let (shutdown_tx, shutdown_rx) = keepalive::channel();
+        Self {
+            env: Default::default(),
+            graph: Default::default(),
+            event_tx,
+            event_rx,
+            downstream_enclaves: Default::default(),
+            upstream_enclaves: Default::default(),
+            shutdown_tx,
+            shutdown_rx,
+        }
+    }
+
     pub fn insert_reactor(
         &mut self,
         reactor: Box<dyn BaseReactor>,

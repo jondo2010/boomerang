@@ -52,12 +52,17 @@ pub struct BuilderRuntimeParts {
 
 impl BuilderRuntimeParts {
     /// Create a new `BuilderRuntimeParts` from a `PartitionMap`.
-    fn new(partition_map: &PartitionMap, enclave_deps: Vec<EnclaveDep>) -> Self {
+    fn new(
+        partition_map: &PartitionMap,
+        enclave_deps: Vec<EnclaveDep>,
+        physical_event_q_size: usize,
+    ) -> Self {
         let mut enclaves = tinymap::TinyMap::new();
         let mut aliases = BuilderAliases::default();
         // Create all the unique enclaves
         for reactor_key in partition_map.values().unique() {
-            let enclave_key = enclaves.insert(runtime::Enclave::default());
+            let enclave_key =
+                enclaves.insert(runtime::Enclave::with_event_q_size(physical_event_q_size));
             aliases.enclave_aliases.insert(*reactor_key, enclave_key);
         }
         // Add any missing aliases
@@ -442,10 +447,14 @@ impl EnvBuilder {
     }
 
     /// Convert the [`EnvBuilder`] into parts suitable for execution by the runtime.
-    pub fn into_runtime_parts(mut self) -> Result<BuilderRuntimeParts, BuilderError> {
+    pub fn into_runtime_parts(
+        mut self,
+        config: &runtime::Config,
+    ) -> Result<BuilderRuntimeParts, BuilderError> {
         let mut partition_map = self.build_partition_map();
         let (port_bindings, enclave_deps) = self.build_connections(&mut partition_map)?;
-        let mut builder_parts = BuilderRuntimeParts::new(&partition_map, enclave_deps);
+        let mut builder_parts =
+            BuilderRuntimeParts::new(&partition_map, enclave_deps, config.physical_event_q_size);
 
         self.build_runtime_actions(&partition_map, &mut builder_parts)?;
         self.build_runtime_ports(&partition_map, &mut builder_parts, &port_bindings)?;

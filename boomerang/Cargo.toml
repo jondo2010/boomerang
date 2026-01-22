@@ -38,7 +38,6 @@ boomerang_macros = { workspace = true }
 [dev-dependencies]
 boomerang_util = { path = "../boomerang_util", features = ["runner", "replay"] }
 criterion = "0.5"
-pprof = { version = "0.13", features = ["criterion", "flamegraph"] }
 serde = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-tracy = { workspace = true }
@@ -47,6 +46,7 @@ tracing-tracy = { workspace = true }
 [target.'cfg(not(windows))'.dev-dependencies]
 termcolor = { version = "1.2" }
 rand = { version = "0.8" }
+pprof = { version = "0.13", features = ["criterion", "flamegraph"] }
 
 [[bench]]
 name = "ping_pong"

@@ -48,10 +48,10 @@ fn bench(c: &mut Criterion) {
                             &mut env_builder,
                         )
                         .unwrap();
-                    let BuilderRuntimeParts { enclaves, .. } =
-                        env_builder.into_runtime_parts().unwrap();
-                    let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
                     let config = runtime::Config::default().with_fast_forward(true);
+                    let BuilderRuntimeParts { enclaves, .. } =
+                        env_builder.into_runtime_parts(&config).unwrap();
+                    let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
                     runtime::Scheduler::new(enclave_key, enclave, config)
                 },
                 |mut sched| {

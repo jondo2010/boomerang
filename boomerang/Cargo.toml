@@ -53,3 +53,7 @@ harness = false
 [[bench]]
 name = "physical_actions"
 harness = false
+
+[[bench]]
+name = "port_bank"
+harness = false

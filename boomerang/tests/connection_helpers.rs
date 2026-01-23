@@ -24,13 +24,16 @@ fn Source(#[output] out: i32) -> impl Reactor {
 }
 
 #[reactor(state = SinkState)]
-fn Sink<const WIDTH: usize>(#[input(len = WIDTH)] input: i32) -> impl Reactor {
+fn Sink(width: usize, #[input(len = width)] input: i32) -> impl Reactor {
     builder
         .add_reaction(Some("inputs"))
         .with_trigger(input)
-        .with_reaction_fn(|_ctx, state, (input,)| {
+        .with_reaction_fn(|_ctx, state, (input,): (runtime::InputBankRef<i32>,)| {
             for port in input.iter() {
-                assert_eq!(port.as_ref().copied(), Some(state.expected));
+                assert_eq!(
+                    (port as &runtime::InputRef<i32>).as_ref().copied(),
+                    Some(state.expected)
+                );
             }
             state.seen = true;
         })
@@ -54,7 +57,7 @@ fn BroadcastMain() -> impl Reactor {
         false,
     )?;
     let sink = builder.add_child_reactor(
-        Sink::<3>(),
+        Sink(3),
         "sink",
         SinkState {
             expected: 7,
@@ -75,7 +78,7 @@ fn CartesianMain() -> impl Reactor {
         false,
     )?;
     let sink = builder.add_child_reactor(
-        Sink::<3>(),
+        Sink(3),
         "sink",
         SinkState {
             expected: 9,

@@ -63,7 +63,8 @@ fn Main<const NUM_NODES: usize = 4>() -> impl Reactor {
             .iter()
             .flat_map(|child| child.out.iter())
             .copied()
-            .cycle(),
+            .cycle()
+            .take(NUM_NODES * NUM_NODES),
         nodes.iter().flat_map(|child| child.inp.iter()).copied(),
         None,
         false,

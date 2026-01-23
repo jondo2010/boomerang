@@ -2,11 +2,12 @@ use boomerang::prelude::*;
 
 #[derive(Default)]
 struct SinkState {
+    width: usize,
     seen: bool,
 }
 
 #[reactor]
-fn Source<const WIDTH: usize>(#[output(len = WIDTH)] out: i32) -> impl Reactor {
+fn Source(width: usize, #[output(len = width)] out: i32) -> impl Reactor {
     builder
         .add_reaction(Some("startup"))
         .with_startup_trigger()
@@ -20,7 +21,7 @@ fn Source<const WIDTH: usize>(#[output(len = WIDTH)] out: i32) -> impl Reactor {
 }
 
 #[reactor(state = SinkState)]
-fn Sink<const WIDTH: usize>(#[input(len = WIDTH)] input: i32) -> impl Reactor {
+fn Sink(#[input(len = state.width)] input: i32) -> impl Reactor {
     builder
         .add_reaction(Some("inputs"))
         .with_trigger(input)
@@ -45,16 +46,14 @@ fn Sink<const WIDTH: usize>(#[input(len = WIDTH)] input: i32) -> impl Reactor {
 
 #[reactor]
 fn Main() -> impl Reactor {
-    let source = builder.add_child_reactor(
-        Source::<3>(),
-        "source",
-        (),
-        false,
-    )?;
+    let source = builder.add_child_reactor(Source(3), "source", (), false)?;
     let sink = builder.add_child_reactor(
-        Sink::<3>(),
+        Sink(),
         "sink",
-        SinkState { seen: false },
+        SinkState {
+            width: 3,
+            seen: false,
+        },
         false,
     )?;
 
@@ -65,11 +64,7 @@ fn Main() -> impl Reactor {
 fn port_bank_reaction() {
     tracing_subscriber::fmt::init();
     let config = runtime::Config::default().with_fast_forward(true);
-    let _ = boomerang_util::runner::build_and_test_reactor(
-        Main(),
-        "port_bank_reaction",
-        (),
-        config,
-    )
-    .unwrap();
+    let _ =
+        boomerang_util::runner::build_and_test_reactor(Main(), "port_bank_reaction", (), config)
+            .unwrap();
 }

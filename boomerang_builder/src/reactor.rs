@@ -3,7 +3,7 @@ use std::fmt::Debug;
 use super::{
     ActionTag, ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey,
     BuilderReactionKey, EnvBuilder, Input, Logical, Output, Physical, PortTag, TimerActionKey,
-    TimerSpec, TypedActionKey, TypedPortKey,
+    TimerSpec, TypedActionKey, TypedPortKey, PortBank,
 };
 use crate::runtime;
 use slotmap::SecondaryMap;
@@ -277,12 +277,28 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         &mut self,
         name: &str,
     ) -> Result<[TypedPortKey<T, Q>; N], BuilderError> {
-        let mut ports = Vec::with_capacity(N);
-        for i in 0..N {
-            let port = self.add_port::<T, Q>(name, Some(runtime::BankInfo { idx: i, total: N }))?;
+        let bank = self.add_ports_bank::<T, Q>(name, N)?;
+        Ok(bank
+            .into_vec()
+            .try_into()
+            .expect("Error converting Vec to array"))
+    }
+
+    /// Adds a runtime-sized bank of ports to this reactor.
+    pub fn add_ports_bank<T: runtime::ReactorData, Q: PortTag>(
+        &mut self,
+        name: &str,
+        len: usize,
+    ) -> Result<PortBank<T, Q>, BuilderError> {
+        let mut ports = Vec::with_capacity(len);
+        for i in 0..len {
+            let port = self.add_port::<T, Q>(
+                name,
+                Some(runtime::BankInfo { idx: i, total: len }),
+            )?;
             ports.push(port);
         }
-        Ok(ports.try_into().expect("Error converting Vec to array"))
+        Ok(PortBank::new(ports))
     }
 
     /// Add a new input port to this reactor.
@@ -309,12 +325,30 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         self.add_ports(name)
     }
 
+    /// Adds a runtime-sized bank of input ports to this reactor.
+    pub fn add_input_bank<T: runtime::ReactorData>(
+        &mut self,
+        name: &str,
+        len: usize,
+    ) -> Result<PortBank<T, Input>, BuilderError> {
+        self.add_ports_bank(name, len)
+    }
+
     /// Adds a bus of output port(s) to this reactor.
     pub fn add_output_ports<T: runtime::ReactorData, const N: usize>(
         &mut self,
         name: &str,
     ) -> Result<[TypedPortKey<T, Output>; N], BuilderError> {
         self.add_ports(name)
+    }
+
+    /// Adds a runtime-sized bank of output ports to this reactor.
+    pub fn add_output_bank<T: runtime::ReactorData>(
+        &mut self,
+        name: &str,
+        len: usize,
+    ) -> Result<PortBank<T, Output>, BuilderError> {
+        self.add_ports_bank(name, len)
     }
 
     /// Add a new child reactor using a closure to build it.
@@ -357,8 +391,61 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         Q1: PortTag,
         Q2: PortTag,
     {
-        for (port_from, port_to) in ports_from.zip(ports_to) {
+        let ports_from: Vec<_> = ports_from.collect();
+        let ports_to: Vec<_> = ports_to.collect();
+
+        if ports_from.len() != ports_to.len() {
+            return Err(BuilderError::PortConnectionLengthMismatch {
+                from: ports_from.len(),
+                to: ports_to.len(),
+            });
+        }
+
+        for (port_from, port_to) in ports_from.into_iter().zip(ports_to) {
             self.connect_port::<T, _, _, _, _>(port_from, port_to, after, physical)?;
+        }
+        Ok(())
+    }
+
+    /// Connect a single source port to every port in the target iterator.
+    pub fn connect_broadcast<T, Q1, Q2, A1, A2>(
+        &mut self,
+        port_from: TypedPortKey<T, Q1, A1>,
+        ports_to: impl Iterator<Item = TypedPortKey<T, Q2, A2>>,
+        after: Option<runtime::Duration>,
+        physical: bool,
+    ) -> Result<(), BuilderError>
+    where
+        T: runtime::ReactorData + Clone,
+        Q1: PortTag,
+        Q2: PortTag,
+    {
+        for port_to in ports_to {
+            self.connect_port::<T, _, _, _, _>(port_from, port_to, after, physical)?;
+        }
+        Ok(())
+    }
+
+    /// Connect every source port to every target port.
+    pub fn connect_cartesian<T, Q1, Q2, A1, A2>(
+        &mut self,
+        ports_from: impl Iterator<Item = TypedPortKey<T, Q1, A1>>,
+        ports_to: impl Iterator<Item = TypedPortKey<T, Q2, A2>>,
+        after: Option<runtime::Duration>,
+        physical: bool,
+    ) -> Result<(), BuilderError>
+    where
+        T: runtime::ReactorData + Clone,
+        Q1: PortTag,
+        Q2: PortTag,
+    {
+        let ports_from: Vec<_> = ports_from.collect();
+        let ports_to: Vec<_> = ports_to.collect();
+
+        for port_from in ports_from {
+            for port_to in ports_to.iter().copied() {
+                self.connect_port::<T, _, _, _, _>(port_from, port_to, after, physical)?;
+            }
         }
         Ok(())
     }

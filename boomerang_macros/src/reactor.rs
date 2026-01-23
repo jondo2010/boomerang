@@ -71,8 +71,8 @@ struct Arg {
 
 #[derive(Debug)]
 enum ArgKind {
-    Input,
-    Output,
+    Input { len: Option<syn::Expr> },
+    Output { len: Option<syn::Expr> },
     State { default: Option<syn::Expr> },
     Param { default: Option<syn::Expr> },
 }
@@ -82,47 +82,29 @@ impl ArgKind {
         let mut kind = None;
 
         for attr in attrs {
-            // Check if the param attribute has arguments (for default value)
-            let default = if let Meta::List(meta_list) = &attr.meta {
-                if !meta_list.tokens.is_empty() {
-                    // Parse param(default = value)
-                    let nested_meta: Meta = syn::parse2(meta_list.tokens.clone())?;
-                    if let Meta::NameValue(nv) = nested_meta {
-                        if nv.path.is_ident("default") {
-                            //if default.is_some() { abort!(attr, "duplicate default value"); }
-                            Some(nv.value)
-                        } else {
-                            abort!(attr, "expected 'default' in param attribute");
-                        }
-                    } else {
-                        abort!(attr, "expected #[param(default = ...)]");
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
             if attr.path().is_ident("input") {
                 if kind.is_some() {
                     abort!(attr, "duplicate argument kind");
                 }
-                kind = Some(ArgKind::Input);
+                let port_len = parse_len(attr)?;
+                kind = Some(ArgKind::Input { len: port_len });
             } else if attr.path().is_ident("output") {
                 if kind.is_some() {
                     abort!(attr, "duplicate argument kind");
                 }
-                kind = Some(ArgKind::Output);
+                let port_len = parse_len(attr)?;
+                kind = Some(ArgKind::Output { len: port_len });
             } else if attr.path().is_ident("state") {
                 if kind.is_some() {
                     abort!(attr, "duplicate argument kind");
                 }
+                let default = parse_default(attr)?;
                 kind = Some(ArgKind::State { default });
             } else if attr.path().is_ident("param") {
                 if kind.is_some() {
                     abort!(attr, "duplicate argument kind");
                 }
+                let default = parse_default(attr)?;
                 kind = Some(ArgKind::Param { default });
             } else {
                 abort!(
@@ -136,6 +118,74 @@ impl ArgKind {
             Some(k) => k,
             None => ArgKind::Param { default: None },
         })
+    }
+}
+
+fn parse_default(attr: &Attribute) -> syn::Result<Option<syn::Expr>> {
+    let meta_list = match &attr.meta {
+        Meta::List(list) => list,
+        Meta::Path(_) => return Ok(None),
+        _ => {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "expected #[param] or #[param(default = ...)]",
+            ))
+        }
+    };
+
+    if meta_list.tokens.is_empty() {
+        return Ok(None);
+    }
+
+    let nested_meta: Meta = syn::parse2(meta_list.tokens.clone())?;
+    if let Meta::NameValue(nv) = nested_meta {
+        if nv.path.is_ident("default") {
+            Ok(Some(nv.value))
+        } else {
+            Err(syn::Error::new_spanned(
+                attr,
+                "expected 'default' in param attribute",
+            ))
+        }
+    } else {
+        Err(syn::Error::new_spanned(
+            attr,
+            "expected #[param(default = ...)]",
+        ))
+    }
+}
+
+fn parse_len(attr: &Attribute) -> syn::Result<Option<syn::Expr>> {
+    let meta_list = match &attr.meta {
+        Meta::List(list) => list,
+        Meta::Path(_) => return Ok(None),
+        _ => {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "expected #[input] or #[input(len = ...)]",
+            ))
+        }
+    };
+
+    if meta_list.tokens.is_empty() {
+        return Ok(None);
+    }
+
+    let nested_meta: Meta = syn::parse2(meta_list.tokens.clone())?;
+    if let Meta::NameValue(nv) = nested_meta {
+        if nv.path.is_ident("len") {
+            Ok(Some(nv.value))
+        } else {
+            Err(syn::Error::new_spanned(
+                attr,
+                "expected 'len' in input/output attribute",
+            ))
+        }
+    } else {
+        Err(syn::Error::new_spanned(
+            attr,
+            "expected #[input(len = ...)] or #[output(len = ...)]",
+        ))
     }
 }
 
@@ -294,9 +344,15 @@ impl ToTokens for ArgsModel {
                  kind,
                  name,
                  ty,
-             }| match *kind {
-                ArgKind::Input => Some(quote! { #[input] #docs pub #name: #ty }),
-                ArgKind::Output => Some(quote! { #[output] #docs pub #name: #ty }),
+             }| match kind {
+                ArgKind::Input { len } => Some(match len {
+                    Some(len) => quote! { #[input(len = #len)] #docs pub #name: #ty },
+                    None => quote! { #[input] #docs pub #name: #ty },
+                }),
+                ArgKind::Output { len } => Some(match len {
+                    Some(len) => quote! { #[output(len = #len)] #docs pub #name: #ty },
+                    None => quote! { #[output] #docs pub #name: #ty },
+                }),
                 _ => None,
             },
         );
@@ -359,7 +415,7 @@ impl ToTokens for ArgsModel {
         let port_idents = args
             .iter()
             .filter_map(|Arg { kind, name, .. }| match *kind {
-                ArgKind::Input | ArgKind::Output => Some(name),
+                ArgKind::Input { .. } | ArgKind::Output { .. } => Some(name),
                 _ => None,
             });
 
@@ -373,19 +429,220 @@ impl ToTokens for ArgsModel {
 
         let ret = quote! { -> impl ::boomerang::builder::Reactor<#state_type_path, Ports = #ports_name #ty_generics> };
 
-        let output = quote! {
-            #port_struct
-            #state_struct
-            #state_impl
+        let has_banked_ports = args.iter().any(|Arg { kind, .. }| {
+            matches!(kind, ArgKind::Input { len: Some(_) } | ArgKind::Output { len: Some(_) })
+        });
 
-            #[allow(non_snake_case)]
-            #docs
-            #vis fn #name #impl_generics(#(#param_args,)*) #ret #where_clause {
-                <#ports_name #ty_generics as ::boomerang::builder::ReactorPorts>::build_with::<_, #state_type_path>(
-                    move |builder, (#(#port_idents,)*)| {
-                        #body
-                        Ok(())
+        let output = if has_banked_ports {
+            let ports_struct_fields = args.iter().filter_map(
+                |Arg {
+                     docs,
+                     kind,
+                     name,
+                     ty,
+                 }| match kind {
+                    ArgKind::Input { len } | ArgKind::Output { len } => {
+                        let dir = match kind {
+                            ArgKind::Input { .. } => quote!(::boomerang::builder::Input),
+                            ArgKind::Output { .. } => quote!(::boomerang::builder::Output),
+                            _ => unreachable!(),
+                        };
+                        let field_ty = match ty {
+                            syn::Type::Array(array) => {
+                                if len.is_some() {
+                                    abort!(ty, "banked ports cannot be declared as arrays");
+                                }
+                                let element_type = &array.elem;
+                                let len_expr = &array.len;
+                                quote!([::boomerang::builder::TypedPortKey<#element_type, #dir, ::boomerang::builder::Contained>; #len_expr])
+                            }
+                            _ if len.is_some() => {
+                                quote!(::boomerang::builder::PortBank<#ty, #dir, ::boomerang::builder::Contained>)
+                            }
+                            _ => {
+                                quote!(::boomerang::builder::TypedPortKey<#ty, #dir, ::boomerang::builder::Contained>)
+                            }
+                        };
+
+                        Some(quote! { #docs pub #name: #field_ty })
+                    }
+                    _ => None,
+                },
+            );
+
+            let ports_struct = quote! {
+                #vis struct #ports_name #impl_generics #where_clause {
+                    #(#ports_struct_fields,)*
+                }
+            };
+
+            let len_bindings = args.iter().filter_map(|Arg { kind, name, .. }| match kind {
+                ArgKind::Input { len: Some(expr) } | ArgKind::Output { len: Some(expr) } => {
+                    let len_name = format_ident!("{}_len", name.ident);
+                    Some(quote! { let #len_name = #expr; })
+                }
+                _ => None,
+            });
+
+            let local_patterns: Vec<_> =
+                args.iter()
+                    .filter_map(|Arg { kind, name, .. }| match kind {
+                        ArgKind::Input { .. } | ArgKind::Output { .. } => Some(name.ident.clone()),
+                        _ => None,
                     })
+                    .collect();
+
+            let local_values: Vec<_> =
+                args.iter()
+                    .filter_map(|Arg { kind, name, .. }| match kind {
+                        ArgKind::Input { len: Some(_) } | ArgKind::Output { len: Some(_) } => {
+                            Some(format_ident!("{}_for_fn", name.ident))
+                        }
+                        ArgKind::Input { len: None } | ArgKind::Output { len: None } => {
+                            Some(name.ident.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+
+            let local_types: Vec<_> = args
+                .iter()
+                .filter_map(|Arg { kind, ty, .. }| match kind {
+                    ArgKind::Input { len } | ArgKind::Output { len } => {
+                        let dir = match kind {
+                            ArgKind::Input { .. } => quote!(::boomerang::builder::Input),
+                            ArgKind::Output { .. } => quote!(::boomerang::builder::Output),
+                            _ => unreachable!(),
+                        };
+                        let local_ty = match ty {
+                            syn::Type::Array(array) => {
+                                if len.is_some() {
+                                    abort!(ty, "banked ports cannot be declared as arrays");
+                                }
+                                let element_type = &array.elem;
+                                let len_expr = &array.len;
+                                quote!([::boomerang::builder::TypedPortKey<#element_type, #dir>; #len_expr])
+                            }
+                            _ if len.is_some() => {
+                                quote!(::boomerang::builder::PortBank<#ty, #dir>)
+                            }
+                            _ => {
+                                quote!(::boomerang::builder::TypedPortKey<#ty, #dir>)
+                            }
+                        };
+                        Some(local_ty)
+                    }
+                    _ => None,
+                })
+                .collect();
+
+            let create_ports = args.iter().filter_map(|Arg { kind, name, ty, .. }| match kind {
+                ArgKind::Input { len } | ArgKind::Output { len } => {
+                    let name_str = name.ident.to_string();
+                    let dir = match kind {
+                        ArgKind::Input { .. } => quote!(::boomerang::builder::Input),
+                        ArgKind::Output { .. } => quote!(::boomerang::builder::Output),
+                        _ => unreachable!(),
+                    };
+                    let for_fn_name = format_ident!("{}_for_fn", name.ident);
+
+                    match ty {
+                        syn::Type::Array(array) => {
+                            if len.is_some() {
+                                abort!(ty, "banked ports cannot be declared as arrays");
+                            }
+                            let element_type = &array.elem;
+                            let len_expr = &array.len;
+                            match kind {
+                                ArgKind::Input { .. } => Some(quote! {
+                                    let #name = builder.add_input_ports::<#element_type, #len_expr>(#name_str)?;
+                                }),
+                                ArgKind::Output { .. } => Some(quote! {
+                                    let #name = builder.add_output_ports::<#element_type, #len_expr>(#name_str)?;
+                                }),
+                                _ => None,
+                            }
+                        }
+                        _ => match (kind, len) {
+                            (ArgKind::Input { .. }, Some(_)) => {
+                                let len_name = format_ident!("{}_len", name.ident);
+                                Some(quote! {
+                                    let #name = builder.add_input_bank::<#ty>(#name_str, #len_name)?;
+                                    let #for_fn_name = #name.clone();
+                                })
+                            }
+                            (ArgKind::Output { .. }, Some(_)) => {
+                                let len_name = format_ident!("{}_len", name.ident);
+                                Some(quote! {
+                                    let #name = builder.add_output_bank::<#ty>(#name_str, #len_name)?;
+                                    let #for_fn_name = #name.clone();
+                                })
+                            }
+                            _ => Some(quote! {
+                                let #name = builder.add_port::<#ty, #dir>(#name_str, None)?;
+                            }),
+                        },
+                    }
+                }
+                _ => None,
+            });
+
+            let field_inits = args.iter().filter_map(|Arg { kind, name, ty, .. }| match kind {
+                ArgKind::Input { .. } | ArgKind::Output { .. } => match ty {
+                    syn::Type::Array(_) => Some(quote! {
+                        #name: std::array::from_fn(|i| #name[i].contained())
+                    }),
+                    _ => Some(quote!(#name: #name.contained())),
+                },
+                _ => None,
+            });
+
+            quote! {
+                #ports_struct
+                #state_struct
+                #state_impl
+
+                #[allow(non_snake_case)]
+                #docs
+                #vis fn #name #impl_generics(#(#param_args,)*) #ret #where_clause {
+                    move |name: &str,
+                         state: #state_type_path,
+                         parent: Option<::boomerang::builder::BuilderReactorKey>,
+                         bank_info: Option<::boomerang::runtime::BankInfo>,
+                         is_enclave: bool,
+                         env: &mut ::boomerang::builder::EnvBuilder| {
+                        #(#len_bindings)*
+                        let mut builder = env.add_reactor(name, parent, bank_info, state, is_enclave);
+                        #(#create_ports)*
+                        (move |builder: &mut ::boomerang::builder::ReactorBuilderState<'_, #state_type_path>,
+                              ports: (#(#local_types,)* )| -> Result<(), ::boomerang::builder::BuilderError> {
+                            #[allow(non_snake_case)]
+                            let (#(#local_patterns,)*) = ports;
+                            #body
+                            Ok(())
+                        })(&mut builder, (#(#local_values,)*))?;
+                        builder.finish()?;
+                        Ok(#ports_name {
+                            #(#field_inits,)*
+                        })
+                    }
+                }
+            }
+        } else {
+            quote! {
+                #port_struct
+                #state_struct
+                #state_impl
+
+                #[allow(non_snake_case)]
+                #docs
+                #vis fn #name #impl_generics(#(#param_args,)*) #ret #where_clause {
+                    <#ports_name #ty_generics as ::boomerang::builder::ReactorPorts>::build_with::<_, #state_type_path>(
+                        move |builder, (#(#port_idents,)*)| {
+                            #body
+                            Ok(())
+                        })
+                }
             }
         };
 

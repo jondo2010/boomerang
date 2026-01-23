@@ -274,7 +274,8 @@ fn reaction_refs_extract_reports_missing() {
         actions: runtime::RefsMut::new(&mut actions),
     };
 
-    let res = TypedPortKey::<u32, Input, Local>::extract(&mut refs);
+    let port = TypedPortKey::<u32, Input, Local>::new(BuilderPortKey::default());
+    let res = port.extract(&mut refs);
 
     assert!(matches!(res, Err(runtime::ReactionRefsError::Missing { kind }) if kind == "input port"));
 }
@@ -304,7 +305,8 @@ fn reaction_refs_extract_reports_type_mismatch() {
         actions: runtime::RefsMut::new(&mut actions),
     };
 
-    let res = TypedPortKey::<u32, Input, Local>::extract(&mut refs);
+    let port = TypedPortKey::<u32, Input, Local>::new(BuilderPortKey::default());
+    let res = port.extract(&mut refs);
 
     assert!(matches!(res, Err(runtime::ReactionRefsError::TypeMismatch { kind, expected, found })
         if kind == "input port" && expected == std::any::type_name::<u32>() && found == std::any::type_name::<bool>()
@@ -388,6 +390,24 @@ fn test_nested_reactor() {
         enclave.env.reactors[inner_reactor_key].name(),
         "outer/inner"
     );
+}
+
+#[test]
+fn connect_ports_reports_length_mismatch() {
+    let mut env_builder = EnvBuilder::new();
+
+    let mut reactor = env_builder.add_reactor("reactor", None, None, (), false);
+    let outputs = reactor.add_output_ports::<u8, 2>("out").unwrap();
+    let inputs = reactor.add_input_ports::<u8, 3>("in").unwrap();
+
+    let err = reactor
+        .connect_ports(outputs.into_iter(), inputs.into_iter(), None, false)
+        .expect_err("Expected length mismatch");
+
+    assert!(matches!(
+        err,
+        BuilderError::PortConnectionLengthMismatch { from: 2, to: 3 }
+    ));
 }
 
 /// Test semantics of trigger/effect/uses ports on reactions.

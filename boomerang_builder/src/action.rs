@@ -85,7 +85,10 @@ impl<T: runtime::ReactorData, Q: ActionTag> runtime::ReactionRefsExtract for Typ
         = runtime::ActionRef<'store, T>
     where
         Self: 'store;
-    fn extract<'store>(refs: &mut runtime::ReactionRefs<'store>) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
+    fn extract<'store>(
+        &self,
+        refs: &mut runtime::ReactionRefs<'store>,
+    ) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
         let action = refs
             .actions
             .next()
@@ -128,7 +131,10 @@ impl runtime::ReactionRefsExtract for TimerActionKey {
         = runtime::ActionRef<'store>
     where
         Self: 'store;
-    fn extract<'store>(refs: &mut runtime::ReactionRefs<'store>) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
+    fn extract<'store>(
+        &self,
+        refs: &mut runtime::ReactionRefs<'store>,
+    ) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
         let action = refs
             .actions
             .next()

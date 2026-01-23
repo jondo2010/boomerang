@@ -2,8 +2,8 @@ use std::fmt::Debug;
 
 use super::{BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactorKey, EnvBuilder};
 use crate::{
-    runtime, ActionTag, BuilderRuntimeParts, ParentReactorBuilder, PortTag, TimerActionKey,
-    TypedActionKey, TypedPortKey,
+    runtime, ActionTag, BuilderRuntimeParts, ParentReactorBuilder, PortBank, PortTag,
+    TimerActionKey, TypedActionKey, TypedPortKey,
 };
 use slotmap::SecondaryMap;
 use variadics_please::all_tuples;
@@ -138,7 +138,7 @@ impl TriggerMode {
 }
 
 pub trait PartialReactionBuilderField: runtime::ReactionRefsExtract {
-    fn extend_builder<S: runtime::ReactorData, Fields: Copy, ReactionFn>(
+    fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
         builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
@@ -151,7 +151,7 @@ where
     Q: PortTag,
     TypedPortKey<T, Q, A>: runtime::ReactionRefsExtract,
 {
-    fn extend_builder<S: runtime::ReactorData, Fields: Copy, ReactionFn>(
+    fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
         builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
@@ -167,7 +167,7 @@ where
     Q: PortTag,
     TypedPortKey<T, Q, A>: runtime::ReactionRefsExtract,
 {
-    fn extend_builder<S: runtime::ReactorData, Fields: Copy, ReactionFn>(
+    fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
         builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
@@ -178,13 +178,31 @@ where
     }
 }
 
+impl<T, Q, A> PartialReactionBuilderField for PortBank<T, Q, A>
+where
+    T: runtime::ReactorData,
+    Q: PortTag,
+    PortBank<T, Q, A>: runtime::ReactionRefsExtract,
+{
+    fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
+        &self,
+        builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
+        trigger_mode: TriggerMode,
+    ) {
+        self.iter().for_each(|port| {
+            let port_key = BuilderPortKey::from(port);
+            builder.record_port_relation(port_key, trigger_mode);
+        });
+    }
+}
+
 impl<T, Q> PartialReactionBuilderField for TypedActionKey<T, Q>
 where
     T: runtime::ReactorData,
     Q: ActionTag,
     TypedActionKey<T, Q>: runtime::ReactionRefsExtract,
 {
-    fn extend_builder<S: runtime::ReactorData, Fields: Copy, ReactionFn>(
+    fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
         builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
@@ -195,7 +213,7 @@ where
 }
 
 impl PartialReactionBuilderField for TimerActionKey {
-    fn extend_builder<S: runtime::ReactorData, Fields: Copy, ReactionFn>(
+    fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
         builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
@@ -206,7 +224,7 @@ impl PartialReactionBuilderField for TimerActionKey {
 }
 
 #[derive(Debug)]
-pub struct PartialReactionBuilder<'a, S: runtime::ReactorData, Fields: Copy = (), ReactionFn = ()> {
+pub struct PartialReactionBuilder<'a, S: runtime::ReactorData, Fields = (), ReactionFn = ()> {
     name: Option<String>,
     reaction_fn: ReactionFn,
     port_relations: slotmap::SecondaryMap<BuilderPortKey, TriggerMode>,
@@ -215,6 +233,7 @@ pub struct PartialReactionBuilder<'a, S: runtime::ReactorData, Fields: Copy = ()
     action_order: Vec<BuilderActionKey>,
     reactor_key: BuilderReactorKey,
     env: &'a mut EnvBuilder,
+    fields: Fields,
     phantom: std::marker::PhantomData<(S, Fields, ReactionFn)>,
 }
 
@@ -233,12 +252,13 @@ impl<'a, S: runtime::ReactorData> PartialReactionBuilder<'a, S, (), ()> {
             action_order: Vec::new(),
             reactor_key,
             env,
+            fields: (),
             phantom: std::marker::PhantomData,
         }
     }
 }
 
-impl<'a, S: runtime::ReactorData, Fields: Copy, ReactionFn> PartialReactionBuilder<'a, S, Fields, ReactionFn> {
+impl<'a, S: runtime::ReactorData, Fields, ReactionFn> PartialReactionBuilder<'a, S, Fields, ReactionFn> {
     fn record_port_relation(&mut self, key: BuilderPortKey, trigger_mode: TriggerMode) {
         if !self.port_relations.contains_key(key) {
             self.port_order.push(key);
@@ -297,6 +317,7 @@ macro_rules! impl_with_field {
                     action_order,
                     reactor_key,
                     env,
+                    fields,
                     ..
                 } = self;
                 PartialReactionBuilder {
@@ -308,6 +329,7 @@ macro_rules! impl_with_field {
                     action_order,
                     reactor_key,
                     env,
+                    fields: fields.append(field),
                     phantom: std::marker::PhantomData,
                 }
             }
@@ -328,6 +350,7 @@ macro_rules! impl_with_field {
                     action_order,
                     reactor_key,
                     env,
+                    fields,
                     ..
                 } = self;
                 PartialReactionBuilder {
@@ -339,6 +362,7 @@ macro_rules! impl_with_field {
                     action_order,
                     reactor_key,
                     env,
+                    fields: fields.append(field),
                     phantom: std::marker::PhantomData,
                 }
             }
@@ -358,6 +382,7 @@ macro_rules! impl_with_field {
                     action_order,
                     reactor_key,
                     env,
+                    fields,
                     ..
                 } = self;
                 PartialReactionBuilder {
@@ -369,6 +394,7 @@ macro_rules! impl_with_field {
                     action_order,
                     reactor_key,
                     env,
+                    fields: fields.append(field),
                     phantom: std::marker::PhantomData,
                 }
             }
@@ -376,13 +402,34 @@ macro_rules! impl_with_field {
     };
 }
 
+trait TupleAppend<T> {
+    type Output;
+    fn append(self, value: T) -> Self::Output;
+}
+
+macro_rules! impl_tuple_append {
+    ($($T:ident),*) => {
+        impl<$($T,)* X> TupleAppend<X> for ($($T,)*)
+        {
+            type Output = ($($T,)* X,);
+            #[allow(non_snake_case)]
+            fn append(self, value: X) -> Self::Output {
+                let ($($T,)*) = self;
+                ($($T,)* value,)
+            }
+        }
+    };
+}
+
+all_tuples!(impl_tuple_append, 0, 10, T);
+
 // Generate implementations for tuples of size 0 to 10
 all_tuples!(impl_with_field, 0, 10, F);
 
 impl<'a, S, Fields> PartialReactionBuilder<'a, S, Fields>
 where
     S: runtime::ReactorData,
-    Fields: runtime::ReactionRefsExtract,
+    Fields: runtime::ReactionRefsExtract + Clone + Send + Sync,
 {
     pub fn with_reaction_fn<F>(
         self,
@@ -402,11 +449,16 @@ where
             action_order,
             reactor_key,
             env,
+            fields,
             ..
         } = self;
+        let fields_for_reaction = fields.clone();
         let reaction_fn: BoxedBuilderReactionFn =
-            Box::new(|_: &BuilderRuntimeParts| -> runtime::BoxedReactionFn {
-                Box::new(runtime::reaction::FnRefsAdapter::new(f))
+            Box::new(move |_: &BuilderRuntimeParts| -> runtime::BoxedReactionFn {
+                Box::new(runtime::reaction::FnRefsAdapter::new(
+                    fields_for_reaction,
+                    f,
+                ))
             });
         PartialReactionBuilder {
             name,
@@ -417,10 +469,17 @@ where
             action_order,
             reactor_key,
             env,
+            fields,
             phantom: std::marker::PhantomData,
         }
     }
+}
 
+impl<'a, S, Fields> PartialReactionBuilder<'a, S, Fields>
+where
+    S: runtime::ReactorData,
+    Fields: runtime::ReactionRefsExtract,
+{
     pub fn with_defered_reaction_fn<F>(
         self,
         f: F,
@@ -436,6 +495,7 @@ where
             action_order,
             reactor_key,
             env,
+            fields,
             ..
         } = self;
         PartialReactionBuilder {
@@ -447,6 +507,7 @@ where
             action_order,
             reactor_key,
             env,
+            fields,
             phantom: std::marker::PhantomData,
         }
     }

@@ -66,6 +66,20 @@ impl<'a, T: 'a + ?Sized> Refs<'a, T> {
 
         Ok(result)
     }
+
+    pub fn take(&mut self, n: usize) -> Result<RefsSlice<'a, T>, ReactionRefsError> {
+        if self.len() < n {
+            return Err(ReactionRefsError::missing("port"));
+        }
+
+        let ptr = self.ptr;
+        self.ptr = unsafe { NonNull::new_unchecked(self.ptr.as_ptr().add(n)) };
+        Ok(RefsSlice {
+            ptr,
+            len: n,
+            _marker: PhantomData,
+        })
+    }
 }
 
 impl<'a, T: 'a + ?Sized> Iterator for Refs<'a, T> {
@@ -133,6 +147,20 @@ impl<'a, T: 'a + ?Sized> RefsMut<'a, T> {
 
         Ok(result)
     }
+
+    pub fn take(&mut self, n: usize) -> Result<RefsSliceMut<'a, T>, ReactionRefsError> {
+        if self.len() < n {
+            return Err(ReactionRefsError::missing("port"));
+        }
+
+        let ptr = self.ptr;
+        self.ptr = unsafe { NonNull::new_unchecked(self.ptr.as_ptr().add(n)) };
+        Ok(RefsSliceMut {
+            ptr,
+            len: n,
+            _marker: PhantomData,
+        })
+    }
 }
 
 impl<'a, T: 'a + ?Sized> Iterator for RefsMut<'a, T> {
@@ -153,6 +181,146 @@ impl<'a, T: 'a + ?Sized> Iterator for RefsMut<'a, T> {
 impl<'a, T: 'a + ?Sized> ExactSizeIterator for RefsMut<'a, T> {
     fn len(&self) -> usize {
         unsafe { usize::try_from(self.end.offset_from(self.ptr.as_ptr())).unwrap_unchecked() }
+    }
+}
+
+/// Borrowed view over a contiguous subset of `Refs`.
+#[derive(Clone, Copy)]
+pub struct RefsSlice<'a, T: 'a + ?Sized> {
+    ptr: NonNull<NonNull<T>>,
+    len: usize,
+    _marker: PhantomData<&'a T>,
+}
+
+impl<'a, T: 'a + ?Sized> RefsSlice<'a, T> {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn iter(&self) -> RefsSliceIter<'a, T> {
+        RefsSliceIter {
+            ptr: self.ptr,
+            remaining: self.len,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn get(&self, idx: usize) -> Option<&'a T> {
+        if idx >= self.len {
+            return None;
+        }
+
+        let ptr = unsafe { self.ptr.as_ptr().add(idx) };
+        Some(unsafe { (*ptr).as_ref() })
+    }
+}
+
+pub struct RefsSliceIter<'a, T: 'a + ?Sized> {
+    ptr: NonNull<NonNull<T>>,
+    remaining: usize,
+    _marker: PhantomData<&'a T>,
+}
+
+impl<'a, T: 'a + ?Sized> Iterator for RefsSliceIter<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+
+        let ptr = self.ptr;
+        self.ptr = unsafe { NonNull::new_unchecked(self.ptr.as_ptr().add(1)) };
+        self.remaining -= 1;
+        Some(unsafe { (*ptr.as_ptr()).as_ref() })
+    }
+}
+
+impl<'a, T: 'a + ?Sized> ExactSizeIterator for RefsSliceIter<'a, T> {
+    fn len(&self) -> usize {
+        self.remaining
+    }
+}
+
+/// Borrowed mutable view over a contiguous subset of `RefsMut`.
+pub struct RefsSliceMut<'a, T: 'a + ?Sized> {
+    ptr: NonNull<NonNull<T>>,
+    len: usize,
+    _marker: PhantomData<&'a mut T>,
+}
+
+impl<'a, T: 'a + ?Sized> RefsSliceMut<'a, T> {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn iter(&self) -> RefsSliceIter<'a, T> {
+        RefsSliceIter {
+            ptr: self.ptr,
+            remaining: self.len,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn iter_mut(&mut self) -> RefsSliceIterMut<'a, T> {
+        RefsSliceIterMut {
+            ptr: self.ptr,
+            remaining: self.len,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn get(&self, idx: usize) -> Option<&'a T> {
+        if idx >= self.len {
+            return None;
+        }
+
+        let ptr = unsafe { self.ptr.as_ptr().add(idx) };
+        Some(unsafe { (*ptr).as_ref() })
+    }
+
+    pub fn get_mut(&mut self, idx: usize) -> Option<&'a mut T> {
+        if idx >= self.len {
+            return None;
+        }
+
+        let ptr = unsafe { self.ptr.as_ptr().add(idx) };
+        Some(unsafe { (*ptr).as_mut() })
+    }
+}
+
+pub struct RefsSliceIterMut<'a, T: 'a + ?Sized> {
+    ptr: NonNull<NonNull<T>>,
+    remaining: usize,
+    _marker: PhantomData<&'a mut T>,
+}
+
+impl<'a, T: 'a + ?Sized> Iterator for RefsSliceIterMut<'a, T> {
+    type Item = &'a mut T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+
+        let ptr = self.ptr;
+        self.ptr = unsafe { NonNull::new_unchecked(self.ptr.as_ptr().add(1)) };
+        self.remaining -= 1;
+        Some(unsafe { (*ptr.as_ptr()).as_mut() })
+    }
+}
+
+impl<'a, T: 'a + ?Sized> ExactSizeIterator for RefsSliceIterMut<'a, T> {
+    fn len(&self) -> usize {
+        self.remaining
     }
 }
 

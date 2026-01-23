@@ -30,10 +30,7 @@ fn Sink(width: usize, #[input(len = width)] input: i32) -> impl Reactor {
         .with_trigger(input)
         .with_reaction_fn(|_ctx, state, (input,): (runtime::InputBankRef<i32>,)| {
             for port in input.iter() {
-                assert_eq!(
-                    (port as &runtime::InputRef<i32>).as_ref().copied(),
-                    Some(state.expected)
-                );
+                assert_eq!(port.as_ref().copied(), Some(state.expected));
             }
             state.seen = true;
         })

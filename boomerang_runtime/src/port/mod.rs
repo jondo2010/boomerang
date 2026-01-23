@@ -1,10 +1,15 @@
 use downcast_rs::{impl_downcast, Downcast};
 use std::{
     fmt::{Debug, Display},
+    marker::PhantomData,
     ops::{Deref, DerefMut},
 };
 
-use crate::{refs_extract::ReactionRefsError, ReactorData};
+use crate::{
+    refs::{RefsSlice, RefsSliceMut},
+    refs_extract::ReactionRefsError,
+    ReactorData,
+};
 
 tinymap::key_type! { pub PortKey }
 
@@ -133,6 +138,14 @@ impl<T: ReactorData> InputRef<'_, T> {
     pub fn key(&self) -> PortKey {
         self.0.get_key()
     }
+
+    /// # Safety
+    ///
+    /// The caller must ensure `port` is a `Port<T>`.
+    pub unsafe fn from_unchecked(port: &dyn BasePort) -> Self {
+        let ptr = port as *const dyn BasePort as *const Port<T>;
+        InputRef(&*ptr)
+    }
 }
 
 impl<'a, T: ReactorData> From<&'a Port<T>> for InputRef<'a, T> {
@@ -186,6 +199,14 @@ impl<T: ReactorData> OutputRef<'_, T> {
     pub fn key(&self) -> PortKey {
         self.0.get_key()
     }
+
+    /// # Safety
+    ///
+    /// The caller must ensure `port` is a `Port<T>`.
+    pub unsafe fn from_unchecked(port: &mut dyn BasePort) -> Self {
+        let ptr = port as *mut dyn BasePort as *mut Port<T>;
+        OutputRef(&mut *ptr)
+    }
 }
 
 impl<'a, T: ReactorData> From<&'a mut Port<T>> for OutputRef<'a, T> {
@@ -224,12 +245,18 @@ impl<'a, T: ReactorData> TryFrom<DynPortRefMut<'a>> for OutputRef<'a, T> {
 
 /// A reference to a bank of input ports.
 pub struct InputBankRef<'a, T: ReactorData = ()> {
-    ports: Vec<InputRef<'a, T>>,
+    ports: RefsSlice<'a, dyn BasePort>,
+    _marker: PhantomData<T>,
 }
 
 impl<'a, T: ReactorData> InputBankRef<'a, T> {
-    pub fn new(ports: Vec<InputRef<'a, T>>) -> Self {
-        Self { ports }
+    /// The caller must ensure `ports` only contains `Port<T>` instances.
+    /// Port banks created via `PortBank::extract` pre-validate this invariant.
+    pub fn from_slice(ports: RefsSlice<'a, dyn BasePort>) -> Self {
+        Self {
+            ports,
+            _marker: PhantomData,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -240,23 +267,35 @@ impl<'a, T: ReactorData> InputBankRef<'a, T> {
         self.ports.is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &InputRef<'a, T>> {
-        self.ports.iter()
+    pub fn iter(&self) -> impl Iterator<Item = InputRef<'a, T>> + '_ {
+        // Safety: `PortBank::extract` validates the bank types before constructing this view.
+        self.ports
+            .iter()
+            .map(|port| unsafe { InputRef::from_unchecked(port) })
     }
 
-    pub fn get(&self, idx: usize) -> Option<&InputRef<'a, T>> {
-        self.ports.get(idx)
+    pub fn get(&self, idx: usize) -> Option<InputRef<'a, T>> {
+        // Safety: `PortBank::extract` validates the bank types before constructing this view.
+        self.ports
+            .get(idx)
+            .map(|port| unsafe { InputRef::from_unchecked(port) })
     }
 }
 
 /// A reference to a bank of output ports.
 pub struct OutputBankRef<'a, T: ReactorData = ()> {
-    ports: Vec<OutputRef<'a, T>>,
+    ports: RefsSliceMut<'a, dyn BasePort>,
+    _marker: PhantomData<T>,
 }
 
 impl<'a, T: ReactorData> OutputBankRef<'a, T> {
-    pub fn new(ports: Vec<OutputRef<'a, T>>) -> Self {
-        Self { ports }
+    /// The caller must ensure `ports` only contains `Port<T>` instances.
+    /// Port banks created via `PortBank::extract` pre-validate this invariant.
+    pub fn from_slice(ports: RefsSliceMut<'a, dyn BasePort>) -> Self {
+        Self {
+            ports,
+            _marker: PhantomData,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -267,19 +306,24 @@ impl<'a, T: ReactorData> OutputBankRef<'a, T> {
         self.ports.is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &OutputRef<'a, T>> {
-        self.ports.iter()
+    pub fn iter(&mut self) -> impl Iterator<Item = OutputRef<'a, T>> + '_ {
+        // Safety: `PortBank::extract` validates the bank types before constructing this view.
+        self.ports
+            .iter_mut()
+            .map(|port| unsafe { OutputRef::from_unchecked(port) })
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut OutputRef<'a, T>> {
-        self.ports.iter_mut()
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = OutputRef<'a, T>> + '_ {
+        self.iter()
     }
 
-    pub fn get(&self, idx: usize) -> Option<&OutputRef<'a, T>> {
-        self.ports.get(idx)
+    pub fn get(&mut self, idx: usize) -> Option<OutputRef<'a, T>> {
+        let port = self.ports.get_mut(idx)?;
+        // Safety: `PortBank::extract` validates the bank types before constructing this view.
+        Some(unsafe { OutputRef::from_unchecked(port) })
     }
 
-    pub fn get_mut(&mut self, idx: usize) -> Option<&mut OutputRef<'a, T>> {
-        self.ports.get_mut(idx)
+    pub fn get_mut(&mut self, idx: usize) -> Option<OutputRef<'a, T>> {
+        self.get(idx)
     }
 }

@@ -213,15 +213,15 @@ impl<T: runtime::ReactorData> runtime::ReactionRefsExtract for PortBank<T, Input
         &self,
         refs: &mut runtime::ReactionRefs<'store>,
     ) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
-        let mut ports = Vec::with_capacity(self.len());
-        for _ in 0..self.len() {
-            let port = refs
-                .ports
-                .next()
-                .ok_or_else(|| runtime::ReactionRefsError::missing("input port bank"))?;
-            ports.push(runtime::InputRef::try_from(runtime::DynPortRef(port))?);
+        let len = self.len();
+        let ports = runtime::refs::Refs::take(&mut refs.ports, len)
+            .map_err(|_| runtime::ReactionRefsError::missing("input port bank"))?;
+
+        for port in ports.iter() {
+            runtime::InputRef::<T>::try_from(runtime::DynPortRef(port))?;
         }
-        Ok(runtime::InputBankRef::new(ports))
+
+        Ok(runtime::InputBankRef::from_slice(ports))
     }
 }
 
@@ -234,15 +234,15 @@ impl<T: runtime::ReactorData> runtime::ReactionRefsExtract for PortBank<T, Input
         &self,
         refs: &mut runtime::ReactionRefs<'store>,
     ) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
-        let mut ports = Vec::with_capacity(self.len());
-        for _ in 0..self.len() {
-            let port = refs
-                .ports_mut
-                .next()
-                .ok_or_else(|| runtime::ReactionRefsError::missing("contained input port bank"))?;
-            ports.push(runtime::OutputRef::try_from(runtime::DynPortRefMut(port))?);
+        let len = self.len();
+        let mut ports = runtime::refs::RefsMut::take(&mut refs.ports_mut, len)
+            .map_err(|_| runtime::ReactionRefsError::missing("contained input port bank"))?;
+
+        for port in ports.iter_mut() {
+            runtime::OutputRef::<T>::try_from(runtime::DynPortRefMut(port))?;
         }
-        Ok(runtime::OutputBankRef::new(ports))
+
+        Ok(runtime::OutputBankRef::from_slice(ports))
     }
 }
 
@@ -255,15 +255,15 @@ impl<T: runtime::ReactorData> runtime::ReactionRefsExtract for PortBank<T, Outpu
         &self,
         refs: &mut runtime::ReactionRefs<'store>,
     ) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
-        let mut ports = Vec::with_capacity(self.len());
-        for _ in 0..self.len() {
-            let port = refs
-                .ports_mut
-                .next()
-                .ok_or_else(|| runtime::ReactionRefsError::missing("output port bank"))?;
-            ports.push(runtime::OutputRef::try_from(runtime::DynPortRefMut(port))?);
+        let len = self.len();
+        let mut ports = runtime::refs::RefsMut::take(&mut refs.ports_mut, len)
+            .map_err(|_| runtime::ReactionRefsError::missing("output port bank"))?;
+
+        for port in ports.iter_mut() {
+            runtime::OutputRef::<T>::try_from(runtime::DynPortRefMut(port))?;
         }
-        Ok(runtime::OutputBankRef::new(ports))
+
+        Ok(runtime::OutputBankRef::from_slice(ports))
     }
 }
 
@@ -276,15 +276,15 @@ impl<T: runtime::ReactorData> runtime::ReactionRefsExtract for PortBank<T, Outpu
         &self,
         refs: &mut runtime::ReactionRefs<'store>,
     ) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
-        let mut ports = Vec::with_capacity(self.len());
-        for _ in 0..self.len() {
-            let port = refs
-                .ports
-                .next()
-                .ok_or_else(|| runtime::ReactionRefsError::missing("contained output port bank"))?;
-            ports.push(runtime::InputRef::try_from(runtime::DynPortRef(port))?);
+        let len = self.len();
+        let ports = runtime::refs::Refs::take(&mut refs.ports, len)
+            .map_err(|_| runtime::ReactionRefsError::missing("contained output port bank"))?;
+
+        for port in ports.iter() {
+            runtime::InputRef::<T>::try_from(runtime::DynPortRef(port))?;
         }
-        Ok(runtime::InputBankRef::new(ports))
+
+        Ok(runtime::InputBankRef::from_slice(ports))
     }
 }
 

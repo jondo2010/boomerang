@@ -13,8 +13,8 @@ fn Source(width: usize, #[output(len = width)] out: i32) -> impl Reactor {
         .with_startup_trigger()
         .with_effect(out)
         .with_reaction_fn(|_ctx, _state, (_startup, mut out)| {
-            for (idx, port) in out.iter_mut().enumerate() {
-                **port = Some(idx as i32);
+            for (idx, mut port) in out.iter_mut().enumerate() {
+                *port = Some(idx as i32);
             }
         })
         .finish()?;

@@ -47,7 +47,7 @@ variadics_please.workspace = true
 # replay dependencies
 bytes = { version = "1.10", optional = true }
 mcap = { version = "0.24", optional = true }
-foxglove = { version = "0.16", optional = true }
+foxglove = { version = "0.17", optional = true }
 memmap2 = { version = "0.9", optional = true }
 serde_json = { version = "1.0", optional = true }
 

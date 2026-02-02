@@ -33,7 +33,7 @@ replay = [
 [dependencies]
 kanal = "0.1"
 document-features = { workspace = true }
-downcast-rs = "1.2"
+downcast-rs = "2.0"
 itertools.workspace = true
 pin-project = "1.1"
 rayon = { version = "1.7", optional = true }

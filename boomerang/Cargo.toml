@@ -43,7 +43,7 @@ tracing-tracy = { workspace = true }
 # Deps for Snake example
 [target.'cfg(not(windows))'.dev-dependencies]
 termcolor = { version = "1.2" }
-rand = { version = "0.9" }
+rand = { version = "0.10" }
 pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 
 [[bench]]

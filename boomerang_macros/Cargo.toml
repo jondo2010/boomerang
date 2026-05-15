@@ -13,7 +13,7 @@ exclude.workspace = true
 
 [dependencies]
 attribute-derive = { version = "0.10", features = ["syn-full"] }
-convert_case = "0.10"
+convert_case = "0.11"
 parse_duration = "2.1"
 proc-macro-error2 = { version = "2", default-features = false }
 proc-macro2 = "1.0"

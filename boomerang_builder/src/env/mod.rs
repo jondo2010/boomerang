@@ -532,6 +532,24 @@ impl EnvBuilder {
         P1: Into<BuilderPortKey>,
         P2: Into<BuilderPortKey>,
     {
+        self.add_port_connection_in_scope::<T, P1, P2>(
+            source_key, target_key, None, after, physical,
+        )
+    }
+
+    pub(crate) fn add_port_connection_in_scope<T, P1, P2>(
+        &mut self,
+        source_key: P1,
+        target_key: P2,
+        scope_mode: Option<BuilderModeKey>,
+        after: Option<runtime::Duration>,
+        physical: bool,
+    ) -> Result<(), BuilderError>
+    where
+        T: runtime::ReactorData + Clone,
+        P1: Into<BuilderPortKey>,
+        P2: Into<BuilderPortKey>,
+    {
         let source_key = source_key.into();
         let target_key = target_key.into();
 
@@ -546,6 +564,7 @@ impl EnvBuilder {
                 source_key,
                 target_key,
                 after,
+                scope_mode,
                 _phantom: Default::default(),
             })
         } else {
@@ -553,6 +572,7 @@ impl EnvBuilder {
                 source_key,
                 target_key,
                 after,
+                scope_mode,
                 _phantom: Default::default(),
             })
         });

@@ -288,6 +288,67 @@ fn test_runtime_scope_metadata_for_mode_components() {
 }
 
 #[test]
+fn test_child_and_connection_helper_reactors_inherit_mode_scope() {
+    let mut env_builder = EnvBuilder::new();
+    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, (), false);
+
+    let idle = reactor_builder.add_mode("idle", ModeKind::Initial).unwrap();
+
+    reactor_builder
+        .in_mode(idle, |builder| {
+            let source = builder.add_child_with(|parent, env| {
+                let mut child = env.add_reactor("source", Some(parent), None, (), false);
+                let _out = child.add_output_port::<u32>("out")?;
+                child.finish()
+            })?;
+            let target = builder.add_child_with(|parent, env| {
+                let mut child = env.add_reactor("target", Some(parent), None, (), false);
+                let _input = child.add_input_port::<u32>("input")?;
+                child.finish()
+            })?;
+
+            let source_out = builder
+                .env()
+                .find_port_by_name::<u32, Output>("out", source)
+                .unwrap();
+            let target_input = builder
+                .env()
+                .find_port_by_name::<u32, Input>("input", target)
+                .unwrap();
+            builder.connect_port::<u32, _, _, _, _>(
+                source_out,
+                target_input,
+                Some(runtime::Duration::nanoseconds(1)),
+                false,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    let reactor_key = reactor_builder.finish().unwrap();
+    let builder_parts = env_builder
+        .into_runtime_parts(&runtime::Config::default())
+        .unwrap();
+
+    let (enclave_key, _runtime_reactor) = builder_parts.aliases.reactor_aliases[reactor_key];
+    let enclave = &builder_parts.enclaves[enclave_key];
+    let runtime_idle = builder_parts.aliases.mode_aliases[idle].1;
+    let idle_scope = enclave.graph.mode_scopes[runtime_idle];
+
+    let scoped_reactor_roots = enclave
+        .graph
+        .reactor_root_scopes
+        .values()
+        .filter(|&&scope| enclave.graph.scopes[scope].parent == Some(idle_scope))
+        .count();
+
+    assert_eq!(
+        scoped_reactor_roots, 3,
+        "source, target, and delayed connection helper reactors should be inside idle"
+    );
+}
+
+#[test]
 fn test_reactions_startup_shutdown() {
     let mut env_builder = EnvBuilder::new();
     let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, (), false);

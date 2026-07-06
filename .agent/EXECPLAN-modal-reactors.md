@@ -18,7 +18,7 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 - [x] (2026-07-06 21:02Z) Verified the first typed-transition slice with focused builder, macro, and modal integration tests plus `git diff --check` and no-external-reference scans.
 - [x] (2026-07-06 21:09Z) Implemented the valid Rust structural syntax `mode! { initial idle { ... } }` and `mode! { active { ... } }`, including macro parser tests and an end-to-end modal integration test.
 - [x] (2026-07-06 21:24Z) Added first static scope metadata: runtime root/mode `ScopeKey`s, action/port/reaction scope maps, builder scope ownership for mode-local actions and reactions, port rejection inside modes, and reset-trigger validation.
-- [ ] Extend static scope ownership to child reactor instances and delayed/physical connection helper reactions before scheduler local-time work.
+- [x] (2026-07-06 21:39Z) Extended static scope ownership to child reactor instances and delayed/physical connection helper reactors before scheduler local-time work.
 - [ ] Replace the temporary compatibility syntax with macro-generated mode handles for typed transition effects in structural mode declarations.
 - [ ] Implement mode-local event queues and local-time scheduling.
 - [ ] Implement reset/history transition application, including recursive reset of contained modal reactors.
@@ -51,6 +51,9 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 
 - Observation: Static scope metadata can be added without changing scheduler behavior yet, but it must be assigned after reactor and mode aliases exist.
   Evidence: `cargo test -p boomerang_builder`, `cargo test -p boomerang_runtime env::tests`, `cargo test -p boomerang modal_structural_syntax`, `cargo test -p boomerang modal_basic`, and `cargo test -p boomerang mixed_reactions` pass after adding `ScopeKey`, root/mode scopes, and action/port/reaction scope maps. The new builder test `test_runtime_scope_metadata_for_mode_components` verifies a mode-local action and reaction map to the mode scope while a reactor port and root reaction map to the root scope.
+
+- Observation: Child reactors and synthetic connection reactors need scope ownership before local-time scheduling is introduced, because delayed and cross-enclave connections are represented as helper reactors in the builder graph.
+  Evidence: `cargo test -p boomerang_builder test_child_and_connection_helper_reactors_inherit_mode_scope` passes after `ReactorBuilderState::add_child_with` and `ConnectionBuilder` propagate the current mode to child/helper reactors. The test verifies that source, target, and delayed connection helper reactor root scopes all have the enclosing mode scope as their parent.
 
 ## Decision Log
 
@@ -544,3 +547,5 @@ Change log: 2026-07-06 / Codex: started implementation with typed builder/runtim
 Change log: 2026-07-06 / Codex: corrected the proposed structural syntax to valid Rust `mode!` statements after discovering that bare `initial mode` blocks are rejected before attribute macro expansion, and added the first parser/integration implementation slice for that syntax.
 
 Change log: 2026-07-06 / Codex: added the first static scope metadata layer for reactors, modes, actions, ports, and reactions, plus validation for mode-local ports and reset triggers outside mode scopes.
+
+Change log: 2026-07-06 / Codex: extended mode scope ownership to child reactor instances and synthetic delayed/physical connection helper reactors, and recorded focused verification for that slice.

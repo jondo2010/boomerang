@@ -391,6 +391,11 @@ impl Enclave {
         self.graph.mode_scopes[mode_key]
     }
 
+    pub fn set_reactor_scope_parent(&mut self, reactor_key: ReactorKey, parent: ScopeKey) {
+        let root_scope = self.root_scope(reactor_key);
+        self.graph.scopes[root_scope].parent = Some(parent);
+    }
+
     pub fn insert_action_scope(&mut self, action_key: ActionKey, scope: ScopeKey) {
         self.graph.action_scopes.insert(action_key, scope);
     }

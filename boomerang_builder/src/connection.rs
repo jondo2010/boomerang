@@ -7,9 +7,9 @@ use std::collections::{BTreeSet, HashMap};
 use slotmap::SecondaryMap;
 
 use crate::{
-    runtime, ActionTag, BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactorKey,
-    EnclaveDep, EnvBuilder, Input, Output, ParentReactorBuilder, PartitionMap, PortType,
-    TriggerMode, TypedActionKey, TypedPortKey,
+    runtime, ActionTag, BuilderActionKey, BuilderError, BuilderModeKey, BuilderPortKey,
+    BuilderReactorKey, EnclaveDep, EnvBuilder, Input, Output, ParentReactorBuilder, PartitionMap,
+    PortType, TriggerMode, TypedActionKey, TypedPortKey,
 };
 
 #[derive(Default)]
@@ -211,6 +211,7 @@ pub struct ConnectionBuilder<T: runtime::ReactorData, Q: ActionTag> {
     pub(crate) source_key: BuilderPortKey,
     pub(crate) target_key: BuilderPortKey,
     pub(crate) after: Option<runtime::Duration>,
+    pub(crate) scope_mode: Option<BuilderModeKey>,
     pub(crate) _phantom: std::marker::PhantomData<fn() -> (T, Q)>,
 }
 
@@ -257,8 +258,12 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
                     source_parent_reactor_key, target_parent_reactor_key,
                     "Delayed connections between same ancestor?"
                 );
-                let (reactor_key, input_port, output_port) =
-                    build_delayed_connection::<T, Q>(env, source_parent_reactor_key, self.after)?;
+                let (reactor_key, input_port, output_port) = build_delayed_connection::<T, Q>(
+                    env,
+                    source_parent_reactor_key,
+                    self.scope_mode,
+                    self.after,
+                )?;
                 partition_map.insert(reactor_key, source_partition);
                 port_bindings.bind(self.source_key, input_port.into(), env)?;
                 port_bindings.bind(output_port.into(), self.target_key, env)?;
@@ -279,6 +284,7 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
             } = build_enclave_connection_target::<T, Q>(
                 env,
                 target_parent_reactor_key,
+                self.scope_mode,
                 self.after,
             )?;
             partition_map.insert(reactor_key, target_partition);
@@ -292,6 +298,7 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
             } = build_enclave_connection_source::<T>(
                 env,
                 source_parent_reactor_key,
+                self.scope_mode,
                 target_partition,
                 action_key.into(),
             )?;
@@ -315,6 +322,7 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
 fn build_delayed_connection<T: runtime::ReactorData + Clone, Q: ActionTag>(
     env: &mut EnvBuilder,
     parent_key: Option<BuilderReactorKey>,
+    scope_mode: Option<BuilderModeKey>,
     after: Option<runtime::Duration>,
 ) -> Result<
     (
@@ -325,6 +333,9 @@ fn build_delayed_connection<T: runtime::ReactorData + Clone, Q: ActionTag>(
     BuilderError,
 > {
     let mut builder = env.add_reactor("con_reactor", parent_key, None, (), false);
+    if let Some(scope_mode) = scope_mode {
+        builder.set_scope_mode(scope_mode)?;
+    }
     let input_port = builder.add_input_port::<T>("con_in")?;
     let output_port = builder.add_output_port::<T>("con_out")?;
     let action_key = builder.add_action::<T, Q>("con_act", after)?;
@@ -361,10 +372,14 @@ struct EnclaveConnectionSource<T: runtime::ReactorData + Clone> {
 fn build_enclave_connection_source<T: runtime::ReactorData + Clone>(
     env: &mut EnvBuilder,
     parent_key: Option<BuilderReactorKey>,
+    scope_mode: Option<BuilderModeKey>,
     target_partition: BuilderReactorKey,
     target_action_key: BuilderActionKey,
 ) -> Result<EnclaveConnectionSource<T>, BuilderError> {
     let mut source_builder = env.add_reactor("con_reactor_src", parent_key, None, (), false);
+    if let Some(scope_mode) = scope_mode {
+        source_builder.set_scope_mode(scope_mode)?;
+    }
     let input_port = source_builder.add_input_port::<T>("con_in")?;
     source_builder
         .add_reaction(None)
@@ -407,9 +422,13 @@ struct EnclaveConnectionTarget<T: runtime::ReactorData, Q: ActionTag> {
 fn build_enclave_connection_target<T: runtime::ReactorData + Clone, Q: ActionTag>(
     env: &mut EnvBuilder,
     parent_key: Option<BuilderReactorKey>,
+    scope_mode: Option<BuilderModeKey>,
     after: Option<runtime::Duration>,
 ) -> Result<EnclaveConnectionTarget<T, Q>, BuilderError> {
     let mut target_builder = env.add_reactor("con_reactor_tgt", parent_key, None, (), false);
+    if let Some(scope_mode) = scope_mode {
+        target_builder.set_scope_mode(scope_mode)?;
+    }
     let action_key = target_builder.add_action::<T, Q>("con_act", after)?;
     let output_port = target_builder.add_output_port::<T>("con_out")?;
 

@@ -30,6 +30,7 @@ pub struct BuilderAliases {
     pub enclave_aliases: SecondaryMap<BuilderReactorKey, runtime::EnclaveKey>,
     pub reactor_aliases:
         SecondaryMap<BuilderReactorKey, (runtime::EnclaveKey, runtime::ReactorKey)>,
+    pub reactor_scope_modes: SecondaryMap<BuilderReactorKey, Option<BuilderModeKey>>,
     pub reaction_aliases:
         SecondaryMap<BuilderReactionKey, (runtime::EnclaveKey, runtime::ReactionKey)>,
     pub mode_aliases: SecondaryMap<BuilderModeKey, (runtime::EnclaveKey, runtime::ModeKey)>,
@@ -181,13 +182,38 @@ impl EnvBuilder {
             let enclave_key = builder_parts.aliases.enclave_aliases[partition_key];
             let enclave = &mut builder_parts.enclaves[enclave_key];
             let bank_info = reactor.bank_info.clone();
+            let scope_mode = reactor.scope_mode;
             let reactor_fqn = &reactor_fqns[builder_reactor_key];
             let runtime_reactor_key =
                 enclave.insert_reactor(reactor.into_runtime(reactor_fqn), bank_info);
             builder_parts
                 .aliases
+                .reactor_scope_modes
+                .insert(builder_reactor_key, scope_mode);
+            builder_parts
+                .aliases
                 .reactor_aliases
                 .insert(builder_reactor_key, (enclave_key, runtime_reactor_key));
+        }
+        Ok(())
+    }
+
+    fn assign_runtime_reactor_scope_parents(
+        &mut self,
+        builder_parts: &mut BuilderRuntimeParts,
+    ) -> Result<(), BuilderError> {
+        for (builder_reactor_key, scope_mode) in &builder_parts.aliases.reactor_scope_modes {
+            let Some(scope_mode) = scope_mode else {
+                continue;
+            };
+            let (enclave_key, runtime_reactor_key) =
+                builder_parts.aliases.reactor_aliases[builder_reactor_key];
+            let (mode_enclave_key, runtime_mode_key) =
+                builder_parts.aliases.mode_aliases[*scope_mode];
+            assert_eq!(enclave_key, mode_enclave_key, "Crosscheck");
+            let enclave = &mut builder_parts.enclaves[enclave_key];
+            let parent_scope = enclave.mode_scope(runtime_mode_key);
+            enclave.set_reactor_scope_parent(runtime_reactor_key, parent_scope);
         }
         Ok(())
     }
@@ -561,6 +587,7 @@ impl EnvBuilder {
 
         self.build_runtime_reactors(&partition_map, &mut builder_parts)?;
         self.build_runtime_modes(&mut builder_parts)?;
+        self.assign_runtime_reactor_scope_parents(&mut builder_parts)?;
         self.assign_runtime_action_and_port_scopes(&mut builder_parts, &port_bindings)?;
 
         // must be done last, since building other parts may add new reactions

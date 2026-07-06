@@ -83,6 +83,8 @@ pub struct ReactorBuilder {
     type_name: String,
     /// Optional parent reactor key
     pub parent_reactor_key: Option<BuilderReactorKey>,
+    /// Enclosing parent mode scope, if this reactor instance was declared inside a mode.
+    pub scope_mode: Option<BuilderModeKey>,
     /// Reactions in this ReactorType
     pub reactions: SecondaryMap<BuilderReactionKey, ()>,
     /// Modes in this Reactor
@@ -120,6 +122,7 @@ impl ReactorBuilder {
             state: Box::new(ReactorState(reactor_state)),
             type_name: type_name.into(),
             parent_reactor_key: parent,
+            scope_mode: None,
             reactions: SecondaryMap::new(),
             modes: SecondaryMap::new(),
             ports: SecondaryMap::new(),
@@ -239,6 +242,22 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
     /// Get the [`BuilderReactorKey`] for this `ReactorBuilder`
     pub fn key(&self) -> BuilderReactorKey {
         self.reactor_key
+    }
+
+    pub(crate) fn set_scope_mode(&mut self, mode: BuilderModeKey) -> Result<(), BuilderError> {
+        let mode_builder = self.env.mode_builders.get(mode).ok_or_else(|| {
+            BuilderError::ReactionBuilderError(format!("Unknown mode key {mode:?}"))
+        })?;
+        let reactor_builder = &self.env.reactor_builders[self.reactor_key];
+        if Some(mode_builder.reactor_key) != reactor_builder.parent_reactor_key {
+            return Err(BuilderError::ReactionBuilderError(format!(
+                "Mode '{}' does not enclose reactor '{}'",
+                mode_builder.name,
+                reactor_builder.name()
+            )));
+        }
+        self.env.reactor_builders[self.reactor_key].scope_mode = Some(mode);
+        Ok(())
     }
 
     pub fn current_mode(&self) -> Option<BuilderModeKey> {
@@ -465,7 +484,18 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
     where
         F: FnOnce(BuilderReactorKey, &mut EnvBuilder) -> Result<BuilderReactorKey, BuilderError>,
     {
-        f(self.reactor_key, self.env)
+        let child = f(self.reactor_key, self.env)?;
+        if self.env.reactor_builders[child].parent_reactor_key != Some(self.reactor_key) {
+            return Err(BuilderError::ReactionBuilderError(format!(
+                "Child builder returned reactor '{}' that is not contained by '{}'",
+                self.env.reactor_builders[child].name(),
+                self.env.reactor_builders[self.reactor_key].name()
+            )));
+        }
+        if let Some(mode) = self.current_mode {
+            self.env.reactor_builders[child].scope_mode = Some(mode);
+        }
+        Ok(child)
     }
 
     /// Connect 2 ports on this reactor. This has the logical meaning of "connecting" `port_a` to
@@ -482,8 +512,13 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         Q1: PortTag,
         Q2: PortTag,
     {
-        self.env
-            .add_port_connection::<T, _, _>(port_a_key, port_b_key, after, physical)
+        self.env.add_port_connection_in_scope::<T, _, _>(
+            port_a_key,
+            port_b_key,
+            self.current_mode,
+            after,
+            physical,
+        )
     }
 
     /// Connect multiple ports on this reactor. This has the logical meaning of "connecting"

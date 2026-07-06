@@ -13,8 +13,6 @@ mod kw {
     syn::custom_keyword!(shutdown);
     syn::custom_keyword!(reset);
     syn::custom_keyword!(history);
-    syn::custom_keyword!(modes);
-    syn::custom_keyword!(transition);
 }
 
 /// Represents a path or identifier that can be either simple (x) or compound (a.b)
@@ -203,8 +201,6 @@ pub struct Model {
     triggers: Vec<TriggerType>,
     uses: Vec<PathOrIdent>,
     effects: Vec<EffectType>,
-    modes: Option<Vec<PathOrIdent>>,
-    transition: Option<PathOrIdent>,
     code: syn::Block,
 }
 
@@ -224,7 +220,7 @@ impl Parse for Model {
 
         // Parse uses (if any identifiers before -> or {)
         let mut uses: Punctuated<PathOrIdent, token::Comma> = Punctuated::new();
-        while !input.peek(Token![->]) && !input.peek(token::Brace) && !input.peek(Token![@]) {
+        while !input.peek(Token![->]) && !input.peek(token::Brace) {
             uses.push_value(input.parse()?);
             if !input.peek(Token![,]) {
                 break;
@@ -237,7 +233,7 @@ impl Parse for Model {
             let _arrow = input.parse::<Token![->]>()?;
             // Parse effects (if any identifiers before {)
             let mut effects: Punctuated<EffectType, token::Comma> = Punctuated::new();
-            while !input.peek(token::Brace) && !input.peek(Token![@]) {
+            while !input.peek(token::Brace) {
                 effects.push_value(input.parse()?);
                 if !input.peek(Token![,]) {
                     break;
@@ -249,34 +245,6 @@ impl Parse for Model {
             None
         };
 
-        let mut modes: Option<Vec<PathOrIdent>> = None;
-        let mut transition: Option<PathOrIdent> = None;
-
-        while input.peek(Token![@]) {
-            input.parse::<Token![@]>()?;
-            let lookahead = input.lookahead1();
-            if lookahead.peek(kw::modes) {
-                if modes.is_some() {
-                    return Err(input.error("duplicate @modes modifier"));
-                }
-                input.parse::<kw::modes>()?;
-                let content;
-                let _paren = parenthesized!(content in input);
-                let list = content.parse_terminated(PathOrIdent::parse, Token![,])?;
-                modes = Some(list.into_iter().collect());
-            } else if lookahead.peek(kw::transition) {
-                if transition.is_some() {
-                    return Err(input.error("duplicate @transition modifier"));
-                }
-                input.parse::<kw::transition>()?;
-                let content;
-                let _paren = parenthesized!(content in input);
-                transition = Some(content.parse()?);
-            } else {
-                return Err(input.error("expected @modes(...) or @transition(...)"));
-            }
-        }
-
         // Parse the code block
         let code = input.parse()?;
 
@@ -285,8 +253,6 @@ impl Parse for Model {
             triggers: triggers.into_iter().collect(),
             uses: uses.into_iter().collect(),
             effects: effects.map(|e| e.into_iter().collect()).unwrap_or_default(),
-            modes,
-            transition,
             code,
         })
     }
@@ -305,8 +271,6 @@ impl ToTokens for Model {
         let triggers = &self.triggers;
         let uses = &self.uses;
         let effects = &self.effects;
-        let modes = &self.modes;
-        let transition = &self.transition;
         let code = &self.code;
 
         // Start building the reaction
@@ -386,18 +350,6 @@ impl ToTokens for Model {
             #(.with_effect(#effect_fields))*
         });
 
-        if let Some(modes) = modes.as_ref() {
-            reaction.append_all(quote! {
-                .with_modes([#(#modes),*])
-            });
-        }
-
-        if let Some(transition) = transition.as_ref() {
-            reaction.append_all(quote! {
-                .with_transition(#transition)
-            });
-        }
-
         reaction.append_all(quote! {
             .with_reaction_fn(move |
                 ctx,
@@ -469,13 +421,6 @@ mod tests {
         assert!(matches!(&reaction.triggers[0], TriggerType::Startup));
         assert!(reaction.uses.is_empty());
         assert!(reaction.effects.is_empty());
-    }
-
-    #[test]
-    fn test_parse_modes_and_transition() {
-        let reaction = syn::parse_str::<Model>("(a) @modes(m1, m2) @transition(m3) { }").unwrap();
-        assert_eq!(reaction.modes.as_ref().unwrap().len(), 2);
-        assert!(reaction.transition.is_some());
     }
 
     #[test]

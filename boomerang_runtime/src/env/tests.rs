@@ -40,9 +40,6 @@ pub fn create_dummy_env() -> (Env, ReactionGraph) {
         .reaction_reactors
         .insert(reaction_key, reactor_key);
     reaction_graph.reaction_modes.insert(reaction_key, None);
-    reaction_graph
-        .reaction_transitions
-        .insert(reaction_key, None);
     reaction_graph.reactor_modes.insert(reactor_key, Vec::new());
     reaction_graph
         .reactor_mode_names
@@ -92,7 +89,6 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
         std::iter::empty(),
         reactor_b_scope,
         None,
-        None,
     );
 
     // portB triggers reactionOutput
@@ -110,7 +106,6 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
         std::iter::once(port_b),
         std::iter::once(action_b),
         reactor_b_scope,
-        None,
         None,
     );
 
@@ -148,7 +143,6 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
         std::iter::empty(),
         reactor_a_scope,
         None,
-        None,
     );
 
     // startup action triggers reactionStartup
@@ -175,7 +169,6 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
         std::iter::empty(),
         std::iter::empty(),
         reactor_a_scope,
-        None,
         None,
     );
 

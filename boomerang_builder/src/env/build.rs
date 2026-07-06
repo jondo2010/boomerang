@@ -491,14 +491,6 @@ impl EnvBuilder {
                 runtime::ModeFilter::new(runtime_modes)
             });
 
-            let transition_to =
-                reaction
-                    .transition_to
-                    .map(|mode_key| runtime::ModeTransitionEffect {
-                        target: builder_parts.aliases.mode_aliases[mode_key].1,
-                        transition: runtime::TransitionKind::Reset,
-                    });
-
             let reaction_scope = if let Some(mode_key) = reaction.scope_mode {
                 let (mode_enclave_key, runtime_mode_key) =
                     builder_parts.aliases.mode_aliases[mode_key];
@@ -516,7 +508,6 @@ impl EnvBuilder {
                 actions,
                 reaction_scope,
                 mode_filter,
-                transition_to,
             );
 
             let level_reaction = (reaction_levels[builder_reaction_key], runtime_reaction_key);

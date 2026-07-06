@@ -718,15 +718,6 @@ impl Scheduler {
             for (idx, trigger_res) in iter_ctx_res {
                 let reaction_key = self.reaction_buffer[idx];
                 let reactor_key = self.reaction_graph.reaction_reactors[reaction_key];
-                if let Some(effect) = self.reaction_graph.reaction_transitions[reaction_key] {
-                    self.transition_buffer.push((
-                        reactor_key,
-                        ModeTransitionRequest {
-                            target: ModeTransitionTarget::Key(effect.target),
-                            transition: effect.transition,
-                        },
-                    ));
-                }
                 if let Some(request) = &trigger_res.scheduled_mode {
                     self.transition_buffer.push((reactor_key, request.clone()));
                 }

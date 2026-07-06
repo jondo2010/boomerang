@@ -37,8 +37,6 @@ pub struct ReactionBuilder {
     pub(super) enabled_modes: Option<Vec<BuilderModeKey>>,
     /// Enclosing mode scope, if this reaction was declared inside a mode.
     pub(super) scope_mode: Option<BuilderModeKey>,
-    /// Mode transition target for this reaction
-    pub(super) transition_to: Option<BuilderModeKey>,
     /// Declared typed mode effects for this reaction
     pub(super) mode_effects: Vec<BuilderModeEffect>,
     /// Whether this reaction is triggered by mode reset entry.
@@ -66,7 +64,6 @@ impl ReactionBuilder {
             reaction_fn,
             enabled_modes: None,
             scope_mode: None,
-            transition_to: None,
             mode_effects: Vec::new(),
             reset_trigger: false,
             action_relations: SecondaryMap::new(),
@@ -91,7 +88,6 @@ impl Debug for ReactionBuilder {
             .field("reaction_fn", &"ReactionFn()")
             .field("enabled_modes", &self.enabled_modes)
             .field("scope_mode", &self.scope_mode)
-            .field("transition_to", &self.transition_to)
             .field("mode_effects", &self.mode_effects)
             .field("reset_trigger", &self.reset_trigger)
             .field("action_relations", &self.action_relations)
@@ -312,7 +308,6 @@ pub struct PartialReactionBuilder<'a, S: runtime::ReactorData, Fields = (), Reac
     reaction_fn: ReactionFn,
     enabled_modes: Option<Vec<BuilderModeKey>>,
     scope_mode: Option<BuilderModeKey>,
-    transition_to: Option<BuilderModeKey>,
     mode_effects: Vec<BuilderModeEffect>,
     reset_trigger: bool,
     port_relations: slotmap::SecondaryMap<BuilderPortKey, TriggerMode>,
@@ -336,7 +331,6 @@ impl<'a, S: runtime::ReactorData> PartialReactionBuilder<'a, S, (), ()> {
             reaction_fn: (),
             enabled_modes: None,
             scope_mode: None,
-            transition_to: None,
             mode_effects: Vec::new(),
             reset_trigger: false,
             port_relations: slotmap::SecondaryMap::new(),
@@ -378,24 +372,12 @@ impl<'a, S: runtime::ReactorData, Fields, ReactionFn>
         self
     }
 
-    /// Restrict this reaction to the provided modes.
-    pub fn with_modes(mut self, modes: impl IntoIterator<Item = BuilderModeKey>) -> Self {
-        self.enabled_modes = Some(modes.into_iter().collect());
-        self
-    }
-
     /// Record the static mode scope that owns this reaction.
     pub fn in_mode_scope(mut self, mode: BuilderModeKey) -> Self {
         self.scope_mode = Some(mode);
         if self.enabled_modes.is_none() {
             self.enabled_modes = Some(vec![mode]);
         }
-        self
-    }
-
-    /// Transition this reactor to the provided mode after the reaction runs.
-    pub fn with_transition(mut self, mode: BuilderModeKey) -> Self {
-        self.transition_to = Some(mode);
         self
     }
 }
@@ -439,7 +421,6 @@ macro_rules! impl_with_field {
                     name,
                     enabled_modes,
                     scope_mode,
-                    transition_to,
                     mode_effects,
                     reset_trigger,
                     port_relations,
@@ -456,7 +437,6 @@ macro_rules! impl_with_field {
                     reaction_fn: (),
                     enabled_modes,
                     scope_mode,
-                    transition_to,
                     mode_effects,
                     reset_trigger,
                     port_relations,
@@ -482,7 +462,6 @@ macro_rules! impl_with_field {
                     name,
                     enabled_modes,
                     scope_mode,
-                    transition_to,
                     mode_effects,
                     reset_trigger,
                     port_relations,
@@ -499,7 +478,6 @@ macro_rules! impl_with_field {
                     reaction_fn: (),
                     enabled_modes,
                     scope_mode,
-                    transition_to,
                     mode_effects,
                     reset_trigger,
                     port_relations,
@@ -524,7 +502,6 @@ macro_rules! impl_with_field {
                     name,
                     enabled_modes,
                     scope_mode,
-                    transition_to,
                     mode_effects,
                     reset_trigger,
                     port_relations,
@@ -541,7 +518,6 @@ macro_rules! impl_with_field {
                     reaction_fn: (),
                     enabled_modes,
                     scope_mode,
-                    transition_to,
                     mode_effects,
                     reset_trigger,
                     port_relations,
@@ -601,7 +577,6 @@ where
             name,
             enabled_modes,
             scope_mode,
-            transition_to,
             mode_effects,
             reset_trigger,
             port_relations,
@@ -626,7 +601,6 @@ where
             reaction_fn,
             enabled_modes,
             scope_mode,
-            transition_to,
             mode_effects,
             reset_trigger,
             port_relations,
@@ -657,7 +631,6 @@ where
             name,
             enabled_modes,
             scope_mode,
-            transition_to,
             mode_effects,
             reset_trigger,
             port_relations,
@@ -674,7 +647,6 @@ where
             reaction_fn: Box::new(f),
             enabled_modes,
             scope_mode,
-            transition_to,
             mode_effects,
             reset_trigger,
             port_relations,
@@ -700,7 +672,6 @@ where
             name,
             enabled_modes,
             scope_mode,
-            transition_to,
             mode_effects,
             reset_trigger,
             port_relations,
@@ -759,20 +730,6 @@ where
             }
         }
 
-        if let Some(mode_key) = transition_to.as_ref() {
-            let mode = env.mode_builders.get(*mode_key).ok_or_else(|| {
-                BuilderError::ReactionBuilderError(format!(
-                    "Unknown mode key {mode_key:?} for reaction '{name:?}'"
-                ))
-            })?;
-            if mode.reactor_key != reactor_key {
-                return Err(BuilderError::ReactionBuilderError(format!(
-                    "Transition mode '{}' does not belong to reaction '{name:?}'",
-                    mode.name
-                )));
-            }
-        }
-
         for effect in &mode_effects {
             let mode = env.mode_builders.get(effect.target()).ok_or_else(|| {
                 BuilderError::ReactionBuilderError(format!(
@@ -797,7 +754,6 @@ where
             reaction_fn,
             enabled_modes,
             scope_mode,
-            transition_to,
             mode_effects,
             reset_trigger,
             action_relations,

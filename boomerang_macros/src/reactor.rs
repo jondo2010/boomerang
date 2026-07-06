@@ -394,6 +394,7 @@ impl ReactorBody {
 
                 Some(quote! {
                     let #key_ident = builder.add_mode(#name, #kind)?;
+                    #[allow(unused_variables)]
                     let #effect_ident = builder.reset_mode_effect(#key_ident)?;
                 })
             })

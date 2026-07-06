@@ -19,7 +19,7 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 - [x] (2026-07-06 21:09Z) Implemented the valid Rust structural syntax `mode! { initial idle { ... } }` and `mode! { active { ... } }`, including macro parser tests and an end-to-end modal integration test.
 - [x] (2026-07-06 21:24Z) Added first static scope metadata: runtime root/mode `ScopeKey`s, action/port/reaction scope maps, builder scope ownership for mode-local actions and reactions, port rejection inside modes, and reset-trigger validation.
 - [x] (2026-07-06 21:39Z) Extended static scope ownership to child reactor instances and delayed/physical connection helper reactors before scheduler local-time work.
-- [ ] Replace the temporary compatibility syntax with macro-generated mode handles for typed transition effects in structural mode declarations.
+- [x] (2026-07-06 21:49Z) Replaced the temporary compatibility syntax with macro-generated mode handles for typed transition effects in structural mode declarations.
 - [ ] Implement mode-local event queues and local-time scheduling.
 - [ ] Implement reset/history transition application, including recursive reset of contained modal reactors.
 - [ ] Implement modal startup, shutdown, and reset-trigger behavior.
@@ -54,6 +54,12 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 
 - Observation: Child reactors and synthetic connection reactors need scope ownership before local-time scheduling is introduced, because delayed and cross-enclave connections are represented as helper reactors in the builder graph.
   Evidence: `cargo test -p boomerang_builder test_child_and_connection_helper_reactors_inherit_mode_scope` passes after `ReactorBuilderState::add_child_with` and `ConnectionBuilder` propagate the current mode to child/helper reactors. The test verifies that source, target, and delayed connection helper reactor root scopes all have the enclosing mode scope as their parent.
+
+- Observation: The structural macro must tolerate mode handles that are generated for forward references but are not used by the user code in that mode's body.
+  Evidence: Converting `boomerang/tests/modal_mixed_reactions.rs` to `mode!` blocks initially produced an unused `mode_a` warning because that mode was only a scope, not a transition effect. Emitting `#[allow(unused_variables)]` on generated mode-effect handles removes the warning while preserving forward references.
+
+- Observation: Once modal integration tests use explicit typed effects, the old unconditional transition graph slot is unnecessary.
+  Evidence: `cargo test -p boomerang_macros`, `cargo test -p boomerang_builder`, `cargo test -p boomerang_runtime env::tests`, `cargo test -p boomerang modal`, and `cargo test -p boomerang mixed_reactions` pass after removing `@modes(...)`, `@transition(...)`, `Context::set_mode_name`, `PartialReactionBuilder::with_modes`, `PartialReactionBuilder::with_transition`, and runtime `reaction_transitions`.
 
 ## Decision Log
 
@@ -95,6 +101,10 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 
 - Decision: Preserve the spike's `@modes(...)`, `@transition(...)`, and `Context::set_mode_name(...)` APIs temporarily while introducing typed transition effects.
   Rationale: This keeps the existing modal spike tests green while the implementation is migrated toward the planned API. These compatibility paths should be deleted before final acceptance once structural mode blocks and runtime transition semantics are complete.
+  Date/Author: 2026-07-06 / Codex.
+
+- Decision: Remove the spike compatibility syntax and unconditional transition builder/runtime path now that structural `mode!` tests use typed effects.
+  Rationale: Keeping two modal front-end APIs would obscure the developer API and create a second transition semantic where a reaction always transitions merely because it declared a target. The intended API requires user code to call `.set(ctx)`, which makes conditional transitions explicit and matches reset/history effect declarations.
   Date/Author: 2026-07-06 / Codex.
 
 ## Outcomes & Retrospective
@@ -549,3 +559,5 @@ Change log: 2026-07-06 / Codex: corrected the proposed structural syntax to vali
 Change log: 2026-07-06 / Codex: added the first static scope metadata layer for reactors, modes, actions, ports, and reactions, plus validation for mode-local ports and reset triggers outside mode scopes.
 
 Change log: 2026-07-06 / Codex: extended mode scope ownership to child reactor instances and synthetic delayed/physical connection helper reactors, and recorded focused verification for that slice.
+
+Change log: 2026-07-06 / Codex: removed spike modal syntax and unconditional static transitions, converted modal integration tests to structural `mode!` blocks with typed `.set(ctx)` effects, and documented the verification.

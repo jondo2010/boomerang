@@ -252,14 +252,6 @@ impl Context {
             .push((action.key(), new_tag));
     }
 
-    /// Schedule a mode transition by name to be applied after the current tag.
-    pub fn set_mode_name(&mut self, mode: &'static str) {
-        self.set_mode_transition(ModeTransitionRequest {
-            target: ModeTransitionTarget::Name(mode.to_owned()),
-            transition: TransitionKind::Reset,
-        });
-    }
-
     pub(crate) fn set_mode_transition(&mut self, request: ModeTransitionRequest) {
         self.trigger_res.scheduled_mode = Some(request);
     }

@@ -74,13 +74,6 @@ pub enum TransitionKind {
     History,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct ModeTransitionEffect {
-    pub target: ModeKey,
-    pub transition: TransitionKind,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ModeFilter {
@@ -188,8 +181,6 @@ pub struct ReactionGraph {
     pub reactor_initial_modes: tinymap::TinySecondaryMap<ReactorKey, Option<ModeKey>>,
     /// Mode filter per reaction (None means always enabled)
     pub reaction_modes: tinymap::TinySecondaryMap<ReactionKey, Option<ModeFilter>>,
-    /// Static transition effect per reaction.
-    pub reaction_transitions: tinymap::TinySecondaryMap<ReactionKey, Option<ModeTransitionEffect>>,
 }
 
 impl ReactionGraph {
@@ -360,7 +351,6 @@ impl Enclave {
         actions: impl IntoIterator<Item = ActionKey>,
         scope: ScopeKey,
         mode_filter: Option<ModeFilter>,
-        transition_to: Option<ModeTransitionEffect>,
     ) -> ReactionKey {
         let reaction_key = self.env.reactions.insert(reaction);
         self.graph
@@ -377,9 +367,6 @@ impl Enclave {
             .insert(reaction_key, reactor_key);
         self.graph.reaction_scopes.insert(reaction_key, scope);
         self.graph.reaction_modes.insert(reaction_key, mode_filter);
-        self.graph
-            .reaction_transitions
-            .insert(reaction_key, transition_to);
         reaction_key
     }
 
@@ -476,10 +463,6 @@ impl Enclave {
         );
         itertools::assert_equal(self.env.reactions.keys(), self.graph.reaction_scopes.keys());
         itertools::assert_equal(self.env.reactions.keys(), self.graph.reaction_modes.keys());
-        itertools::assert_equal(
-            self.env.reactions.keys(),
-            self.graph.reaction_transitions.keys(),
-        );
         itertools::assert_equal(
             self.env.reactors.keys(),
             self.graph.reactor_bank_infos.keys(),

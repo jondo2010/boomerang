@@ -95,7 +95,6 @@ impl std::fmt::Debug for ReactionGraph {
             .field("reactor_mode_names", &self.reactor_mode_names)
             .field("reactor_initial_modes", &self.reactor_initial_modes)
             .field("reaction_modes", &self.reaction_modes)
-            .field("reaction_transitions", &self.reaction_transitions)
             .finish()
     }
 }

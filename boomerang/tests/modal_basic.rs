@@ -2,8 +2,6 @@ use boomerang::prelude::*;
 
 #[reactor]
 fn ModalBasic(#[state] a_count: u32, #[state] b_count: u32) -> impl Reactor {
-    let mode_a = builder.add_mode("mode_a", true)?;
-    let mode_b = builder.add_mode("mode_b", false)?;
     let pulse = builder.add_logical_action::<()>("pulse", None)?;
 
     reaction! {
@@ -13,20 +11,26 @@ fn ModalBasic(#[state] a_count: u32, #[state] b_count: u32) -> impl Reactor {
         }
     }
 
-    reaction! {
-        (pulse) @modes(mode_a) @transition(mode_b) {
-            state.a_count += 1;
-        }
-    }
-
-    reaction! {
-        (pulse) @modes(mode_b) @transition(mode_a) {
-            state.b_count += 1;
-            if state.b_count == 1 {
-                ctx.schedule_shutdown(None);
+    mode! { initial mode_a {
+        reaction! {
+            (pulse) -> mode_b {
+                state.a_count += 1;
+                mode_b.set(ctx);
             }
         }
-    }
+    } }
+
+    mode! { mode_b {
+        reaction! {
+            (pulse) -> mode_a {
+                state.b_count += 1;
+                mode_a.set(ctx);
+                if state.b_count == 1 {
+                    ctx.schedule_shutdown(None);
+                }
+            }
+        }
+    } }
 
     reaction! {
         (shutdown) {

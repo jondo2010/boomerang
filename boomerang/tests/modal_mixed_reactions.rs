@@ -18,16 +18,14 @@ fn MixedReactions(#[state] x: i32, #[state] first: bool) -> impl Reactor {
         }
     }
 
-    let mode_a = builder.add_mode("A", ModeKind::Initial)?;
-    let mode_b_key = builder.add_mode("B", ModeKind::Normal)?;
-    let mode_b = builder.reset_mode_effect(mode_b_key)?;
-
-    reaction! {
-        (t) -> mode_b @modes(mode_a) {
-            state.x = state.x * 10 + 3;
-            mode_b.set(ctx);
+    mode! { initial mode_a {
+        reaction! {
+            (t) -> mode_b {
+                state.x = state.x * 10 + 3;
+                mode_b.set(ctx);
+            }
         }
-    }
+    } }
 
     reaction! {
         (t) {
@@ -35,11 +33,13 @@ fn MixedReactions(#[state] x: i32, #[state] first: bool) -> impl Reactor {
         }
     }
 
-    reaction! {
-        (t) @modes(mode_b_key) {
-            state.x = state.x * 10 + 5;
+    mode! { mode_b {
+        reaction! {
+            (t) {
+                state.x = state.x * 10 + 5;
+            }
         }
-    }
+    } }
 
     reaction! {
         (t) {

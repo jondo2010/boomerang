@@ -1,4 +1,4 @@
-# Minimal Modal Reactors Layer
+# Full Modal Reactors
 
 This ExecPlan is a living document. The sections `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work proceeds.
 
@@ -6,238 +6,449 @@ Reference: `.agent/PLANS.md` in the repository root. This ExecPlan must be maint
 
 ## Purpose / Big Picture
 
-Add a minimal modal layer so a reactor can have an explicit mode state, define transitions between modes, and enable or disable reactions based on the current mode. After this change, a user can define named modes on a reactor, mark which reactions are active in which modes, and optionally move the reactor to a new mode when a reaction completes. The visible behavior is that reactions are skipped when their mode is inactive and mode transitions change which reactions can run next. This will be demonstrated by a new test that toggles between two modes and proves only the expected reactions execute.
+Implement full modal reactor semantics in Boomerang, comparable in intent to Lingua Franca modal reactors. After this work, a Boomerang reactor can declare mutually exclusive modes whose contained reactions, timers, logical actions, child reactors, and delayed connections execute only while their enclosing mode is active. A reaction can transition to another mode, using reset behavior by default or history behavior when requested. Reset discards pending local events and reinitializes modal timing behavior; history suspends and later resumes local time as if no time passed while the mode was inactive.
+
+The user-visible result is a reactor that can model behavior such as "idle" and "active" phases without manually guarding every reaction and without timers in inactive modes continuing to consume logical time. This will be demonstrated by integration tests ported from LF modal model examples, especially cases where a pending action in a history mode resumes later while a pending action in a reset mode is discarded.
 
 ## Progress
 
-- [x] (2026-01-26 21:43Z) Drafted ExecPlan for minimal modal reactors layer.
-- [x] (2026-01-26 22:07Z) Added runtime and builder data structures for mode definitions, reaction mode filters, and reaction transitions.
-- [x] (2026-01-26 22:07Z) Implemented modal filtering and deferred transitions in the scheduler with reusable buffers to avoid hot-loop allocations.
-- [x] (2026-01-26 22:07Z) Added builder and macro API for modes and transitions.
-- [x] (2026-01-26 22:07Z) Added integration test for modal enable/disable and transitions.
-- [x] (2026-01-26 22:07Z) Ran `cargo test -p boomerang modal_basic`.
-- [x] (2026-01-26 22:17Z) Added LF MixedReactions port and ran `cargo test -p boomerang mixed_reactions`.
-- [x] (2026-01-26 22:24Z) Added dynamic mode switching via `Context::set_mode_name` and updated MixedReactions to use it.
+- [x] (2026-07-06 18:26Z) Replaced the prior minimal reaction-gating ExecPlan with this full-semantics modal reactors plan.
+- [ ] Agree on the front-end syntax and macro integration details before implementation.
+- [ ] Implement static mode scopes in the builder and runtime graph.
+- [ ] Implement typed transition effects in reaction declarations.
+- [ ] Implement mode-local event queues and local-time scheduling.
+- [ ] Implement reset/history transition application, including recursive reset of contained modal reactors.
+- [ ] Implement modal startup, shutdown, and reset-trigger behavior.
+- [ ] Add LF-style integration tests and performance benchmarks.
 
 ## Surprises & Discoveries
 
-- Observation: Mode transitions must apply after the full tag to match LF MixedReactions semantics; applying after each level allowed a mode-B reaction to run in the same tag.
-  Evidence: `MixedReactions` produced `12345` on first tick until transitions were deferred until after `process_tag` completed.
-- Observation: Dynamic mode switching requires a runtime-resolvable identifier; mode names are stored in the graph and resolved after each tag.
-  Evidence: `Context::set_mode_name("B")` schedules a transition resolved by `ReactionGraph::mode_for_reactor_name`.
+- Observation: The prior WIP proves that per-reaction gating and deferred transition application can pass simple mixed-reaction tests, but that design is not enough for full modal reactors.
+  Evidence: The WIP only stores reaction mode filters and current mode state; it has no ownership of timers, logical actions, delayed connections, child reactors, queued local events, reset/history transition kinds, or startup/shutdown special cases.
+
+- Observation: To make mode declarations ergonomic inside `#[reactor]`, the reactor macro must parse mode blocks itself rather than relying on an ordinary Rust macro statement alone.
+  Evidence: Forward references such as a reaction inside `idle` transitioning to `active` require the macro to discover all mode names before emitting builder code for any mode body.
 
 ## Decision Log
 
-- Decision: Implement transitions as static per-reaction targets (no dynamic guards in the reaction body).
-  Rationale: Minimal viable modal layer with clear semantics and low API surface; guards can be modeled by splitting reactions.
-  Date/Author: 2026-01-26 / Codex.
-- Decision: Apply mode gating at execution time (per reaction invocation) rather than when scheduling triggers.
-  Rationale: Keeps scheduling simple while still enforcing modal activation rules.
-  Date/Author: 2026-01-26 / Codex.
-- Decision: When multiple reactions in the same level transition a reactor in one tag, the last executed reaction wins.
-  Rationale: Deterministic given current reaction iteration order and minimal extra bookkeeping.
-  Date/Author: 2026-01-26 / Codex.
-- Decision: Avoid any new allocations in scheduler hot loops by precomputing mode filters and reusing buffers.
-  Rationale: Protect benchmark performance; keep filtering constant-time with no per-tag heap growth.
-  Date/Author: 2026-01-26 / Codex.
-- Decision: Defer applying mode transitions until after the entire tag completes.
-  Rationale: Match LF modal semantics where a mode change takes effect on the next tag; avoid mutable aliasing of the Store while reaction triggers hold borrows.
-  Date/Author: 2026-01-26 / Codex.
-- Decision: Provide dynamic mode switching by name via `Context::set_mode_name(&'static str)` and resolve names after each tag.
-  Rationale: Allows reaction bodies to choose modes without exposing runtime keys; avoids hot-loop allocations.
-  Date/Author: 2026-01-26 / Codex.
+- Decision: Implement full LF-style modal semantics, not the minimal reaction-filter feature.
+  Rationale: The feature is only useful as "modal reactors" if it controls modal components and local time, not just whether a reaction body is skipped.
+  Date/Author: 2026-07-06 / Codex, confirmed by user.
+
+- Decision: Parse mode syntax directly as part of the `#[reactor]` macro input.
+  Rationale: This gives users structural mode blocks, supports forward references to modes, and lets the macro generate typed mode handles before expanding mode bodies.
+  Date/Author: 2026-07-06 / Codex.
+
+- Decision: Reset is the default transition kind; `history(mode_name)` explicitly requests history behavior.
+  Rationale: This matches the LF convention and keeps common transitions concise.
+  Date/Author: 2026-07-06 / Codex, confirmed by user.
+
+- Decision: Do not introduce automatic Rust state field reset in the first full implementation. Use explicit reset reactions over existing Rust state.
+  Rationale: Boomerang state is arbitrary Rust data created from `#[state]` function parameters. Automatically resetting selected fields would require a second state-definition DSL or trait bounds that do not fit existing ergonomics. LF already treats explicit reset reactions as the correct escape hatch for state reinitialization.
+  Date/Author: 2026-07-06 / Codex.
+
+- Decision: Use typed mode transition effects instead of `Context::set_mode_name(&'static str)`.
+  Rationale: String lookup is slow, typo-prone, and bypasses builder validation. A transition effect declared in a reaction signature lets the builder validate ownership and transition kind once.
+  Date/Author: 2026-07-06 / Codex.
+
+- Decision: Represent local time with per-scope local event queues plus an active-scope frontier, not by scanning all queued events on every transition.
+  Rationale: Performance depends on inactive modes being cheap. Suspending a mode should not require updating every event in the system, and finding the next event should consider only active scopes.
+  Date/Author: 2026-07-06 / Codex.
 
 ## Outcomes & Retrospective
 
-Not started yet.
+Not started. The expected outcome is a complete modal runtime with tests that prove reset/history local-time behavior and benchmark data showing that non-modal models retain current performance characteristics.
 
 ## Context and Orientation
 
-Boomerang is a Rust workspace. Runtime scheduling and reaction execution live in `boomerang_runtime`, while the DSL and builder logic live in `boomerang_builder` and `boomerang_macros`. Reactions are scheduled in `boomerang_runtime/src/sched.rs` and executed through the `Store` in `boomerang_runtime/src/store.rs`. Builder-side reaction definitions are created in `boomerang_builder/src/reaction.rs` and lowered into runtime structures in `boomerang_builder/src/env/build.rs`. Macro syntax for reactions lives in `boomerang_macros/src/reaction.rs`.
+Boomerang is a Rust workspace. User-facing macros live in `boomerang_macros`, builder-side model construction lives in `boomerang_builder`, runtime scheduling lives in `boomerang_runtime`, and integration tests live in `boomerang/tests`.
 
-Definitions used here:
-- Mode: A named state attached to a reactor. Each reactor has zero or more modes; if none are defined, all reactions are always enabled.
-- Mode filter: A list of modes in which a reaction is allowed to run.
-- Mode transition: A rule that, when a reaction completes, sets the reactor’s current mode to a target mode.
-- Hot loop: The scheduler path that runs per-tag and per-reaction in `boomerang_runtime/src/sched.rs`, where new allocations must be avoided.
+The existing reactor syntax is a Rust function annotated with `#[reactor]`. The macro provides a `builder` variable in the function body, and helper macros such as `timer!` and `reaction!` expand into builder calls. The current WIP on the branch before this plan added a minimal mode key, reaction filters, and transition after a tag. That code should be treated as a spike: useful evidence, but not the target architecture.
 
-Key files to modify:
-- `boomerang_runtime/src/env/mod.rs` (ReactionGraph fields, ModeKey definition, insert APIs).
-- `boomerang_runtime/src/store.rs` (current mode tracking).
-- `boomerang_runtime/src/sched.rs` (mode gating + transitions during execution).
-- `boomerang_builder/src/reactor.rs` (mode definition API).
-- `boomerang_builder/src/reaction.rs` (mode filters + transition on reaction builders).
-- `boomerang_builder/src/env/mod.rs` and `boomerang_builder/src/env/build.rs` (mode builders and runtime mapping).
-- `boomerang_macros/src/reaction.rs` (optional modal syntax).
-- `boomerang/src/lib.rs` (prelude re-exports if needed).
-- `boomerang/tests/modal_basic.rs` (new test).
+Important current files:
 
-## Plan of Work
+- `boomerang_macros/src/reactor.rs` parses the `#[reactor]` function and emits builder code.
+- `boomerang_macros/src/reaction.rs` parses `reaction!` syntax and emits `builder.add_reaction(...).with_trigger(...).with_effect(...).finish()?`.
+- `boomerang_builder/src/env/mod.rs` owns the builder graph: reactors, ports, actions, reactions, connections, and validation.
+- `boomerang_builder/src/env/build.rs` lowers builder graph data into runtime `Enclave`s, `Env`, and `ReactionGraph`.
+- `boomerang_runtime/src/env/mod.rs` defines runtime graph keys and static dependency maps.
+- `boomerang_runtime/src/sched.rs` owns the event queue and reaction scheduling loop.
+- `boomerang_runtime/src/store.rs` owns runtime reactor state, action stores, port stores, reaction objects, and cached reaction borrow contexts.
 
-First, add a minimal representation of modes to runtime: a `ModeKey` type, per-reactor initial mode, and per-reaction mode filters/transition targets in `ReactionGraph`. Then, add mode state tracking in `Store`, initialized from the graph. Next, update the scheduler so each reaction is skipped if its mode filter does not include the reactor’s current mode, and apply mode transitions after reaction completion. The scheduler changes must avoid new allocations: filtering should reuse preallocated buffers or stack-based iteration, and any per-reaction data needed for filtering should be precomputed and stored in `ReactionGraph` or `Store`.
+Terms used in this plan:
 
-On the builder side, introduce mode builders keyed by reactor, and methods to define modes and mark an initial mode. Extend reaction builders to accept an optional mode filter and transition target, and lower these into runtime graph fields during build. Update the `reaction!` macro to accept optional modal modifiers, so users can declare modes and transitions without dropping to manual builder chaining.
+A mode is a named mutually exclusive state of one reactor. Exactly one sibling mode in a modal group is active at a logical instant.
 
-Finally, add a focused integration test that demonstrates a reactor toggling between two modes, with reactions only firing in their allowed modes, and verify that the transition rule affects downstream behavior.
+A mode scope is the static region of the model contained by a mode. Reactions, timers, logical actions, child reactors, and delayed connections can belong to a mode scope. Root scope means the component is outside any mode and always active.
 
-## Concrete Steps
+Local time is logical time measured only while a mode scope is active. If a mode is inactive for one second of global logical time, timers and scheduled logical actions in that mode do not age by one second.
 
-1. Inspect current build pipeline to place mode definitions.
-    - Command (from repo root):
-        rg -n "insert_reaction|ReactionGraph" boomerang_runtime/src boomerang_builder/src
-    - Expected: references in `boomerang_runtime/src/env/mod.rs` and `boomerang_builder/src/env/build.rs`.
+A reset transition enters a mode as if its local timing history were new. It discards pending local events in the target scope and recursively resets contained modal reactors to their initial modes. Reset is the default transition kind.
 
-2. Add runtime mode structures and APIs.
-    - Edit `boomerang_runtime/src/env/mod.rs`:
-        - Define `ModeKey` via `tinymap::key_type!`.
-        - Add fields to `ReactionGraph`:
-            - `reaction_modes: TinySecondaryMap<ReactionKey, Option<ModeFilter>>`
-            - `reaction_transitions: TinySecondaryMap<ReactionKey, Option<ModeKey>>`
-            - `reactor_initial_modes: TinySecondaryMap<ReactorKey, Option<ModeKey>>`
-            - `reactor_modes: TinySecondaryMap<ReactorKey, Vec<ModeKey>>` (for debug/introspection).
-        - Define `ModeFilter` as a compact, allocation-free structure suitable for hot loops (for example, a bitset over ModeKey indices or a small fixed array with a length and inline storage).
-        - Add `Enclave::insert_mode(reactor_key: ReactorKey, name: &str, initial: bool) -> ModeKey`.
-        - Extend `Enclave::insert_reaction` signature to accept mode filter + transition target and store in graph.
-        - Update `Env::validate` to assert new maps are populated for each reaction/reactor.
-    - Edit `boomerang_runtime/src/env/debug.rs` to include new fields in debug output.
+A history transition enters a mode preserving its local timing history. Queued local timers and actions resume with the same remaining delay they had when the mode was deactivated.
 
-3. Add store tracking of current modes.
-    - Edit `boomerang_runtime/src/store.rs`:
-        - Add `reactor_modes: TinySecondaryMap<ReactorKey, Option<ModeKey>>` to `Store`.
-        - Initialize in `Store::new` from `ReactionGraph::reactor_initial_modes`.
-        - Add helpers:
-            - `fn current_mode(&self, reactor_key: ReactorKey) -> Option<ModeKey>`
-            - `fn set_mode(&mut self, reactor_key: ReactorKey, mode: ModeKey)`
-        - Ensure `Store::into_env` remains unchanged (modes are runtime state only).
+A transition effect is a typed value passed to a reaction because the reaction declared that it may set a mode. It is not a port or action value. Calling `active.set(ctx)` records a transition request in the current reaction context.
 
-4. Apply mode gating and transitions in scheduler without allocations.
-    - Edit `boomerang_runtime/src/sched.rs`:
-        - Replace any per-level collection that allocates (e.g., building a new Vec each iteration). Instead, reuse a preallocated Vec stored on the scheduler struct, or iterate twice over the key set when necessary.
-        - For each reaction key at a level, check `reaction_graph.reaction_modes` and the reactor’s current mode in `Store`.
-        - Skip reactions not enabled; only execute reactions whose mode filter matches.
-        - After each reaction trigger, if `reaction_graph.reaction_transitions[reaction_key]` is `Some(mode)`, call `store.set_mode(reactor_key, mode)`.
-        - Update stats to reflect only executed reactions.
-        - Ensure no allocations are introduced in the per-tag execution path; if a temporary buffer is needed, allocate it once on `Scheduler` and clear it between levels.
+## Proposed Front-End Syntax
 
-5. Add builder support for modes.
-    - Edit `boomerang_builder/src/reactor.rs`:
-        - Add a `BuilderModeKey` slotmap key type.
-        - Add mode bookkeeping to `ReactorBuilder` (mode keys + order + initial).
-        - Add `ReactorBuilderState::add_mode(name: &str, initial: bool) -> Result<BuilderModeKey, BuilderError>`.
-    - Edit `boomerang_builder/src/env/mod.rs`:
-        - Add `mode_builders: SlotMap<BuilderModeKey, ModeBuilder>` with `ModeBuilder { name, reactor_key, initial }`.
-        - Enforce duplicate-name checks per reactor and single initial mode.
-    - Edit `boomerang_builder/src/env/build.rs`:
-        - Add mode alias map to `BuilderAliases`.
-        - Add a `build_runtime_modes` phase that inserts modes into runtime enclaves before reactions.
-        - Map builder mode keys to runtime mode keys for use in reaction lowering.
+The preferred user syntax integrates modes directly into `#[reactor]`. The macro parses `initial mode` and `mode` blocks as part of the reactor function body, discovers all mode names first, emits mode handles, and then emits scoped builder code for each mode body. This permits forward references between sibling modes.
 
-6. Extend reaction builder to carry modal metadata.
-    - Edit `boomerang_builder/src/reaction.rs`:
-        - Add `enabled_modes: Option<Vec<BuilderModeKey>>` and `transition_to: Option<BuilderModeKey>` to `ReactionBuilder`.
-        - Add builder methods on `PartialReactionBuilder`:
-            - `with_modes(modes: impl IntoIterator<Item = BuilderModeKey>)`
-            - `with_transition(mode: BuilderModeKey)`
-        - Ensure `finish()` validates that referenced modes belong to the same reactor.
+Example:
 
-7. Update reaction macro syntax for modal annotations.
-    - Edit `boomerang_macros/src/reaction.rs`:
-        - Extend grammar to accept optional modifiers before the code block:
-            - `@modes(mode_a, mode_b)`
-            - `@transition(mode_b)`
-        - Emit `.with_modes([...])` and `.with_transition(...)` when modifiers are present.
-        - Keep existing syntax valid without changes.
+    #[reactor]
+    fn Controller(
+        #[state] model: ControllerState,
+        #[input] cmd: Command,
+        #[output] status: Status,
+    ) -> impl Reactor {
+        timer! { heartbeat(0 sec, 1 sec) }
 
-8. Re-export new builder types if needed.
-    - Edit `boomerang/src/lib.rs` prelude to re-export `BuilderModeKey` if user code needs explicit typing.
+        reaction! {
+            (heartbeat) {
+                state.model.global_ticks += 1;
+            }
+        }
 
-9. Add integration test demonstrating modal behavior.
-    - Create `boomerang/tests/modal_basic.rs`:
-        - Define a reactor with two modes (`mode_a` initial, `mode_b`).
-        - Add a logical action `pulse`.
-        - Add two reactions triggered by `pulse`, each enabled in a different mode.
-        - Reaction A transitions to mode B; Reaction B transitions to mode A.
-        - Use a startup reaction to schedule two `pulse` actions at different logical times.
-        - Assert that each reaction runs exactly once and in the correct order.
+        initial mode idle {
+            timer! { poll(0 sec, 100 msec) }
 
-## Validation and Acceptance
+            reaction! {
+                (startup) {
+                    state.model.idle_started = true;
+                }
+            }
 
-Behavioral acceptance:
-- When a reactor is in `mode_a`, only reactions declared in `mode_a` execute.
-- After a reaction transitions the reactor to `mode_b`, subsequent triggered reactions in the same tag and future tags only run if they are enabled for `mode_b`.
-- Benchmarks should show no regression attributable to per-tag allocations (qualitative check: no new allocations in scheduler hot loop).
+            reaction! {
+                (reset) {
+                    state.model.reset_idle();
+                }
+            }
 
-Validation commands (from repo root):
-    cargo test -p boomerang modal_basic
-Expected outcome:
-    - The new test `modal_basic` passes.
-    - No existing tests regress (optionally run `cargo test` for full confidence).
+            reaction! {
+                (cmd) -> active, status {
+                    if cmd.as_ref() == Some(&Command::Start) {
+                        active.set(ctx);
+                    }
+                    *status = Some(Status::Idle);
+                }
+            }
+        }
 
-## Idempotence and Recovery
+        mode active {
+            timer! { tick(0 sec, 10 msec) }
+            let work = builder.add_logical_action::<Work>("work", Some(Duration::milliseconds(500)))?;
 
-All changes are additive. Re-running build/test steps is safe. If a change causes a compile error, revert the last edited file or comment out the new mode-specific calls in the test to isolate the issue. No destructive operations are required.
+            reaction! {
+                (tick) -> work {
+                    ctx.schedule_action(&mut work, Work::new(), None);
+                }
+            }
 
-## Artifacts and Notes
-
-Expected test transcript snippet (illustrative):
-    running 1 test
-    test modal_basic ... ok
-    test result: ok. 1 passed; 0 failed
-
-Actual test commands:
-    cargo test -p boomerang modal_basic
-    cargo test -p boomerang mixed_reactions
-
-Example modal usage pattern (non-normative):
-    let mode_a = builder.add_mode("mode_a", true)?;
-    let mode_b = builder.add_mode("mode_b", false)?;
-    reaction! {
-        (pulse) @modes(mode_a) @transition(mode_b) {
-            state.a_count += 1;
+            reaction! {
+                (cmd) -> history(idle), status {
+                    if cmd.as_ref() == Some(&Command::Pause) {
+                        idle.set(ctx);
+                    }
+                    *status = Some(Status::Active);
+                }
+            }
         }
     }
 
+In the example, `heartbeat` and its reaction are outside modes and always active. `poll`, `tick`, `work`, and the mode-local reactions are scoped to their enclosing mode. `-> active` declares a reset transition effect because reset is the default. `-> history(idle)` declares a history transition effect. The closure argument named `active` or `idle` is a typed transition handle, not a string. Calling `.set(ctx)` schedules the mode change; merely declaring the effect does not transition.
+
+Mode syntax is intentionally restricted:
+
+Ports remain reactor-level declarations. A mode may use reactor-level ports in reactions and connections, but may not declare new input or output ports because ports are the stable interface of a reactor.
+
+Nested `mode` blocks are not allowed directly inside another mode. Hierarchical modal behavior is expressed by instantiating a child reactor that itself has modes inside a parent mode. This matches LF's practical composition model and keeps the builder graph simple.
+
+An unqualified mode effect such as `-> active` means reset. The explicit spelling `-> reset(active)` is accepted as an alias. The spelling `-> history(active)` requests history.
+
+The `reaction!` macro gains a `reset` trigger keyword. A reset-triggered reaction is valid only inside a mode scope and runs when that mode is entered by reset behavior. A reset reaction is not a transition effect; it is a reaction trigger.
+
+The lower-level builder syntax remains available for generated code and tests:
+
+    let idle = builder.add_mode("idle", ModeKind::Initial)?;
+    let active = builder.add_mode("active", ModeKind::Normal)?;
+    builder.in_mode(idle, |builder| {
+        builder.add_reaction(Some("enter_idle"))
+            .with_reset_trigger()
+            .with_reaction_fn(|ctx, state, ()| {
+                state.model.reset_idle();
+            })
+            .finish()?;
+        Ok(())
+    })?;
+
+This lower-level API is not the primary documentation surface, but it provides a stable target for macro expansion.
+
+## Runtime Semantics
+
+At startup, each modal reactor activates its initial mode. Components outside modes are active immediately. Startup reactions outside modes run at program startup as they do today. Startup reactions inside a mode run at most once, when that mode scope is first activated. Shutdown reactions inside modes run when the reactor shuts down if their enclosing mode scope has been activated at least once, even if the mode is inactive at shutdown.
+
+When a reaction sets a mode transition at tag `(t, m)`, the current mode remains active for the rest of that tag. The target mode can first produce reactions at a future tag. If a reset activation produces an immediate reset reaction or a zero-offset timer, schedule it at `(t, m + 1)`. If no immediate local event exists, the target mode waits for its next local event or external trigger.
+
+Multiple reactions may request transitions in the same tag. The scheduler uses existing deterministic reaction order; the last executed transition request for a modal reactor wins. If a reaction declares two transition effects and sets both, the last `.set(ctx)` call inside that reaction wins for that reactor.
+
+For reset transitions, the runtime discards pending local events owned by the target scope and all recursively contained scopes, resets contained modal reactors to their initial modes, clears activation history for contained startup where appropriate, schedules reset-triggered reactions, and schedules initial timer offsets for the entered scope. Rust state is reset only by user-written reset reactions.
+
+For history transitions, the runtime preserves queued local events. While the scope was inactive, its local clock did not advance, so each queued local event keeps the same remaining local delay. On reactivation, the runtime maps the next local event to global time based on the reactivation tag.
+
+Mode-local logical actions, timers, and delayed connections are scheduled in local time. Root-scope actions, timers, and connections keep current global behavior.
+
+External physical actions require careful treatment because physical events happen in wall-clock time, not logical local time. For the first full implementation, physical actions declared in a mode should be accepted but their incoming events should be delivered only if their enclosing mode is active at the event tag; they are not suspended and replayed by history. This behavior must be documented and tested. If this proves surprising during implementation, record the discovery and consider rejecting mode-local physical actions until a better semantic model is designed.
+
+## Performance Design
+
+The performance target is that non-modal programs pay only small constant overhead, and modal programs do not scan inactive modes at every tag.
+
+Static graph data should be computed once in `boomerang_builder/src/env/build.rs` and stored in `boomerang_runtime/src/env/mod.rs`. Every reaction, action, timer, port connection, and reactor instance gets a compact `ScopeKey`. Root scope is represented by a sentinel or `ScopeKey::from(0)`. Each scope stores its parent scope, owning reactor, optional mode key, initial child mode if it is a modal group, and precomputed descendants for reset. For active checks, store a precomputed ancestor chain or compact bitset. If the number of scopes is small enough to fit in a machine word, use an inline mask; otherwise store ranges over a flattened scope tree.
+
+The scheduler should avoid per-tag allocation. Add reusable buffers to `Scheduler` for transition requests, reset scopes, and reaction filtering. Do not allocate a new vector while iterating levels. Existing WIP added reusable buffers; keep that idea but move it behind full scope semantics.
+
+Use per-scope local event queues. A local event stores a local tag, an event payload, the owning scope, and a generation number. Each active scope has at most one frontier entry in a global frontier heap: the global tag corresponding to the head of that scope's local queue. When a local queue changes or a scope is activated, push a new frontier entry with that scope's queue epoch. Stale frontier entries are skipped by comparing epoch and active generation. This makes finding the next global event proportional to the number of active scopes with pending events, not all inactive events.
+
+Reset should invalidate old events by incrementing a scope generation and clearing that scope's local queues. If clearing a large queue is too expensive, replace the queue with an empty queue and let old heap entries expire by generation. The reset cost should be proportional to the events owned by the reset subtree, not the entire model.
+
+History should not rewrite queued local tags. On deactivation, record the local time at suspension. On activation, record the global tag where the scope resumed and map local queue heads to global tags lazily as `activation_global_tag + (event_local_tag - activation_local_tag)`. This avoids touching every queued event on history transition.
+
+Reaction gating remains necessary because root-scope ports can trigger reactions inside inactive modes. The check must be a cheap scope-active check at execution time and when extending downstream levels from set ports. It must not perform name lookup, heap allocation, or scan ancestor chains in the hot loop.
+
+Benchmark requirements:
+
+- `cargo bench -p boomerang --bench ping_pong` should show no meaningful regression for non-modal models.
+- A new modal benchmark should include many inactive modes each with timers/actions queued, proving inactive modes do not add per-tag cost.
+- If `BOOMERANG_PROFILE=1 cargo bench -p boomerang --bench modal_modes` is run, the flamegraph should show the scheduler spending time on active event queues and reaction execution, not scanning inactive scopes.
+
+## Plan of Work
+
+First, remove or quarantine the minimal WIP API from the previous spike. The old `@modes(...)`, `@transition(...)`, and `Context::set_mode_name` design should not become the long-term API. If retaining compatibility temporarily helps development, put it behind private tests or feature-gated spike code and delete it before acceptance.
+
+Next, extend `boomerang_builder` with static scopes. Add builder keys for modes and scopes, store each component's scope, and add validation rules: each modal reactor has exactly one initial mode; mode names are unique per reactor; mode effects may only target sibling modes of the current modal reactor; reset triggers are only valid inside modes; mode-local ports are rejected; direct nested mode blocks are rejected.
+
+Then extend `boomerang_macros/src/reactor.rs` so the `#[reactor]` parser recognizes `initial mode name { ... }` and `mode name { ... }` blocks. The parser should collect mode declarations before emitting code, then emit builder calls to create all sibling mode handles, then emit each mode body inside a scoped builder. Extend `boomerang_macros/src/reaction.rs` to parse `reset` as a trigger and `reset(mode)` / `history(mode)` / bare `mode` as mode transition effects.
+
+After the builder and macro layers compile, add runtime static graph support in `boomerang_runtime/src/env/mod.rs`. Define `ScopeKey`, `ModeKey`, `TransitionKind`, `ModeTransitionEffect`, and maps from reactions/actions/timers/connections to scopes. Keep public exports minimal; most keys should remain runtime/builder implementation details unless user code must name them.
+
+Next, refactor scheduling. `boomerang_runtime/src/sched.rs` currently uses a global event queue. Introduce a root global queue plus per-scope local queues or one generalized event manager that treats root as always-active local time. All public scheduler behavior must remain deterministic. Keep existing tests passing after each refactoring step by making root-scope behavior equivalent to today's behavior before enabling mode-local behavior.
+
+Then implement transition application after each tag. Collect transition requests from triggered reactions, resolve last-wins per modal reactor, and apply reset/history activation. Activation must schedule any immediate local events at the next microstep, not in the same tag.
+
+Finally, implement startup/shutdown/reset modal triggers and recursive reset behavior. Add tests first or alongside implementation so failures describe the missing semantics precisely.
+
+## Concrete Steps
+
+From repository root `/Users/johhug01/Source/boomerang`, start by confirming the branch and baseline:
+
+    git branch --show-current
+
+Expected output:
+
+    modal-reactors2
+
+Run the current tests before implementation begins:
+
+    cargo test
+
+Expected output is all current tests passing. If this fails before modal work begins, fix or record the pre-existing failure in `Surprises & Discoveries`.
+
+Add syntax parser tests in `boomerang_macros/src/reactor.rs` and `boomerang_macros/src/reaction.rs`. Include tests for:
+
+- two sibling mode blocks, one initial;
+- forward transition reference from the first mode body to the second mode;
+- `-> active` and `-> reset(active)` both parse as reset;
+- `-> history(idle)` parses as history;
+- `(reset)` parses as a reset trigger;
+- direct nested `mode` blocks fail with a clear diagnostic.
+
+Add builder validation tests in `boomerang_builder/src/tests.rs` for duplicate mode names, missing initial mode, multiple initial modes, transition to mode in another reactor, reset trigger outside mode, and mode-local port declarations.
+
+Add runtime tests under `boomerang/tests/`:
+
+- `modal_basic.rs`: a reset transition toggles modes and only the active mode's reaction runs.
+- `modal_mixed_reactions.rs`: top-level reactions and mode reactions execute in deterministic order, and a newly active mode does not run in the same tag.
+- `modal_history_local_time.rs`: a mode schedules a logical action, exits before the action fires, re-enters by history, and the action fires after the remaining local delay.
+- `modal_reset_discards_events.rs`: a mode schedules a logical action, exits before it fires, re-enters by reset, and the old action never fires.
+- `modal_reset_recursive.rs`: resetting a parent mode resets contained child modal reactors to their initial modes.
+- `modal_startup_shutdown.rs`: startup inside a mode runs once on first activation, and shutdown inside a previously activated mode runs at program shutdown even if the mode is inactive.
+
+After each milestone, run the narrowest useful test:
+
+    cargo test -p boomerang_macros modal
+    cargo test -p boomerang_builder modal
+    cargo test -p boomerang_runtime modal
+    cargo test -p boomerang modal
+
+Before completion, run:
+
+    cargo fmt --check
+    cargo test
+    cargo bench -p boomerang --bench ping_pong
+    cargo bench -p boomerang --bench modal_modes
+
+## Validation and Acceptance
+
+The feature is accepted only when a user can write one `#[reactor]` function with `initial mode` and `mode` blocks, declare timers/actions/reactions inside those blocks, transition with reset and history effects, and observe correct local-time behavior.
+
+Behavioral acceptance:
+
+When a reaction inside `idle` sets `active` at tag `(t, m)`, no reaction inside `active` executes at `(t, m)`. If `active` has a zero-offset timer or reset reaction, its earliest reaction occurs at `(t, m + 1)`.
+
+When a pending local action is scheduled in a mode and the mode is exited, that action does not fire while the mode is inactive. If the mode is re-entered by history, the action fires after the remaining local delay. If the mode is re-entered by reset, the action is discarded.
+
+When a parent mode is reset, contained modal reactors return to their initial modes and their pending local events are discarded.
+
+When a startup reaction is inside a mode, it runs at most once on first activation. When a shutdown reaction is inside a mode, it runs at program shutdown if its mode has ever been active.
+
+Performance acceptance:
+
+Non-modal `ping_pong` benchmark results should stay within normal noise of the baseline. If the median changes significantly, investigate before merging. The modal benchmark should demonstrate that adding many inactive modes does not increase per-tag scheduler cost linearly with all inactive events.
+
+## Idempotence and Recovery
+
+The implementation should be done in small commits. Each milestone should leave the workspace compiling or should explicitly mark a temporary expected failure in `Progress`. If a parser or builder refactor fails, it is safe to revert only that milestone commit and keep this ExecPlan. Do not use destructive git commands unless explicitly requested by the user.
+
+Generated benchmark artifacts under `target/` should not be committed. Runtime or tool logs under `logs/` should not be committed unless a future plan explicitly says otherwise.
+
+If the local-time scheduler refactor becomes too large, split it behind a new internal `EventManager` type while preserving the old root-scope behavior. Keep all existing non-modal tests passing before adding modal local-time behavior.
+
+## Artifacts and Notes
+
+Prior WIP checkpoint:
+
+    2026-07-06: Current branch `modal-reactors` was committed as `964ef3b feat: add modal reactors spike` before creating `modal-reactors2`.
+
+The old WIP is useful for these ideas:
+
+- store current mode state per reactor;
+- defer transition application until after a tag;
+- use reusable scheduler buffers;
+- validate mode ownership in the builder.
+
+The old WIP should not be copied directly for these API decisions:
+
+- `@modes(...)` as the main syntax;
+- `@transition(...)` without reset/history kind;
+- `Context::set_mode_name(&'static str)`;
+- treating modes as reaction filters only.
+
 ## Interfaces and Dependencies
 
-New/updated interfaces to implement:
+No new external crates are expected. Use existing `slotmap` for builder keys and `boomerang_tinymap` for runtime maps. If a compact bitset is needed, first evaluate whether a small inline representation is enough before adding a dependency.
 
-- `boomerang_runtime/src/env/mod.rs`:
-    - `tinymap::key_type! { pub ModeKey }`
-    - `ReactionGraph` fields:
-        - `reaction_modes: TinySecondaryMap<ReactionKey, Option<ModeFilter>>`
-        - `reaction_transitions: TinySecondaryMap<ReactionKey, Option<ModeKey>>`
-        - `reactor_initial_modes: TinySecondaryMap<ReactorKey, Option<ModeKey>>`
-        - `reactor_modes: TinySecondaryMap<ReactorKey, Vec<ModeKey>>`
-    - `Enclave::insert_mode(reactor_key: ReactorKey, name: &str, initial: bool) -> ModeKey`
-    - `Enclave::insert_reaction(..., mode_filter: Option<ModeFilter>, transition_to: Option<ModeKey>)`
+In `boomerang_builder/src/reactor.rs`, define builder-side keys and data:
 
-- `boomerang_runtime/src/store.rs`:
-    - `reactor_modes: TinySecondaryMap<ReactorKey, Option<ModeKey>>`
-    - `fn current_mode(&self, reactor_key: ReactorKey) -> Option<ModeKey>`
-    - `fn set_mode(&mut self, reactor_key: ReactorKey, mode: ModeKey)`
+    slotmap::new_key_type! { pub struct BuilderModeKey; }
+    slotmap::new_key_type! { pub struct BuilderScopeKey; }
 
-- `boomerang_builder/src/reactor.rs`:
-    - `slotmap::new_key_type! { pub struct BuilderModeKey; }`
-    - `ReactorBuilderState::add_mode(...)`
+    pub enum ModeKind {
+        Initial,
+        Normal,
+    }
 
-- `boomerang_builder/src/reaction.rs`:
-    - `ReactionBuilder { enabled_modes: Option<Vec<BuilderModeKey>>, transition_to: Option<BuilderModeKey>, ... }`
-    - `PartialReactionBuilder::with_modes(...)`
-    - `PartialReactionBuilder::with_transition(...)`
+    pub enum TransitionKind {
+        Reset,
+        History,
+    }
 
-- `boomerang_builder/src/env/build.rs`:
-    - `BuilderAliases::mode_aliases`
-    - `build_runtime_modes()` invoked before reactions
+In `boomerang_builder/src/env/mod.rs`, add mode and scope builders:
 
-- `boomerang_macros/src/reaction.rs`:
-    - Optional `@modes(...)` and `@transition(...)` parsing and codegen.
+    pub struct ScopeBuilder {
+        pub parent: Option<BuilderScopeKey>,
+        pub reactor_key: BuilderReactorKey,
+        pub mode_key: Option<BuilderModeKey>,
+    }
 
-Dependencies:
-- No new external crates. Use existing `tinymap`, `slotmap`, and `itertools` already in use.
+    pub struct ModeBuilder {
+        pub name: String,
+        pub reactor_key: BuilderReactorKey,
+        pub scope_key: BuilderScopeKey,
+        pub kind: ModeKind,
+    }
 
-Note: If using a bitset-based `ModeFilter`, ensure it is constructed once at build time and stored in the graph. Any checks in `Scheduler::process_tag` should be constant-time and allocation-free.
+ReactorBuilderState should gain scoped builder support:
 
-Change log: 2026-01-26 / Codex: updated ExecPlan to address performance constraint (avoid allocations in scheduler hot loops) and wrote plan to `.agent/EXECPLAN-modal-reactors.md`.
-Change log: 2026-01-26 / Codex: updated progress, added borrow-related discovery, recorded deferred transition decision, and captured test command after implementation.
-Change log: 2026-01-26 / Codex: adjusted transition semantics to apply after the full tag and added LF MixedReactions test plus test command.
-Change log: 2026-01-26 / Codex: added dynamic mode switching by name and updated MixedReactions to use it.
+    pub fn add_mode(&mut self, name: &str, kind: ModeKind) -> Result<BuilderModeKey, BuilderError>;
+    pub fn in_mode<R>(&mut self, mode: BuilderModeKey, f: impl FnOnce(&mut Self) -> Result<R, BuilderError>) -> Result<R, BuilderError>;
+
+The exact lifetime shape may differ; the important interface is that macro-generated code can enter a mode scope and existing `timer!`, `reaction!`, child reactor, action, and connection builder calls record that scope.
+
+In `boomerang_builder/src/reaction.rs`, add mode transition effects:
+
+    pub struct BuilderModeEffect {
+        pub target: BuilderModeKey,
+        pub transition: TransitionKind,
+    }
+
+    pub trait PartialReactionBuilderField {
+        // Existing behavior remains for ports/actions.
+    }
+
+    impl PartialReactionBuilderField for BuilderModeEffect { ... }
+
+Add `with_reset_trigger()` for reset reactions. Reset triggers are not action keys; they are mode-scope lifecycle triggers lowered into runtime reset reactions.
+
+In `boomerang_runtime/src/env/mod.rs`, define runtime keys and graph fields:
+
+    tinymap::key_type! { pub ScopeKey }
+    tinymap::key_type! { pub ModeKey }
+
+    pub enum TransitionKind {
+        Reset,
+        History,
+    }
+
+    pub struct ScopeInfo {
+        pub parent: Option<ScopeKey>,
+        pub reactor: ReactorKey,
+        pub mode: Option<ModeKey>,
+        pub descendants: Vec<ScopeKey>,
+    }
+
+    pub struct ModeInfo {
+        pub reactor: ReactorKey,
+        pub scope: ScopeKey,
+        pub name: String,
+        pub initial: bool,
+    }
+
+ReactionGraph should include scope ownership maps:
+
+    pub scopes: TinyMap<ScopeKey, ScopeInfo>;
+    pub modes: TinyMap<ModeKey, ModeInfo>;
+    pub reaction_scopes: TinySecondaryMap<ReactionKey, ScopeKey>;
+    pub action_scopes: TinySecondaryMap<ActionKey, ScopeKey>;
+    pub port_connection_scopes: Vec<ConnectionScopeInfo>;
+    pub reset_reactions: TinySecondaryMap<ScopeKey, Vec<LevelReactionKey>>;
+    pub startup_reactions: TinySecondaryMap<ScopeKey, Vec<LevelReactionKey>>;
+    pub shutdown_reactions_by_scope: TinySecondaryMap<ScopeKey, Vec<LevelReactionKey>>;
+
+In `boomerang_runtime/src/context.rs`, replace string mode scheduling with typed transition recording:
+
+    pub(crate) struct TriggerRes {
+        pub scheduled_actions: Vec<(ActionKey, Tag)>,
+        pub scheduled_shutdown: Option<Tag>,
+        pub scheduled_mode: Option<ModeTransitionRequest>,
+    }
+
+    pub struct ModeEffectRef {
+        target: ModeKey,
+        transition: TransitionKind,
+    }
+
+    impl ModeEffectRef {
+        pub fn set(&self, ctx: &mut Context) { ... }
+    }
+
+In `boomerang_runtime/src/sched.rs`, introduce an event manager:
+
+    struct EventManager {
+        root_queue: BinaryHeap<ScheduledEvent>,
+        scope_queues: TinySecondaryMap<ScopeKey, LocalEventQueue>,
+        active_frontier: BinaryHeap<ScopeFrontierEntry>,
+    }
+
+The exact names can change, but the design must preserve root-scope behavior and make inactive local queues dormant without scanning them on each global tag.
+
+Change log: 2026-07-06 / Codex: replaced minimal modal reactors plan with full-semantics plan after user confirmed full LF-like semantics, reset default, and branch serialization workflow.

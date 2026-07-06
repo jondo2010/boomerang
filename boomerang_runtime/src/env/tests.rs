@@ -65,9 +65,12 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
     let enclave_b = &mut enclaves[key_b];
 
     let reactor_b = enclave_b.insert_reactor(Reactor::new("reactorB", false).boxed(), None);
+    let reactor_b_scope = enclave_b.root_scope(reactor_b);
     let port_b = enclave_b.insert_port(|key| Port::<u32>::new("portB", key).boxed());
+    enclave_b.insert_port_scope(port_b, reactor_b_scope);
     let action_b =
         enclave_b.insert_action(|key| Action::<u32>::new("actionB", key, None, true).boxed());
+    enclave_b.insert_action_scope(action_b, reactor_b_scope);
 
     // receiver-side has a reaction that reads the value from 'portB' and prints it.
     let reaction_output = enclave_b.insert_reaction(
@@ -87,6 +90,7 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
         std::iter::once(port_b),
         std::iter::empty(),
         std::iter::empty(),
+        reactor_b_scope,
         None,
         None,
     );
@@ -105,6 +109,7 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
         std::iter::empty(),
         std::iter::once(port_b),
         std::iter::once(action_b),
+        reactor_b_scope,
         None,
         None,
     );
@@ -120,8 +125,10 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
     let enclave_a = &mut enclaves[key_a];
 
     let reactor_a = enclave_a.insert_reactor(Reactor::new("reactorA", ()).boxed(), None);
+    let reactor_a_scope = enclave_a.root_scope(reactor_a);
     // sender-side has a startup reaction that sets the value of 'portA' to 42.
     let port_a = enclave_a.insert_port(|key| Port::<u32>::new("portA", key).boxed());
+    enclave_a.insert_port_scope(port_a, reactor_a_scope);
 
     let reaction_startup = enclave_a.insert_reaction(
         Reaction::new(
@@ -139,6 +146,7 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
         // portA is effected by reactionStartup
         std::iter::once(port_a),
         std::iter::empty(),
+        reactor_a_scope,
         None,
         None,
     );
@@ -146,6 +154,7 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
     // startup action triggers reactionStartup
     let startup_action =
         enclave_a.insert_action(|key| Action::<()>::new("startup", key, None, true).boxed());
+    enclave_a.insert_action_scope(startup_action, reactor_a_scope);
     enclave_a.insert_startup_action(startup_action, Tag::ZERO);
     enclave_a.insert_action_trigger(startup_action, (Level::from(0), reaction_startup));
 
@@ -165,6 +174,7 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
         std::iter::once(port_a),
         std::iter::empty(),
         std::iter::empty(),
+        reactor_a_scope,
         None,
         None,
     );

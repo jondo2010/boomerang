@@ -175,6 +175,7 @@ impl EnvBuilder {
         self.add_action_impl::<(), Logical>(
             name,
             reactor_key,
+            None,
             ActionType::Timer(TimerSpec::STARTUP),
         )
     }
@@ -184,7 +185,7 @@ impl EnvBuilder {
         name: &str,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey, BuilderError> {
-        self.add_action_impl::<(), Logical>(name, reactor_key, ActionType::Shutdown)
+        self.add_action_impl::<(), Logical>(name, reactor_key, None, ActionType::Shutdown)
     }
 
     pub fn add_mode(
@@ -252,8 +253,22 @@ impl EnvBuilder {
         reactor_key: BuilderReactorKey,
         timer_spec: TimerSpec,
     ) -> Result<TimerActionKey, BuilderError> {
-        let action_key =
-            self.add_action_impl::<(), Logical>(name, reactor_key, ActionType::Timer(timer_spec))?;
+        self.add_timer_action_in_scope(name, reactor_key, None, timer_spec)
+    }
+
+    pub(crate) fn add_timer_action_in_scope(
+        &mut self,
+        name: &str,
+        reactor_key: BuilderReactorKey,
+        scope_mode: Option<BuilderModeKey>,
+        timer_spec: TimerSpec,
+    ) -> Result<TimerActionKey, BuilderError> {
+        let action_key = self.add_action_impl::<(), Logical>(
+            name,
+            reactor_key,
+            scope_mode,
+            ActionType::Timer(timer_spec),
+        )?;
         Ok(TimerActionKey::from(BuilderActionKey::from(action_key)))
     }
 
@@ -264,9 +279,20 @@ impl EnvBuilder {
         min_delay: Option<runtime::Duration>,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey<T, Q>, BuilderError> {
+        self.add_action_in_scope::<T, Q>(name, min_delay, reactor_key, None)
+    }
+
+    pub(crate) fn add_action_in_scope<T: runtime::ReactorData, Q: ActionTag>(
+        &mut self,
+        name: &str,
+        min_delay: Option<runtime::Duration>,
+        reactor_key: BuilderReactorKey,
+        scope_mode: Option<BuilderModeKey>,
+    ) -> Result<TypedActionKey<T, Q>, BuilderError> {
         self.add_action_impl::<T, Q>(
             name,
             reactor_key,
+            scope_mode,
             ActionType::Standard {
                 is_logical: Q::IS_LOGICAL,
                 min_delay,
@@ -282,12 +308,27 @@ impl EnvBuilder {
         &mut self,
         name: &str,
         reactor_key: BuilderReactorKey,
+        scope_mode: Option<BuilderModeKey>,
         r#type: ActionType,
     ) -> Result<TypedActionKey<T, Q>, BuilderError>
     where
         T: runtime::ReactorData,
     {
         let reactor_builder = &mut self.reactor_builders[reactor_key];
+
+        if let Some(mode_key) = scope_mode {
+            let mode = self.mode_builders.get(mode_key).ok_or_else(|| {
+                BuilderError::ReactionBuilderError(format!(
+                    "Unknown mode key {mode_key:?} for action '{name}'"
+                ))
+            })?;
+            if mode.reactor_key != reactor_key {
+                return Err(BuilderError::ReactionBuilderError(format!(
+                    "Mode '{}' does not belong to action '{name}'",
+                    mode.name
+                )));
+            }
+        }
 
         // Ensure no duplicates
         if reactor_builder
@@ -301,9 +342,9 @@ impl EnvBuilder {
             });
         }
 
-        let key = self
-            .action_builders
-            .insert(ActionBuilder::new(name, reactor_key, r#type));
+        let key =
+            self.action_builders
+                .insert(ActionBuilder::new(name, reactor_key, scope_mode, r#type));
 
         reactor_builder.actions.insert(key, ());
 

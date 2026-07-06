@@ -401,6 +401,7 @@ mod tests {
         let action = ActionBuilder::new(
             "TestAction",
             BuilderReactorKey::default(),
+            None,
             crate::ActionType::Shutdown,
         );
         let segment = action.fqn_segment(false);

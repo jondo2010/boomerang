@@ -6,7 +6,7 @@
 
 use std::{fmt::Debug, marker::PhantomData};
 
-use super::BuilderReactorKey;
+use super::{BuilderModeKey, BuilderReactorKey};
 use crate::{runtime, ParentReactorBuilder};
 
 slotmap::new_key_type! {pub struct BuilderActionKey;}
@@ -203,6 +203,8 @@ pub struct ActionBuilder {
     name: String,
     /// The key of the Reactor that owns this ActionBuilder
     reactor_key: BuilderReactorKey,
+    /// Enclosing mode scope, if this action was declared inside a mode.
+    scope_mode: Option<BuilderModeKey>,
     /// Logical type of the action
     r#type: ActionType,
 }
@@ -214,10 +216,16 @@ impl ParentReactorBuilder for ActionBuilder {
 }
 
 impl ActionBuilder {
-    pub fn new(name: &str, reactor_key: BuilderReactorKey, r#type: ActionType) -> Self {
+    pub fn new(
+        name: &str,
+        reactor_key: BuilderReactorKey,
+        scope_mode: Option<BuilderModeKey>,
+        r#type: ActionType,
+    ) -> Self {
         Self {
             name: name.to_owned(),
             reactor_key,
+            scope_mode,
             r#type,
         }
     }
@@ -228,6 +236,10 @@ impl ActionBuilder {
 
     pub fn reactor_key(&self) -> BuilderReactorKey {
         self.reactor_key
+    }
+
+    pub fn scope_mode(&self) -> Option<BuilderModeKey> {
+        self.scope_mode
     }
 
     pub fn r#type(&self) -> &ActionType {

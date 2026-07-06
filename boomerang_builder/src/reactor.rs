@@ -261,7 +261,8 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         name: &str,
         spec: TimerSpec,
     ) -> Result<TimerActionKey, BuilderError> {
-        self.env.add_timer_action(name, self.reactor_key, spec)
+        self.env
+            .add_timer_action_in_scope(name, self.reactor_key, self.current_mode, spec)
     }
 
     /// Add a new action to the reactor.
@@ -274,7 +275,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         min_delay: Option<runtime::Duration>,
     ) -> Result<TypedActionKey<T, Q>, BuilderError> {
         self.env
-            .add_action::<T, Q>(name, min_delay, self.reactor_key)
+            .add_action_in_scope::<T, Q>(name, min_delay, self.reactor_key, self.current_mode)
     }
 
     /// Add a new logical action to the reactor.
@@ -286,8 +287,12 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         name: &str,
         min_delay: Option<runtime::Duration>,
     ) -> Result<TypedActionKey<T, Logical>, BuilderError> {
-        self.env
-            .add_action::<T, Logical>(name, min_delay, self.reactor_key)
+        self.env.add_action_in_scope::<T, Logical>(
+            name,
+            min_delay,
+            self.reactor_key,
+            self.current_mode,
+        )
     }
 
     pub fn add_physical_action<T: runtime::ReactorData>(
@@ -295,8 +300,12 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         name: &str,
         min_delay: Option<runtime::Duration>,
     ) -> Result<TypedActionKey<T, Physical>, BuilderError> {
-        self.env
-            .add_action::<T, Physical>(name, min_delay, self.reactor_key)
+        self.env.add_action_in_scope::<T, Physical>(
+            name,
+            min_delay,
+            self.reactor_key,
+            self.current_mode,
+        )
     }
 
     /// Add a new mode to this reactor.
@@ -363,6 +372,11 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         name: &str,
         bank_info: Option<runtime::BankInfo>,
     ) -> Result<TypedPortKey<T, Q>, BuilderError> {
+        if self.current_mode.is_some() {
+            return Err(BuilderError::ReactionBuilderError(format!(
+                "Port '{name}' cannot be declared inside a mode"
+            )));
+        }
         tracing::debug!("Adding port: {name}");
         self.env
             .internal_add_port::<T, Q>(name, self.reactor_key, bank_info)

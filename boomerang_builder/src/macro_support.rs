@@ -61,7 +61,7 @@ impl<S: runtime::ReactorData> ReactorBuilderState<'_, S> {
         let current_mode = self.current_mode();
         let builder = PartialReactionBuilder::new(name, reactor_key, self.env());
         if let Some(mode) = current_mode {
-            builder.with_modes([mode])
+            builder.in_mode_scope(mode)
         } else {
             builder
         }

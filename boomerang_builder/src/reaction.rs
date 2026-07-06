@@ -35,6 +35,8 @@ pub struct ReactionBuilder {
     pub(super) reaction_fn: BoxedBuilderReactionFn,
     /// Modes in which this reaction is enabled
     pub(super) enabled_modes: Option<Vec<BuilderModeKey>>,
+    /// Enclosing mode scope, if this reaction was declared inside a mode.
+    pub(super) scope_mode: Option<BuilderModeKey>,
     /// Mode transition target for this reaction
     pub(super) transition_to: Option<BuilderModeKey>,
     /// Declared typed mode effects for this reaction
@@ -63,6 +65,7 @@ impl ReactionBuilder {
             reactor_key: parent_key,
             reaction_fn,
             enabled_modes: None,
+            scope_mode: None,
             transition_to: None,
             mode_effects: Vec::new(),
             reset_trigger: false,
@@ -87,6 +90,7 @@ impl Debug for ReactionBuilder {
             .field("reactor_key", &self.reactor_key)
             .field("reaction_fn", &"ReactionFn()")
             .field("enabled_modes", &self.enabled_modes)
+            .field("scope_mode", &self.scope_mode)
             .field("transition_to", &self.transition_to)
             .field("mode_effects", &self.mode_effects)
             .field("reset_trigger", &self.reset_trigger)
@@ -307,6 +311,7 @@ pub struct PartialReactionBuilder<'a, S: runtime::ReactorData, Fields = (), Reac
     name: Option<String>,
     reaction_fn: ReactionFn,
     enabled_modes: Option<Vec<BuilderModeKey>>,
+    scope_mode: Option<BuilderModeKey>,
     transition_to: Option<BuilderModeKey>,
     mode_effects: Vec<BuilderModeEffect>,
     reset_trigger: bool,
@@ -330,6 +335,7 @@ impl<'a, S: runtime::ReactorData> PartialReactionBuilder<'a, S, (), ()> {
             name: name.map(|s| s.to_string()),
             reaction_fn: (),
             enabled_modes: None,
+            scope_mode: None,
             transition_to: None,
             mode_effects: Vec::new(),
             reset_trigger: false,
@@ -378,6 +384,15 @@ impl<'a, S: runtime::ReactorData, Fields, ReactionFn>
         self
     }
 
+    /// Record the static mode scope that owns this reaction.
+    pub fn in_mode_scope(mut self, mode: BuilderModeKey) -> Self {
+        self.scope_mode = Some(mode);
+        if self.enabled_modes.is_none() {
+            self.enabled_modes = Some(vec![mode]);
+        }
+        self
+    }
+
     /// Transition this reactor to the provided mode after the reaction runs.
     pub fn with_transition(mut self, mode: BuilderModeKey) -> Self {
         self.transition_to = Some(mode);
@@ -423,6 +438,7 @@ macro_rules! impl_with_field {
                 let Self {
                     name,
                     enabled_modes,
+                    scope_mode,
                     transition_to,
                     mode_effects,
                     reset_trigger,
@@ -439,6 +455,7 @@ macro_rules! impl_with_field {
                     name,
                     reaction_fn: (),
                     enabled_modes,
+                    scope_mode,
                     transition_to,
                     mode_effects,
                     reset_trigger,
@@ -464,6 +481,7 @@ macro_rules! impl_with_field {
                 let Self {
                     name,
                     enabled_modes,
+                    scope_mode,
                     transition_to,
                     mode_effects,
                     reset_trigger,
@@ -480,6 +498,7 @@ macro_rules! impl_with_field {
                     name,
                     reaction_fn: (),
                     enabled_modes,
+                    scope_mode,
                     transition_to,
                     mode_effects,
                     reset_trigger,
@@ -504,6 +523,7 @@ macro_rules! impl_with_field {
                 let Self {
                     name,
                     enabled_modes,
+                    scope_mode,
                     transition_to,
                     mode_effects,
                     reset_trigger,
@@ -520,6 +540,7 @@ macro_rules! impl_with_field {
                     name,
                     reaction_fn: (),
                     enabled_modes,
+                    scope_mode,
                     transition_to,
                     mode_effects,
                     reset_trigger,
@@ -579,6 +600,7 @@ where
         let Self {
             name,
             enabled_modes,
+            scope_mode,
             transition_to,
             mode_effects,
             reset_trigger,
@@ -603,6 +625,7 @@ where
             name,
             reaction_fn,
             enabled_modes,
+            scope_mode,
             transition_to,
             mode_effects,
             reset_trigger,
@@ -633,6 +656,7 @@ where
         let Self {
             name,
             enabled_modes,
+            scope_mode,
             transition_to,
             mode_effects,
             reset_trigger,
@@ -649,6 +673,7 @@ where
             name,
             reaction_fn: Box::new(f),
             enabled_modes,
+            scope_mode,
             transition_to,
             mode_effects,
             reset_trigger,
@@ -674,6 +699,7 @@ where
         let Self {
             name,
             enabled_modes,
+            scope_mode,
             transition_to,
             mode_effects,
             reset_trigger,
@@ -697,6 +723,12 @@ where
             )));
         }
 
+        if reset_trigger && scope_mode.is_none() {
+            return Err(BuilderError::ReactionBuilderError(format!(
+                "Reaction '{name:?}' uses reset trigger outside a mode scope"
+            )));
+        }
+
         if let Some(ref modes) = enabled_modes {
             for mode_key in modes {
                 let mode = env.mode_builders.get(*mode_key).ok_or_else(|| {
@@ -710,6 +742,20 @@ where
                         mode.name
                     )));
                 }
+            }
+        }
+
+        if let Some(scope_mode) = scope_mode {
+            let mode = env.mode_builders.get(scope_mode).ok_or_else(|| {
+                BuilderError::ReactionBuilderError(format!(
+                    "Unknown mode key {scope_mode:?} for reaction '{name:?}'"
+                ))
+            })?;
+            if mode.reactor_key != reactor_key {
+                return Err(BuilderError::ReactionBuilderError(format!(
+                    "Mode scope '{}' does not belong to reaction '{name:?}'",
+                    mode.name
+                )));
             }
         }
 
@@ -750,6 +796,7 @@ where
             reactor_key,
             reaction_fn,
             enabled_modes,
+            scope_mode,
             transition_to,
             mode_effects,
             reset_trigger,

@@ -57,6 +57,15 @@ impl std::ops::Sub<usize> for Level {
 pub type LevelReactionKey = (Level, ReactionKey);
 
 tinymap::key_type! { pub ModeKey }
+tinymap::key_type! { pub ScopeKey }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ScopeInfo {
+    pub parent: Option<ScopeKey>,
+    pub reactor: ReactorKey,
+    pub mode: Option<ModeKey>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -137,6 +146,12 @@ pub struct BankInfo {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Default)]
 pub struct ReactionGraph {
+    /// All static execution scopes. Each reactor has a root scope, and each mode has a child scope.
+    pub scopes: tinymap::TinyMap<ScopeKey, ScopeInfo>,
+    /// Root scope per reactor.
+    pub reactor_root_scopes: tinymap::TinySecondaryMap<ReactorKey, ScopeKey>,
+    /// Scope per mode.
+    pub mode_scopes: tinymap::TinySecondaryMap<ModeKey, ScopeKey>,
     /// All defined modes with their owning reactor
     pub modes: tinymap::TinyMap<ModeKey, ReactorKey>,
     /// Names for each mode
@@ -157,6 +172,12 @@ pub struct ReactionGraph {
     pub reaction_actions: tinymap::TinySecondaryMap<ReactionKey, Vec<ActionKey>>,
     /// For each reaction, the reactor it belongs to
     pub reaction_reactors: tinymap::TinySecondaryMap<ReactionKey, ReactorKey>,
+    /// Static scope per reaction.
+    pub reaction_scopes: tinymap::TinySecondaryMap<ReactionKey, ScopeKey>,
+    /// Static scope per action.
+    pub action_scopes: tinymap::TinySecondaryMap<ActionKey, ScopeKey>,
+    /// Static scope per port. Ports are currently always reactor-root scoped.
+    pub port_scopes: tinymap::TinySecondaryMap<PortKey, ScopeKey>,
     /// Bank index for a multi-bank reactor
     pub reactor_bank_infos: tinymap::TinySecondaryMap<ReactorKey, Option<BankInfo>>,
     /// All known modes per reactor
@@ -267,6 +288,14 @@ impl Enclave {
         bank_info: Option<BankInfo>,
     ) -> ReactorKey {
         let reactor_key = self.env.reactors.insert(reactor);
+        let root_scope = self.graph.scopes.insert(ScopeInfo {
+            parent: None,
+            reactor: reactor_key,
+            mode: None,
+        });
+        self.graph
+            .reactor_root_scopes
+            .insert(reactor_key, root_scope);
         self.graph.reactor_bank_infos.insert(reactor_key, bank_info);
         self.graph.reactor_modes.insert(reactor_key, Vec::new());
         self.graph
@@ -296,6 +325,13 @@ impl Enclave {
 
     pub fn insert_mode(&mut self, reactor_key: ReactorKey, name: &str, initial: bool) -> ModeKey {
         let mode_key = self.graph.modes.insert(reactor_key);
+        let root_scope = self.graph.reactor_root_scopes[reactor_key];
+        let mode_scope = self.graph.scopes.insert(ScopeInfo {
+            parent: Some(root_scope),
+            reactor: reactor_key,
+            mode: Some(mode_key),
+        });
+        self.graph.mode_scopes.insert(mode_key, mode_scope);
         self.graph.mode_names.insert(mode_key, name.to_owned());
         self.graph
             .reactor_modes
@@ -322,6 +358,7 @@ impl Enclave {
         use_ports: impl IntoIterator<Item = PortKey>,
         effect_ports: impl IntoIterator<Item = PortKey>,
         actions: impl IntoIterator<Item = ActionKey>,
+        scope: ScopeKey,
         mode_filter: Option<ModeFilter>,
         transition_to: Option<ModeTransitionEffect>,
     ) -> ReactionKey {
@@ -338,11 +375,28 @@ impl Enclave {
         self.graph
             .reaction_reactors
             .insert(reaction_key, reactor_key);
+        self.graph.reaction_scopes.insert(reaction_key, scope);
         self.graph.reaction_modes.insert(reaction_key, mode_filter);
         self.graph
             .reaction_transitions
             .insert(reaction_key, transition_to);
         reaction_key
+    }
+
+    pub fn root_scope(&self, reactor_key: ReactorKey) -> ScopeKey {
+        self.graph.reactor_root_scopes[reactor_key]
+    }
+
+    pub fn mode_scope(&self, mode_key: ModeKey) -> ScopeKey {
+        self.graph.mode_scopes[mode_key]
+    }
+
+    pub fn insert_action_scope(&mut self, action_key: ActionKey, scope: ScopeKey) {
+        self.graph.action_scopes.insert(action_key, scope);
+    }
+
+    pub fn insert_port_scope(&mut self, port_key: PortKey, scope: ScopeKey) {
+        self.graph.port_scopes.insert(port_key, scope);
     }
 
     /// Insert an `ActionKey` that is triggered on startup.
@@ -396,7 +450,9 @@ impl Enclave {
     /// Validate the lengths of the runtime data structures.
     pub fn validate(&self) {
         itertools::assert_equal(self.env.actions.keys(), self.graph.action_triggers.keys());
+        itertools::assert_equal(self.env.actions.keys(), self.graph.action_scopes.keys());
         itertools::assert_equal(self.env.ports.keys(), self.graph.port_triggers.keys());
+        itertools::assert_equal(self.env.ports.keys(), self.graph.port_scopes.keys());
         itertools::assert_equal(
             self.env.reactions.keys(),
             self.graph.reaction_use_ports.keys(),
@@ -413,6 +469,7 @@ impl Enclave {
             self.env.reactions.keys(),
             self.graph.reaction_reactors.keys(),
         );
+        itertools::assert_equal(self.env.reactions.keys(), self.graph.reaction_scopes.keys());
         itertools::assert_equal(self.env.reactions.keys(), self.graph.reaction_modes.keys());
         itertools::assert_equal(
             self.env.reactions.keys(),
@@ -421,6 +478,10 @@ impl Enclave {
         itertools::assert_equal(
             self.env.reactors.keys(),
             self.graph.reactor_bank_infos.keys(),
+        );
+        itertools::assert_equal(
+            self.env.reactors.keys(),
+            self.graph.reactor_root_scopes.keys(),
         );
         itertools::assert_equal(self.env.reactors.keys(), self.graph.reactor_modes.keys());
         itertools::assert_equal(
@@ -432,6 +493,7 @@ impl Enclave {
             self.graph.reactor_initial_modes.keys(),
         );
         itertools::assert_equal(self.graph.modes.keys(), self.graph.mode_names.keys());
+        itertools::assert_equal(self.graph.modes.keys(), self.graph.mode_scopes.keys());
     }
 }
 

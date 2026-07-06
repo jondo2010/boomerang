@@ -127,11 +127,13 @@ fn test_mode_kind_effect_and_reset_trigger_builder() {
         .unwrap();
 
     let reset_reaction = reactor_builder
-        .add_reaction(Some("reset_active"))
-        .with_reset_trigger()
-        .with_modes([active])
-        .with_reaction_fn(|_ctx, _state, ()| {})
-        .finish()
+        .in_mode(active, |builder| {
+            builder
+                .add_reaction(Some("reset_active"))
+                .with_reset_trigger()
+                .with_reaction_fn(|_ctx, _state, ()| {})
+                .finish()
+        })
         .unwrap();
 
     let _reactor_key = reactor_builder.finish().unwrap();
@@ -148,6 +150,10 @@ fn test_mode_kind_effect_and_reset_trigger_builder() {
         runtime::TransitionKind::Reset
     );
     assert!(env_builder.reaction_builders[reset_reaction].reset_trigger);
+    assert_eq!(
+        env_builder.reaction_builders[reset_reaction].scope_mode,
+        Some(active)
+    );
 }
 
 #[test]
@@ -183,11 +189,102 @@ fn test_in_mode_scopes_reactions_and_rejects_nested_modes() {
         env_builder.reaction_builders[scoped_reaction].enabled_modes,
         Some(vec![idle])
     );
+    assert_eq!(
+        env_builder.reaction_builders[scoped_reaction].scope_mode,
+        Some(idle)
+    );
     assert!(matches!(
         nested_result,
         Err(BuilderError::ReactionBuilderError(message))
             if message.contains("Nested mode blocks")
     ));
+}
+
+#[test]
+fn test_reset_trigger_outside_mode_is_rejected() {
+    let mut env_builder = EnvBuilder::new();
+    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, (), false);
+
+    let res = reactor_builder
+        .add_reaction(Some("bad_reset"))
+        .with_reset_trigger()
+        .with_reaction_fn(|_ctx, _state, ()| {})
+        .finish();
+
+    assert!(matches!(res, Err(BuilderError::ReactionBuilderError(_))));
+}
+
+#[test]
+fn test_port_declaration_inside_mode_is_rejected() {
+    let mut env_builder = EnvBuilder::new();
+    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, (), false);
+    let idle = reactor_builder.add_mode("idle", ModeKind::Initial).unwrap();
+
+    let res = reactor_builder.in_mode(idle, |builder| {
+        builder.add_output_port::<u32>("mode_out").map(|_| ())
+    });
+
+    assert!(matches!(res, Err(BuilderError::ReactionBuilderError(_))));
+}
+
+#[test]
+fn test_runtime_scope_metadata_for_mode_components() {
+    let mut env_builder = EnvBuilder::new();
+    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, (), false);
+
+    let out = reactor_builder.add_output_port::<u32>("out").unwrap();
+    let idle = reactor_builder.add_mode("idle", ModeKind::Initial).unwrap();
+    let root_tick = reactor_builder
+        .add_logical_action::<()>("root_tick", None)
+        .unwrap();
+
+    let root_reaction = reactor_builder
+        .add_reaction(Some("root"))
+        .with_trigger(root_tick)
+        .with_effect(out)
+        .with_reaction_fn(|_ctx, _state, (_root_tick, _out)| {})
+        .finish()
+        .unwrap();
+
+    let (mode_tick, mode_reaction) = reactor_builder
+        .in_mode(idle, |builder| {
+            let mode_tick = builder.add_logical_action::<()>("mode_tick", None)?;
+            let reaction = builder
+                .add_reaction(Some("mode_reaction"))
+                .with_trigger(mode_tick)
+                .with_reaction_fn(|_ctx, _state, (_mode_tick,)| {})
+                .finish()?;
+            Ok((mode_tick, reaction))
+        })
+        .unwrap();
+
+    let reactor_key = reactor_builder.finish().unwrap();
+    let builder_parts = env_builder
+        .into_runtime_parts(&runtime::Config::default())
+        .unwrap();
+
+    let (enclave_key, runtime_reactor) = builder_parts.aliases.reactor_aliases[reactor_key];
+    let enclave = &builder_parts.enclaves[enclave_key];
+    let root_scope = enclave.graph.reactor_root_scopes[runtime_reactor];
+    let runtime_idle = builder_parts.aliases.mode_aliases[idle].1;
+    let idle_scope = enclave.graph.mode_scopes[runtime_idle];
+
+    let runtime_out = builder_parts.aliases.port_aliases[BuilderPortKey::from(out)].1;
+    let runtime_root_reaction = builder_parts.aliases.reaction_aliases[root_reaction].1;
+    let runtime_mode_tick =
+        builder_parts.aliases.action_aliases[BuilderActionKey::from(mode_tick)].1;
+    let runtime_mode_reaction = builder_parts.aliases.reaction_aliases[mode_reaction].1;
+
+    assert_eq!(enclave.graph.port_scopes[runtime_out], root_scope);
+    assert_eq!(
+        enclave.graph.reaction_scopes[runtime_root_reaction],
+        root_scope
+    );
+    assert_eq!(enclave.graph.action_scopes[runtime_mode_tick], idle_scope);
+    assert_eq!(
+        enclave.graph.reaction_scopes[runtime_mode_reaction],
+        idle_scope
+    );
 }
 
 #[test]

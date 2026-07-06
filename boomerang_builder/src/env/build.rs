@@ -286,10 +286,60 @@ impl EnvBuilder {
 
         // Now create the reset reactions for periodic timers, since we can now get &mut self.
         for (name, reaction_fn, reactor_key, action_key) in new_reactions {
-            let _ = PartialReactionBuilder::<()>::new(Some(&name), reactor_key, self)
-                .with_trigger(action_key)
+            let scope_mode = self.action_builders[BuilderActionKey::from(action_key)].scope_mode();
+            let mut reaction = PartialReactionBuilder::<()>::new(Some(&name), reactor_key, self)
+                .with_trigger(action_key);
+            if let Some(scope_mode) = scope_mode {
+                reaction = reaction.in_mode_scope(scope_mode);
+            }
+            let _ = reaction
                 .with_defered_reaction_fn(reaction_fn.defer())
                 .finish()?;
+        }
+
+        Ok(())
+    }
+
+    fn assign_runtime_action_and_port_scopes(
+        &mut self,
+        builder_parts: &mut BuilderRuntimeParts,
+        port_bindings: &PortBindings,
+    ) -> Result<(), BuilderError> {
+        for (builder_action_key, action) in &self.action_builders {
+            let (enclave_key, action_key) =
+                match builder_parts.aliases.action_aliases.get(builder_action_key) {
+                    Some(alias) => *alias,
+                    None => continue,
+                };
+            let enclave = &mut builder_parts.enclaves[enclave_key];
+            let scope = if let Some(mode_key) = action.scope_mode() {
+                let (mode_enclave_key, runtime_mode_key) =
+                    builder_parts.aliases.mode_aliases[mode_key];
+                assert_eq!(enclave_key, mode_enclave_key, "Crosscheck");
+                enclave.mode_scope(runtime_mode_key)
+            } else {
+                let (reactor_enclave_key, runtime_reactor_key) =
+                    builder_parts.aliases.reactor_aliases[action.reactor_key()];
+                assert_eq!(enclave_key, reactor_enclave_key, "Crosscheck");
+                enclave.root_scope(runtime_reactor_key)
+            };
+            enclave.insert_action_scope(action_key, scope);
+        }
+
+        for (builder_port_key, _port) in &self.port_builders {
+            let (enclave_key, port_key) =
+                match builder_parts.aliases.port_aliases.get(builder_port_key) {
+                    Some(alias) => *alias,
+                    None => continue,
+                };
+            let inward_port_key = port_bindings.follow_port_inward(builder_port_key);
+            let port = &self.port_builders[inward_port_key];
+            let enclave = &mut builder_parts.enclaves[enclave_key];
+            let (reactor_enclave_key, runtime_reactor_key) =
+                builder_parts.aliases.reactor_aliases[port.get_reactor_key()];
+            assert_eq!(enclave_key, reactor_enclave_key, "Crosscheck");
+            let scope = enclave.root_scope(runtime_reactor_key);
+            enclave.insert_port_scope(port_key, scope);
         }
 
         Ok(())
@@ -423,12 +473,22 @@ impl EnvBuilder {
                         transition: runtime::TransitionKind::Reset,
                     });
 
+            let reaction_scope = if let Some(mode_key) = reaction.scope_mode {
+                let (mode_enclave_key, runtime_mode_key) =
+                    builder_parts.aliases.mode_aliases[mode_key];
+                assert_eq!(enclave_key, mode_enclave_key, "Crosscheck");
+                enclave.mode_scope(runtime_mode_key)
+            } else {
+                enclave.root_scope(runtime_reactor_key)
+            };
+
             let runtime_reaction_key = enclave.insert_reaction(
                 runtime::Reaction::new(&reaction_name, reaction_body, None),
                 runtime_reactor_key,
                 use_ports,
                 effect_ports,
                 actions,
+                reaction_scope,
                 mode_filter,
                 transition_to,
             );
@@ -501,6 +561,7 @@ impl EnvBuilder {
 
         self.build_runtime_reactors(&partition_map, &mut builder_parts)?;
         self.build_runtime_modes(&mut builder_parts)?;
+        self.assign_runtime_action_and_port_scopes(&mut builder_parts, &port_bindings)?;
 
         // must be done last, since building other parts may add new reactions
         self.build_runtime_reactions(&partition_map, &mut builder_parts, &reaction_levels)?;

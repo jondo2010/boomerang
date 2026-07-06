@@ -242,8 +242,7 @@ impl EnvBuilder {
                 self.reactor_builders[reactor_key].name()
             )));
         }
-        let target_name = Box::leak(mode.name.clone().into_boxed_str());
-        Ok(BuilderModeEffect::new(mode_key, target_name, transition))
+        Ok(BuilderModeEffect::new(mode_key, transition))
     }
 
     /// Add a Timer Action to the given Reactor

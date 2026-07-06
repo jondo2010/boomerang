@@ -190,13 +190,6 @@ impl ReactionGraph {
             .iter()
             .flat_map(|&action_key| self.action_triggers[action_key].iter().copied())
     }
-
-    pub fn mode_for_reactor_name(&self, reactor_key: ReactorKey, name: &str) -> Option<ModeKey> {
-        self.reactor_mode_names[reactor_key]
-            .iter()
-            .find(|(_, mode_name)| mode_name.as_str() == name)
-            .map(|(mode_key, _)| *mode_key)
-    }
 }
 
 tinymap::key_type! { pub EnclaveKey }

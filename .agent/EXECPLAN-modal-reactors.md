@@ -21,6 +21,7 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 - [x] (2026-07-06 21:39Z) Extended static scope ownership to child reactor instances and delayed/physical connection helper reactors before scheduler local-time work.
 - [x] (2026-07-06 21:49Z) Replaced the temporary compatibility syntax with macro-generated mode handles for typed transition effects in structural mode declarations.
 - [x] (2026-07-06 21:58Z) Added scheduler active-scope checks so reactions in child reactors nested under inactive modes do not execute.
+- [x] (2026-07-06 22:02Z) Resolved typed mode effects to runtime `ModeKey`s during lowering so `.set(ctx)` no longer does name lookup in the scheduler.
 - [ ] Implement mode-local event queues and local-time scheduling.
 - [ ] Implement reset/history transition application, including recursive reset of contained modal reactors.
 - [ ] Implement modal startup, shutdown, and reset-trigger behavior.
@@ -64,6 +65,9 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 
 - Observation: Child reactors created through the normal macro-facing `add_child_reactor` path did not inherit the enclosing mode scope, even after `add_child_with` was fixed.
   Evidence: The new `boomerang/tests/modal_nested_reactions.rs` initially failed because a child reactor declared inside an inactive `active` mode still ran its `(startup)` reaction and panicked. Threading `scope_mode` through the internal `Reactor::build` path and checking `Store::scope_is_active` in the scheduler makes `cargo test -p boomerang modal_nested_reactions` pass.
+
+- Observation: Typed mode effects can be resolved from builder keys to runtime keys once, when the reaction closure is lowered, instead of leaking mode names and resolving names after every transition request.
+  Evidence: `rg -n "Box::leak|new_name|ModeTransitionTarget|mode_for_reactor_name|target_name" boomerang_builder boomerang_runtime` returns no matches after adding `ResolveModeEffects`, and `cargo test -p boomerang_builder`, `cargo test -p boomerang_macros`, `cargo test -p boomerang modal_basic`, `cargo test -p boomerang mixed_reactions`, and `cargo test -p boomerang modal_structural_syntax` pass.
 
 ## Decision Log
 
@@ -113,6 +117,10 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 
 - Decision: Treat the optional enclosing mode on `Reactor::build` as internal macro/developer plumbing and expose `ReactorBuilderState::set_scope_mode` as `#[doc(hidden)]`.
   Rationale: Normal users should continue to express scope with `mode!` blocks. The builder still needs a validated way for generated child-reactor construction to attach a child root scope to the enclosing mode before the child adds ports, actions, reactions, and its own children.
+  Date/Author: 2026-07-06 / Codex.
+
+- Decision: Resolve typed mode transition effects to runtime `ModeKey`s during reaction lowering.
+  Rationale: A mode transition is a hot-path runtime operation. The builder already knows the exact target mode and has alias maps during lowering, so name strings and scheduler lookups are unnecessary overhead and make invalid targets harder to reason about.
   Date/Author: 2026-07-06 / Codex.
 
 ## Outcomes & Retrospective
@@ -571,3 +579,5 @@ Change log: 2026-07-06 / Codex: extended mode scope ownership to child reactor i
 Change log: 2026-07-06 / Codex: removed spike modal syntax and unconditional static transitions, converted modal integration tests to structural `mode!` blocks with typed `.set(ctx)` effects, and documented the verification.
 
 Change log: 2026-07-06 / Codex: added active scope checks to the scheduler, threaded mode scope through macro-generated child reactor builds, and added a nested inactive-child startup regression test.
+
+Change log: 2026-07-06 / Codex: changed typed mode effects to resolve to runtime `ModeKey`s at lowering time and removed the remaining name-based transition target path.

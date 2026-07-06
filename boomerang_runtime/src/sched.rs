@@ -9,8 +9,8 @@ use crate::{
     keepalive,
     key_set::KeySetView,
     store::Store,
-    CommonContext, Duration, Env, Level, ModeTransitionRequest, ModeTransitionTarget,
-    ReactionGraph, ReactionKey, ReactionSet, ReactionSetLimits, ReactorKey, SendContext, Tag,
+    CommonContext, Duration, Env, Level, ModeTransitionRequest, ReactionGraph, ReactionKey,
+    ReactionSet, ReactionSetLimits, ReactorKey, SendContext, Tag,
 };
 
 #[derive(Debug)]
@@ -766,17 +766,7 @@ impl Scheduler {
         });
 
         for (reactor_key, request) in self.transition_buffer.drain(..) {
-            let mode = match request.target {
-                ModeTransitionTarget::Key(mode) => Some(mode),
-                ModeTransitionTarget::Name(ref name) => self
-                    .reaction_graph
-                    .mode_for_reactor_name(reactor_key, name.as_str()),
-            };
-            if let Some(mode) = mode {
-                self.store.set_mode(reactor_key, mode);
-            } else {
-                tracing::warn!(reactor = ?reactor_key, transition = ?request, "Unknown mode");
-            }
+            self.store.set_mode(reactor_key, request.target);
         }
 
         self.store.reset_ports();

@@ -99,19 +99,15 @@ impl Debug for ReactionBuilder {
 #[derive(Clone, Copy, Debug)]
 pub struct BuilderModeEffect {
     target: BuilderModeKey,
-    target_name: &'static str,
+    runtime_target: Option<runtime::ModeKey>,
     transition: runtime::TransitionKind,
 }
 
 impl BuilderModeEffect {
-    pub(crate) fn new(
-        target: BuilderModeKey,
-        target_name: &'static str,
-        transition: runtime::TransitionKind,
-    ) -> Self {
+    pub(crate) fn new(target: BuilderModeKey, transition: runtime::TransitionKind) -> Self {
         Self {
             target,
-            target_name,
+            runtime_target: None,
             transition,
         }
     }
@@ -130,6 +126,29 @@ impl BuilderModeEffect {
     }
 }
 
+#[doc(hidden)]
+pub trait ResolveModeEffects {
+    fn resolve_mode_effects(&mut self, runtime_parts: &BuilderRuntimeParts);
+}
+
+impl ResolveModeEffects for () {
+    fn resolve_mode_effects(&mut self, _runtime_parts: &BuilderRuntimeParts) {}
+}
+
+impl ResolveModeEffects for BuilderModeEffect {
+    fn resolve_mode_effects(&mut self, runtime_parts: &BuilderRuntimeParts) {
+        self.runtime_target = Some(runtime_parts.aliases.mode_aliases[self.target].1);
+    }
+}
+
+impl<T: ResolveModeEffects, const N: usize> ResolveModeEffects for [T; N] {
+    fn resolve_mode_effects(&mut self, runtime_parts: &BuilderRuntimeParts) {
+        for item in self {
+            item.resolve_mode_effects(runtime_parts);
+        }
+    }
+}
+
 impl runtime::ReactionRefsExtract for BuilderModeEffect {
     type Ref<'store>
         = runtime::ModeEffectRef
@@ -140,12 +159,45 @@ impl runtime::ReactionRefsExtract for BuilderModeEffect {
         &self,
         _refs: &mut runtime::ReactionRefs<'store>,
     ) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
-        Ok(runtime::ModeEffectRef::new_name(
-            self.target_name,
-            self.transition,
-        ))
+        let target = self
+            .runtime_target
+            .ok_or_else(|| runtime::ReactionRefsError::missing("mode effect"))?;
+        Ok(runtime::ModeEffectRef::new_key(target, self.transition))
     }
 }
+
+impl<T: runtime::ReactorData, Q: ActionTag> ResolveModeEffects for TypedActionKey<T, Q> {
+    fn resolve_mode_effects(&mut self, _runtime_parts: &BuilderRuntimeParts) {}
+}
+
+impl ResolveModeEffects for TimerActionKey {
+    fn resolve_mode_effects(&mut self, _runtime_parts: &BuilderRuntimeParts) {}
+}
+
+impl<T: runtime::ReactorData, Q: PortTag, A> ResolveModeEffects for TypedPortKey<T, Q, A> {
+    fn resolve_mode_effects(&mut self, _runtime_parts: &BuilderRuntimeParts) {}
+}
+
+impl<T: runtime::ReactorData, Q: PortTag, A> ResolveModeEffects for PortBank<T, Q, A> {
+    fn resolve_mode_effects(&mut self, _runtime_parts: &BuilderRuntimeParts) {}
+}
+
+macro_rules! impl_resolve_mode_effects {
+    ($($T:ident),*) => {
+        impl<$($T,)*> ResolveModeEffects for ($($T,)*)
+        where
+            $($T: ResolveModeEffects,)*
+        {
+            #[allow(non_snake_case)]
+            fn resolve_mode_effects(&mut self, runtime_parts: &BuilderRuntimeParts) {
+                let ($($T,)*) = self;
+                $($T.resolve_mode_effects(runtime_parts);)*
+            }
+        }
+    };
+}
+
+all_tuples!(impl_resolve_mode_effects, 1, 10, T);
 
 impl ReactionBuilder {
     /// Get the name of this Reaction
@@ -561,7 +613,7 @@ all_tuples!(impl_with_field, 0, 10, F);
 impl<'a, S, Fields> PartialReactionBuilder<'a, S, Fields>
 where
     S: runtime::ReactorData,
-    Fields: runtime::ReactionRefsExtract + Clone + Send + Sync,
+    Fields: runtime::ReactionRefsExtract + ResolveModeEffects + Clone + Send + Sync,
 {
     pub fn with_reaction_fn<F>(
         self,
@@ -589,13 +641,16 @@ where
             ..
         } = self;
         let fields_for_reaction = fields.clone();
-        let reaction_fn: BoxedBuilderReactionFn =
-            Box::new(move |_: &BuilderRuntimeParts| -> runtime::BoxedReactionFn {
+        let reaction_fn: BoxedBuilderReactionFn = Box::new(
+            move |runtime_parts: &BuilderRuntimeParts| -> runtime::BoxedReactionFn {
+                let mut fields_for_reaction = fields_for_reaction.clone();
+                fields_for_reaction.resolve_mode_effects(runtime_parts);
                 Box::new(runtime::reaction::FnRefsAdapter::new(
                     fields_for_reaction,
                     f,
                 ))
-            });
+            },
+        );
         PartialReactionBuilder {
             name,
             reaction_fn,

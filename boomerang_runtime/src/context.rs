@@ -3,46 +3,29 @@ use crate::{
     EnclaveKey, ModeKey, ReactionGraph, ReactionKey, ReactorData, Tag, TransitionKind,
 };
 
-/// Identifies a requested mode transition target.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ModeTransitionTarget {
-    Key(ModeKey),
-    Name(String),
-}
-
 /// A mode transition requested by a reaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModeTransitionRequest {
-    pub target: ModeTransitionTarget,
+    pub target: ModeKey,
     pub transition: TransitionKind,
 }
 
 /// A typed mode transition effect passed into a reaction closure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModeEffectRef {
-    target: ModeTransitionTarget,
+    target: ModeKey,
     transition: TransitionKind,
 }
 
 impl ModeEffectRef {
     pub fn new_key(target: ModeKey, transition: TransitionKind) -> Self {
-        Self {
-            target: ModeTransitionTarget::Key(target),
-            transition,
-        }
-    }
-
-    pub fn new_name(target: impl Into<String>, transition: TransitionKind) -> Self {
-        Self {
-            target: ModeTransitionTarget::Name(target.into()),
-            transition,
-        }
+        Self { target, transition }
     }
 
     /// Request this mode transition after the current reaction finishes.
     pub fn set(&self, ctx: &mut Context) {
         ctx.set_mode_transition(ModeTransitionRequest {
-            target: self.target.clone(),
+            target: self.target,
             transition: self.transition,
         });
     }

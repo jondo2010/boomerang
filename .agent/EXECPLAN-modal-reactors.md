@@ -6,20 +6,22 @@ Reference: `.agent/PLANS.md` in the repository root. This ExecPlan must be maint
 
 ## Purpose / Big Picture
 
-Implement full modal reactor semantics in Boomerang, comparable in intent to Lingua Franca modal reactors. After this work, a Boomerang reactor can declare mutually exclusive modes whose contained reactions, timers, logical actions, child reactors, and delayed connections execute only while their enclosing mode is active. A reaction can transition to another mode, using reset behavior by default or history behavior when requested. Reset discards pending local events and reinitializes modal timing behavior; history suspends and later resumes local time as if no time passed while the mode was inactive.
+Implement full modal reactor semantics in Boomerang. After this work, a Boomerang reactor can declare mutually exclusive modes whose contained reactions, timers, logical actions, child reactors, and delayed connections execute only while their enclosing mode is active. A reaction can transition to another mode, using reset behavior by default or history behavior when requested. Reset discards pending local events and reinitializes modal timing behavior; history suspends and later resumes local time as if no time passed while the mode was inactive.
 
-The user-visible result is a reactor that can model behavior such as "idle" and "active" phases without manually guarding every reaction and without timers in inactive modes continuing to consume logical time. This will be demonstrated by integration tests ported from LF modal model examples, especially cases where a pending action in a history mode resumes later while a pending action in a reset mode is discarded.
+The user-visible result is a reactor that can model behavior such as "idle" and "active" phases without manually guarding every reaction and without timers in inactive modes continuing to consume logical time. This will be demonstrated by integration tests adapted from an external modal-model behavior corpus, especially cases where a pending action in a history mode resumes later while a pending action in a reset mode is discarded.
 
 ## Progress
 
 - [x] (2026-07-06 18:26Z) Replaced the prior minimal reaction-gating ExecPlan with this full-semantics modal reactors plan.
+- [x] (2026-07-06 20:32Z) Added book documentation requirements, no-external-reference guidance for implementation/user docs, and a minimal upstream test-port set.
 - [ ] Agree on the front-end syntax and macro integration details before implementation.
 - [ ] Implement static mode scopes in the builder and runtime graph.
 - [ ] Implement typed transition effects in reaction declarations.
 - [ ] Implement mode-local event queues and local-time scheduling.
 - [ ] Implement reset/history transition application, including recursive reset of contained modal reactors.
 - [ ] Implement modal startup, shutdown, and reset-trigger behavior.
-- [ ] Add LF-style integration tests and performance benchmarks.
+- [ ] Add selected modal-model integration tests and performance benchmarks.
+- [ ] Document the user-facing syntax and semantics in the book under `book/src` without naming the external reference language or its test suite.
 
 ## Surprises & Discoveries
 
@@ -29,9 +31,15 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 - Observation: To make mode declarations ergonomic inside `#[reactor]`, the reactor macro must parse mode blocks itself rather than relying on an ordinary Rust macro statement alone.
   Evidence: Forward references such as a reaction inside `idle` transitioning to `active` require the macro to discover all mode names before emitting builder code for any mode body.
 
+- Observation: The book exists under `book/src`, and `book/src/SUMMARY.md` currently links only Introduction, Quickstart, and Glossary pages.
+  Evidence: `find book/src -maxdepth 2 -type f -print` returns `book/src/replay.md`, `book/src/SUMMARY.md`, `book/src/glossary.md`, `book/src/quickstart.md`, and `book/src/introduction.md`; `book/src/SUMMARY.md` does not yet link `replay.md` or any modal reactors page.
+
+- Observation: The upstream C modal-model directory contains a broad suite, but a smaller set covers distinct semantics needed for Boomerang's first full implementation.
+  Evidence: The directory listing includes `Count3Modes.lf`, `MixedReactions.lf`, `ModalActions.lf`, `ModalAfter.lf`, `ModalCycleBreaker.lf`, `ModalMultiport.lf`, `ModalMultiportBank.lf`, `ModalNestedReactions.lf`, `ModalStartupShutdown.lf`, `ModalStateReset.lf`, `ModalTimers.lf`, several bank/state variants, and a `util` directory. The selected port list below keeps one representative for each distinct semantic area.
+
 ## Decision Log
 
-- Decision: Implement full LF-style modal semantics, not the minimal reaction-filter feature.
+- Decision: Implement full modal semantics, not the minimal reaction-filter feature.
   Rationale: The feature is only useful as "modal reactors" if it controls modal components and local time, not just whether a reaction body is skipped.
   Date/Author: 2026-07-06 / Codex, confirmed by user.
 
@@ -40,11 +48,11 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
   Date/Author: 2026-07-06 / Codex.
 
 - Decision: Reset is the default transition kind; `history(mode_name)` explicitly requests history behavior.
-  Rationale: This matches the LF convention and keeps common transitions concise.
+  Rationale: Reset is the safer default because it discards stale local events and starts the target mode from a predictable timing state. History is less common and should be visually explicit at the transition site.
   Date/Author: 2026-07-06 / Codex, confirmed by user.
 
 - Decision: Do not introduce automatic Rust state field reset in the first full implementation. Use explicit reset reactions over existing Rust state.
-  Rationale: Boomerang state is arbitrary Rust data created from `#[state]` function parameters. Automatically resetting selected fields would require a second state-definition DSL or trait bounds that do not fit existing ergonomics. LF already treats explicit reset reactions as the correct escape hatch for state reinitialization.
+  Rationale: Boomerang state is arbitrary Rust data created from `#[state]` function parameters. Automatically resetting selected fields would require a second state-definition DSL or trait bounds that do not fit existing ergonomics. Explicit reset reactions keep state reset behavior local, visible, and compatible with normal Rust ownership.
   Date/Author: 2026-07-06 / Codex.
 
 - Decision: Use typed mode transition effects instead of `Context::set_mode_name(&'static str)`.
@@ -53,6 +61,18 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 
 - Decision: Represent local time with per-scope local event queues plus an active-scope frontier, not by scanning all queued events on every transition.
   Rationale: Performance depends on inactive modes being cheap. Suspending a mode should not require updating every event in the system, and finding the next event should consider only active scopes.
+  Date/Author: 2026-07-06 / Codex.
+
+- Decision: Keep references to the external reference language and test suite inside this ExecPlan only.
+  Rationale: Boomerang's public API, implementation comments, diagnostics, tests, and user book should stand on their own. User-facing documentation should describe Boomerang behavior directly, not as a comparison to another language.
+  Date/Author: 2026-07-06 / Codex, requested by user.
+
+- Decision: Add book documentation as a required milestone for the feature.
+  Rationale: Modal reactors introduce new front-end syntax and non-obvious timing semantics. The feature is not complete unless users can learn the syntax, reset/history behavior, lifecycle triggers, and local-time behavior from `book/src` without reading the implementation or this ExecPlan.
+  Date/Author: 2026-07-06 / Codex, requested by user.
+
+- Decision: Port a minimal first-wave set of upstream modal-model tests, and explicitly defer redundant or language-specific cases.
+  Rationale: The first-wave set should prove one representative of each semantic class without spending implementation time on duplicates. Rust-specific state reset behavior must be tested with Boomerang-native reset reactions rather than by copying language-specific state syntax.
   Date/Author: 2026-07-06 / Codex.
 
 ## Outcomes & Retrospective
@@ -74,6 +94,8 @@ Important current files:
 - `boomerang_runtime/src/env/mod.rs` defines runtime graph keys and static dependency maps.
 - `boomerang_runtime/src/sched.rs` owns the event queue and reaction scheduling loop.
 - `boomerang_runtime/src/store.rs` owns runtime reactor state, action stores, port stores, reaction objects, and cached reaction borrow contexts.
+- `book/src/SUMMARY.md` is the mdBook table of contents. Add a modal reactors page there.
+- `book/src/glossary.md` defines user-facing terms. Add modal terms there only if the new modal page cannot define them clearly enough on first use.
 
 Terms used in this plan:
 
@@ -161,7 +183,7 @@ Mode syntax is intentionally restricted:
 
 Ports remain reactor-level declarations. A mode may use reactor-level ports in reactions and connections, but may not declare new input or output ports because ports are the stable interface of a reactor.
 
-Nested `mode` blocks are not allowed directly inside another mode. Hierarchical modal behavior is expressed by instantiating a child reactor that itself has modes inside a parent mode. This matches LF's practical composition model and keeps the builder graph simple.
+Nested `mode` blocks are not allowed directly inside another mode. Hierarchical modal behavior is expressed by instantiating a child reactor that itself has modes inside a parent mode. This keeps the builder graph simple and uses the existing reactor composition model.
 
 An unqualified mode effect such as `-> active` means reset. The explicit spelling `-> reset(active)` is accepted as an alias. The spelling `-> history(active)` requests history.
 
@@ -198,6 +220,25 @@ For history transitions, the runtime preserves queued local events. While the sc
 Mode-local logical actions, timers, and delayed connections are scheduled in local time. Root-scope actions, timers, and connections keep current global behavior.
 
 External physical actions require careful treatment because physical events happen in wall-clock time, not logical local time. For the first full implementation, physical actions declared in a mode should be accepted but their incoming events should be delivered only if their enclosing mode is active at the event tag; they are not suspended and replayed by history. This behavior must be documented and tested. If this proves surprising during implementation, record the discovery and consider rejecting mode-local physical actions until a better semantic model is designed.
+
+## Reference Test Porting
+
+Use the Lingua Franca C modal-model tests only as an external behavior corpus for this ExecPlan. Do not mention Lingua Franca, LF, or the upstream test suite in Boomerang implementation comments, public API docs, diagnostics, user book pages, or test names. The Boomerang tests should be written as native Rust integration tests with direct assertions over observed output and state.
+
+Port or adapt this first-wave set because each file covers a distinct semantic area:
+
+- `Count3Modes.lf` becomes `boomerang/tests/modal_count_3_modes.rs`. It proves the smallest useful reset cycle through three sibling modes and verifies that only the active mode responds to each trigger.
+- `MixedReactions.lf` becomes `boomerang/tests/modal_mixed_reactions.rs`. It proves deterministic ordering between root-scope reactions and mode-scope reactions, and it proves that a transition requested at a tag does not make the target mode run at that same tag.
+- `ModalStateReset.lf` becomes `boomerang/tests/modal_reset_reactions.rs`, adapted to Boomerang's Rust state model. It should not implement automatic `reset state` syntax; instead, it proves that a `(reset)` reaction runs on reset entry and can explicitly restore user state.
+- `ModalTimers.lf` becomes `boomerang/tests/modal_timers.rs`. It proves that timers declared inside modes are suspended while inactive, reset on reset entry, and resumed according to local time on history entry.
+- `ModalActions.lf` becomes `boomerang/tests/modal_actions.rs`. It proves that logical actions scheduled inside modes do not fire while inactive, resume with remaining local delay on history entry, and do not leak across reset entry.
+- `ModalAfter.lf` becomes `boomerang/tests/modal_delayed_connections.rs`. It proves that delayed connections inside modes use mode-local time and obey the same reset/history behavior as mode-local logical actions.
+- `ModalStartupShutdown.lf` becomes `boomerang/tests/modal_startup_shutdown.rs`. It proves startup, reset, and shutdown reactions in modes, including an unreachable mode whose lifecycle reactions must never run.
+- `ModalNestedReactions.lf` becomes `boomerang/tests/modal_nested_reactions.rs`. It proves that reactions and connections indirectly nested in an inactive mode through a child reactor are disabled.
+- `ModalCycleBreaker.lf` becomes `boomerang/tests/modal_cycle_breaker.rs`. It proves that the static dependency graph and cycle analysis account for mutually exclusive mode scopes and do not reject a model only because inactive-mode edges would form a cycle if all modes were flattened together.
+- `ModalMultiportBank.lf` becomes `boomerang/tests/modal_multiport_bank.rs`. It proves that mode-scoped reactor banks and multiport connections route only through the active branch. If port-bank support is temporarily unstable while modal scheduling is being built, first port `ModalMultiport.lf` as `boomerang/tests/modal_multiport.rs`, then replace or extend it with `ModalMultiportBank.lf` before final acceptance.
+
+Do not port these in the first wave unless a failure points directly at them: `BanksCount3ModesSimple.lf`, `BanksCount3ModesComplex.lf`, `BanksModalStateReset.lf`, `ConvertCaseTest.lf`, `MultipleOutputFeeder_2Connections.lf`, and `MultipleOutputFeeder_ReactionConnections.lf`. They are useful second-wave regression tests, but their first-wave value is covered by the files above or by Boomerang-native tests. Do not directly port `ResetStateVariableOfTypeTime.lf` or `ResetStateVariableWithParameterizedValue.lf`; those depend on state reset syntax that this plan intentionally does not add. Cover their useful behavior with explicit reset reactions over Rust state instead.
 
 ## Performance Design
 
@@ -237,6 +278,10 @@ Then implement transition application after each tag. Collect transition request
 
 Finally, implement startup/shutdown/reset modal triggers and recursive reset behavior. Add tests first or alongside implementation so failures describe the missing semantics precisely.
 
+After the feature behavior is implemented and before final acceptance, document it in the book. Add `book/src/modal-reactors.md` and link it from `book/src/SUMMARY.md`. The page must show the proposed `#[reactor]` syntax, explain mode scopes, transition effects, reset as the default, `history(mode)` transitions, `(reset)` reactions, lifecycle triggers, mode-local timers/actions/delayed connections, and the physical-action caveat. Write the page as Boomerang documentation, not as comparative documentation, and do not name the external reference language or its test suite.
+
+If the new page introduces terms that users will encounter elsewhere, update `book/src/glossary.md` with concise entries for "mode", "mode scope", "reset transition", "history transition", and "local time". Keep the glossary entries short and link readers back to `modal-reactors.md` for examples.
+
 ## Concrete Steps
 
 From repository root `/Users/johhug01/Source/boomerang`, start by confirming the branch and baseline:
@@ -266,12 +311,23 @@ Add builder validation tests in `boomerang_builder/src/tests.rs` for duplicate m
 
 Add runtime tests under `boomerang/tests/`:
 
-- `modal_basic.rs`: a reset transition toggles modes and only the active mode's reaction runs.
-- `modal_mixed_reactions.rs`: top-level reactions and mode reactions execute in deterministic order, and a newly active mode does not run in the same tag.
-- `modal_history_local_time.rs`: a mode schedules a logical action, exits before the action fires, re-enters by history, and the action fires after the remaining local delay.
-- `modal_reset_discards_events.rs`: a mode schedules a logical action, exits before it fires, re-enters by reset, and the old action never fires.
-- `modal_reset_recursive.rs`: resetting a parent mode resets contained child modal reactors to their initial modes.
-- `modal_startup_shutdown.rs`: startup inside a mode runs once on first activation, and shutdown inside a previously activated mode runs at program shutdown even if the mode is inactive.
+- `modal_count_3_modes.rs`: adapted from `Count3Modes.lf`; a reset transition cycles through three modes and only the active mode's reaction runs.
+- `modal_mixed_reactions.rs`: adapted from `MixedReactions.lf`; root reactions and mode reactions execute in deterministic order, and a newly active mode does not run in the same tag.
+- `modal_reset_reactions.rs`: adapted from `ModalStateReset.lf`; reset-triggered reactions explicitly restore Rust state on reset entry.
+- `modal_timers.rs`: adapted from `ModalTimers.lf`; mode-local timers suspend while inactive and reset or resume according to transition kind.
+- `modal_actions.rs`: adapted from `ModalActions.lf`; a mode schedules a logical action, exits before the action fires, re-enters by history, and the action fires after the remaining local delay; the reset path discards stale pending actions.
+- `modal_delayed_connections.rs`: adapted from `ModalAfter.lf`; delayed connections inside modes use mode-local time and obey reset/history behavior.
+- `modal_startup_shutdown.rs`: adapted from `ModalStartupShutdown.lf`; startup inside a mode runs once on first activation, reset reactions run on reset entry, shutdown inside a previously activated mode runs at program shutdown, and unreachable modes do not run lifecycle reactions.
+- `modal_nested_reactions.rs`: adapted from `ModalNestedReactions.lf`; child reactors and connections nested in inactive modes are disabled.
+- `modal_cycle_breaker.rs`: adapted from `ModalCycleBreaker.lf`; cycle validation respects mutually exclusive mode scopes.
+- `modal_multiport_bank.rs`: adapted from `ModalMultiportBank.lf`; modal scopes work with multiports and reactor banks. If this blocks early scheduler work, temporarily add the simpler `modal_multiport.rs` from `ModalMultiport.lf` and replace or extend it before final acceptance.
+
+Add book documentation after the user-facing syntax is stable:
+
+- Create `book/src/modal-reactors.md` with examples and semantics for users.
+- Link the page from `book/src/SUMMARY.md`.
+- Update `book/src/glossary.md` only for terms that remain useful outside the modal reactors page.
+- Ensure the book and implementation do not mention the external reference language or test suite outside this ExecPlan.
 
 After each milestone, run the narrowest useful test:
 
@@ -286,6 +342,11 @@ Before completion, run:
     cargo test
     cargo bench -p boomerang --bench ping_pong
     cargo bench -p boomerang --bench modal_modes
+    mdbook build book
+    rg -n "Lingua Franca|lf-lang|LF-style|LF modal" boomerang_builder boomerang_runtime boomerang_macros book/src
+    rg -n "Lingua Franca|lf-lang|LF-style|LF modal" boomerang/tests --glob 'modal_*.rs'
+
+The `mdbook build book` command should complete without errors. If `mdbook` is not installed in the local environment, record that in `Progress` and run it in CI or another environment before final merge. The `rg` commands should return no matches; they intentionally exclude this ExecPlan and older non-modal test ports because provenance for the modal test corpus belongs here.
 
 ## Validation and Acceptance
 
@@ -304,6 +365,10 @@ When a startup reaction is inside a mode, it runs at most once on first activati
 Performance acceptance:
 
 Non-modal `ping_pong` benchmark results should stay within normal noise of the baseline. If the median changes significantly, investigate before merging. The modal benchmark should demonstrate that adding many inactive modes does not increase per-tag scheduler cost linearly with all inactive events.
+
+Documentation acceptance:
+
+The book contains a linked `book/src/modal-reactors.md` page that explains modal syntax and semantics as Boomerang features. Running `mdbook build book` succeeds where `mdbook` is available. Running `rg -n "Lingua Franca|lf-lang|LF-style|LF modal" boomerang_builder boomerang_runtime boomerang_macros book/src` and `rg -n "Lingua Franca|lf-lang|LF-style|LF modal" boomerang/tests --glob 'modal_*.rs'` returns no matches, proving that modal implementation details and user docs do not name the external reference language or test suite.
 
 ## Idempotence and Recovery
 
@@ -451,4 +516,6 @@ In `boomerang_runtime/src/sched.rs`, introduce an event manager:
 
 The exact names can change, but the design must preserve root-scope behavior and make inactive local queues dormant without scanning them on each global tag.
 
-Change log: 2026-07-06 / Codex: replaced minimal modal reactors plan with full-semantics plan after user confirmed full LF-like semantics, reset default, and branch serialization workflow.
+Change log: 2026-07-06 / Codex: replaced minimal modal reactors plan with full-semantics plan after user confirmed full modal semantics, reset default, and branch serialization workflow.
+
+Change log: 2026-07-06 / Codex: added book documentation requirements, constrained external reference mentions to this ExecPlan, and selected the minimal upstream modal tests to port or adapt.

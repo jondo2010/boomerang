@@ -270,10 +270,14 @@ impl ToTokens for Model {
                     move |name: &str,
                      state: S,
                      parent: Option<::boomerang::builder::BuilderReactorKey>,
+                     scope_mode: Option<::boomerang::builder::BuilderModeKey>,
                      bank_info: Option<::boomerang::runtime::BankInfo>,
                      is_enclave: bool,
                      env: &mut ::boomerang::builder::EnvBuilder| {
                         let mut builder = env.add_reactor(name, parent, bank_info, state, is_enclave);
+                        if let Some(scope_mode) = scope_mode {
+                            builder.set_scope_mode(scope_mode)?;
+                        }
                         #(#create_ports)*
                         f(&mut builder, (#(#local_names,)*))?;
                         builder.finish()?;

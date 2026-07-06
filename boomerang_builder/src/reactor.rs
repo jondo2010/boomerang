@@ -244,7 +244,8 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         self.reactor_key
     }
 
-    pub(crate) fn set_scope_mode(&mut self, mode: BuilderModeKey) -> Result<(), BuilderError> {
+    #[doc(hidden)]
+    pub fn set_scope_mode(&mut self, mode: BuilderModeKey) -> Result<(), BuilderError> {
         let mode_builder = self.env.mode_builders.get(mode).ok_or_else(|| {
             BuilderError::ReactionBuilderError(format!("Unknown mode key {mode:?}"))
         })?;

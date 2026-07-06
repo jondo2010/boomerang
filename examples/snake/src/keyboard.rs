@@ -57,7 +57,7 @@ fn main() {
 
     let mut env_builder = EnvBuilder::new();
     let _ = example::Example()
-        .build("printer", (), None, None, false, &mut env_builder)
+        .build("printer", (), None, None, None, false, &mut env_builder)
         .unwrap();
 
     let config = runtime::Config::default()

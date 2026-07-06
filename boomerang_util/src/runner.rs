@@ -87,7 +87,7 @@ pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
 ) -> anyhow::Result<(R::Ports, Vec<runtime::Env>)> {
     let mut env_builder = EnvBuilder::new();
     let reactor = reactor_builder
-        .build(name, state, None, None, false, &mut env_builder)
+        .build(name, state, None, None, None, false, &mut env_builder)
         .context("Error building top-level reactor!")?;
 
     env_builder.validate_reactions()?;
@@ -137,7 +137,7 @@ where
     // build the reactor
     let mut env_builder = EnvBuilder::new();
     let reactor = reactor
-        .build(name, state, None, None, false, &mut env_builder)
+        .build(name, state, None, None, None, false, &mut env_builder)
         .context("Error building top-level reactor!")?;
 
     let args = Args::parse();

@@ -1,6 +1,6 @@
 //! This module provides traits and implementations for building reactors
 use crate::{
-    runtime, BuilderError, BuilderReactorKey, EnvBuilder, PartialReactionBuilder,
+    runtime, BuilderError, BuilderModeKey, BuilderReactorKey, EnvBuilder, PartialReactionBuilder,
     ReactorBuilderState,
 };
 
@@ -11,6 +11,7 @@ pub trait Reactor<State: runtime::ReactorData = ()>: Sized {
         name: &str,
         state: State,
         parent: Option<BuilderReactorKey>,
+        scope_mode: Option<BuilderModeKey>,
         bank_info: Option<runtime::BankInfo>,
         is_enclave: bool,
         env: &mut EnvBuilder,
@@ -23,6 +24,7 @@ where
             /*name*/ &str,
             /*state*/ State,
             /*parent*/ Option<BuilderReactorKey>,
+            /*scope_mode*/ Option<BuilderModeKey>,
             /*bank_info*/ Option<boomerang_runtime::BankInfo>,
             /*is_enclave*/ bool,
             /*env*/ &mut EnvBuilder,
@@ -36,11 +38,12 @@ where
         name: &str,
         state: State,
         parent: Option<BuilderReactorKey>,
+        scope_mode: Option<BuilderModeKey>,
         bank_info: Option<boomerang_runtime::BankInfo>,
         is_enclave: bool,
         env: &mut EnvBuilder,
     ) -> Result<Self::Ports, BuilderError> {
-        (self)(name, state, parent, bank_info, is_enclave, env)
+        (self)(name, state, parent, scope_mode, bank_info, is_enclave, env)
     }
 }
 
@@ -78,7 +81,16 @@ impl<S: runtime::ReactorData> ReactorBuilderState<'_, S> {
         ChildState: runtime::ReactorData,
         R: Reactor<ChildState>,
     {
-        reactor.build(name, state, Some(self.key()), None, is_enclave, self.env())
+        let scope_mode = self.current_mode();
+        reactor.build(
+            name,
+            state,
+            Some(self.key()),
+            scope_mode,
+            None,
+            is_enclave,
+            self.env(),
+        )
     }
 
     pub fn add_child_reactors<R, ChildState, const N: usize>(
@@ -92,12 +104,14 @@ impl<S: runtime::ReactorData> ReactorBuilderState<'_, S> {
         R: Reactor<ChildState>,
         ChildState: runtime::ReactorData + Clone,
     {
+        let scope_mode = self.current_mode();
         let reactors = (0..N)
             .map(|i| {
                 reactor.build(
                     &format!("{name}_{i}"),
                     state.clone(),
                     Some(self.key()),
+                    scope_mode,
                     Some(runtime::BankInfo { idx: i, total: N }),
                     is_enclave,
                     self.env(),

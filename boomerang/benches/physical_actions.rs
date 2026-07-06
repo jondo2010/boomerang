@@ -43,6 +43,7 @@ fn bench(c: &mut Criterion) {
                             },
                             None,
                             None,
+                            None,
                             false,
                             &mut env_builder,
                         )

@@ -20,6 +20,7 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 - [x] (2026-07-06 21:24Z) Added first static scope metadata: runtime root/mode `ScopeKey`s, action/port/reaction scope maps, builder scope ownership for mode-local actions and reactions, port rejection inside modes, and reset-trigger validation.
 - [x] (2026-07-06 21:39Z) Extended static scope ownership to child reactor instances and delayed/physical connection helper reactors before scheduler local-time work.
 - [x] (2026-07-06 21:49Z) Replaced the temporary compatibility syntax with macro-generated mode handles for typed transition effects in structural mode declarations.
+- [x] (2026-07-06 21:58Z) Added scheduler active-scope checks so reactions in child reactors nested under inactive modes do not execute.
 - [ ] Implement mode-local event queues and local-time scheduling.
 - [ ] Implement reset/history transition application, including recursive reset of contained modal reactors.
 - [ ] Implement modal startup, shutdown, and reset-trigger behavior.
@@ -60,6 +61,9 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 
 - Observation: Once modal integration tests use explicit typed effects, the old unconditional transition graph slot is unnecessary.
   Evidence: `cargo test -p boomerang_macros`, `cargo test -p boomerang_builder`, `cargo test -p boomerang_runtime env::tests`, `cargo test -p boomerang modal`, and `cargo test -p boomerang mixed_reactions` pass after removing `@modes(...)`, `@transition(...)`, `Context::set_mode_name`, `PartialReactionBuilder::with_modes`, `PartialReactionBuilder::with_transition`, and runtime `reaction_transitions`.
+
+- Observation: Child reactors created through the normal macro-facing `add_child_reactor` path did not inherit the enclosing mode scope, even after `add_child_with` was fixed.
+  Evidence: The new `boomerang/tests/modal_nested_reactions.rs` initially failed because a child reactor declared inside an inactive `active` mode still ran its `(startup)` reaction and panicked. Threading `scope_mode` through the internal `Reactor::build` path and checking `Store::scope_is_active` in the scheduler makes `cargo test -p boomerang modal_nested_reactions` pass.
 
 ## Decision Log
 
@@ -105,6 +109,10 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 
 - Decision: Remove the spike compatibility syntax and unconditional transition builder/runtime path now that structural `mode!` tests use typed effects.
   Rationale: Keeping two modal front-end APIs would obscure the developer API and create a second transition semantic where a reaction always transitions merely because it declared a target. The intended API requires user code to call `.set(ctx)`, which makes conditional transitions explicit and matches reset/history effect declarations.
+  Date/Author: 2026-07-06 / Codex.
+
+- Decision: Treat the optional enclosing mode on `Reactor::build` as internal macro/developer plumbing and expose `ReactorBuilderState::set_scope_mode` as `#[doc(hidden)]`.
+  Rationale: Normal users should continue to express scope with `mode!` blocks. The builder still needs a validated way for generated child-reactor construction to attach a child root scope to the enclosing mode before the child adds ports, actions, reactions, and its own children.
   Date/Author: 2026-07-06 / Codex.
 
 ## Outcomes & Retrospective
@@ -561,3 +569,5 @@ Change log: 2026-07-06 / Codex: added the first static scope metadata layer for 
 Change log: 2026-07-06 / Codex: extended mode scope ownership to child reactor instances and synthetic delayed/physical connection helper reactors, and recorded focused verification for that slice.
 
 Change log: 2026-07-06 / Codex: removed spike modal syntax and unconditional static transitions, converted modal integration tests to structural `mode!` blocks with typed `.set(ctx)` effects, and documented the verification.
+
+Change log: 2026-07-06 / Codex: added active scope checks to the scheduler, threaded mode scope through macro-generated child reactor builds, and added a nested inactive-child startup regression test.

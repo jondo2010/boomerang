@@ -684,11 +684,14 @@ impl Scheduler {
             self.reaction_buffer.clear();
             for reaction_key in reaction_keys {
                 let reactor_key = self.reaction_graph.reaction_reactors[reaction_key];
+                let scope_key = self.reaction_graph.reaction_scopes[reaction_key];
+                let scope_enabled = self.store.scope_is_active(&self.reaction_graph, scope_key);
                 let current_mode = self.store.current_mode(reactor_key);
-                let enabled = match self.reaction_graph.reaction_modes[reaction_key].as_ref() {
+                let mode_enabled = match self.reaction_graph.reaction_modes[reaction_key].as_ref() {
                     Some(filter) => filter.allows(current_mode),
                     None => true,
                 };
+                let enabled = scope_enabled && mode_enabled;
                 if enabled {
                     self.reaction_buffer.push(reaction_key);
                 }

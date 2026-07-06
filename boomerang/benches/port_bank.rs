@@ -172,6 +172,7 @@ fn bench(c: &mut Criterion) {
                             BenchState::default(),
                             None,
                             None,
+                            None,
                             false,
                             &mut env_builder,
                         )

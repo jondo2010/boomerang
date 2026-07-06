@@ -814,11 +814,15 @@ impl ToTokens for ArgsModel {
                     move |name: &str,
                          state: #state_type_path,
                          parent: Option<::boomerang::builder::BuilderReactorKey>,
+                         scope_mode: Option<::boomerang::builder::BuilderModeKey>,
                          bank_info: Option<::boomerang::runtime::BankInfo>,
                          is_enclave: bool,
                          env: &mut ::boomerang::builder::EnvBuilder| {
                         #(#len_bindings)*
                         let mut builder = env.add_reactor(name, parent, bank_info, state, is_enclave);
+                        if let Some(scope_mode) = scope_mode {
+                            builder.set_scope_mode(scope_mode)?;
+                        }
                         #(#create_ports)*
                         (move |builder: &mut ::boomerang::builder::ReactorBuilderState<'_, #state_type_path>,
                               ports: (#(#local_types,)* )| -> Result<(), ::boomerang::builder::BuilderError> {

@@ -5,7 +5,8 @@ use std::{pin::Pin, ptr::NonNull};
 use crate::{
     refs::{Refs, RefsMut},
     ActionKey, BaseAction, BasePort, BaseReactor, CommonContext, Context, Deadline, ModeKey,
-    PortKey, Reaction, ReactionKey, ReactionRefs, ReactorData, ReactorKey, Tag, TriggerRes,
+    PortKey, Reaction, ReactionKey, ReactionRefs, ReactorData, ReactorKey, ScopeKey, Tag,
+    TriggerRes,
 };
 
 use super::{Env, ReactionGraph};
@@ -323,6 +324,22 @@ impl Store {
             .get(reactor_key)
             .copied()
             .flatten()
+    }
+
+    pub fn scope_is_active(&self, reaction_graph: &ReactionGraph, mut scope_key: ScopeKey) -> bool {
+        loop {
+            let scope = &reaction_graph.scopes[scope_key];
+            if let Some(mode_key) = scope.mode {
+                if self.current_mode(scope.reactor) != Some(mode_key) {
+                    return false;
+                }
+            }
+
+            let Some(parent) = scope.parent else {
+                return true;
+            };
+            scope_key = parent;
+        }
     }
 
     pub fn set_mode(&mut self, reactor_key: ReactorKey, mode: ModeKey) {

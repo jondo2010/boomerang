@@ -29,6 +29,7 @@ pub use port::{
 pub use reaction::*;
 pub use reactor::*;
 
+pub use boomerang_runtime::TransitionKind;
 use boomerang_runtime::{self as runtime};
 
 #[derive(thiserror::Error, Debug)]

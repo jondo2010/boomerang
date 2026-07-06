@@ -54,9 +54,10 @@ pub mod prelude {
     //! Re-exported common types and traits for Boomerang
 
     pub use super::builder::{
-        BuilderError, BuilderFqn, BuilderRuntimeParts, Contained, EnvBuilder, Input, Local,
-        Logical, Output, Physical, PortBank, Reactor, TimerActionKey, TimerSpec, TypedActionKey,
-        TypedPortKey, BuilderModeKey, BuilderReactorKey,
+        BuilderError, BuilderFqn, BuilderModeEffect, BuilderModeKey, BuilderReactorKey,
+        BuilderRuntimeParts, Contained, EnvBuilder, Input, Local, Logical, ModeKind, Output,
+        Physical, PortBank, Reactor, TimerActionKey, TimerSpec, TransitionKind, TypedActionKey,
+        TypedPortKey,
     };
 
     pub use super::runtime::{self, action::ActionCommon, CommonContext, Duration, FromRefs, Tag};
@@ -65,7 +66,6 @@ pub mod prelude {
 
     pub use crate::flatten_transposed::FlattenTransposedExt;
 }
-
 
 /// Top-level error type for Boomerang
 #[derive(thiserror::Error, Debug)]

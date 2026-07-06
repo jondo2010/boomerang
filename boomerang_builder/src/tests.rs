@@ -103,6 +103,54 @@ fn test_reactions_without_trigger() {
 }
 
 #[test]
+fn test_mode_kind_effect_and_reset_trigger_builder() {
+    let mut env_builder = EnvBuilder::new();
+    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, (), false);
+
+    let idle = reactor_builder.add_mode("idle", ModeKind::Initial).unwrap();
+    let active = reactor_builder
+        .add_mode("active", ModeKind::Normal)
+        .unwrap();
+    let active_effect = reactor_builder.reset_mode_effect(active).unwrap();
+    let tick = reactor_builder
+        .add_logical_action::<()>("tick", None)
+        .unwrap();
+
+    let switch_reaction = reactor_builder
+        .add_reaction(Some("switch"))
+        .with_trigger(tick)
+        .with_effect(active_effect)
+        .with_reaction_fn(|ctx, _state, (_tick, active)| {
+            active.set(ctx);
+        })
+        .finish()
+        .unwrap();
+
+    let reset_reaction = reactor_builder
+        .add_reaction(Some("reset_active"))
+        .with_reset_trigger()
+        .with_modes([active])
+        .with_reaction_fn(|_ctx, _state, ()| {})
+        .finish()
+        .unwrap();
+
+    let _reactor_key = reactor_builder.finish().unwrap();
+
+    assert_eq!(env_builder.reactor_builders.len(), 1);
+    assert_eq!(env_builder.mode_builders[idle].kind, ModeKind::Initial);
+    assert_eq!(env_builder.mode_builders[active].kind, ModeKind::Normal);
+    assert_eq!(
+        env_builder.reaction_builders[switch_reaction].mode_effects[0].target(),
+        active
+    );
+    assert_eq!(
+        env_builder.reaction_builders[switch_reaction].mode_effects[0].transition(),
+        runtime::TransitionKind::Reset
+    );
+    assert!(env_builder.reaction_builders[reset_reaction].reset_trigger);
+}
+
+#[test]
 fn test_reactions_startup_shutdown() {
     let mut env_builder = EnvBuilder::new();
     let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, (), false);
@@ -155,7 +203,9 @@ fn test_reactions_startup_shutdown() {
 
     let BuilderRuntimeParts {
         enclaves, aliases, ..
-    } = env_builder.into_runtime_parts(&runtime::Config::default()).unwrap();
+    } = env_builder
+        .into_runtime_parts(&runtime::Config::default())
+        .unwrap();
     let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();
     let r0_key = aliases.reaction_aliases[r0_key].1;
     let r1_key = aliases.reaction_aliases[r1_key].1;
@@ -217,7 +267,9 @@ fn test_actions1() {
     let _reactor_key = reactor_builder.finish().unwrap();
     let BuilderRuntimeParts {
         enclaves, aliases, ..
-    } = env_builder.into_runtime_parts(&runtime::Config::default()).unwrap();
+    } = env_builder
+        .into_runtime_parts(&runtime::Config::default())
+        .unwrap();
     let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();
 
     let reaction_a = aliases.reaction_aliases[reaction_a].1;
@@ -277,7 +329,9 @@ fn reaction_refs_extract_reports_missing() {
     let port = TypedPortKey::<u32, Input, Local>::new(BuilderPortKey::default());
     let res = port.extract(&mut refs);
 
-    assert!(matches!(res, Err(runtime::ReactionRefsError::Missing { kind }) if kind == "input port"));
+    assert!(
+        matches!(res, Err(runtime::ReactionRefsError::Missing { kind }) if kind == "input port")
+    );
 }
 
 #[test]
@@ -308,9 +362,11 @@ fn reaction_refs_extract_reports_type_mismatch() {
     let port = TypedPortKey::<u32, Input, Local>::new(BuilderPortKey::default());
     let res = port.extract(&mut refs);
 
-    assert!(matches!(res, Err(runtime::ReactionRefsError::TypeMismatch { kind, expected, found })
-        if kind == "input port" && expected == std::any::type_name::<u32>() && found == std::any::type_name::<bool>()
-    ));
+    assert!(
+        matches!(res, Err(runtime::ReactionRefsError::TypeMismatch { kind, expected, found })
+            if kind == "input port" && expected == std::any::type_name::<u32>() && found == std::any::type_name::<bool>()
+        )
+    );
 }
 
 /// Test port bindings and connections within a nested reactor.
@@ -369,7 +425,9 @@ fn test_nested_reactor() {
 
     let BuilderRuntimeParts {
         enclaves, aliases, ..
-    } = env_builder.into_runtime_parts(&runtime::Config::default()).unwrap();
+    } = env_builder
+        .into_runtime_parts(&runtime::Config::default())
+        .unwrap();
     assert_eq!(enclaves.len(), 1);
 
     assert_eq!(
@@ -431,7 +489,9 @@ fn test_reaction_ports() -> anyhow::Result<()> {
 
     let BuilderRuntimeParts {
         enclaves, aliases, ..
-    } = env_builder.into_runtime_parts(&runtime::Config::default()).unwrap();
+    } = env_builder
+        .into_runtime_parts(&runtime::Config::default())
+        .unwrap();
     assert_eq!(enclaves.len(), 1);
     let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();
 
@@ -448,7 +508,9 @@ fn test_reaction_ports() -> anyhow::Result<()> {
 
     // reactionA should "effect" (be able to write to) portB
     itertools::assert_equal(
-        enclave.graph.reaction_effect_ports[reaction_a].iter().copied(),
+        enclave.graph.reaction_effect_ports[reaction_a]
+            .iter()
+            .copied(),
         std::iter::once(port_b),
     );
 
@@ -863,7 +925,9 @@ fn test_enclave_partitioning() {
 
     let world = reactor_builder.finish().unwrap();
 
-    let builder_parts = env_builder.into_runtime_parts(&runtime::Config::default()).unwrap();
+    let builder_parts = env_builder
+        .into_runtime_parts(&runtime::Config::default())
+        .unwrap();
     assert_eq!(builder_parts.enclaves.len(), 2, "Expected 2 enclaves");
 
     let (world_enclave, world_key) = builder_parts.aliases.reactor_aliases[world];
@@ -1010,7 +1074,9 @@ fn test_enclave2() {
         enclaves,
         aliases: _,
         ..
-    } = env_builder.into_runtime_parts(&runtime::Config::default()).unwrap();
+    } = env_builder
+        .into_runtime_parts(&runtime::Config::default())
+        .unwrap();
     assert_eq!(enclaves.len(), 3);
 
     let config = runtime::Config::default()
@@ -1109,7 +1175,9 @@ fn test_port_binding() {
 
     let BuilderRuntimeParts {
         enclaves, aliases, ..
-    } = env_builder.into_runtime_parts(&runtime::Config::default()).unwrap();
+    } = env_builder
+        .into_runtime_parts(&runtime::Config::default())
+        .unwrap();
     assert_eq!(enclaves.len(), 1);
     let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();
     assert_eq!(enclave.env.reactors.len(), 4);

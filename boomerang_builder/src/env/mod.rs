@@ -6,10 +6,13 @@ use crate::{
 };
 
 use super::{
-    action::ActionBuilder, port::BasePortBuilder, port::PortBuilder, reaction::ReactionBuilder,
+    action::ActionBuilder,
+    port::BasePortBuilder,
+    port::PortBuilder,
+    reaction::{BuilderModeEffect, ReactionBuilder},
     runtime, ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderModeKey,
-    BuilderPortKey, BuilderReactionKey, BuilderReactorKey, Input, Logical, Output, PortTag,
-    ReactorBuilder, ReactorBuilderState, TypedActionKey, TypedPortKey,
+    BuilderPortKey, BuilderReactionKey, BuilderReactorKey, Input, Logical, ModeKind, Output,
+    PortTag, ReactorBuilder, ReactorBuilderState, TypedActionKey, TypedPortKey,
 };
 use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, EdgeDirection};
@@ -64,7 +67,7 @@ type ReplayFunctionBuilder = dyn FnOnce(&BuilderRuntimeParts) -> Box<dyn runtime
 pub struct ModeBuilder {
     pub name: String,
     pub reactor_key: BuilderReactorKey,
-    pub initial: bool,
+    pub kind: ModeKind,
 }
 
 #[derive(Default)]
@@ -188,8 +191,9 @@ impl EnvBuilder {
         &mut self,
         name: &str,
         reactor_key: BuilderReactorKey,
-        initial: bool,
+        kind: impl Into<ModeKind>,
     ) -> Result<BuilderModeKey, BuilderError> {
+        let kind = kind.into();
         let reactor_builder = &mut self.reactor_builders[reactor_key];
         if reactor_builder.modes.keys().any(|mode_key| {
             self.mode_builders[mode_key].name == name
@@ -201,7 +205,7 @@ impl EnvBuilder {
             });
         }
 
-        if initial && reactor_builder.initial_mode.is_some() {
+        if kind.is_initial() && reactor_builder.initial_mode.is_some() {
             return Err(BuilderError::MultipleInitialModes {
                 reactor_name: reactor_builder.name().to_owned(),
             });
@@ -210,15 +214,38 @@ impl EnvBuilder {
         let key = self.mode_builders.insert(ModeBuilder {
             name: name.to_owned(),
             reactor_key,
-            initial,
+            kind,
         });
 
         reactor_builder.modes.insert(key, ());
-        if initial {
+        if kind.is_initial() {
             reactor_builder.initial_mode = Some(key);
         }
 
         Ok(key)
+    }
+
+    pub fn mode_effect(
+        &self,
+        reactor_key: BuilderReactorKey,
+        mode_key: BuilderModeKey,
+        transition: runtime::TransitionKind,
+    ) -> Result<BuilderModeEffect, BuilderError> {
+        let mode = self.mode_builders.get(mode_key).ok_or_else(|| {
+            BuilderError::ReactionBuilderError(format!("Unknown mode key {mode_key:?}"))
+        })?;
+        if mode.reactor_key != reactor_key {
+            return Err(BuilderError::ReactionBuilderError(format!(
+                "Mode '{}' does not belong to reactor '{}'",
+                mode.name,
+                self.reactor_builders[reactor_key].name()
+            )));
+        }
+        Ok(BuilderModeEffect::new(
+            mode_key,
+            mode.name.clone(),
+            transition,
+        ))
     }
 
     /// Add a Timer Action to the given Reactor

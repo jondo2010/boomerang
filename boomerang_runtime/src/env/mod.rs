@@ -58,6 +58,20 @@ pub type LevelReactionKey = (Level, ReactionKey);
 
 tinymap::key_type! { pub ModeKey }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum TransitionKind {
+    Reset,
+    History,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ModeTransitionEffect {
+    pub target: ModeKey,
+    pub transition: TransitionKind,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ModeFilter {
@@ -153,8 +167,8 @@ pub struct ReactionGraph {
     pub reactor_initial_modes: tinymap::TinySecondaryMap<ReactorKey, Option<ModeKey>>,
     /// Mode filter per reaction (None means always enabled)
     pub reaction_modes: tinymap::TinySecondaryMap<ReactionKey, Option<ModeFilter>>,
-    /// Transition target per reaction
-    pub reaction_transitions: tinymap::TinySecondaryMap<ReactionKey, Option<ModeKey>>,
+    /// Static transition effect per reaction.
+    pub reaction_transitions: tinymap::TinySecondaryMap<ReactionKey, Option<ModeTransitionEffect>>,
 }
 
 impl ReactionGraph {
@@ -165,11 +179,7 @@ impl ReactionGraph {
             .flat_map(|&action_key| self.action_triggers[action_key].iter().copied())
     }
 
-    pub fn mode_for_reactor_name(
-        &self,
-        reactor_key: ReactorKey,
-        name: &str,
-    ) -> Option<ModeKey> {
+    pub fn mode_for_reactor_name(&self, reactor_key: ReactorKey, name: &str) -> Option<ModeKey> {
         self.reactor_mode_names[reactor_key]
             .iter()
             .find(|(_, mode_name)| mode_name.as_str() == name)
@@ -313,7 +323,7 @@ impl Enclave {
         effect_ports: impl IntoIterator<Item = PortKey>,
         actions: impl IntoIterator<Item = ActionKey>,
         mode_filter: Option<ModeFilter>,
-        transition_to: Option<ModeKey>,
+        transition_to: Option<ModeTransitionEffect>,
     ) -> ReactionKey {
         let reaction_key = self.env.reactions.insert(reaction);
         self.graph
@@ -328,9 +338,7 @@ impl Enclave {
         self.graph
             .reaction_reactors
             .insert(reaction_key, reactor_key);
-        self.graph
-            .reaction_modes
-            .insert(reaction_key, mode_filter);
+        self.graph.reaction_modes.insert(reaction_key, mode_filter);
         self.graph
             .reaction_transitions
             .insert(reaction_key, transition_to);
@@ -405,10 +413,7 @@ impl Enclave {
             self.env.reactions.keys(),
             self.graph.reaction_reactors.keys(),
         );
-        itertools::assert_equal(
-            self.env.reactions.keys(),
-            self.graph.reaction_modes.keys(),
-        );
+        itertools::assert_equal(self.env.reactions.keys(), self.graph.reaction_modes.keys());
         itertools::assert_equal(
             self.env.reactions.keys(),
             self.graph.reaction_transitions.keys(),
@@ -417,10 +422,7 @@ impl Enclave {
             self.env.reactors.keys(),
             self.graph.reactor_bank_infos.keys(),
         );
-        itertools::assert_equal(
-            self.env.reactors.keys(),
-            self.graph.reactor_modes.keys(),
-        );
+        itertools::assert_equal(self.env.reactors.keys(), self.graph.reactor_modes.keys());
         itertools::assert_equal(
             self.env.reactors.keys(),
             self.graph.reactor_mode_names.keys(),

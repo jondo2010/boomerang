@@ -1,9 +1,9 @@
 use std::fmt::Debug;
 
 use super::{
-    ActionTag, ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey,
-    BuilderReactionKey, EnvBuilder, Input, Logical, Output, Physical, PortTag, TimerActionKey,
-    TimerSpec, TypedActionKey, TypedPortKey, PortBank,
+    ActionTag, ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderModeEffect,
+    BuilderPortKey, BuilderReactionKey, EnvBuilder, Input, Logical, Output, Physical, PortBank,
+    PortTag, TimerActionKey, TimerSpec, TypedActionKey, TypedPortKey,
 };
 use crate::runtime;
 use slotmap::SecondaryMap;
@@ -14,6 +14,28 @@ slotmap::new_key_type! {
 
 slotmap::new_key_type! {
     pub struct BuilderModeKey;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModeKind {
+    Initial,
+    Normal,
+}
+
+impl ModeKind {
+    pub fn is_initial(self) -> bool {
+        matches!(self, ModeKind::Initial)
+    }
+}
+
+impl From<bool> for ModeKind {
+    fn from(initial: bool) -> Self {
+        if initial {
+            ModeKind::Initial
+        } else {
+            ModeKind::Normal
+        }
+    }
 }
 
 impl petgraph::graph::GraphIndex for BuilderReactorKey {
@@ -274,9 +296,31 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
     pub fn add_mode(
         &mut self,
         name: &str,
-        initial: bool,
+        kind: impl Into<ModeKind>,
     ) -> Result<BuilderModeKey, BuilderError> {
-        self.env.add_mode(name, self.reactor_key, initial)
+        self.env.add_mode(name, self.reactor_key, kind)
+    }
+
+    pub fn mode_effect(
+        &self,
+        mode: BuilderModeKey,
+        transition: runtime::TransitionKind,
+    ) -> Result<BuilderModeEffect, BuilderError> {
+        self.env.mode_effect(self.reactor_key, mode, transition)
+    }
+
+    pub fn reset_mode_effect(
+        &self,
+        mode: BuilderModeKey,
+    ) -> Result<BuilderModeEffect, BuilderError> {
+        self.mode_effect(mode, runtime::TransitionKind::Reset)
+    }
+
+    pub fn history_mode_effect(
+        &self,
+        mode: BuilderModeKey,
+    ) -> Result<BuilderModeEffect, BuilderError> {
+        self.mode_effect(mode, runtime::TransitionKind::History)
     }
 
     /// Add a new input port to this reactor.
@@ -311,10 +355,8 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
     ) -> Result<PortBank<T, Q>, BuilderError> {
         let mut ports = Vec::with_capacity(len);
         for i in 0..len {
-            let port = self.add_port::<T, Q>(
-                name,
-                Some(runtime::BankInfo { idx: i, total: len }),
-            )?;
+            let port =
+                self.add_port::<T, Q>(name, Some(runtime::BankInfo { idx: i, total: len }))?;
             ports.push(port);
         }
         Ok(PortBank::new(ports))

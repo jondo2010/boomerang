@@ -9,15 +9,9 @@ use crate::{
     keepalive,
     key_set::KeySetView,
     store::Store,
-    CommonContext, Duration, Env, Level, ModeKey, ReactionGraph, ReactionKey, ReactionSet,
-    ReactionSetLimits, ReactorKey, SendContext, Tag,
+    CommonContext, Duration, Env, Level, ModeTransitionRequest, ModeTransitionTarget,
+    ReactionGraph, ReactionKey, ReactionSet, ReactionSetLimits, ReactorKey, SendContext, Tag,
 };
-
-#[derive(Clone, Copy, Debug)]
-enum ModeTransition {
-    Key(ModeKey),
-    Name(&'static str),
-}
 
 #[derive(Debug)]
 struct EventQueue {
@@ -328,7 +322,7 @@ pub struct Scheduler {
     /// Reusable buffer for reaction keys to avoid allocations in hot loops
     reaction_buffer: Vec<ReactionKey>,
     /// Reusable buffer for mode transitions to avoid allocations in hot loops
-    transition_buffer: Vec<(ReactorKey, ModeTransition)>,
+    transition_buffer: Vec<(ReactorKey, ModeTransitionRequest)>,
 }
 
 impl Scheduler {
@@ -724,13 +718,17 @@ impl Scheduler {
             for (idx, trigger_res) in iter_ctx_res {
                 let reaction_key = self.reaction_buffer[idx];
                 let reactor_key = self.reaction_graph.reaction_reactors[reaction_key];
-                if let Some(mode) = self.reaction_graph.reaction_transitions[reaction_key] {
-                    self.transition_buffer
-                        .push((reactor_key, ModeTransition::Key(mode)));
+                if let Some(effect) = self.reaction_graph.reaction_transitions[reaction_key] {
+                    self.transition_buffer.push((
+                        reactor_key,
+                        ModeTransitionRequest {
+                            target: ModeTransitionTarget::Key(effect.target),
+                            transition: effect.transition,
+                        },
+                    ));
                 }
-                if let Some(mode_name) = trigger_res.scheduled_mode_name {
-                    self.transition_buffer
-                        .push((reactor_key, ModeTransition::Name(mode_name)));
+                if let Some(request) = &trigger_res.scheduled_mode {
+                    self.transition_buffer.push((reactor_key, request.clone()));
                 }
 
                 if let Some(shutdown_tag) = trigger_res.scheduled_shutdown {
@@ -773,17 +771,17 @@ impl Scheduler {
             }
         });
 
-        for (reactor_key, transition) in self.transition_buffer.drain(..) {
-            let mode = match transition {
-                ModeTransition::Key(mode) => Some(mode),
-                ModeTransition::Name(name) => {
-                    self.reaction_graph.mode_for_reactor_name(reactor_key, name)
-                }
+        for (reactor_key, request) in self.transition_buffer.drain(..) {
+            let mode = match request.target {
+                ModeTransitionTarget::Key(mode) => Some(mode),
+                ModeTransitionTarget::Name(ref name) => self
+                    .reaction_graph
+                    .mode_for_reactor_name(reactor_key, name.as_str()),
             };
             if let Some(mode) = mode {
                 self.store.set_mode(reactor_key, mode);
             } else {
-                tracing::warn!(reactor = ?reactor_key, mode = ?transition, "Unknown mode");
+                tracing::warn!(reactor = ?reactor_key, transition = ?request, "Unknown mode");
             }
         }
 

@@ -11,6 +11,8 @@ use syn::{
 mod kw {
     syn::custom_keyword!(startup);
     syn::custom_keyword!(shutdown);
+    syn::custom_keyword!(reset);
+    syn::custom_keyword!(history);
     syn::custom_keyword!(modes);
     syn::custom_keyword!(transition);
 }
@@ -112,6 +114,8 @@ pub enum TriggerType {
     Startup,
     /// Represents a shutdown trigger
     Shutdown,
+    /// Represents a mode reset trigger
+    Reset,
     /// Represents a regular identifier or field access trigger
     Regular(PathOrIdent),
 }
@@ -125,6 +129,9 @@ impl Parse for TriggerType {
         } else if lookahead.peek(kw::shutdown) {
             input.parse::<kw::shutdown>()?;
             Ok(TriggerType::Shutdown)
+        } else if lookahead.peek(kw::reset) {
+            input.parse::<kw::reset>()?;
+            Ok(TriggerType::Reset)
         } else {
             // Try to parse as PathOrIdent
             let path_or_ident = input.parse::<PathOrIdent>()?;
@@ -138,7 +145,48 @@ impl ToTokens for TriggerType {
         match self {
             TriggerType::Startup => tokens.append_all(quote!(startup)),
             TriggerType::Shutdown => tokens.append_all(quote!(shutdown)),
+            TriggerType::Reset => tokens.append_all(quote!(reset)),
             TriggerType::Regular(path_or_ident) => path_or_ident.to_tokens(tokens),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum EffectType {
+    Regular(PathOrIdent),
+    Reset(PathOrIdent),
+    History(PathOrIdent),
+}
+
+impl EffectType {
+    fn field_expr(&self) -> proc_macro2::TokenStream {
+        match self {
+            EffectType::Regular(path) => quote!(#path),
+            EffectType::Reset(path) => {
+                quote!(#path.with_transition(::boomerang::builder::TransitionKind::Reset))
+            }
+            EffectType::History(path) => {
+                quote!(#path.with_transition(::boomerang::builder::TransitionKind::History))
+            }
+        }
+    }
+}
+
+impl Parse for EffectType {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let lookahead = input.lookahead1();
+        if lookahead.peek(kw::reset) {
+            input.parse::<kw::reset>()?;
+            let content;
+            let _paren = parenthesized!(content in input);
+            Ok(EffectType::Reset(content.parse()?))
+        } else if lookahead.peek(kw::history) {
+            input.parse::<kw::history>()?;
+            let content;
+            let _paren = parenthesized!(content in input);
+            Ok(EffectType::History(content.parse()?))
+        } else {
+            Ok(EffectType::Regular(input.parse()?))
         }
     }
 }
@@ -154,7 +202,7 @@ pub struct Model {
     name: Option<Ident>,
     triggers: Vec<TriggerType>,
     uses: Vec<PathOrIdent>,
-    effects: Vec<PathOrIdent>,
+    effects: Vec<EffectType>,
     modes: Option<Vec<PathOrIdent>>,
     transition: Option<PathOrIdent>,
     code: syn::Block,
@@ -188,7 +236,7 @@ impl Parse for Model {
         let effects = if input.peek(Token![->]) {
             let _arrow = input.parse::<Token![->]>()?;
             // Parse effects (if any identifiers before {)
-            let mut effects: Punctuated<PathOrIdent, token::Comma> = Punctuated::new();
+            let mut effects: Punctuated<EffectType, token::Comma> = Punctuated::new();
             while !input.peek(token::Brace) && !input.peek(Token![@]) {
                 effects.push_value(input.parse()?);
                 if !input.peek(Token![,]) {
@@ -214,8 +262,7 @@ impl Parse for Model {
                 input.parse::<kw::modes>()?;
                 let content;
                 let _paren = parenthesized!(content in input);
-                let list =
-                    content.parse_terminated(PathOrIdent::parse, Token![,])?;
+                let list = content.parse_terminated(PathOrIdent::parse, Token![,])?;
                 modes = Some(list.into_iter().collect());
             } else if lookahead.peek(kw::transition) {
                 if transition.is_some() {
@@ -282,6 +329,11 @@ impl ToTokens for Model {
                         .with_shutdown_trigger()
                     });
                 }
+                TriggerType::Reset => {
+                    reaction.append_all(quote! {
+                        .with_reset_trigger()
+                    });
+                }
                 TriggerType::Regular(path_or_ident) => {
                     reaction.append_all(quote! {
                         .with_trigger(#path_or_ident)
@@ -291,15 +343,16 @@ impl ToTokens for Model {
         }
 
         // Add trigger arguments for the reaction_fn closure
-        let trigger_args = triggers.iter().map(|t| match t {
-            TriggerType::Startup => quote!(startup),
-            TriggerType::Shutdown => quote!(shutdown),
+        let trigger_args = triggers.iter().filter_map(|t| match t {
+            TriggerType::Startup => Some(quote!(startup)),
+            TriggerType::Shutdown => Some(quote!(shutdown)),
+            TriggerType::Reset => None,
             TriggerType::Regular(path_or_ident) => {
                 let id = match path_or_ident {
                     PathOrIdent::Simple(ident) => ident,
                     PathOrIdent::Field(field) => &camelcase_field(field),
                 };
-                quote!(#id)
+                Some(quote!(#id))
             }
         });
 
@@ -314,17 +367,23 @@ impl ToTokens for Model {
 
         // Add effects arguments for the reaction_fn closure
         let effects_args = effects.iter().map(|e| match e {
-            PathOrIdent::Simple(ident) => quote!(#ident),
-            PathOrIdent::Field(field) => {
+            EffectType::Regular(PathOrIdent::Simple(ident))
+            | EffectType::Reset(PathOrIdent::Simple(ident))
+            | EffectType::History(PathOrIdent::Simple(ident)) => quote!(#ident),
+            EffectType::Regular(PathOrIdent::Field(field))
+            | EffectType::Reset(PathOrIdent::Field(field))
+            | EffectType::History(PathOrIdent::Field(field)) => {
                 let id = &camelcase_field(field);
                 quote!(#id)
             }
         });
 
+        let effect_fields = effects.iter().map(EffectType::field_expr);
+
         // Add uses and effects
         reaction.append_all(quote! {
             #(.with_use(#uses))*
-            #(.with_effect(#effects))*
+            #(.with_effect(#effect_fields))*
         });
 
         if let Some(modes) = modes.as_ref() {
@@ -381,8 +440,12 @@ mod tests {
         );
         assert!(matches!(&reaction.uses[0], PathOrIdent::Simple(ident) if ident == "u1"));
         assert!(matches!(&reaction.uses[1], PathOrIdent::Simple(ident) if ident == "u2"));
-        assert!(matches!(&reaction.effects[0], PathOrIdent::Simple(ident) if ident == "e1"));
-        assert!(matches!(&reaction.effects[1], PathOrIdent::Simple(ident) if ident == "e2"));
+        assert!(
+            matches!(&reaction.effects[0], EffectType::Regular(PathOrIdent::Simple(ident)) if ident == "e1")
+        );
+        assert!(
+            matches!(&reaction.effects[1], EffectType::Regular(PathOrIdent::Simple(ident)) if ident == "e2")
+        );
     }
 
     #[test]
@@ -410,10 +473,35 @@ mod tests {
 
     #[test]
     fn test_parse_modes_and_transition() {
-        let reaction =
-            syn::parse_str::<Model>("(a) @modes(m1, m2) @transition(m3) { }").unwrap();
+        let reaction = syn::parse_str::<Model>("(a) @modes(m1, m2) @transition(m3) { }").unwrap();
         assert_eq!(reaction.modes.as_ref().unwrap().len(), 2);
         assert!(reaction.transition.is_some());
+    }
+
+    #[test]
+    fn test_parse_reset_trigger() {
+        let reaction = syn::parse_str::<Model>("(reset) { }").unwrap();
+        assert!(matches!(&reaction.triggers[0], TriggerType::Reset));
+        assert!(reaction.uses.is_empty());
+        assert!(reaction.effects.is_empty());
+    }
+
+    #[test]
+    fn test_parse_reset_and_history_effects() {
+        let reaction =
+            syn::parse_str::<Model>("(cmd) -> reset(active), history(idle), status { }").unwrap();
+        assert!(matches!(
+            &reaction.effects[0],
+            EffectType::Reset(PathOrIdent::Simple(ident)) if ident == "active"
+        ));
+        assert!(matches!(
+            &reaction.effects[1],
+            EffectType::History(PathOrIdent::Simple(ident)) if ident == "idle"
+        ));
+        assert!(matches!(
+            &reaction.effects[2],
+            EffectType::Regular(PathOrIdent::Simple(ident)) if ident == "status"
+        ));
     }
 
     #[test]
@@ -470,7 +558,7 @@ mod tests {
         // Check the effect item
         assert!(matches!(
             &reaction.effects[0],
-            PathOrIdent::Field(field) if field == &parse_quote!{ module.output }
+            EffectType::Regular(PathOrIdent::Field(field)) if field == &parse_quote!{ module.output }
         ));
     }
 

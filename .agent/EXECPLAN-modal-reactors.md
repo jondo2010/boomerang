@@ -14,9 +14,11 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 
 - [x] (2026-07-06 18:26Z) Replaced the prior minimal reaction-gating ExecPlan with this full-semantics modal reactors plan.
 - [x] (2026-07-06 20:32Z) Added book documentation requirements, no-external-reference guidance for implementation/user docs, and a minimal upstream test-port set.
-- [ ] Agree on the front-end syntax and macro integration details before implementation.
+- [x] (2026-07-06 20:46Z) Began implementation by adding `ModeKind`, `TransitionKind`, typed `BuilderModeEffect`, `ModeEffectRef::set(ctx)`, `(reset)` parser support, and `reset(mode)` / `history(mode)` effect parsing while preserving the existing spike tests.
+- [x] (2026-07-06 21:02Z) Verified the first typed-transition slice with focused builder, macro, and modal integration tests plus `git diff --check` and no-external-reference scans.
+- [ ] Finish front-end syntax integration for structural `initial mode` and `mode` blocks inside `#[reactor]`.
 - [ ] Implement static mode scopes in the builder and runtime graph.
-- [ ] Implement typed transition effects in reaction declarations.
+- [ ] Replace the temporary compatibility syntax with macro-generated mode handles for typed transition effects in structural mode declarations.
 - [ ] Implement mode-local event queues and local-time scheduling.
 - [ ] Implement reset/history transition application, including recursive reset of contained modal reactors.
 - [ ] Implement modal startup, shutdown, and reset-trigger behavior.
@@ -36,6 +38,12 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 
 - Observation: The upstream C modal-model directory contains a broad suite, but a smaller set covers distinct semantics needed for Boomerang's first full implementation.
   Evidence: The directory listing includes `Count3Modes.lf`, `MixedReactions.lf`, `ModalActions.lf`, `ModalAfter.lf`, `ModalCycleBreaker.lf`, `ModalMultiport.lf`, `ModalMultiportBank.lf`, `ModalNestedReactions.lf`, `ModalStartupShutdown.lf`, `ModalStateReset.lf`, `ModalTimers.lf`, several bank/state variants, and a `util` directory. The selected port list below keeps one representative for each distinct semantic area.
+
+- Observation: The first implementation slice can add typed mode transition effects without changing scheduler behavior yet.
+  Evidence: `cargo test -p boomerang_builder test_mode_kind_effect_and_reset_trigger_builder`, `cargo test -p boomerang_macros reaction::tests`, `cargo test -p boomerang modal_basic`, and `cargo test -p boomerang mixed_reactions` all pass after adding `BuilderModeEffect` and updating `modal_mixed_reactions.rs` to call `mode_b.set(ctx)`.
+
+- Observation: Full `cargo fmt` is temporarily blocked by pre-existing trailing whitespace in `boomerang_macros/src/ports.rs`, outside this modal slice.
+  Evidence: `cargo fmt` reports trailing whitespace at `boomerang_macros/src/ports.rs:140:140`, `:164:129`, `:203:147`, and `:209:151`. Targeted `rustfmt` on the touched modal files succeeds, and `git diff --check` passes after removing formatter spillover from unrelated runtime files.
 
 ## Decision Log
 
@@ -73,6 +81,10 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 
 - Decision: Port a minimal first-wave set of upstream modal-model tests, and explicitly defer redundant or language-specific cases.
   Rationale: The first-wave set should prove one representative of each semantic class without spending implementation time on duplicates. Rust-specific state reset behavior must be tested with Boomerang-native reset reactions rather than by copying language-specific state syntax.
+  Date/Author: 2026-07-06 / Codex.
+
+- Decision: Preserve the spike's `@modes(...)`, `@transition(...)`, and `Context::set_mode_name(...)` APIs temporarily while introducing typed transition effects.
+  Rationale: This keeps the existing modal spike tests green while the implementation is migrated toward the planned API. These compatibility paths should be deleted before final acceptance once structural mode blocks and runtime transition semantics are complete.
   Date/Author: 2026-07-06 / Codex.
 
 ## Outcomes & Retrospective
@@ -519,3 +531,5 @@ The exact names can change, but the design must preserve root-scope behavior and
 Change log: 2026-07-06 / Codex: replaced minimal modal reactors plan with full-semantics plan after user confirmed full modal semantics, reset default, and branch serialization workflow.
 
 Change log: 2026-07-06 / Codex: added book documentation requirements, constrained external reference mentions to this ExecPlan, and selected the minimal upstream modal tests to port or adapt.
+
+Change log: 2026-07-06 / Codex: started implementation with typed builder/runtime transition effect plumbing, reset-trigger parser support, and focused tests while keeping spike compatibility.

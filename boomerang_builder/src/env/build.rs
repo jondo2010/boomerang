@@ -3,8 +3,8 @@ use itertools::Itertools;
 use slotmap::SecondaryMap;
 
 use crate::{
-    connection::PortBindings, ActionType, BuilderActionKey, BuilderError, BuilderPortKey,
-    BuilderModeKey, BuilderReactionKey, BuilderReactorKey, ParentReactorBuilder,
+    connection::PortBindings, ActionType, BuilderActionKey, BuilderError, BuilderModeKey,
+    BuilderPortKey, BuilderReactionKey, BuilderReactorKey, ParentReactorBuilder,
     PartialReactionBuilder, TimerActionKey,
 };
 
@@ -200,7 +200,8 @@ impl EnvBuilder {
             let (enclave_key, reactor_key) =
                 builder_parts.aliases.reactor_aliases[mode.reactor_key];
             let enclave = &mut builder_parts.enclaves[enclave_key];
-            let runtime_mode_key = enclave.insert_mode(reactor_key, &mode.name, mode.initial);
+            let runtime_mode_key =
+                enclave.insert_mode(reactor_key, &mode.name, mode.kind.is_initial());
             builder_parts
                 .aliases
                 .mode_aliases
@@ -402,9 +403,9 @@ impl EnvBuilder {
                 .iter()
                 .map(|builder_port_key| builder_parts.aliases.port_aliases[*builder_port_key].1);
 
-            let actions = action_keys
-                .iter()
-                .map(|builder_action_key| builder_parts.aliases.action_aliases[*builder_action_key].1);
+            let actions = action_keys.iter().map(|builder_action_key| {
+                builder_parts.aliases.action_aliases[*builder_action_key].1
+            });
 
             let mode_filter = reaction.enabled_modes.as_ref().map(|modes| {
                 let runtime_modes = modes
@@ -414,9 +415,13 @@ impl EnvBuilder {
                 runtime::ModeFilter::new(runtime_modes)
             });
 
-            let transition_to = reaction
-                .transition_to
-                .map(|mode_key| builder_parts.aliases.mode_aliases[mode_key].1);
+            let transition_to =
+                reaction
+                    .transition_to
+                    .map(|mode_key| runtime::ModeTransitionEffect {
+                        target: builder_parts.aliases.mode_aliases[mode_key].1,
+                        transition: runtime::TransitionKind::Reset,
+                    });
 
             let runtime_reaction_key = enclave.insert_reaction(
                 runtime::Reaction::new(&reaction_name, reaction_body, None),

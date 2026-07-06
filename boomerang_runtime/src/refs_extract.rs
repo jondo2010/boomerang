@@ -25,7 +25,11 @@ impl ReactionRefsError {
     }
 
     pub fn type_mismatch(kind: &'static str, expected: &'static str, found: &'static str) -> Self {
-        ReactionRefsError::TypeMismatch { kind, expected, found }
+        ReactionRefsError::TypeMismatch {
+            kind,
+            expected,
+            found,
+        }
     }
 
     pub fn destructure_remaining(remaining: usize) -> Self {
@@ -50,6 +54,17 @@ pub trait ReactionRefsExtract: 'static {
     ) -> Result<Self::Ref<'store>, ReactionRefsError>;
 }
 
+impl ReactionRefsExtract for () {
+    type Ref<'store> = ();
+
+    fn extract<'store>(
+        &self,
+        _refs: &mut ReactionRefs<'store>,
+    ) -> Result<Self::Ref<'store>, ReactionRefsError> {
+        Ok(())
+    }
+}
+
 // Blanket impl for arrays of `ReactionRefsExtract` types
 impl<T: ReactionRefsExtract, const N: usize> ReactionRefsExtract for [T; N] {
     type Ref<'store>
@@ -61,7 +76,8 @@ impl<T: ReactionRefsExtract, const N: usize> ReactionRefsExtract for [T; N] {
         refs: &mut ReactionRefs<'store>,
     ) -> Result<Self::Ref<'store>, ReactionRefsError> {
         // Manual, allocation-free equivalent of std::array::try_from_fn
-        let mut array: [MaybeUninit<T::Ref<'store>>; N] = unsafe { MaybeUninit::uninit().assume_init() };
+        let mut array: [MaybeUninit<T::Ref<'store>>; N] =
+            unsafe { MaybeUninit::uninit().assume_init() };
 
         for idx in 0..N {
             match self[idx].extract(refs) {

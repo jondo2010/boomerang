@@ -1,4 +1,4 @@
-//! Ported from LF test: modal_models/MixedReactions.lf
+//! Modal reaction ordering regression.
 
 use boomerang::prelude::*;
 
@@ -18,13 +18,14 @@ fn MixedReactions(#[state] x: i32, #[state] first: bool) -> impl Reactor {
         }
     }
 
-    let mode_a = builder.add_mode("A", true)?;
-    let mode_b = builder.add_mode("B", false)?;
+    let mode_a = builder.add_mode("A", ModeKind::Initial)?;
+    let mode_b_key = builder.add_mode("B", ModeKind::Normal)?;
+    let mode_b = builder.reset_mode_effect(mode_b_key)?;
 
     reaction! {
-        (t) @modes(mode_a) {
+        (t) -> mode_b @modes(mode_a) {
             state.x = state.x * 10 + 3;
-            ctx.set_mode_name("B");
+            mode_b.set(ctx);
         }
     }
 
@@ -35,7 +36,7 @@ fn MixedReactions(#[state] x: i32, #[state] first: bool) -> impl Reactor {
     }
 
     reaction! {
-        (t) @modes(mode_b) {
+        (t) @modes(mode_b_key) {
             state.x = state.x * 10 + 5;
         }
     }

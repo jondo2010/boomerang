@@ -157,6 +157,7 @@ pub struct ReactorBuilderState<'a, S: runtime::ReactorData = ()> {
     env: &'a mut EnvBuilder,
     startup_action: TypedActionKey,
     shutdown_action: TypedActionKey,
+    current_mode: Option<BuilderModeKey>,
     phantom: std::marker::PhantomData<S>,
 }
 
@@ -192,6 +193,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
             env,
             startup_action,
             shutdown_action,
+            current_mode: None,
             phantom: std::marker::PhantomData,
         }
     }
@@ -224,6 +226,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
             env,
             startup_action: TypedActionKey::from(startup_action),
             shutdown_action: TypedActionKey::from(shutdown_action),
+            current_mode: None,
             phantom: std::marker::PhantomData,
         }
     }
@@ -236,6 +239,10 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
     /// Get the [`BuilderReactorKey`] for this `ReactorBuilder`
     pub fn key(&self) -> BuilderReactorKey {
         self.reactor_key
+    }
+
+    pub fn current_mode(&self) -> Option<BuilderModeKey> {
+        self.current_mode
     }
 
     /// Get the startup action for this reactor
@@ -321,6 +328,33 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         mode: BuilderModeKey,
     ) -> Result<BuilderModeEffect, BuilderError> {
         self.mode_effect(mode, runtime::TransitionKind::History)
+    }
+
+    pub fn in_mode<R>(
+        &mut self,
+        mode: BuilderModeKey,
+        f: impl FnOnce(&mut Self) -> Result<R, BuilderError>,
+    ) -> Result<R, BuilderError> {
+        let mode_builder = self.env.mode_builders.get(mode).ok_or_else(|| {
+            BuilderError::ReactionBuilderError(format!("Unknown mode key {mode:?}"))
+        })?;
+        if mode_builder.reactor_key != self.reactor_key {
+            return Err(BuilderError::ReactionBuilderError(format!(
+                "Mode '{}' does not belong to reactor '{}'",
+                mode_builder.name,
+                self.env.reactor_builders[self.reactor_key].name()
+            )));
+        }
+        if self.current_mode.is_some() {
+            return Err(BuilderError::ReactionBuilderError(
+                "Nested mode blocks are not supported".to_owned(),
+            ));
+        }
+
+        let previous_mode = self.current_mode.replace(mode);
+        let result = f(self);
+        self.current_mode = previous_mode;
+        result
     }
 
     /// Add a new input port to this reactor.

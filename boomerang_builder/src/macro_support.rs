@@ -58,7 +58,13 @@ pub trait ReactorPorts {
 impl<S: runtime::ReactorData> ReactorBuilderState<'_, S> {
     pub fn add_reaction(&mut self, name: Option<&str>) -> PartialReactionBuilder<'_, S> {
         let reactor_key = self.key();
-        PartialReactionBuilder::new(name, reactor_key, self.env())
+        let current_mode = self.current_mode();
+        let builder = PartialReactionBuilder::new(name, reactor_key, self.env());
+        if let Some(mode) = current_mode {
+            builder.with_modes([mode])
+        } else {
+            builder
+        }
     }
 
     pub fn add_child_reactor<ChildState, R>(

@@ -96,17 +96,17 @@ impl Debug for ReactionBuilder {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct BuilderModeEffect {
     target: BuilderModeKey,
-    target_name: String,
+    target_name: &'static str,
     transition: runtime::TransitionKind,
 }
 
 impl BuilderModeEffect {
     pub(crate) fn new(
         target: BuilderModeKey,
-        target_name: String,
+        target_name: &'static str,
         transition: runtime::TransitionKind,
     ) -> Self {
         Self {
@@ -141,7 +141,7 @@ impl runtime::ReactionRefsExtract for BuilderModeEffect {
         _refs: &mut runtime::ReactionRefs<'store>,
     ) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
         Ok(runtime::ModeEffectRef::new_name(
-            self.target_name.clone(),
+            self.target_name,
             self.transition,
         ))
     }

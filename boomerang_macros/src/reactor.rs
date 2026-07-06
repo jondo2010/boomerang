@@ -1,9 +1,9 @@
-use proc_macro2::{Span, TokenStream};
+use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use proc_macro_error2::abort;
 use quote::{format_ident, quote, quote_spanned, ToTokens, TokenStreamExt};
 use syn::{
-    parse::Parse, parse_quote, spanned::Spanned, Attribute, Block, FnArg, Ident, ItemFn, Meta, Pat,
-    PatIdent, Type, TypePath, Visibility,
+    braced, parse::Parse, parse_quote, spanned::Spanned, Attribute, FnArg, Ident, Meta, Pat,
+    PatIdent, Signature, Type, TypePath, Visibility,
 };
 
 use crate::util::convert_from_snake_case;
@@ -230,55 +230,253 @@ impl From<FnArg> for Arg {
 }
 
 #[derive(Debug)]
+struct ModeDecl {
+    initial: bool,
+    name: Ident,
+    body: ReactorBody,
+}
+
+impl ModeDecl {
+    fn key_ident(&self) -> Ident {
+        format_ident!("__boomerang_mode_key_{}", self.name)
+    }
+
+    fn name_str(&self) -> String {
+        self.name.to_string()
+    }
+}
+
+#[derive(Debug)]
+enum BodyItem {
+    Tokens(TokenStream),
+    Mode(ModeDecl),
+}
+
+#[derive(Debug)]
+struct ReactorBody {
+    items: Vec<BodyItem>,
+}
+
+impl ReactorBody {
+    fn parse_tokens(tokens: TokenStream, allow_modes: bool) -> syn::Result<Self> {
+        let tokens = tokens.into_iter().collect::<Vec<_>>();
+        let mut items = Vec::new();
+        let mut pending = TokenStream::new();
+        let mut idx = 0;
+
+        while idx < tokens.len() {
+            match Self::parse_mode_at(&tokens, idx, allow_modes)? {
+                Some((mode, consumed)) => {
+                    if !pending.is_empty() {
+                        items.push(BodyItem::Tokens(pending));
+                        pending = TokenStream::new();
+                    }
+                    items.push(BodyItem::Mode(mode));
+                    idx += consumed;
+                }
+                None => {
+                    pending.extend(std::iter::once(tokens[idx].clone()));
+                    idx += 1;
+                }
+            }
+        }
+
+        if !pending.is_empty() {
+            items.push(BodyItem::Tokens(pending));
+        }
+
+        Ok(Self { items })
+    }
+
+    fn parse_mode_at(
+        tokens: &[TokenTree],
+        idx: usize,
+        allow_modes: bool,
+    ) -> syn::Result<Option<(ModeDecl, usize)>> {
+        let Some(first) = tokens.get(idx) else {
+            return Ok(None);
+        };
+
+        if is_ident(first, "mode")
+            && tokens.get(idx + 1).is_some_and(is_bang)
+            && matches!(tokens.get(idx + 2), Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Brace)
+        {
+            if !allow_modes {
+                return Err(syn::Error::new_spanned(
+                    first,
+                    "nested mode blocks are not supported",
+                ));
+            }
+            let Some(TokenTree::Group(group)) = tokens.get(idx + 2) else {
+                unreachable!();
+            };
+            return Ok(Some((Self::parse_mode_macro(group)?, 3)));
+        }
+
+        Ok(None)
+    }
+
+    fn parse_mode_macro(group: &proc_macro2::Group) -> syn::Result<ModeDecl> {
+        let tokens = group.stream().into_iter().collect::<Vec<_>>();
+        let Some(first) = tokens.first() else {
+            return Err(syn::Error::new_spanned(group, "expected mode declaration"));
+        };
+
+        let (initial, name_idx) = if is_ident(first, "initial") {
+            (true, 1)
+        } else {
+            (false, 0)
+        };
+
+        let name = match tokens.get(name_idx) {
+            Some(TokenTree::Ident(ident)) => ident.clone(),
+            Some(other) => {
+                return Err(syn::Error::new_spanned(
+                    other,
+                    "expected mode name in `mode!` block",
+                ))
+            }
+            None => {
+                return Err(syn::Error::new_spanned(
+                    group,
+                    "expected mode name in `mode!` block",
+                ))
+            }
+        };
+
+        let body_group = match tokens.get(name_idx + 1) {
+            Some(TokenTree::Group(body_group)) if body_group.delimiter() == Delimiter::Brace => {
+                body_group
+            }
+            Some(other) => {
+                return Err(syn::Error::new_spanned(
+                    other,
+                    "expected `{ ... }` mode body",
+                ))
+            }
+            None => {
+                return Err(syn::Error::new_spanned(
+                    group,
+                    "expected `{ ... }` mode body",
+                ))
+            }
+        };
+
+        if let Some(extra) = tokens.get(name_idx + 2) {
+            return Err(syn::Error::new_spanned(
+                extra,
+                "unexpected tokens after mode body",
+            ));
+        }
+
+        Ok(ModeDecl {
+            initial,
+            name,
+            body: ReactorBody::parse_tokens(body_group.stream(), false)?,
+        })
+    }
+
+    fn mode_bindings(&self) -> Vec<TokenStream> {
+        self.items
+            .iter()
+            .filter_map(|item| {
+                let BodyItem::Mode(mode) = item else {
+                    return None;
+                };
+                let key_ident = mode.key_ident();
+                let effect_ident = &mode.name;
+                let name = mode.name_str();
+                let kind = if mode.initial {
+                    quote!(::boomerang::builder::ModeKind::Initial)
+                } else {
+                    quote!(::boomerang::builder::ModeKind::Normal)
+                };
+
+                Some(quote! {
+                    let #key_ident = builder.add_mode(#name, #kind)?;
+                    let #effect_ident = builder.reset_mode_effect(#key_ident)?;
+                })
+            })
+            .collect()
+    }
+
+    fn body_tokens(&self) -> TokenStream {
+        let mut tokens = TokenStream::new();
+        for item in &self.items {
+            match item {
+                BodyItem::Tokens(body_tokens) => tokens.append_all(body_tokens.clone()),
+                BodyItem::Mode(mode) => {
+                    let key_ident = mode.key_ident();
+                    let body = mode.body.body_tokens();
+                    tokens.append_all(quote! {
+                        builder.in_mode(#key_ident, |builder| {
+                            #body
+                            Ok(())
+                        })?;
+                    });
+                }
+            }
+        }
+        tokens
+    }
+
+    #[cfg(test)]
+    fn modes(&self) -> impl Iterator<Item = &ModeDecl> {
+        self.items.iter().filter_map(|item| match item {
+            BodyItem::Mode(mode) => Some(mode),
+            BodyItem::Tokens(_) => None,
+        })
+    }
+}
+
+fn is_ident(token: &TokenTree, expected: &str) -> bool {
+    matches!(token, TokenTree::Ident(ident) if ident == expected)
+}
+
+fn is_bang(token: &TokenTree) -> bool {
+    matches!(token, TokenTree::Punct(punct) if punct.as_char() == '!')
+}
+
+#[derive(Debug)]
 pub struct Model {
     docs: Docs,
     vis: Visibility,
     name: Ident,
     generics: syn::Generics, // Added generics field
     args: Vec<Arg>,
-    body: Box<Block>,
+    body: ReactorBody,
 }
 
 impl Parse for Model {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let mut item = ItemFn::parse(input)?;
-        //convert_impl_trait_to_generic(&mut item.sig);
+        let attrs = Attribute::parse_outer(input)?;
+        let vis = input.parse::<Visibility>()?;
+        let sig = input.parse::<Signature>()?;
+        let content;
+        braced!(content in input);
+        let body_tokens = content.parse::<TokenStream>()?;
+        let body = ReactorBody::parse_tokens(body_tokens, true)?;
 
-        let docs = Docs::new(&item.attrs);
+        if !input.is_empty() {
+            return Err(input.error("unexpected tokens after reactor function body"));
+        }
 
-        let props = item
-            .sig
+        let docs = Docs::new(&attrs);
+
+        let props = sig
             .inputs
             .clone()
             .into_iter()
             .map(Arg::from)
             .collect::<Vec<_>>();
 
-        // We need to remove the `#[doc = ""]` and `#[builder(_)]`
-        // attrs from the function signature
-        item.attrs.retain(|attr| match &attr.meta {
-            Meta::NameValue(attr) => attr.path != parse_quote!(doc),
-            Meta::List(attr) => attr.path != parse_quote!(prop),
-            _ => true,
-        });
-
-        item.sig.inputs.iter_mut().for_each(|arg| {
-            if let FnArg::Typed(ty) = arg {
-                ty.attrs.retain(|attr| match &attr.meta {
-                    Meta::NameValue(attr) => attr.path != parse_quote!(doc),
-                    Meta::List(attr) => attr.path != parse_quote!(prop),
-                    _ => true,
-                });
-            }
-        });
-
         Ok(Self {
             docs,
-            vis: item.vis.clone(),
-            name: convert_from_snake_case(&item.sig.ident),
-            generics: item.sig.generics.clone(), // Extract generics
+            vis,
+            name: convert_from_snake_case(&sig.ident),
+            generics: sig.generics.clone(), // Extract generics
             args: props,
-            body: item.block,
+            body,
         })
     }
 }
@@ -430,8 +628,13 @@ impl ToTokens for ArgsModel {
         let ret = quote! { -> impl ::boomerang::builder::Reactor<#state_type_path, Ports = #ports_name #ty_generics> };
 
         let has_banked_ports = args.iter().any(|Arg { kind, .. }| {
-            matches!(kind, ArgKind::Input { len: Some(_) } | ArgKind::Output { len: Some(_) })
+            matches!(
+                kind,
+                ArgKind::Input { len: Some(_) } | ArgKind::Output { len: Some(_) }
+            )
         });
+        let mode_bindings = body.mode_bindings();
+        let body_tokens = body.body_tokens();
 
         let output = if has_banked_ports {
             let ports_struct_fields = args.iter().filter_map(
@@ -484,26 +687,26 @@ impl ToTokens for ArgsModel {
                 _ => None,
             });
 
-            let local_patterns: Vec<_> =
-                args.iter()
-                    .filter_map(|Arg { kind, name, .. }| match kind {
-                        ArgKind::Input { .. } | ArgKind::Output { .. } => Some(name.ident.clone()),
-                        _ => None,
-                    })
-                    .collect();
+            let local_patterns: Vec<_> = args
+                .iter()
+                .filter_map(|Arg { kind, name, .. }| match kind {
+                    ArgKind::Input { .. } | ArgKind::Output { .. } => Some(name.ident.clone()),
+                    _ => None,
+                })
+                .collect();
 
-            let local_values: Vec<_> =
-                args.iter()
-                    .filter_map(|Arg { kind, name, .. }| match kind {
-                        ArgKind::Input { len: Some(_) } | ArgKind::Output { len: Some(_) } => {
-                            Some(format_ident!("{}_for_fn", name.ident))
-                        }
-                        ArgKind::Input { len: None } | ArgKind::Output { len: None } => {
-                            Some(name.ident.clone())
-                        }
-                        _ => None,
-                    })
-                    .collect();
+            let local_values: Vec<_> = args
+                .iter()
+                .filter_map(|Arg { kind, name, .. }| match kind {
+                    ArgKind::Input { len: Some(_) } | ArgKind::Output { len: Some(_) } => {
+                        Some(format_ident!("{}_for_fn", name.ident))
+                    }
+                    ArgKind::Input { len: None } | ArgKind::Output { len: None } => {
+                        Some(name.ident.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
 
             let local_types: Vec<_> = args
                 .iter()
@@ -587,15 +790,17 @@ impl ToTokens for ArgsModel {
                 _ => None,
             });
 
-            let field_inits = args.iter().filter_map(|Arg { kind, name, ty, .. }| match kind {
-                ArgKind::Input { .. } | ArgKind::Output { .. } => match ty {
-                    syn::Type::Array(_) => Some(quote! {
-                        #name: std::array::from_fn(|i| #name[i].contained())
-                    }),
-                    _ => Some(quote!(#name: #name.contained())),
-                },
-                _ => None,
-            });
+            let field_inits = args
+                .iter()
+                .filter_map(|Arg { kind, name, ty, .. }| match kind {
+                    ArgKind::Input { .. } | ArgKind::Output { .. } => match ty {
+                        syn::Type::Array(_) => Some(quote! {
+                            #name: std::array::from_fn(|i| #name[i].contained())
+                        }),
+                        _ => Some(quote!(#name: #name.contained())),
+                    },
+                    _ => None,
+                });
 
             quote! {
                 #ports_struct
@@ -618,7 +823,8 @@ impl ToTokens for ArgsModel {
                               ports: (#(#local_types,)* )| -> Result<(), ::boomerang::builder::BuilderError> {
                             #[allow(non_snake_case)]
                             let (#(#local_patterns,)*) = ports;
-                            #body
+                            #(#mode_bindings)*
+                            #body_tokens
                             Ok(())
                         })(&mut builder, (#(#local_values,)*))?;
                         builder.finish()?;
@@ -639,7 +845,8 @@ impl ToTokens for ArgsModel {
                 #vis fn #name #impl_generics(#(#param_args,)*) #ret #where_clause {
                     <#ports_name #ty_generics as ::boomerang::builder::ReactorPorts>::build_with::<_, #state_type_path>(
                         move |builder, (#(#port_idents,)*)| {
-                            #body
+                            #(#mode_bindings)*
+                            #body_tokens
                             Ok(())
                         })
                 }
@@ -650,10 +857,58 @@ impl ToTokens for ArgsModel {
     }
 }
 
-#[test]
-fn test() {
-    let parsed: TypePath = parse_quote! {
-        CountPorts<T>
-    };
-    dbg!(parsed);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_structural_mode_blocks() {
+        let model = syn::parse_str::<Model>(
+            r#"
+            fn Example() -> impl Reactor {
+                let root = 1;
+                mode! { initial idle {
+                    reaction! {
+                        (startup) -> active {
+                            active.set(ctx);
+                        }
+                    }
+                } }
+                mode! { active {
+                    reaction! {
+                        (reset) -> history(idle) {
+                            idle.set(ctx);
+                        }
+                    }
+                } }
+                let after = root + 1;
+            }
+            "#,
+        )
+        .unwrap();
+
+        let modes = model.body.modes().collect::<Vec<_>>();
+        assert_eq!(modes.len(), 2);
+        assert!(modes[0].initial);
+        assert_eq!(modes[0].name, "idle");
+        assert!(!modes[1].initial);
+        assert_eq!(modes[1].name, "active");
+    }
+
+    #[test]
+    fn rejects_direct_nested_mode_blocks() {
+        let err = syn::parse_str::<Model>(
+            r#"
+            fn Example() -> impl Reactor {
+                mode! { initial idle {
+                    mode! { active {
+                    } }
+                } }
+            }
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("nested mode blocks"));
+    }
 }

@@ -151,6 +151,46 @@ fn test_mode_kind_effect_and_reset_trigger_builder() {
 }
 
 #[test]
+fn test_in_mode_scopes_reactions_and_rejects_nested_modes() {
+    let mut env_builder = EnvBuilder::new();
+    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, (), false);
+
+    let idle = reactor_builder.add_mode("idle", ModeKind::Initial).unwrap();
+    let active = reactor_builder
+        .add_mode("active", ModeKind::Normal)
+        .unwrap();
+    let tick = reactor_builder
+        .add_logical_action::<()>("tick", None)
+        .unwrap();
+
+    let scoped_reaction = reactor_builder
+        .in_mode(idle, |builder| {
+            builder
+                .add_reaction(Some("scoped"))
+                .with_trigger(tick)
+                .with_reaction_fn(|_ctx, _state, (_tick,)| {})
+                .finish()
+        })
+        .unwrap();
+
+    let nested_result = reactor_builder.in_mode(idle, |builder| {
+        builder.in_mode(active, |_builder| Ok::<_, BuilderError>(()))
+    });
+
+    let _reactor_key = reactor_builder.finish().unwrap();
+
+    assert_eq!(
+        env_builder.reaction_builders[scoped_reaction].enabled_modes,
+        Some(vec![idle])
+    );
+    assert!(matches!(
+        nested_result,
+        Err(BuilderError::ReactionBuilderError(message))
+            if message.contains("Nested mode blocks")
+    ));
+}
+
+#[test]
 fn test_reactions_startup_shutdown() {
     let mut env_builder = EnvBuilder::new();
     let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, (), false);

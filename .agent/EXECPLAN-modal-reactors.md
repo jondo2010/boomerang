@@ -16,7 +16,7 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 - [x] (2026-07-06 20:32Z) Added book documentation requirements, no-external-reference guidance for implementation/user docs, and a minimal upstream test-port set.
 - [x] (2026-07-06 20:46Z) Began implementation by adding `ModeKind`, `TransitionKind`, typed `BuilderModeEffect`, `ModeEffectRef::set(ctx)`, `(reset)` parser support, and `reset(mode)` / `history(mode)` effect parsing while preserving the existing spike tests.
 - [x] (2026-07-06 21:02Z) Verified the first typed-transition slice with focused builder, macro, and modal integration tests plus `git diff --check` and no-external-reference scans.
-- [ ] Finish front-end syntax integration for structural `initial mode` and `mode` blocks inside `#[reactor]`.
+- [x] (2026-07-06 21:09Z) Implemented the valid Rust structural syntax `mode! { initial idle { ... } }` and `mode! { active { ... } }`, including macro parser tests and an end-to-end modal integration test.
 - [ ] Implement static mode scopes in the builder and runtime graph.
 - [ ] Replace the temporary compatibility syntax with macro-generated mode handles for typed transition effects in structural mode declarations.
 - [ ] Implement mode-local event queues and local-time scheduling.
@@ -30,7 +30,7 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 - Observation: The prior WIP proves that per-reaction gating and deferred transition application can pass simple mixed-reaction tests, but that design is not enough for full modal reactors.
   Evidence: The WIP only stores reaction mode filters and current mode state; it has no ownership of timers, logical actions, delayed connections, child reactors, queued local events, reset/history transition kinds, or startup/shutdown special cases.
 
-- Observation: To make mode declarations ergonomic inside `#[reactor]`, the reactor macro must parse mode blocks itself rather than relying on an ordinary Rust macro statement alone.
+- Observation: To make mode declarations ergonomic inside `#[reactor]`, the reactor macro must parse the function body itself and intercept `mode!` statements rather than leaving them as ordinary Rust macro calls.
   Evidence: Forward references such as a reaction inside `idle` transitioning to `active` require the macro to discover all mode names before emitting builder code for any mode body.
 
 - Observation: The book exists under `book/src`, and `book/src/SUMMARY.md` currently links only Introduction, Quickstart, and Glossary pages.
@@ -45,14 +45,17 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 - Observation: Full `cargo fmt` is temporarily blocked by pre-existing trailing whitespace in `boomerang_macros/src/ports.rs`, outside this modal slice.
   Evidence: `cargo fmt` reports trailing whitespace at `boomerang_macros/src/ports.rs:140:140`, `:164:129`, `:203:147`, and `:209:151`. Targeted `rustfmt` on the touched modal files succeeds, and `git diff --check` passes after removing formatter spillover from unrelated runtime files.
 
+- Observation: Bare `initial mode idle { ... }` syntax cannot be used inside a Rust function body handled by an attribute macro.
+  Evidence: `cargo test -p boomerang modal_structural_syntax` failed before macro expansion with `expected one of '!', '.', '::', ';', '?', '{', '}', or an operator, found 'mode'` at `initial mode mode_a`. The working syntax is a valid Rust macro statement that `#[reactor]` intercepts: `mode! { initial mode_a { ... } }`.
+
 ## Decision Log
 
 - Decision: Implement full modal semantics, not the minimal reaction-filter feature.
   Rationale: The feature is only useful as "modal reactors" if it controls modal components and local time, not just whether a reaction body is skipped.
   Date/Author: 2026-07-06 / Codex, confirmed by user.
 
-- Decision: Parse mode syntax directly as part of the `#[reactor]` macro input.
-  Rationale: This gives users structural mode blocks, supports forward references to modes, and lets the macro generate typed mode handles before expanding mode bodies.
+- Decision: Parse `mode! { initial name { ... } }` and `mode! { name { ... } }` statements as part of the `#[reactor]` macro input.
+  Rationale: This gives users structural mode blocks, supports forward references to modes, and lets the macro generate typed mode handles before expanding mode bodies. The earlier bare `initial mode name { ... }` spelling is not valid Rust in function bodies before attribute macro expansion.
   Date/Author: 2026-07-06 / Codex.
 
 - Decision: Reset is the default transition kind; `history(mode_name)` explicitly requests history behavior.
@@ -125,7 +128,7 @@ A transition effect is a typed value passed to a reaction because the reaction d
 
 ## Proposed Front-End Syntax
 
-The preferred user syntax integrates modes directly into `#[reactor]`. The macro parses `initial mode` and `mode` blocks as part of the reactor function body, discovers all mode names first, emits mode handles, and then emits scoped builder code for each mode body. This permits forward references between sibling modes.
+The preferred user syntax integrates modes directly into `#[reactor]` using `mode!` statements. The `mode!` spelling is a valid Rust macro invocation, so the Rust compiler accepts it inside a function body before the `#[reactor]` attribute macro expands. The `#[reactor]` macro intercepts these statements, discovers all mode names first, emits mode handles, and then emits scoped builder code for each mode body. This permits forward references between sibling modes.
 
 Example:
 
@@ -143,7 +146,7 @@ Example:
             }
         }
 
-        initial mode idle {
+        mode! { initial idle {
             timer! { poll(0 sec, 100 msec) }
 
             reaction! {
@@ -166,9 +169,9 @@ Example:
                     *status = Some(Status::Idle);
                 }
             }
-        }
+        } }
 
-        mode active {
+        mode! { active {
             timer! { tick(0 sec, 10 msec) }
             let work = builder.add_logical_action::<Work>("work", Some(Duration::milliseconds(500)))?;
 
@@ -186,7 +189,7 @@ Example:
                     *status = Some(Status::Active);
                 }
             }
-        }
+        } }
     }
 
 In the example, `heartbeat` and its reaction are outside modes and always active. `poll`, `tick`, `work`, and the mode-local reactions are scoped to their enclosing mode. `-> active` declares a reset transition effect because reset is the default. `-> history(idle)` declares a history transition effect. The closure argument named `active` or `idle` is a typed transition handle, not a string. Calling `.set(ctx)` schedules the mode change; merely declaring the effect does not transition.
@@ -195,7 +198,7 @@ Mode syntax is intentionally restricted:
 
 Ports remain reactor-level declarations. A mode may use reactor-level ports in reactions and connections, but may not declare new input or output ports because ports are the stable interface of a reactor.
 
-Nested `mode` blocks are not allowed directly inside another mode. Hierarchical modal behavior is expressed by instantiating a child reactor that itself has modes inside a parent mode. This keeps the builder graph simple and uses the existing reactor composition model.
+Nested `mode!` blocks are not allowed directly inside another mode. Hierarchical modal behavior is expressed by instantiating a child reactor that itself has modes inside a parent mode. This keeps the builder graph simple and uses the existing reactor composition model.
 
 An unqualified mode effect such as `-> active` means reset. The explicit spelling `-> reset(active)` is accepted as an alias. The spelling `-> history(active)` requests history.
 
@@ -280,7 +283,7 @@ First, remove or quarantine the minimal WIP API from the previous spike. The old
 
 Next, extend `boomerang_builder` with static scopes. Add builder keys for modes and scopes, store each component's scope, and add validation rules: each modal reactor has exactly one initial mode; mode names are unique per reactor; mode effects may only target sibling modes of the current modal reactor; reset triggers are only valid inside modes; mode-local ports are rejected; direct nested mode blocks are rejected.
 
-Then extend `boomerang_macros/src/reactor.rs` so the `#[reactor]` parser recognizes `initial mode name { ... }` and `mode name { ... }` blocks. The parser should collect mode declarations before emitting code, then emit builder calls to create all sibling mode handles, then emit each mode body inside a scoped builder. Extend `boomerang_macros/src/reaction.rs` to parse `reset` as a trigger and `reset(mode)` / `history(mode)` / bare `mode` as mode transition effects.
+Then extend `boomerang_macros/src/reactor.rs` so the `#[reactor]` parser recognizes `mode! { initial name { ... } }` and `mode! { name { ... } }` statements. The parser should collect mode declarations before emitting code, then emit builder calls to create all sibling mode handles, then emit each mode body inside a scoped builder. Extend `boomerang_macros/src/reaction.rs` to parse `reset` as a trigger and `reset(mode)` / `history(mode)` / bare `mode` as mode transition effects.
 
 After the builder and macro layers compile, add runtime static graph support in `boomerang_runtime/src/env/mod.rs`. Define `ScopeKey`, `ModeKey`, `TransitionKind`, `ModeTransitionEffect`, and maps from reactions/actions/timers/connections to scopes. Keep public exports minimal; most keys should remain runtime/builder implementation details unless user code must name them.
 
@@ -312,12 +315,12 @@ Expected output is all current tests passing. If this fails before modal work be
 
 Add syntax parser tests in `boomerang_macros/src/reactor.rs` and `boomerang_macros/src/reaction.rs`. Include tests for:
 
-- two sibling mode blocks, one initial;
+- two sibling `mode!` blocks, one initial;
 - forward transition reference from the first mode body to the second mode;
 - `-> active` and `-> reset(active)` both parse as reset;
 - `-> history(idle)` parses as history;
 - `(reset)` parses as a reset trigger;
-- direct nested `mode` blocks fail with a clear diagnostic.
+- direct nested `mode!` blocks fail with a clear diagnostic.
 
 Add builder validation tests in `boomerang_builder/src/tests.rs` for duplicate mode names, missing initial mode, multiple initial modes, transition to mode in another reactor, reset trigger outside mode, and mode-local port declarations.
 
@@ -362,7 +365,7 @@ The `mdbook build book` command should complete without errors. If `mdbook` is n
 
 ## Validation and Acceptance
 
-The feature is accepted only when a user can write one `#[reactor]` function with `initial mode` and `mode` blocks, declare timers/actions/reactions inside those blocks, transition with reset and history effects, and observe correct local-time behavior.
+The feature is accepted only when a user can write one `#[reactor]` function with `mode! { initial ... }` and `mode! { ... }` blocks, declare timers/actions/reactions inside those blocks, transition with reset and history effects, and observe correct local-time behavior.
 
 Behavioral acceptance:
 
@@ -533,3 +536,5 @@ Change log: 2026-07-06 / Codex: replaced minimal modal reactors plan with full-s
 Change log: 2026-07-06 / Codex: added book documentation requirements, constrained external reference mentions to this ExecPlan, and selected the minimal upstream modal tests to port or adapt.
 
 Change log: 2026-07-06 / Codex: started implementation with typed builder/runtime transition effect plumbing, reset-trigger parser support, and focused tests while keeping spike compatibility.
+
+Change log: 2026-07-06 / Codex: corrected the proposed structural syntax to valid Rust `mode!` statements after discovering that bare `initial mode` blocks are rejected before attribute macro expansion, and added the first parser/integration implementation slice for that syntax.

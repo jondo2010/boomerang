@@ -4,8 +4,8 @@ use std::{pin::Pin, ptr::NonNull};
 
 use crate::{
     refs::{Refs, RefsMut},
-    ActionKey, BaseAction, BasePort, BaseReactor, CommonContext, Context, Deadline, PortKey,
-    Reaction, ReactionKey, ReactionRefs, ReactorData, ReactorKey, Tag, TriggerRes,
+    ActionKey, BaseAction, BasePort, BaseReactor, CommonContext, Context, Deadline, ModeKey,
+    PortKey, Reaction, ReactionKey, ReactionRefs, ReactorData, ReactorKey, Tag, TriggerRes,
 };
 
 use super::{Env, ReactionGraph};
@@ -115,6 +115,8 @@ pub struct Store {
     /// Internal caches of `ReactionTriggerCtxPtrs`
     #[pin]
     caches: tinymap::TinySecondaryMap<ReactionKey, ReactionTriggerCtxPtrs>,
+    /// Current mode per reactor
+    reactor_modes: tinymap::TinySecondaryMap<ReactorKey, Option<ModeKey>>,
 }
 
 impl Store {
@@ -142,6 +144,11 @@ impl Store {
                 ports: env.ports,
             },
             caches: ptrs,
+            reactor_modes: reaction_graph
+                .reactor_initial_modes
+                .iter()
+                .map(|(key, mode)| (key, *mode))
+                .collect(),
         };
 
         // Pin the Box first, then use projection for safe access
@@ -309,6 +316,17 @@ impl Store {
             .ports
             .values_mut()
             .for_each(|p| p.cleanup());
+    }
+
+    pub fn current_mode(&self, reactor_key: ReactorKey) -> Option<ModeKey> {
+        self.reactor_modes
+            .get(reactor_key)
+            .copied()
+            .flatten()
+    }
+
+    pub fn set_mode(&mut self, reactor_key: ReactorKey, mode: ModeKey) {
+        self.reactor_modes.insert(reactor_key, Some(mode));
     }
 
     /// Turn this `Store` back into the `Env` it was built from.

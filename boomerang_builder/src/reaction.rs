@@ -1,6 +1,8 @@
 use std::fmt::Debug;
 
-use super::{BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactorKey, EnvBuilder};
+use super::{
+    BuilderActionKey, BuilderError, BuilderModeKey, BuilderPortKey, BuilderReactorKey, EnvBuilder,
+};
 use crate::{
     runtime, ActionTag, BuilderRuntimeParts, ParentReactorBuilder, PortBank, PortTag,
     TimerActionKey, TypedActionKey, TypedPortKey,
@@ -31,6 +33,10 @@ pub struct ReactionBuilder {
     pub(super) reactor_key: BuilderReactorKey,
     /// The Reaction function
     pub(super) reaction_fn: BoxedBuilderReactionFn,
+    /// Modes in which this reaction is enabled
+    pub(super) enabled_modes: Option<Vec<BuilderModeKey>>,
+    /// Mode transition target for this reaction
+    pub(super) transition_to: Option<BuilderModeKey>,
     /// Relations between this Reaction and Actions
     pub(super) action_relations: SecondaryMap<BuilderActionKey, TriggerMode>,
     /// Actions in the order they were declared on the builder
@@ -52,6 +58,8 @@ impl ReactionBuilder {
             name: name.map(|s| s.into()),
             reactor_key: parent_key,
             reaction_fn,
+            enabled_modes: None,
+            transition_to: None,
             action_relations: SecondaryMap::new(),
             action_order: Vec::new(),
             port_relations: SecondaryMap::new(),
@@ -72,6 +80,8 @@ impl Debug for ReactionBuilder {
             .field("name", &self.name)
             .field("reactor_key", &self.reactor_key)
             .field("reaction_fn", &"ReactionFn()")
+            .field("enabled_modes", &self.enabled_modes)
+            .field("transition_to", &self.transition_to)
             .field("action_relations", &self.action_relations)
             .field("port_relations", &self.port_relations)
             .finish()
@@ -227,6 +237,8 @@ impl PartialReactionBuilderField for TimerActionKey {
 pub struct PartialReactionBuilder<'a, S: runtime::ReactorData, Fields = (), ReactionFn = ()> {
     name: Option<String>,
     reaction_fn: ReactionFn,
+    enabled_modes: Option<Vec<BuilderModeKey>>,
+    transition_to: Option<BuilderModeKey>,
     port_relations: slotmap::SecondaryMap<BuilderPortKey, TriggerMode>,
     port_order: Vec<BuilderPortKey>,
     action_relations: slotmap::SecondaryMap<BuilderActionKey, TriggerMode>,
@@ -246,6 +258,8 @@ impl<'a, S: runtime::ReactorData> PartialReactionBuilder<'a, S, (), ()> {
         Self {
             name: name.map(|s| s.to_string()),
             reaction_fn: (),
+            enabled_modes: None,
+            transition_to: None,
             port_relations: slotmap::SecondaryMap::new(),
             port_order: Vec::new(),
             action_relations: slotmap::SecondaryMap::new(),
@@ -271,6 +285,18 @@ impl<'a, S: runtime::ReactorData, Fields, ReactionFn> PartialReactionBuilder<'a,
             self.action_order.push(key);
         }
         self.action_relations.insert(key, trigger_mode);
+    }
+
+    /// Restrict this reaction to the provided modes.
+    pub fn with_modes(mut self, modes: impl IntoIterator<Item = BuilderModeKey>) -> Self {
+        self.enabled_modes = Some(modes.into_iter().collect());
+        self
+    }
+
+    /// Transition this reactor to the provided mode after the reaction runs.
+    pub fn with_transition(mut self, mode: BuilderModeKey) -> Self {
+        self.transition_to = Some(mode);
+        self
     }
 }
 
@@ -311,6 +337,8 @@ macro_rules! impl_with_field {
                 #[allow(non_snake_case)]
                 let Self {
                     name,
+                    enabled_modes,
+                    transition_to,
                     port_relations,
                     port_order,
                     action_relations,
@@ -323,6 +351,8 @@ macro_rules! impl_with_field {
                 PartialReactionBuilder {
                     name,
                     reaction_fn: (),
+                    enabled_modes,
+                    transition_to,
                     port_relations,
                     port_order,
                     action_relations,
@@ -344,6 +374,8 @@ macro_rules! impl_with_field {
                 #[allow(non_snake_case)]
                 let Self {
                     name,
+                    enabled_modes,
+                    transition_to,
                     port_relations,
                     port_order,
                     action_relations,
@@ -356,6 +388,8 @@ macro_rules! impl_with_field {
                 PartialReactionBuilder {
                     name,
                     reaction_fn: (),
+                    enabled_modes,
+                    transition_to,
                     port_relations,
                     port_order,
                     action_relations,
@@ -376,6 +410,8 @@ macro_rules! impl_with_field {
                 #[allow(non_snake_case)]
                 let Self {
                     name,
+                    enabled_modes,
+                    transition_to,
                     port_relations,
                     port_order,
                     action_relations,
@@ -388,6 +424,8 @@ macro_rules! impl_with_field {
                 PartialReactionBuilder {
                     name,
                     reaction_fn: (),
+                    enabled_modes,
+                    transition_to,
                     port_relations,
                     port_order,
                     action_relations,
@@ -443,6 +481,8 @@ where
     {
         let Self {
             name,
+            enabled_modes,
+            transition_to,
             port_relations,
             port_order,
             action_relations,
@@ -463,6 +503,8 @@ where
         PartialReactionBuilder {
             name,
             reaction_fn,
+            enabled_modes,
+            transition_to,
             port_relations,
             port_order,
             action_relations,
@@ -489,6 +531,8 @@ where
     {
         let Self {
             name,
+            enabled_modes,
+            transition_to,
             port_relations,
             port_order,
             action_relations,
@@ -501,6 +545,8 @@ where
         PartialReactionBuilder {
             name,
             reaction_fn: Box::new(f),
+            enabled_modes,
+            transition_to,
             port_relations,
             port_order,
             action_relations,
@@ -522,6 +568,8 @@ where
     pub fn finish(self) -> Result<BuilderReactionKey, BuilderError> {
         let Self {
             name,
+            enabled_modes,
+            transition_to,
             port_relations,
             port_order,
             action_relations,
@@ -541,6 +589,42 @@ where
             )));
         }
 
+        if let Some(ref modes) = enabled_modes {
+            for mode_key in modes {
+                let mode = env
+                    .mode_builders
+                    .get(*mode_key)
+                    .ok_or_else(|| {
+                        BuilderError::ReactionBuilderError(format!(
+                            "Unknown mode key {mode_key:?} for reaction '{name:?}'"
+                        ))
+                    })?;
+                if mode.reactor_key != reactor_key {
+                    return Err(BuilderError::ReactionBuilderError(format!(
+                        "Mode '{}' does not belong to reaction '{name:?}'",
+                        mode.name
+                    )));
+                }
+            }
+        }
+
+        if let Some(mode_key) = transition_to.as_ref() {
+            let mode = env
+                .mode_builders
+                .get(*mode_key)
+                .ok_or_else(|| {
+                    BuilderError::ReactionBuilderError(format!(
+                        "Unknown mode key {mode_key:?} for reaction '{name:?}'"
+                    ))
+                })?;
+            if mode.reactor_key != reactor_key {
+                return Err(BuilderError::ReactionBuilderError(format!(
+                    "Transition mode '{}' does not belong to reaction '{name:?}'",
+                    mode.name
+                )));
+            }
+        }
+
         let reactor = &mut env.reactor_builders[reactor_key];
         let reactions = &mut env.reaction_builders;
 
@@ -548,6 +632,8 @@ where
             name,
             reactor_key,
             reaction_fn,
+            enabled_modes,
+            transition_to,
             action_relations,
             action_order,
             port_relations,

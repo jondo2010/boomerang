@@ -10,6 +10,8 @@ pub(crate) struct TriggerRes {
     pub scheduled_actions: Vec<(ActionKey, Tag)>,
     /// A shutdown was scheduled
     pub scheduled_shutdown: Option<Tag>,
+    /// A mode transition was scheduled by name
+    pub scheduled_mode_name: Option<&'static str>,
 }
 
 /// Scheduler context passed into reactor functions.
@@ -110,6 +112,7 @@ impl Context {
             trigger_res: TriggerRes {
                 scheduled_actions: Vec::new(),
                 scheduled_shutdown: None,
+                scheduled_mode_name: None,
             },
         }
     }
@@ -118,6 +121,7 @@ impl Context {
         self.tag = tag;
         self.trigger_res.scheduled_actions.clear();
         self.trigger_res.scheduled_shutdown = None;
+        self.trigger_res.scheduled_mode_name = None;
     }
 
     /// Get the physical start time of the scheduler
@@ -201,6 +205,11 @@ impl Context {
         self.trigger_res
             .scheduled_actions
             .push((action.key(), new_tag));
+    }
+
+    /// Schedule a mode transition by name to be applied after the current tag.
+    pub fn set_mode_name(&mut self, mode: &'static str) {
+        self.trigger_res.scheduled_mode_name = Some(mode);
     }
 }
 

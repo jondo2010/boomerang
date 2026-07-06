@@ -56,7 +56,7 @@ pub mod prelude {
     pub use super::builder::{
         BuilderError, BuilderFqn, BuilderRuntimeParts, Contained, EnvBuilder, Input, Local,
         Logical, Output, Physical, PortBank, Reactor, TimerActionKey, TimerSpec, TypedActionKey,
-        TypedPortKey, BuilderReactorKey,
+        TypedPortKey, BuilderModeKey, BuilderReactorKey,
     };
 
     pub use super::runtime::{self, action::ActionCommon, CommonContext, Duration, FromRefs, Tag};

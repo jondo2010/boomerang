@@ -9,9 +9,15 @@ use crate::{
     keepalive,
     key_set::KeySetView,
     store::Store,
-    CommonContext, Duration, Env, Level, ReactionGraph, ReactionKey, ReactionSet,
-    ReactionSetLimits, SendContext, Tag,
+    CommonContext, Duration, Env, Level, ModeKey, ReactionGraph, ReactionKey, ReactionSet,
+    ReactionSetLimits, ReactorKey, SendContext, Tag,
 };
+
+#[derive(Clone, Copy, Debug)]
+enum ModeTransition {
+    Key(ModeKey),
+    Name(&'static str),
+}
 
 #[derive(Debug)]
 struct EventQueue {
@@ -319,6 +325,10 @@ pub struct Scheduler {
     downstream_enclaves: tinymap::TinySecondaryMap<EnclaveKey, SendContext>,
     /// Runtime statistics
     stats: Stats,
+    /// Reusable buffer for reaction keys to avoid allocations in hot loops
+    reaction_buffer: Vec<ReactionKey>,
+    /// Reusable buffer for mode transitions to avoid allocations in hot loops
+    transition_buffer: Vec<(ReactorKey, ModeTransition)>,
 }
 
 impl Scheduler {
@@ -343,6 +353,7 @@ impl Scheduler {
         } = enclave;
 
         let start_time = std::time::Instant::now();
+        let reaction_capacity = env.reactions.len();
 
         // Find the maximum level in the reaction graph
         let max_level = graph
@@ -399,6 +410,8 @@ impl Scheduler {
             upstream_enclaves,
             downstream_enclaves,
             stats: Stats::default(),
+            reaction_buffer: Vec::with_capacity(reaction_capacity),
+            transition_buffer: Vec::with_capacity(reaction_capacity),
         }
     }
 
@@ -670,14 +683,32 @@ impl Scheduler {
     /// Reactions at a level N may trigger further reactions at levels M>N
     #[tracing::instrument(skip(self, reaction_view), fields(tag = %tag))]
     pub fn process_tag(&mut self, tag: Tag, reaction_view: KeySetView<ReactionKey>) {
+        self.transition_buffer.clear();
         reaction_view.for_each_level(|level, reaction_keys, next_levels| {
             tracing::trace!(level=?level, "Iter");
 
+            self.reaction_buffer.clear();
+            for reaction_key in reaction_keys {
+                let reactor_key = self.reaction_graph.reaction_reactors[reaction_key];
+                let current_mode = self.store.current_mode(reactor_key);
+                let enabled = match self.reaction_graph.reaction_modes[reaction_key].as_ref() {
+                    Some(filter) => filter.allows(current_mode),
+                    None => true,
+                };
+                if enabled {
+                    self.reaction_buffer.push(reaction_key);
+                }
+            }
+
             self.stats
-                .increment_processed_reactions(reaction_keys.len());
+                .increment_processed_reactions(self.reaction_buffer.len());
 
             // Safety: reaction_keys in the same level are guaranteed to be independent of each other.
-            let iter_ctx = unsafe { self.store.iter_borrow_storage(reaction_keys) };
+            let iter_ctx = unsafe {
+                self.store
+                    .iter_borrow_storage(self.reaction_buffer.iter().copied())
+            }
+            .enumerate();
 
             #[cfg(feature = "parallel")]
             use rayon::prelude::ParallelIterator;
@@ -685,12 +716,23 @@ impl Scheduler {
             #[cfg(feature = "parallel")]
             let iter_ctx = rayon::prelude::ParallelBridge::par_bridge(iter_ctx);
 
-            let iter_ctx_res = iter_ctx.map(|trigger_ctx| trigger_ctx.trigger(tag));
+            let iter_ctx_res = iter_ctx.map(|(idx, trigger_ctx)| (idx, trigger_ctx.trigger(tag)));
 
             #[cfg(feature = "parallel")]
             let iter_ctx_res = iter_ctx_res.collect::<Vec<_>>();
 
-            for trigger_res in iter_ctx_res {
+            for (idx, trigger_res) in iter_ctx_res {
+                let reaction_key = self.reaction_buffer[idx];
+                let reactor_key = self.reaction_graph.reaction_reactors[reaction_key];
+                if let Some(mode) = self.reaction_graph.reaction_transitions[reaction_key] {
+                    self.transition_buffer
+                        .push((reactor_key, ModeTransition::Key(mode)));
+                }
+                if let Some(mode_name) = trigger_res.scheduled_mode_name {
+                    self.transition_buffer
+                        .push((reactor_key, ModeTransition::Name(mode_name)));
+                }
+
                 if let Some(shutdown_tag) = trigger_res.scheduled_shutdown {
                     // if the new shutdown tag is earlier than the current shutdown tag, update the shutdown tag and
                     // schedule a shutdown event
@@ -730,6 +772,20 @@ impl Scheduler {
                 next_levels.extend_above(downstream.copied());
             }
         });
+
+        for (reactor_key, transition) in self.transition_buffer.drain(..) {
+            let mode = match transition {
+                ModeTransition::Key(mode) => Some(mode),
+                ModeTransition::Name(name) => {
+                    self.reaction_graph.mode_for_reactor_name(reactor_key, name)
+                }
+            };
+            if let Some(mode) = mode {
+                self.store.set_mode(reactor_key, mode);
+            } else {
+                tracing::warn!(reactor = ?reactor_key, mode = ?transition, "Unknown mode");
+            }
+        }
 
         self.store.reset_ports();
     }

@@ -7,9 +7,9 @@ use crate::{
 
 use super::{
     action::ActionBuilder, port::BasePortBuilder, port::PortBuilder, reaction::ReactionBuilder,
-    runtime, ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey,
-    BuilderReactionKey, BuilderReactorKey, Input, Logical, Output, PortTag, ReactorBuilder,
-    ReactorBuilderState, TypedActionKey, TypedPortKey,
+    runtime, ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderModeKey,
+    BuilderPortKey, BuilderReactionKey, BuilderReactorKey, Input, Logical, Output, PortTag,
+    ReactorBuilder, ReactorBuilderState, TypedActionKey, TypedPortKey,
 };
 use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, EdgeDirection};
@@ -60,6 +60,13 @@ mod util {
 #[cfg(feature = "replay")]
 type ReplayFunctionBuilder = dyn FnOnce(&BuilderRuntimeParts) -> Box<dyn runtime::replay::ReplayFn>;
 
+#[derive(Debug)]
+pub struct ModeBuilder {
+    pub name: String,
+    pub reactor_key: BuilderReactorKey,
+    pub initial: bool,
+}
+
 #[derive(Default)]
 pub struct EnvBuilder {
     /// Builder for Actions
@@ -68,6 +75,8 @@ pub struct EnvBuilder {
     pub(super) port_builders: SlotMap<BuilderPortKey, Box<dyn BasePortBuilder>>,
     /// Builders for Reactions
     pub(super) reaction_builders: SlotMap<BuilderReactionKey, ReactionBuilder>,
+    /// Builders for Modes
+    pub(super) mode_builders: SlotMap<BuilderModeKey, ModeBuilder>,
     /// Builders for Reactors
     pub(super) reactor_builders: SlotMap<BuilderReactorKey, ReactorBuilder>,
     /// Builders for Connections
@@ -173,6 +182,43 @@ impl EnvBuilder {
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey, BuilderError> {
         self.add_action_impl::<(), Logical>(name, reactor_key, ActionType::Shutdown)
+    }
+
+    pub fn add_mode(
+        &mut self,
+        name: &str,
+        reactor_key: BuilderReactorKey,
+        initial: bool,
+    ) -> Result<BuilderModeKey, BuilderError> {
+        let reactor_builder = &mut self.reactor_builders[reactor_key];
+        if reactor_builder.modes.keys().any(|mode_key| {
+            self.mode_builders[mode_key].name == name
+                && self.mode_builders[mode_key].reactor_key == reactor_key
+        }) {
+            return Err(BuilderError::DuplicateModeDefinition {
+                reactor_name: reactor_builder.name().to_owned(),
+                mode_name: name.to_owned(),
+            });
+        }
+
+        if initial && reactor_builder.initial_mode.is_some() {
+            return Err(BuilderError::MultipleInitialModes {
+                reactor_name: reactor_builder.name().to_owned(),
+            });
+        }
+
+        let key = self.mode_builders.insert(ModeBuilder {
+            name: name.to_owned(),
+            reactor_key,
+            initial,
+        });
+
+        reactor_builder.modes.insert(key, ());
+        if initial {
+            reactor_builder.initial_mode = Some(key);
+        }
+
+        Ok(key)
     }
 
     /// Add a Timer Action to the given Reactor

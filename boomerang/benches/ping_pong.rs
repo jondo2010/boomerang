@@ -155,7 +155,7 @@ fn criterion_config() -> Criterion {
     let mut criterion = Criterion::default();
     #[cfg(not(windows))]
     if std::env::var_os("BOOMERANG_PROFILE").is_some() {
-        criterion = criterion.with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
+        criterion = criterion.with_profiler(PProfProfiler::new(5000, Output::Flamegraph(None)));
     }
     criterion
 }

@@ -56,6 +56,31 @@ impl std::ops::Sub<usize> for Level {
 /// A paired `ReactionKey` with it's execution `Level`.
 pub type LevelReactionKey = (Level, ReactionKey);
 
+tinymap::key_type! { pub ModeKey }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ModeFilter {
+    modes: Vec<ModeKey>,
+}
+
+impl ModeFilter {
+    pub fn new(modes: Vec<ModeKey>) -> Self {
+        Self { modes }
+    }
+
+    pub fn allows(&self, current: Option<ModeKey>) -> bool {
+        let Some(mode) = current else {
+            return false;
+        };
+        self.modes.iter().any(|m| *m == mode)
+    }
+
+    pub fn modes(&self) -> &[ModeKey] {
+        &self.modes
+    }
+}
+
 /// `Env` stores the resolved runtime state of all the reactors.
 ///
 /// The reactor heirarchy has been flattened and build by the builder methods.
@@ -98,6 +123,10 @@ pub struct BankInfo {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Default)]
 pub struct ReactionGraph {
+    /// All defined modes with their owning reactor
+    pub modes: tinymap::TinyMap<ModeKey, ReactorKey>,
+    /// Names for each mode
+    pub mode_names: tinymap::TinySecondaryMap<ModeKey, String>,
     /// For each Action, a set of Reactions it triggers
     pub action_triggers: tinymap::TinySecondaryMap<ActionKey, Vec<LevelReactionKey>>,
     /// For each Port, a set of Reactions it triggers
@@ -116,6 +145,16 @@ pub struct ReactionGraph {
     pub reaction_reactors: tinymap::TinySecondaryMap<ReactionKey, ReactorKey>,
     /// Bank index for a multi-bank reactor
     pub reactor_bank_infos: tinymap::TinySecondaryMap<ReactorKey, Option<BankInfo>>,
+    /// All known modes per reactor
+    pub reactor_modes: tinymap::TinySecondaryMap<ReactorKey, Vec<ModeKey>>,
+    /// Mode names per reactor
+    pub reactor_mode_names: tinymap::TinySecondaryMap<ReactorKey, Vec<(ModeKey, String)>>,
+    /// Initial mode per reactor (if any)
+    pub reactor_initial_modes: tinymap::TinySecondaryMap<ReactorKey, Option<ModeKey>>,
+    /// Mode filter per reaction (None means always enabled)
+    pub reaction_modes: tinymap::TinySecondaryMap<ReactionKey, Option<ModeFilter>>,
+    /// Transition target per reaction
+    pub reaction_transitions: tinymap::TinySecondaryMap<ReactionKey, Option<ModeKey>>,
 }
 
 impl ReactionGraph {
@@ -124,6 +163,17 @@ impl ReactionGraph {
         self.shutdown_actions
             .iter()
             .flat_map(|&action_key| self.action_triggers[action_key].iter().copied())
+    }
+
+    pub fn mode_for_reactor_name(
+        &self,
+        reactor_key: ReactorKey,
+        name: &str,
+    ) -> Option<ModeKey> {
+        self.reactor_mode_names[reactor_key]
+            .iter()
+            .find(|(_, mode_name)| mode_name.as_str() == name)
+            .map(|(mode_key, _)| *mode_key)
     }
 }
 
@@ -208,6 +258,11 @@ impl Enclave {
     ) -> ReactorKey {
         let reactor_key = self.env.reactors.insert(reactor);
         self.graph.reactor_bank_infos.insert(reactor_key, bank_info);
+        self.graph.reactor_modes.insert(reactor_key, Vec::new());
+        self.graph
+            .reactor_mode_names
+            .insert(reactor_key, Vec::new());
+        self.graph.reactor_initial_modes.insert(reactor_key, None);
         reactor_key
     }
 
@@ -229,6 +284,27 @@ impl Enclave {
         port_key
     }
 
+    pub fn insert_mode(&mut self, reactor_key: ReactorKey, name: &str, initial: bool) -> ModeKey {
+        let mode_key = self.graph.modes.insert(reactor_key);
+        self.graph.mode_names.insert(mode_key, name.to_owned());
+        self.graph
+            .reactor_modes
+            .get_mut(reactor_key)
+            .expect("reactor not found")
+            .push(mode_key);
+        self.graph
+            .reactor_mode_names
+            .get_mut(reactor_key)
+            .expect("reactor not found")
+            .push((mode_key, name.to_owned()));
+        if initial {
+            self.graph
+                .reactor_initial_modes
+                .insert(reactor_key, Some(mode_key));
+        }
+        mode_key
+    }
+
     pub fn insert_reaction(
         &mut self,
         reaction: Reaction,
@@ -236,6 +312,8 @@ impl Enclave {
         use_ports: impl IntoIterator<Item = PortKey>,
         effect_ports: impl IntoIterator<Item = PortKey>,
         actions: impl IntoIterator<Item = ActionKey>,
+        mode_filter: Option<ModeFilter>,
+        transition_to: Option<ModeKey>,
     ) -> ReactionKey {
         let reaction_key = self.env.reactions.insert(reaction);
         self.graph
@@ -250,6 +328,12 @@ impl Enclave {
         self.graph
             .reaction_reactors
             .insert(reaction_key, reactor_key);
+        self.graph
+            .reaction_modes
+            .insert(reaction_key, mode_filter);
+        self.graph
+            .reaction_transitions
+            .insert(reaction_key, transition_to);
         reaction_key
     }
 
@@ -322,9 +406,30 @@ impl Enclave {
             self.graph.reaction_reactors.keys(),
         );
         itertools::assert_equal(
+            self.env.reactions.keys(),
+            self.graph.reaction_modes.keys(),
+        );
+        itertools::assert_equal(
+            self.env.reactions.keys(),
+            self.graph.reaction_transitions.keys(),
+        );
+        itertools::assert_equal(
             self.env.reactors.keys(),
             self.graph.reactor_bank_infos.keys(),
         );
+        itertools::assert_equal(
+            self.env.reactors.keys(),
+            self.graph.reactor_modes.keys(),
+        );
+        itertools::assert_equal(
+            self.env.reactors.keys(),
+            self.graph.reactor_mode_names.keys(),
+        );
+        itertools::assert_equal(
+            self.env.reactors.keys(),
+            self.graph.reactor_initial_modes.keys(),
+        );
+        itertools::assert_equal(self.graph.modes.keys(), self.graph.mode_names.keys());
     }
 }
 

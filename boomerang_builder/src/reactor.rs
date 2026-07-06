@@ -12,6 +12,10 @@ slotmap::new_key_type! {
     pub struct BuilderReactorKey;
 }
 
+slotmap::new_key_type! {
+    pub struct BuilderModeKey;
+}
+
 impl petgraph::graph::GraphIndex for BuilderReactorKey {
     fn index(&self) -> usize {
         self.0.as_ffi() as usize
@@ -59,6 +63,8 @@ pub struct ReactorBuilder {
     pub parent_reactor_key: Option<BuilderReactorKey>,
     /// Reactions in this ReactorType
     pub reactions: SecondaryMap<BuilderReactionKey, ()>,
+    /// Modes in this Reactor
+    pub modes: SecondaryMap<BuilderModeKey, ()>,
     /// Ports in this Reactor
     pub ports: SecondaryMap<BuilderPortKey, ()>,
     /// Actions in this Reactor
@@ -67,6 +73,8 @@ pub struct ReactorBuilder {
     pub bank_info: Option<runtime::BankInfo>,
     /// Whether this Reactor is an enclave
     pub is_enclave: bool,
+    /// Initial mode for this reactor
+    pub initial_mode: Option<BuilderModeKey>,
 }
 
 impl ParentReactorBuilder for ReactorBuilder {
@@ -91,10 +99,12 @@ impl ReactorBuilder {
             type_name: type_name.into(),
             parent_reactor_key: parent,
             reactions: SecondaryMap::new(),
+            modes: SecondaryMap::new(),
             ports: SecondaryMap::new(),
             actions: SecondaryMap::new(),
             bank_info,
             is_enclave,
+            initial_mode: None,
         }
     }
 
@@ -258,6 +268,15 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
     ) -> Result<TypedActionKey<T, Physical>, BuilderError> {
         self.env
             .add_action::<T, Physical>(name, min_delay, self.reactor_key)
+    }
+
+    /// Add a new mode to this reactor.
+    pub fn add_mode(
+        &mut self,
+        name: &str,
+        initial: bool,
+    ) -> Result<BuilderModeKey, BuilderError> {
+        self.env.add_mode(name, self.reactor_key, initial)
     }
 
     /// Add a new input port to this reactor.

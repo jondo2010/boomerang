@@ -4,8 +4,8 @@ use slotmap::SecondaryMap;
 
 use crate::{
     connection::PortBindings, ActionType, BuilderActionKey, BuilderError, BuilderPortKey,
-    BuilderReactionKey, BuilderReactorKey, ParentReactorBuilder, PartialReactionBuilder,
-    TimerActionKey,
+    BuilderModeKey, BuilderReactionKey, BuilderReactorKey, ParentReactorBuilder,
+    PartialReactionBuilder, TimerActionKey,
 };
 
 use super::EnvBuilder;
@@ -32,6 +32,7 @@ pub struct BuilderAliases {
         SecondaryMap<BuilderReactorKey, (runtime::EnclaveKey, runtime::ReactorKey)>,
     pub reaction_aliases:
         SecondaryMap<BuilderReactionKey, (runtime::EnclaveKey, runtime::ReactionKey)>,
+    pub mode_aliases: SecondaryMap<BuilderModeKey, (runtime::EnclaveKey, runtime::ModeKey)>,
     pub action_aliases: SecondaryMap<BuilderActionKey, (runtime::EnclaveKey, runtime::ActionKey)>,
     pub port_aliases: SecondaryMap<BuilderPortKey, (runtime::EnclaveKey, runtime::PortKey)>,
 }
@@ -187,6 +188,23 @@ impl EnvBuilder {
                 .aliases
                 .reactor_aliases
                 .insert(builder_reactor_key, (enclave_key, runtime_reactor_key));
+        }
+        Ok(())
+    }
+
+    fn build_runtime_modes(
+        &mut self,
+        builder_parts: &mut BuilderRuntimeParts,
+    ) -> Result<(), BuilderError> {
+        for (builder_mode_key, mode) in self.mode_builders.drain() {
+            let (enclave_key, reactor_key) =
+                builder_parts.aliases.reactor_aliases[mode.reactor_key];
+            let enclave = &mut builder_parts.enclaves[enclave_key];
+            let runtime_mode_key = enclave.insert_mode(reactor_key, &mode.name, mode.initial);
+            builder_parts
+                .aliases
+                .mode_aliases
+                .insert(builder_mode_key, (enclave_key, runtime_mode_key));
         }
         Ok(())
     }
@@ -388,12 +406,26 @@ impl EnvBuilder {
                 .iter()
                 .map(|builder_action_key| builder_parts.aliases.action_aliases[*builder_action_key].1);
 
+            let mode_filter = reaction.enabled_modes.as_ref().map(|modes| {
+                let runtime_modes = modes
+                    .iter()
+                    .map(|mode_key| builder_parts.aliases.mode_aliases[*mode_key].1)
+                    .collect();
+                runtime::ModeFilter::new(runtime_modes)
+            });
+
+            let transition_to = reaction
+                .transition_to
+                .map(|mode_key| builder_parts.aliases.mode_aliases[mode_key].1);
+
             let runtime_reaction_key = enclave.insert_reaction(
                 runtime::Reaction::new(&reaction_name, reaction_body, None),
                 runtime_reactor_key,
                 use_ports,
                 effect_ports,
                 actions,
+                mode_filter,
+                transition_to,
             );
 
             let level_reaction = (reaction_levels[builder_reaction_key], runtime_reaction_key);
@@ -463,6 +495,7 @@ impl EnvBuilder {
         let reaction_levels = self.build_runtime_level_map(&port_bindings)?;
 
         self.build_runtime_reactors(&partition_map, &mut builder_parts)?;
+        self.build_runtime_modes(&mut builder_parts)?;
 
         // must be done last, since building other parts may add new reactions
         self.build_runtime_reactions(&partition_map, &mut builder_parts, &reaction_levels)?;

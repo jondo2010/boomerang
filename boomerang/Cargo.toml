@@ -44,7 +44,7 @@ tracing-tracy = { workspace = true }
 [target.'cfg(not(windows))'.dev-dependencies]
 termcolor = { version = "1.2" }
 rand = { version = "0.8" }
-pprof = { version = "0.13", features = ["criterion", "flamegraph"] }
+pprof = { version = "0.15", features = ["criterion", "flamegraph", "prost-codec"] }
 
 [[bench]]
 name = "ping_pong"

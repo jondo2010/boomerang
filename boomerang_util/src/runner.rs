@@ -21,7 +21,7 @@ use std::path::PathBuf;
 struct Args {
     #[arg(
         long,
-        env = "BOOMERANG_REACTION_GRAPH",
+        env = "BOOM_REACTION_GRAPH",
         value_parser = clap::builder::BoolishValueParser::new()
     )]
     reaction_graph: bool,

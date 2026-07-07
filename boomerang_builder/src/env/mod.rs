@@ -676,13 +676,16 @@ impl EnvBuilder {
                                 }
                             })
                     })
+                    .filter(move |&dep_key| {
+                        !self.reactions_are_mutually_exclusive(reaction_key, dep_key)
+                    })
                     .map(move |dep_key| (reaction_key, dep_key))
             });
 
         // For all Reactions within a Reactor, create a chain of dependencies by priority. This
         // ensures that Reactions within a Reactor always end up at unique levels.
         let internal = self.reactor_builders.values().flat_map(move |reactor| {
-            reactor
+            let reactions = reactor
                 .reactions
                 .keys()
                 .sorted_by_key(|&reaction_key| {
@@ -690,9 +693,35 @@ impl EnvBuilder {
                     reaction_key.data().as_ffi()
                 })
                 .rev()
-                .tuple_windows()
+                .collect_vec();
+
+            let mut edges = Vec::new();
+            for (idx, reaction_key) in reactions.iter().copied().enumerate() {
+                for dep_key in reactions.iter().copied().skip(idx + 1) {
+                    if !self.reactions_are_mutually_exclusive(reaction_key, dep_key) {
+                        edges.push((reaction_key, dep_key));
+                    }
+                }
+            }
+            edges
         });
         deps.chain(internal)
+    }
+
+    fn reactions_are_mutually_exclusive(
+        &self,
+        a: BuilderReactionKey,
+        b: BuilderReactionKey,
+    ) -> bool {
+        let Some(a_mode) = self.reaction_builders[a].scope_mode else {
+            return false;
+        };
+        let Some(b_mode) = self.reaction_builders[b].scope_mode else {
+            return false;
+        };
+
+        a_mode != b_mode
+            && self.mode_builders[a_mode].reactor_key == self.mode_builders[b_mode].reactor_key
     }
 
     /// Build a DAG of Reactions

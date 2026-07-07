@@ -30,6 +30,7 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 - [x] (2026-07-07 08:31Z) Implemented the mode-local physical-action caveat: physical actions carry static action-kind metadata, stay on the global queue, run only if their scope is active at the physical event tag, and are not suspended or replayed by history.
 - [x] (2026-07-07 08:33Z) Added the first-wave three-mode cycle integration test, proving reset transitions cycle through three sibling modes and only the active mode responds to each root trigger.
 - [x] (2026-07-07 08:45Z) Added linked book documentation for modal reactors, concise glossary entries for modal terms, and removed the obsolete `book/book.toml` `multilingual` field so `mdbook build book` succeeds locally.
+- [x] (2026-07-07 08:51Z) Implemented modal cycle-breaker dependency analysis: builder reaction dependency edges now skip pairs of reactions owned by mutually exclusive sibling modes, and `boomerang/tests/modal_cycle_breaker.rs` proves opposing dependencies in sibling modes do not form a static cycle.
 - [ ] Extend mode-local event queues and local-time scheduling to the planned inactive-scope performance benchmark.
 - [ ] Add selected modal-model integration tests and performance benchmarks.
 
@@ -106,6 +107,12 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 
 - Observation: The local `mdbook` version rejects the existing `book/book.toml` `multilingual = false` field.
   Evidence: `mdbook build book` failed with `unknown field 'multilingual'` before the documentation slice changed `book/book.toml`. Removing that obsolete field lets `mdbook build book` complete and write the HTML book to `book/book`.
+
+- Observation: A model with no startup work and no events can underflow natural shutdown scheduling from `Tag::NEVER`.
+  Evidence: The first `modal_cycle_breaker` test had no startup reaction and panicked at `boomerang_runtime/src/time.rs:75` while calculating shutdown from `Tag::NEVER`. The test now schedules an ordinary startup shutdown so this milestone specifically covers dependency-cycle behavior. The no-event shutdown edge remains a separate runtime cleanup candidate.
+
+- Observation: The existing internal reaction-priority chain creates edges between all reactions in a reactor, regardless of mode scope.
+  Evidence: The cycle-breaker slice rewrote the internal edge construction to add priority edges only between reaction pairs that can be active together, while retaining a total order among compatible pairs. `cargo test -p boomerang_builder` and `cargo test -p boomerang modal` pass after this change.
 
 ## Decision Log
 
@@ -209,6 +216,10 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
   Rationale: The documentation acceptance command is `mdbook build book`. Leaving an obsolete config field in place would make the new modal page unbuildable in this environment even though the page content is valid.
   Date/Author: 2026-07-07 / Codex.
 
+- Decision: Treat reactions scoped to different modes of the same reactor as mutually exclusive for static dependency edges.
+  Rationale: Such reactions cannot execute in the same active configuration, so port dependencies or priority-ordering edges between them should not make the global reaction graph cyclic. Root reactions and reactions in the same mode remain ordered normally because they can run together.
+  Date/Author: 2026-07-07 / Codex.
+
 ## Outcomes & Retrospective
 
 2026-07-07: The first local-time runtime slice is implemented for mode-scoped logical actions scheduled from reactions. The new modal action tests prove the core distinction: history preserves the pending action's remaining local delay, while reset discards the stale pending action. Remaining gaps after this slice were mode-local timers, delayed connections, lifecycle startup/shutdown/reset triggers, physical-action caveat handling, and the performance benchmark that proves inactive queues stay cheap.
@@ -226,6 +237,8 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 2026-07-07: The three-mode reset cycle first-wave test is now covered by `boomerang/tests/modal_count_3_modes.rs`. The test uses a root one-shot driver action and records the active mode sequence, proving only one sibling mode reacts at each step and reset transitions cycle `one`, `two`, `three` twice. Remaining first-wave gaps include cycle-breaker and multiport/bank coverage, plus the inactive-scope performance benchmark and book documentation.
 
 2026-07-07: User-facing modal reactor documentation is now linked from the book. `book/src/modal-reactors.md` explains mode syntax, reset and history transitions, lifecycle reactions, local-time components, transition timing, and physical actions without naming the external reference language or test corpus. `book/src/glossary.md` now defines the modal terms used by the page. The local `mdbook build book` command passes after removing the obsolete `multilingual` field from `book/book.toml`. Remaining gaps are the inactive-scope performance benchmark and remaining first-wave cycle-breaker and multiport/bank coverage.
+
+2026-07-07: Modal cycle-breaker behavior is now implemented. The builder dependency graph skips port and priority edges between reactions owned by sibling modes of the same reactor, and `boomerang/tests/modal_cycle_breaker.rs` proves opposing same-tag dependencies in mutually exclusive modes build and execute without a static cycle error. Remaining first-wave gaps are multiport/bank coverage and the inactive-scope performance benchmark.
 
 ## Context and Orientation
 
@@ -554,6 +567,13 @@ For the book documentation slice, also run:
     rg -n "Lingua Franca|lf-lang|LF-style|LF modal" boomerang/tests --glob 'modal_*.rs'
     git diff --check
 
+For the cycle-breaker slice, also run:
+
+    cargo test -p boomerang --test modal_cycle_breaker
+    cargo test -p boomerang_builder
+    cargo test -p boomerang modal
+    git diff --check
+
 Before completion, run:
 
     cargo fmt --check
@@ -775,3 +795,5 @@ Change log: 2026-07-07 / Codex: added action-kind metadata and physical-action m
 Change log: 2026-07-07 / Codex: added the three-mode modal cycle integration test using native Boomerang actions to prove active-mode-only reaction behavior across repeated reset transitions.
 
 Change log: 2026-07-07 / Codex: added modal reactor book documentation, glossary entries, and a small mdBook config compatibility fix required for the documented build command to pass locally.
+
+Change log: 2026-07-07 / Codex: made builder reaction dependency analysis skip edges between mutually exclusive sibling mode scopes and added a modal cycle-breaker integration test.

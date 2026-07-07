@@ -57,3 +57,7 @@ harness = false
 [[bench]]
 name = "port_bank"
 harness = false
+
+[[bench]]
+name = "modal_modes"
+harness = false

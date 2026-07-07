@@ -32,7 +32,7 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 - [x] (2026-07-07 08:45Z) Added linked book documentation for modal reactors, concise glossary entries for modal terms, and removed the obsolete `book/book.toml` `multilingual` field so `mdbook build book` succeeds locally.
 - [x] (2026-07-07 08:51Z) Implemented modal cycle-breaker dependency analysis: builder reaction dependency edges now skip pairs of reactions owned by mutually exclusive sibling modes, and `boomerang/tests/modal_cycle_breaker.rs` proves opposing dependencies in sibling modes do not form a static cycle.
 - [x] (2026-07-07 08:51Z) Added modal multiport-bank integration coverage in `boomerang/tests/modal_multiport_bank.rs`, proving banked child reactors and multiport connections work inside an active mode.
-- [ ] Extend mode-local event queues and local-time scheduling to the planned inactive-scope performance benchmark.
+- [x] (2026-07-07 08:55Z) Added the `modal_modes` Criterion benchmark, registered it in `boomerang/Cargo.toml`, and verified it with `cargo test -p boomerang --bench modal_modes` plus `cargo bench -p boomerang --bench modal_modes`.
 - [ ] Run final full-workspace validation and benchmark suite.
 
 ## Surprises & Discoveries
@@ -117,6 +117,9 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 
 - Observation: Modal banked child reactors and multiport connections work with the existing scope propagation.
   Evidence: The new `boomerang/tests/modal_multiport_bank.rs` test creates a bank of child reactors inside the active mode, fully connects each banked output to each multiport input, and passes with `cargo test -p boomerang --test modal_multiport_bank` and `cargo test -p boomerang modal`.
+
+- Observation: The new inactive-scope benchmark shows no linear per-tag scan across dormant mode queues in the measured cases.
+  Evidence: `cargo bench -p boomerang --bench modal_modes` measured 10,000 active root ticks at about 2.15 ms with 1 mode, 2.16 ms with 32 modes, and 2.42 ms with 256 modes. The 256-mode case is modestly slower, but not proportional to the 256 dormant scoped timer queues.
 
 ## Decision Log
 
@@ -245,6 +248,8 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 2026-07-07: Modal cycle-breaker behavior is now implemented. The builder dependency graph skips port and priority edges between reactions owned by sibling modes of the same reactor, and `boomerang/tests/modal_cycle_breaker.rs` proves opposing same-tag dependencies in mutually exclusive modes build and execute without a static cycle error. Remaining first-wave gaps are multiport/bank coverage and the inactive-scope performance benchmark.
 
 2026-07-07: First-wave multiport and bank coverage is now implemented. `boomerang/tests/modal_multiport_bank.rs` creates banked child reactors inside a mode and checks that a fully connected multiport network receives one value from every peer before shutdown. The focused modal test suite passes with this coverage in place. Remaining gaps are the inactive-scope performance benchmark and final full-workspace validation.
+
+2026-07-07: The inactive-scope performance benchmark is now implemented as `boomerang/benches/modal_modes.rs` and registered as `cargo bench -p boomerang --bench modal_modes`. It builds many sibling modes, gives each mode a local one-shot timer so inactive modes hold dormant queued work, and drives the initial active mode with root-scope ticks. The benchmark passes in Criterion test mode and reports near-flat timing between 1 and 32 modes, with a modest increase at 256 modes. Remaining work is final full-workspace validation, including the existing non-modal `ping_pong` benchmark.
 
 ## Context and Orientation
 
@@ -586,6 +591,12 @@ For the modal multiport-bank slice, also run:
     cargo test -p boomerang modal
     git diff --check
 
+For the inactive-scope benchmark slice, also run:
+
+    cargo test -p boomerang --bench modal_modes
+    cargo bench -p boomerang --bench modal_modes
+    git diff --check
+
 Before completion, run:
 
     cargo fmt --check
@@ -811,3 +822,5 @@ Change log: 2026-07-07 / Codex: added modal reactor book documentation, glossary
 Change log: 2026-07-07 / Codex: made builder reaction dependency analysis skip edges between mutually exclusive sibling mode scopes and added a modal cycle-breaker integration test.
 
 Change log: 2026-07-07 / Codex: added modal multiport-bank integration coverage and recorded that banked child reactors plus multiport routing work inside an active mode with the existing scope propagation.
+
+Change log: 2026-07-07 / Codex: added the `modal_modes` Criterion benchmark to measure root-scope progress while many inactive mode scopes hold dormant local timer events, and recorded local test and benchmark results.

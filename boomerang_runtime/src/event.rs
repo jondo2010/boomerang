@@ -22,8 +22,12 @@ pub struct ScheduledEvent {
     pub(crate) reactions: ReactionSet,
     /// Whether the scheduler should terminate after processing this event.
     pub(crate) terminal: bool,
-    /// Action values made present by this event.
-    pub(crate) action_values: Vec<ScheduledActionValue>,
+    /// Action value made present by this event.
+    ///
+    /// This is only needed while a mode-local event is queued and may be
+    /// rebased on history re-entry. Root/global events do not carry this
+    /// metadata.
+    pub(crate) action_value: Option<ScheduledActionValue>,
 }
 
 impl Display for ScheduledEvent {
@@ -207,19 +211,19 @@ mod tests {
             tag: Tag::new(Duration::seconds(1), 0),
             reactions: ReactionSet::default(),
             terminal: false,
-            action_values: Vec::new(),
+            action_value: None,
         });
         heap.push(ScheduledEvent {
             tag: Tag::new(Duration::seconds(1), 0),
             reactions: ReactionSet::default(),
             terminal: true,
-            action_values: Vec::new(),
+            action_value: None,
         });
         heap.push(ScheduledEvent {
             tag: Tag::new(Duration::seconds(0), 0),
             reactions: ReactionSet::default(),
             terminal: false,
-            action_values: Vec::new(),
+            action_value: None,
         });
 
         // The top event should NOT be the shutdown event

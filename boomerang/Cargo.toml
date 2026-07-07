@@ -61,3 +61,7 @@ harness = false
 [[bench]]
 name = "modal_modes"
 harness = false
+
+[[bench]]
+name = "modal_scheduler_perf"
+harness = false

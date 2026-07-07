@@ -158,7 +158,13 @@ impl<T: ReactorData> ActionStore<T> {
 
     pub fn clear_older_than(&mut self, clear_tag: Tag) {
         let clear_offset = clear_tag.offset();
-        self.offsets = self.offsets.split_off(&clear_offset);
+        while self
+            .offsets
+            .first_key_value()
+            .is_some_and(|(&offset, _)| offset < clear_offset)
+        {
+            self.offsets.pop_first();
+        }
 
         if let Some(bucket) = self.offsets.get_mut(&clear_offset) {
             bucket.remove_before(clear_tag.microstep());

@@ -1,3 +1,9 @@
+//! Build-time environment lowering.
+//!
+//! The builder owns the linear construction pass that turns reactor declarations into
+//! `boomerang_runtime` data, including static dependency maps and derived scheduler indexes. The
+//! runtime receives those data structures ready to execute.
+
 use crate::{
     connection::{BaseConnectionBuilder, ConnectionBuilder, PortBindings},
     port::Contained,

@@ -1,4 +1,11 @@
+//! Runtime graph lowering for [`EnvBuilder`].
+//!
+//! This module performs the build-time pass that materializes runtime enclaves and completes
+//! derived [`boomerang_runtime::ReactionGraph`] data. The scheduler should not need to reconstruct
+//! these static indexes during execution.
+
 use boomerang_runtime::{self as runtime};
+use core::range::Range;
 use itertools::Itertools;
 use slotmap::SecondaryMap;
 
@@ -120,6 +127,117 @@ pub struct EnclaveDep {
     pub upstream: BuilderReactorKey,
     pub downstream: BuilderReactorKey,
     pub delay: Option<runtime::Duration>,
+}
+
+fn push_range<T>(target: &mut Vec<T>, values: impl IntoIterator<Item = T>) -> Range<usize> {
+    let start = target.len();
+    target.extend(values);
+    Range {
+        start,
+        end: target.len(),
+    }
+}
+
+fn scope_is_descendant_or_self(
+    graph: &runtime::ReactionGraph,
+    mut scope: runtime::ScopeKey,
+    ancestor: runtime::ScopeKey,
+) -> bool {
+    loop {
+        if scope == ancestor {
+            return true;
+        }
+
+        let Some(parent) = graph.scopes[scope].parent else {
+            return false;
+        };
+        scope = parent;
+    }
+}
+
+fn build_modal_schedule_index(graph: &runtime::ReactionGraph) -> runtime::ModalScheduleIndex {
+    let mut index = runtime::ModalScheduleIndex::default();
+
+    for scope in graph.scopes.keys() {
+        let descendant_range = push_range(
+            &mut index.scope_descendants,
+            graph
+                .scopes
+                .keys()
+                .filter(|&candidate| scope_is_descendant_or_self(graph, candidate, scope)),
+        );
+        index
+            .scope_descendant_ranges
+            .insert(scope, descendant_range);
+
+        let logical_action_range = push_range(
+            &mut index.scope_logical_actions,
+            graph
+                .action_scopes
+                .iter()
+                .filter_map(|(action_key, &action_scope)| {
+                    (graph.action_is_logical[action_key]
+                        && scope_is_descendant_or_self(graph, action_scope, scope))
+                    .then_some(action_key)
+                }),
+        );
+        index
+            .scope_logical_action_ranges
+            .insert(scope, logical_action_range);
+
+        let timer_startup_range = push_range(
+            &mut index.scope_timer_startups,
+            graph
+                .timer_startup_actions
+                .iter()
+                .copied()
+                .filter(|(action_key, _)| {
+                    let action_scope = graph.action_scopes[*action_key];
+                    scope_is_descendant_or_self(graph, action_scope, scope)
+                }),
+        );
+        index
+            .scope_timer_startup_ranges
+            .insert(scope, timer_startup_range);
+
+        let reset_reaction_range = push_range(
+            &mut index.scope_reset_reactions,
+            graph
+                .reset_reactions
+                .iter()
+                .filter(|(reaction_scope, reactions)| {
+                    !reactions.is_empty()
+                        && scope_is_descendant_or_self(graph, *reaction_scope, scope)
+                })
+                .flat_map(|(_, reactions)| reactions.iter().copied()),
+        );
+        index
+            .scope_reset_reaction_ranges
+            .insert(scope, reset_reaction_range);
+
+        let startup_reaction_range = push_range(
+            &mut index.scope_startup_reactions,
+            graph.startup_reactions[scope].iter().copied(),
+        );
+        index
+            .scope_startup_reaction_ranges
+            .insert(scope, startup_reaction_range);
+    }
+
+    index.all_shutdown_reactions.extend(
+        graph
+            .shutdown_reactions_by_scope
+            .values()
+            .flat_map(|reactions| reactions.iter().copied()),
+    );
+
+    for reaction in &index.all_shutdown_reactions {
+        if !index.all_shutdown_actions_unique.contains(&reaction.action) {
+            index.all_shutdown_actions_unique.push(reaction.action);
+        }
+    }
+
+    index
 }
 
 impl EnvBuilder {
@@ -605,6 +723,11 @@ impl EnvBuilder {
 
         #[cfg(feature = "replay")]
         self.build_runtime_replayers(&mut builder_parts)?;
+
+        for enclave in builder_parts.enclaves.values_mut() {
+            let modal_schedule_index = build_modal_schedule_index(&enclave.graph);
+            enclave.graph.modal_schedule_index = modal_schedule_index;
+        }
 
         Ok(builder_parts)
     }

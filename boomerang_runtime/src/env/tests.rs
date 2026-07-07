@@ -181,6 +181,96 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
     enclaves
 }
 
+#[cfg(feature = "serde")]
+#[test]
+fn reaction_graph_serde_preserves_modal_schedule_index() {
+    fn range(start: usize, end: usize) -> core::range::Range<usize> {
+        core::range::Range { start, end }
+    }
+
+    let mut enclave = Enclave::default();
+    let reactor = enclave.insert_reactor(Reactor::new("modal", ()).boxed(), None);
+    let root_scope = enclave.root_scope(reactor);
+    let mode = enclave.insert_mode(reactor, "running", true);
+    let mode_scope = enclave.mode_scope(mode);
+
+    let logical_action =
+        enclave.insert_action(|key| Action::<()>::new("logical", key, None, true).boxed());
+    enclave.insert_action_scope(logical_action, mode_scope);
+    enclave.insert_timer_startup_action(logical_action, Tag::ZERO);
+
+    let startup_action =
+        enclave.insert_action(|key| Action::<()>::new("startup", key, None, true).boxed());
+    enclave.insert_action_scope(startup_action, mode_scope);
+
+    let reaction = enclave.insert_reaction(
+        Reaction::new("reaction", reaction_closure!(), None),
+        reactor,
+        std::iter::empty::<PortKey>(),
+        std::iter::empty::<PortKey>(),
+        std::iter::once(logical_action),
+        mode_scope,
+        None,
+    );
+    enclave.insert_reset_trigger(mode_scope, (Level::from(0), reaction));
+    enclave.insert_startup_trigger(mode_scope, startup_action, (Level::from(0), reaction));
+
+    let mut modal_schedule_index = ModalScheduleIndex::default();
+    modal_schedule_index.scope_descendants = vec![root_scope, mode_scope];
+    modal_schedule_index
+        .scope_descendant_ranges
+        .insert(root_scope, range(0, 2));
+    modal_schedule_index
+        .scope_descendant_ranges
+        .insert(mode_scope, range(1, 2));
+    modal_schedule_index.scope_logical_actions = vec![logical_action];
+    modal_schedule_index
+        .scope_logical_action_ranges
+        .insert(root_scope, range(0, 1));
+    modal_schedule_index
+        .scope_logical_action_ranges
+        .insert(mode_scope, range(0, 1));
+    modal_schedule_index.scope_timer_startups = vec![(logical_action, Tag::ZERO)];
+    modal_schedule_index
+        .scope_timer_startup_ranges
+        .insert(root_scope, range(0, 1));
+    modal_schedule_index
+        .scope_timer_startup_ranges
+        .insert(mode_scope, range(0, 1));
+    modal_schedule_index.scope_reset_reactions = vec![(Level::from(0), reaction)];
+    modal_schedule_index
+        .scope_reset_reaction_ranges
+        .insert(root_scope, range(0, 1));
+    modal_schedule_index
+        .scope_reset_reaction_ranges
+        .insert(mode_scope, range(0, 1));
+    modal_schedule_index.scope_startup_reactions = vec![LifecycleReaction {
+        reaction: (Level::from(0), reaction),
+        action: startup_action,
+    }];
+    modal_schedule_index
+        .scope_startup_reaction_ranges
+        .insert(root_scope, range(0, 0));
+    modal_schedule_index
+        .scope_startup_reaction_ranges
+        .insert(mode_scope, range(0, 1));
+    modal_schedule_index.all_shutdown_reactions = vec![LifecycleReaction {
+        reaction: (Level::from(1), reaction),
+        action: startup_action,
+    }];
+    modal_schedule_index.all_shutdown_actions_unique = vec![startup_action];
+    enclave.graph.modal_schedule_index = modal_schedule_index;
+
+    let serialized = serde_json::to_string(&enclave.graph).unwrap();
+    assert!(serialized.contains("modal_schedule_index"));
+
+    let deserialized: ReactionGraph = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(
+        deserialized.modal_schedule_index,
+        enclave.graph.modal_schedule_index
+    );
+}
+
 #[test]
 fn test_enclave0() {
     tracing_subscriber::fmt::init();

@@ -1,8 +1,15 @@
+//! Runtime environment data consumed by the scheduler.
+//!
+//! This module defines the resolved reactors, actions, ports, reactions, and graph metadata that
+//! the runtime executes. Build-time lowering and construction of derived graph indexes belong in
+//! `boomerang_builder`; the runtime treats [`ReactionGraph`] as ready-to-execute data.
+
 use crate::{
     event::AsyncEvent, keepalive, ActionKey, AsyncActionRef, BaseAction, BasePort, BaseReactor,
     Duration, DynActionRef, PortKey, Reaction, ReactionKey, ReactorData, ReactorKey, SendContext,
     Tag,
 };
+use core::range::Range;
 
 mod debug;
 #[cfg(test)]
@@ -104,9 +111,132 @@ impl ModeFilter {
     }
 }
 
+/// Flattened scheduler lookup tables derived from [`ReactionGraph`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ModalScheduleIndex {
+    #[cfg_attr(feature = "serde", serde(with = "range_map_serde"))]
+    pub scope_descendant_ranges: tinymap::TinySecondaryMap<ScopeKey, Range<usize>>,
+    pub scope_descendants: Vec<ScopeKey>,
+    #[cfg_attr(feature = "serde", serde(with = "range_map_serde"))]
+    pub scope_logical_action_ranges: tinymap::TinySecondaryMap<ScopeKey, Range<usize>>,
+    pub scope_logical_actions: Vec<ActionKey>,
+    #[cfg_attr(feature = "serde", serde(with = "range_map_serde"))]
+    pub scope_timer_startup_ranges: tinymap::TinySecondaryMap<ScopeKey, Range<usize>>,
+    pub scope_timer_startups: Vec<(ActionKey, Tag)>,
+    #[cfg_attr(feature = "serde", serde(with = "range_map_serde"))]
+    pub scope_reset_reaction_ranges: tinymap::TinySecondaryMap<ScopeKey, Range<usize>>,
+    pub scope_reset_reactions: Vec<LevelReactionKey>,
+    #[cfg_attr(feature = "serde", serde(with = "range_map_serde"))]
+    pub scope_startup_reaction_ranges: tinymap::TinySecondaryMap<ScopeKey, Range<usize>>,
+    pub scope_startup_reactions: Vec<LifecycleReaction>,
+    pub all_shutdown_reactions: Vec<LifecycleReaction>,
+    pub all_shutdown_actions_unique: Vec<ActionKey>,
+}
+
+impl Default for ModalScheduleIndex {
+    fn default() -> Self {
+        Self {
+            scope_descendant_ranges: tinymap::TinySecondaryMap::new(),
+            scope_descendants: Vec::new(),
+            scope_logical_action_ranges: tinymap::TinySecondaryMap::new(),
+            scope_logical_actions: Vec::new(),
+            scope_timer_startup_ranges: tinymap::TinySecondaryMap::new(),
+            scope_timer_startups: Vec::new(),
+            scope_reset_reaction_ranges: tinymap::TinySecondaryMap::new(),
+            scope_reset_reactions: Vec::new(),
+            scope_startup_reaction_ranges: tinymap::TinySecondaryMap::new(),
+            scope_startup_reactions: Vec::new(),
+            all_shutdown_reactions: Vec::new(),
+            all_shutdown_actions_unique: Vec::new(),
+        }
+    }
+}
+
+impl ModalScheduleIndex {
+    pub fn scope_descendants(&self, scope: ScopeKey) -> &[ScopeKey] {
+        &self.scope_descendants[self.scope_descendant_ranges[scope]]
+    }
+
+    pub fn scope_logical_actions(&self, scope: ScopeKey) -> &[ActionKey] {
+        &self.scope_logical_actions[self.scope_logical_action_ranges[scope]]
+    }
+
+    pub fn scope_timer_startups(&self, scope: ScopeKey) -> &[(ActionKey, Tag)] {
+        &self.scope_timer_startups[self.scope_timer_startup_ranges[scope]]
+    }
+
+    pub fn scope_reset_reactions(&self, scope: ScopeKey) -> &[LevelReactionKey] {
+        &self.scope_reset_reactions[self.scope_reset_reaction_ranges[scope]]
+    }
+
+    pub fn scope_startup_reactions(&self, scope: ScopeKey) -> &[LifecycleReaction] {
+        &self.scope_startup_reactions[self.scope_startup_reaction_ranges[scope]]
+    }
+}
+
+#[cfg(feature = "serde")]
+mod range_map_serde {
+    use super::*;
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct SerializableRange {
+        start: usize,
+        end: usize,
+    }
+
+    pub fn serialize<K, S>(
+        map: &tinymap::TinySecondaryMap<K, Range<usize>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        K: tinymap::Key + serde::Serialize,
+        S: serde::Serializer,
+    {
+        let serializable = map
+            .iter()
+            .map(|(key, range)| {
+                (
+                    key,
+                    SerializableRange {
+                        start: range.start,
+                        end: range.end,
+                    },
+                )
+            })
+            .collect::<tinymap::TinySecondaryMap<K, SerializableRange>>();
+        serde::Serialize::serialize(&serializable, serializer)
+    }
+
+    pub fn deserialize<'de, K, D>(
+        deserializer: D,
+    ) -> Result<tinymap::TinySecondaryMap<K, Range<usize>>, D::Error>
+    where
+        K: tinymap::Key + serde::Deserialize<'de>,
+        D: serde::Deserializer<'de>,
+    {
+        let serializable =
+            <tinymap::TinySecondaryMap<K, SerializableRange> as serde::Deserialize>::deserialize(
+                deserializer,
+            )?;
+        Ok(serializable
+            .into_iter()
+            .map(|(key, range)| {
+                (
+                    key,
+                    Range {
+                        start: range.start,
+                        end: range.end,
+                    },
+                )
+            })
+            .collect())
+    }
+}
+
 /// `Env` stores the resolved runtime state of all the reactors.
 ///
-/// The reactor heirarchy has been flattened and build by the builder methods.
+/// The reactor hierarchy has been flattened and built by the builder methods.
 #[derive(Default)]
 pub struct Env {
     /// The runtime set of Reactors
@@ -198,6 +328,8 @@ pub struct ReactionGraph {
     pub startup_reactions: tinymap::TinySecondaryMap<ScopeKey, Vec<LifecycleReaction>>,
     /// Shutdown-triggered reactions by their static owning scope.
     pub shutdown_reactions_by_scope: tinymap::TinySecondaryMap<ScopeKey, Vec<LifecycleReaction>>,
+    /// Flattened static lookup tables for modal scheduler operations.
+    pub modal_schedule_index: ModalScheduleIndex,
 }
 
 impl ReactionGraph {

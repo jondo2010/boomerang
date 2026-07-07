@@ -29,9 +29,9 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 - [x] (2026-07-07 08:28Z) Verified delayed connection helper reactors under reset/history: delayed connection actions inherit the enclosing mode scope, history re-entry resumes a pending delayed delivery with remaining local delay, and reset re-entry discards the pending delayed delivery.
 - [x] (2026-07-07 08:31Z) Implemented the mode-local physical-action caveat: physical actions carry static action-kind metadata, stay on the global queue, run only if their scope is active at the physical event tag, and are not suspended or replayed by history.
 - [x] (2026-07-07 08:33Z) Added the first-wave three-mode cycle integration test, proving reset transitions cycle through three sibling modes and only the active mode responds to each root trigger.
+- [x] (2026-07-07 08:45Z) Added linked book documentation for modal reactors, concise glossary entries for modal terms, and removed the obsolete `book/book.toml` `multilingual` field so `mdbook build book` succeeds locally.
 - [ ] Extend mode-local event queues and local-time scheduling to the planned inactive-scope performance benchmark.
 - [ ] Add selected modal-model integration tests and performance benchmarks.
-- [ ] Document the user-facing syntax and semantics in the book under `book/src` without naming the external reference language or its test suite.
 
 ## Surprises & Discoveries
 
@@ -103,6 +103,9 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 
 - Observation: Physical actions need action-kind metadata in `ReactionGraph` because event routing cannot infer logical versus physical behavior from scope alone.
   Evidence: Prior scoped action routing would place a mode-local physical action into the per-scope local queue, making history re-entry replay it. The new `action_is_logical` runtime map lets `EventManager::push_action_event` keep physical actions on the root global queue, and `cargo test -p boomerang --test modal_physical_actions` proves an event that occurs while the mode is inactive is dropped rather than replayed after history re-entry.
+
+- Observation: The local `mdbook` version rejects the existing `book/book.toml` `multilingual = false` field.
+  Evidence: `mdbook build book` failed with `unknown field 'multilingual'` before the documentation slice changed `book/book.toml`. Removing that obsolete field lets `mdbook build book` complete and write the HTML book to `book/book`.
 
 ## Decision Log
 
@@ -202,6 +205,10 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
   Rationale: Physical actions happen in wall-clock time, so history should not suspend and replay them as local-time events. Root-queue delivery plus the existing active-scope reaction filter gives the intended behavior: if the mode is inactive when the physical tag is processed, the reaction does not run and the event is not replayed later.
   Date/Author: 2026-07-07 / Codex.
 
+- Decision: Fix the existing mdBook config while adding modal documentation.
+  Rationale: The documentation acceptance command is `mdbook build book`. Leaving an obsolete config field in place would make the new modal page unbuildable in this environment even though the page content is valid.
+  Date/Author: 2026-07-07 / Codex.
+
 ## Outcomes & Retrospective
 
 2026-07-07: The first local-time runtime slice is implemented for mode-scoped logical actions scheduled from reactions. The new modal action tests prove the core distinction: history preserves the pending action's remaining local delay, while reset discards the stale pending action. Remaining gaps after this slice were mode-local timers, delayed connections, lifecycle startup/shutdown/reset triggers, physical-action caveat handling, and the performance benchmark that proves inactive queues stay cheap.
@@ -217,6 +224,8 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 2026-07-07: The physical-action caveat is now implemented and tested. Mode-scoped physical actions are accepted, but they are not local-time events: they remain scheduled by global physical/logical tag conversion, run only if their scope is active at that tag, and are not replayed by history. The new `boomerang/tests/modal_physical_actions.rs` test uses a short wall-clock run to prove an inactive physical event is dropped and not replayed after history re-entry. Remaining gaps are the inactive-scope performance benchmark, remaining first-wave modal tests, and book documentation.
 
 2026-07-07: The three-mode reset cycle first-wave test is now covered by `boomerang/tests/modal_count_3_modes.rs`. The test uses a root one-shot driver action and records the active mode sequence, proving only one sibling mode reacts at each step and reset transitions cycle `one`, `two`, `three` twice. Remaining first-wave gaps include cycle-breaker and multiport/bank coverage, plus the inactive-scope performance benchmark and book documentation.
+
+2026-07-07: User-facing modal reactor documentation is now linked from the book. `book/src/modal-reactors.md` explains mode syntax, reset and history transitions, lifecycle reactions, local-time components, transition timing, and physical actions without naming the external reference language or test corpus. `book/src/glossary.md` now defines the modal terms used by the page. The local `mdbook build book` command passes after removing the obsolete `multilingual` field from `book/book.toml`. Remaining gaps are the inactive-scope performance benchmark and remaining first-wave cycle-breaker and multiport/bank coverage.
 
 ## Context and Orientation
 
@@ -538,6 +547,13 @@ For the three-mode cycle test slice, also run:
     cargo test -p boomerang modal
     git diff --check
 
+For the book documentation slice, also run:
+
+    mdbook build book
+    rg -n "Lingua Franca|lf-lang|LF-style|LF modal" boomerang_builder boomerang_runtime boomerang_macros book/src
+    rg -n "Lingua Franca|lf-lang|LF-style|LF modal" boomerang/tests --glob 'modal_*.rs'
+    git diff --check
+
 Before completion, run:
 
     cargo fmt --check
@@ -757,3 +773,5 @@ Change log: 2026-07-07 / Codex: added delayed-connection integration coverage sh
 Change log: 2026-07-07 / Codex: added action-kind metadata and physical-action modal coverage so mode-scoped physical events stay global, are filtered by active scope at their event tag, and are not replayed by history.
 
 Change log: 2026-07-07 / Codex: added the three-mode modal cycle integration test using native Boomerang actions to prove active-mode-only reaction behavior across repeated reset transitions.
+
+Change log: 2026-07-07 / Codex: added modal reactor book documentation, glossary entries, and a small mdBook config compatibility fix required for the documented build command to pass locally.

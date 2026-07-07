@@ -34,7 +34,8 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 - [x] (2026-07-07 08:51Z) Added modal multiport-bank integration coverage in `boomerang/tests/modal_multiport_bank.rs`, proving banked child reactors and multiport connections work inside an active mode.
 - [x] (2026-07-07 08:55Z) Added the `modal_modes` Criterion benchmark, registered it in `boomerang/Cargo.toml`, and verified it with `cargo test -p boomerang --bench modal_modes` plus `cargo bench -p boomerang --bench modal_modes`.
 - [x] (2026-07-07 09:03Z) Added a non-modal scheduler fast path after `cargo bench -p boomerang --bench ping_pong` reported a root-scope regression; the rerun reports improvements versus the saved local baseline for all three `ping_pong` cases.
-- [ ] Run final full-workspace validation and benchmark suite.
+- [x] (2026-07-07 09:06Z) Ran final validation: `cargo test`, `mdbook build book`, `git diff --check`, both no-external-reference scans, `cargo bench -p boomerang --bench ping_pong`, and `cargo bench -p boomerang --bench modal_modes` all pass or report acceptable benchmark results; `cargo fmt --check` still fails on pre-existing workspace formatting drift outside this modal slice.
+- [ ] Optional follow-up before merge: decide whether to apply a separate workspace-wide rustfmt cleanup for the pre-existing `cargo fmt --check` drift.
 
 ## Surprises & Discoveries
 
@@ -55,6 +56,9 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 
 - Observation: Full `cargo fmt` is temporarily blocked by pre-existing trailing whitespace in `boomerang_macros/src/ports.rs`, outside this modal slice.
   Evidence: `cargo fmt` reports trailing whitespace at `boomerang_macros/src/ports.rs:140:140`, `:164:129`, `:203:147`, and `:209:151`. Targeted `rustfmt` on the touched modal files succeeds, and `git diff --check` passes after removing formatter spillover from unrelated runtime files.
+
+- Observation: Final `cargo fmt --check` still fails because the repository has broader pre-existing formatting drift outside the modal implementation files.
+  Evidence: The final run reports rustfmt diffs in existing non-modal files such as `boomerang/benches/physical_actions.rs`, `boomerang/tests/action_delay.rs`, `boomerang/tests/connection_helpers.rs`, `boomerang/tests/generic_after.rs`, `boomerang/tests/hello_world.rs`, `boomerang/tests/microsteps_multiple_actions.rs`, `boomerang_macros/src/lib.rs`, `boomerang_macros/src/ports.rs`, `boomerang_runtime/src/action/action_ref.rs`, `boomerang_runtime/src/port/mod.rs`, and `boomerang_runtime/src/refs.rs`. `git diff --check` passes, and targeted rustfmt was used for touched files.
 
 - Observation: Bare `initial mode idle { ... }` syntax cannot be used inside a Rust function body handled by an attribute macro.
   Evidence: `cargo test -p boomerang modal_structural_syntax` failed before macro expansion with `expected one of '!', '.', '::', ';', '?', '{', '}', or an operator, found 'mode'` at `initial mode mode_a`. The working syntax is a valid Rust macro statement that `#[reactor]` intercepts: `mode! { initial mode_a { ... } }`.
@@ -235,6 +239,10 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
   Rationale: Non-modal programs should not pay for modal scope checks, local frontier peeking, or root-event copying. Checking `ReactionGraph::modes.is_empty()` once at scheduler construction preserves the modal path while restoring the hot path for existing non-modal models.
   Date/Author: 2026-07-07 / Codex.
 
+- Decision: Do not include a workspace-wide rustfmt cleanup in the modal reactors commits.
+  Rationale: The final formatting drift is pre-existing and spans unrelated examples, tests, macros, and runtime helper files. Keeping it out of the modal feature preserves review focus; if required for merge, it should be a separate chore commit.
+  Date/Author: 2026-07-07 / Codex.
+
 ## Outcomes & Retrospective
 
 2026-07-07: The first local-time runtime slice is implemented for mode-scoped logical actions scheduled from reactions. The new modal action tests prove the core distinction: history preserves the pending action's remaining local delay, while reset discards the stale pending action. Remaining gaps after this slice were mode-local timers, delayed connections, lifecycle startup/shutdown/reset triggers, physical-action caveat handling, and the performance benchmark that proves inactive queues stay cheap.
@@ -260,6 +268,8 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 2026-07-07: The inactive-scope performance benchmark is now implemented as `boomerang/benches/modal_modes.rs` and registered as `cargo bench -p boomerang --bench modal_modes`. It builds many sibling modes, gives each mode a local one-shot timer so inactive modes hold dormant queued work, and drives the initial active mode with root-scope ticks. The benchmark passes in Criterion test mode and reports near-flat timing between 1 and 32 modes, with a modest increase at 256 modes. Remaining work is final full-workspace validation, including the existing non-modal `ping_pong` benchmark.
 
 2026-07-07: Final validation found and recovered a non-modal benchmark regression. `boomerang_runtime/src/sched.rs` now bypasses modal local-frontier work and modal reaction enabled checks when the graph contains no modes, and root-only event popping returns the root queue's `ReactionSet` directly instead of copying it through an aggregate set. Focused runtime and modal tests pass, `modal_modes` remains stable, and `ping_pong` now reports an improvement versus the saved local baseline. Remaining work is to rerun the full final validation suite after committing this recovery slice.
+
+2026-07-07: Final validation has been run after the performance recovery. `cargo test` passes across the workspace, `mdbook build book` writes the HTML book successfully, `git diff --check` passes, and both external-reference scans return no matches. `ping_pong` reports improvements versus the saved local baseline after the non-modal fast path, and `modal_modes` remains stable. The only remaining caveat is `cargo fmt --check`, which fails on pre-existing formatting drift outside the modal files; this is recorded as an optional separate cleanup before merge.
 
 ## Context and Orientation
 
@@ -628,6 +638,30 @@ Before completion, run:
 
 The `mdbook build book` command should complete without errors. If `mdbook` is not installed in the local environment, record that in `Progress` and run it in CI or another environment before final merge. The `rg` commands should return no matches; they intentionally exclude this ExecPlan and older non-modal test ports because provenance for the modal test corpus belongs here.
 
+Final local validation on 2026-07-07:
+
+    cargo test
+    # passes across workspace tests and doc tests
+
+    mdbook build book
+    # passes and writes book/book
+
+    git diff --check
+    # passes
+
+    rg -n "Lingua Franca|lf-lang|LF-style|LF modal" boomerang_builder boomerang_runtime boomerang_macros book/src
+    rg -n "Lingua Franca|lf-lang|LF-style|LF modal" boomerang/tests --glob 'modal_*.rs'
+    # both return no matches
+
+    cargo bench -p boomerang --bench ping_pong
+    # after the non-modal fast path: 100 pings about 17.1 us, 10,000 pings about 1.45 ms, 1,000,000 pings about 155.8 ms, all improved versus the saved local baseline
+
+    cargo bench -p boomerang --bench modal_modes
+    # after the non-modal fast path: 1 mode about 2.12 ms, 32 modes about 2.10 ms, 256 modes about 2.45 ms for 10,000 active root ticks
+
+    cargo fmt --check
+    # still fails on pre-existing formatting drift outside the modal implementation files; see Surprises & Discoveries
+
 ## Validation and Acceptance
 
 The feature is accepted only when a user can write one `#[reactor]` function with `mode! { initial ... }` and `mode! { ... }` blocks, declare timers/actions/reactions inside those blocks, transition with reset and history effects, and observe correct local-time behavior.
@@ -845,3 +879,5 @@ Change log: 2026-07-07 / Codex: added modal multiport-bank integration coverage 
 Change log: 2026-07-07 / Codex: added the `modal_modes` Criterion benchmark to measure root-scope progress while many inactive mode scopes hold dormant local timer events, and recorded local test and benchmark results.
 
 Change log: 2026-07-07 / Codex: added scheduler fast paths for graphs with no modes after final `ping_pong` validation exposed non-modal overhead from modal event and reaction bookkeeping.
+
+Change log: 2026-07-07 / Codex: recorded final validation results and left the pre-existing workspace-wide rustfmt drift as an explicit optional cleanup outside the modal reactors feature commits.

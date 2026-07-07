@@ -47,12 +47,7 @@ fn Sink(width: usize, #[input(len = width)] input: i32) -> impl Reactor {
 
 #[reactor]
 fn BroadcastMain() -> impl Reactor {
-    let source = builder.add_child_reactor(
-        Source(),
-        "source",
-        SourceState { value: 7 },
-        false,
-    )?;
+    let source = builder.add_child_reactor(Source(), "source", SourceState { value: 7 }, false)?;
     let sink = builder.add_child_reactor(
         Sink(3),
         "sink",
@@ -68,12 +63,7 @@ fn BroadcastMain() -> impl Reactor {
 
 #[reactor]
 fn CartesianMain() -> impl Reactor {
-    let source = builder.add_child_reactor(
-        Source(),
-        "source",
-        SourceState { value: 9 },
-        false,
-    )?;
+    let source = builder.add_child_reactor(Source(), "source", SourceState { value: 9 }, false)?;
     let sink = builder.add_child_reactor(
         Sink(3),
         "sink",

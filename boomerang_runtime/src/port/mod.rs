@@ -171,7 +171,9 @@ impl<'a, T: ReactorData> TryFrom<DynPortRef<'a>> for InputRef<'a, T> {
         port.0
             .downcast_ref::<Port<T>>()
             .map(InputRef::from)
-            .ok_or_else(|| ReactionRefsError::type_mismatch("input port", std::any::type_name::<T>(), found))
+            .ok_or_else(|| {
+                ReactionRefsError::type_mismatch("input port", std::any::type_name::<T>(), found)
+            })
     }
 }
 
@@ -235,11 +237,12 @@ impl<'a, T: ReactorData> TryFrom<DynPortRefMut<'a>> for OutputRef<'a, T> {
     fn try_from(port: DynPortRefMut<'a>) -> Result<Self, Self::Error> {
         let found = port.0.type_name();
 
-        port
-            .0
+        port.0
             .downcast_mut::<Port<T>>()
             .map(OutputRef::from)
-            .ok_or_else(|| ReactionRefsError::type_mismatch("output port", std::any::type_name::<T>(), found))
+            .ok_or_else(|| {
+                ReactionRefsError::type_mismatch("output port", std::any::type_name::<T>(), found)
+            })
     }
 }
 

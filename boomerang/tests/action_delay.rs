@@ -3,11 +3,7 @@
 use boomerang::prelude::*;
 
 #[reactor]
-fn GeneratedDelay(
-    #[state] y_state: u32,
-    #[input] y_in: u32,
-    #[output] y_out: u32,
-) -> impl Reactor {
+fn GeneratedDelay(#[state] y_state: u32, #[input] y_in: u32, #[output] y_out: u32) -> impl Reactor {
     let act = builder.add_logical_action::<()>("act", Some(Duration::milliseconds(100)))?;
 
     reaction! {

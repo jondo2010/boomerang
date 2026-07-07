@@ -38,7 +38,6 @@ fn HelloWorld() -> impl Reactor {
 fn hello_world() {
     tracing_subscriber::fmt::init();
     let config = runtime::Config::default().with_fast_forward(true);
-    let _ =
-        boomerang_util::runner::build_and_test_reactor(HelloWorld(), "hello_world", (), config)
-            .unwrap();
+    let _ = boomerang_util::runner::build_and_test_reactor(HelloWorld(), "hello_world", (), config)
+        .unwrap();
 }

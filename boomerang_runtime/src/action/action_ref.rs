@@ -31,7 +31,9 @@ impl<'a, T: ReactorData> TryFrom<DynActionRefMut<'a>> for ActionRef<'a, T> {
             .0
             .downcast_mut::<Action<T>>()
             .map(ActionRef)
-            .ok_or_else(|| ReactionRefsError::type_mismatch("action", std::any::type_name::<T>(), found))
+            .ok_or_else(|| {
+                ReactionRefsError::type_mismatch("action", std::any::type_name::<T>(), found)
+            })
     }
 }
 
@@ -115,7 +117,9 @@ impl<'a, T: ReactorData> TryFrom<DynActionRef<'a>> for AsyncActionRef<T> {
                 is_logical: action.is_logical(),
                 _phantom: Default::default(),
             })
-            .ok_or_else(|| ReactionRefsError::type_mismatch("action", std::any::type_name::<T>(), found))
+            .ok_or_else(|| {
+                ReactionRefsError::type_mismatch("action", std::any::type_name::<T>(), found)
+            })
     }
 }
 

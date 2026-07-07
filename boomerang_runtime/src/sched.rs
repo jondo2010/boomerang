@@ -1,16 +1,18 @@
 use std::{collections::BinaryHeap, pin::Pin};
 
 use kanal::ReceiveErrorTimeout;
+use tinymap::Key as _;
 
 use crate::{
     build_reaction_contexts,
     env::{Enclave, EnclaveKey},
-    event::{AsyncEvent, ScheduledEvent},
+    event::{AsyncEvent, ScheduledActionValue, ScheduledEvent},
     keepalive,
     key_set::KeySetView,
     store::Store,
-    CommonContext, Duration, Env, Level, ModeTransitionRequest, ReactionGraph, ReactionKey,
-    ReactionSet, ReactionSetLimits, ReactorKey, SendContext, Tag,
+    ActionKey, CommonContext, Duration, Env, Level, LifecycleReaction, ModeTransitionRequest,
+    ReactionGraph, ReactionKey, ReactionSet, ReactionSetLimits, ReactorKey, ScopeKey, SendContext,
+    Tag, TransitionKind,
 };
 
 #[derive(Debug)]
@@ -39,11 +41,38 @@ impl EventQueue {
     where
         I: IntoIterator<Item = (Level, ReactionKey)>,
     {
+        self.push_event_inner(tag, reactions, terminal, None);
+    }
+
+    fn push_action_event<I>(
+        &mut self,
+        tag: Tag,
+        action_value: ScheduledActionValue,
+        reactions: I,
+        terminal: bool,
+    ) where
+        I: IntoIterator<Item = (Level, ReactionKey)>,
+    {
+        self.push_event_inner(tag, reactions, terminal, Some(action_value));
+    }
+
+    fn push_event_inner<I>(
+        &mut self,
+        tag: Tag,
+        reactions: I,
+        terminal: bool,
+        action_value: Option<ScheduledActionValue>,
+    ) where
+        I: IntoIterator<Item = (Level, ReactionKey)>,
+    {
         if self.peek_tag() == Some(tag) {
             // If the tag is the same as the next event, merge the reactions
             let mut event = self.event_queue.peek_mut().unwrap();
             event.reactions.extend_above(reactions);
             event.terminal = event.terminal || terminal;
+            if let Some(action_value) = action_value {
+                event.action_values.push(action_value);
+            }
         } else {
             // Otherwise, push a new event
             let mut reaction_set = self.next_reaction_set();
@@ -52,6 +81,7 @@ impl EventQueue {
                 tag,
                 reactions: reaction_set,
                 terminal,
+                action_values: action_value.into_iter().collect(),
             };
             self.event_queue.push(event);
         }
@@ -112,6 +142,592 @@ impl EventQueue {
             );
         }
     }
+
+    fn clear(&mut self) {
+        while let Some(event) = self.event_queue.pop() {
+            self.free_reaction_sets.push(event.reactions);
+        }
+    }
+
+    fn rebase_action_values(
+        &mut self,
+        store: &mut Pin<Box<Store>>,
+        mut map_tag: impl FnMut(Tag) -> Tag,
+    ) {
+        let mut events = self.event_queue.drain().collect::<Vec<_>>();
+        for event in &mut events {
+            let new_tag = map_tag(event.tag);
+            for action_value in &mut event.action_values {
+                store.reschedule_action_value(action_value.key, action_value.stored_tag, new_tag);
+                action_value.stored_tag = new_tag;
+            }
+        }
+        self.event_queue = events.into_iter().collect();
+    }
+}
+
+#[derive(Debug)]
+struct ScopeTimeState {
+    active: bool,
+    ever_active: bool,
+    startup_fired: bool,
+    activation_global: Tag,
+    activation_local: Tag,
+    allow_activation_tag: bool,
+    suspended_local: Tag,
+    frontier_epoch: u64,
+    queue: EventQueue,
+}
+
+impl ScopeTimeState {
+    fn new(active: bool, reaction_set_limits: ReactionSetLimits) -> Self {
+        Self {
+            active,
+            ever_active: active,
+            startup_fired: active,
+            activation_global: Tag::ZERO,
+            activation_local: Tag::ZERO,
+            allow_activation_tag: active,
+            suspended_local: Tag::ZERO,
+            frontier_epoch: 0,
+            queue: EventQueue::new(reaction_set_limits),
+        }
+    }
+
+    fn local_to_global(&self, local_tag: Tag) -> Tag {
+        local_to_global(
+            self.activation_global,
+            self.activation_local,
+            self.allow_activation_tag,
+            local_tag,
+        )
+    }
+
+    fn global_to_local(&self, global_tag: Tag) -> Tag {
+        let elapsed = global_tag.offset() - self.activation_global.offset();
+        Tag::new(
+            self.activation_local.offset() + elapsed,
+            global_tag.microstep(),
+        )
+    }
+}
+
+fn local_to_global(
+    activation_global: Tag,
+    activation_local: Tag,
+    allow_activation_tag: bool,
+    local_tag: Tag,
+) -> Tag {
+    let elapsed = local_tag.offset() - activation_local.offset();
+    let mut global_tag = Tag::new(activation_global.offset() + elapsed, local_tag.microstep());
+
+    if global_tag < activation_global || (global_tag == activation_global && !allow_activation_tag)
+    {
+        global_tag = activation_global.delay(Duration::ZERO);
+    }
+
+    global_tag
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScopeFrontierEntry {
+    global_tag: Tag,
+    scope: ScopeKey,
+    epoch: u64,
+}
+
+impl Ord for ScopeFrontierEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.global_tag
+            .cmp(&other.global_tag)
+            .then(self.scope.index().cmp(&other.scope.index()))
+            .reverse()
+    }
+}
+
+impl PartialOrd for ScopeFrontierEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Debug)]
+struct ReadyEvent {
+    tag: Tag,
+    reactions: ReactionSet,
+    terminal: bool,
+}
+
+#[derive(Debug)]
+struct EventManager {
+    root: EventQueue,
+    scopes: tinymap::TinySecondaryMap<ScopeKey, ScopeTimeState>,
+    frontier: BinaryHeap<ScopeFrontierEntry>,
+    free_reaction_sets: Vec<ReactionSet>,
+    reaction_set_limits: ReactionSetLimits,
+}
+
+impl EventManager {
+    fn new(
+        reaction_set_limits: ReactionSetLimits,
+        reaction_graph: &ReactionGraph,
+        store: &Pin<Box<Store>>,
+    ) -> Self {
+        let root = EventQueue::new(reaction_set_limits.clone());
+        let scopes = reaction_graph
+            .scopes
+            .keys()
+            .map(|scope| {
+                (
+                    scope,
+                    ScopeTimeState::new(
+                        store.scope_is_active(reaction_graph, scope),
+                        reaction_set_limits.clone(),
+                    ),
+                )
+            })
+            .collect();
+
+        Self {
+            root,
+            scopes,
+            frontier: BinaryHeap::new(),
+            free_reaction_sets: Vec::new(),
+            reaction_set_limits,
+        }
+    }
+
+    fn push_event<I>(&mut self, tag: Tag, reactions: I, terminal: bool)
+    where
+        I: IntoIterator<Item = (Level, ReactionKey)>,
+    {
+        self.root.push_event(tag, reactions, terminal);
+    }
+
+    fn push_action_event<I>(
+        &mut self,
+        action_key: crate::ActionKey,
+        tag: Tag,
+        reactions: I,
+        terminal: bool,
+        reaction_graph: &ReactionGraph,
+    ) where
+        I: IntoIterator<Item = (Level, ReactionKey)>,
+    {
+        let action_value = ScheduledActionValue {
+            key: action_key,
+            stored_tag: tag,
+        };
+        let scope = reaction_graph.action_scopes[action_key];
+        if !reaction_graph.action_is_logical[action_key]
+            || Self::scope_uses_global_time(reaction_graph, scope)
+        {
+            self.root
+                .push_action_event(tag, action_value, reactions, terminal);
+            return;
+        }
+
+        let local_tag = self.scopes[scope].global_to_local(tag);
+        self.scopes[scope]
+            .queue
+            .push_action_event(local_tag, action_value, reactions, terminal);
+        self.refresh_frontier(scope);
+    }
+
+    fn push_local_action_event<I>(
+        &mut self,
+        scope: ScopeKey,
+        local_tag: Tag,
+        action_value: ScheduledActionValue,
+        reactions: I,
+        terminal: bool,
+        reaction_graph: &ReactionGraph,
+    ) where
+        I: IntoIterator<Item = (Level, ReactionKey)>,
+    {
+        if Self::scope_uses_global_time(reaction_graph, scope) {
+            self.root
+                .push_action_event(action_value.stored_tag, action_value, reactions, terminal);
+            return;
+        }
+
+        self.scopes[scope]
+            .queue
+            .push_action_event(local_tag, action_value, reactions, terminal);
+        self.refresh_frontier(scope);
+    }
+
+    fn peek_tag(&mut self) -> Option<Tag> {
+        let root_tag = self.root.peek_tag();
+        let local_tag = self.peek_frontier_tag();
+        match (root_tag, local_tag) {
+            (Some(root), Some(local)) => Some(root.min(local)),
+            (Some(root), None) => Some(root),
+            (None, Some(local)) => Some(local),
+            (None, None) => None,
+        }
+    }
+
+    fn pop_next_event(&mut self) -> Option<ReadyEvent> {
+        let tag = self.peek_tag()?;
+        let mut ready = ReadyEvent {
+            tag,
+            reactions: self.next_reaction_set(),
+            terminal: false,
+        };
+
+        if self.root.peek_tag() == Some(tag) {
+            let event = self.root.pop_next_event().unwrap();
+            ready.reactions.merge(&event.reactions);
+            ready.terminal = ready.terminal || event.terminal;
+            self.root.free_reaction_sets.push(event.reactions);
+        }
+
+        while self.peek_frontier_tag() == Some(tag) {
+            let frontier = self.frontier.pop().unwrap();
+            let event = {
+                let state = &mut self.scopes[frontier.scope];
+                state.queue.pop_next_event().unwrap()
+            };
+
+            ready.reactions.merge(&event.reactions);
+            ready.terminal = ready.terminal || event.terminal;
+
+            {
+                let state = &mut self.scopes[frontier.scope];
+                state.queue.free_reaction_sets.push(event.reactions);
+            }
+            self.refresh_frontier(frontier.scope);
+        }
+
+        Some(ready)
+    }
+
+    fn shutdown(&mut self) {
+        self.root.shutdown();
+    }
+
+    fn return_reaction_set(&mut self, mut reaction_set: ReactionSet) {
+        reaction_set.clear();
+        self.free_reaction_sets.push(reaction_set);
+    }
+
+    fn apply_transition(
+        &mut self,
+        reactor_key: ReactorKey,
+        request: &ModeTransitionRequest,
+        store: &mut Pin<Box<Store>>,
+        reaction_graph: &ReactionGraph,
+        current_tag: Tag,
+    ) {
+        let target_scope = reaction_graph.mode_scopes[request.target];
+
+        if matches!(request.transition, TransitionKind::Reset) {
+            self.reset_scope_subtree(target_scope, store, reaction_graph);
+            store.reset_child_modes_in_scope(reaction_graph, target_scope);
+        }
+
+        store.set_mode(reactor_key, request.target);
+        let startup_scopes = self.sync_active_scopes(
+            store,
+            reaction_graph,
+            current_tag,
+            target_scope,
+            request.transition,
+        );
+        self.schedule_startup_reactions(
+            &startup_scopes,
+            store,
+            reaction_graph,
+            current_tag.delay(Duration::ZERO),
+        );
+
+        if matches!(request.transition, TransitionKind::Reset) {
+            self.schedule_reset_timer_startups(target_scope, store, reaction_graph);
+            self.schedule_reset_reactions(
+                target_scope,
+                reaction_graph,
+                current_tag.delay(Duration::ZERO),
+            );
+        }
+    }
+
+    fn reset_scope_subtree(
+        &mut self,
+        root_scope: ScopeKey,
+        store: &mut Pin<Box<Store>>,
+        reaction_graph: &ReactionGraph,
+    ) {
+        let reset_scopes = reaction_graph
+            .scopes
+            .keys()
+            .filter(|&scope| Self::scope_is_descendant_or_self(reaction_graph, scope, root_scope))
+            .collect::<Vec<_>>();
+
+        for scope in &reset_scopes {
+            let state = &mut self.scopes[*scope];
+            state.queue.clear();
+            state.suspended_local = Tag::ZERO;
+            state.activation_local = Tag::ZERO;
+            state.frontier_epoch = state.frontier_epoch.wrapping_add(1);
+        }
+
+        let action_keys = reaction_graph
+            .action_scopes
+            .iter()
+            .filter(|(action_key, &scope)| {
+                reaction_graph.action_is_logical[*action_key] && reset_scopes.contains(&scope)
+            })
+            .map(|(action_key, _)| action_key)
+            .collect::<Vec<_>>();
+
+        for action_key in action_keys {
+            store.clear_action_values(action_key);
+        }
+    }
+
+    fn sync_active_scopes(
+        &mut self,
+        store: &mut Pin<Box<Store>>,
+        reaction_graph: &ReactionGraph,
+        current_tag: Tag,
+        reset_root: ScopeKey,
+        transition: TransitionKind,
+    ) -> Vec<ScopeKey> {
+        let activation_global = current_tag;
+        let scopes = reaction_graph.scopes.keys().collect::<Vec<_>>();
+        let mut startup_scopes = Vec::new();
+
+        for scope in scopes {
+            let new_active = store.scope_is_active(reaction_graph, scope);
+            let reset = matches!(transition, TransitionKind::Reset)
+                && Self::scope_is_descendant_or_self(reaction_graph, scope, reset_root);
+
+            let state = &mut self.scopes[scope];
+            match (state.active, new_active) {
+                (true, false) => {
+                    state.suspended_local = state.global_to_local(current_tag);
+                    state.active = false;
+                    state.frontier_epoch = state.frontier_epoch.wrapping_add(1);
+                }
+                (false, true) => {
+                    state.active = true;
+                    state.ever_active = true;
+                    if !state.startup_fired {
+                        state.startup_fired = true;
+                        startup_scopes.push(scope);
+                    }
+                    state.activation_global = activation_global;
+                    state.allow_activation_tag = false;
+                    if reset {
+                        state.activation_local = Tag::ZERO;
+                        state.suspended_local = Tag::ZERO;
+                    } else {
+                        state.activation_local = state.suspended_local;
+                    }
+                    state.frontier_epoch = state.frontier_epoch.wrapping_add(1);
+                    let activation_global = state.activation_global;
+                    let activation_local = state.activation_local;
+                    let allow_activation_tag = state.allow_activation_tag;
+                    state.queue.rebase_action_values(store, |local_tag| {
+                        local_to_global(
+                            activation_global,
+                            activation_local,
+                            allow_activation_tag,
+                            local_tag,
+                        )
+                    });
+                    self.refresh_frontier(scope);
+                }
+                (true, true) if reset => {
+                    state.ever_active = true;
+                    state.activation_global = activation_global;
+                    state.activation_local = Tag::ZERO;
+                    state.allow_activation_tag = false;
+                    state.suspended_local = Tag::ZERO;
+                    state.frontier_epoch = state.frontier_epoch.wrapping_add(1);
+                    self.refresh_frontier(scope);
+                }
+                _ => {}
+            }
+        }
+
+        startup_scopes
+    }
+
+    fn schedule_startup_reactions(
+        &mut self,
+        scopes: &[ScopeKey],
+        store: &mut Pin<Box<Store>>,
+        reaction_graph: &ReactionGraph,
+        tag: Tag,
+    ) {
+        if scopes.is_empty() {
+            return;
+        }
+
+        let startup_reactions = scopes
+            .iter()
+            .flat_map(|scope| reaction_graph.startup_reactions[*scope].iter().copied())
+            .collect::<Vec<_>>();
+
+        if startup_reactions.is_empty() {
+            return;
+        }
+
+        for action_key in unique_lifecycle_actions(&startup_reactions) {
+            store.push_action_value(action_key, tag, Box::new(()));
+        }
+
+        self.push_event(
+            tag,
+            startup_reactions
+                .into_iter()
+                .map(|reaction| reaction.reaction),
+            false,
+        );
+    }
+
+    fn schedule_reset_timer_startups(
+        &mut self,
+        root_scope: ScopeKey,
+        store: &mut Pin<Box<Store>>,
+        reaction_graph: &ReactionGraph,
+    ) {
+        let timer_startups = reaction_graph
+            .timer_startup_actions
+            .iter()
+            .copied()
+            .filter(|(action_key, _)| {
+                let scope = reaction_graph.action_scopes[*action_key];
+                Self::scope_is_descendant_or_self(reaction_graph, scope, root_scope)
+            })
+            .collect::<Vec<_>>();
+
+        for (action_key, local_tag) in timer_startups {
+            let scope = reaction_graph.action_scopes[action_key];
+            let global_tag = if Self::scope_uses_global_time(reaction_graph, scope) {
+                local_tag
+            } else {
+                self.scopes[scope].local_to_global(local_tag)
+            };
+            store.push_action_value(action_key, global_tag, Box::new(()));
+            let downstream = reaction_graph.action_triggers[action_key].iter().copied();
+            self.push_local_action_event(
+                scope,
+                local_tag,
+                ScheduledActionValue {
+                    key: action_key,
+                    stored_tag: global_tag,
+                },
+                downstream,
+                false,
+                reaction_graph,
+            );
+        }
+    }
+
+    fn schedule_reset_reactions(
+        &mut self,
+        root_scope: ScopeKey,
+        reaction_graph: &ReactionGraph,
+        tag: Tag,
+    ) {
+        let reset_reactions = reaction_graph
+            .reset_reactions
+            .iter()
+            .filter(|(scope, reactions)| {
+                !reactions.is_empty()
+                    && Self::scope_is_descendant_or_self(reaction_graph, *scope, root_scope)
+            })
+            .flat_map(|(_, reactions)| reactions.iter().copied())
+            .collect::<Vec<_>>();
+
+        if !reset_reactions.is_empty() {
+            self.push_event(tag, reset_reactions, false);
+        }
+    }
+
+    fn next_reaction_set(&mut self) -> ReactionSet {
+        self.free_reaction_sets
+            .pop()
+            .unwrap_or_else(|| ReactionSet::new(&self.reaction_set_limits))
+    }
+
+    fn refresh_frontier(&mut self, scope: ScopeKey) {
+        let state = &mut self.scopes[scope];
+        state.frontier_epoch = state.frontier_epoch.wrapping_add(1);
+        if !state.active {
+            return;
+        }
+
+        let Some(local_tag) = state.queue.peek_tag() else {
+            return;
+        };
+        let global_tag = state.local_to_global(local_tag);
+        self.frontier.push(ScopeFrontierEntry {
+            global_tag,
+            scope,
+            epoch: state.frontier_epoch,
+        });
+    }
+
+    fn peek_frontier_tag(&mut self) -> Option<Tag> {
+        loop {
+            let entry = *self.frontier.peek()?;
+            let state = &self.scopes[entry.scope];
+            if !state.active || state.frontier_epoch != entry.epoch {
+                self.frontier.pop();
+                continue;
+            }
+
+            let Some(local_tag) = state.queue.peek_tag() else {
+                self.frontier.pop();
+                continue;
+            };
+            if state.local_to_global(local_tag) != entry.global_tag {
+                self.frontier.pop();
+                continue;
+            }
+
+            return Some(entry.global_tag);
+        }
+    }
+
+    fn scope_uses_global_time(reaction_graph: &ReactionGraph, scope: ScopeKey) -> bool {
+        reaction_graph.scopes[scope].parent.is_none()
+    }
+
+    fn scope_ever_active(&self, scope: ScopeKey) -> bool {
+        self.scopes[scope].ever_active
+    }
+
+    fn scope_is_descendant_or_self(
+        reaction_graph: &ReactionGraph,
+        mut scope: ScopeKey,
+        ancestor: ScopeKey,
+    ) -> bool {
+        loop {
+            if scope == ancestor {
+                return true;
+            }
+
+            let Some(parent) = reaction_graph.scopes[scope].parent else {
+                return false;
+            };
+            scope = parent;
+        }
+    }
+}
+
+fn unique_lifecycle_actions(reactions: &[LifecycleReaction]) -> Vec<ActionKey> {
+    let mut actions = Vec::new();
+    for reaction in reactions {
+        if !actions.contains(&reaction.action) {
+            actions.push(reaction.action);
+        }
+    }
+    actions
 }
 
 #[derive(Debug, Clone)]
@@ -303,8 +919,8 @@ pub struct Scheduler {
     reaction_graph: ReactionGraph,
     /// Asynchronous events receiver
     event_rx: crate::Receiver<AsyncEvent>,
-    /// Event queue
-    events: EventQueue,
+    /// Event queues for root-scope and mode-local events.
+    events: EventManager,
     /// Initial physical time.
     start_time: std::time::Instant,
     /// Current tag
@@ -363,12 +979,11 @@ impl Scheduler {
             max_level,
             num_keys: env.reactions.len(),
         };
-        let events = EventQueue::new(reaction_set_limits);
-
         // Build contexts for each reaction
         let contexts = build_reaction_contexts(key, &graph, start_time, event_tx, shutdown_rx);
 
         let store = Store::new(env, contexts, &graph);
+        let events = EventManager::new(reaction_set_limits, &graph, &store);
 
         let upstream_enclaves = upstream_enclaves
             .into_iter()
@@ -441,25 +1056,43 @@ impl Scheduler {
                     return;
                 }
                 let downstream = self.reaction_graph.action_triggers[key].iter().copied();
-                self.events.push_event(tag, downstream, false);
                 self.store.push_action_value(key, tag, value);
+                self.events
+                    .push_action_event(key, tag, downstream, false, &self.reaction_graph);
             }
             AsyncEvent::Physical { time, key, value } => {
                 let tag = Tag::from_physical_time(self.start_time, time);
                 let downstream = self.reaction_graph.action_triggers[key].iter().copied();
-                self.events.push_event(tag, downstream, false);
                 self.store.push_action_value(key, tag, value);
+                self.events
+                    .push_action_event(key, tag, downstream, false, &self.reaction_graph);
             }
             AsyncEvent::Shutdown { delay } => {
                 let tag = self.current_tag.delay(delay);
-                for action_key in &self.reaction_graph.shutdown_actions {
-                    self.store.push_action_value(*action_key, tag, Box::new(()));
-                }
-                let downstream = self.reaction_graph.shutdown_reactions();
-                self.events.push_event(tag, downstream, true);
-                //self.shutdown_tag = Some(tag);
+                self.schedule_shutdown_at(tag);
             }
         }
+    }
+
+    fn schedule_shutdown_at(&mut self, tag: Tag) {
+        let shutdown_reactions = self
+            .reaction_graph
+            .shutdown_reactions_by_scope
+            .values()
+            .flat_map(|reactions| reactions.iter().copied())
+            .collect::<Vec<_>>();
+
+        for action_key in unique_lifecycle_actions(&shutdown_reactions) {
+            self.store.push_action_value(action_key, tag, Box::new(()));
+        }
+
+        self.events.push_event(
+            tag,
+            shutdown_reactions
+                .into_iter()
+                .map(|reaction| reaction.reaction),
+            true,
+        );
     }
 
     /// Execute startup of the Scheduler.
@@ -476,18 +1109,15 @@ impl Scheduler {
                     tracing::trace!(level = %lvl, reaction = %reaction_key, tag = %tag, "Startup reaction");
                 })
                 .copied();
-            self.events.push_event(tag, downstream, false);
+            self.events
+                .push_action_event(action_key, tag, downstream, false, &self.reaction_graph);
         }
 
         // Schedule a shutdown event if a timeout is set
         if let Some(timeout) = self.config.timeout {
             let tag = tag.delay(timeout);
-            for action_key in &self.reaction_graph.shutdown_actions {
-                self.store.push_action_value(*action_key, tag, Box::new(()));
-            }
             tracing::info!(tag = %tag, "Timeout set, scheduling shutdown");
-            self.events
-                .push_event(tag, self.reaction_graph.shutdown_reactions(), true);
+            self.schedule_shutdown_at(tag);
         }
 
         tracing::info!(tag = %tag, "Starting the execution.");
@@ -578,22 +1208,21 @@ impl Scheduler {
                 }
             }
 
-            //if let Some(mut event) = self.events.pop_next_event() {
             let mut event = self.events.pop_next_event().unwrap();
 
-            tracing::debug!(event = %event, "Processing");
+            tracing::debug!(event = ?event, "Processing");
 
             if event.terminal {
                 // Signal to any waiting threads that the scheduler is shutting down.
                 self.shutdown_tx.shutdown();
             }
 
-            self.process_tag(event.tag, event.reactions.view());
-
-            // Return the ReactionSet to the free pool
-            self.events.free_reaction_sets.push(event.reactions);
+            self.process_tag(event.tag, event.reactions.view(), event.terminal);
 
             self.current_tag = event.tag;
+
+            // Return the ReactionSet to the free pool
+            self.events.return_reaction_set(event.reactions);
 
             // Release the current tag to downstream reactors
             self.release_tag_downstream(self.current_tag);
@@ -612,12 +1241,7 @@ impl Scheduler {
             // Shutdown event will be processed at the next event loop iteration
             let shutdown = self.current_tag.delay(Duration::ZERO);
             self.shutdown_tag = Some(shutdown);
-            for action_key in &self.reaction_graph.shutdown_actions {
-                self.store
-                    .push_action_value(*action_key, shutdown, Box::new(()));
-            }
-            self.events
-                .push_event(shutdown, self.reaction_graph.shutdown_reactions(), true);
+            self.schedule_shutdown_at(shutdown);
         }
 
         true
@@ -676,7 +1300,12 @@ impl Scheduler {
     ///
     /// Reactions at a level N may trigger further reactions at levels M>N
     #[tracing::instrument(skip(self, reaction_view), fields(tag = %tag))]
-    pub fn process_tag(&mut self, tag: Tag, reaction_view: KeySetView<ReactionKey>) {
+    pub fn process_tag(
+        &mut self,
+        tag: Tag,
+        reaction_view: KeySetView<ReactionKey>,
+        terminal: bool,
+    ) {
         self.transition_buffer.clear();
         reaction_view.for_each_level(|level, reaction_keys, next_levels| {
             tracing::trace!(level=?level, "Iter");
@@ -685,13 +1314,20 @@ impl Scheduler {
             for reaction_key in reaction_keys {
                 let reactor_key = self.reaction_graph.reaction_reactors[reaction_key];
                 let scope_key = self.reaction_graph.reaction_scopes[reaction_key];
-                let scope_enabled = self.store.scope_is_active(&self.reaction_graph, scope_key);
-                let current_mode = self.store.current_mode(reactor_key);
-                let mode_enabled = match self.reaction_graph.reaction_modes[reaction_key].as_ref() {
-                    Some(filter) => filter.allows(current_mode),
-                    None => true,
+                let shutdown_lifecycle =
+                    terminal && self.reaction_graph.is_shutdown_reaction(reaction_key);
+                let enabled = if shutdown_lifecycle {
+                    self.events.scope_ever_active(scope_key)
+                } else {
+                    let scope_enabled = self.store.scope_is_active(&self.reaction_graph, scope_key);
+                    let current_mode = self.store.current_mode(reactor_key);
+                    let mode_enabled =
+                        match self.reaction_graph.reaction_modes[reaction_key].as_ref() {
+                            Some(filter) => filter.allows(current_mode),
+                            None => true,
+                        };
+                    scope_enabled && mode_enabled
                 };
-                let enabled = scope_enabled && mode_enabled;
                 if enabled {
                     self.reaction_buffer.push(reaction_key);
                 }
@@ -718,6 +1354,7 @@ impl Scheduler {
             #[cfg(feature = "parallel")]
             let iter_ctx_res = iter_ctx_res.collect::<Vec<_>>();
 
+            let mut pending_shutdown_tag = None;
             for (idx, trigger_res) in iter_ctx_res {
                 let reaction_key = self.reaction_buffer[idx];
                 let reactor_key = self.reaction_graph.reaction_reactors[reaction_key];
@@ -730,16 +1367,7 @@ impl Scheduler {
                     // schedule a shutdown event
                     if self.shutdown_tag.map(|t| shutdown_tag < t).unwrap_or(true) {
                         self.shutdown_tag = Some(shutdown_tag);
-
-                        //for action_key in &self.reaction_graph.shutdown_actions {
-                        //    self.store
-                        //        .push_action_value(*action_key, shutdown_tag, Box::new(()));
-                        //}
-                        self.events.push_event(
-                            shutdown_tag,
-                            self.reaction_graph.shutdown_reactions(),
-                            true,
-                        );
+                        pending_shutdown_tag = Some(shutdown_tag);
                     }
                 }
 
@@ -750,8 +1378,18 @@ impl Scheduler {
                     let downstream = self.reaction_graph.action_triggers[action_key]
                         .iter()
                         .copied();
-                    self.events.push_event(tag, downstream, false);
+                    self.events.push_action_event(
+                        action_key,
+                        tag,
+                        downstream,
+                        false,
+                        &self.reaction_graph,
+                    );
                 }
+            }
+
+            if let Some(shutdown_tag) = pending_shutdown_tag {
+                self.schedule_shutdown_at(shutdown_tag);
             }
 
             // Collect all the reactions that are triggered by the ports
@@ -765,8 +1403,26 @@ impl Scheduler {
             }
         });
 
+        let mut transitions = Vec::<(ReactorKey, ModeTransitionRequest)>::new();
         for (reactor_key, request) in self.transition_buffer.drain(..) {
-            self.store.set_mode(reactor_key, request.target);
+            if let Some((_, existing)) = transitions
+                .iter_mut()
+                .find(|(existing_reactor, _)| *existing_reactor == reactor_key)
+            {
+                *existing = request;
+            } else {
+                transitions.push((reactor_key, request));
+            }
+        }
+
+        for (reactor_key, request) in transitions {
+            self.events.apply_transition(
+                reactor_key,
+                &request,
+                &mut self.store,
+                &self.reaction_graph,
+                tag,
+            );
         }
 
         self.store.reset_ports();

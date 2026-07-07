@@ -86,7 +86,9 @@ impl std::fmt::Debug for ReactionGraph {
             .field("modes", &self.modes)
             .field("mode_names", &self.mode_names)
             .field("startup_actions", &self.startup_actions)
+            .field("timer_startup_actions", &self.timer_startup_actions)
             .field("shutdown_actions", &self.shutdown_actions)
+            .field("action_is_logical", &self.action_is_logical)
             .field("reaction_use_ports", &self.reaction_use_ports)
             .field("reaction_effect_ports", &self.reaction_effect_ports)
             .field("reaction_actions", &self.reaction_actions)
@@ -95,6 +97,12 @@ impl std::fmt::Debug for ReactionGraph {
             .field("reactor_mode_names", &self.reactor_mode_names)
             .field("reactor_initial_modes", &self.reactor_initial_modes)
             .field("reaction_modes", &self.reaction_modes)
+            .field("reset_reactions", &self.reset_reactions)
+            .field("startup_reactions", &self.startup_reactions)
+            .field(
+                "shutdown_reactions_by_scope",
+                &self.shutdown_reactions_by_scope,
+            )
             .finish()
     }
 }

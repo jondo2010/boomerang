@@ -43,6 +43,12 @@ pub trait BaseAction: Debug + Downcast + Send + Sync {
 
     /// Push a new value onto the action store. If the underlying types are not the same, this will panic.
     fn push_value(&mut self, tag: Tag, value: Box<dyn ReactorData>);
+
+    /// Move a stored value from one tag to another.
+    fn reschedule_value(&mut self, from: Tag, to: Tag);
+
+    /// Remove all stored values for this action.
+    fn clear_values(&mut self);
 }
 
 downcast_rs::impl_downcast!(BaseAction);
@@ -100,6 +106,14 @@ impl<T: ReactorData> BaseAction for Action<T> {
         } else {
             panic!("Type mismatch");
         }
+    }
+
+    fn reschedule_value(&mut self, from: Tag, to: Tag) {
+        self.store.move_value(from, to);
+    }
+
+    fn clear_values(&mut self) {
+        self.store.clear();
     }
 }
 

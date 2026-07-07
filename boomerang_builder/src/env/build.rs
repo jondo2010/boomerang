@@ -512,6 +512,10 @@ impl EnvBuilder {
 
             let level_reaction = (reaction_levels[builder_reaction_key], runtime_reaction_key);
 
+            if reaction.reset_trigger {
+                enclave.insert_reset_trigger(reaction_scope, level_reaction);
+            }
+
             for (builder_port_key, tm) in &reaction.port_relations {
                 let port_key = builder_parts.aliases.port_aliases[builder_port_key].1;
                 if tm.is_triggers() {
@@ -524,13 +528,28 @@ impl EnvBuilder {
                 if tm.is_triggers() {
                     enclave.insert_action_trigger(action_key, level_reaction);
 
-                    match self.action_builders[builder_action_key].r#type() {
+                    let action_builder = &self.action_builders[builder_action_key];
+                    match action_builder.r#type() {
                         ActionType::Timer(timer_spec) => {
                             let tag = runtime::Tag::new(timer_spec.offset.unwrap_or_default(), 0);
                             enclave.insert_startup_action(action_key, tag);
+                            if action_builder.name() == "__startup" {
+                                enclave.insert_startup_trigger(
+                                    reaction_scope,
+                                    action_key,
+                                    level_reaction,
+                                );
+                            } else {
+                                enclave.insert_timer_startup_action(action_key, tag);
+                            }
                         }
                         ActionType::Shutdown => {
                             enclave.insert_shutdown_action(action_key);
+                            enclave.insert_shutdown_trigger(
+                                reaction_scope,
+                                action_key,
+                                level_reaction,
+                            );
                         }
                         _ => {}
                     }

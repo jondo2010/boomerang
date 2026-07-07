@@ -185,24 +185,24 @@ impl Store {
                 .iter_many_unchecked_mut(inner.reactions.keys())
                 .map(|r| NonNull::new_unchecked(r));
 
-        let action_keys = reaction_graph
-            .reaction_actions
-            .values()
-            .map(|actions| actions.iter().copied());
+            let action_keys = reaction_graph
+                .reaction_actions
+                .values()
+                .map(|actions| actions.iter().copied());
 
             let (_, grouped_actions) = inner
                 .actions
                 .iter_ptr_chunks_split_unchecked(std::iter::empty(), action_keys);
 
-        let port_ref_keys = reaction_graph
-            .reaction_use_ports
-            .values()
-            .map(|ports| ports.iter().copied());
+            let port_ref_keys = reaction_graph
+                .reaction_use_ports
+                .values()
+                .map(|ports| ports.iter().copied());
 
-        let port_mut_keys = reaction_graph
-            .reaction_effect_ports
-            .values()
-            .map(|ports| ports.iter().copied());
+            let port_mut_keys = reaction_graph
+                .reaction_effect_ports
+                .values()
+                .map(|ports| ports.iter().copied());
 
             let (grouped_ref_ports, grouped_mut_ports) = inner
                 .ports
@@ -244,6 +244,25 @@ impl Store {
         // SAFETY: we are projecting to a field, not moving anything from self
         let actions = &mut self.as_mut().project().inner.actions;
         actions[action_key].push_value(tag, value);
+    }
+
+    pub fn reschedule_action_value(
+        self: &mut Pin<Box<Self>>,
+        action_key: ActionKey,
+        from: Tag,
+        to: Tag,
+    ) {
+        if from == to {
+            return;
+        }
+
+        let actions = &mut self.as_mut().project().inner.actions;
+        actions[action_key].reschedule_value(from, to);
+    }
+
+    pub fn clear_action_values(self: &mut Pin<Box<Self>>, action_key: ActionKey) {
+        let actions = &mut self.as_mut().project().inner.actions;
+        actions[action_key].clear_values();
     }
 
     /// Returns an `Iterator` of `ReactionTriggerCtx` for each `Reaction` in the given
@@ -320,10 +339,7 @@ impl Store {
     }
 
     pub fn current_mode(&self, reactor_key: ReactorKey) -> Option<ModeKey> {
-        self.reactor_modes
-            .get(reactor_key)
-            .copied()
-            .flatten()
+        self.reactor_modes.get(reactor_key).copied().flatten()
     }
 
     pub fn scope_is_active(&self, reaction_graph: &ReactionGraph, mut scope_key: ScopeKey) -> bool {
@@ -346,6 +362,27 @@ impl Store {
         self.reactor_modes.insert(reactor_key, Some(mode));
     }
 
+    pub fn reset_child_modes_in_scope(&mut self, reaction_graph: &ReactionGraph, scope: ScopeKey) {
+        let reactor_modes = reaction_graph
+            .reactor_root_scopes
+            .iter()
+            .filter(|(_, &root_scope)| {
+                root_scope != scope
+                    && scope_is_descendant_or_self(reaction_graph, root_scope, scope)
+            })
+            .map(|(reactor_key, _)| {
+                (
+                    reactor_key,
+                    reaction_graph.reactor_initial_modes[reactor_key],
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for (reactor_key, initial_mode) in reactor_modes {
+            self.reactor_modes.insert(reactor_key, initial_mode);
+        }
+    }
+
     /// Turn this `Store` back into the `Env` it was built from.
     pub fn into_env(self: Pin<Box<Self>>) -> Env {
         // SAFETY: We are the only owner of the `Store` and we are consuming it, and immediately
@@ -357,6 +394,23 @@ impl Store {
             actions: store.inner.actions,
             ports: store.inner.ports,
         }
+    }
+}
+
+fn scope_is_descendant_or_self(
+    reaction_graph: &ReactionGraph,
+    mut scope_key: ScopeKey,
+    ancestor: ScopeKey,
+) -> bool {
+    loop {
+        if scope_key == ancestor {
+            return true;
+        }
+
+        let Some(parent) = reaction_graph.scopes[scope_key].parent else {
+            return false;
+        };
+        scope_key = parent;
     }
 }
 

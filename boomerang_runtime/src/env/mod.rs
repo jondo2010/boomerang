@@ -56,6 +56,13 @@ impl std::ops::Sub<usize> for Level {
 /// A paired `ReactionKey` with it's execution `Level`.
 pub type LevelReactionKey = (Level, ReactionKey);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct LifecycleReaction {
+    pub reaction: LevelReactionKey,
+    pub action: ActionKey,
+}
+
 tinymap::key_type! { pub ModeKey }
 tinymap::key_type! { pub ScopeKey }
 
@@ -155,8 +162,12 @@ pub struct ReactionGraph {
     pub port_triggers: tinymap::TinySecondaryMap<PortKey, Vec<LevelReactionKey>>,
     /// Global startup actions
     pub startup_actions: Vec<(ActionKey, Tag)>,
+    /// Timer startup actions. This excludes reactor lifecycle startup actions.
+    pub timer_startup_actions: Vec<(ActionKey, Tag)>,
     /// Global shutdown actions
     pub shutdown_actions: Vec<ActionKey>,
+    /// Whether each action uses logical-time scheduling.
+    pub action_is_logical: tinymap::TinySecondaryMap<ActionKey, bool>,
     /// For each reaction, the ordered 'use' ports in declaration order
     pub reaction_use_ports: tinymap::TinySecondaryMap<ReactionKey, Vec<PortKey>>,
     /// For each reaction, the ordered 'effect' ports in declaration order
@@ -181,14 +192,27 @@ pub struct ReactionGraph {
     pub reactor_initial_modes: tinymap::TinySecondaryMap<ReactorKey, Option<ModeKey>>,
     /// Mode filter per reaction (None means always enabled)
     pub reaction_modes: tinymap::TinySecondaryMap<ReactionKey, Option<ModeFilter>>,
+    /// Reset-triggered reactions by their static owning scope.
+    pub reset_reactions: tinymap::TinySecondaryMap<ScopeKey, Vec<LevelReactionKey>>,
+    /// Startup-triggered reactions by their static owning scope.
+    pub startup_reactions: tinymap::TinySecondaryMap<ScopeKey, Vec<LifecycleReaction>>,
+    /// Shutdown-triggered reactions by their static owning scope.
+    pub shutdown_reactions_by_scope: tinymap::TinySecondaryMap<ScopeKey, Vec<LifecycleReaction>>,
 }
 
 impl ReactionGraph {
     /// Get an iterator over all the shutdown reactions
     pub fn shutdown_reactions(&self) -> impl Iterator<Item = LevelReactionKey> + '_ {
-        self.shutdown_actions
-            .iter()
-            .flat_map(|&action_key| self.action_triggers[action_key].iter().copied())
+        self.shutdown_reactions_by_scope
+            .values()
+            .flat_map(|reactions| reactions.iter().map(|reaction| reaction.reaction))
+    }
+
+    pub fn is_shutdown_reaction(&self, reaction_key: ReactionKey) -> bool {
+        self.shutdown_reactions_by_scope
+            .values()
+            .flatten()
+            .any(|reaction| reaction.reaction.1 == reaction_key)
     }
 }
 
@@ -277,6 +301,11 @@ impl Enclave {
             reactor: reactor_key,
             mode: None,
         });
+        self.graph.reset_reactions.insert(root_scope, Vec::new());
+        self.graph.startup_reactions.insert(root_scope, Vec::new());
+        self.graph
+            .shutdown_reactions_by_scope
+            .insert(root_scope, Vec::new());
         self.graph
             .reactor_root_scopes
             .insert(reactor_key, root_scope);
@@ -295,6 +324,9 @@ impl Enclave {
     {
         let action_key = self.env.actions.insert_with_key(action_fn);
         self.graph.action_triggers.insert(action_key, vec![]);
+        self.graph
+            .action_is_logical
+            .insert(action_key, self.env.actions[action_key].is_logical());
         action_key
     }
 
@@ -315,6 +347,11 @@ impl Enclave {
             reactor: reactor_key,
             mode: Some(mode_key),
         });
+        self.graph.reset_reactions.insert(mode_scope, Vec::new());
+        self.graph.startup_reactions.insert(mode_scope, Vec::new());
+        self.graph
+            .shutdown_reactions_by_scope
+            .insert(mode_scope, Vec::new());
         self.graph.mode_scopes.insert(mode_key, mode_scope);
         self.graph.mode_names.insert(mode_key, name.to_owned());
         self.graph
@@ -389,6 +426,11 @@ impl Enclave {
         self.graph.startup_actions.push((action_key, tag));
     }
 
+    /// Insert a timer `ActionKey` that is scheduled from local time zero.
+    pub fn insert_timer_startup_action(&mut self, action_key: ActionKey, tag: Tag) {
+        self.graph.timer_startup_actions.push((action_key, tag));
+    }
+
     /// Insert an `ActionKey` that is triggered on shutdown.
     pub fn insert_shutdown_action(&mut self, action_key: ActionKey) {
         self.graph.shutdown_actions.push(action_key);
@@ -414,6 +456,52 @@ impl Enclave {
         triggers.push(trigger);
     }
 
+    /// Insert a `LevelReactionKey` that is triggered when a mode scope is entered by reset.
+    pub fn insert_reset_trigger(&mut self, scope: ScopeKey, trigger: LevelReactionKey) {
+        let triggers = self
+            .graph
+            .reset_reactions
+            .get_mut(scope)
+            .expect("scope not found");
+        triggers.push(trigger);
+    }
+
+    /// Insert a `LevelReactionKey` that is triggered when its scope starts up.
+    pub fn insert_startup_trigger(
+        &mut self,
+        scope: ScopeKey,
+        action: ActionKey,
+        trigger: LevelReactionKey,
+    ) {
+        let triggers = self
+            .graph
+            .startup_reactions
+            .get_mut(scope)
+            .expect("scope not found");
+        triggers.push(LifecycleReaction {
+            reaction: trigger,
+            action,
+        });
+    }
+
+    /// Insert a `LevelReactionKey` that is triggered when its scope shuts down.
+    pub fn insert_shutdown_trigger(
+        &mut self,
+        scope: ScopeKey,
+        action: ActionKey,
+        trigger: LevelReactionKey,
+    ) {
+        let triggers = self
+            .graph
+            .shutdown_reactions_by_scope
+            .get_mut(scope)
+            .expect("scope not found");
+        triggers.push(LifecycleReaction {
+            reaction: trigger,
+            action,
+        });
+    }
+
     /// Create a [`SendContext`] for sending events into the scheduler.
     pub fn create_send_context(&self, key: EnclaveKey) -> SendContext {
         SendContext {
@@ -436,6 +524,7 @@ impl Enclave {
     pub fn validate(&self) {
         itertools::assert_equal(self.env.actions.keys(), self.graph.action_triggers.keys());
         itertools::assert_equal(self.env.actions.keys(), self.graph.action_scopes.keys());
+        itertools::assert_equal(self.env.actions.keys(), self.graph.action_is_logical.keys());
         itertools::assert_equal(self.env.ports.keys(), self.graph.port_triggers.keys());
         itertools::assert_equal(self.env.ports.keys(), self.graph.port_scopes.keys());
         itertools::assert_equal(
@@ -475,6 +564,15 @@ impl Enclave {
         );
         itertools::assert_equal(self.graph.modes.keys(), self.graph.mode_names.keys());
         itertools::assert_equal(self.graph.modes.keys(), self.graph.mode_scopes.keys());
+        itertools::assert_equal(self.graph.scopes.keys(), self.graph.reset_reactions.keys());
+        itertools::assert_equal(
+            self.graph.scopes.keys(),
+            self.graph.startup_reactions.keys(),
+        );
+        itertools::assert_equal(
+            self.graph.scopes.keys(),
+            self.graph.shutdown_reactions_by_scope.keys(),
+        );
     }
 }
 

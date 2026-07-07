@@ -22,9 +22,14 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 - [x] (2026-07-06 21:49Z) Replaced the temporary compatibility syntax with macro-generated mode handles for typed transition effects in structural mode declarations.
 - [x] (2026-07-06 21:58Z) Added scheduler active-scope checks so reactions in child reactors nested under inactive modes do not execute.
 - [x] (2026-07-06 22:02Z) Resolved typed mode effects to runtime `ModeKey`s during lowering so `.set(ctx)` no longer does name lookup in the scheduler.
-- [ ] Implement mode-local event queues and local-time scheduling.
-- [ ] Implement reset/history transition application, including recursive reset of contained modal reactors.
-- [ ] Implement modal startup, shutdown, and reset-trigger behavior.
+- [x] (2026-07-07 06:45Z) Added the first mode-local scheduling slice: mode-scoped logical actions are held in per-scope local queues, history re-entry rebases pending action values to the resumed global tag, reset re-entry clears pending action queues and values, and child reactor modes under a reset scope return to their initial modes.
+- [x] (2026-07-07 07:02Z) Extended mode-local scheduling to timers: history re-entry resumes pending timer firings with remaining local delay, reset re-entry clears stale timer firings and schedules fresh timer startup events from reset local time zero, and initial active zero-offset timers can still fire at startup.
+- [x] (2026-07-07 07:11Z) Implemented reset-trigger reactions: builder lowering records reset-triggered reactions by owning runtime scope, reset transitions enqueue reset reactions in the reset subtree for the next microstep, and initial active modes do not run reset reactions merely because the program started.
+- [x] (2026-07-07 08:24Z) Implemented modal startup and shutdown lifecycle behavior: first activation schedules scoped startup reactions once, shutdown reactions run for scopes that were activated at least once even if inactive at shutdown, and unreachable mode lifecycle reactions do not run.
+- [x] (2026-07-07 08:28Z) Verified delayed connection helper reactors under reset/history: delayed connection actions inherit the enclosing mode scope, history re-entry resumes a pending delayed delivery with remaining local delay, and reset re-entry discards the pending delayed delivery.
+- [x] (2026-07-07 08:31Z) Implemented the mode-local physical-action caveat: physical actions carry static action-kind metadata, stay on the global queue, run only if their scope is active at the physical event tag, and are not suspended or replayed by history.
+- [x] (2026-07-07 08:33Z) Added the first-wave three-mode cycle integration test, proving reset transitions cycle through three sibling modes and only the active mode responds to each root trigger.
+- [ ] Extend mode-local event queues and local-time scheduling to the planned inactive-scope performance benchmark.
 - [ ] Add selected modal-model integration tests and performance benchmarks.
 - [ ] Document the user-facing syntax and semantics in the book under `book/src` without naming the external reference language or its test suite.
 
@@ -68,6 +73,36 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 
 - Observation: Typed mode effects can be resolved from builder keys to runtime keys once, when the reaction closure is lowered, instead of leaking mode names and resolving names after every transition request.
   Evidence: `rg -n "Box::leak|new_name|ModeTransitionTarget|mode_for_reactor_name|target_name" boomerang_builder boomerang_runtime` returns no matches after adding `ResolveModeEffects`, and `cargo test -p boomerang_builder`, `cargo test -p boomerang_macros`, `cargo test -p boomerang modal_basic`, `cargo test -p boomerang mixed_reactions`, and `cargo test -p boomerang modal_structural_syntax` pass.
+
+- Observation: The existing action store prunes values older than the current global tag, so a mode-local action value cannot simply remain stored under its original local tag while the mode is inactive.
+  Evidence: The new `boomerang/tests/modal_actions.rs` history test initially failed with the pending action firing at 6 ns instead of 7 ns, and the reset test initially failed because the stale pending action still fired. After adding per-scope queues and rebasing stored action values on history activation, `cargo test -p boomerang --test modal_actions` passes.
+
+- Observation: Reaction result handling cannot borrow `Store` immutably while reaction contexts still hold the mutable borrow used for executing the current level.
+  Evidence: The first `EventManager::push_action_event` version queried `Store::action_is_logical` from the scheduled-action loop and failed to compile with `cannot borrow *self.store as immutable because it is also borrowed as mutable`. This slice now routes by static action scope only; the physical-action caveat remains for the later semantics/documentation milestone.
+
+- Observation: Timer actions and reactor lifecycle startup actions are both represented as `ActionType::Timer`, but reset transitions must restart only user-declared timers, not `(startup)` lifecycle reactions.
+  Evidence: `ReactorBuilderState::new` creates an internal action named `__startup` through `add_startup_action`, and `EnvBuilder::build_runtime_reactions` previously inserted all `ActionType::Timer` triggers into `ReactionGraph::startup_actions`. The timer reset slice adds `ReactionGraph::timer_startup_actions` and excludes the internal `__startup` action so reset can reschedule timers without treating startup reactions as timer firings.
+
+- Observation: Initial active mode scopes and transition-activated mode scopes need different handling for immediate local events.
+  Evidence: A zero-offset mode-local timer in an initial mode should be eligible at program startup, but a zero-offset timer in a mode entered by transition must wait until the next microstep after the transition tag. `ScopeTimeState::allow_activation_tag` captures this distinction, and `cargo test -p boomerang --test modal_timers` passes with both history and reset timer behavior.
+
+- Observation: Reset-triggered reactions already participate in the builder reaction graph as ordinary reaction nodes, even though they have no action or port triggers.
+  Evidence: `build_reaction_graph` explicitly adds every `BuilderReactionKey` as a node before level assignment, so the reset-trigger slice could reuse `build_runtime_level_map` and only needed new runtime metadata: `ReactionGraph::reset_reactions`, filled during `EnvBuilder::build_runtime_reactions`.
+
+- Observation: Reset reactions must be scheduled after the transition reaction completes, not run inline during transition application.
+  Evidence: The new `boomerang/tests/modal_reset_reactions.rs` test asserts that a reset reaction entered from a tag at microstep 0 runs at microstep 1. `cargo test -p boomerang --test modal_reset_reactions` passes after scheduling reset reactions at `current_tag.delay(Duration::ZERO)`.
+
+- Observation: Reactor lifecycle startup and shutdown are represented by internal actions whose action scope is the reactor root, even when the lifecycle reaction is declared inside a mode.
+  Evidence: Mode startup on first activation could not be implemented by re-triggering the internal startup action normally, because that would also run root startup reactions again. The lifecycle slice adds scoped startup and shutdown reaction maps that carry both the reaction and the internal action key, so the runtime can make `startup` or `shutdown` present while scheduling only the scoped lifecycle reactions.
+
+- Observation: Timeout shutdown events are scheduled during program startup, before later mode activations can mark their scopes as activated.
+  Evidence: The new `modal_timeout_shutdown_uses_activation_history_at_shutdown_time` test would miss a shutdown reaction for a mode activated after startup if shutdown reactions were filtered when the timeout event was scheduled. The scheduler now places all shutdown lifecycle reactions in terminal events and filters them at terminal processing time using per-scope activation history.
+
+- Observation: Delayed connections did not need a separate runtime event type after helper reactors inherited mode scope.
+  Evidence: Delayed connections are lowered into helper reactors with a logical action carrying the delay. Because that helper action is already mode-scoped and stored in the per-scope local queue, `cargo test -p boomerang --test modal_delayed_connections` passes for both history resume at 13 ns and reset discard without additional runtime changes.
+
+- Observation: Physical actions need action-kind metadata in `ReactionGraph` because event routing cannot infer logical versus physical behavior from scope alone.
+  Evidence: Prior scoped action routing would place a mode-local physical action into the per-scope local queue, making history re-entry replay it. The new `action_is_logical` runtime map lets `EventManager::push_action_event` keep physical actions on the root global queue, and `cargo test -p boomerang --test modal_physical_actions` proves an event that occurs while the mode is inactive is dropped rather than replayed after history re-entry.
 
 ## Decision Log
 
@@ -123,9 +158,65 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
   Rationale: A mode transition is a hot-path runtime operation. The builder already knows the exact target mode and has alias maps during lowering, so name strings and scheduler lookups are unnecessary overhead and make invalid targets harder to reason about.
   Date/Author: 2026-07-06 / Codex.
 
+- Decision: Introduce an internal `EventManager` that keeps the existing root event queue and adds per-scope local queues with a frontier heap.
+  Rationale: This preserves non-modal root-scope behavior while giving mode-owned actions a queue that can become dormant while inactive. Frontier entries carry an epoch so queue changes, activation, and reset can invalidate stale heap entries without scanning queued events on every tag.
+  Date/Author: 2026-07-07 / Codex.
+
+- Decision: Rebase stored action values when a local queue becomes active rather than changing the public `Context::schedule_action` or `ActionRef` API in this slice.
+  Rationale: `Context::schedule_action` currently stores values immediately through `ActionRef`, and `ActionStore` expects lookup tags to be monotonic in global execution. Rebasing keeps pending local values visible at the resumed global tag and avoids changing user-facing reaction signatures.
+  Date/Author: 2026-07-07 / Codex.
+
+- Decision: Collapse transition requests to last-wins per reactor before applying reset/history side effects.
+  Rationale: The previous loop set modes sequentially. Once transitions clear queues, reset child modes, and rebase local time, applying intermediate same-tag transitions would create observable side effects that should not survive the tag.
+  Date/Author: 2026-07-07 / Codex.
+
+- Decision: Track timer startup events separately from general startup actions in `ReactionGraph`.
+  Rationale: Program startup still needs one unified startup scheduling pass, but reset entry needs to reschedule only timers in the reset subtree. A separate `timer_startup_actions` list keeps reset semantics explicit and avoids accidentally running lifecycle startup reactions on reset entry.
+  Date/Author: 2026-07-07 / Codex.
+
+- Decision: Store whether a scope activation may use the activation tag itself.
+  Rationale: Scopes active at program startup should preserve existing zero-offset timer behavior at `Tag::ZERO`. Scopes activated by a transition should map local zero to the next microstep so newly active modal work does not run in the same tag as the transition.
+  Date/Author: 2026-07-07 / Codex.
+
+- Decision: Store reset-triggered reactions by runtime scope and enqueue the reset subtree on reset entry.
+  Rationale: Resetting a mode can reset child reactor modes too. Storing reset reactions by scope lets the scheduler collect the target scope and descendants, then rely on the existing active-scope check to execute only reactions whose scopes are active after the mode switch.
+  Date/Author: 2026-07-07 / Codex.
+
+- Decision: Do not run reset reactions for initially active modes at program startup.
+  Rationale: `(startup)` and `(reset)` are different lifecycle events. A reset reaction should run because a mode is entered by reset, not because its enclosing mode starts active at program initialization.
+  Date/Author: 2026-07-07 / Codex.
+
+- Decision: Track `ever_active` and `startup_fired` per runtime scope.
+  Rationale: Startup reactions inside a mode must run once on first activation, while shutdown reactions must run for any scope that was activated at least once. Keeping this state next to the scope-local queue lets the scheduler answer both questions without scanning reactor mode history.
+  Date/Author: 2026-07-07 / Codex.
+
+- Decision: Schedule shutdown terminal events with all shutdown lifecycle reactions and filter by activation history at execution time.
+  Rationale: A timeout shutdown can be scheduled before a mode is activated. Filtering at schedule time would permanently omit shutdown reactions for modes activated later, so terminal processing must make the final eligibility decision.
+  Date/Author: 2026-07-07 / Codex.
+
+- Decision: Treat delayed connections as covered by scoped helper reactors and scoped logical actions rather than adding connection-specific scheduler machinery.
+  Rationale: The builder already lowers delayed connections to helper reactors with delayed logical actions, and prior scope ownership work makes those helpers children of the enclosing mode scope. Reusing the existing local action queue keeps the scheduler smaller and gives reset/history behavior identical to user-declared logical actions.
+  Date/Author: 2026-07-07 / Codex.
+
+- Decision: Keep mode-scoped physical actions on the global event queue and filter them by active scope at the event tag.
+  Rationale: Physical actions happen in wall-clock time, so history should not suspend and replay them as local-time events. Root-queue delivery plus the existing active-scope reaction filter gives the intended behavior: if the mode is inactive when the physical tag is processed, the reaction does not run and the event is not replayed later.
+  Date/Author: 2026-07-07 / Codex.
+
 ## Outcomes & Retrospective
 
-Not started. The expected outcome is a complete modal runtime with tests that prove reset/history local-time behavior and benchmark data showing that non-modal models retain current performance characteristics.
+2026-07-07: The first local-time runtime slice is implemented for mode-scoped logical actions scheduled from reactions. The new modal action tests prove the core distinction: history preserves the pending action's remaining local delay, while reset discards the stale pending action. Remaining gaps after this slice were mode-local timers, delayed connections, lifecycle startup/shutdown/reset triggers, physical-action caveat handling, and the performance benchmark that proves inactive queues stay cheap.
+
+2026-07-07: Mode-local timers now use the same scoped queue machinery. The new modal timer tests prove that history resumes a timer after the remaining active local delay and reset restarts the timer from reset entry. Remaining gaps are delayed connections, lifecycle startup/shutdown/reset triggers, physical-action caveat handling, and the inactive-scope performance benchmark.
+
+2026-07-07: Reset-triggered reactions now run on reset entry and remain distinct from startup. The new modal reset reaction tests prove a reset reaction can restore Rust state at the next microstep after a reset transition and that an initially active mode does not run reset reactions at program startup. Remaining gaps are delayed connections, modal startup/shutdown behavior, physical-action caveat handling, and the inactive-scope performance benchmark.
+
+2026-07-07: Modal lifecycle startup and shutdown behavior is now implemented. The new `boomerang/tests/modal_startup_shutdown.rs` tests prove that startup inside a mode runs once on first activation at the next microstep, that re-entering the mode does not run startup a second time, that shutdown inside a previously activated mode runs even after the mode becomes inactive, that unreachable mode lifecycle reactions do not run, and that timeout shutdown uses activation history at shutdown processing time. Remaining gaps are delayed connections, physical-action caveat handling, and the inactive-scope performance benchmark.
+
+2026-07-07: Mode-local delayed connections are now covered by integration tests. The new `boomerang/tests/modal_delayed_connections.rs` tests prove that a pending delayed delivery inside a mode is suspended while inactive, resumes after the remaining active local delay when the mode is re-entered by history, and is discarded when the mode is re-entered by reset. No runtime code change was needed in this slice because delayed connection helper reactors already inherit mode scope and use scoped logical actions. Remaining gaps are physical-action caveat handling, the inactive-scope performance benchmark, remaining first-wave modal tests, and book documentation.
+
+2026-07-07: The physical-action caveat is now implemented and tested. Mode-scoped physical actions are accepted, but they are not local-time events: they remain scheduled by global physical/logical tag conversion, run only if their scope is active at that tag, and are not replayed by history. The new `boomerang/tests/modal_physical_actions.rs` test uses a short wall-clock run to prove an inactive physical event is dropped and not replayed after history re-entry. Remaining gaps are the inactive-scope performance benchmark, remaining first-wave modal tests, and book documentation.
+
+2026-07-07: The three-mode reset cycle first-wave test is now covered by `boomerang/tests/modal_count_3_modes.rs`. The test uses a root one-shot driver action and records the active mode sequence, proving only one sibling mode reacts at each step and reset transitions cycle `one`, `two`, `three` twice. Remaining first-wave gaps include cycle-breaker and multiport/bank coverage, plus the inactive-scope performance benchmark and book documentation.
 
 ## Context and Orientation
 
@@ -384,6 +475,69 @@ After each milestone, run the narrowest useful test:
     cargo test -p boomerang_runtime modal
     cargo test -p boomerang modal
 
+For the first mode-local logical-action slice, also run:
+
+    cargo test -p boomerang --test modal_actions
+    cargo test -p boomerang_runtime
+    cargo test -p boomerang_builder
+    cargo test -p boomerang --test modal_mixed_reactions
+    git diff --check
+
+For the mode-local timer slice, also run:
+
+    cargo test -p boomerang --test modal_timers
+    cargo test -p boomerang --test modal_actions
+    cargo test -p boomerang_runtime
+    cargo test -p boomerang_builder
+    cargo test -p boomerang modal
+    cargo test -p boomerang --test modal_mixed_reactions
+    git diff --check
+
+For the reset-trigger reaction slice, also run:
+
+    cargo test -p boomerang --test modal_reset_reactions
+    cargo test -p boomerang_runtime
+    cargo test -p boomerang_builder
+    cargo test -p boomerang --test modal_actions
+    cargo test -p boomerang --test modal_timers
+    cargo test -p boomerang modal
+    cargo test -p boomerang --test modal_mixed_reactions
+    git diff --check
+
+For the modal lifecycle slice, also run:
+
+    cargo test -p boomerang --test modal_startup_shutdown
+    cargo test -p boomerang_runtime
+    cargo test -p boomerang_builder
+    cargo test -p boomerang --test modal_actions
+    cargo test -p boomerang --test modal_timers
+    cargo test -p boomerang --test modal_reset_reactions
+    cargo test -p boomerang modal
+    cargo test -p boomerang --test modal_mixed_reactions
+    cargo test -p boomerang --test modal_nested_reactions
+    git diff --check
+
+For the delayed connection slice, also run:
+
+    cargo test -p boomerang --test modal_delayed_connections
+    cargo test -p boomerang modal
+    git diff --check
+
+For the physical-action caveat slice, also run:
+
+    cargo test -p boomerang --test modal_physical_actions
+    cargo test -p boomerang_runtime
+    cargo test -p boomerang_builder
+    cargo test -p boomerang --test modal_delayed_connections
+    cargo test -p boomerang modal
+    git diff --check
+
+For the three-mode cycle test slice, also run:
+
+    cargo test -p boomerang --test modal_count_3_modes
+    cargo test -p boomerang modal
+    git diff --check
+
 Before completion, run:
 
     cargo fmt --check
@@ -532,10 +686,18 @@ ReactionGraph should include scope ownership maps:
     pub modes: TinyMap<ModeKey, ModeInfo>;
     pub reaction_scopes: TinySecondaryMap<ReactionKey, ScopeKey>;
     pub action_scopes: TinySecondaryMap<ActionKey, ScopeKey>;
+    pub action_is_logical: TinySecondaryMap<ActionKey, bool>;
     pub port_connection_scopes: Vec<ConnectionScopeInfo>;
     pub reset_reactions: TinySecondaryMap<ScopeKey, Vec<LevelReactionKey>>;
-    pub startup_reactions: TinySecondaryMap<ScopeKey, Vec<LevelReactionKey>>;
-    pub shutdown_reactions_by_scope: TinySecondaryMap<ScopeKey, Vec<LevelReactionKey>>;
+    pub startup_reactions: TinySecondaryMap<ScopeKey, Vec<LifecycleReaction>>;
+    pub shutdown_reactions_by_scope: TinySecondaryMap<ScopeKey, Vec<LifecycleReaction>>;
+
+where `LifecycleReaction` stores both the level/reaction pair and the internal startup or shutdown action key that should be present when the lifecycle reaction runs:
+
+    pub struct LifecycleReaction {
+        pub reaction: LevelReactionKey,
+        pub action: ActionKey,
+    }
 
 In `boomerang_runtime/src/context.rs`, replace string mode scheduling with typed transition recording:
 
@@ -581,3 +743,17 @@ Change log: 2026-07-06 / Codex: removed spike modal syntax and unconditional sta
 Change log: 2026-07-06 / Codex: added active scope checks to the scheduler, threaded mode scope through macro-generated child reactor builds, and added a nested inactive-child startup regression test.
 
 Change log: 2026-07-06 / Codex: changed typed mode effects to resolve to runtime `ModeKey`s at lowering time and removed the remaining name-based transition target path.
+
+Change log: 2026-07-07 / Codex: added the first scoped event manager implementation for mode-local logical actions, reset/history transition application for pending action queues and child mode reset, `modal_actions` integration tests, and focused verification transcripts.
+
+Change log: 2026-07-07 / Codex: extended scoped local-time scheduling to timers by recording timer startup actions separately from lifecycle startup actions, rescheduling timer startup events on reset entry, preserving startup-tag behavior for initially active scopes, and adding `modal_timers` integration tests.
+
+Change log: 2026-07-07 / Codex: implemented reset-triggered reactions by recording reset reactions per runtime scope, scheduling reset-subtree reset reactions at the next microstep after reset entry, adding modal reset reaction tests, and documenting the startup/reset distinction.
+
+Change log: 2026-07-07 / Codex: implemented modal lifecycle startup/shutdown behavior with scoped lifecycle reaction metadata, per-scope activation history, timeout-safe terminal shutdown filtering, and `modal_startup_shutdown` integration tests.
+
+Change log: 2026-07-07 / Codex: added delayed-connection integration coverage showing that scoped helper reactors and local logical-action queues already provide reset/history delayed delivery semantics.
+
+Change log: 2026-07-07 / Codex: added action-kind metadata and physical-action modal coverage so mode-scoped physical events stay global, are filtered by active scope at their event tag, and are not replayed by history.
+
+Change log: 2026-07-07 / Codex: added the three-mode modal cycle integration test using native Boomerang actions to prove active-mode-only reaction behavior across repeated reset transitions.

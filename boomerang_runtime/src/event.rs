@@ -2,6 +2,17 @@ use std::fmt::{Debug, Display};
 
 use crate::{ActionKey, Duration, EnclaveKey, ReactionSet, ReactorData, Tag};
 
+/// The action value associated with a scheduled event.
+///
+/// Root-scope events keep `stored_tag` equal to the event tag. Mode-local events
+/// keep their event tag in local time and update `stored_tag` whenever that
+/// local event is mapped to a new global tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ScheduledActionValue {
+    pub(crate) key: ActionKey,
+    pub(crate) stored_tag: Tag,
+}
+
 /// `ScheduledEvent` is used internally by the scheduler loop in the event queue. The dependent reactions are already expanded into a single reaction set.
 #[derive(Debug, Clone)]
 pub struct ScheduledEvent {
@@ -11,6 +22,8 @@ pub struct ScheduledEvent {
     pub(crate) reactions: ReactionSet,
     /// Whether the scheduler should terminate after processing this event.
     pub(crate) terminal: bool,
+    /// Action values made present by this event.
+    pub(crate) action_values: Vec<ScheduledActionValue>,
 }
 
 impl Display for ScheduledEvent {
@@ -194,16 +207,19 @@ mod tests {
             tag: Tag::new(Duration::seconds(1), 0),
             reactions: ReactionSet::default(),
             terminal: false,
+            action_values: Vec::new(),
         });
         heap.push(ScheduledEvent {
             tag: Tag::new(Duration::seconds(1), 0),
             reactions: ReactionSet::default(),
             terminal: true,
+            action_values: Vec::new(),
         });
         heap.push(ScheduledEvent {
             tag: Tag::new(Duration::seconds(0), 0),
             reactions: ReactionSet::default(),
             terminal: false,
+            action_values: Vec::new(),
         });
 
         // The top event should NOT be the shutdown event

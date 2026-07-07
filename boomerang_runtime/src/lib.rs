@@ -29,8 +29,8 @@ pub use action::{
 pub use context::*;
 use downcast_rs::Downcast;
 pub use env::{
-    crosslink_enclaves, BankInfo, Enclave, EnclaveKey, Env, Level, LevelReactionKey, ModeFilter,
-    ModeKey, ReactionGraph, ScopeInfo, ScopeKey, TransitionKind,
+    crosslink_enclaves, BankInfo, Enclave, EnclaveKey, Env, Level, LevelReactionKey,
+    LifecycleReaction, ModeFilter, ModeKey, ReactionGraph, ScopeInfo, ScopeKey, TransitionKind,
 };
 pub use kanal::{Receiver, Sender};
 pub use key_set::KeySetLimits as ReactionSetLimits;

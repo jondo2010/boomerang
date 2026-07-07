@@ -31,8 +31,9 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 - [x] (2026-07-07 08:33Z) Added the first-wave three-mode cycle integration test, proving reset transitions cycle through three sibling modes and only the active mode responds to each root trigger.
 - [x] (2026-07-07 08:45Z) Added linked book documentation for modal reactors, concise glossary entries for modal terms, and removed the obsolete `book/book.toml` `multilingual` field so `mdbook build book` succeeds locally.
 - [x] (2026-07-07 08:51Z) Implemented modal cycle-breaker dependency analysis: builder reaction dependency edges now skip pairs of reactions owned by mutually exclusive sibling modes, and `boomerang/tests/modal_cycle_breaker.rs` proves opposing dependencies in sibling modes do not form a static cycle.
+- [x] (2026-07-07 08:51Z) Added modal multiport-bank integration coverage in `boomerang/tests/modal_multiport_bank.rs`, proving banked child reactors and multiport connections work inside an active mode.
 - [ ] Extend mode-local event queues and local-time scheduling to the planned inactive-scope performance benchmark.
-- [ ] Add selected modal-model integration tests and performance benchmarks.
+- [ ] Run final full-workspace validation and benchmark suite.
 
 ## Surprises & Discoveries
 
@@ -113,6 +114,9 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 
 - Observation: The existing internal reaction-priority chain creates edges between all reactions in a reactor, regardless of mode scope.
   Evidence: The cycle-breaker slice rewrote the internal edge construction to add priority edges only between reaction pairs that can be active together, while retaining a total order among compatible pairs. `cargo test -p boomerang_builder` and `cargo test -p boomerang modal` pass after this change.
+
+- Observation: Modal banked child reactors and multiport connections work with the existing scope propagation.
+  Evidence: The new `boomerang/tests/modal_multiport_bank.rs` test creates a bank of child reactors inside the active mode, fully connects each banked output to each multiport input, and passes with `cargo test -p boomerang --test modal_multiport_bank` and `cargo test -p boomerang modal`.
 
 ## Decision Log
 
@@ -239,6 +243,8 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 2026-07-07: User-facing modal reactor documentation is now linked from the book. `book/src/modal-reactors.md` explains mode syntax, reset and history transitions, lifecycle reactions, local-time components, transition timing, and physical actions without naming the external reference language or test corpus. `book/src/glossary.md` now defines the modal terms used by the page. The local `mdbook build book` command passes after removing the obsolete `multilingual` field from `book/book.toml`. Remaining gaps are the inactive-scope performance benchmark and remaining first-wave cycle-breaker and multiport/bank coverage.
 
 2026-07-07: Modal cycle-breaker behavior is now implemented. The builder dependency graph skips port and priority edges between reactions owned by sibling modes of the same reactor, and `boomerang/tests/modal_cycle_breaker.rs` proves opposing same-tag dependencies in mutually exclusive modes build and execute without a static cycle error. Remaining first-wave gaps are multiport/bank coverage and the inactive-scope performance benchmark.
+
+2026-07-07: First-wave multiport and bank coverage is now implemented. `boomerang/tests/modal_multiport_bank.rs` creates banked child reactors inside a mode and checks that a fully connected multiport network receives one value from every peer before shutdown. The focused modal test suite passes with this coverage in place. Remaining gaps are the inactive-scope performance benchmark and final full-workspace validation.
 
 ## Context and Orientation
 
@@ -574,6 +580,12 @@ For the cycle-breaker slice, also run:
     cargo test -p boomerang modal
     git diff --check
 
+For the modal multiport-bank slice, also run:
+
+    cargo test -p boomerang --test modal_multiport_bank
+    cargo test -p boomerang modal
+    git diff --check
+
 Before completion, run:
 
     cargo fmt --check
@@ -797,3 +809,5 @@ Change log: 2026-07-07 / Codex: added the three-mode modal cycle integration tes
 Change log: 2026-07-07 / Codex: added modal reactor book documentation, glossary entries, and a small mdBook config compatibility fix required for the documented build command to pass locally.
 
 Change log: 2026-07-07 / Codex: made builder reaction dependency analysis skip edges between mutually exclusive sibling mode scopes and added a modal cycle-breaker integration test.
+
+Change log: 2026-07-07 / Codex: added modal multiport-bank integration coverage and recorded that banked child reactors plus multiport routing work inside an active mode with the existing scope propagation.

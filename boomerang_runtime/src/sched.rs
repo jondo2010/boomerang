@@ -102,8 +102,7 @@ impl EventQueue {
                     event.reactions.merge(&next_event.reactions);
                     event.terminal = event.terminal || next_event.terminal;
 
-                    // Return the ReactionSet to the free pool
-                    self.free_reaction_sets.push(next_event.reactions);
+                    self.recycle_reaction_set(next_event.reactions);
                 } else {
                     break;
                 }
@@ -119,11 +118,12 @@ impl EventQueue {
     fn next_reaction_set(&mut self) -> ReactionSet {
         self.free_reaction_sets
             .pop()
-            .map(|mut reaction_set| {
-                reaction_set.clear();
-                reaction_set
-            })
             .unwrap_or_else(|| ReactionSet::new(&self.reaction_set_limits))
+    }
+
+    fn recycle_reaction_set(&mut self, mut reaction_set: ReactionSet) {
+        reaction_set.clear();
+        self.free_reaction_sets.push(reaction_set);
     }
 
     /// Peek the tag of the next event in the queue
@@ -148,7 +148,7 @@ impl EventQueue {
 
     fn clear(&mut self) {
         while let Some(event) = self.event_queue.pop() {
-            self.free_reaction_sets.push(event.reactions);
+            self.recycle_reaction_set(event.reactions);
         }
     }
 
@@ -170,30 +170,22 @@ impl EventQueue {
 }
 
 #[derive(Debug)]
-struct ScopeTimeState {
-    active: bool,
-    ever_active: bool,
-    startup_fired: bool,
+struct ScopeClockState {
     activation_global: Tag,
     activation_local: Tag,
     allow_activation_tag: bool,
     suspended_local: Tag,
     frontier_epoch: u64,
-    queue: EventQueue,
 }
 
-impl ScopeTimeState {
-    fn new(active: bool, reaction_set_limits: ReactionSetLimits) -> Self {
+impl ScopeClockState {
+    fn new(active: bool) -> Self {
         Self {
-            active,
-            ever_active: active,
-            startup_fired: active,
             activation_global: Tag::ZERO,
             activation_local: Tag::ZERO,
             allow_activation_tag: active,
             suspended_local: Tag::ZERO,
             frontier_epoch: 0,
-            queue: EventQueue::new(reaction_set_limits),
         }
     }
 
@@ -264,7 +256,11 @@ struct ReadyEvent {
 #[derive(Debug)]
 struct EventManager {
     root: EventQueue,
-    scopes: tinymap::TinySecondaryMap<ScopeKey, ScopeTimeState>,
+    scope_active: tinymap::TinySecondaryMap<ScopeKey, bool>,
+    scope_ever_active: tinymap::TinySecondaryMap<ScopeKey, bool>,
+    scope_startup_fired: tinymap::TinySecondaryMap<ScopeKey, bool>,
+    scope_clocks: tinymap::TinySecondaryMap<ScopeKey, ScopeClockState>,
+    scope_queues: tinymap::TinySecondaryMap<ScopeKey, EventQueue>,
     frontier: BinaryHeap<ScopeFrontierEntry>,
     free_reaction_sets: Vec<ReactionSet>,
     reaction_set_limits: ReactionSetLimits,
@@ -278,23 +274,28 @@ impl EventManager {
         store: &Pin<Box<Store>>,
     ) -> Self {
         let root = EventQueue::new(reaction_set_limits.clone());
-        let scopes = reaction_graph
-            .scopes
-            .keys()
-            .map(|scope| {
-                (
-                    scope,
-                    ScopeTimeState::new(
-                        store.scope_is_active(reaction_graph, scope),
-                        reaction_set_limits.clone(),
-                    ),
-                )
-            })
-            .collect();
+        let mut scope_active = tinymap::TinySecondaryMap::new();
+        let mut scope_ever_active = tinymap::TinySecondaryMap::new();
+        let mut scope_startup_fired = tinymap::TinySecondaryMap::new();
+        let mut scope_clocks = tinymap::TinySecondaryMap::new();
+        let mut scope_queues = tinymap::TinySecondaryMap::new();
+
+        for scope in reaction_graph.scopes.keys() {
+            let active = store.scope_is_active(reaction_graph, scope);
+            scope_active.insert(scope, active);
+            scope_ever_active.insert(scope, active);
+            scope_startup_fired.insert(scope, active);
+            scope_clocks.insert(scope, ScopeClockState::new(active));
+            scope_queues.insert(scope, EventQueue::new(reaction_set_limits.clone()));
+        }
 
         Self {
             root,
-            scopes,
+            scope_active,
+            scope_ever_active,
+            scope_startup_fired,
+            scope_clocks,
+            scope_queues,
             frontier: BinaryHeap::new(),
             free_reaction_sets: Vec::new(),
             reaction_set_limits,
@@ -336,8 +337,8 @@ impl EventManager {
             return;
         }
 
-        let local_tag = self.scopes[scope].global_to_local(tag);
-        self.scopes[scope].queue.push_action_event(
+        let local_tag = self.scope_clocks[scope].global_to_local(tag);
+        self.scope_queues[scope].push_action_event(
             local_tag,
             Some(action_value),
             reactions,
@@ -363,7 +364,7 @@ impl EventManager {
             return;
         }
 
-        self.scopes[scope].queue.push_action_event(
+        self.scope_queues[scope].push_action_event(
             local_tag,
             Some(action_value),
             reactions,
@@ -408,23 +409,17 @@ impl EventManager {
             let event = self.root.pop_next_event().unwrap();
             ready.reactions.merge(&event.reactions);
             ready.terminal = ready.terminal || event.terminal;
-            self.root.free_reaction_sets.push(event.reactions);
+            self.root.recycle_reaction_set(event.reactions);
         }
 
         while self.peek_frontier_tag() == Some(tag) {
             let frontier = self.frontier.pop().unwrap();
-            let event = {
-                let state = &mut self.scopes[frontier.scope];
-                state.queue.pop_next_event().unwrap()
-            };
+            let event = self.scope_queues[frontier.scope].pop_next_event().unwrap();
 
             ready.reactions.merge(&event.reactions);
             ready.terminal = ready.terminal || event.terminal;
 
-            {
-                let state = &mut self.scopes[frontier.scope];
-                state.queue.free_reaction_sets.push(event.reactions);
-            }
+            self.scope_queues[frontier.scope].recycle_reaction_set(event.reactions);
             self.refresh_frontier(frontier.scope);
         }
 
@@ -435,12 +430,13 @@ impl EventManager {
         self.root.shutdown();
     }
 
-    fn return_reaction_set(&mut self, mut reaction_set: ReactionSet) {
-        reaction_set.clear();
+    fn return_reaction_set(&mut self, reaction_set: ReactionSet) {
         if self.has_local_scopes {
+            let mut reaction_set = reaction_set;
+            reaction_set.clear();
             self.free_reaction_sets.push(reaction_set);
         } else {
-            self.root.free_reaction_sets.push(reaction_set);
+            self.root.recycle_reaction_set(reaction_set);
         }
     }
 
@@ -494,11 +490,11 @@ impl EventManager {
             .modal_schedule_index
             .scope_descendants(root_scope)
         {
-            let state = &mut self.scopes[scope];
-            state.queue.clear();
-            state.suspended_local = Tag::ZERO;
-            state.activation_local = Tag::ZERO;
-            state.frontier_epoch = state.frontier_epoch.wrapping_add(1);
+            self.scope_queues[scope].clear();
+            let clock = &mut self.scope_clocks[scope];
+            clock.suspended_local = Tag::ZERO;
+            clock.activation_local = Tag::ZERO;
+            clock.frontier_epoch = clock.frontier_epoch.wrapping_add(1);
         }
 
         for &action_key in reaction_graph
@@ -525,33 +521,34 @@ impl EventManager {
             let reset = matches!(transition, TransitionKind::Reset)
                 && Self::scope_is_descendant_or_self(reaction_graph, scope, reset_root);
 
-            let state = &mut self.scopes[scope];
-            match (state.active, new_active) {
+            match (self.scope_active[scope], new_active) {
                 (true, false) => {
-                    state.suspended_local = state.global_to_local(current_tag);
-                    state.active = false;
-                    state.frontier_epoch = state.frontier_epoch.wrapping_add(1);
+                    let clock = &mut self.scope_clocks[scope];
+                    clock.suspended_local = clock.global_to_local(current_tag);
+                    self.scope_active[scope] = false;
+                    clock.frontier_epoch = clock.frontier_epoch.wrapping_add(1);
                 }
                 (false, true) => {
-                    state.active = true;
-                    state.ever_active = true;
-                    if !state.startup_fired {
-                        state.startup_fired = true;
+                    self.scope_active[scope] = true;
+                    self.scope_ever_active[scope] = true;
+                    if !self.scope_startup_fired[scope] {
+                        self.scope_startup_fired[scope] = true;
                         startup_scopes.push(scope);
                     }
-                    state.activation_global = activation_global;
-                    state.allow_activation_tag = false;
+                    let clock = &mut self.scope_clocks[scope];
+                    clock.activation_global = activation_global;
+                    clock.allow_activation_tag = false;
                     if reset {
-                        state.activation_local = Tag::ZERO;
-                        state.suspended_local = Tag::ZERO;
+                        clock.activation_local = Tag::ZERO;
+                        clock.suspended_local = Tag::ZERO;
                     } else {
-                        state.activation_local = state.suspended_local;
+                        clock.activation_local = clock.suspended_local;
                     }
-                    state.frontier_epoch = state.frontier_epoch.wrapping_add(1);
-                    let activation_global = state.activation_global;
-                    let activation_local = state.activation_local;
-                    let allow_activation_tag = state.allow_activation_tag;
-                    state.queue.rebase_action_values(store, |local_tag| {
+                    clock.frontier_epoch = clock.frontier_epoch.wrapping_add(1);
+                    let activation_global = clock.activation_global;
+                    let activation_local = clock.activation_local;
+                    let allow_activation_tag = clock.allow_activation_tag;
+                    self.scope_queues[scope].rebase_action_values(store, |local_tag| {
                         local_to_global(
                             activation_global,
                             activation_local,
@@ -562,12 +559,13 @@ impl EventManager {
                     self.refresh_frontier(scope);
                 }
                 (true, true) if reset => {
-                    state.ever_active = true;
-                    state.activation_global = activation_global;
-                    state.activation_local = Tag::ZERO;
-                    state.allow_activation_tag = false;
-                    state.suspended_local = Tag::ZERO;
-                    state.frontier_epoch = state.frontier_epoch.wrapping_add(1);
+                    self.scope_ever_active[scope] = true;
+                    let clock = &mut self.scope_clocks[scope];
+                    clock.activation_global = activation_global;
+                    clock.activation_local = Tag::ZERO;
+                    clock.allow_activation_tag = false;
+                    clock.suspended_local = Tag::ZERO;
+                    clock.frontier_epoch = clock.frontier_epoch.wrapping_add(1);
                     self.refresh_frontier(scope);
                 }
                 _ => {}
@@ -634,7 +632,7 @@ impl EventManager {
             let global_tag = if Self::scope_uses_global_time(reaction_graph, scope) {
                 local_tag
             } else {
-                self.scopes[scope].local_to_global(local_tag)
+                self.scope_clocks[scope].local_to_global(local_tag)
             };
             store.push_action_value(action_key, global_tag, Box::new(()));
             let downstream = reaction_graph.action_triggers[action_key].iter().copied();
@@ -673,37 +671,37 @@ impl EventManager {
     }
 
     fn refresh_frontier(&mut self, scope: ScopeKey) {
-        let state = &mut self.scopes[scope];
-        state.frontier_epoch = state.frontier_epoch.wrapping_add(1);
-        if !state.active {
+        let clock = &mut self.scope_clocks[scope];
+        clock.frontier_epoch = clock.frontier_epoch.wrapping_add(1);
+        if !self.scope_active[scope] {
             return;
         }
 
-        let Some(local_tag) = state.queue.peek_tag() else {
+        let Some(local_tag) = self.scope_queues[scope].peek_tag() else {
             return;
         };
-        let global_tag = state.local_to_global(local_tag);
+        let global_tag = self.scope_clocks[scope].local_to_global(local_tag);
         self.frontier.push(ScopeFrontierEntry {
             global_tag,
             scope,
-            epoch: state.frontier_epoch,
+            epoch: self.scope_clocks[scope].frontier_epoch,
         });
     }
 
     fn peek_frontier_tag(&mut self) -> Option<Tag> {
         loop {
             let entry = *self.frontier.peek()?;
-            let state = &self.scopes[entry.scope];
-            if !state.active || state.frontier_epoch != entry.epoch {
+            let clock = &self.scope_clocks[entry.scope];
+            if !self.scope_active[entry.scope] || clock.frontier_epoch != entry.epoch {
                 self.frontier.pop();
                 continue;
             }
 
-            let Some(local_tag) = state.queue.peek_tag() else {
+            let Some(local_tag) = self.scope_queues[entry.scope].peek_tag() else {
                 self.frontier.pop();
                 continue;
             };
-            if state.local_to_global(local_tag) != entry.global_tag {
+            if clock.local_to_global(local_tag) != entry.global_tag {
                 self.frontier.pop();
                 continue;
             }
@@ -717,11 +715,11 @@ impl EventManager {
     }
 
     fn scope_ever_active(&self, scope: ScopeKey) -> bool {
-        self.scopes[scope].ever_active
+        self.scope_ever_active[scope]
     }
 
     fn scope_active(&self, scope: ScopeKey) -> bool {
-        self.scopes[scope].active
+        self.scope_active[scope]
     }
 
     fn scope_is_descendant_or_self(

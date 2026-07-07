@@ -33,6 +33,7 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 - [x] (2026-07-07 08:51Z) Implemented modal cycle-breaker dependency analysis: builder reaction dependency edges now skip pairs of reactions owned by mutually exclusive sibling modes, and `boomerang/tests/modal_cycle_breaker.rs` proves opposing dependencies in sibling modes do not form a static cycle.
 - [x] (2026-07-07 08:51Z) Added modal multiport-bank integration coverage in `boomerang/tests/modal_multiport_bank.rs`, proving banked child reactors and multiport connections work inside an active mode.
 - [x] (2026-07-07 08:55Z) Added the `modal_modes` Criterion benchmark, registered it in `boomerang/Cargo.toml`, and verified it with `cargo test -p boomerang --bench modal_modes` plus `cargo bench -p boomerang --bench modal_modes`.
+- [x] (2026-07-07 09:03Z) Added a non-modal scheduler fast path after `cargo bench -p boomerang --bench ping_pong` reported a root-scope regression; the rerun reports improvements versus the saved local baseline for all three `ping_pong` cases.
 - [ ] Run final full-workspace validation and benchmark suite.
 
 ## Surprises & Discoveries
@@ -120,6 +121,9 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 
 - Observation: The new inactive-scope benchmark shows no linear per-tag scan across dormant mode queues in the measured cases.
   Evidence: `cargo bench -p boomerang --bench modal_modes` measured 10,000 active root ticks at about 2.15 ms with 1 mode, 2.16 ms with 32 modes, and 2.42 ms with 256 modes. The 256-mode case is modestly slower, but not proportional to the 256 dormant scoped timer queues.
+
+- Observation: The first final-validation `ping_pong` run exposed a significant non-modal hot-path regression from modal scheduler bookkeeping.
+  Evidence: Before the fast path, `cargo bench -p boomerang --bench ping_pong` reported regressions of roughly +41%, +26%, and +18% for 100, 10,000, and 1,000,000 pings. After adding root-only event and reaction fast paths, the same command reported improvements of roughly -13%, -12%, and -9% versus the saved local baseline.
 
 ## Decision Log
 
@@ -227,6 +231,10 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
   Rationale: Such reactions cannot execute in the same active configuration, so port dependencies or priority-ordering edges between them should not make the global reaction graph cyclic. Root reactions and reactions in the same mode remain ordered normally because they can run together.
   Date/Author: 2026-07-07 / Codex.
 
+- Decision: Add explicit root-only fast paths in the scheduler when the runtime graph has no modes.
+  Rationale: Non-modal programs should not pay for modal scope checks, local frontier peeking, or root-event copying. Checking `ReactionGraph::modes.is_empty()` once at scheduler construction preserves the modal path while restoring the hot path for existing non-modal models.
+  Date/Author: 2026-07-07 / Codex.
+
 ## Outcomes & Retrospective
 
 2026-07-07: The first local-time runtime slice is implemented for mode-scoped logical actions scheduled from reactions. The new modal action tests prove the core distinction: history preserves the pending action's remaining local delay, while reset discards the stale pending action. Remaining gaps after this slice were mode-local timers, delayed connections, lifecycle startup/shutdown/reset triggers, physical-action caveat handling, and the performance benchmark that proves inactive queues stay cheap.
@@ -250,6 +258,8 @@ The user-visible result is a reactor that can model behavior such as "idle" and 
 2026-07-07: First-wave multiport and bank coverage is now implemented. `boomerang/tests/modal_multiport_bank.rs` creates banked child reactors inside a mode and checks that a fully connected multiport network receives one value from every peer before shutdown. The focused modal test suite passes with this coverage in place. Remaining gaps are the inactive-scope performance benchmark and final full-workspace validation.
 
 2026-07-07: The inactive-scope performance benchmark is now implemented as `boomerang/benches/modal_modes.rs` and registered as `cargo bench -p boomerang --bench modal_modes`. It builds many sibling modes, gives each mode a local one-shot timer so inactive modes hold dormant queued work, and drives the initial active mode with root-scope ticks. The benchmark passes in Criterion test mode and reports near-flat timing between 1 and 32 modes, with a modest increase at 256 modes. Remaining work is final full-workspace validation, including the existing non-modal `ping_pong` benchmark.
+
+2026-07-07: Final validation found and recovered a non-modal benchmark regression. `boomerang_runtime/src/sched.rs` now bypasses modal local-frontier work and modal reaction enabled checks when the graph contains no modes, and root-only event popping returns the root queue's `ReactionSet` directly instead of copying it through an aggregate set. Focused runtime and modal tests pass, `modal_modes` remains stable, and `ping_pong` now reports an improvement versus the saved local baseline. Remaining work is to rerun the full final validation suite after committing this recovery slice.
 
 ## Context and Orientation
 
@@ -597,6 +607,15 @@ For the inactive-scope benchmark slice, also run:
     cargo bench -p boomerang --bench modal_modes
     git diff --check
 
+For the non-modal scheduler fast-path slice, also run:
+
+    cargo test -p boomerang_runtime
+    cargo test -p boomerang modal
+    cargo test -p boomerang --bench modal_modes
+    cargo bench -p boomerang --bench ping_pong
+    cargo bench -p boomerang --bench modal_modes
+    git diff --check
+
 Before completion, run:
 
     cargo fmt --check
@@ -824,3 +843,5 @@ Change log: 2026-07-07 / Codex: made builder reaction dependency analysis skip e
 Change log: 2026-07-07 / Codex: added modal multiport-bank integration coverage and recorded that banked child reactors plus multiport routing work inside an active mode with the existing scope propagation.
 
 Change log: 2026-07-07 / Codex: added the `modal_modes` Criterion benchmark to measure root-scope progress while many inactive mode scopes hold dormant local timer events, and recorded local test and benchmark results.
+
+Change log: 2026-07-07 / Codex: added scheduler fast paths for graphs with no modes after final `ping_pong` validation exposed non-modal overhead from modal event and reaction bookkeeping.

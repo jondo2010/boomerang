@@ -265,6 +265,7 @@ struct EventManager {
     frontier: BinaryHeap<ScopeFrontierEntry>,
     free_reaction_sets: Vec<ReactionSet>,
     reaction_set_limits: ReactionSetLimits,
+    has_local_scopes: bool,
 }
 
 impl EventManager {
@@ -294,6 +295,7 @@ impl EventManager {
             frontier: BinaryHeap::new(),
             free_reaction_sets: Vec::new(),
             reaction_set_limits,
+            has_local_scopes: !reaction_graph.modes.is_empty(),
         }
     }
 
@@ -318,6 +320,12 @@ impl EventManager {
             key: action_key,
             stored_tag: tag,
         };
+        if !self.has_local_scopes {
+            self.root
+                .push_action_event(tag, action_value, reactions, terminal);
+            return;
+        }
+
         let scope = reaction_graph.action_scopes[action_key];
         if !reaction_graph.action_is_logical[action_key]
             || Self::scope_uses_global_time(reaction_graph, scope)
@@ -358,6 +366,10 @@ impl EventManager {
     }
 
     fn peek_tag(&mut self) -> Option<Tag> {
+        if !self.has_local_scopes {
+            return self.root.peek_tag();
+        }
+
         let root_tag = self.root.peek_tag();
         let local_tag = self.peek_frontier_tag();
         match (root_tag, local_tag) {
@@ -369,6 +381,15 @@ impl EventManager {
     }
 
     fn pop_next_event(&mut self) -> Option<ReadyEvent> {
+        if !self.has_local_scopes {
+            let event = self.root.pop_next_event()?;
+            return Some(ReadyEvent {
+                tag: event.tag,
+                reactions: event.reactions,
+                terminal: event.terminal,
+            });
+        }
+
         let tag = self.peek_tag()?;
         let mut ready = ReadyEvent {
             tag,
@@ -409,7 +430,11 @@ impl EventManager {
 
     fn return_reaction_set(&mut self, mut reaction_set: ReactionSet) {
         reaction_set.clear();
-        self.free_reaction_sets.push(reaction_set);
+        if self.has_local_scopes {
+            self.free_reaction_sets.push(reaction_set);
+        } else {
+            self.root.free_reaction_sets.push(reaction_set);
+        }
     }
 
     fn apply_transition(
@@ -939,6 +964,8 @@ pub struct Scheduler {
     reaction_buffer: Vec<ReactionKey>,
     /// Reusable buffer for mode transitions to avoid allocations in hot loops
     transition_buffer: Vec<(ReactorKey, ModeTransitionRequest)>,
+    /// Whether this graph contains any modes and needs modal scope checks in the hot path.
+    has_modes: bool,
 }
 
 impl Scheduler {
@@ -983,6 +1010,7 @@ impl Scheduler {
         let contexts = build_reaction_contexts(key, &graph, start_time, event_tx, shutdown_rx);
 
         let store = Store::new(env, contexts, &graph);
+        let has_modes = !graph.modes.is_empty();
         let events = EventManager::new(reaction_set_limits, &graph, &store);
 
         let upstream_enclaves = upstream_enclaves
@@ -1021,6 +1049,7 @@ impl Scheduler {
             stats: Stats::default(),
             reaction_buffer: Vec::with_capacity(reaction_capacity),
             transition_buffer: Vec::with_capacity(reaction_capacity),
+            has_modes,
         }
     }
 
@@ -1311,26 +1340,31 @@ impl Scheduler {
             tracing::trace!(level=?level, "Iter");
 
             self.reaction_buffer.clear();
-            for reaction_key in reaction_keys {
-                let reactor_key = self.reaction_graph.reaction_reactors[reaction_key];
-                let scope_key = self.reaction_graph.reaction_scopes[reaction_key];
-                let shutdown_lifecycle =
-                    terminal && self.reaction_graph.is_shutdown_reaction(reaction_key);
-                let enabled = if shutdown_lifecycle {
-                    self.events.scope_ever_active(scope_key)
-                } else {
-                    let scope_enabled = self.store.scope_is_active(&self.reaction_graph, scope_key);
-                    let current_mode = self.store.current_mode(reactor_key);
-                    let mode_enabled =
-                        match self.reaction_graph.reaction_modes[reaction_key].as_ref() {
-                            Some(filter) => filter.allows(current_mode),
-                            None => true,
-                        };
-                    scope_enabled && mode_enabled
-                };
-                if enabled {
-                    self.reaction_buffer.push(reaction_key);
+            if self.has_modes {
+                for reaction_key in reaction_keys {
+                    let reactor_key = self.reaction_graph.reaction_reactors[reaction_key];
+                    let scope_key = self.reaction_graph.reaction_scopes[reaction_key];
+                    let shutdown_lifecycle =
+                        terminal && self.reaction_graph.is_shutdown_reaction(reaction_key);
+                    let enabled = if shutdown_lifecycle {
+                        self.events.scope_ever_active(scope_key)
+                    } else {
+                        let scope_enabled =
+                            self.store.scope_is_active(&self.reaction_graph, scope_key);
+                        let current_mode = self.store.current_mode(reactor_key);
+                        let mode_enabled =
+                            match self.reaction_graph.reaction_modes[reaction_key].as_ref() {
+                                Some(filter) => filter.allows(current_mode),
+                                None => true,
+                            };
+                        scope_enabled && mode_enabled
+                    };
+                    if enabled {
+                        self.reaction_buffer.push(reaction_key);
+                    }
                 }
+            } else {
+                self.reaction_buffer.extend(reaction_keys);
             }
 
             self.stats
@@ -1402,6 +1436,11 @@ impl Scheduler {
                 next_levels.extend_above(downstream.copied());
             }
         });
+
+        if self.transition_buffer.is_empty() {
+            self.store.reset_ports();
+            return;
+        }
 
         let mut transitions = Vec::<(ReactorKey, ModeTransitionRequest)>::new();
         for (reactor_key, request) in self.transition_buffer.drain(..) {

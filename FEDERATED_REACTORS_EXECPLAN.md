@@ -20,7 +20,11 @@ The first working behavior is deliberately narrow. It supports static persistent
 - [x] (2026-07-08 19:37Z) Recorded user decision that first-slice MSG data frames route through the RTI.
 - [x] (2026-07-08 19:40Z) Started Milestone 1 implementation, limited to builder/API placement metadata, federation topology extraction, and unsupported distributed zero-delay cycle validation.
 - [x] (2026-07-08 19:53Z) Added `ReactorPlacement`, feature-gated `FederationPlan` metadata, cross-federate topology extraction, and explicit distributed zero-delay-cycle rejection with focused builder tests.
-- [ ] Add wire tag, protocol message, RTI state, and in-memory transport tests in a new `boomerang_federated` crate.
+- [x] (2026-07-08 20:10Z) Started Milestone 2 implementation: add a separate optional `boomerang_federated` crate for wire tags, protocol messages, codec traits, RTI state-machine tests, and in-memory async transport tests without changing scheduler semantics.
+- [x] (2026-07-08 20:15Z) Added `boomerang_federated` with `WireTag`, `FederateId`, `EndpointId`, static topology/neighbor structures, serde-friendly frame/message types, codec traits with a JSON serde adapter, an RTI state machine, and an in-memory async transport pair.
+- [x] (2026-07-08 20:15Z) Ran `cargo test -p boomerang_federated`; 13 unit tests and 0 doc tests passed.
+- [x] (2026-07-08 20:15Z) Ran `cargo test -p boomerang_builder --features federated`; 37 unit tests and 0 doc tests passed.
+- [x] (2026-07-08 20:15Z) Ran `cargo check -p boomerang --features federated --benches`; the top-level federated feature and benches checked successfully.
 - [ ] Add runtime scheduler hooks for an optional federated time barrier and transport-backed inbound events.
 - [ ] Lower cross-federate connections into serialized sender reactions and inbound endpoint registry entries.
 - [ ] Add equivalence tests for distributed hello, delayed connection, and zero-delay-cycle rejection.
@@ -87,6 +91,8 @@ The first working behavior is deliberately narrow. It supports static persistent
 ## Outcomes & Retrospective
 
 Milestone 1 builder/API groundwork is implemented. The builder now records enum-based reactor placement, preserves the existing `is_enclave` compatibility path, emits feature-gated static `FederationPlan` metadata for cross-federate connections, records connection delays, and rejects distributed zero-delay cycles with an explicit builder error. No RTI, transport, protocol loop, scheduler semantic change, or distributed execution path has been added.
+
+Milestone 2 protocol groundwork is implemented in the separate `boomerang_federated` workspace crate. The crate defines wire-safe tag and identity types, static topology and neighbor structures with logical edge delays, RTI-routed control/data message enums, a serde-friendly frame enum, payload codec traits with a JSON serde adapter, a deterministic RTI state machine for static TAG/NET/LTC/MSG behavior, and an in-memory async transport pair for tests. The top-level `boomerang` crate exposes these protocol primitives only through its `federated` feature. `boomerang_runtime` remains unchanged, and no TCP, process launch, scheduler semantic change, runtime data-plane lowering, PTAG/ABS behavior, or distributed execution path has been added.
 
 ## Context and Orientation
 
@@ -330,3 +336,5 @@ Change note: The plan was refined on 2026-07-08 to prefer a `ReactorPlacement` e
 Change note: The plan was refined again on 2026-07-08 to make async I/O a firm first-slice decision, make serde the first supported payload codec, and document the costs and benefits of RTI-routed versus direct federate-to-federate MSG data routing.
 
 Change note: The plan was refined again on 2026-07-08 to make RTI-routed MSG data frames a firm first-slice decision.
+
+Change note: Milestone 2 was implemented on 2026-07-08 by adding the optional `boomerang_federated` crate with protocol, codec, RTI state-machine, and in-memory transport tests while preserving the non-goals for runtime scheduler hooks, TCP networking, PTAG/ABS, and distributed execution.

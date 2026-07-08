@@ -48,6 +48,8 @@ pub mod flatten_transposed;
 
 // Re-exports
 pub use boomerang_builder as builder;
+#[cfg(feature = "federated")]
+pub use boomerang_federated as federated;
 pub use boomerang_runtime as runtime;
 
 pub mod prelude {
@@ -65,6 +67,9 @@ pub mod prelude {
         FederateBuildInfo, FederateSpec, FederatedEdge, FederatedEndpoint, FederatedEndpointId,
         FederationPlan,
     };
+
+    #[cfg(feature = "federated")]
+    pub use super::federated::{EndpointId, FederateId, WireTag};
 
     pub use super::runtime::{self, action::ActionCommon, CommonContext, Duration, FromRefs, Tag};
 

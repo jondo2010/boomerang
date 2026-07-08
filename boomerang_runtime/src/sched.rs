@@ -158,12 +158,32 @@ impl EventQueue {
         mut map_tag: impl FnMut(Tag) -> Tag,
     ) {
         let mut events = self.event_queue.drain().collect::<Vec<_>>();
+        let mut first_move: Option<(crate::ActionKey, Tag, Tag)> = None;
+        let mut moves: Option<Vec<(crate::ActionKey, Tag, Tag)>> = None;
         for event in &mut events {
             let new_tag = map_tag(event.tag);
             if let Some(action_value) = &mut event.action_value {
-                store.reschedule_action_value(action_value.key, action_value.stored_tag, new_tag);
+                let action_move = (action_value.key, action_value.stored_tag, new_tag);
+                if let Some(moves) = &mut moves {
+                    moves.push(action_move);
+                } else if let Some(first_move) = first_move.take() {
+                    let mut collected = Vec::with_capacity(2);
+                    collected.push(first_move);
+                    collected.push(action_move);
+                    moves = Some(collected);
+                } else {
+                    first_move = Some(action_move);
+                }
                 action_value.stored_tag = new_tag;
             }
+        }
+        if let Some(mut moves) = moves {
+            moves.sort_by(|(_, from_a, _), (_, from_b, _)| from_b.cmp(from_a));
+            for (action_key, from, to) in moves {
+                store.reschedule_action_value(action_key, from, to);
+            }
+        } else if let Some((action_key, from, to)) = first_move {
+            store.reschedule_action_value(action_key, from, to);
         }
         self.event_queue = events.into_iter().collect();
     }
@@ -190,6 +210,10 @@ impl ScopeClockState {
     }
 
     fn local_to_global(&self, local_tag: Tag) -> Tag {
+        if self.activation_global == self.activation_local && self.allow_activation_tag {
+            return local_tag;
+        }
+
         local_to_global(
             self.activation_global,
             self.activation_local,
@@ -199,12 +223,30 @@ impl ScopeClockState {
     }
 
     fn global_to_local(&self, global_tag: Tag) -> Tag {
-        let elapsed = global_tag.offset() - self.activation_global.offset();
-        Tag::new(
-            self.activation_local.offset() + elapsed,
-            global_tag.microstep(),
-        )
+        if self.activation_global == self.activation_local {
+            return global_tag;
+        }
+
+        global_to_local(self.activation_global, self.activation_local, global_tag)
     }
+}
+
+fn global_to_local(activation_global: Tag, activation_local: Tag, global_tag: Tag) -> Tag {
+    if activation_global == activation_local {
+        return global_tag;
+    }
+
+    let elapsed = global_tag.offset() - activation_global.offset();
+    let offset = activation_local.offset() + elapsed;
+    let microstep = if global_tag.offset() == activation_global.offset()
+        && global_tag.microstep() >= activation_global.microstep()
+    {
+        activation_local.microstep() + (global_tag.microstep() - activation_global.microstep())
+    } else {
+        global_tag.microstep()
+    };
+
+    Tag::new(offset, microstep)
 }
 
 fn local_to_global(
@@ -213,8 +255,20 @@ fn local_to_global(
     allow_activation_tag: bool,
     local_tag: Tag,
 ) -> Tag {
+    if activation_global == activation_local && allow_activation_tag {
+        return local_tag;
+    }
+
     let elapsed = local_tag.offset() - activation_local.offset();
-    let mut global_tag = Tag::new(activation_global.offset() + elapsed, local_tag.microstep());
+    let offset = activation_global.offset() + elapsed;
+    let microstep = if local_tag.offset() == activation_local.offset()
+        && local_tag.microstep() >= activation_local.microstep()
+    {
+        activation_global.microstep() + (local_tag.microstep() - activation_local.microstep())
+    } else {
+        local_tag.microstep()
+    };
+    let mut global_tag = Tag::new(offset, microstep);
 
     if global_tag < activation_global || (global_tag == activation_global && !allow_activation_tag)
     {
@@ -1460,12 +1514,21 @@ impl Scheduler {
             return false;
         }
 
-        let reactor_key = self.reaction_graph.reaction_reactors[reaction_key];
-        let current_mode = self.store.current_mode(reactor_key);
-        match self.reaction_graph.reaction_modes[reaction_key].as_ref() {
-            Some(filter) => filter.allows(current_mode),
-            None => true,
-        }
+        debug_assert!(
+            self.reaction_graph.reaction_modes[reaction_key]
+                .as_ref()
+                .is_none_or(|filter| {
+                    self.reaction_graph.scopes[scope_key]
+                        .mode
+                        .is_some_and(|mode| {
+                            let modes = filter.modes();
+                            modes.len() == 1 && modes[0] == mode
+                        })
+                }),
+            "reaction mode filters are expected to be equivalent to the static reaction scope"
+        );
+
+        true
     }
 
     /// Consume the scheduler and return the `Env` instance.

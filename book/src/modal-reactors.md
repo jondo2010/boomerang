@@ -92,7 +92,10 @@ reaction! {
 }
 ```
 
-If a mode-local action had 2 ms remaining when the mode became inactive, it still has 2 ms remaining when the mode is re-entered by history.
+If a mode-local action had 2 ms remaining when the mode became inactive, it still has 2 ms
+remaining when the mode is re-entered by history. History also preserves logical microstep ordering
+for pending work at the activation tag, so multiple zero-delay local actions resume in the same order
+they would have had if the mode had stayed active.
 
 ## Lifecycle Reactions
 
@@ -141,6 +144,11 @@ Root-scope components, declared outside all modes, keep the usual global behavio
 Mode-local ports are not allowed. Ports are the stable interface of a reactor, so declare input and output ports at the reactor level and use them from mode-local reactions as needed.
 
 Directly nested `mode!` blocks are not allowed. To model nested modal behavior, instantiate a child reactor inside a mode and give that child reactor its own modes.
+
+Dependency cycles are checked against these static scopes. Reactions in sibling modes of the same
+reactor are mutually exclusive, and this remains true for child reactors declared inside those
+sibling modes. A dependency path that would be cyclic only by combining reactions from mutually
+exclusive modes is allowed because those reactions cannot run together at one logical instant.
 
 ## Transition Timing
 

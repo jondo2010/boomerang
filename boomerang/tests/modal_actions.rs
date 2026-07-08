@@ -106,6 +106,65 @@ fn ModalActionResetDiscard(#[state] scheduled: bool, #[state] fired: bool) -> im
     }
 }
 
+#[reactor]
+fn ModalActionHistoryPreservesMicrosteps(
+    #[state] scheduled: bool,
+    #[state] seen: Vec<u32>,
+) -> impl Reactor {
+    let pulse = builder.add_logical_action::<()>("pulse", None)?;
+
+    reaction! {
+        (startup) -> pulse {
+            ctx.schedule_action(&mut pulse, (), None);
+            ctx.schedule_action(&mut pulse, (), None);
+            ctx.schedule_shutdown(Some(Duration::nanoseconds(1)));
+        }
+    }
+
+    mode! { initial active {
+        let work = builder.add_logical_action::<u32>("work", None)?;
+
+        reaction! {
+            (pulse) -> work, inactive {
+                if !state.scheduled {
+                    state.scheduled = true;
+                    ctx.schedule_action(&mut work, 1, None);
+                    ctx.schedule_action(&mut work, 2, None);
+                    inactive.set(ctx);
+                }
+            }
+        }
+
+        reaction! {
+            (work) {
+                let value = ctx
+                    .get_action_value(&mut work)
+                    .copied()
+                    .expect("missing work value");
+                state.seen.push(value);
+            }
+        }
+    } }
+
+    mode! { inactive {
+        reaction! {
+            (pulse) -> history(active) {
+                active.set(ctx);
+            }
+        }
+    } }
+
+    reaction! {
+        (shutdown) {
+            assert_eq!(
+                state.seen,
+                vec![1, 2],
+                "history re-entry must preserve queued mode-local microsteps"
+            );
+        }
+    }
+}
+
 #[test]
 fn modal_action_history_resumes_pending_action() {
     let _ = tracing_subscriber::fmt::try_init();
@@ -117,6 +176,22 @@ fn modal_action_history_resumes_pending_action() {
             scheduled: false,
             fired: false,
             fire_time_ns: 0,
+        },
+        config,
+    )
+    .unwrap();
+}
+
+#[test]
+fn modal_action_history_preserves_microsteps() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let config = runtime::Config::default().with_fast_forward(true);
+    boomerang_util::runner::build_and_test_reactor(
+        ModalActionHistoryPreservesMicrosteps(),
+        "modal_action_history_preserves_microsteps",
+        ModalActionHistoryPreservesMicrostepsState {
+            scheduled: false,
+            seen: Vec::new(),
         },
         config,
     )

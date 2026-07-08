@@ -719,15 +719,38 @@ impl EnvBuilder {
         a: BuilderReactionKey,
         b: BuilderReactionKey,
     ) -> bool {
-        let Some(a_mode) = self.reaction_builders[a].scope_mode else {
-            return false;
-        };
-        let Some(b_mode) = self.reaction_builders[b].scope_mode else {
-            return false;
-        };
+        let a_modes = self.enclosing_modes_for_reaction(a);
+        let b_modes = self.enclosing_modes_for_reaction(b);
 
-        a_mode != b_mode
-            && self.mode_builders[a_mode].reactor_key == self.mode_builders[b_mode].reactor_key
+        a_modes.iter().any(|&a_mode| {
+            b_modes.iter().any(|&b_mode| {
+                a_mode != b_mode
+                    && self.mode_builders[a_mode].reactor_key
+                        == self.mode_builders[b_mode].reactor_key
+            })
+        })
+    }
+
+    fn enclosing_modes_for_reaction(
+        &self,
+        reaction_key: BuilderReactionKey,
+    ) -> Vec<BuilderModeKey> {
+        let reaction = &self.reaction_builders[reaction_key];
+        let mut modes = Vec::new();
+        if let Some(mode) = reaction.scope_mode {
+            modes.push(mode);
+        }
+
+        let mut reactor_key = Some(reaction.reactor_key);
+        while let Some(key) = reactor_key {
+            let reactor = &self.reactor_builders[key];
+            if let Some(mode) = reactor.scope_mode {
+                modes.push(mode);
+            }
+            reactor_key = reactor.parent_reactor_key;
+        }
+
+        modes
     }
 
     /// Build a DAG of Reactions

@@ -13,7 +13,7 @@ jobs:
       pages: write # To push to a GitHub Pages site
       id-token: write # To update the deployment status
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - name: Install latest mdbook
@@ -27,12 +27,12 @@ jobs:
         run: |
           mdbook build book && mdbook test book
       - name: Setup Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           # Upload output directory
           path: "book/book"
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

@@ -33,6 +33,8 @@ pub use env::{
     LifecycleReaction, ModalScheduleIndex, Mode, ModeFilter, ModeKey, ReactionGraph, ScopeInfo,
     ScopeKey, TransitionKind,
 };
+#[cfg(feature = "federated")]
+pub use event::AsyncEvent;
 pub use kanal::{Receiver, Sender};
 pub use key_set::KeySetLimits as ReactionSetLimits;
 pub use port::{DynPortRef, DynPortRefMut, *};

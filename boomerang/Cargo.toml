@@ -24,7 +24,11 @@ parallel = ["boomerang_runtime/parallel"]
 replay = ["boomerang_runtime/replay", "boomerang_builder/replay"]
 
 ## Builder metadata and protocol primitives for static federated enclave topologies
-federated = ["boomerang_builder/federated", "dep:boomerang_federated"]
+federated = [
+    "boomerang_runtime/federated",
+    "boomerang_builder/federated",
+    "dep:boomerang_federated",
+]
 
 [dependencies]
 document-features = { workspace = true }

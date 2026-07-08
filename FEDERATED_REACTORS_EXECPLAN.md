@@ -25,7 +25,21 @@ The first working behavior is deliberately narrow. It supports static persistent
 - [x] (2026-07-08 20:15Z) Ran `cargo test -p boomerang_federated`; 13 unit tests and 0 doc tests passed.
 - [x] (2026-07-08 20:15Z) Ran `cargo test -p boomerang_builder --features federated`; 37 unit tests and 0 doc tests passed.
 - [x] (2026-07-08 20:15Z) Ran `cargo check -p boomerang --features federated --benches`; the top-level federated feature and benches checked successfully.
-- [ ] Add runtime scheduler hooks for an optional federated time barrier and transport-backed inbound events.
+- [x] (2026-07-08 20:22Z) Started Milestone 3 implementation, limited to optional runtime scheduler hooks for federated time coordination. Default local execution, `LogicalTimeBarrier`, scheduler semantics, runtime data-plane lowering, and `boomerang_runtime` dependency boundaries remain unchanged.
+- [x] (2026-07-08 20:26Z) Added the runtime hook shape in `boomerang_runtime`: a runtime-owned `FederatedTimeBarrier` trait, an opt-in `Scheduler::new_with_federated_time_barrier` constructor, `Scheduler::next` acquire/LTC calls around tag processing, and focused unit tests for hook ordering and inbound-event interruption.
+- [x] (2026-07-08 20:27Z) Ran `cargo test -p boomerang_runtime`; 19 unit tests passed, 1 doc test passed, and the existing `refs` doc test remained ignored.
+- [x] (2026-07-08 20:27Z) Ran `cargo test -p boomerang_federated`; 13 unit tests and 0 doc tests passed.
+- [x] (2026-07-08 20:27Z) Ran `cargo test -p boomerang_builder --features federated`; 37 unit tests and 0 doc tests passed.
+- [x] (2026-07-08 20:27Z) Ran `cargo check -p boomerang --features federated --benches`; the top-level federated feature and benches checked successfully.
+- [x] (2026-07-08 20:28Z) Ran `cargo test -p boomerang --test scheduler_alloc`; the steady-state scheduler allocation guard passed with 1 integration test.
+- [x] (2026-07-08 20:28Z) Completed Milestone 3 runtime scheduler hooks for an optional federated time barrier and inbound `AsyncEvent` interruption. Transport-backed producers remain future work; this slice only adds the scheduler interface and tests.
+- [x] (2026-07-08 21:33Z) Started Milestone 3 cleanup after review: feature-gate the runtime federated hook, move `FederatedTimeBarrier` into `sched/barrier.rs`, keep the dyn-backed opt-in constructor, and preserve `LogicalTimeBarrier` behavior unchanged.
+- [x] (2026-07-08 21:35Z) Added the `boomerang_runtime/federated` feature, wired the top-level `boomerang/federated` feature through it, gated the runtime hook API/calls/tests, and moved `FederatedTimeBarrier` into `boomerang_runtime/src/sched/barrier.rs`.
+- [x] (2026-07-08 21:35Z) Ran `cargo test -p boomerang_runtime`; default runtime tests passed with 17 unit tests, 1 doc test passed, and the existing `refs` doc test ignored.
+- [x] (2026-07-08 21:35Z) Ran `cargo test -p boomerang_runtime --features federated`; feature-gated runtime hook tests passed with 19 unit tests, 1 doc test passed, and the existing `refs` doc test ignored.
+- [x] (2026-07-08 21:35Z) Reran `cargo test -p boomerang_federated`, `cargo test -p boomerang_builder --features federated`, `cargo check -p boomerang --features federated --benches`, and `cargo test -p boomerang --test scheduler_alloc`; all passed.
+- [x] (2026-07-08 21:39Z) Refined the scheduler constructor split so the non-federated build uses a neutral local construction helper and no `new_with_optional_federated_time_barrier` helper exists outside the federated path.
+- [x] (2026-07-08 21:43Z) Folded local construction back into `Scheduler::new` and replaced the federated `Option<Box<dyn FederatedTimeBarrier>>` field with a boxed no-op barrier in federated builds. The opt-in federated constructor now swaps in the caller-provided barrier.
 - [ ] Lower cross-federate connections into serialized sender reactions and inbound endpoint registry entries.
 - [ ] Add equivalence tests for distributed hello, delayed connection, and zero-delay-cycle rejection.
 
@@ -88,11 +102,29 @@ The first working behavior is deliberately narrow. It supports static persistent
   Rationale: RTI-routed MSGs keep the MVP centralized, easier to test, and aligned with the RTI's in-transit message queues for TAG decisions. The protocol will still carry source and target federate ids so direct federate-to-federate data channels can be added later as an optimization without redesigning endpoint identity or payload codecs. The user confirmed RTI routing for the first slice.
   Date/Author: 2026-07-08 / Codex
 
+- Decision: Implement the Milestone 3 scheduler hook as a runtime-owned optional trait and constructor, not as a dependency on `boomerang_federated`.
+  Rationale: The scheduler only needs to ask for a tag grant, accept an interrupting `AsyncEvent`, and report logical tag completion. Keeping the hook in `boomerang_runtime` avoids pulling protocol, codec, or transport dependencies into default local execution while still giving `boomerang_federated` a narrow bridge to implement later.
+  Date/Author: 2026-07-08 / Codex
+
+- Decision: Feature-gate the Milestone 3 runtime hook and keep it in `sched/barrier.rs` beside the existing local logical-time barrier.
+  Rationale: The hook is only needed by federated execution and should not expand the default runtime API surface. Putting `FederatedTimeBarrier` in `barrier.rs` keeps local and federated tag-gating interfaces together while preserving the existing `LogicalTimeBarrier` implementation unchanged.
+  Date/Author: 2026-07-08 / Codex
+
+- Decision: Keep the ordinary scheduler constructor path named and shaped as local construction, and let the feature-gated federated constructor attach the optional hook afterward.
+  Rationale: A helper named `new_with_optional_federated_time_barrier` is confusing in non-federated builds even when private. The default runtime should read as local-only code; the federated feature should add the extra constructor and field behavior explicitly.
+  Date/Author: 2026-07-08 / Codex
+
+- Decision: In federated builds, store a boxed no-op `FederatedTimeBarrier` for ordinary `Scheduler::new` instead of an `Option`.
+  Rationale: The field only exists when the `federated` feature is enabled, so `Option` adds an unnecessary branch and weakens the model. A no-op barrier preserves `Scheduler::new` compatibility under the feature while keeping the tag-gating call path uniform.
+  Date/Author: 2026-07-08 / Codex
+
 ## Outcomes & Retrospective
 
 Milestone 1 builder/API groundwork is implemented. The builder now records enum-based reactor placement, preserves the existing `is_enclave` compatibility path, emits feature-gated static `FederationPlan` metadata for cross-federate connections, records connection delays, and rejects distributed zero-delay cycles with an explicit builder error. No RTI, transport, protocol loop, scheduler semantic change, or distributed execution path has been added.
 
 Milestone 2 protocol groundwork is implemented in the separate `boomerang_federated` workspace crate. The crate defines wire-safe tag and identity types, static topology and neighbor structures with logical edge delays, RTI-routed control/data message enums, a serde-friendly frame enum, payload codec traits with a JSON serde adapter, a deterministic RTI state machine for static TAG/NET/LTC/MSG behavior, and an in-memory async transport pair for tests. The top-level `boomerang` crate exposes these protocol primitives only through its `federated` feature. `boomerang_runtime` remains unchanged, and no TCP, process launch, scheduler semantic change, runtime data-plane lowering, PTAG/ABS behavior, or distributed execution path has been added.
+
+Milestone 3 runtime hook groundwork is implemented in `boomerang_runtime` behind the `federated` feature. The runtime exposes `AsyncEvent` under that feature and defines `FederatedTimeBarrier` in `boomerang_runtime/src/sched/barrier.rs` with `acquire_tag(tag, event_rx)` and `logical_tag_complete(tag)`. `Scheduler::new` and `execute_enclaves` still construct local-compatible schedulers; under the federated feature they carry a boxed no-op barrier, while `Scheduler::new_with_federated_time_barrier` swaps in the caller-provided barrier. When enabled, `Scheduler::next` waits on the federated barrier after local upstream barriers and before wall-clock synchronization or tag processing; if the hook returns an inbound `AsyncEvent`, the scheduler handles it and retries later without advancing. After a tag is processed and local downstream releases are sent, the scheduler reports LTC through the hook. When the feature is disabled, the hook field, constructor, calls, and tests are compiled out. No runtime data-plane lowering, endpoint registry, TCP networking, process launch, PTAG/ABS support, or dependency from `boomerang_runtime` to `boomerang_federated` has been added.
 
 ## Context and Orientation
 
@@ -338,3 +370,5 @@ Change note: The plan was refined again on 2026-07-08 to make async I/O a firm f
 Change note: The plan was refined again on 2026-07-08 to make RTI-routed MSG data frames a firm first-slice decision.
 
 Change note: Milestone 2 was implemented on 2026-07-08 by adding the optional `boomerang_federated` crate with protocol, codec, RTI state-machine, and in-memory transport tests while preserving the non-goals for runtime scheduler hooks, TCP networking, PTAG/ABS, and distributed execution.
+
+Change note: Milestone 3 was implemented on 2026-07-08 by adding feature-gated runtime scheduler hooks for federated time coordination, re-exporting `AsyncEvent` for hook implementations only under the runtime `federated` feature, and validating the hook order and interrupt behavior without changing default local scheduler construction or adding runtime protocol dependencies. Follow-up cleanup moved the hook trait into `sched/barrier.rs`, wired the top-level `boomerang/federated` feature through `boomerang_runtime/federated`, folded local construction back into `Scheduler::new`, and replaced the internal `Option` with a boxed no-op barrier under the federated feature.

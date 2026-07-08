@@ -1,5 +1,49 @@
 use crate::{event::AsyncEvent, CommonContext, Duration, EnclaveKey, SendContext, Tag};
 
+/// Optional scheduler hook for federated logical-time coordination.
+///
+/// Implementations can block until the requested tag is granted, or return an
+/// inbound event that the scheduler should handle before trying to advance.
+#[cfg(feature = "federated")]
+pub trait FederatedTimeBarrier: Send {
+    /// Acquire permission to advance to `tag`.
+    ///
+    /// Returning `None` means the tag was granted. Returning an [`AsyncEvent`]
+    /// interrupts the wait and lets the scheduler handle the event before
+    /// advancing.
+    fn acquire_tag(
+        &mut self,
+        tag: Tag,
+        event_rx: &crate::Receiver<AsyncEvent>,
+    ) -> Option<AsyncEvent>;
+
+    /// Report that all work for `tag` has completed.
+    fn logical_tag_complete(&mut self, tag: Tag);
+}
+
+#[cfg(feature = "federated")]
+pub(super) struct NoFederatedTimeBarrier;
+
+#[cfg(feature = "federated")]
+impl FederatedTimeBarrier for NoFederatedTimeBarrier {
+    fn acquire_tag(
+        &mut self,
+        _tag: Tag,
+        _event_rx: &crate::Receiver<AsyncEvent>,
+    ) -> Option<AsyncEvent> {
+        None
+    }
+
+    fn logical_tag_complete(&mut self, _tag: Tag) {}
+}
+
+#[cfg(feature = "federated")]
+impl std::fmt::Debug for dyn FederatedTimeBarrier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("dyn FederatedTimeBarrier")
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct LogicalTimeBarrier {
     /// The last released tag

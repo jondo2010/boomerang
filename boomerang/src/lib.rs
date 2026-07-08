@@ -56,8 +56,14 @@ pub mod prelude {
     pub use super::builder::{
         BuilderError, BuilderFqn, BuilderModeEffect, BuilderModeKey, BuilderReactorKey,
         BuilderRuntimeParts, Contained, EnvBuilder, Input, Local, Logical, ModeKind, Output,
-        Physical, PortBank, Reactor, TimerActionKey, TimerSpec, TransitionKind, TypedActionKey,
-        TypedPortKey,
+        Physical, PortBank, Reactor, ReactorPlacement, TimerActionKey, TimerSpec, TransitionKind,
+        TypedActionKey, TypedPortKey,
+    };
+
+    #[cfg(feature = "federated")]
+    pub use super::builder::{
+        FederateBuildInfo, FederateSpec, FederatedEdge, FederatedEndpoint, FederatedEndpointId,
+        FederationPlan,
     };
 
     pub use super::runtime::{self, action::ActionCommon, CommonContext, Duration, FromRefs, Tag};

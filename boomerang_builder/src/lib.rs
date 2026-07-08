@@ -7,6 +7,8 @@
 mod action;
 mod connection;
 mod env;
+#[cfg(feature = "federated")]
+mod federation;
 mod fqn;
 mod port;
 mod reaction;
@@ -21,6 +23,8 @@ pub mod plantuml;
 
 pub use action::*;
 pub use env::*;
+#[cfg(feature = "federated")]
+pub use federation::*;
 pub use fqn::*;
 pub use port::{
     BuilderPortKey, Contained, Input, Local, Output, PortBank, PortBuilder, PortTag, PortType,
@@ -100,6 +104,9 @@ pub enum BuilderError {
 
     #[error("Port connection length mismatch: {from} -> {to}")]
     PortConnectionLengthMismatch { from: usize, to: usize },
+
+    #[error("Unsupported federation topology: {what}")]
+    UnsupportedFederationTopology { what: String },
 
     #[error("Error building Reaction: {0}")]
     ReactionBuilderError(String),

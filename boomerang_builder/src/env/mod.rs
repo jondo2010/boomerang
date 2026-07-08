@@ -18,7 +18,7 @@ use super::{
     reaction::{BuilderModeEffect, ReactionBuilder},
     runtime, ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderModeKey,
     BuilderPortKey, BuilderReactionKey, BuilderReactorKey, Input, Logical, ModeKind, Output,
-    PortTag, ReactorBuilder, ReactorBuilderState, TypedActionKey, TypedPortKey,
+    PortTag, ReactorBuilder, ReactorBuilderState, ReactorPlacement, TypedActionKey, TypedPortKey,
 };
 use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, EdgeDirection};
@@ -108,10 +108,10 @@ impl EnvBuilder {
         parent: Option<BuilderReactorKey>,
         bank_info: Option<runtime::BankInfo>,
         state: S,
-        is_enclave: bool,
+        placement: impl Into<ReactorPlacement>,
     ) -> ReactorBuilderState<'_, S> {
         tracing::debug!("Adding Reactor: {name}");
-        ReactorBuilderState::new(name, parent, bank_info, state, is_enclave, self)
+        ReactorBuilderState::new(name, parent, bank_info, state, placement, self)
     }
 
     /// Get a previously built reactor

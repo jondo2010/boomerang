@@ -178,6 +178,7 @@ where
         aliases: _,
         #[cfg(feature = "replay")]
         replayers,
+        ..
     } = env_builder
         .into_runtime_parts(&config)
         .context("Error building environment!")?;

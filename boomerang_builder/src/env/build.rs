@@ -8,11 +8,17 @@ use boomerang_runtime::{self as runtime};
 use core::range::Range;
 use itertools::Itertools;
 use slotmap::SecondaryMap;
+#[cfg(feature = "federated")]
+use std::collections::BTreeMap;
 
 use crate::{
     connection::PortBindings, ActionType, BuilderActionKey, BuilderError, BuilderModeKey,
     BuilderPortKey, BuilderReactionKey, BuilderReactorKey, ParentReactorBuilder,
     PartialReactionBuilder, TimerActionKey,
+};
+#[cfg(feature = "federated")]
+use crate::{
+    FederateBuildInfo, FederatedEdge, FederatedEndpoint, FederatedEndpointId, FederationPlan,
 };
 
 use super::EnvBuilder;
@@ -54,6 +60,9 @@ pub struct BuilderRuntimeParts {
     pub enclaves: tinymap::TinyMap<runtime::EnclaveKey, runtime::Enclave>,
     /// Aliases from builder keys to runtime keys
     pub aliases: BuilderAliases,
+    #[cfg(feature = "federated")]
+    /// Static federation metadata extracted by the builder.
+    pub federation_plan: FederationPlan,
     #[cfg(feature = "replay")]
     /// The action replayers for each enclave
     pub replayers: runtime::replay::ReplayersMap,
@@ -112,13 +121,20 @@ impl BuilderRuntimeParts {
             Self {
                 enclaves,
                 aliases,
+                #[cfg(feature = "federated")]
+                federation_plan: FederationPlan::default(),
                 replayers,
             }
         }
         #[cfg(not(feature = "replay"))]
         {
             // No replayers, just return the enclaves and aliases
-            Self { enclaves, aliases }
+            Self {
+                enclaves,
+                aliases,
+                #[cfg(feature = "federated")]
+                federation_plan: FederationPlan::default(),
+            }
         }
     }
 }
@@ -241,6 +257,189 @@ fn build_modal_schedule_index(graph: &runtime::ReactionGraph) -> runtime::ModalS
 }
 
 impl EnvBuilder {
+    #[cfg(feature = "federated")]
+    fn build_federation_plan(
+        &self,
+        partition_map: &PartitionMap,
+    ) -> Result<FederationPlan, BuilderError> {
+        let mut plan = FederationPlan::default();
+        let mut federate_id_by_partition = SecondaryMap::<BuilderReactorKey, String>::new();
+        let mut seen_ids = BTreeMap::<String, BuilderReactorKey>::new();
+
+        for (reactor_key, reactor) in &self.reactor_builders {
+            let Some(spec) = reactor.federate_spec() else {
+                continue;
+            };
+
+            if spec.id.trim().is_empty() {
+                return Err(BuilderError::UnsupportedFederationTopology {
+                    what: format!(
+                        "federate reactor '{}' must have a non-empty id",
+                        self.fqn_for(reactor_key, false)?
+                    ),
+                });
+            }
+
+            if spec.transient {
+                return Err(BuilderError::UnsupportedFederationTopology {
+                    what: format!(
+                        "transient federate '{}' is reserved for a later milestone",
+                        spec.id
+                    ),
+                });
+            }
+
+            if partition_map[reactor_key] != reactor_key {
+                return Err(BuilderError::UnsupportedFederationTopology {
+                    what: format!(
+                        "federate '{}' must be an enclave root in this milestone",
+                        spec.id
+                    ),
+                });
+            }
+
+            if let Some(previous) = seen_ids.insert(spec.id.clone(), reactor_key) {
+                return Err(BuilderError::UnsupportedFederationTopology {
+                    what: format!(
+                        "duplicate federate id '{}' for '{}' and '{}'",
+                        spec.id,
+                        self.fqn_for(previous, false)?,
+                        self.fqn_for(reactor_key, false)?,
+                    ),
+                });
+            }
+
+            federate_id_by_partition.insert(reactor_key, spec.id.clone());
+            plan.federates.push(FederateBuildInfo {
+                id: spec.id.clone(),
+                reactor: reactor_key,
+                reactor_fqn: self.fqn_for(reactor_key, false)?.to_string(),
+            });
+        }
+
+        for connection in &self.connection_builders {
+            let source_port_key = connection.source_key();
+            let target_port_key = connection.target_key();
+            let source_port = &self.port_builders[source_port_key];
+            let target_port = &self.port_builders[target_port_key];
+            let source_reactor_key = source_port.parent_reactor_key().ok_or_else(|| {
+                BuilderError::InternalError("source port has no parent reactor".to_owned())
+            })?;
+            let target_reactor_key = target_port.parent_reactor_key().ok_or_else(|| {
+                BuilderError::InternalError("target port has no parent reactor".to_owned())
+            })?;
+            let source_partition = partition_map[source_reactor_key];
+            let target_partition = partition_map[target_reactor_key];
+
+            if source_partition == target_partition {
+                continue;
+            }
+
+            let source_federate = federate_id_by_partition.get(source_partition);
+            let target_federate = federate_id_by_partition.get(target_partition);
+
+            match (source_federate, target_federate) {
+                (None, None) => continue,
+                (Some(_), Some(_)) => {}
+                _ => {
+                    return Err(BuilderError::UnsupportedFederationTopology {
+                        what: format!(
+                            "connection '{}' -> '{}' crosses a federated boundary, but both enclave roots are not federates",
+                            self.fqn_for(source_port_key, false)?,
+                            self.fqn_for(target_port_key, false)?,
+                        ),
+                    });
+                }
+            }
+
+            if connection.physical() {
+                return Err(BuilderError::UnsupportedFederationTopology {
+                    what: format!(
+                        "cross-federate physical connection '{}' -> '{}' is reserved for a later milestone",
+                        self.fqn_for(source_port_key, false)?,
+                        self.fqn_for(target_port_key, false)?,
+                    ),
+                });
+            }
+
+            let source_federate = source_federate.cloned().unwrap();
+            let target_federate = target_federate.cloned().unwrap();
+            let source_port_fqn = self.fqn_for(source_port_key, false)?.to_string();
+            let target_port_fqn = self.fqn_for(target_port_key, false)?.to_string();
+            let endpoint_id =
+                FederatedEndpointId::new(format!("{source_port_fqn}->{target_port_fqn}"));
+
+            plan.endpoints.push(FederatedEndpoint {
+                id: endpoint_id.clone(),
+                source_federate: source_federate.clone(),
+                target_federate: target_federate.clone(),
+                source_port: source_port_key,
+                target_port: target_port_key,
+                source_port_fqn,
+                target_port_fqn,
+            });
+            plan.edges.push(FederatedEdge {
+                endpoint: endpoint_id,
+                source_federate,
+                target_federate,
+                source_federate_reactor: source_partition,
+                target_federate_reactor: target_partition,
+                source_port: source_port_key,
+                target_port: target_port_key,
+                delay: connection.after(),
+            });
+        }
+
+        self.validate_federation_zero_delay_cycles(&plan)?;
+
+        Ok(plan)
+    }
+
+    #[cfg(feature = "federated")]
+    fn validate_federation_zero_delay_cycles(
+        &self,
+        plan: &FederationPlan,
+    ) -> Result<(), BuilderError> {
+        let mut graph = petgraph::prelude::DiGraphMap::<BuilderReactorKey, ()>::new();
+
+        for federate in &plan.federates {
+            graph.add_node(federate.reactor);
+        }
+
+        for edge in &plan.edges {
+            let has_positive_delay = edge
+                .delay
+                .is_some_and(|delay| delay > runtime::Duration::ZERO);
+            if !has_positive_delay {
+                graph.add_edge(
+                    edge.source_federate_reactor,
+                    edge.target_federate_reactor,
+                    (),
+                );
+            }
+        }
+
+        if let Err(cycle) = petgraph::algo::toposort(&graph, None) {
+            let cycle = super::util::find_minimal_cycle(&graph, cycle.node_id());
+            let cycle = cycle
+                .into_iter()
+                .map(|reactor_key| {
+                    self.reactor_builders[reactor_key]
+                        .federate_spec()
+                        .map(|spec| spec.id.clone())
+                        .unwrap_or_else(|| format!("{reactor_key:?}"))
+                })
+                .join(" -> ");
+            return Err(BuilderError::UnsupportedFederationTopology {
+                what: format!(
+                    "distributed zero-delay cycle is unsupported in the static MVP: {cycle}"
+                ),
+            });
+        }
+
+        Ok(())
+    }
+
     /// Process the connections and reduce them to a set of port bindings.
     pub(super) fn build_connections(
         &mut self,
@@ -264,13 +463,13 @@ impl EnvBuilder {
         petgraph::visit::depth_first_search(&graph, self.reactor_builders.keys(), |event| {
             match event {
                 petgraph::visit::DfsEvent::Discover(key, _) => {
-                    if self.reactor_builders[key].is_enclave {
+                    if self.reactor_builders[key].placement().starts_enclave() {
                         node_stack.push(key);
                     }
                     partitions.push((key, *node_stack.last().unwrap()));
                 }
                 petgraph::visit::DfsEvent::Finish(key, _)
-                    if self.reactor_builders[key].is_enclave =>
+                    if self.reactor_builders[key].placement().starts_enclave() =>
                 {
                     node_stack.pop();
                 }
@@ -703,9 +902,15 @@ impl EnvBuilder {
         config: &runtime::Config,
     ) -> Result<BuilderRuntimeParts, BuilderError> {
         let mut partition_map = self.build_partition_map();
+        #[cfg(feature = "federated")]
+        let federation_plan = self.build_federation_plan(&partition_map)?;
         let (port_bindings, enclave_deps) = self.build_connections(&mut partition_map)?;
         let mut builder_parts =
             BuilderRuntimeParts::new(&partition_map, enclave_deps, config.physical_event_q_size);
+        #[cfg(feature = "federated")]
+        {
+            builder_parts.federation_plan = federation_plan;
+        }
 
         self.build_runtime_actions(&partition_map, &mut builder_parts)?;
         self.build_runtime_ports(&partition_map, &mut builder_parts, &port_bindings)?;

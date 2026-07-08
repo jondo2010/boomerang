@@ -23,6 +23,9 @@ parallel = ["boomerang_runtime/parallel"]
 ## Support for recording and replaying
 replay = ["boomerang_runtime/replay", "boomerang_builder/replay"]
 
+## Builder metadata for static federated enclave topologies
+federated = ["boomerang_builder/federated"]
+
 [dependencies]
 document-features = { workspace = true }
 thiserror.workspace = true

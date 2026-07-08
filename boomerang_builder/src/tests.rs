@@ -1150,6 +1150,177 @@ fn test_enclave_partitioning() {
     )
 }
 
+#[test]
+fn test_is_enclave_compatibility_with_reactor_placement() {
+    let mut env_builder = EnvBuilder::new();
+    let reactor = env_builder
+        .add_reactor("enclave", None, None, (), true)
+        .finish()
+        .unwrap();
+
+    let reactor = &env_builder.reactor_builders[reactor];
+    assert!(reactor.is_enclave);
+    assert!(reactor.is_enclave());
+    assert_eq!(reactor.placement(), &ReactorPlacement::Enclave);
+}
+
+#[cfg(feature = "federated")]
+#[derive(Clone, Copy)]
+struct FederatedIoPorts {
+    input: TypedPortKey<u32, Input, Contained>,
+    output: TypedPortKey<u32, Output, Contained>,
+}
+
+#[cfg(feature = "federated")]
+fn federated_source_reactor() -> impl Reactor<(), Ports = TypedPortKey<u32, Output, Contained>> {
+    |name: &str,
+     state: (),
+     parent: Option<BuilderReactorKey>,
+     scope_mode: Option<BuilderModeKey>,
+     bank_info: Option<runtime::BankInfo>,
+     placement: ReactorPlacement,
+     env: &mut EnvBuilder| {
+        let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
+        if let Some(scope_mode) = scope_mode {
+            builder.set_scope_mode(scope_mode)?;
+        }
+        let output = builder.add_output_port::<u32>("out")?.contained();
+        builder.finish()?;
+        Ok(output)
+    }
+}
+
+#[cfg(feature = "federated")]
+fn federated_sink_reactor() -> impl Reactor<(), Ports = TypedPortKey<u32, Input, Contained>> {
+    |name: &str,
+     state: (),
+     parent: Option<BuilderReactorKey>,
+     scope_mode: Option<BuilderModeKey>,
+     bank_info: Option<runtime::BankInfo>,
+     placement: ReactorPlacement,
+     env: &mut EnvBuilder| {
+        let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
+        if let Some(scope_mode) = scope_mode {
+            builder.set_scope_mode(scope_mode)?;
+        }
+        let input = builder.add_input_port::<u32>("in")?.contained();
+        builder.finish()?;
+        Ok(input)
+    }
+}
+
+#[cfg(feature = "federated")]
+fn federated_io_reactor() -> impl Reactor<(), Ports = FederatedIoPorts> {
+    |name: &str,
+     state: (),
+     parent: Option<BuilderReactorKey>,
+     scope_mode: Option<BuilderModeKey>,
+     bank_info: Option<runtime::BankInfo>,
+     placement: ReactorPlacement,
+     env: &mut EnvBuilder| {
+        let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
+        if let Some(scope_mode) = scope_mode {
+            builder.set_scope_mode(scope_mode)?;
+        }
+        let input = builder.add_input_port::<u32>("in")?.contained();
+        let output = builder.add_output_port::<u32>("out")?.contained();
+        builder.finish()?;
+        Ok(FederatedIoPorts { input, output })
+    }
+}
+
+#[cfg(feature = "federated")]
+fn build_federated_source_sink_plan(
+    after: Option<runtime::Duration>,
+) -> Result<FederationPlan, BuilderError> {
+    let mut env_builder = EnvBuilder::new();
+    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let source = builder.add_child_federate(federated_source_reactor(), "source", ())?;
+    let sink = builder.add_child_federate(federated_sink_reactor(), "sink", ())?;
+    builder.connect_port(source, sink, after, false)?;
+    builder.finish()?;
+
+    let parts = env_builder.into_runtime_parts(&runtime::Config::default())?;
+    Ok(parts.federation_plan)
+}
+
+#[cfg(feature = "federated")]
+#[test]
+fn test_add_child_federate_sets_enclave_compatible_placement() {
+    let mut env_builder = EnvBuilder::new();
+    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let _source = builder
+        .add_child_federate(federated_source_reactor(), "source", ())
+        .unwrap();
+    let main = builder.finish().unwrap();
+    let source = env_builder.find_reactor_by_fqn("main/source").unwrap();
+
+    assert!(!env_builder.reactor_builders[main].is_enclave);
+    let source = &env_builder.reactor_builders[source];
+    assert!(source.is_enclave);
+    assert!(matches!(source.placement(), ReactorPlacement::Federate(spec) if spec.id == "source"));
+}
+
+#[cfg(feature = "federated")]
+#[test]
+fn test_federated_source_sink_topology_plan() {
+    let plan = build_federated_source_sink_plan(None).unwrap();
+
+    assert_eq!(plan.federates.len(), 2);
+    assert_eq!(
+        plan.federates
+            .iter()
+            .map(|federate| federate.id.as_str())
+            .collect_vec(),
+        vec!["source", "sink"]
+    );
+    assert_eq!(plan.edges.len(), 1);
+    assert_eq!(plan.endpoints.len(), 1);
+    let edge = &plan.edges[0];
+    assert_eq!(edge.source_federate, "source");
+    assert_eq!(edge.target_federate, "sink");
+    assert_eq!(edge.delay, None);
+    assert_eq!(plan.endpoints[0].id, edge.endpoint);
+    assert_eq!(plan.endpoints[0].source_port_fqn, "main/source/out");
+    assert_eq!(plan.endpoints[0].target_port_fqn, "main/sink/in");
+}
+
+#[cfg(feature = "federated")]
+#[test]
+fn test_delayed_cross_federate_connection_records_delay() {
+    let delay = runtime::Duration::milliseconds(10);
+    let plan = build_federated_source_sink_plan(Some(delay)).unwrap();
+
+    assert_eq!(plan.edges.len(), 1);
+    assert_eq!(plan.edges[0].delay, Some(delay));
+}
+
+#[cfg(feature = "federated")]
+#[test]
+fn test_zero_delay_distributed_cycle_is_rejected() {
+    let mut env_builder = EnvBuilder::new();
+    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let a = builder.add_child_federate(federated_io_reactor(), "a", ());
+    let b = builder.add_child_federate(federated_io_reactor(), "b", ());
+    let a = a.unwrap();
+    let b = b.unwrap();
+    builder
+        .connect_port(a.output, b.input, None, false)
+        .unwrap();
+    builder
+        .connect_port(b.output, a.input, None, false)
+        .unwrap();
+    builder.finish().unwrap();
+
+    assert!(matches!(
+        env_builder
+            .into_runtime_parts(&runtime::Config::default())
+            .expect_err("zero-delay distributed cycle should be rejected"),
+        BuilderError::UnsupportedFederationTopology { what }
+            if what.contains("distributed zero-delay cycle")
+    ));
+}
+
 pub struct PingPong {
     pub env_builder: EnvBuilder,
     pub main: BuilderReactorKey,

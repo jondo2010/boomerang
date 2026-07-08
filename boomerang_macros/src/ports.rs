@@ -273,9 +273,9 @@ impl ToTokens for Model {
                      parent: Option<::boomerang::builder::BuilderReactorKey>,
                      scope_mode: Option<::boomerang::builder::BuilderModeKey>,
                      bank_info: Option<::boomerang::runtime::BankInfo>,
-                     is_enclave: bool,
+                     placement: ::boomerang::builder::ReactorPlacement,
                      env: &mut ::boomerang::builder::EnvBuilder| {
-                        let mut builder = env.add_reactor(name, parent, bank_info, state, is_enclave);
+                        let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
                         if let Some(scope_mode) = scope_mode {
                             builder.set_scope_mode(scope_mode)?;
                         }

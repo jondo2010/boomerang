@@ -20,6 +20,9 @@ tracy = ["tracing-tracy/enable"]
 ## Support for recording and replaying events
 replay = ["dep:serde"]
 
+## Builder metadata for static federated enclave topologies
+federated = []
+
 
 [dependencies]
 document-features = { workspace = true }

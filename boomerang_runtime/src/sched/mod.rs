@@ -194,7 +194,7 @@ impl Scheduler {
 
         let store = Store::new(env, contexts, &graph);
         let has_modes = !graph.modes.is_empty();
-        let events = EventManager::new(reaction_set_limits, &graph, &store);
+        let events = EventManager::new(reaction_set_limits, &graph);
 
         let upstream_enclaves = upstream_enclaves
             .into_iter()

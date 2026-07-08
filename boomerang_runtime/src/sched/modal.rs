@@ -4,7 +4,7 @@ use tinymap::Key as _;
 
 use super::queue::EventQueue;
 use crate::{
-    event::ScheduledActionValue, store::Store, Duration, Level, ModeTransitionRequest,
+    event::ScheduledActionValue, store::Store, Duration, Level, ModeKey, ModeTransitionRequest,
     ReactionGraph, ReactionKey, ReactionSet, ReactionSetLimits, ReactorKey, ScopeKey, Tag,
     TransitionKind,
 };
@@ -152,6 +152,8 @@ pub(super) struct EventManager {
     scope_ever_active: tinymap::TinySecondaryMap<ScopeKey, bool>,
     /// Whether scope-local startup reactions have already fired for each scope.
     scope_startup_fired: tinymap::TinySecondaryMap<ScopeKey, bool>,
+    /// Current mode per reactor for modal scheduling decisions.
+    reactor_modes: tinymap::TinySecondaryMap<ReactorKey, Option<ModeKey>>,
     /// Local clock state for each static scope.
     scope_clocks: tinymap::TinySecondaryMap<ScopeKey, ScopeClockState>,
     /// Per-scope queues for events scheduled in scope-local time.
@@ -170,17 +172,21 @@ impl EventManager {
     pub(super) fn new(
         reaction_set_limits: ReactionSetLimits,
         reaction_graph: &ReactionGraph,
-        store: &Pin<Box<Store>>,
     ) -> Self {
         let root = EventQueue::new(reaction_set_limits.clone());
         let mut scope_active = tinymap::TinySecondaryMap::new();
         let mut scope_ever_active = tinymap::TinySecondaryMap::new();
         let mut scope_startup_fired = tinymap::TinySecondaryMap::new();
+        let reactor_modes = reaction_graph
+            .reactor_initial_modes
+            .iter()
+            .map(|(key, mode)| (key, *mode))
+            .collect();
         let mut scope_clocks = tinymap::TinySecondaryMap::new();
         let mut scope_queues = tinymap::TinySecondaryMap::new();
 
         for scope in reaction_graph.scopes.keys() {
-            let active = store.scope_is_active(reaction_graph, scope);
+            let active = Self::scope_is_active_with_modes(reaction_graph, &reactor_modes, scope);
             scope_active.insert(scope, active);
             scope_ever_active.insert(scope, active);
             scope_startup_fired.insert(scope, active);
@@ -193,6 +199,7 @@ impl EventManager {
             scope_active,
             scope_ever_active,
             scope_startup_fired,
+            reactor_modes,
             scope_clocks,
             scope_queues,
             frontier: BinaryHeap::new(),
@@ -351,10 +358,10 @@ impl EventManager {
 
         if matches!(request.transition, TransitionKind::Reset) {
             self.reset_scope_subtree(target_scope, store, reaction_graph);
-            store.reset_child_modes_in_scope(reaction_graph, target_scope);
+            self.reset_child_modes_in_scope(reaction_graph, target_scope);
         }
 
-        store.set_mode(reactor_key, request.target);
+        self.set_mode(reactor_key, request.target);
         let startup_scopes = self.sync_active_scopes(
             store,
             reaction_graph,
@@ -416,7 +423,7 @@ impl EventManager {
         let mut startup_scopes = Vec::new();
 
         for scope in reaction_graph.scopes.keys() {
-            let new_active = store.scope_is_active(reaction_graph, scope);
+            let new_active = self.scope_is_active(reaction_graph, scope);
             let reset = matches!(transition, TransitionKind::Reset)
                 && Self::scope_is_descendant_or_self(reaction_graph, scope, reset_root);
 
@@ -611,6 +618,71 @@ impl EventManager {
 
     fn scope_uses_global_time(reaction_graph: &ReactionGraph, scope: ScopeKey) -> bool {
         reaction_graph.scopes[scope].parent.is_none()
+    }
+
+    fn current_mode(&self, reactor_key: ReactorKey) -> Option<ModeKey> {
+        self.reactor_modes.get(reactor_key).copied().flatten()
+    }
+
+    fn set_mode(&mut self, reactor_key: ReactorKey, mode: ModeKey) {
+        self.reactor_modes.insert(reactor_key, Some(mode));
+    }
+
+    fn reset_child_modes_in_scope(&mut self, reaction_graph: &ReactionGraph, scope: ScopeKey) {
+        let reactor_modes = reaction_graph
+            .reactor_root_scopes
+            .iter()
+            .filter(|(_, &root_scope)| {
+                root_scope != scope
+                    && Self::scope_is_descendant_or_self(reaction_graph, root_scope, scope)
+            })
+            .map(|(reactor_key, _)| {
+                (
+                    reactor_key,
+                    reaction_graph.reactor_initial_modes[reactor_key],
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for (reactor_key, initial_mode) in reactor_modes {
+            self.reactor_modes.insert(reactor_key, initial_mode);
+        }
+    }
+
+    fn scope_is_active(&self, reaction_graph: &ReactionGraph, mut scope_key: ScopeKey) -> bool {
+        loop {
+            let scope = &reaction_graph.scopes[scope_key];
+            if let Some(mode_key) = scope.mode {
+                if self.current_mode(scope.reactor) != Some(mode_key) {
+                    return false;
+                }
+            }
+
+            let Some(parent) = scope.parent else {
+                return true;
+            };
+            scope_key = parent;
+        }
+    }
+
+    fn scope_is_active_with_modes(
+        reaction_graph: &ReactionGraph,
+        reactor_modes: &tinymap::TinySecondaryMap<ReactorKey, Option<ModeKey>>,
+        mut scope_key: ScopeKey,
+    ) -> bool {
+        loop {
+            let scope = &reaction_graph.scopes[scope_key];
+            if let Some(mode_key) = scope.mode {
+                if reactor_modes.get(scope.reactor).copied().flatten() != Some(mode_key) {
+                    return false;
+                }
+            }
+
+            let Some(parent) = scope.parent else {
+                return true;
+            };
+            scope_key = parent;
+        }
     }
 
     pub(super) fn scope_ever_active(&self, scope: ScopeKey) -> bool {

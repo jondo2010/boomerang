@@ -1,12 +1,16 @@
-//! Runtime data storage
+//! Runtime execution storage.
+//!
+//! `ReactionGraph` owns static topology and lookup indexes. `Store` owns the
+//! pinned runtime objects used while executing reactions, plus per-reaction
+//! caches into those objects. Scheduler state such as queues, clocks, and the
+//! current modal state should live outside this module.
 
 use std::{pin::Pin, ptr::NonNull};
 
 use crate::{
     refs::{Refs, RefsMut},
-    ActionKey, BaseAction, BasePort, BaseReactor, CommonContext, Context, Deadline, ModeKey,
-    PortKey, Reaction, ReactionKey, ReactionRefs, ReactorData, ReactorKey, ScopeKey, Tag,
-    TriggerRes,
+    ActionKey, BaseAction, BasePort, BaseReactor, CommonContext, Context, Deadline, PortKey,
+    Reaction, ReactionKey, ReactionRefs, ReactorData, ReactorKey, Tag, TriggerRes,
 };
 
 use super::{Env, ReactionGraph};
@@ -99,6 +103,9 @@ impl Default for ReactionTriggerCtxPtrs {
 
 unsafe impl Send for ReactionTriggerCtxPtrs {}
 
+/// Pinned runtime objects addressed by reaction trigger caches.
+///
+/// These are execution objects, not static graph indexes or scheduler state.
 #[derive(Debug)]
 struct Inner {
     contexts: tinymap::TinySecondaryMap<ReactionKey, Context>,
@@ -108,16 +115,15 @@ struct Inner {
     ports: tinymap::TinyMap<PortKey, Box<dyn BasePort>>,
 }
 
+/// Pinned runtime object store plus per-reaction trigger caches.
 #[derive(Debug)]
 #[pin_project::pin_project]
 pub struct Store {
     #[pin]
     inner: Inner,
-    /// Internal caches of `ReactionTriggerCtxPtrs`
+    /// Per-reaction cached pointers into `inner` for building `ReactionTriggerCtx`.
     #[pin]
     caches: tinymap::TinySecondaryMap<ReactionKey, ReactionTriggerCtxPtrs>,
-    /// Current mode per reactor
-    reactor_modes: tinymap::TinySecondaryMap<ReactorKey, Option<ModeKey>>,
 }
 
 impl Store {
@@ -145,11 +151,6 @@ impl Store {
                 ports: env.ports,
             },
             caches: ptrs,
-            reactor_modes: reaction_graph
-                .reactor_initial_modes
-                .iter()
-                .map(|(key, mode)| (key, *mode))
-                .collect(),
         };
 
         // Pin the Box first, then use projection for safe access
@@ -338,51 +339,6 @@ impl Store {
             .for_each(|p| p.cleanup());
     }
 
-    pub fn current_mode(&self, reactor_key: ReactorKey) -> Option<ModeKey> {
-        self.reactor_modes.get(reactor_key).copied().flatten()
-    }
-
-    pub fn scope_is_active(&self, reaction_graph: &ReactionGraph, mut scope_key: ScopeKey) -> bool {
-        loop {
-            let scope = &reaction_graph.scopes[scope_key];
-            if let Some(mode_key) = scope.mode {
-                if self.current_mode(scope.reactor) != Some(mode_key) {
-                    return false;
-                }
-            }
-
-            let Some(parent) = scope.parent else {
-                return true;
-            };
-            scope_key = parent;
-        }
-    }
-
-    pub fn set_mode(&mut self, reactor_key: ReactorKey, mode: ModeKey) {
-        self.reactor_modes.insert(reactor_key, Some(mode));
-    }
-
-    pub fn reset_child_modes_in_scope(&mut self, reaction_graph: &ReactionGraph, scope: ScopeKey) {
-        let reactor_modes = reaction_graph
-            .reactor_root_scopes
-            .iter()
-            .filter(|(_, &root_scope)| {
-                root_scope != scope
-                    && scope_is_descendant_or_self(reaction_graph, root_scope, scope)
-            })
-            .map(|(reactor_key, _)| {
-                (
-                    reactor_key,
-                    reaction_graph.reactor_initial_modes[reactor_key],
-                )
-            })
-            .collect::<Vec<_>>();
-
-        for (reactor_key, initial_mode) in reactor_modes {
-            self.reactor_modes.insert(reactor_key, initial_mode);
-        }
-    }
-
     /// Turn this `Store` back into the `Env` it was built from.
     pub fn into_env(self: Pin<Box<Self>>) -> Env {
         // SAFETY: We are the only owner of the `Store` and we are consuming it, and immediately
@@ -394,23 +350,6 @@ impl Store {
             actions: store.inner.actions,
             ports: store.inner.ports,
         }
-    }
-}
-
-fn scope_is_descendant_or_self(
-    reaction_graph: &ReactionGraph,
-    mut scope_key: ScopeKey,
-    ancestor: ScopeKey,
-) -> bool {
-    loop {
-        if scope_key == ancestor {
-            return true;
-        }
-
-        let Some(parent) = reaction_graph.scopes[scope_key].parent else {
-            return false;
-        };
-        scope_key = parent;
     }
 }
 

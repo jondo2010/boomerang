@@ -3,7 +3,7 @@ use boomerang::prelude::*;
 #[derive(Debug, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct Count3State {
-    sequence: Vec<&'static str>,
+    sequence: Vec<String>,
 }
 
 #[reactor(state = Count3State)]
@@ -26,7 +26,7 @@ fn ModalCount3Modes() -> impl Reactor {
     mode! { initial one {
         reaction! {
             (pulse) -> two, advance {
-                state.sequence.push("one");
+                state.sequence.push("one".to_owned());
                 two.set(ctx);
                 ctx.schedule_action(&mut advance, (), None);
             }
@@ -36,7 +36,7 @@ fn ModalCount3Modes() -> impl Reactor {
     mode! { two {
         reaction! {
             (pulse) -> three, advance {
-                state.sequence.push("two");
+                state.sequence.push("two".to_owned());
                 three.set(ctx);
                 ctx.schedule_action(&mut advance, (), None);
             }
@@ -46,7 +46,7 @@ fn ModalCount3Modes() -> impl Reactor {
     mode! { three {
         reaction! {
             (pulse) -> one, advance {
-                state.sequence.push("three");
+                state.sequence.push("three".to_owned());
                 if state.sequence.len() == 6 {
                     ctx.schedule_shutdown(None);
                 } else {

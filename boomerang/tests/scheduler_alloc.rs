@@ -122,6 +122,10 @@ fn stop_counting_allocations() -> usize {
 }
 
 #[test]
+#[cfg_attr(
+    feature = "parallel",
+    ignore = "the parallel scheduler path uses Rayon/thread-pool machinery that allocates"
+)]
 fn steady_state_root_action_scheduler_next_does_not_allocate() {
     let mut scheduler = build_scheduler(RootActionLoop(), RootActionLoopState::default());
     scheduler.startup();

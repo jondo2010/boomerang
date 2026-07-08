@@ -6,6 +6,7 @@ use crate::{
 
 pub trait Reactor<State: runtime::ReactorData = ()>: Sized {
     type Ports;
+    #[allow(clippy::too_many_arguments)]
     fn build(
         &self,
         name: &str,

@@ -103,7 +103,7 @@ impl ModeFilter {
         let Some(mode) = current else {
             return false;
         };
-        self.modes.iter().any(|m| *m == mode)
+        self.modes.contains(&mode)
     }
 
     pub fn modes(&self) -> &[ModeKey] {
@@ -504,6 +504,7 @@ impl Enclave {
         mode_key
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_reaction(
         &mut self,
         reaction: Reaction,

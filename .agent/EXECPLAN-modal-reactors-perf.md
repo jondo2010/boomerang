@@ -21,9 +21,16 @@ The observable result is not a new user-facing API. The observable result is tha
 - [x] (2026-07-07 10:10Z) Removed the per-transition second deduplication `Vec` in `Scheduler::process_tag` by collapsing last-wins mode transition requests directly into the reusable `transition_buffer`.
 - [x] (2026-07-07 10:10Z) Used `EventManager`'s cached active scope state for current-level modal reaction gating and filtered inactive modal port-trigger reactions before inserting them into later reaction levels.
 - [x] (2026-07-07 10:20Z) Added `ModalScheduleIndex` to `ReactionGraph`, populated it during `EnvBuilder::into_runtime_parts`, and used it for reset-subtree clearing, reset timer startup scheduling, reset reactions, startup reaction lookup, and shutdown scheduling.
-- [ ] Split hot active-scope state from cold per-scope event queues. Partial progress: current-level reaction gating now uses cached active flags, but `ScopeTimeState` still stores hot flags and cold queues together.
-- [ ] Remove or bypass redundant per-reaction `ModeFilter` checks from the hot path.
-- [ ] Re-run functional tests and benchmarks, record results, and update this plan with outcomes.
+- [x] (2026-07-07 13:23Z) Split hot active-scope state from cold per-scope event queues by replacing `ScopeTimeState` with separate active/startup flag maps, `ScopeClockState`, and per-scope `EventQueue` storage in `EventManager`.
+- [x] (2026-07-07 13:45Z) Ran `modal_scheduler_perf`, `modal_modes`, and two `ping_pong` passes after the state-layout split. Modal fanout improved, transition churn stayed within noise, reset-subtree moved backward by about 2-3%, and `ping_pong` reported a guard regression with noisy repeat data.
+- [x] (2026-07-07 13:58Z) Profiled the regressing benchmark areas with pprof and macOS `sample`. The modal reset hot path is dominated by `EventQueue::push_event_inner` zeroing dense `ReactionSet` storage, while `ping_pong` stays on the non-modal root event queue path and does not show hot modal scope-state frames.
+- [x] (2026-07-07 14:07Z) Implemented the first diagnosis solution: pooled `ReactionSet`s are now cleared once when returned to a pool, and `EventQueue::next_reaction_set` trusts that pool invariant instead of clearing on checkout.
+- [x] (2026-07-07 14:07Z) Re-ran focused validation and benchmarks after the single-clear pooling change. Runtime tests, modal tests, modal scheduler benchmark smoke tests, `reset_subtree`, and `ping_pong` passed; `ping_pong` improved by about 8-14% and the reset-subtree regression was no longer reported.
+- [x] (2026-07-07 14:08Z) Re-ran final hygiene after updating this ExecPlan; `cargo fmt --check` and `git diff --check` passed, with only the existing stable-rustfmt warnings.
+- [x] (2026-07-07 14:32Z) Wrapped the current state-layout and `ReactionSet` pooling milestone as accepted for focused validation. The milestone is not the whole ExecPlan closeout; full workspace tests and the complete benchmark set remain reserved for final validation after remaining scheduler cleanup.
+- [x] (2026-07-07 14:46Z) Trialed converting `EventManager`'s hot boolean scope-state maps from `TinySecondaryMap<ScopeKey, bool>` to `tinymap::KeySet<ScopeKey>`, rejected the scheduler conversion after broad Criterion regressions, and kept only the tested `KeySet::remove` primitive.
+- [x] (2026-07-07 15:12Z) Bypassed redundant per-reaction `ModeFilter` scans in the scheduler hot path by relying on static reaction scope activity, while keeping a debug-only invariant that existing mode filters match the static mode scope.
+- [x] (2026-07-08 11:50Z) Re-ran the PR-readiness validation set after the scheduler module split: `cargo fmt --check`, `cargo clippy --workspace --all-targets`, `cargo test`, `mdbook build book`, `cargo test -p boomerang --bench modal_modes`, `cargo bench -p boomerang --bench modal_scheduler_perf`, `cargo bench -p boomerang --bench modal_modes`, and `git diff --check` all passed. Criterion reported improvements or no detected change across the measured modal scheduler groups.
 
 ## Surprises & Discoveries
 
@@ -56,6 +63,33 @@ The observable result is not a new user-facing API. The observable result is tha
 
 - Observation: The flattened modal schedule index moves reset-subtree scaling and transition churn, while fanout stays at the improved filtered level.
   Evidence: After adding `ModalScheduleIndex`, `cargo bench -p boomerang --bench modal_scheduler_perf` improved `reset_subtree/medium` from 35.031 ms to 30.304 ms and `reset_subtree/large` from 243.94 ms to 221.90 ms relative to the post-filtering run. It also improved `transition_churn/reset/100_000` from 28.087 ms to 23.560 ms.
+
+- Observation: The state-layout split can be made without changing modal scheduler behavior.
+  Evidence: After replacing the combined `ScopeTimeState` with separate `scope_active`, `scope_ever_active`, `scope_startup_fired`, `scope_clocks`, and `scope_queues` maps, `cargo test -p boomerang_runtime`, `cargo test -p boomerang modal`, and `cargo test -p boomerang --bench modal_scheduler_perf` all passed.
+
+- Observation: The state-layout split improves inactive fanout cases but is not an unqualified performance win yet.
+  Evidence: `cargo bench -p boomerang --bench modal_scheduler_perf` on 2026-07-07 13:45Z reported improvements for `inactive_port_fanout/modes/32`, `/256`, and `/1024`, with `/1024` improving by about 18.69% versus local Criterion history. The same run reported regressions for `reset_subtree/medium/64` and `/large/512` of about 2.81% and 2.23%, respectively.
+
+- Observation: The non-modal guard benchmark is currently noisy and cannot be used to claim clean progress after the state-layout split.
+  Evidence: The first `cargo bench -p boomerang --bench ping_pong` pass on 2026-07-07 13:45Z reported regressions of about 4.94%, 5.32%, and 4.25% for sizes 100, 10,000, and 1,000,000. A repeat pass reported the 100 case as within noise, but the 10,000 case had four high-severe outliers and the 1,000,000 case still regressed by about 5.48%. A process check showed no active Cargo or rustc benchmark process and only idle CodeStory repair processes.
+
+- Observation: The reset-subtree profile points at dense reaction-set clearing/initialization, not the new active flag maps.
+  Evidence: `/tmp/modal_reset_large.sample.txt` captured `reset_subtree/large/512` with 2,869 samples under `EventQueue::push_event_inner`, including 2,531 samples in `_platform_memset` and 332 in `__bzero`. State-split-specific frames were small by comparison: `local_to_global` had 20 samples, `EventManager::refresh_frontier` 18, `EventManager::peek_frontier_tag` 7, and `TinySecondaryMap::insert` 6. This matches `ReactionSet::new` and `ReactionSet::clear`, which allocate or clear `tinymap::KeySet` storage for every level at full reaction capacity.
+
+- Observation: The `ping_pong` profile does not show the modal state split as a direct hot path.
+  Evidence: `/tmp/ping_pong_1m.sample.txt` captured `ping_pong/1_000_000` with 1,857 samples in `Scheduler::process_tag`, 488 in `Scheduler::next`, 292 in `EventQueue::push_event_inner`, 183 in `tracing::span::Span::record_all`, and 61 in `OffsetBucket::insert`. The profile did not show hot `scope_active`, `scope_clocks`, or `peek_frontier_tag` frames, consistent with the `!has_local_scopes` fast path still using only the root event queue.
+
+- Observation: The redundant `ReactionSet` clear was real and affected the non-modal guard path as well as modal reset noise.
+  Evidence: After changing pooled `ReactionSet`s to clear only on return, `cargo bench -p boomerang --bench ping_pong` reported `ping_pong/100` at 14.259 us, `ping_pong/10_000` at 1.1818 ms, and `ping_pong/1_000_000` at 116.74 ms, with Criterion reporting improvements of about 7.79%, 13.89%, and 13.32%. Focused `reset_subtree` rerun reported no detected change for small, medium, or large, and the large case tightened to 229.06 ms rather than repeating the earlier noisy 244.16 ms profile-pass result.
+
+- Observation: The three hot scope-state boolean maps can be represented more compactly as bitsets.
+  Evidence: `boomerang_tinymap::TinySecondaryMap<K, V>` stores `Vec<Option<V>>` plus a present-value count, while `boomerang_tinymap::KeySet<K>` stores a `FixedBitSet`. The current `EventManager` uses `TinySecondaryMap<ScopeKey, bool>` for `scope_active`, `scope_ever_active`, and `scope_startup_fired`; these maps are logically sets of scopes where the flag is true. The existing `KeySet` API supports insertion and indexing, but it does not yet expose a single-key removal or `set(key, bool)` operation needed for `scope_active` deactivation.
+
+- Observation: Directly replacing the hot scope-state boolean maps with `KeySet<ScopeKey>` is smaller but slower for current scheduler access patterns.
+  Evidence: After adding `KeySet::remove`, converting `EventManager` flags to `KeySet`, and passing focused functional checks, `cargo bench -p boomerang --bench modal_scheduler_perf` on 2026-07-07 14:46Z reported regressions in every `transition_churn` case, including about 7.69% slower for `transition_churn/reset/100_000` and about 7.92% slower for `transition_churn/history/100_000`. The same run reported inactive fanout regressions of about 19.76% for 256 modes and about 24.57% for 1024 modes. `reset_subtree` was neutral, so the regression is concentrated in frequent flag reads and writes rather than reset clearing.
+
+- Observation: Runtime `ModeFilter` checks are redundant for the current builder API.
+  Evidence: `ReactionBuilder::in_mode_scope` is the only code path that populates `enabled_modes`, and it also records `scope_mode`. Builder lowering turns `scope_mode` into `ReactionGraph::reaction_scopes`, and the scheduler already gates reactions on `EventManager::scope_active(scope_key)`. After bypassing the `Store::current_mode` lookup and `ModeFilter::allows` vector scan, `cargo test -p boomerang_runtime`, `cargo test -p boomerang modal`, and `cargo test -p boomerang --bench modal_scheduler_perf` passed. `cargo bench -p boomerang --bench modal_scheduler_perf` then reported improvements in all transition-churn cases and large inactive-fanout cases.
 
 ## Decision Log
 
@@ -95,9 +129,29 @@ The observable result is not a new user-facing API. The observable result is tha
   Rationale: The index is static graph metadata: scope descendants, logical actions in a subtree, timer startup actions in a subtree, reset reactions in a subtree, startup reactions by scope, and shutdown reactions do not depend on runtime execution. Building it once keeps transition code on dense slices and avoids per-transition scans and collects.
   Date/Author: 2026-07-07 / Codex.
 
+- Decision: Split `EventManager` scope state into separate maps rather than introduce a larger abstraction around scope records.
+  Rationale: Scheduler hot-path checks only need active and ever-active flags, while event queues are larger cold structures. Separate `TinySecondaryMap` storage keeps those hot checks to direct indexed loads and preserves the existing time conversion helper methods on a small `ScopeClockState`.
+  Date/Author: 2026-07-07 / Codex.
+
+- Decision: Maintain a clear-on-return invariant for pooled `ReactionSet`s.
+  Rationale: `ReactionSet::clear` walks dense per-level bitsets. Clearing again when a set is checked out from the pool repeats the same memory zeroing before any new reactions are inserted. Centralizing pool returns through `EventQueue::recycle_reaction_set` keeps the invariant local and removes the redundant clear from both root and modal event queue paths.
+  Date/Author: 2026-07-07 / Codex.
+
+- Decision: Add a separate KeySet flag-map milestone before removing redundant `ModeFilter` checks.
+  Rationale: The `EventManager` state-layout milestone intentionally split hot flags from cold queue state, but using `TinySecondaryMap<ScopeKey, bool>` leaves those flags byte-and-option backed rather than bitset backed. Converting them to `KeySet<ScopeKey>` is small, independently testable, and directly aligned with the state-layout goal. It should be measured before changing the mode-filter path so any benchmark movement can be attributed cleanly.
+  Date/Author: 2026-07-07 / Codex.
+
+- Decision: Keep `KeySet::remove`, but do not use `KeySet<ScopeKey>` for `EventManager` hot flags in this implementation.
+  Rationale: The direct conversion preserves behavior and reduces the conceptual shape of the data, but the relevant modal benchmarks regressed broadly. `FixedBitSet` indexing is not a win for this hot path as currently used, and memory compression is not worth slowing transition churn or inactive fanout. Keeping the new primitive is low risk and useful for future set-like callers; reverting the scheduler fields keeps the measured faster layout.
+  Date/Author: 2026-07-07 / Codex.
+
+- Decision: Bypass `ModeFilter` in release scheduler reaction gating, but keep the graph field and a debug-only invariant check.
+  Rationale: Removing the runtime graph field would be a wider compatibility and serialization change. The scheduler hot path only needs to know whether the reaction's static scope is active, because the only current source of a mode filter is the same mode scope. A `debug_assert!` preserves the assumption during development without paying `Store::current_mode` and vector scan costs in optimized builds.
+  Date/Author: 2026-07-07 / Codex.
+
 ## Outcomes & Retrospective
 
-The first implementation milestone is complete: benchmark coverage exists for transition churn, inactive modal fanout, and reset-subtree scaling, root/global scheduled action events no longer allocate a per-event metadata vector, and a steady-state non-modal root action loop now has a passing zero-allocation guard after warmup. The allocation guard also exposed and drove a no-allocation pruning change in `ActionStore`. A second scheduler hot-path milestone is complete: inactive modal port fanout is filtered before insertion, current-level modal gating uses cached active flags, and transition requests are deduplicated in the reusable buffer. A third milestone is complete: `ReactionGraph` now carries a flattened modal schedule index used by reset, startup, and shutdown scheduling paths. Remaining work is the deeper state-layout and redundant mode-filter cleanup.
+The first implementation milestone is complete: benchmark coverage exists for transition churn, inactive modal fanout, and reset-subtree scaling, root/global scheduled action events no longer allocate a per-event metadata vector, and a steady-state non-modal root action loop now has a passing zero-allocation guard after warmup. The allocation guard also exposed and drove a no-allocation pruning change in `ActionStore`. A second scheduler hot-path milestone is complete: inactive modal port fanout is filtered before insertion, current-level modal gating uses cached active flags, and transition requests are deduplicated in the reusable buffer. A third milestone is complete: `ReactionGraph` now carries a flattened modal schedule index used by reset, startup, and shutdown scheduling paths. A fourth implementation milestone is now accepted for focused validation: `EventManager` no longer stores active flags, clock fields, and per-scope queues in one combined `ScopeTimeState`, and pooled `ReactionSet`s now clear only on return. The profiling diagnosis showed that dense reaction-set clearing was masking the state-layout result; after the single-clear fix, `ping_pong` improved materially and focused `reset_subtree` no longer reports the earlier regression. The KeySet flag-map trial is complete but rejected for scheduler storage: the direct bitset conversion regressed transition churn and inactive fanout, so `EventManager` remains on `TinySecondaryMap<ScopeKey, bool>` while `KeySet::remove` stays as a tested utility. The `ModeFilter` hot-path cleanup is complete: optimized scheduler gating now relies on active static reaction scope and leaves the old filter only as debug-checked graph metadata. Before closing the full ExecPlan, run a complete final validation and benchmark pass.
 
 ## Context and Orientation
 
@@ -171,11 +225,27 @@ Sixth, split hot active-state data from cold queue data. `ScopeTimeState` curren
 
 `ScopeClockState` should contain activation and suspended local-time tags plus frontier epoch. The exact decomposition can vary, but `Scheduler::process_tag` must be able to ask whether a reaction scope is active with one or two indexed loads and no parent walk through `Store::scope_is_active`.
 
-Seventh, filter modal reactions before downstream port triggers are inserted into future levels. Add a helper used by `Scheduler::process_tag`, such as `reaction_is_enabled_at_current_tag(reaction_key, terminal)`, that uses cached active-scope state and shutdown activation history. Use this helper both when filtering the current level and when extending `next_levels` from set ports. This ensures inactive modal reactions are not inserted into `ReactionSet` only to be skipped later.
+Seventh, trial compression of the hot scope boolean maps to bitsets. The state-layout split has already separated `scope_active`, `scope_ever_active`, and `scope_startup_fired` from cold queue state, but these fields still use `TinySecondaryMap<ScopeKey, bool>`. `TinySecondaryMap` is a sparse secondary map backed by `Vec<Option<V>>`; this is appropriate when some keys are absent or when values are larger than a flag. Here the fields are semantically sets of scopes for which a flag is true. `boomerang_tinymap::KeySet<ScopeKey>` is backed by `FixedBitSet` and is designed for this shape, but it first needs a single-key clear or set operation.
 
-Eighth, remove or bypass redundant mode-filter checks. Inspect how `ReactionBuilder::enabled_modes`, `ReactionGraph::reaction_modes`, and runtime `ModeFilter` are used. If `enabled_modes` is only populated by `in_mode_scope`, then the reaction's scope already determines whether it is active. In that case, remove `ModeFilter` from the hot path and possibly from `ReactionGraph`. If public or macro code still creates mode filters independently, keep the data structure but precompute a cheap per-reaction predicate that does not scan a `Vec<ModeKey>` every time.
+Add a method to `boomerang_tinymap/src/key_set/mod.rs`:
 
-Ninth, avoid per-tag transition dedup allocation. `Scheduler::process_tag` currently stores transition requests in `transition_buffer`, then creates a second `Vec` to collapse to last-wins per reactor. Instead, collapse into the existing reusable buffer as requests are observed: when a reaction schedules a mode transition, search the current buffer for that reactor and replace the request if found, otherwise push. This keeps last-wins behavior and removes the second allocation.
+    pub fn remove(&mut self, key: K) {
+        self.data.set(key.index(), false);
+    }
+
+or, if the implementation reads better at call sites:
+
+    pub fn set(&mut self, key: K, value: bool) {
+        self.data.set(key.index(), value);
+    }
+
+Add focused `KeySet` unit tests for clearing one key without disturbing another. Then change `EventManager` in `boomerang_runtime/src/sched.rs` so `scope_active`, `scope_ever_active`, and `scope_startup_fired` are `tinymap::KeySet<ScopeKey>`. Initialization should insert a scope only when its initial flag is true. Reads such as `self.scope_active[scope]` can stay as indexing operations because `KeySet` already implements `Index<K, Output = bool>`. Writes that set a flag true should call `insert`; writes that set `scope_active` false should call `remove` or `set(scope, false)`. This trial is accepted only if focused scheduler tests still pass and `ping_pong`, `modal_modes`, and `modal_scheduler_perf` do not show a new meaningful regression. The trial on 2026-07-07 failed that performance bar, so keep `KeySet::remove` and leave `EventManager` on `TinySecondaryMap<ScopeKey, bool>` unless a future representation avoids the measured regressions.
+
+Eighth, filter modal reactions before downstream port triggers are inserted into future levels. Add a helper used by `Scheduler::process_tag`, such as `reaction_is_enabled_at_current_tag(reaction_key, terminal)`, that uses cached active-scope state and shutdown activation history. Use this helper both when filtering the current level and when extending `next_levels` from set ports. This ensures inactive modal reactions are not inserted into `ReactionSet` only to be skipped later.
+
+Ninth, remove or bypass redundant mode-filter checks. Inspect how `ReactionBuilder::enabled_modes`, `ReactionGraph::reaction_modes`, and runtime `ModeFilter` are used. If `enabled_modes` is only populated by `in_mode_scope`, then the reaction's scope already determines whether it is active. In that case, remove `ModeFilter` from the hot path and possibly from `ReactionGraph`. If public or macro code still creates mode filters independently, keep the data structure but precompute a cheap per-reaction predicate that does not scan a `Vec<ModeKey>` every time. The 2026-07-07 implementation kept `ReactionGraph::reaction_modes` for compatibility and debug data, but bypassed `ModeFilter` in release scheduler gating. `Scheduler::reaction_is_enabled_at_current_tag` now checks shutdown lifecycle history, active static reaction scope, and then returns true. A debug-only assertion verifies that any existing mode filter is exactly the static mode owning the reaction scope.
+
+Tenth, avoid per-tag transition dedup allocation. `Scheduler::process_tag` currently stores transition requests in `transition_buffer`, then creates a second `Vec` to collapse to last-wins per reactor. Instead, collapse into the existing reusable buffer as requests are observed: when a reaction schedules a mode transition, search the current buffer for that reactor and replace the request if found, otherwise push. This keeps last-wins behavior and removes the second allocation.
 
 Finally, validate behavior and performance. Semantic behavior must stay unchanged. Benchmark improvements should be recorded with before and after numbers. If any optimization worsens `ping_pong`, stop and record the regression in `Surprises & Discoveries` before proceeding.
 
@@ -206,6 +276,16 @@ After each scheduler optimization milestone, run the focused modal tests and ben
     cargo test -p boomerang_runtime
     cargo test -p boomerang --bench modal_scheduler_perf
 
+For the KeySet flag-map milestone, also run the tinymap unit tests because that milestone changes `boomerang_tinymap/src/key_set/mod.rs`:
+
+    cargo test -p boomerang_tinymap key_set
+
+Then run focused benchmarks to compare the bitset-backed flags against the current `TinySecondaryMap<ScopeKey, bool>` layout:
+
+    cargo bench -p boomerang --bench ping_pong
+    cargo bench -p boomerang --bench modal_modes
+    cargo bench -p boomerang --bench modal_scheduler_perf
+
 After all implementation work, run the broader validation:
 
     cargo test
@@ -228,6 +308,8 @@ Benchmark coverage is accepted when `cargo bench -p boomerang --bench modal_sche
 Allocation coverage is accepted when a steady-state non-modal root action chain can run repeated `Scheduler::next()` calls after warmup without additional heap allocations, or when a documented ignored diagnostic test explains why the assertion cannot be stable on this platform. The preferred acceptance is an ordinary passing test, not an ignored test.
 
 Performance is accepted when the new benchmark demonstrates that the optimized scheduler avoids the pathologies identified in this plan. Specifically, root/global action scheduling should not allocate per event, transition-heavy cases should not allocate temporary vectors per transition, inactive modal port fanout should avoid inserting known-inactive reactions into future levels, and `ping_pong` should remain within normal Criterion noise of the baseline captured before this plan's implementation.
+
+The KeySet flag-map trial is accepted for the tinymap utility when `boomerang_tinymap::KeySet` has a tested single-key clear or set operation. The scheduler storage conversion is accepted only if `EventManager` can store `scope_active`, `scope_ever_active`, and `scope_startup_fired` as `tinymap::KeySet<ScopeKey>` without regressing `ping_pong`, `modal_modes`, or `modal_scheduler_perf`. The 2026-07-07 direct conversion failed that performance acceptance and was reverted, so the accepted outcome is the utility method plus documented rejection of the scheduler conversion.
 
 ## Idempotence and Recovery
 
@@ -311,6 +393,126 @@ Post-index non-modal guard benchmark:
       ping_pong/10_000: 1.2311 ms median estimate, Criterion reported improvement versus previous local history.
       ping_pong/1_000_000: 122.82 ms median estimate, Criterion reported improvement versus previous local history.
 
+State-layout split validation:
+
+    2026-07-07 13:23Z after splitting `EventManager` state into hot flag maps, `ScopeClockState`, and per-scope `EventQueue` maps:
+      cargo test -p boomerang_runtime: passed, 17 unit tests and 2 doc tests.
+      cargo test -p boomerang modal: passed all modal-filtered integration tests.
+      cargo test -p boomerang --bench modal_scheduler_perf: passed all Criterion smoke scenarios in test mode.
+      cargo fmt --check: passed, with existing stable-rustfmt warnings about unstable wrap comment settings.
+      git diff --check: passed.
+
+State-layout split Criterion benchmark results:
+
+    2026-07-07 13:45Z after splitting `EventManager` state:
+      modal_scheduler_perf/transition_churn/reset/10_000: 2.1277 ms median estimate, about 1.03% faster than local Criterion history and within noise.
+      modal_scheduler_perf/transition_churn/history/10_000: 2.0433 ms median estimate, about 0.94% slower than local Criterion history and within noise.
+      modal_scheduler_perf/transition_churn/reset/100_000: 23.207 ms median estimate, about 2.15% faster than local Criterion history and within noise.
+      modal_scheduler_perf/transition_churn/history/100_000: 22.363 ms median estimate, about 2.10% faster than local Criterion history and within noise.
+      modal_scheduler_perf/inactive_port_fanout/1: 2.0896 ms median estimate, no detected change.
+      modal_scheduler_perf/inactive_port_fanout/32: 2.3767 ms median estimate, about 2.96% faster than local Criterion history.
+      modal_scheduler_perf/inactive_port_fanout/256: 2.6443 ms median estimate, about 5.05% faster than local Criterion history.
+      modal_scheduler_perf/inactive_port_fanout/1024: 1.4452 ms median estimate, about 18.69% faster than local Criterion history.
+      modal_scheduler_perf/reset_subtree/small: 3.1269 ms median estimate, no detected change.
+      modal_scheduler_perf/reset_subtree/medium: 31.270 ms median estimate, about 2.81% slower than local Criterion history.
+      modal_scheduler_perf/reset_subtree/large: 226.85 ms median estimate, about 2.23% slower than local Criterion history.
+
+    2026-07-07 13:45Z modal_modes guard:
+      modal_modes/inactive_modes/1: 1.8759 ms median estimate, within noise.
+      modal_modes/inactive_modes/32: 1.8845 ms median estimate, within noise.
+      modal_modes/inactive_modes/256: 2.1961 ms median estimate, no detected change.
+
+    2026-07-07 13:45Z ping_pong guard:
+      First pass:
+        ping_pong/100: 15.397 us median estimate, Criterion reported about 4.94% slower.
+        ping_pong/10_000: 1.2914 ms median estimate, Criterion reported about 5.32% slower.
+        ping_pong/1_000_000: 128.04 ms median estimate, Criterion reported about 4.25% slower.
+      Repeat pass:
+        ping_pong/100: 15.741 us median estimate, within noise.
+        ping_pong/10_000: 1.4488 ms median estimate, Criterion reported about 5.47% slower with four high-severe outliers.
+        ping_pong/1_000_000: 135.07 ms median estimate, Criterion reported about 5.48% slower.
+      Process check:
+        Read-only `ps` check found no active Cargo or rustc process and only idle CodeStory repair processes, so the non-modal regression should not be dismissed purely as background build contention.
+
+State-layout split profiling artifacts:
+
+    2026-07-07 13:58Z:
+      BOOMERANG_PROFILE=1 cargo bench -p boomerang --bench ping_pong -- ping_pong/1000000
+      result: pprof flamegraph written to `target/criterion/ping_pong/1000000/profile/flamegraph.svg`, with the visible hot frames under `Scheduler::next`, `FnRefsAdapter::trigger`, `Context::schedule_action`, `EventQueue::push_event`, and `OffsetBucket::insert`.
+
+      target/release/deps/modal_scheduler_perf-59cc9c35e8ca5347 --bench reset_subtree/large/512
+      sampled with macOS `sample` for 8 seconds after warmup.
+      report: `/tmp/modal_reset_large.sample.txt`.
+      top diagnosis: `EventQueue::push_event_inner` accounts for the largest sampled runtime, mostly `_platform_memset` and `__bzero`, which indicates dense `ReactionSet` storage clearing or initialization dominates the reset-subtree case.
+
+      target/release/deps/ping_pong-dd8178770d48a9af --bench ping_pong/1000000
+      sampled with macOS `sample` for 8 seconds after warmup.
+      report: `/tmp/ping_pong_1m.sample.txt`.
+      top diagnosis: the profile is rooted in the non-modal scheduler path. `Scheduler::process_tag`, `EventQueue::push_event_inner`, tracing span recording, action scheduling, and action-store insertion dominate; modal state split maps are not visible hot frames.
+
+Single-clear `ReactionSet` pooling results:
+
+    2026-07-07 14:07Z after changing `EventQueue` so pooled `ReactionSet`s are cleared on return rather than again on checkout:
+      cargo bench -p boomerang --bench modal_scheduler_perf -- reset_subtree
+      reset_subtree/small/1: 3.0684 ms median estimate, no detected change.
+      reset_subtree/medium/64: 31.503 ms median estimate, no detected change.
+      reset_subtree/large/512: 229.06 ms median estimate, no detected change. This is much tighter than the earlier noisy profile-pass result around 244.16 ms and does not repeat the reported reset-subtree regression.
+
+      cargo bench -p boomerang --bench ping_pong
+      ping_pong/100: 14.259 us median estimate, Criterion reported about 7.79% faster.
+      ping_pong/10_000: 1.1818 ms median estimate, Criterion reported about 13.89% faster.
+      ping_pong/1_000_000: 116.74 ms median estimate, Criterion reported about 13.32% faster.
+
+KeySet flag-map trial:
+
+    2026-07-07 14:46Z after adding `KeySet::remove` and temporarily converting `EventManager` scope flags to `tinymap::KeySet<ScopeKey>`:
+      cargo test -p boomerang_tinymap key_set: passed 9 tests, including `key_set::tests::test_remove`.
+      cargo test -p boomerang_runtime: passed 17 unit tests and 2 doc-tests, with 1 ignored doc-test.
+      cargo test -p boomerang modal: all modal-filtered integration tests passed.
+      cargo test -p boomerang --bench modal_scheduler_perf: all benchmark smoke cases reported Success.
+      cargo bench -p boomerang --bench ping_pong:
+        ping_pong/100: 15.333 us median estimate, Criterion reported about 4.89% slower.
+        ping_pong/10_000: 1.1810 ms median estimate, no detected change.
+        ping_pong/1_000_000: 117.38 ms median estimate, no detected change.
+      cargo bench -p boomerang --bench modal_modes:
+        inactive_modes/1: 1.8513 ms median estimate, change within noise threshold.
+        inactive_modes/32: 1.8651 ms median estimate, no detected change.
+        inactive_modes/256: 2.1919 ms median estimate, no detected change.
+      cargo bench -p boomerang --bench modal_scheduler_perf:
+        transition_churn/reset/10_000: 2.2434 ms median estimate, Criterion reported about 5.32% slower.
+        transition_churn/history/10_000: 2.1516 ms median estimate, Criterion reported about 6.14% slower.
+        transition_churn/reset/100_000: 24.890 ms median estimate, Criterion reported about 7.69% slower.
+        transition_churn/history/100_000: 23.941 ms median estimate, Criterion reported about 7.92% slower.
+        inactive_port_fanout/1: 2.3415 ms median estimate, Criterion reported about 7.52% slower.
+        inactive_port_fanout/32: 2.5293 ms median estimate, Criterion reported about 7.09% slower.
+        inactive_port_fanout/256: 3.1853 ms median estimate, Criterion reported about 19.76% slower.
+        inactive_port_fanout/1024: 1.7818 ms median estimate, Criterion reported about 24.57% slower.
+        reset_subtree/small: 3.1100 ms median estimate, no detected change.
+        reset_subtree/medium: 31.188 ms median estimate, no detected change.
+        reset_subtree/large: 226.88 ms median estimate, change within noise threshold.
+      Outcome: the scheduler conversion was reverted. `KeySet::remove` and its unit test remain because they are independently useful and do not affect scheduler performance.
+
+ModeFilter hot-path bypass results:
+
+    2026-07-07 15:12Z after changing `Scheduler::reaction_is_enabled_at_current_tag` to rely on static reaction scope activity and leave `ModeFilter` as debug-checked metadata:
+      cargo bench -p boomerang --bench modal_scheduler_perf:
+        transition_churn/reset/10_000: 2.1763 ms median estimate, Criterion reported about 2.49% faster.
+        transition_churn/history/10_000: 2.0758 ms median estimate, Criterion reported about 3.87% faster.
+        transition_churn/reset/100_000: 23.967 ms median estimate, Criterion reported about 3.27% faster.
+        transition_churn/history/100_000: 22.955 ms median estimate, Criterion reported about 4.05% faster.
+        inactive_port_fanout/1: 2.1048 ms median estimate, no detected change.
+        inactive_port_fanout/32: 2.3006 ms median estimate, Criterion reported about 9.41% faster.
+        inactive_port_fanout/256: 2.5714 ms median estimate, Criterion reported about 18.20% faster.
+        inactive_port_fanout/1024: 1.3227 ms median estimate, Criterion reported about 25.21% faster.
+        reset_subtree/small: 3.0532 ms median estimate, change within noise threshold.
+        reset_subtree/medium: 31.756 ms median estimate, no detected change.
+        reset_subtree/large: 224.60 ms median estimate, change within noise threshold.
+
+      cargo bench -p boomerang --bench ping_pong:
+        ping_pong/100: 15.388 us median estimate, no detected change.
+        ping_pong/10_000: 1.1258 ms median estimate, Criterion reported about 4.49% faster.
+        ping_pong/1_000_000: 112.16 ms median estimate, Criterion reported about 4.44% faster.
+
 Change log:
 
     2026-07-07 / Codex: created this plan from the modal scheduler performance review. The plan intentionally starts with benchmark coverage before implementation changes so later optimizations have measurable evidence.
@@ -318,12 +520,20 @@ Change log:
     2026-07-07 / Codex: implemented the first allocation reduction in `ScheduledEvent`, recorded that a full Criterion baseline was not captured before this patch, and kept the remaining mode-local heap drain/rebuild as later transition-path work.
     2026-07-07 / Codex: added steady-state allocation coverage and fixed the action-store pruning allocation it exposed. The new guard passes only after both the scheduled-event metadata change and the `ActionStore::clear_older_than` change.
     2026-07-07 / Codex: captured Criterion checkpoint results after the allocation fixes. Local Criterion history reported improvements for `ping_pong` and `modal_modes`, but later comparisons in this plan should use the explicit checkpoint numbers above.
+    2026-07-07 / Codex: completed the state-layout milestone by splitting `EventManager` scope state into hot active/startup flag maps, `ScopeClockState`, and per-scope queue storage. This keeps scheduler active checks on compact indexed booleans while preserving the existing queue and local/global time behavior.
+    2026-07-07 / Codex: ran the Criterion benchmark set after the state-layout split. The result is mixed: modal fanout improved materially, transition churn stayed within noise, reset-subtree regressed slightly, and `ping_pong` reported a guard regression that needs follow-up before final validation.
+    2026-07-07 / Codex: profiled the regressing areas. The largest modal reset cost is dense `ReactionSet` zeroing inside `EventQueue::push_event_inner`; the non-modal `ping_pong` profile does not show hot modal scope-state frames. This suggests the next investigation should target event queue/reaction-set reuse and clearing behavior before spending effort on mode-filter removal.
+    2026-07-07 / Codex: implemented the first profiling diagnosis solution by adding `EventQueue::recycle_reaction_set`, returning merged and cleared events through that helper, and making `EventQueue::next_reaction_set` reuse already-clear pooled sets without clearing again. Focused re-bench results fixed the `ping_pong` guard regression and stabilized the reset-subtree result.
+    2026-07-07 / Codex: wrapped the state-layout plus single-clear `ReactionSet` pooling milestone as accepted for focused validation, then added a new next milestone to replace `EventManager`'s `TinySecondaryMap<ScopeKey, bool>` hot flags with bitset-backed `KeySet<ScopeKey>` flags. This preserves benchmark attribution by measuring the flag storage change before continuing to `ModeFilter` cleanup.
+    2026-07-07 / Codex: trialed the bitset-backed flag milestone. Added `KeySet::remove` with unit coverage, measured a direct `EventManager` conversion, and rejected/reverted the scheduler conversion after Criterion showed broad transition-churn and inactive-fanout regressions. The next implementation milestone is now the redundant `ModeFilter` cleanup.
+    2026-07-07 / Codex: completed the redundant `ModeFilter` hot-path cleanup by removing the release-mode `Store::current_mode` lookup and `ModeFilter::allows` vector scan from scheduler reaction gating. The graph metadata remains for compatibility, and a debug assertion verifies that existing filters match the static mode scope.
     2026-07-07 / Codex: implemented cached active-scope gating, inactive modal port-trigger filtering, and in-place transition dedup. The targeted modal benchmark shows large inactive-fanout gains with no meaningful `ping_pong` regression.
     2026-07-07 / Codex: implemented `ModalScheduleIndex` on `ReactionGraph` and switched transition lifecycle helpers to dense range slices. Reset-subtree and transition-churn benchmarks improved again; `ping_pong` did not regress.
     2026-07-07 / Codex: ran final hygiene and full test validation for this implementation slice. `cargo fmt --check` passes but still prints the repository's existing stable-rustfmt warnings for `wrap_comments` and `comment_width`.
     2026-07-07 / Codex: restored `ReactionGraph::shutdown_reactions()` to read the source maps rather than the derived index so the public helper remains correct even before index rebuild. The scheduler still uses `modal_schedule_index` directly for shutdown scheduling.
     2026-07-07 / Codex: replaced the local `IndexRange` wrapper with `core::range::Range<usize>`. Current Serde still does not serialize this new core range type directly, so `ModalScheduleIndex` now serializes its range maps through an explicit start/end shim while `ReactionGraph` preserves the modal index as pure data.
     2026-07-07 / Codex: moved `ModalScheduleIndex` construction out of `boomerang_runtime` and into the builder lowering pass in `boomerang_builder/src/env/build.rs`. Runtime now owns only the index data type, accessors, and serde representation; builder owns the static construction algorithm. Added module-level docs in both env modules describing this boundary.
+    2026-07-08 / Codex: closed the final validation gate after the scheduler was split into `sched/mod.rs`, `sched/queue.rs`, `sched/modal.rs`, and `sched/barrier.rs`. Full workspace tests, clippy, formatting, mdBook, benchmark smoke tests, and complete modal Criterion benchmark runs passed.
 
 Validation transcript:
 
@@ -458,6 +668,119 @@ Validation transcript:
       cargo test -p boomerang --bench modal_scheduler_perf
       result: all transition_churn, inactive_port_fanout, and reset_subtree benchmark test-mode cases reported Success.
 
+    2026-07-07 14:07Z:
+      cargo fmt --check
+      result: passed; rustfmt printed the repository's existing stable-channel warnings for unsupported `wrap_comments` and `comment_width` config options.
+
+      cargo test -p boomerang_runtime
+      result: 17 passed; 0 failed; doc-tests 1 passed, 1 ignored.
+
+      cargo test -p boomerang --bench modal_scheduler_perf
+      result: all transition_churn, inactive_port_fanout, and reset_subtree benchmark test-mode cases reported Success.
+
+      cargo test -p boomerang modal
+      result: all modal-filtered integration tests passed; modal_physical_actions emitted expected scheduler lateness warnings.
+
+      cargo bench -p boomerang --bench modal_scheduler_perf -- reset_subtree
+      result: no detected reset-subtree regression; large case median estimate was 229.06 ms.
+
+      cargo bench -p boomerang --bench ping_pong
+      result: Criterion reported improvements for all three cases, with the 1,000,000 element case at 116.74 ms.
+
+    2026-07-07 14:08Z:
+      cargo fmt --check
+      result: passed; rustfmt printed the repository's existing stable-channel warnings for unsupported `wrap_comments` and `comment_width` config options.
+
+      git diff --check
+      result: passed with no whitespace errors.
+
+    2026-07-07 14:46Z:
+      cargo test -p boomerang_tinymap key_set
+      result: 9 passed; 0 failed. This includes the new `key_set::tests::test_remove`.
+
+      cargo test -p boomerang_runtime
+      result: 17 passed; 0 failed; doc-tests 1 passed, 1 ignored.
+
+      cargo test -p boomerang modal
+      result: all modal-filtered integration tests passed.
+
+      cargo test -p boomerang --bench modal_scheduler_perf
+      result: all transition_churn, inactive_port_fanout, and reset_subtree benchmark test-mode cases reported Success.
+
+      cargo fmt --check
+      result: passed; rustfmt printed the repository's existing stable-channel warnings for unsupported `wrap_comments` and `comment_width` config options.
+
+      git diff --check
+      result: passed with no whitespace errors.
+
+      cargo bench -p boomerang --bench ping_pong
+      result: larger guard cases reported no detected change, but `ping_pong/100` regressed by about 4.89% during the temporary `KeySet` scheduler conversion.
+
+      cargo bench -p boomerang --bench modal_modes
+      result: no meaningful regression; the 1-mode case was within the configured noise threshold and larger cases reported no detected change.
+
+      cargo bench -p boomerang --bench modal_scheduler_perf
+      result: the temporary `KeySet` scheduler conversion regressed transition churn by about 5-8% and inactive fanout by about 7-25%, so the scheduler conversion was reverted while keeping `KeySet::remove`.
+
+      cargo test -p boomerang_tinymap key_set
+      result after reverting only the scheduler conversion: 9 passed; 0 failed.
+
+      cargo test -p boomerang_runtime
+      result after reverting only the scheduler conversion: 17 passed; 0 failed; doc-tests 1 passed, 1 ignored.
+
+      cargo fmt --check
+      result after reverting only the scheduler conversion: passed with the existing stable-rustfmt warnings.
+
+      git diff --check
+      result after reverting only the scheduler conversion: passed with no whitespace errors.
+
+    2026-07-07 15:12Z:
+      cargo test -p boomerang_runtime
+      result: 17 passed; 0 failed; doc-tests 1 passed, 1 ignored.
+
+      cargo test -p boomerang modal
+      result: all modal-filtered integration tests passed.
+
+      cargo test -p boomerang --bench modal_scheduler_perf
+      result: all transition_churn, inactive_port_fanout, and reset_subtree benchmark test-mode cases reported Success.
+
+      cargo fmt --check
+      result: passed; rustfmt printed the repository's existing stable-channel warnings for unsupported `wrap_comments` and `comment_width` config options.
+
+      git diff --check
+      result: passed with no whitespace errors.
+
+      cargo bench -p boomerang --bench modal_scheduler_perf
+      result: transition churn improved by about 2.49-4.05%, inactive fanout improved by about 9.41-25.21% for the larger mode counts, and reset-subtree cases were neutral.
+
+      cargo bench -p boomerang --bench ping_pong
+      result: no non-modal regression; 100 was neutral and the 10,000 and 1,000,000 cases improved by about 4.49% and 4.44%.
+
+    2026-07-08 11:50Z:
+      cargo fmt --check
+      result: passed; rustfmt printed the repository's existing stable-channel warnings for unsupported `wrap_comments` and `comment_width` config options.
+
+      cargo clippy --workspace --all-targets
+      result: passed with no warnings.
+
+      cargo test
+      result: full workspace tests and doc-tests passed. Notable totals included 32 `boomerang_builder` unit tests, 30 `boomerang_macros` unit tests, 18 `boomerang_runtime` unit tests, and 30 `boomerang_tinymap` unit tests; existing ignored doc-tests remained ignored.
+
+      mdbook build book
+      result: passed; HTML book written under `book/book`.
+
+      cargo test -p boomerang --bench modal_modes
+      result: all inactive mode benchmark smoke cases reported Success.
+
+      cargo bench -p boomerang --bench modal_scheduler_perf
+      result: transition_churn/history and transition_churn/reset improved or reported no detected change; inactive_port_fanout improved through 256 modes and reported no detected change at 1024 modes; reset_subtree medium and large improved while small reported no detected change.
+
+      cargo bench -p boomerang --bench modal_modes
+      result: Criterion reported improvements for inactive mode counts 1, 32, and 256.
+
+      git diff --check
+      result: passed with no whitespace errors.
+
 ## Interfaces and Dependencies
 
 Use the existing dependencies already present in `boomerang/Cargo.toml`: `criterion` for benchmarks and `pprof` for optional flamegraphs. Do not add a benchmark dependency unless the need is recorded in `Decision Log`.
@@ -484,3 +807,13 @@ In `boomerang_runtime/src/env/mod.rs`, add any new modal indexing structs next t
 In `boomerang_builder/src/env/build.rs`, build the modal index after runtime scopes, actions, modes, and reactions are available. The index must not depend on scheduler state. It is static metadata.
 
 In `boomerang_runtime/src/sched.rs`, update `EventManager` and `Scheduler::process_tag` to use the new static index and cached active-scope data. Public scheduler behavior and public APIs should not change.
+
+In `boomerang_tinymap/src/key_set/mod.rs`, add a single-key clear or set operation to `KeySet<K>`, with unit coverage in the existing `#[cfg(test)]` module. The method must leave other keys unchanged and must be safe to call for any key index representable by `K`.
+
+In `boomerang_runtime/src/sched.rs`, do not directly convert these fields to bitset-backed `KeySet<ScopeKey>` in the current implementation:
+
+    scope_active: tinymap::KeySet<ScopeKey>
+    scope_ever_active: tinymap::KeySet<ScopeKey>
+    scope_startup_fired: tinymap::KeySet<ScopeKey>
+
+That direct conversion was benchmarked and rejected on 2026-07-07 because it regressed transition churn and inactive fanout. A future flag representation may still be considered, but it must preserve the public `EventManager::scope_active` and `EventManager::scope_ever_active` helper behavior and must pass the same benchmark acceptance gate before replacing the current `TinySecondaryMap<ScopeKey, bool>` fields.

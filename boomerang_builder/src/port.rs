@@ -57,7 +57,7 @@ impl<T: runtime::ReactorData, Q: PortTag, A> Copy for TypedPortKey<T, Q, A> {}
 
 impl<T: runtime::ReactorData, Q: PortTag, A> Clone for TypedPortKey<T, Q, A> {
     fn clone(&self) -> Self {
-        Self(self.0, PhantomData)
+        *self
     }
 }
 

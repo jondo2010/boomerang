@@ -413,17 +413,11 @@ fn test_reactions_startup_shutdown() {
 
     assert_eq!(enclave.env.reactions.len(), 2);
     assert_eq!(
-        enclave.graph.reaction_actions[r0_key]
-            .iter()
-            .copied()
-            .collect::<Vec<_>>(),
+        enclave.graph.reaction_actions[r0_key].to_vec(),
         vec![startup_key]
     );
     assert_eq!(
-        enclave.graph.reaction_actions[r1_key]
-            .iter()
-            .copied()
-            .collect::<Vec<_>>(),
+        enclave.graph.reaction_actions[r1_key].to_vec(),
         vec![shutdown_key]
     );
     assert_eq!(

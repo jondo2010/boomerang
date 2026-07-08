@@ -74,11 +74,5 @@ fn main() {
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(Duration::seconds(3));
-    let _ = boomerang_util::runner::build_and_test_reactor(
-        After(),
-        "after",
-        Default::default(),
-        config,
-    )
-    .unwrap();
+    let _ = boomerang_util::runner::build_and_test_reactor(After(), "after", (), config).unwrap();
 }

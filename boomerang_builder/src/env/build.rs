@@ -269,10 +269,10 @@ impl EnvBuilder {
                     }
                     partitions.push((key, *node_stack.last().unwrap()));
                 }
-                petgraph::visit::DfsEvent::Finish(key, _) => {
-                    if self.reactor_builders[key].is_enclave {
-                        node_stack.pop();
-                    }
+                petgraph::visit::DfsEvent::Finish(key, _)
+                    if self.reactor_builders[key].is_enclave =>
+                {
+                    node_stack.pop();
                 }
                 _ => {}
             }

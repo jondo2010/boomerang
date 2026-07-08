@@ -14,11 +14,11 @@ static FIRST_ALLOCATION_NEW_SIZE: AtomicUsize = AtomicUsize::new(0);
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ptr = unsafe { System.alloc(layout) };
-        if COUNT_ALLOCATIONS.load(Ordering::Relaxed) {
-            if ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed) == 0 {
-                FIRST_ALLOCATION_KIND.store(1, Ordering::Relaxed);
-                FIRST_ALLOCATION_SIZE.store(layout.size(), Ordering::Relaxed);
-            }
+        if COUNT_ALLOCATIONS.load(Ordering::Relaxed)
+            && ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed) == 0
+        {
+            FIRST_ALLOCATION_KIND.store(1, Ordering::Relaxed);
+            FIRST_ALLOCATION_SIZE.store(layout.size(), Ordering::Relaxed);
         }
         ptr
     }
@@ -29,12 +29,12 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let ptr = unsafe { System.realloc(ptr, layout, new_size) };
-        if COUNT_ALLOCATIONS.load(Ordering::Relaxed) {
-            if ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed) == 0 {
-                FIRST_ALLOCATION_KIND.store(2, Ordering::Relaxed);
-                FIRST_ALLOCATION_SIZE.store(layout.size(), Ordering::Relaxed);
-                FIRST_ALLOCATION_NEW_SIZE.store(new_size, Ordering::Relaxed);
-            }
+        if COUNT_ALLOCATIONS.load(Ordering::Relaxed)
+            && ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed) == 0
+        {
+            FIRST_ALLOCATION_KIND.store(2, Ordering::Relaxed);
+            FIRST_ALLOCATION_SIZE.store(layout.size(), Ordering::Relaxed);
+            FIRST_ALLOCATION_NEW_SIZE.store(new_size, Ordering::Relaxed);
         }
         ptr
     }

@@ -350,7 +350,7 @@ impl PartialReactionBuilderField for BuilderModeEffect {
         builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
         _trigger_mode: TriggerMode,
     ) {
-        builder.record_mode_effect(self.clone());
+        builder.record_mode_effect(*self);
     }
 }
 

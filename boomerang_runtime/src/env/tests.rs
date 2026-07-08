@@ -42,9 +42,6 @@ pub fn create_dummy_env() -> (Env, ReactionGraph) {
     reaction_graph.reaction_modes.insert(reaction_key, None);
     reaction_graph.reactor_modes.insert(reactor_key, Vec::new());
     reaction_graph
-        .reactor_mode_names
-        .insert(reactor_key, Vec::new());
-    reaction_graph
         .reactor_initial_modes
         .insert(reactor_key, None);
 

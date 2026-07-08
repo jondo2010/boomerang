@@ -62,11 +62,7 @@ fn generic_after() {
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(Duration::seconds(1));
-    let (_, _env) = boomerang_util::runner::build_and_test_reactor(
-        GenericAfter(),
-        "generic_after",
-        (),
-        config,
-    )
-    .unwrap();
+    let (_, _env) =
+        boomerang_util::runner::build_and_test_reactor(GenericAfter(), "generic_after", (), config)
+            .unwrap();
 }

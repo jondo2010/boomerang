@@ -1,118 +1,24 @@
-use std::{collections::BinaryHeap, pin::Pin};
+use std::pin::Pin;
 
 use kanal::ReceiveErrorTimeout;
+
+mod barrier;
+mod modal;
+mod queue;
+
+use barrier::LogicalTimeBarrier;
+use modal::EventManager;
 
 use crate::{
     build_reaction_contexts,
     env::{Enclave, EnclaveKey},
-    event::{AsyncEvent, ScheduledEvent},
+    event::AsyncEvent,
     keepalive,
     key_set::KeySetView,
     store::Store,
-    CommonContext, Duration, Env, Level, ReactionGraph, ReactionKey, ReactionSet,
-    ReactionSetLimits, SendContext, Tag,
+    CommonContext, Duration, Env, ModeTransitionRequest, ReactionGraph, ReactionKey,
+    ReactionSetLimits, ReactorKey, SendContext, Tag,
 };
-
-#[derive(Debug)]
-struct EventQueue {
-    /// Current event queue
-    event_queue: BinaryHeap<ScheduledEvent>,
-    /// Recycled ReactionSets to avoid allocations
-    free_reaction_sets: Vec<ReactionSet>,
-    /// Limits for the reaction sets
-    reaction_set_limits: ReactionSetLimits,
-}
-
-impl EventQueue {
-    fn new(reaction_set_limits: ReactionSetLimits) -> Self {
-        Self {
-            event_queue: BinaryHeap::new(),
-            free_reaction_sets: Vec::new(),
-            reaction_set_limits,
-        }
-    }
-
-    /// Push an event into the event queue
-    ///
-    /// A free event is pulled from the `free_events` vector and then modified with the provided function.
-    fn push_event<I>(&mut self, tag: Tag, reactions: I, terminal: bool)
-    where
-        I: IntoIterator<Item = (Level, ReactionKey)>,
-    {
-        if self.peek_tag() == Some(tag) {
-            // If the tag is the same as the next event, merge the reactions
-            let mut event = self.event_queue.peek_mut().unwrap();
-            event.reactions.extend_above(reactions);
-            event.terminal = event.terminal || terminal;
-        } else {
-            // Otherwise, push a new event
-            let mut reaction_set = self.next_reaction_set();
-            reaction_set.extend_above(reactions);
-            let event = ScheduledEvent {
-                tag,
-                reactions: reaction_set,
-                terminal,
-            };
-            self.event_queue.push(event);
-        }
-    }
-
-    /// Pop the next event from the event queue.
-    ///
-    /// Any subsequent events with the same tag are merged into the returned event.
-    fn pop_next_event(&mut self) -> Option<ScheduledEvent> {
-        if let Some(mut event) = self.event_queue.pop() {
-            // Merge events with the same tag
-            while let Some(next_event) = self.event_queue.peek() {
-                if next_event.tag == event.tag {
-                    let next_event = self.event_queue.pop().unwrap();
-                    event.reactions.merge(&next_event.reactions);
-                    event.terminal = event.terminal || next_event.terminal;
-
-                    // Return the ReactionSet to the free pool
-                    self.free_reaction_sets.push(next_event.reactions);
-                } else {
-                    break;
-                }
-            }
-
-            return Some(event);
-        }
-
-        None
-    }
-
-    /// Get a free [`ReactionSet`] or create a new one if none are available.
-    fn next_reaction_set(&mut self) -> ReactionSet {
-        self.free_reaction_sets
-            .pop()
-            .map(|mut reaction_set| {
-                reaction_set.clear();
-                reaction_set
-            })
-            .unwrap_or_else(|| ReactionSet::new(&self.reaction_set_limits))
-    }
-
-    /// Peek the tag of the next event in the queue
-    fn peek_tag(&self) -> Option<Tag> {
-        self.event_queue.peek().map(|event| event.tag)
-    }
-
-    /// If the event queue still has events on it, report that.
-    fn shutdown(&mut self) {
-        if !self.event_queue.is_empty() {
-            tracing::warn!(
-                "---- There are {} unprocessed future events on the event queue.",
-                self.event_queue.len()
-            );
-            let event = self.event_queue.peek().unwrap();
-            tracing::warn!(
-                "---- The first future event has timestamp {} after start time.",
-                event.tag.offset()
-            );
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -162,88 +68,6 @@ impl Config {
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
-    }
-}
-
-#[derive(Debug)]
-struct LogicalTimeBarrier {
-    /// The last released tag
-    released_tag: Tag,
-    provisional_tag: Tag,
-    /// The send context for the upstream enclave
-    upstream_ctx: SendContext,
-    /// Optional delay for the upstream connection
-    upstream_delay: Option<Duration>,
-}
-
-impl LogicalTimeBarrier {
-    #[tracing::instrument(skip(self), fields(tag = %tag, released = %self.released_tag))]
-    pub fn release_tag(&mut self, tag: Tag) {
-        tracing::trace!("Release");
-
-        if tag < self.released_tag {
-            tracing::warn!(
-                "Cannot release a tag ({tag}) earlier than the last released tag {}",
-                self.released_tag
-            );
-        }
-        self.released_tag = tag;
-        // Reset the provisional tag
-        self.provisional_tag = Tag::NEVER;
-    }
-
-    pub fn release_tag_provisional(&mut self, tag: Tag) {
-        if tag <= self.provisional_tag {
-            self.release_tag(tag);
-        }
-    }
-
-    #[inline]
-    /// Try to acquire the given tag without blocking.
-    pub fn try_acquire_tag(&mut self, tag: Tag) -> bool {
-        tag <= self.released_tag
-    }
-
-    /// Acquire the given tag, blocking until it is released, or an [`AsyncEvent`] is received.
-    ///
-    /// If an async event is received, it is returned to the caller. A return value of `None` indicates that the tag has been released.
-    #[inline]
-    #[tracing::instrument(skip(self, tag, this_enclave, event_rx), fields(tag = %tag))]
-    pub fn acquire_tag(
-        &mut self,
-        tag: Tag,
-        this_enclave: EnclaveKey,
-        event_rx: &crate::Receiver<AsyncEvent>,
-    ) -> Option<AsyncEvent> {
-        // Since this is a delayed connection, we can go back in time and need to
-        // acquire the latest upstream tag that can create an event at the given
-        // tag.
-        let upstream_tag = if let Some(delay) = self.upstream_delay {
-            tag.pre(delay)
-        } else {
-            tag
-        };
-
-        tracing::trace!(upstream_tag = %upstream_tag, "Try acquire");
-        if self.try_acquire_tag(upstream_tag) {
-            return None;
-        }
-
-        tracing::trace!(%upstream_tag, "Releasing provisional tag");
-        self.provisional_tag = upstream_tag;
-        if !self
-            .upstream_ctx
-            .release_provisional(this_enclave, upstream_tag)
-        {
-            // The upstream has terminated try to return a queued event here. If the upstream terminated, we probably
-            // have an event queued from it. This prevents pre-mature termination of this enclave.
-            tracing::warn!("Upstream has terminated");
-            return event_rx.try_recv().expect("Upstream terminated");
-        }
-
-        // Block until the tag is released
-        tracing::trace!("Blocking");
-        event_rx.recv().ok()
     }
 }
 
@@ -303,8 +127,8 @@ pub struct Scheduler {
     reaction_graph: ReactionGraph,
     /// Asynchronous events receiver
     event_rx: crate::Receiver<AsyncEvent>,
-    /// Event queue
-    events: EventQueue,
+    /// Event queues for root-scope and mode-local events.
+    events: EventManager,
     /// Initial physical time.
     start_time: std::time::Instant,
     /// Current tag
@@ -319,6 +143,12 @@ pub struct Scheduler {
     downstream_enclaves: tinymap::TinySecondaryMap<EnclaveKey, SendContext>,
     /// Runtime statistics
     stats: Stats,
+    /// Reusable buffer for reaction keys to avoid allocations in hot loops
+    reaction_buffer: Vec<ReactionKey>,
+    /// Reusable buffer for mode transitions to avoid allocations in hot loops
+    transition_buffer: Vec<(ReactorKey, ModeTransitionRequest)>,
+    /// Whether this graph contains any modes and needs modal scope checks in the hot path.
+    has_modes: bool,
 }
 
 impl Scheduler {
@@ -343,6 +173,7 @@ impl Scheduler {
         } = enclave;
 
         let start_time = std::time::Instant::now();
+        let reaction_capacity = env.reactions.len();
 
         // Find the maximum level in the reaction graph
         let max_level = graph
@@ -358,12 +189,12 @@ impl Scheduler {
             max_level,
             num_keys: env.reactions.len(),
         };
-        let events = EventQueue::new(reaction_set_limits);
-
         // Build contexts for each reaction
         let contexts = build_reaction_contexts(key, &graph, start_time, event_tx, shutdown_rx);
 
         let store = Store::new(env, contexts, &graph);
+        let has_modes = !graph.modes.is_empty();
+        let events = EventManager::new(reaction_set_limits, &graph);
 
         let upstream_enclaves = upstream_enclaves
             .into_iter()
@@ -399,6 +230,9 @@ impl Scheduler {
             upstream_enclaves,
             downstream_enclaves,
             stats: Stats::default(),
+            reaction_buffer: Vec::with_capacity(reaction_capacity),
+            transition_buffer: Vec::with_capacity(reaction_capacity),
+            has_modes,
         }
     }
 
@@ -434,25 +268,43 @@ impl Scheduler {
                     return;
                 }
                 let downstream = self.reaction_graph.action_triggers[key].iter().copied();
-                self.events.push_event(tag, downstream, false);
                 self.store.push_action_value(key, tag, value);
+                self.events
+                    .push_action_event(key, tag, downstream, false, &self.reaction_graph);
             }
             AsyncEvent::Physical { time, key, value } => {
                 let tag = Tag::from_physical_time(self.start_time, time);
                 let downstream = self.reaction_graph.action_triggers[key].iter().copied();
-                self.events.push_event(tag, downstream, false);
                 self.store.push_action_value(key, tag, value);
+                self.events
+                    .push_action_event(key, tag, downstream, false, &self.reaction_graph);
             }
             AsyncEvent::Shutdown { delay } => {
                 let tag = self.current_tag.delay(delay);
-                for action_key in &self.reaction_graph.shutdown_actions {
-                    self.store.push_action_value(*action_key, tag, Box::new(()));
-                }
-                let downstream = self.reaction_graph.shutdown_reactions();
-                self.events.push_event(tag, downstream, true);
-                //self.shutdown_tag = Some(tag);
+                self.schedule_shutdown_at(tag);
             }
         }
+    }
+
+    fn schedule_shutdown_at(&mut self, tag: Tag) {
+        let shutdown_reactions = &self
+            .reaction_graph
+            .modal_schedule_index
+            .all_shutdown_reactions;
+
+        for &action_key in &self
+            .reaction_graph
+            .modal_schedule_index
+            .all_shutdown_actions_unique
+        {
+            self.store.push_action_value(action_key, tag, Box::new(()));
+        }
+
+        self.events.push_event(
+            tag,
+            shutdown_reactions.iter().map(|reaction| reaction.reaction),
+            true,
+        );
     }
 
     /// Execute startup of the Scheduler.
@@ -469,18 +321,15 @@ impl Scheduler {
                     tracing::trace!(level = %lvl, reaction = %reaction_key, tag = %tag, "Startup reaction");
                 })
                 .copied();
-            self.events.push_event(tag, downstream, false);
+            self.events
+                .push_action_event(action_key, tag, downstream, false, &self.reaction_graph);
         }
 
         // Schedule a shutdown event if a timeout is set
         if let Some(timeout) = self.config.timeout {
             let tag = tag.delay(timeout);
-            for action_key in &self.reaction_graph.shutdown_actions {
-                self.store.push_action_value(*action_key, tag, Box::new(()));
-            }
             tracing::info!(tag = %tag, "Timeout set, scheduling shutdown");
-            self.events
-                .push_event(tag, self.reaction_graph.shutdown_reactions(), true);
+            self.schedule_shutdown_at(tag);
         }
 
         tracing::info!(tag = %tag, "Starting the execution.");
@@ -571,22 +420,21 @@ impl Scheduler {
                 }
             }
 
-            //if let Some(mut event) = self.events.pop_next_event() {
             let mut event = self.events.pop_next_event().unwrap();
 
-            tracing::debug!(event = %event, "Processing");
+            tracing::debug!(event = ?event, "Processing");
 
             if event.terminal {
                 // Signal to any waiting threads that the scheduler is shutting down.
                 self.shutdown_tx.shutdown();
             }
 
-            self.process_tag(event.tag, event.reactions.view());
-
-            // Return the ReactionSet to the free pool
-            self.events.free_reaction_sets.push(event.reactions);
+            self.process_tag(event.tag, event.reactions.view(), event.terminal);
 
             self.current_tag = event.tag;
+
+            // Return the ReactionSet to the free pool
+            self.events.return_reaction_set(event.reactions);
 
             // Release the current tag to downstream reactors
             self.release_tag_downstream(self.current_tag);
@@ -605,12 +453,7 @@ impl Scheduler {
             // Shutdown event will be processed at the next event loop iteration
             let shutdown = self.current_tag.delay(Duration::ZERO);
             self.shutdown_tag = Some(shutdown);
-            for action_key in &self.reaction_graph.shutdown_actions {
-                self.store
-                    .push_action_value(*action_key, shutdown, Box::new(()));
-            }
-            self.events
-                .push_event(shutdown, self.reaction_graph.shutdown_reactions(), true);
+            self.schedule_shutdown_at(shutdown);
         }
 
         true
@@ -669,15 +512,36 @@ impl Scheduler {
     ///
     /// Reactions at a level N may trigger further reactions at levels M>N
     #[tracing::instrument(skip(self, reaction_view), fields(tag = %tag))]
-    pub fn process_tag(&mut self, tag: Tag, reaction_view: KeySetView<ReactionKey>) {
+    pub fn process_tag(
+        &mut self,
+        tag: Tag,
+        reaction_view: KeySetView<ReactionKey>,
+        terminal: bool,
+    ) {
+        self.transition_buffer.clear();
         reaction_view.for_each_level(|level, reaction_keys, next_levels| {
             tracing::trace!(level=?level, "Iter");
 
+            self.reaction_buffer.clear();
+            if self.has_modes {
+                for reaction_key in reaction_keys {
+                    if self.reaction_is_enabled_at_current_tag(reaction_key, terminal) {
+                        self.reaction_buffer.push(reaction_key);
+                    }
+                }
+            } else {
+                self.reaction_buffer.extend(reaction_keys);
+            }
+
             self.stats
-                .increment_processed_reactions(reaction_keys.len());
+                .increment_processed_reactions(self.reaction_buffer.len());
 
             // Safety: reaction_keys in the same level are guaranteed to be independent of each other.
-            let iter_ctx = unsafe { self.store.iter_borrow_storage(reaction_keys) };
+            let iter_ctx = unsafe {
+                self.store
+                    .iter_borrow_storage(self.reaction_buffer.iter().copied())
+            }
+            .enumerate();
 
             #[cfg(feature = "parallel")]
             use rayon::prelude::ParallelIterator;
@@ -685,27 +549,33 @@ impl Scheduler {
             #[cfg(feature = "parallel")]
             let iter_ctx = rayon::prelude::ParallelBridge::par_bridge(iter_ctx);
 
-            let iter_ctx_res = iter_ctx.map(|trigger_ctx| trigger_ctx.trigger(tag));
+            let iter_ctx_res = iter_ctx.map(|(idx, trigger_ctx)| (idx, trigger_ctx.trigger(tag)));
 
             #[cfg(feature = "parallel")]
             let iter_ctx_res = iter_ctx_res.collect::<Vec<_>>();
 
-            for trigger_res in iter_ctx_res {
+            let mut pending_shutdown_tag = None;
+            for (idx, trigger_res) in iter_ctx_res {
+                let reaction_key = self.reaction_buffer[idx];
+                let reactor_key = self.reaction_graph.reaction_reactors[reaction_key];
+                if let Some(request) = &trigger_res.scheduled_mode {
+                    if let Some((_, existing)) = self
+                        .transition_buffer
+                        .iter_mut()
+                        .find(|(existing_reactor, _)| *existing_reactor == reactor_key)
+                    {
+                        *existing = request.clone();
+                    } else {
+                        self.transition_buffer.push((reactor_key, request.clone()));
+                    }
+                }
+
                 if let Some(shutdown_tag) = trigger_res.scheduled_shutdown {
                     // if the new shutdown tag is earlier than the current shutdown tag, update the shutdown tag and
                     // schedule a shutdown event
                     if self.shutdown_tag.map(|t| shutdown_tag < t).unwrap_or(true) {
                         self.shutdown_tag = Some(shutdown_tag);
-
-                        //for action_key in &self.reaction_graph.shutdown_actions {
-                        //    self.store
-                        //        .push_action_value(*action_key, shutdown_tag, Box::new(()));
-                        //}
-                        self.events.push_event(
-                            shutdown_tag,
-                            self.reaction_graph.shutdown_reactions(),
-                            true,
-                        );
+                        pending_shutdown_tag = Some(shutdown_tag);
                     }
                 }
 
@@ -716,22 +586,93 @@ impl Scheduler {
                     let downstream = self.reaction_graph.action_triggers[action_key]
                         .iter()
                         .copied();
-                    self.events.push_event(tag, downstream, false);
+                    self.events.push_action_event(
+                        action_key,
+                        tag,
+                        downstream,
+                        false,
+                        &self.reaction_graph,
+                    );
                 }
             }
 
-            // Collect all the reactions that are triggered by the ports
-            let downstream = self.store.iter_set_port_keys().flat_map(|port_key| {
-                self.stats.increment_set_ports();
-                self.reaction_graph.port_triggers[port_key].iter()
-            });
+            if let Some(shutdown_tag) = pending_shutdown_tag {
+                self.schedule_shutdown_at(shutdown_tag);
+            }
 
+            // Collect all the reactions that are triggered by the ports
             if let Some(mut next_levels) = next_levels {
-                next_levels.extend_above(downstream.copied());
+                let reaction_graph = &self.reaction_graph;
+                let events = &self.events;
+                let has_modes = self.has_modes;
+
+                for port_key in self.store.iter_set_port_keys() {
+                    self.stats.increment_set_ports();
+                    let downstream = reaction_graph.port_triggers[port_key].iter().copied();
+                    if has_modes {
+                        next_levels.extend_above(downstream.filter(|&(_, reaction_key)| {
+                            let scope_key = reaction_graph.reaction_scopes[reaction_key];
+                            events.scope_active(scope_key)
+                        }));
+                    } else {
+                        next_levels.extend_above(downstream);
+                    }
+                }
             }
         });
 
+        if self.transition_buffer.is_empty() {
+            self.store.reset_ports();
+            return;
+        }
+
+        for idx in 0..self.transition_buffer.len() {
+            let (reactor_key, request) = self.transition_buffer[idx].clone();
+            self.events.apply_transition(
+                reactor_key,
+                &request,
+                &mut self.store,
+                &self.reaction_graph,
+                tag,
+            );
+        }
+        self.transition_buffer.clear();
+
         self.store.reset_ports();
+    }
+
+    fn reaction_is_enabled_at_current_tag(
+        &self,
+        reaction_key: ReactionKey,
+        terminal: bool,
+    ) -> bool {
+        debug_assert!(self.has_modes);
+
+        let scope_key = self.reaction_graph.reaction_scopes[reaction_key];
+        let shutdown_lifecycle = terminal && self.reaction_graph.is_shutdown_reaction(reaction_key);
+        if shutdown_lifecycle {
+            return self.events.scope_ever_active(scope_key);
+        }
+
+        if !self.events.scope_active(scope_key) {
+            return false;
+        }
+
+        debug_assert!(
+            self.reaction_graph.reaction_modes[reaction_key]
+                .as_ref()
+                .is_none_or(|filter| {
+                    self.reaction_graph.scopes[scope_key]
+                        .mode
+                        .is_some_and(|mode| {
+                            let modes = filter.modes();
+                            modes.len() == 1 && modes[0] == mode
+                        })
+                }),
+            "reaction mode filters are expected to be equivalent to the static reaction scope"
+        );
+
+        true
     }
 
     /// Consume the scheduler and return the `Env` instance.

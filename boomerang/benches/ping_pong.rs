@@ -116,7 +116,7 @@ fn bench(c: &mut Criterion) {
                     let mut env_builder = EnvBuilder::new();
                     let reactor = Main(count);
                     let _reactor = reactor
-                        .build("main", (), None, None, false, &mut env_builder)
+                        .build("main", (), None, None, None, false, &mut env_builder)
                         .unwrap();
                     let config = runtime::Config::default().with_fast_forward(true);
                     let BuilderRuntimeParts {
@@ -155,7 +155,7 @@ fn criterion_config() -> Criterion {
     let mut criterion = Criterion::default();
     #[cfg(not(windows))]
     if std::env::var_os("BOOMERANG_PROFILE").is_some() {
-        criterion = criterion.with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
+        criterion = criterion.with_profiler(PProfProfiler::new(5000, Output::Flamegraph(None)));
     }
     criterion
 }

@@ -29,6 +29,7 @@ pub use port::{
 pub use reaction::*;
 pub use reactor::*;
 
+pub use boomerang_runtime::TransitionKind;
 use boomerang_runtime::{self as runtime};
 
 #[derive(thiserror::Error, Debug)]
@@ -44,6 +45,15 @@ pub enum BuilderError {
         reactor_name: String,
         action_name: String,
     },
+
+    #[error("Duplicate Mode Definition: {}.{}", reactor_name, mode_name)]
+    DuplicateModeDefinition {
+        reactor_name: String,
+        mode_name: String,
+    },
+
+    #[error("Multiple initial modes defined for reactor {reactor_name}")]
+    MultipleInitialModes { reactor_name: String },
 
     #[error("ActionKey not found: {}", 0)]
     ActionKeyNotFound(BuilderActionKey),

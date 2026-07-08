@@ -13,8 +13,8 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Debug;
-use std::sync::Mutex;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use downcast_rs::Downcast;
 
@@ -74,6 +74,19 @@ impl<T: ReactorData> OffsetBucket<T> {
         self.actions.get(index).and_then(|value| value.as_ref())
     }
 
+    fn take(&mut self, microstep: usize) -> Option<T> {
+        if microstep < self.base_microstep {
+            return None;
+        }
+
+        let index = microstep - self.base_microstep;
+        let value = self.actions.get_mut(index)?.take();
+        if value.is_some() {
+            self.occupied = self.occupied.saturating_sub(1);
+        }
+        value
+    }
+
     fn remove_before(&mut self, microstep: usize) {
         if microstep <= self.base_microstep {
             return;
@@ -94,6 +107,9 @@ impl<T: ReactorData> OffsetBucket<T> {
 pub trait BaseActionStore: Debug + Downcast + Send + Sync {
     /// Remove any value at the given Tag
     fn clear_older_than(&mut self, tag: Tag);
+
+    /// Remove all pending values.
+    fn clear(&mut self);
 
     /// Convert a Boxed store into an Arc-Mutex-protected version
     fn boxed_to_mutex(self: Box<Self>) -> Arc<Mutex<dyn BaseActionStore>>;
@@ -142,13 +158,53 @@ impl<T: ReactorData> ActionStore<T> {
 
     pub fn clear_older_than(&mut self, clear_tag: Tag) {
         let clear_offset = clear_tag.offset();
-        self.offsets = self.offsets.split_off(&clear_offset);
+        while self
+            .offsets
+            .first_key_value()
+            .is_some_and(|(&offset, _)| offset < clear_offset)
+        {
+            self.offsets.pop_first();
+        }
 
         if let Some(bucket) = self.offsets.get_mut(&clear_offset) {
             bucket.remove_before(clear_tag.microstep());
             if bucket.is_empty() {
                 self.offsets.remove(&clear_offset);
             }
+        }
+    }
+
+    /// Remove all stored action values.
+    pub fn clear(&mut self) {
+        self.offsets.clear();
+    }
+
+    /// Remove and return the value stored at exactly `tag`.
+    pub fn take(&mut self, tag: Tag) -> Option<T> {
+        let value = self
+            .offsets
+            .get_mut(&tag.offset())
+            .and_then(|bucket| bucket.take(tag.microstep()));
+
+        if self
+            .offsets
+            .get(&tag.offset())
+            .is_some_and(OffsetBucket::is_empty)
+        {
+            self.offsets.remove(&tag.offset());
+        }
+
+        value
+    }
+
+    /// Move a value from one tag to another, replacing any existing value at the target.
+    pub fn move_value(&mut self, from: Tag, to: Tag) {
+        if from == to {
+            return;
+        }
+
+        if let Some(value) = self.take(from) {
+            self.push(to, value);
         }
     }
 
@@ -177,6 +233,10 @@ impl<T: ReactorData> Default for ActionStore<T> {
 impl<T: ReactorData> BaseActionStore for ActionStore<T> {
     fn clear_older_than(&mut self, tag: Tag) {
         self.clear_older_than(tag)
+    }
+
+    fn clear(&mut self) {
+        self.clear()
     }
 
     fn boxed_to_mutex(self: Box<Self>) -> Arc<Mutex<dyn BaseActionStore>> {

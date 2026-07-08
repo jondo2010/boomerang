@@ -1,11 +1,18 @@
+//! Runtime graph lowering for [`EnvBuilder`].
+//!
+//! This module performs the build-time pass that materializes runtime enclaves and completes
+//! derived [`boomerang_runtime::ReactionGraph`] data. The scheduler should not need to reconstruct
+//! these static indexes during execution.
+
 use boomerang_runtime::{self as runtime};
+use core::range::Range;
 use itertools::Itertools;
 use slotmap::SecondaryMap;
 
 use crate::{
-    connection::PortBindings, ActionType, BuilderActionKey, BuilderError, BuilderPortKey,
-    BuilderReactionKey, BuilderReactorKey, ParentReactorBuilder, PartialReactionBuilder,
-    TimerActionKey,
+    connection::PortBindings, ActionType, BuilderActionKey, BuilderError, BuilderModeKey,
+    BuilderPortKey, BuilderReactionKey, BuilderReactorKey, ParentReactorBuilder,
+    PartialReactionBuilder, TimerActionKey,
 };
 
 use super::EnvBuilder;
@@ -30,8 +37,10 @@ pub struct BuilderAliases {
     pub enclave_aliases: SecondaryMap<BuilderReactorKey, runtime::EnclaveKey>,
     pub reactor_aliases:
         SecondaryMap<BuilderReactorKey, (runtime::EnclaveKey, runtime::ReactorKey)>,
+    pub reactor_scope_modes: SecondaryMap<BuilderReactorKey, Option<BuilderModeKey>>,
     pub reaction_aliases:
         SecondaryMap<BuilderReactionKey, (runtime::EnclaveKey, runtime::ReactionKey)>,
+    pub mode_aliases: SecondaryMap<BuilderModeKey, (runtime::EnclaveKey, runtime::ModeKey)>,
     pub action_aliases: SecondaryMap<BuilderActionKey, (runtime::EnclaveKey, runtime::ActionKey)>,
     pub port_aliases: SecondaryMap<BuilderPortKey, (runtime::EnclaveKey, runtime::PortKey)>,
 }
@@ -120,6 +129,117 @@ pub struct EnclaveDep {
     pub delay: Option<runtime::Duration>,
 }
 
+fn push_range<T>(target: &mut Vec<T>, values: impl IntoIterator<Item = T>) -> Range<usize> {
+    let start = target.len();
+    target.extend(values);
+    Range {
+        start,
+        end: target.len(),
+    }
+}
+
+fn scope_is_descendant_or_self(
+    graph: &runtime::ReactionGraph,
+    mut scope: runtime::ScopeKey,
+    ancestor: runtime::ScopeKey,
+) -> bool {
+    loop {
+        if scope == ancestor {
+            return true;
+        }
+
+        let Some(parent) = graph.scopes[scope].parent else {
+            return false;
+        };
+        scope = parent;
+    }
+}
+
+fn build_modal_schedule_index(graph: &runtime::ReactionGraph) -> runtime::ModalScheduleIndex {
+    let mut index = runtime::ModalScheduleIndex::default();
+
+    for scope in graph.scopes.keys() {
+        let descendant_range = push_range(
+            &mut index.scope_descendants,
+            graph
+                .scopes
+                .keys()
+                .filter(|&candidate| scope_is_descendant_or_self(graph, candidate, scope)),
+        );
+        index
+            .scope_descendant_ranges
+            .insert(scope, descendant_range);
+
+        let logical_action_range = push_range(
+            &mut index.scope_logical_actions,
+            graph
+                .action_scopes
+                .iter()
+                .filter_map(|(action_key, &action_scope)| {
+                    (graph.action_is_logical[action_key]
+                        && scope_is_descendant_or_self(graph, action_scope, scope))
+                    .then_some(action_key)
+                }),
+        );
+        index
+            .scope_logical_action_ranges
+            .insert(scope, logical_action_range);
+
+        let timer_startup_range = push_range(
+            &mut index.scope_timer_startups,
+            graph
+                .timer_startup_actions
+                .iter()
+                .copied()
+                .filter(|(action_key, _)| {
+                    let action_scope = graph.action_scopes[*action_key];
+                    scope_is_descendant_or_self(graph, action_scope, scope)
+                }),
+        );
+        index
+            .scope_timer_startup_ranges
+            .insert(scope, timer_startup_range);
+
+        let reset_reaction_range = push_range(
+            &mut index.scope_reset_reactions,
+            graph
+                .reset_reactions
+                .iter()
+                .filter(|(reaction_scope, reactions)| {
+                    !reactions.is_empty()
+                        && scope_is_descendant_or_self(graph, *reaction_scope, scope)
+                })
+                .flat_map(|(_, reactions)| reactions.iter().copied()),
+        );
+        index
+            .scope_reset_reaction_ranges
+            .insert(scope, reset_reaction_range);
+
+        let startup_reaction_range = push_range(
+            &mut index.scope_startup_reactions,
+            graph.startup_reactions[scope].iter().copied(),
+        );
+        index
+            .scope_startup_reaction_ranges
+            .insert(scope, startup_reaction_range);
+    }
+
+    index.all_shutdown_reactions.extend(
+        graph
+            .shutdown_reactions_by_scope
+            .values()
+            .flat_map(|reactions| reactions.iter().copied()),
+    );
+
+    for reaction in &index.all_shutdown_reactions {
+        if !index.all_shutdown_actions_unique.contains(&reaction.action) {
+            index.all_shutdown_actions_unique.push(reaction.action);
+        }
+    }
+
+    index
+}
+
 impl EnvBuilder {
     /// Process the connections and reduce them to a set of port bindings.
     pub(super) fn build_connections(
@@ -149,10 +269,10 @@ impl EnvBuilder {
                     }
                     partitions.push((key, *node_stack.last().unwrap()));
                 }
-                petgraph::visit::DfsEvent::Finish(key, _) => {
-                    if self.reactor_builders[key].is_enclave {
-                        node_stack.pop();
-                    }
+                petgraph::visit::DfsEvent::Finish(key, _)
+                    if self.reactor_builders[key].is_enclave =>
+                {
+                    node_stack.pop();
                 }
                 _ => {}
             }
@@ -180,13 +300,56 @@ impl EnvBuilder {
             let enclave_key = builder_parts.aliases.enclave_aliases[partition_key];
             let enclave = &mut builder_parts.enclaves[enclave_key];
             let bank_info = reactor.bank_info.clone();
+            let scope_mode = reactor.scope_mode;
             let reactor_fqn = &reactor_fqns[builder_reactor_key];
             let runtime_reactor_key =
                 enclave.insert_reactor(reactor.into_runtime(reactor_fqn), bank_info);
             builder_parts
                 .aliases
+                .reactor_scope_modes
+                .insert(builder_reactor_key, scope_mode);
+            builder_parts
+                .aliases
                 .reactor_aliases
                 .insert(builder_reactor_key, (enclave_key, runtime_reactor_key));
+        }
+        Ok(())
+    }
+
+    fn assign_runtime_reactor_scope_parents(
+        &mut self,
+        builder_parts: &mut BuilderRuntimeParts,
+    ) -> Result<(), BuilderError> {
+        for (builder_reactor_key, scope_mode) in &builder_parts.aliases.reactor_scope_modes {
+            let Some(scope_mode) = scope_mode else {
+                continue;
+            };
+            let (enclave_key, runtime_reactor_key) =
+                builder_parts.aliases.reactor_aliases[builder_reactor_key];
+            let (mode_enclave_key, runtime_mode_key) =
+                builder_parts.aliases.mode_aliases[*scope_mode];
+            assert_eq!(enclave_key, mode_enclave_key, "Crosscheck");
+            let enclave = &mut builder_parts.enclaves[enclave_key];
+            let parent_scope = enclave.mode_scope(runtime_mode_key);
+            enclave.set_reactor_scope_parent(runtime_reactor_key, parent_scope);
+        }
+        Ok(())
+    }
+
+    fn build_runtime_modes(
+        &mut self,
+        builder_parts: &mut BuilderRuntimeParts,
+    ) -> Result<(), BuilderError> {
+        for (builder_mode_key, mode) in self.mode_builders.drain() {
+            let (enclave_key, reactor_key) =
+                builder_parts.aliases.reactor_aliases[mode.reactor_key];
+            let enclave = &mut builder_parts.enclaves[enclave_key];
+            let runtime_mode_key =
+                enclave.insert_mode(reactor_key, &mode.name, mode.kind.is_initial());
+            builder_parts
+                .aliases
+                .mode_aliases
+                .insert(builder_mode_key, (enclave_key, runtime_mode_key));
         }
         Ok(())
     }
@@ -267,10 +430,60 @@ impl EnvBuilder {
 
         // Now create the reset reactions for periodic timers, since we can now get &mut self.
         for (name, reaction_fn, reactor_key, action_key) in new_reactions {
-            let _ = PartialReactionBuilder::<()>::new(Some(&name), reactor_key, self)
-                .with_trigger(action_key)
+            let scope_mode = self.action_builders[BuilderActionKey::from(action_key)].scope_mode();
+            let mut reaction = PartialReactionBuilder::<()>::new(Some(&name), reactor_key, self)
+                .with_trigger(action_key);
+            if let Some(scope_mode) = scope_mode {
+                reaction = reaction.in_mode_scope(scope_mode);
+            }
+            let _ = reaction
                 .with_defered_reaction_fn(reaction_fn.defer())
                 .finish()?;
+        }
+
+        Ok(())
+    }
+
+    fn assign_runtime_action_and_port_scopes(
+        &mut self,
+        builder_parts: &mut BuilderRuntimeParts,
+        port_bindings: &PortBindings,
+    ) -> Result<(), BuilderError> {
+        for (builder_action_key, action) in &self.action_builders {
+            let (enclave_key, action_key) =
+                match builder_parts.aliases.action_aliases.get(builder_action_key) {
+                    Some(alias) => *alias,
+                    None => continue,
+                };
+            let enclave = &mut builder_parts.enclaves[enclave_key];
+            let scope = if let Some(mode_key) = action.scope_mode() {
+                let (mode_enclave_key, runtime_mode_key) =
+                    builder_parts.aliases.mode_aliases[mode_key];
+                assert_eq!(enclave_key, mode_enclave_key, "Crosscheck");
+                enclave.mode_scope(runtime_mode_key)
+            } else {
+                let (reactor_enclave_key, runtime_reactor_key) =
+                    builder_parts.aliases.reactor_aliases[action.reactor_key()];
+                assert_eq!(enclave_key, reactor_enclave_key, "Crosscheck");
+                enclave.root_scope(runtime_reactor_key)
+            };
+            enclave.insert_action_scope(action_key, scope);
+        }
+
+        for (builder_port_key, _port) in &self.port_builders {
+            let (enclave_key, port_key) =
+                match builder_parts.aliases.port_aliases.get(builder_port_key) {
+                    Some(alias) => *alias,
+                    None => continue,
+                };
+            let inward_port_key = port_bindings.follow_port_inward(builder_port_key);
+            let port = &self.port_builders[inward_port_key];
+            let enclave = &mut builder_parts.enclaves[enclave_key];
+            let (reactor_enclave_key, runtime_reactor_key) =
+                builder_parts.aliases.reactor_aliases[port.get_reactor_key()];
+            assert_eq!(enclave_key, reactor_enclave_key, "Crosscheck");
+            let scope = enclave.root_scope(runtime_reactor_key);
+            enclave.insert_port_scope(port_key, scope);
         }
 
         Ok(())
@@ -384,9 +597,26 @@ impl EnvBuilder {
                 .iter()
                 .map(|builder_port_key| builder_parts.aliases.port_aliases[*builder_port_key].1);
 
-            let actions = action_keys
-                .iter()
-                .map(|builder_action_key| builder_parts.aliases.action_aliases[*builder_action_key].1);
+            let actions = action_keys.iter().map(|builder_action_key| {
+                builder_parts.aliases.action_aliases[*builder_action_key].1
+            });
+
+            let mode_filter = reaction.enabled_modes.as_ref().map(|modes| {
+                let runtime_modes = modes
+                    .iter()
+                    .map(|mode_key| builder_parts.aliases.mode_aliases[*mode_key].1)
+                    .collect();
+                runtime::ModeFilter::new(runtime_modes)
+            });
+
+            let reaction_scope = if let Some(mode_key) = reaction.scope_mode {
+                let (mode_enclave_key, runtime_mode_key) =
+                    builder_parts.aliases.mode_aliases[mode_key];
+                assert_eq!(enclave_key, mode_enclave_key, "Crosscheck");
+                enclave.mode_scope(runtime_mode_key)
+            } else {
+                enclave.root_scope(runtime_reactor_key)
+            };
 
             let runtime_reaction_key = enclave.insert_reaction(
                 runtime::Reaction::new(&reaction_name, reaction_body, None),
@@ -394,9 +624,15 @@ impl EnvBuilder {
                 use_ports,
                 effect_ports,
                 actions,
+                reaction_scope,
+                mode_filter,
             );
 
             let level_reaction = (reaction_levels[builder_reaction_key], runtime_reaction_key);
+
+            if reaction.reset_trigger {
+                enclave.insert_reset_trigger(reaction_scope, level_reaction);
+            }
 
             for (builder_port_key, tm) in &reaction.port_relations {
                 let port_key = builder_parts.aliases.port_aliases[builder_port_key].1;
@@ -410,13 +646,28 @@ impl EnvBuilder {
                 if tm.is_triggers() {
                     enclave.insert_action_trigger(action_key, level_reaction);
 
-                    match self.action_builders[builder_action_key].r#type() {
+                    let action_builder = &self.action_builders[builder_action_key];
+                    match action_builder.r#type() {
                         ActionType::Timer(timer_spec) => {
                             let tag = runtime::Tag::new(timer_spec.offset.unwrap_or_default(), 0);
                             enclave.insert_startup_action(action_key, tag);
+                            if action_builder.name() == "__startup" {
+                                enclave.insert_startup_trigger(
+                                    reaction_scope,
+                                    action_key,
+                                    level_reaction,
+                                );
+                            } else {
+                                enclave.insert_timer_startup_action(action_key, tag);
+                            }
                         }
                         ActionType::Shutdown => {
                             enclave.insert_shutdown_action(action_key);
+                            enclave.insert_shutdown_trigger(
+                                reaction_scope,
+                                action_key,
+                                level_reaction,
+                            );
                         }
                         _ => {}
                     }
@@ -463,12 +714,20 @@ impl EnvBuilder {
         let reaction_levels = self.build_runtime_level_map(&port_bindings)?;
 
         self.build_runtime_reactors(&partition_map, &mut builder_parts)?;
+        self.build_runtime_modes(&mut builder_parts)?;
+        self.assign_runtime_reactor_scope_parents(&mut builder_parts)?;
+        self.assign_runtime_action_and_port_scopes(&mut builder_parts, &port_bindings)?;
 
         // must be done last, since building other parts may add new reactions
         self.build_runtime_reactions(&partition_map, &mut builder_parts, &reaction_levels)?;
 
         #[cfg(feature = "replay")]
         self.build_runtime_replayers(&mut builder_parts)?;
+
+        for enclave in builder_parts.enclaves.values_mut() {
+            let modal_schedule_index = build_modal_schedule_index(&enclave.graph);
+            enclave.graph.modal_schedule_index = modal_schedule_index;
+        }
 
         Ok(builder_parts)
     }

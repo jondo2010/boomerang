@@ -1,7 +1,35 @@
 use crate::{
     event::AsyncEvent, keepalive, ActionCommon, ActionKey, ActionRef, BankInfo, Duration,
-    EnclaveKey, ReactionGraph, ReactionKey, ReactorData, Tag,
+    EnclaveKey, ModeKey, ReactionGraph, ReactionKey, ReactorData, Tag, TransitionKind,
 };
+
+/// A mode transition requested by a reaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModeTransitionRequest {
+    pub target: ModeKey,
+    pub transition: TransitionKind,
+}
+
+/// A typed mode transition effect passed into a reaction closure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModeEffectRef {
+    target: ModeKey,
+    transition: TransitionKind,
+}
+
+impl ModeEffectRef {
+    pub fn new_key(target: ModeKey, transition: TransitionKind) -> Self {
+        Self { target, transition }
+    }
+
+    /// Request this mode transition after the current reaction finishes.
+    pub fn set(&self, ctx: &mut Context) {
+        ctx.set_mode_transition(ModeTransitionRequest {
+            target: self.target,
+            transition: self.transition,
+        });
+    }
+}
 
 /// Result from a reaction trigger
 #[derive(Debug, Clone)]
@@ -10,6 +38,8 @@ pub(crate) struct TriggerRes {
     pub scheduled_actions: Vec<(ActionKey, Tag)>,
     /// A shutdown was scheduled
     pub scheduled_shutdown: Option<Tag>,
+    /// A mode transition was scheduled
+    pub scheduled_mode: Option<ModeTransitionRequest>,
 }
 
 /// Scheduler context passed into reactor functions.
@@ -110,6 +140,7 @@ impl Context {
             trigger_res: TriggerRes {
                 scheduled_actions: Vec::new(),
                 scheduled_shutdown: None,
+                scheduled_mode: None,
             },
         }
     }
@@ -118,6 +149,7 @@ impl Context {
         self.tag = tag;
         self.trigger_res.scheduled_actions.clear();
         self.trigger_res.scheduled_shutdown = None;
+        self.trigger_res.scheduled_mode = None;
     }
 
     /// Get the physical start time of the scheduler
@@ -201,6 +233,10 @@ impl Context {
         self.trigger_res
             .scheduled_actions
             .push((action.key(), new_tag));
+    }
+
+    pub(crate) fn set_mode_transition(&mut self, request: ModeTransitionRequest) {
+        self.trigger_res.scheduled_mode = Some(request);
     }
 }
 
@@ -333,10 +369,9 @@ mod tests {
         ctx.reset_for_reaction(Tag::ZERO);
 
         let mut action = Action::<u32>::new("test", ActionKey::from(0), None, true);
-        let mut action_ref = ActionRef::<u32>::try_from(DynActionRefMut(
-            &mut action as &mut dyn BaseAction,
-        ))
-        .expect("action ref");
+        let mut action_ref =
+            ActionRef::<u32>::try_from(DynActionRefMut(&mut action as &mut dyn BaseAction))
+                .expect("action ref");
 
         ctx.schedule_action(&mut action_ref, 1, None);
         ctx.schedule_action(&mut action_ref, 2, None);

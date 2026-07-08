@@ -35,7 +35,7 @@ boomerang_macros = { workspace = true }
 
 [dev-dependencies]
 boomerang_util = { path = "../boomerang_util", features = ["runner", "replay"] }
-criterion = "0.8"
+criterion = "0.5"
 serde = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-tracy = { workspace = true }
@@ -56,4 +56,12 @@ harness = false
 
 [[bench]]
 name = "port_bank"
+harness = false
+
+[[bench]]
+name = "modal_modes"
+harness = false
+
+[[bench]]
+name = "modal_scheduler_perf"
 harness = false

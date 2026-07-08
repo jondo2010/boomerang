@@ -44,6 +44,7 @@ fn bench(c: &mut Criterion) {
                             HelloBench { my_i: 0 },
                             None,
                             None,
+                            None,
                             false,
                             &mut env_builder,
                         )

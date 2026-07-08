@@ -3,6 +3,8 @@
 #![doc = document_features::document_features!()]
 #![deny(clippy::all)]
 
+pub use ::time::Duration;
+
 pub mod action;
 mod context;
 mod env;
@@ -20,9 +22,6 @@ mod sched;
 pub mod store;
 mod time;
 
-// Re-exports
-pub use ::time::Duration;
-
 pub use action::{
     Action, ActionCommon, ActionKey, ActionRef, AsyncActionRef, BaseAction, DynActionRef,
     DynActionRefMut,
@@ -30,7 +29,9 @@ pub use action::{
 pub use context::*;
 use downcast_rs::Downcast;
 pub use env::{
-    crosslink_enclaves, BankInfo, Enclave, EnclaveKey, Env, Level, LevelReactionKey, ReactionGraph,
+    crosslink_enclaves, BankInfo, Enclave, EnclaveKey, Env, Level, LevelReactionKey,
+    LifecycleReaction, ModalScheduleIndex, Mode, ModeFilter, ModeKey, ReactionGraph, ScopeInfo,
+    ScopeKey, TransitionKind,
 };
 pub use kanal::{Receiver, Sender};
 pub use key_set::KeySetLimits as ReactionSetLimits;

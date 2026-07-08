@@ -39,6 +39,11 @@ pub fn create_dummy_env() -> (Env, ReactionGraph) {
     reaction_graph
         .reaction_reactors
         .insert(reaction_key, reactor_key);
+    reaction_graph.reaction_modes.insert(reaction_key, None);
+    reaction_graph.reactor_modes.insert(reactor_key, Vec::new());
+    reaction_graph
+        .reactor_initial_modes
+        .insert(reactor_key, None);
 
     (env, reaction_graph)
 }
@@ -54,9 +59,12 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
     let enclave_b = &mut enclaves[key_b];
 
     let reactor_b = enclave_b.insert_reactor(Reactor::new("reactorB", false).boxed(), None);
+    let reactor_b_scope = enclave_b.root_scope(reactor_b);
     let port_b = enclave_b.insert_port(|key| Port::<u32>::new("portB", key).boxed());
+    enclave_b.insert_port_scope(port_b, reactor_b_scope);
     let action_b =
         enclave_b.insert_action(|key| Action::<u32>::new("actionB", key, None, true).boxed());
+    enclave_b.insert_action_scope(action_b, reactor_b_scope);
 
     // receiver-side has a reaction that reads the value from 'portB' and prints it.
     let reaction_output = enclave_b.insert_reaction(
@@ -76,6 +84,8 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
         std::iter::once(port_b),
         std::iter::empty(),
         std::iter::empty(),
+        reactor_b_scope,
+        None,
     );
 
     // portB triggers reactionOutput
@@ -92,6 +102,8 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
         std::iter::empty(),
         std::iter::once(port_b),
         std::iter::once(action_b),
+        reactor_b_scope,
+        None,
     );
 
     // actionB triggers reactionB
@@ -105,8 +117,10 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
     let enclave_a = &mut enclaves[key_a];
 
     let reactor_a = enclave_a.insert_reactor(Reactor::new("reactorA", ()).boxed(), None);
+    let reactor_a_scope = enclave_a.root_scope(reactor_a);
     // sender-side has a startup reaction that sets the value of 'portA' to 42.
     let port_a = enclave_a.insert_port(|key| Port::<u32>::new("portA", key).boxed());
+    enclave_a.insert_port_scope(port_a, reactor_a_scope);
 
     let reaction_startup = enclave_a.insert_reaction(
         Reaction::new(
@@ -124,11 +138,14 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
         // portA is effected by reactionStartup
         std::iter::once(port_a),
         std::iter::empty(),
+        reactor_a_scope,
+        None,
     );
 
     // startup action triggers reactionStartup
     let startup_action =
         enclave_a.insert_action(|key| Action::<()>::new("startup", key, None, true).boxed());
+    enclave_a.insert_action_scope(startup_action, reactor_a_scope);
     enclave_a.insert_startup_action(startup_action, Tag::ZERO);
     enclave_a.insert_action_trigger(startup_action, (Level::from(0), reaction_startup));
 
@@ -148,6 +165,8 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
         std::iter::once(port_a),
         std::iter::empty(),
         std::iter::empty(),
+        reactor_a_scope,
+        None,
     );
 
     // portA triggers reactionA
@@ -157,6 +176,98 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
     crate::crosslink_enclaves(&mut enclaves, key_a, key_b, None);
 
     enclaves
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn reaction_graph_serde_preserves_modal_schedule_index() {
+    fn range(start: usize, end: usize) -> core::range::Range<usize> {
+        core::range::Range { start, end }
+    }
+
+    let mut enclave = Enclave::default();
+    let reactor = enclave.insert_reactor(Reactor::new("modal", ()).boxed(), None);
+    let root_scope = enclave.root_scope(reactor);
+    let mode = enclave.insert_mode(reactor, "running", true);
+    let mode_scope = enclave.mode_scope(mode);
+
+    let logical_action =
+        enclave.insert_action(|key| Action::<()>::new("logical", key, None, true).boxed());
+    enclave.insert_action_scope(logical_action, mode_scope);
+    enclave.insert_timer_startup_action(logical_action, Tag::ZERO);
+
+    let startup_action =
+        enclave.insert_action(|key| Action::<()>::new("startup", key, None, true).boxed());
+    enclave.insert_action_scope(startup_action, mode_scope);
+
+    let reaction = enclave.insert_reaction(
+        Reaction::new("reaction", reaction_closure!(), None),
+        reactor,
+        std::iter::empty::<PortKey>(),
+        std::iter::empty::<PortKey>(),
+        std::iter::once(logical_action),
+        mode_scope,
+        None,
+    );
+    enclave.insert_reset_trigger(mode_scope, (Level::from(0), reaction));
+    enclave.insert_startup_trigger(mode_scope, startup_action, (Level::from(0), reaction));
+
+    let mut modal_schedule_index = ModalScheduleIndex {
+        scope_descendants: vec![root_scope, mode_scope],
+        scope_logical_actions: vec![logical_action],
+        scope_timer_startups: vec![(logical_action, Tag::ZERO)],
+        scope_reset_reactions: vec![(Level::from(0), reaction)],
+        scope_startup_reactions: vec![LifecycleReaction {
+            reaction: (Level::from(0), reaction),
+            action: startup_action,
+        }],
+        all_shutdown_reactions: vec![LifecycleReaction {
+            reaction: (Level::from(1), reaction),
+            action: startup_action,
+        }],
+        all_shutdown_actions_unique: vec![startup_action],
+        ..Default::default()
+    };
+    modal_schedule_index
+        .scope_descendant_ranges
+        .insert(root_scope, range(0, 2));
+    modal_schedule_index
+        .scope_descendant_ranges
+        .insert(mode_scope, range(1, 2));
+    modal_schedule_index
+        .scope_logical_action_ranges
+        .insert(root_scope, range(0, 1));
+    modal_schedule_index
+        .scope_logical_action_ranges
+        .insert(mode_scope, range(0, 1));
+    modal_schedule_index
+        .scope_timer_startup_ranges
+        .insert(root_scope, range(0, 1));
+    modal_schedule_index
+        .scope_timer_startup_ranges
+        .insert(mode_scope, range(0, 1));
+    modal_schedule_index
+        .scope_reset_reaction_ranges
+        .insert(root_scope, range(0, 1));
+    modal_schedule_index
+        .scope_reset_reaction_ranges
+        .insert(mode_scope, range(0, 1));
+    modal_schedule_index
+        .scope_startup_reaction_ranges
+        .insert(root_scope, range(0, 0));
+    modal_schedule_index
+        .scope_startup_reaction_ranges
+        .insert(mode_scope, range(0, 1));
+    enclave.graph.modal_schedule_index = modal_schedule_index;
+
+    let serialized = serde_json::to_string(&enclave.graph).unwrap();
+    assert!(serialized.contains("modal_schedule_index"));
+
+    let deserialized: ReactionGraph = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(
+        deserialized.modal_schedule_index,
+        enclave.graph.modal_schedule_index
+    );
 }
 
 #[test]

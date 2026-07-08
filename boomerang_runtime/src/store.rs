@@ -1,4 +1,9 @@
-//! Runtime data storage
+//! Runtime execution storage.
+//!
+//! `ReactionGraph` owns static topology and lookup indexes. `Store` owns the
+//! pinned runtime objects used while executing reactions, plus per-reaction
+//! caches into those objects. Scheduler state such as queues, clocks, and the
+//! current modal state should live outside this module.
 
 use std::{pin::Pin, ptr::NonNull};
 
@@ -98,6 +103,9 @@ impl Default for ReactionTriggerCtxPtrs {
 
 unsafe impl Send for ReactionTriggerCtxPtrs {}
 
+/// Pinned runtime objects addressed by reaction trigger caches.
+///
+/// These are execution objects, not static graph indexes or scheduler state.
 #[derive(Debug)]
 struct Inner {
     contexts: tinymap::TinySecondaryMap<ReactionKey, Context>,
@@ -107,12 +115,13 @@ struct Inner {
     ports: tinymap::TinyMap<PortKey, Box<dyn BasePort>>,
 }
 
+/// Pinned runtime object store plus per-reaction trigger caches.
 #[derive(Debug)]
 #[pin_project::pin_project]
 pub struct Store {
     #[pin]
     inner: Inner,
-    /// Internal caches of `ReactionTriggerCtxPtrs`
+    /// Per-reaction cached pointers into `inner` for building `ReactionTriggerCtx`.
     #[pin]
     caches: tinymap::TinySecondaryMap<ReactionKey, ReactionTriggerCtxPtrs>,
 }
@@ -177,24 +186,24 @@ impl Store {
                 .iter_many_unchecked_mut(inner.reactions.keys())
                 .map(|r| NonNull::new_unchecked(r));
 
-        let action_keys = reaction_graph
-            .reaction_actions
-            .values()
-            .map(|actions| actions.iter().copied());
+            let action_keys = reaction_graph
+                .reaction_actions
+                .values()
+                .map(|actions| actions.iter().copied());
 
             let (_, grouped_actions) = inner
                 .actions
                 .iter_ptr_chunks_split_unchecked(std::iter::empty(), action_keys);
 
-        let port_ref_keys = reaction_graph
-            .reaction_use_ports
-            .values()
-            .map(|ports| ports.iter().copied());
+            let port_ref_keys = reaction_graph
+                .reaction_use_ports
+                .values()
+                .map(|ports| ports.iter().copied());
 
-        let port_mut_keys = reaction_graph
-            .reaction_effect_ports
-            .values()
-            .map(|ports| ports.iter().copied());
+            let port_mut_keys = reaction_graph
+                .reaction_effect_ports
+                .values()
+                .map(|ports| ports.iter().copied());
 
             let (grouped_ref_ports, grouped_mut_ports) = inner
                 .ports
@@ -236,6 +245,25 @@ impl Store {
         // SAFETY: we are projecting to a field, not moving anything from self
         let actions = &mut self.as_mut().project().inner.actions;
         actions[action_key].push_value(tag, value);
+    }
+
+    pub fn reschedule_action_value(
+        self: &mut Pin<Box<Self>>,
+        action_key: ActionKey,
+        from: Tag,
+        to: Tag,
+    ) {
+        if from == to {
+            return;
+        }
+
+        let actions = &mut self.as_mut().project().inner.actions;
+        actions[action_key].reschedule_value(from, to);
+    }
+
+    pub fn clear_action_values(self: &mut Pin<Box<Self>>, action_key: ActionKey) {
+        let actions = &mut self.as_mut().project().inner.actions;
+        actions[action_key].clear_values();
     }
 
     /// Returns an `Iterator` of `ReactionTriggerCtx` for each `Reaction` in the given

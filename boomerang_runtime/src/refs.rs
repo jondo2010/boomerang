@@ -337,7 +337,9 @@ impl<'a, P> Partition<'a, dyn BasePort> for P
 where
     P: TryFrom<DynPortRef<'a>, Error = ReactionRefsError>,
 {
-    fn part(mut refs: Refs<'a, dyn BasePort>) -> Result<(Self, Refs<'a, dyn BasePort>), ReactionRefsError> {
+    fn part(
+        mut refs: Refs<'a, dyn BasePort>,
+    ) -> Result<(Self, Refs<'a, dyn BasePort>), ReactionRefsError> {
         let port = refs
             .next()
             .ok_or_else(|| ReactionRefsError::missing("port"))?;
@@ -351,7 +353,9 @@ impl<'a, P, const N: usize> Partition<'a, dyn BasePort> for [P; N]
 where
     P: TryFrom<DynPortRef<'a>, Error = ReactionRefsError>,
 {
-    fn part(mut refs: Refs<'a, dyn BasePort>) -> Result<(Self, Refs<'a, dyn BasePort>), ReactionRefsError> {
+    fn part(
+        mut refs: Refs<'a, dyn BasePort>,
+    ) -> Result<(Self, Refs<'a, dyn BasePort>), ReactionRefsError> {
         if refs.len() < N {
             return Err(ReactionRefsError::missing("port"));
         }
@@ -382,7 +386,9 @@ impl<'a, P> PartitionMut<'a, dyn BasePort> for P
 where
     P: TryFrom<DynPortRefMut<'a>, Error = ReactionRefsError>,
 {
-    fn part_mut(mut refs: RefsMut<'a, dyn BasePort>) -> Result<(Self, RefsMut<'a, dyn BasePort>), ReactionRefsError> {
+    fn part_mut(
+        mut refs: RefsMut<'a, dyn BasePort>,
+    ) -> Result<(Self, RefsMut<'a, dyn BasePort>), ReactionRefsError> {
         let port = refs
             .next()
             .ok_or_else(|| ReactionRefsError::missing("port"))?;
@@ -396,7 +402,9 @@ impl<'a, P, const N: usize> PartitionMut<'a, dyn BasePort> for [P; N]
 where
     P: TryFrom<DynPortRefMut<'a>, Error = ReactionRefsError>,
 {
-    fn part_mut(mut refs: RefsMut<'a, dyn BasePort>) -> Result<(Self, RefsMut<'a, dyn BasePort>), ReactionRefsError> {
+    fn part_mut(
+        mut refs: RefsMut<'a, dyn BasePort>,
+    ) -> Result<(Self, RefsMut<'a, dyn BasePort>), ReactionRefsError> {
         if refs.len() < N {
             return Err(ReactionRefsError::missing("port"));
         }
@@ -563,7 +571,8 @@ mod tests {
         };
 
         let refs_mut = RefsMut::new(&mut ptrs);
-        let (p1, p2a): (OutputRef<u32>, [OutputRef<bool>; 2]) = refs_mut.partition_mut().expect("partition_mut");
+        let (p1, p2a): (OutputRef<u32>, [OutputRef<bool>; 2]) =
+            refs_mut.partition_mut().expect("partition_mut");
 
         assert_eq!(p1.name(), "p1");
         assert_eq!(p2a[0].name(), "p2a");
@@ -604,7 +613,8 @@ mod tests {
 
         let mut empty_vec: Vec<NonNull<dyn BasePort>> = Vec::new();
         let refs_mut = RefsMut::new(&mut empty_vec);
-        let result: Result<(OutputRef<i32>, OutputRef<u32>), ReactionRefsError> = refs_mut.partition_mut();
+        let result: Result<(OutputRef<i32>, OutputRef<u32>), ReactionRefsError> =
+            refs_mut.partition_mut();
         assert!(matches!(result, Err(ReactionRefsError::Missing { .. })));
     }
 }

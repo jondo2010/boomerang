@@ -1,3 +1,9 @@
+//! Build-time environment lowering.
+//!
+//! The builder owns the linear construction pass that turns reactor declarations into
+//! `boomerang_runtime` data, including static dependency maps and derived scheduler indexes. The
+//! runtime receives those data structures ready to execute.
+
 use crate::{
     connection::{BaseConnectionBuilder, ConnectionBuilder, PortBindings},
     port::Contained,
@@ -6,10 +12,13 @@ use crate::{
 };
 
 use super::{
-    action::ActionBuilder, port::BasePortBuilder, port::PortBuilder, reaction::ReactionBuilder,
-    runtime, ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey,
-    BuilderReactionKey, BuilderReactorKey, Input, Logical, Output, PortTag, ReactorBuilder,
-    ReactorBuilderState, TypedActionKey, TypedPortKey,
+    action::ActionBuilder,
+    port::BasePortBuilder,
+    port::PortBuilder,
+    reaction::{BuilderModeEffect, ReactionBuilder},
+    runtime, ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderModeKey,
+    BuilderPortKey, BuilderReactionKey, BuilderReactorKey, Input, Logical, ModeKind, Output,
+    PortTag, ReactorBuilder, ReactorBuilderState, TypedActionKey, TypedPortKey,
 };
 use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, EdgeDirection};
@@ -60,6 +69,13 @@ mod util {
 #[cfg(feature = "replay")]
 type ReplayFunctionBuilder = dyn FnOnce(&BuilderRuntimeParts) -> Box<dyn runtime::replay::ReplayFn>;
 
+#[derive(Debug)]
+pub struct ModeBuilder {
+    pub name: String,
+    pub reactor_key: BuilderReactorKey,
+    pub kind: ModeKind,
+}
+
 #[derive(Default)]
 pub struct EnvBuilder {
     /// Builder for Actions
@@ -68,6 +84,8 @@ pub struct EnvBuilder {
     pub(super) port_builders: SlotMap<BuilderPortKey, Box<dyn BasePortBuilder>>,
     /// Builders for Reactions
     pub(super) reaction_builders: SlotMap<BuilderReactionKey, ReactionBuilder>,
+    /// Builders for Modes
+    pub(super) mode_builders: SlotMap<BuilderModeKey, ModeBuilder>,
     /// Builders for Reactors
     pub(super) reactor_builders: SlotMap<BuilderReactorKey, ReactorBuilder>,
     /// Builders for Connections
@@ -163,6 +181,7 @@ impl EnvBuilder {
         self.add_action_impl::<(), Logical>(
             name,
             reactor_key,
+            None,
             ActionType::Timer(TimerSpec::STARTUP),
         )
     }
@@ -172,7 +191,64 @@ impl EnvBuilder {
         name: &str,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey, BuilderError> {
-        self.add_action_impl::<(), Logical>(name, reactor_key, ActionType::Shutdown)
+        self.add_action_impl::<(), Logical>(name, reactor_key, None, ActionType::Shutdown)
+    }
+
+    pub fn add_mode(
+        &mut self,
+        name: &str,
+        reactor_key: BuilderReactorKey,
+        kind: impl Into<ModeKind>,
+    ) -> Result<BuilderModeKey, BuilderError> {
+        let kind = kind.into();
+        let reactor_builder = &mut self.reactor_builders[reactor_key];
+        if reactor_builder.modes.keys().any(|mode_key| {
+            self.mode_builders[mode_key].name == name
+                && self.mode_builders[mode_key].reactor_key == reactor_key
+        }) {
+            return Err(BuilderError::DuplicateModeDefinition {
+                reactor_name: reactor_builder.name().to_owned(),
+                mode_name: name.to_owned(),
+            });
+        }
+
+        if kind.is_initial() && reactor_builder.initial_mode.is_some() {
+            return Err(BuilderError::MultipleInitialModes {
+                reactor_name: reactor_builder.name().to_owned(),
+            });
+        }
+
+        let key = self.mode_builders.insert(ModeBuilder {
+            name: name.to_owned(),
+            reactor_key,
+            kind,
+        });
+
+        reactor_builder.modes.insert(key, ());
+        if kind.is_initial() {
+            reactor_builder.initial_mode = Some(key);
+        }
+
+        Ok(key)
+    }
+
+    pub fn mode_effect(
+        &self,
+        reactor_key: BuilderReactorKey,
+        mode_key: BuilderModeKey,
+        transition: runtime::TransitionKind,
+    ) -> Result<BuilderModeEffect, BuilderError> {
+        let mode = self.mode_builders.get(mode_key).ok_or_else(|| {
+            BuilderError::ReactionBuilderError(format!("Unknown mode key {mode_key:?}"))
+        })?;
+        if mode.reactor_key != reactor_key {
+            return Err(BuilderError::ReactionBuilderError(format!(
+                "Mode '{}' does not belong to reactor '{}'",
+                mode.name,
+                self.reactor_builders[reactor_key].name()
+            )));
+        }
+        Ok(BuilderModeEffect::new(mode_key, transition))
     }
 
     /// Add a Timer Action to the given Reactor
@@ -182,8 +258,22 @@ impl EnvBuilder {
         reactor_key: BuilderReactorKey,
         timer_spec: TimerSpec,
     ) -> Result<TimerActionKey, BuilderError> {
-        let action_key =
-            self.add_action_impl::<(), Logical>(name, reactor_key, ActionType::Timer(timer_spec))?;
+        self.add_timer_action_in_scope(name, reactor_key, None, timer_spec)
+    }
+
+    pub(crate) fn add_timer_action_in_scope(
+        &mut self,
+        name: &str,
+        reactor_key: BuilderReactorKey,
+        scope_mode: Option<BuilderModeKey>,
+        timer_spec: TimerSpec,
+    ) -> Result<TimerActionKey, BuilderError> {
+        let action_key = self.add_action_impl::<(), Logical>(
+            name,
+            reactor_key,
+            scope_mode,
+            ActionType::Timer(timer_spec),
+        )?;
         Ok(TimerActionKey::from(BuilderActionKey::from(action_key)))
     }
 
@@ -194,9 +284,20 @@ impl EnvBuilder {
         min_delay: Option<runtime::Duration>,
         reactor_key: BuilderReactorKey,
     ) -> Result<TypedActionKey<T, Q>, BuilderError> {
+        self.add_action_in_scope::<T, Q>(name, min_delay, reactor_key, None)
+    }
+
+    pub(crate) fn add_action_in_scope<T: runtime::ReactorData, Q: ActionTag>(
+        &mut self,
+        name: &str,
+        min_delay: Option<runtime::Duration>,
+        reactor_key: BuilderReactorKey,
+        scope_mode: Option<BuilderModeKey>,
+    ) -> Result<TypedActionKey<T, Q>, BuilderError> {
         self.add_action_impl::<T, Q>(
             name,
             reactor_key,
+            scope_mode,
             ActionType::Standard {
                 is_logical: Q::IS_LOGICAL,
                 min_delay,
@@ -212,12 +313,27 @@ impl EnvBuilder {
         &mut self,
         name: &str,
         reactor_key: BuilderReactorKey,
+        scope_mode: Option<BuilderModeKey>,
         r#type: ActionType,
     ) -> Result<TypedActionKey<T, Q>, BuilderError>
     where
         T: runtime::ReactorData,
     {
         let reactor_builder = &mut self.reactor_builders[reactor_key];
+
+        if let Some(mode_key) = scope_mode {
+            let mode = self.mode_builders.get(mode_key).ok_or_else(|| {
+                BuilderError::ReactionBuilderError(format!(
+                    "Unknown mode key {mode_key:?} for action '{name}'"
+                ))
+            })?;
+            if mode.reactor_key != reactor_key {
+                return Err(BuilderError::ReactionBuilderError(format!(
+                    "Mode '{}' does not belong to action '{name}'",
+                    mode.name
+                )));
+            }
+        }
 
         // Ensure no duplicates
         if reactor_builder
@@ -231,9 +347,9 @@ impl EnvBuilder {
             });
         }
 
-        let key = self
-            .action_builders
-            .insert(ActionBuilder::new(name, reactor_key, r#type));
+        let key =
+            self.action_builders
+                .insert(ActionBuilder::new(name, reactor_key, scope_mode, r#type));
 
         reactor_builder.actions.insert(key, ());
 
@@ -421,6 +537,24 @@ impl EnvBuilder {
         P1: Into<BuilderPortKey>,
         P2: Into<BuilderPortKey>,
     {
+        self.add_port_connection_in_scope::<T, P1, P2>(
+            source_key, target_key, None, after, physical,
+        )
+    }
+
+    pub(crate) fn add_port_connection_in_scope<T, P1, P2>(
+        &mut self,
+        source_key: P1,
+        target_key: P2,
+        scope_mode: Option<BuilderModeKey>,
+        after: Option<runtime::Duration>,
+        physical: bool,
+    ) -> Result<(), BuilderError>
+    where
+        T: runtime::ReactorData + Clone,
+        P1: Into<BuilderPortKey>,
+        P2: Into<BuilderPortKey>,
+    {
         let source_key = source_key.into();
         let target_key = target_key.into();
 
@@ -435,6 +569,7 @@ impl EnvBuilder {
                 source_key,
                 target_key,
                 after,
+                scope_mode,
                 _phantom: Default::default(),
             })
         } else {
@@ -442,6 +577,7 @@ impl EnvBuilder {
                 source_key,
                 target_key,
                 after,
+                scope_mode,
                 _phantom: Default::default(),
             })
         });
@@ -546,13 +682,16 @@ impl EnvBuilder {
                                 }
                             })
                     })
+                    .filter(move |&dep_key| {
+                        !self.reactions_are_mutually_exclusive(reaction_key, dep_key)
+                    })
                     .map(move |dep_key| (reaction_key, dep_key))
             });
 
         // For all Reactions within a Reactor, create a chain of dependencies by priority. This
         // ensures that Reactions within a Reactor always end up at unique levels.
         let internal = self.reactor_builders.values().flat_map(move |reactor| {
-            reactor
+            let reactions = reactor
                 .reactions
                 .keys()
                 .sorted_by_key(|&reaction_key| {
@@ -560,9 +699,58 @@ impl EnvBuilder {
                     reaction_key.data().as_ffi()
                 })
                 .rev()
-                .tuple_windows()
+                .collect_vec();
+
+            let mut edges = Vec::new();
+            for (idx, reaction_key) in reactions.iter().copied().enumerate() {
+                for dep_key in reactions.iter().copied().skip(idx + 1) {
+                    if !self.reactions_are_mutually_exclusive(reaction_key, dep_key) {
+                        edges.push((reaction_key, dep_key));
+                    }
+                }
+            }
+            edges
         });
         deps.chain(internal)
+    }
+
+    fn reactions_are_mutually_exclusive(
+        &self,
+        a: BuilderReactionKey,
+        b: BuilderReactionKey,
+    ) -> bool {
+        let a_modes = self.enclosing_modes_for_reaction(a);
+        let b_modes = self.enclosing_modes_for_reaction(b);
+
+        a_modes.iter().any(|&a_mode| {
+            b_modes.iter().any(|&b_mode| {
+                a_mode != b_mode
+                    && self.mode_builders[a_mode].reactor_key
+                        == self.mode_builders[b_mode].reactor_key
+            })
+        })
+    }
+
+    fn enclosing_modes_for_reaction(
+        &self,
+        reaction_key: BuilderReactionKey,
+    ) -> Vec<BuilderModeKey> {
+        let reaction = &self.reaction_builders[reaction_key];
+        let mut modes = Vec::new();
+        if let Some(mode) = reaction.scope_mode {
+            modes.push(mode);
+        }
+
+        let mut reactor_key = Some(reaction.reactor_key);
+        while let Some(key) = reactor_key {
+            let reactor = &self.reactor_builders[key];
+            if let Some(mode) = reactor.scope_mode {
+                modes.push(mode);
+            }
+            reactor_key = reactor.parent_reactor_key;
+        }
+
+        modes
     }
 
     /// Build a DAG of Reactions

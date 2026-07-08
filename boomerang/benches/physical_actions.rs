@@ -43,19 +43,19 @@ fn bench(c: &mut Criterion) {
                             },
                             None,
                             None,
+                            None,
                             false,
                             &mut env_builder,
                         )
                         .unwrap();
-                    let action_key = env_builder
-                        .find_physical_action_by_fqn("main/a")
-                        .unwrap();
+                    let action_key = env_builder.find_physical_action_by_fqn("main/a").unwrap();
                     let config = runtime::Config::default()
                         .with_fast_forward(false)
                         .with_keep_alive(true)
                         .with_queue_size(65_536);
-                    let BuilderRuntimeParts { enclaves, aliases, .. } =
-                        env_builder.into_runtime_parts(&config).unwrap();
+                    let BuilderRuntimeParts {
+                        enclaves, aliases, ..
+                    } = env_builder.into_runtime_parts(&config).unwrap();
                     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
                     let (action_enclave_key, action_key) = aliases.action_aliases[action_key];
                     assert_eq!(

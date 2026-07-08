@@ -137,7 +137,7 @@ impl ToTokens for Model {
                 PortType::Input => quote!(::boomerang::builder::Input),
                 PortType::Output => quote!(::boomerang::builder::Output),
             };
-            
+
             // Determine if this is an array type and handle appropriately
             match ty {
                 syn::Type::Array(array) => {
@@ -161,7 +161,7 @@ impl ToTokens for Model {
                 PortType::Input => quote!(::boomerang::builder::Input),
                 PortType::Output => quote!(::boomerang::builder::Output),
             };
-            
+
             // Determine if this is an array type and handle appropriately
             match ty {
                 syn::Type::Array(array) => {
@@ -200,13 +200,13 @@ impl ToTokens for Model {
                     PortType::Input => quote!(::boomerang::builder::Input),
                     PortType::Output => quote!(::boomerang::builder::Output),
                 };
-                
+
                 // Determine if this is an array type and handle appropriately
                 match ty {
                     syn::Type::Array(array) => {
                         let element_type = &array.elem;
                         let len_expr = &array.len;
-                    
+
                     match port_type {
                             PortType::Input => quote! {
                                 let #ident = builder.add_input_ports::<#element_type, #len_expr>(#name_str)?;
@@ -236,8 +236,10 @@ impl ToTokens for Model {
             },
         );
 
-        let field_inits = self.fields.iter().map(|PortField {  ident, ty, len, ..  }| {
-            match ty {
+        let field_inits = self
+            .fields
+            .iter()
+            .map(|PortField { ident, ty, len, .. }| match ty {
                 syn::Type::Array(_) => {
                     quote!(#ident: std::array::from_fn(|i| #ident[i].contained()))
                 }
@@ -247,8 +249,7 @@ impl ToTokens for Model {
                 _ => {
                     quote!(#ident: #ident.contained())
                 }
-            }
-        });
+            });
 
         let expanded = quote! {
             #vis struct #struct_name #impl_generics {
@@ -270,10 +271,14 @@ impl ToTokens for Model {
                     move |name: &str,
                      state: S,
                      parent: Option<::boomerang::builder::BuilderReactorKey>,
+                     scope_mode: Option<::boomerang::builder::BuilderModeKey>,
                      bank_info: Option<::boomerang::runtime::BankInfo>,
                      is_enclave: bool,
                      env: &mut ::boomerang::builder::EnvBuilder| {
                         let mut builder = env.add_reactor(name, parent, bank_info, state, is_enclave);
+                        if let Some(scope_mode) = scope_mode {
+                            builder.set_scope_mode(scope_mode)?;
+                        }
                         #(#create_ports)*
                         f(&mut builder, (#(#local_names,)*))?;
                         builder.finish()?;

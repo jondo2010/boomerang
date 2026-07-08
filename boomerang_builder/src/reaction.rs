@@ -1,6 +1,8 @@
 use std::fmt::Debug;
 
-use super::{BuilderActionKey, BuilderError, BuilderPortKey, BuilderReactorKey, EnvBuilder};
+use super::{
+    BuilderActionKey, BuilderError, BuilderModeKey, BuilderPortKey, BuilderReactorKey, EnvBuilder,
+};
 use crate::{
     runtime, ActionTag, BuilderRuntimeParts, ParentReactorBuilder, PortBank, PortTag,
     TimerActionKey, TypedActionKey, TypedPortKey,
@@ -31,6 +33,14 @@ pub struct ReactionBuilder {
     pub(super) reactor_key: BuilderReactorKey,
     /// The Reaction function
     pub(super) reaction_fn: BoxedBuilderReactionFn,
+    /// Modes in which this reaction is enabled
+    pub(super) enabled_modes: Option<Vec<BuilderModeKey>>,
+    /// Enclosing mode scope, if this reaction was declared inside a mode.
+    pub(super) scope_mode: Option<BuilderModeKey>,
+    /// Declared typed mode effects for this reaction
+    pub(super) mode_effects: Vec<BuilderModeEffect>,
+    /// Whether this reaction is triggered by mode reset entry.
+    pub(super) reset_trigger: bool,
     /// Relations between this Reaction and Actions
     pub(super) action_relations: SecondaryMap<BuilderActionKey, TriggerMode>,
     /// Actions in the order they were declared on the builder
@@ -52,6 +62,10 @@ impl ReactionBuilder {
             name: name.map(|s| s.into()),
             reactor_key: parent_key,
             reaction_fn,
+            enabled_modes: None,
+            scope_mode: None,
+            mode_effects: Vec::new(),
+            reset_trigger: false,
             action_relations: SecondaryMap::new(),
             action_order: Vec::new(),
             port_relations: SecondaryMap::new(),
@@ -72,11 +86,118 @@ impl Debug for ReactionBuilder {
             .field("name", &self.name)
             .field("reactor_key", &self.reactor_key)
             .field("reaction_fn", &"ReactionFn()")
+            .field("enabled_modes", &self.enabled_modes)
+            .field("scope_mode", &self.scope_mode)
+            .field("mode_effects", &self.mode_effects)
+            .field("reset_trigger", &self.reset_trigger)
             .field("action_relations", &self.action_relations)
             .field("port_relations", &self.port_relations)
             .finish()
     }
 }
+
+#[derive(Clone, Copy, Debug)]
+pub struct BuilderModeEffect {
+    target: BuilderModeKey,
+    runtime_target: Option<runtime::ModeKey>,
+    transition: runtime::TransitionKind,
+}
+
+impl BuilderModeEffect {
+    pub(crate) fn new(target: BuilderModeKey, transition: runtime::TransitionKind) -> Self {
+        Self {
+            target,
+            runtime_target: None,
+            transition,
+        }
+    }
+
+    pub fn target(&self) -> BuilderModeKey {
+        self.target
+    }
+
+    pub fn transition(&self) -> runtime::TransitionKind {
+        self.transition
+    }
+
+    pub fn with_transition(mut self, transition: runtime::TransitionKind) -> Self {
+        self.transition = transition;
+        self
+    }
+}
+
+#[doc(hidden)]
+pub trait ResolveModeEffects {
+    fn resolve_mode_effects(&mut self, runtime_parts: &BuilderRuntimeParts);
+}
+
+impl ResolveModeEffects for () {
+    fn resolve_mode_effects(&mut self, _runtime_parts: &BuilderRuntimeParts) {}
+}
+
+impl ResolveModeEffects for BuilderModeEffect {
+    fn resolve_mode_effects(&mut self, runtime_parts: &BuilderRuntimeParts) {
+        self.runtime_target = Some(runtime_parts.aliases.mode_aliases[self.target].1);
+    }
+}
+
+impl<T: ResolveModeEffects, const N: usize> ResolveModeEffects for [T; N] {
+    fn resolve_mode_effects(&mut self, runtime_parts: &BuilderRuntimeParts) {
+        for item in self {
+            item.resolve_mode_effects(runtime_parts);
+        }
+    }
+}
+
+impl runtime::ReactionRefsExtract for BuilderModeEffect {
+    type Ref<'store>
+        = runtime::ModeEffectRef
+    where
+        Self: 'store;
+
+    fn extract<'store>(
+        &self,
+        _refs: &mut runtime::ReactionRefs<'store>,
+    ) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
+        let target = self
+            .runtime_target
+            .ok_or_else(|| runtime::ReactionRefsError::missing("mode effect"))?;
+        Ok(runtime::ModeEffectRef::new_key(target, self.transition))
+    }
+}
+
+impl<T: runtime::ReactorData, Q: ActionTag> ResolveModeEffects for TypedActionKey<T, Q> {
+    fn resolve_mode_effects(&mut self, _runtime_parts: &BuilderRuntimeParts) {}
+}
+
+impl ResolveModeEffects for TimerActionKey {
+    fn resolve_mode_effects(&mut self, _runtime_parts: &BuilderRuntimeParts) {}
+}
+
+impl<T: runtime::ReactorData, Q: PortTag, A> ResolveModeEffects for TypedPortKey<T, Q, A> {
+    fn resolve_mode_effects(&mut self, _runtime_parts: &BuilderRuntimeParts) {}
+}
+
+impl<T: runtime::ReactorData, Q: PortTag, A> ResolveModeEffects for PortBank<T, Q, A> {
+    fn resolve_mode_effects(&mut self, _runtime_parts: &BuilderRuntimeParts) {}
+}
+
+macro_rules! impl_resolve_mode_effects {
+    ($($T:ident),*) => {
+        impl<$($T,)*> ResolveModeEffects for ($($T,)*)
+        where
+            $($T: ResolveModeEffects,)*
+        {
+            #[allow(non_snake_case)]
+            fn resolve_mode_effects(&mut self, runtime_parts: &BuilderRuntimeParts) {
+                let ($($T,)*) = self;
+                $($T.resolve_mode_effects(runtime_parts);)*
+            }
+        }
+    };
+}
+
+all_tuples!(impl_resolve_mode_effects, 1, 10, T);
 
 impl ReactionBuilder {
     /// Get the name of this Reaction
@@ -223,10 +344,24 @@ impl PartialReactionBuilderField for TimerActionKey {
     }
 }
 
+impl PartialReactionBuilderField for BuilderModeEffect {
+    fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
+        &self,
+        builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
+        _trigger_mode: TriggerMode,
+    ) {
+        builder.record_mode_effect(*self);
+    }
+}
+
 #[derive(Debug)]
 pub struct PartialReactionBuilder<'a, S: runtime::ReactorData, Fields = (), ReactionFn = ()> {
     name: Option<String>,
     reaction_fn: ReactionFn,
+    enabled_modes: Option<Vec<BuilderModeKey>>,
+    scope_mode: Option<BuilderModeKey>,
+    mode_effects: Vec<BuilderModeEffect>,
+    reset_trigger: bool,
     port_relations: slotmap::SecondaryMap<BuilderPortKey, TriggerMode>,
     port_order: Vec<BuilderPortKey>,
     action_relations: slotmap::SecondaryMap<BuilderActionKey, TriggerMode>,
@@ -246,6 +381,10 @@ impl<'a, S: runtime::ReactorData> PartialReactionBuilder<'a, S, (), ()> {
         Self {
             name: name.map(|s| s.to_string()),
             reaction_fn: (),
+            enabled_modes: None,
+            scope_mode: None,
+            mode_effects: Vec::new(),
+            reset_trigger: false,
             port_relations: slotmap::SecondaryMap::new(),
             port_order: Vec::new(),
             action_relations: slotmap::SecondaryMap::new(),
@@ -258,7 +397,9 @@ impl<'a, S: runtime::ReactorData> PartialReactionBuilder<'a, S, (), ()> {
     }
 }
 
-impl<'a, S: runtime::ReactorData, Fields, ReactionFn> PartialReactionBuilder<'a, S, Fields, ReactionFn> {
+impl<'a, S: runtime::ReactorData, Fields, ReactionFn>
+    PartialReactionBuilder<'a, S, Fields, ReactionFn>
+{
     fn record_port_relation(&mut self, key: BuilderPortKey, trigger_mode: TriggerMode) {
         if !self.port_relations.contains_key(key) {
             self.port_order.push(key);
@@ -271,6 +412,25 @@ impl<'a, S: runtime::ReactorData, Fields, ReactionFn> PartialReactionBuilder<'a,
             self.action_order.push(key);
         }
         self.action_relations.insert(key, trigger_mode);
+    }
+
+    fn record_mode_effect(&mut self, effect: BuilderModeEffect) {
+        self.mode_effects.push(effect);
+    }
+
+    /// Trigger this reaction when its enclosing mode is entered by reset.
+    pub fn with_reset_trigger(mut self) -> Self {
+        self.reset_trigger = true;
+        self
+    }
+
+    /// Record the static mode scope that owns this reaction.
+    pub fn in_mode_scope(mut self, mode: BuilderModeKey) -> Self {
+        self.scope_mode = Some(mode);
+        if self.enabled_modes.is_none() {
+            self.enabled_modes = Some(vec![mode]);
+        }
+        self
     }
 }
 
@@ -311,6 +471,10 @@ macro_rules! impl_with_field {
                 #[allow(non_snake_case)]
                 let Self {
                     name,
+                    enabled_modes,
+                    scope_mode,
+                    mode_effects,
+                    reset_trigger,
                     port_relations,
                     port_order,
                     action_relations,
@@ -323,6 +487,10 @@ macro_rules! impl_with_field {
                 PartialReactionBuilder {
                     name,
                     reaction_fn: (),
+                    enabled_modes,
+                    scope_mode,
+                    mode_effects,
+                    reset_trigger,
                     port_relations,
                     port_order,
                     action_relations,
@@ -344,6 +512,10 @@ macro_rules! impl_with_field {
                 #[allow(non_snake_case)]
                 let Self {
                     name,
+                    enabled_modes,
+                    scope_mode,
+                    mode_effects,
+                    reset_trigger,
                     port_relations,
                     port_order,
                     action_relations,
@@ -356,6 +528,10 @@ macro_rules! impl_with_field {
                 PartialReactionBuilder {
                     name,
                     reaction_fn: (),
+                    enabled_modes,
+                    scope_mode,
+                    mode_effects,
+                    reset_trigger,
                     port_relations,
                     port_order,
                     action_relations,
@@ -376,6 +552,10 @@ macro_rules! impl_with_field {
                 #[allow(non_snake_case)]
                 let Self {
                     name,
+                    enabled_modes,
+                    scope_mode,
+                    mode_effects,
+                    reset_trigger,
                     port_relations,
                     port_order,
                     action_relations,
@@ -388,6 +568,10 @@ macro_rules! impl_with_field {
                 PartialReactionBuilder {
                     name,
                     reaction_fn: (),
+                    enabled_modes,
+                    scope_mode,
+                    mode_effects,
+                    reset_trigger,
                     port_relations,
                     port_order,
                     action_relations,
@@ -429,7 +613,7 @@ all_tuples!(impl_with_field, 0, 10, F);
 impl<'a, S, Fields> PartialReactionBuilder<'a, S, Fields>
 where
     S: runtime::ReactorData,
-    Fields: runtime::ReactionRefsExtract + Clone + Send + Sync,
+    Fields: runtime::ReactionRefsExtract + ResolveModeEffects + Clone + Send + Sync,
 {
     pub fn with_reaction_fn<F>(
         self,
@@ -443,6 +627,10 @@ where
     {
         let Self {
             name,
+            enabled_modes,
+            scope_mode,
+            mode_effects,
+            reset_trigger,
             port_relations,
             port_order,
             action_relations,
@@ -453,16 +641,23 @@ where
             ..
         } = self;
         let fields_for_reaction = fields.clone();
-        let reaction_fn: BoxedBuilderReactionFn =
-            Box::new(move |_: &BuilderRuntimeParts| -> runtime::BoxedReactionFn {
+        let reaction_fn: BoxedBuilderReactionFn = Box::new(
+            move |runtime_parts: &BuilderRuntimeParts| -> runtime::BoxedReactionFn {
+                let mut fields_for_reaction = fields_for_reaction.clone();
+                fields_for_reaction.resolve_mode_effects(runtime_parts);
                 Box::new(runtime::reaction::FnRefsAdapter::new(
                     fields_for_reaction,
                     f,
                 ))
-            });
+            },
+        );
         PartialReactionBuilder {
             name,
             reaction_fn,
+            enabled_modes,
+            scope_mode,
+            mode_effects,
+            reset_trigger,
             port_relations,
             port_order,
             action_relations,
@@ -489,6 +684,10 @@ where
     {
         let Self {
             name,
+            enabled_modes,
+            scope_mode,
+            mode_effects,
+            reset_trigger,
             port_relations,
             port_order,
             action_relations,
@@ -501,6 +700,10 @@ where
         PartialReactionBuilder {
             name,
             reaction_fn: Box::new(f),
+            enabled_modes,
+            scope_mode,
+            mode_effects,
+            reset_trigger,
             port_relations,
             port_order,
             action_relations,
@@ -522,6 +725,10 @@ where
     pub fn finish(self) -> Result<BuilderReactionKey, BuilderError> {
         let Self {
             name,
+            enabled_modes,
+            scope_mode,
+            mode_effects,
+            reset_trigger,
             port_relations,
             port_order,
             action_relations,
@@ -535,10 +742,62 @@ where
         // Ensure there is at least one trigger declared
         if !action_relations.values().any(|&mode| mode.is_triggers())
             && !port_relations.values().any(|&mode| mode.is_triggers())
+            && !reset_trigger
         {
             return Err(BuilderError::ReactionBuilderError(format!(
                 "Reaction '{name:?}' has no triggers defined"
             )));
+        }
+
+        if reset_trigger && scope_mode.is_none() {
+            return Err(BuilderError::ReactionBuilderError(format!(
+                "Reaction '{name:?}' uses reset trigger outside a mode scope"
+            )));
+        }
+
+        if let Some(ref modes) = enabled_modes {
+            for mode_key in modes {
+                let mode = env.mode_builders.get(*mode_key).ok_or_else(|| {
+                    BuilderError::ReactionBuilderError(format!(
+                        "Unknown mode key {mode_key:?} for reaction '{name:?}'"
+                    ))
+                })?;
+                if mode.reactor_key != reactor_key {
+                    return Err(BuilderError::ReactionBuilderError(format!(
+                        "Mode '{}' does not belong to reaction '{name:?}'",
+                        mode.name
+                    )));
+                }
+            }
+        }
+
+        if let Some(scope_mode) = scope_mode {
+            let mode = env.mode_builders.get(scope_mode).ok_or_else(|| {
+                BuilderError::ReactionBuilderError(format!(
+                    "Unknown mode key {scope_mode:?} for reaction '{name:?}'"
+                ))
+            })?;
+            if mode.reactor_key != reactor_key {
+                return Err(BuilderError::ReactionBuilderError(format!(
+                    "Mode scope '{}' does not belong to reaction '{name:?}'",
+                    mode.name
+                )));
+            }
+        }
+
+        for effect in &mode_effects {
+            let mode = env.mode_builders.get(effect.target()).ok_or_else(|| {
+                BuilderError::ReactionBuilderError(format!(
+                    "Unknown mode key {:?} for reaction '{name:?}'",
+                    effect.target()
+                ))
+            })?;
+            if mode.reactor_key != reactor_key {
+                return Err(BuilderError::ReactionBuilderError(format!(
+                    "Mode effect '{}' does not belong to reaction '{name:?}'",
+                    mode.name
+                )));
+            }
         }
 
         let reactor = &mut env.reactor_builders[reactor_key];
@@ -548,6 +807,10 @@ where
             name,
             reactor_key,
             reaction_fn,
+            enabled_modes,
+            scope_mode,
+            mode_effects,
+            reset_trigger,
             action_relations,
             action_order,
             port_relations,

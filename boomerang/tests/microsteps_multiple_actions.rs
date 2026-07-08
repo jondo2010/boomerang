@@ -5,11 +5,7 @@
 use boomerang::prelude::*;
 
 #[reactor]
-fn Destination(
-    #[state] seen: Vec<(char, u32)>,
-    #[input] x: u32,
-    #[input] y: u32,
-) -> impl Reactor {
+fn Destination(#[state] seen: Vec<(char, u32)>, #[input] x: u32, #[input] y: u32) -> impl Reactor {
     reaction! {
         (x, y) {
             let elapsed = ctx.get_elapsed_logical_time();

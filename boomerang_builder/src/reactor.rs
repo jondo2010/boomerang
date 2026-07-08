@@ -1,15 +1,41 @@
 use std::fmt::Debug;
 
 use super::{
-    ActionTag, ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderPortKey,
-    BuilderReactionKey, EnvBuilder, Input, Logical, Output, Physical, PortTag, TimerActionKey,
-    TimerSpec, TypedActionKey, TypedPortKey, PortBank,
+    ActionTag, ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderModeEffect,
+    BuilderPortKey, BuilderReactionKey, EnvBuilder, Input, Logical, Output, Physical, PortBank,
+    PortTag, TimerActionKey, TimerSpec, TypedActionKey, TypedPortKey,
 };
 use crate::runtime;
 use slotmap::SecondaryMap;
 
 slotmap::new_key_type! {
     pub struct BuilderReactorKey;
+}
+
+slotmap::new_key_type! {
+    pub struct BuilderModeKey;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModeKind {
+    Initial,
+    Normal,
+}
+
+impl ModeKind {
+    pub fn is_initial(self) -> bool {
+        matches!(self, ModeKind::Initial)
+    }
+}
+
+impl From<bool> for ModeKind {
+    fn from(initial: bool) -> Self {
+        if initial {
+            ModeKind::Initial
+        } else {
+            ModeKind::Normal
+        }
+    }
 }
 
 impl petgraph::graph::GraphIndex for BuilderReactorKey {
@@ -57,8 +83,12 @@ pub struct ReactorBuilder {
     type_name: String,
     /// Optional parent reactor key
     pub parent_reactor_key: Option<BuilderReactorKey>,
+    /// Enclosing parent mode scope, if this reactor instance was declared inside a mode.
+    pub scope_mode: Option<BuilderModeKey>,
     /// Reactions in this ReactorType
     pub reactions: SecondaryMap<BuilderReactionKey, ()>,
+    /// Modes in this Reactor
+    pub modes: SecondaryMap<BuilderModeKey, ()>,
     /// Ports in this Reactor
     pub ports: SecondaryMap<BuilderPortKey, ()>,
     /// Actions in this Reactor
@@ -67,6 +97,8 @@ pub struct ReactorBuilder {
     pub bank_info: Option<runtime::BankInfo>,
     /// Whether this Reactor is an enclave
     pub is_enclave: bool,
+    /// Initial mode for this reactor
+    pub initial_mode: Option<BuilderModeKey>,
 }
 
 impl ParentReactorBuilder for ReactorBuilder {
@@ -90,11 +122,14 @@ impl ReactorBuilder {
             state: Box::new(ReactorState(reactor_state)),
             type_name: type_name.into(),
             parent_reactor_key: parent,
+            scope_mode: None,
             reactions: SecondaryMap::new(),
+            modes: SecondaryMap::new(),
             ports: SecondaryMap::new(),
             actions: SecondaryMap::new(),
             bank_info,
             is_enclave,
+            initial_mode: None,
         }
     }
 
@@ -125,6 +160,7 @@ pub struct ReactorBuilderState<'a, S: runtime::ReactorData = ()> {
     env: &'a mut EnvBuilder,
     startup_action: TypedActionKey,
     shutdown_action: TypedActionKey,
+    current_mode: Option<BuilderModeKey>,
     phantom: std::marker::PhantomData<S>,
 }
 
@@ -160,6 +196,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
             env,
             startup_action,
             shutdown_action,
+            current_mode: None,
             phantom: std::marker::PhantomData,
         }
     }
@@ -192,6 +229,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
             env,
             startup_action: TypedActionKey::from(startup_action),
             shutdown_action: TypedActionKey::from(shutdown_action),
+            current_mode: None,
             phantom: std::marker::PhantomData,
         }
     }
@@ -204,6 +242,27 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
     /// Get the [`BuilderReactorKey`] for this `ReactorBuilder`
     pub fn key(&self) -> BuilderReactorKey {
         self.reactor_key
+    }
+
+    #[doc(hidden)]
+    pub fn set_scope_mode(&mut self, mode: BuilderModeKey) -> Result<(), BuilderError> {
+        let mode_builder = self.env.mode_builders.get(mode).ok_or_else(|| {
+            BuilderError::ReactionBuilderError(format!("Unknown mode key {mode:?}"))
+        })?;
+        let reactor_builder = &self.env.reactor_builders[self.reactor_key];
+        if Some(mode_builder.reactor_key) != reactor_builder.parent_reactor_key {
+            return Err(BuilderError::ReactionBuilderError(format!(
+                "Mode '{}' does not enclose reactor '{}'",
+                mode_builder.name,
+                reactor_builder.name()
+            )));
+        }
+        self.env.reactor_builders[self.reactor_key].scope_mode = Some(mode);
+        Ok(())
+    }
+
+    pub fn current_mode(&self) -> Option<BuilderModeKey> {
+        self.current_mode
     }
 
     /// Get the startup action for this reactor
@@ -222,7 +281,8 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         name: &str,
         spec: TimerSpec,
     ) -> Result<TimerActionKey, BuilderError> {
-        self.env.add_timer_action(name, self.reactor_key, spec)
+        self.env
+            .add_timer_action_in_scope(name, self.reactor_key, self.current_mode, spec)
     }
 
     /// Add a new action to the reactor.
@@ -235,7 +295,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         min_delay: Option<runtime::Duration>,
     ) -> Result<TypedActionKey<T, Q>, BuilderError> {
         self.env
-            .add_action::<T, Q>(name, min_delay, self.reactor_key)
+            .add_action_in_scope::<T, Q>(name, min_delay, self.reactor_key, self.current_mode)
     }
 
     /// Add a new logical action to the reactor.
@@ -247,8 +307,12 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         name: &str,
         min_delay: Option<runtime::Duration>,
     ) -> Result<TypedActionKey<T, Logical>, BuilderError> {
-        self.env
-            .add_action::<T, Logical>(name, min_delay, self.reactor_key)
+        self.env.add_action_in_scope::<T, Logical>(
+            name,
+            min_delay,
+            self.reactor_key,
+            self.current_mode,
+        )
     }
 
     pub fn add_physical_action<T: runtime::ReactorData>(
@@ -256,8 +320,70 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         name: &str,
         min_delay: Option<runtime::Duration>,
     ) -> Result<TypedActionKey<T, Physical>, BuilderError> {
-        self.env
-            .add_action::<T, Physical>(name, min_delay, self.reactor_key)
+        self.env.add_action_in_scope::<T, Physical>(
+            name,
+            min_delay,
+            self.reactor_key,
+            self.current_mode,
+        )
+    }
+
+    /// Add a new mode to this reactor.
+    pub fn add_mode(
+        &mut self,
+        name: &str,
+        kind: impl Into<ModeKind>,
+    ) -> Result<BuilderModeKey, BuilderError> {
+        self.env.add_mode(name, self.reactor_key, kind)
+    }
+
+    pub fn mode_effect(
+        &self,
+        mode: BuilderModeKey,
+        transition: runtime::TransitionKind,
+    ) -> Result<BuilderModeEffect, BuilderError> {
+        self.env.mode_effect(self.reactor_key, mode, transition)
+    }
+
+    pub fn reset_mode_effect(
+        &self,
+        mode: BuilderModeKey,
+    ) -> Result<BuilderModeEffect, BuilderError> {
+        self.mode_effect(mode, runtime::TransitionKind::Reset)
+    }
+
+    pub fn history_mode_effect(
+        &self,
+        mode: BuilderModeKey,
+    ) -> Result<BuilderModeEffect, BuilderError> {
+        self.mode_effect(mode, runtime::TransitionKind::History)
+    }
+
+    pub fn in_mode<R>(
+        &mut self,
+        mode: BuilderModeKey,
+        f: impl FnOnce(&mut Self) -> Result<R, BuilderError>,
+    ) -> Result<R, BuilderError> {
+        let mode_builder = self.env.mode_builders.get(mode).ok_or_else(|| {
+            BuilderError::ReactionBuilderError(format!("Unknown mode key {mode:?}"))
+        })?;
+        if mode_builder.reactor_key != self.reactor_key {
+            return Err(BuilderError::ReactionBuilderError(format!(
+                "Mode '{}' does not belong to reactor '{}'",
+                mode_builder.name,
+                self.env.reactor_builders[self.reactor_key].name()
+            )));
+        }
+        if self.current_mode.is_some() {
+            return Err(BuilderError::ReactionBuilderError(
+                "Nested mode blocks are not supported".to_owned(),
+            ));
+        }
+
+        let previous_mode = self.current_mode.replace(mode);
+        let result = f(self);
+        self.current_mode = previous_mode;
+        result
     }
 
     /// Add a new input port to this reactor.
@@ -266,6 +392,11 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         name: &str,
         bank_info: Option<runtime::BankInfo>,
     ) -> Result<TypedPortKey<T, Q>, BuilderError> {
+        if self.current_mode.is_some() {
+            return Err(BuilderError::ReactionBuilderError(format!(
+                "Port '{name}' cannot be declared inside a mode"
+            )));
+        }
         tracing::debug!("Adding port: {name}");
         self.env
             .internal_add_port::<T, Q>(name, self.reactor_key, bank_info)
@@ -292,10 +423,8 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
     ) -> Result<PortBank<T, Q>, BuilderError> {
         let mut ports = Vec::with_capacity(len);
         for i in 0..len {
-            let port = self.add_port::<T, Q>(
-                name,
-                Some(runtime::BankInfo { idx: i, total: len }),
-            )?;
+            let port =
+                self.add_port::<T, Q>(name, Some(runtime::BankInfo { idx: i, total: len }))?;
             ports.push(port);
         }
         Ok(PortBank::new(ports))
@@ -356,7 +485,18 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
     where
         F: FnOnce(BuilderReactorKey, &mut EnvBuilder) -> Result<BuilderReactorKey, BuilderError>,
     {
-        f(self.reactor_key, self.env)
+        let child = f(self.reactor_key, self.env)?;
+        if self.env.reactor_builders[child].parent_reactor_key != Some(self.reactor_key) {
+            return Err(BuilderError::ReactionBuilderError(format!(
+                "Child builder returned reactor '{}' that is not contained by '{}'",
+                self.env.reactor_builders[child].name(),
+                self.env.reactor_builders[self.reactor_key].name()
+            )));
+        }
+        if let Some(mode) = self.current_mode {
+            self.env.reactor_builders[child].scope_mode = Some(mode);
+        }
+        Ok(child)
     }
 
     /// Connect 2 ports on this reactor. This has the logical meaning of "connecting" `port_a` to
@@ -373,8 +513,13 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         Q1: PortTag,
         Q2: PortTag,
     {
-        self.env
-            .add_port_connection::<T, _, _>(port_a_key, port_b_key, after, physical)
+        self.env.add_port_connection_in_scope::<T, _, _>(
+            port_a_key,
+            port_b_key,
+            self.current_mode,
+            after,
+            physical,
+        )
     }
 
     /// Connect multiple ports on this reactor. This has the logical meaning of "connecting"

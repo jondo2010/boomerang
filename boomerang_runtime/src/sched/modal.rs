@@ -9,12 +9,18 @@ use crate::{
     TransitionKind,
 };
 
+/// Clock state for a scheduler scope that may be suspended and resumed by modal transitions.
 #[derive(Debug)]
 struct ScopeClockState {
+    /// Global scheduler tag at which the scope most recently became active.
     activation_global: Tag,
+    /// Scope-local tag that corresponds to [`activation_global`](Self::activation_global).
     activation_local: Tag,
+    /// Whether events exactly at the activation tag are allowed to run in this activation.
     allow_activation_tag: bool,
+    /// Scope-local tag captured when the scope most recently became inactive.
     suspended_local: Tag,
+    /// Generation counter used to invalidate stale frontier heap entries for this scope.
     frontier_epoch: u64,
 }
 
@@ -98,10 +104,14 @@ fn local_to_global(
     global_tag
 }
 
+/// Heap entry for the next runnable event in a scope-local queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ScopeFrontierEntry {
+    /// Global tag corresponding to the scope queue's current local front event.
     global_tag: Tag,
+    /// Scope whose queue contributed this frontier entry.
     scope: ScopeKey,
+    /// Clock generation observed when this entry was pushed.
     epoch: u64,
 }
 
@@ -120,24 +130,39 @@ impl PartialOrd for ScopeFrontierEntry {
     }
 }
 
+/// Event returned to the scheduler after root and scope-local queues are merged at one tag.
 #[derive(Debug)]
 pub(super) struct ReadyEvent {
+    /// Global tag at which the contained reactions are ready.
     pub(super) tag: Tag,
+    /// Reactions ready to execute at [`tag`](Self::tag).
     pub(super) reactions: ReactionSet,
+    /// Whether this event indicates scheduler termination.
     pub(super) terminal: bool,
 }
 
+/// Owns root and scope-local event queues for modal scheduling.
 #[derive(Debug)]
 pub(super) struct EventManager {
+    /// Global event queue used for root-scoped work and non-modal fast paths.
     root: EventQueue,
+    /// Current active/inactive state for each static scope.
     scope_active: tinymap::TinySecondaryMap<ScopeKey, bool>,
+    /// Whether each scope has ever been active during this scheduler run.
     scope_ever_active: tinymap::TinySecondaryMap<ScopeKey, bool>,
+    /// Whether scope-local startup reactions have already fired for each scope.
     scope_startup_fired: tinymap::TinySecondaryMap<ScopeKey, bool>,
+    /// Local clock state for each static scope.
     scope_clocks: tinymap::TinySecondaryMap<ScopeKey, ScopeClockState>,
+    /// Per-scope queues for events scheduled in scope-local time.
     scope_queues: tinymap::TinySecondaryMap<ScopeKey, EventQueue>,
+    /// Min-heap of each active scope's next event, ordered by global tag.
     frontier: BinaryHeap<ScopeFrontierEntry>,
+    /// Reusable reaction sets for merged ready events.
     free_reaction_sets: Vec<ReactionSet>,
+    /// Key and level limits used when allocating reaction sets.
     reaction_set_limits: ReactionSetLimits,
+    /// Whether this graph has any modal scopes requiring local queues.
     has_local_scopes: bool,
 }
 

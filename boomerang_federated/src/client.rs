@@ -416,6 +416,10 @@ impl RtiFederatedTimeBarrier {
         }
 
         self.drain_outbound_commands()?;
+        self.client.send(FederateToRti::Net {
+            federate_id: self.federate_id.clone(),
+            tag: WireTag::FOREVER,
+        })?;
         self.client.send(FederateToRti::Stop {
             federate_id: self.federate_id.clone(),
         })?;
@@ -865,6 +869,52 @@ mod tests {
             barrier.acquire_tag_result(boomerang_runtime::Tag::ZERO, &event_rx),
             Err(FederateClientError::RtiError { message }) if message == "boom"
         ));
+
+        rti.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bridge_stop_sends_no_future_before_stop() {
+        let (client, rti) =
+            connect_client_with_fake_rti(fed("source"), |mut transport| async move {
+                assert!(matches!(
+                    recv_federate_to_rti(&mut transport).await,
+                    FederateToRti::Hello { federate_id, .. } if federate_id == fed("source")
+                ));
+                send_rti_to_federate(
+                    &mut transport,
+                    RtiToFederate::Start {
+                        start_unix_epoch_ns: 0,
+                    },
+                )
+                .await;
+                assert_eq!(
+                    recv_federate_to_rti(&mut transport).await,
+                    FederateToRti::Net {
+                        federate_id: fed("source"),
+                        tag: WireTag::FOREVER,
+                    }
+                );
+                assert_eq!(
+                    recv_federate_to_rti(&mut transport).await,
+                    FederateToRti::Stop {
+                        federate_id: fed("source"),
+                    }
+                );
+            })
+            .await;
+
+        let (_outbound, receiver) = boomerang_runtime::FederatedOutboundChannel::pair();
+        let mut barrier = RtiFederatedTimeBarrier::new(
+            fed("source"),
+            client,
+            [route()],
+            receiver,
+            empty_inbound_registry(),
+        )
+        .unwrap();
+
+        barrier.stop_result().unwrap();
 
         rti.await.unwrap();
     }

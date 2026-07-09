@@ -1,6 +1,6 @@
 use itertools::Itertools;
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 
 use super::*;
 use crate::{port::Contained, runtime};
@@ -96,8 +96,9 @@ fn federated_startup_source_reactor(
             .add_reaction(Some("emit"))
             .with_trigger(startup)
             .with_effect(output)
-            .with_reaction_fn(move |_ctx, _state, (_startup, mut output)| {
+            .with_reaction_fn(move |ctx, _state, (_startup, mut output)| {
                 *output = Some(value);
+                ctx.schedule_shutdown(None);
             })
             .finish()?;
         builder.finish()?;
@@ -123,6 +124,44 @@ fn federated_sink_reactor() -> impl Reactor<(), Ports = TypedPortKey<u32, Input,
     }
 }
 
+fn federated_shutdown_after_startup_sink_reactor(
+    values: Arc<Mutex<Vec<(runtime::Tag, u32)>>>,
+) -> impl Reactor<(), Ports = TypedPortKey<u32, Input, Contained>> {
+    move |name: &str,
+          state: (),
+          parent: Option<BuilderReactorKey>,
+          scope_mode: Option<BuilderModeKey>,
+          bank_info: Option<runtime::BankInfo>,
+          placement: ReactorPlacement,
+          env: &mut EnvBuilder| {
+        let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
+        if let Some(scope_mode) = scope_mode {
+            builder.set_scope_mode(scope_mode)?;
+        }
+        let input = builder.add_input_port::<u32>("in")?;
+        let startup = builder.get_startup_action();
+        builder
+            .add_reaction(Some("shutdown_after_startup"))
+            .with_trigger(startup)
+            .with_reaction_fn(|ctx, _state, (_startup,)| {
+                ctx.schedule_shutdown(Some(runtime::Duration::milliseconds(10)));
+            })
+            .finish()?;
+        let values = Arc::clone(&values);
+        builder
+            .add_reaction(Some("record_unexpected"))
+            .with_trigger(input)
+            .with_reaction_fn(move |ctx, _state, (input,)| {
+                if let Some(value) = *input {
+                    values.lock().unwrap().push((ctx.get_tag(), value));
+                }
+            })
+            .finish()?;
+        builder.finish()?;
+        Ok(input.contained())
+    }
+}
+
 fn federated_recording_sink_reactor(
     values: Arc<Mutex<Vec<(runtime::Tag, u32)>>>,
 ) -> impl Reactor<(), Ports = TypedPortKey<u32, Input, Contained>> {
@@ -138,6 +177,14 @@ fn federated_recording_sink_reactor(
             builder.set_scope_mode(scope_mode)?;
         }
         let input = builder.add_input_port::<u32>("in")?;
+        let startup = builder.get_startup_action();
+        builder
+            .add_reaction(Some("shutdown_if_no_input"))
+            .with_trigger(startup)
+            .with_reaction_fn(|ctx, _state, (_startup,)| {
+                ctx.schedule_shutdown(Some(runtime::Duration::milliseconds(100)));
+            })
+            .finish()?;
         let values = Arc::clone(&values);
         builder
             .add_reaction(Some("record"))
@@ -346,6 +393,23 @@ fn run_in_memory_federated_source_sink(
     (recorded_values, routed_tags)
 }
 
+fn run_with_wall_timeout<T: Send + 'static>(
+    label: &'static str,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(Ok(value)) => value,
+        Ok(Err(payload)) => std::panic::resume_unwind(payload),
+        Err(_) => panic!("{label} timed out"),
+    }
+}
+
 fn run_live_in_memory_federated_source_sink(
     after: Option<runtime::Duration>,
 ) -> Vec<(runtime::Tag, u32)> {
@@ -366,9 +430,33 @@ fn run_live_in_memory_federated_source_sink(
     builder.connect_port(source, sink, after, false).unwrap();
     builder.finish().unwrap();
 
-    let config = runtime::Config::default()
-        .with_fast_forward(true)
-        .with_timeout(runtime::Duration::milliseconds(100));
+    let config = runtime::Config::default().with_fast_forward(true);
+    let parts = env_builder.into_runtime_parts(&config).unwrap();
+    let _envs = execute_federation_in_memory(parts, config).unwrap();
+
+    let recorded_values = values.lock().unwrap().clone();
+    recorded_values
+}
+
+fn run_live_in_memory_no_message_source_sink() -> Vec<(runtime::Tag, u32)> {
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let mut env_builder = EnvBuilder::new();
+    register_u32_federated_codec(&mut env_builder).unwrap();
+    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let source = builder
+        .add_child_federate(federated_source_reactor(), "source", ())
+        .unwrap();
+    let sink = builder
+        .add_child_federate(
+            federated_shutdown_after_startup_sink_reactor(Arc::clone(&values)),
+            "sink",
+            (),
+        )
+        .unwrap();
+    builder.connect_port(source, sink, None, false).unwrap();
+    builder.finish().unwrap();
+
+    let config = runtime::Config::default().with_fast_forward(true);
     let parts = env_builder.into_runtime_parts(&config).unwrap();
     let _envs = execute_federation_in_memory(parts, config).unwrap();
 
@@ -515,7 +603,9 @@ fn test_in_memory_distributed_hello_matches_local_enclave() {
 
 #[test]
 fn test_live_in_memory_distributed_hello_records_zero_tag() {
-    let values = run_live_in_memory_federated_source_sink(None);
+    let values = run_with_wall_timeout("live in-memory distributed hello", || {
+        run_live_in_memory_federated_source_sink(None)
+    });
 
     assert_eq!(values, vec![(runtime::Tag::ZERO, 7)]);
 }
@@ -534,9 +624,20 @@ fn test_in_memory_distributed_delayed_connection_matches_local_tag() {
 #[test]
 fn test_live_in_memory_distributed_delayed_connection_records_delay_tag() {
     let delay = runtime::Duration::milliseconds(10);
-    let values = run_live_in_memory_federated_source_sink(Some(delay));
+    let values = run_with_wall_timeout("live in-memory delayed federation", move || {
+        run_live_in_memory_federated_source_sink(Some(delay))
+    });
 
     assert_eq!(values, vec![(runtime::Tag::new(delay, 0), 7)]);
+}
+
+#[test]
+fn test_live_in_memory_no_message_topology_terminates_without_timeout() {
+    let values = run_with_wall_timeout("live in-memory no-message federation", || {
+        run_live_in_memory_no_message_source_sink()
+    });
+
+    assert!(values.is_empty());
 }
 
 #[test]

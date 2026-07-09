@@ -144,6 +144,8 @@ pub fn execute_federation_in_memory(
         );
     }
 
+    let mut envs = tinymap::TinySecondaryMap::new();
+    let mut barrier_error = None;
     let mut handles = Vec::new();
     for (enclave_key, enclave) in enclaves {
         let Some(federate_id) = federate_by_enclave.get(enclave_key).cloned() else {
@@ -156,21 +158,26 @@ pub fn execute_federation_in_memory(
             )));
         };
 
-        if enclave.env.reactions.is_empty() {
-            return Err(unsupported_topology(format!(
-                "federate '{federate_id}' maps to enclave {enclave_key:?}, but that enclave has no reactions; no-future federates are reserved for a later milestone"
-            )));
-        }
-
         let barrier = barriers
             .get(&federate_id)
             .expect("barriers were built from federate_enclaves")
             .clone();
+
+        if federate_has_no_initial_work(&enclave, &topology, &federate_id) {
+            let boomerang_runtime::Enclave { env, .. } = enclave;
+            envs.insert(enclave_key, env);
+            if let Err(error) = barrier.stop() {
+                barrier_error.get_or_insert_with(|| error.to_string());
+            }
+            continue;
+        }
+
         let config = config.clone();
         handles.push(
             std::thread::Builder::new()
                 .name(format!("federate-{federate_id}"))
                 .spawn(move || {
+                    let stop_barrier = barrier.clone();
                     let mut scheduler =
                         boomerang_runtime::Scheduler::new_with_federated_time_barrier(
                             enclave_key,
@@ -179,23 +186,21 @@ pub fn execute_federation_in_memory(
                             barrier,
                         );
                     scheduler.event_loop();
-                    (enclave_key, scheduler.into_env())
+                    let env = scheduler.into_env();
+                    let stop_result = stop_barrier.stop();
+                    (enclave_key, env, stop_result)
                 })?,
         );
     }
 
-    if handles.is_empty() {
-        return Err(unsupported_topology(
-            "in-memory federation runner found no federate scheduler enclaves",
-        ));
-    }
-
-    let mut envs = tinymap::TinySecondaryMap::new();
     let mut thread_panic = None;
     for handle in handles {
         match handle.join() {
-            Ok((enclave_key, env)) => {
+            Ok((enclave_key, env, stop_result)) => {
                 envs.insert(enclave_key, env);
+                if let Err(error) = stop_result {
+                    barrier_error.get_or_insert_with(|| error.to_string());
+                }
             }
             Err(error) => {
                 thread_panic = Some(format!("{error:?}"));
@@ -203,7 +208,6 @@ pub fn execute_federation_in_memory(
         }
     }
 
-    let mut barrier_error = None;
     for barrier in barriers.values() {
         if let Some(error) = barrier.take_error()? {
             barrier_error.get_or_insert_with(|| error.to_string());
@@ -404,6 +408,16 @@ fn federate_by_enclave_map(
     }
 
     Ok(federate_by_enclave)
+}
+
+fn federate_has_no_initial_work(
+    enclave: &boomerang_runtime::Enclave,
+    topology: &FederatedTopology,
+    federate_id: &FederateId,
+) -> bool {
+    enclave.env.reactions.is_empty()
+        || (enclave.graph.startup_actions.is_empty()
+            && topology.incoming_edges(federate_id).next().is_none())
 }
 
 fn unsupported_topology(what: impl Into<String>) -> StaticFederationRunnerError {

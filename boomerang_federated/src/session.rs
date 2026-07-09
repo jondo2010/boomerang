@@ -254,10 +254,15 @@ where
                     }
 
                     if matches!(message, FederateToRti::Stop { .. }) {
-                        if let Err(error) = self.rti.handle(message) {
-                            return protocol_error(sinks, &federate_id, error.to_string()).await;
-                        }
+                        let deliveries = match self.rti.handle(message) {
+                            Ok(deliveries) => deliveries,
+                            Err(error) => {
+                                return protocol_error(sinks, &federate_id, error.to_string())
+                                    .await;
+                            }
+                        };
                         stopped.insert(federate_id);
+                        send_deliveries(sinks, deliveries).await?;
                         continue;
                     }
 

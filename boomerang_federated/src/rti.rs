@@ -109,9 +109,11 @@ impl RtiState {
             }
             FederateToRti::Net { federate_id, tag } => {
                 let decision = self.request_tag(&federate_id, tag)?;
-                Ok(Self::grant_delivery(federate_id, decision)
+                let mut deliveries = Self::grant_delivery(federate_id, decision)
                     .into_iter()
-                    .collect())
+                    .collect::<Vec<_>>();
+                deliveries.extend(self.try_grants_for_all()?);
+                Ok(deliveries)
             }
             FederateToRti::Ltc { federate_id, tag } => {
                 self.complete_tag(&federate_id, tag)?;
@@ -137,11 +139,13 @@ impl RtiState {
             }
             FederateToRti::Stop { federate_id } => {
                 self.ensure_federate(&federate_id)?;
-                self.federates
+                let state = self
+                    .federates
                     .get_mut(&federate_id)
-                    .expect("federate existence was checked")
-                    .stopped = true;
-                Ok(Vec::new())
+                    .expect("federate existence was checked");
+                state.next_event = Some(WireTag::FOREVER);
+                state.stopped = true;
+                self.try_grants_for_all()
             }
         }
     }
@@ -238,6 +242,12 @@ impl RtiState {
             .federates
             .get(federate_id)
             .ok_or_else(|| RtiError::UnknownFederate(federate_id.clone()))?;
+        if state.stopped {
+            return Ok(GrantDecision::Blocked {
+                requested: state.next_event.unwrap_or(WireTag::FOREVER),
+                earliest_incoming: self.earliest_incoming_message_tag(federate_id)?,
+            });
+        }
         let requested = match state.next_event {
             Some(tag) => tag,
             None => {
@@ -247,6 +257,13 @@ impl RtiState {
                 })
             }
         };
+
+        if requested == WireTag::FOREVER {
+            return Ok(GrantDecision::Blocked {
+                requested,
+                earliest_incoming: self.earliest_incoming_message_tag(federate_id)?,
+            });
+        }
 
         if state
             .last_granted
@@ -433,6 +450,79 @@ mod tests {
                 },
             }]
         );
+    }
+
+    #[test]
+    fn net_forever_unblocks_pending_downstream_without_granting_forever() {
+        let mut rti = RtiState::new(topology_with_edge(WireDelay::ZERO));
+
+        assert_eq!(
+            rti.handle(FederateToRti::Net {
+                federate_id: fed("target"),
+                tag: WireTag::finite(10, 0),
+            })
+            .unwrap(),
+            Vec::new()
+        );
+
+        let deliveries = rti
+            .handle(FederateToRti::Net {
+                federate_id: fed("source"),
+                tag: WireTag::FOREVER,
+            })
+            .unwrap();
+
+        assert_eq!(
+            deliveries,
+            vec![RtiDelivery {
+                federate_id: fed("target"),
+                message: RtiToFederate::Tag {
+                    tag: WireTag::finite(10, 0),
+                },
+            }]
+        );
+        assert_eq!(
+            rti.federate_state(&fed("source")).unwrap().next_event,
+            Some(WireTag::FOREVER)
+        );
+        assert_eq!(
+            rti.federate_state(&fed("source")).unwrap().last_granted,
+            None
+        );
+    }
+
+    #[test]
+    fn stop_marks_federate_no_future_and_unblocks_pending_downstream() {
+        let mut rti = RtiState::new(topology_with_edge(WireDelay::ZERO));
+
+        assert_eq!(
+            rti.handle(FederateToRti::Net {
+                federate_id: fed("target"),
+                tag: WireTag::finite(10, 0),
+            })
+            .unwrap(),
+            Vec::new()
+        );
+
+        let deliveries = rti
+            .handle(FederateToRti::Stop {
+                federate_id: fed("source"),
+            })
+            .unwrap();
+
+        assert_eq!(
+            deliveries,
+            vec![RtiDelivery {
+                federate_id: fed("target"),
+                message: RtiToFederate::Tag {
+                    tag: WireTag::finite(10, 0),
+                },
+            }]
+        );
+        let source_state = rti.federate_state(&fed("source")).unwrap();
+        assert!(source_state.stopped);
+        assert_eq!(source_state.next_event, Some(WireTag::FOREVER));
+        assert_eq!(source_state.last_granted, None);
     }
 
     #[test]

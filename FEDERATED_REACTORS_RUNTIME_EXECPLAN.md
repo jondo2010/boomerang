@@ -31,7 +31,7 @@ Before the live runner is implemented, this plan now first aligns local enclave 
 - [x] (2026-07-09 14:31Z) Implemented a federate client bridge in `boomerang_federated` that attaches a protocol client session to one runtime scheduler barrier and one federate id.
 - [x] (2026-07-09 16:05Z) Implemented a public builder-facing in-memory static federation runner that uses the real RTI session loop, real federate protocol clients, and real scheduler barriers.
 - [x] (2026-07-09 19:12Z) Refactored the in-memory static federation runner so runtime orchestration lives in `boomerang_federated::static_runner`, while `boomerang_builder::execute_federation_in_memory` remains a thin builder-metadata lowering shim.
-- [ ] Define and test shutdown and no-future-event behavior.
+- [x] (2026-07-09 19:30Z) Defined and tested shutdown/no-future behavior for the static in-memory federation runner.
 - [ ] Promote TCP smoke transport into a reusable RTI/federate runtime path.
 - [ ] Add broader correctness tests for multi-hop topologies, positive-delay cycles, same-tag messages, and rejected unsupported semantics.
 
@@ -129,6 +129,15 @@ Before the live runner is implemented, this plan now first aligns local enclave 
 
 - Observation: The buffered-plus-live outbound sink is a runtime integration primitive rather than a builder type.
   Evidence: `BuilderFederatedOutboundSink` was removed; `boomerang_runtime::BufferedFederatedOutboundSink` now implements `FederatedOutboundSink`, preserves drainable `FederatedOutboundBuffer` behavior, and forwards configured live routes to `FederatedOutboundChannel`.
+
+- Observation: In this Milestone 7 session, CodeStory local navigation was fresh for `/Users/johhug01/Source/boomerang`, but packet/search stayed blocked by stale sidecar retrieval even after MCP auto-repair and `repair_all`.
+  Evidence: `codestory://status` reported `project_root` `/Users/johhug01/Source/boomerang`, `index_freshness.status` `fresh`, and `allowed_surfaces.packet/search.allowed` `false` with `sidecar_manifest_stale`; `mcp__codestory.repair_all` returned failed/repairing status, so direct source reads were used after `mcp__codestory.ground`.
+
+- Observation: The static runner cannot wait for every scheduler thread before sending any final federate `Stop`.
+  Evidence: the delayed live test without `Config::with_timeout` requires the source federate to publish no-future immediately after its scheduler exits; otherwise the sink remains blocked waiting for a `TAG` at the delayed message tag.
+
+- Observation: A builder-generated federated sender reaction can make an otherwise idle source enclave look non-empty to the runner.
+  Evidence: a source federate with only an output port connected across federation has `env.reactions` populated by lowering, but `graph.startup_actions` is empty and the federate has no upstream federated edges. Running it as a scheduler reaches the runtime's synthetic no-event shutdown path from `Tag::NEVER`, which overflows the zero-delay microstep increment in debug builds.
 
 ## Decision Log
 
@@ -228,6 +237,18 @@ Before the live runner is implemented, this plan now first aligns local enclave 
   Rationale: The sink's behavior is runtime-facing: buffer outbound endpoint commands for manual drains and forward matching live routes to channels. Keeping it in `boomerang_runtime` avoids builder-specific naming and lets any federated runtime adapter install live routes without depending on builder internals.
   Date/Author: 2026-07-09 / Codex
 
+- Decision: Treat `NET(FOREVER)` and `Stop` as no-future information, not as a request for `TAG(FOREVER)`.
+  Rationale: A no-future federate must unblock downstream pending grants, but granting infinity back to that federate is not useful work and stopped federates must not receive new grants. `RtiState` now records `next_event = FOREVER` for no-future/stop and retries pending grants for other federates.
+  Date/Author: 2026-07-09 / Codex
+
+- Decision: Send final no-future/stop from each static-runner federate as soon as its scheduler exits.
+  Rationale: Waiting for all scheduler threads before stopping any federate can deadlock a downstream federate that is blocked on an upstream no-future signal. The runner now calls the shared barrier stop path from the scheduler thread after `event_loop` returns, while keeping the final outer stop calls idempotent.
+  Date/Author: 2026-07-09 / Codex
+
+- Decision: Treat a federate enclave with no startup actions and no upstream federated edges as no initial work, even if lowering added a generated sender reaction.
+  Rationale: Such an enclave cannot receive a future federated message and has no local startup/timer event to produce output. Running it as a scheduler only reaches a runtime no-event edge case; the static runner can publish no-future immediately instead.
+  Date/Author: 2026-07-09 / Codex
+
 ## Outcomes & Retrospective
 
 This plan starts after the builder, protocol, endpoint, scheduler hook, in-memory smoke, and TCP smoke groundwork has landed. The expected outcome is a live in-memory static federation that can be run by one test or helper and then a TCP-backed variant that uses the same protocol session logic. On 2026-07-09, the plan was revised so the first implementation milestone extracts shared inter-partition boundary metadata before adding protocol bridge utilities.
@@ -245,6 +266,8 @@ Milestone 5 is complete. `boomerang_federated/src/client.rs` now defines `Federa
 Milestone 6 is complete. `boomerang_builder::execute_federation_in_memory` now exposes the opt-in builder-facing live in-memory runner behind the `federated` feature and is re-exported by the umbrella crate prelude. The runner takes `BuilderRuntimeParts` and `runtime::Config`, rejects empty federation plans, non-empty unmapped enclaves, duplicate/ambiguous enclave-to-federate mappings, no-reaction/no-future federate enclaves, missing endpoint routes, physical cross-federate edges, and distributed zero-delay cycles. It converts the builder `FederationPlan` into a protocol topology and client routes, installs endpoint-to-`FederatedOutboundChannel` forwarding while preserving the existing `FederatedOutboundBuffer`, starts one in-memory `StaticRtiSession`, connects all `FederateProtocolClient`s concurrently, runs one scheduler thread per federate with `RtiFederatedTimeBarrier`, sends post-scheduler `Stop` frames, awaits the real RTI session, and returns final `Env` values keyed by `EnclaveKey`. `FederatedInboundEndpointRegistry` is now cloneable so each barrier can schedule through the same endpoint handlers. The builder tests keep the old manual RTI-routing checks and add live source/sink tests using `SerdeJsonCodec`; the hello case records `(Tag::ZERO, 7)` and the delayed case records `(Tag::new(Duration::milliseconds(10), 0), 7)`. No TCP orchestration, no `boomerang_runtime` dependency on `boomerang_federated`, no `PTAG`/`ABS`, and no no-future shutdown semantics were added. Validation passed with `cargo test -p boomerang_federated`, `cargo test -p boomerang_builder --features federated`, `cargo test -p boomerang_runtime --features federated`, and `cargo check -p boomerang --features federated`.
 
 After Milestone 6, the code was refactored to put the live static runner in `boomerang_federated::static_runner`. The public builder API remains `execute_federation_in_memory(parts, config)`, but it now lowers `BuilderRuntimeParts` into protocol/runtime DTOs and delegates execution. `boomerang_builder` no longer depends directly on Tokio for the federated feature. `boomerang_runtime` now owns `BufferedFederatedOutboundSink`, so the buffering/live-forwarding outbound sink no longer carries builder naming. Validation passed with `cargo test -p boomerang_runtime --features federated`, `cargo test -p boomerang_federated --features runtime`, `cargo test -p boomerang_builder --features federated`, `cargo test -p boomerang_federated`, `cargo check -p boomerang --features federated`, `cargo check -p boomerang_builder`, and `cargo check -p boomerang_federated --no-default-features --features runtime`.
+
+Milestone 7 is implemented. `RtiState` now records `NET(FOREVER)` and `Stop` as no-future state and retries pending grants for other federates without granting `TAG(FOREVER)` to the no-future/stopped federate. The RTI session forwards deliveries caused by `Stop`. `RtiFederatedTimeBarrier::stop_result` sends `NET(FOREVER)` before `Stop`. The static runner sends final stop/no-future from each scheduler thread as soon as that scheduler exits, and it immediately stops federates that have no startup actions and no upstream federated edges. Tests cover `NET(FOREVER)` unblocking a pending downstream grant, `Stop` marking a federate no-future, the bridge's `NET(FOREVER)` before `Stop`, live delayed source/sink execution without `Config::with_timeout`, and a no-message topology that terminates without a timeout. Validation passed with `cargo test -p boomerang_federated`, `cargo test -p boomerang_federated --features runtime`, `cargo test -p boomerang_builder --features federated`, `cargo test -p boomerang_runtime --features federated`, and `cargo check -p boomerang --features federated`.
 
 ## Context and Orientation
 

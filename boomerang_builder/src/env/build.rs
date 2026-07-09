@@ -63,6 +63,12 @@ pub struct BuilderRuntimeParts {
     #[cfg(feature = "federated")]
     /// Static federation metadata extracted by the builder.
     pub federation_plan: FederationPlan,
+    #[cfg(feature = "federated")]
+    /// Outbound serialized endpoint commands emitted by federated sender reactions.
+    pub federated_outbound: runtime::FederatedOutboundBuffer,
+    #[cfg(feature = "federated")]
+    /// Registry used by federated clients to schedule received endpoint payloads.
+    pub federated_inbound_endpoints: runtime::FederatedInboundEndpointRegistry,
     #[cfg(feature = "replay")]
     /// The action replayers for each enclave
     pub replayers: runtime::replay::ReplayersMap,
@@ -123,6 +129,10 @@ impl BuilderRuntimeParts {
                 aliases,
                 #[cfg(feature = "federated")]
                 federation_plan: FederationPlan::default(),
+                #[cfg(feature = "federated")]
+                federated_outbound: runtime::FederatedOutboundBuffer::default(),
+                #[cfg(feature = "federated")]
+                federated_inbound_endpoints: runtime::FederatedInboundEndpointRegistry::default(),
                 replayers,
             }
         }
@@ -134,6 +144,10 @@ impl BuilderRuntimeParts {
                 aliases,
                 #[cfg(feature = "federated")]
                 federation_plan: FederationPlan::default(),
+                #[cfg(feature = "federated")]
+                federated_outbound: runtime::FederatedOutboundBuffer::default(),
+                #[cfg(feature = "federated")]
+                federated_inbound_endpoints: runtime::FederatedInboundEndpointRegistry::default(),
             }
         }
     }
@@ -643,6 +657,19 @@ impl EnvBuilder {
         Ok(())
     }
 
+    #[cfg(feature = "federated")]
+    fn build_federated_inbound_endpoints(
+        &mut self,
+        builder_parts: &mut BuilderRuntimeParts,
+    ) -> Result<(), BuilderError> {
+        let mut registry = std::mem::take(&mut builder_parts.federated_inbound_endpoints);
+        for endpoint_builder in self.federated_inbound_endpoint_builders.drain(..) {
+            endpoint_builder(builder_parts, &mut registry)?;
+        }
+        builder_parts.federated_inbound_endpoints = registry;
+        Ok(())
+    }
+
     fn assign_runtime_action_and_port_scopes(
         &mut self,
         builder_parts: &mut BuilderRuntimeParts,
@@ -913,6 +940,8 @@ impl EnvBuilder {
         }
 
         self.build_runtime_actions(&partition_map, &mut builder_parts)?;
+        #[cfg(feature = "federated")]
+        self.build_federated_inbound_endpoints(&mut builder_parts)?;
         self.build_runtime_ports(&partition_map, &mut builder_parts, &port_bindings)?;
 
         // this must be done before build_runtime_reactors, since that drains self.reaction_builders

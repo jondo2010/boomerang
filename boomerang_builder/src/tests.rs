@@ -1,6 +1,8 @@
 use boomerang_runtime::{ActionCommon, BaseAction, CommonContext, ReactionRefsExtract};
 use itertools::Itertools;
 use std::ptr::NonNull;
+#[cfg(feature = "federated")]
+use std::sync::{Arc, Mutex};
 
 use super::*;
 use crate::{port::Contained, runtime};
@@ -1191,6 +1193,36 @@ fn federated_source_reactor() -> impl Reactor<(), Ports = TypedPortKey<u32, Outp
 }
 
 #[cfg(feature = "federated")]
+fn federated_startup_source_reactor(
+    value: u32,
+) -> impl Reactor<(), Ports = TypedPortKey<u32, Output, Contained>> {
+    move |name: &str,
+          state: (),
+          parent: Option<BuilderReactorKey>,
+          scope_mode: Option<BuilderModeKey>,
+          bank_info: Option<runtime::BankInfo>,
+          placement: ReactorPlacement,
+          env: &mut EnvBuilder| {
+        let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
+        if let Some(scope_mode) = scope_mode {
+            builder.set_scope_mode(scope_mode)?;
+        }
+        let output = builder.add_output_port::<u32>("out")?;
+        let startup = builder.get_startup_action();
+        builder
+            .add_reaction(Some("emit"))
+            .with_trigger(startup)
+            .with_effect(output)
+            .with_reaction_fn(move |_ctx, _state, (_startup, mut output)| {
+                *output = Some(value);
+            })
+            .finish()?;
+        builder.finish()?;
+        Ok(output.contained())
+    }
+}
+
+#[cfg(feature = "federated")]
 fn federated_sink_reactor() -> impl Reactor<(), Ports = TypedPortKey<u32, Input, Contained>> {
     |name: &str,
      state: (),
@@ -1206,6 +1238,37 @@ fn federated_sink_reactor() -> impl Reactor<(), Ports = TypedPortKey<u32, Input,
         let input = builder.add_input_port::<u32>("in")?.contained();
         builder.finish()?;
         Ok(input)
+    }
+}
+
+#[cfg(feature = "federated")]
+fn federated_recording_sink_reactor(
+    values: Arc<Mutex<Vec<(runtime::Tag, u32)>>>,
+) -> impl Reactor<(), Ports = TypedPortKey<u32, Input, Contained>> {
+    move |name: &str,
+          state: (),
+          parent: Option<BuilderReactorKey>,
+          scope_mode: Option<BuilderModeKey>,
+          bank_info: Option<runtime::BankInfo>,
+          placement: ReactorPlacement,
+          env: &mut EnvBuilder| {
+        let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
+        if let Some(scope_mode) = scope_mode {
+            builder.set_scope_mode(scope_mode)?;
+        }
+        let input = builder.add_input_port::<u32>("in")?;
+        let values = Arc::clone(&values);
+        builder
+            .add_reaction(Some("record"))
+            .with_trigger(input)
+            .with_reaction_fn(move |ctx, _state, (input,)| {
+                if let Some(value) = *input {
+                    values.lock().unwrap().push((ctx.get_tag(), value));
+                }
+            })
+            .finish()?;
+        builder.finish()?;
+        Ok(input.contained())
     }
 }
 
@@ -1237,7 +1300,7 @@ fn build_federated_source_sink_plan(
     let mut builder = env_builder.add_reactor("main", None, None, (), false);
     let source = builder.add_child_federate(federated_source_reactor(), "source", ())?;
     let sink = builder.add_child_federate(federated_sink_reactor(), "sink", ())?;
-    builder.connect_port(source, sink, after, false)?;
+    builder.connect_federated_port(source, sink, after, boomerang_federated::SerdeJsonCodec)?;
     builder.finish()?;
 
     let parts = env_builder.into_runtime_parts(&runtime::Config::default())?;
@@ -1293,6 +1356,145 @@ fn test_delayed_cross_federate_connection_records_delay() {
 
     assert_eq!(plan.edges.len(), 1);
     assert_eq!(plan.edges[0].delay, Some(delay));
+}
+
+#[cfg(feature = "federated")]
+#[test]
+fn test_cross_federate_connection_without_codec_is_rejected() {
+    let mut env_builder = EnvBuilder::new();
+    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let source = builder
+        .add_child_federate(federated_source_reactor(), "source", ())
+        .unwrap();
+    let sink = builder
+        .add_child_federate(federated_sink_reactor(), "sink", ())
+        .unwrap();
+    builder.connect_port(source, sink, None, false).unwrap();
+    builder.finish().unwrap();
+
+    let error = match env_builder.into_runtime_parts(&runtime::Config::default()) {
+        Ok(_) => panic!("cross-federate connection without codec should fail"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        BuilderError::UnsupportedFederationTopology { what }
+            if what.contains("requires a federated codec")
+    ));
+}
+
+#[cfg(feature = "federated")]
+#[test]
+fn test_federated_connection_lowers_endpoint_runtime_parts() {
+    let mut env_builder = EnvBuilder::new();
+    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let source = builder
+        .add_child_federate(federated_source_reactor(), "source", ())
+        .unwrap();
+    let sink = builder
+        .add_child_federate(federated_sink_reactor(), "sink", ())
+        .unwrap();
+    builder
+        .connect_federated_port(source, sink, None, boomerang_federated::SerdeJsonCodec)
+        .unwrap();
+    builder.finish().unwrap();
+
+    let parts = env_builder
+        .into_runtime_parts(&runtime::Config::default())
+        .unwrap();
+
+    assert_eq!(parts.federation_plan.endpoints.len(), 1);
+    assert_eq!(parts.federated_inbound_endpoints.len(), 1);
+    assert!(parts.federated_outbound.is_empty().unwrap());
+    assert!(parts.enclaves.values().all(|enclave| {
+        enclave.upstream_enclaves.is_empty() && enclave.downstream_enclaves.is_empty()
+    }));
+}
+
+#[cfg(feature = "federated")]
+#[test]
+fn test_federated_sender_emits_serialized_msg_command() {
+    let delay = runtime::Duration::milliseconds(10);
+    let mut env_builder = EnvBuilder::new();
+    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let source = builder
+        .add_child_federate(federated_startup_source_reactor(7), "source", ())
+        .unwrap();
+    let sink = builder
+        .add_child_federate(federated_sink_reactor(), "sink", ())
+        .unwrap();
+    builder
+        .connect_federated_port(
+            source,
+            sink,
+            Some(delay),
+            boomerang_federated::SerdeJsonCodec,
+        )
+        .unwrap();
+    builder.finish().unwrap();
+
+    let BuilderRuntimeParts {
+        enclaves,
+        federated_outbound,
+        ..
+    } = env_builder
+        .into_runtime_parts(&runtime::Config::default())
+        .unwrap();
+
+    let config = runtime::Config::default()
+        .with_fast_forward(true)
+        .with_timeout(runtime::Duration::milliseconds(1));
+    let _envs = runtime::execute_enclaves(enclaves.into_iter(), config);
+
+    let commands = federated_outbound.drain().unwrap();
+    assert_eq!(commands.len(), 1);
+    let runtime::FederatedOutboundCommand::Msg(message) = &commands[0];
+    assert_eq!(message.endpoint.as_str(), "main/source/out->main/sink/in");
+    assert_eq!(message.tag, runtime::Tag::new(delay, 0));
+    assert_eq!(message.payload, b"7");
+}
+
+#[cfg(feature = "federated")]
+#[test]
+fn test_federated_inbound_registry_schedules_target_action() {
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let mut env_builder = EnvBuilder::new();
+    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let source = builder
+        .add_child_federate(federated_source_reactor(), "source", ())
+        .unwrap();
+    let sink = builder
+        .add_child_federate(
+            federated_recording_sink_reactor(Arc::clone(&values)),
+            "sink",
+            (),
+        )
+        .unwrap();
+    builder
+        .connect_federated_port(source, sink, None, boomerang_federated::SerdeJsonCodec)
+        .unwrap();
+    builder.finish().unwrap();
+
+    let BuilderRuntimeParts {
+        enclaves,
+        federated_inbound_endpoints,
+        ..
+    } = env_builder
+        .into_runtime_parts(&runtime::Config::default())
+        .unwrap();
+
+    let endpoint = runtime::FederatedEndpointId::new("main/source/out->main/sink/in");
+    federated_inbound_endpoints
+        .schedule(&endpoint, runtime::Tag::ZERO, b"42")
+        .unwrap();
+
+    let config = runtime::Config::default()
+        .with_fast_forward(true)
+        .with_timeout(runtime::Duration::milliseconds(1));
+    let _envs = runtime::execute_enclaves(enclaves.into_iter(), config);
+
+    assert_eq!(*values.lock().unwrap(), vec![(runtime::Tag::ZERO, 42)]);
 }
 
 #[cfg(feature = "federated")]

@@ -4,6 +4,8 @@
 //! `boomerang_runtime` data, including static dependency maps and derived scheduler indexes. The
 //! runtime receives those data structures ready to execute.
 
+#[cfg(feature = "federated")]
+use crate::connection::{FederatedDecoderAdapter, FederatedEncoderAdapter};
 use crate::{
     connection::{BaseConnectionBuilder, ConnectionBuilder, PortBindings},
     port::Contained,
@@ -23,6 +25,8 @@ use super::{
 use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, EdgeDirection};
 use slotmap::{Key, SecondaryMap, SlotMap};
+#[cfg(feature = "federated")]
+use std::sync::Arc;
 use std::{collections::HashMap, convert::TryInto};
 
 mod build;
@@ -69,6 +73,12 @@ mod util {
 #[cfg(feature = "replay")]
 type ReplayFunctionBuilder = dyn FnOnce(&BuilderRuntimeParts) -> Box<dyn runtime::replay::ReplayFn>;
 
+#[cfg(feature = "federated")]
+type FederatedInboundEndpointBuilder = dyn FnOnce(
+    &BuilderRuntimeParts,
+    &mut runtime::FederatedInboundEndpointRegistry,
+) -> Result<(), BuilderError>;
+
 #[derive(Debug)]
 pub struct ModeBuilder {
     pub name: String,
@@ -90,6 +100,9 @@ pub struct EnvBuilder {
     pub(super) reactor_builders: SlotMap<BuilderReactorKey, ReactorBuilder>,
     /// Builders for Connections
     pub(super) connection_builders: Vec<Box<dyn BaseConnectionBuilder>>,
+    #[cfg(feature = "federated")]
+    /// Builders for inbound federated endpoint registry entries.
+    pub(super) federated_inbound_endpoint_builders: Vec<Box<FederatedInboundEndpointBuilder>>,
     #[cfg(feature = "replay")]
     /// Builders for Replay functions
     pub(super) replay_builders: SecondaryMap<BuilderActionKey, Box<ReplayFunctionBuilder>>,
@@ -570,6 +583,10 @@ impl EnvBuilder {
                 target_key,
                 after,
                 scope_mode,
+                #[cfg(feature = "federated")]
+                federated_encoder: None,
+                #[cfg(feature = "federated")]
+                federated_decoder: None,
                 _phantom: Default::default(),
             })
         } else {
@@ -578,11 +595,131 @@ impl EnvBuilder {
                 target_key,
                 after,
                 scope_mode,
+                #[cfg(feature = "federated")]
+                federated_encoder: None,
+                #[cfg(feature = "federated")]
+                federated_decoder: None,
                 _phantom: Default::default(),
             })
         });
 
         Ok(())
+    }
+
+    #[cfg(feature = "federated")]
+    pub fn add_federated_port_connection<T, P1, P2, C>(
+        &mut self,
+        source_key: P1,
+        target_key: P2,
+        after: Option<runtime::Duration>,
+        codec: C,
+    ) -> Result<(), BuilderError>
+    where
+        T: runtime::ReactorData + Clone,
+        P1: Into<BuilderPortKey>,
+        P2: Into<BuilderPortKey>,
+        C: boomerang_federated::PayloadEncoder<T>
+            + boomerang_federated::PayloadDecoder<T>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.add_federated_port_connection_in_scope::<T, P1, P2, C>(
+            source_key, target_key, None, after, codec,
+        )
+    }
+
+    #[cfg(feature = "federated")]
+    pub(crate) fn add_federated_port_connection_in_scope<T, P1, P2, C>(
+        &mut self,
+        source_key: P1,
+        target_key: P2,
+        scope_mode: Option<BuilderModeKey>,
+        after: Option<runtime::Duration>,
+        codec: C,
+    ) -> Result<(), BuilderError>
+    where
+        T: runtime::ReactorData + Clone,
+        P1: Into<BuilderPortKey>,
+        P2: Into<BuilderPortKey>,
+        C: boomerang_federated::PayloadEncoder<T>
+            + boomerang_federated::PayloadDecoder<T>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let source_key = source_key.into();
+        let target_key = target_key.into();
+
+        tracing::debug!(
+            "Adding federated connection from {} to {} with after={after:?}",
+            source_key.fqn(self, false)?,
+            target_key.fqn(self, false)?,
+        );
+
+        let codec = Arc::new(codec);
+        let encoder_codec = Arc::clone(&codec);
+        let decoder_codec = Arc::clone(&codec);
+
+        self.connection_builders
+            .push(Box::new(ConnectionBuilder::<T, Logical> {
+                source_key,
+                target_key,
+                after,
+                scope_mode,
+                federated_encoder: Some(Box::new(move || {
+                    Box::new(FederatedEncoderAdapter {
+                        codec: encoder_codec,
+                    })
+                })),
+                federated_decoder: Some(Box::new(move || {
+                    Box::new(FederatedDecoderAdapter {
+                        codec: decoder_codec,
+                    })
+                })),
+                _phantom: Default::default(),
+            }));
+
+        Ok(())
+    }
+
+    #[cfg(feature = "federated")]
+    pub(super) fn add_federated_inbound_endpoint<T>(
+        &mut self,
+        endpoint: runtime::FederatedEndpointId,
+        target_partition: BuilderReactorKey,
+        target_action_key: BuilderActionKey,
+        decoder: Box<dyn runtime::FederatedPayloadDecoder<T>>,
+    ) where
+        T: runtime::ReactorData,
+    {
+        self.federated_inbound_endpoint_builders
+            .push(Box::new(move |builder_parts, registry| {
+                let (enclave_key, runtime_action_key) = *builder_parts
+                    .aliases
+                    .action_aliases
+                    .get(target_action_key)
+                    .ok_or_else(|| {
+                        BuilderError::InternalError(format!(
+                            "missing runtime action alias for federated endpoint {endpoint}"
+                        ))
+                    })?;
+                let expected_enclave_key = builder_parts.aliases.enclave_aliases[target_partition];
+                if enclave_key != expected_enclave_key {
+                    return Err(BuilderError::InternalError(format!(
+                        "federated endpoint {endpoint} resolved to wrong target enclave"
+                    )));
+                }
+
+                let enclave = &builder_parts.enclaves[enclave_key];
+                let context = enclave.create_send_context(enclave_key);
+                let action_ref = enclave.create_async_action_ref(runtime_action_key);
+                registry
+                    .register(endpoint, context, action_ref, decoder)
+                    .map_err(|error| BuilderError::UnsupportedFederationTopology {
+                        what: error.to_string(),
+                    })
+            }));
     }
 
     /// Get a fully-qualified name for a given key

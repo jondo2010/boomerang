@@ -9,6 +9,8 @@ pub mod action;
 mod context;
 mod env;
 mod event;
+#[cfg(feature = "federated")]
+mod federated;
 pub mod keepalive;
 mod key_set;
 pub mod port;
@@ -35,9 +37,17 @@ pub use env::{
 };
 #[cfg(feature = "federated")]
 pub use event::AsyncEvent;
+#[cfg(feature = "federated")]
+pub use federated::{
+    FederatedEndpointError, FederatedEndpointId, FederatedInboundEndpointRegistry,
+    FederatedOutboundBuffer, FederatedOutboundCommand, FederatedOutboundMessage,
+    FederatedOutboundSink, FederatedPayloadDecoder, FederatedPayloadEncoder,
+};
 pub use kanal::{Receiver, Sender};
 pub use key_set::KeySetLimits as ReactionSetLimits;
 pub use port::{DynPortRef, DynPortRefMut, *};
+#[cfg(feature = "federated")]
+pub use reaction::FederatedSenderReactionFn;
 pub use reaction::{
     BoxedReactionFn, ConnectionReceiverReactionFn, ConnectionSenderReactionFn, Deadline,
     EnclaveSenderReactionFn, FromRefs, Reaction, ReactionFn, ReactionKey, ReactionSet,

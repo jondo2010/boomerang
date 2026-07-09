@@ -279,7 +279,7 @@ impl CommonContext for Context {
 }
 
 /// SendContext can be shared across threads and allows asynchronous events to be scheduled.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SendContext {
     /// Enclave ID for this context
     pub(crate) enclave_key: EnclaveKey,

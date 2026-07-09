@@ -3,6 +3,8 @@
 //! Non-port-binding connections are connections with a specified delay or between enclaves.
 
 use std::collections::{BTreeSet, HashMap};
+#[cfg(feature = "federated")]
+use std::sync::Arc;
 
 use slotmap::SecondaryMap;
 
@@ -11,6 +13,49 @@ use crate::{
     BuilderReactorKey, EnclaveDep, EnvBuilder, Input, Output, ParentReactorBuilder, PartitionMap,
     PortType, TriggerMode, TypedActionKey, TypedPortKey,
 };
+
+#[cfg(feature = "federated")]
+pub(crate) type FederatedEncoderFactory<T> =
+    Box<dyn FnOnce() -> Box<dyn runtime::FederatedPayloadEncoder<T>>>;
+#[cfg(feature = "federated")]
+pub(crate) type FederatedDecoderFactory<T> =
+    Box<dyn FnOnce() -> Box<dyn runtime::FederatedPayloadDecoder<T>>>;
+
+#[cfg(feature = "federated")]
+pub(crate) struct FederatedEncoderAdapter<C> {
+    pub(crate) codec: Arc<C>,
+}
+
+#[cfg(feature = "federated")]
+impl<T, C> runtime::FederatedPayloadEncoder<T> for FederatedEncoderAdapter<C>
+where
+    T: runtime::ReactorData,
+    C: boomerang_federated::PayloadEncoder<T> + Send + Sync + 'static,
+{
+    fn encode(&self, value: &T) -> Result<Vec<u8>, runtime::FederatedEndpointError> {
+        self.codec
+            .encode(value)
+            .map_err(|error| runtime::FederatedEndpointError::codec(error.to_string()))
+    }
+}
+
+#[cfg(feature = "federated")]
+pub(crate) struct FederatedDecoderAdapter<C> {
+    pub(crate) codec: Arc<C>,
+}
+
+#[cfg(feature = "federated")]
+impl<T, C> runtime::FederatedPayloadDecoder<T> for FederatedDecoderAdapter<C>
+where
+    T: runtime::ReactorData,
+    C: boomerang_federated::PayloadDecoder<T> + Send + Sync + 'static,
+{
+    fn decode(&self, bytes: &[u8]) -> Result<T, runtime::FederatedEndpointError> {
+        self.codec
+            .decode(bytes)
+            .map_err(|error| runtime::FederatedEndpointError::codec(error.to_string()))
+    }
+}
 
 #[derive(Default)]
 pub struct PortBindings {
@@ -199,7 +244,7 @@ pub trait BaseConnectionBuilder {
     fn physical(&self) -> bool;
     /// Build the connection between two ports
     fn build(
-        &self,
+        &mut self,
         env: &mut EnvBuilder,
         partition_map: &mut PartitionMap,
         port_bindings: &mut PortBindings,
@@ -212,6 +257,10 @@ pub struct ConnectionBuilder<T: runtime::ReactorData, Q: ActionTag> {
     pub(crate) target_key: BuilderPortKey,
     pub(crate) after: Option<runtime::Duration>,
     pub(crate) scope_mode: Option<BuilderModeKey>,
+    #[cfg(feature = "federated")]
+    pub(crate) federated_encoder: Option<FederatedEncoderFactory<T>>,
+    #[cfg(feature = "federated")]
+    pub(crate) federated_decoder: Option<FederatedDecoderFactory<T>>,
     pub(crate) _phantom: std::marker::PhantomData<fn() -> (T, Q)>,
 }
 
@@ -231,7 +280,7 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
         !Q::IS_LOGICAL
     }
     fn build(
-        &self,
+        &mut self,
         env: &mut EnvBuilder,
         partition_map: &mut PartitionMap,
         port_bindings: &mut PortBindings,
@@ -272,6 +321,83 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
                 port_bindings.bind(self.source_key, self.target_key, env)?;
             }
         } else {
+            #[cfg(feature = "federated")]
+            if partitions_are_both_federated(env, source_partition, target_partition)? {
+                if !Q::IS_LOGICAL {
+                    return Err(BuilderError::UnsupportedFederationTopology {
+                        what: format!(
+                            "cross-federate physical connection '{}' -> '{}' is reserved for a later milestone",
+                            env.fqn_for(self.source_key, false)?,
+                            env.fqn_for(self.target_key, false)?,
+                        ),
+                    });
+                }
+
+                let source_fqn = env.fqn_for(self.source_key, false)?;
+                let target_fqn = env.fqn_for(self.target_key, false)?;
+                let encoder = self.federated_encoder.take().ok_or_else(|| {
+                    BuilderError::UnsupportedFederationTopology {
+                        what: format!(
+                            "cross-federate connection '{}' -> '{}' requires a federated codec; use connect_federated_port",
+                            source_fqn,
+                            target_fqn,
+                        ),
+                    }
+                })?();
+                let decoder = self.federated_decoder.take().ok_or_else(|| {
+                    BuilderError::UnsupportedFederationTopology {
+                        what: format!(
+                            "cross-federate connection '{}' -> '{}' requires a federated codec; use connect_federated_port",
+                            source_fqn,
+                            target_fqn,
+                        ),
+                    }
+                })?();
+                let endpoint = federated_endpoint_id(env, self.source_key, self.target_key)?;
+
+                let target_parent_reactor_key =
+                    env.reactor_builders[target_reactor_key].parent_reactor_key();
+
+                let EnclaveConnectionTarget {
+                    reactor_key,
+                    output_port,
+                    action_key,
+                } = build_enclave_connection_target::<T, Q>(
+                    env,
+                    target_parent_reactor_key,
+                    self.scope_mode,
+                    self.after,
+                )?;
+                partition_map.insert(reactor_key, target_partition);
+                port_bindings.bind(output_port.into(), self.target_key, env)?;
+
+                env.add_federated_inbound_endpoint::<T>(
+                    endpoint.clone(),
+                    target_partition,
+                    action_key.into(),
+                    decoder,
+                );
+
+                let source_parent_reactor_key =
+                    env.reactor_builders[source_reactor_key].parent_reactor_key();
+                let EnclaveConnectionSource {
+                    reactor_key,
+                    input_port,
+                } = build_federated_connection_source::<T>(
+                    env,
+                    source_parent_reactor_key,
+                    self.scope_mode,
+                    target_partition,
+                    action_key.into(),
+                    endpoint,
+                    encoder,
+                )?;
+                partition_map.insert(reactor_key, source_partition);
+                port_bindings.bind(self.source_key, input_port.into(), env)?;
+
+                return Ok(());
+            }
+
             // The connection is between two different partitions, so we need to build a pair of Reactions that trigger
             // and react to an Action.
             let target_parent_reactor_key =
@@ -313,6 +439,39 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
         }
         Ok(())
     }
+}
+
+#[cfg(feature = "federated")]
+fn partitions_are_both_federated(
+    env: &EnvBuilder,
+    source_partition: BuilderReactorKey,
+    target_partition: BuilderReactorKey,
+) -> Result<bool, BuilderError> {
+    let source_federate = env.reactor_builders[source_partition].federate_spec();
+    let target_federate = env.reactor_builders[target_partition].federate_spec();
+
+    match (source_federate.is_some(), target_federate.is_some()) {
+        (true, true) => Ok(true),
+        (false, false) => Ok(false),
+        _ => Err(BuilderError::UnsupportedFederationTopology {
+            what:
+                "connection crosses a federated boundary, but both enclave roots are not federates"
+                    .to_owned(),
+        }),
+    }
+}
+
+#[cfg(feature = "federated")]
+fn federated_endpoint_id(
+    env: &EnvBuilder,
+    source_key: BuilderPortKey,
+    target_key: BuilderPortKey,
+) -> Result<runtime::FederatedEndpointId, BuilderError> {
+    let source_port_fqn = env.fqn_for(source_key, false)?.to_string();
+    let target_port_fqn = env.fqn_for(target_key, false)?.to_string();
+    Ok(runtime::FederatedEndpointId::new(format!(
+        "{source_port_fqn}->{target_port_fqn}"
+    )))
 }
 
 /// Build a delayed or physical connection between two ports.
@@ -400,6 +559,52 @@ fn build_enclave_connection_source<T: runtime::ReactorData + Clone>(
             let remote_action_ref = enclave.create_async_action_ref(*runtime_action_key);
             runtime::EnclaveSenderReactionFn::<T>::new(remote_context, remote_action_ref, None)
                 .into()
+        })
+        .finish()?;
+    let reactor_key = source_builder.finish()?;
+    Ok(EnclaveConnectionSource {
+        reactor_key,
+        input_port,
+    })
+}
+
+#[cfg(feature = "federated")]
+fn build_federated_connection_source<T: runtime::ReactorData + Clone>(
+    env: &mut EnvBuilder,
+    parent_key: Option<BuilderReactorKey>,
+    scope_mode: Option<BuilderModeKey>,
+    target_partition: BuilderReactorKey,
+    target_action_key: BuilderActionKey,
+    endpoint: runtime::FederatedEndpointId,
+    encoder: Box<dyn runtime::FederatedPayloadEncoder<T>>,
+) -> Result<EnclaveConnectionSource<T>, BuilderError> {
+    let mut source_builder = env.add_reactor("con_reactor_src", parent_key, None, (), false);
+    if let Some(scope_mode) = scope_mode {
+        source_builder.set_scope_mode(scope_mode)?;
+    }
+    let input_port = source_builder.add_input_port::<T>("con_in")?;
+    source_builder
+        .add_reaction(None)
+        .with_trigger(input_port)
+        .with_defered_reaction_fn(move |builder_parts| {
+            let (enclave_key, runtime_action_key) = builder_parts
+                .aliases
+                .action_aliases
+                .get(target_action_key)
+                .expect("Action key");
+            let enclave = &builder_parts.enclaves[*enclave_key];
+
+            let enclave_key2 = builder_parts.aliases.enclave_aliases[target_partition];
+            assert_eq!(enclave_key, &enclave_key2, "Temporary cross-check");
+
+            let remote_action_ref = enclave.create_async_action_ref(*runtime_action_key);
+            runtime::FederatedSenderReactionFn::<T>::new(
+                endpoint,
+                remote_action_ref,
+                encoder,
+                Box::new(builder_parts.federated_outbound.clone()),
+            )
+            .into()
         })
         .finish()?;
     let reactor_key = source_builder.finish()?;

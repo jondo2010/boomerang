@@ -65,12 +65,12 @@ pub mod prelude {
 
     #[cfg(feature = "federated")]
     pub use super::builder::{
-        FederateBuildInfo, FederateSpec, FederatedEdge, FederatedEndpoint, FederatedEndpointId,
-        FederationPlan,
+        federated_routes_from_plan, federation_topology_from_plan, FederateBuildInfo, FederateSpec,
+        FederatedEdge, FederatedEndpoint, FederatedEndpointId, FederatedRoute, FederationPlan,
     };
 
     #[cfg(feature = "federated")]
-    pub use super::federated::{EndpointId, FederateId, WireTag};
+    pub use super::federated::{EndpointId, FederateId, RuntimeBridgeError, WireDelay, WireTag};
 
     pub use super::runtime::{self, action::ActionCommon, CommonContext, Duration, FromRefs, Tag};
 

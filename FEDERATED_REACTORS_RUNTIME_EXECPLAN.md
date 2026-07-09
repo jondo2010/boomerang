@@ -20,7 +20,7 @@ Before the live runner is implemented, this plan now first aligns local enclave 
 - [x] (2026-07-09 08:47Z) Grounded the repository with CodeStory local navigation and confirmed packet/search are unavailable because the sidecar retrieval mode is degraded.
 - [x] (2026-07-09 09:58Z) Revised the plan to put shared inter-partition boundary metadata before the runtime/protocol bridge milestone.
 - [x] (2026-07-09 10:09Z) Extracted shared inter-partition topology and boundary-edge metadata for local enclave and federated boundaries.
-- [ ] Add checked runtime/protocol tag and endpoint bridge utilities.
+- [x] (2026-07-09 10:39Z) Added checked runtime/protocol tag and delay bridge utilities in `boomerang_federated`, plus builder-owned topology and endpoint route extraction.
 - [ ] Replace or augment the pull-only outbound buffer with a live outbound sink that can wake a federate client.
 - [ ] Implement an in-memory static RTI/federate runner that uses real scheduler barriers.
 - [ ] Define and test shutdown and no-future-event behavior.
@@ -49,6 +49,15 @@ Before the live runner is implemented, this plan now first aligns local enclave 
 
 - Observation: Milestone 1 can keep federation-specific delivery unchanged while moving validation and metadata extraction to one builder-owned source of truth.
   Evidence: `boomerang_builder/src/inter_partition.rs` now defines `PartitionRoot`, `PartitionRootKind`, `BoundaryKind`, `InterPartitionEdge`, and `InterPartitionPlan`; `boomerang_builder/src/env/build.rs` builds that plan first, derives local `EnclaveDep` values from local boundary edges, and derives `FederationPlan` from federated boundary edges. `InterPartitionEdge` keeps source and target port keys rather than caching derived port FQNs.
+
+- Observation: In this Milestone 2 session, CodeStory was pointed at `/Users/johhug01/Source/boomerang`; local navigation was fresh, while packet/search remained blocked by degraded sidecar retrieval.
+  Evidence: `codestory://status` reported `project_root` `/Users/johhug01/Source/boomerang`, `index_freshness.status` `fresh`, and `allowed_surfaces.packet/search.allowed` `false`.
+
+- Observation: Runtime `Duration` can represent values that cannot be serialized as `WireDelay`.
+  Evidence: the bridge test constructs `runtime::Duration::nanoseconds_i128(i128::from(u64::MAX) + 1)` and verifies `WireDelay::try_from` rejects it because `WireDelay` stores nanoseconds in `u64`.
+
+- Observation: Rust's orphan rules allow the checked runtime/protocol conversions to be expressed as `TryFrom` impls in `boomerang_federated`.
+  Evidence: `boomerang_federated` owns `WireTag` and `WireDelay`, so the `runtime` feature now provides `TryFrom<boomerang_runtime::Tag> for WireTag`, `TryFrom<WireTag> for boomerang_runtime::Tag`, and `TryFrom<boomerang_runtime::Duration> for WireDelay` without adding any dependency from `boomerang_runtime` to `boomerang_federated`.
 
 ## Decision Log
 
@@ -84,11 +93,21 @@ Before the live runner is implemented, this plan now first aligns local enclave 
   Rationale: Boundary metadata should keep stable builder keys and semantic fields. FQNs are derived presentation or endpoint metadata and can be created from the builder when `FederationPlan` or debug output needs them.
   Date/Author: 2026-07-09 / Codex
 
+- Decision: Put runtime/protocol conversion impls in `boomerang_federated` behind its `runtime` feature, while keeping builder plan-to-topology and route extraction in `boomerang_builder`.
+  Rationale: Runtime `Tag`/`Duration` conversion is not builder logic. `boomerang_federated` owns the wire protocol types and can implement `TryFrom` without making `boomerang_runtime` depend on protocol code. Builder still owns conversion from `FederationPlan` metadata into protocol topology and endpoint route metadata because that mapping depends on builder-produced federate and endpoint ids.
+  Date/Author: 2026-07-09 / Codex
+
+- Decision: Represent invalid bridge conversions as `BuilderError::FederationBridgeError`.
+  Rationale: Builder APIs still need to report failed protocol topology extraction through `BuilderError`, including errors propagated from `boomerang_federated::RuntimeBridgeError` and malformed federation plan metadata such as duplicate or missing endpoint routes.
+  Date/Author: 2026-07-09 / Codex
+
 ## Outcomes & Retrospective
 
 This plan starts after the builder, protocol, endpoint, scheduler hook, in-memory smoke, and TCP smoke groundwork has landed. The expected outcome is a live in-memory static federation that can be run by one test or helper and then a TCP-backed variant that uses the same protocol session logic. On 2026-07-09, the plan was revised so the first implementation milestone extracts shared inter-partition boundary metadata before adding protocol bridge utilities.
 
 Milestone 1 is complete. `BuilderRuntimeParts` now carries an `inter_partition_plan`; local cross-enclave `EnclaveDep` values and federated `FederationPlan` endpoint/edge metadata are both derived from this shared plan. Common inter-partition metadata lives in non-gated `boomerang_builder/src/inter_partition.rs`, while federated plan metadata lives in module-gated `boomerang_builder/src/federation.rs`. Local delivery still lowers to `EnclaveSenderReactionFn`, federated delivery still lowers to `FederatedSenderReactionFn` plus outbound/inbound endpoint runtime pieces, and no RTI/session/tag bridge utilities were added. `InterPartitionEdge` records source and target port keys, not derived port FQN strings; `FederationPlan` generation computes FQNs from the builder when endpoint metadata is created. Validation passed with `cargo test -p boomerang_builder --features federated`, `cargo test -p boomerang_runtime --features federated`, and `cargo test -p boomerang_federated`; extra checks `cargo test -p boomerang_builder` and `cargo check -p boomerang --features federated` also passed.
+
+Milestone 2 is complete. `boomerang_federated/src/runtime_bridge.rs` now provides checked `TryFrom` impls for `runtime::Tag` <-> `boomerang_federated::WireTag` and `runtime::Duration` -> `WireDelay` behind the `boomerang_federated/runtime` feature. Negative finite tags are rejected except for sentinel `Tag::NEVER`/`WireTag::NEVER`; wire offsets outside `runtime::Duration`, microsteps outside `usize`, and delays outside nonnegative `u64` nanoseconds return `boomerang_federated::RuntimeBridgeError`. `boomerang_builder/src/federation.rs` keeps builder-owned `federation_topology_from_plan` and `federated_routes_from_plan`, and maps `RuntimeBridgeError` into `BuilderError::FederationBridgeError` when extracting topology. Route extraction maps runtime `FederatedEndpointId` values to source and target protocol `FederateId` values and checks endpoint/edge consistency. The manual federated builder tests now use `TryFrom` for tag conversion and the builder route/topology helpers instead of local ad hoc conversion helpers. Validation passed with `cargo test -p boomerang_federated --features runtime`, `cargo test -p boomerang_builder --features federated`, `cargo test -p boomerang_runtime --features federated`, `cargo test -p boomerang_federated`, and `cargo check -p boomerang --features federated`.
 
 ## Context and Orientation
 
@@ -343,7 +362,28 @@ In `boomerang_builder/src/inter_partition.rs`, define shared inter-partition met
 
 The exact type names may change, but Milestone 1 must leave a single builder-owned representation from which local `EnclaveDep` values and federated `FederationPlan` edges can be derived. This module must not mention `boomerang_federated::WireTag`, `ProtocolFrame`, `FederateId`, `EndpointId`, or `RtiState`.
 
-In a builder-owned federated bridge module, define checked conversion and route extraction:
+In `boomerang_federated` behind the `runtime` feature, define checked runtime/protocol conversion impls:
+
+    pub enum RuntimeBridgeError {
+        ...
+    }
+
+    impl TryFrom<boomerang_runtime::Tag> for WireTag {
+        type Error = RuntimeBridgeError;
+        ...
+    }
+
+    impl TryFrom<WireTag> for boomerang_runtime::Tag {
+        type Error = RuntimeBridgeError;
+        ...
+    }
+
+    impl TryFrom<boomerang_runtime::Duration> for WireDelay {
+        type Error = RuntimeBridgeError;
+        ...
+    }
+
+In a builder-owned federated bridge module, define topology and route extraction:
 
     pub struct FederatedRoute {
         pub endpoint: runtime::FederatedEndpointId,
@@ -358,14 +398,6 @@ In a builder-owned federated bridge module, define checked conversion and route 
     pub fn federated_routes_from_plan(
         plan: &FederationPlan,
     ) -> Result<Vec<FederatedRoute>, BuilderError>;
-
-    pub fn runtime_tag_to_wire_tag(
-        tag: runtime::Tag,
-    ) -> Result<boomerang_federated::WireTag, BuilderError>;
-
-    pub fn wire_tag_to_runtime_tag(
-        tag: boomerang_federated::WireTag,
-    ) -> Result<runtime::Tag, BuilderError>;
 
 In `boomerang_runtime/src/federated.rs`, add a live outbound sink while preserving the existing buffer:
 

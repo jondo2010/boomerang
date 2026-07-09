@@ -21,8 +21,11 @@ tracy = ["tracing-tracy/enable"]
 replay = ["dep:serde"]
 
 ## Builder metadata and endpoint lowering for static federated enclave topologies
-federated = ["boomerang_runtime/federated", "dep:boomerang_federated"]
-
+federated = [
+    "boomerang_runtime/federated",
+    "boomerang_federated/runtime",
+    "dep:boomerang_federated",
+]
 
 [dependencies]
 document-features = { workspace = true }

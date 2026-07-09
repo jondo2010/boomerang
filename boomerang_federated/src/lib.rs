@@ -5,6 +5,8 @@
 pub mod codec;
 pub mod protocol;
 pub mod rti;
+#[cfg(feature = "runtime")]
+pub mod runtime_bridge;
 pub mod transport;
 
 #[cfg(feature = "serde-json-codec")]
@@ -15,6 +17,8 @@ pub use protocol::{
     RtiToFederate, TopologyEdge, WireDelay, WireTag,
 };
 pub use rti::{FederateState, GrantDecision, RtiDelivery, RtiError, RtiState};
+#[cfg(feature = "runtime")]
+pub use runtime_bridge::RuntimeBridgeError;
 #[cfg(feature = "serde-json-codec")]
 pub use transport::TcpTransport;
 pub use transport::{

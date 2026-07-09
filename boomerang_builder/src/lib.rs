@@ -110,6 +110,9 @@ pub enum BuilderError {
     #[error("Unsupported federation topology: {what}")]
     UnsupportedFederationTopology { what: String },
 
+    #[error("Federation bridge error: {what}")]
+    FederationBridgeError { what: String },
+
     #[error("Error building Reaction: {0}")]
     ReactionBuilderError(String),
 
@@ -129,5 +132,14 @@ pub enum BuilderError {
 impl From<std::convert::Infallible> for BuilderError {
     fn from(_: std::convert::Infallible) -> Self {
         unreachable!()
+    }
+}
+
+#[cfg(feature = "federated")]
+impl From<boomerang_federated::RuntimeBridgeError> for BuilderError {
+    fn from(error: boomerang_federated::RuntimeBridgeError) -> Self {
+        Self::FederationBridgeError {
+            what: error.to_string(),
+        }
     }
 }

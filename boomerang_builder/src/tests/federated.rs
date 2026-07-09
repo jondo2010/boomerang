@@ -1,4 +1,5 @@
 use itertools::Itertools;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use super::*;
@@ -175,64 +176,18 @@ fn register_u32_federated_codec(env_builder: &mut EnvBuilder) -> Result<(), Buil
     env_builder.register_federated_codec::<u32, _>(boomerang_federated::SerdeJsonCodec)
 }
 
-fn wire_delay_from_runtime(delay: Option<runtime::Duration>) -> boomerang_federated::WireDelay {
-    let Some(delay) = delay else {
-        return boomerang_federated::WireDelay::ZERO;
-    };
-
-    boomerang_federated::WireDelay::from_nanos(delay.whole_nanoseconds().try_into().unwrap())
-}
-
-fn runtime_tag_to_wire_tag(tag: runtime::Tag) -> boomerang_federated::WireTag {
-    if tag == runtime::Tag::NEVER {
-        boomerang_federated::WireTag::NEVER
-    } else if tag == runtime::Tag::FOREVER {
-        boomerang_federated::WireTag::FOREVER
-    } else {
-        boomerang_federated::WireTag::finite(
-            tag.offset().whole_nanoseconds(),
-            tag.microstep().try_into().unwrap(),
-        )
-    }
-}
-
-fn wire_tag_to_runtime_tag(tag: boomerang_federated::WireTag) -> runtime::Tag {
-    match tag {
-        boomerang_federated::WireTag::Never => runtime::Tag::NEVER,
-        boomerang_federated::WireTag::Forever => runtime::Tag::FOREVER,
-        boomerang_federated::WireTag::Finite {
-            offset_ns,
-            microstep,
-        } => runtime::Tag::new(
-            runtime::Duration::nanoseconds(offset_ns.try_into().unwrap()),
-            microstep.try_into().unwrap(),
-        ),
-    }
-}
-
-fn topology_from_plan(plan: &FederationPlan) -> boomerang_federated::FederatedTopology {
-    boomerang_federated::FederatedTopology::with_edges(
-        plan.federates
-            .iter()
-            .map(|federate| boomerang_federated::FederateId::new(federate.id.clone())),
-        plan.edges.iter().map(|edge| {
-            boomerang_federated::TopologyEdge::new(
-                edge.source_federate.clone(),
-                edge.target_federate.clone(),
-                edge.endpoint.as_str(),
-                wire_delay_from_runtime(edge.delay),
-            )
-        }),
-    )
-}
-
 fn route_outbound_commands_through_rti(
     plan: &FederationPlan,
     commands: Vec<runtime::FederatedOutboundCommand>,
     inbound_endpoints: &runtime::FederatedInboundEndpointRegistry,
 ) -> Vec<runtime::Tag> {
-    let topology = topology_from_plan(plan);
+    let topology = federation_topology_from_plan(plan).unwrap();
     let mut rti = boomerang_federated::RtiState::new(topology.clone());
+    let routes = federated_routes_from_plan(plan)
+        .unwrap()
+        .into_iter()
+        .map(|route| (route.endpoint.clone(), route))
+        .collect::<BTreeMap<_, _>>();
 
     for federate in &plan.federates {
         let federate_id = boomerang_federated::FederateId::new(federate.id.clone());
@@ -246,19 +201,15 @@ fn route_outbound_commands_through_rti(
     let mut routed_tags = Vec::new();
     for command in commands {
         let runtime::FederatedOutboundCommand::Msg(message) = command;
-        let edge = plan
-            .edges
-            .iter()
-            .find(|edge| edge.endpoint.as_str() == message.endpoint.as_str())
-            .unwrap();
-        let source = boomerang_federated::FederateId::new(edge.source_federate.clone());
-        let target = boomerang_federated::FederateId::new(edge.target_federate.clone());
+        let route = routes
+            .get(&message.endpoint)
+            .expect("outbound endpoint should have route metadata");
         let endpoint = boomerang_federated::EndpointId::new(message.endpoint.as_str());
-        let tag = runtime_tag_to_wire_tag(message.tag);
+        let tag = boomerang_federated::WireTag::try_from(message.tag).unwrap();
         let deliveries = rti
             .handle(boomerang_federated::FederateToRti::Msg {
-                source: source.clone(),
-                target: target.clone(),
+                source: route.source.clone(),
+                target: route.target.clone(),
                 endpoint: endpoint.clone(),
                 tag,
                 payload: message.payload,
@@ -267,7 +218,7 @@ fn route_outbound_commands_through_rti(
 
         assert_eq!(deliveries.len(), 1);
         let delivery = &deliveries[0];
-        assert_eq!(delivery.federate_id, target);
+        assert_eq!(delivery.federate_id, route.target);
         match &delivery.message {
             boomerang_federated::RtiToFederate::Msg {
                 source: delivered_source,
@@ -275,9 +226,9 @@ fn route_outbound_commands_through_rti(
                 tag: delivered_tag,
                 payload,
             } => {
-                assert_eq!(delivered_source, &source);
+                assert_eq!(delivered_source, &route.source);
                 assert_eq!(delivered_endpoint, &endpoint);
-                let runtime_tag = wire_tag_to_runtime_tag(*delivered_tag);
+                let runtime_tag = runtime::Tag::try_from(*delivered_tag).unwrap();
                 inbound_endpoints
                     .schedule(&message.endpoint, runtime_tag, payload)
                     .unwrap();
@@ -453,6 +404,33 @@ fn test_federated_source_sink_topology_plan() {
     assert_eq!(plan.endpoints[0].source_port_fqn, "main/source/out");
     assert_eq!(plan.endpoints[0].target_port_fqn, "main/sink/in");
 
+    let topology = federation_topology_from_plan(plan).unwrap();
+    assert_eq!(
+        topology
+            .federates
+            .iter()
+            .map(|federate| federate.as_str())
+            .collect_vec(),
+        vec!["source", "sink"]
+    );
+    assert_eq!(topology.edges.len(), 1);
+    assert_eq!(topology.edges[0].source.as_str(), "source");
+    assert_eq!(topology.edges[0].target.as_str(), "sink");
+    assert_eq!(
+        topology.edges[0].endpoint.as_str(),
+        "main/source/out->main/sink/in"
+    );
+    assert_eq!(
+        topology.edges[0].delay,
+        boomerang_federated::WireDelay::ZERO
+    );
+
+    let routes = federated_routes_from_plan(plan).unwrap();
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].endpoint.as_str(), "main/source/out->main/sink/in");
+    assert_eq!(routes[0].source.as_str(), "source");
+    assert_eq!(routes[0].target.as_str(), "sink");
+
     assert_eq!(
         parts
             .inter_partition_plan
@@ -487,6 +465,11 @@ fn test_delayed_cross_federate_connection_records_delay() {
 
     assert_eq!(plan.edges.len(), 1);
     assert_eq!(plan.edges[0].delay, Some(delay));
+    let topology = federation_topology_from_plan(&plan).unwrap();
+    assert_eq!(
+        topology.edges[0].delay,
+        boomerang_federated::WireDelay::from_nanos(10_000_000)
+    );
 }
 
 #[test]

@@ -27,6 +27,7 @@ replay = ["boomerang_runtime/replay", "boomerang_builder/replay"]
 federated = [
     "boomerang_runtime/federated",
     "boomerang_builder/federated",
+    "boomerang_federated/runtime",
     "dep:boomerang_federated",
 ]
 

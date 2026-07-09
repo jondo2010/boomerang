@@ -1,25 +1,19 @@
-use std::{
-    future::Future,
-    pin::Pin,
-    sync::mpsc::{self, Receiver, Sender},
-};
-
+use futures_channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use futures_util::{stream::Map, StreamExt};
 #[cfg(feature = "serde-json-codec")]
-use bytes::Bytes;
-#[cfg(feature = "serde-json-codec")]
-use futures_util::{SinkExt, StreamExt};
-#[cfg(feature = "serde-json-codec")]
-use tokio::net::{TcpStream, ToSocketAddrs};
+use tokio::net::TcpStream;
 #[cfg(feature = "serde-json-codec")]
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 #[cfg(feature = "serde-json-codec")]
 use crate::ProtocolFrame;
 
-pub type TransportFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-
 #[cfg(feature = "serde-json-codec")]
-const DEFAULT_MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
+pub type JsonProtocolFrameTransport = tokio_serde::SymmetricallyFramed<
+    Framed<TcpStream, LengthDelimitedCodec>,
+    ProtocolFrame,
+    tokio_serde::formats::SymmetricalJson<ProtocolFrame>,
+>;
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum TransportError {
@@ -31,42 +25,48 @@ pub enum TransportError {
 
     #[error("transport frame codec error: {0}")]
     Codec(String),
-
-    #[error("transport frame length {len} exceeds maximum {max}")]
-    FrameTooLarge { len: usize, max: usize },
 }
 
-/// Async sink for ordered protocol frames.
-pub trait FrameSink<M>: Send {
-    fn send<'a>(&'a mut self, frame: M) -> TransportFuture<'a, Result<(), TransportError>>;
-}
-
-/// Async stream for ordered protocol frames.
-pub trait FrameStream<M>: Send {
-    fn recv<'a>(&'a mut self) -> TransportFuture<'a, Result<Option<M>, TransportError>>;
-}
-
-/// In-memory ordered transport for deterministic protocol tests.
-#[derive(Debug)]
-pub struct InMemoryTransport<Outgoing, Incoming> {
-    sender: Sender<Outgoing>,
-    receiver: Receiver<Incoming>,
-}
-
-impl<Outgoing, Incoming> InMemoryTransport<Outgoing, Incoming> {
-    fn new(sender: Sender<Outgoing>, receiver: Receiver<Incoming>) -> Self {
-        Self { sender, receiver }
+impl From<mpsc::SendError> for TransportError {
+    fn from(_: mpsc::SendError) -> Self {
+        Self::Closed
     }
 }
 
+impl From<std::io::Error> for TransportError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error.to_string())
+    }
+}
+
+/// Sending half of an in-memory ordered transport.
+pub type InMemoryFrameSink<M> = UnboundedSender<M>;
+
+/// Receiving half of an in-memory ordered transport.
+pub type InMemoryFrameStream<M> = Map<UnboundedReceiver<M>, fn(M) -> Result<M, TransportError>>;
+
+/// In-memory ordered transport for deterministic protocol tests.
+pub type InMemoryTransport<Outgoing, Incoming> =
+    (InMemoryFrameSink<Outgoing>, InMemoryFrameStream<Incoming>);
+
 pub fn in_memory_transport_pair<A, B>() -> (InMemoryTransport<A, B>, InMemoryTransport<B, A>) {
-    let (a_sender, a_receiver) = mpsc::channel();
-    let (b_sender, b_receiver) = mpsc::channel();
+    let (a_sender, a_receiver) = mpsc::unbounded();
+    let (b_sender, b_receiver) = mpsc::unbounded();
 
     (
-        InMemoryTransport::new(a_sender, b_receiver),
-        InMemoryTransport::new(b_sender, a_receiver),
+        (
+            a_sender,
+            b_receiver.map(ok_frame::<B> as fn(B) -> Result<B, TransportError>),
+        ),
+        (
+            b_sender,
+            a_receiver.map(ok_frame::<A> as fn(A) -> Result<A, TransportError>),
+        ),
     )
+}
+
+fn ok_frame<M>(frame: M) -> Result<M, TransportError> {
+    Ok(frame)
 }
 
 /// Length-delimited TCP transport for serde JSON encoded [`ProtocolFrame`] values.
@@ -74,126 +74,11 @@ pub fn in_memory_transport_pair<A, B>() -> (InMemoryTransport<A, B>, InMemoryTra
 /// Each frame is encoded as a big-endian `u32` byte length followed by that many JSON bytes. The
 /// transport is reliable and ordered because it is backed by a single TCP stream.
 #[cfg(feature = "serde-json-codec")]
-#[derive(Debug)]
-pub struct TcpTransport {
-    framed: Framed<TcpStream, LengthDelimitedCodec>,
-    max_frame_len: usize,
-}
-
-#[cfg(feature = "serde-json-codec")]
-impl TcpTransport {
-    pub fn from_stream(stream: TcpStream) -> Self {
-        let codec = LengthDelimitedCodec::builder()
-            .max_frame_length(DEFAULT_MAX_FRAME_LEN)
-            .new_codec();
-        Self {
-            framed: Framed::new(stream, codec),
-            max_frame_len: DEFAULT_MAX_FRAME_LEN,
-        }
-    }
-
-    pub fn with_max_frame_len(mut self, max_frame_len: usize) -> Self {
-        let codec = LengthDelimitedCodec::builder()
-            .max_frame_length(max_frame_len)
-            .new_codec();
-        self.framed = self.framed.map_codec(|_| codec);
-        self.max_frame_len = max_frame_len;
-        self
-    }
-
-    pub async fn connect(addr: impl ToSocketAddrs) -> Result<Self, TransportError> {
-        let stream = TcpStream::connect(addr)
-            .await
-            .map_err(|error| TransportError::Io(error.to_string()))?;
-        Ok(Self::from_stream(stream))
-    }
-
-    pub fn max_frame_len(&self) -> usize {
-        self.max_frame_len
-    }
-}
-
-#[cfg(feature = "serde-json-codec")]
-impl FrameSink<ProtocolFrame> for TcpTransport {
-    fn send<'a>(
-        &'a mut self,
-        frame: ProtocolFrame,
-    ) -> TransportFuture<'a, Result<(), TransportError>> {
-        Box::pin(async move {
-            let payload = serde_json::to_vec(&frame)
-                .map_err(|error| TransportError::Codec(error.to_string()))?;
-            if payload.len() > self.max_frame_len {
-                return Err(TransportError::FrameTooLarge {
-                    len: payload.len(),
-                    max: self.max_frame_len,
-                });
-            }
-            if payload.len() > u32::MAX as usize {
-                return Err(TransportError::FrameTooLarge {
-                    len: payload.len(),
-                    max: u32::MAX as usize,
-                });
-            }
-
-            self.framed
-                .send(Bytes::from(payload))
-                .await
-                .map_err(map_io_error)?;
-            Ok(())
-        })
-    }
-}
-
-#[cfg(feature = "serde-json-codec")]
-impl FrameStream<ProtocolFrame> for TcpTransport {
-    fn recv<'a>(
-        &'a mut self,
-    ) -> TransportFuture<'a, Result<Option<ProtocolFrame>, TransportError>> {
-        Box::pin(async move {
-            let Some(payload) = self.framed.next().await.transpose().map_err(map_io_error)? else {
-                return Ok(None);
-            };
-            let frame = serde_json::from_slice(&payload)
-                .map_err(|error| TransportError::Codec(error.to_string()))?;
-            Ok(Some(frame))
-        })
-    }
-}
-
-#[cfg(feature = "serde-json-codec")]
-fn map_io_error(error: std::io::Error) -> TransportError {
-    match error.kind() {
-        std::io::ErrorKind::BrokenPipe
-        | std::io::ErrorKind::ConnectionAborted
-        | std::io::ErrorKind::ConnectionReset
-        | std::io::ErrorKind::UnexpectedEof => TransportError::Closed,
-        _ => TransportError::Io(error.to_string()),
-    }
-}
-
-impl<Outgoing, Incoming> FrameSink<Outgoing> for InMemoryTransport<Outgoing, Incoming>
-where
-    Outgoing: Send + 'static,
-    Incoming: Send + 'static,
-{
-    fn send<'a>(&'a mut self, frame: Outgoing) -> TransportFuture<'a, Result<(), TransportError>> {
-        Box::pin(async move { self.sender.send(frame).map_err(|_| TransportError::Closed) })
-    }
-}
-
-impl<Outgoing, Incoming> FrameStream<Incoming> for InMemoryTransport<Outgoing, Incoming>
-where
-    Outgoing: Send + 'static,
-    Incoming: Send + 'static,
-{
-    fn recv<'a>(&'a mut self) -> TransportFuture<'a, Result<Option<Incoming>, TransportError>> {
-        Box::pin(async move {
-            match self.receiver.recv() {
-                Ok(frame) => Ok(Some(frame)),
-                Err(_) => Ok(None),
-            }
-        })
-    }
+pub fn json_protocol_frame_transport(stream: TcpStream) -> JsonProtocolFrameTransport {
+    tokio_serde::SymmetricallyFramed::new(
+        Framed::new(stream, LengthDelimitedCodec::new()),
+        tokio_serde::formats::SymmetricalJson::default(),
+    )
 }
 
 #[cfg(test)]
@@ -203,6 +88,8 @@ mod tests {
         sync::Arc,
         task::{Context, Poll, Wake, Waker},
     };
+
+    use futures_util::{SinkExt, StreamExt};
 
     use super::*;
     use crate::{
@@ -234,72 +121,75 @@ mod tests {
 
     #[test]
     fn memory_transport_delivers_frames_in_order() {
-        let (mut federate, mut rti) = in_memory_transport_pair::<FederateToRti, RtiToFederate>();
+        let ((mut federate_sink, _), (_, mut rti_stream)) =
+            in_memory_transport_pair::<FederateToRti, RtiToFederate>();
 
-        block_on(federate.send(FederateToRti::Net {
+        block_on(federate_sink.send(FederateToRti::Net {
             federate_id: FederateId::new("fed-a"),
             tag: WireTag::ZERO,
         }))
         .unwrap();
-        block_on(federate.send(FederateToRti::Ltc {
+        block_on(federate_sink.send(FederateToRti::Ltc {
             federate_id: FederateId::new("fed-a"),
             tag: WireTag::ZERO,
         }))
         .unwrap();
 
         assert_eq!(
-            block_on(rti.recv()).unwrap(),
-            Some(FederateToRti::Net {
+            block_on(rti_stream.next()).unwrap().unwrap(),
+            FederateToRti::Net {
                 federate_id: FederateId::new("fed-a"),
                 tag: WireTag::ZERO,
-            })
+            }
         );
         assert_eq!(
-            block_on(rti.recv()).unwrap(),
-            Some(FederateToRti::Ltc {
+            block_on(rti_stream.next()).unwrap().unwrap(),
+            FederateToRti::Ltc {
                 federate_id: FederateId::new("fed-a"),
                 tag: WireTag::ZERO,
-            })
+            }
         );
     }
 
     #[test]
     fn memory_transport_is_bidirectional() {
-        let (mut federate, mut rti) = in_memory_transport_pair::<ProtocolFrame, ProtocolFrame>();
+        let ((mut federate_sink, mut federate_stream), (mut rti_sink, mut rti_stream)) =
+            in_memory_transport_pair::<ProtocolFrame, ProtocolFrame>();
 
         block_on(
-            federate.send(ProtocolFrame::FederateToRti(FederateToRti::Net {
+            federate_sink.send(ProtocolFrame::FederateToRti(FederateToRti::Net {
                 federate_id: FederateId::new("fed-a"),
                 tag: WireTag::ZERO,
             })),
         )
         .unwrap();
-        block_on(rti.send(ProtocolFrame::RtiToFederate(RtiToFederate::Tag {
-            tag: WireTag::ZERO,
-        })))
+        block_on(
+            rti_sink.send(ProtocolFrame::RtiToFederate(RtiToFederate::Tag {
+                tag: WireTag::ZERO,
+            })),
+        )
         .unwrap();
 
         assert_eq!(
-            block_on(rti.recv()).unwrap(),
-            Some(ProtocolFrame::FederateToRti(FederateToRti::Net {
+            block_on(rti_stream.next()).unwrap().unwrap(),
+            ProtocolFrame::FederateToRti(FederateToRti::Net {
                 federate_id: FederateId::new("fed-a"),
                 tag: WireTag::ZERO,
-            }))
+            })
         );
         assert_eq!(
-            block_on(federate.recv()).unwrap(),
-            Some(ProtocolFrame::RtiToFederate(RtiToFederate::Tag {
-                tag: WireTag::ZERO,
-            }))
+            block_on(federate_stream.next()).unwrap().unwrap(),
+            ProtocolFrame::RtiToFederate(RtiToFederate::Tag { tag: WireTag::ZERO })
         );
     }
 
     #[test]
     fn memory_transport_reports_end_of_stream_when_peer_drops() {
-        let (federate, mut rti) = in_memory_transport_pair::<FederateToRti, RtiToFederate>();
+        let (federate, (_, mut rti_stream)) =
+            in_memory_transport_pair::<FederateToRti, RtiToFederate>();
         drop(federate);
 
-        assert_eq!(block_on(rti.recv()).unwrap(), None);
+        assert_eq!(block_on(rti_stream.next()), None);
     }
 
     #[cfg(feature = "serde-json-codec")]
@@ -328,11 +218,11 @@ mod tests {
         let rti_sink = sink.clone();
         let rti = tokio::spawn(async move {
             let (first_stream, _) = listener.accept().await.unwrap();
-            let mut first = TcpTransport::from_stream(first_stream);
+            let mut first = json_protocol_frame_transport(first_stream);
             let first_id = recv_hello(&mut first, &rti_topology).await;
 
             let (second_stream, _) = listener.accept().await.unwrap();
-            let mut second = TcpTransport::from_stream(second_stream);
+            let mut second = json_protocol_frame_transport(second_stream);
             let second_id = recv_hello(&mut second, &rti_topology).await;
 
             let (mut source_transport, mut sink_transport) = match (first_id, second_id) {
@@ -347,7 +237,7 @@ mod tests {
             source_transport.send(start.clone()).await.unwrap();
             sink_transport.send(start).await.unwrap();
 
-            let frame = source_transport.recv().await.unwrap().unwrap();
+            let frame = source_transport.next().await.unwrap().unwrap();
             let deliveries = match frame {
                 ProtocolFrame::FederateToRti(message @ FederateToRti::Msg { .. }) => {
                     let mut rti = crate::RtiState::new(rti_topology);
@@ -405,8 +295,11 @@ mod tests {
     }
 
     #[cfg(feature = "serde-json-codec")]
-    async fn recv_hello(transport: &mut TcpTransport, topology: &FederatedTopology) -> FederateId {
-        match transport.recv().await.unwrap().unwrap() {
+    async fn recv_hello(
+        transport: &mut JsonProtocolFrameTransport,
+        topology: &FederatedTopology,
+    ) -> FederateId {
+        match transport.next().await.unwrap().unwrap() {
             ProtocolFrame::FederateToRti(FederateToRti::Hello {
                 federate_id,
                 topology: neighbor_structure,
@@ -419,22 +312,22 @@ mod tests {
     }
 
     #[cfg(feature = "serde-json-codec")]
-    async fn expect_start(transport: &mut TcpTransport) {
+    async fn expect_start(transport: &mut JsonProtocolFrameTransport) {
         assert_eq!(
-            transport.recv().await.unwrap(),
-            Some(ProtocolFrame::RtiToFederate(RtiToFederate::Start {
+            transport.next().await.unwrap().unwrap(),
+            ProtocolFrame::RtiToFederate(RtiToFederate::Start {
                 start_unix_epoch_ns: 0,
-            }))
+            })
         );
     }
 
     #[cfg(feature = "serde-json-codec")]
-    async fn expect_stop(transport: &mut TcpTransport, federate_id: &FederateId) {
+    async fn expect_stop(transport: &mut JsonProtocolFrameTransport, federate_id: &FederateId) {
         assert_eq!(
-            transport.recv().await.unwrap(),
-            Some(ProtocolFrame::FederateToRti(FederateToRti::Stop {
+            transport.next().await.unwrap().unwrap(),
+            ProtocolFrame::FederateToRti(FederateToRti::Stop {
                 federate_id: federate_id.clone(),
-            }))
+            })
         );
     }
 
@@ -446,7 +339,8 @@ mod tests {
         endpoint: EndpointId,
         topology: crate::NeighborStructure,
     ) {
-        let mut transport = TcpTransport::connect(addr).await.unwrap();
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let mut transport = json_protocol_frame_transport(stream);
         transport
             .send(ProtocolFrame::FederateToRti(FederateToRti::Hello {
                 federate_id: source.clone(),
@@ -472,8 +366,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            transport.recv().await.unwrap(),
-            Some(ProtocolFrame::RtiToFederate(RtiToFederate::Stop))
+            transport.next().await.unwrap().unwrap(),
+            ProtocolFrame::RtiToFederate(RtiToFederate::Stop)
         );
     }
 
@@ -483,7 +377,8 @@ mod tests {
         sink: FederateId,
         topology: crate::NeighborStructure,
     ) -> RtiToFederate {
-        let mut transport = TcpTransport::connect(addr).await.unwrap();
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let mut transport = json_protocol_frame_transport(stream);
         transport
             .send(ProtocolFrame::FederateToRti(FederateToRti::Hello {
                 federate_id: sink.clone(),
@@ -493,7 +388,7 @@ mod tests {
             .unwrap();
         expect_start(&mut transport).await;
 
-        let delivered = match transport.recv().await.unwrap().unwrap() {
+        let delivered = match transport.next().await.unwrap().unwrap() {
             ProtocolFrame::RtiToFederate(message @ RtiToFederate::Msg { .. }) => message,
             other => panic!("expected routed MSG, got {other:?}"),
         };
@@ -504,8 +399,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            transport.recv().await.unwrap(),
-            Some(ProtocolFrame::RtiToFederate(RtiToFederate::Stop))
+            transport.next().await.unwrap().unwrap(),
+            ProtocolFrame::RtiToFederate(RtiToFederate::Stop)
         );
         delivered
     }

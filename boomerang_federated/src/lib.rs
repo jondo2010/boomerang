@@ -7,6 +7,7 @@ pub mod protocol;
 pub mod rti;
 #[cfg(feature = "runtime")]
 pub mod runtime_bridge;
+pub mod session;
 pub mod transport;
 
 #[cfg(feature = "serde-json-codec")]
@@ -19,9 +20,10 @@ pub use protocol::{
 pub use rti::{FederateState, GrantDecision, RtiDelivery, RtiError, RtiState};
 #[cfg(feature = "runtime")]
 pub use runtime_bridge::RuntimeBridgeError;
-#[cfg(feature = "serde-json-codec")]
-pub use transport::TcpTransport;
+pub use session::{RtiSessionEndpoint, SessionError, StaticRtiSession};
 pub use transport::{
-    in_memory_transport_pair, FrameSink, FrameStream, InMemoryTransport, TransportError,
-    TransportFuture,
+    in_memory_transport_pair, InMemoryFrameSink, InMemoryFrameStream, InMemoryTransport,
+    TransportError,
 };
+#[cfg(feature = "serde-json-codec")]
+pub use transport::{json_protocol_frame_transport, JsonProtocolFrameTransport};

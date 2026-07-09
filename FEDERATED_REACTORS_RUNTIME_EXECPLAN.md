@@ -22,6 +22,13 @@ Before the live runner is implemented, this plan now first aligns local enclave 
 - [x] (2026-07-09 10:09Z) Extracted shared inter-partition topology and boundary-edge metadata for local enclave and federated boundaries.
 - [x] (2026-07-09 10:39Z) Added checked runtime/protocol tag and delay bridge utilities in `boomerang_federated`, plus builder-owned topology and endpoint route extraction.
 - [x] (2026-07-09 11:32Z) Added a live `FederatedOutboundChannel`/`FederatedOutboundReceiver` pair in `boomerang_runtime` while preserving `FederatedOutboundBuffer`.
+- [x] (2026-07-09 12:33Z) Added a pure in-memory RTI session loop in `boomerang_federated` that drives real protocol `Hello`, `Start`, `NET`, `TAG`, `LTC`, `MSG`, `Stop`, and `Error` frames over the existing transport traits.
+- [x] (2026-07-09 13:03Z) Refactored the Milestone 4 RTI session loop to async Tokio tasks/channels so the same session shape can be reused by TCP transport.
+- [x] (2026-07-09 13:19Z) Replaced the custom federated transport traits with `futures_util::Sink` and `futures_util::Stream` bounds for the RTI session and in-memory/TCP transports.
+- [x] (2026-07-09 13:39Z) Replaced manual `TcpTransport` protocol JSON encode/decode with `tokio-serde` layered over the existing `tokio-util` length-delimited TCP frames.
+- [x] (2026-07-09 13:44Z) Removed the `TcpTransport` wrapper and exposed the direct `JsonProtocolFrameTransport` tokio-serde transport using `LengthDelimitedCodec::new()`.
+- [x] (2026-07-09 13:55Z) Replaced the custom Tokio-backed in-memory transport wrappers with `futures-channel` MPSC endpoint types and relaxed the RTI session transport bounds to ecosystem `Sink` plus `TryStream` with errors convertible into `TransportError`.
+- [ ] Implement a federate client bridge that attaches protocol sessions to scheduler barriers.
 - [ ] Implement an in-memory static RTI/federate runner that uses real scheduler barriers.
 - [ ] Define and test shutdown and no-future-event behavior.
 - [ ] Promote TCP smoke transport into a reusable RTI/federate runtime path.
@@ -64,6 +71,39 @@ Before the live runner is implemented, this plan now first aligns local enclave 
 
 - Observation: `kanal` already provides the exact synchronous receive shape needed for the runtime channel wrapper.
   Evidence: `kanal::Receiver::recv` blocks until a command or close, and `kanal::Receiver::try_recv` returns `Result<Option<T>, ReceiveError>`, matching the planned `FederatedOutboundReceiver` API without adding a runtime dependency.
+
+- Observation: In this Milestone 4 session, CodeStory local navigation was fresh for `/Users/johhug01/Source/boomerang`, but packet/search stayed blocked by stale sidecar retrieval even after the MCP auto-repair path started.
+  Evidence: `codestory://status` reported `project_root` `/Users/johhug01/Source/boomerang`, `index_freshness.status` `fresh`, `allowed_surfaces.packet/search.allowed` `false`, and `status_resource_auto_repair.result.status` `started`; direct source reads were used after the allowed `ground` surface.
+
+- Observation: The first protocol session test must make the source advertise a later `NET` before the sink's `LTC(ZERO)` can release the sink's blocked `TAG(ZERO)`.
+  Evidence: `RtiState::earliest_incoming_message_tag` considers both in-transit messages and the upstream federate's `next_event`; the session test sends source `NET([0ns+1])` after source `MSG(ZERO)`, then sink `LTC(ZERO)` clears the in-transit message and triggers the pending sink grant.
+
+- Observation: The initial synchronous Milestone 4 session used the correct protocol behavior but the wrong execution shape for the TCP goal.
+  Evidence: `StaticRtiSession::run` now returns a future, session reader fan-in uses `tokio::sync::mpsc`, reader loops are spawned with `tokio::spawn`, and in-memory protocol tests use async channel-backed endpoints with `#[tokio::test]`.
+
+- Observation: The CodeStory MCP transport closed during the follow-up transport-trait refactor.
+  Evidence: `codestory://status` through MCP resources failed with `Transport closed`, and `mcp__codestory.ground` returned `tool call failed ... Transport closed`; direct source reads were used for the refactor.
+
+- Observation: `boomerang_federated` already had enough async ecosystem surface to remove the crate-specific transport traits without adding another dependency.
+  Evidence: `boomerang_federated/Cargo.toml` already depended on `futures-util` with the `sink` feature, and `cargo test -p boomerang_federated` passed after `InMemoryTransport`, split in-memory halves, and the TCP protocol transport used `futures_util::Sink` and `futures_util::Stream`.
+
+- Observation: `tokio-serde` matches the desired TCP layering better than a hand-written TCP JSON wrapper.
+  Evidence: `tokio-serde` 0.9.0 provides `SymmetricallyFramed` and `formats::SymmetricalJson`, while its documentation expects a separate framed byte transport such as a length-delimited `tokio-util` transport underneath. `JsonProtocolFrameTransport` is now a direct alias for `tokio_serde::SymmetricallyFramed<tokio_util::codec::Framed<TcpStream, LengthDelimitedCodec>, ProtocolFrame, SymmetricalJson<ProtocolFrame>>`, and `cargo test -p boomerang_federated` passed.
+
+- Observation: The ignored localhost TCP smoke test still needs sandbox approval, but the `tokio-serde` TCP path works after that approval.
+  Evidence: `cargo test -p boomerang_federated tcp_smoke -- --ignored` first failed at `TcpListener::bind("127.0.0.1:0")` with `Operation not permitted`; rerunning the same command with approval passed with `1 passed`.
+
+- Observation: Once `tokio-serde` owned protocol JSON and `LengthDelimitedCodec::new()` owned frame sizing, the `TcpTransport` wrapper had no remaining behavior worth preserving.
+  Evidence: `boomerang_federated/src/transport.rs` now exposes `json_protocol_frame_transport(TcpStream) -> JsonProtocolFrameTransport`; the TCP smoke test uses `TcpStream::connect` and the free constructor directly.
+
+- Observation: During the `futures-channel` in-memory transport follow-up, the CodeStory MCP transport was unavailable.
+  Evidence: `functions.list_mcp_resources(server="codestory")` failed with `Transport closed`; direct source reads were used after the supported MCP status path was blocked.
+
+- Observation: `futures-channel` provides the missing direct in-memory async transport pieces that `tokio-util` and `tokio-serde` do not.
+  Evidence: `futures_channel::mpsc::UnboundedSender<T>` implements `futures_util::Sink<T>` behind the `sink` feature, and `UnboundedReceiver<T>` implements `Stream`; `boomerang_federated/src/transport.rs` now exposes those endpoints through type aliases instead of local `Sink`/`Stream` impls.
+
+- Observation: Direct ecosystem transport endpoints should not be forced to use `TransportError` as their native error type.
+  Evidence: `futures_channel::mpsc::UnboundedSender<T>` uses `mpsc::SendError`, while `tokio-serde` over `LengthDelimitedCodec` uses the underlying framed transport error. `StaticRtiSession` now accepts `Sink<ProtocolFrame>` and `TryStream<Ok = ProtocolFrame>` where both error types implement `Into<TransportError>`.
 
 ## Decision Log
 
@@ -111,6 +151,30 @@ Before the live runner is implemented, this plan now first aligns local enclave 
   Rationale: The federate bridge needs wakeup and blocking/nonblocking receive semantics now, but capacity and backpressure policy belong with later client/session design. The existing `FederatedOutboundBuffer` remains the deterministic drainable test helper.
   Date/Author: 2026-07-09 / Codex
 
+- Decision: Initially keep Milestone 4 in `boomerang_federated` as a synchronous pure protocol session over `FrameSink<ProtocolFrame>` and `FrameStream<ProtocolFrame>`, with split in-memory transport halves for deterministic tests.
+  Rationale: The milestone needed real session flow and RTI routing, not scheduler orchestration. Splitting the in-memory transport let reader threads block on federate input while the central RTI loop could still send `Start`, `TAG`, routed `MSG`, `Stop`, and `Error` frames through the same transport traits. This decision was superseded later the same day by the async Tokio session-loop decision below.
+  Date/Author: 2026-07-09 / Codex
+
+- Decision: Replace the synchronous Milestone 4 session loop with an async Tokio loop before building the runtime federate client bridge.
+  Rationale: The end goal is RTI sessions over TCP/Tokio. Keeping a synchronous session would force later adapter code or a second rewrite during TCP promotion. Making `StaticRtiSession::run` async now keeps Milestone 4 pure protocol while aligning it with the TCP protocol transport.
+  Date/Author: 2026-07-09 / Codex
+
+- Decision: Use `futures_util::Sink` and `futures_util::TryStream` as the transport contract for RTI sessions instead of maintaining crate-specific `FrameSink` and `FrameStream` traits.
+  Rationale: The RTI session should be transport-agnostic, but `Sink` and result-bearing streams are the ecosystem-standard async contracts already used by framed TCP transports and test clients. Removing the custom traits reduces adapter code before the later TCP/Tokio runtime path is built.
+  Date/Author: 2026-07-09 / Codex
+
+- Decision: Add `tokio-serde` with its `json` feature for TCP `ProtocolFrame` serialization instead of adding `tokio-serde-json` or keeping manual serde calls in a TCP wrapper.
+  Rationale: `tokio-serde` is the current Tokio 1-compatible crate and composes directly with `tokio-util` length-delimited framing. `tokio-serde-json` is an older format-specific adapter and would be a worse fit for this workspace's Tokio 1 stack. Keeping JSON serialization in `tokio-serde` lets the TCP path use standard `Sink` and `Stream` implementations from the composed transport stack.
+  Date/Author: 2026-07-09 / Codex
+
+- Decision: Remove the `TcpTransport` newtype and use `LengthDelimitedCodec::new()` for the default TCP frame length.
+  Rationale: After adding `tokio-serde`, the wrapper only forwarded `Sink`/`Stream`, constructed the inner framed transport, and tracked a custom max-frame length. The session loop already accepts standard `Sink`/`Stream` endpoints. A public `JsonProtocolFrameTransport` alias plus `json_protocol_frame_transport(TcpStream)` constructor exposes the reusable transport without duplicating ecosystem behavior.
+  Date/Author: 2026-07-09 / Codex
+
+- Decision: Use `futures-channel` MPSC endpoints directly for pure in-memory protocol transports.
+  Rationale: `futures-channel` supplies an async `Sink` sender and `Stream` receiver without tying the transport helper to Tokio internals. Keeping `InMemoryFrameSink` as `UnboundedSender` removes local sink forwarding code; mapping the receiver into `Result<_, TransportError>` is the only adapter needed for the session's `TryStream` contract.
+  Date/Author: 2026-07-09 / Codex
+
 ## Outcomes & Retrospective
 
 This plan starts after the builder, protocol, endpoint, scheduler hook, in-memory smoke, and TCP smoke groundwork has landed. The expected outcome is a live in-memory static federation that can be run by one test or helper and then a TCP-backed variant that uses the same protocol session logic. On 2026-07-09, the plan was revised so the first implementation milestone extracts shared inter-partition boundary metadata before adding protocol bridge utilities.
@@ -120,6 +184,8 @@ Milestone 1 is complete. `BuilderRuntimeParts` now carries an `inter_partition_p
 Milestone 2 is complete. `boomerang_federated/src/runtime_bridge.rs` now provides checked `TryFrom` impls for `runtime::Tag` <-> `boomerang_federated::WireTag` and `runtime::Duration` -> `WireDelay` behind the `boomerang_federated/runtime` feature. Negative finite tags are rejected except for sentinel `Tag::NEVER`/`WireTag::NEVER`; wire offsets outside `runtime::Duration`, microsteps outside `usize`, and delays outside nonnegative `u64` nanoseconds return `boomerang_federated::RuntimeBridgeError`. `boomerang_builder/src/federation.rs` keeps builder-owned `federation_topology_from_plan` and `federated_routes_from_plan`, and maps `RuntimeBridgeError` into `BuilderError::FederationBridgeError` when extracting topology. Route extraction maps runtime `FederatedEndpointId` values to source and target protocol `FederateId` values and checks endpoint/edge consistency. The manual federated builder tests now use `TryFrom` for tag conversion and the builder route/topology helpers instead of local ad hoc conversion helpers. Validation passed with `cargo test -p boomerang_federated --features runtime`, `cargo test -p boomerang_builder --features federated`, `cargo test -p boomerang_runtime --features federated`, `cargo test -p boomerang_federated`, and `cargo check -p boomerang --features federated`.
 
 Milestone 3 is complete. `boomerang_runtime/src/federated.rs` now defines `FederatedOutboundChannel` and `FederatedOutboundReceiver` behind the existing runtime `federated` feature. `FederatedOutboundChannel::pair()` returns a sink and receiver backed by an unbounded `kanal` channel; the sink implements `FederatedOutboundSink`, the receiver exposes blocking `recv` and nonblocking `try_recv`, and channel send/receive failures map to `FederatedEndpointError`. `FederatedOutboundBuffer` remains unchanged and available for deterministic tests. Runtime unit tests prove that `FederatedOutboundSink::send` delivers the exact command through `try_recv`, wakes a blocking receiver, and that the buffer still drains commands. No `boomerang_runtime` dependency on `boomerang_federated`, RTI/session/client bridge, TCP transport, builder-lowered outbound behavior replacement, or local/federated delivery behavior change was added. Validation passed with `cargo test -p boomerang_runtime --features federated`, `cargo test -p boomerang_builder --features federated`, `cargo test -p boomerang_federated`, and `cargo check -p boomerang --features federated`.
+
+Milestone 4 is complete. `boomerang_federated/src/session.rs` now defines `StaticRtiSession`, `RtiSessionEndpoint`, and `SessionError`. The session owns `RtiState`, validates that keyed persistent endpoints match the static topology, receives matching `Hello` frames and neighbor structures from every federate, sends `Start`, drives `NET`/`TAG` and `LTC` through `RtiState`, validates and routes topology-backed `MSG` frames, sends `Stop` after all federates stop, and sends `RtiToFederate::Error` before returning a protocol error for unexpected frames. `StaticRtiSession::run` is async, uses Tokio reader tasks and `tokio::sync::mpsc` fan-in, and is generic over `futures_util::Sink<ProtocolFrame>` plus `futures_util::TryStream<Ok = ProtocolFrame>` where transport errors convert into `TransportError`, so direct in-memory endpoints and future TCP endpoints do not need local wrapper impls just to normalize errors. `boomerang_federated/src/transport.rs` now exposes `InMemoryFrameSink` as `futures_channel::mpsc::UnboundedSender`, `InMemoryFrameStream` as a mapped `futures_channel::mpsc::UnboundedReceiver`, and `InMemoryTransport` as a pair of those halves; the previous custom in-memory `Sink`/`Stream` structs and impls are gone. The TCP path now exposes `JsonProtocolFrameTransport` directly as a `tokio-serde` JSON transport over `tokio-util` length-delimited TCP framing, plus `json_protocol_frame_transport(TcpStream)` as the constructor. There is no `TcpTransport` wrapper and no custom TCP max-frame policy; the path uses `LengthDelimitedCodec::new()` defaults. Pure protocol tests script two federates over in-memory `ProtocolFrame` transports: the source/sink test covers `Hello`, `Start`, sink `NET(ZERO)`, source `NET(ZERO)` and source `TAG(ZERO)`, routed source `MSG(ZERO)`, source `NET([0ns+1])`, sink `LTC(ZERO)` and pending sink `TAG(ZERO)`, then `Stop`; a second test verifies protocol error delivery for an unexpected federate frame. The ignored localhost TCP smoke test also passes when rerun with sandbox approval. No Boomerang schedulers, runtime federate client bridge, `FederatedTimeBarrier` integration, TCP orchestration, builder manual test replacement, or `boomerang_runtime` dependency on `boomerang_federated` was added. Validation passed with `cargo test -p boomerang_federated`, `cargo test -p boomerang_builder --features federated`, `cargo test -p boomerang_runtime --features federated`, and `cargo check -p boomerang --features federated`.
 
 ## Context and Orientation
 
@@ -157,7 +223,7 @@ The existing code already contains these foundations:
 
 `boomerang_federated/src/rti.rs` defines `RtiState`, a deterministic state machine for `TAG`, `NET`, `LTC`, and `MSG` decisions.
 
-`boomerang_federated/src/transport.rs` defines in-memory transport traits and `TcpTransport` over length-delimited JSON `ProtocolFrame` values.
+`boomerang_federated/src/transport.rs` defines in-memory transport endpoints and `JsonProtocolFrameTransport` for length-delimited JSON `ProtocolFrame` values over TCP. These transports implement the standard async `futures_util::Sink` and `futures_util::Stream` traits rather than crate-specific transport traits. TCP protocol JSON serialization uses `tokio-serde`, and byte framing uses `tokio-util::codec::LengthDelimitedCodec`.
 
 `boomerang_builder/src/tests/federated.rs` contains the current strongest equivalence tests. They manually run source and sink enclaves separately, drain `FederatedOutboundBuffer`, route commands through `RtiState`, schedule through `FederatedInboundEndpointRegistry`, and compare values and tags against local enclave execution. The live runner must replace this manual staging with a reusable implementation.
 
@@ -193,7 +259,7 @@ Milestone 2 creates explicit bridge utilities between builder/runtime metadata a
 
 Milestone 3 adds a live outbound command sink. The current `FederatedOutboundBuffer` is useful for tests but does not wake a client. Add a feature-gated runtime type such as `FederatedOutboundChannel` in `boomerang_runtime/src/federated.rs` that implements `FederatedOutboundSink` and internally uses a bounded or unbounded channel. It should expose a blocking `recv` or timeout-aware `recv_timeout` API usable by a non-async scheduler bridge. Keep `FederatedOutboundBuffer` for deterministic tests. At the end of this milestone, `FederatedSenderReactionFn` can be constructed with either the old buffer or the new channel, and a unit test proves that a reaction-emitted outbound command wakes a receiver.
 
-Milestone 4 implements an in-memory RTI session loop in `boomerang_federated`. Add a module such as `boomerang_federated/src/session.rs`. It should own `RtiState` plus per-federate transport endpoints. For in-memory operation, use the existing `FrameSink` and `FrameStream` traits over `ProtocolFrame`. The RTI session receives `Hello` from all persistent federates, sends `Start`, routes `MSG`, handles `NET`, sends `TAG`, handles `LTC`, tracks in-transit messages through `RtiState`, and handles `Stop`. This milestone should not construct Boomerang schedulers yet. Its tests can be pure protocol tests with scripted federate clients that request tags and send messages.
+Milestone 4 implements an in-memory RTI session loop in `boomerang_federated`. Add a module such as `boomerang_federated/src/session.rs`. It should own `RtiState` plus per-federate transport endpoints. For in-memory operation, use `futures_util::Sink<ProtocolFrame>` and `futures_util::TryStream<Ok = ProtocolFrame>` so the same session contract can later run over TCP/Tokio while allowing concrete transports to keep their native error types. The RTI session receives `Hello` from all persistent federates, sends `Start`, routes `MSG`, handles `NET`, sends `TAG`, handles `LTC`, tracks in-transit messages through `RtiState`, and handles `Stop`. This milestone should not construct Boomerang schedulers yet. Its tests can be pure protocol tests with scripted federate clients that request tags and send messages.
 
 Milestone 5 implements a federate client bridge that attaches one runtime scheduler to one federate id. This bridge lives outside `boomerang_runtime`; put it in `boomerang_federated` if it can avoid depending on `boomerang_builder`, or in `boomerang_builder` behind the `federated` feature if it needs `BuilderRuntimeParts` and `FederationPlan`. The bridge owns a `FederatedTimeBarrier` implementation. When `acquire_tag(tag, event_rx)` is called, it converts `tag` to `WireTag`, sends `NET`, waits for a matching `TAG`, and keeps accepting inbound protocol frames. If it receives a `MSG`, it schedules the decoded payload through `FederatedInboundEndpointRegistry` and returns an interrupting `AsyncEvent` or otherwise wakes the scheduler so the newly arrived event can be processed. When `logical_tag_complete(tag)` is called, it sends `LTC`. The bridge also drains or receives outbound commands from the runtime sink and sends `MSG` frames to the RTI with source federate id, target federate id, endpoint id, wire tag, and payload.
 
@@ -201,7 +267,7 @@ Milestone 6 adds a public in-memory static runner for tests and early users. A r
 
 Milestone 7 defines shutdown semantics for the static runner. A federate with no local work should send `NET(FOREVER)`. When a scheduler reaches a terminal shutdown tag, the client should send `LTC` for that tag and then `Stop` or a final no-future indication. The RTI should not grant tags after a federate is stopped, and it should allow the federation to terminate only after all persistent federates have stopped or reached no-future state and all in-transit messages are acknowledged. Add tests for a source that stops after startup, a sink that waits for a delayed message and then stops, and a no-message topology that does not deadlock.
 
-Milestone 8 promotes TCP from smoke coverage to a reusable runtime path. Reuse the session and client logic from the in-memory runner with `TcpTransport`. Keep the test ignored if localhost binding remains sandbox-sensitive, but make the code path real: one RTI listener accepts federates, each federate sends `Hello`, the RTI sends `Start`, the source sends a Boomerang-produced `MSG`, the sink schedules it through the inbound registry, `TAG` and `LTC` flow, and both sides shut down. Do not add Tokio to `boomerang_runtime`; keep Tokio scoped to `boomerang_federated`.
+Milestone 8 promotes TCP from smoke coverage to a reusable runtime path. Reuse the session and client logic from the in-memory runner with `JsonProtocolFrameTransport`. Keep the test ignored if localhost binding remains sandbox-sensitive, but make the code path real: one RTI listener accepts federates, each federate sends `Hello`, the RTI sends `Start`, the source sends a Boomerang-produced `MSG`, the sink schedules it through the inbound registry, `TAG` and `LTC` flow, and both sides shut down. Do not add Tokio to `boomerang_runtime`; keep Tokio scoped to `boomerang_federated`.
 
 Milestone 9 broadens correctness coverage. Add tests for a three-federate chain, fanout from one source to two sinks, two messages at the same tag and endpoint, same timestamp but increasing microsteps, a positive-delay distributed cycle, and continued rejection of a zero-delay distributed cycle. Add an explicit test that a target federate cannot receive a `TAG` beyond an in-transit message until it sends `LTC` at or beyond that message tag. If modal reactors or physical actions are not supported across federation, add explicit rejection tests or document the exact supported subset in API docs.
 
@@ -343,7 +409,7 @@ Do not add a dependency from `boomerang_runtime` to `boomerang_federated`. If a 
 
 Keep Tokio dependencies scoped to `boomerang_federated`. The reaction scheduler remains synchronous and thread-based.
 
-Use existing `kanal` channels where a synchronous bridge is needed inside runtime-adjacent code. Use existing `FrameSink` and `FrameStream` traits for transport-agnostic protocol sessions. Use `TcpTransport` only after the in-memory session is correct.
+Use existing `kanal` channels where a synchronous bridge is needed inside runtime-adjacent code. Use `futures_util::Sink` and `futures_util::TryStream` for transport-agnostic protocol sessions, with `TransportError` as the common session-facing error. Use `futures-channel` for pure in-memory protocol endpoint pairs. Use `tokio-serde` for TCP protocol serialization and `tokio-util` for byte framing. Use `JsonProtocolFrameTransport` only after the in-memory session is correct.
 
 The final public or crate-public shape should include equivalents of these interfaces. Exact names may change if the implementation finds a better local convention, but the behavior must remain.
 
@@ -491,3 +557,11 @@ This plan does not require multiple local enclaves inside one federate process. 
 Change note: This file was created on 2026-07-09 as a fresh, self-contained ExecPlan for the next phase: turning the existing federated scaffolding into a live static federated runtime. It intentionally leaves `FEDERATED_REACTORS_EXECPLAN.md` untouched.
 
 Change note: Revised on 2026-07-09 to insert shared inter-partition topology and boundary-edge metadata as the new first milestone. This change captures the decision to unify local enclave and federated reactor planning at the builder metadata layer before adding checked protocol bridge utilities, while keeping local and federated delivery implementations separate.
+
+Change note: Revised on 2026-07-09 to replace the Milestone 4 custom federated transport traits with the ecosystem-standard `futures_util::Sink` and `futures_util::Stream` contract. This keeps the pure in-memory RTI session milestone aligned with the later TCP/Tokio goal while reducing crate-specific async abstraction.
+
+Change note: Revised on 2026-07-09 to replace manual `TcpTransport` JSON encode/decode logic with `tokio-serde`'s JSON transport combinator over the existing `tokio-util` length-delimited frames. This further reduces custom TCP transport code while preserving the Milestone 4 scope.
+
+Change note: Revised on 2026-07-09 to remove the `TcpTransport` wrapper entirely. The TCP protocol path is now the direct `JsonProtocolFrameTransport` alias plus `json_protocol_frame_transport(TcpStream)`, using the default `LengthDelimitedCodec` frame length.
+
+Change note: Revised on 2026-07-09 to replace the Tokio-backed custom in-memory transport structs with direct `futures-channel` MPSC endpoint types. The RTI session now accepts `Sink`/`TryStream` endpoints whose native errors convert into `TransportError`.

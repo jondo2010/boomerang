@@ -18,17 +18,18 @@ default = ["serde", "serde-json-codec"]
 serde = ["dep:serde"]
 
 ## JSON-backed serde payload codec for tests and first adapters
-serde-json-codec = ["serde", "dep:serde_json"]
+serde-json-codec = ["serde", "dep:serde_json", "dep:tokio-serde"]
 
 ## Checked conversions between protocol metadata and boomerang_runtime types
 runtime = ["dep:boomerang_runtime"]
 
 [dependencies]
-bytes = "1"
+futures-channel = { version = "0.3", features = ["sink"] }
 futures-util = { version = "0.3", features = ["sink"] }
 serde = { workspace = true, optional = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true }
 thiserror.workspace = true
-tokio = { version = "1.52", features = ["io-util", "macros", "net", "rt-multi-thread"] }
+tokio = { version = "1.52", features = ["io-util", "macros", "net", "rt-multi-thread", "sync"] }
+tokio-serde = { version = "0.9", features = ["json"], optional = true }
 tokio-util = { version = "0.7", features = ["codec"] }
 boomerang_runtime = { workspace = true, optional = true }

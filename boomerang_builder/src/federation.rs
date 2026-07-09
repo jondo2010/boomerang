@@ -1,6 +1,8 @@
 //! Builder-visible metadata for static federated enclave topologies.
 
-use crate::{runtime, BuilderPortKey, BuilderReactorKey};
+use crate::{
+    runtime, BoundaryKind, BuilderPortKey, BuilderReactorKey, InterPartitionPlan, PartitionRootKind,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FederatedEndpointId(String);
@@ -55,5 +57,63 @@ pub struct FederationPlan {
 impl FederationPlan {
     pub fn is_empty(&self) -> bool {
         self.federates.is_empty() && self.edges.is_empty() && self.endpoints.is_empty()
+    }
+
+    pub fn from_inter_partition_plan<E>(
+        plan: &InterPartitionPlan,
+        mut port_fqn: impl FnMut(BuilderPortKey) -> Result<String, E>,
+    ) -> Result<Self, E> {
+        let mut federation_plan = Self {
+            federates: plan
+                .partition_roots
+                .iter()
+                .filter_map(|root| match &root.kind {
+                    PartitionRootKind::LocalEnclave => None,
+                    PartitionRootKind::Federated { federate } => Some(FederateBuildInfo {
+                        id: federate.clone(),
+                        reactor: root.reactor,
+                        reactor_fqn: root.reactor_fqn.clone(),
+                    }),
+                })
+                .collect(),
+            edges: Vec::new(),
+            endpoints: Vec::new(),
+        };
+
+        for edge in plan.federated_edges() {
+            let source_port_fqn = port_fqn(edge.source_port)?;
+            let target_port_fqn = port_fqn(edge.target_port)?;
+            let BoundaryKind::Federated {
+                source_federate,
+                target_federate,
+            } = &edge.kind
+            else {
+                unreachable!("federated_edges only yields federated boundary edges");
+            };
+            let endpoint =
+                FederatedEndpointId::new(format!("{}->{}", source_port_fqn, target_port_fqn));
+
+            federation_plan.endpoints.push(FederatedEndpoint {
+                id: endpoint.clone(),
+                source_federate: source_federate.clone(),
+                target_federate: target_federate.clone(),
+                source_port: edge.source_port,
+                target_port: edge.target_port,
+                source_port_fqn,
+                target_port_fqn,
+            });
+            federation_plan.edges.push(FederatedEdge {
+                endpoint,
+                source_federate: source_federate.clone(),
+                target_federate: target_federate.clone(),
+                source_federate_reactor: edge.source_partition,
+                target_federate_reactor: edge.target_partition,
+                source_port: edge.source_port,
+                target_port: edge.target_port,
+                delay: edge.delay,
+            });
+        }
+
+        Ok(federation_plan)
     }
 }

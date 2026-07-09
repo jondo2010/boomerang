@@ -10,6 +10,7 @@ mod env;
 #[cfg(feature = "federated")]
 mod federation;
 mod fqn;
+mod inter_partition;
 mod port;
 mod reaction;
 mod reactor;
@@ -26,6 +27,7 @@ pub use env::*;
 #[cfg(feature = "federated")]
 pub use federation::*;
 pub use fqn::*;
+pub use inter_partition::*;
 pub use port::{
     BuilderPortKey, Contained, Input, Local, Output, PortBank, PortBuilder, PortTag, PortType,
     TypedPortKey,

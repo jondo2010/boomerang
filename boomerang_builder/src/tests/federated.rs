@@ -397,6 +397,12 @@ fn run_in_memory_federated_source_sink(
 fn build_federated_source_sink_plan(
     after: Option<runtime::Duration>,
 ) -> Result<FederationPlan, BuilderError> {
+    Ok(build_federated_source_sink_parts(after)?.federation_plan)
+}
+
+fn build_federated_source_sink_parts(
+    after: Option<runtime::Duration>,
+) -> Result<BuilderRuntimeParts, BuilderError> {
     let mut env_builder = EnvBuilder::new();
     register_u32_federated_codec(&mut env_builder)?;
     let mut builder = env_builder.add_reactor("main", None, None, (), false);
@@ -405,8 +411,7 @@ fn build_federated_source_sink_plan(
     builder.connect_port(source, sink, after, false)?;
     builder.finish()?;
 
-    let parts = env_builder.into_runtime_parts(&runtime::Config::default())?;
-    Ok(parts.federation_plan)
+    env_builder.into_runtime_parts(&runtime::Config::default())
 }
 
 #[test]
@@ -427,7 +432,8 @@ fn test_add_child_federate_sets_enclave_compatible_placement() {
 
 #[test]
 fn test_federated_source_sink_topology_plan() {
-    let plan = build_federated_source_sink_plan(None).unwrap();
+    let parts = build_federated_source_sink_parts(None).unwrap();
+    let plan = &parts.federation_plan;
 
     assert_eq!(plan.federates.len(), 2);
     assert_eq!(
@@ -446,6 +452,32 @@ fn test_federated_source_sink_topology_plan() {
     assert_eq!(plan.endpoints[0].id, edge.endpoint);
     assert_eq!(plan.endpoints[0].source_port_fqn, "main/source/out");
     assert_eq!(plan.endpoints[0].target_port_fqn, "main/sink/in");
+
+    assert_eq!(
+        parts
+            .inter_partition_plan
+            .partition_roots
+            .iter()
+            .filter_map(|root| match &root.kind {
+                PartitionRootKind::Federated { federate } => Some(federate.as_str()),
+                PartitionRootKind::LocalEnclave => None,
+            })
+            .collect_vec(),
+        vec!["source", "sink"]
+    );
+    assert_eq!(parts.inter_partition_plan.edges.len(), 1);
+    let boundary = &parts.inter_partition_plan.edges[0];
+    assert_eq!(boundary.source_port, plan.endpoints[0].source_port);
+    assert_eq!(boundary.target_port, plan.endpoints[0].target_port);
+    assert!(matches!(
+        &boundary.kind,
+        BoundaryKind::Federated {
+            source_federate,
+            target_federate
+        } if source_federate == "source" && target_federate == "sink"
+    ));
+    assert_eq!(boundary.delay, None);
+    assert!(!boundary.physical);
 }
 
 #[test]
@@ -505,6 +537,130 @@ fn test_cross_federate_connection_without_codec_is_rejected() {
 }
 
 #[test]
+fn test_cross_federate_physical_connection_is_rejected() {
+    let mut env_builder = EnvBuilder::new();
+    register_u32_federated_codec(&mut env_builder).unwrap();
+    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let source = builder
+        .add_child_federate(federated_source_reactor(), "source", ())
+        .unwrap();
+    let sink = builder
+        .add_child_federate(federated_sink_reactor(), "sink", ())
+        .unwrap();
+    builder.connect_port(source, sink, None, true).unwrap();
+    builder.finish().unwrap();
+
+    assert!(matches!(
+        env_builder
+            .into_runtime_parts(&runtime::Config::default())
+            .expect_err("cross-federate physical connection should be rejected"),
+        BuilderError::UnsupportedFederationTopology { what }
+            if what.contains("cross-federate physical connection")
+    ));
+}
+
+#[test]
+fn test_mixed_local_federated_boundary_is_rejected() {
+    let mut env_builder = EnvBuilder::new();
+    register_u32_federated_codec(&mut env_builder).unwrap();
+    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let source = builder
+        .add_child_federate(federated_source_reactor(), "source", ())
+        .unwrap();
+    let sink = builder
+        .add_child_reactor(federated_sink_reactor(), "sink", (), true)
+        .unwrap();
+    builder.connect_port(source, sink, None, false).unwrap();
+    builder.finish().unwrap();
+
+    assert!(matches!(
+        env_builder
+            .into_runtime_parts(&runtime::Config::default())
+            .expect_err("mixed local/federated boundary should be rejected"),
+        BuilderError::UnsupportedFederationTopology { what }
+            if what.contains("crosses a federated boundary")
+                && what.contains("both enclave roots are not federates")
+    ));
+}
+
+#[test]
+fn test_transient_federate_is_rejected() {
+    let mut env_builder = EnvBuilder::new();
+    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    builder
+        .add_child_reactor_with_placement(
+            federated_source_reactor(),
+            "source",
+            (),
+            ReactorPlacement::Federate(FederateSpec::new("source").transient(true)),
+        )
+        .unwrap();
+    builder.finish().unwrap();
+
+    assert!(matches!(
+        env_builder
+            .into_runtime_parts(&runtime::Config::default())
+            .expect_err("transient federate should be rejected"),
+        BuilderError::UnsupportedFederationTopology { what }
+            if what.contains("transient federate 'source'")
+    ));
+}
+
+#[test]
+fn test_empty_federate_id_is_rejected() {
+    let mut env_builder = EnvBuilder::new();
+    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    builder
+        .add_child_reactor_with_placement(
+            federated_source_reactor(),
+            "source",
+            (),
+            ReactorPlacement::Federate(FederateSpec::new(" ")),
+        )
+        .unwrap();
+    builder.finish().unwrap();
+
+    assert!(matches!(
+        env_builder
+            .into_runtime_parts(&runtime::Config::default())
+            .expect_err("empty federate id should be rejected"),
+        BuilderError::UnsupportedFederationTopology { what }
+            if what.contains("must have a non-empty id")
+    ));
+}
+
+#[test]
+fn test_duplicate_federate_id_is_rejected() {
+    let mut env_builder = EnvBuilder::new();
+    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    builder
+        .add_child_reactor_with_placement(
+            federated_source_reactor(),
+            "source",
+            (),
+            ReactorPlacement::Federate(FederateSpec::new("same")),
+        )
+        .unwrap();
+    builder
+        .add_child_reactor_with_placement(
+            federated_sink_reactor(),
+            "sink",
+            (),
+            ReactorPlacement::Federate(FederateSpec::new("same")),
+        )
+        .unwrap();
+    builder.finish().unwrap();
+
+    assert!(matches!(
+        env_builder
+            .into_runtime_parts(&runtime::Config::default())
+            .expect_err("duplicate federate id should be rejected"),
+        BuilderError::UnsupportedFederationTopology { what }
+            if what.contains("duplicate federate id 'same'")
+    ));
+}
+
+#[test]
 fn test_local_cross_enclave_connection_does_not_require_federated_codec() {
     let mut env_builder = EnvBuilder::new();
     let mut builder = env_builder.add_reactor("main", None, None, (), false);
@@ -521,6 +677,12 @@ fn test_local_cross_enclave_connection_does_not_require_federated_codec() {
         .into_runtime_parts(&runtime::Config::default())
         .unwrap();
 
+    assert_eq!(parts.inter_partition_plan.edges.len(), 1);
+    let boundary = &parts.inter_partition_plan.edges[0];
+    assert!(matches!(boundary.kind, BoundaryKind::LocalEnclave));
+    assert_eq!(boundary.source_port, source.into());
+    assert_eq!(boundary.target_port, sink.into());
+    assert!(!boundary.physical);
     assert!(parts.federation_plan.is_empty());
     assert_eq!(parts.federated_inbound_endpoints.len(), 0);
     assert!(parts.enclaves.values().any(|enclave| {

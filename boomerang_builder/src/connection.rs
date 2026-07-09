@@ -10,8 +10,8 @@ use slotmap::SecondaryMap;
 
 use crate::{
     runtime, ActionTag, BuilderActionKey, BuilderError, BuilderModeKey, BuilderPortKey,
-    BuilderReactorKey, EnclaveDep, EnvBuilder, Input, Output, ParentReactorBuilder, PartitionMap,
-    PortType, TriggerMode, TypedActionKey, TypedPortKey,
+    BuilderReactorKey, EnvBuilder, Input, Output, ParentReactorBuilder, PartitionMap, PortType,
+    TriggerMode, TypedActionKey, TypedPortKey,
 };
 
 #[cfg(feature = "federated")]
@@ -241,7 +241,6 @@ pub trait BaseConnectionBuilder {
         env: &mut EnvBuilder,
         partition_map: &mut PartitionMap,
         port_bindings: &mut PortBindings,
-        enclave_deps: &mut Vec<EnclaveDep>,
     ) -> Result<(), BuilderError>;
 }
 
@@ -273,7 +272,6 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
         env: &mut EnvBuilder,
         partition_map: &mut PartitionMap,
         port_bindings: &mut PortBindings,
-        enclave_deps: &mut Vec<EnclaveDep>,
     ) -> Result<(), BuilderError> {
         let source_port = &env.port_builders[self.source_key()];
         let target_port = &env.port_builders[self.target_key()];
@@ -401,12 +399,6 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
             )?;
             partition_map.insert(reactor_key, source_partition);
             port_bindings.bind(self.source_key, input_port.into(), env)?;
-
-            enclave_deps.push(EnclaveDep {
-                upstream: source_partition,
-                downstream: target_partition,
-                delay: self.after,
-            });
         }
         Ok(())
     }

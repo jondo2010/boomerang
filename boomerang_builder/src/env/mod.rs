@@ -26,7 +26,10 @@ use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, EdgeDirection};
 use slotmap::{Key, SecondaryMap, SlotMap};
 #[cfg(feature = "federated")]
-use std::sync::Arc;
+use std::{
+    any::{type_name, Any, TypeId},
+    sync::Arc,
+};
 use std::{collections::HashMap, convert::TryInto};
 
 mod build;
@@ -79,6 +82,15 @@ type FederatedInboundEndpointBuilder = dyn FnOnce(
     &mut runtime::FederatedInboundEndpointRegistry,
 ) -> Result<(), BuilderError>;
 
+#[cfg(feature = "federated")]
+type FederatedCodecEntry = dyn Any + Send + Sync;
+
+#[cfg(feature = "federated")]
+struct FederatedCodecRegistration<T: runtime::ReactorData> {
+    encoder_factory: Box<dyn Fn() -> Box<dyn runtime::FederatedPayloadEncoder<T>> + Send + Sync>,
+    decoder_factory: Box<dyn Fn() -> Box<dyn runtime::FederatedPayloadDecoder<T>> + Send + Sync>,
+}
+
 #[derive(Debug)]
 pub struct ModeBuilder {
     pub name: String,
@@ -100,6 +112,9 @@ pub struct EnvBuilder {
     pub(super) reactor_builders: SlotMap<BuilderReactorKey, ReactorBuilder>,
     /// Builders for Connections
     pub(super) connection_builders: Vec<Box<dyn BaseConnectionBuilder>>,
+    #[cfg(feature = "federated")]
+    /// Environment-scoped payload codec policy for inferred cross-federate connections.
+    federated_codecs: HashMap<TypeId, Box<FederatedCodecEntry>>,
     #[cfg(feature = "federated")]
     /// Builders for inbound federated endpoint registry entries.
     pub(super) federated_inbound_endpoint_builders: Vec<Box<FederatedInboundEndpointBuilder>>,
@@ -583,10 +598,6 @@ impl EnvBuilder {
                 target_key,
                 after,
                 scope_mode,
-                #[cfg(feature = "federated")]
-                federated_encoder: None,
-                #[cfg(feature = "federated")]
-                federated_decoder: None,
                 _phantom: Default::default(),
             })
         } else {
@@ -595,10 +606,6 @@ impl EnvBuilder {
                 target_key,
                 after,
                 scope_mode,
-                #[cfg(feature = "federated")]
-                federated_encoder: None,
-                #[cfg(feature = "federated")]
-                federated_decoder: None,
                 _phantom: Default::default(),
             })
         });
@@ -607,80 +614,89 @@ impl EnvBuilder {
     }
 
     #[cfg(feature = "federated")]
-    pub fn add_federated_port_connection<T, P1, P2, C>(
-        &mut self,
-        source_key: P1,
-        target_key: P2,
-        after: Option<runtime::Duration>,
-        codec: C,
-    ) -> Result<(), BuilderError>
+    pub fn register_federated_codec<T, C>(&mut self, codec: C) -> Result<(), BuilderError>
     where
-        T: runtime::ReactorData + Clone,
-        P1: Into<BuilderPortKey>,
-        P2: Into<BuilderPortKey>,
+        T: runtime::ReactorData,
         C: boomerang_federated::PayloadEncoder<T>
             + boomerang_federated::PayloadDecoder<T>
             + Send
             + Sync
             + 'static,
     {
-        self.add_federated_port_connection_in_scope::<T, P1, P2, C>(
-            source_key, target_key, None, after, codec,
-        )
-    }
-
-    #[cfg(feature = "federated")]
-    pub(crate) fn add_federated_port_connection_in_scope<T, P1, P2, C>(
-        &mut self,
-        source_key: P1,
-        target_key: P2,
-        scope_mode: Option<BuilderModeKey>,
-        after: Option<runtime::Duration>,
-        codec: C,
-    ) -> Result<(), BuilderError>
-    where
-        T: runtime::ReactorData + Clone,
-        P1: Into<BuilderPortKey>,
-        P2: Into<BuilderPortKey>,
-        C: boomerang_federated::PayloadEncoder<T>
-            + boomerang_federated::PayloadDecoder<T>
-            + Send
-            + Sync
-            + 'static,
-    {
-        let source_key = source_key.into();
-        let target_key = target_key.into();
-
-        tracing::debug!(
-            "Adding federated connection from {} to {} with after={after:?}",
-            source_key.fqn(self, false)?,
-            target_key.fqn(self, false)?,
-        );
+        let type_id = TypeId::of::<T>();
+        if self.federated_codecs.contains_key(&type_id) {
+            return Err(BuilderError::UnsupportedFederationTopology {
+                what: format!(
+                    "federated codec for payload type '{}' is already registered",
+                    type_name::<T>()
+                ),
+            });
+        }
 
         let codec = Arc::new(codec);
         let encoder_codec = Arc::clone(&codec);
         let decoder_codec = Arc::clone(&codec);
 
-        self.connection_builders
-            .push(Box::new(ConnectionBuilder::<T, Logical> {
-                source_key,
-                target_key,
-                after,
-                scope_mode,
-                federated_encoder: Some(Box::new(move || {
+        self.federated_codecs.insert(
+            type_id,
+            Box::new(FederatedCodecRegistration::<T> {
+                encoder_factory: Box::new(move || {
                     Box::new(FederatedEncoderAdapter {
-                        codec: encoder_codec,
+                        codec: Arc::clone(&encoder_codec),
                     })
-                })),
-                federated_decoder: Some(Box::new(move || {
+                }),
+                decoder_factory: Box::new(move || {
                     Box::new(FederatedDecoderAdapter {
-                        codec: decoder_codec,
+                        codec: Arc::clone(&decoder_codec),
                     })
-                })),
-                _phantom: Default::default(),
-            }));
+                }),
+            }),
+        );
 
         Ok(())
+    }
+
+    #[cfg(feature = "federated")]
+    pub(super) fn federated_codec_for<T>(
+        &self,
+        source_key: BuilderPortKey,
+        target_key: BuilderPortKey,
+    ) -> Result<
+        (
+            Box<dyn runtime::FederatedPayloadEncoder<T>>,
+            Box<dyn runtime::FederatedPayloadDecoder<T>>,
+        ),
+        BuilderError,
+    >
+    where
+        T: runtime::ReactorData,
+    {
+        let source_fqn = self.fqn_for(source_key, false)?;
+        let target_fqn = self.fqn_for(target_key, false)?;
+        let entry = self.federated_codecs.get(&TypeId::of::<T>()).ok_or_else(|| {
+            BuilderError::UnsupportedFederationTopology {
+                what: format!(
+                    "cross-federate connection '{}' -> '{}' requires a federated codec for payload type '{}'; register one on EnvBuilder with register_federated_codec::<T, _>(...)",
+                    source_fqn,
+                    target_fqn,
+                    type_name::<T>(),
+                ),
+            }
+        })?;
+
+        let registration = entry
+            .downcast_ref::<FederatedCodecRegistration<T>>()
+            .ok_or_else(|| {
+                BuilderError::InternalError(format!(
+                    "federated codec registry type mismatch for payload type '{}'",
+                    type_name::<T>()
+                ))
+            })?;
+
+        Ok((
+            (registration.encoder_factory)(),
+            (registration.decoder_factory)(),
+        ))
     }
 
     #[cfg(feature = "federated")]

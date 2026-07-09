@@ -604,34 +604,6 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         )
     }
 
-    #[cfg(feature = "federated")]
-    pub fn connect_federated_port<T, Q1, Q2, A1, A2, C>(
-        &mut self,
-        port_a_key: TypedPortKey<T, Q1, A1>,
-        port_b_key: TypedPortKey<T, Q2, A2>,
-        after: Option<runtime::Duration>,
-        codec: C,
-    ) -> Result<(), BuilderError>
-    where
-        T: runtime::ReactorData + Clone,
-        Q1: PortTag,
-        Q2: PortTag,
-        C: boomerang_federated::PayloadEncoder<T>
-            + boomerang_federated::PayloadDecoder<T>
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.env
-            .add_federated_port_connection_in_scope::<T, _, _, C>(
-                port_a_key,
-                port_b_key,
-                self.current_mode,
-                after,
-                codec,
-            )
-    }
-
     /// Connect multiple ports on this reactor. This has the logical meaning of "connecting"
     /// `ports_from` to `ports_to`.
     pub fn connect_ports<T, Q1, Q2, A1, A2>(

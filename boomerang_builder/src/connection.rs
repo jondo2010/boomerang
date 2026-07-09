@@ -15,13 +15,6 @@ use crate::{
 };
 
 #[cfg(feature = "federated")]
-pub(crate) type FederatedEncoderFactory<T> =
-    Box<dyn FnOnce() -> Box<dyn runtime::FederatedPayloadEncoder<T>>>;
-#[cfg(feature = "federated")]
-pub(crate) type FederatedDecoderFactory<T> =
-    Box<dyn FnOnce() -> Box<dyn runtime::FederatedPayloadDecoder<T>>>;
-
-#[cfg(feature = "federated")]
 pub(crate) struct FederatedEncoderAdapter<C> {
     pub(crate) codec: Arc<C>,
 }
@@ -257,10 +250,6 @@ pub struct ConnectionBuilder<T: runtime::ReactorData, Q: ActionTag> {
     pub(crate) target_key: BuilderPortKey,
     pub(crate) after: Option<runtime::Duration>,
     pub(crate) scope_mode: Option<BuilderModeKey>,
-    #[cfg(feature = "federated")]
-    pub(crate) federated_encoder: Option<FederatedEncoderFactory<T>>,
-    #[cfg(feature = "federated")]
-    pub(crate) federated_decoder: Option<FederatedDecoderFactory<T>>,
     pub(crate) _phantom: std::marker::PhantomData<fn() -> (T, Q)>,
 }
 
@@ -333,26 +322,8 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
                     });
                 }
 
-                let source_fqn = env.fqn_for(self.source_key, false)?;
-                let target_fqn = env.fqn_for(self.target_key, false)?;
-                let encoder = self.federated_encoder.take().ok_or_else(|| {
-                    BuilderError::UnsupportedFederationTopology {
-                        what: format!(
-                            "cross-federate connection '{}' -> '{}' requires a federated codec; use connect_federated_port",
-                            source_fqn,
-                            target_fqn,
-                        ),
-                    }
-                })?();
-                let decoder = self.federated_decoder.take().ok_or_else(|| {
-                    BuilderError::UnsupportedFederationTopology {
-                        what: format!(
-                            "cross-federate connection '{}' -> '{}' requires a federated codec; use connect_federated_port",
-                            source_fqn,
-                            target_fqn,
-                        ),
-                    }
-                })?();
+                let (encoder, decoder) =
+                    env.federated_codec_for::<T>(self.source_key, self.target_key)?;
                 let endpoint = federated_endpoint_id(env, self.source_key, self.target_key)?;
 
                 let target_parent_reactor_key =

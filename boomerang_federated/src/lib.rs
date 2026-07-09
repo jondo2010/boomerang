@@ -2,6 +2,8 @@
 #![deny(unsafe_code)]
 #![deny(clippy::all)]
 
+#[cfg(feature = "runtime")]
+pub mod client;
 pub mod codec;
 pub mod protocol;
 pub mod rti;
@@ -10,6 +12,10 @@ pub mod runtime_bridge;
 pub mod session;
 pub mod transport;
 
+#[cfg(feature = "runtime")]
+pub use client::{
+    FederateClientError, FederateClientRoute, FederateProtocolClient, RtiFederatedTimeBarrier,
+};
 #[cfg(feature = "serde-json-codec")]
 pub use codec::SerdeJsonCodec;
 pub use codec::{CodecError, PayloadCodec, PayloadDecoder, PayloadEncoder};

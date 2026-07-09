@@ -6,3 +6,5 @@
 
 #[cfg(feature = "runner")]
 pub mod runner;
+#[cfg(feature = "test-tracing")]
+pub mod test_tracing;

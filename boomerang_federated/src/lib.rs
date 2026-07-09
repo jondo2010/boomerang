@@ -15,6 +15,8 @@ pub use protocol::{
     RtiToFederate, TopologyEdge, WireDelay, WireTag,
 };
 pub use rti::{FederateState, GrantDecision, RtiDelivery, RtiError, RtiState};
+#[cfg(feature = "serde-json-codec")]
+pub use transport::TcpTransport;
 pub use transport::{
     in_memory_transport_pair, FrameSink, FrameStream, InMemoryTransport, TransportError,
     TransportFuture,

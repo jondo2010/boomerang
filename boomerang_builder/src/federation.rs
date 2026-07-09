@@ -250,6 +250,128 @@ pub fn federated_routes_from_plan(
     Ok(routes)
 }
 
+/// Execute a static federation in memory using the real RTI session and federate clients.
+///
+/// This is an explicit federated execution path. It does not replace
+/// [`runtime::execute_enclaves`], which remains local-only.
+pub fn execute_federation_in_memory(
+    parts: crate::BuilderRuntimeParts,
+    config: runtime::Config,
+) -> Result<tinymap::TinySecondaryMap<runtime::EnclaveKey, runtime::Env>, BuilderError> {
+    let runtime_parts = static_federation_runtime_parts(parts)?;
+    boomerang_federated::static_runner::execute_federation_in_memory(runtime_parts, config)
+        .map_err(BuilderError::from)
+}
+
+fn static_federation_runtime_parts(
+    parts: crate::BuilderRuntimeParts,
+) -> Result<boomerang_federated::StaticFederationRuntimeParts, BuilderError> {
+    validate_static_runner_plan(&parts)?;
+
+    let topology = federation_topology_from_plan(&parts.federation_plan)?;
+    let routes = federated_routes_from_plan(&parts.federation_plan)?
+        .into_iter()
+        .map(|route| {
+            boomerang_federated::FederateClientRoute::new(
+                route.endpoint,
+                route.source,
+                route.target,
+            )
+        })
+        .collect();
+    let (federate_enclaves, _federate_by_enclave) = federate_enclave_maps(&parts)?;
+
+    Ok(boomerang_federated::StaticFederationRuntimeParts {
+        topology,
+        routes,
+        federate_enclaves,
+        enclaves: parts.enclaves,
+        outbound_sink: parts.federated_outbound_sink,
+        inbound_endpoints: parts.federated_inbound_endpoints,
+    })
+}
+
+fn validate_static_runner_plan(parts: &crate::BuilderRuntimeParts) -> Result<(), BuilderError> {
+    if parts.federation_plan.federates.is_empty()
+        || parts.federation_plan.edges.is_empty()
+        || parts.federation_plan.endpoints.is_empty()
+    {
+        return Err(BuilderError::UnsupportedFederationTopology {
+            what: "in-memory federation runner requires a non-empty federation plan with at least one cross-federate endpoint".into(),
+        });
+    }
+
+    let mut zero_delay_graph = petgraph::prelude::DiGraphMap::<BuilderReactorKey, ()>::new();
+    for edge in parts.inter_partition_plan.federated_edges() {
+        if edge.physical {
+            return Err(BuilderError::UnsupportedFederationTopology {
+                what: "cross-federate physical connections are reserved for a later milestone"
+                    .into(),
+            });
+        }
+
+        let has_positive_delay = edge
+            .delay
+            .is_some_and(|delay| delay > runtime::Duration::ZERO);
+        if !has_positive_delay {
+            zero_delay_graph.add_edge(edge.source_partition, edge.target_partition, ());
+        }
+    }
+
+    if petgraph::algo::toposort(&zero_delay_graph, None).is_err() {
+        return Err(BuilderError::UnsupportedFederationTopology {
+            what: "distributed zero-delay cycle is unsupported in the static in-memory runner"
+                .into(),
+        });
+    }
+
+    Ok(())
+}
+
+fn federate_enclave_maps(
+    parts: &crate::BuilderRuntimeParts,
+) -> Result<
+    (
+        BTreeMap<boomerang_federated::FederateId, runtime::EnclaveKey>,
+        tinymap::TinySecondaryMap<runtime::EnclaveKey, boomerang_federated::FederateId>,
+    ),
+    BuilderError,
+> {
+    let mut federate_enclaves = BTreeMap::new();
+    let mut federate_by_enclave = tinymap::TinySecondaryMap::new();
+
+    for federate in &parts.federation_plan.federates {
+        let enclave_key = *parts
+            .aliases
+            .enclave_aliases
+            .get(federate.reactor)
+            .ok_or_else(|| {
+                federation_bridge_error(format!(
+                    "federate '{}' has no runtime enclave alias",
+                    federate.id
+                ))
+            })?;
+        let federate_id = boomerang_federated::FederateId::new(federate.id.clone());
+
+        if let Some(previous) = federate_by_enclave.get(enclave_key) {
+            return Err(federation_bridge_error(format!(
+                "ambiguous enclave-to-federate mapping: enclave {enclave_key:?} maps to both '{previous}' and '{federate_id}'"
+            )));
+        }
+        if federate_enclaves
+            .insert(federate_id.clone(), enclave_key)
+            .is_some()
+        {
+            return Err(federation_bridge_error(format!(
+                "duplicate federate id '{federate_id}'"
+            )));
+        }
+        federate_by_enclave.insert(enclave_key, federate_id);
+    }
+
+    Ok((federate_enclaves, federate_by_enclave))
+}
+
 fn checked_federate_id_set(plan: &FederationPlan) -> Result<BTreeSet<String>, BuilderError> {
     let mut federate_ids = BTreeSet::new();
     for federate in &plan.federates {

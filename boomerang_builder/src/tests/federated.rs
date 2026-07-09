@@ -145,6 +145,7 @@ fn federated_recording_sink_reactor(
             .with_reaction_fn(move |ctx, _state, (input,)| {
                 if let Some(value) = *input {
                     values.lock().unwrap().push((ctx.get_tag(), value));
+                    ctx.schedule_shutdown(None);
                 }
             })
             .finish()?;
@@ -345,6 +346,36 @@ fn run_in_memory_federated_source_sink(
     (recorded_values, routed_tags)
 }
 
+fn run_live_in_memory_federated_source_sink(
+    after: Option<runtime::Duration>,
+) -> Vec<(runtime::Tag, u32)> {
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let mut env_builder = EnvBuilder::new();
+    register_u32_federated_codec(&mut env_builder).unwrap();
+    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let source = builder
+        .add_child_federate(federated_startup_source_reactor(7), "source", ())
+        .unwrap();
+    let sink = builder
+        .add_child_federate(
+            federated_recording_sink_reactor(Arc::clone(&values)),
+            "sink",
+            (),
+        )
+        .unwrap();
+    builder.connect_port(source, sink, after, false).unwrap();
+    builder.finish().unwrap();
+
+    let config = runtime::Config::default()
+        .with_fast_forward(true)
+        .with_timeout(runtime::Duration::milliseconds(100));
+    let parts = env_builder.into_runtime_parts(&config).unwrap();
+    let _envs = execute_federation_in_memory(parts, config).unwrap();
+
+    let recorded_values = values.lock().unwrap().clone();
+    recorded_values
+}
+
 fn build_federated_source_sink_plan(
     after: Option<runtime::Duration>,
 ) -> Result<FederationPlan, BuilderError> {
@@ -483,6 +514,13 @@ fn test_in_memory_distributed_hello_matches_local_enclave() {
 }
 
 #[test]
+fn test_live_in_memory_distributed_hello_records_zero_tag() {
+    let values = run_live_in_memory_federated_source_sink(None);
+
+    assert_eq!(values, vec![(runtime::Tag::ZERO, 7)]);
+}
+
+#[test]
 fn test_in_memory_distributed_delayed_connection_matches_local_tag() {
     let delay = runtime::Duration::milliseconds(10);
     let local_values = run_local_source_sink(Some(delay));
@@ -491,6 +529,14 @@ fn test_in_memory_distributed_delayed_connection_matches_local_tag() {
     assert_eq!(local_values, vec![(runtime::Tag::new(delay, 0), 7)]);
     assert_eq!(federated_values, local_values);
     assert_eq!(routed_tags, vec![runtime::Tag::new(delay, 0)]);
+}
+
+#[test]
+fn test_live_in_memory_distributed_delayed_connection_records_delay_tag() {
+    let delay = runtime::Duration::milliseconds(10);
+    let values = run_live_in_memory_federated_source_sink(Some(delay));
+
+    assert_eq!(values, vec![(runtime::Tag::new(delay, 0), 7)]);
 }
 
 #[test]

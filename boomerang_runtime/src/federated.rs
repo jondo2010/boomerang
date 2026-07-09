@@ -210,6 +210,63 @@ impl FederatedOutboundSink for FederatedOutboundBuffer {
     }
 }
 
+/// Outbound sink that preserves test-drainable commands and can also forward live endpoint routes.
+#[derive(Debug, Clone)]
+pub struct BufferedFederatedOutboundSink {
+    buffer: FederatedOutboundBuffer,
+    live_routes: Arc<Mutex<BTreeMap<FederatedEndpointId, FederatedOutboundChannel>>>,
+}
+
+impl BufferedFederatedOutboundSink {
+    pub fn new(buffer: FederatedOutboundBuffer) -> Self {
+        Self {
+            buffer,
+            live_routes: Arc::default(),
+        }
+    }
+
+    pub fn set_live_route(
+        &self,
+        endpoint: FederatedEndpointId,
+        channel: FederatedOutboundChannel,
+    ) -> Result<(), FederatedEndpointError> {
+        self.live_routes
+            .lock()
+            .map_err(|_| {
+                FederatedEndpointError::send("federated outbound route map lock poisoned")
+            })?
+            .insert(endpoint, channel);
+        Ok(())
+    }
+}
+
+impl Default for BufferedFederatedOutboundSink {
+    fn default() -> Self {
+        Self::new(FederatedOutboundBuffer::default())
+    }
+}
+
+impl FederatedOutboundSink for BufferedFederatedOutboundSink {
+    fn send(&self, command: FederatedOutboundCommand) -> Result<(), FederatedEndpointError> {
+        FederatedOutboundSink::send(&self.buffer, command.clone())?;
+
+        let FederatedOutboundCommand::Msg(message) = &command;
+        let Some(channel) = self
+            .live_routes
+            .lock()
+            .map_err(|_| {
+                FederatedEndpointError::send("federated outbound route map lock poisoned")
+            })?
+            .get(&message.endpoint)
+            .cloned()
+        else {
+            return Ok(());
+        };
+
+        FederatedOutboundSink::send(&channel, command)
+    }
+}
+
 trait FederatedInboundEndpoint: Send + Sync {
     fn schedule(&self, tag: Tag, payload: &[u8]) -> Result<(), FederatedEndpointError>;
 }
@@ -260,9 +317,9 @@ impl<T: ReactorData> FederatedInboundEndpoint for TypedFederatedInboundEndpoint<
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct FederatedInboundEndpointRegistry {
-    endpoints: BTreeMap<FederatedEndpointId, Box<dyn FederatedInboundEndpoint>>,
+    endpoints: BTreeMap<FederatedEndpointId, Arc<dyn FederatedInboundEndpoint>>,
 }
 
 impl fmt::Debug for FederatedInboundEndpointRegistry {
@@ -290,7 +347,7 @@ impl FederatedInboundEndpointRegistry {
 
         let endpoint_id = endpoint.clone();
         let endpoint = TypedFederatedInboundEndpoint::new(endpoint, context, action_ref, decoder)?;
-        self.endpoints.insert(endpoint_id, Box::new(endpoint));
+        self.endpoints.insert(endpoint_id, Arc::new(endpoint));
         Ok(())
     }
 
@@ -377,5 +434,21 @@ mod tests {
         assert_eq!(buffer.len().unwrap(), 1);
         assert_eq!(buffer.drain().unwrap(), vec![command]);
         assert!(buffer.is_empty().unwrap());
+    }
+
+    #[test]
+    fn buffered_outbound_sink_buffers_and_forwards_live_route() {
+        let buffer = FederatedOutboundBuffer::default();
+        let sink = BufferedFederatedOutboundSink::new(buffer.clone());
+        let (channel, receiver) = FederatedOutboundChannel::pair();
+        let command = outbound_command();
+        let FederatedOutboundCommand::Msg(message) = &command;
+
+        sink.set_live_route(message.endpoint.clone(), channel)
+            .unwrap();
+        FederatedOutboundSink::send(&sink, command.clone()).unwrap();
+
+        assert_eq!(buffer.drain().unwrap(), vec![command.clone()]);
+        assert_eq!(receiver.try_recv().unwrap(), Some(command));
     }
 }

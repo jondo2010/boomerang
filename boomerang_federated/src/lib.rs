@@ -10,6 +10,8 @@ pub mod rti;
 #[cfg(feature = "runtime")]
 pub mod runtime_bridge;
 pub mod session;
+#[cfg(feature = "runtime")]
+pub mod static_runner;
 pub mod transport;
 
 #[cfg(feature = "runtime")]
@@ -27,6 +29,8 @@ pub use rti::{FederateState, GrantDecision, RtiDelivery, RtiError, RtiState};
 #[cfg(feature = "runtime")]
 pub use runtime_bridge::RuntimeBridgeError;
 pub use session::{RtiSessionEndpoint, SessionError, StaticRtiSession};
+#[cfg(feature = "runtime")]
+pub use static_runner::{StaticFederationRunnerError, StaticFederationRuntimeParts};
 pub use transport::{
     in_memory_transport_pair, InMemoryFrameSink, InMemoryFrameStream, InMemoryTransport,
     TransportError,

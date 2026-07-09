@@ -143,3 +143,26 @@ impl From<boomerang_federated::RuntimeBridgeError> for BuilderError {
         }
     }
 }
+
+#[cfg(feature = "federated")]
+impl From<boomerang_federated::FederateClientError> for BuilderError {
+    fn from(error: boomerang_federated::FederateClientError) -> Self {
+        Self::FederationBridgeError {
+            what: error.to_string(),
+        }
+    }
+}
+
+#[cfg(feature = "federated")]
+impl From<boomerang_federated::StaticFederationRunnerError> for BuilderError {
+    fn from(error: boomerang_federated::StaticFederationRunnerError) -> Self {
+        match error {
+            boomerang_federated::StaticFederationRunnerError::UnsupportedTopology { what } => {
+                Self::UnsupportedFederationTopology { what }
+            }
+            error => Self::FederationBridgeError {
+                what: error.to_string(),
+            },
+        }
+    }
+}

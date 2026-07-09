@@ -361,16 +361,10 @@ impl RtiFederatedTimeBarrier {
                 RtiToFederate::Tag { tag: granted } => {
                     let runtime_tag = boomerang_runtime::Tag::try_from(granted)?;
                     self.last_granted = Some(runtime_tag);
-                    if granted == requested {
+                    if granted >= requested {
                         return Ok(None);
                     }
-                    if granted < requested {
-                        continue;
-                    }
-                    return Err(FederateClientError::UnexpectedTag {
-                        requested,
-                        received: granted,
-                    });
+                    continue;
                 }
                 RtiToFederate::Msg {
                     source,
@@ -408,6 +402,25 @@ impl RtiFederatedTimeBarrier {
     ) -> Result<(), FederateClientError> {
         self.drain_outbound_commands()?;
         self.send_ltc(tag)
+    }
+
+    /// Send a final Stop frame for this federate after its scheduler has terminated.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self),
+        fields(federate = %self.federate_id)
+    )]
+    pub fn stop_result(&mut self) -> Result<(), FederateClientError> {
+        if self.stopped {
+            return Ok(());
+        }
+
+        self.drain_outbound_commands()?;
+        self.client.send(FederateToRti::Stop {
+            federate_id: self.federate_id.clone(),
+        })?;
+        self.stopped = true;
+        Ok(())
     }
 
     /// Schedule one inbound MSG payload through the runtime inbound endpoint registry.

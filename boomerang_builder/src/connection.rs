@@ -565,7 +565,7 @@ fn build_federated_connection_source<T: runtime::ReactorData + Clone>(
                 endpoint,
                 remote_action_ref,
                 encoder,
-                Box::new(builder_parts.federated_outbound.clone()),
+                Box::new(builder_parts.federated_outbound_sink.clone()),
             )
             .into()
         })

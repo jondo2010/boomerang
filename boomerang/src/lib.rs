@@ -65,8 +65,9 @@ pub mod prelude {
 
     #[cfg(feature = "federated")]
     pub use super::builder::{
-        federated_routes_from_plan, federation_topology_from_plan, FederateBuildInfo, FederateSpec,
-        FederatedEdge, FederatedEndpoint, FederatedEndpointId, FederatedRoute, FederationPlan,
+        execute_federation_in_memory, federated_routes_from_plan, federation_topology_from_plan,
+        FederateBuildInfo, FederateSpec, FederatedEdge, FederatedEndpoint, FederatedEndpointId,
+        FederatedRoute, FederationPlan,
     };
 
     #[cfg(feature = "federated")]

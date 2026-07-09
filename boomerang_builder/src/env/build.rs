@@ -68,6 +68,8 @@ pub struct BuilderRuntimeParts {
     /// Outbound serialized endpoint commands emitted by federated sender reactions.
     pub federated_outbound: runtime::FederatedOutboundBuffer,
     #[cfg(feature = "federated")]
+    pub(crate) federated_outbound_sink: runtime::BufferedFederatedOutboundSink,
+    #[cfg(feature = "federated")]
     /// Registry used by federated clients to schedule received endpoint payloads.
     pub federated_inbound_endpoints: runtime::FederatedInboundEndpointRegistry,
     #[cfg(feature = "replay")]
@@ -117,6 +119,12 @@ impl BuilderRuntimeParts {
         }
         #[cfg(feature = "replay")]
         {
+            #[cfg(feature = "federated")]
+            let federated_outbound = runtime::FederatedOutboundBuffer::default();
+            #[cfg(feature = "federated")]
+            let federated_outbound_sink =
+                runtime::BufferedFederatedOutboundSink::new(federated_outbound.clone());
+
             // Pre-fill the replayers map with empty maps
             let replayers = enclaves
                 .keys()
@@ -133,7 +141,9 @@ impl BuilderRuntimeParts {
                 #[cfg(feature = "federated")]
                 federation_plan: FederationPlan::default(),
                 #[cfg(feature = "federated")]
-                federated_outbound: runtime::FederatedOutboundBuffer::default(),
+                federated_outbound,
+                #[cfg(feature = "federated")]
+                federated_outbound_sink,
                 #[cfg(feature = "federated")]
                 federated_inbound_endpoints: runtime::FederatedInboundEndpointRegistry::default(),
                 replayers,
@@ -141,6 +151,12 @@ impl BuilderRuntimeParts {
         }
         #[cfg(not(feature = "replay"))]
         {
+            #[cfg(feature = "federated")]
+            let federated_outbound = runtime::FederatedOutboundBuffer::default();
+            #[cfg(feature = "federated")]
+            let federated_outbound_sink =
+                runtime::BufferedFederatedOutboundSink::new(federated_outbound.clone());
+
             // No replayers, just return the enclaves and aliases
             Self {
                 enclaves,
@@ -149,7 +165,9 @@ impl BuilderRuntimeParts {
                 #[cfg(feature = "federated")]
                 federation_plan: FederationPlan::default(),
                 #[cfg(feature = "federated")]
-                federated_outbound: runtime::FederatedOutboundBuffer::default(),
+                federated_outbound,
+                #[cfg(feature = "federated")]
+                federated_outbound_sink,
                 #[cfg(feature = "federated")]
                 federated_inbound_endpoints: runtime::FederatedInboundEndpointRegistry::default(),
             }

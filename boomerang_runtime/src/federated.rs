@@ -48,6 +48,9 @@ pub enum FederatedEndpointError {
     #[error("federated outbound sink error: {0}")]
     Send(String),
 
+    #[error("federated outbound receiver error: {0}")]
+    Receive(String),
+
     #[error("duplicate federated endpoint: {0}")]
     DuplicateEndpoint(FederatedEndpointId),
 
@@ -71,6 +74,10 @@ impl FederatedEndpointError {
 
     pub fn send(message: impl Into<String>) -> Self {
         Self::Send(message.into())
+    }
+
+    pub fn receive(message: impl Into<String>) -> Self {
+        Self::Receive(message.into())
     }
 }
 
@@ -118,6 +125,47 @@ pub enum FederatedOutboundCommand {
 
 pub trait FederatedOutboundSink: Send + Sync + 'static {
     fn send(&self, command: FederatedOutboundCommand) -> Result<(), FederatedEndpointError>;
+}
+
+/// Live outbound command sink that wakes a waiting federate client.
+#[derive(Debug, Clone)]
+pub struct FederatedOutboundChannel {
+    sender: kanal::Sender<FederatedOutboundCommand>,
+}
+
+/// Receiving half of a live outbound command channel.
+#[derive(Debug)]
+pub struct FederatedOutboundReceiver {
+    receiver: kanal::Receiver<FederatedOutboundCommand>,
+}
+
+impl FederatedOutboundChannel {
+    pub fn pair() -> (Self, FederatedOutboundReceiver) {
+        let (sender, receiver) = kanal::unbounded();
+        (Self { sender }, FederatedOutboundReceiver { receiver })
+    }
+}
+
+impl FederatedOutboundReceiver {
+    pub fn recv(&self) -> Result<FederatedOutboundCommand, FederatedEndpointError> {
+        self.receiver
+            .recv()
+            .map_err(|error| FederatedEndpointError::receive(error.to_string()))
+    }
+
+    pub fn try_recv(&self) -> Result<Option<FederatedOutboundCommand>, FederatedEndpointError> {
+        self.receiver
+            .try_recv()
+            .map_err(|error| FederatedEndpointError::receive(error.to_string()))
+    }
+}
+
+impl FederatedOutboundSink for FederatedOutboundChannel {
+    fn send(&self, command: FederatedOutboundCommand) -> Result<(), FederatedEndpointError> {
+        self.sender
+            .send(command)
+            .map_err(|error| FederatedEndpointError::send(error.to_string()))
+    }
 }
 
 /// In-memory outbound command buffer used by builder-lowered endpoint reactions.
@@ -269,5 +317,65 @@ impl FederatedInboundEndpointRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.endpoints.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::mpsc, time::Duration};
+
+    use super::*;
+
+    fn outbound_command() -> FederatedOutboundCommand {
+        FederatedOutboundCommand::Msg(FederatedOutboundMessage {
+            endpoint: FederatedEndpointId::new("source/out->sink/in"),
+            tag: Tag::ZERO,
+            payload: b"7".to_vec(),
+        })
+    }
+
+    #[test]
+    fn outbound_channel_try_recv_delivers_exact_command() {
+        let (channel, receiver) = FederatedOutboundChannel::pair();
+        let command = outbound_command();
+
+        assert_eq!(receiver.try_recv().unwrap(), None);
+        FederatedOutboundSink::send(&channel, command.clone()).unwrap();
+
+        assert_eq!(receiver.try_recv().unwrap(), Some(command));
+        assert_eq!(receiver.try_recv().unwrap(), None);
+    }
+
+    #[test]
+    fn outbound_channel_send_wakes_blocking_receiver() {
+        let (channel, receiver) = FederatedOutboundChannel::pair();
+        let command = outbound_command();
+        let expected = command.clone();
+        let (observed_tx, observed_rx) = mpsc::channel();
+
+        let handle = std::thread::spawn(move || {
+            observed_tx.send(receiver.recv()).unwrap();
+        });
+
+        FederatedOutboundSink::send(&channel, command).unwrap();
+
+        let observed = observed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("blocking outbound receiver should wake")
+            .unwrap();
+        assert_eq!(observed, expected);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn outbound_buffer_remains_drainable_test_helper() {
+        let buffer = FederatedOutboundBuffer::default();
+        let command = outbound_command();
+
+        FederatedOutboundSink::send(&buffer, command.clone()).unwrap();
+
+        assert_eq!(buffer.len().unwrap(), 1);
+        assert_eq!(buffer.drain().unwrap(), vec![command]);
+        assert!(buffer.is_empty().unwrap());
     }
 }

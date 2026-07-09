@@ -21,7 +21,7 @@ Before the live runner is implemented, this plan now first aligns local enclave 
 - [x] (2026-07-09 09:58Z) Revised the plan to put shared inter-partition boundary metadata before the runtime/protocol bridge milestone.
 - [x] (2026-07-09 10:09Z) Extracted shared inter-partition topology and boundary-edge metadata for local enclave and federated boundaries.
 - [x] (2026-07-09 10:39Z) Added checked runtime/protocol tag and delay bridge utilities in `boomerang_federated`, plus builder-owned topology and endpoint route extraction.
-- [ ] Replace or augment the pull-only outbound buffer with a live outbound sink that can wake a federate client.
+- [x] (2026-07-09 11:32Z) Added a live `FederatedOutboundChannel`/`FederatedOutboundReceiver` pair in `boomerang_runtime` while preserving `FederatedOutboundBuffer`.
 - [ ] Implement an in-memory static RTI/federate runner that uses real scheduler barriers.
 - [ ] Define and test shutdown and no-future-event behavior.
 - [ ] Promote TCP smoke transport into a reusable RTI/federate runtime path.
@@ -58,6 +58,12 @@ Before the live runner is implemented, this plan now first aligns local enclave 
 
 - Observation: Rust's orphan rules allow the checked runtime/protocol conversions to be expressed as `TryFrom` impls in `boomerang_federated`.
   Evidence: `boomerang_federated` owns `WireTag` and `WireDelay`, so the `runtime` feature now provides `TryFrom<boomerang_runtime::Tag> for WireTag`, `TryFrom<WireTag> for boomerang_runtime::Tag`, and `TryFrom<boomerang_runtime::Duration> for WireDelay` without adding any dependency from `boomerang_runtime` to `boomerang_federated`.
+
+- Observation: In this Milestone 3 session, CodeStory was pointed at `/Users/johhug01/Source/boomerang`; local navigation was fresh, while packet/search remained blocked by degraded sidecar retrieval.
+  Evidence: `codestory://status` reported `project_root` `/Users/johhug01/Source/boomerang`, `index_freshness.status` `fresh`, and `allowed_surfaces.packet/search.allowed` `false`; `mcp__codestory.ground` returned repository coverage for the Boomerang workspace.
+
+- Observation: `kanal` already provides the exact synchronous receive shape needed for the runtime channel wrapper.
+  Evidence: `kanal::Receiver::recv` blocks until a command or close, and `kanal::Receiver::try_recv` returns `Result<Option<T>, ReceiveError>`, matching the planned `FederatedOutboundReceiver` API without adding a runtime dependency.
 
 ## Decision Log
 
@@ -101,6 +107,10 @@ Before the live runner is implemented, this plan now first aligns local enclave 
   Rationale: Builder APIs still need to report failed protocol topology extraction through `BuilderError`, including errors propagated from `boomerang_federated::RuntimeBridgeError` and malformed federation plan metadata such as duplicate or missing endpoint routes.
   Date/Author: 2026-07-09 / Codex
 
+- Decision: Implement the Milestone 3 live outbound sink as an unbounded `kanal` channel pair in `boomerang_runtime`.
+  Rationale: The federate bridge needs wakeup and blocking/nonblocking receive semantics now, but capacity and backpressure policy belong with later client/session design. The existing `FederatedOutboundBuffer` remains the deterministic drainable test helper.
+  Date/Author: 2026-07-09 / Codex
+
 ## Outcomes & Retrospective
 
 This plan starts after the builder, protocol, endpoint, scheduler hook, in-memory smoke, and TCP smoke groundwork has landed. The expected outcome is a live in-memory static federation that can be run by one test or helper and then a TCP-backed variant that uses the same protocol session logic. On 2026-07-09, the plan was revised so the first implementation milestone extracts shared inter-partition boundary metadata before adding protocol bridge utilities.
@@ -108,6 +118,8 @@ This plan starts after the builder, protocol, endpoint, scheduler hook, in-memor
 Milestone 1 is complete. `BuilderRuntimeParts` now carries an `inter_partition_plan`; local cross-enclave `EnclaveDep` values and federated `FederationPlan` endpoint/edge metadata are both derived from this shared plan. Common inter-partition metadata lives in non-gated `boomerang_builder/src/inter_partition.rs`, while federated plan metadata lives in module-gated `boomerang_builder/src/federation.rs`. Local delivery still lowers to `EnclaveSenderReactionFn`, federated delivery still lowers to `FederatedSenderReactionFn` plus outbound/inbound endpoint runtime pieces, and no RTI/session/tag bridge utilities were added. `InterPartitionEdge` records source and target port keys, not derived port FQN strings; `FederationPlan` generation computes FQNs from the builder when endpoint metadata is created. Validation passed with `cargo test -p boomerang_builder --features federated`, `cargo test -p boomerang_runtime --features federated`, and `cargo test -p boomerang_federated`; extra checks `cargo test -p boomerang_builder` and `cargo check -p boomerang --features federated` also passed.
 
 Milestone 2 is complete. `boomerang_federated/src/runtime_bridge.rs` now provides checked `TryFrom` impls for `runtime::Tag` <-> `boomerang_federated::WireTag` and `runtime::Duration` -> `WireDelay` behind the `boomerang_federated/runtime` feature. Negative finite tags are rejected except for sentinel `Tag::NEVER`/`WireTag::NEVER`; wire offsets outside `runtime::Duration`, microsteps outside `usize`, and delays outside nonnegative `u64` nanoseconds return `boomerang_federated::RuntimeBridgeError`. `boomerang_builder/src/federation.rs` keeps builder-owned `federation_topology_from_plan` and `federated_routes_from_plan`, and maps `RuntimeBridgeError` into `BuilderError::FederationBridgeError` when extracting topology. Route extraction maps runtime `FederatedEndpointId` values to source and target protocol `FederateId` values and checks endpoint/edge consistency. The manual federated builder tests now use `TryFrom` for tag conversion and the builder route/topology helpers instead of local ad hoc conversion helpers. Validation passed with `cargo test -p boomerang_federated --features runtime`, `cargo test -p boomerang_builder --features federated`, `cargo test -p boomerang_runtime --features federated`, `cargo test -p boomerang_federated`, and `cargo check -p boomerang --features federated`.
+
+Milestone 3 is complete. `boomerang_runtime/src/federated.rs` now defines `FederatedOutboundChannel` and `FederatedOutboundReceiver` behind the existing runtime `federated` feature. `FederatedOutboundChannel::pair()` returns a sink and receiver backed by an unbounded `kanal` channel; the sink implements `FederatedOutboundSink`, the receiver exposes blocking `recv` and nonblocking `try_recv`, and channel send/receive failures map to `FederatedEndpointError`. `FederatedOutboundBuffer` remains unchanged and available for deterministic tests. Runtime unit tests prove that `FederatedOutboundSink::send` delivers the exact command through `try_recv`, wakes a blocking receiver, and that the buffer still drains commands. No `boomerang_runtime` dependency on `boomerang_federated`, RTI/session/client bridge, TCP transport, builder-lowered outbound behavior replacement, or local/federated delivery behavior change was added. Validation passed with `cargo test -p boomerang_runtime --features federated`, `cargo test -p boomerang_builder --features federated`, `cargo test -p boomerang_federated`, and `cargo check -p boomerang --features federated`.
 
 ## Context and Orientation
 

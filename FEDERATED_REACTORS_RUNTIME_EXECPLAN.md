@@ -32,7 +32,7 @@ Before the live runner is implemented, this plan now first aligns local enclave 
 - [x] (2026-07-09 16:05Z) Implemented a public builder-facing in-memory static federation runner that uses the real RTI session loop, real federate protocol clients, and real scheduler barriers.
 - [x] (2026-07-09 19:12Z) Refactored the in-memory static federation runner so runtime orchestration lives in `boomerang_federated::static_runner`, while `boomerang_builder::execute_federation_in_memory` remains a thin builder-metadata lowering shim.
 - [x] (2026-07-09 19:30Z) Defined and tested shutdown/no-future behavior for the static in-memory federation runner.
-- [ ] Promote TCP smoke transport into a reusable RTI/federate runtime path.
+- [x] (2026-07-09 21:20Z) Promoted the TCP smoke path into a shared `run_tcp_static_rti_session` plus `FederateProtocolClient` flow over `JsonProtocolFrameTransport`, so the ignored localhost smoke now exercises `StaticRtiSession` instead of a bespoke one-message harness.
 - [ ] Add broader correctness tests for multi-hop topologies, positive-delay cycles, same-tag messages, and rejected unsupported semantics.
 
 ## Surprises & Discoveries
@@ -138,6 +138,18 @@ Before the live runner is implemented, this plan now first aligns local enclave 
 
 - Observation: A builder-generated federated sender reaction can make an otherwise idle source enclave look non-empty to the runner.
   Evidence: a source federate with only an output port connected across federation has `env.reactions` populated by lowering, but `graph.startup_actions` is empty and the federate has no upstream federated edges. Running it as a scheduler reaches the runtime's synthetic no-event shutdown path from `Tag::NEVER`, which overflows the zero-delay microstep increment in debug builds.
+
+- Observation: In this Milestone 8 session, CodeStory local navigation was fresh for `/Users/johhug01/Source/boomerang`, but packet/search stayed blocked by stale sidecar retrieval after MCP auto-repair started.
+  Evidence: `codestory://status` reported `project_root` `/Users/johhug01/Source/boomerang`, `index_freshness.status` `fresh`, `allowed_surfaces.packet/search.allowed` `false`, and `status_resource_auto_repair.result.status` `started`; `mcp__codestory.ground` was used before direct source reads.
+
+- Observation: The protocol client was more tightly feature-gated than its own dependencies require.
+  Evidence: `FederateProtocolClient::connect`, its reader/writer tasks, and its send/receive API only need protocol frames, Tokio tasks/channels, and transport errors. The scheduler barrier and route metadata still require `boomerang_runtime`, so only `RtiFederatedTimeBarrier` and `FederateClientRoute` remain behind the `runtime` feature.
+
+- Observation: The current `StaticRtiSession` API needs a federate id before its reader task can fan frames into the RTI loop.
+  Evidence: `RtiSessionEndpoint` values are keyed by `FederateId`, `spawn_stream_reader` tags each incoming frame with that id, and `receive_hellos` validates that the first `Hello` matches the keyed endpoint. The new TCP launcher therefore accepts static sockets in `topology.federates` order and lets the session still validate each `Hello`.
+
+- Observation: The localhost TCP smoke still needs sandbox approval in this environment, but the shared TCP session/client path passes once binding is allowed.
+  Evidence: `cargo test -p boomerang_federated tcp_smoke -- --ignored` first failed at `TcpListener::bind("127.0.0.1:0")` with `Operation not permitted`; rerunning the same command with approval passed with `1 passed`.
 
 ## Decision Log
 
@@ -249,6 +261,14 @@ Before the live runner is implemented, this plan now first aligns local enclave 
   Rationale: Such an enclave cannot receive a future federated message and has no local startup/timer event to produce output. Running it as a scheduler only reaches a runtime no-event edge case; the static runner can publish no-future immediately instead.
   Date/Author: 2026-07-09 / Codex
 
+- Decision: Expose `FederateProtocolClient` without the `boomerang_federated/runtime` feature while keeping the scheduler bridge runtime-gated.
+  Rationale: The protocol client is the federate-side wire-session primitive and does not mention `boomerang_runtime` types. Making it available under default features lets TCP protocol tests and future non-builder launchers reuse the same `Hello`/`Start` handshake and reader/writer tasks. `FederateClientRoute` and `RtiFederatedTimeBarrier` remain behind `runtime` because they bind protocol routes to runtime endpoint ids, inbound registries, outbound receivers, and scheduler barriers.
+  Date/Author: 2026-07-09 / Codex
+
+- Decision: Add `run_tcp_static_rti_session` as a topology-order static TCP launcher instead of changing `StaticRtiSession` to discover arbitrary socket identities during this milestone.
+  Rationale: This milestone's goal is to promote the smoke path onto the existing shared RTI session and federate client logic, not to add dynamic join or identity negotiation. Static launchers already know the topology and can open clients in that order; the session still validates that each endpoint's first `Hello` matches the expected federate id.
+  Date/Author: 2026-07-09 / Codex
+
 ## Outcomes & Retrospective
 
 This plan starts after the builder, protocol, endpoint, scheduler hook, in-memory smoke, and TCP smoke groundwork has landed. The expected outcome is a live in-memory static federation that can be run by one test or helper and then a TCP-backed variant that uses the same protocol session logic. On 2026-07-09, the plan was revised so the first implementation milestone extracts shared inter-partition boundary metadata before adding protocol bridge utilities.
@@ -268,6 +288,8 @@ Milestone 6 is complete. `boomerang_builder::execute_federation_in_memory` now e
 After Milestone 6, the code was refactored to put the live static runner in `boomerang_federated::static_runner`. The public builder API remains `execute_federation_in_memory(parts, config)`, but it now lowers `BuilderRuntimeParts` into protocol/runtime DTOs and delegates execution. `boomerang_builder` no longer depends directly on Tokio for the federated feature. `boomerang_runtime` now owns `BufferedFederatedOutboundSink`, so the buffering/live-forwarding outbound sink no longer carries builder naming. Validation passed with `cargo test -p boomerang_runtime --features federated`, `cargo test -p boomerang_federated --features runtime`, `cargo test -p boomerang_builder --features federated`, `cargo test -p boomerang_federated`, `cargo check -p boomerang --features federated`, `cargo check -p boomerang_builder`, and `cargo check -p boomerang_federated --no-default-features --features runtime`.
 
 Milestone 7 is implemented. `RtiState` now records `NET(FOREVER)` and `Stop` as no-future state and retries pending grants for other federates without granting `TAG(FOREVER)` to the no-future/stopped federate. The RTI session forwards deliveries caused by `Stop`. `RtiFederatedTimeBarrier::stop_result` sends `NET(FOREVER)` before `Stop`. The static runner sends final stop/no-future from each scheduler thread as soon as that scheduler exits, and it immediately stops federates that have no startup actions and no upstream federated edges. Tests cover `NET(FOREVER)` unblocking a pending downstream grant, `Stop` marking a federate no-future, the bridge's `NET(FOREVER)` before `Stop`, live delayed source/sink execution without `Config::with_timeout`, and a no-message topology that terminates without a timeout. Validation passed with `cargo test -p boomerang_federated`, `cargo test -p boomerang_federated --features runtime`, `cargo test -p boomerang_builder --features federated`, `cargo test -p boomerang_runtime --features federated`, and `cargo check -p boomerang --features federated`.
+
+Milestone 8 is complete. `boomerang_federated::transport` now exposes `JsonProtocolFrameSink`, `JsonProtocolFrameStream`, and `run_tcp_static_rti_session(TcpListener, FederatedTopology)`. The TCP launcher accepts one static connection per topology federate, wraps each socket with `json_protocol_frame_transport`, splits the transport into standard sink/stream halves, and runs the existing `StaticRtiSession`. `FederateProtocolClient` is now available without the `runtime` feature, while `FederateClientRoute` and `RtiFederatedTimeBarrier` remain runtime-gated. The ignored `tcp_smoke` test no longer manually accepts two sockets, decodes `Hello`, forwards one `MSG`, or sends `Stop` itself; it starts `run_tcp_static_rti_session`, connects two `FederateProtocolClient`s over `JsonProtocolFrameTransport`, drives `NET`, `TAG`, `MSG`, `LTC`, `NET(FOREVER)`, and `Stop` through the shared APIs, and asserts the routed payload and shutdown. No `PTAG`, `ABS`, distributed zero-delay cycle support, `boomerang_runtime` dependency on `boomerang_federated`, or Tokio/protocol code in `boomerang_runtime` was added. Validation passed with `cargo test -p boomerang_federated`, `cargo test -p boomerang_federated --features runtime`, `cargo test -p boomerang_builder --features federated`, `cargo test -p boomerang_runtime --features federated`, and `cargo check -p boomerang --features federated`. The focused TCP command first failed in the sandbox with `Operation not permitted` at localhost bind, then passed after approval with `cargo test -p boomerang_federated tcp_smoke -- --ignored`.
 
 ## Context and Orientation
 

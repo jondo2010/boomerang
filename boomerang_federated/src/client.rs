@@ -1,7 +1,8 @@
-//! Federate-side protocol bridge for one runtime scheduler.
+//! Federate-side protocol bridge for one persistent federate.
 
+#[cfg(feature = "runtime")]
+use std::collections::BTreeMap;
 use std::{
-    collections::BTreeMap,
     sync::mpsc::{self, RecvTimeoutError},
     time::Duration as StdDuration,
 };
@@ -9,9 +10,12 @@ use std::{
 use futures_util::{Sink, SinkExt, TryStream, TryStreamExt};
 use tokio::task::JoinHandle;
 
+#[cfg(feature = "runtime")]
+use crate::RuntimeBridgeError;
+#[cfg(feature = "runtime")]
+use crate::WireTag;
 use crate::{
-    FederateId, FederateToRti, NeighborStructure, ProtocolFrame, RtiToFederate, RuntimeBridgeError,
-    TransportError, WireTag,
+    FederateId, FederateToRti, NeighborStructure, ProtocolFrame, RtiToFederate, TransportError,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -19,9 +23,11 @@ pub enum FederateClientError {
     #[error("transport error: {0}")]
     Transport(#[from] TransportError),
 
+    #[cfg(feature = "runtime")]
     #[error("runtime bridge error: {0}")]
     RuntimeBridge(#[from] RuntimeBridgeError),
 
+    #[cfg(feature = "runtime")]
     #[error("runtime endpoint error: {0}")]
     RuntimeEndpoint(#[from] boomerang_runtime::FederatedEndpointError),
 
@@ -37,17 +43,21 @@ pub enum FederateClientError {
     #[error("federate protocol client is closed")]
     ClientClosed,
 
+    #[cfg(feature = "runtime")]
     #[error("scheduler event channel closed after scheduling inbound endpoint `{endpoint}`")]
     SchedulerEventChannelClosed {
         endpoint: boomerang_runtime::FederatedEndpointId,
     },
 
+    #[cfg(feature = "runtime")]
     #[error("duplicate federated client route for endpoint `{0}`")]
     DuplicateRoute(boomerang_runtime::FederatedEndpointId),
 
+    #[cfg(feature = "runtime")]
     #[error("unknown federated client route for endpoint `{0}`")]
     UnknownRoute(boomerang_runtime::FederatedEndpointId),
 
+    #[cfg(feature = "runtime")]
     #[error(
         "route for endpoint `{endpoint}` has source `{route_source}`, expected `{federate_id}`"
     )]
@@ -57,6 +67,7 @@ pub enum FederateClientError {
         federate_id: FederateId,
     },
 
+    #[cfg(feature = "runtime")]
     #[error(
         "route for endpoint `{endpoint}` has target `{route_target}`, expected `{federate_id}`"
     )]
@@ -66,6 +77,7 @@ pub enum FederateClientError {
         federate_id: FederateId,
     },
 
+    #[cfg(feature = "runtime")]
     #[error(
         "inbound MSG for endpoint `{endpoint}` came from `{observed_source}`, but route source is `{route_source}`"
     )]
@@ -75,6 +87,7 @@ pub enum FederateClientError {
         route_source: FederateId,
     },
 
+    #[cfg(feature = "runtime")]
     #[error("received TAG {received} while waiting for {requested}")]
     UnexpectedTag {
         requested: WireTag,
@@ -102,11 +115,11 @@ pub struct FederateProtocolClient {
 impl FederateProtocolClient {
     /// Connect a federate transport to the RTI and complete the Hello/Start handshake.
     /// Background reader and writer tasks are spawned for the live session.
-    #[tracing::instrument(
+    #[cfg_attr(feature = "runtime", tracing::instrument(
         level = "debug",
         skip(federate_id, topology, sink, stream),
         fields(federate = %federate_id)
-    )]
+    ))]
     pub async fn connect<S, R>(
         federate_id: FederateId,
         topology: NeighborStructure,
@@ -164,13 +177,15 @@ impl FederateProtocolClient {
         self.start_unix_epoch_ns
     }
 
-    fn send(&self, message: FederateToRti) -> Result<(), FederateClientError> {
+    /// Send one federate-to-RTI protocol message on the connected transport.
+    pub fn send(&self, message: FederateToRti) -> Result<(), FederateClientError> {
         self.outgoing
             .send(message)
             .map_err(|_| FederateClientError::ClientClosed)
     }
 
-    fn recv_timeout(
+    /// Receive one RTI-to-federate protocol message, waiting up to `timeout`.
+    pub fn recv_timeout(
         &self,
         timeout: StdDuration,
     ) -> Result<Option<RtiToFederate>, FederateClientError> {
@@ -237,6 +252,7 @@ where
     })
 }
 
+#[cfg(feature = "runtime")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FederateClientRoute {
     pub endpoint: boomerang_runtime::FederatedEndpointId,
@@ -244,6 +260,7 @@ pub struct FederateClientRoute {
     pub target: FederateId,
 }
 
+#[cfg(feature = "runtime")]
 impl FederateClientRoute {
     /// Create route metadata for one runtime federated endpoint.
     pub fn new(
@@ -260,6 +277,7 @@ impl FederateClientRoute {
 }
 
 /// Federated scheduler barrier for one federate runtime enclave.
+#[cfg(feature = "runtime")]
 #[derive(Debug)]
 pub struct RtiFederatedTimeBarrier {
     federate_id: FederateId,
@@ -273,6 +291,7 @@ pub struct RtiFederatedTimeBarrier {
     poll_interval: StdDuration,
 }
 
+#[cfg(feature = "runtime")]
 impl RtiFederatedTimeBarrier {
     /// Create a scheduler barrier for one federate runtime enclave.
     /// Route metadata binds runtime endpoints to source and target federates.
@@ -535,6 +554,7 @@ impl RtiFederatedTimeBarrier {
     }
 }
 
+#[cfg(feature = "runtime")]
 impl boomerang_runtime::FederatedTimeBarrier for RtiFederatedTimeBarrier {
     fn acquire_tag(
         &mut self,
@@ -557,7 +577,7 @@ impl boomerang_runtime::FederatedTimeBarrier for RtiFederatedTimeBarrier {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime"))]
 mod tests {
     use futures_util::{SinkExt, StreamExt};
 

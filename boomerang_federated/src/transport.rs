@@ -1,12 +1,18 @@
+#[cfg(feature = "serde-json-codec")]
+use std::collections::BTreeMap;
+
 use futures_channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use futures_util::{stream::Map, StreamExt};
 #[cfg(feature = "serde-json-codec")]
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 #[cfg(feature = "serde-json-codec")]
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 #[cfg(feature = "serde-json-codec")]
-use crate::ProtocolFrame;
+use crate::{
+    FederateId, FederatedTopology, ProtocolFrame, RtiSessionEndpoint, SessionError,
+    StaticRtiSession,
+};
 
 #[cfg(feature = "serde-json-codec")]
 pub type JsonProtocolFrameTransport = tokio_serde::SymmetricallyFramed<
@@ -14,6 +20,13 @@ pub type JsonProtocolFrameTransport = tokio_serde::SymmetricallyFramed<
     ProtocolFrame,
     tokio_serde::formats::SymmetricalJson<ProtocolFrame>,
 >;
+
+#[cfg(feature = "serde-json-codec")]
+pub type JsonProtocolFrameSink =
+    futures_util::stream::SplitSink<JsonProtocolFrameTransport, ProtocolFrame>;
+
+#[cfg(feature = "serde-json-codec")]
+pub type JsonProtocolFrameStream = futures_util::stream::SplitStream<JsonProtocolFrameTransport>;
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum TransportError {
@@ -81,6 +94,39 @@ pub fn json_protocol_frame_transport(stream: TcpStream) -> JsonProtocolFrameTran
     )
 }
 
+/// Accept a static topology's TCP federate connections and run the shared RTI session loop.
+///
+/// This helper is intended for static launchers that open one client connection per federate in
+/// `topology.federates` order. The accepted sockets are split into standard `Sink`/`TryStream`
+/// halves and then driven by [`StaticRtiSession`].
+#[cfg(feature = "serde-json-codec")]
+pub async fn run_tcp_static_rti_session(
+    listener: TcpListener,
+    topology: FederatedTopology,
+) -> Result<(), SessionError> {
+    let mut endpoints = BTreeMap::<
+        FederateId,
+        RtiSessionEndpoint<JsonProtocolFrameSink, JsonProtocolFrameStream>,
+    >::new();
+
+    for federate_id in &topology.federates {
+        let (stream, _) = listener.accept().await.map_err(|error| {
+            SessionError::Shutdown(format!("failed to accept TCP federate connection: {error}"))
+        })?;
+        let (sink, stream) = json_protocol_frame_transport(stream).split();
+        if endpoints
+            .insert(federate_id.clone(), RtiSessionEndpoint::new(sink, stream))
+            .is_some()
+        {
+            return Err(SessionError::Shutdown(format!(
+                "duplicate federate id `{federate_id}` in TCP topology"
+            )));
+        }
+    }
+
+    StaticRtiSession::new(topology, endpoints).run().await
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -97,7 +143,7 @@ mod tests {
             EndpointId, FederateId, FederateToRti, FederatedTopology, RtiToFederate, TopologyEdge,
             WireDelay, WireTag,
         },
-        ProtocolFrame,
+        FederateProtocolClient, NeighborStructure, ProtocolFrame,
     };
 
     struct NoopWaker;
@@ -193,10 +239,11 @@ mod tests {
     }
 
     #[cfg(feature = "serde-json-codec")]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "localhost TCP smoke test; run with `cargo test -p boomerang_federated tcp_smoke -- --ignored`"]
     async fn tcp_smoke_routes_msg_through_rti_and_shuts_down() {
-        use tokio::net::TcpListener;
+        use std::time::Duration as StdDuration;
+        use tokio::net::{TcpListener, TcpStream};
 
         let source = FederateId::new("source");
         let sink = FederateId::new("sink");
@@ -213,195 +260,139 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let rti_topology = topology.clone();
-        let rti_source = source.clone();
-        let rti_sink = sink.clone();
-        let rti = tokio::spawn(async move {
-            let (first_stream, _) = listener.accept().await.unwrap();
-            let mut first = json_protocol_frame_transport(first_stream);
-            let first_id = recv_hello(&mut first, &rti_topology).await;
+        let rti = tokio::spawn(run_tcp_static_rti_session(listener, topology.clone()));
 
-            let (second_stream, _) = listener.accept().await.unwrap();
-            let mut second = json_protocol_frame_transport(second_stream);
-            let second_id = recv_hello(&mut second, &rti_topology).await;
-
-            let (mut source_transport, mut sink_transport) = match (first_id, second_id) {
-                (id, other) if id == rti_source && other == rti_sink => (first, second),
-                (id, other) if id == rti_sink && other == rti_source => (second, first),
-                (id, other) => panic!("unexpected federates {id:?} and {other:?}"),
-            };
-
-            let start = ProtocolFrame::RtiToFederate(RtiToFederate::Start {
-                start_unix_epoch_ns: 0,
-            });
-            source_transport.send(start.clone()).await.unwrap();
-            sink_transport.send(start).await.unwrap();
-
-            let frame = source_transport.next().await.unwrap().unwrap();
-            let deliveries = match frame {
-                ProtocolFrame::FederateToRti(message @ FederateToRti::Msg { .. }) => {
-                    let mut rti = crate::RtiState::new(rti_topology);
-                    rti.handle(message).unwrap()
-                }
-                other => panic!("expected source MSG, got {other:?}"),
-            };
-
-            assert_eq!(deliveries.len(), 1);
-            let delivery = deliveries.into_iter().next().unwrap();
-            assert_eq!(delivery.federate_id, rti_sink);
-            sink_transport
-                .send(ProtocolFrame::RtiToFederate(delivery.message))
-                .await
-                .unwrap();
-
-            expect_stop(&mut source_transport, &rti_source).await;
-            expect_stop(&mut sink_transport, &rti_sink).await;
-            source_transport
-                .send(ProtocolFrame::RtiToFederate(RtiToFederate::Stop))
-                .await
-                .unwrap();
-            sink_transport
-                .send(ProtocolFrame::RtiToFederate(RtiToFederate::Stop))
-                .await
-                .unwrap();
-        });
-
-        let source_client = tokio::spawn(run_source_client(
-            addr,
+        let source_stream = TcpStream::connect(addr).await.unwrap();
+        let sink_stream = TcpStream::connect(addr).await.unwrap();
+        let source_connect = tokio::spawn(connect_tcp_client(
             source.clone(),
-            sink.clone(),
-            endpoint.clone(),
             topology.neighbors_for(&source),
+            source_stream,
         ));
-        let sink_client = tokio::spawn(run_sink_client(
-            addr,
+        let sink_connect = tokio::spawn(connect_tcp_client(
             sink.clone(),
             topology.neighbors_for(&sink),
+            sink_stream,
         ));
+        let source_client = source_connect.await.unwrap();
+        let sink_client = sink_connect.await.unwrap();
+        let recv_timeout = StdDuration::from_secs(1);
 
-        source_client.await.unwrap();
-        let delivered = sink_client.await.unwrap();
-        rti.await.unwrap();
-
-        assert_eq!(
-            delivered,
-            RtiToFederate::Msg {
-                source,
-                endpoint,
-                tag: WireTag::ZERO,
-                payload: b"hello over tcp".to_vec(),
-            }
-        );
-    }
-
-    #[cfg(feature = "serde-json-codec")]
-    async fn recv_hello(
-        transport: &mut JsonProtocolFrameTransport,
-        topology: &FederatedTopology,
-    ) -> FederateId {
-        match transport.next().await.unwrap().unwrap() {
-            ProtocolFrame::FederateToRti(FederateToRti::Hello {
-                federate_id,
-                topology: neighbor_structure,
-            }) => {
-                assert_eq!(neighbor_structure, topology.neighbors_for(&federate_id));
-                federate_id
-            }
-            other => panic!("expected hello, got {other:?}"),
-        }
-    }
-
-    #[cfg(feature = "serde-json-codec")]
-    async fn expect_start(transport: &mut JsonProtocolFrameTransport) {
-        assert_eq!(
-            transport.next().await.unwrap().unwrap(),
-            ProtocolFrame::RtiToFederate(RtiToFederate::Start {
-                start_unix_epoch_ns: 0,
-            })
-        );
-    }
-
-    #[cfg(feature = "serde-json-codec")]
-    async fn expect_stop(transport: &mut JsonProtocolFrameTransport, federate_id: &FederateId) {
-        assert_eq!(
-            transport.next().await.unwrap().unwrap(),
-            ProtocolFrame::FederateToRti(FederateToRti::Stop {
-                federate_id: federate_id.clone(),
-            })
-        );
-    }
-
-    #[cfg(feature = "serde-json-codec")]
-    async fn run_source_client(
-        addr: std::net::SocketAddr,
-        source: FederateId,
-        sink: FederateId,
-        endpoint: EndpointId,
-        topology: crate::NeighborStructure,
-    ) {
-        let stream = TcpStream::connect(addr).await.unwrap();
-        let mut transport = json_protocol_frame_transport(stream);
-        transport
-            .send(ProtocolFrame::FederateToRti(FederateToRti::Hello {
-                federate_id: source.clone(),
-                topology,
-            }))
-            .await
-            .unwrap();
-        expect_start(&mut transport).await;
-        transport
-            .send(ProtocolFrame::FederateToRti(FederateToRti::Msg {
-                source: source.clone(),
-                target: sink,
-                endpoint,
-                tag: WireTag::ZERO,
-                payload: b"hello over tcp".to_vec(),
-            }))
-            .await
-            .unwrap();
-        transport
-            .send(ProtocolFrame::FederateToRti(FederateToRti::Stop {
-                federate_id: source,
-            }))
-            .await
-            .unwrap();
-        assert_eq!(
-            transport.next().await.unwrap().unwrap(),
-            ProtocolFrame::RtiToFederate(RtiToFederate::Stop)
-        );
-    }
-
-    #[cfg(feature = "serde-json-codec")]
-    async fn run_sink_client(
-        addr: std::net::SocketAddr,
-        sink: FederateId,
-        topology: crate::NeighborStructure,
-    ) -> RtiToFederate {
-        let stream = TcpStream::connect(addr).await.unwrap();
-        let mut transport = json_protocol_frame_transport(stream);
-        transport
-            .send(ProtocolFrame::FederateToRti(FederateToRti::Hello {
+        sink_client
+            .send(FederateToRti::Net {
                 federate_id: sink.clone(),
-                topology,
-            }))
-            .await
+                tag: WireTag::ZERO,
+            })
             .unwrap();
-        expect_start(&mut transport).await;
-
-        let delivered = match transport.next().await.unwrap().unwrap() {
-            ProtocolFrame::RtiToFederate(message @ RtiToFederate::Msg { .. }) => message,
-            other => panic!("expected routed MSG, got {other:?}"),
-        };
-        transport
-            .send(ProtocolFrame::FederateToRti(FederateToRti::Stop {
-                federate_id: sink,
-            }))
-            .await
+        source_client
+            .send(FederateToRti::Net {
+                federate_id: source.clone(),
+                tag: WireTag::ZERO,
+            })
             .unwrap();
         assert_eq!(
-            transport.next().await.unwrap().unwrap(),
-            ProtocolFrame::RtiToFederate(RtiToFederate::Stop)
+            recv_rti_message(&source_client, recv_timeout, "source TAG(ZERO)"),
+            RtiToFederate::Tag { tag: WireTag::ZERO }
         );
-        delivered
+
+        source_client
+            .send(FederateToRti::Msg {
+                source: source.clone(),
+                target: sink.clone(),
+                endpoint: endpoint.clone(),
+                tag: WireTag::ZERO,
+                payload: b"hello over tcp".to_vec(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            recv_rti_message(&sink_client, recv_timeout, "routed sink MSG"),
+            RtiToFederate::Msg {
+                source: source.clone(),
+                endpoint: endpoint.clone(),
+                tag: WireTag::ZERO,
+                payload: b"hello over tcp".to_vec(),
+            }
+        );
+
+        source_client
+            .send(FederateToRti::Net {
+                federate_id: source.clone(),
+                tag: WireTag::finite(0, 1),
+            })
+            .unwrap();
+        assert_eq!(
+            recv_rti_message(&source_client, recv_timeout, "source TAG([0ns+1])"),
+            RtiToFederate::Tag {
+                tag: WireTag::finite(0, 1),
+            }
+        );
+        sink_client
+            .send(FederateToRti::Ltc {
+                federate_id: sink.clone(),
+                tag: WireTag::ZERO,
+            })
+            .unwrap();
+        assert_eq!(
+            recv_rti_message(&sink_client, recv_timeout, "sink TAG(ZERO)"),
+            RtiToFederate::Tag { tag: WireTag::ZERO }
+        );
+
+        source_client
+            .send(FederateToRti::Net {
+                federate_id: source.clone(),
+                tag: WireTag::FOREVER,
+            })
+            .unwrap();
+        source_client
+            .send(FederateToRti::Stop {
+                federate_id: source,
+            })
+            .unwrap();
+        sink_client
+            .send(FederateToRti::Net {
+                federate_id: sink.clone(),
+                tag: WireTag::FOREVER,
+            })
+            .unwrap();
+        sink_client
+            .send(FederateToRti::Stop { federate_id: sink })
+            .unwrap();
+        assert_eq!(
+            recv_rti_message(&source_client, recv_timeout, "source Stop"),
+            RtiToFederate::Stop
+        );
+        assert_eq!(
+            recv_rti_message(&sink_client, recv_timeout, "sink Stop"),
+            RtiToFederate::Stop
+        );
+
+        drop(source_client);
+        drop(sink_client);
+        rti.await.unwrap().unwrap();
+    }
+
+    #[cfg(feature = "serde-json-codec")]
+    async fn connect_tcp_client(
+        federate_id: FederateId,
+        topology: NeighborStructure,
+        stream: TcpStream,
+    ) -> FederateProtocolClient {
+        let (sink, stream) = json_protocol_frame_transport(stream).split();
+        FederateProtocolClient::connect(federate_id, topology, sink, stream)
+            .await
+            .unwrap()
+    }
+
+    #[cfg(feature = "serde-json-codec")]
+    fn recv_rti_message(
+        client: &FederateProtocolClient,
+        timeout: std::time::Duration,
+        label: &str,
+    ) -> RtiToFederate {
+        client
+            .recv_timeout(timeout)
+            .unwrap()
+            .unwrap_or_else(|| panic!("timed out waiting for {label}"))
     }
 }

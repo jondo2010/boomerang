@@ -2,7 +2,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use futures_channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use futures_util::{stream::FuturesUnordered, stream::Map, StreamExt};
+#[cfg(feature = "serde-json-codec")]
+use futures_util::stream::FuturesUnordered;
+use futures_util::{stream::Map, StreamExt};
 #[cfg(feature = "serde-json-codec")]
 use tokio::net::{TcpListener, TcpStream};
 #[cfg(feature = "serde-json-codec")]

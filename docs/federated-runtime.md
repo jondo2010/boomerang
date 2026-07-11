@@ -44,6 +44,84 @@ The top-level `boomerang` crate should only re-export public APIs.
 
 ## Shared Execution Flow
 
+The following block diagram shows a one-way source-to-sink federation. Solid
+arrows are runtime data or coordination flow. Dashed arrows are construction or
+route installation performed before the schedulers start. The transport blocks
+represent either the in-memory channels or the TCP connections used by the two
+static runners.
+
+```mermaid
+flowchart LR
+    Builder["EnvBuilder<br/>reactors, ports, connection"]
+    Parts["BuilderRuntimeParts<br/>enclaves, plan, router,<br/>fault state, inbound registry"]
+    Runner["Static federation runner<br/>validates topology and installs routes"]
+    Faults["FederatedFaultState<br/>shared first terminal endpoint error"]
+
+    Builder -->|lower| Parts
+    Parts -->|runtime parts| Runner
+
+    subgraph Source["Source federate / enclave"]
+        SchedA["Scheduler A"]
+        SourceReaction["Source reaction<br/>writes output port"]
+        SenderReaction["FederatedSenderReactionFn<br/>encode payload + runtime tag"]
+        Router["FederatedOutboundRouter<br/>endpoint → channel"]
+        OutChannel["FederatedOutboundChannel"]
+        OutReceiver["FederatedOutboundReceiver"]
+        BarrierA["RtiFederatedTimeBarrier A"]
+        ClientA["FederateProtocolClient A"]
+
+        SchedA --> SourceReaction --> SenderReaction --> Router
+        Router --> OutChannel --> OutReceiver --> BarrierA
+        SchedA -->|tag request / completion| BarrierA
+        BarrierA -->|grant or inbound interrupt| SchedA
+        BarrierA -->|NET, MSG, LTC, Stop| ClientA
+        ClientA -->|TAG, MSG, Error| BarrierA
+    end
+
+    subgraph Coordination["Federated protocol and coordination"]
+        TransportA["In-memory or TCP transport A"]
+        RTI["StaticRtiSession + RtiState<br/>grant calculation, in-transit counts,<br/>message routing"]
+        TransportB["In-memory or TCP transport B"]
+
+        ClientA --> TransportA --> RTI
+        RTI --> TransportA --> ClientA
+    end
+
+    subgraph Target["Target federate / enclave"]
+        ClientB["FederateProtocolClient B"]
+        BarrierB["RtiFederatedTimeBarrier B"]
+        Registry["FederatedInboundEndpointRegistry<br/>endpoint → logical action"]
+        EventQueue["Scheduler event queue<br/>AsyncEvent"]
+        SchedB["Scheduler B"]
+        ReceiverReaction["ConnectionReceiverReactionFn<br/>logical action → input port"]
+        TargetReaction["Target reaction<br/>reads input port"]
+
+        ClientB -->|TAG, MSG, Error| BarrierB
+        BarrierB -->|decoded MSG| Registry --> EventQueue --> SchedB
+        SchedB --> ReceiverReaction --> TargetReaction
+        SchedB -->|tag request / completion| BarrierB
+        BarrierB -->|grant or inbound interrupt| SchedB
+        BarrierB -->|NET, MsgAck, LTC, Stop| ClientB
+    end
+
+    RTI --> TransportB --> ClientB
+    ClientB --> TransportB --> RTI
+
+    Runner -. creates schedulers and clients .-> SchedA
+    Runner -. installs endpoint route .-> Router
+    Runner -. creates protocol session .-> RTI
+    Runner -. supplies inbound registry .-> Registry
+    Runner -. shares fault state .-> Faults
+    SenderReaction -. records codec or send failure .-> Faults
+    BarrierA -. checks before protocol progress .-> Faults
+    BarrierB -. checks before protocol progress .-> Faults
+```
+
+The router is deliberately below the protocol boundary: it handles
+`FederatedOutboundCommand` values and runtime endpoint ids, not wire frames.
+`RtiFederatedTimeBarrier` drains the selected receiver and is the first
+component that translates those commands into protocol `MSG` frames.
+
 `add_child_federate` builds a child reactor with `ReactorPlacement::Federate`.
 Federate placement starts a runtime enclave, so a source/sink federation has one
 enclave for the source federate and one enclave for the sink federate. Empty
@@ -52,7 +130,7 @@ the runner. Non-empty unmapped enclaves are rejected.
 
 `EnvBuilder::into_runtime_parts` produces `BuilderRuntimeParts` containing the
 runtime enclaves, builder aliases, inter-partition metadata, the federation
-plan, a buffered federated outbound sink, shared federated fault state, and the
+plan, a federated outbound router, shared federated fault state, and the
 inbound endpoint registry.
 
 The builder-facing execution functions validate the builder-owned plan and

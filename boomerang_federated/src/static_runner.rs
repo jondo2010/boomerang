@@ -121,6 +121,13 @@ pub enum StaticFederationRunnerError {
 
     #[error("federate scheduler thread panicked: {what}")]
     SchedulerThreadPanic { what: String },
+
+    #[error("federate `{federate_id}` scheduler failed: {source}")]
+    SchedulerRuntime {
+        federate_id: FederateId,
+        #[source]
+        source: boomerang_runtime::RuntimeError,
+    },
 }
 
 type FederationEnvs =
@@ -375,8 +382,10 @@ fn execute_connected_static_federation(
     let mut barrier_error = None;
     let mut handles: Vec<
         std::thread::JoinHandle<(
+            FederateId,
             boomerang_runtime::EnclaveKey,
             boomerang_runtime::Env,
+            Result<(), boomerang_runtime::RuntimeError>,
             Result<(), FederateClientError>,
         )>,
     > = Vec::new();
@@ -404,6 +413,7 @@ fn execute_connected_static_federation(
         }
 
         let config = config.clone();
+        let thread_federate_id = federate_id.clone();
         let handle = match std::thread::Builder::new()
             .name(format!("federate-{federate_id}"))
             .spawn(move || {
@@ -414,10 +424,16 @@ fn execute_connected_static_federation(
                     config,
                     barrier,
                 );
-                scheduler.event_loop();
+                let scheduler_result = scheduler.try_event_loop();
                 let env = scheduler.into_env();
                 let stop_result = stop_barrier.stop();
-                (enclave_key, env, stop_result)
+                (
+                    thread_federate_id,
+                    enclave_key,
+                    env,
+                    scheduler_result,
+                    stop_result,
+                )
             }) {
             Ok(handle) => handle,
             Err(source) => {
@@ -438,10 +454,17 @@ fn execute_connected_static_federation(
     }
 
     let mut thread_panic = None;
+    let mut scheduler_error = None;
     for handle in handles {
         match handle.join() {
-            Ok((enclave_key, env, stop_result)) => {
+            Ok((federate_id, enclave_key, env, scheduler_result, stop_result)) => {
                 envs.insert(enclave_key, env);
+                if let Err(source) = scheduler_result {
+                    scheduler_error.get_or_insert(StaticFederationRunnerError::SchedulerRuntime {
+                        federate_id,
+                        source,
+                    });
+                }
                 if let Err(error) = stop_result {
                     barrier_error.get_or_insert_with(|| error.to_string());
                 }
@@ -453,9 +476,6 @@ fn execute_connected_static_federation(
     }
 
     for barrier in barriers.values() {
-        if let Some(error) = barrier.take_error()? {
-            barrier_error.get_or_insert_with(|| error.to_string());
-        }
         if let Err(error) = barrier.stop() {
             barrier_error.get_or_insert_with(|| error.to_string());
         }
@@ -467,6 +487,9 @@ fn execute_connected_static_federation(
 
     if let Some(error) = thread_panic {
         return Err(StaticFederationRunnerError::SchedulerThreadPanic { what: error });
+    }
+    if let Some(error) = scheduler_error {
+        return Err(error);
     }
     if let Some(error) = barrier_error {
         return Err(bridge_error(error));
@@ -501,14 +524,6 @@ impl SharedFederatedTimeBarrier {
         }
     }
 
-    fn take_error(&self) -> Result<Option<FederateClientError>, StaticFederationRunnerError> {
-        Ok(self
-            .inner
-            .lock()
-            .map_err(|_| bridge_error("federate barrier lock poisoned"))?
-            .take_error())
-    }
-
     fn stop(&self) -> Result<(), FederateClientError> {
         self.inner
             .lock()
@@ -522,16 +537,22 @@ impl boomerang_runtime::FederatedTimeBarrier for SharedFederatedTimeBarrier {
         &mut self,
         tag: boomerang_runtime::Tag,
         event_rx: &boomerang_runtime::Receiver<boomerang_runtime::AsyncEvent>,
-    ) -> Option<boomerang_runtime::AsyncEvent> {
-        self.inner.lock().ok().and_then(|mut barrier| {
-            boomerang_runtime::FederatedTimeBarrier::acquire_tag(&mut *barrier, tag, event_rx)
-        })
+    ) -> Result<boomerang_runtime::FederatedBarrierOutcome, boomerang_runtime::FederatedBarrierError>
+    {
+        let mut barrier = self.inner.lock().map_err(|_| {
+            boomerang_runtime::FederatedBarrierError::new("federate barrier lock poisoned")
+        })?;
+        boomerang_runtime::FederatedTimeBarrier::acquire_tag(&mut *barrier, tag, event_rx)
     }
 
-    fn logical_tag_complete(&mut self, tag: boomerang_runtime::Tag) {
-        if let Ok(mut barrier) = self.inner.lock() {
-            boomerang_runtime::FederatedTimeBarrier::logical_tag_complete(&mut *barrier, tag);
-        }
+    fn logical_tag_complete(
+        &mut self,
+        tag: boomerang_runtime::Tag,
+    ) -> Result<(), boomerang_runtime::FederatedBarrierError> {
+        let mut barrier = self.inner.lock().map_err(|_| {
+            boomerang_runtime::FederatedBarrierError::new("federate barrier lock poisoned")
+        })?;
+        boomerang_runtime::FederatedTimeBarrier::logical_tag_complete(&mut *barrier, tag)
     }
 }
 

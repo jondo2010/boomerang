@@ -1,5 +1,39 @@
 use crate::{event::AsyncEvent, CommonContext, Duration, EnclaveKey, SendContext, Tag};
 
+/// Result of waiting for federated permission to process a logical tag.
+#[cfg(feature = "federated")]
+#[derive(Debug)]
+pub enum FederatedBarrierOutcome {
+    /// The requested tag may be processed.
+    Granted,
+    /// An asynchronous event must be handled before requesting the tag again.
+    Interrupted(AsyncEvent),
+}
+
+/// Protocol-free error returned by a federated scheduler barrier.
+#[cfg(feature = "federated")]
+#[derive(Debug, thiserror::Error)]
+#[error("federated coordination failed: {message}")]
+pub struct FederatedBarrierError {
+    message: String,
+}
+
+#[cfg(feature = "federated")]
+impl FederatedBarrierError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+#[cfg(feature = "federated")]
+impl From<String> for FederatedBarrierError {
+    fn from(message: String) -> Self {
+        Self::new(message)
+    }
+}
+
 /// Optional scheduler hook for federated logical-time coordination.
 ///
 /// Implementations can block until the requested tag is granted, or return an
@@ -8,17 +42,16 @@ use crate::{event::AsyncEvent, CommonContext, Duration, EnclaveKey, SendContext,
 pub trait FederatedTimeBarrier: Send {
     /// Acquire permission to advance to `tag`.
     ///
-    /// Returning `None` means the tag was granted. Returning an [`AsyncEvent`]
-    /// interrupts the wait and lets the scheduler handle the event before
-    /// advancing.
+    /// A returned [`FederatedBarrierOutcome`] explicitly distinguishes a grant
+    /// from an asynchronous interruption. Coordination failures are terminal.
     fn acquire_tag(
         &mut self,
         tag: Tag,
         event_rx: &crate::Receiver<AsyncEvent>,
-    ) -> Option<AsyncEvent>;
+    ) -> Result<FederatedBarrierOutcome, FederatedBarrierError>;
 
     /// Report that all work for `tag` has completed.
-    fn logical_tag_complete(&mut self, tag: Tag);
+    fn logical_tag_complete(&mut self, tag: Tag) -> Result<(), FederatedBarrierError>;
 }
 
 #[cfg(feature = "federated")]
@@ -30,11 +63,13 @@ impl FederatedTimeBarrier for NoFederatedTimeBarrier {
         &mut self,
         _tag: Tag,
         _event_rx: &crate::Receiver<AsyncEvent>,
-    ) -> Option<AsyncEvent> {
-        None
+    ) -> Result<FederatedBarrierOutcome, FederatedBarrierError> {
+        Ok(FederatedBarrierOutcome::Granted)
     }
 
-    fn logical_tag_complete(&mut self, _tag: Tag) {}
+    fn logical_tag_complete(&mut self, _tag: Tag) -> Result<(), FederatedBarrierError> {
+        Ok(())
+    }
 }
 
 #[cfg(feature = "federated")]

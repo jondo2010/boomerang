@@ -86,6 +86,10 @@ pub enum RuntimeError {
     #[cfg(feature = "replay")]
     #[error(transparent)]
     ReplayError(#[from] replay::ReplayError),
+
+    #[cfg(feature = "federated")]
+    #[error(transparent)]
+    FederatedBarrier(#[from] FederatedBarrierError),
 }
 
 pub mod fmt_utils {

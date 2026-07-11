@@ -6,11 +6,11 @@ mod barrier;
 mod modal;
 mod queue;
 
-#[cfg(feature = "federated")]
-pub use barrier::FederatedTimeBarrier;
 use barrier::LogicalTimeBarrier;
 #[cfg(feature = "federated")]
 use barrier::NoFederatedTimeBarrier;
+#[cfg(feature = "federated")]
+pub use barrier::{FederatedBarrierError, FederatedBarrierOutcome, FederatedTimeBarrier};
 use modal::EventManager;
 
 use crate::{
@@ -21,7 +21,7 @@ use crate::{
     key_set::KeySetView,
     store::Store,
     CommonContext, Duration, Env, ModeTransitionRequest, ReactionGraph, ReactionKey,
-    ReactionSetLimits, ReactorKey, SendContext, Tag,
+    ReactionSetLimits, ReactorKey, RuntimeError, SendContext, Tag,
 };
 
 #[derive(Debug, Clone)]
@@ -418,18 +418,28 @@ impl Scheduler {
     }
 
     #[cfg(feature = "federated")]
-    fn acquire_federated_tag(&mut self, tag: Tag) -> Option<AsyncEvent> {
+    fn acquire_federated_tag(
+        &mut self,
+        tag: Tag,
+    ) -> Result<FederatedBarrierOutcome, FederatedBarrierError> {
         self.federated_time_barrier.acquire_tag(tag, &self.event_rx)
     }
 
     #[cfg(feature = "federated")]
-    fn federated_logical_tag_complete(&mut self, tag: Tag) {
-        self.federated_time_barrier.logical_tag_complete(tag);
+    fn federated_logical_tag_complete(&mut self, tag: Tag) -> Result<(), FederatedBarrierError> {
+        self.federated_time_barrier.logical_tag_complete(tag)
     }
 
     #[tracing::instrument(skip(self), fields(tag = %self.current_tag))]
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> bool {
+        self.try_next()
+            .unwrap_or_else(|error| panic!("scheduler execution failed: {error}"))
+    }
+
+    /// Process one scheduler step, returning coordination failures to the caller.
+    #[tracing::instrument(skip(self), fields(tag = %self.current_tag))]
+    pub fn try_next(&mut self) -> Result<bool, RuntimeError> {
         // Pump the event queue
         while let Ok(Some(async_event)) = self.event_rx.try_recv() {
             self.handle_async_event(async_event);
@@ -443,16 +453,19 @@ impl Scheduler {
                 if let Some(async_event) = barrier.acquire_tag(next_tag, self.key, &self.event_rx) {
                     self.handle_async_event(async_event);
                     // Returned early due to async event
-                    return true;
+                    return Ok(true);
                 }
             }
 
             #[cfg(feature = "federated")]
             {
-                if let Some(async_event) = self.acquire_federated_tag(next_tag) {
-                    self.handle_async_event(async_event);
-                    // Returned early due to async event
-                    return true;
+                match self.acquire_federated_tag(next_tag)? {
+                    FederatedBarrierOutcome::Granted => {}
+                    FederatedBarrierOutcome::Interrupted(async_event) => {
+                        self.handle_async_event(async_event);
+                        // Returned early due to async event
+                        return Ok(true);
+                    }
                 }
             }
 
@@ -460,7 +473,7 @@ impl Scheduler {
                 let target = next_tag.to_logical_time(self.start_time);
                 if self.synchronize_wall_clock(target) {
                     // Woken up by async event
-                    return true;
+                    return Ok(true);
                 }
             }
 
@@ -483,14 +496,14 @@ impl Scheduler {
             // Release the current tag to downstream reactors
             self.release_tag_downstream(self.current_tag);
             #[cfg(feature = "federated")]
-            self.federated_logical_tag_complete(self.current_tag);
+            self.federated_logical_tag_complete(self.current_tag)?;
 
             self.stats.increment_processed_tags();
 
             if event.terminal {
                 // Break out of the event loop;
                 self.shutdown_tag = Some(self.current_tag);
-                return false;
+                return Ok(false);
             }
         } else if let Some(async_event) = self.receive_event_async() {
             self.handle_async_event(async_event);
@@ -502,16 +515,34 @@ impl Scheduler {
             self.schedule_shutdown_at(shutdown);
         }
 
-        true
+        Ok(true)
     }
 
     #[tracing::instrument(skip(self), fields(key = %self.key))]
     pub fn event_loop(&mut self) {
+        self.try_event_loop()
+            .unwrap_or_else(|error| panic!("scheduler execution failed: {error}"));
+    }
+
+    /// Run until shutdown or return the first runtime coordination failure.
+    #[tracing::instrument(skip(self), fields(key = %self.key))]
+    pub fn try_event_loop(&mut self) -> Result<(), RuntimeError> {
         self.startup();
 
-        while self.next() {}
+        loop {
+            match self.try_next() {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(error) => {
+                    self.shutdown_tx.shutdown();
+                    self.events.shutdown();
+                    return Err(error);
+                }
+            }
+        }
 
         self.shutdown();
+        Ok(())
     }
 
     // Wait until the wall-clock time is reached
@@ -796,6 +827,8 @@ mod tests {
     struct RecordingBarrier {
         log: Arc<Mutex<Vec<HookCall>>>,
         interrupt: Option<AsyncEvent>,
+        acquire_error: Option<String>,
+        completion_error: Option<String>,
     }
 
     impl RecordingBarrier {
@@ -803,6 +836,8 @@ mod tests {
             Self {
                 log,
                 interrupt: None,
+                acquire_error: None,
+                completion_error: None,
             }
         }
 
@@ -810,6 +845,26 @@ mod tests {
             Self {
                 log,
                 interrupt: Some(event),
+                acquire_error: None,
+                completion_error: None,
+            }
+        }
+
+        fn failing_acquire(log: Arc<Mutex<Vec<HookCall>>>, message: &str) -> Self {
+            Self {
+                log,
+                interrupt: None,
+                acquire_error: Some(message.into()),
+                completion_error: None,
+            }
+        }
+
+        fn failing_completion(log: Arc<Mutex<Vec<HookCall>>>, message: &str) -> Self {
+            Self {
+                log,
+                interrupt: None,
+                acquire_error: None,
+                completion_error: Some(message.into()),
             }
         }
     }
@@ -819,13 +874,23 @@ mod tests {
             &mut self,
             tag: Tag,
             _event_rx: &crate::Receiver<AsyncEvent>,
-        ) -> Option<AsyncEvent> {
+        ) -> Result<FederatedBarrierOutcome, FederatedBarrierError> {
             self.log.lock().unwrap().push(HookCall::Acquire(tag));
-            self.interrupt.take()
+            if let Some(message) = self.acquire_error.take() {
+                return Err(FederatedBarrierError::new(message));
+            }
+            Ok(match self.interrupt.take() {
+                Some(event) => FederatedBarrierOutcome::Interrupted(event),
+                None => FederatedBarrierOutcome::Granted,
+            })
         }
 
-        fn logical_tag_complete(&mut self, tag: Tag) {
+        fn logical_tag_complete(&mut self, tag: Tag) -> Result<(), FederatedBarrierError> {
             self.log.lock().unwrap().push(HookCall::Ltc(tag));
+            if let Some(message) = self.completion_error.take() {
+                return Err(FederatedBarrierError::new(message));
+            }
+            Ok(())
         }
     }
 
@@ -924,5 +989,57 @@ mod tests {
 
         let calls = log.lock().unwrap().clone();
         assert_eq!(calls, vec![HookCall::Acquire(future_tag)]);
+    }
+
+    #[test]
+    fn federated_barrier_error_prevents_reaction_execution() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let barrier = RecordingBarrier::failing_acquire(Arc::clone(&log), "denied");
+        let (mut scheduler, reaction) =
+            scheduler_with_recording_reaction(Arc::clone(&log), barrier);
+        let tag = Tag::ZERO;
+
+        scheduler.startup();
+        let before_wait = scheduler.current_tag;
+        scheduler
+            .events
+            .push_event(tag, std::iter::once((Level::from(0), reaction)), false);
+
+        assert!(matches!(
+            scheduler.try_next(),
+            Err(RuntimeError::FederatedBarrier(_))
+        ));
+        assert_eq!(scheduler.current_tag, before_wait);
+        assert_eq!(scheduler.events.peek_tag(), Some(tag));
+        assert!(!log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| matches!(call, HookCall::Reaction(_))));
+    }
+
+    #[test]
+    fn federated_completion_error_is_returned() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let barrier = RecordingBarrier::failing_completion(Arc::clone(&log), "ltc failed");
+        let (mut scheduler, reaction) =
+            scheduler_with_recording_reaction(Arc::clone(&log), barrier);
+        let tag = Tag::ZERO;
+
+        scheduler.startup();
+        scheduler
+            .events
+            .push_event(tag, std::iter::once((Level::from(0), reaction)), false);
+
+        assert!(matches!(
+            scheduler.try_next(),
+            Err(RuntimeError::FederatedBarrier(_))
+        ));
+        assert_eq!(scheduler.current_tag, tag);
+        assert!(log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| matches!(call, HookCall::Reaction(reaction_tag) if *reaction_tag == tag)));
     }
 }

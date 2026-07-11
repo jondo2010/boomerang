@@ -287,7 +287,6 @@ pub struct RtiFederatedTimeBarrier {
     inbound: boomerang_runtime::FederatedInboundEndpointRegistry,
     last_granted: Option<boomerang_runtime::Tag>,
     stopped: bool,
-    last_error: Option<FederateClientError>,
     poll_interval: StdDuration,
 }
 
@@ -325,19 +324,8 @@ impl RtiFederatedTimeBarrier {
             inbound,
             last_granted: None,
             stopped: false,
-            last_error: None,
             poll_interval: StdDuration::from_millis(1),
         })
-    }
-
-    /// Return the most recent bridge error captured by the scheduler trait adapter.
-    pub fn last_error(&self) -> Option<&FederateClientError> {
-        self.last_error.as_ref()
-    }
-
-    /// Remove and return the most recent bridge error captured by the trait adapter.
-    pub fn take_error(&mut self) -> Option<FederateClientError> {
-        self.last_error.take()
     }
 
     /// Request and wait for an RTI TAG grant for `tag`.
@@ -560,20 +548,22 @@ impl boomerang_runtime::FederatedTimeBarrier for RtiFederatedTimeBarrier {
         &mut self,
         tag: boomerang_runtime::Tag,
         event_rx: &boomerang_runtime::Receiver<boomerang_runtime::AsyncEvent>,
-    ) -> Option<boomerang_runtime::AsyncEvent> {
-        match self.acquire_tag_result(tag, event_rx) {
-            Ok(event) => event,
-            Err(error) => {
-                self.last_error = Some(error);
-                None
-            }
-        }
+    ) -> Result<boomerang_runtime::FederatedBarrierOutcome, boomerang_runtime::FederatedBarrierError>
+    {
+        self.acquire_tag_result(tag, event_rx)
+            .map(|event| match event {
+                Some(event) => boomerang_runtime::FederatedBarrierOutcome::Interrupted(event),
+                None => boomerang_runtime::FederatedBarrierOutcome::Granted,
+            })
+            .map_err(|error| boomerang_runtime::FederatedBarrierError::new(error.to_string()))
     }
 
-    fn logical_tag_complete(&mut self, tag: boomerang_runtime::Tag) {
-        if let Err(error) = self.logical_tag_complete_result(tag) {
-            self.last_error = Some(error);
-        }
+    fn logical_tag_complete(
+        &mut self,
+        tag: boomerang_runtime::Tag,
+    ) -> Result<(), boomerang_runtime::FederatedBarrierError> {
+        self.logical_tag_complete_result(tag)
+            .map_err(|error| boomerang_runtime::FederatedBarrierError::new(error.to_string()))
     }
 }
 
@@ -886,8 +876,12 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            barrier.acquire_tag_result(boomerang_runtime::Tag::ZERO, &event_rx),
-            Err(FederateClientError::RtiError { message }) if message == "boom"
+            boomerang_runtime::FederatedTimeBarrier::acquire_tag(
+                &mut barrier,
+                boomerang_runtime::Tag::ZERO,
+                &event_rx,
+            ),
+            Err(error) if error.to_string().contains("boom")
         ));
 
         rti.await.unwrap();

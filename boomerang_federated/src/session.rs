@@ -13,11 +13,25 @@ use crate::{
 pub struct RtiSessionEndpoint<S, R> {
     sink: S,
     stream: R,
+    initial_frame: Option<ProtocolFrame>,
 }
 
 impl<S, R> RtiSessionEndpoint<S, R> {
     pub fn new(sink: S, stream: R) -> Self {
-        Self { sink, stream }
+        Self {
+            sink,
+            stream,
+            initial_frame: None,
+        }
+    }
+
+    /// Construct an endpoint whose first frame was consumed while identifying the peer.
+    pub fn with_initial_frame(sink: S, stream: R, frame: ProtocolFrame) -> Self {
+        Self {
+            sink,
+            stream,
+            initial_frame: Some(frame),
+        }
     }
 }
 
@@ -95,6 +109,18 @@ where
         let mut sinks = BTreeMap::new();
         let endpoints = std::mem::take(&mut self.endpoints);
         for (federate_id, endpoint) in endpoints {
+            if let Some(frame) = endpoint.initial_frame {
+                input_tx
+                    .send(SessionInput::Frame {
+                        federate_id: federate_id.clone(),
+                        frame,
+                    })
+                    .map_err(|_| {
+                        SessionError::Shutdown(
+                            "session input closed while queueing an initial Hello".into(),
+                        )
+                    })?;
+            }
             sinks.insert(federate_id.clone(), endpoint.sink);
             spawn_stream_reader(federate_id, endpoint.stream, input_tx.clone());
         }

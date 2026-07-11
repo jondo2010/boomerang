@@ -51,6 +51,9 @@ pub enum StaticFederationRunnerError {
     #[error("unsupported static federation topology: {what}")]
     UnsupportedTopology { what: String },
 
+    #[error("unsupported static federation configuration: {what}")]
+    UnsupportedConfiguration { what: String },
+
     #[error("static federation runner error: {what}")]
     Bridge { what: String },
 
@@ -153,6 +156,7 @@ pub fn execute_federation_in_memory(
     config: boomerang_runtime::Config,
 ) -> Result<FederationEnvs, StaticFederationRunnerError> {
     let prepared = prepare_static_federation(parts)?;
+    validate_static_runner_config(&config)?;
     let tokio_runtime = build_tokio_runtime(prepared.federate_enclaves.len())?;
     let mut session_endpoints = BTreeMap::new();
     let mut client_transports = BTreeMap::new();
@@ -182,6 +186,7 @@ pub fn execute_federation_over_tcp(
     tcp: TcpStaticFederationConfig,
 ) -> Result<FederationEnvs, StaticFederationRunnerError> {
     let prepared = prepare_static_federation(parts)?;
+    validate_static_runner_config(&config)?;
     let tokio_runtime = build_tokio_runtime(prepared.federate_enclaves.len())?;
     let listener = tokio_runtime
         .block_on(tokio::net::TcpListener::bind(tcp.bind_addr))
@@ -671,6 +676,18 @@ fn validate_static_runner_parts(
     Ok(())
 }
 
+fn validate_static_runner_config(
+    config: &boomerang_runtime::Config,
+) -> Result<(), StaticFederationRunnerError> {
+    if config.fast_forward {
+        Ok(())
+    } else {
+        Err(StaticFederationRunnerError::UnsupportedConfiguration {
+            what: "static federation currently requires Config::with_fast_forward(true) because a common physical start is not implemented".into(),
+        })
+    }
+}
+
 fn federate_by_enclave_map(
     federate_enclaves: &BTreeMap<FederateId, boomerang_runtime::EnclaveKey>,
 ) -> Result<
@@ -711,6 +728,59 @@ fn bridge_error(what: impl Into<String>) -> StaticFederationRunnerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn valid_empty_static_parts() -> StaticFederationRuntimeParts {
+        let source = FederateId::new("source");
+        let sink = FederateId::new("sink");
+        let endpoint = crate::EndpointId::new("source.out->sink.in");
+        let mut enclaves = tinymap::TinyMap::new();
+        let source_enclave = enclaves.insert(boomerang_runtime::Enclave::default());
+        let sink_enclave = enclaves.insert(boomerang_runtime::Enclave::default());
+
+        StaticFederationRuntimeParts {
+            topology: FederatedTopology::with_edges(
+                [source.clone(), sink.clone()],
+                [crate::TopologyEdge::new(
+                    source.clone(),
+                    sink.clone(),
+                    endpoint.clone(),
+                    crate::WireDelay::ZERO,
+                )],
+            ),
+            routes: vec![FederateClientRoute::new(
+                boomerang_runtime::FederatedEndpointId::new(endpoint.as_str()),
+                source.clone(),
+                sink.clone(),
+            )],
+            federate_enclaves: BTreeMap::from([(source, source_enclave), (sink, sink_enclave)]),
+            enclaves,
+            outbound_sink: boomerang_runtime::BufferedFederatedOutboundSink::default(),
+            faults: boomerang_runtime::FederatedFaultState::default(),
+            inbound_endpoints: boomerang_runtime::FederatedInboundEndpointRegistry::default(),
+        }
+    }
+
+    #[test]
+    fn unsupported_configuration_rejects_wall_clock_static_federation() {
+        let error = execute_federation_in_memory(
+            valid_empty_static_parts(),
+            boomerang_runtime::Config::default(),
+        )
+        .expect_err("wall-clock static federation must be rejected");
+
+        assert!(matches!(
+            error,
+            StaticFederationRunnerError::UnsupportedConfiguration { what }
+                if what.contains("with_fast_forward(true)")
+                    && what.contains("common physical start")
+        ));
+
+        execute_federation_in_memory(
+            valid_empty_static_parts(),
+            boomerang_runtime::Config::default().with_fast_forward(true),
+        )
+        .expect("fast-forward static federation should pass configuration validation");
+    }
 
     #[cfg(feature = "serde-json-codec")]
     #[test]
@@ -761,6 +831,26 @@ mod tests {
             error,
             StaticFederationRunnerError::UnsupportedTopology { what }
                 if what.contains("non-empty federation topology")
+        ));
+    }
+
+    #[cfg(feature = "serde-json-codec")]
+    #[test]
+    fn tcp_runner_validates_configuration_before_binding() {
+        let tcp = TcpStaticFederationConfig {
+            bind_addr: SocketAddr::from(([203, 0, 113, 1], 1)),
+        };
+
+        let error = execute_federation_over_tcp(
+            valid_empty_static_parts(),
+            boomerang_runtime::Config::default(),
+            tcp,
+        )
+        .expect_err("unsupported configuration must fail before TCP bind");
+
+        assert!(matches!(
+            error,
+            StaticFederationRunnerError::UnsupportedConfiguration { .. }
         ));
     }
 }

@@ -1,8 +1,8 @@
 #[cfg(feature = "serde-json-codec")]
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use futures_channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use futures_util::{stream::Map, StreamExt};
+use futures_util::{stream::FuturesUnordered, stream::Map, StreamExt};
 #[cfg(feature = "serde-json-codec")]
 use tokio::net::{TcpListener, TcpStream};
 #[cfg(feature = "serde-json-codec")]
@@ -96,32 +96,91 @@ pub fn json_protocol_frame_transport(stream: TcpStream) -> JsonProtocolFrameTran
 
 /// Accept a static topology's TCP federate connections and run the shared RTI session loop.
 ///
-/// This helper is intended for static launchers that open one client connection per federate in
-/// `topology.federates` order. The accepted sockets are split into standard `Sink`/`TryStream`
-/// halves and then driven by [`StaticRtiSession`].
+/// Accepted sockets are identified by their first `Hello` frame, independently of arrival order,
+/// and then driven by [`StaticRtiSession`].
 #[cfg(feature = "serde-json-codec")]
 pub async fn run_tcp_static_rti_session(
     listener: TcpListener,
     topology: FederatedTopology,
 ) -> Result<(), SessionError> {
-    let mut endpoints = BTreeMap::<
-        FederateId,
-        RtiSessionEndpoint<JsonProtocolFrameSink, JsonProtocolFrameStream>,
-    >::new();
+    let expected = topology.federates.iter().cloned().collect::<BTreeSet<_>>();
+    if expected.len() != topology.federates.len() {
+        return Err(SessionError::Shutdown(
+            "duplicate federate id in TCP topology".into(),
+        ));
+    }
 
-    for federate_id in &topology.federates {
+    let mut accepted = Vec::with_capacity(expected.len());
+    for peer_index in 0..expected.len() {
         let (stream, _) = listener.accept().await.map_err(|error| {
             SessionError::Shutdown(format!("failed to accept TCP federate connection: {error}"))
         })?;
         let (sink, stream) = json_protocol_frame_transport(stream).split();
+        accepted.push((peer_index, sink, stream));
+    }
+
+    let mut first_frames = FuturesUnordered::new();
+    for (peer_index, sink, mut stream) in accepted {
+        first_frames.push(async move {
+            let frame = stream
+                .next()
+                .await
+                .ok_or_else(|| {
+                    SessionError::Shutdown(format!(
+                        "TCP peer {peer_index} closed before its Hello frame"
+                    ))
+                })?
+                .map_err(|error| {
+                    SessionError::Shutdown(format!(
+                        "failed to read TCP peer {peer_index} Hello frame: {error}"
+                    ))
+                })?;
+            Ok::<_, SessionError>((peer_index, sink, stream, frame))
+        });
+    }
+
+    let mut endpoints = BTreeMap::<
+        FederateId,
+        RtiSessionEndpoint<JsonProtocolFrameSink, JsonProtocolFrameStream>,
+    >::new();
+    while let Some(first_frame) = first_frames.next().await {
+        let (peer_index, sink, stream, frame) = first_frame?;
+        let federate_id = match &frame {
+            ProtocolFrame::FederateToRti(crate::FederateToRti::Hello { federate_id, .. }) => {
+                federate_id.clone()
+            }
+            _ => {
+                return Err(SessionError::Shutdown(format!(
+                    "TCP peer {peer_index} sent a non-Hello first frame"
+                )))
+            }
+        };
+        if !expected.contains(&federate_id) {
+            return Err(SessionError::Protocol {
+                federate_id,
+                message: "Hello declared an unknown federate id".into(),
+            });
+        }
         if endpoints
-            .insert(federate_id.clone(), RtiSessionEndpoint::new(sink, stream))
+            .insert(
+                federate_id.clone(),
+                RtiSessionEndpoint::with_initial_frame(sink, stream, frame),
+            )
             .is_some()
         {
-            return Err(SessionError::Shutdown(format!(
-                "duplicate federate id `{federate_id}` in TCP topology"
-            )));
+            return Err(SessionError::Protocol {
+                federate_id: federate_id.clone(),
+                message: format!("duplicate Hello for federate `{federate_id}`"),
+            });
         }
+    }
+
+    let observed = endpoints.keys().cloned().collect::<BTreeSet<_>>();
+    let missing = expected.difference(&observed).collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(SessionError::Shutdown(format!(
+            "TCP peers omitted expected federates: {missing:?}"
+        )));
     }
 
     StaticRtiSession::new(topology, endpoints).run().await
@@ -241,7 +300,7 @@ mod tests {
     #[cfg(feature = "serde-json-codec")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "localhost TCP smoke test; run with `cargo test -p boomerang_federated tcp_smoke -- --ignored`"]
-    async fn tcp_smoke_routes_msg_through_rti_and_shuts_down() {
+    async fn tcp_smoke_identifies_reverse_order_peers_by_hello() {
         use std::time::Duration as StdDuration;
         use tokio::net::{TcpListener, TcpStream};
 
@@ -262,8 +321,8 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let rti = tokio::spawn(run_tcp_static_rti_session(listener, topology.clone()));
 
-        let source_stream = TcpStream::connect(addr).await.unwrap();
         let sink_stream = TcpStream::connect(addr).await.unwrap();
+        let source_stream = TcpStream::connect(addr).await.unwrap();
         let source_connect = tokio::spawn(connect_tcp_client(
             source.clone(),
             topology.neighbors_for(&source),

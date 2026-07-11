@@ -27,6 +27,8 @@ pub use rti::{FederateState, GrantDecision, RtiDelivery, RtiError, RtiState};
 #[cfg(feature = "runtime")]
 pub use runtime_bridge::RuntimeBridgeError;
 pub use session::{RtiSessionEndpoint, SessionError, StaticRtiSession};
+#[cfg(all(feature = "runtime", feature = "serde-json-codec"))]
+pub use static_runner::{execute_federation_over_tcp, TcpStaticFederationConfig};
 #[cfg(feature = "runtime")]
 pub use static_runner::{StaticFederationRunnerError, StaticFederationRuntimeParts};
 pub use transport::{

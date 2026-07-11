@@ -1,9 +1,11 @@
 #![cfg(feature = "federated")]
-//! Proves the public `boomerang` API can build and execute a static in-memory
-//! federation, route a logical message through the RTI, and deliver it at
-//! `Tag::ZERO`.
+//! Proves the public `boomerang` API can build and execute static federations,
+//! route a logical message through the RTI, and deliver it at `Tag::ZERO`.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{mpsc, Arc, Mutex},
+    time::Duration as StdDuration,
+};
 
 use boomerang::prelude::*;
 
@@ -80,4 +82,50 @@ fn public_api_runs_static_in_memory_federation() {
     let _envs = execute_federation_in_memory(parts, config).unwrap();
 
     assert_eq!(*values.lock().unwrap(), vec![(Tag::ZERO, 7)]);
+}
+
+#[test]
+#[ignore = "localhost TCP integration test; run with `cargo test -p boomerang --features federated tcp_static -- --ignored`"]
+fn public_api_runs_tcp_static_federation() {
+    boomerang_util::test_tracing::init_with_directive("debug");
+    let values = run_with_wall_timeout("public TCP static federation", || {
+        let values = Arc::new(Mutex::new(Vec::new()));
+        let mut env_builder = EnvBuilder::new();
+        env_builder
+            .register_federated_codec::<u32, _>(boomerang::federated::SerdeJsonCodec)
+            .unwrap();
+
+        StaticFederation(Arc::clone(&values))
+            .build("main", (), None, None, None, false, &mut env_builder)
+            .unwrap();
+        env_builder.validate_reactions().unwrap();
+
+        let config = runtime::Config::default().with_fast_forward(true);
+        let parts = env_builder.into_runtime_parts(&config).unwrap();
+        let _envs =
+            execute_federation_over_tcp(parts, config, TcpStaticFederationConfig::default())
+                .unwrap();
+
+        let recorded = values.lock().unwrap().clone();
+        recorded
+    });
+
+    assert_eq!(values, vec![(Tag::ZERO, 7)]);
+}
+
+fn run_with_wall_timeout<T: Send + 'static>(
+    label: &'static str,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(StdDuration::from_secs(5)) {
+        Ok(Ok(value)) => value,
+        Ok(Err(payload)) => std::panic::resume_unwind(payload),
+        Err(_) => panic!("{label} timed out"),
+    }
 }

@@ -263,6 +263,21 @@ pub fn execute_federation_in_memory(
         .map_err(BuilderError::from)
 }
 
+/// Execute a static federation over TCP using the real RTI session and federate clients.
+///
+/// This is a single-process runner that connects each federate scheduler to a runner-owned TCP
+/// listener. It does not replace [`execute_federation_in_memory`] or
+/// [`runtime::execute_enclaves`].
+pub fn execute_federation_over_tcp(
+    parts: crate::BuilderRuntimeParts,
+    config: runtime::Config,
+    tcp: boomerang_federated::TcpStaticFederationConfig,
+) -> Result<tinymap::TinySecondaryMap<runtime::EnclaveKey, runtime::Env>, BuilderError> {
+    let runtime_parts = static_federation_runtime_parts(parts)?;
+    boomerang_federated::execute_federation_over_tcp(runtime_parts, config, tcp)
+        .map_err(BuilderError::from)
+}
+
 fn static_federation_runtime_parts(
     parts: crate::BuilderRuntimeParts,
 ) -> Result<boomerang_federated::StaticFederationRuntimeParts, BuilderError> {
@@ -297,7 +312,7 @@ fn validate_static_runner_plan(parts: &crate::BuilderRuntimeParts) -> Result<(),
         || parts.federation_plan.endpoints.is_empty()
     {
         return Err(BuilderError::UnsupportedFederationTopology {
-            what: "in-memory federation runner requires a non-empty federation plan with at least one cross-federate endpoint".into(),
+            what: "static federation runner requires a non-empty federation plan with at least one cross-federate endpoint".into(),
         });
     }
 
@@ -320,7 +335,7 @@ fn validate_static_runner_plan(parts: &crate::BuilderRuntimeParts) -> Result<(),
 
     if petgraph::algo::toposort(&zero_delay_graph, None).is_err() {
         return Err(BuilderError::UnsupportedFederationTopology {
-            what: "distributed zero-delay cycle is unsupported in the static in-memory runner"
+            what: "distributed zero-delay cycle is unsupported in the static federation runner"
                 .into(),
         });
     }

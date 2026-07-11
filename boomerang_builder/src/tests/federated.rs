@@ -220,6 +220,93 @@ fn federated_io_reactor() -> impl Reactor<(), Ports = FederatedIoPorts> {
     }
 }
 
+fn federated_forwarding_reactor(addend: u32) -> impl Reactor<(), Ports = FederatedIoPorts> {
+    move |name: &str,
+          state: (),
+          parent: Option<BuilderReactorKey>,
+          scope_mode: Option<BuilderModeKey>,
+          bank_info: Option<runtime::BankInfo>,
+          placement: ReactorPlacement,
+          env: &mut EnvBuilder| {
+        let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
+        if let Some(scope_mode) = scope_mode {
+            builder.set_scope_mode(scope_mode)?;
+        }
+        let input = builder.add_input_port::<u32>("in")?;
+        let output = builder.add_output_port::<u32>("out")?;
+        let startup = builder.get_startup_action();
+        builder
+            .add_reaction(Some("keep_alive"))
+            .with_trigger(startup)
+            .with_reaction_fn(|ctx, _state, (_startup,)| {
+                ctx.schedule_shutdown(Some(runtime::Duration::milliseconds(100)));
+            })
+            .finish()?;
+        builder
+            .add_reaction(Some("forward"))
+            .with_trigger(input)
+            .with_effect(output)
+            .with_reaction_fn(move |ctx, _state, (input, mut output)| {
+                if let Some(value) = *input {
+                    *output = Some(value + addend);
+                    ctx.schedule_shutdown(None);
+                }
+            })
+            .finish()?;
+        builder.finish()?;
+        Ok(FederatedIoPorts {
+            input: input.contained(),
+            output: output.contained(),
+        })
+    }
+}
+
+fn federated_startup_recording_io_reactor(
+    value: u32,
+    values: Arc<Mutex<Vec<(runtime::Tag, u32)>>>,
+) -> impl Reactor<(), Ports = FederatedIoPorts> {
+    move |name: &str,
+          state: (),
+          parent: Option<BuilderReactorKey>,
+          scope_mode: Option<BuilderModeKey>,
+          bank_info: Option<runtime::BankInfo>,
+          placement: ReactorPlacement,
+          env: &mut EnvBuilder| {
+        let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
+        if let Some(scope_mode) = scope_mode {
+            builder.set_scope_mode(scope_mode)?;
+        }
+        let input = builder.add_input_port::<u32>("in")?;
+        let output = builder.add_output_port::<u32>("out")?;
+        let startup = builder.get_startup_action();
+        builder
+            .add_reaction(Some("emit_startup"))
+            .with_trigger(startup)
+            .with_effect(output)
+            .with_reaction_fn(move |ctx, _state, (_startup, mut output)| {
+                *output = Some(value);
+                ctx.schedule_shutdown(Some(runtime::Duration::milliseconds(100)));
+            })
+            .finish()?;
+        let values = Arc::clone(&values);
+        builder
+            .add_reaction(Some("record_feedback"))
+            .with_trigger(input)
+            .with_reaction_fn(move |ctx, _state, (input,)| {
+                if let Some(value) = *input {
+                    values.lock().unwrap().push((ctx.get_tag(), value));
+                    ctx.schedule_shutdown(None);
+                }
+            })
+            .finish()?;
+        builder.finish()?;
+        Ok(FederatedIoPorts {
+            input: input.contained(),
+            output: output.contained(),
+        })
+    }
+}
+
 fn register_u32_federated_codec(env_builder: &mut EnvBuilder) -> Result<(), BuilderError> {
     env_builder.register_federated_codec::<u32, _>(boomerang_federated::SerdeJsonCodec)
 }
@@ -464,6 +551,115 @@ fn run_live_in_memory_no_message_source_sink() -> Vec<(runtime::Tag, u32)> {
     recorded_values
 }
 
+fn run_live_in_memory_three_federate_chain() -> Vec<(runtime::Tag, u32)> {
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let mut env_builder = EnvBuilder::new();
+    register_u32_federated_codec(&mut env_builder).unwrap();
+    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let source = builder
+        .add_child_federate(federated_startup_source_reactor(7), "source", ())
+        .unwrap();
+    let relay = builder
+        .add_child_federate(federated_forwarding_reactor(1), "relay", ())
+        .unwrap();
+    let sink = builder
+        .add_child_federate(
+            federated_recording_sink_reactor(Arc::clone(&values)),
+            "sink",
+            (),
+        )
+        .unwrap();
+    builder
+        .connect_port(source, relay.input, None, false)
+        .unwrap();
+    builder
+        .connect_port(relay.output, sink, None, false)
+        .unwrap();
+    builder.finish().unwrap();
+
+    let config = runtime::Config::default().with_fast_forward(true);
+    let parts = env_builder.into_runtime_parts(&config).unwrap();
+    let _envs = execute_federation_in_memory(parts, config).unwrap();
+
+    let recorded_values = values.lock().unwrap().clone();
+    recorded_values
+}
+
+fn run_live_in_memory_fanout() -> (Vec<(runtime::Tag, u32)>, Vec<(runtime::Tag, u32)>) {
+    let left_values = Arc::new(Mutex::new(Vec::new()));
+    let right_values = Arc::new(Mutex::new(Vec::new()));
+    let mut env_builder = EnvBuilder::new();
+    register_u32_federated_codec(&mut env_builder).unwrap();
+    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let source = builder
+        .add_child_federate(federated_startup_source_reactor(7), "source", ())
+        .unwrap();
+    let left = builder
+        .add_child_federate(
+            federated_recording_sink_reactor(Arc::clone(&left_values)),
+            "left",
+            (),
+        )
+        .unwrap();
+    let right = builder
+        .add_child_federate(
+            federated_recording_sink_reactor(Arc::clone(&right_values)),
+            "right",
+            (),
+        )
+        .unwrap();
+    builder.connect_port(source, left, None, false).unwrap();
+    builder.connect_port(source, right, None, false).unwrap();
+    builder.finish().unwrap();
+
+    let config = runtime::Config::default().with_fast_forward(true);
+    let parts = env_builder.into_runtime_parts(&config).unwrap();
+    let _envs = execute_federation_in_memory(parts, config).unwrap();
+
+    let recorded_left_values = left_values.lock().unwrap().clone();
+    let recorded_right_values = right_values.lock().unwrap().clone();
+    (recorded_left_values, recorded_right_values)
+}
+
+fn run_live_in_memory_positive_delay_cycle() -> (Vec<(runtime::Tag, u32)>, Vec<(runtime::Tag, u32)>)
+{
+    let a_values = Arc::new(Mutex::new(Vec::new()));
+    let b_values = Arc::new(Mutex::new(Vec::new()));
+    let delay = runtime::Duration::milliseconds(10);
+    let mut env_builder = EnvBuilder::new();
+    register_u32_federated_codec(&mut env_builder).unwrap();
+    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let a = builder
+        .add_child_federate(
+            federated_startup_recording_io_reactor(1, Arc::clone(&a_values)),
+            "a",
+            (),
+        )
+        .unwrap();
+    let b = builder
+        .add_child_federate(
+            federated_startup_recording_io_reactor(2, Arc::clone(&b_values)),
+            "b",
+            (),
+        )
+        .unwrap();
+    builder
+        .connect_port(a.output, b.input, Some(delay), false)
+        .unwrap();
+    builder
+        .connect_port(b.output, a.input, Some(delay), false)
+        .unwrap();
+    builder.finish().unwrap();
+
+    let config = runtime::Config::default().with_fast_forward(true);
+    let parts = env_builder.into_runtime_parts(&config).unwrap();
+    let _envs = execute_federation_in_memory(parts, config).unwrap();
+
+    let recorded_a_values = a_values.lock().unwrap().clone();
+    let recorded_b_values = b_values.lock().unwrap().clone();
+    (recorded_a_values, recorded_b_values)
+}
+
 fn build_federated_source_sink_plan(
     after: Option<runtime::Duration>,
 ) -> Result<FederationPlan, BuilderError> {
@@ -638,6 +834,35 @@ fn test_live_in_memory_no_message_topology_terminates_without_timeout() {
     });
 
     assert!(values.is_empty());
+}
+
+#[test]
+fn test_live_in_memory_three_federate_chain_records_relayed_value() {
+    let values = run_with_wall_timeout("live in-memory three-federate chain", || {
+        run_live_in_memory_three_federate_chain()
+    });
+
+    assert_eq!(values, vec![(runtime::Tag::ZERO, 8)]);
+}
+
+#[test]
+fn test_live_in_memory_fanout_delivers_same_tag_to_each_sink() {
+    let (left_values, right_values) =
+        run_with_wall_timeout("live in-memory fanout", || run_live_in_memory_fanout());
+
+    assert_eq!(left_values, vec![(runtime::Tag::ZERO, 7)]);
+    assert_eq!(right_values, vec![(runtime::Tag::ZERO, 7)]);
+}
+
+#[test]
+fn test_live_in_memory_positive_delay_cycle_records_delayed_feedback() {
+    let delay = runtime::Duration::milliseconds(10);
+    let (a_values, b_values) = run_with_wall_timeout("live in-memory positive-delay cycle", || {
+        run_live_in_memory_positive_delay_cycle()
+    });
+
+    assert_eq!(a_values, vec![(runtime::Tag::new(delay, 0), 2)]);
+    assert_eq!(b_values, vec![(runtime::Tag::new(delay, 0), 1)]);
 }
 
 #[test]

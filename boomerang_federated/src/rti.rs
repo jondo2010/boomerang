@@ -424,6 +424,35 @@ mod tests {
     }
 
     #[test]
+    fn multiple_same_tag_in_transit_messages_block_until_tag_ltc() {
+        let mut rti = RtiState::new(FederatedTopology::new([fed("source"), fed("target")]));
+
+        rti.record_in_transit_message(&fed("source"), &fed("target"), WireTag::ZERO)
+            .unwrap();
+        rti.record_in_transit_message(&fed("source"), &fed("target"), WireTag::ZERO)
+            .unwrap();
+
+        assert_eq!(
+            rti.request_tag(&fed("target"), WireTag::finite(0, 1))
+                .unwrap(),
+            GrantDecision::Blocked {
+                requested: WireTag::finite(0, 1),
+                earliest_incoming: Some(WireTag::ZERO),
+            }
+        );
+
+        rti.complete_tag(&fed("target"), WireTag::ZERO).unwrap();
+
+        assert_eq!(
+            rti.request_tag(&fed("target"), WireTag::finite(0, 1))
+                .unwrap(),
+            GrantDecision::Granted {
+                tag: WireTag::finite(0, 1),
+            }
+        );
+    }
+
+    #[test]
     fn ltc_can_trigger_pending_grant_after_in_transit_message_is_acknowledged() {
         let mut rti = RtiState::new(FederatedTopology::new([fed("source"), fed("target")]));
         rti.record_in_transit_message(&fed("source"), &fed("target"), WireTag::finite(5, 0))
@@ -449,6 +478,156 @@ mod tests {
                     tag: WireTag::finite(10, 0),
                 },
             }]
+        );
+    }
+
+    #[test]
+    fn same_timestamp_microstep_progression_unblocks_downstream_grant() {
+        let mut rti = RtiState::new(topology_with_edge(WireDelay::ZERO));
+
+        assert_eq!(
+            rti.request_tag(&fed("source"), WireTag::finite(0, 1))
+                .unwrap(),
+            GrantDecision::Granted {
+                tag: WireTag::finite(0, 1),
+            }
+        );
+        assert_eq!(
+            rti.request_tag(&fed("target"), WireTag::finite(0, 1))
+                .unwrap(),
+            GrantDecision::Blocked {
+                requested: WireTag::finite(0, 1),
+                earliest_incoming: Some(WireTag::finite(0, 1)),
+            }
+        );
+
+        assert_eq!(
+            rti.request_tag(&fed("source"), WireTag::finite(0, 2))
+                .unwrap(),
+            GrantDecision::Granted {
+                tag: WireTag::finite(0, 2),
+            }
+        );
+        assert_eq!(
+            rti.request_tag(&fed("target"), WireTag::finite(0, 1))
+                .unwrap(),
+            GrantDecision::Granted {
+                tag: WireTag::finite(0, 1),
+            }
+        );
+    }
+
+    #[test]
+    fn multi_hop_chain_requires_each_upstream_to_advance_past_the_requested_tag() {
+        let mut rti = RtiState::new(FederatedTopology::with_edges(
+            [fed("a"), fed("b"), fed("c")],
+            [
+                TopologyEdge::new(fed("a"), fed("b"), endpoint("a.out->b.in"), WireDelay::ZERO),
+                TopologyEdge::new(fed("b"), fed("c"), endpoint("b.out->c.in"), WireDelay::ZERO),
+            ],
+        ));
+
+        assert_eq!(
+            rti.request_tag(&fed("b"), WireTag::ZERO).unwrap(),
+            GrantDecision::Blocked {
+                requested: WireTag::ZERO,
+                earliest_incoming: Some(WireTag::NEVER),
+            }
+        );
+        assert_eq!(
+            rti.request_tag(&fed("c"), WireTag::ZERO).unwrap(),
+            GrantDecision::Blocked {
+                requested: WireTag::ZERO,
+                earliest_incoming: Some(WireTag::ZERO),
+            }
+        );
+
+        assert_eq!(
+            rti.request_tag(&fed("a"), WireTag::ZERO).unwrap(),
+            GrantDecision::Granted { tag: WireTag::ZERO }
+        );
+        assert_eq!(
+            rti.request_tag(&fed("a"), WireTag::finite(0, 1)).unwrap(),
+            GrantDecision::Granted {
+                tag: WireTag::finite(0, 1),
+            }
+        );
+        assert_eq!(
+            rti.request_tag(&fed("b"), WireTag::ZERO).unwrap(),
+            GrantDecision::Granted { tag: WireTag::ZERO }
+        );
+        assert_eq!(
+            rti.request_tag(&fed("c"), WireTag::ZERO).unwrap(),
+            GrantDecision::Blocked {
+                requested: WireTag::ZERO,
+                earliest_incoming: Some(WireTag::ZERO),
+            }
+        );
+
+        assert_eq!(
+            rti.request_tag(&fed("a"), WireTag::finite(0, 2)).unwrap(),
+            GrantDecision::Granted {
+                tag: WireTag::finite(0, 2),
+            }
+        );
+        assert_eq!(
+            rti.request_tag(&fed("b"), WireTag::finite(0, 1)).unwrap(),
+            GrantDecision::Granted {
+                tag: WireTag::finite(0, 1),
+            }
+        );
+        assert_eq!(
+            rti.request_tag(&fed("c"), WireTag::ZERO).unwrap(),
+            GrantDecision::Granted { tag: WireTag::ZERO }
+        );
+    }
+
+    #[test]
+    fn positive_delay_cycle_allows_startup_grants_after_both_federates_advertise() {
+        let delay = WireDelay::from_nanos(10);
+        let mut rti = RtiState::new(FederatedTopology::with_edges(
+            [fed("a"), fed("b")],
+            [
+                TopologyEdge::new(fed("a"), fed("b"), endpoint("a.out->b.in"), delay),
+                TopologyEdge::new(fed("b"), fed("a"), endpoint("b.out->a.in"), delay),
+            ],
+        ));
+
+        assert_eq!(
+            rti.request_tag(&fed("a"), WireTag::ZERO).unwrap(),
+            GrantDecision::Blocked {
+                requested: WireTag::ZERO,
+                earliest_incoming: Some(WireTag::NEVER),
+            }
+        );
+
+        let deliveries = rti
+            .handle(FederateToRti::Net {
+                federate_id: fed("b"),
+                tag: WireTag::ZERO,
+            })
+            .unwrap();
+
+        assert_eq!(
+            deliveries,
+            vec![
+                RtiDelivery {
+                    federate_id: fed("b"),
+                    message: RtiToFederate::Tag { tag: WireTag::ZERO },
+                },
+                RtiDelivery {
+                    federate_id: fed("a"),
+                    message: RtiToFederate::Tag { tag: WireTag::ZERO },
+                },
+            ]
+        );
+        assert_eq!(
+            rti.earliest_incoming_message_tag(&fed("a")).unwrap(),
+            Some(WireTag::finite(10, 0))
+        );
+        assert_eq!(
+            rti.earliest_incoming_message_tag(&fed("b")).unwrap(),
+            Some(WireTag::finite(10, 0))
         );
     }
 

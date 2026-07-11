@@ -318,6 +318,10 @@ where
                 federate_id: message_federate,
                 ..
             }
+            | FederateToRti::MsgAck {
+                federate_id: message_federate,
+                ..
+            }
             | FederateToRti::Stop {
                 federate_id: message_federate,
             } => {
@@ -656,13 +660,21 @@ mod tests {
         expect_tag(&mut source_client, WireTag::finite(0, 1)).await;
         send_client_frame(
             &mut sink_client,
-            FederateToRti::Ltc {
+            FederateToRti::MsgAck {
                 federate_id: sink.clone(),
                 tag: WireTag::ZERO,
             },
         )
         .await;
         expect_tag(&mut sink_client, WireTag::ZERO).await;
+        send_client_frame(
+            &mut sink_client,
+            FederateToRti::Ltc {
+                federate_id: sink.clone(),
+                tag: WireTag::ZERO,
+            },
+        )
+        .await;
 
         send_client_frame(
             &mut source_client,
@@ -768,7 +780,17 @@ mod tests {
 
         send_client_frame(
             &mut sink_client,
-            FederateToRti::Ltc {
+            FederateToRti::MsgAck {
+                federate_id: sink.clone(),
+                tag: WireTag::ZERO,
+            },
+        )
+        .await;
+        tokio::task::yield_now().await;
+        assert_eq!(recv_client_frame_now(&mut sink_client), None);
+        send_client_frame(
+            &mut sink_client,
+            FederateToRti::MsgAck {
                 federate_id: sink.clone(),
                 tag: WireTag::ZERO,
             },

@@ -328,7 +328,7 @@ mod tests {
             }
         );
         sink_client
-            .send(FederateToRti::Ltc {
+            .send(FederateToRti::MsgAck {
                 federate_id: sink.clone(),
                 tag: WireTag::ZERO,
             })
@@ -337,6 +337,12 @@ mod tests {
             recv_rti_message(&sink_client, recv_timeout, "sink TAG(ZERO)"),
             RtiToFederate::Tag { tag: WireTag::ZERO }
         );
+        sink_client
+            .send(FederateToRti::Ltc {
+                federate_id: sink.clone(),
+                tag: WireTag::ZERO,
+            })
+            .unwrap();
 
         source_client
             .send(FederateToRti::Net {

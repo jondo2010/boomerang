@@ -290,6 +290,11 @@ pub enum FederateToRti {
         federate_id: FederateId,
         tag: WireTag,
     },
+    /// Acknowledge that exactly one message was queued in the target scheduler.
+    MsgAck {
+        federate_id: FederateId,
+        tag: WireTag,
+    },
     Msg {
         source: FederateId,
         target: FederateId,

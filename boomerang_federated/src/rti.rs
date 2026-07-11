@@ -62,6 +62,12 @@ pub enum RtiError {
 
     #[error("delaying tag {tag} by {delay_ns}ns overflowed")]
     TagDelayOverflow { tag: WireTag, delay_ns: u64 },
+
+    #[error("federate `{federate_id}` acknowledged no in-transit message at {tag}")]
+    UnmatchedMessageAck {
+        federate_id: FederateId,
+        tag: WireTag,
+    },
 }
 
 /// Deterministic RTI state for static TAG/NET/LTC/MSG coordination.
@@ -119,6 +125,10 @@ impl RtiState {
                 self.complete_tag(&federate_id, tag)?;
                 self.try_grants_for_all()
             }
+            FederateToRti::MsgAck { federate_id, tag } => {
+                self.acknowledge_message(&federate_id, tag)?;
+                self.try_grants_for_all()
+            }
             FederateToRti::Msg {
                 source,
                 target,
@@ -173,13 +183,38 @@ impl RtiState {
             state.last_completed = tag;
         }
 
-        if let Some(messages) = self.in_transit.get_mut(federate_id) {
-            let completed_tags: Vec<_> = messages.range(..=tag).map(|(&tag, _)| tag).collect();
-            for completed_tag in completed_tags {
-                messages.remove(&completed_tag);
-            }
-        }
+        Ok(())
+    }
 
+    /// Acknowledge delivery of exactly one message into a federate's scheduler queue.
+    pub fn acknowledge_message(
+        &mut self,
+        federate_id: &FederateId,
+        tag: WireTag,
+    ) -> Result<(), RtiError> {
+        self.ensure_federate(federate_id)?;
+        let remove_federate_entry = {
+            let messages = self.in_transit.get_mut(federate_id).ok_or_else(|| {
+                RtiError::UnmatchedMessageAck {
+                    federate_id: federate_id.clone(),
+                    tag,
+                }
+            })?;
+            let count = messages
+                .get_mut(&tag)
+                .ok_or_else(|| RtiError::UnmatchedMessageAck {
+                    federate_id: federate_id.clone(),
+                    tag,
+                })?;
+            *count -= 1;
+            if *count == 0 {
+                messages.remove(&tag);
+            }
+            messages.is_empty()
+        };
+        if remove_federate_entry {
+            self.in_transit.remove(federate_id);
+        }
         Ok(())
     }
 
@@ -396,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn in_transit_message_blocks_grant_until_target_ltc_acknowledges_the_message_tag() {
+    fn in_transit_message_blocks_grant_until_target_msg_ack() {
         let mut rti = RtiState::new(FederatedTopology::new([fed("source"), fed("target")]));
 
         rti.record_in_transit_message(&fed("source"), &fed("target"), WireTag::finite(5, 0))
@@ -411,7 +446,7 @@ mod tests {
             }
         );
 
-        rti.complete_tag(&fed("target"), WireTag::finite(5, 0))
+        rti.acknowledge_message(&fed("target"), WireTag::finite(5, 0))
             .unwrap();
 
         assert_eq!(
@@ -424,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn multiple_same_tag_in_transit_messages_block_until_tag_ltc() {
+    fn multiple_same_tag_messages_require_one_msg_ack_each() {
         let mut rti = RtiState::new(FederatedTopology::new([fed("source"), fed("target")]));
 
         rti.record_in_transit_message(&fed("source"), &fed("target"), WireTag::ZERO)
@@ -446,6 +481,29 @@ mod tests {
         assert_eq!(
             rti.request_tag(&fed("target"), WireTag::finite(0, 1))
                 .unwrap(),
+            GrantDecision::Blocked {
+                requested: WireTag::finite(0, 1),
+                earliest_incoming: Some(WireTag::ZERO),
+            }
+        );
+
+        rti.acknowledge_message(&fed("target"), WireTag::ZERO)
+            .unwrap();
+        assert_eq!(
+            rti.request_tag(&fed("target"), WireTag::finite(0, 1))
+                .unwrap(),
+            GrantDecision::Blocked {
+                requested: WireTag::finite(0, 1),
+                earliest_incoming: Some(WireTag::ZERO),
+            }
+        );
+
+        rti.acknowledge_message(&fed("target"), WireTag::ZERO)
+            .unwrap();
+
+        assert_eq!(
+            rti.request_tag(&fed("target"), WireTag::finite(0, 1))
+                .unwrap(),
             GrantDecision::Granted {
                 tag: WireTag::finite(0, 1),
             }
@@ -453,7 +511,7 @@ mod tests {
     }
 
     #[test]
-    fn ltc_can_trigger_pending_grant_after_in_transit_message_is_acknowledged() {
+    fn msg_ack_can_trigger_pending_grant() {
         let mut rti = RtiState::new(FederatedTopology::new([fed("source"), fed("target")]));
         rti.record_in_transit_message(&fed("source"), &fed("target"), WireTag::finite(5, 0))
             .unwrap();
@@ -464,7 +522,7 @@ mod tests {
         ));
 
         let deliveries = rti
-            .handle(FederateToRti::Ltc {
+            .handle(FederateToRti::MsgAck {
                 federate_id: fed("target"),
                 tag: WireTag::finite(5, 0),
             })
@@ -478,6 +536,19 @@ mod tests {
                     tag: WireTag::finite(10, 0),
                 },
             }]
+        );
+    }
+
+    #[test]
+    fn unmatched_msg_ack_returns_typed_error() {
+        let mut rti = RtiState::new(FederatedTopology::new([fed("target")]));
+
+        assert_eq!(
+            rti.acknowledge_message(&fed("target"), WireTag::ZERO),
+            Err(RtiError::UnmatchedMessageAck {
+                federate_id: fed("target"),
+                tag: WireTag::ZERO,
+            })
         );
     }
 

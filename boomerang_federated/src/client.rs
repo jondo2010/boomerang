@@ -485,10 +485,7 @@ impl RtiFederatedTimeBarrier {
         self.inbound
             .schedule(&runtime_endpoint, runtime_tag, payload)?;
 
-        // Current RTI state tracks delivered MSG frames as in-transit until the
-        // target reports LTC for the message tag. Report that delivery ack now;
-        // the scheduler's later completion LTC is idempotent.
-        self.send_ltc(runtime_tag)?;
+        self.send_msg_ack(runtime_tag)?;
 
         event_rx
             .recv()
@@ -544,6 +541,14 @@ impl RtiFederatedTimeBarrier {
     )]
     fn send_ltc(&self, tag: boomerang_runtime::Tag) -> Result<(), FederateClientError> {
         self.client.send(FederateToRti::Ltc {
+            federate_id: self.federate_id.clone(),
+            tag: WireTag::try_from(tag)?,
+        })
+    }
+
+    /// Acknowledge that one inbound message was queued, without claiming tag completion.
+    fn send_msg_ack(&self, tag: boomerang_runtime::Tag) -> Result<(), FederateClientError> {
+        self.client.send(FederateToRti::MsgAck {
             federate_id: self.federate_id.clone(),
             tag: WireTag::try_from(tag)?,
         })
@@ -820,6 +825,13 @@ mod tests {
             .await;
             assert_eq!(
                 recv_federate_to_rti(&mut transport).await,
+                FederateToRti::MsgAck {
+                    federate_id: fed("sink"),
+                    tag: WireTag::ZERO,
+                }
+            );
+            assert_eq!(
+                recv_federate_to_rti(&mut transport).await,
                 FederateToRti::Ltc {
                     federate_id: fed("sink"),
                     tag: WireTag::ZERO,
@@ -855,6 +867,9 @@ mod tests {
             }
             event => panic!("expected logical async event, got {event:?}"),
         }
+        barrier
+            .logical_tag_complete_result(boomerang_runtime::Tag::ZERO)
+            .unwrap();
 
         rti.await.unwrap();
     }

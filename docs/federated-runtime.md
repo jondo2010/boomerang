@@ -22,7 +22,9 @@ connected.
 
 `boomerang_runtime` owns scheduler-facing primitives only. It defines endpoint
 ids, payload codec traits, outbound sinks and receivers, inbound endpoint
-registries, and the `FederatedTimeBarrier` scheduler hook. It must stay
+registries, the shared first-error fault latch, and the `FederatedTimeBarrier`
+scheduler hook. The barrier returns an explicit granted or interrupted outcome,
+or a terminal coordination error. It must stay
 protocol-free and must not depend on `boomerang_federated`, Tokio, RTI state, or
 wire frame types.
 
@@ -50,7 +52,8 @@ the runner. Non-empty unmapped enclaves are rejected.
 
 `EnvBuilder::into_runtime_parts` produces `BuilderRuntimeParts` containing the
 runtime enclaves, builder aliases, inter-partition metadata, the federation
-plan, a buffered federated outbound sink, and the inbound endpoint registry.
+plan, a buffered federated outbound sink, shared federated fault state, and the
+inbound endpoint registry.
 
 The builder-facing execution functions validate the builder-owned plan and
 convert it into protocol/runtime DTOs: a `FederatedTopology`, client routes,
@@ -58,14 +61,20 @@ and a federate-to-enclave map. They then delegate to the matching function in
 `boomerang_federated::static_runner`.
 
 The static runner first validates and prepares transport-independent runtime
-parts. The in-memory path creates one channel transport per federate and starts
-`StaticRtiSession` directly. The TCP path binds a listener, starts
-`run_tcp_static_rti_session`, and establishes sockets in static topology order
-because the accept helper assigns sockets in that order. Both paths then run
+parts, then rejects configurations without `Config::with_fast_forward(true)`.
+Static federation does not yet have a common physical start, so silently using
+independent scheduler clocks would be incorrect. The in-memory path creates one
+channel transport per federate and starts `StaticRtiSession` directly. The TCP
+path binds a listener, starts `run_tcp_static_rti_session`, accepts the static
+number of sockets, and identifies each peer from its first `Hello` frame rather
+than arrival order. The consumed frame is preserved for the session's topology
+validation. Both paths then run
 all `FederateProtocolClient::connect` handshakes concurrently, wrap each client
 in an `RtiFederatedTimeBarrier`, and enter the same connected-runner function.
 That function runs one scheduler thread per active mapped federate enclave with
-`Scheduler::new_with_federated_time_barrier`.
+`Scheduler::new_with_federated_time_barrier`. It uses the fallible scheduler
+loop, stops every barrier after success or failure, and returns coordination or
+runtime endpoint errors to the public caller.
 
 The connected runner retains an outbound sender and receiver pair for every
 federate until shutdown, including federates with no outbound route. This keeps
@@ -73,16 +82,21 @@ the receiver open while the barrier drains it before sending final no-future
 and `Stop` frames.
 
 Outbound payloads leave a scheduler through generated federated sender
-reactions. Those reactions write to `BufferedFederatedOutboundSink`, which keeps
-the old drainable buffer behavior and forwards live routes to a per-federate
-`FederatedOutboundReceiver`. The barrier drains that receiver during
+reactions. Codec and sink failures are published to the shared first-error
+fault latch and become terminal scheduler errors. Those reactions write to
+`BufferedFederatedOutboundSink`. Before a live route is installed, a command is
+stored in the drainable diagnostic buffer. After installation, it is sent only
+to the per-federate `FederatedOutboundReceiver`; live execution does not retain
+a second payload copy. The barrier drains that receiver during
 `logical_tag_complete`, sends protocol `MSG` frames, and then sends `LTC` for
-the completed tag.
+the completed scheduler tag.
 
 Inbound payloads arrive as protocol `MSG` frames from the RTI. The barrier
 schedules them through `FederatedInboundEndpointRegistry`, returns the queued
-`AsyncEvent` to the scheduler, and acknowledges delivery so the RTI can release
-blocked grants.
+`AsyncEvent` to the scheduler, and sends one `MsgAck` after successful queueing.
+`MsgAck` decrements exactly one matching in-transit message. The scheduler sends
+the distinct `LTC` frame only after reactions at that tag complete; `LTC` does
+not acknowledge delivery or clear in-transit counts.
 
 Shutdown uses no-future information. A federate that has no future local events
 sends `NET(FOREVER)` before `Stop`. The RTI records this as no-future state for
@@ -124,6 +138,7 @@ messages, microstep progression, multi-hop grant dependencies, and grant
 blocking behind in-transit messages.
 
 The ignored TCP smoke in `boomerang_federated/src/transport.rs` remains a
-narrow protocol-level test of the shared RTI session and client. The ignored
+narrow protocol-level test of the shared RTI session and client, including
+sink-before-source connection order and `Hello`-based identity. The ignored
 top-level test adds scheduler-running TCP coverage without replacing any
 direct in-memory correctness test.

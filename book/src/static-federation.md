@@ -18,6 +18,11 @@ let parts = env_builder.into_runtime_parts(&config)?;
 let envs = execute_federation_in_memory(parts, config)?;
 ```
 
+Static federation currently requires fast-forward execution because a common
+physical start is not implemented. Omitting `.with_fast_forward(true)` returns
+an unsupported-configuration error instead of running schedulers against
+independently initialized wall clocks.
+
 The TCP runner is also synchronous and single-process. It starts a static RTI
 listener, connects every federate scheduler through the shared TCP protocol
 transport, and returns the same final runtime environments:
@@ -35,6 +40,12 @@ let envs = execute_federation_over_tcp(
 The default TCP configuration binds `127.0.0.1:0`, so the operating system
 selects an unused localhost port. This runner proves real framed transport; it
 does not launch separate processes or provide dynamic federation membership.
+Socket arrival order does not establish identity: each accepted peer declares
+its preconfigured federate id in `Hello`, while membership remains static.
+
+Payload encoding, transport, RTI protocol, and outbound delivery failures are
+returned to the runner's caller. They are not treated as permission to process
+a logical tag.
 
 The supported subset is deliberately conservative. It supports static
 persistent federates, one runtime enclave per federate, logical

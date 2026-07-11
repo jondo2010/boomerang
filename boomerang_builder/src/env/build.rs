@@ -11,14 +11,14 @@ use slotmap::SecondaryMap;
 #[cfg(feature = "federated")]
 use std::collections::BTreeMap;
 
-#[cfg(feature = "federated")]
-use crate::FederationPlan;
 use crate::{
     connection::PortBindings, ActionType, BoundaryKind, BuilderActionKey, BuilderError,
     BuilderModeKey, BuilderPortKey, BuilderReactionKey, BuilderReactorKey, InterPartitionEdge,
     InterPartitionPlan, ParentReactorBuilder, PartialReactionBuilder, PartitionRoot,
     PartitionRootKind, TimerActionKey,
 };
+#[cfg(feature = "federated")]
+use crate::{federated_routes_from_plan, FederationPlan};
 
 use super::EnvBuilder;
 
@@ -65,7 +65,7 @@ pub struct BuilderRuntimeParts {
     /// Static federation metadata extracted by the builder.
     pub federation_plan: FederationPlan,
     #[cfg(feature = "federated")]
-    pub(crate) federated_outbound_router: runtime::FederatedOutboundRouter,
+    pub(crate) federated_connections: boomerang_federated::FederatedRuntimeConnections,
     #[cfg(feature = "federated")]
     /// Shared terminal fault state for generated sender reactions and live barriers.
     pub federated_faults: runtime::FederatedFaultState,
@@ -84,6 +84,8 @@ impl BuilderRuntimeParts {
         inter_partition_plan: InterPartitionPlan,
         enclave_deps: Vec<EnclaveDep>,
         physical_event_q_size: usize,
+        #[cfg(feature = "federated")]
+        federated_connections: boomerang_federated::FederatedRuntimeConnections,
     ) -> Self {
         let mut enclaves = tinymap::TinyMap::new();
         let mut aliases = BuilderAliases::default();
@@ -119,9 +121,6 @@ impl BuilderRuntimeParts {
         }
         #[cfg(feature = "replay")]
         {
-            #[cfg(feature = "federated")]
-            let federated_outbound_router = runtime::FederatedOutboundRouter::default();
-
             // Pre-fill the replayers map with empty maps
             let replayers = enclaves
                 .keys()
@@ -138,7 +137,7 @@ impl BuilderRuntimeParts {
                 #[cfg(feature = "federated")]
                 federation_plan: FederationPlan::default(),
                 #[cfg(feature = "federated")]
-                federated_outbound_router,
+                federated_connections,
                 #[cfg(feature = "federated")]
                 federated_faults: runtime::FederatedFaultState::default(),
                 #[cfg(feature = "federated")]
@@ -148,9 +147,6 @@ impl BuilderRuntimeParts {
         }
         #[cfg(not(feature = "replay"))]
         {
-            #[cfg(feature = "federated")]
-            let federated_outbound_router = runtime::FederatedOutboundRouter::default();
-
             // No replayers, just return the enclaves and aliases
             Self {
                 enclaves,
@@ -159,7 +155,7 @@ impl BuilderRuntimeParts {
                 #[cfg(feature = "federated")]
                 federation_plan: FederationPlan::default(),
                 #[cfg(feature = "federated")]
-                federated_outbound_router,
+                federated_connections,
                 #[cfg(feature = "federated")]
                 federated_faults: runtime::FederatedFaultState::default(),
                 #[cfg(feature = "federated")]
@@ -970,6 +966,22 @@ impl EnvBuilder {
             FederationPlan::from_inter_partition_plan(&inter_partition_plan, |port| {
                 self.fqn_for(port, false).map(|fqn| fqn.to_string())
             })?;
+        #[cfg(feature = "federated")]
+        let federated_connections = boomerang_federated::FederatedRuntimeConnections::new(
+            federation_plan
+                .federates
+                .iter()
+                .map(|federate| boomerang_federated::FederateId::new(federate.id.clone())),
+            federated_routes_from_plan(&federation_plan)?
+                .into_iter()
+                .map(|route| {
+                    boomerang_federated::FederateClientRoute::new(
+                        route.endpoint,
+                        route.source,
+                        route.target,
+                    )
+                }),
+        )?;
         let enclave_deps = enclave_deps_from_inter_partition_plan(&inter_partition_plan);
         let port_bindings = self.build_connections(&mut partition_map)?;
         let mut builder_parts = BuilderRuntimeParts::new(
@@ -977,6 +989,8 @@ impl EnvBuilder {
             inter_partition_plan,
             enclave_deps,
             config.physical_event_q_size,
+            #[cfg(feature = "federated")]
+            federated_connections,
         );
         #[cfg(feature = "federated")]
         {

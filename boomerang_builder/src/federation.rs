@@ -284,24 +284,13 @@ fn static_federation_runtime_parts(
     validate_static_runner_plan(&parts)?;
 
     let topology = federation_topology_from_plan(&parts.federation_plan)?;
-    let routes = federated_routes_from_plan(&parts.federation_plan)?
-        .into_iter()
-        .map(|route| {
-            boomerang_federated::FederateClientRoute::new(
-                route.endpoint,
-                route.source,
-                route.target,
-            )
-        })
-        .collect();
     let (federate_enclaves, _federate_by_enclave) = federate_enclave_maps(&parts)?;
 
     Ok(boomerang_federated::StaticFederationRuntimeParts {
         topology,
-        routes,
         federate_enclaves,
         enclaves: parts.enclaves,
-        outbound_router: parts.federated_outbound_router,
+        connections: parts.federated_connections,
         faults: parts.federated_faults,
         inbound_endpoints: parts.federated_inbound_endpoints,
     })

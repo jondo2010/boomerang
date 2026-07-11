@@ -1,5 +1,4 @@
 use itertools::Itertools;
-use std::collections::BTreeMap;
 use std::sync::{mpsc, Arc, Mutex};
 
 use super::*;
@@ -20,25 +19,25 @@ struct LocalOnlyPayload {
 struct IntentionalFailingCodec;
 
 struct FederatedOutboundCapture {
-    receiver: runtime::FederatedOutboundReceiver,
+    mailbox: boomerang_federated::FederateClientMailbox,
 }
 
 impl FederatedOutboundCapture {
-    fn install(parts: &BuilderRuntimeParts) -> Self {
+    fn take(parts: &mut BuilderRuntimeParts) -> Self {
         assert_eq!(parts.federation_plan.endpoints.len(), 1);
-        let endpoint =
-            runtime::FederatedEndpointId::new(parts.federation_plan.endpoints[0].id.as_str());
-        let (channel, receiver) = runtime::FederatedOutboundChannel::pair();
-        parts
-            .federated_outbound_router
-            .set_route(endpoint, channel)
-            .unwrap();
-        Self { receiver }
+        let source = boomerang_federated::FederateId::new(
+            parts.federation_plan.endpoints[0].source_federate.clone(),
+        );
+        let mailbox = parts
+            .federated_connections
+            .take_mailbox(&source)
+            .expect("source federate mailbox was created during lowering");
+        Self { mailbox }
     }
 
-    fn drain(&self) -> Vec<runtime::FederatedOutboundCommand> {
+    fn drain(&mut self) -> Vec<boomerang_federated::FederateToRti> {
         let mut commands = Vec::new();
-        while let Some(command) = self.receiver.try_recv().unwrap() {
+        while let Some(command) = self.mailbox.try_recv().unwrap() {
             commands.push(command);
         }
         commands
@@ -356,17 +355,11 @@ fn register_u32_federated_codec(env_builder: &mut EnvBuilder) -> Result<(), Buil
 
 fn route_outbound_commands_through_rti(
     plan: &FederationPlan,
-    commands: Vec<runtime::FederatedOutboundCommand>,
+    commands: Vec<boomerang_federated::FederateToRti>,
     inbound_endpoints: &runtime::FederatedInboundEndpointRegistry,
 ) -> Vec<runtime::Tag> {
     let topology = federation_topology_from_plan(plan).unwrap();
     let mut rti = boomerang_federated::RtiState::new(topology.clone());
-    let routes = federated_routes_from_plan(plan)
-        .unwrap()
-        .into_iter()
-        .map(|route| (route.endpoint.clone(), route))
-        .collect::<BTreeMap<_, _>>();
-
     for federate in &plan.federates {
         let federate_id = boomerang_federated::FederateId::new(federate.id.clone());
         rti.handle(boomerang_federated::FederateToRti::Hello {
@@ -378,25 +371,30 @@ fn route_outbound_commands_through_rti(
 
     let mut routed_tags = Vec::new();
     for command in commands {
-        let runtime::FederatedOutboundCommand::Msg(message) = command;
-        let route = routes
-            .get(&message.endpoint)
-            .expect("outbound endpoint should have route metadata");
-        let endpoint = boomerang_federated::EndpointId::new(message.endpoint.as_str());
-        let tag = boomerang_federated::WireTag::try_from(message.tag).unwrap();
+        let boomerang_federated::FederateToRti::Msg {
+            source,
+            target,
+            endpoint,
+            tag,
+            payload,
+        } = command
+        else {
+            panic!("lowered sender should emit a protocol MSG")
+        };
+        let runtime_endpoint = runtime::FederatedEndpointId::new(endpoint.as_str());
         let deliveries = rti
             .handle(boomerang_federated::FederateToRti::Msg {
-                source: route.source.clone(),
-                target: route.target.clone(),
+                source: source.clone(),
+                target: target.clone(),
                 endpoint: endpoint.clone(),
                 tag,
-                payload: message.payload,
+                payload,
             })
             .unwrap();
 
         assert_eq!(deliveries.len(), 1);
         let delivery = &deliveries[0];
-        assert_eq!(delivery.federate_id, route.target);
+        assert_eq!(delivery.federate_id, target);
         match &delivery.message {
             boomerang_federated::RtiToFederate::Msg {
                 source: delivered_source,
@@ -404,11 +402,11 @@ fn route_outbound_commands_through_rti(
                 tag: delivered_tag,
                 payload,
             } => {
-                assert_eq!(delivered_source, &route.source);
+                assert_eq!(delivered_source, &source);
                 assert_eq!(delivered_endpoint, &endpoint);
                 let runtime_tag = runtime::Tag::try_from(*delivered_tag).unwrap();
                 inbound_endpoints
-                    .schedule(&message.endpoint, runtime_tag, payload)
+                    .schedule(&runtime_endpoint, runtime_tag, payload)
                     .unwrap();
                 routed_tags.push(runtime_tag);
             }
@@ -469,10 +467,10 @@ fn run_in_memory_federated_source_sink(
     builder.connect_port(source, sink, after, false).unwrap();
     builder.finish().unwrap();
 
-    let parts = env_builder
+    let mut parts = env_builder
         .into_runtime_parts(&runtime::Config::default())
         .unwrap();
-    let outbound = FederatedOutboundCapture::install(&parts);
+    let mut outbound = FederatedOutboundCapture::take(&mut parts);
     let BuilderRuntimeParts {
         enclaves,
         aliases,
@@ -1166,10 +1164,10 @@ fn test_federated_sender_emits_serialized_msg_command() {
         .unwrap();
     builder.finish().unwrap();
 
-    let parts = env_builder
+    let mut parts = env_builder
         .into_runtime_parts(&runtime::Config::default())
         .unwrap();
-    let outbound = FederatedOutboundCapture::install(&parts);
+    let mut outbound = FederatedOutboundCapture::take(&mut parts);
     let BuilderRuntimeParts { enclaves, .. } = parts;
 
     let config = runtime::Config::default()
@@ -1179,10 +1177,24 @@ fn test_federated_sender_emits_serialized_msg_command() {
 
     let commands = outbound.drain();
     assert_eq!(commands.len(), 1);
-    let runtime::FederatedOutboundCommand::Msg(message) = &commands[0];
-    assert_eq!(message.endpoint.as_str(), "main/source/out->main/sink/in");
-    assert_eq!(message.tag, runtime::Tag::new(delay, 0));
-    assert_eq!(message.payload, b"7");
+    let boomerang_federated::FederateToRti::Msg {
+        source,
+        target,
+        endpoint,
+        tag,
+        payload,
+    } = &commands[0]
+    else {
+        panic!("lowered sender should emit a protocol MSG")
+    };
+    assert_eq!(source.as_str(), "source");
+    assert_eq!(target.as_str(), "sink");
+    assert_eq!(endpoint.as_str(), "main/source/out->main/sink/in");
+    assert_eq!(
+        *tag,
+        boomerang_federated::WireTag::try_from(runtime::Tag::new(delay, 0)).unwrap()
+    );
+    assert_eq!(payload, b"7");
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     fmt,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, OnceLock},
 };
 
 use crate::{
@@ -48,9 +48,6 @@ pub enum FederatedEndpointError {
     #[error("federated outbound sink error: {0}")]
     Send(String),
 
-    #[error("federated outbound receiver error: {0}")]
-    Receive(String),
-
     #[error("duplicate federated endpoint: {0}")]
     DuplicateEndpoint(FederatedEndpointId),
 
@@ -89,10 +86,6 @@ impl FederatedEndpointError {
 
     pub fn send(message: impl Into<String>) -> Self {
         Self::Send(message.into())
-    }
-
-    pub fn receive(message: impl Into<String>) -> Self {
-        Self::Receive(message.into())
     }
 }
 
@@ -140,92 +133,6 @@ pub enum FederatedOutboundCommand {
 
 pub trait FederatedOutboundSink: Send + Sync + 'static {
     fn send(&self, command: FederatedOutboundCommand) -> Result<(), FederatedEndpointError>;
-}
-
-/// Live outbound command sink that wakes a waiting federate client.
-#[derive(Debug, Clone)]
-pub struct FederatedOutboundChannel {
-    sender: kanal::Sender<FederatedOutboundCommand>,
-}
-
-/// Receiving half of a live outbound command channel.
-#[derive(Debug)]
-pub struct FederatedOutboundReceiver {
-    receiver: kanal::Receiver<FederatedOutboundCommand>,
-}
-
-impl FederatedOutboundChannel {
-    pub fn pair() -> (Self, FederatedOutboundReceiver) {
-        let (sender, receiver) = kanal::unbounded();
-        (Self { sender }, FederatedOutboundReceiver { receiver })
-    }
-}
-
-impl FederatedOutboundReceiver {
-    pub fn recv(&self) -> Result<FederatedOutboundCommand, FederatedEndpointError> {
-        self.receiver
-            .recv()
-            .map_err(|error| FederatedEndpointError::receive(error.to_string()))
-    }
-
-    pub fn try_recv(&self) -> Result<Option<FederatedOutboundCommand>, FederatedEndpointError> {
-        self.receiver
-            .try_recv()
-            .map_err(|error| FederatedEndpointError::receive(error.to_string()))
-    }
-}
-
-impl FederatedOutboundSink for FederatedOutboundChannel {
-    fn send(&self, command: FederatedOutboundCommand) -> Result<(), FederatedEndpointError> {
-        self.sender
-            .send(command)
-            .map_err(|error| FederatedEndpointError::send(error.to_string()))
-    }
-}
-
-/// Routes outbound commands from generated reactions to live federate clients.
-///
-/// Every endpoint must have a route installed before its sender reaction executes. Missing routes
-/// fail closed instead of retaining commands without a consumer.
-#[derive(Debug, Clone, Default)]
-pub struct FederatedOutboundRouter {
-    routes: Arc<Mutex<BTreeMap<FederatedEndpointId, FederatedOutboundChannel>>>,
-}
-
-impl FederatedOutboundRouter {
-    pub fn set_route(
-        &self,
-        endpoint: FederatedEndpointId,
-        channel: FederatedOutboundChannel,
-    ) -> Result<(), FederatedEndpointError> {
-        self.routes
-            .lock()
-            .map_err(|_| {
-                FederatedEndpointError::send("federated outbound route map lock poisoned")
-            })?
-            .insert(endpoint, channel);
-        Ok(())
-    }
-}
-
-impl FederatedOutboundSink for FederatedOutboundRouter {
-    fn send(&self, command: FederatedOutboundCommand) -> Result<(), FederatedEndpointError> {
-        let FederatedOutboundCommand::Msg(message) = &command;
-        let endpoint = message.endpoint.clone();
-        let channel = self
-            .routes
-            .lock()
-            .map_err(|_| {
-                FederatedEndpointError::send("federated outbound route map lock poisoned")
-            })?
-            .get(&endpoint)
-            .cloned();
-
-        match channel {
-            Some(channel) => FederatedOutboundSink::send(&channel, command),
-            None => Err(FederatedEndpointError::UnknownEndpoint(endpoint)),
-        }
-    }
 }
 
 trait FederatedInboundEndpoint: Send + Sync {
@@ -340,87 +247,7 @@ impl FederatedInboundEndpointRegistry {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::mpsc, time::Duration};
-
     use super::*;
-
-    fn outbound_command() -> FederatedOutboundCommand {
-        FederatedOutboundCommand::Msg(FederatedOutboundMessage {
-            endpoint: FederatedEndpointId::new("source/out->sink/in"),
-            tag: Tag::ZERO,
-            payload: b"7".to_vec(),
-        })
-    }
-
-    #[test]
-    fn outbound_channel_try_recv_delivers_exact_command() {
-        let (channel, receiver) = FederatedOutboundChannel::pair();
-        let command = outbound_command();
-
-        assert_eq!(receiver.try_recv().unwrap(), None);
-        FederatedOutboundSink::send(&channel, command.clone()).unwrap();
-
-        assert_eq!(receiver.try_recv().unwrap(), Some(command));
-        assert_eq!(receiver.try_recv().unwrap(), None);
-    }
-
-    #[test]
-    fn outbound_channel_send_wakes_blocking_receiver() {
-        let (channel, receiver) = FederatedOutboundChannel::pair();
-        let command = outbound_command();
-        let expected = command.clone();
-        let (observed_tx, observed_rx) = mpsc::channel();
-
-        let handle = std::thread::spawn(move || {
-            observed_tx.send(receiver.recv()).unwrap();
-        });
-
-        FederatedOutboundSink::send(&channel, command).unwrap();
-
-        let observed = observed_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("blocking outbound receiver should wake")
-            .unwrap();
-        assert_eq!(observed, expected);
-        handle.join().unwrap();
-    }
-
-    #[test]
-    fn outbound_router_rejects_missing_route() {
-        let router = FederatedOutboundRouter::default();
-        let command = outbound_command();
-
-        assert!(matches!(
-            FederatedOutboundSink::send(&router, command),
-            Err(FederatedEndpointError::UnknownEndpoint(endpoint))
-                if endpoint.as_str() == "source/out->sink/in"
-        ));
-    }
-
-    #[test]
-    fn outbound_router_forwards_to_installed_route() {
-        let router = FederatedOutboundRouter::default();
-        let (channel, receiver) = FederatedOutboundChannel::pair();
-        let endpoint = FederatedEndpointId::new("source/out->sink/in");
-
-        router.set_route(endpoint.clone(), channel).unwrap();
-        for value in 0..16_u32 {
-            FederatedOutboundSink::send(
-                &router,
-                FederatedOutboundCommand::Msg(FederatedOutboundMessage {
-                    endpoint: endpoint.clone(),
-                    tag: Tag::ZERO,
-                    payload: vec![(value % 251) as u8; 128],
-                }),
-            )
-            .unwrap();
-        }
-
-        for _ in 0..16 {
-            assert!(receiver.try_recv().unwrap().is_some());
-        }
-        assert_eq!(receiver.try_recv().unwrap(), None);
-    }
 
     #[test]
     fn federated_fault_state_preserves_first_error() {

@@ -1,6 +1,11 @@
-//! Checked conversions between Boomerang runtime metadata and wire protocol metadata.
+//! Checked conversions and prebuilt connections between runtime and wire protocol metadata.
 
-use crate::{WireDelay, WireTag};
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::{
+    FederateClientError, FederateClientMailbox, FederateClientRoute, FederateId,
+    FederateProtocolSender, FederateToRti, WireDelay, WireTag,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeBridgeError {
@@ -119,6 +124,122 @@ impl TryFrom<boomerang_runtime::Duration> for WireDelay {
     }
 }
 
+/// All outbound protocol mailboxes and endpoint bindings created during runtime lowering.
+#[derive(Debug, Default)]
+pub struct FederatedRuntimeConnections {
+    routes: BTreeMap<boomerang_runtime::FederatedEndpointId, FederateClientRoute>,
+    mailboxes: BTreeMap<FederateId, FederateClientMailbox>,
+}
+
+impl FederatedRuntimeConnections {
+    pub fn new(
+        federates: impl IntoIterator<Item = FederateId>,
+        routes: impl IntoIterator<Item = FederateClientRoute>,
+    ) -> Result<Self, FederateClientError> {
+        let mut federate_ids = BTreeSet::new();
+        let mut mailboxes = BTreeMap::new();
+        for federate in federates {
+            if !federate_ids.insert(federate.clone()) {
+                return Err(FederateClientError::Protocol(format!(
+                    "duplicate prebuilt federate mailbox for '{federate}'"
+                )));
+            }
+            mailboxes.insert(federate, FederateClientMailbox::new());
+        }
+
+        let mut route_map = BTreeMap::new();
+        for route in routes {
+            if !federate_ids.contains(&route.source) {
+                return Err(FederateClientError::Protocol(format!(
+                    "route for endpoint '{}' references source federate '{}' without a prebuilt mailbox",
+                    route.endpoint, route.source
+                )));
+            }
+            if !federate_ids.contains(&route.target) {
+                return Err(FederateClientError::Protocol(format!(
+                    "route for endpoint '{}' references target federate '{}' without a prebuilt mailbox",
+                    route.endpoint, route.target
+                )));
+            }
+            if route_map
+                .insert(route.endpoint.clone(), route.clone())
+                .is_some()
+            {
+                return Err(FederateClientError::DuplicateRoute(route.endpoint));
+            }
+        }
+
+        Ok(Self {
+            routes: route_map,
+            mailboxes,
+        })
+    }
+
+    pub fn outbound_sink(
+        &self,
+        endpoint: &boomerang_runtime::FederatedEndpointId,
+    ) -> Result<Box<dyn boomerang_runtime::FederatedOutboundSink>, FederateClientError> {
+        let route = self
+            .routes
+            .get(endpoint)
+            .ok_or_else(|| FederateClientError::UnknownRoute(endpoint.clone()))?
+            .clone();
+        let sender = self
+            .mailboxes
+            .get(&route.source)
+            .expect("route sources are validated when connections are built")
+            .sender();
+        Ok(Box::new(ProtocolFederatedOutboundSink { route, sender }))
+    }
+
+    pub fn take_mailbox(&mut self, federate: &FederateId) -> Option<FederateClientMailbox> {
+        self.mailboxes.remove(federate)
+    }
+
+    pub fn routes(&self) -> impl Iterator<Item = &FederateClientRoute> {
+        self.routes.values()
+    }
+
+    pub fn contains_mailbox(&self, federate: &FederateId) -> bool {
+        self.mailboxes.contains_key(federate)
+    }
+
+    pub fn mailbox_count(&self) -> usize {
+        self.mailboxes.len()
+    }
+}
+
+struct ProtocolFederatedOutboundSink {
+    route: FederateClientRoute,
+    sender: FederateProtocolSender,
+}
+
+impl boomerang_runtime::FederatedOutboundSink for ProtocolFederatedOutboundSink {
+    fn send(
+        &self,
+        command: boomerang_runtime::FederatedOutboundCommand,
+    ) -> Result<(), boomerang_runtime::FederatedEndpointError> {
+        let boomerang_runtime::FederatedOutboundCommand::Msg(message) = command;
+        if message.endpoint != self.route.endpoint {
+            return Err(boomerang_runtime::FederatedEndpointError::UnknownEndpoint(
+                message.endpoint,
+            ));
+        }
+
+        let tag = WireTag::try_from(message.tag)
+            .map_err(|error| boomerang_runtime::FederatedEndpointError::send(error.to_string()))?;
+        self.sender
+            .send(FederateToRti::Msg {
+                source: self.route.source.clone(),
+                target: self.route.target.clone(),
+                endpoint: crate::EndpointId::new(message.endpoint.as_str()),
+                tag,
+                payload: message.payload,
+            })
+            .map_err(|error| boomerang_runtime::FederatedEndpointError::send(error.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +320,50 @@ mod tests {
             )),
             "does not fit wire u64",
         );
+    }
+
+    #[test]
+    fn prebuilt_outbound_sink_emits_exact_protocol_message() {
+        let source = FederateId::new("source");
+        let target = FederateId::new("target");
+        let endpoint = boomerang_runtime::FederatedEndpointId::new("source/out->target/in");
+        let route = FederateClientRoute::new(endpoint.clone(), source.clone(), target.clone());
+        let mut connections =
+            FederatedRuntimeConnections::new([source.clone(), target.clone()], [route]).unwrap();
+        let sink = connections.outbound_sink(&endpoint).unwrap();
+
+        sink.send(boomerang_runtime::FederatedOutboundCommand::Msg(
+            boomerang_runtime::FederatedOutboundMessage {
+                endpoint: endpoint.clone(),
+                tag: boomerang_runtime::Tag::ZERO,
+                payload: b"7".to_vec(),
+            },
+        ))
+        .unwrap();
+
+        let mut mailbox = connections.take_mailbox(&source).unwrap();
+        assert_eq!(
+            mailbox.try_recv().unwrap(),
+            Some(FederateToRti::Msg {
+                source,
+                target,
+                endpoint: crate::EndpointId::new(endpoint.as_str()),
+                tag: WireTag::ZERO,
+                payload: b"7".to_vec(),
+            })
+        );
+        assert_eq!(mailbox.try_recv().unwrap(), None);
+    }
+
+    #[test]
+    fn prebuilt_connections_reject_route_without_source_mailbox() {
+        let endpoint = boomerang_runtime::FederatedEndpointId::new("source/out->target/in");
+        let error = FederatedRuntimeConnections::new(
+            [FederateId::new("target")],
+            [FederateClientRoute::new(endpoint, "source", "target")],
+        )
+        .expect_err("route source must be validated while connections are built");
+
+        assert!(error.to_string().contains("without a prebuilt mailbox"));
     }
 }

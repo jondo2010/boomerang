@@ -561,11 +561,15 @@ fn build_federated_connection_source<T: runtime::ReactorData + Clone>(
             assert_eq!(enclave_key, &enclave_key2, "Temporary cross-check");
 
             let remote_action_ref = enclave.create_async_action_ref(*runtime_action_key);
+            let outbound = builder_parts
+                .federated_connections
+                .outbound_sink(&endpoint)
+                .expect("federated endpoint sink was validated before deferred lowering");
             runtime::FederatedSenderReactionFn::<T>::new(
                 endpoint,
                 remote_action_ref,
                 encoder,
-                Box::new(builder_parts.federated_outbound_router.clone()),
+                outbound,
                 builder_parts.federated_faults.clone(),
             )
             .into()

@@ -102,10 +102,70 @@ enum ClientInput {
     Closed,
 }
 
+/// Cloneable sender for a federate's single ordered protocol-outbound queue.
+#[derive(Debug, Clone)]
+pub struct FederateProtocolSender {
+    outgoing: tokio::sync::mpsc::UnboundedSender<FederateToRti>,
+}
+
+impl FederateProtocolSender {
+    pub fn send(&self, message: FederateToRti) -> Result<(), FederateClientError> {
+        self.outgoing
+            .send(message)
+            .map_err(|_| FederateClientError::ClientClosed)
+    }
+}
+
+/// A prebuildable protocol mailbox whose receiver is connected to a transport at execution time.
+#[derive(Debug)]
+pub struct FederateClientMailbox {
+    sender: FederateProtocolSender,
+    receiver: tokio::sync::mpsc::UnboundedReceiver<FederateToRti>,
+}
+
+impl FederateClientMailbox {
+    pub fn new() -> Self {
+        let (outgoing, receiver) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            sender: FederateProtocolSender { outgoing },
+            receiver,
+        }
+    }
+
+    pub fn sender(&self) -> FederateProtocolSender {
+        self.sender.clone()
+    }
+
+    pub fn try_recv(&mut self) -> Result<Option<FederateToRti>, FederateClientError> {
+        match self.receiver.try_recv() {
+            Ok(message) => Ok(Some(message)),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => Ok(None),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                Err(FederateClientError::ClientClosed)
+            }
+        }
+    }
+
+    fn into_parts(
+        self,
+    ) -> (
+        FederateProtocolSender,
+        tokio::sync::mpsc::UnboundedReceiver<FederateToRti>,
+    ) {
+        (self.sender, self.receiver)
+    }
+}
+
+impl Default for FederateClientMailbox {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A connected protocol client for one persistent federate.
 #[derive(Debug)]
 pub struct FederateProtocolClient {
-    outgoing: tokio::sync::mpsc::UnboundedSender<FederateToRti>,
+    outgoing: FederateProtocolSender,
     incoming: mpsc::Receiver<ClientInput>,
     start_unix_epoch_ns: i128,
     reader: JoinHandle<()>,
@@ -123,8 +183,32 @@ impl FederateProtocolClient {
     pub async fn connect<S, R>(
         federate_id: FederateId,
         topology: NeighborStructure,
+        sink: S,
+        stream: R,
+    ) -> Result<Self, FederateClientError>
+    where
+        S: Sink<ProtocolFrame> + Send + Unpin + 'static,
+        S::Error: Into<TransportError> + Send + 'static,
+        R: TryStream<Ok = ProtocolFrame> + Send + Unpin + 'static,
+        R::Error: Into<TransportError> + Send + 'static,
+    {
+        Self::connect_with_mailbox(
+            federate_id,
+            topology,
+            sink,
+            stream,
+            FederateClientMailbox::new(),
+        )
+        .await
+    }
+
+    /// Connect a transport using an outbound mailbox created during runtime lowering.
+    pub async fn connect_with_mailbox<S, R>(
+        federate_id: FederateId,
+        topology: NeighborStructure,
         mut sink: S,
         mut stream: R,
+        mailbox: FederateClientMailbox,
     ) -> Result<Self, FederateClientError>
     where
         S: Sink<ProtocolFrame> + Send + Unpin + 'static,
@@ -158,7 +242,7 @@ impl FederateProtocolClient {
             None => return Err(FederateClientError::Transport(TransportError::Closed)),
         };
 
-        let (outgoing, outgoing_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (outgoing, outgoing_rx) = mailbox.into_parts();
         let (incoming, incoming_rx) = mpsc::channel();
         let reader = spawn_reader(stream, incoming.clone());
         let writer = spawn_writer(sink, outgoing_rx, incoming);
@@ -179,9 +263,7 @@ impl FederateProtocolClient {
 
     /// Send one federate-to-RTI protocol message on the connected transport.
     pub fn send(&self, message: FederateToRti) -> Result<(), FederateClientError> {
-        self.outgoing
-            .send(message)
-            .map_err(|_| FederateClientError::ClientClosed)
+        self.outgoing.send(message)
     }
 
     /// Receive one RTI-to-federate protocol message, waiting up to `timeout`.
@@ -283,7 +365,6 @@ pub struct RtiFederatedTimeBarrier {
     federate_id: FederateId,
     client: FederateProtocolClient,
     routes: BTreeMap<boomerang_runtime::FederatedEndpointId, FederateClientRoute>,
-    outbound: boomerang_runtime::FederatedOutboundReceiver,
     inbound: boomerang_runtime::FederatedInboundEndpointRegistry,
     faults: boomerang_runtime::FederatedFaultState,
     last_granted: Option<boomerang_runtime::Tag>,
@@ -297,14 +378,13 @@ impl RtiFederatedTimeBarrier {
     /// Route metadata binds runtime endpoints to source and target federates.
     #[tracing::instrument(
         level = "debug",
-        skip(federate_id, client, routes, outbound, inbound),
+        skip(federate_id, client, routes, inbound),
         fields(federate = %federate_id)
     )]
     pub fn new(
         federate_id: FederateId,
         client: FederateProtocolClient,
         routes: impl IntoIterator<Item = FederateClientRoute>,
-        outbound: boomerang_runtime::FederatedOutboundReceiver,
         inbound: boomerang_runtime::FederatedInboundEndpointRegistry,
         faults: boomerang_runtime::FederatedFaultState,
     ) -> Result<Self, FederateClientError> {
@@ -322,7 +402,6 @@ impl RtiFederatedTimeBarrier {
             federate_id,
             client,
             routes: route_map,
-            outbound,
             inbound,
             faults,
             last_granted: None,
@@ -402,7 +481,7 @@ impl RtiFederatedTimeBarrier {
         }
     }
 
-    /// Flush outbound runtime messages and report LTC for a completed scheduler tag.
+    /// Report LTC after every reaction-emitted MSG has entered the ordered client mailbox.
     #[tracing::instrument(
         level = "debug",
         skip(self, tag),
@@ -412,7 +491,6 @@ impl RtiFederatedTimeBarrier {
         &mut self,
         tag: boomerang_runtime::Tag,
     ) -> Result<(), FederateClientError> {
-        self.drain_outbound_commands()?;
         self.check_runtime_fault()?;
         self.send_ltc(tag)
     }
@@ -428,7 +506,7 @@ impl RtiFederatedTimeBarrier {
             return Ok(());
         }
 
-        let drain_result = self.drain_outbound_commands();
+        let fault_result = self.check_runtime_fault();
         let net_result = self.client.send(FederateToRti::Net {
             federate_id: self.federate_id.clone(),
             tag: WireTag::FOREVER,
@@ -437,7 +515,7 @@ impl RtiFederatedTimeBarrier {
             federate_id: self.federate_id.clone(),
         });
         self.stopped = true;
-        drain_result?;
+        fault_result?;
         net_result?;
         stop_result?;
         Ok(())
@@ -493,37 +571,6 @@ impl RtiFederatedTimeBarrier {
             .map_err(|_| FederateClientError::SchedulerEventChannelClosed {
                 endpoint: runtime_endpoint,
             })
-    }
-
-    /// Drain runtime outbound commands and forward each payload as an RTI MSG frame.
-    #[tracing::instrument(
-        level = "debug",
-        skip(self),
-        fields(federate = %self.federate_id)
-    )]
-    fn drain_outbound_commands(&mut self) -> Result<(), FederateClientError> {
-        self.check_runtime_fault()?;
-        while let Some(command) = self.outbound.try_recv()? {
-            let boomerang_runtime::FederatedOutboundCommand::Msg(message) = command;
-            let route = self.route_for(&message.endpoint)?;
-            if route.source != self.federate_id {
-                return Err(FederateClientError::RouteSourceMismatch {
-                    endpoint: message.endpoint,
-                    route_source: route.source.clone(),
-                    federate_id: self.federate_id.clone(),
-                });
-            }
-
-            self.client.send(FederateToRti::Msg {
-                source: self.federate_id.clone(),
-                target: route.target.clone(),
-                endpoint: crate::EndpointId::new(message.endpoint.as_str()),
-                tag: WireTag::try_from(message.tag)?,
-                payload: message.payload,
-            })?;
-        }
-
-        Ok(())
     }
 
     fn check_runtime_fault(&self) -> Result<(), FederateClientError> {
@@ -652,15 +699,29 @@ mod tests {
         F: FnOnce(crate::InMemoryTransport<ProtocolFrame, ProtocolFrame>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
+        connect_client_with_fake_rti_and_mailbox(federate_id, FederateClientMailbox::new(), rti)
+            .await
+    }
+
+    async fn connect_client_with_fake_rti_and_mailbox<F, Fut>(
+        federate_id: FederateId,
+        mailbox: FederateClientMailbox,
+        rti: F,
+    ) -> (FederateProtocolClient, JoinHandle<()>)
+    where
+        F: FnOnce(crate::InMemoryTransport<ProtocolFrame, ProtocolFrame>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
         let topology = source_sink_topology();
         let (client_transport, rti_transport) = in_memory_transport_pair();
         let handle = tokio::spawn(rti(rti_transport));
         let (sink, stream) = client_transport;
-        let client = FederateProtocolClient::connect(
+        let client = FederateProtocolClient::connect_with_mailbox(
             federate_id.clone(),
             topology.neighbors_for(&federate_id),
             sink,
             stream,
+            mailbox,
         )
         .await
         .unwrap();
@@ -713,8 +774,15 @@ mod tests {
     async fn bridge_sends_net_outbound_msg_and_ltc_frames() {
         boomerang_util::test_tracing::init_with_directive("boomerang_federated=debug");
 
-        let (client, rti) =
-            connect_client_with_fake_rti(fed("source"), |mut transport| async move {
+        let mut connections =
+            crate::FederatedRuntimeConnections::new([fed("source"), fed("sink")], [route()])
+                .unwrap();
+        let outbound = connections.outbound_sink(&endpoint()).unwrap();
+        let mailbox = connections.take_mailbox(&fed("source")).unwrap();
+        let (client, rti) = connect_client_with_fake_rti_and_mailbox(
+            fed("source"),
+            mailbox,
+            |mut transport| async move {
                 assert!(matches!(
                     recv_federate_to_rti(&mut transport).await,
                     FederateToRti::Hello { federate_id, .. } if federate_id == fed("source")
@@ -752,16 +820,15 @@ mod tests {
                         tag: WireTag::ZERO,
                     }
                 );
-            })
-            .await;
+            },
+        )
+        .await;
 
-        let (outbound, receiver) = boomerang_runtime::FederatedOutboundChannel::pair();
         let event_rx = empty_event_rx();
         let mut barrier = RtiFederatedTimeBarrier::new(
             fed("source"),
             client,
             [route()],
-            receiver,
             empty_inbound_registry(),
             boomerang_runtime::FederatedFaultState::default(),
         )
@@ -774,17 +841,15 @@ mod tests {
                 .map(|event| format!("{event:?}")),
             None
         );
-        boomerang_runtime::FederatedOutboundSink::send(
-            &outbound,
-            boomerang_runtime::FederatedOutboundCommand::Msg(
+        outbound
+            .send(boomerang_runtime::FederatedOutboundCommand::Msg(
                 boomerang_runtime::FederatedOutboundMessage {
                     endpoint: endpoint(),
                     tag: boomerang_runtime::Tag::ZERO,
                     payload: b"7".to_vec(),
                 },
-            ),
-        )
-        .unwrap();
+            ))
+            .unwrap();
         barrier
             .logical_tag_complete_result(boomerang_runtime::Tag::ZERO)
             .unwrap();
@@ -840,13 +905,11 @@ mod tests {
         })
         .await;
 
-        let (_outbound, receiver) = boomerang_runtime::FederatedOutboundChannel::pair();
         let (registry, event_rx, action_key, _shutdown_tx) = inbound_registry_for_u32();
         let mut barrier = RtiFederatedTimeBarrier::new(
             fed("sink"),
             client,
             [route()],
-            receiver,
             registry,
             boomerang_runtime::FederatedFaultState::default(),
         )
@@ -903,13 +966,11 @@ mod tests {
             })
             .await;
 
-        let (_outbound, receiver) = boomerang_runtime::FederatedOutboundChannel::pair();
         let event_rx = empty_event_rx();
         let mut barrier = RtiFederatedTimeBarrier::new(
             fed("source"),
             client,
             [route()],
-            receiver,
             empty_inbound_registry(),
             boomerang_runtime::FederatedFaultState::default(),
         )
@@ -958,12 +1019,10 @@ mod tests {
             })
             .await;
 
-        let (_outbound, receiver) = boomerang_runtime::FederatedOutboundChannel::pair();
         let mut barrier = RtiFederatedTimeBarrier::new(
             fed("source"),
             client,
             [route()],
-            receiver,
             empty_inbound_registry(),
             boomerang_runtime::FederatedFaultState::default(),
         )

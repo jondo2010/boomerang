@@ -22,10 +22,9 @@ use crate::{json_protocol_frame_transport, run_tcp_static_rti_session};
 /// Runtime parts required to execute one static federation.
 pub struct StaticFederationRuntimeParts {
     pub topology: FederatedTopology,
-    pub routes: Vec<FederateClientRoute>,
     pub federate_enclaves: BTreeMap<FederateId, boomerang_runtime::EnclaveKey>,
     pub enclaves: tinymap::TinyMap<boomerang_runtime::EnclaveKey, boomerang_runtime::Enclave>,
-    pub outbound_router: boomerang_runtime::FederatedOutboundRouter,
+    pub connections: crate::FederatedRuntimeConnections,
     pub faults: boomerang_runtime::FederatedFaultState,
     pub inbound_endpoints: boomerang_runtime::FederatedInboundEndpointRegistry,
 }
@@ -144,8 +143,7 @@ struct PreparedStaticFederation {
     federate_enclaves: BTreeMap<FederateId, boomerang_runtime::EnclaveKey>,
     federate_by_enclave: tinymap::TinySecondaryMap<boomerang_runtime::EnclaveKey, FederateId>,
     enclaves: tinymap::TinyMap<boomerang_runtime::EnclaveKey, boomerang_runtime::Enclave>,
-    outbound_channels: BTreeMap<FederateId, boomerang_runtime::FederatedOutboundChannel>,
-    outbound_receivers: BTreeMap<FederateId, boomerang_runtime::FederatedOutboundReceiver>,
+    connections: crate::FederatedRuntimeConnections,
     inbound_endpoints: boomerang_runtime::FederatedInboundEndpointRegistry,
     faults: boomerang_runtime::FederatedFaultState,
 }
@@ -155,7 +153,7 @@ pub fn execute_federation_in_memory(
     parts: StaticFederationRuntimeParts,
     config: boomerang_runtime::Config,
 ) -> Result<FederationEnvs, StaticFederationRunnerError> {
-    let prepared = prepare_static_federation(parts)?;
+    let mut prepared = prepare_static_federation(parts)?;
     validate_static_runner_config(&config)?;
     let tokio_runtime = build_tokio_runtime(prepared.federate_enclaves.len())?;
     let mut session_endpoints = BTreeMap::new();
@@ -173,7 +171,12 @@ pub fn execute_federation_in_memory(
 
     let session = StaticRtiSession::new(prepared.topology.clone(), session_endpoints);
     let session_handle = tokio_runtime.spawn(session.run());
-    let clients = connect_clients(&tokio_runtime, &prepared.topology, client_transports)?;
+    let clients = connect_clients(
+        &tokio_runtime,
+        &prepared.topology,
+        &mut prepared.connections,
+        client_transports,
+    )?;
 
     execute_connected_static_federation(prepared, config, &tokio_runtime, session_handle, clients)
 }
@@ -185,7 +188,7 @@ pub fn execute_federation_over_tcp(
     config: boomerang_runtime::Config,
     tcp: TcpStaticFederationConfig,
 ) -> Result<FederationEnvs, StaticFederationRunnerError> {
-    let prepared = prepare_static_federation(parts)?;
+    let mut prepared = prepare_static_federation(parts)?;
     validate_static_runner_config(&config)?;
     let tokio_runtime = build_tokio_runtime(prepared.federate_enclaves.len())?;
     let listener = tokio_runtime
@@ -220,7 +223,12 @@ pub fn execute_federation_over_tcp(
         client_transports.insert(federate_id.clone(), (sink, stream));
     }
 
-    let clients = match connect_clients(&tokio_runtime, &prepared.topology, client_transports) {
+    let clients = match connect_clients(
+        &tokio_runtime,
+        &prepared.topology,
+        &mut prepared.connections,
+        client_transports,
+    ) {
         Ok(clients) => clients,
         Err(error) => {
             session_handle.abort();
@@ -238,13 +246,13 @@ fn prepare_static_federation(
 
     let StaticFederationRuntimeParts {
         topology,
-        routes,
         federate_enclaves,
         enclaves,
-        outbound_router,
+        connections,
         faults,
         inbound_endpoints,
     } = parts;
+    let routes = connections.routes().cloned().collect();
     let federate_by_enclave = federate_by_enclave_map(&federate_enclaves)?;
 
     for (enclave_key, enclave) in enclaves.iter() {
@@ -255,33 +263,13 @@ fn prepare_static_federation(
         }
     }
 
-    let mut outbound_channels = BTreeMap::new();
-    let mut outbound_receivers = BTreeMap::new();
-    for federate_id in federate_enclaves.keys() {
-        let (channel, receiver) = boomerang_runtime::FederatedOutboundChannel::pair();
-        outbound_channels.insert(federate_id.clone(), channel);
-        outbound_receivers.insert(federate_id.clone(), receiver);
-    }
-
-    for route in &routes {
-        let channel = outbound_channels.get(&route.source).ok_or_else(|| {
-            bridge_error(format!(
-                "route endpoint '{}' references source federate '{}' without a runtime enclave",
-                route.endpoint.as_str(),
-                route.source
-            ))
-        })?;
-        outbound_router.set_route(route.endpoint.clone(), channel.clone())?;
-    }
-
     Ok(PreparedStaticFederation {
         topology,
         routes,
         federate_enclaves,
         federate_by_enclave,
         enclaves,
-        outbound_channels,
-        outbound_receivers,
+        connections,
         inbound_endpoints,
         faults,
     })
@@ -300,6 +288,7 @@ fn build_tokio_runtime(
 fn connect_clients<S, R>(
     tokio_runtime: &tokio::runtime::Runtime,
     topology: &FederatedTopology,
+    connections: &mut crate::FederatedRuntimeConnections,
     mut transports: BTreeMap<FederateId, (S, R)>,
 ) -> Result<BTreeMap<FederateId, FederateProtocolClient>, StaticFederationRunnerError>
 where
@@ -317,11 +306,22 @@ where
         })?;
         let federate_id_for_client = federate_id.clone();
         let neighbors = topology.neighbors_for(federate_id);
+        let mailbox = connections.take_mailbox(federate_id).ok_or_else(|| {
+            bridge_error(format!(
+                "missing prebuilt protocol mailbox for federate '{federate_id}'"
+            ))
+        })?;
         connect_handles.push((
             federate_id.clone(),
             tokio_runtime.spawn(async move {
-                FederateProtocolClient::connect(federate_id_for_client, neighbors, sink, stream)
-                    .await
+                FederateProtocolClient::connect_with_mailbox(
+                    federate_id_for_client,
+                    neighbors,
+                    sink,
+                    stream,
+                    mailbox,
+                )
+                .await
             }),
         ));
     }
@@ -357,8 +357,7 @@ fn execute_connected_static_federation(
         federate_enclaves,
         federate_by_enclave,
         enclaves,
-        outbound_channels: _outbound_channels,
-        mut outbound_receivers,
+        connections: _connections,
         inbound_endpoints,
         faults,
     } = prepared;
@@ -370,16 +369,10 @@ fn execute_connected_static_federation(
                 "missing connected client for federate '{federate_id}'"
             ))
         })?;
-        let outbound = outbound_receivers.remove(&federate_id).ok_or_else(|| {
-            bridge_error(format!(
-                "missing outbound receiver for federate '{federate_id}'"
-            ))
-        })?;
         let barrier = RtiFederatedTimeBarrier::new(
             federate_id.clone(),
             client,
             routes.clone(),
-            outbound,
             inbound_endpoints.clone(),
             faults.clone(),
         )?;
@@ -572,7 +565,7 @@ fn validate_static_runner_parts(
 ) -> Result<(), StaticFederationRunnerError> {
     if parts.topology.federates.is_empty()
         || parts.topology.edges.is_empty()
-        || parts.routes.is_empty()
+        || parts.connections.routes().next().is_none()
     {
         return Err(unsupported_topology(
             "static federation runner requires a non-empty federation topology with at least one cross-federate endpoint",
@@ -609,6 +602,21 @@ fn validate_static_runner_parts(
         }
     }
 
+    if parts.connections.mailbox_count() != federates.len() {
+        return Err(bridge_error(format!(
+            "prebuilt protocol mailbox count {} does not match topology federate count {}",
+            parts.connections.mailbox_count(),
+            federates.len()
+        )));
+    }
+    for federate_id in &parts.topology.federates {
+        if !parts.connections.contains_mailbox(federate_id) {
+            return Err(bridge_error(format!(
+                "federate '{federate_id}' is missing its prebuilt protocol mailbox"
+            )));
+        }
+    }
+
     let mut edge_endpoints = BTreeSet::new();
     for edge in &parts.topology.edges {
         if edge.endpoint.as_str().trim().is_empty() {
@@ -637,7 +645,7 @@ fn validate_static_runner_parts(
     }
 
     let mut route_endpoints = BTreeSet::new();
-    for route in &parts.routes {
+    for route in parts.connections.routes() {
         if route.endpoint.as_str().trim().is_empty() {
             return Err(bridge_error(
                 "federation route contains an empty endpoint id",
@@ -737,6 +745,11 @@ mod tests {
         let source_enclave = enclaves.insert(boomerang_runtime::Enclave::default());
         let sink_enclave = enclaves.insert(boomerang_runtime::Enclave::default());
 
+        let route = FederateClientRoute::new(
+            boomerang_runtime::FederatedEndpointId::new(endpoint.as_str()),
+            source.clone(),
+            sink.clone(),
+        );
         StaticFederationRuntimeParts {
             topology: FederatedTopology::with_edges(
                 [source.clone(), sink.clone()],
@@ -747,14 +760,12 @@ mod tests {
                     crate::WireDelay::ZERO,
                 )],
             ),
-            routes: vec![FederateClientRoute::new(
-                boomerang_runtime::FederatedEndpointId::new(endpoint.as_str()),
-                source.clone(),
-                sink.clone(),
-            )],
-            federate_enclaves: BTreeMap::from([(source, source_enclave), (sink, sink_enclave)]),
+            federate_enclaves: BTreeMap::from([
+                (source.clone(), source_enclave),
+                (sink.clone(), sink_enclave),
+            ]),
             enclaves,
-            outbound_router: boomerang_runtime::FederatedOutboundRouter::default(),
+            connections: crate::FederatedRuntimeConnections::new([source, sink], [route]).unwrap(),
             faults: boomerang_runtime::FederatedFaultState::default(),
             inbound_endpoints: boomerang_runtime::FederatedInboundEndpointRegistry::default(),
         }
@@ -780,6 +791,25 @@ mod tests {
             boomerang_runtime::Config::default().with_fast_forward(true),
         )
         .expect("fast-forward static federation should pass configuration validation");
+    }
+
+    #[test]
+    fn prebuilt_mailboxes_are_required_before_runner_startup() {
+        let mut parts = valid_empty_static_parts();
+        let source = FederateId::new("source");
+        parts.connections.take_mailbox(&source).unwrap();
+
+        let error = execute_federation_in_memory(
+            parts,
+            boomerang_runtime::Config::default().with_fast_forward(true),
+        )
+        .expect_err("runner must not recreate a missing lowered mailbox");
+
+        assert!(matches!(
+            error,
+            StaticFederationRunnerError::Bridge { what }
+                if what.contains("prebuilt protocol mailbox")
+        ));
     }
 
     #[cfg(feature = "serde-json-codec")]
@@ -813,10 +843,9 @@ mod tests {
     fn tcp_runner_validates_parts_before_binding() {
         let parts = StaticFederationRuntimeParts {
             topology: FederatedTopology::default(),
-            routes: Vec::new(),
             federate_enclaves: BTreeMap::new(),
             enclaves: tinymap::TinyMap::new(),
-            outbound_router: boomerang_runtime::FederatedOutboundRouter::default(),
+            connections: crate::FederatedRuntimeConnections::new([], []).unwrap(),
             faults: boomerang_runtime::FederatedFaultState::default(),
             inbound_endpoints: boomerang_runtime::FederatedInboundEndpointRegistry::default(),
         };

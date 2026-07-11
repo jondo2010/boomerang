@@ -13,7 +13,9 @@ pub mod session;
 pub mod static_runner;
 pub mod transport;
 
-pub use client::{FederateClientError, FederateProtocolClient};
+pub use client::{
+    FederateClientError, FederateClientMailbox, FederateProtocolClient, FederateProtocolSender,
+};
 #[cfg(feature = "runtime")]
 pub use client::{FederateClientRoute, RtiFederatedTimeBarrier};
 #[cfg(feature = "serde-json-codec")]
@@ -25,7 +27,7 @@ pub use protocol::{
 };
 pub use rti::{FederateState, GrantDecision, RtiDelivery, RtiError, RtiState};
 #[cfg(feature = "runtime")]
-pub use runtime_bridge::RuntimeBridgeError;
+pub use runtime_bridge::{FederatedRuntimeConnections, RuntimeBridgeError};
 pub use session::{RtiSessionEndpoint, SessionError, StaticRtiSession};
 #[cfg(all(feature = "runtime", feature = "serde-json-codec"))]
 pub use static_runner::{execute_federation_over_tcp, TcpStaticFederationConfig};

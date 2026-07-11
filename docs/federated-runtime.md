@@ -46,15 +46,15 @@ The top-level `boomerang` crate should only re-export public APIs.
 
 The following block diagram shows a one-way source-to-sink federation. Solid
 arrows are runtime data or coordination flow. Dashed arrows are construction or
-route installation performed before the schedulers start. The transport blocks
+transport attachment performed before the schedulers start. The transport blocks
 represent either the in-memory channels or the TCP connections used by the two
 static runners.
 
 ```mermaid
 flowchart LR
     Builder["EnvBuilder<br/>reactors, ports, connection"]
-    Parts["BuilderRuntimeParts<br/>enclaves, plan, router,<br/>fault state, inbound registry"]
-    Runner["Static federation runner<br/>validates topology and installs routes"]
+    Parts["BuilderRuntimeParts<br/>ready-to-run enclaves, plan,<br/>prebuilt mailboxes, fault state,<br/>inbound registry"]
+    Runner["Static federation runner<br/>validates and connects transports"]
     Faults["FederatedFaultState<br/>shared first terminal endpoint error"]
 
     Builder -->|lower| Parts
@@ -64,17 +64,15 @@ flowchart LR
         SchedA["Scheduler A"]
         SourceReaction["Source reaction<br/>writes output port"]
         SenderReaction["FederatedSenderReactionFn<br/>encode payload + runtime tag"]
-        Router["FederatedOutboundRouter<br/>endpoint → channel"]
-        OutChannel["FederatedOutboundChannel"]
-        OutReceiver["FederatedOutboundReceiver"]
+        EndpointSink["Endpoint-specific protocol sink<br/>runtime command → MSG"]
+        MailboxA["Prebuilt Tokio mailbox A<br/>single ordered outbound queue"]
         BarrierA["RtiFederatedTimeBarrier A"]
         ClientA["FederateProtocolClient A"]
 
-        SchedA --> SourceReaction --> SenderReaction --> Router
-        Router --> OutChannel --> OutReceiver --> BarrierA
+        SchedA --> SourceReaction --> SenderReaction --> EndpointSink --> MailboxA --> ClientA
         SchedA -->|tag request / completion| BarrierA
         BarrierA -->|grant or inbound interrupt| SchedA
-        BarrierA -->|NET, MSG, LTC, Stop| ClientA
+        BarrierA -->|NET, LTC, Stop| ClientA
         ClientA -->|TAG, MSG, Error| BarrierA
     end
 
@@ -107,8 +105,10 @@ flowchart LR
     RTI --> TransportB --> ClientB
     ClientB --> TransportB --> RTI
 
+    Parts -. deferred lowering attaches .-> EndpointSink
+    Parts -. owns until transport connection .-> MailboxA
     Runner -. creates schedulers and clients .-> SchedA
-    Runner -. installs endpoint route .-> Router
+    Runner -. connects existing mailbox to writer .-> MailboxA
     Runner -. creates protocol session .-> RTI
     Runner -. supplies inbound registry .-> Registry
     Runner -. shares fault state .-> Faults
@@ -117,10 +117,12 @@ flowchart LR
     BarrierB -. checks before protocol progress .-> Faults
 ```
 
-The router is deliberately below the protocol boundary: it handles
-`FederatedOutboundCommand` values and runtime endpoint ids, not wire frames.
-`RtiFederatedTimeBarrier` drains the selected receiver and is the first
-component that translates those commands into protocol `MSG` frames.
+Each generated sender reaction represents one statically known endpoint, so
+lowering attaches its final endpoint-specific sink directly. That sink is
+implemented in `boomerang_federated`: it accepts the protocol-free
+`FederatedOutboundCommand`, performs the checked wire-tag conversion, constructs
+the protocol `MSG`, and sends it into the source federate's prebuilt mailbox.
+There is no runtime router or intermediate `kanal` queue.
 
 `add_child_federate` builds a child reactor with `ReactorPlacement::Federate`.
 Federate placement starts a runtime enclave, so a source/sink federation has one
@@ -130,13 +132,14 @@ the runner. Non-empty unmapped enclaves are rejected.
 
 `EnvBuilder::into_runtime_parts` produces `BuilderRuntimeParts` containing the
 runtime enclaves, builder aliases, inter-partition metadata, the federation
-plan, a federated outbound router, shared federated fault state, and the
-inbound endpoint registry.
+plan, prebuilt per-federate protocol mailboxes, shared federated fault state,
+and the inbound endpoint registry. Deferred reaction construction attaches the
+final endpoint-specific outbound sink before these parts are returned.
 
-The builder-facing execution functions validate the builder-owned plan and
-convert it into protocol/runtime DTOs: a `FederatedTopology`, client routes,
-and a federate-to-enclave map. They then delegate to the matching function in
-`boomerang_federated::static_runner`.
+The builder-facing execution functions validate the builder-owned plan, create
+the `FederatedTopology` and federate-to-enclave map, and move the already-built
+runtime connections into `StaticFederationRuntimeParts`. They then delegate to
+the matching function in `boomerang_federated::static_runner`.
 
 The static runner first validates and prepares transport-independent runtime
 parts, then rejects configurations without `Config::with_fast_forward(true)`.
@@ -154,20 +157,20 @@ That function runs one scheduler thread per active mapped federate enclave with
 loop, stops every barrier after success or failure, and returns coordination or
 runtime endpoint errors to the public caller.
 
-The connected runner retains an outbound sender and receiver pair for every
-federate until shutdown, including federates with no outbound route. This keeps
-the receiver open while the barrier drains it before sending final no-future
-and `Stop` frames.
+The connected runner consumes the prebuilt mailbox receiver for every federate
+and gives it to that client's async transport writer. Sender reactions and the
+barrier share clones of the same mailbox sender. Consequently, reaction-emitted
+`MSG` frames and the subsequent `LTC` frame enter one FIFO queue in program
+order.
 
 Outbound payloads leave a scheduler through generated federated sender
 reactions. Codec and sink failures are published to the shared first-error
-fault latch and become terminal scheduler errors. Those reactions write to a
-`FederatedOutboundRouter`. The static runner installs every endpoint route
-before scheduler execution; a missing route returns `UnknownEndpoint` instead
-of retaining an undeliverable command. Installed routes send to the source
-federate's `FederatedOutboundReceiver`. The barrier drains that receiver during
-`logical_tag_complete`, sends protocol `MSG` frames, and then sends `LTC` for
-the completed scheduler tag.
+fault latch and become terminal scheduler errors. Each reaction writes through
+the endpoint-specific sink installed during lowering. The sink immediately
+converts the runtime command to a protocol `MSG` and enqueues it in the source
+federate mailbox. During `logical_tag_complete`, the barrier checks the shared
+fault latch and enqueues `LTC` into that same mailbox after all reaction-emitted
+messages for the completed tag.
 
 Inbound payloads arrive as protocol `MSG` frames from the RTI. The barrier
 schedules them through `FederatedInboundEndpointRegistry`, returns the queued

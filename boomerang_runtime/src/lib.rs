@@ -40,8 +40,7 @@ pub use event::AsyncEvent;
 #[cfg(feature = "federated")]
 pub use federated::{
     FederatedEndpointError, FederatedEndpointId, FederatedFaultState,
-    FederatedInboundEndpointRegistry, FederatedOutboundChannel, FederatedOutboundCommand,
-    FederatedOutboundMessage, FederatedOutboundReceiver, FederatedOutboundRouter,
+    FederatedInboundEndpointRegistry, FederatedOutboundCommand, FederatedOutboundMessage,
     FederatedOutboundSink, FederatedPayloadDecoder, FederatedPayloadEncoder,
 };
 pub use kanal::{Receiver, Sender};

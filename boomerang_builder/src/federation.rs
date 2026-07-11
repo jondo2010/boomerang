@@ -302,6 +302,7 @@ fn static_federation_runtime_parts(
         federate_enclaves,
         enclaves: parts.enclaves,
         outbound_sink: parts.federated_outbound_sink,
+        faults: parts.federated_faults,
         inbound_endpoints: parts.federated_inbound_endpoints,
     })
 }

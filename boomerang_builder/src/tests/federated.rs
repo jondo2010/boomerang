@@ -16,6 +16,23 @@ struct LocalOnlyPayload {
     _value: Arc<Mutex<u32>>,
 }
 
+#[derive(Clone, Copy)]
+struct IntentionalFailingCodec;
+
+impl boomerang_federated::PayloadEncoder<u32> for IntentionalFailingCodec {
+    fn encode(&self, _value: &u32) -> Result<Vec<u8>, boomerang_federated::CodecError> {
+        Err(boomerang_federated::CodecError::message(
+            "intentional codec failure",
+        ))
+    }
+}
+
+impl boomerang_federated::PayloadDecoder<u32> for IntentionalFailingCodec {
+    fn decode(&self, _bytes: &[u8]) -> Result<u32, boomerang_federated::CodecError> {
+        Ok(0)
+    }
+}
+
 fn local_only_source_reactor(
 ) -> impl Reactor<(), Ports = TypedPortKey<LocalOnlyPayload, Output, Contained>> {
     |name: &str,
@@ -804,6 +821,41 @@ fn test_live_in_memory_distributed_hello_records_zero_tag() {
     });
 
     assert_eq!(values, vec![(runtime::Tag::ZERO, 7)]);
+}
+
+#[test]
+fn test_live_in_memory_intentional_codec_failure_is_returned() {
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let mut env_builder = EnvBuilder::new();
+    env_builder
+        .register_federated_codec::<u32, _>(IntentionalFailingCodec)
+        .unwrap();
+    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let source = builder
+        .add_child_federate(federated_startup_source_reactor(7), "source", ())
+        .unwrap();
+    let sink = builder
+        .add_child_federate(
+            federated_recording_sink_reactor(Arc::clone(&values)),
+            "sink",
+            (),
+        )
+        .unwrap();
+    builder.connect_port(source, sink, None, false).unwrap();
+    builder.finish().unwrap();
+
+    let config = runtime::Config::default().with_fast_forward(true);
+    let parts = env_builder.into_runtime_parts(&config).unwrap();
+    let error = run_with_wall_timeout("intentional codec failure", move || {
+        execute_federation_in_memory(parts, config).unwrap_err()
+    });
+
+    assert!(matches!(
+        error,
+        BuilderError::FederationBridgeError { what }
+            if what.contains("intentional codec failure")
+    ));
+    assert!(values.lock().unwrap().is_empty());
 }
 
 #[test]

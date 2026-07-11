@@ -6,8 +6,8 @@ use crate::{
 };
 #[cfg(feature = "federated")]
 use crate::{
-    FederatedEndpointId, FederatedOutboundCommand, FederatedOutboundMessage, FederatedOutboundSink,
-    FederatedPayloadEncoder,
+    FederatedEndpointId, FederatedFaultState, FederatedOutboundCommand, FederatedOutboundMessage,
+    FederatedOutboundSink, FederatedPayloadEncoder,
 };
 
 tinymap::key_type! { pub ReactionKey }
@@ -191,6 +191,7 @@ pub struct FederatedSenderReactionFn<T: ReactorData + Clone> {
     target_action_ref: AsyncActionRef<T>,
     encoder: Box<dyn FederatedPayloadEncoder<T>>,
     outbound: Box<dyn FederatedOutboundSink>,
+    faults: FederatedFaultState,
 }
 
 #[cfg(feature = "federated")]
@@ -200,12 +201,14 @@ impl<T: ReactorData + Clone> FederatedSenderReactionFn<T> {
         target_action_ref: AsyncActionRef<T>,
         encoder: Box<dyn FederatedPayloadEncoder<T>>,
         outbound: Box<dyn FederatedOutboundSink>,
+        faults: FederatedFaultState,
     ) -> Self {
         Self {
             endpoint,
             target_action_ref,
             encoder,
             outbound,
+            faults,
         }
     }
 }
@@ -251,6 +254,7 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for FederatedSenderReact
             Ok(payload) => payload,
             Err(error) => {
                 tracing::error!(?error, endpoint = %self.endpoint, "Failed to encode federated payload");
+                self.faults.record(error);
                 return;
             }
         };
@@ -263,6 +267,7 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for FederatedSenderReact
 
         if let Err(error) = self.outbound.send(command) {
             tracing::error!(?error, endpoint = %self.endpoint, "Failed to emit federated command");
+            self.faults.record(error);
         }
     }
 }

@@ -26,6 +26,7 @@ pub struct StaticFederationRuntimeParts {
     pub federate_enclaves: BTreeMap<FederateId, boomerang_runtime::EnclaveKey>,
     pub enclaves: tinymap::TinyMap<boomerang_runtime::EnclaveKey, boomerang_runtime::Enclave>,
     pub outbound_sink: boomerang_runtime::BufferedFederatedOutboundSink,
+    pub faults: boomerang_runtime::FederatedFaultState,
     pub inbound_endpoints: boomerang_runtime::FederatedInboundEndpointRegistry,
 }
 
@@ -143,6 +144,7 @@ struct PreparedStaticFederation {
     outbound_channels: BTreeMap<FederateId, boomerang_runtime::FederatedOutboundChannel>,
     outbound_receivers: BTreeMap<FederateId, boomerang_runtime::FederatedOutboundReceiver>,
     inbound_endpoints: boomerang_runtime::FederatedInboundEndpointRegistry,
+    faults: boomerang_runtime::FederatedFaultState,
 }
 
 /// Execute a static federation in memory using the real RTI session and federate clients.
@@ -235,6 +237,7 @@ fn prepare_static_federation(
         federate_enclaves,
         enclaves,
         outbound_sink,
+        faults,
         inbound_endpoints,
     } = parts;
     let federate_by_enclave = federate_by_enclave_map(&federate_enclaves)?;
@@ -275,6 +278,7 @@ fn prepare_static_federation(
         outbound_channels,
         outbound_receivers,
         inbound_endpoints,
+        faults,
     })
 }
 
@@ -351,6 +355,7 @@ fn execute_connected_static_federation(
         outbound_channels: _outbound_channels,
         mut outbound_receivers,
         inbound_endpoints,
+        faults,
     } = prepared;
 
     let mut barriers = BTreeMap::new();
@@ -371,6 +376,7 @@ fn execute_connected_static_federation(
             routes.clone(),
             outbound,
             inbound_endpoints.clone(),
+            faults.clone(),
         )?;
         barriers.insert(
             federate_id.clone(),
@@ -741,6 +747,7 @@ mod tests {
             federate_enclaves: BTreeMap::new(),
             enclaves: tinymap::TinyMap::new(),
             outbound_sink: boomerang_runtime::BufferedFederatedOutboundSink::default(),
+            faults: boomerang_runtime::FederatedFaultState::default(),
             inbound_endpoints: boomerang_runtime::FederatedInboundEndpointRegistry::default(),
         };
         let tcp = TcpStaticFederationConfig {

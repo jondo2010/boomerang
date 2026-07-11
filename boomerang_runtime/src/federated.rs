@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     fmt,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use crate::{
@@ -40,7 +40,7 @@ impl fmt::Display for FederatedEndpointId {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum FederatedEndpointError {
     #[error("federated payload codec error: {0}")]
     Codec(String),
@@ -65,6 +65,24 @@ pub enum FederatedEndpointError {
 
     #[error("federated outbound buffer lock poisoned")]
     PoisonedOutboundBuffer,
+}
+
+/// Shared first-error latch for terminal federated runtime endpoint failures.
+#[derive(Debug, Clone, Default)]
+pub struct FederatedFaultState {
+    first_error: Arc<OnceLock<FederatedEndpointError>>,
+}
+
+impl FederatedFaultState {
+    /// Record `error` if no earlier endpoint failure has been published.
+    pub fn record(&self, error: FederatedEndpointError) {
+        let _ = self.first_error.set(error);
+    }
+
+    /// Return the first published endpoint failure without consuming it.
+    pub fn get(&self) -> Option<FederatedEndpointError> {
+        self.first_error.get().cloned()
+    }
 }
 
 impl FederatedEndpointError {
@@ -248,22 +266,20 @@ impl Default for BufferedFederatedOutboundSink {
 
 impl FederatedOutboundSink for BufferedFederatedOutboundSink {
     fn send(&self, command: FederatedOutboundCommand) -> Result<(), FederatedEndpointError> {
-        FederatedOutboundSink::send(&self.buffer, command.clone())?;
-
         let FederatedOutboundCommand::Msg(message) = &command;
-        let Some(channel) = self
+        let channel = self
             .live_routes
             .lock()
             .map_err(|_| {
                 FederatedEndpointError::send("federated outbound route map lock poisoned")
             })?
             .get(&message.endpoint)
-            .cloned()
-        else {
-            return Ok(());
-        };
+            .cloned();
 
-        FederatedOutboundSink::send(&channel, command)
+        match channel {
+            Some(channel) => FederatedOutboundSink::send(&channel, command),
+            None => FederatedOutboundSink::send(&self.buffer, command),
+        }
     }
 }
 
@@ -437,18 +453,51 @@ mod tests {
     }
 
     #[test]
-    fn buffered_outbound_sink_buffers_and_forwards_live_route() {
+    fn buffered_outbound_sink_buffers_without_live_route() {
         let buffer = FederatedOutboundBuffer::default();
         let sink = BufferedFederatedOutboundSink::new(buffer.clone());
-        let (channel, receiver) = FederatedOutboundChannel::pair();
         let command = outbound_command();
-        let FederatedOutboundCommand::Msg(message) = &command;
-
-        sink.set_live_route(message.endpoint.clone(), channel)
-            .unwrap();
         FederatedOutboundSink::send(&sink, command.clone()).unwrap();
 
         assert_eq!(buffer.drain().unwrap(), vec![command.clone()]);
-        assert_eq!(receiver.try_recv().unwrap(), Some(command));
+    }
+
+    #[test]
+    fn buffered_outbound_sink_forwards_without_retaining_live_command() {
+        let buffer = FederatedOutboundBuffer::default();
+        let sink = BufferedFederatedOutboundSink::new(buffer.clone());
+        let (channel, receiver) = FederatedOutboundChannel::pair();
+        let endpoint = FederatedEndpointId::new("source/out->sink/in");
+
+        sink.set_live_route(endpoint.clone(), channel).unwrap();
+        for value in 0..1024_u32 {
+            FederatedOutboundSink::send(
+                &sink,
+                FederatedOutboundCommand::Msg(FederatedOutboundMessage {
+                    endpoint: endpoint.clone(),
+                    tag: Tag::ZERO,
+                    payload: vec![(value % 251) as u8; 128],
+                }),
+            )
+            .unwrap();
+        }
+
+        for _ in 0..1024 {
+            assert!(receiver.try_recv().unwrap().is_some());
+        }
+        assert_eq!(receiver.try_recv().unwrap(), None);
+        assert_eq!(buffer.len().unwrap(), 0);
+    }
+
+    #[test]
+    fn federated_fault_state_preserves_first_error() {
+        let faults = FederatedFaultState::default();
+        faults.record(FederatedEndpointError::codec("first"));
+        faults.record(FederatedEndpointError::send("second"));
+
+        assert!(matches!(
+            faults.get(),
+            Some(FederatedEndpointError::Codec(message)) if message == "first"
+        ));
     }
 }

@@ -70,6 +70,9 @@ pub struct BuilderRuntimeParts {
     #[cfg(feature = "federated")]
     pub(crate) federated_outbound_sink: runtime::BufferedFederatedOutboundSink,
     #[cfg(feature = "federated")]
+    /// Shared terminal fault state for generated sender reactions and live barriers.
+    pub federated_faults: runtime::FederatedFaultState,
+    #[cfg(feature = "federated")]
     /// Registry used by federated clients to schedule received endpoint payloads.
     pub federated_inbound_endpoints: runtime::FederatedInboundEndpointRegistry,
     #[cfg(feature = "replay")]
@@ -145,6 +148,8 @@ impl BuilderRuntimeParts {
                 #[cfg(feature = "federated")]
                 federated_outbound_sink,
                 #[cfg(feature = "federated")]
+                federated_faults: runtime::FederatedFaultState::default(),
+                #[cfg(feature = "federated")]
                 federated_inbound_endpoints: runtime::FederatedInboundEndpointRegistry::default(),
                 replayers,
             }
@@ -168,6 +173,8 @@ impl BuilderRuntimeParts {
                 federated_outbound,
                 #[cfg(feature = "federated")]
                 federated_outbound_sink,
+                #[cfg(feature = "federated")]
+                federated_faults: runtime::FederatedFaultState::default(),
                 #[cfg(feature = "federated")]
                 federated_inbound_endpoints: runtime::FederatedInboundEndpointRegistry::default(),
             }

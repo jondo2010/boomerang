@@ -40,9 +40,10 @@ pub use event::AsyncEvent;
 #[cfg(feature = "federated")]
 pub use federated::{
     BufferedFederatedOutboundSink, FederatedEndpointError, FederatedEndpointId,
-    FederatedInboundEndpointRegistry, FederatedOutboundBuffer, FederatedOutboundChannel,
-    FederatedOutboundCommand, FederatedOutboundMessage, FederatedOutboundReceiver,
-    FederatedOutboundSink, FederatedPayloadDecoder, FederatedPayloadEncoder,
+    FederatedFaultState, FederatedInboundEndpointRegistry, FederatedOutboundBuffer,
+    FederatedOutboundChannel, FederatedOutboundCommand, FederatedOutboundMessage,
+    FederatedOutboundReceiver, FederatedOutboundSink, FederatedPayloadDecoder,
+    FederatedPayloadEncoder,
 };
 pub use kanal::{Receiver, Sender};
 pub use key_set::KeySetLimits as ReactionSetLimits;

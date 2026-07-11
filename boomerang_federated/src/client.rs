@@ -285,6 +285,7 @@ pub struct RtiFederatedTimeBarrier {
     routes: BTreeMap<boomerang_runtime::FederatedEndpointId, FederateClientRoute>,
     outbound: boomerang_runtime::FederatedOutboundReceiver,
     inbound: boomerang_runtime::FederatedInboundEndpointRegistry,
+    faults: boomerang_runtime::FederatedFaultState,
     last_granted: Option<boomerang_runtime::Tag>,
     stopped: bool,
     poll_interval: StdDuration,
@@ -305,6 +306,7 @@ impl RtiFederatedTimeBarrier {
         routes: impl IntoIterator<Item = FederateClientRoute>,
         outbound: boomerang_runtime::FederatedOutboundReceiver,
         inbound: boomerang_runtime::FederatedInboundEndpointRegistry,
+        faults: boomerang_runtime::FederatedFaultState,
     ) -> Result<Self, FederateClientError> {
         let mut route_map = BTreeMap::new();
         for route in routes {
@@ -322,6 +324,7 @@ impl RtiFederatedTimeBarrier {
             routes: route_map,
             outbound,
             inbound,
+            faults,
             last_granted: None,
             stopped: false,
             poll_interval: StdDuration::from_millis(1),
@@ -349,6 +352,8 @@ impl RtiFederatedTimeBarrier {
         {
             return Ok(None);
         }
+
+        self.check_runtime_fault()?;
 
         let requested = WireTag::try_from(tag)?;
         self.client.send(FederateToRti::Net {
@@ -408,6 +413,7 @@ impl RtiFederatedTimeBarrier {
         tag: boomerang_runtime::Tag,
     ) -> Result<(), FederateClientError> {
         self.drain_outbound_commands()?;
+        self.check_runtime_fault()?;
         self.send_ltc(tag)
     }
 
@@ -422,15 +428,18 @@ impl RtiFederatedTimeBarrier {
             return Ok(());
         }
 
-        self.drain_outbound_commands()?;
-        self.client.send(FederateToRti::Net {
+        let drain_result = self.drain_outbound_commands();
+        let net_result = self.client.send(FederateToRti::Net {
             federate_id: self.federate_id.clone(),
             tag: WireTag::FOREVER,
-        })?;
-        self.client.send(FederateToRti::Stop {
+        });
+        let stop_result = self.client.send(FederateToRti::Stop {
             federate_id: self.federate_id.clone(),
-        })?;
+        });
         self.stopped = true;
+        drain_result?;
+        net_result?;
+        stop_result?;
         Ok(())
     }
 
@@ -496,6 +505,7 @@ impl RtiFederatedTimeBarrier {
         fields(federate = %self.federate_id)
     )]
     fn drain_outbound_commands(&mut self) -> Result<(), FederateClientError> {
+        self.check_runtime_fault()?;
         while let Some(command) = self.outbound.try_recv()? {
             let boomerang_runtime::FederatedOutboundCommand::Msg(message) = command;
             let route = self.route_for(&message.endpoint)?;
@@ -517,6 +527,13 @@ impl RtiFederatedTimeBarrier {
         }
 
         Ok(())
+    }
+
+    fn check_runtime_fault(&self) -> Result<(), FederateClientError> {
+        match self.faults.get() {
+            Some(error) => Err(FederateClientError::RuntimeEndpoint(error)),
+            None => Ok(()),
+        }
     }
 
     /// Send LTC for a scheduler tag through the federate protocol client.
@@ -741,6 +758,7 @@ mod tests {
             [route()],
             receiver,
             empty_inbound_registry(),
+            boomerang_runtime::FederatedFaultState::default(),
         )
         .unwrap();
 
@@ -812,9 +830,15 @@ mod tests {
 
         let (_outbound, receiver) = boomerang_runtime::FederatedOutboundChannel::pair();
         let (registry, event_rx, action_key, _shutdown_tx) = inbound_registry_for_u32();
-        let mut barrier =
-            RtiFederatedTimeBarrier::new(fed("sink"), client, [route()], receiver, registry)
-                .unwrap();
+        let mut barrier = RtiFederatedTimeBarrier::new(
+            fed("sink"),
+            client,
+            [route()],
+            receiver,
+            registry,
+            boomerang_runtime::FederatedFaultState::default(),
+        )
+        .unwrap();
 
         let event = barrier
             .acquire_tag_result(boomerang_runtime::Tag::ZERO, &event_rx)
@@ -872,6 +896,7 @@ mod tests {
             [route()],
             receiver,
             empty_inbound_registry(),
+            boomerang_runtime::FederatedFaultState::default(),
         )
         .unwrap();
 
@@ -925,6 +950,7 @@ mod tests {
             [route()],
             receiver,
             empty_inbound_registry(),
+            boomerang_runtime::FederatedFaultState::default(),
         )
         .unwrap();
 

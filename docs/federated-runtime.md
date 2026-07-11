@@ -83,11 +83,11 @@ and `Stop` frames.
 
 Outbound payloads leave a scheduler through generated federated sender
 reactions. Codec and sink failures are published to the shared first-error
-fault latch and become terminal scheduler errors. Those reactions write to
-`BufferedFederatedOutboundSink`. Before a live route is installed, a command is
-stored in the drainable diagnostic buffer. After installation, it is sent only
-to the per-federate `FederatedOutboundReceiver`; live execution does not retain
-a second payload copy. The barrier drains that receiver during
+fault latch and become terminal scheduler errors. Those reactions write to a
+`FederatedOutboundRouter`. The static runner installs every endpoint route
+before scheduler execution; a missing route returns `UnknownEndpoint` instead
+of retaining an undeliverable command. Installed routes send to the source
+federate's `FederatedOutboundReceiver`. The barrier drains that receiver during
 `logical_tag_complete`, sends protocol `MSG` frames, and then sends `LTC` for
 the completed scheduler tag.
 

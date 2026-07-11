@@ -19,6 +19,32 @@ struct LocalOnlyPayload {
 #[derive(Clone, Copy)]
 struct IntentionalFailingCodec;
 
+struct FederatedOutboundCapture {
+    receiver: runtime::FederatedOutboundReceiver,
+}
+
+impl FederatedOutboundCapture {
+    fn install(parts: &BuilderRuntimeParts) -> Self {
+        assert_eq!(parts.federation_plan.endpoints.len(), 1);
+        let endpoint =
+            runtime::FederatedEndpointId::new(parts.federation_plan.endpoints[0].id.as_str());
+        let (channel, receiver) = runtime::FederatedOutboundChannel::pair();
+        parts
+            .federated_outbound_router
+            .set_route(endpoint, channel)
+            .unwrap();
+        Self { receiver }
+    }
+
+    fn drain(&self) -> Vec<runtime::FederatedOutboundCommand> {
+        let mut commands = Vec::new();
+        while let Some(command) = self.receiver.try_recv().unwrap() {
+            commands.push(command);
+        }
+        commands
+    }
+}
+
 impl boomerang_federated::PayloadEncoder<u32> for IntentionalFailingCodec {
     fn encode(&self, _value: &u32) -> Result<Vec<u8>, boomerang_federated::CodecError> {
         Err(boomerang_federated::CodecError::message(
@@ -443,16 +469,17 @@ fn run_in_memory_federated_source_sink(
     builder.connect_port(source, sink, after, false).unwrap();
     builder.finish().unwrap();
 
+    let parts = env_builder
+        .into_runtime_parts(&runtime::Config::default())
+        .unwrap();
+    let outbound = FederatedOutboundCapture::install(&parts);
     let BuilderRuntimeParts {
         enclaves,
         aliases,
         federation_plan,
-        federated_outbound,
         federated_inbound_endpoints,
         ..
-    } = env_builder
-        .into_runtime_parts(&runtime::Config::default())
-        .unwrap();
+    } = parts;
 
     let source_reactor = federation_plan
         .federates
@@ -485,7 +512,7 @@ fn run_in_memory_federated_source_sink(
         .with_fast_forward(true)
         .with_timeout(runtime::Duration::milliseconds(100));
     let _source_envs = runtime::execute_enclaves(source_enclaves.into_iter(), config.clone());
-    let commands = federated_outbound.drain().unwrap();
+    let commands = outbound.drain();
     let routed_tags = route_outbound_commands_through_rti(
         &federation_plan,
         commands,
@@ -1117,7 +1144,6 @@ fn test_federated_connection_lowers_endpoint_runtime_parts() {
 
     assert_eq!(parts.federation_plan.endpoints.len(), 1);
     assert_eq!(parts.federated_inbound_endpoints.len(), 1);
-    assert!(parts.federated_outbound.is_empty().unwrap());
     assert!(parts.enclaves.values().all(|enclave| {
         enclave.upstream_enclaves.is_empty() && enclave.downstream_enclaves.is_empty()
     }));
@@ -1140,20 +1166,18 @@ fn test_federated_sender_emits_serialized_msg_command() {
         .unwrap();
     builder.finish().unwrap();
 
-    let BuilderRuntimeParts {
-        enclaves,
-        federated_outbound,
-        ..
-    } = env_builder
+    let parts = env_builder
         .into_runtime_parts(&runtime::Config::default())
         .unwrap();
+    let outbound = FederatedOutboundCapture::install(&parts);
+    let BuilderRuntimeParts { enclaves, .. } = parts;
 
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(runtime::Duration::milliseconds(1));
     let _envs = runtime::execute_enclaves(enclaves.into_iter(), config);
 
-    let commands = federated_outbound.drain().unwrap();
+    let commands = outbound.drain();
     assert_eq!(commands.len(), 1);
     let runtime::FederatedOutboundCommand::Msg(message) = &commands[0];
     assert_eq!(message.endpoint.as_str(), "main/source/out->main/sink/in");

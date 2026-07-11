@@ -25,7 +25,7 @@ pub struct StaticFederationRuntimeParts {
     pub routes: Vec<FederateClientRoute>,
     pub federate_enclaves: BTreeMap<FederateId, boomerang_runtime::EnclaveKey>,
     pub enclaves: tinymap::TinyMap<boomerang_runtime::EnclaveKey, boomerang_runtime::Enclave>,
-    pub outbound_sink: boomerang_runtime::BufferedFederatedOutboundSink,
+    pub outbound_router: boomerang_runtime::FederatedOutboundRouter,
     pub faults: boomerang_runtime::FederatedFaultState,
     pub inbound_endpoints: boomerang_runtime::FederatedInboundEndpointRegistry,
 }
@@ -241,7 +241,7 @@ fn prepare_static_federation(
         routes,
         federate_enclaves,
         enclaves,
-        outbound_sink,
+        outbound_router,
         faults,
         inbound_endpoints,
     } = parts;
@@ -271,7 +271,7 @@ fn prepare_static_federation(
                 route.source
             ))
         })?;
-        outbound_sink.set_live_route(route.endpoint.clone(), channel.clone())?;
+        outbound_router.set_route(route.endpoint.clone(), channel.clone())?;
     }
 
     Ok(PreparedStaticFederation {
@@ -754,7 +754,7 @@ mod tests {
             )],
             federate_enclaves: BTreeMap::from([(source, source_enclave), (sink, sink_enclave)]),
             enclaves,
-            outbound_sink: boomerang_runtime::BufferedFederatedOutboundSink::default(),
+            outbound_router: boomerang_runtime::FederatedOutboundRouter::default(),
             faults: boomerang_runtime::FederatedFaultState::default(),
             inbound_endpoints: boomerang_runtime::FederatedInboundEndpointRegistry::default(),
         }
@@ -816,7 +816,7 @@ mod tests {
             routes: Vec::new(),
             federate_enclaves: BTreeMap::new(),
             enclaves: tinymap::TinyMap::new(),
-            outbound_sink: boomerang_runtime::BufferedFederatedOutboundSink::default(),
+            outbound_router: boomerang_runtime::FederatedOutboundRouter::default(),
             faults: boomerang_runtime::FederatedFaultState::default(),
             inbound_endpoints: boomerang_runtime::FederatedInboundEndpointRegistry::default(),
         };

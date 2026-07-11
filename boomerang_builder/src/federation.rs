@@ -301,7 +301,7 @@ fn static_federation_runtime_parts(
         routes,
         federate_enclaves,
         enclaves: parts.enclaves,
-        outbound_sink: parts.federated_outbound_sink,
+        outbound_router: parts.federated_outbound_router,
         faults: parts.federated_faults,
         inbound_endpoints: parts.federated_inbound_endpoints,
     })

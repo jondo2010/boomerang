@@ -293,6 +293,22 @@ impl Trace {
         );
     }
 
+    /// Asserts the total number of recorded events without imposing a total order.
+    #[track_caller]
+    pub(crate) fn assert_len(&self, expected: usize) {
+        let events = self
+            .events
+            .lock()
+            .expect("trace collector mutex should not be poisoned");
+        assert_eq!(
+            events.len(),
+            expected,
+            "expected {expected} total trace event(s), found {}\ntrace:\n{}",
+            events.len(),
+            Self::normalized_events(&events)
+        );
+    }
+
     fn normalized(&self) -> String {
         Self::normalized_events(
             &self

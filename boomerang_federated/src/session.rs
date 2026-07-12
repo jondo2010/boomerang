@@ -536,6 +536,19 @@ mod tests {
         )
     }
 
+    fn positive_delay_cycle_topology() -> FederatedTopology {
+        let a = fed("a");
+        let b = fed("b");
+        let delay = WireDelay::from_nanos(10);
+        FederatedTopology::with_edges(
+            [a.clone(), b.clone()],
+            [
+                TopologyEdge::new(a.clone(), b.clone(), endpoint("a.out->b.in"), delay),
+                TopologyEdge::new(b, a, endpoint("b.out->a.in"), delay),
+            ],
+        )
+    }
+
     async fn send_client_frame(
         transport: &mut InMemoryTransport<ProtocolFrame, ProtocolFrame>,
         message: FederateToRti,
@@ -576,16 +589,137 @@ mod tests {
     }
 
     fn spawn_session(topology: FederatedTopology) -> SessionFixture {
+        spawn_two_federate_session(topology, fed("source"), fed("sink"))
+    }
+
+    fn spawn_two_federate_session(
+        topology: FederatedTopology,
+        first: FederateId,
+        second: FederateId,
+    ) -> SessionFixture {
         let (source_client, source_rti) = in_memory_transport_pair();
         let (sink_client, sink_rti) = in_memory_transport_pair();
         let mut endpoints = BTreeMap::new();
-        endpoints.insert(fed("source"), session_endpoint(source_rti));
-        endpoints.insert(fed("sink"), session_endpoint(sink_rti));
+        endpoints.insert(first, session_endpoint(source_rti));
+        endpoints.insert(second, session_endpoint(sink_rti));
 
         let session = StaticRtiSession::new(topology, endpoints);
         let handle = tokio::spawn(session.run());
 
         (source_client, sink_client, handle)
+    }
+
+    #[tokio::test]
+    async fn session_positive_delay_cycle_progresses_with_bounded_control_trace() {
+        const ADVANCE_COUNT: usize = 3;
+        const FEDERATE_COUNT: usize = 2;
+        const CONTROL_EVENTS_PER_ADVANCE: usize = 3; // NET request, TAG grant, and LTC.
+        const FIXED_PROTOCOL_EVENTS: usize = 8; // Two each of Hello, Start, and both Stop directions.
+
+        let topology = positive_delay_cycle_topology();
+        let a = fed("a");
+        let b = fed("b");
+        let (a_client, b_client, session) =
+            spawn_two_federate_session(topology.clone(), a.clone(), b.clone());
+        let trace = Trace::default();
+        let mut a_client = RecordingClientTransport::new(a_client, a.clone(), trace.clone());
+        let mut b_client = RecordingClientTransport::new(b_client, b.clone(), trace.clone());
+
+        a_client
+            .send(FederateToRti::Hello {
+                federate_id: a.clone(),
+                topology: topology.neighbors_for(&a),
+            })
+            .await;
+        b_client
+            .send(FederateToRti::Hello {
+                federate_id: b.clone(),
+                topology: topology.neighbors_for(&b),
+            })
+            .await;
+        assert_eq!(
+            a_client.recv().await,
+            RtiToFederate::Start {
+                start_unix_epoch_ns: 0,
+            }
+        );
+        assert_eq!(
+            b_client.recv().await,
+            RtiToFederate::Start {
+                start_unix_epoch_ns: 0,
+            }
+        );
+
+        let requested_tags = [
+            WireTag::ZERO,
+            WireTag::finite(10, 0),
+            WireTag::finite(20, 0),
+        ];
+        for tag in requested_tags {
+            a_client
+                .send(FederateToRti::Net {
+                    federate_id: a.clone(),
+                    tag,
+                })
+                .await;
+            b_client
+                .send(FederateToRti::Net {
+                    federate_id: b.clone(),
+                    tag,
+                })
+                .await;
+            assert_eq!(a_client.recv().await, RtiToFederate::Tag { tag });
+            assert_eq!(b_client.recv().await, RtiToFederate::Tag { tag });
+            a_client
+                .send(FederateToRti::Ltc {
+                    federate_id: a.clone(),
+                    tag,
+                })
+                .await;
+            b_client
+                .send(FederateToRti::Ltc {
+                    federate_id: b.clone(),
+                    tag,
+                })
+                .await;
+        }
+
+        a_client
+            .send(FederateToRti::Stop {
+                federate_id: a.clone(),
+            })
+            .await;
+        b_client
+            .send(FederateToRti::Stop {
+                federate_id: b.clone(),
+            })
+            .await;
+        assert_eq!(a_client.recv().await, RtiToFederate::Stop);
+        assert_eq!(b_client.recv().await, RtiToFederate::Stop);
+
+        use FramePattern::{Ltc, Net, Tag};
+        for tag in requested_tags {
+            for federate in [&a, &b] {
+                trace.assert_count(TracePattern::client_to_rti(federate.clone(), Net(tag)), 1);
+                trace.assert_count(TracePattern::rti_to_client(federate.clone(), Tag(tag)), 1);
+                trace.assert_count(TracePattern::client_to_rti(federate.clone(), Ltc(tag)), 1);
+                trace.assert_before(
+                    TracePattern::client_to_rti(federate.clone(), Net(tag)),
+                    TracePattern::rti_to_client(federate.clone(), Tag(tag)),
+                );
+                trace.assert_before(
+                    TracePattern::rti_to_client(federate.clone(), Tag(tag)),
+                    TracePattern::client_to_rti(federate.clone(), Ltc(tag)),
+                );
+            }
+        }
+        trace.assert_len(
+            ADVANCE_COUNT * FEDERATE_COUNT * CONTROL_EVENTS_PER_ADVANCE + FIXED_PROTOCOL_EVENTS,
+        );
+
+        drop(a_client);
+        drop(b_client);
+        session.await.unwrap().unwrap();
     }
 
     #[tokio::test]

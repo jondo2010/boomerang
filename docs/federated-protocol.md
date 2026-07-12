@@ -196,10 +196,21 @@ federation shutdown. An error is never interpreted as a tag grant.
 
 ## Performance Considerations
 
-The current `MsgAck` contract sends one control frame per delivered message.
-This is deliberately exact and keeps same-tag accounting correct, but it can be
-expensive for high-rate small-message traffic: each `MSG` adds another client
-write, serialization step, RTI dispatch, and grant retry.
+The client keeps at most one outstanding `NET` for an unchanged next-event
+request. Once that frame has been queued successfully, an unrelated inbound
+message may interrupt the scheduler wait without causing the same `NET` to be
+sent again. A distinct later request sends one new `NET`; a sufficient `TAG`,
+normal stop, or a terminal protocol, transport, RTI, or runtime error clears the
+outstanding request. This is an efficiency contract, not permission to suppress
+`NET` frames whose requested tag has changed.
+
+The current `MsgAck` contract sends exactly one control frame per successfully
+decoded and queued delivered message. This is deliberately exact and keeps
+same-tag accounting correct, but it can be expensive for high-rate
+small-message traffic: each `MSG` adds another client write, serialization
+step, RTI dispatch, and grant retry. Failed queue delivery is not acknowledged,
+and neither `LTC` nor another same-tag acknowledgment substitutes for the
+required one-to-one acknowledgment.
 
 A future protocol may batch acknowledgments by target and tag, acknowledge
 sequence ranges, or piggyback counts on another control frame. Any such change
@@ -209,6 +220,16 @@ must preserve these properties:
 - each message decrements the RTI count exactly once;
 - one acknowledgment cannot accidentally clear other same-tag messages; and
 - pending grants are reconsidered promptly enough to avoid artificial stalls.
+
+Protocol trace tests distinguish causal requirements from incidental
+implementation ordering. They assert exact counts, absence, bounded control
+traffic, and relations such as forwarded `MSG` before matching `MsgAck` and
+matching `MsgAck` before a grant that it unblocks. They assert a complete total
+order only in the hand-driven reference session where the harness deliberately
+chooses every exchange. Concurrently independent `NET`, `TAG`, and `LTC`
+interleavings are not protocol contracts. The positive-delay-cycle reference
+therefore uses a derived budget of one `NET`, one `TAG`, and one `LTC` per
+federate and requested watermark rather than relying on thread timing.
 
 The live command channels are also currently unbounded. Introducing bounded
 backpressure requires care because blocking a scheduler reaction before its

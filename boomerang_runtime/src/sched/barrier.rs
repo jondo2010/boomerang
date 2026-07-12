@@ -103,6 +103,12 @@ impl std::fmt::Debug for dyn FederatedTimeBarrier {
 pub(super) struct LogicalTimeBarrier {
     /// The last released tag
     pub(super) released_tag: Tag,
+    /// The greatest upstream tag for which a provisional release is outstanding.
+    ///
+    /// An unchanged or weaker acquire request reuses this watermark instead of
+    /// sending duplicate coordination traffic. A stronger request advances it,
+    /// and an actual release resets it so a later acquire may send a new request.
+    /// A failed upstream send does not establish the watermark.
     pub(super) provisional_tag: Tag,
     /// The send context for the upstream enclave
     pub(super) upstream_ctx: SendContext,

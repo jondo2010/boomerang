@@ -11,7 +11,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TraceActor {
+enum TraceActor {
     Client(FederateId),
     Rti,
 }
@@ -25,8 +25,9 @@ impl fmt::Display for TraceActor {
     }
 }
 
+/// Lossy semantic projection used only to match and display recorded protocol frames.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TraceMessage {
+pub(crate) enum FramePattern {
     Hello,
     Start,
     Net(WireTag),
@@ -38,7 +39,32 @@ pub(crate) enum TraceMessage {
     Error,
 }
 
-impl fmt::Display for TraceMessage {
+impl FramePattern {
+    fn from_frame(frame: &ProtocolFrame) -> Self {
+        match frame {
+            ProtocolFrame::FederateToRti(FederateToRti::Hello { .. }) => Self::Hello,
+            ProtocolFrame::FederateToRti(FederateToRti::Net { tag, .. }) => Self::Net(*tag),
+            ProtocolFrame::FederateToRti(FederateToRti::Ltc { tag, .. }) => Self::Ltc(*tag),
+            ProtocolFrame::FederateToRti(FederateToRti::MsgAck { tag, .. }) => Self::MsgAck(*tag),
+            ProtocolFrame::FederateToRti(FederateToRti::Msg { endpoint, tag, .. })
+            | ProtocolFrame::RtiToFederate(RtiToFederate::Msg { endpoint, tag, .. }) => Self::Msg {
+                tag: *tag,
+                endpoint: endpoint.clone(),
+            },
+            ProtocolFrame::FederateToRti(FederateToRti::Stop { .. })
+            | ProtocolFrame::RtiToFederate(RtiToFederate::Stop) => Self::Stop,
+            ProtocolFrame::RtiToFederate(RtiToFederate::Start { .. }) => Self::Start,
+            ProtocolFrame::RtiToFederate(RtiToFederate::Tag { tag }) => Self::Tag(*tag),
+            ProtocolFrame::RtiToFederate(RtiToFederate::Error { .. }) => Self::Error,
+        }
+    }
+
+    fn matches(&self, frame: &ProtocolFrame) -> bool {
+        self == &Self::from_frame(frame)
+    }
+}
+
+impl fmt::Display for FramePattern {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Hello => f.write_str("Hello"),
@@ -54,78 +80,37 @@ impl fmt::Display for TraceMessage {
     }
 }
 
-impl From<&FederateToRti> for TraceMessage {
-    fn from(frame: &FederateToRti) -> Self {
-        match frame {
-            FederateToRti::Hello { .. } => Self::Hello,
-            FederateToRti::Net { tag, .. } => Self::Net(*tag),
-            FederateToRti::Ltc { tag, .. } => Self::Ltc(*tag),
-            FederateToRti::MsgAck { tag, .. } => Self::MsgAck(*tag),
-            FederateToRti::Msg { endpoint, tag, .. } => Self::Msg {
-                tag: *tag,
-                endpoint: endpoint.clone(),
-            },
-            FederateToRti::Stop { .. } => Self::Stop,
-        }
-    }
-}
-
-impl From<&RtiToFederate> for TraceMessage {
-    fn from(frame: &RtiToFederate) -> Self {
-        match frame {
-            RtiToFederate::Start { .. } => Self::Start,
-            RtiToFederate::Tag { tag } => Self::Tag(*tag),
-            RtiToFederate::Msg { endpoint, tag, .. } => Self::Msg {
-                tag: *tag,
-                endpoint: endpoint.clone(),
-            },
-            RtiToFederate::Stop => Self::Stop,
-            RtiToFederate::Error { .. } => Self::Error,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TraceEvent {
-    pub(crate) from: TraceActor,
-    pub(crate) to: TraceActor,
-    pub(crate) message: TraceMessage,
+struct TraceEvent {
+    client_id: FederateId,
+    frame: ProtocolFrame,
 }
 
 impl TraceEvent {
-    pub(crate) fn new(from: TraceActor, to: TraceActor, message: TraceMessage) -> Self {
-        Self { from, to, message }
+    fn new(client_id: FederateId, frame: ProtocolFrame) -> Self {
+        Self { client_id, frame }
     }
 
-    pub(crate) fn client_to_rti(frame: &FederateToRti) -> Self {
-        let federate_id = match frame {
-            FederateToRti::Hello { federate_id, .. }
-            | FederateToRti::Net { federate_id, .. }
-            | FederateToRti::Ltc { federate_id, .. }
-            | FederateToRti::MsgAck { federate_id, .. }
-            | FederateToRti::Stop { federate_id } => federate_id,
-            FederateToRti::Msg { source, .. } => source,
-        };
-
-        Self {
-            from: TraceActor::Client(federate_id.clone()),
-            to: TraceActor::Rti,
-            message: frame.into(),
-        }
-    }
-
-    pub(crate) fn rti_to_client(target: &FederateId, frame: &RtiToFederate) -> Self {
-        Self {
-            from: TraceActor::Rti,
-            to: TraceActor::Client(target.clone()),
-            message: frame.into(),
+    fn actors(&self) -> (TraceActor, TraceActor) {
+        match &self.frame {
+            ProtocolFrame::FederateToRti(_) => {
+                (TraceActor::Client(self.client_id.clone()), TraceActor::Rti)
+            }
+            ProtocolFrame::RtiToFederate(_) => {
+                (TraceActor::Rti, TraceActor::Client(self.client_id.clone()))
+            }
         }
     }
 }
 
 impl fmt::Display for TraceEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} -> {} {}", self.from, self.to, self.message)
+        let (from, to) = self.actors();
+        write!(
+            f,
+            "{from} -> {to} {}",
+            FramePattern::from_frame(&self.frame)
+        )
     }
 }
 
@@ -133,38 +118,47 @@ impl fmt::Display for TraceEvent {
 pub(crate) struct TracePattern {
     from: Option<TraceActor>,
     to: Option<TraceActor>,
-    message: TraceMessage,
+    frame: FramePattern,
 }
 
 impl TracePattern {
-    pub(crate) fn message(message: TraceMessage) -> Self {
+    pub(crate) fn message(frame: FramePattern) -> Self {
         Self {
             from: None,
             to: None,
-            message,
+            frame,
         }
     }
 
-    pub(crate) fn between(from: TraceActor, to: TraceActor, message: TraceMessage) -> Self {
+    pub(crate) fn client_to_rti(client_id: FederateId, frame: FramePattern) -> Self {
+        Self::between(TraceActor::Client(client_id), TraceActor::Rti, frame)
+    }
+
+    pub(crate) fn rti_to_client(client_id: FederateId, frame: FramePattern) -> Self {
+        Self::between(TraceActor::Rti, TraceActor::Client(client_id), frame)
+    }
+
+    fn between(from: TraceActor, to: TraceActor, frame: FramePattern) -> Self {
         Self {
             from: Some(from),
             to: Some(to),
-            message,
+            frame,
         }
     }
 
     fn matches(&self, event: &TraceEvent) -> bool {
-        self.from.as_ref().is_none_or(|from| from == &event.from)
-            && self.to.as_ref().is_none_or(|to| to == &event.to)
-            && self.message == event.message
+        let (from, to) = event.actors();
+        self.from.as_ref().is_none_or(|expected| expected == &from)
+            && self.to.as_ref().is_none_or(|expected| expected == &to)
+            && self.frame.matches(&event.frame)
     }
 }
 
 impl fmt::Display for TracePattern {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match (&self.from, &self.to) {
-            (Some(from), Some(to)) => write!(f, "{from} -> {to} {}", self.message),
-            _ => self.message.fmt(f),
+            (Some(from), Some(to)) => write!(f, "{from} -> {to} {}", self.frame),
+            _ => self.frame.fmt(f),
         }
     }
 }
@@ -175,37 +169,34 @@ pub(crate) struct Trace {
 }
 
 impl Trace {
-    pub(crate) fn push(&self, event: TraceEvent) {
+    fn push(&self, event: TraceEvent) {
         self.events
             .lock()
             .expect("trace collector mutex should not be poisoned")
             .push(event);
     }
 
-    pub(crate) fn count(&self, mut predicate: impl FnMut(&TraceEvent) -> bool) -> usize {
+    fn count(&self, pattern: &TracePattern) -> usize {
         self.events
             .lock()
             .expect("trace collector mutex should not be poisoned")
             .iter()
-            .filter(|event| predicate(event))
+            .filter(|event| pattern.matches(event))
             .count()
     }
 
-    pub(crate) fn first_position(
-        &self,
-        mut predicate: impl FnMut(&TraceEvent) -> bool,
-    ) -> Option<usize> {
+    fn first_position(&self, pattern: &TracePattern) -> Option<usize> {
         self.events
             .lock()
             .expect("trace collector mutex should not be poisoned")
             .iter()
-            .position(&mut predicate)
+            .position(|event| pattern.matches(event))
     }
 
     #[track_caller]
     pub(crate) fn assert_before(&self, first: TracePattern, second: TracePattern) {
-        let first_position = self.first_position(|event| first.matches(event));
-        let second_position = self.first_position(|event| second.matches(event));
+        let first_position = self.first_position(&first);
+        let second_position = self.first_position(&second);
 
         assert!(
             matches!((first_position, second_position), (Some(first), Some(second)) if first < second),
@@ -215,24 +206,28 @@ impl Trace {
     }
 
     #[track_caller]
-    pub(crate) fn assert_exact(&self, expected: &[TraceEvent]) {
+    pub(crate) fn assert_exact(&self, expected: &[TracePattern]) {
         let events = self
             .events
             .lock()
             .expect("trace collector mutex should not be poisoned");
-        let actual_trace = Self::normalized_events(&events);
-        assert_eq!(
-            events.as_slice(),
-            expected,
+        let matches = events.len() == expected.len()
+            && events
+                .iter()
+                .zip(expected)
+                .all(|(event, pattern)| pattern.matches(event));
+
+        assert!(
+            matches,
             "expected exact trace:\n{}actual trace:\n{}",
-            Self::normalized_events(expected),
-            actual_trace
+            Self::normalized_patterns(expected),
+            Self::normalized_events(&events)
         );
     }
 
     #[track_caller]
     pub(crate) fn assert_count(&self, pattern: TracePattern, expected: usize) {
-        let actual = self.count(|event| pattern.matches(event));
+        let actual = self.count(&pattern);
         assert_eq!(
             actual,
             expected,
@@ -243,7 +238,7 @@ impl Trace {
 
     #[track_caller]
     pub(crate) fn assert_absent(&self, pattern: TracePattern) {
-        let actual = self.count(|event| pattern.matches(event));
+        let actual = self.count(&pattern);
         assert_eq!(
             actual,
             0,
@@ -265,6 +260,14 @@ impl Trace {
         let mut output = String::new();
         for (index, event) in events.iter().enumerate() {
             writeln!(output, "{index}: {event}").expect("writing to a String cannot fail");
+        }
+        output
+    }
+
+    fn normalized_patterns(patterns: &[TracePattern]) -> String {
+        let mut output = String::new();
+        for (index, pattern) in patterns.iter().enumerate() {
+            writeln!(output, "{index}: {pattern}").expect("writing to a String cannot fail");
         }
         output
     }
@@ -297,12 +300,13 @@ where
     St: Stream<Item = Result<ProtocolFrame, TransportError>> + Unpin,
 {
     pub(crate) async fn send(&mut self, message: FederateToRti) {
-        let event = TraceEvent::client_to_rti(&message);
+        let frame = ProtocolFrame::FederateToRti(message);
         self.sink
-            .send(ProtocolFrame::FederateToRti(message))
+            .send(frame.clone())
             .await
             .expect("recording client transport should send a protocol frame");
-        self.trace.push(event);
+        self.trace
+            .push(TraceEvent::new(self.federate_id.clone(), frame));
     }
 
     pub(crate) async fn recv(&mut self) -> RtiToFederate {
@@ -312,13 +316,12 @@ where
             .await
             .expect("recording client transport should remain open")
             .expect("recording client transport should receive a protocol frame");
-        let message = match frame {
+        self.trace
+            .push(TraceEvent::new(self.federate_id.clone(), frame.clone()));
+        match frame {
             ProtocolFrame::RtiToFederate(message) => message,
             other => panic!("expected RTI-to-federate frame, got {other:?}"),
-        };
-        self.trace
-            .push(TraceEvent::rti_to_client(&self.federate_id, &message));
-        message
+        }
     }
 }
 
@@ -327,38 +330,64 @@ mod tests {
     use super::*;
     use crate::in_memory_transport_pair;
 
-    fn client(id: &str) -> TraceActor {
-        TraceActor::Client(FederateId::from(id))
+    fn client_to_rti(client_id: &str, message: FederateToRti) -> TraceEvent {
+        TraceEvent::new(
+            FederateId::from(client_id),
+            ProtocolFrame::FederateToRti(message),
+        )
+    }
+
+    fn rti_to_client(client_id: &str, message: RtiToFederate) -> TraceEvent {
+        TraceEvent::new(
+            FederateId::from(client_id),
+            ProtocolFrame::RtiToFederate(message),
+        )
     }
 
     #[test]
-    fn trace_normalizes_frames_to_semantic_fields() {
-        let first = FederateToRti::Msg {
-            source: FederateId::from("source"),
-            target: FederateId::from("target"),
-            endpoint: EndpointId::from("output"),
-            tag: WireTag::finite(10, 2),
-            payload: vec![1, 2, 3],
-        };
-        let second = FederateToRti::Msg {
-            source: FederateId::from("source"),
-            target: FederateId::from("another-target"),
-            endpoint: EndpointId::from("output"),
-            tag: WireTag::finite(10, 2),
-            payload: vec![9],
-        };
-
-        assert_eq!(
-            TraceEvent::client_to_rti(&first),
-            TraceEvent::client_to_rti(&second)
+    fn frame_patterns_ignore_non_semantic_protocol_fields() {
+        let endpoint = EndpointId::from("output");
+        let first = client_to_rti(
+            "source",
+            FederateToRti::Msg {
+                source: FederateId::from("source"),
+                target: FederateId::from("target"),
+                endpoint: endpoint.clone(),
+                tag: WireTag::finite(10, 2),
+                payload: vec![1, 2, 3],
+            },
+        );
+        let second = client_to_rti(
+            "source",
+            FederateToRti::Msg {
+                source: FederateId::from("source"),
+                target: FederateId::from("another-target"),
+                endpoint: endpoint.clone(),
+                tag: WireTag::finite(10, 2),
+                payload: vec![9],
+            },
+        );
+        let pattern = TracePattern::client_to_rti(
+            FederateId::from("source"),
+            FramePattern::Msg {
+                tag: WireTag::finite(10, 2),
+                endpoint,
+            },
         );
 
-        let start = RtiToFederate::Start {
-            start_unix_epoch_ns: 42,
-        };
-        assert_eq!(
-            TraceEvent::rti_to_client(&FederateId::from("target"), &start).message,
-            TraceMessage::Start
+        assert_ne!(first, second);
+        assert!(pattern.matches(&first));
+        assert!(pattern.matches(&second));
+
+        let start = rti_to_client(
+            "target",
+            RtiToFederate::Start {
+                start_unix_epoch_ns: 42,
+            },
+        );
+        assert!(
+            TracePattern::rti_to_client(FederateId::from("target"), FramePattern::Start)
+                .matches(&start)
         );
     }
 
@@ -395,80 +424,51 @@ mod tests {
         );
 
         trace.assert_exact(&[
-            TraceEvent::new(
-                TraceActor::Client(federate_id.clone()),
-                TraceActor::Rti,
-                TraceMessage::Net(WireTag::ZERO),
-            ),
-            TraceEvent::new(
-                TraceActor::Rti,
-                TraceActor::Client(federate_id),
-                TraceMessage::Tag(WireTag::ZERO),
-            ),
+            TracePattern::client_to_rti(federate_id.clone(), FramePattern::Net(WireTag::ZERO)),
+            TracePattern::rti_to_client(federate_id, FramePattern::Tag(WireTag::ZERO)),
         ]);
     }
 
     #[test]
     fn trace_assertions_match_counts_absence_and_causal_order() {
+        let source = FederateId::from("source");
         let trace = Trace::default();
-        trace.push(TraceEvent {
-            from: client("source"),
-            to: TraceActor::Rti,
-            message: TraceMessage::Net(WireTag::ZERO),
-        });
-        trace.push(TraceEvent {
-            from: TraceActor::Rti,
-            to: client("source"),
-            message: TraceMessage::Tag(WireTag::ZERO),
-        });
+        trace.push(client_to_rti(
+            "source",
+            FederateToRti::Net {
+                federate_id: source.clone(),
+                tag: WireTag::ZERO,
+            },
+        ));
+        trace.push(rti_to_client(
+            "source",
+            RtiToFederate::Tag { tag: WireTag::ZERO },
+        ));
 
-        assert_eq!(
-            trace.count(|event| matches!(event.message, TraceMessage::Net(_))),
-            1
-        );
-        assert_eq!(
-            trace.first_position(|event| matches!(event.message, TraceMessage::Tag(_))),
-            Some(1)
-        );
-        trace.assert_count(TracePattern::message(TraceMessage::Net(WireTag::ZERO)), 1);
-        trace.assert_absent(TracePattern::message(TraceMessage::Error));
-        trace.assert_exact(&[
-            TraceEvent::new(
-                client("source"),
-                TraceActor::Rti,
-                TraceMessage::Net(WireTag::ZERO),
-            ),
-            TraceEvent::new(
-                TraceActor::Rti,
-                client("source"),
-                TraceMessage::Tag(WireTag::ZERO),
-            ),
-        ]);
-        trace.assert_before(
-            TracePattern::between(
-                client("source"),
-                TraceActor::Rti,
-                TraceMessage::Net(WireTag::ZERO),
-            ),
-            TracePattern::between(
-                TraceActor::Rti,
-                client("source"),
-                TraceMessage::Tag(WireTag::ZERO),
-            ),
-        );
+        let net = TracePattern::client_to_rti(source.clone(), FramePattern::Net(WireTag::ZERO));
+        let tag = TracePattern::rti_to_client(source, FramePattern::Tag(WireTag::ZERO));
+        assert_eq!(trace.count(&net), 1);
+        assert_eq!(trace.first_position(&tag), Some(1));
+        trace.assert_count(TracePattern::message(FramePattern::Net(WireTag::ZERO)), 1);
+        trace.assert_absent(TracePattern::message(FramePattern::Error));
+        trace.assert_exact(&[net.clone(), tag.clone()]);
+        trace.assert_before(net, tag);
     }
 
     #[test]
     fn trace_assertion_failures_include_the_normalized_sequence() {
+        let source = FederateId::from("source");
         let trace = Trace::default();
-        trace.push(TraceEvent {
-            from: client("source"),
-            to: TraceActor::Rti,
-            message: TraceMessage::Net(WireTag::ZERO),
-        });
+        trace.push(client_to_rti(
+            "source",
+            FederateToRti::Net {
+                federate_id: source,
+                tag: WireTag::ZERO,
+            },
+        ));
 
         let panic = std::panic::catch_unwind(|| {
-            trace.assert_count(TracePattern::message(TraceMessage::Net(WireTag::ZERO)), 2);
+            trace.assert_count(TracePattern::message(FramePattern::Net(WireTag::ZERO)), 2);
         })
         .expect_err("the count assertion should fail");
         let message = panic

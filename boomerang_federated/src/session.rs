@@ -502,9 +502,7 @@ mod tests {
     use futures_util::{FutureExt, SinkExt, StreamExt};
 
     use super::*;
-    use crate::test_trace::{
-        RecordingClientTransport, Trace, TraceActor, TraceEvent, TraceMessage, TracePattern,
-    };
+    use crate::test_trace::{FramePattern, RecordingClientTransport, Trace, TracePattern};
     use crate::{
         in_memory_transport_pair, transport::InMemoryTransport, EndpointId, TopologyEdge,
         WireDelay, WireTag,
@@ -728,74 +726,69 @@ mod tests {
         assert_eq!(source_client.recv().await, RtiToFederate::Stop);
         assert_eq!(sink_client.recv().await, RtiToFederate::Stop);
 
-        use TraceActor::{Client, Rti};
-        use TraceMessage::{Hello, Ltc, Msg, MsgAck, Net, Start, Stop, Tag};
+        use FramePattern::{Hello, Ltc, Msg, MsgAck, Net, Start, Stop, Tag};
 
         trace.assert_exact(&[
-            TraceEvent::new(Client(source.clone()), Rti, Hello),
-            TraceEvent::new(Client(sink.clone()), Rti, Hello),
-            TraceEvent::new(Rti, Client(source.clone()), Start),
-            TraceEvent::new(Rti, Client(sink.clone()), Start),
-            TraceEvent::new(Client(sink.clone()), Rti, Net(WireTag::ZERO)),
-            TraceEvent::new(Client(source.clone()), Rti, Net(WireTag::ZERO)),
-            TraceEvent::new(Rti, Client(source.clone()), Tag(WireTag::ZERO)),
-            TraceEvent::new(
-                Client(source.clone()),
-                Rti,
+            TracePattern::client_to_rti(source.clone(), Hello),
+            TracePattern::client_to_rti(sink.clone(), Hello),
+            TracePattern::rti_to_client(source.clone(), Start),
+            TracePattern::rti_to_client(sink.clone(), Start),
+            TracePattern::client_to_rti(sink.clone(), Net(WireTag::ZERO)),
+            TracePattern::client_to_rti(source.clone(), Net(WireTag::ZERO)),
+            TracePattern::rti_to_client(source.clone(), Tag(WireTag::ZERO)),
+            TracePattern::client_to_rti(
+                source.clone(),
                 Msg {
                     tag: WireTag::ZERO,
                     endpoint: endpoint.clone(),
                 },
             ),
-            TraceEvent::new(
-                Rti,
-                Client(sink.clone()),
+            TracePattern::rti_to_client(
+                sink.clone(),
                 Msg {
                     tag: WireTag::ZERO,
                     endpoint: endpoint.clone(),
                 },
             ),
-            TraceEvent::new(Client(source.clone()), Rti, Net(WireTag::finite(0, 1))),
-            TraceEvent::new(Rti, Client(source.clone()), Tag(WireTag::finite(0, 1))),
-            TraceEvent::new(Client(sink.clone()), Rti, MsgAck(WireTag::ZERO)),
-            TraceEvent::new(Rti, Client(sink.clone()), Tag(WireTag::ZERO)),
-            TraceEvent::new(Client(sink.clone()), Rti, Ltc(WireTag::ZERO)),
-            TraceEvent::new(Client(source.clone()), Rti, Stop),
-            TraceEvent::new(Client(sink.clone()), Rti, Stop),
-            TraceEvent::new(Rti, Client(source.clone()), Stop),
-            TraceEvent::new(Rti, Client(sink.clone()), Stop),
+            TracePattern::client_to_rti(source.clone(), Net(WireTag::finite(0, 1))),
+            TracePattern::rti_to_client(source.clone(), Tag(WireTag::finite(0, 1))),
+            TracePattern::client_to_rti(sink.clone(), MsgAck(WireTag::ZERO)),
+            TracePattern::rti_to_client(sink.clone(), Tag(WireTag::ZERO)),
+            TracePattern::client_to_rti(sink.clone(), Ltc(WireTag::ZERO)),
+            TracePattern::client_to_rti(source.clone(), Stop),
+            TracePattern::client_to_rti(sink.clone(), Stop),
+            TracePattern::rti_to_client(source.clone(), Stop),
+            TracePattern::rti_to_client(sink.clone(), Stop),
         ]);
 
-        let source_tag = TracePattern::between(Rti, Client(source.clone()), Tag(WireTag::ZERO));
-        let source_msg = TracePattern::between(
-            Client(source.clone()),
-            Rti,
+        let source_tag = TracePattern::rti_to_client(source.clone(), Tag(WireTag::ZERO));
+        let source_msg = TracePattern::client_to_rti(
+            source.clone(),
             Msg {
                 tag: WireTag::ZERO,
                 endpoint: endpoint.clone(),
             },
         );
-        let forwarded_msg = TracePattern::between(
-            Rti,
-            Client(sink.clone()),
+        let forwarded_msg = TracePattern::rti_to_client(
+            sink.clone(),
             Msg {
                 tag: WireTag::ZERO,
                 endpoint: endpoint.clone(),
             },
         );
-        let target_ack = TracePattern::between(Client(sink.clone()), Rti, MsgAck(WireTag::ZERO));
-        let target_tag = TracePattern::between(Rti, Client(sink.clone()), Tag(WireTag::ZERO));
+        let target_ack = TracePattern::client_to_rti(sink.clone(), MsgAck(WireTag::ZERO));
+        let target_tag = TracePattern::rti_to_client(sink.clone(), Tag(WireTag::ZERO));
 
         trace.assert_before(source_tag, source_msg);
         trace.assert_before(forwarded_msg, target_ack.clone());
         trace.assert_before(target_ack, target_tag);
         trace.assert_before(
-            TracePattern::between(Client(source.clone()), Rti, Stop),
-            TracePattern::between(Rti, Client(source.clone()), Stop),
+            TracePattern::client_to_rti(source.clone(), Stop),
+            TracePattern::rti_to_client(source.clone(), Stop),
         );
         trace.assert_before(
-            TracePattern::between(Client(sink.clone()), Rti, Stop),
-            TracePattern::between(Rti, Client(sink.clone()), Stop),
+            TracePattern::client_to_rti(sink.clone(), Stop),
+            TracePattern::rti_to_client(sink.clone(), Stop),
         );
 
         drop(source_client);

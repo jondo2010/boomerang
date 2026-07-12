@@ -1,6 +1,14 @@
-use std::fmt::{self, Write as _};
+use std::{
+    fmt::{self, Write as _},
+    sync::{Arc, Mutex},
+};
 
-use crate::protocol::{EndpointId, FederateId, FederateToRti, RtiToFederate, WireTag};
+use futures_util::{Sink, SinkExt, Stream, StreamExt};
+
+use crate::{
+    protocol::{EndpointId, FederateId, FederateToRti, ProtocolFrame, RtiToFederate, WireTag},
+    TransportError,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TraceActor {
@@ -161,25 +169,37 @@ impl fmt::Display for TracePattern {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct Trace {
-    events: Vec<TraceEvent>,
+    events: Arc<Mutex<Vec<TraceEvent>>>,
 }
 
 impl Trace {
-    pub(crate) fn push(&mut self, event: TraceEvent) {
-        self.events.push(event);
+    pub(crate) fn push(&self, event: TraceEvent) {
+        self.events
+            .lock()
+            .expect("trace collector mutex should not be poisoned")
+            .push(event);
     }
 
     pub(crate) fn count(&self, mut predicate: impl FnMut(&TraceEvent) -> bool) -> usize {
-        self.events.iter().filter(|event| predicate(event)).count()
+        self.events
+            .lock()
+            .expect("trace collector mutex should not be poisoned")
+            .iter()
+            .filter(|event| predicate(event))
+            .count()
     }
 
     pub(crate) fn first_position(
         &self,
         mut predicate: impl FnMut(&TraceEvent) -> bool,
     ) -> Option<usize> {
-        self.events.iter().position(&mut predicate)
+        self.events
+            .lock()
+            .expect("trace collector mutex should not be poisoned")
+            .iter()
+            .position(&mut predicate)
     }
 
     #[track_caller]
@@ -196,12 +216,17 @@ impl Trace {
 
     #[track_caller]
     pub(crate) fn assert_exact(&self, expected: &[TraceEvent]) {
+        let events = self
+            .events
+            .lock()
+            .expect("trace collector mutex should not be poisoned");
+        let actual_trace = Self::normalized_events(&events);
         assert_eq!(
-            self.events.as_slice(),
+            events.as_slice(),
             expected,
             "expected exact trace:\n{}actual trace:\n{}",
             Self::normalized_events(expected),
-            self.normalized()
+            actual_trace
         );
     }
 
@@ -228,7 +253,12 @@ impl Trace {
     }
 
     fn normalized(&self) -> String {
-        Self::normalized_events(&self.events)
+        Self::normalized_events(
+            &self
+                .events
+                .lock()
+                .expect("trace collector mutex should not be poisoned"),
+        )
     }
 
     fn normalized_events(events: &[TraceEvent]) -> String {
@@ -240,9 +270,62 @@ impl Trace {
     }
 }
 
+/// Test-only client transport decorator that records successful protocol exchanges.
+pub(crate) struct RecordingClientTransport<S, St> {
+    sink: S,
+    stream: St,
+    federate_id: FederateId,
+    trace: Trace,
+}
+
+impl<S, St> RecordingClientTransport<S, St> {
+    pub(crate) fn new(transport: (S, St), federate_id: FederateId, trace: Trace) -> Self {
+        let (sink, stream) = transport;
+        Self {
+            sink,
+            stream,
+            federate_id,
+            trace,
+        }
+    }
+}
+
+impl<S, St> RecordingClientTransport<S, St>
+where
+    S: Sink<ProtocolFrame> + Unpin,
+    S::Error: fmt::Debug,
+    St: Stream<Item = Result<ProtocolFrame, TransportError>> + Unpin,
+{
+    pub(crate) async fn send(&mut self, message: FederateToRti) {
+        let event = TraceEvent::client_to_rti(&message);
+        self.sink
+            .send(ProtocolFrame::FederateToRti(message))
+            .await
+            .expect("recording client transport should send a protocol frame");
+        self.trace.push(event);
+    }
+
+    pub(crate) async fn recv(&mut self) -> RtiToFederate {
+        let frame = self
+            .stream
+            .next()
+            .await
+            .expect("recording client transport should remain open")
+            .expect("recording client transport should receive a protocol frame");
+        let message = match frame {
+            ProtocolFrame::RtiToFederate(message) => message,
+            other => panic!("expected RTI-to-federate frame, got {other:?}"),
+        };
+        self.trace
+            .push(TraceEvent::rti_to_client(&self.federate_id, &message));
+        message
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::in_memory_transport_pair;
 
     fn client(id: &str) -> TraceActor {
         TraceActor::Client(FederateId::from(id))
@@ -279,9 +362,55 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn recording_transport_captures_successful_protocol_frames() {
+        let federate_id = FederateId::from("source");
+        let (client, mut rti) = in_memory_transport_pair();
+        let trace = Trace::default();
+        let mut client = RecordingClientTransport::new(client, federate_id.clone(), trace.clone());
+
+        client
+            .send(FederateToRti::Net {
+                federate_id: federate_id.clone(),
+                tag: WireTag::ZERO,
+            })
+            .await;
+        assert_eq!(
+            rti.1.next().await.unwrap().unwrap(),
+            ProtocolFrame::FederateToRti(FederateToRti::Net {
+                federate_id: federate_id.clone(),
+                tag: WireTag::ZERO,
+            })
+        );
+
+        rti.0
+            .send(ProtocolFrame::RtiToFederate(RtiToFederate::Tag {
+                tag: WireTag::ZERO,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            client.recv().await,
+            RtiToFederate::Tag { tag: WireTag::ZERO }
+        );
+
+        trace.assert_exact(&[
+            TraceEvent::new(
+                TraceActor::Client(federate_id.clone()),
+                TraceActor::Rti,
+                TraceMessage::Net(WireTag::ZERO),
+            ),
+            TraceEvent::new(
+                TraceActor::Rti,
+                TraceActor::Client(federate_id),
+                TraceMessage::Tag(WireTag::ZERO),
+            ),
+        ]);
+    }
+
     #[test]
     fn trace_assertions_match_counts_absence_and_causal_order() {
-        let mut trace = Trace::default();
+        let trace = Trace::default();
         trace.push(TraceEvent {
             from: client("source"),
             to: TraceActor::Rti,
@@ -331,7 +460,7 @@ mod tests {
 
     #[test]
     fn trace_assertion_failures_include_the_normalized_sequence() {
-        let mut trace = Trace::default();
+        let trace = Trace::default();
         trace.push(TraceEvent {
             from: client("source"),
             to: TraceActor::Rti,

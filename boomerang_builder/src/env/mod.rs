@@ -79,7 +79,7 @@ type ReplayFunctionBuilder = dyn FnOnce(&BuilderRuntimeParts) -> Box<dyn runtime
 #[cfg(feature = "federated")]
 type FederatedInboundEndpointBuilder = dyn FnOnce(
     &BuilderRuntimeParts,
-    &mut runtime::FederatedInboundEndpointRegistry,
+    &mut boomerang_federated::FederatedRuntimeConnections,
 ) -> Result<(), BuilderError>;
 
 #[cfg(feature = "federated")]
@@ -709,8 +709,8 @@ impl EnvBuilder {
     ) where
         T: runtime::ReactorData,
     {
-        self.federated_inbound_endpoint_builders
-            .push(Box::new(move |builder_parts, registry| {
+        self.federated_inbound_endpoint_builders.push(Box::new(
+            move |builder_parts, connections| {
                 let (enclave_key, runtime_action_key) = *builder_parts
                     .aliases
                     .action_aliases
@@ -730,12 +730,29 @@ impl EnvBuilder {
                 let enclave = &builder_parts.enclaves[enclave_key];
                 let context = enclave.create_send_context(enclave_key);
                 let action_ref = enclave.create_async_action_ref(runtime_action_key);
-                registry
-                    .register(endpoint, context, action_ref, decoder)
+                let target_federate = builder_parts
+                    .federation_plan
+                    .federates
+                    .iter()
+                    .find(|federate| federate.reactor == target_partition)
+                    .ok_or_else(|| {
+                        BuilderError::InternalError(format!(
+                            "missing target federate for inbound endpoint {endpoint}"
+                        ))
+                    })?;
+                connections
+                    .register_inbound(
+                        &boomerang_federated::FederateId::new(target_federate.id.clone()),
+                        endpoint,
+                        context,
+                        action_ref,
+                        decoder,
+                    )
                     .map_err(|error| BuilderError::UnsupportedFederationTopology {
                         what: error.to_string(),
                     })
-            }));
+            },
+        ));
     }
 
     /// Get a fully-qualified name for a given key

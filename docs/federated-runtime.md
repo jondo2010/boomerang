@@ -21,8 +21,8 @@ connected.
 ## Crate Ownership
 
 `boomerang_runtime` owns scheduler-facing primitives only. It defines endpoint
-ids, payload codec traits, outbound sinks and receivers, inbound endpoint
-registries, the shared first-error fault latch, and the `FederatedTimeBarrier`
+ids, payload codec traits, the outbound sink interface, typed inbound endpoint
+registries, the first-error fault-latch implementation, and the `FederatedTimeBarrier`
 scheduler hook. The barrier returns an explicit granted or interrupted outcome,
 or a terminal coordination error. It must stay
 protocol-free and must not depend on `boomerang_federated`, Tokio, RTI state, or
@@ -53,9 +53,8 @@ static runners.
 ```mermaid
 flowchart LR
     Builder["EnvBuilder<br/>reactors, ports, connection"]
-    Parts["BuilderRuntimeParts<br/>ready-to-run enclaves, plan,<br/>prebuilt mailboxes, fault state,<br/>inbound registry"]
+    Parts["BuilderRuntimeParts<br/>ready-to-run enclaves, plan,<br/>per-federate connection bundles"]
     Runner["Static federation runner<br/>validates and connects transports"]
-    Faults["FederatedFaultState<br/>shared first terminal endpoint error"]
 
     Builder -->|lower| Parts
     Parts -->|runtime parts| Runner
@@ -65,14 +64,14 @@ flowchart LR
         SourceReaction["Source reaction<br/>writes output port"]
         SenderReaction["FederatedSenderReactionFn<br/>encode payload + runtime tag"]
         EndpointSink["Endpoint-specific protocol sink<br/>runtime command → MSG"]
-        MailboxA["Prebuilt Tokio mailbox A<br/>single ordered outbound queue"]
+        ConnectionA["FederatedRuntimeConnection A<br/>single outbound mailbox,<br/>incoming routes + registry,<br/>source-local fault state"]
         BarrierA["RtiFederatedTimeBarrier A"]
         ClientA["FederateProtocolClient A"]
 
-        SchedA --> SourceReaction --> SenderReaction --> EndpointSink --> MailboxA --> ClientA
+        SchedA --> SourceReaction --> SenderReaction --> EndpointSink --> ConnectionA --> ClientA
         SchedA -->|tag request / completion| BarrierA
         BarrierA -->|grant or inbound interrupt| SchedA
-        BarrierA -->|NET, LTC, Stop| ClientA
+        BarrierA -->|NET, LTC, Stop| ConnectionA
         ClientA -->|TAG, MSG, Error| BarrierA
     end
 
@@ -88,7 +87,8 @@ flowchart LR
     subgraph Target["Target federate / enclave"]
         ClientB["FederateProtocolClient B"]
         BarrierB["RtiFederatedTimeBarrier B"]
-        Registry["FederatedInboundEndpointRegistry<br/>endpoint → logical action"]
+        ConnectionB["FederatedRuntimeConnection B<br/>single outbound mailbox,<br/>incoming routes + registry,<br/>source-local fault state"]
+        Registry["Per-federate inbound registry<br/>endpoint → logical action"]
         EventQueue["Scheduler event queue<br/>AsyncEvent"]
         SchedB["Scheduler B"]
         ReceiverReaction["ConnectionReceiverReactionFn<br/>logical action → input port"]
@@ -96,25 +96,26 @@ flowchart LR
 
         ClientB -->|TAG, MSG, Error| BarrierB
         BarrierB -->|decoded MSG| Registry --> EventQueue --> SchedB
+        ConnectionB -. owns .-> Registry
         SchedB --> ReceiverReaction --> TargetReaction
         SchedB -->|tag request / completion| BarrierB
         BarrierB -->|grant or inbound interrupt| SchedB
-        BarrierB -->|NET, MsgAck, LTC, Stop| ClientB
+        BarrierB -->|NET, MsgAck, LTC, Stop| ConnectionB --> ClientB
     end
 
     RTI --> TransportB --> ClientB
     ClientB --> TransportB --> RTI
 
     Parts -. deferred lowering attaches .-> EndpointSink
-    Parts -. owns until transport connection .-> MailboxA
+    Parts -. owns until transport connection .-> ConnectionA
+    Parts -. owns until transport connection .-> ConnectionB
     Runner -. creates schedulers and clients .-> SchedA
-    Runner -. connects existing mailbox to writer .-> MailboxA
+    Runner -. consumes bundles and attaches transport .-> ConnectionA
+    Runner -. consumes bundles and attaches transport .-> ConnectionB
     Runner -. creates protocol session .-> RTI
-    Runner -. supplies inbound registry .-> Registry
-    Runner -. shares fault state .-> Faults
-    SenderReaction -. records codec or send failure .-> Faults
-    BarrierA -. checks before protocol progress .-> Faults
-    BarrierB -. checks before protocol progress .-> Faults
+    SenderReaction -. records codec or send failure .-> ConnectionA
+    BarrierA -. checks local fault state .-> ConnectionA
+    BarrierB -. checks local fault state .-> ConnectionB
 ```
 
 Each generated sender reaction represents one statically known endpoint, so
@@ -132,9 +133,12 @@ the runner. Non-empty unmapped enclaves are rejected.
 
 `EnvBuilder::into_runtime_parts` produces `BuilderRuntimeParts` containing the
 runtime enclaves, builder aliases, inter-partition metadata, the federation
-plan, prebuilt per-federate protocol mailboxes, shared federated fault state,
-and the inbound endpoint registry. Deferred reaction construction attaches the
-final endpoint-specific outbound sink before these parts are returned.
+plan, and one complete runtime connection bundle per federate. Each bundle owns
+the prebuilt protocol mailbox, routes targeting that federate, only that
+federate's typed inbound endpoint handlers, and the source-local terminal fault
+state. Deferred reaction construction attaches the final endpoint-specific
+outbound sink and registers every inbound handler before these parts are
+returned.
 
 The builder-facing execution functions validate the builder-owned plan, create
 the `FederatedTopology` and federate-to-enclave map, and move the already-built
@@ -157,24 +161,27 @@ That function runs one scheduler thread per active mapped federate enclave with
 loop, stops every barrier after success or failure, and returns coordination or
 runtime endpoint errors to the public caller.
 
-The connected runner consumes the prebuilt mailbox receiver for every federate
-and gives it to that client's async transport writer. Sender reactions and the
-barrier share clones of the same mailbox sender. Consequently, reaction-emitted
-`MSG` frames and the subsequent `LTC` frame enter one FIFO queue in program
-order.
+The connected runner consumes one complete connection bundle for every
+federate. It gives the prebuilt mailbox receiver to that client's async
+transport writer and gives the bundle's incoming routes, inbound registry, and
+fault state to exactly that federate's barrier. Sender reactions and the barrier
+share clones of the same mailbox sender. Consequently, reaction-emitted `MSG`
+frames and the subsequent `LTC` frame enter one FIFO queue in program order.
 
 Outbound payloads leave a scheduler through generated federated sender
-reactions. Codec and sink failures are published to the shared first-error
-fault latch and become terminal scheduler errors. Each reaction writes through
-the endpoint-specific sink installed during lowering. The sink immediately
+reactions. Codec and sink failures are published to that source federate's
+first-error fault latch and become terminal scheduler errors. Each reaction
+writes through the endpoint-specific sink installed during lowering. The sink immediately
 converts the runtime command to a protocol `MSG` and enqueues it in the source
 federate mailbox. During `logical_tag_complete`, the barrier checks the shared
 fault latch and enqueues `LTC` into that same mailbox after all reaction-emitted
 messages for the completed tag.
 
 Inbound payloads arrive as protocol `MSG` frames from the RTI. The barrier
-schedules them through `FederatedInboundEndpointRegistry`, returns the queued
-`AsyncEvent` to the scheduler, and sends one `MsgAck` after successful queueing.
+schedules them through its federate-local `FederatedInboundEndpointRegistry`,
+returns the queued `AsyncEvent` to the scheduler, and sends one `MsgAck` after
+successful queueing. A barrier cannot dispatch an endpoint belonging to another
+federate because that handler is absent from its bundle.
 `MsgAck` decrements exactly one matching in-transit message. The scheduler sends
 the distinct `LTC` frame only after reactions at that tag complete; `LTC` does
 not acknowledge delivery or clear in-transit counts.

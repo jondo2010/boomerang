@@ -66,12 +66,6 @@ pub struct BuilderRuntimeParts {
     pub federation_plan: FederationPlan,
     #[cfg(feature = "federated")]
     pub(crate) federated_connections: boomerang_federated::FederatedRuntimeConnections,
-    #[cfg(feature = "federated")]
-    /// Shared terminal fault state for generated sender reactions and live barriers.
-    pub federated_faults: runtime::FederatedFaultState,
-    #[cfg(feature = "federated")]
-    /// Registry used by federated clients to schedule received endpoint payloads.
-    pub federated_inbound_endpoints: runtime::FederatedInboundEndpointRegistry,
     #[cfg(feature = "replay")]
     /// The action replayers for each enclave
     pub replayers: runtime::replay::ReplayersMap,
@@ -138,10 +132,6 @@ impl BuilderRuntimeParts {
                 federation_plan: FederationPlan::default(),
                 #[cfg(feature = "federated")]
                 federated_connections,
-                #[cfg(feature = "federated")]
-                federated_faults: runtime::FederatedFaultState::default(),
-                #[cfg(feature = "federated")]
-                federated_inbound_endpoints: runtime::FederatedInboundEndpointRegistry::default(),
                 replayers,
             }
         }
@@ -156,10 +146,6 @@ impl BuilderRuntimeParts {
                 federation_plan: FederationPlan::default(),
                 #[cfg(feature = "federated")]
                 federated_connections,
-                #[cfg(feature = "federated")]
-                federated_faults: runtime::FederatedFaultState::default(),
-                #[cfg(feature = "federated")]
-                federated_inbound_endpoints: runtime::FederatedInboundEndpointRegistry::default(),
             }
         }
     }
@@ -693,11 +679,11 @@ impl EnvBuilder {
         &mut self,
         builder_parts: &mut BuilderRuntimeParts,
     ) -> Result<(), BuilderError> {
-        let mut registry = std::mem::take(&mut builder_parts.federated_inbound_endpoints);
+        let mut connections = std::mem::take(&mut builder_parts.federated_connections);
         for endpoint_builder in self.federated_inbound_endpoint_builders.drain(..) {
-            endpoint_builder(builder_parts, &mut registry)?;
+            endpoint_builder(builder_parts, &mut connections)?;
         }
-        builder_parts.federated_inbound_endpoints = registry;
+        builder_parts.federated_connections = connections;
         Ok(())
     }
 

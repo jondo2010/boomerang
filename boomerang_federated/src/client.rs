@@ -777,7 +777,7 @@ mod tests {
         let mut connections =
             crate::FederatedRuntimeConnections::new([fed("source"), fed("sink")], [route()])
                 .unwrap();
-        let outbound = connections.outbound_sink(&endpoint()).unwrap();
+        let (outbound, _) = connections.outbound_endpoint(&endpoint()).unwrap();
         let mailbox = connections.take_mailbox(&fed("source")).unwrap();
         let (client, rti) = connect_client_with_fake_rti_and_mailbox(
             fed("source"),

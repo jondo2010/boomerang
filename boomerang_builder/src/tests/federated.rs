@@ -475,7 +475,7 @@ fn run_in_memory_federated_source_sink(
         enclaves,
         aliases,
         federation_plan,
-        federated_inbound_endpoints,
+        federated_connections,
         ..
     } = parts;
 
@@ -493,6 +493,8 @@ fn run_in_memory_federated_source_sink(
         .reactor;
     let source_enclave_key = aliases.enclave_aliases[source_reactor];
     let sink_enclave_key = aliases.enclave_aliases[sink_reactor];
+    let sink = boomerang_federated::FederateId::new("sink");
+    let inbound_endpoints = federated_connections.inbound_endpoints(&sink).unwrap();
 
     let mut source_enclaves = Vec::new();
     let mut sink_enclaves = Vec::new();
@@ -511,11 +513,8 @@ fn run_in_memory_federated_source_sink(
         .with_timeout(runtime::Duration::milliseconds(100));
     let _source_envs = runtime::execute_enclaves(source_enclaves.into_iter(), config.clone());
     let commands = outbound.drain();
-    let routed_tags = route_outbound_commands_through_rti(
-        &federation_plan,
-        commands,
-        &federated_inbound_endpoints,
-    );
+    let routed_tags =
+        route_outbound_commands_through_rti(&federation_plan, commands, inbound_endpoints);
     let _sink_envs = runtime::execute_enclaves(sink_enclaves.into_iter(), config);
 
     let recorded_values = values.lock().unwrap().clone();
@@ -1116,7 +1115,7 @@ fn test_local_cross_enclave_connection_does_not_require_federated_codec() {
     assert_eq!(boundary.target_port, sink.into());
     assert!(!boundary.physical);
     assert!(parts.federation_plan.is_empty());
-    assert_eq!(parts.federated_inbound_endpoints.len(), 0);
+    assert!(parts.federated_connections.is_empty());
     assert!(parts.enclaves.values().any(|enclave| {
         !enclave.upstream_enclaves.is_empty() || !enclave.downstream_enclaves.is_empty()
     }));
@@ -1141,7 +1140,15 @@ fn test_federated_connection_lowers_endpoint_runtime_parts() {
         .unwrap();
 
     assert_eq!(parts.federation_plan.endpoints.len(), 1);
-    assert_eq!(parts.federated_inbound_endpoints.len(), 1);
+    let sink = boomerang_federated::FederateId::new("sink");
+    assert_eq!(
+        parts
+            .federated_connections
+            .inbound_endpoints(&sink)
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(parts.enclaves.values().all(|enclave| {
         enclave.upstream_enclaves.is_empty() && enclave.downstream_enclaves.is_empty()
     }));
@@ -1218,14 +1225,16 @@ fn test_federated_inbound_registry_schedules_target_action() {
 
     let BuilderRuntimeParts {
         enclaves,
-        federated_inbound_endpoints,
+        federated_connections,
         ..
     } = env_builder
         .into_runtime_parts(&runtime::Config::default())
         .unwrap();
 
     let endpoint = runtime::FederatedEndpointId::new("main/source/out->main/sink/in");
-    federated_inbound_endpoints
+    let sink = boomerang_federated::FederateId::new("sink");
+    let inbound_endpoints = federated_connections.inbound_endpoints(&sink).unwrap();
+    inbound_endpoints
         .schedule(&endpoint, runtime::Tag::ZERO, b"42")
         .unwrap();
 

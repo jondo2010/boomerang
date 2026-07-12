@@ -134,6 +134,14 @@ pub enum StaticFederationRunnerError {
 type FederationEnvs =
     tinymap::TinySecondaryMap<boomerang_runtime::EnclaveKey, boomerang_runtime::Env>;
 type SessionHandle = tokio::task::JoinHandle<Result<(), SessionError>>;
+type SchedulerThreadResult = (
+    FederateId,
+    boomerang_runtime::EnclaveKey,
+    boomerang_runtime::Env,
+    Result<(), boomerang_runtime::RuntimeError>,
+    Result<(), FederateClientError>,
+);
+type SchedulerThreadHandle = std::thread::JoinHandle<SchedulerThreadResult>;
 
 struct PreparedStaticFederation {
     topology: FederatedTopology,
@@ -392,15 +400,7 @@ fn execute_connected_static_federation(
 
     let mut envs = tinymap::TinySecondaryMap::new();
     let mut barrier_error = None;
-    let mut handles: Vec<
-        std::thread::JoinHandle<(
-            FederateId,
-            boomerang_runtime::EnclaveKey,
-            boomerang_runtime::Env,
-            Result<(), boomerang_runtime::RuntimeError>,
-            Result<(), FederateClientError>,
-        )>,
-    > = Vec::new();
+    let mut handles: Vec<SchedulerThreadHandle> = Vec::new();
     for (enclave_key, enclave) in enclaves {
         let Some(federate_id) = federate_by_enclave.get(enclave_key).cloned() else {
             if enclave.env.reactions.is_empty() {

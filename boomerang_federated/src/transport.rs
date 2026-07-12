@@ -192,8 +192,7 @@ pub async fn run_tcp_static_rti_session(
 mod tests {
     use std::{
         future::Future,
-        sync::Arc,
-        task::{Context, Poll, Wake, Waker},
+        task::{Context, Poll, Waker},
     };
 
     use futures_util::{SinkExt, StreamExt};
@@ -207,15 +206,8 @@ mod tests {
         FederateProtocolClient, NeighborStructure, ProtocolFrame,
     };
 
-    struct NoopWaker;
-
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn block_on<F: Future>(future: F) -> F::Output {
-        let waker = Waker::from(Arc::new(NoopWaker));
-        let mut context = Context::from_waker(&waker);
+        let mut context = Context::from_waker(Waker::noop());
         let mut future = Box::pin(future);
 
         loop {

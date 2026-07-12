@@ -4,6 +4,9 @@ use std::sync::{mpsc, Arc, Mutex};
 use super::*;
 use crate::{port::Contained, runtime};
 
+type RecordedValues = Vec<(runtime::Tag, u32)>;
+type RecordedValuePair = (RecordedValues, RecordedValues);
+
 #[derive(Clone, Copy)]
 struct FederatedIoPorts {
     input: TypedPortKey<u32, Input, Contained>,
@@ -630,7 +633,7 @@ fn run_live_in_memory_three_federate_chain() -> Vec<(runtime::Tag, u32)> {
     recorded_values
 }
 
-fn run_live_in_memory_fanout() -> (Vec<(runtime::Tag, u32)>, Vec<(runtime::Tag, u32)>) {
+fn run_live_in_memory_fanout() -> RecordedValuePair {
     let left_values = Arc::new(Mutex::new(Vec::new()));
     let right_values = Arc::new(Mutex::new(Vec::new()));
     let mut env_builder = EnvBuilder::new();
@@ -666,8 +669,7 @@ fn run_live_in_memory_fanout() -> (Vec<(runtime::Tag, u32)>, Vec<(runtime::Tag, 
     (recorded_left_values, recorded_right_values)
 }
 
-fn run_live_in_memory_positive_delay_cycle() -> (Vec<(runtime::Tag, u32)>, Vec<(runtime::Tag, u32)>)
-{
+fn run_live_in_memory_positive_delay_cycle() -> RecordedValuePair {
     let a_values = Arc::new(Mutex::new(Vec::new()));
     let b_values = Arc::new(Mutex::new(Vec::new()));
     let delay = runtime::Duration::milliseconds(10);
@@ -928,7 +930,7 @@ fn test_live_in_memory_three_federate_chain_records_relayed_value() {
 #[test]
 fn test_live_in_memory_fanout_delivers_same_tag_to_each_sink() {
     let (left_values, right_values) =
-        run_with_wall_timeout("live in-memory fanout", || run_live_in_memory_fanout());
+        run_with_wall_timeout("live in-memory fanout", run_live_in_memory_fanout);
 
     assert_eq!(left_values, vec![(runtime::Tag::ZERO, 7)]);
     assert_eq!(right_values, vec![(runtime::Tag::ZERO, 7)]);

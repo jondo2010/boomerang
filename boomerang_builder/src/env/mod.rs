@@ -39,6 +39,12 @@ mod tests;
 
 pub use build::{BuilderRuntimeParts, DeferedBuild, EnclaveDep, PartitionMap};
 
+#[cfg(feature = "federated")]
+type FederatedCodecPair<T> = (
+    Box<dyn runtime::FederatedPayloadEncoder<T>>,
+    Box<dyn runtime::FederatedPayloadDecoder<T>>,
+);
+
 mod util {
     use petgraph::visit::{IntoNeighborsDirected, IntoNodeIdentifiers, Visitable};
     use std::hash::Hash;
@@ -661,13 +667,7 @@ impl EnvBuilder {
         &self,
         source_key: BuilderPortKey,
         target_key: BuilderPortKey,
-    ) -> Result<
-        (
-            Box<dyn runtime::FederatedPayloadEncoder<T>>,
-            Box<dyn runtime::FederatedPayloadDecoder<T>>,
-        ),
-        BuilderError,
-    >
+    ) -> Result<FederatedCodecPair<T>, BuilderError>
     where
         T: runtime::ReactorData,
     {

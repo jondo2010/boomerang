@@ -264,7 +264,7 @@ impl RtiState {
                 None => WireTag::Never,
             };
 
-            if earliest.map_or(true, |current| candidate < current) {
+            if earliest.is_none_or(|current| candidate < current) {
                 earliest = Some(candidate);
             }
         }
@@ -308,7 +308,7 @@ impl RtiState {
         }
 
         let earliest_incoming = self.earliest_incoming_message_tag(federate_id)?;
-        if earliest_incoming.map_or(true, |earliest| earliest > requested) {
+        if earliest_incoming.is_none_or(|earliest| earliest > requested) {
             self.federates
                 .get_mut(federate_id)
                 .expect("federate existence was checked")

@@ -507,6 +507,12 @@ mod tests {
         WireDelay, WireTag,
     };
 
+    type SessionFixture = (
+        InMemoryTransport<ProtocolFrame, ProtocolFrame>,
+        InMemoryTransport<ProtocolFrame, ProtocolFrame>,
+        JoinHandle<Result<(), SessionError>>,
+    );
+
     fn fed(id: &str) -> FederateId {
         FederateId::new(id)
     }
@@ -590,13 +596,7 @@ mod tests {
         RtiSessionEndpoint::new(sink, stream)
     }
 
-    fn spawn_session(
-        topology: FederatedTopology,
-    ) -> (
-        InMemoryTransport<ProtocolFrame, ProtocolFrame>,
-        InMemoryTransport<ProtocolFrame, ProtocolFrame>,
-        JoinHandle<Result<(), SessionError>>,
-    ) {
+    fn spawn_session(topology: FederatedTopology) -> SessionFixture {
         let (source_client, source_rti) = in_memory_transport_pair();
         let (sink_client, sink_rti) = in_memory_transport_pair();
         let mut endpoints = BTreeMap::new();

@@ -51,6 +51,11 @@ pub struct FederatedRoute {
     pub target: boomerang_federated::FederateId,
 }
 
+type FederateEnclaveMaps = (
+    BTreeMap<boomerang_federated::FederateId, runtime::EnclaveKey>,
+    tinymap::TinySecondaryMap<runtime::EnclaveKey, boomerang_federated::FederateId>,
+);
+
 impl FederationPlan {
     pub fn is_empty(&self) -> bool {
         self.federates.is_empty() && self.edges.is_empty() && self.endpoints.is_empty()
@@ -322,13 +327,7 @@ fn validate_static_runner_plan(parts: &crate::BuilderRuntimeParts) -> Result<(),
 
 fn federate_enclave_maps(
     parts: &crate::BuilderRuntimeParts,
-) -> Result<
-    (
-        BTreeMap<boomerang_federated::FederateId, runtime::EnclaveKey>,
-        tinymap::TinySecondaryMap<runtime::EnclaveKey, boomerang_federated::FederateId>,
-    ),
-    BuilderError,
-> {
+) -> Result<FederateEnclaveMaps, BuilderError> {
     let mut federate_enclaves = BTreeMap::new();
     let mut federate_by_enclave = tinymap::TinySecondaryMap::new();
 

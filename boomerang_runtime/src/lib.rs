@@ -9,6 +9,8 @@ pub mod action;
 mod context;
 mod env;
 mod event;
+#[cfg(feature = "federated")]
+mod federated;
 pub mod keepalive;
 mod key_set;
 pub mod port;
@@ -33,9 +35,19 @@ pub use env::{
     LifecycleReaction, ModalScheduleIndex, Mode, ModeFilter, ModeKey, ReactionGraph, ScopeInfo,
     ScopeKey, TransitionKind,
 };
+#[cfg(feature = "federated")]
+pub use event::AsyncEvent;
+#[cfg(feature = "federated")]
+pub use federated::{
+    FederatedEndpointError, FederatedEndpointKey, FederatedFaultState,
+    FederatedInboundEndpointRegistry, FederatedOutboundCommand, FederatedOutboundMessage,
+    FederatedOutboundSink, FederatedPayloadDecoder, FederatedPayloadEncoder,
+};
 pub use kanal::{Receiver, Sender};
 pub use key_set::KeySetLimits as ReactionSetLimits;
 pub use port::{DynPortRef, DynPortRefMut, *};
+#[cfg(feature = "federated")]
+pub use reaction::FederatedSenderReactionFn;
 pub use reaction::{
     BoxedReactionFn, ConnectionReceiverReactionFn, ConnectionSenderReactionFn, Deadline,
     EnclaveSenderReactionFn, FromRefs, Reaction, ReactionFn, ReactionKey, ReactionSet,
@@ -70,9 +82,16 @@ pub enum RuntimeError {
     #[error("Encode error {error}")]
     EncodeError { error: String },
 
+    #[error(transparent)]
+    LogicalTimeBarrier(#[from] LogicalTimeBarrierError),
+
     #[cfg(feature = "replay")]
     #[error(transparent)]
     ReplayError(#[from] replay::ReplayError),
+
+    #[cfg(feature = "federated")]
+    #[error(transparent)]
+    FederatedBarrier(#[from] FederatedBarrierError),
 }
 
 pub mod fmt_utils {

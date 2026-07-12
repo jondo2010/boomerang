@@ -4,6 +4,11 @@ use crate::{
     key_set::KeySet, ActionCommon, ActionRef, AsyncActionRef, BaseReactor, CommonContext, Context,
     Duration, InputRef, OutputRef, ReactionRefs, ReactionRefsExtract, ReactorData, SendContext,
 };
+#[cfg(feature = "federated")]
+use crate::{
+    FederatedFaultState, FederatedOutboundCommand, FederatedOutboundMessage, FederatedOutboundSink,
+    FederatedPayloadEncoder,
+};
 
 tinymap::key_type! { pub ReactionKey }
 
@@ -172,6 +177,87 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for EnclaveSenderReactio
             }
         } else {
             tracing::warn!("Port is empty, skipping event send");
+        }
+    }
+}
+
+/// Special type implementing [`ReactionFn`] for sending serialized data to a remote federate.
+///
+/// This mirrors [`EnclaveSenderReactionFn`] for logical actions, but emits an outbound command that
+/// can be converted to a protocol MSG frame by a federated client.
+#[cfg(feature = "federated")]
+pub struct FederatedSenderReactionFn<T: ReactorData + Clone> {
+    target_action_ref: AsyncActionRef<T>,
+    encoder: Box<dyn FederatedPayloadEncoder<T>>,
+    outbound: Box<dyn FederatedOutboundSink>,
+    faults: FederatedFaultState,
+}
+
+#[cfg(feature = "federated")]
+impl<T: ReactorData + Clone> FederatedSenderReactionFn<T> {
+    pub fn new(
+        target_action_ref: AsyncActionRef<T>,
+        encoder: Box<dyn FederatedPayloadEncoder<T>>,
+        outbound: Box<dyn FederatedOutboundSink>,
+        faults: FederatedFaultState,
+    ) -> Self {
+        Self {
+            target_action_ref,
+            encoder,
+            outbound,
+            faults,
+        }
+    }
+}
+
+#[cfg(feature = "federated")]
+impl<'store, T: ReactorData + Clone> ReactionFn<'store> for FederatedSenderReactionFn<T> {
+    fn trigger(
+        &mut self,
+        ctx: &'store mut Context,
+        _state: &'store mut dyn BaseReactor,
+        refs: ReactionRefs<'store>,
+    ) {
+        let port: InputRef<T> = match refs.ports.partition() {
+            Ok(port) => port,
+            Err(error) => {
+                tracing::error!(?error, "Failed to destructure ports");
+                return;
+            }
+        };
+
+        let Some(value) = (*port).as_ref() else {
+            tracing::warn!("Port is empty, skipping federated event send");
+            return;
+        };
+
+        if !self.target_action_ref.is_logical() {
+            tracing::error!("Federated sender cannot target a physical action");
+            return;
+        }
+
+        let current_tag = ctx.get_tag();
+        let delay = self.target_action_ref.min_delay();
+        let tag = if delay.is_zero() {
+            current_tag
+        } else {
+            current_tag.delay(delay)
+        };
+
+        let payload = match self.encoder.encode(value) {
+            Ok(payload) => payload,
+            Err(error) => {
+                tracing::error!(?error, "Failed to encode federated payload");
+                self.faults.record(error);
+                return;
+            }
+        };
+
+        let command = FederatedOutboundCommand::Msg(FederatedOutboundMessage { tag, payload });
+
+        if let Err(error) = self.outbound.send(command) {
+            tracing::error!(?error, "Failed to emit federated command");
+            self.faults.record(error);
         }
     }
 }

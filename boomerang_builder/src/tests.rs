@@ -868,7 +868,7 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
         .with_fast_forward(true)
         .with_timeout(runtime::Duration::seconds(1));
     let mut sched = runtime::Scheduler::new(enclave_key, enclave, config);
-    sched.event_loop();
+    sched.try_event_loop()?;
 
     Ok(())
 }
@@ -1071,7 +1071,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
 
     let config = runtime::Config::default().with_fast_forward(true);
     let mut sched = runtime::Scheduler::new(enclave_key, enclave, config);
-    sched.event_loop();
+    sched.try_event_loop()?;
 
     Ok(())
 }
@@ -1149,6 +1149,23 @@ fn test_enclave_partitioning() {
         "Expected only the hello2 reactor in the second enclave"
     )
 }
+
+#[test]
+fn test_is_enclave_compatibility_with_reactor_placement() {
+    let mut env_builder = EnvBuilder::new();
+    let reactor = env_builder
+        .add_reactor("enclave", None, None, (), true)
+        .finish()
+        .unwrap();
+
+    let reactor = &env_builder.reactor_builders[reactor];
+    assert!(reactor.is_enclave);
+    assert!(reactor.is_enclave());
+    assert_eq!(reactor.placement(), &ReactorPlacement::Enclave);
+}
+
+#[cfg(feature = "federated")]
+mod federated;
 
 pub struct PingPong {
     pub env_builder: EnvBuilder,
@@ -1275,7 +1292,7 @@ fn test_enclave2() {
         .with_fast_forward(true)
         .with_timeout(runtime::Duration::milliseconds(3));
 
-    let _envs = runtime::execute_enclaves(enclaves.into_iter(), config);
+    let _envs = runtime::execute_enclaves(enclaves.into_iter(), config).unwrap();
 }
 
 /// Test binding of ports between two child reactors

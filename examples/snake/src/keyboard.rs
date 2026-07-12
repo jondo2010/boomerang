@@ -71,5 +71,5 @@ fn main() {
 
     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
     let mut sched = runtime::Scheduler::new(enclave_key, enclave, config);
-    sched.event_loop();
+    sched.try_event_loop().unwrap();
 }

@@ -77,7 +77,10 @@ pub trait CommonContext {
     fn is_shutdown(&self) -> bool;
 
     /// Schedule a shutdown event at some future time.
-    fn schedule_shutdown(&mut self, offset: Option<Duration>);
+    ///
+    /// Returns `true` when the request was accepted and `false` when an external scheduler channel
+    /// has already closed. Calls made from a scheduler-owned [`Context`] are always accepted.
+    fn schedule_shutdown(&mut self, offset: Option<Duration>) -> bool;
 
     /// Schedule an event externally by sending it to the scheduler through a channel.
     ///
@@ -251,13 +254,14 @@ impl CommonContext for Context {
     }
 
     #[tracing::instrument]
-    fn schedule_shutdown(&mut self, offset: Option<Duration>) {
+    fn schedule_shutdown(&mut self, offset: Option<Duration>) -> bool {
         let tag = self.tag.delay(offset.unwrap_or_default());
 
         self.trigger_res.scheduled_shutdown = self
             .trigger_res
             .scheduled_shutdown
             .map_or(Some(tag), |prev| Some(prev.min(tag)));
+        true
     }
 
     /// Schedule an asynchronous event
@@ -279,7 +283,7 @@ impl CommonContext for Context {
 }
 
 /// SendContext can be shared across threads and allows asynchronous events to be scheduled.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SendContext {
     /// Enclave ID for this context
     pub(crate) enclave_key: EnclaveKey,
@@ -300,9 +304,9 @@ impl CommonContext for SendContext {
     }
 
     /// Schedule a shutdown event at some future time.
-    fn schedule_shutdown(&mut self, offset: Option<Duration>) {
+    fn schedule_shutdown(&mut self, offset: Option<Duration>) -> bool {
         let event = AsyncEvent::shutdown(offset.unwrap_or_default());
-        self.async_tx.send(event).unwrap();
+        self.async_tx.send(event).is_ok()
     }
 
     /// Send an external event to the scheduler.
@@ -386,5 +390,19 @@ mod tests {
         assert_eq!(tags.len(), 2);
         assert_eq!(tags[0].offset(), tags[1].offset());
         assert_eq!(tags[1].microstep(), tags[0].microstep() + 1);
+    }
+
+    #[test]
+    fn send_context_reports_closed_scheduler_when_requesting_shutdown() {
+        let (async_tx, async_rx) = kanal::unbounded::<AsyncEvent>();
+        drop(async_rx);
+        let (_shutdown_tx, shutdown_rx) = keepalive::channel();
+        let mut ctx = SendContext {
+            enclave_key: EnclaveKey::from(0),
+            async_tx,
+            shutdown_rx,
+        };
+
+        assert!(!ctx.schedule_shutdown(None));
     }
 }

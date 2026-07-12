@@ -48,16 +48,31 @@ pub mod flatten_transposed;
 
 // Re-exports
 pub use boomerang_builder as builder;
+#[cfg(feature = "federated")]
+pub use boomerang_federated as federated;
 pub use boomerang_runtime as runtime;
 
 pub mod prelude {
     //! Re-exported common types and traits for Boomerang
 
     pub use super::builder::{
-        BuilderError, BuilderFqn, BuilderModeEffect, BuilderModeKey, BuilderReactorKey,
-        BuilderRuntimeParts, Contained, EnvBuilder, Input, Local, Logical, ModeKind, Output,
-        Physical, PortBank, Reactor, TimerActionKey, TimerSpec, TransitionKind, TypedActionKey,
-        TypedPortKey,
+        BoundaryKind, BuilderError, BuilderFqn, BuilderModeEffect, BuilderModeKey,
+        BuilderReactorKey, BuilderRuntimeParts, Contained, EnvBuilder, Input, InterPartitionEdge,
+        InterPartitionPlan, Local, Logical, ModeKind, Output, PartitionRoot, PartitionRootKind,
+        Physical, PortBank, Reactor, ReactorPlacement, TimerActionKey, TimerSpec, TransitionKind,
+        TypedActionKey, TypedPortKey,
+    };
+
+    #[cfg(feature = "federated")]
+    pub use super::builder::{
+        execute_federation_in_memory, execute_federation_over_tcp, federated_routes_from_plan,
+        federation_topology_from_plan, FederateBuildInfo, FederateSpec, FederatedEdge,
+        FederatedEndpoint, FederatedRoute, FederationPlan,
+    };
+
+    #[cfg(feature = "federated")]
+    pub use super::federated::{
+        EndpointId, FederateId, RuntimeBridgeError, TcpStaticFederationConfig, WireDelay, WireTag,
     };
 
     pub use super::runtime::{self, action::ActionCommon, CommonContext, Duration, FromRefs, Tag};

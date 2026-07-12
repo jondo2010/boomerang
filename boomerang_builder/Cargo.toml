@@ -20,6 +20,12 @@ tracy = ["tracing-tracy/enable"]
 ## Support for recording and replaying events
 replay = ["dep:serde"]
 
+## Builder metadata and endpoint lowering for static federated enclave topologies
+federated = [
+    "boomerang_runtime/federated",
+    "boomerang_federated/runtime",
+    "dep:boomerang_federated",
+]
 
 [dependencies]
 document-features = { workspace = true }
@@ -33,6 +39,7 @@ variadics_please.workspace = true
 
 # repo dependencies
 boomerang_runtime = { workspace = true }
+boomerang_federated = { workspace = true, optional = true }
 tinymap.workspace = true
 
 [dev-dependencies]

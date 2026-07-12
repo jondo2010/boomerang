@@ -7,7 +7,10 @@
 mod action;
 mod connection;
 mod env;
+#[cfg(feature = "federated")]
+mod federation;
 mod fqn;
+mod inter_partition;
 mod port;
 mod reaction;
 mod reactor;
@@ -21,7 +24,10 @@ pub mod plantuml;
 
 pub use action::*;
 pub use env::*;
+#[cfg(feature = "federated")]
+pub use federation::*;
 pub use fqn::*;
+pub use inter_partition::*;
 pub use port::{
     BuilderPortKey, Contained, Input, Local, Output, PortBank, PortBuilder, PortTag, PortType,
     TypedPortKey,
@@ -101,6 +107,12 @@ pub enum BuilderError {
     #[error("Port connection length mismatch: {from} -> {to}")]
     PortConnectionLengthMismatch { from: usize, to: usize },
 
+    #[error("Unsupported federation topology: {what}")]
+    UnsupportedFederationTopology { what: String },
+
+    #[error("Federation bridge error: {what}")]
+    FederationBridgeError { what: String },
+
     #[error("Error building Reaction: {0}")]
     ReactionBuilderError(String),
 
@@ -120,5 +132,37 @@ pub enum BuilderError {
 impl From<std::convert::Infallible> for BuilderError {
     fn from(_: std::convert::Infallible) -> Self {
         unreachable!()
+    }
+}
+
+#[cfg(feature = "federated")]
+impl From<boomerang_federated::RuntimeBridgeError> for BuilderError {
+    fn from(error: boomerang_federated::RuntimeBridgeError) -> Self {
+        Self::FederationBridgeError {
+            what: error.to_string(),
+        }
+    }
+}
+
+#[cfg(feature = "federated")]
+impl From<boomerang_federated::FederateClientError> for BuilderError {
+    fn from(error: boomerang_federated::FederateClientError) -> Self {
+        Self::FederationBridgeError {
+            what: error.to_string(),
+        }
+    }
+}
+
+#[cfg(feature = "federated")]
+impl From<boomerang_federated::StaticFederationRunnerError> for BuilderError {
+    fn from(error: boomerang_federated::StaticFederationRunnerError) -> Self {
+        match error {
+            boomerang_federated::StaticFederationRunnerError::UnsupportedTopology { what } => {
+                Self::UnsupportedFederationTopology { what }
+            }
+            error => Self::FederationBridgeError {
+                what: error.to_string(),
+            },
+        }
     }
 }

@@ -109,7 +109,7 @@ pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
         .into_runtime_parts(&config)
         .context("Error building environment!")?;
 
-    let envs_out = runtime::execute_enclaves(enclaves.into_iter(), config);
+    let envs_out = runtime::execute_enclaves(enclaves.into_iter(), config)?;
     let envs_out = envs_out.into_iter().map(|(_, env)| env).collect();
     Ok((reactor, envs_out))
 }
@@ -178,6 +178,7 @@ where
         aliases: _,
         #[cfg(feature = "replay")]
         replayers,
+        ..
     } = env_builder
         .into_runtime_parts(&config)
         .context("Error building environment!")?;
@@ -187,12 +188,24 @@ where
     }
 
     #[cfg(feature = "replay")]
-    if let Some(filename) = args.replay_filename {
-        tracing::info!("Reading replay from {}", filename.display());
-        runtime::replay::create_replayer(filename, replayers, &enclaves)?;
+    let replay_handle = match args.replay_filename {
+        Some(filename) => {
+            tracing::info!("Reading replay from {}", filename.display());
+            Some(runtime::replay::create_replayer(
+                filename, replayers, &enclaves,
+            )?)
+        }
+        None => None,
+    };
+
+    let execution_result = runtime::execute_enclaves(enclaves.into_iter(), config);
+
+    #[cfg(feature = "replay")]
+    if let Some(handle) = replay_handle {
+        handle.join()?;
     }
 
-    let _envs_out = runtime::execute_enclaves(enclaves.into_iter(), config);
+    let _envs_out = execution_result?;
 
     #[cfg(feature = "replay")]
     if let Some(handle) = recording_handle {

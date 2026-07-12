@@ -288,7 +288,7 @@ fn test_enclave0() {
         .with_keep_alive(false)
         .with_timeout(Duration::seconds(3));
 
-    let envs_out = crate::execute_enclaves(enclaves.into_iter(), config);
+    let envs_out = crate::execute_enclaves(enclaves.into_iter(), config).unwrap();
 
     for env in envs_out.values() {
         if let Some(state) = env

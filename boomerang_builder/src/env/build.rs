@@ -8,12 +8,17 @@ use boomerang_runtime::{self as runtime};
 use core::range::Range;
 use itertools::Itertools;
 use slotmap::SecondaryMap;
+#[cfg(feature = "federated")]
+use std::collections::BTreeMap;
 
 use crate::{
-    connection::PortBindings, ActionType, BuilderActionKey, BuilderError, BuilderModeKey,
-    BuilderPortKey, BuilderReactionKey, BuilderReactorKey, ParentReactorBuilder,
-    PartialReactionBuilder, TimerActionKey,
+    connection::PortBindings, ActionType, BoundaryKind, BuilderActionKey, BuilderError,
+    BuilderModeKey, BuilderPortKey, BuilderReactionKey, BuilderReactorKey, InterPartitionEdge,
+    InterPartitionPlan, ParentReactorBuilder, PartialReactionBuilder, PartitionRoot,
+    PartitionRootKind, TimerActionKey,
 };
+#[cfg(feature = "federated")]
+use crate::{federated_routes_from_plan, FederationPlan};
 
 use super::EnvBuilder;
 
@@ -54,6 +59,13 @@ pub struct BuilderRuntimeParts {
     pub enclaves: tinymap::TinyMap<runtime::EnclaveKey, runtime::Enclave>,
     /// Aliases from builder keys to runtime keys
     pub aliases: BuilderAliases,
+    /// Builder-owned metadata for logical edges that cross runtime partitions.
+    pub inter_partition_plan: InterPartitionPlan,
+    #[cfg(feature = "federated")]
+    /// Static federation metadata extracted by the builder.
+    pub federation_plan: FederationPlan,
+    #[cfg(feature = "federated")]
+    pub(crate) federated_connections: boomerang_federated::FederatedRuntimeConnections,
     #[cfg(feature = "replay")]
     /// The action replayers for each enclave
     pub replayers: runtime::replay::ReplayersMap,
@@ -63,8 +75,11 @@ impl BuilderRuntimeParts {
     /// Create a new `BuilderRuntimeParts` from a `PartitionMap`.
     fn new(
         partition_map: &PartitionMap,
+        inter_partition_plan: InterPartitionPlan,
         enclave_deps: Vec<EnclaveDep>,
         physical_event_q_size: usize,
+        #[cfg(feature = "federated")]
+        federated_connections: boomerang_federated::FederatedRuntimeConnections,
     ) -> Self {
         let mut enclaves = tinymap::TinyMap::new();
         let mut aliases = BuilderAliases::default();
@@ -112,13 +127,26 @@ impl BuilderRuntimeParts {
             Self {
                 enclaves,
                 aliases,
+                inter_partition_plan,
+                #[cfg(feature = "federated")]
+                federation_plan: FederationPlan::default(),
+                #[cfg(feature = "federated")]
+                federated_connections,
                 replayers,
             }
         }
         #[cfg(not(feature = "replay"))]
         {
             // No replayers, just return the enclaves and aliases
-            Self { enclaves, aliases }
+            Self {
+                enclaves,
+                aliases,
+                inter_partition_plan,
+                #[cfg(feature = "federated")]
+                federation_plan: FederationPlan::default(),
+                #[cfg(feature = "federated")]
+                federated_connections,
+            }
         }
     }
 }
@@ -127,6 +155,16 @@ pub struct EnclaveDep {
     pub upstream: BuilderReactorKey,
     pub downstream: BuilderReactorKey,
     pub delay: Option<runtime::Duration>,
+}
+
+fn enclave_deps_from_inter_partition_plan(plan: &InterPartitionPlan) -> Vec<EnclaveDep> {
+    plan.local_enclave_edges()
+        .map(|edge| EnclaveDep {
+            upstream: edge.source_partition,
+            downstream: edge.target_partition,
+            delay: edge.delay,
+        })
+        .collect()
 }
 
 fn push_range<T>(target: &mut Vec<T>, values: impl IntoIterator<Item = T>) -> Range<usize> {
@@ -241,17 +279,209 @@ fn build_modal_schedule_index(graph: &runtime::ReactionGraph) -> runtime::ModalS
 }
 
 impl EnvBuilder {
+    fn build_inter_partition_plan(
+        &self,
+        partition_map: &PartitionMap,
+    ) -> Result<InterPartitionPlan, BuilderError> {
+        let mut plan = InterPartitionPlan::default();
+
+        #[cfg(feature = "federated")]
+        let federate_id_by_partition = {
+            let mut federate_id_by_partition = SecondaryMap::<BuilderReactorKey, String>::new();
+            let mut seen_ids = BTreeMap::<String, BuilderReactorKey>::new();
+
+            for (reactor_key, reactor) in &self.reactor_builders {
+                let Some(spec) = reactor.federate_spec() else {
+                    continue;
+                };
+
+                if spec.id.trim().is_empty() {
+                    return Err(BuilderError::UnsupportedFederationTopology {
+                        what: format!(
+                            "federate reactor '{}' must have a non-empty id",
+                            self.fqn_for(reactor_key, false)?
+                        ),
+                    });
+                }
+
+                if spec.transient {
+                    return Err(BuilderError::UnsupportedFederationTopology {
+                        what: format!(
+                            "transient federate '{}' is reserved for a later milestone",
+                            spec.id
+                        ),
+                    });
+                }
+
+                if partition_map[reactor_key] != reactor_key {
+                    return Err(BuilderError::UnsupportedFederationTopology {
+                        what: format!(
+                            "federate '{}' must be an enclave root in this milestone",
+                            spec.id
+                        ),
+                    });
+                }
+
+                if let Some(previous) = seen_ids.insert(spec.id.clone(), reactor_key) {
+                    return Err(BuilderError::UnsupportedFederationTopology {
+                        what: format!(
+                            "duplicate federate id '{}' for '{}' and '{}'",
+                            spec.id,
+                            self.fqn_for(previous, false)?,
+                            self.fqn_for(reactor_key, false)?,
+                        ),
+                    });
+                }
+
+                federate_id_by_partition.insert(reactor_key, spec.id.clone());
+            }
+
+            federate_id_by_partition
+        };
+
+        for partition in partition_map.values().copied().unique() {
+            #[cfg(feature = "federated")]
+            let kind = federate_id_by_partition
+                .get(partition)
+                .map(|federate| PartitionRootKind::Federated {
+                    federate: federate.clone(),
+                })
+                .unwrap_or(PartitionRootKind::LocalEnclave);
+
+            #[cfg(not(feature = "federated"))]
+            let kind = PartitionRootKind::LocalEnclave;
+
+            plan.partition_roots.push(PartitionRoot {
+                reactor: partition,
+                reactor_fqn: self.fqn_for(partition, false)?.to_string(),
+                kind,
+            });
+        }
+
+        for connection in &self.connection_builders {
+            let source_port_key = connection.source_key();
+            let target_port_key = connection.target_key();
+            let source_port = &self.port_builders[source_port_key];
+            let target_port = &self.port_builders[target_port_key];
+            let source_reactor_key = source_port.parent_reactor_key().ok_or_else(|| {
+                BuilderError::InternalError("source port has no parent reactor".to_owned())
+            })?;
+            let target_reactor_key = target_port.parent_reactor_key().ok_or_else(|| {
+                BuilderError::InternalError("target port has no parent reactor".to_owned())
+            })?;
+            let source_partition = partition_map[source_reactor_key];
+            let target_partition = partition_map[target_reactor_key];
+
+            if source_partition == target_partition {
+                continue;
+            }
+
+            #[cfg(feature = "federated")]
+            let kind = {
+                let source_federate = federate_id_by_partition.get(source_partition);
+                let target_federate = federate_id_by_partition.get(target_partition);
+
+                match (source_federate, target_federate) {
+                    (None, None) => BoundaryKind::LocalEnclave,
+                    (Some(source_federate), Some(target_federate)) => BoundaryKind::Federated {
+                        source_federate: source_federate.clone(),
+                        target_federate: target_federate.clone(),
+                    },
+                    _ => {
+                        return Err(BuilderError::UnsupportedFederationTopology {
+                            what: format!(
+                                "connection '{}' -> '{}' crosses a federated boundary, but both enclave roots are not federates",
+                                self.fqn_for(source_port_key, false)?,
+                                self.fqn_for(target_port_key, false)?,
+                            ),
+                        });
+                    }
+                }
+            };
+
+            #[cfg(not(feature = "federated"))]
+            let kind = BoundaryKind::LocalEnclave;
+
+            if matches!(kind, BoundaryKind::Federated { .. }) && connection.physical() {
+                return Err(BuilderError::UnsupportedFederationTopology {
+                    what: format!(
+                        "cross-federate physical connection '{}' -> '{}' is reserved for a later milestone",
+                        self.fqn_for(source_port_key, false)?,
+                        self.fqn_for(target_port_key, false)?,
+                    ),
+                });
+            }
+
+            plan.edges.push(InterPartitionEdge {
+                kind,
+                source_partition,
+                target_partition,
+                source_port: source_port_key,
+                target_port: target_port_key,
+                delay: connection.after(),
+                physical: connection.physical(),
+            });
+        }
+
+        #[cfg(feature = "federated")]
+        self.validate_federation_zero_delay_cycles(&plan)?;
+
+        Ok(plan)
+    }
+
+    #[cfg(feature = "federated")]
+    fn validate_federation_zero_delay_cycles(
+        &self,
+        plan: &InterPartitionPlan,
+    ) -> Result<(), BuilderError> {
+        let mut graph = petgraph::prelude::DiGraphMap::<BuilderReactorKey, ()>::new();
+
+        for root in &plan.partition_roots {
+            if matches!(root.kind, PartitionRootKind::Federated { .. }) {
+                graph.add_node(root.reactor);
+            }
+        }
+
+        for edge in plan.federated_edges() {
+            let has_positive_delay = edge
+                .delay
+                .is_some_and(|delay| delay > runtime::Duration::ZERO);
+            if !has_positive_delay {
+                graph.add_edge(edge.source_partition, edge.target_partition, ());
+            }
+        }
+
+        if let Err(cycle) = petgraph::algo::toposort(&graph, None) {
+            let cycle = super::util::find_minimal_cycle(&graph, cycle.node_id());
+            let cycle = cycle
+                .into_iter()
+                .map(|reactor_key| {
+                    self.reactor_builders[reactor_key]
+                        .federate_spec()
+                        .map(|spec| spec.id.clone())
+                        .unwrap_or_else(|| format!("{reactor_key:?}"))
+                })
+                .join(" -> ");
+            return Err(BuilderError::UnsupportedFederationTopology {
+                what: format!(
+                    "distributed zero-delay cycle is unsupported in the static MVP: {cycle}"
+                ),
+            });
+        }
+
+        Ok(())
+    }
+
     /// Process the connections and reduce them to a set of port bindings.
     pub(super) fn build_connections(
         &mut self,
         partition_map: &mut PartitionMap,
-    ) -> Result<(PortBindings, Vec<EnclaveDep>), BuilderError> {
+    ) -> Result<PortBindings, BuilderError> {
         let mut port_bindings = PortBindings::default();
-        let mut enclave_deps = vec![];
         for connection in std::mem::take(&mut self.connection_builders).iter_mut() {
-            connection.build(self, partition_map, &mut port_bindings, &mut enclave_deps)?;
+            connection.build(self, partition_map, &mut port_bindings)?;
         }
-        Ok((port_bindings, enclave_deps))
+        Ok(port_bindings)
     }
 
     /// Build the enclave partitioning map.
@@ -264,13 +494,13 @@ impl EnvBuilder {
         petgraph::visit::depth_first_search(&graph, self.reactor_builders.keys(), |event| {
             match event {
                 petgraph::visit::DfsEvent::Discover(key, _) => {
-                    if self.reactor_builders[key].is_enclave {
+                    if self.reactor_builders[key].placement().starts_enclave() {
                         node_stack.push(key);
                     }
                     partitions.push((key, *node_stack.last().unwrap()));
                 }
                 petgraph::visit::DfsEvent::Finish(key, _)
-                    if self.reactor_builders[key].is_enclave =>
+                    if self.reactor_builders[key].placement().starts_enclave() =>
                 {
                     node_stack.pop();
                 }
@@ -441,6 +671,19 @@ impl EnvBuilder {
                 .finish()?;
         }
 
+        Ok(())
+    }
+
+    #[cfg(feature = "federated")]
+    fn build_federated_inbound_endpoints(
+        &mut self,
+        builder_parts: &mut BuilderRuntimeParts,
+    ) -> Result<(), BuilderError> {
+        let mut connections = std::mem::take(&mut builder_parts.federated_connections);
+        for endpoint_builder in self.federated_inbound_endpoint_builders.drain(..) {
+            endpoint_builder(builder_parts, &mut connections)?;
+        }
+        builder_parts.federated_connections = connections;
         Ok(())
     }
 
@@ -703,11 +946,46 @@ impl EnvBuilder {
         config: &runtime::Config,
     ) -> Result<BuilderRuntimeParts, BuilderError> {
         let mut partition_map = self.build_partition_map();
-        let (port_bindings, enclave_deps) = self.build_connections(&mut partition_map)?;
-        let mut builder_parts =
-            BuilderRuntimeParts::new(&partition_map, enclave_deps, config.physical_event_q_size);
+        let inter_partition_plan = self.build_inter_partition_plan(&partition_map)?;
+        #[cfg(feature = "federated")]
+        let federation_plan =
+            FederationPlan::from_inter_partition_plan(&inter_partition_plan, |port| {
+                self.fqn_for(port, false).map(|fqn| fqn.to_string())
+            })?;
+        #[cfg(feature = "federated")]
+        let federated_connections = boomerang_federated::FederatedRuntimeConnections::new(
+            federation_plan
+                .federates
+                .iter()
+                .map(|federate| boomerang_federated::FederateId::new(federate.id.clone())),
+            federated_routes_from_plan(&federation_plan)?
+                .into_iter()
+                .map(|route| {
+                    boomerang_federated::FederateClientRoute::new(
+                        route.endpoint,
+                        route.source,
+                        route.target,
+                    )
+                }),
+        )?;
+        let enclave_deps = enclave_deps_from_inter_partition_plan(&inter_partition_plan);
+        let port_bindings = self.build_connections(&mut partition_map)?;
+        let mut builder_parts = BuilderRuntimeParts::new(
+            &partition_map,
+            inter_partition_plan,
+            enclave_deps,
+            config.physical_event_q_size,
+            #[cfg(feature = "federated")]
+            federated_connections,
+        );
+        #[cfg(feature = "federated")]
+        {
+            builder_parts.federation_plan = federation_plan;
+        }
 
         self.build_runtime_actions(&partition_map, &mut builder_parts)?;
+        #[cfg(feature = "federated")]
+        self.build_federated_inbound_endpoints(&mut builder_parts)?;
         self.build_runtime_ports(&partition_map, &mut builder_parts, &port_bindings)?;
 
         // this must be done before build_runtime_reactors, since that drains self.reaction_builders

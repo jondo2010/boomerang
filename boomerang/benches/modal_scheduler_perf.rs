@@ -361,7 +361,7 @@ fn bench_transition_churn(c: &mut Criterion) {
                         TransitionChurnState::default(),
                     )
                 },
-                |mut sched| sched.event_loop(),
+                |mut sched| sched.try_event_loop().unwrap(),
                 BatchSize::SmallInput,
             );
         });
@@ -407,7 +407,7 @@ fn bench_inactive_port_fanout(c: &mut Criterion) {
                         FanoutParentState::default(),
                     )
                 },
-                |mut sched| sched.event_loop(),
+                |mut sched| sched.try_event_loop().unwrap(),
                 BatchSize::SmallInput,
             );
         });
@@ -457,7 +457,7 @@ fn bench_reset_subtree(c: &mut Criterion) {
                         ResetSubtreeState::default(),
                     )
                 },
-                |mut sched| sched.event_loop(),
+                |mut sched| sched.try_event_loop().unwrap(),
                 BatchSize::SmallInput,
             );
         });

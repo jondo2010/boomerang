@@ -1,7 +1,7 @@
 //! This module provides traits and implementations for building reactors
 use crate::{
     runtime, BuilderError, BuilderModeKey, BuilderReactorKey, EnvBuilder, PartialReactionBuilder,
-    ReactorBuilderState,
+    ReactorBuilderState, ReactorPlacement,
 };
 
 pub trait Reactor<State: runtime::ReactorData = ()>: Sized {
@@ -16,6 +16,28 @@ pub trait Reactor<State: runtime::ReactorData = ()>: Sized {
         bank_info: Option<runtime::BankInfo>,
         is_enclave: bool,
         env: &mut EnvBuilder,
+    ) -> Result<Self::Ports, BuilderError> {
+        self.build_with_placement(
+            name,
+            state,
+            parent,
+            scope_mode,
+            bank_info,
+            ReactorPlacement::from(is_enclave),
+            env,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_with_placement(
+        &self,
+        name: &str,
+        state: State,
+        parent: Option<BuilderReactorKey>,
+        scope_mode: Option<BuilderModeKey>,
+        bank_info: Option<runtime::BankInfo>,
+        placement: ReactorPlacement,
+        env: &mut EnvBuilder,
     ) -> Result<Self::Ports, BuilderError>;
 }
 
@@ -27,24 +49,24 @@ where
             /*parent*/ Option<BuilderReactorKey>,
             /*scope_mode*/ Option<BuilderModeKey>,
             /*bank_info*/ Option<boomerang_runtime::BankInfo>,
-            /*is_enclave*/ bool,
+            /*placement*/ ReactorPlacement,
             /*env*/ &mut EnvBuilder,
         ) -> Result<Ports, BuilderError>
         + 'static,
     State: runtime::ReactorData,
 {
     type Ports = Ports;
-    fn build(
+    fn build_with_placement(
         &self,
         name: &str,
         state: State,
         parent: Option<BuilderReactorKey>,
         scope_mode: Option<BuilderModeKey>,
         bank_info: Option<boomerang_runtime::BankInfo>,
-        is_enclave: bool,
+        placement: ReactorPlacement,
         env: &mut EnvBuilder,
     ) -> Result<Self::Ports, BuilderError> {
-        (self)(name, state, parent, scope_mode, bank_info, is_enclave, env)
+        (self)(name, state, parent, scope_mode, bank_info, placement, env)
     }
 }
 
@@ -82,15 +104,48 @@ impl<S: runtime::ReactorData> ReactorBuilderState<'_, S> {
         ChildState: runtime::ReactorData,
         R: Reactor<ChildState>,
     {
+        self.add_child_reactor_with_placement(reactor, name, state, is_enclave)
+    }
+
+    pub fn add_child_reactor_with_placement<ChildState, R>(
+        &mut self,
+        reactor: R,
+        name: &str,
+        state: ChildState,
+        placement: impl Into<ReactorPlacement>,
+    ) -> Result<R::Ports, BuilderError>
+    where
+        ChildState: runtime::ReactorData,
+        R: Reactor<ChildState>,
+    {
         let scope_mode = self.current_mode();
-        reactor.build(
+        reactor.build_with_placement(
             name,
             state,
             Some(self.key()),
             scope_mode,
             None,
-            is_enclave,
+            placement.into(),
             self.env(),
+        )
+    }
+
+    #[cfg(feature = "federated")]
+    pub fn add_child_federate<ChildState, R>(
+        &mut self,
+        reactor: R,
+        name: &str,
+        state: ChildState,
+    ) -> Result<R::Ports, BuilderError>
+    where
+        ChildState: runtime::ReactorData,
+        R: Reactor<ChildState>,
+    {
+        self.add_child_reactor_with_placement(
+            reactor,
+            name,
+            state,
+            ReactorPlacement::federate(name),
         )
     }
 
@@ -108,13 +163,13 @@ impl<S: runtime::ReactorData> ReactorBuilderState<'_, S> {
         let scope_mode = self.current_mode();
         let reactors = (0..N)
             .map(|i| {
-                reactor.build(
+                reactor.build_with_placement(
                     &format!("{name}_{i}"),
                     state.clone(),
                     Some(self.key()),
                     scope_mode,
                     Some(runtime::BankInfo { idx: i, total: N }),
-                    is_enclave,
+                    ReactorPlacement::from(is_enclave),
                     self.env(),
                 )
             })

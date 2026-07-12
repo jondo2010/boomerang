@@ -333,6 +333,17 @@ impl Debug for BuilderRuntimeParts {
         f.debug_struct("BuilderRuntimeParts")
             .field("enclave_map", &enclaves)
             .field("aliases_map", &self.aliases)
+            .field("inter_partition_plan", &self.inter_partition_plan)
+            .field("federation_plan", &{
+                #[cfg(feature = "federated")]
+                {
+                    &self.federation_plan
+                }
+                #[cfg(not(feature = "federated"))]
+                {
+                    &"<disabled>"
+                }
+            })
             .finish()
     }
 }

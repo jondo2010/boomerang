@@ -23,18 +23,27 @@ parallel = ["boomerang_runtime/parallel"]
 ## Support for recording and replaying
 replay = ["boomerang_runtime/replay", "boomerang_builder/replay"]
 
+## Builder metadata and protocol primitives for static federated enclave topologies
+federated = [
+    "boomerang_runtime/federated",
+    "boomerang_builder/federated",
+    "boomerang_federated/runtime",
+    "dep:boomerang_federated",
+]
+
 [dependencies]
 document-features = { workspace = true }
 thiserror.workspace = true
 
 # repo dependencies
 boomerang_builder = { workspace = true }
+boomerang_federated = { workspace = true, optional = true }
 boomerang_runtime = { workspace = true }
 boomerang_macros = { workspace = true }
 
 
 [dev-dependencies]
-boomerang_util = { path = "../boomerang_util", features = ["runner", "replay"] }
+boomerang_util = { path = "../boomerang_util", features = ["runner", "replay", "test-tracing"] }
 criterion = "0.5"
 serde = { workspace = true }
 tracing-subscriber = { workspace = true }

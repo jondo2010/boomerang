@@ -38,6 +38,70 @@ impl From<bool> for ModeKind {
     }
 }
 
+#[cfg(feature = "federated")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FederateSpec {
+    pub id: String,
+    pub transient: bool,
+}
+
+#[cfg(feature = "federated")]
+impl FederateSpec {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            transient: false,
+        }
+    }
+
+    pub fn transient(mut self, transient: bool) -> Self {
+        self.transient = transient;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReactorPlacement {
+    Local,
+    Enclave,
+    #[cfg(feature = "federated")]
+    Federate(FederateSpec),
+}
+
+impl ReactorPlacement {
+    pub fn starts_enclave(&self) -> bool {
+        match self {
+            ReactorPlacement::Local => false,
+            ReactorPlacement::Enclave => true,
+            #[cfg(feature = "federated")]
+            ReactorPlacement::Federate(_) => true,
+        }
+    }
+
+    #[cfg(feature = "federated")]
+    pub fn federate(id: impl Into<String>) -> Self {
+        ReactorPlacement::Federate(FederateSpec::new(id))
+    }
+
+    #[cfg(feature = "federated")]
+    pub fn federate_spec(&self) -> Option<&FederateSpec> {
+        match self {
+            ReactorPlacement::Federate(spec) => Some(spec),
+            _ => None,
+        }
+    }
+}
+
+impl From<bool> for ReactorPlacement {
+    fn from(is_enclave: bool) -> Self {
+        if is_enclave {
+            ReactorPlacement::Enclave
+        } else {
+            ReactorPlacement::Local
+        }
+    }
+}
+
 impl petgraph::graph::GraphIndex for BuilderReactorKey {
     fn index(&self) -> usize {
         self.0.as_ffi() as usize
@@ -95,6 +159,8 @@ pub struct ReactorBuilder {
     pub actions: SecondaryMap<BuilderActionKey, ()>,
     /// The bank info of the bank that this Reactor belongs to, if any.
     pub bank_info: Option<runtime::BankInfo>,
+    /// Placement metadata for this Reactor instance.
+    pub placement: ReactorPlacement,
     /// Whether this Reactor is an enclave
     pub is_enclave: bool,
     /// Initial mode for this reactor
@@ -115,8 +181,10 @@ impl ReactorBuilder {
         reactor_state: S,
         parent: Option<BuilderReactorKey>,
         bank_info: Option<runtime::BankInfo>,
-        is_enclave: bool,
+        placement: impl Into<ReactorPlacement>,
     ) -> Self {
+        let placement = placement.into();
+        let is_enclave = placement.starts_enclave();
         Self {
             name: name.into(),
             state: Box::new(ReactorState(reactor_state)),
@@ -128,6 +196,7 @@ impl ReactorBuilder {
             ports: SecondaryMap::new(),
             actions: SecondaryMap::new(),
             bank_info,
+            placement,
             is_enclave,
             initial_mode: None,
         }
@@ -139,6 +208,19 @@ impl ReactorBuilder {
 
     pub fn bank_info(&self) -> Option<&runtime::BankInfo> {
         self.bank_info.as_ref()
+    }
+
+    pub fn placement(&self) -> &ReactorPlacement {
+        &self.placement
+    }
+
+    pub fn is_enclave(&self) -> bool {
+        self.is_enclave
+    }
+
+    #[cfg(feature = "federated")]
+    pub fn federate_spec(&self) -> Option<&FederateSpec> {
+        self.placement.federate_spec()
     }
 
     #[allow(dead_code)] // TODO: use or remove this
@@ -170,7 +252,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         parent: Option<BuilderReactorKey>,
         bank_info: Option<runtime::BankInfo>,
         reactor_state: S,
-        is_enclave: bool,
+        placement: impl Into<ReactorPlacement>,
         env: &'a mut EnvBuilder,
     ) -> Self {
         let type_name = std::any::type_name::<S>();
@@ -180,7 +262,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
             reactor_state,
             parent,
             bank_info,
-            is_enclave,
+            placement,
         ));
 
         let startup_action = env

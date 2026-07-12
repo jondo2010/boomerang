@@ -387,14 +387,23 @@ impl FederateClientRoute {
 #[cfg(feature = "runtime")]
 #[derive(Debug)]
 pub struct RtiFederatedTimeBarrier {
+    /// Stable protocol identity used for outgoing frames and inbound route validation.
     federate_id: FederateId,
+    /// Persistent ordered protocol connection to the RTI.
     client: FederateProtocolClient,
+    /// Federation route metadata keyed by its stable endpoint identifier.
     routes: BTreeMap<crate::EndpointId, FederateClientRoute>,
+    /// Runtime registry used to decode and schedule accepted inbound payloads.
     inbound: boomerang_runtime::FederatedInboundEndpointRegistry,
+    /// Shared terminal fault reported by the runtime endpoint workers, if any.
     faults: boomerang_runtime::FederatedFaultState,
+    /// Most recently accepted RTI grant, used to satisfy repeated or older requests locally.
     last_granted: Option<boomerang_runtime::Tag>,
+    /// Successfully queued `NET` request still awaiting a sufficient `TAG` response.
     pending_request: Option<WireTag>,
+    /// Whether this barrier has entered its terminal stopped state.
     stopped: bool,
+    /// Maximum time spent waiting for an RTI frame before checking scheduler events again.
     poll_interval: StdDuration,
 }
 

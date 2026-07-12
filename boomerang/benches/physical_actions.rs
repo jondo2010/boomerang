@@ -66,7 +66,7 @@ fn bench(c: &mut Criterion) {
                     let action_ref = enclave.create_async_action_ref::<u32>(action_key);
                     let mut scheduler = runtime::Scheduler::new(enclave_key, enclave, config);
                     let scheduler_thread = std::thread::spawn(move || {
-                        scheduler.event_loop();
+                        scheduler.try_event_loop().unwrap();
                     });
 
                     (send_ctx, action_ref, scheduler_thread, received)
@@ -91,7 +91,7 @@ fn bench(c: &mut Criterion) {
                         std::thread::yield_now();
                     }
 
-                    send_ctx.schedule_shutdown(None);
+                    assert!(send_ctx.schedule_shutdown(None));
                     scheduler_thread.join().unwrap();
                 },
                 BatchSize::SmallInput,

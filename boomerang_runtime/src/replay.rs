@@ -12,14 +12,44 @@ use crate::{
 pub use {foxglove, mcap};
 
 #[derive(thiserror::Error, Debug)]
-#[error("Replay error")]
 pub enum ReplayError {
+    #[error("replay I/O error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error("MCAP replay error: {0}")]
     Mcap(#[from] mcap::McapError),
 
+    #[error("invalid replay format: {0}")]
     Format(String),
+
+    #[error("replay serialization failed: {error}")]
     SerializationError { error: String },
+
+    #[error("scheduler channel closed while replaying enclave {enclave_key}, action {action_key}")]
+    SchedulerClosed {
+        enclave_key: EnclaveKey,
+        action_key: ActionKey,
+    },
+
+    #[error("replay worker panicked: {what}")]
+    WorkerPanicked { what: String },
+}
+
+/// A running replay worker. Joining it reports all deferred replay failures.
+#[must_use = "replay errors are reported when the handle is joined"]
+#[derive(Debug)]
+pub struct ReplayHandle {
+    worker: std::thread::JoinHandle<Result<(), ReplayError>>,
+}
+
+impl ReplayHandle {
+    pub fn join(self) -> Result<(), ReplayError> {
+        self.worker
+            .join()
+            .map_err(|payload| ReplayError::WorkerPanicked {
+                what: panic_payload_message(payload),
+            })?
+    }
 }
 
 const ENCLAVE: &str = "enclave";
@@ -167,7 +197,7 @@ pub fn create_replayer<P>(
     path: P,
     replayers: ReplayersMap,
     enclaves: &tinymap::TinyMap<EnclaveKey, Enclave>,
-) -> Result<(), ReplayError>
+) -> Result<ReplayHandle, ReplayError>
 where
     P: AsRef<Path>,
 {
@@ -215,6 +245,8 @@ where
     }
 
     struct ReplayContext {
+        enclave_key: EnclaveKey,
+        action_key: ActionKey,
         context: SendContext,
         replayer: Box<dyn ReplayFn>,
     }
@@ -225,42 +257,70 @@ where
             .map(move |(action_key, replayer)| (enclave_key, action_key, replayer))
     });
 
-    let replayers = replayers.filter_map(|(enclave_key, action_key, replayer)| {
-        if let Some(ch) = channels.get(&(enclave_key, action_key)) {
-            let enclave = enclaves.get(enclave_key).expect("Enclave not found");
-            tracing::info!("Replaying channel {}", summary.channels[ch].topic);
-            Some((tinymap::DefaultKey::from(*ch as usize), ReplayContext {
-                context: enclave.create_send_context(enclave_key),
-                replayer
-            }))
-        } else {
-            tracing::warn!("No replay channel found for enclave_key: {enclave_key}, action_key: {action_key}");
-            None
-        }
-    }).collect::<tinymap::TinySecondaryMap<tinymap::DefaultKey, ReplayContext>>();
-
-    std::thread::spawn(move || {
-        let message_stream = mcap::MessageStream::new(&mapped).unwrap();
-        for msg in message_stream {
-            let inner = msg.unwrap();
-
-            let key = tinymap::DefaultKey::from(inner.channel.id as usize);
-            if let Some(replay_ctx) = replayers.get(key) {
-                replay_ctx
-                    .replayer
-                    .process(&inner)
-                    .map(|event| {
-                        if !replay_ctx.context.schedule_external(event) {
-                            tracing::error!("Failed to schedule event");
-                        }
+    let replayers = replayers
+        .filter_map(|(enclave_key, action_key, replayer)| {
+            let Some(ch) = channels.get(&(enclave_key, action_key)) else {
+                tracing::warn!("No replay channel found for enclave_key: {enclave_key}, action_key: {action_key}");
+                return None;
+            };
+            Some(
+                enclaves
+                    .get(enclave_key)
+                    .ok_or_else(|| {
+                        ReplayError::Format(format!(
+                            "recorded enclave {enclave_key} is not present in the runtime"
+                        ))
                     })
-                    .unwrap_or_else(|e| {
-                        tracing::error!("Failed to replay message: {}", e);
-                    });
-            }
-        }
-        tracing::info!("Replay finished");
-    });
+                    .map(|enclave| {
+                        tracing::info!("Replaying channel {}", summary.channels[ch].topic);
+                        (
+                            tinymap::DefaultKey::from(*ch as usize),
+                            ReplayContext {
+                                enclave_key,
+                                action_key,
+                                context: enclave.create_send_context(enclave_key),
+                                replayer,
+                            },
+                        )
+                    }),
+            )
+        })
+        .collect::<Result<
+            tinymap::TinySecondaryMap<tinymap::DefaultKey, ReplayContext>,
+            ReplayError,
+        >>()?;
 
-    Ok(())
+    let worker = std::thread::Builder::new()
+        .name("boomerang-replay".to_owned())
+        .spawn(move || {
+            let message_stream = mcap::MessageStream::new(&mapped)?;
+            for msg in message_stream {
+                let inner = msg?;
+
+                let key = tinymap::DefaultKey::from(inner.channel.id as usize);
+                if let Some(replay_ctx) = replayers.get(key) {
+                    let event = replay_ctx.replayer.process(&inner)?;
+                    if !replay_ctx.context.schedule_external(event) {
+                        return Err(ReplayError::SchedulerClosed {
+                            enclave_key: replay_ctx.enclave_key,
+                            action_key: replay_ctx.action_key,
+                        });
+                    }
+                }
+            }
+            tracing::info!("Replay finished");
+            Ok(())
+        })?;
+
+    Ok(ReplayHandle { worker })
+}
+
+fn panic_payload_message(payload: Box<dyn std::any::Any + Send + 'static>) -> String {
+    match payload.downcast::<String>() {
+        Ok(message) => *message,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(message) => (*message).to_owned(),
+            Err(_) => "non-string panic payload".to_owned(),
+        },
+    }
 }

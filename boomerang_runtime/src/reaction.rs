@@ -6,8 +6,8 @@ use crate::{
 };
 #[cfg(feature = "federated")]
 use crate::{
-    FederatedEndpointId, FederatedFaultState, FederatedOutboundCommand, FederatedOutboundMessage,
-    FederatedOutboundSink, FederatedPayloadEncoder,
+    FederatedFaultState, FederatedOutboundCommand, FederatedOutboundMessage, FederatedOutboundSink,
+    FederatedPayloadEncoder,
 };
 
 tinymap::key_type! { pub ReactionKey }
@@ -187,7 +187,6 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for EnclaveSenderReactio
 /// can be converted to a protocol MSG frame by a federated client.
 #[cfg(feature = "federated")]
 pub struct FederatedSenderReactionFn<T: ReactorData + Clone> {
-    endpoint: FederatedEndpointId,
     target_action_ref: AsyncActionRef<T>,
     encoder: Box<dyn FederatedPayloadEncoder<T>>,
     outbound: Box<dyn FederatedOutboundSink>,
@@ -197,14 +196,12 @@ pub struct FederatedSenderReactionFn<T: ReactorData + Clone> {
 #[cfg(feature = "federated")]
 impl<T: ReactorData + Clone> FederatedSenderReactionFn<T> {
     pub fn new(
-        endpoint: FederatedEndpointId,
         target_action_ref: AsyncActionRef<T>,
         encoder: Box<dyn FederatedPayloadEncoder<T>>,
         outbound: Box<dyn FederatedOutboundSink>,
         faults: FederatedFaultState,
     ) -> Self {
         Self {
-            endpoint,
             target_action_ref,
             encoder,
             outbound,
@@ -235,10 +232,7 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for FederatedSenderReact
         };
 
         if !self.target_action_ref.is_logical() {
-            tracing::error!(
-                endpoint = %self.endpoint,
-                "Federated sender cannot target a physical action"
-            );
+            tracing::error!("Federated sender cannot target a physical action");
             return;
         }
 
@@ -253,20 +247,16 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for FederatedSenderReact
         let payload = match self.encoder.encode(value) {
             Ok(payload) => payload,
             Err(error) => {
-                tracing::error!(?error, endpoint = %self.endpoint, "Failed to encode federated payload");
+                tracing::error!(?error, "Failed to encode federated payload");
                 self.faults.record(error);
                 return;
             }
         };
 
-        let command = FederatedOutboundCommand::Msg(FederatedOutboundMessage {
-            endpoint: self.endpoint.clone(),
-            tag,
-            payload,
-        });
+        let command = FederatedOutboundCommand::Msg(FederatedOutboundMessage { tag, payload });
 
         if let Err(error) = self.outbound.send(command) {
-            tracing::error!(?error, endpoint = %self.endpoint, "Failed to emit federated command");
+            tracing::error!(?error, "Failed to emit federated command");
             self.faults.record(error);
         }
     }

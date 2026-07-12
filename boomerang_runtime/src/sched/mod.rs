@@ -7,6 +7,7 @@ mod modal;
 mod queue;
 
 use barrier::LogicalTimeBarrier;
+pub use barrier::LogicalTimeBarrierError;
 #[cfg(feature = "federated")]
 use barrier::NoFederatedTimeBarrier;
 #[cfg(feature = "federated")]
@@ -23,6 +24,27 @@ use crate::{
     CommonContext, Duration, Env, ModeTransitionRequest, ReactionGraph, ReactionKey,
     ReactionSetLimits, ReactorKey, RuntimeError, SendContext, Tag,
 };
+
+/// Failure while starting or running a set of local enclave schedulers.
+#[derive(Debug, thiserror::Error)]
+pub enum ExecuteEnclavesError {
+    #[error("failed to spawn scheduler thread for enclave {enclave}: {source}")]
+    ThreadSpawn {
+        enclave: EnclaveKey,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("scheduler for enclave {enclave} failed: {source}")]
+    Scheduler {
+        enclave: EnclaveKey,
+        #[source]
+        source: RuntimeError,
+    },
+
+    #[error("scheduler thread for enclave {enclave} panicked: {what}")]
+    ThreadPanic { enclave: EnclaveKey, what: String },
+}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -430,13 +452,6 @@ impl Scheduler {
         self.federated_time_barrier.logical_tag_complete(tag)
     }
 
-    #[tracing::instrument(skip(self), fields(tag = %self.current_tag))]
-    #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> bool {
-        self.try_next()
-            .unwrap_or_else(|error| panic!("scheduler execution failed: {error}"))
-    }
-
     /// Process one scheduler step, returning coordination failures to the caller.
     #[tracing::instrument(skip(self), fields(tag = %self.current_tag))]
     pub fn try_next(&mut self) -> Result<bool, RuntimeError> {
@@ -450,7 +465,9 @@ impl Scheduler {
 
             // Wait until all upstream barriers are released
             for (_upstream_enclave_key, barrier) in self.upstream_enclaves.iter_mut() {
-                if let Some(async_event) = barrier.acquire_tag(next_tag, self.key, &self.event_rx) {
+                if let Some(async_event) =
+                    barrier.acquire_tag(next_tag, self.key, &self.event_rx)?
+                {
                     self.handle_async_event(async_event);
                     // Returned early due to async event
                     return Ok(true);
@@ -516,12 +533,6 @@ impl Scheduler {
         }
 
         Ok(true)
-    }
-
-    #[tracing::instrument(skip(self), fields(key = %self.key))]
-    pub fn event_loop(&mut self) {
-        self.try_event_loop()
-            .unwrap_or_else(|error| panic!("scheduler execution failed: {error}"));
     }
 
     /// Run until shutdown or return the first runtime coordination failure.
@@ -772,41 +783,77 @@ impl Scheduler {
 ///
 /// # Returns
 ///
-/// A vector of `Env` instances, one for each executed enclave.
+/// A map of `Env` instances, one for each executed enclave.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if there is an error during the execution of any enclave.
+/// Returns a typed thread-spawn, scheduler-runtime, or thread-panic error. Runtime and panic
+/// failures are reported after every successfully spawned scheduler thread has terminated.
 pub fn execute_enclaves(
-    #[allow(unused_mut)] mut enclaves: impl Iterator<Item = (EnclaveKey, Enclave)> + Send,
+    enclaves: impl Iterator<Item = (EnclaveKey, Enclave)> + Send,
     config: Config,
-) -> tinymap::TinySecondaryMap<EnclaveKey, Env> {
-    let handles: Vec<_> = enclaves
-        .filter_map(move |(enclave_key, enclave)| {
-            if enclave.env.reactions.is_empty() {
-                // If there are no reactions, there is nothing to do
-                tracing::info!("No reactions to execute for enclave {enclave_key:?}");
-                None
-            } else {
-                tracing::info!("Starting scheduler for enclave {enclave_key:?}");
-                Some(Scheduler::new(enclave_key, enclave, config.clone()))
-            }
-        })
-        .map(|mut sched| {
-            std::thread::Builder::new()
-                .name(sched.key.to_string())
-                .spawn(move || {
-                    sched.event_loop();
-                    (sched.key, sched.into_env())
-                })
-                .unwrap()
-        })
-        .collect();
+) -> Result<tinymap::TinySecondaryMap<EnclaveKey, Env>, ExecuteEnclavesError> {
+    let schedulers = enclaves.filter_map(move |(enclave_key, enclave)| {
+        if enclave.env.reactions.is_empty() {
+            // If there are no reactions, there is nothing to do
+            tracing::info!("No reactions to execute for enclave {enclave_key:?}");
+            None
+        } else {
+            tracing::info!("Starting scheduler for enclave {enclave_key:?}");
+            Some(Scheduler::new(enclave_key, enclave, config.clone()))
+        }
+    });
 
-    handles
-        .into_iter()
-        .map(|handle| handle.join().expect("Thread panicked"))
-        .collect()
+    let mut handles = Vec::new();
+    for mut sched in schedulers {
+        let enclave = sched.key;
+        let handle = std::thread::Builder::new()
+            .name(sched.key.to_string())
+            .spawn(move || {
+                let result = sched.try_event_loop();
+                (sched.key, sched.into_env(), result)
+            })
+            .map_err(|source| ExecuteEnclavesError::ThreadSpawn { enclave, source })?;
+        handles.push((enclave, handle));
+    }
+
+    let mut envs = tinymap::TinySecondaryMap::new();
+    let mut first_error = None;
+
+    for (enclave, handle) in handles {
+        match handle.join() {
+            Ok((key, env, Ok(()))) => {
+                envs.insert(key, env);
+            }
+            Ok((key, _env, Err(source))) => {
+                first_error.get_or_insert(ExecuteEnclavesError::Scheduler {
+                    enclave: key,
+                    source,
+                });
+            }
+            Err(payload) => {
+                first_error.get_or_insert(ExecuteEnclavesError::ThreadPanic {
+                    enclave,
+                    what: panic_payload_message(payload),
+                });
+            }
+        }
+    }
+
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(envs),
+    }
+}
+
+fn panic_payload_message(payload: Box<dyn std::any::Any + Send + 'static>) -> String {
+    match payload.downcast::<String>() {
+        Ok(message) => *message,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(message) => (*message).to_owned(),
+            Err(_) => "non-string panic payload".to_owned(),
+        },
+    }
 }
 
 #[cfg(all(test, feature = "federated"))]
@@ -942,7 +989,7 @@ mod tests {
             .events
             .push_event(tag, std::iter::once((Level::from(0), reaction)), false);
 
-        assert!(scheduler.next());
+        assert!(scheduler.try_next().unwrap());
         assert_eq!(scheduler.current_tag, tag);
 
         let calls = log.lock().unwrap().clone();
@@ -983,7 +1030,7 @@ mod tests {
             false,
         );
 
-        assert!(scheduler.next());
+        assert!(scheduler.try_next().unwrap());
         assert_eq!(scheduler.current_tag, before_wait);
         assert_eq!(scheduler.events.peek_tag(), Some(inbound_tag));
 

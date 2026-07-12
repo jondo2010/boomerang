@@ -702,7 +702,7 @@ impl EnvBuilder {
     #[cfg(feature = "federated")]
     pub(super) fn add_federated_inbound_endpoint<T>(
         &mut self,
-        endpoint: runtime::FederatedEndpointId,
+        endpoint: boomerang_federated::EndpointId,
         target_partition: BuilderReactorKey,
         target_action_key: BuilderActionKey,
         decoder: Box<dyn runtime::FederatedPayloadDecoder<T>>,
@@ -748,6 +748,7 @@ impl EnvBuilder {
                         action_ref,
                         decoder,
                     )
+                    .map(|_| ())
                     .map_err(|error| BuilderError::UnsupportedFederationTopology {
                         what: error.to_string(),
                     })

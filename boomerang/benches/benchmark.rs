@@ -56,7 +56,7 @@ fn bench(c: &mut Criterion) {
                     runtime::Scheduler::new(enclave_key, enclave, config)
                 },
                 |mut sched| {
-                    sched.event_loop();
+                    sched.try_event_loop().unwrap();
                 },
                 BatchSize::SmallInput,
             );

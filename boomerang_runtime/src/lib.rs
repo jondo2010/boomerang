@@ -39,7 +39,7 @@ pub use env::{
 pub use event::AsyncEvent;
 #[cfg(feature = "federated")]
 pub use federated::{
-    FederatedEndpointError, FederatedEndpointId, FederatedFaultState,
+    FederatedEndpointError, FederatedEndpointKey, FederatedFaultState,
     FederatedInboundEndpointRegistry, FederatedOutboundCommand, FederatedOutboundMessage,
     FederatedOutboundSink, FederatedPayloadDecoder, FederatedPayloadEncoder,
 };
@@ -81,6 +81,9 @@ pub enum RuntimeError {
 
     #[error("Encode error {error}")]
     EncodeError { error: String },
+
+    #[error(transparent)]
+    LogicalTimeBarrier(#[from] LogicalTimeBarrierError),
 
     #[cfg(feature = "replay")]
     #[error(transparent)]

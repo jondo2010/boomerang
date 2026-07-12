@@ -7,19 +7,6 @@ use crate::{
     PartitionRootKind,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FederatedEndpointId(String);
-
-impl FederatedEndpointId {
-    pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FederateBuildInfo {
     pub id: String,
@@ -29,7 +16,7 @@ pub struct FederateBuildInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FederatedEndpoint {
-    pub id: FederatedEndpointId,
+    pub id: boomerang_federated::EndpointId,
     pub source_federate: String,
     pub target_federate: String,
     pub source_port: BuilderPortKey,
@@ -40,7 +27,7 @@ pub struct FederatedEndpoint {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FederatedEdge {
-    pub endpoint: FederatedEndpointId,
+    pub endpoint: boomerang_federated::EndpointId,
     pub source_federate: String,
     pub target_federate: String,
     pub source_federate_reactor: BuilderReactorKey,
@@ -59,7 +46,7 @@ pub struct FederationPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FederatedRoute {
-    pub endpoint: runtime::FederatedEndpointId,
+    pub endpoint: boomerang_federated::EndpointId,
     pub source: boomerang_federated::FederateId,
     pub target: boomerang_federated::FederateId,
 }
@@ -100,8 +87,10 @@ impl FederationPlan {
             else {
                 unreachable!("federated_edges only yields federated boundary edges");
             };
-            let endpoint =
-                FederatedEndpointId::new(format!("{}->{}", source_port_fqn, target_port_fqn));
+            let endpoint = boomerang_federated::EndpointId::new(format!(
+                "{}->{}",
+                source_port_fqn, target_port_fqn
+            ));
 
             federation_plan.endpoints.push(FederatedEndpoint {
                 id: endpoint.clone(),
@@ -132,7 +121,7 @@ pub fn federation_topology_from_plan(
     plan: &FederationPlan,
 ) -> Result<boomerang_federated::FederatedTopology, BuilderError> {
     let federate_ids = checked_federate_id_set(plan)?;
-    let mut seen_endpoints = BTreeSet::<FederatedEndpointId>::new();
+    let mut seen_endpoints = BTreeSet::<boomerang_federated::EndpointId>::new();
     let edges = plan
         .edges
         .iter()
@@ -154,7 +143,7 @@ pub fn federation_topology_from_plan(
             Ok(boomerang_federated::TopologyEdge::new(
                 edge.source_federate.clone(),
                 edge.target_federate.clone(),
-                edge.endpoint.as_str(),
+                edge.endpoint.clone(),
                 wire_delay_from_runtime_delay(edge.delay)?,
             ))
         })
@@ -172,7 +161,7 @@ pub fn federated_routes_from_plan(
     plan: &FederationPlan,
 ) -> Result<Vec<FederatedRoute>, BuilderError> {
     let federate_ids = checked_federate_id_set(plan)?;
-    let mut edge_by_endpoint = BTreeMap::<FederatedEndpointId, (String, String)>::new();
+    let mut edge_by_endpoint = BTreeMap::<boomerang_federated::EndpointId, (String, String)>::new();
 
     for edge in &plan.edges {
         validate_endpoint_id("route edge", edge.endpoint.as_str())?;
@@ -196,7 +185,7 @@ pub fn federated_routes_from_plan(
         }
     }
 
-    let mut endpoint_ids = BTreeSet::<FederatedEndpointId>::new();
+    let mut endpoint_ids = BTreeSet::<boomerang_federated::EndpointId>::new();
     let mut routes = Vec::with_capacity(plan.endpoints.len());
     for endpoint in &plan.endpoints {
         validate_endpoint_id("route endpoint", endpoint.id.as_str())?;
@@ -232,7 +221,7 @@ pub fn federated_routes_from_plan(
         }
 
         routes.push(FederatedRoute {
-            endpoint: runtime::FederatedEndpointId::new(endpoint.id.as_str()),
+            endpoint: endpoint.id.clone(),
             source: boomerang_federated::FederateId::new(endpoint.source_federate.clone()),
             target: boomerang_federated::FederateId::new(endpoint.target_federate.clone()),
         });

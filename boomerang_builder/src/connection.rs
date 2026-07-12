@@ -429,10 +429,10 @@ fn federated_endpoint_id(
     env: &EnvBuilder,
     source_key: BuilderPortKey,
     target_key: BuilderPortKey,
-) -> Result<runtime::FederatedEndpointId, BuilderError> {
+) -> Result<boomerang_federated::EndpointId, BuilderError> {
     let source_port_fqn = env.fqn_for(source_key, false)?.to_string();
     let target_port_fqn = env.fqn_for(target_key, false)?.to_string();
-    Ok(runtime::FederatedEndpointId::new(format!(
+    Ok(boomerang_federated::EndpointId::new(format!(
         "{source_port_fqn}->{target_port_fqn}"
     )))
 }
@@ -538,7 +538,7 @@ fn build_federated_connection_source<T: runtime::ReactorData + Clone>(
     scope_mode: Option<BuilderModeKey>,
     target_partition: BuilderReactorKey,
     target_action_key: BuilderActionKey,
-    endpoint: runtime::FederatedEndpointId,
+    endpoint: boomerang_federated::EndpointId,
     encoder: Box<dyn runtime::FederatedPayloadEncoder<T>>,
 ) -> Result<EnclaveConnectionSource<T>, BuilderError> {
     let mut source_builder = env.add_reactor("con_reactor_src", parent_key, None, (), false);
@@ -566,7 +566,6 @@ fn build_federated_connection_source<T: runtime::ReactorData + Clone>(
                 .outbound_endpoint(&endpoint)
                 .expect("federated endpoint sink was validated before deferred lowering");
             runtime::FederatedSenderReactionFn::<T>::new(
-                endpoint,
                 remote_action_ref,
                 encoder,
                 outbound,

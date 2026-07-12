@@ -128,7 +128,7 @@ impl TryFrom<boomerang_runtime::Duration> for WireDelay {
 #[derive(Debug)]
 pub(crate) struct FederatedRuntimeConnection {
     mailbox: FederateClientMailbox,
-    routes: BTreeMap<boomerang_runtime::FederatedEndpointId, FederateClientRoute>,
+    routes: BTreeMap<crate::EndpointId, FederateClientRoute>,
     inbound: boomerang_runtime::FederatedInboundEndpointRegistry,
     faults: boomerang_runtime::FederatedFaultState,
 }
@@ -193,7 +193,11 @@ impl FederatedRuntimeConnections {
             connections.insert(federate, FederatedRuntimeConnection::new());
         }
 
+        let mut route_endpoints = BTreeSet::new();
         for route in routes {
+            if !route_endpoints.insert(route.endpoint.clone()) {
+                return Err(FederateClientError::DuplicateRoute(route.endpoint));
+            }
             if !federate_ids.contains(&route.source) {
                 return Err(FederateClientError::Protocol(format!(
                     "route for endpoint '{}' references source federate '{}' without a prebuilt runtime connection",
@@ -222,7 +226,7 @@ impl FederatedRuntimeConnections {
 
     pub fn outbound_endpoint(
         &self,
-        endpoint: &boomerang_runtime::FederatedEndpointId,
+        endpoint: &crate::EndpointId,
     ) -> Result<
         (
             Box<dyn boomerang_runtime::FederatedOutboundSink>,
@@ -252,11 +256,11 @@ impl FederatedRuntimeConnections {
     pub fn register_inbound<T>(
         &mut self,
         federate: &FederateId,
-        endpoint: boomerang_runtime::FederatedEndpointId,
+        endpoint: crate::EndpointId,
         context: boomerang_runtime::SendContext,
         action_ref: boomerang_runtime::AsyncActionRef<T>,
         decoder: Box<dyn boomerang_runtime::FederatedPayloadDecoder<T>>,
-    ) -> Result<(), FederateClientError>
+    ) -> Result<boomerang_runtime::FederatedEndpointKey, FederateClientError>
     where
         T: boomerang_runtime::ReactorData,
     {
@@ -265,13 +269,16 @@ impl FederatedRuntimeConnections {
                 "missing prebuilt runtime connection for federate '{federate}'"
             ))
         })?;
-        if !connection.routes.contains_key(&endpoint) {
-            return Err(FederateClientError::UnknownRoute(endpoint));
+        let route = connection
+            .routes
+            .get_mut(&endpoint)
+            .ok_or_else(|| FederateClientError::UnknownRoute(endpoint.clone()))?;
+        if route.inbound_key().is_some() {
+            return Err(FederateClientError::DuplicateInboundBinding(endpoint));
         }
-        connection
-            .inbound
-            .register(endpoint, context, action_ref, decoder)?;
-        Ok(())
+        let key = connection.inbound.register(context, action_ref, decoder)?;
+        route.bind_inbound(key);
+        Ok(key)
     }
 
     pub(crate) fn take_federate(
@@ -294,6 +301,19 @@ impl FederatedRuntimeConnections {
         self.federates
             .get(federate)
             .map(FederatedRuntimeConnection::inbound_endpoints)
+    }
+
+    /// Return the target federate's process-local handler key for a stable endpoint.
+    pub fn inbound_endpoint_key(
+        &self,
+        federate: &FederateId,
+        endpoint: &crate::EndpointId,
+    ) -> Option<boomerang_runtime::FederatedEndpointKey> {
+        self.federates
+            .get(federate)?
+            .routes
+            .get(endpoint)?
+            .inbound_key()
     }
 
     pub fn routes(&self) -> impl Iterator<Item = &FederateClientRoute> {
@@ -326,19 +346,13 @@ impl boomerang_runtime::FederatedOutboundSink for ProtocolFederatedOutboundSink 
         command: boomerang_runtime::FederatedOutboundCommand,
     ) -> Result<(), boomerang_runtime::FederatedEndpointError> {
         let boomerang_runtime::FederatedOutboundCommand::Msg(message) = command;
-        if message.endpoint != self.route.endpoint {
-            return Err(boomerang_runtime::FederatedEndpointError::UnknownEndpoint(
-                message.endpoint,
-            ));
-        }
-
         let tag = WireTag::try_from(message.tag)
             .map_err(|error| boomerang_runtime::FederatedEndpointError::send(error.to_string()))?;
         self.sender
             .send(FederateToRti::Msg {
                 source: self.route.source.clone(),
                 target: self.route.target.clone(),
-                endpoint: crate::EndpointId::new(message.endpoint.as_str()),
+                endpoint: self.route.endpoint.clone(),
                 tag,
                 payload: message.payload,
             })
@@ -432,7 +446,7 @@ mod tests {
     fn prebuilt_outbound_sink_emits_exact_protocol_message() {
         let source = FederateId::new("source");
         let target = FederateId::new("target");
-        let endpoint = boomerang_runtime::FederatedEndpointId::new("source/out->target/in");
+        let endpoint = crate::EndpointId::new("source/out->target/in");
         let route = FederateClientRoute::new(endpoint.clone(), source.clone(), target.clone());
         let mut connections =
             FederatedRuntimeConnections::new([source.clone(), target.clone()], [route]).unwrap();
@@ -440,7 +454,6 @@ mod tests {
 
         sink.send(boomerang_runtime::FederatedOutboundCommand::Msg(
             boomerang_runtime::FederatedOutboundMessage {
-                endpoint: endpoint.clone(),
                 tag: boomerang_runtime::Tag::ZERO,
                 payload: b"7".to_vec(),
             },
@@ -453,7 +466,7 @@ mod tests {
             Some(FederateToRti::Msg {
                 source,
                 target,
-                endpoint: crate::EndpointId::new(endpoint.as_str()),
+                endpoint,
                 tag: WireTag::ZERO,
                 payload: b"7".to_vec(),
             })
@@ -463,7 +476,7 @@ mod tests {
 
     #[test]
     fn prebuilt_connections_reject_route_without_source_connection() {
-        let endpoint = boomerang_runtime::FederatedEndpointId::new("source/out->target/in");
+        let endpoint = crate::EndpointId::new("source/out->target/in");
         let error = FederatedRuntimeConnections::new(
             [FederateId::new("target")],
             [FederateClientRoute::new(endpoint, "source", "target")],
@@ -480,8 +493,8 @@ mod tests {
         let source = FederateId::new("source");
         let first = FederateId::new("first");
         let second = FederateId::new("second");
-        let first_endpoint = boomerang_runtime::FederatedEndpointId::new("source/out->first/in");
-        let second_endpoint = boomerang_runtime::FederatedEndpointId::new("source/out->second/in");
+        let first_endpoint = crate::EndpointId::new("source/out->first/in");
+        let second_endpoint = crate::EndpointId::new("source/out->second/in");
         let mut connections = FederatedRuntimeConnections::new(
             [source, first.clone(), second.clone()],
             [
@@ -495,7 +508,7 @@ mod tests {
         let first_action = first_enclave.insert_action(|key| {
             boomerang_runtime::Action::<u32>::new("first", key, None, true).boxed()
         });
-        connections
+        let first_key = connections
             .register_inbound(
                 &first,
                 first_endpoint.clone(),
@@ -516,7 +529,7 @@ mod tests {
         let second_action = second_enclave.insert_action(|key| {
             boomerang_runtime::Action::<u32>::new("second", key, None, true).boxed()
         });
-        connections
+        let second_key = connections
             .register_inbound(
                 &second,
                 second_endpoint.clone(),
@@ -533,27 +546,30 @@ mod tests {
             )
             .unwrap();
 
+        assert_eq!(
+            connections.inbound_endpoint_key(&first, &first_endpoint),
+            Some(first_key)
+        );
+        assert_eq!(
+            connections.inbound_endpoint_key(&second, &second_endpoint),
+            Some(second_key)
+        );
+        assert_eq!(
+            connections.inbound_endpoint_key(&first, &second_endpoint),
+            None
+        );
+
         let first_connection = connections.take_federate(&first).unwrap();
         assert_eq!(first_connection.inbound_endpoints().len(), 1);
         first_connection
             .inbound_endpoints()
-            .schedule(&first_endpoint, boomerang_runtime::Tag::ZERO, b"7")
+            .schedule(first_key, boomerang_runtime::Tag::ZERO, b"7")
             .unwrap();
-        assert!(matches!(
-            first_connection.inbound_endpoints().schedule(
-                &second_endpoint,
-                boomerang_runtime::Tag::ZERO,
-                b"9"
-            ),
-            Err(boomerang_runtime::FederatedEndpointError::UnknownEndpoint(endpoint))
-                if endpoint == second_endpoint
-        ));
+        assert_eq!(first_key, second_key, "keys are local to each registry");
         assert!(first_enclave.event_rx.recv().is_ok());
 
         let second_connection = connections.take_federate(&second).unwrap();
         assert_eq!(second_connection.inbound_endpoints().len(), 1);
-        assert!(second_connection
-            .inbound_endpoints()
-            .contains(&second_endpoint));
+        assert!(second_connection.inbound_endpoints().contains(second_key));
     }
 }

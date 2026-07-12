@@ -45,24 +45,30 @@ pub enum FederateClientError {
 
     #[cfg(feature = "runtime")]
     #[error("scheduler event channel closed after scheduling inbound endpoint `{endpoint}`")]
-    SchedulerEventChannelClosed {
-        endpoint: boomerang_runtime::FederatedEndpointId,
-    },
+    SchedulerEventChannelClosed { endpoint: crate::EndpointId },
 
     #[cfg(feature = "runtime")]
     #[error("duplicate federated client route for endpoint `{0}`")]
-    DuplicateRoute(boomerang_runtime::FederatedEndpointId),
+    DuplicateRoute(crate::EndpointId),
 
     #[cfg(feature = "runtime")]
     #[error("unknown federated client route for endpoint `{0}`")]
-    UnknownRoute(boomerang_runtime::FederatedEndpointId),
+    UnknownRoute(crate::EndpointId),
+
+    #[cfg(feature = "runtime")]
+    #[error("federated client route for endpoint `{0}` has no inbound runtime binding")]
+    UnboundInboundRoute(crate::EndpointId),
+
+    #[cfg(feature = "runtime")]
+    #[error("federated client route for endpoint `{0}` already has an inbound runtime binding")]
+    DuplicateInboundBinding(crate::EndpointId),
 
     #[cfg(feature = "runtime")]
     #[error(
         "route for endpoint `{endpoint}` has source `{route_source}`, expected `{federate_id}`"
     )]
     RouteSourceMismatch {
-        endpoint: boomerang_runtime::FederatedEndpointId,
+        endpoint: crate::EndpointId,
         route_source: FederateId,
         federate_id: FederateId,
     },
@@ -72,7 +78,7 @@ pub enum FederateClientError {
         "route for endpoint `{endpoint}` has target `{route_target}`, expected `{federate_id}`"
     )]
     RouteTargetMismatch {
-        endpoint: boomerang_runtime::FederatedEndpointId,
+        endpoint: crate::EndpointId,
         route_target: FederateId,
         federate_id: FederateId,
     },
@@ -82,7 +88,7 @@ pub enum FederateClientError {
         "inbound MSG for endpoint `{endpoint}` came from `{observed_source}`, but route source is `{route_source}`"
     )]
     InboundSourceMismatch {
-        endpoint: boomerang_runtime::FederatedEndpointId,
+        endpoint: crate::EndpointId,
         observed_source: FederateId,
         route_source: FederateId,
     },
@@ -337,16 +343,17 @@ where
 #[cfg(feature = "runtime")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FederateClientRoute {
-    pub endpoint: boomerang_runtime::FederatedEndpointId,
+    pub endpoint: crate::EndpointId,
     pub source: FederateId,
     pub target: FederateId,
+    inbound_key: Option<boomerang_runtime::FederatedEndpointKey>,
 }
 
 #[cfg(feature = "runtime")]
 impl FederateClientRoute {
     /// Create route metadata for one runtime federated endpoint.
     pub fn new(
-        endpoint: impl Into<boomerang_runtime::FederatedEndpointId>,
+        endpoint: impl Into<crate::EndpointId>,
         source: impl Into<FederateId>,
         target: impl Into<FederateId>,
     ) -> Self {
@@ -354,7 +361,25 @@ impl FederateClientRoute {
             endpoint: endpoint.into(),
             source: source.into(),
             target: target.into(),
+            inbound_key: None,
         }
+    }
+
+    /// Bind this stable route to a handler key in the target federate's local registry.
+    ///
+    /// The key is process-local and must come from the registry passed to the same client barrier.
+    pub fn with_inbound_key(mut self, key: boomerang_runtime::FederatedEndpointKey) -> Self {
+        self.inbound_key = Some(key);
+        self
+    }
+
+    pub(crate) fn bind_inbound(&mut self, key: boomerang_runtime::FederatedEndpointKey) {
+        debug_assert!(self.inbound_key.is_none());
+        self.inbound_key = Some(key);
+    }
+
+    pub(crate) fn inbound_key(&self) -> Option<boomerang_runtime::FederatedEndpointKey> {
+        self.inbound_key
     }
 }
 
@@ -364,7 +389,7 @@ impl FederateClientRoute {
 pub struct RtiFederatedTimeBarrier {
     federate_id: FederateId,
     client: FederateProtocolClient,
-    routes: BTreeMap<boomerang_runtime::FederatedEndpointId, FederateClientRoute>,
+    routes: BTreeMap<crate::EndpointId, FederateClientRoute>,
     inbound: boomerang_runtime::FederatedInboundEndpointRegistry,
     faults: boomerang_runtime::FederatedFaultState,
     last_granted: Option<boomerang_runtime::Tag>,
@@ -417,7 +442,7 @@ impl RtiFederatedTimeBarrier {
         skip(self, tag, event_rx),
         fields(federate = %self.federate_id, tag = %tag)
     )]
-    pub fn acquire_tag_result(
+    pub fn wait_for_tag(
         &mut self,
         tag: boomerang_runtime::Tag,
         event_rx: &boomerang_runtime::Receiver<boomerang_runtime::AsyncEvent>,
@@ -487,7 +512,7 @@ impl RtiFederatedTimeBarrier {
         skip(self, tag),
         fields(federate = %self.federate_id, tag = %tag)
     )]
-    pub fn logical_tag_complete_result(
+    pub fn report_logical_tag_complete(
         &mut self,
         tag: boomerang_runtime::Tag,
     ) -> Result<(), FederateClientError> {
@@ -501,7 +526,7 @@ impl RtiFederatedTimeBarrier {
         skip(self),
         fields(federate = %self.federate_id)
     )]
-    pub fn stop_result(&mut self) -> Result<(), FederateClientError> {
+    pub fn stop(&mut self) -> Result<(), FederateClientError> {
         if self.stopped {
             return Ok(());
         }
@@ -542,35 +567,34 @@ impl RtiFederatedTimeBarrier {
         payload: &[u8],
         event_rx: &boomerang_runtime::Receiver<boomerang_runtime::AsyncEvent>,
     ) -> Result<Option<boomerang_runtime::AsyncEvent>, FederateClientError> {
-        let runtime_endpoint = boomerang_runtime::FederatedEndpointId::new(endpoint.as_str());
-        let route = self.route_for(&runtime_endpoint)?;
+        let route = self.route_for(&endpoint)?;
         if route.target != self.federate_id {
             return Err(FederateClientError::RouteTargetMismatch {
-                endpoint: runtime_endpoint,
+                endpoint: endpoint.clone(),
                 route_target: route.target.clone(),
                 federate_id: self.federate_id.clone(),
             });
         }
         if route.source != source {
             return Err(FederateClientError::InboundSourceMismatch {
-                endpoint: runtime_endpoint,
+                endpoint: endpoint.clone(),
                 observed_source: source,
                 route_source: route.source.clone(),
             });
         }
 
         let runtime_tag = boomerang_runtime::Tag::try_from(tag)?;
-        self.inbound
-            .schedule(&runtime_endpoint, runtime_tag, payload)?;
+        let inbound_key = route
+            .inbound_key
+            .ok_or_else(|| FederateClientError::UnboundInboundRoute(endpoint.clone()))?;
+        self.inbound.schedule(inbound_key, runtime_tag, payload)?;
 
         self.send_msg_ack(runtime_tag)?;
 
         event_rx
             .recv()
             .map(Some)
-            .map_err(|_| FederateClientError::SchedulerEventChannelClosed {
-                endpoint: runtime_endpoint,
-            })
+            .map_err(|_| FederateClientError::SchedulerEventChannelClosed { endpoint })
     }
 
     fn check_runtime_fault(&self) -> Result<(), FederateClientError> {
@@ -603,7 +627,7 @@ impl RtiFederatedTimeBarrier {
 
     fn route_for(
         &self,
-        endpoint: &boomerang_runtime::FederatedEndpointId,
+        endpoint: &crate::EndpointId,
     ) -> Result<&FederateClientRoute, FederateClientError> {
         self.routes
             .get(endpoint)
@@ -619,20 +643,20 @@ impl boomerang_runtime::FederatedTimeBarrier for RtiFederatedTimeBarrier {
         event_rx: &boomerang_runtime::Receiver<boomerang_runtime::AsyncEvent>,
     ) -> Result<boomerang_runtime::FederatedBarrierOutcome, boomerang_runtime::FederatedBarrierError>
     {
-        self.acquire_tag_result(tag, event_rx)
+        self.wait_for_tag(tag, event_rx)
             .map(|event| match event {
                 Some(event) => boomerang_runtime::FederatedBarrierOutcome::Interrupted(event),
                 None => boomerang_runtime::FederatedBarrierOutcome::Granted,
             })
-            .map_err(|error| boomerang_runtime::FederatedBarrierError::new(error.to_string()))
+            .map_err(boomerang_runtime::FederatedBarrierError::from_error)
     }
 
     fn logical_tag_complete(
         &mut self,
         tag: boomerang_runtime::Tag,
     ) -> Result<(), boomerang_runtime::FederatedBarrierError> {
-        self.logical_tag_complete_result(tag)
-            .map_err(|error| boomerang_runtime::FederatedBarrierError::new(error.to_string()))
+        self.report_logical_tag_complete(tag)
+            .map_err(boomerang_runtime::FederatedBarrierError::from_error)
     }
 }
 
@@ -647,12 +671,12 @@ mod tests {
         FederateId::new(id)
     }
 
-    fn endpoint() -> boomerang_runtime::FederatedEndpointId {
-        boomerang_runtime::FederatedEndpointId::new("source.out->sink.in")
+    fn endpoint() -> EndpointId {
+        EndpointId::new("source.out->sink.in")
     }
 
     fn protocol_endpoint() -> EndpointId {
-        EndpointId::new(endpoint().as_str())
+        endpoint()
     }
 
     fn source_sink_topology() -> FederatedTopology {
@@ -742,6 +766,7 @@ mod tests {
         boomerang_runtime::Receiver<boomerang_runtime::AsyncEvent>,
         boomerang_runtime::ActionKey,
         boomerang_runtime::keepalive::Sender,
+        boomerang_runtime::FederatedEndpointKey,
     ) {
         let mut enclave = boomerang_runtime::Enclave::default();
         let action_key = enclave.insert_action(|key| {
@@ -750,9 +775,8 @@ mod tests {
         let action_ref = enclave.create_async_action_ref::<u32>(action_key);
         let context = enclave.create_send_context(boomerang_runtime::EnclaveKey::from(0));
         let mut registry = boomerang_runtime::FederatedInboundEndpointRegistry::default();
-        registry
+        let endpoint_key = registry
             .register(
-                endpoint(),
                 context,
                 action_ref,
                 Box::new(|bytes: &[u8]| {
@@ -767,7 +791,13 @@ mod tests {
                 }),
             )
             .unwrap();
-        (registry, enclave.event_rx, action_key, enclave.shutdown_tx)
+        (
+            registry,
+            enclave.event_rx,
+            action_key,
+            enclave.shutdown_tx,
+            endpoint_key,
+        )
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -836,7 +866,7 @@ mod tests {
 
         assert_eq!(
             barrier
-                .acquire_tag_result(boomerang_runtime::Tag::ZERO, &event_rx)
+                .wait_for_tag(boomerang_runtime::Tag::ZERO, &event_rx)
                 .unwrap()
                 .map(|event| format!("{event:?}")),
             None
@@ -844,14 +874,13 @@ mod tests {
         outbound
             .send(boomerang_runtime::FederatedOutboundCommand::Msg(
                 boomerang_runtime::FederatedOutboundMessage {
-                    endpoint: endpoint(),
                     tag: boomerang_runtime::Tag::ZERO,
                     payload: b"7".to_vec(),
                 },
             ))
             .unwrap();
         barrier
-            .logical_tag_complete_result(boomerang_runtime::Tag::ZERO)
+            .report_logical_tag_complete(boomerang_runtime::Tag::ZERO)
             .unwrap();
 
         rti.await.unwrap();
@@ -905,18 +934,21 @@ mod tests {
         })
         .await;
 
-        let (registry, event_rx, action_key, _shutdown_tx) = inbound_registry_for_u32();
+        let (registry, event_rx, action_key, _shutdown_tx, endpoint_key) =
+            inbound_registry_for_u32();
+        let mut inbound_route = route();
+        inbound_route.bind_inbound(endpoint_key);
         let mut barrier = RtiFederatedTimeBarrier::new(
             fed("sink"),
             client,
-            [route()],
+            [inbound_route],
             registry,
             boomerang_runtime::FederatedFaultState::default(),
         )
         .unwrap();
 
         let event = barrier
-            .acquire_tag_result(boomerang_runtime::Tag::ZERO, &event_rx)
+            .wait_for_tag(boomerang_runtime::Tag::ZERO, &event_rx)
             .unwrap()
             .expect("inbound MSG should interrupt the barrier wait");
         match event {
@@ -931,7 +963,7 @@ mod tests {
             event => panic!("expected logical async event, got {event:?}"),
         }
         barrier
-            .logical_tag_complete_result(boomerang_runtime::Tag::ZERO)
+            .report_logical_tag_complete(boomerang_runtime::Tag::ZERO)
             .unwrap();
 
         rti.await.unwrap();
@@ -1028,7 +1060,7 @@ mod tests {
         )
         .unwrap();
 
-        barrier.stop_result().unwrap();
+        barrier.stop().unwrap();
 
         rti.await.unwrap();
     }

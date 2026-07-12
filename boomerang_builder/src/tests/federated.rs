@@ -356,7 +356,7 @@ fn register_u32_federated_codec(env_builder: &mut EnvBuilder) -> Result<(), Buil
 fn route_outbound_commands_through_rti(
     plan: &FederationPlan,
     commands: Vec<boomerang_federated::FederateToRti>,
-    inbound_endpoints: &runtime::FederatedInboundEndpointRegistry,
+    connections: &boomerang_federated::FederatedRuntimeConnections,
 ) -> Vec<runtime::Tag> {
     let topology = federation_topology_from_plan(plan).unwrap();
     let mut rti = boomerang_federated::RtiState::new(topology.clone());
@@ -381,7 +381,6 @@ fn route_outbound_commands_through_rti(
         else {
             panic!("lowered sender should emit a protocol MSG")
         };
-        let runtime_endpoint = runtime::FederatedEndpointId::new(endpoint.as_str());
         let deliveries = rti
             .handle(boomerang_federated::FederateToRti::Msg {
                 source: source.clone(),
@@ -405,8 +404,12 @@ fn route_outbound_commands_through_rti(
                 assert_eq!(delivered_source, &source);
                 assert_eq!(delivered_endpoint, &endpoint);
                 let runtime_tag = runtime::Tag::try_from(*delivered_tag).unwrap();
+                let endpoint_key = connections
+                    .inbound_endpoint_key(&target, &endpoint)
+                    .expect("lowered inbound endpoint key");
+                let inbound_endpoints = connections.inbound_endpoints(&target).unwrap();
                 inbound_endpoints
-                    .schedule(&runtime_endpoint, runtime_tag, payload)
+                    .schedule(endpoint_key, runtime_tag, payload)
                     .unwrap();
                 routed_tags.push(runtime_tag);
             }
@@ -441,7 +444,7 @@ fn run_local_source_sink(after: Option<runtime::Duration>) -> Vec<(runtime::Tag,
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(runtime::Duration::milliseconds(100));
-    let _envs = runtime::execute_enclaves(enclaves.into_iter(), config);
+    let _envs = runtime::execute_enclaves(enclaves.into_iter(), config).unwrap();
 
     let recorded_values = values.lock().unwrap().clone();
     recorded_values
@@ -494,7 +497,7 @@ fn run_in_memory_federated_source_sink(
     let source_enclave_key = aliases.enclave_aliases[source_reactor];
     let sink_enclave_key = aliases.enclave_aliases[sink_reactor];
     let sink = boomerang_federated::FederateId::new("sink");
-    let inbound_endpoints = federated_connections.inbound_endpoints(&sink).unwrap();
+    let _inbound_endpoints = federated_connections.inbound_endpoints(&sink).unwrap();
 
     let mut source_enclaves = Vec::new();
     let mut sink_enclaves = Vec::new();
@@ -511,11 +514,12 @@ fn run_in_memory_federated_source_sink(
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(runtime::Duration::milliseconds(100));
-    let _source_envs = runtime::execute_enclaves(source_enclaves.into_iter(), config.clone());
+    let _source_envs =
+        runtime::execute_enclaves(source_enclaves.into_iter(), config.clone()).unwrap();
     let commands = outbound.drain();
     let routed_tags =
-        route_outbound_commands_through_rti(&federation_plan, commands, inbound_endpoints);
-    let _sink_envs = runtime::execute_enclaves(sink_enclaves.into_iter(), config);
+        route_outbound_commands_through_rti(&federation_plan, commands, &federated_connections);
+    let _sink_envs = runtime::execute_enclaves(sink_enclaves.into_iter(), config).unwrap();
 
     let recorded_values = values.lock().unwrap().clone();
     (recorded_values, routed_tags)
@@ -1180,7 +1184,7 @@ fn test_federated_sender_emits_serialized_msg_command() {
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(runtime::Duration::milliseconds(1));
-    let _envs = runtime::execute_enclaves(enclaves.into_iter(), config);
+    let _envs = runtime::execute_enclaves(enclaves.into_iter(), config).unwrap();
 
     let commands = outbound.drain();
     assert_eq!(commands.len(), 1);
@@ -1231,17 +1235,20 @@ fn test_federated_inbound_registry_schedules_target_action() {
         .into_runtime_parts(&runtime::Config::default())
         .unwrap();
 
-    let endpoint = runtime::FederatedEndpointId::new("main/source/out->main/sink/in");
+    let endpoint = boomerang_federated::EndpointId::new("main/source/out->main/sink/in");
     let sink = boomerang_federated::FederateId::new("sink");
+    let endpoint_key = federated_connections
+        .inbound_endpoint_key(&sink, &endpoint)
+        .unwrap();
     let inbound_endpoints = federated_connections.inbound_endpoints(&sink).unwrap();
     inbound_endpoints
-        .schedule(&endpoint, runtime::Tag::ZERO, b"42")
+        .schedule(endpoint_key, runtime::Tag::ZERO, b"42")
         .unwrap();
 
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(runtime::Duration::milliseconds(1));
-    let _envs = runtime::execute_enclaves(enclaves.into_iter(), config);
+    let _envs = runtime::execute_enclaves(enclaves.into_iter(), config).unwrap();
 
     assert_eq!(*values.lock().unwrap(), vec![(runtime::Tag::ZERO, 42)]);
 }

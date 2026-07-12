@@ -131,12 +131,12 @@ fn steady_state_root_action_scheduler_next_does_not_allocate() {
     scheduler.startup();
 
     for _ in 0..4096 {
-        assert!(scheduler.next());
+        assert!(scheduler.try_next().unwrap());
     }
 
     start_counting_allocations();
     for _ in 0..1024 {
-        assert!(scheduler.next());
+        assert!(scheduler.try_next().unwrap());
     }
     let allocations = stop_counting_allocations();
 

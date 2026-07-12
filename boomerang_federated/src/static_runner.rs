@@ -540,7 +540,7 @@ impl SharedFederatedTimeBarrier {
         self.inner
             .lock()
             .map_err(|_| FederateClientError::Protocol("federate barrier lock poisoned".into()))?
-            .stop_result()
+            .stop()
     }
 }
 
@@ -680,8 +680,7 @@ fn validate_static_runner_parts(
     }
 
     for endpoint in edge_endpoints {
-        let runtime_endpoint = boomerang_runtime::FederatedEndpointId::new(endpoint.as_str());
-        if !route_endpoints.contains(&runtime_endpoint) {
+        if !route_endpoints.contains(&endpoint) {
             return Err(bridge_error(format!(
                 "missing runtime route for topology endpoint '{}'",
                 endpoint
@@ -753,11 +752,7 @@ mod tests {
         let source_enclave = enclaves.insert(boomerang_runtime::Enclave::default());
         let sink_enclave = enclaves.insert(boomerang_runtime::Enclave::default());
 
-        let route = FederateClientRoute::new(
-            boomerang_runtime::FederatedEndpointId::new(endpoint.as_str()),
-            source.clone(),
-            sink.clone(),
-        );
+        let route = FederateClientRoute::new(endpoint.clone(), source.clone(), sink.clone());
         StaticFederationRuntimeParts {
             topology: FederatedTopology::with_edges(
                 [source.clone(), sink.clone()],

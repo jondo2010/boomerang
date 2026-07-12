@@ -58,7 +58,11 @@ pub fn KeyboardEvents(
                         }
                         (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                             tracing::debug!("Ctrl-C received, shutting down.");
-                            send_ctx.schedule_shutdown(None);
+                            if !send_ctx.schedule_shutdown(None) {
+                                tracing::warn!(
+                                    "scheduler closed before shutdown could be requested"
+                                );
+                            }
                             break;
                         }
                         _ => {

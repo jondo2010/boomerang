@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     fmt,
     sync::{Arc, OnceLock},
 };
@@ -8,36 +7,11 @@ use crate::{
     event::AsyncEvent, ActionCommon, AsyncActionRef, CommonContext, ReactorData, SendContext, Tag,
 };
 
-/// Runtime-local endpoint identity for a serialized cross-federate connection.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FederatedEndpointId(String);
-
-impl FederatedEndpointId {
-    pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<&str> for FederatedEndpointId {
-    fn from(value: &str) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<String> for FederatedEndpointId {
-    fn from(value: String) -> Self {
-        Self::new(value)
-    }
-}
-
-impl fmt::Display for FederatedEndpointId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
+tinymap::key_type! {
+    /// Dense process-local key for a lowered federated inbound endpoint.
+    ///
+    /// This key must never be serialized or compared between federates.
+    pub FederatedEndpointKey
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -48,17 +22,14 @@ pub enum FederatedEndpointError {
     #[error("federated outbound sink error: {0}")]
     Send(String),
 
-    #[error("duplicate federated endpoint: {0}")]
-    DuplicateEndpoint(FederatedEndpointId),
-
     #[error("unknown federated endpoint: {0}")]
-    UnknownEndpoint(FederatedEndpointId),
+    UnknownEndpoint(FederatedEndpointKey),
 
-    #[error("federated endpoint {endpoint} targets a physical action")]
-    PhysicalAction { endpoint: FederatedEndpointId },
+    #[error("federated endpoints cannot target physical actions")]
+    PhysicalAction,
 
     #[error("federated inbound endpoint {0} scheduler channel is closed")]
-    SchedulerClosed(FederatedEndpointId),
+    SchedulerClosed(FederatedEndpointKey),
 }
 
 /// Shared first-error latch for terminal federated runtime endpoint failures.
@@ -121,7 +92,6 @@ where
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FederatedOutboundMessage {
-    pub endpoint: FederatedEndpointId,
     pub tag: Tag,
     pub payload: Vec<u8>,
 }
@@ -140,7 +110,7 @@ trait FederatedInboundEndpoint: Send + Sync {
 }
 
 struct TypedFederatedInboundEndpoint<T: ReactorData> {
-    endpoint: FederatedEndpointId,
+    endpoint: FederatedEndpointKey,
     context: SendContext,
     action_ref: AsyncActionRef<T>,
     decoder: Box<dyn FederatedPayloadDecoder<T>>,
@@ -148,21 +118,17 @@ struct TypedFederatedInboundEndpoint<T: ReactorData> {
 
 impl<T: ReactorData> TypedFederatedInboundEndpoint<T> {
     fn new(
-        endpoint: FederatedEndpointId,
+        endpoint: FederatedEndpointKey,
         context: SendContext,
         action_ref: AsyncActionRef<T>,
         decoder: Box<dyn FederatedPayloadDecoder<T>>,
-    ) -> Result<Self, FederatedEndpointError> {
-        if !action_ref.is_logical() {
-            return Err(FederatedEndpointError::PhysicalAction { endpoint });
-        }
-
-        Ok(Self {
+    ) -> Self {
+        Self {
             endpoint,
             context,
             action_ref,
             decoder,
-        })
+        }
     }
 }
 
@@ -178,16 +144,22 @@ impl<T: ReactorData> FederatedInboundEndpoint for TypedFederatedInboundEndpoint<
         if scheduled {
             Ok(())
         } else {
-            Err(FederatedEndpointError::SchedulerClosed(
-                self.endpoint.clone(),
-            ))
+            Err(FederatedEndpointError::SchedulerClosed(self.endpoint))
         }
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Default)]
 pub struct FederatedInboundEndpointRegistry {
-    endpoints: BTreeMap<FederatedEndpointId, Arc<dyn FederatedInboundEndpoint>>,
+    endpoints: tinymap::TinyMap<FederatedEndpointKey, Arc<dyn FederatedInboundEndpoint>>,
+}
+
+impl Clone for FederatedInboundEndpointRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            endpoints: self.endpoints.values().cloned().collect(),
+        }
+    }
 }
 
 impl fmt::Debug for FederatedInboundEndpointRegistry {
@@ -201,39 +173,39 @@ impl fmt::Debug for FederatedInboundEndpointRegistry {
 impl FederatedInboundEndpointRegistry {
     pub fn register<T>(
         &mut self,
-        endpoint: FederatedEndpointId,
         context: SendContext,
         action_ref: AsyncActionRef<T>,
         decoder: Box<dyn FederatedPayloadDecoder<T>>,
-    ) -> Result<(), FederatedEndpointError>
+    ) -> Result<FederatedEndpointKey, FederatedEndpointError>
     where
         T: ReactorData,
     {
-        if self.endpoints.contains_key(&endpoint) {
-            return Err(FederatedEndpointError::DuplicateEndpoint(endpoint));
+        if !action_ref.is_logical() {
+            return Err(FederatedEndpointError::PhysicalAction);
         }
 
-        let endpoint_id = endpoint.clone();
-        let endpoint = TypedFederatedInboundEndpoint::new(endpoint, context, action_ref, decoder)?;
-        self.endpoints.insert(endpoint_id, Arc::new(endpoint));
-        Ok(())
+        Ok(self.endpoints.insert_with_key(|endpoint| {
+            Arc::new(TypedFederatedInboundEndpoint::new(
+                endpoint, context, action_ref, decoder,
+            ))
+        }))
     }
 
     pub fn schedule(
         &self,
-        endpoint: &FederatedEndpointId,
+        endpoint: FederatedEndpointKey,
         tag: Tag,
         payload: &[u8],
     ) -> Result<(), FederatedEndpointError> {
         let endpoint_handler = self
             .endpoints
             .get(endpoint)
-            .ok_or_else(|| FederatedEndpointError::UnknownEndpoint(endpoint.clone()))?;
+            .ok_or(FederatedEndpointError::UnknownEndpoint(endpoint))?;
         endpoint_handler.schedule(tag, payload)
     }
 
-    pub fn contains(&self, endpoint: &FederatedEndpointId) -> bool {
-        self.endpoints.contains_key(endpoint)
+    pub fn contains(&self, endpoint: FederatedEndpointKey) -> bool {
+        self.endpoints.get(endpoint).is_some()
     }
 
     pub fn len(&self) -> usize {

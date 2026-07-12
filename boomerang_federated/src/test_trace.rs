@@ -85,6 +85,10 @@ pub(crate) struct TraceEvent {
 }
 
 impl TraceEvent {
+    pub(crate) fn new(from: TraceActor, to: TraceActor, message: TraceMessage) -> Self {
+        Self { from, to, message }
+    }
+
     pub(crate) fn client_to_rti(frame: &FederateToRti) -> Self {
         let federate_id = match frame {
             FederateToRti::Hello { federate_id, .. }
@@ -191,6 +195,17 @@ impl Trace {
     }
 
     #[track_caller]
+    pub(crate) fn assert_exact(&self, expected: &[TraceEvent]) {
+        assert_eq!(
+            self.events.as_slice(),
+            expected,
+            "expected exact trace:\n{}actual trace:\n{}",
+            Self::normalized_events(expected),
+            self.normalized()
+        );
+    }
+
+    #[track_caller]
     pub(crate) fn assert_count(&self, pattern: TracePattern, expected: usize) {
         let actual = self.count(|event| pattern.matches(event));
         assert_eq!(
@@ -213,8 +228,12 @@ impl Trace {
     }
 
     fn normalized(&self) -> String {
+        Self::normalized_events(&self.events)
+    }
+
+    fn normalized_events(events: &[TraceEvent]) -> String {
         let mut output = String::new();
-        for (index, event) in self.events.iter().enumerate() {
+        for (index, event) in events.iter().enumerate() {
             writeln!(output, "{index}: {event}").expect("writing to a String cannot fail");
         }
         output
@@ -284,6 +303,18 @@ mod tests {
         );
         trace.assert_count(TracePattern::message(TraceMessage::Net(WireTag::ZERO)), 1);
         trace.assert_absent(TracePattern::message(TraceMessage::Error));
+        trace.assert_exact(&[
+            TraceEvent::new(
+                client("source"),
+                TraceActor::Rti,
+                TraceMessage::Net(WireTag::ZERO),
+            ),
+            TraceEvent::new(
+                TraceActor::Rti,
+                client("source"),
+                TraceMessage::Tag(WireTag::ZERO),
+            ),
+        ]);
         trace.assert_before(
             TracePattern::between(
                 client("source"),

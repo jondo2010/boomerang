@@ -1,3 +1,19 @@
+//! Test-only protocol tracing for federated coordination contracts.
+//!
+//! The recorder retains each successful transport exchange as its original
+//! [`ProtocolFrame`]. Assertions project those frames into [`FramePattern`] values so tests can
+//! describe coordination semantics without depending on payloads, redundant participant fields,
+//! or other protocol details that are irrelevant to the contract under test.
+//!
+//! Use [`TracePattern::client_to_rti`] and [`TracePattern::rti_to_client`] when actor identity and
+//! direction are part of the contract. Use [`TracePattern::message`] only when they deliberately
+//! are not. Prefer causal and count assertions for concurrent behavior; reserve
+//! [`Trace::assert_exact`] for deterministic, hand-driven exchanges.
+//!
+//! [`RecordingClientTransport`] is a test seam, not a durable federation recording format. A
+//! production recorder will need stable deployment identities, an accepted-ingress capture point,
+//! and a versioned serialization contract.
+
 use std::{
     fmt::{self, Write as _},
     sync::{Arc, Mutex},
@@ -25,7 +41,12 @@ impl fmt::Display for TraceActor {
     }
 }
 
-/// Lossy semantic projection used only to match and display recorded protocol frames.
+/// Lossy semantic projection used to match and display recorded protocol frames.
+///
+/// Patterns intentionally retain only fields that express the synchronization contract. For
+/// example, a message pattern keeps its logical tag and endpoint but ignores its payload and
+/// source/target fields. Add a field here only when tests must distinguish it semantically; the
+/// lossless frame remains available in the private recorded event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FramePattern {
     Hello,
@@ -80,6 +101,10 @@ impl fmt::Display for FramePattern {
     }
 }
 
+/// One losslessly captured frame and the client transport on which it was observed.
+///
+/// Direction is derived from the [`ProtocolFrame`] variant rather than stored separately, keeping
+/// the recorded representation faithful to the protocol types.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TraceEvent {
     client_id: FederateId,
@@ -114,6 +139,10 @@ impl fmt::Display for TraceEvent {
     }
 }
 
+/// An assertion pattern combining optional actor constraints with a semantic frame pattern.
+///
+/// Direction-specific constructors constrain both actors. [`Self::message`] matches the frame on
+/// any recorded client transport in either direction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TracePattern {
     from: Option<TraceActor>,
@@ -122,6 +151,7 @@ pub(crate) struct TracePattern {
 }
 
 impl TracePattern {
+    /// Matches a semantic frame regardless of its actors or direction.
     pub(crate) fn message(frame: FramePattern) -> Self {
         Self {
             from: None,
@@ -130,10 +160,12 @@ impl TracePattern {
         }
     }
 
+    /// Matches a frame sent from `client_id` to the RTI.
     pub(crate) fn client_to_rti(client_id: FederateId, frame: FramePattern) -> Self {
         Self::between(TraceActor::Client(client_id), TraceActor::Rti, frame)
     }
 
+    /// Matches a frame sent from the RTI to `client_id`.
     pub(crate) fn rti_to_client(client_id: FederateId, frame: FramePattern) -> Self {
         Self::between(TraceActor::Rti, TraceActor::Client(client_id), frame)
     }
@@ -163,6 +195,11 @@ impl fmt::Display for TracePattern {
     }
 }
 
+/// Shared, insertion-ordered collection of recorded protocol frames.
+///
+/// Clones refer to the same collection, allowing independently owned recording transports to
+/// contribute to one scenario trace. The mutex preserves each observed insertion, but concurrent
+/// tasks may interleave; assertions should encode only ordering that the scenario guarantees.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Trace {
     events: Arc<Mutex<Vec<TraceEvent>>>,
@@ -193,6 +230,9 @@ impl Trace {
             .position(|event| pattern.matches(event))
     }
 
+    /// Asserts that the first match for `first` occurs before the first match for `second`.
+    ///
+    /// The assertion also fails if either pattern is absent.
     #[track_caller]
     pub(crate) fn assert_before(&self, first: TracePattern, second: TracePattern) {
         let first_position = self.first_position(&first);
@@ -205,6 +245,10 @@ impl Trace {
         );
     }
 
+    /// Asserts that the complete trace matches `expected` in order with no extra events.
+    ///
+    /// This is intended for deterministic exchanges. Concurrent scenarios should normally use
+    /// causal, count, and absence assertions instead of imposing an incidental total order.
     #[track_caller]
     pub(crate) fn assert_exact(&self, expected: &[TracePattern]) {
         let events = self
@@ -225,6 +269,7 @@ impl Trace {
         );
     }
 
+    /// Asserts the number of events matching `pattern` across the complete trace.
     #[track_caller]
     pub(crate) fn assert_count(&self, pattern: TracePattern, expected: usize) {
         let actual = self.count(&pattern);
@@ -236,6 +281,7 @@ impl Trace {
         );
     }
 
+    /// Asserts that no event matches `pattern`.
     #[track_caller]
     pub(crate) fn assert_absent(&self, pattern: TracePattern) {
         let actual = self.count(&pattern);
@@ -274,6 +320,10 @@ impl Trace {
 }
 
 /// Test-only client transport decorator that records successful protocol exchanges.
+///
+/// The decorator owns one client's sink and stream and appends lossless [`ProtocolFrame`] values
+/// to a shared [`Trace`]. It intentionally exposes only the typed client-side `send` and `recv`
+/// operations needed by session tests rather than implementing the underlying transport traits.
 pub(crate) struct RecordingClientTransport<S, St> {
     sink: S,
     stream: St,
@@ -282,6 +332,7 @@ pub(crate) struct RecordingClientTransport<S, St> {
 }
 
 impl<S, St> RecordingClientTransport<S, St> {
+    /// Wraps a client transport pair and identifies its observations in `trace`.
     pub(crate) fn new(transport: (S, St), federate_id: FederateId, trace: Trace) -> Self {
         let (sink, stream) = transport;
         Self {
@@ -299,6 +350,9 @@ where
     S::Error: fmt::Debug,
     St: Stream<Item = Result<ProtocolFrame, TransportError>> + Unpin,
 {
+    /// Sends a client frame and records it after the underlying sink accepts it.
+    ///
+    /// A failed send panics through the test helper and is not recorded.
     pub(crate) async fn send(&mut self, message: FederateToRti) {
         let frame = ProtocolFrame::FederateToRti(message);
         self.sink
@@ -309,6 +363,11 @@ where
             .push(TraceEvent::new(self.federate_id.clone(), frame));
     }
 
+    /// Receives and records the next decoded frame, then returns its RTI-to-client message.
+    ///
+    /// End-of-stream and transport errors panic without recording an event. A successfully decoded
+    /// frame is recorded before its direction is checked, so a client-to-RTI frame received on this
+    /// stream appears in diagnostics before the helper panics.
     pub(crate) async fn recv(&mut self) -> RtiToFederate {
         let frame = self
             .stream

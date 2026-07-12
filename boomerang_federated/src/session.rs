@@ -499,7 +499,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use futures_util::{FutureExt, SinkExt, StreamExt};
+    use futures_util::{SinkExt, StreamExt};
 
     use super::*;
     use crate::test_trace::{FramePattern, RecordingClientTransport, Trace, TracePattern};
@@ -556,34 +556,12 @@ mod tests {
         }
     }
 
-    fn recv_client_frame_now(
-        transport: &mut InMemoryTransport<ProtocolFrame, ProtocolFrame>,
-    ) -> Option<RtiToFederate> {
-        match transport.1.next().now_or_never() {
-            Some(Some(Ok(ProtocolFrame::RtiToFederate(message)))) => Some(message),
-            Some(Some(Ok(other))) => panic!("expected RTI-to-federate frame, got {other:?}"),
-            Some(Some(Err(error))) => panic!("transport error while polling client frame: {error}"),
-            Some(None) => panic!("transport closed while polling client frame"),
-            None => None,
-        }
-    }
-
     async fn expect_start(transport: &mut InMemoryTransport<ProtocolFrame, ProtocolFrame>) {
         assert_eq!(
             recv_client_frame(transport).await,
             RtiToFederate::Start {
                 start_unix_epoch_ns: 0,
             }
-        );
-    }
-
-    async fn expect_tag(
-        transport: &mut InMemoryTransport<ProtocolFrame, ProtocolFrame>,
-        tag: WireTag,
-    ) {
-        assert_eq!(
-            recv_client_frame(transport).await,
-            RtiToFederate::Tag { tag }
         );
     }
 
@@ -799,62 +777,70 @@ mod tests {
     #[tokio::test]
     async fn session_blocks_pending_grant_behind_multiple_same_tag_messages() {
         let topology = source_sink_topology();
-        let (mut source_client, mut sink_client, session) = spawn_session(topology.clone());
+        let (source_client, sink_client, session) = spawn_session(topology.clone());
         let source = fed("source");
         let sink = fed("sink");
         let endpoint = endpoint("source.out->sink.in");
+        let trace = Trace::default();
+        let mut source_client =
+            RecordingClientTransport::new(source_client, source.clone(), trace.clone());
+        let mut sink_client =
+            RecordingClientTransport::new(sink_client, sink.clone(), trace.clone());
 
-        send_client_frame(
-            &mut source_client,
-            FederateToRti::Hello {
+        source_client
+            .send(FederateToRti::Hello {
                 federate_id: source.clone(),
                 topology: topology.neighbors_for(&source),
-            },
-        )
-        .await;
-        send_client_frame(
-            &mut sink_client,
-            FederateToRti::Hello {
+            })
+            .await;
+        sink_client
+            .send(FederateToRti::Hello {
                 federate_id: sink.clone(),
                 topology: topology.neighbors_for(&sink),
-            },
-        )
-        .await;
-        expect_start(&mut source_client).await;
-        expect_start(&mut sink_client).await;
+            })
+            .await;
+        assert_eq!(
+            source_client.recv().await,
+            RtiToFederate::Start {
+                start_unix_epoch_ns: 0,
+            }
+        );
+        assert_eq!(
+            sink_client.recv().await,
+            RtiToFederate::Start {
+                start_unix_epoch_ns: 0,
+            }
+        );
 
-        send_client_frame(
-            &mut sink_client,
-            FederateToRti::Net {
+        sink_client
+            .send(FederateToRti::Net {
                 federate_id: sink.clone(),
                 tag: WireTag::finite(0, 1),
-            },
-        )
-        .await;
-        send_client_frame(
-            &mut source_client,
-            FederateToRti::Net {
+            })
+            .await;
+        source_client
+            .send(FederateToRti::Net {
                 federate_id: source.clone(),
                 tag: WireTag::ZERO,
-            },
-        )
-        .await;
-        expect_tag(&mut source_client, WireTag::ZERO).await;
+            })
+            .await;
+        assert_eq!(
+            source_client.recv().await,
+            RtiToFederate::Tag { tag: WireTag::ZERO }
+        );
 
         for payload in [b"first".to_vec(), b"second".to_vec()] {
-            send_client_frame(
-                &mut source_client,
-                FederateToRti::Msg {
+            source_client
+                .send(FederateToRti::Msg {
                     source: source.clone(),
                     target: sink.clone(),
                     endpoint: endpoint.clone(),
                     tag: WireTag::ZERO,
                     payload: payload.clone(),
-                },
-            )
-            .await;
+                })
+                .await;
             assert_eq!(
-                recv_client_frame(&mut sink_client).await,
+                sink_client.recv().await,
                 RtiToFederate::Msg {
                     source: source.clone(),
                     endpoint: endpoint.clone(),
@@ -864,54 +850,85 @@ mod tests {
             );
         }
 
-        send_client_frame(
-            &mut source_client,
-            FederateToRti::Net {
+        source_client
+            .send(FederateToRti::Net {
                 federate_id: source.clone(),
                 tag: WireTag::finite(0, 2),
-            },
-        )
-        .await;
-        expect_tag(&mut source_client, WireTag::finite(0, 2)).await;
+            })
+            .await;
+        assert_eq!(
+            source_client.recv().await,
+            RtiToFederate::Tag {
+                tag: WireTag::finite(0, 2),
+            }
+        );
         tokio::task::yield_now().await;
-        assert_eq!(recv_client_frame_now(&mut sink_client), None);
+        assert_eq!(sink_client.recv_now(), None);
 
-        send_client_frame(
-            &mut sink_client,
-            FederateToRti::MsgAck {
+        let target_ack =
+            TracePattern::client_to_rti(sink.clone(), FramePattern::MsgAck(WireTag::ZERO));
+        let target_grant =
+            TracePattern::rti_to_client(sink.clone(), FramePattern::Tag(WireTag::finite(0, 1)));
+
+        sink_client
+            .send(FederateToRti::MsgAck {
                 federate_id: sink.clone(),
                 tag: WireTag::ZERO,
-            },
-        )
-        .await;
+            })
+            .await;
         tokio::task::yield_now().await;
-        assert_eq!(recv_client_frame_now(&mut sink_client), None);
-        send_client_frame(
-            &mut sink_client,
-            FederateToRti::MsgAck {
+        assert_eq!(sink_client.recv_now(), None);
+        trace.assert_count(target_ack.clone(), 1);
+        trace.assert_absent(target_grant.clone());
+
+        sink_client
+            .send(FederateToRti::MsgAck {
                 federate_id: sink.clone(),
                 tag: WireTag::ZERO,
-            },
-        )
-        .await;
-        expect_tag(&mut sink_client, WireTag::finite(0, 1)).await;
+            })
+            .await;
+        assert_eq!(
+            sink_client.recv().await,
+            RtiToFederate::Tag {
+                tag: WireTag::finite(0, 1),
+            }
+        );
 
-        send_client_frame(
-            &mut source_client,
-            FederateToRti::Stop {
-                federate_id: source,
+        source_client
+            .send(FederateToRti::Stop {
+                federate_id: source.clone(),
+            })
+            .await;
+        sink_client
+            .send(FederateToRti::Stop {
+                federate_id: sink.clone(),
+            })
+            .await;
+        assert_eq!(source_client.recv().await, RtiToFederate::Stop);
+        assert_eq!(sink_client.recv().await, RtiToFederate::Stop);
+
+        let source_message = TracePattern::client_to_rti(
+            source,
+            FramePattern::Msg {
+                tag: WireTag::ZERO,
+                endpoint: endpoint.clone(),
             },
-        )
-        .await;
-        send_client_frame(&mut sink_client, FederateToRti::Stop { federate_id: sink }).await;
-        assert_eq!(
-            recv_client_frame(&mut source_client).await,
-            RtiToFederate::Stop
         );
-        assert_eq!(
-            recv_client_frame(&mut sink_client).await,
-            RtiToFederate::Stop
+        let forwarded_message = TracePattern::rti_to_client(
+            sink,
+            FramePattern::Msg {
+                tag: WireTag::ZERO,
+                endpoint,
+            },
         );
+
+        trace.assert_count(source_message.clone(), 2);
+        trace.assert_count(forwarded_message.clone(), 2);
+        trace.assert_count(target_ack.clone(), 2);
+        trace.assert_count(target_grant.clone(), 1);
+        trace.assert_before(source_message, forwarded_message.clone());
+        trace.assert_before(forwarded_message, target_ack.clone());
+        trace.assert_before(target_ack, target_grant);
 
         drop(source_client);
         drop(sink_client);

@@ -19,7 +19,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use futures_util::{Sink, SinkExt, Stream, StreamExt};
+use futures_util::{FutureExt, Sink, SinkExt, Stream, StreamExt};
 
 use crate::{
     protocol::{EndpointId, FederateId, FederateToRti, ProtocolFrame, RtiToFederate, WireTag},
@@ -350,6 +350,15 @@ where
     S::Error: fmt::Debug,
     St: Stream<Item = Result<ProtocolFrame, TransportError>> + Unpin,
 {
+    fn record_received(&self, frame: ProtocolFrame) -> RtiToFederate {
+        self.trace
+            .push(TraceEvent::new(self.federate_id.clone(), frame.clone()));
+        match frame {
+            ProtocolFrame::RtiToFederate(message) => message,
+            other => panic!("expected RTI-to-federate frame, got {other:?}"),
+        }
+    }
+
     /// Sends a client frame and records it after the underlying sink accepts it.
     ///
     /// A failed send panics through the test helper and is not recorded.
@@ -375,11 +384,21 @@ where
             .await
             .expect("recording client transport should remain open")
             .expect("recording client transport should receive a protocol frame");
-        self.trace
-            .push(TraceEvent::new(self.federate_id.clone(), frame.clone()));
-        match frame {
-            ProtocolFrame::RtiToFederate(message) => message,
-            other => panic!("expected RTI-to-federate frame, got {other:?}"),
+        self.record_received(frame)
+    }
+
+    /// Records and returns the next immediately available RTI-to-client message.
+    ///
+    /// Returns `None` when the stream is pending. Closed streams, transport errors, and frames in
+    /// the wrong direction have the same failure behavior as [`Self::recv`].
+    pub(crate) fn recv_now(&mut self) -> Option<RtiToFederate> {
+        match self.stream.next().now_or_never() {
+            Some(Some(Ok(frame))) => Some(self.record_received(frame)),
+            Some(Some(Err(error))) => {
+                panic!("recording client transport should receive a protocol frame: {error}")
+            }
+            Some(None) => panic!("recording client transport should remain open"),
+            None => None,
         }
     }
 }

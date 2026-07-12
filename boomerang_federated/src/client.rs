@@ -393,6 +393,7 @@ pub struct RtiFederatedTimeBarrier {
     inbound: boomerang_runtime::FederatedInboundEndpointRegistry,
     faults: boomerang_runtime::FederatedFaultState,
     last_granted: Option<boomerang_runtime::Tag>,
+    pending_request: Option<WireTag>,
     stopped: bool,
     poll_interval: StdDuration,
 }
@@ -430,6 +431,7 @@ impl RtiFederatedTimeBarrier {
             inbound,
             faults,
             last_granted: None,
+            pending_request: None,
             stopped: false,
             poll_interval: StdDuration::from_millis(1),
         })
@@ -457,26 +459,51 @@ impl RtiFederatedTimeBarrier {
             return Ok(None);
         }
 
-        self.check_runtime_fault()?;
+        if let Err(error) = self.check_runtime_fault() {
+            self.pending_request = None;
+            return Err(error);
+        }
 
         let requested = WireTag::try_from(tag)?;
-        self.client.send(FederateToRti::Net {
-            federate_id: self.federate_id.clone(),
-            tag: requested,
-        })?;
+        if self.pending_request != Some(requested) {
+            self.client.send(FederateToRti::Net {
+                federate_id: self.federate_id.clone(),
+                tag: requested,
+            })?;
+            self.pending_request = Some(requested);
+        }
 
         loop {
             if let Ok(Some(event)) = event_rx.try_recv() {
                 return Ok(Some(event));
             }
 
-            let Some(message) = self.client.recv_timeout(self.poll_interval)? else {
+            let message = match self.client.recv_timeout(self.poll_interval) {
+                Ok(message) => message,
+                Err(error) => {
+                    self.pending_request = None;
+                    return Err(error);
+                }
+            };
+            let Some(message) = message else {
                 continue;
             };
             match message {
                 RtiToFederate::Tag { tag: granted } => {
-                    let runtime_tag = boomerang_runtime::Tag::try_from(granted)?;
+                    let runtime_tag = match boomerang_runtime::Tag::try_from(granted) {
+                        Ok(tag) => tag,
+                        Err(error) => {
+                            self.pending_request = None;
+                            return Err(error.into());
+                        }
+                    };
                     self.last_granted = Some(runtime_tag);
+                    if self
+                        .pending_request
+                        .is_some_and(|pending| granted >= pending)
+                    {
+                        self.pending_request = None;
+                    }
                     if granted >= requested {
                         return Ok(None);
                     }
@@ -488,16 +515,24 @@ impl RtiFederatedTimeBarrier {
                     tag,
                     payload,
                 } => {
-                    return self.schedule_inbound_msg(source, endpoint, tag, &payload, event_rx);
+                    let result =
+                        self.schedule_inbound_msg(source, endpoint, tag, &payload, event_rx);
+                    if result.is_err() {
+                        self.pending_request = None;
+                    }
+                    return result;
                 }
                 RtiToFederate::Stop => {
+                    self.pending_request = None;
                     self.stopped = true;
                     return Err(FederateClientError::RtiStopped);
                 }
                 RtiToFederate::Error { message } => {
+                    self.pending_request = None;
                     return Err(FederateClientError::RtiError { message });
                 }
                 RtiToFederate::Start { .. } => {
+                    self.pending_request = None;
                     return Err(FederateClientError::Protocol(
                         "unexpected duplicate Start frame".into(),
                     ));
@@ -539,6 +574,7 @@ impl RtiFederatedTimeBarrier {
         let stop_result = self.client.send(FederateToRti::Stop {
             federate_id: self.federate_id.clone(),
         });
+        self.pending_request = None;
         self.stopped = true;
         fault_result?;
         net_result?;
@@ -970,6 +1006,92 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bridge_does_not_repeat_pending_net_after_inbound_interruption() {
+        let next_tag = WireTag::finite(1_000_000_000, 0);
+        let (client, rti) =
+            connect_client_with_fake_rti(fed("sink"), move |mut transport| async move {
+                assert!(matches!(
+                    recv_federate_to_rti(&mut transport).await,
+                    FederateToRti::Hello { federate_id, .. } if federate_id == fed("sink")
+                ));
+                send_rti_to_federate(
+                    &mut transport,
+                    RtiToFederate::Start {
+                        start_unix_epoch_ns: 0,
+                    },
+                )
+                .await;
+                assert_eq!(
+                    recv_federate_to_rti(&mut transport).await,
+                    FederateToRti::Net {
+                        federate_id: fed("sink"),
+                        tag: WireTag::ZERO,
+                    }
+                );
+                send_rti_to_federate(
+                    &mut transport,
+                    RtiToFederate::Msg {
+                        source: fed("source"),
+                        endpoint: protocol_endpoint(),
+                        tag: WireTag::ZERO,
+                        payload: b"42".to_vec(),
+                    },
+                )
+                .await;
+                assert_eq!(
+                    recv_federate_to_rti(&mut transport).await,
+                    FederateToRti::MsgAck {
+                        federate_id: fed("sink"),
+                        tag: WireTag::ZERO,
+                    }
+                );
+
+                send_rti_to_federate(&mut transport, RtiToFederate::Tag { tag: WireTag::ZERO })
+                    .await;
+                assert_eq!(
+                    recv_federate_to_rti(&mut transport).await,
+                    FederateToRti::Net {
+                        federate_id: fed("sink"),
+                        tag: next_tag,
+                    }
+                );
+                send_rti_to_federate(&mut transport, RtiToFederate::Tag { tag: next_tag }).await;
+            })
+            .await;
+
+        let (registry, event_rx, _action_key, _shutdown_tx, endpoint_key) =
+            inbound_registry_for_u32();
+        let mut inbound_route = route();
+        inbound_route.bind_inbound(endpoint_key);
+        let mut barrier = RtiFederatedTimeBarrier::new(
+            fed("sink"),
+            client,
+            [inbound_route],
+            registry,
+            boomerang_runtime::FederatedFaultState::default(),
+        )
+        .unwrap();
+
+        assert!(barrier
+            .wait_for_tag(boomerang_runtime::Tag::ZERO, &event_rx)
+            .unwrap()
+            .is_some());
+        assert!(barrier
+            .wait_for_tag(boomerang_runtime::Tag::ZERO, &event_rx)
+            .unwrap()
+            .is_none());
+        assert!(barrier
+            .wait_for_tag(
+                boomerang_runtime::Tag::new(boomerang_runtime::Duration::seconds(1), 0),
+                &event_rx,
+            )
+            .unwrap()
+            .is_none());
+
+        rti.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bridge_reports_rti_error_frame() {
         let (client, rti) =
             connect_client_with_fake_rti(fed("source"), |mut transport| async move {
@@ -1016,6 +1138,7 @@ mod tests {
             ),
             Err(error) if error.to_string().contains("boom")
         ));
+        assert_eq!(barrier.pending_request, None);
 
         rti.await.unwrap();
     }
@@ -1061,6 +1184,7 @@ mod tests {
         .unwrap();
 
         barrier.stop().unwrap();
+        assert_eq!(barrier.pending_request, None);
 
         rti.await.unwrap();
     }

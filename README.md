@@ -7,7 +7,15 @@
 [![docs](https://docs.rs/boomerang/badge.svg)](https://docs.rs/boomerang)
 [![codecov](https://codecov.io/github/jondo2010/boomerang/graph/badge.svg?token=PYXF8VSNY9)](https://codecov.io/github/jondo2010/boomerang)
 
-A deterministic middleware framework for robotics and distributed systems.
+Boomerang is a Rust runtime and composition framework for deterministic reactive
+systems. Build reusable reactor graphs once, then run them locally or partition
+them across cores, processes, and ECUs—with recording and replay at physical and
+deployment boundaries.
+
+Boomerang is early-stage. It currently provides deterministic logical-time
+execution, local enclaves, modal reactors, recording/replay foundations, and
+experimental static federation. Mixed-criticality and `no_std` embedded
+deployment are long-term goals.
 
 ## Getting Started
 

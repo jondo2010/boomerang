@@ -1,16 +1,50 @@
 # Recording and Replay
 
-The requirement is the ability to record necessary inputs and states of a running system, serialize it into one or more files on disk, and then be able to deterministically replay that recording back into the runtime "offline", at potentially faster-than-realtime speed.
+Recording and replay make nondeterministic or unavailable parts of a system
+repeatable. Boomerang treats recording at two complementary boundaries.
 
-The determinism in Boomerang here means that a system being fed recorded data should repeatably achieve the exact same state and provide the same bitwise-exact outputs as if it was running with real inputs.
+## Physical-Boundary Recording
 
-In Boomerang, `PhysicalAction`s are the boundary between the deterministic runtime and the non-deterministic outside world. Any external sensor or data inputs to the system *must* enter through a `PhysicalAction`. This means to achieve a perfect replay capability, it is only necessary to record the time (`Tag`) and values of the `PhysicalActions` of the system. This is what the recording and replay infrastructure is centered around.
+Physical-boundary recording captures inputs from outside the deterministic
+reactor graph: sensors, clocks, operators, hardware interrupts, and external
+systems. Physical actions are the intended entry point for these inputs.
 
-# Design
+A recording preserves each value and its complete logical tag. Replaying those
+inputs into the same graph should reproduce the same observable logical trace,
+subject to the documented runtime and platform assumptions.
 
-Actions in Boomerang are (logically) local to the Reactor that contains them, and are not accesible to other Reactors.
+## Deployment-Boundary Recording
 
-The Recorder works by injecting an additional Reaction into the containing Reactor for each `PhysicalAction` that should be recorded.
+Deployment-boundary recording captures messages crossing an enclave or
+federate interface. It allows CI to replace a partition—such as a sensor ECU or
+planning subsystem—with trace-backed endpoints while the rest of the graph
+runs live.
 
-# Serialization Data Model
+For a one-way producer, replay injects the recorded outbound messages at their
+original tags. For a bidirectional or feedback interface, a useful recording
+contains both directions: replay supplies the replaced partition's outputs and
+validates that the live system produces inputs compatible with the recorded
+interaction. A static recording cannot respond correctly to novel inputs; that
+requires a behavioral model rather than replay.
 
+## Recording Contract
+
+Portable recordings should use stable logical identities rather than runtime
+allocation keys. A boundary event needs at least:
+
+- the stable endpoint or action identity;
+- direction and payload schema;
+- the full logical tag, including microstep; and
+- deterministic ordering information for events sharing a tag.
+
+Recordings may also carry a graph or interface fingerprint so incompatible
+graphs fail clearly instead of producing misleading results.
+
+## Current Status
+
+Boomerang currently has action recording/replay foundations backed by MCAP.
+Stable deployment-independent identities, full boundary recording, partition
+substitution, and deployment-equivalence trace comparison are architectural
+goals and are not yet complete. In particular, deterministic replay must
+preserve microsteps and must not depend on enclave or action keys that can
+change when a graph is repartitioned.

@@ -59,7 +59,7 @@ impl<T: ReactorData> Display for Port<T> {
             f,
             "Port<{ty}>(\"{name}\", {key})",
             ty = std::any::type_name::<T>(),
-            name = &self.name,
+            name = self.name,
             key = self.key
         )
     }

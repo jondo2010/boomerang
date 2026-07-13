@@ -7,16 +7,39 @@ on:
   pull_request:
     branches: ["main"]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   commitlint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     name: Commitlint
     steps:
       - name: Run commitlint
         uses: opensource-nepal/commitlint@v1
+
+  clippy:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    name: Clippy
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: swatinem/rust-cache@v2
+      - name: Check with Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
     strategy:
@@ -32,6 +55,7 @@ jobs:
             toolchain: nightly
 
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v7
@@ -44,44 +68,12 @@ jobs:
       - name: toolchain version
         run: cargo -vV
 
-      - name: Clippy
-        if: github.event_name == 'pull_request'
-        uses: giraffate/clippy-action@v1
-        with:
-          reporter: "github-pr-review"
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          clippy_flags: -- -Dwarnings
-
-      - name: build
-        run: cargo build --all --verbose
-
       - name: test
         run: cargo test --all --verbose
 
-  #check-unused-dependencies:
-  #  runs-on: ubuntu-latest
-  #  steps:
-  #    - uses: actions/checkout@v3
-  #    - uses: actions/cache@v3
-  #      with:
-  #        path: |
-  #          ~/.cargo/bin/
-  #          ~/.cargo/registry/index/
-  #          ~/.cargo/registry/cache/
-  #          ~/.cargo/git/db/
-  #          target/
-  #        key: ${{ runner.os }}-cargo-check-unused-dependencies-${{ hashFiles('**/Cargo.toml') }}
-  #    - uses: actions-rs/toolchain@v1
-  #      with:
-  #        toolchain: nightly
-  #        override: true
-  #    - name: Installs cargo-udeps
-  #      run: cargo install --force cargo-udeps
-  #    - name: Run cargo udeps
-  #      run: cargo udeps
-
   miri:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v7
@@ -91,7 +83,9 @@ jobs:
         with:
           toolchain: nightly
           components: miri
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
       - name: Test with Miri
-        run: |
-          export MIRIFLAGS="-Zmiri-disable-isolation"
-          cargo +nightly miri setup && cargo +nightly miri test
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+        run: cargo +nightly miri nextest run -p boomerang -E 'kind(test)'

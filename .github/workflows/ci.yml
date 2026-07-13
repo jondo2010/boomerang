@@ -83,7 +83,9 @@ jobs:
         with:
           toolchain: nightly
           components: miri
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
       - name: Test with Miri
-        run: |
-          export MIRIFLAGS="-Zmiri-disable-isolation"
-          cargo +nightly miri setup && cargo +nightly miri test
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+        run: cargo +nightly miri nextest run

@@ -2,29 +2,16 @@
     "$schema": "https://docs.renovatebot.com/renovate-schema.json",
     "extends": [
         "config:recommended",
+        "group:all",
         ":automergeAll",
-        ":automergeBranch",
         ":automergeRequireAllStatusChecks",
-        ":semanticCommits",
-        "schedule:weekly",
-        "schedule:automergeWeekly"
+        ":semanticCommits"
     ],
-    "packageRules": [
-        {
-            "groupName": "rust dependencies",
-            "groupSlug": "rust",
-            "matchDatasources": [
-                "crate"
-            ]
-        },
-        {
-            "groupName": "github ci dependencies",
-            "groupSlug": "ci",
-            "matchDatasources": [
-                "github-tags",
-                "gitea-tags",
-                "github-runners"
-            ]
-        }
-    ]
+    "timezone": "Europe/Berlin",
+    "schedule": [
+        "* 0-3 1,15 * *"
+    ],
+    "branchConcurrentLimit": 1,
+    "prConcurrentLimit": 1,
+    "prHourlyLimit": 1
 }

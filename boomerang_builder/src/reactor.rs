@@ -369,8 +369,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
 
     /// Add a new action to the reactor.
     ///
-    /// This method forwards to the implementation at
-    /// [`crate::assembly::Assembly::internal_add_action`].
+    /// This method records the action in the underlying assembly.
     pub fn add_action<T: runtime::ReactorData, Q: ActionTag>(
         &mut self,
         name: &str,
@@ -386,8 +385,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
 
     /// Add a new logical action to the reactor.
     ///
-    /// This method forwards to the implementation at
-    /// [`crate::assembly::Assembly::add_logical_action`].
+    /// This method records a logical action in the underlying assembly.
     pub fn add_logical_action<T: runtime::ReactorData>(
         &mut self,
         name: &str,

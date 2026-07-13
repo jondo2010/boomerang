@@ -11,6 +11,8 @@ pub mod runtime_bridge;
 pub mod session;
 #[cfg(feature = "runtime")]
 pub mod static_runner;
+#[cfg(test)]
+mod test_trace;
 pub mod transport;
 
 pub use client::{

@@ -5,11 +5,19 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
-      contents: write # To push a branch
+      contents: read
       pages: write # To push to a GitHub Pages site
       id-token: write # To update the deployment status
     steps:

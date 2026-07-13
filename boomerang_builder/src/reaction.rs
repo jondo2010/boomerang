@@ -367,13 +367,17 @@ pub struct PartialReactionBuilder<'a, S: runtime::ReactorData, Fields = (), Reac
     action_relations: slotmap::SecondaryMap<AssemblyActionKey, TriggerMode>,
     action_order: Vec<AssemblyActionKey>,
     reactor_key: AssemblyReactorKey,
-    env: &'a mut Assembly,
+    assembly: &'a mut Assembly,
     fields: Fields,
     phantom: std::marker::PhantomData<(S, Fields, ReactionFn)>,
 }
 
 impl<'a, S: runtime::ReactorData> PartialReactionBuilder<'a, S, (), ()> {
-    pub fn new(name: Option<&str>, reactor_key: AssemblyReactorKey, env: &'a mut Assembly) -> Self {
+    pub fn new(
+        name: Option<&str>,
+        reactor_key: AssemblyReactorKey,
+        assembly: &'a mut Assembly,
+    ) -> Self {
         Self {
             name: name.map(|s| s.to_string()),
             reaction_fn: (),
@@ -386,7 +390,7 @@ impl<'a, S: runtime::ReactorData> PartialReactionBuilder<'a, S, (), ()> {
             action_relations: slotmap::SecondaryMap::new(),
             action_order: Vec::new(),
             reactor_key,
-            env,
+            assembly,
             fields: (),
             phantom: std::marker::PhantomData,
         }
@@ -440,7 +444,7 @@ macro_rules! impl_with_field {
             /// Trigger this reaction on the startup of the reactor
             pub fn with_startup_trigger(self) -> PartialReactionBuilder<'a, S, ($($Fn,)* TypedActionKey,)> {
                 let startup = self
-                    .env
+                    .assembly
                     .get_reactor_builder(self.reactor_key)
                     .unwrap()
                     .get_startup_action();
@@ -450,7 +454,7 @@ macro_rules! impl_with_field {
             /// Trigger this reaction on the shutdown of the reactor
             pub fn with_shutdown_trigger(self) -> PartialReactionBuilder<'a, S, ($($Fn,)* TypedActionKey,)> {
                 let shutdown = self
-                    .env
+                    .assembly
                     .get_reactor_builder(self.reactor_key)
                     .unwrap()
                     .get_shutdown_action();
@@ -476,7 +480,7 @@ macro_rules! impl_with_field {
                     action_relations,
                     action_order,
                     reactor_key,
-                    env,
+                    assembly,
                     fields,
                     ..
                 } = self;
@@ -492,7 +496,7 @@ macro_rules! impl_with_field {
                     action_relations,
                     action_order,
                     reactor_key,
-                    env,
+                    assembly,
                     fields: fields.append(field),
                     phantom: std::marker::PhantomData,
                 }
@@ -517,7 +521,7 @@ macro_rules! impl_with_field {
                     action_relations,
                     action_order,
                     reactor_key,
-                    env,
+                    assembly,
                     fields,
                     ..
                 } = self;
@@ -533,7 +537,7 @@ macro_rules! impl_with_field {
                     action_relations,
                     action_order,
                     reactor_key,
-                    env,
+                    assembly,
                     fields: fields.append(field),
                     phantom: std::marker::PhantomData,
                 }
@@ -557,7 +561,7 @@ macro_rules! impl_with_field {
                     action_relations,
                     action_order,
                     reactor_key,
-                    env,
+                    assembly,
                     fields,
                     ..
                 } = self;
@@ -573,7 +577,7 @@ macro_rules! impl_with_field {
                     action_relations,
                     action_order,
                     reactor_key,
-                    env,
+                    assembly,
                     fields: fields.append(field),
                     phantom: std::marker::PhantomData,
                 }
@@ -632,7 +636,7 @@ where
             action_relations,
             action_order,
             reactor_key,
-            env,
+            assembly,
             fields,
             ..
         } = self;
@@ -659,7 +663,7 @@ where
             action_relations,
             action_order,
             reactor_key,
-            env,
+            assembly,
             fields,
             phantom: std::marker::PhantomData,
         }
@@ -689,7 +693,7 @@ where
             action_relations,
             action_order,
             reactor_key,
-            env,
+            assembly,
             fields,
             ..
         } = self;
@@ -705,7 +709,7 @@ where
             action_relations,
             action_order,
             reactor_key,
-            env,
+            assembly,
             fields,
             phantom: std::marker::PhantomData,
         }
@@ -731,7 +735,7 @@ where
             action_order,
             reaction_fn,
             reactor_key,
-            env,
+            assembly,
             ..
         } = self;
 
@@ -753,7 +757,7 @@ where
 
         if let Some(ref modes) = enabled_modes {
             for mode_key in modes {
-                let mode = env.mode_specs.get(*mode_key).ok_or_else(|| {
+                let mode = assembly.mode_specs.get(*mode_key).ok_or_else(|| {
                     BuilderError::ReactionBuilderError(format!(
                         "Unknown mode key {mode_key:?} for reaction '{name:?}'"
                     ))
@@ -768,7 +772,7 @@ where
         }
 
         if let Some(scope_mode) = scope_mode {
-            let mode = env.mode_specs.get(scope_mode).ok_or_else(|| {
+            let mode = assembly.mode_specs.get(scope_mode).ok_or_else(|| {
                 BuilderError::ReactionBuilderError(format!(
                     "Unknown mode key {scope_mode:?} for reaction '{name:?}'"
                 ))
@@ -782,7 +786,7 @@ where
         }
 
         for effect in &mode_effects {
-            let mode = env.mode_specs.get(effect.target()).ok_or_else(|| {
+            let mode = assembly.mode_specs.get(effect.target()).ok_or_else(|| {
                 BuilderError::ReactionBuilderError(format!(
                     "Unknown mode key {:?} for reaction '{name:?}'",
                     effect.target()
@@ -796,8 +800,8 @@ where
             }
         }
 
-        let reactor = &mut env.reactor_specs[reactor_key];
-        let reactions = &mut env.reaction_specs;
+        let reactor = &mut assembly.reactor_specs[reactor_key];
+        let reactions = &mut assembly.reaction_specs;
 
         let reaction_builder = ReactionSpec {
             name,

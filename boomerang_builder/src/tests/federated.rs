@@ -69,8 +69,8 @@ fn local_only_source_reactor(
      scope_mode: Option<AssemblyModeKey>,
      bank_info: Option<runtime::BankInfo>,
      placement: ReactorPlacement,
-     env: &mut Assembly| {
-        let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
+     assembly: &mut Assembly| {
+        let mut builder = assembly.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
             builder.set_scope_mode(scope_mode)?;
         }
@@ -90,8 +90,8 @@ fn local_only_sink_reactor(
      scope_mode: Option<AssemblyModeKey>,
      bank_info: Option<runtime::BankInfo>,
      placement: ReactorPlacement,
-     env: &mut Assembly| {
-        let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
+     assembly: &mut Assembly| {
+        let mut builder = assembly.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
             builder.set_scope_mode(scope_mode)?;
         }
@@ -110,8 +110,8 @@ fn federated_source_reactor() -> impl Reactor<(), Ports = TypedPortKey<u32, Outp
      scope_mode: Option<AssemblyModeKey>,
      bank_info: Option<runtime::BankInfo>,
      placement: ReactorPlacement,
-     env: &mut Assembly| {
-        let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
+     assembly: &mut Assembly| {
+        let mut builder = assembly.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
             builder.set_scope_mode(scope_mode)?;
         }
@@ -130,8 +130,8 @@ fn federated_startup_source_reactor(
           scope_mode: Option<AssemblyModeKey>,
           bank_info: Option<runtime::BankInfo>,
           placement: ReactorPlacement,
-          env: &mut Assembly| {
-        let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
+          assembly: &mut Assembly| {
+        let mut builder = assembly.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
             builder.set_scope_mode(scope_mode)?;
         }
@@ -158,8 +158,8 @@ fn federated_sink_reactor() -> impl Reactor<(), Ports = TypedPortKey<u32, Input,
      scope_mode: Option<AssemblyModeKey>,
      bank_info: Option<runtime::BankInfo>,
      placement: ReactorPlacement,
-     env: &mut Assembly| {
-        let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
+     assembly: &mut Assembly| {
+        let mut builder = assembly.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
             builder.set_scope_mode(scope_mode)?;
         }
@@ -178,8 +178,8 @@ fn federated_shutdown_after_startup_sink_reactor(
           scope_mode: Option<AssemblyModeKey>,
           bank_info: Option<runtime::BankInfo>,
           placement: ReactorPlacement,
-          env: &mut Assembly| {
-        let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
+          assembly: &mut Assembly| {
+        let mut builder = assembly.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
             builder.set_scope_mode(scope_mode)?;
         }
@@ -216,8 +216,8 @@ fn federated_recording_sink_reactor(
           scope_mode: Option<AssemblyModeKey>,
           bank_info: Option<runtime::BankInfo>,
           placement: ReactorPlacement,
-          env: &mut Assembly| {
-        let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
+          assembly: &mut Assembly| {
+        let mut builder = assembly.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
             builder.set_scope_mode(scope_mode)?;
         }
@@ -253,8 +253,8 @@ fn federated_io_reactor() -> impl Reactor<(), Ports = FederatedIoPorts> {
      scope_mode: Option<AssemblyModeKey>,
      bank_info: Option<runtime::BankInfo>,
      placement: ReactorPlacement,
-     env: &mut Assembly| {
-        let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
+     assembly: &mut Assembly| {
+        let mut builder = assembly.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
             builder.set_scope_mode(scope_mode)?;
         }
@@ -272,8 +272,8 @@ fn federated_forwarding_reactor(addend: u32) -> impl Reactor<(), Ports = Federat
           scope_mode: Option<AssemblyModeKey>,
           bank_info: Option<runtime::BankInfo>,
           placement: ReactorPlacement,
-          env: &mut Assembly| {
-        let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
+          assembly: &mut Assembly| {
+        let mut builder = assembly.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
             builder.set_scope_mode(scope_mode)?;
         }
@@ -316,8 +316,8 @@ fn federated_startup_recording_io_reactor(
           scope_mode: Option<AssemblyModeKey>,
           bank_info: Option<runtime::BankInfo>,
           placement: ReactorPlacement,
-          env: &mut Assembly| {
-        let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
+          assembly: &mut Assembly| {
+        let mut builder = assembly.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
             builder.set_scope_mode(scope_mode)?;
         }

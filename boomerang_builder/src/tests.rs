@@ -294,23 +294,23 @@ fn test_child_and_connection_helper_reactors_inherit_mode_scope() {
 
     reactor_builder
         .in_mode(idle, |builder| {
-            let source = builder.add_child_with(|parent, env| {
-                let mut child = env.add_reactor("source", Some(parent), None, (), false);
+            let source = builder.add_child_with(|parent, assembly| {
+                let mut child = assembly.add_reactor("source", Some(parent), None, (), false);
                 let _out = child.add_output_port::<u32>("out")?;
                 child.finish()
             })?;
-            let target = builder.add_child_with(|parent, env| {
-                let mut child = env.add_reactor("target", Some(parent), None, (), false);
+            let target = builder.add_child_with(|parent, assembly| {
+                let mut child = assembly.add_reactor("target", Some(parent), None, (), false);
                 let _input = child.add_input_port::<u32>("input")?;
                 child.finish()
             })?;
 
             let source_out = builder
-                .env()
+                .assembly()
                 .find_port_by_name::<u32, Output>("out", source)
                 .unwrap();
             let target_input = builder
-                .env()
+                .assembly()
                 .find_port_by_name::<u32, Input>("input", target)
                 .unwrap();
             builder.connect_port::<u32, _, _, _, _>(
@@ -569,8 +569,8 @@ fn test_nested_reactor() {
     let outer_output = outer_builder.add_output_port::<()>("output").unwrap();
 
     let inner_reactor = outer_builder
-        .add_child_with(|parent, env| {
-            let mut inner_builder = env.add_reactor("inner", Some(parent), None, (), false);
+        .add_child_with(|parent, assembly| {
+            let mut inner_builder = assembly.add_reactor("inner", Some(parent), None, (), false);
             let input_port = inner_builder.add_input_port::<()>("input").unwrap();
             let output_port = inner_builder.add_output_port::<()>("output").unwrap();
 
@@ -878,8 +878,8 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
     let mut builder = assembly.add_reactor("main", None, None, (), false);
 
     let source_reactor = builder
-        .add_child_with(|parent, env| {
-            let mut builder = env.add_reactor("Source", Some(parent), None, (), false);
+        .add_child_with(|parent, assembly| {
+            let mut builder = assembly.add_reactor("Source", Some(parent), None, (), false);
             let clock = builder.add_output_port::<u32>("clock")?;
             let o1 = builder.add_output_port::<u32>("o1")?;
             let o2 = builder.add_output_port::<u32>("o2")?;
@@ -944,8 +944,8 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
         })
         .unwrap();
 
-    let sink_reactor = builder.add_child_with(|parent, env| {
-        let mut builder = env.add_reactor("Sink", Some(parent), None, (), false);
+    let sink_reactor = builder.add_child_with(|parent, assembly| {
+        let mut builder = assembly.add_reactor("Sink", Some(parent), None, (), false);
         let clock = builder.add_input_port::<u32>("clock").unwrap();
         let in1 = builder.add_input_port::<u32>("in1").unwrap();
         let in2 = builder.add_input_port::<u32>("in2").unwrap();
@@ -1180,8 +1180,8 @@ pub fn create_ping_pong() -> PingPong {
     ) -> impl FnOnce(AssemblyReactorKey, &mut Assembly) -> Result<AssemblyReactorKey, BuilderError>
            + use<'_> {
         let greeting = format!("{} received", name);
-        move |parent, env: &mut Assembly| {
-            let mut builder = env.add_reactor(name, Some(parent), None, (), is_enclave);
+        move |parent, assembly: &mut Assembly| {
+            let mut builder = assembly.add_reactor(name, Some(parent), None, (), is_enclave);
             let t1 = builder
                 .add_timer(
                     "t1",
@@ -1288,8 +1288,8 @@ fn test_port_binding() {
     let mut builder = assembly.add_reactor("main", None, None, (), false);
 
     let child1 = builder
-        .add_child_with(|parent, env| {
-            let mut builder = env.add_reactor("child1", Some(parent), None, (), false);
+        .add_child_with(|parent, assembly| {
+            let mut builder = assembly.add_reactor("child1", Some(parent), None, (), false);
             let i1 = builder.add_input_port::<()>("i1").unwrap();
             let o1 = builder.add_output_port::<()>("o1").unwrap();
             let _ = builder
@@ -1305,8 +1305,8 @@ fn test_port_binding() {
         .unwrap();
 
     let child2a = builder
-        .add_child_with(|parent, env| {
-            let mut builder = env.add_reactor("child2a", Some(parent), None, (), false);
+        .add_child_with(|parent, assembly| {
+            let mut builder = assembly.add_reactor("child2a", Some(parent), None, (), false);
             let i2 = builder.add_input_port::<()>("i2a").unwrap();
             let _ = builder
                 .add_reaction(Some("reaction"))
@@ -1320,8 +1320,8 @@ fn test_port_binding() {
         .unwrap();
 
     let child2b = builder
-        .add_child_with(|parent, env| {
-            let mut builder = env.add_reactor("child2b", Some(parent), None, (), false);
+        .add_child_with(|parent, assembly| {
+            let mut builder = assembly.add_reactor("child2b", Some(parent), None, (), false);
             let i2 = builder.add_input_port::<()>("i2b").unwrap();
             let _ = builder
                 .add_reaction(Some("reaction"))

@@ -274,8 +274,8 @@ impl ToTokens for Model {
                      scope_mode: Option<::boomerang::builder::AssemblyModeKey>,
                      bank_info: Option<::boomerang::runtime::BankInfo>,
                      placement: ::boomerang::builder::ReactorPlacement,
-                     env: &mut ::boomerang::builder::Assembly| {
-                        let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
+                     assembly: &mut ::boomerang::builder::Assembly| {
+                        let mut builder = assembly.add_reactor(name, parent, bank_info, state, placement);
                         if let Some(scope_mode) = scope_mode {
                             builder.set_scope_mode(scope_mode)?;
                         }

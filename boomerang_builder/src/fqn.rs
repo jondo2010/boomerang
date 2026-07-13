@@ -21,7 +21,7 @@ pub trait Fqn: Copy {
     /// Get a fully-qualified name for self
     ///
     /// If `grouped` is true, the returned Fqn will be grouped by bank
-    fn fqn(self, env: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError>;
+    fn fqn(self, assembly: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError>;
 }
 
 /// The separator for segments in a fully-qualified name.
@@ -242,15 +242,15 @@ impl Index<usize> for BuilderFqn {
 }
 
 impl Fqn for AssemblyReactorKey {
-    fn fqn(self, env: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
-        let reactor = env
+    fn fqn(self, assembly: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
+        let reactor = assembly
             .reactor_specs
             .get(self)
             .ok_or(BuilderError::ReactorKeyNotFound(self))?;
 
         let segment = reactor.fqn_segment(grouped);
         if let Some(parent) = reactor.parent_reactor_key() {
-            parent.fqn(env, grouped)?.append(segment)
+            parent.fqn(assembly, grouped)?.append(segment)
         } else {
             Ok(std::iter::once(segment).collect())
         }
@@ -258,13 +258,13 @@ impl Fqn for AssemblyReactorKey {
 }
 
 impl Fqn for AssemblyActionKey {
-    fn fqn(self, env: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
-        let action = env
+    fn fqn(self, assembly: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
+        let action = assembly
             .action_specs
             .get(self)
             .ok_or(BuilderError::ActionKeyNotFound(self))?;
         let segment = action.fqn_segment(grouped);
-        action.reactor_key().fqn(env, true)?.append(segment)
+        action.reactor_key().fqn(assembly, true)?.append(segment)
     }
 }
 
@@ -273,30 +273,32 @@ where
     T: runtime::ReactorData,
     Q: ActionTag,
 {
-    fn fqn(self, env: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
-        AssemblyActionKey::from(self).fqn(env, grouped)
+    fn fqn(self, assembly: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
+        AssemblyActionKey::from(self).fqn(assembly, grouped)
     }
 }
 
 impl Fqn for AssemblyReactionKey {
-    fn fqn(self, env: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
-        let reaction = env
+    fn fqn(self, assembly: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
+        let reaction = assembly
             .reaction_specs
             .get(self)
             .ok_or(BuilderError::ReactionKeyNotFound(self))?;
         let segment = reaction.fqn_segment(false);
-        reaction.reactor_key.fqn(env, grouped)?.append(segment)
+        reaction.reactor_key.fqn(assembly, grouped)?.append(segment)
     }
 }
 
 impl Fqn for AssemblyPortKey {
-    fn fqn(self, env: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
-        let port = env
+    fn fqn(self, assembly: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
+        let port = assembly
             .port_specs
             .get(self)
             .ok_or(BuilderError::PortKeyNotFound(self))?;
         let segment = port.fqn_segment(grouped);
-        port.get_reactor_key().fqn(env, grouped)?.append(segment)
+        port.get_reactor_key()
+            .fqn(assembly, grouped)?
+            .append(segment)
     }
 }
 
@@ -306,8 +308,8 @@ where
     Q: PortTag,
     A: Copy,
 {
-    fn fqn(self, env: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
-        AssemblyPortKey::from(self).fqn(env, grouped)
+    fn fqn(self, assembly: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
+        AssemblyPortKey::from(self).fqn(assembly, grouped)
     }
 }
 

@@ -1,4 +1,4 @@
-//! Builder for actions. This is typically done using the builder methods on [`crate::builder::env`]
+//! Builder for actions. This is typically done using the builder methods on [`crate::Assembly`]
 //! and [`crate::builder::reactor`].
 //!
 //! An action, like a port (see [`crate::builder::PortSpec`]), can carry data, but unlike a port,

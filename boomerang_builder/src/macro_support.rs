@@ -15,7 +15,7 @@ pub trait Reactor<State: runtime::ReactorData = ()>: Sized {
         scope_mode: Option<AssemblyModeKey>,
         bank_info: Option<runtime::BankInfo>,
         is_enclave: bool,
-        env: &mut Assembly,
+        assembly: &mut Assembly,
     ) -> Result<Self::Ports, BuilderError> {
         self.build_with_placement(
             name,
@@ -24,7 +24,7 @@ pub trait Reactor<State: runtime::ReactorData = ()>: Sized {
             scope_mode,
             bank_info,
             ReactorPlacement::from(is_enclave),
-            env,
+            assembly,
         )
     }
 
@@ -37,7 +37,7 @@ pub trait Reactor<State: runtime::ReactorData = ()>: Sized {
         scope_mode: Option<AssemblyModeKey>,
         bank_info: Option<runtime::BankInfo>,
         placement: ReactorPlacement,
-        env: &mut Assembly,
+        assembly: &mut Assembly,
     ) -> Result<Self::Ports, BuilderError>;
 }
 
@@ -50,7 +50,7 @@ where
             /*scope_mode*/ Option<AssemblyModeKey>,
             /*bank_info*/ Option<boomerang_runtime::BankInfo>,
             /*placement*/ ReactorPlacement,
-            /*env*/ &mut Assembly,
+            /*assembly*/ &mut Assembly,
         ) -> Result<Ports, BuilderError>
         + 'static,
     State: runtime::ReactorData,
@@ -64,9 +64,11 @@ where
         scope_mode: Option<AssemblyModeKey>,
         bank_info: Option<boomerang_runtime::BankInfo>,
         placement: ReactorPlacement,
-        env: &mut Assembly,
+        assembly: &mut Assembly,
     ) -> Result<Self::Ports, BuilderError> {
-        (self)(name, state, parent, scope_mode, bank_info, placement, env)
+        (self)(
+            name, state, parent, scope_mode, bank_info, placement, assembly,
+        )
     }
 }
 
@@ -85,7 +87,7 @@ impl<S: runtime::ReactorData> ReactorBuilderState<'_, S> {
     pub fn add_reaction(&mut self, name: Option<&str>) -> PartialReactionBuilder<'_, S> {
         let reactor_key = self.key();
         let current_mode = self.current_mode();
-        let builder = PartialReactionBuilder::new(name, reactor_key, self.env());
+        let builder = PartialReactionBuilder::new(name, reactor_key, self.assembly());
         if let Some(mode) = current_mode {
             builder.in_mode_scope(mode)
         } else {
@@ -126,7 +128,7 @@ impl<S: runtime::ReactorData> ReactorBuilderState<'_, S> {
             scope_mode,
             None,
             placement.into(),
-            self.env(),
+            self.assembly(),
         )
     }
 
@@ -170,7 +172,7 @@ impl<S: runtime::ReactorData> ReactorBuilderState<'_, S> {
                     scope_mode,
                     Some(runtime::BankInfo { idx: i, total: N }),
                     ReactorPlacement::from(is_enclave),
-                    self.env(),
+                    self.assembly(),
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;

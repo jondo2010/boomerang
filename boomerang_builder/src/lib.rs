@@ -5,8 +5,8 @@
 #![deny(clippy::all)]
 
 mod action;
+mod assembly;
 mod connection;
-mod env;
 #[cfg(feature = "federated")]
 mod federation;
 mod fqn;
@@ -23,7 +23,7 @@ pub use macro_support::{Reactor, ReactorPorts};
 pub mod plantuml;
 
 pub use action::*;
-pub use env::*;
+pub use assembly::*;
 #[cfg(feature = "federated")]
 pub use federation::*;
 pub use fqn::*;

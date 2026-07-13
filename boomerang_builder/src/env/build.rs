@@ -1,4 +1,4 @@
-//! Runtime graph lowering for [`EnvBuilder`].
+//! Runtime graph lowering for [`Assembly`].
 //!
 //! This module performs the build-time pass that materializes runtime enclaves and completes
 //! derived [`boomerang_runtime::ReactionGraph`] data. The scheduler should not need to reconstruct
@@ -20,7 +20,7 @@ use crate::{
 #[cfg(feature = "federated")]
 use crate::{federated_routes_from_plan, FederationPlan};
 
-use super::EnvBuilder;
+use super::Assembly;
 
 /// A trait used to defer the building of until the enclave parts are available.
 pub trait DeferedBuild {
@@ -278,7 +278,7 @@ fn build_modal_schedule_index(graph: &runtime::ReactionGraph) -> runtime::ModalS
     index
 }
 
-impl EnvBuilder {
+impl Assembly {
     fn build_inter_partition_plan(
         &self,
         partition_map: &PartitionMap,
@@ -940,7 +940,7 @@ impl EnvBuilder {
         Ok(())
     }
 
-    /// Convert the [`EnvBuilder`] into parts suitable for execution by the runtime.
+    /// Convert the [`Assembly`] into parts suitable for execution by the runtime.
     pub fn into_runtime_parts(
         mut self,
         config: &runtime::Config,

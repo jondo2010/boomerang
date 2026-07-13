@@ -105,7 +105,7 @@ pub struct ModeBuilder {
 }
 
 #[derive(Default)]
-pub struct EnvBuilder {
+pub struct Assembly {
     /// Builder for Actions
     pub(super) action_builders: SlotMap<BuilderActionKey, ActionBuilder>,
     /// Builders for Ports
@@ -129,7 +129,7 @@ pub struct EnvBuilder {
     pub(super) replay_builders: SecondaryMap<BuilderActionKey, Box<ReplayFunctionBuilder>>,
 }
 
-impl EnvBuilder {
+impl Assembly {
     pub fn new() -> Self {
         Default::default()
     }
@@ -478,7 +478,7 @@ impl EnvBuilder {
             .ok_or_else(|| BuilderError::NamedActionNotFound(action_name.to_string()))
     }
 
-    /// Find a Reactor in the EnvBuilder given its fully-qualified name
+    /// Find a Reactor in the Assembly given its fully-qualified name
     pub fn find_reactor_by_fqn<T>(&self, reactor_fqn: T) -> Result<BuilderReactorKey, BuilderError>
     where
         T: TryInto<BuilderFqn>,
@@ -501,7 +501,7 @@ impl EnvBuilder {
             .ok_or_else(|| BuilderError::NamedReactorNotFound(reactor_fqn.to_string()))
     }
 
-    /// Find a PhysicalAction globally in the EnvBuilder given its fully-qualified name
+    /// Find a PhysicalAction globally in the Assembly given its fully-qualified name
     pub fn find_physical_action_by_fqn<T>(
         &self,
         action_fqn: T,
@@ -526,7 +526,7 @@ impl EnvBuilder {
             .ok_or_else(|| BuilderError::NamedActionNotFound(action_fqn.to_string()))
     }
 
-    /// Find a possible common parent Reactor for two Reactor elements in the EnvBuilder (if it
+    /// Find a possible common parent Reactor for two Reactor elements in the Assembly (if it
     /// exists).
     pub fn common_reactor_key<E0, E1>(&self, e0: &E0, e1: &E1) -> Option<BuilderReactorKey>
     where
@@ -676,7 +676,7 @@ impl EnvBuilder {
         let entry = self.federated_codecs.get(&TypeId::of::<T>()).ok_or_else(|| {
             BuilderError::UnsupportedFederationTopology {
                 what: format!(
-                    "cross-federate connection '{}' -> '{}' requires a federated codec for payload type '{}'; register one on EnvBuilder with register_federated_codec::<T, _>(...)",
+                    "cross-federate connection '{}' -> '{}' requires a federated codec for payload type '{}'; register one on Assembly with register_federated_codec::<T, _>(...)",
                     source_fqn,
                     target_fqn,
                     type_name::<T>(),

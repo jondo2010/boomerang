@@ -1,9 +1,9 @@
 use std::fmt::Debug;
 
 use super::{
-    ActionTag, ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderModeEffect,
-    BuilderPortKey, BuilderReactionKey, EnvBuilder, Input, Logical, Output, Physical, PortBank,
-    PortTag, TimerActionKey, TimerSpec, TypedActionKey, TypedPortKey,
+    ActionTag, ActionType, Assembly, BuilderActionKey, BuilderError, BuilderFqn, BuilderModeEffect,
+    BuilderPortKey, BuilderReactionKey, Input, Logical, Output, Physical, PortBank, PortTag,
+    TimerActionKey, TimerSpec, TypedActionKey, TypedPortKey,
 };
 use crate::runtime;
 use slotmap::SecondaryMap;
@@ -239,7 +239,7 @@ impl ReactorBuilder {
 pub struct ReactorBuilderState<'a, S: runtime::ReactorData = ()> {
     /// The ReactorKey of this Builder
     reactor_key: BuilderReactorKey,
-    env: &'a mut EnvBuilder,
+    env: &'a mut Assembly,
     startup_action: TypedActionKey,
     shutdown_action: TypedActionKey,
     current_mode: Option<BuilderModeKey>,
@@ -253,7 +253,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         bank_info: Option<runtime::BankInfo>,
         reactor_state: S,
         placement: impl Into<ReactorPlacement>,
-        env: &'a mut EnvBuilder,
+        env: &'a mut Assembly,
     ) -> Self {
         let type_name = std::any::type_name::<S>();
         let reactor_key = env.reactor_builders.insert(ReactorBuilder::new(
@@ -284,10 +284,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
     }
 
     /// Create a new `ReactorBuilderState` for a pre-existing reactor
-    pub(super) fn from_pre_existing(
-        reactor_key: BuilderReactorKey,
-        env: &'a mut EnvBuilder,
-    ) -> Self {
+    pub(super) fn from_pre_existing(reactor_key: BuilderReactorKey, env: &'a mut Assembly) -> Self {
         // Find the startup and shutdown actions for this reactor
         let startup_action = env
             .action_builders
@@ -316,8 +313,8 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         }
     }
 
-    /// Get the [`EnvBuilder`] for this `ReactorBuilder`
-    pub fn env(&mut self) -> &mut EnvBuilder {
+    /// Get the [`Assembly`] for this `ReactorBuilder`
+    pub fn env(&mut self) -> &mut Assembly {
         self.env
     }
 
@@ -370,7 +367,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
     /// Add a new action to the reactor.
     ///
     /// This method forwards to the implementation at
-    /// [`crate::env::EnvBuilder::internal_add_action`].
+    /// [`crate::env::Assembly::internal_add_action`].
     pub fn add_action<T: runtime::ReactorData, Q: ActionTag>(
         &mut self,
         name: &str,
@@ -383,7 +380,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
     /// Add a new logical action to the reactor.
     ///
     /// This method forwards to the implementation at
-    /// [`crate::env::EnvBuilder::add_logical_action`].
+    /// [`crate::env::Assembly::add_logical_action`].
     pub fn add_logical_action<T: runtime::ReactorData>(
         &mut self,
         name: &str,
@@ -565,7 +562,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
     /// Add a new child reactor using a closure to build it.
     pub fn add_child_with<F>(&mut self, f: F) -> Result<BuilderReactorKey, BuilderError>
     where
-        F: FnOnce(BuilderReactorKey, &mut EnvBuilder) -> Result<BuilderReactorKey, BuilderError>,
+        F: FnOnce(BuilderReactorKey, &mut Assembly) -> Result<BuilderReactorKey, BuilderError>,
     {
         let child = f(self.reactor_key, self.env)?;
         if self.env.reactor_builders[child].parent_reactor_key != Some(self.reactor_key) {
@@ -682,7 +679,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         Ok(self.reactor_key)
     }
 
-    /// Find a PhysicalAction globally in the EnvBuilder given its fully-qualified name
+    /// Find a PhysicalAction globally in the Assembly given its fully-qualified name
     pub fn find_physical_action_by_fqn(
         &self,
         action_fqn: impl Into<BuilderFqn>,

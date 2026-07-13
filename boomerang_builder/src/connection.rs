@@ -9,9 +9,9 @@ use std::sync::Arc;
 use slotmap::SecondaryMap;
 
 use crate::{
-    runtime, ActionTag, BuilderActionKey, BuilderError, BuilderModeKey, BuilderPortKey,
-    BuilderReactorKey, EnvBuilder, Input, Output, ParentReactorBuilder, PartitionMap, PortType,
-    TriggerMode, TypedActionKey, TypedPortKey,
+    runtime, ActionTag, Assembly, BuilderActionKey, BuilderError, BuilderModeKey, BuilderPortKey,
+    BuilderReactorKey, Input, Output, ParentReactorBuilder, PartitionMap, PortType, TriggerMode,
+    TypedActionKey, TypedPortKey,
 };
 
 #[cfg(feature = "federated")]
@@ -87,7 +87,7 @@ impl PortBindings {
         &mut self,
         source_key: BuilderPortKey,
         target_key: BuilderPortKey,
-        env: &EnvBuilder,
+        env: &Assembly,
     ) -> Result<(), BuilderError> {
         if let Some(existing) = self.inward.get(target_key) {
             return Err(BuilderError::PortConnectionError {
@@ -238,7 +238,7 @@ pub trait BaseConnectionBuilder {
     /// Build the connection between two ports
     fn build(
         &mut self,
-        env: &mut EnvBuilder,
+        env: &mut Assembly,
         partition_map: &mut PartitionMap,
         port_bindings: &mut PortBindings,
     ) -> Result<(), BuilderError>;
@@ -269,7 +269,7 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
     }
     fn build(
         &mut self,
-        env: &mut EnvBuilder,
+        env: &mut Assembly,
         partition_map: &mut PartitionMap,
         port_bindings: &mut PortBindings,
     ) -> Result<(), BuilderError> {
@@ -406,7 +406,7 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
 
 #[cfg(feature = "federated")]
 fn partitions_are_both_federated(
-    env: &EnvBuilder,
+    env: &Assembly,
     source_partition: BuilderReactorKey,
     target_partition: BuilderReactorKey,
 ) -> Result<bool, BuilderError> {
@@ -426,7 +426,7 @@ fn partitions_are_both_federated(
 
 #[cfg(feature = "federated")]
 fn federated_endpoint_id(
-    env: &EnvBuilder,
+    env: &Assembly,
     source_key: BuilderPortKey,
     target_key: BuilderPortKey,
 ) -> Result<boomerang_federated::EndpointId, BuilderError> {
@@ -442,7 +442,7 @@ fn federated_endpoint_id(
 /// The connection is built as a pair of Reactions that trigger and react to an Action.
 #[allow(clippy::type_complexity)]
 fn build_delayed_connection<T: runtime::ReactorData + Clone, Q: ActionTag>(
-    env: &mut EnvBuilder,
+    env: &mut Assembly,
     parent_key: Option<BuilderReactorKey>,
     scope_mode: Option<BuilderModeKey>,
     after: Option<runtime::Duration>,
@@ -492,7 +492,7 @@ struct EnclaveConnectionSource<T: runtime::ReactorData + Clone> {
 ///
 /// The sender-side is build-deferred by returning a closure. The BuilderAction must be turned into a runtime Action before the closure is called.
 fn build_enclave_connection_source<T: runtime::ReactorData + Clone>(
-    env: &mut EnvBuilder,
+    env: &mut Assembly,
     parent_key: Option<BuilderReactorKey>,
     scope_mode: Option<BuilderModeKey>,
     target_partition: BuilderReactorKey,
@@ -533,7 +533,7 @@ fn build_enclave_connection_source<T: runtime::ReactorData + Clone>(
 
 #[cfg(feature = "federated")]
 fn build_federated_connection_source<T: runtime::ReactorData + Clone>(
-    env: &mut EnvBuilder,
+    env: &mut Assembly,
     parent_key: Option<BuilderReactorKey>,
     scope_mode: Option<BuilderModeKey>,
     target_partition: BuilderReactorKey,
@@ -589,10 +589,10 @@ struct EnclaveConnectionTarget<T: runtime::ReactorData, Q: ActionTag> {
 
 /// Build the target portion
 ///
-/// The receiver-side of is built immediately into the `EnvBuilder`, and consists of an Action that triggers a Reaction
+/// The receiver-side of is built immediately into the `Assembly`, and consists of an Action that triggers a Reaction
 /// that writes to the target port.
 fn build_enclave_connection_target<T: runtime::ReactorData + Clone, Q: ActionTag>(
-    env: &mut EnvBuilder,
+    env: &mut Assembly,
     parent_key: Option<BuilderReactorKey>,
     scope_mode: Option<BuilderModeKey>,
     after: Option<runtime::Duration>,

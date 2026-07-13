@@ -3,8 +3,8 @@
 use std::{fmt::Display, ops::Index};
 
 use crate::{
-    port::BasePortBuilder, runtime, ActionBuilder, ActionTag, BuilderActionKey, BuilderPortKey,
-    BuilderReactionKey, BuilderReactorKey, EnvBuilder, ParentReactorBuilder, PortTag,
+    port::BasePortBuilder, runtime, ActionBuilder, ActionTag, Assembly, BuilderActionKey,
+    BuilderPortKey, BuilderReactionKey, BuilderReactorKey, ParentReactorBuilder, PortTag,
     ReactionBuilder, ReactorBuilder, TypedActionKey, TypedPortKey,
 };
 
@@ -21,7 +21,7 @@ pub trait Fqn: Copy {
     /// Get a fully-qualified name for self
     ///
     /// If `grouped` is true, the returned Fqn will be grouped by bank
-    fn fqn(self, env: &EnvBuilder, grouped: bool) -> Result<BuilderFqn, BuilderError>;
+    fn fqn(self, env: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError>;
 }
 
 /// The separator for segments in a fully-qualified name.
@@ -242,7 +242,7 @@ impl Index<usize> for BuilderFqn {
 }
 
 impl Fqn for BuilderReactorKey {
-    fn fqn(self, env: &EnvBuilder, grouped: bool) -> Result<BuilderFqn, BuilderError> {
+    fn fqn(self, env: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
         let reactor = env
             .reactor_builders
             .get(self)
@@ -258,7 +258,7 @@ impl Fqn for BuilderReactorKey {
 }
 
 impl Fqn for BuilderActionKey {
-    fn fqn(self, env: &EnvBuilder, grouped: bool) -> Result<BuilderFqn, BuilderError> {
+    fn fqn(self, env: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
         let action = env
             .action_builders
             .get(self)
@@ -273,13 +273,13 @@ where
     T: runtime::ReactorData,
     Q: ActionTag,
 {
-    fn fqn(self, env: &EnvBuilder, grouped: bool) -> Result<BuilderFqn, BuilderError> {
+    fn fqn(self, env: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
         BuilderActionKey::from(self).fqn(env, grouped)
     }
 }
 
 impl Fqn for BuilderReactionKey {
-    fn fqn(self, env: &EnvBuilder, grouped: bool) -> Result<BuilderFqn, BuilderError> {
+    fn fqn(self, env: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
         let reaction = env
             .reaction_builders
             .get(self)
@@ -290,7 +290,7 @@ impl Fqn for BuilderReactionKey {
 }
 
 impl Fqn for BuilderPortKey {
-    fn fqn(self, env: &EnvBuilder, grouped: bool) -> Result<BuilderFqn, BuilderError> {
+    fn fqn(self, env: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
         let port = env
             .port_builders
             .get(self)
@@ -306,7 +306,7 @@ where
     Q: PortTag,
     A: Copy,
 {
-    fn fqn(self, env: &EnvBuilder, grouped: bool) -> Result<BuilderFqn, BuilderError> {
+    fn fqn(self, env: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
         BuilderPortKey::from(self).fqn(env, grouped)
     }
 }

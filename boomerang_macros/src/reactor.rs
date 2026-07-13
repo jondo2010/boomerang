@@ -817,7 +817,7 @@ impl ToTokens for ArgsModel {
                          scope_mode: Option<::boomerang::builder::BuilderModeKey>,
                          bank_info: Option<::boomerang::runtime::BankInfo>,
                          placement: ::boomerang::builder::ReactorPlacement,
-                         env: &mut ::boomerang::builder::EnvBuilder| {
+                         env: &mut ::boomerang::builder::Assembly| {
                         #(#len_bindings)*
                         let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
                         if let Some(scope_mode) = scope_mode {

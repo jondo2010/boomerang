@@ -11,10 +11,10 @@ logical-time scheduler hooks used by the protocol client. A typical setup
 registers a codec, builds runtime parts, and then selects a runner:
 
 ```rust,ignore
-let mut env_builder = EnvBuilder::new();
-env_builder.register_federated_codec::<u32, _>(boomerang::federated::SerdeJsonCodec)?;
+let mut assembly = Assembly::new();
+assembly.register_federated_codec::<u32, _>(boomerang::federated::SerdeJsonCodec)?;
 let config = runtime::Config::default().with_fast_forward(true);
-let parts = env_builder.into_runtime_parts(&config)?;
+let parts = assembly.into_runtime_parts(&config)?;
 let envs = execute_federation_in_memory(parts, config)?;
 ```
 
@@ -29,7 +29,7 @@ transport, and returns the same final runtime environments:
 
 ```rust,ignore
 let config = runtime::Config::default().with_fast_forward(true);
-let parts = env_builder.into_runtime_parts(&config)?;
+let parts = assembly.into_runtime_parts(&config)?;
 let envs = execute_federation_over_tcp(
     parts,
     config,

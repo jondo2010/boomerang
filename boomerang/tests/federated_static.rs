@@ -67,18 +67,18 @@ fn StaticFederation(values: Arc<Mutex<Vec<(Tag, u32)>>>) -> impl Reactor {
 fn public_api_runs_static_in_memory_federation() {
     boomerang_util::test_tracing::init_with_directive("debug");
     let values = Arc::new(Mutex::new(Vec::new()));
-    let mut env_builder = EnvBuilder::new();
-    env_builder
+    let mut assembly = Assembly::new();
+    assembly
         .register_federated_codec::<u32, _>(boomerang::federated::SerdeJsonCodec)
         .unwrap();
 
     StaticFederation(Arc::clone(&values))
-        .build("main", (), None, None, None, false, &mut env_builder)
+        .build("main", (), None, None, None, false, &mut assembly)
         .unwrap();
-    env_builder.validate_reactions().unwrap();
+    assembly.validate_reactions().unwrap();
 
     let config = runtime::Config::default().with_fast_forward(true);
-    let parts = env_builder.into_runtime_parts(&config).unwrap();
+    let parts = assembly.into_runtime_parts(&config).unwrap();
     let _envs = execute_federation_in_memory(parts, config).unwrap();
 
     assert_eq!(*values.lock().unwrap(), vec![(Tag::ZERO, 7)]);
@@ -90,18 +90,18 @@ fn public_api_runs_tcp_static_federation() {
     boomerang_util::test_tracing::init_with_directive("debug");
     let values = run_with_wall_timeout("public TCP static federation", || {
         let values = Arc::new(Mutex::new(Vec::new()));
-        let mut env_builder = EnvBuilder::new();
-        env_builder
+        let mut assembly = Assembly::new();
+        assembly
             .register_federated_codec::<u32, _>(boomerang::federated::SerdeJsonCodec)
             .unwrap();
 
         StaticFederation(Arc::clone(&values))
-            .build("main", (), None, None, None, false, &mut env_builder)
+            .build("main", (), None, None, None, false, &mut assembly)
             .unwrap();
-        env_builder.validate_reactions().unwrap();
+        assembly.validate_reactions().unwrap();
 
         let config = runtime::Config::default().with_fast_forward(true);
-        let parts = env_builder.into_runtime_parts(&config).unwrap();
+        let parts = assembly.into_runtime_parts(&config).unwrap();
         let _envs =
             execute_federation_over_tcp(parts, config, TcpStaticFederationConfig::default())
                 .unwrap();

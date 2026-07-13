@@ -8,7 +8,7 @@ use slotmap::Key;
 use crate::{BuilderActionKey, BuilderReactorKey, TimerSpec};
 
 use super::{
-    ActionType, BuilderError, BuilderPortKey, BuilderReactionKey, EnvBuilder, PortType,
+    ActionType, Assembly, BuilderError, BuilderPortKey, BuilderReactionKey, PortType,
     ReactorBuilder,
 };
 
@@ -61,7 +61,7 @@ impl ElemId for BuilderReactorKey {
     }
 }
 
-impl EnvBuilder {
+impl Assembly {
     const BANK_EDGE: &str = "[thickness=2]";
 
     fn node_id(&self, key: impl ElemId) -> String {
@@ -406,37 +406,37 @@ mod tests {
 
     #[test]
     fn plantuml_includes_all_roots() {
-        let mut env_builder = EnvBuilder::new();
-        env_builder
+        let mut assembly = Assembly::new();
+        assembly
             .add_reactor("RootA", None, None, (), false)
             .finish()
             .unwrap();
-        env_builder
+        assembly
             .add_reactor("RootB", None, None, (), false)
             .finish()
             .unwrap();
 
-        let graph = env_builder.create_plantuml_graph().unwrap();
+        let graph = assembly.create_plantuml_graph().unwrap();
         assert!(graph.contains("RootA"));
         assert!(graph.contains("RootB"));
     }
 
     #[test]
     fn plantuml_escapes_labels() {
-        let mut env_builder = EnvBuilder::new();
-        let mut reactor = env_builder.add_reactor("reactor\"name]]", None, None, (), false);
+        let mut assembly = Assembly::new();
+        let mut reactor = assembly.add_reactor("reactor\"name]]", None, None, (), false);
         reactor.add_input_port::<()>("port\"name]]").unwrap();
         reactor.finish().unwrap();
 
-        let graph = env_builder.create_plantuml_graph().unwrap();
+        let graph = assembly.create_plantuml_graph().unwrap();
         assert!(graph.contains("reactor\\\"name] ]"));
         assert!(graph.contains("port\\\"name] ]"));
     }
 
     #[test]
     fn plantuml_groups_banked_connections() {
-        let mut env_builder = EnvBuilder::new();
-        let mut reactor = env_builder.add_reactor("Banked", None, None, (), false);
+        let mut assembly = Assembly::new();
+        let mut reactor = assembly.add_reactor("Banked", None, None, (), false);
         let outputs = reactor.add_output_ports::<u8, 2>("out").unwrap();
         let inputs = reactor.add_input_ports::<u8, 2>("in").unwrap();
         for i in 0..2 {
@@ -446,7 +446,7 @@ mod tests {
         }
         reactor.finish().unwrap();
 
-        let graph = env_builder.create_plantuml_graph().unwrap();
+        let graph = assembly.create_plantuml_graph().unwrap();
         assert_eq!(graph.matches("-[thickness=2]->").count(), 1);
     }
 }

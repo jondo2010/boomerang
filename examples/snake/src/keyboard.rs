@@ -55,18 +55,15 @@ fn main() {
     use boomerang::prelude::*;
     tracing_subscriber::fmt::init();
 
-    let mut env_builder = EnvBuilder::new();
+    let mut assembly = Assembly::new();
     let _ = example::Example()
-        .build("printer", (), None, None, None, false, &mut env_builder)
+        .build("printer", (), None, None, None, false, &mut assembly)
         .unwrap();
 
     let config = runtime::Config::default()
         .with_fast_forward(false)
         .with_keep_alive(true);
-    let BuilderRuntimeParts {
-        enclaves,
-        ..
-    } = env_builder.into_runtime_parts(&config).unwrap();
+    let BuilderRuntimeParts { enclaves, .. } = assembly.into_runtime_parts(&config).unwrap();
 
     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
     let mut sched = runtime::Scheduler::new(enclave_key, enclave, config);

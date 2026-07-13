@@ -119,7 +119,7 @@ fn bench(c: &mut Criterion) {
         group.bench_with_input(id, &case, |b, case| {
             b.iter_batched(
                 || {
-                    let mut env_builder = EnvBuilder::new();
+                    let mut assembly = Assembly::new();
                     let reactor = ModalModesBench(case.mode_count, case.iterations);
                     let _reactor = reactor
                         .build(
@@ -129,12 +129,12 @@ fn bench(c: &mut Criterion) {
                             None,
                             None,
                             false,
-                            &mut env_builder,
+                            &mut assembly,
                         )
                         .unwrap();
                     let config = runtime::Config::default().with_fast_forward(true);
                     let BuilderRuntimeParts { enclaves, .. } =
-                        env_builder.into_runtime_parts(&config).unwrap();
+                        assembly.into_runtime_parts(&config).unwrap();
                     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
                     runtime::Scheduler::new(enclave_key, enclave, config)
                 },

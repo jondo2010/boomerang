@@ -1,4 +1,4 @@
-//! Debug impls and output utility methods for the [`EnvBuilder`].
+//! Debug impls and output utility methods for the [`Assembly`].
 
 use std::{collections::HashMap, fmt::Debug};
 
@@ -10,7 +10,7 @@ use crate::{BuilderFqn, BuilderPortKey, BuilderReactionKey, BuilderReactorKey};
 
 use super::{
     build::{BuilderAliases, BuilderRuntimeParts},
-    runtime, EnvBuilder,
+    runtime, Assembly,
 };
 
 use boomerang_runtime::fmt_utils as fmt;
@@ -36,7 +36,7 @@ impl Debug for Connection {
     }
 }
 
-impl EnvBuilder {
+impl Assembly {
     /// Returns a grouped list of (first_key, last_key, fqn) of reactors
     pub fn reactors_debug_grouped(
         &self,
@@ -227,7 +227,7 @@ impl EnvBuilder {
     */
 }
 
-impl Debug for EnvBuilder {
+impl Debug for Assembly {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let reactors = self.reactors_debug_map();
         let actions = self.actions_debug_map();
@@ -248,7 +248,7 @@ impl Debug for EnvBuilder {
         //    })
         //    .collect::<BTreeMap<_, _>>();
 
-        f.debug_struct("EnvBuilder")
+        f.debug_struct("Assembly")
             .field("reactors", &reactors)
             .field("actions", &actions)
             .field("ports", &ports)

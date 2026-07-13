@@ -11,7 +11,7 @@
 
 use anyhow::Context;
 use boomerang::{
-    builder::{BuilderRuntimeParts, EnvBuilder, Reactor},
+    builder::{Assembly, BuilderRuntimeParts, Reactor},
     runtime,
 };
 use clap::Parser;
@@ -85,26 +85,23 @@ pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
     state: S,
     config: runtime::Config,
 ) -> anyhow::Result<(R::Ports, Vec<runtime::Env>)> {
-    let mut env_builder = EnvBuilder::new();
+    let mut assembly = Assembly::new();
     let reactor = reactor_builder
-        .build(name, state, None, None, None, false, &mut env_builder)
+        .build(name, state, None, None, None, false, &mut assembly)
         .context("Error building top-level reactor!")?;
 
-    env_builder.validate_reactions()?;
+    assembly.validate_reactions()?;
 
     let args = Args::parse_from(["boomerang-test"]);
     if args.reaction_graph {
-        let gv = env_builder.create_plantuml_graph()?;
+        let gv = assembly.create_plantuml_graph()?;
         let path = diagram_output_path(name, "puml")?;
         let mut f = std::fs::File::create(&path)?;
         std::io::Write::write_all(&mut f, gv.as_bytes())?;
         tracing::info!("Wrote plantuml graph to {}", path.display());
     }
 
-    let BuilderRuntimeParts {
-        enclaves,
-        ..
-    } = env_builder
+    let BuilderRuntimeParts { enclaves, .. } = assembly
         .into_runtime_parts(&config)
         .context("Error building environment!")?;
 
@@ -134,9 +131,9 @@ where
     R: Reactor<S>,
 {
     // build the reactor
-    let mut env_builder = EnvBuilder::new();
+    let mut assembly = Assembly::new();
     let reactor = reactor
-        .build(name, state, None, None, None, false, &mut env_builder)
+        .build(name, state, None, None, None, false, &mut assembly)
         .context("Error building top-level reactor!")?;
 
     let args = Args::parse();
@@ -156,7 +153,7 @@ where
     };
 
     if args.reaction_graph {
-        let gv = env_builder.create_plantuml_graph()?;
+        let gv = assembly.create_plantuml_graph()?;
         let path = diagram_output_path(name, "puml")?;
         let mut f = std::fs::File::create(&path)?;
         std::io::Write::write_all(&mut f, gv.as_bytes())?;
@@ -164,7 +161,7 @@ where
     }
 
     if args.print_debug_info {
-        println!("{env_builder:#?}");
+        println!("{assembly:#?}");
     }
 
     let config = runtime::Config {
@@ -177,7 +174,7 @@ where
         #[cfg(feature = "replay")]
         replayers,
         ..
-    } = env_builder
+    } = assembly
         .into_runtime_parts(&config)
         .context("Error building environment!")?;
 

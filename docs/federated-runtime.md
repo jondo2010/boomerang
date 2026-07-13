@@ -52,7 +52,7 @@ static runners.
 
 ```mermaid
 flowchart LR
-    Builder["EnvBuilder<br/>reactors, ports, connection"]
+    Builder["Assembly<br/>reactors, ports, connection"]
     Parts["BuilderRuntimeParts<br/>ready-to-run enclaves, plan,<br/>per-federate connection bundles"]
     Runner["Static federation runner<br/>validates and connects transports"]
 
@@ -131,7 +131,7 @@ enclave for the source federate and one enclave for the sink federate. Empty
 unmapped enclaves, such as a structural root with no reactions, are skipped by
 the runner. Non-empty unmapped enclaves are rejected.
 
-`EnvBuilder::into_runtime_parts` produces `BuilderRuntimeParts` containing the
+`Assembly::into_runtime_parts` produces `BuilderRuntimeParts` containing the
 runtime enclaves, builder aliases, inter-partition metadata, the federation
 plan, and one complete runtime connection bundle per federate. Each bundle owns
 the prebuilt protocol mailbox, routes targeting that federate, only that

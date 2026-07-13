@@ -90,7 +90,7 @@ where
     R: Reactor<State>,
     State: runtime::ReactorData,
 {
-    let mut env_builder = EnvBuilder::new();
+    let mut assembly = Assembly::new();
     let _reactor = reactor
         .build(
             "root_action_loop",
@@ -99,11 +99,11 @@ where
             None,
             None,
             false,
-            &mut env_builder,
+            &mut assembly,
         )
         .unwrap();
     let config = runtime::Config::default().with_fast_forward(true);
-    let BuilderRuntimeParts { enclaves, .. } = env_builder.into_runtime_parts(&config).unwrap();
+    let BuilderRuntimeParts { enclaves, .. } = assembly.into_runtime_parts(&config).unwrap();
     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
     runtime::Scheduler::new(enclave_key, enclave, config)
 }

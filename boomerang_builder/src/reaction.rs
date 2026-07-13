@@ -1,7 +1,7 @@
 use std::fmt::Debug;
 
 use super::{
-    BuilderActionKey, BuilderError, BuilderModeKey, BuilderPortKey, BuilderReactorKey, EnvBuilder,
+    Assembly, BuilderActionKey, BuilderError, BuilderModeKey, BuilderPortKey, BuilderReactorKey,
 };
 use crate::{
     runtime, ActionTag, BuilderRuntimeParts, ParentReactorBuilder, PortBank, PortTag,
@@ -367,17 +367,13 @@ pub struct PartialReactionBuilder<'a, S: runtime::ReactorData, Fields = (), Reac
     action_relations: slotmap::SecondaryMap<BuilderActionKey, TriggerMode>,
     action_order: Vec<BuilderActionKey>,
     reactor_key: BuilderReactorKey,
-    env: &'a mut EnvBuilder,
+    env: &'a mut Assembly,
     fields: Fields,
     phantom: std::marker::PhantomData<(S, Fields, ReactionFn)>,
 }
 
 impl<'a, S: runtime::ReactorData> PartialReactionBuilder<'a, S, (), ()> {
-    pub fn new(
-        name: Option<&str>,
-        reactor_key: BuilderReactorKey,
-        env: &'a mut EnvBuilder,
-    ) -> Self {
+    pub fn new(name: Option<&str>, reactor_key: BuilderReactorKey, env: &'a mut Assembly) -> Self {
         Self {
             name: name.map(|s| s.to_string()),
             reaction_fn: (),

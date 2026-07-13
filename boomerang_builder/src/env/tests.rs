@@ -1,7 +1,7 @@
 #[test]
 fn test_build_partition_map() {
     let crate::tests::PingPong {
-        env_builder,
+        assembly,
         main,
         ping,
         pong,
@@ -11,7 +11,7 @@ fn test_build_partition_map() {
         pong_output: _,
     } = crate::tests::create_ping_pong();
 
-    let partition_map = env_builder.build_partition_map();
+    let partition_map = assembly.build_partition_map();
     assert_eq!(partition_map.len(), 3);
     assert_eq!(partition_map[main], main);
     assert_eq!(partition_map[ping], ping);

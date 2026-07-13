@@ -69,7 +69,7 @@ fn local_only_source_reactor(
      scope_mode: Option<BuilderModeKey>,
      bank_info: Option<runtime::BankInfo>,
      placement: ReactorPlacement,
-     env: &mut EnvBuilder| {
+     env: &mut Assembly| {
         let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
             builder.set_scope_mode(scope_mode)?;
@@ -90,7 +90,7 @@ fn local_only_sink_reactor(
      scope_mode: Option<BuilderModeKey>,
      bank_info: Option<runtime::BankInfo>,
      placement: ReactorPlacement,
-     env: &mut EnvBuilder| {
+     env: &mut Assembly| {
         let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
             builder.set_scope_mode(scope_mode)?;
@@ -110,7 +110,7 @@ fn federated_source_reactor() -> impl Reactor<(), Ports = TypedPortKey<u32, Outp
      scope_mode: Option<BuilderModeKey>,
      bank_info: Option<runtime::BankInfo>,
      placement: ReactorPlacement,
-     env: &mut EnvBuilder| {
+     env: &mut Assembly| {
         let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
             builder.set_scope_mode(scope_mode)?;
@@ -130,7 +130,7 @@ fn federated_startup_source_reactor(
           scope_mode: Option<BuilderModeKey>,
           bank_info: Option<runtime::BankInfo>,
           placement: ReactorPlacement,
-          env: &mut EnvBuilder| {
+          env: &mut Assembly| {
         let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
             builder.set_scope_mode(scope_mode)?;
@@ -158,7 +158,7 @@ fn federated_sink_reactor() -> impl Reactor<(), Ports = TypedPortKey<u32, Input,
      scope_mode: Option<BuilderModeKey>,
      bank_info: Option<runtime::BankInfo>,
      placement: ReactorPlacement,
-     env: &mut EnvBuilder| {
+     env: &mut Assembly| {
         let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
             builder.set_scope_mode(scope_mode)?;
@@ -178,7 +178,7 @@ fn federated_shutdown_after_startup_sink_reactor(
           scope_mode: Option<BuilderModeKey>,
           bank_info: Option<runtime::BankInfo>,
           placement: ReactorPlacement,
-          env: &mut EnvBuilder| {
+          env: &mut Assembly| {
         let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
             builder.set_scope_mode(scope_mode)?;
@@ -216,7 +216,7 @@ fn federated_recording_sink_reactor(
           scope_mode: Option<BuilderModeKey>,
           bank_info: Option<runtime::BankInfo>,
           placement: ReactorPlacement,
-          env: &mut EnvBuilder| {
+          env: &mut Assembly| {
         let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
             builder.set_scope_mode(scope_mode)?;
@@ -253,7 +253,7 @@ fn federated_io_reactor() -> impl Reactor<(), Ports = FederatedIoPorts> {
      scope_mode: Option<BuilderModeKey>,
      bank_info: Option<runtime::BankInfo>,
      placement: ReactorPlacement,
-     env: &mut EnvBuilder| {
+     env: &mut Assembly| {
         let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
             builder.set_scope_mode(scope_mode)?;
@@ -272,7 +272,7 @@ fn federated_forwarding_reactor(addend: u32) -> impl Reactor<(), Ports = Federat
           scope_mode: Option<BuilderModeKey>,
           bank_info: Option<runtime::BankInfo>,
           placement: ReactorPlacement,
-          env: &mut EnvBuilder| {
+          env: &mut Assembly| {
         let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
             builder.set_scope_mode(scope_mode)?;
@@ -316,7 +316,7 @@ fn federated_startup_recording_io_reactor(
           scope_mode: Option<BuilderModeKey>,
           bank_info: Option<runtime::BankInfo>,
           placement: ReactorPlacement,
-          env: &mut EnvBuilder| {
+          env: &mut Assembly| {
         let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
             builder.set_scope_mode(scope_mode)?;
@@ -352,8 +352,8 @@ fn federated_startup_recording_io_reactor(
     }
 }
 
-fn register_u32_federated_codec(env_builder: &mut EnvBuilder) -> Result<(), BuilderError> {
-    env_builder.register_federated_codec::<u32, _>(boomerang_federated::SerdeJsonCodec)
+fn register_u32_federated_codec(assembly: &mut Assembly) -> Result<(), BuilderError> {
+    assembly.register_federated_codec::<u32, _>(boomerang_federated::SerdeJsonCodec)
 }
 
 fn route_outbound_commands_through_rti(
@@ -425,8 +425,8 @@ fn route_outbound_commands_through_rti(
 
 fn run_local_source_sink(after: Option<runtime::Duration>) -> Vec<(runtime::Tag, u32)> {
     let values = Arc::new(Mutex::new(Vec::new()));
-    let mut env_builder = EnvBuilder::new();
-    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let mut assembly = Assembly::new();
+    let mut builder = assembly.add_reactor("main", None, None, (), false);
     let source = builder
         .add_child_reactor(federated_startup_source_reactor(7), "source", (), true)
         .unwrap();
@@ -441,7 +441,7 @@ fn run_local_source_sink(after: Option<runtime::Duration>) -> Vec<(runtime::Tag,
     builder.connect_port(source, sink, after, false).unwrap();
     builder.finish().unwrap();
 
-    let BuilderRuntimeParts { enclaves, .. } = env_builder
+    let BuilderRuntimeParts { enclaves, .. } = assembly
         .into_runtime_parts(&runtime::Config::default())
         .unwrap();
     let config = runtime::Config::default()
@@ -457,9 +457,9 @@ fn run_in_memory_federated_source_sink(
     after: Option<runtime::Duration>,
 ) -> (Vec<(runtime::Tag, u32)>, Vec<runtime::Tag>) {
     let values = Arc::new(Mutex::new(Vec::new()));
-    let mut env_builder = EnvBuilder::new();
-    register_u32_federated_codec(&mut env_builder).unwrap();
-    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let mut assembly = Assembly::new();
+    register_u32_federated_codec(&mut assembly).unwrap();
+    let mut builder = assembly.add_reactor("main", None, None, (), false);
     let source = builder
         .add_child_federate(federated_startup_source_reactor(7), "source", ())
         .unwrap();
@@ -473,7 +473,7 @@ fn run_in_memory_federated_source_sink(
     builder.connect_port(source, sink, after, false).unwrap();
     builder.finish().unwrap();
 
-    let mut parts = env_builder
+    let mut parts = assembly
         .into_runtime_parts(&runtime::Config::default())
         .unwrap();
     let mut outbound = FederatedOutboundCapture::take(&mut parts);
@@ -549,9 +549,9 @@ fn run_live_in_memory_federated_source_sink(
     after: Option<runtime::Duration>,
 ) -> Vec<(runtime::Tag, u32)> {
     let values = Arc::new(Mutex::new(Vec::new()));
-    let mut env_builder = EnvBuilder::new();
-    register_u32_federated_codec(&mut env_builder).unwrap();
-    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let mut assembly = Assembly::new();
+    register_u32_federated_codec(&mut assembly).unwrap();
+    let mut builder = assembly.add_reactor("main", None, None, (), false);
     let source = builder
         .add_child_federate(federated_startup_source_reactor(7), "source", ())
         .unwrap();
@@ -566,7 +566,7 @@ fn run_live_in_memory_federated_source_sink(
     builder.finish().unwrap();
 
     let config = runtime::Config::default().with_fast_forward(true);
-    let parts = env_builder.into_runtime_parts(&config).unwrap();
+    let parts = assembly.into_runtime_parts(&config).unwrap();
     let _envs = execute_federation_in_memory(parts, config).unwrap();
 
     let recorded_values = values.lock().unwrap().clone();
@@ -575,9 +575,9 @@ fn run_live_in_memory_federated_source_sink(
 
 fn run_live_in_memory_no_message_source_sink() -> Vec<(runtime::Tag, u32)> {
     let values = Arc::new(Mutex::new(Vec::new()));
-    let mut env_builder = EnvBuilder::new();
-    register_u32_federated_codec(&mut env_builder).unwrap();
-    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let mut assembly = Assembly::new();
+    register_u32_federated_codec(&mut assembly).unwrap();
+    let mut builder = assembly.add_reactor("main", None, None, (), false);
     let source = builder
         .add_child_federate(federated_source_reactor(), "source", ())
         .unwrap();
@@ -592,7 +592,7 @@ fn run_live_in_memory_no_message_source_sink() -> Vec<(runtime::Tag, u32)> {
     builder.finish().unwrap();
 
     let config = runtime::Config::default().with_fast_forward(true);
-    let parts = env_builder.into_runtime_parts(&config).unwrap();
+    let parts = assembly.into_runtime_parts(&config).unwrap();
     let _envs = execute_federation_in_memory(parts, config).unwrap();
 
     let recorded_values = values.lock().unwrap().clone();
@@ -601,9 +601,9 @@ fn run_live_in_memory_no_message_source_sink() -> Vec<(runtime::Tag, u32)> {
 
 fn run_live_in_memory_three_federate_chain() -> Vec<(runtime::Tag, u32)> {
     let values = Arc::new(Mutex::new(Vec::new()));
-    let mut env_builder = EnvBuilder::new();
-    register_u32_federated_codec(&mut env_builder).unwrap();
-    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let mut assembly = Assembly::new();
+    register_u32_federated_codec(&mut assembly).unwrap();
+    let mut builder = assembly.add_reactor("main", None, None, (), false);
     let source = builder
         .add_child_federate(federated_startup_source_reactor(7), "source", ())
         .unwrap();
@@ -626,7 +626,7 @@ fn run_live_in_memory_three_federate_chain() -> Vec<(runtime::Tag, u32)> {
     builder.finish().unwrap();
 
     let config = runtime::Config::default().with_fast_forward(true);
-    let parts = env_builder.into_runtime_parts(&config).unwrap();
+    let parts = assembly.into_runtime_parts(&config).unwrap();
     let _envs = execute_federation_in_memory(parts, config).unwrap();
 
     let recorded_values = values.lock().unwrap().clone();
@@ -636,9 +636,9 @@ fn run_live_in_memory_three_federate_chain() -> Vec<(runtime::Tag, u32)> {
 fn run_live_in_memory_fanout() -> RecordedValuePair {
     let left_values = Arc::new(Mutex::new(Vec::new()));
     let right_values = Arc::new(Mutex::new(Vec::new()));
-    let mut env_builder = EnvBuilder::new();
-    register_u32_federated_codec(&mut env_builder).unwrap();
-    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let mut assembly = Assembly::new();
+    register_u32_federated_codec(&mut assembly).unwrap();
+    let mut builder = assembly.add_reactor("main", None, None, (), false);
     let source = builder
         .add_child_federate(federated_startup_source_reactor(7), "source", ())
         .unwrap();
@@ -661,7 +661,7 @@ fn run_live_in_memory_fanout() -> RecordedValuePair {
     builder.finish().unwrap();
 
     let config = runtime::Config::default().with_fast_forward(true);
-    let parts = env_builder.into_runtime_parts(&config).unwrap();
+    let parts = assembly.into_runtime_parts(&config).unwrap();
     let _envs = execute_federation_in_memory(parts, config).unwrap();
 
     let recorded_left_values = left_values.lock().unwrap().clone();
@@ -673,9 +673,9 @@ fn run_live_in_memory_positive_delay_cycle() -> RecordedValuePair {
     let a_values = Arc::new(Mutex::new(Vec::new()));
     let b_values = Arc::new(Mutex::new(Vec::new()));
     let delay = runtime::Duration::milliseconds(10);
-    let mut env_builder = EnvBuilder::new();
-    register_u32_federated_codec(&mut env_builder).unwrap();
-    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let mut assembly = Assembly::new();
+    register_u32_federated_codec(&mut assembly).unwrap();
+    let mut builder = assembly.add_reactor("main", None, None, (), false);
     let a = builder
         .add_child_federate(
             federated_startup_recording_io_reactor(1, Arc::clone(&a_values)),
@@ -699,7 +699,7 @@ fn run_live_in_memory_positive_delay_cycle() -> RecordedValuePair {
     builder.finish().unwrap();
 
     let config = runtime::Config::default().with_fast_forward(true);
-    let parts = env_builder.into_runtime_parts(&config).unwrap();
+    let parts = assembly.into_runtime_parts(&config).unwrap();
     let _envs = execute_federation_in_memory(parts, config).unwrap();
 
     let recorded_a_values = a_values.lock().unwrap().clone();
@@ -716,29 +716,29 @@ fn build_federated_source_sink_plan(
 fn build_federated_source_sink_parts(
     after: Option<runtime::Duration>,
 ) -> Result<BuilderRuntimeParts, BuilderError> {
-    let mut env_builder = EnvBuilder::new();
-    register_u32_federated_codec(&mut env_builder)?;
-    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let mut assembly = Assembly::new();
+    register_u32_federated_codec(&mut assembly)?;
+    let mut builder = assembly.add_reactor("main", None, None, (), false);
     let source = builder.add_child_federate(federated_source_reactor(), "source", ())?;
     let sink = builder.add_child_federate(federated_sink_reactor(), "sink", ())?;
     builder.connect_port(source, sink, after, false)?;
     builder.finish()?;
 
-    env_builder.into_runtime_parts(&runtime::Config::default())
+    assembly.into_runtime_parts(&runtime::Config::default())
 }
 
 #[test]
 fn test_add_child_federate_sets_enclave_compatible_placement() {
-    let mut env_builder = EnvBuilder::new();
-    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let mut assembly = Assembly::new();
+    let mut builder = assembly.add_reactor("main", None, None, (), false);
     let _source = builder
         .add_child_federate(federated_source_reactor(), "source", ())
         .unwrap();
     let main = builder.finish().unwrap();
-    let source = env_builder.find_reactor_by_fqn("main/source").unwrap();
+    let source = assembly.find_reactor_by_fqn("main/source").unwrap();
 
-    assert!(!env_builder.reactor_builders[main].is_enclave);
-    let source = &env_builder.reactor_builders[source];
+    assert!(!assembly.reactor_builders[main].is_enclave);
+    let source = &assembly.reactor_builders[source];
     assert!(source.is_enclave);
     assert!(matches!(source.placement(), ReactorPlacement::Federate(spec) if spec.id == "source"));
 }
@@ -856,11 +856,11 @@ fn test_live_in_memory_distributed_hello_records_zero_tag() {
 #[test]
 fn test_live_in_memory_intentional_codec_failure_is_returned() {
     let values = Arc::new(Mutex::new(Vec::new()));
-    let mut env_builder = EnvBuilder::new();
-    env_builder
+    let mut assembly = Assembly::new();
+    assembly
         .register_federated_codec::<u32, _>(IntentionalFailingCodec)
         .unwrap();
-    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let mut builder = assembly.add_reactor("main", None, None, (), false);
     let source = builder
         .add_child_federate(federated_startup_source_reactor(7), "source", ())
         .unwrap();
@@ -875,7 +875,7 @@ fn test_live_in_memory_intentional_codec_failure_is_returned() {
     builder.finish().unwrap();
 
     let config = runtime::Config::default().with_fast_forward(true);
-    let parts = env_builder.into_runtime_parts(&config).unwrap();
+    let parts = assembly.into_runtime_parts(&config).unwrap();
     let error = run_with_wall_timeout("intentional codec failure", move || {
         execute_federation_in_memory(parts, config).unwrap_err()
     });
@@ -949,8 +949,8 @@ fn test_live_in_memory_positive_delay_cycle_records_delayed_feedback() {
 
 #[test]
 fn test_cross_federate_connection_without_codec_is_rejected() {
-    let mut env_builder = EnvBuilder::new();
-    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let mut assembly = Assembly::new();
+    let mut builder = assembly.add_reactor("main", None, None, (), false);
     let source = builder
         .add_child_federate(federated_source_reactor(), "source", ())
         .unwrap();
@@ -960,7 +960,7 @@ fn test_cross_federate_connection_without_codec_is_rejected() {
     builder.connect_port(source, sink, None, false).unwrap();
     builder.finish().unwrap();
 
-    let error = match env_builder.into_runtime_parts(&runtime::Config::default()) {
+    let error = match assembly.into_runtime_parts(&runtime::Config::default()) {
         Ok(_) => panic!("cross-federate connection without codec should fail"),
         Err(error) => error,
     };
@@ -975,9 +975,9 @@ fn test_cross_federate_connection_without_codec_is_rejected() {
 
 #[test]
 fn test_cross_federate_physical_connection_is_rejected() {
-    let mut env_builder = EnvBuilder::new();
-    register_u32_federated_codec(&mut env_builder).unwrap();
-    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let mut assembly = Assembly::new();
+    register_u32_federated_codec(&mut assembly).unwrap();
+    let mut builder = assembly.add_reactor("main", None, None, (), false);
     let source = builder
         .add_child_federate(federated_source_reactor(), "source", ())
         .unwrap();
@@ -988,7 +988,7 @@ fn test_cross_federate_physical_connection_is_rejected() {
     builder.finish().unwrap();
 
     assert!(matches!(
-        env_builder
+        assembly
             .into_runtime_parts(&runtime::Config::default())
             .expect_err("cross-federate physical connection should be rejected"),
         BuilderError::UnsupportedFederationTopology { what }
@@ -998,9 +998,9 @@ fn test_cross_federate_physical_connection_is_rejected() {
 
 #[test]
 fn test_mixed_local_federated_boundary_is_rejected() {
-    let mut env_builder = EnvBuilder::new();
-    register_u32_federated_codec(&mut env_builder).unwrap();
-    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let mut assembly = Assembly::new();
+    register_u32_federated_codec(&mut assembly).unwrap();
+    let mut builder = assembly.add_reactor("main", None, None, (), false);
     let source = builder
         .add_child_federate(federated_source_reactor(), "source", ())
         .unwrap();
@@ -1011,7 +1011,7 @@ fn test_mixed_local_federated_boundary_is_rejected() {
     builder.finish().unwrap();
 
     assert!(matches!(
-        env_builder
+        assembly
             .into_runtime_parts(&runtime::Config::default())
             .expect_err("mixed local/federated boundary should be rejected"),
         BuilderError::UnsupportedFederationTopology { what }
@@ -1022,8 +1022,8 @@ fn test_mixed_local_federated_boundary_is_rejected() {
 
 #[test]
 fn test_transient_federate_is_rejected() {
-    let mut env_builder = EnvBuilder::new();
-    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let mut assembly = Assembly::new();
+    let mut builder = assembly.add_reactor("main", None, None, (), false);
     builder
         .add_child_reactor_with_placement(
             federated_source_reactor(),
@@ -1035,7 +1035,7 @@ fn test_transient_federate_is_rejected() {
     builder.finish().unwrap();
 
     assert!(matches!(
-        env_builder
+        assembly
             .into_runtime_parts(&runtime::Config::default())
             .expect_err("transient federate should be rejected"),
         BuilderError::UnsupportedFederationTopology { what }
@@ -1045,8 +1045,8 @@ fn test_transient_federate_is_rejected() {
 
 #[test]
 fn test_empty_federate_id_is_rejected() {
-    let mut env_builder = EnvBuilder::new();
-    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let mut assembly = Assembly::new();
+    let mut builder = assembly.add_reactor("main", None, None, (), false);
     builder
         .add_child_reactor_with_placement(
             federated_source_reactor(),
@@ -1058,7 +1058,7 @@ fn test_empty_federate_id_is_rejected() {
     builder.finish().unwrap();
 
     assert!(matches!(
-        env_builder
+        assembly
             .into_runtime_parts(&runtime::Config::default())
             .expect_err("empty federate id should be rejected"),
         BuilderError::UnsupportedFederationTopology { what }
@@ -1068,8 +1068,8 @@ fn test_empty_federate_id_is_rejected() {
 
 #[test]
 fn test_duplicate_federate_id_is_rejected() {
-    let mut env_builder = EnvBuilder::new();
-    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let mut assembly = Assembly::new();
+    let mut builder = assembly.add_reactor("main", None, None, (), false);
     builder
         .add_child_reactor_with_placement(
             federated_source_reactor(),
@@ -1089,7 +1089,7 @@ fn test_duplicate_federate_id_is_rejected() {
     builder.finish().unwrap();
 
     assert!(matches!(
-        env_builder
+        assembly
             .into_runtime_parts(&runtime::Config::default())
             .expect_err("duplicate federate id should be rejected"),
         BuilderError::UnsupportedFederationTopology { what }
@@ -1099,8 +1099,8 @@ fn test_duplicate_federate_id_is_rejected() {
 
 #[test]
 fn test_local_cross_enclave_connection_does_not_require_federated_codec() {
-    let mut env_builder = EnvBuilder::new();
-    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let mut assembly = Assembly::new();
+    let mut builder = assembly.add_reactor("main", None, None, (), false);
     let source = builder
         .add_child_reactor(local_only_source_reactor(), "source", (), true)
         .unwrap();
@@ -1110,7 +1110,7 @@ fn test_local_cross_enclave_connection_does_not_require_federated_codec() {
     builder.connect_port(source, sink, None, false).unwrap();
     builder.finish().unwrap();
 
-    let parts = env_builder
+    let parts = assembly
         .into_runtime_parts(&runtime::Config::default())
         .unwrap();
 
@@ -1129,9 +1129,9 @@ fn test_local_cross_enclave_connection_does_not_require_federated_codec() {
 
 #[test]
 fn test_federated_connection_lowers_endpoint_runtime_parts() {
-    let mut env_builder = EnvBuilder::new();
-    register_u32_federated_codec(&mut env_builder).unwrap();
-    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let mut assembly = Assembly::new();
+    register_u32_federated_codec(&mut assembly).unwrap();
+    let mut builder = assembly.add_reactor("main", None, None, (), false);
     let source = builder
         .add_child_federate(federated_source_reactor(), "source", ())
         .unwrap();
@@ -1141,7 +1141,7 @@ fn test_federated_connection_lowers_endpoint_runtime_parts() {
     builder.connect_port(source, sink, None, false).unwrap();
     builder.finish().unwrap();
 
-    let parts = env_builder
+    let parts = assembly
         .into_runtime_parts(&runtime::Config::default())
         .unwrap();
 
@@ -1163,9 +1163,9 @@ fn test_federated_connection_lowers_endpoint_runtime_parts() {
 #[test]
 fn test_federated_sender_emits_serialized_msg_command() {
     let delay = runtime::Duration::milliseconds(10);
-    let mut env_builder = EnvBuilder::new();
-    register_u32_federated_codec(&mut env_builder).unwrap();
-    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let mut assembly = Assembly::new();
+    register_u32_federated_codec(&mut assembly).unwrap();
+    let mut builder = assembly.add_reactor("main", None, None, (), false);
     let source = builder
         .add_child_federate(federated_startup_source_reactor(7), "source", ())
         .unwrap();
@@ -1177,7 +1177,7 @@ fn test_federated_sender_emits_serialized_msg_command() {
         .unwrap();
     builder.finish().unwrap();
 
-    let mut parts = env_builder
+    let mut parts = assembly
         .into_runtime_parts(&runtime::Config::default())
         .unwrap();
     let mut outbound = FederatedOutboundCapture::take(&mut parts);
@@ -1213,9 +1213,9 @@ fn test_federated_sender_emits_serialized_msg_command() {
 #[test]
 fn test_federated_inbound_registry_schedules_target_action() {
     let values = Arc::new(Mutex::new(Vec::new()));
-    let mut env_builder = EnvBuilder::new();
-    register_u32_federated_codec(&mut env_builder).unwrap();
-    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let mut assembly = Assembly::new();
+    register_u32_federated_codec(&mut assembly).unwrap();
+    let mut builder = assembly.add_reactor("main", None, None, (), false);
     let source = builder
         .add_child_federate(federated_source_reactor(), "source", ())
         .unwrap();
@@ -1233,7 +1233,7 @@ fn test_federated_inbound_registry_schedules_target_action() {
         enclaves,
         federated_connections,
         ..
-    } = env_builder
+    } = assembly
         .into_runtime_parts(&runtime::Config::default())
         .unwrap();
 
@@ -1257,9 +1257,9 @@ fn test_federated_inbound_registry_schedules_target_action() {
 
 #[test]
 fn test_zero_delay_distributed_cycle_is_rejected() {
-    let mut env_builder = EnvBuilder::new();
-    register_u32_federated_codec(&mut env_builder).unwrap();
-    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let mut assembly = Assembly::new();
+    register_u32_federated_codec(&mut assembly).unwrap();
+    let mut builder = assembly.add_reactor("main", None, None, (), false);
     let a = builder.add_child_federate(federated_io_reactor(), "a", ());
     let b = builder.add_child_federate(federated_io_reactor(), "b", ());
     let a = a.unwrap();
@@ -1273,7 +1273,7 @@ fn test_zero_delay_distributed_cycle_is_rejected() {
     builder.finish().unwrap();
 
     assert!(matches!(
-        env_builder
+        assembly
             .into_runtime_parts(&runtime::Config::default())
             .expect_err("zero-delay distributed cycle should be rejected"),
         BuilderError::UnsupportedFederationTopology { what }

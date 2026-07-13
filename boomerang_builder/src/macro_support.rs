@@ -1,6 +1,6 @@
 //! This module provides traits and implementations for building reactors
 use crate::{
-    runtime, BuilderError, BuilderModeKey, BuilderReactorKey, EnvBuilder, PartialReactionBuilder,
+    runtime, Assembly, BuilderError, BuilderModeKey, BuilderReactorKey, PartialReactionBuilder,
     ReactorBuilderState, ReactorPlacement,
 };
 
@@ -15,7 +15,7 @@ pub trait Reactor<State: runtime::ReactorData = ()>: Sized {
         scope_mode: Option<BuilderModeKey>,
         bank_info: Option<runtime::BankInfo>,
         is_enclave: bool,
-        env: &mut EnvBuilder,
+        env: &mut Assembly,
     ) -> Result<Self::Ports, BuilderError> {
         self.build_with_placement(
             name,
@@ -37,7 +37,7 @@ pub trait Reactor<State: runtime::ReactorData = ()>: Sized {
         scope_mode: Option<BuilderModeKey>,
         bank_info: Option<runtime::BankInfo>,
         placement: ReactorPlacement,
-        env: &mut EnvBuilder,
+        env: &mut Assembly,
     ) -> Result<Self::Ports, BuilderError>;
 }
 
@@ -50,7 +50,7 @@ where
             /*scope_mode*/ Option<BuilderModeKey>,
             /*bank_info*/ Option<boomerang_runtime::BankInfo>,
             /*placement*/ ReactorPlacement,
-            /*env*/ &mut EnvBuilder,
+            /*env*/ &mut Assembly,
         ) -> Result<Ports, BuilderError>
         + 'static,
     State: runtime::ReactorData,
@@ -64,7 +64,7 @@ where
         scope_mode: Option<BuilderModeKey>,
         bank_info: Option<boomerang_runtime::BankInfo>,
         placement: ReactorPlacement,
-        env: &mut EnvBuilder,
+        env: &mut Assembly,
     ) -> Result<Self::Ports, BuilderError> {
         (self)(name, state, parent, scope_mode, bank_info, placement, env)
     }

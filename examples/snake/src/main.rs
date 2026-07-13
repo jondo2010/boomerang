@@ -48,7 +48,7 @@ impl SnakeState {
 #[reactor(state = SnakeState)]
 fn Snake() -> impl Reactor {
     // this thing helps capturing key presses
-    let keyboard = builder.add_child_reactor(
+    let keyboard = ctx.add_child_reactor(
         KeyboardEvents(),
         "keyboard",
         KeyboardEventsState::default(),
@@ -56,19 +56,18 @@ fn Snake() -> impl Reactor {
     )?;
 
     // Triggers a screen refresh, not a timer because we can shrink the period over time to speed up the game.
-    let screen_refresh = builder.add_logical_action("screen_refresh", None)?;
+    let screen_refresh = ctx.add_logical_action("screen_refresh", None)?;
 
     // manually triggered
-    let manually_add_more_food = builder.add_logical_action("manually_add_more_food", None)?;
+    let manually_add_more_food = ctx.add_logical_action("manually_add_more_food", None)?;
 
     // periodic
-    let add_more_food = builder.add_timer(
+    let add_more_food = ctx.add_timer(
         "add_more_food",
         TimerSpec::default().with_period(Duration::seconds(5)),
     )?;
 
-    builder
-        .add_reaction(Some("Startup"))
+    ctx.add_reaction(Some("Startup"))
         .with_startup_trigger()
         .with_effect(screen_refresh)
         .with_reaction_fn(|_ctx, state, (_, mut screen_refresh)| {
@@ -80,8 +79,7 @@ fn Snake() -> impl Reactor {
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("ScreenRefresh"))
+    ctx.add_reaction(Some("ScreenRefresh"))
         .with_trigger(screen_refresh)
         .with_reaction_fn(|_ctx, state, (mut screen_refresh,)| {
             // select a delay depending on the tempo
@@ -91,8 +89,7 @@ fn Snake() -> impl Reactor {
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("MoreFood"))
+    ctx.add_reaction(Some("MoreFood"))
         .with_trigger(screen_refresh)
         .with_effect(manually_add_more_food)
         .with_reaction_fn(|ctx, state, (_, mut manually_add_more_food)| {
@@ -123,8 +120,7 @@ fn Snake() -> impl Reactor {
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("Keyboard"))
+    ctx.add_reaction(Some("Keyboard"))
         .with_trigger(keyboard.arrow_key_pressed)
         .with_reaction_fn(|_ctx, state, (key_event,)| {
             // this might be overwritten several times, only committed on screen refreshes
@@ -138,8 +134,7 @@ fn Snake() -> impl Reactor {
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("AddFood"))
+    ctx.add_reaction(Some("AddFood"))
         .with_trigger(manually_add_more_food)
         .with_trigger(add_more_food)
         .with_reaction_fn(|_ctx, state, (_, _)| {
@@ -154,8 +149,7 @@ fn Snake() -> impl Reactor {
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("Shutdown"))
+    ctx.add_reaction(Some("Shutdown"))
         .with_shutdown_trigger()
         .with_reaction_fn(|_ctx, state, (_,)| {
             println!("Game over! Your score was: {}", state.snake.len());

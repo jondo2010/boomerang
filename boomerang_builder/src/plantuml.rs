@@ -306,7 +306,7 @@ impl Assembly {
         Ok(())
     }
 
-    /// Build a PlantUML representation of the entire Reactor environment. This creates a top-level view
+    /// Build a PlantUML representation of the entire reactor assembly. This creates a top-level view
     /// of all defined Reactors and any nested children.
     pub fn create_plantuml_graph(&self) -> Result<String, AssemblyError> {
         let graph = self.build_reactor_graph_grouped();

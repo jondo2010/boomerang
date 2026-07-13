@@ -1,7 +1,6 @@
-//! Builder for actions. This is typically done using the builder methods on [`crate::Assembly`]
-//! and [`crate::builder::reactor`].
+//! Action specifications recorded through [`crate::Assembly`] and [`crate::ReactorContext`].
 //!
-//! An action, like a port (see [`crate::builder::PortSpec`]), can carry data, but unlike a port,
+//! An action, like a port (see [`crate::PortSpec`]), can carry data, but unlike a port,
 //! an action is visible only within the reactor that defines it.
 
 use std::{fmt::Debug, marker::PhantomData};
@@ -182,7 +181,7 @@ pub enum ActionType {
         is_logical: bool,
         /// Minimum delay between
         min_delay: Option<runtime::Duration>,
-        /// Builder function that creates the runtime action
+        /// Factory function that creates the runtime action.
         build_fn: Box<dyn ActionFactoryFn>,
     },
     Shutdown,

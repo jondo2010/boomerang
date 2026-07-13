@@ -240,9 +240,9 @@ impl Debug for Assembly {
         //let port_aliases = runtime_port_parts
         //    .port_aliases
         //    .iter()
-        //    .map(|(builder_port_key, port_key)| {
+        //    .map(|(assembly_port_key, port_key)| {
         //        (
-        //            self.port_fqn(builder_port_key, false).unwrap(),
+        //            self.port_fqn(assembly_port_key, false).unwrap(),
         //            format!("{:?}", runtime_port_parts.ports[*port_key]),
         //        )
         //    })

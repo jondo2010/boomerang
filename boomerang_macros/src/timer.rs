@@ -105,7 +105,7 @@ impl ToTokens for Model {
         }
 
         tokens.extend(quote::quote! {
-            let #name = builder.add_timer(
+            let #name = ctx.add_timer(
                 #name_str,
                 #timer_spec,
             )?;

@@ -40,14 +40,14 @@ fn ModalBankNode<const NUM_NODES: usize>(
 #[reactor]
 fn ModalMultiportBank<const NUM_NODES: usize = 4>() -> impl Reactor {
     mode! { initial active {
-        let nodes: [_; NUM_NODES] = builder.add_child_reactors(
+        let nodes: [_; NUM_NODES] = ctx.add_child_reactors(
             ModalBankNode::<NUM_NODES>(),
             "nodes",
             Default::default(),
             false,
         )?;
 
-        builder.connect_ports(
+        ctx.connect_ports(
             nodes
                 .iter()
                 .flat_map(|child| child.output.iter())

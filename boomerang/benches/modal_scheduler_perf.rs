@@ -29,23 +29,22 @@ struct TransitionChurnState {
 
 #[reactor(state = TransitionChurnState)]
 fn TransitionChurnBench(iterations: usize, transition: TransitionCase) -> impl Reactor {
-    let tick = builder.add_logical_action::<()>("tick", None)?;
+    let tick = ctx.add_logical_action::<()>("tick", None)?;
 
-    let mode_a = builder.add_mode("mode_a", ModeKind::Initial)?;
-    let mode_b = builder.add_mode("mode_b", ModeKind::Normal)?;
+    let mode_a = ctx.add_mode("mode_a", ModeKind::Initial)?;
+    let mode_b = ctx.add_mode("mode_b", ModeKind::Normal)?;
 
     let a_to_b = match transition {
-        TransitionCase::Reset => builder.reset_mode_effect(mode_b)?,
-        TransitionCase::History => builder.history_mode_effect(mode_b)?,
+        TransitionCase::Reset => ctx.reset_mode_effect(mode_b)?,
+        TransitionCase::History => ctx.history_mode_effect(mode_b)?,
     };
     let b_to_a = match transition {
-        TransitionCase::Reset => builder.reset_mode_effect(mode_a)?,
-        TransitionCase::History => builder.history_mode_effect(mode_a)?,
+        TransitionCase::Reset => ctx.reset_mode_effect(mode_a)?,
+        TransitionCase::History => ctx.history_mode_effect(mode_a)?,
     };
 
-    builder.in_mode(mode_a, |builder| {
-        builder
-            .add_reaction(Some("mode_a_tick"))
+    ctx.in_mode(mode_a, |ctx| {
+        ctx.add_reaction(Some("mode_a_tick"))
             .with_trigger(tick)
             .with_effect(a_to_b)
             .with_reaction_fn(move |ctx, state, (mut tick, mode_b)| {
@@ -63,9 +62,8 @@ fn TransitionChurnBench(iterations: usize, transition: TransitionCase) -> impl R
         Ok(())
     })?;
 
-    builder.in_mode(mode_b, |builder| {
-        builder
-            .add_reaction(Some("mode_b_tick"))
+    ctx.in_mode(mode_b, |ctx| {
+        ctx.add_reaction(Some("mode_b_tick"))
             .with_trigger(tick)
             .with_effect(b_to_a)
             .with_reaction_fn(move |ctx, state, (mut tick, mode_a)| {
@@ -83,8 +81,7 @@ fn TransitionChurnBench(iterations: usize, transition: TransitionCase) -> impl R
         Ok(())
     })?;
 
-    builder
-        .add_reaction(Some("startup"))
+    ctx.add_reaction(Some("startup"))
         .with_startup_trigger()
         .with_effect(tick)
         .with_reaction_fn(|ctx, state, (_startup, mut tick)| {
@@ -95,8 +92,7 @@ fn TransitionChurnBench(iterations: usize, transition: TransitionCase) -> impl R
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("shutdown"))
+    ctx.add_reaction(Some("shutdown"))
         .with_shutdown_trigger()
         .with_reaction_fn(move |_ctx, state, (_shutdown,)| {
             assert_eq!(state.ticks, iterations);
@@ -129,13 +125,12 @@ fn FanoutChild(mode_count: usize, iterations: usize, #[input] input: u64) -> imp
         } else {
             ModeKind::Normal
         };
-        modes.push(builder.add_mode(&format!("mode_{idx}"), kind)?);
+        modes.push(ctx.add_mode(&format!("mode_{idx}"), kind)?);
     }
 
     for (idx, mode) in modes.into_iter().enumerate() {
-        builder.in_mode(mode, |builder| {
-            builder
-                .add_reaction(Some(&format!("input_mode_{idx}")))
+        ctx.in_mode(mode, |ctx| {
+            ctx.add_reaction(Some(&format!("input_mode_{idx}")))
                 .with_trigger(input)
                 .with_reaction_fn(|_ctx, state, (input,)| {
                     if let Some(value) = input.as_ref().copied() {
@@ -148,8 +143,7 @@ fn FanoutChild(mode_count: usize, iterations: usize, #[input] input: u64) -> imp
         })?;
     }
 
-    builder
-        .add_reaction(Some("shutdown"))
+    ctx.add_reaction(Some("shutdown"))
         .with_shutdown_trigger()
         .with_reaction_fn(move |_ctx, state, (_shutdown,)| {
             assert_eq!(
@@ -163,16 +157,15 @@ fn FanoutChild(mode_count: usize, iterations: usize, #[input] input: u64) -> imp
 
 #[reactor(state = FanoutParentState)]
 fn InactivePortFanoutBench(mode_count: usize, iterations: usize) -> impl Reactor {
-    let tick = builder.add_logical_action::<()>("tick", None)?;
-    let child = builder.add_child_reactor(
+    let tick = ctx.add_logical_action::<()>("tick", None)?;
+    let child = ctx.add_child_reactor(
         FanoutChild(mode_count, iterations),
         "child",
         FanoutChildState::default(),
         false,
     )?;
 
-    builder
-        .add_reaction(Some("startup"))
+    ctx.add_reaction(Some("startup"))
         .with_startup_trigger()
         .with_effect(tick)
         .with_reaction_fn(move |ctx, state, (_startup, mut tick)| {
@@ -182,8 +175,7 @@ fn InactivePortFanoutBench(mode_count: usize, iterations: usize) -> impl Reactor
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("tick"))
+    ctx.add_reaction(Some("tick"))
         .with_trigger(tick)
         .with_effect(child.input)
         .with_reaction_fn(|ctx, state, (mut tick, mut input)| {
@@ -199,8 +191,7 @@ fn InactivePortFanoutBench(mode_count: usize, iterations: usize) -> impl Reactor
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("shutdown"))
+    ctx.add_reaction(Some("shutdown"))
         .with_shutdown_trigger()
         .with_reaction_fn(move |_ctx, state, (_shutdown,)| {
             assert_eq!(state.sent, iterations);
@@ -219,16 +210,15 @@ struct ResetSubtreeState {
 
 #[reactor(state = ResetSubtreeState)]
 fn ResetSubtreeBench(timer_count: usize, child_count: usize, iterations: usize) -> impl Reactor {
-    let tick = builder.add_logical_action::<()>("tick", None)?;
+    let tick = ctx.add_logical_action::<()>("tick", None)?;
 
-    let idle = builder.add_mode("idle", ModeKind::Initial)?;
-    let active = builder.add_mode("active", ModeKind::Normal)?;
-    let enter_active = builder.reset_mode_effect(active)?;
-    let reset_active = builder.reset_mode_effect(active)?;
+    let idle = ctx.add_mode("idle", ModeKind::Initial)?;
+    let active = ctx.add_mode("active", ModeKind::Normal)?;
+    let enter_active = ctx.reset_mode_effect(active)?;
+    let reset_active = ctx.reset_mode_effect(active)?;
 
-    builder.in_mode(idle, |builder| {
-        builder
-            .add_reaction(Some("enter_active"))
+    ctx.in_mode(idle, |ctx| {
+        ctx.add_reaction(Some("enter_active"))
             .with_trigger(tick)
             .with_effect(enter_active)
             .with_reaction_fn(|ctx, state, (mut tick, active)| {
@@ -243,33 +233,27 @@ fn ResetSubtreeBench(timer_count: usize, child_count: usize, iterations: usize) 
         Ok(())
     })?;
 
-    builder.in_mode(active, |builder| {
+    ctx.in_mode(active, |ctx| {
         for idx in 0..timer_count {
-            let timer = builder.add_timer(
+            let timer = ctx.add_timer(
                 &format!("local_timer_{idx}"),
                 TimerSpec {
                     offset: Some(Duration::seconds(60)),
                     period: None,
                 },
             )?;
-            builder
-                .add_reaction(Some(&format!("local_timer_{idx}")))
+            ctx.add_reaction(Some(&format!("local_timer_{idx}")))
                 .with_trigger(timer)
                 .with_reaction_fn(|_ctx, _state, (_timer,)| {})
                 .finish()?;
         }
 
         for idx in 0..child_count {
-            let _child = builder.add_child_reactor(
-                EmptyScopedChild(),
-                &format!("child_{idx}"),
-                (),
-                false,
-            )?;
+            let _child =
+                ctx.add_child_reactor(EmptyScopedChild(), &format!("child_{idx}"), (), false)?;
         }
 
-        builder
-            .add_reaction(Some("reset_active"))
+        ctx.add_reaction(Some("reset_active"))
             .with_trigger(tick)
             .with_effect(reset_active)
             .with_reaction_fn(move |ctx, state, (mut tick, active)| {
@@ -287,8 +271,7 @@ fn ResetSubtreeBench(timer_count: usize, child_count: usize, iterations: usize) 
         Ok(())
     })?;
 
-    builder
-        .add_reaction(Some("startup"))
+    ctx.add_reaction(Some("startup"))
         .with_startup_trigger()
         .with_effect(tick)
         .with_reaction_fn(move |ctx, state, (_startup, mut tick)| {
@@ -298,8 +281,7 @@ fn ResetSubtreeBench(timer_count: usize, child_count: usize, iterations: usize) 
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("shutdown"))
+    ctx.add_reaction(Some("shutdown"))
         .with_shutdown_trigger()
         .with_reaction_fn(move |_ctx, state, (_shutdown,)| {
             assert_eq!(state.resets, iterations.saturating_sub(1));

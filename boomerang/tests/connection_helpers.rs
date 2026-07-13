@@ -13,8 +13,7 @@ struct SinkState {
 
 #[reactor(state = SourceState)]
 fn Source(#[output] out: i32) -> impl Reactor {
-    builder
-        .add_reaction(Some("startup"))
+    ctx.add_reaction(Some("startup"))
         .with_startup_trigger()
         .with_effect(out)
         .with_reaction_fn(|_ctx, state, (_startup, mut out)| {
@@ -25,8 +24,7 @@ fn Source(#[output] out: i32) -> impl Reactor {
 
 #[reactor(state = SinkState)]
 fn Sink(width: usize, #[input(len = width)] input: i32) -> impl Reactor {
-    builder
-        .add_reaction(Some("inputs"))
+    ctx.add_reaction(Some("inputs"))
         .with_trigger(input)
         .with_reaction_fn(|_ctx, state, (input,): (runtime::InputBankRef<i32>,)| {
             for port in input.iter() {
@@ -36,8 +34,7 @@ fn Sink(width: usize, #[input(len = width)] input: i32) -> impl Reactor {
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("shutdown"))
+    ctx.add_reaction(Some("shutdown"))
         .with_shutdown_trigger()
         .with_reaction_fn(|_ctx, state, (_shutdown,)| {
             assert!(state.seen);
@@ -47,8 +44,8 @@ fn Sink(width: usize, #[input(len = width)] input: i32) -> impl Reactor {
 
 #[reactor]
 fn BroadcastMain() -> impl Reactor {
-    let source = builder.add_child_reactor(Source(), "source", SourceState { value: 7 }, false)?;
-    let sink = builder.add_child_reactor(
+    let source = ctx.add_child_reactor(Source(), "source", SourceState { value: 7 }, false)?;
+    let sink = ctx.add_child_reactor(
         Sink(3),
         "sink",
         SinkState {
@@ -58,13 +55,13 @@ fn BroadcastMain() -> impl Reactor {
         false,
     )?;
 
-    builder.connect_broadcast(source.out, sink.input.iter(), None, false)?;
+    ctx.connect_broadcast(source.out, sink.input.iter(), None, false)?;
 }
 
 #[reactor]
 fn CartesianMain() -> impl Reactor {
-    let source = builder.add_child_reactor(Source(), "source", SourceState { value: 9 }, false)?;
-    let sink = builder.add_child_reactor(
+    let source = ctx.add_child_reactor(Source(), "source", SourceState { value: 9 }, false)?;
+    let sink = ctx.add_child_reactor(
         Sink(3),
         "sink",
         SinkState {
@@ -74,7 +71,7 @@ fn CartesianMain() -> impl Reactor {
         false,
     )?;
 
-    builder.connect_cartesian(std::iter::once(source.out), sink.input.iter(), None, false)?;
+    ctx.connect_cartesian(std::iter::once(source.out), sink.input.iter(), None, false)?;
 }
 
 #[test]

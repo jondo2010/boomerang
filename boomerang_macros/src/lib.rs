@@ -19,7 +19,7 @@ pub fn reactor_ports(
 
 /// Annotates a function so that it can be used as a Boomerang reactor.
 ///
-/// The `#[reactor]` macro allows you to annotate plain Rust functions as reactor builders. The reactor function takes
+/// The `#[reactor]` macro turns a plain Rust function into a reactor declaration. The reactor function takes
 /// any number of other arguments.
 ///
 /// Here’s how you would define and use a simple Boomerang reactor which has one input, a delay parameter, and a boolean state:

@@ -20,7 +20,7 @@ tracy = ["tracing-tracy/enable"]
 ## Support for recording and replaying events
 replay = ["dep:serde"]
 
-## Builder metadata and endpoint lowering for static federated enclave topologies
+## Assembly metadata and endpoint lowering for static federated enclave topologies
 federated = [
     "boomerang_runtime/federated",
     "boomerang_federated/runtime",

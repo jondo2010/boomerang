@@ -28,9 +28,9 @@ fn Destination(#[state] seen: Vec<(char, u32)>, #[input] x: u32, #[input] y: u32
 
 #[reactor]
 fn MicrostepsMultipleActions() -> impl Reactor {
-    let start = builder.add_timer("start", TimerSpec::STARTUP)?;
-    let repeat = builder.add_logical_action::<u32>("repeat", None)?;
-    let d = builder.add_child_reactor(Destination(), "d", Default::default(), false)?;
+    let start = ctx.add_timer("start", TimerSpec::STARTUP)?;
+    let repeat = ctx.add_logical_action::<u32>("repeat", None)?;
+    let d = ctx.add_child_reactor(Destination(), "d", Default::default(), false)?;
 
     reaction! {
         (start) -> d.x, repeat {

@@ -27,9 +27,9 @@ fn DelayedSink(
 
 #[reactor]
 fn ModalDelayedConnectionHistory() -> impl Reactor {
-    let enter = builder.add_logical_action::<()>("enter", None)?;
-    let pause = builder.add_logical_action::<()>("pause", None)?;
-    let resume = builder.add_logical_action::<()>("resume", None)?;
+    let enter = ctx.add_logical_action::<()>("enter", None)?;
+    let pause = ctx.add_logical_action::<()>("pause", None)?;
+    let resume = ctx.add_logical_action::<()>("resume", None)?;
 
     reaction! {
         (startup) -> enter, pause, resume {
@@ -54,8 +54,8 @@ fn ModalDelayedConnectionHistory() -> impl Reactor {
     } }
 
     mode! { active {
-        let source = builder.add_child_reactor(DelayedSource(), "source", (), false)?;
-        let sink = builder.add_child_reactor(
+        let source = ctx.add_child_reactor(DelayedSource(), "source", (), false)?;
+        let sink = ctx.add_child_reactor(
             DelayedSink(),
             "sink",
             DelayedSinkState {
@@ -64,7 +64,7 @@ fn ModalDelayedConnectionHistory() -> impl Reactor {
             },
             false,
         )?;
-        builder.connect_port(
+        ctx.connect_port(
             source.out,
             sink.input,
             Some(Duration::nanoseconds(5)),
@@ -81,9 +81,9 @@ fn ModalDelayedConnectionHistory() -> impl Reactor {
 
 #[reactor]
 fn ModalDelayedConnectionReset() -> impl Reactor {
-    let enter = builder.add_logical_action::<()>("enter", None)?;
-    let pause = builder.add_logical_action::<()>("pause", None)?;
-    let resume = builder.add_logical_action::<()>("resume", None)?;
+    let enter = ctx.add_logical_action::<()>("enter", None)?;
+    let pause = ctx.add_logical_action::<()>("pause", None)?;
+    let resume = ctx.add_logical_action::<()>("resume", None)?;
 
     reaction! {
         (startup) -> enter, pause, resume {
@@ -109,8 +109,8 @@ fn ModalDelayedConnectionReset() -> impl Reactor {
     } }
 
     mode! { active {
-        let source = builder.add_child_reactor(DelayedSource(), "source", (), false)?;
-        let sink = builder.add_child_reactor(
+        let source = ctx.add_child_reactor(DelayedSource(), "source", (), false)?;
+        let sink = ctx.add_child_reactor(
             DelayedSink(),
             "sink",
             DelayedSinkState {
@@ -119,7 +119,7 @@ fn ModalDelayedConnectionReset() -> impl Reactor {
             },
             false,
         )?;
-        builder.connect_port(
+        ctx.connect_port(
             source.out,
             sink.input,
             Some(Duration::nanoseconds(5)),

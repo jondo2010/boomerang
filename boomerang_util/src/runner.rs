@@ -80,13 +80,13 @@ fn diagram_output_path(name: &str, extension: &str) -> anyhow::Result<PathBuf> {
 }
 
 pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
-    reactor_builder: R,
+    reactor: R,
     name: &str,
     state: S,
     config: runtime::Config,
 ) -> anyhow::Result<(R::Ports, Vec<runtime::Env>)> {
     let mut assembly = Assembly::new();
-    let reactor = reactor_builder
+    let reactor = reactor
         .build(name, state, None, None, None, false, &mut assembly)
         .context("Error building top-level reactor!")?;
 
@@ -103,7 +103,7 @@ pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
 
     let RuntimeAssembly { enclaves, .. } = assembly
         .into_runtime_assembly(&config)
-        .context("Error building environment!")?;
+        .context("Error lowering assembly!")?;
 
     let envs_out = runtime::execute_enclaves(enclaves.into_iter(), config)?;
     let envs_out = envs_out.into_iter().map(|(_, env)| env).collect();
@@ -121,7 +121,7 @@ pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
 ///
 /// Common arguments are parsed from the command line and passed to the scheduler:
 /// * `--reaction-graph`: Generate a PlantUML graph of the reactor hierarchy
-/// * `--print-debug-info`: Print debug information about the environment and triggers
+/// * `--print-debug-info`: Print debug information about the assembly and triggers
 /// * `--fast-forward`: Run the scheduler in fast-forward mode
 /// * `--record-filename`: The filename to serialize recorded actions into
 /// * `--record-actions`: The list of fully-qualified actions to record, e.g., "snake::keyboard::key_press"
@@ -176,7 +176,7 @@ where
         ..
     } = assembly
         .into_runtime_assembly(&config)
-        .context("Error building environment!")?;
+        .context("Error lowering assembly!")?;
 
     if args.print_debug_info {
         println!("{enclaves:#?}");

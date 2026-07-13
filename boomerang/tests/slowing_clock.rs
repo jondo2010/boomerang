@@ -10,10 +10,9 @@ fn SlowingClock(
     #[state(default = Duration::milliseconds(100))] interval: Duration,
     #[state(default = Duration::milliseconds(100))] expected_time: Duration,
 ) -> impl Reactor {
-    let a = builder.add_logical_action("a", Some(Duration::milliseconds(100)))?;
+    let a = ctx.add_logical_action("a", Some(Duration::milliseconds(100)))?;
 
-    builder
-        .add_reaction(Some("Startup"))
+    ctx.add_reaction(Some("Startup"))
         .with_startup_trigger()
         .with_effect(a)
         .with_reaction_fn(|ctx, _state, (_startup, mut a)| {
@@ -22,8 +21,7 @@ fn SlowingClock(
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("A"))
+    ctx.add_reaction(Some("A"))
         .with_trigger(a)
         .with_reaction_fn(|ctx, state, (mut a,)| {
             let elapsed_logical_time = ctx.get_elapsed_logical_time();
@@ -40,8 +38,7 @@ fn SlowingClock(
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("Shutdown"))
+    ctx.add_reaction(Some("Shutdown"))
         .with_shutdown_trigger()
         .with_reaction_fn(|_ctx, state, (_shutdown,)| {
             assert_eq!(

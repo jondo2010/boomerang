@@ -276,7 +276,7 @@ impl ToTokens for Model {
         // Start building the reaction
         let mut reaction = quote! {
             #[allow(unused_variables)]
-            let _ = builder
+            let _ = ctx
                 .add_reaction(#name)
         };
 

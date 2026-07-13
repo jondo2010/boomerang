@@ -20,15 +20,14 @@ mod example {
 
     #[reactor]
     pub fn Example() -> impl Reactor<()> {
-        let keyboard = builder.add_child_reactor(
+        let keyboard = ctx.add_child_reactor(
             KeyboardEvents(),
             "keyboard",
             KeyboardEventsState::default(),
             false,
         )?;
 
-        builder
-            .add_reaction(Some("ReactionKeyPress"))
+        ctx.add_reaction(Some("ReactionKeyPress"))
             .with_trigger(keyboard.arrow_key_pressed)
             .with_reaction_fn(|_ctx, _state, (key_event,)| {
                 let mut stdout = std::io::stdout();

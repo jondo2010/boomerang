@@ -4,9 +4,8 @@ use boomerang::prelude::*;
 
 #[reactor]
 fn Source(#[output] out: u32) -> impl Reactor {
-    let t = builder.add_timer("t", TimerSpec::default())?;
-    builder
-        .add_reaction(Some("SourceReactionOut"))
+    let t = ctx.add_timer("t", TimerSpec::default())?;
+    ctx.add_reaction(Some("SourceReactionOut"))
         .with_trigger(t)
         .with_effect(out)
         .with_reaction_fn(|_ctx, _state, (_t, mut out)| {
@@ -17,8 +16,7 @@ fn Source(#[output] out: u32) -> impl Reactor {
 
 #[reactor]
 fn Gain(#[input] inp: u32, #[output] out: u32, #[param(default = 1)] gain: u32) -> impl Reactor {
-    builder
-        .add_reaction(Some("GainReactionIn"))
+    ctx.add_reaction(Some("GainReactionIn"))
         .with_trigger(inp)
         .with_effect(out)
         .with_reaction_fn(move |_ctx, _state, (inp, mut out)| {
@@ -29,8 +27,7 @@ fn Gain(#[input] inp: u32, #[output] out: u32, #[param(default = 1)] gain: u32) 
 
 #[reactor]
 fn Print(#[input] inp: u32) -> impl Reactor {
-    builder
-        .add_reaction(Some("PrintReactionIn"))
+    ctx.add_reaction(Some("PrintReactionIn"))
         .with_trigger(inp)
         .with_reaction_fn(|_ctx, _state, (inp,)| {
             let value = *inp;
@@ -42,22 +39,22 @@ fn Print(#[input] inp: u32) -> impl Reactor {
 
 #[reactor]
 fn GainContainer(#[input] inp: u32, #[output] out: u32, #[output] out2: u32) -> impl Reactor {
-    let gain = builder.add_child_reactor(Gain(2), "gain", (), false)?;
-    builder.connect_port(inp, gain.inp, None, false)?;
-    builder.connect_port(gain.out, out, None, false)?;
-    builder.connect_port(gain.out, out2, None, false)?;
+    let gain = ctx.add_child_reactor(Gain(2), "gain", (), false)?;
+    ctx.connect_port(inp, gain.inp, None, false)?;
+    ctx.connect_port(gain.out, out, None, false)?;
+    ctx.connect_port(gain.out, out2, None, false)?;
 }
 
 #[reactor]
 fn Hierarchy() -> impl Reactor {
-    let source = builder.add_child_reactor(Source(), "source", (), false)?;
-    let container = builder.add_child_reactor(GainContainer(), "container", (), false)?;
-    let print = builder.add_child_reactor(Print(), "print", (), false)?;
-    let print2 = builder.add_child_reactor(Print(), "print2", (), false)?;
+    let source = ctx.add_child_reactor(Source(), "source", (), false)?;
+    let container = ctx.add_child_reactor(GainContainer(), "container", (), false)?;
+    let print = ctx.add_child_reactor(Print(), "print", (), false)?;
+    let print2 = ctx.add_child_reactor(Print(), "print2", (), false)?;
 
-    builder.connect_port(source.out, container.inp, None, false)?;
-    builder.connect_port(container.out, print.inp, None, false)?;
-    builder.connect_port(container.out2, print2.inp, None, false)?;
+    ctx.connect_port(source.out, container.inp, None, false)?;
+    ctx.connect_port(container.out, print.inp, None, false)?;
+    ctx.connect_port(container.out2, print2.inp, None, false)?;
 }
 
 #[test]

@@ -16,7 +16,7 @@ struct State {
 
 #[reactor(state = State)]
 fn AsyncCallback() -> impl Reactor {
-    let a = builder.add_physical_action::<u32>("a", None)?;
+    let a = ctx.add_physical_action::<u32>("a", None)?;
 
     reaction! {
         Proc (a) {

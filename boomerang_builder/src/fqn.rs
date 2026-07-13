@@ -321,10 +321,10 @@ mod tests {
 
     #[test]
     fn test_fqn() {
-        let fqn = AssemblyFqn::try_from("boomerang/builder/fqn").unwrap();
-        assert_eq!(fqn.to_string(), "boomerang/builder/fqn");
+        let fqn = AssemblyFqn::try_from("boomerang/assembly/fqn").unwrap();
+        assert_eq!(fqn.to_string(), "boomerang/assembly/fqn");
         assert_eq!(fqn[0].to_string(), "boomerang");
-        assert_eq!(fqn[1].to_string(), "builder");
+        assert_eq!(fqn[1].to_string(), "assembly");
         assert_eq!(fqn[2].to_string(), "fqn");
     }
 
@@ -362,7 +362,7 @@ mod tests {
 
     /// Test the FqnSegment trait for ReactorSpec
     #[test]
-    fn test_fqn_segment_reactor_builder() {
+    fn test_fqn_segment_reactor_spec() {
         let reactor = ReactorSpec::new("TestReactor", "", (), None, None, false);
         let segment = reactor.fqn_segment(false);
         assert_eq!(segment.to_string(), "TestReactor");
@@ -384,7 +384,7 @@ mod tests {
 
     /// Test the FqnSegment trait for the ReactionSpec
     #[test]
-    fn test_fqn_segment_reaction_builder() {
+    fn test_fqn_segment_reaction_spec() {
         let reaction = ReactionSpec::new(
             Some("TestReaction"),
             AssemblyReactorKey::default(),
@@ -399,7 +399,7 @@ mod tests {
 
     /// Test the FqnSegment trait for ActionSpec
     #[test]
-    fn test_fqn_segment_action_builder() {
+    fn test_fqn_segment_action_spec() {
         let action = ActionSpec::new(
             "TestAction",
             AssemblyReactorKey::default(),
@@ -415,7 +415,7 @@ mod tests {
 
     /// Test the FqnSegment trait for PortSpec
     #[test]
-    fn test_fqn_segment_port_builder() {
+    fn test_fqn_segment_port_spec() {
         let port = PortSpec::<(), Input>::new(
             "TestPort",
             AssemblyReactorKey::default(),

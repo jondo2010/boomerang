@@ -4,7 +4,7 @@ use boomerang::prelude::*;
 fn Main() -> impl Reactor {
     timer! { t(1 s) };
 
-    let after_shutdown = builder.add_logical_action::<()>("after_shutdown", None)?;
+    let after_shutdown = ctx.add_logical_action::<()>("after_shutdown", None)?;
 
     reaction! {
         (t) -> after_shutdown {

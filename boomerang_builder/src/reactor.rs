@@ -136,7 +136,7 @@ pub trait ParentReactorSpec {
     fn parent_reactor_key(&self) -> Option<AssemblyReactorKey>;
 }
 
-/// ReactorSpec is the Builder-side definition of a Reactor, and is type-erased
+/// `ReactorSpec` is the assembly-side definition of a reactor and is type-erased.
 #[derive(Debug)]
 pub struct ReactorSpec {
     /// The instantiated/child name of the Reactor
@@ -234,10 +234,10 @@ impl ReactorSpec {
     }
 }
 
-/// Builder struct used to facilitate construction of a ReactorSpec by user/generated code.
+/// Declaration context used to record a `ReactorSpec` from user or generated code.
 #[derive(Debug)]
 pub struct ReactorContext<'a, S: runtime::ReactorData = ()> {
-    /// The ReactorKey of this Builder
+    /// The assembly key of this reactor declaration.
     reactor_key: AssemblyReactorKey,
     assembly: &'a mut Assembly,
     startup_action: TypedActionKey,
@@ -328,15 +328,15 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
 
     #[doc(hidden)]
     pub fn set_scope_mode(&mut self, mode: AssemblyModeKey) -> Result<(), AssemblyError> {
-        let mode_builder = self.assembly.mode_specs.get(mode).ok_or_else(|| {
+        let mode_spec = self.assembly.mode_specs.get(mode).ok_or_else(|| {
             AssemblyError::ReactionDeclarationError(format!("Unknown mode key {mode:?}"))
         })?;
-        let reactor_builder = &self.assembly.reactor_specs[self.reactor_key];
-        if Some(mode_builder.reactor_key) != reactor_builder.parent_reactor_key {
+        let reactor_spec = &self.assembly.reactor_specs[self.reactor_key];
+        if Some(mode_spec.reactor_key) != reactor_spec.parent_reactor_key {
             return Err(AssemblyError::ReactionDeclarationError(format!(
                 "Mode '{}' does not enclose reactor '{}'",
-                mode_builder.name,
-                reactor_builder.name()
+                mode_spec.name,
+                reactor_spec.name()
             )));
         }
         self.assembly.reactor_specs[self.reactor_key].scope_mode = Some(mode);
@@ -451,13 +451,13 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
         mode: AssemblyModeKey,
         f: impl FnOnce(&mut Self) -> Result<R, AssemblyError>,
     ) -> Result<R, AssemblyError> {
-        let mode_builder = self.assembly.mode_specs.get(mode).ok_or_else(|| {
+        let mode_spec = self.assembly.mode_specs.get(mode).ok_or_else(|| {
             AssemblyError::ReactionDeclarationError(format!("Unknown mode key {mode:?}"))
         })?;
-        if mode_builder.reactor_key != self.reactor_key {
+        if mode_spec.reactor_key != self.reactor_key {
             return Err(AssemblyError::ReactionDeclarationError(format!(
                 "Mode '{}' does not belong to reactor '{}'",
-                mode_builder.name,
+                mode_spec.name,
                 self.assembly.reactor_specs[self.reactor_key].name()
             )));
         }
@@ -575,7 +575,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
         let child = f(self.reactor_key, self.assembly)?;
         if self.assembly.reactor_specs[child].parent_reactor_key != Some(self.reactor_key) {
             return Err(AssemblyError::ReactionDeclarationError(format!(
-                "Child builder returned reactor '{}' that is not contained by '{}'",
+                "Child declaration returned reactor '{}' that is not contained by '{}'",
                 self.assembly.reactor_specs[child].name(),
                 self.assembly.reactor_specs[self.reactor_key].name()
             )));
@@ -732,7 +732,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
         T: runtime::ReactorData + for<'de> serde::de::Deserialize<'de>,
         Q: ActionTag,
     {
-        // Add a replayer builder
+        // Add a replay factory.
         self.assembly
             .add_replayer(action_key, move |runtime_parts| {
                 let (_enclave_key, action_key) =

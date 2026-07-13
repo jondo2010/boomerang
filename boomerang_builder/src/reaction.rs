@@ -44,11 +44,11 @@ pub struct ReactionSpec {
     pub(super) reset_trigger: bool,
     /// Relations between this Reaction and Actions
     pub(super) action_relations: SecondaryMap<AssemblyActionKey, TriggerMode>,
-    /// Actions in the order they were declared on the builder
+    /// Actions in the order they were declared on the declaration
     pub(super) action_order: Vec<AssemblyActionKey>,
     /// Relations between this Reaction and Ports
     pub(super) port_relations: SecondaryMap<AssemblyPortKey, TriggerMode>,
-    /// Ports in the order they were declared on the builder
+    /// Ports in the order they were declared on the declaration
     pub(super) port_order: Vec<AssemblyPortKey>,
 }
 
@@ -260,9 +260,9 @@ impl TriggerMode {
 }
 
 pub trait ReactionDeclarationField: runtime::ReactionRefsExtract {
-    fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
+    fn extend_declaration<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
-        builder: &mut ReactionDeclaration<S, Fields, ReactionFn>,
+        declaration: &mut ReactionDeclaration<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
     );
 }
@@ -273,13 +273,13 @@ where
     Q: PortTag,
     TypedPortKey<T, Q, A>: runtime::ReactionRefsExtract,
 {
-    fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
+    fn extend_declaration<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
-        builder: &mut ReactionDeclaration<S, Fields, ReactionFn>,
+        declaration: &mut ReactionDeclaration<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
     ) {
         let port_key = AssemblyPortKey::from(*self);
-        builder.record_port_relation(port_key, trigger_mode);
+        declaration.record_port_relation(port_key, trigger_mode);
     }
 }
 
@@ -289,13 +289,13 @@ where
     Q: PortTag,
     TypedPortKey<T, Q, A>: runtime::ReactionRefsExtract,
 {
-    fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
+    fn extend_declaration<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
-        builder: &mut ReactionDeclaration<S, Fields, ReactionFn>,
+        declaration: &mut ReactionDeclaration<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
     ) {
         self.iter().for_each(|port| {
-            port.extend_builder(builder, trigger_mode);
+            port.extend_declaration(declaration, trigger_mode);
         })
     }
 }
@@ -306,14 +306,14 @@ where
     Q: PortTag,
     PortBank<T, Q, A>: runtime::ReactionRefsExtract,
 {
-    fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
+    fn extend_declaration<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
-        builder: &mut ReactionDeclaration<S, Fields, ReactionFn>,
+        declaration: &mut ReactionDeclaration<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
     ) {
         self.iter().for_each(|port| {
             let port_key = AssemblyPortKey::from(port);
-            builder.record_port_relation(port_key, trigger_mode);
+            declaration.record_port_relation(port_key, trigger_mode);
         });
     }
 }
@@ -324,34 +324,34 @@ where
     Q: ActionTag,
     TypedActionKey<T, Q>: runtime::ReactionRefsExtract,
 {
-    fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
+    fn extend_declaration<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
-        builder: &mut ReactionDeclaration<S, Fields, ReactionFn>,
+        declaration: &mut ReactionDeclaration<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
     ) {
         let action_key = AssemblyActionKey::from(*self);
-        builder.record_action_relation(action_key, trigger_mode);
+        declaration.record_action_relation(action_key, trigger_mode);
     }
 }
 
 impl ReactionDeclarationField for TimerActionKey {
-    fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
+    fn extend_declaration<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
-        builder: &mut ReactionDeclaration<S, Fields, ReactionFn>,
+        declaration: &mut ReactionDeclaration<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
     ) {
         let action_key = AssemblyActionKey::from(*self);
-        builder.record_action_relation(action_key, trigger_mode);
+        declaration.record_action_relation(action_key, trigger_mode);
     }
 }
 
 impl ReactionDeclarationField for ModeEffectSpec {
-    fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
+    fn extend_declaration<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
-        builder: &mut ReactionDeclaration<S, Fields, ReactionFn>,
+        declaration: &mut ReactionDeclaration<S, Fields, ReactionFn>,
         _trigger_mode: TriggerMode,
     ) {
-        builder.record_mode_effect(*self);
+        declaration.record_mode_effect(*self);
     }
 }
 
@@ -446,7 +446,7 @@ macro_rules! impl_with_field {
             pub fn with_startup_trigger(self) -> ReactionDeclaration<'a, S, ($($Fn,)* TypedActionKey,)> {
                 let startup = self
                     .assembly
-                    .get_reactor_builder(self.reactor_key)
+                    .get_reactor_spec(self.reactor_key)
                     .unwrap()
                     .get_startup_action();
                 self.with_trigger(startup)
@@ -456,7 +456,7 @@ macro_rules! impl_with_field {
             pub fn with_shutdown_trigger(self) -> ReactionDeclaration<'a, S, ($($Fn,)* TypedActionKey,)> {
                 let shutdown = self
                     .assembly
-                    .get_reactor_builder(self.reactor_key)
+                    .get_reactor_spec(self.reactor_key)
                     .unwrap()
                     .get_shutdown_action();
                 self.with_trigger(shutdown)
@@ -468,7 +468,7 @@ macro_rules! impl_with_field {
             where
                 F: ReactionDeclarationField
             {
-                field.extend_builder(&mut self, TriggerMode::TriggersAndUses);
+                field.extend_declaration(&mut self, TriggerMode::TriggersAndUses);
                 #[allow(non_snake_case)]
                 let Self {
                     name,
@@ -509,7 +509,7 @@ macro_rules! impl_with_field {
             where
                 F: ReactionDeclarationField
             {
-                field.extend_builder(&mut self, TriggerMode::UsesOnly);
+                field.extend_declaration(&mut self, TriggerMode::UsesOnly);
                 #[allow(non_snake_case)]
                 let Self {
                     name,
@@ -549,7 +549,7 @@ macro_rules! impl_with_field {
             where
                 F: ReactionDeclarationField
             {
-                field.extend_builder(&mut self, TriggerMode::EffectsOnly);
+                field.extend_declaration(&mut self, TriggerMode::EffectsOnly);
                 #[allow(non_snake_case)]
                 let Self {
                     name,
@@ -722,7 +722,7 @@ where
     S: runtime::ReactorData,
     Fields: runtime::ReactionRefsExtract,
 {
-    /// Finish building the Reaction and add it to the Environment
+    /// Finish declaring the reaction and add it to the assembly.
     pub fn finish(self) -> Result<AssemblyReactionKey, AssemblyError> {
         let Self {
             name,
@@ -804,7 +804,7 @@ where
         let reactor = &mut assembly.reactor_specs[reactor_key];
         let reactions = &mut assembly.reaction_specs;
 
-        let reaction_builder = ReactionSpec {
+        let reaction_spec = ReactionSpec {
             name,
             reactor_key,
             reaction_fn,
@@ -820,7 +820,7 @@ where
 
         let reaction_key = reactions.insert_with_key(|key| {
             reactor.reactions.insert(key, ());
-            reaction_builder
+            reaction_spec
         });
 
         Ok(reaction_key)

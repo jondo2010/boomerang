@@ -14,7 +14,7 @@ struct ModalModesState {
 
 #[reactor(state = ModalModesState)]
 fn ModalModesBench(mode_count: usize, iterations: usize) -> impl Reactor {
-    let tick = builder.add_logical_action::<()>("tick", None)?;
+    let tick = ctx.add_logical_action::<()>("tick", None)?;
 
     let mut modes = Vec::with_capacity(mode_count);
     for idx in 0..mode_count {
@@ -23,13 +23,13 @@ fn ModalModesBench(mode_count: usize, iterations: usize) -> impl Reactor {
         } else {
             ModeKind::Normal
         };
-        let mode = builder.add_mode(&format!("mode_{idx}"), kind)?;
+        let mode = ctx.add_mode(&format!("mode_{idx}"), kind)?;
         modes.push(mode);
     }
 
     for (idx, mode) in modes.into_iter().enumerate() {
-        builder.in_mode(mode, |builder| {
-            let timer = builder.add_timer(
+        ctx.in_mode(mode, |ctx| {
+            let timer = ctx.add_timer(
                 &format!("local_timer_{idx}"),
                 TimerSpec {
                     offset: Some(Duration::nanoseconds(1)),
@@ -37,8 +37,7 @@ fn ModalModesBench(mode_count: usize, iterations: usize) -> impl Reactor {
                 },
             )?;
 
-            builder
-                .add_reaction(Some(&format!("local_timer_{idx}")))
+            ctx.add_reaction(Some(&format!("local_timer_{idx}")))
                 .with_trigger(timer)
                 .with_reaction_fn(|_ctx, state, (_timer,)| {
                     state.timer_fires += 1;
@@ -49,8 +48,7 @@ fn ModalModesBench(mode_count: usize, iterations: usize) -> impl Reactor {
         })?;
     }
 
-    builder
-        .add_reaction(Some("startup"))
+    ctx.add_reaction(Some("startup"))
         .with_startup_trigger()
         .with_effect(tick)
         .with_reaction_fn(move |ctx, state, (_startup, mut tick)| {
@@ -61,8 +59,7 @@ fn ModalModesBench(mode_count: usize, iterations: usize) -> impl Reactor {
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("tick"))
+    ctx.add_reaction(Some("tick"))
         .with_trigger(tick)
         .with_reaction_fn(|ctx, state, (mut tick,)| {
             state.ticks += 1;
@@ -76,8 +73,7 @@ fn ModalModesBench(mode_count: usize, iterations: usize) -> impl Reactor {
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("shutdown"))
+    ctx.add_reaction(Some("shutdown"))
         .with_shutdown_trigger()
         .with_reaction_fn(move |_ctx, state, (_shutdown,)| {
             assert_eq!(state.ticks, iterations);

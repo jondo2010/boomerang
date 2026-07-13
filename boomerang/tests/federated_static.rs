@@ -16,8 +16,7 @@ struct SinkState {
 
 #[reactor]
 fn FederatedSource(#[output] out: u32) -> impl Reactor {
-    builder
-        .add_reaction(Some("emit"))
+    ctx.add_reaction(Some("emit"))
         .with_startup_trigger()
         .with_effect(out)
         .with_reaction_fn(|ctx, _state, (_startup, mut out)| {
@@ -29,16 +28,14 @@ fn FederatedSource(#[output] out: u32) -> impl Reactor {
 
 #[reactor(state = SinkState)]
 fn FederatedSink(#[input] input: u32) -> impl Reactor {
-    builder
-        .add_reaction(Some("keep_alive_until_message"))
+    ctx.add_reaction(Some("keep_alive_until_message"))
         .with_startup_trigger()
         .with_reaction_fn(|ctx, _state, (_startup,)| {
             ctx.schedule_shutdown(Some(Duration::milliseconds(100)));
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("record"))
+    ctx.add_reaction(Some("record"))
         .with_trigger(input)
         .with_reaction_fn(|ctx, state, (input,)| {
             if let Some(value) = *input {
@@ -51,8 +48,8 @@ fn FederatedSink(#[input] input: u32) -> impl Reactor {
 
 #[reactor]
 fn StaticFederation(values: Arc<Mutex<Vec<(Tag, u32)>>>) -> impl Reactor {
-    let source = builder.add_child_federate(FederatedSource(), "source", ())?;
-    let sink = builder.add_child_federate(
+    let source = ctx.add_child_federate(FederatedSource(), "source", ())?;
+    let sink = ctx.add_child_federate(
         FederatedSink(),
         "sink",
         SinkState {
@@ -60,7 +57,7 @@ fn StaticFederation(values: Arc<Mutex<Vec<(Tag, u32)>>>) -> impl Reactor {
         },
     )?;
 
-    builder.connect_port(source.out, sink.input, None, false)?;
+    ctx.connect_port(source.out, sink.input, None, false)?;
 }
 
 #[test]

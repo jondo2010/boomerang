@@ -12,13 +12,12 @@ pub fn KeyboardEvents(
     #[state] raw_terminal: bool,
 ) -> impl Reactor<KeyboardEventsState, Ports = KeyboardEventsPorts> {
     let key_press =
-        builder.add_physical_action::<KeyEvent>("key_press", Some(Duration::milliseconds(10)))?;
+        ctx.add_physical_action::<KeyEvent>("key_press", Some(Duration::milliseconds(10)))?;
 
-    builder.add_action_recorder(key_press)?;
-    builder.add_action_replayer(key_press)?;
+    ctx.add_action_recorder(key_press)?;
+    ctx.add_action_replayer(key_press)?;
 
-    builder
-        .add_reaction(Some("ReactionKeyPress"))
+    ctx.add_reaction(Some("ReactionKeyPress"))
         .with_trigger(key_press)
         .with_effect(arrow_key_pressed)
         .with_reaction_fn(|_ctx, _state, (mut key_event, mut arrow_key_pressed)| {
@@ -26,8 +25,7 @@ pub fn KeyboardEvents(
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("ReactionShutdown"))
+    ctx.add_reaction(Some("ReactionShutdown"))
         .with_shutdown_trigger()
         .with_reaction_fn(|_ctx, state, _| {
             if state.raw_terminal {
@@ -37,8 +35,7 @@ pub fn KeyboardEvents(
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("ReactionStartup"))
+    ctx.add_reaction(Some("ReactionStartup"))
         .with_startup_trigger()
         .with_effect(key_press)
         .with_reaction_fn(|_ctx, state, (_, key_press)| {

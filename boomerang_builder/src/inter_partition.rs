@@ -1,4 +1,4 @@
-//! Builder-visible metadata for connections that cross runtime partitions.
+//! Assembly-visible metadata for connections that cross runtime partitions.
 
 use crate::{runtime, AssemblyPortKey, AssemblyReactorKey};
 

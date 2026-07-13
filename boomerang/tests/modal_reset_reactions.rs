@@ -6,7 +6,7 @@ fn ModalResetReactions(
     #[state] reset_count: u32,
     #[state] reset_microstep: usize,
 ) -> impl Reactor {
-    let pulse = builder.add_logical_action::<()>("pulse", None)?;
+    let pulse = ctx.add_logical_action::<()>("pulse", None)?;
 
     reaction! {
         (startup) -> pulse {

@@ -209,10 +209,10 @@ impl ToTokens for Model {
 
                     match port_type {
                             PortType::Input => quote! {
-                                let #ident = builder.add_input_ports::<#element_type, #len_expr>(#name_str)?;
+                                let #ident = ctx.add_input_ports::<#element_type, #len_expr>(#name_str)?;
                             },
                             PortType::Output => quote! {
-                                let #ident = builder.add_output_ports::<#element_type, #len_expr>(#name_str)?;
+                                let #ident = ctx.add_output_ports::<#element_type, #len_expr>(#name_str)?;
                             },
                         }
                     },
@@ -220,17 +220,17 @@ impl ToTokens for Model {
                         let len_expr = len.as_ref().expect("len expr");
                         match port_type {
                             PortType::Input => quote! {
-                                let #ident = builder.add_input_bank::<#ty>(#name_str, #len_expr)?;
+                                let #ident = ctx.add_input_bank::<#ty>(#name_str, #len_expr)?;
                                 let #for_fn_ident = #ident.clone();
                             },
                             PortType::Output => quote! {
-                                let #ident = builder.add_output_bank::<#ty>(#name_str, #len_expr)?;
+                                let #ident = ctx.add_output_bank::<#ty>(#name_str, #len_expr)?;
                                 let #for_fn_ident = #ident.clone();
                             },
                         }
                     }
                     _ => {
-                        quote!(let #ident = builder.add_port::<#ty, #dir>(#name_str, None)?;)
+                        quote!(let #ident = ctx.add_port::<#ty, #dir>(#name_str, None)?;)
                     }
                 }
             },
@@ -275,13 +275,13 @@ impl ToTokens for Model {
                      bank_info: Option<::boomerang::runtime::BankInfo>,
                      placement: ::boomerang::builder::ReactorPlacement,
                      assembly: &mut ::boomerang::builder::Assembly| {
-                        let mut builder = assembly.add_reactor(name, parent, bank_info, state, placement);
+                        let mut ctx = assembly.add_reactor(name, parent, bank_info, state, placement);
                         if let Some(scope_mode) = scope_mode {
-                            builder.set_scope_mode(scope_mode)?;
+                            ctx.set_scope_mode(scope_mode)?;
                         }
                         #(#create_ports)*
-                        f(&mut builder, (#(#local_names,)*))?;
-                        builder.finish()?;
+                        f(&mut ctx, (#(#local_names,)*))?;
+                        ctx.finish()?;
                         Ok(#struct_name {
                             #(#field_inits,)*
                         })

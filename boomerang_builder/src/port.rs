@@ -78,8 +78,8 @@ impl<T: runtime::ReactorData, Q: PortTag, A> From<AssemblyPortKey> for TypedPort
 }
 
 impl<T: runtime::ReactorData, Q: PortTag, A> From<TypedPortKey<T, Q, A>> for AssemblyPortKey {
-    fn from(builder_port_key: TypedPortKey<T, Q, A>) -> Self {
-        builder_port_key.0
+    fn from(assembly_port_key: TypedPortKey<T, Q, A>) -> Self {
+        assembly_port_key.0
     }
 }
 

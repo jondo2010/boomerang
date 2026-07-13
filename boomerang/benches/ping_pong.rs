@@ -34,7 +34,7 @@ fn PingReactor(
     #[output] out_ping: (),
     #[output] out_finished: (),
 ) -> impl Reactor {
-    let serve = builder.add_action::<(), Logical>("serve", None)?;
+    let serve = ctx.add_action::<(), Logical>("serve", None)?;
 
     reaction! {
         InStart (in_start) serve {
@@ -80,11 +80,11 @@ fn PongReactor(#[input] in_ping: (), #[output] out_pong: ()) -> impl Reactor {
 
 #[reactor]
 fn Main(count: usize) -> impl Reactor {
-    let ping = builder.add_child_reactor(PingReactor(), "ping", Ping::new(count), false)?;
-    let pong = builder.add_child_reactor(PongReactor(), "pong", Pong::default(), false)?;
+    let ping = ctx.add_child_reactor(PingReactor(), "ping", Ping::new(count), false)?;
+    let pong = ctx.add_child_reactor(PongReactor(), "pong", Pong::default(), false)?;
 
-    builder.connect_port(ping.out_ping, pong.in_ping, None, false)?;
-    builder.connect_port(pong.out_pong, ping.in_pong, None, false)?;
+    ctx.connect_port(ping.out_ping, pong.in_ping, None, false)?;
+    ctx.connect_port(pong.out_pong, ping.in_pong, None, false)?;
 
     reaction! {
         Startup (startup) -> ping.in_start {

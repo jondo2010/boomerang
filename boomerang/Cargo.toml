@@ -23,7 +23,7 @@ parallel = ["boomerang_runtime/parallel"]
 ## Support for recording and replaying
 replay = ["boomerang_runtime/replay", "boomerang_builder/replay"]
 
-## Builder metadata and protocol primitives for static federated enclave topologies
+## Assembly metadata and protocol primitives for static federated enclave topologies
 federated = [
     "boomerang_runtime/federated",
     "boomerang_builder/federated",

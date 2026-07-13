@@ -6,7 +6,7 @@ fn ModalActionHistory(
     #[state] fired: bool,
     #[state] fire_time_ns: i128,
 ) -> impl Reactor {
-    let pulse = builder.add_logical_action::<()>("pulse", None)?;
+    let pulse = ctx.add_logical_action::<()>("pulse", None)?;
 
     reaction! {
         (startup) -> pulse {
@@ -17,7 +17,7 @@ fn ModalActionHistory(
     }
 
     mode! { initial active {
-        let work = builder.add_logical_action::<()>("work", None)?;
+        let work = ctx.add_logical_action::<()>("work", None)?;
 
         reaction! {
             (pulse) -> work, inactive {
@@ -58,7 +58,7 @@ fn ModalActionHistory(
 
 #[reactor]
 fn ModalActionResetDiscard(#[state] scheduled: bool, #[state] fired: bool) -> impl Reactor {
-    let pulse = builder.add_logical_action::<()>("pulse", None)?;
+    let pulse = ctx.add_logical_action::<()>("pulse", None)?;
 
     reaction! {
         (startup) -> pulse {
@@ -69,7 +69,7 @@ fn ModalActionResetDiscard(#[state] scheduled: bool, #[state] fired: bool) -> im
     }
 
     mode! { initial active {
-        let work = builder.add_logical_action::<()>("work", None)?;
+        let work = ctx.add_logical_action::<()>("work", None)?;
 
         reaction! {
             (pulse) -> work, inactive {
@@ -111,7 +111,7 @@ fn ModalActionHistoryPreservesMicrosteps(
     #[state] scheduled: bool,
     #[state] seen: Vec<u32>,
 ) -> impl Reactor {
-    let pulse = builder.add_logical_action::<()>("pulse", None)?;
+    let pulse = ctx.add_logical_action::<()>("pulse", None)?;
 
     reaction! {
         (startup) -> pulse {
@@ -122,7 +122,7 @@ fn ModalActionHistoryPreservesMicrosteps(
     }
 
     mode! { initial active {
-        let work = builder.add_logical_action::<u32>("work", None)?;
+        let work = ctx.add_logical_action::<u32>("work", None)?;
 
         reaction! {
             (pulse) -> work, inactive {

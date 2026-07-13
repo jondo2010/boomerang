@@ -70,14 +70,12 @@ fn local_only_source_reactor(
      bank_info: Option<runtime::BankInfo>,
      placement: ReactorPlacement,
      assembly: &mut Assembly| {
-        let mut builder = assembly.add_reactor(name, parent, bank_info, state, placement);
+        let mut ctx = assembly.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
-            builder.set_scope_mode(scope_mode)?;
+            ctx.set_scope_mode(scope_mode)?;
         }
-        let output = builder
-            .add_output_port::<LocalOnlyPayload>("out")?
-            .contained();
-        builder.finish()?;
+        let output = ctx.add_output_port::<LocalOnlyPayload>("out")?.contained();
+        ctx.finish()?;
         Ok(output)
     }
 }
@@ -91,14 +89,12 @@ fn local_only_sink_reactor(
      bank_info: Option<runtime::BankInfo>,
      placement: ReactorPlacement,
      assembly: &mut Assembly| {
-        let mut builder = assembly.add_reactor(name, parent, bank_info, state, placement);
+        let mut ctx = assembly.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
-            builder.set_scope_mode(scope_mode)?;
+            ctx.set_scope_mode(scope_mode)?;
         }
-        let input = builder
-            .add_input_port::<LocalOnlyPayload>("in")?
-            .contained();
-        builder.finish()?;
+        let input = ctx.add_input_port::<LocalOnlyPayload>("in")?.contained();
+        ctx.finish()?;
         Ok(input)
     }
 }
@@ -111,12 +107,12 @@ fn federated_source_reactor() -> impl Reactor<(), Ports = TypedPortKey<u32, Outp
      bank_info: Option<runtime::BankInfo>,
      placement: ReactorPlacement,
      assembly: &mut Assembly| {
-        let mut builder = assembly.add_reactor(name, parent, bank_info, state, placement);
+        let mut ctx = assembly.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
-            builder.set_scope_mode(scope_mode)?;
+            ctx.set_scope_mode(scope_mode)?;
         }
-        let output = builder.add_output_port::<u32>("out")?.contained();
-        builder.finish()?;
+        let output = ctx.add_output_port::<u32>("out")?.contained();
+        ctx.finish()?;
         Ok(output)
     }
 }
@@ -131,14 +127,13 @@ fn federated_startup_source_reactor(
           bank_info: Option<runtime::BankInfo>,
           placement: ReactorPlacement,
           assembly: &mut Assembly| {
-        let mut builder = assembly.add_reactor(name, parent, bank_info, state, placement);
+        let mut ctx = assembly.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
-            builder.set_scope_mode(scope_mode)?;
+            ctx.set_scope_mode(scope_mode)?;
         }
-        let output = builder.add_output_port::<u32>("out")?;
-        let startup = builder.get_startup_action();
-        builder
-            .add_reaction(Some("emit"))
+        let output = ctx.add_output_port::<u32>("out")?;
+        let startup = ctx.get_startup_action();
+        ctx.add_reaction(Some("emit"))
             .with_trigger(startup)
             .with_effect(output)
             .with_reaction_fn(move |ctx, _state, (_startup, mut output)| {
@@ -146,7 +141,7 @@ fn federated_startup_source_reactor(
                 ctx.schedule_shutdown(None);
             })
             .finish()?;
-        builder.finish()?;
+        ctx.finish()?;
         Ok(output.contained())
     }
 }
@@ -159,12 +154,12 @@ fn federated_sink_reactor() -> impl Reactor<(), Ports = TypedPortKey<u32, Input,
      bank_info: Option<runtime::BankInfo>,
      placement: ReactorPlacement,
      assembly: &mut Assembly| {
-        let mut builder = assembly.add_reactor(name, parent, bank_info, state, placement);
+        let mut ctx = assembly.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
-            builder.set_scope_mode(scope_mode)?;
+            ctx.set_scope_mode(scope_mode)?;
         }
-        let input = builder.add_input_port::<u32>("in")?.contained();
-        builder.finish()?;
+        let input = ctx.add_input_port::<u32>("in")?.contained();
+        ctx.finish()?;
         Ok(input)
     }
 }
@@ -179,22 +174,20 @@ fn federated_shutdown_after_startup_sink_reactor(
           bank_info: Option<runtime::BankInfo>,
           placement: ReactorPlacement,
           assembly: &mut Assembly| {
-        let mut builder = assembly.add_reactor(name, parent, bank_info, state, placement);
+        let mut ctx = assembly.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
-            builder.set_scope_mode(scope_mode)?;
+            ctx.set_scope_mode(scope_mode)?;
         }
-        let input = builder.add_input_port::<u32>("in")?;
-        let startup = builder.get_startup_action();
-        builder
-            .add_reaction(Some("shutdown_after_startup"))
+        let input = ctx.add_input_port::<u32>("in")?;
+        let startup = ctx.get_startup_action();
+        ctx.add_reaction(Some("shutdown_after_startup"))
             .with_trigger(startup)
             .with_reaction_fn(|ctx, _state, (_startup,)| {
                 ctx.schedule_shutdown(Some(runtime::Duration::milliseconds(10)));
             })
             .finish()?;
         let values = Arc::clone(&values);
-        builder
-            .add_reaction(Some("record_unexpected"))
+        ctx.add_reaction(Some("record_unexpected"))
             .with_trigger(input)
             .with_reaction_fn(move |ctx, _state, (input,)| {
                 if let Some(value) = *input {
@@ -202,7 +195,7 @@ fn federated_shutdown_after_startup_sink_reactor(
                 }
             })
             .finish()?;
-        builder.finish()?;
+        ctx.finish()?;
         Ok(input.contained())
     }
 }
@@ -217,22 +210,20 @@ fn federated_recording_sink_reactor(
           bank_info: Option<runtime::BankInfo>,
           placement: ReactorPlacement,
           assembly: &mut Assembly| {
-        let mut builder = assembly.add_reactor(name, parent, bank_info, state, placement);
+        let mut ctx = assembly.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
-            builder.set_scope_mode(scope_mode)?;
+            ctx.set_scope_mode(scope_mode)?;
         }
-        let input = builder.add_input_port::<u32>("in")?;
-        let startup = builder.get_startup_action();
-        builder
-            .add_reaction(Some("shutdown_if_no_input"))
+        let input = ctx.add_input_port::<u32>("in")?;
+        let startup = ctx.get_startup_action();
+        ctx.add_reaction(Some("shutdown_if_no_input"))
             .with_trigger(startup)
             .with_reaction_fn(|ctx, _state, (_startup,)| {
                 ctx.schedule_shutdown(Some(runtime::Duration::milliseconds(100)));
             })
             .finish()?;
         let values = Arc::clone(&values);
-        builder
-            .add_reaction(Some("record"))
+        ctx.add_reaction(Some("record"))
             .with_trigger(input)
             .with_reaction_fn(move |ctx, _state, (input,)| {
                 if let Some(value) = *input {
@@ -241,7 +232,7 @@ fn federated_recording_sink_reactor(
                 }
             })
             .finish()?;
-        builder.finish()?;
+        ctx.finish()?;
         Ok(input.contained())
     }
 }
@@ -254,13 +245,13 @@ fn federated_io_reactor() -> impl Reactor<(), Ports = FederatedIoPorts> {
      bank_info: Option<runtime::BankInfo>,
      placement: ReactorPlacement,
      assembly: &mut Assembly| {
-        let mut builder = assembly.add_reactor(name, parent, bank_info, state, placement);
+        let mut ctx = assembly.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
-            builder.set_scope_mode(scope_mode)?;
+            ctx.set_scope_mode(scope_mode)?;
         }
-        let input = builder.add_input_port::<u32>("in")?.contained();
-        let output = builder.add_output_port::<u32>("out")?.contained();
-        builder.finish()?;
+        let input = ctx.add_input_port::<u32>("in")?.contained();
+        let output = ctx.add_output_port::<u32>("out")?.contained();
+        ctx.finish()?;
         Ok(FederatedIoPorts { input, output })
     }
 }
@@ -273,22 +264,20 @@ fn federated_forwarding_reactor(addend: u32) -> impl Reactor<(), Ports = Federat
           bank_info: Option<runtime::BankInfo>,
           placement: ReactorPlacement,
           assembly: &mut Assembly| {
-        let mut builder = assembly.add_reactor(name, parent, bank_info, state, placement);
+        let mut ctx = assembly.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
-            builder.set_scope_mode(scope_mode)?;
+            ctx.set_scope_mode(scope_mode)?;
         }
-        let input = builder.add_input_port::<u32>("in")?;
-        let output = builder.add_output_port::<u32>("out")?;
-        let startup = builder.get_startup_action();
-        builder
-            .add_reaction(Some("keep_alive"))
+        let input = ctx.add_input_port::<u32>("in")?;
+        let output = ctx.add_output_port::<u32>("out")?;
+        let startup = ctx.get_startup_action();
+        ctx.add_reaction(Some("keep_alive"))
             .with_trigger(startup)
             .with_reaction_fn(|ctx, _state, (_startup,)| {
                 ctx.schedule_shutdown(Some(runtime::Duration::milliseconds(100)));
             })
             .finish()?;
-        builder
-            .add_reaction(Some("forward"))
+        ctx.add_reaction(Some("forward"))
             .with_trigger(input)
             .with_effect(output)
             .with_reaction_fn(move |ctx, _state, (input, mut output)| {
@@ -298,7 +287,7 @@ fn federated_forwarding_reactor(addend: u32) -> impl Reactor<(), Ports = Federat
                 }
             })
             .finish()?;
-        builder.finish()?;
+        ctx.finish()?;
         Ok(FederatedIoPorts {
             input: input.contained(),
             output: output.contained(),
@@ -317,15 +306,14 @@ fn federated_startup_recording_io_reactor(
           bank_info: Option<runtime::BankInfo>,
           placement: ReactorPlacement,
           assembly: &mut Assembly| {
-        let mut builder = assembly.add_reactor(name, parent, bank_info, state, placement);
+        let mut ctx = assembly.add_reactor(name, parent, bank_info, state, placement);
         if let Some(scope_mode) = scope_mode {
-            builder.set_scope_mode(scope_mode)?;
+            ctx.set_scope_mode(scope_mode)?;
         }
-        let input = builder.add_input_port::<u32>("in")?;
-        let output = builder.add_output_port::<u32>("out")?;
-        let startup = builder.get_startup_action();
-        builder
-            .add_reaction(Some("emit_startup"))
+        let input = ctx.add_input_port::<u32>("in")?;
+        let output = ctx.add_output_port::<u32>("out")?;
+        let startup = ctx.get_startup_action();
+        ctx.add_reaction(Some("emit_startup"))
             .with_trigger(startup)
             .with_effect(output)
             .with_reaction_fn(move |ctx, _state, (_startup, mut output)| {
@@ -334,8 +322,7 @@ fn federated_startup_recording_io_reactor(
             })
             .finish()?;
         let values = Arc::clone(&values);
-        builder
-            .add_reaction(Some("record_feedback"))
+        ctx.add_reaction(Some("record_feedback"))
             .with_trigger(input)
             .with_reaction_fn(move |ctx, _state, (input,)| {
                 if let Some(value) = *input {
@@ -344,7 +331,7 @@ fn federated_startup_recording_io_reactor(
                 }
             })
             .finish()?;
-        builder.finish()?;
+        ctx.finish()?;
         Ok(FederatedIoPorts {
             input: input.contained(),
             output: output.contained(),
@@ -426,11 +413,11 @@ fn route_outbound_commands_through_rti(
 fn run_local_source_sink(after: Option<runtime::Duration>) -> Vec<(runtime::Tag, u32)> {
     let values = Arc::new(Mutex::new(Vec::new()));
     let mut assembly = Assembly::new();
-    let mut builder = assembly.add_reactor("main", None, None, (), false);
-    let source = builder
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    let source = ctx
         .add_child_reactor(federated_startup_source_reactor(7), "source", (), true)
         .unwrap();
-    let sink = builder
+    let sink = ctx
         .add_child_reactor(
             federated_recording_sink_reactor(Arc::clone(&values)),
             "sink",
@@ -438,8 +425,8 @@ fn run_local_source_sink(after: Option<runtime::Duration>) -> Vec<(runtime::Tag,
             true,
         )
         .unwrap();
-    builder.connect_port(source, sink, after, false).unwrap();
-    builder.finish().unwrap();
+    ctx.connect_port(source, sink, after, false).unwrap();
+    ctx.finish().unwrap();
 
     let RuntimeAssembly { enclaves, .. } = assembly
         .into_runtime_assembly(&runtime::Config::default())
@@ -459,19 +446,19 @@ fn run_in_memory_federated_source_sink(
     let values = Arc::new(Mutex::new(Vec::new()));
     let mut assembly = Assembly::new();
     register_u32_federated_codec(&mut assembly).unwrap();
-    let mut builder = assembly.add_reactor("main", None, None, (), false);
-    let source = builder
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    let source = ctx
         .add_child_federate(federated_startup_source_reactor(7), "source", ())
         .unwrap();
-    let sink = builder
+    let sink = ctx
         .add_child_federate(
             federated_recording_sink_reactor(Arc::clone(&values)),
             "sink",
             (),
         )
         .unwrap();
-    builder.connect_port(source, sink, after, false).unwrap();
-    builder.finish().unwrap();
+    ctx.connect_port(source, sink, after, false).unwrap();
+    ctx.finish().unwrap();
 
     let mut parts = assembly
         .into_runtime_assembly(&runtime::Config::default())
@@ -551,19 +538,19 @@ fn run_live_in_memory_federated_source_sink(
     let values = Arc::new(Mutex::new(Vec::new()));
     let mut assembly = Assembly::new();
     register_u32_federated_codec(&mut assembly).unwrap();
-    let mut builder = assembly.add_reactor("main", None, None, (), false);
-    let source = builder
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    let source = ctx
         .add_child_federate(federated_startup_source_reactor(7), "source", ())
         .unwrap();
-    let sink = builder
+    let sink = ctx
         .add_child_federate(
             federated_recording_sink_reactor(Arc::clone(&values)),
             "sink",
             (),
         )
         .unwrap();
-    builder.connect_port(source, sink, after, false).unwrap();
-    builder.finish().unwrap();
+    ctx.connect_port(source, sink, after, false).unwrap();
+    ctx.finish().unwrap();
 
     let config = runtime::Config::default().with_fast_forward(true);
     let parts = assembly.into_runtime_assembly(&config).unwrap();
@@ -577,19 +564,19 @@ fn run_live_in_memory_no_message_source_sink() -> Vec<(runtime::Tag, u32)> {
     let values = Arc::new(Mutex::new(Vec::new()));
     let mut assembly = Assembly::new();
     register_u32_federated_codec(&mut assembly).unwrap();
-    let mut builder = assembly.add_reactor("main", None, None, (), false);
-    let source = builder
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    let source = ctx
         .add_child_federate(federated_source_reactor(), "source", ())
         .unwrap();
-    let sink = builder
+    let sink = ctx
         .add_child_federate(
             federated_shutdown_after_startup_sink_reactor(Arc::clone(&values)),
             "sink",
             (),
         )
         .unwrap();
-    builder.connect_port(source, sink, None, false).unwrap();
-    builder.finish().unwrap();
+    ctx.connect_port(source, sink, None, false).unwrap();
+    ctx.finish().unwrap();
 
     let config = runtime::Config::default().with_fast_forward(true);
     let parts = assembly.into_runtime_assembly(&config).unwrap();
@@ -603,27 +590,23 @@ fn run_live_in_memory_three_federate_chain() -> Vec<(runtime::Tag, u32)> {
     let values = Arc::new(Mutex::new(Vec::new()));
     let mut assembly = Assembly::new();
     register_u32_federated_codec(&mut assembly).unwrap();
-    let mut builder = assembly.add_reactor("main", None, None, (), false);
-    let source = builder
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    let source = ctx
         .add_child_federate(federated_startup_source_reactor(7), "source", ())
         .unwrap();
-    let relay = builder
+    let relay = ctx
         .add_child_federate(federated_forwarding_reactor(1), "relay", ())
         .unwrap();
-    let sink = builder
+    let sink = ctx
         .add_child_federate(
             federated_recording_sink_reactor(Arc::clone(&values)),
             "sink",
             (),
         )
         .unwrap();
-    builder
-        .connect_port(source, relay.input, None, false)
-        .unwrap();
-    builder
-        .connect_port(relay.output, sink, None, false)
-        .unwrap();
-    builder.finish().unwrap();
+    ctx.connect_port(source, relay.input, None, false).unwrap();
+    ctx.connect_port(relay.output, sink, None, false).unwrap();
+    ctx.finish().unwrap();
 
     let config = runtime::Config::default().with_fast_forward(true);
     let parts = assembly.into_runtime_assembly(&config).unwrap();
@@ -638,27 +621,27 @@ fn run_live_in_memory_fanout() -> RecordedValuePair {
     let right_values = Arc::new(Mutex::new(Vec::new()));
     let mut assembly = Assembly::new();
     register_u32_federated_codec(&mut assembly).unwrap();
-    let mut builder = assembly.add_reactor("main", None, None, (), false);
-    let source = builder
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    let source = ctx
         .add_child_federate(federated_startup_source_reactor(7), "source", ())
         .unwrap();
-    let left = builder
+    let left = ctx
         .add_child_federate(
             federated_recording_sink_reactor(Arc::clone(&left_values)),
             "left",
             (),
         )
         .unwrap();
-    let right = builder
+    let right = ctx
         .add_child_federate(
             federated_recording_sink_reactor(Arc::clone(&right_values)),
             "right",
             (),
         )
         .unwrap();
-    builder.connect_port(source, left, None, false).unwrap();
-    builder.connect_port(source, right, None, false).unwrap();
-    builder.finish().unwrap();
+    ctx.connect_port(source, left, None, false).unwrap();
+    ctx.connect_port(source, right, None, false).unwrap();
+    ctx.finish().unwrap();
 
     let config = runtime::Config::default().with_fast_forward(true);
     let parts = assembly.into_runtime_assembly(&config).unwrap();
@@ -675,28 +658,26 @@ fn run_live_in_memory_positive_delay_cycle() -> RecordedValuePair {
     let delay = runtime::Duration::milliseconds(10);
     let mut assembly = Assembly::new();
     register_u32_federated_codec(&mut assembly).unwrap();
-    let mut builder = assembly.add_reactor("main", None, None, (), false);
-    let a = builder
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    let a = ctx
         .add_child_federate(
             federated_startup_recording_io_reactor(1, Arc::clone(&a_values)),
             "a",
             (),
         )
         .unwrap();
-    let b = builder
+    let b = ctx
         .add_child_federate(
             federated_startup_recording_io_reactor(2, Arc::clone(&b_values)),
             "b",
             (),
         )
         .unwrap();
-    builder
-        .connect_port(a.output, b.input, Some(delay), false)
+    ctx.connect_port(a.output, b.input, Some(delay), false)
         .unwrap();
-    builder
-        .connect_port(b.output, a.input, Some(delay), false)
+    ctx.connect_port(b.output, a.input, Some(delay), false)
         .unwrap();
-    builder.finish().unwrap();
+    ctx.finish().unwrap();
 
     let config = runtime::Config::default().with_fast_forward(true);
     let parts = assembly.into_runtime_assembly(&config).unwrap();
@@ -718,11 +699,11 @@ fn build_federated_source_sink_parts(
 ) -> Result<RuntimeAssembly, AssemblyError> {
     let mut assembly = Assembly::new();
     register_u32_federated_codec(&mut assembly)?;
-    let mut builder = assembly.add_reactor("main", None, None, (), false);
-    let source = builder.add_child_federate(federated_source_reactor(), "source", ())?;
-    let sink = builder.add_child_federate(federated_sink_reactor(), "sink", ())?;
-    builder.connect_port(source, sink, after, false)?;
-    builder.finish()?;
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    let source = ctx.add_child_federate(federated_source_reactor(), "source", ())?;
+    let sink = ctx.add_child_federate(federated_sink_reactor(), "sink", ())?;
+    ctx.connect_port(source, sink, after, false)?;
+    ctx.finish()?;
 
     assembly.into_runtime_assembly(&runtime::Config::default())
 }
@@ -730,11 +711,11 @@ fn build_federated_source_sink_parts(
 #[test]
 fn test_add_child_federate_sets_enclave_compatible_placement() {
     let mut assembly = Assembly::new();
-    let mut builder = assembly.add_reactor("main", None, None, (), false);
-    let _source = builder
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    let _source = ctx
         .add_child_federate(federated_source_reactor(), "source", ())
         .unwrap();
-    let main = builder.finish().unwrap();
+    let main = ctx.finish().unwrap();
     let source = assembly.find_reactor_by_fqn("main/source").unwrap();
 
     assert!(!assembly.reactor_specs[main].is_enclave);
@@ -860,19 +841,19 @@ fn test_live_in_memory_intentional_codec_failure_is_returned() {
     assembly
         .register_federated_codec::<u32, _>(IntentionalFailingCodec)
         .unwrap();
-    let mut builder = assembly.add_reactor("main", None, None, (), false);
-    let source = builder
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    let source = ctx
         .add_child_federate(federated_startup_source_reactor(7), "source", ())
         .unwrap();
-    let sink = builder
+    let sink = ctx
         .add_child_federate(
             federated_recording_sink_reactor(Arc::clone(&values)),
             "sink",
             (),
         )
         .unwrap();
-    builder.connect_port(source, sink, None, false).unwrap();
-    builder.finish().unwrap();
+    ctx.connect_port(source, sink, None, false).unwrap();
+    ctx.finish().unwrap();
 
     let config = runtime::Config::default().with_fast_forward(true);
     let parts = assembly.into_runtime_assembly(&config).unwrap();
@@ -950,15 +931,15 @@ fn test_live_in_memory_positive_delay_cycle_records_delayed_feedback() {
 #[test]
 fn test_cross_federate_connection_without_codec_is_rejected() {
     let mut assembly = Assembly::new();
-    let mut builder = assembly.add_reactor("main", None, None, (), false);
-    let source = builder
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    let source = ctx
         .add_child_federate(federated_source_reactor(), "source", ())
         .unwrap();
-    let sink = builder
+    let sink = ctx
         .add_child_federate(federated_sink_reactor(), "sink", ())
         .unwrap();
-    builder.connect_port(source, sink, None, false).unwrap();
-    builder.finish().unwrap();
+    ctx.connect_port(source, sink, None, false).unwrap();
+    ctx.finish().unwrap();
 
     let error = match assembly.into_runtime_assembly(&runtime::Config::default()) {
         Ok(_) => panic!("cross-federate connection without codec should fail"),
@@ -977,15 +958,15 @@ fn test_cross_federate_connection_without_codec_is_rejected() {
 fn test_cross_federate_physical_connection_is_rejected() {
     let mut assembly = Assembly::new();
     register_u32_federated_codec(&mut assembly).unwrap();
-    let mut builder = assembly.add_reactor("main", None, None, (), false);
-    let source = builder
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    let source = ctx
         .add_child_federate(federated_source_reactor(), "source", ())
         .unwrap();
-    let sink = builder
+    let sink = ctx
         .add_child_federate(federated_sink_reactor(), "sink", ())
         .unwrap();
-    builder.connect_port(source, sink, None, true).unwrap();
-    builder.finish().unwrap();
+    ctx.connect_port(source, sink, None, true).unwrap();
+    ctx.finish().unwrap();
 
     assert!(matches!(
         assembly
@@ -1000,15 +981,15 @@ fn test_cross_federate_physical_connection_is_rejected() {
 fn test_mixed_local_federated_boundary_is_rejected() {
     let mut assembly = Assembly::new();
     register_u32_federated_codec(&mut assembly).unwrap();
-    let mut builder = assembly.add_reactor("main", None, None, (), false);
-    let source = builder
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    let source = ctx
         .add_child_federate(federated_source_reactor(), "source", ())
         .unwrap();
-    let sink = builder
+    let sink = ctx
         .add_child_reactor(federated_sink_reactor(), "sink", (), true)
         .unwrap();
-    builder.connect_port(source, sink, None, false).unwrap();
-    builder.finish().unwrap();
+    ctx.connect_port(source, sink, None, false).unwrap();
+    ctx.finish().unwrap();
 
     assert!(matches!(
         assembly
@@ -1023,16 +1004,15 @@ fn test_mixed_local_federated_boundary_is_rejected() {
 #[test]
 fn test_transient_federate_is_rejected() {
     let mut assembly = Assembly::new();
-    let mut builder = assembly.add_reactor("main", None, None, (), false);
-    builder
-        .add_child_reactor_with_placement(
-            federated_source_reactor(),
-            "source",
-            (),
-            ReactorPlacement::Federate(FederateSpec::new("source").transient(true)),
-        )
-        .unwrap();
-    builder.finish().unwrap();
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    ctx.add_child_reactor_with_placement(
+        federated_source_reactor(),
+        "source",
+        (),
+        ReactorPlacement::Federate(FederateSpec::new("source").transient(true)),
+    )
+    .unwrap();
+    ctx.finish().unwrap();
 
     assert!(matches!(
         assembly
@@ -1046,16 +1026,15 @@ fn test_transient_federate_is_rejected() {
 #[test]
 fn test_empty_federate_id_is_rejected() {
     let mut assembly = Assembly::new();
-    let mut builder = assembly.add_reactor("main", None, None, (), false);
-    builder
-        .add_child_reactor_with_placement(
-            federated_source_reactor(),
-            "source",
-            (),
-            ReactorPlacement::Federate(FederateSpec::new(" ")),
-        )
-        .unwrap();
-    builder.finish().unwrap();
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    ctx.add_child_reactor_with_placement(
+        federated_source_reactor(),
+        "source",
+        (),
+        ReactorPlacement::Federate(FederateSpec::new(" ")),
+    )
+    .unwrap();
+    ctx.finish().unwrap();
 
     assert!(matches!(
         assembly
@@ -1069,24 +1048,22 @@ fn test_empty_federate_id_is_rejected() {
 #[test]
 fn test_duplicate_federate_id_is_rejected() {
     let mut assembly = Assembly::new();
-    let mut builder = assembly.add_reactor("main", None, None, (), false);
-    builder
-        .add_child_reactor_with_placement(
-            federated_source_reactor(),
-            "source",
-            (),
-            ReactorPlacement::Federate(FederateSpec::new("same")),
-        )
-        .unwrap();
-    builder
-        .add_child_reactor_with_placement(
-            federated_sink_reactor(),
-            "sink",
-            (),
-            ReactorPlacement::Federate(FederateSpec::new("same")),
-        )
-        .unwrap();
-    builder.finish().unwrap();
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    ctx.add_child_reactor_with_placement(
+        federated_source_reactor(),
+        "source",
+        (),
+        ReactorPlacement::Federate(FederateSpec::new("same")),
+    )
+    .unwrap();
+    ctx.add_child_reactor_with_placement(
+        federated_sink_reactor(),
+        "sink",
+        (),
+        ReactorPlacement::Federate(FederateSpec::new("same")),
+    )
+    .unwrap();
+    ctx.finish().unwrap();
 
     assert!(matches!(
         assembly
@@ -1100,15 +1077,15 @@ fn test_duplicate_federate_id_is_rejected() {
 #[test]
 fn test_local_cross_enclave_connection_does_not_require_federated_codec() {
     let mut assembly = Assembly::new();
-    let mut builder = assembly.add_reactor("main", None, None, (), false);
-    let source = builder
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    let source = ctx
         .add_child_reactor(local_only_source_reactor(), "source", (), true)
         .unwrap();
-    let sink = builder
+    let sink = ctx
         .add_child_reactor(local_only_sink_reactor(), "sink", (), true)
         .unwrap();
-    builder.connect_port(source, sink, None, false).unwrap();
-    builder.finish().unwrap();
+    ctx.connect_port(source, sink, None, false).unwrap();
+    ctx.finish().unwrap();
 
     let parts = assembly
         .into_runtime_assembly(&runtime::Config::default())
@@ -1131,15 +1108,15 @@ fn test_local_cross_enclave_connection_does_not_require_federated_codec() {
 fn test_federated_connection_lowers_endpoint_runtime_parts() {
     let mut assembly = Assembly::new();
     register_u32_federated_codec(&mut assembly).unwrap();
-    let mut builder = assembly.add_reactor("main", None, None, (), false);
-    let source = builder
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    let source = ctx
         .add_child_federate(federated_source_reactor(), "source", ())
         .unwrap();
-    let sink = builder
+    let sink = ctx
         .add_child_federate(federated_sink_reactor(), "sink", ())
         .unwrap();
-    builder.connect_port(source, sink, None, false).unwrap();
-    builder.finish().unwrap();
+    ctx.connect_port(source, sink, None, false).unwrap();
+    ctx.finish().unwrap();
 
     let parts = assembly
         .into_runtime_assembly(&runtime::Config::default())
@@ -1165,17 +1142,15 @@ fn test_federated_sender_emits_serialized_msg_command() {
     let delay = runtime::Duration::milliseconds(10);
     let mut assembly = Assembly::new();
     register_u32_federated_codec(&mut assembly).unwrap();
-    let mut builder = assembly.add_reactor("main", None, None, (), false);
-    let source = builder
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    let source = ctx
         .add_child_federate(federated_startup_source_reactor(7), "source", ())
         .unwrap();
-    let sink = builder
+    let sink = ctx
         .add_child_federate(federated_sink_reactor(), "sink", ())
         .unwrap();
-    builder
-        .connect_port(source, sink, Some(delay), false)
-        .unwrap();
-    builder.finish().unwrap();
+    ctx.connect_port(source, sink, Some(delay), false).unwrap();
+    ctx.finish().unwrap();
 
     let mut parts = assembly
         .into_runtime_assembly(&runtime::Config::default())
@@ -1215,19 +1190,19 @@ fn test_federated_inbound_registry_schedules_target_action() {
     let values = Arc::new(Mutex::new(Vec::new()));
     let mut assembly = Assembly::new();
     register_u32_federated_codec(&mut assembly).unwrap();
-    let mut builder = assembly.add_reactor("main", None, None, (), false);
-    let source = builder
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    let source = ctx
         .add_child_federate(federated_source_reactor(), "source", ())
         .unwrap();
-    let sink = builder
+    let sink = ctx
         .add_child_federate(
             federated_recording_sink_reactor(Arc::clone(&values)),
             "sink",
             (),
         )
         .unwrap();
-    builder.connect_port(source, sink, None, false).unwrap();
-    builder.finish().unwrap();
+    ctx.connect_port(source, sink, None, false).unwrap();
+    ctx.finish().unwrap();
 
     let RuntimeAssembly {
         enclaves,
@@ -1259,18 +1234,14 @@ fn test_federated_inbound_registry_schedules_target_action() {
 fn test_zero_delay_distributed_cycle_is_rejected() {
     let mut assembly = Assembly::new();
     register_u32_federated_codec(&mut assembly).unwrap();
-    let mut builder = assembly.add_reactor("main", None, None, (), false);
-    let a = builder.add_child_federate(federated_io_reactor(), "a", ());
-    let b = builder.add_child_federate(federated_io_reactor(), "b", ());
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    let a = ctx.add_child_federate(federated_io_reactor(), "a", ());
+    let b = ctx.add_child_federate(federated_io_reactor(), "b", ());
     let a = a.unwrap();
     let b = b.unwrap();
-    builder
-        .connect_port(a.output, b.input, None, false)
-        .unwrap();
-    builder
-        .connect_port(b.output, a.input, None, false)
-        .unwrap();
-    builder.finish().unwrap();
+    ctx.connect_port(a.output, b.input, None, false).unwrap();
+    ctx.connect_port(b.output, a.input, None, false).unwrap();
+    ctx.finish().unwrap();
 
     assert!(matches!(
         assembly

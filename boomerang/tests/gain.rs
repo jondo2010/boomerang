@@ -25,10 +25,10 @@ fn Test(#[input] x: u32) -> impl Reactor {
 
 #[reactor]
 fn Gain() -> impl Reactor {
-    let g = builder.add_child_reactor(Scale(2), "g", (), false)?;
-    let t = builder.add_child_reactor(Test(), "t", (), false)?;
-    let tim = builder.add_timer("tim", TimerSpec::STARTUP)?;
-    builder.connect_port(g.y, t.x, None, false)?;
+    let g = ctx.add_child_reactor(Scale(2), "g", (), false)?;
+    let t = ctx.add_child_reactor(Test(), "t", (), false)?;
+    let tim = ctx.add_timer("tim", TimerSpec::STARTUP)?;
+    ctx.connect_port(g.y, t.x, None, false)?;
 
     reaction! {
         (tim) -> g.x {

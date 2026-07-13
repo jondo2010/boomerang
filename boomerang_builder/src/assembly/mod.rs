@@ -1,6 +1,6 @@
-//! Build-time environment lowering.
+//! Build-time assembly lowering.
 //!
-//! The builder owns the linear construction pass that turns reactor declarations into
+//! The assembly owns the linear construction pass that turns reactor declarations into
 //! `boomerang_runtime` data, including static dependency maps and derived scheduler indexes. The
 //! runtime receives those data structures ready to execute.
 
@@ -106,20 +106,20 @@ pub struct ModeSpec {
 
 #[derive(Default)]
 pub struct Assembly {
-    /// Builder for Actions
+    /// Action specifications.
     pub(super) action_specs: SlotMap<AssemblyActionKey, ActionSpec>,
-    /// Builders for Ports
+    /// Port specifications.
     pub(super) port_specs: SlotMap<AssemblyPortKey, Box<dyn ErasedPortSpec>>,
-    /// Builders for Reactions
+    /// Reaction specifications.
     pub(super) reaction_specs: SlotMap<AssemblyReactionKey, ReactionSpec>,
-    /// Builders for Modes
+    /// Mode specifications.
     pub(super) mode_specs: SlotMap<AssemblyModeKey, ModeSpec>,
-    /// Builders for Reactors
+    /// Reactor specifications.
     pub(super) reactor_specs: SlotMap<AssemblyReactorKey, ReactorSpec>,
-    /// Builders for Connections
+    /// Connection specifications.
     pub(super) connection_specs: Vec<Box<dyn ErasedConnectionSpec>>,
     #[cfg(feature = "federated")]
-    /// Environment-scoped payload codec policy for inferred cross-federate connections.
+    /// Assembly-scoped payload codec policy for inferred cross-federate connections.
     federated_codecs: HashMap<TypeId, Box<FederatedCodecEntry>>,
     #[cfg(feature = "federated")]
     /// Factories for inbound federated endpoint registry entries.
@@ -149,7 +149,7 @@ impl Assembly {
     }
 
     /// Get a previously built reactor
-    pub fn get_reactor_builder(
+    pub fn get_reactor_spec(
         &mut self,
         reactor_key: AssemblyReactorKey,
     ) -> Result<ReactorContext<'_>, AssemblyError> {
@@ -233,20 +233,20 @@ impl Assembly {
         kind: impl Into<ModeKind>,
     ) -> Result<AssemblyModeKey, AssemblyError> {
         let kind = kind.into();
-        let reactor_builder = &mut self.reactor_specs[reactor_key];
-        if reactor_builder.modes.keys().any(|mode_key| {
+        let reactor_spec = &mut self.reactor_specs[reactor_key];
+        if reactor_spec.modes.keys().any(|mode_key| {
             self.mode_specs[mode_key].name == name
                 && self.mode_specs[mode_key].reactor_key == reactor_key
         }) {
             return Err(AssemblyError::DuplicateModeDefinition {
-                reactor_name: reactor_builder.name().to_owned(),
+                reactor_name: reactor_spec.name().to_owned(),
                 mode_name: name.to_owned(),
             });
         }
 
-        if kind.is_initial() && reactor_builder.initial_mode.is_some() {
+        if kind.is_initial() && reactor_spec.initial_mode.is_some() {
             return Err(AssemblyError::MultipleInitialModes {
-                reactor_name: reactor_builder.name().to_owned(),
+                reactor_name: reactor_spec.name().to_owned(),
             });
         }
 
@@ -256,9 +256,9 @@ impl Assembly {
             kind,
         });
 
-        reactor_builder.modes.insert(key, ());
+        reactor_spec.modes.insert(key, ());
         if kind.is_initial() {
-            reactor_builder.initial_mode = Some(key);
+            reactor_spec.initial_mode = Some(key);
         }
 
         Ok(key)
@@ -351,7 +351,7 @@ impl Assembly {
     where
         T: runtime::ReactorData,
     {
-        let reactor_builder = &mut self.reactor_specs[reactor_key];
+        let reactor_spec = &mut self.reactor_specs[reactor_key];
 
         if let Some(mode_key) = scope_mode {
             let mode = self.mode_specs.get(mode_key).ok_or_else(|| {
@@ -368,13 +368,13 @@ impl Assembly {
         }
 
         // Ensure no duplicates
-        if reactor_builder
+        if reactor_spec
             .actions
             .keys()
             .any(|action_key| self.action_specs[action_key].name() == name)
         {
             return Err(AssemblyError::DuplicateActionDefinition {
-                reactor_name: reactor_builder.name().to_owned(),
+                reactor_name: reactor_spec.name().to_owned(),
                 action_name: name.into(),
             });
         }
@@ -383,7 +383,7 @@ impl Assembly {
             .action_specs
             .insert(ActionSpec::new(name, reactor_key, scope_mode, r#type));
 
-        reactor_builder.actions.insert(key, ());
+        reactor_spec.actions.insert(key, ());
 
         Ok(key.into())
     }
@@ -425,7 +425,7 @@ impl Assembly {
     ) -> Result<&dyn ErasedPortSpec, AssemblyError> {
         self.port_specs
             .get(port_key)
-            .map(|builder| builder.as_ref())
+            .map(|port_spec| port_spec.as_ref())
             .ok_or(AssemblyError::PortKeyNotFound(port_key))
     }
 
@@ -439,10 +439,10 @@ impl Assembly {
     ) -> Option<TypedPortKey<T, Q, Contained>> {
         self.port_specs
             .iter()
-            .find(|(_, port_builder)| {
-                port_builder.name() == port_name
-                    && port_builder.parent_reactor_key() == Some(reactor_key)
-                    && port_builder.inner_type_id() == std::any::TypeId::of::<(T, Q)>()
+            .find(|(_, port_spec)| {
+                port_spec.name() == port_name
+                    && port_spec.parent_reactor_key() == Some(reactor_key)
+                    && port_spec.inner_type_id() == std::any::TypeId::of::<(T, Q)>()
             })
             .map(|(port_key, _)| port_key.into())
     }
@@ -455,12 +455,12 @@ impl Assembly {
     ) -> Result<AssemblyReactionKey, AssemblyError> {
         self.reaction_specs
             .iter()
-            .find(|(_, reaction_builder)| {
-                reaction_builder
+            .find(|(_, reaction_spec)| {
+                reaction_spec
                     .name()
                     .map(|name| name == reaction_name)
                     .unwrap_or_default()
-                    && reaction_builder.parent_reactor_key() == Some(reactor_key)
+                    && reaction_spec.parent_reactor_key() == Some(reactor_key)
             })
             .map(|(reaction_key, _)| reaction_key)
             .ok_or_else(|| AssemblyError::NamedReactionNotFound(reaction_name.to_string()))
@@ -495,8 +495,8 @@ impl Assembly {
             .ok_or(AssemblyError::InvalidFqn(reactor_fqn.to_string()))?;
         self.reactor_specs
             .iter()
-            .find_map(|(reactor_key, reactor_builder)| {
-                if reactor_builder.fqn_segment(false) == segment {
+            .find_map(|(reactor_key, reactor_spec)| {
+                if reactor_spec.fqn_segment(false) == segment {
                     Some(reactor_key)
                 } else {
                     None
@@ -714,8 +714,8 @@ impl Assembly {
         T: runtime::ReactorData,
     {
         self.federated_inbound_endpoint_factories.push(Box::new(
-            move |builder_parts, connections| {
-                let (enclave_key, runtime_action_key) = *builder_parts
+            move |runtime_assembly, connections| {
+                let (enclave_key, runtime_action_key) = *runtime_assembly
                     .aliases
                     .action_aliases
                     .get(target_action_key)
@@ -724,17 +724,18 @@ impl Assembly {
                             "missing runtime action alias for federated endpoint {endpoint}"
                         ))
                     })?;
-                let expected_enclave_key = builder_parts.aliases.enclave_aliases[target_partition];
+                let expected_enclave_key =
+                    runtime_assembly.aliases.enclave_aliases[target_partition];
                 if enclave_key != expected_enclave_key {
                     return Err(AssemblyError::InternalError(format!(
                         "federated endpoint {endpoint} resolved to wrong target enclave"
                     )));
                 }
 
-                let enclave = &builder_parts.enclaves[enclave_key];
+                let enclave = &runtime_assembly.enclaves[enclave_key];
                 let context = enclave.create_send_context(enclave_key);
                 let action_ref = enclave.create_async_action_ref(runtime_action_key);
-                let target_federate = builder_parts
+                let target_federate = runtime_assembly
                     .federation_plan
                     .federates
                     .iter()
@@ -765,7 +766,7 @@ impl Assembly {
         key.fqn(self, grouped)
     }
 
-    /// Validate the reactions in the environment
+    /// Validate the reactions in the assembly.
     pub fn validate_reactions(&self) -> Result<(), AssemblyError> {
         for (_reaction_key, reaction) in &self.reaction_specs {
             // Validate the port dependencies of each Reaction

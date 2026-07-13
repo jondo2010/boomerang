@@ -7,10 +7,10 @@ struct HelloBench {
 }
 
 #[reactor(state = HelloBench)]
-fn HelloBenchBuilder(#[input] in1: u32, #[output] out1: u32) -> impl Reactor {
+fn HelloBenchReactor(#[input] in1: u32, #[output] out1: u32) -> impl Reactor {
     timer! { tim1(100 msec, 1 sec) };
 
-    builder.connect_port(out1, in1, None, false)?;
+    ctx.connect_port(out1, in1, None, false)?;
 
     reaction! {
         ReactionFoo (tim1) -> out1 {
@@ -37,7 +37,7 @@ fn bench(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     let mut assembly = Assembly::new();
-                    let reactor = HelloBenchBuilder();
+                    let reactor = HelloBenchReactor();
                     let _reactor = reactor
                         .build(
                             "benchmark",

@@ -87,11 +87,11 @@ impl<S: runtime::ReactorData> ReactorContext<'_, S> {
     pub fn add_reaction(&mut self, name: Option<&str>) -> ReactionDeclaration<'_, S> {
         let reactor_key = self.key();
         let current_mode = self.current_mode();
-        let builder = ReactionDeclaration::new(name, reactor_key, self.assembly());
+        let declaration = ReactionDeclaration::new(name, reactor_key, self.assembly());
         if let Some(mode) = current_mode {
-            builder.in_mode_scope(mode)
+            declaration.in_mode_scope(mode)
         } else {
-            builder
+            declaration
         }
     }
 

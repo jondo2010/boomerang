@@ -15,14 +15,13 @@ struct State {
 
 #[reactor(state = State)]
 fn AsyncCallback() -> impl Reactor {
-    let t = builder.add_timer(
+    let t = ctx.add_timer(
         "t",
         TimerSpec::default().with_period(Duration::milliseconds(200)),
     )?;
-    let a = builder.add_physical_action::<usize>("a", None)?;
+    let a = ctx.add_physical_action::<usize>("a", None)?;
 
-    builder
-        .add_reaction(Some("T"))
+    ctx.add_reaction(Some("T"))
         .with_trigger(t)
         .with_effect(a)
         .with_reaction_fn(|ctx, state, (_t, a)| {
@@ -69,8 +68,7 @@ fn AsyncCallback() -> impl Reactor {
         }
     }
 
-    builder
-        .add_reaction(Some("Shutdown"))
+    ctx.add_reaction(Some("Shutdown"))
         .with_shutdown_trigger()
         .with_reaction_fn(|_ctx, state, _| {
             // make sure to join the thread before shutting down

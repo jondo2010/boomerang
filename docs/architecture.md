@@ -56,7 +56,7 @@ replayed execution per partition, select an in-memory or network transport,
 and enable recording or validation at selected boundaries.
 
 `RuntimePlan` is the fully lowered, executable result. It contains runtime
-keys and objects, but no unresolved builder identities or placement policy.
+keys and objects, but no unresolved assembly identities or placement policy.
 
 ## Stable Logical Identity
 
@@ -80,7 +80,7 @@ deployment. At minimum, recorded boundary events carry:
 
 ## Partitioning and Boundary Lowering
 
-Partitioning is a builder transformation over the complete logical graph. It
+Partitioning is an assembly transformation over the complete logical graph. It
 must not require application code to call different reactor-construction APIs
 for local and federated deployments.
 
@@ -99,10 +99,10 @@ preserves endpoint identity, payload value, logical delay, full tag, and
 same-tag ordering. Transport and serialization are implementation details and
 must not introduce observable logical behavior.
 
-The builder owns all graph analysis and lowering. It validates partition
+The assembly layer owns all graph analysis and lowering. It validates partition
 boundaries, derives endpoint identities, creates source and target bridge
 reactions, resolves runtime aliases, and emits a protocol-neutral runtime
-description. Protocol topology and wire types are not builder output.
+description. Protocol topology and wire types are not assembly output.
 
 ## Deterministic Equivalence
 
@@ -173,7 +173,7 @@ The architecture supports several backends without changing the graph:
   replaced by trace-backed boundary endpoints.
 
 Backends consume a common lowered plan. They do not repeat graph analysis or
-builder lowering.
+assembly lowering.
 
 ## Crate Boundaries
 
@@ -191,10 +191,10 @@ state, wire frames, and federated protocol types.
 
 `boomerang_federated` owns protocol concerns only: wire-safe identities and
 tags, topology, RTI state and sessions, federate protocol clients, framing, and
-transports. It must not own builder lowering or scheduler thread lifecycle.
+transports. It must not own assembly lowering or scheduler thread lifecycle.
 
 `boomerang_federated_runtime` is the explicit integration adapter. It may
-depend on builder, runtime, and protocol crates. It maps a lowered runtime plan
+depend on assembly, runtime, and protocol crates. It maps a lowered runtime plan
 to protocol topology and routes, converts runtime tags and delays to wire
 representations, implements runtime coordination using federate clients, and
 owns in-memory and network federation orchestration. Mixed runtime/protocol
@@ -209,20 +209,20 @@ The intended dependency direction is:
 ```mermaid
 flowchart LR
     Facade["boomerang"]
-    Builder["boomerang_builder"]
+    AssemblyLayer["boomerang_builder"]
     Runtime["boomerang_runtime"]
     Adapter["boomerang_federated_runtime"]
     Protocol["boomerang_federated"]
 
-    Facade --> Builder
-    Builder --> Runtime
+    Facade --> AssemblyLayer
+    AssemblyLayer --> Runtime
     Facade -. federated feature .-> Adapter
-    Adapter --> Builder
+    Adapter --> AssemblyLayer
     Adapter --> Runtime
     Adapter --> Protocol
 ```
 
-No dependency points from runtime or protocol crates back into the builder or
+No dependency points from runtime or protocol crates back into the assembly layer or
 facade.
 
 ## Feature Model
@@ -234,7 +234,7 @@ may be combined for hybrid replay.
 Lower crates may use implementation features where necessary, but those
 features are not part of the user-facing configuration model. Enabling
 `boomerang/federated` must select a complete, internally consistent federation
-stack without requiring users to coordinate builder, runtime, protocol, or
+stack without requiring users to coordinate assembly, runtime, protocol, or
 codec feature flags.
 
 The default local execution path must not acquire Tokio, network transport, or
@@ -250,13 +250,13 @@ a portable runtime core.
 ```mermaid
 flowchart LR
     Graph["Reactor graph"]
-    Builder["Host-side builder and validation"]
+    AssemblyLayer["Host-side assembly and validation"]
     Plan["Static lowered runtime plan"]
     Core["Portable no_std runtime core"]
     Hosted["std platform adapter<br/>embedded Linux or QNX"]
     Rtos["RTOS / bare-metal adapter<br/>for example Zephyr"]
 
-    Graph --> Builder --> Plan --> Core
+    Graph --> AssemblyLayer --> Plan --> Core
     Core --> Hosted
     Core --> Rtos
 ```
@@ -279,10 +279,10 @@ currently implemented deterministic semantics.
 - Application graph construction is independent of deployment.
 - Partitioning occurs after the complete logical graph is known.
 - Enclave, federate, process, and host mappings remain distinct.
-- Builder output is protocol-neutral.
+- Assembly output is protocol-neutral.
 - Runtime scheduling remains protocol- and transport-neutral.
 - Portable scheduler semantics do not depend on a hosted operating system.
-- Protocol crates do not own builder lowering or scheduler execution.
+- Protocol crates do not own assembly lowering or scheduler execution.
 - Durable identities and recordings do not contain runtime allocation keys.
 - Every boundary backend preserves the same logical delivery contract.
 - Replay preserves complete logical tags and deterministic event order.

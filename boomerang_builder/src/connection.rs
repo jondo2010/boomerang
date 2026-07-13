@@ -1,4 +1,4 @@
-//! Specialized builder for non-port-binding connections between reactors.
+//! Specialized assembly support for non-port-binding connections between reactors.
 //!
 //! Non-port-binding connections are connections with a specified delay or between enclaves.
 
@@ -452,15 +452,15 @@ fn build_delayed_connection<T: runtime::ReactorData + Clone, Q: ActionTag>(
     ),
     AssemblyError,
 > {
-    let mut builder = assembly.add_reactor("con_reactor", parent_key, None, (), false);
+    let mut ctx = assembly.add_reactor("con_reactor", parent_key, None, (), false);
     if let Some(scope_mode) = scope_mode {
-        builder.set_scope_mode(scope_mode)?;
+        ctx.set_scope_mode(scope_mode)?;
     }
-    let input_port = builder.add_input_port::<T>("con_in")?;
-    let output_port = builder.add_output_port::<T>("con_out")?;
-    let action_key = builder.add_action::<T, Q>("con_act", after)?;
+    let input_port = ctx.add_input_port::<T>("con_in")?;
+    let output_port = ctx.add_output_port::<T>("con_out")?;
+    let action_key = ctx.add_action::<T, Q>("con_act", after)?;
     // The target reaction is triggered by the action, and writes to the output port
-    let _ = builder
+    let _ = ctx
         .add_reaction(None)
         .with_trigger(action_key)
         .with_effect(output_port)
@@ -469,7 +469,7 @@ fn build_delayed_connection<T: runtime::ReactorData + Clone, Q: ActionTag>(
         })
         .finish()?;
     // The source reaction is triggered by the input port, and schedules the action
-    let _ = builder
+    let _ = ctx
         .add_reaction(None)
         .with_effect(action_key)
         .with_trigger(input_port)
@@ -477,7 +477,7 @@ fn build_delayed_connection<T: runtime::ReactorData + Clone, Q: ActionTag>(
             runtime::ConnectionSenderReactionFn::<T>::default().into()
         })
         .finish()?;
-    let reactor_key = builder.finish()?;
+    let reactor_key = ctx.finish()?;
     Ok((reactor_key, input_port, output_port))
 }
 
@@ -496,24 +496,24 @@ fn build_enclave_connection_source<T: runtime::ReactorData + Clone>(
     target_partition: AssemblyReactorKey,
     target_action_key: AssemblyActionKey,
 ) -> Result<EnclaveConnectionSource<T>, AssemblyError> {
-    let mut source_builder = assembly.add_reactor("con_reactor_src", parent_key, None, (), false);
+    let mut source_ctx = assembly.add_reactor("con_reactor_src", parent_key, None, (), false);
     if let Some(scope_mode) = scope_mode {
-        source_builder.set_scope_mode(scope_mode)?;
+        source_ctx.set_scope_mode(scope_mode)?;
     }
-    let input_port = source_builder.add_input_port::<T>("con_in")?;
-    source_builder
+    let input_port = source_ctx.add_input_port::<T>("con_in")?;
+    source_ctx
         .add_reaction(None)
         .with_trigger(input_port)
-        .with_deferred_reaction_factory(move |builder_parts| {
-            let (enclave_key, runtime_action_key) = builder_parts
+        .with_deferred_reaction_factory(move |runtime_assembly| {
+            let (enclave_key, runtime_action_key) = runtime_assembly
                 .aliases
                 .action_aliases
                 .get(target_action_key)
                 .expect("Action key");
-            let enclave = &builder_parts.enclaves[*enclave_key];
+            let enclave = &runtime_assembly.enclaves[*enclave_key];
 
             //TODO: Get rid of this and the target_partition argument once this works
-            let enclave_key2 = builder_parts.aliases.enclave_aliases[target_partition];
+            let enclave_key2 = runtime_assembly.aliases.enclave_aliases[target_partition];
             assert_eq!(enclave_key, &enclave_key2, "Temporary cross-check");
 
             let remote_context = enclave.create_send_context(*enclave_key);
@@ -522,7 +522,7 @@ fn build_enclave_connection_source<T: runtime::ReactorData + Clone>(
                 .into()
         })
         .finish()?;
-    let reactor_key = source_builder.finish()?;
+    let reactor_key = source_ctx.finish()?;
     Ok(EnclaveConnectionSource {
         reactor_key,
         input_port,
@@ -539,27 +539,27 @@ fn build_federated_connection_source<T: runtime::ReactorData + Clone>(
     endpoint: boomerang_federated::EndpointId,
     encoder: Box<dyn runtime::FederatedPayloadEncoder<T>>,
 ) -> Result<EnclaveConnectionSource<T>, AssemblyError> {
-    let mut source_builder = assembly.add_reactor("con_reactor_src", parent_key, None, (), false);
+    let mut source_ctx = assembly.add_reactor("con_reactor_src", parent_key, None, (), false);
     if let Some(scope_mode) = scope_mode {
-        source_builder.set_scope_mode(scope_mode)?;
+        source_ctx.set_scope_mode(scope_mode)?;
     }
-    let input_port = source_builder.add_input_port::<T>("con_in")?;
-    source_builder
+    let input_port = source_ctx.add_input_port::<T>("con_in")?;
+    source_ctx
         .add_reaction(None)
         .with_trigger(input_port)
-        .with_deferred_reaction_factory(move |builder_parts| {
-            let (enclave_key, runtime_action_key) = builder_parts
+        .with_deferred_reaction_factory(move |runtime_assembly| {
+            let (enclave_key, runtime_action_key) = runtime_assembly
                 .aliases
                 .action_aliases
                 .get(target_action_key)
                 .expect("Action key");
-            let enclave = &builder_parts.enclaves[*enclave_key];
+            let enclave = &runtime_assembly.enclaves[*enclave_key];
 
-            let enclave_key2 = builder_parts.aliases.enclave_aliases[target_partition];
+            let enclave_key2 = runtime_assembly.aliases.enclave_aliases[target_partition];
             assert_eq!(enclave_key, &enclave_key2, "Temporary cross-check");
 
             let remote_action_ref = enclave.create_async_action_ref(*runtime_action_key);
-            let (outbound, faults) = builder_parts
+            let (outbound, faults) = runtime_assembly
                 .federated_connections
                 .outbound_endpoint(&endpoint)
                 .expect("federated endpoint sink was validated before deferred lowering");
@@ -572,7 +572,7 @@ fn build_federated_connection_source<T: runtime::ReactorData + Clone>(
             .into()
         })
         .finish()?;
-    let reactor_key = source_builder.finish()?;
+    let reactor_key = source_ctx.finish()?;
     Ok(EnclaveConnectionSource {
         reactor_key,
         input_port,
@@ -595,23 +595,23 @@ fn build_enclave_connection_target<T: runtime::ReactorData + Clone, Q: ActionTag
     scope_mode: Option<AssemblyModeKey>,
     after: Option<runtime::Duration>,
 ) -> Result<EnclaveConnectionTarget<T, Q>, AssemblyError> {
-    let mut target_builder = assembly.add_reactor("con_reactor_tgt", parent_key, None, (), false);
+    let mut target_ctx = assembly.add_reactor("con_reactor_tgt", parent_key, None, (), false);
     if let Some(scope_mode) = scope_mode {
-        target_builder.set_scope_mode(scope_mode)?;
+        target_ctx.set_scope_mode(scope_mode)?;
     }
-    let action_key = target_builder.add_action::<T, Q>("con_act", after)?;
-    let output_port = target_builder.add_output_port::<T>("con_out")?;
+    let action_key = target_ctx.add_action::<T, Q>("con_act", after)?;
+    let output_port = target_ctx.add_output_port::<T>("con_out")?;
 
-    target_builder
+    target_ctx
         .add_reaction(None)
         .with_trigger(action_key)
         .with_effect(output_port)
-        .with_deferred_reaction_factory(move |_builder_parts| {
+        .with_deferred_reaction_factory(move |_runtime_assembly| {
             runtime::ConnectionReceiverReactionFn::<T>::default().into()
         })
         .finish()?;
 
-    let reactor_key = target_builder.finish()?;
+    let reactor_key = target_ctx.finish()?;
     Ok(EnclaveConnectionTarget {
         reactor_key,
         output_port,

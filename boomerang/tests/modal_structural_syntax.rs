@@ -2,7 +2,7 @@ use boomerang::prelude::*;
 
 #[reactor]
 fn ModalStructuralSyntax(#[state] a_count: u32, #[state] b_count: u32) -> impl Reactor {
-    let pulse = builder.add_logical_action::<()>("pulse", None)?;
+    let pulse = ctx.add_logical_action::<()>("pulse", None)?;
 
     reaction! {
         (startup) -> pulse {

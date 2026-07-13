@@ -1,4 +1,4 @@
-//! Builder-visible metadata for static federated enclave topologies.
+//! Assembly-visible metadata for static federated enclave topologies.
 
 use std::collections::{BTreeMap, BTreeSet};
 

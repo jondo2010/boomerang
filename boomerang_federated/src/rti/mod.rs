@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroUsize;
 
 use crate::protocol::{
     EndpointId, FederateId, FederateToRti, FederatedTopology, RtiToFederate, TopologyEdge,
@@ -144,23 +145,86 @@ impl CompiledTopology {
     }
 }
 
-/// Per-federate control-plane state known by the RTI.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FederateState {
-    pub last_completed: WireTag,
-    pub last_granted: Option<WireTag>,
-    pub next_event: Option<WireTag>,
-    pub stopped: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NextEvent {
+    Unknown,
+    Finite(WireTag),
+    NoFuture,
 }
 
-impl Default for FederateState {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FederateLifecycle {
+    Running { next_event: NextEvent },
+    Stopped,
+}
+
+/// Per-federate control-plane state known by the RTI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FederateCoordination {
+    lifecycle: FederateLifecycle,
+    last_completed: WireTag,
+    last_granted: Option<WireTag>,
+    in_transit: BTreeMap<WireTag, NonZeroUsize>,
+}
+
+impl Default for FederateCoordination {
     fn default() -> Self {
         Self {
+            lifecycle: FederateLifecycle::Running {
+                next_event: NextEvent::Unknown,
+            },
             last_completed: WireTag::Never,
             last_granted: None,
-            next_event: None,
-            stopped: false,
+            in_transit: BTreeMap::new(),
         }
+    }
+}
+
+impl FederateCoordination {
+    fn advertised_next_event(&self) -> WireTag {
+        match self.lifecycle {
+            FederateLifecycle::Running {
+                next_event: NextEvent::Unknown,
+            } => WireTag::Never,
+            FederateLifecycle::Running {
+                next_event: NextEvent::Finite(tag),
+            } => tag,
+            FederateLifecycle::Running {
+                next_event: NextEvent::NoFuture,
+            }
+            | FederateLifecycle::Stopped => WireTag::Forever,
+        }
+    }
+
+    fn requested_tag(&self) -> Option<WireTag> {
+        match self.lifecycle {
+            FederateLifecycle::Running {
+                next_event: NextEvent::Finite(tag),
+            } => Some(tag),
+            FederateLifecycle::Running {
+                next_event: NextEvent::Unknown | NextEvent::NoFuture,
+            }
+            | FederateLifecycle::Stopped => None,
+        }
+    }
+
+    fn request(&mut self, tag: WireTag) {
+        let FederateLifecycle::Running { next_event } = &mut self.lifecycle else {
+            return;
+        };
+        *next_event = if tag == WireTag::FOREVER {
+            NextEvent::NoFuture
+        } else {
+            NextEvent::Finite(tag)
+        };
+    }
+
+    fn stop(&mut self) {
+        self.lifecycle = FederateLifecycle::Stopped;
+    }
+
+    fn is_stopped(&self) -> bool {
+        matches!(self.lifecycle, FederateLifecycle::Stopped)
     }
 }
 
@@ -233,14 +297,19 @@ pub enum RtiError {
         federate_id: FederateId,
         tag: WireTag,
     },
+
+    #[error("in-transit message count overflow for federate `{federate_id}` at {tag}")]
+    MessageCountOverflow {
+        federate_id: FederateId,
+        tag: WireTag,
+    },
 }
 
 /// Deterministic RTI state for static TAG/NET/LTC/MSG coordination.
 #[derive(Debug, Clone)]
 pub struct RtiState {
     topology: CompiledTopology,
-    federates: BTreeMap<FederateId, FederateState>,
-    in_transit: BTreeMap<FederateId, BTreeMap<WireTag, usize>>,
+    federates: BTreeMap<FederateId, FederateCoordination>,
 }
 
 impl RtiState {
@@ -251,13 +320,12 @@ impl RtiState {
             .federates
             .iter()
             .cloned()
-            .map(|federate_id| (federate_id, FederateState::default()))
+            .map(|federate_id| (federate_id, FederateCoordination::default()))
             .collect();
 
         Ok(Self {
             topology,
             federates,
-            in_transit: BTreeMap::new(),
         })
     }
 
@@ -272,10 +340,6 @@ impl RtiState {
         endpoint: &EndpointId,
     ) -> bool {
         self.topology.contains_route(source, target, endpoint)
-    }
-
-    pub fn federate_state(&self, federate_id: &FederateId) -> Option<&FederateState> {
-        self.federates.get(federate_id)
     }
 
     pub fn handle(&mut self, message: FederateToRti) -> Result<Vec<RtiDelivery>, RtiError> {
@@ -324,8 +388,7 @@ impl RtiState {
                     .federates
                     .get_mut(&federate_id)
                     .expect("federate existence was checked");
-                state.next_event = Some(WireTag::FOREVER);
-                state.stopped = true;
+                state.stop();
                 self.try_grants_for_all()
             }
         }
@@ -340,7 +403,7 @@ impl RtiState {
         self.federates
             .get_mut(federate_id)
             .expect("federate existence was checked")
-            .next_event = Some(tag);
+            .request(tag);
         self.try_grant_tag(federate_id)
     }
 
@@ -364,27 +427,23 @@ impl RtiState {
         tag: WireTag,
     ) -> Result<(), RtiError> {
         self.ensure_federate(federate_id)?;
-        let remove_federate_entry = {
-            let messages = self.in_transit.get_mut(federate_id).ok_or_else(|| {
-                RtiError::UnmatchedMessageAck {
-                    federate_id: federate_id.clone(),
-                    tag,
-                }
-            })?;
-            let count = messages
+        let state = self
+            .federates
+            .get_mut(federate_id)
+            .expect("federate existence was checked");
+        let count =
+            state
+                .in_transit
                 .get_mut(&tag)
                 .ok_or_else(|| RtiError::UnmatchedMessageAck {
                     federate_id: federate_id.clone(),
                     tag,
                 })?;
-            *count -= 1;
-            if *count == 0 {
-                messages.remove(&tag);
+        match NonZeroUsize::new(count.get() - 1) {
+            Some(remaining) => *count = remaining,
+            None => {
+                state.in_transit.remove(&tag);
             }
-            messages.is_empty()
-        };
-        if remove_federate_entry {
-            self.in_transit.remove(federate_id);
         }
         Ok(())
     }
@@ -397,12 +456,28 @@ impl RtiState {
     ) -> Result<(), RtiError> {
         self.ensure_federate(source)?;
         self.ensure_federate(target)?;
-        *self
-            .in_transit
-            .entry(target.clone())
-            .or_default()
-            .entry(tag)
-            .or_default() += 1;
+        let state = self
+            .federates
+            .get_mut(target)
+            .expect("federate existence was checked");
+        match state.in_transit.get_mut(&tag) {
+            Some(count) => {
+                let next =
+                    count
+                        .get()
+                        .checked_add(1)
+                        .ok_or_else(|| RtiError::MessageCountOverflow {
+                            federate_id: target.clone(),
+                            tag,
+                        })?;
+                *count = NonZeroUsize::new(next).expect("positive count remains nonzero");
+            }
+            None => {
+                state
+                    .in_transit
+                    .insert(tag, NonZeroUsize::new(1).expect("one is nonzero"));
+            }
+        }
         Ok(())
     }
 
@@ -430,10 +505,8 @@ impl RtiState {
                 .federates
                 .get(&dependency.source)
                 .ok_or_else(|| RtiError::UnknownFederate(dependency.source.clone()))?;
-            let candidate = match upstream_state.next_event {
-                Some(tag) => apply_edge_delay(tag, dependency.delay)?,
-                None => WireTag::Never,
-            };
+            let candidate =
+                apply_edge_delay(upstream_state.advertised_next_event(), dependency.delay)?;
 
             if earliest.is_none_or(|current| candidate < current) {
                 earliest = Some(candidate);
@@ -448,13 +521,13 @@ impl RtiState {
             .federates
             .get(federate_id)
             .ok_or_else(|| RtiError::UnknownFederate(federate_id.clone()))?;
-        if state.stopped {
+        if state.is_stopped() {
             return Ok(GrantDecision::Blocked {
-                requested: state.next_event.unwrap_or(WireTag::FOREVER),
+                requested: WireTag::Forever,
                 earliest_incoming: self.earliest_incoming_message_tag(federate_id)?,
             });
         }
-        let requested = match state.next_event {
+        let requested = match state.requested_tag() {
             Some(tag) => tag,
             None => {
                 return Ok(GrantDecision::Blocked {
@@ -508,9 +581,9 @@ impl RtiState {
     }
 
     fn earliest_in_transit_message_tag(&self, federate_id: &FederateId) -> Option<WireTag> {
-        self.in_transit
+        self.federates
             .get(federate_id)
-            .and_then(|messages| messages.keys().next().copied())
+            .and_then(|state| state.in_transit.keys().next().copied())
     }
 
     fn ensure_federate(&self, federate_id: &FederateId) -> Result<(), RtiError> {

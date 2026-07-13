@@ -27,7 +27,7 @@ pub use protocol::{
     EndpointId, FederateId, FederateToRti, FederatedTopology, NeighborStructure, ProtocolFrame,
     RtiToFederate, TopologyEdge, WireDelay, WireTag,
 };
-pub use rti::{FederateState, GrantDecision, RtiDelivery, RtiError, RtiState};
+pub use rti::{GrantDecision, RtiDelivery, RtiError, RtiState};
 #[cfg(feature = "runtime")]
 pub use runtime_bridge::{FederatedRuntimeConnections, RuntimeBridgeError};
 pub use session::{RtiSessionEndpoint, SessionError, StaticRtiSession};

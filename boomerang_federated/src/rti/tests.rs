@@ -4,15 +4,13 @@ use crate::protocol::{EndpointId, FederatedTopology, NeighborStructure, Topology
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StateSnapshot {
     topology: CompiledTopology,
-    federates: BTreeMap<FederateId, FederateState>,
-    in_transit: BTreeMap<FederateId, BTreeMap<WireTag, usize>>,
+    federates: BTreeMap<FederateId, FederateCoordination>,
 }
 
 fn snapshot(rti: &RtiState) -> StateSnapshot {
     StateSnapshot {
         topology: rti.topology.clone(),
         federates: rti.federates.clone(),
-        in_transit: rti.in_transit.clone(),
     }
 }
 
@@ -26,6 +24,21 @@ fn endpoint(id: &str) -> EndpointId {
 
 fn new_rti(topology: FederatedTopology) -> RtiState {
     RtiState::new(topology).expect("valid test topology")
+}
+
+fn coordination<'a>(rti: &'a RtiState, federate_id: &FederateId) -> &'a FederateCoordination {
+    rti.federates
+        .get(federate_id)
+        .expect("test federate must exist")
+}
+
+fn coordination_mut<'a>(
+    rti: &'a mut RtiState,
+    federate_id: &FederateId,
+) -> &'a mut FederateCoordination {
+    rti.federates
+        .get_mut(federate_id)
+        .expect("test federate must exist")
 }
 
 fn topology_with_edge(delay: WireDelay) -> FederatedTopology {
@@ -119,7 +132,7 @@ fn handle_characterizes_legal_transition_sequence() {
         .unwrap(),
         Vec::new()
     );
-    assert!(!rti.in_transit.contains_key(&target));
+    assert!(coordination(&rti, &target).in_transit.is_empty());
     assert_eq!(
         rti.handle(FederateToRti::Ltc {
             federate_id: target.clone(),
@@ -148,22 +161,22 @@ fn handle_characterizes_legal_transition_sequence() {
     }
 
     assert_eq!(
-        rti.federate_state(&source),
-        Some(&FederateState {
+        coordination(&rti, &source),
+        &FederateCoordination {
+            lifecycle: FederateLifecycle::Stopped,
             last_completed: WireTag::ZERO,
             last_granted: Some(source_next),
-            next_event: Some(WireTag::FOREVER),
-            stopped: true,
-        })
+            in_transit: BTreeMap::new(),
+        }
     );
     assert_eq!(
-        rti.federate_state(&target),
-        Some(&FederateState {
+        coordination(&rti, &target),
+        &FederateCoordination {
+            lifecycle: FederateLifecycle::Stopped,
             last_completed: WireTag::ZERO,
             last_granted: Some(WireTag::ZERO),
-            next_event: Some(WireTag::FOREVER),
-            stopped: true,
-        })
+            in_transit: BTreeMap::new(),
+        }
     );
 }
 
@@ -201,9 +214,14 @@ fn repeated_and_regressing_net_replace_next_event_without_duplicate_grants() {
         Vec::new()
     );
 
-    let state = rti.federate_state(&fed("solo")).unwrap();
+    let state = coordination(&rti, &fed("solo"));
     assert_eq!(state.last_granted, Some(requested));
-    assert_eq!(state.next_event, Some(regressing));
+    assert_eq!(
+        state.lifecycle,
+        FederateLifecycle::Running {
+            next_event: NextEvent::Finite(regressing),
+        }
+    );
 }
 
 #[test]
@@ -222,10 +240,7 @@ fn repeated_and_regressing_ltc_preserve_completion_high_watermark() {
         );
     }
 
-    assert_eq!(
-        rti.federate_state(&fed("solo")).unwrap().last_completed,
-        completed
-    );
+    assert_eq!(coordination(&rti, &fed("solo")).last_completed, completed);
 }
 
 #[test]
@@ -246,13 +261,15 @@ fn net_never_is_currently_stored_and_granted() {
         )]
     );
     assert_eq!(
-        rti.federate_state(&fed("solo")),
-        Some(&FederateState {
+        coordination(&rti, &fed("solo")),
+        &FederateCoordination {
+            lifecycle: FederateLifecycle::Running {
+                next_event: NextEvent::Finite(WireTag::NEVER),
+            },
             last_completed: WireTag::NEVER,
             last_granted: Some(WireTag::NEVER),
-            next_event: Some(WireTag::NEVER),
-            stopped: false,
-        })
+            in_transit: BTreeMap::new(),
+        }
     );
 }
 
@@ -339,10 +356,11 @@ fn state_handler_currently_accepts_route_absent_from_topology() {
         )]
     );
     assert_eq!(
-        rti.in_transit
-            .get(&fed("target"))
-            .and_then(|messages| messages.get(&WireTag::ZERO)),
-        Some(&1)
+        coordination(&rti, &fed("target"))
+            .in_transit
+            .get(&WireTag::ZERO)
+            .map(|count| count.get()),
+        Some(1)
     );
 }
 
@@ -614,6 +632,27 @@ fn multiple_same_tag_messages_require_one_msg_ack_each() {
 }
 
 #[test]
+fn in_transit_count_overflow_is_failure_atomic() {
+    let mut rti = new_rti(FederatedTopology::new([fed("source"), fed("target")]));
+    coordination_mut(&mut rti, &fed("target"))
+        .in_transit
+        .insert(
+            WireTag::ZERO,
+            NonZeroUsize::new(usize::MAX).expect("maximum usize is nonzero"),
+        );
+    let before = snapshot(&rti);
+
+    assert_eq!(
+        rti.record_in_transit_message(&fed("source"), &fed("target"), WireTag::ZERO),
+        Err(RtiError::MessageCountOverflow {
+            federate_id: fed("target"),
+            tag: WireTag::ZERO,
+        })
+    );
+    assert_eq!(snapshot(&rti), before);
+}
+
+#[test]
 fn msg_ack_can_trigger_pending_grant() {
     let mut rti = new_rti(FederatedTopology::new([fed("source"), fed("target")]));
     rti.record_in_transit_message(&fed("source"), &fed("target"), WireTag::finite(5, 0))
@@ -685,19 +724,22 @@ fn net_overflow_currently_mutates_next_event_before_returning_error() {
     let after = snapshot(&rti);
     assert_ne!(after, before);
     assert_eq!(
-        before.federates.get(&fed("target")).unwrap().next_event,
-        None
+        before.federates.get(&fed("target")).unwrap().lifecycle,
+        FederateLifecycle::Running {
+            next_event: NextEvent::Unknown,
+        }
     );
     assert_eq!(
-        after.federates.get(&fed("target")).unwrap().next_event,
-        Some(WireTag::ZERO)
+        after.federates.get(&fed("target")).unwrap().lifecycle,
+        FederateLifecycle::Running {
+            next_event: NextEvent::Finite(WireTag::ZERO),
+        }
     );
     assert_eq!(
         after.federates.get(&fed("target")).unwrap().last_granted,
         None
     );
     assert_eq!(after.topology, before.topology);
-    assert_eq!(after.in_transit, before.in_transit);
     assert_eq!(
         after.federates.get(&fed("source")),
         before.federates.get(&fed("source"))
@@ -758,7 +800,6 @@ fn global_grant_scan_currently_commits_before_later_overflow_error() {
         WireTag::ZERO
     );
     assert_eq!(after.topology, before.topology);
-    assert_eq!(after.in_transit, before.in_transit);
 }
 
 #[test]
@@ -941,13 +982,12 @@ fn net_forever_unblocks_pending_downstream_without_granting_forever() {
         }]
     );
     assert_eq!(
-        rti.federate_state(&fed("source")).unwrap().next_event,
-        Some(WireTag::FOREVER)
+        coordination(&rti, &fed("source")).lifecycle,
+        FederateLifecycle::Running {
+            next_event: NextEvent::NoFuture,
+        }
     );
-    assert_eq!(
-        rti.federate_state(&fed("source")).unwrap().last_granted,
-        None
-    );
+    assert_eq!(coordination(&rti, &fed("source")).last_granted, None);
 }
 
 #[test]
@@ -978,14 +1018,13 @@ fn stop_marks_federate_no_future_and_unblocks_pending_downstream() {
             },
         }]
     );
-    let source_state = rti.federate_state(&fed("source")).unwrap();
-    assert!(source_state.stopped);
-    assert_eq!(source_state.next_event, Some(WireTag::FOREVER));
+    let source_state = coordination(&rti, &fed("source"));
+    assert_eq!(source_state.lifecycle, FederateLifecycle::Stopped);
     assert_eq!(source_state.last_granted, None);
 }
 
 #[test]
-fn stopped_federate_currently_accepts_net_ltc_and_repeated_stop() {
+fn stopped_federate_ignores_net_but_currently_accepts_ltc_and_repeated_stop() {
     let mut rti = new_rti(FederatedTopology::new([fed("solo")]));
 
     assert_eq!(
@@ -1004,13 +1043,13 @@ fn stopped_federate_currently_accepts_net_ltc_and_repeated_stop() {
         Vec::new()
     );
     assert_eq!(
-        rti.federate_state(&fed("solo")),
-        Some(&FederateState {
+        coordination(&rti, &fed("solo")),
+        &FederateCoordination {
+            lifecycle: FederateLifecycle::Stopped,
             last_completed: WireTag::NEVER,
             last_granted: None,
-            next_event: Some(WireTag::finite(5, 0)),
-            stopped: true,
-        })
+            in_transit: BTreeMap::new(),
+        }
     );
 
     assert_eq!(
@@ -1029,13 +1068,13 @@ fn stopped_federate_currently_accepts_net_ltc_and_repeated_stop() {
         Vec::new()
     );
     assert_eq!(
-        rti.federate_state(&fed("solo")),
-        Some(&FederateState {
+        coordination(&rti, &fed("solo")),
+        &FederateCoordination {
+            lifecycle: FederateLifecycle::Stopped,
             last_completed: WireTag::finite(5, 0),
             last_granted: None,
-            next_event: Some(WireTag::FOREVER),
-            stopped: true,
-        })
+            in_transit: BTreeMap::new(),
+        }
     );
 }
 

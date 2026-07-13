@@ -3,8 +3,8 @@
 use std::{fmt::Display, ops::Index};
 
 use crate::{
-    port::ErasedPortSpec, runtime, ActionSpec, ActionTag, Assembly, BuilderActionKey,
-    BuilderPortKey, BuilderReactionKey, BuilderReactorKey, ParentReactorSpec, PortTag,
+    port::ErasedPortSpec, runtime, ActionSpec, ActionTag, Assembly, AssemblyActionKey,
+    AssemblyPortKey, AssemblyReactionKey, AssemblyReactorKey, ParentReactorSpec, PortTag,
     ReactionSpec, ReactorSpec, TypedActionKey, TypedPortKey,
 };
 
@@ -241,7 +241,7 @@ impl Index<usize> for BuilderFqn {
     }
 }
 
-impl Fqn for BuilderReactorKey {
+impl Fqn for AssemblyReactorKey {
     fn fqn(self, env: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
         let reactor = env
             .reactor_specs
@@ -257,7 +257,7 @@ impl Fqn for BuilderReactorKey {
     }
 }
 
-impl Fqn for BuilderActionKey {
+impl Fqn for AssemblyActionKey {
     fn fqn(self, env: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
         let action = env
             .action_specs
@@ -274,11 +274,11 @@ where
     Q: ActionTag,
 {
     fn fqn(self, env: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
-        BuilderActionKey::from(self).fqn(env, grouped)
+        AssemblyActionKey::from(self).fqn(env, grouped)
     }
 }
 
-impl Fqn for BuilderReactionKey {
+impl Fqn for AssemblyReactionKey {
     fn fqn(self, env: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
         let reaction = env
             .reaction_specs
@@ -289,7 +289,7 @@ impl Fqn for BuilderReactionKey {
     }
 }
 
-impl Fqn for BuilderPortKey {
+impl Fqn for AssemblyPortKey {
     fn fqn(self, env: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
         let port = env
             .port_specs
@@ -307,7 +307,7 @@ where
     A: Copy,
 {
     fn fqn(self, env: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
-        BuilderPortKey::from(self).fqn(env, grouped)
+        AssemblyPortKey::from(self).fqn(env, grouped)
     }
 }
 
@@ -385,7 +385,7 @@ mod tests {
     fn test_fqn_segment_reaction_builder() {
         let reaction = ReactionSpec::new(
             Some("TestReaction"),
-            BuilderReactorKey::default(),
+            AssemblyReactorKey::default(),
             Box::new(|_| runtime::reaction_closure!().into()),
         );
         let segment = reaction.fqn_segment(false);
@@ -400,7 +400,7 @@ mod tests {
     fn test_fqn_segment_action_builder() {
         let action = ActionSpec::new(
             "TestAction",
-            BuilderReactorKey::default(),
+            AssemblyReactorKey::default(),
             None,
             crate::ActionType::Shutdown,
         );
@@ -416,7 +416,7 @@ mod tests {
     fn test_fqn_segment_port_builder() {
         let port = PortSpec::<(), Input>::new(
             "TestPort",
-            BuilderReactorKey::default(),
+            AssemblyReactorKey::default(),
             None, // No bank info
         );
         let segment = (&port as &dyn ErasedPortSpec).fqn_segment(false);
@@ -428,7 +428,7 @@ mod tests {
         // Test with bank info
         let port_banked = PortSpec::<(), Input>::new(
             "BankedPort",
-            BuilderReactorKey::default(),
+            AssemblyReactorKey::default(),
             Some(runtime::BankInfo { idx: 0, total: 10 }),
         );
         let segment_banked = (&port_banked as &dyn ErasedPortSpec).fqn_segment(false);

@@ -3,14 +3,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    runtime, BoundaryKind, BuilderError, BuilderPortKey, BuilderReactorKey, InterPartitionPlan,
+    runtime, AssemblyPortKey, AssemblyReactorKey, BoundaryKind, BuilderError, InterPartitionPlan,
     PartitionRootKind,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FederateBuildInfo {
     pub id: String,
-    pub reactor: BuilderReactorKey,
+    pub reactor: AssemblyReactorKey,
     pub reactor_fqn: String,
 }
 
@@ -19,8 +19,8 @@ pub struct FederatedEndpoint {
     pub id: boomerang_federated::EndpointId,
     pub source_federate: String,
     pub target_federate: String,
-    pub source_port: BuilderPortKey,
-    pub target_port: BuilderPortKey,
+    pub source_port: AssemblyPortKey,
+    pub target_port: AssemblyPortKey,
     pub source_port_fqn: String,
     pub target_port_fqn: String,
 }
@@ -30,10 +30,10 @@ pub struct FederatedEdge {
     pub endpoint: boomerang_federated::EndpointId,
     pub source_federate: String,
     pub target_federate: String,
-    pub source_federate_reactor: BuilderReactorKey,
-    pub target_federate_reactor: BuilderReactorKey,
-    pub source_port: BuilderPortKey,
-    pub target_port: BuilderPortKey,
+    pub source_federate_reactor: AssemblyReactorKey,
+    pub target_federate_reactor: AssemblyReactorKey,
+    pub source_port: AssemblyPortKey,
+    pub target_port: AssemblyPortKey,
     pub delay: Option<runtime::Duration>,
 }
 
@@ -63,7 +63,7 @@ impl FederationPlan {
 
     pub fn from_inter_partition_plan<E>(
         plan: &InterPartitionPlan,
-        mut port_fqn: impl FnMut(BuilderPortKey) -> Result<String, E>,
+        mut port_fqn: impl FnMut(AssemblyPortKey) -> Result<String, E>,
     ) -> Result<Self, E> {
         let mut federation_plan = Self {
             federates: plan
@@ -298,7 +298,7 @@ fn validate_static_runner_plan(parts: &crate::BuilderRuntimeParts) -> Result<(),
         });
     }
 
-    let mut zero_delay_graph = petgraph::prelude::DiGraphMap::<BuilderReactorKey, ()>::new();
+    let mut zero_delay_graph = petgraph::prelude::DiGraphMap::<AssemblyReactorKey, ()>::new();
     for edge in parts.inter_partition_plan.federated_edges() {
         if edge.physical {
             return Err(BuilderError::UnsupportedFederationTopology {

@@ -56,8 +56,8 @@ pub mod prelude {
     //! Re-exported common types and traits for Boomerang
 
     pub use super::builder::{
-        Assembly, BoundaryKind, BuilderError, BuilderFqn, BuilderModeEffect, BuilderModeKey,
-        BuilderReactorKey, BuilderRuntimeParts, Contained, Input, InterPartitionEdge,
+        Assembly, AssemblyModeKey, AssemblyReactorKey, BoundaryKind, BuilderError, BuilderFqn,
+        BuilderModeEffect, BuilderRuntimeParts, Contained, Input, InterPartitionEdge,
         InterPartitionPlan, Local, Logical, ModeKind, Output, PartitionRoot, PartitionRootKind,
         Physical, PortBank, Reactor, ReactorPlacement, TimerActionKey, TimerSpec, TransitionKind,
         TypedActionKey, TypedPortKey,

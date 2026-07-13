@@ -29,7 +29,7 @@ pub use federation::*;
 pub use fqn::*;
 pub use inter_partition::*;
 pub use port::{
-    BuilderPortKey, Contained, Input, Local, Output, PortBank, PortSpec, PortTag, PortType,
+    AssemblyPortKey, Contained, Input, Local, Output, PortBank, PortSpec, PortTag, PortType,
     TypedPortKey,
 };
 pub use reaction::*;
@@ -62,16 +62,16 @@ pub enum BuilderError {
     MultipleInitialModes { reactor_name: String },
 
     #[error("ActionKey not found: {}", 0)]
-    ActionKeyNotFound(BuilderActionKey),
+    ActionKeyNotFound(AssemblyActionKey),
 
     #[error("ReactorKey not found: {}", 0)]
-    ReactorKeyNotFound(BuilderReactorKey),
+    ReactorKeyNotFound(AssemblyReactorKey),
 
     #[error("PortKey not found: {}", 0)]
-    PortKeyNotFound(BuilderPortKey),
+    PortKeyNotFound(AssemblyPortKey),
 
     #[error("ReactionKey not found: {}", 0)]
-    ReactionKeyNotFound(BuilderReactionKey),
+    ReactionKeyNotFound(AssemblyReactionKey),
 
     #[error("A Port named '{0}' was not found.")]
     NamedPortNotFound(String),
@@ -92,15 +92,15 @@ pub enum BuilderError {
     },
 
     #[error("A cycle in the Reaction graph was found: {what:?}.")]
-    ReactionGraphCycle { what: Vec<BuilderReactionKey> },
+    ReactionGraphCycle { what: Vec<AssemblyReactionKey> },
 
     #[error("A cycle in the Reactor graph was found.")]
-    ReactorGraphCycle { what: BuilderReactorKey },
+    ReactorGraphCycle { what: AssemblyReactorKey },
 
     #[error("Error binding ports ({source_key:?}->{target_key:?}): {what}")]
     PortConnectionError {
-        source_key: BuilderPortKey,
-        target_key: BuilderPortKey,
+        source_key: AssemblyPortKey,
+        target_key: AssemblyPortKey,
         what: String,
     },
 
@@ -126,7 +126,7 @@ pub enum BuilderError {
     IoError(#[from] std::io::Error),
 
     #[error("ReplayKey already exists: {}", 0)]
-    ReplayKeyAlreadyExists(BuilderActionKey),
+    ReplayKeyAlreadyExists(AssemblyActionKey),
 }
 
 impl From<std::convert::Infallible> for BuilderError {

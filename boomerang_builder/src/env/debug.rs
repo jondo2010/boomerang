@@ -6,7 +6,7 @@ use itertools::Itertools;
 use petgraph::prelude::DiGraphMap;
 use slotmap::SecondaryMap;
 
-use crate::{BuilderFqn, BuilderPortKey, BuilderReactionKey, BuilderReactorKey};
+use crate::{AssemblyPortKey, AssemblyReactionKey, AssemblyReactorKey, BuilderFqn};
 
 use super::{
     build::{BuilderAliases, BuilderRuntimeParts},
@@ -40,7 +40,7 @@ impl Assembly {
     /// Returns a grouped list of (first_key, last_key, fqn) of reactors
     pub fn reactors_debug_grouped(
         &self,
-    ) -> Vec<(BuilderReactorKey, Option<BuilderReactorKey>, BuilderFqn)> {
+    ) -> Vec<(AssemblyReactorKey, Option<AssemblyReactorKey>, BuilderFqn)> {
         let reactors_chunked = self
             .reactor_specs
             .keys()
@@ -60,8 +60,8 @@ impl Assembly {
     /// Returns a grouped list of (first_key, last_key, fqn) of ports
     pub fn ports_debug_grouped(
         &self,
-        ports: impl Iterator<Item = BuilderPortKey>,
-    ) -> Vec<(BuilderPortKey, Option<BuilderPortKey>, BuilderFqn)> {
+        ports: impl Iterator<Item = AssemblyPortKey>,
+    ) -> Vec<(AssemblyPortKey, Option<AssemblyPortKey>, BuilderFqn)> {
         let ports_chunked = ports
             .map(|port_key| (self.fqn_for(port_key, true).unwrap(), port_key))
             .sorted()
@@ -77,7 +77,7 @@ impl Assembly {
     }
 
     /// Build a DAG of Reactors, grouped by bank
-    pub fn build_reactor_graph_grouped(&self) -> DiGraphMap<BuilderReactorKey, ()> {
+    pub fn build_reactor_graph_grouped(&self) -> DiGraphMap<AssemblyReactorKey, ()> {
         let reactors_grouped = self.reactors_debug_grouped();
 
         let mut graph =
@@ -163,7 +163,7 @@ impl Assembly {
             .chunk_by(|(_, fqn)| fqn.clone());
 
         //let level_map = self.build_runtime_level_map().ok();
-        let level_map: Option<SecondaryMap<BuilderReactionKey, boomerang_runtime::Level>> = None;
+        let level_map: Option<SecondaryMap<AssemblyReactionKey, boomerang_runtime::Level>> = None;
 
         reactions_chunked
             .into_iter()

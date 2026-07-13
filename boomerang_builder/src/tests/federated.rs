@@ -65,8 +65,8 @@ fn local_only_source_reactor(
 ) -> impl Reactor<(), Ports = TypedPortKey<LocalOnlyPayload, Output, Contained>> {
     |name: &str,
      state: (),
-     parent: Option<BuilderReactorKey>,
-     scope_mode: Option<BuilderModeKey>,
+     parent: Option<AssemblyReactorKey>,
+     scope_mode: Option<AssemblyModeKey>,
      bank_info: Option<runtime::BankInfo>,
      placement: ReactorPlacement,
      env: &mut Assembly| {
@@ -86,8 +86,8 @@ fn local_only_sink_reactor(
 ) -> impl Reactor<(), Ports = TypedPortKey<LocalOnlyPayload, Input, Contained>> {
     |name: &str,
      state: (),
-     parent: Option<BuilderReactorKey>,
-     scope_mode: Option<BuilderModeKey>,
+     parent: Option<AssemblyReactorKey>,
+     scope_mode: Option<AssemblyModeKey>,
      bank_info: Option<runtime::BankInfo>,
      placement: ReactorPlacement,
      env: &mut Assembly| {
@@ -106,8 +106,8 @@ fn local_only_sink_reactor(
 fn federated_source_reactor() -> impl Reactor<(), Ports = TypedPortKey<u32, Output, Contained>> {
     |name: &str,
      state: (),
-     parent: Option<BuilderReactorKey>,
-     scope_mode: Option<BuilderModeKey>,
+     parent: Option<AssemblyReactorKey>,
+     scope_mode: Option<AssemblyModeKey>,
      bank_info: Option<runtime::BankInfo>,
      placement: ReactorPlacement,
      env: &mut Assembly| {
@@ -126,8 +126,8 @@ fn federated_startup_source_reactor(
 ) -> impl Reactor<(), Ports = TypedPortKey<u32, Output, Contained>> {
     move |name: &str,
           state: (),
-          parent: Option<BuilderReactorKey>,
-          scope_mode: Option<BuilderModeKey>,
+          parent: Option<AssemblyReactorKey>,
+          scope_mode: Option<AssemblyModeKey>,
           bank_info: Option<runtime::BankInfo>,
           placement: ReactorPlacement,
           env: &mut Assembly| {
@@ -154,8 +154,8 @@ fn federated_startup_source_reactor(
 fn federated_sink_reactor() -> impl Reactor<(), Ports = TypedPortKey<u32, Input, Contained>> {
     |name: &str,
      state: (),
-     parent: Option<BuilderReactorKey>,
-     scope_mode: Option<BuilderModeKey>,
+     parent: Option<AssemblyReactorKey>,
+     scope_mode: Option<AssemblyModeKey>,
      bank_info: Option<runtime::BankInfo>,
      placement: ReactorPlacement,
      env: &mut Assembly| {
@@ -174,8 +174,8 @@ fn federated_shutdown_after_startup_sink_reactor(
 ) -> impl Reactor<(), Ports = TypedPortKey<u32, Input, Contained>> {
     move |name: &str,
           state: (),
-          parent: Option<BuilderReactorKey>,
-          scope_mode: Option<BuilderModeKey>,
+          parent: Option<AssemblyReactorKey>,
+          scope_mode: Option<AssemblyModeKey>,
           bank_info: Option<runtime::BankInfo>,
           placement: ReactorPlacement,
           env: &mut Assembly| {
@@ -212,8 +212,8 @@ fn federated_recording_sink_reactor(
 ) -> impl Reactor<(), Ports = TypedPortKey<u32, Input, Contained>> {
     move |name: &str,
           state: (),
-          parent: Option<BuilderReactorKey>,
-          scope_mode: Option<BuilderModeKey>,
+          parent: Option<AssemblyReactorKey>,
+          scope_mode: Option<AssemblyModeKey>,
           bank_info: Option<runtime::BankInfo>,
           placement: ReactorPlacement,
           env: &mut Assembly| {
@@ -249,8 +249,8 @@ fn federated_recording_sink_reactor(
 fn federated_io_reactor() -> impl Reactor<(), Ports = FederatedIoPorts> {
     |name: &str,
      state: (),
-     parent: Option<BuilderReactorKey>,
-     scope_mode: Option<BuilderModeKey>,
+     parent: Option<AssemblyReactorKey>,
+     scope_mode: Option<AssemblyModeKey>,
      bank_info: Option<runtime::BankInfo>,
      placement: ReactorPlacement,
      env: &mut Assembly| {
@@ -268,8 +268,8 @@ fn federated_io_reactor() -> impl Reactor<(), Ports = FederatedIoPorts> {
 fn federated_forwarding_reactor(addend: u32) -> impl Reactor<(), Ports = FederatedIoPorts> {
     move |name: &str,
           state: (),
-          parent: Option<BuilderReactorKey>,
-          scope_mode: Option<BuilderModeKey>,
+          parent: Option<AssemblyReactorKey>,
+          scope_mode: Option<AssemblyModeKey>,
           bank_info: Option<runtime::BankInfo>,
           placement: ReactorPlacement,
           env: &mut Assembly| {
@@ -312,8 +312,8 @@ fn federated_startup_recording_io_reactor(
 ) -> impl Reactor<(), Ports = FederatedIoPorts> {
     move |name: &str,
           state: (),
-          parent: Option<BuilderReactorKey>,
-          scope_mode: Option<BuilderModeKey>,
+          parent: Option<AssemblyReactorKey>,
+          scope_mode: Option<AssemblyModeKey>,
           bank_info: Option<runtime::BankInfo>,
           placement: ReactorPlacement,
           env: &mut Assembly| {

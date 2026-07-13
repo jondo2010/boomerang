@@ -1,7 +1,7 @@
 use std::fmt::Debug;
 
 use super::{
-    Assembly, BuilderActionKey, BuilderError, BuilderModeKey, BuilderPortKey, BuilderReactorKey,
+    Assembly, AssemblyActionKey, AssemblyModeKey, AssemblyPortKey, AssemblyReactorKey, BuilderError,
 };
 use crate::{
     runtime, ActionTag, BuilderRuntimeParts, ParentReactorSpec, PortBank, PortTag, TimerActionKey,
@@ -11,10 +11,10 @@ use slotmap::SecondaryMap;
 use variadics_please::all_tuples;
 
 slotmap::new_key_type! {
-    pub struct BuilderReactionKey;
+    pub struct AssemblyReactionKey;
 }
 
-impl petgraph::graph::GraphIndex for BuilderReactionKey {
+impl petgraph::graph::GraphIndex for AssemblyReactionKey {
     fn index(&self) -> usize {
         self.0.as_ffi() as usize
     }
@@ -30,32 +30,32 @@ pub type BoxedBuilderReactionFn = Box<dyn FnOnce(&BuilderRuntimeParts) -> runtim
 pub struct ReactionSpec {
     pub(super) name: Option<String>,
     /// The owning Reactor for this Reaction
-    pub(super) reactor_key: BuilderReactorKey,
+    pub(super) reactor_key: AssemblyReactorKey,
     /// The Reaction function
     pub(super) reaction_fn: BoxedBuilderReactionFn,
     /// Modes in which this reaction is enabled
-    pub(super) enabled_modes: Option<Vec<BuilderModeKey>>,
+    pub(super) enabled_modes: Option<Vec<AssemblyModeKey>>,
     /// Enclosing mode scope, if this reaction was declared inside a mode.
-    pub(super) scope_mode: Option<BuilderModeKey>,
+    pub(super) scope_mode: Option<AssemblyModeKey>,
     /// Declared typed mode effects for this reaction
     pub(super) mode_effects: Vec<BuilderModeEffect>,
     /// Whether this reaction is triggered by mode reset entry.
     pub(super) reset_trigger: bool,
     /// Relations between this Reaction and Actions
-    pub(super) action_relations: SecondaryMap<BuilderActionKey, TriggerMode>,
+    pub(super) action_relations: SecondaryMap<AssemblyActionKey, TriggerMode>,
     /// Actions in the order they were declared on the builder
-    pub(super) action_order: Vec<BuilderActionKey>,
+    pub(super) action_order: Vec<AssemblyActionKey>,
     /// Relations between this Reaction and Ports
-    pub(super) port_relations: SecondaryMap<BuilderPortKey, TriggerMode>,
+    pub(super) port_relations: SecondaryMap<AssemblyPortKey, TriggerMode>,
     /// Ports in the order they were declared on the builder
-    pub(super) port_order: Vec<BuilderPortKey>,
+    pub(super) port_order: Vec<AssemblyPortKey>,
 }
 
 impl ReactionSpec {
     /// Create a new ReactionSpec
     pub fn new<S: Into<String>>(
         name: Option<S>,
-        parent_key: BuilderReactorKey,
+        parent_key: AssemblyReactorKey,
         reaction_fn: Box<dyn FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn>,
     ) -> Self {
         ReactionSpec {
@@ -75,7 +75,7 @@ impl ReactionSpec {
 }
 
 impl ParentReactorSpec for ReactionSpec {
-    fn parent_reactor_key(&self) -> Option<BuilderReactorKey> {
+    fn parent_reactor_key(&self) -> Option<AssemblyReactorKey> {
         Some(self.reactor_key)
     }
 }
@@ -98,13 +98,13 @@ impl Debug for ReactionSpec {
 
 #[derive(Clone, Copy, Debug)]
 pub struct BuilderModeEffect {
-    target: BuilderModeKey,
+    target: AssemblyModeKey,
     runtime_target: Option<runtime::ModeKey>,
     transition: runtime::TransitionKind,
 }
 
 impl BuilderModeEffect {
-    pub(crate) fn new(target: BuilderModeKey, transition: runtime::TransitionKind) -> Self {
+    pub(crate) fn new(target: AssemblyModeKey, transition: runtime::TransitionKind) -> Self {
         Self {
             target,
             runtime_target: None,
@@ -112,7 +112,7 @@ impl BuilderModeEffect {
         }
     }
 
-    pub fn target(&self) -> BuilderModeKey {
+    pub fn target(&self) -> AssemblyModeKey {
         self.target
     }
 
@@ -205,14 +205,14 @@ impl ReactionSpec {
         self.name.as_deref()
     }
 
-    pub fn record_port_relation(&mut self, key: BuilderPortKey, trigger_mode: TriggerMode) {
+    pub fn record_port_relation(&mut self, key: AssemblyPortKey, trigger_mode: TriggerMode) {
         if !self.port_relations.contains_key(key) {
             self.port_order.push(key);
         }
         self.port_relations.insert(key, trigger_mode);
     }
 
-    pub fn record_action_relation(&mut self, key: BuilderActionKey, trigger_mode: TriggerMode) {
+    pub fn record_action_relation(&mut self, key: AssemblyActionKey, trigger_mode: TriggerMode) {
         if !self.action_relations.contains_key(key) {
             self.action_order.push(key);
         }
@@ -277,7 +277,7 @@ where
         builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
     ) {
-        let port_key = BuilderPortKey::from(*self);
+        let port_key = AssemblyPortKey::from(*self);
         builder.record_port_relation(port_key, trigger_mode);
     }
 }
@@ -311,7 +311,7 @@ where
         trigger_mode: TriggerMode,
     ) {
         self.iter().for_each(|port| {
-            let port_key = BuilderPortKey::from(port);
+            let port_key = AssemblyPortKey::from(port);
             builder.record_port_relation(port_key, trigger_mode);
         });
     }
@@ -328,7 +328,7 @@ where
         builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
     ) {
-        let action_key = BuilderActionKey::from(*self);
+        let action_key = AssemblyActionKey::from(*self);
         builder.record_action_relation(action_key, trigger_mode);
     }
 }
@@ -339,7 +339,7 @@ impl PartialReactionBuilderField for TimerActionKey {
         builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
     ) {
-        let action_key = BuilderActionKey::from(*self);
+        let action_key = AssemblyActionKey::from(*self);
         builder.record_action_relation(action_key, trigger_mode);
     }
 }
@@ -358,22 +358,22 @@ impl PartialReactionBuilderField for BuilderModeEffect {
 pub struct PartialReactionBuilder<'a, S: runtime::ReactorData, Fields = (), ReactionFn = ()> {
     name: Option<String>,
     reaction_fn: ReactionFn,
-    enabled_modes: Option<Vec<BuilderModeKey>>,
-    scope_mode: Option<BuilderModeKey>,
+    enabled_modes: Option<Vec<AssemblyModeKey>>,
+    scope_mode: Option<AssemblyModeKey>,
     mode_effects: Vec<BuilderModeEffect>,
     reset_trigger: bool,
-    port_relations: slotmap::SecondaryMap<BuilderPortKey, TriggerMode>,
-    port_order: Vec<BuilderPortKey>,
-    action_relations: slotmap::SecondaryMap<BuilderActionKey, TriggerMode>,
-    action_order: Vec<BuilderActionKey>,
-    reactor_key: BuilderReactorKey,
+    port_relations: slotmap::SecondaryMap<AssemblyPortKey, TriggerMode>,
+    port_order: Vec<AssemblyPortKey>,
+    action_relations: slotmap::SecondaryMap<AssemblyActionKey, TriggerMode>,
+    action_order: Vec<AssemblyActionKey>,
+    reactor_key: AssemblyReactorKey,
     env: &'a mut Assembly,
     fields: Fields,
     phantom: std::marker::PhantomData<(S, Fields, ReactionFn)>,
 }
 
 impl<'a, S: runtime::ReactorData> PartialReactionBuilder<'a, S, (), ()> {
-    pub fn new(name: Option<&str>, reactor_key: BuilderReactorKey, env: &'a mut Assembly) -> Self {
+    pub fn new(name: Option<&str>, reactor_key: AssemblyReactorKey, env: &'a mut Assembly) -> Self {
         Self {
             name: name.map(|s| s.to_string()),
             reaction_fn: (),
@@ -396,14 +396,14 @@ impl<'a, S: runtime::ReactorData> PartialReactionBuilder<'a, S, (), ()> {
 impl<'a, S: runtime::ReactorData, Fields, ReactionFn>
     PartialReactionBuilder<'a, S, Fields, ReactionFn>
 {
-    fn record_port_relation(&mut self, key: BuilderPortKey, trigger_mode: TriggerMode) {
+    fn record_port_relation(&mut self, key: AssemblyPortKey, trigger_mode: TriggerMode) {
         if !self.port_relations.contains_key(key) {
             self.port_order.push(key);
         }
         self.port_relations.insert(key, trigger_mode);
     }
 
-    fn record_action_relation(&mut self, key: BuilderActionKey, trigger_mode: TriggerMode) {
+    fn record_action_relation(&mut self, key: AssemblyActionKey, trigger_mode: TriggerMode) {
         if !self.action_relations.contains_key(key) {
             self.action_order.push(key);
         }
@@ -421,7 +421,7 @@ impl<'a, S: runtime::ReactorData, Fields, ReactionFn>
     }
 
     /// Record the static mode scope that owns this reaction.
-    pub fn in_mode_scope(mut self, mode: BuilderModeKey) -> Self {
+    pub fn in_mode_scope(mut self, mode: AssemblyModeKey) -> Self {
         self.scope_mode = Some(mode);
         if self.enabled_modes.is_none() {
             self.enabled_modes = Some(vec![mode]);
@@ -718,7 +718,7 @@ where
     Fields: runtime::ReactionRefsExtract,
 {
     /// Finish building the Reaction and add it to the Environment
-    pub fn finish(self) -> Result<BuilderReactionKey, BuilderError> {
+    pub fn finish(self) -> Result<AssemblyReactionKey, BuilderError> {
         let Self {
             name,
             enabled_modes,

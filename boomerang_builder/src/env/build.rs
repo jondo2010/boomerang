@@ -12,8 +12,8 @@ use slotmap::SecondaryMap;
 use std::collections::BTreeMap;
 
 use crate::{
-    connection::PortBindings, ActionType, BoundaryKind, BuilderActionKey, BuilderError,
-    BuilderModeKey, BuilderPortKey, BuilderReactionKey, BuilderReactorKey, InterPartitionEdge,
+    connection::PortBindings, ActionType, AssemblyActionKey, AssemblyModeKey, AssemblyPortKey,
+    AssemblyReactionKey, AssemblyReactorKey, BoundaryKind, BuilderError, InterPartitionEdge,
     InterPartitionPlan, ParentReactorSpec, PartialReactionBuilder, PartitionRoot,
     PartitionRootKind, TimerActionKey,
 };
@@ -39,19 +39,19 @@ impl DeferedBuild for runtime::reaction::TimerFn {
 /// Aliasing maps from Builder keys to runtime keys
 #[derive(Default)]
 pub struct BuilderAliases {
-    pub enclave_aliases: SecondaryMap<BuilderReactorKey, runtime::EnclaveKey>,
+    pub enclave_aliases: SecondaryMap<AssemblyReactorKey, runtime::EnclaveKey>,
     pub reactor_aliases:
-        SecondaryMap<BuilderReactorKey, (runtime::EnclaveKey, runtime::ReactorKey)>,
-    pub reactor_scope_modes: SecondaryMap<BuilderReactorKey, Option<BuilderModeKey>>,
+        SecondaryMap<AssemblyReactorKey, (runtime::EnclaveKey, runtime::ReactorKey)>,
+    pub reactor_scope_modes: SecondaryMap<AssemblyReactorKey, Option<AssemblyModeKey>>,
     pub reaction_aliases:
-        SecondaryMap<BuilderReactionKey, (runtime::EnclaveKey, runtime::ReactionKey)>,
-    pub mode_aliases: SecondaryMap<BuilderModeKey, (runtime::EnclaveKey, runtime::ModeKey)>,
-    pub action_aliases: SecondaryMap<BuilderActionKey, (runtime::EnclaveKey, runtime::ActionKey)>,
-    pub port_aliases: SecondaryMap<BuilderPortKey, (runtime::EnclaveKey, runtime::PortKey)>,
+        SecondaryMap<AssemblyReactionKey, (runtime::EnclaveKey, runtime::ReactionKey)>,
+    pub mode_aliases: SecondaryMap<AssemblyModeKey, (runtime::EnclaveKey, runtime::ModeKey)>,
+    pub action_aliases: SecondaryMap<AssemblyActionKey, (runtime::EnclaveKey, runtime::ActionKey)>,
+    pub port_aliases: SecondaryMap<AssemblyPortKey, (runtime::EnclaveKey, runtime::PortKey)>,
 }
 
 /// A map of partitions: each Reactor is mapped to one Enclave Reactor.
-pub type PartitionMap = SecondaryMap<BuilderReactorKey, BuilderReactorKey>;
+pub type PartitionMap = SecondaryMap<AssemblyReactorKey, AssemblyReactorKey>;
 
 #[derive(Default)]
 pub struct BuilderRuntimeParts {
@@ -152,8 +152,8 @@ impl BuilderRuntimeParts {
 }
 
 pub struct EnclaveDep {
-    pub upstream: BuilderReactorKey,
-    pub downstream: BuilderReactorKey,
+    pub upstream: AssemblyReactorKey,
+    pub downstream: AssemblyReactorKey,
     pub delay: Option<runtime::Duration>,
 }
 
@@ -287,8 +287,8 @@ impl Assembly {
 
         #[cfg(feature = "federated")]
         let federate_id_by_partition = {
-            let mut federate_id_by_partition = SecondaryMap::<BuilderReactorKey, String>::new();
-            let mut seen_ids = BTreeMap::<String, BuilderReactorKey>::new();
+            let mut federate_id_by_partition = SecondaryMap::<AssemblyReactorKey, String>::new();
+            let mut seen_ids = BTreeMap::<String, AssemblyReactorKey>::new();
 
             for (reactor_key, reactor) in &self.reactor_specs {
                 let Some(spec) = reactor.federate_spec() else {
@@ -434,7 +434,7 @@ impl Assembly {
         &self,
         plan: &InterPartitionPlan,
     ) -> Result<(), BuilderError> {
-        let mut graph = petgraph::prelude::DiGraphMap::<BuilderReactorKey, ()>::new();
+        let mut graph = petgraph::prelude::DiGraphMap::<AssemblyReactorKey, ()>::new();
 
         for root in &plan.partition_roots {
             if matches!(root.kind, PartitionRootKind::Federated { .. }) {
@@ -518,7 +518,7 @@ impl Assembly {
         partition_map: &PartitionMap,
         builder_parts: &mut BuilderRuntimeParts,
     ) -> Result<(), BuilderError> {
-        let reactor_fqns: SecondaryMap<BuilderReactorKey, String> = self
+        let reactor_fqns: SecondaryMap<AssemblyReactorKey, String> = self
             .reactor_specs
             .keys()
             .map(|reactor_key| {
@@ -662,7 +662,7 @@ impl Assembly {
 
         // Now create the reset reactions for periodic timers, since we can now get &mut self.
         for (name, reaction_fn, reactor_key, action_key) in new_reactions {
-            let scope_mode = self.action_specs[BuilderActionKey::from(action_key)].scope_mode();
+            let scope_mode = self.action_specs[AssemblyActionKey::from(action_key)].scope_mode();
             let mut reaction = PartialReactionBuilder::<()>::new(Some(&name), reactor_key, self)
                 .with_trigger(action_key);
             if let Some(scope_mode) = scope_mode {
@@ -771,7 +771,7 @@ impl Assembly {
         &mut self,
         partition_map: &PartitionMap,
         builder_parts: &mut BuilderRuntimeParts,
-        reaction_levels: &SecondaryMap<BuilderReactionKey, runtime::Level>,
+        reaction_levels: &SecondaryMap<AssemblyReactionKey, runtime::Level>,
     ) -> Result<(), BuilderError> {
         for (builder_reaction_key, reaction) in self.reaction_specs.drain() {
             let reaction_body = (reaction.reaction_fn)(builder_parts);

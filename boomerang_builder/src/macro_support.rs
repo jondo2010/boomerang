@@ -1,6 +1,6 @@
 //! This module provides traits and implementations for building reactors
 use crate::{
-    runtime, Assembly, BuilderError, BuilderModeKey, BuilderReactorKey, PartialReactionBuilder,
+    runtime, Assembly, AssemblyModeKey, AssemblyReactorKey, BuilderError, PartialReactionBuilder,
     ReactorBuilderState, ReactorPlacement,
 };
 
@@ -11,8 +11,8 @@ pub trait Reactor<State: runtime::ReactorData = ()>: Sized {
         &self,
         name: &str,
         state: State,
-        parent: Option<BuilderReactorKey>,
-        scope_mode: Option<BuilderModeKey>,
+        parent: Option<AssemblyReactorKey>,
+        scope_mode: Option<AssemblyModeKey>,
         bank_info: Option<runtime::BankInfo>,
         is_enclave: bool,
         env: &mut Assembly,
@@ -33,8 +33,8 @@ pub trait Reactor<State: runtime::ReactorData = ()>: Sized {
         &self,
         name: &str,
         state: State,
-        parent: Option<BuilderReactorKey>,
-        scope_mode: Option<BuilderModeKey>,
+        parent: Option<AssemblyReactorKey>,
+        scope_mode: Option<AssemblyModeKey>,
         bank_info: Option<runtime::BankInfo>,
         placement: ReactorPlacement,
         env: &mut Assembly,
@@ -46,8 +46,8 @@ where
     F: Fn(
             /*name*/ &str,
             /*state*/ State,
-            /*parent*/ Option<BuilderReactorKey>,
-            /*scope_mode*/ Option<BuilderModeKey>,
+            /*parent*/ Option<AssemblyReactorKey>,
+            /*scope_mode*/ Option<AssemblyModeKey>,
             /*bank_info*/ Option<boomerang_runtime::BankInfo>,
             /*placement*/ ReactorPlacement,
             /*env*/ &mut Assembly,
@@ -60,8 +60,8 @@ where
         &self,
         name: &str,
         state: State,
-        parent: Option<BuilderReactorKey>,
-        scope_mode: Option<BuilderModeKey>,
+        parent: Option<AssemblyReactorKey>,
+        scope_mode: Option<AssemblyModeKey>,
         bank_info: Option<boomerang_runtime::BankInfo>,
         placement: ReactorPlacement,
         env: &mut Assembly,

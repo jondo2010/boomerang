@@ -1,6 +1,6 @@
 //! Builder-visible metadata for connections that cross runtime partitions.
 
-use crate::{runtime, BuilderPortKey, BuilderReactorKey};
+use crate::{runtime, AssemblyPortKey, AssemblyReactorKey};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PartitionRootKind {
@@ -10,7 +10,7 @@ pub enum PartitionRootKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionRoot {
-    pub reactor: BuilderReactorKey,
+    pub reactor: AssemblyReactorKey,
     pub reactor_fqn: String,
     pub kind: PartitionRootKind,
 }
@@ -27,10 +27,10 @@ pub enum BoundaryKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterPartitionEdge {
     pub kind: BoundaryKind,
-    pub source_partition: BuilderReactorKey,
-    pub target_partition: BuilderReactorKey,
-    pub source_port: BuilderPortKey,
-    pub target_port: BuilderPortKey,
+    pub source_partition: AssemblyReactorKey,
+    pub target_partition: AssemblyReactorKey,
+    pub source_port: AssemblyPortKey,
+    pub target_port: AssemblyPortKey,
     pub delay: Option<runtime::Duration>,
     pub physical: bool,
 }

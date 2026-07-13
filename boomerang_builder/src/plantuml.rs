@@ -5,10 +5,10 @@ use std::{
 
 use slotmap::Key;
 
-use crate::{BuilderActionKey, BuilderReactorKey, TimerSpec};
+use crate::{AssemblyActionKey, AssemblyReactorKey, TimerSpec};
 
 use super::{
-    ActionType, Assembly, BuilderError, BuilderPortKey, BuilderReactionKey, PortType, ReactorSpec,
+    ActionType, Assembly, AssemblyPortKey, AssemblyReactionKey, BuilderError, PortType, ReactorSpec,
 };
 
 fn escape_puml_label(input: &str) -> String {
@@ -28,7 +28,7 @@ trait ElemId {
     fn elem_id(&self) -> String;
 }
 
-impl ElemId for BuilderReactionKey {
+impl ElemId for AssemblyReactionKey {
     /// Build a unique identifier for a reaction node in the PlantUML graph.
     fn elem_id(&self) -> String {
         let id = self.data().as_ffi();
@@ -36,7 +36,7 @@ impl ElemId for BuilderReactionKey {
     }
 }
 
-impl ElemId for BuilderPortKey {
+impl ElemId for AssemblyPortKey {
     /// Build a unique identifier for a port node in the PlantUML graph.
     fn elem_id(&self) -> String {
         let id = self.data().as_ffi();
@@ -44,7 +44,7 @@ impl ElemId for BuilderPortKey {
     }
 }
 
-impl ElemId for BuilderActionKey {
+impl ElemId for AssemblyActionKey {
     /// Build a unique identifier for an action node in the PlantUML graph.
     fn elem_id(&self) -> String {
         let id = self.data().as_ffi();
@@ -52,7 +52,7 @@ impl ElemId for BuilderActionKey {
     }
 }
 
-impl ElemId for BuilderReactorKey {
+impl ElemId for AssemblyReactorKey {
     /// Build a unique identifier for a reactor node in the PlantUML graph.
     fn elem_id(&self) -> String {
         let id = self.data().as_ffi();

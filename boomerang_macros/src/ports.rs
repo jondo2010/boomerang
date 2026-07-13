@@ -270,8 +270,8 @@ impl ToTokens for Model {
                 {
                     move |name: &str,
                      state: S,
-                     parent: Option<::boomerang::builder::BuilderReactorKey>,
-                     scope_mode: Option<::boomerang::builder::BuilderModeKey>,
+                     parent: Option<::boomerang::builder::AssemblyReactorKey>,
+                     scope_mode: Option<::boomerang::builder::AssemblyModeKey>,
                      bank_info: Option<::boomerang::runtime::BankInfo>,
                      placement: ::boomerang::builder::ReactorPlacement,
                      env: &mut ::boomerang::builder::Assembly| {

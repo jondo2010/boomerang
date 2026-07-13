@@ -267,10 +267,10 @@ fn test_runtime_scope_metadata_for_mode_components() {
     let runtime_idle = builder_parts.aliases.mode_aliases[idle].1;
     let idle_scope = enclave.graph.mode_scopes[runtime_idle];
 
-    let runtime_out = builder_parts.aliases.port_aliases[BuilderPortKey::from(out)].1;
+    let runtime_out = builder_parts.aliases.port_aliases[AssemblyPortKey::from(out)].1;
     let runtime_root_reaction = builder_parts.aliases.reaction_aliases[root_reaction].1;
     let runtime_mode_tick =
-        builder_parts.aliases.action_aliases[BuilderActionKey::from(mode_tick)].1;
+        builder_parts.aliases.action_aliases[AssemblyActionKey::from(mode_tick)].1;
     let runtime_mode_reaction = builder_parts.aliases.reaction_aliases[mode_reaction].1;
 
     assert_eq!(enclave.graph.port_scopes[runtime_out], root_scope);
@@ -516,7 +516,7 @@ fn reaction_refs_extract_reports_missing() {
         actions: runtime::RefsMut::new(&mut actions),
     };
 
-    let port = TypedPortKey::<u32, Input, Local>::new(BuilderPortKey::default());
+    let port = TypedPortKey::<u32, Input, Local>::new(AssemblyPortKey::default());
     let res = port.extract(&mut refs);
 
     assert!(
@@ -549,7 +549,7 @@ fn reaction_refs_extract_reports_type_mismatch() {
         actions: runtime::RefsMut::new(&mut actions),
     };
 
-    let port = TypedPortKey::<u32, Input, Local>::new(BuilderPortKey::default());
+    let port = TypedPortKey::<u32, Input, Local>::new(AssemblyPortKey::default());
     let res = port.extract(&mut refs);
 
     assert!(
@@ -1163,9 +1163,9 @@ mod federated;
 
 pub struct PingPong {
     pub assembly: Assembly,
-    pub main: BuilderReactorKey,
-    pub ping: BuilderReactorKey,
-    pub pong: BuilderReactorKey,
+    pub main: AssemblyReactorKey,
+    pub ping: AssemblyReactorKey,
+    pub pong: AssemblyReactorKey,
     pub ping_input: TypedPortKey<(), Input, Contained>,
     pub ping_output: TypedPortKey<(), Output, Contained>,
     pub pong_input: TypedPortKey<(), Input, Contained>,
@@ -1177,8 +1177,8 @@ pub fn create_ping_pong() -> PingPong {
     fn ping_pong(
         name: &str,
         is_enclave: bool,
-    ) -> impl FnOnce(BuilderReactorKey, &mut Assembly) -> Result<BuilderReactorKey, BuilderError> + use<'_>
-    {
+    ) -> impl FnOnce(AssemblyReactorKey, &mut Assembly) -> Result<AssemblyReactorKey, BuilderError>
+           + use<'_> {
         let greeting = format!("{} received", name);
         move |parent, env: &mut Assembly| {
             let mut builder = env.add_reactor(name, Some(parent), None, (), is_enclave);

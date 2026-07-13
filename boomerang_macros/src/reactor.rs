@@ -813,8 +813,8 @@ impl ToTokens for ArgsModel {
                 #vis fn #name #impl_generics(#(#param_args,)*) #ret #where_clause {
                     move |name: &str,
                          state: #state_type_path,
-                         parent: Option<::boomerang::builder::BuilderReactorKey>,
-                         scope_mode: Option<::boomerang::builder::BuilderModeKey>,
+                         parent: Option<::boomerang::builder::AssemblyReactorKey>,
+                         scope_mode: Option<::boomerang::builder::AssemblyModeKey>,
                          bank_info: Option<::boomerang::runtime::BankInfo>,
                          placement: ::boomerang::builder::ReactorPlacement,
                          env: &mut ::boomerang::builder::Assembly| {

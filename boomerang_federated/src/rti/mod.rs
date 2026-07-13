@@ -123,10 +123,6 @@ impl CompiledTopology {
         self.incoming.get(target).map_or(&[], Vec::as_slice)
     }
 
-    #[allow(
-        dead_code,
-        reason = "consumed by the affected-federate reevaluation milestone"
-    )]
     fn downstream(&self, source: &FederateId) -> &[FederateId] {
         self.downstream.get(source).map_or(&[], Vec::as_slice)
     }
@@ -377,7 +373,7 @@ impl RtiState {
         &self.topology.original
     }
 
-    pub(crate) fn contains_route(
+    fn contains_route(
         &self,
         source: &FederateId,
         target: &FederateId,
@@ -392,10 +388,7 @@ impl RtiState {
         message: FederateToRti,
     ) -> Result<Vec<RtiDelivery>, RtiError> {
         self.validate_message(authenticated_federate, &message)?;
-        let mut staged = self.clone();
-        let deliveries = staged.handle_validated(message)?;
-        *self = staged;
-        Ok(deliveries)
+        self.handle_validated(message)
     }
 
     #[cfg(test)]
@@ -418,20 +411,22 @@ impl RtiState {
                 Ok(Vec::new())
             }
             FederateToRti::Net { federate_id, tag } => {
-                let decision = self.request_tag(&federate_id, tag)?;
-                let mut deliveries = Self::grant_delivery(federate_id, decision)
-                    .into_iter()
-                    .collect::<Vec<_>>();
-                deliveries.extend(self.try_grants_for_all()?);
-                Ok(deliveries)
+                let mut staged = self.coordination(&federate_id)?.clone();
+                staged.request(tag);
+                let affected = self.net_affected_federates(&federate_id);
+                let grants = self.evaluate_grants(&affected, Some((&federate_id, &staged)))?;
+                Ok(self.commit_transition(federate_id, staged, grants))
             }
             FederateToRti::Ltc { federate_id, tag } => {
                 self.complete_tag(&federate_id, tag)?;
-                self.try_grants_for_all()
+                Ok(Vec::new())
             }
             FederateToRti::MsgAck { federate_id, tag } => {
-                self.acknowledge_message(&federate_id, tag)?;
-                self.try_grants_for_all()
+                let mut staged = self.coordination(&federate_id)?.clone();
+                Self::acknowledge_coordination(&mut staged, tag);
+                let affected = [federate_id.clone()];
+                let grants = self.evaluate_grants(&affected, Some((&federate_id, &staged)))?;
+                Ok(self.commit_transition(federate_id, staged, grants))
             }
             FederateToRti::Msg {
                 source,
@@ -452,13 +447,11 @@ impl RtiState {
                 )])
             }
             FederateToRti::Stop { federate_id } => {
-                self.ensure_federate(&federate_id)?;
-                let state = self
-                    .federates
-                    .get_mut(&federate_id)
-                    .expect("federate existence was checked");
-                state.stop();
-                self.try_grants_for_all()
+                let mut staged = self.coordination(&federate_id)?.clone();
+                staged.stop();
+                let affected = self.topology.downstream(&federate_id);
+                let grants = self.evaluate_grants(affected, Some((&federate_id, &staged)))?;
+                Ok(self.commit_transition(federate_id, staged, grants))
             }
         }
     }
@@ -657,6 +650,7 @@ impl RtiState {
         }
     }
 
+    #[cfg(test)]
     fn request_tag(
         &mut self,
         federate_id: &FederateId,
@@ -668,6 +662,12 @@ impl RtiState {
             .expect("federate existence was checked")
             .request(tag);
         self.try_grant_tag(federate_id)
+    }
+
+    fn coordination(&self, federate_id: &FederateId) -> Result<&FederateCoordination, RtiError> {
+        self.federates
+            .get(federate_id)
+            .ok_or_else(|| RtiError::UnknownFederate(federate_id.clone()))
     }
 
     fn complete_tag(&mut self, federate_id: &FederateId, tag: WireTag) -> Result<(), RtiError> {
@@ -684,6 +684,7 @@ impl RtiState {
     }
 
     /// Acknowledge delivery of exactly one message into a federate's scheduler queue.
+    #[cfg(test)]
     fn acknowledge_message(
         &mut self,
         federate_id: &FederateId,
@@ -694,21 +695,27 @@ impl RtiState {
             .federates
             .get_mut(federate_id)
             .expect("federate existence was checked");
-        let count =
-            state
-                .in_transit
-                .get_mut(&tag)
-                .ok_or_else(|| RtiError::UnmatchedMessageAck {
-                    federate_id: federate_id.clone(),
-                    tag,
-                })?;
+        if !state.in_transit.contains_key(&tag) {
+            return Err(RtiError::UnmatchedMessageAck {
+                federate_id: federate_id.clone(),
+                tag,
+            });
+        }
+        Self::acknowledge_coordination(state, tag);
+        Ok(())
+    }
+
+    fn acknowledge_coordination(state: &mut FederateCoordination, tag: WireTag) {
+        let count = state
+            .in_transit
+            .get_mut(&tag)
+            .expect("acknowledgment was validated against staged coordination");
         match NonZeroUsize::new(count.get() - 1) {
             Some(remaining) => *count = remaining,
             None => {
                 state.in_transit.remove(&tag);
             }
         }
-        Ok(())
     }
 
     fn record_in_transit_message(
@@ -744,18 +751,25 @@ impl RtiState {
         Ok(())
     }
 
+    #[cfg(test)]
     fn earliest_incoming_message_tag(
         &self,
         federate_id: &FederateId,
     ) -> Result<Option<WireTag>, RtiError> {
-        self.ensure_federate(federate_id)?;
-        let mut earliest = self.earliest_in_transit_message_tag(federate_id);
+        self.earliest_incoming_message_tag_with_override(federate_id, None)
+    }
+
+    fn earliest_incoming_message_tag_with_override<'a>(
+        &'a self,
+        federate_id: &FederateId,
+        override_state: Option<(&'a FederateId, &'a FederateCoordination)>,
+    ) -> Result<Option<WireTag>, RtiError> {
+        let state = self.coordination_with_override(federate_id, override_state)?;
+        let mut earliest = state.in_transit.keys().next().copied();
 
         for dependency in self.topology.incoming(federate_id) {
-            let upstream_state = self
-                .federates
-                .get(&dependency.source)
-                .ok_or_else(|| RtiError::UnknownFederate(dependency.source.clone()))?;
+            let upstream_state =
+                self.coordination_with_override(&dependency.source, override_state)?;
             let candidate =
                 apply_edge_delay(upstream_state.advertised_next_event(), dependency.delay)?;
 
@@ -767,15 +781,31 @@ impl RtiState {
         Ok(earliest)
     }
 
-    fn try_grant_tag(&mut self, federate_id: &FederateId) -> Result<GrantDecision, RtiError> {
-        let state = self
-            .federates
-            .get(federate_id)
-            .ok_or_else(|| RtiError::UnknownFederate(federate_id.clone()))?;
+    fn coordination_with_override<'a>(
+        &'a self,
+        federate_id: &FederateId,
+        override_state: Option<(&'a FederateId, &'a FederateCoordination)>,
+    ) -> Result<&'a FederateCoordination, RtiError> {
+        if let Some((override_id, state)) = override_state {
+            if override_id == federate_id {
+                return Ok(state);
+            }
+        }
+        self.coordination(federate_id)
+    }
+
+    fn evaluate_grant_tag<'a>(
+        &'a self,
+        federate_id: &FederateId,
+        override_state: Option<(&'a FederateId, &'a FederateCoordination)>,
+    ) -> Result<GrantDecision, RtiError> {
+        let state = self.coordination_with_override(federate_id, override_state)?;
+        let earliest =
+            || self.earliest_incoming_message_tag_with_override(federate_id, override_state);
         if state.is_stopped() {
             return Ok(GrantDecision::Blocked {
                 requested: WireTag::Forever,
-                earliest_incoming: self.earliest_incoming_message_tag(federate_id)?,
+                earliest_incoming: earliest()?,
             });
         }
         let requested = match state.requested_tag() {
@@ -783,7 +813,7 @@ impl RtiState {
             None => {
                 return Ok(GrantDecision::Blocked {
                     requested: WireTag::Forever,
-                    earliest_incoming: self.earliest_incoming_message_tag(federate_id)?,
+                    earliest_incoming: earliest()?,
                 })
             }
         };
@@ -791,7 +821,7 @@ impl RtiState {
         if requested == WireTag::FOREVER {
             return Ok(GrantDecision::Blocked {
                 requested,
-                earliest_incoming: self.earliest_incoming_message_tag(federate_id)?,
+                earliest_incoming: earliest()?,
             });
         }
 
@@ -802,12 +832,8 @@ impl RtiState {
             return Ok(GrantDecision::AlreadyGranted { tag: requested });
         }
 
-        let earliest_incoming = self.earliest_incoming_message_tag(federate_id)?;
-        if earliest_incoming.is_none_or(|earliest| earliest > requested) {
-            self.federates
-                .get_mut(federate_id)
-                .expect("federate existence was checked")
-                .last_granted = Some(requested);
+        let earliest_incoming = earliest()?;
+        if earliest_incoming.is_none_or(|incoming| incoming > requested) {
             Ok(GrantDecision::Granted { tag: requested })
         } else {
             Ok(GrantDecision::Blocked {
@@ -817,24 +843,62 @@ impl RtiState {
         }
     }
 
-    fn try_grants_for_all(&mut self) -> Result<Vec<RtiDelivery>, RtiError> {
-        let federate_ids: Vec<_> = self.federates.keys().cloned().collect();
-        let mut deliveries = Vec::new();
-
-        for federate_id in federate_ids {
-            let decision = self.try_grant_tag(&federate_id)?;
-            if let Some(delivery) = Self::grant_delivery(federate_id, decision) {
-                deliveries.push(delivery);
-            }
+    #[cfg(test)]
+    fn try_grant_tag(&mut self, federate_id: &FederateId) -> Result<GrantDecision, RtiError> {
+        let decision = self.evaluate_grant_tag(federate_id, None)?;
+        if let GrantDecision::Granted { tag } = decision {
+            self.federates
+                .get_mut(federate_id)
+                .expect("federate existence was checked")
+                .last_granted = Some(tag);
         }
-
-        Ok(deliveries)
+        Ok(decision)
     }
 
-    fn earliest_in_transit_message_tag(&self, federate_id: &FederateId) -> Option<WireTag> {
-        self.federates
-            .get(federate_id)
-            .and_then(|state| state.in_transit.keys().next().copied())
+    fn net_affected_federates(&self, source: &FederateId) -> Vec<FederateId> {
+        let mut affected = vec![source.clone()];
+        affected.extend(
+            self.topology
+                .downstream(source)
+                .iter()
+                .filter(|target| *target != source)
+                .cloned(),
+        );
+        affected
+    }
+
+    fn evaluate_grants<'a>(
+        &'a self,
+        affected: &[FederateId],
+        override_state: Option<(&'a FederateId, &'a FederateCoordination)>,
+    ) -> Result<Vec<(FederateId, GrantDecision)>, RtiError> {
+        affected
+            .iter()
+            .map(|federate_id| {
+                self.evaluate_grant_tag(federate_id, override_state)
+                    .map(|decision| (federate_id.clone(), decision))
+            })
+            .collect()
+    }
+
+    fn commit_transition(
+        &mut self,
+        federate_id: FederateId,
+        staged: FederateCoordination,
+        grants: Vec<(FederateId, GrantDecision)>,
+    ) -> Vec<RtiDelivery> {
+        self.federates.insert(federate_id, staged);
+        let mut deliveries = Vec::new();
+        for (grantee, decision) in grants {
+            if let GrantDecision::Granted { tag } = decision {
+                self.federates
+                    .get_mut(&grantee)
+                    .expect("affected federate comes from compiled topology")
+                    .last_granted = Some(tag);
+                deliveries.push(RtiDelivery::new(grantee, RtiToFederate::Tag { tag }));
+            }
+        }
+        deliveries
     }
 
     fn ensure_federate(&self, federate_id: &FederateId) -> Result<(), RtiError> {
@@ -842,15 +906,6 @@ impl RtiState {
             Ok(())
         } else {
             Err(RtiError::UnknownFederate(federate_id.clone()))
-        }
-    }
-
-    fn grant_delivery(federate_id: FederateId, decision: GrantDecision) -> Option<RtiDelivery> {
-        match decision {
-            GrantDecision::Granted { tag } => {
-                Some(RtiDelivery::new(federate_id, RtiToFederate::Tag { tag }))
-            }
-            GrantDecision::AlreadyGranted { .. } | GrantDecision::Blocked { .. } => None,
         }
     }
 }

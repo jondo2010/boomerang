@@ -888,7 +888,7 @@ fn net_overflow_is_failure_atomic() {
 }
 
 #[test]
-fn global_grant_scan_overflow_is_failure_atomic() {
+fn ltc_does_not_reevaluate_unaffected_pending_grants() {
     let delay = WireDelay::from_nanos(1);
     let overflowing = WireTag::finite(i128::MAX, 0);
     let mut rti = new_rti(FederatedTopology::with_edges(
@@ -918,14 +918,88 @@ fn global_grant_scan_overflow_is_failure_atomic() {
         rti.handle(FederateToRti::Ltc {
             federate_id: fed("source"),
             tag: WireTag::ZERO,
-        }),
-        Err(RtiError::TagDelayOverflow {
-            tag: overflowing,
-            delay_ns: 1,
         })
+        .unwrap(),
+        Vec::new()
     );
 
-    assert_eq!(snapshot(&rti), before);
+    assert_eq!(coordination(&rti, &fed("a")).last_granted, None);
+    assert_eq!(
+        coordination(&rti, &fed("source")).last_completed,
+        WireTag::ZERO
+    );
+    assert_eq!(
+        coordination(&rti, &fed("source")).last_granted,
+        before.federates.get(&fed("source")).unwrap().last_granted
+    );
+}
+
+#[test]
+fn net_reevaluates_self_then_sorted_downstream_federates() {
+    let delay = WireDelay::from_nanos(1);
+    let mut rti = new_rti(FederatedTopology::with_edges(
+        [fed("z"), fed("source"), fed("a")],
+        [
+            TopologyEdge::new(fed("source"), fed("z"), endpoint("source.out->z.in"), delay),
+            TopologyEdge::new(fed("source"), fed("a"), endpoint("source.out->a.in"), delay),
+        ],
+    ));
+
+    for target in [fed("z"), fed("a")] {
+        assert!(rti
+            .handle(FederateToRti::Net {
+                federate_id: target,
+                tag: WireTag::ZERO,
+            })
+            .unwrap()
+            .is_empty());
+    }
+
+    assert_eq!(
+        rti.handle(FederateToRti::Net {
+            federate_id: fed("source"),
+            tag: WireTag::ZERO,
+        })
+        .unwrap(),
+        ["source", "a", "z"]
+            .into_iter()
+            .map(|id| RtiDelivery::new(fed(id), RtiToFederate::Tag { tag: WireTag::ZERO }))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn unrelated_net_does_not_scan_an_overflowing_topology_component() {
+    let delay = WireDelay::from_nanos(1);
+    let overflowing = WireTag::finite(i128::MAX, 0);
+    let mut rti = new_rti(FederatedTopology::with_edges(
+        [fed("isolated"), fed("source"), fed("z")],
+        [TopologyEdge::new(
+            fed("source"),
+            fed("z"),
+            endpoint("source.out->z.in"),
+            delay,
+        )],
+    ));
+
+    assert_eq!(
+        rti.request_tag(&fed("source"), overflowing).unwrap(),
+        GrantDecision::Granted { tag: overflowing }
+    );
+    coordination_mut(&mut rti, &fed("z")).request(WireTag::ZERO);
+
+    assert_eq!(
+        rti.handle(FederateToRti::Net {
+            federate_id: fed("isolated"),
+            tag: WireTag::ZERO,
+        })
+        .unwrap(),
+        vec![RtiDelivery::new(
+            fed("isolated"),
+            RtiToFederate::Tag { tag: WireTag::ZERO },
+        )]
+    );
+    assert_eq!(coordination(&rti, &fed("z")).last_granted, None);
 }
 
 #[test]

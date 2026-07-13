@@ -103,7 +103,6 @@ pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
 
     let BuilderRuntimeParts {
         enclaves,
-        aliases: _,
         ..
     } = env_builder
         .into_runtime_parts(&config)
@@ -175,7 +174,6 @@ where
 
     let BuilderRuntimeParts {
         enclaves,
-        aliases: _,
         #[cfg(feature = "replay")]
         replayers,
         ..

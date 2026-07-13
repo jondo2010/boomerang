@@ -1281,7 +1281,6 @@ fn test_enclave2() {
 
     let BuilderRuntimeParts {
         enclaves,
-        aliases: _,
         ..
     } = env_builder
         .into_runtime_parts(&runtime::Config::default())

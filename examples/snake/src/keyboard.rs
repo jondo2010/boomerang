@@ -65,7 +65,6 @@ fn main() {
         .with_keep_alive(true);
     let BuilderRuntimeParts {
         enclaves,
-        aliases: _,
         ..
     } = env_builder.into_runtime_parts(&config).unwrap();
 

@@ -14,8 +14,8 @@ use std::collections::BTreeMap;
 use crate::{
     connection::PortBindings, ActionType, AssemblyActionKey, AssemblyModeKey, AssemblyPortKey,
     AssemblyReactionKey, AssemblyReactorKey, BoundaryKind, BuilderError, InterPartitionEdge,
-    InterPartitionPlan, ParentReactorSpec, PartialReactionBuilder, PartitionRoot,
-    PartitionRootKind, TimerActionKey,
+    InterPartitionPlan, ParentReactorSpec, PartitionRoot, PartitionRootKind, ReactionDeclaration,
+    TimerActionKey,
 };
 #[cfg(feature = "federated")]
 use crate::{federated_routes_from_plan, FederationPlan};
@@ -663,7 +663,7 @@ impl Assembly {
         // Now create the reset reactions for periodic timers, since we can now get &mut self.
         for (name, reaction_fn, reactor_key, action_key) in new_reactions {
             let scope_mode = self.action_specs[AssemblyActionKey::from(action_key)].scope_mode();
-            let mut reaction = PartialReactionBuilder::<()>::new(Some(&name), reactor_key, self)
+            let mut reaction = ReactionDeclaration::<()>::new(Some(&name), reactor_key, self)
                 .with_trigger(action_key);
             if let Some(scope_mode) = scope_mode {
                 reaction = reaction.in_mode_scope(scope_mode);

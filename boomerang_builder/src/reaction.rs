@@ -258,15 +258,15 @@ impl TriggerMode {
     }
 }
 
-pub trait PartialReactionBuilderField: runtime::ReactionRefsExtract {
+pub trait ReactionDeclarationField: runtime::ReactionRefsExtract {
     fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
-        builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
+        builder: &mut ReactionDeclaration<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
     );
 }
 
-impl<T, Q, A> PartialReactionBuilderField for TypedPortKey<T, Q, A>
+impl<T, Q, A> ReactionDeclarationField for TypedPortKey<T, Q, A>
 where
     T: runtime::ReactorData,
     Q: PortTag,
@@ -274,7 +274,7 @@ where
 {
     fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
-        builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
+        builder: &mut ReactionDeclaration<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
     ) {
         let port_key = AssemblyPortKey::from(*self);
@@ -282,7 +282,7 @@ where
     }
 }
 
-impl<T, Q, A, const N: usize> PartialReactionBuilderField for [TypedPortKey<T, Q, A>; N]
+impl<T, Q, A, const N: usize> ReactionDeclarationField for [TypedPortKey<T, Q, A>; N]
 where
     T: runtime::ReactorData,
     Q: PortTag,
@@ -290,7 +290,7 @@ where
 {
     fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
-        builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
+        builder: &mut ReactionDeclaration<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
     ) {
         self.iter().for_each(|port| {
@@ -299,7 +299,7 @@ where
     }
 }
 
-impl<T, Q, A> PartialReactionBuilderField for PortBank<T, Q, A>
+impl<T, Q, A> ReactionDeclarationField for PortBank<T, Q, A>
 where
     T: runtime::ReactorData,
     Q: PortTag,
@@ -307,7 +307,7 @@ where
 {
     fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
-        builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
+        builder: &mut ReactionDeclaration<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
     ) {
         self.iter().for_each(|port| {
@@ -317,7 +317,7 @@ where
     }
 }
 
-impl<T, Q> PartialReactionBuilderField for TypedActionKey<T, Q>
+impl<T, Q> ReactionDeclarationField for TypedActionKey<T, Q>
 where
     T: runtime::ReactorData,
     Q: ActionTag,
@@ -325,7 +325,7 @@ where
 {
     fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
-        builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
+        builder: &mut ReactionDeclaration<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
     ) {
         let action_key = AssemblyActionKey::from(*self);
@@ -333,10 +333,10 @@ where
     }
 }
 
-impl PartialReactionBuilderField for TimerActionKey {
+impl ReactionDeclarationField for TimerActionKey {
     fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
-        builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
+        builder: &mut ReactionDeclaration<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
     ) {
         let action_key = AssemblyActionKey::from(*self);
@@ -344,10 +344,10 @@ impl PartialReactionBuilderField for TimerActionKey {
     }
 }
 
-impl PartialReactionBuilderField for BuilderModeEffect {
+impl ReactionDeclarationField for BuilderModeEffect {
     fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
-        builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
+        builder: &mut ReactionDeclaration<S, Fields, ReactionFn>,
         _trigger_mode: TriggerMode,
     ) {
         builder.record_mode_effect(*self);
@@ -355,7 +355,7 @@ impl PartialReactionBuilderField for BuilderModeEffect {
 }
 
 #[derive(Debug)]
-pub struct PartialReactionBuilder<'a, S: runtime::ReactorData, Fields = (), ReactionFn = ()> {
+pub struct ReactionDeclaration<'a, S: runtime::ReactorData, Fields = (), ReactionFn = ()> {
     name: Option<String>,
     reaction_fn: ReactionFn,
     enabled_modes: Option<Vec<AssemblyModeKey>>,
@@ -372,7 +372,7 @@ pub struct PartialReactionBuilder<'a, S: runtime::ReactorData, Fields = (), Reac
     phantom: std::marker::PhantomData<(S, Fields, ReactionFn)>,
 }
 
-impl<'a, S: runtime::ReactorData> PartialReactionBuilder<'a, S, (), ()> {
+impl<'a, S: runtime::ReactorData> ReactionDeclaration<'a, S, (), ()> {
     pub fn new(
         name: Option<&str>,
         reactor_key: AssemblyReactorKey,
@@ -398,7 +398,7 @@ impl<'a, S: runtime::ReactorData> PartialReactionBuilder<'a, S, (), ()> {
 }
 
 impl<'a, S: runtime::ReactorData, Fields, ReactionFn>
-    PartialReactionBuilder<'a, S, Fields, ReactionFn>
+    ReactionDeclaration<'a, S, Fields, ReactionFn>
 {
     fn record_port_relation(&mut self, key: AssemblyPortKey, trigger_mode: TriggerMode) {
         if !self.port_relations.contains_key(key) {
@@ -436,13 +436,13 @@ impl<'a, S: runtime::ReactorData, Fields, ReactionFn>
 
 macro_rules! impl_with_field {
     ($($Fn:ident),*) => {
-        impl<'a, S, $($Fn,)*> PartialReactionBuilder<'a, S, ($($Fn,)*)>
+        impl<'a, S, $($Fn,)*> ReactionDeclaration<'a, S, ($($Fn,)*)>
         where
             S: runtime::ReactorData,
             $($Fn: runtime::ReactionRefsExtract,)*
         {
             /// Trigger this reaction on the startup of the reactor
-            pub fn with_startup_trigger(self) -> PartialReactionBuilder<'a, S, ($($Fn,)* TypedActionKey,)> {
+            pub fn with_startup_trigger(self) -> ReactionDeclaration<'a, S, ($($Fn,)* TypedActionKey,)> {
                 let startup = self
                     .assembly
                     .get_reactor_builder(self.reactor_key)
@@ -452,7 +452,7 @@ macro_rules! impl_with_field {
             }
 
             /// Trigger this reaction on the shutdown of the reactor
-            pub fn with_shutdown_trigger(self) -> PartialReactionBuilder<'a, S, ($($Fn,)* TypedActionKey,)> {
+            pub fn with_shutdown_trigger(self) -> ReactionDeclaration<'a, S, ($($Fn,)* TypedActionKey,)> {
                 let shutdown = self
                     .assembly
                     .get_reactor_builder(self.reactor_key)
@@ -463,9 +463,9 @@ macro_rules! impl_with_field {
 
             /// Triggers can be input ports, output ports of contained reactors, timers, actions.
             /// There must be at least one trigger for each reaction.
-            pub fn with_trigger<F>(mut self, field: F) -> PartialReactionBuilder<'a, S, ($($Fn,)* F,)>
+            pub fn with_trigger<F>(mut self, field: F) -> ReactionDeclaration<'a, S, ($($Fn,)* F,)>
             where
-                F: PartialReactionBuilderField
+                F: ReactionDeclarationField
             {
                 field.extend_builder(&mut self, TriggerMode::TriggersAndUses);
                 #[allow(non_snake_case)]
@@ -484,7 +484,7 @@ macro_rules! impl_with_field {
                     fields,
                     ..
                 } = self;
-                PartialReactionBuilder {
+                ReactionDeclaration {
                     name,
                     reaction_fn: (),
                     enabled_modes,
@@ -504,9 +504,9 @@ macro_rules! impl_with_field {
 
             /// Use specifies input ports (or output ports of contained reactors) that do not trigger execution of
             /// the reaction but may be read by the reaction.
-            pub fn with_use<F>(mut self, field: F) -> PartialReactionBuilder<'a, S, ($($Fn,)* F,)>
+            pub fn with_use<F>(mut self, field: F) -> ReactionDeclaration<'a, S, ($($Fn,)* F,)>
             where
-                F: PartialReactionBuilderField
+                F: ReactionDeclarationField
             {
                 field.extend_builder(&mut self, TriggerMode::UsesOnly);
                 #[allow(non_snake_case)]
@@ -525,7 +525,7 @@ macro_rules! impl_with_field {
                     fields,
                     ..
                 } = self;
-                PartialReactionBuilder {
+                ReactionDeclaration {
                     name,
                     reaction_fn: (),
                     enabled_modes,
@@ -544,9 +544,9 @@ macro_rules! impl_with_field {
             }
 
             /// Specify an effect field, which can be an output port, input port of contained reactors, or actions.
-            pub fn with_effect<F>(mut self, field: F) -> PartialReactionBuilder<'a, S, ($($Fn,)* F,)>
+            pub fn with_effect<F>(mut self, field: F) -> ReactionDeclaration<'a, S, ($($Fn,)* F,)>
             where
-                F: PartialReactionBuilderField
+                F: ReactionDeclarationField
             {
                 field.extend_builder(&mut self, TriggerMode::EffectsOnly);
                 #[allow(non_snake_case)]
@@ -565,7 +565,7 @@ macro_rules! impl_with_field {
                     fields,
                     ..
                 } = self;
-                PartialReactionBuilder {
+                ReactionDeclaration {
                     name,
                     reaction_fn: (),
                     enabled_modes,
@@ -610,7 +610,7 @@ all_tuples!(impl_tuple_append, 0, 10, T);
 // Generate implementations for tuples of size 0 to 10
 all_tuples!(impl_with_field, 0, 10, F);
 
-impl<'a, S, Fields> PartialReactionBuilder<'a, S, Fields>
+impl<'a, S, Fields> ReactionDeclaration<'a, S, Fields>
 where
     S: runtime::ReactorData,
     Fields: runtime::ReactionRefsExtract + ResolveModeEffects + Clone + Send + Sync,
@@ -618,7 +618,7 @@ where
     pub fn with_reaction_fn<F>(
         self,
         f: F,
-    ) -> PartialReactionBuilder<'a, S, Fields, BoxedBuilderReactionFn>
+    ) -> ReactionDeclaration<'a, S, Fields, BoxedBuilderReactionFn>
     where
         F: for<'store> Fn(&mut runtime::Context, &mut S, Fields::Ref<'store>)
             + Send
@@ -651,7 +651,7 @@ where
                 ))
             },
         );
-        PartialReactionBuilder {
+        ReactionDeclaration {
             name,
             reaction_fn,
             enabled_modes,
@@ -670,7 +670,7 @@ where
     }
 }
 
-impl<'a, S, Fields> PartialReactionBuilder<'a, S, Fields>
+impl<'a, S, Fields> ReactionDeclaration<'a, S, Fields>
 where
     S: runtime::ReactorData,
     Fields: runtime::ReactionRefsExtract,
@@ -678,7 +678,7 @@ where
     pub fn with_defered_reaction_fn<F>(
         self,
         f: F,
-    ) -> PartialReactionBuilder<'a, S, Fields, BoxedBuilderReactionFn>
+    ) -> ReactionDeclaration<'a, S, Fields, BoxedBuilderReactionFn>
     where
         F: FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn + 'static,
     {
@@ -697,7 +697,7 @@ where
             fields,
             ..
         } = self;
-        PartialReactionBuilder {
+        ReactionDeclaration {
             name,
             reaction_fn: Box::new(f),
             enabled_modes,
@@ -716,7 +716,7 @@ where
     }
 }
 
-impl<S, Fields> PartialReactionBuilder<'_, S, Fields, BoxedBuilderReactionFn>
+impl<S, Fields> ReactionDeclaration<'_, S, Fields, BoxedBuilderReactionFn>
 where
     S: runtime::ReactorData,
     Fields: runtime::ReactionRefsExtract,

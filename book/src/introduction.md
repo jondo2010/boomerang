@@ -22,6 +22,20 @@ This separation supports an iterative workflow:
 6. Record physical or deployment boundaries and replay selected subsystems for
    regression and integration testing.
 
+## Assembly and Runtime Vocabulary
+
+Boomerang separates declaring the logical application from executing it. Reactor
+macros and manual APIs use a `ReactorContext` and `ReactionDeclaration` to record
+typed specifications in an `Assembly`. Lowering resolves assembly keys and
+deferred factories, producing a `RuntimeAssembly` whose enclaves can be executed
+by the runtime or a federation runner:
+
+`ReactorContext` / `ReactionDeclaration` → `Assembly` of `Spec` values →
+lowering and `Factory` resolution → `RuntimeAssembly` → runtime execution.
+
+See the [Glossary](./glossary.md) for definitions of these suffixes and the
+related keys, placement, partition, and runtime concepts.
+
 Boomerang is an early-stage project. Deterministic logical-time execution,
 local enclaves, modal reactors, recording/replay foundations, and experimental
 static federation exist today. Deployment-independent partitioning,

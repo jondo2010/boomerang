@@ -1,10 +1,11 @@
 use std::fmt::Debug;
 
 use super::{
-    Assembly, AssemblyActionKey, AssemblyModeKey, AssemblyPortKey, AssemblyReactorKey, BuilderError,
+    Assembly, AssemblyActionKey, AssemblyError, AssemblyModeKey, AssemblyPortKey,
+    AssemblyReactorKey,
 };
 use crate::{
-    runtime, ActionTag, BuilderRuntimeParts, ParentReactorSpec, PortBank, PortTag, TimerActionKey,
+    runtime, ActionTag, ParentReactorSpec, PortBank, PortTag, RuntimeAssembly, TimerActionKey,
     TypedActionKey, TypedPortKey,
 };
 use slotmap::SecondaryMap;
@@ -25,8 +26,7 @@ impl petgraph::graph::GraphIndex for AssemblyReactionKey {
 }
 
 /// A deferred factory for a runtime reaction function.
-pub type DeferredReactionFactory =
-    Box<dyn FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn>;
+pub type DeferredReactionFactory = Box<dyn FnOnce(&RuntimeAssembly) -> runtime::BoxedReactionFn>;
 
 pub struct ReactionSpec {
     pub(super) name: Option<String>,
@@ -39,7 +39,7 @@ pub struct ReactionSpec {
     /// Enclosing mode scope, if this reaction was declared inside a mode.
     pub(super) scope_mode: Option<AssemblyModeKey>,
     /// Declared typed mode effects for this reaction
-    pub(super) mode_effects: Vec<BuilderModeEffect>,
+    pub(super) mode_effects: Vec<ModeEffectSpec>,
     /// Whether this reaction is triggered by mode reset entry.
     pub(super) reset_trigger: bool,
     /// Relations between this Reaction and Actions
@@ -57,7 +57,7 @@ impl ReactionSpec {
     pub fn new<S: Into<String>>(
         name: Option<S>,
         parent_key: AssemblyReactorKey,
-        reaction_fn: Box<dyn FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn>,
+        reaction_fn: Box<dyn FnOnce(&RuntimeAssembly) -> runtime::BoxedReactionFn>,
     ) -> Self {
         ReactionSpec {
             name: name.map(|s| s.into()),
@@ -98,13 +98,13 @@ impl Debug for ReactionSpec {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct BuilderModeEffect {
+pub struct ModeEffectSpec {
     target: AssemblyModeKey,
     runtime_target: Option<runtime::ModeKey>,
     transition: runtime::TransitionKind,
 }
 
-impl BuilderModeEffect {
+impl ModeEffectSpec {
     pub(crate) fn new(target: AssemblyModeKey, transition: runtime::TransitionKind) -> Self {
         Self {
             target,
@@ -129,28 +129,28 @@ impl BuilderModeEffect {
 
 #[doc(hidden)]
 pub trait ResolveModeEffects {
-    fn resolve_mode_effects(&mut self, runtime_parts: &BuilderRuntimeParts);
+    fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssembly);
 }
 
 impl ResolveModeEffects for () {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &BuilderRuntimeParts) {}
+    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
 }
 
-impl ResolveModeEffects for BuilderModeEffect {
-    fn resolve_mode_effects(&mut self, runtime_parts: &BuilderRuntimeParts) {
+impl ResolveModeEffects for ModeEffectSpec {
+    fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssembly) {
         self.runtime_target = Some(runtime_parts.aliases.mode_aliases[self.target].1);
     }
 }
 
 impl<T: ResolveModeEffects, const N: usize> ResolveModeEffects for [T; N] {
-    fn resolve_mode_effects(&mut self, runtime_parts: &BuilderRuntimeParts) {
+    fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssembly) {
         for item in self {
             item.resolve_mode_effects(runtime_parts);
         }
     }
 }
 
-impl runtime::ReactionRefsExtract for BuilderModeEffect {
+impl runtime::ReactionRefsExtract for ModeEffectSpec {
     type Ref<'store>
         = runtime::ModeEffectRef
     where
@@ -168,19 +168,19 @@ impl runtime::ReactionRefsExtract for BuilderModeEffect {
 }
 
 impl<T: runtime::ReactorData, Q: ActionTag> ResolveModeEffects for TypedActionKey<T, Q> {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &BuilderRuntimeParts) {}
+    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
 }
 
 impl ResolveModeEffects for TimerActionKey {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &BuilderRuntimeParts) {}
+    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
 }
 
 impl<T: runtime::ReactorData, Q: PortTag, A> ResolveModeEffects for TypedPortKey<T, Q, A> {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &BuilderRuntimeParts) {}
+    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
 }
 
 impl<T: runtime::ReactorData, Q: PortTag, A> ResolveModeEffects for PortBank<T, Q, A> {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &BuilderRuntimeParts) {}
+    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
 }
 
 macro_rules! impl_resolve_mode_effects {
@@ -190,7 +190,7 @@ macro_rules! impl_resolve_mode_effects {
             $($T: ResolveModeEffects,)*
         {
             #[allow(non_snake_case)]
-            fn resolve_mode_effects(&mut self, runtime_parts: &BuilderRuntimeParts) {
+            fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssembly) {
                 let ($($T,)*) = self;
                 $($T.resolve_mode_effects(runtime_parts);)*
             }
@@ -345,7 +345,7 @@ impl ReactionDeclarationField for TimerActionKey {
     }
 }
 
-impl ReactionDeclarationField for BuilderModeEffect {
+impl ReactionDeclarationField for ModeEffectSpec {
     fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
         builder: &mut ReactionDeclaration<S, Fields, ReactionFn>,
@@ -361,7 +361,7 @@ pub struct ReactionDeclaration<'a, S: runtime::ReactorData, Fields = (), Reactio
     reaction_fn: ReactionFn,
     enabled_modes: Option<Vec<AssemblyModeKey>>,
     scope_mode: Option<AssemblyModeKey>,
-    mode_effects: Vec<BuilderModeEffect>,
+    mode_effects: Vec<ModeEffectSpec>,
     reset_trigger: bool,
     port_relations: slotmap::SecondaryMap<AssemblyPortKey, TriggerMode>,
     port_order: Vec<AssemblyPortKey>,
@@ -415,7 +415,7 @@ impl<'a, S: runtime::ReactorData, Fields, ReactionFn>
         self.action_relations.insert(key, trigger_mode);
     }
 
-    fn record_mode_effect(&mut self, effect: BuilderModeEffect) {
+    fn record_mode_effect(&mut self, effect: ModeEffectSpec) {
         self.mode_effects.push(effect);
     }
 
@@ -643,7 +643,7 @@ where
         } = self;
         let fields_for_reaction = fields.clone();
         let reaction_fn: DeferredReactionFactory = Box::new(
-            move |runtime_parts: &BuilderRuntimeParts| -> runtime::BoxedReactionFn {
+            move |runtime_parts: &RuntimeAssembly| -> runtime::BoxedReactionFn {
                 let mut fields_for_reaction = fields_for_reaction.clone();
                 fields_for_reaction.resolve_mode_effects(runtime_parts);
                 Box::new(runtime::reaction::FnRefsAdapter::new(
@@ -681,7 +681,7 @@ where
         f: F,
     ) -> ReactionDeclaration<'a, S, Fields, DeferredReactionFactory>
     where
-        F: FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn + 'static,
+        F: FnOnce(&RuntimeAssembly) -> runtime::BoxedReactionFn + 'static,
     {
         let Self {
             name,
@@ -723,7 +723,7 @@ where
     Fields: runtime::ReactionRefsExtract,
 {
     /// Finish building the Reaction and add it to the Environment
-    pub fn finish(self) -> Result<AssemblyReactionKey, BuilderError> {
+    pub fn finish(self) -> Result<AssemblyReactionKey, AssemblyError> {
         let Self {
             name,
             enabled_modes,
@@ -745,13 +745,13 @@ where
             && !port_relations.values().any(|&mode| mode.is_triggers())
             && !reset_trigger
         {
-            return Err(BuilderError::ReactionBuilderError(format!(
+            return Err(AssemblyError::ReactionDeclarationError(format!(
                 "Reaction '{name:?}' has no triggers defined"
             )));
         }
 
         if reset_trigger && scope_mode.is_none() {
-            return Err(BuilderError::ReactionBuilderError(format!(
+            return Err(AssemblyError::ReactionDeclarationError(format!(
                 "Reaction '{name:?}' uses reset trigger outside a mode scope"
             )));
         }
@@ -759,12 +759,12 @@ where
         if let Some(ref modes) = enabled_modes {
             for mode_key in modes {
                 let mode = assembly.mode_specs.get(*mode_key).ok_or_else(|| {
-                    BuilderError::ReactionBuilderError(format!(
+                    AssemblyError::ReactionDeclarationError(format!(
                         "Unknown mode key {mode_key:?} for reaction '{name:?}'"
                     ))
                 })?;
                 if mode.reactor_key != reactor_key {
-                    return Err(BuilderError::ReactionBuilderError(format!(
+                    return Err(AssemblyError::ReactionDeclarationError(format!(
                         "Mode '{}' does not belong to reaction '{name:?}'",
                         mode.name
                     )));
@@ -774,12 +774,12 @@ where
 
         if let Some(scope_mode) = scope_mode {
             let mode = assembly.mode_specs.get(scope_mode).ok_or_else(|| {
-                BuilderError::ReactionBuilderError(format!(
+                AssemblyError::ReactionDeclarationError(format!(
                     "Unknown mode key {scope_mode:?} for reaction '{name:?}'"
                 ))
             })?;
             if mode.reactor_key != reactor_key {
-                return Err(BuilderError::ReactionBuilderError(format!(
+                return Err(AssemblyError::ReactionDeclarationError(format!(
                     "Mode scope '{}' does not belong to reaction '{name:?}'",
                     mode.name
                 )));
@@ -788,13 +788,13 @@ where
 
         for effect in &mode_effects {
             let mode = assembly.mode_specs.get(effect.target()).ok_or_else(|| {
-                BuilderError::ReactionBuilderError(format!(
+                AssemblyError::ReactionDeclarationError(format!(
                     "Unknown mode key {:?} for reaction '{name:?}'",
                     effect.target()
                 ))
             })?;
             if mode.reactor_key != reactor_key {
-                return Err(BuilderError::ReactionBuilderError(format!(
+                return Err(AssemblyError::ReactionDeclarationError(format!(
                     "Mode effect '{}' does not belong to reaction '{name:?}'",
                     mode.name
                 )));

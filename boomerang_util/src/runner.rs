@@ -11,7 +11,7 @@
 
 use anyhow::Context;
 use boomerang::{
-    builder::{Assembly, BuilderRuntimeParts, Reactor},
+    builder::{Assembly, Reactor, RuntimeAssembly},
     runtime,
 };
 use clap::Parser;
@@ -101,8 +101,8 @@ pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
         tracing::info!("Wrote plantuml graph to {}", path.display());
     }
 
-    let BuilderRuntimeParts { enclaves, .. } = assembly
-        .into_runtime_parts(&config)
+    let RuntimeAssembly { enclaves, .. } = assembly
+        .into_runtime_assembly(&config)
         .context("Error building environment!")?;
 
     let envs_out = runtime::execute_enclaves(enclaves.into_iter(), config)?;
@@ -169,13 +169,13 @@ where
         ..Default::default()
     };
 
-    let BuilderRuntimeParts {
+    let RuntimeAssembly {
         enclaves,
         #[cfg(feature = "replay")]
         replayers,
         ..
     } = assembly
-        .into_runtime_parts(&config)
+        .into_runtime_assembly(&config)
         .context("Error building environment!")?;
 
     if args.print_debug_info {

@@ -825,7 +825,7 @@ impl ToTokens for ArgsModel {
                         }
                         #(#create_ports)*
                         (move |builder: &mut ::boomerang::builder::ReactorContext<'_, #state_type_path>,
-                              ports: (#(#local_types,)* )| -> Result<(), ::boomerang::builder::BuilderError> {
+                              ports: (#(#local_types,)* )| -> Result<(), ::boomerang::builder::AssemblyError> {
                             #[allow(non_snake_case)]
                             let (#(#local_patterns,)*) = ports;
                             #(#mode_bindings)*

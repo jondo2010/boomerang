@@ -53,9 +53,9 @@ fn bench(c: &mut Criterion) {
                         .with_fast_forward(false)
                         .with_keep_alive(true)
                         .with_queue_size(65_536);
-                    let BuilderRuntimeParts {
+                    let RuntimeAssembly {
                         enclaves, aliases, ..
-                    } = assembly.into_runtime_parts(&config).unwrap();
+                    } = assembly.into_runtime_assembly(&config).unwrap();
                     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
                     let (action_enclave_key, action_key) = aliases.action_aliases[action_key];
                     assert_eq!(

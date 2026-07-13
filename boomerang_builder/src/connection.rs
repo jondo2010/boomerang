@@ -9,8 +9,8 @@ use std::sync::Arc;
 use slotmap::SecondaryMap;
 
 use crate::{
-    runtime, ActionTag, Assembly, AssemblyActionKey, AssemblyModeKey, AssemblyPortKey,
-    AssemblyReactorKey, BuilderError, Input, Output, ParentReactorSpec, PartitionMap, PortType,
+    runtime, ActionTag, Assembly, AssemblyActionKey, AssemblyError, AssemblyModeKey,
+    AssemblyPortKey, AssemblyReactorKey, Input, Output, ParentReactorSpec, PartitionMap, PortType,
     TriggerMode, TypedActionKey, TypedPortKey,
 };
 
@@ -88,9 +88,9 @@ impl PortBindings {
         source_key: AssemblyPortKey,
         target_key: AssemblyPortKey,
         assembly: &Assembly,
-    ) -> Result<(), BuilderError> {
+    ) -> Result<(), AssemblyError> {
         if let Some(existing) = self.inward.get(target_key) {
-            return Err(BuilderError::PortConnectionError {
+            return Err(AssemblyError::PortConnectionError {
                 source_key,
                 target_key,
                 what: format!(
@@ -117,7 +117,7 @@ impl PortBindings {
                     _ => false,
                 })
         }) {
-            return Err(BuilderError::PortConnectionError {
+            return Err(AssemblyError::PortConnectionError {
                 source_key,
                 target_key,
                 what: "Ports with Uses or Effects relations may not be connected to other ports"
@@ -140,7 +140,7 @@ impl PortBindings {
                         // Valid
                     }
                     _ => {
-                        return Err(BuilderError::PortConnectionError {
+                        return Err(AssemblyError::PortConnectionError {
                             source_key,
                             target_key,
                             what: "An input port A may only be bound to another input port B if B is contained by a reactor that in turn is contained by the reactor of A.".into(),
@@ -151,7 +151,7 @@ impl PortBindings {
             (PortType::Output, PortType::Input) => {
                 // VALIDATE(this->container()->container() == port->container()->container(),
                 if source_ancestor != target_ancestor {
-                    return Err(BuilderError::PortConnectionError {
+                    return Err(AssemblyError::PortConnectionError {
                         source_key,
                         target_key,
                         what: "An output port A may only be bound to an input port B if both ports belong to reactors in the same hierarichal level.".into(),
@@ -165,7 +165,7 @@ impl PortBindings {
                     }
                     _ => {
                         dbg!(source_ancestor, target_ancestor);
-                        return Err(BuilderError::PortConnectionError {
+                        return Err(AssemblyError::PortConnectionError {
                             source_key,
                             target_key,
                             what: "An output port A may only be bound to an input port B if both ports belong to reactors in the same hierarichal level.".into(),
@@ -181,7 +181,7 @@ impl PortBindings {
                         // Valid
                     }
                     _ => {
-                        return Err(BuilderError::PortConnectionError {
+                        return Err(AssemblyError::PortConnectionError {
                             source_key,
                             target_key,
                             what: "An output port A may only be bound to another output port B if A is contained by a reactor that in turn is contained by the reactor of B".into(),
@@ -190,7 +190,7 @@ impl PortBindings {
                 }
             }
             (PortType::Input, PortType::Output) => {
-                return Err(BuilderError::PortConnectionError {
+                return Err(AssemblyError::PortConnectionError {
                     source_key,
                     target_key,
                     what: "Unexpected case: can't bind an input Port to an output Port.".to_owned(),
@@ -241,7 +241,7 @@ pub trait ErasedConnectionSpec {
         assembly: &mut Assembly,
         partition_map: &mut PartitionMap,
         port_bindings: &mut PortBindings,
-    ) -> Result<(), BuilderError>;
+    ) -> Result<(), AssemblyError>;
 }
 
 pub struct ConnectionSpec<T: runtime::ReactorData, Q: ActionTag> {
@@ -270,7 +270,7 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> ErasedConnectionSpec for Con
         assembly: &mut Assembly,
         partition_map: &mut PartitionMap,
         port_bindings: &mut PortBindings,
-    ) -> Result<(), BuilderError> {
+    ) -> Result<(), AssemblyError> {
         let source_port = &assembly.port_specs[self.source_key()];
         let target_port = &assembly.port_specs[self.target_key()];
 
@@ -309,7 +309,7 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> ErasedConnectionSpec for Con
             #[cfg(feature = "federated")]
             if partitions_are_both_federated(assembly, source_partition, target_partition)? {
                 if !Q::IS_LOGICAL {
-                    return Err(BuilderError::UnsupportedFederationTopology {
+                    return Err(AssemblyError::UnsupportedFederationTopology {
                         what: format!(
                             "cross-federate physical connection '{}' -> '{}' is reserved for a later milestone",
                             assembly.fqn_for(self.source_key, false)?,
@@ -407,14 +407,14 @@ fn partitions_are_both_federated(
     assembly: &Assembly,
     source_partition: AssemblyReactorKey,
     target_partition: AssemblyReactorKey,
-) -> Result<bool, BuilderError> {
+) -> Result<bool, AssemblyError> {
     let source_federate = assembly.reactor_specs[source_partition].federate_spec();
     let target_federate = assembly.reactor_specs[target_partition].federate_spec();
 
     match (source_federate.is_some(), target_federate.is_some()) {
         (true, true) => Ok(true),
         (false, false) => Ok(false),
-        _ => Err(BuilderError::UnsupportedFederationTopology {
+        _ => Err(AssemblyError::UnsupportedFederationTopology {
             what:
                 "connection crosses a federated boundary, but both enclave roots are not federates"
                     .to_owned(),
@@ -427,7 +427,7 @@ fn federated_endpoint_id(
     assembly: &Assembly,
     source_key: AssemblyPortKey,
     target_key: AssemblyPortKey,
-) -> Result<boomerang_federated::EndpointId, BuilderError> {
+) -> Result<boomerang_federated::EndpointId, AssemblyError> {
     let source_port_fqn = assembly.fqn_for(source_key, false)?.to_string();
     let target_port_fqn = assembly.fqn_for(target_key, false)?.to_string();
     Ok(boomerang_federated::EndpointId::new(format!(
@@ -450,7 +450,7 @@ fn build_delayed_connection<T: runtime::ReactorData + Clone, Q: ActionTag>(
         TypedPortKey<T, Input>,
         TypedPortKey<T, Output>,
     ),
-    BuilderError,
+    AssemblyError,
 > {
     let mut builder = assembly.add_reactor("con_reactor", parent_key, None, (), false);
     if let Some(scope_mode) = scope_mode {
@@ -488,14 +488,14 @@ struct EnclaveConnectionSource<T: runtime::ReactorData + Clone> {
 
 /// Build the source portion
 ///
-/// The sender-side is build-deferred by returning a closure. The BuilderAction must be turned into a runtime Action before the closure is called.
+/// The sender side is deferred until its assembly action can be resolved to a runtime action.
 fn build_enclave_connection_source<T: runtime::ReactorData + Clone>(
     assembly: &mut Assembly,
     parent_key: Option<AssemblyReactorKey>,
     scope_mode: Option<AssemblyModeKey>,
     target_partition: AssemblyReactorKey,
     target_action_key: AssemblyActionKey,
-) -> Result<EnclaveConnectionSource<T>, BuilderError> {
+) -> Result<EnclaveConnectionSource<T>, AssemblyError> {
     let mut source_builder = assembly.add_reactor("con_reactor_src", parent_key, None, (), false);
     if let Some(scope_mode) = scope_mode {
         source_builder.set_scope_mode(scope_mode)?;
@@ -538,7 +538,7 @@ fn build_federated_connection_source<T: runtime::ReactorData + Clone>(
     target_action_key: AssemblyActionKey,
     endpoint: boomerang_federated::EndpointId,
     encoder: Box<dyn runtime::FederatedPayloadEncoder<T>>,
-) -> Result<EnclaveConnectionSource<T>, BuilderError> {
+) -> Result<EnclaveConnectionSource<T>, AssemblyError> {
     let mut source_builder = assembly.add_reactor("con_reactor_src", parent_key, None, (), false);
     if let Some(scope_mode) = scope_mode {
         source_builder.set_scope_mode(scope_mode)?;
@@ -594,7 +594,7 @@ fn build_enclave_connection_target<T: runtime::ReactorData + Clone, Q: ActionTag
     parent_key: Option<AssemblyReactorKey>,
     scope_mode: Option<AssemblyModeKey>,
     after: Option<runtime::Duration>,
-) -> Result<EnclaveConnectionTarget<T, Q>, BuilderError> {
+) -> Result<EnclaveConnectionTarget<T, Q>, AssemblyError> {
     let mut target_builder = assembly.add_reactor("con_reactor_tgt", parent_key, None, (), false);
     if let Some(scope_mode) = scope_mode {
         target_builder.set_scope_mode(scope_mode)?;

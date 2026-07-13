@@ -8,7 +8,8 @@ use slotmap::Key;
 use crate::{AssemblyActionKey, AssemblyReactorKey, TimerSpec};
 
 use super::{
-    ActionType, Assembly, AssemblyPortKey, AssemblyReactionKey, BuilderError, PortType, ReactorSpec,
+    ActionType, Assembly, AssemblyError, AssemblyPortKey, AssemblyReactionKey, PortType,
+    ReactorSpec,
 };
 
 fn escape_puml_label(input: &str) -> String {
@@ -307,10 +308,10 @@ impl Assembly {
 
     /// Build a PlantUML representation of the entire Reactor environment. This creates a top-level view
     /// of all defined Reactors and any nested children.
-    pub fn create_plantuml_graph(&self) -> Result<String, BuilderError> {
+    pub fn create_plantuml_graph(&self) -> Result<String, AssemblyError> {
         let graph = self.build_reactor_graph_grouped();
         let ordered_reactors = petgraph::algo::toposort(&graph, None)
-            .map_err(|e| BuilderError::ReactorGraphCycle { what: e.node_id() })?;
+            .map_err(|e| AssemblyError::ReactorGraphCycle { what: e.node_id() })?;
         let roots: Vec<_> = ordered_reactors
             .iter()
             .copied()

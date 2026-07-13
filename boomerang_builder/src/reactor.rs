@@ -1,9 +1,9 @@
 use std::fmt::Debug;
 
 use super::{
-    ActionTag, ActionType, Assembly, AssemblyActionKey, AssemblyPortKey, AssemblyReactionKey,
-    BuilderError, BuilderFqn, BuilderModeEffect, Input, Logical, Output, Physical, PortBank,
-    PortTag, TimerActionKey, TimerSpec, TypedActionKey, TypedPortKey,
+    ActionTag, ActionType, Assembly, AssemblyActionKey, AssemblyError, AssemblyFqn,
+    AssemblyPortKey, AssemblyReactionKey, Input, Logical, ModeEffectSpec, Output, Physical,
+    PortBank, PortTag, TimerActionKey, TimerSpec, TypedActionKey, TypedPortKey,
 };
 use crate::runtime;
 use slotmap::SecondaryMap;
@@ -327,13 +327,13 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
     }
 
     #[doc(hidden)]
-    pub fn set_scope_mode(&mut self, mode: AssemblyModeKey) -> Result<(), BuilderError> {
+    pub fn set_scope_mode(&mut self, mode: AssemblyModeKey) -> Result<(), AssemblyError> {
         let mode_builder = self.assembly.mode_specs.get(mode).ok_or_else(|| {
-            BuilderError::ReactionBuilderError(format!("Unknown mode key {mode:?}"))
+            AssemblyError::ReactionDeclarationError(format!("Unknown mode key {mode:?}"))
         })?;
         let reactor_builder = &self.assembly.reactor_specs[self.reactor_key];
         if Some(mode_builder.reactor_key) != reactor_builder.parent_reactor_key {
-            return Err(BuilderError::ReactionBuilderError(format!(
+            return Err(AssemblyError::ReactionDeclarationError(format!(
                 "Mode '{}' does not enclose reactor '{}'",
                 mode_builder.name,
                 reactor_builder.name()
@@ -362,7 +362,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
         &mut self,
         name: &str,
         spec: TimerSpec,
-    ) -> Result<TimerActionKey, BuilderError> {
+    ) -> Result<TimerActionKey, AssemblyError> {
         self.assembly
             .add_timer_action_in_scope(name, self.reactor_key, self.current_mode, spec)
     }
@@ -375,7 +375,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
         &mut self,
         name: &str,
         min_delay: Option<runtime::Duration>,
-    ) -> Result<TypedActionKey<T, Q>, BuilderError> {
+    ) -> Result<TypedActionKey<T, Q>, AssemblyError> {
         self.assembly.add_action_in_scope::<T, Q>(
             name,
             min_delay,
@@ -392,7 +392,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
         &mut self,
         name: &str,
         min_delay: Option<runtime::Duration>,
-    ) -> Result<TypedActionKey<T, Logical>, BuilderError> {
+    ) -> Result<TypedActionKey<T, Logical>, AssemblyError> {
         self.assembly.add_action_in_scope::<T, Logical>(
             name,
             min_delay,
@@ -405,7 +405,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
         &mut self,
         name: &str,
         min_delay: Option<runtime::Duration>,
-    ) -> Result<TypedActionKey<T, Physical>, BuilderError> {
+    ) -> Result<TypedActionKey<T, Physical>, AssemblyError> {
         self.assembly.add_action_in_scope::<T, Physical>(
             name,
             min_delay,
@@ -419,7 +419,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
         &mut self,
         name: &str,
         kind: impl Into<ModeKind>,
-    ) -> Result<AssemblyModeKey, BuilderError> {
+    ) -> Result<AssemblyModeKey, AssemblyError> {
         self.assembly.add_mode(name, self.reactor_key, kind)
     }
 
@@ -427,7 +427,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
         &self,
         mode: AssemblyModeKey,
         transition: runtime::TransitionKind,
-    ) -> Result<BuilderModeEffect, BuilderError> {
+    ) -> Result<ModeEffectSpec, AssemblyError> {
         self.assembly
             .mode_effect(self.reactor_key, mode, transition)
     }
@@ -435,34 +435,34 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
     pub fn reset_mode_effect(
         &self,
         mode: AssemblyModeKey,
-    ) -> Result<BuilderModeEffect, BuilderError> {
+    ) -> Result<ModeEffectSpec, AssemblyError> {
         self.mode_effect(mode, runtime::TransitionKind::Reset)
     }
 
     pub fn history_mode_effect(
         &self,
         mode: AssemblyModeKey,
-    ) -> Result<BuilderModeEffect, BuilderError> {
+    ) -> Result<ModeEffectSpec, AssemblyError> {
         self.mode_effect(mode, runtime::TransitionKind::History)
     }
 
     pub fn in_mode<R>(
         &mut self,
         mode: AssemblyModeKey,
-        f: impl FnOnce(&mut Self) -> Result<R, BuilderError>,
-    ) -> Result<R, BuilderError> {
+        f: impl FnOnce(&mut Self) -> Result<R, AssemblyError>,
+    ) -> Result<R, AssemblyError> {
         let mode_builder = self.assembly.mode_specs.get(mode).ok_or_else(|| {
-            BuilderError::ReactionBuilderError(format!("Unknown mode key {mode:?}"))
+            AssemblyError::ReactionDeclarationError(format!("Unknown mode key {mode:?}"))
         })?;
         if mode_builder.reactor_key != self.reactor_key {
-            return Err(BuilderError::ReactionBuilderError(format!(
+            return Err(AssemblyError::ReactionDeclarationError(format!(
                 "Mode '{}' does not belong to reactor '{}'",
                 mode_builder.name,
                 self.assembly.reactor_specs[self.reactor_key].name()
             )));
         }
         if self.current_mode.is_some() {
-            return Err(BuilderError::ReactionBuilderError(
+            return Err(AssemblyError::ReactionDeclarationError(
                 "Nested mode blocks are not supported".to_owned(),
             ));
         }
@@ -478,9 +478,9 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
         &mut self,
         name: &str,
         bank_info: Option<runtime::BankInfo>,
-    ) -> Result<TypedPortKey<T, Q>, BuilderError> {
+    ) -> Result<TypedPortKey<T, Q>, AssemblyError> {
         if self.current_mode.is_some() {
-            return Err(BuilderError::ReactionBuilderError(format!(
+            return Err(AssemblyError::ReactionDeclarationError(format!(
                 "Port '{name}' cannot be declared inside a mode"
             )));
         }
@@ -494,7 +494,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
     pub fn add_ports<T: runtime::ReactorData, Q: PortTag, const N: usize>(
         &mut self,
         name: &str,
-    ) -> Result<[TypedPortKey<T, Q>; N], BuilderError> {
+    ) -> Result<[TypedPortKey<T, Q>; N], AssemblyError> {
         let bank = self.add_ports_bank::<T, Q>(name, N)?;
         Ok(bank
             .into_vec()
@@ -507,7 +507,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
         &mut self,
         name: &str,
         len: usize,
-    ) -> Result<PortBank<T, Q>, BuilderError> {
+    ) -> Result<PortBank<T, Q>, AssemblyError> {
         let mut ports = Vec::with_capacity(len);
         for i in 0..len {
             let port =
@@ -521,7 +521,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
     pub fn add_input_port<T: runtime::ReactorData>(
         &mut self,
         name: &str,
-    ) -> Result<TypedPortKey<T, Input>, BuilderError> {
+    ) -> Result<TypedPortKey<T, Input>, AssemblyError> {
         self.add_port::<T, Input>(name, None)
     }
 
@@ -529,7 +529,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
     pub fn add_output_port<T: runtime::ReactorData>(
         &mut self,
         name: &str,
-    ) -> Result<TypedPortKey<T, Output>, BuilderError> {
+    ) -> Result<TypedPortKey<T, Output>, AssemblyError> {
         self.add_port::<T, Output>(name, None)
     }
 
@@ -537,7 +537,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
     pub fn add_input_ports<T: runtime::ReactorData, const N: usize>(
         &mut self,
         name: &str,
-    ) -> Result<[TypedPortKey<T, Input>; N], BuilderError> {
+    ) -> Result<[TypedPortKey<T, Input>; N], AssemblyError> {
         self.add_ports(name)
     }
 
@@ -546,7 +546,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
         &mut self,
         name: &str,
         len: usize,
-    ) -> Result<PortBank<T, Input>, BuilderError> {
+    ) -> Result<PortBank<T, Input>, AssemblyError> {
         self.add_ports_bank(name, len)
     }
 
@@ -554,7 +554,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
     pub fn add_output_ports<T: runtime::ReactorData, const N: usize>(
         &mut self,
         name: &str,
-    ) -> Result<[TypedPortKey<T, Output>; N], BuilderError> {
+    ) -> Result<[TypedPortKey<T, Output>; N], AssemblyError> {
         self.add_ports(name)
     }
 
@@ -563,18 +563,18 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
         &mut self,
         name: &str,
         len: usize,
-    ) -> Result<PortBank<T, Output>, BuilderError> {
+    ) -> Result<PortBank<T, Output>, AssemblyError> {
         self.add_ports_bank(name, len)
     }
 
     /// Add a new child reactor using a closure to build it.
-    pub fn add_child_with<F>(&mut self, f: F) -> Result<AssemblyReactorKey, BuilderError>
+    pub fn add_child_with<F>(&mut self, f: F) -> Result<AssemblyReactorKey, AssemblyError>
     where
-        F: FnOnce(AssemblyReactorKey, &mut Assembly) -> Result<AssemblyReactorKey, BuilderError>,
+        F: FnOnce(AssemblyReactorKey, &mut Assembly) -> Result<AssemblyReactorKey, AssemblyError>,
     {
         let child = f(self.reactor_key, self.assembly)?;
         if self.assembly.reactor_specs[child].parent_reactor_key != Some(self.reactor_key) {
-            return Err(BuilderError::ReactionBuilderError(format!(
+            return Err(AssemblyError::ReactionDeclarationError(format!(
                 "Child builder returned reactor '{}' that is not contained by '{}'",
                 self.assembly.reactor_specs[child].name(),
                 self.assembly.reactor_specs[self.reactor_key].name()
@@ -594,7 +594,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
         port_b_key: TypedPortKey<T, Q2, A2>,
         after: Option<runtime::Duration>,
         physical: bool,
-    ) -> Result<(), BuilderError>
+    ) -> Result<(), AssemblyError>
     where
         T: runtime::ReactorData + Clone,
         Q1: PortTag,
@@ -617,7 +617,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
         ports_to: impl Iterator<Item = TypedPortKey<T, Q2, A2>>,
         after: Option<runtime::Duration>,
         physical: bool,
-    ) -> Result<(), BuilderError>
+    ) -> Result<(), AssemblyError>
     where
         T: runtime::ReactorData + Clone,
         Q1: PortTag,
@@ -627,7 +627,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
         let ports_to: Vec<_> = ports_to.collect();
 
         if ports_from.len() != ports_to.len() {
-            return Err(BuilderError::PortConnectionLengthMismatch {
+            return Err(AssemblyError::PortConnectionLengthMismatch {
                 from: ports_from.len(),
                 to: ports_to.len(),
             });
@@ -646,7 +646,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
         ports_to: impl Iterator<Item = TypedPortKey<T, Q2, A2>>,
         after: Option<runtime::Duration>,
         physical: bool,
-    ) -> Result<(), BuilderError>
+    ) -> Result<(), AssemblyError>
     where
         T: runtime::ReactorData + Clone,
         Q1: PortTag,
@@ -665,7 +665,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
         ports_to: impl Iterator<Item = TypedPortKey<T, Q2, A2>>,
         after: Option<runtime::Duration>,
         physical: bool,
-    ) -> Result<(), BuilderError>
+    ) -> Result<(), AssemblyError>
     where
         T: runtime::ReactorData + Clone,
         Q1: PortTag,
@@ -682,7 +682,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
         Ok(())
     }
 
-    pub fn finish(self) -> Result<AssemblyReactorKey, BuilderError> {
+    pub fn finish(self) -> Result<AssemblyReactorKey, AssemblyError> {
         self.assembly.validate_reactions()?;
         Ok(self.reactor_key)
     }
@@ -690,8 +690,8 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
     /// Find a PhysicalAction globally in the Assembly given its fully-qualified name
     pub fn find_physical_action_by_fqn(
         &self,
-        action_fqn: impl Into<BuilderFqn>,
-    ) -> Result<AssemblyActionKey, BuilderError> {
+        action_fqn: impl Into<AssemblyFqn>,
+    ) -> Result<AssemblyActionKey, AssemblyError> {
         self.assembly.find_physical_action_by_fqn(action_fqn)
     }
 
@@ -700,7 +700,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
     pub fn add_action_recorder<T, Q>(
         &mut self,
         action_key: TypedActionKey<T, Q>,
-    ) -> Result<(), BuilderError>
+    ) -> Result<(), AssemblyError>
     where
         T: runtime::ReactorData + serde::Serialize,
         Q: ActionTag,
@@ -727,7 +727,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
     pub fn add_action_replayer<T, Q>(
         &mut self,
         action_key: TypedActionKey<T, Q>,
-    ) -> Result<(), BuilderError>
+    ) -> Result<(), AssemblyError>
     where
         T: runtime::ReactorData + for<'de> serde::de::Deserialize<'de>,
         Q: ActionTag,

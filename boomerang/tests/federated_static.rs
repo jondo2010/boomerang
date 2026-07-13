@@ -78,7 +78,7 @@ fn public_api_runs_static_in_memory_federation() {
     assembly.validate_reactions().unwrap();
 
     let config = runtime::Config::default().with_fast_forward(true);
-    let parts = assembly.into_runtime_parts(&config).unwrap();
+    let parts = assembly.into_runtime_assembly(&config).unwrap();
     let _envs = execute_federation_in_memory(parts, config).unwrap();
 
     assert_eq!(*values.lock().unwrap(), vec![(Tag::ZERO, 7)]);
@@ -101,7 +101,7 @@ fn public_api_runs_tcp_static_federation() {
         assembly.validate_reactions().unwrap();
 
         let config = runtime::Config::default().with_fast_forward(true);
-        let parts = assembly.into_runtime_parts(&config).unwrap();
+        let parts = assembly.into_runtime_assembly(&config).unwrap();
         let _envs =
             execute_federation_over_tcp(parts, config, TcpStaticFederationConfig::default())
                 .unwrap();

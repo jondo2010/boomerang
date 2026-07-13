@@ -26,7 +26,7 @@ struct FederatedOutboundCapture {
 }
 
 impl FederatedOutboundCapture {
-    fn take(parts: &mut BuilderRuntimeParts) -> Self {
+    fn take(parts: &mut RuntimeAssembly) -> Self {
         assert_eq!(parts.federation_plan.endpoints.len(), 1);
         let source = boomerang_federated::FederateId::new(
             parts.federation_plan.endpoints[0].source_federate.clone(),
@@ -352,7 +352,7 @@ fn federated_startup_recording_io_reactor(
     }
 }
 
-fn register_u32_federated_codec(assembly: &mut Assembly) -> Result<(), BuilderError> {
+fn register_u32_federated_codec(assembly: &mut Assembly) -> Result<(), AssemblyError> {
     assembly.register_federated_codec::<u32, _>(boomerang_federated::SerdeJsonCodec)
 }
 
@@ -441,8 +441,8 @@ fn run_local_source_sink(after: Option<runtime::Duration>) -> Vec<(runtime::Tag,
     builder.connect_port(source, sink, after, false).unwrap();
     builder.finish().unwrap();
 
-    let BuilderRuntimeParts { enclaves, .. } = assembly
-        .into_runtime_parts(&runtime::Config::default())
+    let RuntimeAssembly { enclaves, .. } = assembly
+        .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
     let config = runtime::Config::default()
         .with_fast_forward(true)
@@ -474,10 +474,10 @@ fn run_in_memory_federated_source_sink(
     builder.finish().unwrap();
 
     let mut parts = assembly
-        .into_runtime_parts(&runtime::Config::default())
+        .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
     let mut outbound = FederatedOutboundCapture::take(&mut parts);
-    let BuilderRuntimeParts {
+    let RuntimeAssembly {
         enclaves,
         aliases,
         federation_plan,
@@ -566,7 +566,7 @@ fn run_live_in_memory_federated_source_sink(
     builder.finish().unwrap();
 
     let config = runtime::Config::default().with_fast_forward(true);
-    let parts = assembly.into_runtime_parts(&config).unwrap();
+    let parts = assembly.into_runtime_assembly(&config).unwrap();
     let _envs = execute_federation_in_memory(parts, config).unwrap();
 
     let recorded_values = values.lock().unwrap().clone();
@@ -592,7 +592,7 @@ fn run_live_in_memory_no_message_source_sink() -> Vec<(runtime::Tag, u32)> {
     builder.finish().unwrap();
 
     let config = runtime::Config::default().with_fast_forward(true);
-    let parts = assembly.into_runtime_parts(&config).unwrap();
+    let parts = assembly.into_runtime_assembly(&config).unwrap();
     let _envs = execute_federation_in_memory(parts, config).unwrap();
 
     let recorded_values = values.lock().unwrap().clone();
@@ -626,7 +626,7 @@ fn run_live_in_memory_three_federate_chain() -> Vec<(runtime::Tag, u32)> {
     builder.finish().unwrap();
 
     let config = runtime::Config::default().with_fast_forward(true);
-    let parts = assembly.into_runtime_parts(&config).unwrap();
+    let parts = assembly.into_runtime_assembly(&config).unwrap();
     let _envs = execute_federation_in_memory(parts, config).unwrap();
 
     let recorded_values = values.lock().unwrap().clone();
@@ -661,7 +661,7 @@ fn run_live_in_memory_fanout() -> RecordedValuePair {
     builder.finish().unwrap();
 
     let config = runtime::Config::default().with_fast_forward(true);
-    let parts = assembly.into_runtime_parts(&config).unwrap();
+    let parts = assembly.into_runtime_assembly(&config).unwrap();
     let _envs = execute_federation_in_memory(parts, config).unwrap();
 
     let recorded_left_values = left_values.lock().unwrap().clone();
@@ -699,7 +699,7 @@ fn run_live_in_memory_positive_delay_cycle() -> RecordedValuePair {
     builder.finish().unwrap();
 
     let config = runtime::Config::default().with_fast_forward(true);
-    let parts = assembly.into_runtime_parts(&config).unwrap();
+    let parts = assembly.into_runtime_assembly(&config).unwrap();
     let _envs = execute_federation_in_memory(parts, config).unwrap();
 
     let recorded_a_values = a_values.lock().unwrap().clone();
@@ -709,13 +709,13 @@ fn run_live_in_memory_positive_delay_cycle() -> RecordedValuePair {
 
 fn build_federated_source_sink_plan(
     after: Option<runtime::Duration>,
-) -> Result<FederationPlan, BuilderError> {
+) -> Result<FederationPlan, AssemblyError> {
     Ok(build_federated_source_sink_parts(after)?.federation_plan)
 }
 
 fn build_federated_source_sink_parts(
     after: Option<runtime::Duration>,
-) -> Result<BuilderRuntimeParts, BuilderError> {
+) -> Result<RuntimeAssembly, AssemblyError> {
     let mut assembly = Assembly::new();
     register_u32_federated_codec(&mut assembly)?;
     let mut builder = assembly.add_reactor("main", None, None, (), false);
@@ -724,7 +724,7 @@ fn build_federated_source_sink_parts(
     builder.connect_port(source, sink, after, false)?;
     builder.finish()?;
 
-    assembly.into_runtime_parts(&runtime::Config::default())
+    assembly.into_runtime_assembly(&runtime::Config::default())
 }
 
 #[test]
@@ -875,14 +875,14 @@ fn test_live_in_memory_intentional_codec_failure_is_returned() {
     builder.finish().unwrap();
 
     let config = runtime::Config::default().with_fast_forward(true);
-    let parts = assembly.into_runtime_parts(&config).unwrap();
+    let parts = assembly.into_runtime_assembly(&config).unwrap();
     let error = run_with_wall_timeout("intentional codec failure", move || {
         execute_federation_in_memory(parts, config).unwrap_err()
     });
 
     assert!(matches!(
         error,
-        BuilderError::FederationBridgeError { what }
+        AssemblyError::FederationBridgeError { what }
             if what.contains("intentional codec failure")
     ));
     assert!(values.lock().unwrap().is_empty());
@@ -960,14 +960,14 @@ fn test_cross_federate_connection_without_codec_is_rejected() {
     builder.connect_port(source, sink, None, false).unwrap();
     builder.finish().unwrap();
 
-    let error = match assembly.into_runtime_parts(&runtime::Config::default()) {
+    let error = match assembly.into_runtime_assembly(&runtime::Config::default()) {
         Ok(_) => panic!("cross-federate connection without codec should fail"),
         Err(error) => error,
     };
 
     assert!(matches!(
         error,
-        BuilderError::UnsupportedFederationTopology { what }
+        AssemblyError::UnsupportedFederationTopology { what }
             if what.contains("requires a federated codec")
                 && what.contains("register_federated_codec")
     ));
@@ -989,9 +989,9 @@ fn test_cross_federate_physical_connection_is_rejected() {
 
     assert!(matches!(
         assembly
-            .into_runtime_parts(&runtime::Config::default())
+            .into_runtime_assembly(&runtime::Config::default())
             .expect_err("cross-federate physical connection should be rejected"),
-        BuilderError::UnsupportedFederationTopology { what }
+        AssemblyError::UnsupportedFederationTopology { what }
             if what.contains("cross-federate physical connection")
     ));
 }
@@ -1012,9 +1012,9 @@ fn test_mixed_local_federated_boundary_is_rejected() {
 
     assert!(matches!(
         assembly
-            .into_runtime_parts(&runtime::Config::default())
+            .into_runtime_assembly(&runtime::Config::default())
             .expect_err("mixed local/federated boundary should be rejected"),
-        BuilderError::UnsupportedFederationTopology { what }
+        AssemblyError::UnsupportedFederationTopology { what }
             if what.contains("crosses a federated boundary")
                 && what.contains("both enclave roots are not federates")
     ));
@@ -1036,9 +1036,9 @@ fn test_transient_federate_is_rejected() {
 
     assert!(matches!(
         assembly
-            .into_runtime_parts(&runtime::Config::default())
+            .into_runtime_assembly(&runtime::Config::default())
             .expect_err("transient federate should be rejected"),
-        BuilderError::UnsupportedFederationTopology { what }
+        AssemblyError::UnsupportedFederationTopology { what }
             if what.contains("transient federate 'source'")
     ));
 }
@@ -1059,9 +1059,9 @@ fn test_empty_federate_id_is_rejected() {
 
     assert!(matches!(
         assembly
-            .into_runtime_parts(&runtime::Config::default())
+            .into_runtime_assembly(&runtime::Config::default())
             .expect_err("empty federate id should be rejected"),
-        BuilderError::UnsupportedFederationTopology { what }
+        AssemblyError::UnsupportedFederationTopology { what }
             if what.contains("must have a non-empty id")
     ));
 }
@@ -1090,9 +1090,9 @@ fn test_duplicate_federate_id_is_rejected() {
 
     assert!(matches!(
         assembly
-            .into_runtime_parts(&runtime::Config::default())
+            .into_runtime_assembly(&runtime::Config::default())
             .expect_err("duplicate federate id should be rejected"),
-        BuilderError::UnsupportedFederationTopology { what }
+        AssemblyError::UnsupportedFederationTopology { what }
             if what.contains("duplicate federate id 'same'")
     ));
 }
@@ -1111,7 +1111,7 @@ fn test_local_cross_enclave_connection_does_not_require_federated_codec() {
     builder.finish().unwrap();
 
     let parts = assembly
-        .into_runtime_parts(&runtime::Config::default())
+        .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
 
     assert_eq!(parts.inter_partition_plan.edges.len(), 1);
@@ -1142,7 +1142,7 @@ fn test_federated_connection_lowers_endpoint_runtime_parts() {
     builder.finish().unwrap();
 
     let parts = assembly
-        .into_runtime_parts(&runtime::Config::default())
+        .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
 
     assert_eq!(parts.federation_plan.endpoints.len(), 1);
@@ -1178,10 +1178,10 @@ fn test_federated_sender_emits_serialized_msg_command() {
     builder.finish().unwrap();
 
     let mut parts = assembly
-        .into_runtime_parts(&runtime::Config::default())
+        .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
     let mut outbound = FederatedOutboundCapture::take(&mut parts);
-    let BuilderRuntimeParts { enclaves, .. } = parts;
+    let RuntimeAssembly { enclaves, .. } = parts;
 
     let config = runtime::Config::default()
         .with_fast_forward(true)
@@ -1229,12 +1229,12 @@ fn test_federated_inbound_registry_schedules_target_action() {
     builder.connect_port(source, sink, None, false).unwrap();
     builder.finish().unwrap();
 
-    let BuilderRuntimeParts {
+    let RuntimeAssembly {
         enclaves,
         federated_connections,
         ..
     } = assembly
-        .into_runtime_parts(&runtime::Config::default())
+        .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
 
     let endpoint = boomerang_federated::EndpointId::new("main/source/out->main/sink/in");
@@ -1274,9 +1274,9 @@ fn test_zero_delay_distributed_cycle_is_rejected() {
 
     assert!(matches!(
         assembly
-            .into_runtime_parts(&runtime::Config::default())
+            .into_runtime_assembly(&runtime::Config::default())
             .expect_err("zero-delay distributed cycle should be rejected"),
-        BuilderError::UnsupportedFederationTopology { what }
+        AssemblyError::UnsupportedFederationTopology { what }
             if what.contains("distributed zero-delay cycle")
     ));
 }

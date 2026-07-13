@@ -264,7 +264,7 @@ impl ToTokens for Model {
                     F: Fn(
                             &mut ::boomerang::builder::ReactorContext<'_, S>,
                             Self::Fields,
-                        ) -> Result<(), ::boomerang::builder::BuilderError>
+                        ) -> Result<(), ::boomerang::builder::AssemblyError>
                         + 'static,
                     S: ::boomerang::runtime::ReactorData,
                 {

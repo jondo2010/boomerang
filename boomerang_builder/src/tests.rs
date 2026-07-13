@@ -18,7 +18,7 @@ fn test_duplicate_ports() {
         assembly
             .add_output_port::<()>("port0", reactor_key)
             .expect_err("Expected duplicate"),
-        BuilderError::DuplicatePortDefinition {
+        AssemblyError::DuplicatePortDefinition {
             reactor_name,
             port_name
         } if reactor_name == "test_reactor" && port_name == "port0"
@@ -58,7 +58,7 @@ fn test_duplicate_actions() {
         reactor_builder
             .add_logical_action::<()>("action0", None)
             .expect_err("Expected duplicate"),
-        BuilderError::DuplicateActionDefinition {
+        AssemblyError::DuplicateActionDefinition {
             reactor_name,
             action_name,
         } if reactor_name== "test_reactor" && action_name == "action0"
@@ -74,7 +74,7 @@ fn test_duplicate_actions() {
                 }
             )
             .expect_err("Expected duplicate"),
-        BuilderError::DuplicateActionDefinition {
+        AssemblyError::DuplicateActionDefinition {
             reactor_name,
             action_name,
         } if reactor_name == "test_reactor" && action_name == "action0"
@@ -97,7 +97,10 @@ fn test_reactions_without_trigger() {
         .with_reaction_fn(|_ctx, _state, (_x,)| {})
         .finish();
 
-    assert!(matches!(res, Err(BuilderError::ReactionBuilderError(_))));
+    assert!(matches!(
+        res,
+        Err(AssemblyError::ReactionDeclarationError(_))
+    ));
 }
 
 #[test]
@@ -178,7 +181,7 @@ fn test_in_mode_scopes_reactions_and_rejects_nested_modes() {
         .unwrap();
 
     let nested_result = reactor_builder.in_mode(idle, |builder| {
-        builder.in_mode(active, |_builder| Ok::<_, BuilderError>(()))
+        builder.in_mode(active, |_builder| Ok::<_, AssemblyError>(()))
     });
 
     let _reactor_key = reactor_builder.finish().unwrap();
@@ -193,7 +196,7 @@ fn test_in_mode_scopes_reactions_and_rejects_nested_modes() {
     );
     assert!(matches!(
         nested_result,
-        Err(BuilderError::ReactionBuilderError(message))
+        Err(AssemblyError::ReactionDeclarationError(message))
             if message.contains("Nested mode blocks")
     ));
 }
@@ -209,7 +212,10 @@ fn test_reset_trigger_outside_mode_is_rejected() {
         .with_reaction_fn(|_ctx, _state, ()| {})
         .finish();
 
-    assert!(matches!(res, Err(BuilderError::ReactionBuilderError(_))));
+    assert!(matches!(
+        res,
+        Err(AssemblyError::ReactionDeclarationError(_))
+    ));
 }
 
 #[test]
@@ -222,7 +228,10 @@ fn test_port_declaration_inside_mode_is_rejected() {
         builder.add_output_port::<u32>("mode_out").map(|_| ())
     });
 
-    assert!(matches!(res, Err(BuilderError::ReactionBuilderError(_))));
+    assert!(matches!(
+        res,
+        Err(AssemblyError::ReactionDeclarationError(_))
+    ));
 }
 
 #[test]
@@ -258,7 +267,7 @@ fn test_runtime_scope_metadata_for_mode_components() {
 
     let reactor_key = reactor_builder.finish().unwrap();
     let builder_parts = assembly
-        .into_runtime_parts(&runtime::Config::default())
+        .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
 
     let (enclave_key, runtime_reactor) = builder_parts.aliases.reactor_aliases[reactor_key];
@@ -325,7 +334,7 @@ fn test_child_and_connection_helper_reactors_inherit_mode_scope() {
 
     let reactor_key = reactor_builder.finish().unwrap();
     let builder_parts = assembly
-        .into_runtime_parts(&runtime::Config::default())
+        .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
 
     let (enclave_key, _runtime_reactor) = builder_parts.aliases.reactor_aliases[reactor_key];
@@ -397,10 +406,10 @@ fn test_reactions_startup_shutdown() {
 
     assembly.validate_reactions().unwrap();
 
-    let BuilderRuntimeParts {
+    let RuntimeAssembly {
         enclaves, aliases, ..
     } = assembly
-        .into_runtime_parts(&runtime::Config::default())
+        .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
     let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();
     let r0_key = aliases.reaction_aliases[r0_key].1;
@@ -455,10 +464,10 @@ fn test_actions1() {
         .unwrap();
 
     let _reactor_key = reactor_builder.finish().unwrap();
-    let BuilderRuntimeParts {
+    let RuntimeAssembly {
         enclaves, aliases, ..
     } = assembly
-        .into_runtime_parts(&runtime::Config::default())
+        .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
     let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();
 
@@ -613,10 +622,10 @@ fn test_nested_reactor() {
         )
         .unwrap();
 
-    let BuilderRuntimeParts {
+    let RuntimeAssembly {
         enclaves, aliases, ..
     } = assembly
-        .into_runtime_parts(&runtime::Config::default())
+        .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
     assert_eq!(enclaves.len(), 1);
 
@@ -654,7 +663,7 @@ fn connect_ports_reports_length_mismatch() {
 
     assert!(matches!(
         err,
-        BuilderError::PortConnectionLengthMismatch { from: 2, to: 3 }
+        AssemblyError::PortConnectionLengthMismatch { from: 2, to: 3 }
     ));
 }
 
@@ -677,10 +686,10 @@ fn test_reaction_ports() -> anyhow::Result<()> {
 
     let _reactor_a = builder_a.finish()?;
 
-    let BuilderRuntimeParts {
+    let RuntimeAssembly {
         enclaves, aliases, ..
     } = assembly
-        .into_runtime_parts(&runtime::Config::default())
+        .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
     assert_eq!(enclaves.len(), 1);
     let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();
@@ -804,9 +813,9 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
 
     builder_main.finish()?;
 
-    let BuilderRuntimeParts {
+    let RuntimeAssembly {
         enclaves, aliases, ..
-    } = assembly.into_runtime_parts(&runtime::Config::default())?;
+    } = assembly.into_runtime_assembly(&runtime::Config::default())?;
     assert_eq!(enclaves.len(), 1);
     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
 
@@ -1007,9 +1016,9 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
     let _reaction_source_t2_key = assembly.find_reaction_by_name("reaction_t2", source_reactor)?;
     let reaction_sink_clock_key = assembly.find_reaction_by_name("reaction_clock", sink_reactor)?;
 
-    let BuilderRuntimeParts {
+    let RuntimeAssembly {
         enclaves, aliases, ..
-    } = assembly.into_runtime_parts(&runtime::Config::default())?;
+    } = assembly.into_runtime_assembly(&runtime::Config::default())?;
     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
 
     // the Source startup reaction should trigger on startup and effect the clock port
@@ -1112,7 +1121,7 @@ fn test_enclave_partitioning() {
     let world = reactor_builder.finish().unwrap();
 
     let builder_parts = assembly
-        .into_runtime_parts(&runtime::Config::default())
+        .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
     assert_eq!(builder_parts.enclaves.len(), 2, "Expected 2 enclaves");
 
@@ -1177,7 +1186,7 @@ pub fn create_ping_pong() -> PingPong {
     fn ping_pong(
         name: &str,
         is_enclave: bool,
-    ) -> impl FnOnce(AssemblyReactorKey, &mut Assembly) -> Result<AssemblyReactorKey, BuilderError>
+    ) -> impl FnOnce(AssemblyReactorKey, &mut Assembly) -> Result<AssemblyReactorKey, AssemblyError>
            + use<'_> {
         let greeting = format!("{} received", name);
         move |parent, assembly: &mut Assembly| {
@@ -1269,8 +1278,8 @@ fn test_enclave2() {
         pong_output: _,
     } = create_ping_pong();
 
-    let BuilderRuntimeParts { enclaves, .. } = assembly
-        .into_runtime_parts(&runtime::Config::default())
+    let RuntimeAssembly { enclaves, .. } = assembly
+        .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
     assert_eq!(enclaves.len(), 3);
 
@@ -1368,10 +1377,10 @@ fn test_port_binding() {
         .add_port_connection::<(), _, _>(o1, i2b, None, false)
         .unwrap();
 
-    let BuilderRuntimeParts {
+    let RuntimeAssembly {
         enclaves, aliases, ..
     } = assembly
-        .into_runtime_parts(&runtime::Config::default())
+        .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
     assert_eq!(enclaves.len(), 1);
     let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();

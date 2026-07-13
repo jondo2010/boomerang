@@ -17,10 +17,10 @@ use super::{
     action::ActionSpec,
     port::ErasedPortSpec,
     port::PortSpec,
-    reaction::{BuilderModeEffect, ReactionSpec},
-    runtime, ActionType, AssemblyActionKey, AssemblyModeKey, AssemblyPortKey, AssemblyReactionKey,
-    AssemblyReactorKey, BuilderError, BuilderFqn, Input, Logical, ModeKind, Output, PortTag,
-    ReactorContext, ReactorPlacement, ReactorSpec, TypedActionKey, TypedPortKey,
+    reaction::{ModeEffectSpec, ReactionSpec},
+    runtime, ActionType, AssemblyActionKey, AssemblyError, AssemblyFqn, AssemblyModeKey,
+    AssemblyPortKey, AssemblyReactionKey, AssemblyReactorKey, Input, Logical, ModeKind, Output,
+    PortTag, ReactorContext, ReactorPlacement, ReactorSpec, TypedActionKey, TypedPortKey,
 };
 use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, EdgeDirection};
@@ -37,7 +37,7 @@ mod debug;
 #[cfg(test)]
 mod tests;
 
-pub use build::{BuilderRuntimeParts, DeferredRuntimeFactory, EnclaveDep, PartitionMap};
+pub use build::{DeferredRuntimeFactory, EnclaveDep, PartitionMap, RuntimeAssembly};
 
 #[cfg(feature = "federated")]
 type FederatedCodecPair<T> = (
@@ -80,13 +80,13 @@ mod util {
 }
 
 #[cfg(feature = "replay")]
-type ReplayFunctionFactory = dyn FnOnce(&BuilderRuntimeParts) -> Box<dyn runtime::replay::ReplayFn>;
+type ReplayFunctionFactory = dyn FnOnce(&RuntimeAssembly) -> Box<dyn runtime::replay::ReplayFn>;
 
 #[cfg(feature = "federated")]
 type FederatedInboundEndpointFactory = dyn FnOnce(
-    &BuilderRuntimeParts,
+    &RuntimeAssembly,
     &mut boomerang_federated::FederatedRuntimeConnections,
-) -> Result<(), BuilderError>;
+) -> Result<(), AssemblyError>;
 
 #[cfg(feature = "federated")]
 type FederatedCodecEntry = dyn Any + Send + Sync;
@@ -152,9 +152,9 @@ impl Assembly {
     pub fn get_reactor_builder(
         &mut self,
         reactor_key: AssemblyReactorKey,
-    ) -> Result<ReactorContext<'_>, BuilderError> {
+    ) -> Result<ReactorContext<'_>, AssemblyError> {
         if !self.reactor_specs.contains_key(reactor_key) {
-            return Err(BuilderError::ReactorKeyNotFound(reactor_key));
+            return Err(AssemblyError::ReactorKeyNotFound(reactor_key));
         }
         Ok(ReactorContext::from_pre_existing(reactor_key, self))
     }
@@ -164,7 +164,7 @@ impl Assembly {
         &mut self,
         name: &str,
         reactor_key: AssemblyReactorKey,
-    ) -> Result<TypedPortKey<T, Input>, BuilderError> {
+    ) -> Result<TypedPortKey<T, Input>, AssemblyError> {
         self.internal_add_port::<T, Input>(name, reactor_key, None)
             .map(From::from)
     }
@@ -174,7 +174,7 @@ impl Assembly {
         &mut self,
         name: &str,
         reactor_key: AssemblyReactorKey,
-    ) -> Result<TypedPortKey<T, Output>, BuilderError> {
+    ) -> Result<TypedPortKey<T, Output>, AssemblyError> {
         self.internal_add_port::<T, Output>(name, reactor_key, None)
             .map(From::from)
     }
@@ -184,14 +184,14 @@ impl Assembly {
         name: &str,
         reactor_key: AssemblyReactorKey,
         bank_info: Option<runtime::BankInfo>,
-    ) -> Result<AssemblyPortKey, BuilderError> {
+    ) -> Result<AssemblyPortKey, AssemblyError> {
         // Ensure no duplicates on (name, reactor_key, bank_info)
         if self.port_specs.values().any(|port| {
             port.name() == name
                 && port.get_reactor_key() == reactor_key
                 && port.bank_info() == bank_info.as_ref()
         }) {
-            return Err(BuilderError::DuplicatePortDefinition {
+            return Err(AssemblyError::DuplicatePortDefinition {
                 reactor_name: self.reactor_specs[reactor_key].name().to_owned(),
                 port_name: name.into(),
             });
@@ -209,7 +209,7 @@ impl Assembly {
         &mut self,
         name: &str,
         reactor_key: AssemblyReactorKey,
-    ) -> Result<TypedActionKey, BuilderError> {
+    ) -> Result<TypedActionKey, AssemblyError> {
         self.add_action_impl::<(), Logical>(
             name,
             reactor_key,
@@ -222,7 +222,7 @@ impl Assembly {
         &mut self,
         name: &str,
         reactor_key: AssemblyReactorKey,
-    ) -> Result<TypedActionKey, BuilderError> {
+    ) -> Result<TypedActionKey, AssemblyError> {
         self.add_action_impl::<(), Logical>(name, reactor_key, None, ActionType::Shutdown)
     }
 
@@ -231,21 +231,21 @@ impl Assembly {
         name: &str,
         reactor_key: AssemblyReactorKey,
         kind: impl Into<ModeKind>,
-    ) -> Result<AssemblyModeKey, BuilderError> {
+    ) -> Result<AssemblyModeKey, AssemblyError> {
         let kind = kind.into();
         let reactor_builder = &mut self.reactor_specs[reactor_key];
         if reactor_builder.modes.keys().any(|mode_key| {
             self.mode_specs[mode_key].name == name
                 && self.mode_specs[mode_key].reactor_key == reactor_key
         }) {
-            return Err(BuilderError::DuplicateModeDefinition {
+            return Err(AssemblyError::DuplicateModeDefinition {
                 reactor_name: reactor_builder.name().to_owned(),
                 mode_name: name.to_owned(),
             });
         }
 
         if kind.is_initial() && reactor_builder.initial_mode.is_some() {
-            return Err(BuilderError::MultipleInitialModes {
+            return Err(AssemblyError::MultipleInitialModes {
                 reactor_name: reactor_builder.name().to_owned(),
             });
         }
@@ -269,18 +269,18 @@ impl Assembly {
         reactor_key: AssemblyReactorKey,
         mode_key: AssemblyModeKey,
         transition: runtime::TransitionKind,
-    ) -> Result<BuilderModeEffect, BuilderError> {
+    ) -> Result<ModeEffectSpec, AssemblyError> {
         let mode = self.mode_specs.get(mode_key).ok_or_else(|| {
-            BuilderError::ReactionBuilderError(format!("Unknown mode key {mode_key:?}"))
+            AssemblyError::ReactionDeclarationError(format!("Unknown mode key {mode_key:?}"))
         })?;
         if mode.reactor_key != reactor_key {
-            return Err(BuilderError::ReactionBuilderError(format!(
+            return Err(AssemblyError::ReactionDeclarationError(format!(
                 "Mode '{}' does not belong to reactor '{}'",
                 mode.name,
                 self.reactor_specs[reactor_key].name()
             )));
         }
-        Ok(BuilderModeEffect::new(mode_key, transition))
+        Ok(ModeEffectSpec::new(mode_key, transition))
     }
 
     /// Add a Timer Action to the given Reactor
@@ -289,7 +289,7 @@ impl Assembly {
         name: &str,
         reactor_key: AssemblyReactorKey,
         timer_spec: TimerSpec,
-    ) -> Result<TimerActionKey, BuilderError> {
+    ) -> Result<TimerActionKey, AssemblyError> {
         self.add_timer_action_in_scope(name, reactor_key, None, timer_spec)
     }
 
@@ -299,7 +299,7 @@ impl Assembly {
         reactor_key: AssemblyReactorKey,
         scope_mode: Option<AssemblyModeKey>,
         timer_spec: TimerSpec,
-    ) -> Result<TimerActionKey, BuilderError> {
+    ) -> Result<TimerActionKey, AssemblyError> {
         let action_key = self.add_action_impl::<(), Logical>(
             name,
             reactor_key,
@@ -315,7 +315,7 @@ impl Assembly {
         name: &str,
         min_delay: Option<runtime::Duration>,
         reactor_key: AssemblyReactorKey,
-    ) -> Result<TypedActionKey<T, Q>, BuilderError> {
+    ) -> Result<TypedActionKey<T, Q>, AssemblyError> {
         self.add_action_in_scope::<T, Q>(name, min_delay, reactor_key, None)
     }
 
@@ -325,7 +325,7 @@ impl Assembly {
         min_delay: Option<runtime::Duration>,
         reactor_key: AssemblyReactorKey,
         scope_mode: Option<AssemblyModeKey>,
-    ) -> Result<TypedActionKey<T, Q>, BuilderError> {
+    ) -> Result<TypedActionKey<T, Q>, AssemblyError> {
         self.add_action_impl::<T, Q>(
             name,
             reactor_key,
@@ -347,7 +347,7 @@ impl Assembly {
         reactor_key: AssemblyReactorKey,
         scope_mode: Option<AssemblyModeKey>,
         r#type: ActionType,
-    ) -> Result<TypedActionKey<T, Q>, BuilderError>
+    ) -> Result<TypedActionKey<T, Q>, AssemblyError>
     where
         T: runtime::ReactorData,
     {
@@ -355,12 +355,12 @@ impl Assembly {
 
         if let Some(mode_key) = scope_mode {
             let mode = self.mode_specs.get(mode_key).ok_or_else(|| {
-                BuilderError::ReactionBuilderError(format!(
+                AssemblyError::ReactionDeclarationError(format!(
                     "Unknown mode key {mode_key:?} for action '{name}'"
                 ))
             })?;
             if mode.reactor_key != reactor_key {
-                return Err(BuilderError::ReactionBuilderError(format!(
+                return Err(AssemblyError::ReactionDeclarationError(format!(
                     "Mode '{}' does not belong to action '{name}'",
                     mode.name
                 )));
@@ -373,7 +373,7 @@ impl Assembly {
             .keys()
             .any(|action_key| self.action_specs[action_key].name() == name)
         {
-            return Err(BuilderError::DuplicateActionDefinition {
+            return Err(AssemblyError::DuplicateActionDefinition {
                 reactor_name: reactor_builder.name().to_owned(),
                 action_name: name.into(),
             });
@@ -394,15 +394,15 @@ impl Assembly {
         &mut self,
         action_key: TypedActionKey<T, Q>,
         replay_factory: F,
-    ) -> Result<(), BuilderError>
+    ) -> Result<(), AssemblyError>
     where
         T: boomerang_runtime::ReactorData + for<'de> serde::Deserialize<'de>,
         Q: ActionTag,
-        F: FnOnce(&BuilderRuntimeParts) -> Box<dyn runtime::replay::ReplayFn> + 'static,
+        F: FnOnce(&RuntimeAssembly) -> Box<dyn runtime::replay::ReplayFn> + 'static,
     {
         let action_key = action_key.into();
         if self.replay_factories.contains_key(action_key) {
-            return Err(BuilderError::ReplayKeyAlreadyExists(action_key));
+            return Err(AssemblyError::ReplayKeyAlreadyExists(action_key));
         }
 
         self.replay_factories
@@ -412,18 +412,21 @@ impl Assembly {
     }
 
     /// Get a previously built action
-    pub fn get_action(&self, action_key: AssemblyActionKey) -> Result<&ActionSpec, BuilderError> {
+    pub fn get_action(&self, action_key: AssemblyActionKey) -> Result<&ActionSpec, AssemblyError> {
         self.action_specs
             .get(action_key)
-            .ok_or(BuilderError::ActionKeyNotFound(action_key))
+            .ok_or(AssemblyError::ActionKeyNotFound(action_key))
     }
 
     /// Get a previously built port
-    pub fn get_port(&self, port_key: AssemblyPortKey) -> Result<&dyn ErasedPortSpec, BuilderError> {
+    pub fn get_port(
+        &self,
+        port_key: AssemblyPortKey,
+    ) -> Result<&dyn ErasedPortSpec, AssemblyError> {
         self.port_specs
             .get(port_key)
             .map(|builder| builder.as_ref())
-            .ok_or(BuilderError::PortKeyNotFound(port_key))
+            .ok_or(AssemblyError::PortKeyNotFound(port_key))
     }
 
     /// Find a port in a child Reactor given it's name and the parent ReactorKey.
@@ -449,7 +452,7 @@ impl Assembly {
         &self,
         reaction_name: &str,
         reactor_key: AssemblyReactorKey,
-    ) -> Result<AssemblyReactionKey, BuilderError> {
+    ) -> Result<AssemblyReactionKey, AssemblyError> {
         self.reaction_specs
             .iter()
             .find(|(_, reaction_builder)| {
@@ -460,7 +463,7 @@ impl Assembly {
                     && reaction_builder.parent_reactor_key() == Some(reactor_key)
             })
             .map(|(reaction_key, _)| reaction_key)
-            .ok_or_else(|| BuilderError::NamedReactionNotFound(reaction_name.to_string()))
+            .ok_or_else(|| AssemblyError::NamedReactionNotFound(reaction_name.to_string()))
     }
 
     /// Find an Action matching a given name and ReactorKey
@@ -468,25 +471,28 @@ impl Assembly {
         &self,
         action_name: &str,
         reactor_key: AssemblyReactorKey,
-    ) -> Result<AssemblyActionKey, BuilderError> {
+    ) -> Result<AssemblyActionKey, AssemblyError> {
         self.reactor_specs[reactor_key]
             .actions
             .keys()
             .find(|action_key| self.action_specs[*action_key].name() == action_name)
-            .ok_or_else(|| BuilderError::NamedActionNotFound(action_name.to_string()))
+            .ok_or_else(|| AssemblyError::NamedActionNotFound(action_name.to_string()))
     }
 
     /// Find a Reactor in the Assembly given its fully-qualified name
-    pub fn find_reactor_by_fqn<T>(&self, reactor_fqn: T) -> Result<AssemblyReactorKey, BuilderError>
+    pub fn find_reactor_by_fqn<T>(
+        &self,
+        reactor_fqn: T,
+    ) -> Result<AssemblyReactorKey, AssemblyError>
     where
-        T: TryInto<BuilderFqn>,
-        T::Error: Into<BuilderError>,
+        T: TryInto<AssemblyFqn>,
+        T::Error: Into<AssemblyError>,
     {
-        let reactor_fqn: BuilderFqn = reactor_fqn.try_into().map_err(Into::into)?;
+        let reactor_fqn: AssemblyFqn = reactor_fqn.try_into().map_err(Into::into)?;
         let (_, segment) = reactor_fqn
             .clone()
             .split_last()
-            .ok_or(BuilderError::InvalidFqn(reactor_fqn.to_string()))?;
+            .ok_or(AssemblyError::InvalidFqn(reactor_fqn.to_string()))?;
         self.reactor_specs
             .iter()
             .find_map(|(reactor_key, reactor_builder)| {
@@ -496,24 +502,24 @@ impl Assembly {
                     None
                 }
             })
-            .ok_or_else(|| BuilderError::NamedReactorNotFound(reactor_fqn.to_string()))
+            .ok_or_else(|| AssemblyError::NamedReactorNotFound(reactor_fqn.to_string()))
     }
 
     /// Find a PhysicalAction globally in the Assembly given its fully-qualified name
     pub fn find_physical_action_by_fqn<T>(
         &self,
         action_fqn: T,
-    ) -> Result<AssemblyActionKey, BuilderError>
+    ) -> Result<AssemblyActionKey, AssemblyError>
     where
-        T: TryInto<BuilderFqn>,
-        T::Error: Into<BuilderError>,
+        T: TryInto<AssemblyFqn>,
+        T::Error: Into<AssemblyError>,
     {
-        let action_fqn: BuilderFqn = action_fqn.try_into().map_err(Into::into)?;
+        let action_fqn: AssemblyFqn = action_fqn.try_into().map_err(Into::into)?;
 
         let (reactor_fqn, segment) = action_fqn
             .clone()
             .split_last()
-            .ok_or(BuilderError::InvalidFqn(action_fqn.to_string()))?;
+            .ok_or(AssemblyError::InvalidFqn(action_fqn.to_string()))?;
 
         let reactor = self.find_reactor_by_fqn(reactor_fqn)?;
 
@@ -521,7 +527,7 @@ impl Assembly {
             .actions
             .keys()
             .find(|action_key| self.action_specs[*action_key].fqn_segment(false) == segment)
-            .ok_or_else(|| BuilderError::NamedActionNotFound(action_fqn.to_string()))
+            .ok_or_else(|| AssemblyError::NamedActionNotFound(action_fqn.to_string()))
     }
 
     /// Find a possible common parent Reactor for two Reactor elements in the Assembly (if it
@@ -563,7 +569,7 @@ impl Assembly {
         target_key: P2,
         after: Option<runtime::Duration>,
         physical: bool,
-    ) -> Result<(), BuilderError>
+    ) -> Result<(), AssemblyError>
     where
         T: runtime::ReactorData + Clone,
         P1: Into<AssemblyPortKey>,
@@ -581,7 +587,7 @@ impl Assembly {
         scope_mode: Option<AssemblyModeKey>,
         after: Option<runtime::Duration>,
         physical: bool,
-    ) -> Result<(), BuilderError>
+    ) -> Result<(), AssemblyError>
     where
         T: runtime::ReactorData + Clone,
         P1: Into<AssemblyPortKey>,
@@ -618,7 +624,7 @@ impl Assembly {
     }
 
     #[cfg(feature = "federated")]
-    pub fn register_federated_codec<T, C>(&mut self, codec: C) -> Result<(), BuilderError>
+    pub fn register_federated_codec<T, C>(&mut self, codec: C) -> Result<(), AssemblyError>
     where
         T: runtime::ReactorData,
         C: boomerang_federated::PayloadEncoder<T>
@@ -629,7 +635,7 @@ impl Assembly {
     {
         let type_id = TypeId::of::<T>();
         if self.federated_codecs.contains_key(&type_id) {
-            return Err(BuilderError::UnsupportedFederationTopology {
+            return Err(AssemblyError::UnsupportedFederationTopology {
                 what: format!(
                     "federated codec for payload type '{}' is already registered",
                     type_name::<T>()
@@ -665,14 +671,14 @@ impl Assembly {
         &self,
         source_key: AssemblyPortKey,
         target_key: AssemblyPortKey,
-    ) -> Result<FederatedCodecPair<T>, BuilderError>
+    ) -> Result<FederatedCodecPair<T>, AssemblyError>
     where
         T: runtime::ReactorData,
     {
         let source_fqn = self.fqn_for(source_key, false)?;
         let target_fqn = self.fqn_for(target_key, false)?;
         let entry = self.federated_codecs.get(&TypeId::of::<T>()).ok_or_else(|| {
-            BuilderError::UnsupportedFederationTopology {
+            AssemblyError::UnsupportedFederationTopology {
                 what: format!(
                     "cross-federate connection '{}' -> '{}' requires a federated codec for payload type '{}'; register one on Assembly with register_federated_codec::<T, _>(...)",
                     source_fqn,
@@ -685,7 +691,7 @@ impl Assembly {
         let registration = entry
             .downcast_ref::<FederatedCodecRegistration<T>>()
             .ok_or_else(|| {
-                BuilderError::InternalError(format!(
+                AssemblyError::InternalError(format!(
                     "federated codec registry type mismatch for payload type '{}'",
                     type_name::<T>()
                 ))
@@ -714,13 +720,13 @@ impl Assembly {
                     .action_aliases
                     .get(target_action_key)
                     .ok_or_else(|| {
-                        BuilderError::InternalError(format!(
+                        AssemblyError::InternalError(format!(
                             "missing runtime action alias for federated endpoint {endpoint}"
                         ))
                     })?;
                 let expected_enclave_key = builder_parts.aliases.enclave_aliases[target_partition];
                 if enclave_key != expected_enclave_key {
-                    return Err(BuilderError::InternalError(format!(
+                    return Err(AssemblyError::InternalError(format!(
                         "federated endpoint {endpoint} resolved to wrong target enclave"
                     )));
                 }
@@ -734,7 +740,7 @@ impl Assembly {
                     .iter()
                     .find(|federate| federate.reactor == target_partition)
                     .ok_or_else(|| {
-                        BuilderError::InternalError(format!(
+                        AssemblyError::InternalError(format!(
                             "missing target federate for inbound endpoint {endpoint}"
                         ))
                     })?;
@@ -747,7 +753,7 @@ impl Assembly {
                         decoder,
                     )
                     .map(|_| ())
-                    .map_err(|error| BuilderError::UnsupportedFederationTopology {
+                    .map_err(|error| AssemblyError::UnsupportedFederationTopology {
                         what: error.to_string(),
                     })
             },
@@ -755,12 +761,12 @@ impl Assembly {
     }
 
     /// Get a fully-qualified name for a given key
-    pub fn fqn_for(&self, key: impl Fqn, grouped: bool) -> Result<BuilderFqn, BuilderError> {
+    pub fn fqn_for(&self, key: impl Fqn, grouped: bool) -> Result<AssemblyFqn, AssemblyError> {
         key.fqn(self, grouped)
     }
 
     /// Validate the reactions in the environment
-    pub fn validate_reactions(&self) -> Result<(), BuilderError> {
+    pub fn validate_reactions(&self) -> Result<(), AssemblyError> {
         for (_reaction_key, reaction) in &self.reaction_specs {
             // Validate the port dependencies of each Reaction
             for (port_key, trigger_mode) in &reaction.port_relations {
@@ -774,7 +780,7 @@ impl Assembly {
                         if (trigger_mode.is_triggers() || trigger_mode.is_uses())
                             && port_reactor_key != reaction.reactor_key
                         {
-                            return Err(BuilderError::ReactionBuilderError(format!(
+                            return Err(AssemblyError::ReactionDeclarationError(format!(
                                 "Reaction {:?} cannot 'trigger on' or 'use' input port '{}', it \
                                  must belong to the same reactor as the reaction",
                                 reaction.name(),
@@ -785,7 +791,7 @@ impl Assembly {
                         if trigger_mode.is_effects()
                             && port_parent_reactor_key != Some(reaction.reactor_key)
                         {
-                            return Err(BuilderError::ReactionBuilderError(format!(
+                            return Err(AssemblyError::ReactionDeclarationError(format!(
                                 "Reaction {:?} cannot 'effect' input port '{}', it must belong to \
                                  a contained reactor",
                                 reaction.name(),
@@ -798,7 +804,7 @@ impl Assembly {
                         if (trigger_mode.is_triggers() || trigger_mode.is_uses())
                             && port_parent_reactor_key != Some(reaction.reactor_key)
                         {
-                            return Err(BuilderError::ReactionBuilderError(format!(
+                            return Err(AssemblyError::ReactionDeclarationError(format!(
                                 "Reaction {:?} cannot 'trigger on' or 'use' output port '{}', it \
                                  must belong to a contained reactor",
                                 reaction.name(),
@@ -807,7 +813,7 @@ impl Assembly {
                         }
                         // effects are valid for output ports on the same reactor
                         if trigger_mode.is_effects() && port_reactor_key != reaction.reactor_key {
-                            return Err(BuilderError::ReactionBuilderError(format!(
+                            return Err(AssemblyError::ReactionDeclarationError(format!(
                                 "Reaction {:?} cannot 'effect' output port '{}', it must belong \
                                  to the same reactor as the reaction",
                                 reaction.name(),
@@ -961,7 +967,7 @@ impl Assembly {
     pub fn build_runtime_level_map(
         &self,
         port_bindings: &PortBindings,
-    ) -> Result<SecondaryMap<AssemblyReactionKey, runtime::Level>, BuilderError> {
+    ) -> Result<SecondaryMap<AssemblyReactionKey, runtime::Level>, AssemblyError> {
         use petgraph::{algo::tred, graph::DefaultIx, graph::NodeIndex};
 
         let mut graph = self
@@ -988,7 +994,7 @@ impl Assembly {
                 .map(|node_index| graph[node_index])
                 .collect_vec();
 
-            BuilderError::ReactionGraphCycle { what: cycle }
+            AssemblyError::ReactionGraphCycle { what: cycle }
         })?;
 
         let (res, _) = tred::dag_to_toposorted_adjacency_list::<_, NodeIndex>(&graph, &toposort);

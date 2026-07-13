@@ -103,7 +103,7 @@ where
         )
         .unwrap();
     let config = runtime::Config::default().with_fast_forward(true);
-    let BuilderRuntimeParts { enclaves, .. } = assembly.into_runtime_parts(&config).unwrap();
+    let RuntimeAssembly { enclaves, .. } = assembly.into_runtime_assembly(&config).unwrap();
     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
     runtime::Scheduler::new(enclave_key, enclave, config)
 }

@@ -12,8 +12,8 @@ use slotmap::SecondaryMap;
 use std::collections::BTreeMap;
 
 use crate::{
-    connection::PortBindings, ActionType, AssemblyActionKey, AssemblyModeKey, AssemblyPortKey,
-    AssemblyReactionKey, AssemblyReactorKey, BoundaryKind, BuilderError, InterPartitionEdge,
+    connection::PortBindings, ActionType, AssemblyActionKey, AssemblyError, AssemblyModeKey,
+    AssemblyPortKey, AssemblyReactionKey, AssemblyReactorKey, BoundaryKind, InterPartitionEdge,
     InterPartitionPlan, ParentReactorSpec, PartitionRoot, PartitionRootKind, ReactionDeclaration,
     TimerActionKey,
 };
@@ -26,19 +26,19 @@ use super::Assembly;
 pub trait DeferredRuntimeFactory {
     type Output;
 
-    fn defer(self) -> impl FnOnce(&BuilderRuntimeParts) -> Self::Output + 'static;
+    fn defer(self) -> impl FnOnce(&RuntimeAssembly) -> Self::Output + 'static;
 }
 
 impl DeferredRuntimeFactory for runtime::reaction::TimerFn {
     type Output = runtime::BoxedReactionFn;
-    fn defer(self) -> impl FnOnce(&BuilderRuntimeParts) -> Self::Output + 'static {
+    fn defer(self) -> impl FnOnce(&RuntimeAssembly) -> Self::Output + 'static {
         move |_| runtime::BoxedReactionFn::from(self)
     }
 }
 
-/// Aliasing maps from Builder keys to runtime keys
+/// Aliasing maps from assembly keys to runtime keys.
 #[derive(Default)]
-pub struct BuilderAliases {
+pub struct RuntimeAliases {
     pub enclave_aliases: SecondaryMap<AssemblyReactorKey, runtime::EnclaveKey>,
     pub reactor_aliases:
         SecondaryMap<AssemblyReactorKey, (runtime::EnclaveKey, runtime::ReactorKey)>,
@@ -54,12 +54,12 @@ pub struct BuilderAliases {
 pub type PartitionMap = SecondaryMap<AssemblyReactorKey, AssemblyReactorKey>;
 
 #[derive(Default)]
-pub struct BuilderRuntimeParts {
+pub struct RuntimeAssembly {
     /// The runtime Enclaves
     pub enclaves: tinymap::TinyMap<runtime::EnclaveKey, runtime::Enclave>,
-    /// Aliases from builder keys to runtime keys
-    pub aliases: BuilderAliases,
-    /// Builder-owned metadata for logical edges that cross runtime partitions.
+    /// Aliases from assembly keys to runtime keys.
+    pub aliases: RuntimeAliases,
+    /// Assembly-owned metadata for logical edges that cross runtime partitions.
     pub inter_partition_plan: InterPartitionPlan,
     #[cfg(feature = "federated")]
     /// Static federation metadata extracted by the builder.
@@ -71,8 +71,8 @@ pub struct BuilderRuntimeParts {
     pub replayers: runtime::replay::ReplayersMap,
 }
 
-impl BuilderRuntimeParts {
-    /// Create a new `BuilderRuntimeParts` from a `PartitionMap`.
+impl RuntimeAssembly {
+    /// Create a new `RuntimeAssembly` from a `PartitionMap`.
     fn new(
         partition_map: &PartitionMap,
         inter_partition_plan: InterPartitionPlan,
@@ -82,7 +82,7 @@ impl BuilderRuntimeParts {
         federated_connections: boomerang_federated::FederatedRuntimeConnections,
     ) -> Self {
         let mut enclaves = tinymap::TinyMap::new();
-        let mut aliases = BuilderAliases::default();
+        let mut aliases = RuntimeAliases::default();
         // Create all the unique enclaves
         for reactor_key in partition_map.values().unique() {
             let enclave_key =
@@ -282,7 +282,7 @@ impl Assembly {
     fn build_inter_partition_plan(
         &self,
         partition_map: &PartitionMap,
-    ) -> Result<InterPartitionPlan, BuilderError> {
+    ) -> Result<InterPartitionPlan, AssemblyError> {
         let mut plan = InterPartitionPlan::default();
 
         #[cfg(feature = "federated")]
@@ -296,7 +296,7 @@ impl Assembly {
                 };
 
                 if spec.id.trim().is_empty() {
-                    return Err(BuilderError::UnsupportedFederationTopology {
+                    return Err(AssemblyError::UnsupportedFederationTopology {
                         what: format!(
                             "federate reactor '{}' must have a non-empty id",
                             self.fqn_for(reactor_key, false)?
@@ -305,7 +305,7 @@ impl Assembly {
                 }
 
                 if spec.transient {
-                    return Err(BuilderError::UnsupportedFederationTopology {
+                    return Err(AssemblyError::UnsupportedFederationTopology {
                         what: format!(
                             "transient federate '{}' is reserved for a later milestone",
                             spec.id
@@ -314,7 +314,7 @@ impl Assembly {
                 }
 
                 if partition_map[reactor_key] != reactor_key {
-                    return Err(BuilderError::UnsupportedFederationTopology {
+                    return Err(AssemblyError::UnsupportedFederationTopology {
                         what: format!(
                             "federate '{}' must be an enclave root in this milestone",
                             spec.id
@@ -323,7 +323,7 @@ impl Assembly {
                 }
 
                 if let Some(previous) = seen_ids.insert(spec.id.clone(), reactor_key) {
-                    return Err(BuilderError::UnsupportedFederationTopology {
+                    return Err(AssemblyError::UnsupportedFederationTopology {
                         what: format!(
                             "duplicate federate id '{}' for '{}' and '{}'",
                             spec.id,
@@ -364,10 +364,10 @@ impl Assembly {
             let source_port = &self.port_specs[source_port_key];
             let target_port = &self.port_specs[target_port_key];
             let source_reactor_key = source_port.parent_reactor_key().ok_or_else(|| {
-                BuilderError::InternalError("source port has no parent reactor".to_owned())
+                AssemblyError::InternalError("source port has no parent reactor".to_owned())
             })?;
             let target_reactor_key = target_port.parent_reactor_key().ok_or_else(|| {
-                BuilderError::InternalError("target port has no parent reactor".to_owned())
+                AssemblyError::InternalError("target port has no parent reactor".to_owned())
             })?;
             let source_partition = partition_map[source_reactor_key];
             let target_partition = partition_map[target_reactor_key];
@@ -388,7 +388,7 @@ impl Assembly {
                         target_federate: target_federate.clone(),
                     },
                     _ => {
-                        return Err(BuilderError::UnsupportedFederationTopology {
+                        return Err(AssemblyError::UnsupportedFederationTopology {
                             what: format!(
                                 "connection '{}' -> '{}' crosses a federated boundary, but both enclave roots are not federates",
                                 self.fqn_for(source_port_key, false)?,
@@ -403,7 +403,7 @@ impl Assembly {
             let kind = BoundaryKind::LocalEnclave;
 
             if matches!(kind, BoundaryKind::Federated { .. }) && connection.physical() {
-                return Err(BuilderError::UnsupportedFederationTopology {
+                return Err(AssemblyError::UnsupportedFederationTopology {
                     what: format!(
                         "cross-federate physical connection '{}' -> '{}' is reserved for a later milestone",
                         self.fqn_for(source_port_key, false)?,
@@ -433,7 +433,7 @@ impl Assembly {
     fn validate_federation_zero_delay_cycles(
         &self,
         plan: &InterPartitionPlan,
-    ) -> Result<(), BuilderError> {
+    ) -> Result<(), AssemblyError> {
         let mut graph = petgraph::prelude::DiGraphMap::<AssemblyReactorKey, ()>::new();
 
         for root in &plan.partition_roots {
@@ -462,7 +462,7 @@ impl Assembly {
                         .unwrap_or_else(|| format!("{reactor_key:?}"))
                 })
                 .join(" -> ");
-            return Err(BuilderError::UnsupportedFederationTopology {
+            return Err(AssemblyError::UnsupportedFederationTopology {
                 what: format!(
                     "distributed zero-delay cycle is unsupported in the static MVP: {cycle}"
                 ),
@@ -476,7 +476,7 @@ impl Assembly {
     pub(super) fn build_connections(
         &mut self,
         partition_map: &mut PartitionMap,
-    ) -> Result<PortBindings, BuilderError> {
+    ) -> Result<PortBindings, AssemblyError> {
         let mut port_bindings = PortBindings::default();
         for connection in std::mem::take(&mut self.connection_specs).iter_mut() {
             connection.build(self, partition_map, &mut port_bindings)?;
@@ -516,8 +516,8 @@ impl Assembly {
     fn build_runtime_reactors(
         &mut self,
         partition_map: &PartitionMap,
-        builder_parts: &mut BuilderRuntimeParts,
-    ) -> Result<(), BuilderError> {
+        builder_parts: &mut RuntimeAssembly,
+    ) -> Result<(), AssemblyError> {
         let reactor_fqns: SecondaryMap<AssemblyReactorKey, String> = self
             .reactor_specs
             .keys()
@@ -550,8 +550,8 @@ impl Assembly {
 
     fn assign_runtime_reactor_scope_parents(
         &mut self,
-        builder_parts: &mut BuilderRuntimeParts,
-    ) -> Result<(), BuilderError> {
+        builder_parts: &mut RuntimeAssembly,
+    ) -> Result<(), AssemblyError> {
         for (builder_reactor_key, scope_mode) in &builder_parts.aliases.reactor_scope_modes {
             let Some(scope_mode) = scope_mode else {
                 continue;
@@ -570,8 +570,8 @@ impl Assembly {
 
     fn build_runtime_modes(
         &mut self,
-        builder_parts: &mut BuilderRuntimeParts,
-    ) -> Result<(), BuilderError> {
+        builder_parts: &mut RuntimeAssembly,
+    ) -> Result<(), AssemblyError> {
         for (builder_mode_key, mode) in self.mode_specs.drain() {
             let (enclave_key, reactor_key) =
                 builder_parts.aliases.reactor_aliases[mode.reactor_key];
@@ -592,8 +592,8 @@ impl Assembly {
     fn build_runtime_actions(
         &mut self,
         partition_map: &PartitionMap,
-        builder_parts: &mut BuilderRuntimeParts,
-    ) -> Result<(), BuilderError> {
+        builder_parts: &mut RuntimeAssembly,
+    ) -> Result<(), AssemblyError> {
         let mut new_reactions = Vec::new();
 
         for (builder_action_key, action) in &self.action_specs {
@@ -679,8 +679,8 @@ impl Assembly {
     #[cfg(feature = "federated")]
     fn build_federated_inbound_endpoints(
         &mut self,
-        builder_parts: &mut BuilderRuntimeParts,
-    ) -> Result<(), BuilderError> {
+        builder_parts: &mut RuntimeAssembly,
+    ) -> Result<(), AssemblyError> {
         let mut connections = std::mem::take(&mut builder_parts.federated_connections);
         for endpoint_factory in self.federated_inbound_endpoint_factories.drain(..) {
             endpoint_factory(builder_parts, &mut connections)?;
@@ -691,9 +691,9 @@ impl Assembly {
 
     fn assign_runtime_action_and_port_scopes(
         &mut self,
-        builder_parts: &mut BuilderRuntimeParts,
+        builder_parts: &mut RuntimeAssembly,
         port_bindings: &PortBindings,
-    ) -> Result<(), BuilderError> {
+    ) -> Result<(), AssemblyError> {
         for (builder_action_key, action) in &self.action_specs {
             let (enclave_key, action_key) =
                 match builder_parts.aliases.action_aliases.get(builder_action_key) {
@@ -737,9 +737,9 @@ impl Assembly {
     fn build_runtime_ports(
         &mut self,
         partition_map: &PartitionMap,
-        builder_parts: &mut BuilderRuntimeParts,
+        builder_parts: &mut RuntimeAssembly,
         port_bindings: &PortBindings,
-    ) -> Result<(), BuilderError> {
+    ) -> Result<(), AssemblyError> {
         let port_groups = self
             .port_specs
             .keys()
@@ -770,9 +770,9 @@ impl Assembly {
     fn build_runtime_reactions(
         &mut self,
         partition_map: &PartitionMap,
-        builder_parts: &mut BuilderRuntimeParts,
+        builder_parts: &mut RuntimeAssembly,
         reaction_levels: &SecondaryMap<AssemblyReactionKey, runtime::Level>,
-    ) -> Result<(), BuilderError> {
+    ) -> Result<(), AssemblyError> {
         for (builder_reaction_key, reaction) in self.reaction_specs.drain() {
             let reaction_body = (reaction.reaction_fn)(builder_parts);
 
@@ -931,8 +931,8 @@ impl Assembly {
     #[cfg(feature = "replay")]
     fn build_runtime_replayers(
         &mut self,
-        builder_parts: &mut BuilderRuntimeParts,
-    ) -> Result<(), BuilderError> {
+        builder_parts: &mut RuntimeAssembly,
+    ) -> Result<(), AssemblyError> {
         for (builder_action_key, replay_factory) in self.replay_factories.drain() {
             let replayer = (replay_factory)(builder_parts);
             let (enclave_key, action_key) =
@@ -943,10 +943,10 @@ impl Assembly {
     }
 
     /// Convert the [`Assembly`] into parts suitable for execution by the runtime.
-    pub fn into_runtime_parts(
+    pub fn into_runtime_assembly(
         mut self,
         config: &runtime::Config,
-    ) -> Result<BuilderRuntimeParts, BuilderError> {
+    ) -> Result<RuntimeAssembly, AssemblyError> {
         let mut partition_map = self.build_partition_map();
         let inter_partition_plan = self.build_inter_partition_plan(&partition_map)?;
         #[cfg(feature = "federated")]
@@ -972,7 +972,7 @@ impl Assembly {
         )?;
         let enclave_deps = enclave_deps_from_inter_partition_plan(&inter_partition_plan);
         let port_bindings = self.build_connections(&mut partition_map)?;
-        let mut builder_parts = BuilderRuntimeParts::new(
+        let mut builder_parts = RuntimeAssembly::new(
             &partition_map,
             inter_partition_plan,
             enclave_deps,

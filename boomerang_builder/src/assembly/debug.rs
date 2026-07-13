@@ -6,10 +6,10 @@ use itertools::Itertools;
 use petgraph::prelude::DiGraphMap;
 use slotmap::SecondaryMap;
 
-use crate::{AssemblyPortKey, AssemblyReactionKey, AssemblyReactorKey, BuilderFqn};
+use crate::{AssemblyFqn, AssemblyPortKey, AssemblyReactionKey, AssemblyReactorKey};
 
 use super::{
-    build::{BuilderAliases, BuilderRuntimeParts},
+    build::{RuntimeAliases, RuntimeAssembly},
     runtime, Assembly,
 };
 
@@ -17,8 +17,8 @@ use boomerang_runtime::fmt_utils as fmt;
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Connection {
-    source: BuilderFqn,
-    target: BuilderFqn,
+    source: AssemblyFqn,
+    target: AssemblyFqn,
     after: Option<runtime::Duration>,
     physical: bool,
 }
@@ -40,7 +40,7 @@ impl Assembly {
     /// Returns a grouped list of (first_key, last_key, fqn) of reactors
     pub fn reactors_debug_grouped(
         &self,
-    ) -> Vec<(AssemblyReactorKey, Option<AssemblyReactorKey>, BuilderFqn)> {
+    ) -> Vec<(AssemblyReactorKey, Option<AssemblyReactorKey>, AssemblyFqn)> {
         let reactors_chunked = self
             .reactor_specs
             .keys()
@@ -61,7 +61,7 @@ impl Assembly {
     pub fn ports_debug_grouped(
         &self,
         ports: impl Iterator<Item = AssemblyPortKey>,
-    ) -> Vec<(AssemblyPortKey, Option<AssemblyPortKey>, BuilderFqn)> {
+    ) -> Vec<(AssemblyPortKey, Option<AssemblyPortKey>, AssemblyFqn)> {
         let ports_chunked = ports
             .map(|port_key| (self.fqn_for(port_key, true).unwrap(), port_key))
             .sorted()
@@ -260,7 +260,7 @@ impl Debug for Assembly {
     }
 }
 
-impl Debug for BuilderAliases {
+impl Debug for RuntimeAliases {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let enclave_aliases = fmt::from_fn(|f| {
             f.debug_map()
@@ -312,7 +312,7 @@ impl Debug for BuilderAliases {
                 .finish()
         });
 
-        f.debug_struct("BuilderAliases")
+        f.debug_struct("RuntimeAliases")
             .field("enclave_aliases", &enclave_aliases)
             .field("reactor_aliases", &reactor_aliases)
             .field("reaction_aliases", &reaction_aliases)
@@ -322,7 +322,7 @@ impl Debug for BuilderAliases {
     }
 }
 
-impl Debug for BuilderRuntimeParts {
+impl Debug for RuntimeAssembly {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let enclaves = fmt::from_fn(|f| {
             f.debug_map()
@@ -330,7 +330,7 @@ impl Debug for BuilderRuntimeParts {
                 .finish()
         });
 
-        f.debug_struct("BuilderRuntimeParts")
+        f.debug_struct("RuntimeAssembly")
             .field("enclave_map", &enclaves)
             .field("aliases_map", &self.aliases)
             .field("inter_partition_plan", &self.inter_partition_plan)

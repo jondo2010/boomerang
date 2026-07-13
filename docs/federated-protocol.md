@@ -3,7 +3,7 @@
 This document describes the internal wire protocol used by Boomerang's static
 federation runners. It is a maintainer reference for the protocol types in
 `boomerang_federated/src/protocol.rs`, the RTI state machine in
-`boomerang_federated/src/rti.rs`, and the live client/session adapters in
+`boomerang_federated/src/rti/mod.rs`, and the live client/session adapters in
 `boomerang_federated/src/client.rs` and `boomerang_federated/src/session.rs`.
 For crate ownership and scheduler integration, see
 [Federated runtime internals](./federated-runtime.md).
@@ -74,10 +74,10 @@ Frames from a federate to the RTI are:
 | Frame | Meaning | Important validation |
 | --- | --- | --- |
 | `Hello { federate_id, topology }` | Declares connection identity and the federate's neighbor view. | Must be the first frame, name a static member, match the endpoint identity, and exactly match the RTI-derived neighbor structure. |
-| `Net { federate_id, tag }` | Announces the federate's next-event tag and requests permission to advance. | The embedded id must match the connection. `Forever` means no future event and is not itself granted. |
-| `Msg { source, target, endpoint, tag, payload }` | Sends one serialized logical payload through the RTI. | Source must match the connection, and the complete route must exist in the static topology. |
-| `MsgAck { federate_id, tag }` | Confirms that exactly one matching `MSG` was decoded and queued in the target scheduler. | Must match one in-transit count at the exact target and tag; unmatched acknowledgments are protocol errors. |
-| `Ltc { federate_id, tag }` | Reports that the scheduler completed reactions at the logical tag. | Advances completion state only. It does not acknowledge or remove messages. |
+| `Net { federate_id, tag }` | Announces the federate's next-event tag and requests permission to advance. | The embedded id must match the connection. A finite tag must be nonnegative and not precede the last completed tag. `Never` is invalid. `Forever` means no future event, is not itself granted, and cannot be followed by another `NET`. |
+| `Msg { source, target, endpoint, tag, payload }` | Sends one serialized logical payload through the RTI. | Source must match the connection, both members and the exact route must exist, and the finite tag must be nonnegative. A message already sent by a peer may cross the target's `Stop` ordering; a stopped source cannot send another message. |
+| `MsgAck { federate_id, tag }` | Confirms that exactly one matching `MSG` was decoded and queued in the target scheduler. | The finite tag must be nonnegative and match one in-transit count at the exact target and tag; unmatched or post-stop acknowledgments are protocol errors. |
+| `Ltc { federate_id, tag }` | Reports that the scheduler completed reactions at the logical tag. | The finite tag must be nonnegative and cannot precede the completion high-watermark. It advances completion state only and does not acknowledge messages or trigger grant reevaluation. |
 | `Stop { federate_id }` | Marks the federate stopped after it has sent no-future information. | The id must match the connection; later frames from that endpoint are rejected. |
 
 Frames from the RTI to a federate are:
@@ -119,9 +119,20 @@ flowchart TD
     F -- no --> X
 ```
 
-The RTI retries pending grants after `NET`, `MsgAck`, `LTC`, and `Stop` change
-coordination state. `LTC` may therefore trigger a retry, but it never clears an
-in-transit message.
+Grant reevaluation follows deterministic causal work sets instead of scanning
+every federate:
+
+- `NET` reevaluates the sender first, then its downstream targets in sorted
+  federate-id order;
+- `Stop` reevaluates downstream targets in sorted federate-id order;
+- `MsgAck` reevaluates only the acknowledging target; and
+- `MSG` can only add a blocking in-transit bound, so it cannot make a pending
+  grant newly eligible; `LTC` is not part of the grant predicate. Neither
+  triggers reevaluation.
+
+All affected decisions are calculated before any state or grant high-watermark
+is committed. This preserves sender-first and sorted-downstream delivery order
+while preventing unrelated topology components from affecting an event.
 
 ## Message Delivery and Completion
 
@@ -143,11 +154,11 @@ sequenceDiagram
     R->>TC: Msg(source, endpoint, T, payload)
     TC->>TS: decode and queue AsyncEvent(T)
     TC->>R: MsgAck(target, T)
-    Note over R: decrement exactly one count<br/>and retry pending grants
+    Note over R: decrement exactly one count<br/>and reconsider this target's grant
     TS->>TS: process reactions at T
     TS->>TC: logical-tag-complete callback
     TC->>R: Ltc(target, T)
-    Note over R: update last_completed only<br/>and retry pending grants
+    Note over R: update last_completed only<br/>without grant reevaluation
 ```
 
 With two messages at the same tag, the first `MsgAck` leaves one in-transit
@@ -183,11 +194,21 @@ no-future and `Stop` so that one failing scheduler does not strand its peers.
 
 ## Failure Semantics
 
-The session rejects a missing, duplicate, unknown, or mismatched `Hello`; a
-non-`Hello` first frame; a route not present in the topology; an id that does
-not match its transport endpoint; a duplicate post-start `Hello`; an unmatched
-`MsgAck`; and any frame sent after `Stop`. Where possible it sends
+The session authenticates every frame with the persistent endpoint that
+supplied it and passes both identities to `RtiState::handle_from`. That is the
+single production mutation boundary. It rejects a missing, duplicate, unknown,
+or mismatched `Hello`; a non-`Hello` first frame; illegal tag sentinels or
+negative finite tags; a route not present in the topology; an id that does not
+match its transport endpoint; a duplicate post-start `Hello`; an unmatched
+`MsgAck`; a regression behind completed time; an illegal stop transition; and
+frames originating from an endpoint after `Stop`. Where possible it sends
 `RtiToFederate::Error` before terminating the session.
+
+An RTI event is failure-atomic: validation and fallible tag-delay calculations
+finish against a staged copy of the one directly changed coordination record,
+then the record and complete deterministic grant batch commit together. An
+error leaves topology, lifecycle, completion, grants, and message counts equal
+to their pre-event values.
 
 Transport, codec, endpoint, RTI, and protocol failures become terminal barrier
 errors. `Scheduler::try_next` returns before processing an ungranted pending
@@ -247,7 +268,8 @@ before the handshake.
 
 The most focused protocol tests are located in:
 
-- `boomerang_federated/src/rti.rs` for grant and in-transit accounting;
+- `boomerang_federated/src/rti/tests.rs` for grant, transition, topology, and
+  in-transit accounting;
 - `boomerang_federated/src/session.rs` for handshake, validation, and protocol
   ordering;
 - `boomerang_federated/src/client.rs` for scheduler/client frame ordering; and

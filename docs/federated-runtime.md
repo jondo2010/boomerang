@@ -168,6 +168,17 @@ fault state to exactly that federate's barrier. Sender reactions and the barrier
 share clones of the same mailbox sender. Consequently, reaction-emitted `MSG`
 frames and the subsequent `LTC` frame enter one FIFO queue in program order.
 
+`RtiState` compiles the immutable static topology once at construction into
+ordered incoming dependencies, downstream targets, and exact route keys. The
+session calls `RtiState::handle_from` with the authenticated connection identity
+for every frame. The RTI validates and preflights each event before committing
+its one changed coordination record and any grants, so an error cannot leave a
+partial transition. Grant reevaluation is causal: `NET` touches the sender and
+downstream targets, `Stop` touches downstream targets, `MsgAck` touches its
+target, and `MSG`/`LTC` do not rescan grants because neither can make a pending
+grant newly eligible. `boomerang_runtime` remains unaware of these protocol and
+RTI details.
+
 Outbound payloads leave a scheduler through generated federated sender
 reactions. Codec and sink failures are published to that source federate's
 first-error fault latch and become terminal scheduler errors. Each reaction
@@ -220,10 +231,11 @@ observes `[(Tag::ZERO, 7)]`.
 coverage for topology lowering, rejection behavior, three-federate chains,
 fanout, and positive-delay cycles.
 
-`boomerang_federated/src/rti.rs` and `boomerang_federated/src/session.rs` cover
-RTI and protocol ordering without running full schedulers, including same-tag
-messages, microstep progression, multi-hop grant dependencies, and grant
-blocking behind in-transit messages.
+`boomerang_federated/src/rti/tests.rs` and
+`boomerang_federated/src/session.rs` cover RTI and protocol ordering without
+running full schedulers, including authenticated failure-atomic transitions,
+targeted work sets, same-tag messages, microstep progression, multi-hop grant
+dependencies, and grant blocking behind in-transit messages.
 
 The ignored TCP smoke in `boomerang_federated/src/transport.rs` remains a
 narrow protocol-level test of the shared RTI session and client, including

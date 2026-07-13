@@ -16,7 +16,7 @@ struct State {
 
 #[reactor(state = State)]
 fn AsyncCallback() -> impl Reactor {
-    let a = builder.add_physical_action::<u32>("a", None)?;
+    let a = ctx.add_physical_action::<u32>("a", None)?;
 
     reaction! {
         Proc (a) {
@@ -33,7 +33,7 @@ fn bench(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     let received = Arc::new(AtomicUsize::new(0));
-                    let mut env_builder = EnvBuilder::new();
+                    let mut assembly = Assembly::new();
                     let reactor = AsyncCallback();
                     let _reactor = reactor
                         .build(
@@ -45,17 +45,17 @@ fn bench(c: &mut Criterion) {
                             None,
                             None,
                             false,
-                            &mut env_builder,
+                            &mut assembly,
                         )
                         .unwrap();
-                    let action_key = env_builder.find_physical_action_by_fqn("main/a").unwrap();
+                    let action_key = assembly.find_physical_action_by_fqn("main/a").unwrap();
                     let config = runtime::Config::default()
                         .with_fast_forward(false)
                         .with_keep_alive(true)
                         .with_queue_size(65_536);
-                    let BuilderRuntimeParts {
+                    let RuntimeAssembly {
                         enclaves, aliases, ..
-                    } = env_builder.into_runtime_parts(&config).unwrap();
+                    } = assembly.into_runtime_assembly(&config).unwrap();
                     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
                     let (action_enclave_key, action_key) = aliases.action_aliases[action_key];
                     assert_eq!(

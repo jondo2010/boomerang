@@ -1,4 +1,4 @@
-//! Specialized builder for non-port-binding connections between reactors.
+//! Specialized assembly support for non-port-binding connections between reactors.
 //!
 //! Non-port-binding connections are connections with a specified delay or between enclaves.
 
@@ -9,8 +9,8 @@ use std::sync::Arc;
 use slotmap::SecondaryMap;
 
 use crate::{
-    runtime, ActionTag, BuilderActionKey, BuilderError, BuilderModeKey, BuilderPortKey,
-    BuilderReactorKey, EnvBuilder, Input, Output, ParentReactorBuilder, PartitionMap, PortType,
+    runtime, ActionTag, Assembly, AssemblyActionKey, AssemblyError, AssemblyModeKey,
+    AssemblyPortKey, AssemblyReactorKey, Input, Output, ParentReactorSpec, PartitionMap, PortType,
     TriggerMode, TypedActionKey, TypedPortKey,
 };
 
@@ -52,8 +52,8 @@ where
 
 #[derive(Default)]
 pub struct PortBindings {
-    inward: SecondaryMap<BuilderPortKey, BuilderPortKey>,
-    outward: SecondaryMap<BuilderPortKey, BTreeSet<BuilderPortKey>>,
+    inward: SecondaryMap<AssemblyPortKey, AssemblyPortKey>,
+    outward: SecondaryMap<AssemblyPortKey, BTreeSet<AssemblyPortKey>>,
 }
 
 impl std::fmt::Debug for PortBindings {
@@ -85,12 +85,12 @@ impl std::fmt::Debug for PortBindings {
 impl PortBindings {
     pub fn bind(
         &mut self,
-        source_key: BuilderPortKey,
-        target_key: BuilderPortKey,
-        env: &EnvBuilder,
-    ) -> Result<(), BuilderError> {
+        source_key: AssemblyPortKey,
+        target_key: AssemblyPortKey,
+        assembly: &Assembly,
+    ) -> Result<(), AssemblyError> {
         if let Some(existing) = self.inward.get(target_key) {
-            return Err(BuilderError::PortConnectionError {
+            return Err(AssemblyError::PortConnectionError {
                 source_key,
                 target_key,
                 what: format!(
@@ -99,7 +99,7 @@ impl PortBindings {
             });
         }
 
-        if env.reaction_builders.iter().any(|(_, reaction)| {
+        if assembly.reaction_specs.iter().any(|(_, reaction)| {
             reaction
                 .port_relations
                 .iter()
@@ -117,7 +117,7 @@ impl PortBindings {
                     _ => false,
                 })
         }) {
-            return Err(BuilderError::PortConnectionError {
+            return Err(AssemblyError::PortConnectionError {
                 source_key,
                 target_key,
                 what: "Ports with Uses or Effects relations may not be connected to other ports"
@@ -125,13 +125,13 @@ impl PortBindings {
             });
         }
 
-        let source_port = &env.port_builders[source_key];
-        let target_port = &env.port_builders[target_key];
+        let source_port = &assembly.port_specs[source_key];
+        let target_port = &assembly.port_specs[target_key];
 
         let source_ancestor =
-            env.reactor_builders[source_port.get_reactor_key()].parent_reactor_key;
+            assembly.reactor_specs[source_port.get_reactor_key()].parent_reactor_key;
         let target_ancestor =
-            env.reactor_builders[target_port.get_reactor_key()].parent_reactor_key;
+            assembly.reactor_specs[target_port.get_reactor_key()].parent_reactor_key;
 
         match (source_port.port_type(), target_port.port_type()) {
             (PortType::Input, PortType::Input) => {
@@ -140,7 +140,7 @@ impl PortBindings {
                         // Valid
                     }
                     _ => {
-                        return Err(BuilderError::PortConnectionError {
+                        return Err(AssemblyError::PortConnectionError {
                             source_key,
                             target_key,
                             what: "An input port A may only be bound to another input port B if B is contained by a reactor that in turn is contained by the reactor of A.".into(),
@@ -151,7 +151,7 @@ impl PortBindings {
             (PortType::Output, PortType::Input) => {
                 // VALIDATE(this->container()->container() == port->container()->container(),
                 if source_ancestor != target_ancestor {
-                    return Err(BuilderError::PortConnectionError {
+                    return Err(AssemblyError::PortConnectionError {
                         source_key,
                         target_key,
                         what: "An output port A may only be bound to an input port B if both ports belong to reactors in the same hierarichal level.".into(),
@@ -165,7 +165,7 @@ impl PortBindings {
                     }
                     _ => {
                         dbg!(source_ancestor, target_ancestor);
-                        return Err(BuilderError::PortConnectionError {
+                        return Err(AssemblyError::PortConnectionError {
                             source_key,
                             target_key,
                             what: "An output port A may only be bound to an input port B if both ports belong to reactors in the same hierarichal level.".into(),
@@ -181,7 +181,7 @@ impl PortBindings {
                         // Valid
                     }
                     _ => {
-                        return Err(BuilderError::PortConnectionError {
+                        return Err(AssemblyError::PortConnectionError {
                             source_key,
                             target_key,
                             what: "An output port A may only be bound to another output port B if A is contained by a reactor that in turn is contained by the reactor of B".into(),
@@ -190,7 +190,7 @@ impl PortBindings {
                 }
             }
             (PortType::Input, PortType::Output) => {
-                return Err(BuilderError::PortConnectionError {
+                return Err(AssemblyError::PortConnectionError {
                     source_key,
                     target_key,
                     what: "Unexpected case: can't bind an input Port to an output Port.".to_owned(),
@@ -210,7 +210,7 @@ impl PortBindings {
     }
 
     /// Follow the inward bindings of a Port to the source
-    pub fn follow_port_inward(&self, port_key: BuilderPortKey) -> BuilderPortKey {
+    pub fn follow_port_inward(&self, port_key: AssemblyPortKey) -> AssemblyPortKey {
         let mut cur_key = port_key;
         while let Some(new_idx) = self.inward.get(cur_key) {
             cur_key = *new_idx;
@@ -221,8 +221,8 @@ impl PortBindings {
     /// Get the outward bindings of a Port
     pub fn get_outward_bindings(
         &self,
-        port_key: BuilderPortKey,
-    ) -> impl Iterator<Item = BuilderPortKey> + use<'_> {
+        port_key: AssemblyPortKey,
+    ) -> impl Iterator<Item = AssemblyPortKey> + use<'_> {
         self.outward
             .get(port_key)
             .into_iter()
@@ -230,35 +230,33 @@ impl PortBindings {
     }
 }
 
-pub trait BaseConnectionBuilder {
-    fn source_key(&self) -> BuilderPortKey;
-    fn target_key(&self) -> BuilderPortKey;
+pub trait ErasedConnectionSpec {
+    fn source_key(&self) -> AssemblyPortKey;
+    fn target_key(&self) -> AssemblyPortKey;
     fn after(&self) -> Option<runtime::Duration>;
     fn physical(&self) -> bool;
     /// Build the connection between two ports
     fn build(
         &mut self,
-        env: &mut EnvBuilder,
+        assembly: &mut Assembly,
         partition_map: &mut PartitionMap,
         port_bindings: &mut PortBindings,
-    ) -> Result<(), BuilderError>;
+    ) -> Result<(), AssemblyError>;
 }
 
-pub struct ConnectionBuilder<T: runtime::ReactorData, Q: ActionTag> {
-    pub(crate) source_key: BuilderPortKey,
-    pub(crate) target_key: BuilderPortKey,
+pub struct ConnectionSpec<T: runtime::ReactorData, Q: ActionTag> {
+    pub(crate) source_key: AssemblyPortKey,
+    pub(crate) target_key: AssemblyPortKey,
     pub(crate) after: Option<runtime::Duration>,
-    pub(crate) scope_mode: Option<BuilderModeKey>,
+    pub(crate) scope_mode: Option<AssemblyModeKey>,
     pub(crate) _phantom: std::marker::PhantomData<fn() -> (T, Q)>,
 }
 
-impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
-    for ConnectionBuilder<T, Q>
-{
-    fn source_key(&self) -> BuilderPortKey {
+impl<T: runtime::ReactorData + Clone, Q: ActionTag> ErasedConnectionSpec for ConnectionSpec<T, Q> {
+    fn source_key(&self) -> AssemblyPortKey {
         self.source_key
     }
-    fn target_key(&self) -> BuilderPortKey {
+    fn target_key(&self) -> AssemblyPortKey {
         self.target_key
     }
     fn after(&self) -> Option<runtime::Duration> {
@@ -269,12 +267,12 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
     }
     fn build(
         &mut self,
-        env: &mut EnvBuilder,
+        assembly: &mut Assembly,
         partition_map: &mut PartitionMap,
         port_bindings: &mut PortBindings,
-    ) -> Result<(), BuilderError> {
-        let source_port = &env.port_builders[self.source_key()];
-        let target_port = &env.port_builders[self.target_key()];
+    ) -> Result<(), AssemblyError> {
+        let source_port = &assembly.port_specs[self.source_key()];
+        let target_port = &assembly.port_specs[self.target_key()];
 
         let source_reactor_key = source_port.parent_reactor_key().unwrap();
         let target_reactor_key = target_port.parent_reactor_key().unwrap();
@@ -287,60 +285,60 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
             // trigger and react to an action.
             if !Q::IS_LOGICAL || self.after.is_some() {
                 let source_parent_reactor_key =
-                    env.reactor_builders[source_reactor_key].parent_reactor_key();
+                    assembly.reactor_specs[source_reactor_key].parent_reactor_key();
                 let target_parent_reactor_key =
-                    env.reactor_builders[target_reactor_key].parent_reactor_key();
+                    assembly.reactor_specs[target_reactor_key].parent_reactor_key();
                 assert_eq!(
                     source_parent_reactor_key, target_parent_reactor_key,
                     "Delayed connections between same ancestor?"
                 );
                 let (reactor_key, input_port, output_port) = build_delayed_connection::<T, Q>(
-                    env,
+                    assembly,
                     source_parent_reactor_key,
                     self.scope_mode,
                     self.after,
                 )?;
                 partition_map.insert(reactor_key, source_partition);
-                port_bindings.bind(self.source_key, input_port.into(), env)?;
-                port_bindings.bind(output_port.into(), self.target_key, env)?;
+                port_bindings.bind(self.source_key, input_port.into(), assembly)?;
+                port_bindings.bind(output_port.into(), self.target_key, assembly)?;
             } else {
                 // Simple case, we can just bind them directly
-                port_bindings.bind(self.source_key, self.target_key, env)?;
+                port_bindings.bind(self.source_key, self.target_key, assembly)?;
             }
         } else {
             #[cfg(feature = "federated")]
-            if partitions_are_both_federated(env, source_partition, target_partition)? {
+            if partitions_are_both_federated(assembly, source_partition, target_partition)? {
                 if !Q::IS_LOGICAL {
-                    return Err(BuilderError::UnsupportedFederationTopology {
+                    return Err(AssemblyError::UnsupportedFederationTopology {
                         what: format!(
                             "cross-federate physical connection '{}' -> '{}' is reserved for a later milestone",
-                            env.fqn_for(self.source_key, false)?,
-                            env.fqn_for(self.target_key, false)?,
+                            assembly.fqn_for(self.source_key, false)?,
+                            assembly.fqn_for(self.target_key, false)?,
                         ),
                     });
                 }
 
                 let (encoder, decoder) =
-                    env.federated_codec_for::<T>(self.source_key, self.target_key)?;
-                let endpoint = federated_endpoint_id(env, self.source_key, self.target_key)?;
+                    assembly.federated_codec_for::<T>(self.source_key, self.target_key)?;
+                let endpoint = federated_endpoint_id(assembly, self.source_key, self.target_key)?;
 
                 let target_parent_reactor_key =
-                    env.reactor_builders[target_reactor_key].parent_reactor_key();
+                    assembly.reactor_specs[target_reactor_key].parent_reactor_key();
 
                 let EnclaveConnectionTarget {
                     reactor_key,
                     output_port,
                     action_key,
                 } = build_enclave_connection_target::<T, Q>(
-                    env,
+                    assembly,
                     target_parent_reactor_key,
                     self.scope_mode,
                     self.after,
                 )?;
                 partition_map.insert(reactor_key, target_partition);
-                port_bindings.bind(output_port.into(), self.target_key, env)?;
+                port_bindings.bind(output_port.into(), self.target_key, assembly)?;
 
-                env.add_federated_inbound_endpoint::<T>(
+                assembly.add_federated_inbound_endpoint::<T>(
                     endpoint.clone(),
                     target_partition,
                     action_key.into(),
@@ -348,12 +346,12 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
                 );
 
                 let source_parent_reactor_key =
-                    env.reactor_builders[source_reactor_key].parent_reactor_key();
+                    assembly.reactor_specs[source_reactor_key].parent_reactor_key();
                 let EnclaveConnectionSource {
                     reactor_key,
                     input_port,
                 } = build_federated_connection_source::<T>(
-                    env,
+                    assembly,
                     source_parent_reactor_key,
                     self.scope_mode,
                     target_partition,
@@ -362,7 +360,7 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
                     encoder,
                 )?;
                 partition_map.insert(reactor_key, source_partition);
-                port_bindings.bind(self.source_key, input_port.into(), env)?;
+                port_bindings.bind(self.source_key, input_port.into(), assembly)?;
 
                 return Ok(());
             }
@@ -370,35 +368,35 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
             // The connection is between two different partitions, so we need to build a pair of Reactions that trigger
             // and react to an Action.
             let target_parent_reactor_key =
-                env.reactor_builders[target_reactor_key].parent_reactor_key();
+                assembly.reactor_specs[target_reactor_key].parent_reactor_key();
 
             let EnclaveConnectionTarget {
                 reactor_key,
                 output_port,
                 action_key,
             } = build_enclave_connection_target::<T, Q>(
-                env,
+                assembly,
                 target_parent_reactor_key,
                 self.scope_mode,
                 self.after,
             )?;
             partition_map.insert(reactor_key, target_partition);
-            port_bindings.bind(output_port.into(), self.target_key, env)?;
+            port_bindings.bind(output_port.into(), self.target_key, assembly)?;
 
             let source_parent_reactor_key =
-                env.reactor_builders[source_reactor_key].parent_reactor_key();
+                assembly.reactor_specs[source_reactor_key].parent_reactor_key();
             let EnclaveConnectionSource {
                 reactor_key,
                 input_port,
             } = build_enclave_connection_source::<T>(
-                env,
+                assembly,
                 source_parent_reactor_key,
                 self.scope_mode,
                 target_partition,
                 action_key.into(),
             )?;
             partition_map.insert(reactor_key, source_partition);
-            port_bindings.bind(self.source_key, input_port.into(), env)?;
+            port_bindings.bind(self.source_key, input_port.into(), assembly)?;
         }
         Ok(())
     }
@@ -406,17 +404,17 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
 
 #[cfg(feature = "federated")]
 fn partitions_are_both_federated(
-    env: &EnvBuilder,
-    source_partition: BuilderReactorKey,
-    target_partition: BuilderReactorKey,
-) -> Result<bool, BuilderError> {
-    let source_federate = env.reactor_builders[source_partition].federate_spec();
-    let target_federate = env.reactor_builders[target_partition].federate_spec();
+    assembly: &Assembly,
+    source_partition: AssemblyReactorKey,
+    target_partition: AssemblyReactorKey,
+) -> Result<bool, AssemblyError> {
+    let source_federate = assembly.reactor_specs[source_partition].federate_spec();
+    let target_federate = assembly.reactor_specs[target_partition].federate_spec();
 
     match (source_federate.is_some(), target_federate.is_some()) {
         (true, true) => Ok(true),
         (false, false) => Ok(false),
-        _ => Err(BuilderError::UnsupportedFederationTopology {
+        _ => Err(AssemblyError::UnsupportedFederationTopology {
             what:
                 "connection crosses a federated boundary, but both enclave roots are not federates"
                     .to_owned(),
@@ -426,12 +424,12 @@ fn partitions_are_both_federated(
 
 #[cfg(feature = "federated")]
 fn federated_endpoint_id(
-    env: &EnvBuilder,
-    source_key: BuilderPortKey,
-    target_key: BuilderPortKey,
-) -> Result<boomerang_federated::EndpointId, BuilderError> {
-    let source_port_fqn = env.fqn_for(source_key, false)?.to_string();
-    let target_port_fqn = env.fqn_for(target_key, false)?.to_string();
+    assembly: &Assembly,
+    source_key: AssemblyPortKey,
+    target_key: AssemblyPortKey,
+) -> Result<boomerang_federated::EndpointId, AssemblyError> {
+    let source_port_fqn = assembly.fqn_for(source_key, false)?.to_string();
+    let target_port_fqn = assembly.fqn_for(target_key, false)?.to_string();
     Ok(boomerang_federated::EndpointId::new(format!(
         "{source_port_fqn}->{target_port_fqn}"
     )))
@@ -442,80 +440,80 @@ fn federated_endpoint_id(
 /// The connection is built as a pair of Reactions that trigger and react to an Action.
 #[allow(clippy::type_complexity)]
 fn build_delayed_connection<T: runtime::ReactorData + Clone, Q: ActionTag>(
-    env: &mut EnvBuilder,
-    parent_key: Option<BuilderReactorKey>,
-    scope_mode: Option<BuilderModeKey>,
+    assembly: &mut Assembly,
+    parent_key: Option<AssemblyReactorKey>,
+    scope_mode: Option<AssemblyModeKey>,
     after: Option<runtime::Duration>,
 ) -> Result<
     (
-        BuilderReactorKey,
+        AssemblyReactorKey,
         TypedPortKey<T, Input>,
         TypedPortKey<T, Output>,
     ),
-    BuilderError,
+    AssemblyError,
 > {
-    let mut builder = env.add_reactor("con_reactor", parent_key, None, (), false);
+    let mut ctx = assembly.add_reactor("con_reactor", parent_key, None, (), false);
     if let Some(scope_mode) = scope_mode {
-        builder.set_scope_mode(scope_mode)?;
+        ctx.set_scope_mode(scope_mode)?;
     }
-    let input_port = builder.add_input_port::<T>("con_in")?;
-    let output_port = builder.add_output_port::<T>("con_out")?;
-    let action_key = builder.add_action::<T, Q>("con_act", after)?;
+    let input_port = ctx.add_input_port::<T>("con_in")?;
+    let output_port = ctx.add_output_port::<T>("con_out")?;
+    let action_key = ctx.add_action::<T, Q>("con_act", after)?;
     // The target reaction is triggered by the action, and writes to the output port
-    let _ = builder
+    let _ = ctx
         .add_reaction(None)
         .with_trigger(action_key)
         .with_effect(output_port)
-        .with_defered_reaction_fn(move |_| {
+        .with_deferred_reaction_factory(move |_| {
             runtime::ConnectionReceiverReactionFn::<T>::default().into()
         })
         .finish()?;
     // The source reaction is triggered by the input port, and schedules the action
-    let _ = builder
+    let _ = ctx
         .add_reaction(None)
         .with_effect(action_key)
         .with_trigger(input_port)
-        .with_defered_reaction_fn(move |_| {
+        .with_deferred_reaction_factory(move |_| {
             runtime::ConnectionSenderReactionFn::<T>::default().into()
         })
         .finish()?;
-    let reactor_key = builder.finish()?;
+    let reactor_key = ctx.finish()?;
     Ok((reactor_key, input_port, output_port))
 }
 
 struct EnclaveConnectionSource<T: runtime::ReactorData + Clone> {
-    reactor_key: BuilderReactorKey,
+    reactor_key: AssemblyReactorKey,
     input_port: TypedPortKey<T, Input>,
 }
 
 /// Build the source portion
 ///
-/// The sender-side is build-deferred by returning a closure. The BuilderAction must be turned into a runtime Action before the closure is called.
+/// The sender side is deferred until its assembly action can be resolved to a runtime action.
 fn build_enclave_connection_source<T: runtime::ReactorData + Clone>(
-    env: &mut EnvBuilder,
-    parent_key: Option<BuilderReactorKey>,
-    scope_mode: Option<BuilderModeKey>,
-    target_partition: BuilderReactorKey,
-    target_action_key: BuilderActionKey,
-) -> Result<EnclaveConnectionSource<T>, BuilderError> {
-    let mut source_builder = env.add_reactor("con_reactor_src", parent_key, None, (), false);
+    assembly: &mut Assembly,
+    parent_key: Option<AssemblyReactorKey>,
+    scope_mode: Option<AssemblyModeKey>,
+    target_partition: AssemblyReactorKey,
+    target_action_key: AssemblyActionKey,
+) -> Result<EnclaveConnectionSource<T>, AssemblyError> {
+    let mut source_ctx = assembly.add_reactor("con_reactor_src", parent_key, None, (), false);
     if let Some(scope_mode) = scope_mode {
-        source_builder.set_scope_mode(scope_mode)?;
+        source_ctx.set_scope_mode(scope_mode)?;
     }
-    let input_port = source_builder.add_input_port::<T>("con_in")?;
-    source_builder
+    let input_port = source_ctx.add_input_port::<T>("con_in")?;
+    source_ctx
         .add_reaction(None)
         .with_trigger(input_port)
-        .with_defered_reaction_fn(move |builder_parts| {
-            let (enclave_key, runtime_action_key) = builder_parts
+        .with_deferred_reaction_factory(move |runtime_assembly| {
+            let (enclave_key, runtime_action_key) = runtime_assembly
                 .aliases
                 .action_aliases
                 .get(target_action_key)
                 .expect("Action key");
-            let enclave = &builder_parts.enclaves[*enclave_key];
+            let enclave = &runtime_assembly.enclaves[*enclave_key];
 
             //TODO: Get rid of this and the target_partition argument once this works
-            let enclave_key2 = builder_parts.aliases.enclave_aliases[target_partition];
+            let enclave_key2 = runtime_assembly.aliases.enclave_aliases[target_partition];
             assert_eq!(enclave_key, &enclave_key2, "Temporary cross-check");
 
             let remote_context = enclave.create_send_context(*enclave_key);
@@ -524,7 +522,7 @@ fn build_enclave_connection_source<T: runtime::ReactorData + Clone>(
                 .into()
         })
         .finish()?;
-    let reactor_key = source_builder.finish()?;
+    let reactor_key = source_ctx.finish()?;
     Ok(EnclaveConnectionSource {
         reactor_key,
         input_port,
@@ -533,35 +531,35 @@ fn build_enclave_connection_source<T: runtime::ReactorData + Clone>(
 
 #[cfg(feature = "federated")]
 fn build_federated_connection_source<T: runtime::ReactorData + Clone>(
-    env: &mut EnvBuilder,
-    parent_key: Option<BuilderReactorKey>,
-    scope_mode: Option<BuilderModeKey>,
-    target_partition: BuilderReactorKey,
-    target_action_key: BuilderActionKey,
+    assembly: &mut Assembly,
+    parent_key: Option<AssemblyReactorKey>,
+    scope_mode: Option<AssemblyModeKey>,
+    target_partition: AssemblyReactorKey,
+    target_action_key: AssemblyActionKey,
     endpoint: boomerang_federated::EndpointId,
     encoder: Box<dyn runtime::FederatedPayloadEncoder<T>>,
-) -> Result<EnclaveConnectionSource<T>, BuilderError> {
-    let mut source_builder = env.add_reactor("con_reactor_src", parent_key, None, (), false);
+) -> Result<EnclaveConnectionSource<T>, AssemblyError> {
+    let mut source_ctx = assembly.add_reactor("con_reactor_src", parent_key, None, (), false);
     if let Some(scope_mode) = scope_mode {
-        source_builder.set_scope_mode(scope_mode)?;
+        source_ctx.set_scope_mode(scope_mode)?;
     }
-    let input_port = source_builder.add_input_port::<T>("con_in")?;
-    source_builder
+    let input_port = source_ctx.add_input_port::<T>("con_in")?;
+    source_ctx
         .add_reaction(None)
         .with_trigger(input_port)
-        .with_defered_reaction_fn(move |builder_parts| {
-            let (enclave_key, runtime_action_key) = builder_parts
+        .with_deferred_reaction_factory(move |runtime_assembly| {
+            let (enclave_key, runtime_action_key) = runtime_assembly
                 .aliases
                 .action_aliases
                 .get(target_action_key)
                 .expect("Action key");
-            let enclave = &builder_parts.enclaves[*enclave_key];
+            let enclave = &runtime_assembly.enclaves[*enclave_key];
 
-            let enclave_key2 = builder_parts.aliases.enclave_aliases[target_partition];
+            let enclave_key2 = runtime_assembly.aliases.enclave_aliases[target_partition];
             assert_eq!(enclave_key, &enclave_key2, "Temporary cross-check");
 
             let remote_action_ref = enclave.create_async_action_ref(*runtime_action_key);
-            let (outbound, faults) = builder_parts
+            let (outbound, faults) = runtime_assembly
                 .federated_connections
                 .outbound_endpoint(&endpoint)
                 .expect("federated endpoint sink was validated before deferred lowering");
@@ -574,7 +572,7 @@ fn build_federated_connection_source<T: runtime::ReactorData + Clone>(
             .into()
         })
         .finish()?;
-    let reactor_key = source_builder.finish()?;
+    let reactor_key = source_ctx.finish()?;
     Ok(EnclaveConnectionSource {
         reactor_key,
         input_port,
@@ -582,38 +580,38 @@ fn build_federated_connection_source<T: runtime::ReactorData + Clone>(
 }
 
 struct EnclaveConnectionTarget<T: runtime::ReactorData, Q: ActionTag> {
-    reactor_key: BuilderReactorKey,
+    reactor_key: AssemblyReactorKey,
     output_port: TypedPortKey<T, Output>,
     action_key: TypedActionKey<T, Q>,
 }
 
 /// Build the target portion
 ///
-/// The receiver-side of is built immediately into the `EnvBuilder`, and consists of an Action that triggers a Reaction
+/// The receiver-side of is built immediately into the `Assembly`, and consists of an Action that triggers a Reaction
 /// that writes to the target port.
 fn build_enclave_connection_target<T: runtime::ReactorData + Clone, Q: ActionTag>(
-    env: &mut EnvBuilder,
-    parent_key: Option<BuilderReactorKey>,
-    scope_mode: Option<BuilderModeKey>,
+    assembly: &mut Assembly,
+    parent_key: Option<AssemblyReactorKey>,
+    scope_mode: Option<AssemblyModeKey>,
     after: Option<runtime::Duration>,
-) -> Result<EnclaveConnectionTarget<T, Q>, BuilderError> {
-    let mut target_builder = env.add_reactor("con_reactor_tgt", parent_key, None, (), false);
+) -> Result<EnclaveConnectionTarget<T, Q>, AssemblyError> {
+    let mut target_ctx = assembly.add_reactor("con_reactor_tgt", parent_key, None, (), false);
     if let Some(scope_mode) = scope_mode {
-        target_builder.set_scope_mode(scope_mode)?;
+        target_ctx.set_scope_mode(scope_mode)?;
     }
-    let action_key = target_builder.add_action::<T, Q>("con_act", after)?;
-    let output_port = target_builder.add_output_port::<T>("con_out")?;
+    let action_key = target_ctx.add_action::<T, Q>("con_act", after)?;
+    let output_port = target_ctx.add_output_port::<T>("con_out")?;
 
-    target_builder
+    target_ctx
         .add_reaction(None)
         .with_trigger(action_key)
         .with_effect(output_port)
-        .with_defered_reaction_fn(move |_builder_parts| {
+        .with_deferred_reaction_factory(move |_runtime_assembly| {
             runtime::ConnectionReceiverReactionFn::<T>::default().into()
         })
         .finish()?;
 
-    let reactor_key = target_builder.finish()?;
+    let reactor_key = target_ctx.finish()?;
     Ok(EnclaveConnectionTarget {
         reactor_key,
         output_port,

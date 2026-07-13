@@ -1,26 +1,26 @@
-//! Build-time environment lowering.
+//! Build-time assembly lowering.
 //!
-//! The builder owns the linear construction pass that turns reactor declarations into
+//! The assembly owns the linear construction pass that turns reactor declarations into
 //! `boomerang_runtime` data, including static dependency maps and derived scheduler indexes. The
 //! runtime receives those data structures ready to execute.
 
 #[cfg(feature = "federated")]
 use crate::connection::{FederatedDecoderAdapter, FederatedEncoderAdapter};
 use crate::{
-    connection::{BaseConnectionBuilder, ConnectionBuilder, PortBindings},
+    connection::{ConnectionSpec, ErasedConnectionSpec, PortBindings},
     port::Contained,
-    ActionTag, Fqn, FqnSegment, ParentReactorBuilder, Physical, PortType, TimerActionKey,
-    TimerSpec, TriggerMode,
+    ActionTag, Fqn, FqnSegment, ParentReactorSpec, Physical, PortType, TimerActionKey, TimerSpec,
+    TriggerMode,
 };
 
 use super::{
-    action::ActionBuilder,
-    port::BasePortBuilder,
-    port::PortBuilder,
-    reaction::{BuilderModeEffect, ReactionBuilder},
-    runtime, ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderModeKey,
-    BuilderPortKey, BuilderReactionKey, BuilderReactorKey, Input, Logical, ModeKind, Output,
-    PortTag, ReactorBuilder, ReactorBuilderState, ReactorPlacement, TypedActionKey, TypedPortKey,
+    action::ActionSpec,
+    port::ErasedPortSpec,
+    port::PortSpec,
+    reaction::{ModeEffectSpec, ReactionSpec},
+    runtime, ActionType, AssemblyActionKey, AssemblyError, AssemblyFqn, AssemblyModeKey,
+    AssemblyPortKey, AssemblyReactionKey, AssemblyReactorKey, Input, Logical, ModeKind, Output,
+    PortTag, ReactorContext, ReactorPlacement, ReactorSpec, TypedActionKey, TypedPortKey,
 };
 use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, EdgeDirection};
@@ -37,7 +37,7 @@ mod debug;
 #[cfg(test)]
 mod tests;
 
-pub use build::{BuilderRuntimeParts, DeferedBuild, EnclaveDep, PartitionMap};
+pub use build::{DeferredRuntimeFactory, EnclaveDep, PartitionMap, RuntimeAssembly};
 
 #[cfg(feature = "federated")]
 type FederatedCodecPair<T> = (
@@ -80,13 +80,13 @@ mod util {
 }
 
 #[cfg(feature = "replay")]
-type ReplayFunctionBuilder = dyn FnOnce(&BuilderRuntimeParts) -> Box<dyn runtime::replay::ReplayFn>;
+type ReplayFunctionFactory = dyn FnOnce(&RuntimeAssembly) -> Box<dyn runtime::replay::ReplayFn>;
 
 #[cfg(feature = "federated")]
-type FederatedInboundEndpointBuilder = dyn FnOnce(
-    &BuilderRuntimeParts,
+type FederatedInboundEndpointFactory = dyn FnOnce(
+    &RuntimeAssembly,
     &mut boomerang_federated::FederatedRuntimeConnections,
-) -> Result<(), BuilderError>;
+) -> Result<(), AssemblyError>;
 
 #[cfg(feature = "federated")]
 type FederatedCodecEntry = dyn Any + Send + Sync;
@@ -98,38 +98,38 @@ struct FederatedCodecRegistration<T: runtime::ReactorData> {
 }
 
 #[derive(Debug)]
-pub struct ModeBuilder {
+pub struct ModeSpec {
     pub name: String,
-    pub reactor_key: BuilderReactorKey,
+    pub reactor_key: AssemblyReactorKey,
     pub kind: ModeKind,
 }
 
 #[derive(Default)]
-pub struct EnvBuilder {
-    /// Builder for Actions
-    pub(super) action_builders: SlotMap<BuilderActionKey, ActionBuilder>,
-    /// Builders for Ports
-    pub(super) port_builders: SlotMap<BuilderPortKey, Box<dyn BasePortBuilder>>,
-    /// Builders for Reactions
-    pub(super) reaction_builders: SlotMap<BuilderReactionKey, ReactionBuilder>,
-    /// Builders for Modes
-    pub(super) mode_builders: SlotMap<BuilderModeKey, ModeBuilder>,
-    /// Builders for Reactors
-    pub(super) reactor_builders: SlotMap<BuilderReactorKey, ReactorBuilder>,
-    /// Builders for Connections
-    pub(super) connection_builders: Vec<Box<dyn BaseConnectionBuilder>>,
+pub struct Assembly {
+    /// Action specifications.
+    pub(super) action_specs: SlotMap<AssemblyActionKey, ActionSpec>,
+    /// Port specifications.
+    pub(super) port_specs: SlotMap<AssemblyPortKey, Box<dyn ErasedPortSpec>>,
+    /// Reaction specifications.
+    pub(super) reaction_specs: SlotMap<AssemblyReactionKey, ReactionSpec>,
+    /// Mode specifications.
+    pub(super) mode_specs: SlotMap<AssemblyModeKey, ModeSpec>,
+    /// Reactor specifications.
+    pub(super) reactor_specs: SlotMap<AssemblyReactorKey, ReactorSpec>,
+    /// Connection specifications.
+    pub(super) connection_specs: Vec<Box<dyn ErasedConnectionSpec>>,
     #[cfg(feature = "federated")]
-    /// Environment-scoped payload codec policy for inferred cross-federate connections.
+    /// Assembly-scoped payload codec policy for inferred cross-federate connections.
     federated_codecs: HashMap<TypeId, Box<FederatedCodecEntry>>,
     #[cfg(feature = "federated")]
-    /// Builders for inbound federated endpoint registry entries.
-    pub(super) federated_inbound_endpoint_builders: Vec<Box<FederatedInboundEndpointBuilder>>,
+    /// Factories for inbound federated endpoint registry entries.
+    pub(super) federated_inbound_endpoint_factories: Vec<Box<FederatedInboundEndpointFactory>>,
     #[cfg(feature = "replay")]
-    /// Builders for Replay functions
-    pub(super) replay_builders: SecondaryMap<BuilderActionKey, Box<ReplayFunctionBuilder>>,
+    /// Factories for replay functions.
+    pub(super) replay_factories: SecondaryMap<AssemblyActionKey, Box<ReplayFunctionFactory>>,
 }
 
-impl EnvBuilder {
+impl Assembly {
     pub fn new() -> Self {
         Default::default()
     }
@@ -139,32 +139,32 @@ impl EnvBuilder {
     pub fn add_reactor<S: runtime::ReactorData>(
         &mut self,
         name: &str,
-        parent: Option<BuilderReactorKey>,
+        parent: Option<AssemblyReactorKey>,
         bank_info: Option<runtime::BankInfo>,
         state: S,
         placement: impl Into<ReactorPlacement>,
-    ) -> ReactorBuilderState<'_, S> {
+    ) -> ReactorContext<'_, S> {
         tracing::debug!("Adding Reactor: {name}");
-        ReactorBuilderState::new(name, parent, bank_info, state, placement, self)
+        ReactorContext::new(name, parent, bank_info, state, placement, self)
     }
 
     /// Get a previously built reactor
-    pub fn get_reactor_builder(
+    pub fn get_reactor_spec(
         &mut self,
-        reactor_key: BuilderReactorKey,
-    ) -> Result<ReactorBuilderState<'_>, BuilderError> {
-        if !self.reactor_builders.contains_key(reactor_key) {
-            return Err(BuilderError::ReactorKeyNotFound(reactor_key));
+        reactor_key: AssemblyReactorKey,
+    ) -> Result<ReactorContext<'_>, AssemblyError> {
+        if !self.reactor_specs.contains_key(reactor_key) {
+            return Err(AssemblyError::ReactorKeyNotFound(reactor_key));
         }
-        Ok(ReactorBuilderState::from_pre_existing(reactor_key, self))
+        Ok(ReactorContext::from_pre_existing(reactor_key, self))
     }
 
     /// Add an Input port to the Reactor
     pub fn add_input_port<T: runtime::ReactorData>(
         &mut self,
         name: &str,
-        reactor_key: BuilderReactorKey,
-    ) -> Result<TypedPortKey<T, Input>, BuilderError> {
+        reactor_key: AssemblyReactorKey,
+    ) -> Result<TypedPortKey<T, Input>, AssemblyError> {
         self.internal_add_port::<T, Input>(name, reactor_key, None)
             .map(From::from)
     }
@@ -173,8 +173,8 @@ impl EnvBuilder {
     pub fn add_output_port<T: runtime::ReactorData>(
         &mut self,
         name: &str,
-        reactor_key: BuilderReactorKey,
-    ) -> Result<TypedPortKey<T, Output>, BuilderError> {
+        reactor_key: AssemblyReactorKey,
+    ) -> Result<TypedPortKey<T, Output>, AssemblyError> {
         self.internal_add_port::<T, Output>(name, reactor_key, None)
             .map(From::from)
     }
@@ -182,26 +182,24 @@ impl EnvBuilder {
     pub fn internal_add_port<T: runtime::ReactorData, Q: PortTag>(
         &mut self,
         name: &str,
-        reactor_key: BuilderReactorKey,
+        reactor_key: AssemblyReactorKey,
         bank_info: Option<runtime::BankInfo>,
-    ) -> Result<BuilderPortKey, BuilderError> {
+    ) -> Result<AssemblyPortKey, AssemblyError> {
         // Ensure no duplicates on (name, reactor_key, bank_info)
-        if self.port_builders.values().any(|port| {
+        if self.port_specs.values().any(|port| {
             port.name() == name
                 && port.get_reactor_key() == reactor_key
                 && port.bank_info() == bank_info.as_ref()
         }) {
-            return Err(BuilderError::DuplicatePortDefinition {
-                reactor_name: self.reactor_builders[reactor_key].name().to_owned(),
+            return Err(AssemblyError::DuplicatePortDefinition {
+                reactor_name: self.reactor_specs[reactor_key].name().to_owned(),
                 port_name: name.into(),
             });
         }
 
-        let key = self.port_builders.insert_with_key(|port_key| {
-            self.reactor_builders[reactor_key]
-                .ports
-                .insert(port_key, ());
-            Box::new(PortBuilder::<T, Q>::new(name, reactor_key, bank_info))
+        let key = self.port_specs.insert_with_key(|port_key| {
+            self.reactor_specs[reactor_key].ports.insert(port_key, ());
+            Box::new(PortSpec::<T, Q>::new(name, reactor_key, bank_info))
         });
 
         Ok(key)
@@ -210,8 +208,8 @@ impl EnvBuilder {
     pub fn add_startup_action(
         &mut self,
         name: &str,
-        reactor_key: BuilderReactorKey,
-    ) -> Result<TypedActionKey, BuilderError> {
+        reactor_key: AssemblyReactorKey,
+    ) -> Result<TypedActionKey, AssemblyError> {
         self.add_action_impl::<(), Logical>(
             name,
             reactor_key,
@@ -223,44 +221,44 @@ impl EnvBuilder {
     pub fn add_shutdown_action(
         &mut self,
         name: &str,
-        reactor_key: BuilderReactorKey,
-    ) -> Result<TypedActionKey, BuilderError> {
+        reactor_key: AssemblyReactorKey,
+    ) -> Result<TypedActionKey, AssemblyError> {
         self.add_action_impl::<(), Logical>(name, reactor_key, None, ActionType::Shutdown)
     }
 
     pub fn add_mode(
         &mut self,
         name: &str,
-        reactor_key: BuilderReactorKey,
+        reactor_key: AssemblyReactorKey,
         kind: impl Into<ModeKind>,
-    ) -> Result<BuilderModeKey, BuilderError> {
+    ) -> Result<AssemblyModeKey, AssemblyError> {
         let kind = kind.into();
-        let reactor_builder = &mut self.reactor_builders[reactor_key];
-        if reactor_builder.modes.keys().any(|mode_key| {
-            self.mode_builders[mode_key].name == name
-                && self.mode_builders[mode_key].reactor_key == reactor_key
+        let reactor_spec = &mut self.reactor_specs[reactor_key];
+        if reactor_spec.modes.keys().any(|mode_key| {
+            self.mode_specs[mode_key].name == name
+                && self.mode_specs[mode_key].reactor_key == reactor_key
         }) {
-            return Err(BuilderError::DuplicateModeDefinition {
-                reactor_name: reactor_builder.name().to_owned(),
+            return Err(AssemblyError::DuplicateModeDefinition {
+                reactor_name: reactor_spec.name().to_owned(),
                 mode_name: name.to_owned(),
             });
         }
 
-        if kind.is_initial() && reactor_builder.initial_mode.is_some() {
-            return Err(BuilderError::MultipleInitialModes {
-                reactor_name: reactor_builder.name().to_owned(),
+        if kind.is_initial() && reactor_spec.initial_mode.is_some() {
+            return Err(AssemblyError::MultipleInitialModes {
+                reactor_name: reactor_spec.name().to_owned(),
             });
         }
 
-        let key = self.mode_builders.insert(ModeBuilder {
+        let key = self.mode_specs.insert(ModeSpec {
             name: name.to_owned(),
             reactor_key,
             kind,
         });
 
-        reactor_builder.modes.insert(key, ());
+        reactor_spec.modes.insert(key, ());
         if kind.is_initial() {
-            reactor_builder.initial_mode = Some(key);
+            reactor_spec.initial_mode = Some(key);
         }
 
         Ok(key)
@@ -268,47 +266,47 @@ impl EnvBuilder {
 
     pub fn mode_effect(
         &self,
-        reactor_key: BuilderReactorKey,
-        mode_key: BuilderModeKey,
+        reactor_key: AssemblyReactorKey,
+        mode_key: AssemblyModeKey,
         transition: runtime::TransitionKind,
-    ) -> Result<BuilderModeEffect, BuilderError> {
-        let mode = self.mode_builders.get(mode_key).ok_or_else(|| {
-            BuilderError::ReactionBuilderError(format!("Unknown mode key {mode_key:?}"))
+    ) -> Result<ModeEffectSpec, AssemblyError> {
+        let mode = self.mode_specs.get(mode_key).ok_or_else(|| {
+            AssemblyError::ReactionDeclarationError(format!("Unknown mode key {mode_key:?}"))
         })?;
         if mode.reactor_key != reactor_key {
-            return Err(BuilderError::ReactionBuilderError(format!(
+            return Err(AssemblyError::ReactionDeclarationError(format!(
                 "Mode '{}' does not belong to reactor '{}'",
                 mode.name,
-                self.reactor_builders[reactor_key].name()
+                self.reactor_specs[reactor_key].name()
             )));
         }
-        Ok(BuilderModeEffect::new(mode_key, transition))
+        Ok(ModeEffectSpec::new(mode_key, transition))
     }
 
     /// Add a Timer Action to the given Reactor
     pub fn add_timer_action(
         &mut self,
         name: &str,
-        reactor_key: BuilderReactorKey,
+        reactor_key: AssemblyReactorKey,
         timer_spec: TimerSpec,
-    ) -> Result<TimerActionKey, BuilderError> {
+    ) -> Result<TimerActionKey, AssemblyError> {
         self.add_timer_action_in_scope(name, reactor_key, None, timer_spec)
     }
 
     pub(crate) fn add_timer_action_in_scope(
         &mut self,
         name: &str,
-        reactor_key: BuilderReactorKey,
-        scope_mode: Option<BuilderModeKey>,
+        reactor_key: AssemblyReactorKey,
+        scope_mode: Option<AssemblyModeKey>,
         timer_spec: TimerSpec,
-    ) -> Result<TimerActionKey, BuilderError> {
+    ) -> Result<TimerActionKey, AssemblyError> {
         let action_key = self.add_action_impl::<(), Logical>(
             name,
             reactor_key,
             scope_mode,
             ActionType::Timer(timer_spec),
         )?;
-        Ok(TimerActionKey::from(BuilderActionKey::from(action_key)))
+        Ok(TimerActionKey::from(AssemblyActionKey::from(action_key)))
     }
 
     /// Add a user Action to the given Reactor.
@@ -316,8 +314,8 @@ impl EnvBuilder {
         &mut self,
         name: &str,
         min_delay: Option<runtime::Duration>,
-        reactor_key: BuilderReactorKey,
-    ) -> Result<TypedActionKey<T, Q>, BuilderError> {
+        reactor_key: AssemblyReactorKey,
+    ) -> Result<TypedActionKey<T, Q>, AssemblyError> {
         self.add_action_in_scope::<T, Q>(name, min_delay, reactor_key, None)
     }
 
@@ -325,9 +323,9 @@ impl EnvBuilder {
         &mut self,
         name: &str,
         min_delay: Option<runtime::Duration>,
-        reactor_key: BuilderReactorKey,
-        scope_mode: Option<BuilderModeKey>,
-    ) -> Result<TypedActionKey<T, Q>, BuilderError> {
+        reactor_key: AssemblyReactorKey,
+        scope_mode: Option<AssemblyModeKey>,
+    ) -> Result<TypedActionKey<T, Q>, AssemblyError> {
         self.add_action_impl::<T, Q>(
             name,
             reactor_key,
@@ -346,23 +344,23 @@ impl EnvBuilder {
     fn add_action_impl<T, Q: ActionTag>(
         &mut self,
         name: &str,
-        reactor_key: BuilderReactorKey,
-        scope_mode: Option<BuilderModeKey>,
+        reactor_key: AssemblyReactorKey,
+        scope_mode: Option<AssemblyModeKey>,
         r#type: ActionType,
-    ) -> Result<TypedActionKey<T, Q>, BuilderError>
+    ) -> Result<TypedActionKey<T, Q>, AssemblyError>
     where
         T: runtime::ReactorData,
     {
-        let reactor_builder = &mut self.reactor_builders[reactor_key];
+        let reactor_spec = &mut self.reactor_specs[reactor_key];
 
         if let Some(mode_key) = scope_mode {
-            let mode = self.mode_builders.get(mode_key).ok_or_else(|| {
-                BuilderError::ReactionBuilderError(format!(
+            let mode = self.mode_specs.get(mode_key).ok_or_else(|| {
+                AssemblyError::ReactionDeclarationError(format!(
                     "Unknown mode key {mode_key:?} for action '{name}'"
                 ))
             })?;
             if mode.reactor_key != reactor_key {
-                return Err(BuilderError::ReactionBuilderError(format!(
+                return Err(AssemblyError::ReactionDeclarationError(format!(
                     "Mode '{}' does not belong to action '{name}'",
                     mode.name
                 )));
@@ -370,22 +368,22 @@ impl EnvBuilder {
         }
 
         // Ensure no duplicates
-        if reactor_builder
+        if reactor_spec
             .actions
             .keys()
-            .any(|action_key| self.action_builders[action_key].name() == name)
+            .any(|action_key| self.action_specs[action_key].name() == name)
         {
-            return Err(BuilderError::DuplicateActionDefinition {
-                reactor_name: reactor_builder.name().to_owned(),
+            return Err(AssemblyError::DuplicateActionDefinition {
+                reactor_name: reactor_spec.name().to_owned(),
                 action_name: name.into(),
             });
         }
 
-        let key =
-            self.action_builders
-                .insert(ActionBuilder::new(name, reactor_key, scope_mode, r#type));
+        let key = self
+            .action_specs
+            .insert(ActionSpec::new(name, reactor_key, scope_mode, r#type));
 
-        reactor_builder.actions.insert(key, ());
+        reactor_spec.actions.insert(key, ());
 
         Ok(key.into())
     }
@@ -395,37 +393,40 @@ impl EnvBuilder {
     pub fn add_replayer<T, Q, F>(
         &mut self,
         action_key: TypedActionKey<T, Q>,
-        replayer_builder_fn: F,
-    ) -> Result<(), BuilderError>
+        replay_factory: F,
+    ) -> Result<(), AssemblyError>
     where
         T: boomerang_runtime::ReactorData + for<'de> serde::Deserialize<'de>,
         Q: ActionTag,
-        F: FnOnce(&BuilderRuntimeParts) -> Box<dyn runtime::replay::ReplayFn> + 'static,
+        F: FnOnce(&RuntimeAssembly) -> Box<dyn runtime::replay::ReplayFn> + 'static,
     {
         let action_key = action_key.into();
-        if self.replay_builders.contains_key(action_key) {
-            return Err(BuilderError::ReplayKeyAlreadyExists(action_key));
+        if self.replay_factories.contains_key(action_key) {
+            return Err(AssemblyError::ReplayKeyAlreadyExists(action_key));
         }
 
-        self.replay_builders
-            .insert(action_key, Box::new(replayer_builder_fn));
+        self.replay_factories
+            .insert(action_key, Box::new(replay_factory));
 
         Ok(())
     }
 
     /// Get a previously built action
-    pub fn get_action(&self, action_key: BuilderActionKey) -> Result<&ActionBuilder, BuilderError> {
-        self.action_builders
+    pub fn get_action(&self, action_key: AssemblyActionKey) -> Result<&ActionSpec, AssemblyError> {
+        self.action_specs
             .get(action_key)
-            .ok_or(BuilderError::ActionKeyNotFound(action_key))
+            .ok_or(AssemblyError::ActionKeyNotFound(action_key))
     }
 
     /// Get a previously built port
-    pub fn get_port(&self, port_key: BuilderPortKey) -> Result<&dyn BasePortBuilder, BuilderError> {
-        self.port_builders
+    pub fn get_port(
+        &self,
+        port_key: AssemblyPortKey,
+    ) -> Result<&dyn ErasedPortSpec, AssemblyError> {
+        self.port_specs
             .get(port_key)
-            .map(|builder| builder.as_ref())
-            .ok_or(BuilderError::PortKeyNotFound(port_key))
+            .map(|port_spec| port_spec.as_ref())
+            .ok_or(AssemblyError::PortKeyNotFound(port_key))
     }
 
     /// Find a port in a child Reactor given it's name and the parent ReactorKey.
@@ -434,14 +435,14 @@ impl EnvBuilder {
     pub fn find_port_by_name<T: runtime::ReactorData, Q: PortTag>(
         &self,
         port_name: &str,
-        reactor_key: BuilderReactorKey,
+        reactor_key: AssemblyReactorKey,
     ) -> Option<TypedPortKey<T, Q, Contained>> {
-        self.port_builders
+        self.port_specs
             .iter()
-            .find(|(_, port_builder)| {
-                port_builder.name() == port_name
-                    && port_builder.parent_reactor_key() == Some(reactor_key)
-                    && port_builder.inner_type_id() == std::any::TypeId::of::<(T, Q)>()
+            .find(|(_, port_spec)| {
+                port_spec.name() == port_name
+                    && port_spec.parent_reactor_key() == Some(reactor_key)
+                    && port_spec.inner_type_id() == std::any::TypeId::of::<(T, Q)>()
             })
             .map(|(port_key, _)| port_key.into())
     }
@@ -450,96 +451,99 @@ impl EnvBuilder {
     pub fn find_reaction_by_name(
         &self,
         reaction_name: &str,
-        reactor_key: BuilderReactorKey,
-    ) -> Result<BuilderReactionKey, BuilderError> {
-        self.reaction_builders
+        reactor_key: AssemblyReactorKey,
+    ) -> Result<AssemblyReactionKey, AssemblyError> {
+        self.reaction_specs
             .iter()
-            .find(|(_, reaction_builder)| {
-                reaction_builder
+            .find(|(_, reaction_spec)| {
+                reaction_spec
                     .name()
                     .map(|name| name == reaction_name)
                     .unwrap_or_default()
-                    && reaction_builder.parent_reactor_key() == Some(reactor_key)
+                    && reaction_spec.parent_reactor_key() == Some(reactor_key)
             })
             .map(|(reaction_key, _)| reaction_key)
-            .ok_or_else(|| BuilderError::NamedReactionNotFound(reaction_name.to_string()))
+            .ok_or_else(|| AssemblyError::NamedReactionNotFound(reaction_name.to_string()))
     }
 
     /// Find an Action matching a given name and ReactorKey
     pub fn find_action_by_name(
         &self,
         action_name: &str,
-        reactor_key: BuilderReactorKey,
-    ) -> Result<BuilderActionKey, BuilderError> {
-        self.reactor_builders[reactor_key]
+        reactor_key: AssemblyReactorKey,
+    ) -> Result<AssemblyActionKey, AssemblyError> {
+        self.reactor_specs[reactor_key]
             .actions
             .keys()
-            .find(|action_key| self.action_builders[*action_key].name() == action_name)
-            .ok_or_else(|| BuilderError::NamedActionNotFound(action_name.to_string()))
+            .find(|action_key| self.action_specs[*action_key].name() == action_name)
+            .ok_or_else(|| AssemblyError::NamedActionNotFound(action_name.to_string()))
     }
 
-    /// Find a Reactor in the EnvBuilder given its fully-qualified name
-    pub fn find_reactor_by_fqn<T>(&self, reactor_fqn: T) -> Result<BuilderReactorKey, BuilderError>
+    /// Find a Reactor in the Assembly given its fully-qualified name
+    pub fn find_reactor_by_fqn<T>(
+        &self,
+        reactor_fqn: T,
+    ) -> Result<AssemblyReactorKey, AssemblyError>
     where
-        T: TryInto<BuilderFqn>,
-        T::Error: Into<BuilderError>,
+        T: TryInto<AssemblyFqn>,
+        T::Error: Into<AssemblyError>,
     {
-        let reactor_fqn: BuilderFqn = reactor_fqn.try_into().map_err(Into::into)?;
+        let reactor_fqn: AssemblyFqn = reactor_fqn.try_into().map_err(Into::into)?;
         let (_, segment) = reactor_fqn
             .clone()
             .split_last()
-            .ok_or(BuilderError::InvalidFqn(reactor_fqn.to_string()))?;
-        self.reactor_builders
+            .ok_or(AssemblyError::InvalidFqn(reactor_fqn.to_string()))?;
+        self.reactor_specs
             .iter()
-            .find_map(|(reactor_key, reactor_builder)| {
-                if reactor_builder.fqn_segment(false) == segment {
+            .find_map(|(reactor_key, reactor_spec)| {
+                if reactor_spec.fqn_segment(false) == segment {
                     Some(reactor_key)
                 } else {
                     None
                 }
             })
-            .ok_or_else(|| BuilderError::NamedReactorNotFound(reactor_fqn.to_string()))
+            .ok_or_else(|| AssemblyError::NamedReactorNotFound(reactor_fqn.to_string()))
     }
 
-    /// Find a PhysicalAction globally in the EnvBuilder given its fully-qualified name
+    /// Find a PhysicalAction globally in the Assembly given its fully-qualified name
     pub fn find_physical_action_by_fqn<T>(
         &self,
         action_fqn: T,
-    ) -> Result<BuilderActionKey, BuilderError>
+    ) -> Result<AssemblyActionKey, AssemblyError>
     where
-        T: TryInto<BuilderFqn>,
-        T::Error: Into<BuilderError>,
+        T: TryInto<AssemblyFqn>,
+        T::Error: Into<AssemblyError>,
     {
-        let action_fqn: BuilderFqn = action_fqn.try_into().map_err(Into::into)?;
+        let action_fqn: AssemblyFqn = action_fqn.try_into().map_err(Into::into)?;
 
         let (reactor_fqn, segment) = action_fqn
             .clone()
             .split_last()
-            .ok_or(BuilderError::InvalidFqn(action_fqn.to_string()))?;
+            .ok_or(AssemblyError::InvalidFqn(action_fqn.to_string()))?;
 
         let reactor = self.find_reactor_by_fqn(reactor_fqn)?;
 
-        self.reactor_builders[reactor]
+        self.reactor_specs[reactor]
             .actions
             .keys()
-            .find(|action_key| self.action_builders[*action_key].fqn_segment(false) == segment)
-            .ok_or_else(|| BuilderError::NamedActionNotFound(action_fqn.to_string()))
+            .find(|action_key| self.action_specs[*action_key].fqn_segment(false) == segment)
+            .ok_or_else(|| AssemblyError::NamedActionNotFound(action_fqn.to_string()))
     }
 
-    /// Find a possible common parent Reactor for two Reactor elements in the EnvBuilder (if it
+    /// Find a possible common parent Reactor for two Reactor elements in the Assembly (if it
     /// exists).
-    pub fn common_reactor_key<E0, E1>(&self, e0: &E0, e1: &E1) -> Option<BuilderReactorKey>
+    pub fn common_reactor_key<E0, E1>(&self, e0: &E0, e1: &E1) -> Option<AssemblyReactorKey>
     where
-        E0: ParentReactorBuilder,
-        E1: ParentReactorBuilder,
+        E0: ParentReactorSpec,
+        E1: ParentReactorSpec,
     {
         let mut e0_key = e0.parent_reactor_key();
         let mut e1_key = e1.parent_reactor_key();
         while e0_key != e1_key {
             match (e0_key, e1_key) {
                 (Some(key0), Some(key1)) => {
-                    e0_key = self.reactor_builders[key0].parent_reactor_key;
-                    e1_key = self.reactor_builders[key1].parent_reactor_key;
+                    e0_key = self.reactor_specs[key0].parent_reactor_key;
+                    e1_key = self.reactor_specs[key1].parent_reactor_key;
                 }
                 _ => return None,
             }
@@ -565,11 +569,11 @@ impl EnvBuilder {
         target_key: P2,
         after: Option<runtime::Duration>,
         physical: bool,
-    ) -> Result<(), BuilderError>
+    ) -> Result<(), AssemblyError>
     where
         T: runtime::ReactorData + Clone,
-        P1: Into<BuilderPortKey>,
-        P2: Into<BuilderPortKey>,
+        P1: Into<AssemblyPortKey>,
+        P2: Into<AssemblyPortKey>,
     {
         self.add_port_connection_in_scope::<T, P1, P2>(
             source_key, target_key, None, after, physical,
@@ -580,14 +584,14 @@ impl EnvBuilder {
         &mut self,
         source_key: P1,
         target_key: P2,
-        scope_mode: Option<BuilderModeKey>,
+        scope_mode: Option<AssemblyModeKey>,
         after: Option<runtime::Duration>,
         physical: bool,
-    ) -> Result<(), BuilderError>
+    ) -> Result<(), AssemblyError>
     where
         T: runtime::ReactorData + Clone,
-        P1: Into<BuilderPortKey>,
-        P2: Into<BuilderPortKey>,
+        P1: Into<AssemblyPortKey>,
+        P2: Into<AssemblyPortKey>,
     {
         let source_key = source_key.into();
         let target_key = target_key.into();
@@ -598,8 +602,8 @@ impl EnvBuilder {
             target_key.fqn(self, false)?,
         );
 
-        self.connection_builders.push(if physical {
-            Box::new(ConnectionBuilder::<T, Physical> {
+        self.connection_specs.push(if physical {
+            Box::new(ConnectionSpec::<T, Physical> {
                 source_key,
                 target_key,
                 after,
@@ -607,7 +611,7 @@ impl EnvBuilder {
                 _phantom: Default::default(),
             })
         } else {
-            Box::new(ConnectionBuilder::<T, Logical> {
+            Box::new(ConnectionSpec::<T, Logical> {
                 source_key,
                 target_key,
                 after,
@@ -620,7 +624,7 @@ impl EnvBuilder {
     }
 
     #[cfg(feature = "federated")]
-    pub fn register_federated_codec<T, C>(&mut self, codec: C) -> Result<(), BuilderError>
+    pub fn register_federated_codec<T, C>(&mut self, codec: C) -> Result<(), AssemblyError>
     where
         T: runtime::ReactorData,
         C: boomerang_federated::PayloadEncoder<T>
@@ -631,7 +635,7 @@ impl EnvBuilder {
     {
         let type_id = TypeId::of::<T>();
         if self.federated_codecs.contains_key(&type_id) {
-            return Err(BuilderError::UnsupportedFederationTopology {
+            return Err(AssemblyError::UnsupportedFederationTopology {
                 what: format!(
                     "federated codec for payload type '{}' is already registered",
                     type_name::<T>()
@@ -665,18 +669,18 @@ impl EnvBuilder {
     #[cfg(feature = "federated")]
     pub(super) fn federated_codec_for<T>(
         &self,
-        source_key: BuilderPortKey,
-        target_key: BuilderPortKey,
-    ) -> Result<FederatedCodecPair<T>, BuilderError>
+        source_key: AssemblyPortKey,
+        target_key: AssemblyPortKey,
+    ) -> Result<FederatedCodecPair<T>, AssemblyError>
     where
         T: runtime::ReactorData,
     {
         let source_fqn = self.fqn_for(source_key, false)?;
         let target_fqn = self.fqn_for(target_key, false)?;
         let entry = self.federated_codecs.get(&TypeId::of::<T>()).ok_or_else(|| {
-            BuilderError::UnsupportedFederationTopology {
+            AssemblyError::UnsupportedFederationTopology {
                 what: format!(
-                    "cross-federate connection '{}' -> '{}' requires a federated codec for payload type '{}'; register one on EnvBuilder with register_federated_codec::<T, _>(...)",
+                    "cross-federate connection '{}' -> '{}' requires a federated codec for payload type '{}'; register one on Assembly with register_federated_codec::<T, _>(...)",
                     source_fqn,
                     target_fqn,
                     type_name::<T>(),
@@ -687,7 +691,7 @@ impl EnvBuilder {
         let registration = entry
             .downcast_ref::<FederatedCodecRegistration<T>>()
             .ok_or_else(|| {
-                BuilderError::InternalError(format!(
+                AssemblyError::InternalError(format!(
                     "federated codec registry type mismatch for payload type '{}'",
                     type_name::<T>()
                 ))
@@ -703,40 +707,41 @@ impl EnvBuilder {
     pub(super) fn add_federated_inbound_endpoint<T>(
         &mut self,
         endpoint: boomerang_federated::EndpointId,
-        target_partition: BuilderReactorKey,
-        target_action_key: BuilderActionKey,
+        target_partition: AssemblyReactorKey,
+        target_action_key: AssemblyActionKey,
         decoder: Box<dyn runtime::FederatedPayloadDecoder<T>>,
     ) where
         T: runtime::ReactorData,
     {
-        self.federated_inbound_endpoint_builders.push(Box::new(
-            move |builder_parts, connections| {
-                let (enclave_key, runtime_action_key) = *builder_parts
+        self.federated_inbound_endpoint_factories.push(Box::new(
+            move |runtime_assembly, connections| {
+                let (enclave_key, runtime_action_key) = *runtime_assembly
                     .aliases
                     .action_aliases
                     .get(target_action_key)
                     .ok_or_else(|| {
-                        BuilderError::InternalError(format!(
+                        AssemblyError::InternalError(format!(
                             "missing runtime action alias for federated endpoint {endpoint}"
                         ))
                     })?;
-                let expected_enclave_key = builder_parts.aliases.enclave_aliases[target_partition];
+                let expected_enclave_key =
+                    runtime_assembly.aliases.enclave_aliases[target_partition];
                 if enclave_key != expected_enclave_key {
-                    return Err(BuilderError::InternalError(format!(
+                    return Err(AssemblyError::InternalError(format!(
                         "federated endpoint {endpoint} resolved to wrong target enclave"
                     )));
                 }
 
-                let enclave = &builder_parts.enclaves[enclave_key];
+                let enclave = &runtime_assembly.enclaves[enclave_key];
                 let context = enclave.create_send_context(enclave_key);
                 let action_ref = enclave.create_async_action_ref(runtime_action_key);
-                let target_federate = builder_parts
+                let target_federate = runtime_assembly
                     .federation_plan
                     .federates
                     .iter()
                     .find(|federate| federate.reactor == target_partition)
                     .ok_or_else(|| {
-                        BuilderError::InternalError(format!(
+                        AssemblyError::InternalError(format!(
                             "missing target federate for inbound endpoint {endpoint}"
                         ))
                     })?;
@@ -749,7 +754,7 @@ impl EnvBuilder {
                         decoder,
                     )
                     .map(|_| ())
-                    .map_err(|error| BuilderError::UnsupportedFederationTopology {
+                    .map_err(|error| AssemblyError::UnsupportedFederationTopology {
                         what: error.to_string(),
                     })
             },
@@ -757,26 +762,26 @@ impl EnvBuilder {
     }
 
     /// Get a fully-qualified name for a given key
-    pub fn fqn_for(&self, key: impl Fqn, grouped: bool) -> Result<BuilderFqn, BuilderError> {
+    pub fn fqn_for(&self, key: impl Fqn, grouped: bool) -> Result<AssemblyFqn, AssemblyError> {
         key.fqn(self, grouped)
     }
 
-    /// Validate the reactions in the environment
-    pub fn validate_reactions(&self) -> Result<(), BuilderError> {
-        for (_reaction_key, reaction) in &self.reaction_builders {
+    /// Validate the reactions in the assembly.
+    pub fn validate_reactions(&self) -> Result<(), AssemblyError> {
+        for (_reaction_key, reaction) in &self.reaction_specs {
             // Validate the port dependencies of each Reaction
             for (port_key, trigger_mode) in &reaction.port_relations {
-                let port = &self.port_builders[port_key];
+                let port = &self.port_specs[port_key];
                 let port_reactor_key = port.get_reactor_key();
                 let port_parent_reactor_key =
-                    self.reactor_builders[port_reactor_key].parent_reactor_key;
+                    self.reactor_specs[port_reactor_key].parent_reactor_key;
                 match port.port_type() {
                     PortType::Input => {
                         // triggers and uses are valid for input ports on the same reactor
                         if (trigger_mode.is_triggers() || trigger_mode.is_uses())
                             && port_reactor_key != reaction.reactor_key
                         {
-                            return Err(BuilderError::ReactionBuilderError(format!(
+                            return Err(AssemblyError::ReactionDeclarationError(format!(
                                 "Reaction {:?} cannot 'trigger on' or 'use' input port '{}', it \
                                  must belong to the same reactor as the reaction",
                                 reaction.name(),
@@ -787,7 +792,7 @@ impl EnvBuilder {
                         if trigger_mode.is_effects()
                             && port_parent_reactor_key != Some(reaction.reactor_key)
                         {
-                            return Err(BuilderError::ReactionBuilderError(format!(
+                            return Err(AssemblyError::ReactionDeclarationError(format!(
                                 "Reaction {:?} cannot 'effect' input port '{}', it must belong to \
                                  a contained reactor",
                                 reaction.name(),
@@ -800,7 +805,7 @@ impl EnvBuilder {
                         if (trigger_mode.is_triggers() || trigger_mode.is_uses())
                             && port_parent_reactor_key != Some(reaction.reactor_key)
                         {
-                            return Err(BuilderError::ReactionBuilderError(format!(
+                            return Err(AssemblyError::ReactionDeclarationError(format!(
                                 "Reaction {:?} cannot 'trigger on' or 'use' output port '{}', it \
                                  must belong to a contained reactor",
                                 reaction.name(),
@@ -809,7 +814,7 @@ impl EnvBuilder {
                         }
                         // effects are valid for output ports on the same reactor
                         if trigger_mode.is_effects() && port_reactor_key != reaction.reactor_key {
-                            return Err(BuilderError::ReactionBuilderError(format!(
+                            return Err(AssemblyError::ReactionDeclarationError(format!(
                                 "Reaction {:?} cannot 'effect' output port '{}', it must belong \
                                  to the same reactor as the reaction",
                                 reaction.name(),
@@ -827,9 +832,9 @@ impl EnvBuilder {
     pub fn reaction_dependency_edges<'a, 'b: 'a>(
         &'a self,
         port_bindings: &'b PortBindings,
-    ) -> impl Iterator<Item = (BuilderReactionKey, BuilderReactionKey)> + 'a {
+    ) -> impl Iterator<Item = (AssemblyReactionKey, AssemblyReactionKey)> + 'a {
         let deps = self
-            .reaction_builders
+            .reaction_specs
             .iter()
             .flat_map(move |(reaction_key, reaction)| {
                 // Connect all reactions this reaction depends upon
@@ -843,7 +848,7 @@ impl EnvBuilder {
                         let source_port_key = port_bindings.follow_port_inward(port_key);
 
                         // all reactions that can set this port
-                        self.reaction_builders
+                        self.reaction_specs
                             .iter()
                             .filter_map(move |(reaction_key, reaction)| {
                                 match reaction.port_relations.get(source_port_key) {
@@ -861,12 +866,12 @@ impl EnvBuilder {
 
         // For all Reactions within a Reactor, create a chain of dependencies by priority. This
         // ensures that Reactions within a Reactor always end up at unique levels.
-        let internal = self.reactor_builders.values().flat_map(move |reactor| {
+        let internal = self.reactor_specs.values().flat_map(move |reactor| {
             let reactions = reactor
                 .reactions
                 .keys()
                 .sorted_by_key(|&reaction_key| {
-                    //self.reaction_builders[reaction_key].priority
+                    //self.reaction_specs[reaction_key].priority
                     reaction_key.data().as_ffi()
                 })
                 .rev()
@@ -887,8 +892,8 @@ impl EnvBuilder {
 
     fn reactions_are_mutually_exclusive(
         &self,
-        a: BuilderReactionKey,
-        b: BuilderReactionKey,
+        a: AssemblyReactionKey,
+        b: AssemblyReactionKey,
     ) -> bool {
         let a_modes = self.enclosing_modes_for_reaction(a);
         let b_modes = self.enclosing_modes_for_reaction(b);
@@ -896,17 +901,16 @@ impl EnvBuilder {
         a_modes.iter().any(|&a_mode| {
             b_modes.iter().any(|&b_mode| {
                 a_mode != b_mode
-                    && self.mode_builders[a_mode].reactor_key
-                        == self.mode_builders[b_mode].reactor_key
+                    && self.mode_specs[a_mode].reactor_key == self.mode_specs[b_mode].reactor_key
             })
         })
     }
 
     fn enclosing_modes_for_reaction(
         &self,
-        reaction_key: BuilderReactionKey,
-    ) -> Vec<BuilderModeKey> {
-        let reaction = &self.reaction_builders[reaction_key];
+        reaction_key: AssemblyReactionKey,
+    ) -> Vec<AssemblyModeKey> {
+        let reaction = &self.reaction_specs[reaction_key];
         let mut modes = Vec::new();
         if let Some(mode) = reaction.scope_mode {
             modes.push(mode);
@@ -914,7 +918,7 @@ impl EnvBuilder {
 
         let mut reactor_key = Some(reaction.reactor_key);
         while let Some(key) = reactor_key {
-            let reactor = &self.reactor_builders[key];
+            let reactor = &self.reactor_specs[key];
             if let Some(mode) = reactor.scope_mode {
                 modes.push(mode);
             }
@@ -928,13 +932,13 @@ impl EnvBuilder {
     pub fn build_reaction_graph(
         &self,
         port_bindings: &PortBindings,
-    ) -> DiGraphMap<BuilderReactionKey, ()> {
+    ) -> DiGraphMap<AssemblyReactionKey, ()> {
         let mut graph = DiGraphMap::from_edges(
             self.reaction_dependency_edges(port_bindings)
                 .map(|(a, b)| (b, a)),
         );
         // Ensure all ReactionIndicies are represented
-        self.reaction_builders.keys().for_each(|key| {
+        self.reaction_specs.keys().for_each(|key| {
             graph.add_node(key);
         });
 
@@ -942,21 +946,21 @@ impl EnvBuilder {
     }
 
     /// Build a DAG of Reactors from the parent-child relationships
-    pub fn build_reactor_graph(&self) -> DiGraphMap<BuilderReactorKey, ()> {
+    pub fn build_reactor_graph(&self) -> DiGraphMap<AssemblyReactorKey, ()> {
         let mut graph =
-            DiGraphMap::from_edges(self.reactor_builders.iter().filter_map(|(key, reactor)| {
+            DiGraphMap::from_edges(self.reactor_specs.iter().filter_map(|(key, reactor)| {
                 reactor
                     .parent_reactor_key
                     .map(|parent_key| (parent_key, key))
             }));
         // ensure all Reactors are represented
-        self.reactor_builders.keys().for_each(|key| {
+        self.reactor_specs.keys().for_each(|key| {
             graph.add_node(key);
         });
         graph
     }
 
-    /// Build a Mapping of `BuilderReactionKey` -> `Level` corresponding to the parallelizable
+    /// Build a Mapping of `AssemblyReactionKey` -> `Level` corresponding to the parallelizable
     /// schedule
     ///
     /// This implements the Coffman-Graham algorithm for job scheduling.
@@ -964,7 +968,7 @@ impl EnvBuilder {
     pub fn build_runtime_level_map(
         &self,
         port_bindings: &PortBindings,
-    ) -> Result<SecondaryMap<BuilderReactionKey, runtime::Level>, BuilderError> {
+    ) -> Result<SecondaryMap<AssemblyReactionKey, runtime::Level>, AssemblyError> {
         use petgraph::{algo::tred, graph::DefaultIx, graph::NodeIndex};
 
         let mut graph = self
@@ -985,13 +989,13 @@ impl EnvBuilder {
             dbg!(res);
 
             // let fas = petgraph::algo::greedy_feedback_arc_set(&graph);
-            // let cycle = petgraph::prelude::DiGraphMap::<BuilderReactionKey, ()>::from_edges(fas);
+            // let cycle = petgraph::prelude::DiGraphMap::<AssemblyReactionKey, ()>::from_edges(fas);
             let cycle = util::find_minimal_cycle(&graph, cycle_error.node_id())
                 .into_iter()
                 .map(|node_index| graph[node_index])
                 .collect_vec();
 
-            BuilderError::ReactionGraphCycle { what: cycle }
+            AssemblyError::ReactionGraphCycle { what: cycle }
         })?;
 
         let (res, _) = tred::dag_to_toposorted_adjacency_list::<_, NodeIndex>(&graph, &toposort);

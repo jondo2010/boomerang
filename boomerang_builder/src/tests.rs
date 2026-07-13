@@ -7,20 +7,18 @@ use crate::{port::Contained, runtime};
 
 #[test]
 fn test_duplicate_ports() {
-    let mut env_builder = EnvBuilder::new();
-    let reactor_key = env_builder
+    let mut assembly = Assembly::new();
+    let reactor_key = assembly
         .add_reactor("test_reactor", None, None, (), false)
         .finish()
         .unwrap();
-    let _ = env_builder
-        .add_input_port::<()>("port0", reactor_key)
-        .unwrap();
+    let _ = assembly.add_input_port::<()>("port0", reactor_key).unwrap();
 
     assert!(matches!(
-        env_builder
+        assembly
             .add_output_port::<()>("port0", reactor_key)
             .expect_err("Expected duplicate"),
-        BuilderError::DuplicatePortDefinition {
+        AssemblyError::DuplicatePortDefinition {
             reactor_name,
             port_name
         } if reactor_name == "test_reactor" && port_name == "port0"
@@ -28,9 +26,9 @@ fn test_duplicate_ports() {
 }
 
 #[test]
-fn test_reaction_builder2() {
-    let mut env_builder = EnvBuilder::new();
-    let mut reactor = env_builder.add_reactor("test_reactor", None, None, (), false);
+fn test_reaction_declaration() {
+    let mut assembly = Assembly::new();
+    let mut reactor = assembly.add_reactor("test_reactor", None, None, (), false);
     let p0 = reactor.add_input_port::<u32>("p0").unwrap();
     let p1 = reactor.add_output_port::<bool>("p1").unwrap();
 
@@ -49,25 +47,25 @@ fn test_reaction_builder2() {
 
 #[test]
 fn test_duplicate_actions() {
-    let mut env_builder = EnvBuilder::new();
-    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, (), false);
+    let mut assembly = Assembly::new();
+    let mut reactor_ctx = assembly.add_reactor("test_reactor", None, None, (), false);
 
-    reactor_builder
+    reactor_ctx
         .add_logical_action::<()>("action0", None)
         .unwrap();
 
     assert!(matches!(
-        reactor_builder
+        reactor_ctx
             .add_logical_action::<()>("action0", None)
             .expect_err("Expected duplicate"),
-        BuilderError::DuplicateActionDefinition {
+        AssemblyError::DuplicateActionDefinition {
             reactor_name,
             action_name,
         } if reactor_name== "test_reactor" && action_name == "action0"
     ));
 
     assert!(matches!(
-        reactor_builder
+        reactor_ctx
             .add_timer(
                 "action0",
                 TimerSpec {
@@ -76,7 +74,7 @@ fn test_duplicate_actions() {
                 }
             )
             .expect_err("Expected duplicate"),
-        BuilderError::DuplicateActionDefinition {
+        AssemblyError::DuplicateActionDefinition {
             reactor_name,
             action_name,
         } if reactor_name == "test_reactor" && action_name == "action0"
@@ -86,37 +84,34 @@ fn test_duplicate_actions() {
 /// Assert that building a reaction without any triggers is an error
 #[test]
 fn test_reactions_without_trigger() {
-    let mut env_builder = EnvBuilder::new();
-    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, (), false);
+    let mut assembly = Assembly::new();
+    let mut reactor_ctx = assembly.add_reactor("test_reactor", None, None, (), false);
 
-    let x = reactor_builder
-        .add_logical_action::<()>("test", None)
-        .unwrap();
+    let x = reactor_ctx.add_logical_action::<()>("test", None).unwrap();
 
-    let res = reactor_builder
+    let res = reactor_ctx
         .add_reaction(None)
         .with_effect(x)
         .with_reaction_fn(|_ctx, _state, (_x,)| {})
         .finish();
 
-    assert!(matches!(res, Err(BuilderError::ReactionBuilderError(_))));
+    assert!(matches!(
+        res,
+        Err(AssemblyError::ReactionDeclarationError(_))
+    ));
 }
 
 #[test]
-fn test_mode_kind_effect_and_reset_trigger_builder() {
-    let mut env_builder = EnvBuilder::new();
-    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, (), false);
+fn test_mode_kind_effect_and_reset_trigger_declaration() {
+    let mut assembly = Assembly::new();
+    let mut reactor_ctx = assembly.add_reactor("test_reactor", None, None, (), false);
 
-    let idle = reactor_builder.add_mode("idle", ModeKind::Initial).unwrap();
-    let active = reactor_builder
-        .add_mode("active", ModeKind::Normal)
-        .unwrap();
-    let active_effect = reactor_builder.reset_mode_effect(active).unwrap();
-    let tick = reactor_builder
-        .add_logical_action::<()>("tick", None)
-        .unwrap();
+    let idle = reactor_ctx.add_mode("idle", ModeKind::Initial).unwrap();
+    let active = reactor_ctx.add_mode("active", ModeKind::Normal).unwrap();
+    let active_effect = reactor_ctx.reset_mode_effect(active).unwrap();
+    let tick = reactor_ctx.add_logical_action::<()>("tick", None).unwrap();
 
-    let switch_reaction = reactor_builder
+    let switch_reaction = reactor_ctx
         .add_reaction(Some("switch"))
         .with_trigger(tick)
         .with_effect(active_effect)
@@ -126,119 +121,119 @@ fn test_mode_kind_effect_and_reset_trigger_builder() {
         .finish()
         .unwrap();
 
-    let reset_reaction = reactor_builder
-        .in_mode(active, |builder| {
-            builder
-                .add_reaction(Some("reset_active"))
+    let reset_reaction = reactor_ctx
+        .in_mode(active, |ctx| {
+            ctx.add_reaction(Some("reset_active"))
                 .with_reset_trigger()
                 .with_reaction_fn(|_ctx, _state, ()| {})
                 .finish()
         })
         .unwrap();
 
-    let _reactor_key = reactor_builder.finish().unwrap();
+    let _reactor_key = reactor_ctx.finish().unwrap();
 
-    assert_eq!(env_builder.reactor_builders.len(), 1);
-    assert_eq!(env_builder.mode_builders[idle].kind, ModeKind::Initial);
-    assert_eq!(env_builder.mode_builders[active].kind, ModeKind::Normal);
+    assert_eq!(assembly.reactor_specs.len(), 1);
+    assert_eq!(assembly.mode_specs[idle].kind, ModeKind::Initial);
+    assert_eq!(assembly.mode_specs[active].kind, ModeKind::Normal);
     assert_eq!(
-        env_builder.reaction_builders[switch_reaction].mode_effects[0].target(),
+        assembly.reaction_specs[switch_reaction].mode_effects[0].target(),
         active
     );
     assert_eq!(
-        env_builder.reaction_builders[switch_reaction].mode_effects[0].transition(),
+        assembly.reaction_specs[switch_reaction].mode_effects[0].transition(),
         runtime::TransitionKind::Reset
     );
-    assert!(env_builder.reaction_builders[reset_reaction].reset_trigger);
+    assert!(assembly.reaction_specs[reset_reaction].reset_trigger);
     assert_eq!(
-        env_builder.reaction_builders[reset_reaction].scope_mode,
+        assembly.reaction_specs[reset_reaction].scope_mode,
         Some(active)
     );
 }
 
 #[test]
 fn test_in_mode_scopes_reactions_and_rejects_nested_modes() {
-    let mut env_builder = EnvBuilder::new();
-    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, (), false);
+    let mut assembly = Assembly::new();
+    let mut reactor_ctx = assembly.add_reactor("test_reactor", None, None, (), false);
 
-    let idle = reactor_builder.add_mode("idle", ModeKind::Initial).unwrap();
-    let active = reactor_builder
-        .add_mode("active", ModeKind::Normal)
-        .unwrap();
-    let tick = reactor_builder
-        .add_logical_action::<()>("tick", None)
-        .unwrap();
+    let idle = reactor_ctx.add_mode("idle", ModeKind::Initial).unwrap();
+    let active = reactor_ctx.add_mode("active", ModeKind::Normal).unwrap();
+    let tick = reactor_ctx.add_logical_action::<()>("tick", None).unwrap();
 
-    let scoped_reaction = reactor_builder
-        .in_mode(idle, |builder| {
-            builder
-                .add_reaction(Some("scoped"))
+    let scoped_reaction = reactor_ctx
+        .in_mode(idle, |ctx| {
+            ctx.add_reaction(Some("scoped"))
                 .with_trigger(tick)
                 .with_reaction_fn(|_ctx, _state, (_tick,)| {})
                 .finish()
         })
         .unwrap();
 
-    let nested_result = reactor_builder.in_mode(idle, |builder| {
-        builder.in_mode(active, |_builder| Ok::<_, BuilderError>(()))
+    let nested_result = reactor_ctx.in_mode(idle, |ctx| {
+        ctx.in_mode(active, |_ctx| Ok::<_, AssemblyError>(()))
     });
 
-    let _reactor_key = reactor_builder.finish().unwrap();
+    let _reactor_key = reactor_ctx.finish().unwrap();
 
     assert_eq!(
-        env_builder.reaction_builders[scoped_reaction].enabled_modes,
+        assembly.reaction_specs[scoped_reaction].enabled_modes,
         Some(vec![idle])
     );
     assert_eq!(
-        env_builder.reaction_builders[scoped_reaction].scope_mode,
+        assembly.reaction_specs[scoped_reaction].scope_mode,
         Some(idle)
     );
     assert!(matches!(
         nested_result,
-        Err(BuilderError::ReactionBuilderError(message))
+        Err(AssemblyError::ReactionDeclarationError(message))
             if message.contains("Nested mode blocks")
     ));
 }
 
 #[test]
 fn test_reset_trigger_outside_mode_is_rejected() {
-    let mut env_builder = EnvBuilder::new();
-    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, (), false);
+    let mut assembly = Assembly::new();
+    let mut reactor_ctx = assembly.add_reactor("test_reactor", None, None, (), false);
 
-    let res = reactor_builder
+    let res = reactor_ctx
         .add_reaction(Some("bad_reset"))
         .with_reset_trigger()
         .with_reaction_fn(|_ctx, _state, ()| {})
         .finish();
 
-    assert!(matches!(res, Err(BuilderError::ReactionBuilderError(_))));
+    assert!(matches!(
+        res,
+        Err(AssemblyError::ReactionDeclarationError(_))
+    ));
 }
 
 #[test]
 fn test_port_declaration_inside_mode_is_rejected() {
-    let mut env_builder = EnvBuilder::new();
-    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, (), false);
-    let idle = reactor_builder.add_mode("idle", ModeKind::Initial).unwrap();
+    let mut assembly = Assembly::new();
+    let mut reactor_ctx = assembly.add_reactor("test_reactor", None, None, (), false);
+    let idle = reactor_ctx.add_mode("idle", ModeKind::Initial).unwrap();
 
-    let res = reactor_builder.in_mode(idle, |builder| {
-        builder.add_output_port::<u32>("mode_out").map(|_| ())
+    let res = reactor_ctx.in_mode(idle, |ctx| {
+        ctx.add_output_port::<u32>("mode_out").map(|_| ())
     });
 
-    assert!(matches!(res, Err(BuilderError::ReactionBuilderError(_))));
+    assert!(matches!(
+        res,
+        Err(AssemblyError::ReactionDeclarationError(_))
+    ));
 }
 
 #[test]
 fn test_runtime_scope_metadata_for_mode_components() {
-    let mut env_builder = EnvBuilder::new();
-    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, (), false);
+    let mut assembly = Assembly::new();
+    let mut reactor_ctx = assembly.add_reactor("test_reactor", None, None, (), false);
 
-    let out = reactor_builder.add_output_port::<u32>("out").unwrap();
-    let idle = reactor_builder.add_mode("idle", ModeKind::Initial).unwrap();
-    let root_tick = reactor_builder
+    let out = reactor_ctx.add_output_port::<u32>("out").unwrap();
+    let idle = reactor_ctx.add_mode("idle", ModeKind::Initial).unwrap();
+    let root_tick = reactor_ctx
         .add_logical_action::<()>("root_tick", None)
         .unwrap();
 
-    let root_reaction = reactor_builder
+    let root_reaction = reactor_ctx
         .add_reaction(Some("root"))
         .with_trigger(root_tick)
         .with_effect(out)
@@ -246,10 +241,10 @@ fn test_runtime_scope_metadata_for_mode_components() {
         .finish()
         .unwrap();
 
-    let (mode_tick, mode_reaction) = reactor_builder
-        .in_mode(idle, |builder| {
-            let mode_tick = builder.add_logical_action::<()>("mode_tick", None)?;
-            let reaction = builder
+    let (mode_tick, mode_reaction) = reactor_ctx
+        .in_mode(idle, |ctx| {
+            let mode_tick = ctx.add_logical_action::<()>("mode_tick", None)?;
+            let reaction = ctx
                 .add_reaction(Some("mode_reaction"))
                 .with_trigger(mode_tick)
                 .with_reaction_fn(|_ctx, _state, (_mode_tick,)| {})
@@ -258,22 +253,22 @@ fn test_runtime_scope_metadata_for_mode_components() {
         })
         .unwrap();
 
-    let reactor_key = reactor_builder.finish().unwrap();
-    let builder_parts = env_builder
-        .into_runtime_parts(&runtime::Config::default())
+    let reactor_key = reactor_ctx.finish().unwrap();
+    let runtime_assembly = assembly
+        .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
 
-    let (enclave_key, runtime_reactor) = builder_parts.aliases.reactor_aliases[reactor_key];
-    let enclave = &builder_parts.enclaves[enclave_key];
+    let (enclave_key, runtime_reactor) = runtime_assembly.aliases.reactor_aliases[reactor_key];
+    let enclave = &runtime_assembly.enclaves[enclave_key];
     let root_scope = enclave.graph.reactor_root_scopes[runtime_reactor];
-    let runtime_idle = builder_parts.aliases.mode_aliases[idle].1;
+    let runtime_idle = runtime_assembly.aliases.mode_aliases[idle].1;
     let idle_scope = enclave.graph.mode_scopes[runtime_idle];
 
-    let runtime_out = builder_parts.aliases.port_aliases[BuilderPortKey::from(out)].1;
-    let runtime_root_reaction = builder_parts.aliases.reaction_aliases[root_reaction].1;
+    let runtime_out = runtime_assembly.aliases.port_aliases[AssemblyPortKey::from(out)].1;
+    let runtime_root_reaction = runtime_assembly.aliases.reaction_aliases[root_reaction].1;
     let runtime_mode_tick =
-        builder_parts.aliases.action_aliases[BuilderActionKey::from(mode_tick)].1;
-    let runtime_mode_reaction = builder_parts.aliases.reaction_aliases[mode_reaction].1;
+        runtime_assembly.aliases.action_aliases[AssemblyActionKey::from(mode_tick)].1;
+    let runtime_mode_reaction = runtime_assembly.aliases.reaction_aliases[mode_reaction].1;
 
     assert_eq!(enclave.graph.port_scopes[runtime_out], root_scope);
     assert_eq!(
@@ -289,33 +284,33 @@ fn test_runtime_scope_metadata_for_mode_components() {
 
 #[test]
 fn test_child_and_connection_helper_reactors_inherit_mode_scope() {
-    let mut env_builder = EnvBuilder::new();
-    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, (), false);
+    let mut assembly = Assembly::new();
+    let mut reactor_ctx = assembly.add_reactor("test_reactor", None, None, (), false);
 
-    let idle = reactor_builder.add_mode("idle", ModeKind::Initial).unwrap();
+    let idle = reactor_ctx.add_mode("idle", ModeKind::Initial).unwrap();
 
-    reactor_builder
-        .in_mode(idle, |builder| {
-            let source = builder.add_child_with(|parent, env| {
-                let mut child = env.add_reactor("source", Some(parent), None, (), false);
+    reactor_ctx
+        .in_mode(idle, |ctx| {
+            let source = ctx.add_child_with(|parent, assembly| {
+                let mut child = assembly.add_reactor("source", Some(parent), None, (), false);
                 let _out = child.add_output_port::<u32>("out")?;
                 child.finish()
             })?;
-            let target = builder.add_child_with(|parent, env| {
-                let mut child = env.add_reactor("target", Some(parent), None, (), false);
+            let target = ctx.add_child_with(|parent, assembly| {
+                let mut child = assembly.add_reactor("target", Some(parent), None, (), false);
                 let _input = child.add_input_port::<u32>("input")?;
                 child.finish()
             })?;
 
-            let source_out = builder
-                .env()
+            let source_out = ctx
+                .assembly()
                 .find_port_by_name::<u32, Output>("out", source)
                 .unwrap();
-            let target_input = builder
-                .env()
+            let target_input = ctx
+                .assembly()
                 .find_port_by_name::<u32, Input>("input", target)
                 .unwrap();
-            builder.connect_port::<u32, _, _, _, _>(
+            ctx.connect_port::<u32, _, _, _, _>(
                 source_out,
                 target_input,
                 Some(runtime::Duration::nanoseconds(1)),
@@ -325,14 +320,14 @@ fn test_child_and_connection_helper_reactors_inherit_mode_scope() {
         })
         .unwrap();
 
-    let reactor_key = reactor_builder.finish().unwrap();
-    let builder_parts = env_builder
-        .into_runtime_parts(&runtime::Config::default())
+    let reactor_key = reactor_ctx.finish().unwrap();
+    let runtime_assembly = assembly
+        .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
 
-    let (enclave_key, _runtime_reactor) = builder_parts.aliases.reactor_aliases[reactor_key];
-    let enclave = &builder_parts.enclaves[enclave_key];
-    let runtime_idle = builder_parts.aliases.mode_aliases[idle].1;
+    let (enclave_key, _runtime_reactor) = runtime_assembly.aliases.reactor_aliases[reactor_key];
+    let enclave = &runtime_assembly.enclaves[enclave_key];
+    let runtime_idle = runtime_assembly.aliases.mode_aliases[idle].1;
     let idle_scope = enclave.graph.mode_scopes[runtime_idle];
 
     let scoped_reactor_roots = enclave
@@ -350,37 +345,37 @@ fn test_child_and_connection_helper_reactors_inherit_mode_scope() {
 
 #[test]
 fn test_reactions_startup_shutdown() {
-    let mut env_builder = EnvBuilder::new();
-    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, (), false);
+    let mut assembly = Assembly::new();
+    let mut reactor_ctx = assembly.add_reactor("test_reactor", None, None, (), false);
 
-    let r0_key = reactor_builder
+    let r0_key = reactor_ctx
         .add_reaction(Some("test"))
         .with_startup_trigger()
         .with_reaction_fn(|_ctx, _state, (_startup,)| {})
         .finish()
         .unwrap();
 
-    let r1_key = reactor_builder
+    let r1_key = reactor_ctx
         .add_reaction(Some("test"))
         .with_shutdown_trigger()
         .with_reaction_fn(|_ctx, _state, (_shutdown,)| {})
         .finish()
         .unwrap();
 
-    let startup_action = reactor_builder.get_startup_action();
-    let shutdown_action = reactor_builder.get_shutdown_action();
+    let startup_action = reactor_ctx.get_startup_action();
+    let shutdown_action = reactor_ctx.get_shutdown_action();
 
-    let _reactor_key = reactor_builder.finish().unwrap();
+    let _reactor_key = reactor_ctx.finish().unwrap();
 
-    assert_eq!(env_builder.reactor_builders.len(), 1);
-    assert_eq!(env_builder.reaction_builders.len(), 2);
+    assert_eq!(assembly.reactor_specs.len(), 1);
+    assert_eq!(assembly.reaction_specs.len(), 2);
     assert_eq!(
-        env_builder.reaction_builders.keys().collect::<Vec<_>>(),
+        assembly.reaction_specs.keys().collect::<Vec<_>>(),
         vec![r0_key, r1_key]
     );
 
     assert_eq!(
-        env_builder.reaction_builders[r0_key]
+        assembly.reaction_specs[r0_key]
             .action_relations
             .iter()
             .next(),
@@ -389,7 +384,7 @@ fn test_reactions_startup_shutdown() {
     );
 
     assert_eq!(
-        env_builder.reaction_builders[r1_key]
+        assembly.reaction_specs[r1_key]
             .action_relations
             .iter()
             .next(),
@@ -397,12 +392,12 @@ fn test_reactions_startup_shutdown() {
         "Shutdown reaction should have the shutdown action as a trigger"
     );
 
-    env_builder.validate_reactions().unwrap();
+    assembly.validate_reactions().unwrap();
 
-    let BuilderRuntimeParts {
+    let RuntimeAssembly {
         enclaves, aliases, ..
-    } = env_builder
-        .into_runtime_parts(&runtime::Config::default())
+    } = assembly
+        .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
     let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();
     let r0_key = aliases.reaction_aliases[r0_key].1;
@@ -429,16 +424,16 @@ fn test_reactions_startup_shutdown() {
 
 #[test]
 fn test_actions1() {
-    let mut env_builder = EnvBuilder::new();
-    let mut reactor_builder = env_builder.add_reactor("test_reactor", None, None, (), false);
+    let mut assembly = Assembly::new();
+    let mut reactor_ctx = assembly.add_reactor("test_reactor", None, None, (), false);
 
-    let action_a = reactor_builder
+    let action_a = reactor_ctx
         .add_logical_action::<()>("a", Some(runtime::Duration::seconds(1)))
         .unwrap();
-    let action_b = reactor_builder.add_logical_action::<()>("b", None).unwrap();
+    let action_b = reactor_ctx.add_logical_action::<()>("b", None).unwrap();
 
     // Triggered by a+b, schedules b
-    let reaction_a = reactor_builder
+    let reaction_a = reactor_ctx
         .add_reaction(Some("ra"))
         .with_trigger(action_a)
         .with_effect(action_b)
@@ -449,18 +444,18 @@ fn test_actions1() {
         .unwrap();
 
     // Triggered by a, schedules a
-    let reaction_b = reactor_builder
+    let reaction_b = reactor_ctx
         .add_reaction(Some("rb"))
         .with_trigger(action_a)
         .with_reaction_fn(|_ctx, _state, (_a,)| {})
         .finish()
         .unwrap();
 
-    let _reactor_key = reactor_builder.finish().unwrap();
-    let BuilderRuntimeParts {
+    let _reactor_key = reactor_ctx.finish().unwrap();
+    let RuntimeAssembly {
         enclaves, aliases, ..
-    } = env_builder
-        .into_runtime_parts(&runtime::Config::default())
+    } = assembly
+        .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
     let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();
 
@@ -518,7 +513,7 @@ fn reaction_refs_extract_reports_missing() {
         actions: runtime::RefsMut::new(&mut actions),
     };
 
-    let port = TypedPortKey::<u32, Input, Local>::new(BuilderPortKey::default());
+    let port = TypedPortKey::<u32, Input, Local>::new(AssemblyPortKey::default());
     let res = port.extract(&mut refs);
 
     assert!(
@@ -551,7 +546,7 @@ fn reaction_refs_extract_reports_type_mismatch() {
         actions: runtime::RefsMut::new(&mut actions),
     };
 
-    let port = TypedPortKey::<u32, Input, Local>::new(BuilderPortKey::default());
+    let port = TypedPortKey::<u32, Input, Local>::new(AssemblyPortKey::default());
     let res = port.extract(&mut refs);
 
     assert!(
@@ -564,19 +559,19 @@ fn reaction_refs_extract_reports_type_mismatch() {
 /// Test port bindings and connections within a nested reactor.
 #[test]
 fn test_nested_reactor() {
-    let mut env_builder = EnvBuilder::new();
+    let mut assembly = Assembly::new();
 
-    let mut outer_builder = env_builder.add_reactor("outer", None, None, (), false);
-    let outer_input = outer_builder.add_input_port::<()>("input").unwrap();
-    let outer_output = outer_builder.add_output_port::<()>("output").unwrap();
+    let mut outer_ctx = assembly.add_reactor("outer", None, None, (), false);
+    let outer_input = outer_ctx.add_input_port::<()>("input").unwrap();
+    let outer_output = outer_ctx.add_output_port::<()>("output").unwrap();
 
-    let inner_reactor = outer_builder
-        .add_child_with(|parent, env| {
-            let mut inner_builder = env.add_reactor("inner", Some(parent), None, (), false);
-            let input_port = inner_builder.add_input_port::<()>("input").unwrap();
-            let output_port = inner_builder.add_output_port::<()>("output").unwrap();
+    let inner_reactor = outer_ctx
+        .add_child_with(|parent, assembly| {
+            let mut inner_ctx = assembly.add_reactor("inner", Some(parent), None, (), false);
+            let input_port = inner_ctx.add_input_port::<()>("input").unwrap();
+            let output_port = inner_ctx.add_output_port::<()>("output").unwrap();
 
-            let _ = inner_builder
+            let _ = inner_ctx
                 .add_reaction(Some("reaction"))
                 .with_trigger(input_port)
                 .with_effect(output_port)
@@ -586,26 +581,26 @@ fn test_nested_reactor() {
                 .finish()
                 .unwrap();
 
-            inner_builder.finish()
+            inner_ctx.finish()
         })
         .unwrap();
 
-    let _outer_reactor = outer_builder.finish().unwrap();
+    let _outer_reactor = outer_ctx.finish().unwrap();
 
-    let inner_input = env_builder
+    let inner_input = assembly
         .find_port_by_name::<(), Input>("input", inner_reactor)
         .unwrap();
-    let inner_output = env_builder
+    let inner_output = assembly
         .find_port_by_name::<(), Output>("output", inner_reactor)
         .unwrap();
 
-    env_builder
+    assembly
         .add_port_connection::<(), _, _>(outer_input, inner_input, None, false)
         .unwrap();
-    env_builder
+    assembly
         .add_port_connection::<(), _, _>(inner_output, outer_output, None, false)
         .unwrap();
-    env_builder
+    assembly
         .add_port_connection::<(), _, _>(
             outer_output,
             outer_input,
@@ -615,10 +610,10 @@ fn test_nested_reactor() {
         )
         .unwrap();
 
-    let BuilderRuntimeParts {
+    let RuntimeAssembly {
         enclaves, aliases, ..
-    } = env_builder
-        .into_runtime_parts(&runtime::Config::default())
+    } = assembly
+        .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
     assert_eq!(enclaves.len(), 1);
 
@@ -644,9 +639,9 @@ fn test_nested_reactor() {
 
 #[test]
 fn connect_ports_reports_length_mismatch() {
-    let mut env_builder = EnvBuilder::new();
+    let mut assembly = Assembly::new();
 
-    let mut reactor = env_builder.add_reactor("reactor", None, None, (), false);
+    let mut reactor = assembly.add_reactor("reactor", None, None, (), false);
     let outputs = reactor.add_output_ports::<u8, 2>("out").unwrap();
     let inputs = reactor.add_input_ports::<u8, 3>("in").unwrap();
 
@@ -656,20 +651,20 @@ fn connect_ports_reports_length_mismatch() {
 
     assert!(matches!(
         err,
-        BuilderError::PortConnectionLengthMismatch { from: 2, to: 3 }
+        AssemblyError::PortConnectionLengthMismatch { from: 2, to: 3 }
     ));
 }
 
 /// Test semantics of trigger/effect/uses ports on reactions.
 #[test]
 fn test_reaction_ports() -> anyhow::Result<()> {
-    let mut env_builder = EnvBuilder::new();
-    let mut builder_a = env_builder.add_reactor("reactorA", None, None, (), false);
-    let port_a = builder_a.add_input_port::<()>("portA").unwrap();
-    let port_b = builder_a.add_output_port::<()>("portB").unwrap();
-    let port_c = builder_a.add_input_port::<()>("portC").unwrap();
+    let mut assembly = Assembly::new();
+    let mut reactor_ctx = assembly.add_reactor("reactorA", None, None, (), false);
+    let port_a = reactor_ctx.add_input_port::<()>("portA").unwrap();
+    let port_b = reactor_ctx.add_output_port::<()>("portB").unwrap();
+    let port_c = reactor_ctx.add_input_port::<()>("portC").unwrap();
 
-    let reaction_a = builder_a
+    let reaction_a = reactor_ctx
         .add_reaction(Some("reactionA"))
         .with_trigger(port_a)
         .with_effect(port_b)
@@ -677,12 +672,12 @@ fn test_reaction_ports() -> anyhow::Result<()> {
         .with_reaction_fn(|_ctx, _state, (_port_a, mut _port_b, _port_c)| {})
         .finish()?;
 
-    let _reactor_a = builder_a.finish()?;
+    let _reactor_a = reactor_ctx.finish()?;
 
-    let BuilderRuntimeParts {
+    let RuntimeAssembly {
         enclaves, aliases, ..
-    } = env_builder
-        .into_runtime_parts(&runtime::Config::default())
+    } = assembly
+        .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
     assert_eq!(enclaves.len(), 1);
     let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();
@@ -736,22 +731,22 @@ fn test_reaction_ports() -> anyhow::Result<()> {
 /// Test that use-dependencies may be declared on logical actions and timers.
 #[test]
 fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
-    let mut env_builder = EnvBuilder::new();
+    let mut assembly = Assembly::new();
 
-    let mut builder_main = env_builder.add_reactor("main", None, None, 0u32, false);
-    let clock = builder_main.add_logical_action::<u32>("clock", None)?;
-    let a = builder_main.add_logical_action::<()>("a", None)?;
-    let t = builder_main.add_timer(
+    let mut reactor_ctx = assembly.add_reactor("main", None, None, 0u32, false);
+    let clock = reactor_ctx.add_logical_action::<u32>("clock", None)?;
+    let a = reactor_ctx.add_logical_action::<()>("a", None)?;
+    let t = reactor_ctx.add_timer(
         "t",
         TimerSpec {
             period: Some(runtime::Duration::milliseconds(2)),
             offset: None,
         },
     )?;
-    let startup_action = builder_main.get_startup_action();
+    let startup_action = reactor_ctx.get_startup_action();
 
     // reaction(startup) -> clock, a
-    let _r_startup = builder_main
+    let _r_startup = reactor_ctx
         .add_reaction(Some("startup"))
         .with_startup_trigger()
         .with_effect(clock)
@@ -772,7 +767,7 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
         .finish()?;
 
     //reaction(clock) a, t {= =}
-    let _r_clock = builder_main
+    let _r_clock = reactor_ctx
         .add_reaction(Some("clock"))
         .with_trigger(clock)
         .with_use(a)
@@ -795,7 +790,7 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
         .finish()?;
 
     // reaction(shutdown) {= =}
-    let _r_shutdown = builder_main
+    let _r_shutdown = reactor_ctx
         .add_reaction(Some("shutdown"))
         .with_shutdown_trigger()
         .with_reaction_fn(|_ctx, state, (_shutdown,)| {
@@ -804,11 +799,11 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
         })
         .finish()?;
 
-    builder_main.finish()?;
+    reactor_ctx.finish()?;
 
-    let BuilderRuntimeParts {
+    let RuntimeAssembly {
         enclaves, aliases, ..
-    } = env_builder.into_runtime_parts(&runtime::Config::default())?;
+    } = assembly.into_runtime_assembly(&runtime::Config::default())?;
     assert_eq!(enclaves.len(), 1);
     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
 
@@ -876,16 +871,16 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
 /// Test that use-dependencies may be absent within a reaction.
 #[test]
 fn test_dependency_use_accessible() -> anyhow::Result<()> {
-    let mut env_builder = EnvBuilder::new();
-    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let mut assembly = Assembly::new();
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
 
-    let source_reactor = builder
-        .add_child_with(|parent, env| {
-            let mut builder = env.add_reactor("Source", Some(parent), None, (), false);
-            let clock = builder.add_output_port::<u32>("clock")?;
-            let o1 = builder.add_output_port::<u32>("o1")?;
-            let o2 = builder.add_output_port::<u32>("o2")?;
-            let t1 = builder
+    let source_reactor = ctx
+        .add_child_with(|parent, assembly| {
+            let mut ctx = assembly.add_reactor("Source", Some(parent), None, (), false);
+            let clock = ctx.add_output_port::<u32>("clock")?;
+            let o1 = ctx.add_output_port::<u32>("o1")?;
+            let o2 = ctx.add_output_port::<u32>("o2")?;
+            let t1 = ctx
                 .add_timer(
                     "t1",
                     TimerSpec {
@@ -894,7 +889,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
                     },
                 )
                 .unwrap();
-            let t2 = builder
+            let t2 = ctx
                 .add_timer(
                     "t2",
                     TimerSpec {
@@ -903,8 +898,8 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
                     },
                 )
                 .unwrap();
-            let startup_action = builder.get_startup_action();
-            let _ = builder
+            let startup_action = ctx.get_startup_action();
+            let _ = ctx
                 .add_reaction(Some("startup"))
                 .with_trigger(startup_action)
                 .with_effect(clock)
@@ -915,7 +910,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
                 })
                 .finish()?;
 
-            let _ = builder
+            let _ = ctx
                 .add_reaction(Some("reaction_t1"))
                 .with_trigger(t1)
                 .with_effect(clock)
@@ -929,7 +924,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
                 })
                 .finish()?;
 
-            let _ = builder
+            let _ = ctx
                 .add_reaction(Some("reaction_t2"))
                 .with_trigger(t2)
                 .with_effect(clock)
@@ -942,16 +937,16 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
                 })
                 .finish()?;
 
-            builder.finish()
+            ctx.finish()
         })
         .unwrap();
 
-    let sink_reactor = builder.add_child_with(|parent, env| {
-        let mut builder = env.add_reactor("Sink", Some(parent), None, (), false);
-        let clock = builder.add_input_port::<u32>("clock").unwrap();
-        let in1 = builder.add_input_port::<u32>("in1").unwrap();
-        let in2 = builder.add_input_port::<u32>("in2").unwrap();
-        let _ = builder
+    let sink_reactor = ctx.add_child_with(|parent, assembly| {
+        let mut ctx = assembly.add_reactor("Sink", Some(parent), None, (), false);
+        let clock = ctx.add_input_port::<u32>("clock").unwrap();
+        let in1 = ctx.add_input_port::<u32>("in1").unwrap();
+        let in2 = ctx.add_input_port::<u32>("in2").unwrap();
+        let _ = ctx
             .add_reaction(Some("reaction_clock"))
             .with_trigger(clock)
             .with_use(in1)
@@ -975,47 +970,43 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
             })
             .finish()?;
 
-        builder.finish()
+        ctx.finish()
     })?;
 
-    let _main_reactor = builder.finish()?;
+    let _main_reactor = ctx.finish()?;
 
-    let clock_source = env_builder
+    let clock_source = assembly
         .find_port_by_name::<u32, Output>("clock", source_reactor)
         .unwrap();
-    let clock_sink = env_builder
+    let clock_sink = assembly
         .find_port_by_name::<u32, Input>("clock", sink_reactor)
         .unwrap();
-    env_builder.add_port_connection::<u32, _, _>(clock_source, clock_sink, None, false)?;
+    assembly.add_port_connection::<u32, _, _>(clock_source, clock_sink, None, false)?;
 
-    let o1_source = env_builder
+    let o1_source = assembly
         .find_port_by_name::<u32, Output>("o1", source_reactor)
         .unwrap();
-    let in1_sink = env_builder
+    let in1_sink = assembly
         .find_port_by_name::<u32, Input>("in1", sink_reactor)
         .unwrap();
-    env_builder.add_port_connection::<u32, _, _>(o1_source, in1_sink, None, false)?;
+    assembly.add_port_connection::<u32, _, _>(o1_source, in1_sink, None, false)?;
 
-    let o2_source = env_builder
+    let o2_source = assembly
         .find_port_by_name::<u32, Output>("o2", source_reactor)
         .unwrap();
-    let in2_sink = env_builder
+    let in2_sink = assembly
         .find_port_by_name::<u32, Input>("in2", sink_reactor)
         .unwrap();
-    env_builder.add_port_connection::<u32, _, _>(o2_source, in2_sink, None, false)?;
+    assembly.add_port_connection::<u32, _, _>(o2_source, in2_sink, None, false)?;
 
-    let reaction_source_startup_key =
-        env_builder.find_reaction_by_name("startup", source_reactor)?;
-    let _reaction_source_t1_key =
-        env_builder.find_reaction_by_name("reaction_t1", source_reactor)?;
-    let _reaction_source_t2_key =
-        env_builder.find_reaction_by_name("reaction_t2", source_reactor)?;
-    let reaction_sink_clock_key =
-        env_builder.find_reaction_by_name("reaction_clock", sink_reactor)?;
+    let reaction_source_startup_key = assembly.find_reaction_by_name("startup", source_reactor)?;
+    let _reaction_source_t1_key = assembly.find_reaction_by_name("reaction_t1", source_reactor)?;
+    let _reaction_source_t2_key = assembly.find_reaction_by_name("reaction_t2", source_reactor)?;
+    let reaction_sink_clock_key = assembly.find_reaction_by_name("reaction_clock", sink_reactor)?;
 
-    let BuilderRuntimeParts {
+    let RuntimeAssembly {
         enclaves, aliases, ..
-    } = env_builder.into_runtime_parts(&runtime::Config::default())?;
+    } = assembly.into_runtime_assembly(&runtime::Config::default())?;
     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
 
     // the Source startup reaction should trigger on startup and effect the clock port
@@ -1078,13 +1069,13 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
 
 #[test]
 fn test_enclave_partitioning() {
-    let mut env_builder = EnvBuilder::new();
-    let mut reactor_builder = env_builder.add_reactor("world", None, None, (), false);
+    let mut assembly = Assembly::new();
+    let mut reactor_ctx = assembly.add_reactor("world", None, None, (), false);
 
-    let hello1 = reactor_builder
-        .add_child_with(|builder_reactor_key, builder| {
+    let hello1 = reactor_ctx
+        .add_child_with(|assembly_reactor_key, assembly| {
             let mut reactor =
-                builder.add_reactor("hello1", Some(builder_reactor_key), None, (), false);
+                assembly.add_reactor("hello1", Some(assembly_reactor_key), None, (), false);
             let startup = reactor.get_startup_action();
             let _ = reactor
                 .add_reaction(Some("startup"))
@@ -1098,10 +1089,10 @@ fn test_enclave_partitioning() {
         })
         .unwrap();
 
-    let hello2 = reactor_builder
-        .add_child_with(|builder_reactor_key, builder| {
+    let hello2 = reactor_ctx
+        .add_child_with(|assembly_reactor_key, assembly| {
             let mut reactor =
-                builder.add_reactor("hello2", Some(builder_reactor_key), None, (), true);
+                assembly.add_reactor("hello2", Some(assembly_reactor_key), None, (), true);
             let startup = reactor.get_startup_action();
             let _ = reactor
                 .add_reaction(Some("startup"))
@@ -1115,23 +1106,23 @@ fn test_enclave_partitioning() {
         })
         .unwrap();
 
-    let world = reactor_builder.finish().unwrap();
+    let world = reactor_ctx.finish().unwrap();
 
-    let builder_parts = env_builder
-        .into_runtime_parts(&runtime::Config::default())
+    let runtime_assembly = assembly
+        .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
-    assert_eq!(builder_parts.enclaves.len(), 2, "Expected 2 enclaves");
+    assert_eq!(runtime_assembly.enclaves.len(), 2, "Expected 2 enclaves");
 
-    let (world_enclave, world_key) = builder_parts.aliases.reactor_aliases[world];
-    let (hello1_enclave, hello1_key) = builder_parts.aliases.reactor_aliases[hello1];
-    let (hello2_enclave, hello2_key) = builder_parts.aliases.reactor_aliases[hello2];
+    let (world_enclave, world_key) = runtime_assembly.aliases.reactor_aliases[world];
+    let (hello1_enclave, hello1_key) = runtime_assembly.aliases.reactor_aliases[hello1];
+    let (hello2_enclave, hello2_key) = runtime_assembly.aliases.reactor_aliases[hello2];
 
     assert_eq!(
         world_enclave, hello1_enclave,
         "Expected world and hello1 in same enclave"
     );
     assert_eq!(
-        builder_parts.enclaves[world_enclave]
+        runtime_assembly.enclaves[world_enclave]
             .env
             .reactors
             .keys()
@@ -1140,7 +1131,7 @@ fn test_enclave_partitioning() {
         "Expected only the world and hello1 reactors in the first enclave"
     );
     assert_eq!(
-        builder_parts.enclaves[hello2_enclave]
+        runtime_assembly.enclaves[hello2_enclave]
             .env
             .reactors
             .keys()
@@ -1152,13 +1143,13 @@ fn test_enclave_partitioning() {
 
 #[test]
 fn test_is_enclave_compatibility_with_reactor_placement() {
-    let mut env_builder = EnvBuilder::new();
-    let reactor = env_builder
+    let mut assembly = Assembly::new();
+    let reactor = assembly
         .add_reactor("enclave", None, None, (), true)
         .finish()
         .unwrap();
 
-    let reactor = &env_builder.reactor_builders[reactor];
+    let reactor = &assembly.reactor_specs[reactor];
     assert!(reactor.is_enclave);
     assert!(reactor.is_enclave());
     assert_eq!(reactor.placement(), &ReactorPlacement::Enclave);
@@ -1168,10 +1159,10 @@ fn test_is_enclave_compatibility_with_reactor_placement() {
 mod federated;
 
 pub struct PingPong {
-    pub env_builder: EnvBuilder,
-    pub main: BuilderReactorKey,
-    pub ping: BuilderReactorKey,
-    pub pong: BuilderReactorKey,
+    pub assembly: Assembly,
+    pub main: AssemblyReactorKey,
+    pub ping: AssemblyReactorKey,
+    pub pong: AssemblyReactorKey,
     pub ping_input: TypedPortKey<(), Input, Contained>,
     pub ping_output: TypedPortKey<(), Output, Contained>,
     pub pong_input: TypedPortKey<(), Input, Contained>,
@@ -1183,12 +1174,12 @@ pub fn create_ping_pong() -> PingPong {
     fn ping_pong(
         name: &str,
         is_enclave: bool,
-    ) -> impl FnOnce(BuilderReactorKey, &mut EnvBuilder) -> Result<BuilderReactorKey, BuilderError>
+    ) -> impl FnOnce(AssemblyReactorKey, &mut Assembly) -> Result<AssemblyReactorKey, AssemblyError>
            + use<'_> {
         let greeting = format!("{} received", name);
-        move |parent, env: &mut EnvBuilder| {
-            let mut builder = env.add_reactor(name, Some(parent), None, (), is_enclave);
-            let t1 = builder
+        move |parent, assembly: &mut Assembly| {
+            let mut ctx = assembly.add_reactor(name, Some(parent), None, (), is_enclave);
+            let t1 = ctx
                 .add_timer(
                     "t1",
                     TimerSpec {
@@ -1197,10 +1188,10 @@ pub fn create_ping_pong() -> PingPong {
                     },
                 )
                 .unwrap();
-            let i1 = builder.add_input_port::<()>("i1")?;
-            let o1 = builder.add_output_port::<()>("o1")?;
+            let i1 = ctx.add_input_port::<()>("i1")?;
+            let o1 = ctx.add_output_port::<()>("o1")?;
 
-            let _ = builder
+            let _ = ctx
                 .add_reaction(Some("reaction_t1"))
                 .with_trigger(t1)
                 .with_effect(o1)
@@ -1209,7 +1200,7 @@ pub fn create_ping_pong() -> PingPong {
                 })
                 .finish()?;
 
-            let _ = builder
+            let _ = ctx
                 .add_reaction(Some("reaction_i1"))
                 .with_trigger(i1)
                 .with_reaction_fn(move |_ctx, _state, (i1,)| {
@@ -1217,35 +1208,31 @@ pub fn create_ping_pong() -> PingPong {
                     println!("{greeting}");
                 })
                 .finish()?;
-            builder.finish()
+            ctx.finish()
         }
     }
 
-    let mut env_builder = EnvBuilder::new();
-    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let mut assembly = Assembly::new();
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
 
     // build ping and pong as child enclave reactors of main
-    let ping = builder.add_child_with(ping_pong("Ping", true)).unwrap();
-    let pong = builder.add_child_with(ping_pong("Pong", true)).unwrap();
-    let main = builder.finish().unwrap();
+    let ping = ctx.add_child_with(ping_pong("Ping", true)).unwrap();
+    let pong = ctx.add_child_with(ping_pong("Pong", true)).unwrap();
+    let main = ctx.finish().unwrap();
 
-    let ping_i1 = env_builder
-        .find_port_by_name::<(), Input>("i1", ping)
-        .unwrap();
-    let ping_o1 = env_builder
+    let ping_i1 = assembly.find_port_by_name::<(), Input>("i1", ping).unwrap();
+    let ping_o1 = assembly
         .find_port_by_name::<(), Output>("o1", ping)
         .unwrap();
-    let pong_i1 = env_builder
-        .find_port_by_name::<(), Input>("i1", pong)
-        .unwrap();
-    let pong_o1 = env_builder
+    let pong_i1 = assembly.find_port_by_name::<(), Input>("i1", pong).unwrap();
+    let pong_o1 = assembly
         .find_port_by_name::<(), Output>("o1", pong)
         .unwrap();
 
-    env_builder
+    assembly
         .add_port_connection::<(), _, _>(ping_o1, pong_i1, None, false)
         .unwrap();
-    env_builder
+    assembly
         .add_port_connection::<(), _, _>(
             pong_o1,
             ping_i1,
@@ -1255,7 +1242,7 @@ pub fn create_ping_pong() -> PingPong {
         .unwrap();
 
     PingPong {
-        env_builder,
+        assembly,
         main,
         ping,
         pong,
@@ -1269,7 +1256,7 @@ pub fn create_ping_pong() -> PingPong {
 #[test]
 fn test_enclave2() {
     let PingPong {
-        env_builder,
+        assembly,
         main: _,
         ping: _,
         pong: _,
@@ -1279,11 +1266,8 @@ fn test_enclave2() {
         pong_output: _,
     } = create_ping_pong();
 
-    let BuilderRuntimeParts {
-        enclaves,
-        ..
-    } = env_builder
-        .into_runtime_parts(&runtime::Config::default())
+    let RuntimeAssembly { enclaves, .. } = assembly
+        .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
     assert_eq!(enclaves.len(), 3);
 
@@ -1297,15 +1281,15 @@ fn test_enclave2() {
 /// Test binding of ports between two child reactors
 #[test]
 fn test_port_binding() {
-    let mut env_builder = EnvBuilder::new();
-    let mut builder = env_builder.add_reactor("main", None, None, (), false);
+    let mut assembly = Assembly::new();
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
 
-    let child1 = builder
-        .add_child_with(|parent, env| {
-            let mut builder = env.add_reactor("child1", Some(parent), None, (), false);
-            let i1 = builder.add_input_port::<()>("i1").unwrap();
-            let o1 = builder.add_output_port::<()>("o1").unwrap();
-            let _ = builder
+    let child1 = ctx
+        .add_child_with(|parent, assembly| {
+            let mut ctx = assembly.add_reactor("child1", Some(parent), None, (), false);
+            let i1 = ctx.add_input_port::<()>("i1").unwrap();
+            let o1 = ctx.add_output_port::<()>("o1").unwrap();
+            let _ = ctx
                 .add_reaction(Some("reaction"))
                 .with_trigger(i1)
                 .with_effect(o1)
@@ -1313,57 +1297,57 @@ fn test_port_binding() {
                     *o1 = *i1;
                 })
                 .finish()?;
-            builder.finish()
+            ctx.finish()
         })
         .unwrap();
 
-    let child2a = builder
-        .add_child_with(|parent, env| {
-            let mut builder = env.add_reactor("child2a", Some(parent), None, (), false);
-            let i2 = builder.add_input_port::<()>("i2a").unwrap();
-            let _ = builder
+    let child2a = ctx
+        .add_child_with(|parent, assembly| {
+            let mut ctx = assembly.add_reactor("child2a", Some(parent), None, (), false);
+            let i2 = ctx.add_input_port::<()>("i2a").unwrap();
+            let _ = ctx
                 .add_reaction(Some("reaction"))
                 .with_trigger(i2)
                 .with_reaction_fn(|_ctx, _state, (i2,)| {
                     assert_eq!(*i2, Some(()));
                 })
                 .finish()?;
-            builder.finish()
+            ctx.finish()
         })
         .unwrap();
 
-    let child2b = builder
-        .add_child_with(|parent, env| {
-            let mut builder = env.add_reactor("child2b", Some(parent), None, (), false);
-            let i2 = builder.add_input_port::<()>("i2b").unwrap();
-            let _ = builder
+    let child2b = ctx
+        .add_child_with(|parent, assembly| {
+            let mut ctx = assembly.add_reactor("child2b", Some(parent), None, (), false);
+            let i2 = ctx.add_input_port::<()>("i2b").unwrap();
+            let _ = ctx
                 .add_reaction(Some("reaction"))
                 .with_trigger(i2)
                 .with_reaction_fn(|_ctx, _state, (i2,)| {
                     assert_eq!(*i2, Some(()));
                 })
                 .finish()?;
-            builder.finish()
+            ctx.finish()
         })
         .unwrap();
 
-    let startup_key = builder.get_startup_action();
-    let _main = builder.finish().unwrap();
+    let startup_key = ctx.get_startup_action();
+    let _main = ctx.finish().unwrap();
 
-    let i1 = env_builder
+    let i1 = assembly
         .find_port_by_name::<(), Input>("i1", child1)
         .unwrap();
-    let o1 = env_builder
+    let o1 = assembly
         .find_port_by_name::<(), Output>("o1", child1)
         .unwrap();
-    let i2a = env_builder
+    let i2a = assembly
         .find_port_by_name::<(), Input>("i2a", child2a)
         .unwrap();
-    let i2b = env_builder
+    let i2b = assembly
         .find_port_by_name::<(), Input>("i2b", child2b)
         .unwrap();
 
-    let _ = ReactorBuilderState::from_pre_existing(_main, &mut env_builder)
+    let _ = ReactorContext::from_pre_existing(_main, &mut assembly)
         .add_reaction(Some("start"))
         .with_trigger(startup_key)
         .with_effect(i1)
@@ -1374,17 +1358,17 @@ fn test_port_binding() {
         .finish()
         .unwrap();
 
-    env_builder
+    assembly
         .add_port_connection::<(), _, _>(o1, i2a, None, false)
         .unwrap();
-    env_builder
+    assembly
         .add_port_connection::<(), _, _>(o1, i2b, None, false)
         .unwrap();
 
-    let BuilderRuntimeParts {
+    let RuntimeAssembly {
         enclaves, aliases, ..
-    } = env_builder
-        .into_runtime_parts(&runtime::Config::default())
+    } = assembly
+        .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
     assert_eq!(enclaves.len(), 1);
     let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();

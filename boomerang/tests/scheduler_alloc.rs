@@ -50,11 +50,10 @@ struct RootActionLoopState {
 
 #[reactor(state = RootActionLoopState)]
 fn RootActionLoop() -> impl Reactor {
-    let ping = builder.add_logical_action::<()>("ping", None)?;
-    let pong = builder.add_logical_action::<()>("pong", None)?;
+    let ping = ctx.add_logical_action::<()>("ping", None)?;
+    let pong = ctx.add_logical_action::<()>("pong", None)?;
 
-    builder
-        .add_reaction(Some("startup"))
+    ctx.add_reaction(Some("startup"))
         .with_startup_trigger()
         .with_effect(ping)
         .with_reaction_fn(|ctx, _state, (_startup, mut ping)| {
@@ -62,8 +61,7 @@ fn RootActionLoop() -> impl Reactor {
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("ping"))
+    ctx.add_reaction(Some("ping"))
         .with_trigger(ping)
         .with_effect(pong)
         .with_reaction_fn(|ctx, state, (mut ping, mut pong)| {
@@ -73,8 +71,7 @@ fn RootActionLoop() -> impl Reactor {
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("pong"))
+    ctx.add_reaction(Some("pong"))
         .with_trigger(pong)
         .with_effect(ping)
         .with_reaction_fn(|ctx, state, (mut pong, mut ping)| {
@@ -90,7 +87,7 @@ where
     R: Reactor<State>,
     State: runtime::ReactorData,
 {
-    let mut env_builder = EnvBuilder::new();
+    let mut assembly = Assembly::new();
     let _reactor = reactor
         .build(
             "root_action_loop",
@@ -99,11 +96,11 @@ where
             None,
             None,
             false,
-            &mut env_builder,
+            &mut assembly,
         )
         .unwrap();
     let config = runtime::Config::default().with_fast_forward(true);
-    let BuilderRuntimeParts { enclaves, .. } = env_builder.into_runtime_parts(&config).unwrap();
+    let RuntimeAssembly { enclaves, .. } = assembly.into_runtime_assembly(&config).unwrap();
     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
     runtime::Scheduler::new(enclave_key, enclave, config)
 }

@@ -8,10 +8,10 @@ fn ModalStartupShutdown(
     #[state] unreachable_shutdowns: u32,
     #[state] startup_microstep: usize,
 ) -> impl Reactor {
-    let enter = builder.add_logical_action::<()>("enter", None)?;
-    let leave = builder.add_logical_action::<()>("leave", None)?;
-    let enter_again = builder.add_logical_action::<()>("enter_again", None)?;
-    let done = builder.add_logical_action::<()>("done", None)?;
+    let enter = ctx.add_logical_action::<()>("enter", None)?;
+    let leave = ctx.add_logical_action::<()>("leave", None)?;
+    let enter_again = ctx.add_logical_action::<()>("enter_again", None)?;
+    let done = ctx.add_logical_action::<()>("done", None)?;
 
     reaction! {
         (startup) -> enter {
@@ -86,8 +86,8 @@ fn ModalTimeoutShutdown(
     #[state] active_startups: u32,
     #[state] active_shutdowns: u32,
 ) -> impl Reactor {
-    let enter = builder.add_logical_action::<()>("enter", None)?;
-    let leave = builder.add_logical_action::<()>("leave", None)?;
+    let enter = ctx.add_logical_action::<()>("enter", None)?;
+    let leave = ctx.add_logical_action::<()>("leave", None)?;
 
     reaction! {
         (startup) -> enter {

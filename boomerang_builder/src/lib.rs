@@ -5,8 +5,8 @@
 #![deny(clippy::all)]
 
 mod action;
+mod assembly;
 mod connection;
-mod env;
 #[cfg(feature = "federated")]
 mod federation;
 mod fqn;
@@ -23,13 +23,13 @@ pub use macro_support::{Reactor, ReactorPorts};
 pub mod plantuml;
 
 pub use action::*;
-pub use env::*;
+pub use assembly::*;
 #[cfg(feature = "federated")]
 pub use federation::*;
 pub use fqn::*;
 pub use inter_partition::*;
 pub use port::{
-    BuilderPortKey, Contained, Input, Local, Output, PortBank, PortBuilder, PortTag, PortType,
+    AssemblyPortKey, Contained, Input, Local, Output, PortBank, PortSpec, PortTag, PortType,
     TypedPortKey,
 };
 pub use reaction::*;
@@ -39,7 +39,7 @@ pub use boomerang_runtime::TransitionKind;
 use boomerang_runtime::{self as runtime};
 
 #[derive(thiserror::Error, Debug)]
-pub enum BuilderError {
+pub enum AssemblyError {
     #[error("Duplicate Port Definition: {}.{}", reactor_name, port_name)]
     DuplicatePortDefinition {
         reactor_name: String,
@@ -62,16 +62,16 @@ pub enum BuilderError {
     MultipleInitialModes { reactor_name: String },
 
     #[error("ActionKey not found: {}", 0)]
-    ActionKeyNotFound(BuilderActionKey),
+    ActionKeyNotFound(AssemblyActionKey),
 
     #[error("ReactorKey not found: {}", 0)]
-    ReactorKeyNotFound(BuilderReactorKey),
+    ReactorKeyNotFound(AssemblyReactorKey),
 
     #[error("PortKey not found: {}", 0)]
-    PortKeyNotFound(BuilderPortKey),
+    PortKeyNotFound(AssemblyPortKey),
 
     #[error("ReactionKey not found: {}", 0)]
-    ReactionKeyNotFound(BuilderReactionKey),
+    ReactionKeyNotFound(AssemblyReactionKey),
 
     #[error("A Port named '{0}' was not found.")]
     NamedPortNotFound(String),
@@ -85,22 +85,22 @@ pub enum BuilderError {
     #[error("A Reactor named '{0}' was not found.")]
     NamedReactorNotFound(String),
 
-    #[error("Inconsistent Builder State: {}", what)]
-    InconsistentBuilderState {
+    #[error("Inconsistent Assembly State: {}", what)]
+    InconsistentAssemblyState {
         what: String,
-        // sub_error: String, //Option<BuilderError>,
+        // sub_error: String, //Option<AssemblyError>,
     },
 
     #[error("A cycle in the Reaction graph was found: {what:?}.")]
-    ReactionGraphCycle { what: Vec<BuilderReactionKey> },
+    ReactionGraphCycle { what: Vec<AssemblyReactionKey> },
 
     #[error("A cycle in the Reactor graph was found.")]
-    ReactorGraphCycle { what: BuilderReactorKey },
+    ReactorGraphCycle { what: AssemblyReactorKey },
 
     #[error("Error binding ports ({source_key:?}->{target_key:?}): {what}")]
     PortConnectionError {
-        source_key: BuilderPortKey,
-        target_key: BuilderPortKey,
+        source_key: AssemblyPortKey,
+        target_key: AssemblyPortKey,
         what: String,
     },
 
@@ -113,8 +113,8 @@ pub enum BuilderError {
     #[error("Federation bridge error: {what}")]
     FederationBridgeError { what: String },
 
-    #[error("Error building Reaction: {0}")]
-    ReactionBuilderError(String),
+    #[error("Error declaring Reaction: {0}")]
+    ReactionDeclarationError(String),
 
     #[error("Invalid fully-qualified name: {0}")]
     InvalidFqn(String),
@@ -126,17 +126,17 @@ pub enum BuilderError {
     IoError(#[from] std::io::Error),
 
     #[error("ReplayKey already exists: {}", 0)]
-    ReplayKeyAlreadyExists(BuilderActionKey),
+    ReplayKeyAlreadyExists(AssemblyActionKey),
 }
 
-impl From<std::convert::Infallible> for BuilderError {
+impl From<std::convert::Infallible> for AssemblyError {
     fn from(_: std::convert::Infallible) -> Self {
         unreachable!()
     }
 }
 
 #[cfg(feature = "federated")]
-impl From<boomerang_federated::RuntimeBridgeError> for BuilderError {
+impl From<boomerang_federated::RuntimeBridgeError> for AssemblyError {
     fn from(error: boomerang_federated::RuntimeBridgeError) -> Self {
         Self::FederationBridgeError {
             what: error.to_string(),
@@ -145,7 +145,7 @@ impl From<boomerang_federated::RuntimeBridgeError> for BuilderError {
 }
 
 #[cfg(feature = "federated")]
-impl From<boomerang_federated::FederateClientError> for BuilderError {
+impl From<boomerang_federated::FederateClientError> for AssemblyError {
     fn from(error: boomerang_federated::FederateClientError) -> Self {
         Self::FederationBridgeError {
             what: error.to_string(),
@@ -154,7 +154,7 @@ impl From<boomerang_federated::FederateClientError> for BuilderError {
 }
 
 #[cfg(feature = "federated")]
-impl From<boomerang_federated::StaticFederationRunnerError> for BuilderError {
+impl From<boomerang_federated::StaticFederationRunnerError> for AssemblyError {
     fn from(error: boomerang_federated::StaticFederationRunnerError) -> Self {
         match error {
             boomerang_federated::StaticFederationRunnerError::UnsupportedTopology { what } => {

@@ -1,16 +1,16 @@
-//! Builder-visible metadata for static federated enclave topologies.
+//! Assembly-visible metadata for static federated enclave topologies.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    runtime, BoundaryKind, BuilderError, BuilderPortKey, BuilderReactorKey, InterPartitionPlan,
+    runtime, AssemblyError, AssemblyPortKey, AssemblyReactorKey, BoundaryKind, InterPartitionPlan,
     PartitionRootKind,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FederateBuildInfo {
     pub id: String,
-    pub reactor: BuilderReactorKey,
+    pub reactor: AssemblyReactorKey,
     pub reactor_fqn: String,
 }
 
@@ -19,8 +19,8 @@ pub struct FederatedEndpoint {
     pub id: boomerang_federated::EndpointId,
     pub source_federate: String,
     pub target_federate: String,
-    pub source_port: BuilderPortKey,
-    pub target_port: BuilderPortKey,
+    pub source_port: AssemblyPortKey,
+    pub target_port: AssemblyPortKey,
     pub source_port_fqn: String,
     pub target_port_fqn: String,
 }
@@ -30,10 +30,10 @@ pub struct FederatedEdge {
     pub endpoint: boomerang_federated::EndpointId,
     pub source_federate: String,
     pub target_federate: String,
-    pub source_federate_reactor: BuilderReactorKey,
-    pub target_federate_reactor: BuilderReactorKey,
-    pub source_port: BuilderPortKey,
-    pub target_port: BuilderPortKey,
+    pub source_federate_reactor: AssemblyReactorKey,
+    pub target_federate_reactor: AssemblyReactorKey,
+    pub source_port: AssemblyPortKey,
+    pub target_port: AssemblyPortKey,
     pub delay: Option<runtime::Duration>,
 }
 
@@ -63,7 +63,7 @@ impl FederationPlan {
 
     pub fn from_inter_partition_plan<E>(
         plan: &InterPartitionPlan,
-        mut port_fqn: impl FnMut(BuilderPortKey) -> Result<String, E>,
+        mut port_fqn: impl FnMut(AssemblyPortKey) -> Result<String, E>,
     ) -> Result<Self, E> {
         let mut federation_plan = Self {
             federates: plan
@@ -124,7 +124,7 @@ impl FederationPlan {
 
 pub fn federation_topology_from_plan(
     plan: &FederationPlan,
-) -> Result<boomerang_federated::FederatedTopology, BuilderError> {
+) -> Result<boomerang_federated::FederatedTopology, AssemblyError> {
     let federate_ids = checked_federate_id_set(plan)?;
     let mut seen_endpoints = BTreeSet::<boomerang_federated::EndpointId>::new();
     let edges = plan
@@ -152,7 +152,7 @@ pub fn federation_topology_from_plan(
                 wire_delay_from_runtime_delay(edge.delay)?,
             ))
         })
-        .collect::<Result<Vec<_>, BuilderError>>()?;
+        .collect::<Result<Vec<_>, AssemblyError>>()?;
 
     Ok(boomerang_federated::FederatedTopology::with_edges(
         plan.federates
@@ -164,7 +164,7 @@ pub fn federation_topology_from_plan(
 
 pub fn federated_routes_from_plan(
     plan: &FederationPlan,
-) -> Result<Vec<FederatedRoute>, BuilderError> {
+) -> Result<Vec<FederatedRoute>, AssemblyError> {
     let federate_ids = checked_federate_id_set(plan)?;
     let mut edge_by_endpoint = BTreeMap::<boomerang_federated::EndpointId, (String, String)>::new();
 
@@ -249,12 +249,12 @@ pub fn federated_routes_from_plan(
 /// This is an explicit federated execution path. It does not replace
 /// [`runtime::execute_enclaves`], which remains local-only.
 pub fn execute_federation_in_memory(
-    parts: crate::BuilderRuntimeParts,
+    parts: crate::RuntimeAssembly,
     config: runtime::Config,
-) -> Result<tinymap::TinySecondaryMap<runtime::EnclaveKey, runtime::Env>, BuilderError> {
+) -> Result<tinymap::TinySecondaryMap<runtime::EnclaveKey, runtime::Env>, AssemblyError> {
     let runtime_parts = static_federation_runtime_parts(parts)?;
     boomerang_federated::static_runner::execute_federation_in_memory(runtime_parts, config)
-        .map_err(BuilderError::from)
+        .map_err(AssemblyError::from)
 }
 
 /// Execute a static federation over TCP using the real RTI session and federate clients.
@@ -263,18 +263,18 @@ pub fn execute_federation_in_memory(
 /// listener. It does not replace [`execute_federation_in_memory`] or
 /// [`runtime::execute_enclaves`].
 pub fn execute_federation_over_tcp(
-    parts: crate::BuilderRuntimeParts,
+    parts: crate::RuntimeAssembly,
     config: runtime::Config,
     tcp: boomerang_federated::TcpStaticFederationConfig,
-) -> Result<tinymap::TinySecondaryMap<runtime::EnclaveKey, runtime::Env>, BuilderError> {
+) -> Result<tinymap::TinySecondaryMap<runtime::EnclaveKey, runtime::Env>, AssemblyError> {
     let runtime_parts = static_federation_runtime_parts(parts)?;
     boomerang_federated::execute_federation_over_tcp(runtime_parts, config, tcp)
-        .map_err(BuilderError::from)
+        .map_err(AssemblyError::from)
 }
 
 fn static_federation_runtime_parts(
-    parts: crate::BuilderRuntimeParts,
-) -> Result<boomerang_federated::StaticFederationRuntimeParts, BuilderError> {
+    parts: crate::RuntimeAssembly,
+) -> Result<boomerang_federated::StaticFederationRuntimeParts, AssemblyError> {
     validate_static_runner_plan(&parts)?;
 
     let topology = federation_topology_from_plan(&parts.federation_plan)?;
@@ -288,20 +288,20 @@ fn static_federation_runtime_parts(
     })
 }
 
-fn validate_static_runner_plan(parts: &crate::BuilderRuntimeParts) -> Result<(), BuilderError> {
+fn validate_static_runner_plan(parts: &crate::RuntimeAssembly) -> Result<(), AssemblyError> {
     if parts.federation_plan.federates.is_empty()
         || parts.federation_plan.edges.is_empty()
         || parts.federation_plan.endpoints.is_empty()
     {
-        return Err(BuilderError::UnsupportedFederationTopology {
+        return Err(AssemblyError::UnsupportedFederationTopology {
             what: "static federation runner requires a non-empty federation plan with at least one cross-federate endpoint".into(),
         });
     }
 
-    let mut zero_delay_graph = petgraph::prelude::DiGraphMap::<BuilderReactorKey, ()>::new();
+    let mut zero_delay_graph = petgraph::prelude::DiGraphMap::<AssemblyReactorKey, ()>::new();
     for edge in parts.inter_partition_plan.federated_edges() {
         if edge.physical {
-            return Err(BuilderError::UnsupportedFederationTopology {
+            return Err(AssemblyError::UnsupportedFederationTopology {
                 what: "cross-federate physical connections are reserved for a later milestone"
                     .into(),
             });
@@ -316,7 +316,7 @@ fn validate_static_runner_plan(parts: &crate::BuilderRuntimeParts) -> Result<(),
     }
 
     if petgraph::algo::toposort(&zero_delay_graph, None).is_err() {
-        return Err(BuilderError::UnsupportedFederationTopology {
+        return Err(AssemblyError::UnsupportedFederationTopology {
             what: "distributed zero-delay cycle is unsupported in the static federation runner"
                 .into(),
         });
@@ -326,8 +326,8 @@ fn validate_static_runner_plan(parts: &crate::BuilderRuntimeParts) -> Result<(),
 }
 
 fn federate_enclave_maps(
-    parts: &crate::BuilderRuntimeParts,
-) -> Result<FederateEnclaveMaps, BuilderError> {
+    parts: &crate::RuntimeAssembly,
+) -> Result<FederateEnclaveMaps, AssemblyError> {
     let mut federate_enclaves = BTreeMap::new();
     let mut federate_by_enclave = tinymap::TinySecondaryMap::new();
 
@@ -363,7 +363,7 @@ fn federate_enclave_maps(
     Ok((federate_enclaves, federate_by_enclave))
 }
 
-fn checked_federate_id_set(plan: &FederationPlan) -> Result<BTreeSet<String>, BuilderError> {
+fn checked_federate_id_set(plan: &FederationPlan) -> Result<BTreeSet<String>, AssemblyError> {
     let mut federate_ids = BTreeSet::new();
     for federate in &plan.federates {
         if federate.id.trim().is_empty() {
@@ -383,7 +383,7 @@ fn checked_federate_id_set(plan: &FederationPlan) -> Result<BTreeSet<String>, Bu
     Ok(federate_ids)
 }
 
-fn validate_endpoint_id(context: &str, endpoint: &str) -> Result<(), BuilderError> {
+fn validate_endpoint_id(context: &str, endpoint: &str) -> Result<(), AssemblyError> {
     if endpoint.trim().is_empty() {
         return Err(federation_bridge_error(format!(
             "{context} has an empty endpoint id"
@@ -398,7 +398,7 @@ fn validate_edge_federates(
     source: &str,
     target: &str,
     federate_ids: &BTreeSet<String>,
-) -> Result<(), BuilderError> {
+) -> Result<(), AssemblyError> {
     if !federate_ids.contains(source) {
         return Err(federation_bridge_error(format!(
             "endpoint '{endpoint}' references unknown source federate '{source}'"
@@ -413,16 +413,16 @@ fn validate_edge_federates(
     Ok(())
 }
 
-fn federation_bridge_error(what: impl Into<String>) -> BuilderError {
-    BuilderError::FederationBridgeError { what: what.into() }
+fn federation_bridge_error(what: impl Into<String>) -> AssemblyError {
+    AssemblyError::FederationBridgeError { what: what.into() }
 }
 
 fn wire_delay_from_runtime_delay(
     delay: Option<runtime::Duration>,
-) -> Result<boomerang_federated::WireDelay, BuilderError> {
+) -> Result<boomerang_federated::WireDelay, AssemblyError> {
     delay
         .map(boomerang_federated::WireDelay::try_from)
         .transpose()
-        .map_err(BuilderError::from)
+        .map_err(AssemblyError::from)
         .map(|delay| delay.unwrap_or(boomerang_federated::WireDelay::ZERO))
 }

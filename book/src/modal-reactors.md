@@ -35,8 +35,8 @@ fn Controller(
     } }
 
     mode! { active {
-        let work = builder.add_logical_action::<()>("work", Some(Duration::milliseconds(50)))?;
-        let tick = builder.add_timer(
+        let work = ctx.add_logical_action::<()>("work", Some(Duration::milliseconds(50)))?;
+        let tick = ctx.add_timer(
             "tick",
             TimerSpec::default().with_period(Duration::milliseconds(10)),
         )?;

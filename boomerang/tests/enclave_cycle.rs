@@ -11,14 +11,13 @@ fn Ping(
     #[state] counter: i32,
     #[state] received: bool,
 ) -> impl Reactor {
-    let t = builder.add_timer(
+    let t = ctx.add_timer(
         "t",
         TimerSpec::default().with_period(Duration::milliseconds(100)),
     )?;
-    let shutdown = builder.get_shutdown_action();
+    let shutdown = ctx.get_shutdown_action();
 
-    builder
-        .add_reaction(Some("ReactionT"))
+    ctx.add_reaction(Some("ReactionT"))
         .with_trigger(t)
         .with_effect(output)
         .with_reaction_fn(|_ctx, state, (_t, mut output)| {
@@ -29,8 +28,7 @@ fn Ping(
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("ReactionIn"))
+    ctx.add_reaction(Some("ReactionIn"))
         .with_trigger(input)
         .with_reaction_fn(|ctx, state, (input,)| {
             state.received = true;
@@ -45,8 +43,7 @@ fn Ping(
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("ReactionShutdown"))
+    ctx.add_reaction(Some("ReactionShutdown"))
         .with_trigger(shutdown)
         .with_reaction_fn(|_ctx, state, _| {
             if !state.received {
@@ -62,8 +59,7 @@ fn Pong(
     #[output] output: i32,
     #[state] received: bool,
 ) -> impl Reactor<PongState, Ports = PongPorts> {
-    builder
-        .add_reaction(Some("RectionIn"))
+    ctx.add_reaction(Some("RectionIn"))
         .with_trigger(input)
         .with_effect(output)
         .with_reaction_fn(|_ctx, state, (input, mut output)| {
@@ -80,8 +76,7 @@ fn Pong(
         })
         .finish()?;
 
-    builder
-        .add_reaction(None)
+    ctx.add_reaction(None)
         .with_shutdown_trigger()
         .with_reaction_fn(|_ctx, state, _| {
             if !state.received {
@@ -93,10 +88,10 @@ fn Pong(
 
 #[reactor]
 fn MainReactor() -> impl Reactor {
-    let ping = builder.add_child_reactor(Ping(), "ping", PingState::default(), true)?;
-    let pong = builder.add_child_reactor(Pong(), "pong", PongState::default(), true)?;
-    builder.connect_port(ping.output, pong.input, None, false)?;
-    builder.connect_port(
+    let ping = ctx.add_child_reactor(Ping(), "ping", PingState::default(), true)?;
+    let pong = ctx.add_child_reactor(Pong(), "pong", PongState::default(), true)?;
+    ctx.connect_port(ping.output, pong.input, None, false)?;
+    ctx.connect_port(
         pong.output,
         ping.input,
         Some(Duration::milliseconds(50)),

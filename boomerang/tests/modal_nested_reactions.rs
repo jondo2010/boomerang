@@ -15,7 +15,7 @@ fn ModalNestedReactions() -> impl Reactor {
     } }
 
     mode! { active {
-        let _inactive_child = builder.add_child_reactor(InactiveChild(), "inactive_child", (), false)?;
+        let _inactive_child = ctx.add_child_reactor(InactiveChild(), "inactive_child", (), false)?;
     } }
 
     reaction! {

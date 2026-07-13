@@ -56,10 +56,10 @@ pub mod prelude {
     //! Re-exported common types and traits for Boomerang
 
     pub use super::builder::{
-        BoundaryKind, BuilderError, BuilderFqn, BuilderModeEffect, BuilderModeKey,
-        BuilderReactorKey, BuilderRuntimeParts, Contained, EnvBuilder, Input, InterPartitionEdge,
-        InterPartitionPlan, Local, Logical, ModeKind, Output, PartitionRoot, PartitionRootKind,
-        Physical, PortBank, Reactor, ReactorPlacement, TimerActionKey, TimerSpec, TransitionKind,
+        Assembly, AssemblyError, AssemblyFqn, AssemblyModeKey, AssemblyReactorKey, BoundaryKind,
+        Contained, Input, InterPartitionEdge, InterPartitionPlan, Local, Logical, ModeEffectSpec,
+        ModeKind, Output, PartitionRoot, PartitionRootKind, Physical, PortBank, Reactor,
+        ReactorPlacement, RuntimeAssembly, TimerActionKey, TimerSpec, TransitionKind,
         TypedActionKey, TypedPortKey,
     };
 
@@ -86,7 +86,7 @@ pub mod prelude {
 #[derive(thiserror::Error, Debug)]
 pub enum BoomerangError {
     #[error(transparent)]
-    Builder(#[from] builder::BuilderError),
+    Assembly(#[from] builder::AssemblyError),
 
     #[error(transparent)]
     Runtime(#[from] runtime::RuntimeError),

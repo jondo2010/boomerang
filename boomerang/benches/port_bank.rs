@@ -30,31 +30,30 @@ struct BenchState {
 
 #[reactor(state = BenchState)]
 fn BankBench(width: usize, iterations: usize, topology: Topology) -> impl Reactor {
-    let tick = builder.add_action::<(), Logical>("tick", None)?;
+    let tick = ctx.add_action::<(), Logical>("tick", None)?;
     let (src_width, dst_width) = match topology {
         Topology::Zip => (width, width),
         Topology::Broadcast => (1, width),
         Topology::Cartesian => (width, width),
     };
 
-    let outputs = builder.add_output_bank::<u64>("out", src_width)?;
-    let inputs = builder.add_input_bank::<u64>("in", dst_width)?;
+    let outputs = ctx.add_output_bank::<u64>("out", src_width)?;
+    let inputs = ctx.add_input_bank::<u64>("in", dst_width)?;
 
     match topology {
         Topology::Zip => {
-            builder.connect_ports(outputs.iter(), inputs.iter(), None, false)?;
+            ctx.connect_ports(outputs.iter(), inputs.iter(), None, false)?;
         }
         Topology::Broadcast => {
             let source = outputs.get(0).expect("output bank is non-empty");
-            builder.connect_broadcast(source, inputs.iter(), None, false)?;
+            ctx.connect_broadcast(source, inputs.iter(), None, false)?;
         }
         Topology::Cartesian => {
-            builder.connect_cartesian(outputs.iter(), inputs.iter(), None, false)?;
+            ctx.connect_cartesian(outputs.iter(), inputs.iter(), None, false)?;
         }
     }
 
-    builder
-        .add_reaction(Some("startup"))
+    ctx.add_reaction(Some("startup"))
         .with_startup_trigger()
         .with_effect(tick)
         .with_reaction_fn(move |ctx, state, (_startup, mut tick)| {
@@ -64,8 +63,7 @@ fn BankBench(width: usize, iterations: usize, topology: Topology) -> impl Reacto
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("tick"))
+    ctx.add_reaction(Some("tick"))
         .with_trigger(tick)
         .with_effect(outputs)
         .with_reaction_fn(|ctx, state, (mut tick, mut outputs)| {
@@ -87,8 +85,7 @@ fn BankBench(width: usize, iterations: usize, topology: Topology) -> impl Reacto
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("inputs"))
+    ctx.add_reaction(Some("inputs"))
         .with_trigger(inputs)
         .with_reaction_fn(|_ctx, state, (inputs,)| {
             let sum = inputs
@@ -164,7 +161,7 @@ fn bench(c: &mut Criterion) {
         group.bench_with_input(id, &case, |b, case| {
             b.iter_batched(
                 || {
-                    let mut env_builder = EnvBuilder::new();
+                    let mut assembly = Assembly::new();
                     let reactor = BankBench(case.width, case.iterations, case.topology);
                     let _reactor = reactor
                         .build(
@@ -174,12 +171,12 @@ fn bench(c: &mut Criterion) {
                             None,
                             None,
                             false,
-                            &mut env_builder,
+                            &mut assembly,
                         )
                         .unwrap();
                     let config = runtime::Config::default().with_fast_forward(true);
-                    let BuilderRuntimeParts { enclaves, .. } =
-                        env_builder.into_runtime_parts(&config).unwrap();
+                    let RuntimeAssembly { enclaves, .. } =
+                        assembly.into_runtime_assembly(&config).unwrap();
                     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
                     runtime::Scheduler::new(enclave_key, enclave, config)
                 },

@@ -1,4 +1,4 @@
-//! Debug impls and output utility methods for the [`EnvBuilder`].
+//! Debug impls and output utility methods for the [`Assembly`].
 
 use std::{collections::HashMap, fmt::Debug};
 
@@ -6,19 +6,19 @@ use itertools::Itertools;
 use petgraph::prelude::DiGraphMap;
 use slotmap::SecondaryMap;
 
-use crate::{BuilderFqn, BuilderPortKey, BuilderReactionKey, BuilderReactorKey};
+use crate::{AssemblyFqn, AssemblyPortKey, AssemblyReactionKey, AssemblyReactorKey};
 
 use super::{
-    build::{BuilderAliases, BuilderRuntimeParts},
-    runtime, EnvBuilder,
+    build::{RuntimeAliases, RuntimeAssembly},
+    runtime, Assembly,
 };
 
 use boomerang_runtime::fmt_utils as fmt;
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Connection {
-    source: BuilderFqn,
-    target: BuilderFqn,
+    source: AssemblyFqn,
+    target: AssemblyFqn,
     after: Option<runtime::Duration>,
     physical: bool,
 }
@@ -36,13 +36,13 @@ impl Debug for Connection {
     }
 }
 
-impl EnvBuilder {
+impl Assembly {
     /// Returns a grouped list of (first_key, last_key, fqn) of reactors
     pub fn reactors_debug_grouped(
         &self,
-    ) -> Vec<(BuilderReactorKey, Option<BuilderReactorKey>, BuilderFqn)> {
+    ) -> Vec<(AssemblyReactorKey, Option<AssemblyReactorKey>, AssemblyFqn)> {
         let reactors_chunked = self
-            .reactor_builders
+            .reactor_specs
             .keys()
             .map(|reactor_key| (self.fqn_for(reactor_key, true).unwrap(), reactor_key))
             .sorted()
@@ -60,8 +60,8 @@ impl EnvBuilder {
     /// Returns a grouped list of (first_key, last_key, fqn) of ports
     pub fn ports_debug_grouped(
         &self,
-        ports: impl Iterator<Item = BuilderPortKey>,
-    ) -> Vec<(BuilderPortKey, Option<BuilderPortKey>, BuilderFqn)> {
+        ports: impl Iterator<Item = AssemblyPortKey>,
+    ) -> Vec<(AssemblyPortKey, Option<AssemblyPortKey>, AssemblyFqn)> {
         let ports_chunked = ports
             .map(|port_key| (self.fqn_for(port_key, true).unwrap(), port_key))
             .sorted()
@@ -77,12 +77,12 @@ impl EnvBuilder {
     }
 
     /// Build a DAG of Reactors, grouped by bank
-    pub fn build_reactor_graph_grouped(&self) -> DiGraphMap<BuilderReactorKey, ()> {
+    pub fn build_reactor_graph_grouped(&self) -> DiGraphMap<AssemblyReactorKey, ()> {
         let reactors_grouped = self.reactors_debug_grouped();
 
         let mut graph =
             DiGraphMap::from_edges(reactors_grouped.iter().filter_map(|(first_key, _, _)| {
-                self.reactor_builders[*first_key]
+                self.reactor_specs[*first_key]
                     .parent_reactor_key
                     .map(|parent_key| (parent_key, *first_key))
             }));
@@ -100,7 +100,7 @@ impl EnvBuilder {
         reactors_chunked
             .into_iter()
             .map(|(first_key, last_key, fqn)| {
-                let reactor = &self.reactor_builders[first_key];
+                let reactor = &self.reactor_specs[first_key];
                 let enclave = if reactor.is_enclave { " <Enclave>" } else { "" };
                 if let Some(last_key) = last_key {
                     (
@@ -115,7 +115,7 @@ impl EnvBuilder {
     }
 
     fn ports_debug_map(&self) -> HashMap<String, String> {
-        let ports = self.port_builders.keys();
+        let ports = self.port_specs.keys();
         let ports_grouped = self.ports_debug_grouped(ports);
         ports_grouped
             .into_iter()
@@ -131,7 +131,7 @@ impl EnvBuilder {
 
     fn actions_debug_map(&self) -> HashMap<String, String> {
         let actions_chunked = self
-            .action_builders
+            .action_specs
             .keys()
             .map(|action_key| (action_key, self.fqn_for(action_key, true).unwrap()))
             .sorted_by(|a, b| a.1.cmp(&b.1))
@@ -141,7 +141,7 @@ impl EnvBuilder {
             .into_iter()
             .map(|(fqn, mut group)| {
                 let (first_key, _) = group.next().unwrap();
-                let ty = self.action_builders[first_key].r#type();
+                let ty = self.action_specs[first_key].r#type();
                 if let Some((last_key, _)) = group.last() {
                     (
                         format!("{first_key:?}..{last_key:?}"),
@@ -156,14 +156,14 @@ impl EnvBuilder {
 
     fn reactions_debug_map(&self) -> HashMap<String, String> {
         let reactions_chunked = self
-            .reaction_builders
+            .reaction_specs
             .keys()
             .map(|reaction_key| (reaction_key, self.fqn_for(reaction_key, true).unwrap()))
             .sorted_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)))
             .chunk_by(|(_, fqn)| fqn.clone());
 
         //let level_map = self.build_runtime_level_map().ok();
-        let level_map: Option<SecondaryMap<BuilderReactionKey, boomerang_runtime::Level>> = None;
+        let level_map: Option<SecondaryMap<AssemblyReactionKey, boomerang_runtime::Level>> = None;
 
         reactions_chunked
             .into_iter()
@@ -193,7 +193,7 @@ impl EnvBuilder {
     }
 
     fn connections_debug_map(&self) -> Vec<Connection> {
-        self.connection_builders
+        self.connection_specs
             .iter()
             .map(|connection| {
                 let source = self.fqn_for(connection.source_key(), false).unwrap();
@@ -227,7 +227,7 @@ impl EnvBuilder {
     */
 }
 
-impl Debug for EnvBuilder {
+impl Debug for Assembly {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let reactors = self.reactors_debug_map();
         let actions = self.actions_debug_map();
@@ -240,15 +240,15 @@ impl Debug for EnvBuilder {
         //let port_aliases = runtime_port_parts
         //    .port_aliases
         //    .iter()
-        //    .map(|(builder_port_key, port_key)| {
+        //    .map(|(assembly_port_key, port_key)| {
         //        (
-        //            self.port_fqn(builder_port_key, false).unwrap(),
+        //            self.port_fqn(assembly_port_key, false).unwrap(),
         //            format!("{:?}", runtime_port_parts.ports[*port_key]),
         //        )
         //    })
         //    .collect::<BTreeMap<_, _>>();
 
-        f.debug_struct("EnvBuilder")
+        f.debug_struct("Assembly")
             .field("reactors", &reactors)
             .field("actions", &actions)
             .field("ports", &ports)
@@ -260,7 +260,7 @@ impl Debug for EnvBuilder {
     }
 }
 
-impl Debug for BuilderAliases {
+impl Debug for RuntimeAliases {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let enclave_aliases = fmt::from_fn(|f| {
             f.debug_map()
@@ -312,7 +312,7 @@ impl Debug for BuilderAliases {
                 .finish()
         });
 
-        f.debug_struct("BuilderAliases")
+        f.debug_struct("RuntimeAliases")
             .field("enclave_aliases", &enclave_aliases)
             .field("reactor_aliases", &reactor_aliases)
             .field("reaction_aliases", &reaction_aliases)
@@ -322,7 +322,7 @@ impl Debug for BuilderAliases {
     }
 }
 
-impl Debug for BuilderRuntimeParts {
+impl Debug for RuntimeAssembly {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let enclaves = fmt::from_fn(|f| {
             f.debug_map()
@@ -330,7 +330,7 @@ impl Debug for BuilderRuntimeParts {
                 .finish()
         });
 
-        f.debug_struct("BuilderRuntimeParts")
+        f.debug_struct("RuntimeAssembly")
             .field("enclave_map", &enclaves)
             .field("aliases_map", &self.aliases)
             .field("inter_partition_plan", &self.inter_partition_plan)

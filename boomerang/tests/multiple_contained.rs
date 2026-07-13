@@ -4,8 +4,7 @@ use boomerang::prelude::*;
 
 #[reactor]
 fn Contained(#[input] in1: u32, #[input] in2: u32, #[output] trigger: u32) -> impl Reactor {
-    builder
-        .add_reaction(Some("ReactionStartup"))
+    ctx.add_reaction(Some("ReactionStartup"))
         .with_startup_trigger()
         .with_effect(trigger)
         .with_reaction_fn(|_ctx, _state, (_startup, mut trigger)| {
@@ -13,8 +12,7 @@ fn Contained(#[input] in1: u32, #[input] in2: u32, #[output] trigger: u32) -> im
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("ReactionIn1"))
+    ctx.add_reaction(Some("ReactionIn1"))
         .with_trigger(in1)
         .with_reaction_fn(|_ctx, _state, (in1,)| {
             println!("{} received {:?}", in1.name(), *in1);
@@ -22,8 +20,7 @@ fn Contained(#[input] in1: u32, #[input] in2: u32, #[output] trigger: u32) -> im
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("ReactionIn2"))
+    ctx.add_reaction(Some("ReactionIn2"))
         .with_trigger(in2)
         .with_reaction_fn(|_ctx, _state, (in2,)| {
             println!("{} received {:?}", in2.name(), *in2);
@@ -34,9 +31,8 @@ fn Contained(#[input] in1: u32, #[input] in2: u32, #[output] trigger: u32) -> im
 
 #[reactor]
 fn MultipleContained() -> impl Reactor {
-    let c = builder.add_child_reactor(Contained(), "c", (), false)?;
-    builder
-        .add_reaction(None)
+    let c = ctx.add_child_reactor(Contained(), "c", (), false)?;
+    ctx.add_reaction(None)
         .with_trigger(c.trigger)
         .with_effect(c.in1)
         .with_effect(c.in2)

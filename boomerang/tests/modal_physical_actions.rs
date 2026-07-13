@@ -2,7 +2,7 @@ use boomerang::prelude::*;
 
 #[reactor]
 fn ModalPhysicalAction(#[state] fired: bool) -> impl Reactor {
-    let resume = builder.add_logical_action::<()>("resume", None)?;
+    let resume = ctx.add_logical_action::<()>("resume", None)?;
 
     reaction! {
         (startup) -> resume {
@@ -12,8 +12,8 @@ fn ModalPhysicalAction(#[state] fired: bool) -> impl Reactor {
     }
 
     mode! { initial active {
-        let physical = builder.add_physical_action::<()>("physical", None)?;
-        let leave = builder.add_logical_action::<()>("leave", None)?;
+        let physical = ctx.add_physical_action::<()>("physical", None)?;
+        let leave = ctx.add_logical_action::<()>("leave", None)?;
 
         reaction! {
             (startup) -> physical, leave {

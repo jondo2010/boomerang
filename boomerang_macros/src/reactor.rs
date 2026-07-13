@@ -393,9 +393,9 @@ impl ReactorBody {
                 };
 
                 Some(quote! {
-                    let #key_ident = builder.add_mode(#name, #kind)?;
+                    let #key_ident = ctx.add_mode(#name, #kind)?;
                     #[allow(unused_variables)]
-                    let #effect_ident = builder.reset_mode_effect(#key_ident)?;
+                    let #effect_ident = ctx.reset_mode_effect(#key_ident)?;
                 })
             })
             .collect()
@@ -410,7 +410,7 @@ impl ReactorBody {
                     let key_ident = mode.key_ident();
                     let body = mode.body.body_tokens();
                     tokens.append_all(quote! {
-                        builder.in_mode(#key_ident, |builder| {
+                        ctx.in_mode(#key_ident, |ctx| {
                             #body
                             Ok(())
                         })?;
@@ -618,7 +618,7 @@ impl ToTokens for ArgsModel {
                 _ => None,
             });
 
-        //TODO for now param args are just re-built into the output function signature. In the future, I may want to generate a builder type instead to support defaults.
+        //TODO for now param args are just re-built into the output function signature. In the future, I may want to generate a ctx type instead to support defaults.
         let param_args = args
             .iter()
             .filter_map(|Arg { kind, name, ty, .. }| match kind {
@@ -759,10 +759,10 @@ impl ToTokens for ArgsModel {
                             let len_expr = &array.len;
                             match kind {
                                 ArgKind::Input { .. } => Some(quote! {
-                                    let #name = builder.add_input_ports::<#element_type, #len_expr>(#name_str)?;
+                                    let #name = ctx.add_input_ports::<#element_type, #len_expr>(#name_str)?;
                                 }),
                                 ArgKind::Output { .. } => Some(quote! {
-                                    let #name = builder.add_output_ports::<#element_type, #len_expr>(#name_str)?;
+                                    let #name = ctx.add_output_ports::<#element_type, #len_expr>(#name_str)?;
                                 }),
                                 _ => None,
                             }
@@ -771,19 +771,19 @@ impl ToTokens for ArgsModel {
                             (ArgKind::Input { .. }, Some(_)) => {
                                 let len_name = format_ident!("{}_len", name.ident);
                                 Some(quote! {
-                                    let #name = builder.add_input_bank::<#ty>(#name_str, #len_name)?;
+                                    let #name = ctx.add_input_bank::<#ty>(#name_str, #len_name)?;
                                     let #for_fn_name = #name.clone();
                                 })
                             }
                             (ArgKind::Output { .. }, Some(_)) => {
                                 let len_name = format_ident!("{}_len", name.ident);
                                 Some(quote! {
-                                    let #name = builder.add_output_bank::<#ty>(#name_str, #len_name)?;
+                                    let #name = ctx.add_output_bank::<#ty>(#name_str, #len_name)?;
                                     let #for_fn_name = #name.clone();
                                 })
                             }
                             _ => Some(quote! {
-                                let #name = builder.add_port::<#ty, #dir>(#name_str, None)?;
+                                let #name = ctx.add_port::<#ty, #dir>(#name_str, None)?;
                             }),
                         },
                     }
@@ -813,26 +813,26 @@ impl ToTokens for ArgsModel {
                 #vis fn #name #impl_generics(#(#param_args,)*) #ret #where_clause {
                     move |name: &str,
                          state: #state_type_path,
-                         parent: Option<::boomerang::builder::BuilderReactorKey>,
-                         scope_mode: Option<::boomerang::builder::BuilderModeKey>,
+                         parent: Option<::boomerang::builder::AssemblyReactorKey>,
+                         scope_mode: Option<::boomerang::builder::AssemblyModeKey>,
                          bank_info: Option<::boomerang::runtime::BankInfo>,
                          placement: ::boomerang::builder::ReactorPlacement,
-                         env: &mut ::boomerang::builder::EnvBuilder| {
+                         assembly: &mut ::boomerang::builder::Assembly| {
                         #(#len_bindings)*
-                        let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
+                        let mut ctx = assembly.add_reactor(name, parent, bank_info, state, placement);
                         if let Some(scope_mode) = scope_mode {
-                            builder.set_scope_mode(scope_mode)?;
+                            ctx.set_scope_mode(scope_mode)?;
                         }
                         #(#create_ports)*
-                        (move |builder: &mut ::boomerang::builder::ReactorBuilderState<'_, #state_type_path>,
-                              ports: (#(#local_types,)* )| -> Result<(), ::boomerang::builder::BuilderError> {
+                        (move |ctx: &mut ::boomerang::builder::ReactorContext<'_, #state_type_path>,
+                              ports: (#(#local_types,)* )| -> Result<(), ::boomerang::builder::AssemblyError> {
                             #[allow(non_snake_case)]
                             let (#(#local_patterns,)*) = ports;
                             #(#mode_bindings)*
                             #body_tokens
                             Ok(())
-                        })(&mut builder, (#(#local_values,)*))?;
-                        builder.finish()?;
+                        })(&mut ctx, (#(#local_values,)*))?;
+                        ctx.finish()?;
                         Ok(#ports_name {
                             #(#field_inits,)*
                         })
@@ -849,7 +849,7 @@ impl ToTokens for ArgsModel {
                 #docs
                 #vis fn #name #impl_generics(#(#param_args,)*) #ret #where_clause {
                     <#ports_name #ty_generics as ::boomerang::builder::ReactorPorts>::build_with::<_, #state_type_path>(
-                        move |builder, (#(#port_idents,)*)| {
+                        move |ctx, (#(#port_idents,)*)| {
                             #(#mode_bindings)*
                             #body_tokens
                             Ok(())

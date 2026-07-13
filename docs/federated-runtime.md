@@ -34,10 +34,10 @@ types, `RtiState`, `StaticRtiSession`, `FederateProtocolClient`,
 `static_runner::execute_federation_in_memory` and
 `static_runner::execute_federation_over_tcp`.
 
-`boomerang_builder` owns topology validation and lowering. It turns builder
+`boomerang_builder` owns topology validation and lowering. It turns assembly
 metadata into a `FederationPlan`, validates unsupported topology shapes, lowers
-builder runtime parts into `boomerang_federated::StaticFederationRuntimeParts`,
-and exposes thin builder-facing `execute_federation_in_memory` and
+`RuntimeAssembly` into `boomerang_federated::StaticFederationRuntimeParts`,
+and exposes thin assembly-facing `execute_federation_in_memory` and
 `execute_federation_over_tcp` shims.
 
 The top-level `boomerang` crate should only re-export public APIs.
@@ -52,11 +52,11 @@ static runners.
 
 ```mermaid
 flowchart LR
-    Builder["EnvBuilder<br/>reactors, ports, connection"]
-    Parts["BuilderRuntimeParts<br/>ready-to-run enclaves, plan,<br/>per-federate connection bundles"]
+    AssemblyModel["Assembly<br/>reactors, ports, connections"]
+    Parts["RuntimeAssembly<br/>ready-to-run enclaves, plan,<br/>per-federate connection bundles"]
     Runner["Static federation runner<br/>validates and connects transports"]
 
-    Builder -->|lower| Parts
+    AssemblyModel -->|lower| Parts
     Parts -->|runtime parts| Runner
 
     subgraph Source["Source federate / enclave"]
@@ -131,8 +131,8 @@ enclave for the source federate and one enclave for the sink federate. Empty
 unmapped enclaves, such as a structural root with no reactions, are skipped by
 the runner. Non-empty unmapped enclaves are rejected.
 
-`EnvBuilder::into_runtime_parts` produces `BuilderRuntimeParts` containing the
-runtime enclaves, builder aliases, inter-partition metadata, the federation
+`Assembly::into_runtime_assembly` produces `RuntimeAssembly` containing the
+runtime enclaves, assembly-to-runtime aliases, inter-partition metadata, the federation
 plan, and one complete runtime connection bundle per federate. Each bundle owns
 the prebuilt protocol mailbox, routes targeting that federate, only that
 federate's typed inbound endpoint handlers, and the source-local terminal fault
@@ -140,7 +140,7 @@ state. Deferred reaction construction attaches the final endpoint-specific
 outbound sink and registers every inbound handler before these parts are
 returned.
 
-The builder-facing execution functions validate the builder-owned plan, create
+The assembly-facing execution functions validate the assembly-owned plan, create
 the `FederatedTopology` and federate-to-enclave map, and move the already-built
 runtime connections into `StaticFederationRuntimeParts`. They then delegate to
 the matching function in `boomerang_federated::static_runner`.
@@ -196,7 +196,7 @@ The current implementation supports same-tag messages, same-timestamp
 microsteps, fanout, multi-hop topologies, shutdown/no-future coordination, and
 positive-delay distributed cycles.
 
-The builder and runner preserve rejection of unsupported semantics:
+The assembly layer and runner preserve rejection of unsupported semantics:
 cross-federate physical connections, transient federates, mixed local/federated
 boundaries, and distributed zero-delay cycles. Do not add distributed
 zero-delay-cycle support until `PTAG` and `ABS` are designed and implemented.
@@ -216,7 +216,7 @@ test calls `execute_federation_over_tcp`. Both build through
 `boomerang::prelude`, register `SerdeJsonCodec`, and assert that the sink
 observes `[(Tag::ZERO, 7)]`.
 
-`boomerang_builder/src/tests/federated.rs` contains builder and live in-memory
+`boomerang_builder/src/tests/federated.rs` contains assembly and live in-memory
 coverage for topology lowering, rejection behavior, three-federate chains,
 fanout, and positive-delay cycles.
 

@@ -8,8 +8,8 @@ struct Count3State {
 
 #[reactor(state = Count3State)]
 fn ModalCount3Modes() -> impl Reactor {
-    let pulse = builder.add_logical_action::<()>("pulse", None)?;
-    let advance = builder.add_logical_action::<()>("advance", None)?;
+    let pulse = ctx.add_logical_action::<()>("pulse", None)?;
+    let advance = ctx.add_logical_action::<()>("advance", None)?;
 
     reaction! {
         (startup) -> pulse {

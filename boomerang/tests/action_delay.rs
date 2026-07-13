@@ -4,7 +4,7 @@ use boomerang::prelude::*;
 
 #[reactor]
 fn GeneratedDelay(#[state] y_state: u32, #[input] y_in: u32, #[output] y_out: u32) -> impl Reactor {
-    let act = builder.add_logical_action::<()>("act", Some(Duration::milliseconds(100)))?;
+    let act = ctx.add_logical_action::<()>("act", Some(Duration::milliseconds(100)))?;
 
     reaction! {
         YIn (y_in) -> act {
@@ -51,12 +51,12 @@ fn Sink(#[state] success: bool, #[input] inp: u32) -> impl Reactor {
 
 #[reactor]
 fn ActionDelay() -> impl Reactor {
-    let source = builder.add_child_reactor(Source(), "source", (), false)?;
-    let sink = builder.add_child_reactor(Sink(), "sink", Default::default(), false)?;
-    let g = builder.add_child_reactor(GeneratedDelay(), "g", Default::default(), false)?;
+    let source = ctx.add_child_reactor(Source(), "source", (), false)?;
+    let sink = ctx.add_child_reactor(Sink(), "sink", Default::default(), false)?;
+    let g = ctx.add_child_reactor(GeneratedDelay(), "g", Default::default(), false)?;
 
-    builder.connect_port(source.out, g.y_in, None, false)?;
-    builder.connect_port(g.y_out, sink.inp, None, false)?;
+    ctx.connect_port(source.out, g.y_in, None, false)?;
+    ctx.connect_port(g.y_out, sink.inp, None, false)?;
 }
 
 #[test]

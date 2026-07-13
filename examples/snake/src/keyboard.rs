@@ -20,15 +20,14 @@ mod example {
 
     #[reactor]
     pub fn Example() -> impl Reactor<()> {
-        let keyboard = builder.add_child_reactor(
+        let keyboard = ctx.add_child_reactor(
             KeyboardEvents(),
             "keyboard",
             KeyboardEventsState::default(),
             false,
         )?;
 
-        builder
-            .add_reaction(Some("ReactionKeyPress"))
+        ctx.add_reaction(Some("ReactionKeyPress"))
             .with_trigger(keyboard.arrow_key_pressed)
             .with_reaction_fn(|_ctx, _state, (key_event,)| {
                 let mut stdout = std::io::stdout();
@@ -55,18 +54,15 @@ fn main() {
     use boomerang::prelude::*;
     tracing_subscriber::fmt::init();
 
-    let mut env_builder = EnvBuilder::new();
+    let mut assembly = Assembly::new();
     let _ = example::Example()
-        .build("printer", (), None, None, None, false, &mut env_builder)
+        .build("printer", (), None, None, None, false, &mut assembly)
         .unwrap();
 
     let config = runtime::Config::default()
         .with_fast_forward(false)
         .with_keep_alive(true);
-    let BuilderRuntimeParts {
-        enclaves,
-        ..
-    } = env_builder.into_runtime_parts(&config).unwrap();
+    let RuntimeAssembly { enclaves, .. } = assembly.into_runtime_assembly(&config).unwrap();
 
     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
     let mut sched = runtime::Scheduler::new(enclave_key, enclave, config);

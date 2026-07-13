@@ -11,17 +11,16 @@ fn Hello(
     #[state] count: usize,
     #[state] previous_time: Duration,
 ) -> impl Reactor {
-    let t = builder.add_timer(
+    let t = ctx.add_timer(
         "t",
         TimerSpec::default()
             .with_offset(Duration::seconds(1))
             .with_period(Duration::seconds(2)),
     )?;
-    let a = builder.add_logical_action::<()>("a", None)?;
+    let a = ctx.add_logical_action::<()>("a", None)?;
 
     let message = message.clone();
-    builder
-        .add_reaction(Some("T"))
+    ctx.add_reaction(Some("T"))
         .with_trigger(t)
         .with_effect(a)
         .with_reaction_fn(move |ctx, state, (_t, mut a)| {
@@ -32,8 +31,7 @@ fn Hello(
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("A"))
+    ctx.add_reaction(Some("A"))
         .with_trigger(a)
         .with_reaction_fn(|ctx, state, (_a,)| {
             state.count += 1;
@@ -52,7 +50,7 @@ fn Hello(
 
 #[reactor]
 fn Inside(message: String) -> impl Reactor {
-    let _third_instance = builder.add_child_reactor(
+    let _third_instance = ctx.add_child_reactor(
         Hello(Duration::seconds(1), message.clone()),
         "hello",
         Default::default(),
@@ -62,19 +60,19 @@ fn Inside(message: String) -> impl Reactor {
 
 #[reactor]
 fn Main() -> impl Reactor {
-    let _first_instance = builder.add_child_reactor(
+    let _first_instance = ctx.add_child_reactor(
         Hello(Duration::seconds(4), "Hello from first.".to_owned()),
         "hello",
         Default::default(),
         false,
     )?;
-    let _second_instance = builder.add_child_reactor(
+    let _second_instance = ctx.add_child_reactor(
         Hello(Duration::seconds(2), "Hello from second.".to_owned()),
         "hello",
         Default::default(),
         false,
     )?;
-    let _third_instance = builder.add_child_reactor(
+    let _third_instance = ctx.add_child_reactor(
         Inside("Hello from composite.".to_owned()),
         "hello",
         Default::default(),

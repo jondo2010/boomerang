@@ -6,7 +6,7 @@ fn ModalTimerHistory(
     #[state] fired: bool,
     #[state] fire_time_ns: i128,
 ) -> impl Reactor {
-    let pulse = builder.add_logical_action::<()>("pulse", None)?;
+    let pulse = ctx.add_logical_action::<()>("pulse", None)?;
 
     reaction! {
         (startup) -> pulse {
@@ -17,7 +17,7 @@ fn ModalTimerHistory(
     }
 
     mode! { initial active {
-        let tick = builder.add_timer(
+        let tick = ctx.add_timer(
             "tick",
             TimerSpec::default().with_offset(Duration::nanoseconds(5)),
         )?;
@@ -64,7 +64,7 @@ fn ModalTimerReset(
     #[state] fired_count: u32,
     #[state] fire_time_ns: i128,
 ) -> impl Reactor {
-    let pulse = builder.add_logical_action::<()>("pulse", None)?;
+    let pulse = ctx.add_logical_action::<()>("pulse", None)?;
 
     reaction! {
         (startup) -> pulse {
@@ -75,7 +75,7 @@ fn ModalTimerReset(
     }
 
     mode! { initial active {
-        let tick = builder.add_timer(
+        let tick = ctx.add_timer(
             "tick",
             TimerSpec::default().with_offset(Duration::nanoseconds(5)),
         )?;

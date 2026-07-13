@@ -13,8 +13,7 @@ pub struct State {
 fn Source<const WIDTH: usize>(#[output] out: [i32; WIDTH]) -> impl Reactor {
     timer! { t(200 msec) };
 
-    builder
-        .add_reaction(None)
+    ctx.add_reaction(None)
         .with_trigger(t)
         .with_effect(out)
         .with_reaction_fn(|_ctx, state, (_t, mut out)| {
@@ -28,8 +27,7 @@ fn Source<const WIDTH: usize>(#[output] out: [i32; WIDTH]) -> impl Reactor {
 
 #[reactor]
 fn Computation<const ITERS: usize>(#[input] in_: i32, #[output] out: i32) -> impl Reactor {
-    builder
-        .add_reaction(None)
+    ctx.add_reaction(None)
         .with_trigger(in_)
         .with_effect(out)
         .with_reaction_fn(move |_ctx, _state, (in_, mut out)| {
@@ -47,8 +45,7 @@ fn Computation<const ITERS: usize>(#[input] in_: i32, #[output] out: i32) -> imp
 fn Destination<const WIDTH: usize, const ITERS: usize = 100_000_000>(
     #[input] in_: [i32; WIDTH],
 ) -> impl Reactor {
-    builder
-        .add_reaction(None)
+    ctx.add_reaction(None)
         .with_trigger(in_)
         .with_reaction_fn(move |_ctx, state, (in_,)| {
             let expected = ITERS as i32 * WIDTH as i32 + state.s;
@@ -59,8 +56,7 @@ fn Destination<const WIDTH: usize, const ITERS: usize = 100_000_000>(
         })
         .finish()?;
 
-    builder
-        .add_reaction(None)
+    ctx.add_reaction(None)
         .with_shutdown_trigger()
         .with_reaction_fn(move |_ctx, state, (_shutdown,)| {
             assert!(state.s > 0, "ERROR: Destination received no input!");
@@ -71,18 +67,18 @@ fn Destination<const WIDTH: usize, const ITERS: usize = 100_000_000>(
 
 #[reactor]
 fn ThreadingMultiport<const WIDTH: usize = 4, const ITERS: usize = 100_000_000>() -> impl Reactor {
-    let a = builder.add_child_reactor(Source::<WIDTH>(), "a", Default::default(), false)?;
+    let a = ctx.add_child_reactor(Source::<WIDTH>(), "a", Default::default(), false)?;
     let t: [_; WIDTH] =
-        builder.add_child_reactors(Computation::<ITERS>(), "t", Default::default(), false)?;
-    let b = builder.add_child_reactor(
+        ctx.add_child_reactors(Computation::<ITERS>(), "t", Default::default(), false)?;
+    let b = ctx.add_child_reactor(
         Destination::<WIDTH, ITERS>(),
         "b",
         Default::default(),
         false,
     )?;
 
-    builder.connect_ports(a.out.iter().copied(), t.iter().map(|c| c.in_), None, false)?;
-    builder.connect_ports(
+    ctx.connect_ports(a.out.iter().copied(), t.iter().map(|c| c.in_), None, false)?;
+    ctx.connect_ports(
         t.iter().flat_map(|c| c.out.iter()).copied(),
         b.in_.iter().copied(),
         None,

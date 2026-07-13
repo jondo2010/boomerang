@@ -5,11 +5,11 @@ use std::{
 
 use slotmap::Key;
 
-use crate::{BuilderActionKey, BuilderReactorKey, TimerSpec};
+use crate::{AssemblyActionKey, AssemblyReactorKey, TimerSpec};
 
 use super::{
-    ActionType, BuilderError, BuilderPortKey, BuilderReactionKey, EnvBuilder, PortType,
-    ReactorBuilder,
+    ActionType, Assembly, AssemblyError, AssemblyPortKey, AssemblyReactionKey, PortType,
+    ReactorSpec,
 };
 
 fn escape_puml_label(input: &str) -> String {
@@ -29,7 +29,7 @@ trait ElemId {
     fn elem_id(&self) -> String;
 }
 
-impl ElemId for BuilderReactionKey {
+impl ElemId for AssemblyReactionKey {
     /// Build a unique identifier for a reaction node in the PlantUML graph.
     fn elem_id(&self) -> String {
         let id = self.data().as_ffi();
@@ -37,7 +37,7 @@ impl ElemId for BuilderReactionKey {
     }
 }
 
-impl ElemId for BuilderPortKey {
+impl ElemId for AssemblyPortKey {
     /// Build a unique identifier for a port node in the PlantUML graph.
     fn elem_id(&self) -> String {
         let id = self.data().as_ffi();
@@ -45,7 +45,7 @@ impl ElemId for BuilderPortKey {
     }
 }
 
-impl ElemId for BuilderActionKey {
+impl ElemId for AssemblyActionKey {
     /// Build a unique identifier for an action node in the PlantUML graph.
     fn elem_id(&self) -> String {
         let id = self.data().as_ffi();
@@ -53,7 +53,7 @@ impl ElemId for BuilderActionKey {
     }
 }
 
-impl ElemId for BuilderReactorKey {
+impl ElemId for AssemblyReactorKey {
     /// Build a unique identifier for a reactor node in the PlantUML graph.
     fn elem_id(&self) -> String {
         let id = self.data().as_ffi();
@@ -61,7 +61,7 @@ impl ElemId for BuilderReactorKey {
     }
 }
 
-impl EnvBuilder {
+impl Assembly {
     const BANK_EDGE: &str = "[thickness=2]";
 
     fn node_id(&self, key: impl ElemId) -> String {
@@ -70,7 +70,7 @@ impl EnvBuilder {
 
     fn puml_write_ports<W: std::io::Write>(
         &self,
-        reactor: &ReactorBuilder,
+        reactor: &ReactorSpec,
         buf: &mut W,
     ) -> std::io::Result<()> {
         let ports = reactor.ports.keys();
@@ -78,7 +78,7 @@ impl EnvBuilder {
             .ports_debug_grouped(ports)
             .into_iter()
             .map(|(first_key, _, _)| {
-                let port = &self.port_builders[first_key];
+                let port = &self.port_specs[first_key];
                 (port, self.node_id(first_key), port.bank_info().is_some())
             });
         for (port, port_id, is_bank) in ports_grouped {
@@ -106,13 +106,13 @@ impl EnvBuilder {
 
     fn puml_write_reaction_nodes<W: std::io::Write>(
         &self,
-        reactor: &ReactorBuilder,
+        reactor: &ReactorSpec,
         buf: &mut W,
     ) -> std::io::Result<()> {
         for (reaction_id, reaction) in reactor.reactions.keys().map(|reaction_key| {
             (
                 self.node_id(reaction_key),
-                &self.reaction_builders[reaction_key],
+                &self.reaction_specs[reaction_key],
             )
         }) {
             let reaction_name = escape_puml_label(reaction.name().unwrap_or("<unnamed_reaction>"));
@@ -128,13 +128,13 @@ impl EnvBuilder {
 
     fn puml_write_reaction_edges<W: std::io::Write>(
         &self,
-        reactor: &ReactorBuilder,
+        reactor: &ReactorSpec,
         buf: &mut W,
     ) -> std::io::Result<()> {
         for (reaction_key, reaction) in reactor
             .reactions
             .keys()
-            .map(|reaction_key| (reaction_key, &self.reaction_builders[reaction_key]))
+            .map(|reaction_key| (reaction_key, &self.reaction_specs[reaction_key]))
         {
             for (port_key, last_port_key, _) in
                 self.ports_debug_grouped(reaction.port_relations.keys())
@@ -173,13 +173,13 @@ impl EnvBuilder {
 
     fn puml_write_action_nodes<W: std::io::Write>(
         &self,
-        reactor: &ReactorBuilder,
+        reactor: &ReactorSpec,
         buf: &mut W,
     ) -> std::io::Result<()> {
         for (action_key, action) in reactor
             .actions
             .keys()
-            .map(|action_key| (action_key, &self.action_builders[action_key]))
+            .map(|action_key| (action_key, &self.action_specs[action_key]))
         {
             let action_id = self.node_id(action_key);
             let (xlabel, tooltip): (String, String) = match action.r#type() {
@@ -220,7 +220,7 @@ impl EnvBuilder {
 
             // Only show if this action shows up in any Reaction's `action_relations`
             if self
-                .reaction_builders
+                .reaction_specs
                 .iter()
                 .any(|(_, reaction)| reaction.action_relations.contains_key(action_key))
             {
@@ -238,13 +238,13 @@ impl EnvBuilder {
 
     fn puml_write_action_edges<W: std::io::Write>(
         &self,
-        reactor: &ReactorBuilder,
+        reactor: &ReactorSpec,
         buf: &mut W,
     ) -> std::io::Result<()> {
         for (reaction_key, reaction) in reactor
             .reactions
             .keys()
-            .map(|reaction_key| (reaction_key, &self.reaction_builders[reaction_key]))
+            .map(|reaction_key| (reaction_key, &self.reaction_specs[reaction_key]))
         {
             let reaction_id = self.node_id(reaction_key);
             for (action_key, trigger_mode) in reaction.action_relations.iter() {
@@ -271,14 +271,14 @@ impl EnvBuilder {
     }
 
     fn build_port_bindings<W: std::io::Write>(&self, buf: &mut W) -> std::io::Result<()> {
-        let ports_grouped = self.ports_debug_grouped(self.port_builders.keys());
+        let ports_grouped = self.ports_debug_grouped(self.port_specs.keys());
         let mut grouped_ports = BTreeMap::new();
         for (first_key, last_key, fqn) in ports_grouped {
             grouped_ports.insert(fqn, (first_key, last_key.is_some()));
         }
 
         let mut emitted: BTreeSet<(String, String, String)> = BTreeSet::new();
-        for connection in &self.connection_builders {
+        for connection in &self.connection_specs {
             let source_fqn = self.fqn_for(connection.source_key(), true).unwrap();
             let target_fqn = self.fqn_for(connection.target_key(), true).unwrap();
             let (source_key, source_banked) = grouped_ports
@@ -306,12 +306,12 @@ impl EnvBuilder {
         Ok(())
     }
 
-    /// Build a PlantUML representation of the entire Reactor environment. This creates a top-level view
+    /// Build a PlantUML representation of the entire reactor assembly. This creates a top-level view
     /// of all defined Reactors and any nested children.
-    pub fn create_plantuml_graph(&self) -> Result<String, BuilderError> {
+    pub fn create_plantuml_graph(&self) -> Result<String, AssemblyError> {
         let graph = self.build_reactor_graph_grouped();
         let ordered_reactors = petgraph::algo::toposort(&graph, None)
-            .map_err(|e| BuilderError::ReactorGraphCycle { what: e.node_id() })?;
+            .map_err(|e| AssemblyError::ReactorGraphCycle { what: e.node_id() })?;
         let roots: Vec<_> = ordered_reactors
             .iter()
             .copied()
@@ -351,7 +351,7 @@ skinparam arrowThickness 1
         for start in roots {
             petgraph::visit::depth_first_search(&graph, Some(start), |event| match event {
                 petgraph::visit::DfsEvent::Discover(reactor_key, _) => {
-                    let reactor = &self.reactor_builders[reactor_key];
+                    let reactor = &self.reactor_specs[reactor_key];
                     let bank = reactor
                         .bank_info()
                         .map(|bi| format!("[0..{}]", bi.total - 1));
@@ -406,37 +406,37 @@ mod tests {
 
     #[test]
     fn plantuml_includes_all_roots() {
-        let mut env_builder = EnvBuilder::new();
-        env_builder
+        let mut assembly = Assembly::new();
+        assembly
             .add_reactor("RootA", None, None, (), false)
             .finish()
             .unwrap();
-        env_builder
+        assembly
             .add_reactor("RootB", None, None, (), false)
             .finish()
             .unwrap();
 
-        let graph = env_builder.create_plantuml_graph().unwrap();
+        let graph = assembly.create_plantuml_graph().unwrap();
         assert!(graph.contains("RootA"));
         assert!(graph.contains("RootB"));
     }
 
     #[test]
     fn plantuml_escapes_labels() {
-        let mut env_builder = EnvBuilder::new();
-        let mut reactor = env_builder.add_reactor("reactor\"name]]", None, None, (), false);
+        let mut assembly = Assembly::new();
+        let mut reactor = assembly.add_reactor("reactor\"name]]", None, None, (), false);
         reactor.add_input_port::<()>("port\"name]]").unwrap();
         reactor.finish().unwrap();
 
-        let graph = env_builder.create_plantuml_graph().unwrap();
+        let graph = assembly.create_plantuml_graph().unwrap();
         assert!(graph.contains("reactor\\\"name] ]"));
         assert!(graph.contains("port\\\"name] ]"));
     }
 
     #[test]
     fn plantuml_groups_banked_connections() {
-        let mut env_builder = EnvBuilder::new();
-        let mut reactor = env_builder.add_reactor("Banked", None, None, (), false);
+        let mut assembly = Assembly::new();
+        let mut reactor = assembly.add_reactor("Banked", None, None, (), false);
         let outputs = reactor.add_output_ports::<u8, 2>("out").unwrap();
         let inputs = reactor.add_input_ports::<u8, 2>("in").unwrap();
         for i in 0..2 {
@@ -446,7 +446,7 @@ mod tests {
         }
         reactor.finish().unwrap();
 
-        let graph = env_builder.create_plantuml_graph().unwrap();
+        let graph = assembly.create_plantuml_graph().unwrap();
         assert_eq!(graph.matches("-[thickness=2]->").count(), 1);
     }
 }

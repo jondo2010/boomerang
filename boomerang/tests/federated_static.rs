@@ -16,8 +16,7 @@ struct SinkState {
 
 #[reactor]
 fn FederatedSource(#[output] out: u32) -> impl Reactor {
-    builder
-        .add_reaction(Some("emit"))
+    ctx.add_reaction(Some("emit"))
         .with_startup_trigger()
         .with_effect(out)
         .with_reaction_fn(|ctx, _state, (_startup, mut out)| {
@@ -29,16 +28,14 @@ fn FederatedSource(#[output] out: u32) -> impl Reactor {
 
 #[reactor(state = SinkState)]
 fn FederatedSink(#[input] input: u32) -> impl Reactor {
-    builder
-        .add_reaction(Some("keep_alive_until_message"))
+    ctx.add_reaction(Some("keep_alive_until_message"))
         .with_startup_trigger()
         .with_reaction_fn(|ctx, _state, (_startup,)| {
             ctx.schedule_shutdown(Some(Duration::milliseconds(100)));
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("record"))
+    ctx.add_reaction(Some("record"))
         .with_trigger(input)
         .with_reaction_fn(|ctx, state, (input,)| {
             if let Some(value) = *input {
@@ -51,8 +48,8 @@ fn FederatedSink(#[input] input: u32) -> impl Reactor {
 
 #[reactor]
 fn StaticFederation(values: Arc<Mutex<Vec<(Tag, u32)>>>) -> impl Reactor {
-    let source = builder.add_child_federate(FederatedSource(), "source", ())?;
-    let sink = builder.add_child_federate(
+    let source = ctx.add_child_federate(FederatedSource(), "source", ())?;
+    let sink = ctx.add_child_federate(
         FederatedSink(),
         "sink",
         SinkState {
@@ -60,25 +57,25 @@ fn StaticFederation(values: Arc<Mutex<Vec<(Tag, u32)>>>) -> impl Reactor {
         },
     )?;
 
-    builder.connect_port(source.out, sink.input, None, false)?;
+    ctx.connect_port(source.out, sink.input, None, false)?;
 }
 
 #[test]
 fn public_api_runs_static_in_memory_federation() {
     boomerang_util::test_tracing::init_with_directive("debug");
     let values = Arc::new(Mutex::new(Vec::new()));
-    let mut env_builder = EnvBuilder::new();
-    env_builder
+    let mut assembly = Assembly::new();
+    assembly
         .register_federated_codec::<u32, _>(boomerang::federated::SerdeJsonCodec)
         .unwrap();
 
     StaticFederation(Arc::clone(&values))
-        .build("main", (), None, None, None, false, &mut env_builder)
+        .build("main", (), None, None, None, false, &mut assembly)
         .unwrap();
-    env_builder.validate_reactions().unwrap();
+    assembly.validate_reactions().unwrap();
 
     let config = runtime::Config::default().with_fast_forward(true);
-    let parts = env_builder.into_runtime_parts(&config).unwrap();
+    let parts = assembly.into_runtime_assembly(&config).unwrap();
     let _envs = execute_federation_in_memory(parts, config).unwrap();
 
     assert_eq!(*values.lock().unwrap(), vec![(Tag::ZERO, 7)]);
@@ -90,18 +87,18 @@ fn public_api_runs_tcp_static_federation() {
     boomerang_util::test_tracing::init_with_directive("debug");
     let values = run_with_wall_timeout("public TCP static federation", || {
         let values = Arc::new(Mutex::new(Vec::new()));
-        let mut env_builder = EnvBuilder::new();
-        env_builder
+        let mut assembly = Assembly::new();
+        assembly
             .register_federated_codec::<u32, _>(boomerang::federated::SerdeJsonCodec)
             .unwrap();
 
         StaticFederation(Arc::clone(&values))
-            .build("main", (), None, None, None, false, &mut env_builder)
+            .build("main", (), None, None, None, false, &mut assembly)
             .unwrap();
-        env_builder.validate_reactions().unwrap();
+        assembly.validate_reactions().unwrap();
 
         let config = runtime::Config::default().with_fast_forward(true);
-        let parts = env_builder.into_runtime_parts(&config).unwrap();
+        let parts = assembly.into_runtime_assembly(&config).unwrap();
         let _envs =
             execute_federation_over_tcp(parts, config, TcpStaticFederationConfig::default())
                 .unwrap();

@@ -1,20 +1,21 @@
 use std::fmt::Debug;
 
 use super::{
-    BuilderActionKey, BuilderError, BuilderModeKey, BuilderPortKey, BuilderReactorKey, EnvBuilder,
+    Assembly, AssemblyActionKey, AssemblyError, AssemblyModeKey, AssemblyPortKey,
+    AssemblyReactorKey,
 };
 use crate::{
-    runtime, ActionTag, BuilderRuntimeParts, ParentReactorBuilder, PortBank, PortTag,
-    TimerActionKey, TypedActionKey, TypedPortKey,
+    runtime, ActionTag, ParentReactorSpec, PortBank, PortTag, RuntimeAssembly, TimerActionKey,
+    TypedActionKey, TypedPortKey,
 };
 use slotmap::SecondaryMap;
 use variadics_please::all_tuples;
 
 slotmap::new_key_type! {
-    pub struct BuilderReactionKey;
+    pub struct AssemblyReactionKey;
 }
 
-impl petgraph::graph::GraphIndex for BuilderReactionKey {
+impl petgraph::graph::GraphIndex for AssemblyReactionKey {
     fn index(&self) -> usize {
         self.0.as_ffi() as usize
     }
@@ -24,41 +25,41 @@ impl petgraph::graph::GraphIndex for BuilderReactionKey {
     }
 }
 
-/// A boxed deferred Reaction builder function
-pub type BoxedBuilderReactionFn = Box<dyn FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn>;
+/// A deferred factory for a runtime reaction function.
+pub type DeferredReactionFactory = Box<dyn FnOnce(&RuntimeAssembly) -> runtime::BoxedReactionFn>;
 
-pub struct ReactionBuilder {
+pub struct ReactionSpec {
     pub(super) name: Option<String>,
     /// The owning Reactor for this Reaction
-    pub(super) reactor_key: BuilderReactorKey,
+    pub(super) reactor_key: AssemblyReactorKey,
     /// The Reaction function
-    pub(super) reaction_fn: BoxedBuilderReactionFn,
+    pub(super) reaction_fn: DeferredReactionFactory,
     /// Modes in which this reaction is enabled
-    pub(super) enabled_modes: Option<Vec<BuilderModeKey>>,
+    pub(super) enabled_modes: Option<Vec<AssemblyModeKey>>,
     /// Enclosing mode scope, if this reaction was declared inside a mode.
-    pub(super) scope_mode: Option<BuilderModeKey>,
+    pub(super) scope_mode: Option<AssemblyModeKey>,
     /// Declared typed mode effects for this reaction
-    pub(super) mode_effects: Vec<BuilderModeEffect>,
+    pub(super) mode_effects: Vec<ModeEffectSpec>,
     /// Whether this reaction is triggered by mode reset entry.
     pub(super) reset_trigger: bool,
     /// Relations between this Reaction and Actions
-    pub(super) action_relations: SecondaryMap<BuilderActionKey, TriggerMode>,
-    /// Actions in the order they were declared on the builder
-    pub(super) action_order: Vec<BuilderActionKey>,
+    pub(super) action_relations: SecondaryMap<AssemblyActionKey, TriggerMode>,
+    /// Actions in the order they were declared on the declaration
+    pub(super) action_order: Vec<AssemblyActionKey>,
     /// Relations between this Reaction and Ports
-    pub(super) port_relations: SecondaryMap<BuilderPortKey, TriggerMode>,
-    /// Ports in the order they were declared on the builder
-    pub(super) port_order: Vec<BuilderPortKey>,
+    pub(super) port_relations: SecondaryMap<AssemblyPortKey, TriggerMode>,
+    /// Ports in the order they were declared on the declaration
+    pub(super) port_order: Vec<AssemblyPortKey>,
 }
 
-impl ReactionBuilder {
-    /// Create a new ReactionBuilder
+impl ReactionSpec {
+    /// Create a new ReactionSpec
     pub fn new<S: Into<String>>(
         name: Option<S>,
-        parent_key: BuilderReactorKey,
-        reaction_fn: Box<dyn FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn>,
+        parent_key: AssemblyReactorKey,
+        reaction_fn: Box<dyn FnOnce(&RuntimeAssembly) -> runtime::BoxedReactionFn>,
     ) -> Self {
-        ReactionBuilder {
+        ReactionSpec {
             name: name.map(|s| s.into()),
             reactor_key: parent_key,
             reaction_fn,
@@ -74,15 +75,15 @@ impl ReactionBuilder {
     }
 }
 
-impl ParentReactorBuilder for ReactionBuilder {
-    fn parent_reactor_key(&self) -> Option<BuilderReactorKey> {
+impl ParentReactorSpec for ReactionSpec {
+    fn parent_reactor_key(&self) -> Option<AssemblyReactorKey> {
         Some(self.reactor_key)
     }
 }
 
-impl Debug for ReactionBuilder {
+impl Debug for ReactionSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ReactionBuilder")
+        f.debug_struct("ReactionSpec")
             .field("name", &self.name)
             .field("reactor_key", &self.reactor_key)
             .field("reaction_fn", &"ReactionFn()")
@@ -97,14 +98,14 @@ impl Debug for ReactionBuilder {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct BuilderModeEffect {
-    target: BuilderModeKey,
+pub struct ModeEffectSpec {
+    target: AssemblyModeKey,
     runtime_target: Option<runtime::ModeKey>,
     transition: runtime::TransitionKind,
 }
 
-impl BuilderModeEffect {
-    pub(crate) fn new(target: BuilderModeKey, transition: runtime::TransitionKind) -> Self {
+impl ModeEffectSpec {
+    pub(crate) fn new(target: AssemblyModeKey, transition: runtime::TransitionKind) -> Self {
         Self {
             target,
             runtime_target: None,
@@ -112,7 +113,7 @@ impl BuilderModeEffect {
         }
     }
 
-    pub fn target(&self) -> BuilderModeKey {
+    pub fn target(&self) -> AssemblyModeKey {
         self.target
     }
 
@@ -128,28 +129,28 @@ impl BuilderModeEffect {
 
 #[doc(hidden)]
 pub trait ResolveModeEffects {
-    fn resolve_mode_effects(&mut self, runtime_parts: &BuilderRuntimeParts);
+    fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssembly);
 }
 
 impl ResolveModeEffects for () {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &BuilderRuntimeParts) {}
+    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
 }
 
-impl ResolveModeEffects for BuilderModeEffect {
-    fn resolve_mode_effects(&mut self, runtime_parts: &BuilderRuntimeParts) {
+impl ResolveModeEffects for ModeEffectSpec {
+    fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssembly) {
         self.runtime_target = Some(runtime_parts.aliases.mode_aliases[self.target].1);
     }
 }
 
 impl<T: ResolveModeEffects, const N: usize> ResolveModeEffects for [T; N] {
-    fn resolve_mode_effects(&mut self, runtime_parts: &BuilderRuntimeParts) {
+    fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssembly) {
         for item in self {
             item.resolve_mode_effects(runtime_parts);
         }
     }
 }
 
-impl runtime::ReactionRefsExtract for BuilderModeEffect {
+impl runtime::ReactionRefsExtract for ModeEffectSpec {
     type Ref<'store>
         = runtime::ModeEffectRef
     where
@@ -167,19 +168,19 @@ impl runtime::ReactionRefsExtract for BuilderModeEffect {
 }
 
 impl<T: runtime::ReactorData, Q: ActionTag> ResolveModeEffects for TypedActionKey<T, Q> {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &BuilderRuntimeParts) {}
+    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
 }
 
 impl ResolveModeEffects for TimerActionKey {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &BuilderRuntimeParts) {}
+    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
 }
 
 impl<T: runtime::ReactorData, Q: PortTag, A> ResolveModeEffects for TypedPortKey<T, Q, A> {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &BuilderRuntimeParts) {}
+    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
 }
 
 impl<T: runtime::ReactorData, Q: PortTag, A> ResolveModeEffects for PortBank<T, Q, A> {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &BuilderRuntimeParts) {}
+    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
 }
 
 macro_rules! impl_resolve_mode_effects {
@@ -189,7 +190,7 @@ macro_rules! impl_resolve_mode_effects {
             $($T: ResolveModeEffects,)*
         {
             #[allow(non_snake_case)]
-            fn resolve_mode_effects(&mut self, runtime_parts: &BuilderRuntimeParts) {
+            fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssembly) {
                 let ($($T,)*) = self;
                 $($T.resolve_mode_effects(runtime_parts);)*
             }
@@ -199,20 +200,20 @@ macro_rules! impl_resolve_mode_effects {
 
 all_tuples!(impl_resolve_mode_effects, 1, 10, T);
 
-impl ReactionBuilder {
+impl ReactionSpec {
     /// Get the name of this Reaction
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
     }
 
-    pub fn record_port_relation(&mut self, key: BuilderPortKey, trigger_mode: TriggerMode) {
+    pub fn record_port_relation(&mut self, key: AssemblyPortKey, trigger_mode: TriggerMode) {
         if !self.port_relations.contains_key(key) {
             self.port_order.push(key);
         }
         self.port_relations.insert(key, trigger_mode);
     }
 
-    pub fn record_action_relation(&mut self, key: BuilderActionKey, trigger_mode: TriggerMode) {
+    pub fn record_action_relation(&mut self, key: AssemblyActionKey, trigger_mode: TriggerMode) {
         if !self.action_relations.contains_key(key) {
             self.action_order.push(key);
         }
@@ -258,125 +259,125 @@ impl TriggerMode {
     }
 }
 
-pub trait PartialReactionBuilderField: runtime::ReactionRefsExtract {
-    fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
+pub trait ReactionDeclarationField: runtime::ReactionRefsExtract {
+    fn extend_declaration<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
-        builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
+        declaration: &mut ReactionDeclaration<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
     );
 }
 
-impl<T, Q, A> PartialReactionBuilderField for TypedPortKey<T, Q, A>
+impl<T, Q, A> ReactionDeclarationField for TypedPortKey<T, Q, A>
 where
     T: runtime::ReactorData,
     Q: PortTag,
     TypedPortKey<T, Q, A>: runtime::ReactionRefsExtract,
 {
-    fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
+    fn extend_declaration<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
-        builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
+        declaration: &mut ReactionDeclaration<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
     ) {
-        let port_key = BuilderPortKey::from(*self);
-        builder.record_port_relation(port_key, trigger_mode);
+        let port_key = AssemblyPortKey::from(*self);
+        declaration.record_port_relation(port_key, trigger_mode);
     }
 }
 
-impl<T, Q, A, const N: usize> PartialReactionBuilderField for [TypedPortKey<T, Q, A>; N]
+impl<T, Q, A, const N: usize> ReactionDeclarationField for [TypedPortKey<T, Q, A>; N]
 where
     T: runtime::ReactorData,
     Q: PortTag,
     TypedPortKey<T, Q, A>: runtime::ReactionRefsExtract,
 {
-    fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
+    fn extend_declaration<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
-        builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
+        declaration: &mut ReactionDeclaration<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
     ) {
         self.iter().for_each(|port| {
-            port.extend_builder(builder, trigger_mode);
+            port.extend_declaration(declaration, trigger_mode);
         })
     }
 }
 
-impl<T, Q, A> PartialReactionBuilderField for PortBank<T, Q, A>
+impl<T, Q, A> ReactionDeclarationField for PortBank<T, Q, A>
 where
     T: runtime::ReactorData,
     Q: PortTag,
     PortBank<T, Q, A>: runtime::ReactionRefsExtract,
 {
-    fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
+    fn extend_declaration<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
-        builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
+        declaration: &mut ReactionDeclaration<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
     ) {
         self.iter().for_each(|port| {
-            let port_key = BuilderPortKey::from(port);
-            builder.record_port_relation(port_key, trigger_mode);
+            let port_key = AssemblyPortKey::from(port);
+            declaration.record_port_relation(port_key, trigger_mode);
         });
     }
 }
 
-impl<T, Q> PartialReactionBuilderField for TypedActionKey<T, Q>
+impl<T, Q> ReactionDeclarationField for TypedActionKey<T, Q>
 where
     T: runtime::ReactorData,
     Q: ActionTag,
     TypedActionKey<T, Q>: runtime::ReactionRefsExtract,
 {
-    fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
+    fn extend_declaration<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
-        builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
+        declaration: &mut ReactionDeclaration<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
     ) {
-        let action_key = BuilderActionKey::from(*self);
-        builder.record_action_relation(action_key, trigger_mode);
+        let action_key = AssemblyActionKey::from(*self);
+        declaration.record_action_relation(action_key, trigger_mode);
     }
 }
 
-impl PartialReactionBuilderField for TimerActionKey {
-    fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
+impl ReactionDeclarationField for TimerActionKey {
+    fn extend_declaration<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
-        builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
+        declaration: &mut ReactionDeclaration<S, Fields, ReactionFn>,
         trigger_mode: TriggerMode,
     ) {
-        let action_key = BuilderActionKey::from(*self);
-        builder.record_action_relation(action_key, trigger_mode);
+        let action_key = AssemblyActionKey::from(*self);
+        declaration.record_action_relation(action_key, trigger_mode);
     }
 }
 
-impl PartialReactionBuilderField for BuilderModeEffect {
-    fn extend_builder<S: runtime::ReactorData, Fields, ReactionFn>(
+impl ReactionDeclarationField for ModeEffectSpec {
+    fn extend_declaration<S: runtime::ReactorData, Fields, ReactionFn>(
         &self,
-        builder: &mut PartialReactionBuilder<S, Fields, ReactionFn>,
+        declaration: &mut ReactionDeclaration<S, Fields, ReactionFn>,
         _trigger_mode: TriggerMode,
     ) {
-        builder.record_mode_effect(*self);
+        declaration.record_mode_effect(*self);
     }
 }
 
 #[derive(Debug)]
-pub struct PartialReactionBuilder<'a, S: runtime::ReactorData, Fields = (), ReactionFn = ()> {
+pub struct ReactionDeclaration<'a, S: runtime::ReactorData, Fields = (), ReactionFn = ()> {
     name: Option<String>,
     reaction_fn: ReactionFn,
-    enabled_modes: Option<Vec<BuilderModeKey>>,
-    scope_mode: Option<BuilderModeKey>,
-    mode_effects: Vec<BuilderModeEffect>,
+    enabled_modes: Option<Vec<AssemblyModeKey>>,
+    scope_mode: Option<AssemblyModeKey>,
+    mode_effects: Vec<ModeEffectSpec>,
     reset_trigger: bool,
-    port_relations: slotmap::SecondaryMap<BuilderPortKey, TriggerMode>,
-    port_order: Vec<BuilderPortKey>,
-    action_relations: slotmap::SecondaryMap<BuilderActionKey, TriggerMode>,
-    action_order: Vec<BuilderActionKey>,
-    reactor_key: BuilderReactorKey,
-    env: &'a mut EnvBuilder,
+    port_relations: slotmap::SecondaryMap<AssemblyPortKey, TriggerMode>,
+    port_order: Vec<AssemblyPortKey>,
+    action_relations: slotmap::SecondaryMap<AssemblyActionKey, TriggerMode>,
+    action_order: Vec<AssemblyActionKey>,
+    reactor_key: AssemblyReactorKey,
+    assembly: &'a mut Assembly,
     fields: Fields,
     phantom: std::marker::PhantomData<(S, Fields, ReactionFn)>,
 }
 
-impl<'a, S: runtime::ReactorData> PartialReactionBuilder<'a, S, (), ()> {
+impl<'a, S: runtime::ReactorData> ReactionDeclaration<'a, S, (), ()> {
     pub fn new(
         name: Option<&str>,
-        reactor_key: BuilderReactorKey,
-        env: &'a mut EnvBuilder,
+        reactor_key: AssemblyReactorKey,
+        assembly: &'a mut Assembly,
     ) -> Self {
         Self {
             name: name.map(|s| s.to_string()),
@@ -390,7 +391,7 @@ impl<'a, S: runtime::ReactorData> PartialReactionBuilder<'a, S, (), ()> {
             action_relations: slotmap::SecondaryMap::new(),
             action_order: Vec::new(),
             reactor_key,
-            env,
+            assembly,
             fields: (),
             phantom: std::marker::PhantomData,
         }
@@ -398,23 +399,23 @@ impl<'a, S: runtime::ReactorData> PartialReactionBuilder<'a, S, (), ()> {
 }
 
 impl<'a, S: runtime::ReactorData, Fields, ReactionFn>
-    PartialReactionBuilder<'a, S, Fields, ReactionFn>
+    ReactionDeclaration<'a, S, Fields, ReactionFn>
 {
-    fn record_port_relation(&mut self, key: BuilderPortKey, trigger_mode: TriggerMode) {
+    fn record_port_relation(&mut self, key: AssemblyPortKey, trigger_mode: TriggerMode) {
         if !self.port_relations.contains_key(key) {
             self.port_order.push(key);
         }
         self.port_relations.insert(key, trigger_mode);
     }
 
-    fn record_action_relation(&mut self, key: BuilderActionKey, trigger_mode: TriggerMode) {
+    fn record_action_relation(&mut self, key: AssemblyActionKey, trigger_mode: TriggerMode) {
         if !self.action_relations.contains_key(key) {
             self.action_order.push(key);
         }
         self.action_relations.insert(key, trigger_mode);
     }
 
-    fn record_mode_effect(&mut self, effect: BuilderModeEffect) {
+    fn record_mode_effect(&mut self, effect: ModeEffectSpec) {
         self.mode_effects.push(effect);
     }
 
@@ -425,7 +426,7 @@ impl<'a, S: runtime::ReactorData, Fields, ReactionFn>
     }
 
     /// Record the static mode scope that owns this reaction.
-    pub fn in_mode_scope(mut self, mode: BuilderModeKey) -> Self {
+    pub fn in_mode_scope(mut self, mode: AssemblyModeKey) -> Self {
         self.scope_mode = Some(mode);
         if self.enabled_modes.is_none() {
             self.enabled_modes = Some(vec![mode]);
@@ -436,26 +437,26 @@ impl<'a, S: runtime::ReactorData, Fields, ReactionFn>
 
 macro_rules! impl_with_field {
     ($($Fn:ident),*) => {
-        impl<'a, S, $($Fn,)*> PartialReactionBuilder<'a, S, ($($Fn,)*)>
+        impl<'a, S, $($Fn,)*> ReactionDeclaration<'a, S, ($($Fn,)*)>
         where
             S: runtime::ReactorData,
             $($Fn: runtime::ReactionRefsExtract,)*
         {
             /// Trigger this reaction on the startup of the reactor
-            pub fn with_startup_trigger(self) -> PartialReactionBuilder<'a, S, ($($Fn,)* TypedActionKey,)> {
+            pub fn with_startup_trigger(self) -> ReactionDeclaration<'a, S, ($($Fn,)* TypedActionKey,)> {
                 let startup = self
-                    .env
-                    .get_reactor_builder(self.reactor_key)
+                    .assembly
+                    .get_reactor_spec(self.reactor_key)
                     .unwrap()
                     .get_startup_action();
                 self.with_trigger(startup)
             }
 
             /// Trigger this reaction on the shutdown of the reactor
-            pub fn with_shutdown_trigger(self) -> PartialReactionBuilder<'a, S, ($($Fn,)* TypedActionKey,)> {
+            pub fn with_shutdown_trigger(self) -> ReactionDeclaration<'a, S, ($($Fn,)* TypedActionKey,)> {
                 let shutdown = self
-                    .env
-                    .get_reactor_builder(self.reactor_key)
+                    .assembly
+                    .get_reactor_spec(self.reactor_key)
                     .unwrap()
                     .get_shutdown_action();
                 self.with_trigger(shutdown)
@@ -463,11 +464,11 @@ macro_rules! impl_with_field {
 
             /// Triggers can be input ports, output ports of contained reactors, timers, actions.
             /// There must be at least one trigger for each reaction.
-            pub fn with_trigger<F>(mut self, field: F) -> PartialReactionBuilder<'a, S, ($($Fn,)* F,)>
+            pub fn with_trigger<F>(mut self, field: F) -> ReactionDeclaration<'a, S, ($($Fn,)* F,)>
             where
-                F: PartialReactionBuilderField
+                F: ReactionDeclarationField
             {
-                field.extend_builder(&mut self, TriggerMode::TriggersAndUses);
+                field.extend_declaration(&mut self, TriggerMode::TriggersAndUses);
                 #[allow(non_snake_case)]
                 let Self {
                     name,
@@ -480,11 +481,11 @@ macro_rules! impl_with_field {
                     action_relations,
                     action_order,
                     reactor_key,
-                    env,
+                    assembly,
                     fields,
                     ..
                 } = self;
-                PartialReactionBuilder {
+                ReactionDeclaration {
                     name,
                     reaction_fn: (),
                     enabled_modes,
@@ -496,7 +497,7 @@ macro_rules! impl_with_field {
                     action_relations,
                     action_order,
                     reactor_key,
-                    env,
+                    assembly,
                     fields: fields.append(field),
                     phantom: std::marker::PhantomData,
                 }
@@ -504,11 +505,11 @@ macro_rules! impl_with_field {
 
             /// Use specifies input ports (or output ports of contained reactors) that do not trigger execution of
             /// the reaction but may be read by the reaction.
-            pub fn with_use<F>(mut self, field: F) -> PartialReactionBuilder<'a, S, ($($Fn,)* F,)>
+            pub fn with_use<F>(mut self, field: F) -> ReactionDeclaration<'a, S, ($($Fn,)* F,)>
             where
-                F: PartialReactionBuilderField
+                F: ReactionDeclarationField
             {
-                field.extend_builder(&mut self, TriggerMode::UsesOnly);
+                field.extend_declaration(&mut self, TriggerMode::UsesOnly);
                 #[allow(non_snake_case)]
                 let Self {
                     name,
@@ -521,11 +522,11 @@ macro_rules! impl_with_field {
                     action_relations,
                     action_order,
                     reactor_key,
-                    env,
+                    assembly,
                     fields,
                     ..
                 } = self;
-                PartialReactionBuilder {
+                ReactionDeclaration {
                     name,
                     reaction_fn: (),
                     enabled_modes,
@@ -537,18 +538,18 @@ macro_rules! impl_with_field {
                     action_relations,
                     action_order,
                     reactor_key,
-                    env,
+                    assembly,
                     fields: fields.append(field),
                     phantom: std::marker::PhantomData,
                 }
             }
 
             /// Specify an effect field, which can be an output port, input port of contained reactors, or actions.
-            pub fn with_effect<F>(mut self, field: F) -> PartialReactionBuilder<'a, S, ($($Fn,)* F,)>
+            pub fn with_effect<F>(mut self, field: F) -> ReactionDeclaration<'a, S, ($($Fn,)* F,)>
             where
-                F: PartialReactionBuilderField
+                F: ReactionDeclarationField
             {
-                field.extend_builder(&mut self, TriggerMode::EffectsOnly);
+                field.extend_declaration(&mut self, TriggerMode::EffectsOnly);
                 #[allow(non_snake_case)]
                 let Self {
                     name,
@@ -561,11 +562,11 @@ macro_rules! impl_with_field {
                     action_relations,
                     action_order,
                     reactor_key,
-                    env,
+                    assembly,
                     fields,
                     ..
                 } = self;
-                PartialReactionBuilder {
+                ReactionDeclaration {
                     name,
                     reaction_fn: (),
                     enabled_modes,
@@ -577,7 +578,7 @@ macro_rules! impl_with_field {
                     action_relations,
                     action_order,
                     reactor_key,
-                    env,
+                    assembly,
                     fields: fields.append(field),
                     phantom: std::marker::PhantomData,
                 }
@@ -610,7 +611,7 @@ all_tuples!(impl_tuple_append, 0, 10, T);
 // Generate implementations for tuples of size 0 to 10
 all_tuples!(impl_with_field, 0, 10, F);
 
-impl<'a, S, Fields> PartialReactionBuilder<'a, S, Fields>
+impl<'a, S, Fields> ReactionDeclaration<'a, S, Fields>
 where
     S: runtime::ReactorData,
     Fields: runtime::ReactionRefsExtract + ResolveModeEffects + Clone + Send + Sync,
@@ -618,7 +619,7 @@ where
     pub fn with_reaction_fn<F>(
         self,
         f: F,
-    ) -> PartialReactionBuilder<'a, S, Fields, BoxedBuilderReactionFn>
+    ) -> ReactionDeclaration<'a, S, Fields, DeferredReactionFactory>
     where
         F: for<'store> Fn(&mut runtime::Context, &mut S, Fields::Ref<'store>)
             + Send
@@ -636,13 +637,13 @@ where
             action_relations,
             action_order,
             reactor_key,
-            env,
+            assembly,
             fields,
             ..
         } = self;
         let fields_for_reaction = fields.clone();
-        let reaction_fn: BoxedBuilderReactionFn = Box::new(
-            move |runtime_parts: &BuilderRuntimeParts| -> runtime::BoxedReactionFn {
+        let reaction_fn: DeferredReactionFactory = Box::new(
+            move |runtime_parts: &RuntimeAssembly| -> runtime::BoxedReactionFn {
                 let mut fields_for_reaction = fields_for_reaction.clone();
                 fields_for_reaction.resolve_mode_effects(runtime_parts);
                 Box::new(runtime::reaction::FnRefsAdapter::new(
@@ -651,7 +652,7 @@ where
                 ))
             },
         );
-        PartialReactionBuilder {
+        ReactionDeclaration {
             name,
             reaction_fn,
             enabled_modes,
@@ -663,24 +664,24 @@ where
             action_relations,
             action_order,
             reactor_key,
-            env,
+            assembly,
             fields,
             phantom: std::marker::PhantomData,
         }
     }
 }
 
-impl<'a, S, Fields> PartialReactionBuilder<'a, S, Fields>
+impl<'a, S, Fields> ReactionDeclaration<'a, S, Fields>
 where
     S: runtime::ReactorData,
     Fields: runtime::ReactionRefsExtract,
 {
-    pub fn with_defered_reaction_fn<F>(
+    pub fn with_deferred_reaction_factory<F>(
         self,
         f: F,
-    ) -> PartialReactionBuilder<'a, S, Fields, BoxedBuilderReactionFn>
+    ) -> ReactionDeclaration<'a, S, Fields, DeferredReactionFactory>
     where
-        F: FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn + 'static,
+        F: FnOnce(&RuntimeAssembly) -> runtime::BoxedReactionFn + 'static,
     {
         let Self {
             name,
@@ -693,11 +694,11 @@ where
             action_relations,
             action_order,
             reactor_key,
-            env,
+            assembly,
             fields,
             ..
         } = self;
-        PartialReactionBuilder {
+        ReactionDeclaration {
             name,
             reaction_fn: Box::new(f),
             enabled_modes,
@@ -709,20 +710,20 @@ where
             action_relations,
             action_order,
             reactor_key,
-            env,
+            assembly,
             fields,
             phantom: std::marker::PhantomData,
         }
     }
 }
 
-impl<S, Fields> PartialReactionBuilder<'_, S, Fields, BoxedBuilderReactionFn>
+impl<S, Fields> ReactionDeclaration<'_, S, Fields, DeferredReactionFactory>
 where
     S: runtime::ReactorData,
     Fields: runtime::ReactionRefsExtract,
 {
-    /// Finish building the Reaction and add it to the Environment
-    pub fn finish(self) -> Result<BuilderReactionKey, BuilderError> {
+    /// Finish declaring the reaction and add it to the assembly.
+    pub fn finish(self) -> Result<AssemblyReactionKey, AssemblyError> {
         let Self {
             name,
             enabled_modes,
@@ -735,7 +736,7 @@ where
             action_order,
             reaction_fn,
             reactor_key,
-            env,
+            assembly,
             ..
         } = self;
 
@@ -744,26 +745,26 @@ where
             && !port_relations.values().any(|&mode| mode.is_triggers())
             && !reset_trigger
         {
-            return Err(BuilderError::ReactionBuilderError(format!(
+            return Err(AssemblyError::ReactionDeclarationError(format!(
                 "Reaction '{name:?}' has no triggers defined"
             )));
         }
 
         if reset_trigger && scope_mode.is_none() {
-            return Err(BuilderError::ReactionBuilderError(format!(
+            return Err(AssemblyError::ReactionDeclarationError(format!(
                 "Reaction '{name:?}' uses reset trigger outside a mode scope"
             )));
         }
 
         if let Some(ref modes) = enabled_modes {
             for mode_key in modes {
-                let mode = env.mode_builders.get(*mode_key).ok_or_else(|| {
-                    BuilderError::ReactionBuilderError(format!(
+                let mode = assembly.mode_specs.get(*mode_key).ok_or_else(|| {
+                    AssemblyError::ReactionDeclarationError(format!(
                         "Unknown mode key {mode_key:?} for reaction '{name:?}'"
                     ))
                 })?;
                 if mode.reactor_key != reactor_key {
-                    return Err(BuilderError::ReactionBuilderError(format!(
+                    return Err(AssemblyError::ReactionDeclarationError(format!(
                         "Mode '{}' does not belong to reaction '{name:?}'",
                         mode.name
                     )));
@@ -772,13 +773,13 @@ where
         }
 
         if let Some(scope_mode) = scope_mode {
-            let mode = env.mode_builders.get(scope_mode).ok_or_else(|| {
-                BuilderError::ReactionBuilderError(format!(
+            let mode = assembly.mode_specs.get(scope_mode).ok_or_else(|| {
+                AssemblyError::ReactionDeclarationError(format!(
                     "Unknown mode key {scope_mode:?} for reaction '{name:?}'"
                 ))
             })?;
             if mode.reactor_key != reactor_key {
-                return Err(BuilderError::ReactionBuilderError(format!(
+                return Err(AssemblyError::ReactionDeclarationError(format!(
                     "Mode scope '{}' does not belong to reaction '{name:?}'",
                     mode.name
                 )));
@@ -786,24 +787,24 @@ where
         }
 
         for effect in &mode_effects {
-            let mode = env.mode_builders.get(effect.target()).ok_or_else(|| {
-                BuilderError::ReactionBuilderError(format!(
+            let mode = assembly.mode_specs.get(effect.target()).ok_or_else(|| {
+                AssemblyError::ReactionDeclarationError(format!(
                     "Unknown mode key {:?} for reaction '{name:?}'",
                     effect.target()
                 ))
             })?;
             if mode.reactor_key != reactor_key {
-                return Err(BuilderError::ReactionBuilderError(format!(
+                return Err(AssemblyError::ReactionDeclarationError(format!(
                     "Mode effect '{}' does not belong to reaction '{name:?}'",
                     mode.name
                 )));
             }
         }
 
-        let reactor = &mut env.reactor_builders[reactor_key];
-        let reactions = &mut env.reaction_builders;
+        let reactor = &mut assembly.reactor_specs[reactor_key];
+        let reactions = &mut assembly.reaction_specs;
 
-        let reaction_builder = ReactionBuilder {
+        let reaction_spec = ReactionSpec {
             name,
             reactor_key,
             reaction_fn,
@@ -819,7 +820,7 @@ where
 
         let reaction_key = reactions.insert_with_key(|key| {
             reactor.reactions.insert(key, ());
-            reaction_builder
+            reaction_spec
         });
 
         Ok(reaction_key)

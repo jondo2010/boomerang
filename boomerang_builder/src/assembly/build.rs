@@ -1,4 +1,4 @@
-//! Runtime graph lowering for [`EnvBuilder`].
+//! Runtime graph lowering for [`Assembly`].
 //!
 //! This module performs the build-time pass that materializes runtime enclaves and completes
 //! derived [`boomerang_runtime::ReactionGraph`] data. The scheduler should not need to reconstruct
@@ -12,57 +12,57 @@ use slotmap::SecondaryMap;
 use std::collections::BTreeMap;
 
 use crate::{
-    connection::PortBindings, ActionType, BoundaryKind, BuilderActionKey, BuilderError,
-    BuilderModeKey, BuilderPortKey, BuilderReactionKey, BuilderReactorKey, InterPartitionEdge,
-    InterPartitionPlan, ParentReactorBuilder, PartialReactionBuilder, PartitionRoot,
-    PartitionRootKind, TimerActionKey,
+    connection::PortBindings, ActionType, AssemblyActionKey, AssemblyError, AssemblyModeKey,
+    AssemblyPortKey, AssemblyReactionKey, AssemblyReactorKey, BoundaryKind, InterPartitionEdge,
+    InterPartitionPlan, ParentReactorSpec, PartitionRoot, PartitionRootKind, ReactionDeclaration,
+    TimerActionKey,
 };
 #[cfg(feature = "federated")]
 use crate::{federated_routes_from_plan, FederationPlan};
 
-use super::EnvBuilder;
+use super::Assembly;
 
-/// A trait used to defer the building of until the enclave parts are available.
-pub trait DeferedBuild {
+/// A trait used to defer runtime object creation until the lowered runtime data is available.
+pub trait DeferredRuntimeFactory {
     type Output;
 
-    fn defer(self) -> impl FnOnce(&BuilderRuntimeParts) -> Self::Output + 'static;
+    fn defer(self) -> impl FnOnce(&RuntimeAssembly) -> Self::Output + 'static;
 }
 
-impl DeferedBuild for runtime::reaction::TimerFn {
+impl DeferredRuntimeFactory for runtime::reaction::TimerFn {
     type Output = runtime::BoxedReactionFn;
-    fn defer(self) -> impl FnOnce(&BuilderRuntimeParts) -> Self::Output + 'static {
+    fn defer(self) -> impl FnOnce(&RuntimeAssembly) -> Self::Output + 'static {
         move |_| runtime::BoxedReactionFn::from(self)
     }
 }
 
-/// Aliasing maps from Builder keys to runtime keys
+/// Aliasing maps from assembly keys to runtime keys.
 #[derive(Default)]
-pub struct BuilderAliases {
-    pub enclave_aliases: SecondaryMap<BuilderReactorKey, runtime::EnclaveKey>,
+pub struct RuntimeAliases {
+    pub enclave_aliases: SecondaryMap<AssemblyReactorKey, runtime::EnclaveKey>,
     pub reactor_aliases:
-        SecondaryMap<BuilderReactorKey, (runtime::EnclaveKey, runtime::ReactorKey)>,
-    pub reactor_scope_modes: SecondaryMap<BuilderReactorKey, Option<BuilderModeKey>>,
+        SecondaryMap<AssemblyReactorKey, (runtime::EnclaveKey, runtime::ReactorKey)>,
+    pub reactor_scope_modes: SecondaryMap<AssemblyReactorKey, Option<AssemblyModeKey>>,
     pub reaction_aliases:
-        SecondaryMap<BuilderReactionKey, (runtime::EnclaveKey, runtime::ReactionKey)>,
-    pub mode_aliases: SecondaryMap<BuilderModeKey, (runtime::EnclaveKey, runtime::ModeKey)>,
-    pub action_aliases: SecondaryMap<BuilderActionKey, (runtime::EnclaveKey, runtime::ActionKey)>,
-    pub port_aliases: SecondaryMap<BuilderPortKey, (runtime::EnclaveKey, runtime::PortKey)>,
+        SecondaryMap<AssemblyReactionKey, (runtime::EnclaveKey, runtime::ReactionKey)>,
+    pub mode_aliases: SecondaryMap<AssemblyModeKey, (runtime::EnclaveKey, runtime::ModeKey)>,
+    pub action_aliases: SecondaryMap<AssemblyActionKey, (runtime::EnclaveKey, runtime::ActionKey)>,
+    pub port_aliases: SecondaryMap<AssemblyPortKey, (runtime::EnclaveKey, runtime::PortKey)>,
 }
 
 /// A map of partitions: each Reactor is mapped to one Enclave Reactor.
-pub type PartitionMap = SecondaryMap<BuilderReactorKey, BuilderReactorKey>;
+pub type PartitionMap = SecondaryMap<AssemblyReactorKey, AssemblyReactorKey>;
 
 #[derive(Default)]
-pub struct BuilderRuntimeParts {
+pub struct RuntimeAssembly {
     /// The runtime Enclaves
     pub enclaves: tinymap::TinyMap<runtime::EnclaveKey, runtime::Enclave>,
-    /// Aliases from builder keys to runtime keys
-    pub aliases: BuilderAliases,
-    /// Builder-owned metadata for logical edges that cross runtime partitions.
+    /// Aliases from assembly keys to runtime keys.
+    pub aliases: RuntimeAliases,
+    /// Assembly-owned metadata for logical edges that cross runtime partitions.
     pub inter_partition_plan: InterPartitionPlan,
     #[cfg(feature = "federated")]
-    /// Static federation metadata extracted by the builder.
+    /// Static federation metadata extracted from the assembly.
     pub federation_plan: FederationPlan,
     #[cfg(feature = "federated")]
     pub(crate) federated_connections: boomerang_federated::FederatedRuntimeConnections,
@@ -71,8 +71,8 @@ pub struct BuilderRuntimeParts {
     pub replayers: runtime::replay::ReplayersMap,
 }
 
-impl BuilderRuntimeParts {
-    /// Create a new `BuilderRuntimeParts` from a `PartitionMap`.
+impl RuntimeAssembly {
+    /// Create a new `RuntimeAssembly` from a `PartitionMap`.
     fn new(
         partition_map: &PartitionMap,
         inter_partition_plan: InterPartitionPlan,
@@ -82,7 +82,7 @@ impl BuilderRuntimeParts {
         federated_connections: boomerang_federated::FederatedRuntimeConnections,
     ) -> Self {
         let mut enclaves = tinymap::TinyMap::new();
-        let mut aliases = BuilderAliases::default();
+        let mut aliases = RuntimeAliases::default();
         // Create all the unique enclaves
         for reactor_key in partition_map.values().unique() {
             let enclave_key =
@@ -152,8 +152,8 @@ impl BuilderRuntimeParts {
 }
 
 pub struct EnclaveDep {
-    pub upstream: BuilderReactorKey,
-    pub downstream: BuilderReactorKey,
+    pub upstream: AssemblyReactorKey,
+    pub downstream: AssemblyReactorKey,
     pub delay: Option<runtime::Duration>,
 }
 
@@ -278,25 +278,25 @@ fn build_modal_schedule_index(graph: &runtime::ReactionGraph) -> runtime::ModalS
     index
 }
 
-impl EnvBuilder {
+impl Assembly {
     fn build_inter_partition_plan(
         &self,
         partition_map: &PartitionMap,
-    ) -> Result<InterPartitionPlan, BuilderError> {
+    ) -> Result<InterPartitionPlan, AssemblyError> {
         let mut plan = InterPartitionPlan::default();
 
         #[cfg(feature = "federated")]
         let federate_id_by_partition = {
-            let mut federate_id_by_partition = SecondaryMap::<BuilderReactorKey, String>::new();
-            let mut seen_ids = BTreeMap::<String, BuilderReactorKey>::new();
+            let mut federate_id_by_partition = SecondaryMap::<AssemblyReactorKey, String>::new();
+            let mut seen_ids = BTreeMap::<String, AssemblyReactorKey>::new();
 
-            for (reactor_key, reactor) in &self.reactor_builders {
+            for (reactor_key, reactor) in &self.reactor_specs {
                 let Some(spec) = reactor.federate_spec() else {
                     continue;
                 };
 
                 if spec.id.trim().is_empty() {
-                    return Err(BuilderError::UnsupportedFederationTopology {
+                    return Err(AssemblyError::UnsupportedFederationTopology {
                         what: format!(
                             "federate reactor '{}' must have a non-empty id",
                             self.fqn_for(reactor_key, false)?
@@ -305,7 +305,7 @@ impl EnvBuilder {
                 }
 
                 if spec.transient {
-                    return Err(BuilderError::UnsupportedFederationTopology {
+                    return Err(AssemblyError::UnsupportedFederationTopology {
                         what: format!(
                             "transient federate '{}' is reserved for a later milestone",
                             spec.id
@@ -314,7 +314,7 @@ impl EnvBuilder {
                 }
 
                 if partition_map[reactor_key] != reactor_key {
-                    return Err(BuilderError::UnsupportedFederationTopology {
+                    return Err(AssemblyError::UnsupportedFederationTopology {
                         what: format!(
                             "federate '{}' must be an enclave root in this milestone",
                             spec.id
@@ -323,7 +323,7 @@ impl EnvBuilder {
                 }
 
                 if let Some(previous) = seen_ids.insert(spec.id.clone(), reactor_key) {
-                    return Err(BuilderError::UnsupportedFederationTopology {
+                    return Err(AssemblyError::UnsupportedFederationTopology {
                         what: format!(
                             "duplicate federate id '{}' for '{}' and '{}'",
                             spec.id,
@@ -358,16 +358,16 @@ impl EnvBuilder {
             });
         }
 
-        for connection in &self.connection_builders {
+        for connection in &self.connection_specs {
             let source_port_key = connection.source_key();
             let target_port_key = connection.target_key();
-            let source_port = &self.port_builders[source_port_key];
-            let target_port = &self.port_builders[target_port_key];
+            let source_port = &self.port_specs[source_port_key];
+            let target_port = &self.port_specs[target_port_key];
             let source_reactor_key = source_port.parent_reactor_key().ok_or_else(|| {
-                BuilderError::InternalError("source port has no parent reactor".to_owned())
+                AssemblyError::InternalError("source port has no parent reactor".to_owned())
             })?;
             let target_reactor_key = target_port.parent_reactor_key().ok_or_else(|| {
-                BuilderError::InternalError("target port has no parent reactor".to_owned())
+                AssemblyError::InternalError("target port has no parent reactor".to_owned())
             })?;
             let source_partition = partition_map[source_reactor_key];
             let target_partition = partition_map[target_reactor_key];
@@ -388,7 +388,7 @@ impl EnvBuilder {
                         target_federate: target_federate.clone(),
                     },
                     _ => {
-                        return Err(BuilderError::UnsupportedFederationTopology {
+                        return Err(AssemblyError::UnsupportedFederationTopology {
                             what: format!(
                                 "connection '{}' -> '{}' crosses a federated boundary, but both enclave roots are not federates",
                                 self.fqn_for(source_port_key, false)?,
@@ -403,7 +403,7 @@ impl EnvBuilder {
             let kind = BoundaryKind::LocalEnclave;
 
             if matches!(kind, BoundaryKind::Federated { .. }) && connection.physical() {
-                return Err(BuilderError::UnsupportedFederationTopology {
+                return Err(AssemblyError::UnsupportedFederationTopology {
                     what: format!(
                         "cross-federate physical connection '{}' -> '{}' is reserved for a later milestone",
                         self.fqn_for(source_port_key, false)?,
@@ -433,8 +433,8 @@ impl EnvBuilder {
     fn validate_federation_zero_delay_cycles(
         &self,
         plan: &InterPartitionPlan,
-    ) -> Result<(), BuilderError> {
-        let mut graph = petgraph::prelude::DiGraphMap::<BuilderReactorKey, ()>::new();
+    ) -> Result<(), AssemblyError> {
+        let mut graph = petgraph::prelude::DiGraphMap::<AssemblyReactorKey, ()>::new();
 
         for root in &plan.partition_roots {
             if matches!(root.kind, PartitionRootKind::Federated { .. }) {
@@ -456,13 +456,13 @@ impl EnvBuilder {
             let cycle = cycle
                 .into_iter()
                 .map(|reactor_key| {
-                    self.reactor_builders[reactor_key]
+                    self.reactor_specs[reactor_key]
                         .federate_spec()
                         .map(|spec| spec.id.clone())
                         .unwrap_or_else(|| format!("{reactor_key:?}"))
                 })
                 .join(" -> ");
-            return Err(BuilderError::UnsupportedFederationTopology {
+            return Err(AssemblyError::UnsupportedFederationTopology {
                 what: format!(
                     "distributed zero-delay cycle is unsupported in the static MVP: {cycle}"
                 ),
@@ -476,9 +476,9 @@ impl EnvBuilder {
     pub(super) fn build_connections(
         &mut self,
         partition_map: &mut PartitionMap,
-    ) -> Result<PortBindings, BuilderError> {
+    ) -> Result<PortBindings, AssemblyError> {
         let mut port_bindings = PortBindings::default();
-        for connection in std::mem::take(&mut self.connection_builders).iter_mut() {
+        for connection in std::mem::take(&mut self.connection_specs).iter_mut() {
             connection.build(self, partition_map, &mut port_bindings)?;
         }
         Ok(port_bindings)
@@ -489,24 +489,26 @@ impl EnvBuilder {
         let graph = self.build_reactor_graph();
 
         let mut partitions = vec![];
-        let mut node_stack = vec![self.reactor_builders.keys().next().unwrap()];
+        let mut node_stack = vec![self.reactor_specs.keys().next().unwrap()];
 
-        petgraph::visit::depth_first_search(&graph, self.reactor_builders.keys(), |event| {
-            match event {
+        petgraph::visit::depth_first_search(
+            &graph,
+            self.reactor_specs.keys(),
+            |event| match event {
                 petgraph::visit::DfsEvent::Discover(key, _) => {
-                    if self.reactor_builders[key].placement().starts_enclave() {
+                    if self.reactor_specs[key].placement().starts_enclave() {
                         node_stack.push(key);
                     }
                     partitions.push((key, *node_stack.last().unwrap()));
                 }
                 petgraph::visit::DfsEvent::Finish(key, _)
-                    if self.reactor_builders[key].placement().starts_enclave() =>
+                    if self.reactor_specs[key].placement().starts_enclave() =>
                 {
                     node_stack.pop();
                 }
                 _ => {}
-            }
-        });
+            },
+        );
 
         partitions.into_iter().collect()
     }
@@ -514,10 +516,10 @@ impl EnvBuilder {
     fn build_runtime_reactors(
         &mut self,
         partition_map: &PartitionMap,
-        builder_parts: &mut BuilderRuntimeParts,
-    ) -> Result<(), BuilderError> {
-        let reactor_fqns: SecondaryMap<BuilderReactorKey, String> = self
-            .reactor_builders
+        runtime_assembly: &mut RuntimeAssembly,
+    ) -> Result<(), AssemblyError> {
+        let reactor_fqns: SecondaryMap<AssemblyReactorKey, String> = self
+            .reactor_specs
             .keys()
             .map(|reactor_key| {
                 self.fqn_for(reactor_key, false)
@@ -525,41 +527,41 @@ impl EnvBuilder {
             })
             .collect::<Result<_, _>>()?;
 
-        for (builder_reactor_key, reactor) in self.reactor_builders.drain() {
-            let partition_key = partition_map[builder_reactor_key];
-            let enclave_key = builder_parts.aliases.enclave_aliases[partition_key];
-            let enclave = &mut builder_parts.enclaves[enclave_key];
+        for (assembly_reactor_key, reactor) in self.reactor_specs.drain() {
+            let partition_key = partition_map[assembly_reactor_key];
+            let enclave_key = runtime_assembly.aliases.enclave_aliases[partition_key];
+            let enclave = &mut runtime_assembly.enclaves[enclave_key];
             let bank_info = reactor.bank_info.clone();
             let scope_mode = reactor.scope_mode;
-            let reactor_fqn = &reactor_fqns[builder_reactor_key];
+            let reactor_fqn = &reactor_fqns[assembly_reactor_key];
             let runtime_reactor_key =
                 enclave.insert_reactor(reactor.into_runtime(reactor_fqn), bank_info);
-            builder_parts
+            runtime_assembly
                 .aliases
                 .reactor_scope_modes
-                .insert(builder_reactor_key, scope_mode);
-            builder_parts
+                .insert(assembly_reactor_key, scope_mode);
+            runtime_assembly
                 .aliases
                 .reactor_aliases
-                .insert(builder_reactor_key, (enclave_key, runtime_reactor_key));
+                .insert(assembly_reactor_key, (enclave_key, runtime_reactor_key));
         }
         Ok(())
     }
 
     fn assign_runtime_reactor_scope_parents(
         &mut self,
-        builder_parts: &mut BuilderRuntimeParts,
-    ) -> Result<(), BuilderError> {
-        for (builder_reactor_key, scope_mode) in &builder_parts.aliases.reactor_scope_modes {
+        runtime_assembly: &mut RuntimeAssembly,
+    ) -> Result<(), AssemblyError> {
+        for (assembly_reactor_key, scope_mode) in &runtime_assembly.aliases.reactor_scope_modes {
             let Some(scope_mode) = scope_mode else {
                 continue;
             };
             let (enclave_key, runtime_reactor_key) =
-                builder_parts.aliases.reactor_aliases[builder_reactor_key];
+                runtime_assembly.aliases.reactor_aliases[assembly_reactor_key];
             let (mode_enclave_key, runtime_mode_key) =
-                builder_parts.aliases.mode_aliases[*scope_mode];
+                runtime_assembly.aliases.mode_aliases[*scope_mode];
             assert_eq!(enclave_key, mode_enclave_key, "Crosscheck");
-            let enclave = &mut builder_parts.enclaves[enclave_key];
+            let enclave = &mut runtime_assembly.enclaves[enclave_key];
             let parent_scope = enclave.mode_scope(runtime_mode_key);
             enclave.set_reactor_scope_parent(runtime_reactor_key, parent_scope);
         }
@@ -568,18 +570,18 @@ impl EnvBuilder {
 
     fn build_runtime_modes(
         &mut self,
-        builder_parts: &mut BuilderRuntimeParts,
-    ) -> Result<(), BuilderError> {
-        for (builder_mode_key, mode) in self.mode_builders.drain() {
+        runtime_assembly: &mut RuntimeAssembly,
+    ) -> Result<(), AssemblyError> {
+        for (assembly_mode_key, mode) in self.mode_specs.drain() {
             let (enclave_key, reactor_key) =
-                builder_parts.aliases.reactor_aliases[mode.reactor_key];
-            let enclave = &mut builder_parts.enclaves[enclave_key];
+                runtime_assembly.aliases.reactor_aliases[mode.reactor_key];
+            let enclave = &mut runtime_assembly.enclaves[enclave_key];
             let runtime_mode_key =
                 enclave.insert_mode(reactor_key, &mode.name, mode.kind.is_initial());
-            builder_parts
+            runtime_assembly
                 .aliases
                 .mode_aliases
-                .insert(builder_mode_key, (enclave_key, runtime_mode_key));
+                .insert(assembly_mode_key, (enclave_key, runtime_mode_key));
         }
         Ok(())
     }
@@ -590,29 +592,29 @@ impl EnvBuilder {
     fn build_runtime_actions(
         &mut self,
         partition_map: &PartitionMap,
-        builder_parts: &mut BuilderRuntimeParts,
-    ) -> Result<(), BuilderError> {
+        runtime_assembly: &mut RuntimeAssembly,
+    ) -> Result<(), AssemblyError> {
         let mut new_reactions = Vec::new();
 
-        for (builder_action_key, action) in &self.action_builders {
+        for (assembly_action_key, action) in &self.action_specs {
             let partition_key = partition_map[action.parent_reactor_key().unwrap()];
-            let enclave_key = builder_parts.aliases.enclave_aliases[partition_key];
-            let enclave = &mut builder_parts.enclaves[enclave_key];
+            let enclave_key = runtime_assembly.aliases.enclave_aliases[partition_key];
+            let enclave = &mut runtime_assembly.enclaves[enclave_key];
 
             let action_referenced = self
-                .reaction_builders
+                .reaction_specs
                 .iter()
-                .any(|(_, reaction)| reaction.action_relations.contains_key(builder_action_key));
+                .any(|(_, reaction)| reaction.action_relations.contains_key(assembly_action_key));
 
             match action.r#type() {
                 ActionType::Timer(spec) if action_referenced => {
                     let runtime_action_key = enclave.insert_action(|key| {
                         runtime::Action::<()>::new(action.name(), key, None, true).boxed()
                     });
-                    builder_parts
+                    runtime_assembly
                         .aliases
                         .action_aliases
-                        .insert(builder_action_key, (enclave_key, runtime_action_key));
+                        .insert(assembly_action_key, (enclave_key, runtime_action_key));
 
                     if spec.period.is_some() {
                         // Periodic timers need a reset reaction
@@ -620,7 +622,7 @@ impl EnvBuilder {
                             format!("{}_reset", action.name()),
                             runtime::reaction::TimerFn(spec.period),
                             action.reactor_key(),
-                            TimerActionKey::from(builder_action_key),
+                            TimerActionKey::from(assembly_action_key),
                         ));
                     }
                 }
@@ -629,10 +631,10 @@ impl EnvBuilder {
                     let runtime_action_key = enclave.insert_action(|key| {
                         runtime::Action::<()>::new(action.name(), key, None, true).boxed()
                     });
-                    builder_parts
+                    runtime_assembly
                         .aliases
                         .action_aliases
-                        .insert(builder_action_key, (enclave_key, runtime_action_key));
+                        .insert(assembly_action_key, (enclave_key, runtime_action_key));
                 }
 
                 ActionType::Standard {
@@ -643,16 +645,16 @@ impl EnvBuilder {
                     let runtime_action_key =
                         enclave.insert_action(|key| build_fn(action.name(), key));
 
-                    builder_parts
+                    runtime_assembly
                         .aliases
                         .action_aliases
-                        .insert(builder_action_key, (enclave_key, runtime_action_key));
+                        .insert(assembly_action_key, (enclave_key, runtime_action_key));
                 }
 
                 _ => {
                     tracing::info!(
                         "Action {} is unused, won't build",
-                        self.fqn_for(builder_action_key, false).unwrap()
+                        self.fqn_for(assembly_action_key, false).unwrap()
                     );
                 }
             }
@@ -660,14 +662,14 @@ impl EnvBuilder {
 
         // Now create the reset reactions for periodic timers, since we can now get &mut self.
         for (name, reaction_fn, reactor_key, action_key) in new_reactions {
-            let scope_mode = self.action_builders[BuilderActionKey::from(action_key)].scope_mode();
-            let mut reaction = PartialReactionBuilder::<()>::new(Some(&name), reactor_key, self)
+            let scope_mode = self.action_specs[AssemblyActionKey::from(action_key)].scope_mode();
+            let mut reaction = ReactionDeclaration::<()>::new(Some(&name), reactor_key, self)
                 .with_trigger(action_key);
             if let Some(scope_mode) = scope_mode {
                 reaction = reaction.in_mode_scope(scope_mode);
             }
             let _ = reaction
-                .with_defered_reaction_fn(reaction_fn.defer())
+                .with_deferred_reaction_factory(reaction_fn.defer())
                 .finish()?;
         }
 
@@ -677,53 +679,56 @@ impl EnvBuilder {
     #[cfg(feature = "federated")]
     fn build_federated_inbound_endpoints(
         &mut self,
-        builder_parts: &mut BuilderRuntimeParts,
-    ) -> Result<(), BuilderError> {
-        let mut connections = std::mem::take(&mut builder_parts.federated_connections);
-        for endpoint_builder in self.federated_inbound_endpoint_builders.drain(..) {
-            endpoint_builder(builder_parts, &mut connections)?;
+        runtime_assembly: &mut RuntimeAssembly,
+    ) -> Result<(), AssemblyError> {
+        let mut connections = std::mem::take(&mut runtime_assembly.federated_connections);
+        for endpoint_factory in self.federated_inbound_endpoint_factories.drain(..) {
+            endpoint_factory(runtime_assembly, &mut connections)?;
         }
-        builder_parts.federated_connections = connections;
+        runtime_assembly.federated_connections = connections;
         Ok(())
     }
 
     fn assign_runtime_action_and_port_scopes(
         &mut self,
-        builder_parts: &mut BuilderRuntimeParts,
+        runtime_assembly: &mut RuntimeAssembly,
         port_bindings: &PortBindings,
-    ) -> Result<(), BuilderError> {
-        for (builder_action_key, action) in &self.action_builders {
-            let (enclave_key, action_key) =
-                match builder_parts.aliases.action_aliases.get(builder_action_key) {
-                    Some(alias) => *alias,
-                    None => continue,
-                };
-            let enclave = &mut builder_parts.enclaves[enclave_key];
+    ) -> Result<(), AssemblyError> {
+        for (assembly_action_key, action) in &self.action_specs {
+            let (enclave_key, action_key) = match runtime_assembly
+                .aliases
+                .action_aliases
+                .get(assembly_action_key)
+            {
+                Some(alias) => *alias,
+                None => continue,
+            };
+            let enclave = &mut runtime_assembly.enclaves[enclave_key];
             let scope = if let Some(mode_key) = action.scope_mode() {
                 let (mode_enclave_key, runtime_mode_key) =
-                    builder_parts.aliases.mode_aliases[mode_key];
+                    runtime_assembly.aliases.mode_aliases[mode_key];
                 assert_eq!(enclave_key, mode_enclave_key, "Crosscheck");
                 enclave.mode_scope(runtime_mode_key)
             } else {
                 let (reactor_enclave_key, runtime_reactor_key) =
-                    builder_parts.aliases.reactor_aliases[action.reactor_key()];
+                    runtime_assembly.aliases.reactor_aliases[action.reactor_key()];
                 assert_eq!(enclave_key, reactor_enclave_key, "Crosscheck");
                 enclave.root_scope(runtime_reactor_key)
             };
             enclave.insert_action_scope(action_key, scope);
         }
 
-        for (builder_port_key, _port) in &self.port_builders {
+        for (assembly_port_key, _port) in &self.port_specs {
             let (enclave_key, port_key) =
-                match builder_parts.aliases.port_aliases.get(builder_port_key) {
+                match runtime_assembly.aliases.port_aliases.get(assembly_port_key) {
                     Some(alias) => *alias,
                     None => continue,
                 };
-            let inward_port_key = port_bindings.follow_port_inward(builder_port_key);
-            let port = &self.port_builders[inward_port_key];
-            let enclave = &mut builder_parts.enclaves[enclave_key];
+            let inward_port_key = port_bindings.follow_port_inward(assembly_port_key);
+            let port = &self.port_specs[inward_port_key];
+            let enclave = &mut runtime_assembly.enclaves[enclave_key];
             let (reactor_enclave_key, runtime_reactor_key) =
-                builder_parts.aliases.reactor_aliases[port.get_reactor_key()];
+                runtime_assembly.aliases.reactor_aliases[port.get_reactor_key()];
             assert_eq!(enclave_key, reactor_enclave_key, "Crosscheck");
             let scope = enclave.root_scope(runtime_reactor_key);
             enclave.insert_port_scope(port_key, scope);
@@ -735,30 +740,30 @@ impl EnvBuilder {
     fn build_runtime_ports(
         &mut self,
         partition_map: &PartitionMap,
-        builder_parts: &mut BuilderRuntimeParts,
+        runtime_assembly: &mut RuntimeAssembly,
         port_bindings: &PortBindings,
-    ) -> Result<(), BuilderError> {
+    ) -> Result<(), AssemblyError> {
         let port_groups = self
-            .port_builders
+            .port_specs
             .keys()
             .map(|port_key| (port_key, port_bindings.follow_port_inward(port_key)))
             .sorted_by(|key_a, key_b| key_a.1.cmp(&key_b.1))
             .chunk_by(|(_port_key, inward_key)| *inward_key);
 
         for (inward_port_key, group) in port_groups.into_iter() {
-            let port = &self.port_builders[inward_port_key];
+            let port = &self.port_specs[inward_port_key];
             let partition_key = partition_map[port.parent_reactor_key().unwrap()];
-            let enclave_key = builder_parts.aliases.enclave_aliases[partition_key];
-            let enclave = &mut builder_parts.enclaves[enclave_key];
+            let enclave_key = runtime_assembly.aliases.enclave_aliases[partition_key];
+            let enclave = &mut runtime_assembly.enclaves[enclave_key];
 
             let runtime_port_key = enclave.insert_port(|key| port.build_runtime_port(key));
 
-            builder_parts
+            runtime_assembly
                 .aliases
                 .port_aliases
                 .insert(inward_port_key, (enclave_key, runtime_port_key));
 
-            builder_parts.aliases.port_aliases.extend(
+            runtime_assembly.aliases.port_aliases.extend(
                 group.map(|(port_key, _inward_key)| (port_key, (enclave_key, runtime_port_key))),
             );
         }
@@ -768,23 +773,23 @@ impl EnvBuilder {
     fn build_runtime_reactions(
         &mut self,
         partition_map: &PartitionMap,
-        builder_parts: &mut BuilderRuntimeParts,
-        reaction_levels: &SecondaryMap<BuilderReactionKey, runtime::Level>,
-    ) -> Result<(), BuilderError> {
-        for (builder_reaction_key, reaction) in self.reaction_builders.drain() {
-            let reaction_body = (reaction.reaction_fn)(builder_parts);
+        runtime_assembly: &mut RuntimeAssembly,
+        reaction_levels: &SecondaryMap<AssemblyReactionKey, runtime::Level>,
+    ) -> Result<(), AssemblyError> {
+        for (assembly_reaction_key, reaction) in self.reaction_specs.drain() {
+            let reaction_body = (reaction.reaction_fn)(runtime_assembly);
 
             let reaction_name = reaction.name.clone().unwrap_or_else(|| {
-                let reaction_u64 = slotmap::Key::data(&builder_reaction_key).as_ffi();
+                let reaction_u64 = slotmap::Key::data(&assembly_reaction_key).as_ffi();
                 format!("reaction{reaction_u64}")
             });
 
             let partition_key = partition_map[reaction.reactor_key];
-            let enclave_key = builder_parts.aliases.enclave_aliases[partition_key];
-            let enclave = &mut builder_parts.enclaves[enclave_key];
+            let enclave_key = runtime_assembly.aliases.enclave_aliases[partition_key];
+            let enclave = &mut runtime_assembly.enclaves[enclave_key];
             let runtime_reactor_key = {
                 let (alias_enclave_key, reactor_key) =
-                    builder_parts.aliases.reactor_aliases[reaction.reactor_key];
+                    runtime_assembly.aliases.reactor_aliases[reaction.reactor_key];
                 assert_eq!(enclave_key, alias_enclave_key, "Crosscheck");
                 reactor_key
             };
@@ -832,29 +837,29 @@ impl EnvBuilder {
                 );
             }
 
-            let use_ports = use_port_keys
-                .iter()
-                .map(|builder_port_key| builder_parts.aliases.port_aliases[*builder_port_key].1);
+            let use_ports = use_port_keys.iter().map(|assembly_port_key| {
+                runtime_assembly.aliases.port_aliases[*assembly_port_key].1
+            });
 
-            let effect_ports = effect_port_keys
-                .iter()
-                .map(|builder_port_key| builder_parts.aliases.port_aliases[*builder_port_key].1);
+            let effect_ports = effect_port_keys.iter().map(|assembly_port_key| {
+                runtime_assembly.aliases.port_aliases[*assembly_port_key].1
+            });
 
-            let actions = action_keys.iter().map(|builder_action_key| {
-                builder_parts.aliases.action_aliases[*builder_action_key].1
+            let actions = action_keys.iter().map(|assembly_action_key| {
+                runtime_assembly.aliases.action_aliases[*assembly_action_key].1
             });
 
             let mode_filter = reaction.enabled_modes.as_ref().map(|modes| {
                 let runtime_modes = modes
                     .iter()
-                    .map(|mode_key| builder_parts.aliases.mode_aliases[*mode_key].1)
+                    .map(|mode_key| runtime_assembly.aliases.mode_aliases[*mode_key].1)
                     .collect();
                 runtime::ModeFilter::new(runtime_modes)
             });
 
             let reaction_scope = if let Some(mode_key) = reaction.scope_mode {
                 let (mode_enclave_key, runtime_mode_key) =
-                    builder_parts.aliases.mode_aliases[mode_key];
+                    runtime_assembly.aliases.mode_aliases[mode_key];
                 assert_eq!(enclave_key, mode_enclave_key, "Crosscheck");
                 enclave.mode_scope(runtime_mode_key)
             } else {
@@ -871,30 +876,30 @@ impl EnvBuilder {
                 mode_filter,
             );
 
-            let level_reaction = (reaction_levels[builder_reaction_key], runtime_reaction_key);
+            let level_reaction = (reaction_levels[assembly_reaction_key], runtime_reaction_key);
 
             if reaction.reset_trigger {
                 enclave.insert_reset_trigger(reaction_scope, level_reaction);
             }
 
-            for (builder_port_key, tm) in &reaction.port_relations {
-                let port_key = builder_parts.aliases.port_aliases[builder_port_key].1;
+            for (assembly_port_key, tm) in &reaction.port_relations {
+                let port_key = runtime_assembly.aliases.port_aliases[assembly_port_key].1;
                 if tm.is_triggers() {
                     enclave.insert_port_trigger(port_key, level_reaction);
                 }
             }
 
-            for (builder_action_key, tm) in &reaction.action_relations {
-                let action_key = builder_parts.aliases.action_aliases[builder_action_key].1;
+            for (assembly_action_key, tm) in &reaction.action_relations {
+                let action_key = runtime_assembly.aliases.action_aliases[assembly_action_key].1;
                 if tm.is_triggers() {
                     enclave.insert_action_trigger(action_key, level_reaction);
 
-                    let action_builder = &self.action_builders[builder_action_key];
-                    match action_builder.r#type() {
+                    let action_spec = &self.action_specs[assembly_action_key];
+                    match action_spec.r#type() {
                         ActionType::Timer(timer_spec) => {
                             let tag = runtime::Tag::new(timer_spec.offset.unwrap_or_default(), 0);
                             enclave.insert_startup_action(action_key, tag);
-                            if action_builder.name() == "__startup" {
+                            if action_spec.name() == "__startup" {
                                 enclave.insert_startup_trigger(
                                     reaction_scope,
                                     action_key,
@@ -917,10 +922,10 @@ impl EnvBuilder {
                 }
             }
 
-            builder_parts
+            runtime_assembly
                 .aliases
                 .reaction_aliases
-                .insert(builder_reaction_key, (enclave_key, runtime_reaction_key));
+                .insert(assembly_reaction_key, (enclave_key, runtime_reaction_key));
         }
         Ok(())
     }
@@ -929,22 +934,22 @@ impl EnvBuilder {
     #[cfg(feature = "replay")]
     fn build_runtime_replayers(
         &mut self,
-        builder_parts: &mut BuilderRuntimeParts,
-    ) -> Result<(), BuilderError> {
-        for (builder_action_key, replayer_builder) in self.replay_builders.drain() {
-            let replayer = (replayer_builder)(builder_parts);
+        runtime_assembly: &mut RuntimeAssembly,
+    ) -> Result<(), AssemblyError> {
+        for (assembly_action_key, replay_factory) in self.replay_factories.drain() {
+            let replayer = (replay_factory)(runtime_assembly);
             let (enclave_key, action_key) =
-                builder_parts.aliases.action_aliases[builder_action_key];
-            builder_parts.replayers[enclave_key].insert(action_key, replayer);
+                runtime_assembly.aliases.action_aliases[assembly_action_key];
+            runtime_assembly.replayers[enclave_key].insert(action_key, replayer);
         }
         Ok(())
     }
 
-    /// Convert the [`EnvBuilder`] into parts suitable for execution by the runtime.
-    pub fn into_runtime_parts(
+    /// Convert the [`Assembly`] into parts suitable for execution by the runtime.
+    pub fn into_runtime_assembly(
         mut self,
         config: &runtime::Config,
-    ) -> Result<BuilderRuntimeParts, BuilderError> {
+    ) -> Result<RuntimeAssembly, AssemblyError> {
         let mut partition_map = self.build_partition_map();
         let inter_partition_plan = self.build_inter_partition_plan(&partition_map)?;
         #[cfg(feature = "federated")]
@@ -970,7 +975,7 @@ impl EnvBuilder {
         )?;
         let enclave_deps = enclave_deps_from_inter_partition_plan(&inter_partition_plan);
         let port_bindings = self.build_connections(&mut partition_map)?;
-        let mut builder_parts = BuilderRuntimeParts::new(
+        let mut runtime_assembly = RuntimeAssembly::new(
             &partition_map,
             inter_partition_plan,
             enclave_deps,
@@ -980,33 +985,33 @@ impl EnvBuilder {
         );
         #[cfg(feature = "federated")]
         {
-            builder_parts.federation_plan = federation_plan;
+            runtime_assembly.federation_plan = federation_plan;
         }
 
-        self.build_runtime_actions(&partition_map, &mut builder_parts)?;
+        self.build_runtime_actions(&partition_map, &mut runtime_assembly)?;
         #[cfg(feature = "federated")]
-        self.build_federated_inbound_endpoints(&mut builder_parts)?;
-        self.build_runtime_ports(&partition_map, &mut builder_parts, &port_bindings)?;
+        self.build_federated_inbound_endpoints(&mut runtime_assembly)?;
+        self.build_runtime_ports(&partition_map, &mut runtime_assembly, &port_bindings)?;
 
-        // this must be done before build_runtime_reactors, since that drains self.reaction_builders
+        // this must be done before build_runtime_reactors, since that drains self.reaction_specs
         let reaction_levels = self.build_runtime_level_map(&port_bindings)?;
 
-        self.build_runtime_reactors(&partition_map, &mut builder_parts)?;
-        self.build_runtime_modes(&mut builder_parts)?;
-        self.assign_runtime_reactor_scope_parents(&mut builder_parts)?;
-        self.assign_runtime_action_and_port_scopes(&mut builder_parts, &port_bindings)?;
+        self.build_runtime_reactors(&partition_map, &mut runtime_assembly)?;
+        self.build_runtime_modes(&mut runtime_assembly)?;
+        self.assign_runtime_reactor_scope_parents(&mut runtime_assembly)?;
+        self.assign_runtime_action_and_port_scopes(&mut runtime_assembly, &port_bindings)?;
 
         // must be done last, since building other parts may add new reactions
-        self.build_runtime_reactions(&partition_map, &mut builder_parts, &reaction_levels)?;
+        self.build_runtime_reactions(&partition_map, &mut runtime_assembly, &reaction_levels)?;
 
         #[cfg(feature = "replay")]
-        self.build_runtime_replayers(&mut builder_parts)?;
+        self.build_runtime_replayers(&mut runtime_assembly)?;
 
-        for enclave in builder_parts.enclaves.values_mut() {
+        for enclave in runtime_assembly.enclaves.values_mut() {
             let modal_schedule_index = build_modal_schedule_index(&enclave.graph);
             enclave.graph.modal_schedule_index = modal_schedule_index;
         }
 
-        Ok(builder_parts)
+        Ok(runtime_assembly)
     }
 }

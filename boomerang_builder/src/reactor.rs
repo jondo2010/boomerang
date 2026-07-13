@@ -1,19 +1,19 @@
 use std::fmt::Debug;
 
 use super::{
-    ActionTag, ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderModeEffect,
-    BuilderPortKey, BuilderReactionKey, EnvBuilder, Input, Logical, Output, Physical, PortBank,
-    PortTag, TimerActionKey, TimerSpec, TypedActionKey, TypedPortKey,
+    ActionTag, ActionType, Assembly, AssemblyActionKey, AssemblyError, AssemblyFqn,
+    AssemblyPortKey, AssemblyReactionKey, Input, Logical, ModeEffectSpec, Output, Physical,
+    PortBank, PortTag, TimerActionKey, TimerSpec, TypedActionKey, TypedPortKey,
 };
 use crate::runtime;
 use slotmap::SecondaryMap;
 
 slotmap::new_key_type! {
-    pub struct BuilderReactorKey;
+    pub struct AssemblyReactorKey;
 }
 
 slotmap::new_key_type! {
-    pub struct BuilderModeKey;
+    pub struct AssemblyModeKey;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,7 +102,7 @@ impl From<bool> for ReactorPlacement {
     }
 }
 
-impl petgraph::graph::GraphIndex for BuilderReactorKey {
+impl petgraph::graph::GraphIndex for AssemblyReactorKey {
     fn index(&self) -> usize {
         self.0.as_ffi() as usize
     }
@@ -131,14 +131,14 @@ impl<T: runtime::ReactorData> Debug for ReactorState<T> {
     }
 }
 
-/// `ParentReactorBuilder` is implemented for Reactor elements that can have a parent Reactor
-pub trait ParentReactorBuilder {
-    fn parent_reactor_key(&self) -> Option<BuilderReactorKey>;
+/// `ParentReactorSpec` is implemented for Reactor elements that can have a parent Reactor
+pub trait ParentReactorSpec {
+    fn parent_reactor_key(&self) -> Option<AssemblyReactorKey>;
 }
 
-/// ReactorBuilder is the Builder-side definition of a Reactor, and is type-erased
+/// `ReactorSpec` is the assembly-side definition of a reactor and is type-erased.
 #[derive(Debug)]
-pub struct ReactorBuilder {
+pub struct ReactorSpec {
     /// The instantiated/child name of the Reactor
     name: String,
     /// The user's Reactor
@@ -146,17 +146,17 @@ pub struct ReactorBuilder {
     /// The top-level/class name of the Reactor
     type_name: String,
     /// Optional parent reactor key
-    pub parent_reactor_key: Option<BuilderReactorKey>,
+    pub parent_reactor_key: Option<AssemblyReactorKey>,
     /// Enclosing parent mode scope, if this reactor instance was declared inside a mode.
-    pub scope_mode: Option<BuilderModeKey>,
+    pub scope_mode: Option<AssemblyModeKey>,
     /// Reactions in this ReactorType
-    pub reactions: SecondaryMap<BuilderReactionKey, ()>,
+    pub reactions: SecondaryMap<AssemblyReactionKey, ()>,
     /// Modes in this Reactor
-    pub modes: SecondaryMap<BuilderModeKey, ()>,
+    pub modes: SecondaryMap<AssemblyModeKey, ()>,
     /// Ports in this Reactor
-    pub ports: SecondaryMap<BuilderPortKey, ()>,
+    pub ports: SecondaryMap<AssemblyPortKey, ()>,
     /// Actions in this Reactor
-    pub actions: SecondaryMap<BuilderActionKey, ()>,
+    pub actions: SecondaryMap<AssemblyActionKey, ()>,
     /// The bank info of the bank that this Reactor belongs to, if any.
     pub bank_info: Option<runtime::BankInfo>,
     /// Placement metadata for this Reactor instance.
@@ -164,22 +164,22 @@ pub struct ReactorBuilder {
     /// Whether this Reactor is an enclave
     pub is_enclave: bool,
     /// Initial mode for this reactor
-    pub initial_mode: Option<BuilderModeKey>,
+    pub initial_mode: Option<AssemblyModeKey>,
 }
 
-impl ParentReactorBuilder for ReactorBuilder {
-    fn parent_reactor_key(&self) -> Option<BuilderReactorKey> {
+impl ParentReactorSpec for ReactorSpec {
+    fn parent_reactor_key(&self) -> Option<AssemblyReactorKey> {
         self.parent_reactor_key
     }
 }
 
-impl ReactorBuilder {
-    /// Create a new `ReactorBuilder` with the given parameters.
+impl ReactorSpec {
+    /// Create a new `ReactorSpec` with the given parameters.
     pub fn new<S: runtime::ReactorData>(
         name: &str,
         type_name: &'static str,
         reactor_state: S,
-        parent: Option<BuilderReactorKey>,
+        parent: Option<AssemblyReactorKey>,
         bank_info: Option<runtime::BankInfo>,
         placement: impl Into<ReactorPlacement>,
     ) -> Self {
@@ -228,35 +228,35 @@ impl ReactorBuilder {
         self.type_name.as_ref()
     }
 
-    /// Build this [`ReactorBuilder`] into a [`Box<dyn runtime::BaseReactor>`]
+    /// Build this [`ReactorSpec`] into a [`Box<dyn runtime::BaseReactor>`]
     pub fn into_runtime(self, name: &str) -> Box<dyn runtime::BaseReactor> {
         self.state.into_runtime(name)
     }
 }
 
-/// Builder struct used to facilitate construction of a ReactorBuilder by user/generated code.
+/// Declaration context used to record a `ReactorSpec` from user or generated code.
 #[derive(Debug)]
-pub struct ReactorBuilderState<'a, S: runtime::ReactorData = ()> {
-    /// The ReactorKey of this Builder
-    reactor_key: BuilderReactorKey,
-    env: &'a mut EnvBuilder,
+pub struct ReactorContext<'a, S: runtime::ReactorData = ()> {
+    /// The assembly key of this reactor declaration.
+    reactor_key: AssemblyReactorKey,
+    assembly: &'a mut Assembly,
     startup_action: TypedActionKey,
     shutdown_action: TypedActionKey,
-    current_mode: Option<BuilderModeKey>,
+    current_mode: Option<AssemblyModeKey>,
     phantom: std::marker::PhantomData<S>,
 }
 
-impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
+impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
     pub(super) fn new(
         name: &str,
-        parent: Option<BuilderReactorKey>,
+        parent: Option<AssemblyReactorKey>,
         bank_info: Option<runtime::BankInfo>,
         reactor_state: S,
         placement: impl Into<ReactorPlacement>,
-        env: &'a mut EnvBuilder,
+        assembly: &'a mut Assembly,
     ) -> Self {
         let type_name = std::any::type_name::<S>();
-        let reactor_key = env.reactor_builders.insert(ReactorBuilder::new(
+        let reactor_key = assembly.reactor_specs.insert(ReactorSpec::new(
             name,
             type_name,
             reactor_state,
@@ -265,17 +265,17 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
             placement,
         ));
 
-        let startup_action = env
+        let startup_action = assembly
             .add_startup_action("__startup", reactor_key)
             .expect("Duplicate startup Action?");
 
-        let shutdown_action = env
+        let shutdown_action = assembly
             .add_shutdown_action("__shutdown", reactor_key)
             .expect("Duplicate shutdown Action?");
 
         Self {
             reactor_key,
-            env,
+            assembly,
             startup_action,
             shutdown_action,
             current_mode: None,
@@ -283,21 +283,21 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         }
     }
 
-    /// Create a new `ReactorBuilderState` for a pre-existing reactor
+    /// Create a new `ReactorContext` for a pre-existing reactor
     pub(super) fn from_pre_existing(
-        reactor_key: BuilderReactorKey,
-        env: &'a mut EnvBuilder,
+        reactor_key: AssemblyReactorKey,
+        assembly: &'a mut Assembly,
     ) -> Self {
         // Find the startup and shutdown actions for this reactor
-        let startup_action = env
-            .action_builders
+        let startup_action = assembly
+            .action_specs
             .iter()
             .find(|(_, action)| matches!(action.r#type(), ActionType::Timer(TimerSpec { period, offset }) if period.is_none() && offset.is_none()) && action.reactor_key() == reactor_key)
             .map(|(action_key, _)| action_key)
             .expect("Startup action not found");
 
-        let shutdown_action = env
-            .action_builders
+        let shutdown_action = assembly
+            .action_specs
             .iter()
             .find(|(_, action)| {
                 matches!(action.r#type(), ActionType::Shutdown)
@@ -308,7 +308,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
 
         Self {
             reactor_key,
-            env,
+            assembly,
             startup_action: TypedActionKey::from(startup_action),
             shutdown_action: TypedActionKey::from(shutdown_action),
             current_mode: None,
@@ -316,34 +316,34 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         }
     }
 
-    /// Get the [`EnvBuilder`] for this `ReactorBuilder`
-    pub fn env(&mut self) -> &mut EnvBuilder {
-        self.env
+    /// Get the [`Assembly`] for this `ReactorSpec`
+    pub fn assembly(&mut self) -> &mut Assembly {
+        self.assembly
     }
 
-    /// Get the [`BuilderReactorKey`] for this `ReactorBuilder`
-    pub fn key(&self) -> BuilderReactorKey {
+    /// Get the [`AssemblyReactorKey`] for this `ReactorSpec`
+    pub fn key(&self) -> AssemblyReactorKey {
         self.reactor_key
     }
 
     #[doc(hidden)]
-    pub fn set_scope_mode(&mut self, mode: BuilderModeKey) -> Result<(), BuilderError> {
-        let mode_builder = self.env.mode_builders.get(mode).ok_or_else(|| {
-            BuilderError::ReactionBuilderError(format!("Unknown mode key {mode:?}"))
+    pub fn set_scope_mode(&mut self, mode: AssemblyModeKey) -> Result<(), AssemblyError> {
+        let mode_spec = self.assembly.mode_specs.get(mode).ok_or_else(|| {
+            AssemblyError::ReactionDeclarationError(format!("Unknown mode key {mode:?}"))
         })?;
-        let reactor_builder = &self.env.reactor_builders[self.reactor_key];
-        if Some(mode_builder.reactor_key) != reactor_builder.parent_reactor_key {
-            return Err(BuilderError::ReactionBuilderError(format!(
+        let reactor_spec = &self.assembly.reactor_specs[self.reactor_key];
+        if Some(mode_spec.reactor_key) != reactor_spec.parent_reactor_key {
+            return Err(AssemblyError::ReactionDeclarationError(format!(
                 "Mode '{}' does not enclose reactor '{}'",
-                mode_builder.name,
-                reactor_builder.name()
+                mode_spec.name,
+                reactor_spec.name()
             )));
         }
-        self.env.reactor_builders[self.reactor_key].scope_mode = Some(mode);
+        self.assembly.reactor_specs[self.reactor_key].scope_mode = Some(mode);
         Ok(())
     }
 
-    pub fn current_mode(&self) -> Option<BuilderModeKey> {
+    pub fn current_mode(&self) -> Option<AssemblyModeKey> {
         self.current_mode
     }
 
@@ -362,34 +362,36 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         &mut self,
         name: &str,
         spec: TimerSpec,
-    ) -> Result<TimerActionKey, BuilderError> {
-        self.env
+    ) -> Result<TimerActionKey, AssemblyError> {
+        self.assembly
             .add_timer_action_in_scope(name, self.reactor_key, self.current_mode, spec)
     }
 
     /// Add a new action to the reactor.
     ///
-    /// This method forwards to the implementation at
-    /// [`crate::env::EnvBuilder::internal_add_action`].
+    /// This method records the action in the underlying assembly.
     pub fn add_action<T: runtime::ReactorData, Q: ActionTag>(
         &mut self,
         name: &str,
         min_delay: Option<runtime::Duration>,
-    ) -> Result<TypedActionKey<T, Q>, BuilderError> {
-        self.env
-            .add_action_in_scope::<T, Q>(name, min_delay, self.reactor_key, self.current_mode)
+    ) -> Result<TypedActionKey<T, Q>, AssemblyError> {
+        self.assembly.add_action_in_scope::<T, Q>(
+            name,
+            min_delay,
+            self.reactor_key,
+            self.current_mode,
+        )
     }
 
     /// Add a new logical action to the reactor.
     ///
-    /// This method forwards to the implementation at
-    /// [`crate::env::EnvBuilder::add_logical_action`].
+    /// This method records a logical action in the underlying assembly.
     pub fn add_logical_action<T: runtime::ReactorData>(
         &mut self,
         name: &str,
         min_delay: Option<runtime::Duration>,
-    ) -> Result<TypedActionKey<T, Logical>, BuilderError> {
-        self.env.add_action_in_scope::<T, Logical>(
+    ) -> Result<TypedActionKey<T, Logical>, AssemblyError> {
+        self.assembly.add_action_in_scope::<T, Logical>(
             name,
             min_delay,
             self.reactor_key,
@@ -401,8 +403,8 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         &mut self,
         name: &str,
         min_delay: Option<runtime::Duration>,
-    ) -> Result<TypedActionKey<T, Physical>, BuilderError> {
-        self.env.add_action_in_scope::<T, Physical>(
+    ) -> Result<TypedActionKey<T, Physical>, AssemblyError> {
+        self.assembly.add_action_in_scope::<T, Physical>(
             name,
             min_delay,
             self.reactor_key,
@@ -415,49 +417,50 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         &mut self,
         name: &str,
         kind: impl Into<ModeKind>,
-    ) -> Result<BuilderModeKey, BuilderError> {
-        self.env.add_mode(name, self.reactor_key, kind)
+    ) -> Result<AssemblyModeKey, AssemblyError> {
+        self.assembly.add_mode(name, self.reactor_key, kind)
     }
 
     pub fn mode_effect(
         &self,
-        mode: BuilderModeKey,
+        mode: AssemblyModeKey,
         transition: runtime::TransitionKind,
-    ) -> Result<BuilderModeEffect, BuilderError> {
-        self.env.mode_effect(self.reactor_key, mode, transition)
+    ) -> Result<ModeEffectSpec, AssemblyError> {
+        self.assembly
+            .mode_effect(self.reactor_key, mode, transition)
     }
 
     pub fn reset_mode_effect(
         &self,
-        mode: BuilderModeKey,
-    ) -> Result<BuilderModeEffect, BuilderError> {
+        mode: AssemblyModeKey,
+    ) -> Result<ModeEffectSpec, AssemblyError> {
         self.mode_effect(mode, runtime::TransitionKind::Reset)
     }
 
     pub fn history_mode_effect(
         &self,
-        mode: BuilderModeKey,
-    ) -> Result<BuilderModeEffect, BuilderError> {
+        mode: AssemblyModeKey,
+    ) -> Result<ModeEffectSpec, AssemblyError> {
         self.mode_effect(mode, runtime::TransitionKind::History)
     }
 
     pub fn in_mode<R>(
         &mut self,
-        mode: BuilderModeKey,
-        f: impl FnOnce(&mut Self) -> Result<R, BuilderError>,
-    ) -> Result<R, BuilderError> {
-        let mode_builder = self.env.mode_builders.get(mode).ok_or_else(|| {
-            BuilderError::ReactionBuilderError(format!("Unknown mode key {mode:?}"))
+        mode: AssemblyModeKey,
+        f: impl FnOnce(&mut Self) -> Result<R, AssemblyError>,
+    ) -> Result<R, AssemblyError> {
+        let mode_spec = self.assembly.mode_specs.get(mode).ok_or_else(|| {
+            AssemblyError::ReactionDeclarationError(format!("Unknown mode key {mode:?}"))
         })?;
-        if mode_builder.reactor_key != self.reactor_key {
-            return Err(BuilderError::ReactionBuilderError(format!(
+        if mode_spec.reactor_key != self.reactor_key {
+            return Err(AssemblyError::ReactionDeclarationError(format!(
                 "Mode '{}' does not belong to reactor '{}'",
-                mode_builder.name,
-                self.env.reactor_builders[self.reactor_key].name()
+                mode_spec.name,
+                self.assembly.reactor_specs[self.reactor_key].name()
             )));
         }
         if self.current_mode.is_some() {
-            return Err(BuilderError::ReactionBuilderError(
+            return Err(AssemblyError::ReactionDeclarationError(
                 "Nested mode blocks are not supported".to_owned(),
             ));
         }
@@ -473,14 +476,14 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         &mut self,
         name: &str,
         bank_info: Option<runtime::BankInfo>,
-    ) -> Result<TypedPortKey<T, Q>, BuilderError> {
+    ) -> Result<TypedPortKey<T, Q>, AssemblyError> {
         if self.current_mode.is_some() {
-            return Err(BuilderError::ReactionBuilderError(format!(
+            return Err(AssemblyError::ReactionDeclarationError(format!(
                 "Port '{name}' cannot be declared inside a mode"
             )));
         }
         tracing::debug!("Adding port: {name}");
-        self.env
+        self.assembly
             .internal_add_port::<T, Q>(name, self.reactor_key, bank_info)
             .map(Into::into)
     }
@@ -489,7 +492,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
     pub fn add_ports<T: runtime::ReactorData, Q: PortTag, const N: usize>(
         &mut self,
         name: &str,
-    ) -> Result<[TypedPortKey<T, Q>; N], BuilderError> {
+    ) -> Result<[TypedPortKey<T, Q>; N], AssemblyError> {
         let bank = self.add_ports_bank::<T, Q>(name, N)?;
         Ok(bank
             .into_vec()
@@ -502,7 +505,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         &mut self,
         name: &str,
         len: usize,
-    ) -> Result<PortBank<T, Q>, BuilderError> {
+    ) -> Result<PortBank<T, Q>, AssemblyError> {
         let mut ports = Vec::with_capacity(len);
         for i in 0..len {
             let port =
@@ -516,7 +519,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
     pub fn add_input_port<T: runtime::ReactorData>(
         &mut self,
         name: &str,
-    ) -> Result<TypedPortKey<T, Input>, BuilderError> {
+    ) -> Result<TypedPortKey<T, Input>, AssemblyError> {
         self.add_port::<T, Input>(name, None)
     }
 
@@ -524,7 +527,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
     pub fn add_output_port<T: runtime::ReactorData>(
         &mut self,
         name: &str,
-    ) -> Result<TypedPortKey<T, Output>, BuilderError> {
+    ) -> Result<TypedPortKey<T, Output>, AssemblyError> {
         self.add_port::<T, Output>(name, None)
     }
 
@@ -532,7 +535,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
     pub fn add_input_ports<T: runtime::ReactorData, const N: usize>(
         &mut self,
         name: &str,
-    ) -> Result<[TypedPortKey<T, Input>; N], BuilderError> {
+    ) -> Result<[TypedPortKey<T, Input>; N], AssemblyError> {
         self.add_ports(name)
     }
 
@@ -541,7 +544,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         &mut self,
         name: &str,
         len: usize,
-    ) -> Result<PortBank<T, Input>, BuilderError> {
+    ) -> Result<PortBank<T, Input>, AssemblyError> {
         self.add_ports_bank(name, len)
     }
 
@@ -549,7 +552,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
     pub fn add_output_ports<T: runtime::ReactorData, const N: usize>(
         &mut self,
         name: &str,
-    ) -> Result<[TypedPortKey<T, Output>; N], BuilderError> {
+    ) -> Result<[TypedPortKey<T, Output>; N], AssemblyError> {
         self.add_ports(name)
     }
 
@@ -558,25 +561,25 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         &mut self,
         name: &str,
         len: usize,
-    ) -> Result<PortBank<T, Output>, BuilderError> {
+    ) -> Result<PortBank<T, Output>, AssemblyError> {
         self.add_ports_bank(name, len)
     }
 
     /// Add a new child reactor using a closure to build it.
-    pub fn add_child_with<F>(&mut self, f: F) -> Result<BuilderReactorKey, BuilderError>
+    pub fn add_child_with<F>(&mut self, f: F) -> Result<AssemblyReactorKey, AssemblyError>
     where
-        F: FnOnce(BuilderReactorKey, &mut EnvBuilder) -> Result<BuilderReactorKey, BuilderError>,
+        F: FnOnce(AssemblyReactorKey, &mut Assembly) -> Result<AssemblyReactorKey, AssemblyError>,
     {
-        let child = f(self.reactor_key, self.env)?;
-        if self.env.reactor_builders[child].parent_reactor_key != Some(self.reactor_key) {
-            return Err(BuilderError::ReactionBuilderError(format!(
-                "Child builder returned reactor '{}' that is not contained by '{}'",
-                self.env.reactor_builders[child].name(),
-                self.env.reactor_builders[self.reactor_key].name()
+        let child = f(self.reactor_key, self.assembly)?;
+        if self.assembly.reactor_specs[child].parent_reactor_key != Some(self.reactor_key) {
+            return Err(AssemblyError::ReactionDeclarationError(format!(
+                "Child declaration returned reactor '{}' that is not contained by '{}'",
+                self.assembly.reactor_specs[child].name(),
+                self.assembly.reactor_specs[self.reactor_key].name()
             )));
         }
         if let Some(mode) = self.current_mode {
-            self.env.reactor_builders[child].scope_mode = Some(mode);
+            self.assembly.reactor_specs[child].scope_mode = Some(mode);
         }
         Ok(child)
     }
@@ -589,13 +592,13 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         port_b_key: TypedPortKey<T, Q2, A2>,
         after: Option<runtime::Duration>,
         physical: bool,
-    ) -> Result<(), BuilderError>
+    ) -> Result<(), AssemblyError>
     where
         T: runtime::ReactorData + Clone,
         Q1: PortTag,
         Q2: PortTag,
     {
-        self.env.add_port_connection_in_scope::<T, _, _>(
+        self.assembly.add_port_connection_in_scope::<T, _, _>(
             port_a_key,
             port_b_key,
             self.current_mode,
@@ -612,7 +615,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         ports_to: impl Iterator<Item = TypedPortKey<T, Q2, A2>>,
         after: Option<runtime::Duration>,
         physical: bool,
-    ) -> Result<(), BuilderError>
+    ) -> Result<(), AssemblyError>
     where
         T: runtime::ReactorData + Clone,
         Q1: PortTag,
@@ -622,7 +625,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         let ports_to: Vec<_> = ports_to.collect();
 
         if ports_from.len() != ports_to.len() {
-            return Err(BuilderError::PortConnectionLengthMismatch {
+            return Err(AssemblyError::PortConnectionLengthMismatch {
                 from: ports_from.len(),
                 to: ports_to.len(),
             });
@@ -641,7 +644,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         ports_to: impl Iterator<Item = TypedPortKey<T, Q2, A2>>,
         after: Option<runtime::Duration>,
         physical: bool,
-    ) -> Result<(), BuilderError>
+    ) -> Result<(), AssemblyError>
     where
         T: runtime::ReactorData + Clone,
         Q1: PortTag,
@@ -660,7 +663,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         ports_to: impl Iterator<Item = TypedPortKey<T, Q2, A2>>,
         after: Option<runtime::Duration>,
         physical: bool,
-    ) -> Result<(), BuilderError>
+    ) -> Result<(), AssemblyError>
     where
         T: runtime::ReactorData + Clone,
         Q1: PortTag,
@@ -677,17 +680,17 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         Ok(())
     }
 
-    pub fn finish(self) -> Result<BuilderReactorKey, BuilderError> {
-        self.env.validate_reactions()?;
+    pub fn finish(self) -> Result<AssemblyReactorKey, AssemblyError> {
+        self.assembly.validate_reactions()?;
         Ok(self.reactor_key)
     }
 
-    /// Find a PhysicalAction globally in the EnvBuilder given its fully-qualified name
+    /// Find a PhysicalAction globally in the Assembly given its fully-qualified name
     pub fn find_physical_action_by_fqn(
         &self,
-        action_fqn: impl Into<BuilderFqn>,
-    ) -> Result<BuilderActionKey, BuilderError> {
-        self.env.find_physical_action_by_fqn(action_fqn)
+        action_fqn: impl Into<AssemblyFqn>,
+    ) -> Result<AssemblyActionKey, AssemblyError> {
+        self.assembly.find_physical_action_by_fqn(action_fqn)
     }
 
     /// Add a recorder for the given action key.
@@ -695,17 +698,17 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
     pub fn add_action_recorder<T, Q>(
         &mut self,
         action_key: TypedActionKey<T, Q>,
-    ) -> Result<(), BuilderError>
+    ) -> Result<(), AssemblyError>
     where
         T: runtime::ReactorData + serde::Serialize,
         Q: ActionTag,
     {
-        let topic = self.env.fqn_for(action_key, false)?.to_string();
+        let topic = self.assembly.fqn_for(action_key, false)?.to_string();
         tracing::debug!("Adding recorder for action {topic}",);
         let _ = self
             .add_reaction(Some("recorder"))
             .with_trigger(action_key)
-            .with_defered_reaction_fn(move |runtime_parts| {
+            .with_deferred_reaction_factory(move |runtime_parts| {
                 let (enclave_key, action_key) =
                     runtime_parts.aliases.action_aliases[action_key.into()];
                 Box::new(
@@ -722,17 +725,18 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
     pub fn add_action_replayer<T, Q>(
         &mut self,
         action_key: TypedActionKey<T, Q>,
-    ) -> Result<(), BuilderError>
+    ) -> Result<(), AssemblyError>
     where
         T: runtime::ReactorData + for<'de> serde::de::Deserialize<'de>,
         Q: ActionTag,
     {
-        // Add a replayer builder
-        self.env.add_replayer(action_key, move |runtime_parts| {
-            let (_enclave_key, action_key) =
-                runtime_parts.aliases.action_aliases[action_key.into()];
-            Box::new(runtime::replay::TypedReplayer::<T>::new(action_key))
-        })?;
+        // Add a replay factory.
+        self.assembly
+            .add_replayer(action_key, move |runtime_parts| {
+                let (_enclave_key, action_key) =
+                    runtime_parts.aliases.action_aliases[action_key.into()];
+                Box::new(runtime::replay::TypedReplayer::<T>::new(action_key))
+            })?;
         Ok(())
     }
 }

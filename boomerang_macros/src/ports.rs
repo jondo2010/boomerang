@@ -209,10 +209,10 @@ impl ToTokens for Model {
 
                     match port_type {
                             PortType::Input => quote! {
-                                let #ident = builder.add_input_ports::<#element_type, #len_expr>(#name_str)?;
+                                let #ident = ctx.add_input_ports::<#element_type, #len_expr>(#name_str)?;
                             },
                             PortType::Output => quote! {
-                                let #ident = builder.add_output_ports::<#element_type, #len_expr>(#name_str)?;
+                                let #ident = ctx.add_output_ports::<#element_type, #len_expr>(#name_str)?;
                             },
                         }
                     },
@@ -220,17 +220,17 @@ impl ToTokens for Model {
                         let len_expr = len.as_ref().expect("len expr");
                         match port_type {
                             PortType::Input => quote! {
-                                let #ident = builder.add_input_bank::<#ty>(#name_str, #len_expr)?;
+                                let #ident = ctx.add_input_bank::<#ty>(#name_str, #len_expr)?;
                                 let #for_fn_ident = #ident.clone();
                             },
                             PortType::Output => quote! {
-                                let #ident = builder.add_output_bank::<#ty>(#name_str, #len_expr)?;
+                                let #ident = ctx.add_output_bank::<#ty>(#name_str, #len_expr)?;
                                 let #for_fn_ident = #ident.clone();
                             },
                         }
                     }
                     _ => {
-                        quote!(let #ident = builder.add_port::<#ty, #dir>(#name_str, None)?;)
+                        quote!(let #ident = ctx.add_port::<#ty, #dir>(#name_str, None)?;)
                     }
                 }
             },
@@ -262,26 +262,26 @@ impl ToTokens for Model {
                 fn build_with<F, S>(f: F) -> impl ::boomerang::builder::Reactor<S, Ports = #struct_name #ty_generics>
                 where
                     F: Fn(
-                            &mut ::boomerang::builder::ReactorBuilderState<'_, S>,
+                            &mut ::boomerang::builder::ReactorContext<'_, S>,
                             Self::Fields,
-                        ) -> Result<(), ::boomerang::builder::BuilderError>
+                        ) -> Result<(), ::boomerang::builder::AssemblyError>
                         + 'static,
                     S: ::boomerang::runtime::ReactorData,
                 {
                     move |name: &str,
                      state: S,
-                     parent: Option<::boomerang::builder::BuilderReactorKey>,
-                     scope_mode: Option<::boomerang::builder::BuilderModeKey>,
+                     parent: Option<::boomerang::builder::AssemblyReactorKey>,
+                     scope_mode: Option<::boomerang::builder::AssemblyModeKey>,
                      bank_info: Option<::boomerang::runtime::BankInfo>,
                      placement: ::boomerang::builder::ReactorPlacement,
-                     env: &mut ::boomerang::builder::EnvBuilder| {
-                        let mut builder = env.add_reactor(name, parent, bank_info, state, placement);
+                     assembly: &mut ::boomerang::builder::Assembly| {
+                        let mut ctx = assembly.add_reactor(name, parent, bank_info, state, placement);
                         if let Some(scope_mode) = scope_mode {
-                            builder.set_scope_mode(scope_mode)?;
+                            ctx.set_scope_mode(scope_mode)?;
                         }
                         #(#create_ports)*
-                        f(&mut builder, (#(#local_names,)*))?;
-                        builder.finish()?;
+                        f(&mut ctx, (#(#local_names,)*))?;
+                        ctx.finish()?;
                         Ok(#struct_name {
                             #(#field_inits,)*
                         })

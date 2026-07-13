@@ -1,15 +1,14 @@
-//! Builder for actions. This is typically done using the builder methods on [`crate::builder::env`]
-//! and [`crate::builder::reactor`].
+//! Action specifications recorded through [`crate::Assembly`] and [`crate::ReactorContext`].
 //!
-//! An action, like a port (see [`crate::builder::PortBuilder`]), can carry data, but unlike a port,
+//! An action, like a port (see [`crate::PortSpec`]), can carry data, but unlike a port,
 //! an action is visible only within the reactor that defines it.
 
 use std::{fmt::Debug, marker::PhantomData};
 
-use super::{BuilderModeKey, BuilderReactorKey};
-use crate::{runtime, ParentReactorBuilder};
+use super::{AssemblyModeKey, AssemblyReactorKey};
+use crate::{runtime, ParentReactorSpec};
 
-slotmap::new_key_type! {pub struct BuilderActionKey;}
+slotmap::new_key_type! {pub struct AssemblyActionKey;}
 
 #[derive(Copy, Clone, Debug)]
 pub struct Logical;
@@ -29,11 +28,11 @@ impl ActionTag for Physical {
     const IS_LOGICAL: bool = false;
 }
 
-/// `TypedActionKey` is a typed wrapper around [`BuilderActionKey`] that is used to associate a type
+/// `TypedActionKey` is a typed wrapper around [`AssemblyActionKey`] that is used to associate a type
 /// with an action. This is used to ensure that the type of the action matches the type of the port
 /// that it is connected to.
 #[derive(Default, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub struct TypedActionKey<T = (), Q = Logical>(BuilderActionKey, PhantomData<(T, Q)>)
+pub struct TypedActionKey<T = (), Q = Logical>(AssemblyActionKey, PhantomData<(T, Q)>)
 where
     T: runtime::ReactorData,
     Q: ActionTag;
@@ -46,13 +45,13 @@ impl<T: runtime::ReactorData, Q: ActionTag> Clone for TypedActionKey<T, Q> {
     }
 }
 
-impl<T: runtime::ReactorData, Q: ActionTag> From<BuilderActionKey> for TypedActionKey<T, Q> {
-    fn from(key: BuilderActionKey) -> Self {
+impl<T: runtime::ReactorData, Q: ActionTag> From<AssemblyActionKey> for TypedActionKey<T, Q> {
+    fn from(key: AssemblyActionKey) -> Self {
         Self(key, PhantomData)
     }
 }
 
-impl<T: runtime::ReactorData, Q: ActionTag> From<TypedActionKey<T, Q>> for BuilderActionKey {
+impl<T: runtime::ReactorData, Q: ActionTag> From<TypedActionKey<T, Q>> for AssemblyActionKey {
     fn from(key: TypedActionKey<T, Q>) -> Self {
         key.0
     }
@@ -60,10 +59,10 @@ impl<T: runtime::ReactorData, Q: ActionTag> From<TypedActionKey<T, Q>> for Build
 
 /// `PhysicalActionKey` is a type-erased physical Action.
 #[derive(Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub struct PhysicalActionKey(BuilderActionKey);
+pub struct PhysicalActionKey(AssemblyActionKey);
 
-impl From<BuilderActionKey> for PhysicalActionKey {
-    fn from(value: BuilderActionKey) -> Self {
+impl From<AssemblyActionKey> for PhysicalActionKey {
+    fn from(value: AssemblyActionKey) -> Self {
         Self(value)
     }
 }
@@ -98,17 +97,17 @@ impl<T: runtime::ReactorData, Q: ActionTag> runtime::ReactionRefsExtract for Typ
     }
 }
 
-impl From<PhysicalActionKey> for BuilderActionKey {
+impl From<PhysicalActionKey> for AssemblyActionKey {
     fn from(value: PhysicalActionKey) -> Self {
         value.0
     }
 }
 
-/// `TimerActionKey` is an wrapper around [`BuilderActionKey`] for timer Actions.
+/// `TimerActionKey` is an wrapper around [`AssemblyActionKey`] for timer Actions.
 #[derive(Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub struct TimerActionKey(BuilderActionKey);
+pub struct TimerActionKey(AssemblyActionKey);
 
-impl From<TimerActionKey> for BuilderActionKey {
+impl From<TimerActionKey> for AssemblyActionKey {
     fn from(value: TimerActionKey) -> Self {
         value.0
     }
@@ -120,8 +119,8 @@ impl From<TimerActionKey> for TypedActionKey<()> {
     }
 }
 
-impl From<BuilderActionKey> for TimerActionKey {
-    fn from(value: BuilderActionKey) -> Self {
+impl From<AssemblyActionKey> for TimerActionKey {
+    fn from(value: AssemblyActionKey) -> Self {
         Self(value)
     }
 }
@@ -182,44 +181,44 @@ pub enum ActionType {
         is_logical: bool,
         /// Minimum delay between
         min_delay: Option<runtime::Duration>,
-        /// Builder function that creates the runtime action
-        build_fn: Box<dyn ActionBuilderFn>,
+        /// Factory function that creates the runtime action.
+        build_fn: Box<dyn ActionFactoryFn>,
     },
     Shutdown,
 }
 
-pub trait ActionBuilderFn: Fn(&str, runtime::ActionKey) -> Box<dyn runtime::BaseAction> {}
-impl<F> ActionBuilderFn for F where F: Fn(&str, runtime::ActionKey) -> Box<dyn runtime::BaseAction> {}
+pub trait ActionFactoryFn: Fn(&str, runtime::ActionKey) -> Box<dyn runtime::BaseAction> {}
+impl<F> ActionFactoryFn for F where F: Fn(&str, runtime::ActionKey) -> Box<dyn runtime::BaseAction> {}
 
-impl Debug for dyn ActionBuilderFn {
+impl Debug for dyn ActionFactoryFn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("dyn ActionBuilderFn").finish()
+        f.debug_tuple("dyn ActionFactoryFn").finish()
     }
 }
 
 #[derive(Debug)]
-pub struct ActionBuilder {
+pub struct ActionSpec {
     /// Name of the Action
     name: String,
-    /// The key of the Reactor that owns this ActionBuilder
-    reactor_key: BuilderReactorKey,
+    /// The key of the Reactor that owns this ActionSpec
+    reactor_key: AssemblyReactorKey,
     /// Enclosing mode scope, if this action was declared inside a mode.
-    scope_mode: Option<BuilderModeKey>,
+    scope_mode: Option<AssemblyModeKey>,
     /// Logical type of the action
     r#type: ActionType,
 }
 
-impl ParentReactorBuilder for ActionBuilder {
-    fn parent_reactor_key(&self) -> Option<BuilderReactorKey> {
+impl ParentReactorSpec for ActionSpec {
+    fn parent_reactor_key(&self) -> Option<AssemblyReactorKey> {
         Some(self.reactor_key)
     }
 }
 
-impl ActionBuilder {
+impl ActionSpec {
     pub fn new(
         name: &str,
-        reactor_key: BuilderReactorKey,
-        scope_mode: Option<BuilderModeKey>,
+        reactor_key: AssemblyReactorKey,
+        scope_mode: Option<AssemblyModeKey>,
         r#type: ActionType,
     ) -> Self {
         Self {
@@ -234,11 +233,11 @@ impl ActionBuilder {
         &self.name
     }
 
-    pub fn reactor_key(&self) -> BuilderReactorKey {
+    pub fn reactor_key(&self) -> AssemblyReactorKey {
         self.reactor_key
     }
 
-    pub fn scope_mode(&self) -> Option<BuilderModeKey> {
+    pub fn scope_mode(&self) -> Option<AssemblyModeKey> {
         self.scope_mode
     }
 

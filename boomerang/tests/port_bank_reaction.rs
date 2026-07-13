@@ -8,8 +8,7 @@ struct SinkState {
 
 #[reactor]
 fn Source(width: usize, #[output(len = width)] out: i32) -> impl Reactor {
-    builder
-        .add_reaction(Some("startup"))
+    ctx.add_reaction(Some("startup"))
         .with_startup_trigger()
         .with_effect(out)
         .with_reaction_fn(|_ctx, _state, (_startup, mut out)| {
@@ -22,8 +21,7 @@ fn Source(width: usize, #[output(len = width)] out: i32) -> impl Reactor {
 
 #[reactor(state = SinkState)]
 fn Sink(#[input(len = state.width)] input: i32) -> impl Reactor {
-    builder
-        .add_reaction(Some("inputs"))
+    ctx.add_reaction(Some("inputs"))
         .with_trigger(input)
         .with_reaction_fn(|_ctx, state, (input,)| {
             let sum = input
@@ -35,8 +33,7 @@ fn Sink(#[input(len = state.width)] input: i32) -> impl Reactor {
         })
         .finish()?;
 
-    builder
-        .add_reaction(Some("shutdown"))
+    ctx.add_reaction(Some("shutdown"))
         .with_shutdown_trigger()
         .with_reaction_fn(|_ctx, state, (_shutdown,)| {
             assert!(state.seen);
@@ -46,8 +43,8 @@ fn Sink(#[input(len = state.width)] input: i32) -> impl Reactor {
 
 #[reactor]
 fn Main() -> impl Reactor {
-    let source = builder.add_child_reactor(Source(3), "source", (), false)?;
-    let sink = builder.add_child_reactor(
+    let source = ctx.add_child_reactor(Source(3), "source", (), false)?;
+    let sink = ctx.add_child_reactor(
         Sink(),
         "sink",
         SinkState {
@@ -57,7 +54,7 @@ fn Main() -> impl Reactor {
         false,
     )?;
 
-    builder.connect_ports(source.out.iter(), sink.input.iter(), None, false)?;
+    ctx.connect_ports(source.out.iter(), sink.input.iter(), None, false)?;
 }
 
 #[test]

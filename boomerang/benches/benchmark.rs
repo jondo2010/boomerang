@@ -7,10 +7,10 @@ struct HelloBench {
 }
 
 #[reactor(state = HelloBench)]
-fn HelloBenchBuilder(#[input] in1: u32, #[output] out1: u32) -> impl Reactor {
+fn HelloBenchReactor(#[input] in1: u32, #[output] out1: u32) -> impl Reactor {
     timer! { tim1(100 msec, 1 sec) };
 
-    builder.connect_port(out1, in1, None, false)?;
+    ctx.connect_port(out1, in1, None, false)?;
 
     reaction! {
         ReactionFoo (tim1) -> out1 {
@@ -36,8 +36,8 @@ fn bench(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &_count| {
             b.iter_batched(
                 || {
-                    let mut env_builder = EnvBuilder::new();
-                    let reactor = HelloBenchBuilder();
+                    let mut assembly = Assembly::new();
+                    let reactor = HelloBenchReactor();
                     let _reactor = reactor
                         .build(
                             "benchmark",
@@ -46,12 +46,12 @@ fn bench(c: &mut Criterion) {
                             None,
                             None,
                             false,
-                            &mut env_builder,
+                            &mut assembly,
                         )
                         .unwrap();
                     let config = runtime::Config::default().with_fast_forward(true);
-                    let BuilderRuntimeParts { enclaves, .. } =
-                        env_builder.into_runtime_parts(&config).unwrap();
+                    let RuntimeAssembly { enclaves, .. } =
+                        assembly.into_runtime_assembly(&config).unwrap();
                     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
                     runtime::Scheduler::new(enclave_key, enclave, config)
                 },

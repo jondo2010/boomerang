@@ -13,11 +13,10 @@ fn Count<T: CountData>(
     #[output] c: T,
     #[state] count: T,
 ) -> impl Reactor<CountState<T>, Ports = CountPorts<T>> {
-    let t = builder.add_timer("t", TimerSpec::default().with_period(Duration::seconds(1)))?;
-    let shutdown = builder.get_shutdown_action();
+    let t = ctx.add_timer("t", TimerSpec::default().with_period(Duration::seconds(1)))?;
+    let shutdown = ctx.get_shutdown_action();
 
-    builder
-        .add_reaction(None)
+    ctx.add_reaction(None)
         .with_trigger(t)
         .with_effect(c)
         .with_reaction_fn(|_ctx, state, (_t, mut c)| {
@@ -27,8 +26,7 @@ fn Count<T: CountData>(
         })
         .finish()?;
 
-    builder
-        .add_reaction(None)
+    ctx.add_reaction(None)
         .with_trigger(shutdown)
         .with_reaction_fn(|_ctx, state, _| {
             assert_eq!(state.count, 4, "expected 4, got {:?}", state.count);

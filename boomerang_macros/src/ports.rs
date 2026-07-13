@@ -262,7 +262,7 @@ impl ToTokens for Model {
                 fn build_with<F, S>(f: F) -> impl ::boomerang::builder::Reactor<S, Ports = #struct_name #ty_generics>
                 where
                     F: Fn(
-                            &mut ::boomerang::builder::ReactorBuilderState<'_, S>,
+                            &mut ::boomerang::builder::ReactorContext<'_, S>,
                             Self::Fields,
                         ) -> Result<(), ::boomerang::builder::BuilderError>
                         + 'static,

@@ -1350,7 +1350,7 @@ fn test_port_binding() {
         .find_port_by_name::<(), Input>("i2b", child2b)
         .unwrap();
 
-    let _ = ReactorBuilderState::from_pre_existing(_main, &mut assembly)
+    let _ = ReactorContext::from_pre_existing(_main, &mut assembly)
         .add_reaction(Some("start"))
         .with_trigger(startup_key)
         .with_effect(i1)

@@ -14,4 +14,4 @@ of the Reactors and Reactions have added their graph state into the [`Assembly`]
 is called to generate the data for the Runtime.
 
 Most users will not need to interact with Builder directly, but for specialized cases it can be useful to manually build
-reactors with [`Assembly`] and [`ReactorBuilderState`], or to adjust the [`Assembly`] graph after reactors have been built.
+reactors with [`Assembly`] and [`ReactorContext`], or to adjust the [`Assembly`] graph after reactors have been built.

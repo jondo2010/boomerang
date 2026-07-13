@@ -1,7 +1,7 @@
 //! This module provides traits and implementations for building reactors
 use crate::{
     runtime, Assembly, AssemblyModeKey, AssemblyReactorKey, BuilderError, PartialReactionBuilder,
-    ReactorBuilderState, ReactorPlacement,
+    ReactorContext, ReactorPlacement,
 };
 
 pub trait Reactor<State: runtime::ReactorData = ()>: Sized {
@@ -79,11 +79,11 @@ pub trait ReactorPorts {
     /// Build the reactor with the given closure
     fn build_with<F, S>(f: F) -> impl Reactor<S, Ports = Self>
     where
-        F: Fn(&mut ReactorBuilderState<'_, S>, Self::Fields) -> Result<(), BuilderError> + 'static,
+        F: Fn(&mut ReactorContext<'_, S>, Self::Fields) -> Result<(), BuilderError> + 'static,
         S: runtime::ReactorData;
 }
 
-impl<S: runtime::ReactorData> ReactorBuilderState<'_, S> {
+impl<S: runtime::ReactorData> ReactorContext<'_, S> {
     pub fn add_reaction(&mut self, name: Option<&str>) -> PartialReactionBuilder<'_, S> {
         let reactor_key = self.key();
         let current_mode = self.current_mode();

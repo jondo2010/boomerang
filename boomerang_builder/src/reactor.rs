@@ -236,7 +236,7 @@ impl ReactorSpec {
 
 /// Builder struct used to facilitate construction of a ReactorSpec by user/generated code.
 #[derive(Debug)]
-pub struct ReactorBuilderState<'a, S: runtime::ReactorData = ()> {
+pub struct ReactorContext<'a, S: runtime::ReactorData = ()> {
     /// The ReactorKey of this Builder
     reactor_key: AssemblyReactorKey,
     assembly: &'a mut Assembly,
@@ -246,7 +246,7 @@ pub struct ReactorBuilderState<'a, S: runtime::ReactorData = ()> {
     phantom: std::marker::PhantomData<S>,
 }
 
-impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
+impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
     pub(super) fn new(
         name: &str,
         parent: Option<AssemblyReactorKey>,
@@ -283,7 +283,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         }
     }
 
-    /// Create a new `ReactorBuilderState` for a pre-existing reactor
+    /// Create a new `ReactorContext` for a pre-existing reactor
     pub(super) fn from_pre_existing(
         reactor_key: AssemblyReactorKey,
         assembly: &'a mut Assembly,

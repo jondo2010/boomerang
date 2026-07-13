@@ -20,7 +20,7 @@ use super::{
     reaction::{BuilderModeEffect, ReactionSpec},
     runtime, ActionType, AssemblyActionKey, AssemblyModeKey, AssemblyPortKey, AssemblyReactionKey,
     AssemblyReactorKey, BuilderError, BuilderFqn, Input, Logical, ModeKind, Output, PortTag,
-    ReactorBuilderState, ReactorPlacement, ReactorSpec, TypedActionKey, TypedPortKey,
+    ReactorContext, ReactorPlacement, ReactorSpec, TypedActionKey, TypedPortKey,
 };
 use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, EdgeDirection};
@@ -143,20 +143,20 @@ impl Assembly {
         bank_info: Option<runtime::BankInfo>,
         state: S,
         placement: impl Into<ReactorPlacement>,
-    ) -> ReactorBuilderState<'_, S> {
+    ) -> ReactorContext<'_, S> {
         tracing::debug!("Adding Reactor: {name}");
-        ReactorBuilderState::new(name, parent, bank_info, state, placement, self)
+        ReactorContext::new(name, parent, bank_info, state, placement, self)
     }
 
     /// Get a previously built reactor
     pub fn get_reactor_builder(
         &mut self,
         reactor_key: AssemblyReactorKey,
-    ) -> Result<ReactorBuilderState<'_>, BuilderError> {
+    ) -> Result<ReactorContext<'_>, BuilderError> {
         if !self.reactor_specs.contains_key(reactor_key) {
             return Err(BuilderError::ReactorKeyNotFound(reactor_key));
         }
-        Ok(ReactorBuilderState::from_pre_existing(reactor_key, self))
+        Ok(ReactorContext::from_pre_existing(reactor_key, self))
     }
 
     /// Add an Input port to the Reactor

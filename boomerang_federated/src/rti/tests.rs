@@ -1,10 +1,9 @@
-
 use super::*;
 use crate::protocol::{EndpointId, FederatedTopology, NeighborStructure, TopologyEdge};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StateSnapshot {
-    topology: FederatedTopology,
+    topology: CompiledTopology,
     federates: BTreeMap<FederateId, FederateState>,
     in_transit: BTreeMap<FederateId, BTreeMap<WireTag, usize>>,
 }
@@ -25,6 +24,10 @@ fn endpoint(id: &str) -> EndpointId {
     EndpointId::new(id)
 }
 
+fn new_rti(topology: FederatedTopology) -> RtiState {
+    RtiState::new(topology).expect("valid test topology")
+}
+
 fn topology_with_edge(delay: WireDelay) -> FederatedTopology {
     FederatedTopology::with_edges(
         [fed("source"), fed("target")],
@@ -40,7 +43,7 @@ fn topology_with_edge(delay: WireDelay) -> FederatedTopology {
 #[test]
 fn handle_characterizes_legal_transition_sequence() {
     let topology = topology_with_edge(WireDelay::ZERO);
-    let mut rti = RtiState::new(topology.clone());
+    let mut rti = new_rti(topology.clone());
     let source = fed("source");
     let target = fed("target");
     let endpoint = endpoint("source.out->target.in");
@@ -166,7 +169,7 @@ fn handle_characterizes_legal_transition_sequence() {
 
 #[test]
 fn repeated_and_regressing_net_replace_next_event_without_duplicate_grants() {
-    let mut rti = RtiState::new(FederatedTopology::new([fed("solo")]));
+    let mut rti = new_rti(FederatedTopology::new([fed("solo")]));
     let requested = WireTag::finite(10, 0);
     let regressing = WireTag::finite(5, 0);
 
@@ -205,7 +208,7 @@ fn repeated_and_regressing_net_replace_next_event_without_duplicate_grants() {
 
 #[test]
 fn repeated_and_regressing_ltc_preserve_completion_high_watermark() {
-    let mut rti = RtiState::new(FederatedTopology::new([fed("solo")]));
+    let mut rti = new_rti(FederatedTopology::new([fed("solo")]));
     let completed = WireTag::finite(10, 0);
 
     for tag in [completed, completed, WireTag::finite(5, 0)] {
@@ -227,7 +230,7 @@ fn repeated_and_regressing_ltc_preserve_completion_high_watermark() {
 
 #[test]
 fn net_never_is_currently_stored_and_granted() {
-    let mut rti = RtiState::new(FederatedTopology::new([fed("solo")]));
+    let mut rti = new_rti(FederatedTopology::new([fed("solo")]));
 
     assert_eq!(
         rti.handle(FederateToRti::Net {
@@ -255,7 +258,7 @@ fn net_never_is_currently_stored_and_granted() {
 
 #[test]
 fn unknown_federate_errors_are_failure_atomic() {
-    let mut baseline = RtiState::new(FederatedTopology::new([fed("source"), fed("target")]));
+    let mut baseline = new_rti(FederatedTopology::new([fed("source"), fed("target")]));
     baseline
         .record_in_transit_message(&fed("source"), &fed("target"), WireTag::ZERO)
         .unwrap();
@@ -313,7 +316,7 @@ fn unknown_federate_errors_are_failure_atomic() {
 
 #[test]
 fn state_handler_currently_accepts_route_absent_from_topology() {
-    let mut rti = RtiState::new(topology_with_edge(WireDelay::ZERO));
+    let mut rti = new_rti(topology_with_edge(WireDelay::ZERO));
     let invalid_endpoint = endpoint("source.out->target.other");
 
     assert_eq!(
@@ -344,8 +347,157 @@ fn state_handler_currently_accepts_route_absent_from_topology() {
 }
 
 #[test]
+fn compiled_topology_indexes_dependencies_and_routes_deterministically() {
+    let topology = FederatedTopology::with_edges(
+        [fed("c"), fed("a"), fed("b")],
+        [
+            TopologyEdge::new(
+                fed("b"),
+                fed("c"),
+                endpoint("b.out->c.in"),
+                WireDelay::from_nanos(2),
+            ),
+            TopologyEdge::new(
+                fed("a"),
+                fed("c"),
+                endpoint("a.out->c.in"),
+                WireDelay::from_nanos(1),
+            ),
+            TopologyEdge::new(fed("a"), fed("b"), endpoint("a.out->b.in"), WireDelay::ZERO),
+        ],
+    );
+    let rti = new_rti(topology.clone());
+
+    assert_eq!(rti.topology(), &topology);
+    assert_eq!(
+        rti.topology.incoming(&fed("c")),
+        [
+            IncomingDependency {
+                source: fed("a"),
+                endpoint: endpoint("a.out->c.in"),
+                delay: WireDelay::from_nanos(1),
+            },
+            IncomingDependency {
+                source: fed("b"),
+                endpoint: endpoint("b.out->c.in"),
+                delay: WireDelay::from_nanos(2),
+            },
+        ]
+    );
+    assert_eq!(rti.topology.downstream(&fed("a")), [fed("b"), fed("c")]);
+    assert_eq!(rti.topology.downstream(&fed("b")), [fed("c")]);
+    assert!(rti.contains_route(&fed("a"), &fed("c"), &endpoint("a.out->c.in")));
+    assert!(!rti.contains_route(&fed("c"), &fed("a"), &endpoint("a.out->c.in")));
+}
+
+#[test]
+fn compiled_topology_rejects_duplicate_federates() {
+    assert_eq!(
+        RtiState::new(FederatedTopology::new([fed("a"), fed("a")])).unwrap_err(),
+        RtiError::DuplicateFederate(fed("a"))
+    );
+}
+
+#[test]
+fn compiled_topology_rejects_undeclared_edge_members() {
+    for (edge, missing) in [
+        (
+            TopologyEdge::new(
+                fed("missing"),
+                fed("target"),
+                endpoint("missing.out->target.in"),
+                WireDelay::ZERO,
+            ),
+            fed("missing"),
+        ),
+        (
+            TopologyEdge::new(
+                fed("source"),
+                fed("missing"),
+                endpoint("source.out->missing.in"),
+                WireDelay::ZERO,
+            ),
+            fed("missing"),
+        ),
+    ] {
+        let endpoint = edge.endpoint.clone();
+        assert_eq!(
+            RtiState::new(FederatedTopology::with_edges(
+                [fed("source"), fed("target")],
+                [edge],
+            ))
+            .unwrap_err(),
+            RtiError::UndeclaredEdgeFederate {
+                endpoint,
+                federate_id: missing,
+            }
+        );
+    }
+}
+
+#[test]
+fn compiled_topology_rejects_missing_duplicate_and_conflicting_routes() {
+    let source = fed("source");
+    let target = fed("target");
+    let route_endpoint = endpoint("source.out->target.in");
+    let valid = TopologyEdge::new(
+        source.clone(),
+        target.clone(),
+        route_endpoint.clone(),
+        WireDelay::ZERO,
+    );
+
+    assert_eq!(
+        RtiState::new(FederatedTopology::with_edges(
+            [source.clone(), target.clone()],
+            [TopologyEdge::new(
+                source.clone(),
+                target.clone(),
+                endpoint(""),
+                WireDelay::ZERO,
+            )],
+        ))
+        .unwrap_err(),
+        RtiError::MissingRouteEndpoint {
+            route_source: source.clone(),
+            route_target: target.clone(),
+        }
+    );
+    assert_eq!(
+        RtiState::new(FederatedTopology::with_edges(
+            [source.clone(), target.clone()],
+            [valid.clone(), valid.clone()],
+        ))
+        .unwrap_err(),
+        RtiError::DuplicateRoute {
+            route_source: source.clone(),
+            route_target: target.clone(),
+            endpoint: route_endpoint.clone(),
+        }
+    );
+    assert_eq!(
+        RtiState::new(FederatedTopology::with_edges(
+            [source, target],
+            [
+                valid,
+                TopologyEdge::new(
+                    fed("source"),
+                    fed("target"),
+                    route_endpoint.clone(),
+                    WireDelay::from_nanos(1),
+                ),
+            ],
+        ))
+        .unwrap_err(),
+        RtiError::ConflictingRoute {
+            endpoint: route_endpoint,
+        }
+    );
+}
+
+#[test]
 fn grants_tag_when_federate_has_no_upstream_or_in_transit_messages() {
-    let mut rti = RtiState::new(FederatedTopology::new([fed("solo")]));
+    let mut rti = new_rti(FederatedTopology::new([fed("solo")]));
 
     let decision = rti.request_tag(&fed("solo"), WireTag::ZERO).unwrap();
 
@@ -354,7 +506,7 @@ fn grants_tag_when_federate_has_no_upstream_or_in_transit_messages() {
 
 #[test]
 fn upstream_net_at_requested_tag_blocks_tag_grant() {
-    let mut rti = RtiState::new(topology_with_edge(WireDelay::ZERO));
+    let mut rti = new_rti(topology_with_edge(WireDelay::ZERO));
 
     assert!(matches!(
         rti.request_tag(&fed("source"), WireTag::ZERO).unwrap(),
@@ -383,7 +535,7 @@ fn upstream_net_at_requested_tag_blocks_tag_grant() {
 
 #[test]
 fn in_transit_message_blocks_grant_until_target_msg_ack() {
-    let mut rti = RtiState::new(FederatedTopology::new([fed("source"), fed("target")]));
+    let mut rti = new_rti(FederatedTopology::new([fed("source"), fed("target")]));
 
     rti.record_in_transit_message(&fed("source"), &fed("target"), WireTag::finite(5, 0))
         .unwrap();
@@ -411,7 +563,7 @@ fn in_transit_message_blocks_grant_until_target_msg_ack() {
 
 #[test]
 fn multiple_same_tag_messages_require_one_msg_ack_each() {
-    let mut rti = RtiState::new(FederatedTopology::new([fed("source"), fed("target")]));
+    let mut rti = new_rti(FederatedTopology::new([fed("source"), fed("target")]));
 
     rti.record_in_transit_message(&fed("source"), &fed("target"), WireTag::ZERO)
         .unwrap();
@@ -463,7 +615,7 @@ fn multiple_same_tag_messages_require_one_msg_ack_each() {
 
 #[test]
 fn msg_ack_can_trigger_pending_grant() {
-    let mut rti = RtiState::new(FederatedTopology::new([fed("source"), fed("target")]));
+    let mut rti = new_rti(FederatedTopology::new([fed("source"), fed("target")]));
     rti.record_in_transit_message(&fed("source"), &fed("target"), WireTag::finite(5, 0))
         .unwrap();
     assert!(matches!(
@@ -492,7 +644,7 @@ fn msg_ack_can_trigger_pending_grant() {
 
 #[test]
 fn unmatched_msg_ack_returns_typed_error() {
-    let mut rti = RtiState::new(FederatedTopology::new([fed("source"), fed("target")]));
+    let mut rti = new_rti(FederatedTopology::new([fed("source"), fed("target")]));
     let other_tag = WireTag::finite(1, 0);
     rti.record_in_transit_message(&fed("source"), &fed("target"), other_tag)
         .unwrap();
@@ -512,7 +664,7 @@ fn unmatched_msg_ack_returns_typed_error() {
 fn net_overflow_currently_mutates_next_event_before_returning_error() {
     let delay = WireDelay::from_nanos(1);
     let overflowing = WireTag::finite(i128::MAX, 0);
-    let mut rti = RtiState::new(topology_with_edge(delay));
+    let mut rti = new_rti(topology_with_edge(delay));
     assert_eq!(
         rti.request_tag(&fed("source"), overflowing).unwrap(),
         GrantDecision::Granted { tag: overflowing }
@@ -556,7 +708,7 @@ fn net_overflow_currently_mutates_next_event_before_returning_error() {
 fn global_grant_scan_currently_commits_before_later_overflow_error() {
     let delay = WireDelay::from_nanos(1);
     let overflowing = WireTag::finite(i128::MAX, 0);
-    let mut rti = RtiState::new(FederatedTopology::with_edges(
+    let mut rti = new_rti(FederatedTopology::with_edges(
         [fed("a"), fed("source"), fed("z")],
         [TopologyEdge::new(
             fed("source"),
@@ -611,7 +763,7 @@ fn global_grant_scan_currently_commits_before_later_overflow_error() {
 
 #[test]
 fn same_timestamp_microstep_progression_unblocks_downstream_grant() {
-    let mut rti = RtiState::new(topology_with_edge(WireDelay::ZERO));
+    let mut rti = new_rti(topology_with_edge(WireDelay::ZERO));
 
     assert_eq!(
         rti.request_tag(&fed("source"), WireTag::finite(0, 1))
@@ -647,7 +799,7 @@ fn same_timestamp_microstep_progression_unblocks_downstream_grant() {
 
 #[test]
 fn multi_hop_chain_requires_each_upstream_to_advance_past_the_requested_tag() {
-    let mut rti = RtiState::new(FederatedTopology::with_edges(
+    let mut rti = new_rti(FederatedTopology::with_edges(
         [fed("a"), fed("b"), fed("c")],
         [
             TopologyEdge::new(fed("a"), fed("b"), endpoint("a.out->b.in"), WireDelay::ZERO),
@@ -713,7 +865,7 @@ fn multi_hop_chain_requires_each_upstream_to_advance_past_the_requested_tag() {
 #[test]
 fn positive_delay_cycle_allows_startup_grants_after_both_federates_advertise() {
     let delay = WireDelay::from_nanos(10);
-    let mut rti = RtiState::new(FederatedTopology::with_edges(
+    let mut rti = new_rti(FederatedTopology::with_edges(
         [fed("a"), fed("b")],
         [
             TopologyEdge::new(fed("a"), fed("b"), endpoint("a.out->b.in"), delay),
@@ -761,7 +913,7 @@ fn positive_delay_cycle_allows_startup_grants_after_both_federates_advertise() {
 
 #[test]
 fn net_forever_unblocks_pending_downstream_without_granting_forever() {
-    let mut rti = RtiState::new(topology_with_edge(WireDelay::ZERO));
+    let mut rti = new_rti(topology_with_edge(WireDelay::ZERO));
 
     assert_eq!(
         rti.handle(FederateToRti::Net {
@@ -800,7 +952,7 @@ fn net_forever_unblocks_pending_downstream_without_granting_forever() {
 
 #[test]
 fn stop_marks_federate_no_future_and_unblocks_pending_downstream() {
-    let mut rti = RtiState::new(topology_with_edge(WireDelay::ZERO));
+    let mut rti = new_rti(topology_with_edge(WireDelay::ZERO));
 
     assert_eq!(
         rti.handle(FederateToRti::Net {
@@ -834,7 +986,7 @@ fn stop_marks_federate_no_future_and_unblocks_pending_downstream() {
 
 #[test]
 fn stopped_federate_currently_accepts_net_ltc_and_repeated_stop() {
-    let mut rti = RtiState::new(FederatedTopology::new([fed("solo")]));
+    let mut rti = new_rti(FederatedTopology::new([fed("solo")]));
 
     assert_eq!(
         rti.handle(FederateToRti::Stop {
@@ -889,7 +1041,7 @@ fn stopped_federate_currently_accepts_net_ltc_and_repeated_stop() {
 
 #[test]
 fn topology_delays_shift_earliest_incoming_message_tags() {
-    let mut rti = RtiState::new(topology_with_edge(WireDelay::from_nanos(10)));
+    let mut rti = new_rti(topology_with_edge(WireDelay::from_nanos(10)));
 
     rti.request_tag(&fed("source"), WireTag::ZERO).unwrap();
 
@@ -916,7 +1068,7 @@ fn topology_delays_shift_earliest_incoming_message_tags() {
 
 #[test]
 fn msg_frames_are_recorded_as_in_transit_and_forwarded_to_the_target() {
-    let mut rti = RtiState::new(FederatedTopology::new([fed("source"), fed("target")]));
+    let mut rti = new_rti(FederatedTopology::new([fed("source"), fed("target")]));
 
     let deliveries = rti
         .handle(FederateToRti::Msg {

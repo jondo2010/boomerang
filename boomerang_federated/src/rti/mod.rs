@@ -1,8 +1,148 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::protocol::{
-    FederateId, FederateToRti, FederatedTopology, RtiToFederate, WireDelay, WireTag,
+    EndpointId, FederateId, FederateToRti, FederatedTopology, RtiToFederate, TopologyEdge,
+    WireDelay, WireTag,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct RouteKey {
+    source: FederateId,
+    target: FederateId,
+    endpoint: EndpointId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct IncomingDependency {
+    source: FederateId,
+    endpoint: EndpointId,
+    delay: WireDelay,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompiledTopology {
+    original: FederatedTopology,
+    incoming: BTreeMap<FederateId, Vec<IncomingDependency>>,
+    downstream: BTreeMap<FederateId, Vec<FederateId>>,
+    routes: BTreeSet<RouteKey>,
+}
+
+impl CompiledTopology {
+    fn new(topology: FederatedTopology) -> Result<Self, RtiError> {
+        let mut members = BTreeSet::new();
+        for federate_id in &topology.federates {
+            if !members.insert(federate_id.clone()) {
+                return Err(RtiError::DuplicateFederate(federate_id.clone()));
+            }
+        }
+
+        let mut incoming = members
+            .iter()
+            .cloned()
+            .map(|federate_id| (federate_id, Vec::new()))
+            .collect::<BTreeMap<_, _>>();
+        let mut downstream_sets = members
+            .iter()
+            .cloned()
+            .map(|federate_id| (federate_id, BTreeSet::new()))
+            .collect::<BTreeMap<_, _>>();
+        let mut routes = BTreeSet::new();
+        let mut endpoint_routes = BTreeMap::<EndpointId, TopologyEdge>::new();
+
+        for edge in &topology.edges {
+            if !members.contains(&edge.source) {
+                return Err(RtiError::UndeclaredEdgeFederate {
+                    endpoint: edge.endpoint.clone(),
+                    federate_id: edge.source.clone(),
+                });
+            }
+            if !members.contains(&edge.target) {
+                return Err(RtiError::UndeclaredEdgeFederate {
+                    endpoint: edge.endpoint.clone(),
+                    federate_id: edge.target.clone(),
+                });
+            }
+            if edge.endpoint.as_str().is_empty() {
+                return Err(RtiError::MissingRouteEndpoint {
+                    route_source: edge.source.clone(),
+                    route_target: edge.target.clone(),
+                });
+            }
+
+            if let Some(existing) = endpoint_routes.get(&edge.endpoint) {
+                if existing == edge {
+                    return Err(RtiError::DuplicateRoute {
+                        route_source: edge.source.clone(),
+                        route_target: edge.target.clone(),
+                        endpoint: edge.endpoint.clone(),
+                    });
+                }
+                return Err(RtiError::ConflictingRoute {
+                    endpoint: edge.endpoint.clone(),
+                });
+            }
+            endpoint_routes.insert(edge.endpoint.clone(), edge.clone());
+
+            routes.insert(RouteKey {
+                source: edge.source.clone(),
+                target: edge.target.clone(),
+                endpoint: edge.endpoint.clone(),
+            });
+            incoming
+                .get_mut(&edge.target)
+                .expect("validated topology target must have an incoming index")
+                .push(IncomingDependency {
+                    source: edge.source.clone(),
+                    endpoint: edge.endpoint.clone(),
+                    delay: edge.delay,
+                });
+            downstream_sets
+                .get_mut(&edge.source)
+                .expect("validated topology source must have a downstream index")
+                .insert(edge.target.clone());
+        }
+
+        for dependencies in incoming.values_mut() {
+            dependencies.sort();
+        }
+        let downstream = downstream_sets
+            .into_iter()
+            .map(|(source, targets)| (source, targets.into_iter().collect()))
+            .collect();
+
+        Ok(Self {
+            original: topology,
+            incoming,
+            downstream,
+            routes,
+        })
+    }
+
+    fn incoming(&self, target: &FederateId) -> &[IncomingDependency] {
+        self.incoming.get(target).map_or(&[], Vec::as_slice)
+    }
+
+    #[allow(
+        dead_code,
+        reason = "consumed by the affected-federate reevaluation milestone"
+    )]
+    fn downstream(&self, source: &FederateId) -> &[FederateId] {
+        self.downstream.get(source).map_or(&[], Vec::as_slice)
+    }
+
+    fn contains_route(
+        &self,
+        source: &FederateId,
+        target: &FederateId,
+        endpoint: &EndpointId,
+    ) -> bool {
+        self.routes.contains(&RouteKey {
+            source: source.clone(),
+            target: target.clone(),
+            endpoint: endpoint.clone(),
+        })
+    }
+}
 
 /// Per-federate control-plane state known by the RTI.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +200,31 @@ pub enum RtiError {
     #[error("unknown federate `{0}`")]
     UnknownFederate(FederateId),
 
+    #[error("duplicate federate `{0}` in RTI topology")]
+    DuplicateFederate(FederateId),
+
+    #[error("route endpoint `{endpoint}` refers to undeclared federate `{federate_id}`")]
+    UndeclaredEdgeFederate {
+        endpoint: EndpointId,
+        federate_id: FederateId,
+    },
+
+    #[error("route {route_source} -> {route_target} has an empty endpoint identity")]
+    MissingRouteEndpoint {
+        route_source: FederateId,
+        route_target: FederateId,
+    },
+
+    #[error("duplicate route {route_source} -> {route_target} endpoint `{endpoint}`")]
+    DuplicateRoute {
+        route_source: FederateId,
+        route_target: FederateId,
+        endpoint: EndpointId,
+    },
+
+    #[error("endpoint `{endpoint}` is assigned to conflicting routes")]
+    ConflictingRoute { endpoint: EndpointId },
+
     #[error("delaying tag {tag} by {delay_ns}ns overflowed")]
     TagDelayOverflow { tag: WireTag, delay_ns: u64 },
 
@@ -73,34 +238,40 @@ pub enum RtiError {
 /// Deterministic RTI state for static TAG/NET/LTC/MSG coordination.
 #[derive(Debug, Clone)]
 pub struct RtiState {
-    topology: FederatedTopology,
+    topology: CompiledTopology,
     federates: BTreeMap<FederateId, FederateState>,
     in_transit: BTreeMap<FederateId, BTreeMap<WireTag, usize>>,
 }
 
 impl RtiState {
-    pub fn new(mut topology: FederatedTopology) -> Self {
-        for edge in topology.edges.clone() {
-            topology.add_federate(edge.source);
-            topology.add_federate(edge.target);
-        }
-
+    pub fn new(topology: FederatedTopology) -> Result<Self, RtiError> {
+        let topology = CompiledTopology::new(topology)?;
         let federates = topology
+            .original
             .federates
             .iter()
             .cloned()
             .map(|federate_id| (federate_id, FederateState::default()))
             .collect();
 
-        Self {
+        Ok(Self {
             topology,
             federates,
             in_transit: BTreeMap::new(),
-        }
+        })
     }
 
     pub fn topology(&self) -> &FederatedTopology {
-        &self.topology
+        &self.topology.original
+    }
+
+    pub(crate) fn contains_route(
+        &self,
+        source: &FederateId,
+        target: &FederateId,
+        endpoint: &EndpointId,
+    ) -> bool {
+        self.topology.contains_route(source, target, endpoint)
     }
 
     pub fn federate_state(&self, federate_id: &FederateId) -> Option<&FederateState> {
@@ -254,13 +425,13 @@ impl RtiState {
         self.ensure_federate(federate_id)?;
         let mut earliest = self.earliest_in_transit_message_tag(federate_id);
 
-        for edge in self.topology.incoming_edges(federate_id) {
+        for dependency in self.topology.incoming(federate_id) {
             let upstream_state = self
                 .federates
-                .get(&edge.source)
-                .ok_or_else(|| RtiError::UnknownFederate(edge.source.clone()))?;
+                .get(&dependency.source)
+                .ok_or_else(|| RtiError::UnknownFederate(dependency.source.clone()))?;
             let candidate = match upstream_state.next_event {
-                Some(tag) => apply_edge_delay(tag, edge.delay)?,
+                Some(tag) => apply_edge_delay(tag, dependency.delay)?,
                 None => WireTag::Never,
             };
 

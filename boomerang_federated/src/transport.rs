@@ -185,7 +185,7 @@ pub async fn run_tcp_static_rti_session(
         )));
     }
 
-    StaticRtiSession::new(topology, endpoints).run().await
+    StaticRtiSession::new(topology, endpoints)?.run().await
 }
 
 #[cfg(test)]

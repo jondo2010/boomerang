@@ -349,7 +349,7 @@ fn route_outbound_commands_through_rti(
     connections: &boomerang_federated::FederatedRuntimeConnections,
 ) -> Vec<runtime::Tag> {
     let topology = federation_topology_from_plan(plan).unwrap();
-    let mut rti = boomerang_federated::RtiState::new(topology.clone());
+    let mut rti = boomerang_federated::RtiState::new(topology.clone()).unwrap();
     for federate in &plan.federates {
         let federate_id = boomerang_federated::FederateId::new(federate.id.clone());
         rti.handle(boomerang_federated::FederateToRti::Hello {

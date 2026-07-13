@@ -178,7 +178,7 @@ pub fn execute_federation_in_memory(
         client_transports.insert(federate_id.clone(), client_transport);
     }
 
-    let session = StaticRtiSession::new(prepared.topology.clone(), session_endpoints);
+    let session = StaticRtiSession::new(prepared.topology.clone(), session_endpoints)?;
     let session_handle = tokio_runtime.spawn(session.run());
     let clients = connect_clients(
         &tokio_runtime,

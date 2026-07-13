@@ -88,12 +88,12 @@ where
     pub fn new(
         topology: FederatedTopology,
         endpoints: BTreeMap<FederateId, RtiSessionEndpoint<S, R>>,
-    ) -> Self {
-        Self {
-            rti: RtiState::new(topology),
+    ) -> Result<Self, SessionError> {
+        Ok(Self {
+            rti: RtiState::new(topology)?,
             endpoints,
             start_unix_epoch_ns: 0,
-        }
+        })
     }
 
     pub fn with_start_unix_epoch_ns(mut self, start_unix_epoch_ns: i128) -> Self {
@@ -368,9 +368,7 @@ where
                         "MSG source `{source}` does not match endpoint `{federate_id}`"
                     ));
                 }
-                let valid_route = self.rti.topology().edges.iter().any(|edge| {
-                    &edge.source == source && &edge.target == target && &edge.endpoint == endpoint
-                });
+                let valid_route = self.rti.contains_route(source, target, endpoint);
                 if !valid_route {
                     return Err(format!(
                         "MSG route {source} -> {target} endpoint `{endpoint}` is not in the RTI topology"
@@ -603,7 +601,7 @@ mod tests {
         endpoints.insert(first, session_endpoint(source_rti));
         endpoints.insert(second, session_endpoint(sink_rti));
 
-        let session = StaticRtiSession::new(topology, endpoints);
+        let session = StaticRtiSession::new(topology, endpoints).expect("valid test topology");
         let handle = tokio::spawn(session.run());
 
         (source_client, sink_client, handle)

@@ -464,7 +464,7 @@ fn build_delayed_connection<T: runtime::ReactorData + Clone, Q: ActionTag>(
         .add_reaction(None)
         .with_trigger(action_key)
         .with_effect(output_port)
-        .with_defered_reaction_fn(move |_| {
+        .with_deferred_reaction_factory(move |_| {
             runtime::ConnectionReceiverReactionFn::<T>::default().into()
         })
         .finish()?;
@@ -473,7 +473,7 @@ fn build_delayed_connection<T: runtime::ReactorData + Clone, Q: ActionTag>(
         .add_reaction(None)
         .with_effect(action_key)
         .with_trigger(input_port)
-        .with_defered_reaction_fn(move |_| {
+        .with_deferred_reaction_factory(move |_| {
             runtime::ConnectionSenderReactionFn::<T>::default().into()
         })
         .finish()?;
@@ -504,7 +504,7 @@ fn build_enclave_connection_source<T: runtime::ReactorData + Clone>(
     source_builder
         .add_reaction(None)
         .with_trigger(input_port)
-        .with_defered_reaction_fn(move |builder_parts| {
+        .with_deferred_reaction_factory(move |builder_parts| {
             let (enclave_key, runtime_action_key) = builder_parts
                 .aliases
                 .action_aliases
@@ -547,7 +547,7 @@ fn build_federated_connection_source<T: runtime::ReactorData + Clone>(
     source_builder
         .add_reaction(None)
         .with_trigger(input_port)
-        .with_defered_reaction_fn(move |builder_parts| {
+        .with_deferred_reaction_factory(move |builder_parts| {
             let (enclave_key, runtime_action_key) = builder_parts
                 .aliases
                 .action_aliases
@@ -606,7 +606,7 @@ fn build_enclave_connection_target<T: runtime::ReactorData + Clone, Q: ActionTag
         .add_reaction(None)
         .with_trigger(action_key)
         .with_effect(output_port)
-        .with_defered_reaction_fn(move |_builder_parts| {
+        .with_deferred_reaction_factory(move |_builder_parts| {
             runtime::ConnectionReceiverReactionFn::<T>::default().into()
         })
         .finish()?;

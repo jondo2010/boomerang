@@ -22,14 +22,14 @@ use crate::{federated_routes_from_plan, FederationPlan};
 
 use super::Assembly;
 
-/// A trait used to defer the building of until the enclave parts are available.
-pub trait DeferedBuild {
+/// A trait used to defer runtime object creation until the lowered runtime data is available.
+pub trait DeferredRuntimeFactory {
     type Output;
 
     fn defer(self) -> impl FnOnce(&BuilderRuntimeParts) -> Self::Output + 'static;
 }
 
-impl DeferedBuild for runtime::reaction::TimerFn {
+impl DeferredRuntimeFactory for runtime::reaction::TimerFn {
     type Output = runtime::BoxedReactionFn;
     fn defer(self) -> impl FnOnce(&BuilderRuntimeParts) -> Self::Output + 'static {
         move |_| runtime::BoxedReactionFn::from(self)
@@ -669,7 +669,7 @@ impl Assembly {
                 reaction = reaction.in_mode_scope(scope_mode);
             }
             let _ = reaction
-                .with_defered_reaction_fn(reaction_fn.defer())
+                .with_deferred_reaction_factory(reaction_fn.defer())
                 .finish()?;
         }
 
@@ -682,8 +682,8 @@ impl Assembly {
         builder_parts: &mut BuilderRuntimeParts,
     ) -> Result<(), BuilderError> {
         let mut connections = std::mem::take(&mut builder_parts.federated_connections);
-        for endpoint_builder in self.federated_inbound_endpoint_builders.drain(..) {
-            endpoint_builder(builder_parts, &mut connections)?;
+        for endpoint_factory in self.federated_inbound_endpoint_factories.drain(..) {
+            endpoint_factory(builder_parts, &mut connections)?;
         }
         builder_parts.federated_connections = connections;
         Ok(())
@@ -933,8 +933,8 @@ impl Assembly {
         &mut self,
         builder_parts: &mut BuilderRuntimeParts,
     ) -> Result<(), BuilderError> {
-        for (builder_action_key, replayer_builder) in self.replay_builders.drain() {
-            let replayer = (replayer_builder)(builder_parts);
+        for (builder_action_key, replay_factory) in self.replay_factories.drain() {
+            let replayer = (replay_factory)(builder_parts);
             let (enclave_key, action_key) =
                 builder_parts.aliases.action_aliases[builder_action_key];
             builder_parts.replayers[enclave_key].insert(action_key, replayer);

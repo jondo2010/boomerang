@@ -37,7 +37,7 @@ mod debug;
 #[cfg(test)]
 mod tests;
 
-pub use build::{BuilderRuntimeParts, DeferedBuild, EnclaveDep, PartitionMap};
+pub use build::{BuilderRuntimeParts, DeferredRuntimeFactory, EnclaveDep, PartitionMap};
 
 #[cfg(feature = "federated")]
 type FederatedCodecPair<T> = (
@@ -80,10 +80,10 @@ mod util {
 }
 
 #[cfg(feature = "replay")]
-type ReplayFunctionBuilder = dyn FnOnce(&BuilderRuntimeParts) -> Box<dyn runtime::replay::ReplayFn>;
+type ReplayFunctionFactory = dyn FnOnce(&BuilderRuntimeParts) -> Box<dyn runtime::replay::ReplayFn>;
 
 #[cfg(feature = "federated")]
-type FederatedInboundEndpointBuilder = dyn FnOnce(
+type FederatedInboundEndpointFactory = dyn FnOnce(
     &BuilderRuntimeParts,
     &mut boomerang_federated::FederatedRuntimeConnections,
 ) -> Result<(), BuilderError>;
@@ -122,11 +122,11 @@ pub struct Assembly {
     /// Environment-scoped payload codec policy for inferred cross-federate connections.
     federated_codecs: HashMap<TypeId, Box<FederatedCodecEntry>>,
     #[cfg(feature = "federated")]
-    /// Builders for inbound federated endpoint registry entries.
-    pub(super) federated_inbound_endpoint_builders: Vec<Box<FederatedInboundEndpointBuilder>>,
+    /// Factories for inbound federated endpoint registry entries.
+    pub(super) federated_inbound_endpoint_factories: Vec<Box<FederatedInboundEndpointFactory>>,
     #[cfg(feature = "replay")]
-    /// Builders for Replay functions
-    pub(super) replay_builders: SecondaryMap<AssemblyActionKey, Box<ReplayFunctionBuilder>>,
+    /// Factories for replay functions.
+    pub(super) replay_factories: SecondaryMap<AssemblyActionKey, Box<ReplayFunctionFactory>>,
 }
 
 impl Assembly {
@@ -393,7 +393,7 @@ impl Assembly {
     pub fn add_replayer<T, Q, F>(
         &mut self,
         action_key: TypedActionKey<T, Q>,
-        replayer_builder_fn: F,
+        replay_factory: F,
     ) -> Result<(), BuilderError>
     where
         T: boomerang_runtime::ReactorData + for<'de> serde::Deserialize<'de>,
@@ -401,12 +401,12 @@ impl Assembly {
         F: FnOnce(&BuilderRuntimeParts) -> Box<dyn runtime::replay::ReplayFn> + 'static,
     {
         let action_key = action_key.into();
-        if self.replay_builders.contains_key(action_key) {
+        if self.replay_factories.contains_key(action_key) {
             return Err(BuilderError::ReplayKeyAlreadyExists(action_key));
         }
 
-        self.replay_builders
-            .insert(action_key, Box::new(replayer_builder_fn));
+        self.replay_factories
+            .insert(action_key, Box::new(replay_factory));
 
         Ok(())
     }
@@ -707,7 +707,7 @@ impl Assembly {
     ) where
         T: runtime::ReactorData,
     {
-        self.federated_inbound_endpoint_builders.push(Box::new(
+        self.federated_inbound_endpoint_factories.push(Box::new(
             move |builder_parts, connections| {
                 let (enclave_key, runtime_action_key) = *builder_parts
                     .aliases

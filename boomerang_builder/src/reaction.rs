@@ -24,15 +24,16 @@ impl petgraph::graph::GraphIndex for AssemblyReactionKey {
     }
 }
 
-/// A boxed deferred Reaction builder function
-pub type BoxedBuilderReactionFn = Box<dyn FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn>;
+/// A deferred factory for a runtime reaction function.
+pub type DeferredReactionFactory =
+    Box<dyn FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn>;
 
 pub struct ReactionSpec {
     pub(super) name: Option<String>,
     /// The owning Reactor for this Reaction
     pub(super) reactor_key: AssemblyReactorKey,
     /// The Reaction function
-    pub(super) reaction_fn: BoxedBuilderReactionFn,
+    pub(super) reaction_fn: DeferredReactionFactory,
     /// Modes in which this reaction is enabled
     pub(super) enabled_modes: Option<Vec<AssemblyModeKey>>,
     /// Enclosing mode scope, if this reaction was declared inside a mode.
@@ -618,7 +619,7 @@ where
     pub fn with_reaction_fn<F>(
         self,
         f: F,
-    ) -> ReactionDeclaration<'a, S, Fields, BoxedBuilderReactionFn>
+    ) -> ReactionDeclaration<'a, S, Fields, DeferredReactionFactory>
     where
         F: for<'store> Fn(&mut runtime::Context, &mut S, Fields::Ref<'store>)
             + Send
@@ -641,7 +642,7 @@ where
             ..
         } = self;
         let fields_for_reaction = fields.clone();
-        let reaction_fn: BoxedBuilderReactionFn = Box::new(
+        let reaction_fn: DeferredReactionFactory = Box::new(
             move |runtime_parts: &BuilderRuntimeParts| -> runtime::BoxedReactionFn {
                 let mut fields_for_reaction = fields_for_reaction.clone();
                 fields_for_reaction.resolve_mode_effects(runtime_parts);
@@ -675,10 +676,10 @@ where
     S: runtime::ReactorData,
     Fields: runtime::ReactionRefsExtract,
 {
-    pub fn with_defered_reaction_fn<F>(
+    pub fn with_deferred_reaction_factory<F>(
         self,
         f: F,
-    ) -> ReactionDeclaration<'a, S, Fields, BoxedBuilderReactionFn>
+    ) -> ReactionDeclaration<'a, S, Fields, DeferredReactionFactory>
     where
         F: FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn + 'static,
     {
@@ -716,7 +717,7 @@ where
     }
 }
 
-impl<S, Fields> ReactionDeclaration<'_, S, Fields, BoxedBuilderReactionFn>
+impl<S, Fields> ReactionDeclaration<'_, S, Fields, DeferredReactionFactory>
 where
     S: runtime::ReactorData,
     Fields: runtime::ReactionRefsExtract,

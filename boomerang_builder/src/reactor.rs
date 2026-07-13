@@ -710,7 +710,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
         let _ = self
             .add_reaction(Some("recorder"))
             .with_trigger(action_key)
-            .with_defered_reaction_fn(move |runtime_parts| {
+            .with_deferred_reaction_factory(move |runtime_parts| {
                 let (enclave_key, action_key) =
                     runtime_parts.aliases.action_aliases[action_key.into()];
                 Box::new(

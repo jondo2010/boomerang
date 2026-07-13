@@ -30,8 +30,15 @@ typed specifications in an `Assembly`. Lowering resolves assembly keys and
 deferred factories, producing a `RuntimeAssembly` whose enclaves can be executed
 by the runtime or a federation runner:
 
-`ReactorContext` / `ReactionDeclaration` → `Assembly` of `Spec` values →
-lowering and `Factory` resolution → `RuntimeAssembly` → runtime execution.
+```mermaid
+flowchart LR
+    Declare["Declare<br/>contexts and declarations"]
+    Assemble["Assemble<br/>logical specifications"]
+    Lower["Lower<br/>resolve runtime objects"]
+    Execute["Execute<br/>runtime assembly"]
+
+    Declare --> Assemble --> Lower --> Execute
+```
 
 See the [Glossary](./glossary.md) for definitions of these suffixes and the
 related keys, placement, partition, and runtime concepts.

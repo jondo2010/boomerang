@@ -352,10 +352,13 @@ fn route_outbound_commands_through_rti(
     let mut rti = boomerang_federated::RtiState::new(topology.clone()).unwrap();
     for federate in &plan.federates {
         let federate_id = boomerang_federated::FederateId::new(federate.id.clone());
-        rti.handle(boomerang_federated::FederateToRti::Hello {
-            federate_id: federate_id.clone(),
-            topology: topology.neighbors_for(&federate_id),
-        })
+        rti.handle_from(
+            &federate_id,
+            boomerang_federated::FederateToRti::Hello {
+                federate_id: federate_id.clone(),
+                topology: topology.neighbors_for(&federate_id),
+            },
+        )
         .unwrap();
     }
 
@@ -372,13 +375,16 @@ fn route_outbound_commands_through_rti(
             panic!("lowered sender should emit a protocol MSG")
         };
         let deliveries = rti
-            .handle(boomerang_federated::FederateToRti::Msg {
-                source: source.clone(),
-                target: target.clone(),
-                endpoint: endpoint.clone(),
-                tag,
-                payload,
-            })
+            .handle_from(
+                &source,
+                boomerang_federated::FederateToRti::Msg {
+                    source: source.clone(),
+                    target: target.clone(),
+                    endpoint: endpoint.clone(),
+                    tag,
+                    payload,
+                },
+            )
             .unwrap();
 
         assert_eq!(deliveries.len(), 1);

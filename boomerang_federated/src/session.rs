@@ -198,10 +198,13 @@ where
                     }
 
                     self.rti
-                        .handle(FederateToRti::Hello {
-                            federate_id,
-                            topology,
-                        })
+                        .handle_from(
+                            &federate_id,
+                            FederateToRti::Hello {
+                                federate_id: federate_id.clone(),
+                                topology,
+                            },
+                        )
                         .map_err(SessionError::Rti)?;
                 }
                 SessionInput::Closed { federate_id } => {
@@ -270,17 +273,13 @@ where
                         .await;
                     };
 
-                    if let Err(message) = self.validate_federate_message(&federate_id, &message) {
-                        return protocol_error(sinks, &federate_id, message).await;
-                    }
-
                     if matches!(message, FederateToRti::Hello { .. }) {
                         return protocol_error(sinks, &federate_id, "unexpected Hello after Start")
                             .await;
                     }
 
                     if matches!(message, FederateToRti::Stop { .. }) {
-                        let deliveries = match self.rti.handle(message) {
+                        let deliveries = match self.rti.handle_from(&federate_id, message) {
                             Ok(deliveries) => deliveries,
                             Err(error) => {
                                 return protocol_error(sinks, &federate_id, error.to_string())
@@ -292,7 +291,7 @@ where
                         continue;
                     }
 
-                    let deliveries = match self.rti.handle(message) {
+                    let deliveries = match self.rti.handle_from(&federate_id, message) {
                         Ok(deliveries) => deliveries,
                         Err(error) => {
                             return protocol_error(sinks, &federate_id, error.to_string()).await;
@@ -321,60 +320,6 @@ where
                 ProtocolFrame::RtiToFederate(RtiToFederate::Stop),
             )
             .await?;
-        }
-
-        Ok(())
-    }
-
-    fn validate_federate_message(
-        &self,
-        federate_id: &FederateId,
-        message: &FederateToRti,
-    ) -> Result<(), String> {
-        match message {
-            FederateToRti::Hello {
-                federate_id: message_federate,
-                ..
-            }
-            | FederateToRti::Net {
-                federate_id: message_federate,
-                ..
-            }
-            | FederateToRti::Ltc {
-                federate_id: message_federate,
-                ..
-            }
-            | FederateToRti::MsgAck {
-                federate_id: message_federate,
-                ..
-            }
-            | FederateToRti::Stop {
-                federate_id: message_federate,
-            } => {
-                if message_federate != federate_id {
-                    return Err(format!(
-                        "message identified federate `{message_federate}`, but endpoint is `{federate_id}`"
-                    ));
-                }
-            }
-            FederateToRti::Msg {
-                source,
-                target,
-                endpoint,
-                ..
-            } => {
-                if source != federate_id {
-                    return Err(format!(
-                        "MSG source `{source}` does not match endpoint `{federate_id}`"
-                    ));
-                }
-                let valid_route = self.rti.contains_route(source, target, endpoint);
-                if !valid_route {
-                    return Err(format!(
-                        "MSG route {source} -> {target} endpoint `{endpoint}` is not in the RTI topology"
-                    ));
-                }
-            }
         }
 
         Ok(())
@@ -612,7 +557,7 @@ mod tests {
         const ADVANCE_COUNT: usize = 3;
         const FEDERATE_COUNT: usize = 2;
         const CONTROL_EVENTS_PER_ADVANCE: usize = 3; // NET request, TAG grant, and LTC.
-        const FIXED_PROTOCOL_EVENTS: usize = 8; // Two each of Hello, Start, and both Stop directions.
+        const FIXED_PROTOCOL_EVENTS: usize = 10; // Two each of Hello, Start, no-future NET, and both Stop directions.
 
         let topology = positive_delay_cycle_topology();
         let a = fed("a");
@@ -682,6 +627,18 @@ mod tests {
                 .await;
         }
 
+        a_client
+            .send(FederateToRti::Net {
+                federate_id: a.clone(),
+                tag: WireTag::FOREVER,
+            })
+            .await;
+        b_client
+            .send(FederateToRti::Net {
+                federate_id: b.clone(),
+                tag: WireTag::FOREVER,
+            })
+            .await;
         a_client
             .send(FederateToRti::Stop {
                 federate_id: a.clone(),
@@ -824,6 +781,18 @@ mod tests {
             .await;
 
         source_client
+            .send(FederateToRti::Net {
+                federate_id: source.clone(),
+                tag: WireTag::FOREVER,
+            })
+            .await;
+        sink_client
+            .send(FederateToRti::Net {
+                federate_id: sink.clone(),
+                tag: WireTag::FOREVER,
+            })
+            .await;
+        source_client
             .send(FederateToRti::Stop {
                 federate_id: source.clone(),
             })
@@ -865,6 +834,8 @@ mod tests {
             TracePattern::client_to_rti(sink.clone(), MsgAck(WireTag::ZERO)),
             TracePattern::rti_to_client(sink.clone(), Tag(WireTag::ZERO)),
             TracePattern::client_to_rti(sink.clone(), Ltc(WireTag::ZERO)),
+            TracePattern::client_to_rti(source.clone(), Net(WireTag::FOREVER)),
+            TracePattern::client_to_rti(sink.clone(), Net(WireTag::FOREVER)),
             TracePattern::client_to_rti(source.clone(), Stop),
             TracePattern::client_to_rti(sink.clone(), Stop),
             TracePattern::rti_to_client(source.clone(), Stop),
@@ -1026,6 +997,18 @@ mod tests {
             }
         );
 
+        source_client
+            .send(FederateToRti::Net {
+                federate_id: source.clone(),
+                tag: WireTag::FOREVER,
+            })
+            .await;
+        sink_client
+            .send(FederateToRti::Net {
+                federate_id: sink.clone(),
+                tag: WireTag::FOREVER,
+            })
+            .await;
         source_client
             .send(FederateToRti::Stop {
                 federate_id: source.clone(),

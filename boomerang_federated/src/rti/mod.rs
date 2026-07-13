@@ -230,7 +230,7 @@ impl FederateCoordination {
 
 /// Result of evaluating whether a pending NET request can receive a TAG.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GrantDecision {
+enum GrantDecision {
     Granted {
         tag: WireTag,
     },
@@ -303,6 +303,50 @@ pub enum RtiError {
         federate_id: FederateId,
         tag: WireTag,
     },
+
+    #[error(
+        "{event} identified federate `{claimed_federate}`, but authenticated endpoint is `{authenticated_federate}`"
+    )]
+    FederateIdentityMismatch {
+        event: &'static str,
+        authenticated_federate: FederateId,
+        claimed_federate: FederateId,
+    },
+
+    #[error("{event} from federate `{federate_id}` used illegal tag {tag}")]
+    InvalidTag {
+        event: &'static str,
+        federate_id: FederateId,
+        tag: WireTag,
+    },
+
+    #[error("NET for federate `{federate_id}` regressed from {previous} to {requested}")]
+    RegressingNet {
+        federate_id: FederateId,
+        previous: WireTag,
+        requested: WireTag,
+    },
+
+    #[error("LTC for federate `{federate_id}` regressed from {previous} to {completed}")]
+    RegressingLtc {
+        federate_id: FederateId,
+        previous: WireTag,
+        completed: WireTag,
+    },
+
+    #[error("federate `{federate_id}` cannot process {event} while {lifecycle}")]
+    InvalidLifecycleTransition {
+        federate_id: FederateId,
+        event: &'static str,
+        lifecycle: &'static str,
+    },
+
+    #[error("MSG route {source_federate} -> {target_federate} endpoint `{endpoint}` is not in the RTI topology")]
+    InvalidRoute {
+        source_federate: FederateId,
+        target_federate: FederateId,
+        endpoint: EndpointId,
+    },
 }
 
 /// Deterministic RTI state for static TAG/NET/LTC/MSG coordination.
@@ -342,7 +386,32 @@ impl RtiState {
         self.topology.contains_route(source, target, endpoint)
     }
 
-    pub fn handle(&mut self, message: FederateToRti) -> Result<Vec<RtiDelivery>, RtiError> {
+    pub fn handle_from(
+        &mut self,
+        authenticated_federate: &FederateId,
+        message: FederateToRti,
+    ) -> Result<Vec<RtiDelivery>, RtiError> {
+        self.validate_message(authenticated_federate, &message)?;
+        let mut staged = self.clone();
+        let deliveries = staged.handle_validated(message)?;
+        *self = staged;
+        Ok(deliveries)
+    }
+
+    #[cfg(test)]
+    fn handle(&mut self, message: FederateToRti) -> Result<Vec<RtiDelivery>, RtiError> {
+        let authenticated_federate = match &message {
+            FederateToRti::Hello { federate_id, .. }
+            | FederateToRti::Net { federate_id, .. }
+            | FederateToRti::Ltc { federate_id, .. }
+            | FederateToRti::MsgAck { federate_id, .. }
+            | FederateToRti::Stop { federate_id } => federate_id.clone(),
+            FederateToRti::Msg { source, .. } => source.clone(),
+        };
+        self.handle_from(&authenticated_federate, message)
+    }
+
+    fn handle_validated(&mut self, message: FederateToRti) -> Result<Vec<RtiDelivery>, RtiError> {
         match message {
             FederateToRti::Hello { federate_id, .. } => {
                 self.ensure_federate(&federate_id)?;
@@ -394,7 +463,201 @@ impl RtiState {
         }
     }
 
-    pub fn request_tag(
+    fn validate_message(
+        &self,
+        authenticated_federate: &FederateId,
+        message: &FederateToRti,
+    ) -> Result<(), RtiError> {
+        self.ensure_federate(authenticated_federate)?;
+        match message {
+            FederateToRti::Hello { federate_id, .. } => {
+                Self::validate_identity(authenticated_federate, federate_id, "Hello")
+            }
+            FederateToRti::Net { federate_id, tag } => {
+                Self::validate_identity(authenticated_federate, federate_id, "NET")?;
+                if *tag == WireTag::NEVER || !is_nonnegative_wire_tag(*tag) {
+                    return Err(RtiError::InvalidTag {
+                        event: "NET",
+                        federate_id: federate_id.clone(),
+                        tag: *tag,
+                    });
+                }
+                let state = self
+                    .federates
+                    .get(federate_id)
+                    .expect("authenticated federate must exist");
+                match state.lifecycle {
+                    FederateLifecycle::Stopped => Err(RtiError::InvalidLifecycleTransition {
+                        federate_id: federate_id.clone(),
+                        event: "NET",
+                        lifecycle: "stopped",
+                    }),
+                    FederateLifecycle::Running {
+                        next_event: NextEvent::NoFuture,
+                    } => Err(RtiError::InvalidLifecycleTransition {
+                        federate_id: federate_id.clone(),
+                        event: "NET",
+                        lifecycle: "no-future",
+                    }),
+                    FederateLifecycle::Running { .. } if *tag < state.last_completed => {
+                        Err(RtiError::RegressingNet {
+                            federate_id: federate_id.clone(),
+                            previous: state.last_completed,
+                            requested: *tag,
+                        })
+                    }
+                    FederateLifecycle::Running { .. } => Ok(()),
+                }
+            }
+            FederateToRti::Ltc { federate_id, tag } => {
+                Self::validate_identity(authenticated_federate, federate_id, "LTC")?;
+                Self::validate_finite_tag(federate_id, "LTC", *tag)?;
+                let state = self
+                    .federates
+                    .get(federate_id)
+                    .expect("authenticated federate must exist");
+                if state.is_stopped() {
+                    return Err(RtiError::InvalidLifecycleTransition {
+                        federate_id: federate_id.clone(),
+                        event: "LTC",
+                        lifecycle: "stopped",
+                    });
+                }
+                if *tag < state.last_completed {
+                    return Err(RtiError::RegressingLtc {
+                        federate_id: federate_id.clone(),
+                        previous: state.last_completed,
+                        completed: *tag,
+                    });
+                }
+                Ok(())
+            }
+            FederateToRti::MsgAck { federate_id, tag } => {
+                Self::validate_identity(authenticated_federate, federate_id, "MsgAck")?;
+                Self::validate_finite_tag(federate_id, "MsgAck", *tag)?;
+                let state = self
+                    .federates
+                    .get(federate_id)
+                    .expect("authenticated federate must exist");
+                if state.is_stopped() {
+                    return Err(RtiError::InvalidLifecycleTransition {
+                        federate_id: federate_id.clone(),
+                        event: "MsgAck",
+                        lifecycle: "stopped",
+                    });
+                }
+                if !state.in_transit.contains_key(tag) {
+                    return Err(RtiError::UnmatchedMessageAck {
+                        federate_id: federate_id.clone(),
+                        tag: *tag,
+                    });
+                }
+                Ok(())
+            }
+            FederateToRti::Msg {
+                source,
+                target,
+                endpoint,
+                tag,
+                ..
+            } => {
+                Self::validate_identity(authenticated_federate, source, "MSG")?;
+                self.ensure_federate(target)?;
+                Self::validate_finite_tag(source, "MSG", *tag)?;
+                let source_state = self
+                    .federates
+                    .get(source)
+                    .expect("authenticated federate must exist");
+                if source_state.is_stopped() {
+                    return Err(RtiError::InvalidLifecycleTransition {
+                        federate_id: source.clone(),
+                        event: "MSG",
+                        lifecycle: "stopped",
+                    });
+                }
+                let target_state = self
+                    .federates
+                    .get(target)
+                    .expect("validated target federate must exist");
+                if !self.contains_route(source, target, endpoint) {
+                    return Err(RtiError::InvalidRoute {
+                        source_federate: source.clone(),
+                        target_federate: target.clone(),
+                        endpoint: endpoint.clone(),
+                    });
+                }
+                if target_state
+                    .in_transit
+                    .get(tag)
+                    .is_some_and(|count| count.get() == usize::MAX)
+                {
+                    return Err(RtiError::MessageCountOverflow {
+                        federate_id: target.clone(),
+                        tag: *tag,
+                    });
+                }
+                Ok(())
+            }
+            FederateToRti::Stop { federate_id } => {
+                Self::validate_identity(authenticated_federate, federate_id, "Stop")?;
+                let state = self
+                    .federates
+                    .get(federate_id)
+                    .expect("authenticated federate must exist");
+                match state.lifecycle {
+                    FederateLifecycle::Running {
+                        next_event: NextEvent::NoFuture,
+                    } => Ok(()),
+                    FederateLifecycle::Running { .. } => {
+                        Err(RtiError::InvalidLifecycleTransition {
+                            federate_id: federate_id.clone(),
+                            event: "Stop",
+                            lifecycle: "running with future events",
+                        })
+                    }
+                    FederateLifecycle::Stopped => Err(RtiError::InvalidLifecycleTransition {
+                        federate_id: federate_id.clone(),
+                        event: "Stop",
+                        lifecycle: "stopped",
+                    }),
+                }
+            }
+        }
+    }
+
+    fn validate_identity(
+        authenticated_federate: &FederateId,
+        claimed_federate: &FederateId,
+        event: &'static str,
+    ) -> Result<(), RtiError> {
+        if authenticated_federate == claimed_federate {
+            Ok(())
+        } else {
+            Err(RtiError::FederateIdentityMismatch {
+                event,
+                authenticated_federate: authenticated_federate.clone(),
+                claimed_federate: claimed_federate.clone(),
+            })
+        }
+    }
+
+    fn validate_finite_tag(
+        federate_id: &FederateId,
+        event: &'static str,
+        tag: WireTag,
+    ) -> Result<(), RtiError> {
+        if is_nonnegative_finite_tag(tag) {
+            Ok(())
+        } else {
+            Err(RtiError::InvalidTag {
+                event,
+                federate_id: federate_id.clone(),
+                tag,
+            })
+        }
+    }
+
+    fn request_tag(
         &mut self,
         federate_id: &FederateId,
         tag: WireTag,
@@ -407,7 +670,7 @@ impl RtiState {
         self.try_grant_tag(federate_id)
     }
 
-    pub fn complete_tag(&mut self, federate_id: &FederateId, tag: WireTag) -> Result<(), RtiError> {
+    fn complete_tag(&mut self, federate_id: &FederateId, tag: WireTag) -> Result<(), RtiError> {
         self.ensure_federate(federate_id)?;
         let state = self
             .federates
@@ -421,7 +684,7 @@ impl RtiState {
     }
 
     /// Acknowledge delivery of exactly one message into a federate's scheduler queue.
-    pub fn acknowledge_message(
+    fn acknowledge_message(
         &mut self,
         federate_id: &FederateId,
         tag: WireTag,
@@ -448,7 +711,7 @@ impl RtiState {
         Ok(())
     }
 
-    pub fn record_in_transit_message(
+    fn record_in_transit_message(
         &mut self,
         source: &FederateId,
         target: &FederateId,
@@ -481,19 +744,7 @@ impl RtiState {
         Ok(())
     }
 
-    pub fn can_grant_tag(
-        &self,
-        federate_id: &FederateId,
-        requested: WireTag,
-    ) -> Result<bool, RtiError> {
-        self.ensure_federate(federate_id)?;
-        Ok(match self.earliest_incoming_message_tag(federate_id)? {
-            Some(earliest) => earliest > requested,
-            None => true,
-        })
-    }
-
-    pub fn earliest_incoming_message_tag(
+    fn earliest_incoming_message_tag(
         &self,
         federate_id: &FederateId,
     ) -> Result<Option<WireTag>, RtiError> {
@@ -609,6 +860,14 @@ fn apply_edge_delay(tag: WireTag, delay: WireDelay) -> Result<WireTag, RtiError>
         tag,
         delay_ns: delay.as_nanos(),
     })
+}
+
+fn is_nonnegative_wire_tag(tag: WireTag) -> bool {
+    tag == WireTag::FOREVER || is_nonnegative_finite_tag(tag)
+}
+
+fn is_nonnegative_finite_tag(tag: WireTag) -> bool {
+    matches!(tag, WireTag::Finite { offset_ns, .. } if offset_ns >= 0)
 }
 
 #[cfg(test)]

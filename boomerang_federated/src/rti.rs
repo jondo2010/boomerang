@@ -370,7 +370,22 @@ fn apply_edge_delay(tag: WireTag, delay: WireDelay) -> Result<WireTag, RtiError>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{EndpointId, FederatedTopology, TopologyEdge};
+    use crate::protocol::{EndpointId, FederatedTopology, NeighborStructure, TopologyEdge};
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct StateSnapshot {
+        topology: FederatedTopology,
+        federates: BTreeMap<FederateId, FederateState>,
+        in_transit: BTreeMap<FederateId, BTreeMap<WireTag, usize>>,
+    }
+
+    fn snapshot(rti: &RtiState) -> StateSnapshot {
+        StateSnapshot {
+            topology: rti.topology.clone(),
+            federates: rti.federates.clone(),
+            in_transit: rti.in_transit.clone(),
+        }
+    }
 
     fn fed(id: &str) -> FederateId {
         FederateId::new(id)
@@ -390,6 +405,312 @@ mod tests {
                 delay,
             )],
         )
+    }
+
+    #[test]
+    fn handle_characterizes_legal_transition_sequence() {
+        let topology = topology_with_edge(WireDelay::ZERO);
+        let mut rti = RtiState::new(topology.clone());
+        let source = fed("source");
+        let target = fed("target");
+        let endpoint = endpoint("source.out->target.in");
+        let source_next = WireTag::finite(0, 1);
+
+        assert_eq!(
+            rti.handle(FederateToRti::Net {
+                federate_id: source.clone(),
+                tag: WireTag::ZERO,
+            })
+            .unwrap(),
+            vec![RtiDelivery::new(
+                source.clone(),
+                RtiToFederate::Tag { tag: WireTag::ZERO },
+            )]
+        );
+        assert_eq!(
+            rti.handle(FederateToRti::Ltc {
+                federate_id: source.clone(),
+                tag: WireTag::ZERO,
+            })
+            .unwrap(),
+            Vec::new()
+        );
+        assert_eq!(
+            rti.handle(FederateToRti::Net {
+                federate_id: source.clone(),
+                tag: source_next,
+            })
+            .unwrap(),
+            vec![RtiDelivery::new(
+                source.clone(),
+                RtiToFederate::Tag { tag: source_next },
+            )]
+        );
+        assert_eq!(
+            rti.handle(FederateToRti::Net {
+                federate_id: target.clone(),
+                tag: WireTag::ZERO,
+            })
+            .unwrap(),
+            vec![RtiDelivery::new(
+                target.clone(),
+                RtiToFederate::Tag { tag: WireTag::ZERO },
+            )]
+        );
+
+        let payload = vec![1, 2, 3];
+        assert_eq!(
+            rti.handle(FederateToRti::Msg {
+                source: source.clone(),
+                target: target.clone(),
+                endpoint: endpoint.clone(),
+                tag: WireTag::ZERO,
+                payload: payload.clone(),
+            })
+            .unwrap(),
+            vec![RtiDelivery::new(
+                target.clone(),
+                RtiToFederate::Msg {
+                    source: source.clone(),
+                    endpoint,
+                    tag: WireTag::ZERO,
+                    payload,
+                },
+            )]
+        );
+        assert_eq!(
+            rti.handle(FederateToRti::MsgAck {
+                federate_id: target.clone(),
+                tag: WireTag::ZERO,
+            })
+            .unwrap(),
+            Vec::new()
+        );
+        assert!(!rti.in_transit.contains_key(&target));
+        assert_eq!(
+            rti.handle(FederateToRti::Ltc {
+                federate_id: target.clone(),
+                tag: WireTag::ZERO,
+            })
+            .unwrap(),
+            Vec::new()
+        );
+
+        for federate_id in [&source, &target] {
+            assert_eq!(
+                rti.handle(FederateToRti::Net {
+                    federate_id: federate_id.clone(),
+                    tag: WireTag::FOREVER,
+                })
+                .unwrap(),
+                Vec::new()
+            );
+            assert_eq!(
+                rti.handle(FederateToRti::Stop {
+                    federate_id: federate_id.clone(),
+                })
+                .unwrap(),
+                Vec::new()
+            );
+        }
+
+        assert_eq!(
+            rti.federate_state(&source),
+            Some(&FederateState {
+                last_completed: WireTag::ZERO,
+                last_granted: Some(source_next),
+                next_event: Some(WireTag::FOREVER),
+                stopped: true,
+            })
+        );
+        assert_eq!(
+            rti.federate_state(&target),
+            Some(&FederateState {
+                last_completed: WireTag::ZERO,
+                last_granted: Some(WireTag::ZERO),
+                next_event: Some(WireTag::FOREVER),
+                stopped: true,
+            })
+        );
+    }
+
+    #[test]
+    fn repeated_and_regressing_net_replace_next_event_without_duplicate_grants() {
+        let mut rti = RtiState::new(FederatedTopology::new([fed("solo")]));
+        let requested = WireTag::finite(10, 0);
+        let regressing = WireTag::finite(5, 0);
+
+        assert_eq!(
+            rti.handle(FederateToRti::Net {
+                federate_id: fed("solo"),
+                tag: requested,
+            })
+            .unwrap(),
+            vec![RtiDelivery::new(
+                fed("solo"),
+                RtiToFederate::Tag { tag: requested },
+            )]
+        );
+        assert_eq!(
+            rti.handle(FederateToRti::Net {
+                federate_id: fed("solo"),
+                tag: requested,
+            })
+            .unwrap(),
+            Vec::new()
+        );
+        assert_eq!(
+            rti.handle(FederateToRti::Net {
+                federate_id: fed("solo"),
+                tag: regressing,
+            })
+            .unwrap(),
+            Vec::new()
+        );
+
+        let state = rti.federate_state(&fed("solo")).unwrap();
+        assert_eq!(state.last_granted, Some(requested));
+        assert_eq!(state.next_event, Some(regressing));
+    }
+
+    #[test]
+    fn repeated_and_regressing_ltc_preserve_completion_high_watermark() {
+        let mut rti = RtiState::new(FederatedTopology::new([fed("solo")]));
+        let completed = WireTag::finite(10, 0);
+
+        for tag in [completed, completed, WireTag::finite(5, 0)] {
+            assert_eq!(
+                rti.handle(FederateToRti::Ltc {
+                    federate_id: fed("solo"),
+                    tag,
+                })
+                .unwrap(),
+                Vec::new()
+            );
+        }
+
+        assert_eq!(
+            rti.federate_state(&fed("solo")).unwrap().last_completed,
+            completed
+        );
+    }
+
+    #[test]
+    fn net_never_is_currently_stored_and_granted() {
+        let mut rti = RtiState::new(FederatedTopology::new([fed("solo")]));
+
+        assert_eq!(
+            rti.handle(FederateToRti::Net {
+                federate_id: fed("solo"),
+                tag: WireTag::NEVER,
+            })
+            .unwrap(),
+            vec![RtiDelivery::new(
+                fed("solo"),
+                RtiToFederate::Tag {
+                    tag: WireTag::NEVER,
+                },
+            )]
+        );
+        assert_eq!(
+            rti.federate_state(&fed("solo")),
+            Some(&FederateState {
+                last_completed: WireTag::NEVER,
+                last_granted: Some(WireTag::NEVER),
+                next_event: Some(WireTag::NEVER),
+                stopped: false,
+            })
+        );
+    }
+
+    #[test]
+    fn unknown_federate_errors_are_failure_atomic() {
+        let mut baseline = RtiState::new(FederatedTopology::new([fed("source"), fed("target")]));
+        baseline
+            .record_in_transit_message(&fed("source"), &fed("target"), WireTag::ZERO)
+            .unwrap();
+        let unknown = fed("unknown");
+        let cases = [
+            FederateToRti::Hello {
+                federate_id: unknown.clone(),
+                topology: NeighborStructure {
+                    federate_id: unknown.clone(),
+                    upstream: Vec::new(),
+                    downstream: Vec::new(),
+                },
+            },
+            FederateToRti::Net {
+                federate_id: unknown.clone(),
+                tag: WireTag::ZERO,
+            },
+            FederateToRti::Ltc {
+                federate_id: unknown.clone(),
+                tag: WireTag::ZERO,
+            },
+            FederateToRti::MsgAck {
+                federate_id: unknown.clone(),
+                tag: WireTag::ZERO,
+            },
+            FederateToRti::Msg {
+                source: unknown.clone(),
+                target: fed("target"),
+                endpoint: endpoint("unknown.out->target.in"),
+                tag: WireTag::ZERO,
+                payload: vec![1],
+            },
+            FederateToRti::Msg {
+                source: fed("source"),
+                target: unknown.clone(),
+                endpoint: endpoint("source.out->unknown.in"),
+                tag: WireTag::ZERO,
+                payload: vec![2],
+            },
+            FederateToRti::Stop {
+                federate_id: unknown.clone(),
+            },
+        ];
+
+        for message in cases {
+            let mut rti = baseline.clone();
+            let before = snapshot(&rti);
+            assert_eq!(
+                rti.handle(message),
+                Err(RtiError::UnknownFederate(unknown.clone()))
+            );
+            assert_eq!(snapshot(&rti), before);
+        }
+    }
+
+    #[test]
+    fn state_handler_currently_accepts_route_absent_from_topology() {
+        let mut rti = RtiState::new(topology_with_edge(WireDelay::ZERO));
+        let invalid_endpoint = endpoint("source.out->target.other");
+
+        assert_eq!(
+            rti.handle(FederateToRti::Msg {
+                source: fed("source"),
+                target: fed("target"),
+                endpoint: invalid_endpoint.clone(),
+                tag: WireTag::ZERO,
+                payload: vec![9],
+            })
+            .unwrap(),
+            vec![RtiDelivery::new(
+                fed("target"),
+                RtiToFederate::Msg {
+                    source: fed("source"),
+                    endpoint: invalid_endpoint,
+                    tag: WireTag::ZERO,
+                    payload: vec![9],
+                },
+            )]
+        );
+        assert_eq!(
+            rti.in_transit
+                .get(&fed("target"))
+                .and_then(|messages| messages.get(&WireTag::ZERO)),
+            Some(&1)
+        );
     }
 
     #[test]
@@ -541,7 +862,11 @@ mod tests {
 
     #[test]
     fn unmatched_msg_ack_returns_typed_error() {
-        let mut rti = RtiState::new(FederatedTopology::new([fed("target")]));
+        let mut rti = RtiState::new(FederatedTopology::new([fed("source"), fed("target")]));
+        let other_tag = WireTag::finite(1, 0);
+        rti.record_in_transit_message(&fed("source"), &fed("target"), other_tag)
+            .unwrap();
+        let before = snapshot(&rti);
 
         assert_eq!(
             rti.acknowledge_message(&fed("target"), WireTag::ZERO),
@@ -550,6 +875,108 @@ mod tests {
                 tag: WireTag::ZERO,
             })
         );
+        assert_eq!(snapshot(&rti), before);
+    }
+
+    #[test]
+    fn net_overflow_currently_mutates_next_event_before_returning_error() {
+        let delay = WireDelay::from_nanos(1);
+        let overflowing = WireTag::finite(i128::MAX, 0);
+        let mut rti = RtiState::new(topology_with_edge(delay));
+        assert_eq!(
+            rti.request_tag(&fed("source"), overflowing).unwrap(),
+            GrantDecision::Granted { tag: overflowing }
+        );
+        let before = snapshot(&rti);
+
+        assert_eq!(
+            rti.handle(FederateToRti::Net {
+                federate_id: fed("target"),
+                tag: WireTag::ZERO,
+            }),
+            Err(RtiError::TagDelayOverflow {
+                tag: overflowing,
+                delay_ns: 1,
+            })
+        );
+
+        let after = snapshot(&rti);
+        assert_ne!(after, before);
+        assert_eq!(
+            before.federates.get(&fed("target")).unwrap().next_event,
+            None
+        );
+        assert_eq!(
+            after.federates.get(&fed("target")).unwrap().next_event,
+            Some(WireTag::ZERO)
+        );
+        assert_eq!(
+            after.federates.get(&fed("target")).unwrap().last_granted,
+            None
+        );
+        assert_eq!(after.topology, before.topology);
+        assert_eq!(after.in_transit, before.in_transit);
+        assert_eq!(
+            after.federates.get(&fed("source")),
+            before.federates.get(&fed("source"))
+        );
+    }
+
+    #[test]
+    fn global_grant_scan_currently_commits_before_later_overflow_error() {
+        let delay = WireDelay::from_nanos(1);
+        let overflowing = WireTag::finite(i128::MAX, 0);
+        let mut rti = RtiState::new(FederatedTopology::with_edges(
+            [fed("a"), fed("source"), fed("z")],
+            [TopologyEdge::new(
+                fed("source"),
+                fed("z"),
+                endpoint("source.out->z.in"),
+                delay,
+            )],
+        ));
+
+        rti.record_in_transit_message(&fed("source"), &fed("a"), WireTag::ZERO)
+            .unwrap();
+        assert!(matches!(
+            rti.request_tag(&fed("a"), WireTag::ZERO).unwrap(),
+            GrantDecision::Blocked { .. }
+        ));
+        rti.acknowledge_message(&fed("a"), WireTag::ZERO).unwrap();
+        assert_eq!(
+            rti.request_tag(&fed("source"), overflowing).unwrap(),
+            GrantDecision::Granted { tag: overflowing }
+        );
+        let before = snapshot(&rti);
+
+        assert_eq!(
+            rti.handle(FederateToRti::Ltc {
+                federate_id: fed("source"),
+                tag: WireTag::ZERO,
+            }),
+            Err(RtiError::TagDelayOverflow {
+                tag: overflowing,
+                delay_ns: 1,
+            })
+        );
+
+        let after = snapshot(&rti);
+        assert_ne!(after, before);
+        assert_eq!(before.federates.get(&fed("a")).unwrap().last_granted, None);
+        assert_eq!(
+            after.federates.get(&fed("a")).unwrap().last_granted,
+            Some(WireTag::ZERO)
+        );
+        assert_eq!(
+            before.federates.get(&fed("source")).unwrap().last_completed,
+            WireTag::NEVER
+        );
+        assert_eq!(
+            after.federates.get(&fed("source")).unwrap().last_completed,
+            WireTag::ZERO
+        );
+        assert_eq!(after.topology, before.topology);
+        assert_eq!(after.in_transit, before.in_transit);
     }
 
     #[test]
@@ -773,6 +1200,61 @@ mod tests {
         assert!(source_state.stopped);
         assert_eq!(source_state.next_event, Some(WireTag::FOREVER));
         assert_eq!(source_state.last_granted, None);
+    }
+
+    #[test]
+    fn stopped_federate_currently_accepts_net_ltc_and_repeated_stop() {
+        let mut rti = RtiState::new(FederatedTopology::new([fed("solo")]));
+
+        assert_eq!(
+            rti.handle(FederateToRti::Stop {
+                federate_id: fed("solo"),
+            })
+            .unwrap(),
+            Vec::new()
+        );
+        assert_eq!(
+            rti.handle(FederateToRti::Net {
+                federate_id: fed("solo"),
+                tag: WireTag::finite(5, 0),
+            })
+            .unwrap(),
+            Vec::new()
+        );
+        assert_eq!(
+            rti.federate_state(&fed("solo")),
+            Some(&FederateState {
+                last_completed: WireTag::NEVER,
+                last_granted: None,
+                next_event: Some(WireTag::finite(5, 0)),
+                stopped: true,
+            })
+        );
+
+        assert_eq!(
+            rti.handle(FederateToRti::Ltc {
+                federate_id: fed("solo"),
+                tag: WireTag::finite(5, 0),
+            })
+            .unwrap(),
+            Vec::new()
+        );
+        assert_eq!(
+            rti.handle(FederateToRti::Stop {
+                federate_id: fed("solo"),
+            })
+            .unwrap(),
+            Vec::new()
+        );
+        assert_eq!(
+            rti.federate_state(&fed("solo")),
+            Some(&FederateState {
+                last_completed: WireTag::finite(5, 0),
+                last_granted: None,
+                next_event: Some(WireTag::FOREVER),
+                stopped: true,
+            })
+        );
     }
 
     #[test]

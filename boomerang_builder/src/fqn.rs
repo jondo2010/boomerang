@@ -3,9 +3,9 @@
 use std::{fmt::Display, ops::Index};
 
 use crate::{
-    port::BasePortBuilder, runtime, ActionBuilder, ActionTag, Assembly, BuilderActionKey,
-    BuilderPortKey, BuilderReactionKey, BuilderReactorKey, ParentReactorBuilder, PortTag,
-    ReactionBuilder, ReactorBuilder, TypedActionKey, TypedPortKey,
+    port::ErasedPortSpec, runtime, ActionSpec, ActionTag, Assembly, BuilderActionKey,
+    BuilderPortKey, BuilderReactionKey, BuilderReactorKey, ParentReactorSpec, PortTag,
+    ReactionSpec, ReactorSpec, TypedActionKey, TypedPortKey,
 };
 
 use super::BuilderError;
@@ -53,7 +53,7 @@ pub struct BuilderFqnSegment {
     index: BuilderFqnSegmentIndex,
 }
 
-impl FqnSegment for ReactorBuilder {
+impl FqnSegment for ReactorSpec {
     /// Create a new segment from a reactor.
     ///
     /// If `grouped` is true, a banked reactor will be represented as a ranged index.
@@ -73,7 +73,7 @@ impl FqnSegment for ReactorBuilder {
     }
 }
 
-impl FqnSegment for ReactionBuilder {
+impl FqnSegment for ReactionSpec {
     /// Create a new segment from a reaction.
     fn fqn_segment(&self, _grouped: bool) -> BuilderFqnSegment {
         let name = self.name().unwrap_or("<unnamed_reaction>").to_string();
@@ -84,7 +84,7 @@ impl FqnSegment for ReactionBuilder {
     }
 }
 
-impl FqnSegment for dyn BasePortBuilder {
+impl FqnSegment for dyn ErasedPortSpec {
     /// Create a new segment from an action.
     ///
     /// If `grouped` is true, a banked action will be represented as a ranged index.
@@ -106,7 +106,7 @@ impl FqnSegment for dyn BasePortBuilder {
     }
 }
 
-impl FqnSegment for ActionBuilder {
+impl FqnSegment for ActionSpec {
     fn fqn_segment(&self, _grouped: bool) -> BuilderFqnSegment {
         BuilderFqnSegment {
             name: self.name().to_string(),
@@ -244,7 +244,7 @@ impl Index<usize> for BuilderFqn {
 impl Fqn for BuilderReactorKey {
     fn fqn(self, env: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
         let reactor = env
-            .reactor_builders
+            .reactor_specs
             .get(self)
             .ok_or(BuilderError::ReactorKeyNotFound(self))?;
 
@@ -260,7 +260,7 @@ impl Fqn for BuilderReactorKey {
 impl Fqn for BuilderActionKey {
     fn fqn(self, env: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
         let action = env
-            .action_builders
+            .action_specs
             .get(self)
             .ok_or(BuilderError::ActionKeyNotFound(self))?;
         let segment = action.fqn_segment(grouped);
@@ -281,7 +281,7 @@ where
 impl Fqn for BuilderReactionKey {
     fn fqn(self, env: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
         let reaction = env
-            .reaction_builders
+            .reaction_specs
             .get(self)
             .ok_or(BuilderError::ReactionKeyNotFound(self))?;
         let segment = reaction.fqn_segment(false);
@@ -292,7 +292,7 @@ impl Fqn for BuilderReactionKey {
 impl Fqn for BuilderPortKey {
     fn fqn(self, env: &Assembly, grouped: bool) -> Result<BuilderFqn, BuilderError> {
         let port = env
-            .port_builders
+            .port_specs
             .get(self)
             .ok_or(BuilderError::PortKeyNotFound(self))?;
         let segment = port.fqn_segment(grouped);
@@ -313,7 +313,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::{runtime, Input, PortBuilder};
+    use crate::{runtime, Input, PortSpec};
 
     use super::*;
 
@@ -358,14 +358,14 @@ mod tests {
         );
     }
 
-    /// Test the FqnSegment trait for ReactorBuilder
+    /// Test the FqnSegment trait for ReactorSpec
     #[test]
     fn test_fqn_segment_reactor_builder() {
-        let reactor = ReactorBuilder::new("TestReactor", "", (), None, None, false);
+        let reactor = ReactorSpec::new("TestReactor", "", (), None, None, false);
         let segment = reactor.fqn_segment(false);
         assert_eq!(segment.to_string(), "TestReactor");
 
-        let banked_reactor = ReactorBuilder::new(
+        let banked_reactor = ReactorSpec::new(
             "BankedReactor",
             "",
             (),
@@ -380,10 +380,10 @@ mod tests {
         assert_eq!(segment_grouped.to_string(), "BankedReactor[0..10]");
     }
 
-    /// Test the FqnSegment trait for the ReactionBuilder
+    /// Test the FqnSegment trait for the ReactionSpec
     #[test]
     fn test_fqn_segment_reaction_builder() {
-        let reaction = ReactionBuilder::new(
+        let reaction = ReactionSpec::new(
             Some("TestReaction"),
             BuilderReactorKey::default(),
             Box::new(|_| runtime::reaction_closure!().into()),
@@ -395,10 +395,10 @@ mod tests {
         assert_eq!(segment.index, BuilderFqnSegmentIndex::None);
     }
 
-    /// Test the FqnSegment trait for ActionBuilder
+    /// Test the FqnSegment trait for ActionSpec
     #[test]
     fn test_fqn_segment_action_builder() {
-        let action = ActionBuilder::new(
+        let action = ActionSpec::new(
             "TestAction",
             BuilderReactorKey::default(),
             None,
@@ -411,30 +411,30 @@ mod tests {
         assert_eq!(segment.index, BuilderFqnSegmentIndex::None);
     }
 
-    /// Test the FqnSegment trait for PortBuilder
+    /// Test the FqnSegment trait for PortSpec
     #[test]
     fn test_fqn_segment_port_builder() {
-        let port = PortBuilder::<(), Input>::new(
+        let port = PortSpec::<(), Input>::new(
             "TestPort",
             BuilderReactorKey::default(),
             None, // No bank info
         );
-        let segment = (&port as &dyn BasePortBuilder).fqn_segment(false);
+        let segment = (&port as &dyn ErasedPortSpec).fqn_segment(false);
         assert_eq!(segment.to_string(), "TestPort");
 
         // Test that the index is None for ports without bank info
         assert_eq!(segment.index, BuilderFqnSegmentIndex::None);
 
         // Test with bank info
-        let port_banked = PortBuilder::<(), Input>::new(
+        let port_banked = PortSpec::<(), Input>::new(
             "BankedPort",
             BuilderReactorKey::default(),
             Some(runtime::BankInfo { idx: 0, total: 10 }),
         );
-        let segment_banked = (&port_banked as &dyn BasePortBuilder).fqn_segment(false);
+        let segment_banked = (&port_banked as &dyn ErasedPortSpec).fqn_segment(false);
         assert_eq!(segment_banked.to_string(), "BankedPort[0]");
 
-        let segment_banked_grouped = (&port_banked as &dyn BasePortBuilder).fqn_segment(true);
+        let segment_banked_grouped = (&port_banked as &dyn ErasedPortSpec).fqn_segment(true);
         assert_eq!(segment_banked_grouped.to_string(), "BankedPort[0..10]");
     }
 }

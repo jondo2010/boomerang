@@ -136,20 +136,20 @@ fn test_mode_kind_effect_and_reset_trigger_builder() {
 
     let _reactor_key = reactor_builder.finish().unwrap();
 
-    assert_eq!(assembly.reactor_builders.len(), 1);
-    assert_eq!(assembly.mode_builders[idle].kind, ModeKind::Initial);
-    assert_eq!(assembly.mode_builders[active].kind, ModeKind::Normal);
+    assert_eq!(assembly.reactor_specs.len(), 1);
+    assert_eq!(assembly.mode_specs[idle].kind, ModeKind::Initial);
+    assert_eq!(assembly.mode_specs[active].kind, ModeKind::Normal);
     assert_eq!(
-        assembly.reaction_builders[switch_reaction].mode_effects[0].target(),
+        assembly.reaction_specs[switch_reaction].mode_effects[0].target(),
         active
     );
     assert_eq!(
-        assembly.reaction_builders[switch_reaction].mode_effects[0].transition(),
+        assembly.reaction_specs[switch_reaction].mode_effects[0].transition(),
         runtime::TransitionKind::Reset
     );
-    assert!(assembly.reaction_builders[reset_reaction].reset_trigger);
+    assert!(assembly.reaction_specs[reset_reaction].reset_trigger);
     assert_eq!(
-        assembly.reaction_builders[reset_reaction].scope_mode,
+        assembly.reaction_specs[reset_reaction].scope_mode,
         Some(active)
     );
 }
@@ -184,11 +184,11 @@ fn test_in_mode_scopes_reactions_and_rejects_nested_modes() {
     let _reactor_key = reactor_builder.finish().unwrap();
 
     assert_eq!(
-        assembly.reaction_builders[scoped_reaction].enabled_modes,
+        assembly.reaction_specs[scoped_reaction].enabled_modes,
         Some(vec![idle])
     );
     assert_eq!(
-        assembly.reaction_builders[scoped_reaction].scope_mode,
+        assembly.reaction_specs[scoped_reaction].scope_mode,
         Some(idle)
     );
     assert!(matches!(
@@ -370,15 +370,15 @@ fn test_reactions_startup_shutdown() {
 
     let _reactor_key = reactor_builder.finish().unwrap();
 
-    assert_eq!(assembly.reactor_builders.len(), 1);
-    assert_eq!(assembly.reaction_builders.len(), 2);
+    assert_eq!(assembly.reactor_specs.len(), 1);
+    assert_eq!(assembly.reaction_specs.len(), 2);
     assert_eq!(
-        assembly.reaction_builders.keys().collect::<Vec<_>>(),
+        assembly.reaction_specs.keys().collect::<Vec<_>>(),
         vec![r0_key, r1_key]
     );
 
     assert_eq!(
-        assembly.reaction_builders[r0_key]
+        assembly.reaction_specs[r0_key]
             .action_relations
             .iter()
             .next(),
@@ -387,7 +387,7 @@ fn test_reactions_startup_shutdown() {
     );
 
     assert_eq!(
-        assembly.reaction_builders[r1_key]
+        assembly.reaction_specs[r1_key]
             .action_relations
             .iter()
             .next(),
@@ -1152,7 +1152,7 @@ fn test_is_enclave_compatibility_with_reactor_placement() {
         .finish()
         .unwrap();
 
-    let reactor = &assembly.reactor_builders[reactor];
+    let reactor = &assembly.reactor_specs[reactor];
     assert!(reactor.is_enclave);
     assert!(reactor.is_enclave());
     assert_eq!(reactor.placement(), &ReactorPlacement::Enclave);

@@ -7,20 +7,20 @@
 #[cfg(feature = "federated")]
 use crate::connection::{FederatedDecoderAdapter, FederatedEncoderAdapter};
 use crate::{
-    connection::{BaseConnectionBuilder, ConnectionBuilder, PortBindings},
+    connection::{ConnectionSpec, ErasedConnectionSpec, PortBindings},
     port::Contained,
-    ActionTag, Fqn, FqnSegment, ParentReactorBuilder, Physical, PortType, TimerActionKey,
-    TimerSpec, TriggerMode,
+    ActionTag, Fqn, FqnSegment, ParentReactorSpec, Physical, PortType, TimerActionKey, TimerSpec,
+    TriggerMode,
 };
 
 use super::{
-    action::ActionBuilder,
-    port::BasePortBuilder,
-    port::PortBuilder,
-    reaction::{BuilderModeEffect, ReactionBuilder},
+    action::ActionSpec,
+    port::ErasedPortSpec,
+    port::PortSpec,
+    reaction::{BuilderModeEffect, ReactionSpec},
     runtime, ActionType, BuilderActionKey, BuilderError, BuilderFqn, BuilderModeKey,
     BuilderPortKey, BuilderReactionKey, BuilderReactorKey, Input, Logical, ModeKind, Output,
-    PortTag, ReactorBuilder, ReactorBuilderState, ReactorPlacement, TypedActionKey, TypedPortKey,
+    PortTag, ReactorBuilderState, ReactorPlacement, ReactorSpec, TypedActionKey, TypedPortKey,
 };
 use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, EdgeDirection};
@@ -98,7 +98,7 @@ struct FederatedCodecRegistration<T: runtime::ReactorData> {
 }
 
 #[derive(Debug)]
-pub struct ModeBuilder {
+pub struct ModeSpec {
     pub name: String,
     pub reactor_key: BuilderReactorKey,
     pub kind: ModeKind,
@@ -107,17 +107,17 @@ pub struct ModeBuilder {
 #[derive(Default)]
 pub struct Assembly {
     /// Builder for Actions
-    pub(super) action_builders: SlotMap<BuilderActionKey, ActionBuilder>,
+    pub(super) action_specs: SlotMap<BuilderActionKey, ActionSpec>,
     /// Builders for Ports
-    pub(super) port_builders: SlotMap<BuilderPortKey, Box<dyn BasePortBuilder>>,
+    pub(super) port_specs: SlotMap<BuilderPortKey, Box<dyn ErasedPortSpec>>,
     /// Builders for Reactions
-    pub(super) reaction_builders: SlotMap<BuilderReactionKey, ReactionBuilder>,
+    pub(super) reaction_specs: SlotMap<BuilderReactionKey, ReactionSpec>,
     /// Builders for Modes
-    pub(super) mode_builders: SlotMap<BuilderModeKey, ModeBuilder>,
+    pub(super) mode_specs: SlotMap<BuilderModeKey, ModeSpec>,
     /// Builders for Reactors
-    pub(super) reactor_builders: SlotMap<BuilderReactorKey, ReactorBuilder>,
+    pub(super) reactor_specs: SlotMap<BuilderReactorKey, ReactorSpec>,
     /// Builders for Connections
-    pub(super) connection_builders: Vec<Box<dyn BaseConnectionBuilder>>,
+    pub(super) connection_specs: Vec<Box<dyn ErasedConnectionSpec>>,
     #[cfg(feature = "federated")]
     /// Environment-scoped payload codec policy for inferred cross-federate connections.
     federated_codecs: HashMap<TypeId, Box<FederatedCodecEntry>>,
@@ -153,7 +153,7 @@ impl Assembly {
         &mut self,
         reactor_key: BuilderReactorKey,
     ) -> Result<ReactorBuilderState<'_>, BuilderError> {
-        if !self.reactor_builders.contains_key(reactor_key) {
+        if !self.reactor_specs.contains_key(reactor_key) {
             return Err(BuilderError::ReactorKeyNotFound(reactor_key));
         }
         Ok(ReactorBuilderState::from_pre_existing(reactor_key, self))
@@ -186,22 +186,20 @@ impl Assembly {
         bank_info: Option<runtime::BankInfo>,
     ) -> Result<BuilderPortKey, BuilderError> {
         // Ensure no duplicates on (name, reactor_key, bank_info)
-        if self.port_builders.values().any(|port| {
+        if self.port_specs.values().any(|port| {
             port.name() == name
                 && port.get_reactor_key() == reactor_key
                 && port.bank_info() == bank_info.as_ref()
         }) {
             return Err(BuilderError::DuplicatePortDefinition {
-                reactor_name: self.reactor_builders[reactor_key].name().to_owned(),
+                reactor_name: self.reactor_specs[reactor_key].name().to_owned(),
                 port_name: name.into(),
             });
         }
 
-        let key = self.port_builders.insert_with_key(|port_key| {
-            self.reactor_builders[reactor_key]
-                .ports
-                .insert(port_key, ());
-            Box::new(PortBuilder::<T, Q>::new(name, reactor_key, bank_info))
+        let key = self.port_specs.insert_with_key(|port_key| {
+            self.reactor_specs[reactor_key].ports.insert(port_key, ());
+            Box::new(PortSpec::<T, Q>::new(name, reactor_key, bank_info))
         });
 
         Ok(key)
@@ -235,10 +233,10 @@ impl Assembly {
         kind: impl Into<ModeKind>,
     ) -> Result<BuilderModeKey, BuilderError> {
         let kind = kind.into();
-        let reactor_builder = &mut self.reactor_builders[reactor_key];
+        let reactor_builder = &mut self.reactor_specs[reactor_key];
         if reactor_builder.modes.keys().any(|mode_key| {
-            self.mode_builders[mode_key].name == name
-                && self.mode_builders[mode_key].reactor_key == reactor_key
+            self.mode_specs[mode_key].name == name
+                && self.mode_specs[mode_key].reactor_key == reactor_key
         }) {
             return Err(BuilderError::DuplicateModeDefinition {
                 reactor_name: reactor_builder.name().to_owned(),
@@ -252,7 +250,7 @@ impl Assembly {
             });
         }
 
-        let key = self.mode_builders.insert(ModeBuilder {
+        let key = self.mode_specs.insert(ModeSpec {
             name: name.to_owned(),
             reactor_key,
             kind,
@@ -272,14 +270,14 @@ impl Assembly {
         mode_key: BuilderModeKey,
         transition: runtime::TransitionKind,
     ) -> Result<BuilderModeEffect, BuilderError> {
-        let mode = self.mode_builders.get(mode_key).ok_or_else(|| {
+        let mode = self.mode_specs.get(mode_key).ok_or_else(|| {
             BuilderError::ReactionBuilderError(format!("Unknown mode key {mode_key:?}"))
         })?;
         if mode.reactor_key != reactor_key {
             return Err(BuilderError::ReactionBuilderError(format!(
                 "Mode '{}' does not belong to reactor '{}'",
                 mode.name,
-                self.reactor_builders[reactor_key].name()
+                self.reactor_specs[reactor_key].name()
             )));
         }
         Ok(BuilderModeEffect::new(mode_key, transition))
@@ -353,10 +351,10 @@ impl Assembly {
     where
         T: runtime::ReactorData,
     {
-        let reactor_builder = &mut self.reactor_builders[reactor_key];
+        let reactor_builder = &mut self.reactor_specs[reactor_key];
 
         if let Some(mode_key) = scope_mode {
-            let mode = self.mode_builders.get(mode_key).ok_or_else(|| {
+            let mode = self.mode_specs.get(mode_key).ok_or_else(|| {
                 BuilderError::ReactionBuilderError(format!(
                     "Unknown mode key {mode_key:?} for action '{name}'"
                 ))
@@ -373,7 +371,7 @@ impl Assembly {
         if reactor_builder
             .actions
             .keys()
-            .any(|action_key| self.action_builders[action_key].name() == name)
+            .any(|action_key| self.action_specs[action_key].name() == name)
         {
             return Err(BuilderError::DuplicateActionDefinition {
                 reactor_name: reactor_builder.name().to_owned(),
@@ -381,9 +379,9 @@ impl Assembly {
             });
         }
 
-        let key =
-            self.action_builders
-                .insert(ActionBuilder::new(name, reactor_key, scope_mode, r#type));
+        let key = self
+            .action_specs
+            .insert(ActionSpec::new(name, reactor_key, scope_mode, r#type));
 
         reactor_builder.actions.insert(key, ());
 
@@ -414,15 +412,15 @@ impl Assembly {
     }
 
     /// Get a previously built action
-    pub fn get_action(&self, action_key: BuilderActionKey) -> Result<&ActionBuilder, BuilderError> {
-        self.action_builders
+    pub fn get_action(&self, action_key: BuilderActionKey) -> Result<&ActionSpec, BuilderError> {
+        self.action_specs
             .get(action_key)
             .ok_or(BuilderError::ActionKeyNotFound(action_key))
     }
 
     /// Get a previously built port
-    pub fn get_port(&self, port_key: BuilderPortKey) -> Result<&dyn BasePortBuilder, BuilderError> {
-        self.port_builders
+    pub fn get_port(&self, port_key: BuilderPortKey) -> Result<&dyn ErasedPortSpec, BuilderError> {
+        self.port_specs
             .get(port_key)
             .map(|builder| builder.as_ref())
             .ok_or(BuilderError::PortKeyNotFound(port_key))
@@ -436,7 +434,7 @@ impl Assembly {
         port_name: &str,
         reactor_key: BuilderReactorKey,
     ) -> Option<TypedPortKey<T, Q, Contained>> {
-        self.port_builders
+        self.port_specs
             .iter()
             .find(|(_, port_builder)| {
                 port_builder.name() == port_name
@@ -452,7 +450,7 @@ impl Assembly {
         reaction_name: &str,
         reactor_key: BuilderReactorKey,
     ) -> Result<BuilderReactionKey, BuilderError> {
-        self.reaction_builders
+        self.reaction_specs
             .iter()
             .find(|(_, reaction_builder)| {
                 reaction_builder
@@ -471,10 +469,10 @@ impl Assembly {
         action_name: &str,
         reactor_key: BuilderReactorKey,
     ) -> Result<BuilderActionKey, BuilderError> {
-        self.reactor_builders[reactor_key]
+        self.reactor_specs[reactor_key]
             .actions
             .keys()
-            .find(|action_key| self.action_builders[*action_key].name() == action_name)
+            .find(|action_key| self.action_specs[*action_key].name() == action_name)
             .ok_or_else(|| BuilderError::NamedActionNotFound(action_name.to_string()))
     }
 
@@ -489,7 +487,7 @@ impl Assembly {
             .clone()
             .split_last()
             .ok_or(BuilderError::InvalidFqn(reactor_fqn.to_string()))?;
-        self.reactor_builders
+        self.reactor_specs
             .iter()
             .find_map(|(reactor_key, reactor_builder)| {
                 if reactor_builder.fqn_segment(false) == segment {
@@ -519,10 +517,10 @@ impl Assembly {
 
         let reactor = self.find_reactor_by_fqn(reactor_fqn)?;
 
-        self.reactor_builders[reactor]
+        self.reactor_specs[reactor]
             .actions
             .keys()
-            .find(|action_key| self.action_builders[*action_key].fqn_segment(false) == segment)
+            .find(|action_key| self.action_specs[*action_key].fqn_segment(false) == segment)
             .ok_or_else(|| BuilderError::NamedActionNotFound(action_fqn.to_string()))
     }
 
@@ -530,16 +528,16 @@ impl Assembly {
     /// exists).
     pub fn common_reactor_key<E0, E1>(&self, e0: &E0, e1: &E1) -> Option<BuilderReactorKey>
     where
-        E0: ParentReactorBuilder,
-        E1: ParentReactorBuilder,
+        E0: ParentReactorSpec,
+        E1: ParentReactorSpec,
     {
         let mut e0_key = e0.parent_reactor_key();
         let mut e1_key = e1.parent_reactor_key();
         while e0_key != e1_key {
             match (e0_key, e1_key) {
                 (Some(key0), Some(key1)) => {
-                    e0_key = self.reactor_builders[key0].parent_reactor_key;
-                    e1_key = self.reactor_builders[key1].parent_reactor_key;
+                    e0_key = self.reactor_specs[key0].parent_reactor_key;
+                    e1_key = self.reactor_specs[key1].parent_reactor_key;
                 }
                 _ => return None,
             }
@@ -598,8 +596,8 @@ impl Assembly {
             target_key.fqn(self, false)?,
         );
 
-        self.connection_builders.push(if physical {
-            Box::new(ConnectionBuilder::<T, Physical> {
+        self.connection_specs.push(if physical {
+            Box::new(ConnectionSpec::<T, Physical> {
                 source_key,
                 target_key,
                 after,
@@ -607,7 +605,7 @@ impl Assembly {
                 _phantom: Default::default(),
             })
         } else {
-            Box::new(ConnectionBuilder::<T, Logical> {
+            Box::new(ConnectionSpec::<T, Logical> {
                 source_key,
                 target_key,
                 after,
@@ -763,13 +761,13 @@ impl Assembly {
 
     /// Validate the reactions in the environment
     pub fn validate_reactions(&self) -> Result<(), BuilderError> {
-        for (_reaction_key, reaction) in &self.reaction_builders {
+        for (_reaction_key, reaction) in &self.reaction_specs {
             // Validate the port dependencies of each Reaction
             for (port_key, trigger_mode) in &reaction.port_relations {
-                let port = &self.port_builders[port_key];
+                let port = &self.port_specs[port_key];
                 let port_reactor_key = port.get_reactor_key();
                 let port_parent_reactor_key =
-                    self.reactor_builders[port_reactor_key].parent_reactor_key;
+                    self.reactor_specs[port_reactor_key].parent_reactor_key;
                 match port.port_type() {
                     PortType::Input => {
                         // triggers and uses are valid for input ports on the same reactor
@@ -829,7 +827,7 @@ impl Assembly {
         port_bindings: &'b PortBindings,
     ) -> impl Iterator<Item = (BuilderReactionKey, BuilderReactionKey)> + 'a {
         let deps = self
-            .reaction_builders
+            .reaction_specs
             .iter()
             .flat_map(move |(reaction_key, reaction)| {
                 // Connect all reactions this reaction depends upon
@@ -843,7 +841,7 @@ impl Assembly {
                         let source_port_key = port_bindings.follow_port_inward(port_key);
 
                         // all reactions that can set this port
-                        self.reaction_builders
+                        self.reaction_specs
                             .iter()
                             .filter_map(move |(reaction_key, reaction)| {
                                 match reaction.port_relations.get(source_port_key) {
@@ -861,12 +859,12 @@ impl Assembly {
 
         // For all Reactions within a Reactor, create a chain of dependencies by priority. This
         // ensures that Reactions within a Reactor always end up at unique levels.
-        let internal = self.reactor_builders.values().flat_map(move |reactor| {
+        let internal = self.reactor_specs.values().flat_map(move |reactor| {
             let reactions = reactor
                 .reactions
                 .keys()
                 .sorted_by_key(|&reaction_key| {
-                    //self.reaction_builders[reaction_key].priority
+                    //self.reaction_specs[reaction_key].priority
                     reaction_key.data().as_ffi()
                 })
                 .rev()
@@ -896,8 +894,7 @@ impl Assembly {
         a_modes.iter().any(|&a_mode| {
             b_modes.iter().any(|&b_mode| {
                 a_mode != b_mode
-                    && self.mode_builders[a_mode].reactor_key
-                        == self.mode_builders[b_mode].reactor_key
+                    && self.mode_specs[a_mode].reactor_key == self.mode_specs[b_mode].reactor_key
             })
         })
     }
@@ -906,7 +903,7 @@ impl Assembly {
         &self,
         reaction_key: BuilderReactionKey,
     ) -> Vec<BuilderModeKey> {
-        let reaction = &self.reaction_builders[reaction_key];
+        let reaction = &self.reaction_specs[reaction_key];
         let mut modes = Vec::new();
         if let Some(mode) = reaction.scope_mode {
             modes.push(mode);
@@ -914,7 +911,7 @@ impl Assembly {
 
         let mut reactor_key = Some(reaction.reactor_key);
         while let Some(key) = reactor_key {
-            let reactor = &self.reactor_builders[key];
+            let reactor = &self.reactor_specs[key];
             if let Some(mode) = reactor.scope_mode {
                 modes.push(mode);
             }
@@ -934,7 +931,7 @@ impl Assembly {
                 .map(|(a, b)| (b, a)),
         );
         // Ensure all ReactionIndicies are represented
-        self.reaction_builders.keys().for_each(|key| {
+        self.reaction_specs.keys().for_each(|key| {
             graph.add_node(key);
         });
 
@@ -944,13 +941,13 @@ impl Assembly {
     /// Build a DAG of Reactors from the parent-child relationships
     pub fn build_reactor_graph(&self) -> DiGraphMap<BuilderReactorKey, ()> {
         let mut graph =
-            DiGraphMap::from_edges(self.reactor_builders.iter().filter_map(|(key, reactor)| {
+            DiGraphMap::from_edges(self.reactor_specs.iter().filter_map(|(key, reactor)| {
                 reactor
                     .parent_reactor_key
                     .map(|parent_key| (parent_key, key))
             }));
         // ensure all Reactors are represented
-        self.reactor_builders.keys().for_each(|key| {
+        self.reactor_specs.keys().for_each(|key| {
             graph.add_node(key);
         });
         graph

@@ -737,8 +737,8 @@ fn test_add_child_federate_sets_enclave_compatible_placement() {
     let main = builder.finish().unwrap();
     let source = assembly.find_reactor_by_fqn("main/source").unwrap();
 
-    assert!(!assembly.reactor_builders[main].is_enclave);
-    let source = &assembly.reactor_builders[source];
+    assert!(!assembly.reactor_specs[main].is_enclave);
+    let source = &assembly.reactor_specs[source];
     assert!(source.is_enclave);
     assert!(matches!(source.placement(), ReactorPlacement::Federate(spec) if spec.id == "source"));
 }

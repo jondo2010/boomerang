@@ -42,7 +42,7 @@ impl Assembly {
         &self,
     ) -> Vec<(BuilderReactorKey, Option<BuilderReactorKey>, BuilderFqn)> {
         let reactors_chunked = self
-            .reactor_builders
+            .reactor_specs
             .keys()
             .map(|reactor_key| (self.fqn_for(reactor_key, true).unwrap(), reactor_key))
             .sorted()
@@ -82,7 +82,7 @@ impl Assembly {
 
         let mut graph =
             DiGraphMap::from_edges(reactors_grouped.iter().filter_map(|(first_key, _, _)| {
-                self.reactor_builders[*first_key]
+                self.reactor_specs[*first_key]
                     .parent_reactor_key
                     .map(|parent_key| (parent_key, *first_key))
             }));
@@ -100,7 +100,7 @@ impl Assembly {
         reactors_chunked
             .into_iter()
             .map(|(first_key, last_key, fqn)| {
-                let reactor = &self.reactor_builders[first_key];
+                let reactor = &self.reactor_specs[first_key];
                 let enclave = if reactor.is_enclave { " <Enclave>" } else { "" };
                 if let Some(last_key) = last_key {
                     (
@@ -115,7 +115,7 @@ impl Assembly {
     }
 
     fn ports_debug_map(&self) -> HashMap<String, String> {
-        let ports = self.port_builders.keys();
+        let ports = self.port_specs.keys();
         let ports_grouped = self.ports_debug_grouped(ports);
         ports_grouped
             .into_iter()
@@ -131,7 +131,7 @@ impl Assembly {
 
     fn actions_debug_map(&self) -> HashMap<String, String> {
         let actions_chunked = self
-            .action_builders
+            .action_specs
             .keys()
             .map(|action_key| (action_key, self.fqn_for(action_key, true).unwrap()))
             .sorted_by(|a, b| a.1.cmp(&b.1))
@@ -141,7 +141,7 @@ impl Assembly {
             .into_iter()
             .map(|(fqn, mut group)| {
                 let (first_key, _) = group.next().unwrap();
-                let ty = self.action_builders[first_key].r#type();
+                let ty = self.action_specs[first_key].r#type();
                 if let Some((last_key, _)) = group.last() {
                     (
                         format!("{first_key:?}..{last_key:?}"),
@@ -156,7 +156,7 @@ impl Assembly {
 
     fn reactions_debug_map(&self) -> HashMap<String, String> {
         let reactions_chunked = self
-            .reaction_builders
+            .reaction_specs
             .keys()
             .map(|reaction_key| (reaction_key, self.fqn_for(reaction_key, true).unwrap()))
             .sorted_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)))
@@ -193,7 +193,7 @@ impl Assembly {
     }
 
     fn connections_debug_map(&self) -> Vec<Connection> {
-        self.connection_builders
+        self.connection_specs
             .iter()
             .map(|connection| {
                 let source = self.fqn_for(connection.source_key(), false).unwrap();

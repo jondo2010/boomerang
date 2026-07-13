@@ -131,14 +131,14 @@ impl<T: runtime::ReactorData> Debug for ReactorState<T> {
     }
 }
 
-/// `ParentReactorBuilder` is implemented for Reactor elements that can have a parent Reactor
-pub trait ParentReactorBuilder {
+/// `ParentReactorSpec` is implemented for Reactor elements that can have a parent Reactor
+pub trait ParentReactorSpec {
     fn parent_reactor_key(&self) -> Option<BuilderReactorKey>;
 }
 
-/// ReactorBuilder is the Builder-side definition of a Reactor, and is type-erased
+/// ReactorSpec is the Builder-side definition of a Reactor, and is type-erased
 #[derive(Debug)]
-pub struct ReactorBuilder {
+pub struct ReactorSpec {
     /// The instantiated/child name of the Reactor
     name: String,
     /// The user's Reactor
@@ -167,14 +167,14 @@ pub struct ReactorBuilder {
     pub initial_mode: Option<BuilderModeKey>,
 }
 
-impl ParentReactorBuilder for ReactorBuilder {
+impl ParentReactorSpec for ReactorSpec {
     fn parent_reactor_key(&self) -> Option<BuilderReactorKey> {
         self.parent_reactor_key
     }
 }
 
-impl ReactorBuilder {
-    /// Create a new `ReactorBuilder` with the given parameters.
+impl ReactorSpec {
+    /// Create a new `ReactorSpec` with the given parameters.
     pub fn new<S: runtime::ReactorData>(
         name: &str,
         type_name: &'static str,
@@ -228,13 +228,13 @@ impl ReactorBuilder {
         self.type_name.as_ref()
     }
 
-    /// Build this [`ReactorBuilder`] into a [`Box<dyn runtime::BaseReactor>`]
+    /// Build this [`ReactorSpec`] into a [`Box<dyn runtime::BaseReactor>`]
     pub fn into_runtime(self, name: &str) -> Box<dyn runtime::BaseReactor> {
         self.state.into_runtime(name)
     }
 }
 
-/// Builder struct used to facilitate construction of a ReactorBuilder by user/generated code.
+/// Builder struct used to facilitate construction of a ReactorSpec by user/generated code.
 #[derive(Debug)]
 pub struct ReactorBuilderState<'a, S: runtime::ReactorData = ()> {
     /// The ReactorKey of this Builder
@@ -256,7 +256,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         env: &'a mut Assembly,
     ) -> Self {
         let type_name = std::any::type_name::<S>();
-        let reactor_key = env.reactor_builders.insert(ReactorBuilder::new(
+        let reactor_key = env.reactor_specs.insert(ReactorSpec::new(
             name,
             type_name,
             reactor_state,
@@ -287,14 +287,14 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
     pub(super) fn from_pre_existing(reactor_key: BuilderReactorKey, env: &'a mut Assembly) -> Self {
         // Find the startup and shutdown actions for this reactor
         let startup_action = env
-            .action_builders
+            .action_specs
             .iter()
             .find(|(_, action)| matches!(action.r#type(), ActionType::Timer(TimerSpec { period, offset }) if period.is_none() && offset.is_none()) && action.reactor_key() == reactor_key)
             .map(|(action_key, _)| action_key)
             .expect("Startup action not found");
 
         let shutdown_action = env
-            .action_builders
+            .action_specs
             .iter()
             .find(|(_, action)| {
                 matches!(action.r#type(), ActionType::Shutdown)
@@ -313,22 +313,22 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         }
     }
 
-    /// Get the [`Assembly`] for this `ReactorBuilder`
+    /// Get the [`Assembly`] for this `ReactorSpec`
     pub fn env(&mut self) -> &mut Assembly {
         self.env
     }
 
-    /// Get the [`BuilderReactorKey`] for this `ReactorBuilder`
+    /// Get the [`BuilderReactorKey`] for this `ReactorSpec`
     pub fn key(&self) -> BuilderReactorKey {
         self.reactor_key
     }
 
     #[doc(hidden)]
     pub fn set_scope_mode(&mut self, mode: BuilderModeKey) -> Result<(), BuilderError> {
-        let mode_builder = self.env.mode_builders.get(mode).ok_or_else(|| {
+        let mode_builder = self.env.mode_specs.get(mode).ok_or_else(|| {
             BuilderError::ReactionBuilderError(format!("Unknown mode key {mode:?}"))
         })?;
-        let reactor_builder = &self.env.reactor_builders[self.reactor_key];
+        let reactor_builder = &self.env.reactor_specs[self.reactor_key];
         if Some(mode_builder.reactor_key) != reactor_builder.parent_reactor_key {
             return Err(BuilderError::ReactionBuilderError(format!(
                 "Mode '{}' does not enclose reactor '{}'",
@@ -336,7 +336,7 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
                 reactor_builder.name()
             )));
         }
-        self.env.reactor_builders[self.reactor_key].scope_mode = Some(mode);
+        self.env.reactor_specs[self.reactor_key].scope_mode = Some(mode);
         Ok(())
     }
 
@@ -443,14 +443,14 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         mode: BuilderModeKey,
         f: impl FnOnce(&mut Self) -> Result<R, BuilderError>,
     ) -> Result<R, BuilderError> {
-        let mode_builder = self.env.mode_builders.get(mode).ok_or_else(|| {
+        let mode_builder = self.env.mode_specs.get(mode).ok_or_else(|| {
             BuilderError::ReactionBuilderError(format!("Unknown mode key {mode:?}"))
         })?;
         if mode_builder.reactor_key != self.reactor_key {
             return Err(BuilderError::ReactionBuilderError(format!(
                 "Mode '{}' does not belong to reactor '{}'",
                 mode_builder.name,
-                self.env.reactor_builders[self.reactor_key].name()
+                self.env.reactor_specs[self.reactor_key].name()
             )));
         }
         if self.current_mode.is_some() {
@@ -565,15 +565,15 @@ impl<'a, S: runtime::ReactorData> ReactorBuilderState<'a, S> {
         F: FnOnce(BuilderReactorKey, &mut Assembly) -> Result<BuilderReactorKey, BuilderError>,
     {
         let child = f(self.reactor_key, self.env)?;
-        if self.env.reactor_builders[child].parent_reactor_key != Some(self.reactor_key) {
+        if self.env.reactor_specs[child].parent_reactor_key != Some(self.reactor_key) {
             return Err(BuilderError::ReactionBuilderError(format!(
                 "Child builder returned reactor '{}' that is not contained by '{}'",
-                self.env.reactor_builders[child].name(),
-                self.env.reactor_builders[self.reactor_key].name()
+                self.env.reactor_specs[child].name(),
+                self.env.reactor_specs[self.reactor_key].name()
             )));
         }
         if let Some(mode) = self.current_mode {
-            self.env.reactor_builders[child].scope_mode = Some(mode);
+            self.env.reactor_specs[child].scope_mode = Some(mode);
         }
         Ok(child)
     }

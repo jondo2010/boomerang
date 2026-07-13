@@ -4,8 +4,8 @@ use super::{
     Assembly, BuilderActionKey, BuilderError, BuilderModeKey, BuilderPortKey, BuilderReactorKey,
 };
 use crate::{
-    runtime, ActionTag, BuilderRuntimeParts, ParentReactorBuilder, PortBank, PortTag,
-    TimerActionKey, TypedActionKey, TypedPortKey,
+    runtime, ActionTag, BuilderRuntimeParts, ParentReactorSpec, PortBank, PortTag, TimerActionKey,
+    TypedActionKey, TypedPortKey,
 };
 use slotmap::SecondaryMap;
 use variadics_please::all_tuples;
@@ -27,7 +27,7 @@ impl petgraph::graph::GraphIndex for BuilderReactionKey {
 /// A boxed deferred Reaction builder function
 pub type BoxedBuilderReactionFn = Box<dyn FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn>;
 
-pub struct ReactionBuilder {
+pub struct ReactionSpec {
     pub(super) name: Option<String>,
     /// The owning Reactor for this Reaction
     pub(super) reactor_key: BuilderReactorKey,
@@ -51,14 +51,14 @@ pub struct ReactionBuilder {
     pub(super) port_order: Vec<BuilderPortKey>,
 }
 
-impl ReactionBuilder {
-    /// Create a new ReactionBuilder
+impl ReactionSpec {
+    /// Create a new ReactionSpec
     pub fn new<S: Into<String>>(
         name: Option<S>,
         parent_key: BuilderReactorKey,
         reaction_fn: Box<dyn FnOnce(&BuilderRuntimeParts) -> runtime::BoxedReactionFn>,
     ) -> Self {
-        ReactionBuilder {
+        ReactionSpec {
             name: name.map(|s| s.into()),
             reactor_key: parent_key,
             reaction_fn,
@@ -74,15 +74,15 @@ impl ReactionBuilder {
     }
 }
 
-impl ParentReactorBuilder for ReactionBuilder {
+impl ParentReactorSpec for ReactionSpec {
     fn parent_reactor_key(&self) -> Option<BuilderReactorKey> {
         Some(self.reactor_key)
     }
 }
 
-impl Debug for ReactionBuilder {
+impl Debug for ReactionSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ReactionBuilder")
+        f.debug_struct("ReactionSpec")
             .field("name", &self.name)
             .field("reactor_key", &self.reactor_key)
             .field("reaction_fn", &"ReactionFn()")
@@ -199,7 +199,7 @@ macro_rules! impl_resolve_mode_effects {
 
 all_tuples!(impl_resolve_mode_effects, 1, 10, T);
 
-impl ReactionBuilder {
+impl ReactionSpec {
     /// Get the name of this Reaction
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
@@ -753,7 +753,7 @@ where
 
         if let Some(ref modes) = enabled_modes {
             for mode_key in modes {
-                let mode = env.mode_builders.get(*mode_key).ok_or_else(|| {
+                let mode = env.mode_specs.get(*mode_key).ok_or_else(|| {
                     BuilderError::ReactionBuilderError(format!(
                         "Unknown mode key {mode_key:?} for reaction '{name:?}'"
                     ))
@@ -768,7 +768,7 @@ where
         }
 
         if let Some(scope_mode) = scope_mode {
-            let mode = env.mode_builders.get(scope_mode).ok_or_else(|| {
+            let mode = env.mode_specs.get(scope_mode).ok_or_else(|| {
                 BuilderError::ReactionBuilderError(format!(
                     "Unknown mode key {scope_mode:?} for reaction '{name:?}'"
                 ))
@@ -782,7 +782,7 @@ where
         }
 
         for effect in &mode_effects {
-            let mode = env.mode_builders.get(effect.target()).ok_or_else(|| {
+            let mode = env.mode_specs.get(effect.target()).ok_or_else(|| {
                 BuilderError::ReactionBuilderError(format!(
                     "Unknown mode key {:?} for reaction '{name:?}'",
                     effect.target()
@@ -796,10 +796,10 @@ where
             }
         }
 
-        let reactor = &mut env.reactor_builders[reactor_key];
-        let reactions = &mut env.reaction_builders;
+        let reactor = &mut env.reactor_specs[reactor_key];
+        let reactions = &mut env.reaction_specs;
 
-        let reaction_builder = ReactionBuilder {
+        let reaction_builder = ReactionSpec {
             name,
             reactor_key,
             reaction_fn,

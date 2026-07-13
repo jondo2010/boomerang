@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use crate::{
     connection::PortBindings, ActionType, BoundaryKind, BuilderActionKey, BuilderError,
     BuilderModeKey, BuilderPortKey, BuilderReactionKey, BuilderReactorKey, InterPartitionEdge,
-    InterPartitionPlan, ParentReactorBuilder, PartialReactionBuilder, PartitionRoot,
+    InterPartitionPlan, ParentReactorSpec, PartialReactionBuilder, PartitionRoot,
     PartitionRootKind, TimerActionKey,
 };
 #[cfg(feature = "federated")]
@@ -290,7 +290,7 @@ impl Assembly {
             let mut federate_id_by_partition = SecondaryMap::<BuilderReactorKey, String>::new();
             let mut seen_ids = BTreeMap::<String, BuilderReactorKey>::new();
 
-            for (reactor_key, reactor) in &self.reactor_builders {
+            for (reactor_key, reactor) in &self.reactor_specs {
                 let Some(spec) = reactor.federate_spec() else {
                     continue;
                 };
@@ -358,11 +358,11 @@ impl Assembly {
             });
         }
 
-        for connection in &self.connection_builders {
+        for connection in &self.connection_specs {
             let source_port_key = connection.source_key();
             let target_port_key = connection.target_key();
-            let source_port = &self.port_builders[source_port_key];
-            let target_port = &self.port_builders[target_port_key];
+            let source_port = &self.port_specs[source_port_key];
+            let target_port = &self.port_specs[target_port_key];
             let source_reactor_key = source_port.parent_reactor_key().ok_or_else(|| {
                 BuilderError::InternalError("source port has no parent reactor".to_owned())
             })?;
@@ -456,7 +456,7 @@ impl Assembly {
             let cycle = cycle
                 .into_iter()
                 .map(|reactor_key| {
-                    self.reactor_builders[reactor_key]
+                    self.reactor_specs[reactor_key]
                         .federate_spec()
                         .map(|spec| spec.id.clone())
                         .unwrap_or_else(|| format!("{reactor_key:?}"))
@@ -478,7 +478,7 @@ impl Assembly {
         partition_map: &mut PartitionMap,
     ) -> Result<PortBindings, BuilderError> {
         let mut port_bindings = PortBindings::default();
-        for connection in std::mem::take(&mut self.connection_builders).iter_mut() {
+        for connection in std::mem::take(&mut self.connection_specs).iter_mut() {
             connection.build(self, partition_map, &mut port_bindings)?;
         }
         Ok(port_bindings)
@@ -489,24 +489,26 @@ impl Assembly {
         let graph = self.build_reactor_graph();
 
         let mut partitions = vec![];
-        let mut node_stack = vec![self.reactor_builders.keys().next().unwrap()];
+        let mut node_stack = vec![self.reactor_specs.keys().next().unwrap()];
 
-        petgraph::visit::depth_first_search(&graph, self.reactor_builders.keys(), |event| {
-            match event {
+        petgraph::visit::depth_first_search(
+            &graph,
+            self.reactor_specs.keys(),
+            |event| match event {
                 petgraph::visit::DfsEvent::Discover(key, _) => {
-                    if self.reactor_builders[key].placement().starts_enclave() {
+                    if self.reactor_specs[key].placement().starts_enclave() {
                         node_stack.push(key);
                     }
                     partitions.push((key, *node_stack.last().unwrap()));
                 }
                 petgraph::visit::DfsEvent::Finish(key, _)
-                    if self.reactor_builders[key].placement().starts_enclave() =>
+                    if self.reactor_specs[key].placement().starts_enclave() =>
                 {
                     node_stack.pop();
                 }
                 _ => {}
-            }
-        });
+            },
+        );
 
         partitions.into_iter().collect()
     }
@@ -517,7 +519,7 @@ impl Assembly {
         builder_parts: &mut BuilderRuntimeParts,
     ) -> Result<(), BuilderError> {
         let reactor_fqns: SecondaryMap<BuilderReactorKey, String> = self
-            .reactor_builders
+            .reactor_specs
             .keys()
             .map(|reactor_key| {
                 self.fqn_for(reactor_key, false)
@@ -525,7 +527,7 @@ impl Assembly {
             })
             .collect::<Result<_, _>>()?;
 
-        for (builder_reactor_key, reactor) in self.reactor_builders.drain() {
+        for (builder_reactor_key, reactor) in self.reactor_specs.drain() {
             let partition_key = partition_map[builder_reactor_key];
             let enclave_key = builder_parts.aliases.enclave_aliases[partition_key];
             let enclave = &mut builder_parts.enclaves[enclave_key];
@@ -570,7 +572,7 @@ impl Assembly {
         &mut self,
         builder_parts: &mut BuilderRuntimeParts,
     ) -> Result<(), BuilderError> {
-        for (builder_mode_key, mode) in self.mode_builders.drain() {
+        for (builder_mode_key, mode) in self.mode_specs.drain() {
             let (enclave_key, reactor_key) =
                 builder_parts.aliases.reactor_aliases[mode.reactor_key];
             let enclave = &mut builder_parts.enclaves[enclave_key];
@@ -594,13 +596,13 @@ impl Assembly {
     ) -> Result<(), BuilderError> {
         let mut new_reactions = Vec::new();
 
-        for (builder_action_key, action) in &self.action_builders {
+        for (builder_action_key, action) in &self.action_specs {
             let partition_key = partition_map[action.parent_reactor_key().unwrap()];
             let enclave_key = builder_parts.aliases.enclave_aliases[partition_key];
             let enclave = &mut builder_parts.enclaves[enclave_key];
 
             let action_referenced = self
-                .reaction_builders
+                .reaction_specs
                 .iter()
                 .any(|(_, reaction)| reaction.action_relations.contains_key(builder_action_key));
 
@@ -660,7 +662,7 @@ impl Assembly {
 
         // Now create the reset reactions for periodic timers, since we can now get &mut self.
         for (name, reaction_fn, reactor_key, action_key) in new_reactions {
-            let scope_mode = self.action_builders[BuilderActionKey::from(action_key)].scope_mode();
+            let scope_mode = self.action_specs[BuilderActionKey::from(action_key)].scope_mode();
             let mut reaction = PartialReactionBuilder::<()>::new(Some(&name), reactor_key, self)
                 .with_trigger(action_key);
             if let Some(scope_mode) = scope_mode {
@@ -692,7 +694,7 @@ impl Assembly {
         builder_parts: &mut BuilderRuntimeParts,
         port_bindings: &PortBindings,
     ) -> Result<(), BuilderError> {
-        for (builder_action_key, action) in &self.action_builders {
+        for (builder_action_key, action) in &self.action_specs {
             let (enclave_key, action_key) =
                 match builder_parts.aliases.action_aliases.get(builder_action_key) {
                     Some(alias) => *alias,
@@ -713,14 +715,14 @@ impl Assembly {
             enclave.insert_action_scope(action_key, scope);
         }
 
-        for (builder_port_key, _port) in &self.port_builders {
+        for (builder_port_key, _port) in &self.port_specs {
             let (enclave_key, port_key) =
                 match builder_parts.aliases.port_aliases.get(builder_port_key) {
                     Some(alias) => *alias,
                     None => continue,
                 };
             let inward_port_key = port_bindings.follow_port_inward(builder_port_key);
-            let port = &self.port_builders[inward_port_key];
+            let port = &self.port_specs[inward_port_key];
             let enclave = &mut builder_parts.enclaves[enclave_key];
             let (reactor_enclave_key, runtime_reactor_key) =
                 builder_parts.aliases.reactor_aliases[port.get_reactor_key()];
@@ -739,14 +741,14 @@ impl Assembly {
         port_bindings: &PortBindings,
     ) -> Result<(), BuilderError> {
         let port_groups = self
-            .port_builders
+            .port_specs
             .keys()
             .map(|port_key| (port_key, port_bindings.follow_port_inward(port_key)))
             .sorted_by(|key_a, key_b| key_a.1.cmp(&key_b.1))
             .chunk_by(|(_port_key, inward_key)| *inward_key);
 
         for (inward_port_key, group) in port_groups.into_iter() {
-            let port = &self.port_builders[inward_port_key];
+            let port = &self.port_specs[inward_port_key];
             let partition_key = partition_map[port.parent_reactor_key().unwrap()];
             let enclave_key = builder_parts.aliases.enclave_aliases[partition_key];
             let enclave = &mut builder_parts.enclaves[enclave_key];
@@ -771,7 +773,7 @@ impl Assembly {
         builder_parts: &mut BuilderRuntimeParts,
         reaction_levels: &SecondaryMap<BuilderReactionKey, runtime::Level>,
     ) -> Result<(), BuilderError> {
-        for (builder_reaction_key, reaction) in self.reaction_builders.drain() {
+        for (builder_reaction_key, reaction) in self.reaction_specs.drain() {
             let reaction_body = (reaction.reaction_fn)(builder_parts);
 
             let reaction_name = reaction.name.clone().unwrap_or_else(|| {
@@ -889,7 +891,7 @@ impl Assembly {
                 if tm.is_triggers() {
                     enclave.insert_action_trigger(action_key, level_reaction);
 
-                    let action_builder = &self.action_builders[builder_action_key];
+                    let action_builder = &self.action_specs[builder_action_key];
                     match action_builder.r#type() {
                         ActionType::Timer(timer_spec) => {
                             let tag = runtime::Tag::new(timer_spec.offset.unwrap_or_default(), 0);
@@ -988,7 +990,7 @@ impl Assembly {
         self.build_federated_inbound_endpoints(&mut builder_parts)?;
         self.build_runtime_ports(&partition_map, &mut builder_parts, &port_bindings)?;
 
-        // this must be done before build_runtime_reactors, since that drains self.reaction_builders
+        // this must be done before build_runtime_reactors, since that drains self.reaction_specs
         let reaction_levels = self.build_runtime_level_map(&port_bindings)?;
 
         self.build_runtime_reactors(&partition_map, &mut builder_parts)?;

@@ -29,7 +29,7 @@ pub use federation::*;
 pub use fqn::*;
 pub use inter_partition::*;
 pub use port::{
-    BuilderPortKey, Contained, Input, Local, Output, PortBank, PortBuilder, PortTag, PortType,
+    BuilderPortKey, Contained, Input, Local, Output, PortBank, PortSpec, PortTag, PortType,
     TypedPortKey,
 };
 pub use reaction::*;

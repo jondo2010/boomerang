@@ -1,6 +1,6 @@
 use std::{fmt::Debug, marker::PhantomData};
 
-use crate::{runtime, BuilderReactorKey, ParentReactorBuilder};
+use crate::{runtime, BuilderReactorKey, ParentReactorSpec};
 
 slotmap::new_key_type! { pub struct BuilderPortKey; }
 
@@ -294,25 +294,25 @@ pub enum PortType {
     Output,
 }
 
-pub trait BasePortBuilder {
+pub trait ErasedPortSpec {
     fn name(&self) -> &str;
     fn get_reactor_key(&self) -> BuilderReactorKey;
     fn port_type(&self) -> &PortType;
     fn bank_info(&self) -> Option<&runtime::BankInfo>;
-    /// Create a runtime Port from this PortBuilder
+    /// Create a runtime Port from this PortSpec
     fn build_runtime_port(&self, key: runtime::PortKey) -> Box<dyn runtime::BasePort>;
     fn inner_type_id(&self) -> std::any::TypeId;
 }
 
-impl ParentReactorBuilder for Box<dyn BasePortBuilder> {
+impl ParentReactorSpec for Box<dyn ErasedPortSpec> {
     fn parent_reactor_key(&self) -> Option<BuilderReactorKey> {
         Some(self.get_reactor_key())
     }
 }
 
-pub struct PortBuilder<T: runtime::ReactorData, Q: PortTag> {
+pub struct PortSpec<T: runtime::ReactorData, Q: PortTag> {
     name: String,
-    /// The key of the Reactor that owns this PortBuilder
+    /// The key of the Reactor that owns this PortSpec
     reactor_key: BuilderReactorKey,
     /// The type of Port to build
     port_type: PortType,
@@ -321,7 +321,7 @@ pub struct PortBuilder<T: runtime::ReactorData, Q: PortTag> {
     _phantom: PhantomData<fn() -> (T, Q)>,
 }
 
-impl<T: runtime::ReactorData, Q: PortTag> PortBuilder<T, Q> {
+impl<T: runtime::ReactorData, Q: PortTag> PortSpec<T, Q> {
     pub fn new(
         name: &str,
         reactor_key: BuilderReactorKey,
@@ -337,7 +337,7 @@ impl<T: runtime::ReactorData, Q: PortTag> PortBuilder<T, Q> {
     }
 }
 
-impl<T: runtime::ReactorData, Q: PortTag> BasePortBuilder for PortBuilder<T, Q> {
+impl<T: runtime::ReactorData, Q: PortTag> ErasedPortSpec for PortSpec<T, Q> {
     fn name(&self) -> &str {
         &self.name
     }
@@ -354,7 +354,7 @@ impl<T: runtime::ReactorData, Q: PortTag> BasePortBuilder for PortBuilder<T, Q> 
         self.bank_info.as_ref()
     }
 
-    /// Build the PortBuilder into a runtime Port
+    /// Build the PortSpec into a runtime Port
     fn build_runtime_port(&self, key: runtime::PortKey) -> Box<dyn runtime::BasePort> {
         Box::new(runtime::Port::<T>::new(&self.name, key))
     }

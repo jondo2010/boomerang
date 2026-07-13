@@ -10,7 +10,7 @@ use slotmap::SecondaryMap;
 
 use crate::{
     runtime, ActionTag, Assembly, BuilderActionKey, BuilderError, BuilderModeKey, BuilderPortKey,
-    BuilderReactorKey, Input, Output, ParentReactorBuilder, PartitionMap, PortType, TriggerMode,
+    BuilderReactorKey, Input, Output, ParentReactorSpec, PartitionMap, PortType, TriggerMode,
     TypedActionKey, TypedPortKey,
 };
 
@@ -99,7 +99,7 @@ impl PortBindings {
             });
         }
 
-        if env.reaction_builders.iter().any(|(_, reaction)| {
+        if env.reaction_specs.iter().any(|(_, reaction)| {
             reaction
                 .port_relations
                 .iter()
@@ -125,13 +125,11 @@ impl PortBindings {
             });
         }
 
-        let source_port = &env.port_builders[source_key];
-        let target_port = &env.port_builders[target_key];
+        let source_port = &env.port_specs[source_key];
+        let target_port = &env.port_specs[target_key];
 
-        let source_ancestor =
-            env.reactor_builders[source_port.get_reactor_key()].parent_reactor_key;
-        let target_ancestor =
-            env.reactor_builders[target_port.get_reactor_key()].parent_reactor_key;
+        let source_ancestor = env.reactor_specs[source_port.get_reactor_key()].parent_reactor_key;
+        let target_ancestor = env.reactor_specs[target_port.get_reactor_key()].parent_reactor_key;
 
         match (source_port.port_type(), target_port.port_type()) {
             (PortType::Input, PortType::Input) => {
@@ -230,7 +228,7 @@ impl PortBindings {
     }
 }
 
-pub trait BaseConnectionBuilder {
+pub trait ErasedConnectionSpec {
     fn source_key(&self) -> BuilderPortKey;
     fn target_key(&self) -> BuilderPortKey;
     fn after(&self) -> Option<runtime::Duration>;
@@ -244,7 +242,7 @@ pub trait BaseConnectionBuilder {
     ) -> Result<(), BuilderError>;
 }
 
-pub struct ConnectionBuilder<T: runtime::ReactorData, Q: ActionTag> {
+pub struct ConnectionSpec<T: runtime::ReactorData, Q: ActionTag> {
     pub(crate) source_key: BuilderPortKey,
     pub(crate) target_key: BuilderPortKey,
     pub(crate) after: Option<runtime::Duration>,
@@ -252,9 +250,7 @@ pub struct ConnectionBuilder<T: runtime::ReactorData, Q: ActionTag> {
     pub(crate) _phantom: std::marker::PhantomData<fn() -> (T, Q)>,
 }
 
-impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
-    for ConnectionBuilder<T, Q>
-{
+impl<T: runtime::ReactorData + Clone, Q: ActionTag> ErasedConnectionSpec for ConnectionSpec<T, Q> {
     fn source_key(&self) -> BuilderPortKey {
         self.source_key
     }
@@ -273,8 +269,8 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
         partition_map: &mut PartitionMap,
         port_bindings: &mut PortBindings,
     ) -> Result<(), BuilderError> {
-        let source_port = &env.port_builders[self.source_key()];
-        let target_port = &env.port_builders[self.target_key()];
+        let source_port = &env.port_specs[self.source_key()];
+        let target_port = &env.port_specs[self.target_key()];
 
         let source_reactor_key = source_port.parent_reactor_key().unwrap();
         let target_reactor_key = target_port.parent_reactor_key().unwrap();
@@ -287,9 +283,9 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
             // trigger and react to an action.
             if !Q::IS_LOGICAL || self.after.is_some() {
                 let source_parent_reactor_key =
-                    env.reactor_builders[source_reactor_key].parent_reactor_key();
+                    env.reactor_specs[source_reactor_key].parent_reactor_key();
                 let target_parent_reactor_key =
-                    env.reactor_builders[target_reactor_key].parent_reactor_key();
+                    env.reactor_specs[target_reactor_key].parent_reactor_key();
                 assert_eq!(
                     source_parent_reactor_key, target_parent_reactor_key,
                     "Delayed connections between same ancestor?"
@@ -325,7 +321,7 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
                 let endpoint = federated_endpoint_id(env, self.source_key, self.target_key)?;
 
                 let target_parent_reactor_key =
-                    env.reactor_builders[target_reactor_key].parent_reactor_key();
+                    env.reactor_specs[target_reactor_key].parent_reactor_key();
 
                 let EnclaveConnectionTarget {
                     reactor_key,
@@ -348,7 +344,7 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
                 );
 
                 let source_parent_reactor_key =
-                    env.reactor_builders[source_reactor_key].parent_reactor_key();
+                    env.reactor_specs[source_reactor_key].parent_reactor_key();
                 let EnclaveConnectionSource {
                     reactor_key,
                     input_port,
@@ -370,7 +366,7 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
             // The connection is between two different partitions, so we need to build a pair of Reactions that trigger
             // and react to an Action.
             let target_parent_reactor_key =
-                env.reactor_builders[target_reactor_key].parent_reactor_key();
+                env.reactor_specs[target_reactor_key].parent_reactor_key();
 
             let EnclaveConnectionTarget {
                 reactor_key,
@@ -386,7 +382,7 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> BaseConnectionBuilder
             port_bindings.bind(output_port.into(), self.target_key, env)?;
 
             let source_parent_reactor_key =
-                env.reactor_builders[source_reactor_key].parent_reactor_key();
+                env.reactor_specs[source_reactor_key].parent_reactor_key();
             let EnclaveConnectionSource {
                 reactor_key,
                 input_port,
@@ -410,8 +406,8 @@ fn partitions_are_both_federated(
     source_partition: BuilderReactorKey,
     target_partition: BuilderReactorKey,
 ) -> Result<bool, BuilderError> {
-    let source_federate = env.reactor_builders[source_partition].federate_spec();
-    let target_federate = env.reactor_builders[target_partition].federate_spec();
+    let source_federate = env.reactor_specs[source_partition].federate_spec();
+    let target_federate = env.reactor_specs[target_partition].federate_spec();
 
     match (source_federate.is_some(), target_federate.is_some()) {
         (true, true) => Ok(true),

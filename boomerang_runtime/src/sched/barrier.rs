@@ -107,7 +107,8 @@ pub(super) struct LogicalTimeBarrier {
     ///
     /// An unchanged or weaker acquire request reuses this watermark instead of
     /// sending duplicate coordination traffic. A stronger request advances it,
-    /// and an actual release resets it so a later acquire may send a new request.
+    /// and an actual release at or beyond it clears it. An intermediate release
+    /// advances known progress without retiring the stronger outstanding request.
     /// A failed upstream send does not establish the watermark.
     pub(super) provisional_tag: Tag,
     /// The send context for the upstream enclave
@@ -126,10 +127,14 @@ impl LogicalTimeBarrier {
                 "Cannot release a tag ({tag}) earlier than the last released tag {}",
                 self.released_tag
             );
+        } else {
+            self.released_tag = tag;
         }
-        self.released_tag = tag;
-        // Reset the provisional tag
-        self.provisional_tag = Tag::NEVER;
+
+        // Only progress sufficient for the outstanding request retires it.
+        if self.provisional_tag <= self.released_tag {
+            self.provisional_tag = Tag::NEVER;
+        }
     }
 
     pub(super) fn release_tag_provisional(&mut self, tag: Tag) {
@@ -291,6 +296,75 @@ mod tests {
             .unwrap()
             .is_some());
         assert_provisional_request(&upstream_rx, after_release);
+    }
+
+    #[test]
+    fn local_barrier_preserves_pending_request_across_insufficient_release() {
+        let (upstream_tx, upstream_rx) = kanal::unbounded();
+        let (_shutdown_tx, shutdown_rx) = keepalive::channel();
+        let mut barrier = LogicalTimeBarrier {
+            released_tag: Tag::NEVER,
+            provisional_tag: Tag::NEVER,
+            upstream_ctx: SendContext {
+                enclave_key: EnclaveKey::from(1),
+                async_tx: upstream_tx,
+                shutdown_rx,
+            },
+            upstream_delay: None,
+        };
+        let (event_tx, event_rx) = kanal::unbounded();
+        let this_enclave = EnclaveKey::from(0);
+        let intermediate = Tag::new(Duration::seconds(1), 0);
+        let requested = Tag::new(Duration::seconds(2), 0);
+
+        queue_interruption(&event_tx);
+        assert!(barrier
+            .acquire_tag(requested, this_enclave, &event_rx)
+            .unwrap()
+            .is_some());
+        assert_provisional_request(&upstream_rx, requested);
+
+        barrier.release_tag(intermediate);
+        assert_eq!(barrier.released_tag, intermediate);
+        assert_eq!(barrier.provisional_tag, requested);
+
+        queue_interruption(&event_tx);
+        assert!(barrier
+            .acquire_tag(requested, this_enclave, &event_rx)
+            .unwrap()
+            .is_some());
+        assert!(upstream_rx.try_recv().unwrap().is_none());
+
+        barrier.release_tag(requested);
+        assert_eq!(barrier.provisional_tag, Tag::NEVER);
+        assert!(barrier
+            .acquire_tag(requested, this_enclave, &event_rx)
+            .unwrap()
+            .is_none());
+        assert!(upstream_rx.try_recv().unwrap().is_none());
+    }
+
+    #[test]
+    fn local_barrier_release_progress_is_monotonic() {
+        let (upstream_tx, _upstream_rx) = kanal::unbounded();
+        let (_shutdown_tx, shutdown_rx) = keepalive::channel();
+        let released = Tag::new(Duration::seconds(2), 0);
+        let stale = Tag::new(Duration::seconds(1), 0);
+        let mut barrier = LogicalTimeBarrier {
+            released_tag: Tag::NEVER,
+            provisional_tag: Tag::NEVER,
+            upstream_ctx: SendContext {
+                enclave_key: EnclaveKey::from(1),
+                async_tx: upstream_tx,
+                shutdown_rx,
+            },
+            upstream_delay: None,
+        };
+
+        barrier.release_tag(released);
+        barrier.release_tag(stale);
+
+        assert_eq!(barrier.released_tag, released);
     }
 
     #[cfg(feature = "federated")]

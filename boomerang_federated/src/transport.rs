@@ -105,8 +105,17 @@ pub async fn run_tcp_static_rti_session(
     listener: TcpListener,
     topology: FederatedTopology,
 ) -> Result<(), SessionError> {
-    let expected = topology.federates.iter().cloned().collect::<BTreeSet<_>>();
-    if expected.len() != topology.federates.len() {
+    run_tcp_static_rti_session_compiled(listener, crate::CompiledTopology::new(topology)?).await
+}
+
+#[cfg(feature = "serde-json-codec")]
+pub(crate) async fn run_tcp_static_rti_session_compiled(
+    listener: TcpListener,
+    topology: crate::CompiledTopology,
+) -> Result<(), SessionError> {
+    let manifest = topology.topology();
+    let expected = manifest.federates.iter().cloned().collect::<BTreeSet<_>>();
+    if expected.len() != manifest.federates.len() {
         return Err(SessionError::Shutdown(
             "duplicate federate id in TCP topology".into(),
         ));
@@ -185,7 +194,9 @@ pub async fn run_tcp_static_rti_session(
         )));
     }
 
-    StaticRtiSession::new(topology, endpoints)?.run().await
+    StaticRtiSession::from_compiled(topology, endpoints)
+        .run()
+        .await
 }
 
 #[cfg(test)]

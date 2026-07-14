@@ -18,7 +18,7 @@ use crate::{
     TimerActionKey,
 };
 #[cfg(feature = "federated")]
-use crate::{federated_routes_from_plan, FederationPlan};
+use crate::{federated_routes_from_plan, federation_topology_from_plan, FederationPlan};
 
 use super::Assembly;
 
@@ -64,6 +64,8 @@ pub struct RuntimeAssembly {
     #[cfg(feature = "federated")]
     /// Static federation metadata extracted from the assembly.
     pub federation_plan: FederationPlan,
+    #[cfg(feature = "federated")]
+    pub(crate) compiled_federation_topology: Option<boomerang_federated::CompiledTopology>,
     #[cfg(feature = "federated")]
     pub(crate) federated_connections: boomerang_federated::FederatedRuntimeConnections,
     #[cfg(feature = "replay")]
@@ -131,6 +133,8 @@ impl RuntimeAssembly {
                 #[cfg(feature = "federated")]
                 federation_plan: FederationPlan::default(),
                 #[cfg(feature = "federated")]
+                compiled_federation_topology: None,
+                #[cfg(feature = "federated")]
                 federated_connections,
                 replayers,
             }
@@ -144,6 +148,8 @@ impl RuntimeAssembly {
                 inter_partition_plan,
                 #[cfg(feature = "federated")]
                 federation_plan: FederationPlan::default(),
+                #[cfg(feature = "federated")]
+                compiled_federation_topology: None,
                 #[cfg(feature = "federated")]
                 federated_connections,
             }
@@ -958,6 +964,14 @@ impl Assembly {
                 self.fqn_for(port, false).map(|fqn| fqn.to_string())
             })?;
         #[cfg(feature = "federated")]
+        let compiled_federation_topology = if federation_plan.is_empty() {
+            None
+        } else {
+            Some(boomerang_federated::CompiledTopology::new(
+                federation_topology_from_plan(&federation_plan)?,
+            )?)
+        };
+        #[cfg(feature = "federated")]
         let federated_connections = boomerang_federated::FederatedRuntimeConnections::new(
             federation_plan
                 .federates
@@ -986,6 +1000,7 @@ impl Assembly {
         #[cfg(feature = "federated")]
         {
             runtime_assembly.federation_plan = federation_plan;
+            runtime_assembly.compiled_federation_topology = compiled_federation_topology;
         }
 
         self.build_runtime_actions(&partition_map, &mut runtime_assembly)?;

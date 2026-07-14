@@ -773,6 +773,14 @@ fn test_federated_source_sink_topology_plan() {
         topology.edges[0].delay,
         boomerang_federated::WireDelay::ZERO
     );
+    assert_eq!(
+        parts
+            .compiled_federation_topology
+            .as_ref()
+            .expect("lowering must compile the RTI topology")
+            .topology(),
+        &topology
+    );
 
     let routes = federated_routes_from_plan(plan).unwrap();
     assert_eq!(routes.len(), 1);

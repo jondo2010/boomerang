@@ -4,7 +4,7 @@ use futures_util::{Sink, SinkExt, TryStream, TryStreamExt};
 use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::{
-    rti::{RtiDelivery, RtiError, RtiState},
+    rti::{CompiledTopology, RtiDelivery, RtiError, RtiState},
     FederateId, FederateToRti, FederatedTopology, ProtocolFrame, RtiToFederate, TransportError,
 };
 
@@ -89,11 +89,21 @@ where
         topology: FederatedTopology,
         endpoints: BTreeMap<FederateId, RtiSessionEndpoint<S, R>>,
     ) -> Result<Self, SessionError> {
-        Ok(Self {
-            rti: RtiState::new(topology)?,
+        Ok(Self::from_compiled(
+            CompiledTopology::new(topology)?,
+            endpoints,
+        ))
+    }
+
+    pub fn from_compiled(
+        topology: CompiledTopology,
+        endpoints: BTreeMap<FederateId, RtiSessionEndpoint<S, R>>,
+    ) -> Self {
+        Self {
+            rti: RtiState::from_compiled(topology),
             endpoints,
             start_unix_epoch_ns: 0,
-        })
+        }
     }
 
     pub fn with_start_unix_epoch_ns(mut self, start_unix_epoch_ns: i128) -> Self {

@@ -107,11 +107,14 @@ uncompleted incoming tags. Multiple payloads at one tag occupy one set entry,
 not one counter per payload. The effective next-event tag, or effective NET, is
 the minimum of the advertised NET and the earliest tag in that set.
 
-`CompiledTopology` precomputes immediate incoming edges, sorted transitive
-upstream and downstream members, and the minimum cumulative delay for every
-reachable ordered source/target pair. Delay composition uses checked
-arithmetic. An overflow rejects topology construction rather than producing a
-saturated bound.
+During builder lowering, `CompiledTopology` validates the static manifest and
+precomputes immediate incoming edges, sorted transitive upstream and downstream
+members, and the minimum cumulative delay for every reachable ordered
+source/target pair. The lowered runtime parts carry that immutable artifact into
+the RTI session, so session startup does not repeat graph compilation. Direct
+session users may still supply a raw topology, which is compiled at that
+configuration boundary. Delay composition uses checked arithmetic. An overflow
+rejects topology construction rather than producing a saturated bound.
 
 The earliest incoming message tag (EIMT) for a target is the minimum, over all
 transitive upstream members, of the upstream effective NET shifted by the

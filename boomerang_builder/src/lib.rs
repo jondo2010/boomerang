@@ -113,6 +113,10 @@ pub enum AssemblyError {
     #[error("Federation bridge error: {what}")]
     FederationBridgeError { what: String },
 
+    #[cfg(feature = "federated")]
+    #[error("Invalid federation topology: {0}")]
+    FederationTopology(#[from] boomerang_federated::RtiError),
+
     #[error("Error declaring Reaction: {0}")]
     ReactionDeclarationError(String),
 

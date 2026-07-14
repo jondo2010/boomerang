@@ -11,17 +11,19 @@ use std::{
 use futures_util::StreamExt;
 use futures_util::{Sink, TryStream};
 
+#[cfg(feature = "serde-json-codec")]
+use crate::json_protocol_frame_transport;
+#[cfg(feature = "serde-json-codec")]
+use crate::transport::run_tcp_static_rti_session_compiled;
 use crate::{
-    in_memory_transport_pair, FederateClientError, FederateClientRoute, FederateId,
-    FederateProtocolClient, FederatedTopology, ProtocolFrame, RtiFederatedTimeBarrier,
+    in_memory_transport_pair, CompiledTopology, FederateClientError, FederateClientRoute,
+    FederateId, FederateProtocolClient, FederatedTopology, ProtocolFrame, RtiFederatedTimeBarrier,
     RtiSessionEndpoint, SessionError, StaticRtiSession, TransportError,
 };
-#[cfg(feature = "serde-json-codec")]
-use crate::{json_protocol_frame_transport, run_tcp_static_rti_session};
 
 /// Runtime parts required to execute one static federation.
 pub struct StaticFederationRuntimeParts {
-    pub topology: FederatedTopology,
+    pub topology: CompiledTopology,
     pub federate_enclaves: BTreeMap<FederateId, boomerang_runtime::EnclaveKey>,
     pub enclaves: tinymap::TinyMap<boomerang_runtime::EnclaveKey, boomerang_runtime::Enclave>,
     pub connections: crate::FederatedRuntimeConnections,
@@ -144,7 +146,7 @@ type SchedulerThreadResult = (
 type SchedulerThreadHandle = std::thread::JoinHandle<SchedulerThreadResult>;
 
 struct PreparedStaticFederation {
-    topology: FederatedTopology,
+    topology: CompiledTopology,
     federate_enclaves: BTreeMap<FederateId, boomerang_runtime::EnclaveKey>,
     federate_by_enclave: tinymap::TinySecondaryMap<boomerang_runtime::EnclaveKey, FederateId>,
     enclaves: tinymap::TinyMap<boomerang_runtime::EnclaveKey, boomerang_runtime::Enclave>,
@@ -167,7 +169,7 @@ pub fn execute_federation_in_memory(
     let tokio_runtime = build_tokio_runtime(prepared.federate_enclaves.len())?;
     let mut session_endpoints = BTreeMap::new();
     let mut client_transports = BTreeMap::new();
-    for federate_id in &prepared.topology.federates {
+    for federate_id in &prepared.topology.topology().federates {
         let (client_transport, rti_transport) =
             in_memory_transport_pair::<ProtocolFrame, ProtocolFrame>();
         let (rti_sink, rti_stream) = rti_transport;
@@ -178,11 +180,11 @@ pub fn execute_federation_in_memory(
         client_transports.insert(federate_id.clone(), client_transport);
     }
 
-    let session = StaticRtiSession::new(prepared.topology.clone(), session_endpoints)?;
+    let session = StaticRtiSession::from_compiled(prepared.topology.clone(), session_endpoints);
     let session_handle = tokio_runtime.spawn(session.run());
     let clients = connect_clients(
         &tokio_runtime,
-        &prepared.topology,
+        prepared.topology.topology(),
         connections,
         client_transports,
     )?;
@@ -210,13 +212,13 @@ pub fn execute_federation_over_tcp(
         .local_addr()
         .map_err(|source| StaticFederationRunnerError::TcpLocalAddress { source })?;
     let connect_addr = listener_connect_addr(listener_addr);
-    let session_handle = tokio_runtime.spawn(run_tcp_static_rti_session(
+    let session_handle = tokio_runtime.spawn(run_tcp_static_rti_session_compiled(
         listener,
         prepared.topology.clone(),
     ));
 
     let mut client_transports = BTreeMap::new();
-    for federate_id in &prepared.topology.federates {
+    for federate_id in &prepared.topology.topology().federates {
         let stream = match tokio_runtime.block_on(tokio::net::TcpStream::connect(connect_addr)) {
             Ok(stream) => stream,
             Err(source) => {
@@ -234,7 +236,7 @@ pub fn execute_federation_over_tcp(
 
     let clients = match connect_clients(
         &tokio_runtime,
-        &prepared.topology,
+        prepared.topology.topology(),
         connections,
         client_transports,
     ) {
@@ -415,7 +417,7 @@ fn execute_connected_static_federation(
             .expect("barriers were built from federate_enclaves")
             .clone();
 
-        if federate_has_no_initial_work(&enclave, &topology, &federate_id) {
+        if federate_has_no_initial_work(&enclave, topology.topology(), &federate_id) {
             let boomerang_runtime::Enclave { env, .. } = enclave;
             envs.insert(enclave_key, env);
             if let Err(error) = barrier.stop() {
@@ -571,8 +573,9 @@ impl boomerang_runtime::FederatedTimeBarrier for SharedFederatedTimeBarrier {
 fn validate_static_runner_parts(
     parts: &StaticFederationRuntimeParts,
 ) -> Result<(), StaticFederationRunnerError> {
-    if parts.topology.federates.is_empty()
-        || parts.topology.edges.is_empty()
+    let topology = parts.topology.topology();
+    if topology.federates.is_empty()
+        || topology.edges.is_empty()
         || parts.connections.routes().next().is_none()
     {
         return Err(unsupported_topology(
@@ -581,7 +584,7 @@ fn validate_static_runner_parts(
     }
 
     let mut federates = BTreeSet::new();
-    for federate_id in &parts.topology.federates {
+    for federate_id in &topology.federates {
         if federate_id.as_str().trim().is_empty() {
             return Err(bridge_error(
                 "federation topology contains an empty federate id",
@@ -602,7 +605,7 @@ fn validate_static_runner_parts(
         }
     }
 
-    for federate_id in &parts.topology.federates {
+    for federate_id in &topology.federates {
         if !parts.federate_enclaves.contains_key(federate_id) {
             return Err(unsupported_topology(format!(
                 "federate '{federate_id}' has no runtime enclave"
@@ -617,7 +620,7 @@ fn validate_static_runner_parts(
             federates.len()
         )));
     }
-    for federate_id in &parts.topology.federates {
+    for federate_id in &topology.federates {
         if !parts.connections.contains_federate(federate_id) {
             return Err(bridge_error(format!(
                 "federate '{federate_id}' is missing its prebuilt runtime connection"
@@ -626,7 +629,7 @@ fn validate_static_runner_parts(
     }
 
     let mut edge_endpoints = BTreeSet::new();
-    for edge in &parts.topology.edges {
+    for edge in &topology.edges {
         if edge.endpoint.as_str().trim().is_empty() {
             return Err(bridge_error(
                 "federation topology contains an empty endpoint id",
@@ -754,7 +757,7 @@ mod tests {
 
         let route = FederateClientRoute::new(endpoint.clone(), source.clone(), sink.clone());
         StaticFederationRuntimeParts {
-            topology: FederatedTopology::with_edges(
+            topology: CompiledTopology::new(FederatedTopology::with_edges(
                 [source.clone(), sink.clone()],
                 [crate::TopologyEdge::new(
                     source.clone(),
@@ -762,7 +765,8 @@ mod tests {
                     endpoint.clone(),
                     crate::WireDelay::ZERO,
                 )],
-            ),
+            ))
+            .unwrap(),
             federate_enclaves: BTreeMap::from([
                 (source.clone(), source_enclave),
                 (sink.clone(), sink_enclave),
@@ -843,7 +847,7 @@ mod tests {
     #[test]
     fn tcp_runner_validates_parts_before_binding() {
         let parts = StaticFederationRuntimeParts {
-            topology: FederatedTopology::default(),
+            topology: CompiledTopology::new(FederatedTopology::default()).unwrap(),
             federate_enclaves: BTreeMap::new(),
             enclaves: tinymap::TinyMap::new(),
             connections: crate::FederatedRuntimeConnections::new([], []).unwrap(),

@@ -273,11 +273,15 @@ pub fn execute_federation_over_tcp(
 }
 
 fn static_federation_runtime_parts(
-    parts: crate::RuntimeAssembly,
+    mut parts: crate::RuntimeAssembly,
 ) -> Result<boomerang_federated::StaticFederationRuntimeParts, AssemblyError> {
     validate_static_runner_plan(&parts)?;
 
-    let topology = federation_topology_from_plan(&parts.federation_plan)?;
+    let topology = parts.compiled_federation_topology.take().ok_or_else(|| {
+        AssemblyError::InconsistentAssemblyState {
+            what: "federated runtime assembly is missing its compiled RTI topology".into(),
+        }
+    })?;
     let (federate_enclaves, _federate_by_enclave) = federate_enclave_maps(&parts)?;
 
     Ok(boomerang_federated::StaticFederationRuntimeParts {

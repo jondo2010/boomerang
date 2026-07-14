@@ -25,8 +25,12 @@ struct IncomingPath {
     delay: WireDelay,
 }
 
+/// Validated static RTI topology with deterministic coordination indexes.
+///
+/// Construct this once when lowering or loading a federation manifest, then reuse it for each RTI
+/// state instantiated from that manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CompiledTopology {
+pub struct CompiledTopology {
     original: FederatedTopology,
     incoming: BTreeMap<FederateId, Vec<IncomingDependency>>,
     downstream: BTreeMap<FederateId, Vec<FederateId>>,
@@ -37,7 +41,7 @@ struct CompiledTopology {
 }
 
 impl CompiledTopology {
-    fn new(topology: FederatedTopology) -> Result<Self, RtiError> {
+    pub fn new(topology: FederatedTopology) -> Result<Self, RtiError> {
         let mut members = BTreeSet::new();
         for federate_id in &topology.federates {
             if !members.insert(federate_id.clone()) {
@@ -202,6 +206,10 @@ impl CompiledTopology {
             minimum_delays,
             routes,
         })
+    }
+
+    pub fn topology(&self) -> &FederatedTopology {
+        &self.original
     }
 
     fn incoming(&self, target: &FederateId) -> &[IncomingDependency] {
@@ -468,7 +476,10 @@ pub struct RtiState {
 
 impl RtiState {
     pub fn new(topology: FederatedTopology) -> Result<Self, RtiError> {
-        let topology = CompiledTopology::new(topology)?;
+        Ok(Self::from_compiled(CompiledTopology::new(topology)?))
+    }
+
+    pub fn from_compiled(topology: CompiledTopology) -> Self {
         let federates = topology
             .original
             .federates
@@ -477,14 +488,14 @@ impl RtiState {
             .map(|federate_id| (federate_id, FederateCoordination::default()))
             .collect();
 
-        Ok(Self {
+        Self {
             topology,
             federates,
-        })
+        }
     }
 
     pub fn topology(&self) -> &FederatedTopology {
-        &self.topology.original
+        self.topology.topology()
     }
 
     fn contains_route(

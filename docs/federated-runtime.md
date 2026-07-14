@@ -36,7 +36,8 @@ types, `RtiState`, `StaticRtiSession`, `FederateProtocolClient`,
 
 `boomerang_builder` owns topology validation and lowering. It turns assembly
 metadata into a `FederationPlan`, validates unsupported topology shapes, lowers
-`RuntimeAssembly` into `boomerang_federated::StaticFederationRuntimeParts`,
+the RTI's immutable `CompiledTopology`, and packages `RuntimeAssembly` into
+`boomerang_federated::StaticFederationRuntimeParts`,
 and exposes thin assembly-facing `execute_federation_in_memory` and
 `execute_federation_over_tcp` shims.
 
@@ -168,9 +169,13 @@ fault state to exactly that federate's barrier. Sender reactions and the barrier
 share clones of the same mailbox sender. Consequently, reaction-emitted `MSG`
 frames and the subsequent `LTC` frame enter one FIFO queue in program order.
 
-`RtiState` compiles the immutable static topology once at construction into
-ordered immediate and transitive dependencies, minimum cumulative path delays,
-downstream work sets, and exact route keys. The session calls
+Builder lowering asks `boomerang_federated::CompiledTopology` to validate the
+static manifest and produce ordered immediate and transitive dependencies,
+minimum cumulative path delays, downstream work sets, and exact route keys.
+`RuntimeAssembly` carries that artifact through `StaticFederationRuntimeParts`
+to `StaticRtiSession`; RTI startup does not recompute it. Raw-topology session
+constructors remain as a convenience for callers outside the builder and
+compile once at their configuration boundary. The session calls
 `RtiState::handle_from` with the authenticated connection identity
 for every frame. The RTI validates and preflights each event before committing
 its one changed coordination record and any grants, so an error cannot leave a

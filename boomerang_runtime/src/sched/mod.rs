@@ -856,18 +856,70 @@ fn panic_payload_message(payload: Box<dyn std::any::Any + Send + 'static>) -> St
     }
 }
 
-#[cfg(all(test, feature = "federated"))]
-mod tests {
+#[cfg(test)]
+mod local_tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
     use crate::{reaction_closure, ActionKey, Level, PortKey, Reaction, Reactor};
 
+    #[test]
+    fn scheduler_without_external_coordinator_processes_and_completes_tag() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut enclave = Enclave::default();
+        let reactor = enclave.insert_reactor(Reactor::new("root", ()).boxed(), None);
+        let scope = enclave.root_scope(reactor);
+        let reaction_log = Arc::clone(&log);
+        let reaction = enclave.insert_reaction(
+            Reaction::new(
+                "record",
+                reaction_closure!(ctx, _reactor, _refs => {
+                    reaction_log.lock().unwrap().push(ctx.get_tag());
+                }),
+                None,
+            ),
+            reactor,
+            std::iter::empty::<PortKey>(),
+            std::iter::empty::<PortKey>(),
+            std::iter::empty::<ActionKey>(),
+            scope,
+            None,
+        );
+        let mut scheduler = Scheduler::new(
+            EnclaveKey::from(0),
+            enclave,
+            Config::default().with_fast_forward(true),
+        );
+        let tag = Tag::ZERO;
+
+        scheduler.startup();
+        scheduler
+            .events
+            .push_event(tag, std::iter::once((Level::from(0), reaction)), false);
+
+        assert!(scheduler.try_next().unwrap());
+        assert_eq!(scheduler.current_tag, tag);
+        assert_eq!(*log.lock().unwrap(), vec![tag]);
+    }
+}
+
+#[cfg(all(test, feature = "federated"))]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::{
+        env::{DownstreamRef, UpstreamRef},
+        reaction_closure, ActionKey, Level, PortKey, Reaction, Reactor,
+    };
+
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum HookCall {
-        Acquire(Tag),
+        LocalAcquire(Tag),
+        ExternalAcquire(Tag),
         Reaction(Tag),
-        Ltc(Tag),
+        LocalComplete(Tag),
+        ExternalComplete(Tag),
     }
 
     #[derive(Debug)]
@@ -922,7 +974,10 @@ mod tests {
             tag: Tag,
             _event_rx: &crate::Receiver<AsyncEvent>,
         ) -> Result<FederatedBarrierOutcome, FederatedBarrierError> {
-            self.log.lock().unwrap().push(HookCall::Acquire(tag));
+            self.log
+                .lock()
+                .unwrap()
+                .push(HookCall::ExternalAcquire(tag));
             if let Some(message) = self.acquire_error.take() {
                 return Err(FederatedBarrierError::new(message));
             }
@@ -933,10 +988,50 @@ mod tests {
         }
 
         fn logical_tag_complete(&mut self, tag: Tag) -> Result<(), FederatedBarrierError> {
-            self.log.lock().unwrap().push(HookCall::Ltc(tag));
+            self.log
+                .lock()
+                .unwrap()
+                .push(HookCall::ExternalComplete(tag));
             if let Some(message) = self.completion_error.take() {
                 return Err(FederatedBarrierError::new(message));
             }
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct RecordingBarrierWithLocalRelease {
+        log: Arc<Mutex<Vec<HookCall>>>,
+        downstream_rx: crate::Receiver<AsyncEvent>,
+    }
+
+    impl FederatedTimeBarrier for RecordingBarrierWithLocalRelease {
+        fn acquire_tag(
+            &mut self,
+            tag: Tag,
+            _event_rx: &crate::Receiver<AsyncEvent>,
+        ) -> Result<FederatedBarrierOutcome, FederatedBarrierError> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(HookCall::ExternalAcquire(tag));
+            Ok(FederatedBarrierOutcome::Granted)
+        }
+
+        fn logical_tag_complete(&mut self, tag: Tag) -> Result<(), FederatedBarrierError> {
+            loop {
+                let event = self
+                    .downstream_rx
+                    .recv()
+                    .expect("local downstream release channel should remain open");
+                if matches!(event, AsyncEvent::TagRelease { tag: released, .. } if released == tag)
+                {
+                    break;
+                }
+            }
+            let mut log = self.log.lock().unwrap();
+            log.push(HookCall::LocalComplete(tag));
+            log.push(HookCall::ExternalComplete(tag));
             Ok(())
         }
     }
@@ -976,6 +1071,84 @@ mod tests {
         (scheduler, reaction)
     }
 
+    fn scheduler_with_local_dependencies(
+        log: Arc<Mutex<Vec<HookCall>>>,
+    ) -> (
+        Scheduler,
+        ReactionKey,
+        crate::Receiver<AsyncEvent>,
+        crate::Sender<AsyncEvent>,
+        (crate::keepalive::Sender, crate::keepalive::Sender),
+    ) {
+        let mut enclave = Enclave::default();
+        let event_tx = enclave.event_tx.clone();
+        let reactor = enclave.insert_reactor(Reactor::new("root", ()).boxed(), None);
+        let scope = enclave.root_scope(reactor);
+        let reaction_log = Arc::clone(&log);
+        let reaction = enclave.insert_reaction(
+            Reaction::new(
+                "record",
+                reaction_closure!(ctx, _reactor, _refs => {
+                    reaction_log
+                        .lock()
+                        .unwrap()
+                        .push(HookCall::Reaction(ctx.get_tag()));
+                }),
+                None,
+            ),
+            reactor,
+            std::iter::empty::<PortKey>(),
+            std::iter::empty::<PortKey>(),
+            std::iter::empty::<ActionKey>(),
+            scope,
+            None,
+        );
+
+        let upstream = EnclaveKey::from(1);
+        let (upstream_tx, upstream_rx) = kanal::unbounded();
+        let (upstream_shutdown_tx, upstream_shutdown_rx) = crate::keepalive::channel();
+        enclave.upstream_enclaves.insert(
+            upstream,
+            UpstreamRef {
+                send_ctx: SendContext {
+                    enclave_key: upstream,
+                    async_tx: upstream_tx,
+                    shutdown_rx: upstream_shutdown_rx,
+                },
+                delay: None,
+            },
+        );
+
+        let downstream = EnclaveKey::from(2);
+        let (downstream_tx, downstream_rx) = kanal::unbounded();
+        let (downstream_shutdown_tx, downstream_shutdown_rx) = crate::keepalive::channel();
+        enclave.downstream_enclaves.insert(
+            downstream,
+            DownstreamRef {
+                send_ctx: SendContext {
+                    enclave_key: downstream,
+                    async_tx: downstream_tx,
+                    shutdown_rx: downstream_shutdown_rx,
+                },
+            },
+        );
+
+        let barrier = RecordingBarrierWithLocalRelease { log, downstream_rx };
+        let scheduler = Scheduler::new_with_federated_time_barrier(
+            EnclaveKey::from(0),
+            enclave,
+            Config::default().with_fast_forward(true),
+            barrier,
+        );
+        (
+            scheduler,
+            reaction,
+            upstream_rx,
+            event_tx,
+            (upstream_shutdown_tx, downstream_shutdown_tx),
+        )
+    }
+
     #[test]
     fn federated_time_barrier_wraps_processed_logical_tag() {
         let log = Arc::new(Mutex::new(Vec::new()));
@@ -996,11 +1169,95 @@ mod tests {
         assert_eq!(
             calls,
             vec![
-                HookCall::Acquire(tag),
+                HookCall::ExternalAcquire(tag),
                 HookCall::Reaction(tag),
-                HookCall::Ltc(tag)
+                HookCall::ExternalComplete(tag)
             ]
         );
+    }
+
+    #[test]
+    fn local_coordination_wraps_external_coordination() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let (mut scheduler, reaction, upstream_rx, event_tx, _shutdown_guards) =
+            scheduler_with_local_dependencies(Arc::clone(&log));
+        let tag = Tag::ZERO;
+
+        scheduler.startup();
+        scheduler
+            .events
+            .push_event(tag, std::iter::once((Level::from(0), reaction)), false);
+
+        let acquire_log = Arc::clone(&log);
+        let release = std::thread::spawn(move || {
+            let request = upstream_rx
+                .recv()
+                .expect("local upstream should receive a provisional request");
+            assert!(matches!(
+                request,
+                AsyncEvent::TagReleaseProvisional {
+                    enclave,
+                    tag: requested,
+                } if enclave == EnclaveKey::from(0) && requested == tag
+            ));
+            acquire_log
+                .lock()
+                .unwrap()
+                .push(HookCall::LocalAcquire(tag));
+            event_tx
+                .send(AsyncEvent::release(EnclaveKey::from(1), tag))
+                .unwrap();
+        });
+
+        assert!(scheduler.try_next().unwrap());
+        release.join().unwrap();
+        assert!(scheduler.try_next().unwrap());
+
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                HookCall::LocalAcquire(tag),
+                HookCall::ExternalAcquire(tag),
+                HookCall::Reaction(tag),
+                HookCall::LocalComplete(tag),
+                HookCall::ExternalComplete(tag),
+            ]
+        );
+    }
+
+    #[test]
+    fn local_interruption_prevents_external_acquire() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let (mut scheduler, _reaction, upstream_rx, event_tx, _shutdown_guards) =
+            scheduler_with_local_dependencies(Arc::clone(&log));
+        let tag = Tag::new(Duration::seconds(1), 0);
+
+        scheduler.startup();
+        scheduler
+            .events
+            .push_event(tag, std::iter::empty::<(Level, ReactionKey)>(), false);
+
+        let acquire_log = Arc::clone(&log);
+        let interrupt = std::thread::spawn(move || {
+            let request = upstream_rx
+                .recv()
+                .expect("local upstream should receive a provisional request");
+            assert!(matches!(
+                request,
+                AsyncEvent::TagReleaseProvisional { tag: requested, .. } if requested == tag
+            ));
+            acquire_log
+                .lock()
+                .unwrap()
+                .push(HookCall::LocalAcquire(tag));
+            event_tx
+                .send(AsyncEvent::provisional(EnclaveKey::from(9), Tag::ZERO))
+                .unwrap();
+        });
+
+        assert!(scheduler.try_next().unwrap());
+        interrupt.join().unwrap();
+        assert_eq!(*log.lock().unwrap(), vec![HookCall::LocalAcquire(tag)]);
     }
 
     #[test]
@@ -1035,7 +1292,7 @@ mod tests {
         assert_eq!(scheduler.events.peek_tag(), Some(inbound_tag));
 
         let calls = log.lock().unwrap().clone();
-        assert_eq!(calls, vec![HookCall::Acquire(future_tag)]);
+        assert_eq!(calls, vec![HookCall::ExternalAcquire(future_tag)]);
     }
 
     #[test]

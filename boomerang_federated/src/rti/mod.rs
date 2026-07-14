@@ -20,11 +20,20 @@ struct IncomingDependency {
     delay: WireDelay,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct IncomingPath {
+    source: FederateId,
+    delay: WireDelay,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CompiledTopology {
     original: FederatedTopology,
     incoming: BTreeMap<FederateId, Vec<IncomingDependency>>,
     downstream: BTreeMap<FederateId, Vec<FederateId>>,
+    transitive_incoming: BTreeMap<FederateId, Vec<IncomingPath>>,
+    transitive_downstream: BTreeMap<FederateId, Vec<FederateId>>,
+    minimum_delays: BTreeMap<(FederateId, FederateId), WireDelay>,
     routes: BTreeSet<RouteKey>,
 }
 
@@ -49,6 +58,7 @@ impl CompiledTopology {
             .collect::<BTreeMap<_, _>>();
         let mut routes = BTreeSet::new();
         let mut endpoint_routes = BTreeMap::<EndpointId, TopologyEdge>::new();
+        let mut minimum_delays = BTreeMap::<(FederateId, FederateId), WireDelay>::new();
 
         for edge in &topology.edges {
             if !members.contains(&edge.source) {
@@ -101,6 +111,10 @@ impl CompiledTopology {
                 .get_mut(&edge.source)
                 .expect("validated topology source must have a downstream index")
                 .insert(edge.target.clone());
+            minimum_delays
+                .entry((edge.source.clone(), edge.target.clone()))
+                .and_modify(|delay| *delay = (*delay).min(edge.delay))
+                .or_insert(edge.delay);
         }
 
         for dependencies in incoming.values_mut() {
@@ -109,12 +123,84 @@ impl CompiledTopology {
         let downstream = downstream_sets
             .into_iter()
             .map(|(source, targets)| (source, targets.into_iter().collect()))
+            .collect::<BTreeMap<_, _>>();
+
+        for _ in 0..members.len() {
+            let paths = minimum_delays
+                .iter()
+                .map(|((source, target), delay)| (source.clone(), target.clone(), *delay))
+                .collect::<Vec<_>>();
+            let mut updates = BTreeMap::new();
+
+            for (source, intermediate, first) in &paths {
+                for (next_intermediate, target, second) in &paths {
+                    if intermediate != next_intermediate {
+                        continue;
+                    }
+                    let nanos =
+                        first
+                            .as_nanos()
+                            .checked_add(second.as_nanos())
+                            .ok_or_else(|| RtiError::PathDelayOverflow {
+                                path_source: source.clone(),
+                                intermediate: intermediate.clone(),
+                                target: target.clone(),
+                                first_delay_ns: first.as_nanos(),
+                                second_delay_ns: second.as_nanos(),
+                            })?;
+                    let candidate = WireDelay::from_nanos(nanos);
+                    let key = (source.clone(), target.clone());
+                    let current = updates
+                        .get(&key)
+                        .copied()
+                        .or_else(|| minimum_delays.get(&key).copied());
+                    if current.is_none_or(|delay| candidate < delay) {
+                        updates.insert(key, candidate);
+                    }
+                }
+            }
+
+            if updates.is_empty() {
+                break;
+            }
+            minimum_delays.extend(updates);
+        }
+
+        let mut transitive_incoming = members
+            .iter()
+            .cloned()
+            .map(|federate_id| (federate_id, Vec::new()))
+            .collect::<BTreeMap<_, _>>();
+        let mut transitive_downstream_sets = members
+            .iter()
+            .cloned()
+            .map(|federate_id| (federate_id, BTreeSet::new()))
+            .collect::<BTreeMap<_, _>>();
+        for ((source, target), delay) in &minimum_delays {
+            transitive_incoming
+                .get_mut(target)
+                .expect("minimum-delay target must be a topology member")
+                .push(IncomingPath {
+                    source: source.clone(),
+                    delay: *delay,
+                });
+            transitive_downstream_sets
+                .get_mut(source)
+                .expect("minimum-delay source must be a topology member")
+                .insert(target.clone());
+        }
+        let transitive_downstream = transitive_downstream_sets
+            .into_iter()
+            .map(|(source, targets)| (source, targets.into_iter().collect()))
             .collect();
 
         Ok(Self {
             original: topology,
             incoming,
             downstream,
+            transitive_incoming,
+            transitive_downstream,
+            minimum_delays,
             routes,
         })
     }
@@ -125,6 +211,24 @@ impl CompiledTopology {
 
     fn downstream(&self, source: &FederateId) -> &[FederateId] {
         self.downstream.get(source).map_or(&[], Vec::as_slice)
+    }
+
+    fn transitive_incoming(&self, target: &FederateId) -> &[IncomingPath] {
+        self.transitive_incoming
+            .get(target)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    fn transitive_downstream(&self, source: &FederateId) -> &[FederateId] {
+        self.transitive_downstream
+            .get(source)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    fn minimum_delay(&self, source: &FederateId, target: &FederateId) -> Option<WireDelay> {
+        self.minimum_delays
+            .get(&(source.clone(), target.clone()))
+            .copied()
     }
 
     fn contains_route(
@@ -287,6 +391,17 @@ pub enum RtiError {
 
     #[error("delaying tag {tag} by {delay_ns}ns overflowed")]
     TagDelayOverflow { tag: WireTag, delay_ns: u64 },
+
+    #[error(
+        "minimum path delay {path_source} -> {intermediate} -> {target} overflowed while adding {first_delay_ns}ns and {second_delay_ns}ns"
+    )]
+    PathDelayOverflow {
+        path_source: FederateId,
+        intermediate: FederateId,
+        target: FederateId,
+        first_delay_ns: u64,
+        second_delay_ns: u64,
+    },
 
     #[error("federate `{federate_id}` acknowledged no in-transit message at {tag}")]
     UnmatchedMessageAck {

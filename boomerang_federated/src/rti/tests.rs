@@ -567,8 +567,110 @@ fn compiled_topology_indexes_dependencies_and_routes_deterministically() {
     );
     assert_eq!(rti.topology.downstream(&fed("a")), [fed("b"), fed("c")]);
     assert_eq!(rti.topology.downstream(&fed("b")), [fed("c")]);
+    assert_eq!(
+        rti.topology.transitive_incoming(&fed("c")),
+        [
+            IncomingPath {
+                source: fed("a"),
+                delay: WireDelay::from_nanos(1),
+            },
+            IncomingPath {
+                source: fed("b"),
+                delay: WireDelay::from_nanos(2),
+            },
+        ]
+    );
+    assert_eq!(
+        rti.topology.transitive_downstream(&fed("a")),
+        [fed("b"), fed("c")]
+    );
+    assert_eq!(
+        rti.topology.minimum_delay(&fed("a"), &fed("c")),
+        Some(WireDelay::from_nanos(1))
+    );
     assert!(rti.contains_route(&fed("a"), &fed("c"), &endpoint("a.out->c.in")));
     assert!(!rti.contains_route(&fed("c"), &fed("a"), &endpoint("a.out->c.in")));
+}
+
+#[test]
+fn compiled_topology_finds_competing_paths_cycles_and_disconnected_members() {
+    let rti = new_rti(FederatedTopology::with_edges(
+        [fed("a"), fed("b"), fed("c"), fed("isolated")],
+        [
+            TopologyEdge::new(
+                fed("a"),
+                fed("b"),
+                endpoint("a.direct->b.in"),
+                WireDelay::from_nanos(5),
+            ),
+            TopologyEdge::new(
+                fed("a"),
+                fed("c"),
+                endpoint("a.out->c.in"),
+                WireDelay::from_nanos(1),
+            ),
+            TopologyEdge::new(
+                fed("c"),
+                fed("b"),
+                endpoint("c.out->b.in"),
+                WireDelay::from_nanos(1),
+            ),
+            TopologyEdge::new(
+                fed("b"),
+                fed("a"),
+                endpoint("b.out->a.in"),
+                WireDelay::from_nanos(10),
+            ),
+        ],
+    ));
+
+    assert_eq!(
+        rti.topology.minimum_delay(&fed("a"), &fed("b")),
+        Some(WireDelay::from_nanos(2))
+    );
+    assert_eq!(
+        rti.topology.minimum_delay(&fed("a"), &fed("a")),
+        Some(WireDelay::from_nanos(12))
+    );
+    assert_eq!(
+        rti.topology.minimum_delay(&fed("isolated"), &fed("a")),
+        None
+    );
+    assert!(rti
+        .topology
+        .transitive_incoming(&fed("isolated"))
+        .is_empty());
+}
+
+#[test]
+fn compiled_topology_rejects_minimum_path_delay_overflow() {
+    assert_eq!(
+        RtiState::new(FederatedTopology::with_edges(
+            [fed("a"), fed("b"), fed("c")],
+            [
+                TopologyEdge::new(
+                    fed("a"),
+                    fed("b"),
+                    endpoint("a.out->b.in"),
+                    WireDelay::from_nanos(u64::MAX),
+                ),
+                TopologyEdge::new(
+                    fed("b"),
+                    fed("c"),
+                    endpoint("b.out->c.in"),
+                    WireDelay::from_nanos(1),
+                ),
+            ],
+        ))
+        .unwrap_err(),
+        RtiError::PathDelayOverflow {
+            path_source: fed("a"),
+            intermediate: fed("b"),
+            target: fed("c"),
+            first_delay_ns: u64::MAX,
+            second_delay_ns: 1,
+        }
+    );
 }
 
 #[test]

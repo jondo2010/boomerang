@@ -23,9 +23,13 @@ use crate::{
 
 /// Runtime parts required to execute one static federation.
 pub struct StaticFederationRuntimeParts {
+    /// Validated RTI topology and its precomputed coordination indexes.
     pub topology: CompiledTopology,
+    /// Runtime enclave assigned to each protocol federate identity.
     pub federate_enclaves: BTreeMap<FederateId, boomerang_runtime::EnclaveKey>,
+    /// Fully lowered runtime enclaves to execute under federated coordination.
     pub enclaves: tinymap::TinyMap<boomerang_runtime::EnclaveKey, boomerang_runtime::Enclave>,
+    /// Prebuilt protocol mailboxes, routes, inbound handlers, and fault state.
     pub connections: crate::FederatedRuntimeConnections,
 }
 
@@ -33,6 +37,7 @@ pub struct StaticFederationRuntimeParts {
 #[cfg(feature = "serde-json-codec")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TcpStaticFederationConfig {
+    /// Socket address on which the runner-owned RTI listener should bind.
     pub bind_addr: SocketAddr,
 }
 
@@ -146,16 +151,24 @@ type SchedulerThreadResult = (
 type SchedulerThreadHandle = std::thread::JoinHandle<SchedulerThreadResult>;
 
 struct PreparedStaticFederation {
+    /// Validated RTI topology shared with the runner-owned session.
     topology: CompiledTopology,
+    /// Runtime enclave assigned to each protocol federate identity.
     federate_enclaves: BTreeMap<FederateId, boomerang_runtime::EnclaveKey>,
+    /// Reverse lookup used to assign each runtime enclave to one federate.
     federate_by_enclave: tinymap::TinySecondaryMap<boomerang_runtime::EnclaveKey, FederateId>,
+    /// Fully lowered runtime enclaves awaiting scheduler construction.
     enclaves: tinymap::TinyMap<boomerang_runtime::EnclaveKey, boomerang_runtime::Enclave>,
 }
 
 struct ConnectedFederate {
+    /// Connected protocol client used by the federate's time barrier.
     client: FederateProtocolClient,
+    /// Validated inbound message routes owned by this federate.
     routes: Vec<FederateClientRoute>,
+    /// Runtime endpoint registry used to admit routed payloads.
     inbound: boomerang_runtime::FederatedInboundEndpointRegistry,
+    /// Shared first-error state for protocol and runtime endpoint failures.
     faults: boomerang_runtime::FederatedFaultState,
 }
 
@@ -528,6 +541,7 @@ fn listener_connect_addr(listener_addr: SocketAddr) -> SocketAddr {
 
 #[derive(Clone)]
 struct SharedFederatedTimeBarrier {
+    /// Shared barrier implementation serialized across scheduler calls.
     inner: Arc<Mutex<RtiFederatedTimeBarrier>>,
 }
 

@@ -787,6 +787,15 @@ fn test_federated_source_sink_topology_plan() {
         boomerang_federated::WireDelay::ZERO
     );
     assert_eq!(federation.topology.topology(), &topology);
+    assert_eq!(federation.federate_enclaves.len(), plan.federates.len());
+    for federate in &plan.federates {
+        assert_eq!(
+            federation
+                .federate_enclaves
+                .get(&boomerang_federated::FederateId::new(federate.id.clone())),
+            parts.aliases.enclave_aliases.get(federate.reactor)
+        );
+    }
 
     let routes = federated_routes_from_plan(plan).unwrap();
     assert_eq!(routes.len(), 1);

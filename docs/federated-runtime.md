@@ -135,17 +135,18 @@ the runner. Non-empty unmapped enclaves are rejected.
 `Assembly::into_runtime_assembly` produces `RuntimeAssembly` containing the
 runtime enclaves, assembly-to-runtime aliases, inter-partition metadata, and an
 optional `LoweredFederation`. A present aggregate owns the federation plan, the
-compiled RTI topology, and one complete runtime connection bundle per federate;
-a local-only assembly has no aggregate. Each bundle owns the prebuilt protocol
-mailbox, routes targeting that federate, only that federate's typed inbound
-endpoint handlers, and the source-local terminal fault state. Deferred reaction
-construction attaches the final endpoint-specific outbound sink and registers
-every inbound handler before these parts are returned.
+compiled RTI topology, the resolved federate-to-enclave map, and one complete
+runtime connection bundle per federate; a local-only assembly has no aggregate.
+Each bundle owns the prebuilt protocol mailbox, routes targeting that federate,
+only that federate's typed inbound endpoint handlers, and the source-local
+terminal fault state. Deferred reaction construction attaches the final
+endpoint-specific outbound sink and registers every inbound handler before
+these parts are returned.
 
-The assembly-facing execution functions validate the assembly-owned plan,
-create the federate-to-enclave map, and move the already-compiled topology and
-runtime connections into `StaticFederationRuntimeParts`. They then delegate to
-the matching function in `boomerang_federated::static_runner`.
+The assembly-facing execution functions consume the already-resolved
+federate-to-enclave map, compiled topology, runtime enclaves, and connections
+into `StaticFederationRuntimeParts`. They then delegate to the matching function
+in `boomerang_federated::static_runner`.
 
 The static runner first validates and prepares transport-independent runtime
 parts, then rejects configurations without `Config::with_fast_forward(true)`.

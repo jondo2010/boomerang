@@ -124,7 +124,7 @@ pub struct Assembly {
     /// Assembly-scoped payload codec policy for inferred cross-federate connections.
     federated_codecs: HashMap<TypeId, Box<FederatedCodecEntry>>,
     #[cfg(feature = "federated")]
-    /// Factories for inbound federated endpoint registry entries.
+    /// Factories for runtime handlers attached to inbound federated routes.
     pub(super) federated_inbound_endpoint_factories: Vec<Box<FederatedInboundEndpointFactory>>,
     #[cfg(feature = "replay")]
     /// Factories for replay functions.
@@ -762,7 +762,6 @@ impl Assembly {
                         action_ref,
                         decoder,
                     )
-                    .map(|_| ())
                     .map_err(|error| AssemblyError::UnsupportedFederationTopology {
                         what: error.to_string(),
                     })

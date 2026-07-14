@@ -7,13 +7,6 @@ use crate::{
     event::AsyncEvent, ActionCommon, AsyncActionRef, CommonContext, ReactorData, SendContext, Tag,
 };
 
-tinymap::key_type! {
-    /// Dense process-local key for a lowered federated inbound endpoint.
-    ///
-    /// This key must never be serialized or compared between federates.
-    pub FederatedEndpointKey
-}
-
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum FederatedEndpointError {
     #[error("federated payload codec error: {0}")]
@@ -22,14 +15,11 @@ pub enum FederatedEndpointError {
     #[error("federated outbound sink error: {0}")]
     Send(String),
 
-    #[error("unknown federated endpoint: {0}")]
-    UnknownEndpoint(FederatedEndpointKey),
-
     #[error("federated endpoints cannot target physical actions")]
     PhysicalAction,
 
-    #[error("federated inbound endpoint {0} scheduler channel is closed")]
-    SchedulerClosed(FederatedEndpointKey),
+    #[error("federated inbound endpoint scheduler channel is closed")]
+    SchedulerClosed,
 }
 
 /// Shared first-error latch for terminal federated runtime endpoint failures.
@@ -105,78 +95,29 @@ pub trait FederatedOutboundSink: Send + Sync + 'static {
     fn send(&self, command: FederatedOutboundCommand) -> Result<(), FederatedEndpointError>;
 }
 
-trait FederatedInboundEndpoint: Send + Sync {
-    fn schedule(&self, tag: Tag, payload: &[u8]) -> Result<(), FederatedEndpointError>;
+type FederatedInboundHandler =
+    dyn Fn(Tag, &[u8]) -> Result<(), FederatedEndpointError> + Send + Sync;
+
+/// Type-erased runtime handler attached directly to one lowered federated route.
+#[derive(Clone)]
+pub struct FederatedInboundEndpoint {
+    /// Typed decode-and-schedule operation erased after lowering.
+    handler: Arc<FederatedInboundHandler>,
 }
 
-struct TypedFederatedInboundEndpoint<T: ReactorData> {
-    endpoint: FederatedEndpointKey,
-    context: SendContext,
-    action_ref: AsyncActionRef<T>,
-    decoder: Box<dyn FederatedPayloadDecoder<T>>,
-}
-
-impl<T: ReactorData> TypedFederatedInboundEndpoint<T> {
-    fn new(
-        endpoint: FederatedEndpointKey,
-        context: SendContext,
-        action_ref: AsyncActionRef<T>,
-        decoder: Box<dyn FederatedPayloadDecoder<T>>,
-    ) -> Self {
-        Self {
-            endpoint,
-            context,
-            action_ref,
-            decoder,
-        }
-    }
-}
-
-impl<T: ReactorData> FederatedInboundEndpoint for TypedFederatedInboundEndpoint<T> {
-    fn schedule(&self, tag: Tag, payload: &[u8]) -> Result<(), FederatedEndpointError> {
-        let value = self.decoder.decode(payload)?;
-        let scheduled = self.context.schedule_external(AsyncEvent::Logical {
-            tag,
-            key: self.action_ref.key(),
-            value: Box::new(value),
-        });
-
-        if scheduled {
-            Ok(())
-        } else {
-            Err(FederatedEndpointError::SchedulerClosed(self.endpoint))
-        }
-    }
-}
-
-#[derive(Default)]
-pub struct FederatedInboundEndpointRegistry {
-    endpoints: tinymap::TinyMap<FederatedEndpointKey, Arc<dyn FederatedInboundEndpoint>>,
-}
-
-impl Clone for FederatedInboundEndpointRegistry {
-    fn clone(&self) -> Self {
-        Self {
-            endpoints: self.endpoints.values().cloned().collect(),
-        }
-    }
-}
-
-impl fmt::Debug for FederatedInboundEndpointRegistry {
+impl fmt::Debug for FederatedInboundEndpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FederatedInboundEndpointRegistry")
-            .field("endpoints", &self.endpoints.keys().collect::<Vec<_>>())
-            .finish()
+        f.debug_struct("FederatedInboundEndpoint").finish()
     }
 }
 
-impl FederatedInboundEndpointRegistry {
-    pub fn register<T>(
-        &mut self,
+impl FederatedInboundEndpoint {
+    /// Erase one typed logical-action decoder and scheduler target for storage in a route.
+    pub fn new<T>(
         context: SendContext,
         action_ref: AsyncActionRef<T>,
         decoder: Box<dyn FederatedPayloadDecoder<T>>,
-    ) -> Result<FederatedEndpointKey, FederatedEndpointError>
+    ) -> Result<Self, FederatedEndpointError>
     where
         T: ReactorData,
     {
@@ -184,36 +125,26 @@ impl FederatedInboundEndpointRegistry {
             return Err(FederatedEndpointError::PhysicalAction);
         }
 
-        Ok(self.endpoints.insert_with_key(|endpoint| {
-            Arc::new(TypedFederatedInboundEndpoint::new(
-                endpoint, context, action_ref, decoder,
-            ))
-        }))
+        Ok(Self {
+            handler: Arc::new(move |tag, payload| {
+                let value = decoder.decode(payload)?;
+                let scheduled = context.schedule_external(AsyncEvent::Logical {
+                    tag,
+                    key: action_ref.key(),
+                    value: Box::new(value),
+                });
+                if scheduled {
+                    Ok(())
+                } else {
+                    Err(FederatedEndpointError::SchedulerClosed)
+                }
+            }),
+        })
     }
 
-    pub fn schedule(
-        &self,
-        endpoint: FederatedEndpointKey,
-        tag: Tag,
-        payload: &[u8],
-    ) -> Result<(), FederatedEndpointError> {
-        let endpoint_handler = self
-            .endpoints
-            .get(endpoint)
-            .ok_or(FederatedEndpointError::UnknownEndpoint(endpoint))?;
-        endpoint_handler.schedule(tag, payload)
-    }
-
-    pub fn contains(&self, endpoint: FederatedEndpointKey) -> bool {
-        self.endpoints.get(endpoint).is_some()
-    }
-
-    pub fn len(&self) -> usize {
-        self.endpoints.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.endpoints.is_empty()
+    /// Decode and schedule one payload at its logical tag.
+    pub fn schedule(&self, tag: Tag, payload: &[u8]) -> Result<(), FederatedEndpointError> {
+        (self.handler)(tag, payload)
     }
 }
 

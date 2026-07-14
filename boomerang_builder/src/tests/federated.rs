@@ -418,12 +418,10 @@ fn route_outbound_commands_through_rti(
                 assert_eq!(delivered_source, &source);
                 assert_eq!(delivered_endpoint, &endpoint);
                 let runtime_tag = runtime::Tag::try_from(*delivered_tag).unwrap();
-                let endpoint_key = connections
-                    .inbound_endpoint_key(&target, &endpoint)
-                    .expect("lowered inbound endpoint key");
-                let inbound_endpoints = connections.inbound_endpoints(&target).unwrap();
-                inbound_endpoints
-                    .schedule(endpoint_key, runtime_tag, payload)
+                connections
+                    .inbound_endpoint(&target, &endpoint)
+                    .expect("lowered inbound endpoint")
+                    .schedule(runtime_tag, payload)
                     .unwrap();
                 routed_tags.push(runtime_tag);
             }
@@ -512,9 +510,6 @@ fn run_in_memory_federated_source_sink(
         .reactor;
     let source_enclave_key = aliases.enclave_aliases[source_reactor];
     let sink_enclave_key = aliases.enclave_aliases[sink_reactor];
-    let sink = boomerang_federated::FederateId::new("sink");
-    let _inbound_endpoints = federated_connections.inbound_endpoints(&sink).unwrap();
-
     let mut source_enclaves = Vec::new();
     let mut sink_enclaves = Vec::new();
     for (enclave_key, enclave) in enclaves {
@@ -1169,16 +1164,13 @@ fn test_federated_connection_lowers_endpoint_runtime_parts() {
         .as_ref()
         .expect("federated connection lowering must produce a federation");
     assert_eq!(federation.plan.endpoints.len(), 1);
+    let endpoint = &federation.plan.endpoints[0].id;
     let sink = boomerang_federated::FederateId::new("sink");
-    assert_eq!(
-        federation
-            .runtime
-            .connections()
-            .inbound_endpoints(&sink)
-            .unwrap()
-            .len(),
-        1
-    );
+    assert!(federation
+        .runtime
+        .connections()
+        .inbound_endpoint(&sink, endpoint)
+        .is_some());
     assert!(parts.enclaves.values().all(|enclave| {
         enclave.upstream_enclaves.is_empty() && enclave.downstream_enclaves.is_empty()
     }));
@@ -1233,7 +1225,7 @@ fn test_federated_sender_emits_serialized_msg_command() {
 }
 
 #[test]
-fn test_federated_inbound_registry_schedules_target_action() {
+fn test_federated_inbound_endpoint_schedules_target_action() {
     let values = Arc::new(Mutex::new(Vec::new()));
     let mut assembly = Assembly::new();
     register_u32_federated_codec(&mut assembly).unwrap();
@@ -1263,12 +1255,10 @@ fn test_federated_inbound_registry_schedules_target_action() {
     let federated_connections = federation.runtime.connections();
     let endpoint = boomerang_federated::EndpointId::new("main/source/out->main/sink/in");
     let sink = boomerang_federated::FederateId::new("sink");
-    let endpoint_key = federated_connections
-        .inbound_endpoint_key(&sink, &endpoint)
-        .unwrap();
-    let inbound_endpoints = federated_connections.inbound_endpoints(&sink).unwrap();
-    inbound_endpoints
-        .schedule(endpoint_key, runtime::Tag::ZERO, b"42")
+    federated_connections
+        .inbound_endpoint(&sink, &endpoint)
+        .unwrap()
+        .schedule(runtime::Tag::ZERO, b"42")
         .unwrap();
 
     let config = runtime::Config::default()

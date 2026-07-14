@@ -347,12 +347,12 @@ where
 }
 
 #[cfg(feature = "runtime")]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct FederateClientRoute {
     pub endpoint: crate::EndpointId,
     pub source: FederateId,
     pub target: FederateId,
-    inbound_key: Option<boomerang_runtime::FederatedEndpointKey>,
+    inbound: Option<boomerang_runtime::FederatedInboundEndpoint>,
 }
 
 #[cfg(feature = "runtime")]
@@ -367,25 +367,17 @@ impl FederateClientRoute {
             endpoint: endpoint.into(),
             source: source.into(),
             target: target.into(),
-            inbound_key: None,
+            inbound: None,
         }
     }
 
-    /// Bind this stable route to a handler key in the target federate's local registry.
-    ///
-    /// The key is process-local and must come from the registry passed to the same client barrier.
-    pub fn with_inbound_key(mut self, key: boomerang_runtime::FederatedEndpointKey) -> Self {
-        self.inbound_key = Some(key);
-        self
+    pub(crate) fn bind_inbound(&mut self, inbound: boomerang_runtime::FederatedInboundEndpoint) {
+        debug_assert!(self.inbound.is_none());
+        self.inbound = Some(inbound);
     }
 
-    pub(crate) fn bind_inbound(&mut self, key: boomerang_runtime::FederatedEndpointKey) {
-        debug_assert!(self.inbound_key.is_none());
-        self.inbound_key = Some(key);
-    }
-
-    pub(crate) fn inbound_key(&self) -> Option<boomerang_runtime::FederatedEndpointKey> {
-        self.inbound_key
+    pub(crate) fn inbound(&self) -> Option<&boomerang_runtime::FederatedInboundEndpoint> {
+        self.inbound.as_ref()
     }
 }
 
@@ -399,8 +391,6 @@ pub struct RtiFederatedTimeBarrier {
     client: FederateProtocolClient,
     /// Federation route metadata keyed by its stable endpoint identifier.
     routes: BTreeMap<crate::EndpointId, FederateClientRoute>,
-    /// Runtime registry used to decode and schedule accepted inbound payloads.
-    inbound: boomerang_runtime::FederatedInboundEndpointRegistry,
     /// Shared terminal fault reported by the runtime endpoint workers, if any.
     faults: boomerang_runtime::FederatedFaultState,
     /// Most recently accepted RTI grant, used to satisfy repeated or older requests locally.
@@ -421,23 +411,20 @@ impl RtiFederatedTimeBarrier {
     /// Route metadata binds runtime endpoints to source and target federates.
     #[tracing::instrument(
         level = "debug",
-        skip(federate_id, client, routes, inbound),
+        skip(federate_id, client, routes),
         fields(federate = %federate_id)
     )]
     pub fn new(
         federate_id: FederateId,
         client: FederateProtocolClient,
         routes: impl IntoIterator<Item = FederateClientRoute>,
-        inbound: boomerang_runtime::FederatedInboundEndpointRegistry,
         faults: boomerang_runtime::FederatedFaultState,
     ) -> Result<Self, FederateClientError> {
         let mut route_map = BTreeMap::new();
         for route in routes {
-            if route_map
-                .insert(route.endpoint.clone(), route.clone())
-                .is_some()
-            {
-                return Err(FederateClientError::DuplicateRoute(route.endpoint));
+            let endpoint = route.endpoint.clone();
+            if route_map.insert(endpoint.clone(), route).is_some() {
+                return Err(FederateClientError::DuplicateRoute(endpoint));
             }
         }
 
@@ -445,7 +432,6 @@ impl RtiFederatedTimeBarrier {
             federate_id,
             client,
             routes: route_map,
-            inbound,
             faults,
             last_granted: None,
             pending_request: None,
@@ -609,7 +595,7 @@ impl RtiFederatedTimeBarrier {
         Ok(())
     }
 
-    /// Schedule one inbound MSG payload through the runtime inbound endpoint registry.
+    /// Schedule one inbound MSG payload through the handler attached during lowering.
     /// Returns the scheduler wake event produced by that async scheduling operation.
     #[tracing::instrument(
         level = "debug",
@@ -647,10 +633,11 @@ impl RtiFederatedTimeBarrier {
         }
 
         let runtime_tag = boomerang_runtime::Tag::try_from(tag)?;
-        let inbound_key = route
-            .inbound_key
+        let inbound = route
+            .inbound
+            .as_ref()
             .ok_or_else(|| FederateClientError::UnboundInboundRoute(endpoint.clone()))?;
-        self.inbound.schedule(inbound_key, runtime_tag, payload)?;
+        inbound.schedule(runtime_tag, payload)?;
 
         event_rx
             .recv()
@@ -812,20 +799,15 @@ mod tests {
         (client, handle)
     }
 
-    fn empty_inbound_registry() -> boomerang_runtime::FederatedInboundEndpointRegistry {
-        boomerang_runtime::FederatedInboundEndpointRegistry::default()
-    }
-
     fn empty_event_rx() -> boomerang_runtime::Receiver<boomerang_runtime::AsyncEvent> {
         boomerang_runtime::Enclave::default().event_rx
     }
 
-    fn inbound_registry_for_u32() -> (
-        boomerang_runtime::FederatedInboundEndpointRegistry,
+    fn inbound_endpoint_for_u32() -> (
+        boomerang_runtime::FederatedInboundEndpoint,
         boomerang_runtime::Receiver<boomerang_runtime::AsyncEvent>,
         boomerang_runtime::ActionKey,
         boomerang_runtime::keepalive::Sender,
-        boomerang_runtime::FederatedEndpointKey,
     ) {
         let mut enclave = boomerang_runtime::Enclave::default();
         let action_key = enclave.insert_action(|key| {
@@ -833,30 +815,22 @@ mod tests {
         });
         let action_ref = enclave.create_async_action_ref::<u32>(action_key);
         let context = enclave.create_send_context(boomerang_runtime::EnclaveKey::from(0));
-        let mut registry = boomerang_runtime::FederatedInboundEndpointRegistry::default();
-        let endpoint_key = registry
-            .register(
-                context,
-                action_ref,
-                Box::new(|bytes: &[u8]| {
-                    std::str::from_utf8(bytes)
-                        .map_err(|error| {
-                            boomerang_runtime::FederatedEndpointError::codec(error.to_string())
-                        })?
-                        .parse::<u32>()
-                        .map_err(|error| {
-                            boomerang_runtime::FederatedEndpointError::codec(error.to_string())
-                        })
-                }),
-            )
-            .unwrap();
-        (
-            registry,
-            enclave.event_rx,
-            action_key,
-            enclave.shutdown_tx,
-            endpoint_key,
+        let endpoint = boomerang_runtime::FederatedInboundEndpoint::new(
+            context,
+            action_ref,
+            Box::new(|bytes: &[u8]| {
+                std::str::from_utf8(bytes)
+                    .map_err(|error| {
+                        boomerang_runtime::FederatedEndpointError::codec(error.to_string())
+                    })?
+                    .parse::<u32>()
+                    .map_err(|error| {
+                        boomerang_runtime::FederatedEndpointError::codec(error.to_string())
+                    })
+            }),
         )
+        .unwrap();
+        (endpoint, enclave.event_rx, action_key, enclave.shutdown_tx)
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -918,7 +892,6 @@ mod tests {
             fed("source"),
             client,
             [route()],
-            empty_inbound_registry(),
             boomerang_runtime::FederatedFaultState::default(),
         )
         .unwrap();
@@ -986,15 +959,13 @@ mod tests {
         })
         .await;
 
-        let (registry, event_rx, action_key, _shutdown_tx, endpoint_key) =
-            inbound_registry_for_u32();
+        let (inbound, event_rx, action_key, _shutdown_tx) = inbound_endpoint_for_u32();
         let mut inbound_route = route();
-        inbound_route.bind_inbound(endpoint_key);
+        inbound_route.bind_inbound(inbound);
         let mut barrier = RtiFederatedTimeBarrier::new(
             fed("sink"),
             client,
             [inbound_route],
-            registry,
             boomerang_runtime::FederatedFaultState::default(),
         )
         .unwrap();
@@ -1066,15 +1037,13 @@ mod tests {
         })
         .await;
 
-        let (registry, event_rx, action_key, _shutdown_tx, endpoint_key) =
-            inbound_registry_for_u32();
+        let (inbound, event_rx, action_key, _shutdown_tx) = inbound_endpoint_for_u32();
         let mut inbound_route = route();
-        inbound_route.bind_inbound(endpoint_key);
+        inbound_route.bind_inbound(inbound);
         let mut barrier = RtiFederatedTimeBarrier::new(
             fed("sink"),
             client,
             [inbound_route],
-            registry,
             boomerang_runtime::FederatedFaultState::default(),
         )
         .unwrap();
@@ -1140,15 +1109,13 @@ mod tests {
         })
         .await;
 
-        let (registry, event_rx, _action_key, _shutdown_tx, endpoint_key) =
-            inbound_registry_for_u32();
+        let (inbound, event_rx, _action_key, _shutdown_tx) = inbound_endpoint_for_u32();
         let mut inbound_route = route();
-        inbound_route.bind_inbound(endpoint_key);
+        inbound_route.bind_inbound(inbound);
         let mut barrier = RtiFederatedTimeBarrier::new(
             fed("sink"),
             client,
             [inbound_route],
-            registry,
             boomerang_runtime::FederatedFaultState::default(),
         )
         .unwrap();
@@ -1216,15 +1183,13 @@ mod tests {
             })
             .await;
 
-        let (registry, event_rx, _action_key, _shutdown_tx, endpoint_key) =
-            inbound_registry_for_u32();
+        let (inbound, event_rx, _action_key, _shutdown_tx) = inbound_endpoint_for_u32();
         let mut inbound_route = route();
-        inbound_route.bind_inbound(endpoint_key);
+        inbound_route.bind_inbound(inbound);
         let mut barrier = RtiFederatedTimeBarrier::new(
             fed("sink"),
             client,
             [inbound_route],
-            registry,
             boomerang_runtime::FederatedFaultState::default(),
         )
         .unwrap();
@@ -1282,7 +1247,6 @@ mod tests {
             fed("source"),
             client,
             [route()],
-            empty_inbound_registry(),
             boomerang_runtime::FederatedFaultState::default(),
         )
         .unwrap();
@@ -1335,7 +1299,6 @@ mod tests {
             fed("source"),
             client,
             [route()],
-            empty_inbound_registry(),
             boomerang_runtime::FederatedFaultState::default(),
         )
         .unwrap();

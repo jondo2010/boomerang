@@ -255,8 +255,6 @@ struct ConnectedFederate {
     client: FederateProtocolClient,
     /// Validated inbound message routes owned by this federate.
     routes: Vec<FederateClientRoute>,
-    /// Runtime endpoint registry used to admit routed payloads.
-    inbound: boomerang_runtime::FederatedInboundEndpointRegistry,
     /// Shared first-error state for protocol and runtime endpoint failures.
     faults: boomerang_runtime::FederatedFaultState,
 }
@@ -432,11 +430,10 @@ where
                 "missing prebuilt runtime connection for federate '{federate_id}'"
             ))
         })?;
-        let (mailbox, routes, inbound, faults) = connection.into_parts();
+        let (mailbox, routes, faults) = connection.into_parts();
         connect_handles.push((
             federate_id.clone(),
             routes,
-            inbound,
             faults,
             tokio_runtime.spawn(async move {
                 FederateProtocolClient::connect_with_mailbox(
@@ -452,7 +449,7 @@ where
     }
 
     let mut clients = BTreeMap::new();
-    for (federate_id, routes, inbound, faults, connect_handle) in connect_handles {
+    for (federate_id, routes, faults, connect_handle) in connect_handles {
         let client = tokio_runtime.block_on(connect_handle).map_err(|source| {
             StaticFederationRunnerError::ClientTask {
                 federate_id: federate_id.clone(),
@@ -468,7 +465,6 @@ where
             ConnectedFederate {
                 client,
                 routes,
-                inbound,
                 faults,
             },
         );
@@ -501,7 +497,6 @@ fn execute_connected_static_federation(
             federate_id.clone(),
             connected.client,
             connected.routes,
-            connected.inbound,
             connected.faults,
         )?;
         barriers.insert(

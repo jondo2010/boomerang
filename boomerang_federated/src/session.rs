@@ -867,9 +867,12 @@ mod tests {
         );
         let target_ack = TracePattern::client_to_rti(sink.clone(), MsgAck(WireTag::ZERO));
         let target_tag = TracePattern::rti_to_client(sink.clone(), Tag(WireTag::ZERO));
+        let source_next = TracePattern::client_to_rti(source.clone(), Net(WireTag::finite(0, 1)));
 
-        trace.assert_before(source_tag, source_msg);
-        trace.assert_before(forwarded_msg, target_ack.clone());
+        trace.assert_before(source_tag, source_msg.clone());
+        trace.assert_before(source_msg, source_next);
+        trace.assert_before(forwarded_msg.clone(), target_ack.clone());
+        trace.assert_before(forwarded_msg, target_tag.clone());
         trace.assert_before(target_ack, target_tag);
         trace.assert_before(
             TracePattern::client_to_rti(source.clone(), Stop),

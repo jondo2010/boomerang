@@ -475,6 +475,73 @@ mod tests {
     }
 
     #[test]
+    fn outbound_messages_enter_the_shared_mailbox_before_later_progress() {
+        let source = FederateId::new("source");
+        let target = FederateId::new("target");
+        let endpoint = crate::EndpointId::new("source/out->target/in");
+        let route = FederateClientRoute::new(endpoint.clone(), source.clone(), target.clone());
+        let mut connections =
+            FederatedRuntimeConnections::new([source.clone(), target.clone()], [route]).unwrap();
+        let (sink, _) = connections.outbound_endpoint(&endpoint).unwrap();
+        let progress = connections
+            .federates
+            .get(&source)
+            .expect("source connection exists")
+            .mailbox
+            .sender();
+
+        for payload in [b"first".to_vec(), b"second".to_vec()] {
+            sink.send(boomerang_runtime::FederatedOutboundCommand::Msg(
+                boomerang_runtime::FederatedOutboundMessage {
+                    tag: boomerang_runtime::Tag::ZERO,
+                    payload,
+                },
+            ))
+            .unwrap();
+        }
+        progress
+            .send(FederateToRti::Ltc {
+                federate_id: source.clone(),
+                tag: WireTag::ZERO,
+            })
+            .unwrap();
+        progress
+            .send(FederateToRti::Net {
+                federate_id: source.clone(),
+                tag: WireTag::finite(0, 1),
+            })
+            .unwrap();
+
+        let mut mailbox = connections.take_mailbox(&source).unwrap();
+        for payload in [b"first".to_vec(), b"second".to_vec()] {
+            assert_eq!(
+                mailbox.try_recv().unwrap(),
+                Some(FederateToRti::Msg {
+                    source: source.clone(),
+                    target: target.clone(),
+                    endpoint: endpoint.clone(),
+                    tag: WireTag::ZERO,
+                    payload,
+                })
+            );
+        }
+        assert_eq!(
+            mailbox.try_recv().unwrap(),
+            Some(FederateToRti::Ltc {
+                federate_id: source.clone(),
+                tag: WireTag::ZERO,
+            })
+        );
+        assert_eq!(
+            mailbox.try_recv().unwrap(),
+            Some(FederateToRti::Net {
+                federate_id: source,
+                tag: WireTag::finite(0, 1),
+            })
+        );
+    }
+
+    #[test]
     fn prebuilt_connections_reject_route_without_source_connection() {
         let endpoint = crate::EndpointId::new("source/out->target/in");
         let error = FederatedRuntimeConnections::new(

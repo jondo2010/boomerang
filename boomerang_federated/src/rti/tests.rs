@@ -1104,6 +1104,39 @@ fn multi_hop_chain_requires_each_upstream_to_advance_past_the_requested_tag() {
 }
 
 #[test]
+fn immediate_only_eimt_currently_misses_an_earlier_transitive_upstream() {
+    let mut rti = new_rti(FederatedTopology::with_edges(
+        [fed("a"), fed("b"), fed("c")],
+        [
+            TopologyEdge::new(fed("a"), fed("b"), endpoint("a.out->b.in"), WireDelay::ZERO),
+            TopologyEdge::new(fed("b"), fed("c"), endpoint("b.out->c.in"), WireDelay::ZERO),
+        ],
+    ));
+
+    assert_eq!(
+        rti.request_tag(&fed("a"), WireTag::finite(50, 0)).unwrap(),
+        GrantDecision::Granted {
+            tag: WireTag::finite(50, 0),
+        }
+    );
+    assert!(matches!(
+        rti.request_tag(&fed("b"), WireTag::finite(100, 0)).unwrap(),
+        GrantDecision::Blocked { .. }
+    ));
+
+    assert_eq!(
+        rti.earliest_incoming_message_tag(&fed("c")).unwrap(),
+        Some(WireTag::finite(100, 0))
+    );
+    assert_eq!(
+        rti.request_tag(&fed("c"), WireTag::finite(99, 0)).unwrap(),
+        GrantDecision::Granted {
+            tag: WireTag::finite(99, 0),
+        }
+    );
+}
+
+#[test]
 fn positive_delay_cycle_allows_startup_grants_after_both_federates_advertise() {
     let delay = WireDelay::from_nanos(10);
     let mut rti = new_rti(FederatedTopology::with_edges(

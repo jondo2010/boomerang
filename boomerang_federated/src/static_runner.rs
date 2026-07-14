@@ -232,7 +232,7 @@ pub fn run_in_memory(
     let session_handle = tokio_runtime.spawn(session.run());
     let clients = connect_clients(
         &tokio_runtime,
-        prepared.topology.topology(),
+        &prepared.topology,
         connections,
         client_transports,
     )?;
@@ -285,7 +285,7 @@ pub fn run_over_tcp(
 
     let clients = match connect_clients(
         &tokio_runtime,
-        prepared.topology.topology(),
+        &prepared.topology,
         connections,
         client_transports,
     ) {
@@ -346,7 +346,7 @@ fn build_tokio_runtime(
 
 fn connect_clients<S, R>(
     tokio_runtime: &tokio::runtime::Runtime,
-    topology: &FederatedTopology,
+    topology: &CompiledTopology,
     mut connections: crate::FederatedRuntimeConnections,
     mut transports: BTreeMap<FederateId, (S, R)>,
 ) -> Result<BTreeMap<FederateId, ConnectedFederate>, StaticFederationRunnerError>
@@ -357,14 +357,21 @@ where
     R::Error: Into<TransportError> + Send + 'static,
 {
     let mut connect_handles = Vec::new();
-    for federate_id in &topology.federates {
+    for federate_id in &topology.topology().federates {
         let (sink, stream) = transports.remove(federate_id).ok_or_else(|| {
             bridge_error(format!(
                 "missing client transport for federate '{federate_id}'"
             ))
         })?;
         let federate_id_for_client = federate_id.clone();
-        let neighbors = topology.neighbors_for(federate_id);
+        let neighbors = topology
+            .neighbors_for(federate_id)
+            .ok_or_else(|| {
+                bridge_error(format!(
+                    "missing compiled neighbor structure for federate '{federate_id}'"
+                ))
+            })?
+            .clone();
         let connection = connections.take_federate(federate_id).ok_or_else(|| {
             bridge_error(format!(
                 "missing prebuilt runtime connection for federate '{federate_id}'"

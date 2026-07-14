@@ -173,8 +173,9 @@ share clones of the same mailbox sender. Consequently, reaction-emitted `MSG`
 frames and the subsequent `LTC` frame enter one FIFO queue in program order.
 
 Builder lowering asks `boomerang_federated::CompiledTopology` to validate the
-static manifest and produce ordered immediate and transitive dependencies,
-minimum cumulative path delays, downstream work sets, and exact route keys.
+static manifest and produce ordered per-federate neighbor views, immediate and
+transitive dependencies, minimum cumulative path delays, downstream work sets,
+and exact route keys.
 `RuntimeAssembly::federation` carries that artifact inside its
 `LoweredFederation` and federated-owned `StaticFederationRuntime` to
 `StaticRtiSession`; RTI startup does not recompute it. Raw-topology session

@@ -511,7 +511,7 @@ fn state_handler_rejects_route_absent_from_topology_without_mutation() {
 #[test]
 fn compiled_topology_indexes_dependencies_and_routes_deterministically() {
     let topology = FederatedTopology::with_edges(
-        [fed("c"), fed("a"), fed("b")],
+        [fed("c"), fed("a"), fed("b"), fed("isolated")],
         [
             TopologyEdge::new(
                 fed("b"),
@@ -531,6 +531,56 @@ fn compiled_topology_indexes_dependencies_and_routes_deterministically() {
     let rti = new_rti(topology.clone());
 
     assert_eq!(rti.topology(), &topology);
+    assert_eq!(
+        rti.topology.neighbors_for(&fed("a")),
+        Some(&NeighborStructure {
+            federate_id: fed("a"),
+            upstream: Vec::new(),
+            downstream: vec![
+                TopologyEdge::new(fed("a"), fed("b"), endpoint("a.out->b.in"), WireDelay::ZERO,),
+                TopologyEdge::new(
+                    fed("a"),
+                    fed("c"),
+                    endpoint("a.out->c.in"),
+                    WireDelay::from_nanos(1),
+                ),
+            ],
+        })
+    );
+    assert_eq!(
+        rti.topology.neighbors_for(&fed("c")),
+        Some(&NeighborStructure {
+            federate_id: fed("c"),
+            upstream: vec![
+                TopologyEdge::new(
+                    fed("a"),
+                    fed("c"),
+                    endpoint("a.out->c.in"),
+                    WireDelay::from_nanos(1),
+                ),
+                TopologyEdge::new(
+                    fed("b"),
+                    fed("c"),
+                    endpoint("b.out->c.in"),
+                    WireDelay::from_nanos(2),
+                ),
+            ],
+            downstream: Vec::new(),
+        })
+    );
+    assert_eq!(
+        rti.topology.neighbors_for(&fed("isolated")),
+        Some(&NeighborStructure {
+            federate_id: fed("isolated"),
+            upstream: Vec::new(),
+            downstream: Vec::new(),
+        })
+    );
+    assert_eq!(rti.topology.neighbors_for(&fed("unknown")), None);
+    assert_eq!(
+        rti.topology.neighbors_for(&fed("c")),
+        Some(&topology.neighbors_for(&fed("c")))
+    );
     assert_eq!(
         rti.topology.incoming(&fed("c")),
         [

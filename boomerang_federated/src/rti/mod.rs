@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::protocol::{
-    EndpointId, FederateId, FederateToRti, FederatedTopology, RtiToFederate, TopologyEdge,
-    WireDelay, WireTag,
+    EndpointId, FederateId, FederateToRti, FederatedTopology, NeighborStructure, RtiToFederate,
+    TopologyEdge, WireDelay, WireTag,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -38,6 +38,7 @@ pub struct CompiledTopology {
     transitive_downstream: BTreeMap<FederateId, Vec<FederateId>>,
     minimum_delays: BTreeMap<(FederateId, FederateId), WireDelay>,
     routes: BTreeSet<RouteKey>,
+    neighbor_structures: BTreeMap<FederateId, NeighborStructure>,
 }
 
 impl CompiledTopology {
@@ -62,6 +63,20 @@ impl CompiledTopology {
         let mut routes = BTreeSet::new();
         let mut endpoint_routes = BTreeMap::<EndpointId, TopologyEdge>::new();
         let mut minimum_delays = BTreeMap::<(FederateId, FederateId), WireDelay>::new();
+        let mut neighbor_structures = members
+            .iter()
+            .cloned()
+            .map(|federate_id| {
+                (
+                    federate_id.clone(),
+                    NeighborStructure {
+                        federate_id,
+                        upstream: Vec::new(),
+                        downstream: Vec::new(),
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
 
         for edge in &topology.edges {
             if !members.contains(&edge.source) {
@@ -118,6 +133,21 @@ impl CompiledTopology {
                 .entry((edge.source.clone(), edge.target.clone()))
                 .and_modify(|delay| *delay = (*delay).min(edge.delay))
                 .or_insert(edge.delay);
+            neighbor_structures
+                .get_mut(&edge.target)
+                .expect("validated topology target must have a neighbor view")
+                .upstream
+                .push(edge.clone());
+            neighbor_structures
+                .get_mut(&edge.source)
+                .expect("validated topology source must have a neighbor view")
+                .downstream
+                .push(edge.clone());
+        }
+
+        for neighbors in neighbor_structures.values_mut() {
+            neighbors.upstream.sort();
+            neighbors.downstream.sort();
         }
 
         for dependencies in incoming.values_mut() {
@@ -205,11 +235,17 @@ impl CompiledTopology {
             transitive_downstream,
             minimum_delays,
             routes,
+            neighbor_structures,
         })
     }
 
     pub fn topology(&self) -> &FederatedTopology {
         &self.original
+    }
+
+    /// Return the precomputed incoming and outgoing edge view for one federate.
+    pub fn neighbors_for(&self, federate_id: &FederateId) -> Option<&NeighborStructure> {
+        self.neighbor_structures.get(federate_id)
     }
 
     fn incoming(&self, target: &FederateId) -> &[IncomingDependency] {
@@ -496,6 +532,10 @@ impl RtiState {
 
     pub fn topology(&self) -> &FederatedTopology {
         self.topology.topology()
+    }
+
+    pub(crate) fn neighbors_for(&self, federate_id: &FederateId) -> Option<&NeighborStructure> {
+        self.topology.neighbors_for(federate_id)
     }
 
     fn contains_route(

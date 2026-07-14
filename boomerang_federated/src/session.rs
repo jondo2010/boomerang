@@ -197,8 +197,11 @@ where
                         return protocol_error(sinks, &federate_id, "duplicate Hello").await;
                     }
 
-                    let expected_topology = self.rti.topology().neighbors_for(&federate_id);
-                    if topology != expected_topology {
+                    let expected_topology = self
+                        .rti
+                        .neighbors_for(&federate_id)
+                        .expect("authenticated topology member must have a compiled neighbor view");
+                    if &topology != expected_topology {
                         return protocol_error(
                             sinks,
                             &federate_id,

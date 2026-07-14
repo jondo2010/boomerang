@@ -36,9 +36,10 @@ functions.
 
 `boomerang_builder` owns topology validation and lowering. It turns assembly
 metadata into a `FederationPlan`, validates unsupported topology shapes, lowers
-the RTI's immutable `CompiledTopology`, and returns `RuntimeAssembly` with a
-federated-owned `StaticFederationRuntime`. It contains no production execution
-entry point or runner-error conversion.
+the RTI's immutable `CompiledTopology`, validates and caches bidirectional
+federate/enclave placement, and returns `RuntimeAssembly` with a federated-owned
+`StaticFederationRuntime`. It contains no production execution entry point or
+runner-error conversion.
 
 The top-level `boomerang` crate owns the application-facing
 `execute_federation_in_memory` and `execute_federation_over_tcp` functions. They
@@ -180,7 +181,10 @@ and exact route keys.
 `LoweredFederation` and federated-owned `StaticFederationRuntime` to
 `StaticRtiSession`; RTI startup does not recompute it. Raw-topology session
 constructors remain as a convenience for callers outside the builder and
-compile once at their configuration boundary. The session calls
+compile once at their configuration boundary. `StaticFederationRuntime`
+similarly validates its one-to-one federate/enclave placement once when it is
+constructed and retains both lookup directions; runner preparation does not
+rebuild the reverse map. The session calls
 `RtiState::handle_from` with the authenticated connection identity
 for every frame. The RTI validates and preflights each event before committing
 its one changed coordination record and any grants, so an error cannot leave a

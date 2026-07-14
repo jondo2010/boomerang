@@ -128,7 +128,7 @@ impl RuntimeAssembly {
                         federation.topology,
                         lower_federate_enclaves(&federation.plan, &aliases.enclave_aliases)?,
                         federation.connections,
-                    ),
+                    )?,
                     plan: federation.plan,
                 })
             })
@@ -190,7 +190,6 @@ fn lower_federate_enclaves(
     enclave_aliases: &SecondaryMap<AssemblyReactorKey, runtime::EnclaveKey>,
 ) -> Result<BTreeMap<boomerang_federated::FederateId, runtime::EnclaveKey>, AssemblyError> {
     let mut federate_enclaves = BTreeMap::new();
-    let mut federate_by_enclave = tinymap::TinySecondaryMap::new();
 
     for federate in &plan.federates {
         let enclave_key = *enclave_aliases.get(federate.reactor).ok_or_else(|| {
@@ -200,13 +199,6 @@ fn lower_federate_enclaves(
         })?;
         let federate_id = boomerang_federated::FederateId::new(federate.id.clone());
 
-        if let Some(previous) = federate_by_enclave.get(enclave_key) {
-            return Err(AssemblyError::FederationBridgeError {
-                what: format!(
-                    "ambiguous enclave-to-federate mapping: enclave {enclave_key:?} maps to both '{previous}' and '{federate_id}'"
-                ),
-            });
-        }
         if federate_enclaves
             .insert(federate_id.clone(), enclave_key)
             .is_some()
@@ -215,7 +207,6 @@ fn lower_federate_enclaves(
                 what: format!("duplicate federate id '{federate_id}'"),
             });
         }
-        federate_by_enclave.insert(enclave_key, federate_id);
     }
 
     Ok(federate_enclaves)

@@ -1037,6 +1037,155 @@ fn ltc_does_not_reevaluate_unaffected_pending_grants() {
 }
 
 #[test]
+fn ltc_grants_the_minimum_delay_adjusted_upstream_completion() {
+    let mut rti = new_rti(topology_with_edge(WireDelay::from_nanos(5)));
+
+    assert_eq!(
+        rti.handle(FederateToRti::Net {
+            federate_id: fed("source"),
+            tag: WireTag::finite(10, 0),
+        })
+        .unwrap(),
+        vec![RtiDelivery::new(
+            fed("source"),
+            RtiToFederate::Tag {
+                tag: WireTag::finite(10, 0),
+            },
+        )]
+    );
+    assert!(rti
+        .handle(FederateToRti::Net {
+            federate_id: fed("target"),
+            tag: WireTag::finite(15, 0),
+        })
+        .unwrap()
+        .is_empty());
+
+    assert_eq!(
+        rti.handle(FederateToRti::Ltc {
+            federate_id: fed("source"),
+            tag: WireTag::finite(10, 0),
+        })
+        .unwrap(),
+        vec![RtiDelivery::new(
+            fed("target"),
+            RtiToFederate::Tag {
+                tag: WireTag::finite(15, 0),
+            },
+        )]
+    );
+}
+
+#[test]
+fn ltc_reevaluates_sorted_transitive_downstream_work_set() {
+    let mut rti = new_rti(FederatedTopology::with_edges(
+        [fed("z"), fed("source"), fed("a")],
+        [
+            TopologyEdge::new(
+                fed("source"),
+                fed("z"),
+                endpoint("source.out->z.in"),
+                WireDelay::ZERO,
+            ),
+            TopologyEdge::new(
+                fed("source"),
+                fed("a"),
+                endpoint("source.out->a.in"),
+                WireDelay::ZERO,
+            ),
+        ],
+    ));
+
+    rti.handle(FederateToRti::Net {
+        federate_id: fed("source"),
+        tag: WireTag::finite(10, 0),
+    })
+    .unwrap();
+    for target in [fed("z"), fed("a")] {
+        assert!(rti
+            .handle(FederateToRti::Net {
+                federate_id: target,
+                tag: WireTag::finite(10, 0),
+            })
+            .unwrap()
+            .is_empty());
+    }
+
+    assert_eq!(
+        rti.handle(FederateToRti::Ltc {
+            federate_id: fed("source"),
+            tag: WireTag::finite(10, 0),
+        })
+        .unwrap(),
+        ["a", "z"]
+            .into_iter()
+            .map(|id| {
+                RtiDelivery::new(
+                    fed(id),
+                    RtiToFederate::Tag {
+                        tag: WireTag::finite(10, 0),
+                    },
+                )
+            })
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn ltc_transitive_grant_overflow_is_failure_atomic() {
+    let mut rti = new_rti(FederatedTopology::with_edges(
+        [fed("source"), fed("target")],
+        [TopologyEdge::new(
+            fed("source"),
+            fed("target"),
+            endpoint("source.out->target.in"),
+            WireDelay::from_nanos(1),
+        )],
+    ));
+    assert!(rti
+        .handle(FederateToRti::Net {
+            federate_id: fed("target"),
+            tag: WireTag::finite(10, 0),
+        })
+        .unwrap()
+        .is_empty());
+    coordination_mut(&mut rti, &fed("source")).request(WireTag::finite(i128::MAX, 0));
+    let before = snapshot(&rti);
+
+    assert_eq!(
+        rti.handle(FederateToRti::Ltc {
+            federate_id: fed("source"),
+            tag: WireTag::ZERO,
+        }),
+        Err(RtiError::TagDelayOverflow {
+            tag: WireTag::finite(i128::MAX, 0),
+            delay_ns: 1,
+        })
+    );
+    assert_eq!(snapshot(&rti), before);
+}
+
+#[test]
+fn lf_tag_predecessor_preserves_sentinels_and_tag_boundaries() {
+    assert_eq!(
+        latest_tag_strictly_before(WireTag::NEVER),
+        Some(WireTag::NEVER)
+    );
+    assert_eq!(
+        latest_tag_strictly_before(WireTag::FOREVER),
+        Some(WireTag::FOREVER)
+    );
+    assert_eq!(
+        latest_tag_strictly_before(WireTag::finite(5, 2)),
+        Some(WireTag::finite(5, 1))
+    );
+    assert_eq!(
+        latest_tag_strictly_before(WireTag::finite(5, 0)),
+        Some(WireTag::finite(4, u64::MAX))
+    );
+}
+
+#[test]
 fn net_reevaluates_self_then_sorted_downstream_federates() {
     let delay = WireDelay::from_nanos(1);
     let mut rti = new_rti(FederatedTopology::with_edges(
@@ -1063,10 +1212,21 @@ fn net_reevaluates_self_then_sorted_downstream_federates() {
             tag: WireTag::ZERO,
         })
         .unwrap(),
-        ["source", "a", "z"]
-            .into_iter()
-            .map(|id| RtiDelivery::new(fed(id), RtiToFederate::Tag { tag: WireTag::ZERO }))
-            .collect::<Vec<_>>()
+        vec![
+            RtiDelivery::new(fed("source"), RtiToFederate::Tag { tag: WireTag::ZERO }),
+            RtiDelivery::new(
+                fed("a"),
+                RtiToFederate::Tag {
+                    tag: WireTag::finite(0, u64::MAX),
+                },
+            ),
+            RtiDelivery::new(
+                fed("z"),
+                RtiToFederate::Tag {
+                    tag: WireTag::finite(0, u64::MAX),
+                },
+            ),
+        ]
     );
 }
 
@@ -1161,7 +1321,7 @@ fn multi_hop_chain_requires_each_upstream_to_advance_past_the_requested_tag() {
         rti.request_tag(&fed("c"), WireTag::ZERO).unwrap(),
         GrantDecision::Blocked {
             requested: WireTag::ZERO,
-            earliest_incoming: Some(WireTag::ZERO),
+            earliest_incoming: Some(WireTag::NEVER),
         }
     );
 
@@ -1206,7 +1366,7 @@ fn multi_hop_chain_requires_each_upstream_to_advance_past_the_requested_tag() {
 }
 
 #[test]
-fn immediate_only_eimt_currently_misses_an_earlier_transitive_upstream() {
+fn transitive_eimt_blocks_an_earlier_upstream_through_an_intermediate() {
     let mut rti = new_rti(FederatedTopology::with_edges(
         [fed("a"), fed("b"), fed("c")],
         [
@@ -1228,12 +1388,13 @@ fn immediate_only_eimt_currently_misses_an_earlier_transitive_upstream() {
 
     assert_eq!(
         rti.earliest_incoming_message_tag(&fed("c")).unwrap(),
-        Some(WireTag::finite(100, 0))
+        Some(WireTag::finite(50, 0))
     );
     assert_eq!(
         rti.request_tag(&fed("c"), WireTag::finite(99, 0)).unwrap(),
-        GrantDecision::Granted {
-            tag: WireTag::finite(99, 0),
+        GrantDecision::Blocked {
+            requested: WireTag::finite(99, 0),
+            earliest_incoming: Some(WireTag::finite(50, 0)),
         }
     );
 }
@@ -1269,11 +1430,15 @@ fn positive_delay_cycle_allows_startup_grants_after_both_federates_advertise() {
         vec![
             RtiDelivery {
                 federate_id: fed("b"),
-                message: RtiToFederate::Tag { tag: WireTag::ZERO },
+                message: RtiToFederate::Tag {
+                    tag: WireTag::finite(9, u64::MAX),
+                },
             },
             RtiDelivery {
                 federate_id: fed("a"),
-                message: RtiToFederate::Tag { tag: WireTag::ZERO },
+                message: RtiToFederate::Tag {
+                    tag: WireTag::finite(9, u64::MAX),
+                },
             },
         ]
     );
@@ -1312,7 +1477,7 @@ fn net_forever_unblocks_pending_downstream_without_granting_forever() {
         vec![RtiDelivery {
             federate_id: fed("target"),
             message: RtiToFederate::Tag {
-                tag: WireTag::finite(10, 0),
+                tag: WireTag::FOREVER
             },
         }]
     );
@@ -1350,7 +1515,7 @@ fn no_future_net_unblocks_pending_downstream_before_stop() {
         vec![RtiDelivery {
             federate_id: fed("target"),
             message: RtiToFederate::Tag {
-                tag: WireTag::finite(10, 0),
+                tag: WireTag::FOREVER
             },
         }]
     );
@@ -1480,7 +1645,7 @@ fn topology_delays_shift_earliest_incoming_message_tags() {
         rti.request_tag(&fed("target"), WireTag::finite(9, 0))
             .unwrap(),
         GrantDecision::Granted {
-            tag: WireTag::finite(9, 0),
+            tag: WireTag::finite(9, u64::MAX),
         }
     );
     assert_eq!(
@@ -1515,8 +1680,11 @@ fn msg_frames_are_recorded_as_in_transit_and_forwarded_to_the_target() {
 
     assert_eq!(
         rti.earliest_incoming_message_tag(&fed("target")).unwrap(),
-        Some(WireTag::finite(3, 0))
+        Some(WireTag::FOREVER)
     );
+    assert!(coordination(&rti, &fed("target"))
+        .in_transit
+        .contains_key(&WireTag::finite(3, 0)));
     assert_eq!(
         deliveries,
         vec![RtiDelivery {

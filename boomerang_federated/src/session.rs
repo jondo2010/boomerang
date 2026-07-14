@@ -598,7 +598,12 @@ mod tests {
             WireTag::finite(10, 0),
             WireTag::finite(20, 0),
         ];
-        for tag in requested_tags {
+        let granted_tags = [
+            WireTag::finite(9, u64::MAX),
+            WireTag::finite(10, 0),
+            WireTag::finite(20, 0),
+        ];
+        for (tag, granted) in requested_tags.into_iter().zip(granted_tags) {
             a_client
                 .send(FederateToRti::Net {
                     federate_id: a.clone(),
@@ -611,8 +616,8 @@ mod tests {
                     tag,
                 })
                 .await;
-            assert_eq!(a_client.recv().await, RtiToFederate::Tag { tag });
-            assert_eq!(b_client.recv().await, RtiToFederate::Tag { tag });
+            assert_eq!(a_client.recv().await, RtiToFederate::Tag { tag: granted });
+            assert_eq!(b_client.recv().await, RtiToFederate::Tag { tag: granted });
             a_client
                 .send(FederateToRti::Ltc {
                     federate_id: a.clone(),
@@ -653,17 +658,20 @@ mod tests {
         assert_eq!(b_client.recv().await, RtiToFederate::Stop);
 
         use FramePattern::{Ltc, Net, Tag};
-        for tag in requested_tags {
+        for (tag, granted) in requested_tags.into_iter().zip(granted_tags) {
             for federate in [&a, &b] {
                 trace.assert_count(TracePattern::client_to_rti(federate.clone(), Net(tag)), 1);
-                trace.assert_count(TracePattern::rti_to_client(federate.clone(), Tag(tag)), 1);
+                trace.assert_count(
+                    TracePattern::rti_to_client(federate.clone(), Tag(granted)),
+                    1,
+                );
                 trace.assert_count(TracePattern::client_to_rti(federate.clone(), Ltc(tag)), 1);
                 trace.assert_before(
                     TracePattern::client_to_rti(federate.clone(), Net(tag)),
-                    TracePattern::rti_to_client(federate.clone(), Tag(tag)),
+                    TracePattern::rti_to_client(federate.clone(), Tag(granted)),
                 );
                 trace.assert_before(
-                    TracePattern::rti_to_client(federate.clone(), Tag(tag)),
+                    TracePattern::rti_to_client(federate.clone(), Tag(granted)),
                     TracePattern::client_to_rti(federate.clone(), Ltc(tag)),
                 );
             }

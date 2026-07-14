@@ -209,6 +209,7 @@ impl CompiledTopology {
         self.incoming.get(target).map_or(&[], Vec::as_slice)
     }
 
+    #[cfg(test)]
     fn downstream(&self, source: &FederateId) -> &[FederateId] {
         self.downstream.get(source).map_or(&[], Vec::as_slice)
     }
@@ -225,6 +226,7 @@ impl CompiledTopology {
             .map_or(&[], Vec::as_slice)
     }
 
+    #[cfg(test)]
     fn minimum_delay(&self, source: &FederateId, target: &FederateId) -> Option<WireDelay> {
         self.minimum_delays
             .get(&(source.clone(), target.clone()))
@@ -306,6 +308,13 @@ impl FederateCoordination {
             }
             | FederateLifecycle::Stopped => None,
         }
+    }
+
+    fn effective_next_event(&self) -> WireTag {
+        self.in_transit.keys().next().copied().map_or_else(
+            || self.advertised_next_event(),
+            |tag| tag.min(self.advertised_next_event()),
+        )
     }
 
     fn request(&mut self, tag: WireTag) {
@@ -391,6 +400,9 @@ pub enum RtiError {
 
     #[error("delaying tag {tag} by {delay_ns}ns overflowed")]
     TagDelayOverflow { tag: WireTag, delay_ns: u64 },
+
+    #[error("cannot calculate the latest tag strictly before {tag}")]
+    TagPredecessorUnderflow { tag: WireTag },
 
     #[error(
         "minimum path delay {path_source} -> {intermediate} -> {target} overflowed while adding {first_delay_ns}ns and {second_delay_ns}ns"
@@ -533,8 +545,13 @@ impl RtiState {
                 Ok(self.commit_transition(federate_id, staged, grants))
             }
             FederateToRti::Ltc { federate_id, tag } => {
-                self.complete_tag(&federate_id, tag)?;
-                Ok(Vec::new())
+                let mut staged = self.coordination(&federate_id)?.clone();
+                if tag > staged.last_completed {
+                    staged.last_completed = tag;
+                }
+                let affected = self.topology.transitive_downstream(&federate_id).to_vec();
+                let grants = self.evaluate_grants(&affected, Some((&federate_id, &staged)))?;
+                Ok(self.commit_transition(federate_id, staged, grants))
             }
             FederateToRti::MsgAck { federate_id, tag } => {
                 let mut staged = self.coordination(&federate_id)?.clone();
@@ -564,8 +581,8 @@ impl RtiState {
             FederateToRti::Stop { federate_id } => {
                 let mut staged = self.coordination(&federate_id)?.clone();
                 staged.stop();
-                let affected = self.topology.downstream(&federate_id);
-                let grants = self.evaluate_grants(affected, Some((&federate_id, &staged)))?;
+                let affected = self.topology.transitive_downstream(&federate_id).to_vec();
+                let grants = self.evaluate_grants(&affected, Some((&federate_id, &staged)))?;
                 Ok(self.commit_transition(federate_id, staged, grants))
             }
         }
@@ -785,6 +802,7 @@ impl RtiState {
             .ok_or_else(|| RtiError::UnknownFederate(federate_id.clone()))
     }
 
+    #[cfg(test)]
     fn complete_tag(&mut self, federate_id: &FederateId, tag: WireTag) -> Result<(), RtiError> {
         self.ensure_federate(federate_id)?;
         let state = self
@@ -879,14 +897,13 @@ impl RtiState {
         federate_id: &FederateId,
         override_state: Option<(&'a FederateId, &'a FederateCoordination)>,
     ) -> Result<Option<WireTag>, RtiError> {
-        let state = self.coordination_with_override(federate_id, override_state)?;
-        let mut earliest = state.in_transit.keys().next().copied();
+        let mut earliest = None;
 
-        for dependency in self.topology.incoming(federate_id) {
+        for dependency in self.topology.transitive_incoming(federate_id) {
             let upstream_state =
                 self.coordination_with_override(&dependency.source, override_state)?;
             let candidate =
-                apply_edge_delay(upstream_state.advertised_next_event(), dependency.delay)?;
+                apply_edge_delay(upstream_state.effective_next_event(), dependency.delay)?;
 
             if earliest.is_none_or(|current| candidate < current) {
                 earliest = Some(candidate);
@@ -920,7 +937,7 @@ impl RtiState {
         if state.is_stopped() {
             return Ok(GrantDecision::Blocked {
                 requested: WireTag::Forever,
-                earliest_incoming: earliest()?,
+                earliest_incoming: None,
             });
         }
         let requested = match state.requested_tag() {
@@ -928,7 +945,7 @@ impl RtiState {
             None => {
                 return Ok(GrantDecision::Blocked {
                     requested: WireTag::Forever,
-                    earliest_incoming: earliest()?,
+                    earliest_incoming: None,
                 })
             }
         };
@@ -940,6 +957,13 @@ impl RtiState {
             });
         }
 
+        if let Some(in_transit) = state.in_transit.keys().next().copied() {
+            return Ok(GrantDecision::Blocked {
+                requested,
+                earliest_incoming: Some(in_transit),
+            });
+        }
+
         if state
             .last_granted
             .is_some_and(|last_granted| last_granted >= requested)
@@ -947,15 +971,41 @@ impl RtiState {
             return Ok(GrantDecision::AlreadyGranted { tag: requested });
         }
 
-        let earliest_incoming = earliest()?;
-        if earliest_incoming.is_none_or(|incoming| incoming > requested) {
-            Ok(GrantDecision::Granted { tag: requested })
-        } else {
-            Ok(GrantDecision::Blocked {
-                requested,
-                earliest_incoming,
-            })
+        if self.topology.incoming(federate_id).is_empty() {
+            return Ok(GrantDecision::Granted { tag: requested });
         }
+
+        let last_granted = state.last_granted.unwrap_or(WireTag::NEVER);
+        let mut minimum_upstream_completed = WireTag::FOREVER;
+        for dependency in self.topology.incoming(federate_id) {
+            let upstream_state =
+                self.coordination_with_override(&dependency.source, override_state)?;
+            if upstream_state.is_stopped() {
+                continue;
+            }
+            let candidate = apply_edge_delay(upstream_state.last_completed, dependency.delay)?;
+            minimum_upstream_completed = minimum_upstream_completed.min(candidate);
+        }
+        if minimum_upstream_completed > last_granted && minimum_upstream_completed >= requested {
+            return Ok(GrantDecision::Granted {
+                tag: minimum_upstream_completed,
+            });
+        }
+
+        let earliest_incoming = earliest()?;
+        if let Some(incoming) = earliest_incoming {
+            if incoming > requested {
+                let safe = latest_tag_strictly_before(incoming)
+                    .ok_or(RtiError::TagPredecessorUnderflow { tag: incoming })?;
+                if safe > last_granted {
+                    return Ok(GrantDecision::Granted { tag: safe });
+                }
+            }
+        }
+        Ok(GrantDecision::Blocked {
+            requested,
+            earliest_incoming,
+        })
     }
 
     #[cfg(test)]
@@ -974,7 +1024,7 @@ impl RtiState {
         let mut affected = vec![source.clone()];
         affected.extend(
             self.topology
-                .downstream(source)
+                .transitive_downstream(source)
                 .iter()
                 .filter(|target| *target != source)
                 .cloned(),
@@ -1030,6 +1080,25 @@ fn apply_edge_delay(tag: WireTag, delay: WireDelay) -> Result<WireTag, RtiError>
         tag,
         delay_ns: delay.as_nanos(),
     })
+}
+
+fn latest_tag_strictly_before(tag: WireTag) -> Option<WireTag> {
+    match tag {
+        WireTag::Never => Some(WireTag::Never),
+        WireTag::Forever => Some(WireTag::Forever),
+        WireTag::Finite {
+            offset_ns,
+            microstep,
+        } => {
+            if microstep > 0 {
+                Some(WireTag::finite(offset_ns, microstep - 1))
+            } else {
+                offset_ns
+                    .checked_sub(1)
+                    .map(|offset_ns| WireTag::finite(offset_ns, u64::MAX))
+            }
+        }
+    }
 }
 
 fn is_nonnegative_wire_tag(tag: WireTag) -> bool {

@@ -124,15 +124,9 @@ fn handle_characterizes_legal_transition_sequence() {
             },
         )]
     );
-    assert_eq!(
-        rti.handle(FederateToRti::MsgAck {
-            federate_id: target.clone(),
-            tag: WireTag::ZERO,
-        })
-        .unwrap(),
-        Vec::new()
-    );
-    assert!(coordination(&rti, &target).in_transit.is_empty());
+    assert!(coordination(&rti, &target)
+        .in_transit
+        .contains(&WireTag::ZERO));
     assert_eq!(
         rti.handle(FederateToRti::Ltc {
             federate_id: target.clone(),
@@ -166,7 +160,7 @@ fn handle_characterizes_legal_transition_sequence() {
             lifecycle: FederateLifecycle::Stopped,
             last_completed: WireTag::ZERO,
             last_granted: Some(source_next),
-            in_transit: BTreeMap::new(),
+            in_transit: BTreeSet::new(),
         }
     );
     assert_eq!(
@@ -175,7 +169,7 @@ fn handle_characterizes_legal_transition_sequence() {
             lifecycle: FederateLifecycle::Stopped,
             last_completed: WireTag::ZERO,
             last_granted: Some(WireTag::ZERO),
-            in_transit: BTreeMap::new(),
+            in_transit: BTreeSet::new(),
         }
     );
 }
@@ -339,10 +333,6 @@ fn unknown_federate_errors_are_failure_atomic() {
             federate_id: unknown.clone(),
             tag: WireTag::ZERO,
         },
-        FederateToRti::MsgAck {
-            federate_id: unknown.clone(),
-            tag: WireTag::ZERO,
-        },
         FederateToRti::Msg {
             source: unknown.clone(),
             target: fed("target"),
@@ -436,15 +426,6 @@ fn invalid_tags_and_lifecycle_transitions_are_failure_atomic() {
             "LTC",
             fed("source"),
             WireTag::FOREVER,
-        ),
-        (
-            FederateToRti::MsgAck {
-                federate_id: fed("target"),
-                tag: WireTag::NEVER,
-            },
-            "MsgAck",
-            fed("target"),
-            WireTag::NEVER,
         ),
         (
             FederateToRti::Msg {
@@ -817,151 +798,128 @@ fn upstream_net_at_requested_tag_blocks_tag_grant() {
 }
 
 #[test]
-fn in_transit_message_blocks_grant_until_target_msg_ack() {
-    let mut rti = new_rti(FederatedTopology::new([fed("source"), fed("target")]));
+fn multiple_same_tag_messages_share_one_in_transit_entry() {
+    let mut rti = new_rti(topology_with_edge(WireDelay::ZERO));
+    let message = || FederateToRti::Msg {
+        source: fed("source"),
+        target: fed("target"),
+        endpoint: endpoint("source.out->target.in"),
+        tag: WireTag::ZERO,
+        payload: vec![1],
+    };
 
-    rti.record_in_transit_message(&fed("source"), &fed("target"), WireTag::finite(5, 0))
-        .unwrap();
-
-    assert_eq!(
-        rti.request_tag(&fed("target"), WireTag::finite(10, 0))
-            .unwrap(),
-        GrantDecision::Blocked {
-            requested: WireTag::finite(10, 0),
-            earliest_incoming: Some(WireTag::finite(5, 0)),
-        }
-    );
-
-    rti.acknowledge_message(&fed("target"), WireTag::finite(5, 0))
-        .unwrap();
+    rti.handle(message()).unwrap();
+    rti.handle(message()).unwrap();
 
     assert_eq!(
-        rti.request_tag(&fed("target"), WireTag::finite(10, 0))
-            .unwrap(),
-        GrantDecision::Granted {
-            tag: WireTag::finite(10, 0),
-        }
+        coordination(&rti, &fed("target")).in_transit,
+        BTreeSet::from([WireTag::ZERO])
     );
 }
 
 #[test]
-fn multiple_same_tag_messages_require_one_msg_ack_each() {
-    let mut rti = new_rti(FederatedTopology::new([fed("source"), fed("target")]));
+fn ltc_clears_in_transit_tags_through_completion() {
+    let mut rti = new_rti(topology_with_edge(WireDelay::ZERO));
+    for tag in [
+        WireTag::finite(3, 0),
+        WireTag::finite(5, 0),
+        WireTag::finite(7, 0),
+    ] {
+        rti.record_in_transit_message(&fed("source"), &fed("target"), tag)
+            .unwrap();
+    }
 
-    rti.record_in_transit_message(&fed("source"), &fed("target"), WireTag::ZERO)
-        .unwrap();
-    rti.record_in_transit_message(&fed("source"), &fed("target"), WireTag::ZERO)
-        .unwrap();
-
-    assert_eq!(
-        rti.request_tag(&fed("target"), WireTag::finite(0, 1))
-            .unwrap(),
-        GrantDecision::Blocked {
-            requested: WireTag::finite(0, 1),
-            earliest_incoming: Some(WireTag::ZERO),
-        }
-    );
-
-    rti.complete_tag(&fed("target"), WireTag::ZERO).unwrap();
+    rti.handle(FederateToRti::Ltc {
+        federate_id: fed("target"),
+        tag: WireTag::finite(5, 0),
+    })
+    .unwrap();
 
     assert_eq!(
-        rti.request_tag(&fed("target"), WireTag::finite(0, 1))
-            .unwrap(),
-        GrantDecision::Blocked {
-            requested: WireTag::finite(0, 1),
-            earliest_incoming: Some(WireTag::ZERO),
-        }
-    );
-
-    rti.acknowledge_message(&fed("target"), WireTag::ZERO)
-        .unwrap();
-    assert_eq!(
-        rti.request_tag(&fed("target"), WireTag::finite(0, 1))
-            .unwrap(),
-        GrantDecision::Blocked {
-            requested: WireTag::finite(0, 1),
-            earliest_incoming: Some(WireTag::ZERO),
-        }
-    );
-
-    rti.acknowledge_message(&fed("target"), WireTag::ZERO)
-        .unwrap();
-
-    assert_eq!(
-        rti.request_tag(&fed("target"), WireTag::finite(0, 1))
-            .unwrap(),
-        GrantDecision::Granted {
-            tag: WireTag::finite(0, 1),
-        }
+        coordination(&rti, &fed("target")).in_transit,
+        BTreeSet::from([WireTag::finite(7, 0)])
     );
 }
 
 #[test]
-fn in_transit_count_overflow_is_failure_atomic() {
-    let mut rti = new_rti(FederatedTopology::new([fed("source"), fed("target")]));
-    coordination_mut(&mut rti, &fed("target"))
-        .in_transit
-        .insert(
-            WireTag::ZERO,
-            NonZeroUsize::new(usize::MAX).expect("maximum usize is nonzero"),
-        );
-    let before = snapshot(&rti);
-
-    assert_eq!(
-        rti.record_in_transit_message(&fed("source"), &fed("target"), WireTag::ZERO),
-        Err(RtiError::MessageCountOverflow {
-            federate_id: fed("target"),
-            tag: WireTag::ZERO,
-        })
-    );
-    assert_eq!(snapshot(&rti), before);
-}
-
-#[test]
-fn msg_ack_can_trigger_pending_grant() {
-    let mut rti = new_rti(FederatedTopology::new([fed("source"), fed("target")]));
-    rti.record_in_transit_message(&fed("source"), &fed("target"), WireTag::finite(5, 0))
-        .unwrap();
-    assert!(matches!(
-        rti.request_tag(&fed("target"), WireTag::finite(10, 0))
-            .unwrap(),
-        GrantDecision::Blocked { .. }
+fn target_ltc_reconsiders_downstream_request_after_clearing_in_transit_tag() {
+    let mut rti = new_rti(FederatedTopology::with_edges(
+        [fed("source"), fed("target"), fed("downstream")],
+        [
+            TopologyEdge::new(
+                fed("source"),
+                fed("target"),
+                endpoint("source.out->target.in"),
+                WireDelay::ZERO,
+            ),
+            TopologyEdge::new(
+                fed("target"),
+                fed("downstream"),
+                endpoint("target.out->downstream.in"),
+                WireDelay::ZERO,
+            ),
+        ],
     ));
+    rti.handle(FederateToRti::Net {
+        federate_id: fed("source"),
+        tag: WireTag::FOREVER,
+    })
+    .unwrap();
+    rti.record_in_transit_message(&fed("source"), &fed("target"), WireTag::finite(0, 5))
+        .unwrap();
+    rti.handle(FederateToRti::Net {
+        federate_id: fed("target"),
+        tag: WireTag::finite(0, 10),
+    })
+    .unwrap();
+
+    assert_eq!(
+        rti.handle(FederateToRti::Net {
+            federate_id: fed("downstream"),
+            tag: WireTag::finite(0, 9),
+        })
+        .unwrap(),
+        Vec::new()
+    );
+
+    assert_eq!(
+        rti.handle(FederateToRti::Ltc {
+            federate_id: fed("target"),
+            tag: WireTag::finite(0, 5),
+        })
+        .unwrap(),
+        vec![RtiDelivery::new(
+            fed("downstream"),
+            RtiToFederate::Tag {
+                tag: WireTag::finite(0, 9),
+            },
+        )]
+    );
+}
+
+#[test]
+fn message_at_completed_tag_is_forwarded_without_being_recorded() {
+    let mut rti = new_rti(topology_with_edge(WireDelay::ZERO));
+    let completed = WireTag::finite(5, 0);
+    rti.handle(FederateToRti::Ltc {
+        federate_id: fed("target"),
+        tag: completed,
+    })
+    .unwrap();
 
     let deliveries = rti
-        .handle(FederateToRti::MsgAck {
-            federate_id: fed("target"),
-            tag: WireTag::finite(5, 0),
+        .handle(FederateToRti::Msg {
+            source: fed("source"),
+            target: fed("target"),
+            endpoint: endpoint("source.out->target.in"),
+            tag: completed,
+            payload: vec![1],
         })
         .unwrap();
 
-    assert_eq!(
-        deliveries,
-        vec![RtiDelivery {
-            federate_id: fed("target"),
-            message: RtiToFederate::Tag {
-                tag: WireTag::finite(10, 0),
-            },
-        }]
-    );
-}
-
-#[test]
-fn unmatched_msg_ack_returns_typed_error() {
-    let mut rti = new_rti(FederatedTopology::new([fed("source"), fed("target")]));
-    let other_tag = WireTag::finite(1, 0);
-    rti.record_in_transit_message(&fed("source"), &fed("target"), other_tag)
-        .unwrap();
-    let before = snapshot(&rti);
-
-    assert_eq!(
-        rti.acknowledge_message(&fed("target"), WireTag::ZERO),
-        Err(RtiError::UnmatchedMessageAck {
-            federate_id: fed("target"),
-            tag: WireTag::ZERO,
-        })
-    );
-    assert_eq!(snapshot(&rti), before);
+    assert!(coordination(&rti, &fed("target")).in_transit.is_empty());
+    assert_eq!(deliveries.len(), 1);
+    assert!(matches!(deliveries[0].message, RtiToFederate::Msg { tag, .. } if tag == completed));
 }
 
 #[test]
@@ -994,22 +952,18 @@ fn ltc_does_not_reevaluate_unaffected_pending_grants() {
     let delay = WireDelay::from_nanos(1);
     let overflowing = WireTag::finite(i128::MAX, 0);
     let mut rti = new_rti(FederatedTopology::with_edges(
-        [fed("a"), fed("source"), fed("z")],
-        [TopologyEdge::new(
-            fed("source"),
-            fed("z"),
-            endpoint("source.out->z.in"),
-            delay,
-        )],
+        [fed("a"), fed("source"), fed("x"), fed("z")],
+        [
+            TopologyEdge::new(fed("source"), fed("z"), endpoint("source.out->z.in"), delay),
+            TopologyEdge::new(fed("x"), fed("a"), endpoint("x.out->a.in"), WireDelay::ZERO),
+        ],
     ));
 
-    rti.record_in_transit_message(&fed("source"), &fed("a"), WireTag::ZERO)
-        .unwrap();
+    rti.request_tag(&fed("x"), WireTag::ZERO).unwrap();
     assert!(matches!(
         rti.request_tag(&fed("a"), WireTag::ZERO).unwrap(),
         GrantDecision::Blocked { .. }
     ));
-    rti.acknowledge_message(&fed("a"), WireTag::ZERO).unwrap();
     assert_eq!(
         rti.request_tag(&fed("source"), overflowing).unwrap(),
         GrantDecision::Granted { tag: overflowing }
@@ -1625,10 +1579,7 @@ fn message_already_sent_by_a_peer_can_arrive_after_target_stop() {
             },
         )]
     );
-    assert_eq!(
-        coordination(&rti, &target).in_transit.get(&tag),
-        NonZeroUsize::new(1).as_ref()
-    );
+    assert!(coordination(&rti, &target).in_transit.contains(&tag));
 }
 
 #[test]
@@ -1684,7 +1635,7 @@ fn msg_frames_are_recorded_as_in_transit_and_forwarded_to_the_target() {
     );
     assert!(coordination(&rti, &fed("target"))
         .in_transit
-        .contains_key(&WireTag::finite(3, 0)));
+        .contains(&WireTag::finite(3, 0)));
     assert_eq!(
         deliveries,
         vec![RtiDelivery {

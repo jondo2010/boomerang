@@ -380,12 +380,6 @@ mod tests {
                 tag: WireTag::finite(0, 1),
             }
         );
-        sink_client
-            .send(FederateToRti::MsgAck {
-                federate_id: sink.clone(),
-                tag: WireTag::ZERO,
-            })
-            .unwrap();
         assert_eq!(
             recv_rti_message(&sink_client, recv_timeout, "sink TAG(ZERO)"),
             RtiToFederate::Tag { tag: WireTag::ZERO }

@@ -771,12 +771,6 @@ mod tests {
                 tag: WireTag::finite(0, 1),
             }
         );
-        sink_client
-            .send(FederateToRti::MsgAck {
-                federate_id: sink.clone(),
-                tag: WireTag::ZERO,
-            })
-            .await;
         assert_eq!(
             sink_client.recv().await,
             RtiToFederate::Tag { tag: WireTag::ZERO }
@@ -813,7 +807,7 @@ mod tests {
         assert_eq!(source_client.recv().await, RtiToFederate::Stop);
         assert_eq!(sink_client.recv().await, RtiToFederate::Stop);
 
-        use FramePattern::{Hello, Ltc, Msg, MsgAck, Net, Start, Stop, Tag};
+        use FramePattern::{Hello, Ltc, Msg, Net, Start, Stop, Tag};
 
         trace.assert_exact(&[
             TracePattern::client_to_rti(source.clone(), Hello),
@@ -839,7 +833,6 @@ mod tests {
             ),
             TracePattern::client_to_rti(source.clone(), Net(WireTag::finite(0, 1))),
             TracePattern::rti_to_client(source.clone(), Tag(WireTag::finite(0, 1))),
-            TracePattern::client_to_rti(sink.clone(), MsgAck(WireTag::ZERO)),
             TracePattern::rti_to_client(sink.clone(), Tag(WireTag::ZERO)),
             TracePattern::client_to_rti(sink.clone(), Ltc(WireTag::ZERO)),
             TracePattern::client_to_rti(source.clone(), Net(WireTag::FOREVER)),
@@ -865,15 +858,12 @@ mod tests {
                 endpoint: endpoint.clone(),
             },
         );
-        let target_ack = TracePattern::client_to_rti(sink.clone(), MsgAck(WireTag::ZERO));
         let target_tag = TracePattern::rti_to_client(sink.clone(), Tag(WireTag::ZERO));
         let source_next = TracePattern::client_to_rti(source.clone(), Net(WireTag::finite(0, 1)));
 
         trace.assert_before(source_tag, source_msg.clone());
         trace.assert_before(source_msg, source_next);
-        trace.assert_before(forwarded_msg.clone(), target_ack.clone());
         trace.assert_before(forwarded_msg, target_tag.clone());
-        trace.assert_before(target_ack, target_tag);
         trace.assert_before(
             TracePattern::client_to_rti(source.clone(), Stop),
             TracePattern::rti_to_client(source.clone(), Stop),
@@ -889,7 +879,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_blocks_pending_grant_behind_multiple_same_tag_messages() {
+    async fn session_orders_multiple_same_tag_messages_before_their_grant() {
         let topology = source_sink_topology();
         let (source_client, sink_client, session) = spawn_session(topology.clone());
         let source = fed("source");
@@ -976,31 +966,8 @@ mod tests {
                 tag: WireTag::finite(0, 2),
             }
         );
-        tokio::task::yield_now().await;
-        assert_eq!(sink_client.recv_now(), None);
-
-        let target_ack =
-            TracePattern::client_to_rti(sink.clone(), FramePattern::MsgAck(WireTag::ZERO));
         let target_grant =
             TracePattern::rti_to_client(sink.clone(), FramePattern::Tag(WireTag::finite(0, 1)));
-
-        sink_client
-            .send(FederateToRti::MsgAck {
-                federate_id: sink.clone(),
-                tag: WireTag::ZERO,
-            })
-            .await;
-        tokio::task::yield_now().await;
-        assert_eq!(sink_client.recv_now(), None);
-        trace.assert_count(target_ack.clone(), 1);
-        trace.assert_absent(target_grant.clone());
-
-        sink_client
-            .send(FederateToRti::MsgAck {
-                federate_id: sink.clone(),
-                tag: WireTag::ZERO,
-            })
-            .await;
         assert_eq!(
             sink_client.recv().await,
             RtiToFederate::Tag {
@@ -1050,11 +1017,9 @@ mod tests {
 
         trace.assert_count(source_message.clone(), 2);
         trace.assert_count(forwarded_message.clone(), 2);
-        trace.assert_count(target_ack.clone(), 2);
         trace.assert_count(target_grant.clone(), 1);
         trace.assert_before(source_message, forwarded_message.clone());
-        trace.assert_before(forwarded_message, target_ack.clone());
-        trace.assert_before(target_ack, target_grant);
+        trace.assert_before(forwarded_message, target_grant);
 
         drop(source_client);
         drop(sink_client);

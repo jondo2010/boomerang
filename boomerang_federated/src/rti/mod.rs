@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::num::NonZeroUsize;
 
 use crate::protocol::{
     EndpointId, FederateId, FederateToRti, FederatedTopology, RtiToFederate, TopologyEdge,
@@ -266,7 +265,7 @@ struct FederateCoordination {
     lifecycle: FederateLifecycle,
     last_completed: WireTag,
     last_granted: Option<WireTag>,
-    in_transit: BTreeMap<WireTag, NonZeroUsize>,
+    in_transit: BTreeSet<WireTag>,
 }
 
 impl Default for FederateCoordination {
@@ -277,7 +276,7 @@ impl Default for FederateCoordination {
             },
             last_completed: WireTag::Never,
             last_granted: None,
-            in_transit: BTreeMap::new(),
+            in_transit: BTreeSet::new(),
         }
     }
 }
@@ -311,7 +310,7 @@ impl FederateCoordination {
     }
 
     fn effective_next_event(&self) -> WireTag {
-        self.in_transit.keys().next().copied().map_or_else(
+        self.in_transit.iter().next().copied().map_or_else(
             || self.advertised_next_event(),
             |tag| tag.min(self.advertised_next_event()),
         )
@@ -415,18 +414,6 @@ pub enum RtiError {
         second_delay_ns: u64,
     },
 
-    #[error("federate `{federate_id}` acknowledged no in-transit message at {tag}")]
-    UnmatchedMessageAck {
-        federate_id: FederateId,
-        tag: WireTag,
-    },
-
-    #[error("in-transit message count overflow for federate `{federate_id}` at {tag}")]
-    MessageCountOverflow {
-        federate_id: FederateId,
-        tag: WireTag,
-    },
-
     #[error(
         "{event} identified federate `{claimed_federate}`, but authenticated endpoint is `{authenticated_federate}`"
     )]
@@ -524,7 +511,6 @@ impl RtiState {
             FederateToRti::Hello { federate_id, .. }
             | FederateToRti::Net { federate_id, .. }
             | FederateToRti::Ltc { federate_id, .. }
-            | FederateToRti::MsgAck { federate_id, .. }
             | FederateToRti::Stop { federate_id } => federate_id.clone(),
             FederateToRti::Msg { source, .. } => source.clone(),
         };
@@ -549,14 +535,8 @@ impl RtiState {
                 if tag > staged.last_completed {
                     staged.last_completed = tag;
                 }
-                let affected = self.topology.transitive_downstream(&federate_id).to_vec();
-                let grants = self.evaluate_grants(&affected, Some((&federate_id, &staged)))?;
-                Ok(self.commit_transition(federate_id, staged, grants))
-            }
-            FederateToRti::MsgAck { federate_id, tag } => {
-                let mut staged = self.coordination(&federate_id)?.clone();
-                Self::acknowledge_coordination(&mut staged, tag);
-                let affected = [federate_id.clone()];
+                staged.in_transit.retain(|in_transit| *in_transit > tag);
+                let affected = self.ltc_affected_federates(&federate_id);
                 let grants = self.evaluate_grants(&affected, Some((&federate_id, &staged)))?;
                 Ok(self.commit_transition(federate_id, staged, grants))
             }
@@ -657,28 +637,6 @@ impl RtiState {
                 }
                 Ok(())
             }
-            FederateToRti::MsgAck { federate_id, tag } => {
-                Self::validate_identity(authenticated_federate, federate_id, "MsgAck")?;
-                Self::validate_finite_tag(federate_id, "MsgAck", *tag)?;
-                let state = self
-                    .federates
-                    .get(federate_id)
-                    .expect("authenticated federate must exist");
-                if state.is_stopped() {
-                    return Err(RtiError::InvalidLifecycleTransition {
-                        federate_id: federate_id.clone(),
-                        event: "MsgAck",
-                        lifecycle: "stopped",
-                    });
-                }
-                if !state.in_transit.contains_key(tag) {
-                    return Err(RtiError::UnmatchedMessageAck {
-                        federate_id: federate_id.clone(),
-                        tag: *tag,
-                    });
-                }
-                Ok(())
-            }
             FederateToRti::Msg {
                 source,
                 target,
@@ -700,25 +658,11 @@ impl RtiState {
                         lifecycle: "stopped",
                     });
                 }
-                let target_state = self
-                    .federates
-                    .get(target)
-                    .expect("validated target federate must exist");
                 if !self.contains_route(source, target, endpoint) {
                     return Err(RtiError::InvalidRoute {
                         source_federate: source.clone(),
                         target_federate: target.clone(),
                         endpoint: endpoint.clone(),
-                    });
-                }
-                if target_state
-                    .in_transit
-                    .get(tag)
-                    .is_some_and(|count| count.get() == usize::MAX)
-                {
-                    return Err(RtiError::MessageCountOverflow {
-                        federate_id: target.clone(),
-                        tag: *tag,
                     });
                 }
                 Ok(())
@@ -802,55 +746,6 @@ impl RtiState {
             .ok_or_else(|| RtiError::UnknownFederate(federate_id.clone()))
     }
 
-    #[cfg(test)]
-    fn complete_tag(&mut self, federate_id: &FederateId, tag: WireTag) -> Result<(), RtiError> {
-        self.ensure_federate(federate_id)?;
-        let state = self
-            .federates
-            .get_mut(federate_id)
-            .expect("federate existence was checked");
-        if tag > state.last_completed {
-            state.last_completed = tag;
-        }
-
-        Ok(())
-    }
-
-    /// Acknowledge delivery of exactly one message into a federate's scheduler queue.
-    #[cfg(test)]
-    fn acknowledge_message(
-        &mut self,
-        federate_id: &FederateId,
-        tag: WireTag,
-    ) -> Result<(), RtiError> {
-        self.ensure_federate(federate_id)?;
-        let state = self
-            .federates
-            .get_mut(federate_id)
-            .expect("federate existence was checked");
-        if !state.in_transit.contains_key(&tag) {
-            return Err(RtiError::UnmatchedMessageAck {
-                federate_id: federate_id.clone(),
-                tag,
-            });
-        }
-        Self::acknowledge_coordination(state, tag);
-        Ok(())
-    }
-
-    fn acknowledge_coordination(state: &mut FederateCoordination, tag: WireTag) {
-        let count = state
-            .in_transit
-            .get_mut(&tag)
-            .expect("acknowledgment was validated against staged coordination");
-        match NonZeroUsize::new(count.get() - 1) {
-            Some(remaining) => *count = remaining,
-            None => {
-                state.in_transit.remove(&tag);
-            }
-        }
-    }
-
     fn record_in_transit_message(
         &mut self,
         source: &FederateId,
@@ -863,23 +758,8 @@ impl RtiState {
             .federates
             .get_mut(target)
             .expect("federate existence was checked");
-        match state.in_transit.get_mut(&tag) {
-            Some(count) => {
-                let next =
-                    count
-                        .get()
-                        .checked_add(1)
-                        .ok_or_else(|| RtiError::MessageCountOverflow {
-                            federate_id: target.clone(),
-                            tag,
-                        })?;
-                *count = NonZeroUsize::new(next).expect("positive count remains nonzero");
-            }
-            None => {
-                state
-                    .in_transit
-                    .insert(tag, NonZeroUsize::new(1).expect("one is nonzero"));
-            }
+        if tag > state.last_completed {
+            state.in_transit.insert(tag);
         }
         Ok(())
     }
@@ -957,12 +837,7 @@ impl RtiState {
             });
         }
 
-        if let Some(in_transit) = state.in_transit.keys().next().copied() {
-            return Ok(GrantDecision::Blocked {
-                requested,
-                earliest_incoming: Some(in_transit),
-            });
-        }
+        let requested = state.effective_next_event().min(requested);
 
         if state
             .last_granted
@@ -1021,6 +896,18 @@ impl RtiState {
     }
 
     fn net_affected_federates(&self, source: &FederateId) -> Vec<FederateId> {
+        let mut affected = vec![source.clone()];
+        affected.extend(
+            self.topology
+                .transitive_downstream(source)
+                .iter()
+                .filter(|target| *target != source)
+                .cloned(),
+        );
+        affected
+    }
+
+    fn ltc_affected_federates(&self, source: &FederateId) -> Vec<FederateId> {
         let mut affected = vec![source.clone()];
         affected.extend(
             self.topology

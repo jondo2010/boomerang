@@ -652,8 +652,6 @@ impl RtiFederatedTimeBarrier {
             .ok_or_else(|| FederateClientError::UnboundInboundRoute(endpoint.clone()))?;
         self.inbound.schedule(inbound_key, runtime_tag, payload)?;
 
-        self.send_msg_ack(runtime_tag)?;
-
         event_rx
             .recv()
             .map(Some)
@@ -681,14 +679,6 @@ impl RtiFederatedTimeBarrier {
     )]
     fn send_ltc(&self, tag: boomerang_runtime::Tag) -> Result<(), FederateClientError> {
         self.client.send(FederateToRti::Ltc {
-            federate_id: self.federate_id.clone(),
-            tag: WireTag::try_from(tag)?,
-        })
-    }
-
-    /// Acknowledge that one inbound message was queued, without claiming tag completion.
-    fn send_msg_ack(&self, tag: boomerang_runtime::Tag) -> Result<(), FederateClientError> {
-        self.client.send(FederateToRti::MsgAck {
             federate_id: self.federate_id.clone(),
             tag: WireTag::try_from(tag)?,
         })
@@ -956,7 +946,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn bridge_schedules_inbound_msg_and_acknowledges_delivery() {
+    async fn bridge_schedules_inbound_msg_before_reporting_completion() {
         let (client, rti) = connect_client_with_fake_rti(fed("sink"), |mut transport| async move {
             assert!(matches!(
                 recv_federate_to_rti(&mut transport).await,
@@ -986,13 +976,6 @@ mod tests {
                 },
             )
             .await;
-            assert_eq!(
-                recv_federate_to_rti(&mut transport).await,
-                FederateToRti::MsgAck {
-                    federate_id: fed("sink"),
-                    tag: WireTag::ZERO,
-                }
-            );
             assert_eq!(
                 recv_federate_to_rti(&mut transport).await,
                 FederateToRti::Ltc {
@@ -1073,15 +1056,6 @@ mod tests {
             }
             send_rti_to_federate(&mut transport, RtiToFederate::Tag { tag: WireTag::ZERO }).await;
 
-            for _ in 0..2 {
-                assert_eq!(
-                    recv_federate_to_rti(&mut transport).await,
-                    FederateToRti::MsgAck {
-                        federate_id: fed("sink"),
-                        tag: WireTag::ZERO,
-                    }
-                );
-            }
             assert_eq!(
                 recv_federate_to_rti(&mut transport).await,
                 FederateToRti::Ltc {
@@ -1229,14 +1203,6 @@ mod tests {
                     },
                 )
                 .await;
-                assert_eq!(
-                    recv_federate_to_rti(&mut transport).await,
-                    FederateToRti::MsgAck {
-                        federate_id: fed("sink"),
-                        tag: WireTag::ZERO,
-                    }
-                );
-
                 send_rti_to_federate(&mut transport, RtiToFederate::Tag { tag: WireTag::ZERO })
                     .await;
                 assert_eq!(

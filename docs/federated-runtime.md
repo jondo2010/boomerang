@@ -77,7 +77,7 @@ flowchart LR
 
     subgraph Coordination["Federated protocol and coordination"]
         TransportA["In-memory or TCP transport A"]
-        RTI["StaticRtiSession + RtiState<br/>grant calculation, in-transit counts,<br/>message routing"]
+        RTI["StaticRtiSession + RtiState<br/>LF grant calculation, in-transit tags,<br/>message routing"]
         TransportB["In-memory or TCP transport B"]
 
         ClientA --> TransportA --> RTI
@@ -100,7 +100,7 @@ flowchart LR
         SchedB --> ReceiverReaction --> TargetReaction
         SchedB -->|tag request / completion| BarrierB
         BarrierB -->|grant or inbound interrupt| SchedB
-        BarrierB -->|NET, MsgAck, LTC, Stop| ConnectionB --> ClientB
+        BarrierB -->|NET, LTC, Stop| ConnectionB --> ClientB
     end
 
     RTI --> TransportB --> ClientB
@@ -169,15 +169,19 @@ share clones of the same mailbox sender. Consequently, reaction-emitted `MSG`
 frames and the subsequent `LTC` frame enter one FIFO queue in program order.
 
 `RtiState` compiles the immutable static topology once at construction into
-ordered incoming dependencies, downstream targets, and exact route keys. The
-session calls `RtiState::handle_from` with the authenticated connection identity
+ordered immediate and transitive dependencies, minimum cumulative path delays,
+downstream work sets, and exact route keys. The session calls
+`RtiState::handle_from` with the authenticated connection identity
 for every frame. The RTI validates and preflights each event before committing
 its one changed coordination record and any grants, so an error cannot leave a
-partial transition. Grant reevaluation is causal: `NET` touches the sender and
-downstream targets, `Stop` touches downstream targets, `MsgAck` touches its
-target, and `MSG`/`LTC` do not rescan grants because neither can make a pending
-grant newly eligible. `boomerang_runtime` remains unaware of these protocol and
-RTI details.
+partial transition. Grant evaluation follows the centralized definitive subset
+from reactor-c commit `a98d9d3833de5fc5650f9f64dc4b085b982f3a3e`: an
+immediate upstream LTC frontier may grant directly, otherwise the transitive
+earliest-incoming-message tag grants its latest strict predecessor. Grant
+reevaluation is causal: `NET` and `LTC` touch the member followed by sorted
+transitive downstream members, `Stop` touches sorted transitive downstream
+members, and `MSG` adds only a conservative tag bound. `boomerang_runtime`
+remains unaware of these protocol and RTI details.
 
 Outbound payloads leave a scheduler through generated federated sender
 reactions. Codec and sink failures are published to that source federate's
@@ -190,12 +194,17 @@ messages for the completed tag.
 
 Inbound payloads arrive as protocol `MSG` frames from the RTI. The barrier
 schedules them through its federate-local `FederatedInboundEndpointRegistry`,
-returns the queued `AsyncEvent` to the scheduler, and sends one `MsgAck` after
-successful queueing. A barrier cannot dispatch an endpoint belonging to another
-federate because that handler is absent from its bundle.
-`MsgAck` decrements exactly one matching in-transit message. The scheduler sends
-the distinct `LTC` frame only after reactions at that tag complete; `LTC` does
-not acknowledge delivery or clear in-transit counts.
+and returns the queued `AsyncEvent` to the scheduler before reading a later RTI
+frame. A barrier cannot dispatch an endpoint belonging to another federate
+because that handler is absent from its bundle. Any failure before queue
+admission makes the barrier terminal, so it cannot consume a later `TAG`.
+
+The RTI records one ordered-set entry for each distinct target tag later than
+the target's completion watermark. Multiple same-tag messages share that entry.
+The scheduler sends `LTC` only after reactions at that tag complete; the RTI
+then removes every recorded tag through the completion watermark and
+reevaluates the member and its transitive downstream work set. No per-payload
+acknowledgment frame or message count is used.
 
 Shutdown uses no-future information. A federate that has no future local events
 sends `NET(FOREVER)` before `Stop`. The RTI records this as no-future state for
@@ -235,7 +244,7 @@ fanout, and positive-delay cycles.
 `boomerang_federated/src/session.rs` cover RTI and protocol ordering without
 running full schedulers, including authenticated failure-atomic transitions,
 targeted work sets, same-tag messages, microstep progression, multi-hop grant
-dependencies, and grant blocking behind in-transit messages.
+dependencies, transitive minimum-delay bounds, and LTC-cleared in-transit tags.
 
 The ignored TCP smoke in `boomerang_federated/src/transport.rs` remains a
 narrow protocol-level test of the shared RTI session and client, including

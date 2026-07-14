@@ -65,12 +65,8 @@ pub type PartitionMap = SecondaryMap<AssemblyReactorKey, AssemblyReactorKey>;
 pub struct LoweredFederation {
     /// Assembly-visible federate, edge, and endpoint metadata.
     pub plan: FederationPlan,
-    /// Validated RTI topology and its precomputed coordination indexes.
-    pub(crate) topology: boomerang_federated::CompiledTopology,
-    /// Runtime enclave assigned to each protocol federate identity.
-    pub(crate) federate_enclaves: BTreeMap<boomerang_federated::FederateId, runtime::EnclaveKey>,
-    /// Prebuilt protocol mailboxes, routes, inbound handlers, and fault state.
-    pub(crate) connections: boomerang_federated::FederatedRuntimeConnections,
+    /// Federation-specific runtime state consumed after lowering.
+    pub runtime: boomerang_federated::StaticFederationRuntime,
 }
 
 /// Federation artifacts created before runtime enclave keys have been allocated.
@@ -128,13 +124,12 @@ impl RuntimeAssembly {
         let federation = federation
             .map(|federation| -> Result<LoweredFederation, AssemblyError> {
                 Ok(LoweredFederation {
-                    federate_enclaves: lower_federate_enclaves(
-                        &federation.plan,
-                        &aliases.enclave_aliases,
-                    )?,
+                    runtime: boomerang_federated::StaticFederationRuntime::new(
+                        federation.topology,
+                        lower_federate_enclaves(&federation.plan, &aliases.enclave_aliases)?,
+                        federation.connections,
+                    ),
                     plan: federation.plan,
-                    topology: federation.topology,
-                    connections: federation.connections,
                 })
             })
             .transpose()?;
@@ -763,22 +758,24 @@ impl Assembly {
             return Ok(());
         }
         let mut connections = std::mem::take(
-            &mut runtime_assembly
+            runtime_assembly
                 .federation
                 .as_mut()
                 .ok_or_else(|| AssemblyError::InconsistentAssemblyState {
                     what: "federated inbound endpoints exist without a lowered federation".into(),
                 })?
-                .connections,
+                .runtime
+                .connections_mut(),
         );
         for endpoint_factory in self.federated_inbound_endpoint_factories.drain(..) {
             endpoint_factory(runtime_assembly, &mut connections)?;
         }
-        runtime_assembly
+        *runtime_assembly
             .federation
             .as_mut()
             .expect("lowered federation was checked before endpoint construction")
-            .connections = connections;
+            .runtime
+            .connections_mut() = connections;
         Ok(())
     }
 

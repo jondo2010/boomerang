@@ -156,17 +156,3 @@ impl From<boomerang_federated::FederateClientError> for AssemblyError {
         }
     }
 }
-
-#[cfg(feature = "federated")]
-impl From<boomerang_federated::StaticFederationRunnerError> for AssemblyError {
-    fn from(error: boomerang_federated::StaticFederationRunnerError) -> Self {
-        match error {
-            boomerang_federated::StaticFederationRunnerError::UnsupportedTopology { what } => {
-                Self::UnsupportedFederationTopology { what }
-            }
-            error => Self::FederationBridgeError {
-                what: error.to_string(),
-            },
-        }
-    }
-}

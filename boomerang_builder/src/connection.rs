@@ -563,7 +563,8 @@ fn build_federated_connection_source<T: runtime::ReactorData + Clone>(
                 .federation
                 .as_ref()
                 .expect("federated sender exists only in a lowered federation")
-                .connections
+                .runtime
+                .connections()
                 .outbound_endpoint(&endpoint)
                 .expect("federated endpoint sink was validated before deferred lowering");
             runtime::FederatedSenderReactionFn::<T>::new(

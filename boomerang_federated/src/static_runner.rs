@@ -21,16 +21,49 @@ use crate::{
     RtiSessionEndpoint, SessionError, StaticRtiSession, TransportError,
 };
 
-/// Runtime parts required to execute one static federation.
-pub struct StaticFederationRuntimeParts {
+/// Fully lowered federation-specific state required by a static runner.
+pub struct StaticFederationRuntime {
     /// Validated RTI topology and its precomputed coordination indexes.
-    pub topology: CompiledTopology,
+    topology: CompiledTopology,
     /// Runtime enclave assigned to each protocol federate identity.
-    pub federate_enclaves: BTreeMap<FederateId, boomerang_runtime::EnclaveKey>,
-    /// Fully lowered runtime enclaves to execute under federated coordination.
-    pub enclaves: tinymap::TinyMap<boomerang_runtime::EnclaveKey, boomerang_runtime::Enclave>,
+    federate_enclaves: BTreeMap<FederateId, boomerang_runtime::EnclaveKey>,
     /// Prebuilt protocol mailboxes, routes, inbound handlers, and fault state.
-    pub connections: crate::FederatedRuntimeConnections,
+    connections: crate::FederatedRuntimeConnections,
+}
+
+impl StaticFederationRuntime {
+    /// Create static runner state from artifacts produced during lowering.
+    pub fn new(
+        topology: CompiledTopology,
+        federate_enclaves: BTreeMap<FederateId, boomerang_runtime::EnclaveKey>,
+        connections: crate::FederatedRuntimeConnections,
+    ) -> Self {
+        Self {
+            topology,
+            federate_enclaves,
+            connections,
+        }
+    }
+
+    /// Return the validated topology and its precomputed coordination indexes.
+    pub fn topology(&self) -> &CompiledTopology {
+        &self.topology
+    }
+
+    /// Return the runtime enclave assigned to each protocol federate identity.
+    pub fn federate_enclaves(&self) -> &BTreeMap<FederateId, boomerang_runtime::EnclaveKey> {
+        &self.federate_enclaves
+    }
+
+    /// Return the prebuilt runtime connections.
+    pub fn connections(&self) -> &crate::FederatedRuntimeConnections {
+        &self.connections
+    }
+
+    /// Return mutable access to the prebuilt runtime connections during lowering.
+    pub fn connections_mut(&mut self) -> &mut crate::FederatedRuntimeConnections {
+        &mut self.connections
+    }
 }
 
 /// TCP listener configuration for the single-process static federation runner.
@@ -138,7 +171,8 @@ pub enum StaticFederationRunnerError {
     },
 }
 
-type FederationEnvs =
+/// Final runtime environments returned for each executed enclave.
+pub type FederationEnvs =
     tinymap::TinySecondaryMap<boomerang_runtime::EnclaveKey, boomerang_runtime::Env>;
 type SessionHandle = tokio::task::JoinHandle<Result<(), SessionError>>;
 type SchedulerThreadResult = (
@@ -172,12 +206,13 @@ struct ConnectedFederate {
     faults: boomerang_runtime::FederatedFaultState,
 }
 
-/// Execute a static federation in memory using the real RTI session and federate clients.
-pub fn execute_federation_in_memory(
-    parts: StaticFederationRuntimeParts,
+/// Run a lowered static federation in memory using the real RTI session and federate clients.
+pub fn run_in_memory(
+    runtime: StaticFederationRuntime,
+    enclaves: tinymap::TinyMap<boomerang_runtime::EnclaveKey, boomerang_runtime::Enclave>,
     config: boomerang_runtime::Config,
 ) -> Result<FederationEnvs, StaticFederationRunnerError> {
-    let (prepared, connections) = prepare_static_federation(parts)?;
+    let (prepared, connections) = prepare_static_federation(runtime, enclaves)?;
     validate_static_runner_config(&config)?;
     let tokio_runtime = build_tokio_runtime(prepared.federate_enclaves.len())?;
     let mut session_endpoints = BTreeMap::new();
@@ -205,14 +240,15 @@ pub fn execute_federation_in_memory(
     execute_connected_static_federation(prepared, config, &tokio_runtime, session_handle, clients)
 }
 
-/// Execute a static federation over TCP using the shared RTI session and federate clients.
+/// Run a lowered static federation over TCP using the shared RTI session and federate clients.
 #[cfg(feature = "serde-json-codec")]
-pub fn execute_federation_over_tcp(
-    parts: StaticFederationRuntimeParts,
+pub fn run_over_tcp(
+    runtime: StaticFederationRuntime,
+    enclaves: tinymap::TinyMap<boomerang_runtime::EnclaveKey, boomerang_runtime::Enclave>,
     config: boomerang_runtime::Config,
     tcp: TcpStaticFederationConfig,
 ) -> Result<FederationEnvs, StaticFederationRunnerError> {
-    let (prepared, connections) = prepare_static_federation(parts)?;
+    let (prepared, connections) = prepare_static_federation(runtime, enclaves)?;
     validate_static_runner_config(&config)?;
     let tokio_runtime = build_tokio_runtime(prepared.federate_enclaves.len())?;
     let listener = tokio_runtime
@@ -264,19 +300,19 @@ pub fn execute_federation_over_tcp(
 }
 
 fn prepare_static_federation(
-    parts: StaticFederationRuntimeParts,
+    runtime: StaticFederationRuntime,
+    enclaves: tinymap::TinyMap<boomerang_runtime::EnclaveKey, boomerang_runtime::Enclave>,
 ) -> Result<
     (PreparedStaticFederation, crate::FederatedRuntimeConnections),
     StaticFederationRunnerError,
 > {
-    validate_static_runner_parts(&parts)?;
+    validate_static_runner_runtime(&runtime)?;
 
-    let StaticFederationRuntimeParts {
+    let StaticFederationRuntime {
         topology,
         federate_enclaves,
-        enclaves,
         connections,
-    } = parts;
+    } = runtime;
     let federate_by_enclave = federate_by_enclave_map(&federate_enclaves)?;
 
     for (enclave_key, enclave) in enclaves.iter() {
@@ -584,13 +620,13 @@ impl boomerang_runtime::FederatedTimeBarrier for SharedFederatedTimeBarrier {
     }
 }
 
-fn validate_static_runner_parts(
-    parts: &StaticFederationRuntimeParts,
+fn validate_static_runner_runtime(
+    runtime: &StaticFederationRuntime,
 ) -> Result<(), StaticFederationRunnerError> {
-    let topology = parts.topology.topology();
+    let topology = runtime.topology.topology();
     if topology.federates.is_empty()
         || topology.edges.is_empty()
-        || parts.connections.routes().next().is_none()
+        || runtime.connections.routes().next().is_none()
     {
         return Err(unsupported_topology(
             "static federation runner requires a non-empty federation topology with at least one cross-federate endpoint",
@@ -611,7 +647,7 @@ fn validate_static_runner_parts(
         }
     }
 
-    for federate_id in parts.federate_enclaves.keys() {
+    for federate_id in runtime.federate_enclaves.keys() {
         if !federates.contains(federate_id) {
             return Err(bridge_error(format!(
                 "federate '{federate_id}' has a runtime enclave but is missing from topology"
@@ -620,22 +656,22 @@ fn validate_static_runner_parts(
     }
 
     for federate_id in &topology.federates {
-        if !parts.federate_enclaves.contains_key(federate_id) {
+        if !runtime.federate_enclaves.contains_key(federate_id) {
             return Err(unsupported_topology(format!(
                 "federate '{federate_id}' has no runtime enclave"
             )));
         }
     }
 
-    if parts.connections.len() != federates.len() {
+    if runtime.connections.len() != federates.len() {
         return Err(bridge_error(format!(
             "prebuilt runtime connection count {} does not match topology federate count {}",
-            parts.connections.len(),
+            runtime.connections.len(),
             federates.len()
         )));
     }
     for federate_id in &topology.federates {
-        if !parts.connections.contains_federate(federate_id) {
+        if !runtime.connections.contains_federate(federate_id) {
             return Err(bridge_error(format!(
                 "federate '{federate_id}' is missing its prebuilt runtime connection"
             )));
@@ -670,7 +706,7 @@ fn validate_static_runner_parts(
     }
 
     let mut route_endpoints = BTreeSet::new();
-    for route in parts.connections.routes() {
+    for route in runtime.connections.routes() {
         if route.endpoint.as_str().trim().is_empty() {
             return Err(bridge_error(
                 "federation route contains an empty endpoint id",
@@ -761,7 +797,10 @@ fn bridge_error(what: impl Into<String>) -> StaticFederationRunnerError {
 mod tests {
     use super::*;
 
-    fn valid_empty_static_parts() -> StaticFederationRuntimeParts {
+    fn valid_empty_static_runtime() -> (
+        StaticFederationRuntime,
+        tinymap::TinyMap<boomerang_runtime::EnclaveKey, boomerang_runtime::Enclave>,
+    ) {
         let source = FederateId::new("source");
         let sink = FederateId::new("sink");
         let endpoint = crate::EndpointId::new("source.out->sink.in");
@@ -770,8 +809,8 @@ mod tests {
         let sink_enclave = enclaves.insert(boomerang_runtime::Enclave::default());
 
         let route = FederateClientRoute::new(endpoint.clone(), source.clone(), sink.clone());
-        StaticFederationRuntimeParts {
-            topology: CompiledTopology::new(FederatedTopology::with_edges(
+        let runtime = StaticFederationRuntime::new(
+            CompiledTopology::new(FederatedTopology::with_edges(
                 [source.clone(), sink.clone()],
                 [crate::TopologyEdge::new(
                     source.clone(),
@@ -781,22 +820,20 @@ mod tests {
                 )],
             ))
             .unwrap(),
-            federate_enclaves: BTreeMap::from([
+            BTreeMap::from([
                 (source.clone(), source_enclave),
                 (sink.clone(), sink_enclave),
             ]),
-            enclaves,
-            connections: crate::FederatedRuntimeConnections::new([source, sink], [route]).unwrap(),
-        }
+            crate::FederatedRuntimeConnections::new([source, sink], [route]).unwrap(),
+        );
+        (runtime, enclaves)
     }
 
     #[test]
     fn unsupported_configuration_rejects_wall_clock_static_federation() {
-        let error = execute_federation_in_memory(
-            valid_empty_static_parts(),
-            boomerang_runtime::Config::default(),
-        )
-        .expect_err("wall-clock static federation must be rejected");
+        let (runtime, enclaves) = valid_empty_static_runtime();
+        let error = run_in_memory(runtime, enclaves, boomerang_runtime::Config::default())
+            .expect_err("wall-clock static federation must be rejected");
 
         assert!(matches!(
             error,
@@ -805,8 +842,10 @@ mod tests {
                     && what.contains("common physical start")
         ));
 
-        execute_federation_in_memory(
-            valid_empty_static_parts(),
+        let (runtime, enclaves) = valid_empty_static_runtime();
+        run_in_memory(
+            runtime,
+            enclaves,
             boomerang_runtime::Config::default().with_fast_forward(true),
         )
         .expect("fast-forward static federation should pass configuration validation");
@@ -814,12 +853,13 @@ mod tests {
 
     #[test]
     fn prebuilt_runtime_connections_are_required_before_runner_startup() {
-        let mut parts = valid_empty_static_parts();
+        let (mut runtime, enclaves) = valid_empty_static_runtime();
         let source = FederateId::new("source");
-        parts.connections.take_federate(&source).unwrap();
+        runtime.connections_mut().take_federate(&source).unwrap();
 
-        let error = execute_federation_in_memory(
-            parts,
+        let error = run_in_memory(
+            runtime,
+            enclaves,
             boomerang_runtime::Config::default().with_fast_forward(true),
         )
         .expect_err("runner must not recreate a missing lowered mailbox");
@@ -860,18 +900,22 @@ mod tests {
     #[cfg(feature = "serde-json-codec")]
     #[test]
     fn tcp_runner_validates_parts_before_binding() {
-        let parts = StaticFederationRuntimeParts {
-            topology: CompiledTopology::new(FederatedTopology::default()).unwrap(),
-            federate_enclaves: BTreeMap::new(),
-            enclaves: tinymap::TinyMap::new(),
-            connections: crate::FederatedRuntimeConnections::new([], []).unwrap(),
-        };
+        let runtime = StaticFederationRuntime::new(
+            CompiledTopology::new(FederatedTopology::default()).unwrap(),
+            BTreeMap::new(),
+            crate::FederatedRuntimeConnections::new([], []).unwrap(),
+        );
         let tcp = TcpStaticFederationConfig {
             bind_addr: SocketAddr::from(([203, 0, 113, 1], 1)),
         };
 
-        let error = execute_federation_over_tcp(parts, boomerang_runtime::Config::default(), tcp)
-            .expect_err("invalid runtime parts must fail before TCP bind");
+        let error = run_over_tcp(
+            runtime,
+            tinymap::TinyMap::new(),
+            boomerang_runtime::Config::default(),
+            tcp,
+        )
+        .expect_err("invalid runtime parts must fail before TCP bind");
 
         assert!(matches!(
             error,
@@ -887,12 +931,9 @@ mod tests {
             bind_addr: SocketAddr::from(([203, 0, 113, 1], 1)),
         };
 
-        let error = execute_federation_over_tcp(
-            valid_empty_static_parts(),
-            boomerang_runtime::Config::default(),
-            tcp,
-        )
-        .expect_err("unsupported configuration must fail before TCP bind");
+        let (runtime, enclaves) = valid_empty_static_runtime();
+        let error = run_over_tcp(runtime, enclaves, boomerang_runtime::Config::default(), tcp)
+            .expect_err("unsupported configuration must fail before TCP bind");
 
         assert!(matches!(
             error,

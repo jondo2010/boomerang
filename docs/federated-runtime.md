@@ -31,17 +31,19 @@ wire frame types.
 `boomerang_federated` owns the protocol and orchestration layer. It defines wire
 types, `RtiState`, `StaticRtiSession`, `FederateProtocolClient`,
 `RtiFederatedTimeBarrier`, in-memory and TCP protocol transports, and
-`static_runner::execute_federation_in_memory` and
-`static_runner::execute_federation_over_tcp`.
+`StaticFederationRuntime` plus the transport-specific `static_runner::run_*`
+functions.
 
 `boomerang_builder` owns topology validation and lowering. It turns assembly
 metadata into a `FederationPlan`, validates unsupported topology shapes, lowers
-the RTI's immutable `CompiledTopology`, and packages `RuntimeAssembly` into
-`boomerang_federated::StaticFederationRuntimeParts`,
-and exposes thin assembly-facing `execute_federation_in_memory` and
-`execute_federation_over_tcp` shims.
+the RTI's immutable `CompiledTopology`, and returns `RuntimeAssembly` with a
+federated-owned `StaticFederationRuntime`. It contains no production execution
+entry point or runner-error conversion.
 
-The top-level `boomerang` crate should only re-export public APIs.
+The top-level `boomerang` crate owns the application-facing
+`execute_federation_in_memory` and `execute_federation_over_tcp` functions. They
+separate generic runtime enclaves from the federation-specific runtime and
+delegate to `boomerang_federated` without calling back into the builder.
 
 ## Shared Execution Flow
 
@@ -143,10 +145,9 @@ terminal fault state. Deferred reaction construction attaches the final
 endpoint-specific outbound sink and registers every inbound handler before
 these parts are returned.
 
-The assembly-facing execution functions consume the already-resolved
-federate-to-enclave map, compiled topology, runtime enclaves, and connections
-into `StaticFederationRuntimeParts`. They then delegate to the matching function
-in `boomerang_federated::static_runner`.
+The facade execution functions consume the already-resolved
+`StaticFederationRuntime` and the generic runtime enclaves. They then delegate
+to the matching `run_*` function in `boomerang_federated::static_runner`.
 
 The static runner first validates and prepares transport-independent runtime
 parts, then rejects configurations without `Config::with_fast_forward(true)`.
@@ -175,7 +176,7 @@ Builder lowering asks `boomerang_federated::CompiledTopology` to validate the
 static manifest and produce ordered immediate and transitive dependencies,
 minimum cumulative path delays, downstream work sets, and exact route keys.
 `RuntimeAssembly::federation` carries that artifact inside its
-`LoweredFederation` through `StaticFederationRuntimeParts` to
+`LoweredFederation` and federated-owned `StaticFederationRuntime` to
 `StaticRtiSession`; RTI startup does not recompute it. Raw-topology session
 constructors remain as a convenience for callers outside the builder and
 compile once at their configuration boundary. The session calls
@@ -246,7 +247,9 @@ observes `[(Tag::ZERO, 7)]`.
 
 `boomerang_builder/src/tests/federated.rs` contains assembly and live in-memory
 coverage for topology lowering, rejection behavior, three-federate chains,
-fanout, and positive-delay cycles.
+fanout, and positive-delay cycles. Its live tests invoke the federated runner
+through a test-only helper; no production execution function resides in the
+builder crate.
 
 `boomerang_federated/src/rti/tests.rs` and
 `boomerang_federated/src/session.rs` cover RTI and protocol ordering without

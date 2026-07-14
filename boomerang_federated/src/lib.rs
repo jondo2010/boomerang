@@ -32,9 +32,9 @@ pub use rti::{CompiledTopology, RtiDelivery, RtiError, RtiState};
 pub use runtime_bridge::{FederatedRuntimeConnections, RuntimeBridgeError};
 pub use session::{RtiSessionEndpoint, SessionError, StaticRtiSession};
 #[cfg(all(feature = "runtime", feature = "serde-json-codec"))]
-pub use static_runner::{execute_federation_over_tcp, TcpStaticFederationConfig};
+pub use static_runner::TcpStaticFederationConfig;
 #[cfg(feature = "runtime")]
-pub use static_runner::{StaticFederationRunnerError, StaticFederationRuntimeParts};
+pub use static_runner::{StaticFederationRunnerError, StaticFederationRuntime};
 pub use transport::{
     in_memory_transport_pair, InMemoryFrameSink, InMemoryFrameStream, InMemoryTransport,
     TransportError,

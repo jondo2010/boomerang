@@ -263,54 +263,6 @@ pub fn federated_routes_from_plan(
     Ok(routes)
 }
 
-/// Execute a static federation in memory using the real RTI session and federate clients.
-///
-/// This is an explicit federated execution path. It does not replace
-/// [`runtime::execute_enclaves`], which remains local-only.
-pub fn execute_federation_in_memory(
-    parts: crate::RuntimeAssembly,
-    config: runtime::Config,
-) -> Result<tinymap::TinySecondaryMap<runtime::EnclaveKey, runtime::Env>, AssemblyError> {
-    let runtime_parts = parts.try_into_static_federation_parts()?;
-    boomerang_federated::static_runner::execute_federation_in_memory(runtime_parts, config)
-        .map_err(AssemblyError::from)
-}
-
-/// Execute a static federation over TCP using the real RTI session and federate clients.
-///
-/// This is a single-process runner that connects each federate scheduler to a runner-owned TCP
-/// listener. It does not replace [`execute_federation_in_memory`] or
-/// [`runtime::execute_enclaves`].
-pub fn execute_federation_over_tcp(
-    parts: crate::RuntimeAssembly,
-    config: runtime::Config,
-    tcp: boomerang_federated::TcpStaticFederationConfig,
-) -> Result<tinymap::TinySecondaryMap<runtime::EnclaveKey, runtime::Env>, AssemblyError> {
-    let runtime_parts = parts.try_into_static_federation_parts()?;
-    boomerang_federated::execute_federation_over_tcp(runtime_parts, config, tcp)
-        .map_err(AssemblyError::from)
-}
-
-impl crate::RuntimeAssembly {
-    /// Consume this lowered assembly and project it into static-runner-owned parts.
-    fn try_into_static_federation_parts(
-        self,
-    ) -> Result<boomerang_federated::StaticFederationRuntimeParts, AssemblyError> {
-        let federation =
-            self.federation
-                .ok_or_else(|| AssemblyError::UnsupportedFederationTopology {
-                    what: "static federation runner requires a lowered federation".into(),
-                })?;
-
-        Ok(boomerang_federated::StaticFederationRuntimeParts {
-            topology: federation.topology,
-            federate_enclaves: federation.federate_enclaves,
-            enclaves: self.enclaves,
-            connections: federation.connections,
-        })
-    }
-}
-
 fn checked_federate_id_set(plan: &FederationPlan) -> Result<BTreeSet<String>, AssemblyError> {
     let mut federate_ids = BTreeSet::new();
     for federate in &plan.federates {

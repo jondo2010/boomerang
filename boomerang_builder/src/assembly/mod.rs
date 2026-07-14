@@ -37,6 +37,8 @@ mod debug;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "federated")]
+pub use build::LoweredFederation;
 pub use build::{DeferredRuntimeFactory, EnclaveDep, PartitionMap, RuntimeAssembly};
 
 #[cfg(feature = "federated")]
@@ -736,7 +738,14 @@ impl Assembly {
                 let context = enclave.create_send_context(enclave_key);
                 let action_ref = enclave.create_async_action_ref(runtime_action_key);
                 let target_federate = runtime_assembly
-                    .federation_plan
+                    .federation
+                    .as_ref()
+                    .ok_or_else(|| {
+                        AssemblyError::InternalError(format!(
+                            "missing lowered federation for inbound endpoint {endpoint}"
+                        ))
+                    })?
+                    .plan
                     .federates
                     .iter()
                     .find(|federate| federate.reactor == target_partition)

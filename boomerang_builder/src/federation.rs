@@ -277,25 +277,29 @@ fn static_federation_runtime_parts(
 ) -> Result<boomerang_federated::StaticFederationRuntimeParts, AssemblyError> {
     validate_static_runner_plan(&parts)?;
 
-    let topology = parts.compiled_federation_topology.take().ok_or_else(|| {
-        AssemblyError::InconsistentAssemblyState {
-            what: "federated runtime assembly is missing its compiled RTI topology".into(),
-        }
-    })?;
     let (federate_enclaves, _federate_by_enclave) = federate_enclave_maps(&parts)?;
+    let federation = parts
+        .federation
+        .take()
+        .expect("static runner plan validation requires a lowered federation");
 
     Ok(boomerang_federated::StaticFederationRuntimeParts {
-        topology,
+        topology: federation.topology,
         federate_enclaves,
         enclaves: parts.enclaves,
-        connections: parts.federated_connections,
+        connections: federation.connections,
     })
 }
 
 fn validate_static_runner_plan(parts: &crate::RuntimeAssembly) -> Result<(), AssemblyError> {
-    if parts.federation_plan.federates.is_empty()
-        || parts.federation_plan.edges.is_empty()
-        || parts.federation_plan.endpoints.is_empty()
+    let Some(federation) = &parts.federation else {
+        return Err(AssemblyError::UnsupportedFederationTopology {
+            what: "static federation runner requires a lowered federation".into(),
+        });
+    };
+    if federation.plan.federates.is_empty()
+        || federation.plan.edges.is_empty()
+        || federation.plan.endpoints.is_empty()
     {
         return Err(AssemblyError::UnsupportedFederationTopology {
             what: "static federation runner requires a non-empty federation plan with at least one cross-federate endpoint".into(),
@@ -335,7 +339,14 @@ fn federate_enclave_maps(
     let mut federate_enclaves = BTreeMap::new();
     let mut federate_by_enclave = tinymap::TinySecondaryMap::new();
 
-    for federate in &parts.federation_plan.federates {
+    let federation =
+        parts
+            .federation
+            .as_ref()
+            .ok_or_else(|| AssemblyError::InconsistentAssemblyState {
+                what: "federate enclave mapping requires a lowered federation".into(),
+            })?;
+    for federate in &federation.plan.federates {
         let enclave_key = *parts
             .aliases
             .enclave_aliases

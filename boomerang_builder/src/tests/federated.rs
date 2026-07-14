@@ -27,12 +27,16 @@ struct FederatedOutboundCapture {
 
 impl FederatedOutboundCapture {
     fn take(parts: &mut RuntimeAssembly) -> Self {
-        assert_eq!(parts.federation_plan.endpoints.len(), 1);
+        let federation = parts
+            .federation
+            .as_mut()
+            .expect("federated assembly must contain lowered federation data");
+        assert_eq!(federation.plan.endpoints.len(), 1);
         let source = boomerang_federated::FederateId::new(
-            parts.federation_plan.endpoints[0].source_federate.clone(),
+            federation.plan.endpoints[0].source_federate.clone(),
         );
-        let mailbox = parts
-            .federated_connections
+        let mailbox = federation
+            .connections
             .take_mailbox(&source)
             .expect("source federate mailbox was created during lowering");
         Self { mailbox }
@@ -473,10 +477,12 @@ fn run_in_memory_federated_source_sink(
     let RuntimeAssembly {
         enclaves,
         aliases,
-        federation_plan,
-        federated_connections,
+        federation,
         ..
     } = parts;
+    let federation = federation.expect("source/sink lowering must produce a federation");
+    let federation_plan = federation.plan;
+    let federated_connections = federation.connections;
 
     let source_reactor = federation_plan
         .federates
@@ -697,7 +703,10 @@ fn run_live_in_memory_positive_delay_cycle() -> RecordedValuePair {
 fn build_federated_source_sink_plan(
     after: Option<runtime::Duration>,
 ) -> Result<FederationPlan, AssemblyError> {
-    Ok(build_federated_source_sink_parts(after)?.federation_plan)
+    Ok(build_federated_source_sink_parts(after)?
+        .federation
+        .expect("source/sink lowering must produce a federation")
+        .plan)
 }
 
 fn build_federated_source_sink_parts(
@@ -733,7 +742,11 @@ fn test_add_child_federate_sets_enclave_compatible_placement() {
 #[test]
 fn test_federated_source_sink_topology_plan() {
     let parts = build_federated_source_sink_parts(None).unwrap();
-    let plan = &parts.federation_plan;
+    let federation = parts
+        .federation
+        .as_ref()
+        .expect("source/sink lowering must produce a federation");
+    let plan = &federation.plan;
 
     assert_eq!(plan.federates.len(), 2);
     assert_eq!(
@@ -773,14 +786,7 @@ fn test_federated_source_sink_topology_plan() {
         topology.edges[0].delay,
         boomerang_federated::WireDelay::ZERO
     );
-    assert_eq!(
-        parts
-            .compiled_federation_topology
-            .as_ref()
-            .expect("lowering must compile the RTI topology")
-            .topology(),
-        &topology
-    );
+    assert_eq!(federation.topology.topology(), &topology);
 
     let routes = federated_routes_from_plan(plan).unwrap();
     assert_eq!(routes.len(), 1);
@@ -1111,8 +1117,7 @@ fn test_local_cross_enclave_connection_does_not_require_federated_codec() {
     assert_eq!(boundary.source_port, source.into());
     assert_eq!(boundary.target_port, sink.into());
     assert!(!boundary.physical);
-    assert!(parts.federation_plan.is_empty());
-    assert!(parts.federated_connections.is_empty());
+    assert!(parts.federation.is_none());
     assert!(parts.enclaves.values().any(|enclave| {
         !enclave.upstream_enclaves.is_empty() || !enclave.downstream_enclaves.is_empty()
     }));
@@ -1136,11 +1141,15 @@ fn test_federated_connection_lowers_endpoint_runtime_parts() {
         .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
 
-    assert_eq!(parts.federation_plan.endpoints.len(), 1);
+    let federation = parts
+        .federation
+        .as_ref()
+        .expect("federated connection lowering must produce a federation");
+    assert_eq!(federation.plan.endpoints.len(), 1);
     let sink = boomerang_federated::FederateId::new("sink");
     assert_eq!(
-        parts
-            .federated_connections
+        federation
+            .connections
             .inbound_endpoints(&sink)
             .unwrap()
             .len(),
@@ -1220,12 +1229,14 @@ fn test_federated_inbound_registry_schedules_target_action() {
 
     let RuntimeAssembly {
         enclaves,
-        federated_connections,
+        federation,
         ..
     } = assembly
         .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
 
+    let federation = federation.expect("federated lowering must produce a federation");
+    let federated_connections = federation.connections;
     let endpoint = boomerang_federated::EndpointId::new("main/source/out->main/sink/in");
     let sink = boomerang_federated::FederateId::new("sink");
     let endpoint_key = federated_connections

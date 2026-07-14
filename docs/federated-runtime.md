@@ -54,7 +54,7 @@ static runners.
 ```mermaid
 flowchart LR
     AssemblyModel["Assembly<br/>reactors, ports, connections"]
-    Parts["RuntimeAssembly<br/>ready-to-run enclaves, plan,<br/>per-federate connection bundles"]
+    Parts["RuntimeAssembly<br/>ready-to-run enclaves + optional<br/>LoweredFederation aggregate"]
     Runner["Static federation runner<br/>validates and connects transports"]
 
     AssemblyModel -->|lower| Parts
@@ -133,16 +133,17 @@ unmapped enclaves, such as a structural root with no reactions, are skipped by
 the runner. Non-empty unmapped enclaves are rejected.
 
 `Assembly::into_runtime_assembly` produces `RuntimeAssembly` containing the
-runtime enclaves, assembly-to-runtime aliases, inter-partition metadata, the federation
-plan, and one complete runtime connection bundle per federate. Each bundle owns
-the prebuilt protocol mailbox, routes targeting that federate, only that
-federate's typed inbound endpoint handlers, and the source-local terminal fault
-state. Deferred reaction construction attaches the final endpoint-specific
-outbound sink and registers every inbound handler before these parts are
-returned.
+runtime enclaves, assembly-to-runtime aliases, inter-partition metadata, and an
+optional `LoweredFederation`. A present aggregate owns the federation plan, the
+compiled RTI topology, and one complete runtime connection bundle per federate;
+a local-only assembly has no aggregate. Each bundle owns the prebuilt protocol
+mailbox, routes targeting that federate, only that federate's typed inbound
+endpoint handlers, and the source-local terminal fault state. Deferred reaction
+construction attaches the final endpoint-specific outbound sink and registers
+every inbound handler before these parts are returned.
 
-The assembly-facing execution functions validate the assembly-owned plan, create
-the `FederatedTopology` and federate-to-enclave map, and move the already-built
+The assembly-facing execution functions validate the assembly-owned plan,
+create the federate-to-enclave map, and move the already-compiled topology and
 runtime connections into `StaticFederationRuntimeParts`. They then delegate to
 the matching function in `boomerang_federated::static_runner`.
 
@@ -172,8 +173,9 @@ frames and the subsequent `LTC` frame enter one FIFO queue in program order.
 Builder lowering asks `boomerang_federated::CompiledTopology` to validate the
 static manifest and produce ordered immediate and transitive dependencies,
 minimum cumulative path delays, downstream work sets, and exact route keys.
-`RuntimeAssembly` carries that artifact through `StaticFederationRuntimeParts`
-to `StaticRtiSession`; RTI startup does not recompute it. Raw-topology session
+`RuntimeAssembly::federation` carries that artifact inside its
+`LoweredFederation` through `StaticFederationRuntimeParts` to
+`StaticRtiSession`; RTI startup does not recompute it. Raw-topology session
 constructors remain as a convenience for callers outside the builder and
 compile once at their configuration boundary. The session calls
 `RtiState::handle_from` with the authenticated connection identity

@@ -42,9 +42,9 @@ pub enum FederateClientError {
 
     #[cfg(feature = "runtime")]
     #[error(
-        "federated scheduler barrier is terminal after an earlier protocol or admission failure"
+        "RTI logical-time coordinator is terminal after an earlier protocol or admission failure"
     )]
-    BarrierFailed,
+    CoordinationFailed,
 
     #[error("federate protocol client is closed")]
     ClientClosed,
@@ -381,10 +381,10 @@ impl FederateClientRoute {
     }
 }
 
-/// Federated scheduler barrier for one federate runtime enclave.
+/// RTI-backed logical-time coordinator for one federate runtime enclave.
 #[cfg(feature = "runtime")]
 #[derive(Debug)]
-pub struct RtiFederatedTimeBarrier {
+pub struct RtiLogicalTimeCoordinator {
     /// Stable protocol identity used for outgoing frames and inbound route validation.
     federate_id: FederateId,
     /// Persistent ordered protocol connection to the RTI.
@@ -397,7 +397,7 @@ pub struct RtiFederatedTimeBarrier {
     last_granted: Option<boomerang_runtime::Tag>,
     /// Successfully queued `NET` request still awaiting a sufficient `TAG` response.
     pending_request: Option<WireTag>,
-    /// Whether this barrier has entered its terminal stopped state.
+    /// Whether this coordinator has entered its terminal stopped state.
     stopped: bool,
     /// Whether an earlier protocol, transport, or admission error made further grants unsafe.
     failed: bool,
@@ -406,8 +406,8 @@ pub struct RtiFederatedTimeBarrier {
 }
 
 #[cfg(feature = "runtime")]
-impl RtiFederatedTimeBarrier {
-    /// Create a scheduler barrier for one federate runtime enclave.
+impl RtiLogicalTimeCoordinator {
+    /// Create an RTI coordinator for one federate runtime enclave.
     /// Route metadata binds runtime endpoints to source and target federates.
     #[tracing::instrument(
         level = "debug",
@@ -457,7 +457,7 @@ impl RtiFederatedTimeBarrier {
             return Err(FederateClientError::RtiStopped);
         }
         if self.failed {
-            return Err(FederateClientError::BarrierFailed);
+            return Err(FederateClientError::CoordinationFailed);
         }
         if self
             .last_granted
@@ -557,7 +557,7 @@ impl RtiFederatedTimeBarrier {
         tag: boomerang_runtime::Tag,
     ) -> Result<(), FederateClientError> {
         if self.failed {
-            return Err(FederateClientError::BarrierFailed);
+            return Err(FederateClientError::CoordinationFailed);
         }
         if let Err(error) = self.check_runtime_fault() {
             return self.fail(error);
@@ -682,27 +682,26 @@ impl RtiFederatedTimeBarrier {
 }
 
 #[cfg(feature = "runtime")]
-impl boomerang_runtime::FederatedTimeBarrier for RtiFederatedTimeBarrier {
-    fn acquire_tag(
+impl boomerang_runtime::LogicalTimeCoordinator for RtiLogicalTimeCoordinator {
+    fn acquire(
         &mut self,
         tag: boomerang_runtime::Tag,
         event_rx: &boomerang_runtime::Receiver<boomerang_runtime::AsyncEvent>,
-    ) -> Result<boomerang_runtime::FederatedBarrierOutcome, boomerang_runtime::FederatedBarrierError>
-    {
+    ) -> Result<boomerang_runtime::CoordinationOutcome, boomerang_runtime::CoordinationError> {
         self.wait_for_tag(tag, event_rx)
             .map(|event| match event {
-                Some(event) => boomerang_runtime::FederatedBarrierOutcome::Interrupted(event),
-                None => boomerang_runtime::FederatedBarrierOutcome::Granted,
+                Some(event) => boomerang_runtime::CoordinationOutcome::Interrupted(event),
+                None => boomerang_runtime::CoordinationOutcome::Granted,
             })
-            .map_err(boomerang_runtime::FederatedBarrierError::from_error)
+            .map_err(boomerang_runtime::CoordinationError::from_error)
     }
 
-    fn logical_tag_complete(
+    fn complete(
         &mut self,
         tag: boomerang_runtime::Tag,
-    ) -> Result<(), boomerang_runtime::FederatedBarrierError> {
+    ) -> Result<(), boomerang_runtime::CoordinationError> {
         self.report_logical_tag_complete(tag)
-            .map_err(boomerang_runtime::FederatedBarrierError::from_error)
+            .map_err(boomerang_runtime::CoordinationError::from_error)
     }
 }
 
@@ -888,7 +887,7 @@ mod tests {
         .await;
 
         let event_rx = empty_event_rx();
-        let mut barrier = RtiFederatedTimeBarrier::new(
+        let mut barrier = RtiLogicalTimeCoordinator::new(
             fed("source"),
             client,
             [route()],
@@ -962,7 +961,7 @@ mod tests {
         let (inbound, event_rx, action_key, _shutdown_tx) = inbound_endpoint_for_u32();
         let mut inbound_route = route();
         inbound_route.bind_inbound(inbound);
-        let mut barrier = RtiFederatedTimeBarrier::new(
+        let mut barrier = RtiLogicalTimeCoordinator::new(
             fed("sink"),
             client,
             [inbound_route],
@@ -1040,7 +1039,7 @@ mod tests {
         let (inbound, event_rx, action_key, _shutdown_tx) = inbound_endpoint_for_u32();
         let mut inbound_route = route();
         inbound_route.bind_inbound(inbound);
-        let mut barrier = RtiFederatedTimeBarrier::new(
+        let mut barrier = RtiLogicalTimeCoordinator::new(
             fed("sink"),
             client,
             [inbound_route],
@@ -1075,7 +1074,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn inbound_admission_failure_makes_the_barrier_terminal_before_later_tag() {
+    async fn inbound_admission_failure_makes_the_coordinator_terminal_before_later_tag() {
         let (client, rti) = connect_client_with_fake_rti(fed("sink"), |mut transport| async move {
             assert!(matches!(
                 recv_federate_to_rti(&mut transport).await,
@@ -1112,7 +1111,7 @@ mod tests {
         let (inbound, event_rx, _action_key, _shutdown_tx) = inbound_endpoint_for_u32();
         let mut inbound_route = route();
         inbound_route.bind_inbound(inbound);
-        let mut barrier = RtiFederatedTimeBarrier::new(
+        let mut barrier = RtiLogicalTimeCoordinator::new(
             fed("sink"),
             client,
             [inbound_route],
@@ -1127,11 +1126,11 @@ mod tests {
         assert!(barrier.failed);
         assert!(matches!(
             barrier.wait_for_tag(boomerang_runtime::Tag::ZERO, &event_rx),
-            Err(FederateClientError::BarrierFailed)
+            Err(FederateClientError::CoordinationFailed)
         ));
         assert!(matches!(
             barrier.report_logical_tag_complete(boomerang_runtime::Tag::ZERO),
-            Err(FederateClientError::BarrierFailed)
+            Err(FederateClientError::CoordinationFailed)
         ));
 
         rti.await.unwrap();
@@ -1186,7 +1185,7 @@ mod tests {
         let (inbound, event_rx, _action_key, _shutdown_tx) = inbound_endpoint_for_u32();
         let mut inbound_route = route();
         inbound_route.bind_inbound(inbound);
-        let mut barrier = RtiFederatedTimeBarrier::new(
+        let mut barrier = RtiLogicalTimeCoordinator::new(
             fed("sink"),
             client,
             [inbound_route],
@@ -1243,7 +1242,7 @@ mod tests {
             .await;
 
         let event_rx = empty_event_rx();
-        let mut barrier = RtiFederatedTimeBarrier::new(
+        let mut barrier = RtiLogicalTimeCoordinator::new(
             fed("source"),
             client,
             [route()],
@@ -1252,7 +1251,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            boomerang_runtime::FederatedTimeBarrier::acquire_tag(
+            boomerang_runtime::LogicalTimeCoordinator::acquire(
                 &mut barrier,
                 boomerang_runtime::Tag::ZERO,
                 &event_rx,
@@ -1295,7 +1294,7 @@ mod tests {
             })
             .await;
 
-        let mut barrier = RtiFederatedTimeBarrier::new(
+        let mut barrier = RtiLogicalTimeCoordinator::new(
             fed("source"),
             client,
             [route()],

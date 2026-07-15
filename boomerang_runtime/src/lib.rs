@@ -35,7 +35,6 @@ pub use env::{
     LifecycleReaction, ModalScheduleIndex, Mode, ModeFilter, ModeKey, ReactionGraph, ScopeInfo,
     ScopeKey, TransitionKind,
 };
-#[cfg(feature = "federated")]
 pub use event::AsyncEvent;
 #[cfg(feature = "federated")]
 pub use federated::{
@@ -89,9 +88,8 @@ pub enum RuntimeError {
     #[error(transparent)]
     ReplayError(#[from] replay::ReplayError),
 
-    #[cfg(feature = "federated")]
     #[error(transparent)]
-    FederatedBarrier(#[from] FederatedBarrierError),
+    Coordination(#[from] CoordinationError),
 }
 
 pub mod fmt_utils {

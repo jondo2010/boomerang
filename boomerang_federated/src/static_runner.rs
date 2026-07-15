@@ -17,8 +17,8 @@ use crate::json_protocol_frame_transport;
 use crate::transport::run_tcp_static_rti_session_compiled;
 use crate::{
     in_memory_transport_pair, CompiledTopology, FederateClientError, FederateClientRoute,
-    FederateId, FederateProtocolClient, FederatedTopology, ProtocolFrame, RtiFederatedTimeBarrier,
-    RtiSessionEndpoint, SessionError, StaticRtiSession, TransportError,
+    FederateId, FederateProtocolClient, FederatedTopology, ProtocolFrame,
+    RtiLogicalTimeCoordinator, RtiSessionEndpoint, SessionError, StaticRtiSession, TransportError,
 };
 
 /// Fully lowered federation-specific state required by a static runner.
@@ -251,7 +251,7 @@ struct PreparedStaticFederation {
 }
 
 struct ConnectedFederate {
-    /// Connected protocol client used by the federate's time barrier.
+    /// Connected protocol client used by the federate's logical-time coordinator.
     client: FederateProtocolClient,
     /// Validated inbound message routes owned by this federate.
     routes: Vec<FederateClientRoute>,
@@ -493,7 +493,7 @@ fn execute_connected_static_federation(
                 "missing connected client for federate '{federate_id}'"
             ))
         })?;
-        let barrier = RtiFederatedTimeBarrier::new(
+        let barrier = RtiLogicalTimeCoordinator::new(
             federate_id.clone(),
             connected.client,
             connected.routes,
@@ -501,7 +501,7 @@ fn execute_connected_static_federation(
         )?;
         barriers.insert(
             federate_id.clone(),
-            SharedFederatedTimeBarrier::new(barrier),
+            SharedRtiLogicalTimeCoordinator::new(barrier),
         );
     }
 
@@ -537,7 +537,7 @@ fn execute_connected_static_federation(
             .name(format!("federate-{federate_id}"))
             .spawn(move || {
                 let stop_barrier = barrier.clone();
-                let mut scheduler = boomerang_runtime::Scheduler::new_with_federated_time_barrier(
+                let mut scheduler = boomerang_runtime::Scheduler::new_with_logical_time_coordinator(
                     enclave_key,
                     enclave,
                     config,
@@ -632,13 +632,13 @@ fn listener_connect_addr(listener_addr: SocketAddr) -> SocketAddr {
 }
 
 #[derive(Clone)]
-struct SharedFederatedTimeBarrier {
-    /// Shared barrier implementation serialized across scheduler calls.
-    inner: Arc<Mutex<RtiFederatedTimeBarrier>>,
+struct SharedRtiLogicalTimeCoordinator {
+    /// Shared RTI coordinator serialized across scheduler calls.
+    inner: Arc<Mutex<RtiLogicalTimeCoordinator>>,
 }
 
-impl SharedFederatedTimeBarrier {
-    fn new(barrier: RtiFederatedTimeBarrier) -> Self {
+impl SharedRtiLogicalTimeCoordinator {
+    fn new(barrier: RtiLogicalTimeCoordinator) -> Self {
         Self {
             inner: Arc::new(Mutex::new(barrier)),
         }
@@ -647,32 +647,31 @@ impl SharedFederatedTimeBarrier {
     fn stop(&self) -> Result<(), FederateClientError> {
         self.inner
             .lock()
-            .map_err(|_| FederateClientError::Protocol("federate barrier lock poisoned".into()))?
+            .map_err(|_| FederateClientError::Protocol("RTI coordinator lock poisoned".into()))?
             .stop()
     }
 }
 
-impl boomerang_runtime::FederatedTimeBarrier for SharedFederatedTimeBarrier {
-    fn acquire_tag(
+impl boomerang_runtime::LogicalTimeCoordinator for SharedRtiLogicalTimeCoordinator {
+    fn acquire(
         &mut self,
         tag: boomerang_runtime::Tag,
         event_rx: &boomerang_runtime::Receiver<boomerang_runtime::AsyncEvent>,
-    ) -> Result<boomerang_runtime::FederatedBarrierOutcome, boomerang_runtime::FederatedBarrierError>
-    {
+    ) -> Result<boomerang_runtime::CoordinationOutcome, boomerang_runtime::CoordinationError> {
         let mut barrier = self.inner.lock().map_err(|_| {
-            boomerang_runtime::FederatedBarrierError::new("federate barrier lock poisoned")
+            boomerang_runtime::CoordinationError::new("RTI coordinator lock poisoned")
         })?;
-        boomerang_runtime::FederatedTimeBarrier::acquire_tag(&mut *barrier, tag, event_rx)
+        boomerang_runtime::LogicalTimeCoordinator::acquire(&mut *barrier, tag, event_rx)
     }
 
-    fn logical_tag_complete(
+    fn complete(
         &mut self,
         tag: boomerang_runtime::Tag,
-    ) -> Result<(), boomerang_runtime::FederatedBarrierError> {
+    ) -> Result<(), boomerang_runtime::CoordinationError> {
         let mut barrier = self.inner.lock().map_err(|_| {
-            boomerang_runtime::FederatedBarrierError::new("federate barrier lock poisoned")
+            boomerang_runtime::CoordinationError::new("RTI coordinator lock poisoned")
         })?;
-        boomerang_runtime::FederatedTimeBarrier::logical_tag_complete(&mut *barrier, tag)
+        boomerang_runtime::LogicalTimeCoordinator::complete(&mut *barrier, tag)
     }
 }
 

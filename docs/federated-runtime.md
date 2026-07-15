@@ -14,23 +14,23 @@ federate timing and message frames, decides when tags are safe to process, and
 routes payload messages between federates.
 
 The supported paths are the deterministic in-memory static runner and a
-single-process TCP static runner. Both run the same scheduler/barrier lifecycle
-and differ only in how the RTI session and federate protocol clients are
-connected.
+single-process TCP static runner. Both run the same scheduler coordination
+lifecycle and differ only in how the RTI session and federate protocol clients
+are connected.
 
 ## Crate Ownership
 
 `boomerang_runtime` owns scheduler-facing primitives only. It defines endpoint
 handlers, payload codec traits, the outbound sink interface, the first-error
-fault-latch implementation, and the `FederatedTimeBarrier`
-scheduler hook. The barrier returns an explicit granted or interrupted outcome,
+fault-latch implementation, and the `LogicalTimeCoordinator`
+scheduler hook. The hook returns an explicit granted or interrupted outcome,
 or a terminal coordination error. It must stay
 protocol-free and must not depend on `boomerang_federated`, Tokio, RTI state, or
 wire frame types.
 
 `boomerang_federated` owns the protocol and orchestration layer. It defines wire
 types, `RtiState`, `StaticRtiSession`, `FederateProtocolClient`,
-`RtiFederatedTimeBarrier`, in-memory and TCP protocol transports, and
+`RtiLogicalTimeCoordinator`, in-memory and TCP protocol transports, and
 `StaticFederationRuntime` plus the transport-specific `static_runner::run_*`
 functions.
 
@@ -69,14 +69,14 @@ flowchart LR
         SenderReaction["FederatedSenderReactionFn<br/>encode payload + runtime tag"]
         EndpointSink["Endpoint-specific protocol sink<br/>runtime command → MSG"]
         ConnectionA["FederatedRuntimeConnection A<br/>single outbound mailbox,<br/>routes with attached handlers,<br/>source-local fault state"]
-        BarrierA["RtiFederatedTimeBarrier A"]
+        CoordinatorA["RtiLogicalTimeCoordinator A"]
         ClientA["FederateProtocolClient A"]
 
         SchedA --> SourceReaction --> SenderReaction --> EndpointSink --> ConnectionA --> ClientA
-        SchedA -->|tag request / completion| BarrierA
-        BarrierA -->|grant or inbound interrupt| SchedA
-        BarrierA -->|NET, LTC, Stop| ConnectionA
-        ClientA -->|TAG, MSG, Error| BarrierA
+        SchedA -->|tag request / completion| CoordinatorA
+        CoordinatorA -->|grant or inbound interrupt| SchedA
+        CoordinatorA -->|NET, LTC, Stop| ConnectionA
+        ClientA -->|TAG, MSG, Error| CoordinatorA
     end
 
     subgraph Coordination["Federated protocol and coordination"]
@@ -90,7 +90,7 @@ flowchart LR
 
     subgraph Target["Target federate / enclave"]
         ClientB["FederateProtocolClient B"]
-        BarrierB["RtiFederatedTimeBarrier B"]
+        CoordinatorB["RtiLogicalTimeCoordinator B"]
         ConnectionB["FederatedRuntimeConnection B<br/>single outbound mailbox,<br/>routes with attached handlers,<br/>source-local fault state"]
         InboundHandler["Route-attached inbound handler<br/>decode → logical action"]
         EventQueue["Scheduler event queue<br/>AsyncEvent"]
@@ -98,13 +98,13 @@ flowchart LR
         ReceiverReaction["ConnectionReceiverReactionFn<br/>logical action → input port"]
         TargetReaction["Target reaction<br/>reads input port"]
 
-        ClientB -->|TAG, MSG, Error| BarrierB
-        BarrierB -->|MSG payload| InboundHandler --> EventQueue --> SchedB
+        ClientB -->|TAG, MSG, Error| CoordinatorB
+        CoordinatorB -->|MSG payload| InboundHandler --> EventQueue --> SchedB
         ConnectionB -. route owns .-> InboundHandler
         SchedB --> ReceiverReaction --> TargetReaction
-        SchedB -->|tag request / completion| BarrierB
-        BarrierB -->|grant or inbound interrupt| SchedB
-        BarrierB -->|NET, LTC, Stop| ConnectionB --> ClientB
+        SchedB -->|tag request / completion| CoordinatorB
+        CoordinatorB -->|grant or inbound interrupt| SchedB
+        CoordinatorB -->|NET, LTC, Stop| ConnectionB --> ClientB
     end
 
     RTI --> TransportB --> ClientB
@@ -160,19 +160,19 @@ number of sockets, and identifies each peer from its first `Hello` frame rather
 than arrival order. The consumed frame is preserved for the session's topology
 validation. Both paths then run
 all `FederateProtocolClient::connect` handshakes concurrently, wrap each client
-in an `RtiFederatedTimeBarrier`, and enter the same connected-runner function.
+in an `RtiLogicalTimeCoordinator`, and enter the same connected-runner function.
 That function runs one scheduler thread per active mapped federate enclave with
-`Scheduler::new_with_federated_time_barrier`. It uses the fallible scheduler
-loop, stops every barrier after success or failure, and returns coordination or
-runtime endpoint errors to the public caller.
+`Scheduler::new_with_logical_time_coordinator`. It uses the fallible scheduler
+loop, stops every coordinator after success or failure, and returns coordination
+or runtime endpoint errors to the public caller.
 
 The connected runner consumes one complete connection bundle for every
 federate. It gives the prebuilt mailbox receiver to that client's async
 transport writer and gives the bundle's incoming routes with their attached
-handlers and fault state to exactly that federate's barrier. Sender reactions
-and the barrier share clones of the same mailbox sender. Consequently,
-reaction-emitted `MSG` frames and the subsequent `LTC` frame enter one FIFO
-queue in program order.
+handlers and fault state to exactly that federate's coordinator. Sender
+reactions and the coordinator share clones of the same mailbox sender.
+Consequently, reaction-emitted `MSG` frames and the subsequent `LTC` frame enter
+one FIFO queue in program order.
 
 Builder lowering asks `boomerang_federated::CompiledTopology` to validate the
 static manifest and produce ordered per-federate neighbor views, immediate and
@@ -210,7 +210,7 @@ messages for the completed tag.
 Inbound payloads arrive as protocol `MSG` frames from the RTI. Each lowered
 `FederateClientRoute` owns its type-erased `FederatedInboundEndpoint`, which
 decodes and schedules that route's payload directly. The barrier returns the
-queued `AsyncEvent` to the scheduler before reading a later RTI frame. A barrier
+queued `AsyncEvent` to the scheduler before reading a later RTI frame. A coordinator
 cannot dispatch an endpoint belonging to another federate because that route is
 absent from its bundle. Any failure before queue admission makes the barrier
 terminal, so it cannot consume a later `TAG`.

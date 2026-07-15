@@ -19,7 +19,7 @@ pub use client::{
     FederateClientError, FederateClientMailbox, FederateProtocolClient, FederateProtocolSender,
 };
 #[cfg(feature = "runtime")]
-pub use client::{FederateClientRoute, RtiFederatedTimeBarrier};
+pub use client::{FederateClientRoute, RtiLogicalTimeCoordinator};
 #[cfg(feature = "serde-json-codec")]
 pub use codec::SerdeJsonCodec;
 pub use codec::{CodecError, PayloadCodec, PayloadDecoder, PayloadEncoder};

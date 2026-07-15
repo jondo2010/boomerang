@@ -82,6 +82,16 @@ fn public_api_runs_static_in_memory_federation() {
 }
 
 #[test]
+fn public_api_rejects_runtime_without_lowered_federation() {
+    let parts = RuntimeAssembly::default();
+
+    assert!(matches!(
+        execute_federation_in_memory(parts, runtime::Config::default().with_fast_forward(true)),
+        Err(boomerang::BoomerangError::MissingStaticFederation)
+    ));
+}
+
+#[test]
 #[ignore = "localhost TCP integration test; run with `cargo test -p boomerang --features federated tcp_static -- --ignored`"]
 fn public_api_runs_tcp_static_federation() {
     boomerang_util::test_tracing::init_with_directive("debug");

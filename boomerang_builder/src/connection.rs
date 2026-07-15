@@ -560,7 +560,11 @@ fn build_federated_connection_source<T: runtime::ReactorData + Clone>(
 
             let remote_action_ref = enclave.create_async_action_ref(*runtime_action_key);
             let (outbound, faults) = runtime_assembly
-                .federated_connections
+                .federation
+                .as_ref()
+                .expect("federated sender exists only in a lowered federation")
+                .runtime
+                .connections()
                 .outbound_endpoint(&endpoint)
                 .expect("federated endpoint sink was validated before deferred lowering");
             runtime::FederatedSenderReactionFn::<T>::new(

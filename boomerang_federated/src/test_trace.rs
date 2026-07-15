@@ -19,7 +19,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use futures_util::{FutureExt, Sink, SinkExt, Stream, StreamExt};
+use futures_util::{Sink, SinkExt, Stream, StreamExt};
 
 use crate::{
     protocol::{EndpointId, FederateId, FederateToRti, ProtocolFrame, RtiToFederate, WireTag},
@@ -54,7 +54,6 @@ pub(crate) enum FramePattern {
     Net(WireTag),
     Tag(WireTag),
     Msg { tag: WireTag, endpoint: EndpointId },
-    MsgAck(WireTag),
     Ltc(WireTag),
     Stop,
     Error,
@@ -66,7 +65,6 @@ impl FramePattern {
             ProtocolFrame::FederateToRti(FederateToRti::Hello { .. }) => Self::Hello,
             ProtocolFrame::FederateToRti(FederateToRti::Net { tag, .. }) => Self::Net(*tag),
             ProtocolFrame::FederateToRti(FederateToRti::Ltc { tag, .. }) => Self::Ltc(*tag),
-            ProtocolFrame::FederateToRti(FederateToRti::MsgAck { tag, .. }) => Self::MsgAck(*tag),
             ProtocolFrame::FederateToRti(FederateToRti::Msg { endpoint, tag, .. })
             | ProtocolFrame::RtiToFederate(RtiToFederate::Msg { endpoint, tag, .. }) => Self::Msg {
                 tag: *tag,
@@ -93,7 +91,6 @@ impl fmt::Display for FramePattern {
             Self::Net(tag) => write!(f, "Net({tag})"),
             Self::Tag(tag) => write!(f, "Tag({tag})"),
             Self::Msg { tag, endpoint } => write!(f, "Msg({tag}, {endpoint})"),
-            Self::MsgAck(tag) => write!(f, "MsgAck({tag})"),
             Self::Ltc(tag) => write!(f, "Ltc({tag})"),
             Self::Stop => f.write_str("Stop"),
             Self::Error => f.write_str("Error"),
@@ -401,21 +398,6 @@ where
             .expect("recording client transport should remain open")
             .expect("recording client transport should receive a protocol frame");
         self.record_received(frame)
-    }
-
-    /// Records and returns the next immediately available RTI-to-client message.
-    ///
-    /// Returns `None` when the stream is pending. Closed streams, transport errors, and frames in
-    /// the wrong direction have the same failure behavior as [`Self::recv`].
-    pub(crate) fn recv_now(&mut self) -> Option<RtiToFederate> {
-        match self.stream.next().now_or_never() {
-            Some(Some(Ok(frame))) => Some(self.record_received(frame)),
-            Some(Some(Err(error))) => {
-                panic!("recording client transport should receive a protocol frame: {error}")
-            }
-            Some(None) => panic!("recording client transport should remain open"),
-            None => None,
-        }
     }
 }
 

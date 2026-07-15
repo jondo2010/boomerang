@@ -7,6 +7,19 @@ use crate::{port::Contained, runtime};
 type RecordedValues = Vec<(runtime::Tag, u32)>;
 type RecordedValuePair = (RecordedValues, RecordedValues);
 
+fn run_lowered_federation_for_test(
+    parts: RuntimeAssembly,
+    config: runtime::Config,
+) -> Result<
+    boomerang_federated::static_runner::FederationEnvs,
+    boomerang_federated::StaticFederationRunnerError,
+> {
+    let federation = parts
+        .federation
+        .expect("test federation must contain lowered runtime state");
+    boomerang_federated::static_runner::run_in_memory(federation.runtime, parts.enclaves, config)
+}
+
 #[derive(Clone, Copy)]
 struct FederatedIoPorts {
     input: TypedPortKey<u32, Input, Contained>,
@@ -27,12 +40,17 @@ struct FederatedOutboundCapture {
 
 impl FederatedOutboundCapture {
     fn take(parts: &mut RuntimeAssembly) -> Self {
-        assert_eq!(parts.federation_plan.endpoints.len(), 1);
+        let federation = parts
+            .federation
+            .as_mut()
+            .expect("federated assembly must contain lowered federation data");
+        assert_eq!(federation.plan.endpoints.len(), 1);
         let source = boomerang_federated::FederateId::new(
-            parts.federation_plan.endpoints[0].source_federate.clone(),
+            federation.plan.endpoints[0].source_federate.clone(),
         );
-        let mailbox = parts
-            .federated_connections
+        let mailbox = federation
+            .runtime
+            .connections_mut()
             .take_mailbox(&source)
             .expect("source federate mailbox was created during lowering");
         Self { mailbox }
@@ -349,13 +367,16 @@ fn route_outbound_commands_through_rti(
     connections: &boomerang_federated::FederatedRuntimeConnections,
 ) -> Vec<runtime::Tag> {
     let topology = federation_topology_from_plan(plan).unwrap();
-    let mut rti = boomerang_federated::RtiState::new(topology.clone());
+    let mut rti = boomerang_federated::RtiState::new(topology.clone()).unwrap();
     for federate in &plan.federates {
         let federate_id = boomerang_federated::FederateId::new(federate.id.clone());
-        rti.handle(boomerang_federated::FederateToRti::Hello {
-            federate_id: federate_id.clone(),
-            topology: topology.neighbors_for(&federate_id),
-        })
+        rti.handle_from(
+            &federate_id,
+            boomerang_federated::FederateToRti::Hello {
+                federate_id: federate_id.clone(),
+                topology: topology.neighbors_for(&federate_id),
+            },
+        )
         .unwrap();
     }
 
@@ -372,13 +393,16 @@ fn route_outbound_commands_through_rti(
             panic!("lowered sender should emit a protocol MSG")
         };
         let deliveries = rti
-            .handle(boomerang_federated::FederateToRti::Msg {
-                source: source.clone(),
-                target: target.clone(),
-                endpoint: endpoint.clone(),
-                tag,
-                payload,
-            })
+            .handle_from(
+                &source,
+                boomerang_federated::FederateToRti::Msg {
+                    source: source.clone(),
+                    target: target.clone(),
+                    endpoint: endpoint.clone(),
+                    tag,
+                    payload,
+                },
+            )
             .unwrap();
 
         assert_eq!(deliveries.len(), 1);
@@ -394,12 +418,10 @@ fn route_outbound_commands_through_rti(
                 assert_eq!(delivered_source, &source);
                 assert_eq!(delivered_endpoint, &endpoint);
                 let runtime_tag = runtime::Tag::try_from(*delivered_tag).unwrap();
-                let endpoint_key = connections
-                    .inbound_endpoint_key(&target, &endpoint)
-                    .expect("lowered inbound endpoint key");
-                let inbound_endpoints = connections.inbound_endpoints(&target).unwrap();
-                inbound_endpoints
-                    .schedule(endpoint_key, runtime_tag, payload)
+                connections
+                    .inbound_endpoint(&target, &endpoint)
+                    .expect("lowered inbound endpoint")
+                    .schedule(runtime_tag, payload)
                     .unwrap();
                 routed_tags.push(runtime_tag);
             }
@@ -467,10 +489,12 @@ fn run_in_memory_federated_source_sink(
     let RuntimeAssembly {
         enclaves,
         aliases,
-        federation_plan,
-        federated_connections,
+        federation,
         ..
     } = parts;
+    let federation = federation.expect("source/sink lowering must produce a federation");
+    let federation_plan = federation.plan;
+    let federated_connections = federation.runtime.connections();
 
     let source_reactor = federation_plan
         .federates
@@ -486,9 +510,6 @@ fn run_in_memory_federated_source_sink(
         .reactor;
     let source_enclave_key = aliases.enclave_aliases[source_reactor];
     let sink_enclave_key = aliases.enclave_aliases[sink_reactor];
-    let sink = boomerang_federated::FederateId::new("sink");
-    let _inbound_endpoints = federated_connections.inbound_endpoints(&sink).unwrap();
-
     let mut source_enclaves = Vec::new();
     let mut sink_enclaves = Vec::new();
     for (enclave_key, enclave) in enclaves {
@@ -508,7 +529,7 @@ fn run_in_memory_federated_source_sink(
         runtime::execute_enclaves(source_enclaves.into_iter(), config.clone()).unwrap();
     let commands = outbound.drain();
     let routed_tags =
-        route_outbound_commands_through_rti(&federation_plan, commands, &federated_connections);
+        route_outbound_commands_through_rti(&federation_plan, commands, federated_connections);
     let _sink_envs = runtime::execute_enclaves(sink_enclaves.into_iter(), config).unwrap();
 
     let recorded_values = values.lock().unwrap().clone();
@@ -554,7 +575,7 @@ fn run_live_in_memory_federated_source_sink(
 
     let config = runtime::Config::default().with_fast_forward(true);
     let parts = assembly.into_runtime_assembly(&config).unwrap();
-    let _envs = execute_federation_in_memory(parts, config).unwrap();
+    let _envs = run_lowered_federation_for_test(parts, config).unwrap();
 
     let recorded_values = values.lock().unwrap().clone();
     recorded_values
@@ -580,7 +601,7 @@ fn run_live_in_memory_no_message_source_sink() -> Vec<(runtime::Tag, u32)> {
 
     let config = runtime::Config::default().with_fast_forward(true);
     let parts = assembly.into_runtime_assembly(&config).unwrap();
-    let _envs = execute_federation_in_memory(parts, config).unwrap();
+    let _envs = run_lowered_federation_for_test(parts, config).unwrap();
 
     let recorded_values = values.lock().unwrap().clone();
     recorded_values
@@ -610,7 +631,7 @@ fn run_live_in_memory_three_federate_chain() -> Vec<(runtime::Tag, u32)> {
 
     let config = runtime::Config::default().with_fast_forward(true);
     let parts = assembly.into_runtime_assembly(&config).unwrap();
-    let _envs = execute_federation_in_memory(parts, config).unwrap();
+    let _envs = run_lowered_federation_for_test(parts, config).unwrap();
 
     let recorded_values = values.lock().unwrap().clone();
     recorded_values
@@ -645,7 +666,7 @@ fn run_live_in_memory_fanout() -> RecordedValuePair {
 
     let config = runtime::Config::default().with_fast_forward(true);
     let parts = assembly.into_runtime_assembly(&config).unwrap();
-    let _envs = execute_federation_in_memory(parts, config).unwrap();
+    let _envs = run_lowered_federation_for_test(parts, config).unwrap();
 
     let recorded_left_values = left_values.lock().unwrap().clone();
     let recorded_right_values = right_values.lock().unwrap().clone();
@@ -681,7 +702,7 @@ fn run_live_in_memory_positive_delay_cycle() -> RecordedValuePair {
 
     let config = runtime::Config::default().with_fast_forward(true);
     let parts = assembly.into_runtime_assembly(&config).unwrap();
-    let _envs = execute_federation_in_memory(parts, config).unwrap();
+    let _envs = run_lowered_federation_for_test(parts, config).unwrap();
 
     let recorded_a_values = a_values.lock().unwrap().clone();
     let recorded_b_values = b_values.lock().unwrap().clone();
@@ -691,7 +712,10 @@ fn run_live_in_memory_positive_delay_cycle() -> RecordedValuePair {
 fn build_federated_source_sink_plan(
     after: Option<runtime::Duration>,
 ) -> Result<FederationPlan, AssemblyError> {
-    Ok(build_federated_source_sink_parts(after)?.federation_plan)
+    Ok(build_federated_source_sink_parts(after)?
+        .federation
+        .expect("source/sink lowering must produce a federation")
+        .plan)
 }
 
 fn build_federated_source_sink_parts(
@@ -727,7 +751,11 @@ fn test_add_child_federate_sets_enclave_compatible_placement() {
 #[test]
 fn test_federated_source_sink_topology_plan() {
     let parts = build_federated_source_sink_parts(None).unwrap();
-    let plan = &parts.federation_plan;
+    let federation = parts
+        .federation
+        .as_ref()
+        .expect("source/sink lowering must produce a federation");
+    let plan = &federation.plan;
 
     assert_eq!(plan.federates.len(), 2);
     assert_eq!(
@@ -767,6 +795,20 @@ fn test_federated_source_sink_topology_plan() {
         topology.edges[0].delay,
         boomerang_federated::WireDelay::ZERO
     );
+    assert_eq!(federation.runtime.topology().topology(), &topology);
+    assert_eq!(
+        federation.runtime.federate_enclaves().len(),
+        plan.federates.len()
+    );
+    for federate in &plan.federates {
+        assert_eq!(
+            federation
+                .runtime
+                .federate_enclaves()
+                .get(&boomerang_federated::FederateId::new(federate.id.clone())),
+            parts.aliases.enclave_aliases.get(federate.reactor)
+        );
+    }
 
     let routes = federated_routes_from_plan(plan).unwrap();
     assert_eq!(routes.len(), 1);
@@ -858,14 +900,10 @@ fn test_live_in_memory_intentional_codec_failure_is_returned() {
     let config = runtime::Config::default().with_fast_forward(true);
     let parts = assembly.into_runtime_assembly(&config).unwrap();
     let error = run_with_wall_timeout("intentional codec failure", move || {
-        execute_federation_in_memory(parts, config).unwrap_err()
+        run_lowered_federation_for_test(parts, config).unwrap_err()
     });
 
-    assert!(matches!(
-        error,
-        AssemblyError::FederationBridgeError { what }
-            if what.contains("intentional codec failure")
-    ));
+    assert!(error.to_string().contains("intentional codec failure"));
     assert!(values.lock().unwrap().is_empty());
 }
 
@@ -1097,8 +1135,7 @@ fn test_local_cross_enclave_connection_does_not_require_federated_codec() {
     assert_eq!(boundary.source_port, source.into());
     assert_eq!(boundary.target_port, sink.into());
     assert!(!boundary.physical);
-    assert!(parts.federation_plan.is_empty());
-    assert!(parts.federated_connections.is_empty());
+    assert!(parts.federation.is_none());
     assert!(parts.enclaves.values().any(|enclave| {
         !enclave.upstream_enclaves.is_empty() || !enclave.downstream_enclaves.is_empty()
     }));
@@ -1122,16 +1159,18 @@ fn test_federated_connection_lowers_endpoint_runtime_parts() {
         .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
 
-    assert_eq!(parts.federation_plan.endpoints.len(), 1);
+    let federation = parts
+        .federation
+        .as_ref()
+        .expect("federated connection lowering must produce a federation");
+    assert_eq!(federation.plan.endpoints.len(), 1);
+    let endpoint = &federation.plan.endpoints[0].id;
     let sink = boomerang_federated::FederateId::new("sink");
-    assert_eq!(
-        parts
-            .federated_connections
-            .inbound_endpoints(&sink)
-            .unwrap()
-            .len(),
-        1
-    );
+    assert!(federation
+        .runtime
+        .connections()
+        .inbound_endpoint(&sink, endpoint)
+        .is_some());
     assert!(parts.enclaves.values().all(|enclave| {
         enclave.upstream_enclaves.is_empty() && enclave.downstream_enclaves.is_empty()
     }));
@@ -1186,7 +1225,7 @@ fn test_federated_sender_emits_serialized_msg_command() {
 }
 
 #[test]
-fn test_federated_inbound_registry_schedules_target_action() {
+fn test_federated_inbound_endpoint_schedules_target_action() {
     let values = Arc::new(Mutex::new(Vec::new()));
     let mut assembly = Assembly::new();
     register_u32_federated_codec(&mut assembly).unwrap();
@@ -1206,20 +1245,20 @@ fn test_federated_inbound_registry_schedules_target_action() {
 
     let RuntimeAssembly {
         enclaves,
-        federated_connections,
+        federation,
         ..
     } = assembly
         .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
 
+    let federation = federation.expect("federated lowering must produce a federation");
+    let federated_connections = federation.runtime.connections();
     let endpoint = boomerang_federated::EndpointId::new("main/source/out->main/sink/in");
     let sink = boomerang_federated::FederateId::new("sink");
-    let endpoint_key = federated_connections
-        .inbound_endpoint_key(&sink, &endpoint)
-        .unwrap();
-    let inbound_endpoints = federated_connections.inbound_endpoints(&sink).unwrap();
-    inbound_endpoints
-        .schedule(endpoint_key, runtime::Tag::ZERO, b"42")
+    federated_connections
+        .inbound_endpoint(&sink, &endpoint)
+        .unwrap()
+        .schedule(runtime::Tag::ZERO, b"42")
         .unwrap();
 
     let config = runtime::Config::default()

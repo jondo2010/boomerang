@@ -9,52 +9,71 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FederateBuildInfo {
+    /// Stable protocol identity assigned to the federate.
     pub id: String,
+    /// Assembly reactor that forms the federate's partition root.
     pub reactor: AssemblyReactorKey,
+    /// Fully qualified assembly name of the federate reactor.
     pub reactor_fqn: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FederatedEndpoint {
+    /// Stable protocol identity of the cross-federate endpoint.
     pub id: boomerang_federated::EndpointId,
+    /// Protocol identity of the sending federate.
     pub source_federate: String,
+    /// Protocol identity of the receiving federate.
     pub target_federate: String,
+    /// Assembly port that emits values for this endpoint.
     pub source_port: AssemblyPortKey,
+    /// Assembly port that receives values from this endpoint.
     pub target_port: AssemblyPortKey,
+    /// Fully qualified assembly name of the source port.
     pub source_port_fqn: String,
+    /// Fully qualified assembly name of the target port.
     pub target_port_fqn: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FederatedEdge {
+    /// Stable protocol identity shared with the corresponding endpoint.
     pub endpoint: boomerang_federated::EndpointId,
+    /// Protocol identity of the sending federate.
     pub source_federate: String,
+    /// Protocol identity of the receiving federate.
     pub target_federate: String,
+    /// Assembly reactor that forms the source federate partition root.
     pub source_federate_reactor: AssemblyReactorKey,
+    /// Assembly reactor that forms the target federate partition root.
     pub target_federate_reactor: AssemblyReactorKey,
+    /// Assembly port at the source of the cross-federate connection.
     pub source_port: AssemblyPortKey,
+    /// Assembly port at the target of the cross-federate connection.
     pub target_port: AssemblyPortKey,
+    /// Logical delay applied while crossing the federation boundary.
     pub delay: Option<runtime::Duration>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct FederationPlan {
+    /// Federates participating in the statically lowered application.
     pub federates: Vec<FederateBuildInfo>,
+    /// Directed logical dependencies between federates.
     pub edges: Vec<FederatedEdge>,
+    /// Typed payload routes associated with the federated edges.
     pub endpoints: Vec<FederatedEndpoint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FederatedRoute {
+    /// Stable protocol identity of the routed endpoint.
     pub endpoint: boomerang_federated::EndpointId,
+    /// Protocol identity of the sending federate.
     pub source: boomerang_federated::FederateId,
+    /// Protocol identity of the receiving federate.
     pub target: boomerang_federated::FederateId,
 }
-
-type FederateEnclaveMaps = (
-    BTreeMap<boomerang_federated::FederateId, runtime::EnclaveKey>,
-    tinymap::TinySecondaryMap<runtime::EnclaveKey, boomerang_federated::FederateId>,
-);
 
 impl FederationPlan {
     pub fn is_empty(&self) -> bool {
@@ -242,125 +261,6 @@ pub fn federated_routes_from_plan(
     }
 
     Ok(routes)
-}
-
-/// Execute a static federation in memory using the real RTI session and federate clients.
-///
-/// This is an explicit federated execution path. It does not replace
-/// [`runtime::execute_enclaves`], which remains local-only.
-pub fn execute_federation_in_memory(
-    parts: crate::RuntimeAssembly,
-    config: runtime::Config,
-) -> Result<tinymap::TinySecondaryMap<runtime::EnclaveKey, runtime::Env>, AssemblyError> {
-    let runtime_parts = static_federation_runtime_parts(parts)?;
-    boomerang_federated::static_runner::execute_federation_in_memory(runtime_parts, config)
-        .map_err(AssemblyError::from)
-}
-
-/// Execute a static federation over TCP using the real RTI session and federate clients.
-///
-/// This is a single-process runner that connects each federate scheduler to a runner-owned TCP
-/// listener. It does not replace [`execute_federation_in_memory`] or
-/// [`runtime::execute_enclaves`].
-pub fn execute_federation_over_tcp(
-    parts: crate::RuntimeAssembly,
-    config: runtime::Config,
-    tcp: boomerang_federated::TcpStaticFederationConfig,
-) -> Result<tinymap::TinySecondaryMap<runtime::EnclaveKey, runtime::Env>, AssemblyError> {
-    let runtime_parts = static_federation_runtime_parts(parts)?;
-    boomerang_federated::execute_federation_over_tcp(runtime_parts, config, tcp)
-        .map_err(AssemblyError::from)
-}
-
-fn static_federation_runtime_parts(
-    parts: crate::RuntimeAssembly,
-) -> Result<boomerang_federated::StaticFederationRuntimeParts, AssemblyError> {
-    validate_static_runner_plan(&parts)?;
-
-    let topology = federation_topology_from_plan(&parts.federation_plan)?;
-    let (federate_enclaves, _federate_by_enclave) = federate_enclave_maps(&parts)?;
-
-    Ok(boomerang_federated::StaticFederationRuntimeParts {
-        topology,
-        federate_enclaves,
-        enclaves: parts.enclaves,
-        connections: parts.federated_connections,
-    })
-}
-
-fn validate_static_runner_plan(parts: &crate::RuntimeAssembly) -> Result<(), AssemblyError> {
-    if parts.federation_plan.federates.is_empty()
-        || parts.federation_plan.edges.is_empty()
-        || parts.federation_plan.endpoints.is_empty()
-    {
-        return Err(AssemblyError::UnsupportedFederationTopology {
-            what: "static federation runner requires a non-empty federation plan with at least one cross-federate endpoint".into(),
-        });
-    }
-
-    let mut zero_delay_graph = petgraph::prelude::DiGraphMap::<AssemblyReactorKey, ()>::new();
-    for edge in parts.inter_partition_plan.federated_edges() {
-        if edge.physical {
-            return Err(AssemblyError::UnsupportedFederationTopology {
-                what: "cross-federate physical connections are reserved for a later milestone"
-                    .into(),
-            });
-        }
-
-        let has_positive_delay = edge
-            .delay
-            .is_some_and(|delay| delay > runtime::Duration::ZERO);
-        if !has_positive_delay {
-            zero_delay_graph.add_edge(edge.source_partition, edge.target_partition, ());
-        }
-    }
-
-    if petgraph::algo::toposort(&zero_delay_graph, None).is_err() {
-        return Err(AssemblyError::UnsupportedFederationTopology {
-            what: "distributed zero-delay cycle is unsupported in the static federation runner"
-                .into(),
-        });
-    }
-
-    Ok(())
-}
-
-fn federate_enclave_maps(
-    parts: &crate::RuntimeAssembly,
-) -> Result<FederateEnclaveMaps, AssemblyError> {
-    let mut federate_enclaves = BTreeMap::new();
-    let mut federate_by_enclave = tinymap::TinySecondaryMap::new();
-
-    for federate in &parts.federation_plan.federates {
-        let enclave_key = *parts
-            .aliases
-            .enclave_aliases
-            .get(federate.reactor)
-            .ok_or_else(|| {
-                federation_bridge_error(format!(
-                    "federate '{}' has no runtime enclave alias",
-                    federate.id
-                ))
-            })?;
-        let federate_id = boomerang_federated::FederateId::new(federate.id.clone());
-
-        if let Some(previous) = federate_by_enclave.get(enclave_key) {
-            return Err(federation_bridge_error(format!(
-                "ambiguous enclave-to-federate mapping: enclave {enclave_key:?} maps to both '{previous}' and '{federate_id}'"
-            )));
-        }
-        if federate_enclaves
-            .insert(federate_id.clone(), enclave_key)
-            .is_some()
-        {
-            return Err(federation_bridge_error(format!(
-                "duplicate federate id '{federate_id}'"
-            )));
-        }
-        federate_by_enclave.insert(enclave_key, federate_id);
-    }
-
-    Ok((federate_enclaves, federate_by_enclave))
 }
 
 fn checked_federate_id_set(plan: &FederationPlan) -> Result<BTreeSet<String>, AssemblyError> {

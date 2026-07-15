@@ -45,6 +45,11 @@
 #![deny(clippy::all)]
 
 pub mod flatten_transposed;
+#[cfg(feature = "federated")]
+mod static_federation;
+
+#[cfg(feature = "federated")]
+pub use static_federation::{execute_federation_in_memory, execute_federation_over_tcp};
 
 // Re-exports
 pub use boomerang_builder as builder;
@@ -65,10 +70,12 @@ pub mod prelude {
 
     #[cfg(feature = "federated")]
     pub use super::builder::{
-        execute_federation_in_memory, execute_federation_over_tcp, federated_routes_from_plan,
-        federation_topology_from_plan, FederateBuildInfo, FederateSpec, FederatedEdge,
-        FederatedEndpoint, FederatedRoute, FederationPlan,
+        federated_routes_from_plan, federation_topology_from_plan, FederateBuildInfo, FederateSpec,
+        FederatedEdge, FederatedEndpoint, FederatedRoute, FederationPlan,
     };
+
+    #[cfg(feature = "federated")]
+    pub use super::{execute_federation_in_memory, execute_federation_over_tcp};
 
     #[cfg(feature = "federated")]
     pub use super::federated::{
@@ -90,4 +97,12 @@ pub enum BoomerangError {
 
     #[error(transparent)]
     Runtime(#[from] runtime::RuntimeError),
+
+    #[cfg(feature = "federated")]
+    #[error(transparent)]
+    StaticFederation(#[from] federated::StaticFederationRunnerError),
+
+    #[cfg(feature = "federated")]
+    #[error("static federation execution requires a lowered federation")]
+    MissingStaticFederation,
 }

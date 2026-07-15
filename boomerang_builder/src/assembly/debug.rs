@@ -334,10 +334,10 @@ impl Debug for RuntimeAssembly {
             .field("enclave_map", &enclaves)
             .field("aliases_map", &self.aliases)
             .field("inter_partition_plan", &self.inter_partition_plan)
-            .field("federation_plan", &{
+            .field("federation", &{
                 #[cfg(feature = "federated")]
                 {
-                    &self.federation_plan
+                    &self.federation.as_ref().map(|federation| &federation.plan)
                 }
                 #[cfg(not(feature = "federated"))]
                 {

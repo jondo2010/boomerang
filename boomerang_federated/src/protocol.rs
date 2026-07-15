@@ -1,15 +1,24 @@
 use std::fmt;
 
-/// Stable federate identity used on the wire and in static topology data.
+/// Stable identity of one participant in a federation.
+///
+/// A federate is a topology vertex with its own protocol connection and logical-time state. This
+/// identifier authenticates that connection and addresses `NET`, `LTC`, `TAG`, message source,
+/// and message target state. One federate can own many cross-federate endpoints.
+///
+/// This is distinct from [`EndpointId`], which identifies one routed logical connection between
+/// federates rather than either participant.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FederateId(String);
 
 impl FederateId {
+    /// Create a stable protocol identity from its wire representation.
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
+    /// Return the wire representation of this federate identity.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -33,16 +42,25 @@ impl fmt::Display for FederateId {
     }
 }
 
-/// Stable endpoint identity for a serialized cross-federate connection.
+/// Stable identity of one serialized cross-federate logical connection.
+///
+/// An endpoint identifies a specific route, normally derived from its source and target ports. It
+/// selects the payload codec, topology edge, and target runtime action used for a message. Several
+/// endpoints may share the same source and target [`FederateId`] values.
+///
+/// This is a logical route identity, not a federate identity, socket address, or transport
+/// connection.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EndpointId(String);
 
 impl EndpointId {
+    /// Create a stable route identity from its wire representation.
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
+    /// Return the wire representation of this endpoint identity.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -170,7 +188,7 @@ impl WireDelay {
 }
 
 /// A directed cross-federate edge with the minimum logical delay on that endpoint.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TopologyEdge {
     pub source: FederateId,
@@ -266,11 +284,14 @@ impl FederatedTopology {
     }
 
     pub fn neighbors_for(&self, federate_id: &FederateId) -> NeighborStructure {
-        NeighborStructure {
+        let mut neighbors = NeighborStructure {
             federate_id: federate_id.clone(),
             upstream: self.incoming_edges(federate_id).cloned().collect(),
             downstream: self.outgoing_edges(federate_id).cloned().collect(),
-        }
+        };
+        neighbors.upstream.sort();
+        neighbors.downstream.sort();
+        neighbors
     }
 }
 
@@ -287,11 +308,6 @@ pub enum FederateToRti {
         tag: WireTag,
     },
     Ltc {
-        federate_id: FederateId,
-        tag: WireTag,
-    },
-    /// Acknowledge that exactly one message was queued in the target scheduler.
-    MsgAck {
         federate_id: FederateId,
         tag: WireTag,
     },

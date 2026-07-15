@@ -1136,9 +1136,41 @@ fn test_local_cross_enclave_connection_does_not_require_federated_codec() {
     assert_eq!(boundary.target_port, sink.into());
     assert!(!boundary.physical);
     assert!(parts.federation.is_none());
-    assert!(parts.enclaves.values().any(|enclave| {
-        !enclave.upstream_enclaves.is_empty() || !enclave.downstream_enclaves.is_empty()
-    }));
+    let source_enclave = parts.aliases.enclave_aliases[boundary.source_partition];
+    let sink_enclave = parts.aliases.enclave_aliases[boundary.target_partition];
+    assert_ne!(source_enclave, sink_enclave);
+    assert!(parts.enclaves[source_enclave].upstream_enclaves.is_empty());
+    assert_eq!(
+        parts.enclaves[source_enclave]
+            .downstream_enclaves
+            .keys()
+            .collect_vec(),
+        vec![sink_enclave]
+    );
+    assert_eq!(
+        parts.enclaves[sink_enclave]
+            .upstream_enclaves
+            .keys()
+            .collect_vec(),
+        vec![source_enclave]
+    );
+    assert!(parts.enclaves[sink_enclave].downstream_enclaves.is_empty());
+    assert_eq!(
+        parts
+            .enclaves
+            .values()
+            .map(|enclave| enclave.upstream_enclaves.len())
+            .sum::<usize>(),
+        1
+    );
+    assert_eq!(
+        parts
+            .enclaves
+            .values()
+            .map(|enclave| enclave.downstream_enclaves.len())
+            .sum::<usize>(),
+        1
+    );
 }
 
 #[test]
@@ -1165,6 +1197,11 @@ fn test_federated_connection_lowers_endpoint_runtime_parts() {
         .expect("federated connection lowering must produce a federation");
     assert_eq!(federation.plan.endpoints.len(), 1);
     let endpoint = &federation.plan.endpoints[0].id;
+    let routes = federation.runtime.connections().routes().collect_vec();
+    assert_eq!(routes.len(), 1);
+    assert_eq!(&routes[0].endpoint, endpoint);
+    assert_eq!(routes[0].source.as_str(), "source");
+    assert_eq!(routes[0].target.as_str(), "sink");
     let sink = boomerang_federated::FederateId::new("sink");
     assert!(federation
         .runtime

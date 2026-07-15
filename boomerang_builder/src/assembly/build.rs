@@ -101,7 +101,6 @@ impl RuntimeAssembly {
     fn new(
         partition_map: &PartitionMap,
         inter_partition_plan: InterPartitionPlan,
-        enclave_deps: Vec<EnclaveDep>,
         physical_event_q_size: usize,
         #[cfg(feature = "federated")] federation: Option<PendingFederation>,
     ) -> Result<Self, AssemblyError> {
@@ -133,21 +132,16 @@ impl RuntimeAssembly {
                 })
             })
             .transpose()?;
-        // Add any enclave dependencies
-        for EnclaveDep {
-            upstream,
-            downstream,
-            delay,
-        } in enclave_deps
-        {
-            let upstream_enclave_key = aliases.enclave_aliases[upstream];
-            let downstream_enclave_key = aliases.enclave_aliases[downstream];
+        // Install local coordination directly from the common inter-partition plan.
+        for edge in inter_partition_plan.local_enclave_edges() {
+            let upstream_enclave_key = aliases.enclave_aliases[edge.source_partition];
+            let downstream_enclave_key = aliases.enclave_aliases[edge.target_partition];
 
             runtime::crosslink_enclaves(
                 &mut enclaves,
                 upstream_enclave_key,
                 downstream_enclave_key,
-                delay,
+                edge.delay,
             );
         }
         #[cfg(feature = "replay")]
@@ -210,25 +204,6 @@ fn lower_federate_enclaves(
     }
 
     Ok(federate_enclaves)
-}
-
-pub struct EnclaveDep {
-    /// Assembly reactor at the upstream end of the enclave dependency.
-    pub upstream: AssemblyReactorKey,
-    /// Assembly reactor at the downstream end of the enclave dependency.
-    pub downstream: AssemblyReactorKey,
-    /// Optional logical delay across the enclave dependency.
-    pub delay: Option<runtime::Duration>,
-}
-
-fn enclave_deps_from_inter_partition_plan(plan: &InterPartitionPlan) -> Vec<EnclaveDep> {
-    plan.local_enclave_edges()
-        .map(|edge| EnclaveDep {
-            upstream: edge.source_partition,
-            downstream: edge.target_partition,
-            delay: edge.delay,
-        })
-        .collect()
 }
 
 fn push_range<T>(target: &mut Vec<T>, values: impl IntoIterator<Item = T>) -> Range<usize> {
@@ -1068,12 +1043,10 @@ impl Assembly {
             topology,
             connections: federated_connections,
         });
-        let enclave_deps = enclave_deps_from_inter_partition_plan(&inter_partition_plan);
         let port_bindings = self.build_connections(&mut partition_map)?;
         let mut runtime_assembly = RuntimeAssembly::new(
             &partition_map,
             inter_partition_plan,
-            enclave_deps,
             config.physical_event_q_size,
             #[cfg(feature = "federated")]
             federation,

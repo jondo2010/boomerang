@@ -350,14 +350,13 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> ErasedConnectionSpec for Con
                 let EnclaveConnectionSource {
                     reactor_key,
                     input_port,
-                } = build_federated_connection_source::<T>(
+                } = build_inter_partition_connection_source::<T>(
                     assembly,
                     source_parent_reactor_key,
                     self.scope_mode,
                     target_partition,
                     action_key.into(),
-                    endpoint,
-                    encoder,
+                    InterPartitionSourceBackend::Serialized { endpoint, encoder },
                 )?;
                 partition_map.insert(reactor_key, source_partition);
                 port_bindings.bind(self.source_key, input_port.into(), assembly)?;
@@ -388,12 +387,13 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> ErasedConnectionSpec for Con
             let EnclaveConnectionSource {
                 reactor_key,
                 input_port,
-            } = build_enclave_connection_source::<T>(
+            } = build_inter_partition_connection_source::<T>(
                 assembly,
                 source_parent_reactor_key,
                 self.scope_mode,
                 target_partition,
                 action_key.into(),
+                InterPartitionSourceBackend::in_process(),
             )?;
             partition_map.insert(reactor_key, source_partition);
             port_bindings.bind(self.source_key, input_port.into(), assembly)?;
@@ -486,15 +486,31 @@ struct EnclaveConnectionSource<T: runtime::ReactorData + Clone> {
     input_port: TypedPortKey<T, Input>,
 }
 
+enum InterPartitionSourceBackend<T: runtime::ReactorData> {
+    InProcess(std::marker::PhantomData<fn() -> T>),
+    #[cfg(feature = "federated")]
+    Serialized {
+        endpoint: boomerang_federated::EndpointId,
+        encoder: Box<dyn runtime::FederatedPayloadEncoder<T>>,
+    },
+}
+
+impl<T: runtime::ReactorData> InterPartitionSourceBackend<T> {
+    fn in_process() -> Self {
+        Self::InProcess(std::marker::PhantomData)
+    }
+}
+
 /// Build the source portion
 ///
 /// The sender side is deferred until its assembly action can be resolved to a runtime action.
-fn build_enclave_connection_source<T: runtime::ReactorData + Clone>(
+fn build_inter_partition_connection_source<T: runtime::ReactorData + Clone>(
     assembly: &mut Assembly,
     parent_key: Option<AssemblyReactorKey>,
     scope_mode: Option<AssemblyModeKey>,
     target_partition: AssemblyReactorKey,
     target_action_key: AssemblyActionKey,
+    backend: InterPartitionSourceBackend<T>,
 ) -> Result<EnclaveConnectionSource<T>, AssemblyError> {
     let mut source_ctx = assembly.add_reactor("con_reactor_src", parent_key, None, (), false);
     if let Some(scope_mode) = scope_mode {
@@ -516,71 +532,30 @@ fn build_enclave_connection_source<T: runtime::ReactorData + Clone>(
             let enclave_key2 = runtime_assembly.aliases.enclave_aliases[target_partition];
             assert_eq!(enclave_key, &enclave_key2, "Temporary cross-check");
 
-            let remote_context = enclave.create_send_context(*enclave_key);
             let remote_action_ref = enclave.create_async_action_ref(*runtime_action_key);
-            runtime::InterPartitionSenderReactionFn::<T>::new(
-                remote_action_ref,
-                Box::new(runtime::InProcessInterPartitionEventSink::new(
-                    remote_context,
-                )),
-                None,
-            )
-            .into()
-        })
-        .finish()?;
-    let reactor_key = source_ctx.finish()?;
-    Ok(EnclaveConnectionSource {
-        reactor_key,
-        input_port,
-    })
-}
-
-#[cfg(feature = "federated")]
-fn build_federated_connection_source<T: runtime::ReactorData + Clone>(
-    assembly: &mut Assembly,
-    parent_key: Option<AssemblyReactorKey>,
-    scope_mode: Option<AssemblyModeKey>,
-    target_partition: AssemblyReactorKey,
-    target_action_key: AssemblyActionKey,
-    endpoint: boomerang_federated::EndpointId,
-    encoder: Box<dyn runtime::FederatedPayloadEncoder<T>>,
-) -> Result<EnclaveConnectionSource<T>, AssemblyError> {
-    let mut source_ctx = assembly.add_reactor("con_reactor_src", parent_key, None, (), false);
-    if let Some(scope_mode) = scope_mode {
-        source_ctx.set_scope_mode(scope_mode)?;
-    }
-    let input_port = source_ctx.add_input_port::<T>("con_in")?;
-    source_ctx
-        .add_reaction(None)
-        .with_trigger(input_port)
-        .with_deferred_reaction_factory(move |runtime_assembly| {
-            let (enclave_key, runtime_action_key) = runtime_assembly
-                .aliases
-                .action_aliases
-                .get(target_action_key)
-                .expect("Action key");
-            let enclave = &runtime_assembly.enclaves[*enclave_key];
-
-            let enclave_key2 = runtime_assembly.aliases.enclave_aliases[target_partition];
-            assert_eq!(enclave_key, &enclave_key2, "Temporary cross-check");
-
-            let remote_action_ref = enclave.create_async_action_ref(*runtime_action_key);
-            let (outbound, faults) = runtime_assembly
-                .federation
-                .as_ref()
-                .expect("federated sender exists only in a lowered federation")
-                .runtime
-                .connections()
-                .outbound_endpoint(&endpoint)
-                .expect("federated endpoint sink was validated before deferred lowering");
-            runtime::InterPartitionSenderReactionFn::<T>::new(
-                remote_action_ref,
-                Box::new(runtime::SerializedInterPartitionEventSink::new(
-                    encoder, outbound, faults,
-                )),
-                None,
-            )
-            .into()
+            let sink: Box<dyn runtime::InterPartitionEventSink<T>> = match backend {
+                InterPartitionSourceBackend::InProcess(_) => {
+                    let remote_context = enclave.create_send_context(*enclave_key);
+                    Box::new(runtime::InProcessInterPartitionEventSink::new(
+                        remote_context,
+                    ))
+                }
+                #[cfg(feature = "federated")]
+                InterPartitionSourceBackend::Serialized { endpoint, encoder } => {
+                    let (outbound, faults) = runtime_assembly
+                        .federation
+                        .as_ref()
+                        .expect("serialized sender exists only in a lowered federation")
+                        .runtime
+                        .connections()
+                        .outbound_endpoint(&endpoint)
+                        .expect("serialized endpoint sink was validated before deferred lowering");
+                    Box::new(runtime::SerializedInterPartitionEventSink::new(
+                        encoder, outbound, faults,
+                    ))
+                }
+            };
+            runtime::InterPartitionSenderReactionFn::<T>::new(remote_action_ref, sink, None).into()
         })
         .finish()?;
     let reactor_key = source_ctx.finish()?;

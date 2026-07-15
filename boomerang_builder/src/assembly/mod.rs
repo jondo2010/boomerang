@@ -39,7 +39,7 @@ mod tests;
 
 #[cfg(feature = "federated")]
 pub use build::LoweredFederation;
-pub use build::{DeferredRuntimeFactory, EnclaveDep, PartitionMap, RuntimeAssembly};
+pub use build::{DeferredRuntimeFactory, PartitionMap, RuntimeAssembly};
 
 #[cfg(feature = "federated")]
 type FederatedCodecPair<T> = (

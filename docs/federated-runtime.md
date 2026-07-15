@@ -5,6 +5,11 @@ runtime work. It is internal developer documentation, not an end-user guide.
 The user-facing static federation documentation lives in
 `book/src/static-federation.md`.
 
+Read [Scheduler Internals](./scheduler-internals.md) first for the common
+scheduler loop, local enclave barriers, generic logical-time coordination, and
+cross-partition sender path. This note covers only the federated protocol,
+topology, transport, and runner specialization of that machinery.
+
 ## Current Scope
 
 The implemented runtime path supports static, persistent federates connected by
@@ -47,6 +52,11 @@ separate generic runtime enclaves from the federation-specific runtime and
 delegate to `boomerang_federated` without calling back into the builder.
 
 ## Shared Execution Flow
+
+The acquire/process/complete order and ordinary event handling are defined in
+the scheduler guide. Federation supplies `RtiLogicalTimeCoordinator` as the
+external authority and `SerializedInterPartitionEventSink` as the payload
+backend; it does not replace the scheduler state machine.
 
 The following block diagram shows a one-way source-to-sink federation. Solid
 arrows are runtime data or coordination flow. Dashed arrows are construction or
@@ -204,13 +214,13 @@ reactions. Codec and sink failures are published to that source federate's
 first-error fault latch and become terminal scheduler errors. Each reaction
 writes through the endpoint-specific sink installed during lowering. The sink immediately
 converts the runtime command to a protocol `MSG` and enqueues it in the source
-federate mailbox. During `logical_tag_complete`, the barrier checks the shared
+federate mailbox. During coordinator completion, the RTI adapter checks the shared
 fault latch and enqueues `LTC` into that same mailbox after all reaction-emitted
 messages for the completed tag.
 
 Inbound payloads arrive as protocol `MSG` frames from the RTI. Each lowered
 `FederateClientRoute` owns its type-erased `FederatedInboundEndpoint`, which
-decodes and schedules that route's payload directly. The barrier returns the
+decodes and schedules that route's payload directly. The coordinator returns the
 queued `AsyncEvent` to the scheduler before reading a later RTI frame. A coordinator
 cannot dispatch an endpoint belonging to another federate because that route is
 absent from its bundle. Any failure before queue admission makes the barrier
@@ -255,7 +265,8 @@ observes `[(Tag::ZERO, 7)]`.
 
 `boomerang_builder/src/tests/federated.rs` contains assembly and live in-memory
 coverage for topology lowering, rejection behavior, three-federate chains,
-fanout, and positive-delay cycles. Its live tests invoke the federated runner
+fanout, positive-delay cycles, and exact local-versus-federated value, tag, and
+shutdown equivalence. Its live tests invoke the federated runner
 through a test-only helper; no production execution function resides in the
 builder crate.
 

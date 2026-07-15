@@ -121,7 +121,7 @@ pub enum InterPartitionEventTime {
 /// Backend for one cross-partition sender reaction.
 ///
 /// The reaction owns port extraction and delivery-time calculation. Implementations own only the
-/// placement-specific dispatch and error policy.
+/// placement-specific dispatch and error policy; they must not recalculate logical tags.
 pub trait InterPartitionEventSink<T: ReactorData>: Send + Sync + 'static {
     fn send(&self, time: InterPartitionEventTime, target: &AsyncActionRef<T>, value: &T);
 }
@@ -205,6 +205,10 @@ impl<T: ReactorData> InterPartitionEventSink<T> for SerializedInterPartitionEven
 }
 
 /// Common reaction for sending a value across any runtime partition boundary.
+///
+/// A zero logical minimum delay preserves the current complete tag, while a positive delay
+/// advances logical time and resets the microstep. The selected sink owns only dispatch and error
+/// policy.
 pub struct InterPartitionSenderReactionFn<T: ReactorData + Clone> {
     target_action_ref: AsyncActionRef<T>,
     sink: Box<dyn InterPartitionEventSink<T>>,

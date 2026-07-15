@@ -55,6 +55,8 @@ impl From<String> for CoordinationError {
 ///
 /// Implementations can block until the requested tag is granted, or return an
 /// inbound event that the scheduler should handle before trying to advance.
+/// The scheduler calls `acquire` only after local upstream barriers grant, and
+/// calls `complete` only after reactions finish and local downstream releases.
 pub trait LogicalTimeCoordinator: Send {
     /// Acquire permission to advance to `tag`.
     ///
@@ -209,8 +211,9 @@ pub(super) enum CoordinationEventResult {
 /// Scheduler-owned composition of local barriers and one optional external coordinator.
 ///
 /// Local upstream acquisition always precedes external acquisition. Local downstream release
-/// always precedes external completion. The external coordinator remains protocol-free; RTI and
-/// transport adapters live outside `boomerang_runtime`.
+/// always precedes external completion. Coordination events are consumed here before ordinary
+/// scheduler event handling. The external coordinator remains protocol-free; RTI and transport
+/// adapters live outside `boomerang_runtime`.
 #[derive(Debug)]
 pub(super) struct SchedulerCoordination {
     enclave: EnclaveKey,

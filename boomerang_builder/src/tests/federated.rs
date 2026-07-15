@@ -6,6 +6,30 @@ use crate::{port::Contained, runtime};
 
 type RecordedValues = Vec<(runtime::Tag, u32)>;
 type RecordedValuePair = (RecordedValues, RecordedValues);
+type BoundaryDeliveries = Arc<Mutex<Vec<(&'static str, runtime::Tag, u32)>>>;
+type BoundaryShutdowns = Arc<Mutex<Vec<(&'static str, runtime::Tag)>>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BoundaryEquivalenceResult {
+    deliveries: Vec<(&'static str, runtime::Tag, u32)>,
+    shutdowns: Vec<(&'static str, runtime::Tag)>,
+    completed_enclaves: usize,
+}
+
+#[derive(Clone, Copy)]
+enum BoundaryEquivalencePlacement {
+    Local,
+    Federated,
+}
+
+impl BoundaryEquivalencePlacement {
+    fn reactor_placement(self, name: &'static str) -> ReactorPlacement {
+        match self {
+            Self::Local => ReactorPlacement::Enclave,
+            Self::Federated => ReactorPlacement::federate(name),
+        }
+    }
+}
 
 fn run_lowered_federation_for_test(
     parts: RuntimeAssembly,
@@ -161,6 +185,115 @@ fn federated_startup_source_reactor(
             .finish()?;
         ctx.finish()?;
         Ok(output.contained())
+    }
+}
+
+fn equivalence_source_reactor(
+    partition: &'static str,
+    value: u32,
+    emit_at_next_microstep: bool,
+    shutdowns: BoundaryShutdowns,
+) -> impl Reactor<(), Ports = TypedPortKey<u32, Output, Contained>> {
+    move |name: &str,
+          state: (),
+          parent: Option<AssemblyReactorKey>,
+          scope_mode: Option<AssemblyModeKey>,
+          bank_info: Option<runtime::BankInfo>,
+          placement: ReactorPlacement,
+          assembly: &mut Assembly| {
+        let mut ctx = assembly.add_reactor(name, parent, bank_info, state, placement);
+        if let Some(scope_mode) = scope_mode {
+            ctx.set_scope_mode(scope_mode)?;
+        }
+        let output = ctx.add_output_port::<u32>("out")?;
+        let startup = ctx.get_startup_action();
+        let shutdown = ctx.get_shutdown_action();
+        if emit_at_next_microstep {
+            let emit = ctx.add_logical_action::<()>("emit", None)?;
+            ctx.add_reaction(Some("schedule_emit"))
+                .with_trigger(startup)
+                .with_effect(emit)
+                .with_reaction_fn(|ctx, _state, (_startup, mut emit)| {
+                    ctx.schedule_action(&mut emit, (), None);
+                })
+                .finish()?;
+            ctx.add_reaction(Some("emit"))
+                .with_trigger(emit)
+                .with_effect(output)
+                .with_reaction_fn(move |ctx, _state, (_emit, mut output)| {
+                    *output = Some(value);
+                    ctx.schedule_shutdown(None);
+                })
+                .finish()?;
+        } else {
+            ctx.add_reaction(Some("emit"))
+                .with_trigger(startup)
+                .with_effect(output)
+                .with_reaction_fn(move |ctx, _state, (_startup, mut output)| {
+                    *output = Some(value);
+                    ctx.schedule_shutdown(None);
+                })
+                .finish()?;
+        }
+        let shutdowns = Arc::clone(&shutdowns);
+        ctx.add_reaction(Some("record_shutdown"))
+            .with_trigger(shutdown)
+            .with_reaction_fn(move |ctx, _state, (_shutdown,)| {
+                shutdowns.lock().unwrap().push((partition, ctx.get_tag()));
+            })
+            .finish()?;
+        ctx.finish()?;
+        Ok(output.contained())
+    }
+}
+
+fn equivalence_sink_reactor(
+    partition: &'static str,
+    deliveries: BoundaryDeliveries,
+    shutdowns: BoundaryShutdowns,
+) -> impl Reactor<(), Ports = TypedPortKey<u32, Input, Contained>> {
+    move |name: &str,
+          state: (),
+          parent: Option<AssemblyReactorKey>,
+          scope_mode: Option<AssemblyModeKey>,
+          bank_info: Option<runtime::BankInfo>,
+          placement: ReactorPlacement,
+          assembly: &mut Assembly| {
+        let mut ctx = assembly.add_reactor(name, parent, bank_info, state, placement);
+        if let Some(scope_mode) = scope_mode {
+            ctx.set_scope_mode(scope_mode)?;
+        }
+        let input = ctx.add_input_port::<u32>("in")?;
+        let startup = ctx.get_startup_action();
+        let shutdown = ctx.get_shutdown_action();
+        ctx.add_reaction(Some("shutdown_if_no_input"))
+            .with_trigger(startup)
+            .with_reaction_fn(|ctx, _state, (_startup,)| {
+                ctx.schedule_shutdown(Some(runtime::Duration::seconds(1)));
+            })
+            .finish()?;
+        let deliveries = Arc::clone(&deliveries);
+        ctx.add_reaction(Some("record"))
+            .with_trigger(input)
+            .with_reaction_fn(move |ctx, _state, (input,)| {
+                if let Some(value) = *input {
+                    deliveries
+                        .lock()
+                        .unwrap()
+                        .push((partition, ctx.get_tag(), value));
+                    ctx.schedule_shutdown(None);
+                }
+            })
+            .finish()?;
+        let shutdowns = Arc::clone(&shutdowns);
+        ctx.add_reaction(Some("record_shutdown"))
+            .with_trigger(shutdown)
+            .with_reaction_fn(move |ctx, _state, (_shutdown,)| {
+                shutdowns.lock().unwrap().push((partition, ctx.get_tag()));
+            })
+            .finish()?;
+        ctx.finish()?;
+        Ok(input.contained())
     }
 }
 
@@ -581,6 +714,62 @@ fn run_live_in_memory_federated_source_sink(
     recorded_values
 }
 
+fn run_boundary_equivalence(
+    placement: BoundaryEquivalencePlacement,
+    delay: Option<runtime::Duration>,
+    emit_at_next_microstep: bool,
+) -> BoundaryEquivalenceResult {
+    let deliveries = Arc::new(Mutex::new(Vec::new()));
+    let shutdowns = Arc::new(Mutex::new(Vec::new()));
+    let mut assembly = Assembly::new();
+    if matches!(placement, BoundaryEquivalencePlacement::Federated) {
+        register_u32_federated_codec(&mut assembly).unwrap();
+    }
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    let source = ctx
+        .add_child_reactor_with_placement(
+            equivalence_source_reactor("source", 7, emit_at_next_microstep, Arc::clone(&shutdowns)),
+            "source",
+            (),
+            placement.reactor_placement("source"),
+        )
+        .unwrap();
+    let sink = ctx
+        .add_child_reactor_with_placement(
+            equivalence_sink_reactor("sink", Arc::clone(&deliveries), Arc::clone(&shutdowns)),
+            "sink",
+            (),
+            placement.reactor_placement("sink"),
+        )
+        .unwrap();
+    ctx.connect_port(source, sink, delay, false).unwrap();
+    ctx.finish().unwrap();
+
+    let config = runtime::Config::default().with_fast_forward(true);
+    let parts = assembly.into_runtime_assembly(&config).unwrap();
+    let completed_enclaves = match placement {
+        BoundaryEquivalencePlacement::Local => {
+            assert!(parts.federation.is_none());
+            runtime::execute_enclaves(parts.enclaves.into_iter(), config)
+                .unwrap()
+                .len()
+        }
+        BoundaryEquivalencePlacement::Federated => run_lowered_federation_for_test(parts, config)
+            .unwrap()
+            .len(),
+    };
+
+    let mut deliveries = deliveries.lock().unwrap().clone();
+    deliveries.sort();
+    let mut shutdowns = shutdowns.lock().unwrap().clone();
+    shutdowns.sort();
+    BoundaryEquivalenceResult {
+        deliveries,
+        shutdowns,
+        completed_enclaves,
+    }
+}
+
 fn run_live_in_memory_no_message_source_sink() -> Vec<(runtime::Tag, u32)> {
     let values = Arc::new(Mutex::new(Vec::new()));
     let mut assembly = Assembly::new();
@@ -926,6 +1115,72 @@ fn test_live_in_memory_distributed_delayed_connection_records_delay_tag() {
     });
 
     assert_eq!(values, vec![(runtime::Tag::new(delay, 0), 7)]);
+}
+
+#[test]
+fn test_supported_local_and_federated_boundaries_are_semantically_equivalent() {
+    let immediate_local = run_with_wall_timeout("local immediate boundary equivalence", || {
+        run_boundary_equivalence(BoundaryEquivalencePlacement::Local, None, false)
+    });
+    let immediate_federated =
+        run_with_wall_timeout("federated immediate boundary equivalence", || {
+            run_boundary_equivalence(BoundaryEquivalencePlacement::Federated, None, false)
+        });
+    let microstep_local = run_with_wall_timeout("local microstep boundary equivalence", || {
+        run_boundary_equivalence(BoundaryEquivalencePlacement::Local, None, true)
+    });
+    let microstep_federated =
+        run_with_wall_timeout("federated microstep boundary equivalence", || {
+            run_boundary_equivalence(BoundaryEquivalencePlacement::Federated, None, true)
+        });
+    let delay = runtime::Duration::milliseconds(10);
+    let delayed_local = run_with_wall_timeout("local delayed boundary equivalence", move || {
+        run_boundary_equivalence(BoundaryEquivalencePlacement::Local, Some(delay), false)
+    });
+    let delayed_federated =
+        run_with_wall_timeout("federated delayed boundary equivalence", move || {
+            run_boundary_equivalence(BoundaryEquivalencePlacement::Federated, Some(delay), false)
+        });
+
+    assert_eq!(immediate_local, immediate_federated);
+    assert_eq!(microstep_local, microstep_federated);
+    assert_eq!(delayed_local, delayed_federated);
+    assert_eq!(immediate_local.completed_enclaves, 2);
+    assert_eq!(microstep_local.completed_enclaves, 2);
+    assert_eq!(delayed_local.completed_enclaves, 2);
+    assert_eq!(
+        immediate_local.deliveries,
+        vec![("sink", runtime::Tag::ZERO, 7)]
+    );
+    assert_eq!(
+        microstep_local.deliveries,
+        vec![("sink", runtime::Tag::new(runtime::Duration::ZERO, 1), 7,)]
+    );
+    assert_eq!(
+        delayed_local.deliveries,
+        vec![("sink", runtime::Tag::new(delay, 0), 7)]
+    );
+    assert_eq!(
+        immediate_local.shutdowns,
+        vec![
+            ("sink", runtime::Tag::new(runtime::Duration::ZERO, 1)),
+            ("source", runtime::Tag::new(runtime::Duration::ZERO, 1)),
+        ]
+    );
+    assert_eq!(
+        microstep_local.shutdowns,
+        vec![
+            ("sink", runtime::Tag::new(runtime::Duration::ZERO, 2)),
+            ("source", runtime::Tag::new(runtime::Duration::ZERO, 2)),
+        ]
+    );
+    assert_eq!(
+        delayed_local.shutdowns,
+        vec![
+            ("sink", runtime::Tag::new(delay, 1)),
+            ("source", runtime::Tag::new(runtime::Duration::ZERO, 1)),
+        ]
+    );
 }
 
 #[test]

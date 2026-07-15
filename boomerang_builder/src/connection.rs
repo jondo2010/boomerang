@@ -518,8 +518,14 @@ fn build_enclave_connection_source<T: runtime::ReactorData + Clone>(
 
             let remote_context = enclave.create_send_context(*enclave_key);
             let remote_action_ref = enclave.create_async_action_ref(*runtime_action_key);
-            runtime::EnclaveSenderReactionFn::<T>::new(remote_context, remote_action_ref, None)
-                .into()
+            runtime::InterPartitionSenderReactionFn::<T>::new(
+                remote_action_ref,
+                Box::new(runtime::InProcessInterPartitionEventSink::new(
+                    remote_context,
+                )),
+                None,
+            )
+            .into()
         })
         .finish()?;
     let reactor_key = source_ctx.finish()?;
@@ -567,11 +573,12 @@ fn build_federated_connection_source<T: runtime::ReactorData + Clone>(
                 .connections()
                 .outbound_endpoint(&endpoint)
                 .expect("federated endpoint sink was validated before deferred lowering");
-            runtime::FederatedSenderReactionFn::<T>::new(
+            runtime::InterPartitionSenderReactionFn::<T>::new(
                 remote_action_ref,
-                encoder,
-                outbound,
-                faults,
+                Box::new(runtime::SerializedInterPartitionEventSink::new(
+                    encoder, outbound, faults,
+                )),
+                None,
             )
             .into()
         })

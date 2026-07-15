@@ -66,13 +66,14 @@ flowchart LR
     subgraph Source["Source federate / enclave"]
         SchedA["Scheduler A"]
         SourceReaction["Source reaction<br/>writes output port"]
-        SenderReaction["FederatedSenderReactionFn<br/>encode payload + runtime tag"]
+        SenderReaction["InterPartitionSenderReactionFn<br/>calculate delivery time"]
+        SerializedSink["SerializedInterPartitionEventSink<br/>encode payload"]
         EndpointSink["Endpoint-specific protocol sink<br/>runtime command → MSG"]
         ConnectionA["FederatedRuntimeConnection A<br/>single outbound mailbox,<br/>routes with attached handlers,<br/>source-local fault state"]
         CoordinatorA["RtiLogicalTimeCoordinator A"]
         ClientA["FederateProtocolClient A"]
 
-        SchedA --> SourceReaction --> SenderReaction --> EndpointSink --> ConnectionA --> ClientA
+        SchedA --> SourceReaction --> SenderReaction --> SerializedSink --> EndpointSink --> ConnectionA --> ClientA
         SchedA -->|tag request / completion| CoordinatorA
         CoordinatorA -->|grant or inbound interrupt| SchedA
         CoordinatorA -->|NET, LTC, Stop| ConnectionA
@@ -117,9 +118,9 @@ flowchart LR
     Runner -. consumes bundles and attaches transport .-> ConnectionA
     Runner -. consumes bundles and attaches transport .-> ConnectionB
     Runner -. creates protocol session .-> RTI
-    SenderReaction -. records codec or send failure .-> ConnectionA
-    BarrierA -. checks local fault state .-> ConnectionA
-    BarrierB -. checks local fault state .-> ConnectionB
+    SerializedSink -. records codec or send failure .-> ConnectionA
+    CoordinatorA -. checks local fault state .-> ConnectionA
+    CoordinatorB -. checks local fault state .-> ConnectionB
 ```
 
 Each generated sender reaction represents one statically known endpoint, so

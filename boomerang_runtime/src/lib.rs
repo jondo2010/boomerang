@@ -46,10 +46,11 @@ pub use kanal::{Receiver, Sender};
 pub use key_set::KeySetLimits as ReactionSetLimits;
 pub use port::{DynPortRef, DynPortRefMut, *};
 #[cfg(feature = "federated")]
-pub use reaction::FederatedSenderReactionFn;
+pub use reaction::SerializedInterPartitionEventSink;
 pub use reaction::{
-    BoxedReactionFn, ConnectionReceiverReactionFn, ConnectionSenderReactionFn, Deadline,
-    EnclaveSenderReactionFn, FromRefs, Reaction, ReactionFn, ReactionKey, ReactionSet,
+    BoxedReactionFn, ConnectionReceiverReactionFn, ConnectionSenderReactionFn, Deadline, FromRefs,
+    InProcessInterPartitionEventSink, InterPartitionEventSink, InterPartitionEventTime,
+    InterPartitionSenderReactionFn, Reaction, ReactionFn, ReactionKey, ReactionSet,
 };
 pub use reactor::*;
 pub use refs::{Refs, RefsMut};

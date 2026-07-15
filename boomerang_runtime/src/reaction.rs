@@ -3,6 +3,7 @@ use std::{fmt::Debug, sync::RwLock};
 use crate::{
     key_set::KeySet, ActionCommon, ActionRef, AsyncActionRef, BaseReactor, CommonContext, Context,
     Duration, InputRef, OutputRef, ReactionRefs, ReactionRefsExtract, ReactorData, SendContext,
+    Tag,
 };
 #[cfg(feature = "federated")]
 use crate::{
@@ -108,101 +109,69 @@ where
     }
 }
 
-/// Special type implementing [`ReactionFn`] for sending data to an another Enclave.
-///
-/// This is used to implement connections between Ports in different Enclaves.
-/// The Reaction using this function should be 'triggered' by the sending side port only.
-pub struct EnclaveSenderReactionFn<T: ReactorData + Clone> {
-    /// A clone of the sender side context
-    remote_context: SendContext,
-    /// The remote action that we're sending data to.
-    remote_action_ref: AsyncActionRef<T>,
-    /// The optional delay to apply to the event.
-    delay: Option<Duration>,
+/// Placement-neutral delivery time calculated by a cross-partition sender reaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterPartitionEventTime {
+    /// Deliver at this complete logical tag.
+    Logical(Tag),
+    /// Deliver as a physical event with an optional additional delay.
+    Physical(Option<Duration>),
 }
 
-impl<T: ReactorData + Clone> EnclaveSenderReactionFn<T> {
-    pub fn new(
-        remote_context: SendContext,
-        remote_action_ref: AsyncActionRef<T>,
-        delay: Option<Duration>,
-    ) -> Self {
-        Self {
-            remote_context,
-            remote_action_ref,
-            delay,
-        }
+/// Backend for one cross-partition sender reaction.
+///
+/// The reaction owns port extraction and delivery-time calculation. Implementations own only the
+/// placement-specific dispatch and error policy.
+pub trait InterPartitionEventSink<T: ReactorData>: Send + Sync + 'static {
+    fn send(&self, time: InterPartitionEventTime, target: &AsyncActionRef<T>, value: &T);
+}
+
+/// In-process cross-partition event sink backed by a scheduler send context.
+pub struct InProcessInterPartitionEventSink {
+    remote_context: SendContext,
+}
+
+impl InProcessInterPartitionEventSink {
+    pub fn new(remote_context: SendContext) -> Self {
+        Self { remote_context }
     }
 }
 
-impl<'store, T: ReactorData + Clone> ReactionFn<'store> for EnclaveSenderReactionFn<T> {
-    fn trigger(
-        &mut self,
-        ctx: &'store mut Context,
-        _state: &'store mut dyn BaseReactor,
-        refs: ReactionRefs<'store>,
-    ) {
-        let port: InputRef<T> = match refs.ports.partition() {
-            Ok(port) => port,
-            Err(error) => {
-                tracing::error!(?error, "Failed to destructure ports");
-                return;
-            }
-        };
-        if let Some(value) = (*port).as_ref() {
-            //TODO something nicer here
-            if self.remote_action_ref.is_logical() {
-                let current_tag = ctx.get_tag();
-
-                let delay = self.remote_action_ref.min_delay();
-
-                let tag = if delay.is_zero() {
-                    current_tag
-                } else {
-                    current_tag.delay(delay)
-                };
-
+impl<T: ReactorData + Clone> InterPartitionEventSink<T> for InProcessInterPartitionEventSink {
+    fn send(&self, time: InterPartitionEventTime, target: &AsyncActionRef<T>, value: &T) {
+        match time {
+            InterPartitionEventTime::Logical(tag) => {
                 self.remote_context
                     .schedule_external(crate::event::AsyncEvent::Logical {
                         tag,
-                        key: self.remote_action_ref.key(),
+                        key: target.key(),
                         value: Box::new(value.clone()),
                     });
-            } else {
-                self.remote_context.schedule_action_async(
-                    &self.remote_action_ref,
-                    value.clone(),
-                    self.delay,
-                );
             }
-        } else {
-            tracing::warn!("Port is empty, skipping event send");
+            InterPartitionEventTime::Physical(delay) => {
+                self.remote_context
+                    .schedule_action_async(target, value.clone(), delay);
+            }
         }
     }
 }
 
-/// Special type implementing [`ReactionFn`] for sending serialized data to a remote federate.
-///
-/// This mirrors [`EnclaveSenderReactionFn`] for logical actions, but emits an outbound command that
-/// can be converted to a protocol MSG frame by a federated client.
+/// Serialized cross-partition event sink backed by a protocol-free encoder and outbound channel.
 #[cfg(feature = "federated")]
-pub struct FederatedSenderReactionFn<T: ReactorData + Clone> {
-    target_action_ref: AsyncActionRef<T>,
+pub struct SerializedInterPartitionEventSink<T: ReactorData> {
     encoder: Box<dyn FederatedPayloadEncoder<T>>,
     outbound: Box<dyn FederatedOutboundSink>,
     faults: FederatedFaultState,
 }
 
 #[cfg(feature = "federated")]
-impl<T: ReactorData + Clone> FederatedSenderReactionFn<T> {
+impl<T: ReactorData> SerializedInterPartitionEventSink<T> {
     pub fn new(
-        target_action_ref: AsyncActionRef<T>,
         encoder: Box<dyn FederatedPayloadEncoder<T>>,
         outbound: Box<dyn FederatedOutboundSink>,
         faults: FederatedFaultState,
     ) -> Self {
         Self {
-            target_action_ref,
             encoder,
             outbound,
             faults,
@@ -211,37 +180,11 @@ impl<T: ReactorData + Clone> FederatedSenderReactionFn<T> {
 }
 
 #[cfg(feature = "federated")]
-impl<'store, T: ReactorData + Clone> ReactionFn<'store> for FederatedSenderReactionFn<T> {
-    fn trigger(
-        &mut self,
-        ctx: &'store mut Context,
-        _state: &'store mut dyn BaseReactor,
-        refs: ReactionRefs<'store>,
-    ) {
-        let port: InputRef<T> = match refs.ports.partition() {
-            Ok(port) => port,
-            Err(error) => {
-                tracing::error!(?error, "Failed to destructure ports");
-                return;
-            }
-        };
-
-        let Some(value) = (*port).as_ref() else {
-            tracing::warn!("Port is empty, skipping federated event send");
+impl<T: ReactorData> InterPartitionEventSink<T> for SerializedInterPartitionEventSink<T> {
+    fn send(&self, time: InterPartitionEventTime, _target: &AsyncActionRef<T>, value: &T) {
+        let InterPartitionEventTime::Logical(tag) = time else {
+            tracing::error!("Serialized sender cannot target a physical action");
             return;
-        };
-
-        if !self.target_action_ref.is_logical() {
-            tracing::error!("Federated sender cannot target a physical action");
-            return;
-        }
-
-        let current_tag = ctx.get_tag();
-        let delay = self.target_action_ref.min_delay();
-        let tag = if delay.is_zero() {
-            current_tag
-        } else {
-            current_tag.delay(delay)
         };
 
         let payload = match self.encoder.encode(value) {
@@ -254,11 +197,66 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for FederatedSenderReact
         };
 
         let command = FederatedOutboundCommand::Msg(FederatedOutboundMessage { tag, payload });
-
         if let Err(error) = self.outbound.send(command) {
             tracing::error!(?error, "Failed to emit federated command");
             self.faults.record(error);
         }
+    }
+}
+
+/// Common reaction for sending a value across any runtime partition boundary.
+pub struct InterPartitionSenderReactionFn<T: ReactorData + Clone> {
+    target_action_ref: AsyncActionRef<T>,
+    sink: Box<dyn InterPartitionEventSink<T>>,
+    physical_delay: Option<Duration>,
+}
+
+impl<T: ReactorData + Clone> InterPartitionSenderReactionFn<T> {
+    pub fn new(
+        target_action_ref: AsyncActionRef<T>,
+        sink: Box<dyn InterPartitionEventSink<T>>,
+        physical_delay: Option<Duration>,
+    ) -> Self {
+        Self {
+            target_action_ref,
+            sink,
+            physical_delay,
+        }
+    }
+}
+
+impl<'store, T: ReactorData + Clone> ReactionFn<'store> for InterPartitionSenderReactionFn<T> {
+    fn trigger(
+        &mut self,
+        ctx: &'store mut Context,
+        _state: &'store mut dyn BaseReactor,
+        refs: ReactionRefs<'store>,
+    ) {
+        let port: InputRef<T> = match refs.ports.partition() {
+            Ok(port) => port,
+            Err(error) => {
+                tracing::error!(?error, "Failed to destructure ports");
+                return;
+            }
+        };
+        let Some(value) = (*port).as_ref() else {
+            tracing::warn!("Port is empty, skipping inter-partition event send");
+            return;
+        };
+
+        let time = if self.target_action_ref.is_logical() {
+            let current_tag = ctx.get_tag();
+            let delay = self.target_action_ref.min_delay();
+            InterPartitionEventTime::Logical(if delay.is_zero() {
+                current_tag
+            } else {
+                current_tag.delay(delay)
+            })
+        } else {
+            InterPartitionEventTime::Physical(self.physical_delay)
+        };
+
+        self.sink.send(time, &self.target_action_ref, value);
     }
 }
 
@@ -558,24 +556,27 @@ mod tests {
             let target = logical_action_ref::<u32>(delay);
             let (local_tx, local_rx) = kanal::unbounded();
             let (_local_shutdown_tx, local_shutdown_rx) = keepalive::channel();
-            let mut local = EnclaveSenderReactionFn::new(
-                SendContext {
+            let mut local = InterPartitionSenderReactionFn::new(
+                target.clone(),
+                Box::new(InProcessInterPartitionEventSink::new(SendContext {
                     enclave_key: EnclaveKey::from(1),
                     async_tx: local_tx,
                     shutdown_rx: local_shutdown_rx,
-                },
-                target.clone(),
+                })),
                 None,
             );
 
             let commands = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let mut serialized = FederatedSenderReactionFn::new(
+            let mut serialized = InterPartitionSenderReactionFn::new(
                 target,
-                Box::new(|value: &u32| Ok(value.to_le_bytes().to_vec())),
-                Box::new(RecordingOutboundSink {
-                    commands: Arc::clone(&commands),
-                }),
-                FederatedFaultState::default(),
+                Box::new(SerializedInterPartitionEventSink::new(
+                    Box::new(|value: &u32| Ok(value.to_le_bytes().to_vec())),
+                    Box::new(RecordingOutboundSink {
+                        commands: Arc::clone(&commands),
+                    }),
+                    FederatedFaultState::default(),
+                )),
+                None,
             );
 
             trigger_sender(&mut local, current_tag, value);
@@ -617,23 +618,26 @@ mod tests {
         let target = physical_action_ref::<u32>(Some(Duration::milliseconds(1)));
         let (local_tx, local_rx) = kanal::unbounded();
         let (_local_shutdown_tx, local_shutdown_rx) = keepalive::channel();
-        let mut local = EnclaveSenderReactionFn::new(
-            SendContext {
+        let mut local = InterPartitionSenderReactionFn::new(
+            target.clone(),
+            Box::new(InProcessInterPartitionEventSink::new(SendContext {
                 enclave_key: EnclaveKey::from(1),
                 async_tx: local_tx,
                 shutdown_rx: local_shutdown_rx,
-            },
-            target.clone(),
+            })),
             None,
         );
         let commands = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let mut serialized = FederatedSenderReactionFn::new(
+        let mut serialized = InterPartitionSenderReactionFn::new(
             target,
-            Box::new(|value: &u32| Ok(value.to_le_bytes().to_vec())),
-            Box::new(RecordingOutboundSink {
-                commands: Arc::clone(&commands),
-            }),
-            FederatedFaultState::default(),
+            Box::new(SerializedInterPartitionEventSink::new(
+                Box::new(|value: &u32| Ok(value.to_le_bytes().to_vec())),
+                Box::new(RecordingOutboundSink {
+                    commands: Arc::clone(&commands),
+                }),
+                FederatedFaultState::default(),
+            )),
+            None,
         );
 
         trigger_sender(&mut local, Tag::ZERO, value);

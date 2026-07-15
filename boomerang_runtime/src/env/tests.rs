@@ -1,5 +1,8 @@
 use crate::{
-    reaction::{ConnectionReceiverReactionFn, EnclaveSenderReactionFn},
+    reaction::{
+        ConnectionReceiverReactionFn, InProcessInterPartitionEventSink,
+        InterPartitionSenderReactionFn,
+    },
     reaction_closure, Action, Config, InputRef, OutputRef, Port, Reactor,
 };
 
@@ -153,9 +156,11 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
     let reaction_a = enclave_a.insert_reaction(
         Reaction::new(
             "reactionA",
-            EnclaveSenderReactionFn::<u32>::new(
-                enclave_b_remote_context,
+            InterPartitionSenderReactionFn::<u32>::new(
                 enclave_b_remote_action_ref,
+                Box::new(InProcessInterPartitionEventSink::new(
+                    enclave_b_remote_context,
+                )),
                 None,
             ),
             None,

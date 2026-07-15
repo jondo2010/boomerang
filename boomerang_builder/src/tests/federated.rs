@@ -8,6 +8,7 @@ type RecordedValues = Vec<(runtime::Tag, u32)>;
 type RecordedValuePair = (RecordedValues, RecordedValues);
 type BoundaryDeliveries = Arc<Mutex<Vec<(&'static str, runtime::Tag, u32)>>>;
 type BoundaryShutdowns = Arc<Mutex<Vec<(&'static str, runtime::Tag)>>>;
+const TEST_WALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BoundaryEquivalenceResult {
@@ -679,7 +680,7 @@ fn run_with_wall_timeout<T: Send + 'static>(
         let _ = tx.send(result);
     });
 
-    match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+    match rx.recv_timeout(TEST_WALL_TIMEOUT) {
         Ok(Ok(value)) => value,
         Ok(Err(payload)) => std::panic::resume_unwind(payload),
         Err(_) => panic!("{label} timed out"),

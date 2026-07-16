@@ -170,6 +170,20 @@ pub struct FederatedRuntimeConnections {
 }
 
 impl FederatedRuntimeConnections {
+    /// Build one runtime connection per federate and one inbound route per topology edge.
+    pub fn from_topology(topology: &crate::FederatedTopology) -> Result<Self, FederateClientError> {
+        Self::new(
+            topology.federates.iter().cloned(),
+            topology.edges.iter().map(|edge| {
+                FederateClientRoute::new(
+                    edge.endpoint.clone(),
+                    edge.source.clone(),
+                    edge.target.clone(),
+                )
+            }),
+        )
+    }
+
     pub fn new(
         federates: impl IntoIterator<Item = FederateId>,
         routes: impl IntoIterator<Item = FederateClientRoute>,

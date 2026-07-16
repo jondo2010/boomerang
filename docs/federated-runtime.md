@@ -39,12 +39,12 @@ types, `RtiState`, `StaticRtiSession`, `FederateProtocolClient`,
 `StaticFederationRuntime` plus the transport-specific `static_runner::run_*`
 functions.
 
-`boomerang_builder` owns topology validation and lowering. It turns assembly
-metadata into a `FederationPlan`, validates unsupported topology shapes, lowers
-the RTI's immutable `CompiledTopology`, validates and caches bidirectional
-federate/enclave placement, and returns `RuntimeAssembly` with a federated-owned
-`StaticFederationRuntime`. It contains no production execution entry point or
-runner-error conversion.
+`boomerang_builder` owns topology validation and lowering. It projects the
+federated subset of its transient partition-boundary analysis directly into the RTI's immutable
+`CompiledTopology`, validates unsupported topology shapes, validates and caches
+bidirectional federate/enclave placement, and returns `RuntimeAssembly` with a
+federated-owned `StaticFederationRuntime`. It contains no production execution
+entry point or runner-error conversion.
 
 The top-level `boomerang` crate owns the application-facing
 `execute_federation_in_memory` and `execute_federation_over_tcp` functions. They
@@ -67,7 +67,7 @@ static runners.
 ```mermaid
 flowchart LR
     AssemblyModel["Assembly<br/>reactors, ports, connections"]
-    Parts["RuntimeAssembly<br/>ready-to-run enclaves + optional<br/>LoweredFederation aggregate"]
+    Parts["RuntimeAssembly<br/>ready-to-run enclaves + optional<br/>StaticFederationRuntime"]
     Runner["Static federation runner<br/>validates and connects transports"]
 
     AssemblyModel -->|lower| Parts
@@ -148,9 +148,9 @@ the runner. Non-empty unmapped enclaves are rejected.
 
 `Assembly::into_runtime_assembly` produces `RuntimeAssembly` containing the
 runtime enclaves, assembly-to-runtime aliases, inter-partition metadata, and an
-optional `LoweredFederation`. A present aggregate owns the federation plan, the
-compiled RTI topology, the resolved federate-to-enclave map, and one complete
-runtime connection bundle per federate; a local-only assembly has no aggregate.
+optional `StaticFederationRuntime`. A present runtime owns the compiled RTI
+topology, the resolved federate-to-enclave map, and one complete runtime
+connection bundle per federate; a local-only assembly has no federation runtime.
 Each bundle owns the prebuilt protocol mailbox, routes targeting that federate,
 only that federate's typed inbound endpoint handlers, and the source-local
 terminal fault state. Deferred reaction construction attaches the final
@@ -190,8 +190,8 @@ static manifest and produce ordered per-federate neighbor views, immediate and
 transitive dependencies, minimum cumulative path delays, downstream work sets,
 and exact route keys.
 `RuntimeAssembly::federation` carries that artifact inside its
-`LoweredFederation` and federated-owned `StaticFederationRuntime` to
-`StaticRtiSession`; RTI startup does not recompute it. Raw-topology session
+federated-owned `StaticFederationRuntime` to `StaticRtiSession`; RTI startup
+does not recompute it. Raw-topology session
 constructors remain as a convenience for callers outside the builder and
 compile once at their configuration boundary. `StaticFederationRuntime`
 similarly validates its one-to-one federate/enclave placement once when it is

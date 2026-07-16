@@ -93,8 +93,9 @@ impl StaticFederationRuntime {
     pub fn new(
         topology: CompiledTopology,
         federate_enclaves: BTreeMap<FederateId, boomerang_runtime::EnclaveKey>,
-        connections: crate::FederatedRuntimeConnections,
     ) -> Result<Self, FederatePlacementError> {
+        let connections = crate::FederatedRuntimeConnections::from_topology(topology.topology())
+            .expect("compiled topology must produce valid runtime connections");
         Ok(Self {
             topology,
             placement: FederateEnclaveMap::new(federate_enclaves)?,
@@ -860,7 +861,6 @@ mod tests {
         let source_enclave = enclaves.insert(boomerang_runtime::Enclave::default());
         let sink_enclave = enclaves.insert(boomerang_runtime::Enclave::default());
 
-        let route = FederateClientRoute::new(endpoint.clone(), source.clone(), sink.clone());
         let runtime = StaticFederationRuntime::new(
             CompiledTopology::new(FederatedTopology::with_edges(
                 [source.clone(), sink.clone()],
@@ -876,7 +876,6 @@ mod tests {
                 (source.clone(), source_enclave),
                 (sink.clone(), sink_enclave),
             ]),
-            crate::FederatedRuntimeConnections::new([source, sink], [route]).unwrap(),
         )
         .unwrap();
         (runtime, enclaves)
@@ -956,7 +955,6 @@ mod tests {
         let runtime = StaticFederationRuntime::new(
             CompiledTopology::new(FederatedTopology::default()).unwrap(),
             BTreeMap::new(),
-            crate::FederatedRuntimeConnections::new([], []).unwrap(),
         )
         .unwrap();
         let tcp = TcpStaticFederationConfig {

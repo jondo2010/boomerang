@@ -11,7 +11,7 @@
 
 use anyhow::Context;
 use boomerang::{
-    builder::{Assembly, Reactor, RuntimeAssembly},
+    builder::{Assembly, Reactor, ReactorPlacement, RuntimeAssembly},
     runtime,
 };
 use clap::Parser;
@@ -87,7 +87,15 @@ pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
 ) -> anyhow::Result<(R::Ports, Vec<runtime::Env>)> {
     let mut assembly = Assembly::new();
     let reactor = reactor
-        .build(name, state, None, None, None, false, &mut assembly)
+        .build(
+            name,
+            state,
+            None,
+            None,
+            None,
+            ReactorPlacement::Local,
+            &mut assembly,
+        )
         .context("Error building top-level reactor!")?;
 
     assembly.validate_reactions()?;
@@ -110,7 +118,7 @@ pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
     Ok((reactor, envs_out))
 }
 
-/// Utility method to build and run a given top-level `Reactor`.
+/// Utility method to build and run a given top-level `Reactor` locally (non-federated or enclaved).
 ///
 /// This method is intended to be used from the `main` function of a binary.
 ///
@@ -133,7 +141,15 @@ where
     // build the reactor
     let mut assembly = Assembly::new();
     let reactor = reactor
-        .build(name, state, None, None, None, false, &mut assembly)
+        .build(
+            name,
+            state,
+            None,
+            None,
+            None,
+            ReactorPlacement::Local,
+            &mut assembly,
+        )
         .context("Error building top-level reactor!")?;
 
     let args = Args::parse();

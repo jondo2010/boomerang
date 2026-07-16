@@ -42,7 +42,7 @@ fn run_lowered_federation_for_test(
     let federation = parts
         .federation
         .expect("test federation must contain lowered runtime state");
-    boomerang_federated::static_runner::run_in_memory(federation.runtime, parts.enclaves, config)
+    boomerang_federated::static_runner::run_in_memory(federation, parts.enclaves, config)
 }
 
 #[derive(Clone, Copy)]
@@ -69,12 +69,9 @@ impl FederatedOutboundCapture {
             .federation
             .as_mut()
             .expect("federated assembly must contain lowered federation data");
-        assert_eq!(federation.plan.endpoints.len(), 1);
-        let source = boomerang_federated::FederateId::new(
-            federation.plan.endpoints[0].source_federate.clone(),
-        );
+        assert_eq!(federation.topology().topology().edges.len(), 1);
+        let source = federation.topology().topology().edges[0].source.clone();
         let mailbox = federation
-            .runtime
             .connections_mut()
             .take_mailbox(&source)
             .expect("source federate mailbox was created during lowering");
@@ -496,19 +493,17 @@ fn register_u32_federated_codec(assembly: &mut Assembly) -> Result<(), AssemblyE
 }
 
 fn route_outbound_commands_through_rti(
-    plan: &FederationPlan,
+    topology: &boomerang_federated::FederatedTopology,
     commands: Vec<boomerang_federated::FederateToRti>,
     connections: &boomerang_federated::FederatedRuntimeConnections,
 ) -> Vec<runtime::Tag> {
-    let topology = federation_topology_from_plan(plan).unwrap();
     let mut rti = boomerang_federated::RtiState::new(topology.clone()).unwrap();
-    for federate in &plan.federates {
-        let federate_id = boomerang_federated::FederateId::new(federate.id.clone());
+    for federate_id in &topology.federates {
         rti.handle_from(
-            &federate_id,
+            federate_id,
             boomerang_federated::FederateToRti::Hello {
                 federate_id: federate_id.clone(),
-                topology: topology.neighbors_for(&federate_id),
+                topology: topology.neighbors_for(federate_id),
             },
         )
         .unwrap();
@@ -622,28 +617,14 @@ fn run_in_memory_federated_source_sink(
     let mut outbound = FederatedOutboundCapture::take(&mut parts);
     let RuntimeAssembly {
         enclaves,
-        aliases,
         federation,
         ..
     } = parts;
     let federation = federation.expect("source/sink lowering must produce a federation");
-    let federation_plan = federation.plan;
-    let federated_connections = federation.runtime.connections();
-
-    let source_reactor = federation_plan
-        .federates
-        .iter()
-        .find(|federate| federate.id == "source")
-        .unwrap()
-        .reactor;
-    let sink_reactor = federation_plan
-        .federates
-        .iter()
-        .find(|federate| federate.id == "sink")
-        .unwrap()
-        .reactor;
-    let source_enclave_key = aliases.enclave_aliases[source_reactor];
-    let sink_enclave_key = aliases.enclave_aliases[sink_reactor];
+    let source_enclave_key =
+        federation.federate_enclaves()[&boomerang_federated::FederateId::new("source")];
+    let sink_enclave_key =
+        federation.federate_enclaves()[&boomerang_federated::FederateId::new("sink")];
     let mut source_enclaves = Vec::new();
     let mut sink_enclaves = Vec::new();
     for (enclave_key, enclave) in enclaves {
@@ -662,8 +643,11 @@ fn run_in_memory_federated_source_sink(
     let _source_envs =
         runtime::execute_enclaves(source_enclaves.into_iter(), config.clone()).unwrap();
     let commands = outbound.drain();
-    let routed_tags =
-        route_outbound_commands_through_rti(&federation_plan, commands, federated_connections);
+    let routed_tags = route_outbound_commands_through_rti(
+        federation.topology().topology(),
+        commands,
+        federation.connections(),
+    );
     let _sink_envs = runtime::execute_enclaves(sink_enclaves.into_iter(), config).unwrap();
 
     let recorded_values = values.lock().unwrap().clone();
@@ -899,15 +883,6 @@ fn run_live_in_memory_positive_delay_cycle() -> RecordedValuePair {
     (recorded_a_values, recorded_b_values)
 }
 
-fn build_federated_source_sink_plan(
-    after: Option<runtime::Duration>,
-) -> Result<FederationPlan, AssemblyError> {
-    Ok(build_federated_source_sink_parts(after)?
-        .federation
-        .expect("source/sink lowering must produce a federation")
-        .plan)
-}
-
 fn build_federated_source_sink_parts(
     after: Option<runtime::Duration>,
 ) -> Result<RuntimeAssembly, AssemblyError> {
@@ -939,33 +914,14 @@ fn test_add_child_federate_sets_enclave_compatible_placement() {
 }
 
 #[test]
-fn test_federated_source_sink_topology_plan() {
+fn test_federated_source_sink_lowers_authoritative_runtime_topology() {
     let parts = build_federated_source_sink_parts(None).unwrap();
     let federation = parts
         .federation
         .as_ref()
         .expect("source/sink lowering must produce a federation");
-    let plan = &federation.plan;
+    let topology = federation.topology().topology();
 
-    assert_eq!(plan.federates.len(), 2);
-    assert_eq!(
-        plan.federates
-            .iter()
-            .map(|federate| federate.id.as_str())
-            .collect_vec(),
-        vec!["source", "sink"]
-    );
-    assert_eq!(plan.edges.len(), 1);
-    assert_eq!(plan.endpoints.len(), 1);
-    let edge = &plan.edges[0];
-    assert_eq!(edge.source_federate, "source");
-    assert_eq!(edge.target_federate, "sink");
-    assert_eq!(edge.delay, None);
-    assert_eq!(plan.endpoints[0].id, edge.endpoint);
-    assert_eq!(plan.endpoints[0].source_port_fqn, "main/source/out");
-    assert_eq!(plan.endpoints[0].target_port_fqn, "main/sink/in");
-
-    let topology = federation_topology_from_plan(plan).unwrap();
     assert_eq!(
         topology
             .federates
@@ -985,64 +941,23 @@ fn test_federated_source_sink_topology_plan() {
         topology.edges[0].delay,
         boomerang_federated::WireDelay::ZERO
     );
-    assert_eq!(federation.runtime.topology().topology(), &topology);
-    assert_eq!(
-        federation.runtime.federate_enclaves().len(),
-        plan.federates.len()
-    );
-    for federate in &plan.federates {
-        assert_eq!(
-            federation
-                .runtime
-                .federate_enclaves()
-                .get(&boomerang_federated::FederateId::new(federate.id.clone())),
-            parts.aliases.enclave_aliases.get(federate.reactor)
-        );
-    }
+    assert_eq!(federation.federate_enclaves().len(), 2);
 
-    let routes = federated_routes_from_plan(plan).unwrap();
+    let routes = federation.connections().routes().collect_vec();
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].endpoint.as_str(), "main/source/out->main/sink/in");
     assert_eq!(routes[0].source.as_str(), "source");
     assert_eq!(routes[0].target.as_str(), "sink");
-
-    assert_eq!(
-        parts
-            .inter_partition_plan
-            .partition_roots
-            .iter()
-            .filter_map(|root| match &root.kind {
-                PartitionRootKind::Federated { federate } => Some(federate.as_str()),
-                PartitionRootKind::LocalEnclave => None,
-            })
-            .collect_vec(),
-        vec!["source", "sink"]
-    );
-    assert_eq!(parts.inter_partition_plan.edges.len(), 1);
-    let boundary = &parts.inter_partition_plan.edges[0];
-    assert_eq!(boundary.source_port, plan.endpoints[0].source_port);
-    assert_eq!(boundary.target_port, plan.endpoints[0].target_port);
-    assert!(matches!(
-        &boundary.kind,
-        BoundaryKind::Federated {
-            source_federate,
-            target_federate
-        } if source_federate == "source" && target_federate == "sink"
-    ));
-    assert_eq!(boundary.delay, None);
-    assert!(!boundary.physical);
 }
 
 #[test]
 fn test_delayed_cross_federate_connection_records_delay() {
     let delay = runtime::Duration::milliseconds(10);
-    let plan = build_federated_source_sink_plan(Some(delay)).unwrap();
+    let parts = build_federated_source_sink_parts(Some(delay)).unwrap();
+    let federation = parts.federation.as_ref().unwrap();
 
-    assert_eq!(plan.edges.len(), 1);
-    assert_eq!(plan.edges[0].delay, Some(delay));
-    let topology = federation_topology_from_plan(&plan).unwrap();
     assert_eq!(
-        topology.edges[0].delay,
+        federation.topology().topology().edges[0].delay,
         boomerang_federated::WireDelay::from_nanos(10_000_000)
     );
 }
@@ -1385,15 +1300,9 @@ fn test_local_cross_enclave_connection_does_not_require_federated_codec() {
         .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
 
-    assert_eq!(parts.inter_partition_plan.edges.len(), 1);
-    let boundary = &parts.inter_partition_plan.edges[0];
-    assert!(matches!(boundary.kind, BoundaryKind::LocalEnclave));
-    assert_eq!(boundary.source_port, source.into());
-    assert_eq!(boundary.target_port, sink.into());
-    assert!(!boundary.physical);
     assert!(parts.federation.is_none());
-    let source_enclave = parts.aliases.enclave_aliases[boundary.source_partition];
-    let sink_enclave = parts.aliases.enclave_aliases[boundary.target_partition];
+    let source_enclave = parts.aliases.port_aliases[AssemblyPortKey::from(source)].0;
+    let sink_enclave = parts.aliases.port_aliases[AssemblyPortKey::from(sink)].0;
     assert_ne!(source_enclave, sink_enclave);
     assert!(parts.enclaves[source_enclave].upstream_enclaves.is_empty());
     assert_eq!(
@@ -1451,16 +1360,15 @@ fn test_federated_connection_lowers_endpoint_runtime_parts() {
         .federation
         .as_ref()
         .expect("federated connection lowering must produce a federation");
-    assert_eq!(federation.plan.endpoints.len(), 1);
-    let endpoint = &federation.plan.endpoints[0].id;
-    let routes = federation.runtime.connections().routes().collect_vec();
+    assert_eq!(federation.topology().topology().edges.len(), 1);
+    let endpoint = &federation.topology().topology().edges[0].endpoint;
+    let routes = federation.connections().routes().collect_vec();
     assert_eq!(routes.len(), 1);
     assert_eq!(&routes[0].endpoint, endpoint);
     assert_eq!(routes[0].source.as_str(), "source");
     assert_eq!(routes[0].target.as_str(), "sink");
     let sink = boomerang_federated::FederateId::new("sink");
     assert!(federation
-        .runtime
         .connections()
         .inbound_endpoint(&sink, endpoint)
         .is_some());
@@ -1545,7 +1453,7 @@ fn test_federated_inbound_endpoint_schedules_target_action() {
         .unwrap();
 
     let federation = federation.expect("federated lowering must produce a federation");
-    let federated_connections = federation.runtime.connections();
+    let federated_connections = federation.connections();
     let endpoint = boomerang_federated::EndpointId::new("main/source/out->main/sink/in");
     let sink = boomerang_federated::FederateId::new("sink");
     federated_connections

@@ -70,7 +70,15 @@ fn public_api_runs_static_in_memory_federation() {
         .unwrap();
 
     StaticFederation(Arc::clone(&values))
-        .build("main", (), None, None, None, false, &mut assembly)
+        .build(
+            "main",
+            (),
+            None,
+            None,
+            None,
+            ReactorPlacement::Local,
+            &mut assembly,
+        )
         .unwrap();
     assembly.validate_reactions().unwrap();
 
@@ -103,7 +111,15 @@ fn public_api_runs_tcp_static_federation() {
             .unwrap();
 
         StaticFederation(Arc::clone(&values))
-            .build("main", (), None, None, None, false, &mut assembly)
+            .build(
+                "main",
+                (),
+                None,
+                None,
+                None,
+                ReactorPlacement::Local,
+                &mut assembly,
+            )
             .unwrap();
         assembly.validate_reactions().unwrap();
 

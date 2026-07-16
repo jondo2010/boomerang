@@ -6,6 +6,8 @@
 
 #[cfg(feature = "federated")]
 use crate::connection::{FederatedDecoderAdapter, FederatedEncoderAdapter};
+#[cfg(feature = "federated")]
+use crate::federation::FederatedBoundaryIndex;
 use crate::{
     connection::{ConnectionSpec, ErasedConnectionSpec, PortBindings},
     port::Contained,
@@ -14,12 +16,9 @@ use crate::{
 };
 
 use super::{
-    action::ActionSpec,
-    port::ErasedPortSpec,
-    port::PortSpec,
-    reaction::{ModeEffectSpec, ReactionSpec},
-    runtime, ActionType, AssemblyActionKey, AssemblyError, AssemblyFqn, AssemblyModeKey,
-    AssemblyPortKey, AssemblyReactionKey, AssemblyReactorKey, Input, Logical, ModeKind, Output,
+    action::ActionSpec, port::ErasedPortSpec, port::PortSpec, reaction::ReactionSpec, runtime,
+    ActionType, AssemblyActionKey, AssemblyError, AssemblyFqn, AssemblyModeKey, AssemblyPortKey,
+    AssemblyReactionKey, AssemblyReactorKey, Input, Logical, ModeEffectSpec, ModeKind, Output,
     PortTag, ReactorContext, ReactorPlacement, ReactorSpec, TypedActionKey, TypedPortKey,
 };
 use itertools::Itertools;
@@ -37,8 +36,6 @@ mod debug;
 #[cfg(test)]
 mod tests;
 
-#[cfg(feature = "federated")]
-pub use build::LoweredFederation;
 pub use build::{DeferredRuntimeFactory, PartitionMap, RuntimeAssembly};
 
 #[cfg(feature = "federated")]
@@ -90,6 +87,60 @@ type FederatedInboundEndpointFactory = dyn FnOnce(
     &mut boomerang_federated::FederatedRuntimeConnections,
 ) -> Result<(), AssemblyError>;
 
+/// Transient state produced while connection specifications are lowered.
+#[derive(Default)]
+pub(super) struct ConnectionLoweringArtifacts {
+    pub(super) port_bindings: PortBindings,
+    #[cfg(feature = "federated")]
+    pub(super) federated_inbound_endpoint_factories: Vec<Box<FederatedInboundEndpointFactory>>,
+    #[cfg(feature = "federated")]
+    pub(super) federated_boundaries: FederatedBoundaryIndex,
+}
+
+#[cfg(feature = "federated")]
+impl ConnectionLoweringArtifacts {
+    pub(super) fn add_federated_inbound_endpoint<T>(
+        &mut self,
+        endpoint: boomerang_federated::EndpointId,
+        target_partition: AssemblyReactorKey,
+        target_federate: boomerang_federated::FederateId,
+        target_action_key: AssemblyActionKey,
+        decoder: Box<dyn runtime::FederatedPayloadDecoder<T>>,
+    ) where
+        T: runtime::ReactorData,
+    {
+        self.federated_inbound_endpoint_factories.push(Box::new(
+            move |runtime_assembly, connections| {
+                let (enclave_key, runtime_action_key) = *runtime_assembly
+                    .aliases
+                    .action_aliases
+                    .get(target_action_key)
+                    .ok_or_else(|| {
+                        AssemblyError::InternalError(format!(
+                            "missing runtime action alias for federated endpoint {endpoint}"
+                        ))
+                    })?;
+                let expected_enclave_key =
+                    runtime_assembly.aliases.enclave_aliases[target_partition];
+                if enclave_key != expected_enclave_key {
+                    return Err(AssemblyError::InternalError(format!(
+                        "federated endpoint {endpoint} resolved to wrong target enclave"
+                    )));
+                }
+
+                let enclave = &runtime_assembly.enclaves[enclave_key];
+                let context = enclave.create_send_context(enclave_key);
+                let action_ref = enclave.create_async_action_ref(runtime_action_key);
+                connections
+                    .register_inbound(&target_federate, endpoint, context, action_ref, decoder)
+                    .map_err(|error| AssemblyError::UnsupportedFederationTopology {
+                        what: error.to_string(),
+                    })
+            },
+        ));
+    }
+}
+
 #[cfg(feature = "federated")]
 type FederatedCodecEntry = dyn Any + Send + Sync;
 
@@ -123,9 +174,6 @@ pub struct Assembly {
     #[cfg(feature = "federated")]
     /// Assembly-scoped payload codec policy for inferred cross-federate connections.
     federated_codecs: HashMap<TypeId, Box<FederatedCodecEntry>>,
-    #[cfg(feature = "federated")]
-    /// Factories for runtime handlers attached to inbound federated routes.
-    pub(super) federated_inbound_endpoint_factories: Vec<Box<FederatedInboundEndpointFactory>>,
     #[cfg(feature = "replay")]
     /// Factories for replay functions.
     pub(super) replay_factories: SecondaryMap<AssemblyActionKey, Box<ReplayFunctionFactory>>,
@@ -703,70 +751,6 @@ impl Assembly {
             (registration.encoder_factory)(),
             (registration.decoder_factory)(),
         ))
-    }
-
-    #[cfg(feature = "federated")]
-    pub(super) fn add_federated_inbound_endpoint<T>(
-        &mut self,
-        endpoint: boomerang_federated::EndpointId,
-        target_partition: AssemblyReactorKey,
-        target_action_key: AssemblyActionKey,
-        decoder: Box<dyn runtime::FederatedPayloadDecoder<T>>,
-    ) where
-        T: runtime::ReactorData,
-    {
-        self.federated_inbound_endpoint_factories.push(Box::new(
-            move |runtime_assembly, connections| {
-                let (enclave_key, runtime_action_key) = *runtime_assembly
-                    .aliases
-                    .action_aliases
-                    .get(target_action_key)
-                    .ok_or_else(|| {
-                        AssemblyError::InternalError(format!(
-                            "missing runtime action alias for federated endpoint {endpoint}"
-                        ))
-                    })?;
-                let expected_enclave_key =
-                    runtime_assembly.aliases.enclave_aliases[target_partition];
-                if enclave_key != expected_enclave_key {
-                    return Err(AssemblyError::InternalError(format!(
-                        "federated endpoint {endpoint} resolved to wrong target enclave"
-                    )));
-                }
-
-                let enclave = &runtime_assembly.enclaves[enclave_key];
-                let context = enclave.create_send_context(enclave_key);
-                let action_ref = enclave.create_async_action_ref(runtime_action_key);
-                let target_federate = runtime_assembly
-                    .federation
-                    .as_ref()
-                    .ok_or_else(|| {
-                        AssemblyError::InternalError(format!(
-                            "missing lowered federation for inbound endpoint {endpoint}"
-                        ))
-                    })?
-                    .plan
-                    .federates
-                    .iter()
-                    .find(|federate| federate.reactor == target_partition)
-                    .ok_or_else(|| {
-                        AssemblyError::InternalError(format!(
-                            "missing target federate for inbound endpoint {endpoint}"
-                        ))
-                    })?;
-                connections
-                    .register_inbound(
-                        &boomerang_federated::FederateId::new(target_federate.id.clone()),
-                        endpoint,
-                        context,
-                        action_ref,
-                        decoder,
-                    )
-                    .map_err(|error| AssemblyError::UnsupportedFederationTopology {
-                        what: error.to_string(),
-                    })
-            },
-        ));
     }
 
     /// Get a fully-qualified name for a given key

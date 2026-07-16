@@ -33,7 +33,7 @@ encoder and outbound-sink interfaces, not RTI or wire types.
 
 `boomerang_builder/src/connection.rs` chooses the sink while lowering a
 connection. `boomerang_builder/src/assembly/build.rs` derives local crosslinks
-and serialized federation artifacts from one `InterPartitionPlan`.
+and serialized federation artifacts from one transient partition-boundary analysis.
 `boomerang_federated/src/client.rs` implements the external contract as
 `RtiLogicalTimeCoordinator`; protocol sessions and transports remain in
 `boomerang_federated`.

@@ -333,11 +333,13 @@ impl Debug for RuntimeAssembly {
         f.debug_struct("RuntimeAssembly")
             .field("enclave_map", &enclaves)
             .field("aliases_map", &self.aliases)
-            .field("inter_partition_plan", &self.inter_partition_plan)
             .field("federation", &{
                 #[cfg(feature = "federated")]
                 {
-                    &self.federation.as_ref().map(|federation| &federation.plan)
+                    &self
+                        .federation
+                        .as_ref()
+                        .map(|federation| federation.topology().topology())
                 }
                 #[cfg(not(feature = "federated"))]
                 {

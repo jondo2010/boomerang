@@ -53,9 +53,9 @@ the corresponding assembly key.
 ## Boundary
 
 A connection point between runtime partitions. A boundary may be local between
-enclaves or federated between coordinated participants. `BoundaryKind` and
-`InterPartitionPlan` describe the result of boundary analysis during lowering;
-the runtime backend supplies the corresponding delivery mechanism.
+enclaves or federated between coordinated participants. Lowering analyzes each
+cross-partition connection once and selects the corresponding runtime delivery
+mechanism.
 
 ## Connection
 
@@ -157,9 +157,9 @@ information used during safe declaration.
 ## Partition
 
 A region of the declared graph selected to execute behind one runtime boundary.
-Current lowering maps each partition root to an enclave and records
-cross-partition connections in an `InterPartitionPlan`. A partition is a graph
-and deployment concept; it is not automatically a process, host, or federate.
+Current lowering maps each partition root to an enclave and transiently analyzes
+its cross-partition connections. A partition is a graph and deployment concept;
+it is not automatically a process, host, or federate.
 
 ## Reaction
 

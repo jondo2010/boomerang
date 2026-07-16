@@ -10,7 +10,7 @@ pub fn execute_federation_in_memory(
     let federation = parts
         .federation
         .ok_or(BoomerangError::MissingStaticFederation)?;
-    federated::static_runner::run_in_memory(federation.runtime, parts.enclaves, config)
+    federated::static_runner::run_in_memory(federation, parts.enclaves, config)
         .map_err(BoomerangError::from)
 }
 
@@ -23,6 +23,6 @@ pub fn execute_federation_over_tcp(
     let federation = parts
         .federation
         .ok_or(BoomerangError::MissingStaticFederation)?;
-    federated::static_runner::run_over_tcp(federation.runtime, parts.enclaves, config, tcp)
+    federated::static_runner::run_over_tcp(federation, parts.enclaves, config, tcp)
         .map_err(BoomerangError::from)
 }

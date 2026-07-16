@@ -61,18 +61,14 @@ pub mod prelude {
     //! Re-exported common types and traits for Boomerang
 
     pub use super::builder::{
-        Assembly, AssemblyError, AssemblyFqn, AssemblyModeKey, AssemblyReactorKey, BoundaryKind,
-        Contained, Input, InterPartitionEdge, InterPartitionPlan, Local, Logical, ModeEffectSpec,
-        ModeKind, Output, PartitionRoot, PartitionRootKind, Physical, PortBank, Reactor,
+        Assembly, AssemblyError, AssemblyFqn, AssemblyModeKey, AssemblyReactorKey, Contained,
+        Input, Local, Logical, ModeEffectSpec, ModeKind, Output, Physical, PortBank, Reactor,
         ReactorPlacement, RuntimeAssembly, TimerActionKey, TimerSpec, TransitionKind,
         TypedActionKey, TypedPortKey,
     };
 
     #[cfg(feature = "federated")]
-    pub use super::builder::{
-        federated_routes_from_plan, federation_topology_from_plan, FederateBuildInfo, FederateSpec,
-        FederatedEdge, FederatedEndpoint, FederatedRoute, FederationPlan,
-    };
+    pub use super::builder::FederateSpec;
 
     #[cfg(feature = "federated")]
     pub use super::{execute_federation_in_memory, execute_federation_over_tcp};

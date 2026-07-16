@@ -93,7 +93,7 @@ fn empty_event_rx() -> boomerang_runtime::Receiver<boomerang_runtime::AsyncEvent
 }
 
 fn inbound_endpoint_for_u32() -> (
-    boomerang_runtime::FederatedInboundEndpoint,
+    crate::FederatedInboundEndpoint,
     boomerang_runtime::Receiver<boomerang_runtime::AsyncEvent>,
     boomerang_runtime::ActionKey,
     boomerang_runtime::keepalive::Sender,
@@ -104,18 +104,14 @@ fn inbound_endpoint_for_u32() -> (
     });
     let action_ref = enclave.create_async_action_ref::<u32>(action_key);
     let context = enclave.create_send_context(boomerang_runtime::EnclaveKey::from(0));
-    let endpoint = boomerang_runtime::FederatedInboundEndpoint::new(
+    let endpoint = crate::FederatedInboundEndpoint::new(
         context,
         action_ref,
         Box::new(|bytes: &[u8]| {
             std::str::from_utf8(bytes)
-                .map_err(|error| {
-                    boomerang_runtime::FederatedEndpointError::codec(error.to_string())
-                })?
+                .map_err(|error| crate::CodecError::message(error.to_string()))?
                 .parse::<u32>()
-                .map_err(|error| {
-                    boomerang_runtime::FederatedEndpointError::codec(error.to_string())
-                })
+                .map_err(|error| crate::CodecError::message(error.to_string()))
         }),
     )
     .unwrap();
@@ -179,7 +175,7 @@ async fn bridge_sends_net_outbound_msg_and_ltc_frames() {
         fed("source"),
         client,
         [route()],
-        boomerang_runtime::FederatedFaultState::default(),
+        crate::FederatedFaultState::default(),
     )
     .unwrap();
 
@@ -191,8 +187,8 @@ async fn bridge_sends_net_outbound_msg_and_ltc_frames() {
         None
     );
     outbound
-        .send(boomerang_runtime::FederatedOutboundCommand::Msg(
-            boomerang_runtime::FederatedOutboundMessage {
+        .send(crate::FederatedOutboundCommand::Msg(
+            crate::FederatedOutboundMessage {
                 tag: boomerang_runtime::Tag::ZERO,
                 payload: b"7".to_vec(),
             },
@@ -253,7 +249,7 @@ async fn bridge_schedules_inbound_msg_before_reporting_completion() {
         fed("sink"),
         client,
         [inbound_route],
-        boomerang_runtime::FederatedFaultState::default(),
+        crate::FederatedFaultState::default(),
     )
     .unwrap();
 
@@ -331,7 +327,7 @@ async fn bridge_admits_all_preceding_messages_before_consuming_tag() {
         fed("sink"),
         client,
         [inbound_route],
-        boomerang_runtime::FederatedFaultState::default(),
+        crate::FederatedFaultState::default(),
     )
     .unwrap();
 
@@ -403,7 +399,7 @@ async fn inbound_admission_failure_makes_the_coordinator_terminal_before_later_t
         fed("sink"),
         client,
         [inbound_route],
-        boomerang_runtime::FederatedFaultState::default(),
+        crate::FederatedFaultState::default(),
     )
     .unwrap();
 
@@ -476,7 +472,7 @@ async fn bridge_does_not_repeat_pending_net_after_inbound_interruption() {
         fed("sink"),
         client,
         [inbound_route],
-        boomerang_runtime::FederatedFaultState::default(),
+        crate::FederatedFaultState::default(),
     )
     .unwrap();
 
@@ -532,7 +528,7 @@ async fn bridge_reports_rti_error_frame() {
         fed("source"),
         client,
         [route()],
-        boomerang_runtime::FederatedFaultState::default(),
+        crate::FederatedFaultState::default(),
     )
     .unwrap();
 
@@ -583,7 +579,7 @@ async fn bridge_stop_sends_no_future_before_stop() {
         fed("source"),
         client,
         [route()],
-        boomerang_runtime::FederatedFaultState::default(),
+        crate::FederatedFaultState::default(),
     )
     .unwrap();
 

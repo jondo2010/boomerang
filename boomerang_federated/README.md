@@ -1,7 +1,10 @@
 # boomerang_federated
 
-Protocol, codec, transport, and RTI state-machine primitives for Boomerang
-federations.
+Protocol, codec, transport, RTI state-machine, and runtime bridge primitives for
+Boomerang federations. `RuntimeFederation` contains independent RTI topology
+data and self-contained `RuntimeFederate` compute nodes, each owning one or more
+scheduler Enclaves.
 
-This crate is intentionally separate from `boomerang_runtime`. It does not
-start sockets, processes, or schedulers in the Milestone 2 slice.
+This crate depends on the protocol-neutral scheduler extension points in
+`boomerang_runtime`; the core runtime does not depend on this crate or expose a
+federation feature.

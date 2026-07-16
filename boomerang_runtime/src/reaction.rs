@@ -5,11 +5,6 @@ use crate::{
     Duration, InputRef, OutputRef, ReactionRefs, ReactionRefsExtract, ReactorData, SendContext,
     Tag,
 };
-#[cfg(feature = "federated")]
-use crate::{
-    FederatedFaultState, FederatedOutboundCommand, FederatedOutboundMessage, FederatedOutboundSink,
-    FederatedPayloadEncoder,
-};
 
 tinymap::key_type! { pub ReactionKey }
 
@@ -152,54 +147,6 @@ impl<T: ReactorData + Clone> InterPartitionEventSink<T> for InProcessInterPartit
                 self.remote_context
                     .schedule_action_async(target, value.clone(), delay);
             }
-        }
-    }
-}
-
-/// Serialized cross-partition event sink backed by a protocol-free encoder and outbound channel.
-#[cfg(feature = "federated")]
-pub struct SerializedInterPartitionEventSink<T: ReactorData> {
-    encoder: Box<dyn FederatedPayloadEncoder<T>>,
-    outbound: Box<dyn FederatedOutboundSink>,
-    faults: FederatedFaultState,
-}
-
-#[cfg(feature = "federated")]
-impl<T: ReactorData> SerializedInterPartitionEventSink<T> {
-    pub fn new(
-        encoder: Box<dyn FederatedPayloadEncoder<T>>,
-        outbound: Box<dyn FederatedOutboundSink>,
-        faults: FederatedFaultState,
-    ) -> Self {
-        Self {
-            encoder,
-            outbound,
-            faults,
-        }
-    }
-}
-
-#[cfg(feature = "federated")]
-impl<T: ReactorData> InterPartitionEventSink<T> for SerializedInterPartitionEventSink<T> {
-    fn send(&self, time: InterPartitionEventTime, _target: &AsyncActionRef<T>, value: &T) {
-        let InterPartitionEventTime::Logical(tag) = time else {
-            tracing::error!("Serialized sender cannot target a physical action");
-            return;
-        };
-
-        let payload = match self.encoder.encode(value) {
-            Ok(payload) => payload,
-            Err(error) => {
-                tracing::error!(?error, "Failed to encode federated payload");
-                self.faults.record(error);
-                return;
-            }
-        };
-
-        let command = FederatedOutboundCommand::Msg(FederatedOutboundMessage { tag, payload });
-        if let Err(error) = self.outbound.send(command) {
-            tracing::error!(?error, "Failed to emit federated command");
-            self.faults.record(error);
         }
     }
 }
@@ -456,85 +403,7 @@ macro_rules! reaction_closure {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "federated")]
-    use std::{ptr::NonNull, sync::Arc};
-
     use super::*;
-    #[cfg(feature = "federated")]
-    use crate::{
-        keepalive, Action, ActionKey, AsyncEvent, BaseAction, BasePort, DynActionRef, EnclaveKey,
-        FederatedOutboundCommand, Port, PortKey, ReactionRefs, Reactor, Refs, RefsMut, Tag,
-    };
-
-    #[cfg(feature = "federated")]
-    #[derive(Debug)]
-    struct RecordingOutboundSink {
-        commands: Arc<std::sync::Mutex<Vec<FederatedOutboundCommand>>>,
-    }
-
-    #[cfg(feature = "federated")]
-    impl FederatedOutboundSink for RecordingOutboundSink {
-        fn send(
-            &self,
-            command: FederatedOutboundCommand,
-        ) -> Result<(), crate::FederatedEndpointError> {
-            self.commands.lock().unwrap().push(command);
-            Ok(())
-        }
-    }
-
-    #[cfg(feature = "federated")]
-    fn logical_action_ref<T: ReactorData>(delay: Option<Duration>) -> AsyncActionRef<T> {
-        let action = Action::<T>::new("target", ActionKey::from(7), delay, true);
-        AsyncActionRef::try_from(DynActionRef(&action)).unwrap()
-    }
-
-    #[cfg(feature = "federated")]
-    fn physical_action_ref<T: ReactorData>(delay: Option<Duration>) -> AsyncActionRef<T> {
-        let action = Action::<T>::new("target", ActionKey::from(7), delay, false);
-        AsyncActionRef::try_from(DynActionRef(&action)).unwrap()
-    }
-
-    #[cfg(feature = "federated")]
-    fn trigger_sender<R>(sender: &mut R, tag: Tag, value: u32)
-    where
-        R: for<'store> ReactionFn<'store>,
-    {
-        let (context_tx, _context_rx) = kanal::unbounded();
-        let (_shutdown_tx, shutdown_rx) = keepalive::channel();
-        let mut context = Context::new(
-            EnclaveKey::from(0),
-            std::time::Instant::now(),
-            None,
-            context_tx,
-            shutdown_rx,
-        );
-        context.reset_for_reaction(tag);
-        let mut reactor = Reactor::new("source", ());
-
-        let mut source_port = Port::<u32>::new("source", PortKey::from(0));
-        *source_port = Some(value);
-        let source_port: Box<dyn BasePort> = Box::new(source_port);
-        let mut ports = vec![NonNull::from(&*source_port)];
-
-        let mut dummy_port: Box<dyn BasePort> =
-            Box::new(Port::<()>::new("dummy", PortKey::from(1)));
-        let mut ports_mut = vec![NonNull::from(&mut *dummy_port)];
-
-        let mut dummy_action: Box<dyn BaseAction> =
-            Box::new(Action::<()>::new("dummy", ActionKey::from(8), None, true));
-        let mut actions = vec![NonNull::from(&mut *dummy_action)];
-
-        sender.trigger(
-            &mut context,
-            &mut reactor,
-            ReactionRefs {
-                ports: Refs::new(&mut ports),
-                ports_mut: RefsMut::new(&mut ports_mut),
-                actions: RefsMut::new(&mut actions),
-            },
-        );
-    }
 
     /// Test the FnAdapter struct.
     #[test]
@@ -548,112 +417,5 @@ mod tests {
         let _closure = reaction_closure!(ctx, _state, _refs => {
             ctx.get_elapsed_logical_time();
         });
-    }
-
-    #[cfg(feature = "federated")]
-    #[test]
-    fn local_and_serialized_senders_compute_the_same_logical_delivery() {
-        let current_tag = Tag::new(Duration::seconds(5), 3);
-        let value = 0x0102_0304_u32;
-
-        for delay in [None, Some(Duration::milliseconds(10))] {
-            let target = logical_action_ref::<u32>(delay);
-            let (local_tx, local_rx) = kanal::unbounded();
-            let (_local_shutdown_tx, local_shutdown_rx) = keepalive::channel();
-            let mut local = InterPartitionSenderReactionFn::new(
-                target.clone(),
-                Box::new(InProcessInterPartitionEventSink::new(SendContext {
-                    enclave_key: EnclaveKey::from(1),
-                    async_tx: local_tx,
-                    shutdown_rx: local_shutdown_rx,
-                })),
-                None,
-            );
-
-            let commands = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let mut serialized = InterPartitionSenderReactionFn::new(
-                target,
-                Box::new(SerializedInterPartitionEventSink::new(
-                    Box::new(|value: &u32| Ok(value.to_le_bytes().to_vec())),
-                    Box::new(RecordingOutboundSink {
-                        commands: Arc::clone(&commands),
-                    }),
-                    FederatedFaultState::default(),
-                )),
-                None,
-            );
-
-            trigger_sender(&mut local, current_tag, value);
-            trigger_sender(&mut serialized, current_tag, value);
-
-            let (local_tag, local_value) = match local_rx.recv().unwrap() {
-                AsyncEvent::Logical { tag, value, .. } => (
-                    tag,
-                    *value.downcast::<u32>().ok().expect("typed local value"),
-                ),
-                event => panic!("expected logical local delivery, got {event:?}"),
-            };
-            let commands = commands.lock().unwrap();
-            let (serialized_tag, serialized_value) = match commands.as_slice() {
-                [FederatedOutboundCommand::Msg(message)] => (
-                    message.tag,
-                    u32::from_le_bytes(message.payload.as_slice().try_into().expect("u32 payload")),
-                ),
-                commands => panic!("expected one serialized delivery, got {commands:?}"),
-            };
-
-            assert_eq!(local_tag, serialized_tag);
-            assert_eq!(local_value, serialized_value);
-            assert_eq!(local_value, value);
-            assert_eq!(
-                local_tag,
-                match delay {
-                    None => current_tag,
-                    Some(delay) => current_tag.delay(delay),
-                }
-            );
-        }
-    }
-
-    #[cfg(feature = "federated")]
-    #[test]
-    fn physical_delivery_remains_local_only() {
-        let value = 42_u32;
-        let target = physical_action_ref::<u32>(Some(Duration::milliseconds(1)));
-        let (local_tx, local_rx) = kanal::unbounded();
-        let (_local_shutdown_tx, local_shutdown_rx) = keepalive::channel();
-        let mut local = InterPartitionSenderReactionFn::new(
-            target.clone(),
-            Box::new(InProcessInterPartitionEventSink::new(SendContext {
-                enclave_key: EnclaveKey::from(1),
-                async_tx: local_tx,
-                shutdown_rx: local_shutdown_rx,
-            })),
-            None,
-        );
-        let commands = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let mut serialized = InterPartitionSenderReactionFn::new(
-            target,
-            Box::new(SerializedInterPartitionEventSink::new(
-                Box::new(|value: &u32| Ok(value.to_le_bytes().to_vec())),
-                Box::new(RecordingOutboundSink {
-                    commands: Arc::clone(&commands),
-                }),
-                FederatedFaultState::default(),
-            )),
-            None,
-        );
-
-        trigger_sender(&mut local, Tag::ZERO, value);
-        trigger_sender(&mut serialized, Tag::ZERO, value);
-
-        let observed = match local_rx.recv().unwrap() {
-            AsyncEvent::Physical { value, .. } => {
-                *value.downcast::<u32>().ok().expect("typed local value")
-            }
-            event => panic!("expected physical local delivery, got {event:?}"),
-        };
-        assert_eq!(observed, value);
-        assert!(commands.lock().unwrap().is_empty());
     }
 }

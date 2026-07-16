@@ -1,283 +1,102 @@
 # Federated Runtime Internals
 
-This note records the current static federation design after the in-memory
-runtime work. It is internal developer documentation, not an end-user guide.
-The user-facing static federation documentation lives in
-`book/src/static-federation.md`.
+Boomerang separates four runtime concepts. A **Reactor** is an application component. An
+**Enclave** is a group of Reactors executed by one scheduler, normally on one thread. A
+**Federate** is one deployable compute node or process and owns one or more Enclaves. A
+**Federation** is the complete distributed graph. The **RTI** (runtime infrastructure) is an
+independent hub that grants logical time and relays messages between Federates.
 
-Read [Scheduler Internals](./scheduler-internals.md) first for the common
-scheduler loop, local enclave barriers, generic logical-time coordination, and
-cross-partition sender path. This note covers only the federated protocol,
-topology, transport, and runner specialization of that machinery.
-
-## Current Scope
-
-The implemented runtime path supports static, persistent federates connected by
-logical cross-federate messages. A federate is represented as a runtime enclave
-and is coordinated by an RTI, short for runtime infrastructure. The RTI receives
-federate timing and message frames, decides when tags are safe to process, and
-routes payload messages between federates.
-
-The supported paths are the deterministic in-memory static runner and a
-single-process TCP static runner. Both run the same scheduler coordination
-lifecycle and differ only in how the RTI session and federate protocol clients
-are connected.
-
-## Crate Ownership
-
-`boomerang_runtime` owns scheduler-facing primitives only. It defines endpoint
-handlers, payload codec traits, the outbound sink interface, the first-error
-fault-latch implementation, and the `LogicalTimeCoordinator`
-scheduler hook. The hook returns an explicit granted or interrupted outcome,
-or a terminal coordination error. It must stay
-protocol-free and must not depend on `boomerang_federated`, Tokio, RTI state, or
-wire frame types.
-
-`boomerang_federated` owns the protocol and orchestration layer. It defines wire
-types, `RtiState`, `StaticRtiSession`, `FederateProtocolClient`,
-`RtiLogicalTimeCoordinator`, in-memory and TCP protocol transports, and
-`StaticFederationRuntime` plus the transport-specific `static_runner::run_*`
-functions.
-
-`boomerang_builder` owns topology validation and lowering. It projects the
-federated subset of its transient partition-boundary analysis directly into the RTI's immutable
-`CompiledTopology`, validates unsupported topology shapes, validates and caches
-bidirectional federate/enclave placement, and returns `RuntimeAssembly` with a
-federated-owned `StaticFederationRuntime`. It contains no production execution
-entry point or runner-error conversion.
-
-The top-level `boomerang` crate owns the application-facing
-`execute_federation_in_memory` and `execute_federation_over_tcp` functions. They
-separate generic runtime enclaves from the federation-specific runtime and
-delegate to `boomerang_federated` without calling back into the builder.
-
-## Shared Execution Flow
-
-The acquire/process/complete order and ordinary event handling are defined in
-the scheduler guide. Federation supplies `RtiLogicalTimeCoordinator` as the
-external authority and `SerializedInterPartitionEventSink` as the payload
-backend; it does not replace the scheduler state machine.
-
-The following block diagram shows a one-way source-to-sink federation. Solid
-arrows are runtime data or coordination flow. Dashed arrows are construction or
-transport attachment performed before the schedulers start. The transport blocks
-represent either the in-memory channels or the TCP connections used by the two
-static runners.
-
-```mermaid
-flowchart LR
-    AssemblyModel["Assembly<br/>reactors, ports, connections"]
-    Parts["RuntimeAssembly<br/>ready-to-run enclaves + optional<br/>StaticFederationRuntime"]
-    Runner["Static federation runner<br/>validates and connects transports"]
-
-    AssemblyModel -->|lower| Parts
-    Parts -->|runtime parts| Runner
-
-    subgraph Source["Source federate / enclave"]
-        SchedA["Scheduler A"]
-        SourceReaction["Source reaction<br/>writes output port"]
-        SenderReaction["InterPartitionSenderReactionFn<br/>calculate delivery time"]
-        SerializedSink["SerializedInterPartitionEventSink<br/>encode payload"]
-        EndpointSink["Endpoint-specific protocol sink<br/>runtime command → MSG"]
-        ConnectionA["FederatedRuntimeConnection A<br/>single outbound mailbox,<br/>routes with attached handlers,<br/>source-local fault state"]
-        CoordinatorA["RtiLogicalTimeCoordinator A"]
-        ClientA["FederateProtocolClient A"]
-
-        SchedA --> SourceReaction --> SenderReaction --> SerializedSink --> EndpointSink --> ConnectionA --> ClientA
-        SchedA -->|tag request / completion| CoordinatorA
-        CoordinatorA -->|grant or inbound interrupt| SchedA
-        CoordinatorA -->|NET, LTC, Stop| ConnectionA
-        ClientA -->|TAG, MSG, Error| CoordinatorA
-    end
-
-    subgraph Coordination["Federated protocol and coordination"]
-        TransportA["In-memory or TCP transport A"]
-        RTI["StaticRtiSession + RtiState<br/>LF grant calculation, in-transit tags,<br/>message routing"]
-        TransportB["In-memory or TCP transport B"]
-
-        ClientA --> TransportA --> RTI
-        RTI --> TransportA --> ClientA
-    end
-
-    subgraph Target["Target federate / enclave"]
-        ClientB["FederateProtocolClient B"]
-        CoordinatorB["RtiLogicalTimeCoordinator B"]
-        ConnectionB["FederatedRuntimeConnection B<br/>single outbound mailbox,<br/>routes with attached handlers,<br/>source-local fault state"]
-        InboundHandler["Route-attached inbound handler<br/>decode → logical action"]
-        EventQueue["Scheduler event queue<br/>AsyncEvent"]
-        SchedB["Scheduler B"]
-        ReceiverReaction["ConnectionReceiverReactionFn<br/>logical action → input port"]
-        TargetReaction["Target reaction<br/>reads input port"]
-
-        ClientB -->|TAG, MSG, Error| CoordinatorB
-        CoordinatorB -->|MSG payload| InboundHandler --> EventQueue --> SchedB
-        ConnectionB -. route owns .-> InboundHandler
-        SchedB --> ReceiverReaction --> TargetReaction
-        SchedB -->|tag request / completion| CoordinatorB
-        CoordinatorB -->|grant or inbound interrupt| SchedB
-        CoordinatorB -->|NET, LTC, Stop| ConnectionB --> ClientB
-    end
-
-    RTI --> TransportB --> ClientB
-    ClientB --> TransportB --> RTI
-
-    Parts -. deferred lowering attaches .-> EndpointSink
-    Parts -. owns until transport connection .-> ConnectionA
-    Parts -. owns until transport connection .-> ConnectionB
-    Runner -. creates schedulers and clients .-> SchedA
-    Runner -. consumes bundles and attaches transport .-> ConnectionA
-    Runner -. consumes bundles and attaches transport .-> ConnectionB
-    Runner -. creates protocol session .-> RTI
-    SerializedSink -. records codec or send failure .-> ConnectionA
-    CoordinatorA -. checks local fault state .-> ConnectionA
-    CoordinatorB -. checks local fault state .-> ConnectionB
+```text
+Federation
+├── Federate A
+│   ├── Enclave A1 ── Reactors
+│   └── Enclave A2 ── Reactors
+├── Federate B
+│   └── Enclave B1 ── Reactors
+└── RTI (independent star hub)
 ```
 
-Each generated sender reaction represents one statically known endpoint, so
-lowering attaches its final endpoint-specific sink directly. That sink is
-implemented in `boomerang_federated`: it accepts the protocol-free
-`FederatedOutboundCommand`, performs the checked wire-tag conversion, constructs
-the protocol `MSG`, and sends it into the source federate's prebuilt mailbox.
-There is no runtime router or intermediate `kanal` queue.
+These boundaries select the delivery mechanism. A connection inside one Enclave is direct. A
+connection between Enclaves owned by the same Federate uses
+`InProcessInterPartitionEventSink` and local scheduler channels. Only a connection whose
+endpoints belong to different Federates is serialized and represented by an RTI topology edge.
 
-`add_child_federate` builds a child reactor with `ReactorPlacement::Federate`.
-Federate placement starts a runtime enclave, so a source/sink federation has one
-enclave for the source federate and one enclave for the sink federate. Empty
-unmapped enclaves, such as a structural root with no reactions, are skipped by
-the runner. Non-empty unmapped enclaves are rejected.
+## Build-to-runtime workflow
 
-`Assembly::into_runtime_assembly` produces `RuntimeAssembly` containing the
-runtime enclaves, assembly-to-runtime aliases, inter-partition metadata, and an
-optional `StaticFederationRuntime`. A present runtime owns the compiled RTI
-topology, the resolved federate-to-enclave map, and one complete runtime
-connection bundle per federate; a local-only assembly has no federation runtime.
-Each bundle owns the prebuilt protocol mailbox, routes targeting that federate,
-only that federate's typed inbound endpoint handlers, and the source-local
-terminal fault state. Deferred reaction construction attaches the final
-endpoint-specific outbound sink and registers every inbound handler before
-these parts are returned.
+`boomerang_builder::Assembly` is the mutable declaration graph. The consuming
+`Assembly::into_runtime_assembly` pass validates placement, analyzes connection boundaries,
+allocates Enclaves, installs local crosslinks, constructs protocol bridges, and returns:
 
-The facade execution functions consume the already-resolved
-`StaticFederationRuntime` and the generic runtime enclaves. They then delegate
-to the matching `run_*` function in `boomerang_federated::static_runner`.
+```text
+RuntimeAssembly
+├── aliases: assembly keys → runtime keys
+└── execution
+    ├── Local(RuntimeEnclaves)
+    └── Federated(RuntimeFederation)
+        ├── CompiledTopology     (data needed to start an independent RTI)
+        └── FederateId → RuntimeFederate
+            ├── RuntimeEnclaves  (key-preserving owned scheduler set)
+            └── FederateRuntimeBridge
+```
 
-The static runner first validates and prepares transport-independent runtime
-parts, then rejects configurations without `Config::with_fast_forward(true)`.
-Static federation does not yet have a common physical start, so silently using
-independent scheduler clocks would be incorrect. The in-memory path creates one
-channel transport per federate and starts `StaticRtiSession` directly. The TCP
-path binds a listener, starts `run_tcp_static_rti_session`, accepts the static
-number of sockets, and identifies each peer from its first `Hello` frame rather
-than arrival order. The consumed frame is preserved for the session's topology
-validation. Both paths then run
-all `FederateProtocolClient::connect` handshakes concurrently, wrap each client
-in an `RtiLogicalTimeCoordinator`, and enter the same connected-runner function.
-That function runs one scheduler thread per active mapped federate enclave with
-`Scheduler::new_with_logical_time_coordinator`. It uses the fallible scheduler
-loop, stops every coordinator after success or failure, and returns coordination
-or runtime endpoint errors to the public caller.
+`RuntimeAssembly::into_local` and `RuntimeAssembly::into_federation` are typed conversions. A
+local runner cannot accidentally discard federation metadata, and a Federate bridge cannot be
+separated from the Enclaves it serves.
 
-The connected runner consumes one complete connection bundle for every
-federate. It gives the prebuilt mailbox receiver to that client's async
-transport writer and gives the bundle's incoming routes with their attached
-handlers and fault state to exactly that federate's coordinator. Sender
-reactions and the coordinator share clones of the same mailbox sender.
-Consequently, reaction-emitted `MSG` frames and the subsequent `LTC` frame enter
-one FIFO queue in program order.
+`RuntimeFederation::into_parts` returns the immutable compiled topology and a deterministic map
+of independently owned `RuntimeFederate` values. It contains no RTI thread or task. A deployment
+launcher may start the RTI in another process and move each Federate to its target node. The
+single-process static runner consumes the same value and supplies in-memory or TCP transports.
 
-Builder lowering asks `boomerang_federated::CompiledTopology` to validate the
-static manifest and produce ordered per-federate neighbor views, immediate and
-transitive dependencies, minimum cumulative path delays, downstream work sets,
-and exact route keys.
-`RuntimeAssembly::federation` carries that artifact inside its
-federated-owned `StaticFederationRuntime` to `StaticRtiSession`; RTI startup
-does not recompute it. Raw-topology session
-constructors remain as a convenience for callers outside the builder and
-compile once at their configuration boundary. `StaticFederationRuntime`
-similarly validates its one-to-one federate/enclave placement once when it is
-constructed and retains both lookup directions; runner preparation does not
-rebuild the reverse map. The session calls
-`RtiState::handle_from` with the authenticated connection identity
-for every frame. The RTI validates and preflights each event before committing
-its one changed coordination record and any grants, so an error cannot leave a
-partial transition. Grant evaluation follows the centralized definitive subset
-from reactor-c commit `a98d9d3833de5fc5650f9f64dc4b085b982f3a3e`: an
-immediate upstream LTC frontier may grant directly, otherwise the transitive
-earliest-incoming-message tag grants its latest strict predecessor. Grant
-reevaluation is causal: `NET` and `LTC` touch the member followed by sorted
-transitive downstream members, `Stop` touches sorted transitive downstream
-members, and `MSG` adds only a conservative tag bound. `boomerang_runtime`
-remains unaware of these protocol and RTI details.
+## Placement and lowering
 
-Outbound payloads leave a scheduler through generated federated sender
-reactions. Codec and sink failures are published to that source federate's
-first-error fault latch and become terminal scheduler errors. Each reaction
-writes through the endpoint-specific sink installed during lowering. The sink immediately
-converts the runtime command to a protocol `MSG` and enqueues it in the source
-federate mailbox. During coordinator completion, the RTI adapter checks the shared
-fault latch and enqueues `LTC` into that same mailbox after all reaction-emitted
-messages for the completed tag.
+`ReactorPlacement::Federate(spec)` opens a Federate scope and starts its initial Enclave. A
+descendant declared with `ReactorPlacement::Enclave` starts another scheduler while inheriting
+the nearest Federate. Nested Federate scopes, duplicate Federate IDs, and connections with only
+one endpoint in a Federate are rejected before execution.
 
-Inbound payloads arrive as protocol `MSG` frames from the RTI. Each lowered
-`FederateClientRoute` owns its type-erased `FederatedInboundEndpoint`, which
-decodes and schedules that route's payload directly. The coordinator returns the
-queued `AsyncEvent` to the scheduler before reading a later RTI frame. A coordinator
-cannot dispatch an endpoint belonging to another federate because that route is
-absent from its bundle. Any failure before queue admission makes the barrier
-terminal, so it cannot consume a later `TAG`.
+Partition analysis records the Federate inherited by every Enclave root. Same-Federate
+cross-Enclave boundaries remain local and do not require a payload codec. Cross-Federate
+boundaries produce an `EndpointId`, `TopologyEdge`, encoder, serialized sender, inbound decoder,
+and target action route.
 
-The RTI records one ordered-set entry for each distinct target tag later than
-the target's completion watermark. Multiple same-tag messages share that entry.
-The scheduler sends `LTC` only after reactions at that tag complete; the RTI
-then removes every recorded tag through the completion watermark and
-reevaluates the member and its transitive downstream work set. No per-payload
-acknowledgment frame or message count is used.
+The aggregate `FederatedRuntimeConnections` value exists only during lowering. Finalization
+consumes it, splits the key-preserving `RuntimeEnclaves`, and produces one
+`FederateRuntimeBridge` per `RuntimeFederate`.
 
-Shutdown uses no-future information. A federate that has no future local events
-sends `NET(FOREVER)` before `Stop`. The RTI records this as no-future state for
-that federate and retries pending grants for downstream federates.
+## Scheduler and RTI coordination
 
-## Semantics and Non-Goals
+Every Enclave retains an independent scheduler. Within a Federate, one gateway Enclave owns the
+blocking `RtiLogicalTimeCoordinator`; the other Enclaves use the runtime's local upstream and
+downstream barriers and feed the gateway through in-process crosslinks. This avoids treating one
+protocol client as several independent RTI participants while preserving scheduler parallelism.
 
-The current implementation supports same-tag messages, same-timestamp
-microsteps, fanout, multi-hop topologies, shutdown/no-future coordination, and
-positive-delay distributed cycles.
+The RTI remains a star. Each Federate has one protocol identity and connection. Outbound
+serialized messages enter that Federate's FIFO mailbox before logical-time completion is
+reported. Incoming messages select a stable endpoint route, decode the payload, and schedule the
+target action in the correct owned Enclave.
 
-The assembly layer and runner preserve rejection of unsupported semantics:
-cross-federate physical connections, transient federates, mixed local/federated
-boundaries, and distributed zero-delay cycles. Do not add distributed
-zero-delay-cycle support until `PTAG` and `ABS` are designed and implemented.
-`PTAG` is a provisional tag grant. `ABS` is an absence signal for an upstream
-port at a tag. The current runtime does not emit the per-port absence
-information needed for constructive zero-delay distributed cycles.
+## Ownership map
 
-Keep Tokio, wire protocol code, RTI sessions, and federate protocol clients in
-`boomerang_federated`. Do not move those dependencies into
-`boomerang_runtime`.
+- `boomerang_runtime` owns protocol-neutral Enclaves, schedulers, local crosslinks,
+  `RuntimeEnclaves`, and `InterPartitionEventSink`.
+- `boomerang_federated` owns codecs, serialized sinks, endpoint/fault types, protocol clients,
+  `FederateRuntimeBridge`, `RuntimeFederate`, `RuntimeFederation`, RTI state, sessions, and
+  transports.
+- `boomerang_builder` owns declarations, placement analysis, topology projection, codec
+  registration, pending bindings, and the `RuntimeAssembly` lowering result.
+- `boomerang` exposes application-facing execution functions that consume `RuntimeFederation`.
 
-## Tests That Define the Current Behavior
+The dependency direction is `boomerang_builder → boomerang_federated → boomerang_runtime` for
+runtime integration. `boomerang_runtime` has no federation feature and no protocol dependency.
 
-`boomerang/tests/federated_static.rs` contains the public API proofs. The
-non-ignored test calls `execute_federation_in_memory`; the ignored localhost
-test calls `execute_federation_over_tcp`. Both build through
-`boomerang::prelude`, register `SerdeJsonCodec`, and assert that the sink
-observes `[(Tag::ZERO, 7)]`.
+## Behavioral proof
 
-`boomerang_builder/src/tests/federated.rs` contains assembly and live in-memory
-coverage for topology lowering, rejection behavior, three-federate chains,
-fanout, positive-delay cycles, and exact local-versus-federated value, tag, and
-shutdown equivalence. Its live tests invoke the federated runner
-through a test-only helper; no production execution function resides in the
-builder crate.
+`boomerang/tests/federated_static.rs` builds Federate A with a source Enclave and a relay Enclave,
+plus Federate B with a sink Enclave. Source-to-relay stays in process; relay-to-sink is the only
+compiled RTI endpoint. The same graph runs through the in-memory and TCP runners and records the
+value at the expected complete logical tag.
 
-`boomerang_federated/src/rti/tests.rs` and
-`boomerang_federated/src/session.rs` cover RTI and protocol ordering without
-running full schedulers, including authenticated failure-atomic transitions,
-targeted work sets, same-tag messages, microstep progression, multi-hop grant
-dependencies, transitive minimum-delay bounds, and LTC-cleared in-transit tags.
-
-The ignored TCP smoke in `boomerang_federated/src/transport.rs` remains a
-narrow protocol-level test of the shared RTI session and client, including
-sink-before-source connection order and `Hello`-based identity. The ignored
-top-level test adds scheduler-running TCP coverage without replacing any
-direct in-memory correctness test.
+The builder and federated crate tests additionally cover duplicate and nested placement errors,
+codec failures, delayed connections, fanout, cycles, route validation, and decomposition into
+independently owned Federates.

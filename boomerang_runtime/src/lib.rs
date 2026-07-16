@@ -9,8 +9,6 @@ pub mod action;
 mod context;
 mod env;
 mod event;
-#[cfg(feature = "federated")]
-mod federated;
 pub mod keepalive;
 mod key_set;
 pub mod port;
@@ -20,6 +18,7 @@ pub mod refs;
 mod refs_extract;
 #[cfg(feature = "replay")]
 pub mod replay;
+mod runtime_enclaves;
 mod sched;
 pub mod store;
 mod time;
@@ -36,17 +35,9 @@ pub use env::{
     ScopeKey, TransitionKind,
 };
 pub use event::AsyncEvent;
-#[cfg(feature = "federated")]
-pub use federated::{
-    FederatedEndpointError, FederatedFaultState, FederatedInboundEndpoint,
-    FederatedOutboundCommand, FederatedOutboundMessage, FederatedOutboundSink,
-    FederatedPayloadDecoder, FederatedPayloadEncoder,
-};
 pub use kanal::{Receiver, Sender};
 pub use key_set::KeySetLimits as ReactionSetLimits;
 pub use port::{DynPortRef, DynPortRefMut, *};
-#[cfg(feature = "federated")]
-pub use reaction::SerializedInterPartitionEventSink;
 pub use reaction::{
     BoxedReactionFn, ConnectionReceiverReactionFn, ConnectionSenderReactionFn, Deadline, FromRefs,
     InProcessInterPartitionEventSink, InterPartitionEventSink, InterPartitionEventTime,
@@ -55,6 +46,7 @@ pub use reaction::{
 pub use reactor::*;
 pub use refs::{Refs, RefsMut};
 pub use refs_extract::{ReactionRefs, ReactionRefsError, ReactionRefsExtract};
+pub use runtime_enclaves::{RuntimeEnclaves, RuntimeEnclavesError};
 pub use sched::*;
 pub use time::*;
 

@@ -63,8 +63,8 @@ pub mod prelude {
     pub use super::builder::{
         Assembly, AssemblyError, AssemblyFqn, AssemblyModeKey, AssemblyReactorKey, Contained,
         Input, Local, Logical, ModeEffectSpec, ModeKind, Output, Physical, PortBank, Reactor,
-        ReactorPlacement, RuntimeAssembly, TimerActionKey, TimerSpec, TransitionKind,
-        TypedActionKey, TypedPortKey,
+        ReactorPlacement, RuntimeAssembly, RuntimeExecution, RuntimeExecutionError, TimerActionKey,
+        TimerSpec, TransitionKind, TypedActionKey, TypedPortKey,
     };
 
     #[cfg(feature = "federated")]
@@ -75,7 +75,8 @@ pub mod prelude {
 
     #[cfg(feature = "federated")]
     pub use super::federated::{
-        EndpointId, FederateId, RuntimeBridgeError, TcpStaticFederationConfig, WireDelay, WireTag,
+        EndpointId, FederateId, RuntimeBridgeError, RuntimeFederate, RuntimeFederation,
+        TcpStaticFederationConfig, WireDelay, WireTag,
     };
 
     pub use super::runtime::{self, action::ActionCommon, CommonContext, Duration, FromRefs, Tag};

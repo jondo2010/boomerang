@@ -8,8 +8,6 @@
 //! semantics.
 
 use std::collections::{BTreeSet, HashMap};
-#[cfg(feature = "federated")]
-use std::sync::Arc;
 
 use slotmap::SecondaryMap;
 
@@ -18,42 +16,6 @@ use crate::{
     AssemblyError, AssemblyModeKey, AssemblyPortKey, AssemblyReactorKey, Input, Output,
     ParentReactorSpec, PartitionMap, PortType, TriggerMode, TypedActionKey, TypedPortKey,
 };
-
-#[cfg(feature = "federated")]
-pub(crate) struct FederatedEncoderAdapter<C> {
-    pub(crate) codec: Arc<C>,
-}
-
-#[cfg(feature = "federated")]
-impl<T, C> runtime::FederatedPayloadEncoder<T> for FederatedEncoderAdapter<C>
-where
-    T: runtime::ReactorData,
-    C: boomerang_federated::PayloadEncoder<T> + Send + Sync + 'static,
-{
-    fn encode(&self, value: &T) -> Result<Vec<u8>, runtime::FederatedEndpointError> {
-        self.codec
-            .encode(value)
-            .map_err(|error| runtime::FederatedEndpointError::codec(error.to_string()))
-    }
-}
-
-#[cfg(feature = "federated")]
-pub(crate) struct FederatedDecoderAdapter<C> {
-    pub(crate) codec: Arc<C>,
-}
-
-#[cfg(feature = "federated")]
-impl<T, C> runtime::FederatedPayloadDecoder<T> for FederatedDecoderAdapter<C>
-where
-    T: runtime::ReactorData,
-    C: boomerang_federated::PayloadDecoder<T> + Send + Sync + 'static,
-{
-    fn decode(&self, bytes: &[u8]) -> Result<T, runtime::FederatedEndpointError> {
-        self.codec
-            .decode(bytes)
-            .map_err(|error| runtime::FederatedEndpointError::codec(error.to_string()))
-    }
-}
 
 /// The resolved, directed port-to-port edges in an assembled reactor graph.
 ///
@@ -506,7 +468,7 @@ enum InterPartitionSourceBackend<T: runtime::ReactorData> {
     #[cfg(feature = "federated")]
     Serialized {
         endpoint: boomerang_federated::EndpointId,
-        encoder: Box<dyn runtime::FederatedPayloadEncoder<T>>,
+        encoder: Box<dyn boomerang_federated::PayloadEncoder<T>>,
     },
 }
 
@@ -559,7 +521,7 @@ fn build_inter_partition_connection_source<T: runtime::ReactorData + Clone>(
                         .connections()
                         .outbound_endpoint(&endpoint)
                         .expect("serialized endpoint sink was validated before deferred lowering");
-                    Box::new(runtime::SerializedInterPartitionEventSink::new(
+                    Box::new(boomerang_federated::SerializedInterPartitionEventSink::new(
                         encoder, outbound, faults,
                     ))
                 }

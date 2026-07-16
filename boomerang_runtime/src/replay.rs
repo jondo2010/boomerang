@@ -4,8 +4,7 @@ use std::{collections::HashMap, path::Path};
 
 use crate::{
     event::AsyncEvent, reaction::ReactionFn, ActionKey, ActionRef, BaseReactor, CommonContext,
-    Context, Duration, Enclave, EnclaveKey, ReactionRefs, ReactorData, RuntimeError, SendContext,
-    Tag,
+    Context, Duration, EnclaveKey, ReactionRefs, ReactorData, RuntimeError, SendContext, Tag,
 };
 
 /// Re-export the `foxglove` and `mcap` crates for use in this module.
@@ -196,7 +195,7 @@ pub type ReplayersMap =
 pub fn create_replayer<P>(
     path: P,
     replayers: ReplayersMap,
-    enclaves: &tinymap::TinyMap<EnclaveKey, Enclave>,
+    enclaves: &crate::RuntimeEnclaves,
 ) -> Result<ReplayHandle, ReplayError>
 where
     P: AsRef<Path>,

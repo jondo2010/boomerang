@@ -19,20 +19,20 @@ use crate::{
     PartitionBoundary, ReactionDeclaration, TimerActionKey,
 };
 
-#[cfg(feature = "federated")]
-use super::FederatedInboundEndpointFactory;
 use super::{Assembly, ConnectionLoweringArtifacts};
+#[cfg(feature = "federated")]
+use crate::federated::FederatedInboundEndpointFactory;
 
 /// A trait used to defer runtime object creation until the lowered runtime data is available.
 pub trait DeferredRuntimeFactory {
     type Output;
 
-    fn defer(self) -> impl FnOnce(&RuntimeAssembly) -> Self::Output + 'static;
+    fn defer(self) -> impl FnOnce(&RuntimeAssemblyContext) -> Self::Output + 'static;
 }
 
 impl DeferredRuntimeFactory for runtime::reaction::TimerFn {
     type Output = runtime::BoxedReactionFn;
-    fn defer(self) -> impl FnOnce(&RuntimeAssembly) -> Self::Output + 'static {
+    fn defer(self) -> impl FnOnce(&RuntimeAssemblyContext) -> Self::Output + 'static {
         move |_| runtime::BoxedReactionFn::from(self)
     }
 }
@@ -58,6 +58,94 @@ pub struct RuntimeAliases {
     pub port_aliases: SecondaryMap<AssemblyPortKey, (runtime::EnclaveKey, runtime::PortKey)>,
 }
 
+/// Coherent result of lowering an [`Assembly`].
+pub struct RuntimeAssembly {
+    pub aliases: RuntimeAliases,
+    pub execution: RuntimeExecution,
+}
+
+impl std::fmt::Debug for RuntimeAssembly {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match &self.execution {
+            RuntimeExecution::Local(_) => "local",
+            #[cfg(feature = "federated")]
+            RuntimeExecution::Federated(_) => "federated",
+        };
+        f.debug_struct("RuntimeAssembly")
+            .field("execution", &kind)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The mutually exclusive local and federated runtime shapes.
+pub enum RuntimeExecution {
+    Local(runtime::RuntimeEnclaves),
+    #[cfg(feature = "federated")]
+    Federated(boomerang_federated::RuntimeFederation),
+}
+
+impl Default for RuntimeAssembly {
+    fn default() -> Self {
+        Self {
+            aliases: RuntimeAliases::default(),
+            execution: RuntimeExecution::Local(runtime::RuntimeEnclaves::new()),
+        }
+    }
+}
+
+impl RuntimeAssembly {
+    pub fn local_enclaves(&self) -> Option<&runtime::RuntimeEnclaves> {
+        match &self.execution {
+            RuntimeExecution::Local(enclaves) => Some(enclaves),
+            #[cfg(feature = "federated")]
+            RuntimeExecution::Federated(_) => None,
+        }
+    }
+
+    #[cfg(feature = "federated")]
+    pub fn federation(&self) -> Option<&boomerang_federated::RuntimeFederation> {
+        match &self.execution {
+            RuntimeExecution::Federated(federation) => Some(federation),
+            RuntimeExecution::Local(_) => None,
+        }
+    }
+
+    #[cfg(feature = "federated")]
+    pub fn federation_mut(&mut self) -> Option<&mut boomerang_federated::RuntimeFederation> {
+        match &mut self.execution {
+            RuntimeExecution::Federated(federation) => Some(federation),
+            RuntimeExecution::Local(_) => None,
+        }
+    }
+
+    #[cfg(feature = "federated")]
+    pub fn into_federation(
+        self,
+    ) -> Result<boomerang_federated::RuntimeFederation, RuntimeExecutionError> {
+        match self.execution {
+            RuntimeExecution::Federated(federation) => Ok(federation),
+            RuntimeExecution::Local(_) => Err(RuntimeExecutionError::ExpectedFederation),
+        }
+    }
+
+    pub fn into_local(self) -> Result<runtime::RuntimeEnclaves, RuntimeExecutionError> {
+        match self.execution {
+            RuntimeExecution::Local(enclaves) => Ok(enclaves),
+            #[cfg(feature = "federated")]
+            RuntimeExecution::Federated(_) => Err(RuntimeExecutionError::ExpectedLocal),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RuntimeExecutionError {
+    #[error("expected a local runtime assembly, found a Federation")]
+    ExpectedLocal,
+    #[cfg(feature = "federated")]
+    #[error("expected a federated runtime assembly, found local Enclaves")]
+    ExpectedFederation,
+}
+
 /// A map of partitions: each Reactor is mapped to one Enclave Reactor.
 pub type PartitionMap = SecondaryMap<AssemblyReactorKey, AssemblyReactorKey>;
 
@@ -71,28 +159,25 @@ struct PendingFederation {
 }
 
 #[derive(Default)]
-pub struct RuntimeAssembly {
+pub struct RuntimeAssemblyContext {
     /// Executable runtime enclaves keyed by their lowered enclave identities.
-    pub enclaves: tinymap::TinyMap<runtime::EnclaveKey, runtime::Enclave>,
+    pub enclaves: runtime::RuntimeEnclaves,
     /// Aliases from assembly keys to runtime keys.
     pub aliases: RuntimeAliases,
     #[cfg(feature = "federated")]
     /// Fully lowered static-federation data, or `None` for a local-only assembly.
     pub federation: Option<boomerang_federated::StaticFederationRuntime>,
-    #[cfg(feature = "replay")]
-    /// Action replayers partitioned by their target runtime enclave.
-    pub replayers: runtime::replay::ReplayersMap,
 }
 
-impl RuntimeAssembly {
-    /// Create a new `RuntimeAssembly` from a `PartitionMap`.
+impl RuntimeAssemblyContext {
+    /// Create a new `RuntimeAssemblyContext` from a `PartitionMap`.
     fn new(
         partition_map: &PartitionMap,
         partition_analysis: &PartitionAnalysis,
         physical_event_q_size: usize,
         #[cfg(feature = "federated")] federation: Option<PendingFederation>,
     ) -> Result<Self, AssemblyError> {
-        let mut enclaves = tinymap::TinyMap::new();
+        let mut enclaves = runtime::RuntimeEnclaves::new();
         let mut aliases = RuntimeAliases::default();
         // Create all the unique enclaves
         for reactor_key in partition_map.values().unique() {
@@ -134,20 +219,19 @@ impl RuntimeAssembly {
         #[cfg(feature = "replay")]
         {
             // Pre-fill the replayers map with empty maps
-            let replayers = enclaves
-                .keys()
-                .map(|enclave_key| {
+            let enclave_keys = enclaves.keys().collect_vec();
+            enclaves
+                .replayers_mut()
+                .extend(enclave_keys.into_iter().map(|enclave_key| {
                     let replayers = tinymap::TinySecondaryMap::new();
                     (enclave_key, replayers)
-                })
-                .collect();
+                }));
 
             Ok(Self {
                 enclaves,
                 aliases,
                 #[cfg(feature = "federated")]
                 federation,
-                replayers,
             })
         }
         #[cfg(not(feature = "replay"))]
@@ -160,6 +244,23 @@ impl RuntimeAssembly {
                 federation,
             })
         }
+    }
+
+    fn finish(self) -> Result<RuntimeAssembly, AssemblyError> {
+        let Self {
+            enclaves,
+            aliases,
+            #[cfg(feature = "federated")]
+            federation,
+        } = self;
+        #[cfg(feature = "federated")]
+        let execution = match federation {
+            Some(federation) => RuntimeExecution::Federated(federation.finalize(enclaves)?),
+            None => RuntimeExecution::Local(enclaves),
+        };
+        #[cfg(not(feature = "federated"))]
+        let execution = RuntimeExecution::Local(enclaves);
+        Ok(RuntimeAssembly { aliases, execution })
     }
 }
 
@@ -569,7 +670,7 @@ impl Assembly {
     fn build_runtime_reactors(
         &mut self,
         partition_map: &PartitionMap,
-        runtime_assembly: &mut RuntimeAssembly,
+        runtime_assembly: &mut RuntimeAssemblyContext,
     ) -> Result<(), AssemblyError> {
         let reactor_fqns: SecondaryMap<AssemblyReactorKey, String> = self
             .reactor_specs
@@ -603,7 +704,7 @@ impl Assembly {
 
     fn assign_runtime_reactor_scope_parents(
         &mut self,
-        runtime_assembly: &mut RuntimeAssembly,
+        runtime_assembly: &mut RuntimeAssemblyContext,
     ) -> Result<(), AssemblyError> {
         for (assembly_reactor_key, scope_mode) in &runtime_assembly.aliases.reactor_scope_modes {
             let Some(scope_mode) = scope_mode else {
@@ -623,7 +724,7 @@ impl Assembly {
 
     fn build_runtime_modes(
         &mut self,
-        runtime_assembly: &mut RuntimeAssembly,
+        runtime_assembly: &mut RuntimeAssemblyContext,
     ) -> Result<(), AssemblyError> {
         for (assembly_mode_key, mode) in self.mode_specs.drain() {
             let (enclave_key, reactor_key) =
@@ -645,7 +746,7 @@ impl Assembly {
     fn build_runtime_actions(
         &mut self,
         partition_map: &PartitionMap,
-        runtime_assembly: &mut RuntimeAssembly,
+        runtime_assembly: &mut RuntimeAssemblyContext,
     ) -> Result<(), AssemblyError> {
         let mut new_reactions = Vec::new();
 
@@ -731,7 +832,7 @@ impl Assembly {
 
     #[cfg(feature = "federated")]
     fn build_federated_inbound_endpoints(
-        runtime_assembly: &mut RuntimeAssembly,
+        runtime_assembly: &mut RuntimeAssemblyContext,
         endpoint_factories: Vec<Box<FederatedInboundEndpointFactory>>,
     ) -> Result<(), AssemblyError> {
         if endpoint_factories.is_empty() {
@@ -759,7 +860,7 @@ impl Assembly {
 
     fn assign_runtime_action_and_port_scopes(
         &mut self,
-        runtime_assembly: &mut RuntimeAssembly,
+        runtime_assembly: &mut RuntimeAssemblyContext,
         port_bindings: &PortBindings,
     ) -> Result<(), AssemblyError> {
         for (assembly_action_key, action) in &self.action_specs {
@@ -808,7 +909,7 @@ impl Assembly {
     fn build_runtime_ports(
         &mut self,
         partition_map: &PartitionMap,
-        runtime_assembly: &mut RuntimeAssembly,
+        runtime_assembly: &mut RuntimeAssemblyContext,
         port_bindings: &PortBindings,
     ) -> Result<(), AssemblyError> {
         let port_groups = self
@@ -841,7 +942,7 @@ impl Assembly {
     fn build_runtime_reactions(
         &mut self,
         partition_map: &PartitionMap,
-        runtime_assembly: &mut RuntimeAssembly,
+        runtime_assembly: &mut RuntimeAssemblyContext,
         reaction_levels: &SecondaryMap<AssemblyReactionKey, runtime::Level>,
     ) -> Result<(), AssemblyError> {
         for (assembly_reaction_key, reaction) in self.reaction_specs.drain() {
@@ -1002,13 +1103,13 @@ impl Assembly {
     #[cfg(feature = "replay")]
     fn build_runtime_replayers(
         &mut self,
-        runtime_assembly: &mut RuntimeAssembly,
+        runtime_assembly: &mut RuntimeAssemblyContext,
     ) -> Result<(), AssemblyError> {
         for (assembly_action_key, replay_factory) in self.replay_factories.drain() {
             let replayer = (replay_factory)(runtime_assembly);
             let (enclave_key, action_key) =
                 runtime_assembly.aliases.action_aliases[assembly_action_key];
-            runtime_assembly.replayers[enclave_key].insert(action_key, replayer);
+            runtime_assembly.enclaves.replayers_mut()[enclave_key].insert(action_key, replayer);
         }
         Ok(())
     }
@@ -1050,7 +1151,7 @@ impl Assembly {
                 federated_boundaries: _,
             } = self.build_connections(&mut partition_map, boundaries)?;
 
-            let mut runtime_assembly = RuntimeAssembly::new(
+            let mut runtime_assembly = RuntimeAssemblyContext::new(
                 &partition_map,
                 &partition_analysis,
                 config.physical_event_q_size,
@@ -1072,7 +1173,7 @@ impl Assembly {
             let ConnectionLoweringArtifacts { port_bindings } =
                 self.build_connections(&mut partition_map)?;
 
-            let mut runtime_assembly = RuntimeAssembly::new(
+            let mut runtime_assembly = RuntimeAssemblyContext::new(
                 &partition_map,
                 &partition_analysis,
                 config.physical_event_q_size,
@@ -1104,6 +1205,6 @@ impl Assembly {
             enclave.graph.modal_schedule_index = modal_schedule_index;
         }
 
-        Ok(runtime_assembly)
+        runtime_assembly.finish()
     }
 }

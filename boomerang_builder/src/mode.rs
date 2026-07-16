@@ -1,7 +1,7 @@
 use variadics_please::all_tuples;
 
 use crate::{
-    runtime, ActionTag, PortBank, PortTag, RuntimeAssembly, TimerActionKey, TypedActionKey,
+    runtime, ActionTag, PortBank, PortTag, RuntimeAssemblyContext, TimerActionKey, TypedActionKey,
     TypedPortKey,
 };
 
@@ -80,21 +80,21 @@ impl runtime::ReactionRefsExtract for ModeEffectSpec {
 
 #[doc(hidden)]
 pub trait ResolveModeEffects {
-    fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssembly);
+    fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssemblyContext);
 }
 
 impl ResolveModeEffects for () {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
+    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssemblyContext) {}
 }
 
 impl ResolveModeEffects for ModeEffectSpec {
-    fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssembly) {
+    fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssemblyContext) {
         self.runtime_target = Some(runtime_parts.aliases.mode_aliases[self.target].1);
     }
 }
 
 impl<T: ResolveModeEffects, const N: usize> ResolveModeEffects for [T; N] {
-    fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssembly) {
+    fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssemblyContext) {
         for item in self {
             item.resolve_mode_effects(runtime_parts);
         }
@@ -102,19 +102,19 @@ impl<T: ResolveModeEffects, const N: usize> ResolveModeEffects for [T; N] {
 }
 
 impl<T: runtime::ReactorData, Q: ActionTag> ResolveModeEffects for TypedActionKey<T, Q> {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
+    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssemblyContext) {}
 }
 
 impl ResolveModeEffects for TimerActionKey {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
+    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssemblyContext) {}
 }
 
 impl<T: runtime::ReactorData, Q: PortTag, A> ResolveModeEffects for TypedPortKey<T, Q, A> {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
+    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssemblyContext) {}
 }
 
 impl<T: runtime::ReactorData, Q: PortTag, A> ResolveModeEffects for PortBank<T, Q, A> {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
+    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssemblyContext) {}
 }
 
 macro_rules! impl_resolve_mode_effects {
@@ -124,7 +124,7 @@ macro_rules! impl_resolve_mode_effects {
             $($T: ResolveModeEffects,)*
         {
             #[allow(non_snake_case)]
-            fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssembly) {
+            fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssemblyContext) {
                 let ($($T,)*) = self;
                 $($T.resolve_mode_effects(runtime_parts);)*
             }

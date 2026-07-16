@@ -100,11 +100,12 @@ assembly.
 
 ## Federate
 
-A statically identified participant in coordinated federated execution. In the
-current experimental federation slice, each federate is placed at an enclave
-root and communicates through the runtime infrastructure loop (RTI). Federates,
-enclaves, processes, and hosts are separate concepts even where the current
-runner maps them one-to-one. See [Static Federation](./static-federation.md).
+A statically identified compute node or process in coordinated execution. A
+Federate owns one or more Enclaves and has one protocol identity and connection
+to the runtime infrastructure (RTI). Enclaves remain independent scheduler
+boundaries; same-Federate Enclave traffic stays in process, while only
+cross-Federate traffic enters the RTI star. See
+[Static Federation](./static-federation.md).
 
 ## History Transition
 
@@ -196,10 +197,11 @@ durable application identity.
 
 ## Runtime Assembly
 
-`RuntimeAssembly` is the ready-to-run result of lowering an `Assembly`. It owns
-runtime enclaves and the resolved metadata needed by features such as replay and
-static federation. Runners consume it to create schedulers or federation roles;
-it no longer accepts logical graph declarations.
+`RuntimeAssembly` is the ready-to-run result of lowering an `Assembly`. Its
+`RuntimeExecution` variant owns either local `RuntimeEnclaves` or a
+`RuntimeFederation` containing independently movable `RuntimeFederate` values.
+Runners consume it to create local schedulers or federation roles; it no longer
+accepts logical graph declarations.
 
 ## Runtime Environment
 

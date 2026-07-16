@@ -14,9 +14,6 @@ exclude.workspace = true
 [features]
 default = []
 
-## Optional runtime endpoints and sender hooks for federated payload delivery
-federated = []
-
 ## Support for parallel execution
 parallel = ["dep:rayon"]
 

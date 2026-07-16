@@ -32,7 +32,7 @@ pub enum FederateClientError {
 
     #[cfg(feature = "runtime")]
     #[error("runtime endpoint error: {0}")]
-    RuntimeEndpoint(#[from] boomerang_runtime::FederatedEndpointError),
+    RuntimeEndpoint(#[from] crate::FederatedEndpointError),
 
     #[error("protocol error: {0}")]
     Protocol(String),
@@ -355,7 +355,7 @@ pub struct FederateClientRoute {
     pub endpoint: crate::EndpointId,
     pub source: FederateId,
     pub target: FederateId,
-    inbound: Option<boomerang_runtime::FederatedInboundEndpoint>,
+    inbound: Option<crate::FederatedInboundEndpoint>,
 }
 
 #[cfg(feature = "runtime")]
@@ -374,12 +374,12 @@ impl FederateClientRoute {
         }
     }
 
-    pub(crate) fn bind_inbound(&mut self, inbound: boomerang_runtime::FederatedInboundEndpoint) {
+    pub(crate) fn bind_inbound(&mut self, inbound: crate::FederatedInboundEndpoint) {
         debug_assert!(self.inbound.is_none());
         self.inbound = Some(inbound);
     }
 
-    pub(crate) fn inbound(&self) -> Option<&boomerang_runtime::FederatedInboundEndpoint> {
+    pub(crate) fn inbound(&self) -> Option<&crate::FederatedInboundEndpoint> {
         self.inbound.as_ref()
     }
 }
@@ -395,7 +395,7 @@ pub struct RtiLogicalTimeCoordinator {
     /// Federation route metadata keyed by its stable endpoint identifier.
     routes: BTreeMap<crate::EndpointId, FederateClientRoute>,
     /// Shared terminal fault reported by the runtime endpoint workers, if any.
-    faults: boomerang_runtime::FederatedFaultState,
+    faults: crate::FederatedFaultState,
     /// Most recently accepted RTI grant, used to satisfy repeated or older requests locally.
     last_granted: Option<boomerang_runtime::Tag>,
     /// Successfully queued `NET` request still awaiting a sufficient `TAG` response.
@@ -421,7 +421,7 @@ impl RtiLogicalTimeCoordinator {
         federate_id: FederateId,
         client: FederateProtocolClient,
         routes: impl IntoIterator<Item = FederateClientRoute>,
-        faults: boomerang_runtime::FederatedFaultState,
+        faults: crate::FederatedFaultState,
     ) -> Result<Self, FederateClientError> {
         let mut route_map = BTreeMap::new();
         for route in routes {

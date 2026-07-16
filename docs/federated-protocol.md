@@ -23,10 +23,12 @@ differences are listed under [Protocol Non-Goals](#protocol-non-goals).
 
 ## Participants and Transport
 
-A federate is one statically declared runtime enclave. Every federate has one
-persistent, ordered, bidirectional connection to a centralized runtime
-infrastructure process, abbreviated RTI. Payloads also travel through the RTI;
-there are no direct peer-to-peer payload channels.
+A Federate is one statically declared compute node or process containing one or
+more runtime Enclaves. Every Federate has one persistent, ordered,
+bidirectional connection to a centralized runtime infrastructure process,
+abbreviated RTI. Payloads crossing Federate boundaries travel through the RTI;
+same-Federate Enclave traffic stays in process, and there are no direct
+peer-to-peer payload channels.
 
 The in-memory runner transports `ProtocolFrame` values over ordered channels.
 The TCP runner serializes the same frames as JSON inside a length-delimited

@@ -9,7 +9,7 @@ use slotmap::SecondaryMap;
 use crate::{AssemblyFqn, AssemblyPortKey, AssemblyReactionKey, AssemblyReactorKey};
 
 use super::{
-    build::{RuntimeAliases, RuntimeAssembly},
+    build::{RuntimeAliases, RuntimeAssemblyContext},
     runtime, Assembly,
 };
 
@@ -322,7 +322,7 @@ impl Debug for RuntimeAliases {
     }
 }
 
-impl Debug for RuntimeAssembly {
+impl Debug for RuntimeAssemblyContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let enclaves = fmt::from_fn(|f| {
             f.debug_map()
@@ -330,7 +330,7 @@ impl Debug for RuntimeAssembly {
                 .finish()
         });
 
-        f.debug_struct("RuntimeAssembly")
+        f.debug_struct("RuntimeAssemblyContext")
             .field("enclave_map", &enclaves)
             .field("aliases_map", &self.aliases)
             .field("federation", &{

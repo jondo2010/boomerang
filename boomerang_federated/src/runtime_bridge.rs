@@ -126,34 +126,38 @@ impl TryFrom<boomerang_runtime::Duration> for WireDelay {
 
 /// Complete lowered connection state for one federate.
 #[derive(Debug)]
-pub(crate) struct FederatedRuntimeConnection {
+pub struct FederateRuntimeBridge {
     mailbox: FederateClientMailbox,
     routes: BTreeMap<crate::EndpointId, FederateClientRoute>,
-    faults: boomerang_runtime::FederatedFaultState,
+    faults: crate::FederatedFaultState,
 }
 
-impl FederatedRuntimeConnection {
+impl FederateRuntimeBridge {
     fn new() -> Self {
         Self {
             mailbox: FederateClientMailbox::new(),
             routes: BTreeMap::new(),
-            faults: boomerang_runtime::FederatedFaultState::default(),
+            faults: crate::FederatedFaultState::default(),
         }
     }
 
     /// Consume this connection and return its prebuilt protocol mailbox.
     ///
     /// This is primarily useful to inspect lowering output without starting a runner.
-    pub(crate) fn into_mailbox(self) -> FederateClientMailbox {
+    pub fn into_mailbox(self) -> FederateClientMailbox {
         self.mailbox
     }
 
-    pub(crate) fn into_parts(
+    pub fn take_mailbox(&mut self) -> FederateClientMailbox {
+        std::mem::take(&mut self.mailbox)
+    }
+
+    pub fn into_parts(
         self,
     ) -> (
         FederateClientMailbox,
         Vec<FederateClientRoute>,
-        boomerang_runtime::FederatedFaultState,
+        crate::FederatedFaultState,
     ) {
         (
             self.mailbox,
@@ -161,12 +165,24 @@ impl FederatedRuntimeConnection {
             self.faults,
         )
     }
+
+    pub fn routes(&self) -> impl Iterator<Item = &FederateClientRoute> {
+        self.routes.values()
+    }
+
+    pub fn inbound_endpoint(
+        &self,
+        endpoint: &crate::EndpointId,
+    ) -> Option<&crate::FederatedInboundEndpoint> {
+        self.routes.get(endpoint)?.inbound()
+    }
 }
 
 /// Complete per-federate connection bundles created during runtime lowering.
+#[doc(hidden)]
 #[derive(Debug, Default)]
 pub struct FederatedRuntimeConnections {
-    federates: BTreeMap<FederateId, FederatedRuntimeConnection>,
+    federates: BTreeMap<FederateId, FederateRuntimeBridge>,
 }
 
 impl FederatedRuntimeConnections {
@@ -196,7 +212,7 @@ impl FederatedRuntimeConnections {
                     "duplicate prebuilt runtime connection for '{federate}'"
                 )));
             }
-            connections.insert(federate, FederatedRuntimeConnection::new());
+            connections.insert(federate, FederateRuntimeBridge::new());
         }
 
         let mut route_endpoints = BTreeSet::new();
@@ -232,8 +248,8 @@ impl FederatedRuntimeConnections {
         endpoint: &crate::EndpointId,
     ) -> Result<
         (
-            Box<dyn boomerang_runtime::FederatedOutboundSink>,
-            boomerang_runtime::FederatedFaultState,
+            Box<dyn crate::FederatedOutboundSink>,
+            crate::FederatedFaultState,
         ),
         FederateClientError,
     > {
@@ -263,7 +279,7 @@ impl FederatedRuntimeConnections {
         endpoint: crate::EndpointId,
         context: boomerang_runtime::SendContext,
         action_ref: boomerang_runtime::AsyncActionRef<T>,
-        decoder: Box<dyn boomerang_runtime::FederatedPayloadDecoder<T>>,
+        decoder: Box<dyn crate::PayloadDecoder<T>>,
     ) -> Result<(), FederateClientError>
     where
         T: boomerang_runtime::ReactorData,
@@ -280,23 +296,19 @@ impl FederatedRuntimeConnections {
         if route.inbound().is_some() {
             return Err(FederateClientError::DuplicateInboundBinding(endpoint));
         }
-        let inbound =
-            boomerang_runtime::FederatedInboundEndpoint::new(context, action_ref, decoder)?;
+        let inbound = crate::FederatedInboundEndpoint::new(context, action_ref, decoder)?;
         route.bind_inbound(inbound);
         Ok(())
     }
 
-    pub(crate) fn take_federate(
-        &mut self,
-        federate: &FederateId,
-    ) -> Option<FederatedRuntimeConnection> {
+    pub fn take_federate(&mut self, federate: &FederateId) -> Option<FederateRuntimeBridge> {
         self.federates.remove(federate)
     }
 
     /// Consume one federate's prebuilt mailbox for direct lowering inspection.
     pub fn take_mailbox(&mut self, federate: &FederateId) -> Option<FederateClientMailbox> {
         self.take_federate(federate)
-            .map(FederatedRuntimeConnection::into_mailbox)
+            .map(FederateRuntimeBridge::into_mailbox)
     }
 
     /// Return the lowered runtime handler attached to a stable inbound route.
@@ -304,7 +316,7 @@ impl FederatedRuntimeConnections {
         &self,
         federate: &FederateId,
         endpoint: &crate::EndpointId,
-    ) -> Option<&boomerang_runtime::FederatedInboundEndpoint> {
+    ) -> Option<&crate::FederatedInboundEndpoint> {
         self.federates
             .get(federate)?
             .routes
@@ -338,14 +350,14 @@ struct ProtocolFederatedOutboundSink {
     sender: FederateProtocolSender,
 }
 
-impl boomerang_runtime::FederatedOutboundSink for ProtocolFederatedOutboundSink {
+impl crate::FederatedOutboundSink for ProtocolFederatedOutboundSink {
     fn send(
         &self,
-        command: boomerang_runtime::FederatedOutboundCommand,
-    ) -> Result<(), boomerang_runtime::FederatedEndpointError> {
-        let boomerang_runtime::FederatedOutboundCommand::Msg(message) = command;
+        command: crate::FederatedOutboundCommand,
+    ) -> Result<(), crate::FederatedEndpointError> {
+        let crate::FederatedOutboundCommand::Msg(message) = command;
         let tag = WireTag::try_from(message.tag)
-            .map_err(|error| boomerang_runtime::FederatedEndpointError::send(error.to_string()))?;
+            .map_err(|error| crate::FederatedEndpointError::send(error.to_string()))?;
         self.sender
             .send(FederateToRti::Msg {
                 source: self.source.clone(),
@@ -354,7 +366,7 @@ impl boomerang_runtime::FederatedOutboundSink for ProtocolFederatedOutboundSink 
                 tag,
                 payload: message.payload,
             })
-            .map_err(|error| boomerang_runtime::FederatedEndpointError::send(error.to_string()))
+            .map_err(|error| crate::FederatedEndpointError::send(error.to_string()))
     }
 }
 
@@ -450,8 +462,8 @@ mod tests {
             FederatedRuntimeConnections::new([source.clone(), target.clone()], [route]).unwrap();
         let (sink, _) = connections.outbound_endpoint(&endpoint).unwrap();
 
-        sink.send(boomerang_runtime::FederatedOutboundCommand::Msg(
-            boomerang_runtime::FederatedOutboundMessage {
+        sink.send(crate::FederatedOutboundCommand::Msg(
+            crate::FederatedOutboundMessage {
                 tag: boomerang_runtime::Tag::ZERO,
                 payload: b"7".to_vec(),
             },
@@ -489,8 +501,8 @@ mod tests {
             .sender();
 
         for payload in [b"first".to_vec(), b"second".to_vec()] {
-            sink.send(boomerang_runtime::FederatedOutboundCommand::Msg(
-                boomerang_runtime::FederatedOutboundMessage {
+            sink.send(crate::FederatedOutboundCommand::Msg(
+                crate::FederatedOutboundMessage {
                     tag: boomerang_runtime::Tag::ZERO,
                     payload,
                 },
@@ -583,9 +595,7 @@ mod tests {
                     std::str::from_utf8(bytes)
                         .unwrap()
                         .parse::<u32>()
-                        .map_err(|error| {
-                            boomerang_runtime::FederatedEndpointError::codec(error.to_string())
-                        })
+                        .map_err(|error| crate::CodecError::message(error.to_string()))
                 }),
             )
             .unwrap();
@@ -604,9 +614,7 @@ mod tests {
                     std::str::from_utf8(bytes)
                         .unwrap()
                         .parse::<u32>()
-                        .map_err(|error| {
-                            boomerang_runtime::FederatedEndpointError::codec(error.to_string())
-                        })
+                        .map_err(|error| crate::CodecError::message(error.to_string()))
                 }),
             )
             .unwrap();
@@ -623,5 +631,38 @@ mod tests {
         assert!(connections
             .inbound_endpoint(&first, &second_endpoint)
             .is_none());
+    }
+
+    #[test]
+    fn runtime_connections_reject_inbound_endpoint_for_wrong_federate() {
+        let source = FederateId::new("source");
+        let target = FederateId::new("target");
+        let wrong = FederateId::new("wrong");
+        let endpoint = crate::EndpointId::new("source/out->target/in");
+        let mut connections = FederatedRuntimeConnections::new(
+            [source.clone(), target, wrong.clone()],
+            [FederateClientRoute::new(
+                endpoint.clone(),
+                source,
+                FederateId::new("target"),
+            )],
+        )
+        .unwrap();
+        let mut enclave = boomerang_runtime::Enclave::default();
+        let action = enclave.insert_action(|key| {
+            boomerang_runtime::Action::<u32>::new("target", key, None, true).boxed()
+        });
+
+        let error = connections
+            .register_inbound(
+                &wrong,
+                endpoint.clone(),
+                enclave.create_send_context(boomerang_runtime::EnclaveKey::from(0)),
+                enclave.create_async_action_ref(action),
+                Box::new(|_: &[u8]| -> Result<u32, crate::CodecError> { Ok(0) }),
+            )
+            .expect_err("an endpoint must be bound by its topology target Federate");
+
+        assert!(matches!(error, FederateClientError::UnknownRoute(found) if found == endpoint));
     }
 }

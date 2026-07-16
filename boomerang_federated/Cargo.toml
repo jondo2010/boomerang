@@ -21,7 +21,7 @@ serde = ["dep:serde"]
 serde-json-codec = ["serde", "dep:serde_json", "dep:tokio-serde"]
 
 ## Checked conversions and scheduler bridge support for boomerang_runtime types
-runtime = ["dep:boomerang_runtime", "boomerang_runtime/federated", "dep:tinymap", "dep:tracing"]
+runtime = ["dep:boomerang_runtime", "dep:tinymap", "dep:tracing"]
 
 [dependencies]
 futures-channel = { version = "0.3", features = ["sink"] }

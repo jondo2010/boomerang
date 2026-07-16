@@ -15,5 +15,10 @@ An [`Assembly`] is the build-time graph of reactor, reaction, port, action, mode
 specs. Once declarations have populated that graph, [`Assembly::into_runtime_assembly`] lowers it
 into [`RuntimeAssembly`] data that `boomerang_runtime` can execute.
 
+`RuntimeAssembly` explicitly contains either local `RuntimeEnclaves` or a
+`RuntimeFederation`. A runtime Federation owns an independent RTI topology and
+one self-contained `RuntimeFederate` per compute node; each Federate may contain
+multiple scheduler Enclaves.
+
 Most users will not need to interact with the assembly layer directly. Specialized code can declare
 reactors with [`Assembly`] and [`ReactorContext`], or inspect and adjust the graph before lowering.

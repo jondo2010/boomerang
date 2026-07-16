@@ -11,7 +11,7 @@
 
 use anyhow::Context;
 use boomerang::{
-    builder::{Assembly, Reactor, ReactorPlacement, RuntimeAssembly},
+    builder::{Assembly, Reactor, ReactorPlacement},
     runtime,
 };
 use clap::Parser;
@@ -109,9 +109,11 @@ pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
         tracing::info!("Wrote plantuml graph to {}", path.display());
     }
 
-    let RuntimeAssembly { enclaves, .. } = assembly
+    let enclaves = assembly
         .into_runtime_assembly(&config)
-        .context("Error lowering assembly!")?;
+        .context("Error lowering assembly!")?
+        .into_local()
+        .context("generic test runner cannot execute a Federation")?;
 
     let envs_out = runtime::execute_enclaves(enclaves.into_iter(), config)?;
     let envs_out = envs_out.into_iter().map(|(_, env)| env).collect();
@@ -185,14 +187,11 @@ where
         ..Default::default()
     };
 
-    let RuntimeAssembly {
-        enclaves,
-        #[cfg(feature = "replay")]
-        replayers,
-        ..
-    } = assembly
+    let mut enclaves = assembly
         .into_runtime_assembly(&config)
-        .context("Error lowering assembly!")?;
+        .context("Error lowering assembly!")?
+        .into_local()
+        .context("generic local runner cannot execute a Federation")?;
 
     if args.print_debug_info {
         println!("{enclaves:#?}");
@@ -202,6 +201,7 @@ where
     let replay_handle = match args.replay_filename {
         Some(filename) => {
             tracing::info!("Reading replay from {}", filename.display());
+            let replayers = enclaves.take_replayers();
             Some(runtime::replay::create_replayer(
                 filename, replayers, &enclaves,
             )?)

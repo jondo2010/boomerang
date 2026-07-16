@@ -160,3 +160,12 @@ impl From<boomerang_federated::FederateClientError> for AssemblyError {
         }
     }
 }
+
+#[cfg(feature = "federated")]
+impl From<boomerang_federated::RuntimeFederationError> for AssemblyError {
+    fn from(error: boomerang_federated::RuntimeFederationError) -> Self {
+        Self::FederationBridgeError {
+            what: error.to_string(),
+        }
+    }
+}

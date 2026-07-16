@@ -3,6 +3,7 @@
 #[cfg(feature = "federated")]
 use crate::AssemblyPortKey;
 use crate::{runtime, AssemblyReactorKey};
+#[cfg(feature = "federated")]
 use slotmap::SecondaryMap;
 
 pub(crate) struct PartitionBoundary {

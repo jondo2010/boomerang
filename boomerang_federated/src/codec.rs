@@ -20,9 +20,27 @@ pub trait PayloadEncoder<T>: Send + Sync + 'static {
     fn encode(&self, value: &T) -> Result<Vec<u8>, CodecError>;
 }
 
+impl<T, F> PayloadEncoder<T> for F
+where
+    F: Fn(&T) -> Result<Vec<u8>, CodecError> + Send + Sync + 'static,
+{
+    fn encode(&self, value: &T) -> Result<Vec<u8>, CodecError> {
+        (self)(value)
+    }
+}
+
 /// Decodes protocol bytes into typed payload values.
 pub trait PayloadDecoder<T>: Send + Sync + 'static {
     fn decode(&self, bytes: &[u8]) -> Result<T, CodecError>;
+}
+
+impl<T, F> PayloadDecoder<T> for F
+where
+    F: Fn(&[u8]) -> Result<T, CodecError> + Send + Sync + 'static,
+{
+    fn decode(&self, bytes: &[u8]) -> Result<T, CodecError> {
+        (self)(bytes)
+    }
 }
 
 /// Marker trait for adapters that can both encode and decode a payload type.

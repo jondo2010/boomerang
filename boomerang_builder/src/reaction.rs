@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     runtime, ActionTag, ModeEffectSpec, ParentReactorSpec, PortBank, PortTag, ResolveModeEffects,
-    RuntimeAssembly, TimerActionKey, TypedActionKey, TypedPortKey,
+    RuntimeAssemblyContext, TimerActionKey, TypedActionKey, TypedPortKey,
 };
 use slotmap::SecondaryMap;
 use variadics_please::all_tuples;
@@ -26,7 +26,8 @@ impl petgraph::graph::GraphIndex for AssemblyReactionKey {
 }
 
 /// A deferred factory for a runtime reaction function.
-pub type DeferredReactionFactory = Box<dyn FnOnce(&RuntimeAssembly) -> runtime::BoxedReactionFn>;
+pub type DeferredReactionFactory =
+    Box<dyn FnOnce(&RuntimeAssemblyContext) -> runtime::BoxedReactionFn>;
 
 pub struct ReactionSpec {
     pub(super) name: Option<String>,
@@ -57,7 +58,7 @@ impl ReactionSpec {
     pub fn new<S: Into<String>>(
         name: Option<S>,
         parent_key: AssemblyReactorKey,
-        reaction_fn: Box<dyn FnOnce(&RuntimeAssembly) -> runtime::BoxedReactionFn>,
+        reaction_fn: Box<dyn FnOnce(&RuntimeAssemblyContext) -> runtime::BoxedReactionFn>,
     ) -> Self {
         ReactionSpec {
             name: name.map(|s| s.into()),
@@ -540,7 +541,7 @@ where
         } = self;
         let fields_for_reaction = fields.clone();
         let reaction_fn: DeferredReactionFactory = Box::new(
-            move |runtime_parts: &RuntimeAssembly| -> runtime::BoxedReactionFn {
+            move |runtime_parts: &RuntimeAssemblyContext| -> runtime::BoxedReactionFn {
                 let mut fields_for_reaction = fields_for_reaction.clone();
                 fields_for_reaction.resolve_mode_effects(runtime_parts);
                 Box::new(runtime::reaction::FnRefsAdapter::new(
@@ -578,7 +579,7 @@ where
         f: F,
     ) -> ReactionDeclaration<'a, S, Fields, DeferredReactionFactory>
     where
-        F: FnOnce(&RuntimeAssembly) -> runtime::BoxedReactionFn + 'static,
+        F: FnOnce(&RuntimeAssemblyContext) -> runtime::BoxedReactionFn + 'static,
     {
         let Self {
             name,

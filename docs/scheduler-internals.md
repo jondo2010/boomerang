@@ -28,8 +28,9 @@ from another thread or partition.
 `boomerang_runtime/src/reaction.rs` owns generated connection reactions.
 `InterPartitionSenderReactionFn` calculates delivery timing once and delegates
 to an `InterPartitionEventSink`. The in-process sink remains in the default
-runtime. The serialized sink is feature-gated but still knows only runtime
-encoder and outbound-sink interfaces, not RTI or wire types.
+runtime. The serialized sink, payload codecs, endpoint handlers, and fault state
+live in `boomerang_federated/src/runtime.rs`; the core runtime has no federation
+feature or protocol vocabulary.
 
 `boomerang_builder/src/connection.rs` chooses the sink while lowering a
 connection. `boomerang_builder/src/assembly/build.rs` derives local crosslinks
@@ -37,6 +38,12 @@ and serialized federation artifacts from one transient partition-boundary analys
 `boomerang_federated/src/client.rs` implements the external contract as
 `RtiLogicalTimeCoordinator`; protocol sessions and transports remain in
 `boomerang_federated`.
+
+A Federate may own several Enclaves, but it still has one RTI identity and
+protocol client. The static runner selects one gateway Enclave for the blocking
+RTI coordinator. Other Enclaves retain their local schedulers and communicate
+with the gateway through the same upstream/downstream crosslinks used by local
+partitioned execution.
 
 ## Scheduler Construction
 

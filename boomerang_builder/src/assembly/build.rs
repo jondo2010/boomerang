@@ -12,7 +12,7 @@ use slotmap::SecondaryMap;
 use std::collections::BTreeMap;
 
 #[cfg(feature = "federated")]
-use crate::federation::{FederatedBoundaryIndex, FederationLowering};
+use crate::federated::{FederatedBoundaryIndex, FederationLowering};
 use crate::{
     connection::PortBindings, ActionType, AssemblyActionKey, AssemblyError, AssemblyModeKey,
     AssemblyPortKey, AssemblyReactionKey, AssemblyReactorKey, ParentReactorSpec, PartitionAnalysis,
@@ -64,8 +64,8 @@ pub type PartitionMap = SecondaryMap<AssemblyReactorKey, AssemblyReactorKey>;
 /// Federation artifacts created before runtime enclave keys have been allocated.
 #[cfg(feature = "federated")]
 struct PendingFederation {
-    /// Protocol federates mapped to their assembly partition roots.
-    federate_reactors: BTreeMap<boomerang_federated::FederateId, AssemblyReactorKey>,
+    /// Protocol federates mapped to all of their assembly Enclave roots.
+    federate_reactors: BTreeMap<boomerang_federated::FederateId, Vec<AssemblyReactorKey>>,
     /// Validated RTI topology and its precomputed coordination indexes.
     topology: boomerang_federated::CompiledTopology,
 }
@@ -165,20 +165,25 @@ impl RuntimeAssembly {
 
 #[cfg(feature = "federated")]
 fn lower_federate_enclaves(
-    federate_reactors: &BTreeMap<boomerang_federated::FederateId, AssemblyReactorKey>,
+    federate_reactors: &BTreeMap<boomerang_federated::FederateId, Vec<AssemblyReactorKey>>,
     enclave_aliases: &SecondaryMap<AssemblyReactorKey, runtime::EnclaveKey>,
-) -> Result<BTreeMap<boomerang_federated::FederateId, runtime::EnclaveKey>, AssemblyError> {
+) -> Result<BTreeMap<boomerang_federated::FederateId, Vec<runtime::EnclaveKey>>, AssemblyError> {
     let mut federate_enclaves = BTreeMap::new();
 
-    for (federate_id, &reactor_key) in federate_reactors {
-        let enclave_key = *enclave_aliases.get(reactor_key).ok_or_else(|| {
-            AssemblyError::FederationBridgeError {
-                what: format!("federate '{federate_id}' has no runtime enclave alias"),
-            }
-        })?;
+    for (federate_id, reactor_keys) in federate_reactors {
+        let enclave_keys = reactor_keys
+            .iter()
+            .map(|&reactor_key| {
+                enclave_aliases.get(reactor_key).copied().ok_or_else(|| {
+                    AssemblyError::FederationBridgeError {
+                        what: format!("federate '{federate_id}' has no runtime enclave alias"),
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         if federate_enclaves
-            .insert(federate_id.clone(), enclave_key)
+            .insert(federate_id.clone(), enclave_keys)
             .is_some()
         {
             return Err(AssemblyError::FederationBridgeError {
@@ -345,6 +350,20 @@ impl Assembly {
                     });
                 }
 
+                let mut ancestor = reactor.parent_reactor_key;
+                while let Some(ancestor_key) = ancestor {
+                    let ancestor_reactor = &self.reactor_specs[ancestor_key];
+                    if let Some(ancestor_spec) = ancestor_reactor.federate_spec() {
+                        return Err(AssemblyError::UnsupportedFederationTopology {
+                            what: format!(
+                                "nested federate '{}' inside federate '{}' is unsupported",
+                                spec.id, ancestor_spec.id
+                            ),
+                        });
+                    }
+                    ancestor = ancestor_reactor.parent_reactor_key;
+                }
+
                 if let Some(previous) = seen_ids.insert(spec.id.clone(), reactor_key) {
                     return Err(AssemblyError::UnsupportedFederationTopology {
                         what: format!(
@@ -355,8 +374,20 @@ impl Assembly {
                         ),
                     });
                 }
+            }
 
-                federate_id_by_partition.insert(reactor_key, spec.id.clone());
+            // Every scheduler partition inherits the nearest enclosing Federate scope. The
+            // Federate declaration itself is also that scope's initial Enclave root.
+            for &partition_root in partition_map.values().unique() {
+                let mut cursor = Some(partition_root);
+                while let Some(reactor_key) = cursor {
+                    let reactor = &self.reactor_specs[reactor_key];
+                    if let Some(spec) = reactor.federate_spec() {
+                        federate_id_by_partition.insert(partition_root, spec.id.clone());
+                        break;
+                    }
+                    cursor = reactor.parent_reactor_key;
+                }
             }
 
             federate_id_by_partition
@@ -392,7 +423,7 @@ impl Assembly {
 
                 match (source_federate, target_federate) {
                     (None, None) => false,
-                    (Some(_), Some(_)) => true,
+                    (Some(source), Some(target)) => source != target,
                     _ => {
                         return Err(AssemblyError::UnsupportedFederationTopology {
                             what: format!(
@@ -463,6 +494,11 @@ impl Assembly {
                     self.reactor_specs[reactor_key]
                         .federate_spec()
                         .map(|spec| spec.id.clone())
+                        .or_else(|| {
+                            analysis
+                                .federate_for_partition(reactor_key)
+                                .map(str::to_owned)
+                        })
                         .unwrap_or_else(|| format!("{reactor_key:?}"))
                 })
                 .join(" -> ");
@@ -993,14 +1029,17 @@ impl Assembly {
                 })?;
             let FederationLowering {
                 topology,
-                federate_reactors,
+                federates,
                 boundaries,
             } = federation_lowering;
-            let federation = if federate_reactors.is_empty() {
+            let federation = if federates.is_empty() {
                 None
             } else {
                 Some(PendingFederation {
-                    federate_reactors,
+                    federate_reactors: federates
+                        .into_iter()
+                        .map(|(id, plan)| (id, plan.enclave_roots))
+                        .collect(),
                     topology: boomerang_federated::CompiledTopology::new(topology)?,
                 })
             };

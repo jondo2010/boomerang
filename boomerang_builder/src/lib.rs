@@ -8,7 +8,7 @@ mod action;
 mod assembly;
 mod connection;
 #[cfg(feature = "federated")]
-mod federation;
+mod federated;
 mod fqn;
 mod inter_partition;
 mod mode;

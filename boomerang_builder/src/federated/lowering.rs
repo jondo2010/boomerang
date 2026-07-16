@@ -1,4 +1,4 @@
-//! Lowering support for static federated enclave topologies.
+//! Projection from assembly partition boundaries to protocol topology artifacts.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -7,7 +7,6 @@ use crate::{runtime, AssemblyError, AssemblyPortKey, AssemblyReactorKey, Partiti
 pub(crate) type FederatedBoundaryIndex =
     HashMap<(AssemblyPortKey, AssemblyPortKey), FederatedBoundary>;
 
-/// Protocol identity needed while lowering one federated boundary connection.
 #[derive(Debug, Clone)]
 pub(crate) struct FederatedBoundary {
     pub(crate) endpoint: boomerang_federated::EndpointId,
@@ -15,11 +14,14 @@ pub(crate) struct FederatedBoundary {
     pub(crate) target_partition: AssemblyReactorKey,
 }
 
-/// Canonical one-pass projection from assembly boundaries to federation artifacts.
 pub(crate) struct FederationLowering {
     pub(crate) topology: boomerang_federated::FederatedTopology,
-    pub(crate) federate_reactors: BTreeMap<boomerang_federated::FederateId, AssemblyReactorKey>,
+    pub(crate) federates: BTreeMap<boomerang_federated::FederateId, FederatePlan>,
     pub(crate) boundaries: FederatedBoundaryIndex,
+}
+
+pub(crate) struct FederatePlan {
+    pub(crate) enclave_roots: Vec<AssemblyReactorKey>,
 }
 
 impl FederationLowering {
@@ -27,25 +29,25 @@ impl FederationLowering {
         analysis: &PartitionAnalysis,
         mut port_fqn: impl FnMut(AssemblyPortKey) -> Result<String, AssemblyError>,
     ) -> Result<Self, AssemblyError> {
-        let mut federates = Vec::new();
-        let mut federate_reactors = BTreeMap::new();
+        let mut federates = BTreeMap::<boomerang_federated::FederateId, FederatePlan>::new();
+        let mut federate_order = Vec::new();
         for (reactor, federate) in &analysis.federates {
             if federate.trim().is_empty() {
                 return Err(federation_bridge_error(format!(
-                    "federate partition {:?} has an empty protocol id",
-                    reactor
+                    "federate partition {reactor:?} has an empty protocol id"
                 )));
             }
             let federate_id = boomerang_federated::FederateId::new(federate.clone());
-            if federate_reactors
-                .insert(federate_id.clone(), reactor)
-                .is_some()
-            {
-                return Err(federation_bridge_error(format!(
-                    "duplicate federate id '{federate_id}'"
-                )));
+            if !federates.contains_key(&federate_id) {
+                federate_order.push(federate_id.clone());
             }
-            federates.push(federate_id);
+            federates
+                .entry(federate_id)
+                .or_insert_with(|| FederatePlan {
+                    enclave_roots: Vec::new(),
+                })
+                .enclave_roots
+                .push(reactor);
         }
 
         let mut seen_endpoints = BTreeSet::new();
@@ -54,12 +56,12 @@ impl FederationLowering {
         for (edge, source_federate, target_federate) in analysis.federated_boundaries() {
             let source = boomerang_federated::FederateId::new(source_federate);
             let target = boomerang_federated::FederateId::new(target_federate);
-            if !federate_reactors.contains_key(&source) {
+            if !federates.contains_key(&source) {
                 return Err(federation_bridge_error(format!(
                     "federated boundary references unknown source federate '{source}'"
                 )));
             }
-            if !federate_reactors.contains_key(&target) {
+            if !federates.contains_key(&target) {
                 return Err(federation_bridge_error(format!(
                     "federated boundary references unknown target federate '{target}'"
                 )));
@@ -105,8 +107,11 @@ impl FederationLowering {
         }
 
         Ok(Self {
-            topology: boomerang_federated::FederatedTopology::with_edges(federates, topology_edges),
-            federate_reactors,
+            topology: boomerang_federated::FederatedTopology::with_edges(
+                federate_order,
+                topology_edges,
+            ),
+            federates,
             boundaries,
         })
     }

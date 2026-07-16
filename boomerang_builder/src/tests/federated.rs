@@ -139,6 +139,49 @@ fn local_only_sink_reactor(
     }
 }
 
+fn local_only_two_enclave_federate() -> impl Reactor<(), Ports = ()> {
+    |name: &str,
+     state: (),
+     parent: Option<AssemblyReactorKey>,
+     scope_mode: Option<AssemblyModeKey>,
+     bank_info: Option<runtime::BankInfo>,
+     placement: ReactorPlacement,
+     assembly: &mut Assembly| {
+        let mut ctx = assembly.add_reactor(name, parent, bank_info, state, placement);
+        if let Some(scope_mode) = scope_mode {
+            ctx.set_scope_mode(scope_mode)?;
+        }
+        let source = ctx.add_child_reactor(local_only_source_reactor(), "source", (), false)?;
+        let sink = ctx.add_child_reactor(local_only_sink_reactor(), "sink", (), true)?;
+        ctx.connect_port(source, sink, None, false)?;
+        ctx.finish()?;
+        Ok(())
+    }
+}
+
+fn nested_federate() -> impl Reactor<(), Ports = ()> {
+    |name: &str,
+     state: (),
+     parent: Option<AssemblyReactorKey>,
+     scope_mode: Option<AssemblyModeKey>,
+     bank_info: Option<runtime::BankInfo>,
+     placement: ReactorPlacement,
+     assembly: &mut Assembly| {
+        let mut ctx = assembly.add_reactor(name, parent, bank_info, state, placement);
+        if let Some(scope_mode) = scope_mode {
+            ctx.set_scope_mode(scope_mode)?;
+        }
+        ctx.add_child_reactor_with_placement(
+            local_only_source_reactor(),
+            "inner",
+            (),
+            ReactorPlacement::federate("inner"),
+        )?;
+        ctx.finish()?;
+        Ok(())
+    }
+}
+
 fn federated_source_reactor() -> impl Reactor<(), Ports = TypedPortKey<u32, Output, Contained>> {
     |name: &str,
      state: (),
@@ -622,9 +665,9 @@ fn run_in_memory_federated_source_sink(
     } = parts;
     let federation = federation.expect("source/sink lowering must produce a federation");
     let source_enclave_key =
-        federation.federate_enclaves()[&boomerang_federated::FederateId::new("source")];
+        federation.federate_enclaves()[&boomerang_federated::FederateId::new("source")][0];
     let sink_enclave_key =
-        federation.federate_enclaves()[&boomerang_federated::FederateId::new("sink")];
+        federation.federate_enclaves()[&boomerang_federated::FederateId::new("sink")][0];
     let mut source_enclaves = Vec::new();
     let mut sink_enclaves = Vec::new();
     for (enclave_key, enclave) in enclaves {
@@ -1281,6 +1324,62 @@ fn test_duplicate_federate_id_is_rejected() {
         AssemblyError::UnsupportedFederationTopology { what }
             if what.contains("duplicate federate id 'same'")
     ));
+}
+
+#[test]
+fn test_nested_federate_scope_is_rejected() {
+    let mut assembly = Assembly::new();
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    ctx.add_child_reactor_with_placement(
+        nested_federate(),
+        "outer",
+        (),
+        ReactorPlacement::federate("outer"),
+    )
+    .unwrap();
+    ctx.finish().unwrap();
+
+    assert!(matches!(
+        assembly
+            .into_runtime_assembly(&runtime::Config::default())
+            .expect_err("nested Federate scopes should be rejected"),
+        AssemblyError::UnsupportedFederationTopology { what }
+            if what.contains("nested federate 'inner' inside federate 'outer'")
+    ));
+}
+
+#[test]
+fn test_same_federate_cross_enclave_boundary_stays_local() {
+    let mut assembly = Assembly::new();
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    ctx.add_child_reactor_with_placement(
+        local_only_two_enclave_federate(),
+        "node",
+        (),
+        ReactorPlacement::federate("node"),
+    )
+    .unwrap();
+    ctx.finish().unwrap();
+
+    // LocalOnlyPayload deliberately has no federated codec. Lowering succeeds because the
+    // boundary changes scheduler Enclaves but does not leave the Federate.
+    let parts = assembly
+        .into_runtime_assembly(&runtime::Config::default())
+        .unwrap();
+    let federation = parts.federation.as_ref().unwrap();
+    assert!(federation.topology().topology().edges.is_empty());
+    assert_eq!(
+        federation.federate_enclaves()[&boomerang_federated::FederateId::new("node")].len(),
+        2
+    );
+    assert_eq!(
+        parts
+            .enclaves
+            .values()
+            .map(|enclave| enclave.downstream_enclaves.len())
+            .sum::<usize>(),
+        1
+    );
 }
 
 #[test]

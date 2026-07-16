@@ -4,7 +4,10 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
 };
 
 #[cfg(feature = "serde-json-codec")]
@@ -46,27 +49,29 @@ pub struct FederatePlacementError {
 }
 
 struct FederateEnclaveMap {
-    /// Runtime enclave assigned to each protocol federate identity.
-    by_federate: BTreeMap<FederateId, boomerang_runtime::EnclaveKey>,
+    /// Runtime Enclaves assigned to each protocol Federate identity.
+    by_federate: BTreeMap<FederateId, Vec<boomerang_runtime::EnclaveKey>>,
     /// Protocol federate identity assigned to each runtime enclave.
     by_enclave: tinymap::TinySecondaryMap<boomerang_runtime::EnclaveKey, FederateId>,
 }
 
 impl FederateEnclaveMap {
     fn new(
-        by_federate: BTreeMap<FederateId, boomerang_runtime::EnclaveKey>,
+        by_federate: BTreeMap<FederateId, Vec<boomerang_runtime::EnclaveKey>>,
     ) -> Result<Self, FederatePlacementError> {
         let mut by_enclave =
             tinymap::TinySecondaryMap::<boomerang_runtime::EnclaveKey, FederateId>::new();
-        for (federate_id, &enclave_key) in &by_federate {
-            if let Some(first) = by_enclave.get(enclave_key) {
-                return Err(FederatePlacementError {
-                    enclave_key,
-                    first: first.clone(),
-                    second: federate_id.clone(),
-                });
+        for (federate_id, enclave_keys) in &by_federate {
+            for &enclave_key in enclave_keys {
+                if let Some(first) = by_enclave.get(enclave_key) {
+                    return Err(FederatePlacementError {
+                        enclave_key,
+                        first: first.clone(),
+                        second: federate_id.clone(),
+                    });
+                }
+                by_enclave.insert(enclave_key, federate_id.clone());
             }
-            by_enclave.insert(enclave_key, federate_id.clone());
         }
         Ok(Self {
             by_federate,
@@ -92,7 +97,7 @@ impl StaticFederationRuntime {
     /// Returns an error when more than one federate is assigned to the same runtime enclave.
     pub fn new(
         topology: CompiledTopology,
-        federate_enclaves: BTreeMap<FederateId, boomerang_runtime::EnclaveKey>,
+        federate_enclaves: BTreeMap<FederateId, Vec<boomerang_runtime::EnclaveKey>>,
     ) -> Result<Self, FederatePlacementError> {
         let connections = crate::FederatedRuntimeConnections::from_topology(topology.topology())
             .expect("compiled topology must produce valid runtime connections");
@@ -109,7 +114,7 @@ impl StaticFederationRuntime {
     }
 
     /// Return the runtime enclave assigned to each protocol federate identity.
-    pub fn federate_enclaves(&self) -> &BTreeMap<FederateId, boomerang_runtime::EnclaveKey> {
+    pub fn federate_enclaves(&self) -> &BTreeMap<FederateId, Vec<boomerang_runtime::EnclaveKey>> {
         &self.placement.by_federate
     }
 
@@ -502,7 +507,7 @@ fn execute_connected_static_federation(
         )?;
         barriers.insert(
             federate_id.clone(),
-            SharedRtiLogicalTimeCoordinator::new(barrier),
+            SharedRtiLogicalTimeCoordinator::new(barrier, placement.by_federate[federate_id].len()),
         );
     }
 
@@ -526,7 +531,7 @@ fn execute_connected_static_federation(
         if federate_has_no_initial_work(&enclave, topology.topology(), &federate_id) {
             let boomerang_runtime::Enclave { env, .. } = enclave;
             envs.insert(enclave_key, env);
-            if let Err(error) = barrier.stop() {
+            if let Err(error) = barrier.finish_participant() {
                 barrier_error.get_or_insert_with(|| error.to_string());
             }
             continue;
@@ -546,7 +551,7 @@ fn execute_connected_static_federation(
                 );
                 let scheduler_result = scheduler.try_event_loop();
                 let env = scheduler.into_env();
-                let stop_result = stop_barrier.stop();
+                let stop_result = stop_barrier.finish_participant();
                 (
                     thread_federate_id,
                     enclave_key,
@@ -558,7 +563,7 @@ fn execute_connected_static_federation(
             Ok(handle) => handle,
             Err(source) => {
                 for barrier in barriers.values() {
-                    let _ = barrier.stop();
+                    let _ = barrier.force_stop();
                 }
                 session_handle.abort();
                 for handle in handles {
@@ -596,7 +601,7 @@ fn execute_connected_static_federation(
     }
 
     for barrier in barriers.values() {
-        if let Err(error) = barrier.stop() {
+        if let Err(error) = barrier.force_stop() {
             barrier_error.get_or_insert_with(|| error.to_string());
         }
     }
@@ -636,16 +641,36 @@ fn listener_connect_addr(listener_addr: SocketAddr) -> SocketAddr {
 struct SharedRtiLogicalTimeCoordinator {
     /// Shared RTI coordinator serialized across scheduler calls.
     inner: Arc<Mutex<RtiLogicalTimeCoordinator>>,
+    remaining_participants: Arc<AtomicUsize>,
+    stopped: Arc<AtomicBool>,
 }
 
 impl SharedRtiLogicalTimeCoordinator {
-    fn new(barrier: RtiLogicalTimeCoordinator) -> Self {
+    fn new(barrier: RtiLogicalTimeCoordinator, participants: usize) -> Self {
         Self {
             inner: Arc::new(Mutex::new(barrier)),
+            remaining_participants: Arc::new(AtomicUsize::new(participants)),
+            stopped: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    fn stop(&self) -> Result<(), FederateClientError> {
+    fn finish_participant(&self) -> Result<(), FederateClientError> {
+        let previous = self.remaining_participants.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |remaining| remaining.checked_sub(1),
+        );
+        match previous {
+            Ok(1) => self.force_stop(),
+            Ok(_) | Err(0) => Ok(()),
+            Err(_) => unreachable!("participant count can only fail at zero"),
+        }
+    }
+
+    fn force_stop(&self) -> Result<(), FederateClientError> {
+        if self.stopped.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
         self.inner
             .lock()
             .map_err(|_| FederateClientError::Protocol("RTI coordinator lock poisoned".into()))?
@@ -839,8 +864,8 @@ mod tests {
         let mut enclaves = tinymap::TinyMap::new();
         let enclave_key = enclaves.insert(boomerang_runtime::Enclave::default());
         let error = FederateEnclaveMap::new(BTreeMap::from([
-            (FederateId::new("first"), enclave_key),
-            (FederateId::new("second"), enclave_key),
+            (FederateId::new("first"), vec![enclave_key]),
+            (FederateId::new("second"), vec![enclave_key]),
         ]))
         .err()
         .expect("duplicate enclave placement must be rejected");
@@ -873,8 +898,8 @@ mod tests {
             ))
             .unwrap(),
             BTreeMap::from([
-                (source.clone(), source_enclave),
-                (sink.clone(), sink_enclave),
+                (source.clone(), vec![source_enclave]),
+                (sink.clone(), vec![sink_enclave]),
             ]),
         )
         .unwrap();

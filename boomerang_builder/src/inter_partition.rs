@@ -17,11 +17,13 @@ pub(crate) struct PartitionBoundary {
 
 #[derive(Default)]
 pub(crate) struct PartitionAnalysis {
+    #[cfg(feature = "federated")]
     pub(crate) federates: SecondaryMap<AssemblyReactorKey, String>,
     pub(crate) boundaries: Vec<PartitionBoundary>,
 }
 
 impl PartitionAnalysis {
+    #[cfg(feature = "federated")]
     pub(crate) fn federate_for_partition(&self, partition: AssemblyReactorKey) -> Option<&str> {
         self.federates.get(partition).map(String::as_str)
     }
@@ -29,7 +31,7 @@ impl PartitionAnalysis {
     pub(crate) fn local_boundaries(&self) -> impl Iterator<Item = &PartitionBoundary> {
         self.boundaries
             .iter()
-            .filter(|edge| self.federates_for_edge(edge).is_none())
+            .filter(|edge| self.is_local_edge(edge))
     }
 
     #[cfg(feature = "federated")]
@@ -38,10 +40,24 @@ impl PartitionAnalysis {
     ) -> impl Iterator<Item = (&PartitionBoundary, &str, &str)> {
         self.boundaries.iter().filter_map(|edge| {
             self.federates_for_edge(edge)
-                .map(|(source, target)| (edge, source, target))
+                .and_then(|(source, target)| (source != target).then_some((edge, source, target)))
         })
     }
 
+    #[cfg(feature = "federated")]
+    fn is_local_edge(&self, edge: &PartitionBoundary) -> bool {
+        match self.federates_for_edge(edge) {
+            None => true,
+            Some((source, target)) => source == target,
+        }
+    }
+
+    #[cfg(not(feature = "federated"))]
+    fn is_local_edge(&self, _edge: &PartitionBoundary) -> bool {
+        true
+    }
+
+    #[cfg(feature = "federated")]
     fn federates_for_edge(&self, edge: &PartitionBoundary) -> Option<(&str, &str)> {
         let source = self.federate_for_partition(edge.source_partition);
         let target = self.federate_for_partition(edge.target_partition);

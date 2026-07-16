@@ -7,7 +7,7 @@
 #[cfg(feature = "federated")]
 use crate::connection::{FederatedDecoderAdapter, FederatedEncoderAdapter};
 #[cfg(feature = "federated")]
-use crate::federation::FederatedBoundaryIndex;
+use crate::federated::FederatedBoundaryIndex;
 use crate::{
     connection::{ConnectionSpec, ErasedConnectionSpec, PortBindings},
     port::Contained,

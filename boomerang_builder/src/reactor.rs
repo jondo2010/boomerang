@@ -5,37 +5,11 @@ use super::{
     AssemblyPortKey, AssemblyReactionKey, Input, Logical, ModeEffectSpec, Output, Physical,
     PortBank, PortTag, TimerActionKey, TimerSpec, TypedActionKey, TypedPortKey,
 };
-use crate::runtime;
+use crate::{runtime, AssemblyModeKey, ModeKind};
 use slotmap::SecondaryMap;
 
 slotmap::new_key_type! {
     pub struct AssemblyReactorKey;
-}
-
-slotmap::new_key_type! {
-    pub struct AssemblyModeKey;
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModeKind {
-    Initial,
-    Normal,
-}
-
-impl ModeKind {
-    pub fn is_initial(self) -> bool {
-        matches!(self, ModeKind::Initial)
-    }
-}
-
-impl From<bool> for ModeKind {
-    fn from(initial: bool) -> Self {
-        if initial {
-            ModeKind::Initial
-        } else {
-            ModeKind::Normal
-        }
-    }
 }
 
 #[cfg(feature = "federated")]

@@ -11,6 +11,7 @@ mod connection;
 mod federation;
 mod fqn;
 mod inter_partition;
+mod mode;
 mod port;
 mod reaction;
 mod reactor;
@@ -24,10 +25,9 @@ pub mod plantuml;
 
 pub use action::*;
 pub use assembly::*;
-#[cfg(feature = "federated")]
-pub use federation::*;
 pub use fqn::*;
-pub use inter_partition::*;
+pub(crate) use inter_partition::*;
+pub use mode::{AssemblyModeKey, ModeEffectSpec, ModeKind, ResolveModeEffects};
 pub use port::{
     AssemblyPortKey, Contained, Input, Local, Output, PortBank, PortSpec, PortTag, PortType,
     TypedPortKey,

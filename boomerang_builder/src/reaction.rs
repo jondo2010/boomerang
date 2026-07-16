@@ -5,8 +5,8 @@ use super::{
     AssemblyReactorKey,
 };
 use crate::{
-    runtime, ActionTag, ParentReactorSpec, PortBank, PortTag, RuntimeAssembly, TimerActionKey,
-    TypedActionKey, TypedPortKey,
+    runtime, ActionTag, ModeEffectSpec, ParentReactorSpec, PortBank, PortTag, ResolveModeEffects,
+    RuntimeAssembly, TimerActionKey, TypedActionKey, TypedPortKey,
 };
 use slotmap::SecondaryMap;
 use variadics_please::all_tuples;
@@ -96,109 +96,6 @@ impl Debug for ReactionSpec {
             .finish()
     }
 }
-
-#[derive(Clone, Copy, Debug)]
-pub struct ModeEffectSpec {
-    target: AssemblyModeKey,
-    runtime_target: Option<runtime::ModeKey>,
-    transition: runtime::TransitionKind,
-}
-
-impl ModeEffectSpec {
-    pub(crate) fn new(target: AssemblyModeKey, transition: runtime::TransitionKind) -> Self {
-        Self {
-            target,
-            runtime_target: None,
-            transition,
-        }
-    }
-
-    pub fn target(&self) -> AssemblyModeKey {
-        self.target
-    }
-
-    pub fn transition(&self) -> runtime::TransitionKind {
-        self.transition
-    }
-
-    pub fn with_transition(mut self, transition: runtime::TransitionKind) -> Self {
-        self.transition = transition;
-        self
-    }
-}
-
-#[doc(hidden)]
-pub trait ResolveModeEffects {
-    fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssembly);
-}
-
-impl ResolveModeEffects for () {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
-}
-
-impl ResolveModeEffects for ModeEffectSpec {
-    fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssembly) {
-        self.runtime_target = Some(runtime_parts.aliases.mode_aliases[self.target].1);
-    }
-}
-
-impl<T: ResolveModeEffects, const N: usize> ResolveModeEffects for [T; N] {
-    fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssembly) {
-        for item in self {
-            item.resolve_mode_effects(runtime_parts);
-        }
-    }
-}
-
-impl runtime::ReactionRefsExtract for ModeEffectSpec {
-    type Ref<'store>
-        = runtime::ModeEffectRef
-    where
-        Self: 'store;
-
-    fn extract<'store>(
-        &self,
-        _refs: &mut runtime::ReactionRefs<'store>,
-    ) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
-        let target = self
-            .runtime_target
-            .ok_or_else(|| runtime::ReactionRefsError::missing("mode effect"))?;
-        Ok(runtime::ModeEffectRef::new_key(target, self.transition))
-    }
-}
-
-impl<T: runtime::ReactorData, Q: ActionTag> ResolveModeEffects for TypedActionKey<T, Q> {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
-}
-
-impl ResolveModeEffects for TimerActionKey {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
-}
-
-impl<T: runtime::ReactorData, Q: PortTag, A> ResolveModeEffects for TypedPortKey<T, Q, A> {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
-}
-
-impl<T: runtime::ReactorData, Q: PortTag, A> ResolveModeEffects for PortBank<T, Q, A> {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
-}
-
-macro_rules! impl_resolve_mode_effects {
-    ($($T:ident),*) => {
-        impl<$($T,)*> ResolveModeEffects for ($($T,)*)
-        where
-            $($T: ResolveModeEffects,)*
-        {
-            #[allow(non_snake_case)]
-            fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssembly) {
-                let ($($T,)*) = self;
-                $($T.resolve_mode_effects(runtime_parts);)*
-            }
-        }
-    };
-}
-
-all_tuples!(impl_resolve_mode_effects, 1, 10, T);
 
 impl ReactionSpec {
     /// Get the name of this Reaction

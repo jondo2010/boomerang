@@ -6,14 +6,35 @@ Boomerang separates four runtime concepts. A **Reactor** is an application compo
 **Federation** is the complete distributed graph. The **RTI** (runtime infrastructure) is an
 independent hub that grants logical time and relays messages between Federates.
 
-```text
-Federation
-├── Federate A
-│   ├── Enclave A1 ── Reactors
-│   └── Enclave A2 ── Reactors
-├── Federate B
-│   └── Enclave B1 ── Reactors
-└── RTI (independent star hub)
+```mermaid
+flowchart LR
+    subgraph federation["Federation"]
+        direction LR
+
+        subgraph federate_a["Federate A"]
+            direction TB
+
+            subgraph enclave_a1["Enclave A1"]
+                reactors_a1["Reactors"]
+            end
+
+            subgraph enclave_a2["Enclave A2"]
+                reactors_a2["Reactors"]
+            end
+        end
+
+        subgraph federate_b["Federate B"]
+            direction TB
+
+            subgraph enclave_b1["Enclave B1"]
+                reactors_b1["Reactors"]
+            end
+        end
+
+        rti["RTI<br/>independent star hub"]
+        rti <-->|protocol connection| federate_a
+        rti <-->|protocol connection| federate_b
+    end
 ```
 
 These boundaries select the delivery mechanism. A connection inside one Enclave is direct. A
@@ -27,16 +48,26 @@ endpoints belong to different Federates is serialized and represented by an RTI 
 `Assembly::into_runtime_assembly` pass validates placement, analyzes connection boundaries,
 allocates Enclaves, installs local crosslinks, constructs protocol bridges, and returns:
 
-```text
-RuntimeAssembly
-├── aliases: assembly keys → runtime keys
-└── execution
-    ├── Local(RuntimeEnclaves)
-    └── Federated(RuntimeFederation)
-        ├── CompiledTopology     (data needed to start an independent RTI)
-        └── FederateId → RuntimeFederate
-            ├── RuntimeEnclaves  (key-preserving owned scheduler set)
-            └── FederateRuntimeBridge
+```mermaid
+flowchart TB
+    runtime_assembly["RuntimeAssembly"]
+    aliases["aliases<br/>assembly keys → runtime keys"]
+    execution["execution"]
+    local["Local(RuntimeEnclaves)"]
+    federated["Federated(RuntimeFederation)"]
+    topology["CompiledTopology<br/>data needed to start an independent RTI"]
+    runtime_federates["FederateId → RuntimeFederate"]
+    runtime_enclaves["RuntimeEnclaves<br/>key-preserving owned scheduler set"]
+    bridge["FederateRuntimeBridge"]
+
+    runtime_assembly --> aliases
+    runtime_assembly --> execution
+    execution --> local
+    execution --> federated
+    federated --> topology
+    federated --> runtime_federates
+    runtime_federates --> runtime_enclaves
+    runtime_federates --> bridge
 ```
 
 `RuntimeAssembly::into_local` and `RuntimeAssembly::into_federation` are typed conversions. A

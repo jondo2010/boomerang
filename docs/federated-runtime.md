@@ -53,11 +53,12 @@ flowchart TB
     runtime_assembly["RuntimeAssembly"]
     aliases["aliases<br/>assembly keys → runtime keys"]
     execution["execution"]
-    local["Local(RuntimeEnclaves)"]
+    local["Local(TinyMap&lt;EnclaveKey, Enclave&gt;)"]
     federated["Federated(RuntimeFederation)"]
     topology["CompiledTopology<br/>data needed to start an independent RTI"]
     runtime_federates["FederateId → RuntimeFederate"]
-    runtime_enclaves["RuntimeEnclaves<br/>key-preserving owned scheduler set"]
+    runtime_enclaves["TinyMap&lt;EnclaveKey, Enclave&gt;<br/>dense runtime owner"]
+    enclave_keys["Vec&lt;EnclaveKey&gt;<br/>Federate placement"]
     bridge["FederateRuntimeBridge"]
 
     runtime_assembly --> aliases
@@ -65,19 +66,22 @@ flowchart TB
     execution --> local
     execution --> federated
     federated --> topology
+    federated --> runtime_enclaves
     federated --> runtime_federates
-    runtime_federates --> runtime_enclaves
+    runtime_federates --> enclave_keys
     runtime_federates --> bridge
+    enclave_keys -. indexes .-> runtime_enclaves
 ```
 
 `RuntimeAssembly::into_local` and `RuntimeAssembly::into_federation` are typed conversions. A
-local runner cannot accidentally discard federation metadata, and a Federate bridge cannot be
-separated from the Enclaves it serves.
+local runner cannot accidentally discard federation metadata, and Federate placement remains
+explicit rather than changing globally allocated Enclave keys.
 
-`RuntimeFederation::into_parts` returns the immutable compiled topology and a deterministic map
-of independently owned `RuntimeFederate` values. It contains no RTI thread or task. A deployment
-launcher may start the RTI in another process and move each Federate to its target node. The
-single-process static runner consumes the same value and supplies in-memory or TCP transports.
+`RuntimeFederation::into_parts` returns the immutable compiled topology, the dense Enclave map,
+and a deterministic map of `RuntimeFederate` placement and bridge metadata. It contains no RTI
+thread or task. A deployment launcher may start the RTI independently and assign Enclaves to
+compute nodes from those key lists. The single-process static runner consumes the same value and
+supplies in-memory or TCP transports.
 
 ## Placement and lowering
 
@@ -92,8 +96,8 @@ boundaries produce an `EndpointId`, `TopologyEdge`, encoder, serialized sender, 
 and target action route.
 
 The aggregate `FederatedRuntimeConnections` value exists only during lowering. Finalization
-consumes it, splits the key-preserving `RuntimeEnclaves`, and produces one
-`FederateRuntimeBridge` per `RuntimeFederate`.
+consumes it, validates every Federate-to-Enclave assignment against the dense map, and produces
+one `FederateRuntimeBridge` per `RuntimeFederate`.
 
 ## Scheduler and RTI coordination
 
@@ -109,8 +113,8 @@ target action in the correct owned Enclave.
 
 ## Ownership map
 
-- `boomerang_runtime` owns protocol-neutral Enclaves, schedulers, local crosslinks,
-  `RuntimeEnclaves`, and `InterPartitionEventSink`.
+- `boomerang_runtime` owns protocol-neutral Enclave types, dense maps, schedulers, local
+  crosslinks, and `InterPartitionEventSink`.
 - `boomerang_federated` owns codecs, serialized sinks, endpoint/fault types, protocol clients,
   `FederateRuntimeBridge`, `RuntimeFederate`, `RuntimeFederation`, RTI state, sessions, and
   transports.
@@ -129,5 +133,5 @@ compiled RTI endpoint. The same graph runs through the in-memory and TCP runners
 value at the expected complete logical tag.
 
 The builder and federated crate tests additionally cover duplicate and nested placement errors,
-codec failures, delayed connections, fanout, cycles, route validation, and decomposition into
-independently owned Federates.
+codec failures, delayed connections, fanout, cycles, route validation, dense-key preservation,
+and Federate placement.

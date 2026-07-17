@@ -129,7 +129,7 @@ impl StaticFederationRuntime {
         &mut self.connections
     }
 
-    /// Consume transient lowering state into independently owned runtime Federates.
+    /// Consume transient lowering state into the dense runtime Federation hierarchy.
     pub fn finalize(
         self,
         runtime: tinymap::TinyMap<boomerang_runtime::EnclaveKey, boomerang_runtime::Enclave>,

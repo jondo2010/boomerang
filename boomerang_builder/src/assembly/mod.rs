@@ -6,8 +6,8 @@
 //!
 //! The workflow is: declare or mutate an [`Assembly`], consume it with
 //! [`Assembly::into_runtime_assembly`], then match the returned [`RuntimeExecution`] as either
-//! local [`boomerang_runtime::RuntimeEnclaves`] or a federated hierarchy of independently owned
-//! `RuntimeFederate` values and RTI topology.
+//! a local dense Enclave map or a [`boomerang_federated::RuntimeFederation`] containing the dense
+//! map, Federate placement, protocol bridges, and RTI topology.
 
 #[cfg(feature = "federated")]
 use crate::federated::FederatedBoundaryIndex;

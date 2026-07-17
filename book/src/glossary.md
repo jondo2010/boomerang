@@ -198,10 +198,10 @@ durable application identity.
 ## Runtime Assembly
 
 `RuntimeAssembly` is the ready-to-run result of lowering an `Assembly`. Its
-`RuntimeExecution` variant owns either local `RuntimeEnclaves` or a
-`RuntimeFederation` containing independently movable `RuntimeFederate` values.
-Runners consume it to create local schedulers or federation roles; it no longer
-accepts logical graph declarations.
+`RuntimeExecution` variant owns either a local dense Enclave map or a `RuntimeFederation` that
+owns the dense map alongside Federate placement, protocol bridges, and RTI topology. Runners
+consume it to create local schedulers or federation roles; it no longer accepts logical graph
+declarations.
 
 ## Runtime Environment
 

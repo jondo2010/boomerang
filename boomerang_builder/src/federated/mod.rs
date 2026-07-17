@@ -6,4 +6,4 @@ mod lowering;
 
 pub(crate) use bindings::FederatedInboundEndpointFactory;
 pub(crate) use codec::FederatedCodecRegistry;
-pub(crate) use lowering::{FederatedBoundaryIndex, FederationLowering};
+pub(crate) use lowering::{lower_federation, FederatedBoundaryIndex, FederationLoweringArtifacts};

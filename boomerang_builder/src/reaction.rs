@@ -12,6 +12,7 @@ use slotmap::SecondaryMap;
 use variadics_please::all_tuples;
 
 slotmap::new_key_type! {
+    /// Stable key for an assembly reaction specification.
     pub struct AssemblyReactionKey;
 }
 
@@ -26,10 +27,14 @@ impl petgraph::graph::GraphIndex for AssemblyReactionKey {
 }
 
 /// A deferred factory for a runtime reaction function.
-pub type DeferredReactionFactory =
-    Box<dyn FnOnce(&RuntimeAssemblyContext) -> runtime::BoxedReactionFn>;
+pub struct DeferredReactionFactory(
+    /// Callback resolved once runtime aliases and enclaves are available.
+    pub(crate) Box<dyn FnOnce(&RuntimeAssemblyContext) -> runtime::BoxedReactionFn>,
+);
 
+/// Build-time specification for a reaction and its declared dependencies.
 pub struct ReactionSpec {
+    /// Optional user-facing reaction name.
     pub(super) name: Option<String>,
     /// The owning Reactor for this Reaction
     pub(super) reactor_key: AssemblyReactorKey,
@@ -55,7 +60,8 @@ pub struct ReactionSpec {
 
 impl ReactionSpec {
     /// Create a new ReactionSpec
-    pub fn new<S: Into<String>>(
+    #[cfg(test)]
+    pub(crate) fn new<S: Into<String>>(
         name: Option<S>,
         parent_key: AssemblyReactorKey,
         reaction_fn: Box<dyn FnOnce(&RuntimeAssemblyContext) -> runtime::BoxedReactionFn>,
@@ -63,7 +69,7 @@ impl ReactionSpec {
         ReactionSpec {
             name: name.map(|s| s.into()),
             reactor_key: parent_key,
-            reaction_fn,
+            reaction_fn: DeferredReactionFactory(reaction_fn),
             enabled_modes: None,
             scope_mode: None,
             mode_effects: Vec::new(),
@@ -540,16 +546,16 @@ where
             ..
         } = self;
         let fields_for_reaction = fields.clone();
-        let reaction_fn: DeferredReactionFactory = Box::new(
-            move |runtime_parts: &RuntimeAssemblyContext| -> runtime::BoxedReactionFn {
+        let reaction_fn = DeferredReactionFactory(Box::new(
+            move |runtime_assembly: &RuntimeAssemblyContext| -> runtime::BoxedReactionFn {
                 let mut fields_for_reaction = fields_for_reaction.clone();
-                fields_for_reaction.resolve_mode_effects(runtime_parts);
+                fields_for_reaction.resolve_mode_effects(&runtime_assembly.aliases);
                 Box::new(runtime::reaction::FnRefsAdapter::new(
                     fields_for_reaction,
                     f,
                 ))
             },
-        );
+        ));
         ReactionDeclaration {
             name,
             reaction_fn,
@@ -574,7 +580,7 @@ where
     S: runtime::ReactorData,
     Fields: runtime::ReactionRefsExtract,
 {
-    pub fn with_deferred_reaction_factory<F>(
+    pub(crate) fn with_deferred_reaction_factory<F>(
         self,
         f: F,
     ) -> ReactionDeclaration<'a, S, Fields, DeferredReactionFactory>
@@ -598,7 +604,7 @@ where
         } = self;
         ReactionDeclaration {
             name,
-            reaction_fn: Box::new(f),
+            reaction_fn: DeferredReactionFactory(Box::new(f)),
             enabled_modes,
             scope_mode,
             mode_effects,

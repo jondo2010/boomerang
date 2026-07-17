@@ -1,11 +1,12 @@
 use variadics_please::all_tuples;
 
 use crate::{
-    runtime, ActionTag, PortBank, PortTag, RuntimeAssemblyContext, TimerActionKey, TypedActionKey,
+    runtime, ActionTag, PortBank, PortTag, RuntimeAliases, TimerActionKey, TypedActionKey,
     TypedPortKey,
 };
 
 slotmap::new_key_type! {
+    /// Stable key for an assembly mode specification.
     pub struct AssemblyModeKey;
 }
 
@@ -32,9 +33,13 @@ impl From<bool> for ModeKind {
 }
 
 #[derive(Clone, Copy, Debug)]
+/// Build-time description of a mode transition effect.
 pub struct ModeEffectSpec {
+    /// Assembly mode targeted by the transition.
     target: AssemblyModeKey,
+    /// Runtime mode key resolved during assembly lowering.
     runtime_target: Option<runtime::ModeKey>,
+    /// Transition applied when the containing reaction executes.
     transition: runtime::TransitionKind,
 }
 
@@ -80,41 +85,41 @@ impl runtime::ReactionRefsExtract for ModeEffectSpec {
 
 #[doc(hidden)]
 pub trait ResolveModeEffects {
-    fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssemblyContext);
+    fn resolve_mode_effects(&mut self, aliases: &RuntimeAliases);
 }
 
 impl ResolveModeEffects for () {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssemblyContext) {}
+    fn resolve_mode_effects(&mut self, _aliases: &RuntimeAliases) {}
 }
 
 impl ResolveModeEffects for ModeEffectSpec {
-    fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssemblyContext) {
-        self.runtime_target = Some(runtime_parts.aliases.mode_aliases[self.target].1);
+    fn resolve_mode_effects(&mut self, aliases: &RuntimeAliases) {
+        self.runtime_target = Some(aliases.mode_aliases[self.target].1);
     }
 }
 
 impl<T: ResolveModeEffects, const N: usize> ResolveModeEffects for [T; N] {
-    fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssemblyContext) {
+    fn resolve_mode_effects(&mut self, aliases: &RuntimeAliases) {
         for item in self {
-            item.resolve_mode_effects(runtime_parts);
+            item.resolve_mode_effects(aliases);
         }
     }
 }
 
 impl<T: runtime::ReactorData, Q: ActionTag> ResolveModeEffects for TypedActionKey<T, Q> {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssemblyContext) {}
+    fn resolve_mode_effects(&mut self, _aliases: &RuntimeAliases) {}
 }
 
 impl ResolveModeEffects for TimerActionKey {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssemblyContext) {}
+    fn resolve_mode_effects(&mut self, _aliases: &RuntimeAliases) {}
 }
 
 impl<T: runtime::ReactorData, Q: PortTag, A> ResolveModeEffects for TypedPortKey<T, Q, A> {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssemblyContext) {}
+    fn resolve_mode_effects(&mut self, _aliases: &RuntimeAliases) {}
 }
 
 impl<T: runtime::ReactorData, Q: PortTag, A> ResolveModeEffects for PortBank<T, Q, A> {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssemblyContext) {}
+    fn resolve_mode_effects(&mut self, _aliases: &RuntimeAliases) {}
 }
 
 macro_rules! impl_resolve_mode_effects {
@@ -124,9 +129,9 @@ macro_rules! impl_resolve_mode_effects {
             $($T: ResolveModeEffects,)*
         {
             #[allow(non_snake_case)]
-            fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssemblyContext) {
+            fn resolve_mode_effects(&mut self, aliases: &RuntimeAliases) {
                 let ($($T,)*) = self;
-                $($T.resolve_mode_effects(runtime_parts);)*
+                $($T.resolve_mode_effects(aliases);)*
             }
         }
     };

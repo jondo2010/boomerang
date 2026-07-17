@@ -34,9 +34,9 @@ mod debug;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use build::RuntimeAssemblyContext;
 pub use build::{
-    DeferredRuntimeFactory, PartitionMap, RuntimeAssembly, RuntimeAssemblyContext,
-    RuntimeExecution, RuntimeExecutionError,
+    PartitionMap, RuntimeAliases, RuntimeAssembly, RuntimeExecution, RuntimeExecutionError,
 };
 
 mod util {
@@ -74,24 +74,30 @@ mod util {
 }
 
 #[cfg(feature = "replay")]
-type ReplayFunctionFactory =
-    dyn FnOnce(&RuntimeAssemblyContext) -> Box<dyn runtime::replay::ReplayFn>;
+type ReplayFunctionFactory = dyn FnOnce(&RuntimeAliases) -> Box<dyn runtime::replay::ReplayFn>;
 
 /// Transient state produced while connection specifications are lowered.
 #[derive(Default)]
 pub(super) struct ConnectionLoweringArtifacts {
+    /// Direct and synthetic port bindings produced by connection lowering.
     pub(super) port_bindings: PortBindings,
     #[cfg(feature = "federated")]
+    /// Deferred factories for inbound federated runtime endpoints.
     pub(super) federated_inbound_endpoint_factories:
         Vec<Box<crate::federated::FederatedInboundEndpointFactory>>,
     #[cfg(feature = "federated")]
+    /// Federated boundaries not yet consumed by connection lowering.
     pub(super) federated_boundaries: FederatedBoundaryIndex,
 }
 
 #[derive(Debug)]
+/// Build-time mode declaration owned by an assembly reactor.
 pub struct ModeSpec {
+    /// User-facing mode name.
     pub name: String,
+    /// Reactor that owns the mode.
     pub reactor_key: AssemblyReactorKey,
+    /// Whether the mode is initially active or normal.
     pub kind: ModeKind,
 }
 
@@ -386,7 +392,7 @@ impl Assembly {
     where
         T: boomerang_runtime::ReactorData + for<'de> serde::Deserialize<'de>,
         Q: ActionTag,
-        F: FnOnce(&RuntimeAssemblyContext) -> Box<dyn runtime::replay::ReplayFn> + 'static,
+        F: FnOnce(&RuntimeAliases) -> Box<dyn runtime::replay::ReplayFn> + 'static,
     {
         let action_key = action_key.into();
         if self.replay_factories.contains_key(action_key) {

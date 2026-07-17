@@ -12,7 +12,7 @@ use slotmap::SecondaryMap;
 use std::collections::BTreeMap;
 
 #[cfg(feature = "federated")]
-use crate::federated::{FederatedBoundaryIndex, FederationLowering};
+use crate::federated::{lower_federation, FederatedBoundaryIndex, FederationLoweringArtifacts};
 use crate::{
     connection::PortBindings, ActionType, AssemblyActionKey, AssemblyError, AssemblyModeKey,
     AssemblyPortKey, AssemblyReactionKey, AssemblyReactorKey, ParentReactorSpec, PartitionAnalysis,
@@ -22,20 +22,6 @@ use crate::{
 use super::{Assembly, ConnectionLoweringArtifacts};
 #[cfg(feature = "federated")]
 use crate::federated::FederatedInboundEndpointFactory;
-
-/// A trait used to defer runtime object creation until the lowered runtime data is available.
-pub trait DeferredRuntimeFactory {
-    type Output;
-
-    fn defer(self) -> impl FnOnce(&RuntimeAssemblyContext) -> Self::Output + 'static;
-}
-
-impl DeferredRuntimeFactory for runtime::reaction::TimerFn {
-    type Output = runtime::BoxedReactionFn;
-    fn defer(self) -> impl FnOnce(&RuntimeAssemblyContext) -> Self::Output + 'static {
-        move |_| runtime::BoxedReactionFn::from(self)
-    }
-}
 
 /// Aliasing maps from assembly keys to runtime keys.
 #[derive(Default)]
@@ -60,7 +46,9 @@ pub struct RuntimeAliases {
 
 /// Coherent result of lowering an [`Assembly`].
 pub struct RuntimeAssembly {
+    /// Key mappings from assembly declarations to their runtime counterparts.
     pub aliases: RuntimeAliases,
+    /// Executable local or federated runtime hierarchy.
     pub execution: RuntimeExecution,
 }
 
@@ -149,119 +137,85 @@ pub enum RuntimeExecutionError {
 /// A map of partitions: each Reactor is mapped to one Enclave Reactor.
 pub type PartitionMap = SecondaryMap<AssemblyReactorKey, AssemblyReactorKey>;
 
-/// Federation artifacts created before runtime enclave keys have been allocated.
-#[cfg(feature = "federated")]
-struct PendingFederation {
-    /// Protocol federates mapped to all of their assembly Enclave roots.
-    federate_reactors: BTreeMap<boomerang_federated::FederateId, Vec<AssemblyReactorKey>>,
-    /// Validated RTI topology and its precomputed coordination indexes.
-    topology: boomerang_federated::CompiledTopology,
-}
-
-#[derive(Default)]
-pub struct RuntimeAssemblyContext {
+/// Mutable runtime state shared by the internal assembly-lowering stages.
+pub(crate) struct RuntimeAssemblyContext {
     /// Executable runtime enclaves keyed by their lowered enclave identities.
-    pub enclaves: runtime::RuntimeEnclaves,
+    pub(crate) enclaves: runtime::RuntimeEnclaves,
     /// Aliases from assembly keys to runtime keys.
-    pub aliases: RuntimeAliases,
+    pub(crate) aliases: RuntimeAliases,
     #[cfg(feature = "federated")]
     /// Fully lowered static-federation data, or `None` for a local-only assembly.
-    pub federation: Option<boomerang_federated::StaticFederationRuntime>,
+    pub(crate) federation: Option<boomerang_federated::StaticFederationRuntime>,
 }
 
-impl RuntimeAssemblyContext {
-    /// Create a new `RuntimeAssemblyContext` from a `PartitionMap`.
-    fn new(
-        partition_map: &PartitionMap,
-        partition_analysis: &PartitionAnalysis,
-        physical_event_q_size: usize,
-        #[cfg(feature = "federated")] federation: Option<PendingFederation>,
-    ) -> Result<Self, AssemblyError> {
-        let mut enclaves = runtime::RuntimeEnclaves::new();
-        let mut aliases = RuntimeAliases::default();
-        // Create all the unique enclaves
-        for reactor_key in partition_map.values().unique() {
-            let enclave_key =
-                enclaves.insert(runtime::Enclave::with_event_q_size(physical_event_q_size));
-            aliases.enclave_aliases.insert(*reactor_key, enclave_key);
-        }
-        // Add any missing aliases
-        for (reactor_key, reactor_enclave_key) in partition_map {
-            if !aliases.enclave_aliases.contains_key(reactor_key) {
-                let enclave_key = aliases.enclave_aliases[*reactor_enclave_key];
-                aliases.enclave_aliases.insert(reactor_key, enclave_key);
-            }
-        }
-        #[cfg(feature = "federated")]
-        let federation = federation
-            .map(|federation| -> Result<boomerang_federated::StaticFederationRuntime, AssemblyError> {
-                Ok(boomerang_federated::StaticFederationRuntime::new(
-                    federation.topology,
-                    lower_federate_enclaves(
-                        &federation.federate_reactors,
-                        &aliases.enclave_aliases,
-                    )?,
-                )?)
-            })
-            .transpose()?;
-        // Install local coordination while the transient partition analysis is available.
-        for edge in partition_analysis.local_boundaries() {
-            let upstream_enclave_key = aliases.enclave_aliases[edge.source_partition];
-            let downstream_enclave_key = aliases.enclave_aliases[edge.target_partition];
+/// Allocate runtime enclaves and install local cross-enclave coordination.
+fn initialize_runtime_assembly_context(
+    partition_map: &PartitionMap,
+    partition_analysis: &PartitionAnalysis,
+    physical_event_q_size: usize,
+) -> RuntimeAssemblyContext {
+    let mut enclaves = runtime::RuntimeEnclaves::new();
+    let mut aliases = RuntimeAliases::default();
 
-            runtime::crosslink_enclaves(
-                &mut enclaves,
-                upstream_enclave_key,
-                downstream_enclave_key,
-                edge.delay,
-            );
-        }
-        #[cfg(feature = "replay")]
-        {
-            // Pre-fill the replayers map with empty maps
-            let enclave_keys = enclaves.keys().collect_vec();
-            enclaves
-                .replayers_mut()
-                .extend(enclave_keys.into_iter().map(|enclave_key| {
-                    let replayers = tinymap::TinySecondaryMap::new();
-                    (enclave_key, replayers)
-                }));
-
-            Ok(Self {
-                enclaves,
-                aliases,
-                #[cfg(feature = "federated")]
-                federation,
-            })
-        }
-        #[cfg(not(feature = "replay"))]
-        {
-            // No replayers, just return the enclaves and aliases
-            Ok(Self {
-                enclaves,
-                aliases,
-                #[cfg(feature = "federated")]
-                federation,
-            })
+    for reactor_key in partition_map.values().unique() {
+        let enclave_key =
+            enclaves.insert(runtime::Enclave::with_event_q_size(physical_event_q_size));
+        aliases.enclave_aliases.insert(*reactor_key, enclave_key);
+    }
+    for (reactor_key, reactor_enclave_key) in partition_map {
+        if !aliases.enclave_aliases.contains_key(reactor_key) {
+            let enclave_key = aliases.enclave_aliases[*reactor_enclave_key];
+            aliases.enclave_aliases.insert(reactor_key, enclave_key);
         }
     }
 
-    fn finish(self) -> Result<RuntimeAssembly, AssemblyError> {
-        let Self {
-            enclaves,
-            aliases,
-            #[cfg(feature = "federated")]
-            federation,
-        } = self;
-        #[cfg(feature = "federated")]
-        let execution = match federation {
-            Some(federation) => RuntimeExecution::Federated(federation.finalize(enclaves)?),
-            None => RuntimeExecution::Local(enclaves),
-        };
-        #[cfg(not(feature = "federated"))]
-        let execution = RuntimeExecution::Local(enclaves);
-        Ok(RuntimeAssembly { aliases, execution })
+    for edge in partition_analysis.local_boundaries() {
+        let upstream_enclave_key = aliases.enclave_aliases[edge.source_partition];
+        let downstream_enclave_key = aliases.enclave_aliases[edge.target_partition];
+        runtime::crosslink_enclaves(
+            &mut enclaves,
+            upstream_enclave_key,
+            downstream_enclave_key,
+            edge.delay,
+        );
     }
+
+    #[cfg(feature = "replay")]
+    {
+        let enclave_keys = enclaves.keys().collect_vec();
+        enclaves.replayers_mut().extend(
+            enclave_keys
+                .into_iter()
+                .map(|enclave_key| (enclave_key, tinymap::TinySecondaryMap::new())),
+        );
+    }
+
+    RuntimeAssemblyContext {
+        enclaves,
+        aliases,
+        #[cfg(feature = "federated")]
+        federation: None,
+    }
+}
+
+/// Convert completed lowering state into the public runtime assembly.
+fn finish_runtime_assembly_context(
+    context: RuntimeAssemblyContext,
+) -> Result<RuntimeAssembly, AssemblyError> {
+    let RuntimeAssemblyContext {
+        enclaves,
+        aliases,
+        #[cfg(feature = "federated")]
+        federation,
+    } = context;
+    #[cfg(feature = "federated")]
+    let execution = match federation {
+        Some(federation) => RuntimeExecution::Federated(federation.finalize(enclaves)?),
+        None => RuntimeExecution::Local(enclaves),
+    };
+    #[cfg(not(feature = "federated"))]
+    let execution = RuntimeExecution::Local(enclaves);
+    Ok(RuntimeAssembly { aliases, execution })
 }
 
 #[cfg(feature = "federated")]
@@ -294,6 +248,35 @@ fn lower_federate_enclaves(
     }
 
     Ok(federate_enclaves)
+}
+
+/// Resolve deferred inbound endpoints after runtime action aliases exist.
+#[cfg(feature = "federated")]
+fn build_federated_inbound_endpoints(
+    runtime_assembly: &mut RuntimeAssemblyContext,
+    endpoint_factories: Vec<Box<FederatedInboundEndpointFactory>>,
+) -> Result<(), AssemblyError> {
+    if endpoint_factories.is_empty() {
+        return Ok(());
+    }
+    let mut connections = std::mem::take(
+        runtime_assembly
+            .federation
+            .as_mut()
+            .ok_or_else(|| AssemblyError::InconsistentAssemblyState {
+                what: "federated inbound endpoints exist without a lowered federation".into(),
+            })?
+            .connections_mut(),
+    );
+    for endpoint_factory in endpoint_factories {
+        endpoint_factory(runtime_assembly, &mut connections)?;
+    }
+    *runtime_assembly
+        .federation
+        .as_mut()
+        .expect("lowered federation was checked before endpoint construction")
+        .connections_mut() = connections;
+    Ok(())
 }
 
 fn push_range<T>(target: &mut Vec<T>, values: impl IntoIterator<Item = T>) -> Range<usize> {
@@ -823,38 +806,12 @@ impl Assembly {
                 reaction = reaction.in_mode_scope(scope_mode);
             }
             let _ = reaction
-                .with_deferred_reaction_factory(reaction_fn.defer())
+                .with_deferred_reaction_factory(move |_| {
+                    runtime::BoxedReactionFn::from(reaction_fn)
+                })
                 .finish()?;
         }
 
-        Ok(())
-    }
-
-    #[cfg(feature = "federated")]
-    fn build_federated_inbound_endpoints(
-        runtime_assembly: &mut RuntimeAssemblyContext,
-        endpoint_factories: Vec<Box<FederatedInboundEndpointFactory>>,
-    ) -> Result<(), AssemblyError> {
-        if endpoint_factories.is_empty() {
-            return Ok(());
-        }
-        let mut connections = std::mem::take(
-            runtime_assembly
-                .federation
-                .as_mut()
-                .ok_or_else(|| AssemblyError::InconsistentAssemblyState {
-                    what: "federated inbound endpoints exist without a lowered federation".into(),
-                })?
-                .connections_mut(),
-        );
-        for endpoint_factory in endpoint_factories {
-            endpoint_factory(runtime_assembly, &mut connections)?;
-        }
-        *runtime_assembly
-            .federation
-            .as_mut()
-            .expect("lowered federation was checked before endpoint construction")
-            .connections_mut() = connections;
         Ok(())
     }
 
@@ -946,7 +903,7 @@ impl Assembly {
         reaction_levels: &SecondaryMap<AssemblyReactionKey, runtime::Level>,
     ) -> Result<(), AssemblyError> {
         for (assembly_reaction_key, reaction) in self.reaction_specs.drain() {
-            let reaction_body = (reaction.reaction_fn)(runtime_assembly);
+            let reaction_body = (reaction.reaction_fn.0)(runtime_assembly);
 
             let reaction_name = reaction.name.clone().unwrap_or_else(|| {
                 let reaction_u64 = slotmap::Key::data(&assembly_reaction_key).as_ffi();
@@ -1106,7 +1063,7 @@ impl Assembly {
         runtime_assembly: &mut RuntimeAssemblyContext,
     ) -> Result<(), AssemblyError> {
         for (assembly_action_key, replay_factory) in self.replay_factories.drain() {
-            let replayer = (replay_factory)(runtime_assembly);
+            let replayer = (replay_factory)(&runtime_assembly.aliases);
             let (enclave_key, action_key) =
                 runtime_assembly.aliases.action_aliases[assembly_action_key];
             runtime_assembly.enclaves.replayers_mut()[enclave_key].insert(action_key, replayer);
@@ -1123,66 +1080,49 @@ impl Assembly {
         let partition_analysis = self.build_partition_analysis(&partition_map)?;
 
         #[cfg(feature = "federated")]
-        let (mut runtime_assembly, port_bindings) = {
-            let federation_lowering =
-                FederationLowering::from_partition_analysis(&partition_analysis, |port| {
-                    self.fqn_for(port, false).map(|fqn| fqn.to_string())
-                })?;
-            let FederationLowering {
-                topology,
-                federates,
-                boundaries,
-            } = federation_lowering;
-            let federation = if federates.is_empty() {
-                None
-            } else {
-                Some(PendingFederation {
-                    federate_reactors: federates
-                        .into_iter()
-                        .map(|(id, plan)| (id, plan.enclave_roots))
-                        .collect(),
-                    topology: boomerang_federated::CompiledTopology::new(topology)?,
-                })
-            };
+        let FederationLoweringArtifacts {
+            topology,
+            federate_reactors,
+            boundaries,
+        } = lower_federation(&partition_analysis, |port| {
+            self.fqn_for(port, false).map(|fqn| fqn.to_string())
+        })?;
 
-            let ConnectionLoweringArtifacts {
-                port_bindings,
-                federated_inbound_endpoint_factories,
-                federated_boundaries: _,
-            } = self.build_connections(&mut partition_map, boundaries)?;
-
-            let mut runtime_assembly = RuntimeAssemblyContext::new(
-                &partition_map,
-                &partition_analysis,
-                config.physical_event_q_size,
-                federation,
-            )?;
-
-            self.build_runtime_actions(&partition_map, &mut runtime_assembly)?;
-
-            // Must happen after build_runtime_actions, since that may add new reactions for periodic timers.
-            Self::build_federated_inbound_endpoints(
-                &mut runtime_assembly,
-                federated_inbound_endpoint_factories,
-            )?;
-
-            (runtime_assembly, port_bindings)
-        };
+        #[cfg(feature = "federated")]
+        let ConnectionLoweringArtifacts {
+            port_bindings,
+            federated_inbound_endpoint_factories,
+            federated_boundaries: _,
+        } = self.build_connections(&mut partition_map, boundaries)?;
         #[cfg(not(feature = "federated"))]
-        let (mut runtime_assembly, port_bindings) = {
-            let ConnectionLoweringArtifacts { port_bindings } =
-                self.build_connections(&mut partition_map)?;
+        let ConnectionLoweringArtifacts { port_bindings } =
+            self.build_connections(&mut partition_map)?;
 
-            let mut runtime_assembly = RuntimeAssemblyContext::new(
-                &partition_map,
-                &partition_analysis,
-                config.physical_event_q_size,
+        let mut runtime_assembly = initialize_runtime_assembly_context(
+            &partition_map,
+            &partition_analysis,
+            config.physical_event_q_size,
+        );
+
+        #[cfg(feature = "federated")]
+        if !federate_reactors.is_empty() {
+            let federate_enclaves = lower_federate_enclaves(
+                &federate_reactors,
+                &runtime_assembly.aliases.enclave_aliases,
             )?;
+            runtime_assembly.federation = Some(boomerang_federated::StaticFederationRuntime::new(
+                boomerang_federated::CompiledTopology::new(topology)?,
+                federate_enclaves,
+            )?);
+        }
 
-            self.build_runtime_actions(&partition_map, &mut runtime_assembly)?;
+        self.build_runtime_actions(&partition_map, &mut runtime_assembly)?;
 
-            (runtime_assembly, port_bindings)
-        };
+        #[cfg(feature = "federated")]
+        build_federated_inbound_endpoints(
+            &mut runtime_assembly,
+            federated_inbound_endpoint_factories,
+        )?;
 
         self.build_runtime_ports(&partition_map, &mut runtime_assembly, &port_bindings)?;
 
@@ -1205,6 +1145,6 @@ impl Assembly {
             enclave.graph.modal_schedule_index = modal_schedule_index;
         }
 
-        runtime_assembly.finish()
+        finish_runtime_assembly_context(runtime_assembly)
     }
 }

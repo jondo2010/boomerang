@@ -707,8 +707,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
         // Add a replay factory.
         self.assembly
             .add_replayer(action_key, move |runtime_parts| {
-                let (_enclave_key, action_key) =
-                    runtime_parts.aliases.action_aliases[action_key.into()];
+                let (_enclave_key, action_key) = runtime_parts.action_aliases[action_key.into()];
                 Box::new(runtime::replay::TypedReplayer::<T>::new(action_key))
             })?;
         Ok(())

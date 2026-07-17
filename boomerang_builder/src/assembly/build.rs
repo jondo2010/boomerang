@@ -169,8 +169,8 @@ pub type PartitionMap = SecondaryMap<AssemblyReactorKey, AssemblyReactorKey>;
 
 /// Mutable runtime state shared by the internal assembly-lowering stages.
 pub(crate) struct RuntimeAssemblyContext {
-    /// Executable runtime enclaves keyed by their lowered enclave identities.
-    pub(crate) enclaves: tinymap::TinyMap<runtime::EnclaveKey, runtime::Enclave>,
+    /// Runtime Enclaves grouped by their final execution owner.
+    enclaves: RuntimeEnclaveStores,
     /// Aliases from assembly keys to runtime keys.
     pub(crate) aliases: RuntimeAliases,
     #[cfg(feature = "federated")]
@@ -178,21 +178,150 @@ pub(crate) struct RuntimeAssemblyContext {
     pub(crate) federation: Option<boomerang_federated::StaticFederationRuntime>,
 }
 
+/// Dense runtime Enclave maps grouped by their execution owner.
+#[derive(Default)]
+struct RuntimeEnclaveStores {
+    /// Enclaves outside a Federate scope, including local execution and assembly scaffolding.
+    local: tinymap::TinyMap<runtime::EnclaveKey, runtime::Enclave>,
+    /// Enclaves owned by each protocol Federate.
+    #[cfg(feature = "federated")]
+    federated: BTreeMap<
+        boomerang_federated::FederateId,
+        tinymap::TinyMap<runtime::EnclaveKey, runtime::Enclave>,
+    >,
+}
+
+impl RuntimeEnclaveStores {
+    /// Allocate an Enclave directly within its final execution owner.
+    fn insert(
+        &mut self,
+        #[cfg(feature = "federated")] federate: Option<boomerang_federated::FederateId>,
+        enclave: runtime::Enclave,
+    ) -> RuntimeEnclaveRef {
+        #[cfg(feature = "federated")]
+        if let Some(federate) = federate {
+            let enclave = self
+                .federated
+                .entry(federate.clone())
+                .or_default()
+                .insert(enclave);
+            return RuntimeEnclaveRef::Federated { federate, enclave };
+        }
+
+        RuntimeEnclaveRef::Local(self.local.insert(enclave))
+    }
+
+    /// Return an Enclave through its owner-qualified reference.
+    fn get(&self, owner: &RuntimeEnclaveRef) -> Option<&runtime::Enclave> {
+        match owner {
+            RuntimeEnclaveRef::Local(key) => self.local.get(*key),
+            #[cfg(feature = "federated")]
+            RuntimeEnclaveRef::Federated { federate, enclave } => {
+                self.federated.get(federate)?.get(*enclave)
+            }
+        }
+    }
+
+    /// Return mutable access to an Enclave through its owner-qualified reference.
+    fn get_mut(&mut self, owner: &RuntimeEnclaveRef) -> Option<&mut runtime::Enclave> {
+        match owner {
+            RuntimeEnclaveRef::Local(key) => self
+                .local
+                .get(*key)
+                .is_some()
+                .then(|| &mut self.local[*key]),
+            #[cfg(feature = "federated")]
+            RuntimeEnclaveRef::Federated { federate, enclave } => {
+                let enclaves = self.federated.get_mut(federate)?;
+                enclaves
+                    .get(*enclave)
+                    .is_some()
+                    .then(|| &mut enclaves[*enclave])
+            }
+        }
+    }
+
+    /// Install one in-process crosslink between Enclaves with the same owner.
+    fn crosslink(
+        &mut self,
+        upstream: &RuntimeEnclaveRef,
+        downstream: &RuntimeEnclaveRef,
+        delay: Option<runtime::Duration>,
+    ) -> Result<(), AssemblyError> {
+        match (upstream, downstream) {
+            (RuntimeEnclaveRef::Local(upstream), RuntimeEnclaveRef::Local(downstream)) => {
+                runtime::crosslink_enclaves(&mut self.local, *upstream, *downstream, delay);
+            }
+            #[cfg(feature = "federated")]
+            (
+                RuntimeEnclaveRef::Federated {
+                    federate: upstream_federate,
+                    enclave: upstream,
+                },
+                RuntimeEnclaveRef::Federated {
+                    federate: downstream_federate,
+                    enclave: downstream,
+                },
+            ) if upstream_federate == downstream_federate => {
+                let enclaves = self.federated.get_mut(upstream_federate).ok_or_else(|| {
+                    AssemblyError::InternalError(format!(
+                        "missing runtime Enclave store for Federate '{upstream_federate}'"
+                    ))
+                })?;
+                runtime::crosslink_enclaves(enclaves, *upstream, *downstream, delay);
+            }
+            _ => {
+                return Err(AssemblyError::InternalError(
+                    "local partition boundary resolved to different runtime owners".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Visit every lowered Enclave without flattening owner-local key spaces.
+    fn for_each_mut(&mut self, mut visit: impl FnMut(&mut runtime::Enclave)) {
+        for enclave in self.local.values_mut() {
+            visit(enclave);
+        }
+        #[cfg(feature = "federated")]
+        for enclaves in self.federated.values_mut() {
+            for enclave in enclaves.values_mut() {
+                visit(enclave);
+            }
+        }
+    }
+}
+
+impl RuntimeAssemblyContext {
+    /// Return an Enclave through its owner-qualified reference.
+    pub(crate) fn enclave(&self, owner: &RuntimeEnclaveRef) -> &runtime::Enclave {
+        self.enclaves
+            .get(owner)
+            .expect("runtime Enclave alias must resolve within its owner")
+    }
+}
+
 /// Allocate runtime enclaves and install local cross-enclave coordination.
 fn initialize_runtime_assembly_context(
     partition_map: &PartitionMap,
     partition_analysis: &PartitionAnalysis,
     physical_event_q_size: usize,
-) -> RuntimeAssemblyContext {
-    let mut enclaves = tinymap::TinyMap::new();
+) -> Result<RuntimeAssemblyContext, AssemblyError> {
+    let mut enclaves = RuntimeEnclaveStores::default();
     let mut aliases = RuntimeAliases::default();
 
     for reactor_key in partition_map.values().unique() {
-        let enclave_key =
-            enclaves.insert(runtime::Enclave::with_event_q_size(physical_event_q_size));
-        aliases
-            .enclave_aliases
-            .insert(*reactor_key, RuntimeEnclaveRef::Local(enclave_key));
+        #[cfg(feature = "federated")]
+        let federate = partition_analysis
+            .federate_for_partition(*reactor_key)
+            .map(boomerang_federated::FederateId::new);
+        let enclave_ref = enclaves.insert(
+            #[cfg(feature = "federated")]
+            federate,
+            runtime::Enclave::with_event_q_size(physical_event_q_size),
+        );
+        aliases.enclave_aliases.insert(*reactor_key, enclave_ref);
     }
     for (reactor_key, reactor_enclave_key) in partition_map {
         if !aliases.enclave_aliases.contains_key(reactor_key) {
@@ -202,22 +331,19 @@ fn initialize_runtime_assembly_context(
     }
 
     for edge in partition_analysis.local_boundaries() {
-        let upstream_enclave_key = aliases.enclave_aliases[edge.source_partition].enclave_key();
-        let downstream_enclave_key = aliases.enclave_aliases[edge.target_partition].enclave_key();
-        runtime::crosslink_enclaves(
-            &mut enclaves,
-            upstream_enclave_key,
-            downstream_enclave_key,
+        enclaves.crosslink(
+            &aliases.enclave_aliases[edge.source_partition],
+            &aliases.enclave_aliases[edge.target_partition],
             edge.delay,
-        );
+        )?;
     }
 
-    RuntimeAssemblyContext {
+    Ok(RuntimeAssemblyContext {
         enclaves,
         aliases,
         #[cfg(feature = "federated")]
         federation: None,
-    }
+    })
 }
 
 /// Convert completed lowering state into the public runtime assembly.
@@ -232,45 +358,27 @@ fn finish_runtime_assembly_context(
     } = context;
     #[cfg(feature = "federated")]
     let execution = match federation {
-        Some(federation) => RuntimeExecution::Federated(federation.finalize(enclaves)?),
-        None => RuntimeExecution::Local(enclaves),
+        Some(federation) => {
+            if enclaves
+                .local
+                .values()
+                .any(|enclave| !enclave.env.reactions.is_empty())
+            {
+                return Err(AssemblyError::UnsupportedFederationTopology {
+                    what: "runtime Enclave outside every Federate contains executable reactions"
+                        .into(),
+                });
+            }
+            RuntimeExecution::Federated(federation.finalize(enclaves.federated)?)
+        }
+        None => {
+            debug_assert!(enclaves.federated.is_empty());
+            RuntimeExecution::Local(enclaves.local)
+        }
     };
     #[cfg(not(feature = "federated"))]
-    let execution = RuntimeExecution::Local(enclaves);
+    let execution = RuntimeExecution::Local(enclaves.local);
     Ok(RuntimeAssembly { aliases, execution })
-}
-
-#[cfg(feature = "federated")]
-fn lower_federate_enclaves(
-    federate_reactors: &BTreeMap<boomerang_federated::FederateId, Vec<AssemblyReactorKey>>,
-    enclave_aliases: &SecondaryMap<AssemblyReactorKey, RuntimeEnclaveRef>,
-) -> Result<BTreeMap<boomerang_federated::FederateId, Vec<runtime::EnclaveKey>>, AssemblyError> {
-    let mut federate_enclaves = BTreeMap::new();
-
-    for (federate_id, reactor_keys) in federate_reactors {
-        let enclave_keys = reactor_keys
-            .iter()
-            .map(|&reactor_key| {
-                enclave_aliases
-                    .get(reactor_key)
-                    .map(RuntimeEnclaveRef::enclave_key)
-                    .ok_or_else(|| AssemblyError::FederationBridgeError {
-                        what: format!("federate '{federate_id}' has no runtime enclave alias"),
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        if federate_enclaves
-            .insert(federate_id.clone(), enclave_keys)
-            .is_some()
-        {
-            return Err(AssemblyError::FederationBridgeError {
-                what: format!("duplicate federate id '{federate_id}'"),
-            });
-        }
-    }
-
-    Ok(federate_enclaves)
 }
 
 /// Resolve deferred inbound endpoints after runtime action aliases exist.
@@ -690,7 +798,10 @@ impl Assembly {
         for (assembly_reactor_key, reactor) in self.reactor_specs.drain() {
             let partition_key = partition_map[assembly_reactor_key];
             let enclave_ref = runtime_assembly.aliases.enclave_aliases[partition_key].clone();
-            let enclave = &mut runtime_assembly.enclaves[enclave_ref.enclave_key()];
+            let enclave = runtime_assembly
+                .enclaves
+                .get_mut(&enclave_ref)
+                .expect("runtime Reactor Enclave alias must resolve");
             let bank_info = reactor.bank_info.clone();
             let scope_mode = reactor.scope_mode;
             let reactor_fqn = &reactor_fqns[assembly_reactor_key];
@@ -721,7 +832,10 @@ impl Assembly {
             let (mode_enclave_ref, runtime_mode_key) =
                 runtime_assembly.aliases.mode_aliases[*scope_mode].clone();
             assert_eq!(enclave_ref, mode_enclave_ref, "Crosscheck");
-            let enclave = &mut runtime_assembly.enclaves[enclave_ref.enclave_key()];
+            let enclave = runtime_assembly
+                .enclaves
+                .get_mut(&enclave_ref)
+                .expect("runtime Reactor Enclave alias must resolve");
             let parent_scope = enclave.mode_scope(runtime_mode_key);
             enclave.set_reactor_scope_parent(runtime_reactor_key, parent_scope);
         }
@@ -735,7 +849,10 @@ impl Assembly {
         for (assembly_mode_key, mode) in self.mode_specs.drain() {
             let (enclave_ref, reactor_key) =
                 runtime_assembly.aliases.reactor_aliases[mode.reactor_key].clone();
-            let enclave = &mut runtime_assembly.enclaves[enclave_ref.enclave_key()];
+            let enclave = runtime_assembly
+                .enclaves
+                .get_mut(&enclave_ref)
+                .expect("runtime Mode Enclave alias must resolve");
             let runtime_mode_key =
                 enclave.insert_mode(reactor_key, &mode.name, mode.kind.is_initial());
             runtime_assembly
@@ -759,7 +876,10 @@ impl Assembly {
         for (assembly_action_key, action) in &self.action_specs {
             let partition_key = partition_map[action.parent_reactor_key().unwrap()];
             let enclave_ref = runtime_assembly.aliases.enclave_aliases[partition_key].clone();
-            let enclave = &mut runtime_assembly.enclaves[enclave_ref.enclave_key()];
+            let enclave = runtime_assembly
+                .enclaves
+                .get_mut(&enclave_ref)
+                .expect("runtime Action Enclave alias must resolve");
 
             let action_referenced = self
                 .reaction_specs
@@ -852,7 +972,10 @@ impl Assembly {
                 Some(alias) => alias.clone(),
                 None => continue,
             };
-            let enclave = &mut runtime_assembly.enclaves[enclave_ref.enclave_key()];
+            let enclave = runtime_assembly
+                .enclaves
+                .get_mut(&enclave_ref)
+                .expect("runtime Action Enclave alias must resolve");
             let scope = if let Some(mode_key) = action.scope_mode() {
                 let (mode_enclave_ref, runtime_mode_key) =
                     runtime_assembly.aliases.mode_aliases[mode_key].clone();
@@ -875,7 +998,10 @@ impl Assembly {
                 };
             let inward_port_key = port_bindings.follow_port_inward(assembly_port_key);
             let port = &self.port_specs[inward_port_key];
-            let enclave = &mut runtime_assembly.enclaves[enclave_ref.enclave_key()];
+            let enclave = runtime_assembly
+                .enclaves
+                .get_mut(&enclave_ref)
+                .expect("runtime Port Enclave alias must resolve");
             let (reactor_enclave_ref, runtime_reactor_key) =
                 runtime_assembly.aliases.reactor_aliases[port.get_reactor_key()].clone();
             assert_eq!(enclave_ref, reactor_enclave_ref, "Crosscheck");
@@ -903,7 +1029,10 @@ impl Assembly {
             let port = &self.port_specs[inward_port_key];
             let partition_key = partition_map[port.parent_reactor_key().unwrap()];
             let enclave_ref = runtime_assembly.aliases.enclave_aliases[partition_key].clone();
-            let enclave = &mut runtime_assembly.enclaves[enclave_ref.enclave_key()];
+            let enclave = runtime_assembly
+                .enclaves
+                .get_mut(&enclave_ref)
+                .expect("runtime Port Enclave alias must resolve");
 
             let runtime_port_key = enclave.insert_port(|key| port.build_runtime_port(key));
 
@@ -938,7 +1067,10 @@ impl Assembly {
 
             let partition_key = partition_map[reaction.reactor_key];
             let enclave_ref = runtime_assembly.aliases.enclave_aliases[partition_key].clone();
-            let enclave = &mut runtime_assembly.enclaves[enclave_ref.enclave_key()];
+            let enclave = runtime_assembly
+                .enclaves
+                .get_mut(&enclave_ref)
+                .expect("runtime Reaction Enclave alias must resolve");
             let runtime_reactor_key = {
                 let (alias_enclave_ref, reactor_key) =
                     runtime_assembly.aliases.reactor_aliases[reaction.reactor_key].clone();
@@ -1092,7 +1224,10 @@ impl Assembly {
             let replayer = (replay_factory)(&runtime_assembly.aliases);
             let (enclave_ref, action_key) =
                 runtime_assembly.aliases.action_aliases[assembly_action_key].clone();
-            runtime_assembly.enclaves[enclave_ref.enclave_key()]
+            runtime_assembly
+                .enclaves
+                .get_mut(&enclave_ref)
+                .expect("runtime replay Enclave alias must resolve")
                 .replayers_mut()
                 .insert(action_key, replayer);
         }
@@ -1130,18 +1265,13 @@ impl Assembly {
             &partition_map,
             &partition_analysis,
             config.physical_event_q_size,
-        );
+        )?;
 
         #[cfg(feature = "federated")]
         if !federate_reactors.is_empty() {
-            let federate_enclaves = lower_federate_enclaves(
-                &federate_reactors,
-                &runtime_assembly.aliases.enclave_aliases,
-            )?;
             runtime_assembly.federation = Some(boomerang_federated::StaticFederationRuntime::new(
                 boomerang_federated::CompiledTopology::new(topology)?,
-                federate_enclaves,
-            )?);
+            ));
         }
 
         self.build_runtime_actions(&partition_map, &mut runtime_assembly)?;
@@ -1168,10 +1298,10 @@ impl Assembly {
         #[cfg(feature = "replay")]
         self.build_runtime_replayers(&mut runtime_assembly)?;
 
-        for enclave in runtime_assembly.enclaves.values_mut() {
+        runtime_assembly.enclaves.for_each_mut(|enclave| {
             let modal_schedule_index = build_modal_schedule_index(&enclave.graph);
             enclave.graph.modal_schedule_index = modal_schedule_index;
-        }
+        });
 
         finish_runtime_assembly_context(runtime_assembly)
     }

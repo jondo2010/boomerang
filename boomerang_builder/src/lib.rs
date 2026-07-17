@@ -117,10 +117,6 @@ pub enum AssemblyError {
     #[error("Invalid federation topology: {0}")]
     FederationTopology(#[from] boomerang_federated::RtiError),
 
-    #[cfg(feature = "federated")]
-    #[error("Invalid federate placement: {0}")]
-    FederatePlacement(#[from] boomerang_federated::FederatePlacementError),
-
     #[error("Error declaring Reaction: {0}")]
     ReactionDeclarationError(String),
 

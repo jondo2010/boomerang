@@ -1277,12 +1277,12 @@ fn test_same_federate_cross_enclave_boundary_stays_local() {
     assert!(federation.topology().topology().edges.is_empty());
     assert_eq!(
         federation.federates()[&boomerang_federated::FederateId::new("node")]
-            .enclave_keys()
+            .enclaves()
             .len(),
         2
     );
     assert_eq!(
-        federation
+        federation.federates()[&boomerang_federated::FederateId::new("node")]
             .enclaves()
             .values()
             .map(|enclave| enclave.downstream_enclaves.len())
@@ -1363,6 +1363,22 @@ fn test_federated_connection_lowers_endpoint_runtime_parts() {
         .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
 
+    let source_owner = parts.aliases.port_aliases[AssemblyPortKey::from(source)]
+        .0
+        .clone();
+    let sink_owner = parts.aliases.port_aliases[AssemblyPortKey::from(sink)]
+        .0
+        .clone();
+    assert!(matches!(
+        &source_owner,
+        RuntimeEnclaveRef::Federated { federate, .. } if federate.as_str() == "source"
+    ));
+    assert!(matches!(
+        &sink_owner,
+        RuntimeEnclaveRef::Federated { federate, .. } if federate.as_str() == "sink"
+    ));
+    assert_eq!(source_owner.enclave_key(), sink_owner.enclave_key());
+
     let federation = parts
         .federation()
         .expect("federated connection lowering must produce a federation");
@@ -1382,9 +1398,13 @@ fn test_federated_connection_lowers_endpoint_runtime_parts() {
         .bridge()
         .inbound_endpoint(endpoint)
         .is_some());
-    assert!(federation.enclaves().values().all(|enclave| {
-        enclave.upstream_enclaves.is_empty() && enclave.downstream_enclaves.is_empty()
-    }));
+    assert!(federation
+        .federates()
+        .values()
+        .flat_map(|federate| federate.enclaves().values())
+        .all(|enclave| {
+            enclave.upstream_enclaves.is_empty() && enclave.downstream_enclaves.is_empty()
+        }));
 }
 
 #[test]

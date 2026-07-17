@@ -502,7 +502,7 @@ fn build_inter_partition_connection_source<T: runtime::ReactorData + Clone>(
                 .action_aliases
                 .get(target_action_key)
                 .expect("Action key");
-            let enclave = &runtime_assembly.enclaves[enclave_key.enclave_key()];
+            let enclave = runtime_assembly.enclave(enclave_key);
 
             let remote_action_ref = enclave.create_async_action_ref(*runtime_action_key);
             let sink: Box<dyn runtime::InterPartitionEventSink<T>> = match backend {

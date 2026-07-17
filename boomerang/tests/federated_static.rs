@@ -133,13 +133,13 @@ fn public_api_runs_static_in_memory_federation() {
     assert_eq!(federation.federates().len(), 2);
     assert_eq!(
         federation.federates()[&FederateId::new("a")]
-            .enclave_keys()
+            .enclaves()
             .len(),
         2
     );
     assert_eq!(
         federation.federates()[&FederateId::new("b")]
-            .enclave_keys()
+            .enclaves()
             .len(),
         1
     );
@@ -160,7 +160,7 @@ fn public_api_rejects_runtime_without_lowered_federation() {
 }
 
 #[test]
-fn public_api_owns_dense_runtime_enclave_map() {
+fn public_api_federates_own_local_enclave_maps() {
     let values = Arc::new(Mutex::new(Vec::new()));
     let mut assembly = Assembly::new();
     assembly
@@ -184,22 +184,19 @@ fn public_api_owns_dense_runtime_enclave_map() {
         .unwrap()
         .into_federation()
         .unwrap();
-    let (topology, enclaves, federates) = federation.into_parts();
+    let (topology, federates) = federation.into_parts();
     assert_eq!(topology.topology().edges.len(), 1);
     assert_eq!(federates.len(), 2);
 
     let a = &federates[&FederateId::new("a")];
     let b = &federates[&FederateId::new("b")];
     assert_eq!(a.id(), &FederateId::new("a"));
-    assert_eq!(a.enclave_keys().len(), 2);
+    assert_eq!(a.enclaves().len(), 2);
     assert_eq!(a.bridge().routes().count(), 0);
     assert_eq!(b.id(), &FederateId::new("b"));
-    assert_eq!(b.enclave_keys().len(), 1);
+    assert_eq!(b.enclaves().len(), 1);
     assert_eq!(b.bridge().routes().count(), 1);
-    assert!(federates
-        .values()
-        .flat_map(|federate| federate.enclave_keys())
-        .all(|&key| enclaves.get(key).is_some()));
+    assert_eq!(a.enclaves().keys().next(), b.enclaves().keys().next());
 }
 
 #[test]

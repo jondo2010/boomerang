@@ -46,9 +46,7 @@ pub use session::{RtiSessionEndpoint, SessionError, StaticRtiSession};
 #[cfg(all(feature = "runtime", feature = "serde-json-codec"))]
 pub use static_runner::TcpStaticFederationConfig;
 #[cfg(feature = "runtime")]
-pub use static_runner::{
-    FederatePlacementError, StaticFederationRunnerError, StaticFederationRuntime,
-};
+pub use static_runner::{StaticFederationRunnerError, StaticFederationRuntime};
 pub use transport::{
     in_memory_transport_pair, InMemoryFrameSink, InMemoryFrameStream, InMemoryTransport,
     TransportError,

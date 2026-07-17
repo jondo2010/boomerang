@@ -23,7 +23,7 @@ impl ConnectionLoweringArtifacts {
     {
         self.federated_inbound_endpoint_factories.push(Box::new(
             move |runtime_assembly, connections| {
-                let (enclave_key, runtime_action_key) = *runtime_assembly
+                let (enclave_ref, runtime_action_key) = runtime_assembly
                     .aliases
                     .action_aliases
                     .get(target_action_key)
@@ -31,16 +31,18 @@ impl ConnectionLoweringArtifacts {
                         AssemblyError::InternalError(format!(
                             "missing runtime action alias for federated endpoint {endpoint}"
                         ))
-                    })?;
-                let expected_enclave_key =
-                    runtime_assembly.aliases.enclave_aliases[target_partition];
-                if enclave_key != expected_enclave_key {
+                    })?
+                    .clone();
+                let expected_enclave_ref =
+                    &runtime_assembly.aliases.enclave_aliases[target_partition];
+                if &enclave_ref != expected_enclave_ref {
                     return Err(AssemblyError::InternalError(format!(
                         "federated endpoint {endpoint} resolved to wrong target enclave"
                     )));
                 }
 
-                let enclave = &runtime_assembly.enclaves[enclave_key];
+                let enclave_key = enclave_ref.enclave_key();
+                let enclave = runtime_assembly.enclave(&enclave_ref);
                 let context = enclave.create_send_context(enclave_key);
                 let action_ref = enclave.create_async_action_ref(runtime_action_key);
                 connections

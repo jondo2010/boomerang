@@ -44,10 +44,15 @@ runtime Enclaves are allocated. Assembly lowering uses that information to alloc
 directly into its final owner's `TinyMap`; it never creates a federation-wide Enclave map and does
 not split or rekey Enclaves during finalization.
 
-The internal assembly context owns either:
+The internal assembly context owns dense maps appropriate to the execution shape:
 
 - one dense Enclave map for local execution, or
 - dense Enclave maps keyed by `FederateId` for federated execution.
+
+A reaction-free assembly-root partition outside every Federate may be retained as transient local
+lowering scaffolding because existing assembly graphs use it to contain sibling Federate
+declarations. It is discarded before constructing `RuntimeFederation`; lowering rejects it if it
+contains executable reactions.
 
 All subsequent lowering resolves a `RuntimeEnclaveRef` through this context before inserting or
 accessing runtime objects. Local partition boundaries are crosslinked only after confirming that

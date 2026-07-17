@@ -51,37 +51,42 @@ allocates Enclaves, installs local crosslinks, constructs protocol bridges, and 
 ```mermaid
 flowchart TB
     runtime_assembly["RuntimeAssembly"]
-    aliases["aliases<br/>assembly keys → runtime keys"]
+    aliases["aliases<br/>assembly keys → owner-qualified runtime keys"]
     execution["execution"]
     local["Local(TinyMap&lt;EnclaveKey, Enclave&gt;)"]
     federated["Federated(RuntimeFederation)"]
     topology["CompiledTopology<br/>data needed to start an independent RTI"]
     runtime_federates["FederateId → RuntimeFederate"]
-    runtime_enclaves["TinyMap&lt;EnclaveKey, Enclave&gt;<br/>dense runtime owner"]
-    enclave_keys["Vec&lt;EnclaveKey&gt;<br/>Federate placement"]
-    bridge["FederateRuntimeBridge"]
+    federate_a["RuntimeFederate A"]
+    federate_b["RuntimeFederate B"]
+    enclaves_a["TinyMap&lt;EnclaveKey, Enclave&gt;<br/>A-local keys"]
+    enclaves_b["TinyMap&lt;EnclaveKey, Enclave&gt;<br/>B-local keys"]
+    bridge_a["FederateRuntimeBridge A"]
+    bridge_b["FederateRuntimeBridge B"]
 
     runtime_assembly --> aliases
     runtime_assembly --> execution
     execution --> local
     execution --> federated
     federated --> topology
-    federated --> runtime_enclaves
     federated --> runtime_federates
-    runtime_federates --> enclave_keys
-    runtime_federates --> bridge
-    enclave_keys -. indexes .-> runtime_enclaves
+    runtime_federates --> federate_a
+    runtime_federates --> federate_b
+    federate_a --> enclaves_a
+    federate_b --> enclaves_b
+    federate_a --> bridge_a
+    federate_b --> bridge_b
 ```
 
 `RuntimeAssembly::into_local` and `RuntimeAssembly::into_federation` are typed conversions. A
 local runner cannot accidentally discard federation metadata, and Federate placement remains
-explicit rather than changing globally allocated Enclave keys.
+structural because every `RuntimeFederate` directly owns its Enclaves.
 
-`RuntimeFederation::into_parts` returns the immutable compiled topology, the dense Enclave map,
-and a deterministic map of `RuntimeFederate` placement and bridge metadata. It contains no RTI
-thread or task. A deployment launcher may start the RTI independently and assign Enclaves to
-compute nodes from those key lists. The single-process static runner consumes the same value and
-supplies in-memory or TCP transports.
+`RuntimeFederation::into_parts` returns the immutable compiled topology and a deterministic map of
+`RuntimeFederate` values. Each Federate contains its own dense Enclave map and protocol bridge. An
+`EnclaveKey` is meaningful only within that map, so separate Federates may both own
+`EnclaveKey(0)`. The hierarchy contains no RTI thread or task; a deployment launcher or the
+single-process static runner consumes the independent Federate values and supplies transports.
 
 ## Placement and lowering
 
@@ -95,9 +100,15 @@ cross-Enclave boundaries remain local and do not require a payload codec. Cross-
 boundaries produce an `EndpointId`, `TopologyEdge`, encoder, serialized sender, inbound decoder,
 and target action route.
 
-The aggregate `FederatedRuntimeConnections` value exists only during lowering. Finalization
-consumes it, validates every Federate-to-Enclave assignment against the dense map, and produces
-one `FederateRuntimeBridge` per `RuntimeFederate`.
+The aggregate `FederatedRuntimeConnections` value exists only during lowering. Enclaves are
+allocated directly into their owning Federate's dense map, while owner-qualified aliases pair the
+`FederateId` with the local `EnclaveKey`. Finalization pairs each map with one
+`FederateRuntimeBridge`; there is no parallel placement index to validate or retain.
+
+An unowned, reaction-free assembly-root partition may exist transiently while the builder lowers a
+federated declaration graph. It is scaffolding rather than executable Federate state and is
+discarded before `RuntimeFederation` is constructed. Executable work outside every Federate is
+rejected.
 
 ## Scheduler and RTI coordination
 
@@ -132,6 +143,6 @@ plus Federate B with a sink Enclave. Source-to-relay stays in process; relay-to-
 compiled RTI endpoint. The same graph runs through the in-memory and TCP runners and records the
 value at the expected complete logical tag.
 
-The builder and federated crate tests additionally cover duplicate and nested placement errors,
-codec failures, delayed connections, fanout, cycles, route validation, dense-key preservation,
-and Federate placement.
+The builder and federated crate tests additionally cover duplicate and nested Federate declarations,
+codec failures, delayed connections, fanout, cycles, route validation, independent dense key
+spaces, and Federate-owned runtime stores.

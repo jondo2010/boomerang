@@ -270,6 +270,7 @@ impl RuntimeEnclaveStores {
                 })?;
                 runtime::crosslink_enclaves(enclaves, *upstream, *downstream, delay);
             }
+            #[cfg(feature = "federated")]
             _ => {
                 return Err(AssemblyError::InternalError(
                     "local partition boundary resolved to different runtime owners".into(),

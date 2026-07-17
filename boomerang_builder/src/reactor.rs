@@ -683,10 +683,15 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
             .add_reaction(Some("recorder"))
             .with_trigger(action_key)
             .with_deferred_reaction_factory(move |runtime_parts| {
-                let (enclave_key, action_key) =
-                    runtime_parts.aliases.action_aliases[action_key.into()];
+                let (enclave, action_key) =
+                    runtime_parts.aliases.action_aliases[action_key.into()].clone();
                 Box::new(
-                    runtime::replay::RecorderFn::<T>::new(&topic, enclave_key, action_key).unwrap(),
+                    runtime::replay::RecorderFn::<T>::new(
+                        &topic,
+                        enclave.enclave_key(),
+                        action_key,
+                    )
+                    .unwrap(),
                 )
             })
             .finish()?;
@@ -707,7 +712,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
         // Add a replay factory.
         self.assembly
             .add_replayer(action_key, move |runtime_parts| {
-                let (_enclave_key, action_key) = runtime_parts.action_aliases[action_key.into()];
+                let action_key = runtime_parts.action_aliases[action_key.into()].1;
                 Box::new(runtime::replay::TypedReplayer::<T>::new(action_key))
             })?;
         Ok(())

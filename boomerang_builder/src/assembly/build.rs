@@ -27,21 +27,46 @@ use crate::federated::FederatedInboundEndpointFactory;
 #[derive(Default)]
 pub struct RuntimeAliases {
     /// Runtime enclave allocated for each assembly reactor or partition root.
-    pub enclave_aliases: SecondaryMap<AssemblyReactorKey, runtime::EnclaveKey>,
+    pub enclave_aliases: SecondaryMap<AssemblyReactorKey, RuntimeEnclaveRef>,
     /// Runtime enclave and reactor allocated for each assembly reactor.
-    pub reactor_aliases:
-        SecondaryMap<AssemblyReactorKey, (runtime::EnclaveKey, runtime::ReactorKey)>,
+    pub reactor_aliases: SecondaryMap<AssemblyReactorKey, (RuntimeEnclaveRef, runtime::ReactorKey)>,
     /// Optional assembly mode that lexically contains each assembly reactor.
     pub reactor_scope_modes: SecondaryMap<AssemblyReactorKey, Option<AssemblyModeKey>>,
     /// Runtime enclave and reaction allocated for each assembly reaction.
     pub reaction_aliases:
-        SecondaryMap<AssemblyReactionKey, (runtime::EnclaveKey, runtime::ReactionKey)>,
+        SecondaryMap<AssemblyReactionKey, (RuntimeEnclaveRef, runtime::ReactionKey)>,
     /// Runtime enclave and mode allocated for each assembly mode.
-    pub mode_aliases: SecondaryMap<AssemblyModeKey, (runtime::EnclaveKey, runtime::ModeKey)>,
+    pub mode_aliases: SecondaryMap<AssemblyModeKey, (RuntimeEnclaveRef, runtime::ModeKey)>,
     /// Runtime enclave and action allocated for each assembly action.
-    pub action_aliases: SecondaryMap<AssemblyActionKey, (runtime::EnclaveKey, runtime::ActionKey)>,
+    pub action_aliases: SecondaryMap<AssemblyActionKey, (RuntimeEnclaveRef, runtime::ActionKey)>,
     /// Runtime enclave and port allocated for each assembly port.
-    pub port_aliases: SecondaryMap<AssemblyPortKey, (runtime::EnclaveKey, runtime::PortKey)>,
+    pub port_aliases: SecondaryMap<AssemblyPortKey, (RuntimeEnclaveRef, runtime::PortKey)>,
+}
+
+/// Identity of a runtime Enclave together with its owning execution scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeEnclaveRef {
+    /// Enclave owned by the single-process local runtime.
+    Local(runtime::EnclaveKey),
+    /// Enclave owned by one protocol Federate.
+    #[cfg(feature = "federated")]
+    Federated {
+        /// Protocol identity of the owning Federate.
+        federate: boomerang_federated::FederateId,
+        /// Dense key within the owning Federate's Enclave map.
+        enclave: runtime::EnclaveKey,
+    },
+}
+
+impl RuntimeEnclaveRef {
+    /// Return the dense key within this Enclave's owner.
+    pub fn enclave_key(&self) -> runtime::EnclaveKey {
+        match self {
+            Self::Local(key) => *key,
+            #[cfg(feature = "federated")]
+            Self::Federated { enclave, .. } => *enclave,
+        }
+    }
 }
 
 /// Coherent result of lowering an [`Assembly`].
@@ -165,18 +190,20 @@ fn initialize_runtime_assembly_context(
     for reactor_key in partition_map.values().unique() {
         let enclave_key =
             enclaves.insert(runtime::Enclave::with_event_q_size(physical_event_q_size));
-        aliases.enclave_aliases.insert(*reactor_key, enclave_key);
+        aliases
+            .enclave_aliases
+            .insert(*reactor_key, RuntimeEnclaveRef::Local(enclave_key));
     }
     for (reactor_key, reactor_enclave_key) in partition_map {
         if !aliases.enclave_aliases.contains_key(reactor_key) {
-            let enclave_key = aliases.enclave_aliases[*reactor_enclave_key];
-            aliases.enclave_aliases.insert(reactor_key, enclave_key);
+            let enclave = aliases.enclave_aliases[*reactor_enclave_key].clone();
+            aliases.enclave_aliases.insert(reactor_key, enclave);
         }
     }
 
     for edge in partition_analysis.local_boundaries() {
-        let upstream_enclave_key = aliases.enclave_aliases[edge.source_partition];
-        let downstream_enclave_key = aliases.enclave_aliases[edge.target_partition];
+        let upstream_enclave_key = aliases.enclave_aliases[edge.source_partition].enclave_key();
+        let downstream_enclave_key = aliases.enclave_aliases[edge.target_partition].enclave_key();
         runtime::crosslink_enclaves(
             &mut enclaves,
             upstream_enclave_key,
@@ -216,7 +243,7 @@ fn finish_runtime_assembly_context(
 #[cfg(feature = "federated")]
 fn lower_federate_enclaves(
     federate_reactors: &BTreeMap<boomerang_federated::FederateId, Vec<AssemblyReactorKey>>,
-    enclave_aliases: &SecondaryMap<AssemblyReactorKey, runtime::EnclaveKey>,
+    enclave_aliases: &SecondaryMap<AssemblyReactorKey, RuntimeEnclaveRef>,
 ) -> Result<BTreeMap<boomerang_federated::FederateId, Vec<runtime::EnclaveKey>>, AssemblyError> {
     let mut federate_enclaves = BTreeMap::new();
 
@@ -224,11 +251,12 @@ fn lower_federate_enclaves(
         let enclave_keys = reactor_keys
             .iter()
             .map(|&reactor_key| {
-                enclave_aliases.get(reactor_key).copied().ok_or_else(|| {
-                    AssemblyError::FederationBridgeError {
+                enclave_aliases
+                    .get(reactor_key)
+                    .map(RuntimeEnclaveRef::enclave_key)
+                    .ok_or_else(|| AssemblyError::FederationBridgeError {
                         what: format!("federate '{federate_id}' has no runtime enclave alias"),
-                    }
-                })
+                    })
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -661,8 +689,8 @@ impl Assembly {
 
         for (assembly_reactor_key, reactor) in self.reactor_specs.drain() {
             let partition_key = partition_map[assembly_reactor_key];
-            let enclave_key = runtime_assembly.aliases.enclave_aliases[partition_key];
-            let enclave = &mut runtime_assembly.enclaves[enclave_key];
+            let enclave_ref = runtime_assembly.aliases.enclave_aliases[partition_key].clone();
+            let enclave = &mut runtime_assembly.enclaves[enclave_ref.enclave_key()];
             let bank_info = reactor.bank_info.clone();
             let scope_mode = reactor.scope_mode;
             let reactor_fqn = &reactor_fqns[assembly_reactor_key];
@@ -675,7 +703,7 @@ impl Assembly {
             runtime_assembly
                 .aliases
                 .reactor_aliases
-                .insert(assembly_reactor_key, (enclave_key, runtime_reactor_key));
+                .insert(assembly_reactor_key, (enclave_ref, runtime_reactor_key));
         }
         Ok(())
     }
@@ -688,12 +716,12 @@ impl Assembly {
             let Some(scope_mode) = scope_mode else {
                 continue;
             };
-            let (enclave_key, runtime_reactor_key) =
-                runtime_assembly.aliases.reactor_aliases[assembly_reactor_key];
-            let (mode_enclave_key, runtime_mode_key) =
-                runtime_assembly.aliases.mode_aliases[*scope_mode];
-            assert_eq!(enclave_key, mode_enclave_key, "Crosscheck");
-            let enclave = &mut runtime_assembly.enclaves[enclave_key];
+            let (enclave_ref, runtime_reactor_key) =
+                runtime_assembly.aliases.reactor_aliases[assembly_reactor_key].clone();
+            let (mode_enclave_ref, runtime_mode_key) =
+                runtime_assembly.aliases.mode_aliases[*scope_mode].clone();
+            assert_eq!(enclave_ref, mode_enclave_ref, "Crosscheck");
+            let enclave = &mut runtime_assembly.enclaves[enclave_ref.enclave_key()];
             let parent_scope = enclave.mode_scope(runtime_mode_key);
             enclave.set_reactor_scope_parent(runtime_reactor_key, parent_scope);
         }
@@ -705,15 +733,15 @@ impl Assembly {
         runtime_assembly: &mut RuntimeAssemblyContext,
     ) -> Result<(), AssemblyError> {
         for (assembly_mode_key, mode) in self.mode_specs.drain() {
-            let (enclave_key, reactor_key) =
-                runtime_assembly.aliases.reactor_aliases[mode.reactor_key];
-            let enclave = &mut runtime_assembly.enclaves[enclave_key];
+            let (enclave_ref, reactor_key) =
+                runtime_assembly.aliases.reactor_aliases[mode.reactor_key].clone();
+            let enclave = &mut runtime_assembly.enclaves[enclave_ref.enclave_key()];
             let runtime_mode_key =
                 enclave.insert_mode(reactor_key, &mode.name, mode.kind.is_initial());
             runtime_assembly
                 .aliases
                 .mode_aliases
-                .insert(assembly_mode_key, (enclave_key, runtime_mode_key));
+                .insert(assembly_mode_key, (enclave_ref, runtime_mode_key));
         }
         Ok(())
     }
@@ -730,8 +758,8 @@ impl Assembly {
 
         for (assembly_action_key, action) in &self.action_specs {
             let partition_key = partition_map[action.parent_reactor_key().unwrap()];
-            let enclave_key = runtime_assembly.aliases.enclave_aliases[partition_key];
-            let enclave = &mut runtime_assembly.enclaves[enclave_key];
+            let enclave_ref = runtime_assembly.aliases.enclave_aliases[partition_key].clone();
+            let enclave = &mut runtime_assembly.enclaves[enclave_ref.enclave_key()];
 
             let action_referenced = self
                 .reaction_specs
@@ -743,10 +771,10 @@ impl Assembly {
                     let runtime_action_key = enclave.insert_action(|key| {
                         runtime::Action::<()>::new(action.name(), key, None, true).boxed()
                     });
-                    runtime_assembly
-                        .aliases
-                        .action_aliases
-                        .insert(assembly_action_key, (enclave_key, runtime_action_key));
+                    runtime_assembly.aliases.action_aliases.insert(
+                        assembly_action_key,
+                        (enclave_ref.clone(), runtime_action_key),
+                    );
 
                     if spec.period.is_some() {
                         // Periodic timers need a reset reaction
@@ -763,10 +791,10 @@ impl Assembly {
                     let runtime_action_key = enclave.insert_action(|key| {
                         runtime::Action::<()>::new(action.name(), key, None, true).boxed()
                     });
-                    runtime_assembly
-                        .aliases
-                        .action_aliases
-                        .insert(assembly_action_key, (enclave_key, runtime_action_key));
+                    runtime_assembly.aliases.action_aliases.insert(
+                        assembly_action_key,
+                        (enclave_ref.clone(), runtime_action_key),
+                    );
                 }
 
                 ActionType::Standard {
@@ -777,10 +805,10 @@ impl Assembly {
                     let runtime_action_key =
                         enclave.insert_action(|key| build_fn(action.name(), key));
 
-                    runtime_assembly
-                        .aliases
-                        .action_aliases
-                        .insert(assembly_action_key, (enclave_key, runtime_action_key));
+                    runtime_assembly.aliases.action_aliases.insert(
+                        assembly_action_key,
+                        (enclave_ref.clone(), runtime_action_key),
+                    );
                 }
 
                 _ => {
@@ -816,41 +844,41 @@ impl Assembly {
         port_bindings: &PortBindings,
     ) -> Result<(), AssemblyError> {
         for (assembly_action_key, action) in &self.action_specs {
-            let (enclave_key, action_key) = match runtime_assembly
+            let (enclave_ref, action_key) = match runtime_assembly
                 .aliases
                 .action_aliases
                 .get(assembly_action_key)
             {
-                Some(alias) => *alias,
+                Some(alias) => alias.clone(),
                 None => continue,
             };
-            let enclave = &mut runtime_assembly.enclaves[enclave_key];
+            let enclave = &mut runtime_assembly.enclaves[enclave_ref.enclave_key()];
             let scope = if let Some(mode_key) = action.scope_mode() {
-                let (mode_enclave_key, runtime_mode_key) =
-                    runtime_assembly.aliases.mode_aliases[mode_key];
-                assert_eq!(enclave_key, mode_enclave_key, "Crosscheck");
+                let (mode_enclave_ref, runtime_mode_key) =
+                    runtime_assembly.aliases.mode_aliases[mode_key].clone();
+                assert_eq!(enclave_ref, mode_enclave_ref, "Crosscheck");
                 enclave.mode_scope(runtime_mode_key)
             } else {
-                let (reactor_enclave_key, runtime_reactor_key) =
-                    runtime_assembly.aliases.reactor_aliases[action.reactor_key()];
-                assert_eq!(enclave_key, reactor_enclave_key, "Crosscheck");
+                let (reactor_enclave_ref, runtime_reactor_key) =
+                    runtime_assembly.aliases.reactor_aliases[action.reactor_key()].clone();
+                assert_eq!(enclave_ref, reactor_enclave_ref, "Crosscheck");
                 enclave.root_scope(runtime_reactor_key)
             };
             enclave.insert_action_scope(action_key, scope);
         }
 
         for (assembly_port_key, _port) in &self.port_specs {
-            let (enclave_key, port_key) =
+            let (enclave_ref, port_key) =
                 match runtime_assembly.aliases.port_aliases.get(assembly_port_key) {
-                    Some(alias) => *alias,
+                    Some(alias) => alias.clone(),
                     None => continue,
                 };
             let inward_port_key = port_bindings.follow_port_inward(assembly_port_key);
             let port = &self.port_specs[inward_port_key];
-            let enclave = &mut runtime_assembly.enclaves[enclave_key];
-            let (reactor_enclave_key, runtime_reactor_key) =
-                runtime_assembly.aliases.reactor_aliases[port.get_reactor_key()];
-            assert_eq!(enclave_key, reactor_enclave_key, "Crosscheck");
+            let enclave = &mut runtime_assembly.enclaves[enclave_ref.enclave_key()];
+            let (reactor_enclave_ref, runtime_reactor_key) =
+                runtime_assembly.aliases.reactor_aliases[port.get_reactor_key()].clone();
+            assert_eq!(enclave_ref, reactor_enclave_ref, "Crosscheck");
             let scope = enclave.root_scope(runtime_reactor_key);
             enclave.insert_port_scope(port_key, scope);
         }
@@ -874,19 +902,22 @@ impl Assembly {
         for (inward_port_key, group) in port_groups.into_iter() {
             let port = &self.port_specs[inward_port_key];
             let partition_key = partition_map[port.parent_reactor_key().unwrap()];
-            let enclave_key = runtime_assembly.aliases.enclave_aliases[partition_key];
-            let enclave = &mut runtime_assembly.enclaves[enclave_key];
+            let enclave_ref = runtime_assembly.aliases.enclave_aliases[partition_key].clone();
+            let enclave = &mut runtime_assembly.enclaves[enclave_ref.enclave_key()];
 
             let runtime_port_key = enclave.insert_port(|key| port.build_runtime_port(key));
 
             runtime_assembly
                 .aliases
                 .port_aliases
-                .insert(inward_port_key, (enclave_key, runtime_port_key));
+                .insert(inward_port_key, (enclave_ref.clone(), runtime_port_key));
 
-            runtime_assembly.aliases.port_aliases.extend(
-                group.map(|(port_key, _inward_key)| (port_key, (enclave_key, runtime_port_key))),
-            );
+            runtime_assembly
+                .aliases
+                .port_aliases
+                .extend(group.map(|(port_key, _inward_key)| {
+                    (port_key, (enclave_ref.clone(), runtime_port_key))
+                }));
         }
         Ok(())
     }
@@ -906,12 +937,12 @@ impl Assembly {
             });
 
             let partition_key = partition_map[reaction.reactor_key];
-            let enclave_key = runtime_assembly.aliases.enclave_aliases[partition_key];
-            let enclave = &mut runtime_assembly.enclaves[enclave_key];
+            let enclave_ref = runtime_assembly.aliases.enclave_aliases[partition_key].clone();
+            let enclave = &mut runtime_assembly.enclaves[enclave_ref.enclave_key()];
             let runtime_reactor_key = {
-                let (alias_enclave_key, reactor_key) =
-                    runtime_assembly.aliases.reactor_aliases[reaction.reactor_key];
-                assert_eq!(enclave_key, alias_enclave_key, "Crosscheck");
+                let (alias_enclave_ref, reactor_key) =
+                    runtime_assembly.aliases.reactor_aliases[reaction.reactor_key].clone();
+                assert_eq!(enclave_ref, alias_enclave_ref, "Crosscheck");
                 reactor_key
             };
 
@@ -979,9 +1010,9 @@ impl Assembly {
             });
 
             let reaction_scope = if let Some(mode_key) = reaction.scope_mode {
-                let (mode_enclave_key, runtime_mode_key) =
-                    runtime_assembly.aliases.mode_aliases[mode_key];
-                assert_eq!(enclave_key, mode_enclave_key, "Crosscheck");
+                let (mode_enclave_ref, runtime_mode_key) =
+                    runtime_assembly.aliases.mode_aliases[mode_key].clone();
+                assert_eq!(enclave_ref, mode_enclave_ref, "Crosscheck");
                 enclave.mode_scope(runtime_mode_key)
             } else {
                 enclave.root_scope(runtime_reactor_key)
@@ -1046,7 +1077,7 @@ impl Assembly {
             runtime_assembly
                 .aliases
                 .reaction_aliases
-                .insert(assembly_reaction_key, (enclave_key, runtime_reaction_key));
+                .insert(assembly_reaction_key, (enclave_ref, runtime_reaction_key));
         }
         Ok(())
     }
@@ -1059,9 +1090,9 @@ impl Assembly {
     ) -> Result<(), AssemblyError> {
         for (assembly_action_key, replay_factory) in self.replay_factories.drain() {
             let replayer = (replay_factory)(&runtime_assembly.aliases);
-            let (enclave_key, action_key) =
-                runtime_assembly.aliases.action_aliases[assembly_action_key];
-            runtime_assembly.enclaves[enclave_key]
+            let (enclave_ref, action_key) =
+                runtime_assembly.aliases.action_aliases[assembly_action_key].clone();
+            runtime_assembly.enclaves[enclave_ref.enclave_key()]
                 .replayers_mut()
                 .insert(action_key, replayer);
         }

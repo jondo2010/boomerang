@@ -269,7 +269,7 @@ impl Debug for RuntimeAliases {
                 .entries(
                     self.enclave_aliases
                         .iter()
-                        .map(|(k, v)| (format!("{k:?}"), v.to_string())),
+                        .map(|(k, v)| (format!("{k:?}"), format!("{v:?}"))),
                 )
                 .finish()
         });

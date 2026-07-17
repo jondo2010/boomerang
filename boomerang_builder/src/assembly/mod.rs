@@ -36,7 +36,8 @@ mod tests;
 
 pub(crate) use build::RuntimeAssemblyContext;
 pub use build::{
-    PartitionMap, RuntimeAliases, RuntimeAssembly, RuntimeExecution, RuntimeExecutionError,
+    PartitionMap, RuntimeAliases, RuntimeAssembly, RuntimeEnclaveRef, RuntimeExecution,
+    RuntimeExecutionError,
 };
 
 mod util {

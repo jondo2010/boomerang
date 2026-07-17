@@ -258,7 +258,13 @@ fn test_runtime_scope_metadata_for_mode_components() {
         .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
 
-    let (enclave_key, runtime_reactor) = runtime_assembly.aliases.reactor_aliases[reactor_key];
+    let (owner, runtime_reactor) = runtime_assembly.aliases.reactor_aliases[reactor_key].clone();
+    assert!(matches!(owner, RuntimeEnclaveRef::Local(_)));
+    assert_eq!(
+        owner,
+        runtime_assembly.aliases.enclave_aliases[reactor_key].clone()
+    );
+    let enclave_key = owner.enclave_key();
     let enclave = &runtime_assembly.local_enclaves().unwrap()[enclave_key];
     let root_scope = enclave.graph.reactor_root_scopes[runtime_reactor];
     let runtime_idle = runtime_assembly.aliases.mode_aliases[idle].1;
@@ -325,8 +331,9 @@ fn test_child_and_connection_helper_reactors_inherit_mode_scope() {
         .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
 
-    let (enclave_key, _runtime_reactor) = runtime_assembly.aliases.reactor_aliases[reactor_key];
-    let enclave = &runtime_assembly.local_enclaves().unwrap()[enclave_key];
+    let (enclave_ref, _runtime_reactor) =
+        runtime_assembly.aliases.reactor_aliases[reactor_key].clone();
+    let enclave = &runtime_assembly.local_enclaves().unwrap()[enclave_ref.enclave_key()];
     let runtime_idle = runtime_assembly.aliases.mode_aliases[idle].1;
     let idle_scope = enclave.graph.mode_scopes[runtime_idle];
 
@@ -1125,16 +1132,16 @@ fn test_enclave_partitioning() {
         "Expected 2 enclaves"
     );
 
-    let (world_enclave, world_key) = runtime_assembly.aliases.reactor_aliases[world];
-    let (hello1_enclave, hello1_key) = runtime_assembly.aliases.reactor_aliases[hello1];
-    let (hello2_enclave, hello2_key) = runtime_assembly.aliases.reactor_aliases[hello2];
+    let (world_enclave, world_key) = runtime_assembly.aliases.reactor_aliases[world].clone();
+    let (hello1_enclave, hello1_key) = runtime_assembly.aliases.reactor_aliases[hello1].clone();
+    let (hello2_enclave, hello2_key) = runtime_assembly.aliases.reactor_aliases[hello2].clone();
 
     assert_eq!(
         world_enclave, hello1_enclave,
         "Expected world and hello1 in same enclave"
     );
     assert_eq!(
-        runtime_assembly.local_enclaves().unwrap()[world_enclave]
+        runtime_assembly.local_enclaves().unwrap()[world_enclave.enclave_key()]
             .env
             .reactors
             .keys()
@@ -1143,7 +1150,7 @@ fn test_enclave_partitioning() {
         "Expected only the world and hello1 reactors in the first enclave"
     );
     assert_eq!(
-        runtime_assembly.local_enclaves().unwrap()[hello2_enclave]
+        runtime_assembly.local_enclaves().unwrap()[hello2_enclave.enclave_key()]
             .env
             .reactors
             .keys()

@@ -59,9 +59,10 @@ fn bench(c: &mut Criterion) {
                         panic!("benchmark expected local execution")
                     };
                     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
-                    let (action_enclave_key, action_key) = aliases.action_aliases[action_key];
+                    let (action_enclave, action_key) = aliases.action_aliases[action_key].clone();
                     assert_eq!(
-                        action_enclave_key, enclave_key,
+                        action_enclave.enclave_key(),
+                        enclave_key,
                         "physical action enclave mismatch"
                     );
                     let send_ctx = enclave.create_send_context(enclave_key);

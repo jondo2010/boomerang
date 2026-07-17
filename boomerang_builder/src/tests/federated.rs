@@ -1309,8 +1309,12 @@ fn test_local_cross_enclave_connection_does_not_require_federated_codec() {
         .unwrap();
 
     assert!(parts.federation().is_none());
-    let source_enclave = parts.aliases.port_aliases[AssemblyPortKey::from(source)].0;
-    let sink_enclave = parts.aliases.port_aliases[AssemblyPortKey::from(sink)].0;
+    let source_enclave = parts.aliases.port_aliases[AssemblyPortKey::from(source)]
+        .0
+        .enclave_key();
+    let sink_enclave = parts.aliases.port_aliases[AssemblyPortKey::from(sink)]
+        .0
+        .enclave_key();
     assert_ne!(source_enclave, sink_enclave);
     let enclaves = parts.local_enclaves().unwrap();
     assert!(enclaves[source_enclave].upstream_enclaves.is_empty());
@@ -1427,8 +1431,8 @@ fn test_federated_sender_emits_serialized_msg_command() {
         .unwrap();
     let mut outbound = FederatedOutboundCapture::take(&mut parts);
     let federation = parts.into_federation().unwrap();
-    let (_, enclaves, mut federates) = federation.into_parts();
-    let source_keys = federates
+    let (_, mut federates) = federation.into_parts();
+    let source_enclaves = federates
         .remove(&boomerang_federated::FederateId::new("source"))
         .unwrap()
         .into_parts()
@@ -1437,13 +1441,7 @@ fn test_federated_sender_emits_serialized_msg_command() {
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(runtime::Duration::milliseconds(1));
-    let _envs = runtime::execute_enclaves(
-        enclaves
-            .into_iter()
-            .filter(|(key, _)| source_keys.contains(key)),
-        config,
-    )
-    .unwrap();
+    let _envs = runtime::execute_enclaves(source_enclaves.into_iter(), config).unwrap();
 
     let commands = outbound.drain();
     assert_eq!(commands.len(), 1);
@@ -1499,19 +1497,13 @@ fn test_federated_inbound_endpoint_schedules_target_action() {
         .unwrap()
         .schedule(runtime::Tag::ZERO, b"42")
         .unwrap();
-    let (_, enclaves, mut federates) = federation.into_parts();
-    let sink_keys = federates.remove(&sink).unwrap().into_parts().1;
+    let (_, mut federates) = federation.into_parts();
+    let sink_enclaves = federates.remove(&sink).unwrap().into_parts().1;
 
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(runtime::Duration::milliseconds(1));
-    let _envs = runtime::execute_enclaves(
-        enclaves
-            .into_iter()
-            .filter(|(key, _)| sink_keys.contains(key)),
-        config,
-    )
-    .unwrap();
+    let _envs = runtime::execute_enclaves(sink_enclaves.into_iter(), config).unwrap();
 
     assert_eq!(*values.lock().unwrap(), vec![(runtime::Tag::ZERO, 42)]);
 }

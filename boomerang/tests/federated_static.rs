@@ -144,7 +144,10 @@ fn public_api_runs_static_in_memory_federation() {
         1
     );
     assert_eq!(federation.topology().topology().edges.len(), 1);
-    let _envs = execute_federation_in_memory(parts.into_federation().unwrap(), config).unwrap();
+    let envs = execute_federation_in_memory(parts.into_federation().unwrap(), config).unwrap();
+    let a_envs = &envs[&FederateId::new("a")];
+    let b_envs = &envs[&FederateId::new("b")];
+    assert_eq!(a_envs.keys().next(), b_envs.keys().next());
 
     assert_eq!(*values.lock().unwrap(), vec![(Tag::ZERO, 7)]);
 }

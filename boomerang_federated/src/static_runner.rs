@@ -807,31 +807,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn static_runtime_rejects_two_federates_in_one_enclave() {
-        let mut enclaves = tinymap::TinyMap::new();
-        let enclave_key = enclaves.insert(boomerang_runtime::Enclave::default());
-        let error = FederateEnclaveMap::new(BTreeMap::from([
-            (FederateId::new("first"), vec![enclave_key]),
-            (FederateId::new("second"), vec![enclave_key]),
-        ]))
-        .err()
-        .expect("duplicate enclave placement must be rejected");
+    fn federate_maps_allocate_independent_dense_keys() {
+        let mut first =
+            tinymap::TinyMap::<boomerang_runtime::EnclaveKey, boomerang_runtime::Enclave>::new();
+        let mut second =
+            tinymap::TinyMap::<boomerang_runtime::EnclaveKey, boomerang_runtime::Enclave>::new();
 
-        assert_eq!(error.enclave_key, enclave_key);
-        assert_eq!(error.first, FederateId::new("first"));
-        assert_eq!(error.second, FederateId::new("second"));
+        let first_key = first.insert(boomerang_runtime::Enclave::default());
+        let second_key = second.insert(boomerang_runtime::Enclave::default());
+
+        assert_eq!(first_key, second_key);
     }
 
     fn valid_empty_static_runtime() -> (
         StaticFederationRuntime,
-        tinymap::TinyMap<boomerang_runtime::EnclaveKey, boomerang_runtime::Enclave>,
+        BTreeMap<
+            FederateId,
+            tinymap::TinyMap<boomerang_runtime::EnclaveKey, boomerang_runtime::Enclave>,
+        >,
     ) {
         let source = FederateId::new("source");
         let sink = FederateId::new("sink");
         let endpoint = crate::EndpointId::new("source.out->sink.in");
-        let mut enclaves = tinymap::TinyMap::new();
-        let source_enclave = enclaves.insert(boomerang_runtime::Enclave::default());
-        let sink_enclave = enclaves.insert(boomerang_runtime::Enclave::default());
+        let mut source_enclaves = tinymap::TinyMap::new();
+        source_enclaves.insert(boomerang_runtime::Enclave::default());
+        let mut sink_enclaves = tinymap::TinyMap::new();
+        sink_enclaves.insert(boomerang_runtime::Enclave::default());
 
         let runtime = StaticFederationRuntime::new(
             CompiledTopology::new(FederatedTopology::with_edges(
@@ -844,30 +845,36 @@ mod tests {
                 )],
             ))
             .unwrap(),
-            BTreeMap::from([
-                (source.clone(), vec![source_enclave]),
-                (sink.clone(), vec![sink_enclave]),
-            ]),
+        );
+        (
+            runtime,
+            BTreeMap::from([(source, source_enclaves), (sink, sink_enclaves)]),
         )
-        .unwrap();
-        (runtime, enclaves)
     }
 
     #[test]
     fn preparation_preserves_dense_enclave_keys() {
-        let (runtime, enclaves) = valid_empty_static_runtime();
-        let expected_keys = enclaves.keys().collect::<Vec<_>>();
-        let runtime = runtime.finalize(enclaves).unwrap();
+        let (runtime, runtimes) = valid_empty_static_runtime();
+        let expected_keys = runtimes
+            .iter()
+            .map(|(id, enclaves)| (id.clone(), enclaves.keys().collect::<Vec<_>>()))
+            .collect::<BTreeMap<_, _>>();
+        let runtime = runtime.finalize(runtimes).unwrap();
 
         let (prepared, _) = prepare_static_federation(runtime).unwrap();
 
-        assert_eq!(prepared.enclaves.keys().collect::<Vec<_>>(), expected_keys);
+        let prepared_keys = prepared
+            .runtimes
+            .iter()
+            .map(|(id, enclaves)| (id.clone(), enclaves.keys().collect::<Vec<_>>()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(prepared_keys, expected_keys);
     }
 
     #[test]
     fn unsupported_configuration_rejects_wall_clock_static_federation() {
-        let (runtime, enclaves) = valid_empty_static_runtime();
-        let runtime = runtime.finalize(enclaves).unwrap();
+        let (runtime, runtimes) = valid_empty_static_runtime();
+        let runtime = runtime.finalize(runtimes).unwrap();
         let error = run_in_memory(runtime, boomerang_runtime::Config::default())
             .expect_err("wall-clock static federation must be rejected");
 
@@ -878,8 +885,8 @@ mod tests {
                     && what.contains("common physical start")
         ));
 
-        let (runtime, enclaves) = valid_empty_static_runtime();
-        let runtime = runtime.finalize(enclaves).unwrap();
+        let (runtime, runtimes) = valid_empty_static_runtime();
+        let runtime = runtime.finalize(runtimes).unwrap();
         run_in_memory(
             runtime,
             boomerang_runtime::Config::default().with_fast_forward(true),
@@ -889,12 +896,12 @@ mod tests {
 
     #[test]
     fn prebuilt_runtime_connections_are_required_before_runner_startup() {
-        let (mut runtime, enclaves) = valid_empty_static_runtime();
+        let (mut runtime, runtimes) = valid_empty_static_runtime();
         let source = FederateId::new("source");
         runtime.connections_mut().take_federate(&source).unwrap();
 
         let error = runtime
-            .finalize(enclaves)
+            .finalize(runtimes)
             .err()
             .expect("finalization must not recreate a missing lowered mailbox");
 
@@ -935,14 +942,12 @@ mod tests {
     fn tcp_runner_validates_parts_before_binding() {
         let runtime = StaticFederationRuntime::new(
             CompiledTopology::new(FederatedTopology::default()).unwrap(),
-            BTreeMap::new(),
-        )
-        .unwrap();
+        );
         let tcp = TcpStaticFederationConfig {
             bind_addr: SocketAddr::from(([203, 0, 113, 1], 1)),
         };
 
-        let runtime = runtime.finalize(tinymap::TinyMap::new()).unwrap();
+        let runtime = runtime.finalize(BTreeMap::new()).unwrap();
         let error = run_over_tcp(runtime, boomerang_runtime::Config::default(), tcp)
             .expect_err("invalid runtime parts must fail before TCP bind");
 
@@ -960,8 +965,8 @@ mod tests {
             bind_addr: SocketAddr::from(([203, 0, 113, 1], 1)),
         };
 
-        let (runtime, enclaves) = valid_empty_static_runtime();
-        let runtime = runtime.finalize(enclaves).unwrap();
+        let (runtime, runtimes) = valid_empty_static_runtime();
+        let runtime = runtime.finalize(runtimes).unwrap();
         let error = run_over_tcp(runtime, boomerang_runtime::Config::default(), tcp)
             .expect_err("unsupported configuration must fail before TCP bind");
 

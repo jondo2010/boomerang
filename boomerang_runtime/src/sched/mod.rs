@@ -193,6 +193,7 @@ impl Scheduler {
             upstream_enclaves,
             shutdown_tx,
             shutdown_rx,
+            ..
         } = enclave;
 
         let start_time = std::time::Instant::now();

@@ -29,7 +29,6 @@ pub struct DownstreamRef {
 }
 
 /// Self-contained runtime data consumed by one scheduler instance.
-#[derive(Debug)]
 pub struct Enclave {
     /// Resolved reactors, actions, ports, and reactions.
     pub env: Env,
@@ -47,6 +46,24 @@ pub struct Enclave {
     pub shutdown_tx: keepalive::Sender,
     /// Channel used to observe scheduler shutdown.
     pub shutdown_rx: keepalive::Receiver,
+    /// Replay handlers keyed by their target runtime Action.
+    #[cfg(feature = "replay")]
+    replayers: tinymap::TinySecondaryMap<ActionKey, Box<dyn crate::replay::ReplayFn>>,
+}
+
+impl std::fmt::Debug for Enclave {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Enclave")
+            .field("env", &self.env)
+            .field("graph", &self.graph)
+            .field("event_tx", &self.event_tx)
+            .field("event_rx", &self.event_rx)
+            .field("upstream_enclaves", &self.upstream_enclaves)
+            .field("downstream_enclaves", &self.downstream_enclaves)
+            .field("shutdown_tx", &self.shutdown_tx)
+            .field("shutdown_rx", &self.shutdown_rx)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for Enclave {
@@ -62,11 +79,30 @@ impl Default for Enclave {
             upstream_enclaves: Default::default(),
             shutdown_tx,
             shutdown_rx,
+            #[cfg(feature = "replay")]
+            replayers: Default::default(),
         }
     }
 }
 
 impl Enclave {
+    /// Return mutable access to replay handlers during runtime lowering.
+    #[cfg(feature = "replay")]
+    #[doc(hidden)]
+    pub fn replayers_mut(
+        &mut self,
+    ) -> &mut tinymap::TinySecondaryMap<ActionKey, Box<dyn crate::replay::ReplayFn>> {
+        &mut self.replayers
+    }
+
+    /// Remove and return all replay handlers attached to this Enclave.
+    #[cfg(feature = "replay")]
+    pub fn take_replayers(
+        &mut self,
+    ) -> tinymap::TinySecondaryMap<ActionKey, Box<dyn crate::replay::ReplayFn>> {
+        std::mem::take(&mut self.replayers)
+    }
+
     /// Create an empty Enclave with the requested physical event queue capacity.
     pub fn with_event_q_size(physical_event_q_size: usize) -> Self {
         let size = physical_event_q_size.max(1);
@@ -81,6 +117,8 @@ impl Enclave {
             upstream_enclaves: Default::default(),
             shutdown_tx,
             shutdown_rx,
+            #[cfg(feature = "replay")]
+            replayers: Default::default(),
         }
     }
 

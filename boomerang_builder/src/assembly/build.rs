@@ -67,7 +67,7 @@ impl std::fmt::Debug for RuntimeAssembly {
 
 /// The mutually exclusive local and federated runtime shapes.
 pub enum RuntimeExecution {
-    Local(runtime::RuntimeEnclaves),
+    Local(tinymap::TinyMap<runtime::EnclaveKey, runtime::Enclave>),
     #[cfg(feature = "federated")]
     Federated(boomerang_federated::RuntimeFederation),
 }
@@ -76,13 +76,15 @@ impl Default for RuntimeAssembly {
     fn default() -> Self {
         Self {
             aliases: RuntimeAliases::default(),
-            execution: RuntimeExecution::Local(runtime::RuntimeEnclaves::new()),
+            execution: RuntimeExecution::Local(tinymap::TinyMap::new()),
         }
     }
 }
 
 impl RuntimeAssembly {
-    pub fn local_enclaves(&self) -> Option<&runtime::RuntimeEnclaves> {
+    pub fn local_enclaves(
+        &self,
+    ) -> Option<&tinymap::TinyMap<runtime::EnclaveKey, runtime::Enclave>> {
         match &self.execution {
             RuntimeExecution::Local(enclaves) => Some(enclaves),
             #[cfg(feature = "federated")]
@@ -116,7 +118,10 @@ impl RuntimeAssembly {
         }
     }
 
-    pub fn into_local(self) -> Result<runtime::RuntimeEnclaves, RuntimeExecutionError> {
+    pub fn into_local(
+        self,
+    ) -> Result<tinymap::TinyMap<runtime::EnclaveKey, runtime::Enclave>, RuntimeExecutionError>
+    {
         match self.execution {
             RuntimeExecution::Local(enclaves) => Ok(enclaves),
             #[cfg(feature = "federated")]
@@ -140,7 +145,7 @@ pub type PartitionMap = SecondaryMap<AssemblyReactorKey, AssemblyReactorKey>;
 /// Mutable runtime state shared by the internal assembly-lowering stages.
 pub(crate) struct RuntimeAssemblyContext {
     /// Executable runtime enclaves keyed by their lowered enclave identities.
-    pub(crate) enclaves: runtime::RuntimeEnclaves,
+    pub(crate) enclaves: tinymap::TinyMap<runtime::EnclaveKey, runtime::Enclave>,
     /// Aliases from assembly keys to runtime keys.
     pub(crate) aliases: RuntimeAliases,
     #[cfg(feature = "federated")]
@@ -154,7 +159,7 @@ fn initialize_runtime_assembly_context(
     partition_analysis: &PartitionAnalysis,
     physical_event_q_size: usize,
 ) -> RuntimeAssemblyContext {
-    let mut enclaves = runtime::RuntimeEnclaves::new();
+    let mut enclaves = tinymap::TinyMap::new();
     let mut aliases = RuntimeAliases::default();
 
     for reactor_key in partition_map.values().unique() {
@@ -177,16 +182,6 @@ fn initialize_runtime_assembly_context(
             upstream_enclave_key,
             downstream_enclave_key,
             edge.delay,
-        );
-    }
-
-    #[cfg(feature = "replay")]
-    {
-        let enclave_keys = enclaves.keys().collect_vec();
-        enclaves.replayers_mut().extend(
-            enclave_keys
-                .into_iter()
-                .map(|enclave_key| (enclave_key, tinymap::TinySecondaryMap::new())),
         );
     }
 
@@ -1066,7 +1061,9 @@ impl Assembly {
             let replayer = (replay_factory)(&runtime_assembly.aliases);
             let (enclave_key, action_key) =
                 runtime_assembly.aliases.action_aliases[assembly_action_key];
-            runtime_assembly.enclaves.replayers_mut()[enclave_key].insert(action_key, replayer);
+            runtime_assembly.enclaves[enclave_key]
+                .replayers_mut()
+                .insert(action_key, replayer);
         }
         Ok(())
     }

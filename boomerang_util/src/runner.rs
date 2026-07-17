@@ -201,7 +201,11 @@ where
     let replay_handle = match args.replay_filename {
         Some(filename) => {
             tracing::info!("Reading replay from {}", filename.display());
-            let replayers = enclaves.take_replayers();
+            let enclave_keys = enclaves.keys().collect::<Vec<_>>();
+            let replayers = enclave_keys
+                .into_iter()
+                .map(|key| (key, enclaves[key].take_replayers()))
+                .collect();
             Some(runtime::replay::create_replayer(
                 filename, replayers, &enclaves,
             )?)

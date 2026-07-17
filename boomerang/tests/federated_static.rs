@@ -133,13 +133,13 @@ fn public_api_runs_static_in_memory_federation() {
     assert_eq!(federation.federates().len(), 2);
     assert_eq!(
         federation.federates()[&FederateId::new("a")]
-            .enclaves()
+            .enclave_keys()
             .len(),
         2
     );
     assert_eq!(
         federation.federates()[&FederateId::new("b")]
-            .enclaves()
+            .enclave_keys()
             .len(),
         1
     );
@@ -160,7 +160,7 @@ fn public_api_rejects_runtime_without_lowered_federation() {
 }
 
 #[test]
-fn public_api_decomposes_independently_owned_runtime_federates() {
+fn public_api_owns_dense_runtime_enclave_map() {
     let values = Arc::new(Mutex::new(Vec::new()));
     let mut assembly = Assembly::new();
     assembly
@@ -184,27 +184,22 @@ fn public_api_decomposes_independently_owned_runtime_federates() {
         .unwrap()
         .into_federation()
         .unwrap();
-    let (topology, mut federates) = federation.into_parts();
+    let (topology, enclaves, federates) = federation.into_parts();
     assert_eq!(topology.topology().edges.len(), 1);
     assert_eq!(federates.len(), 2);
 
-    let a = federates.remove(&FederateId::new("a")).unwrap();
-    let b = federates.remove(&FederateId::new("b")).unwrap();
+    let a = &federates[&FederateId::new("a")];
+    let b = &federates[&FederateId::new("b")];
     assert_eq!(a.id(), &FederateId::new("a"));
-    assert_eq!(a.enclaves().len(), 2);
+    assert_eq!(a.enclave_keys().len(), 2);
     assert_eq!(a.bridge().routes().count(), 0);
     assert_eq!(b.id(), &FederateId::new("b"));
-    assert_eq!(b.enclaves().len(), 1);
+    assert_eq!(b.enclave_keys().len(), 1);
     assert_eq!(b.bridge().routes().count(), 1);
-
-    // Both values are owned and can be consumed independently after the builder and Federation
-    // are gone; neither returned tuple contains a borrow from the other Federate.
-    let (a_id, a_enclaves, _a_bridge) = a.into_parts();
-    let (b_id, b_enclaves, _b_bridge) = b.into_parts();
-    assert_eq!(a_id, FederateId::new("a"));
-    assert_eq!(a_enclaves.len(), 2);
-    assert_eq!(b_id, FederateId::new("b"));
-    assert_eq!(b_enclaves.len(), 1);
+    assert!(federates
+        .values()
+        .flat_map(|federate| federate.enclave_keys())
+        .all(|&key| enclaves.get(key).is_some()));
 }
 
 #[test]

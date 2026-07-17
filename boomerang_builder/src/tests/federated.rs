@@ -1277,14 +1277,14 @@ fn test_same_federate_cross_enclave_boundary_stays_local() {
     assert!(federation.topology().topology().edges.is_empty());
     assert_eq!(
         federation.federates()[&boomerang_federated::FederateId::new("node")]
-            .enclaves()
+            .enclave_keys()
             .len(),
         2
     );
     assert_eq!(
         federation
             .enclaves()
-            .map(|(_, enclave)| enclave)
+            .values()
             .map(|enclave| enclave.downstream_enclaves.len())
             .sum::<usize>(),
         1
@@ -1382,7 +1382,7 @@ fn test_federated_connection_lowers_endpoint_runtime_parts() {
         .bridge()
         .inbound_endpoint(endpoint)
         .is_some());
-    assert!(federation.enclaves().all(|(_, enclave)| {
+    assert!(federation.enclaves().values().all(|enclave| {
         enclave.upstream_enclaves.is_empty() && enclave.downstream_enclaves.is_empty()
     }));
 }
@@ -1407,8 +1407,8 @@ fn test_federated_sender_emits_serialized_msg_command() {
         .unwrap();
     let mut outbound = FederatedOutboundCapture::take(&mut parts);
     let federation = parts.into_federation().unwrap();
-    let (_, mut federates) = federation.into_parts();
-    let source_runtime = federates
+    let (_, enclaves, mut federates) = federation.into_parts();
+    let source_keys = federates
         .remove(&boomerang_federated::FederateId::new("source"))
         .unwrap()
         .into_parts()
@@ -1417,7 +1417,13 @@ fn test_federated_sender_emits_serialized_msg_command() {
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(runtime::Duration::milliseconds(1));
-    let _envs = runtime::execute_enclaves(source_runtime.into_iter(), config).unwrap();
+    let _envs = runtime::execute_enclaves(
+        enclaves
+            .into_iter()
+            .filter(|(key, _)| source_keys.contains(key)),
+        config,
+    )
+    .unwrap();
 
     let commands = outbound.drain();
     assert_eq!(commands.len(), 1);
@@ -1473,13 +1479,19 @@ fn test_federated_inbound_endpoint_schedules_target_action() {
         .unwrap()
         .schedule(runtime::Tag::ZERO, b"42")
         .unwrap();
-    let (_, mut federates) = federation.into_parts();
-    let sink_runtime = federates.remove(&sink).unwrap().into_parts().1;
+    let (_, enclaves, mut federates) = federation.into_parts();
+    let sink_keys = federates.remove(&sink).unwrap().into_parts().1;
 
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(runtime::Duration::milliseconds(1));
-    let _envs = runtime::execute_enclaves(sink_runtime.into_iter(), config).unwrap();
+    let _envs = runtime::execute_enclaves(
+        enclaves
+            .into_iter()
+            .filter(|(key, _)| sink_keys.contains(key)),
+        config,
+    )
+    .unwrap();
 
     assert_eq!(*values.lock().unwrap(), vec![(runtime::Tag::ZERO, 42)]);
 }

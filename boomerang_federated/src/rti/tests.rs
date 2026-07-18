@@ -4,7 +4,7 @@ use crate::protocol::{EndpointId, FederatedTopology, NeighborStructure, Topology
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StateSnapshot {
     topology: CompiledTopology,
-    federates: BTreeMap<FederateId, FederateCoordination>,
+    federates: tinymap::TinySecondaryMap<FederateKey, FederateCoordination>,
 }
 
 fn snapshot(rti: &RtiState) -> StateSnapshot {
@@ -27,17 +27,23 @@ fn new_rti(topology: FederatedTopology) -> RtiState {
 }
 
 fn coordination<'a>(rti: &'a RtiState, federate_id: &FederateId) -> &'a FederateCoordination {
-    rti.federates
-        .get(federate_id)
-        .expect("test federate must exist")
+    let key = rti
+        .topology
+        .federate_key(federate_id)
+        .expect("test federate must exist");
+    rti.federates.get(key).expect("test federate must exist")
 }
 
 fn coordination_mut<'a>(
     rti: &'a mut RtiState,
     federate_id: &FederateId,
 ) -> &'a mut FederateCoordination {
+    let key = rti
+        .topology
+        .federate_key(federate_id)
+        .expect("test federate must exist");
     rti.federates
-        .get_mut(federate_id)
+        .get_mut(key)
         .expect("test federate must exist")
 }
 
@@ -51,6 +57,17 @@ fn topology_with_edge(delay: WireDelay) -> FederatedTopology {
             delay,
         )],
     )
+}
+
+#[test]
+fn rti_coordination_is_indexed_by_compiled_federate_key() {
+    let rti = new_rti(FederatedTopology::new([fed("b"), fed("a")]));
+    let a = rti.topology.federate_key(&fed("a")).unwrap();
+    let b = rti.topology.federate_key(&fed("b")).unwrap();
+
+    assert_ne!(a, b);
+    assert_eq!(rti.federates.get(a), Some(&FederateCoordination::default()));
+    assert_eq!(rti.federates.get(b), Some(&FederateCoordination::default()));
 }
 
 #[test]
@@ -1149,7 +1166,11 @@ fn ltc_does_not_reevaluate_unaffected_pending_grants() {
     );
     assert_eq!(
         coordination(&rti, &fed("source")).last_granted,
-        before.federates.get(&fed("source")).unwrap().last_granted
+        before
+            .federates
+            .get(before.topology.federate_key(&fed("source")).unwrap())
+            .unwrap()
+            .last_granted
     );
 }
 

@@ -529,6 +529,24 @@ fn compiled_topology_indexes_dependencies_and_routes_deterministically() {
         ],
     );
     let rti = new_rti(topology.clone());
+    let reordered = new_rti(FederatedTopology::with_edges(
+        [fed("isolated"), fed("b"), fed("a"), fed("c")],
+        [
+            TopologyEdge::new(fed("a"), fed("b"), endpoint("a.out->b.in"), WireDelay::ZERO),
+            TopologyEdge::new(
+                fed("a"),
+                fed("c"),
+                endpoint("a.out->c.in"),
+                WireDelay::from_nanos(1),
+            ),
+            TopologyEdge::new(
+                fed("b"),
+                fed("c"),
+                endpoint("b.out->c.in"),
+                WireDelay::from_nanos(2),
+            ),
+        ],
+    ));
 
     assert_eq!(rti.topology(), &topology);
     assert_eq!(
@@ -621,6 +639,24 @@ fn compiled_topology_indexes_dependencies_and_routes_deterministically() {
     );
     assert!(rti.contains_route(&fed("a"), &fed("c"), &endpoint("a.out->c.in")));
     assert!(!rti.contains_route(&fed("c"), &fed("a"), &endpoint("a.out->c.in")));
+    for federate_id in [fed("a"), fed("b"), fed("c"), fed("isolated")] {
+        assert_eq!(
+            rti.topology.neighbors_for(&federate_id),
+            reordered.topology.neighbors_for(&federate_id)
+        );
+    }
+    assert_eq!(
+        rti.topology.minimum_delay(&fed("a"), &fed("c")),
+        reordered.topology.minimum_delay(&fed("a"), &fed("c"))
+    );
+    assert_eq!(
+        rti.contains_route(&fed("a"), &fed("c"), &endpoint("a.out->c.in")),
+        reordered.contains_route(&fed("a"), &fed("c"), &endpoint("a.out->c.in"))
+    );
+    assert_eq!(
+        rti.topology.transitive_downstream(&fed("a")),
+        reordered.topology.transitive_downstream(&fed("a"))
+    );
 }
 
 #[test]

@@ -4,7 +4,7 @@ use futures_util::{Sink, SinkExt, TryStream, TryStreamExt};
 use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::{
-    rti::{CompiledTopology, RtiDelivery, RtiError, RtiState},
+    rti::{CompiledTopology, FederateKey, RtiDelivery, RtiError, RtiState},
     FederateId, FederateToRti, FederatedTopology, ProtocolFrame, RtiToFederate, TransportError,
 };
 
@@ -64,16 +64,25 @@ pub enum SessionError {
     Shutdown(String),
 }
 
+/// One authenticated transport participant resolved against the compiled topology.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionParticipant {
+    /// Stable identity retained for errors and sink addressing.
+    id: FederateId,
+    /// Process-local dense identity used by RTI coordination.
+    key: FederateKey,
+}
+
 enum SessionInput {
     Frame {
-        federate_id: FederateId,
+        participant: SessionParticipant,
         frame: ProtocolFrame,
     },
     Closed {
-        federate_id: FederateId,
+        participant: SessionParticipant,
     },
     TransportError {
-        federate_id: FederateId,
+        participant: SessionParticipant,
         error: TransportError,
     },
 }
@@ -119,10 +128,17 @@ where
         let mut sinks = BTreeMap::new();
         let endpoints = std::mem::take(&mut self.endpoints);
         for (federate_id, endpoint) in endpoints {
+            let participant = SessionParticipant {
+                key: self
+                    .rti
+                    .federate_key(&federate_id)
+                    .expect("validated session endpoint must be a compiled topology member"),
+                id: federate_id.clone(),
+            };
             if let Some(frame) = endpoint.initial_frame {
                 input_tx
                     .send(SessionInput::Frame {
-                        federate_id: federate_id.clone(),
+                        participant: participant.clone(),
                         frame,
                     })
                     .map_err(|_| {
@@ -132,7 +148,7 @@ where
                     })?;
             }
             sinks.insert(federate_id.clone(), endpoint.sink);
-            spawn_stream_reader(federate_id, endpoint.stream, input_tx.clone());
+            spawn_stream_reader(participant, endpoint.stream, input_tx.clone());
         }
         drop(input_tx);
 
@@ -173,7 +189,8 @@ where
         while seen.len() < expected.len() {
             let input = receive_session_input(input_rx).await?;
             match input {
-                SessionInput::Frame { federate_id, frame } => {
+                SessionInput::Frame { participant, frame } => {
+                    let federate_id = &participant.id;
                     let ProtocolFrame::FederateToRti(FederateToRti::Hello {
                         federate_id: hello_federate,
                         topology,
@@ -183,7 +200,7 @@ where
                             .await;
                     };
 
-                    if hello_federate != federate_id {
+                    if &hello_federate != federate_id {
                         return protocol_error(
                             sinks,
                             &federate_id,
@@ -211,8 +228,8 @@ where
                     }
 
                     self.rti
-                        .handle_from(
-                            &federate_id,
+                        .handle_from_key(
+                            participant.key,
                             FederateToRti::Hello {
                                 federate_id: federate_id.clone(),
                                 topology,
@@ -220,14 +237,15 @@ where
                         )
                         .map_err(SessionError::Rti)?;
                 }
-                SessionInput::Closed { federate_id } => {
+                SessionInput::Closed { participant } => {
+                    let federate_id = participant.id;
                     return Err(SessionError::Shutdown(format!(
                         "federate `{federate_id}` closed before Hello"
                     )));
                 }
-                SessionInput::TransportError { federate_id, error } => {
+                SessionInput::TransportError { participant, error } => {
                     return Err(SessionError::Transport {
-                        federate_id,
+                        federate_id: participant.id,
                         source: error,
                     });
                 }
@@ -267,8 +285,9 @@ where
         while stopped.len() < expected.len() {
             let input = receive_session_input(input_rx).await?;
             match input {
-                SessionInput::Frame { federate_id, frame } => {
-                    if stopped.contains(&federate_id) {
+                SessionInput::Frame { participant, frame } => {
+                    let federate_id = &participant.id;
+                    if stopped.contains(federate_id) {
                         return protocol_error(
                             sinks,
                             &federate_id,
@@ -292,19 +311,19 @@ where
                     }
 
                     if matches!(message, FederateToRti::Stop { .. }) {
-                        let deliveries = match self.rti.handle_from(&federate_id, message) {
+                        let deliveries = match self.rti.handle_from_key(participant.key, message) {
                             Ok(deliveries) => deliveries,
                             Err(error) => {
                                 return protocol_error(sinks, &federate_id, error.to_string())
                                     .await;
                             }
                         };
-                        stopped.insert(federate_id);
+                        stopped.insert(federate_id.clone());
                         send_deliveries(sinks, deliveries).await?;
                         continue;
                     }
 
-                    let deliveries = match self.rti.handle_from(&federate_id, message) {
+                    let deliveries = match self.rti.handle_from_key(participant.key, message) {
                         Ok(deliveries) => deliveries,
                         Err(error) => {
                             return protocol_error(sinks, &federate_id, error.to_string()).await;
@@ -312,14 +331,15 @@ where
                     };
                     send_deliveries(sinks, deliveries).await?;
                 }
-                SessionInput::Closed { federate_id } => {
+                SessionInput::Closed { participant } => {
+                    let federate_id = participant.id;
                     return Err(SessionError::Shutdown(format!(
                         "federate `{federate_id}` closed before Stop"
                     )));
                 }
-                SessionInput::TransportError { federate_id, error } => {
+                SessionInput::TransportError { participant, error } => {
                     return Err(SessionError::Transport {
-                        federate_id,
+                        federate_id: participant.id,
                         source: error,
                     });
                 }
@@ -344,7 +364,7 @@ fn expected_federates(topology: &FederatedTopology) -> BTreeSet<FederateId> {
 }
 
 fn spawn_stream_reader<R>(
-    federate_id: FederateId,
+    participant: SessionParticipant,
     mut stream: R,
     input_tx: mpsc::UnboundedSender<SessionInput>,
 ) -> JoinHandle<()>
@@ -356,15 +376,15 @@ where
         loop {
             let input = match stream.try_next().await {
                 Ok(Some(frame)) => SessionInput::Frame {
-                    federate_id: federate_id.clone(),
+                    participant: participant.clone(),
                     frame,
                 },
                 Err(error) => SessionInput::TransportError {
-                    federate_id: federate_id.clone(),
+                    participant: participant.clone(),
                     error: error.into(),
                 },
                 Ok(None) => SessionInput::Closed {
-                    federate_id: federate_id.clone(),
+                    participant: participant.clone(),
                 },
             };
 
@@ -1037,6 +1057,60 @@ mod tests {
         drop(source_client);
         drop(sink_client);
         session.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_cached_identity_rejects_mismatched_claim() {
+        let topology = source_sink_topology();
+        let (mut source_client, mut sink_client, session) = spawn_session(topology.clone());
+        let source = fed("source");
+        let sink = fed("sink");
+
+        send_client_frame(
+            &mut source_client,
+            FederateToRti::Hello {
+                federate_id: source.clone(),
+                topology: topology.neighbors_for(&source),
+            },
+        )
+        .await;
+        send_client_frame(
+            &mut sink_client,
+            FederateToRti::Hello {
+                federate_id: sink.clone(),
+                topology: topology.neighbors_for(&sink),
+            },
+        )
+        .await;
+        expect_start(&mut source_client).await;
+        expect_start(&mut sink_client).await;
+
+        send_client_frame(
+            &mut source_client,
+            FederateToRti::Net {
+                federate_id: sink.clone(),
+                tag: WireTag::ZERO,
+            },
+        )
+        .await;
+        let expected_message =
+            "NET identified federate `sink`, but authenticated endpoint is `source`";
+        assert_eq!(
+            recv_client_frame(&mut source_client).await,
+            RtiToFederate::Error {
+                message: expected_message.into(),
+            }
+        );
+
+        drop(source_client);
+        drop(sink_client);
+        assert!(matches!(
+            session.await.unwrap().unwrap_err(),
+            SessionError::Protocol {
+                federate_id,
+                message,
+            } if federate_id == source && message == expected_message
+        ));
     }
 
     #[tokio::test]

@@ -7,9 +7,8 @@ use crate::protocol::{
 
 mod index;
 
-use index::{
-    CompiledEndpoint, CompiledFederate, EndpointKey, FederateKey, IncomingDependency, IncomingPath,
-};
+pub(crate) use index::FederateKey;
+use index::{CompiledEndpoint, CompiledFederate, EndpointKey, IncomingDependency, IncomingPath};
 
 /// Validated static RTI topology with deterministic coordination indexes.
 ///
@@ -568,6 +567,10 @@ impl RtiState {
 
     pub(crate) fn neighbors_for(&self, federate_id: &FederateId) -> Option<&NeighborStructure> {
         self.topology.neighbors_for(federate_id)
+    }
+
+    pub(crate) fn federate_key(&self, federate_id: &FederateId) -> Option<FederateKey> {
+        self.topology.federate_key(federate_id)
     }
 
     #[cfg(test)]

@@ -4,7 +4,10 @@ use std::collections::BTreeMap;
 
 use crate::{CompiledTopology, FederateId, FederateRuntimeBridge, FederatedRuntimeConnections};
 
-/// One deployable Federate's identity, owned Enclaves, and protocol bridge.
+/// Owned pre-execution runtime bundle for one deployable Federate.
+///
+/// A runner consumes this value into independently scheduled Enclaves and one protocol client;
+/// the RTI itself receives only the compiled topology and transport endpoints.
 pub struct RuntimeFederate {
     /// Protocol identity for this Federate.
     id: FederateId,
@@ -56,7 +59,7 @@ impl RuntimeFederate {
     }
 }
 
-/// RTI topology and deployable runtime Federates.
+/// Compiled RTI topology and the deployable runtime bundle for each Federate.
 pub struct RuntimeFederation {
     /// Immutable topology used to start the RTI.
     topology: CompiledTopology,

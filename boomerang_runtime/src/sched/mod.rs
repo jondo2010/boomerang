@@ -15,7 +15,7 @@ use modal::EventManager;
 
 use crate::{
     build_reaction_contexts,
-    enclaves::{Enclave, EnclaveKey},
+    enclave::{Enclave, EnclaveKey},
     event::AsyncEvent,
     keepalive,
     key_set::KeySetView,
@@ -854,7 +854,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        enclaves::{DownstreamRef, UpstreamRef},
+        enclave::{DownstreamRef, UpstreamRef},
         reaction_closure, ActionKey, Level, PortKey, Reaction, Reactor, SendContext,
     };
 

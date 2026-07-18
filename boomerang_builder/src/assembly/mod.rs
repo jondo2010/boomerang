@@ -6,8 +6,8 @@
 //!
 //! The workflow is: declare or mutate an [`Assembly`], consume it with
 //! [`Assembly::into_runtime_assembly`], then match the returned [`RuntimeExecution`] as either
-//! a local dense Enclave map or a [`boomerang_federated::RuntimeFederation`] containing the dense
-//! map, Federate placement, protocol bridges, and RTI topology.
+//! a local dense Enclave map or a [`boomerang_federated::RuntimeFederation`] containing compiled
+//! RTI topology and one owned Enclave map and protocol bridge per Federate.
 
 #[cfg(feature = "federated")]
 use crate::federated::FederatedBoundaryIndex;
@@ -36,7 +36,7 @@ mod tests;
 
 pub(crate) use build::RuntimeAssemblyContext;
 pub use build::{
-    PartitionMap, RuntimeAliases, RuntimeAssembly, RuntimeEnclaveRef, RuntimeExecution,
+    EnclaveRef, PartitionMap, RuntimeAliases, RuntimeAssembly, RuntimeExecution,
     RuntimeExecutionError,
 };
 

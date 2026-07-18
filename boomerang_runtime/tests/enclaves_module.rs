@@ -1,4 +1,4 @@
-use boomerang_runtime::enclaves::{Enclave, EnclaveKey};
+use boomerang_runtime::enclave::{Enclave, EnclaveKey};
 
 #[test]
 fn enclave_types_are_available_from_their_own_module() {

@@ -259,7 +259,7 @@ fn test_runtime_scope_metadata_for_mode_components() {
         .unwrap();
 
     let (owner, runtime_reactor) = runtime_assembly.aliases.reactor_aliases[reactor_key].clone();
-    assert!(matches!(owner, RuntimeEnclaveRef::Local(_)));
+    assert!(matches!(owner, EnclaveRef::Local(_)));
     assert_eq!(
         owner,
         runtime_assembly.aliases.enclave_aliases[reactor_key].clone()

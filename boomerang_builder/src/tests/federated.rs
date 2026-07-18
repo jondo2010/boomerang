@@ -1375,11 +1375,11 @@ fn test_federated_connection_lowers_endpoint_runtime_parts() {
         .clone();
     assert!(matches!(
         &source_owner,
-        RuntimeEnclaveRef::Federated { federate, .. } if federate.as_str() == "source"
+        EnclaveRef::Federated { federate, .. } if federate.as_str() == "source"
     ));
     assert!(matches!(
         &sink_owner,
-        RuntimeEnclaveRef::Federated { federate, .. } if federate.as_str() == "sink"
+        EnclaveRef::Federated { federate, .. } if federate.as_str() == "sink"
     ));
     assert_eq!(source_owner.enclave_key(), sink_owner.enclave_key());
 

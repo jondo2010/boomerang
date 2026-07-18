@@ -27,25 +27,25 @@ use crate::federated::FederatedInboundEndpointFactory;
 #[derive(Default)]
 pub struct RuntimeAliases {
     /// Runtime enclave allocated for each assembly reactor or partition root.
-    pub enclave_aliases: SecondaryMap<AssemblyReactorKey, RuntimeEnclaveRef>,
+    pub enclave_aliases: SecondaryMap<AssemblyReactorKey, EnclaveRef>,
     /// Runtime enclave and reactor allocated for each assembly reactor.
-    pub reactor_aliases: SecondaryMap<AssemblyReactorKey, (RuntimeEnclaveRef, runtime::ReactorKey)>,
+    pub reactor_aliases: SecondaryMap<AssemblyReactorKey, (EnclaveRef, runtime::ReactorKey)>,
     /// Optional assembly mode that lexically contains each assembly reactor.
     pub reactor_scope_modes: SecondaryMap<AssemblyReactorKey, Option<AssemblyModeKey>>,
     /// Runtime enclave and reaction allocated for each assembly reaction.
-    pub reaction_aliases:
-        SecondaryMap<AssemblyReactionKey, (RuntimeEnclaveRef, runtime::ReactionKey)>,
+    pub reaction_aliases: SecondaryMap<AssemblyReactionKey, (EnclaveRef, runtime::ReactionKey)>,
     /// Runtime enclave and mode allocated for each assembly mode.
-    pub mode_aliases: SecondaryMap<AssemblyModeKey, (RuntimeEnclaveRef, runtime::ModeKey)>,
+    pub mode_aliases: SecondaryMap<AssemblyModeKey, (EnclaveRef, runtime::ModeKey)>,
     /// Runtime enclave and action allocated for each assembly action.
-    pub action_aliases: SecondaryMap<AssemblyActionKey, (RuntimeEnclaveRef, runtime::ActionKey)>,
+    pub action_aliases: SecondaryMap<AssemblyActionKey, (EnclaveRef, runtime::ActionKey)>,
     /// Runtime enclave and port allocated for each assembly port.
-    pub port_aliases: SecondaryMap<AssemblyPortKey, (RuntimeEnclaveRef, runtime::PortKey)>,
+    pub port_aliases: SecondaryMap<AssemblyPortKey, (EnclaveRef, runtime::PortKey)>,
 }
 
 /// Identity of a runtime Enclave together with its owning execution scope.
+/// Lowering uses it to select an owner-specific Enclave map and resolve aliases.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuntimeEnclaveRef {
+pub enum EnclaveRef {
     /// Enclave owned by the single-process local runtime.
     Local(runtime::EnclaveKey),
     /// Enclave owned by one protocol Federate.
@@ -58,7 +58,7 @@ pub enum RuntimeEnclaveRef {
     },
 }
 
-impl RuntimeEnclaveRef {
+impl EnclaveRef {
     /// Return the dense key within this Enclave's owner.
     pub fn enclave_key(&self) -> runtime::EnclaveKey {
         match self {
@@ -197,7 +197,7 @@ impl RuntimeEnclaveStores {
         &mut self,
         #[cfg(feature = "federated")] federate: Option<boomerang_federated::FederateId>,
         enclave: runtime::Enclave,
-    ) -> RuntimeEnclaveRef {
+    ) -> EnclaveRef {
         #[cfg(feature = "federated")]
         if let Some(federate) = federate {
             let enclave = self
@@ -205,33 +205,33 @@ impl RuntimeEnclaveStores {
                 .entry(federate.clone())
                 .or_default()
                 .insert(enclave);
-            return RuntimeEnclaveRef::Federated { federate, enclave };
+            return EnclaveRef::Federated { federate, enclave };
         }
 
-        RuntimeEnclaveRef::Local(self.local.insert(enclave))
+        EnclaveRef::Local(self.local.insert(enclave))
     }
 
     /// Return an Enclave through its owner-qualified reference.
-    fn get(&self, owner: &RuntimeEnclaveRef) -> Option<&runtime::Enclave> {
+    fn get(&self, owner: &EnclaveRef) -> Option<&runtime::Enclave> {
         match owner {
-            RuntimeEnclaveRef::Local(key) => self.local.get(*key),
+            EnclaveRef::Local(key) => self.local.get(*key),
             #[cfg(feature = "federated")]
-            RuntimeEnclaveRef::Federated { federate, enclave } => {
+            EnclaveRef::Federated { federate, enclave } => {
                 self.federated.get(federate)?.get(*enclave)
             }
         }
     }
 
     /// Return mutable access to an Enclave through its owner-qualified reference.
-    fn get_mut(&mut self, owner: &RuntimeEnclaveRef) -> Option<&mut runtime::Enclave> {
+    fn get_mut(&mut self, owner: &EnclaveRef) -> Option<&mut runtime::Enclave> {
         match owner {
-            RuntimeEnclaveRef::Local(key) => self
+            EnclaveRef::Local(key) => self
                 .local
                 .get(*key)
                 .is_some()
                 .then(|| &mut self.local[*key]),
             #[cfg(feature = "federated")]
-            RuntimeEnclaveRef::Federated { federate, enclave } => {
+            EnclaveRef::Federated { federate, enclave } => {
                 let enclaves = self.federated.get_mut(federate)?;
                 enclaves
                     .get(*enclave)
@@ -244,21 +244,21 @@ impl RuntimeEnclaveStores {
     /// Install one in-process crosslink between Enclaves with the same owner.
     fn crosslink(
         &mut self,
-        upstream: &RuntimeEnclaveRef,
-        downstream: &RuntimeEnclaveRef,
+        upstream: &EnclaveRef,
+        downstream: &EnclaveRef,
         delay: Option<runtime::Duration>,
     ) -> Result<(), AssemblyError> {
         match (upstream, downstream) {
-            (RuntimeEnclaveRef::Local(upstream), RuntimeEnclaveRef::Local(downstream)) => {
+            (EnclaveRef::Local(upstream), EnclaveRef::Local(downstream)) => {
                 runtime::crosslink_enclaves(&mut self.local, *upstream, *downstream, delay);
             }
             #[cfg(feature = "federated")]
             (
-                RuntimeEnclaveRef::Federated {
+                EnclaveRef::Federated {
                     federate: upstream_federate,
                     enclave: upstream,
                 },
-                RuntimeEnclaveRef::Federated {
+                EnclaveRef::Federated {
                     federate: downstream_federate,
                     enclave: downstream,
                 },
@@ -296,7 +296,7 @@ impl RuntimeEnclaveStores {
 
 impl RuntimeAssemblyContext {
     /// Return an Enclave through its owner-qualified reference.
-    pub(crate) fn enclave(&self, owner: &RuntimeEnclaveRef) -> &runtime::Enclave {
+    pub(crate) fn enclave(&self, owner: &EnclaveRef) -> &runtime::Enclave {
         self.enclaves
             .get(owner)
             .expect("runtime Enclave alias must resolve within its owner")

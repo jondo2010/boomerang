@@ -7,7 +7,7 @@ pub use ::time::Duration;
 
 pub mod action;
 mod context;
-pub mod enclaves;
+pub mod enclave;
 mod env;
 mod event;
 pub mod keepalive;
@@ -29,7 +29,7 @@ pub use action::{
 };
 pub use context::*;
 use downcast_rs::Downcast;
-pub use enclaves::{crosslink_enclaves, DownstreamRef, Enclave, EnclaveKey, UpstreamRef};
+pub use enclave::{crosslink_enclaves, DownstreamRef, Enclave, EnclaveKey, UpstreamRef};
 pub use env::{
     BankInfo, Env, Level, LevelReactionKey, LifecycleReaction, ModalScheduleIndex, Mode,
     ModeFilter, ModeKey, ReactionGraph, ScopeInfo, ScopeKey, TransitionKind,

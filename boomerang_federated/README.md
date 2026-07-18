@@ -1,9 +1,10 @@
 # boomerang_federated
 
-Protocol, codec, transport, RTI state-machine, and runtime bridge primitives for
-Boomerang federations. `RuntimeFederation` owns the dense runtime Enclave map and independent RTI
-topology data. Each `RuntimeFederate` records the Enclave keys and protocol bridge for one compute
-node.
+Protocol, codec, transport, RTI state-machine, and runtime bridge primitives for Boomerang
+federations. `RuntimeFederation` owns the compiled RTI topology and a deterministic map of
+`RuntimeFederate` values. Each `RuntimeFederate` is an owned pre-execution bundle containing one
+compute node's dense Enclave map and protocol bridge. A runner consumes those bundles to start the
+Enclave schedulers and protocol clients; the RTI itself receives topology and transport endpoints.
 
 This crate depends on the protocol-neutral scheduler extension points in
 `boomerang_runtime`; the core runtime does not depend on this crate or expose a

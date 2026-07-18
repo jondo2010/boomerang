@@ -600,37 +600,53 @@ fn compiled_topology_indexes_dependencies_and_routes_deterministically() {
         Some(&topology.neighbors_for(&fed("c")))
     );
     assert_eq!(
-        rti.topology.incoming(&fed("c")),
+        rti.topology
+            .incoming(&fed("c"))
+            .iter()
+            .map(|dependency| (
+                rti.topology.federate_id(dependency.source).clone(),
+                rti.topology.endpoint(dependency.endpoint).id.clone(),
+                dependency.delay,
+            ))
+            .collect::<Vec<_>>(),
         [
-            IncomingDependency {
-                source: fed("a"),
-                endpoint: endpoint("a.out->c.in"),
-                delay: WireDelay::from_nanos(1),
-            },
-            IncomingDependency {
-                source: fed("b"),
-                endpoint: endpoint("b.out->c.in"),
-                delay: WireDelay::from_nanos(2),
-            },
-        ]
-    );
-    assert_eq!(rti.topology.downstream(&fed("a")), [fed("b"), fed("c")]);
-    assert_eq!(rti.topology.downstream(&fed("b")), [fed("c")]);
-    assert_eq!(
-        rti.topology.transitive_incoming(&fed("c")),
-        [
-            IncomingPath {
-                source: fed("a"),
-                delay: WireDelay::from_nanos(1),
-            },
-            IncomingPath {
-                source: fed("b"),
-                delay: WireDelay::from_nanos(2),
-            },
+            (fed("a"), endpoint("a.out->c.in"), WireDelay::from_nanos(1)),
+            (fed("b"), endpoint("b.out->c.in"), WireDelay::from_nanos(2)),
         ]
     );
     assert_eq!(
-        rti.topology.transitive_downstream(&fed("a")),
+        rti.topology
+            .downstream(&fed("a"))
+            .iter()
+            .map(|key| rti.topology.federate_id(*key).clone())
+            .collect::<Vec<_>>(),
+        [fed("b"), fed("c")]
+    );
+    assert_eq!(
+        rti.topology
+            .downstream(&fed("b"))
+            .iter()
+            .map(|key| rti.topology.federate_id(*key).clone())
+            .collect::<Vec<_>>(),
+        [fed("c")]
+    );
+    assert_eq!(
+        rti.topology
+            .transitive_incoming(&fed("c"))
+            .iter()
+            .map(|path| (rti.topology.federate_id(path.source).clone(), path.delay,))
+            .collect::<Vec<_>>(),
+        [
+            (fed("a"), WireDelay::from_nanos(1)),
+            (fed("b"), WireDelay::from_nanos(2)),
+        ]
+    );
+    assert_eq!(
+        rti.topology
+            .transitive_downstream(&fed("a"))
+            .iter()
+            .map(|key| rti.topology.federate_id(*key).clone())
+            .collect::<Vec<_>>(),
         [fed("b"), fed("c")]
     );
     assert_eq!(
@@ -657,6 +673,67 @@ fn compiled_topology_indexes_dependencies_and_routes_deterministically() {
         rti.topology.transitive_downstream(&fed("a")),
         reordered.topology.transitive_downstream(&fed("a"))
     );
+}
+
+#[test]
+fn compiled_topology_dense_keys_are_lexical_and_round_trip() {
+    let first = CompiledTopology::new(FederatedTopology::with_edges(
+        [fed("c"), fed("a"), fed("b")],
+        [
+            TopologyEdge::new(fed("b"), fed("c"), endpoint("route-b-c"), WireDelay::ZERO),
+            TopologyEdge::new(fed("a"), fed("b"), endpoint("route-a-b"), WireDelay::ZERO),
+        ],
+    ))
+    .unwrap();
+    let reordered = CompiledTopology::new(FederatedTopology::with_edges(
+        [fed("b"), fed("c"), fed("a")],
+        [
+            TopologyEdge::new(fed("a"), fed("b"), endpoint("route-a-b"), WireDelay::ZERO),
+            TopologyEdge::new(fed("b"), fed("c"), endpoint("route-b-c"), WireDelay::ZERO),
+        ],
+    ))
+    .unwrap();
+
+    let first_keys = first
+        .federates()
+        .map(|(key, federate)| (federate.id.clone(), key))
+        .collect::<Vec<_>>();
+    let reordered_keys = reordered
+        .federates()
+        .map(|(key, federate)| (federate.id.clone(), key))
+        .collect::<Vec<_>>();
+
+    assert_eq!(first_keys, reordered_keys);
+    assert_eq!(
+        first_keys.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+        vec![&fed("a"), &fed("b"), &fed("c")]
+    );
+    for (id, key) in first_keys {
+        assert_eq!(first.federate_key(&id), Some(key));
+        assert_eq!(first.federate_id(key), &id);
+    }
+}
+
+#[test]
+fn compiled_topology_endpoint_keys_round_trip_and_bind_exact_route() {
+    let topology = CompiledTopology::new(FederatedTopology::with_edges(
+        [fed("a"), fed("b"), fed("c")],
+        [
+            TopologyEdge::new(fed("b"), fed("c"), endpoint("route-b-c"), WireDelay::ZERO),
+            TopologyEdge::new(fed("a"), fed("b"), endpoint("route-a-b"), WireDelay::ZERO),
+        ],
+    ))
+    .unwrap();
+
+    let endpoint_key = topology.endpoint_key(&endpoint("route-a-b")).unwrap();
+    let compiled = topology.endpoint(endpoint_key);
+    assert_eq!(compiled.id, endpoint("route-a-b"));
+    assert_eq!(topology.federate_id(compiled.source), &fed("a"));
+    assert_eq!(topology.federate_id(compiled.target), &fed("b"));
+    assert_eq!(compiled.delay, WireDelay::ZERO);
+    assert!(topology.contains_route(&fed("a"), &fed("b"), &endpoint("route-a-b")));
+    assert!(!topology.contains_route(&fed("b"), &fed("a"), &endpoint("route-a-b")));
+    assert!(!topology.contains_route(&fed("a"), &fed("c"), &endpoint("route-a-b")));
 }
 
 #[test]

@@ -5,41 +5,51 @@ use crate::protocol::{
     TopologyEdge, WireDelay, WireTag,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct RouteKey {
-    source: FederateId,
-    target: FederateId,
-    endpoint: EndpointId,
-}
+mod index;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct IncomingDependency {
-    source: FederateId,
-    endpoint: EndpointId,
-    delay: WireDelay,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct IncomingPath {
-    source: FederateId,
-    delay: WireDelay,
-}
+use index::{
+    CompiledEndpoint, CompiledFederate, EndpointKey, FederateKey, IncomingDependency, IncomingPath,
+};
 
 /// Validated static RTI topology with deterministic coordination indexes.
 ///
 /// Construct this once when lowering or loading a federation manifest, then reuse it for each RTI
 /// state instantiated from that manifest.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct CompiledTopology {
     original: FederatedTopology,
-    incoming: BTreeMap<FederateId, Vec<IncomingDependency>>,
-    downstream: BTreeMap<FederateId, Vec<FederateId>>,
-    transitive_incoming: BTreeMap<FederateId, Vec<IncomingPath>>,
-    transitive_downstream: BTreeMap<FederateId, Vec<FederateId>>,
-    minimum_delays: BTreeMap<(FederateId, FederateId), WireDelay>,
-    routes: BTreeSet<RouteKey>,
-    neighbor_structures: BTreeMap<FederateId, NeighborStructure>,
+    federates: tinymap::TinyMap<FederateKey, CompiledFederate>,
+    federate_keys: BTreeMap<FederateId, FederateKey>,
+    endpoints: tinymap::TinyMap<EndpointKey, CompiledEndpoint>,
+    endpoint_keys: BTreeMap<EndpointId, EndpointKey>,
+    minimum_delays: BTreeMap<(FederateKey, FederateKey), WireDelay>,
 }
+
+impl Clone for CompiledTopology {
+    fn clone(&self) -> Self {
+        Self {
+            original: self.original.clone(),
+            federates: self.federates.values().cloned().collect(),
+            federate_keys: self.federate_keys.clone(),
+            endpoints: self.endpoints.values().cloned().collect(),
+            endpoint_keys: self.endpoint_keys.clone(),
+            minimum_delays: self.minimum_delays.clone(),
+        }
+    }
+}
+
+impl PartialEq for CompiledTopology {
+    fn eq(&self, other: &Self) -> bool {
+        self.original == other.original
+            && self.federates.values().eq(other.federates.values())
+            && self.federate_keys == other.federate_keys
+            && self.endpoints.values().eq(other.endpoints.values())
+            && self.endpoint_keys == other.endpoint_keys
+            && self.minimum_delays == other.minimum_delays
+    }
+}
+
+impl Eq for CompiledTopology {}
 
 impl CompiledTopology {
     pub fn new(topology: FederatedTopology) -> Result<Self, RtiError> {
@@ -50,33 +60,7 @@ impl CompiledTopology {
             }
         }
 
-        let mut incoming = members
-            .iter()
-            .cloned()
-            .map(|federate_id| (federate_id, Vec::new()))
-            .collect::<BTreeMap<_, _>>();
-        let mut downstream_sets = members
-            .iter()
-            .cloned()
-            .map(|federate_id| (federate_id, BTreeSet::new()))
-            .collect::<BTreeMap<_, _>>();
-        let mut routes = BTreeSet::new();
         let mut endpoint_routes = BTreeMap::<EndpointId, TopologyEdge>::new();
-        let mut minimum_delays = BTreeMap::<(FederateId, FederateId), WireDelay>::new();
-        let mut neighbor_structures = members
-            .iter()
-            .cloned()
-            .map(|federate_id| {
-                (
-                    federate_id.clone(),
-                    NeighborStructure {
-                        federate_id,
-                        upstream: Vec::new(),
-                        downstream: Vec::new(),
-                    },
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
 
         for edge in &topology.edges {
             if !members.contains(&edge.source) {
@@ -111,54 +95,63 @@ impl CompiledTopology {
                 });
             }
             endpoint_routes.insert(edge.endpoint.clone(), edge.clone());
+        }
 
-            routes.insert(RouteKey {
-                source: edge.source.clone(),
-                target: edge.target.clone(),
-                endpoint: edge.endpoint.clone(),
+        let mut federates = tinymap::TinyMap::with_capacity(members.len());
+        let mut federate_keys = BTreeMap::new();
+        for federate_id in members {
+            let key = federates.insert(CompiledFederate {
+                id: federate_id.clone(),
+                incoming: Vec::new(),
+                downstream: Vec::new(),
+                transitive_incoming: Vec::new(),
+                transitive_downstream: Vec::new(),
+                neighbors: NeighborStructure {
+                    federate_id: federate_id.clone(),
+                    upstream: Vec::new(),
+                    downstream: Vec::new(),
+                },
             });
-            incoming
-                .get_mut(&edge.target)
-                .expect("validated topology target must have an incoming index")
-                .push(IncomingDependency {
-                    source: edge.source.clone(),
-                    endpoint: edge.endpoint.clone(),
-                    delay: edge.delay,
-                });
-            downstream_sets
-                .get_mut(&edge.source)
-                .expect("validated topology source must have a downstream index")
-                .insert(edge.target.clone());
+            federate_keys.insert(federate_id, key);
+        }
+
+        let mut endpoints = tinymap::TinyMap::with_capacity(endpoint_routes.len());
+        let mut endpoint_keys = BTreeMap::new();
+        let mut minimum_delays = BTreeMap::<(FederateKey, FederateKey), WireDelay>::new();
+        for (endpoint_id, edge) in endpoint_routes {
+            let source = federate_keys[&edge.source];
+            let target = federate_keys[&edge.target];
+            let endpoint = endpoints.insert(CompiledEndpoint {
+                id: endpoint_id.clone(),
+                source,
+                target,
+                delay: edge.delay,
+            });
+            endpoint_keys.insert(endpoint_id, endpoint);
+
+            federates[target].incoming.push(IncomingDependency {
+                source,
+                endpoint,
+                delay: edge.delay,
+            });
+            federates[source].downstream.push(target);
             minimum_delays
-                .entry((edge.source.clone(), edge.target.clone()))
+                .entry((source, target))
                 .and_modify(|delay| *delay = (*delay).min(edge.delay))
                 .or_insert(edge.delay);
-            neighbor_structures
-                .get_mut(&edge.target)
-                .expect("validated topology target must have a neighbor view")
-                .upstream
-                .push(edge.clone());
-            neighbor_structures
-                .get_mut(&edge.source)
-                .expect("validated topology source must have a neighbor view")
-                .downstream
-                .push(edge.clone());
+            federates[target].neighbors.upstream.push(edge.clone());
+            federates[source].neighbors.downstream.push(edge);
         }
 
-        for neighbors in neighbor_structures.values_mut() {
-            neighbors.upstream.sort();
-            neighbors.downstream.sort();
+        for federate in federates.values_mut() {
+            federate.incoming.sort();
+            federate.downstream.sort();
+            federate.downstream.dedup();
+            federate.neighbors.upstream.sort();
+            federate.neighbors.downstream.sort();
         }
 
-        for dependencies in incoming.values_mut() {
-            dependencies.sort();
-        }
-        let downstream = downstream_sets
-            .into_iter()
-            .map(|(source, targets)| (source, targets.into_iter().collect()))
-            .collect::<BTreeMap<_, _>>();
-
-        for _ in 0..members.len() {
+        for _ in 0..federates.len() {
             let paths = minimum_delays
                 .iter()
                 .map(|((source, target), delay)| (source.clone(), target.clone(), *delay))
@@ -175,14 +168,14 @@ impl CompiledTopology {
                             .as_nanos()
                             .checked_add(second.as_nanos())
                             .ok_or_else(|| RtiError::PathDelayOverflow {
-                                path_source: source.clone(),
-                                intermediate: intermediate.clone(),
-                                target: target.clone(),
+                                path_source: federates[*source].id.clone(),
+                                intermediate: federates[*intermediate].id.clone(),
+                                target: federates[*target].id.clone(),
                                 first_delay_ns: first.as_nanos(),
                                 second_delay_ns: second.as_nanos(),
                             })?;
                     let candidate = WireDelay::from_nanos(nanos);
-                    let key = (source.clone(), target.clone());
+                    let key = (*source, *target);
                     let current = updates
                         .get(&key)
                         .copied()
@@ -199,43 +192,21 @@ impl CompiledTopology {
             minimum_delays.extend(updates);
         }
 
-        let mut transitive_incoming = members
-            .iter()
-            .cloned()
-            .map(|federate_id| (federate_id, Vec::new()))
-            .collect::<BTreeMap<_, _>>();
-        let mut transitive_downstream_sets = members
-            .iter()
-            .cloned()
-            .map(|federate_id| (federate_id, BTreeSet::new()))
-            .collect::<BTreeMap<_, _>>();
         for ((source, target), delay) in &minimum_delays {
-            transitive_incoming
-                .get_mut(target)
-                .expect("minimum-delay target must be a topology member")
-                .push(IncomingPath {
-                    source: source.clone(),
-                    delay: *delay,
-                });
-            transitive_downstream_sets
-                .get_mut(source)
-                .expect("minimum-delay source must be a topology member")
-                .insert(target.clone());
+            federates[*target].transitive_incoming.push(IncomingPath {
+                source: *source,
+                delay: *delay,
+            });
+            federates[*source].transitive_downstream.push(*target);
         }
-        let transitive_downstream = transitive_downstream_sets
-            .into_iter()
-            .map(|(source, targets)| (source, targets.into_iter().collect()))
-            .collect();
 
         Ok(Self {
             original: topology,
-            incoming,
-            downstream,
-            transitive_incoming,
-            transitive_downstream,
+            federates,
+            federate_keys,
+            endpoints,
+            endpoint_keys,
             minimum_delays,
-            routes,
-            neighbor_structures,
         })
     }
 
@@ -243,37 +214,65 @@ impl CompiledTopology {
         &self.original
     }
 
+    pub(crate) fn federate_key(&self, id: &FederateId) -> Option<FederateKey> {
+        self.federate_keys.get(id).copied()
+    }
+
+    pub(crate) fn federate_id(&self, key: FederateKey) -> &FederateId {
+        &self.federates[key].id
+    }
+
+    pub(crate) fn federates(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (FederateKey, &CompiledFederate)> {
+        (0..self.federates.len()).map(|index| {
+            let key = FederateKey::from(index);
+            (key, &self.federates[key])
+        })
+    }
+
+    pub(crate) fn endpoint_key(&self, id: &EndpointId) -> Option<EndpointKey> {
+        self.endpoint_keys.get(id).copied()
+    }
+
+    pub(crate) fn endpoint(&self, key: EndpointKey) -> &CompiledEndpoint {
+        &self.endpoints[key]
+    }
+
     /// Return the precomputed incoming and outgoing edge view for one federate.
     pub fn neighbors_for(&self, federate_id: &FederateId) -> Option<&NeighborStructure> {
-        self.neighbor_structures.get(federate_id)
+        self.federate_key(federate_id)
+            .map(|key| &self.federates[key].neighbors)
     }
 
     fn incoming(&self, target: &FederateId) -> &[IncomingDependency] {
-        self.incoming.get(target).map_or(&[], Vec::as_slice)
+        self.federate_key(target)
+            .map_or(&[], |key| self.federates[key].incoming.as_slice())
     }
 
     #[cfg(test)]
-    fn downstream(&self, source: &FederateId) -> &[FederateId] {
-        self.downstream.get(source).map_or(&[], Vec::as_slice)
+    fn downstream(&self, source: &FederateId) -> &[FederateKey] {
+        self.federate_key(source)
+            .map_or(&[], |key| self.federates[key].downstream.as_slice())
     }
 
     fn transitive_incoming(&self, target: &FederateId) -> &[IncomingPath] {
-        self.transitive_incoming
-            .get(target)
-            .map_or(&[], Vec::as_slice)
+        self.federate_key(target).map_or(&[], |key| {
+            self.federates[key].transitive_incoming.as_slice()
+        })
     }
 
-    fn transitive_downstream(&self, source: &FederateId) -> &[FederateId] {
-        self.transitive_downstream
-            .get(source)
-            .map_or(&[], Vec::as_slice)
+    fn transitive_downstream(&self, source: &FederateId) -> &[FederateKey] {
+        self.federate_key(source).map_or(&[], |key| {
+            self.federates[key].transitive_downstream.as_slice()
+        })
     }
 
     #[cfg(test)]
     fn minimum_delay(&self, source: &FederateId, target: &FederateId) -> Option<WireDelay> {
-        self.minimum_delays
-            .get(&(source.clone(), target.clone()))
-            .copied()
+        let source = self.federate_key(source)?;
+        let target = self.federate_key(target)?;
+        self.minimum_delays.get(&(source, target)).copied()
     }
 
     fn contains_route(
@@ -282,11 +281,17 @@ impl CompiledTopology {
         target: &FederateId,
         endpoint: &EndpointId,
     ) -> bool {
-        self.routes.contains(&RouteKey {
-            source: source.clone(),
-            target: target.clone(),
-            endpoint: endpoint.clone(),
-        })
+        let Some(source) = self.federate_key(source) else {
+            return false;
+        };
+        let Some(target) = self.federate_key(target) else {
+            return false;
+        };
+        let Some(endpoint) = self.endpoint_key(endpoint) else {
+            return false;
+        };
+        let endpoint = self.endpoint(endpoint);
+        endpoint.source == source && endpoint.target == target
     }
 }
 
@@ -517,11 +522,8 @@ impl RtiState {
 
     pub fn from_compiled(topology: CompiledTopology) -> Self {
         let federates = topology
-            .original
-            .federates
-            .iter()
-            .cloned()
-            .map(|federate_id| (federate_id, FederateCoordination::default()))
+            .federates()
+            .map(|(_, federate)| (federate.id.clone(), FederateCoordination::default()))
             .collect();
 
         Self {
@@ -612,7 +614,12 @@ impl RtiState {
             FederateToRti::Stop { federate_id } => {
                 let mut staged = self.coordination(&federate_id)?.clone();
                 staged.stop();
-                let affected = self.topology.transitive_downstream(&federate_id).to_vec();
+                let affected = self
+                    .topology
+                    .transitive_downstream(&federate_id)
+                    .iter()
+                    .map(|key| self.topology.federate_id(*key).clone())
+                    .collect::<Vec<_>>();
                 let grants = self.evaluate_grants(&affected, Some((&federate_id, &staged)))?;
                 Ok(self.commit_transition(federate_id, staged, grants))
             }
@@ -831,8 +838,8 @@ impl RtiState {
         let mut earliest = None;
 
         for dependency in self.topology.transitive_incoming(federate_id) {
-            let upstream_state =
-                self.coordination_with_override(&dependency.source, override_state)?;
+            let source = self.topology.federate_id(dependency.source);
+            let upstream_state = self.coordination_with_override(source, override_state)?;
             let candidate =
                 apply_edge_delay(upstream_state.effective_next_event(), dependency.delay)?;
 
@@ -904,8 +911,8 @@ impl RtiState {
         let last_granted = state.last_granted.unwrap_or(WireTag::NEVER);
         let mut minimum_upstream_completed = WireTag::FOREVER;
         for dependency in self.topology.incoming(federate_id) {
-            let upstream_state =
-                self.coordination_with_override(&dependency.source, override_state)?;
+            let source = self.topology.federate_id(dependency.source);
+            let upstream_state = self.coordination_with_override(source, override_state)?;
             if upstream_state.is_stopped() {
                 continue;
             }
@@ -948,24 +955,32 @@ impl RtiState {
 
     fn net_affected_federates(&self, source: &FederateId) -> Vec<FederateId> {
         let mut affected = vec![source.clone()];
+        let source_key = self
+            .topology
+            .federate_key(source)
+            .expect("validated event source must be a topology member");
         affected.extend(
             self.topology
                 .transitive_downstream(source)
                 .iter()
-                .filter(|target| *target != source)
-                .cloned(),
+                .filter(|target| **target != source_key)
+                .map(|target| self.topology.federate_id(*target).clone()),
         );
         affected
     }
 
     fn ltc_affected_federates(&self, source: &FederateId) -> Vec<FederateId> {
         let mut affected = vec![source.clone()];
+        let source_key = self
+            .topology
+            .federate_key(source)
+            .expect("validated event source must be a topology member");
         affected.extend(
             self.topology
                 .transitive_downstream(source)
                 .iter()
-                .filter(|target| *target != source)
-                .cloned(),
+                .filter(|target| **target != source_key)
+                .map(|target| self.topology.federate_id(*target).clone()),
         );
         affected
     }

@@ -245,6 +245,7 @@ impl FederatedRuntimeConnections {
 
     pub fn outbound_endpoint(
         &self,
+        target_federate: &FederateId,
         endpoint: &crate::EndpointId,
     ) -> Result<
         (
@@ -253,10 +254,13 @@ impl FederatedRuntimeConnections {
         ),
         FederateClientError,
     > {
-        let route = self
+        let target = self
             .federates
-            .values()
-            .find_map(|connection| connection.routes.get(endpoint))
+            .get(target_federate)
+            .ok_or_else(|| FederateClientError::UnknownRoute(endpoint.clone()))?;
+        let route = target
+            .routes
+            .get(endpoint)
             .ok_or_else(|| FederateClientError::UnknownRoute(endpoint.clone()))?;
         let source = self
             .federates
@@ -453,6 +457,48 @@ mod tests {
     }
 
     #[test]
+    fn outbound_endpoint_uses_declared_target_route() {
+        let source = FederateId::new("source");
+        let target = FederateId::new("target");
+        let other = FederateId::new("other");
+        let endpoint = crate::EndpointId::new("source/out->target/in");
+        let other_endpoint = crate::EndpointId::new("source/out->other/in");
+        let mut connections = FederatedRuntimeConnections::new(
+            [source.clone(), target.clone(), other.clone()],
+            [
+                FederateClientRoute::new(endpoint.clone(), source.clone(), target.clone()),
+                FederateClientRoute::new(other_endpoint, source.clone(), other.clone()),
+            ],
+        )
+        .unwrap();
+
+        let (sink, _) = connections.outbound_endpoint(&target, &endpoint).unwrap();
+        sink.send(crate::FederatedOutboundCommand::Msg(
+            crate::FederatedOutboundMessage {
+                tag: boomerang_runtime::Tag::new(boomerang_runtime::Duration::nanoseconds(5), 2),
+                payload: b"payload".to_vec(),
+            },
+        ))
+        .unwrap();
+
+        let mut mailbox = connections.take_mailbox(&source).unwrap();
+        assert_eq!(
+            mailbox.try_recv().unwrap(),
+            Some(FederateToRti::Msg {
+                source: source.clone(),
+                target: target.clone(),
+                endpoint: endpoint.clone(),
+                tag: WireTag::finite(5, 2),
+                payload: b"payload".to_vec(),
+            })
+        );
+        assert!(matches!(
+            connections.outbound_endpoint(&other, &endpoint),
+            Err(FederateClientError::UnknownRoute(unknown)) if unknown == endpoint
+        ));
+    }
+
+    #[test]
     fn prebuilt_outbound_sink_emits_exact_protocol_message() {
         let source = FederateId::new("source");
         let target = FederateId::new("target");
@@ -460,7 +506,7 @@ mod tests {
         let route = FederateClientRoute::new(endpoint.clone(), source.clone(), target.clone());
         let mut connections =
             FederatedRuntimeConnections::new([source.clone(), target.clone()], [route]).unwrap();
-        let (sink, _) = connections.outbound_endpoint(&endpoint).unwrap();
+        let (sink, _) = connections.outbound_endpoint(&target, &endpoint).unwrap();
 
         sink.send(crate::FederatedOutboundCommand::Msg(
             crate::FederatedOutboundMessage {
@@ -492,7 +538,7 @@ mod tests {
         let route = FederateClientRoute::new(endpoint.clone(), source.clone(), target.clone());
         let mut connections =
             FederatedRuntimeConnections::new([source.clone(), target.clone()], [route]).unwrap();
-        let (sink, _) = connections.outbound_endpoint(&endpoint).unwrap();
+        let (sink, _) = connections.outbound_endpoint(&target, &endpoint).unwrap();
         let progress = connections
             .federates
             .get(&source)

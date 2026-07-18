@@ -324,6 +324,7 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> ErasedConnectionSpec for Con
                     )));
                 }
                 let endpoint = boundary.endpoint;
+                let target_federate = boundary.target_federate;
 
                 let target_parent_reactor_key =
                     assembly.reactor_specs[target_reactor_key].parent_reactor_key();
@@ -346,7 +347,7 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> ErasedConnectionSpec for Con
                 lowering.add_federated_inbound_endpoint::<T>(
                     endpoint.clone(),
                     target_partition,
-                    boundary.target_federate,
+                    target_federate.clone(),
                     action_key.into(),
                     decoder,
                 );
@@ -361,7 +362,11 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> ErasedConnectionSpec for Con
                     source_parent_reactor_key,
                     self.scope_mode,
                     action_key.into(),
-                    InterPartitionSourceBackend::Serialized { endpoint, encoder },
+                    InterPartitionSourceBackend::Serialized {
+                        target_federate,
+                        endpoint,
+                        encoder,
+                    },
                 )?;
                 partition_map.insert(reactor_key, source_partition);
                 lowering
@@ -467,6 +472,7 @@ enum InterPartitionSourceBackend<T: runtime::ReactorData> {
     InProcess(std::marker::PhantomData<fn() -> T>),
     #[cfg(feature = "federated")]
     Serialized {
+        target_federate: boomerang_federated::FederateId,
         endpoint: boomerang_federated::EndpointId,
         encoder: Box<dyn boomerang_federated::PayloadEncoder<T>>,
     },
@@ -513,13 +519,17 @@ fn build_inter_partition_connection_source<T: runtime::ReactorData + Clone>(
                     ))
                 }
                 #[cfg(feature = "federated")]
-                InterPartitionSourceBackend::Serialized { endpoint, encoder } => {
+                InterPartitionSourceBackend::Serialized {
+                    target_federate,
+                    endpoint,
+                    encoder,
+                } => {
                     let (outbound, faults) = runtime_assembly
                         .federation
                         .as_ref()
                         .expect("serialized sender exists only in a lowered federation")
                         .connections()
-                        .outbound_endpoint(&endpoint)
+                        .outbound_endpoint(&target_federate, &endpoint)
                         .expect("serialized endpoint sink was validated before deferred lowering");
                     Box::new(boomerang_federated::SerializedInterPartitionEventSink::new(
                         encoder, outbound, faults,

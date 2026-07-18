@@ -124,7 +124,9 @@ async fn bridge_sends_net_outbound_msg_and_ltc_frames() {
 
     let mut connections =
         crate::FederatedRuntimeConnections::new([fed("source"), fed("sink")], [route()]).unwrap();
-    let (outbound, _) = connections.outbound_endpoint(&endpoint()).unwrap();
+    let (outbound, _) = connections
+        .outbound_endpoint(&fed("sink"), &endpoint())
+        .unwrap();
     let mailbox = connections.take_mailbox(&fed("source")).unwrap();
     let (client, rti) = connect_client_with_fake_rti_and_mailbox(
         fed("source"),

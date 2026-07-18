@@ -122,6 +122,19 @@ serialized messages enter that Federate's FIFO mailbox before logical-time compl
 reported. Incoming messages select a stable endpoint route, decode the payload, and schedule the
 target action in the correct owned Enclave.
 
+`FederateId` and `EndpointId` remain stable strings at builder, manifest,
+transport, tracing, error, and protocol boundaries. `CompiledTopology` resolves
+them into crate-private `FederateKey` and `EndpointKey` values allocated in
+lexical stable-ID order. Immutable Federate and endpoint records are owned by
+dense maps, while mutable RTI coordination is attached with a dense secondary
+map. Grant work sets, dependency paths, route validation, and cached session
+participants use those process-local keys; deliveries and diagnostics translate
+back to stable IDs. Dense keys are not public API and never appear on the wire.
+
+Serialized outbound lowering also retains the already-known target
+`FederateId`. Deferred sender construction selects that target's route table and
+then its `EndpointId` directly, rather than scanning every Federate's routes.
+
 ## Ownership map
 
 - `boomerang_runtime` owns protocol-neutral Enclave types, dense maps, schedulers, local

@@ -153,7 +153,7 @@ impl CompiledTopology {
         for _ in 0..federates.len() {
             let paths = minimum_delays
                 .iter()
-                .map(|((source, target), delay)| (source.clone(), target.clone(), *delay))
+                .map(|((source, target), delay)| (*source, *target, *delay))
                 .collect::<Vec<_>>();
             let mut updates = BTreeMap::new();
 

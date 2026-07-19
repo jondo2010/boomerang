@@ -14,12 +14,13 @@ use std::collections::BTreeMap;
 #[cfg(feature = "federated")]
 use crate::federated::{lower_federation, FederatedBoundaryIndex, FederationLoweringArtifacts};
 use crate::{
-    connection::PortBindings, ActionType, AssemblyActionKey, AssemblyError, AssemblyModeKey,
-    AssemblyPortKey, AssemblyReactionKey, AssemblyReactorKey, ParentReactorSpec, PartitionAnalysis,
+    connection::{ConnectionLoweringArtifacts, PortBindings},
+    ActionType, AssemblyActionKey, AssemblyError, AssemblyModeKey, AssemblyPortKey,
+    AssemblyReactionKey, AssemblyReactorKey, ParentReactorSpec, PartitionAnalysis,
     PartitionBoundary, ReactionDeclaration, TimerActionKey,
 };
 
-use super::{Assembly, ConnectionLoweringArtifacts};
+use super::Assembly;
 #[cfg(feature = "federated")]
 use crate::federated::FederatedInboundEndpointFactory;
 
@@ -735,11 +736,9 @@ impl Assembly {
         #[cfg(feature = "federated")] federated_boundaries: FederatedBoundaryIndex,
     ) -> Result<ConnectionLoweringArtifacts, AssemblyError> {
         let mut lowering = ConnectionLoweringArtifacts {
-            port_bindings: PortBindings::default(),
-            #[cfg(feature = "federated")]
-            federated_inbound_endpoint_factories: Vec::new(),
             #[cfg(feature = "federated")]
             federated_boundaries,
+            ..Default::default()
         };
         for connection in std::mem::take(&mut self.connection_specs).iter_mut() {
             connection.build(self, partition_map, &mut lowering)?;

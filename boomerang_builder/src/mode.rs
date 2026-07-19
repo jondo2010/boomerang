@@ -1,8 +1,8 @@
 use variadics_please::all_tuples;
 
 use crate::{
-    runtime, ActionTag, PortBank, PortTag, RuntimeAliases, TimerActionKey, TypedActionKey,
-    TypedPortKey,
+    runtime, ActionTag, AssemblyReactorKey, PortBank, PortTag, RuntimeAliases, TimerActionKey,
+    TypedActionKey, TypedPortKey,
 };
 
 slotmap::new_key_type! {
@@ -32,8 +32,19 @@ impl From<bool> for ModeKind {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+/// Build-time mode declaration owned by an assembly reactor.
+#[derive(Debug)]
+pub struct ModeSpec {
+    /// User-facing mode name.
+    pub name: String,
+    /// Reactor that owns the mode.
+    pub reactor_key: AssemblyReactorKey,
+    /// Whether the mode is initially active or normal.
+    pub kind: ModeKind,
+}
+
 /// Build-time description of a mode transition effect.
+#[derive(Clone, Copy, Debug)]
 pub struct ModeEffectSpec {
     /// Assembly mode targeted by the transition.
     target: AssemblyModeKey,

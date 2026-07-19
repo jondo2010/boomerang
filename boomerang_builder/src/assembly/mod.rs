@@ -9,13 +9,11 @@
 //! a local dense Enclave map or a [`boomerang_federated::RuntimeFederation`] containing compiled
 //! RTI topology and one owned Enclave map and protocol bridge per Federate.
 
-#[cfg(feature = "federated")]
-use crate::federated::FederatedBoundaryIndex;
 use crate::{
     connection::{ConnectionSpec, ErasedConnectionSpec, PortBindings},
     port::Contained,
-    ActionTag, Fqn, FqnSegment, ParentReactorSpec, Physical, PortType, TimerActionKey, TimerSpec,
-    TriggerMode,
+    ActionTag, Fqn, FqnSegment, ModeSpec, ParentReactorSpec, Physical, PortType, TimerActionKey,
+    TimerSpec, TriggerMode,
 };
 
 use super::{
@@ -76,31 +74,6 @@ mod util {
 
 #[cfg(feature = "replay")]
 type ReplayFunctionFactory = dyn FnOnce(&RuntimeAliases) -> Box<dyn runtime::replay::ReplayFn>;
-
-/// Transient state produced while connection specifications are lowered.
-#[derive(Default)]
-pub(super) struct ConnectionLoweringArtifacts {
-    /// Direct and synthetic port bindings produced by connection lowering.
-    pub(super) port_bindings: PortBindings,
-    #[cfg(feature = "federated")]
-    /// Deferred factories for inbound federated runtime endpoints.
-    pub(super) federated_inbound_endpoint_factories:
-        Vec<Box<crate::federated::FederatedInboundEndpointFactory>>,
-    #[cfg(feature = "federated")]
-    /// Federated boundaries not yet consumed by connection lowering.
-    pub(super) federated_boundaries: FederatedBoundaryIndex,
-}
-
-#[derive(Debug)]
-/// Build-time mode declaration owned by an assembly reactor.
-pub struct ModeSpec {
-    /// User-facing mode name.
-    pub name: String,
-    /// Reactor that owns the mode.
-    pub reactor_key: AssemblyReactorKey,
-    /// Whether the mode is initially active or normal.
-    pub kind: ModeKind,
-}
 
 #[derive(Default)]
 pub struct Assembly {

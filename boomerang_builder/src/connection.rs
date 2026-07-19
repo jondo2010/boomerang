@@ -11,10 +11,12 @@ use std::collections::{BTreeSet, HashMap};
 
 use slotmap::SecondaryMap;
 
+#[cfg(feature = "federated")]
+use crate::federated;
 use crate::{
-    assembly::ConnectionLoweringArtifacts, runtime, ActionTag, Assembly, AssemblyActionKey,
-    AssemblyError, AssemblyModeKey, AssemblyPortKey, AssemblyReactorKey, Input, Output,
-    ParentReactorSpec, PartitionMap, PortType, TriggerMode, TypedActionKey, TypedPortKey,
+    runtime, ActionTag, Assembly, AssemblyActionKey, AssemblyError, AssemblyModeKey,
+    AssemblyPortKey, AssemblyReactorKey, Input, Output, ParentReactorSpec, PartitionMap, PortType,
+    TriggerMode, TypedActionKey, TypedPortKey,
 };
 
 /// The resolved, directed port-to-port edges in an assembled reactor graph.
@@ -204,6 +206,20 @@ impl PortBindings {
             .into_iter()
             .flat_map(|set| set.iter().cloned())
     }
+}
+
+/// Transient state produced while connection specifications are lowered.
+#[derive(Default)]
+pub(super) struct ConnectionLoweringArtifacts {
+    /// Direct and synthetic port bindings produced by connection lowering.
+    pub(super) port_bindings: PortBindings,
+    #[cfg(feature = "federated")]
+    /// Deferred factories for inbound federated runtime endpoints.
+    pub(super) federated_inbound_endpoint_factories:
+        Vec<Box<federated::FederatedInboundEndpointFactory>>,
+    #[cfg(feature = "federated")]
+    /// Federated boundaries not yet consumed by connection lowering.
+    pub(super) federated_boundaries: federated::FederatedBoundaryIndex,
 }
 
 pub trait ErasedConnectionSpec {

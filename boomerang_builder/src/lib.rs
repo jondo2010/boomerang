@@ -27,7 +27,7 @@ pub use action::*;
 pub use assembly::*;
 pub use fqn::*;
 pub(crate) use inter_partition::*;
-pub use mode::{AssemblyModeKey, ModeEffectSpec, ModeKind, ResolveModeEffects};
+pub use mode::{AssemblyModeKey, ModeEffectSpec, ModeKind, ModeSpec, ResolveModeEffects};
 pub use port::{
     AssemblyPortKey, Contained, Input, Local, Output, PortBank, PortSpec, PortTag, PortType,
     TypedPortKey,

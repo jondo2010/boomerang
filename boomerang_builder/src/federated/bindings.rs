@@ -1,8 +1,8 @@
 //! Deferred inbound endpoint bindings resolved after runtime aliases exist.
 
 use crate::{
-    assembly::{ConnectionLoweringArtifacts, RuntimeAssemblyContext},
-    runtime, AssemblyActionKey, AssemblyError, AssemblyReactorKey,
+    assembly::RuntimeAssemblyContext, connection::ConnectionLoweringArtifacts, runtime,
+    AssemblyActionKey, AssemblyError, AssemblyReactorKey,
 };
 
 pub(crate) type FederatedInboundEndpointFactory = dyn FnOnce(

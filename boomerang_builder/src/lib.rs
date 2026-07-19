@@ -8,9 +8,10 @@ mod action;
 mod assembly;
 mod connection;
 #[cfg(feature = "federated")]
-mod federation;
+mod federated;
 mod fqn;
 mod inter_partition;
+mod mode;
 mod port;
 mod reaction;
 mod reactor;
@@ -24,10 +25,9 @@ pub mod plantuml;
 
 pub use action::*;
 pub use assembly::*;
-#[cfg(feature = "federated")]
-pub use federation::*;
 pub use fqn::*;
-pub use inter_partition::*;
+pub(crate) use inter_partition::*;
+pub use mode::{AssemblyModeKey, ModeEffectSpec, ModeKind, ResolveModeEffects};
 pub use port::{
     AssemblyPortKey, Contained, Input, Local, Output, PortBank, PortSpec, PortTag, PortType,
     TypedPortKey,
@@ -117,10 +117,6 @@ pub enum AssemblyError {
     #[error("Invalid federation topology: {0}")]
     FederationTopology(#[from] boomerang_federated::RtiError),
 
-    #[cfg(feature = "federated")]
-    #[error("Invalid federate placement: {0}")]
-    FederatePlacement(#[from] boomerang_federated::FederatePlacementError),
-
     #[error("Error declaring Reaction: {0}")]
     ReactionDeclarationError(String),
 
@@ -155,6 +151,15 @@ impl From<boomerang_federated::RuntimeBridgeError> for AssemblyError {
 #[cfg(feature = "federated")]
 impl From<boomerang_federated::FederateClientError> for AssemblyError {
     fn from(error: boomerang_federated::FederateClientError) -> Self {
+        Self::FederationBridgeError {
+            what: error.to_string(),
+        }
+    }
+}
+
+#[cfg(feature = "federated")]
+impl From<boomerang_federated::RuntimeFederationError> for AssemblyError {
+    fn from(error: boomerang_federated::RuntimeFederationError) -> Self {
         Self::FederationBridgeError {
             what: error.to_string(),
         }

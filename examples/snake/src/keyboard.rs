@@ -56,13 +56,17 @@ fn main() {
 
     let mut assembly = Assembly::new();
     let _ = example::Example()
-        .build("printer", (), None, None, None, false, &mut assembly)
+        .build("printer", (), None, None, None, false.into(), &mut assembly)
         .unwrap();
 
     let config = runtime::Config::default()
         .with_fast_forward(false)
         .with_keep_alive(true);
-    let RuntimeAssembly { enclaves, .. } = assembly.into_runtime_assembly(&config).unwrap();
+    let enclaves = assembly
+        .into_runtime_assembly(&config)
+        .unwrap()
+        .into_local()
+        .unwrap();
 
     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
     let mut sched = runtime::Scheduler::new(enclave_key, enclave, config);

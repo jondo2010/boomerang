@@ -7,10 +7,9 @@ pub use ::time::Duration;
 
 pub mod action;
 mod context;
+pub mod enclave;
 mod env;
 mod event;
-#[cfg(feature = "federated")]
-mod federated;
 pub mod keepalive;
 mod key_set;
 pub mod port;
@@ -30,27 +29,19 @@ pub use action::{
 };
 pub use context::*;
 use downcast_rs::Downcast;
+pub use enclave::{crosslink_enclaves, DownstreamRef, Enclave, EnclaveKey, UpstreamRef};
 pub use env::{
-    crosslink_enclaves, BankInfo, Enclave, EnclaveKey, Env, Level, LevelReactionKey,
-    LifecycleReaction, ModalScheduleIndex, Mode, ModeFilter, ModeKey, ReactionGraph, ScopeInfo,
-    ScopeKey, TransitionKind,
+    BankInfo, Env, Level, LevelReactionKey, LifecycleReaction, ModalScheduleIndex, Mode,
+    ModeFilter, ModeKey, ReactionGraph, ScopeInfo, ScopeKey, TransitionKind,
 };
-#[cfg(feature = "federated")]
 pub use event::AsyncEvent;
-#[cfg(feature = "federated")]
-pub use federated::{
-    FederatedEndpointError, FederatedFaultState, FederatedInboundEndpoint,
-    FederatedOutboundCommand, FederatedOutboundMessage, FederatedOutboundSink,
-    FederatedPayloadDecoder, FederatedPayloadEncoder,
-};
 pub use kanal::{Receiver, Sender};
 pub use key_set::KeySetLimits as ReactionSetLimits;
 pub use port::{DynPortRef, DynPortRefMut, *};
-#[cfg(feature = "federated")]
-pub use reaction::FederatedSenderReactionFn;
 pub use reaction::{
-    BoxedReactionFn, ConnectionReceiverReactionFn, ConnectionSenderReactionFn, Deadline,
-    EnclaveSenderReactionFn, FromRefs, Reaction, ReactionFn, ReactionKey, ReactionSet,
+    BoxedReactionFn, ConnectionReceiverReactionFn, ConnectionSenderReactionFn, Deadline, FromRefs,
+    InProcessInterPartitionEventSink, InterPartitionEventSink, InterPartitionEventTime,
+    InterPartitionSenderReactionFn, Reaction, ReactionFn, ReactionKey, ReactionSet,
 };
 pub use reactor::*;
 pub use refs::{Refs, RefsMut};
@@ -89,9 +80,8 @@ pub enum RuntimeError {
     #[error(transparent)]
     ReplayError(#[from] replay::ReplayError),
 
-    #[cfg(feature = "federated")]
     #[error(transparent)]
-    FederatedBarrier(#[from] FederatedBarrierError),
+    Coordination(#[from] CoordinationError),
 }
 
 pub mod fmt_utils {

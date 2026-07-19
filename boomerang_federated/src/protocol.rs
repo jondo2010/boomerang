@@ -393,4 +393,26 @@ mod tests {
             assert_eq!(decoded, tag);
         }
     }
+
+    #[cfg(feature = "serde-json-codec")]
+    #[test]
+    fn stable_protocol_identities_round_trip_without_dense_keys() {
+        let message = FederateToRti::Msg {
+            source: FederateId::new("plant/controller-A"),
+            target: FederateId::new("actuator/controller-B"),
+            endpoint: EndpointId::new("plant.output->actuator.input"),
+            tag: WireTag::finite(42, 7),
+            payload: vec![1, 2, 3],
+        };
+
+        let encoded = serde_json::to_string(&message).unwrap();
+        let decoded: FederateToRti = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded, message);
+        assert!(encoded.contains("plant/controller-A"));
+        assert!(encoded.contains("actuator/controller-B"));
+        assert!(encoded.contains("plant.output->actuator.input"));
+        assert!(!encoded.contains("FederateKey"));
+        assert!(!encoded.contains("EndpointKey"));
+    }
 }

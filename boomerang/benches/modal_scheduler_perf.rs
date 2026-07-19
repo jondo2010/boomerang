@@ -296,10 +296,14 @@ where
 {
     let mut assembly = Assembly::new();
     let _reactor = reactor
-        .build("main", state, None, None, None, false, &mut assembly)
+        .build("main", state, None, None, None, false.into(), &mut assembly)
         .unwrap();
     let config = runtime::Config::default().with_fast_forward(true);
-    let RuntimeAssembly { enclaves, .. } = assembly.into_runtime_assembly(&config).unwrap();
+    let enclaves = assembly
+        .into_runtime_assembly(&config)
+        .unwrap()
+        .into_local()
+        .unwrap();
     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
     runtime::Scheduler::new(enclave_key, enclave, config)
 }

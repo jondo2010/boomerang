@@ -22,7 +22,6 @@ replay = ["boomerang_runtime/replay", "dep:serde"]
 
 ## Assembly metadata and endpoint lowering for static federated enclave topologies
 federated = [
-    "boomerang_runtime/federated",
     "boomerang_federated/runtime",
     "dep:boomerang_federated",
 ]

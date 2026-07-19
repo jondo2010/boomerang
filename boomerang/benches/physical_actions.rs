@@ -44,7 +44,7 @@ fn bench(c: &mut Criterion) {
                             None,
                             None,
                             None,
-                            false,
+                            false.into(),
                             &mut assembly,
                         )
                         .unwrap();
@@ -53,13 +53,16 @@ fn bench(c: &mut Criterion) {
                         .with_fast_forward(false)
                         .with_keep_alive(true)
                         .with_queue_size(65_536);
-                    let RuntimeAssembly {
-                        enclaves, aliases, ..
-                    } = assembly.into_runtime_assembly(&config).unwrap();
+                    let RuntimeAssembly { aliases, execution } =
+                        assembly.into_runtime_assembly(&config).unwrap();
+                    let RuntimeExecution::Local(enclaves) = execution else {
+                        panic!("benchmark expected local execution")
+                    };
                     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
-                    let (action_enclave_key, action_key) = aliases.action_aliases[action_key];
+                    let (action_enclave, action_key) = aliases.action_aliases[action_key].clone();
                     assert_eq!(
-                        action_enclave_key, enclave_key,
+                        action_enclave.enclave_key(),
+                        enclave_key,
                         "physical action enclave mismatch"
                     );
                     let send_ctx = enclave.create_send_context(enclave_key);

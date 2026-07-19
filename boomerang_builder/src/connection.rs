@@ -1,58 +1,34 @@
-//! Specialized assembly support for non-port-binding connections between reactors.
+//! Connection declarations and their resolved port bindings.
 //!
-//! Non-port-binding connections are connections with a specified delay or between enclaves.
+//! A [`ConnectionSpec`] records a typed connection request before the assembly's
+//! partition boundaries are known. During assembly, it is lowered into the
+//! reactions, actions, and endpoints required by its delay and partition
+//! crossing. [`PortBindings`] records the direct port-to-port edges that remain
+//! after that lowering; it does not retain the connection's timing or transport
+//! semantics.
 
 use std::collections::{BTreeSet, HashMap};
-#[cfg(feature = "federated")]
-use std::sync::Arc;
 
 use slotmap::SecondaryMap;
 
 use crate::{
-    runtime, ActionTag, Assembly, AssemblyActionKey, AssemblyError, AssemblyModeKey,
-    AssemblyPortKey, AssemblyReactorKey, Input, Output, ParentReactorSpec, PartitionMap, PortType,
-    TriggerMode, TypedActionKey, TypedPortKey,
+    assembly::ConnectionLoweringArtifacts, runtime, ActionTag, Assembly, AssemblyActionKey,
+    AssemblyError, AssemblyModeKey, AssemblyPortKey, AssemblyReactorKey, Input, Output,
+    ParentReactorSpec, PartitionMap, PortType, TriggerMode, TypedActionKey, TypedPortKey,
 };
 
-#[cfg(feature = "federated")]
-pub(crate) struct FederatedEncoderAdapter<C> {
-    pub(crate) codec: Arc<C>,
-}
-
-#[cfg(feature = "federated")]
-impl<T, C> runtime::FederatedPayloadEncoder<T> for FederatedEncoderAdapter<C>
-where
-    T: runtime::ReactorData,
-    C: boomerang_federated::PayloadEncoder<T> + Send + Sync + 'static,
-{
-    fn encode(&self, value: &T) -> Result<Vec<u8>, runtime::FederatedEndpointError> {
-        self.codec
-            .encode(value)
-            .map_err(|error| runtime::FederatedEndpointError::codec(error.to_string()))
-    }
-}
-
-#[cfg(feature = "federated")]
-pub(crate) struct FederatedDecoderAdapter<C> {
-    pub(crate) codec: Arc<C>,
-}
-
-#[cfg(feature = "federated")]
-impl<T, C> runtime::FederatedPayloadDecoder<T> for FederatedDecoderAdapter<C>
-where
-    T: runtime::ReactorData,
-    C: boomerang_federated::PayloadDecoder<T> + Send + Sync + 'static,
-{
-    fn decode(&self, bytes: &[u8]) -> Result<T, runtime::FederatedEndpointError> {
-        self.codec
-            .decode(bytes)
-            .map_err(|error| runtime::FederatedEndpointError::codec(error.to_string()))
-    }
-}
-
+/// The resolved, directed port-to-port edges in an assembled reactor graph.
+///
+/// These bindings are the output of lowering [`ConnectionSpec`] values. A
+/// simple zero-delay local connection contributes its original source and
+/// target directly. Delayed or partition-crossing connections first create
+/// synthetic connection machinery and then bind the original ports to that
+/// machinery's boundary ports.
 #[derive(Default)]
 pub struct PortBindings {
+    /// Maps each bound target port to its unique immediate source port.
     inward: SecondaryMap<AssemblyPortKey, AssemblyPortKey>,
+    /// Maps each source port to its deterministically ordered immediate targets.
     outward: SecondaryMap<AssemblyPortKey, BTreeSet<AssemblyPortKey>>,
 }
 
@@ -240,15 +216,27 @@ pub trait ErasedConnectionSpec {
         &mut self,
         assembly: &mut Assembly,
         partition_map: &mut PartitionMap,
-        port_bindings: &mut PortBindings,
+        lowering: &mut ConnectionLoweringArtifacts,
     ) -> Result<(), AssemblyError>;
 }
 
+/// A typed connection request awaiting assembly and partition-aware lowering.
+///
+/// Unlike [`PortBindings`], this specification retains the payload type, timing
+/// kind, delay, and modal scope needed to choose an implementation. Lowering
+/// may resolve it to a direct binding or expand it into synthetic reactions,
+/// actions, and local or serialized partition-boundary endpoints.
 pub struct ConnectionSpec<T: runtime::ReactorData, Q: ActionTag> {
+    /// The upstream port from which values originate.
     pub(crate) source_key: AssemblyPortKey,
+    /// The downstream port to which values are delivered.
     pub(crate) target_key: AssemblyPortKey,
+    /// The optional delay applied when delivering a value to the target.
     pub(crate) after: Option<runtime::Duration>,
+    /// The modal scope inherited by synthetic connection reactions, if any.
     pub(crate) scope_mode: Option<AssemblyModeKey>,
+    /// Retains the payload type and logical-or-physical timing kind without
+    /// owning either.
     pub(crate) _phantom: std::marker::PhantomData<fn() -> (T, Q)>,
 }
 
@@ -269,7 +257,7 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> ErasedConnectionSpec for Con
         &mut self,
         assembly: &mut Assembly,
         partition_map: &mut PartitionMap,
-        port_bindings: &mut PortBindings,
+        lowering: &mut ConnectionLoweringArtifacts,
     ) -> Result<(), AssemblyError> {
         let source_port = &assembly.port_specs[self.source_key()];
         let target_port = &assembly.port_specs[self.target_key()];
@@ -299,15 +287,24 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> ErasedConnectionSpec for Con
                     self.after,
                 )?;
                 partition_map.insert(reactor_key, source_partition);
-                port_bindings.bind(self.source_key, input_port.into(), assembly)?;
-                port_bindings.bind(output_port.into(), self.target_key, assembly)?;
+                lowering
+                    .port_bindings
+                    .bind(self.source_key, input_port.into(), assembly)?;
+                lowering
+                    .port_bindings
+                    .bind(output_port.into(), self.target_key, assembly)?;
             } else {
                 // Simple case, we can just bind them directly
-                port_bindings.bind(self.source_key, self.target_key, assembly)?;
+                lowering
+                    .port_bindings
+                    .bind(self.source_key, self.target_key, assembly)?;
             }
         } else {
             #[cfg(feature = "federated")]
-            if partitions_are_both_federated(assembly, source_partition, target_partition)? {
+            if let Some(boundary) = lowering
+                .federated_boundaries
+                .remove(&(self.source_key, self.target_key))
+            {
                 if !Q::IS_LOGICAL {
                     return Err(AssemblyError::UnsupportedFederationTopology {
                         what: format!(
@@ -320,7 +317,14 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> ErasedConnectionSpec for Con
 
                 let (encoder, decoder) =
                     assembly.federated_codec_for::<T>(self.source_key, self.target_key)?;
-                let endpoint = federated_endpoint_id(assembly, self.source_key, self.target_key)?;
+                if boundary.target_partition != target_partition {
+                    return Err(AssemblyError::InternalError(format!(
+                        "federated endpoint {} resolved to the wrong target partition",
+                        boundary.endpoint
+                    )));
+                }
+                let endpoint = boundary.endpoint;
+                let target_federate = boundary.target_federate;
 
                 let target_parent_reactor_key =
                     assembly.reactor_specs[target_reactor_key].parent_reactor_key();
@@ -336,11 +340,14 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> ErasedConnectionSpec for Con
                     self.after,
                 )?;
                 partition_map.insert(reactor_key, target_partition);
-                port_bindings.bind(output_port.into(), self.target_key, assembly)?;
+                lowering
+                    .port_bindings
+                    .bind(output_port.into(), self.target_key, assembly)?;
 
-                assembly.add_federated_inbound_endpoint::<T>(
+                lowering.add_federated_inbound_endpoint::<T>(
                     endpoint.clone(),
                     target_partition,
+                    target_federate.clone(),
                     action_key.into(),
                     decoder,
                 );
@@ -350,17 +357,21 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> ErasedConnectionSpec for Con
                 let EnclaveConnectionSource {
                     reactor_key,
                     input_port,
-                } = build_federated_connection_source::<T>(
+                } = build_inter_partition_connection_source::<T>(
                     assembly,
                     source_parent_reactor_key,
                     self.scope_mode,
-                    target_partition,
                     action_key.into(),
-                    endpoint,
-                    encoder,
+                    InterPartitionSourceBackend::Serialized {
+                        target_federate,
+                        endpoint,
+                        encoder,
+                    },
                 )?;
                 partition_map.insert(reactor_key, source_partition);
-                port_bindings.bind(self.source_key, input_port.into(), assembly)?;
+                lowering
+                    .port_bindings
+                    .bind(self.source_key, input_port.into(), assembly)?;
 
                 return Ok(());
             }
@@ -381,58 +392,29 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> ErasedConnectionSpec for Con
                 self.after,
             )?;
             partition_map.insert(reactor_key, target_partition);
-            port_bindings.bind(output_port.into(), self.target_key, assembly)?;
+            lowering
+                .port_bindings
+                .bind(output_port.into(), self.target_key, assembly)?;
 
             let source_parent_reactor_key =
                 assembly.reactor_specs[source_reactor_key].parent_reactor_key();
             let EnclaveConnectionSource {
                 reactor_key,
                 input_port,
-            } = build_enclave_connection_source::<T>(
+            } = build_inter_partition_connection_source::<T>(
                 assembly,
                 source_parent_reactor_key,
                 self.scope_mode,
-                target_partition,
                 action_key.into(),
+                InterPartitionSourceBackend::in_process(),
             )?;
             partition_map.insert(reactor_key, source_partition);
-            port_bindings.bind(self.source_key, input_port.into(), assembly)?;
+            lowering
+                .port_bindings
+                .bind(self.source_key, input_port.into(), assembly)?;
         }
         Ok(())
     }
-}
-
-#[cfg(feature = "federated")]
-fn partitions_are_both_federated(
-    assembly: &Assembly,
-    source_partition: AssemblyReactorKey,
-    target_partition: AssemblyReactorKey,
-) -> Result<bool, AssemblyError> {
-    let source_federate = assembly.reactor_specs[source_partition].federate_spec();
-    let target_federate = assembly.reactor_specs[target_partition].federate_spec();
-
-    match (source_federate.is_some(), target_federate.is_some()) {
-        (true, true) => Ok(true),
-        (false, false) => Ok(false),
-        _ => Err(AssemblyError::UnsupportedFederationTopology {
-            what:
-                "connection crosses a federated boundary, but both enclave roots are not federates"
-                    .to_owned(),
-        }),
-    }
-}
-
-#[cfg(feature = "federated")]
-fn federated_endpoint_id(
-    assembly: &Assembly,
-    source_key: AssemblyPortKey,
-    target_key: AssemblyPortKey,
-) -> Result<boomerang_federated::EndpointId, AssemblyError> {
-    let source_port_fqn = assembly.fqn_for(source_key, false)?.to_string();
-    let target_port_fqn = assembly.fqn_for(target_key, false)?.to_string();
-    Ok(boomerang_federated::EndpointId::new(format!(
-        "{source_port_fqn}->{target_port_fqn}"
-    )))
 }
 
 /// Build a delayed or physical connection between two ports.
@@ -486,15 +468,31 @@ struct EnclaveConnectionSource<T: runtime::ReactorData + Clone> {
     input_port: TypedPortKey<T, Input>,
 }
 
+enum InterPartitionSourceBackend<T: runtime::ReactorData> {
+    InProcess(std::marker::PhantomData<fn() -> T>),
+    #[cfg(feature = "federated")]
+    Serialized {
+        target_federate: boomerang_federated::FederateId,
+        endpoint: boomerang_federated::EndpointId,
+        encoder: Box<dyn boomerang_federated::PayloadEncoder<T>>,
+    },
+}
+
+impl<T: runtime::ReactorData> InterPartitionSourceBackend<T> {
+    fn in_process() -> Self {
+        Self::InProcess(std::marker::PhantomData)
+    }
+}
+
 /// Build the source portion
 ///
 /// The sender side is deferred until its assembly action can be resolved to a runtime action.
-fn build_enclave_connection_source<T: runtime::ReactorData + Clone>(
+fn build_inter_partition_connection_source<T: runtime::ReactorData + Clone>(
     assembly: &mut Assembly,
     parent_key: Option<AssemblyReactorKey>,
     scope_mode: Option<AssemblyModeKey>,
-    target_partition: AssemblyReactorKey,
     target_action_key: AssemblyActionKey,
+    backend: InterPartitionSourceBackend<T>,
 ) -> Result<EnclaveConnectionSource<T>, AssemblyError> {
     let mut source_ctx = assembly.add_reactor("con_reactor_src", parent_key, None, (), false);
     if let Some(scope_mode) = scope_mode {
@@ -510,70 +508,35 @@ fn build_enclave_connection_source<T: runtime::ReactorData + Clone>(
                 .action_aliases
                 .get(target_action_key)
                 .expect("Action key");
-            let enclave = &runtime_assembly.enclaves[*enclave_key];
-
-            //TODO: Get rid of this and the target_partition argument once this works
-            let enclave_key2 = runtime_assembly.aliases.enclave_aliases[target_partition];
-            assert_eq!(enclave_key, &enclave_key2, "Temporary cross-check");
-
-            let remote_context = enclave.create_send_context(*enclave_key);
-            let remote_action_ref = enclave.create_async_action_ref(*runtime_action_key);
-            runtime::EnclaveSenderReactionFn::<T>::new(remote_context, remote_action_ref, None)
-                .into()
-        })
-        .finish()?;
-    let reactor_key = source_ctx.finish()?;
-    Ok(EnclaveConnectionSource {
-        reactor_key,
-        input_port,
-    })
-}
-
-#[cfg(feature = "federated")]
-fn build_federated_connection_source<T: runtime::ReactorData + Clone>(
-    assembly: &mut Assembly,
-    parent_key: Option<AssemblyReactorKey>,
-    scope_mode: Option<AssemblyModeKey>,
-    target_partition: AssemblyReactorKey,
-    target_action_key: AssemblyActionKey,
-    endpoint: boomerang_federated::EndpointId,
-    encoder: Box<dyn runtime::FederatedPayloadEncoder<T>>,
-) -> Result<EnclaveConnectionSource<T>, AssemblyError> {
-    let mut source_ctx = assembly.add_reactor("con_reactor_src", parent_key, None, (), false);
-    if let Some(scope_mode) = scope_mode {
-        source_ctx.set_scope_mode(scope_mode)?;
-    }
-    let input_port = source_ctx.add_input_port::<T>("con_in")?;
-    source_ctx
-        .add_reaction(None)
-        .with_trigger(input_port)
-        .with_deferred_reaction_factory(move |runtime_assembly| {
-            let (enclave_key, runtime_action_key) = runtime_assembly
-                .aliases
-                .action_aliases
-                .get(target_action_key)
-                .expect("Action key");
-            let enclave = &runtime_assembly.enclaves[*enclave_key];
-
-            let enclave_key2 = runtime_assembly.aliases.enclave_aliases[target_partition];
-            assert_eq!(enclave_key, &enclave_key2, "Temporary cross-check");
+            let enclave = runtime_assembly.enclave(enclave_key);
 
             let remote_action_ref = enclave.create_async_action_ref(*runtime_action_key);
-            let (outbound, faults) = runtime_assembly
-                .federation
-                .as_ref()
-                .expect("federated sender exists only in a lowered federation")
-                .runtime
-                .connections()
-                .outbound_endpoint(&endpoint)
-                .expect("federated endpoint sink was validated before deferred lowering");
-            runtime::FederatedSenderReactionFn::<T>::new(
-                remote_action_ref,
-                encoder,
-                outbound,
-                faults,
-            )
-            .into()
+            let sink: Box<dyn runtime::InterPartitionEventSink<T>> = match backend {
+                InterPartitionSourceBackend::InProcess(_) => {
+                    let remote_context = enclave.create_send_context(enclave_key.enclave_key());
+                    Box::new(runtime::InProcessInterPartitionEventSink::new(
+                        remote_context,
+                    ))
+                }
+                #[cfg(feature = "federated")]
+                InterPartitionSourceBackend::Serialized {
+                    target_federate,
+                    endpoint,
+                    encoder,
+                } => {
+                    let (outbound, faults) = runtime_assembly
+                        .federation
+                        .as_ref()
+                        .expect("serialized sender exists only in a lowered federation")
+                        .connections()
+                        .outbound_endpoint(&target_federate, &endpoint)
+                        .expect("serialized endpoint sink was validated before deferred lowering");
+                    Box::new(boomerang_federated::SerializedInterPartitionEventSink::new(
+                        encoder, outbound, faults,
+                    ))
+                }
+            };
+            runtime::InterPartitionSenderReactionFn::<T>::new(remote_action_ref, sink, None).into()
         })
         .finish()?;
     let reactor_key = source_ctx.finish()?;

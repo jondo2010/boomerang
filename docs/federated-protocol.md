@@ -23,10 +23,12 @@ differences are listed under [Protocol Non-Goals](#protocol-non-goals).
 
 ## Participants and Transport
 
-A federate is one statically declared runtime enclave. Every federate has one
-persistent, ordered, bidirectional connection to a centralized runtime
-infrastructure process, abbreviated RTI. Payloads also travel through the RTI;
-there are no direct peer-to-peer payload channels.
+A Federate is one statically declared compute node or process containing one or
+more runtime Enclaves. Every Federate has one persistent, ordered,
+bidirectional connection to a centralized runtime infrastructure process,
+abbreviated RTI. Payloads crossing Federate boundaries travel through the RTI;
+same-Federate Enclave traffic stays in process, and there are no direct
+peer-to-peer payload channels.
 
 The in-memory runner transports `ProtocolFrame` values over ordered channels.
 The TCP runner serializes the same frames as JSON inside a length-delimited
@@ -65,6 +67,15 @@ that epoch to synchronize scheduler clocks.
 one directed serialized connection. `FederatedTopology` contains the complete
 federate list and directed `TopologyEdge` values; each edge records its source,
 target, endpoint, and minimum logical delay.
+
+Those stable string identities are the only identities stored in manifests or
+serialized in `FederateToRti`, `RtiToFederate`, and `ProtocolFrame`. Topology
+compilation additionally assigns crate-private `FederateKey` and `EndpointKey`
+values in lexical stable-ID order. These dense keys belong to one
+`CompiledTopology` instance, are process-local indexes rather than protocol
+identities, and are never serialized or exposed by the public facade. The
+compiled artifact retains the original manifest in its original order for
+public inspection.
 
 `WireTag` is independent of process-local clocks and architecture-sized
 integers. It has three forms:
@@ -108,8 +119,9 @@ not one counter per payload. The effective next-event tag, or effective NET, is
 the minimum of the advertised NET and the earliest tag in that set.
 
 During builder lowering, `CompiledTopology` validates the static manifest and
-precomputes each federate's sorted handshake neighbor view, immediate incoming
-edges, sorted transitive upstream and downstream members, and the minimum
+resolves stable identities into dense Federate and endpoint records. Each
+Federate record owns its sorted handshake neighbor view, immediate incoming
+dependencies, sorted transitive upstream and downstream keys, and the minimum
 cumulative delay for every reachable ordered source/target pair. The lowered
 runtime parts carry that immutable artifact into the clients and RTI session,
 so startup neither repeats graph compilation nor scans all edges for every
@@ -236,14 +248,16 @@ no-future and `Stop` so that one failing scheduler does not strand its peers.
 ## Failure Semantics
 
 The session authenticates every frame with the persistent endpoint that
-supplied it and passes both identities to `RtiState::handle_from`. That is the
-single production mutation boundary. It rejects a missing, duplicate, unknown,
-or mismatched `Hello`; a non-`Hello` first frame; illegal tag sentinels or
-negative finite tags; a route not present in the topology; an id that does not
-match its transport endpoint; a duplicate post-start `Hello`; a regression
-behind completed time; an illegal stop transition; and
-frames originating from an endpoint after `Stop`. Where possible it sends
-`RtiToFederate::Error` before terminating the session.
+supplied it. After validating the complete endpoint set, it resolves each
+transport participant once and carries both its stable `FederateId` and private
+dense key. The RTI's validated-event boundary still compares every claimed
+stable identity and route before mutation. It rejects a missing, duplicate,
+unknown, or mismatched `Hello`; a non-`Hello` first frame; illegal tag sentinels
+or negative finite tags; a route not present in the topology; an id that does
+not match its transport endpoint; a duplicate post-start `Hello`; a regression
+behind completed time; an illegal stop transition; and frames originating from
+an endpoint after `Stop`. Where possible it sends `RtiToFederate::Error` before
+terminating the session.
 
 An RTI event is failure-atomic: validation and fallible tag-delay calculations
 finish against a staged copy of the one directly changed coordination record,

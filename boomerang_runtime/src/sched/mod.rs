@@ -6,23 +6,22 @@ mod barrier;
 mod modal;
 mod queue;
 
-use barrier::LogicalTimeBarrier;
-pub use barrier::LogicalTimeBarrierError;
-#[cfg(feature = "federated")]
-use barrier::NoFederatedTimeBarrier;
-#[cfg(feature = "federated")]
-pub use barrier::{FederatedBarrierError, FederatedBarrierOutcome, FederatedTimeBarrier};
+pub use barrier::{
+    CoordinationError, CoordinationOutcome, LogicalTimeBarrierError, LogicalTimeCoordinator,
+    NoopLogicalTimeCoordinator,
+};
+use barrier::{CoordinationEventResult, LogicalTimeBarrier, SchedulerCoordination};
 use modal::EventManager;
 
 use crate::{
     build_reaction_contexts,
-    env::{Enclave, EnclaveKey},
+    enclave::{Enclave, EnclaveKey},
     event::AsyncEvent,
     keepalive,
     key_set::KeySetView,
     store::Store,
-    CommonContext, Duration, Env, ModeTransitionRequest, ReactionGraph, ReactionKey,
-    ReactionSetLimits, ReactorKey, RuntimeError, SendContext, Tag,
+    Duration, Env, ModeTransitionRequest, ReactionGraph, ReactionKey, ReactionSetLimits,
+    ReactorKey, RuntimeError, Tag,
 };
 
 /// Failure while starting or running a set of local enclave schedulers.
@@ -163,13 +162,8 @@ pub struct Scheduler {
     shutdown_tag: Option<Tag>,
     /// Shutdown channel
     shutdown_tx: keepalive::Sender,
-    /// Logical time barriers for each upstream enclave
-    upstream_enclaves: tinymap::TinySecondaryMap<EnclaveKey, LogicalTimeBarrier>,
-    /// The senders for downstream enclaves
-    downstream_enclaves: tinymap::TinySecondaryMap<EnclaveKey, SendContext>,
-    /// Federated logical-time coordination hook
-    #[cfg(feature = "federated")]
-    federated_time_barrier: Box<dyn FederatedTimeBarrier>,
+    /// Local and optional external logical-time coordination.
+    coordination: SchedulerCoordination,
     /// Runtime statistics
     stats: Stats,
     /// Reusable buffer for reaction keys to avoid allocations in hot loops
@@ -199,6 +193,7 @@ impl Scheduler {
             upstream_enclaves,
             shutdown_tx,
             shutdown_rx,
+            ..
         } = enclave;
 
         let start_time = std::time::Instant::now();
@@ -245,6 +240,8 @@ impl Scheduler {
             .map(|(enclave_key, downstream_ref)| (enclave_key, downstream_ref.send_ctx))
             .collect();
 
+        let coordination = SchedulerCoordination::new(key, upstream_enclaves, downstream_enclaves);
+
         Self {
             key,
             config,
@@ -256,10 +253,7 @@ impl Scheduler {
             current_tag: Tag::NEVER,
             shutdown_tag: None,
             shutdown_tx,
-            upstream_enclaves,
-            downstream_enclaves,
-            #[cfg(feature = "federated")]
-            federated_time_barrier: Box::new(NoFederatedTimeBarrier),
+            coordination,
             stats: Stats::default(),
             reaction_buffer: Vec::with_capacity(reaction_capacity),
             transition_buffer: Vec::with_capacity(reaction_capacity),
@@ -267,19 +261,18 @@ impl Scheduler {
         }
     }
 
-    /// Create a new Scheduler instance with a federated time barrier.
+    /// Create a new scheduler with an external logical-time coordinator.
     ///
-    /// This constructor is the opt-in path for federated time coordination.
+    /// This constructor is the opt-in path for external time coordination.
     /// [`Scheduler::new`] and [`execute_enclaves`] keep the local-only behavior.
-    #[cfg(feature = "federated")]
-    pub fn new_with_federated_time_barrier(
+    pub fn new_with_logical_time_coordinator(
         key: EnclaveKey,
         enclave: Enclave,
         config: Config,
-        federated_time_barrier: impl FederatedTimeBarrier + 'static,
+        coordinator: impl LogicalTimeCoordinator + 'static,
     ) -> Self {
         let mut scheduler = Self::new(key, enclave, config);
-        scheduler.federated_time_barrier = Box::new(federated_time_barrier);
+        scheduler.coordination.set_external(coordinator);
         scheduler
     }
 
@@ -288,24 +281,18 @@ impl Scheduler {
     fn handle_async_event(&mut self, event: AsyncEvent) {
         self.stats.increment_processed_events();
         tracing::trace!("Handling");
+        let event = match self.coordination.observe_event(event, self.current_tag) {
+            CoordinationEventResult::Consumed => return,
+            CoordinationEventResult::Event(event) => event,
+        };
         match event {
-            AsyncEvent::TagRelease { enclave, tag } => {
-                self.upstream_enclaves
-                    .get_mut(enclave)
-                    .expect("Unknown upstream enclave")
-                    .release_tag(tag);
-            }
-            AsyncEvent::TagReleaseProvisional { enclave, tag } => {
+            AsyncEvent::TagRelease { .. } => unreachable!("coordination consumes tag releases"),
+            AsyncEvent::TagReleaseProvisional { enclave: _, tag } => {
                 if tag <= self.current_tag {
                     if tag < self.current_tag {
                         tracing::warn!(tag = %tag, "Ignoring empty event in the past");
                     }
                     return;
-                }
-                // TagReleaseProvisional events are coming from downstream enclaves.
-                // If this enclave is also an upstream (cycle), then also release it provisionally.
-                if let Some(barrier) = self.upstream_enclaves.get_mut(enclave) {
-                    barrier.release_tag_provisional(tag);
                 }
                 self.events.push_event(tag, std::iter::empty(), false);
             }
@@ -384,7 +371,8 @@ impl Scheduler {
         self.current_tag = tag.decrement();
 
         // Release the current tag to downstream reactors
-        self.release_tag_downstream(self.current_tag);
+        self.coordination
+            .release_downstream(self.current_tag, self.shutdown_tag.is_some());
 
         self.start_time = std::time::Instant::now();
     }
@@ -425,33 +413,6 @@ impl Scheduler {
         }
     }
 
-    /// Release the current tag to downstream reactors
-    #[tracing::instrument(skip(self, current_tag), fields(tag = %current_tag))]
-    fn release_tag_downstream(&self, current_tag: Tag) {
-        for (key, ctx) in self.downstream_enclaves.iter() {
-            let event = AsyncEvent::release(self.key, current_tag);
-            tracing::trace!(downstream = %key, event = %event, "Releasing downstream");
-            if !ctx.schedule_external(event) && self.shutdown_tag.is_none() {
-                tracing::warn!(
-                    "Failed to send tag downstream, downstream has unexpectedly terminated."
-                );
-            }
-        }
-    }
-
-    #[cfg(feature = "federated")]
-    fn acquire_federated_tag(
-        &mut self,
-        tag: Tag,
-    ) -> Result<FederatedBarrierOutcome, FederatedBarrierError> {
-        self.federated_time_barrier.acquire_tag(tag, &self.event_rx)
-    }
-
-    #[cfg(feature = "federated")]
-    fn federated_logical_tag_complete(&mut self, tag: Tag) -> Result<(), FederatedBarrierError> {
-        self.federated_time_barrier.logical_tag_complete(tag)
-    }
-
     /// Process one scheduler step, returning coordination failures to the caller.
     #[tracing::instrument(skip(self), fields(tag = %self.current_tag))]
     pub fn try_next(&mut self) -> Result<bool, RuntimeError> {
@@ -463,26 +424,12 @@ impl Scheduler {
         if let Some(next_tag) = self.events.peek_tag() {
             tracing::trace!(next_tag = %next_tag, "Trying next tag");
 
-            // Wait until all upstream barriers are released
-            for (_upstream_enclave_key, barrier) in self.upstream_enclaves.iter_mut() {
-                if let Some(async_event) =
-                    barrier.acquire_tag(next_tag, self.key, &self.event_rx)?
-                {
+            match self.coordination.acquire(next_tag, &self.event_rx)? {
+                CoordinationOutcome::Granted => {}
+                CoordinationOutcome::Interrupted(async_event) => {
                     self.handle_async_event(async_event);
                     // Returned early due to async event
                     return Ok(true);
-                }
-            }
-
-            #[cfg(feature = "federated")]
-            {
-                match self.acquire_federated_tag(next_tag)? {
-                    FederatedBarrierOutcome::Granted => {}
-                    FederatedBarrierOutcome::Interrupted(async_event) => {
-                        self.handle_async_event(async_event);
-                        // Returned early due to async event
-                        return Ok(true);
-                    }
                 }
             }
 
@@ -510,10 +457,8 @@ impl Scheduler {
             // Return the ReactionSet to the free pool
             self.events.return_reaction_set(event.reactions);
 
-            // Release the current tag to downstream reactors
-            self.release_tag_downstream(self.current_tag);
-            #[cfg(feature = "federated")]
-            self.federated_logical_tag_complete(self.current_tag)?;
+            self.coordination
+                .complete(self.current_tag, self.shutdown_tag.is_some())?;
 
             self.stats.increment_processed_tags();
 
@@ -856,29 +801,81 @@ fn panic_payload_message(payload: Box<dyn std::any::Any + Send + 'static>) -> St
     }
 }
 
-#[cfg(all(test, feature = "federated"))]
-mod tests {
+#[cfg(test)]
+mod local_tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
     use crate::{reaction_closure, ActionKey, Level, PortKey, Reaction, Reactor};
 
+    #[test]
+    fn scheduler_without_external_coordinator_processes_and_completes_tag() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut enclave = Enclave::default();
+        let reactor = enclave.insert_reactor(Reactor::new("root", ()).boxed(), None);
+        let scope = enclave.root_scope(reactor);
+        let reaction_log = Arc::clone(&log);
+        let reaction = enclave.insert_reaction(
+            Reaction::new(
+                "record",
+                reaction_closure!(ctx, _reactor, _refs => {
+                    reaction_log.lock().unwrap().push(ctx.get_tag());
+                }),
+                None,
+            ),
+            reactor,
+            std::iter::empty::<PortKey>(),
+            std::iter::empty::<PortKey>(),
+            std::iter::empty::<ActionKey>(),
+            scope,
+            None,
+        );
+        let mut scheduler = Scheduler::new(
+            EnclaveKey::from(0),
+            enclave,
+            Config::default().with_fast_forward(true),
+        );
+        let tag = Tag::ZERO;
+
+        scheduler.startup();
+        scheduler
+            .events
+            .push_event(tag, std::iter::once((Level::from(0), reaction)), false);
+
+        assert!(scheduler.try_next().unwrap());
+        assert_eq!(scheduler.current_tag, tag);
+        assert_eq!(*log.lock().unwrap(), vec![tag]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::{
+        enclave::{DownstreamRef, UpstreamRef},
+        reaction_closure, ActionKey, Level, PortKey, Reaction, Reactor, SendContext,
+    };
+
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum HookCall {
-        Acquire(Tag),
+        LocalAcquire(Tag),
+        ExternalAcquire(Tag),
         Reaction(Tag),
-        Ltc(Tag),
+        LocalComplete(Tag),
+        ExternalComplete(Tag),
     }
 
     #[derive(Debug)]
-    struct RecordingBarrier {
+    struct RecordingCoordinator {
         log: Arc<Mutex<Vec<HookCall>>>,
         interrupt: Option<AsyncEvent>,
         acquire_error: Option<String>,
         completion_error: Option<String>,
     }
 
-    impl RecordingBarrier {
+    impl RecordingCoordinator {
         fn granting(log: Arc<Mutex<Vec<HookCall>>>) -> Self {
             Self {
                 log,
@@ -916,34 +913,77 @@ mod tests {
         }
     }
 
-    impl FederatedTimeBarrier for RecordingBarrier {
-        fn acquire_tag(
+    impl LogicalTimeCoordinator for RecordingCoordinator {
+        fn acquire(
             &mut self,
             tag: Tag,
             _event_rx: &crate::Receiver<AsyncEvent>,
-        ) -> Result<FederatedBarrierOutcome, FederatedBarrierError> {
-            self.log.lock().unwrap().push(HookCall::Acquire(tag));
+        ) -> Result<CoordinationOutcome, CoordinationError> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(HookCall::ExternalAcquire(tag));
             if let Some(message) = self.acquire_error.take() {
-                return Err(FederatedBarrierError::new(message));
+                return Err(CoordinationError::new(message));
             }
             Ok(match self.interrupt.take() {
-                Some(event) => FederatedBarrierOutcome::Interrupted(event),
-                None => FederatedBarrierOutcome::Granted,
+                Some(event) => CoordinationOutcome::Interrupted(event),
+                None => CoordinationOutcome::Granted,
             })
         }
 
-        fn logical_tag_complete(&mut self, tag: Tag) -> Result<(), FederatedBarrierError> {
-            self.log.lock().unwrap().push(HookCall::Ltc(tag));
+        fn complete(&mut self, tag: Tag) -> Result<(), CoordinationError> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(HookCall::ExternalComplete(tag));
             if let Some(message) = self.completion_error.take() {
-                return Err(FederatedBarrierError::new(message));
+                return Err(CoordinationError::new(message));
             }
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct RecordingCoordinatorWithLocalRelease {
+        log: Arc<Mutex<Vec<HookCall>>>,
+        downstream_rx: crate::Receiver<AsyncEvent>,
+    }
+
+    impl LogicalTimeCoordinator for RecordingCoordinatorWithLocalRelease {
+        fn acquire(
+            &mut self,
+            tag: Tag,
+            _event_rx: &crate::Receiver<AsyncEvent>,
+        ) -> Result<CoordinationOutcome, CoordinationError> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(HookCall::ExternalAcquire(tag));
+            Ok(CoordinationOutcome::Granted)
+        }
+
+        fn complete(&mut self, tag: Tag) -> Result<(), CoordinationError> {
+            loop {
+                let event = self
+                    .downstream_rx
+                    .recv()
+                    .expect("local downstream release channel should remain open");
+                if matches!(event, AsyncEvent::TagRelease { tag: released, .. } if released == tag)
+                {
+                    break;
+                }
+            }
+            let mut log = self.log.lock().unwrap();
+            log.push(HookCall::LocalComplete(tag));
+            log.push(HookCall::ExternalComplete(tag));
             Ok(())
         }
     }
 
     fn scheduler_with_recording_reaction(
         log: Arc<Mutex<Vec<HookCall>>>,
-        barrier: impl FederatedTimeBarrier + 'static,
+        barrier: impl LogicalTimeCoordinator + 'static,
     ) -> (Scheduler, ReactionKey) {
         let mut enclave = Enclave::default();
         let reactor = enclave.insert_reactor(Reactor::new("root", ()).boxed(), None);
@@ -967,7 +1007,7 @@ mod tests {
             scope,
             None,
         );
-        let scheduler = Scheduler::new_with_federated_time_barrier(
+        let scheduler = Scheduler::new_with_logical_time_coordinator(
             EnclaveKey::from(0),
             enclave,
             Config::default().with_fast_forward(true),
@@ -976,10 +1016,88 @@ mod tests {
         (scheduler, reaction)
     }
 
+    fn scheduler_with_local_dependencies(
+        log: Arc<Mutex<Vec<HookCall>>>,
+    ) -> (
+        Scheduler,
+        ReactionKey,
+        crate::Receiver<AsyncEvent>,
+        crate::Sender<AsyncEvent>,
+        (crate::keepalive::Sender, crate::keepalive::Sender),
+    ) {
+        let mut enclave = Enclave::default();
+        let event_tx = enclave.event_tx.clone();
+        let reactor = enclave.insert_reactor(Reactor::new("root", ()).boxed(), None);
+        let scope = enclave.root_scope(reactor);
+        let reaction_log = Arc::clone(&log);
+        let reaction = enclave.insert_reaction(
+            Reaction::new(
+                "record",
+                reaction_closure!(ctx, _reactor, _refs => {
+                    reaction_log
+                        .lock()
+                        .unwrap()
+                        .push(HookCall::Reaction(ctx.get_tag()));
+                }),
+                None,
+            ),
+            reactor,
+            std::iter::empty::<PortKey>(),
+            std::iter::empty::<PortKey>(),
+            std::iter::empty::<ActionKey>(),
+            scope,
+            None,
+        );
+
+        let upstream = EnclaveKey::from(1);
+        let (upstream_tx, upstream_rx) = kanal::unbounded();
+        let (upstream_shutdown_tx, upstream_shutdown_rx) = crate::keepalive::channel();
+        enclave.upstream_enclaves.insert(
+            upstream,
+            UpstreamRef {
+                send_ctx: SendContext {
+                    enclave_key: upstream,
+                    async_tx: upstream_tx,
+                    shutdown_rx: upstream_shutdown_rx,
+                },
+                delay: None,
+            },
+        );
+
+        let downstream = EnclaveKey::from(2);
+        let (downstream_tx, downstream_rx) = kanal::unbounded();
+        let (downstream_shutdown_tx, downstream_shutdown_rx) = crate::keepalive::channel();
+        enclave.downstream_enclaves.insert(
+            downstream,
+            DownstreamRef {
+                send_ctx: SendContext {
+                    enclave_key: downstream,
+                    async_tx: downstream_tx,
+                    shutdown_rx: downstream_shutdown_rx,
+                },
+            },
+        );
+
+        let barrier = RecordingCoordinatorWithLocalRelease { log, downstream_rx };
+        let scheduler = Scheduler::new_with_logical_time_coordinator(
+            EnclaveKey::from(0),
+            enclave,
+            Config::default().with_fast_forward(true),
+            barrier,
+        );
+        (
+            scheduler,
+            reaction,
+            upstream_rx,
+            event_tx,
+            (upstream_shutdown_tx, downstream_shutdown_tx),
+        )
+    }
+
     #[test]
-    fn federated_time_barrier_wraps_processed_logical_tag() {
+    fn external_coordinator_wraps_processed_logical_tag() {
         let log = Arc::new(Mutex::new(Vec::new()));
-        let barrier = RecordingBarrier::granting(Arc::clone(&log));
+        let barrier = RecordingCoordinator::granting(Arc::clone(&log));
         let (mut scheduler, reaction) =
             scheduler_with_recording_reaction(Arc::clone(&log), barrier);
         let tag = Tag::ZERO;
@@ -996,26 +1114,110 @@ mod tests {
         assert_eq!(
             calls,
             vec![
-                HookCall::Acquire(tag),
+                HookCall::ExternalAcquire(tag),
                 HookCall::Reaction(tag),
-                HookCall::Ltc(tag)
+                HookCall::ExternalComplete(tag)
             ]
         );
     }
 
     #[test]
-    fn federated_time_barrier_can_interrupt_wait_with_inbound_event() {
+    fn local_coordination_wraps_external_coordination() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let (mut scheduler, reaction, upstream_rx, event_tx, _shutdown_guards) =
+            scheduler_with_local_dependencies(Arc::clone(&log));
+        let tag = Tag::ZERO;
+
+        scheduler.startup();
+        scheduler
+            .events
+            .push_event(tag, std::iter::once((Level::from(0), reaction)), false);
+
+        let acquire_log = Arc::clone(&log);
+        let release = std::thread::spawn(move || {
+            let request = upstream_rx
+                .recv()
+                .expect("local upstream should receive a provisional request");
+            assert!(matches!(
+                request,
+                AsyncEvent::TagReleaseProvisional {
+                    enclave,
+                    tag: requested,
+                } if enclave == EnclaveKey::from(0) && requested == tag
+            ));
+            acquire_log
+                .lock()
+                .unwrap()
+                .push(HookCall::LocalAcquire(tag));
+            event_tx
+                .send(AsyncEvent::release(EnclaveKey::from(1), tag))
+                .unwrap();
+        });
+
+        assert!(scheduler.try_next().unwrap());
+        release.join().unwrap();
+        assert!(scheduler.try_next().unwrap());
+
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                HookCall::LocalAcquire(tag),
+                HookCall::ExternalAcquire(tag),
+                HookCall::Reaction(tag),
+                HookCall::LocalComplete(tag),
+                HookCall::ExternalComplete(tag),
+            ]
+        );
+    }
+
+    #[test]
+    fn local_interruption_prevents_external_acquire() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let (mut scheduler, _reaction, upstream_rx, event_tx, _shutdown_guards) =
+            scheduler_with_local_dependencies(Arc::clone(&log));
+        let tag = Tag::new(Duration::seconds(1), 0);
+
+        scheduler.startup();
+        scheduler
+            .events
+            .push_event(tag, std::iter::empty::<(Level, ReactionKey)>(), false);
+
+        let acquire_log = Arc::clone(&log);
+        let interrupt = std::thread::spawn(move || {
+            let request = upstream_rx
+                .recv()
+                .expect("local upstream should receive a provisional request");
+            assert!(matches!(
+                request,
+                AsyncEvent::TagReleaseProvisional { tag: requested, .. } if requested == tag
+            ));
+            acquire_log
+                .lock()
+                .unwrap()
+                .push(HookCall::LocalAcquire(tag));
+            event_tx
+                .send(AsyncEvent::provisional(EnclaveKey::from(9), Tag::ZERO))
+                .unwrap();
+        });
+
+        assert!(scheduler.try_next().unwrap());
+        interrupt.join().unwrap();
+        assert_eq!(*log.lock().unwrap(), vec![HookCall::LocalAcquire(tag)]);
+    }
+
+    #[test]
+    fn external_coordinator_can_interrupt_wait_with_inbound_event() {
         let log = Arc::new(Mutex::new(Vec::new()));
         let future_tag = Tag::new(Duration::seconds(1), 0);
         let inbound_tag = Tag::ZERO;
-        let barrier = RecordingBarrier::interrupting(
+        let barrier = RecordingCoordinator::interrupting(
             Arc::clone(&log),
             AsyncEvent::TagReleaseProvisional {
                 enclave: EnclaveKey::from(1),
                 tag: inbound_tag,
             },
         );
-        let mut scheduler = Scheduler::new_with_federated_time_barrier(
+        let mut scheduler = Scheduler::new_with_logical_time_coordinator(
             EnclaveKey::from(0),
             Enclave::default(),
             Config::default().with_fast_forward(true),
@@ -1035,13 +1237,13 @@ mod tests {
         assert_eq!(scheduler.events.peek_tag(), Some(inbound_tag));
 
         let calls = log.lock().unwrap().clone();
-        assert_eq!(calls, vec![HookCall::Acquire(future_tag)]);
+        assert_eq!(calls, vec![HookCall::ExternalAcquire(future_tag)]);
     }
 
     #[test]
-    fn federated_barrier_error_prevents_reaction_execution() {
+    fn coordination_error_prevents_reaction_execution() {
         let log = Arc::new(Mutex::new(Vec::new()));
-        let barrier = RecordingBarrier::failing_acquire(Arc::clone(&log), "denied");
+        let barrier = RecordingCoordinator::failing_acquire(Arc::clone(&log), "denied");
         let (mut scheduler, reaction) =
             scheduler_with_recording_reaction(Arc::clone(&log), barrier);
         let tag = Tag::ZERO;
@@ -1054,7 +1256,7 @@ mod tests {
 
         assert!(matches!(
             scheduler.try_next(),
-            Err(RuntimeError::FederatedBarrier(_))
+            Err(RuntimeError::Coordination(_))
         ));
         assert_eq!(scheduler.current_tag, before_wait);
         assert_eq!(scheduler.events.peek_tag(), Some(tag));
@@ -1066,9 +1268,9 @@ mod tests {
     }
 
     #[test]
-    fn federated_completion_error_is_returned() {
+    fn external_completion_error_is_returned() {
         let log = Arc::new(Mutex::new(Vec::new()));
-        let barrier = RecordingBarrier::failing_completion(Arc::clone(&log), "ltc failed");
+        let barrier = RecordingCoordinator::failing_completion(Arc::clone(&log), "ltc failed");
         let (mut scheduler, reaction) =
             scheduler_with_recording_reaction(Arc::clone(&log), barrier);
         let tag = Tag::ZERO;
@@ -1080,7 +1282,7 @@ mod tests {
 
         assert!(matches!(
             scheduler.try_next(),
-            Err(RuntimeError::FederatedBarrier(_))
+            Err(RuntimeError::Coordination(_))
         ));
         assert_eq!(scheduler.current_tag, tag);
         assert!(log

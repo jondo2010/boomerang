@@ -25,7 +25,6 @@ replay = ["boomerang_runtime/replay", "boomerang_builder/replay"]
 
 ## Assembly metadata and protocol primitives for static federated enclave topologies
 federated = [
-    "boomerang_runtime/federated",
     "boomerang_builder/federated",
     "boomerang_federated/runtime",
     "dep:boomerang_federated",

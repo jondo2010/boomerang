@@ -48,10 +48,14 @@ returned to the runner's caller. They are not treated as permission to process
 a logical tag.
 
 The supported subset is deliberately conservative. It supports static
-persistent federates, one runtime enclave per federate, logical
-cross-federate messages routed through the RTI, same-tag messages,
+persistent Federates containing one or more independently scheduled Enclaves,
+logical cross-Federate messages routed through the RTI, same-tag messages,
 same-timestamp microsteps, fanout, multi-hop topologies, shutdown/no-future
 coordination, and positive-delay distributed cycles.
+
+Connections between Enclaves in the same Federate remain in process. Each
+Federate has one protocol identity and one RTI connection regardless of its
+Enclave count.
 
 The implementation rejects cross-federate physical connections, transient
 federates, mixed local/federated boundaries, and distributed zero-delay cycles.

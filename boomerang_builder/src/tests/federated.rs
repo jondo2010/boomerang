@@ -68,8 +68,15 @@ impl FederatedOutboundCapture {
         let federation = parts
             .federation_mut()
             .expect("federated assembly must contain lowered federation data");
-        assert_eq!(federation.topology().topology().edges.len(), 1);
-        let source = federation.topology().topology().edges[0].source.clone();
+        assert_eq!(federation.graph().endpoint_ids().count(), 1);
+        let source = federation
+            .federates()
+            .values()
+            .flat_map(|federate| federate.bridge().routes())
+            .next()
+            .expect("lowered route exists")
+            .source
+            .clone();
         let mailbox = federation
             .federates_mut()
             .get_mut(&source)
@@ -866,26 +873,21 @@ fn test_federated_source_sink_lowers_authoritative_runtime_topology() {
     let federation = parts
         .federation()
         .expect("source/sink lowering must produce a federation");
-    let topology = federation.topology().topology();
+    let graph = federation.graph();
 
     assert_eq!(
-        topology
-            .federates
-            .iter()
+        graph
+            .federate_ids()
             .map(|federate| federate.as_str())
             .collect_vec(),
         vec!["sink", "source"]
     );
-    assert_eq!(topology.edges.len(), 1);
-    assert_eq!(topology.edges[0].source.as_str(), "source");
-    assert_eq!(topology.edges[0].target.as_str(), "sink");
+    assert_eq!(graph.endpoint_ids().count(), 1);
+    let endpoint = graph.endpoint_ids().next().unwrap();
+    assert_eq!(endpoint.as_str(), "main/source/out->main/sink/in");
     assert_eq!(
-        topology.edges[0].endpoint.as_str(),
-        "main/source/out->main/sink/in"
-    );
-    assert_eq!(
-        topology.edges[0].delay,
-        boomerang_federated::WireDelay::ZERO
+        graph.endpoint_delay(endpoint),
+        Some(boomerang_federated::WireDelay::ZERO)
     );
     assert_eq!(federation.federates().len(), 2);
 
@@ -907,8 +909,10 @@ fn test_delayed_cross_federate_connection_records_delay() {
     let federation = parts.federation().unwrap();
 
     assert_eq!(
-        federation.topology().topology().edges[0].delay,
-        boomerang_federated::WireDelay::from_nanos(10_000_000)
+        federation
+            .graph()
+            .endpoint_delay(federation.graph().endpoint_ids().next().unwrap()),
+        Some(boomerang_federated::WireDelay::from_nanos(10_000_000))
     );
 }
 
@@ -1298,7 +1302,7 @@ fn test_same_federate_cross_enclave_boundary_stays_local() {
         .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
     let federation = parts.federation().unwrap();
-    assert!(federation.topology().topology().edges.is_empty());
+    assert_eq!(federation.graph().endpoint_ids().count(), 0);
     assert_eq!(
         federation.federates()[&boomerang_federated::FederateId::new("node")]
             .enclaves()
@@ -1410,8 +1414,8 @@ fn test_federated_connection_lowers_endpoint_runtime_parts() {
     let federation = parts
         .federation()
         .expect("federated connection lowering must produce a federation");
-    assert_eq!(federation.topology().topology().edges.len(), 1);
-    let endpoint = &federation.topology().topology().edges[0].endpoint;
+    assert_eq!(federation.graph().endpoint_ids().count(), 1);
+    let endpoint = federation.graph().endpoint_ids().next().unwrap();
     let routes = federation
         .federates()
         .values()

@@ -143,7 +143,8 @@ fn public_api_runs_static_in_memory_federation() {
             .len(),
         1
     );
-    assert_eq!(federation.topology().topology().edges.len(), 1);
+    assert_eq!(federation.graph().federate_ids().count(), 2);
+    assert_eq!(federation.graph().endpoint_ids().count(), 1);
     let envs = execute_federation_in_memory(parts.into_federation().unwrap(), config).unwrap();
     let a_envs = &envs[&FederateId::new("a")];
     let b_envs = &envs[&FederateId::new("b")];
@@ -187,8 +188,8 @@ fn public_api_federates_own_local_enclave_maps() {
         .unwrap()
         .into_federation()
         .unwrap();
-    let (topology, federates) = federation.into_parts();
-    assert_eq!(topology.topology().edges.len(), 1);
+    let (graph, federates) = federation.into_parts();
+    assert_eq!(graph.endpoint_ids().count(), 1);
     assert_eq!(federates.len(), 2);
 
     let a = &federates[&FederateId::new("a")];

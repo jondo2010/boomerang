@@ -26,6 +26,35 @@ pub(crate) struct AnalyzedFederationGraph {
     pub(crate) affected_downstream: BTreeMap<FederateId, Vec<FederateId>>,
 }
 
+impl AnalyzedFederationGraph {
+    /// Project completed analysis into the federated runtime's immutable graph handoff.
+    pub(crate) fn to_rti_graph(&self) -> boomerang_federated::RtiGraph {
+        let federates = self
+            .federates
+            .iter()
+            .map(|id| boomerang_federated::rti::RtiFederateParts {
+                id: id.clone(),
+                transitive_incoming: self.transitive_incoming[id].clone(),
+                affected_downstream: self.affected_downstream[id].clone(),
+            })
+            .collect();
+        let endpoints = self
+            .endpoints
+            .iter()
+            .map(|endpoint| boomerang_federated::rti::RtiEndpointParts {
+                id: endpoint.endpoint.clone(),
+                source: endpoint.source.clone(),
+                target: endpoint.target.clone(),
+                delay: endpoint.delay,
+            })
+            .collect();
+        boomerang_federated::RtiGraph::from_lowered(boomerang_federated::rti::RtiGraphParts {
+            federates,
+            endpoints,
+        })
+    }
+}
+
 pub(crate) fn analyze_federation_graph(
     federates: impl IntoIterator<Item = FederateId>,
     endpoints: impl IntoIterator<Item = FederationEndpoint>,

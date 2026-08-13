@@ -4,8 +4,8 @@ use futures_util::{Sink, SinkExt, TryStream, TryStreamExt};
 use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::{
-    rti::{CompiledTopology, FederateKey, RtiDelivery, RtiError, RtiState},
-    FederateId, FederateToRti, FederatedTopology, ProtocolFrame, RtiToFederate, TransportError,
+    rti::{FederateKey, RtiDelivery, RtiError, RtiState},
+    FederateId, FederateToRti, ProtocolFrame, RtiGraph, RtiToFederate, TransportError,
 };
 
 /// One federate's RTI-side transport halves.
@@ -64,7 +64,7 @@ pub enum SessionError {
     Shutdown(String),
 }
 
-/// One authenticated transport participant resolved against the compiled topology.
+/// One authenticated transport participant resolved against the RTI graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionParticipant {
     /// Stable identity retained for errors and sink addressing.
@@ -94,22 +94,9 @@ where
     R: TryStream<Ok = ProtocolFrame> + Send + Unpin + 'static,
     R::Error: Into<TransportError>,
 {
-    pub fn new(
-        topology: FederatedTopology,
-        endpoints: BTreeMap<FederateId, RtiSessionEndpoint<S, R>>,
-    ) -> Result<Self, SessionError> {
-        Ok(Self::from_compiled(
-            CompiledTopology::new(topology)?,
-            endpoints,
-        ))
-    }
-
-    pub fn from_compiled(
-        topology: CompiledTopology,
-        endpoints: BTreeMap<FederateId, RtiSessionEndpoint<S, R>>,
-    ) -> Self {
+    pub fn new(graph: RtiGraph, endpoints: BTreeMap<FederateId, RtiSessionEndpoint<S, R>>) -> Self {
         Self {
-            rti: RtiState::from_compiled(topology),
+            rti: RtiState::from_graph(graph),
             endpoints,
             start_unix_epoch_ns: 0,
         }
@@ -121,7 +108,7 @@ where
     }
 
     pub async fn run(mut self) -> Result<(), SessionError> {
-        let expected = expected_federates(self.rti.topology());
+        let expected = expected_federates(self.rti.graph());
         self.validate_endpoint_set(&expected)?;
 
         let (input_tx, mut input_rx) = mpsc::unbounded_channel();
@@ -132,7 +119,7 @@ where
                 key: self
                     .rti
                     .federate_key(&federate_id)
-                    .expect("validated session endpoint must be a compiled topology member"),
+                    .expect("validated session endpoint must be an RTI graph member"),
                 id: federate_id.clone(),
             };
             if let Some(frame) = endpoint.initial_frame {
@@ -195,14 +182,14 @@ where
                         federate_id: hello_federate,
                     }) = frame
                     else {
-                        return protocol_error(sinks, &federate_id, "expected Hello before Start")
+                        return protocol_error(sinks, federate_id, "expected Hello before Start")
                             .await;
                     };
 
                     if &hello_federate != federate_id {
                         return protocol_error(
                             sinks,
-                            &federate_id,
+                            federate_id,
                             format!(
                                 "Hello identified federate `{hello_federate}`, but endpoint is `{federate_id}`"
                             ),
@@ -210,7 +197,7 @@ where
                         .await;
                     }
                     if !seen.insert(federate_id.clone()) {
-                        return protocol_error(sinks, &federate_id, "duplicate Hello").await;
+                        return protocol_error(sinks, federate_id, "duplicate Hello").await;
                     }
 
                     self.rti
@@ -275,7 +262,7 @@ where
                     if stopped.contains(federate_id) {
                         return protocol_error(
                             sinks,
-                            &federate_id,
+                            federate_id,
                             "received protocol frame after Stop",
                         )
                         .await;
@@ -284,14 +271,14 @@ where
                     let ProtocolFrame::FederateToRti(message) = frame else {
                         return protocol_error(
                             sinks,
-                            &federate_id,
+                            federate_id,
                             "federate sent an RTI-to-federate frame",
                         )
                         .await;
                     };
 
                     if matches!(message, FederateToRti::Hello { .. }) {
-                        return protocol_error(sinks, &federate_id, "unexpected Hello after Start")
+                        return protocol_error(sinks, federate_id, "unexpected Hello after Start")
                             .await;
                     }
 
@@ -299,8 +286,7 @@ where
                         let deliveries = match self.rti.handle_from_key(participant.key, message) {
                             Ok(deliveries) => deliveries,
                             Err(error) => {
-                                return protocol_error(sinks, &federate_id, error.to_string())
-                                    .await;
+                                return protocol_error(sinks, federate_id, error.to_string()).await;
                             }
                         };
                         stopped.insert(federate_id.clone());
@@ -311,7 +297,7 @@ where
                     let deliveries = match self.rti.handle_from_key(participant.key, message) {
                         Ok(deliveries) => deliveries,
                         Err(error) => {
-                            return protocol_error(sinks, &federate_id, error.to_string()).await;
+                            return protocol_error(sinks, federate_id, error.to_string()).await;
                         }
                     };
                     send_deliveries(sinks, deliveries).await?;
@@ -344,8 +330,8 @@ where
     }
 }
 
-fn expected_federates(topology: &FederatedTopology) -> BTreeSet<FederateId> {
-    topology.federates.iter().cloned().collect()
+fn expected_federates(graph: &RtiGraph) -> BTreeSet<FederateId> {
+    graph.federate_ids().cloned().collect()
 }
 
 fn spawn_stream_reader<R>(
@@ -465,8 +451,10 @@ mod tests {
     use super::*;
     use crate::test_trace::{FramePattern, RecordingClientTransport, Trace, TracePattern};
     use crate::{
-        in_memory_transport_pair, transport::InMemoryTransport, EndpointId, TopologyEdge,
-        WireDelay, WireTag,
+        in_memory_transport_pair,
+        rti::{RtiEndpointParts, RtiFederateParts},
+        transport::InMemoryTransport,
+        EndpointId, WireDelay, WireTag,
     };
 
     type SessionFixture = (
@@ -483,29 +471,63 @@ mod tests {
         EndpointId::new(id)
     }
 
-    fn source_sink_topology() -> FederatedTopology {
-        let source = fed("source");
-        let sink = fed("sink");
-        FederatedTopology::with_edges(
-            [source.clone(), sink.clone()],
-            [TopologyEdge::new(
-                source,
-                sink,
-                endpoint("source.out->sink.in"),
+    fn federate_part(
+        id: &str,
+        incoming: &[(&str, WireDelay)],
+        affected: &[&str],
+    ) -> RtiFederateParts {
+        RtiFederateParts {
+            id: fed(id),
+            transitive_incoming: incoming
+                .iter()
+                .map(|(source, delay)| (fed(source), *delay))
+                .collect(),
+            affected_downstream: affected.iter().map(|target| fed(target)).collect(),
+        }
+    }
+
+    fn endpoint_part(source: &str, target: &str, id: &str, delay: WireDelay) -> RtiEndpointParts {
+        RtiEndpointParts {
+            id: endpoint(id),
+            source: fed(source),
+            target: fed(target),
+            delay,
+        }
+    }
+
+    fn source_sink_graph() -> RtiGraph {
+        crate::rti::test_graph(
+            [
+                federate_part("source", &[], &["sink"]),
+                federate_part("sink", &[("source", WireDelay::ZERO)], &[]),
+            ],
+            [endpoint_part(
+                "source",
+                "sink",
+                "source.out->sink.in",
                 WireDelay::ZERO,
             )],
         )
     }
 
-    fn positive_delay_cycle_topology() -> FederatedTopology {
-        let a = fed("a");
-        let b = fed("b");
+    fn positive_delay_cycle_graph() -> RtiGraph {
         let delay = WireDelay::from_nanos(10);
-        FederatedTopology::with_edges(
-            [a.clone(), b.clone()],
+        crate::rti::test_graph(
             [
-                TopologyEdge::new(a.clone(), b.clone(), endpoint("a.out->b.in"), delay),
-                TopologyEdge::new(b, a, endpoint("b.out->a.in"), delay),
+                federate_part(
+                    "a",
+                    &[("a", WireDelay::from_nanos(20)), ("b", delay)],
+                    &["b"],
+                ),
+                federate_part(
+                    "b",
+                    &[("a", delay), ("b", WireDelay::from_nanos(20))],
+                    &["a"],
+                ),
+            ],
+            [
+                endpoint_part("a", "b", "a.out->b.in", delay),
+                endpoint_part("b", "a", "b.out->a.in", delay),
             ],
         )
     }
@@ -549,12 +571,12 @@ mod tests {
         RtiSessionEndpoint::new(sink, stream)
     }
 
-    fn spawn_session(topology: FederatedTopology) -> SessionFixture {
-        spawn_two_federate_session(topology, fed("source"), fed("sink"))
+    fn spawn_session(graph: RtiGraph) -> SessionFixture {
+        spawn_two_federate_session(graph, fed("source"), fed("sink"))
     }
 
     fn spawn_two_federate_session(
-        topology: FederatedTopology,
+        graph: RtiGraph,
         first: FederateId,
         second: FederateId,
     ) -> SessionFixture {
@@ -564,7 +586,7 @@ mod tests {
         endpoints.insert(first, session_endpoint(source_rti));
         endpoints.insert(second, session_endpoint(sink_rti));
 
-        let session = StaticRtiSession::new(topology, endpoints).expect("valid test topology");
+        let session = StaticRtiSession::new(graph, endpoints);
         let handle = tokio::spawn(session.run());
 
         (source_client, sink_client, handle)
@@ -577,11 +599,10 @@ mod tests {
         const CONTROL_EVENTS_PER_ADVANCE: usize = 3; // NET request, TAG grant, and LTC.
         const FIXED_PROTOCOL_EVENTS: usize = 10; // Two each of Hello, Start, no-future NET, and both Stop directions.
 
-        let topology = positive_delay_cycle_topology();
         let a = fed("a");
         let b = fed("b");
         let (a_client, b_client, session) =
-            spawn_two_federate_session(topology.clone(), a.clone(), b.clone());
+            spawn_two_federate_session(positive_delay_cycle_graph(), a.clone(), b.clone());
         let trace = Trace::default();
         let mut a_client = RecordingClientTransport::new(a_client, a.clone(), trace.clone());
         let mut b_client = RecordingClientTransport::new(b_client, b.clone(), trace.clone());
@@ -703,8 +724,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_routes_zero_tag_msg_and_unblocks_later_grants() {
-        let topology = source_sink_topology();
-        let (source_client, sink_client, session) = spawn_session(topology.clone());
+        let (source_client, sink_client, session) = spawn_session(source_sink_graph());
         let source = fed("source");
         let sink = fed("sink");
         let endpoint = endpoint("source.out->sink.in");
@@ -894,8 +914,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_orders_multiple_same_tag_messages_before_their_grant() {
-        let topology = source_sink_topology();
-        let (source_client, sink_client, session) = spawn_session(topology.clone());
+        let (source_client, sink_client, session) = spawn_session(source_sink_graph());
         let source = fed("source");
         let sink = fed("sink");
         let endpoint = endpoint("source.out->sink.in");
@@ -1040,8 +1059,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_cached_identity_rejects_mismatched_claim() {
-        let topology = source_sink_topology();
-        let (mut source_client, mut sink_client, session) = spawn_session(topology.clone());
+        let (mut source_client, mut sink_client, session) = spawn_session(source_sink_graph());
         let source = fed("source");
         let sink = fed("sink");
 
@@ -1092,8 +1110,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_sends_protocol_error_for_unexpected_federate_frame() {
-        let topology = source_sink_topology();
-        let (mut source_client, mut sink_client, session) = spawn_session(topology.clone());
+        let (mut source_client, mut sink_client, session) = spawn_session(source_sink_graph());
         let source = fed("source");
         let sink = fed("sink");
 

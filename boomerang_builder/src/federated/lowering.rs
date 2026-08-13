@@ -22,8 +22,10 @@ pub(crate) struct FederatedBoundary {
 
 /// Transient artifacts produced by lowering assembly federation boundaries.
 pub(crate) struct FederationLoweringArtifacts {
-    /// Protocol topology derived from federated partition boundaries.
-    pub(crate) topology: boomerang_federated::FederatedTopology,
+    /// Final immutable graph derived from federated partition boundaries.
+    pub(crate) rti_graph: boomerang_federated::RtiGraph,
+    /// Prebuilt local client mailboxes and routes from the same endpoint records.
+    pub(crate) connections: boomerang_federated::FederatedRuntimeConnections,
     /// Assembly enclave roots grouped by their owning protocol federate.
     pub(crate) federate_reactors:
         BTreeMap<boomerang_federated::FederateId, Vec<AssemblyReactorKey>>,
@@ -102,15 +104,22 @@ pub(crate) fn lower_federation(
         ));
     }
 
-    let topology_edges = graph.endpoints.into_iter().map(|edge| {
-        boomerang_federated::TopologyEdge::new(edge.source, edge.target, edge.endpoint, edge.delay)
-    });
+    let connections = boomerang_federated::FederatedRuntimeConnections::new(
+        graph.federates.iter().cloned(),
+        graph.endpoints.iter().map(|edge| {
+            boomerang_federated::FederateClientRoute::new(
+                edge.endpoint.clone(),
+                edge.source.clone(),
+                edge.target.clone(),
+            )
+        }),
+    )
+    .map_err(|error| federation_bridge_error(error.to_string()))?;
+    let rti_graph = graph.to_rti_graph();
 
     Ok(FederationLoweringArtifacts {
-        topology: boomerang_federated::FederatedTopology::with_edges(
-            graph.federates,
-            topology_edges,
-        ),
+        rti_graph,
+        connections,
         federate_reactors,
         boundaries,
     })

@@ -33,7 +33,7 @@ pub use protocol::{
     EndpointId, FederateId, FederateToRti, FederatedTopology, NeighborStructure, ProtocolFrame,
     RtiToFederate, TopologyEdge, WireDelay, WireTag,
 };
-pub use rti::{CompiledTopology, RtiDelivery, RtiError, RtiState};
+pub use rti::{RtiDelivery, RtiError, RtiGraph, RtiState};
 #[cfg(feature = "runtime")]
 pub use runtime::{
     FederatedEndpointError, FederatedFaultState, FederatedInboundEndpoint,

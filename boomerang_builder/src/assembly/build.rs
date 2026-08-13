@@ -1190,7 +1190,8 @@ impl Assembly {
 
         #[cfg(feature = "federated")]
         let FederationLoweringArtifacts {
-            topology,
+            rti_graph,
+            connections,
             federate_reactors,
             boundaries,
         } = lower_federation(&partition_analysis, |port| {
@@ -1216,7 +1217,8 @@ impl Assembly {
         #[cfg(feature = "federated")]
         if !federate_reactors.is_empty() {
             runtime_assembly.federation = Some(boomerang_federated::StaticFederationRuntime::new(
-                boomerang_federated::CompiledTopology::new(topology)?,
+                rti_graph,
+                connections,
             ));
         }
 

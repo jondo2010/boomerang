@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 
 use tinymap::TinyMap;
 
-use super::index::{EndpointKey, FederateKey, IncomingDependency, IncomingPath};
+use super::index::{
+    EndpointKey, FederateKey, IncomingDependency, IncomingPath, RtiEndpoint, RtiFederate,
+};
 use crate::protocol::{EndpointId, FederateId, WireDelay};
 
 /// Immutable RTI graph indexed by dense runtime-local identities.
@@ -38,24 +40,9 @@ pub struct RtiEndpointParts {
     pub delay: WireDelay,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct RtiFederate {
-    pub(super) id: FederateId,
-    pub(super) incoming: Vec<IncomingDependency>,
-    pub(super) transitive_incoming: Vec<IncomingPath>,
-    pub(super) affected_downstream: Vec<FederateKey>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct RtiEndpoint {
-    pub(super) id: EndpointId,
-    pub(super) source: FederateKey,
-    pub(super) target: FederateKey,
-    pub(super) delay: WireDelay,
-}
-
 impl RtiGraph {
     /// Intern final lowered graph records without repeating graph analysis.
+    #[doc(hidden)]
     pub fn from_lowered(mut parts: RtiGraphParts) -> Self {
         parts
             .federates
@@ -194,6 +181,21 @@ impl RtiGraph {
         }
     }
 
+    /// Stable Federate identities in deterministic order.
+    pub fn federate_ids(&self) -> impl Iterator<Item = &FederateId> {
+        self.federates.values().map(|federate| &federate.id)
+    }
+
+    /// Stable endpoint identities in deterministic order.
+    pub fn endpoint_ids(&self) -> impl Iterator<Item = &EndpointId> {
+        self.endpoints.values().map(|endpoint| &endpoint.id)
+    }
+
+    /// Return the logical delay of a stable endpoint identity.
+    pub fn endpoint_delay(&self, id: &EndpointId) -> Option<WireDelay> {
+        self.endpoint_key(id).map(|key| self.endpoints[key].delay)
+    }
+
     pub(crate) fn federate_key(&self, id: &FederateId) -> Option<FederateKey> {
         self.federate_keys.get(id).copied()
     }
@@ -214,22 +216,28 @@ impl RtiGraph {
         &self.endpoints[key].id
     }
 
+    pub(crate) fn endpoint(&self, key: EndpointKey) -> &RtiEndpoint {
+        &self.endpoints[key]
+    }
+
+    #[cfg(test)]
     pub(crate) fn endpoints(&self) -> impl Iterator<Item = (EndpointKey, &RtiEndpoint)> + '_ {
         self.endpoints.iter()
     }
 
-    pub(crate) fn incoming(&self, target: FederateKey) -> &[IncomingDependency] {
+    pub(super) fn incoming(&self, target: FederateKey) -> &[IncomingDependency] {
         &self.federates[target].incoming
     }
 
-    pub(crate) fn transitive_incoming(&self, target: FederateKey) -> &[IncomingPath] {
+    pub(super) fn transitive_incoming(&self, target: FederateKey) -> &[IncomingPath] {
         &self.federates[target].transitive_incoming
     }
 
-    pub(crate) fn affected_downstream(&self, source: FederateKey) -> &[FederateKey] {
+    pub(super) fn affected_downstream(&self, source: FederateKey) -> &[FederateKey] {
         &self.federates[source].affected_downstream
     }
 
+    #[cfg(test)]
     pub(crate) fn contains_route(
         &self,
         source: &FederateId,

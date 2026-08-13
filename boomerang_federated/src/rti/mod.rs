@@ -5,6 +5,9 @@ use crate::protocol::{
     TopologyEdge, WireDelay, WireTag,
 };
 
+// This final-shape contract remains intentionally unwired until the runtime migration.
+#[allow(dead_code)]
+mod graph;
 mod index;
 
 pub(crate) use index::FederateKey;

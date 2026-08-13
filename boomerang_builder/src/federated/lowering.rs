@@ -1,8 +1,10 @@
 //! Projection from assembly partition boundaries to protocol topology artifacts.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 
 use crate::{runtime, AssemblyError, AssemblyPortKey, AssemblyReactorKey, PartitionAnalysis};
+
+use super::{analyze_federation_graph, FederationEndpoint};
 
 pub(crate) type FederatedBoundaryIndex =
     HashMap<(AssemblyPortKey, AssemblyPortKey), FederatedBoundary>;
@@ -35,7 +37,6 @@ pub(crate) fn lower_federation(
     mut port_fqn: impl FnMut(AssemblyPortKey) -> Result<String, AssemblyError>,
 ) -> Result<FederationLoweringArtifacts, AssemblyError> {
     let mut federate_reactors = BTreeMap::new();
-    let mut federate_order = Vec::new();
     for (reactor, federate) in &analysis.federates {
         if federate.trim().is_empty() {
             return Err(federation_bridge_error(format!(
@@ -43,18 +44,15 @@ pub(crate) fn lower_federation(
             )));
         }
         let federate_id = boomerang_federated::FederateId::new(federate.clone());
-        if !federate_reactors.contains_key(&federate_id) {
-            federate_order.push(federate_id.clone());
-        }
         federate_reactors
             .entry(federate_id)
             .or_insert_with(Vec::new)
             .push(reactor);
     }
 
-    let mut seen_endpoints = BTreeSet::new();
     let mut boundaries = HashMap::new();
-    let mut topology_edges = Vec::new();
+    let mut has_duplicate_boundary = false;
+    let mut endpoints = Vec::new();
     for (edge, source_federate, target_federate) in analysis.federated_boundaries() {
         let source = boomerang_federated::FederateId::new(source_federate);
         let target = boomerang_federated::FederateId::new(target_federate);
@@ -79,19 +77,13 @@ pub(crate) fn lower_federation(
                 "federated boundary has an empty endpoint id",
             ));
         }
-        if !seen_endpoints.insert(endpoint.clone()) {
-            return Err(federation_bridge_error(format!(
-                "duplicate federated boundary endpoint '{endpoint}'"
-            )));
-        }
-
-        topology_edges.push(boomerang_federated::TopologyEdge::new(
+        endpoints.push(FederationEndpoint {
             source,
-            target.clone(),
-            endpoint.clone(),
-            wire_delay_from_runtime_delay(edge.delay)?,
-        ));
-        if boundaries
+            target: target.clone(),
+            endpoint: endpoint.clone(),
+            delay: wire_delay_from_runtime_delay(edge.delay)?,
+        });
+        has_duplicate_boundary |= boundaries
             .insert(
                 (edge.source_port, edge.target_port),
                 FederatedBoundary {
@@ -100,17 +92,23 @@ pub(crate) fn lower_federation(
                     target_partition: edge.target_partition,
                 },
             )
-            .is_some()
-        {
-            return Err(federation_bridge_error(
-                "duplicate federated boundary for the same source and target ports",
-            ));
-        }
+            .is_some();
     }
+
+    let graph = analyze_federation_graph(federate_reactors.keys().cloned(), endpoints)?;
+    if has_duplicate_boundary {
+        return Err(federation_bridge_error(
+            "duplicate federated boundary for the same source and target ports",
+        ));
+    }
+
+    let topology_edges = graph.endpoints.into_iter().map(|edge| {
+        boomerang_federated::TopologyEdge::new(edge.source, edge.target, edge.endpoint, edge.delay)
+    });
 
     Ok(FederationLoweringArtifacts {
         topology: boomerang_federated::FederatedTopology::with_edges(
-            federate_order,
+            graph.federates,
             topology_edges,
         ),
         federate_reactors,

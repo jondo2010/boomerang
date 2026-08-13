@@ -874,7 +874,7 @@ fn test_federated_source_sink_lowers_authoritative_runtime_topology() {
             .iter()
             .map(|federate| federate.as_str())
             .collect_vec(),
-        vec!["source", "sink"]
+        vec!["sink", "source"]
     );
     assert_eq!(topology.edges.len(), 1);
     assert_eq!(topology.edges[0].source.as_str(), "source");
@@ -1228,8 +1228,32 @@ fn test_duplicate_federate_id_is_rejected() {
         assembly
             .into_runtime_assembly(&runtime::Config::default())
             .expect_err("duplicate federate id should be rejected"),
-        AssemblyError::UnsupportedFederationTopology { what }
-            if what.contains("duplicate federate id 'same'")
+        AssemblyError::DuplicateFederateId { federate_id }
+            if federate_id == "same"
+    ));
+}
+
+#[test]
+fn test_duplicate_federated_endpoint_is_rejected_with_focused_error() {
+    let mut assembly = Assembly::new();
+    register_u32_federated_codec(&mut assembly).unwrap();
+    let mut ctx = assembly.add_reactor("main", None, None, (), false);
+    let source = ctx
+        .add_child_federate(federated_source_reactor(), "source", ())
+        .unwrap();
+    let sink = ctx
+        .add_child_federate(federated_sink_reactor(), "sink", ())
+        .unwrap();
+    ctx.connect_port(source, sink, None, false).unwrap();
+    ctx.connect_port(source, sink, None, false).unwrap();
+    ctx.finish().unwrap();
+
+    assert!(matches!(
+        assembly
+            .into_runtime_assembly(&runtime::Config::default())
+            .expect_err("duplicate federated endpoint should be rejected"),
+        AssemblyError::DuplicateFederatedEndpoint { endpoint }
+            if endpoint == "main/source/out->main/sink/in"
     ));
 }
 
@@ -1525,7 +1549,7 @@ fn test_zero_delay_distributed_cycle_is_rejected() {
         assembly
             .into_runtime_assembly(&runtime::Config::default())
             .expect_err("zero-delay distributed cycle should be rejected"),
-        AssemblyError::UnsupportedFederationTopology { what }
-            if what.contains("distributed zero-delay cycle")
+        AssemblyError::FederationZeroDelayCycle { federates }
+            if federates == vec!["a".to_owned(), "b".to_owned()]
     ));
 }

@@ -110,6 +110,18 @@ pub enum AssemblyError {
     #[error("Unsupported federation topology: {what}")]
     UnsupportedFederationTopology { what: String },
 
+    #[error("duplicate Federate id `{federate_id}`")]
+    DuplicateFederateId { federate_id: String },
+
+    #[error("duplicate federated endpoint `{endpoint}`")]
+    DuplicateFederatedEndpoint { endpoint: String },
+
+    #[error("distributed zero-delay cycle: {federates:?}")]
+    FederationZeroDelayCycle { federates: Vec<String> },
+
+    #[error("minimum path delay from `{source}` to `{target}` exceeds u64 nanoseconds")]
+    FederationPathDelayOverflow { r#source: String, target: String },
+
     #[error("Federation bridge error: {what}")]
     FederationBridgeError { what: String },
 

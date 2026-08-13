@@ -581,14 +581,9 @@ impl Assembly {
                     ancestor = ancestor_reactor.parent_reactor_key;
                 }
 
-                if let Some(previous) = seen_ids.insert(spec.id.clone(), reactor_key) {
-                    return Err(AssemblyError::UnsupportedFederationTopology {
-                        what: format!(
-                            "duplicate federate id '{}' for '{}' and '{}'",
-                            spec.id,
-                            self.fqn_for(previous, false)?,
-                            self.fqn_for(reactor_key, false)?,
-                        ),
+                if seen_ids.insert(spec.id.clone(), reactor_key).is_some() {
+                    return Err(AssemblyError::DuplicateFederateId {
+                        federate_id: spec.id.clone(),
                     });
                 }
             }
@@ -677,56 +672,7 @@ impl Assembly {
             });
         }
 
-        #[cfg(feature = "federated")]
-        self.validate_federation_zero_delay_cycles(&analysis)?;
-
         Ok(analysis)
-    }
-
-    #[cfg(feature = "federated")]
-    fn validate_federation_zero_delay_cycles(
-        &self,
-        analysis: &PartitionAnalysis,
-    ) -> Result<(), AssemblyError> {
-        let mut graph = petgraph::prelude::DiGraphMap::<AssemblyReactorKey, ()>::new();
-
-        for partition in analysis.federates.keys() {
-            graph.add_node(partition);
-        }
-
-        for (edge, _, _) in analysis.federated_boundaries() {
-            let has_positive_delay = edge
-                .delay
-                .is_some_and(|delay| delay > runtime::Duration::ZERO);
-            if !has_positive_delay {
-                graph.add_edge(edge.source_partition, edge.target_partition, ());
-            }
-        }
-
-        if let Err(cycle) = petgraph::algo::toposort(&graph, None) {
-            let cycle = super::util::find_minimal_cycle(&graph, cycle.node_id());
-            let cycle = cycle
-                .into_iter()
-                .map(|reactor_key| {
-                    self.reactor_specs[reactor_key]
-                        .federate_spec()
-                        .map(|spec| spec.id.clone())
-                        .or_else(|| {
-                            analysis
-                                .federate_for_partition(reactor_key)
-                                .map(str::to_owned)
-                        })
-                        .unwrap_or_else(|| format!("{reactor_key:?}"))
-                })
-                .join(" -> ");
-            return Err(AssemblyError::UnsupportedFederationTopology {
-                what: format!(
-                    "distributed zero-delay cycle is unsupported in the static MVP: {cycle}"
-                ),
-            });
-        }
-
-        Ok(())
     }
 
     /// Process connection specifications into transient lowering artifacts.

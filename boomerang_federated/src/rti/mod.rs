@@ -565,10 +565,6 @@ impl RtiState {
         self.topology.topology()
     }
 
-    pub(crate) fn neighbors_for(&self, federate_id: &FederateId) -> Option<&NeighborStructure> {
-        self.topology.neighbors_for(federate_id)
-    }
-
     pub(crate) fn federate_key(&self, federate_id: &FederateId) -> Option<FederateKey> {
         self.topology.federate_key(federate_id)
     }
@@ -604,7 +600,7 @@ impl RtiState {
     #[cfg(test)]
     fn handle(&mut self, message: FederateToRti) -> Result<Vec<RtiDelivery>, RtiError> {
         let authenticated_federate = match &message {
-            FederateToRti::Hello { federate_id, .. }
+            FederateToRti::Hello { federate_id }
             | FederateToRti::Net { federate_id, .. }
             | FederateToRti::Ltc { federate_id, .. }
             | FederateToRti::Stop { federate_id } => federate_id.clone(),
@@ -676,7 +672,7 @@ impl RtiState {
     ) -> Result<ResolvedRtiEvent, RtiError> {
         debug_assert!(self.federates.contains_key(authenticated_federate));
         match message {
-            FederateToRti::Hello { federate_id, .. } => {
+            FederateToRti::Hello { federate_id } => {
                 self.validate_identity(authenticated_federate, &federate_id, "Hello")?;
                 Ok(ResolvedRtiEvent::Hello {
                     federate: authenticated_federate,

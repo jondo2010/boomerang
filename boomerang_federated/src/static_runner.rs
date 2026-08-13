@@ -360,14 +360,6 @@ where
             ))
         })?;
         let federate_id_for_client = federate_id.clone();
-        let neighbors = topology
-            .neighbors_for(federate_id)
-            .ok_or_else(|| {
-                bridge_error(format!(
-                    "missing compiled neighbor structure for federate '{federate_id}'"
-                ))
-            })?
-            .clone();
         let connection = connections.remove(federate_id).ok_or_else(|| {
             bridge_error(format!(
                 "missing prebuilt runtime connection for federate '{federate_id}'"
@@ -381,7 +373,6 @@ where
             tokio_runtime.spawn(async move {
                 FederateProtocolClient::connect_with_mailbox(
                     federate_id_for_client,
-                    neighbors,
                     sink,
                     stream,
                     mailbox,

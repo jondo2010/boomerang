@@ -157,7 +157,7 @@ pub(crate) async fn run_tcp_static_rti_session_compiled(
     while let Some(first_frame) = first_frames.next().await {
         let (peer_index, sink, stream, frame) = first_frame?;
         let federate_id = match &frame {
-            ProtocolFrame::FederateToRti(crate::FederateToRti::Hello { federate_id, .. }) => {
+            ProtocolFrame::FederateToRti(crate::FederateToRti::Hello { federate_id }) => {
                 federate_id.clone()
             }
             _ => {
@@ -214,7 +214,7 @@ mod tests {
             EndpointId, FederateId, FederateToRti, FederatedTopology, RtiToFederate, TopologyEdge,
             WireDelay, WireTag,
         },
-        FederateProtocolClient, NeighborStructure, ProtocolFrame,
+        FederateProtocolClient, ProtocolFrame,
     };
 
     fn block_on<F: Future>(future: F) -> F::Output {
@@ -328,16 +328,8 @@ mod tests {
 
         let sink_stream = TcpStream::connect(addr).await.unwrap();
         let source_stream = TcpStream::connect(addr).await.unwrap();
-        let source_connect = tokio::spawn(connect_tcp_client(
-            source.clone(),
-            topology.neighbors_for(&source),
-            source_stream,
-        ));
-        let sink_connect = tokio::spawn(connect_tcp_client(
-            sink.clone(),
-            topology.neighbors_for(&sink),
-            sink_stream,
-        ));
+        let source_connect = tokio::spawn(connect_tcp_client(source.clone(), source_stream));
+        let sink_connect = tokio::spawn(connect_tcp_client(sink.clone(), sink_stream));
         let source_client = source_connect.await.unwrap();
         let sink_client = sink_connect.await.unwrap();
         let recv_timeout = StdDuration::from_secs(1);
@@ -439,11 +431,10 @@ mod tests {
     #[cfg(feature = "serde-json-codec")]
     async fn connect_tcp_client(
         federate_id: FederateId,
-        topology: NeighborStructure,
         stream: TcpStream,
     ) -> FederateProtocolClient {
         let (sink, stream) = json_protocol_frame_transport(stream).split();
-        FederateProtocolClient::connect(federate_id, topology, sink, stream)
+        FederateProtocolClient::connect(federate_id, sink, stream)
             .await
             .unwrap()
     }

@@ -14,9 +14,7 @@ use tokio::task::JoinHandle;
 use crate::RuntimeBridgeError;
 #[cfg(feature = "runtime")]
 use crate::WireTag;
-use crate::{
-    FederateId, FederateToRti, NeighborStructure, ProtocolFrame, RtiToFederate, TransportError,
-};
+use crate::{FederateId, FederateToRti, ProtocolFrame, RtiToFederate, TransportError};
 
 #[cfg(all(test, feature = "runtime"))]
 mod tests;
@@ -192,12 +190,11 @@ impl FederateProtocolClient {
     /// Background reader and writer tasks are spawned for the live session.
     #[cfg_attr(feature = "runtime", tracing::instrument(
         level = "debug",
-        skip(federate_id, topology, sink, stream),
+        skip(federate_id, sink, stream),
         fields(federate = %federate_id)
     ))]
     pub async fn connect<S, R>(
         federate_id: FederateId,
-        topology: NeighborStructure,
         sink: S,
         stream: R,
     ) -> Result<Self, FederateClientError>
@@ -207,20 +204,12 @@ impl FederateProtocolClient {
         R: TryStream<Ok = ProtocolFrame> + Send + Unpin + 'static,
         R::Error: Into<TransportError> + Send + 'static,
     {
-        Self::connect_with_mailbox(
-            federate_id,
-            topology,
-            sink,
-            stream,
-            FederateClientMailbox::new(),
-        )
-        .await
+        Self::connect_with_mailbox(federate_id, sink, stream, FederateClientMailbox::new()).await
     }
 
     /// Connect a transport using an outbound mailbox created during runtime lowering.
     pub async fn connect_with_mailbox<S, R>(
         federate_id: FederateId,
-        topology: NeighborStructure,
         mut sink: S,
         mut stream: R,
         mailbox: FederateClientMailbox,
@@ -233,7 +222,6 @@ impl FederateProtocolClient {
     {
         sink.send(ProtocolFrame::FederateToRti(FederateToRti::Hello {
             federate_id,
-            topology,
         }))
         .await
         .map_err(|error| FederateClientError::Transport(error.into()))?;

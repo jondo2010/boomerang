@@ -193,7 +193,6 @@ where
                     let federate_id = &participant.id;
                     let ProtocolFrame::FederateToRti(FederateToRti::Hello {
                         federate_id: hello_federate,
-                        topology,
                     }) = frame
                     else {
                         return protocol_error(sinks, &federate_id, "expected Hello before Start")
@@ -214,25 +213,11 @@ where
                         return protocol_error(sinks, &federate_id, "duplicate Hello").await;
                     }
 
-                    let expected_topology = self
-                        .rti
-                        .neighbors_for(&federate_id)
-                        .expect("authenticated topology member must have a compiled neighbor view");
-                    if &topology != expected_topology {
-                        return protocol_error(
-                            sinks,
-                            &federate_id,
-                            "Hello neighbor structure does not match RTI topology",
-                        )
-                        .await;
-                    }
-
                     self.rti
                         .handle_from_key(
                             participant.key,
                             FederateToRti::Hello {
                                 federate_id: federate_id.clone(),
-                                topology,
                             },
                         )
                         .map_err(SessionError::Rti)?;
@@ -604,13 +589,11 @@ mod tests {
         a_client
             .send(FederateToRti::Hello {
                 federate_id: a.clone(),
-                topology: topology.neighbors_for(&a),
             })
             .await;
         b_client
             .send(FederateToRti::Hello {
                 federate_id: b.clone(),
-                topology: topology.neighbors_for(&b),
             })
             .await;
         assert_eq!(
@@ -734,13 +717,11 @@ mod tests {
         source_client
             .send(FederateToRti::Hello {
                 federate_id: source.clone(),
-                topology: topology.neighbors_for(&source),
             })
             .await;
         sink_client
             .send(FederateToRti::Hello {
                 federate_id: sink.clone(),
-                topology: topology.neighbors_for(&sink),
             })
             .await;
         assert_eq!(
@@ -927,13 +908,11 @@ mod tests {
         source_client
             .send(FederateToRti::Hello {
                 federate_id: source.clone(),
-                topology: topology.neighbors_for(&source),
             })
             .await;
         sink_client
             .send(FederateToRti::Hello {
                 federate_id: sink.clone(),
-                topology: topology.neighbors_for(&sink),
             })
             .await;
         assert_eq!(
@@ -1070,7 +1049,6 @@ mod tests {
             &mut source_client,
             FederateToRti::Hello {
                 federate_id: source.clone(),
-                topology: topology.neighbors_for(&source),
             },
         )
         .await;
@@ -1078,7 +1056,6 @@ mod tests {
             &mut sink_client,
             FederateToRti::Hello {
                 federate_id: sink.clone(),
-                topology: topology.neighbors_for(&sink),
             },
         )
         .await;
@@ -1124,7 +1101,6 @@ mod tests {
             &mut source_client,
             FederateToRti::Hello {
                 federate_id: source.clone(),
-                topology: topology.neighbors_for(&source),
             },
         )
         .await;
@@ -1132,7 +1108,6 @@ mod tests {
             &mut sink_client,
             FederateToRti::Hello {
                 federate_id: sink.clone(),
-                topology: topology.neighbors_for(&sink),
             },
         )
         .await;

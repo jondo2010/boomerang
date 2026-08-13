@@ -336,11 +336,6 @@ fn unknown_federate_errors_are_failure_atomic() {
     let cases = [
         FederateToRti::Hello {
             federate_id: unknown.clone(),
-            topology: NeighborStructure {
-                federate_id: unknown.clone(),
-                upstream: Vec::new(),
-                downstream: Vec::new(),
-            },
         },
         FederateToRti::Net {
             federate_id: unknown.clone(),

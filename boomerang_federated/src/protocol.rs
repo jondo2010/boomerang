@@ -301,7 +301,6 @@ impl FederatedTopology {
 pub enum FederateToRti {
     Hello {
         federate_id: FederateId,
-        topology: NeighborStructure,
     },
     Net {
         federate_id: FederateId,

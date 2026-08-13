@@ -1,7 +1,7 @@
 use futures_util::{SinkExt, StreamExt};
 
 use super::*;
-use crate::{in_memory_transport_pair, EndpointId, FederatedTopology, TopologyEdge, WireDelay};
+use crate::{in_memory_transport_pair, EndpointId};
 
 fn fed(id: &str) -> FederateId {
     FederateId::new(id)
@@ -13,18 +13,6 @@ fn endpoint() -> EndpointId {
 
 fn protocol_endpoint() -> EndpointId {
     endpoint()
-}
-
-fn source_sink_topology() -> FederatedTopology {
-    FederatedTopology::with_edges(
-        [fed("source"), fed("sink")],
-        [TopologyEdge::new(
-            fed("source"),
-            fed("sink"),
-            protocol_endpoint(),
-            WireDelay::ZERO,
-        )],
-    )
 }
 
 fn route() -> FederateClientRoute {
@@ -71,19 +59,13 @@ where
     F: FnOnce(crate::InMemoryTransport<ProtocolFrame, ProtocolFrame>) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
-    let topology = source_sink_topology();
     let (client_transport, rti_transport) = in_memory_transport_pair();
     let handle = tokio::spawn(rti(rti_transport));
     let (sink, stream) = client_transport;
-    let client = FederateProtocolClient::connect_with_mailbox(
-        federate_id.clone(),
-        topology.neighbors_for(&federate_id),
-        sink,
-        stream,
-        mailbox,
-    )
-    .await
-    .unwrap();
+    let client =
+        FederateProtocolClient::connect_with_mailbox(federate_id.clone(), sink, stream, mailbox)
+            .await
+            .unwrap();
     assert_eq!(client.start_unix_epoch_ns(), 0);
     (client, handle)
 }
@@ -132,10 +114,12 @@ async fn bridge_sends_net_outbound_msg_and_ltc_frames() {
         fed("source"),
         mailbox,
         |mut transport| async move {
-            assert!(matches!(
+            assert_eq!(
                 recv_federate_to_rti(&mut transport).await,
-                FederateToRti::Hello { federate_id, .. } if federate_id == fed("source")
-            ));
+                FederateToRti::Hello {
+                    federate_id: fed("source"),
+                },
+            );
             send_rti_to_federate(
                 &mut transport,
                 RtiToFederate::Start {

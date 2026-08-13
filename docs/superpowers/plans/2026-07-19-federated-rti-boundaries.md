@@ -4,7 +4,7 @@
 
 **Goal:** Make assembly lowering the only producer of an immutable RTI graph, give each runtime Federate only its local data, and separate that graph from dense mutable RTI coordination state.
 
-**Architecture:** Builder-owned federation graph analysis derives final RTI graph parts and per-Federate bridges from `PartitionAnalysis`. `boomerang_federated` mechanically interns those final parts into `RtiGraph`; sessions own the graph and a separate `RtiRuntimeState`, while clients consume only `RuntimeFederate` values. Raw topology manifests, topology-bearing `Hello`, and compatibility constructors are removed end to end.
+**Architecture:** Builder-owned federation graph analysis derives final RTI graph parts and per-Federate bridges from `PartitionAnalysis`. `boomerang_federated` mechanically interns those final parts into `RtiGraph`; sessions own the graph and a separate `RtiRuntimeState`, while clients consume only `RuntimeFederate` values. One Federate coordination service projects RTI grants across every active Enclave scheduler, and runner supervision stops blocked peers before joining after failure. Raw topology manifests, topology-bearing `Hello`, and compatibility constructors are removed end to end.
 
 **Tech Stack:** Rust, `petgraph`, `slotmap`, `tinymap`, Tokio, Cargo tests, Clippy, rustfmt.
 
@@ -27,6 +27,9 @@
 - Modify `boomerang_federated/src/hierarchy.rs`: make `RuntimeFederation` own `RtiGraph` and independent `RuntimeFederate` values.
 - Modify `boomerang_federated/src/runtime_bridge.rs`: construct Federate-local bridges directly from lowered routes; remove topology-derived construction.
 - Modify `boomerang_federated/src/static_runner.rs`: split the graph from Federates once, move it into the session, and never consult it while starting clients.
+- Modify `boomerang_federated/src/static_runner.rs`: replace the single-gateway heuristic with a
+  Federate-wide coordination service, and supervise scheduler failures before joining blocked
+  peers.
 - Modify `boomerang_federated/src/transport.rs`: accept only final `RtiGraph` for RTI TCP startup.
 - Modify `boomerang_federated/src/lib.rs`: export `RtiGraph`; remove manifest topology exports.
 - Modify `boomerang_federated/src/rti/tests.rs`, session/client/transport/static-runner tests, and `boomerang_builder/src/tests/federated.rs`: relocate tests to their owning phase.
@@ -644,7 +647,90 @@ git add boomerang_federated/src/rti boomerang_federated/src/lib.rs boomerang_fed
 git commit -m "refactor(federated): plumb final RTI graph ownership"
 ```
 
-### Task 5: Remove Raw Topology APIs and Separate Error Phases
+### Task 5: Coordinate Every Enclave and Make Scheduler Failure Fail Fast
+
+**Files:**
+- Modify: `boomerang_federated/src/static_runner.rs`
+- Modify: `boomerang_federated/src/client/mod.rs` only if the protocol coordinator needs a
+  non-blocking polling boundary
+- Test: `boomerang_federated/src/static_runner.rs` test module
+- Test: `boomerang/tests/federated_static.rs`
+
+- [ ] **Step 1: Write a failing multi-Enclave frontier test**
+
+Build a Federate with at least two independently runnable Enclaves where the Enclave that does not
+match the old gateway heuristic has an inbound federated route. Hold back the RTI grant for that
+Federate and assert through a bounded observation channel that neither Enclave advances beyond the
+withheld tag. Then deliver a message at that tag, grant the tag, and assert that the receiving
+Enclave observes the message before executing later-tag work.
+
+Name the focused test
+`static_runner::tests::all_enclaves_participate_in_federate_rti_frontier`. It must fail against the
+single-gateway implementation because the non-gateway scheduler uses only local coordination.
+
+- [ ] **Step 2: Write a failing bounded panic-supervision test**
+
+Create a static federation in which one scheduler reaction panics while a peer scheduler is
+waiting for an RTI grant. Run the federation behind a test-only bounded completion channel and
+assert that it returns `StaticFederationRunnerError::SchedulerThreadPanic` within the timeout.
+The test must fail against the current join-first implementation by timing out. Do not add a
+runtime timeout as the fix.
+
+Name the focused test `static_runner::tests::scheduler_panic_stops_waiting_peers`.
+
+- [ ] **Step 3: Replace the gateway with a Federate coordination service**
+
+In `boomerang_federated/src/static_runner.rs`, create one coordination service per Federate. The
+service owns its `RtiLogicalTimeCoordinator` and runs a dedicated request loop. Give every active
+Enclave a participant proxy implementing `boomerang_runtime::LogicalTimeCoordinator`; the proxy
+contains its `EnclaveKey` and request/reply channels, but no RTI graph or protocol transport.
+
+Track each active participant's requested tag, completed tag, and terminal state. Request the
+Federate's minimum safe next tag only after the participant frontier is known, release only the
+participants covered by the returned grant, and report LTC only when every active participant has
+completed that tag or moved beyond it. Remove a normally finished participant from subsequent
+frontier calculations. Serialize protocol access in the service loop; do not hold a shared mutex
+across a blocking RTI wait that prevents participant progress from reaching the service.
+
+Delete `gateway_enclaves` and the participant count of one. Keep the generic coordinator interface
+in `boomerang_runtime`; all Federate identity, RTI protocol, transport, and Tokio knowledge remains
+in `boomerang_federated`.
+
+- [ ] **Step 4: Supervise completion before ordered joins**
+
+Have every scheduler thread report its terminal result, including a caught panic payload, over a
+completion channel. The runner waits for completion reports rather than blocking on handles in
+spawn order. On the first panic or scheduler error, force-stop every Federate coordination
+service and abort or close the RTI session before joining remaining scheduler threads. Preserve
+the first terminal error as the returned error; retain cleanup failures only as secondary
+diagnostics.
+
+On normal completion, remove each Enclave participant from its Federate frontier. Send exactly one
+Stop after the last participant finishes, then join all scheduler threads and await the RTI
+session.
+
+- [ ] **Step 5: Run focused and end-to-end tests**
+
+Run:
+
+```bash
+cargo test -p boomerang_federated --all-features static_runner::tests::all_enclaves_participate_in_federate_rti_frontier
+cargo test -p boomerang_federated --all-features static_runner::tests::scheduler_panic_stops_waiting_peers
+cargo test -p boomerang_federated --all-features static_runner
+cargo test -p boomerang --all-features federated_static
+```
+
+Expected: the multi-Enclave frontier test proves that no sibling scheduler bypasses RTI grants;
+the panic test returns the expected error within its bound; all static federation tests pass.
+
+- [ ] **Step 6: Commit Federate-wide coordination and supervision**
+
+```bash
+git add boomerang_federated/src/static_runner.rs boomerang_federated/src/client/mod.rs boomerang/tests/federated_static.rs
+git commit -m "fix(federated): coordinate all federate enclaves"
+```
+
+### Task 6: Remove Raw Topology APIs and Separate Error Phases
 
 **Files:**
 - Modify: `boomerang_federated/src/protocol.rs`
@@ -738,7 +824,7 @@ git add boomerang_federated/src boomerang_builder/src
 git commit -m "refactor(federated): remove raw RTI topology APIs"
 ```
 
-### Task 6: Document and Verify the Complete Boundary Refactor
+### Task 7: Document and Verify the Complete Boundary Refactor
 
 **Files:**
 - Modify: `docs/federated-runtime.md`
@@ -823,9 +909,19 @@ Re-read `docs/superpowers/specs/2026-07-19-federated-rti-boundaries-design.md` a
 [ ] RuntimeFederate startup does not receive or query RtiGraph.
 [ ] Hello contains only FederateId.
 [ ] Graph validation and path computation live in boomerang_builder.
+[ ] Every active Enclave participates in its Federate's RTI logical-time frontier.
+[ ] A scheduler panic stops waiting peers before joins and returns SchedulerThreadPanic.
 [ ] No compatibility topology constructors or aliases remain.
 [ ] In-memory and TCP end-to-end tests pass.
 ```
 
 If any box cannot be checked from source and fresh command output, do not report completion; fix
 the uncovered requirement and repeat Steps 2-5.
+
+## Plan Revision Note
+
+2026-08-13: Reconciled the architecture review with the approved design. Added Task 5 because the
+existing single-gateway heuristic does not coordinate every Enclave in a Federate and the current
+join-before-force-stop ordering can hang after a scheduler panic. The task preserves the existing
+wire protocol and RTI grant state machine while making the static runner project those semantics
+across all Federate-owned schedulers and fail fast as one supervised unit.

@@ -15,8 +15,9 @@ without compatibility constructors or parallel legacy paths.
 ## Scope
 
 This change covers static federation construction, RTI graph representation, session startup,
-client startup, topology validation, and the builder-to-runtime handoff. It retains the existing
-TAG, NET, LTC, MSG, and Stop behavior.
+client startup, topology validation, federate-wide scheduler coordination, runner failure
+supervision, and the builder-to-runtime handoff. It retains the existing TAG, NET, LTC, MSG, and
+Stop protocol and RTI state-machine behavior.
 
 Federation partners are trusted. `Hello` establishes a declared Federate identity but does not
 send, hash, or authenticate topology. Authentication and topology hashing are explicitly deferred.
@@ -98,6 +99,50 @@ The static runner consumes `RuntimeFederation` once. It creates transports by it
 Federate map, moves `RtiGraph` into the RTI session, and moves each `RuntimeFederate` into its
 client and schedulers. Client connection code never queries the RTI graph.
 
+## Federate-Wide Logical-Time Coordination
+
+One protocol client and one `RtiLogicalTimeCoordinator` belong to each Federate, but every active
+Enclave scheduler owned by that Federate participates in the Federate's logical-time frontier. An
+Enclave is a separately scheduled runtime partition. The frontier is the lowest tag to which the
+Federate can safely advance after accounting for all of its active Enclaves and their in-process
+dependencies.
+
+The current heuristic of attaching the RTI coordinator to one selected "gateway" Enclave is not
+part of the target architecture. A non-gateway Enclave can otherwise advance without an RTI grant
+and can outrun an inbound federated message or the Federate's Stop ordering. Selecting an Enclave
+because it has an upstream local dependency does not establish a correctness relationship between
+that scheduler and every other scheduler in the Federate.
+
+The static runner therefore creates one Federate coordination service and gives each active
+Enclave a participant proxy implementing `boomerang_runtime::LogicalTimeCoordinator`. The service
+owns the single protocol coordinator and serializes protocol access. It aggregates participant
+requests into the Federate's next-event request, releases a participant only after the RTI grant
+and the Federate-local frontier permit that tag, and sends LTC only after every active participant
+has completed that tag or advanced beyond it. Participant completion removes that Enclave from
+future frontier calculations. Stop is sent after all participants finish, or immediately through
+the failure path.
+
+This service lives in `boomerang_federated`; `boomerang_runtime` retains only its generic
+`LogicalTimeCoordinator` trait and remains unaware of RTI messages, transports, Tokio, Federate
+identities, and endpoint identities. The service must not hold a mutex across a blocking RTI wait
+that prevents other Enclave participants from reporting progress. A dedicated coordination loop
+and per-Enclave request/reply channels provide serialization without exposing `RtiGraph` to any
+client scheduler.
+
+## Runner Failure Supervision
+
+Scheduler failure is terminal for the whole static federation. The runner must observe scheduler
+completion independently of join order. On the first scheduler error or panic it force-stops every
+Federate coordination service, aborts or closes the RTI session, and only then joins the remaining
+scheduler threads. This ordering unblocks peers waiting for grants and prevents a panic in one
+scheduler from hanging the runner while it joins another scheduler first.
+
+Normal shutdown follows the same ownership rule without treating success as failure: all Enclave
+participants finish, each Federate coordination service sends one Stop, scheduler threads join,
+and the RTI session completes. Panics are converted into `SchedulerThreadPanic`; ordinary scheduler
+errors retain `SchedulerRuntime`. Cleanup errors may be retained as secondary diagnostics but must
+not replace the first terminal failure.
+
 The following source-manifest and compatibility APIs are removed:
 
 - `FederatedTopology`;
@@ -161,6 +206,13 @@ Session and client tests prove that `Hello` carries only identity and that sessi
 resolved once into dense keys. Structural runner tests prove that each `RuntimeFederate` starts
 without access to `RtiGraph` and that RTI startup moves rather than clones the graph.
 
+Multi-Enclave runner tests prove that every active Enclave participates in the Federate frontier:
+an Enclave without the former gateway heuristic cannot advance past a withheld RTI grant, and an
+inbound message is observed before that Enclave advances beyond the message tag. A bounded failure
+test injects a scheduler panic while another scheduler is waiting for a grant and proves that the
+runner returns `SchedulerThreadPanic` rather than hanging. The timeout is test evidence, not a
+runtime shutdown mechanism.
+
 Existing in-memory and TCP end-to-end federation tests remain the final behavioral proof that
 assembly lowering produces complete artifacts.
 
@@ -174,4 +226,14 @@ and Clippy with warnings denied.
 - client topology exchange;
 - authentication, authorization, or topology hashing;
 - dynamic Federation membership;
-- changes to logical-time grant semantics.
+- changes to RTI TAG/NET/LTC grant semantics; projecting all Enclave schedulers into one Federate
+  frontier is an in-scope correction to the runner's use of those semantics.
+
+## Reconciliation Note
+
+The 2026-08-13 architecture review found that the existing single-gateway scheduler heuristic can
+let sibling Enclaves outrun RTI coordination and that joining scheduler threads before force-stop
+can hang after a scheduler panic. This revision makes both findings required runtime invariants of
+the phase-boundary refactor because the refactor already owns static-runner construction and claims
+to preserve federated logical-time behavior. They are not changes to the wire protocol or the RTI
+grant state machine.

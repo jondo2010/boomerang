@@ -31,6 +31,7 @@ enum Request {
     },
     Complete {
         participant: EnclaveKey,
+        request_id: u64,
         tag: Tag,
         reply: Reply,
     },
@@ -172,9 +173,15 @@ impl LogicalTimeCoordinator for FederateParticipantProxy {
     }
 
     fn complete(&mut self, tag: Tag) -> Result<(), CoordinationError> {
+        self.request_id = self
+            .request_id
+            .checked_add(1)
+            .ok_or_else(|| CoordinationError::new("request id overflow"))?;
         let participant = self.participant;
+        let request_id = self.request_id;
         self.call(|reply| Request::Complete {
             participant,
+            request_id,
             tag,
             reply,
         })
@@ -202,14 +209,24 @@ fn run(
                     reply,
                 } => match state.publish(participant, sequence, publication) {
                     Ok(actions) => {
-                        execute_actions(
+                        if let Err(error) = execute_actions(
                             actions,
                             &mut state,
                             &mut coordinator,
                             &wakes,
                             &mut pending,
                             &mut pending_wakes,
-                        )?;
+                        ) {
+                            let first = terminate(
+                                &mut state,
+                                &mut coordinator,
+                                &mut pending,
+                                &mut pending_wakes,
+                                error,
+                            );
+                            let _ = reply.send(Err(first.clone()));
+                            return Err(first);
+                        }
                         let _ = reply.send(Ok(()));
                     }
                     Err(error) => {
@@ -224,41 +241,79 @@ fn run(
                     reply,
                 } => {
                     pending.insert((participant, request_id), reply);
-                    let actions = state
-                        .acquire(participant, request_id, publication_sequence, tag)
-                        .map_err(|error| fail_all(&mut pending, error))?;
-                    execute_actions(
+                    let actions =
+                        match state.acquire(participant, request_id, publication_sequence, tag) {
+                            Ok(actions) => actions,
+                            Err(error) => {
+                                return Err(terminate(
+                                    &mut state,
+                                    &mut coordinator,
+                                    &mut pending,
+                                    &mut pending_wakes,
+                                    error,
+                                ));
+                            }
+                        };
+                    if let Err(error) = execute_actions(
                         actions,
                         &mut state,
                         &mut coordinator,
                         &wakes,
                         &mut pending,
                         &mut pending_wakes,
-                    )?;
+                    ) {
+                        return Err(terminate(
+                            &mut state,
+                            &mut coordinator,
+                            &mut pending,
+                            &mut pending_wakes,
+                            error,
+                        ));
+                    }
                 }
                 Request::Complete {
                     participant,
+                    request_id,
                     tag,
                     reply,
-                } => match state.complete(participant, tag) {
-                    Ok(actions) => {
-                        execute_actions(
-                            actions,
-                            &mut state,
-                            &mut coordinator,
-                            &wakes,
-                            &mut pending,
-                            &mut pending_wakes,
-                        )?;
-                        let _ = reply.send(Ok(()));
+                } => {
+                    pending.insert((participant, request_id), reply);
+                    match state.complete(participant, request_id, tag) {
+                        Ok(actions) => {
+                            if let Err(error) = execute_actions(
+                                actions,
+                                &mut state,
+                                &mut coordinator,
+                                &wakes,
+                                &mut pending,
+                                &mut pending_wakes,
+                            ) {
+                                return Err(terminate(
+                                    &mut state,
+                                    &mut coordinator,
+                                    &mut pending,
+                                    &mut pending_wakes,
+                                    error,
+                                ));
+                            }
+                        }
+                        Err(error) => {
+                            if let Some(reply) = pending.remove(&(participant, request_id)) {
+                                let _ = reply.send(Err(error));
+                            }
+                        }
                     }
-                    Err(error) => {
-                        let _ = reply.send(Err(error));
-                    }
-                },
+                }
                 Request::ForceStop { reply } => {
-                    fail_all(&mut pending, "Federate coordination stopped".into());
-                    let result = coordinator.stop().map_err(|error| error.to_string());
+                    let actions = state.fail("Federate coordination stopped".into());
+                    let result = execute_actions(
+                        actions,
+                        &mut state,
+                        &mut coordinator,
+                        &wakes,
+                        &mut pending,
+                        &mut pending_wakes,
+                    );
                     let _ = reply.send(result.clone());
                     return result.map(|_| coordinator);
                 }
@@ -269,19 +324,32 @@ fn run(
         }
         match coordinator.poll() {
             Ok(ProtocolPoll::Pending | ProtocolPoll::Progress) => {}
-            Ok(ProtocolPoll::Granted(tag)) => execute_actions(
-                state.grant(tag),
-                &mut state,
-                &mut coordinator,
-                &wakes,
-                &mut pending,
-                &mut pending_wakes,
-            )?,
+            Ok(ProtocolPoll::Granted(tag)) => {
+                if let Err(error) = execute_actions(
+                    state.grant(tag),
+                    &mut state,
+                    &mut coordinator,
+                    &wakes,
+                    &mut pending,
+                    &mut pending_wakes,
+                ) {
+                    return Err(terminate(
+                        &mut state,
+                        &mut coordinator,
+                        &mut pending,
+                        &mut pending_wakes,
+                        error,
+                    ));
+                }
+            }
             Err(error) => {
-                let message = error.to_string();
-                fail_all(&mut pending, message.clone());
-                let _ = coordinator.stop();
-                return Err(message);
+                return Err(terminate(
+                    &mut state,
+                    &mut coordinator,
+                    &mut pending,
+                    &mut pending_wakes,
+                    error.to_string(),
+                ));
             }
         }
     }
@@ -322,6 +390,16 @@ fn execute_actions(
                 request_id,
                 ..
             } => {
+                _state.release_request(participant, request_id);
+                if let Some(reply) = pending.remove(&(participant, request_id)) {
+                    let _ = reply.send(Ok(()));
+                }
+            }
+            CoordinationAction::ReleaseCompletion {
+                participant,
+                request_id,
+            } => {
+                _state.release_request(participant, request_id);
                 if let Some(reply) = pending.remove(&(participant, request_id)) {
                     let _ = reply.send(Ok(()));
                 }
@@ -331,6 +409,7 @@ fn execute_actions(
                 request_id,
                 reason,
             } => {
+                _state.release_request(participant, request_id);
                 if let Some(reply) = pending.remove(&(participant, request_id)) {
                     let _ = reply.send(Err(reason));
                 }
@@ -345,6 +424,40 @@ fn execute_actions(
     }
     flush_pending_wakes(wakes, pending_wakes);
     Ok(())
+}
+
+fn terminate(
+    state: &mut FederateCoordinationState,
+    coordinator: &mut RtiLogicalTimeCoordinator,
+    pending: &mut BTreeMap<(EnclaveKey, u64), Reply>,
+    pending_wakes: &mut BTreeMap<EnclaveKey, CoordinationWake>,
+    reason: String,
+) -> String {
+    let actions = state.fail(reason);
+    let first = state
+        .terminal_error()
+        .expect("fail records a terminal error")
+        .to_owned();
+    for action in actions {
+        match action {
+            CoordinationAction::FailRequest {
+                participant,
+                request_id,
+                reason,
+            } => {
+                if let Some(reply) = pending.remove(&(participant, request_id)) {
+                    let _ = reply.send(Err(reason));
+                }
+            }
+            CoordinationAction::SendStop => {
+                let _ = coordinator.stop();
+            }
+            _ => unreachable!("terminal state emitted a non-terminal action"),
+        }
+    }
+    pending_wakes.clear();
+    fail_all(pending, first.clone());
+    first
 }
 
 fn flush_pending_wakes(

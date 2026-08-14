@@ -20,6 +20,10 @@ pub(crate) enum CoordinationAction {
         publication_sequence: u64,
         tag: Tag,
     },
+    ReleaseCompletion {
+        participant: EnclaveKey,
+        request_id: u64,
+    },
     ReportLtc {
         tag: Tag,
     },
@@ -39,10 +43,16 @@ struct PendingAcquire {
 }
 
 #[derive(Debug)]
+struct PendingCompletion {
+    request_id: u64,
+}
+
+#[derive(Debug)]
 struct ParticipantState {
     publication_sequence: Option<u64>,
     frontier: Option<LogicalTimeFrontier>,
     pending: Option<PendingAcquire>,
+    pending_completion: Option<PendingCompletion>,
     certificate_epoch: Option<u64>,
     completed: Option<Tag>,
     finished: bool,
@@ -56,6 +66,7 @@ pub(crate) struct FederateCoordinationState {
     round: Option<(Tag, u64)>,
     observation_epoch: u64,
     stopped: bool,
+    terminal_error: Option<String>,
 }
 
 impl FederateCoordinationState {
@@ -71,6 +82,7 @@ impl FederateCoordinationState {
                         publication_sequence: None,
                         frontier: None,
                         pending: None,
+                        pending_completion: None,
                         certificate_epoch: None,
                         completed: None,
                         finished: false,
@@ -85,11 +97,65 @@ impl FederateCoordinationState {
             round: None,
             observation_epoch: 0,
             stopped: false,
+            terminal_error: None,
         }
     }
 
     pub(crate) fn is_stopped(&self) -> bool {
         self.stopped
+    }
+
+    pub(crate) fn terminal_error(&self) -> Option<&str> {
+        self.terminal_error.as_deref()
+    }
+
+    pub(crate) fn fail(&mut self, reason: String) -> Vec<CoordinationAction> {
+        if self.terminal_error.is_some() {
+            return Vec::new();
+        }
+        self.terminal_error = Some(reason.clone());
+        let mut actions = Vec::new();
+        for (&participant, state) in &mut self.participants {
+            if let Some(pending) = state.pending.take() {
+                actions.push(CoordinationAction::FailRequest {
+                    participant,
+                    request_id: pending.request_id,
+                    reason: reason.clone(),
+                });
+            }
+            if let Some(pending) = state.pending_completion.take() {
+                actions.push(CoordinationAction::FailRequest {
+                    participant,
+                    request_id: pending.request_id,
+                    reason: reason.clone(),
+                });
+            }
+        }
+        if !self.stopped {
+            self.stopped = true;
+            actions.push(CoordinationAction::SendStop);
+        }
+        actions
+    }
+
+    pub(crate) fn release_request(&mut self, participant: EnclaveKey, request_id: u64) {
+        let Some(state) = self.participants.get_mut(&participant) else {
+            return;
+        };
+        if state
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.request_id == request_id)
+        {
+            state.pending = None;
+        }
+        if state
+            .pending_completion
+            .as_ref()
+            .is_some_and(|pending| pending.request_id == request_id)
+        {
+            state.pending_completion = None;
+        }
     }
 
     pub(crate) fn publish(
@@ -98,6 +164,9 @@ impl FederateCoordinationState {
         sequence: u64,
         publication: FrontierPublication,
     ) -> Result<Vec<CoordinationAction>, String> {
+        if let Some(error) = &self.terminal_error {
+            return Err(error.clone());
+        }
         let state = self
             .participants
             .get(&participant)
@@ -197,6 +266,9 @@ impl FederateCoordinationState {
         publication_sequence: u64,
         tag: Tag,
     ) -> Result<Vec<CoordinationAction>, String> {
+        if let Some(error) = &self.terminal_error {
+            return Err(error.clone());
+        }
         let state = self
             .participants
             .get_mut(&participant)
@@ -230,6 +302,9 @@ impl FederateCoordinationState {
     }
 
     pub(crate) fn grant(&mut self, grant: Tag) -> Vec<CoordinationAction> {
+        if self.stopped {
+            return Vec::new();
+        }
         self.grant_coverage = Some(self.grant_coverage.map_or(grant, |old| old.max(grant)));
         let mut actions = Vec::new();
         for (&participant, state) in &mut self.participants {
@@ -261,8 +336,12 @@ impl FederateCoordinationState {
     pub(crate) fn complete(
         &mut self,
         participant: EnclaveKey,
+        request_id: u64,
         tag: Tag,
     ) -> Result<Vec<CoordinationAction>, String> {
+        if let Some(error) = &self.terminal_error {
+            return Err(error.clone());
+        }
         let state = self
             .participants
             .get(&participant)
@@ -290,6 +369,16 @@ impl FederateCoordinationState {
             }
         }
         let state = self.participants.get_mut(&participant).expect("checked");
+        if let Some(old) = state
+            .pending_completion
+            .replace(PendingCompletion { request_id })
+        {
+            actions.push(CoordinationAction::FailRequest {
+                participant,
+                request_id: old.request_id,
+                reason: "superseded by newer completion".into(),
+            });
+        }
         state.completed = Some(tag);
         if let Some((round_tag, epoch)) = self.round {
             if tag >= round_tag {
@@ -306,6 +395,10 @@ impl FederateCoordinationState {
                 actions.extend(self.recompute_net());
             }
         }
+        actions.push(CoordinationAction::ReleaseCompletion {
+            participant,
+            request_id,
+        });
         Ok(actions)
     }
 
@@ -662,7 +755,7 @@ mod tests {
         let wakes = state.grant(Tag::ZERO);
         assert!(!has_ltc(
             &state
-                .complete(key(0), Tag::ZERO)
+                .complete(key(0), 1, Tag::ZERO)
                 .expect("first participant completion"),
             Tag::ZERO
         ));
@@ -674,7 +767,7 @@ mod tests {
             )
             .unwrap();
         assert!(!has_ltc(&invalidated, Tag::ZERO));
-        state.complete(key(0), Tag::ZERO).unwrap();
+        state.complete(key(0), 1, Tag::ZERO).unwrap();
         assert!(has_ltc(
             &state
                 .publish(
@@ -706,7 +799,7 @@ mod tests {
             )
             .unwrap();
 
-        let invalidated = state.complete(key(0), Tag::ZERO).unwrap();
+        let invalidated = state.complete(key(0), 1, Tag::ZERO).unwrap();
 
         assert_eq!(
             invalidated
@@ -783,9 +876,9 @@ mod tests {
             state.publish(key(0), 1, candidate(round)).unwrap();
             state.publish(key(1), 1, candidate(round)).unwrap();
             state.grant(round);
-            assert!(!has_ltc(&state.complete(key(0), round).unwrap(), round));
-            assert!(!has_ltc(&state.complete(key(1), round).unwrap(), round));
-            assert!(has_ltc(&state.complete(key(0), round).unwrap(), round));
+            assert!(!has_ltc(&state.complete(key(0), 1, round).unwrap(), round));
+            assert!(!has_ltc(&state.complete(key(1), 2, round).unwrap(), round));
+            assert!(has_ltc(&state.complete(key(0), 3, round).unwrap(), round));
         }
     }
 
@@ -913,5 +1006,35 @@ mod tests {
                 CoordinationAction::RequestNet { tag: requested },
             ] if *completed == Tag::ZERO && *requested == later
         ));
+    }
+
+    #[test]
+    fn terminal_failure_fans_out_pending_requests_and_preserves_first_error() {
+        let participant = key(0);
+        let mut state = FederateCoordinationState::new(
+            crate::federate_coordination::FederateCoordinationLayout::new([participant]),
+        );
+        state.publish(participant, 1, candidate(Tag::ZERO)).unwrap();
+        state.acquire(participant, 11, 1, Tag::ZERO).unwrap();
+        state.complete(participant, 12, Tag::ZERO).unwrap();
+
+        let actions = state.fail("first failure".into());
+        assert_eq!(state.terminal_error(), Some("first failure"));
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            CoordinationAction::FailRequest { request_id: 11, reason, .. }
+                if reason == "first failure"
+        )));
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            CoordinationAction::FailRequest { request_id: 12, reason, .. }
+                if reason == "first failure"
+        )));
+        assert!(actions
+            .iter()
+            .any(|action| matches!(action, CoordinationAction::SendStop)));
+
+        assert!(state.fail("second failure".into()).is_empty());
+        assert_eq!(state.terminal_error(), Some("first failure"));
     }
 }

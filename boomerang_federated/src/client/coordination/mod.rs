@@ -13,7 +13,21 @@ pub(crate) enum ProtocolPoll {
     Granted(boomerang_runtime::Tag),
 }
 
-/// RTI-backed logical-time coordinator for one federate runtime enclave.
+/// RTI-backed wire adapter for one federate.
+///
+/// Scheduler events and TAG-coverage policy belong to the Federate coordination service, not this
+/// protocol adapter:
+///
+/// ```compile_fail
+/// fn scheduler_policy_is_not_exposed_by_the_wire_adapter(
+///     coordinator: &mut boomerang_federated::RtiLogicalTimeCoordinator,
+///     event_rx: &boomerang_runtime::Receiver<boomerang_runtime::AsyncEvent>,
+/// ) {
+///     coordinator
+///         .wait_for_tag(boomerang_runtime::Tag::ZERO, event_rx)
+///         .unwrap();
+/// }
+/// ```
 #[derive(Debug)]
 pub struct RtiLogicalTimeCoordinator {
     /// Stable protocol identity used for outgoing frames and inbound route validation.
@@ -66,39 +80,6 @@ impl RtiLogicalTimeCoordinator {
             failed: false,
             poll_interval: StdDuration::from_millis(1),
         })
-    }
-
-    /// Request and wait for an RTI TAG grant for `tag`.
-    /// Inbound MSG frames are scheduled while the scheduler is blocked.
-    #[tracing::instrument(
-        level = "debug",
-        skip(self, tag, event_rx),
-        fields(federate = %self.federate_id, tag = %tag)
-    )]
-    pub fn wait_for_tag(
-        &mut self,
-        tag: boomerang_runtime::Tag,
-        event_rx: &boomerang_runtime::Receiver<boomerang_runtime::AsyncEvent>,
-    ) -> Result<Option<boomerang_runtime::AsyncEvent>, FederateClientError> {
-        if self.stopped {
-            return Err(FederateClientError::RtiStopped);
-        }
-        if self.failed {
-            return Err(FederateClientError::CoordinationFailed);
-        }
-        self.submit_net(tag)?;
-
-        loop {
-            if let Ok(Some(event)) = event_rx.try_recv() {
-                return Ok(Some(event));
-            }
-
-            match self.poll()? {
-                ProtocolPoll::Pending | ProtocolPoll::Progress => continue,
-                ProtocolPoll::Granted(granted) if granted >= tag => return Ok(None),
-                ProtocolPoll::Granted(_) => continue,
-            }
-        }
     }
 
     pub(crate) fn submit_net(

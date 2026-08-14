@@ -1,6 +1,7 @@
 use futures_util::{SinkExt, StreamExt};
 
 use super::*;
+use crate::client::coordination::ProtocolPoll;
 use crate::{in_memory_transport_pair, EndpointId};
 
 fn fed(id: &str) -> FederateId {
@@ -68,10 +69,6 @@ where
             .unwrap();
     assert_eq!(client.start_unix_epoch_ns(), 0);
     (client, handle)
-}
-
-fn empty_event_rx() -> boomerang_runtime::Receiver<boomerang_runtime::AsyncEvent> {
-    boomerang_runtime::Enclave::default().event_rx
 }
 
 fn inbound_endpoint_for_u32() -> (
@@ -156,7 +153,6 @@ async fn bridge_sends_net_outbound_msg_and_ltc_frames() {
     )
     .await;
 
-    let event_rx = empty_event_rx();
     let mut barrier = RtiLogicalTimeCoordinator::new(
         fed("source"),
         client,
@@ -165,13 +161,16 @@ async fn bridge_sends_net_outbound_msg_and_ltc_frames() {
     )
     .unwrap();
 
-    assert_eq!(
-        barrier
-            .wait_for_tag(boomerang_runtime::Tag::ZERO, &event_rx)
-            .unwrap()
-            .map(|event| format!("{event:?}")),
-        None
-    );
+    barrier.submit_net(boomerang_runtime::Tag::ZERO).unwrap();
+    loop {
+        match barrier.poll().unwrap() {
+            ProtocolPoll::Granted(tag) => {
+                assert_eq!(tag, boomerang_runtime::Tag::ZERO);
+                break;
+            }
+            ProtocolPoll::Pending | ProtocolPoll::Progress => {}
+        }
+    }
     outbound
         .send(crate::FederatedOutboundCommand::Msg(
             crate::FederatedOutboundMessage {
@@ -239,10 +238,11 @@ async fn bridge_schedules_inbound_msg_before_reporting_completion() {
     )
     .unwrap();
 
-    let event = barrier
-        .wait_for_tag(boomerang_runtime::Tag::ZERO, &event_rx)
-        .unwrap()
-        .expect("inbound MSG should interrupt the barrier wait");
+    barrier.submit_net(boomerang_runtime::Tag::ZERO).unwrap();
+    assert_eq!(barrier.poll().unwrap(), ProtocolPoll::Progress);
+    let event = event_rx
+        .recv()
+        .expect("inbound MSG should schedule an event");
     match event {
         boomerang_runtime::AsyncEvent::Logical { tag, key, value } => {
             assert_eq!(tag, boomerang_runtime::Tag::ZERO);
@@ -317,11 +317,12 @@ async fn bridge_admits_all_preceding_messages_before_consuming_tag() {
     )
     .unwrap();
 
+    barrier.submit_net(boomerang_runtime::Tag::ZERO).unwrap();
     for expected in [41, 42] {
-        let event = barrier
-            .wait_for_tag(boomerang_runtime::Tag::ZERO, &event_rx)
-            .unwrap()
-            .expect("each preceding MSG must interrupt before TAG");
+        assert_eq!(barrier.poll().unwrap(), ProtocolPoll::Progress);
+        let event = event_rx
+            .recv()
+            .expect("each preceding MSG must schedule before TAG");
         let boomerang_runtime::AsyncEvent::Logical { tag, key, value } = event else {
             panic!("expected logical async event");
         };
@@ -332,10 +333,10 @@ async fn bridge_admits_all_preceding_messages_before_consuming_tag() {
             Err(_) => panic!("expected u32 payload"),
         }
     }
-    assert!(barrier
-        .wait_for_tag(boomerang_runtime::Tag::ZERO, &event_rx)
-        .unwrap()
-        .is_none());
+    assert_eq!(
+        barrier.poll().unwrap(),
+        ProtocolPoll::Granted(boomerang_runtime::Tag::ZERO)
+    );
     barrier
         .report_logical_tag_complete(boomerang_runtime::Tag::ZERO)
         .unwrap();
@@ -378,7 +379,7 @@ async fn inbound_admission_failure_makes_the_coordinator_terminal_before_later_t
     })
     .await;
 
-    let (inbound, event_rx, _action_key, _shutdown_tx) = inbound_endpoint_for_u32();
+    let (inbound, _event_rx, _action_key, _shutdown_tx) = inbound_endpoint_for_u32();
     let mut inbound_route = route();
     inbound_route.bind_inbound(inbound);
     let mut barrier = RtiLogicalTimeCoordinator::new(
@@ -389,13 +390,14 @@ async fn inbound_admission_failure_makes_the_coordinator_terminal_before_later_t
     )
     .unwrap();
 
+    barrier.submit_net(boomerang_runtime::Tag::ZERO).unwrap();
     assert!(matches!(
-        barrier.wait_for_tag(boomerang_runtime::Tag::ZERO, &event_rx),
+        barrier.poll(),
         Err(FederateClientError::RuntimeEndpoint(_))
     ));
     assert!(barrier.failed);
     assert!(matches!(
-        barrier.wait_for_tag(boomerang_runtime::Tag::ZERO, &event_rx),
+        barrier.submit_net(boomerang_runtime::Tag::ZERO),
         Err(FederateClientError::CoordinationFailed)
     ));
     assert!(matches!(
@@ -462,21 +464,16 @@ async fn bridge_does_not_repeat_pending_net_after_inbound_interruption() {
     )
     .unwrap();
 
-    assert!(barrier
-        .wait_for_tag(boomerang_runtime::Tag::ZERO, &event_rx)
-        .unwrap()
-        .is_some());
-    assert!(barrier
-        .wait_for_tag(boomerang_runtime::Tag::ZERO, &event_rx)
-        .unwrap()
-        .is_none());
-    assert!(barrier
-        .wait_for_tag(
-            boomerang_runtime::Tag::new(boomerang_runtime::Duration::seconds(1), 0),
-            &event_rx,
-        )
-        .unwrap()
-        .is_none());
+    barrier.submit_net(boomerang_runtime::Tag::ZERO).unwrap();
+    assert_eq!(barrier.poll().unwrap(), ProtocolPoll::Progress);
+    assert!(event_rx.recv().is_ok());
+    assert_eq!(
+        barrier.poll().unwrap(),
+        ProtocolPoll::Granted(boomerang_runtime::Tag::ZERO)
+    );
+    let next = boomerang_runtime::Tag::new(boomerang_runtime::Duration::seconds(1), 0);
+    barrier.submit_net(next).unwrap();
+    assert_eq!(barrier.poll().unwrap(), ProtocolPoll::Granted(next));
 
     rti.await.unwrap();
 }
@@ -509,7 +506,6 @@ async fn bridge_reports_rti_error_frame() {
     })
     .await;
 
-    let event_rx = empty_event_rx();
     let mut barrier = RtiLogicalTimeCoordinator::new(
         fed("source"),
         client,
@@ -518,10 +514,15 @@ async fn bridge_reports_rti_error_frame() {
     )
     .unwrap();
 
-    assert!(matches!(
-        barrier.wait_for_tag(boomerang_runtime::Tag::ZERO, &event_rx),
-        Err(error) if error.to_string().contains("boom")
-    ));
+    barrier.submit_net(boomerang_runtime::Tag::ZERO).unwrap();
+    let error = loop {
+        match barrier.poll() {
+            Err(error) => break error,
+            Ok(ProtocolPoll::Pending | ProtocolPoll::Progress) => {}
+            Ok(ProtocolPoll::Granted(tag)) => panic!("unexpected TAG {tag}"),
+        }
+    };
+    assert!(error.to_string().contains("boom"));
     assert_eq!(barrier.pending_request, None);
 
     rti.await.unwrap();

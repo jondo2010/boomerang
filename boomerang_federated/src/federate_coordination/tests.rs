@@ -58,6 +58,18 @@ where
     F: FnOnce(crate::InMemoryTransport<ProtocolFrame, ProtocolFrame>) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
+    coordinator_with_fake_rti_and_faults(crate::FederatedFaultState::default(), routes, fake).await
+}
+
+async fn coordinator_with_fake_rti_and_faults<F, Fut>(
+    faults: crate::FederatedFaultState,
+    routes: impl IntoIterator<Item = FederateClientRoute>,
+    fake: F,
+) -> (RtiLogicalTimeCoordinator, tokio::task::JoinHandle<()>)
+where
+    F: FnOnce(crate::InMemoryTransport<ProtocolFrame, ProtocolFrame>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
     let (client_transport, rti_transport) = in_memory_transport_pair();
     let handle = tokio::spawn(async move {
         let mut transport = rti_transport;
@@ -79,15 +91,105 @@ where
         .await
         .unwrap();
     (
-        RtiLogicalTimeCoordinator::new(
-            fed(),
-            client,
-            routes,
-            crate::FederatedFaultState::default(),
-        )
-        .unwrap(),
+        RtiLogicalTimeCoordinator::new(fed(), client, routes, faults).unwrap(),
         handle,
     )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn request_net_failure_fans_out_the_first_concrete_error() {
+    let faults = crate::FederatedFaultState::default();
+    faults.record(crate::FederatedEndpointError::codec("first action failure"));
+    faults.record(crate::FederatedEndpointError::send("later failure"));
+    let (coordinator, rti) =
+        coordinator_with_fake_rti_and_faults(faults, [], |mut transport| async move {
+            assert!(matches!(
+                recv_frame(&mut transport).await,
+                FederateToRti::Net {
+                    tag: WireTag::FOREVER,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                recv_frame(&mut transport).await,
+                FederateToRti::Stop { .. }
+            ));
+        })
+        .await;
+    let first = 0usize.into();
+    let second = 1usize.into();
+    let (wakes, mut receivers, _guards) = participant_channels([first, second]);
+    let service = FederateCoordinationService::spawn(
+        coordinator,
+        FederateCoordinationLayout::new([first, second]),
+        wakes,
+    )
+    .unwrap();
+    let mut first_participant = service.participant(first);
+    let mut second_participant = service.participant(second);
+    first_participant
+        .publish_frontier(candidate(Tag::ZERO))
+        .unwrap();
+    let first_events = receivers.remove(&first).unwrap();
+    let acquire = std::thread::spawn(move || first_participant.acquire(Tag::ZERO, &first_events));
+    std::thread::sleep(StdDuration::from_millis(20));
+
+    let publish_error = second_participant
+        .publish_frontier(candidate(Tag::ZERO))
+        .unwrap_err();
+    assert!(publish_error.to_string().contains("first action failure"));
+    let acquire_error = acquire.join().unwrap().unwrap_err();
+    assert!(acquire_error.to_string().contains("first action failure"));
+    assert!(!acquire_error.to_string().contains("service stopped"));
+    assert!(service.join().unwrap_err().contains("first action failure"));
+    rti.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn report_ltc_failure_fails_the_pending_completion_with_the_first_error() {
+    let faults = crate::FederatedFaultState::default();
+    let coordinator_faults = faults.clone();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let (coordinator, rti) =
+        coordinator_with_fake_rti_and_faults(coordinator_faults, [], |mut transport| async move {
+            assert!(matches!(
+                recv_frame(&mut transport).await,
+                FederateToRti::Net {
+                    tag: WireTag::ZERO,
+                    ..
+                }
+            ));
+            send_frame(&mut transport, RtiToFederate::Tag { tag: WireTag::ZERO }).await;
+            let _ = done_rx.await;
+        })
+        .await;
+    let participant_key = 0usize.into();
+    let (wakes, mut receivers, _guards) = participant_channels([participant_key]);
+    let service = FederateCoordinationService::spawn(
+        coordinator,
+        FederateCoordinationLayout::new([participant_key]),
+        wakes,
+    )
+    .unwrap();
+    let mut participant = service.participant(participant_key);
+    participant.publish_frontier(candidate(Tag::ZERO)).unwrap();
+    let events = receivers.remove(&participant_key).unwrap();
+    let _ = participant.acquire(Tag::ZERO, &events).unwrap();
+
+    faults.record(crate::FederatedEndpointError::codec(
+        "completion action failure",
+    ));
+    let completion_error = participant.complete(Tag::ZERO).unwrap_err();
+    assert!(completion_error
+        .to_string()
+        .contains("completion action failure"));
+    assert!(!completion_error.to_string().contains("service stopped"));
+    assert!(service
+        .join()
+        .unwrap_err()
+        .contains("completion action failure"));
+    let _ = done_tx.send(());
+    rti.await.unwrap();
 }
 
 fn participant_channels(
@@ -348,7 +450,8 @@ async fn force_stop_fails_pending_acquire_without_deadlock() {
     let waiter = std::thread::spawn(move || participant.acquire(Tag::ZERO, &event_rx));
     std::thread::sleep(StdDuration::from_millis(20));
     service.force_stop().unwrap();
-    assert!(waiter.join().unwrap().is_err());
+    let error = waiter.join().unwrap().unwrap_err();
+    assert!(error.to_string().contains("coordination stopped"));
     service.join().unwrap();
     rti.await.unwrap();
 }

@@ -421,29 +421,26 @@ fn execute_connected_static_federation(
         let handle = match std::thread::Builder::new()
             .name(format!("federate-{federate_id}-{enclave_key}"))
             .spawn(move || {
-                let mut scheduler = boomerang_runtime::Scheduler::new_with_logical_time_coordinator(
-                    enclave_key,
-                    enclave,
-                    config,
-                    participant,
-                );
-                let terminal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    scheduler.try_event_loop()
-                }));
-                let result = match terminal {
-                    Ok(Ok(())) => SchedulerThreadResult::Completed {
-                        federate_id: thread_federate_id,
-                        enclave_key,
-                        env: scheduler.into_env(),
-                    },
-                    Ok(Err(source)) => SchedulerThreadResult::RuntimeError {
-                        federate_id: thread_federate_id,
-                        source,
-                    },
-                    Err(payload) => SchedulerThreadResult::Panicked {
-                        what: panic_payload_message(payload),
-                    },
-                };
+                let result = catch_scheduler_thread_body(|| {
+                    let mut scheduler =
+                        boomerang_runtime::Scheduler::new_with_logical_time_coordinator(
+                            enclave_key,
+                            enclave,
+                            config,
+                            participant,
+                        );
+                    match scheduler.try_event_loop() {
+                        Ok(()) => SchedulerThreadResult::Completed {
+                            federate_id: thread_federate_id,
+                            enclave_key,
+                            env: scheduler.into_env(),
+                        },
+                        Err(source) => SchedulerThreadResult::RuntimeError {
+                            federate_id: thread_federate_id,
+                            source,
+                        },
+                    }
+                });
                 let _ = completion_tx.send(result);
             }) {
             Ok(handle) => handle,
@@ -469,9 +466,16 @@ fn execute_connected_static_federation(
     >::new();
     let mut first_error = None;
     for _ in 0..handles.len() {
-        let result = completion_rx.recv().map_err(|_| {
-            bridge_error("scheduler completion channel closed before all schedulers terminated")
-        })?;
+        let result = match receive_scheduler_result(&completion_rx, || {
+            force_stop_services(&services);
+            session_handle.abort();
+        }) {
+            Ok(result) => result,
+            Err(error) => {
+                first_error.get_or_insert(error);
+                break;
+            }
+        };
         match result {
             SchedulerThreadResult::Completed {
                 federate_id,
@@ -537,6 +541,27 @@ fn execute_connected_static_federation(
     session_result?;
     drop(coordinators);
     Ok(envs)
+}
+
+fn catch_scheduler_thread_body(
+    body: impl FnOnce() -> SchedulerThreadResult,
+) -> SchedulerThreadResult {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(result) => result,
+        Err(payload) => SchedulerThreadResult::Panicked {
+            what: panic_payload_message(payload),
+        },
+    }
+}
+
+fn receive_scheduler_result(
+    completion_rx: &mpsc::Receiver<SchedulerThreadResult>,
+    cleanup: impl FnOnce(),
+) -> Result<SchedulerThreadResult, StaticFederationRunnerError> {
+    completion_rx.recv().map_err(|_| {
+        cleanup();
+        bridge_error("scheduler completion channel closed before all schedulers terminated")
+    })
 }
 
 fn force_stop_services(
@@ -1675,6 +1700,36 @@ mod tests {
             Err(StaticFederationRunnerError::SchedulerThreadPanic { what })
                 if what.contains("intentional scheduler panic")
         ));
+    }
+
+    #[test]
+    fn scheduler_thread_catches_panics_outside_the_event_loop() {
+        let result = catch_scheduler_thread_body(|| {
+            panic!("intentional scheduler construction panic");
+        });
+
+        assert!(matches!(
+            result,
+            SchedulerThreadResult::Panicked { what }
+                if what.contains("intentional scheduler construction panic")
+        ));
+    }
+
+    #[test]
+    fn closed_completion_channel_runs_cleanup_before_returning_error() {
+        let (completion_tx, completion_rx) = std::sync::mpsc::channel();
+        drop(completion_tx);
+        let cleaned = std::sync::atomic::AtomicBool::new(false);
+
+        let result = receive_scheduler_result(&completion_rx, || {
+            cleaned.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        assert!(matches!(
+            result,
+            Err(StaticFederationRunnerError::Bridge { .. })
+        ));
+        assert!(cleaned.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]

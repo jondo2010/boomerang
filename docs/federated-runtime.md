@@ -120,7 +120,7 @@ inbound decoder, and target action route. No declarative topology manifest cross
 phase, and no compatibility constructor can build an RTI from one.
 
 The aggregate `FederatedRuntimeConnections` value is created during federation lowering and retained
-inside `StaticFederationRuntime`. While runtime actions are lowered, inbound endpoint factories
+inside `StaticFederationRuntime`. After runtime actions are lowered, inbound endpoint factories
 temporarily take and mutate it to attach target Enclave contexts and action references. Finalization
 then consumes it, pairing each owned Enclave map with one `FederateRuntimeBridge`. Enclaves are
 allocated directly into their owning Federate's dense map, while owner-qualified aliases pair the

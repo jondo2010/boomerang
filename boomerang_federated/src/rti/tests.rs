@@ -542,7 +542,7 @@ fn invalid_tags_and_lifecycle_transitions_are_failure_atomic() {
 }
 
 #[test]
-fn state_handler_rejects_route_absent_from_topology_without_mutation() {
+fn state_handler_rejects_absent_route_without_mutation() {
     let mut rti = rti_with_edge(WireDelay::ZERO);
     let invalid_endpoint = endpoint("source.out->target.other");
     let before = snapshot(&rti);

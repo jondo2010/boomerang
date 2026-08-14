@@ -8,7 +8,15 @@ pub mod codec;
 mod federate_coordination;
 #[cfg(feature = "runtime")]
 mod hierarchy;
+/// Stable protocol identities, frames, tags, and delays.
+///
+/// Declarative topology manifests are intentionally not part of the public API;
+/// assembly lowering is the only supported producer of an RTI graph.
 pub mod protocol;
+/// Runtime RTI graph and live coordination state.
+///
+/// Static topology failures belong to assembly lowering rather than the live
+/// RTI error boundary.
 pub mod rti;
 #[cfg(feature = "runtime")]
 mod runtime;
@@ -32,8 +40,7 @@ pub use codec::{CodecError, PayloadCodec, PayloadDecoder, PayloadEncoder};
 #[cfg(feature = "runtime")]
 pub use hierarchy::{RuntimeFederate, RuntimeFederation, RuntimeFederationError};
 pub use protocol::{
-    EndpointId, FederateId, FederateToRti, FederatedTopology, NeighborStructure, ProtocolFrame,
-    RtiToFederate, TopologyEdge, WireDelay, WireTag,
+    EndpointId, FederateId, FederateToRti, ProtocolFrame, RtiToFederate, WireDelay, WireTag,
 };
 pub use rti::{RtiDelivery, RtiError, RtiGraph, RtiState};
 #[cfg(feature = "runtime")]

@@ -137,47 +137,11 @@ pub enum RtiError {
     #[error("unknown federate `{0}`")]
     UnknownFederate(FederateId),
 
-    #[error("duplicate federate `{0}` in RTI topology")]
-    DuplicateFederate(FederateId),
-
-    #[error("route endpoint `{endpoint}` refers to undeclared federate `{federate_id}`")]
-    UndeclaredEdgeFederate {
-        endpoint: EndpointId,
-        federate_id: FederateId,
-    },
-
-    #[error("route {route_source} -> {route_target} has an empty endpoint identity")]
-    MissingRouteEndpoint {
-        route_source: FederateId,
-        route_target: FederateId,
-    },
-
-    #[error("duplicate route {route_source} -> {route_target} endpoint `{endpoint}`")]
-    DuplicateRoute {
-        route_source: FederateId,
-        route_target: FederateId,
-        endpoint: EndpointId,
-    },
-
-    #[error("endpoint `{endpoint}` is assigned to conflicting routes")]
-    ConflictingRoute { endpoint: EndpointId },
-
     #[error("delaying tag {tag} by {delay_ns}ns overflowed")]
     TagDelayOverflow { tag: WireTag, delay_ns: u64 },
 
     #[error("cannot calculate the latest tag strictly before {tag}")]
     TagPredecessorUnderflow { tag: WireTag },
-
-    #[error(
-        "minimum path delay {path_source} -> {intermediate} -> {target} overflowed while adding {first_delay_ns}ns and {second_delay_ns}ns"
-    )]
-    PathDelayOverflow {
-        path_source: FederateId,
-        intermediate: FederateId,
-        target: FederateId,
-        first_delay_ns: u64,
-        second_delay_ns: u64,
-    },
 
     #[error(
         "{event} identified federate `{claimed_federate}`, but authenticated endpoint is `{authenticated_federate}`"

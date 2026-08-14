@@ -99,6 +99,24 @@ The static runner consumes `RuntimeFederation` once. It creates transports by it
 Federate map, moves `RtiGraph` into the RTI session, and moves each `RuntimeFederate` into its
 client and schedulers. Client connection code never queries the RTI graph.
 
+The runtime-only coordination correction does not change build or lowering artifacts. It keeps
+three categories structurally separate after a `RuntimeFederate` is consumed:
+
+- immutable per-execution layout: Federate identity, the complete sorted set of owned Enclave
+  keys, and Federate-local routes;
+- per-run resources and capabilities: participant channels and wake handles, protocol mailbox and
+  client ownership, thread handles, and completion/session handles;
+- mutable service/protocol state: publication sequences, pending request identities, advertised
+  NET, grant coverage, observation epochs and certificates, completed tags, lifecycle, and the
+  first failure.
+
+The immutable `FederateCoordinationLayout` is created at runtime from exactly every Enclave owned
+by the consumed `RuntimeFederate`, including an Enclave with no startup work. An "active Enclave"
+means an owned participant that has not authoritatively published `Finished`; it never means an
+Enclave selected because it currently has queued or startup work. No participant layout, channel,
+frontier, grant, epoch, or service state is written back into `RuntimeFederation`,
+`RuntimeFederate`, `RtiGraph`, builder analysis, or lowering output.
+
 ## Federate-Wide Logical-Time Coordination
 
 One protocol client and one `RtiLogicalTimeCoordinator` belong to each Federate, but every active
@@ -120,8 +138,8 @@ nonblocking frontier-publication phase and a later blocking grant-acquisition ph
 the federated protocol distinction between a Federate's NET promise and its permission to execute
 after TAG.
 
-Before an Enclave can block on an in-process upstream barrier, its scheduler publishes one of
-three versioned frontier states through the generic coordinator interface:
+Before an Enclave can block on an in-process upstream barrier, its scheduler publishes a
+monotonically sequenced frontier state through the generic coordinator interface:
 
 - `Candidate(tag)`: the lowest currently queued event tag;
 - `Idle`: no finite event is currently queued, but future local or federated input remains
@@ -129,10 +147,13 @@ three versioned frontier states through the generic coordinator interface:
 - `Finished`: the scheduler is terminal and no longer participates.
 
 Publication never waits for the RTI. A candidate revision caused by an earlier local or federated
-event replaces the previous publication before the scheduler attempts that tag again. Once every
-active participant has published a current state, the service sends one Federate NET for the
-minimum finite candidate. If all participants are idle, it sends no finite NET and continues
-servicing participant and protocol input.
+event replaces the previous publication before the scheduler attempts that tag again and
+supersedes any acquire and reply associated with the older publication sequence. Each acquire has
+a participant-local request id and is bound to the publication sequence that justified it; a new
+publication cancels an older pending acquire before its reply can release the scheduler. Once every active
+participant has published a current state, the service sends one Federate NET for the minimum
+finite candidate. If all participants are idle, it sends no finite NET, does not send
+`NET(FOREVER)`, and continues servicing participant and protocol input.
 
 After publishing, a scheduler retains the established execution order: acquire in-process
 barriers, acquire the external Federate permit, process the tag, release in-process downstream
@@ -143,26 +164,43 @@ permission.
 
 An `Idle` publication is not evidence that the participant has completed every future tag: a
 same-Federate upstream Enclave may still enqueue work at that tag. Whenever the cached RTI grant
-covers the Federate's current minimum candidate `t`, the service therefore opens a versioned local
-round for `t`; an RTI grant higher than `t` does not implicitly complete the higher tag. Every
-active participant is woken, if necessary, to observe the round and must either process all newly
-visible work through `t` or publish a post-round quiescence certificate. The service sends LTC for
-`t` only when every active participant has completed `t`, advanced beyond it, or certified
-quiescence for that round after local downstream releases are visible. Stale `Idle` or candidate
-publications from an earlier round never satisfy completion. This certification is local control
-traffic and does not add a wire-protocol message.
+covers the Federate's current minimum candidate `t`, the service therefore opens a local round for
+`t` with a fresh observation epoch; an RTI grant higher than `t` does not implicitly complete the
+higher tag. It sends every active participant a mandatory generic coordination wake containing the
+exact pair `(t, observation_epoch)`. `SchedulerCoordination` records the pair only when it consumes
+that exact wake event. The next frontier publication carries only the last consumed pair, so an
+unrelated async event cannot falsely acknowledge a wake that has merely been sent. There is no
+shared "latest epoch" side channel for a scheduler to sample.
 
-Participant completion removes that Enclave from future frontier calculations. The last
-participant causes exactly one Stop. The failure path force-stops the service without waiting for
-frontier or quiescence consensus.
+Round completion is a conservative fixed-point computation. A participant must either complete
+`t`, advance beyond it, or publish quiescence after consuming the current epoch's wake. Every
+accepted participant completion, frontier advance, or candidate revision that occurs after any
+current-epoch quiescence certificate invalidates all prior certificates, starts a new observation
+epoch for the same `t`, and wakes all active participants again. The service has no local
+dependency graph and does not classify any such transition as harmless. It sends LTC for `t` only
+after one complete observation epoch in which
+every active participant acknowledges completion or quiescence and no later transition
+invalidates that epoch. This certification is local control traffic and does not add a
+wire-protocol message.
+
+Normal scheduler shutdown is the sole authoritative publisher of `Finished`; the runner does not
+publish it a second time. After a participant is terminal, any repeated `Finished` publication is
+idempotent even if it replays a sequence; other stale or non-monotonic publications remain errors.
+A Finished participant leaves future frontier calculations, and the last Finished participant
+causes exactly one Stop. Scheduler panic or error instead uses the global force-stop path without
+waiting for frontier or quiescence consensus.
 
 This service lives in `boomerang_federated`; `boomerang_runtime` retains only its generic
 `LogicalTimeCoordinator` trait and remains unaware of RTI messages, transports, Tokio, Federate
 identities, and endpoint identities. Its generic contract gains frontier publication and
-grant-version/quiescence concepts, but no federated types. The service must not hold a mutex across
-a blocking RTI wait that prevents other Enclave participants from reporting progress. A dedicated
-coordination loop polls protocol progress and drains per-Enclave publication, acquisition,
-completion, and shutdown channels without exposing `RtiGraph` to any client scheduler.
+observation-epoch/quiescence concepts, but no federated types. The aggregate state machine is the
+sole owner of the advertised Federate frontier, grant coverage, local rounds, and participant
+supersession. The protocol coordinator owns only wire send/poll validation, inbound route
+admission, and protocol failure atomicity; a returned TAG is an input to the aggregate state, not a
+second grant cache. The service must not hold a mutex across a blocking RTI wait that prevents
+other Enclave participants from reporting progress. A dedicated coordination loop polls protocol
+progress and drains per-Enclave publication, acquisition, completion, and shutdown channels
+without exposing `RtiGraph` to any client scheduler.
 
 ## Runner Failure Supervision
 
@@ -246,11 +284,14 @@ an Enclave without the former gateway heuristic cannot advance past a withheld R
 inbound message is observed before that Enclave advances beyond the message tag. Tests cover
 independent siblings, zero-delay and positive-delay same-Federate dependencies, an initially idle
 downstream Enclave, candidate regression after local or federated interruption, and stale
-publication rejection across grant versions. They prove that LTC waits for post-grant quiescence
-from every active Enclave and that normal completion sends exactly one Stop. A bounded failure test
-injects a scheduler panic while another scheduler is waiting for a grant and proves that the
-runner returns `SchedulerThreadPanic` rather than hanging. The timeout is test evidence, not a
-runtime shutdown mechanism.
+publication rejection across observation epochs. A deterministic race test proves that an idle
+downstream certificate recorded before its upstream releases local work is invalidated and that LTC
+waits for a later fixed-point epoch. Another test interleaves an unrelated async event with a sent
+coordination wake and proves that only consumption of the wake acknowledges its epoch. Tests also
+prove acquire supersession, exact NET/TAG/LTC/Stop frame counts, and exactly one Stop after normal
+completion. A bounded failure test injects a scheduler panic while another scheduler is waiting for
+a grant and proves that the runner returns `SchedulerThreadPanic` rather than hanging. The timeout
+is test evidence, not a runtime shutdown mechanism.
 
 Existing in-memory and TCP end-to-end federation tests remain the final behavioral proof that
 assembly lowering produces complete artifacts.

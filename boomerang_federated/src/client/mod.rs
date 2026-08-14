@@ -53,6 +53,9 @@ pub enum FederateClientError {
     #[error("federate protocol client is closed")]
     ClientClosed,
 
+    #[error("timed out waiting for federate protocol delivery")]
+    DeliveryTimeout,
+
     #[cfg(feature = "runtime")]
     #[error("scheduler event channel closed after scheduling inbound endpoint `{endpoint}`")]
     SchedulerEventChannelClosed { endpoint: crate::EndpointId },
@@ -118,17 +121,45 @@ enum ClientInput {
     Closed,
 }
 
+#[derive(Debug)]
+struct OutboundRequest {
+    message: FederateToRti,
+    delivered: Option<mpsc::Sender<Result<(), TransportError>>>,
+}
+
 /// Cloneable sender for a federate's single ordered protocol-outbound queue.
 #[derive(Debug, Clone)]
 pub struct FederateProtocolSender {
-    outgoing: tokio::sync::mpsc::UnboundedSender<FederateToRti>,
+    outgoing: tokio::sync::mpsc::UnboundedSender<OutboundRequest>,
 }
 
 impl FederateProtocolSender {
     pub fn send(&self, message: FederateToRti) -> Result<(), FederateClientError> {
         self.outgoing
-            .send(message)
+            .send(OutboundRequest {
+                message,
+                delivered: None,
+            })
             .map_err(|_| FederateClientError::ClientClosed)
+    }
+
+    fn send_confirmed(
+        &self,
+        message: FederateToRti,
+        timeout: StdDuration,
+    ) -> Result<(), FederateClientError> {
+        let (delivered, delivery) = mpsc::channel();
+        self.outgoing
+            .send(OutboundRequest {
+                message,
+                delivered: Some(delivered),
+            })
+            .map_err(|_| FederateClientError::ClientClosed)?;
+        match delivery.recv_timeout(timeout) {
+            Ok(result) => result.map_err(FederateClientError::Transport),
+            Err(RecvTimeoutError::Timeout) => Err(FederateClientError::DeliveryTimeout),
+            Err(RecvTimeoutError::Disconnected) => Err(FederateClientError::ClientClosed),
+        }
     }
 }
 
@@ -136,7 +167,7 @@ impl FederateProtocolSender {
 #[derive(Debug)]
 pub struct FederateClientMailbox {
     sender: FederateProtocolSender,
-    receiver: tokio::sync::mpsc::UnboundedReceiver<FederateToRti>,
+    receiver: tokio::sync::mpsc::UnboundedReceiver<OutboundRequest>,
 }
 
 impl FederateClientMailbox {
@@ -154,7 +185,7 @@ impl FederateClientMailbox {
 
     pub fn try_recv(&mut self) -> Result<Option<FederateToRti>, FederateClientError> {
         match self.receiver.try_recv() {
-            Ok(message) => Ok(Some(message)),
+            Ok(request) => Ok(Some(request.message)),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => Ok(None),
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                 Err(FederateClientError::ClientClosed)
@@ -166,7 +197,7 @@ impl FederateClientMailbox {
         self,
     ) -> (
         FederateProtocolSender,
-        tokio::sync::mpsc::UnboundedReceiver<FederateToRti>,
+        tokio::sync::mpsc::UnboundedReceiver<OutboundRequest>,
     ) {
         (self.sender, self.receiver)
     }
@@ -272,6 +303,14 @@ impl FederateProtocolClient {
         self.outgoing.send(message)
     }
 
+    pub(crate) fn send_confirmed(
+        &self,
+        message: FederateToRti,
+        timeout: StdDuration,
+    ) -> Result<(), FederateClientError> {
+        self.outgoing.send_confirmed(message, timeout)
+    }
+
     /// Receive one RTI-to-federate protocol message, waiting up to `timeout`.
     pub fn recv_timeout(
         &self,
@@ -323,7 +362,7 @@ where
 
 fn spawn_writer<S>(
     mut sink: S,
-    mut outgoing: tokio::sync::mpsc::UnboundedReceiver<FederateToRti>,
+    mut outgoing: tokio::sync::mpsc::UnboundedReceiver<OutboundRequest>,
     incoming: mpsc::Sender<ClientInput>,
 ) -> JoinHandle<()>
 where
@@ -331,10 +370,24 @@ where
     S::Error: Into<TransportError> + Send + 'static,
 {
     tokio::spawn(async move {
-        while let Some(message) = outgoing.recv().await {
-            if let Err(error) = sink.send(ProtocolFrame::FederateToRti(message)).await {
-                let _ = incoming.send(ClientInput::Transport(error.into()));
-                break;
+        while let Some(request) = outgoing.recv().await {
+            let result = sink
+                .send(ProtocolFrame::FederateToRti(request.message))
+                .await
+                .map_err(Into::into);
+            match result {
+                Ok(()) => {
+                    if let Some(delivered) = request.delivered {
+                        let _ = delivered.send(Ok(()));
+                    }
+                }
+                Err(error) => {
+                    if let Some(delivered) = request.delivered {
+                        let _ = delivered.send(Err(error.clone()));
+                    }
+                    let _ = incoming.send(ClientInput::Transport(error));
+                    break;
+                }
             }
         }
     })

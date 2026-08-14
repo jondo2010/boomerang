@@ -3,6 +3,8 @@ use std::{collections::BTreeMap, time::Duration as StdDuration};
 use super::{FederateClientError, FederateClientRoute, FederateProtocolClient};
 use crate::{FederateId, FederateToRti, RtiToFederate, WireTag};
 
+const TERMINAL_DELIVERY_TIMEOUT: StdDuration = StdDuration::from_secs(1);
+
 #[cfg(test)]
 mod tests;
 
@@ -184,13 +186,19 @@ impl RtiLogicalTimeCoordinator {
         }
 
         let fault_result = self.check_runtime_fault();
-        let net_result = self.client.send(FederateToRti::Net {
-            federate_id: self.federate_id.clone(),
-            tag: WireTag::FOREVER,
-        });
-        let stop_result = self.client.send(FederateToRti::Stop {
-            federate_id: self.federate_id.clone(),
-        });
+        let net_result = self.client.send_confirmed(
+            FederateToRti::Net {
+                federate_id: self.federate_id.clone(),
+                tag: WireTag::FOREVER,
+            },
+            TERMINAL_DELIVERY_TIMEOUT,
+        );
+        let stop_result = self.client.send_confirmed(
+            FederateToRti::Stop {
+                federate_id: self.federate_id.clone(),
+            },
+            TERMINAL_DELIVERY_TIMEOUT,
+        );
         self.pending_request = None;
         self.stopped = true;
         fault_result?;

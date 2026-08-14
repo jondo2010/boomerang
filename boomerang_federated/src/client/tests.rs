@@ -1,4 +1,14 @@
-use futures_util::{SinkExt, StreamExt};
+use std::{
+    pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    task::{Context, Poll, Waker},
+    time::{Duration as StdDuration, Instant},
+};
+
+use futures_util::{Sink, SinkExt, StreamExt};
 
 use super::*;
 use crate::client::coordination::ProtocolPoll;
@@ -18,6 +28,96 @@ fn protocol_endpoint() -> EndpointId {
 
 fn route() -> FederateClientRoute {
     FederateClientRoute::new(endpoint(), fed("source"), fed("sink"))
+}
+
+#[derive(Debug, Default)]
+struct DeliveryGate {
+    open: AtomicBool,
+    blocked: AtomicBool,
+    fail: AtomicBool,
+    waker: Mutex<Option<Waker>>,
+    delivered: Mutex<Vec<ProtocolFrame>>,
+}
+
+impl DeliveryGate {
+    fn open(&self) {
+        self.open.store(true, Ordering::Release);
+        if let Some(waker) = self.waker.lock().unwrap().take() {
+            waker.wake();
+        }
+    }
+
+    fn close(&self) {
+        self.open.store(false, Ordering::Release);
+        self.blocked.store(false, Ordering::Release);
+    }
+
+    fn fail(&self) {
+        self.fail.store(true, Ordering::Release);
+    }
+
+    async fn wait_until_blocked(&self) {
+        let deadline = Instant::now() + StdDuration::from_secs(1);
+        while !self.blocked.load(Ordering::Acquire) {
+            assert!(
+                Instant::now() < deadline,
+                "writer did not reach the gated transport flush"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+#[derive(Debug)]
+struct GatedSink {
+    gate: Arc<DeliveryGate>,
+    pending: Vec<ProtocolFrame>,
+}
+
+impl GatedSink {
+    fn new(gate: Arc<DeliveryGate>) -> Self {
+        gate.open();
+        Self {
+            gate,
+            pending: Vec::new(),
+        }
+    }
+}
+
+impl Sink<ProtocolFrame> for GatedSink {
+    type Error = crate::TransportError;
+
+    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, item: ProtocolFrame) -> Result<(), Self::Error> {
+        self.pending.push(item);
+        Ok(())
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        if self.gate.fail.load(Ordering::Acquire) {
+            self.pending.clear();
+            return Poll::Ready(Err(crate::TransportError::Closed));
+        }
+        if !self.gate.open.load(Ordering::Acquire) {
+            let mut waker = self.gate.waker.lock().unwrap();
+            *waker = Some(cx.waker().clone());
+            if !self.gate.open.load(Ordering::Acquire) {
+                self.gate.blocked.store(true, Ordering::Release);
+                return Poll::Pending;
+            }
+            waker.take();
+        }
+        let delivered = self.pending.drain(..).collect::<Vec<_>>();
+        self.gate.delivered.lock().unwrap().extend(delivered);
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.poll_flush(cx)
+    }
 }
 
 async fn recv_federate_to_rti(
@@ -570,4 +670,158 @@ async fn bridge_stop_sends_no_future_before_stop() {
     assert_eq!(barrier.pending_request, None);
 
     rti.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bridge_stop_waits_for_terminal_transport_delivery() {
+    let (client_transport, mut rti_transport) = in_memory_transport_pair();
+    send_rti_to_federate(
+        &mut rti_transport,
+        RtiToFederate::Start {
+            start_unix_epoch_ns: 0,
+        },
+    )
+    .await;
+
+    let gate = Arc::new(DeliveryGate::default());
+    let client = FederateProtocolClient::connect(
+        fed("source"),
+        GatedSink::new(gate.clone()),
+        client_transport.1,
+    )
+    .await
+    .unwrap();
+    gate.close();
+
+    let mut coordinator = RtiLogicalTimeCoordinator::new(
+        fed("source"),
+        client,
+        [route()],
+        crate::FederatedFaultState::default(),
+    )
+    .unwrap();
+    let (returned_tx, returned_rx) = std::sync::mpsc::channel();
+    let stop = tokio::task::spawn_blocking(move || {
+        let result = coordinator.stop();
+        returned_tx.send(()).unwrap();
+        (result, coordinator)
+    });
+
+    gate.wait_until_blocked().await;
+    assert!(
+        matches!(
+            returned_rx.recv_timeout(StdDuration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ),
+        "stop returned before the terminal frames reached the transport"
+    );
+
+    gate.open();
+    let (result, coordinator) = stop.await.unwrap();
+    result.unwrap();
+    drop(coordinator);
+
+    assert_eq!(
+        *gate.delivered.lock().unwrap(),
+        [
+            ProtocolFrame::FederateToRti(FederateToRti::Hello {
+                federate_id: fed("source"),
+            }),
+            ProtocolFrame::FederateToRti(FederateToRti::Net {
+                federate_id: fed("source"),
+                tag: WireTag::FOREVER,
+            }),
+            ProtocolFrame::FederateToRti(FederateToRti::Stop {
+                federate_id: fed("source"),
+            }),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn confirmed_delivery_times_out_when_transport_does_not_flush() {
+    let (client_transport, mut rti_transport) = in_memory_transport_pair();
+    send_rti_to_federate(
+        &mut rti_transport,
+        RtiToFederate::Start {
+            start_unix_epoch_ns: 0,
+        },
+    )
+    .await;
+
+    let gate = Arc::new(DeliveryGate::default());
+    let client = FederateProtocolClient::connect(
+        fed("source"),
+        GatedSink::new(gate.clone()),
+        client_transport.1,
+    )
+    .await
+    .unwrap();
+    gate.close();
+
+    let delivery = tokio::task::spawn_blocking(move || {
+        let started = Instant::now();
+        let result = client.send_confirmed(
+            FederateToRti::Stop {
+                federate_id: fed("source"),
+            },
+            StdDuration::from_millis(20),
+        );
+        (result, started.elapsed(), client)
+    });
+
+    gate.wait_until_blocked().await;
+    let (result, elapsed, client) = delivery.await.unwrap();
+    assert!(matches!(result, Err(FederateClientError::DeliveryTimeout)));
+    assert!(elapsed < StdDuration::from_secs(1));
+
+    gate.open();
+    drop(client);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn confirmed_transport_failure_reaches_caller_and_client_input() {
+    let (client_transport, mut rti_transport) = in_memory_transport_pair();
+    send_rti_to_federate(
+        &mut rti_transport,
+        RtiToFederate::Start {
+            start_unix_epoch_ns: 0,
+        },
+    )
+    .await;
+
+    let gate = Arc::new(DeliveryGate::default());
+    let client = FederateProtocolClient::connect(
+        fed("source"),
+        GatedSink::new(gate.clone()),
+        client_transport.1,
+    )
+    .await
+    .unwrap();
+    gate.fail();
+
+    let (delivery_error, input_error, client) = tokio::task::spawn_blocking(move || {
+        let delivery_error = client
+            .send_confirmed(
+                FederateToRti::Stop {
+                    federate_id: fed("source"),
+                },
+                StdDuration::from_secs(1),
+            )
+            .unwrap_err();
+        let input_error = client.recv_timeout(StdDuration::from_secs(1)).unwrap_err();
+        (delivery_error, input_error, client)
+    })
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        delivery_error,
+        FederateClientError::Transport(crate::TransportError::Closed)
+    ));
+    assert!(matches!(
+        input_error,
+        FederateClientError::Transport(crate::TransportError::Closed)
+    ));
+    drop(client);
 }

@@ -50,9 +50,9 @@ sequenceDiagram
     S->>L: Hello(sink)
     O->>L: Hello(source)
     Note over L: read first frames concurrently<br/>and map sockets by declared id
-    L->>R: cached sink key + preserved Hello
-    L->>R: cached source key + preserved Hello
-    R->>R: validate ids against immutable RtiGraph
+    L->>R: FederateId-keyed sink endpoint + preserved Hello
+    L->>R: FederateId-keyed source endpoint + preserved Hello
+    R->>R: resolve ids to FederateKey and cache per participant
     R-->>S: Start(start_unix_epoch_ns)
     R-->>O: Start(start_unix_epoch_ns)
 ```
@@ -118,13 +118,14 @@ uncompleted incoming tags. Multiple payloads at one tag occupy one set entry,
 not one counter per payload. The effective next-event tag, or effective NET, is
 the minimum of the advertised NET and the earliest tag in that set.
 
-During builder lowering, `PartitionAnalysis` validates the static federation
-and resolves stable identities into dense Federate and endpoint records. Each
-Federate record owns immediate incoming dependencies, sorted transitive
-upstream and downstream keys, and the minimum cumulative delay for every
-reachable ordered source/target pair. The resulting immutable `RtiGraph` moves
-into the RTI session, while each independently deployable `RuntimeFederate`
-receives only its local Enclaves, routes, mailbox, and fault state. Startup
+Builder lowering consumes `PartitionAnalysis`, validates the derived static
+federation, resolves stable identities into dense Federate and endpoint records,
+and then produces the immutable `RtiGraph`. Each Federate record owns immediate
+incoming dependencies, sorted transitive upstream and downstream keys, and the
+minimum cumulative delay for every reachable ordered source/target pair. The
+graph moves into the RTI session, while each independently deployable
+`RuntimeFederate` receives only its local Enclaves, routes, mailbox, and fault
+state. Startup
 therefore binds an identity-only `Hello` to the precomputed graph rather than
 accepting or compiling topology from a client. Delay composition uses checked
 arithmetic; overflow rejects assembly lowering rather than producing a

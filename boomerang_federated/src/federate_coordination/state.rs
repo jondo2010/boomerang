@@ -243,6 +243,19 @@ impl FederateCoordinationState {
                 return Ok(actions);
             }
         }
+        if frontier_changed && self.round.is_none() {
+            if let Some(tag) = self
+                .minimum_candidate()
+                .filter(|tag| self.grant_coverage.is_some_and(|grant| *tag <= grant))
+            {
+                self.observation_epoch = self.observation_epoch.wrapping_add(1);
+                for state in self.participants.values_mut() {
+                    state.certificate_epoch = None;
+                }
+                self.round = Some((tag, self.observation_epoch));
+                actions.extend(self.wake_actions(tag, self.observation_epoch));
+            }
+        }
         actions.extend(self.recompute_net());
         if let Some((tag, epoch)) = self.round {
             if self
@@ -704,6 +717,63 @@ mod tests {
             state.acquire(key(1), 2, 1, later).unwrap().as_slice(),
             [CoordinationAction::ReleaseAcquire { tag, .. }] if *tag == later
         ));
+    }
+
+    #[test]
+    fn cached_grant_opens_round_when_frontier_moves_within_coverage() {
+        let earlier = Tag::new(boomerang_runtime::Duration::ZERO, 1);
+        let later = Tag::new(boomerang_runtime::Duration::seconds(1), 0);
+        let participant = key(0);
+        let mut state = FederateCoordinationState::new(
+            crate::federate_coordination::FederateCoordinationLayout::new([participant]),
+        );
+
+        state.publish(participant, 1, candidate(later)).unwrap();
+        state.acquire(participant, 1, 1, later).unwrap();
+        assert!(state.grant(earlier).is_empty());
+
+        let actions = state.publish(participant, 2, candidate(earlier)).unwrap();
+        let wake = wake_for(&actions, participant);
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            CoordinationAction::FailRequest { request_id: 1, .. }
+        )));
+
+        assert!(matches!(
+            state
+                .acquire(participant, 2, 2, earlier)
+                .unwrap()
+                .as_slice(),
+            [CoordinationAction::ReleaseAcquire { request_id: 2, .. }]
+        ));
+        state
+            .publish(
+                participant,
+                3,
+                publication(LogicalTimeFrontier::Candidate(earlier), Some(wake)),
+            )
+            .unwrap();
+
+        let completion = state.complete(participant, 3, earlier).unwrap();
+        assert!(has_ltc(&completion, earlier));
+    }
+
+    #[test]
+    fn repeated_candidate_after_ltc_does_not_reopen_cached_round() {
+        let participant = key(0);
+        let mut state = FederateCoordinationState::new(
+            crate::federate_coordination::FederateCoordinationLayout::new([participant]),
+        );
+
+        state.publish(participant, 1, candidate(Tag::ZERO)).unwrap();
+        state.grant(Tag::ZERO);
+        assert!(has_ltc(
+            &state.complete(participant, 1, Tag::ZERO).unwrap(),
+            Tag::ZERO
+        ));
+
+        let repeated = state.publish(participant, 2, candidate(Tag::ZERO)).unwrap();
+        assert!(repeated.is_empty());
     }
 
     #[test]

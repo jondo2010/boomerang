@@ -1,6 +1,20 @@
 use crate::{
-    event::AsyncEvent, CommonContext, Duration, EnclaveKey, RuntimeError, SendContext, Tag,
+    event::{AsyncEvent, CoordinationWake},
+    CommonContext, Duration, EnclaveKey, RuntimeError, SendContext, Tag,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogicalTimeFrontier {
+    Candidate(Tag),
+    Idle,
+    Finished,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrontierPublication {
+    pub frontier: LogicalTimeFrontier,
+    pub consumed_wake: Option<CoordinationWake>,
+}
 
 /// Failure while coordinating logical time with a local upstream enclave.
 #[derive(Debug, thiserror::Error)]
@@ -58,6 +72,11 @@ impl From<String> for CoordinationError {
 /// The scheduler calls `acquire` only after local upstream barriers grant, and
 /// calls `complete` only after reactions finish and local downstream releases.
 pub trait LogicalTimeCoordinator: Send {
+    fn publish_frontier(
+        &mut self,
+        publication: FrontierPublication,
+    ) -> Result<(), CoordinationError>;
+
     /// Acquire permission to advance to `tag`.
     ///
     /// A returned [`CoordinationOutcome`] explicitly distinguishes a grant
@@ -77,6 +96,13 @@ pub trait LogicalTimeCoordinator: Send {
 pub struct NoopLogicalTimeCoordinator;
 
 impl LogicalTimeCoordinator for NoopLogicalTimeCoordinator {
+    fn publish_frontier(
+        &mut self,
+        _publication: FrontierPublication,
+    ) -> Result<(), CoordinationError> {
+        Ok(())
+    }
+
     fn acquire(
         &mut self,
         _tag: Tag,
@@ -220,6 +246,7 @@ pub(super) struct SchedulerCoordination {
     upstream: tinymap::TinySecondaryMap<EnclaveKey, LogicalTimeBarrier>,
     downstream: tinymap::TinySecondaryMap<EnclaveKey, SendContext>,
     external: Box<dyn LogicalTimeCoordinator>,
+    consumed_wake: Option<CoordinationWake>,
 }
 
 impl SchedulerCoordination {
@@ -233,6 +260,7 @@ impl SchedulerCoordination {
             upstream,
             downstream,
             external: Box::new(NoopLogicalTimeCoordinator),
+            consumed_wake: None,
         }
     }
 
@@ -246,6 +274,10 @@ impl SchedulerCoordination {
         current_tag: Tag,
     ) -> CoordinationEventResult {
         match event {
+            AsyncEvent::CoordinationWake(wake) => {
+                self.consumed_wake = Some(wake);
+                CoordinationEventResult::Consumed
+            }
             AsyncEvent::TagRelease { enclave, tag } => {
                 self.upstream
                     .get_mut(enclave)
@@ -264,6 +296,19 @@ impl SchedulerCoordination {
             }
             event => CoordinationEventResult::Event(event),
         }
+    }
+
+    pub(super) fn publish_frontier(
+        &mut self,
+        frontier: LogicalTimeFrontier,
+    ) -> Result<(), CoordinationError> {
+        let publication = FrontierPublication {
+            frontier,
+            consumed_wake: self.consumed_wake,
+        };
+        self.external.publish_frontier(publication)?;
+        self.consumed_wake = None;
+        Ok(())
     }
 
     pub(super) fn acquire(
@@ -291,20 +336,43 @@ impl SchedulerCoordination {
         }
     }
 
-    pub(super) fn complete(
-        &mut self,
-        tag: Tag,
-        shutting_down: bool,
-    ) -> Result<(), CoordinationError> {
-        self.release_downstream(tag, shutting_down);
+    pub(super) fn complete(&mut self, tag: Tag, terminal: bool) -> Result<(), CoordinationError> {
+        self.release_downstream(if terminal { Tag::FOREVER } else { tag }, terminal);
         self.external.complete(tag)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
     use crate::keepalive;
+
+    #[derive(Debug)]
+    struct RecordingCompletion(Arc<Mutex<Vec<Tag>>>);
+
+    impl LogicalTimeCoordinator for RecordingCompletion {
+        fn publish_frontier(
+            &mut self,
+            _publication: FrontierPublication,
+        ) -> Result<(), CoordinationError> {
+            Ok(())
+        }
+
+        fn acquire(
+            &mut self,
+            _tag: Tag,
+            _event_rx: &crate::Receiver<AsyncEvent>,
+        ) -> Result<CoordinationOutcome, CoordinationError> {
+            Ok(CoordinationOutcome::Granted)
+        }
+
+        fn complete(&mut self, tag: Tag) -> Result<(), CoordinationError> {
+            self.0.lock().unwrap().push(tag);
+            Ok(())
+        }
+    }
 
     fn queue_interruption(event_tx: &crate::Sender<AsyncEvent>) {
         event_tx.send(AsyncEvent::shutdown(Duration::ZERO)).unwrap();
@@ -463,6 +531,67 @@ mod tests {
         barrier.release_tag(stale);
 
         assert_eq!(barrier.released_tag, released);
+    }
+
+    #[test]
+    fn terminal_completion_releases_local_downstreams_forever() {
+        let (downstream_tx, downstream_rx) = kanal::unbounded();
+        let (_shutdown_tx, shutdown_rx) = crate::keepalive::channel();
+        let downstream = EnclaveKey::from(1);
+        let mut downstreams = tinymap::TinySecondaryMap::new();
+        downstreams.insert(
+            downstream,
+            SendContext {
+                enclave_key: downstream,
+                async_tx: downstream_tx,
+                shutdown_rx,
+            },
+        );
+        let mut coordination = SchedulerCoordination::new(
+            EnclaveKey::from(0),
+            tinymap::TinySecondaryMap::new(),
+            downstreams,
+        );
+        let completions = Arc::new(Mutex::new(Vec::new()));
+        coordination.set_external(RecordingCompletion(Arc::clone(&completions)));
+
+        coordination.complete(Tag::ZERO, true).unwrap();
+
+        assert!(matches!(
+            downstream_rx.recv().unwrap(),
+            AsyncEvent::TagRelease { tag, .. } if tag == Tag::FOREVER
+        ));
+        assert_eq!(*completions.lock().unwrap(), vec![Tag::ZERO]);
+    }
+
+    #[test]
+    fn nonterminal_completion_releases_actual_tag_even_with_future_shutdown() {
+        let (downstream_tx, downstream_rx) = kanal::unbounded();
+        let (_shutdown_tx, shutdown_rx) = crate::keepalive::channel();
+        let downstream = EnclaveKey::from(1);
+        let mut downstreams = tinymap::TinySecondaryMap::new();
+        downstreams.insert(
+            downstream,
+            SendContext {
+                enclave_key: downstream,
+                async_tx: downstream_tx,
+                shutdown_rx,
+            },
+        );
+        let mut coordination = SchedulerCoordination::new(
+            EnclaveKey::from(0),
+            tinymap::TinySecondaryMap::new(),
+            downstreams,
+        );
+        let current = Tag::ZERO;
+        let _scheduled_shutdown = Tag::new(Duration::milliseconds(100), 0);
+
+        coordination.complete(current, false).unwrap();
+
+        assert!(matches!(
+            downstream_rx.recv().unwrap(),
+            AsyncEvent::TagRelease { tag, .. } if tag == current
+        ));
     }
 
     #[test]

@@ -7,8 +7,8 @@ mod modal;
 mod queue;
 
 pub use barrier::{
-    CoordinationError, CoordinationOutcome, LogicalTimeBarrierError, LogicalTimeCoordinator,
-    NoopLogicalTimeCoordinator,
+    CoordinationError, CoordinationOutcome, FrontierPublication, LogicalTimeBarrierError,
+    LogicalTimeCoordinator, LogicalTimeFrontier, NoopLogicalTimeCoordinator,
 };
 use barrier::{CoordinationEventResult, LogicalTimeBarrier, SchedulerCoordination};
 use modal::EventManager;
@@ -286,6 +286,9 @@ impl Scheduler {
             CoordinationEventResult::Event(event) => event,
         };
         match event {
+            AsyncEvent::CoordinationWake(_) => {
+                unreachable!("coordination consumes coordination wakes")
+            }
             AsyncEvent::TagRelease { .. } => unreachable!("coordination consumes tag releases"),
             AsyncEvent::TagReleaseProvisional { enclave: _, tag } => {
                 if tag <= self.current_tag {
@@ -424,6 +427,9 @@ impl Scheduler {
         if let Some(next_tag) = self.events.peek_tag() {
             tracing::trace!(next_tag = %next_tag, "Trying next tag");
 
+            self.coordination
+                .publish_frontier(LogicalTimeFrontier::Candidate(next_tag))?;
+
             match self.coordination.acquire(next_tag, &self.event_rx)? {
                 CoordinationOutcome::Granted => {}
                 CoordinationOutcome::Interrupted(async_event) => {
@@ -458,7 +464,7 @@ impl Scheduler {
             self.events.return_reaction_set(event.reactions);
 
             self.coordination
-                .complete(self.current_tag, self.shutdown_tag.is_some())?;
+                .complete(self.current_tag, event.terminal)?;
 
             self.stats.increment_processed_tags();
 
@@ -467,14 +473,22 @@ impl Scheduler {
                 self.shutdown_tag = Some(self.current_tag);
                 return Ok(false);
             }
-        } else if let Some(async_event) = self.receive_event_async() {
-            self.handle_async_event(async_event);
         } else {
-            tracing::debug!("No more events in queue, pushing a shutdown event.");
-            // Shutdown event will be processed at the next event loop iteration
-            let shutdown = self.current_tag.delay(Duration::ZERO);
-            self.shutdown_tag = Some(shutdown);
-            self.schedule_shutdown_at(shutdown);
+            self.coordination
+                .publish_frontier(LogicalTimeFrontier::Idle)?;
+            if let Some(async_event) = self.receive_event_async() {
+                self.handle_async_event(async_event);
+            } else {
+                tracing::debug!("No more events in queue, pushing a shutdown event.");
+                // Shutdown event will be processed at the next event loop iteration
+                let shutdown = if self.current_tag < Tag::ZERO {
+                    Tag::ZERO
+                } else {
+                    self.current_tag.delay(Duration::ZERO)
+                };
+                self.shutdown_tag = Some(shutdown);
+                self.schedule_shutdown_at(shutdown);
+            }
         }
 
         Ok(true)
@@ -497,6 +511,8 @@ impl Scheduler {
             }
         }
 
+        self.coordination
+            .publish_frontier(LogicalTimeFrontier::Finished)?;
         self.shutdown();
         Ok(())
     }
@@ -855,11 +871,13 @@ mod tests {
     use super::*;
     use crate::{
         enclave::{DownstreamRef, UpstreamRef},
-        reaction_closure, ActionKey, Level, PortKey, Reaction, Reactor, SendContext,
+        reaction_closure, ActionKey, CoordinationWake, Level, PortKey, Reaction, Reactor,
+        SendContext,
     };
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum HookCall {
+        Publish(FrontierPublication),
         LocalAcquire(Tag),
         ExternalAcquire(Tag),
         Reaction(Tag),
@@ -873,6 +891,7 @@ mod tests {
         interrupt: Option<AsyncEvent>,
         acquire_error: Option<String>,
         completion_error: Option<String>,
+        publication_error: Option<String>,
     }
 
     impl RecordingCoordinator {
@@ -882,6 +901,7 @@ mod tests {
                 interrupt: None,
                 acquire_error: None,
                 completion_error: None,
+                publication_error: None,
             }
         }
 
@@ -891,6 +911,7 @@ mod tests {
                 interrupt: Some(event),
                 acquire_error: None,
                 completion_error: None,
+                publication_error: None,
             }
         }
 
@@ -900,6 +921,7 @@ mod tests {
                 interrupt: None,
                 acquire_error: Some(message.into()),
                 completion_error: None,
+                publication_error: None,
             }
         }
 
@@ -909,11 +931,36 @@ mod tests {
                 interrupt: None,
                 acquire_error: None,
                 completion_error: Some(message.into()),
+                publication_error: None,
+            }
+        }
+
+        fn failing_publication(log: Arc<Mutex<Vec<HookCall>>>, message: &str) -> Self {
+            Self {
+                log,
+                interrupt: None,
+                acquire_error: None,
+                completion_error: None,
+                publication_error: Some(message.into()),
             }
         }
     }
 
     impl LogicalTimeCoordinator for RecordingCoordinator {
+        fn publish_frontier(
+            &mut self,
+            publication: FrontierPublication,
+        ) -> Result<(), CoordinationError> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(HookCall::Publish(publication));
+            if let Some(message) = self.publication_error.take() {
+                return Err(CoordinationError::new(message));
+            }
+            Ok(())
+        }
+
         fn acquire(
             &mut self,
             tag: Tag,
@@ -951,6 +998,17 @@ mod tests {
     }
 
     impl LogicalTimeCoordinator for RecordingCoordinatorWithLocalRelease {
+        fn publish_frontier(
+            &mut self,
+            publication: FrontierPublication,
+        ) -> Result<(), CoordinationError> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(HookCall::Publish(publication));
+            Ok(())
+        }
+
         fn acquire(
             &mut self,
             tag: Tag,
@@ -1114,6 +1172,10 @@ mod tests {
         assert_eq!(
             calls,
             vec![
+                HookCall::Publish(FrontierPublication {
+                    frontier: LogicalTimeFrontier::Candidate(tag),
+                    consumed_wake: None,
+                }),
                 HookCall::ExternalAcquire(tag),
                 HookCall::Reaction(tag),
                 HookCall::ExternalComplete(tag)
@@ -1161,13 +1223,53 @@ mod tests {
         assert_eq!(
             *log.lock().unwrap(),
             vec![
+                HookCall::Publish(FrontierPublication {
+                    frontier: LogicalTimeFrontier::Candidate(tag),
+                    consumed_wake: None,
+                }),
                 HookCall::LocalAcquire(tag),
+                HookCall::Publish(FrontierPublication {
+                    frontier: LogicalTimeFrontier::Candidate(tag),
+                    consumed_wake: None,
+                }),
                 HookCall::ExternalAcquire(tag),
                 HookCall::Reaction(tag),
                 HookCall::LocalComplete(tag),
                 HookCall::ExternalComplete(tag),
             ]
         );
+    }
+
+    #[test]
+    fn future_shutdown_does_not_release_local_downstream_early() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let (mut scheduler, reaction, upstream_rx, event_tx, _shutdown_guards) =
+            scheduler_with_local_dependencies(Arc::clone(&log));
+        let current = Tag::ZERO;
+        scheduler.startup();
+        scheduler.shutdown_tag = Some(Tag::new(Duration::milliseconds(100), 0));
+        scheduler
+            .events
+            .push_event(current, std::iter::once((Level::from(0), reaction)), false);
+        let release = std::thread::spawn(move || {
+            assert!(matches!(
+                upstream_rx.recv().unwrap(),
+                AsyncEvent::TagReleaseProvisional { tag, .. } if tag == current
+            ));
+            event_tx
+                .send(AsyncEvent::release(EnclaveKey::from(1), current))
+                .unwrap();
+        });
+
+        assert!(scheduler.try_next().unwrap());
+        release.join().unwrap();
+        assert!(scheduler.try_next().unwrap());
+
+        assert!(log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| matches!(call, HookCall::LocalComplete(tag) if *tag == current)));
     }
 
     #[test]
@@ -1202,7 +1304,16 @@ mod tests {
 
         assert!(scheduler.try_next().unwrap());
         interrupt.join().unwrap();
-        assert_eq!(*log.lock().unwrap(), vec![HookCall::LocalAcquire(tag)]);
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                HookCall::Publish(FrontierPublication {
+                    frontier: LogicalTimeFrontier::Candidate(tag),
+                    consumed_wake: None,
+                }),
+                HookCall::LocalAcquire(tag),
+            ]
+        );
     }
 
     #[test]
@@ -1237,7 +1348,16 @@ mod tests {
         assert_eq!(scheduler.events.peek_tag(), Some(inbound_tag));
 
         let calls = log.lock().unwrap().clone();
-        assert_eq!(calls, vec![HookCall::ExternalAcquire(future_tag)]);
+        assert_eq!(
+            calls,
+            vec![
+                HookCall::Publish(FrontierPublication {
+                    frontier: LogicalTimeFrontier::Candidate(future_tag),
+                    consumed_wake: None,
+                }),
+                HookCall::ExternalAcquire(future_tag),
+            ]
+        );
     }
 
     #[test]
@@ -1290,5 +1410,177 @@ mod tests {
             .unwrap()
             .iter()
             .any(|call| matches!(call, HookCall::Reaction(reaction_tag) if *reaction_tag == tag)));
+    }
+
+    #[test]
+    fn scheduler_publishes_candidate_before_local_acquire() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let (mut scheduler, _reaction, upstream_rx, event_tx, _guards) =
+            scheduler_with_local_dependencies(Arc::clone(&log));
+        let tag = Tag::ZERO;
+        scheduler.startup();
+        scheduler
+            .events
+            .push_event(tag, std::iter::empty::<(Level, ReactionKey)>(), false);
+        let acquire_log = Arc::clone(&log);
+        let release = std::thread::spawn(move || {
+            let _ = upstream_rx.recv().unwrap();
+            acquire_log
+                .lock()
+                .unwrap()
+                .push(HookCall::LocalAcquire(tag));
+            event_tx
+                .send(AsyncEvent::release(EnclaveKey::from(1), tag))
+                .unwrap();
+        });
+        assert!(scheduler.try_next().unwrap());
+        release.join().unwrap();
+        let log = log.lock().unwrap();
+        assert!(matches!(log[0], HookCall::Publish(FrontierPublication {
+            frontier: LogicalTimeFrontier::Candidate(observed), ..
+        }) if observed == tag));
+        assert_eq!(log[1], HookCall::LocalAcquire(tag));
+    }
+
+    #[test]
+    fn scheduler_publishes_idle_before_waiting_for_async_event() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let (mut scheduler, _) = scheduler_with_recording_reaction(
+            Arc::clone(&log),
+            RecordingCoordinator::granting(Arc::clone(&log)),
+        );
+        scheduler.startup();
+        scheduler.config.keep_alive = true;
+        let (tx, rx) = kanal::unbounded();
+        scheduler.event_rx = rx;
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let sender = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            tx.send(AsyncEvent::provisional(EnclaveKey::from(9), Tag::ZERO))
+                .unwrap();
+            done_rx.recv().unwrap();
+        });
+        assert!(scheduler.try_next().unwrap());
+        done_tx.send(()).unwrap();
+        sender.join().unwrap();
+        assert!(matches!(
+            log.lock().unwrap().first(),
+            Some(HookCall::Publish(FrontierPublication {
+                frontier: LogicalTimeFrontier::Idle,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn earlier_interruption_republishes_candidate_before_retry() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let interruption = AsyncEvent::provisional(EnclaveKey::from(9), Tag::ZERO);
+        let (mut scheduler, reaction) = scheduler_with_recording_reaction(
+            Arc::clone(&log),
+            RecordingCoordinator::interrupting(Arc::clone(&log), interruption),
+        );
+        let tag = Tag::new(Duration::seconds(1), 0);
+        scheduler.startup();
+        scheduler
+            .events
+            .push_event(tag, [(Level::from(0), reaction)], false);
+        assert!(scheduler.try_next().unwrap());
+        assert!(scheduler.try_next().unwrap());
+        let publications = log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| {
+                matches!(
+                    call,
+                    HookCall::Publish(FrontierPublication {
+                        frontier: LogicalTimeFrontier::Candidate(_),
+                        ..
+                    })
+                )
+            })
+            .count();
+        assert_eq!(publications, 2);
+    }
+
+    #[test]
+    fn coordination_wake_rechecks_an_idle_frontier() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let (mut scheduler, _) = scheduler_with_recording_reaction(
+            Arc::clone(&log),
+            RecordingCoordinator::granting(Arc::clone(&log)),
+        );
+        scheduler.startup();
+        scheduler.handle_async_event(AsyncEvent::CoordinationWake(CoordinationWake {
+            tag: Tag::ZERO,
+            observation_epoch: 7,
+        }));
+        scheduler
+            .events
+            .push_event(Tag::ZERO, std::iter::empty::<(Level, ReactionKey)>(), false);
+        assert!(scheduler.try_next().unwrap());
+        assert!(log.lock().unwrap().iter().any(|call| matches!(call,
+            HookCall::Publish(FrontierPublication { consumed_wake: Some(wake), .. })
+                if *wake == CoordinationWake { tag: Tag::ZERO, observation_epoch: 7 }
+        )));
+    }
+
+    #[test]
+    fn unrelated_async_event_does_not_acknowledge_sent_coordination_wake() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let (mut scheduler, _) = scheduler_with_recording_reaction(
+            Arc::clone(&log),
+            RecordingCoordinator::granting(Arc::clone(&log)),
+        );
+        scheduler.startup();
+        scheduler.handle_async_event(AsyncEvent::provisional(EnclaveKey::from(9), Tag::ZERO));
+        assert!(scheduler.try_next().unwrap());
+        assert!(log.lock().unwrap().iter().all(|call| !matches!(
+            call,
+            HookCall::Publish(FrontierPublication {
+                consumed_wake: Some(_),
+                ..
+            })
+        )));
+    }
+
+    #[test]
+    fn publication_failure_prevents_reaction_execution_and_retains_source() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let (mut scheduler, reaction) = scheduler_with_recording_reaction(
+            Arc::clone(&log),
+            RecordingCoordinator::failing_publication(Arc::clone(&log), "publication failed"),
+        );
+        scheduler.startup();
+        scheduler
+            .events
+            .push_event(Tag::ZERO, [(Level::from(0), reaction)], false);
+        let error = scheduler.try_next().unwrap_err();
+        assert!(error.to_string().contains("publication failed"));
+        assert!(!log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| matches!(call, HookCall::Reaction(_))));
+    }
+
+    #[test]
+    fn initially_empty_scheduler_finishes_from_zero_without_overflow() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut scheduler = Scheduler::new_with_logical_time_coordinator(
+            EnclaveKey::from(0),
+            Enclave::default(),
+            Config::default().with_fast_forward(true),
+            RecordingCoordinator::granting(Arc::clone(&log)),
+        );
+        scheduler.try_event_loop().unwrap();
+        assert!(log.lock().unwrap().iter().any(|call| matches!(
+            call,
+            HookCall::Publish(FrontierPublication {
+                frontier: LogicalTimeFrontier::Finished,
+                ..
+            })
+        )));
     }
 }

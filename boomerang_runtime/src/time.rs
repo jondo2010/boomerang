@@ -70,6 +70,18 @@ impl Tag {
     /// Create a new Tag strictly in the future from the current.
     pub fn delay(&self, offset: Duration) -> Self {
         if offset.is_zero() {
+            if *self == Self::FOREVER {
+                return Self::FOREVER;
+            }
+            if self.microstep == usize::MAX {
+                return Self {
+                    offset: self
+                        .offset
+                        .checked_add(Duration::nanoseconds(1))
+                        .unwrap_or(Duration::MAX),
+                    microstep: 0,
+                };
+            }
             Self {
                 offset: self.offset,
                 microstep: self.microstep + 1,
@@ -115,5 +127,21 @@ impl Tag {
                 microstep: self.microstep - 1,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_delay_after_max_microstep_advances_to_next_physical_tick() {
+        let tag = Tag::new(Duration::milliseconds(5), usize::MAX);
+
+        assert_eq!(
+            tag.delay(Duration::ZERO),
+            Tag::new(Duration::milliseconds(5) + Duration::nanoseconds(1), 0)
+        );
+        assert_eq!(Tag::FOREVER.delay(Duration::ZERO), Tag::FOREVER);
     }
 }

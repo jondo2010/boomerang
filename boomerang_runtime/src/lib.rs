@@ -34,7 +34,7 @@ pub use env::{
     BankInfo, Env, Level, LevelReactionKey, LifecycleReaction, ModalScheduleIndex, Mode,
     ModeFilter, ModeKey, ReactionGraph, ScopeInfo, ScopeKey, TransitionKind,
 };
-pub use event::AsyncEvent;
+pub use event::{AsyncEvent, CoordinationWake};
 pub use kanal::{Receiver, Sender};
 pub use key_set::KeySetLimits as ReactionSetLimits;
 pub use port::{DynPortRef, DynPortRefMut, *};

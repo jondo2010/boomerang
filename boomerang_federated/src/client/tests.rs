@@ -519,11 +519,7 @@ async fn bridge_reports_rti_error_frame() {
     .unwrap();
 
     assert!(matches!(
-        boomerang_runtime::LogicalTimeCoordinator::acquire(
-            &mut barrier,
-            boomerang_runtime::Tag::ZERO,
-            &event_rx,
-        ),
+        barrier.wait_for_tag(boomerang_runtime::Tag::ZERO, &event_rx),
         Err(error) if error.to_string().contains("boom")
     ));
     assert_eq!(barrier.pending_request, None);

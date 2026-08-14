@@ -278,7 +278,11 @@ impl CommonContext for Context {
             return Some(false);
         }
 
-        self.async_tx.try_send(event).map(|_| true).ok()
+        match self.async_tx.try_send(event) {
+            Ok(true) => Some(true),
+            Ok(false) => None,
+            Err(_) => Some(false),
+        }
     }
 }
 
@@ -323,7 +327,11 @@ impl CommonContext for SendContext {
             return Some(false);
         }
 
-        self.async_tx.try_send(event).map(|_| true).ok()
+        match self.async_tx.try_send(event) {
+            Ok(true) => Some(true),
+            Ok(false) => None,
+            Err(_) => Some(false),
+        }
     }
 }
 
@@ -404,5 +412,25 @@ mod tests {
         };
 
         assert!(!ctx.schedule_shutdown(None));
+    }
+
+    #[test]
+    fn send_context_nonblocking_schedule_distinguishes_full_and_closed_channels() {
+        let (async_tx, async_rx) = kanal::bounded(1);
+        let (_shutdown_tx, shutdown_rx) = keepalive::channel();
+        let ctx = SendContext {
+            enclave_key: EnclaveKey::from(0),
+            async_tx,
+            shutdown_rx,
+        };
+        let event = || AsyncEvent::shutdown(Duration::ZERO);
+
+        assert_eq!(ctx.try_schedule_async(event()), Some(true));
+        assert_eq!(ctx.try_schedule_async(event()), None);
+        assert!(async_rx.recv().is_ok());
+        assert_eq!(ctx.try_schedule_async(event()), Some(true));
+        assert!(async_rx.recv().is_ok());
+        drop(async_rx);
+        assert_eq!(ctx.try_schedule_async(event()), Some(false));
     }
 }

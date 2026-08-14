@@ -53,7 +53,7 @@
 - Modify: `boomerang_federated/src/session.rs` test module
 - Modify: `boomerang_federated/src/transport.rs` test module
 
-- [ ] **Step 1: Write a failing identity-only client handshake test**
+- [x] **Step 1: Write a failing identity-only client handshake test**
 
 In `boomerang_federated/src/client/tests.rs`, change the first Hello assertion to require the final enum shape:
 
@@ -69,7 +69,7 @@ assert_eq!(
 Also change one session fixture to construct `FederateToRti::Hello { federate_id }` without a
 topology field. This makes the desired protocol API explicit before production code changes.
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run:
 
@@ -80,7 +80,7 @@ cargo test -p boomerang_federated client::tests
 Expected: compilation fails because `FederateToRti::Hello` still requires `topology` and client
 connection still emits a neighbor structure.
 
-- [ ] **Step 3: Remove topology from the handshake path**
+- [x] **Step 3: Remove topology from the handshake path**
 
 Change the protocol variant:
 
@@ -126,7 +126,7 @@ In `StaticRtiSession::receive_hellos`, match only `federate_id`, retain duplicat
 checks, remove `neighbors_for` comparison, and forward the same identity-only message to RTI state.
 Update RTI validation matches from `{ federate_id, .. }` to `{ federate_id }`.
 
-- [ ] **Step 4: Update all handshake fixtures and verify GREEN**
+- [x] **Step 4: Update all handshake fixtures and verify GREEN**
 
 Remove topology arguments from `FederateProtocolClient::connect*` call sites and replace all Hello
 fixtures with:
@@ -145,7 +145,7 @@ cargo test -p boomerang_federated
 
 Expected: all `boomerang_federated` tests pass.
 
-- [ ] **Step 5: Commit the trusted handshake slice**
+- [x] **Step 5: Commit the trusted handshake slice**
 
 ```bash
 git add boomerang_federated/src/protocol.rs boomerang_federated/src/client/mod.rs boomerang_federated/src/client/tests.rs boomerang_federated/src/session.rs boomerang_federated/src/rti/mod.rs boomerang_federated/src/transport.rs
@@ -163,7 +163,7 @@ git commit -m "refactor(federated): trust identity-only hello"
 - Test: `boomerang_builder/src/federated/graph.rs`
 - Test: `boomerang_builder/src/tests/federated.rs`
 
-- [ ] **Step 1: Write failing builder graph-analysis tests**
+- [x] **Step 1: Write failing builder graph-analysis tests**
 
 Add unit tests beside the new graph module for deterministic paths and zero-delay cycles. The
 tests exercise stable IDs rather than RTI dense keys:
@@ -203,7 +203,7 @@ fn analysis_rejects_zero_delay_cycles() {
 Add cases for parallel endpoints, deterministic input reordering, duplicate endpoints, positive
 delay cycles, disconnected members, and a path whose accumulated delay exceeds `u64::MAX`.
 
-- [ ] **Step 2: Run the graph tests and verify RED**
+- [x] **Step 2: Run the graph tests and verify RED**
 
 Run:
 
@@ -214,7 +214,7 @@ cargo test -p boomerang_builder --features federated federated::graph::tests
 Expected: compilation fails because `federated::graph` and the focused assembly error variants do
 not exist.
 
-- [ ] **Step 3: Implement the builder-owned analyzed graph**
+- [x] **Step 3: Implement the builder-owned analyzed graph**
 
 Create these builder-internal records in `federated/graph.rs`:
 
@@ -267,7 +267,7 @@ FederationZeroDelayCycle { federates: Vec<String> },
 FederationPathDelayOverflow { source: String, target: String },
 ```
 
-- [ ] **Step 4: Route existing assembly validation through the analyzed graph**
+- [x] **Step 4: Route existing assembly validation through the analyzed graph**
 
 In `lower_federation`, first project each `PartitionAnalysis::federated_boundaries()` item into a
 `FederationEndpoint`, then call `analyze_federation_graph`. Delete
@@ -277,7 +277,7 @@ only the builder graph module performs graph validation.
 Keep `PartitionAnalysis` as the sole owner of Federate placement and cross-partition boundary
 inputs; do not add a second topology collection to `Assembly`.
 
-- [ ] **Step 5: Verify builder graph behavior is GREEN**
+- [x] **Step 5: Verify builder graph behavior is GREEN**
 
 Run:
 
@@ -288,7 +288,7 @@ cargo test -p boomerang_builder --features federated tests::federated
 
 Expected: graph-analysis and existing federated builder tests pass.
 
-- [ ] **Step 6: Commit builder-owned graph analysis**
+- [x] **Step 6: Commit builder-owned graph analysis**
 
 ```bash
 git add boomerang_builder/src/federated/graph.rs boomerang_builder/src/federated/mod.rs boomerang_builder/src/federated/lowering.rs boomerang_builder/src/assembly/build.rs boomerang_builder/src/lib.rs boomerang_builder/src/tests/federated.rs
@@ -302,7 +302,7 @@ git commit -m "refactor(builder): analyze federation graph during lowering"
 - Modify: `boomerang_federated/src/rti/mod.rs`
 - Test: `boomerang_federated/src/rti/graph.rs`
 
-- [ ] **Step 1: Write failing tests against final graph parts**
+- [x] **Step 1: Write failing tests against final graph parts**
 
 Add tests in `rti/graph.rs` against the intended final-parts API:
 
@@ -331,7 +331,7 @@ fn rti_graph_interns_final_parts_without_retaining_source_data() {
 }
 ```
 
-- [ ] **Step 2: Run focused RTI tests and verify RED**
+- [x] **Step 2: Run focused RTI tests and verify RED**
 
 Run:
 
@@ -342,7 +342,7 @@ cargo test -p boomerang_federated rti::graph::tests
 Expected: compilation fails because `RtiGraph`, `RtiGraphParts`, and final part records do not
 exist.
 
-- [ ] **Step 3: Implement immutable graph records and mechanical interning**
+- [x] **Step 3: Implement immutable graph records and mechanical interning**
 
 Create `rti/graph.rs` with a public immutable graph and doc-hidden builder handoff:
 
@@ -384,7 +384,7 @@ neighbor views, direct-downstream test cache, or all-pairs minimum-delay map.
 Keep `graph` private inside the `rti` module during this task. This is an internal final-shape
 contract used to drive the end-to-end migration in Task 4, not a public compatibility API.
 
-- [ ] **Step 4: Verify the graph contract is GREEN**
+- [x] **Step 4: Verify the graph contract is GREEN**
 
 Run:
 
@@ -395,7 +395,7 @@ cargo test -p boomerang_federated rti::graph::tests
 Expected: final-parts interning, dense identities, route lookup, and affected-set tests pass while
 the new module remains private.
 
-- [ ] **Step 5: Commit the private final graph contract**
+- [x] **Step 5: Commit the private final graph contract**
 
 ```bash
 git add boomerang_federated/src/rti/graph.rs boomerang_federated/src/rti/mod.rs
@@ -420,7 +420,7 @@ git commit -m "refactor(federated): define final RTI graph contract"
 - Test: `boomerang_federated/src/static_runner.rs` test module
 - Test: `boomerang/tests/federated_static.rs`
 
-- [ ] **Step 1: Write a failing runner ownership test**
+- [x] **Step 1: Write a failing runner ownership test**
 
 Add a test that consumes `RuntimeFederation` into one graph and independent Federates, then starts
 client preparation using only a selected `RuntimeFederate`:
@@ -443,7 +443,7 @@ fn runtime_federate_is_complete_without_rti_graph_access() {
 Add an integration assertion that the existing static federation still runs after the graph is
 moved into the RTI task.
 
-- [ ] **Step 2: Run runner tests and verify RED**
+- [x] **Step 2: Run runner tests and verify RED**
 
 Run:
 
@@ -454,7 +454,7 @@ cargo test -p boomerang_federated --features runtime static_runner::tests::runti
 Expected: compilation fails because the hierarchy and runner still expose/consume
 `CompiledTopology` and derive client configuration from it.
 
-- [ ] **Step 3: Replace compiled topology with graph plus dense runtime state**
+- [x] **Step 3: Replace compiled topology with graph plus dense runtime state**
 
 Promote the private graph contract as `boomerang_federated::RtiGraph`. Change `rti/index.rs` to
 contain only `RtiFederate`, `RtiEndpoint`, `IncomingDependency`, and `IncomingPath`; remove neighbor
@@ -497,7 +497,7 @@ from `self.federates` to `self.runtime.federates`. Remove public raw-topology co
 crate-private test helper. Delete the old topology-compilation tests only after confirming their
 duplicate, cycle, path, and overflow cases are covered by Task 2's builder graph tests.
 
-- [ ] **Step 4: Project analyzed builder data directly into graph parts**
+- [x] **Step 4: Project analyzed builder data directly into graph parts**
 
 Add a borrowing conversion that performs no graph algorithms and leaves endpoint data available
 for Federate-local route construction:
@@ -523,7 +523,7 @@ pub(crate) fn to_rti_graph(&self) -> boomerang_federated::RtiGraph {
 Change `FederationLoweringArtifacts.topology` to `rti_graph: RtiGraph` and pass that graph through
 `Assembly::into_runtime_assembly` without compiling or validating it again.
 
-- [ ] **Step 5: Build Federate-local bridges during lowering**
+- [x] **Step 5: Build Federate-local bridges during lowering**
 
 Remove `FederatedRuntimeConnections::from_topology`. In builder lowering, create routes from the
 same analyzed endpoint records used for `RtiGraph`:
@@ -550,7 +550,7 @@ pub fn new(graph: RtiGraph, connections: FederatedRuntimeConnections) -> Self {
 }
 ```
 
-- [ ] **Step 6: Make the runtime hierarchy own final artifacts**
+- [x] **Step 6: Make the runtime hierarchy own final artifacts**
 
 Change `RuntimeFederation` to:
 
@@ -569,7 +569,7 @@ pub fn into_parts(self) -> (RtiGraph, BTreeMap<FederateId, RuntimeFederate>) {
 the lowering-owned Federate IDs. Remove graph-based client configuration and second-pass topology
 validation.
 
-- [ ] **Step 7: Move the graph once and start clients from Federates only**
+- [x] **Step 7: Move the graph once and start clients from Federates only**
 
 In `prepare_static_federation`, consume the hierarchy into:
 
@@ -617,7 +617,7 @@ fn federate_has_no_initial_work(
 }
 ```
 
-- [ ] **Step 8: Remove runner topology validation and raw TCP construction**
+- [x] **Step 8: Remove runner topology validation and raw TCP construction**
 
 Delete `validate_static_runner_runtime`, `UnsupportedTopology`, and checks that compare global
 topology edges with Federate bridges. These are lowering invariants.
@@ -634,7 +634,7 @@ pub(crate) async fn run_tcp_static_rti_session(
 Use `graph.federate_ids()` to validate accepted Hello identities, then move the graph into
 `StaticRtiSession::new(graph, endpoints)`.
 
-- [ ] **Step 9: Verify star-shaped runtime behavior is GREEN**
+- [x] **Step 9: Verify star-shaped runtime behavior is GREEN**
 
 Run:
 
@@ -647,7 +647,7 @@ cargo test -p boomerang --all-features federated_static
 
 Expected: unit and end-to-end in-memory/TCP federation tests pass.
 
-- [ ] **Step 10: Commit the graph/state/runtime ownership slice**
+- [x] **Step 10: Commit the graph/state/runtime ownership slice**
 
 ```bash
 git add boomerang_federated/src/rti boomerang_federated/src/lib.rs boomerang_federated/src/runtime_bridge.rs boomerang_federated/src/hierarchy.rs boomerang_federated/src/static_runner.rs boomerang_federated/src/session.rs boomerang_federated/src/transport.rs boomerang_builder/src/federated/graph.rs boomerang_builder/src/federated/lowering.rs boomerang_builder/src/assembly/build.rs boomerang/tests/federated_static.rs
@@ -743,7 +743,7 @@ an upstream local-barrier participant. The pure state machine records logical pe
 participant key and request id, never channel senders, wake handles, thread handles, or protocol
 clients. Those capabilities and resources belong to the service layer.
 
-- [ ] **Step 0: Quarantine the failed prototype and re-establish the Task 4 baseline**
+- [x] **Step 0: Quarantine the failed prototype and re-establish the Task 4 baseline**
 
 The working tree contains an uncommitted Task 5 prototype in `client/mod.rs` and
 `static_runner.rs`. Inspect its diff before editing. Preserve the two tests that proved the
@@ -776,7 +776,7 @@ Expected RED: the frontier test reports that the non-gateway Enclave advanced be
 frontier, and the panic test reports the bounded join-first timeout. Record both intended failure
 modes; an unrelated compile error or different failure is not valid RED evidence.
 
-- [ ] **Step 1: Define the generic split-phase scheduler contract with failing runtime tests**
+- [x] **Step 1: Define the generic split-phase scheduler contract with failing runtime tests**
 
 Add runtime tests that characterize the required ordering and interruption behavior:
 
@@ -857,7 +857,7 @@ cargo test -p boomerang_runtime sched::barrier::tests
 Expected: all generic scheduler coordination tests pass, including the existing ordering and
 failure-atomicity characterization tests. `boomerang_runtime` remains free of federated knowledge.
 
-- [ ] **Step 2: Implement the generic contract and mechanically keep all implementations compiling**
+- [x] **Step 2: Implement the generic contract and mechanically keep all implementations compiling**
 
 Implement the generic runtime contract and scheduler behavior. Mechanically update every existing
 trait implementation so the focused runtime crate can compile. Until the runner is migrated in
@@ -870,7 +870,7 @@ Run the focused runtime tests from Step 1. Do not run or require a workspace che
 commit. Tasks 5 Steps 1-7 are one uncommitted TDD sequence because the trait, participant proxy,
 service, and runner migration form one compile boundary.
 
-- [ ] **Step 3: Write failing pure state-machine tests for Federate aggregation**
+- [x] **Step 3: Write failing pure state-machine tests for Federate aggregation**
 
 Create `federate_coordination/layout.rs` with an immutable `FederateCoordinationLayout` containing
 the sorted set of every Enclave key owned by the consumed `RuntimeFederate`. "Active" means an
@@ -925,7 +925,7 @@ Then implement the minimum pure state machine and verify GREEN. The state module
 `FederateToRti`, `RtiToFederate`, `FederateProtocolClient`, `RtiGraph`, Tokio, sockets, or builder
 types.
 
-- [ ] **Step 4: Add the protocol adapter and dedicated service loop**
+- [x] **Step 4: Add the protocol adapter and dedicated service loop**
 
 Keep the per-Federate protocol state machine separate from aggregation. Move
 `RtiLogicalTimeCoordinator` to `client/coordination/mod.rs` and its focused tests to
@@ -986,7 +986,7 @@ cargo test -p boomerang_federated --all-features client::coordination::tests
 Inspect the list output and require a nonzero test count before treating the focused client suite
 as evidence.
 
-- [ ] **Step 5: Verify the isolated service without committing the incomplete migration**
+- [x] **Step 5: Verify the isolated service without committing the incomplete migration**
 
 ```bash
 cargo test -p boomerang_runtime sched::tests
@@ -1000,7 +1000,7 @@ Expected: focused slices are GREEN. Do not commit yet. The old runner may still 
 temporary direct-coordinator shim from Step 2, which is forbidden in the final structure and must
 be removed during Step 6.
 
-- [ ] **Step 6: Integrate services in the static runner with failing end-to-end tests**
+- [x] **Step 6: Integrate services in the static runner with failing end-to-end tests**
 
 Keep `static_runner.rs` limited to resource construction and supervision. At runtime, after
 `RuntimeFederate` has been consumed, derive the immutable sorted participant layout from its owned
@@ -1046,7 +1046,7 @@ cargo test -p boomerang --all-features --test federated_static public_api_runs_s
 Expected: every active Enclave is protected by the Federate grant, local dependencies do not
 deadlock, and no global graph is visible to the runtime Federate or its schedulers.
 
-- [ ] **Step 7: Supervise completion before ordered joins**
+- [x] **Step 7: Supervise completion before ordered joins**
 
 Have every scheduler thread report its terminal result, including a caught panic payload, over a
 completion channel. The runner waits for completion reports rather than blocking on handles in
@@ -1069,7 +1069,7 @@ cargo test -p boomerang_federated --all-features static_runner::tests::scheduler
 Expected: it returns `SchedulerThreadPanic` within the test bound and never relies on join order or
 a runtime timeout.
 
-- [ ] **Step 8: Compile-check and commit the complete Task 5 migration atomically**
+- [x] **Step 8: Compile-check and commit the complete Task 5 migration atomically**
 
 ```bash
 cargo check --workspace --all-features
@@ -1077,7 +1077,7 @@ git add boomerang_runtime/src/event.rs boomerang_runtime/src/sched/barrier.rs bo
 git commit -m "fix(federated): coordinate all federate enclaves"
 ```
 
-- [ ] **Step 9: Audit phase and data boundaries before Task 6**
+- [x] **Step 9: Audit phase and data boundaries before Task 6**
 
 Run Graft structural inspection first, then exhaustive concept searches and inspect the results:
 
@@ -1148,7 +1148,7 @@ federation tests must pass with fresh output.
 - Modify: `boomerang_builder/src/lib.rs`
 - Modify: `boomerang_builder/src/tests/federated.rs`
 
-- [ ] **Step 1: Move topology-failure assertions to builder tests**
+- [x] **Step 1: Move topology-failure assertions to builder tests**
 
 Add builder tests that assert the focused `AssemblyError` variants for duplicate Federate IDs,
 duplicate endpoints, zero-delay cycles, and accumulated-delay overflow. Use real `Assembly`
@@ -1158,7 +1158,7 @@ for the `u64::MAX + 1` path that normal runtime durations cannot express.
 Delete the corresponding `CompiledTopology`/`RtiError` assertions from `rti/tests.rs` only after
 the builder tests are in place.
 
-- [ ] **Step 2: Run ownership tests and verify RED where responsibility moved**
+- [x] **Step 2: Run ownership tests and verify RED where responsibility moved**
 
 Run:
 
@@ -1169,7 +1169,7 @@ cargo test -p boomerang_builder --features federated tests::federated
 Expected before completing the move: new assertions fail or do not compile because some graph
 failures are still represented as `RtiError`/generic federation errors.
 
-- [ ] **Step 3: Delete declarative topology and compile-time RTI errors**
+- [x] **Step 3: Delete declarative topology and compile-time RTI errors**
 
 Remove these types and all exports:
 
@@ -1194,7 +1194,7 @@ PathDelayOverflow
 Remove `AssemblyError::FederationTopology(#[from] RtiError)`. Keep only live RTI errors for
 identity, route messages, tags, lifecycle, regressions, and runtime tag arithmetic.
 
-- [ ] **Step 4: Remove compatibility constructors and update test fixtures**
+- [x] **Step 4: Remove compatibility constructors and update test fixtures**
 
 Delete raw-topology constructors from `RtiState`, `StaticRtiSession`, TCP transport helpers,
 `StaticFederationRuntime`, and runner tests. Update remaining tests to use explicit final graph
@@ -1209,7 +1209,7 @@ rg -n "FederatedTopology|TopologyEdge|NeighborStructure|CompiledTopology|from_co
 
 Expected: no matches, except historical design/plan documentation outside those source roots.
 
-- [ ] **Step 5: Run crate tests and verify GREEN**
+- [x] **Step 5: Run crate tests and verify GREEN**
 
 Run:
 
@@ -1220,7 +1220,7 @@ cargo test -p boomerang_builder --all-features
 
 Expected: both crates pass with topology failures owned exclusively by builder tests.
 
-- [ ] **Step 6: Commit API and error cleanup**
+- [x] **Step 6: Commit API and error cleanup**
 
 ```bash
 cargo check --workspace --all-features
@@ -1235,7 +1235,7 @@ git commit -m "refactor(federated): remove raw RTI topology APIs"
 - Modify: `docs/superpowers/plans/2026-07-19-federated-rti-boundaries.md` (checkboxes only during execution)
 - Verify: all workspace crates and tests
 
-- [ ] **Step 1: Update architecture documentation**
+- [x] **Step 1: Update architecture documentation**
 
 Replace the `CompiledTopology` diagram and narrative with:
 
@@ -1250,7 +1250,7 @@ RuntimeFederation
 Document that `PartitionAnalysis` and builder graph analysis compute all reachability and delays,
 that Hello carries only identity, and that runtime graph/state use separate immutable/dense types.
 
-- [ ] **Step 2: Format and verify formatting**
+- [x] **Step 2: Format and verify formatting**
 
 Run:
 
@@ -1261,7 +1261,7 @@ cargo fmt --all -- --check
 
 Expected: the check exits successfully with no output.
 
-- [ ] **Step 3: Run the full workspace test suite**
+- [x] **Step 3: Run the full workspace test suite**
 
 Run:
 
@@ -1271,7 +1271,7 @@ cargo test --workspace --all-features
 
 Expected: all workspace tests pass with zero failures.
 
-- [ ] **Step 4: Run Clippy with warnings denied**
+- [x] **Step 4: Run Clippy with warnings denied**
 
 Run:
 
@@ -1281,7 +1281,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 Expected: Clippy exits successfully with zero warnings.
 
-- [ ] **Step 5: Verify architectural removals and review the diff**
+- [x] **Step 5: Verify architectural removals and review the diff**
 
 Run:
 
@@ -1295,7 +1295,7 @@ git status --short
 Expected: the search has no source matches, `git diff --check` succeeds, and status contains only
 the intended implementation/documentation changes plus pre-existing user-owned files.
 
-- [ ] **Step 6: Commit documentation and final mechanical cleanup**
+- [x] **Step 6: Commit documentation and final mechanical cleanup**
 
 ```bash
 cargo check --workspace --all-features
@@ -1303,7 +1303,7 @@ git add docs/federated-runtime.md docs/superpowers/plans/2026-07-19-federated-rt
 git commit -m "docs: describe federated RTI phase boundaries"
 ```
 
-- [ ] **Step 7: Perform a final requirement audit**
+- [x] **Step 7: Perform a final requirement audit**
 
 Re-read `docs/superpowers/specs/2026-07-19-federated-rti-boundaries-design.md` and confirm:
 

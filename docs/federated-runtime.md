@@ -55,7 +55,7 @@ flowchart TB
     execution["execution"]
     local["Local(TinyMap&lt;EnclaveKey, Enclave&gt;)"]
     federated["Federated(RuntimeFederation)"]
-    topology["CompiledTopology<br/>data needed to start an independent RTI"]
+    rti_graph["RtiGraph<br/>consumed by StaticRtiSession / RtiState"]
     runtime_federates["FederateId → RuntimeFederate"]
     federate_a["RuntimeFederate A"]
     federate_b["RuntimeFederate B"]
@@ -68,7 +68,7 @@ flowchart TB
     runtime_assembly --> execution
     execution --> local
     execution --> federated
-    federated --> topology
+    federated --> rti_graph
     federated --> runtime_federates
     runtime_federates --> federate_a
     runtime_federates --> federate_b
@@ -82,11 +82,22 @@ flowchart TB
 local runner cannot accidentally discard federation metadata, and Federate placement remains
 structural because every `RuntimeFederate` directly owns its Enclaves.
 
-`RuntimeFederation::into_parts` returns the immutable compiled topology and a deterministic map of
+`RuntimeFederation::into_parts` returns the immutable `RtiGraph` and a deterministic map of
 `RuntimeFederate` values. Each Federate contains its own dense Enclave map and protocol bridge. An
 `EnclaveKey` is meaningful only within that map, so separate Federates may both own
 `EnclaveKey(0)`. The hierarchy contains no RTI thread or task; a deployment launcher or the
 single-process static runner consumes the independent Federate values and supplies transports.
+
+`RuntimeFederate` is therefore an owned pre-execution runtime bundle, not lowering metadata or RTI
+state. The static runner consumes it into Enclave schedulers and a Federate protocol client. The RTI
+is started separately from `RtiGraph` and transport endpoints and never receives a
+`RuntimeFederate` value.
+
+The ownership split survives startup. `StaticRtiSession` consumes the graph into `RtiState`, where
+immutable identities, dependencies, paths, and routes remain separate from the dense mutable
+`RtiRuntimeState`. Each `RuntimeFederate` is consumed independently and its
+`FederateRuntimeBridge` supplies only Federate-local routes, mailbox, and fault state to the
+protocol client. A client neither receives nor queries the global graph.
 
 ## Placement and lowering
 
@@ -95,10 +106,16 @@ descendant declared with `ReactorPlacement::Enclave` starts another scheduler wh
 the nearest Federate. Nested Federate scopes, duplicate Federate IDs, and connections with only
 one endpoint in a Federate are rejected before execution.
 
-Partition analysis records the Federate inherited by every Enclave root. Same-Federate
-cross-Enclave boundaries remain local and do not require a payload codec. Cross-Federate
-boundaries produce an `EndpointId`, `TopologyEdge`, encoder, serialized sender, inbound decoder,
-and target action route.
+`PartitionAnalysis` records the Federate inherited by every Enclave root and is the sole input to
+builder-owned federation graph analysis. That analysis validates membership, endpoint uniqueness,
+and zero-delay cycles; computes deterministic reachability, affected sets, and minimum accumulated
+path delays; and projects the final `RtiGraph` plus Federate-local bridges. `RtiGraph` mechanically
+interns those final records and performs no runtime graph analysis.
+
+Same-Federate cross-Enclave boundaries remain local and do not require a payload codec.
+Cross-Federate boundaries produce an `EndpointId`, analyzed graph edge, encoder, serialized sender,
+inbound decoder, and target action route. No declarative topology manifest crosses into the runtime
+phase, and no compatibility constructor can build an RTI from one.
 
 The aggregate `FederatedRuntimeConnections` value exists only during lowering. Enclaves are
 allocated directly into their owning Federate's dense map, while owner-qualified aliases pair the
@@ -112,24 +129,47 @@ rejected.
 
 ## Scheduler and RTI coordination
 
-Every Enclave retains an independent scheduler. Within a Federate, one gateway Enclave owns the
-blocking `RtiLogicalTimeCoordinator`; the other Enclaves use the runtime's local upstream and
-downstream barriers and feed the gateway through in-process crosslinks. This avoids treating one
-protocol client as several independent RTI participants while preserving scheduler parallelism.
+Every Enclave retains an independent scheduler. After a `RuntimeFederate` is consumed, the static
+runner creates one immutable participant layout containing every owned Enclave and one
+Federate-wide coordination service. Each scheduler receives a participant proxy implementing the
+runtime's generic `LogicalTimeCoordinator`; the service alone owns the single protocol coordinator.
+
+Coordination is split-phase. Before it can block on an in-process upstream barrier, each scheduler
+publishes a sequenced `Candidate(tag)`, `Idle`, or `Finished` frontier without waiting for the RTI.
+It then preserves the execution order: acquire local barriers, block for the external Federate
+permit, process the tag, release downstream barriers, and report external completion. The service
+advertises one NET for the minimum finite candidate and releases only acquire requests covered by
+the cached RTI grant. All-idle Federates remain responsive without advertising `NET(FOREVER)`.
+
+After a grant covers the current minimum candidate, the service opens a local observation round and
+wakes every active participant with the exact tag and epoch. Only a consumed wake can certify that
+participant's later completion, advancement, or quiescence. Any subsequent frontier transition
+invalidates existing certificates and starts a fresh epoch, so stale idle state cannot cause a
+premature LTC. The participant layout is static for one execution; publications, request IDs,
+grants, epochs, certificates, lifecycle, and failure state are dynamic per-run service state and
+are never written back into builder analysis, `RtiGraph`, or `RuntimeFederate`.
 
 The RTI remains a star. Each Federate has one protocol identity and connection. Outbound
 serialized messages enter that Federate's FIFO mailbox before logical-time completion is
 reported. Incoming messages select a stable endpoint route, decode the payload, and schedule the
-target action in the correct owned Enclave.
+target action in the correct owned Enclave. Startup begins with identity-only
+`FederateToRti::Hello { federate_id }`; trusted clients send no topology or topology hash.
 
-`FederateId` and `EndpointId` remain stable strings at builder, manifest,
-transport, tracing, error, and protocol boundaries. `CompiledTopology` resolves
-them into crate-private `FederateKey` and `EndpointKey` values allocated in
+`FederateId` and `EndpointId` remain stable strings at builder, transport,
+tracing, error, and protocol boundaries. `RtiGraph` resolves them into
+crate-private `FederateKey` and `EndpointKey` values allocated in
 lexical stable-ID order. Immutable Federate and endpoint records are owned by
 dense maps, while mutable RTI coordination is attached with a dense secondary
 map. Grant work sets, dependency paths, route validation, and cached session
 participants use those process-local keys; deliveries and diagnostics translate
 back to stable IDs. Dense keys are not public API and never appear on the wire.
+
+Scheduler completion is supervised independently of thread join order. The first scheduler error
+or panic force-stops every Federate coordination service and closes the RTI session before the
+runner joins waiting peers. Panics become `SchedulerThreadPanic`, ordinary scheduler errors remain
+`SchedulerRuntime`, and cleanup failures do not replace the first terminal error. Normal shutdown
+instead lets the final participant publish `Finished`, sends exactly one Stop per Federate, and
+then joins schedulers, services, and the RTI session.
 
 Serialized outbound lowering also retains the already-known target
 `FederateId`. Deferred sender construction selects that target's route table and
@@ -138,12 +178,12 @@ then its `EndpointId` directly, rather than scanning every Federate's routes.
 ## Ownership map
 
 - `boomerang_runtime` owns protocol-neutral Enclave types, dense maps, schedulers, local
-  crosslinks, and `InterPartitionEventSink`.
+  crosslinks, generic split-phase coordination concepts, and `InterPartitionEventSink`.
 - `boomerang_federated` owns codecs, serialized sinks, endpoint/fault types, protocol clients,
-  `FederateRuntimeBridge`, `RuntimeFederate`, `RuntimeFederation`, RTI state, sessions, and
-  transports.
-- `boomerang_builder` owns declarations, placement analysis, topology projection, codec
-  registration, pending bindings, and the `RuntimeAssembly` lowering result.
+  Federate-wide coordination services, `FederateRuntimeBridge`, `RuntimeFederate`,
+  `RuntimeFederation`, RTI state, sessions, and transports.
+- `boomerang_builder` owns declarations, placement and federation graph analysis, graph projection,
+  codec registration, pending bindings, and the `RuntimeAssembly` lowering result.
 - `boomerang` exposes application-facing execution functions that consume `RuntimeFederation`.
 
 The dependency direction is `boomerang_builder → boomerang_federated → boomerang_runtime` for
@@ -156,6 +196,7 @@ plus Federate B with a sink Enclave. Source-to-relay stays in process; relay-to-
 compiled RTI endpoint. The same graph runs through the in-memory and TCP runners and records the
 value at the expected complete logical tag.
 
-The builder and federated crate tests additionally cover duplicate and nested Federate declarations,
-codec failures, delayed connections, fanout, cycles, route validation, independent dense key
-spaces, and Federate-owned runtime stores.
+The builder, runtime, and federated crate tests additionally cover duplicate and nested Federate
+declarations, codec failures, delayed connections, fanout, cycles, route validation, independent
+dense key spaces, split-phase publication ordering, observation-epoch invalidation, exact protocol
+frame counts, Federate-owned runtime stores, and stop-before-join failure supervision.

@@ -1259,7 +1259,8 @@ cargo fmt --all
 cargo fmt --all -- --check
 ```
 
-Expected: the check exits successfully with no output.
+Observed during Task 7: the check exits successfully. Stable rustfmt emits warnings that the
+configured `wrap_comments` and `comment_width` options are available only on nightly.
 
 - [x] **Step 3: Run the full workspace test suite**
 
@@ -1279,7 +1280,8 @@ Run:
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-Expected: Clippy exits successfully with zero warnings.
+Observed during Task 7: Clippy exits successfully with no lint failures under `-D warnings`. Cargo
+also emits a future-incompatibility note for the `binrw` and `proc-macro-error2` dependencies.
 
 - [x] **Step 5: Verify architectural removals and review the diff**
 
@@ -1308,24 +1310,24 @@ git commit -m "docs: describe federated RTI phase boundaries"
 Re-read `docs/superpowers/specs/2026-07-19-federated-rti-boundaries-design.md` and confirm:
 
 ```text
-[ ] Assembly lowering is the only RtiGraph producer.
-[ ] RtiGraph retains no declarative source topology or client neighbor structures.
-[ ] Runtime RTI state is a separate dense secondary map.
-[ ] RuntimeFederate startup does not receive or query RtiGraph.
-[ ] Hello contains only FederateId.
-[ ] Graph validation and path computation live in boomerang_builder.
-[ ] Every active Enclave participates in its Federate's RTI logical-time frontier.
-[ ] Frontier publication precedes local blocking while local acquire still precedes blocking
+[x] Assembly lowering is the only RtiGraph producer.
+[x] RtiGraph retains no declarative source topology or client neighbor structures.
+[x] Runtime RTI state is a separate dense secondary map.
+[x] RuntimeFederate startup does not receive or query RtiGraph.
+[x] Hello contains only FederateId.
+[x] Graph validation and path computation live in boomerang_builder.
+[x] Every active Enclave participates in its Federate's RTI logical-time frontier.
+[x] Frontier publication precedes local blocking while local acquire still precedes blocking
     external grant acquisition.
-[ ] Stale pre-round Idle/candidate publications cannot satisfy post-round LTC quiescence.
-[ ] Builder/lowering/runtime hierarchy contain no mutable participant or service state.
-[ ] static_runner constructs and supervises coordination but contains no frontier state machine or
+[x] Stale pre-round Idle/candidate publications cannot satisfy post-round LTC quiescence.
+[x] Builder/lowering/runtime hierarchy contain no mutable participant or service state.
+[x] static_runner constructs and supervises coordination but contains no frontier state machine or
     RTI polling loop.
-[ ] boomerang_runtime contains generic coordination only, with no Federate, RTI, transport, Tokio,
+[x] boomerang_runtime contains generic coordination only, with no Federate, RTI, transport, Tokio,
     endpoint, or graph knowledge.
-[ ] A scheduler panic stops waiting peers before joins and returns SchedulerThreadPanic.
-[ ] No compatibility topology constructors or aliases remain.
-[ ] In-memory and TCP end-to-end tests pass.
+[x] A scheduler panic stops waiting peers before joins and returns SchedulerThreadPanic.
+[x] No compatibility topology constructors or aliases remain.
+[x] In-memory and TCP end-to-end tests pass.
 ```
 
 If any box cannot be checked from source and fresh command output, do not report completion; fix

@@ -106,21 +106,25 @@ descendant declared with `ReactorPlacement::Enclave` starts another scheduler wh
 the nearest Federate. Nested Federate scopes, duplicate Federate IDs, and connections with only
 one endpoint in a Federate are rejected before execution.
 
-`PartitionAnalysis` records the Federate inherited by every Enclave root and is the sole input to
-builder-owned federation graph analysis. That analysis validates membership, endpoint uniqueness,
-and zero-delay cycles; computes deterministic reachability, affected sets, and minimum accumulated
-path delays; and projects the final `RtiGraph` plus Federate-local bridges. `RtiGraph` mechanically
-interns those final records and performs no runtime graph analysis.
+`PartitionAnalysis` records the Federate inherited by every Enclave root and is the authoritative
+structural input to builder-owned federation graph analysis. Lowering combines those ownership and
+boundary records with assembly-qualified source and target port names, supplied through its
+`port_fqn` callback, to derive stable endpoint identities. Graph analysis then validates membership,
+endpoint uniqueness, and zero-delay cycles; computes deterministic reachability, affected sets, and
+minimum accumulated path delays; and projects the final `RtiGraph` plus Federate-local bridges.
+`RtiGraph` mechanically interns those final records and performs no runtime graph analysis.
 
 Same-Federate cross-Enclave boundaries remain local and do not require a payload codec.
 Cross-Federate boundaries produce an `EndpointId`, analyzed graph edge, encoder, serialized sender,
 inbound decoder, and target action route. No declarative topology manifest crosses into the runtime
 phase, and no compatibility constructor can build an RTI from one.
 
-The aggregate `FederatedRuntimeConnections` value exists only during lowering. Enclaves are
+The aggregate `FederatedRuntimeConnections` value is created during federation lowering and retained
+inside `StaticFederationRuntime`. While runtime actions are lowered, inbound endpoint factories
+temporarily take and mutate it to attach target Enclave contexts and action references. Finalization
+then consumes it, pairing each owned Enclave map with one `FederateRuntimeBridge`. Enclaves are
 allocated directly into their owning Federate's dense map, while owner-qualified aliases pair the
-`FederateId` with the local `EnclaveKey`. Finalization pairs each map with one
-`FederateRuntimeBridge`; there is no parallel placement index to validate or retain.
+`FederateId` with the local `EnclaveKey`; there is no parallel placement index to validate or retain.
 
 An unowned, reaction-free assembly-root partition may exist transiently while the builder lowers a
 federated declaration graph. It is scaffolding rather than executable Federate state and is
@@ -193,7 +197,7 @@ runtime integration. `boomerang_runtime` has no federation feature and no protoc
 
 `boomerang/tests/federated_static.rs` builds Federate A with a source Enclave and a relay Enclave,
 plus Federate B with a sink Enclave. Source-to-relay stays in process; relay-to-sink is the only
-compiled RTI endpoint. The same graph runs through the in-memory and TCP runners and records the
+lowered RTI endpoint. The same graph runs through the in-memory and TCP runners and records the
 value at the expected complete logical tag.
 
 The builder, runtime, and federated crate tests additionally cover duplicate and nested Federate

@@ -143,6 +143,7 @@ impl FederateProtocolSender {
             .map_err(|_| FederateClientError::ClientClosed)
     }
 
+    #[cfg(feature = "runtime")]
     fn send_confirmed(
         &self,
         message: FederateToRti,
@@ -303,6 +304,7 @@ impl FederateProtocolClient {
         self.outgoing.send(message)
     }
 
+    #[cfg(feature = "runtime")]
     pub(crate) fn send_confirmed(
         &self,
         message: FederateToRti,

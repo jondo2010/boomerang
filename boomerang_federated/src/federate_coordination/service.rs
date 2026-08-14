@@ -155,21 +155,7 @@ impl LogicalTimeCoordinator for FederateParticipantProxy {
                 reply: tx,
             })
             .map_err(|_| CoordinationError::new("Federate coordination service stopped"))?;
-        loop {
-            match rx.try_recv() {
-                Ok(Ok(())) => return Ok(CoordinationOutcome::Granted),
-                Ok(Err(message)) => return Err(CoordinationError::new(message)),
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    return Err(CoordinationError::new(
-                        "Federate coordination service stopped",
-                    ))
-                }
-                Err(mpsc::TryRecvError::Empty) => {}
-            }
-            if let Ok(event) = event_rx.recv_timeout(Duration::from_millis(1)) {
-                return Ok(CoordinationOutcome::Interrupted(event));
-            }
-        }
+        wait_for_acquire(&rx, event_rx)
     }
 
     fn complete(&mut self, tag: Tag) -> Result<(), CoordinationError> {
@@ -185,6 +171,37 @@ impl LogicalTimeCoordinator for FederateParticipantProxy {
             tag,
             reply,
         })
+    }
+}
+
+fn wait_for_acquire(
+    reply: &mpsc::Receiver<Result<(), String>>,
+    event_rx: &boomerang_runtime::Receiver<AsyncEvent>,
+) -> Result<CoordinationOutcome, CoordinationError> {
+    loop {
+        let queued_event = event_rx.try_recv().ok().flatten();
+        match reply.try_recv() {
+            Ok(Ok(())) => {
+                if let Some(event) = queued_event.or_else(|| event_rx.try_recv().ok().flatten()) {
+                    return Ok(CoordinationOutcome::Interrupted(event));
+                }
+                return Ok(CoordinationOutcome::Granted);
+            }
+            Ok(Err(message)) => return Err(CoordinationError::new(message)),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err(CoordinationError::new(
+                    "Federate coordination service stopped",
+                ))
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                if let Some(event) = queued_event {
+                    return Ok(CoordinationOutcome::Interrupted(event));
+                }
+            }
+        }
+        if let Ok(event) = event_rx.recv_timeout(Duration::from_millis(1)) {
+            return Ok(CoordinationOutcome::Interrupted(event));
+        }
     }
 }
 
@@ -492,4 +509,49 @@ fn panic_payload_message(payload: Box<dyn std::any::Any + Send + 'static>) -> St
         .map(|value| (*value).to_owned())
         .or_else(|| payload.downcast_ref::<String>().cloned())
         .unwrap_or_else(|| "coordination service panicked".into())
+}
+
+#[cfg(test)]
+mod acquire_tests {
+    use super::*;
+
+    #[test]
+    fn queued_event_interrupts_when_successful_grant_is_also_ready() {
+        let key = EnclaveKey::from(0);
+        let enclave = boomerang_runtime::Enclave::default();
+        let wake = enclave.create_send_context(key);
+        let event_rx = enclave.event_rx;
+        let _guard = enclave.shutdown_tx;
+        assert!(wake.schedule_external(AsyncEvent::Shutdown {
+            delay: boomerang_runtime::Duration::ZERO,
+        }));
+
+        let (reply_tx, reply_rx) = mpsc::channel();
+        reply_tx.send(Ok(())).unwrap();
+
+        assert!(matches!(
+            wait_for_acquire(&reply_rx, &event_rx).unwrap(),
+            CoordinationOutcome::Interrupted(AsyncEvent::Shutdown { .. })
+        ));
+    }
+
+    #[test]
+    fn service_error_remains_terminal_when_event_is_also_ready() {
+        let key = EnclaveKey::from(0);
+        let enclave = boomerang_runtime::Enclave::default();
+        let wake = enclave.create_send_context(key);
+        let event_rx = enclave.event_rx;
+        let _guard = enclave.shutdown_tx;
+        assert!(wake.schedule_external(AsyncEvent::Shutdown {
+            delay: boomerang_runtime::Duration::ZERO,
+        }));
+
+        let (reply_tx, reply_rx) = mpsc::channel();
+        reply_tx.send(Err("coordination failed".into())).unwrap();
+
+        assert!(wait_for_acquire(&reply_rx, &event_rx)
+            .unwrap_err()
+            .to_string()
+            .contains("coordination failed"));
+    }
 }

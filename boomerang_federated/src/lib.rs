@@ -4,6 +4,7 @@
 
 pub mod client;
 pub mod codec;
+#[cfg(feature = "runtime")]
 mod federate_coordination;
 #[cfg(feature = "runtime")]
 mod hierarchy;

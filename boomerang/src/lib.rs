@@ -45,6 +45,8 @@
 #![deny(clippy::all)]
 
 pub mod flatten_transposed;
+#[cfg(feature = "rerun")]
+pub mod rerun;
 #[cfg(feature = "federated")]
 mod static_federation;
 

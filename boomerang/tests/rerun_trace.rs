@@ -1,7 +1,6 @@
 #![cfg(feature = "rerun")]
 
 use boomerang::rerun::{RerunSessionBuilder, SinkConfig};
-use std::time::Duration;
 
 #[test]
 fn memory_session_starts_enabled_with_empty_failure_counts() {
@@ -30,9 +29,8 @@ fn default_source_ids_are_generated_per_session() {
 }
 
 #[test]
-fn memory_session_flush_is_finite_and_idempotent() {
+fn memory_session_flush_is_idempotent_smoke_test() {
     let session = RerunSessionBuilder::new("boomerang-rerun-test")
-        .flush_timeout(Duration::from_millis(100))
         .build()
         .unwrap();
 

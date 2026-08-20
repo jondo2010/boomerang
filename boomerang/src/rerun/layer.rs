@@ -252,7 +252,7 @@ impl RerunLayer {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             match record.event.as_str() {
-                "propagation_send" | "async_ingress" => registration
+                "propagation_send" | "async_ingress" | "action_schedule" => registration
                     .resolve_entity(&record.fields, record.event.as_str())
                     .map(|action| {
                         let reactions = registration.triggered_reactions(&action).to_vec();
@@ -317,6 +317,22 @@ impl RerunLayer {
                 }
                 if correlation.capture_early_ingress(key, record.clone()) {
                     return Vec::new();
+                }
+                Vec::new()
+            }
+            "action_schedule" if record.fields.outcome.as_deref() == Some("rebased") => {
+                if let (Some((_, reactions)), Some(enclave), Some(old_tag), Some(destination_tag)) = (
+                    topology,
+                    record.fields.enclave.as_deref(),
+                    CompleteTag::old_from_fields(&record.fields),
+                    CompleteTag::destination_from_fields(&record.fields),
+                ) {
+                    correlation.rebase_predecessors(
+                        enclave,
+                        &reactions,
+                        &old_tag,
+                        &destination_tag,
+                    );
                 }
                 Vec::new()
             }
@@ -488,6 +504,20 @@ impl CompleteTag {
         Some(Self {
             logical_ns: fields.destination_logical_ns.or(fields.logical_ns)?,
             microstep: fields.destination_microstep.or(fields.microstep)?,
+        })
+    }
+
+    fn old_from_fields(fields: &TraceFields) -> Option<Self> {
+        Some(Self {
+            logical_ns: fields.old_logical_ns?,
+            microstep: fields.old_microstep?,
+        })
+    }
+
+    fn destination_from_fields(fields: &TraceFields) -> Option<Self> {
+        Some(Self {
+            logical_ns: fields.destination_logical_ns?,
+            microstep: fields.destination_microstep?,
         })
     }
 }
@@ -699,6 +729,42 @@ impl CorrelationState {
             .into_iter()
             .map(|predecessor| predecessor.id)
             .collect()
+    }
+
+    fn rebase_predecessors(
+        &mut self,
+        enclave: &str,
+        reactions: &[String],
+        old_tag: &CompleteTag,
+        destination_tag: &CompleteTag,
+    ) {
+        if old_tag == destination_tag {
+            return;
+        }
+        for reaction in reactions {
+            let old_key = ReactionKey {
+                enclave: enclave.to_owned(),
+                reaction: reaction.clone(),
+                tag: old_tag.clone(),
+            };
+            let Some(moved) = self.predecessors.remove(&old_key) else {
+                continue;
+            };
+            let destination = self.predecessors.entry(ReactionKey {
+                enclave: enclave.to_owned(),
+                reaction: reaction.clone(),
+                tag: destination_tag.clone(),
+            });
+            let predecessors = destination.or_default();
+            for predecessor in moved {
+                if !predecessors
+                    .iter()
+                    .any(|existing| existing.id == predecessor.id)
+                {
+                    predecessors.push(predecessor);
+                }
+            }
+        }
     }
 
     fn cleanup_through(&mut self, enclave: &str, tag: &CompleteTag) {
@@ -1532,5 +1598,48 @@ mod tests {
         assert!(lock_unpoisoned(&capture.0)
             .iter()
             .all(|record| record.event != "propagation_receive" && record.event != "causal_link"));
+    }
+
+    #[test]
+    fn modal_rebase_moves_receive_predecessor_to_destination_tag() {
+        let capture = Arc::new(RecordCapture::default());
+        let session = RerunSessionBuilder::new("modal-rebase")
+            .trace_writer(capture.clone())
+            .build()
+            .unwrap();
+        {
+            let mut registration = session
+                .adapter
+                .registration
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registration.register("e0", "action", "a0", "a0", "/actions/a0");
+            registration.register("e0", "reaction", "r0", "r0", "/reactions/r0");
+            registration.register_action_trigger("/actions/a0", "/reactions/r0");
+        }
+        let subscriber = tracing_subscriber::registry().with(session.layer());
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::trace!(target: TRACE_TARGET, event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, outcome = "accepted");
+            tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, destination_logical_ns = 1_u64, destination_microstep = 0_u64, outcome = "accepted");
+            tracing::trace!(target: TRACE_TARGET, event = "action_schedule", enclave = "e0", action_key = "a0", old_logical_ns = 1_u64, old_microstep = 0_u64, destination_logical_ns = 5_u64, destination_microstep = 0_u64, outcome = "rebased");
+            let reaction = tracing::trace_span!(target: TRACE_TARGET, "reaction_execute", event = "reaction_execute", enclave = "e0", reaction_key = "r0", logical_ns = 5_u64, microstep = 0_u64, state = "begin");
+            drop(reaction);
+        });
+
+        let records = lock_unpoisoned(&capture.0);
+        let receive = records
+            .iter()
+            .find(|record| record.event == "propagation_receive")
+            .unwrap();
+        let reaction = records
+            .iter()
+            .find(|record| record.event == "reaction_execute")
+            .unwrap();
+        assert!(records.iter().any(|record| {
+            record.event == "causal_link"
+                && record.fields.source.as_deref() == Some(receive.id.0.as_str())
+                && record.fields.destination.as_deref() == Some(reaction.id.0.as_str())
+        }));
     }
 }

@@ -146,9 +146,13 @@ Application payload values are never recorded. Traces may include type names,
 value sizes, entity names, errors, and timing, so treat recordings as diagnostic
 metadata and review those fields before sharing them. The first registration,
 encoding, sink, flush, or callback failure disables that session, increments
-its error counter, and emits one internal warning. Its layer then unregisters
-interest in Boomerang trace callsites; later attempts are counted as skipped.
-Another composed layer may independently keep those callsites enabled.
+its error counter, emits one internal warning, and rebuilds tracing's interest
+cache. When no other layer is interested, future Boomerang trace callsites are
+filtered before reaching the adapter. `skipped_count` covers only attempts that
+still enter the adapter after disabling, such as a racing callback or a later
+explicit runtime-registration attempt. Another composed layer may keep those
+callsites globally enabled, but the disabled Rerun layer's own filter still
+rejects its callbacks.
 
 Without an interested layer, trace annotations perform no metadata work. The
 adapter adds no fields to `TriggerRes`, `Context`, `Scheduler`, queues, events,

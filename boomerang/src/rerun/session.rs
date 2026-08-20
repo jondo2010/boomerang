@@ -641,6 +641,14 @@ struct LifecycleWorker {
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
+struct PendingReset<'a>(&'a AtomicBool);
+
+impl Drop for PendingReset<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 impl LifecycleWorker {
     fn spawn(
         recording: RecordingStream,
@@ -656,6 +664,7 @@ impl LifecycleWorker {
             .name("boomerang-rerun-lifecycle".to_owned())
             .spawn(move || {
                 while let Ok(command) = receiver.recv() {
+                    let _pending_reset = PendingReset(&worker_pending);
                     match command {
                         LifecycleCommand::Flush { reply } => {
                             let _ = reply.send(driver.flush(&recording, sdk_timeout));
@@ -669,11 +678,9 @@ impl LifecycleWorker {
                             drop(memory);
                             let result = driver.teardown(recording, sdk_timeout).and(flush);
                             let _ = reply.send(result);
-                            worker_pending.store(false, Ordering::Release);
                             return;
                         }
                     }
-                    worker_pending.store(false, Ordering::Release);
                 }
                 recording.disconnect();
                 drop(memory);
@@ -909,7 +916,22 @@ impl SessionState {
 
 #[cfg(test)]
 mod tests {
-    use super::SessionState;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::{BlueprintConfig, FlushDriver, LifecycleError, RerunSessionBuilder, SessionState};
+
+    struct PanickingFlush;
+
+    impl FlushDriver for PanickingFlush {
+        fn flush(
+            &self,
+            _recording: &rerun::RecordingStream,
+            _timeout: Duration,
+        ) -> Result<(), rerun::sink::SinkFlushError> {
+            panic!("injected lifecycle panic")
+        }
+    }
 
     #[test]
     fn first_failure_disables_once_and_later_attempts_are_skipped() {
@@ -944,5 +966,26 @@ mod tests {
         });
 
         assert_eq!(flushes, 1);
+    }
+
+    #[test]
+    fn worker_panic_releases_admission_and_disables_once_on_disconnect() {
+        let session = RerunSessionBuilder::new("panicking-lifecycle-driver")
+            .blueprint(BlueprintConfig::None)
+            .flush_timeout(Duration::from_secs(1))
+            .flush_driver(Arc::new(PanickingFlush))
+            .build()
+            .unwrap();
+        let worker = session.lifecycle.as_ref().unwrap();
+
+        let first = worker.flush(Duration::from_secs(1)).unwrap_err();
+        assert!(matches!(first, LifecycleError::Disconnected));
+        let next = worker.snapshot(Duration::from_secs(1)).unwrap_err();
+        assert!(matches!(next, LifecycleError::Disconnected));
+
+        session.state.disable_on_error(&first);
+        session.state.disable_on_error(&next);
+        assert!(!session.is_enabled());
+        assert_eq!(session.error_count(), 1);
     }
 }

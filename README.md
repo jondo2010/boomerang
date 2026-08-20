@@ -34,6 +34,25 @@ Enable the optional `rerun` feature to record the scheduler's structured trace
 into [Rerun](https://rerun.io/). The adapter uses Rerun `0.36.1` and composes as
 a `tracing_subscriber` layer; it never installs a global subscriber.
 
+The examples below name APIs from `tracing` and `tracing-subscriber`, so a
+consumer must declare them directly:
+
+```toml
+[dependencies]
+boomerang = { version = "0.3", features = ["rerun"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+```
+
+Add `federated` to the `boomerang` feature list for the federated example. A
+direct Rerun dependency is needed only when consumer code names Rerun SDK types
+or constructs a custom blueprint; the local example leaves its snapshot type
+inferred. Use the same SDK configuration as the adapter:
+
+```toml
+rerun = { version = "=0.36.1", default-features = false, features = ["sdk"] }
+```
+
 Register the lowered `RuntimeAssembly` before execution consumes it. For a
 local assembly, the complete flow is:
 
@@ -50,7 +69,7 @@ use tracing_subscriber::prelude::*;
 fn run_local(
     parts: RuntimeAssembly,
     config: runtime::Config,
-) -> Result<Vec<rerun::log::LogMsg>, Box<dyn Error>> {
+) -> Result<(), Box<dyn Error>> {
     let session = RerunSessionBuilder::new("my-boomerang-model")
         .sink(SinkConfig::Memory)
         .build()?;
@@ -64,7 +83,8 @@ fn run_local(
     })?;
 
     // This bounded call flushes, returns, and clears the memory recording.
-    Ok(session.take_memory_snapshot_bounded().unwrap_or_default())
+    let _messages = session.take_memory_snapshot_bounded().unwrap_or_default();
+    Ok(())
 }
 # }
 ```
@@ -144,15 +164,17 @@ a fabricated causal edge.
 
 Application payload values are never recorded. Traces may include type names,
 value sizes, entity names, errors, and timing, so treat recordings as diagnostic
-metadata and review those fields before sharing them. The first registration,
-encoding, sink, flush, or callback failure disables that session, increments
-its error counter, emits one internal warning, and rebuilds tracing's interest
-cache. When no other layer is interested, future Boomerang trace callsites are
-filtered before reaching the adapter. `skipped_count` covers only attempts that
-still enter the adapter after disabling, such as a racing callback or a later
-explicit runtime-registration attempt. Another composed layer may keep those
-callsites globally enabled, but the disabled Rerun layer's own filter still
-rejects its callbacks.
+metadata and review those fields before sharing them. Configuration and sink
+construction failures return `RerunSessionBuildError`; no session or counters
+exist yet. After a session is built, its first runtime-registration, logging,
+snapshot, flush, or teardown failure disables it, increments its error counter,
+emits one internal warning, and rebuilds tracing's interest cache. When no other
+layer is interested, future Boomerang trace callsites are filtered before
+reaching the adapter. `skipped_count` covers only attempts that still enter the
+adapter after disabling, such as a racing callback or a later explicit
+runtime-registration attempt. Another composed layer may keep those callsites
+globally enabled, but the disabled Rerun layer's own filter still rejects its
+callbacks.
 
 Without an interested layer, trace annotations perform no metadata work. The
 adapter adds no fields to `TriggerRes`, `Context`, `Scheduler`, queues, events,

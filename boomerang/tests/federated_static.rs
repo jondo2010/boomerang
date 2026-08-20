@@ -444,9 +444,21 @@ fn public_api_runs_static_in_memory_federation() {
                 Some(segments[..=enclave + 1].join("/"))
             })
             .collect::<std::collections::BTreeSet<_>>();
-        assert!(
-            scheduler_lanes.len() >= 2,
-            "expected traces from at least two federated scheduler lanes, got {scheduler_lanes:?}"
+        assert_eq!(
+            scheduler_lanes
+                .iter()
+                .filter(|lane| lane.starts_with("/federates/a/enclaves/"))
+                .count(),
+            2,
+            "expected both lowered scheduler lanes in federate A: {scheduler_lanes:?}"
+        );
+        assert_eq!(
+            scheduler_lanes
+                .iter()
+                .filter(|lane| lane.starts_with("/federates/b/enclaves/"))
+                .count(),
+            1,
+            "expected the lowered scheduler lane in federate B: {scheduler_lanes:?}"
         );
     }
 }

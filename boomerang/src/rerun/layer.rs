@@ -268,23 +268,31 @@ impl RerunLayer {
         let mut correlation = lock_unpoisoned(&self.adapter.correlation);
         correlation.advance();
         match record.event.as_str() {
-            "propagation_send"
-                if record.fields.kind.as_deref() == Some("logical")
-                    && record.fields.outcome.as_deref() == Some("accepted") =>
-            {
+            "propagation_send" if record.fields.kind.as_deref() == Some("logical") => {
                 if let (Some((action, _)), Some(tag), Some(destination)) = (
                     topology,
                     CompleteTag::from_fields(&record.fields),
                     record.fields.destination.clone(),
                 ) {
-                    correlation.insert_send(
-                        PropagationKey {
-                            enclave: destination,
-                            action,
-                            tag,
-                        },
-                        record.id.clone(),
-                    );
+                    let key = PropagationKey {
+                        enclave: destination,
+                        action,
+                        tag,
+                    };
+                    let accepted = record.fields.outcome.as_deref() == Some("accepted");
+                    match correlation.finish_open_send(&key, &record.id, accepted) {
+                        FinishOpenSend::NotOpen if accepted => {
+                            correlation.insert_send(key, record.id.clone());
+                        }
+                        FinishOpenSend::EarlyIngress(ingress) => {
+                            return self.derive_receive(
+                                &mut correlation,
+                                record.id.clone(),
+                                *ingress,
+                            );
+                        }
+                        FinishOpenSend::NotOpen | FinishOpenSend::Handled => {}
+                    }
                 }
                 Vec::new()
             }
@@ -292,54 +300,25 @@ impl RerunLayer {
                 if record.fields.kind.as_deref() == Some("logical")
                     && record.fields.outcome.as_deref() == Some("accepted") =>
             {
-                let (Some((action, reactions)), Some(tag), Some(enclave)) = (
+                let (Some((action, _)), Some(tag), Some(enclave)) = (
                     topology,
                     CompleteTag::from_fields(&record.fields),
                     record.fields.enclave.clone(),
                 ) else {
                     return Vec::new();
                 };
-                let Some(send) = correlation.take_send(&PropagationKey {
+                let key = PropagationKey {
                     enclave: enclave.clone(),
                     action,
                     tag: tag.clone(),
-                }) else {
-                    return Vec::new();
                 };
-                let Some(receive_id) = self.next_id(&enclave) else {
-                    return Vec::new();
-                };
-                let mut receive_fields = record.fields.clone();
-                receive_fields.event = Some("propagation_receive".to_owned());
-                let receive = TraceRecord {
-                    entity_path: format!(
-                        "/propagation/receives/{}",
-                        super::entities::escape_entity_segment(&receive_id.0)
-                    ),
-                    event: "propagation_receive".to_owned(),
-                    id: receive_id.clone(),
-                    parent_id: Some(send.clone()),
-                    timepoint: record.timepoint.clone(),
-                    microstep: record.microstep,
-                    duration_ns: None,
-                    terminal_state: None,
-                    fields: receive_fields,
-                };
-                for reaction in reactions {
-                    correlation.insert_predecessor(
-                        ReactionKey {
-                            enclave: enclave.clone(),
-                            reaction,
-                            tag: tag.clone(),
-                        },
-                        receive_id.clone(),
-                    );
+                if let Some(send) = correlation.take_send(&key) {
+                    return self.derive_receive(&mut correlation, send, record.clone());
                 }
-                let mut derived = vec![receive];
-                if let Some(link) = self.causal_link(&enclave, &send, &receive_id, record) {
-                    derived.push(link);
+                if correlation.capture_early_ingress(key, record.clone()) {
+                    return Vec::new();
                 }
-                derived
+                Vec::new()
             }
             "reaction_execute" => {
                 let (Some((reaction, _)), Some(tag), Some(enclave)) = (
@@ -369,6 +348,93 @@ impl RerunLayer {
                 Vec::new()
             }
             _ => Vec::new(),
+        }
+    }
+
+    fn derive_receive(
+        &self,
+        correlation: &mut CorrelationState,
+        send: TraceId,
+        ingress: TraceRecord,
+    ) -> Vec<TraceRecord> {
+        let Some(enclave) = ingress.fields.enclave.clone() else {
+            return Vec::new();
+        };
+        let Some(tag) = CompleteTag::from_fields(&ingress.fields) else {
+            return Vec::new();
+        };
+        let reactions = {
+            let registration = self
+                .adapter
+                .registration
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registration
+                .resolve_entity(&ingress.fields, ingress.event.as_str())
+                .map(|action| registration.triggered_reactions(&action).to_vec())
+                .unwrap_or_default()
+        };
+        let Some(receive_id) = self.next_id(&enclave) else {
+            return Vec::new();
+        };
+        let mut receive_fields = ingress.fields.clone();
+        receive_fields.event = Some("propagation_receive".to_owned());
+        let receive = TraceRecord {
+            entity_path: format!(
+                "/propagation/receives/{}",
+                super::entities::escape_entity_segment(&receive_id.0)
+            ),
+            event: "propagation_receive".to_owned(),
+            id: receive_id.clone(),
+            parent_id: Some(send.clone()),
+            timepoint: ingress.timepoint.clone(),
+            microstep: ingress.microstep,
+            duration_ns: None,
+            terminal_state: None,
+            fields: receive_fields,
+        };
+        for reaction in reactions {
+            correlation.insert_predecessor(
+                ReactionKey {
+                    enclave: enclave.clone(),
+                    reaction,
+                    tag: tag.clone(),
+                },
+                receive_id.clone(),
+            );
+        }
+        let mut derived = vec![receive];
+        if let Some(link) = self.causal_link(&enclave, &send, &receive_id, &ingress) {
+            derived.push(link);
+        }
+        derived
+    }
+
+    fn begin_propagation_send(&self, fields: &TraceFields, id: TraceId) {
+        if fields.event.as_deref() != Some("propagation_send")
+            || fields.kind.as_deref() != Some("logical")
+        {
+            return;
+        }
+        let action = self
+            .adapter
+            .registration
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .resolve_entity(fields, "propagation_send");
+        if let (Some(action), Some(tag), Some(destination)) = (
+            action,
+            CompleteTag::from_fields(fields),
+            fields.destination.clone(),
+        ) {
+            lock_unpoisoned(&self.adapter.correlation).begin_open_send(
+                PropagationKey {
+                    enclave: destination,
+                    action,
+                    tag,
+                },
+                id,
+            );
         }
     }
 
@@ -465,7 +531,34 @@ impl PendingResolution {
 pub(super) struct CorrelationState {
     epoch: u64,
     sends: BTreeMap<PropagationKey, PendingResolution>,
+    open_sends: BTreeMap<PropagationKey, PendingResolution>,
+    early_ingress: BTreeMap<PropagationKey, PendingIngress>,
     predecessors: BTreeMap<ReactionKey, Vec<PendingPredecessor>>,
+}
+
+#[derive(Clone, Debug)]
+enum PendingIngress {
+    Unique {
+        record: Box<TraceRecord>,
+        epoch: u64,
+    },
+    Ambiguous {
+        epoch: u64,
+    },
+}
+
+impl PendingIngress {
+    fn epoch(&self) -> u64 {
+        match self {
+            Self::Unique { epoch, .. } | Self::Ambiguous { epoch } => *epoch,
+        }
+    }
+}
+
+enum FinishOpenSend {
+    NotOpen,
+    EarlyIngress(Box<TraceRecord>),
+    Handled,
 }
 
 #[derive(Clone, Debug)]
@@ -479,6 +572,9 @@ impl CorrelationState {
         self.epoch = self.epoch.saturating_add(1);
         let minimum = self.epoch.saturating_sub(MAX_CORRELATION_AGE);
         self.sends.retain(|_, value| value.epoch() >= minimum);
+        self.open_sends.retain(|_, value| value.epoch() >= minimum);
+        self.early_ingress
+            .retain(|_, value| value.epoch() >= minimum);
         self.predecessors.retain(|_, values| {
             values.retain(|value| value.epoch >= minimum);
             !values.is_empty()
@@ -487,11 +583,95 @@ impl CorrelationState {
     }
 
     fn insert_send(&mut self, key: PropagationKey, id: TraceId) {
-        insert_resolution(&mut self.sends, key, id, self.epoch);
+        if self.open_sends.contains_key(&key) {
+            self.sends.insert(
+                key.clone(),
+                PendingResolution::Ambiguous { epoch: self.epoch },
+            );
+            self.open_sends
+                .insert(key, PendingResolution::Ambiguous { epoch: self.epoch });
+        } else {
+            insert_resolution(&mut self.sends, key, id, self.epoch);
+        }
         self.enforce_bound();
     }
 
+    fn begin_open_send(&mut self, key: PropagationKey, id: TraceId) {
+        if self.sends.contains_key(&key) {
+            self.sends.insert(
+                key.clone(),
+                PendingResolution::Ambiguous { epoch: self.epoch },
+            );
+            self.open_sends
+                .insert(key, PendingResolution::Ambiguous { epoch: self.epoch });
+        } else {
+            insert_resolution(&mut self.open_sends, key, id, self.epoch);
+        }
+        self.enforce_bound();
+    }
+
+    fn capture_early_ingress(&mut self, key: PropagationKey, record: TraceRecord) -> bool {
+        if !self.open_sends.contains_key(&key) {
+            return false;
+        }
+        self.early_ingress
+            .entry(key)
+            .and_modify(|ingress| *ingress = PendingIngress::Ambiguous { epoch: self.epoch })
+            .or_insert(PendingIngress::Unique {
+                record: Box::new(record),
+                epoch: self.epoch,
+            });
+        self.enforce_bound();
+        true
+    }
+
+    fn finish_open_send(
+        &mut self,
+        key: &PropagationKey,
+        id: &TraceId,
+        accepted: bool,
+    ) -> FinishOpenSend {
+        match self.open_sends.get(key) {
+            None => FinishOpenSend::NotOpen,
+            Some(PendingResolution::Ambiguous { .. }) => FinishOpenSend::Handled,
+            Some(PendingResolution::Unique { id: pending, .. }) if pending != id => {
+                FinishOpenSend::Handled
+            }
+            Some(PendingResolution::Unique { .. }) => {
+                self.open_sends.remove(key);
+                let ingress = self.early_ingress.remove(key);
+                if !accepted {
+                    return FinishOpenSend::Handled;
+                }
+                match ingress {
+                    Some(PendingIngress::Unique { record, .. }) => {
+                        FinishOpenSend::EarlyIngress(record)
+                    }
+                    Some(PendingIngress::Ambiguous { .. }) => FinishOpenSend::Handled,
+                    None => {
+                        self.insert_send(key.clone(), id.clone());
+                        FinishOpenSend::Handled
+                    }
+                }
+            }
+        }
+    }
+
     fn take_send(&mut self, key: &PropagationKey) -> Option<TraceId> {
+        if self.open_sends.contains_key(key) && self.sends.contains_key(key) {
+            self.sends.insert(
+                key.clone(),
+                PendingResolution::Ambiguous { epoch: self.epoch },
+            );
+            self.open_sends.insert(
+                key.clone(),
+                PendingResolution::Ambiguous { epoch: self.epoch },
+            );
+            return None;
+        }
+        if self.open_sends.contains_key(key) {
+            return None;
+        }
         match self.sends.get(key) {
             Some(PendingResolution::Unique { .. }) => self
                 .sends
@@ -524,12 +704,19 @@ impl CorrelationState {
     fn cleanup_through(&mut self, enclave: &str, tag: &CompleteTag) {
         self.sends
             .retain(|key, _| key.enclave != enclave || key.tag > *tag);
+        self.open_sends
+            .retain(|key, _| key.enclave != enclave || key.tag > *tag);
+        self.early_ingress
+            .retain(|key, _| key.enclave != enclave || key.tag > *tag);
         self.predecessors
             .retain(|key, _| key.enclave != enclave || key.tag > *tag);
     }
 
     fn enforce_bound(&mut self) {
-        while self.sends.len() + self.predecessors.values().map(Vec::len).sum::<usize>()
+        while self.sends.len()
+            + self.open_sends.len()
+            + self.early_ingress.len()
+            + self.predecessors.values().map(Vec::len).sum::<usize>()
             > MAX_PENDING_CORRELATIONS
         {
             let oldest_send = self
@@ -542,15 +729,54 @@ impl CorrelationState {
                     .enumerate()
                     .map(|(index, value)| (value.epoch, key.clone(), index))
             });
-            match (oldest_send.min(), oldest_predecessor.min()) {
+            let oldest_open_send = self
+                .open_sends
+                .iter()
+                .map(|(key, value)| (value.epoch(), key.clone(), 1_u8));
+            let oldest_early_ingress = self
+                .early_ingress
+                .iter()
+                .map(|(key, value)| (value.epoch(), key.clone(), 2_u8));
+            let oldest_propagation = oldest_send
+                .map(|(epoch, key)| (epoch, key, 0_u8))
+                .chain(oldest_open_send)
+                .chain(oldest_early_ingress)
+                .min();
+            match (oldest_propagation, oldest_predecessor.min()) {
                 (Some(send), Some(predecessor)) if send.0 <= predecessor.0 => {
-                    self.sends.remove(&send.1);
+                    match send.2 {
+                        0 => {
+                            self.sends.remove(&send.1);
+                        }
+                        1 => {
+                            self.open_sends.remove(&send.1);
+                        }
+                        _ => {
+                            self.early_ingress.remove(&send.1);
+                        }
+                    }
+                    if !self.open_sends.contains_key(&send.1) {
+                        self.early_ingress.remove(&send.1);
+                    }
                 }
                 (Some(_), Some(predecessor)) => {
                     remove_predecessor(&mut self.predecessors, &predecessor.1, predecessor.2);
                 }
                 (Some(send), None) => {
-                    self.sends.remove(&send.1);
+                    match send.2 {
+                        0 => {
+                            self.sends.remove(&send.1);
+                        }
+                        1 => {
+                            self.open_sends.remove(&send.1);
+                        }
+                        _ => {
+                            self.early_ingress.remove(&send.1);
+                        }
+                    }
+                    if !self.open_sends.contains_key(&send.1) {
+                        self.early_ingress.remove(&send.1);
+                    }
                 }
                 (None, Some(predecessor)) => {
                     remove_predecessor(&mut self.predecessors, &predecessor.1, predecessor.2);
@@ -616,10 +842,13 @@ where
             let Some(trace_id) = self.next_id(enclave) else {
                 return;
             };
+            self.begin_propagation_send(&fields, trace_id.clone());
+            let timepoint = self.timepoint(&fields);
             let span_state = Arc::new(SpanState::new(
                 trace_id,
                 parent.map(|parent| parent.id.clone()),
                 fields,
+                timepoint,
             ));
             if let Some(span) = ctx.span(id) {
                 span.extensions_mut().insert(span_state);
@@ -668,6 +897,7 @@ where
                 Some(state.id.clone()),
                 Some(state.close_duration()),
             ) {
+                record.timepoint = state.timepoint.clone();
                 record.terminal_state = terminal_state;
                 self.write_with_causality(record);
             }
@@ -698,6 +928,7 @@ struct SpanState {
     id: TraceId,
     parent_id: Option<TraceId>,
     fields: Mutex<TraceFields>,
+    timepoint: TraceTimePoint,
     timing: Mutex<SpanTiming>,
 }
 
@@ -708,11 +939,17 @@ struct SpanTiming {
 }
 
 impl SpanState {
-    fn new(id: TraceId, parent_id: Option<TraceId>, fields: TraceFields) -> Self {
+    fn new(
+        id: TraceId,
+        parent_id: Option<TraceId>,
+        fields: TraceFields,
+        timepoint: TraceTimePoint,
+    ) -> Self {
         Self {
             id,
             parent_id,
             fields: Mutex::new(fields),
+            timepoint,
             timing: Mutex::new(SpanTiming::default()),
         }
     }
@@ -1145,5 +1382,155 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn ingress_during_open_send_span_links_only_after_accepted_close() {
+        let capture = Arc::new(RecordCapture::default());
+        let session = RerunSessionBuilder::new("two-phase-send")
+            .trace_writer(capture.clone())
+            .build()
+            .unwrap();
+        session
+            .adapter
+            .registration
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .register("e0", "action", "a0", "a0", "/actions/a0");
+        let subscriber = tracing_subscriber::registry().with(session.layer());
+
+        tracing::subscriber::with_default(subscriber, || {
+            let send = tracing::trace_span!(
+                target: TRACE_TARGET,
+                "propagation_send",
+                event = "propagation_send",
+                enclave = "source",
+                kind = "logical",
+                destination = "e0",
+                action_key = "a0",
+                logical_ns = 1_u64,
+                microstep = 0_u64,
+                outcome = tracing::field::Empty,
+            );
+            let entered = send.enter();
+            tracing::trace!(
+                target: TRACE_TARGET,
+                event = "async_ingress",
+                enclave = "e0",
+                kind = "logical",
+                action_key = "a0",
+                logical_ns = 1_u64,
+                microstep = 0_u64,
+                destination_logical_ns = 1_u64,
+                destination_microstep = 0_u64,
+                outcome = "accepted",
+            );
+            send.record("outcome", "accepted");
+            drop(entered);
+            drop(send);
+        });
+
+        let records = lock_unpoisoned(&capture.0);
+        let send = records
+            .iter()
+            .find(|record| record.event == "propagation_send")
+            .unwrap();
+        let receive = records
+            .iter()
+            .find(|record| record.event == "propagation_receive")
+            .expect("accepted send must correlate with ingress observed before span close");
+        assert_eq!(receive.parent_id.as_ref(), Some(&send.id));
+        let ingress = records
+            .iter()
+            .find(|record| record.event == "async_ingress")
+            .unwrap();
+        assert!(send.timepoint.elapsed_ns <= ingress.timepoint.elapsed_ns);
+    }
+
+    #[test]
+    fn ingress_during_failed_send_span_remains_neutral() {
+        let capture = Arc::new(RecordCapture::default());
+        let session = RerunSessionBuilder::new("failed-two-phase-send")
+            .trace_writer(capture.clone())
+            .build()
+            .unwrap();
+        session
+            .adapter
+            .registration
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .register("e0", "action", "a0", "a0", "/actions/a0");
+        let subscriber = tracing_subscriber::registry().with(session.layer());
+
+        tracing::subscriber::with_default(subscriber, || {
+            let send = tracing::trace_span!(target: TRACE_TARGET, "propagation_send", event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, outcome = tracing::field::Empty);
+            let entered = send.enter();
+            tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, destination_logical_ns = 1_u64, destination_microstep = 0_u64, outcome = "accepted");
+            send.record("outcome", "failed");
+            drop(entered);
+            drop(send);
+        });
+
+        assert!(lock_unpoisoned(&capture.0)
+            .iter()
+            .all(|record| record.event != "propagation_receive" && record.event != "causal_link"));
+    }
+
+    #[test]
+    fn duplicate_open_send_candidates_keep_early_ingress_neutral() {
+        let capture = Arc::new(RecordCapture::default());
+        let session = RerunSessionBuilder::new("ambiguous-two-phase-send")
+            .trace_writer(capture.clone())
+            .build()
+            .unwrap();
+        session
+            .adapter
+            .registration
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .register("e0", "action", "a0", "a0", "/actions/a0");
+        let subscriber = tracing_subscriber::registry().with(session.layer());
+
+        tracing::subscriber::with_default(subscriber, || {
+            let first = tracing::trace_span!(target: TRACE_TARGET, "propagation_send", event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, outcome = tracing::field::Empty);
+            let second = tracing::trace_span!(target: TRACE_TARGET, "propagation_send", event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, outcome = tracing::field::Empty);
+            tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, destination_logical_ns = 1_u64, destination_microstep = 0_u64, outcome = "accepted");
+            first.record("outcome", "accepted");
+            second.record("outcome", "accepted");
+            drop(first);
+            drop(second);
+        });
+
+        assert!(lock_unpoisoned(&capture.0)
+            .iter()
+            .all(|record| record.event != "propagation_receive" && record.event != "causal_link"));
+    }
+
+    #[test]
+    fn completed_and_open_send_candidates_keep_ingress_neutral() {
+        let capture = Arc::new(RecordCapture::default());
+        let session = RerunSessionBuilder::new("mixed-ambiguous-send")
+            .trace_writer(capture.clone())
+            .build()
+            .unwrap();
+        session
+            .adapter
+            .registration
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .register("e0", "action", "a0", "a0", "/actions/a0");
+        let subscriber = tracing_subscriber::registry().with(session.layer());
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::trace!(target: TRACE_TARGET, event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, outcome = "accepted");
+            let open = tracing::trace_span!(target: TRACE_TARGET, "propagation_send", event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, outcome = tracing::field::Empty);
+            tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, destination_logical_ns = 1_u64, destination_microstep = 0_u64, outcome = "accepted");
+            open.record("outcome", "accepted");
+            drop(open);
+        });
+
+        assert!(lock_unpoisoned(&capture.0)
+            .iter()
+            .all(|record| record.event != "propagation_receive" && record.event != "causal_link"));
     }
 }

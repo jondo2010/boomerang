@@ -79,7 +79,7 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use tracing::{field::Visit, span::Attributes, Event, Id, Subscriber};
+    use tracing::{field::Visit, span::Attributes, span::Record, Event, Id, Subscriber};
     use tracing_subscriber::{layer::Context, prelude::*, registry::LookupSpan, Layer};
 
     use crate::{
@@ -176,6 +176,14 @@ mod tests {
                 fields: visitor.0,
                 parent,
             });
+        }
+
+        fn on_record(&self, id: &Id, values: &Record<'_>, _ctx: Context<'_, S>) {
+            let mut visitor = FieldVisitor::default();
+            values.record(&mut visitor);
+            if let Some(span) = self.spans.lock().unwrap().get_mut(&id.into_u64()) {
+                span.fields.extend(visitor.0);
+            }
         }
 
         fn on_enter(&self, id: &Id, _ctx: Context<'_, S>) {
@@ -329,7 +337,6 @@ mod tests {
         for fact in [
             event::ACTION_SCHEDULE,
             event::PORT_WRITE,
-            event::PROPAGATION_SEND,
             event::ASYNC_INGRESS,
             event::FRONTIER_PUBLISH,
             event::COORDINATION_GRANT,
@@ -363,11 +370,12 @@ mod tests {
             .expect("portA write");
         assert_parent_reaction(port_write, "startup", &spans);
 
-        let send = records
-            .iter()
+        let send = spans
+            .values()
             .find(|record| record.field("event") == event::PROPAGATION_SEND)
             .expect("in-process propagation send");
         assert_parent_reaction(send, "reactionA", &spans);
+        assert_eq!(send.field("outcome"), "accepted");
 
         for record in &records {
             if matches!(

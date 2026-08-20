@@ -136,15 +136,9 @@ impl<T: ReactorData + Clone> InterPartitionEventSink<T> for InProcessInterPartit
     fn send(&self, time: InterPartitionEventTime, target: &AsyncActionRef<T>, value: &T) {
         match time {
             InterPartitionEventTime::Logical(tag) => {
-                let accepted =
-                    self.remote_context
-                        .schedule_external(crate::event::AsyncEvent::Logical {
-                            tag,
-                            key: target.key(),
-                            value: Box::new(value.clone()),
-                        });
-                tracing::trace!(
+                let span = tracing::trace_span!(
                     target: crate::trace::TRACE_TARGET,
+                    "propagation_send",
                     event = crate::trace::event::PROPAGATION_SEND,
                     kind = "logical",
                     destination = %self.remote_context.enclave_id(),
@@ -154,15 +148,22 @@ impl<T: ReactorData + Clone> InterPartitionEventSink<T> for InProcessInterPartit
                     microstep = crate::trace::microstep(tag),
                     value_type = std::any::type_name::<T>(),
                     value_size = std::mem::size_of_val(value),
-                    outcome = if accepted { "accepted" } else { "failed" },
+                    outcome = tracing::field::Empty,
                 );
-            }
-            InterPartitionEventTime::Physical(delay) => {
+                let _entered = span.enter();
                 let accepted =
                     self.remote_context
-                        .schedule_action_async(target, value.clone(), delay);
-                tracing::trace!(
+                        .schedule_external(crate::event::AsyncEvent::Logical {
+                            tag,
+                            key: target.key(),
+                            value: Box::new(value.clone()),
+                        });
+                span.record("outcome", if accepted { "accepted" } else { "failed" });
+            }
+            InterPartitionEventTime::Physical(delay) => {
+                let span = tracing::trace_span!(
                     target: crate::trace::TRACE_TARGET,
+                    "propagation_send",
                     event = crate::trace::event::PROPAGATION_SEND,
                     kind = "physical",
                     destination = %self.remote_context.enclave_id(),
@@ -170,8 +171,13 @@ impl<T: ReactorData + Clone> InterPartitionEventSink<T> for InProcessInterPartit
                     action = target.name(),
                     value_type = std::any::type_name::<T>(),
                     value_size = std::mem::size_of_val(value),
-                    outcome = if accepted { "accepted" } else { "failed" },
+                    outcome = tracing::field::Empty,
                 );
+                let _entered = span.enter();
+                let accepted =
+                    self.remote_context
+                        .schedule_action_async(target, value.clone(), delay);
+                span.record("outcome", if accepted { "accepted" } else { "failed" });
             }
         }
     }

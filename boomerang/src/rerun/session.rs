@@ -681,15 +681,24 @@ impl LifecycleWorker {
         self.commands
             .send(LifecycleCommand::Shutdown { reply })
             .map_err(|_| LifecycleError::Disconnected)?;
-        let result = receive_lifecycle_result(receiver, timeout);
-        if result.is_ok() {
-            if let Some(handle) = self.handle.take() {
-                if handle.join().is_err() {
-                    return Err(LifecycleError::Disconnected);
+        match receiver.recv_timeout(timeout) {
+            Ok(result) => {
+                // A reply is sent only after final sink teardown and the last strong recording
+                // drop. Join even when the flush itself reported an error: cleanup completed.
+                if let Some(handle) = self.handle.take() {
+                    if handle.join().is_err() {
+                        return Err(LifecycleError::Disconnected);
+                    }
                 }
+                result.map_err(Into::into)
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                Err(LifecycleError::Timeout(timeout))
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err(LifecycleError::Disconnected)
             }
         }
-        result
     }
 }
 

@@ -7,7 +7,8 @@ use rerun::{RecordingStream, RecordingStreamBuilder};
 #[cfg(feature = "federated")]
 use super::entities::{escape_entity_segment, log_runtime_relation, runtime_enclave_root};
 use super::entities::{log_runtime_enclaves, RegistrationIndex, RerunTraceWriter, TraceWriter};
-use super::layer::RerunLayer;
+use super::layer::{RerunLayer, SessionFilter};
+use tracing_subscriber::Layer as _;
 
 const DEFAULT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 static SOURCE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -229,8 +230,8 @@ impl RerunSessionBuilder {
 /// An observational Rerun recording session.
 ///
 /// An active memory, file, or tee sink is not nonblocking: Rerun's bounded batching may
-/// backpressure scheduler callbacks under saturation. Once disabled, the tracing annotations
-/// retain their zero-metadata-work path.
+/// backpressure scheduler callbacks under saturation. Once disabled, its trace callsites are
+/// cached as uninterested when no other subscriber or layer needs them.
 pub struct RerunSession {
     recording: RecordingStream,
     memory: Option<rerun::sink::MemorySinkStorage>,
@@ -240,7 +241,7 @@ pub struct RerunSession {
     state: SessionState,
     trace_writer: Arc<dyn TraceWriter>,
     started: Instant,
-    next_trace_id: Arc<AtomicU64>,
+    pub(super) next_trace_id: Arc<AtomicU64>,
     registration: Arc<RwLock<RegistrationIndex>>,
 }
 
@@ -266,16 +267,28 @@ impl RerunSession {
     }
 
     /// Creates a composable tracing layer without installing a global subscriber.
-    pub fn layer(&self) -> RerunLayer {
+    ///
+    /// After this session is disabled, its per-layer filter rejects `boomerang::trace` callsites
+    /// dynamically. If another composed layer remains interested in those callsites, tracing must
+    /// still construct their metadata and fields for that layer; only this adapter's callbacks are
+    /// skipped. Unrelated targets are never filtered by this adapter.
+    pub fn layer<S>(&self) -> impl tracing_subscriber::Layer<S>
+    where
+        S: tracing::Subscriber
+            + for<'lookup> tracing_subscriber::registry::LookupSpan<'lookup>
+            + 'static,
+    {
+        let state = self.state.clone();
         RerunLayer::new(
             self.recording.clone_weak(),
-            self.state.clone(),
+            state.clone(),
             Arc::from(self.source_id.as_str()),
             self.trace_writer.clone(),
             self.started,
             self.next_trace_id.clone(),
             self.registration.clone(),
         )
+        .with_filter(SessionFilter::new(state))
     }
 
     /// Access the backing memory sink for recording inspection or serialization.
@@ -591,7 +604,7 @@ impl SessionState {
         }
     }
 
-    fn is_enabled(&self) -> bool {
+    pub(super) fn is_enabled(&self) -> bool {
         self.inner.enabled.load(Ordering::Acquire)
     }
 
@@ -628,6 +641,7 @@ impl SessionState {
     pub(super) fn disable_on_error(&self, error: &dyn std::fmt::Display) {
         if self.inner.enabled.swap(false, Ordering::AcqRel) {
             self.inner.error_count.fetch_add(1, Ordering::Relaxed);
+            tracing::callsite::rebuild_interest_cache();
             if !self.inner.warned.swap(true, Ordering::AcqRel) {
                 tracing::warn!(
                     target: "boomerang::rerun_internal",

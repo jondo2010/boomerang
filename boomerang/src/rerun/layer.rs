@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Record};
 use tracing::{Event, Id, Subscriber};
-use tracing_subscriber::layer::Context;
+use tracing_subscriber::layer::{Context, Filter};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 
@@ -21,12 +21,45 @@ use super::session::SessionState;
 const TRACE_TARGET: &str = "boomerang::trace";
 const INTERNAL_TARGET: &str = "boomerang::rerun_internal";
 
+#[derive(Clone)]
+pub(super) struct SessionFilter {
+    state: SessionState,
+}
+
+impl SessionFilter {
+    pub(super) fn new(state: SessionState) -> Self {
+        Self { state }
+    }
+}
+
+impl<S> Filter<S> for SessionFilter {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>, _ctx: &Context<'_, S>) -> bool {
+        metadata.target() != TRACE_TARGET || self.state.is_enabled()
+    }
+
+    fn callsite_enabled(
+        &self,
+        metadata: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        if metadata.target() == TRACE_TARGET {
+            if self.state.is_enabled() {
+                tracing::subscriber::Interest::sometimes()
+            } else {
+                tracing::subscriber::Interest::never()
+            }
+        } else {
+            tracing::subscriber::Interest::always()
+        }
+    }
+}
+
 /// A composable tracing layer that maps Boomerang's structured runtime facts to Rerun.
 ///
 /// With an active memory, file, or tee sink, writes use Rerun 0.36.1's bounded batching pipeline
 /// and may backpressure the scheduler callback under saturation. This layer deliberately owns no
-/// second dynamic-record queue. When the layer is disabled, Boomerang's gated annotations avoid
-/// trace metadata work and runtime layout changes.
+/// second dynamic-record queue. The layer returned by [`RerunSession::layer`](super::RerunSession::layer)
+/// uses a dynamic per-layer filter: after session failure it avoids trace metadata work when no
+/// other interested layer is composed, while leaving unrelated targets and other layers intact.
 #[derive(Clone)]
 pub struct RerunLayer {
     recording: rerun::RecordingStream,
@@ -515,9 +548,8 @@ mod tests {
             .trace_writer(captured.clone())
             .build()
             .unwrap();
-        let layer = session.layer();
-        layer.next_id.store(u64::MAX - 1, Ordering::Relaxed);
-        let subscriber = tracing_subscriber::registry().with(layer);
+        session.next_trace_id.store(u64::MAX - 1, Ordering::Relaxed);
+        let subscriber = tracing_subscriber::registry().with(session.layer());
 
         tracing::subscriber::with_default(subscriber, || {
             for _ in 0..2 {

@@ -1,6 +1,7 @@
 #![cfg(feature = "rerun")]
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::{Duration, Instant};
 
@@ -712,11 +713,10 @@ fn closed_runtime_span_has_duration_and_terminal_state() {
 #[test]
 fn simultaneous_events_receive_unique_adapter_ids() {
     let (session, capture) = session_with_capture("concurrent");
-    let layer = session.layer();
     let barrier = Arc::new(Barrier::new(9));
     std::thread::scope(|scope| {
         for worker in 0..8 {
-            let subscriber = tracing_subscriber::registry().with(layer.clone());
+            let subscriber = tracing_subscriber::registry().with(session.layer());
             let barrier = barrier.clone();
             scope.spawn(move || {
                 tracing::subscriber::with_default(subscriber, || {
@@ -800,29 +800,148 @@ impl TraceWriter for FailingWriter {
     }
 }
 
+struct CountingDebug<'a>(&'a AtomicUsize);
+
+impl std::fmt::Debug for CountingDebug<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        formatter.write_str("e0")
+    }
+}
+
+fn emit_counted_shutdown(evaluations: &AtomicUsize) {
+    tracing::trace!(
+        target: "boomerang::trace",
+        event = "shutdown",
+        enclave = ?CountingDebug(evaluations),
+        state = "complete",
+        outcome = "success",
+    );
+}
+
+#[derive(Clone)]
+struct EventCounter(Arc<AtomicUsize>);
+
+struct DebugEvaluatingVisitor;
+
+impl tracing::field::Visit for DebugEvaluatingVisitor {
+    fn record_debug(&mut self, _field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        let _ = format!("{value:?}");
+    }
+}
+
+impl<S> tracing_subscriber::Layer<S> for EventCounter
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _context: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if event.metadata().target() == "boomerang::trace" {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            event.record(&mut DebugEvaluatingVisitor);
+        }
+    }
+}
+
+fn emit_composed_counted_shutdown(evaluations: &AtomicUsize) {
+    tracing::trace!(
+        target: "boomerang::trace",
+        event = "shutdown",
+        enclave = ?CountingDebug(evaluations),
+        state = "complete",
+        outcome = "success",
+    );
+}
+
 #[test]
-fn first_write_failure_disables_layer_and_later_records_are_skipped() {
+fn first_write_failure_dynamically_disables_trace_callsites() {
+    const CHILD_MARKER: &str = "BOOMERANG_RERUN_INTEREST_CHILD";
+    if std::env::var_os(CHILD_MARKER).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "first_write_failure_dynamically_disables_trace_callsites",
+            ])
+            .env(CHILD_MARKER, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+
     let session = RerunSessionBuilder::new("boomerang-rerun-test")
         .trace_writer(Arc::new(FailingWriter))
         .build()
         .unwrap();
     let subscriber = tracing_subscriber::registry().with(session.layer());
 
+    let evaluations = AtomicUsize::new(0);
     tracing::subscriber::with_default(subscriber, || {
-        for _ in 0..3 {
-            tracing::trace!(
-                target: "boomerang::trace",
-                event = "shutdown",
-                enclave = "e0",
-                state = "complete",
-                outcome = "success",
-            );
-        }
+        assert!(tracing::enabled!(
+            target: "boomerang::trace",
+            tracing::Level::TRACE
+        ));
+        emit_counted_shutdown(&evaluations);
+        assert!(!tracing::enabled!(
+            target: "boomerang::trace",
+            tracing::Level::TRACE
+        ));
+        assert!(tracing::enabled!(
+            target: "unrelated",
+            tracing::Level::TRACE
+        ));
+        emit_counted_shutdown(&evaluations);
     });
 
     assert!(!session.is_enabled());
     assert_eq!(session.error_count(), 1);
-    assert_eq!(session.skipped_count(), 2);
+    assert_eq!(session.skipped_count(), 0);
+    assert_eq!(evaluations.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn another_interested_layer_keeps_disabled_trace_callsites_enabled() {
+    let session = RerunSessionBuilder::new("boomerang-rerun-test")
+        .trace_writer(Arc::new(FailingWriter))
+        .build()
+        .unwrap();
+    let observed = Arc::new(AtomicUsize::new(0));
+    let observer = EventCounter(observed.clone()).with_filter(
+        tracing_subscriber::filter::filter_fn(|metadata| metadata.target() == "boomerang::trace"),
+    );
+    let subscriber = tracing_subscriber::registry()
+        .with(session.layer())
+        .with(observer);
+
+    let evaluations = AtomicUsize::new(0);
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::trace!(
+            target: "boomerang::trace",
+            event = "shutdown",
+            enclave = "e0",
+            state = "complete",
+            outcome = "success",
+        );
+        assert!(!session.is_enabled());
+        assert!(tracing::enabled!(
+            target: "boomerang::trace",
+            tracing::Level::TRACE
+        ));
+        emit_composed_counted_shutdown(&evaluations);
+    });
+
+    assert_eq!(session.error_count(), 1);
+    assert_eq!(session.skipped_count(), 0);
+    assert_eq!(
+        (
+            evaluations.load(Ordering::Relaxed),
+            observed.load(Ordering::Relaxed)
+        ),
+        (1, 2)
+    );
 }
 
 struct PanickingWriter;
@@ -899,7 +1018,7 @@ fn normalization_panic_isolated_and_disables_subsequent_callbacks() {
     assert!(application_result.is_ok());
     assert!(!session.is_enabled());
     assert_eq!(session.error_count(), 1);
-    assert_eq!(session.skipped_count(), 1);
+    assert_eq!(session.skipped_count(), 0);
 }
 
 #[test]

@@ -5,6 +5,7 @@ use std::sync::{Arc, Barrier, Mutex};
 use boomerang::rerun::{
     RerunSessionBuilder, SinkConfig, TraceRecord, TraceWriter, TraceWriterError,
 };
+use boomerang::runtime::{Enclave, Port, Reactor};
 use tracing_subscriber::prelude::*;
 
 #[derive(Default)]
@@ -37,6 +38,61 @@ fn session_with_capture(source_id: &str) -> (boomerang::rerun::RerunSession, Arc
         .build()
         .unwrap();
     (session, capture)
+}
+
+fn memory_paths(session: &boomerang::rerun::RerunSession) -> Vec<String> {
+    session
+        .memory_sink()
+        .take()
+        .into_iter()
+        .filter_map(|message| match message {
+            rerun::log::LogMsg::ArrowMsg(_, message) => {
+                Some(rerun::log::Chunk::from_chunk_record_batch(&message.batch).unwrap())
+            }
+            _ => None,
+        })
+        .map(|chunk| chunk.entity_path().to_string())
+        .collect()
+}
+
+#[test]
+fn local_registration_aligns_after_the_runtime_graph_is_dropped() {
+    let (session, capture) = session_with_capture("local-source");
+    let mut enclaves = boomerang_tinymap::TinyMap::new();
+    let enclave_key = enclaves.insert(Enclave::default());
+    let enclave = &mut enclaves[enclave_key];
+    let reactor_key = enclave.insert_reactor(Reactor::new("local", ()).boxed(), None);
+    let scope = enclave.root_scope(reactor_key);
+    let port_key = enclave.insert_port(|key| Port::<u32>::new("input", key).boxed());
+    enclave.insert_port_scope(port_key, scope);
+
+    session.register_enclaves(None, &enclaves);
+    let static_paths = memory_paths(&session);
+    assert!(static_paths
+        .iter()
+        .any(|path| path == "/enclaves/EnclaveKey\\(0\\)"));
+    assert!(static_paths.iter().any(|path| {
+        path == "/enclaves/EnclaveKey\\(0\\)/reactors/local\\@ReactorKey\\(0\\)/ports/PortKey\\(0\\)"
+    }));
+    drop(enclaves);
+
+    let subscriber = tracing_subscriber::registry().with(session.layer());
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::trace!(
+            target: "boomerang::trace",
+            event = "port_write",
+            enclave = %enclave_key,
+            port_key = %port_key,
+            outcome = "test",
+        );
+    });
+
+    let records = capture.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].entity_path,
+        "/enclaves/EnclaveKey(0)/reactors/local@ReactorKey(0)/ports/PortKey(0)/port_write"
+    );
 }
 
 #[test]

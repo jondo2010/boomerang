@@ -696,29 +696,35 @@ fn runtime_reactor_path(
     enclave: &boomerang_runtime::Enclave,
     key: boomerang_runtime::ReactorKey,
 ) -> String {
-    let fqn = enclave.env.reactors[key].name();
-    let mut prefix = String::new();
-    let hierarchy = fqn
+    let mut key_chain = Vec::new();
+    let mut current = Some(key);
+    while let Some(reactor_key) = current {
+        key_chain.push(reactor_key);
+        current = enclave
+            .graph
+            .reactor_root_scopes
+            .get(reactor_key)
+            .and_then(|scope| enclave.graph.scopes[*scope].parent)
+            .map(|parent| enclave.graph.scopes[parent].reactor)
+            .filter(|parent| *parent != reactor_key);
+    }
+    key_chain.reverse();
+
+    let first_fqn = enclave.env.reactors[key_chain[0]].name();
+    let mut hierarchy = first_fqn
         .split('/')
-        .map(|segment| {
-            if !prefix.is_empty() {
-                prefix.push('/');
-            }
-            prefix.push_str(segment);
-            let mut segment = escape_entity_segment(segment);
-            if let Some((reactor_key, _)) = enclave
-                .env
-                .reactors
-                .iter()
-                .find(|(_, reactor)| reactor.name() == prefix)
-            {
-                segment.push('@');
-                segment.push_str(&escape_entity_segment(&reactor_key.to_string()));
-            }
-            segment
-        })
+        .map(escape_entity_segment)
         .collect::<Vec<_>>();
-    debug_assert!(hierarchy.last().is_some_and(|leaf| leaf.contains('@')));
+    hierarchy.pop();
+    hierarchy.extend(key_chain.into_iter().map(|reactor_key| {
+        let reactor = &enclave.env.reactors[reactor_key];
+        let display_name = reactor.name().rsplit('/').next().unwrap_or(reactor.name());
+        format!(
+            "{}@{}",
+            escape_entity_segment(display_name),
+            escape_entity_segment(&reactor_key.to_string())
+        )
+    }));
     format!("{root}/reactors/{}", hierarchy.join("/reactors/"))
 }
 
@@ -831,6 +837,9 @@ fn reaction_levels(
 }
 
 pub(crate) fn entity_path(fields: &TraceFields, event: &str) -> String {
+    if matches!(event, "propagation_send" | "propagation_receive") {
+        return format!("/propagation/unresolved/{}", escape_entity_segment(event));
+    }
     let enclave = escape_entity_segment(fields.enclave.as_deref().unwrap_or("unknown"));
     if let Some(action) = fields.action_key.as_ref().or(fields.action.as_ref()) {
         return format!(
@@ -864,9 +873,53 @@ pub(crate) fn entity_path(fields: &TraceFields, event: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use boomerang_runtime::{Enclave, Reactor};
     use rerun::AsComponents as _;
 
     use super::*;
+
+    #[test]
+    fn duplicate_reactor_names_use_the_supplied_stable_key() {
+        let mut enclave = Enclave::default();
+        let root = enclave.insert_reactor(Reactor::new("main", ()).boxed(), None);
+        let root_scope = enclave.root_scope(root);
+        let first = enclave.insert_reactor(Reactor::new("main/duplicate", ()).boxed(), None);
+        enclave.set_reactor_scope_parent(first, root_scope);
+        let second = enclave.insert_reactor(Reactor::new("main/duplicate", ()).boxed(), None);
+        enclave.set_reactor_scope_parent(second, root_scope);
+
+        let first_path = runtime_reactor_path("/enclaves/local", &enclave, first);
+        let second_path = runtime_reactor_path("/enclaves/local", &enclave, second);
+
+        assert_eq!(
+            first_path,
+            "/enclaves/local/reactors/main@ReactorKey(0)/reactors/duplicate@ReactorKey(1)"
+        );
+        assert_eq!(
+            second_path,
+            "/enclaves/local/reactors/main@ReactorKey(0)/reactors/duplicate@ReactorKey(2)"
+        );
+        assert_ne!(first_path, second_path);
+    }
+
+    #[test]
+    fn unresolved_propagation_never_fabricates_an_action_path() {
+        let fields = TraceFields {
+            enclave: Some("EnclaveKey(1)".to_owned()),
+            destination: Some("EnclaveKey(0)".to_owned()),
+            action_key: Some("ActionKey(0)".to_owned()),
+            ..TraceFields::default()
+        };
+
+        assert_eq!(
+            entity_path(&fields, "propagation_send"),
+            "/propagation/unresolved/propagation_send"
+        );
+        assert_eq!(
+            entity_path(&fields, "propagation_receive"),
+            "/propagation/unresolved/propagation_receive"
+        );
+    }
 
     fn record(event: &str) -> TraceRecord {
         TraceRecord {

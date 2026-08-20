@@ -228,9 +228,8 @@ fn public_api_runs_static_in_memory_federation() {
         assert!(
             paths.iter().any(|path| {
                 path.starts_with("/federates/a/enclaves/")
-                    && path.contains(
-                        "/reactors/main/reactors/a\\@ReactorKey\\(0\\)/reactors/source\\@ReactorKey\\(1\\)",
-                    )
+                    && path
+                        .contains("/reactors/main/reactors/a/reactors/source\\@ReactorKey\\(1\\)")
                     && path.contains("/reactions/")
             }),
             "registered paths: {paths:#?}"
@@ -254,14 +253,12 @@ fn public_api_runs_static_in_memory_federation() {
             ambiguous_action_event,
             "/enclaves/EnclaveKey\\(0\\)/actions/ActionKey\\(0\\)/action_schedule"
         );
-        let ambiguous_propagation = paths
+        assert!(paths
             .iter()
-            .find(|path| path.ends_with("/actions/ActionKey\\(0\\)/propagation_send"))
-            .expect("ambiguous destination action event");
-        assert_eq!(
-            ambiguous_propagation,
-            "/enclaves/EnclaveKey\\(1\\)/actions/ActionKey\\(0\\)/propagation_send"
-        );
+            .any(|path| path == "/propagation/unresolved/propagation_send"));
+        assert!(!paths
+            .iter()
+            .any(|path| { path.ends_with("/propagation_send") && path.contains("/actions/") }));
 
         let component_suffixes = chunks
             .iter()
@@ -354,14 +351,14 @@ fn public_api_runs_static_in_memory_federation() {
                     == Some("owns_port")
                     && text_component(chunk, ":boomerang.runtime.target").as_deref()
                         == Some(
-                            "/federates/a/enclaves/EnclaveKey(0)/reactors/main/reactors/a@ReactorKey(0)/reactors/source@ReactorKey(1)/ports/PortKey(0)",
+                            "/federates/a/enclaves/EnclaveKey(0)/reactors/main/reactors/a/reactors/source@ReactorKey(1)/ports/PortKey(0)",
                         )
             })
             .expect("exact source port ownership relation");
         assert_eq!(
             text_component(ownership, ":boomerang.runtime.source").as_deref(),
             Some(
-                "/federates/a/enclaves/EnclaveKey(0)/reactors/main/reactors/a@ReactorKey(0)/reactors/source@ReactorKey(1)"
+                "/federates/a/enclaves/EnclaveKey(0)/reactors/main/reactors/a/reactors/source@ReactorKey(1)"
             )
         );
         let trigger = chunks

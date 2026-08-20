@@ -167,6 +167,9 @@ pub trait FlushDriver: Send + Sync + 'static {
     }
 }
 
+#[cfg(test)]
+type LifecycleReplyHook = Arc<dyn Fn() + Send + Sync>;
+
 struct SdkFlushDriver;
 
 impl FlushDriver for SdkFlushDriver {
@@ -192,6 +195,8 @@ pub struct RerunSessionBuilder {
     flush_timeout: Duration,
     flush_driver: Arc<dyn FlushDriver>,
     trace_writer: Arc<dyn TraceWriter>,
+    #[cfg(test)]
+    lifecycle_reply_hook: Option<LifecycleReplyHook>,
 }
 
 impl RerunSessionBuilder {
@@ -205,6 +210,8 @@ impl RerunSessionBuilder {
             flush_timeout: DEFAULT_FLUSH_TIMEOUT,
             flush_driver: Arc::new(SdkFlushDriver),
             trace_writer: Arc::new(RerunTraceWriter),
+            #[cfg(test)]
+            lifecycle_reply_hook: None,
         }
     }
 
@@ -253,6 +260,12 @@ impl RerunSessionBuilder {
         self
     }
 
+    #[cfg(test)]
+    fn lifecycle_reply_hook(mut self, hook: LifecycleReplyHook) -> Self {
+        self.lifecycle_reply_hook = Some(hook);
+        self
+    }
+
     /// Builds the recording session.
     ///
     /// The complete topology is normalized and validated before Rerun creates a memory sink or
@@ -290,6 +303,8 @@ impl RerunSessionBuilder {
             self.flush_driver,
             self.flush_timeout,
             state.clone(),
+            #[cfg(test)]
+            self.lifecycle_reply_hook,
         )
         .map_err(RerunSessionBuildError::LifecycleWorker)?;
 
@@ -542,15 +557,10 @@ impl RerunSession {
     pub fn flush(&self) {
         let timeout = self.flush_timeout;
         self.state.flush_once(|| {
-            match self
-                .lifecycle
+            self.lifecycle
                 .as_ref()
                 .expect("lifecycle worker exists until drop")
                 .flush(timeout)
-            {
-                Err(LifecycleError::Busy | LifecycleError::Disabled) => Ok(()),
-                result => result,
-            }
         });
     }
 }
@@ -641,11 +651,30 @@ struct LifecycleWorker {
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
-struct PendingReset<'a>(&'a AtomicBool);
+struct PendingReset<'a> {
+    pending: &'a AtomicBool,
+    armed: bool,
+}
+
+impl<'a> PendingReset<'a> {
+    fn new(pending: &'a AtomicBool) -> Self {
+        Self {
+            pending,
+            armed: true,
+        }
+    }
+
+    fn release(&mut self) {
+        if self.armed {
+            self.pending.store(false, Ordering::Release);
+            self.armed = false;
+        }
+    }
+}
 
 impl Drop for PendingReset<'_> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        self.release();
     }
 }
 
@@ -656,6 +685,7 @@ impl LifecycleWorker {
         driver: Arc<dyn FlushDriver>,
         sdk_timeout: Duration,
         state: SessionState,
+        #[cfg(test)] reply_hook: Option<LifecycleReplyHook>,
     ) -> Result<Self, std::io::Error> {
         let (commands, receiver) = std::sync::mpsc::sync_channel(1);
         let pending = Arc::new(AtomicBool::new(false));
@@ -664,20 +694,37 @@ impl LifecycleWorker {
             .name("boomerang-rerun-lifecycle".to_owned())
             .spawn(move || {
                 while let Ok(command) = receiver.recv() {
-                    let _pending_reset = PendingReset(&worker_pending);
+                    let mut pending_reset = PendingReset::new(&worker_pending);
                     match command {
                         LifecycleCommand::Flush { reply } => {
-                            let _ = reply.send(driver.flush(&recording, sdk_timeout));
+                            let result = driver.flush(&recording, sdk_timeout);
+                            pending_reset.release();
+                            let _ = reply.send(result);
+                            #[cfg(test)]
+                            if let Some(hook) = reply_hook.as_ref() {
+                                hook();
+                            }
                         }
                         LifecycleCommand::Snapshot { reply } => {
-                            let _ = reply.send(memory.as_ref().map(|storage| storage.take()));
+                            let result = memory.as_ref().map(|storage| storage.take());
+                            pending_reset.release();
+                            let _ = reply.send(result);
+                            #[cfg(test)]
+                            if let Some(hook) = reply_hook.as_ref() {
+                                hook();
+                            }
                         }
                         LifecycleCommand::Shutdown { reply } => {
                             let flush = driver.flush(&recording, sdk_timeout);
                             recording.disconnect();
                             drop(memory);
                             let result = driver.teardown(recording, sdk_timeout).and(flush);
+                            pending_reset.release();
                             let _ = reply.send(result);
+                            #[cfg(test)]
+                            if let Some(hook) = reply_hook.as_ref() {
+                                hook();
+                            }
                             return;
                         }
                     }
@@ -886,16 +933,15 @@ impl SessionState {
         }
     }
 
-    fn flush_once<E>(&self, flush: impl FnOnce() -> Result<(), E>)
-    where
-        E: std::fmt::Display,
-    {
+    fn flush_once(&self, flush: impl FnOnce() -> Result<(), LifecycleError>) {
         if self.inner.flushed.swap(true, Ordering::AcqRel) {
             return;
         }
 
-        if let Err(error) = flush() {
-            self.disable_on_error(&error);
+        match flush() {
+            Ok(()) | Err(LifecycleError::Disabled) => {}
+            Err(LifecycleError::Busy) => self.inner.flushed.store(false, Ordering::Release),
+            Err(error) => self.disable_on_error(&error),
         }
     }
 
@@ -916,8 +962,9 @@ impl SessionState {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::time::Duration;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc, Barrier};
+    use std::time::{Duration, Instant};
 
     use super::{BlueprintConfig, FlushDriver, LifecycleError, RerunSessionBuilder, SessionState};
 
@@ -930,6 +977,58 @@ mod tests {
             _timeout: Duration,
         ) -> Result<(), rerun::sink::SinkFlushError> {
             panic!("injected lifecycle panic")
+        }
+    }
+
+    struct CountingGatedFlush {
+        calls: AtomicUsize,
+        entered: Barrier,
+        release: Barrier,
+    }
+
+    impl CountingGatedFlush {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                entered: Barrier::new(2),
+                release: Barrier::new(2),
+            }
+        }
+    }
+
+    impl FlushDriver for CountingGatedFlush {
+        fn flush(
+            &self,
+            _recording: &rerun::RecordingStream,
+            _timeout: Duration,
+        ) -> Result<(), rerun::sink::SinkFlushError> {
+            if self.calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                self.entered.wait();
+                self.release.wait();
+            }
+            Ok(())
+        }
+    }
+
+    struct TeardownCount(Arc<AtomicUsize>);
+
+    impl FlushDriver for TeardownCount {
+        fn flush(
+            &self,
+            _recording: &rerun::RecordingStream,
+            _timeout: Duration,
+        ) -> Result<(), rerun::sink::SinkFlushError> {
+            Ok(())
+        }
+
+        fn teardown(
+            &self,
+            recording: rerun::RecordingStream,
+            _timeout: Duration,
+        ) -> Result<(), rerun::sink::SinkFlushError> {
+            drop(recording);
+            self.0.fetch_add(1, Ordering::AcqRel);
+            Ok(())
         }
     }
 
@@ -958,11 +1057,11 @@ mod tests {
 
         state.flush_once(|| {
             flushes += 1;
-            Ok::<_, &'static str>(())
+            Ok(())
         });
         state.flush_once(|| {
             flushes += 1;
-            Ok::<_, &'static str>(())
+            Ok(())
         });
 
         assert_eq!(flushes, 1);
@@ -987,5 +1086,87 @@ mod tests {
         session.state.disable_on_error(&next);
         assert!(!session.is_enabled());
         assert_eq!(session.error_count(), 1);
+    }
+
+    #[test]
+    fn reply_releases_admission_before_immediate_drop_runs_teardown() {
+        let teardown_count = Arc::new(AtomicUsize::new(0));
+        let first_reply = Arc::new(AtomicBool::new(true));
+        let hook_entered = Arc::new(Barrier::new(2));
+        let hook_release = Arc::new(Barrier::new(2));
+        let session = RerunSessionBuilder::new("reply-before-drop")
+            .blueprint(BlueprintConfig::None)
+            .flush_timeout(Duration::from_secs(1))
+            .flush_driver(Arc::new(TeardownCount(teardown_count.clone())))
+            .lifecycle_reply_hook(Arc::new({
+                let first_reply = first_reply.clone();
+                let hook_entered = hook_entered.clone();
+                let hook_release = hook_release.clone();
+                move || {
+                    if first_reply.swap(false, Ordering::AcqRel) {
+                        hook_entered.wait();
+                        hook_release.wait();
+                    }
+                }
+            }))
+            .build()
+            .unwrap();
+
+        assert!(session.take_memory_snapshot_bounded().is_some());
+        hook_entered.wait();
+        let pending = session.lifecycle.as_ref().unwrap().pending.clone();
+        let (dropped, drop_complete) = mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            drop(session);
+            let _ = dropped.send(());
+        });
+
+        if pending.load(Ordering::Acquire) {
+            drop_complete.recv_timeout(Duration::from_secs(1)).unwrap();
+            hook_release.wait();
+        } else {
+            let started = Instant::now();
+            while !pending.load(Ordering::Acquire) {
+                assert!(started.elapsed() < Duration::from_secs(1));
+                std::thread::yield_now();
+            }
+            hook_release.wait();
+            drop_complete.recv_timeout(Duration::from_secs(1)).unwrap();
+        }
+        assert_eq!(teardown_count.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn busy_flush_can_be_retried_after_lifecycle_operation_completes() {
+        let driver = Arc::new(CountingGatedFlush::new());
+        let session = Arc::new(
+            RerunSessionBuilder::new("retry-busy-flush")
+                .blueprint(BlueprintConfig::None)
+                .flush_timeout(Duration::from_secs(1))
+                .flush_driver(driver.clone())
+                .build()
+                .unwrap(),
+        );
+        let in_flight = {
+            let session = session.clone();
+            std::thread::spawn(move || {
+                session
+                    .lifecycle
+                    .as_ref()
+                    .unwrap()
+                    .flush(Duration::from_secs(1))
+                    .unwrap();
+            })
+        };
+        driver.entered.wait();
+
+        session.flush();
+        assert!(session.is_enabled());
+        driver.release.wait();
+        in_flight.join().unwrap();
+
+        session.flush();
+        session.flush();
+        assert_eq!(driver.calls.load(Ordering::Acquire), 2);
     }
 }

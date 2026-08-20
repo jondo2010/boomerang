@@ -303,10 +303,12 @@ impl Scheduler {
                 tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::ASYNC_INGRESS, enclave = %self.key, kind = "provisional_release", logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), outcome = "accepted");
             }
             AsyncEvent::Logical { tag, key, value } => {
-                let value_size = std::mem::size_of_val(&*value);
+                let trace_value_size = trace::collect_if_enabled(|| std::mem::size_of_val(&*value));
                 if tag <= self.current_tag {
-                    let (action, value_type) = self.store.action_metadata(key);
-                    tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::ASYNC_INGRESS, enclave = %self.key, kind = "logical", action_key = %key, action, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), destination_logical_ns = trace::logical_ns(tag), destination_microstep = trace::microstep(tag), value_type, value_size, outcome = "ignored_past");
+                    if let Some(value_size) = trace_value_size {
+                        let (action, value_type) = self.store.action_metadata(key);
+                        tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::ASYNC_INGRESS, enclave = %self.key, kind = "logical", action_key = %key, action, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), destination_logical_ns = trace::logical_ns(tag), destination_microstep = trace::microstep(tag), value_type, value_size, outcome = "ignored_past");
+                    }
                     tracing::warn!(tag = %tag, "Ignoring empty event in the past");
                     return;
                 }
@@ -314,18 +316,22 @@ impl Scheduler {
                 self.store.push_action_value(key, tag, value);
                 self.events
                     .push_action_event(key, tag, downstream, false, &self.reaction_graph);
-                let (action, value_type) = self.store.action_metadata(key);
-                tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::ASYNC_INGRESS, enclave = %self.key, kind = "logical", action_key = %key, action, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), destination_logical_ns = trace::logical_ns(tag), destination_microstep = trace::microstep(tag), value_type, value_size, outcome = "accepted");
+                if let Some(value_size) = trace_value_size {
+                    let (action, value_type) = self.store.action_metadata(key);
+                    tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::ASYNC_INGRESS, enclave = %self.key, kind = "logical", action_key = %key, action, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), destination_logical_ns = trace::logical_ns(tag), destination_microstep = trace::microstep(tag), value_type, value_size, outcome = "accepted");
+                }
             }
             AsyncEvent::Physical { time, key, value } => {
                 let tag = Tag::from_physical_time(self.start_time, time);
-                let value_size = std::mem::size_of_val(&*value);
+                let trace_value_size = trace::collect_if_enabled(|| std::mem::size_of_val(&*value));
                 let downstream = self.reaction_graph.action_triggers[key].iter().copied();
                 self.store.push_action_value(key, tag, value);
                 self.events
                     .push_action_event(key, tag, downstream, false, &self.reaction_graph);
-                let (action, value_type) = self.store.action_metadata(key);
-                tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::ASYNC_INGRESS, enclave = %self.key, kind = "physical", action_key = %key, action, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), destination_logical_ns = trace::logical_ns(tag), destination_microstep = trace::microstep(tag), value_type, value_size, outcome = "accepted");
+                if let Some(value_size) = trace_value_size {
+                    let (action, value_type) = self.store.action_metadata(key);
+                    tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::ASYNC_INGRESS, enclave = %self.key, kind = "physical", action_key = %key, action, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), destination_logical_ns = trace::logical_ns(tag), destination_microstep = trace::microstep(tag), value_type, value_size, outcome = "accepted");
+                }
             }
             AsyncEvent::Shutdown { delay } => {
                 let tag = self.current_tag.delay(delay);
@@ -364,8 +370,10 @@ impl Scheduler {
         // Initialize the event queue with the startup actions
         for &(action_key, tag) in &self.reaction_graph.startup_actions {
             self.store.push_action_value(action_key, tag, Box::new(()));
-            let (action, value_type) = self.store.action_metadata(action_key);
-            tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::ACTION_SCHEDULE, enclave = %self.key, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), action_key = %action_key, action, destination_logical_ns = trace::logical_ns(tag), destination_microstep = trace::microstep(tag), value_type, value_size = 0usize, outcome = "startup");
+            if trace::enabled() {
+                let (action, value_type) = self.store.action_metadata(action_key);
+                tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::ACTION_SCHEDULE, enclave = %self.key, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), action_key = %action_key, action, destination_logical_ns = trace::logical_ns(tag), destination_microstep = trace::microstep(tag), value_type, value_size = 0usize, outcome = "startup");
+            }
             let downstream = self.reaction_graph.action_triggers[action_key]
                 .iter()
                 .inspect(|(lvl, reaction_key)| {

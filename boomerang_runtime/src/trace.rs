@@ -10,6 +10,11 @@ pub(crate) fn enabled() -> bool {
     tracing::enabled!(target: TRACE_TARGET, tracing::Level::TRACE)
 }
 
+#[inline]
+pub(crate) fn collect_if_enabled<T>(collect: impl FnOnce() -> T) -> Option<T> {
+    enabled().then(collect)
+}
+
 pub(crate) fn logical_ns(tag: crate::Tag) -> u64 {
     let nanoseconds = tag.offset().whole_nanoseconds();
     if nanoseconds.is_negative() {
@@ -68,6 +73,7 @@ pub mod event {
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::Cell,
         collections::HashMap,
         fmt,
         sync::{Arc, Mutex},
@@ -240,6 +246,29 @@ mod tests {
     #[test]
     fn trace_target_is_stable() {
         assert_eq!(TRACE_TARGET, "boomerang::trace");
+    }
+
+    #[test]
+    fn disabled_trace_target_skips_metadata_collection() {
+        let metadata_collected = Cell::new(false);
+        let envs =
+            tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+                assert!(super::collect_if_enabled(|| metadata_collected.set(true)).is_none());
+                execute_enclaves(
+                    create_enclave_pair().into_iter(),
+                    Config::default()
+                        .with_fast_forward(true)
+                        .with_keep_alive(false)
+                        .with_timeout(Duration::seconds(3)),
+                )
+                .expect("enclave execution succeeds without tracing")
+            });
+        assert!(!metadata_collected.get());
+        let reactor_b = envs
+            .values()
+            .find_map(|env| env.find_reactor_by_name("reactorB"))
+            .expect("reactorB is returned");
+        assert_eq!(reactor_b.get_state::<bool>(), Some(&true));
     }
 
     #[test]

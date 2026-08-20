@@ -32,6 +32,7 @@ pub struct TraceTimePoint {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TraceFields {
     pub event: Option<String>,
+    pub federate: Option<String>,
     pub enclave: Option<String>,
     pub kind: Option<String>,
     pub reactor: Option<String>,
@@ -44,6 +45,7 @@ pub struct TraceFields {
     pub logical_ns: Option<u64>,
     pub microstep: Option<u64>,
     pub destination: Option<String>,
+    pub destination_federate: Option<String>,
     /// Adapter-owned source identifier for synthesized causal relations.
     pub source: Option<String>,
     pub destination_logical_ns: Option<u64>,
@@ -67,6 +69,7 @@ impl TraceFields {
             };
         }
         inherit!(
+            federate,
             enclave,
             reactor,
             reaction_key,
@@ -260,6 +263,7 @@ impl TraceRecord {
             };
         }
         string_fields!(
+            federate,
             enclave,
             kind,
             reactor,
@@ -270,6 +274,7 @@ impl TraceRecord {
             port_key,
             port,
             destination,
+            destination_federate,
             source,
             level,
             state,
@@ -334,6 +339,7 @@ pub(super) struct RegistrationIndex {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct RegistrationLookup {
+    federate: Option<String>,
     enclave: String,
     kind: &'static str,
     identity: String,
@@ -346,6 +352,7 @@ enum RegistrationResolution {
 }
 
 impl RegistrationIndex {
+    #[cfg(test)]
     pub(super) fn register(
         &mut self,
         enclave: &str,
@@ -354,9 +361,21 @@ impl RegistrationIndex {
         display_name: &str,
         path: &str,
     ) {
-        self.register_identity(enclave, kind, stable_key, path);
+        self.register_in_federate(None, enclave, kind, stable_key, display_name, path);
+    }
+
+    pub(super) fn register_in_federate(
+        &mut self,
+        federate: Option<&str>,
+        enclave: &str,
+        kind: &'static str,
+        stable_key: &str,
+        display_name: &str,
+        path: &str,
+    ) {
+        self.register_identity(federate, enclave, kind, stable_key, path);
         if display_name != stable_key {
-            self.register_identity(enclave, kind, display_name, path);
+            self.register_identity(federate, enclave, kind, display_name, path);
         }
     }
 
@@ -370,8 +389,16 @@ impl RegistrationIndex {
         }
     }
 
-    fn register_identity(&mut self, enclave: &str, kind: &'static str, identity: &str, path: &str) {
+    fn register_identity(
+        &mut self,
+        federate: Option<&str>,
+        enclave: &str,
+        kind: &'static str,
+        identity: &str,
+        path: &str,
+    ) {
         let lookup = RegistrationLookup {
+            federate: federate.map(str::to_owned),
             enclave: enclave.to_owned(),
             kind,
             identity: identity.to_owned(),
@@ -393,10 +420,13 @@ impl RegistrationIndex {
     }
 
     pub(super) fn resolve_entity(&self, fields: &TraceFields, event: &str) -> Option<String> {
-        let enclave = if event == "propagation_send" {
-            fields.destination.as_deref()?
+        let (federate, enclave) = if event == "propagation_send" {
+            (
+                fields.destination_federate.as_deref(),
+                fields.destination.as_deref()?,
+            )
         } else {
-            fields.enclave.as_deref()?
+            (fields.federate.as_deref(), fields.enclave.as_deref()?)
         };
         let (kind, identity) = if let Some(identity) = fields.action_key.as_ref() {
             ("action", identity.as_str())
@@ -414,6 +444,7 @@ impl RegistrationIndex {
             ("scheduler", "scheduler")
         };
         let lookup = RegistrationLookup {
+            federate: federate.map(str::to_owned),
             enclave: enclave.to_owned(),
             kind,
             identity: identity.to_owned(),
@@ -475,7 +506,8 @@ pub(super) fn log_runtime_enclaves(
         let mut nodes = vec![enclave_path.clone(), scheduler.clone()];
         let mut edges = vec![(enclave_path.clone(), scheduler.clone(), "owns_scheduler")];
         let enclave_key_string = enclave_key.to_string();
-        index.register(
+        index.register_in_federate(
+            federate,
             &enclave_key_string,
             "scheduler",
             "scheduler",
@@ -559,7 +591,8 @@ pub(super) fn log_runtime_enclaves(
             nodes.push(path.clone());
             edges.push((owner_path, path.clone(), "owns_reaction"));
             let owner_key = owner.to_string();
-            index.register(
+            index.register_in_federate(
+                federate,
                 &enclave_key_string,
                 "reaction",
                 &key.to_string(),
@@ -595,7 +628,8 @@ pub(super) fn log_runtime_enclaves(
             nodes.push(path.clone());
             edges.push((reactor_path(owner), path.clone(), "owns_action"));
             let owner_key = owner.to_string();
-            index.register(
+            index.register_in_federate(
+                federate,
                 &enclave_key_string,
                 "action",
                 &key.to_string(),
@@ -633,7 +667,8 @@ pub(super) fn log_runtime_enclaves(
             nodes.push(path.clone());
             edges.push((reactor_path(owner), path.clone(), "owns_port"));
             let owner_key = owner.to_string();
-            index.register(
+            index.register_in_federate(
+                federate,
                 &enclave_key_string,
                 "port",
                 &key.to_string(),
@@ -907,16 +942,25 @@ pub(crate) fn entity_path(fields: &TraceFields, event: &str) -> String {
         return format!("/propagation/unresolved/{}", escape_entity_segment(event));
     }
     let enclave = escape_entity_segment(fields.enclave.as_deref().unwrap_or("unknown"));
+    let root = fields.federate.as_deref().map_or_else(
+        || format!("/enclaves/{enclave}"),
+        |federate| {
+            format!(
+                "/federates/{}/enclaves/{enclave}",
+                escape_entity_segment(federate)
+            )
+        },
+    );
     if let Some(action) = fields.action_key.as_ref().or(fields.action.as_ref()) {
         return format!(
-            "/enclaves/{enclave}/actions/{}/{}",
+            "{root}/actions/{}/{}",
             escape_entity_segment(action),
             escape_entity_segment(event),
         );
     }
     if let Some(port) = fields.port_key.as_ref().or(fields.port.as_ref()) {
         return format!(
-            "/enclaves/{enclave}/ports/{}/{}",
+            "{root}/ports/{}/{}",
             escape_entity_segment(port),
             escape_entity_segment(event),
         );
@@ -926,15 +970,12 @@ pub(crate) fn entity_path(fields: &TraceFields, event: &str) -> String {
         fields.reaction_key.as_ref().or(fields.reaction.as_ref()),
     ) {
         return format!(
-            "/enclaves/{enclave}/reactors/{}/reactions/{}",
+            "{root}/reactors/{}/reactions/{}",
             escape_entity_segment(reactor),
             escape_entity_segment(reaction),
         );
     }
-    format!(
-        "/enclaves/{enclave}/scheduler/{}",
-        escape_entity_segment(event)
-    )
+    format!("{root}/scheduler/{}", escape_entity_segment(event))
 }
 
 #[cfg(test)]
@@ -943,6 +984,49 @@ mod tests {
     use rerun::AsComponents as _;
 
     use super::*;
+
+    #[test]
+    fn federate_qualifies_overlapping_runtime_entity_keys() {
+        let mut index = RegistrationIndex::default();
+        index.register_in_federate(
+            Some("a"),
+            "0",
+            "action",
+            "0",
+            "input",
+            "/federates/a/enclaves/0/actions/input",
+        );
+        index.register_in_federate(
+            Some("b"),
+            "0",
+            "action",
+            "0",
+            "input",
+            "/federates/b/enclaves/0/actions/input",
+        );
+
+        let ingress = TraceFields {
+            federate: Some("b".to_owned()),
+            enclave: Some("0".to_owned()),
+            action_key: Some("0".to_owned()),
+            ..TraceFields::default()
+        };
+        assert_eq!(
+            index.resolve_entity(&ingress, "async_ingress").as_deref(),
+            Some("/federates/b/enclaves/0/actions/input")
+        );
+
+        let send = TraceFields {
+            destination_federate: Some("b".to_owned()),
+            destination: Some("0".to_owned()),
+            action_key: Some("0".to_owned()),
+            ..TraceFields::default()
+        };
+        assert_eq!(
+            index.resolve_entity(&send, "propagation_send").as_deref(),
+            Some("/federates/b/enclaves/0/actions/input")
+        );
+    }
 
     #[test]
     fn duplicate_reactor_names_use_the_supplied_stable_key() {

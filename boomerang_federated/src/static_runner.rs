@@ -427,6 +427,15 @@ fn execute_connected_static_federation(
             .name(format!("federate-{federate_id}-{enclave_key}"))
             .spawn(move || {
                 let run = || {
+                    let span = tracing::trace_span!(
+                        target: boomerang_runtime::trace::TRACE_TARGET,
+                        "scheduler_thread",
+                        event = "scheduler_thread",
+                        federate = %thread_federate_id,
+                        enclave = %enclave_key,
+                        state = "running",
+                    );
+                    let _entered = span.enter();
                     catch_scheduler_thread_body(|| {
                         let mut scheduler =
                             boomerang_runtime::Scheduler::new_with_logical_time_coordinator(

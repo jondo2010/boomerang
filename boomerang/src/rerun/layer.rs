@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
@@ -275,6 +275,7 @@ impl RerunLayer {
                     record.fields.destination.clone(),
                 ) {
                     let key = PropagationKey {
+                        federate: record.fields.destination_federate.clone(),
                         enclave: destination,
                         action,
                         tag,
@@ -308,6 +309,7 @@ impl RerunLayer {
                     return Vec::new();
                 };
                 let key = PropagationKey {
+                    federate: record.fields.federate.clone(),
                     enclave: enclave.clone(),
                     action,
                     tag: tag.clone(),
@@ -328,6 +330,7 @@ impl RerunLayer {
                     CompleteTag::destination_from_fields(&record.fields),
                 ) {
                     correlation.rebase_predecessors(
+                        record.fields.federate.as_deref(),
                         enclave,
                         &reactions,
                         &old_tag,
@@ -346,6 +349,7 @@ impl RerunLayer {
                 };
                 correlation
                     .take_predecessors(&ReactionKey {
+                        federate: record.fields.federate.clone(),
                         enclave: enclave.clone(),
                         reaction,
                         tag,
@@ -359,7 +363,7 @@ impl RerunLayer {
                     record.fields.enclave.as_deref(),
                     CompleteTag::from_fields(&record.fields),
                 ) {
-                    correlation.cleanup_through(enclave, &tag);
+                    correlation.cleanup_through(record.fields.federate.as_deref(), enclave, &tag);
                 }
                 Vec::new()
             }
@@ -412,6 +416,7 @@ impl RerunLayer {
         for reaction in reactions {
             correlation.insert_predecessor(
                 ReactionKey {
+                    federate: ingress.fields.federate.clone(),
                     enclave: enclave.clone(),
                     reaction,
                     tag: tag.clone(),
@@ -445,6 +450,7 @@ impl RerunLayer {
         ) {
             lock_unpoisoned(&self.adapter.correlation).begin_open_send(
                 PropagationKey {
+                    federate: fields.destination_federate.clone(),
                     enclave: destination,
                     action,
                     tag,
@@ -493,7 +499,7 @@ impl RerunLayer {
 const MAX_PENDING_CORRELATIONS: usize = 4096;
 const MAX_CORRELATION_AGE: u64 = 4096;
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct CompleteTag {
     logical_ns: u64,
     microstep: u64,
@@ -522,15 +528,17 @@ impl CompleteTag {
     }
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct PropagationKey {
+    federate: Option<String>,
     enclave: String,
     action: String,
     tag: CompleteTag,
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct ReactionKey {
+    federate: Option<String>,
     enclave: String,
     reaction: String,
     tag: CompleteTag,
@@ -560,10 +568,26 @@ impl PendingResolution {
 #[derive(Default)]
 pub(super) struct CorrelationState {
     epoch: u64,
-    sends: BTreeMap<PropagationKey, PendingResolution>,
-    open_sends: BTreeMap<PropagationKey, PendingResolution>,
-    early_ingress: BTreeMap<PropagationKey, PendingIngress>,
-    predecessors: BTreeMap<ReactionKey, Vec<PendingPredecessor>>,
+    pending_count: usize,
+    eviction: VecDeque<EvictionToken>,
+    sends: HashMap<PropagationKey, PendingResolution>,
+    open_sends: HashMap<PropagationKey, PendingResolution>,
+    early_ingress: HashMap<PropagationKey, PendingIngress>,
+    predecessors: HashMap<ReactionKey, Vec<PendingPredecessor>>,
+}
+
+#[derive(Clone, Debug)]
+struct EvictionToken {
+    epoch: u64,
+    key: EvictionKey,
+}
+
+#[derive(Clone, Debug)]
+enum EvictionKey {
+    Send(PropagationKey),
+    OpenSend(PropagationKey),
+    EarlyIngress(PropagationKey),
+    Predecessor(ReactionKey, TraceId),
 }
 
 #[derive(Clone, Debug)]
@@ -601,56 +625,67 @@ impl CorrelationState {
     fn advance(&mut self) {
         self.epoch = self.epoch.saturating_add(1);
         let minimum = self.epoch.saturating_sub(MAX_CORRELATION_AGE);
-        self.sends.retain(|_, value| value.epoch() >= minimum);
-        self.open_sends.retain(|_, value| value.epoch() >= minimum);
-        self.early_ingress
-            .retain(|_, value| value.epoch() >= minimum);
-        self.predecessors.retain(|_, values| {
-            values.retain(|value| value.epoch >= minimum);
-            !values.is_empty()
-        });
-        self.enforce_bound();
+        while self
+            .eviction
+            .front()
+            .is_some_and(|token| token.epoch < minimum)
+        {
+            self.evict_front();
+        }
     }
 
     fn insert_send(&mut self, key: PropagationKey, id: TraceId) {
         if self.open_sends.contains_key(&key) {
-            self.sends.insert(
-                key.clone(),
-                PendingResolution::Ambiguous { epoch: self.epoch },
-            );
-            self.open_sends
-                .insert(key, PendingResolution::Ambiguous { epoch: self.epoch });
+            self.poison_send_key(key);
         } else {
-            insert_resolution(&mut self.sends, key, id, self.epoch);
+            let inserted = insert_resolution(&mut self.sends, key.clone(), id, self.epoch);
+            self.track(EvictionKey::Send(key), inserted);
         }
         self.enforce_bound();
     }
 
     fn begin_open_send(&mut self, key: PropagationKey, id: TraceId) {
         if self.sends.contains_key(&key) {
-            self.sends.insert(
-                key.clone(),
-                PendingResolution::Ambiguous { epoch: self.epoch },
-            );
-            self.open_sends
-                .insert(key, PendingResolution::Ambiguous { epoch: self.epoch });
+            self.poison_send_key(key);
         } else {
-            insert_resolution(&mut self.open_sends, key, id, self.epoch);
+            let inserted = insert_resolution(&mut self.open_sends, key.clone(), id, self.epoch);
+            self.track(EvictionKey::OpenSend(key), inserted);
         }
         self.enforce_bound();
+    }
+
+    fn poison_send_key(&mut self, key: PropagationKey) {
+        let send_inserted = self
+            .sends
+            .insert(
+                key.clone(),
+                PendingResolution::Ambiguous { epoch: self.epoch },
+            )
+            .is_none();
+        self.track(EvictionKey::Send(key.clone()), send_inserted);
+        let open_inserted = self
+            .open_sends
+            .insert(
+                key.clone(),
+                PendingResolution::Ambiguous { epoch: self.epoch },
+            )
+            .is_none();
+        self.track(EvictionKey::OpenSend(key), open_inserted);
     }
 
     fn capture_early_ingress(&mut self, key: PropagationKey, record: TraceRecord) -> bool {
         if !self.open_sends.contains_key(&key) {
             return false;
         }
+        let inserted = !self.early_ingress.contains_key(&key);
         self.early_ingress
-            .entry(key)
+            .entry(key.clone())
             .and_modify(|ingress| *ingress = PendingIngress::Ambiguous { epoch: self.epoch })
             .or_insert(PendingIngress::Unique {
                 record: Box::new(record),
                 epoch: self.epoch,
             });
+        self.track(EvictionKey::EarlyIngress(key), inserted);
         self.enforce_bound();
         true
     }
@@ -669,7 +704,11 @@ impl CorrelationState {
             }
             Some(PendingResolution::Unique { .. }) => {
                 self.open_sends.remove(key);
+                self.pending_count = self.pending_count.saturating_sub(1);
                 let ingress = self.early_ingress.remove(key);
+                if ingress.is_some() {
+                    self.pending_count = self.pending_count.saturating_sub(1);
+                }
                 if !accepted {
                     return FinishOpenSend::Handled;
                 }
@@ -689,43 +728,42 @@ impl CorrelationState {
 
     fn take_send(&mut self, key: &PropagationKey) -> Option<TraceId> {
         if self.open_sends.contains_key(key) && self.sends.contains_key(key) {
-            self.sends.insert(
-                key.clone(),
-                PendingResolution::Ambiguous { epoch: self.epoch },
-            );
-            self.open_sends.insert(
-                key.clone(),
-                PendingResolution::Ambiguous { epoch: self.epoch },
-            );
+            self.poison_send_key(key.clone());
             return None;
         }
         if self.open_sends.contains_key(key) {
             return None;
         }
         match self.sends.get(key) {
-            Some(PendingResolution::Unique { .. }) => self
-                .sends
-                .remove(key)
-                .and_then(PendingResolution::unique_id),
+            Some(PendingResolution::Unique { .. }) => {
+                let resolution = self.sends.remove(key);
+                self.pending_count = self.pending_count.saturating_sub(1);
+                resolution.and_then(PendingResolution::unique_id)
+            }
             Some(PendingResolution::Ambiguous { .. }) | None => None,
         }
     }
 
     fn insert_predecessor(&mut self, key: ReactionKey, id: TraceId) {
-        let predecessors = self.predecessors.entry(key).or_default();
+        let predecessors = self.predecessors.entry(key.clone()).or_default();
         if !predecessors.iter().any(|predecessor| predecessor.id == id) {
             predecessors.push(PendingPredecessor {
-                id,
+                id: id.clone(),
                 epoch: self.epoch,
+            });
+            self.pending_count += 1;
+            self.eviction.push_back(EvictionToken {
+                epoch: self.epoch,
+                key: EvictionKey::Predecessor(key, id),
             });
         }
         self.enforce_bound();
     }
 
     fn take_predecessors(&mut self, key: &ReactionKey) -> Vec<TraceId> {
-        self.predecessors
-            .remove(key)
-            .unwrap_or_default()
+        let predecessors = self.predecessors.remove(key).unwrap_or_default();
+        self.pending_count = self.pending_count.saturating_sub(predecessors.len());
+        predecessors
             .into_iter()
             .map(|predecessor| predecessor.id)
             .collect()
@@ -733,6 +771,7 @@ impl CorrelationState {
 
     fn rebase_predecessors(
         &mut self,
+        federate: Option<&str>,
         enclave: &str,
         reactions: &[String],
         old_tag: &CompleteTag,
@@ -743,6 +782,7 @@ impl CorrelationState {
         }
         for reaction in reactions {
             let old_key = ReactionKey {
+                federate: federate.map(str::to_owned),
                 enclave: enclave.to_owned(),
                 reaction: reaction.clone(),
                 tag: old_tag.clone(),
@@ -751,6 +791,7 @@ impl CorrelationState {
                 continue;
             };
             let destination = self.predecessors.entry(ReactionKey {
+                federate: federate.map(str::to_owned),
                 enclave: enclave.to_owned(),
                 reaction: reaction.clone(),
                 tag: destination_tag.clone(),
@@ -761,123 +802,169 @@ impl CorrelationState {
                     .iter()
                     .any(|existing| existing.id == predecessor.id)
                 {
+                    self.eviction.push_back(EvictionToken {
+                        epoch: predecessor.epoch,
+                        key: EvictionKey::Predecessor(
+                            ReactionKey {
+                                federate: federate.map(str::to_owned),
+                                enclave: enclave.to_owned(),
+                                reaction: reaction.clone(),
+                                tag: destination_tag.clone(),
+                            },
+                            predecessor.id.clone(),
+                        ),
+                    });
                     predecessors.push(predecessor);
+                } else {
+                    self.pending_count = self.pending_count.saturating_sub(1);
                 }
             }
         }
     }
 
-    fn cleanup_through(&mut self, enclave: &str, tag: &CompleteTag) {
+    fn cleanup_through(&mut self, federate: Option<&str>, enclave: &str, tag: &CompleteTag) {
+        let keep = |key_federate: Option<&str>, key_enclave: &str, key_tag: &CompleteTag| {
+            key_federate != federate || key_enclave != enclave || key_tag > tag
+        };
         self.sends
-            .retain(|key, _| key.enclave != enclave || key.tag > *tag);
+            .retain(|key, _| keep(key.federate.as_deref(), &key.enclave, &key.tag));
         self.open_sends
-            .retain(|key, _| key.enclave != enclave || key.tag > *tag);
+            .retain(|key, _| keep(key.federate.as_deref(), &key.enclave, &key.tag));
         self.early_ingress
-            .retain(|key, _| key.enclave != enclave || key.tag > *tag);
+            .retain(|key, _| keep(key.federate.as_deref(), &key.enclave, &key.tag));
         self.predecessors
-            .retain(|key, _| key.enclave != enclave || key.tag > *tag);
+            .retain(|key, _| keep(key.federate.as_deref(), &key.enclave, &key.tag));
+        self.rebuild_eviction();
     }
 
     fn enforce_bound(&mut self) {
-        while self.sends.len()
-            + self.open_sends.len()
-            + self.early_ingress.len()
-            + self.predecessors.values().map(Vec::len).sum::<usize>()
-            > MAX_PENDING_CORRELATIONS
-        {
-            let oldest_send = self
-                .sends
-                .iter()
-                .map(|(key, value)| (value.epoch(), key.clone()));
-            let oldest_predecessor = self.predecessors.iter().flat_map(|(key, values)| {
-                values
-                    .iter()
-                    .enumerate()
-                    .map(|(index, value)| (value.epoch, key.clone(), index))
-            });
-            let oldest_open_send = self
-                .open_sends
-                .iter()
-                .map(|(key, value)| (value.epoch(), key.clone(), 1_u8));
-            let oldest_early_ingress = self
-                .early_ingress
-                .iter()
-                .map(|(key, value)| (value.epoch(), key.clone(), 2_u8));
-            let oldest_propagation = oldest_send
-                .map(|(epoch, key)| (epoch, key, 0_u8))
-                .chain(oldest_open_send)
-                .chain(oldest_early_ingress)
-                .min();
-            match (oldest_propagation, oldest_predecessor.min()) {
-                (Some(send), Some(predecessor)) if send.0 <= predecessor.0 => {
-                    match send.2 {
-                        0 => {
-                            self.sends.remove(&send.1);
-                        }
-                        1 => {
-                            self.open_sends.remove(&send.1);
-                        }
-                        _ => {
-                            self.early_ingress.remove(&send.1);
-                        }
-                    }
-                    if !self.open_sends.contains_key(&send.1) {
-                        self.early_ingress.remove(&send.1);
-                    }
+        while self.pending_count > MAX_PENDING_CORRELATIONS && !self.eviction.is_empty() {
+            self.evict_front();
+        }
+    }
+
+    fn track(&mut self, key: EvictionKey, inserted: bool) {
+        if inserted {
+            self.pending_count += 1;
+        }
+        self.eviction.push_back(EvictionToken {
+            epoch: self.epoch,
+            key,
+        });
+    }
+
+    fn evict_front(&mut self) {
+        let Some(token) = self.eviction.pop_front() else {
+            return;
+        };
+        let removed = match token.key {
+            EvictionKey::Send(key) => remove_resolution_at(&mut self.sends, &key, token.epoch),
+            EvictionKey::OpenSend(key) => {
+                let removed = remove_resolution_at(&mut self.open_sends, &key, token.epoch);
+                if removed && self.early_ingress.remove(&key).is_some() {
+                    self.pending_count = self.pending_count.saturating_sub(1);
                 }
-                (Some(_), Some(predecessor)) => {
-                    remove_predecessor(&mut self.predecessors, &predecessor.1, predecessor.2);
-                }
-                (Some(send), None) => {
-                    match send.2 {
-                        0 => {
-                            self.sends.remove(&send.1);
-                        }
-                        1 => {
-                            self.open_sends.remove(&send.1);
-                        }
-                        _ => {
-                            self.early_ingress.remove(&send.1);
-                        }
-                    }
-                    if !self.open_sends.contains_key(&send.1) {
-                        self.early_ingress.remove(&send.1);
-                    }
-                }
-                (None, Some(predecessor)) => {
-                    remove_predecessor(&mut self.predecessors, &predecessor.1, predecessor.2);
-                }
-                (None, None) => break,
+                removed
             }
+            EvictionKey::EarlyIngress(key) => {
+                if self
+                    .early_ingress
+                    .get(&key)
+                    .is_some_and(|value| value.epoch() == token.epoch)
+                {
+                    self.early_ingress.remove(&key);
+                    true
+                } else {
+                    false
+                }
+            }
+            EvictionKey::Predecessor(key, id) => {
+                remove_predecessor_at(&mut self.predecessors, &key, &id, token.epoch)
+            }
+        };
+        if removed {
+            self.pending_count = self.pending_count.saturating_sub(1);
+        }
+    }
+
+    fn rebuild_eviction(&mut self) {
+        let mut tokens = Vec::new();
+        tokens.extend(self.sends.iter().map(|(key, value)| EvictionToken {
+            epoch: value.epoch(),
+            key: EvictionKey::Send(key.clone()),
+        }));
+        tokens.extend(self.open_sends.iter().map(|(key, value)| EvictionToken {
+            epoch: value.epoch(),
+            key: EvictionKey::OpenSend(key.clone()),
+        }));
+        tokens.extend(self.early_ingress.iter().map(|(key, value)| EvictionToken {
+            epoch: value.epoch(),
+            key: EvictionKey::EarlyIngress(key.clone()),
+        }));
+        tokens.extend(self.predecessors.iter().flat_map(|(key, values)| {
+            values.iter().map(|value| EvictionToken {
+                epoch: value.epoch,
+                key: EvictionKey::Predecessor(key.clone(), value.id.clone()),
+            })
+        }));
+        tokens.sort_by_key(|token| token.epoch);
+        self.pending_count = tokens.len();
+        self.eviction = tokens.into();
+    }
+}
+
+fn insert_resolution<K: Eq + std::hash::Hash>(
+    map: &mut HashMap<K, PendingResolution>,
+    key: K,
+    id: TraceId,
+    epoch: u64,
+) -> bool {
+    use std::collections::hash_map::Entry;
+    match map.entry(key) {
+        Entry::Occupied(mut entry) => {
+            entry.insert(PendingResolution::Ambiguous { epoch });
+            false
+        }
+        Entry::Vacant(entry) => {
+            entry.insert(PendingResolution::Unique { id, epoch });
+            true
         }
     }
 }
 
-fn remove_predecessor(
-    predecessors: &mut BTreeMap<ReactionKey, Vec<PendingPredecessor>>,
-    key: &ReactionKey,
-    index: usize,
-) {
-    let remove_key = if let Some(values) = predecessors.get_mut(key) {
-        values.remove(index);
-        values.is_empty()
+fn remove_resolution_at(
+    map: &mut HashMap<PropagationKey, PendingResolution>,
+    key: &PropagationKey,
+    epoch: u64,
+) -> bool {
+    if map.get(key).is_some_and(|value| value.epoch() == epoch) {
+        map.remove(key);
+        true
     } else {
         false
-    };
-    if remove_key {
-        predecessors.remove(key);
     }
 }
 
-fn insert_resolution<K: Ord>(
-    map: &mut BTreeMap<K, PendingResolution>,
-    key: K,
-    id: TraceId,
+fn remove_predecessor_at(
+    predecessors: &mut HashMap<ReactionKey, Vec<PendingPredecessor>>,
+    key: &ReactionKey,
+    id: &TraceId,
     epoch: u64,
-) {
-    map.entry(key)
-        .and_modify(|resolution| *resolution = PendingResolution::Ambiguous { epoch })
-        .or_insert(PendingResolution::Unique { id, epoch });
+) -> bool {
+    let Some(values) = predecessors.get_mut(key) else {
+        return false;
+    };
+    let Some(index) = values
+        .iter()
+        .position(|value| value.epoch == epoch && value.id == *id)
+    else {
+        return false;
+    };
+    values.remove(index);
+    if values.is_empty() {
+        predecessors.remove(key);
+    }
+    true
 }
 
 impl<S> Layer<S> for RerunLayer
@@ -1173,6 +1260,7 @@ impl TraceFields {
     fn record_text(&mut self, name: &str, value: String) {
         match name {
             "event" => self.event = Some(value),
+            "federate" => self.federate = Some(value),
             "enclave" => self.enclave = Some(value),
             "kind" => self.kind = Some(value),
             "reactor" => self.reactor = Some(value),
@@ -1183,6 +1271,7 @@ impl TraceFields {
             "port_key" => self.port_key = Some(value),
             "port" => self.port = Some(value),
             "destination" => self.destination = Some(value),
+            "destination_federate" => self.destination_federate = Some(value),
             "source" => self.source = Some(value),
             "level" => self.level = Some(value),
             "state" => self.state = Some(value),
@@ -1273,6 +1362,7 @@ mod tests {
             state.advance();
             state.insert_send(
                 PropagationKey {
+                    federate: None,
                     enclave: "e0".to_owned(),
                     action: format!("action-{logical_ns}"),
                     tag: CompleteTag {
@@ -1287,6 +1377,7 @@ mod tests {
         assert!(!state.sends.keys().any(|key| key.tag.logical_ns == 0));
 
         state.cleanup_through(
+            None,
             "e0",
             &CompleteTag {
                 logical_ns: u64::MAX,
@@ -1302,6 +1393,7 @@ mod tests {
         let mut state = CorrelationState::default();
         state.advance();
         let key = ReactionKey {
+            federate: None,
             enclave: "e0".to_owned(),
             reaction: "reaction".to_owned(),
             tag: CompleteTag {
@@ -1322,6 +1414,7 @@ mod tests {
         let mut state = CorrelationState::default();
         state.advance();
         let key = PropagationKey {
+            federate: None,
             enclave: "e0".to_owned(),
             action: "action".to_owned(),
             tag: CompleteTag {
@@ -1335,7 +1428,7 @@ mod tests {
         state.insert_send(key.clone(), TraceId("later".to_owned()));
         assert_eq!(state.take_send(&key), None);
 
-        state.cleanup_through("e0", &key.tag);
+        state.cleanup_through(None, "e0", &key.tag);
         state.insert_send(key.clone(), TraceId("fresh".to_owned()));
         assert_eq!(state.take_send(&key), Some(TraceId("fresh".to_owned())));
     }

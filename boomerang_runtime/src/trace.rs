@@ -15,7 +15,8 @@ pub(crate) fn collect_if_enabled<T>(collect: impl FnOnce() -> T) -> Option<T> {
     enabled().then(collect)
 }
 
-pub(crate) fn logical_ns(tag: crate::Tag) -> u64 {
+#[doc(hidden)]
+pub fn logical_ns(tag: crate::Tag) -> u64 {
     let nanoseconds = tag.offset().whole_nanoseconds();
     if nanoseconds.is_negative() {
         0
@@ -24,7 +25,8 @@ pub(crate) fn logical_ns(tag: crate::Tag) -> u64 {
     }
 }
 
-pub(crate) fn microstep(tag: crate::Tag) -> u64 {
+#[doc(hidden)]
+pub fn microstep(tag: crate::Tag) -> u64 {
     u64::try_from(tag.microstep()).expect("tag microstep does not fit in u64")
 }
 

@@ -6,11 +6,11 @@ use std::{
 };
 
 use boomerang_runtime::{
-    ActionCommon, AsyncActionRef, CommonContext, InterPartitionEventSink, InterPartitionEventTime,
-    ReactorData, SendContext, Tag,
+    ActionCommon, AsyncActionRef, CommonContext, EnclaveKey, InterPartitionEventSink,
+    InterPartitionEventTime, ReactorData, SendContext, Tag,
 };
 
-use crate::{PayloadDecoder, PayloadEncoder};
+use crate::{FederateId, PayloadDecoder, PayloadEncoder};
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum FederatedEndpointError {
@@ -115,6 +115,8 @@ impl FederatedInboundEndpoint {
 
 /// Serialized cross-partition event sink backed by a payload codec and Federate mailbox.
 pub struct SerializedInterPartitionEventSink<T: ReactorData> {
+    destination_federate: FederateId,
+    destination_enclave: EnclaveKey,
     encoder: Box<dyn PayloadEncoder<T>>,
     outbound: Box<dyn FederatedOutboundSink>,
     faults: FederatedFaultState,
@@ -122,11 +124,15 @@ pub struct SerializedInterPartitionEventSink<T: ReactorData> {
 
 impl<T: ReactorData> SerializedInterPartitionEventSink<T> {
     pub fn new(
+        destination_federate: FederateId,
+        destination_enclave: EnclaveKey,
         encoder: Box<dyn PayloadEncoder<T>>,
         outbound: Box<dyn FederatedOutboundSink>,
         faults: FederatedFaultState,
     ) -> Self {
         Self {
+            destination_federate,
+            destination_enclave,
             encoder,
             outbound,
             faults,
@@ -135,15 +141,33 @@ impl<T: ReactorData> SerializedInterPartitionEventSink<T> {
 }
 
 impl<T: ReactorData> InterPartitionEventSink<T> for SerializedInterPartitionEventSink<T> {
-    fn send(&self, time: InterPartitionEventTime, _target: &AsyncActionRef<T>, value: &T) {
+    fn send(&self, time: InterPartitionEventTime, target: &AsyncActionRef<T>, value: &T) {
         let InterPartitionEventTime::Logical(tag) = time else {
             tracing::error!("Serialized sender cannot target a physical action");
             return;
         };
 
+        let span = tracing::trace_span!(
+            target: boomerang_runtime::trace::TRACE_TARGET,
+            "propagation_send",
+            event = boomerang_runtime::trace::event::PROPAGATION_SEND,
+            kind = "logical",
+            destination_federate = %self.destination_federate,
+            destination = %self.destination_enclave,
+            action_key = %target.key(),
+            action = target.name(),
+            logical_ns = boomerang_runtime::trace::logical_ns(tag),
+            microstep = boomerang_runtime::trace::microstep(tag),
+            value_type = std::any::type_name::<T>(),
+            value_size = std::mem::size_of_val(value),
+            outcome = tracing::field::Empty,
+        );
+        let _entered = span.enter();
+
         let payload = match self.encoder.encode(value) {
             Ok(payload) => payload,
             Err(error) => {
+                span.record("outcome", "failed");
                 let error = FederatedEndpointError::codec(error.to_string());
                 tracing::error!(?error, "Failed to encode federated payload");
                 self.faults.record(error);
@@ -153,8 +177,11 @@ impl<T: ReactorData> InterPartitionEventSink<T> for SerializedInterPartitionEven
 
         let command = FederatedOutboundCommand::Msg(FederatedOutboundMessage { tag, payload });
         if let Err(error) = self.outbound.send(command) {
+            span.record("outcome", "failed");
             tracing::error!(?error, "Failed to emit federated command");
             self.faults.record(error);
+        } else {
+            span.record("outcome", "accepted");
         }
     }
 }

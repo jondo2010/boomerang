@@ -212,6 +212,7 @@ fn public_api_runs_static_in_memory_federation() {
             tracing::trace!(
                 target: "boomerang::trace",
                 event = "port_write",
+                federate = "a",
                 enclave = %runtime::EnclaveKey::from(1),
                 port_key = %runtime::PortKey::from(0),
                 outcome = "test",
@@ -219,15 +220,8 @@ fn public_api_runs_static_in_memory_federation() {
             tracing::trace!(
                 target: "boomerang::trace",
                 event = "action_schedule",
+                federate = "a",
                 enclave = %runtime::EnclaveKey::from(0),
-                action_key = %runtime::ActionKey::from(0),
-                outcome = "test",
-            );
-            tracing::trace!(
-                target: "boomerang::trace",
-                event = "propagation_send",
-                enclave = %runtime::EnclaveKey::from(1),
-                destination = %runtime::EnclaveKey::from(0),
                 action_key = %runtime::ActionKey::from(0),
                 outcome = "test",
             );
@@ -268,20 +262,11 @@ fn public_api_runs_static_in_memory_federation() {
             .expect("unambiguous dynamic port event");
         assert!(aligned_port_event.starts_with("/federates/a/enclaves/EnclaveKey\\(1\\)/"));
         assert!(aligned_port_event.contains("/reactors/main/reactors/a/reactors/relay\\@"));
-        let ambiguous_action_event = paths
+        let aligned_action_event = paths
             .iter()
             .find(|path| path.ends_with("/actions/ActionKey\\(0\\)/action_schedule"))
-            .expect("ambiguous dynamic action event");
-        assert_eq!(
-            ambiguous_action_event,
-            "/enclaves/EnclaveKey\\(0\\)/actions/ActionKey\\(0\\)/action_schedule"
-        );
-        assert!(paths
-            .iter()
-            .any(|path| path.starts_with("/propagation/sends/")));
-        assert!(!paths
-            .iter()
-            .any(|path| { path.ends_with("/propagation_send") && path.contains("/actions/") }));
+            .expect("federate-qualified dynamic action event");
+        assert!(aligned_action_event.starts_with("/federates/a/enclaves/EnclaveKey\\(0\\)/"));
 
         let component_suffixes = chunks
             .iter()
@@ -468,6 +453,11 @@ fn public_api_runs_static_in_memory_federation() {
             })
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
+            scheduler_lanes.len(),
+            3,
+            "expected exactly three distinct federated scheduler lanes: {scheduler_lanes:?}"
+        );
+        assert_eq!(
             scheduler_lanes
                 .iter()
                 .filter(|lane| lane.starts_with("/federates/a/enclaves/"))
@@ -528,6 +518,69 @@ fn public_api_runs_static_in_memory_federation() {
                 (source, destination)
             })
             .collect::<Vec<_>>();
+        let serialized_send = runtime_chunks
+            .iter()
+            .find(|chunk| {
+                text_component(chunk, ":boomerang.trace.event").as_deref()
+                    == Some("propagation_send")
+                    && text_component(chunk, ":boomerang.trace.federate").as_deref() == Some("a")
+                    && text_component(chunk, ":boomerang.trace.destination_federate").as_deref()
+                        == Some("b")
+                    && text_component(chunk, ":boomerang.trace.outcome").as_deref()
+                        == Some("accepted")
+            })
+            .expect("accepted serialized A-to-B propagation send");
+        let send_id = text_component(serialized_send, ":boomerang.trace.id").unwrap();
+        let receive_id = links
+            .iter()
+            .find_map(|(source, destination)| (source == &send_id).then_some(destination))
+            .expect("serialized send has exact B receive edge");
+        let receive = runtime_chunks
+            .iter()
+            .find(|chunk| {
+                text_component(chunk, ":boomerang.trace.id").as_deref() == Some(receive_id.as_str())
+                    && text_component(chunk, ":boomerang.trace.event").as_deref()
+                        == Some("propagation_receive")
+            })
+            .expect("serialized send destination is a propagation receive");
+        assert_eq!(
+            text_component(receive, ":boomerang.trace.federate").as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            text_component(serialized_send, ":boomerang.trace.destination"),
+            text_component(receive, ":boomerang.trace.enclave")
+        );
+        assert_eq!(
+            text_component(serialized_send, ":boomerang.trace.action_key"),
+            text_component(receive, ":boomerang.trace.action_key")
+        );
+        let reaction_id = links
+            .iter()
+            .find_map(|(source, destination)| (source == receive_id).then_some(destination))
+            .expect("B receive has exact reaction edge");
+        let reaction = runtime_chunks
+            .iter()
+            .find(|chunk| {
+                text_component(chunk, ":boomerang.trace.id").as_deref()
+                    == Some(reaction_id.as_str())
+            })
+            .expect("B reaction record exists");
+        assert_eq!(
+            text_component(reaction, ":boomerang.trace.event").as_deref(),
+            Some("reaction_execute")
+        );
+        assert_eq!(
+            text_component(reaction, ":boomerang.trace.federate").as_deref(),
+            Some("b")
+        );
+        let reaction_path = reaction.entity_path().to_string();
+        assert!(
+            reaction_path.starts_with("/federates/b/enclaves/")
+                && reaction_path.contains("/reactors/main/reactors/con_reactor_tgt\\@"),
+            "A-to-B receive linked to unexpected reaction path {}",
+            reaction.entity_path()
+        );
         let receives = records
             .iter()
             .filter(|(_, event)| event.as_str() == "propagation_receive")

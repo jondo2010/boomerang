@@ -40,6 +40,29 @@ fn text_component(chunk: &rerun::log::Chunk, suffix: &str) -> Option<String> {
     (values.len() == 1).then(|| values.value(0).to_owned())
 }
 
+#[cfg(feature = "rerun")]
+fn graph_edge(chunk: &rerun::log::Chunk) -> Option<(String, String)> {
+    let descriptor = chunk.component_descriptors().find(|descriptor| {
+        descriptor
+            .component_type
+            .as_ref()
+            .is_some_and(|name| name.as_str() == "rerun.components.GraphEdge")
+    })?;
+    let values = chunk.component_batch_raw(descriptor.component, 0)?.ok()?;
+    let values = values
+        .as_any()
+        .downcast_ref::<rerun::external::arrow::array::StructArray>()?;
+    let first = values
+        .column_by_name("first")?
+        .as_any()
+        .downcast_ref::<rerun::external::arrow::array::StringArray>()?;
+    let second = values
+        .column_by_name("second")?
+        .as_any()
+        .downcast_ref::<rerun::external::arrow::array::StringArray>()?;
+    (values.len() == 1).then(|| (first.value(0).to_owned(), second.value(0).to_owned()))
+}
+
 #[derive(Clone)]
 struct SinkState {
     values: Arc<Mutex<Vec<(Tag, u32)>>>,
@@ -470,19 +493,57 @@ fn public_api_runs_static_in_memory_federation() {
             !causal_links.is_empty(),
             "the exercised federated propagation produced no exact causal link"
         );
-        assert!(causal_links.iter().all(|link| {
-            let path = link.entity_path();
-            path.to_string().starts_with("/propagation/")
-                && runtime_chunks.iter().any(|chunk| {
-                    chunk.entity_path() == path
-                        && chunk.component_descriptors().any(|descriptor| {
-                            descriptor
-                                .archetype
-                                .as_ref()
-                                .is_some_and(|name| name.as_str() == "rerun.archetypes.GraphEdges")
-                        })
-                })
-        }));
+        let records = runtime_chunks
+            .iter()
+            .filter_map(|chunk| {
+                Some((
+                    text_component(chunk, ":boomerang.trace.id")?,
+                    text_component(chunk, ":boomerang.trace.event")?,
+                ))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let links = causal_links
+            .iter()
+            .map(|link| {
+                let source = text_component(link, ":boomerang.trace.source")
+                    .expect("causal source adapter ID");
+                let destination = text_component(link, ":boomerang.trace.destination")
+                    .expect("causal destination adapter ID");
+                let graph = runtime_chunks
+                    .iter()
+                    .find(|chunk| {
+                        chunk.entity_path() == link.entity_path() && graph_edge(chunk).is_some()
+                    })
+                    .and_then(|chunk| graph_edge(chunk))
+                    .expect("co-located built-in GraphEdges endpoint pair");
+                assert_eq!(graph, (source.clone(), destination.clone()));
+                assert!(
+                    records.contains_key(&source),
+                    "unknown causal source {source}"
+                );
+                assert!(
+                    records.contains_key(&destination),
+                    "unknown causal destination {destination}"
+                );
+                (source, destination)
+            })
+            .collect::<Vec<_>>();
+        let receives = records
+            .iter()
+            .filter(|(_, event)| event.as_str() == "propagation_receive")
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        assert!(receives.iter().any(|receive| {
+            let has_send = links.iter().any(|(source, destination)| {
+                destination == *receive
+                    && records.get(source).map(String::as_str) == Some("propagation_send")
+            });
+            let has_reaction = links.iter().any(|(source, destination)| {
+                source == *receive
+                    && records.get(destination).map(String::as_str) == Some("reaction_execute")
+            });
+            has_send && has_reaction
+        }), "no complete propagation_send -> propagation_receive -> reaction_execute chain: records={records:?}, links={links:?}");
     }
 }
 

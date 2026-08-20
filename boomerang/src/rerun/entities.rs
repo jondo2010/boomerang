@@ -346,7 +346,7 @@ enum RegistrationResolution {
 }
 
 impl RegistrationIndex {
-    fn register(
+    pub(super) fn register(
         &mut self,
         enclave: &str,
         kind: &'static str,
@@ -357,6 +357,16 @@ impl RegistrationIndex {
         self.register_identity(enclave, kind, stable_key, path);
         if display_name != stable_key {
             self.register_identity(enclave, kind, display_name, path);
+        }
+    }
+
+    pub(super) fn register_action_trigger(&mut self, action_path: &str, reaction_path: &str) {
+        let reactions = self
+            .action_triggers
+            .entry(action_path.to_owned())
+            .or_default();
+        if !reactions.iter().any(|reaction| reaction == reaction_path) {
+            reactions.push(reaction_path.to_owned());
         }
     }
 
@@ -670,15 +680,9 @@ pub(super) fn log_runtime_enclaves(
 
         for (action, reactions) in enclave.graph.action_triggers.iter() {
             let action_path = action_path(action);
-            let triggered = index
-                .action_triggers
-                .entry(action_path.clone())
-                .or_default();
             for (_, reaction) in reactions {
                 let reaction = reaction_path(*reaction);
-                if !triggered.contains(&reaction) {
-                    triggered.push(reaction);
-                }
+                index.register_action_trigger(&action_path, &reaction);
             }
             edges.extend(
                 reactions.iter().map(|(_, reaction)| {
@@ -1041,6 +1045,29 @@ mod tests {
     fn duration_is_exposed_as_builtin_scalar_series() {
         let series = record("reaction_execute").scalar_series();
         assert!(series.iter().any(|(name, _)| *name == "duration_ns"));
+    }
+
+    #[test]
+    fn registration_merge_is_idempotent_and_conflicts_become_ambiguous() {
+        let fields = TraceFields {
+            enclave: Some("e0".to_owned()),
+            action_key: Some("a0".to_owned()),
+            ..TraceFields::default()
+        };
+        let mut registration = RegistrationIndex::default();
+        registration.register("e0", "action", "a0", "input", "/first/action");
+        let mut repeated = RegistrationIndex::default();
+        repeated.register("e0", "action", "a0", "input", "/first/action");
+        registration.merge(repeated);
+        assert_eq!(
+            registration.resolve_entity(&fields, "async_ingress"),
+            Some("/first/action".to_owned())
+        );
+
+        let mut conflicting = RegistrationIndex::default();
+        conflicting.register("e0", "action", "a0", "input", "/second/action");
+        registration.merge(conflicting);
+        assert_eq!(registration.resolve_entity(&fields, "async_ingress"), None);
     }
 
     #[test]

@@ -350,13 +350,13 @@ impl RerunLayer {
                     return Vec::new();
                 };
                 correlation
-                    .take_predecessor(&ReactionKey {
+                    .take_predecessors(&ReactionKey {
                         enclave: enclave.clone(),
                         reaction,
                         tag,
                     })
-                    .and_then(|receive| self.causal_link(&enclave, &receive, &record.id, record))
                     .into_iter()
+                    .filter_map(|receive| self.causal_link(&enclave, &receive, &record.id, record))
                     .collect()
             }
             "tag_process" => {
@@ -465,7 +465,13 @@ impl PendingResolution {
 pub(super) struct CorrelationState {
     epoch: u64,
     sends: BTreeMap<PropagationKey, PendingResolution>,
-    predecessors: BTreeMap<ReactionKey, PendingResolution>,
+    predecessors: BTreeMap<ReactionKey, Vec<PendingPredecessor>>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingPredecessor {
+    id: TraceId,
+    epoch: u64,
 }
 
 impl CorrelationState {
@@ -473,8 +479,10 @@ impl CorrelationState {
         self.epoch = self.epoch.saturating_add(1);
         let minimum = self.epoch.saturating_sub(MAX_CORRELATION_AGE);
         self.sends.retain(|_, value| value.epoch() >= minimum);
-        self.predecessors
-            .retain(|_, value| value.epoch() >= minimum);
+        self.predecessors.retain(|_, values| {
+            values.retain(|value| value.epoch >= minimum);
+            !values.is_empty()
+        });
         self.enforce_bound();
     }
 
@@ -484,20 +492,33 @@ impl CorrelationState {
     }
 
     fn take_send(&mut self, key: &PropagationKey) -> Option<TraceId> {
-        self.sends
-            .remove(key)
-            .and_then(PendingResolution::unique_id)
+        match self.sends.get(key) {
+            Some(PendingResolution::Unique { .. }) => self
+                .sends
+                .remove(key)
+                .and_then(PendingResolution::unique_id),
+            Some(PendingResolution::Ambiguous { .. }) | None => None,
+        }
     }
 
     fn insert_predecessor(&mut self, key: ReactionKey, id: TraceId) {
-        insert_resolution(&mut self.predecessors, key, id, self.epoch);
+        let predecessors = self.predecessors.entry(key).or_default();
+        if !predecessors.iter().any(|predecessor| predecessor.id == id) {
+            predecessors.push(PendingPredecessor {
+                id,
+                epoch: self.epoch,
+            });
+        }
         self.enforce_bound();
     }
 
-    fn take_predecessor(&mut self, key: &ReactionKey) -> Option<TraceId> {
+    fn take_predecessors(&mut self, key: &ReactionKey) -> Vec<TraceId> {
         self.predecessors
             .remove(key)
-            .and_then(PendingResolution::unique_id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|predecessor| predecessor.id)
+            .collect()
     }
 
     fn cleanup_through(&mut self, enclave: &str, tag: &CompleteTag) {
@@ -508,31 +529,51 @@ impl CorrelationState {
     }
 
     fn enforce_bound(&mut self) {
-        while self.sends.len() + self.predecessors.len() > MAX_PENDING_CORRELATIONS {
+        while self.sends.len() + self.predecessors.values().map(Vec::len).sum::<usize>()
+            > MAX_PENDING_CORRELATIONS
+        {
             let oldest_send = self
                 .sends
                 .iter()
                 .map(|(key, value)| (value.epoch(), key.clone()));
-            let oldest_predecessor = self
-                .predecessors
-                .iter()
-                .map(|(key, value)| (value.epoch(), key.clone()));
+            let oldest_predecessor = self.predecessors.iter().flat_map(|(key, values)| {
+                values
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| (value.epoch, key.clone(), index))
+            });
             match (oldest_send.min(), oldest_predecessor.min()) {
                 (Some(send), Some(predecessor)) if send.0 <= predecessor.0 => {
                     self.sends.remove(&send.1);
                 }
                 (Some(_), Some(predecessor)) => {
-                    self.predecessors.remove(&predecessor.1);
+                    remove_predecessor(&mut self.predecessors, &predecessor.1, predecessor.2);
                 }
                 (Some(send), None) => {
                     self.sends.remove(&send.1);
                 }
                 (None, Some(predecessor)) => {
-                    self.predecessors.remove(&predecessor.1);
+                    remove_predecessor(&mut self.predecessors, &predecessor.1, predecessor.2);
                 }
                 (None, None) => break,
             }
         }
+    }
+}
+
+fn remove_predecessor(
+    predecessors: &mut BTreeMap<ReactionKey, Vec<PendingPredecessor>>,
+    key: &ReactionKey,
+    index: usize,
+) {
+    let remove_key = if let Some(values) = predecessors.get_mut(key) {
+        values.remove(index);
+        values.is_empty()
+    } else {
+        false
+    };
+    if remove_key {
+        predecessors.remove(key);
     }
 }
 
@@ -874,6 +915,20 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordCapture(Mutex<Vec<TraceRecord>>);
+
+    impl TraceWriter for RecordCapture {
+        fn write(
+            &self,
+            _recording: &rerun::RecordingStream,
+            record: &TraceRecord,
+        ) -> Result<(), TraceWriterError> {
+            lock_unpoisoned(&self.0).push(record.clone());
+            Ok(())
+        }
+    }
+
     #[test]
     fn sequence_exhaustion_disables_without_emitting_duplicate_id() {
         let captured = Arc::new(IdCapture::default());
@@ -940,7 +995,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_pending_predecessors_are_ambiguous_not_first_wins() {
+    fn distinct_pending_predecessors_are_all_retained_for_one_reaction() {
         let mut state = CorrelationState::default();
         state.advance();
         let key = ReactionKey {
@@ -953,6 +1008,142 @@ mod tests {
         };
         state.insert_predecessor(key.clone(), TraceId("first".to_owned()));
         state.insert_predecessor(key.clone(), TraceId("second".to_owned()));
-        assert_eq!(state.take_predecessor(&key), None);
+        assert_eq!(
+            state.take_predecessors(&key),
+            vec![TraceId("first".to_owned()), TraceId("second".to_owned())]
+        );
+    }
+
+    #[test]
+    fn ambiguous_send_poison_survives_ingress_until_tag_cleanup() {
+        let mut state = CorrelationState::default();
+        state.advance();
+        let key = PropagationKey {
+            enclave: "e0".to_owned(),
+            action: "action".to_owned(),
+            tag: CompleteTag {
+                logical_ns: 1,
+                microstep: 0,
+            },
+        };
+        state.insert_send(key.clone(), TraceId("first".to_owned()));
+        state.insert_send(key.clone(), TraceId("second".to_owned()));
+        assert_eq!(state.take_send(&key), None);
+        state.insert_send(key.clone(), TraceId("later".to_owned()));
+        assert_eq!(state.take_send(&key), None);
+
+        state.cleanup_through("e0", &key.tag);
+        state.insert_send(key.clone(), TraceId("fresh".to_owned()));
+        assert_eq!(state.take_send(&key), Some(TraceId("fresh".to_owned())));
+    }
+
+    #[test]
+    fn two_distinct_action_receives_both_link_to_the_same_reaction() {
+        let capture = Arc::new(RecordCapture::default());
+        let session = RerunSessionBuilder::new("multiple-predecessors")
+            .source_id("multiple-predecessors")
+            .trace_writer(capture.clone())
+            .build()
+            .unwrap();
+        {
+            let mut registration = session
+                .adapter
+                .registration
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registration.register("e0", "action", "a0", "a0", "/actions/a0");
+            registration.register("e0", "action", "a1", "a1", "/actions/a1");
+            registration.register("e0", "reaction", "r0", "r0", "/reactions/r0");
+            registration.register_action_trigger("/actions/a0", "/reactions/r0");
+            registration.register_action_trigger("/actions/a1", "/reactions/r0");
+        }
+        let subscriber = tracing_subscriber::registry().with(session.layer());
+        tracing::subscriber::with_default(subscriber, || {
+            for action in ["a0", "a1"] {
+                tracing::trace!(target: TRACE_TARGET, event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = action, logical_ns = 3_u64, microstep = 0_u64, outcome = "accepted");
+                tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = action, logical_ns = 3_u64, microstep = 0_u64, destination_logical_ns = 3_u64, destination_microstep = 0_u64, outcome = "accepted");
+            }
+            let reaction = tracing::trace_span!(target: TRACE_TARGET, "reaction_execute", event = "reaction_execute", enclave = "e0", reaction_key = "r0", logical_ns = 3_u64, microstep = 0_u64, state = "begin");
+            let _entered = reaction.enter();
+        });
+
+        let records = lock_unpoisoned(&capture.0);
+        let reaction = records
+            .iter()
+            .find(|record| record.event == "reaction_execute")
+            .unwrap();
+        let receives = records
+            .iter()
+            .filter(|record| record.event == "propagation_receive")
+            .map(|record| record.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(receives.len(), 2);
+        let predecessors = records
+            .iter()
+            .filter(|record| {
+                record.event == "causal_link"
+                    && record.fields.destination.as_deref() == Some(reaction.id.0.as_str())
+            })
+            .filter_map(|record| record.fields.source.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(predecessors.len(), 2);
+        assert!(receives
+            .iter()
+            .all(|receive| predecessors.contains(&receive.0)));
+    }
+
+    #[test]
+    fn ambiguous_send_interleaving_stays_neutral_until_tag_cleanup() {
+        let capture = Arc::new(RecordCapture::default());
+        let session = RerunSessionBuilder::new("persistent-poison")
+            .trace_writer(capture.clone())
+            .build()
+            .unwrap();
+        {
+            let mut registration = session
+                .adapter
+                .registration
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registration.register("e0", "action", "a0", "a0", "/actions/a0");
+            registration.register("e0", "reaction", "r0", "r0", "/reactions/r0");
+            registration.register_action_trigger("/actions/a0", "/reactions/r0");
+        }
+        let subscriber = tracing_subscriber::registry().with(session.layer());
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..2 {
+                tracing::trace!(target: TRACE_TARGET, event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, outcome = "accepted");
+            }
+            tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, destination_logical_ns = 1_u64, destination_microstep = 0_u64, outcome = "accepted");
+            tracing::trace!(target: TRACE_TARGET, event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, outcome = "accepted");
+            tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, destination_logical_ns = 1_u64, destination_microstep = 0_u64, outcome = "accepted");
+            let poisoned_reaction = tracing::trace_span!(target: TRACE_TARGET, "reaction_execute", event = "reaction_execute", enclave = "e0", reaction_key = "r0", logical_ns = 1_u64, microstep = 0_u64, state = "begin");
+            drop(poisoned_reaction.enter());
+            drop(poisoned_reaction);
+            let tag = tracing::trace_span!(target: TRACE_TARGET, "tag_process", event = "tag_process", enclave = "e0", logical_ns = 1_u64, microstep = 0_u64, state = "processing");
+            drop(tag.enter());
+            drop(tag);
+
+            tracing::trace!(target: TRACE_TARGET, event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", logical_ns = 2_u64, microstep = 0_u64, outcome = "accepted");
+            tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = "a0", logical_ns = 2_u64, microstep = 0_u64, destination_logical_ns = 2_u64, destination_microstep = 0_u64, outcome = "accepted");
+            let fresh_reaction = tracing::trace_span!(target: TRACE_TARGET, "reaction_execute", event = "reaction_execute", enclave = "e0", reaction_key = "r0", logical_ns = 2_u64, microstep = 0_u64, state = "begin");
+            drop(fresh_reaction.enter());
+            drop(fresh_reaction);
+        });
+
+        let records = lock_unpoisoned(&capture.0);
+        let receives = records
+            .iter()
+            .filter(|record| record.event == "propagation_receive")
+            .collect::<Vec<_>>();
+        assert_eq!(receives.len(), 1);
+        assert_eq!(receives[0].fields.logical_ns, Some(2));
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.event == "causal_link")
+                .count(),
+            2
+        );
     }
 }

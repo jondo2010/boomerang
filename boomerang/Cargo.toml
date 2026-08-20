@@ -31,7 +31,7 @@ federated = [
 ]
 
 ## Record runtime traces with the Rerun SDK
-rerun = ["dep:rerun", "dep:tracing", "dep:tracing-subscriber"]
+rerun = ["dep:rerun", "dep:tracing", "dep:tracing-subscriber", "dep:boomerang_tinymap"]
 
 [dependencies]
 document-features = { workspace = true }
@@ -42,6 +42,7 @@ boomerang_builder = { workspace = true }
 boomerang_federated = { workspace = true, optional = true }
 boomerang_runtime = { workspace = true }
 boomerang_macros = { workspace = true }
+boomerang_tinymap = { workspace = true, optional = true }
 rerun = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }

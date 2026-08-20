@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 
 use rerun::{RecordingStream, RecordingStreamBuilder, RecordingStreamResult};
 
-use super::entities::{RerunTraceWriter, TraceWriter};
+#[cfg(feature = "federated")]
+use super::entities::{escape_entity_segment, log_runtime_relation, runtime_enclave_root};
+use super::entities::{log_runtime_enclaves, RerunTraceWriter, TraceWriter};
 use super::layer::RerunLayer;
 
 const DEFAULT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -87,7 +89,7 @@ impl RerunSessionBuilder {
 
         Ok(RerunSession {
             recording,
-            _memory: memory,
+            memory,
             source_id,
             flush_timeout: self.flush_timeout,
             state: SessionState::new(enabled),
@@ -101,7 +103,7 @@ impl RerunSessionBuilder {
 /// An observational Rerun recording session.
 pub struct RerunSession {
     recording: RecordingStream,
-    _memory: rerun::sink::MemorySinkStorage,
+    memory: rerun::sink::MemorySinkStorage,
     source_id: String,
     flush_timeout: Duration,
     state: SessionState,
@@ -141,6 +143,126 @@ impl RerunSession {
             self.started,
             self.next_trace_id.clone(),
         )
+    }
+
+    /// Access the backing memory sink for recording inspection or serialization.
+    pub fn memory_sink(&self) -> &rerun::sink::MemorySinkStorage {
+        &self.memory
+    }
+
+    /// Registers the immutable hierarchy already produced by builder lowering.
+    ///
+    /// Registration is synchronous and retains no reference to, or copy of, the runtime graph.
+    pub fn register_runtime(&self, runtime: &boomerang_builder::RuntimeAssembly) {
+        match &runtime.execution {
+            boomerang_builder::RuntimeExecution::Local(enclaves) => {
+                self.register_enclaves(None, enclaves);
+            }
+            #[cfg(feature = "federated")]
+            boomerang_builder::RuntimeExecution::Federated(federation) => {
+                self.observe_registration(|| {
+                    let mut federation_nodes = Vec::new();
+                    let mut federation_edges = Vec::new();
+                    for (id, federate) in federation.federates() {
+                        let path = format!("/federates/{}", escape_entity_segment(id.as_str()));
+                        federation_nodes.push(path.clone());
+                        let entity = rerun::DynamicArchetype::new("boomerang.RuntimeEntity")
+                            .with_component::<rerun::components::Text>(
+                                "boomerang.runtime.display_name",
+                                [id.as_str()],
+                            )
+                            .with_component::<rerun::components::Text>(
+                                "boomerang.runtime.stable_key",
+                                [id.as_str()],
+                            )
+                            .with_component::<rerun::components::Text>(
+                                "boomerang.runtime.kind",
+                                ["federate"],
+                            );
+                        self.recording.log_static(path.as_str(), &entity)?;
+                        for enclave in federate.enclaves().keys() {
+                            let enclave_path = runtime_enclave_root(Some(id.as_str()), enclave);
+                            let relation_index = federation_edges.len();
+                            log_runtime_relation(
+                                &self.recording,
+                                &format!("/federation/topology/ownership/{relation_index}"),
+                                &path,
+                                &enclave_path,
+                                "owns_enclave",
+                                None,
+                                None,
+                            )?;
+                            federation_nodes.push(enclave_path.clone());
+                            federation_edges.push((path.clone(), enclave_path));
+                        }
+                        log_runtime_enclaves(
+                            &self.recording,
+                            Some(id.as_str()),
+                            federate.enclaves(),
+                        )?;
+                    }
+
+                    for (endpoint, source, target, delay) in federation.graph().endpoint_routes() {
+                        let source =
+                            format!("/federates/{}", escape_entity_segment(source.as_str()));
+                        let target =
+                            format!("/federates/{}", escape_entity_segment(target.as_str()));
+                        log_runtime_relation(
+                            &self.recording,
+                            &format!(
+                                "/federation/topology/endpoints/{}",
+                                escape_entity_segment(endpoint.as_str())
+                            ),
+                            &source,
+                            &target,
+                            "federated_endpoint",
+                            Some(endpoint.as_str()),
+                            Some(delay.as_nanos()),
+                        )?;
+                        federation_edges.push((source, target));
+                    }
+                    self.recording.log_static(
+                        "/federation/topology/nodes",
+                        &rerun::GraphNodes::new(federation_nodes.clone())
+                            .with_labels(federation_nodes),
+                    )?;
+                    self.recording.log_static(
+                        "/federation/topology/edges",
+                        &rerun::GraphEdges::new(federation_edges)
+                            .with_graph_type(rerun::components::GraphType::Directed),
+                    )?;
+                    Ok(())
+                });
+            }
+        }
+    }
+
+    /// Registers one already-lowered Enclave map without retaining it.
+    pub fn register_enclaves(
+        &self,
+        federate: Option<&str>,
+        enclaves: &boomerang_tinymap::TinyMap<
+            boomerang_runtime::EnclaveKey,
+            boomerang_runtime::Enclave,
+        >,
+    ) {
+        self.observe_registration(|| log_runtime_enclaves(&self.recording, federate, enclaves));
+    }
+
+    fn observe_registration(
+        &self,
+        registration: impl FnOnce() -> rerun::RecordingStreamResult<()>,
+    ) {
+        if !self.state.try_begin_attempt() {
+            return;
+        }
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(registration)) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => self.state.disable_on_error(&error),
+            Err(_) => self
+                .state
+                .disable_on_error(&"runtime registration panicked"),
+        }
     }
 
     /// Flushes pending data once, bounded by the configured timeout.

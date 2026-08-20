@@ -9,6 +9,21 @@ use std::{
 
 use boomerang::prelude::*;
 
+#[cfg(feature = "rerun")]
+fn rerun_chunks(session: &boomerang::rerun::RerunSession) -> Vec<rerun::log::Chunk> {
+    session
+        .memory_sink()
+        .take()
+        .into_iter()
+        .filter_map(|message| match message {
+            rerun::log::LogMsg::ArrowMsg(_, message) => {
+                Some(rerun::log::Chunk::from_chunk_record_batch(&message.batch).unwrap())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 #[derive(Clone)]
 struct SinkState {
     values: Arc<Mutex<Vec<(Tag, u32)>>>,
@@ -110,11 +125,15 @@ fn public_api_runs_static_in_memory_federation() {
     boomerang_util::test_tracing::init_with_directive("debug");
     let values = Arc::new(Mutex::new(Vec::new()));
     let mut assembly = Assembly::new();
+    #[cfg(feature = "rerun")]
+    let rerun = boomerang::rerun::RerunSessionBuilder::new("federated-static-test")
+        .build()
+        .unwrap();
     assembly
         .register_federated_codec::<u32, _>(boomerang::federated::SerdeJsonCodec)
         .unwrap();
 
-    StaticFederation(Arc::clone(&values))
+    let _ = StaticFederation(Arc::clone(&values))
         .build(
             "main",
             (),
@@ -129,6 +148,8 @@ fn public_api_runs_static_in_memory_federation() {
 
     let config = runtime::Config::default().with_fast_forward(true);
     let parts = assembly.into_runtime_assembly(&config).unwrap();
+    #[cfg(feature = "rerun")]
+    rerun.register_runtime(&parts);
     let federation = parts.federation().unwrap();
     assert_eq!(federation.federates().len(), 2);
     assert_eq!(
@@ -145,6 +166,108 @@ fn public_api_runs_static_in_memory_federation() {
     );
     assert_eq!(federation.graph().federate_ids().count(), 2);
     assert_eq!(federation.graph().endpoint_ids().count(), 1);
+    #[cfg(feature = "rerun")]
+    {
+        let chunks = rerun_chunks(&rerun);
+        let paths = chunks
+            .iter()
+            .map(|chunk| chunk.entity_path().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(paths.iter().any(|path| path == "/federates/a"));
+        assert!(paths.iter().any(|path| path == "/federates/b"));
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|path| path.ends_with("/scheduler"))
+                .count(),
+            3,
+            "one scheduler entity per lowered Enclave"
+        );
+        assert!(paths.iter().any(|path| {
+            path.starts_with("/federates/a/enclaves/")
+                && path.contains("/reactors/main/reactors/a/reactors/source/reactions/")
+        }));
+        assert!(paths.iter().any(|path| {
+            path.starts_with("/federates/b/enclaves/")
+                && path.contains("/reactors/main/reactors/b/actions/")
+        }));
+
+        let component_suffixes = chunks
+            .iter()
+            .flat_map(|chunk| chunk.component_descriptors())
+            .map(|descriptor| descriptor.component.to_string())
+            .collect::<Vec<_>>();
+        for required in [
+            ":boomerang.runtime.display_name",
+            ":boomerang.runtime.stable_key",
+            ":boomerang.runtime.kind",
+            ":boomerang.runtime.owner_key",
+            ":boomerang.runtime.type",
+            ":boomerang.runtime.action_timing",
+            ":boomerang.runtime.reaction_level",
+            ":boomerang.runtime.source",
+            ":boomerang.runtime.target",
+            ":boomerang.runtime.relation_kind",
+        ] {
+            assert!(
+                component_suffixes
+                    .iter()
+                    .any(|component| component.ends_with(required)),
+                "missing static component {required}"
+            );
+        }
+        assert!(chunks
+            .iter()
+            .any(
+                |chunk| chunk.component_descriptors().any(|descriptor| descriptor
+                    .archetype
+                    .as_ref()
+                    .is_some_and(|name| name.as_str() == "rerun.archetypes.GraphNodes"))
+            ));
+        assert!(chunks
+            .iter()
+            .any(
+                |chunk| chunk.component_descriptors().any(|descriptor| descriptor
+                    .archetype
+                    .as_ref()
+                    .is_some_and(|name| name.as_str() == "rerun.archetypes.GraphEdges"))
+            ));
+        assert!(paths
+            .iter()
+            .any(|path| path.starts_with("/federation/topology/ownership/")));
+        let endpoint = chunks
+            .iter()
+            .find(|chunk| {
+                chunk
+                    .entity_path()
+                    .to_string()
+                    .starts_with("/federation/topology/endpoints/")
+            })
+            .expect("lowered federated endpoint relation");
+        for required in [
+            ":boomerang.runtime.stable_key",
+            ":boomerang.runtime.delay_ns",
+            ":boomerang.runtime.source",
+            ":boomerang.runtime.target",
+        ] {
+            assert!(endpoint
+                .component_descriptors()
+                .any(|descriptor| descriptor.component.as_str().ends_with(required)));
+        }
+        assert!(
+            chunks
+                .iter()
+                .filter(|chunk| {
+                    let path = chunk.entity_path().to_string();
+                    path.starts_with("/federates/") || path.starts_with("/federation/")
+                })
+                .all(|chunk| chunk.timelines().is_empty()),
+            "static registration must be timeless"
+        );
+        assert!(rerun.is_enabled());
+        assert_eq!(rerun.error_count(), 0);
+    }
     let envs = execute_federation_in_memory(parts.into_federation().unwrap(), config).unwrap();
     let a_envs = &envs[&FederateId::new("a")];
     let b_envs = &envs[&FederateId::new("b")];

@@ -271,7 +271,8 @@ impl RerunSession {
     /// After this session is disabled, its per-layer filter rejects `boomerang::trace` callsites
     /// dynamically. If another composed layer remains interested in those callsites, tracing must
     /// still construct their metadata and fields for that layer; only this adapter's callbacks are
-    /// skipped. Unrelated targets are never filtered by this adapter.
+    /// skipped. This adapter expresses no interest in unrelated targets, while other composed
+    /// layers remain free to enable them.
     pub fn layer<S>(&self) -> impl tracing_subscriber::Layer<S>
     where
         S: tracing::Subscriber

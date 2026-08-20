@@ -819,8 +819,18 @@ fn emit_counted_shutdown(evaluations: &AtomicUsize) {
     );
 }
 
+fn emit_counted_unrelated(evaluations: &AtomicUsize) {
+    tracing::trace!(
+        target: "unrelated",
+        value = ?CountingDebug(evaluations),
+    );
+}
+
 #[derive(Clone)]
-struct EventCounter(Arc<AtomicUsize>);
+struct EventCounter {
+    target: &'static str,
+    observed: Arc<AtomicUsize>,
+}
 
 struct DebugEvaluatingVisitor;
 
@@ -839,8 +849,8 @@ where
         event: &tracing::Event<'_>,
         _context: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        if event.metadata().target() == "boomerang::trace" {
-            self.0.fetch_add(1, Ordering::Relaxed);
+        if event.metadata().target() == self.target {
+            self.observed.fetch_add(1, Ordering::Relaxed);
             event.record(&mut DebugEvaluatingVisitor);
         }
     }
@@ -879,6 +889,7 @@ fn first_write_failure_dynamically_disables_trace_callsites() {
     let subscriber = tracing_subscriber::registry().with(session.layer());
 
     let evaluations = AtomicUsize::new(0);
+    let unrelated_evaluations = AtomicUsize::new(0);
     tracing::subscriber::with_default(subscriber, || {
         assert!(tracing::enabled!(
             target: "boomerang::trace",
@@ -889,10 +900,11 @@ fn first_write_failure_dynamically_disables_trace_callsites() {
             target: "boomerang::trace",
             tracing::Level::TRACE
         ));
-        assert!(tracing::enabled!(
+        assert!(!tracing::enabled!(
             target: "unrelated",
             tracing::Level::TRACE
         ));
+        emit_counted_unrelated(&unrelated_evaluations);
         emit_counted_shutdown(&evaluations);
     });
 
@@ -900,6 +912,7 @@ fn first_write_failure_dynamically_disables_trace_callsites() {
     assert_eq!(session.error_count(), 1);
     assert_eq!(session.skipped_count(), 0);
     assert_eq!(evaluations.load(Ordering::Relaxed), 1);
+    assert_eq!(unrelated_evaluations.load(Ordering::Relaxed), 0);
 }
 
 #[test]
@@ -909,9 +922,13 @@ fn another_interested_layer_keeps_disabled_trace_callsites_enabled() {
         .build()
         .unwrap();
     let observed = Arc::new(AtomicUsize::new(0));
-    let observer = EventCounter(observed.clone()).with_filter(
-        tracing_subscriber::filter::filter_fn(|metadata| metadata.target() == "boomerang::trace"),
-    );
+    let observer = EventCounter {
+        target: "boomerang::trace",
+        observed: observed.clone(),
+    }
+    .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+        metadata.target() == "boomerang::trace"
+    }));
     let subscriber = tracing_subscriber::registry()
         .with(session.layer())
         .with(observer);
@@ -942,6 +959,39 @@ fn another_interested_layer_keeps_disabled_trace_callsites_enabled() {
         ),
         (1, 2)
     );
+}
+
+#[test]
+fn another_interested_layer_can_enable_an_unrelated_target() {
+    let session = RerunSessionBuilder::new("boomerang-rerun-test")
+        .build()
+        .unwrap();
+    let observed = Arc::new(AtomicUsize::new(0));
+    let observer = EventCounter {
+        target: "unrelated",
+        observed: observed.clone(),
+    }
+    .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+        metadata.target() == "unrelated"
+    }));
+    let subscriber = tracing_subscriber::registry()
+        .with(session.layer())
+        .with(observer);
+
+    let evaluations = AtomicUsize::new(0);
+    tracing::subscriber::with_default(subscriber, || {
+        assert!(tracing::enabled!(
+            target: "unrelated",
+            tracing::Level::TRACE
+        ));
+        emit_counted_unrelated(&evaluations);
+    });
+
+    assert!(session.is_enabled());
+    assert_eq!(session.error_count(), 0);
+    assert_eq!(session.skipped_count(), 0);
+    assert_eq!(evaluations.load(Ordering::Relaxed), 1);
+    assert_eq!(observed.load(Ordering::Relaxed), 1);
 }
 
 struct PanickingWriter;

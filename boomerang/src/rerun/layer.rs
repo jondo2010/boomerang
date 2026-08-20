@@ -34,21 +34,19 @@ impl SessionFilter {
 
 impl<S> Filter<S> for SessionFilter {
     fn enabled(&self, metadata: &tracing::Metadata<'_>, _ctx: &Context<'_, S>) -> bool {
-        metadata.target() != TRACE_TARGET || self.state.is_enabled()
+        metadata.target() == TRACE_TARGET && self.state.is_enabled()
     }
 
     fn callsite_enabled(
         &self,
         metadata: &'static tracing::Metadata<'static>,
     ) -> tracing::subscriber::Interest {
-        if metadata.target() == TRACE_TARGET {
-            if self.state.is_enabled() {
-                tracing::subscriber::Interest::sometimes()
-            } else {
-                tracing::subscriber::Interest::never()
-            }
+        if metadata.target() != TRACE_TARGET {
+            tracing::subscriber::Interest::never()
+        } else if self.state.is_enabled() {
+            tracing::subscriber::Interest::sometimes()
         } else {
-            tracing::subscriber::Interest::always()
+            tracing::subscriber::Interest::never()
         }
     }
 }
@@ -59,7 +57,8 @@ impl<S> Filter<S> for SessionFilter {
 /// and may backpressure the scheduler callback under saturation. This layer deliberately owns no
 /// second dynamic-record queue. The layer returned by [`RerunSession::layer`](super::RerunSession::layer)
 /// uses a dynamic per-layer filter: after session failure it avoids trace metadata work when no
-/// other interested layer is composed, while leaving unrelated targets and other layers intact.
+/// other interested layer is composed. It expresses no interest in unrelated targets, while
+/// leaving other composed layers free to enable them.
 #[derive(Clone)]
 pub struct RerunLayer {
     recording: rerun::RecordingStream,

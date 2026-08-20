@@ -418,29 +418,40 @@ fn execute_connected_static_federation(
         let config = config.clone();
         let completion_tx = completion_tx.clone();
         let thread_federate_id = federate_id.clone();
+        let dispatch = tracing::enabled!(
+            target: boomerang_runtime::trace::TRACE_TARGET,
+            tracing::Level::TRACE
+        )
+        .then(|| tracing::dispatcher::get_default(Clone::clone));
         let handle = match std::thread::Builder::new()
             .name(format!("federate-{federate_id}-{enclave_key}"))
             .spawn(move || {
-                let result = catch_scheduler_thread_body(|| {
-                    let mut scheduler =
-                        boomerang_runtime::Scheduler::new_with_logical_time_coordinator(
-                            enclave_key,
-                            enclave,
-                            config,
-                            participant,
-                        );
-                    match scheduler.try_event_loop() {
-                        Ok(()) => SchedulerThreadResult::Completed {
-                            federate_id: thread_federate_id,
-                            enclave_key,
-                            env: scheduler.into_env(),
-                        },
-                        Err(source) => SchedulerThreadResult::RuntimeError {
-                            federate_id: thread_federate_id,
-                            source,
-                        },
-                    }
-                });
+                let run = || {
+                    catch_scheduler_thread_body(|| {
+                        let mut scheduler =
+                            boomerang_runtime::Scheduler::new_with_logical_time_coordinator(
+                                enclave_key,
+                                enclave,
+                                config,
+                                participant,
+                            );
+                        match scheduler.try_event_loop() {
+                            Ok(()) => SchedulerThreadResult::Completed {
+                                federate_id: thread_federate_id,
+                                enclave_key,
+                                env: scheduler.into_env(),
+                            },
+                            Err(source) => SchedulerThreadResult::RuntimeError {
+                                federate_id: thread_federate_id,
+                                source,
+                            },
+                        }
+                    })
+                };
+                let result = match dispatch {
+                    Some(dispatch) => tracing::dispatcher::with_default(&dispatch, run),
+                    None => run(),
+                };
                 let _ = completion_tx.send(result);
             }) {
             Ok(handle) => handle,

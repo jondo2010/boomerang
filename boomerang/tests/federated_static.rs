@@ -402,12 +402,53 @@ fn public_api_runs_static_in_memory_federation() {
         assert!(rerun.is_enabled());
         assert_eq!(rerun.error_count(), 0);
     }
+    #[cfg(feature = "rerun")]
+    let envs = {
+        let subscriber = tracing_subscriber::registry().with(rerun.layer());
+        tracing::subscriber::with_default(subscriber, || {
+            execute_federation_in_memory(parts.into_federation().unwrap(), config).unwrap()
+        })
+    };
+    #[cfg(not(feature = "rerun"))]
     let envs = execute_federation_in_memory(parts.into_federation().unwrap(), config).unwrap();
     let a_envs = &envs[&FederateId::new("a")];
     let b_envs = &envs[&FederateId::new("b")];
     assert_eq!(a_envs.keys().next(), b_envs.keys().next());
 
     assert_eq!(*values.lock().unwrap(), vec![(Tag::ZERO, 7)]);
+
+    #[cfg(feature = "rerun")]
+    {
+        let runtime_chunks = rerun_chunks(&rerun);
+        let runtime_chunks = runtime_chunks
+            .iter()
+            .filter(|chunk| !chunk.timelines().is_empty())
+            .collect::<Vec<_>>();
+        assert!(
+            !runtime_chunks.is_empty(),
+            "scheduler emitted no trace records"
+        );
+        assert!(runtime_chunks.iter().any(|chunk| {
+            chunk
+                .timelines()
+                .values()
+                .any(|timeline| timeline.name() == "logical")
+        }));
+
+        let scheduler_lanes = runtime_chunks
+            .iter()
+            .filter_map(|chunk| {
+                let path = chunk.entity_path().to_string();
+                let segments = path.split('/').collect::<Vec<_>>();
+                let enclave = segments.iter().position(|segment| *segment == "enclaves")?;
+                Some(segments[..=enclave + 1].join("/"))
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            scheduler_lanes.len() >= 2,
+            "expected traces from at least two federated scheduler lanes, got {scheduler_lanes:?}"
+        );
+    }
 }
 
 #[test]

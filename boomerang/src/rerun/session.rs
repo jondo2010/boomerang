@@ -1,8 +1,11 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rerun::{RecordingStream, RecordingStreamBuilder, RecordingStreamResult};
+
+use super::entities::{RerunTraceWriter, TraceWriter};
+use super::layer::RerunLayer;
 
 const DEFAULT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 static SOURCE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -16,12 +19,12 @@ pub enum SinkConfig {
 }
 
 /// Configures a [`RerunSession`].
-#[derive(Debug)]
 pub struct RerunSessionBuilder {
     application_id: String,
     source_id: Option<String>,
     sink: SinkConfig,
     flush_timeout: Duration,
+    trace_writer: Arc<dyn TraceWriter>,
 }
 
 impl RerunSessionBuilder {
@@ -32,6 +35,7 @@ impl RerunSessionBuilder {
             source_id: None,
             sink: SinkConfig::default(),
             flush_timeout: DEFAULT_FLUSH_TIMEOUT,
+            trace_writer: Arc::new(RerunTraceWriter),
         }
     }
 
@@ -50,6 +54,15 @@ impl RerunSessionBuilder {
     /// Sets the maximum time spent flushing on an explicit flush or drop.
     pub fn flush_timeout(mut self, flush_timeout: Duration) -> Self {
         self.flush_timeout = flush_timeout;
+        self
+    }
+
+    /// Overrides the synchronous dynamic-record writer.
+    ///
+    /// This seam supports deterministic testing and future file/live/tee sinks without adding a
+    /// second trace queue.
+    pub fn trace_writer(mut self, trace_writer: Arc<dyn TraceWriter>) -> Self {
+        self.trace_writer = trace_writer;
         self
     }
 
@@ -78,6 +91,9 @@ impl RerunSessionBuilder {
             source_id,
             flush_timeout: self.flush_timeout,
             state: SessionState::new(enabled),
+            trace_writer: self.trace_writer,
+            started: Instant::now(),
+            next_trace_id: Arc::new(AtomicU64::new(0)),
         })
     }
 }
@@ -89,6 +105,9 @@ pub struct RerunSession {
     source_id: String,
     flush_timeout: Duration,
     state: SessionState,
+    trace_writer: Arc<dyn TraceWriter>,
+    started: Instant,
+    next_trace_id: Arc<AtomicU64>,
 }
 
 impl RerunSession {
@@ -112,15 +131,22 @@ impl RerunSession {
         &self.source_id
     }
 
+    /// Creates a composable tracing layer without installing a global subscriber.
+    pub fn layer(&self) -> RerunLayer {
+        RerunLayer::new(
+            self.recording.clone(),
+            self.state.clone(),
+            Arc::from(self.source_id.as_str()),
+            self.trace_writer.clone(),
+            self.started,
+            self.next_trace_id.clone(),
+        )
+    }
+
     /// Flushes pending data once, bounded by the configured timeout.
     pub fn flush(&self) {
         self.state
             .flush_once(|| self.recording.flush_with_timeout(self.flush_timeout));
-    }
-
-    #[expect(dead_code, reason = "used by the sibling tracing layer")]
-    pub(super) fn recording_parts(&self) -> (&RecordingStream, SessionState) {
-        (&self.recording, self.state.clone())
     }
 }
 
@@ -174,10 +200,6 @@ impl SessionState {
         self.inner.skipped_count.load(Ordering::Relaxed)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by the sibling tracing layer")
-    )]
     pub(super) fn try_begin_attempt(&self) -> bool {
         if self.is_enabled() {
             true

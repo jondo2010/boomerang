@@ -235,9 +235,10 @@ impl RerunSessionBuilder {
     /// Overrides the adapter-local flush operation.
     ///
     /// This is primarily useful for verifying timeout isolation. The adapter invokes the driver
-    /// on one persistent lifecycle worker, so a broken primitive cannot block the application
-    /// thread. If the SDK never returns, that one detached worker and its sink resources may
-    /// remain for the failed session; the adapter cannot cancel SDK work safely.
+    /// on one persistent lifecycle worker with at most one admitted operation, so a broken
+    /// primitive cannot block the application thread or accumulate lifecycle requests. If the SDK
+    /// never returns, that one detached worker and its sink resources may remain for the failed
+    /// session; the adapter cannot cancel SDK work safely.
     pub fn flush_driver(mut self, flush_driver: Arc<dyn FlushDriver>) -> Self {
         self.flush_driver = flush_driver;
         self
@@ -282,11 +283,13 @@ impl RerunSessionBuilder {
         });
         let enabled = recording.is_enabled();
         let has_memory = memory.is_some();
+        let state = SessionState::new(enabled);
         let lifecycle = LifecycleWorker::spawn(
             recording.clone(),
             memory,
             self.flush_driver,
             self.flush_timeout,
+            state.clone(),
         )
         .map_err(RerunSessionBuildError::LifecycleWorker)?;
 
@@ -296,7 +299,7 @@ impl RerunSessionBuilder {
             source_id,
             flush_timeout: self.flush_timeout,
             lifecycle: Some(lifecycle),
-            state: SessionState::new(enabled),
+            state,
             trace_writer: self.trace_writer,
             started: Instant::now(),
             adapter: AdapterState::default(),
@@ -384,7 +387,9 @@ impl RerunSession {
         {
             Ok(messages) => messages,
             Err(error) => {
-                self.state.disable_on_error(&error);
+                if error.disables_session() {
+                    self.state.disable_on_error(&error);
+                }
                 None
             }
         }
@@ -537,10 +542,15 @@ impl RerunSession {
     pub fn flush(&self) {
         let timeout = self.flush_timeout;
         self.state.flush_once(|| {
-            self.lifecycle
+            match self
+                .lifecycle
                 .as_ref()
                 .expect("lifecycle worker exists until drop")
                 .flush(timeout)
+            {
+                Err(LifecycleError::Busy | LifecycleError::Disabled) => Ok(()),
+                result => result,
+            }
         });
     }
 }
@@ -598,8 +608,18 @@ enum LifecycleError {
     Timeout(Duration),
     #[error("Rerun lifecycle worker disconnected")]
     Disconnected,
+    #[error("a Rerun lifecycle operation is already pending")]
+    Busy,
+    #[error("the Rerun session is disabled")]
+    Disabled,
     #[error(transparent)]
     Sink(#[from] rerun::sink::SinkFlushError),
+}
+
+impl LifecycleError {
+    fn disables_session(&self) -> bool {
+        !matches!(self, Self::Busy | Self::Disabled)
+    }
 }
 
 enum LifecycleCommand {
@@ -615,7 +635,9 @@ enum LifecycleCommand {
 }
 
 struct LifecycleWorker {
-    commands: std::sync::mpsc::Sender<LifecycleCommand>,
+    commands: std::sync::mpsc::SyncSender<LifecycleCommand>,
+    pending: Arc<AtomicBool>,
+    state: SessionState,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -625,8 +647,11 @@ impl LifecycleWorker {
         memory: Option<rerun::sink::MemorySinkStorage>,
         driver: Arc<dyn FlushDriver>,
         sdk_timeout: Duration,
+        state: SessionState,
     ) -> Result<Self, std::io::Error> {
-        let (commands, receiver) = std::sync::mpsc::channel();
+        let (commands, receiver) = std::sync::mpsc::sync_channel(1);
+        let pending = Arc::new(AtomicBool::new(false));
+        let worker_pending = pending.clone();
         let handle = std::thread::Builder::new()
             .name("boomerang-rerun-lifecycle".to_owned())
             .spawn(move || {
@@ -644,9 +669,11 @@ impl LifecycleWorker {
                             drop(memory);
                             let result = driver.teardown(recording, sdk_timeout).and(flush);
                             let _ = reply.send(result);
+                            worker_pending.store(false, Ordering::Release);
                             return;
                         }
                     }
+                    worker_pending.store(false, Ordering::Release);
                 }
                 recording.disconnect();
                 drop(memory);
@@ -654,15 +681,40 @@ impl LifecycleWorker {
             })?;
         Ok(Self {
             commands,
+            pending,
+            state,
             handle: Some(handle),
+        })
+    }
+
+    fn begin_submission(&self) -> Result<(), LifecycleError> {
+        if !self.state.is_enabled() {
+            return Err(LifecycleError::Disabled);
+        }
+        self.pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| LifecycleError::Busy)?;
+        if !self.state.is_enabled() {
+            self.pending.store(false, Ordering::Release);
+            return Err(LifecycleError::Disabled);
+        }
+        Ok(())
+    }
+
+    fn submit(&self, command: LifecycleCommand) -> Result<(), LifecycleError> {
+        self.begin_submission()?;
+        self.commands.try_send(command).map_err(|error| {
+            self.pending.store(false, Ordering::Release);
+            match error {
+                std::sync::mpsc::TrySendError::Full(_) => LifecycleError::Busy,
+                std::sync::mpsc::TrySendError::Disconnected(_) => LifecycleError::Disconnected,
+            }
         })
     }
 
     fn flush(&self, timeout: Duration) -> Result<(), LifecycleError> {
         let (reply, receiver) = std::sync::mpsc::sync_channel(1);
-        self.commands
-            .send(LifecycleCommand::Flush { reply })
-            .map_err(|_| LifecycleError::Disconnected)?;
+        self.submit(LifecycleCommand::Flush { reply })?;
         receive_lifecycle_result(receiver, timeout)
     }
 
@@ -671,9 +723,7 @@ impl LifecycleWorker {
         timeout: Duration,
     ) -> Result<Option<Vec<rerun::log::LogMsg>>, LifecycleError> {
         let (reply, receiver) = std::sync::mpsc::sync_channel(1);
-        self.commands
-            .send(LifecycleCommand::Snapshot { reply })
-            .map_err(|_| LifecycleError::Disconnected)?;
+        self.submit(LifecycleCommand::Snapshot { reply })?;
         receiver.recv_timeout(timeout).map_err(|error| match error {
             std::sync::mpsc::RecvTimeoutError::Timeout => LifecycleError::Timeout(timeout),
             std::sync::mpsc::RecvTimeoutError::Disconnected => LifecycleError::Disconnected,
@@ -682,9 +732,7 @@ impl LifecycleWorker {
 
     fn shutdown(mut self, timeout: Duration) -> Result<(), LifecycleError> {
         let (reply, receiver) = std::sync::mpsc::sync_channel(1);
-        self.commands
-            .send(LifecycleCommand::Shutdown { reply })
-            .map_err(|_| LifecycleError::Disconnected)?;
+        self.submit(LifecycleCommand::Shutdown { reply })?;
         match receiver.recv_timeout(timeout) {
             Ok(result) => {
                 // A reply is sent only after final sink teardown and the last strong recording

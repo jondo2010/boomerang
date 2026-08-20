@@ -1,7 +1,7 @@
 #![cfg(feature = "rerun")]
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::{Duration, Instant};
 
@@ -345,6 +345,36 @@ impl FlushDriver for SlowFlush {
     }
 }
 
+struct GatedFirstFlush {
+    first: AtomicBool,
+    entered: Barrier,
+    release: Barrier,
+}
+
+impl GatedFirstFlush {
+    fn new() -> Self {
+        Self {
+            first: AtomicBool::new(true),
+            entered: Barrier::new(2),
+            release: Barrier::new(2),
+        }
+    }
+}
+
+impl FlushDriver for GatedFirstFlush {
+    fn flush(
+        &self,
+        _recording: &rerun::RecordingStream,
+        _timeout: Duration,
+    ) -> Result<(), rerun::sink::SinkFlushError> {
+        if self.first.swap(false, Ordering::AcqRel) {
+            self.entered.wait();
+            self.release.wait();
+        }
+        Ok(())
+    }
+}
+
 struct BlockingTeardown;
 
 impl FlushDriver for BlockingTeardown {
@@ -405,6 +435,60 @@ fn blocking_flush_driver_is_bounded_and_observational() {
     assert_eq!(session.error_count(), 1);
     session.flush();
     assert_eq!(session.error_count(), 1);
+}
+
+#[test]
+fn in_flight_lifecycle_operation_rejects_additional_requests() {
+    let driver = Arc::new(GatedFirstFlush::new());
+    let session = Arc::new(
+        RerunSessionBuilder::new("bounded-lifecycle-submission")
+            .flush_timeout(Duration::from_millis(200))
+            .flush_driver(driver.clone())
+            .build()
+            .unwrap(),
+    );
+    let flushing = {
+        let session = session.clone();
+        std::thread::spawn(move || session.flush())
+    };
+    driver.entered.wait();
+
+    let started = Instant::now();
+    assert_eq!(session.take_memory_snapshot_bounded(), None);
+    assert!(started.elapsed() < Duration::from_millis(100));
+    assert!(session.is_enabled());
+
+    driver.release.wait();
+    flushing.join().unwrap();
+    assert!(session.take_memory_snapshot_bounded().is_some());
+}
+
+#[test]
+fn disabled_session_rejects_lifecycle_requests_without_queueing() {
+    let driver = Arc::new(GatedFirstFlush::new());
+    let session = RerunSessionBuilder::new("disabled-lifecycle-submission")
+        .flush_timeout(Duration::from_millis(50))
+        .flush_driver(driver.clone())
+        .build()
+        .unwrap();
+    let releasing = {
+        let driver = driver.clone();
+        std::thread::spawn(move || {
+            driver.entered.wait();
+            std::thread::sleep(Duration::from_millis(150));
+            driver.release.wait();
+        })
+    };
+
+    session.flush();
+    assert!(!session.is_enabled());
+    let started = Instant::now();
+    for _ in 0..4 {
+        assert_eq!(session.take_memory_snapshot_bounded(), None);
+    }
+    assert!(started.elapsed() < Duration::from_millis(100));
+
+    releasing.join().unwrap();
 }
 
 #[test]

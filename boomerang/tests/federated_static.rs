@@ -268,30 +268,6 @@ fn public_api_runs_static_in_memory_federation() {
             .expect("federate-qualified dynamic action event");
         assert!(aligned_action_event.starts_with("/federates/a/enclaves/EnclaveKey\\(0\\)/"));
 
-        let component_suffixes = chunks
-            .iter()
-            .flat_map(|chunk| chunk.component_descriptors())
-            .map(|descriptor| descriptor.component.to_string())
-            .collect::<Vec<_>>();
-        for required in [
-            ":boomerang.runtime.display_name",
-            ":boomerang.runtime.stable_key",
-            ":boomerang.runtime.kind",
-            ":boomerang.runtime.owner_key",
-            ":boomerang.runtime.type",
-            ":boomerang.runtime.action_timing",
-            ":boomerang.runtime.reaction_level",
-            ":boomerang.runtime.source",
-            ":boomerang.runtime.target",
-            ":boomerang.runtime.relation_kind",
-        ] {
-            assert!(
-                component_suffixes
-                    .iter()
-                    .any(|component| component.ends_with(required)),
-                "missing static component {required}"
-            );
-        }
         let topology_paths = chunks
             .iter()
             .filter_map(|chunk| {

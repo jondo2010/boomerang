@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use rerun::{RecordingStream, RecordingStreamBuilder, RecordingStreamResult};
+use rerun::{RecordingStream, RecordingStreamBuilder};
 
 #[cfg(feature = "federated")]
 use super::entities::{escape_entity_segment, log_runtime_relation, runtime_enclave_root};
@@ -13,11 +13,103 @@ const DEFAULT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 static SOURCE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Destination for a Rerun recording.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum SinkConfig {
     /// Retain the recording in memory.
     #[default]
     Memory,
+    /// Write a recording to an RRD file.
+    File(std::path::PathBuf),
+    /// Request streaming to a Rerun data proxy.
+    ///
+    /// Rerun 0.36.1 only exposes a blocking, bounded-channel client sink, and does not expose the
+    /// requested client memory limit. Building this configuration therefore returns
+    /// [`RerunSessionBuildError::UnsupportedGrpc`] instead of risking scheduler backpressure.
+    Grpc {
+        url: String,
+        memory_limit_bytes: usize,
+    },
+    /// Send every record to all configured destinations.
+    Tee(Vec<Self>),
+}
+
+impl SinkConfig {
+    /// Returns a deterministic, one-level sink configuration.
+    pub fn normalized(self) -> Result<Self, SinkConfigError> {
+        match self {
+            Self::Tee(sinks) if sinks.is_empty() => Err(SinkConfigError::EmptyTee),
+            Self::Tee(sinks) => {
+                let mut flattened = Vec::new();
+                for sink in sinks {
+                    match sink.normalized()? {
+                        Self::Tee(children) => flattened.extend(children),
+                        leaf => flattened.push(leaf),
+                    }
+                }
+                if flattened.is_empty() {
+                    Err(SinkConfigError::EmptyTee)
+                } else {
+                    Ok(Self::Tee(flattened))
+                }
+            }
+            leaf => Ok(leaf),
+        }
+    }
+}
+
+/// Invalid sink topology.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum SinkConfigError {
+    #[error("a Rerun tee sink must contain at least one destination")]
+    EmptyTee,
+}
+
+/// Viewer layout attached to a recording.
+#[derive(Default)]
+pub enum BlueprintConfig {
+    /// Boomerang's timeline-first debugging layout.
+    #[default]
+    Default,
+    /// Do not attach a blueprint.
+    None,
+    /// Attach a caller-provided Rerun blueprint.
+    Custom(Box<rerun::blueprint::Blueprint>),
+}
+
+/// Errors produced while configuring an observational recording session.
+#[derive(Debug, thiserror::Error)]
+pub enum RerunSessionBuildError {
+    #[error(transparent)]
+    SinkConfig(#[from] SinkConfigError),
+    #[error(transparent)]
+    Recording(#[from] rerun::RecordingStreamError),
+    #[error(transparent)]
+    FileSink(#[from] rerun::sink::FileSinkError),
+    #[error(
+        "Rerun 0.36.1 gRPC uses blocking backpressure and cannot be isolated from the scheduler"
+    )]
+    UnsupportedGrpc,
+}
+
+/// Adapter-local flush seam used to isolate sink behavior from application execution.
+pub trait FlushDriver: Send + Sync + 'static {
+    fn flush(
+        &self,
+        recording: &RecordingStream,
+        timeout: Duration,
+    ) -> Result<(), rerun::sink::SinkFlushError>;
+}
+
+struct SdkFlushDriver;
+
+impl FlushDriver for SdkFlushDriver {
+    fn flush(
+        &self,
+        recording: &RecordingStream,
+        timeout: Duration,
+    ) -> Result<(), rerun::sink::SinkFlushError> {
+        recording.flush_with_timeout(timeout)
+    }
 }
 
 /// Configures a [`RerunSession`].
@@ -25,7 +117,9 @@ pub struct RerunSessionBuilder {
     application_id: String,
     source_id: Option<String>,
     sink: SinkConfig,
+    blueprint: BlueprintConfig,
     flush_timeout: Duration,
+    flush_driver: Arc<dyn FlushDriver>,
     trace_writer: Arc<dyn TraceWriter>,
 }
 
@@ -36,7 +130,9 @@ impl RerunSessionBuilder {
             application_id: application_id.into(),
             source_id: None,
             sink: SinkConfig::default(),
+            blueprint: BlueprintConfig::default(),
             flush_timeout: DEFAULT_FLUSH_TIMEOUT,
+            flush_driver: Arc::new(SdkFlushDriver),
             trace_writer: Arc::new(RerunTraceWriter),
         }
     }
@@ -53,9 +149,25 @@ impl RerunSessionBuilder {
         self
     }
 
+    /// Selects the viewer blueprint attached to the recording.
+    pub fn blueprint(mut self, blueprint: BlueprintConfig) -> Self {
+        self.blueprint = blueprint;
+        self
+    }
+
     /// Sets the maximum time spent flushing on an explicit flush or drop.
     pub fn flush_timeout(mut self, flush_timeout: Duration) -> Self {
         self.flush_timeout = flush_timeout;
+        self
+    }
+
+    /// Overrides the adapter-local flush operation.
+    ///
+    /// This is primarily useful for verifying timeout isolation. The adapter always invokes the
+    /// driver on a detached, bounded-wait thread so a broken primitive cannot block application
+    /// shutdown. A permanently blocked driver can retain one detached thread per session.
+    pub fn flush_driver(mut self, flush_driver: Arc<dyn FlushDriver>) -> Self {
+        self.flush_driver = flush_driver;
         self
     }
 
@@ -69,13 +181,17 @@ impl RerunSessionBuilder {
     }
 
     /// Builds the recording session.
-    pub fn build(self) -> RecordingStreamResult<RerunSession> {
-        let (recording, memory) = match self.sink {
-            SinkConfig::Memory => RecordingStreamBuilder::new(
-                rerun::ApplicationId::new_or_unknown(self.application_id),
-            )
-            .memory()?,
+    pub fn build(self) -> Result<RerunSession, RerunSessionBuildError> {
+        let sink = self.sink.normalized()?;
+        let mut builder =
+            RecordingStreamBuilder::new(rerun::ApplicationId::new_or_unknown(self.application_id));
+        builder = match self.blueprint {
+            BlueprintConfig::Default => builder.with_default_blueprint(default_blueprint()),
+            BlueprintConfig::None => builder,
+            BlueprintConfig::Custom(blueprint) => builder.with_default_blueprint(*blueprint),
         };
+        let (recording, initial_memory) = builder.memory()?;
+        let memory = configure_sinks(&recording, sink, initial_memory)?;
         let source_id = self.source_id.unwrap_or_else(|| {
             recording
                 .store_info()
@@ -92,6 +208,7 @@ impl RerunSessionBuilder {
             memory,
             source_id,
             flush_timeout: self.flush_timeout,
+            flush_driver: self.flush_driver,
             state: SessionState::new(enabled),
             trace_writer: self.trace_writer,
             started: Instant::now(),
@@ -104,9 +221,10 @@ impl RerunSessionBuilder {
 /// An observational Rerun recording session.
 pub struct RerunSession {
     recording: RecordingStream,
-    memory: rerun::sink::MemorySinkStorage,
+    memory: Option<rerun::sink::MemorySinkStorage>,
     source_id: String,
     flush_timeout: Duration,
+    flush_driver: Arc<dyn FlushDriver>,
     state: SessionState,
     trace_writer: Arc<dyn TraceWriter>,
     started: Instant,
@@ -138,7 +256,7 @@ impl RerunSession {
     /// Creates a composable tracing layer without installing a global subscriber.
     pub fn layer(&self) -> RerunLayer {
         RerunLayer::new(
-            self.recording.clone(),
+            self.recording.clone_weak(),
             self.state.clone(),
             Arc::from(self.source_id.as_str()),
             self.trace_writer.clone(),
@@ -149,8 +267,8 @@ impl RerunSession {
     }
 
     /// Access the backing memory sink for recording inspection or serialization.
-    pub fn memory_sink(&self) -> &rerun::sink::MemorySinkStorage {
-        &self.memory
+    pub fn memory_sink(&self) -> Option<&rerun::sink::MemorySinkStorage> {
+        self.memory.as_ref()
     }
 
     /// Registers the immutable hierarchy already produced by builder lowering.
@@ -291,9 +409,136 @@ impl RerunSession {
 
     /// Flushes pending data once, bounded by the configured timeout.
     pub fn flush(&self) {
+        let recording = self.recording.clone();
+        let driver = self.flush_driver.clone();
+        let timeout = self.flush_timeout;
         self.state
-            .flush_once(|| self.recording.flush_with_timeout(self.flush_timeout));
+            .flush_once(|| bounded_flush(recording, driver, timeout));
     }
+}
+
+fn configure_sinks(
+    recording: &RecordingStream,
+    config: SinkConfig,
+    initial_memory: rerun::sink::MemorySinkStorage,
+) -> Result<Option<rerun::sink::MemorySinkStorage>, RerunSessionBuildError> {
+    if config == SinkConfig::Memory {
+        return Ok(Some(initial_memory));
+    }
+
+    let leaves = match config {
+        SinkConfig::Tee(leaves) => leaves,
+        leaf => vec![leaf],
+    };
+    if leaves
+        .iter()
+        .any(|leaf| matches!(leaf, SinkConfig::Grpc { .. }))
+    {
+        return Err(RerunSessionBuildError::UnsupportedGrpc);
+    }
+    let mut memory = None;
+    let mut sinks: Vec<Box<dyn rerun::sink::LogSink>> = Vec::with_capacity(leaves.len());
+    for leaf in leaves {
+        match leaf {
+            SinkConfig::Memory => {
+                let sink = rerun::sink::MemorySink::new(recording.clone());
+                memory = Some(sink.buffer());
+                sinks.push(Box::new(sink));
+            }
+            SinkConfig::File(path) => sinks.push(Box::new(rerun::sink::FileSink::new(path)?)),
+            SinkConfig::Grpc {
+                url: _,
+                memory_limit_bytes: _,
+            } => unreachable!("unsupported gRPC sinks were rejected before sink construction"),
+            SinkConfig::Tee(_) => unreachable!("sink configuration was normalized"),
+        }
+    }
+    recording.set_sink(Box::new(rerun::sink::MultiSink::new(sinks)));
+    Ok(memory)
+}
+
+#[derive(Debug, thiserror::Error)]
+enum BoundedFlushError {
+    #[error("failed to spawn bounded Rerun flush worker: {0}")]
+    Spawn(std::io::Error),
+    #[error("Rerun flush exceeded {0:?}")]
+    Timeout(Duration),
+    #[error("Rerun flush worker disconnected")]
+    Disconnected,
+    #[error(transparent)]
+    Sink(#[from] rerun::sink::SinkFlushError),
+}
+
+fn bounded_flush(
+    recording: RecordingStream,
+    driver: Arc<dyn FlushDriver>,
+    timeout: Duration,
+) -> Result<(), BoundedFlushError> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("boomerang-rerun-flush".to_owned())
+        .spawn(move || {
+            let _ = sender.send(driver.flush(&recording, timeout));
+        })
+        .map_err(BoundedFlushError::Spawn)?;
+    match receiver.recv_timeout(timeout) {
+        Ok(result) => result.map_err(Into::into),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(BoundedFlushError::Timeout(timeout)),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err(BoundedFlushError::Disconnected)
+        }
+    }
+}
+
+fn default_blueprint() -> rerun::blueprint::Blueprint {
+    use rerun::blueprint::{
+        Blueprint, DataframeView, GraphView, Grid, StateTimelineView, TextLogView, TimePanel,
+        TimeSeriesView,
+    };
+
+    let roots = ["/enclaves/**", "/federates/**"];
+    let scheduler = StateTimelineView::new("Scheduler timeline")
+        .with_origin("/")
+        .with_contents([
+            "/enclaves/**/scheduler/**",
+            "/federates/**/enclaves/**/scheduler/**",
+        ]);
+    let events = StateTimelineView::new("Event streams")
+        .with_origin("/")
+        .with_contents(roots);
+    let topology = GraphView::new("Ownership and propagation")
+        .with_origin("/")
+        .with_contents([
+            "/enclaves/**/topology",
+            "/federates/**/enclaves/**/topology",
+            "/federation/topology",
+            "/propagation/**",
+        ]);
+    let selected = DataframeView::new("Selected records")
+        .with_origin("/")
+        .with_contents(roots);
+    let diagnostics = TextLogView::new("Diagnostics")
+        .with_origin("/diagnostics")
+        .with_contents(["/diagnostics/**"]);
+    let measures = TimeSeriesView::new("Operational measures")
+        .with_origin("/")
+        .with_contents(roots);
+
+    Blueprint::new(
+        Grid::new([
+            scheduler.into(),
+            events.into(),
+            topology.into(),
+            selected.into(),
+            diagnostics.into(),
+            measures.into(),
+        ])
+        .with_name("Boomerang timeline-first debugger")
+        .with_grid_columns(2),
+    )
+    .with_auto_views(false)
+    .with_auto_layout(false)
+    .with_time_panel(TimePanel::new().with_timeline("logical"))
 }
 
 impl Drop for RerunSession {

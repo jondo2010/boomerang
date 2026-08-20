@@ -17,6 +17,7 @@ use tracing_subscriber::prelude::*;
 fn rerun_chunks(session: &boomerang::rerun::RerunSession) -> Vec<rerun::log::Chunk> {
     session
         .memory_sink()
+        .expect("memory sink")
         .take()
         .into_iter()
         .filter_map(|message| match message {
@@ -418,6 +419,48 @@ fn public_api_rejects_runtime_without_lowered_federation() {
         parts.into_federation(),
         Err(RuntimeExecutionError::ExpectedFederation)
     ));
+}
+
+#[cfg(feature = "rerun")]
+#[test]
+fn unreachable_rerun_grpc_sink_does_not_change_federation_output() {
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let mut assembly = Assembly::new();
+    assembly
+        .register_federated_codec::<u32, _>(boomerang::federated::SerdeJsonCodec)
+        .unwrap();
+    let _ = StaticFederation(Arc::clone(&values))
+        .build(
+            "main",
+            (),
+            None,
+            None,
+            None,
+            ReactorPlacement::Local,
+            &mut assembly,
+        )
+        .unwrap();
+    assembly.validate_reactions().unwrap();
+    let config = runtime::Config::default().with_fast_forward(true);
+    let parts = assembly.into_runtime_assembly(&config).unwrap();
+    let rerun = boomerang::rerun::RerunSessionBuilder::new("federated-grpc-isolation")
+        .sink(boomerang::rerun::SinkConfig::Grpc {
+            url: "rerun+http://127.0.0.1:9/proxy".to_owned(),
+            memory_limit_bytes: 64 * 1024,
+        })
+        .blueprint(boomerang::rerun::BlueprintConfig::None)
+        .flush_timeout(StdDuration::from_millis(10))
+        .build();
+    assert!(matches!(
+        rerun,
+        Err(boomerang::rerun::RerunSessionBuildError::UnsupportedGrpc)
+    ));
+
+    let envs = execute_federation_in_memory(parts.into_federation().unwrap(), config).unwrap();
+    let a_envs = &envs[&FederateId::new("a")];
+    let b_envs = &envs[&FederateId::new("b")];
+    assert_eq!(a_envs.keys().next(), b_envs.keys().next());
+    assert_eq!(*values.lock().unwrap(), vec![(Tag::ZERO, 7)]);
 }
 
 #[test]

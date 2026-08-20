@@ -8,4 +8,7 @@ pub use entities::{
     TraceFields, TraceId, TraceRecord, TraceTimePoint, TraceWriter, TraceWriterError,
 };
 pub use layer::RerunLayer;
-pub use session::{RerunSession, RerunSessionBuilder, SinkConfig};
+pub use session::{
+    BlueprintConfig, FlushDriver, RerunSession, RerunSessionBuildError, RerunSessionBuilder,
+    SinkConfig, SinkConfigError,
+};

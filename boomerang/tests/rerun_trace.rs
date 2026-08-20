@@ -1,9 +1,11 @@
 #![cfg(feature = "rerun")]
 
 use std::sync::{Arc, Barrier, Mutex};
+use std::time::{Duration, Instant};
 
 use boomerang::rerun::{
-    RerunSessionBuilder, SinkConfig, TraceRecord, TraceWriter, TraceWriterError,
+    BlueprintConfig, FlushDriver, RerunSessionBuilder, SinkConfig, TraceRecord, TraceWriter,
+    TraceWriterError,
 };
 use boomerang::runtime::{Enclave, Port, Reactor};
 use tracing_subscriber::prelude::*;
@@ -43,6 +45,7 @@ fn session_with_capture(source_id: &str) -> (boomerang::rerun::RerunSession, Arc
 fn memory_paths(session: &boomerang::rerun::RerunSession) -> Vec<String> {
     session
         .memory_sink()
+        .expect("memory sink")
         .take()
         .into_iter()
         .filter_map(|message| match message {
@@ -53,6 +56,249 @@ fn memory_paths(session: &boomerang::rerun::RerunSession) -> Vec<String> {
         })
         .map(|chunk| chunk.entity_path().to_string())
         .collect()
+}
+
+fn emit_shutdown(session: &boomerang::rerun::RerunSession) {
+    let subscriber = tracing_subscriber::registry().with(session.layer());
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::trace!(
+            target: "boomerang::trace",
+            event = "shutdown",
+            enclave = "e0",
+            logical_ns = 42_u64,
+            state = "complete",
+            outcome = "success",
+        );
+    });
+}
+
+#[test]
+fn sink_config_rejects_empty_tee_and_flattens_nested_tees() {
+    let empty = SinkConfig::Tee(Vec::new()).normalized();
+    assert!(empty.is_err());
+    assert!(RerunSessionBuilder::new("empty-tee")
+        .sink(SinkConfig::Tee(Vec::new()))
+        .build()
+        .is_err());
+
+    let path = std::path::PathBuf::from("trace.rrd");
+    let nested = SinkConfig::Tee(vec![
+        SinkConfig::Memory,
+        SinkConfig::Tee(vec![
+            SinkConfig::File(path.clone()),
+            SinkConfig::Grpc {
+                url: "rerun+http://127.0.0.1:9876/proxy".to_owned(),
+                memory_limit_bytes: 4096,
+            },
+        ]),
+    ])
+    .normalized()
+    .unwrap();
+
+    assert_eq!(
+        nested,
+        SinkConfig::Tee(vec![
+            SinkConfig::Memory,
+            SinkConfig::File(path),
+            SinkConfig::Grpc {
+                url: "rerun+http://127.0.0.1:9876/proxy".to_owned(),
+                memory_limit_bytes: 4096,
+            },
+        ])
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("must-not-be-created.rrd");
+    assert!(RerunSessionBuilder::new("unsupported-grpc-tee")
+        .sink(SinkConfig::Tee(vec![
+            SinkConfig::File(path.clone()),
+            SinkConfig::Grpc {
+                url: "rerun+http://127.0.0.1:9/proxy".to_owned(),
+                memory_limit_bytes: 4096,
+            },
+        ]))
+        .build()
+        .is_err());
+    assert!(!path.exists());
+}
+
+#[test]
+fn file_sink_writes_decodable_trace_records() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("trace.rrd");
+    let session = RerunSessionBuilder::new("boomerang-rerun-test")
+        .sink(SinkConfig::File(path.clone()))
+        .blueprint(BlueprintConfig::None)
+        .build()
+        .unwrap();
+
+    assert!(session.memory_sink().is_none());
+    emit_shutdown(&session);
+    session.flush();
+    assert!(std::fs::metadata(&path).unwrap().len() > 0);
+    drop(session);
+
+    let file = std::io::BufReader::new(std::fs::File::open(&path).unwrap());
+    let messages = rerun::external::re_log_encoding::DecoderApp::decode_lazy(file)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let chunks = messages
+        .into_iter()
+        .filter_map(|message| match message {
+            rerun::log::LogMsg::ArrowMsg(_, message) => {
+                Some(rerun::log::Chunk::from_chunk_record_batch(&message.batch).unwrap())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let trace = chunks
+        .iter()
+        .find(|chunk| chunk.entity_path().to_string().ends_with("/shutdown"))
+        .expect("dynamic trace chunk in .rrd");
+    let timelines = trace
+        .timelines()
+        .keys()
+        .map(|timeline| timeline.as_str())
+        .collect::<Vec<_>>();
+    assert!(timelines.contains(&"elapsed"));
+    assert!(timelines.contains(&"wall_clock"));
+    assert!(timelines.contains(&"logical"));
+    assert!(trace.component_descriptors().any(|descriptor| {
+        descriptor
+            .archetype
+            .as_ref()
+            .is_some_and(|name| name == "boomerang.TraceRecord")
+    }));
+}
+
+#[test]
+fn tee_writes_the_same_trace_to_memory_and_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("tee.rrd");
+    let session = RerunSessionBuilder::new("boomerang-rerun-test")
+        .sink(SinkConfig::Tee(vec![
+            SinkConfig::Memory,
+            SinkConfig::File(path.clone()),
+        ]))
+        .blueprint(BlueprintConfig::None)
+        .build()
+        .unwrap();
+
+    emit_shutdown(&session);
+    session.flush();
+    assert!(memory_paths(&session)
+        .iter()
+        .any(|path| path.ends_with("/shutdown")));
+    drop(session);
+
+    let file = std::io::BufReader::new(std::fs::File::open(path).unwrap());
+    let has_trace = rerun::external::re_log_encoding::DecoderApp::decode_lazy(file)
+        .filter_map(Result::ok)
+        .any(|message| match message {
+            rerun::log::LogMsg::ArrowMsg(_, message) => {
+                rerun::log::Chunk::from_chunk_record_batch(&message.batch)
+                    .is_ok_and(|chunk| chunk.entity_path().to_string().ends_with("/shutdown"))
+            }
+            _ => false,
+        });
+    assert!(has_trace);
+}
+
+struct SlowFlush;
+
+impl FlushDriver for SlowFlush {
+    fn flush(
+        &self,
+        _recording: &rerun::RecordingStream,
+        _timeout: Duration,
+    ) -> Result<(), rerun::sink::SinkFlushError> {
+        std::thread::sleep(Duration::from_millis(200));
+        Ok(())
+    }
+}
+
+#[test]
+fn blocking_flush_driver_is_bounded_and_observational() {
+    let session = RerunSessionBuilder::new("boomerang-rerun-test")
+        .flush_timeout(Duration::from_millis(10))
+        .flush_driver(Arc::new(SlowFlush))
+        .build()
+        .unwrap();
+    let started = Instant::now();
+
+    session.flush();
+
+    assert!(started.elapsed() < Duration::from_millis(100));
+    assert!(!session.is_enabled());
+    assert_eq!(session.error_count(), 1);
+    session.flush();
+    assert_eq!(session.error_count(), 1);
+}
+
+#[test]
+fn default_blueprint_contains_timeline_first_views() {
+    let session = RerunSessionBuilder::new("boomerang-rerun-test")
+        .build()
+        .unwrap();
+    let messages = session.memory_sink().unwrap().take();
+    let blueprint_chunks = messages
+        .into_iter()
+        .filter_map(|message| match message {
+            rerun::log::LogMsg::ArrowMsg(_, message) => {
+                rerun::log::Chunk::from_chunk_record_batch(&message.batch).ok()
+            }
+            _ => None,
+        })
+        .filter(|chunk| {
+            chunk.entity_path().to_string().starts_with("/view/")
+                || chunk.entity_path().to_string() == "/time_panel"
+        })
+        .collect::<Vec<_>>();
+    let debug = format!("{blueprint_chunks:#?}");
+    for name in [
+        "Scheduler timeline",
+        "Event streams",
+        "Ownership and propagation",
+        "Selected records",
+        "Diagnostics",
+        "Operational measures",
+    ] {
+        assert!(
+            debug.contains(name),
+            "missing blueprint view {name}: {debug}"
+        );
+    }
+    assert!(
+        debug.contains("logical"),
+        "logical timeline is not selected"
+    );
+    assert!(debug.contains("/enclaves/**"));
+    assert!(debug.contains("/federates/**"));
+}
+
+#[test]
+fn blueprint_none_and_custom_control_blueprint_emission() {
+    let none = RerunSessionBuilder::new("boomerang-rerun-test")
+        .blueprint(BlueprintConfig::None)
+        .build()
+        .unwrap();
+    assert!(none
+        .memory_sink()
+        .unwrap()
+        .take()
+        .iter()
+        .all(|message| message.store_id().kind() != rerun::StoreKind::Blueprint));
+
+    let custom = rerun::blueprint::Blueprint::new(
+        rerun::blueprint::TextLogView::new("Caller-defined diagnostics")
+            .with_origin("/diagnostics"),
+    );
+    let custom = RerunSessionBuilder::new("boomerang-rerun-test")
+        .blueprint(BlueprintConfig::Custom(Box::new(custom)))
+        .build()
+        .unwrap();
+    let debug = format!("{:#?}", custom.memory_sink().unwrap().take());
+    assert!(debug.contains("Caller-defined diagnostics"));
 }
 
 #[test]

@@ -54,6 +54,7 @@ criterion = "0.5"
 serde = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-tracy = { workspace = true }
+tempfile = "3"
 
 # Deps for Snake example
 [target.'cfg(not(windows))'.dev-dependencies]

@@ -406,4 +406,92 @@ mod tests {
         let series = record("reaction_execute").scalar_series();
         assert!(series.iter().any(|(name, _)| *name == "duration_ns"));
     }
+
+    #[test]
+    fn memory_sink_encodes_timelines_typed_components_and_builtin_archetypes() {
+        let (recording, memory) = rerun::RecordingStreamBuilder::new("boomerang-memory-behavior")
+            .memory()
+            .unwrap();
+        let writer = RerunTraceWriter;
+
+        let mut logical = record("action_schedule");
+        logical.entity_path = "/records/logical".to_owned();
+        logical.fields.terminal = Some(true);
+        writer.write(&recording, &logical).unwrap();
+
+        let mut non_logical = record("shutdown");
+        non_logical.entity_path = "/records/non_logical".to_owned();
+        non_logical.timepoint.logical_ns = None;
+        writer.write(&recording, &non_logical).unwrap();
+
+        let diagnostic = record("diagnostic");
+        writer.write(&recording, &diagnostic).unwrap();
+
+        let chunks = memory
+            .take()
+            .into_iter()
+            .filter_map(|message| match message {
+                rerun::log::LogMsg::ArrowMsg(_, message) => {
+                    Some(rerun::log::Chunk::from_chunk_record_batch(&message.batch).unwrap())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        let non_logical_chunk = chunks
+            .iter()
+            .find(|chunk| chunk.entity_path().to_string() == "/records/non_logical")
+            .expect("non-logical record chunk");
+        assert!(non_logical_chunk
+            .timelines()
+            .keys()
+            .all(|timeline| timeline.as_str() != "logical"));
+
+        let logical_chunk = chunks
+            .iter()
+            .find(|chunk| chunk.entity_path().to_string() == "/records/logical")
+            .expect("logical record chunk");
+        assert!(logical_chunk
+            .timelines()
+            .keys()
+            .any(|timeline| timeline.as_str() == "logical"));
+        let component = |suffix: &str| {
+            logical_chunk
+                .components()
+                .0
+                .values()
+                .find(|column| column.descriptor.component.as_str().ends_with(suffix))
+                .unwrap_or_else(|| panic!("missing {suffix}"))
+        };
+        assert_eq!(
+            component(":boomerang.trace.value_size")
+                .list_array
+                .values()
+                .data_type(),
+            &rerun::external::arrow::datatypes::DataType::UInt64
+        );
+        assert_eq!(
+            component(":boomerang.trace.terminal")
+                .list_array
+                .values()
+                .data_type(),
+            &rerun::external::arrow::datatypes::DataType::Boolean
+        );
+        assert!(chunks
+            .iter()
+            .any(
+                |chunk| chunk.component_descriptors().any(|descriptor| descriptor
+                    .archetype
+                    .as_ref()
+                    .is_some_and(|name| name.as_str() == "rerun.archetypes.TextLog"))
+            ));
+        assert!(chunks
+            .iter()
+            .any(
+                |chunk| chunk.component_descriptors().any(|descriptor| descriptor
+                    .archetype
+                    .as_ref()
+                    .is_some_and(|name| name.as_str() == "rerun.archetypes.Scalars"))
+            ));
+    }
 }

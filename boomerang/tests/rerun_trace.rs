@@ -479,3 +479,73 @@ fn writer_panic_isolated_from_traced_application() {
     assert!(!session.is_enabled());
     assert_eq!(session.error_count(), 1);
 }
+
+struct PanickingDebug;
+
+impl std::fmt::Debug for PanickingDebug {
+    fn fmt(&self, _formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        panic!("injected Debug panic")
+    }
+}
+
+#[test]
+fn normalization_panic_isolated_and_disables_subsequent_callbacks() {
+    let session = RerunSessionBuilder::new("boomerang-rerun-test")
+        .build()
+        .unwrap();
+    let subscriber = tracing_subscriber::registry().with(session.layer());
+
+    let application_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::trace!(
+                target: "boomerang::trace",
+                event = "shutdown",
+                enclave = ?PanickingDebug,
+                state = "complete",
+                outcome = "success",
+            );
+            tracing::trace!(
+                target: "boomerang::trace",
+                event = "shutdown",
+                enclave = "e0",
+                state = "complete",
+                outcome = "success",
+            );
+        });
+    }));
+
+    assert!(application_result.is_ok());
+    assert!(!session.is_enabled());
+    assert_eq!(session.error_count(), 1);
+    assert_eq!(session.skipped_count(), 1);
+}
+
+#[test]
+fn poisoned_span_fields_are_recovered_without_application_panic() {
+    let session = RerunSessionBuilder::new("boomerang-rerun-test")
+        .build()
+        .unwrap();
+    let subscriber = tracing_subscriber::registry().with(session.layer());
+
+    let application_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::trace_span!(
+                target: "boomerang::trace",
+                "reaction_execute",
+                event = "reaction_execute",
+                enclave = "e0",
+                reactor = "r0",
+                reaction = "react",
+                state = tracing::field::Empty,
+            );
+            span.record("state", tracing::field::debug(PanickingDebug));
+            span.record("state", "recovered");
+            let _entered = span.enter();
+        });
+    }));
+
+    assert!(application_result.is_ok());
+    assert!(!session.is_enabled());
+    assert_eq!(session.error_count(), 1);
+    assert!(session.skipped_count() >= 1);
+}

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -13,7 +13,8 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 
 use super::entities::{
-    entity_path, TraceFields, TraceId, TraceRecord, TraceTimePoint, TraceWriter, TraceWriterError,
+    entity_path, RegistrationIndex, TraceFields, TraceId, TraceRecord, TraceTimePoint, TraceWriter,
+    TraceWriterError,
 };
 use super::session::SessionState;
 
@@ -29,6 +30,7 @@ pub struct RerunLayer {
     started: Instant,
     next_id: Arc<AtomicU64>,
     writer: Arc<dyn TraceWriter>,
+    registration: Arc<RwLock<RegistrationIndex>>,
 }
 
 impl RerunLayer {
@@ -39,6 +41,7 @@ impl RerunLayer {
         writer: Arc<dyn TraceWriter>,
         started: Instant,
         next_id: Arc<AtomicU64>,
+        registration: Arc<RwLock<RegistrationIndex>>,
     ) -> Self {
         Self {
             recording,
@@ -47,6 +50,7 @@ impl RerunLayer {
             started,
             next_id,
             writer,
+            registration,
         }
     }
 
@@ -152,10 +156,16 @@ impl RerunLayer {
         } else {
             self.next_id(enclave)?
         };
+        let entity_path = self
+            .registration
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entity_path(&fields, &event)
+            .unwrap_or_else(|| entity_path(&fields, &event));
         Some(TraceRecord {
             id,
             parent_id,
-            entity_path: entity_path(&fields, &event),
+            entity_path,
             event,
             timepoint: self.timepoint(&fields),
             microstep: fields.microstep,

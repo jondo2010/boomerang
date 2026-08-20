@@ -8,6 +8,10 @@ use std::{
 };
 
 use boomerang::prelude::*;
+#[cfg(feature = "rerun")]
+use rerun::external::arrow::array::Array as _;
+#[cfg(feature = "rerun")]
+use tracing_subscriber::prelude::*;
 
 #[cfg(feature = "rerun")]
 fn rerun_chunks(session: &boomerang::rerun::RerunSession) -> Vec<rerun::log::Chunk> {
@@ -22,6 +26,18 @@ fn rerun_chunks(session: &boomerang::rerun::RerunSession) -> Vec<rerun::log::Chu
             _ => None,
         })
         .collect()
+}
+
+#[cfg(feature = "rerun")]
+fn text_component(chunk: &rerun::log::Chunk, suffix: &str) -> Option<String> {
+    let descriptor = chunk
+        .component_descriptors()
+        .find(|descriptor| descriptor.component.as_str().ends_with(suffix))?;
+    let values = chunk.component_batch_raw(descriptor.component, 0)?.ok()?;
+    let values = values
+        .as_any()
+        .downcast_ref::<rerun::external::arrow::array::StringArray>()?;
+    (values.len() == 1).then(|| values.value(0).to_owned())
 }
 
 #[derive(Clone)]
@@ -168,6 +184,31 @@ fn public_api_runs_static_in_memory_federation() {
     assert_eq!(federation.graph().endpoint_ids().count(), 1);
     #[cfg(feature = "rerun")]
     {
+        let subscriber = tracing_subscriber::registry().with(rerun.layer());
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::trace!(
+                target: "boomerang::trace",
+                event = "port_write",
+                enclave = %runtime::EnclaveKey::from(1),
+                port_key = %runtime::PortKey::from(0),
+                outcome = "test",
+            );
+            tracing::trace!(
+                target: "boomerang::trace",
+                event = "action_schedule",
+                enclave = %runtime::EnclaveKey::from(0),
+                action_key = %runtime::ActionKey::from(0),
+                outcome = "test",
+            );
+            tracing::trace!(
+                target: "boomerang::trace",
+                event = "propagation_send",
+                enclave = %runtime::EnclaveKey::from(1),
+                destination = %runtime::EnclaveKey::from(0),
+                action_key = %runtime::ActionKey::from(0),
+                outcome = "test",
+            );
+        });
         let chunks = rerun_chunks(&rerun);
         let paths = chunks
             .iter()
@@ -184,14 +225,43 @@ fn public_api_runs_static_in_memory_federation() {
             3,
             "one scheduler entity per lowered Enclave"
         );
-        assert!(paths.iter().any(|path| {
-            path.starts_with("/federates/a/enclaves/")
-                && path.contains("/reactors/main/reactors/a/reactors/source/reactions/")
-        }));
+        assert!(
+            paths.iter().any(|path| {
+                path.starts_with("/federates/a/enclaves/")
+                    && path.contains(
+                        "/reactors/main/reactors/a\\@ReactorKey\\(0\\)/reactors/source\\@ReactorKey\\(1\\)",
+                    )
+                    && path.contains("/reactions/")
+            }),
+            "registered paths: {paths:#?}"
+        );
         assert!(paths.iter().any(|path| {
             path.starts_with("/federates/b/enclaves/")
-                && path.contains("/reactors/main/reactors/b/actions/")
+                && path.contains("/reactors/main/reactors/b\\@ReactorKey\\(")
+                && path.contains("/actions/")
         }));
+        let aligned_port_event = paths
+            .iter()
+            .find(|path| path.ends_with("/ports/PortKey\\(0\\)/port_write"))
+            .expect("unambiguous dynamic port event");
+        assert!(aligned_port_event.starts_with("/federates/a/enclaves/EnclaveKey\\(1\\)/"));
+        assert!(aligned_port_event.contains("/reactors/main/reactors/a/reactors/relay\\@"));
+        let ambiguous_action_event = paths
+            .iter()
+            .find(|path| path.ends_with("/actions/ActionKey\\(0\\)/action_schedule"))
+            .expect("ambiguous dynamic action event");
+        assert_eq!(
+            ambiguous_action_event,
+            "/enclaves/EnclaveKey\\(0\\)/actions/ActionKey\\(0\\)/action_schedule"
+        );
+        let ambiguous_propagation = paths
+            .iter()
+            .find(|path| path.ends_with("/actions/ActionKey\\(0\\)/propagation_send"))
+            .expect("ambiguous destination action event");
+        assert_eq!(
+            ambiguous_propagation,
+            "/enclaves/EnclaveKey\\(1\\)/actions/ActionKey\\(0\\)/propagation_send"
+        );
 
         let component_suffixes = chunks
             .iter()
@@ -217,22 +287,32 @@ fn public_api_runs_static_in_memory_federation() {
                 "missing static component {required}"
             );
         }
-        assert!(chunks
+        let topology_paths = chunks
             .iter()
-            .any(
-                |chunk| chunk.component_descriptors().any(|descriptor| descriptor
-                    .archetype
-                    .as_ref()
-                    .is_some_and(|name| name.as_str() == "rerun.archetypes.GraphNodes"))
-            ));
-        assert!(chunks
-            .iter()
-            .any(
-                |chunk| chunk.component_descriptors().any(|descriptor| descriptor
-                    .archetype
-                    .as_ref()
-                    .is_some_and(|name| name.as_str() == "rerun.archetypes.GraphEdges"))
-            ));
+            .filter_map(|chunk| {
+                let archetypes = chunk
+                    .component_descriptors()
+                    .filter_map(|descriptor| descriptor.archetype.as_ref())
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+                (!archetypes.is_empty()).then(|| (chunk.entity_path().to_string(), archetypes))
+            })
+            .collect::<Vec<_>>();
+        assert!(topology_paths.iter().any(|(path, archetypes)| {
+            path.ends_with("/topology")
+                && archetypes
+                    .iter()
+                    .any(|name| name == "rerun.archetypes.GraphNodes")
+        }));
+        assert!(topology_paths.iter().any(|(path, archetypes)| {
+            path.ends_with("/topology")
+                && archetypes
+                    .iter()
+                    .any(|name| name == "rerun.archetypes.GraphEdges")
+        }));
+        assert!(!topology_paths.iter().any(|(path, _)| {
+            path.ends_with("/topology/nodes") || path.ends_with("/topology/edges")
+        }));
         assert!(paths
             .iter()
             .any(|path| path.starts_with("/federation/topology/ownership/")));
@@ -255,12 +335,69 @@ fn public_api_runs_static_in_memory_federation() {
                 .component_descriptors()
                 .any(|descriptor| descriptor.component.as_str().ends_with(required)));
         }
+        assert_eq!(
+            text_component(endpoint, ":boomerang.runtime.source").as_deref(),
+            Some("/federates/a")
+        );
+        assert_eq!(
+            text_component(endpoint, ":boomerang.runtime.target").as_deref(),
+            Some("/federates/b")
+        );
+        assert_eq!(
+            text_component(endpoint, ":boomerang.runtime.relation_kind").as_deref(),
+            Some("federated_endpoint")
+        );
+        let ownership = chunks
+            .iter()
+            .find(|chunk| {
+                text_component(chunk, ":boomerang.runtime.relation_kind").as_deref()
+                    == Some("owns_port")
+                    && text_component(chunk, ":boomerang.runtime.target").as_deref()
+                        == Some(
+                            "/federates/a/enclaves/EnclaveKey(0)/reactors/main/reactors/a@ReactorKey(0)/reactors/source@ReactorKey(1)/ports/PortKey(0)",
+                        )
+            })
+            .expect("exact source port ownership relation");
+        assert_eq!(
+            text_component(ownership, ":boomerang.runtime.source").as_deref(),
+            Some(
+                "/federates/a/enclaves/EnclaveKey(0)/reactors/main/reactors/a@ReactorKey(0)/reactors/source@ReactorKey(1)"
+            )
+        );
+        let trigger = chunks
+            .iter()
+            .find(|chunk| {
+                text_component(chunk, ":boomerang.runtime.relation_kind").as_deref()
+                    == Some("triggers")
+                    && text_component(chunk, ":boomerang.runtime.source").as_deref()
+                        == Some(
+                            "/federates/a/enclaves/EnclaveKey(1)/reactors/main/reactors/a/reactors/relay@ReactorKey(0)/ports/PortKey(0)",
+                        )
+                    && text_component(chunk, ":boomerang.runtime.target").as_deref()
+                        == Some(
+                            "/federates/a/enclaves/EnclaveKey(1)/reactors/main/reactors/a/reactors/con_reactor_src@ReactorKey(2)/reactions/ReactionKey(3)",
+                        )
+            })
+            .expect("exact relay port trigger relation");
+        assert_eq!(
+            text_component(trigger, ":boomerang.runtime.relation_kind").as_deref(),
+            Some("triggers")
+        );
         assert!(
             chunks
                 .iter()
                 .filter(|chunk| {
-                    let path = chunk.entity_path().to_string();
-                    path.starts_with("/federates/") || path.starts_with("/federation/")
+                    chunk.component_descriptors().any(|descriptor| {
+                        descriptor.archetype.as_ref().is_some_and(|name| {
+                            matches!(
+                                name.as_str(),
+                                "boomerang.RuntimeEntity"
+                                    | "boomerang.RuntimeRelation"
+                                    | "rerun.archetypes.GraphNodes"
+                                    | "rerun.archetypes.GraphEdges"
+                            )
+                        })
+                    })
                 })
                 .all(|chunk| chunk.timelines().is_empty()),
             "static registration must be timeless"

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 
@@ -309,6 +310,92 @@ pub(crate) fn escape_entity_segment(segment: &str) -> String {
     segment.replace('\\', "\\\\").replace('/', "\\/")
 }
 
+/// Compact adapter-owned lookup derived synchronously from static registration.
+#[derive(Clone, Debug, Default)]
+pub(super) struct RegistrationIndex {
+    entities: HashMap<RegistrationLookup, RegistrationResolution>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct RegistrationLookup {
+    enclave: String,
+    kind: &'static str,
+    identity: String,
+}
+
+#[derive(Clone, Debug)]
+enum RegistrationResolution {
+    Unique(String),
+    Ambiguous,
+}
+
+impl RegistrationIndex {
+    fn register(
+        &mut self,
+        enclave: &str,
+        kind: &'static str,
+        stable_key: &str,
+        display_name: &str,
+        path: &str,
+    ) {
+        self.register_identity(enclave, kind, stable_key, path);
+        if display_name != stable_key {
+            self.register_identity(enclave, kind, display_name, path);
+        }
+    }
+
+    fn register_identity(&mut self, enclave: &str, kind: &'static str, identity: &str, path: &str) {
+        let lookup = RegistrationLookup {
+            enclave: enclave.to_owned(),
+            kind,
+            identity: identity.to_owned(),
+        };
+        self.entities
+            .entry(lookup)
+            .and_modify(|resolution| {
+                if !matches!(resolution, RegistrationResolution::Unique(existing) if existing == path)
+                {
+                    *resolution = RegistrationResolution::Ambiguous;
+                }
+            })
+            .or_insert_with(|| RegistrationResolution::Unique(path.to_owned()));
+    }
+
+    pub(super) fn entity_path(&self, fields: &TraceFields, event: &str) -> Option<String> {
+        let enclave = if event == "propagation_send" {
+            fields.destination.as_deref()?
+        } else {
+            fields.enclave.as_deref()?
+        };
+        let (kind, identity) = if let Some(identity) = fields.action_key.as_ref() {
+            ("action", identity.as_str())
+        } else if let Some(identity) = fields.action.as_ref() {
+            ("action", identity.as_str())
+        } else if let Some(identity) = fields.port_key.as_ref() {
+            ("port", identity.as_str())
+        } else if let Some(identity) = fields.port.as_ref() {
+            ("port", identity.as_str())
+        } else if let Some(identity) = fields.reaction_key.as_ref() {
+            ("reaction", identity.as_str())
+        } else if let Some(identity) = fields.reaction.as_ref() {
+            ("reaction", identity.as_str())
+        } else {
+            ("scheduler", "scheduler")
+        };
+        let lookup = RegistrationLookup {
+            enclave: enclave.to_owned(),
+            kind,
+            identity: identity.to_owned(),
+        };
+        match self.entities.get(&lookup) {
+            Some(RegistrationResolution::Unique(path)) => {
+                Some(format!("{}/{}", path, escape_entity_segment(event)))
+            }
+            Some(RegistrationResolution::Ambiguous) | None => None,
+        }
+    }
+}
+
 pub(super) fn log_runtime_enclaves(
     recording: &rerun::RecordingStream,
     federate: Option<&str>,
@@ -316,6 +403,7 @@ pub(super) fn log_runtime_enclaves(
         boomerang_runtime::EnclaveKey,
         boomerang_runtime::Enclave,
     >,
+    index: &mut RegistrationIndex,
 ) -> rerun::RecordingStreamResult<()> {
     use boomerang_runtime::{ActionKey, PortKey, ReactionKey, ReactorKey};
 
@@ -325,6 +413,14 @@ pub(super) fn log_runtime_enclaves(
         let enclave_path = root.clone();
         let mut nodes = vec![enclave_path.clone(), scheduler.clone()];
         let mut edges = vec![(enclave_path.clone(), scheduler.clone(), "owns_scheduler")];
+        let enclave_key_string = enclave_key.to_string();
+        index.register(
+            &enclave_key_string,
+            "scheduler",
+            "scheduler",
+            "scheduler",
+            &scheduler,
+        );
 
         log_runtime_entity(
             recording,
@@ -358,15 +454,7 @@ pub(super) fn log_runtime_enclaves(
             ],
         )?;
 
-        let reactor_path = |key: ReactorKey| {
-            let fqn = enclave.env.reactors[key].name();
-            let hierarchy = fqn
-                .split('/')
-                .map(escape_entity_segment)
-                .collect::<Vec<_>>()
-                .join("/reactors/");
-            format!("{root}/reactors/{hierarchy}")
-        };
+        let reactor_path = |key: ReactorKey| runtime_reactor_path(&root, enclave, key);
 
         for (key, reactor) in enclave.env.reactors.iter() {
             let path = reactor_path(key);
@@ -410,6 +498,13 @@ pub(super) fn log_runtime_enclaves(
             nodes.push(path.clone());
             edges.push((owner_path, path.clone(), "owns_reaction"));
             let owner_key = owner.to_string();
+            index.register(
+                &enclave_key_string,
+                "reaction",
+                &key.to_string(),
+                reaction.get_name(),
+                &path,
+            );
             log_runtime_entity(
                 recording,
                 &path,
@@ -439,6 +534,13 @@ pub(super) fn log_runtime_enclaves(
             nodes.push(path.clone());
             edges.push((reactor_path(owner), path.clone(), "owns_action"));
             let owner_key = owner.to_string();
+            index.register(
+                &enclave_key_string,
+                "action",
+                &key.to_string(),
+                action.name(),
+                &path,
+            );
             log_runtime_entity(
                 recording,
                 &path,
@@ -470,6 +572,13 @@ pub(super) fn log_runtime_enclaves(
             nodes.push(path.clone());
             edges.push((reactor_path(owner), path.clone(), "owns_port"));
             let owner_key = owner.to_string();
+            index.register(
+                &enclave_key_string,
+                "port",
+                &key.to_string(),
+                port.get_name(),
+                &path,
+            );
             log_runtime_entity(
                 recording,
                 &path,
@@ -566,11 +675,11 @@ pub(super) fn log_runtime_enclaves(
         }
 
         recording.log_static(
-            format!("{root}/topology/nodes"),
+            format!("{root}/topology"),
             &rerun::GraphNodes::new(nodes.clone()).with_labels(nodes),
         )?;
         recording.log_static(
-            format!("{root}/topology/edges"),
+            format!("{root}/topology"),
             &rerun::GraphEdges::new(
                 edges
                     .iter()
@@ -580,6 +689,37 @@ pub(super) fn log_runtime_enclaves(
         )?;
     }
     Ok(())
+}
+
+fn runtime_reactor_path(
+    root: &str,
+    enclave: &boomerang_runtime::Enclave,
+    key: boomerang_runtime::ReactorKey,
+) -> String {
+    let fqn = enclave.env.reactors[key].name();
+    let mut prefix = String::new();
+    let hierarchy = fqn
+        .split('/')
+        .map(|segment| {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(segment);
+            let mut segment = escape_entity_segment(segment);
+            if let Some((reactor_key, _)) = enclave
+                .env
+                .reactors
+                .iter()
+                .find(|(_, reactor)| reactor.name() == prefix)
+            {
+                segment.push('@');
+                segment.push_str(&escape_entity_segment(&reactor_key.to_string()));
+            }
+            segment
+        })
+        .collect::<Vec<_>>();
+    debug_assert!(hierarchy.last().is_some_and(|leaf| leaf.contains('@')));
+    format!("{root}/reactors/{}", hierarchy.join("/reactors/"))
 }
 
 pub(super) fn log_runtime_relation(

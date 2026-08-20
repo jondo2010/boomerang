@@ -1,12 +1,12 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use rerun::{RecordingStream, RecordingStreamBuilder, RecordingStreamResult};
 
 #[cfg(feature = "federated")]
 use super::entities::{escape_entity_segment, log_runtime_relation, runtime_enclave_root};
-use super::entities::{log_runtime_enclaves, RerunTraceWriter, TraceWriter};
+use super::entities::{log_runtime_enclaves, RegistrationIndex, RerunTraceWriter, TraceWriter};
 use super::layer::RerunLayer;
 
 const DEFAULT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -96,6 +96,7 @@ impl RerunSessionBuilder {
             trace_writer: self.trace_writer,
             started: Instant::now(),
             next_trace_id: Arc::new(AtomicU64::new(0)),
+            registration: Arc::new(RwLock::new(RegistrationIndex::default())),
         })
     }
 }
@@ -110,6 +111,7 @@ pub struct RerunSession {
     trace_writer: Arc<dyn TraceWriter>,
     started: Instant,
     next_trace_id: Arc<AtomicU64>,
+    registration: Arc<RwLock<RegistrationIndex>>,
 }
 
 impl RerunSession {
@@ -142,6 +144,7 @@ impl RerunSession {
             self.trace_writer.clone(),
             self.started,
             self.next_trace_id.clone(),
+            self.registration.clone(),
         )
     }
 
@@ -160,7 +163,8 @@ impl RerunSession {
             }
             #[cfg(feature = "federated")]
             boomerang_builder::RuntimeExecution::Federated(federation) => {
-                self.observe_registration(|| {
+                if let Some(index) = self.observe_registration(|| {
+                    let mut index = RegistrationIndex::default();
                     let mut federation_nodes = Vec::new();
                     let mut federation_edges = Vec::new();
                     for (id, federate) in federation.federates() {
@@ -199,6 +203,7 @@ impl RerunSession {
                             &self.recording,
                             Some(id.as_str()),
                             federate.enclaves(),
+                            &mut index,
                         )?;
                     }
 
@@ -222,17 +227,22 @@ impl RerunSession {
                         federation_edges.push((source, target));
                     }
                     self.recording.log_static(
-                        "/federation/topology/nodes",
+                        "/federation/topology",
                         &rerun::GraphNodes::new(federation_nodes.clone())
                             .with_labels(federation_nodes),
                     )?;
                     self.recording.log_static(
-                        "/federation/topology/edges",
+                        "/federation/topology",
                         &rerun::GraphEdges::new(federation_edges)
                             .with_graph_type(rerun::components::GraphType::Directed),
                     )?;
-                    Ok(())
-                });
+                    Ok(index)
+                }) {
+                    *self
+                        .registration
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = index;
+                }
             }
         }
     }
@@ -246,22 +256,36 @@ impl RerunSession {
             boomerang_runtime::Enclave,
         >,
     ) {
-        self.observe_registration(|| log_runtime_enclaves(&self.recording, federate, enclaves));
+        if let Some(index) = self.observe_registration(|| {
+            let mut index = RegistrationIndex::default();
+            log_runtime_enclaves(&self.recording, federate, enclaves, &mut index)?;
+            Ok(index)
+        }) {
+            *self
+                .registration
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = index;
+        }
     }
 
-    fn observe_registration(
+    fn observe_registration<T>(
         &self,
-        registration: impl FnOnce() -> rerun::RecordingStreamResult<()>,
-    ) {
+        registration: impl FnOnce() -> rerun::RecordingStreamResult<T>,
+    ) -> Option<T> {
         if !self.state.try_begin_attempt() {
-            return;
+            return None;
         }
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(registration)) {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => self.state.disable_on_error(&error),
-            Err(_) => self
-                .state
-                .disable_on_error(&"runtime registration panicked"),
+            Ok(Ok(value)) => Some(value),
+            Ok(Err(error)) => {
+                self.state.disable_on_error(&error);
+                None
+            }
+            Err(_) => {
+                self.state
+                    .disable_on_error(&"runtime registration panicked");
+                None
+            }
         }
     }
 

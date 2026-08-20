@@ -518,6 +518,17 @@ fn public_api_runs_static_in_memory_federation() {
                 (source, destination)
             })
             .collect::<Vec<_>>();
+        let in_process_send = runtime_chunks
+            .iter()
+            .find(|chunk| {
+                text_component(chunk, ":boomerang.trace.event").as_deref()
+                    == Some("propagation_send")
+                    && text_component(chunk, ":boomerang.trace.federate").as_deref() == Some("a")
+                    && text_component(chunk, ":boomerang.trace.destination_federate").is_none()
+                    && text_component(chunk, ":boomerang.trace.outcome").as_deref()
+                        == Some("accepted")
+            })
+            .expect("accepted in-process A-to-A propagation send");
         let serialized_send = runtime_chunks
             .iter()
             .find(|chunk| {
@@ -530,73 +541,67 @@ fn public_api_runs_static_in_memory_federation() {
                         == Some("accepted")
             })
             .expect("accepted serialized A-to-B propagation send");
-        let send_id = text_component(serialized_send, ":boomerang.trace.id").unwrap();
-        let receive_id = links
-            .iter()
-            .find_map(|(source, destination)| (source == &send_id).then_some(destination))
-            .expect("serialized send has exact B receive edge");
-        let receive = runtime_chunks
-            .iter()
-            .find(|chunk| {
-                text_component(chunk, ":boomerang.trace.id").as_deref() == Some(receive_id.as_str())
-                    && text_component(chunk, ":boomerang.trace.event").as_deref()
-                        == Some("propagation_receive")
-            })
-            .expect("serialized send destination is a propagation receive");
-        assert_eq!(
-            text_component(receive, ":boomerang.trace.federate").as_deref(),
-            Some("b")
-        );
-        assert_eq!(
-            text_component(serialized_send, ":boomerang.trace.destination"),
-            text_component(receive, ":boomerang.trace.enclave")
-        );
-        assert_eq!(
-            text_component(serialized_send, ":boomerang.trace.action_key"),
-            text_component(receive, ":boomerang.trace.action_key")
-        );
-        let reaction_id = links
-            .iter()
-            .find_map(|(source, destination)| (source == receive_id).then_some(destination))
-            .expect("B receive has exact reaction edge");
-        let reaction = runtime_chunks
-            .iter()
-            .find(|chunk| {
-                text_component(chunk, ":boomerang.trace.id").as_deref()
-                    == Some(reaction_id.as_str())
-            })
-            .expect("B reaction record exists");
-        assert_eq!(
-            text_component(reaction, ":boomerang.trace.event").as_deref(),
-            Some("reaction_execute")
-        );
-        assert_eq!(
-            text_component(reaction, ":boomerang.trace.federate").as_deref(),
-            Some("b")
-        );
-        let reaction_path = reaction.entity_path().to_string();
-        assert!(
-            reaction_path.starts_with("/federates/b/enclaves/")
-                && reaction_path.contains("/reactors/main/reactors/con_reactor_tgt\\@"),
-            "A-to-B receive linked to unexpected reaction path {}",
-            reaction.entity_path()
-        );
-        let receives = records
-            .iter()
-            .filter(|(_, event)| event.as_str() == "propagation_receive")
-            .map(|(id, _)| id)
-            .collect::<Vec<_>>();
-        assert!(receives.iter().any(|receive| {
-            let has_send = links.iter().any(|(source, destination)| {
-                destination == *receive
-                    && records.get(source).map(String::as_str) == Some("propagation_send")
-            });
-            let has_reaction = links.iter().any(|(source, destination)| {
-                source == *receive
-                    && records.get(destination).map(String::as_str) == Some("reaction_execute")
-            });
-            has_send && has_reaction
-        }), "no complete propagation_send -> propagation_receive -> reaction_execute chain: records={records:?}, links={links:?}");
+        assert!(text_component(serialized_send, ":boomerang.trace.destination").is_none());
+
+        let assert_chain = |send: &&rerun::log::Chunk, expected_federate: &str| {
+            let send_id = text_component(send, ":boomerang.trace.id").unwrap();
+            let receive_id = links
+                .iter()
+                .find_map(|(source, destination)| (source == &send_id).then_some(destination))
+                .unwrap_or_else(|| panic!("{expected_federate} send has no exact receive edge"));
+            let receive = runtime_chunks
+                .iter()
+                .find(|chunk| {
+                    text_component(chunk, ":boomerang.trace.id").as_deref()
+                        == Some(receive_id.as_str())
+                        && text_component(chunk, ":boomerang.trace.event").as_deref()
+                            == Some("propagation_receive")
+                })
+                .expect("send destination is a propagation receive");
+            assert_eq!(
+                text_component(receive, ":boomerang.trace.federate").as_deref(),
+                Some(expected_federate)
+            );
+            if let Some(destination) = text_component(send, ":boomerang.trace.destination") {
+                assert_eq!(
+                    Some(destination),
+                    text_component(receive, ":boomerang.trace.enclave")
+                );
+            }
+            assert_eq!(
+                text_component(send, ":boomerang.trace.action_key"),
+                text_component(receive, ":boomerang.trace.action_key")
+            );
+            let reaction_id = links
+                .iter()
+                .find_map(|(source, destination)| (source == receive_id).then_some(destination))
+                .unwrap_or_else(|| panic!("{expected_federate} receive has no reaction edge"));
+            let reaction = runtime_chunks
+                .iter()
+                .find(|chunk| {
+                    text_component(chunk, ":boomerang.trace.id").as_deref()
+                        == Some(reaction_id.as_str())
+                })
+                .expect("reaction record exists");
+            assert_eq!(
+                text_component(reaction, ":boomerang.trace.event").as_deref(),
+                Some("reaction_execute")
+            );
+            assert_eq!(
+                text_component(reaction, ":boomerang.trace.federate").as_deref(),
+                Some(expected_federate)
+            );
+            let reaction_path = reaction.entity_path().to_string();
+            assert!(
+                reaction_path.starts_with(&format!("/federates/{expected_federate}/enclaves/"))
+                    && reaction_path.contains("/reactors/con_reactor_tgt\\@"),
+                "receive linked to unexpected reaction path {reaction_path}"
+            );
+            receive_id.clone()
+        };
+        let local_receive = assert_chain(in_process_send, "a");
+        let remote_receive = assert_chain(serialized_send, "b");
+        assert_ne!(local_receive, remote_receive);
     }
 }
 

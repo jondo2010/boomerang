@@ -444,6 +444,7 @@ mod tests {
         ] {
             let record = records
                 .iter()
+                .chain(spans.values())
                 .find(|record| record.field("event") == fact)
                 .unwrap_or_else(|| panic!("missing parallel fact {fact}"));
             assert_parent_reaction(record, reaction, &spans);

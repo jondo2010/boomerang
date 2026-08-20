@@ -345,6 +345,10 @@ struct ProtocolFederatedOutboundSink {
 }
 
 impl crate::FederatedOutboundSink for ProtocolFederatedOutboundSink {
+    fn target_federate(&self) -> Option<&FederateId> {
+        Some(&self.target)
+    }
+
     fn send(
         &self,
         command: crate::FederatedOutboundCommand,
@@ -463,6 +467,7 @@ mod tests {
         .unwrap();
 
         let (sink, _) = connections.outbound_endpoint(&target, &endpoint).unwrap();
+        assert_eq!(sink.target_federate(), Some(&target));
         sink.send(crate::FederatedOutboundCommand::Msg(
             crate::FederatedOutboundMessage {
                 tag: boomerang_runtime::Tag::new(boomerang_runtime::Duration::nanoseconds(5), 2),

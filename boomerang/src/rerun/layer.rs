@@ -269,14 +269,15 @@ impl RerunLayer {
         correlation.advance();
         match record.event.as_str() {
             "propagation_send" if record.fields.kind.as_deref() == Some("logical") => {
-                if let (Some((action, _)), Some(tag), Some(destination)) = (
-                    topology,
-                    CompleteTag::from_fields(&record.fields),
-                    record.fields.destination.clone(),
-                ) {
+                if let (Some((action, _)), Some(tag)) =
+                    (topology, CompleteTag::from_fields(&record.fields))
+                {
                     let key = PropagationKey {
-                        federate: record.fields.destination_federate.clone(),
-                        enclave: destination,
+                        federate: record
+                            .fields
+                            .destination_federate
+                            .clone()
+                            .or_else(|| record.fields.federate.clone()),
                         action,
                         tag,
                     };
@@ -301,16 +302,13 @@ impl RerunLayer {
                 if record.fields.kind.as_deref() == Some("logical")
                     && record.fields.outcome.as_deref() == Some("accepted") =>
             {
-                let (Some((action, _)), Some(tag), Some(enclave)) = (
-                    topology,
-                    CompleteTag::from_fields(&record.fields),
-                    record.fields.enclave.clone(),
-                ) else {
+                let (Some((action, _)), Some(tag)) =
+                    (topology, CompleteTag::from_fields(&record.fields))
+                else {
                     return Vec::new();
                 };
                 let key = PropagationKey {
                     federate: record.fields.federate.clone(),
-                    enclave: enclave.clone(),
                     action,
                     tag: tag.clone(),
                 };
@@ -357,15 +355,6 @@ impl RerunLayer {
                     .into_iter()
                     .filter_map(|receive| self.causal_link(&enclave, &receive, &record.id, record))
                     .collect()
-            }
-            "tag_process" => {
-                if let (Some(enclave), Some(tag)) = (
-                    record.fields.enclave.as_deref(),
-                    CompleteTag::from_fields(&record.fields),
-                ) {
-                    correlation.cleanup_through(record.fields.federate.as_deref(), enclave, &tag);
-                }
-                Vec::new()
             }
             _ => Vec::new(),
         }
@@ -443,15 +432,13 @@ impl RerunLayer {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .resolve_entity(fields, "propagation_send");
-        if let (Some(action), Some(tag), Some(destination)) = (
-            action,
-            CompleteTag::from_fields(fields),
-            fields.destination.clone(),
-        ) {
+        if let (Some(action), Some(tag)) = (action, CompleteTag::from_fields(fields)) {
             lock_unpoisoned(&self.adapter.correlation).begin_open_send(
                 PropagationKey {
-                    federate: fields.destination_federate.clone(),
-                    enclave: destination,
+                    federate: fields
+                        .destination_federate
+                        .clone()
+                        .or_else(|| fields.federate.clone()),
                     action,
                     tag,
                 },
@@ -531,7 +518,6 @@ impl CompleteTag {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct PropagationKey {
     federate: Option<String>,
-    enclave: String,
     action: String,
     tag: CompleteTag,
 }
@@ -542,6 +528,19 @@ struct ReactionKey {
     enclave: String,
     reaction: String,
     tag: CompleteTag,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct PropagationBucketKey {
+    federate: Option<String>,
+    action: String,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ReactionBucketKey {
+    federate: Option<String>,
+    enclave: String,
+    reaction: String,
 }
 
 #[derive(Clone, Debug)]
@@ -568,12 +567,36 @@ impl PendingResolution {
 #[derive(Default)]
 pub(super) struct CorrelationState {
     epoch: u64,
+    next_generation: u64,
     pending_count: usize,
     eviction: VecDeque<EvictionToken>,
+    generation_eviction: VecDeque<TagGenerationToken>,
+    propagation_generations: HashMap<PropagationBucketKey, VecDeque<TagGeneration>>,
+    reaction_generations: HashMap<ReactionBucketKey, VecDeque<TagGeneration>>,
     sends: HashMap<PropagationKey, PendingResolution>,
     open_sends: HashMap<PropagationKey, PendingResolution>,
     early_ingress: HashMap<PropagationKey, PendingIngress>,
     predecessors: HashMap<ReactionKey, Vec<PendingPredecessor>>,
+}
+
+#[derive(Clone, Debug)]
+struct TagGeneration {
+    tag: CompleteTag,
+    generation: u64,
+}
+
+#[derive(Clone, Debug)]
+struct TagGenerationToken {
+    epoch: u64,
+    key: TagGenerationKey,
+    tag: CompleteTag,
+    generation: u64,
+}
+
+#[derive(Clone, Debug)]
+enum TagGenerationKey {
+    Propagation(PropagationBucketKey),
+    Reaction(ReactionBucketKey),
 }
 
 #[derive(Clone, Debug)]
@@ -632,9 +655,17 @@ impl CorrelationState {
         {
             self.evict_front();
         }
+        while self
+            .generation_eviction
+            .front()
+            .is_some_and(|token| token.epoch < minimum)
+        {
+            self.expire_generation();
+        }
     }
 
     fn insert_send(&mut self, key: PropagationKey, id: TraceId) {
+        self.cleanup_older_propagations(&key);
         if self.open_sends.contains_key(&key) {
             self.poison_send_key(key);
         } else {
@@ -645,6 +676,7 @@ impl CorrelationState {
     }
 
     fn begin_open_send(&mut self, key: PropagationKey, id: TraceId) {
+        self.cleanup_older_propagations(&key);
         if self.sends.contains_key(&key) {
             self.poison_send_key(key);
         } else {
@@ -674,6 +706,7 @@ impl CorrelationState {
     }
 
     fn capture_early_ingress(&mut self, key: PropagationKey, record: TraceRecord) -> bool {
+        self.cleanup_older_propagations(&key);
         if !self.open_sends.contains_key(&key) {
             return false;
         }
@@ -696,6 +729,7 @@ impl CorrelationState {
         id: &TraceId,
         accepted: bool,
     ) -> FinishOpenSend {
+        self.cleanup_older_propagations(key);
         match self.open_sends.get(key) {
             None => FinishOpenSend::NotOpen,
             Some(PendingResolution::Ambiguous { .. }) => FinishOpenSend::Handled,
@@ -716,7 +750,17 @@ impl CorrelationState {
                     Some(PendingIngress::Unique { record, .. }) => {
                         FinishOpenSend::EarlyIngress(record)
                     }
-                    Some(PendingIngress::Ambiguous { .. }) => FinishOpenSend::Handled,
+                    Some(PendingIngress::Ambiguous { .. }) => {
+                        let inserted = self
+                            .sends
+                            .insert(
+                                key.clone(),
+                                PendingResolution::Ambiguous { epoch: self.epoch },
+                            )
+                            .is_none();
+                        self.track(EvictionKey::Send(key.clone()), inserted);
+                        FinishOpenSend::Handled
+                    }
                     None => {
                         self.insert_send(key.clone(), id.clone());
                         FinishOpenSend::Handled
@@ -727,6 +771,7 @@ impl CorrelationState {
     }
 
     fn take_send(&mut self, key: &PropagationKey) -> Option<TraceId> {
+        self.cleanup_older_propagations(key);
         if self.open_sends.contains_key(key) && self.sends.contains_key(key) {
             self.poison_send_key(key.clone());
             return None;
@@ -745,22 +790,27 @@ impl CorrelationState {
     }
 
     fn insert_predecessor(&mut self, key: ReactionKey, id: TraceId) {
-        let predecessors = self.predecessors.entry(key.clone()).or_default();
-        if !predecessors.iter().any(|predecessor| predecessor.id == id) {
-            predecessors.push(PendingPredecessor {
-                id: id.clone(),
-                epoch: self.epoch,
-            });
-            self.pending_count += 1;
-            self.eviction.push_back(EvictionToken {
-                epoch: self.epoch,
-                key: EvictionKey::Predecessor(key, id),
-            });
+        self.cleanup_older_reactions(&key);
+        let inserted = {
+            let predecessors = self.predecessors.entry(key.clone()).or_default();
+            if predecessors.iter().any(|predecessor| predecessor.id == id) {
+                false
+            } else {
+                predecessors.push(PendingPredecessor {
+                    id: id.clone(),
+                    epoch: self.epoch,
+                });
+                true
+            }
+        };
+        if inserted {
+            self.track(EvictionKey::Predecessor(key, id), true);
         }
         self.enforce_bound();
     }
 
     fn take_predecessors(&mut self, key: &ReactionKey) -> Vec<TraceId> {
+        self.cleanup_older_reactions(key);
         let predecessors = self.predecessors.remove(key).unwrap_or_default();
         self.pending_count = self.pending_count.saturating_sub(predecessors.len());
         predecessors
@@ -790,51 +840,34 @@ impl CorrelationState {
             let Some(moved) = self.predecessors.remove(&old_key) else {
                 continue;
             };
-            let destination = self.predecessors.entry(ReactionKey {
+            let destination_key = ReactionKey {
                 federate: federate.map(str::to_owned),
                 enclave: enclave.to_owned(),
                 reaction: reaction.clone(),
                 tag: destination_tag.clone(),
-            });
+            };
+            self.cleanup_older_reactions(&destination_key);
+            let destination = self.predecessors.entry(destination_key.clone());
             let predecessors = destination.or_default();
+            let mut tracked = Vec::new();
             for predecessor in moved {
                 if !predecessors
                     .iter()
                     .any(|existing| existing.id == predecessor.id)
                 {
-                    self.eviction.push_back(EvictionToken {
-                        epoch: predecessor.epoch,
-                        key: EvictionKey::Predecessor(
-                            ReactionKey {
-                                federate: federate.map(str::to_owned),
-                                enclave: enclave.to_owned(),
-                                reaction: reaction.clone(),
-                                tag: destination_tag.clone(),
-                            },
-                            predecessor.id.clone(),
-                        ),
-                    });
+                    tracked.push(EvictionKey::Predecessor(
+                        destination_key.clone(),
+                        predecessor.id.clone(),
+                    ));
                     predecessors.push(predecessor);
                 } else {
                     self.pending_count = self.pending_count.saturating_sub(1);
                 }
             }
+            for key in tracked {
+                self.track(key, false);
+            }
         }
-    }
-
-    fn cleanup_through(&mut self, federate: Option<&str>, enclave: &str, tag: &CompleteTag) {
-        let keep = |key_federate: Option<&str>, key_enclave: &str, key_tag: &CompleteTag| {
-            key_federate != federate || key_enclave != enclave || key_tag > tag
-        };
-        self.sends
-            .retain(|key, _| keep(key.federate.as_deref(), &key.enclave, &key.tag));
-        self.open_sends
-            .retain(|key, _| keep(key.federate.as_deref(), &key.enclave, &key.tag));
-        self.early_ingress
-            .retain(|key, _| keep(key.federate.as_deref(), &key.enclave, &key.tag));
-        self.predecessors
-            .retain(|key, _| keep(key.federate.as_deref(), &key.enclave, &key.tag));
-        self.rebuild_eviction();
     }
 
     fn enforce_bound(&mut self) {
@@ -849,8 +882,9 @@ impl CorrelationState {
         }
         self.eviction.push_back(EvictionToken {
             epoch: self.epoch,
-            key,
+            key: key.clone(),
         });
+        self.ensure_generation(&key);
     }
 
     fn evict_front(&mut self) {
@@ -887,30 +921,182 @@ impl CorrelationState {
         }
     }
 
-    fn rebuild_eviction(&mut self) {
-        let mut tokens = Vec::new();
-        tokens.extend(self.sends.iter().map(|(key, value)| EvictionToken {
-            epoch: value.epoch(),
-            key: EvictionKey::Send(key.clone()),
-        }));
-        tokens.extend(self.open_sends.iter().map(|(key, value)| EvictionToken {
-            epoch: value.epoch(),
-            key: EvictionKey::OpenSend(key.clone()),
-        }));
-        tokens.extend(self.early_ingress.iter().map(|(key, value)| EvictionToken {
-            epoch: value.epoch(),
-            key: EvictionKey::EarlyIngress(key.clone()),
-        }));
-        tokens.extend(self.predecessors.iter().flat_map(|(key, values)| {
-            values.iter().map(|value| EvictionToken {
-                epoch: value.epoch,
-                key: EvictionKey::Predecessor(key.clone(), value.id.clone()),
-            })
-        }));
-        tokens.sort_by_key(|token| token.epoch);
-        self.pending_count = tokens.len();
-        self.eviction = tokens.into();
+    fn cleanup_older_propagations(&mut self, key: &PropagationKey) {
+        let bucket = PropagationBucketKey {
+            federate: key.federate.clone(),
+            action: key.action.clone(),
+        };
+        let (obsolete, empty) =
+            pop_older_generations(self.propagation_generations.get_mut(&bucket), &key.tag);
+        if empty {
+            self.propagation_generations.remove(&bucket);
+        }
+        for tag in obsolete {
+            self.remove_propagation(&PropagationKey {
+                federate: bucket.federate.clone(),
+                action: bucket.action.clone(),
+                tag,
+            });
+        }
     }
+
+    fn cleanup_older_reactions(&mut self, key: &ReactionKey) {
+        let bucket = ReactionBucketKey {
+            federate: key.federate.clone(),
+            enclave: key.enclave.clone(),
+            reaction: key.reaction.clone(),
+        };
+        let (obsolete, empty) =
+            pop_older_generations(self.reaction_generations.get_mut(&bucket), &key.tag);
+        if empty {
+            self.reaction_generations.remove(&bucket);
+        }
+        for tag in obsolete {
+            self.remove_reaction(&ReactionKey {
+                federate: bucket.federate.clone(),
+                enclave: bucket.enclave.clone(),
+                reaction: bucket.reaction.clone(),
+                tag,
+            });
+        }
+    }
+
+    fn ensure_generation(&mut self, key: &EvictionKey) {
+        let (generation_key, tag, create) = match key {
+            EvictionKey::Send(key)
+            | EvictionKey::OpenSend(key)
+            | EvictionKey::EarlyIngress(key) => {
+                let bucket = PropagationBucketKey {
+                    federate: key.federate.clone(),
+                    action: key.action.clone(),
+                };
+                let create = self
+                    .propagation_generations
+                    .get(&bucket)
+                    .and_then(|queue| queue.back())
+                    .is_none_or(|generation| generation.tag < key.tag);
+                (
+                    TagGenerationKey::Propagation(bucket),
+                    key.tag.clone(),
+                    create,
+                )
+            }
+            EvictionKey::Predecessor(key, _) => {
+                let bucket = ReactionBucketKey {
+                    federate: key.federate.clone(),
+                    enclave: key.enclave.clone(),
+                    reaction: key.reaction.clone(),
+                };
+                let create = self
+                    .reaction_generations
+                    .get(&bucket)
+                    .and_then(|queue| queue.back())
+                    .is_none_or(|generation| generation.tag < key.tag);
+                (TagGenerationKey::Reaction(bucket), key.tag.clone(), create)
+            }
+        };
+        if !create {
+            return;
+        }
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.saturating_add(1);
+        let value = TagGeneration {
+            tag: tag.clone(),
+            generation,
+        };
+        match &generation_key {
+            TagGenerationKey::Propagation(bucket) => self
+                .propagation_generations
+                .entry(bucket.clone())
+                .or_default()
+                .push_back(value),
+            TagGenerationKey::Reaction(bucket) => self
+                .reaction_generations
+                .entry(bucket.clone())
+                .or_default()
+                .push_back(value),
+        }
+        self.generation_eviction.push_back(TagGenerationToken {
+            epoch: self.epoch,
+            key: generation_key,
+            tag,
+            generation,
+        });
+    }
+
+    fn expire_generation(&mut self) {
+        let Some(token) = self.generation_eviction.pop_front() else {
+            return;
+        };
+        match &token.key {
+            TagGenerationKey::Propagation(bucket) => {
+                let empty =
+                    expire_generation_from(self.propagation_generations.get_mut(bucket), &token);
+                if empty {
+                    self.propagation_generations.remove(bucket);
+                }
+            }
+            TagGenerationKey::Reaction(bucket) => {
+                let empty =
+                    expire_generation_from(self.reaction_generations.get_mut(bucket), &token);
+                if empty {
+                    self.reaction_generations.remove(bucket);
+                }
+            }
+        }
+    }
+
+    fn remove_propagation(&mut self, key: &PropagationKey) {
+        for removed in [
+            self.sends.remove(key).is_some(),
+            self.open_sends.remove(key).is_some(),
+            self.early_ingress.remove(key).is_some(),
+        ] {
+            if removed {
+                self.pending_count = self.pending_count.saturating_sub(1);
+            }
+        }
+    }
+
+    fn remove_reaction(&mut self, key: &ReactionKey) {
+        if let Some(predecessors) = self.predecessors.remove(key) {
+            self.pending_count = self.pending_count.saturating_sub(predecessors.len());
+        }
+    }
+}
+
+fn pop_older_generations(
+    queue: Option<&mut VecDeque<TagGeneration>>,
+    tag: &CompleteTag,
+) -> (Vec<CompleteTag>, bool) {
+    let Some(queue) = queue else {
+        return (Vec::new(), false);
+    };
+    let mut obsolete = Vec::new();
+    while queue
+        .front()
+        .is_some_and(|generation| generation.tag < *tag)
+    {
+        if let Some(generation) = queue.pop_front() {
+            obsolete.push(generation.tag);
+        }
+    }
+    (obsolete, queue.is_empty())
+}
+
+fn expire_generation_from(
+    queue: Option<&mut VecDeque<TagGeneration>>,
+    token: &TagGenerationToken,
+) -> bool {
+    let Some(queue) = queue else {
+        return false;
+    };
+    if queue.front().is_some_and(|generation| {
+        generation.generation == token.generation && generation.tag == token.tag
+    }) {
+        queue.pop_front();
+    }
+    queue.is_empty()
 }
 
 fn insert_resolution<K: Eq + std::hash::Hash>(
@@ -1363,7 +1549,6 @@ mod tests {
             state.insert_send(
                 PropagationKey {
                     federate: None,
-                    enclave: "e0".to_owned(),
                     action: format!("action-{logical_ns}"),
                     tag: CompleteTag {
                         logical_ns,
@@ -1376,16 +1561,13 @@ mod tests {
         assert_eq!(state.sends.len(), MAX_PENDING_CORRELATIONS);
         assert!(!state.sends.keys().any(|key| key.tag.logical_ns == 0));
 
-        state.cleanup_through(
-            None,
-            "e0",
-            &CompleteTag {
-                logical_ns: u64::MAX,
-                microstep: u64::MAX,
-            },
-        );
+        for _ in 0..=MAX_CORRELATION_AGE {
+            state.advance();
+        }
         assert!(state.sends.is_empty());
         assert!(state.predecessors.is_empty());
+        assert!(state.propagation_generations.is_empty());
+        assert!(state.reaction_generations.is_empty());
     }
 
     #[test]
@@ -1410,12 +1592,11 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_send_poison_survives_ingress_until_tag_cleanup() {
+    fn ambiguous_send_poison_survives_until_age_cleanup() {
         let mut state = CorrelationState::default();
         state.advance();
         let key = PropagationKey {
             federate: None,
-            enclave: "e0".to_owned(),
             action: "action".to_owned(),
             tag: CompleteTag {
                 logical_ns: 1,
@@ -1428,7 +1609,54 @@ mod tests {
         state.insert_send(key.clone(), TraceId("later".to_owned()));
         assert_eq!(state.take_send(&key), None);
 
-        state.cleanup_through(None, "e0", &key.tag);
+        for _ in 0..=MAX_CORRELATION_AGE {
+            state.advance();
+        }
+        state.insert_send(key.clone(), TraceId("fresh".to_owned()));
+        assert_eq!(state.take_send(&key), Some(TraceId("fresh".to_owned())));
+    }
+
+    #[test]
+    fn ambiguous_early_ingress_poison_survives_until_age_cleanup() {
+        let mut state = CorrelationState::default();
+        state.advance();
+        let key = PropagationKey {
+            federate: Some("b".to_owned()),
+            action: "/federates/b/actions/input".to_owned(),
+            tag: CompleteTag {
+                logical_ns: 1,
+                microstep: 0,
+            },
+        };
+        let ingress = |id: &str| TraceRecord {
+            id: TraceId(id.to_owned()),
+            parent_id: None,
+            entity_path: "/ingress".to_owned(),
+            event: "async_ingress".to_owned(),
+            timepoint: TraceTimePoint {
+                elapsed_ns: 0,
+                wall_clock_unix_ns: 0,
+                logical_ns: Some(1),
+            },
+            microstep: Some(0),
+            duration_ns: None,
+            terminal_state: None,
+            fields: TraceFields::default(),
+        };
+        let open = TraceId("open".to_owned());
+        state.begin_open_send(key.clone(), open.clone());
+        assert!(state.capture_early_ingress(key.clone(), ingress("first")));
+        assert!(state.capture_early_ingress(key.clone(), ingress("second")));
+        assert!(matches!(
+            state.finish_open_send(&key, &open, true),
+            FinishOpenSend::Handled
+        ));
+
+        state.insert_send(key.clone(), TraceId("later".to_owned()));
+        assert_eq!(state.take_send(&key), None);
+        for _ in 0..=MAX_CORRELATION_AGE {
+            state.advance();
+        }
         state.insert_send(key.clone(), TraceId("fresh".to_owned()));
         assert_eq!(state.take_send(&key), Some(TraceId("fresh".to_owned())));
     }
@@ -1489,7 +1717,7 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_send_interleaving_stays_neutral_until_tag_cleanup() {
+    fn ambiguous_send_interleaving_stays_neutral_until_next_tag_generation() {
         let capture = Arc::new(RecordCapture::default());
         let session = RerunSessionBuilder::new("persistent-poison")
             .trace_writer(capture.clone())
@@ -1516,10 +1744,6 @@ mod tests {
             let poisoned_reaction = tracing::trace_span!(target: TRACE_TARGET, "reaction_execute", event = "reaction_execute", enclave = "e0", reaction_key = "r0", logical_ns = 1_u64, microstep = 0_u64, state = "begin");
             drop(poisoned_reaction.enter());
             drop(poisoned_reaction);
-            let tag = tracing::trace_span!(target: TRACE_TARGET, "tag_process", event = "tag_process", enclave = "e0", logical_ns = 1_u64, microstep = 0_u64, state = "processing");
-            drop(tag.enter());
-            drop(tag);
-
             tracing::trace!(target: TRACE_TARGET, event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", logical_ns = 2_u64, microstep = 0_u64, outcome = "accepted");
             tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = "a0", logical_ns = 2_u64, microstep = 0_u64, destination_logical_ns = 2_u64, destination_microstep = 0_u64, outcome = "accepted");
             let fresh_reaction = tracing::trace_span!(target: TRACE_TARGET, "reaction_execute", event = "reaction_execute", enclave = "e0", reaction_key = "r0", logical_ns = 2_u64, microstep = 0_u64, state = "begin");

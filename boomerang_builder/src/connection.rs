@@ -548,11 +548,7 @@ fn build_inter_partition_connection_source<T: runtime::ReactorData + Clone>(
                         .outbound_endpoint(&target_federate, &endpoint)
                         .expect("serialized endpoint sink was validated before deferred lowering");
                     Box::new(boomerang_federated::SerializedInterPartitionEventSink::new(
-                        target_federate,
-                        enclave_key.enclave_key(),
-                        encoder,
-                        outbound,
-                        faults,
+                        encoder, outbound, faults,
                     ))
                 }
             };

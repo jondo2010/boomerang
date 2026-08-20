@@ -334,6 +334,7 @@ pub(crate) fn escape_entity_segment(segment: &str) -> String {
 #[derive(Clone, Debug, Default)]
 pub(super) struct RegistrationIndex {
     entities: HashMap<RegistrationLookup, RegistrationResolution>,
+    federated_entities: HashMap<FederatedRegistrationLookup, RegistrationResolution>,
     action_triggers: HashMap<String, Vec<String>>,
 }
 
@@ -341,6 +342,13 @@ pub(super) struct RegistrationIndex {
 struct RegistrationLookup {
     federate: Option<String>,
     enclave: String,
+    kind: &'static str,
+    identity: String,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct FederatedRegistrationLookup {
+    federate: String,
     kind: &'static str,
     identity: String,
 }
@@ -403,15 +411,18 @@ impl RegistrationIndex {
             kind,
             identity: identity.to_owned(),
         };
-        self.entities
-            .entry(lookup)
-            .and_modify(|resolution| {
-                if !matches!(resolution, RegistrationResolution::Unique(existing) if existing == path)
-                {
-                    *resolution = RegistrationResolution::Ambiguous;
-                }
-            })
-            .or_insert_with(|| RegistrationResolution::Unique(path.to_owned()));
+        register_resolution(&mut self.entities, lookup, path);
+        if let Some(federate) = federate {
+            register_resolution(
+                &mut self.federated_entities,
+                FederatedRegistrationLookup {
+                    federate: federate.to_owned(),
+                    kind,
+                    identity: identity.to_owned(),
+                },
+                path,
+            );
+        }
     }
 
     pub(super) fn entity_path(&self, fields: &TraceFields, event: &str) -> Option<String> {
@@ -420,14 +431,6 @@ impl RegistrationIndex {
     }
 
     pub(super) fn resolve_entity(&self, fields: &TraceFields, event: &str) -> Option<String> {
-        let (federate, enclave) = if event == "propagation_send" {
-            (
-                fields.destination_federate.as_deref(),
-                fields.destination.as_deref()?,
-            )
-        } else {
-            (fields.federate.as_deref(), fields.enclave.as_deref()?)
-        };
         let (kind, identity) = if let Some(identity) = fields.action_key.as_ref() {
             ("action", identity.as_str())
         } else if let Some(identity) = fields.action.as_ref() {
@@ -443,16 +446,39 @@ impl RegistrationIndex {
         } else {
             ("scheduler", "scheduler")
         };
+        if event == "propagation_send" {
+            let federate = fields
+                .destination_federate
+                .as_deref()
+                .or(fields.federate.as_deref());
+            if let Some(enclave) = fields.destination.as_deref() {
+                return resolve_registration(
+                    &self.entities,
+                    &RegistrationLookup {
+                        federate: federate.map(str::to_owned),
+                        enclave: enclave.to_owned(),
+                        kind,
+                        identity: identity.to_owned(),
+                    },
+                );
+            }
+            return resolve_registration(
+                &self.federated_entities,
+                &FederatedRegistrationLookup {
+                    federate: federate?.to_owned(),
+                    kind,
+                    identity: identity.to_owned(),
+                },
+            );
+        }
+        let enclave = fields.enclave.as_deref()?;
         let lookup = RegistrationLookup {
-            federate: federate.map(str::to_owned),
+            federate: fields.federate.clone(),
             enclave: enclave.to_owned(),
             kind,
             identity: identity.to_owned(),
         };
-        match self.entities.get(&lookup) {
-            Some(RegistrationResolution::Unique(path)) => Some(path.clone()),
-            Some(RegistrationResolution::Ambiguous) | None => None,
-        }
+        resolve_registration(&self.entities, &lookup)
     }
 
     pub(super) fn triggered_reactions(&self, action_path: &str) -> &[String] {
@@ -464,18 +490,10 @@ impl RegistrationIndex {
 
     pub(super) fn merge(&mut self, other: Self) {
         for (lookup, incoming) in other.entities {
-            self.entities
-                .entry(lookup)
-                .and_modify(|current| {
-                    if !matches!(
-                        (&*current, &incoming),
-                        (RegistrationResolution::Unique(left), RegistrationResolution::Unique(right))
-                            if left == right
-                    ) {
-                        *current = RegistrationResolution::Ambiguous;
-                    }
-                })
-                .or_insert(incoming);
+            merge_resolution(&mut self.entities, lookup, incoming);
+        }
+        for (lookup, incoming) in other.federated_entities {
+            merge_resolution(&mut self.federated_entities, lookup, incoming);
         }
         for (action, reactions) in other.action_triggers {
             let existing = self.action_triggers.entry(action).or_default();
@@ -485,6 +503,42 @@ impl RegistrationIndex {
                 }
             }
         }
+    }
+}
+
+fn register_resolution<K: Eq + std::hash::Hash>(
+    map: &mut HashMap<K, RegistrationResolution>,
+    key: K,
+    path: &str,
+) {
+    merge_resolution(map, key, RegistrationResolution::Unique(path.to_owned()));
+}
+
+fn merge_resolution<K: Eq + std::hash::Hash>(
+    map: &mut HashMap<K, RegistrationResolution>,
+    key: K,
+    incoming: RegistrationResolution,
+) {
+    map.entry(key)
+        .and_modify(|current| {
+            if !matches!(
+                (&*current, &incoming),
+                (RegistrationResolution::Unique(left), RegistrationResolution::Unique(right))
+                    if left == right
+            ) {
+                *current = RegistrationResolution::Ambiguous;
+            }
+        })
+        .or_insert(incoming);
+}
+
+fn resolve_registration<K: Eq + std::hash::Hash>(
+    map: &HashMap<K, RegistrationResolution>,
+    key: &K,
+) -> Option<String> {
+    match map.get(key) {
+        Some(RegistrationResolution::Unique(path)) => Some(path.clone()),
+        Some(RegistrationResolution::Ambiguous) | None => None,
     }
 }
 
@@ -1018,7 +1072,6 @@ mod tests {
 
         let send = TraceFields {
             destination_federate: Some("b".to_owned()),
-            destination: Some("0".to_owned()),
             action_key: Some("0".to_owned()),
             ..TraceFields::default()
         };
@@ -1026,6 +1079,16 @@ mod tests {
             index.resolve_entity(&send, "propagation_send").as_deref(),
             Some("/federates/b/enclaves/0/actions/input")
         );
+
+        index.register_in_federate(
+            Some("b"),
+            "1",
+            "action",
+            "0",
+            "input",
+            "/federates/b/enclaves/1/actions/input",
+        );
+        assert_eq!(index.resolve_entity(&send, "propagation_send"), None);
     }
 
     #[test]

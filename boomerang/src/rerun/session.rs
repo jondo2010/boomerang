@@ -1115,24 +1115,31 @@ mod tests {
         assert!(session.take_memory_snapshot_bounded().is_some());
         hook_entered.wait();
         let pending = session.lifecycle.as_ref().unwrap().pending.clone();
+        let snapshot_admission_released = !pending.load(Ordering::Acquire);
+        if !snapshot_admission_released {
+            hook_release.wait();
+        }
+        assert!(
+            snapshot_admission_released,
+            "snapshot admission must clear before its reply is observable"
+        );
+
         let (dropped, drop_complete) = mpsc::sync_channel(1);
         std::thread::spawn(move || {
             drop(session);
             let _ = dropped.send(());
         });
 
-        if pending.load(Ordering::Acquire) {
-            drop_complete.recv_timeout(Duration::from_secs(1)).unwrap();
-            hook_release.wait();
-        } else {
-            let started = Instant::now();
-            while !pending.load(Ordering::Acquire) {
-                assert!(started.elapsed() < Duration::from_secs(1));
-                std::thread::yield_now();
+        let started = Instant::now();
+        while !pending.load(Ordering::Acquire) {
+            if started.elapsed() >= Duration::from_secs(1) {
+                hook_release.wait();
+                panic!("shutdown was not admitted while the worker hook was paused");
             }
-            hook_release.wait();
-            drop_complete.recv_timeout(Duration::from_secs(1)).unwrap();
+            std::thread::yield_now();
         }
+        hook_release.wait();
+        drop_complete.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!(teardown_count.load(Ordering::Acquire), 1);
     }
 

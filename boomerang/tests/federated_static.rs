@@ -255,7 +255,7 @@ fn public_api_runs_static_in_memory_federation() {
         );
         assert!(paths
             .iter()
-            .any(|path| path == "/propagation/unresolved/propagation_send"));
+            .any(|path| path.starts_with("/propagation/sends/")));
         assert!(!paths
             .iter()
             .any(|path| { path.ends_with("/propagation_send") && path.contains("/actions/") }));
@@ -460,6 +460,29 @@ fn public_api_runs_static_in_memory_federation() {
             1,
             "expected the lowered scheduler lane in federate B: {scheduler_lanes:?}"
         );
+        let causal_links = runtime_chunks
+            .iter()
+            .filter(|chunk| {
+                text_component(chunk, ":boomerang.trace.event").as_deref() == Some("causal_link")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !causal_links.is_empty(),
+            "the exercised federated propagation produced no exact causal link"
+        );
+        assert!(causal_links.iter().all(|link| {
+            let path = link.entity_path();
+            path.to_string().starts_with("/propagation/")
+                && runtime_chunks.iter().any(|chunk| {
+                    chunk.entity_path() == path
+                        && chunk.component_descriptors().any(|descriptor| {
+                            descriptor
+                                .archetype
+                                .as_ref()
+                                .is_some_and(|name| name.as_str() == "rerun.archetypes.GraphEdges")
+                        })
+                })
+        }));
     }
 }
 

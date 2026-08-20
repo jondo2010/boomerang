@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rerun::{RecordingStream, RecordingStreamBuilder};
@@ -7,7 +7,7 @@ use rerun::{RecordingStream, RecordingStreamBuilder};
 #[cfg(feature = "federated")]
 use super::entities::{escape_entity_segment, log_runtime_relation, runtime_enclave_root};
 use super::entities::{log_runtime_enclaves, RegistrationIndex, RerunTraceWriter, TraceWriter};
-use super::layer::{RerunLayer, SessionFilter};
+use super::layer::{AdapterState, RerunLayer, SessionFilter};
 use tracing_subscriber::Layer as _;
 
 const DEFAULT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -299,8 +299,7 @@ impl RerunSessionBuilder {
             state: SessionState::new(enabled),
             trace_writer: self.trace_writer,
             started: Instant::now(),
-            next_trace_id: Arc::new(AtomicU64::new(0)),
-            registration: Arc::new(RwLock::new(RegistrationIndex::default())),
+            adapter: AdapterState::default(),
         })
     }
 }
@@ -319,8 +318,7 @@ pub struct RerunSession {
     state: SessionState,
     trace_writer: Arc<dyn TraceWriter>,
     started: Instant,
-    pub(super) next_trace_id: Arc<AtomicU64>,
-    registration: Arc<RwLock<RegistrationIndex>>,
+    pub(super) adapter: AdapterState,
 }
 
 impl RerunSession {
@@ -364,8 +362,7 @@ impl RerunSession {
             Arc::from(self.source_id.as_str()),
             self.trace_writer.clone(),
             self.started,
-            self.next_trace_id.clone(),
-            self.registration.clone(),
+            self.adapter.clone(),
         )
         .with_filter(SessionFilter::new(state))
     }
@@ -396,6 +393,9 @@ impl RerunSession {
     /// Registers the immutable hierarchy already produced by builder lowering.
     ///
     /// Registration is synchronous and retains no reference to, or copy of, the runtime graph.
+    /// Repeated calls merge compact lookup indexes because previously logged static records remain
+    /// visible. Re-registering the same identity and path is idempotent; conflicting identities
+    /// become ambiguous and are never used for exact causal reconstruction.
     pub fn register_runtime(&self, runtime: &boomerang_builder::RuntimeAssembly) {
         match &runtime.execution {
             boomerang_builder::RuntimeExecution::Local(enclaves) => {
@@ -478,16 +478,19 @@ impl RerunSession {
                     )?;
                     Ok(index)
                 }) {
-                    *self
+                    self.adapter
                         .registration
                         .write()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = index;
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .merge(index);
                 }
             }
         }
     }
 
     /// Registers one already-lowered Enclave map without retaining it.
+    ///
+    /// Registrations merge with the same ambiguity rules as [`Self::register_runtime`].
     pub fn register_enclaves(
         &self,
         federate: Option<&str>,
@@ -501,10 +504,11 @@ impl RerunSession {
             log_runtime_enclaves(&self.recording, federate, enclaves, &mut index)?;
             Ok(index)
         }) {
-            *self
+            self.adapter
                 .registration
                 .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = index;
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .merge(index);
         }
     }
 

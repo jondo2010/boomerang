@@ -44,6 +44,8 @@ pub struct TraceFields {
     pub logical_ns: Option<u64>,
     pub microstep: Option<u64>,
     pub destination: Option<String>,
+    /// Adapter-owned source identifier for synthesized causal relations.
+    pub source: Option<String>,
     pub destination_logical_ns: Option<u64>,
     pub destination_microstep: Option<u64>,
     pub old_logical_ns: Option<u64>,
@@ -180,6 +182,18 @@ impl TraceWriter for RerunTraceWriter {
                 recording.log(record.entity_path.clone(), &payload)?;
             }
         }
+        if record.event == "causal_link" {
+            if let (Some(source), Some(destination)) = (
+                record.fields.source.as_deref(),
+                record.fields.destination.as_deref(),
+            ) {
+                recording.log(
+                    record.entity_path.clone(),
+                    &rerun::GraphEdges::new([(source, destination)])
+                        .with_graph_type(rerun::components::GraphType::Directed),
+                )?;
+            }
+        }
         for (name, value) in record.scalar_series() {
             recording.log(
                 format!("{}/metrics/{name}", record.entity_path),
@@ -256,6 +270,7 @@ impl TraceRecord {
             port_key,
             port,
             destination,
+            source,
             level,
             state,
             value_type,
@@ -314,6 +329,7 @@ pub(crate) fn escape_entity_segment(segment: &str) -> String {
 #[derive(Clone, Debug, Default)]
 pub(super) struct RegistrationIndex {
     entities: HashMap<RegistrationLookup, RegistrationResolution>,
+    action_triggers: HashMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -362,6 +378,11 @@ impl RegistrationIndex {
     }
 
     pub(super) fn entity_path(&self, fields: &TraceFields, event: &str) -> Option<String> {
+        self.resolve_entity(fields, event)
+            .map(|path| format!("{}/{}", path, escape_entity_segment(event)))
+    }
+
+    pub(super) fn resolve_entity(&self, fields: &TraceFields, event: &str) -> Option<String> {
         let enclave = if event == "propagation_send" {
             fields.destination.as_deref()?
         } else {
@@ -388,10 +409,40 @@ impl RegistrationIndex {
             identity: identity.to_owned(),
         };
         match self.entities.get(&lookup) {
-            Some(RegistrationResolution::Unique(path)) => {
-                Some(format!("{}/{}", path, escape_entity_segment(event)))
-            }
+            Some(RegistrationResolution::Unique(path)) => Some(path.clone()),
             Some(RegistrationResolution::Ambiguous) | None => None,
+        }
+    }
+
+    pub(super) fn triggered_reactions(&self, action_path: &str) -> &[String] {
+        self.action_triggers
+            .get(action_path)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    pub(super) fn merge(&mut self, other: Self) {
+        for (lookup, incoming) in other.entities {
+            self.entities
+                .entry(lookup)
+                .and_modify(|current| {
+                    if !matches!(
+                        (&*current, &incoming),
+                        (RegistrationResolution::Unique(left), RegistrationResolution::Unique(right))
+                            if left == right
+                    ) {
+                        *current = RegistrationResolution::Ambiguous;
+                    }
+                })
+                .or_insert(incoming);
+        }
+        for (action, reactions) in other.action_triggers {
+            let existing = self.action_triggers.entry(action).or_default();
+            for reaction in reactions {
+                if !existing.contains(&reaction) {
+                    existing.push(reaction);
+                }
+            }
         }
     }
 }
@@ -618,9 +669,20 @@ pub(super) fn log_runtime_enclaves(
         };
 
         for (action, reactions) in enclave.graph.action_triggers.iter() {
+            let action_path = action_path(action);
+            let triggered = index
+                .action_triggers
+                .entry(action_path.clone())
+                .or_default();
+            for (_, reaction) in reactions {
+                let reaction = reaction_path(*reaction);
+                if !triggered.contains(&reaction) {
+                    triggered.push(reaction);
+                }
+            }
             edges.extend(
                 reactions.iter().map(|(_, reaction)| {
-                    (action_path(action), reaction_path(*reaction), "triggers")
+                    (action_path.clone(), reaction_path(*reaction), "triggers")
                 }),
             );
         }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
@@ -65,9 +65,25 @@ pub struct RerunLayer {
     state: SessionState,
     source_id: Arc<str>,
     started: Instant,
-    next_id: Arc<AtomicU64>,
     writer: Arc<dyn TraceWriter>,
-    registration: Arc<RwLock<RegistrationIndex>>,
+    adapter: AdapterState,
+}
+
+#[derive(Clone)]
+pub(super) struct AdapterState {
+    pub(super) next_id: Arc<AtomicU64>,
+    pub(super) registration: Arc<RwLock<RegistrationIndex>>,
+    correlation: Arc<Mutex<CorrelationState>>,
+}
+
+impl Default for AdapterState {
+    fn default() -> Self {
+        Self {
+            next_id: Arc::new(AtomicU64::new(0)),
+            registration: Arc::new(RwLock::new(RegistrationIndex::default())),
+            correlation: Arc::new(Mutex::new(CorrelationState::default())),
+        }
+    }
 }
 
 impl RerunLayer {
@@ -77,22 +93,21 @@ impl RerunLayer {
         source_id: Arc<str>,
         writer: Arc<dyn TraceWriter>,
         started: Instant,
-        next_id: Arc<AtomicU64>,
-        registration: Arc<RwLock<RegistrationIndex>>,
+        adapter: AdapterState,
     ) -> Self {
         Self {
             recording,
             state,
             source_id,
             started,
-            next_id,
             writer,
-            registration,
+            adapter,
         }
     }
 
     fn next_id(&self, enclave: &str) -> Option<TraceId> {
         match self
+            .adapter
             .next_id
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |sequence| {
                 sequence.checked_add(1)
@@ -194,11 +209,20 @@ impl RerunLayer {
             self.next_id(enclave)?
         };
         let entity_path = self
+            .adapter
             .registration
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entity_path(&fields, &event)
             .unwrap_or_else(|| entity_path(&fields, &event));
+        let entity_path = if event == "propagation_send" {
+            format!(
+                "/propagation/sends/{}",
+                super::entities::escape_entity_segment(&id.0)
+            )
+        } else {
+            entity_path
+        };
         Some(TraceRecord {
             id,
             parent_id,
@@ -211,6 +235,316 @@ impl RerunLayer {
             fields,
         })
     }
+
+    fn write_with_causality(&self, record: TraceRecord) {
+        let derived = self.derive_causality(&record);
+        self.write(record);
+        for record in derived {
+            self.write(record);
+        }
+    }
+
+    fn derive_causality(&self, record: &TraceRecord) -> Vec<TraceRecord> {
+        let topology = {
+            let registration = self
+                .adapter
+                .registration
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match record.event.as_str() {
+                "propagation_send" | "async_ingress" => registration
+                    .resolve_entity(&record.fields, record.event.as_str())
+                    .map(|action| {
+                        let reactions = registration.triggered_reactions(&action).to_vec();
+                        (action, reactions)
+                    }),
+                "reaction_execute" => registration
+                    .resolve_entity(&record.fields, record.event.as_str())
+                    .map(|reaction| (reaction, Vec::new())),
+                _ => None,
+            }
+        };
+
+        let mut correlation = lock_unpoisoned(&self.adapter.correlation);
+        correlation.advance();
+        match record.event.as_str() {
+            "propagation_send"
+                if record.fields.kind.as_deref() == Some("logical")
+                    && record.fields.outcome.as_deref() == Some("accepted") =>
+            {
+                if let (Some((action, _)), Some(tag), Some(destination)) = (
+                    topology,
+                    CompleteTag::from_fields(&record.fields),
+                    record.fields.destination.clone(),
+                ) {
+                    correlation.insert_send(
+                        PropagationKey {
+                            enclave: destination,
+                            action,
+                            tag,
+                        },
+                        record.id.clone(),
+                    );
+                }
+                Vec::new()
+            }
+            "async_ingress"
+                if record.fields.kind.as_deref() == Some("logical")
+                    && record.fields.outcome.as_deref() == Some("accepted") =>
+            {
+                let (Some((action, reactions)), Some(tag), Some(enclave)) = (
+                    topology,
+                    CompleteTag::from_fields(&record.fields),
+                    record.fields.enclave.clone(),
+                ) else {
+                    return Vec::new();
+                };
+                let Some(send) = correlation.take_send(&PropagationKey {
+                    enclave: enclave.clone(),
+                    action,
+                    tag: tag.clone(),
+                }) else {
+                    return Vec::new();
+                };
+                let Some(receive_id) = self.next_id(&enclave) else {
+                    return Vec::new();
+                };
+                let mut receive_fields = record.fields.clone();
+                receive_fields.event = Some("propagation_receive".to_owned());
+                let receive = TraceRecord {
+                    entity_path: format!(
+                        "/propagation/receives/{}",
+                        super::entities::escape_entity_segment(&receive_id.0)
+                    ),
+                    event: "propagation_receive".to_owned(),
+                    id: receive_id.clone(),
+                    parent_id: Some(send.clone()),
+                    timepoint: record.timepoint.clone(),
+                    microstep: record.microstep,
+                    duration_ns: None,
+                    terminal_state: None,
+                    fields: receive_fields,
+                };
+                for reaction in reactions {
+                    correlation.insert_predecessor(
+                        ReactionKey {
+                            enclave: enclave.clone(),
+                            reaction,
+                            tag: tag.clone(),
+                        },
+                        receive_id.clone(),
+                    );
+                }
+                let mut derived = vec![receive];
+                if let Some(link) = self.causal_link(&enclave, &send, &receive_id, record) {
+                    derived.push(link);
+                }
+                derived
+            }
+            "reaction_execute" => {
+                let (Some((reaction, _)), Some(tag), Some(enclave)) = (
+                    topology,
+                    CompleteTag::from_fields(&record.fields),
+                    record.fields.enclave.clone(),
+                ) else {
+                    return Vec::new();
+                };
+                correlation
+                    .take_predecessor(&ReactionKey {
+                        enclave: enclave.clone(),
+                        reaction,
+                        tag,
+                    })
+                    .and_then(|receive| self.causal_link(&enclave, &receive, &record.id, record))
+                    .into_iter()
+                    .collect()
+            }
+            "tag_process" => {
+                if let (Some(enclave), Some(tag)) = (
+                    record.fields.enclave.as_deref(),
+                    CompleteTag::from_fields(&record.fields),
+                ) {
+                    correlation.cleanup_through(enclave, &tag);
+                }
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn causal_link(
+        &self,
+        enclave: &str,
+        source: &TraceId,
+        destination: &TraceId,
+        at: &TraceRecord,
+    ) -> Option<TraceRecord> {
+        let id = self.next_id(enclave)?;
+        let fields = TraceFields {
+            event: Some("causal_link".to_owned()),
+            enclave: Some(enclave.to_owned()),
+            source: Some(source.0.clone()),
+            destination: Some(destination.0.clone()),
+            logical_ns: at.fields.logical_ns,
+            microstep: at.fields.microstep,
+            state: Some("exact".to_owned()),
+            outcome: Some("matched".to_owned()),
+            ..TraceFields::default()
+        };
+        Some(TraceRecord {
+            entity_path: format!(
+                "/propagation/links/{}",
+                super::entities::escape_entity_segment(&id.0)
+            ),
+            event: "causal_link".to_owned(),
+            id,
+            parent_id: Some(source.clone()),
+            timepoint: at.timepoint.clone(),
+            microstep: at.microstep,
+            duration_ns: None,
+            terminal_state: None,
+            fields,
+        })
+    }
+}
+
+const MAX_PENDING_CORRELATIONS: usize = 4096;
+const MAX_CORRELATION_AGE: u64 = 4096;
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct CompleteTag {
+    logical_ns: u64,
+    microstep: u64,
+}
+
+impl CompleteTag {
+    fn from_fields(fields: &TraceFields) -> Option<Self> {
+        Some(Self {
+            logical_ns: fields.destination_logical_ns.or(fields.logical_ns)?,
+            microstep: fields.destination_microstep.or(fields.microstep)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct PropagationKey {
+    enclave: String,
+    action: String,
+    tag: CompleteTag,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ReactionKey {
+    enclave: String,
+    reaction: String,
+    tag: CompleteTag,
+}
+
+#[derive(Clone, Debug)]
+enum PendingResolution {
+    Unique { id: TraceId, epoch: u64 },
+    Ambiguous { epoch: u64 },
+}
+
+impl PendingResolution {
+    fn epoch(&self) -> u64 {
+        match self {
+            Self::Unique { epoch, .. } | Self::Ambiguous { epoch } => *epoch,
+        }
+    }
+
+    fn unique_id(self) -> Option<TraceId> {
+        match self {
+            Self::Unique { id, .. } => Some(id),
+            Self::Ambiguous { .. } => None,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct CorrelationState {
+    epoch: u64,
+    sends: BTreeMap<PropagationKey, PendingResolution>,
+    predecessors: BTreeMap<ReactionKey, PendingResolution>,
+}
+
+impl CorrelationState {
+    fn advance(&mut self) {
+        self.epoch = self.epoch.saturating_add(1);
+        let minimum = self.epoch.saturating_sub(MAX_CORRELATION_AGE);
+        self.sends.retain(|_, value| value.epoch() >= minimum);
+        self.predecessors
+            .retain(|_, value| value.epoch() >= minimum);
+        self.enforce_bound();
+    }
+
+    fn insert_send(&mut self, key: PropagationKey, id: TraceId) {
+        insert_resolution(&mut self.sends, key, id, self.epoch);
+        self.enforce_bound();
+    }
+
+    fn take_send(&mut self, key: &PropagationKey) -> Option<TraceId> {
+        self.sends
+            .remove(key)
+            .and_then(PendingResolution::unique_id)
+    }
+
+    fn insert_predecessor(&mut self, key: ReactionKey, id: TraceId) {
+        insert_resolution(&mut self.predecessors, key, id, self.epoch);
+        self.enforce_bound();
+    }
+
+    fn take_predecessor(&mut self, key: &ReactionKey) -> Option<TraceId> {
+        self.predecessors
+            .remove(key)
+            .and_then(PendingResolution::unique_id)
+    }
+
+    fn cleanup_through(&mut self, enclave: &str, tag: &CompleteTag) {
+        self.sends
+            .retain(|key, _| key.enclave != enclave || key.tag > *tag);
+        self.predecessors
+            .retain(|key, _| key.enclave != enclave || key.tag > *tag);
+    }
+
+    fn enforce_bound(&mut self) {
+        while self.sends.len() + self.predecessors.len() > MAX_PENDING_CORRELATIONS {
+            let oldest_send = self
+                .sends
+                .iter()
+                .map(|(key, value)| (value.epoch(), key.clone()));
+            let oldest_predecessor = self
+                .predecessors
+                .iter()
+                .map(|(key, value)| (value.epoch(), key.clone()));
+            match (oldest_send.min(), oldest_predecessor.min()) {
+                (Some(send), Some(predecessor)) if send.0 <= predecessor.0 => {
+                    self.sends.remove(&send.1);
+                }
+                (Some(_), Some(predecessor)) => {
+                    self.predecessors.remove(&predecessor.1);
+                }
+                (Some(send), None) => {
+                    self.sends.remove(&send.1);
+                }
+                (None, Some(predecessor)) => {
+                    self.predecessors.remove(&predecessor.1);
+                }
+                (None, None) => break,
+            }
+        }
+    }
+}
+
+fn insert_resolution<K: Ord>(
+    map: &mut BTreeMap<K, PendingResolution>,
+    key: K,
+    id: TraceId,
+    epoch: u64,
+) {
+    map.entry(key)
+        .and_modify(|resolution| *resolution = PendingResolution::Ambiguous { epoch })
+        .or_insert(PendingResolution::Unique { id, epoch });
 }
 
 impl<S> Layer<S> for RerunLayer
@@ -294,7 +628,7 @@ where
                 Some(state.close_duration()),
             ) {
                 record.terminal_state = terminal_state;
-                self.write(record);
+                self.write_with_causality(record);
             }
         });
     }
@@ -313,7 +647,7 @@ where
             if let Some(record) =
                 self.make_record(fields, parent.map(|parent| parent.id.clone()), None, None)
             {
-                self.write(record);
+                self.write_with_causality(record);
             }
         });
     }
@@ -505,6 +839,7 @@ impl TraceFields {
             "port_key" => self.port_key = Some(value),
             "port" => self.port = Some(value),
             "destination" => self.destination = Some(value),
+            "source" => self.source = Some(value),
             "level" => self.level = Some(value),
             "state" => self.state = Some(value),
             "value_type" => self.value_type = Some(value),
@@ -547,7 +882,10 @@ mod tests {
             .trace_writer(captured.clone())
             .build()
             .unwrap();
-        session.next_trace_id.store(u64::MAX - 1, Ordering::Relaxed);
+        session
+            .adapter
+            .next_id
+            .store(u64::MAX - 1, Ordering::Relaxed);
         let subscriber = tracing_subscriber::registry().with(session.layer());
 
         tracing::subscriber::with_default(subscriber, || {
@@ -568,5 +906,53 @@ mod tests {
             lock_unpoisoned(&captured.0).clone(),
             [TraceId::new("sequence-exhaustion", "e0", u64::MAX - 1)]
         );
+    }
+
+    #[test]
+    fn correlation_state_evicts_stale_entries_and_is_strictly_bounded() {
+        let mut state = CorrelationState::default();
+        for logical_ns in 0..(MAX_PENDING_CORRELATIONS as u64 + 32) {
+            state.advance();
+            state.insert_send(
+                PropagationKey {
+                    enclave: "e0".to_owned(),
+                    action: format!("action-{logical_ns}"),
+                    tag: CompleteTag {
+                        logical_ns,
+                        microstep: 0,
+                    },
+                },
+                TraceId(format!("id-{logical_ns}")),
+            );
+        }
+        assert_eq!(state.sends.len(), MAX_PENDING_CORRELATIONS);
+        assert!(!state.sends.keys().any(|key| key.tag.logical_ns == 0));
+
+        state.cleanup_through(
+            "e0",
+            &CompleteTag {
+                logical_ns: u64::MAX,
+                microstep: u64::MAX,
+            },
+        );
+        assert!(state.sends.is_empty());
+        assert!(state.predecessors.is_empty());
+    }
+
+    #[test]
+    fn duplicate_pending_predecessors_are_ambiguous_not_first_wins() {
+        let mut state = CorrelationState::default();
+        state.advance();
+        let key = ReactionKey {
+            enclave: "e0".to_owned(),
+            reaction: "reaction".to_owned(),
+            tag: CompleteTag {
+                logical_ns: 1,
+                microstep: 0,
+            },
+        };
+        state.insert_predecessor(key.clone(), TraceId("first".to_owned()));
+        state.insert_predecessor(key.clone(), TraceId("second".to_owned()));
+        assert_eq!(state.take_predecessor(&key), None);
     }
 }

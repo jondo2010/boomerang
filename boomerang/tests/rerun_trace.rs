@@ -9,7 +9,7 @@ use boomerang::rerun::{
     BlueprintConfig, FlushDriver, RerunSessionBuildError, RerunSessionBuilder, SinkConfig,
     SinkConfigError, TraceRecord, TraceWriter, TraceWriterError,
 };
-use boomerang::runtime::{Enclave, Port, Reactor};
+use boomerang::runtime::{Action, Enclave, Level, Port, Reaction, Reactor};
 use rerun::external::arrow::array::Array as _;
 use tracing_subscriber::prelude::*;
 
@@ -99,6 +99,49 @@ fn text_component(chunk: &rerun::log::Chunk, suffix: &str) -> String {
         .unwrap_or_else(|| panic!("component {suffix} is not text"));
     assert_eq!(values.len(), 1);
     values.value(0).to_owned()
+}
+
+fn optional_text_component(chunk: &rerun::log::Chunk, suffix: &str) -> Option<String> {
+    let descriptor = chunk
+        .component_descriptors()
+        .find(|descriptor| descriptor.component.as_str().ends_with(suffix))?;
+    let values = chunk.component_batch_raw(descriptor.component, 0)?.ok()?;
+    let values = values
+        .as_any()
+        .downcast_ref::<rerun::external::arrow::array::StringArray>()?;
+    (values.len() == 1).then(|| values.value(0).to_owned())
+}
+
+fn registered_action_trigger() -> (
+    boomerang_tinymap::TinyMap<boomerang::runtime::EnclaveKey, Enclave>,
+    boomerang::runtime::EnclaveKey,
+    boomerang::runtime::ActionKey,
+) {
+    let mut enclaves = boomerang_tinymap::TinyMap::new();
+    let enclave_key = enclaves.insert(Enclave::default());
+    let enclave = &mut enclaves[enclave_key];
+    let reactor = enclave.insert_reactor(Reactor::new("receiver", ()).boxed(), None);
+    let scope = enclave.root_scope(reactor);
+    let action =
+        enclave.insert_action(|key| Action::<u32>::new("inbound", key, None, true).boxed());
+    enclave.insert_action_scope(action, scope);
+    let reaction = enclave.insert_reaction(
+        Reaction::new(
+            "consume",
+            |_ctx: &mut boomerang::runtime::Context,
+             _reactor: &mut dyn boomerang::runtime::BaseReactor,
+             _refs: boomerang::runtime::ReactionRefs<'_>| {},
+            None,
+        ),
+        reactor,
+        [],
+        [],
+        [action],
+        scope,
+        None,
+    );
+    enclave.insert_action_trigger(action, (Level::from(0), reaction));
+    (enclaves, enclave_key, action)
 }
 
 fn decoded_shutdown(chunks: &[rerun::log::Chunk]) -> DecodedShutdown {
@@ -531,6 +574,216 @@ fn local_registration_aligns_after_the_runtime_graph_is_dropped() {
         records[0].entity_path,
         "/enclaves/EnclaveKey(0)/reactors/local@ReactorKey(0)/ports/PortKey(0)/port_write"
     );
+}
+
+#[test]
+fn unique_logical_propagation_emits_receive_causal_records_and_graph_edges() {
+    let session = RerunSessionBuilder::new("causal-propagation")
+        .source_id("causal-test")
+        .blueprint(BlueprintConfig::None)
+        .build()
+        .unwrap();
+    let (enclaves, destination, action) = registered_action_trigger();
+    session.register_enclaves(None, &enclaves);
+    let subscriber = tracing_subscriber::registry().with(session.layer());
+
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::trace!(
+            target: "boomerang::trace",
+            event = "propagation_send",
+            enclave = "source-enclave",
+            kind = "logical",
+            destination = %destination,
+            action_key = %action,
+            action = "inbound",
+            logical_ns = 42_u64,
+            microstep = 3_u64,
+            outcome = "accepted",
+        );
+        tracing::trace!(
+            target: "boomerang::trace",
+            event = "async_ingress",
+            enclave = %destination,
+            kind = "logical",
+            action_key = %action,
+            action = "inbound",
+            logical_ns = 42_u64,
+            microstep = 3_u64,
+            destination_logical_ns = 42_u64,
+            destination_microstep = 3_u64,
+            outcome = "accepted",
+        );
+        let reaction = tracing::trace_span!(
+            target: "boomerang::trace",
+            "reaction_execute",
+            event = "reaction_execute",
+            enclave = %destination,
+            logical_ns = 42_u64,
+            microstep = 3_u64,
+            reactor = "receiver",
+            reaction = "consume",
+            state = "begin",
+        );
+        let _entered = reaction.enter();
+    });
+
+    let chunks = decode_chunks(session.take_memory_snapshot_bounded().unwrap()).unwrap();
+    let dynamic = chunks
+        .iter()
+        .filter(|chunk| !chunk.timelines().is_empty())
+        .collect::<Vec<_>>();
+    let event_chunks = |event: &str| {
+        dynamic
+            .iter()
+            .copied()
+            .filter(|chunk| {
+                optional_text_component(chunk, ":boomerang.trace.event").as_deref() == Some(event)
+            })
+            .collect::<Vec<_>>()
+    };
+    let send = event_chunks("propagation_send");
+    let receive = event_chunks("propagation_receive");
+    let links = event_chunks("causal_link");
+    assert_eq!(send.len(), 1);
+    assert_eq!(receive.len(), 1);
+    assert_eq!(links.len(), 2, "send->receive and receive->reaction");
+    let send_id = text_component(send[0], ":boomerang.trace.id");
+    let receive_id = text_component(receive[0], ":boomerang.trace.id");
+    assert_ne!(send_id, receive_id);
+    assert!(send[0]
+        .entity_path()
+        .to_string()
+        .starts_with("/propagation/"));
+    assert!(receive[0]
+        .entity_path()
+        .to_string()
+        .starts_with("/propagation/"));
+    assert!(links.iter().all(|link| {
+        let path = link.entity_path().to_string();
+        path.starts_with("/propagation/")
+            && dynamic.iter().any(|chunk| {
+                chunk.entity_path().to_string() == path
+                    && chunk.component_descriptors().any(|descriptor| {
+                        descriptor
+                            .archetype
+                            .as_ref()
+                            .is_some_and(|name| name == "rerun.archetypes.GraphEdges")
+                    })
+            })
+    }));
+    assert!(links.iter().any(|chunk| {
+        optional_text_component(chunk, ":boomerang.trace.source").as_deref()
+            == Some(send_id.as_str())
+            && optional_text_component(chunk, ":boomerang.trace.destination").as_deref()
+                == Some(receive_id.as_str())
+    }));
+}
+
+#[test]
+fn duplicate_logical_sends_leave_ingress_neutral_and_emit_no_causal_edge() {
+    let session = RerunSessionBuilder::new("ambiguous-propagation")
+        .blueprint(BlueprintConfig::None)
+        .build()
+        .unwrap();
+    let (enclaves, destination, action) = registered_action_trigger();
+    session.register_enclaves(None, &enclaves);
+    let dispatch = tracing::Dispatch::new(tracing_subscriber::registry().with(session.layer()));
+
+    std::thread::scope(|scope| {
+        for _ in 0..2 {
+            let dispatch = dispatch.clone();
+            scope.spawn(move || {
+                tracing::dispatcher::with_default(&dispatch, || {
+                    tracing::trace!(target: "boomerang::trace", event = "propagation_send", enclave = "source", kind = "logical", destination = %destination, action_key = %action, logical_ns = 7_u64, microstep = 0_u64, outcome = "accepted");
+                });
+            });
+        }
+    });
+    tracing::dispatcher::with_default(&dispatch, || {
+        tracing::trace!(target: "boomerang::trace", event = "async_ingress", enclave = %destination, kind = "logical", action_key = %action, logical_ns = 7_u64, microstep = 0_u64, destination_logical_ns = 7_u64, destination_microstep = 0_u64, outcome = "accepted");
+    });
+
+    let chunks = decode_chunks(session.take_memory_snapshot_bounded().unwrap()).unwrap();
+    assert!(!chunks.iter().any(|chunk| {
+        optional_text_component(chunk, ":boomerang.trace.event").as_deref() == Some("causal_link")
+            || chunk.component_descriptors().any(|descriptor| {
+                descriptor
+                    .archetype
+                    .as_ref()
+                    .is_some_and(|name| name == "rerun.archetypes.GraphEdges")
+            }) && !chunk.timelines().is_empty()
+    }));
+    let ingress = chunks
+        .iter()
+        .find(|chunk| {
+            optional_text_component(chunk, ":boomerang.trace.event").as_deref()
+                == Some("async_ingress")
+        })
+        .unwrap();
+    assert!(optional_text_component(ingress, ":boomerang.trace.parent_id").is_none());
+}
+
+#[test]
+fn physical_and_unmatched_ingress_never_fabricate_causality() {
+    let session = RerunSessionBuilder::new("neutral-ingress")
+        .blueprint(BlueprintConfig::None)
+        .build()
+        .unwrap();
+    let (enclaves, destination, action) = registered_action_trigger();
+    session.register_enclaves(None, &enclaves);
+    let subscriber = tracing_subscriber::registry().with(session.layer());
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::trace!(target: "boomerang::trace", event = "propagation_send", enclave = "source", kind = "physical", destination = %destination, action_key = %action, outcome = "accepted");
+        tracing::trace!(target: "boomerang::trace", event = "async_ingress", enclave = %destination, kind = "physical", action_key = %action, logical_ns = 8_u64, microstep = 0_u64, destination_logical_ns = 8_u64, destination_microstep = 0_u64, outcome = "accepted");
+        tracing::trace!(target: "boomerang::trace", event = "async_ingress", enclave = %destination, kind = "logical", action_key = %action, logical_ns = 9_u64, microstep = 0_u64, destination_logical_ns = 9_u64, destination_microstep = 0_u64, outcome = "accepted");
+    });
+
+    let chunks = decode_chunks(session.take_memory_snapshot_bounded().unwrap()).unwrap();
+    assert!(!chunks.iter().any(|chunk| {
+        matches!(
+            optional_text_component(chunk, ":boomerang.trace.event").as_deref(),
+            Some("propagation_receive" | "causal_link")
+        )
+    }));
+}
+
+#[test]
+fn repeated_registration_merges_and_conflicting_local_identities_become_ambiguous() {
+    let (session, capture) = session_with_capture("registration-merge");
+    let (first, enclave, action) = registered_action_trigger();
+    session.register_enclaves(Some("a"), &first);
+    session.register_enclaves(Some("a"), &first);
+
+    let subscriber = tracing_subscriber::registry().with(session.layer());
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::trace!(target: "boomerang::trace", event = "propagation_send", enclave = "source", kind = "logical", destination = %enclave, action_key = %action, logical_ns = 1_u64, microstep = 0_u64, outcome = "accepted");
+        tracing::trace!(target: "boomerang::trace", event = "async_ingress", enclave = %enclave, kind = "logical", action_key = %action, logical_ns = 1_u64, microstep = 0_u64, destination_logical_ns = 1_u64, destination_microstep = 0_u64, outcome = "accepted");
+    });
+    assert!(capture
+        .records()
+        .iter()
+        .any(|record| record.event == "propagation_receive"));
+
+    let (second, _, _) = registered_action_trigger();
+    session.register_enclaves(Some("b"), &second);
+    let subscriber = tracing_subscriber::registry().with(session.layer());
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::trace!(target: "boomerang::trace", event = "propagation_send", enclave = "source", kind = "logical", destination = %enclave, action_key = %action, logical_ns = 2_u64, microstep = 0_u64, outcome = "accepted");
+        tracing::trace!(target: "boomerang::trace", event = "async_ingress", enclave = %enclave, kind = "logical", action_key = %action, logical_ns = 2_u64, microstep = 0_u64, destination_logical_ns = 2_u64, destination_microstep = 0_u64, outcome = "accepted");
+    });
+    assert_eq!(
+        capture
+            .records()
+            .iter()
+            .filter(|record| record.event == "propagation_receive")
+            .count(),
+        1,
+        "conflicting federate-local identities must not fabricate a second match"
+    );
+
+    let paths = memory_paths(&session);
+    assert!(paths.iter().any(|path| path.starts_with("/federates/a/")));
+    assert!(paths.iter().any(|path| path.starts_with("/federates/b/")));
 }
 
 #[test]

@@ -1507,6 +1507,110 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "federated")]
+    struct IngressDuringSerializedSend {
+        target: Option<boomerang_federated::FederateId>,
+        action_key: String,
+    }
+
+    #[cfg(feature = "federated")]
+    impl boomerang_federated::FederatedOutboundSink for IngressDuringSerializedSend {
+        fn target_federate(&self) -> Option<&boomerang_federated::FederateId> {
+            self.target.as_ref()
+        }
+
+        fn send(
+            &self,
+            command: boomerang_federated::FederatedOutboundCommand,
+        ) -> Result<(), boomerang_federated::FederatedEndpointError> {
+            let boomerang_federated::FederatedOutboundCommand::Msg(message) = command;
+            tracing::trace!(
+                target: TRACE_TARGET,
+                event = "async_ingress",
+                federate = "b",
+                enclave = "e0",
+                kind = "logical",
+                action_key = %self.action_key,
+                logical_ns = boomerang_runtime::trace::logical_ns(message.tag),
+                microstep = boomerang_runtime::trace::microstep(message.tag),
+                source = "during",
+                outcome = "accepted",
+            );
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "federated")]
+    fn exercise_serialized_send_race(
+        session: &crate::rerun::RerunSession,
+        target: Option<boomerang_federated::FederateId>,
+    ) {
+        use boomerang_runtime::ActionCommon;
+
+        let action = boomerang_runtime::Action::<u32>::new(
+            "input",
+            boomerang_runtime::ActionKey::from(0),
+            None,
+            true,
+        );
+        let action_ref =
+            boomerang_runtime::AsyncActionRef::try_from(boomerang_runtime::DynActionRef(&action))
+                .unwrap();
+        let action_key = action_ref.key().to_string();
+        session
+            .adapter
+            .registration
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .register_in_federate(
+                Some("b"),
+                "e0",
+                "action",
+                &action_key,
+                "input",
+                "/federates/b/enclaves/e0/actions/input",
+            );
+        let sink = boomerang_federated::SerializedInterPartitionEventSink::new(
+            Box::new(|value: &u32| Ok(value.to_le_bytes().to_vec())),
+            Box::new(IngressDuringSerializedSend { target, action_key }),
+            boomerang_federated::FederatedFaultState::default(),
+        );
+        let tag = boomerang_runtime::Tag::ZERO;
+        let reaction = tracing::trace_span!(
+            target: TRACE_TARGET,
+            "reaction_execute",
+            event = "reaction_execute",
+            federate = "a",
+            enclave = "source",
+            reaction_key = "sender",
+            logical_ns = boomerang_runtime::trace::logical_ns(tag),
+            microstep = boomerang_runtime::trace::microstep(tag),
+            state = "begin",
+        );
+        {
+            let _entered = reaction.enter();
+            boomerang_runtime::InterPartitionEventSink::send(
+                &sink,
+                boomerang_runtime::InterPartitionEventTime::Logical(tag),
+                &action_ref,
+                &7,
+            );
+        }
+        drop(reaction);
+        tracing::trace!(
+            target: TRACE_TARGET,
+            event = "async_ingress",
+            federate = "b",
+            enclave = "e0",
+            kind = "logical",
+            action_key = %action_ref.key(),
+            logical_ns = boomerang_runtime::trace::logical_ns(tag),
+            microstep = boomerang_runtime::trace::microstep(tag),
+            source = "later",
+            outcome = "accepted",
+        );
+    }
+
     #[test]
     fn sequence_exhaustion_disables_without_emitting_duplicate_id() {
         let captured = Arc::new(IdCapture::default());
@@ -1828,6 +1932,41 @@ mod tests {
             .find(|record| record.event == "async_ingress")
             .unwrap();
         assert!(send.timepoint.elapsed_ns <= ingress.timepoint.elapsed_ns);
+    }
+
+    #[cfg(feature = "federated")]
+    #[test]
+    fn serialized_send_route_identity_controls_during_dispatch_correlation() {
+        let capture = Arc::new(RecordCapture::default());
+        let session = RerunSessionBuilder::new("serialized-send-race")
+            .trace_writer(capture.clone())
+            .build()
+            .unwrap();
+        let subscriber = tracing_subscriber::registry().with(session.layer());
+
+        tracing::subscriber::with_default(subscriber, || {
+            exercise_serialized_send_race(
+                &session,
+                Some(boomerang_federated::FederateId::new("b")),
+            );
+            exercise_serialized_send_race(&session, None);
+        });
+
+        let records = lock_unpoisoned(&capture.0);
+        let send = records
+            .iter()
+            .find(|record| {
+                record.event == "propagation_send"
+                    && record.fields.destination_federate.as_deref() == Some("b")
+            })
+            .unwrap_or_else(|| panic!("missing serialized send record: {records:#?}"));
+        let receives = records
+            .iter()
+            .filter(|record| record.event == "propagation_receive")
+            .collect::<Vec<_>>();
+        assert_eq!(receives.len(), 1);
+        assert_eq!(receives[0].parent_id.as_ref(), Some(&send.id));
+        assert_eq!(receives[0].fields.source.as_deref(), Some("during"));
     }
 
     #[test]

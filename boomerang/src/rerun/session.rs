@@ -13,6 +13,10 @@ const DEFAULT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 static SOURCE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Destination for a Rerun recording.
+///
+/// Active memory, file, and tee sinks use Rerun 0.36.1's bounded batching pipeline. When that
+/// pipeline is saturated, logging from [`RerunLayer`] may apply backpressure to the scheduler
+/// callback that emitted the trace. Boomerang does not add a second dynamic-record queue.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum SinkConfig {
     /// Retain the recording in memory.
@@ -113,6 +117,10 @@ impl FlushDriver for SdkFlushDriver {
 }
 
 /// Configures a [`RerunSession`].
+///
+/// Enabled sessions inherit Rerun 0.36.1's bounded batching and may backpressure trace callbacks
+/// under saturation. Disabled tracing performs no trace metadata collection and does not alter
+/// runtime object layouts.
 pub struct RerunSessionBuilder {
     application_id: String,
     source_id: Option<String>,
@@ -219,6 +227,10 @@ impl RerunSessionBuilder {
 }
 
 /// An observational Rerun recording session.
+///
+/// An active memory, file, or tee sink is not nonblocking: Rerun's bounded batching may
+/// backpressure scheduler callbacks under saturation. Once disabled, the tracing annotations
+/// retain their zero-metadata-work path.
 pub struct RerunSession {
     recording: RecordingStream,
     memory: Option<rerun::sink::MemorySinkStorage>,

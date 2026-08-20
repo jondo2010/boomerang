@@ -1,5 +1,6 @@
 #![cfg(feature = "rerun")]
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::{Duration, Instant};
 
@@ -8,6 +9,7 @@ use boomerang::rerun::{
     TraceWriterError,
 };
 use boomerang::runtime::{Enclave, Port, Reactor};
+use rerun::external::arrow::array::Array as _;
 use tracing_subscriber::prelude::*;
 
 #[derive(Default)]
@@ -56,6 +58,86 @@ fn memory_paths(session: &boomerang::rerun::RerunSession) -> Vec<String> {
         })
         .map(|chunk| chunk.entity_path().to_string())
         .collect()
+}
+
+fn decode_chunks(
+    messages: Vec<rerun::log::LogMsg>,
+) -> Result<Vec<rerun::log::Chunk>, rerun::log::ChunkError> {
+    messages
+        .into_iter()
+        .filter_map(|message| match message {
+            rerun::log::LogMsg::ArrowMsg(_, message) => {
+                Some(rerun::log::Chunk::from_chunk_record_batch(&message.batch))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct DecodedShutdown {
+    entity_path: String,
+    timelines: BTreeMap<String, Vec<i64>>,
+    descriptors: Vec<(String, Option<String>)>,
+    event: String,
+    state: String,
+    outcome: String,
+}
+
+fn text_component(chunk: &rerun::log::Chunk, suffix: &str) -> String {
+    let descriptor = chunk
+        .component_descriptors()
+        .find(|descriptor| descriptor.component.as_str().ends_with(suffix))
+        .unwrap_or_else(|| panic!("missing component {suffix}"));
+    let values = chunk
+        .component_batch_raw(descriptor.component, 0)
+        .unwrap_or_else(|| panic!("missing component batch {suffix}"))
+        .unwrap();
+    let values = values
+        .as_any()
+        .downcast_ref::<rerun::external::arrow::array::StringArray>()
+        .unwrap_or_else(|| panic!("component {suffix} is not text"));
+    assert_eq!(values.len(), 1);
+    values.value(0).to_owned()
+}
+
+fn decoded_shutdown(chunks: &[rerun::log::Chunk]) -> DecodedShutdown {
+    let chunk = chunks
+        .iter()
+        .find(|chunk| chunk.entity_path().to_string().ends_with("/shutdown"))
+        .expect("shutdown trace record");
+    let timelines = chunk
+        .timelines()
+        .values()
+        .filter(|column| matches!(column.name(), "elapsed" | "wall_clock" | "logical"))
+        .map(|column| (column.name().to_owned(), column.times_raw().to_vec()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(timelines.len(), 3);
+    assert_eq!(timelines["logical"], vec![42]);
+    assert!(timelines["elapsed"][0] >= 0);
+    assert!(timelines["wall_clock"][0] > 0);
+    let mut descriptors = chunk
+        .component_descriptors()
+        .map(|descriptor| {
+            (
+                descriptor.component.to_string(),
+                descriptor.archetype.as_ref().map(ToString::to_string),
+            )
+        })
+        .collect::<Vec<_>>();
+    descriptors.sort();
+    assert!(descriptors
+        .iter()
+        .any(|(_, archetype)| { archetype.as_deref() == Some("boomerang.TraceRecord") }));
+
+    DecodedShutdown {
+        entity_path: chunk.entity_path().to_string(),
+        timelines,
+        descriptors,
+        event: text_component(chunk, ":boomerang.trace.event"),
+        state: text_component(chunk, ":boomerang.trace.state"),
+        outcome: text_component(chunk, ":boomerang.trace.outcome"),
+    }
 }
 
 fn emit_shutdown(session: &boomerang::rerun::RerunSession) {
@@ -186,22 +268,20 @@ fn tee_writes_the_same_trace_to_memory_and_file() {
 
     emit_shutdown(&session);
     session.flush();
-    assert!(memory_paths(&session)
-        .iter()
-        .any(|path| path.ends_with("/shutdown")));
+    let memory_messages = session.memory_sink().unwrap().take();
     drop(session);
 
     let file = std::io::BufReader::new(std::fs::File::open(path).unwrap());
-    let has_trace = rerun::external::re_log_encoding::DecoderApp::decode_lazy(file)
-        .filter_map(Result::ok)
-        .any(|message| match message {
-            rerun::log::LogMsg::ArrowMsg(_, message) => {
-                rerun::log::Chunk::from_chunk_record_batch(&message.batch)
-                    .is_ok_and(|chunk| chunk.entity_path().to_string().ends_with("/shutdown"))
-            }
-            _ => false,
-        });
-    assert!(has_trace);
+    let file_messages = rerun::external::re_log_encoding::DecoderApp::decode_lazy(file)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let memory_shutdown = decoded_shutdown(&decode_chunks(memory_messages).unwrap());
+    let file_shutdown = decoded_shutdown(&decode_chunks(file_messages).unwrap());
+
+    assert_eq!(memory_shutdown.event, "shutdown");
+    assert_eq!(memory_shutdown.state, "complete");
+    assert_eq!(memory_shutdown.outcome, "success");
+    assert_eq!(memory_shutdown, file_shutdown);
 }
 
 struct SlowFlush;

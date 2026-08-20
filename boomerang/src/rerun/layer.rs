@@ -22,6 +22,11 @@ const TRACE_TARGET: &str = "boomerang::trace";
 const INTERNAL_TARGET: &str = "boomerang::rerun_internal";
 
 /// A composable tracing layer that maps Boomerang's structured runtime facts to Rerun.
+///
+/// With an active memory, file, or tee sink, writes use Rerun 0.36.1's bounded batching pipeline
+/// and may backpressure the scheduler callback under saturation. This layer deliberately owns no
+/// second dynamic-record queue. When the layer is disabled, Boomerang's gated annotations avoid
+/// trace metadata work and runtime layout changes.
 #[derive(Clone)]
 pub struct RerunLayer {
     recording: rerun::RecordingStream,

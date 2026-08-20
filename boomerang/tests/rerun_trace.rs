@@ -221,6 +221,113 @@ fn child_event_uses_adapter_parent_id_and_neutral_ingress_has_none() {
 }
 
 #[test]
+fn explicit_root_span_does_not_inherit_current_trace_parent() {
+    let (session, capture) = session_with_capture("explicit-root");
+    let subscriber = tracing_subscriber::registry().with(session.layer());
+
+    tracing::subscriber::with_default(subscriber, || {
+        let parent = tracing::trace_span!(
+            target: "boomerang::trace",
+            "tag_process",
+            event = "tag_process",
+            enclave = "e0",
+            state = "processing",
+        );
+        let _entered = parent.enter();
+        let root = tracing::trace_span!(
+            target: "boomerang::trace",
+            parent: None,
+            "reaction_execute",
+            event = "reaction_execute",
+            enclave = "e0",
+            reactor = "r0",
+            reaction = "root",
+            state = "begin",
+        );
+        let _root_entered = root.enter();
+    });
+
+    let records = capture.records();
+    let root = records
+        .iter()
+        .find(|record| record.fields.reaction.as_deref() == Some("root"))
+        .unwrap();
+    assert_eq!(root.parent_id, None);
+}
+
+#[test]
+fn action_and_port_facts_use_their_own_keyed_entity_paths() {
+    let (session, capture) = session_with_capture("primary-entity");
+    let subscriber = tracing_subscriber::registry().with(session.layer());
+
+    tracing::subscriber::with_default(subscriber, || {
+        let reaction = tracing::trace_span!(
+            target: "boomerang::trace",
+            "reaction_execute",
+            event = "reaction_execute",
+            enclave = "e0",
+            reactor = "reactor-label",
+            reaction_key = "rk/4",
+            reaction = "reaction-label",
+            state = "begin",
+        );
+        let _entered = reaction.enter();
+        tracing::trace!(
+            target: "boomerang::trace",
+            event = "action_schedule",
+            action_key = "ak/2",
+            action = "action-label",
+            outcome = "scheduled",
+        );
+        tracing::trace!(
+            target: "boomerang::trace",
+            event = "port_write",
+            port_key = "pk/3",
+            port = "port-label",
+            outcome = "mutable_access",
+        );
+    });
+
+    let records = capture.records();
+    let action = records
+        .iter()
+        .find(|record| record.event == "action_schedule")
+        .unwrap();
+    let port = records
+        .iter()
+        .find(|record| record.event == "port_write")
+        .unwrap();
+    assert_eq!(
+        action.entity_path,
+        "/enclaves/e0/actions/ak\\/2/action_schedule"
+    );
+    assert_eq!(port.entity_path, "/enclaves/e0/ports/pk\\/3/port_write");
+}
+
+#[test]
+fn closed_runtime_span_has_duration_and_terminal_state() {
+    let (session, capture) = session_with_capture("terminal-state");
+    let subscriber = tracing_subscriber::registry().with(session.layer());
+
+    tracing::subscriber::with_default(subscriber, || {
+        let span = tracing::trace_span!(
+            target: "boomerang::trace",
+            "tag_process",
+            event = "tag_process",
+            enclave = "e0",
+            terminal = true,
+            state = "processing",
+        );
+        let _entered = span.enter();
+    });
+
+    let records = capture.records();
+    assert_eq!(records.len(), 1);
+    assert!(records[0].duration_ns.is_some());
+    assert_eq!(records[0].terminal_state.as_deref(), Some("terminal"));
+}
+
+#[test]
 fn simultaneous_events_receive_unique_adapter_ids() {
     let (session, capture) = session_with_capture("concurrent");
     let layer = session.layer();

@@ -113,6 +113,7 @@ impl RerunLayer {
             timepoint: self.timepoint(&fields),
             microstep: None,
             duration_ns: None,
+            terminal_state: None,
             fields,
         });
     }
@@ -142,6 +143,7 @@ impl RerunLayer {
             timepoint: self.timepoint(&fields),
             microstep: fields.microstep,
             duration_ns: duration.map(|value| u64::try_from(value.as_nanos()).unwrap_or(u64::MAX)),
+            terminal_state: None,
             fields,
         })
     }
@@ -208,12 +210,14 @@ where
             return;
         };
         let fields = state.fields();
-        if let Some(record) = self.make_record(
+        let terminal_state = terminal_span_state(&fields);
+        if let Some(mut record) = self.make_record(
             fields,
             state.parent_id.clone(),
             Some(state.id.clone()),
             Some(state.close_duration()),
         ) {
+            record.terminal_state = terminal_state;
             self.write(record);
         }
     }
@@ -311,13 +315,30 @@ fn span_parent<S>(attrs: &Attributes<'_>, ctx: &Context<'_, S>) -> Option<Arc<Sp
 where
     S: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
-    attrs
-        .parent()
-        .and_then(|id| span_state(id, ctx))
-        .or_else(|| {
-            ctx.lookup_current()
-                .and_then(|span| span.extensions().get::<Arc<SpanState>>().cloned())
-        })
+    if attrs.is_root() {
+        None
+    } else if let Some(parent) = attrs.parent() {
+        span_state(parent, ctx)
+    } else if attrs.is_contextual() {
+        ctx.lookup_current()
+            .and_then(|span| span.extensions().get::<Arc<SpanState>>().cloned())
+    } else {
+        None
+    }
+}
+
+fn terminal_span_state(fields: &TraceFields) -> Option<String> {
+    match fields.event.as_deref() {
+        Some("tag_process" | "reaction_execute" | "coordination_wait") => Some(
+            if fields.terminal == Some(true) {
+                "terminal"
+            } else {
+                "complete"
+            }
+            .to_owned(),
+        ),
+        _ => None,
+    }
 }
 
 fn event_parent<S>(event: &Event<'_>, ctx: &Context<'_, S>) -> Option<Arc<SpanState>>
@@ -385,6 +406,7 @@ impl TraceFields {
             "enclave" => self.enclave = Some(value),
             "kind" => self.kind = Some(value),
             "reactor" => self.reactor = Some(value),
+            "reaction_key" => self.reaction_key = Some(value),
             "reaction" => self.reaction = Some(value),
             "action_key" => self.action_key = Some(value),
             "action" => self.action = Some(value),

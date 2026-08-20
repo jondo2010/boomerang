@@ -34,6 +34,7 @@ pub struct TraceFields {
     pub enclave: Option<String>,
     pub kind: Option<String>,
     pub reactor: Option<String>,
+    pub reaction_key: Option<String>,
     pub reaction: Option<String>,
     pub action_key: Option<String>,
     pub action: Option<String>,
@@ -62,7 +63,14 @@ impl TraceFields {
                 $(if self.$field.is_none() { self.$field = parent.$field.clone(); })*
             };
         }
-        inherit!(enclave, reactor, reaction, logical_ns, microstep,);
+        inherit!(
+            enclave,
+            reactor,
+            reaction_key,
+            reaction,
+            logical_ns,
+            microstep,
+        );
     }
 }
 
@@ -77,6 +85,8 @@ pub struct TraceRecord {
     /// Microstep is deliberately a component, not a Rerun timeline.
     pub microstep: Option<u64>,
     pub duration_ns: Option<u64>,
+    /// Final lifecycle state emitted when a tracked runtime span closes.
+    pub terminal_state: Option<String>,
     pub fields: TraceFields,
 }
 
@@ -123,6 +133,11 @@ pub trait TraceWriter: Send + Sync + 'static {
 
 pub(crate) struct RerunTraceWriter;
 
+enum PrimaryPayload {
+    TextLog(Box<rerun::TextLog>),
+    Dynamic(rerun::DynamicArchetype),
+}
+
 struct TimeContextReset<'a>(&'a rerun::RecordingStream);
 
 impl Drop for TimeContextReset<'_> {
@@ -150,24 +165,67 @@ impl TraceWriter for RerunTraceWriter {
             timepoint.insert_cell("logical", rerun::TimeCell::from_duration_nanos(logical_ns));
         }
 
-        let mut values = rerun::DynamicArchetype::new("boomerang.TraceRecord");
-        for (name, value) in record.component_values() {
-            values = values.with_component::<rerun::components::Text>(name, [value]);
-        }
-
         // Rerun's time context is thread-local. Reset before and after each write so a record
         // without logical time cannot inherit it from an earlier record on the same thread. The
         // guard also resets the context during panic unwinding.
         recording.reset_time();
         let _reset = TimeContextReset(recording);
         recording.set_timepoint(timepoint);
-        let result = recording.log(record.entity_path.clone(), &values);
-        result.map_err(Into::into)
+        match record.primary_payload() {
+            PrimaryPayload::TextLog(payload) => {
+                recording.log(record.entity_path.clone(), payload.as_ref())?;
+            }
+            PrimaryPayload::Dynamic(payload) => {
+                recording.log(record.entity_path.clone(), &payload)?;
+            }
+        }
+        for (name, value) in record.scalar_series() {
+            recording.log(
+                format!("{}/metrics/{name}", record.entity_path),
+                &rerun::Scalars::new([value]),
+            )?;
+        }
+        Ok(())
     }
 }
 
 impl TraceRecord {
-    fn component_values(&self) -> Vec<(&'static str, String)> {
+    fn primary_payload(&self) -> PrimaryPayload {
+        if self.event == "diagnostic" {
+            let text = self
+                .fields
+                .error
+                .as_deref()
+                .unwrap_or("Boomerang trace diagnostic");
+            return PrimaryPayload::TextLog(Box::new(
+                rerun::TextLog::new(text).with_level(rerun::TextLogLevel::ERROR),
+            ));
+        }
+
+        let mut payload = rerun::DynamicArchetype::new("boomerang.TraceRecord");
+        for (name, value) in self.string_components() {
+            payload = payload.with_component::<rerun::components::Text>(name, [value]);
+        }
+        for (name, value) in self.u64_components() {
+            payload = payload.with_component_from_data(
+                name,
+                std::sync::Arc::new(rerun::external::arrow::array::UInt64Array::from(vec![
+                    value,
+                ])),
+            );
+        }
+        if let Some(terminal) = self.fields.terminal {
+            payload = payload.with_component_from_data(
+                "boomerang.trace.terminal",
+                std::sync::Arc::new(rerun::external::arrow::array::BooleanArray::from(vec![
+                    terminal,
+                ])),
+            );
+        }
+        PrimaryPayload::Dynamic(payload)
+    }
+
+    fn string_components(&self) -> Vec<(&'static str, String)> {
         let mut values = vec![
             ("boomerang.trace.id", self.id.0.clone()),
             ("boomerang.trace.event", self.event.clone()),
@@ -175,11 +233,8 @@ impl TraceRecord {
         if let Some(parent_id) = &self.parent_id {
             values.push(("boomerang.trace.parent_id", parent_id.0.clone()));
         }
-        if let Some(microstep) = self.microstep {
-            values.push(("boomerang.trace.microstep", microstep.to_string()));
-        }
-        if let Some(duration_ns) = self.duration_ns {
-            values.push(("boomerang.trace.duration_ns", duration_ns.to_string()));
+        if let Some(terminal_state) = &self.terminal_state {
+            values.push(("boomerang.trace.terminal_state", terminal_state.clone()));
         }
 
         macro_rules! string_fields {
@@ -189,17 +244,11 @@ impl TraceRecord {
                 })*
             };
         }
-        macro_rules! display_fields {
-            ($($field:ident),* $(,)?) => {
-                $(if let Some(value) = self.fields.$field {
-                    values.push((concat!("boomerang.trace.", stringify!($field)), value.to_string()));
-                })*
-            };
-        }
         string_fields!(
             enclave,
             kind,
             reactor,
+            reaction_key,
             reaction,
             action_key,
             action,
@@ -212,15 +261,46 @@ impl TraceRecord {
             outcome,
             error,
         );
-        display_fields!(
-            logical_ns,
-            destination_logical_ns,
-            destination_microstep,
-            old_logical_ns,
-            old_microstep,
-            terminal,
-            value_size,
+        values
+    }
+
+    fn u64_components(&self) -> Vec<(&'static str, u64)> {
+        let mut values = Vec::new();
+        macro_rules! component {
+            ($name:literal, $value:expr) => {
+                if let Some(value) = $value {
+                    values.push(($name, value));
+                }
+            };
+        }
+        component!("boomerang.trace.microstep", self.microstep);
+        component!("boomerang.trace.duration_ns", self.duration_ns);
+        component!("boomerang.trace.logical_ns", self.fields.logical_ns);
+        component!(
+            "boomerang.trace.destination_logical_ns",
+            self.fields.destination_logical_ns
         );
+        component!(
+            "boomerang.trace.destination_microstep",
+            self.fields.destination_microstep
+        );
+        component!("boomerang.trace.old_logical_ns", self.fields.old_logical_ns);
+        component!("boomerang.trace.old_microstep", self.fields.old_microstep);
+        component!("boomerang.trace.value_size", self.fields.value_size);
+        values
+    }
+
+    fn scalar_series(&self) -> Vec<(&'static str, f64)> {
+        let mut values = Vec::new();
+        if let Some(duration_ns) = self.duration_ns {
+            values.push(("duration_ns", duration_ns as f64));
+        }
+        if let Some(value_size) = self.fields.value_size {
+            values.push(("value_size", value_size as f64));
+        }
+        if let Some(terminal) = self.fields.terminal {
+            values.push(("terminal", if terminal { 1.0 } else { 0.0 }));
+        }
         values
     }
 }
@@ -231,29 +311,99 @@ pub(crate) fn escape_entity_segment(segment: &str) -> String {
 
 pub(crate) fn entity_path(fields: &TraceFields, event: &str) -> String {
     let enclave = escape_entity_segment(fields.enclave.as_deref().unwrap_or("unknown"));
-    if let (Some(reactor), Some(reaction)) = (&fields.reactor, &fields.reaction) {
-        return format!(
-            "/enclaves/{enclave}/reactors/{}/reactions/{}",
-            escape_entity_segment(reactor),
-            escape_entity_segment(reaction),
-        );
-    }
-    if let Some(action) = &fields.action {
+    if let Some(action) = fields.action_key.as_ref().or(fields.action.as_ref()) {
         return format!(
             "/enclaves/{enclave}/actions/{}/{}",
             escape_entity_segment(action),
             escape_entity_segment(event),
         );
     }
-    if let Some(port) = &fields.port {
+    if let Some(port) = fields.port_key.as_ref().or(fields.port.as_ref()) {
         return format!(
             "/enclaves/{enclave}/ports/{}/{}",
             escape_entity_segment(port),
             escape_entity_segment(event),
         );
     }
+    if let (Some(reactor), Some(reaction)) = (
+        &fields.reactor,
+        fields.reaction_key.as_ref().or(fields.reaction.as_ref()),
+    ) {
+        return format!(
+            "/enclaves/{enclave}/reactors/{}/reactions/{}",
+            escape_entity_segment(reactor),
+            escape_entity_segment(reaction),
+        );
+    }
     format!(
         "/enclaves/{enclave}/scheduler/{}",
         escape_entity_segment(event)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use rerun::AsComponents as _;
+
+    use super::*;
+
+    fn record(event: &str) -> TraceRecord {
+        TraceRecord {
+            id: TraceId("source:e0:1".to_owned()),
+            parent_id: None,
+            entity_path: "/diagnostics/schema".to_owned(),
+            event: event.to_owned(),
+            timepoint: TraceTimePoint {
+                elapsed_ns: 1,
+                wall_clock_unix_ns: 2,
+                logical_ns: Some(3),
+            },
+            microstep: Some(u64::MAX),
+            duration_ns: Some(5),
+            terminal_state: None,
+            fields: TraceFields {
+                event: Some(event.to_owned()),
+                enclave: Some("e0".to_owned()),
+                value_size: Some(u64::MAX),
+                error: Some("bad schema".to_owned()),
+                ..TraceFields::default()
+            },
+        }
+    }
+
+    #[test]
+    fn diagnostics_use_builtin_text_log() {
+        assert!(matches!(
+            record("diagnostic").primary_payload(),
+            PrimaryPayload::TextLog(_)
+        ));
+    }
+
+    #[test]
+    fn operational_payload_preserves_typed_numeric_components() {
+        let PrimaryPayload::Dynamic(payload) = record("action_schedule").primary_payload() else {
+            panic!("operational records use dynamic components")
+        };
+        let batches = payload.as_serialized_batches();
+        let value_size = batches
+            .iter()
+            .find(|batch| {
+                batch
+                    .descriptor
+                    .component
+                    .as_str()
+                    .ends_with(":boomerang.trace.value_size")
+            })
+            .expect("value_size component");
+        assert_eq!(
+            value_size.array.data_type(),
+            &rerun::external::arrow::datatypes::DataType::UInt64
+        );
+    }
+
+    #[test]
+    fn duration_is_exposed_as_builtin_scalar_series() {
+        let series = record("reaction_execute").scalar_series();
+        assert!(series.iter().any(|(name, _)| *name == "duration_ns"));
+    }
 }

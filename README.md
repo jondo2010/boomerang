@@ -28,6 +28,136 @@ fn HelloWorld() -> impl Reactor {
 }
 ```
 
+## Rerun trace visualization
+
+Enable the optional `rerun` feature to record the scheduler's structured trace
+into [Rerun](https://rerun.io/). The adapter uses Rerun `0.36.1` and composes as
+a `tracing_subscriber` layer; it never installs a global subscriber.
+
+Register the lowered `RuntimeAssembly` before execution consumes it. For a
+local assembly, the complete flow is:
+
+```rust
+# #[cfg(feature = "rerun")]
+# mod rerun_local_example {
+use std::error::Error;
+
+use boomerang::builder::RuntimeAssembly;
+use boomerang::rerun::{RerunSessionBuilder, SinkConfig};
+use boomerang::runtime;
+use tracing_subscriber::prelude::*;
+
+fn run_local(
+    parts: RuntimeAssembly,
+    config: runtime::Config,
+) -> Result<Vec<rerun::log::LogMsg>, Box<dyn Error>> {
+    let session = RerunSessionBuilder::new("my-boomerang-model")
+        .sink(SinkConfig::Memory)
+        .build()?;
+    session.register_runtime(&parts);
+
+    let subscriber = tracing_subscriber::registry().with(session.layer());
+    tracing::subscriber::with_default(subscriber, || {
+        let enclaves = parts.into_local()?;
+        runtime::execute_enclaves(enclaves.into_iter(), config)?;
+        Ok::<_, Box<dyn Error>>(())
+    })?;
+
+    // This bounded call flushes, returns, and clears the memory recording.
+    Ok(session.take_memory_snapshot_bounded().unwrap_or_default())
+}
+# }
+```
+
+With both `federated` and `rerun` enabled, only the final execution call changes:
+
+```rust
+# #[cfg(all(feature = "federated", feature = "rerun"))]
+# mod rerun_federated_example {
+use std::error::Error;
+
+use boomerang::builder::RuntimeAssembly;
+use boomerang::rerun::RerunSessionBuilder;
+use boomerang::{execute_federation_in_memory, runtime};
+use tracing_subscriber::prelude::*;
+
+fn run_federated(
+    parts: RuntimeAssembly,
+    config: runtime::Config,
+) -> Result<(), Box<dyn Error>> {
+    let session = RerunSessionBuilder::new("my-federation").build()?;
+    session.register_runtime(&parts);
+
+    let subscriber = tracing_subscriber::registry().with(session.layer());
+    tracing::subscriber::with_default(subscriber, || {
+        let federation = parts.into_federation()?;
+        execute_federation_in_memory(federation, config)?;
+        Ok::<_, Box<dyn Error>>(())
+    })?;
+    session.flush(); // bounded by the builder's flush_timeout
+    Ok(())
+}
+# }
+```
+
+`SinkConfig::Memory`, `SinkConfig::File(path)`, and arbitrary nested
+`SinkConfig::Tee` combinations are supported. A file sink produces a
+sequentially readable `.rrd`; its footer is deliberately omitted to keep
+long-running memory use bounded. Run `rerun rrd optimize recording.rrd` before
+using random access or `LazyStore`. A memory sink retains the full trace and
+therefore grows with the recording. `take_memory_snapshot_bounded` applies only
+to configurations containing a memory sink. Explicit `flush`, snapshot, and
+drop use `flush_timeout` (five seconds by default); if an SDK operation never
+returns, the adapter may detach its single lifecycle worker together with its
+sinks.
+
+`SinkConfig::Grpc` is intentionally rejected as `UnsupportedGrpc`. The pinned
+SDK exposes a fixed blocking channel for that sink, which could otherwise hang
+a disconnected scheduler callback. The supported sinks still use Rerun's
+bounded batching pipeline: saturation can backpressure the scheduler, and
+Boomerang adds no second event queue.
+
+### Reading a recording
+
+The default blueprint opens scheduler and event timelines, ownership and
+propagation graphs, selected records, diagnostics, and operational measures.
+Each dynamic record carries independent axes:
+
+- `elapsed`: monotonic time since session creation;
+- `wall_clock`: Unix wall-clock time for correlation with external systems;
+- `logical`: the reactor tag's time component, when the event has a tag.
+
+Selecting `logical` removes unrelated wall-clock idle time and therefore
+compresses those gaps. It does not change distances between logical tag times.
+Events at the same logical time share an x-coordinate; inspect the
+`boomerang.trace.microstep` component to order superdense-time events.
+
+Static registration is timeless. It recursively records federates, enclaves,
+reactors, reactions, actions, and ports, with actions and ports owned by their
+reactor. Entity paths use names plus lowered stable keys where needed to remain
+unambiguous. These keys identify one lowered runtime graph; do not treat them as
+portable IDs across changed builds. Static topology shows possible trigger and
+propagation relationships, while dynamic records show the paths actually
+exercised. If duplicate candidates make an exact dynamic propagation source
+ambiguous, the record stays under `/propagation/unresolved` rather than gaining
+a fabricated causal edge.
+
+Application payload values are never recorded. Traces may include type names,
+value sizes, entity names, errors, and timing, so treat recordings as diagnostic
+metadata and review those fields before sharing them. The first registration,
+encoding, sink, flush, or callback failure disables that session, increments
+its error counter, and emits one internal warning. Its layer then unregisters
+interest in Boomerang trace callsites; later attempts are counted as skipped.
+Another composed layer may independently keep those callsites enabled.
+
+Without an interested layer, trace annotations perform no metadata work. The
+adapter adds no fields to `TriggerRes`, `Context`, `Scheduler`, queues, events,
+or payload wrappers, so their layouts and the disabled hot path are unchanged.
+
+The workspace currently builds on stable Rust `1.97`. Rust `1.95` is not a
+supported promise: pre-existing workspace code uses `core::range::Range`, which
+does not compile on that toolchain.
+
 ## License
 
 Licensed under either of

@@ -22,6 +22,7 @@ pub mod replay;
 mod sched;
 pub mod store;
 mod time;
+pub mod trace;
 
 pub use action::{
     Action, ActionCommon, ActionKey, ActionRef, AsyncActionRef, BaseAction, DynActionRef,

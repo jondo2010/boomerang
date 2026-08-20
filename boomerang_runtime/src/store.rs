@@ -50,9 +50,20 @@ impl<'a> From<&'a mut ReactionTriggerCtxPtrs> for ReactionTriggerCtx<'a> {
 
 impl<'a> ReactionTriggerCtx<'a> {
     /// Trigger the reaction with the given context and state.
-    #[tracing::instrument(level = "trace", skip(self, tag), fields(reactor = self.reactor.name(), reaction = self.reaction.get_name()))]
-    pub(crate) fn trigger(self, tag: Tag) -> &'a TriggerRes {
-        tracing::trace!("Exec");
+    pub(crate) fn trigger(self, tag: Tag, level: crate::Level) -> &'a TriggerRes {
+        let span = tracing::trace_span!(
+            target: crate::trace::TRACE_TARGET,
+            "reaction_execute",
+            event = crate::trace::event::REACTION_EXECUTE,
+            enclave = %self.context.enclave_id(),
+            logical_ns = crate::trace::logical_ns(tag),
+            microstep = crate::trace::microstep(tag),
+            reactor = self.reactor.name(),
+            reaction = self.reaction.get_name(),
+            level = %level,
+            state = "begin",
+        );
+        let _entered = span.enter();
 
         if let Some(Deadline { deadline, handler }) = self.reaction.deadline.as_ref() {
             let lag = self.context.get_physical_time() - self.context.get_logical_time();
@@ -330,6 +341,11 @@ impl Store {
             .map(|(key, _)| key)
     }
 
+    pub(crate) fn action_metadata(&self, key: ActionKey) -> (&str, &'static str) {
+        let action = &self.inner.actions[key];
+        (action.name(), action.type_name())
+    }
+
     pub fn reset_ports(self: &mut Pin<Box<Self>>) {
         self.as_mut()
             .project()
@@ -408,7 +424,10 @@ pub mod tests {
         }
         {
             let mut ctx_iter = unsafe { store.iter_borrow_storage(reaction_keys.iter().cloned()) };
-            let _res = ctx_iter.next().unwrap().trigger(Tag::ZERO);
+            let _res = ctx_iter
+                .next()
+                .unwrap()
+                .trigger(Tag::ZERO, crate::Level::default());
         }
     }
 }

@@ -1,5 +1,6 @@
 use crate::{
     event::{AsyncEvent, CoordinationWake},
+    trace::{self, event as trace_event},
     CommonContext, Duration, EnclaveKey, RuntimeError, SendContext, Tag,
 };
 
@@ -306,7 +307,19 @@ impl SchedulerCoordination {
             frontier,
             consumed_wake: self.consumed_wake,
         };
-        self.external.publish_frontier(publication)?;
+        let result = self.external.publish_frontier(publication);
+        match frontier {
+            LogicalTimeFrontier::Candidate(tag) => {
+                tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::FRONTIER_PUBLISH, enclave = %self.enclave, state = "candidate", logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), outcome = if result.is_ok() { "published" } else { "failed" })
+            }
+            LogicalTimeFrontier::Idle => {
+                tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::FRONTIER_PUBLISH, enclave = %self.enclave, state = "idle", outcome = if result.is_ok() { "published" } else { "failed" })
+            }
+            LogicalTimeFrontier::Finished => {
+                tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::FRONTIER_PUBLISH, enclave = %self.enclave, state = "finished", outcome = if result.is_ok() { "published" } else { "failed" })
+            }
+        }
+        result?;
         self.consumed_wake = None;
         Ok(())
     }
@@ -316,19 +329,37 @@ impl SchedulerCoordination {
         tag: Tag,
         event_rx: &crate::Receiver<AsyncEvent>,
     ) -> Result<CoordinationOutcome, RuntimeError> {
+        let wait_span = tracing::trace_span!(
+            target: crate::trace::TRACE_TARGET,
+            "coordination_wait",
+            event = trace_event::COORDINATION_WAIT,
+            enclave = %self.enclave,
+            logical_ns = trace::logical_ns(tag),
+            microstep = trace::microstep(tag),
+            state = "waiting",
+        );
+        let _wait_entered = wait_span.enter();
         for (_upstream, barrier) in self.upstream.iter_mut() {
             if let Some(event) = barrier.acquire_tag(tag, self.enclave, event_rx)? {
+                tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::COORDINATION_GRANT, enclave = %self.enclave, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), outcome = "interrupted_local");
                 return Ok(CoordinationOutcome::Interrupted(event));
             }
         }
-        self.external.acquire(tag, event_rx).map_err(Into::into)
+        let outcome = self
+            .external
+            .acquire(tag, event_rx)
+            .map_err(RuntimeError::from)?;
+        tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::COORDINATION_GRANT, enclave = %self.enclave, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), outcome = match &outcome { CoordinationOutcome::Granted => "granted", CoordinationOutcome::Interrupted(_) => "interrupted_external" });
+        Ok(outcome)
     }
 
     pub(super) fn release_downstream(&self, tag: Tag, shutting_down: bool) {
         for (downstream, context) in self.downstream.iter() {
             let event = AsyncEvent::release(self.enclave, tag);
             tracing::trace!(%downstream, event = %event, "Releasing downstream");
-            if !context.schedule_external(event) && !shutting_down {
+            let accepted = context.schedule_external(event);
+            tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::TAG_RELEASE, enclave = %self.enclave, destination = %downstream, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), outcome = if accepted { "accepted" } else { "failed" });
+            if !accepted && !shutting_down {
                 tracing::warn!(
                     "Failed to send tag downstream, downstream has unexpectedly terminated."
                 );
@@ -338,7 +369,9 @@ impl SchedulerCoordination {
 
     pub(super) fn complete(&mut self, tag: Tag, terminal: bool) -> Result<(), CoordinationError> {
         self.release_downstream(if terminal { Tag::FOREVER } else { tag }, terminal);
-        self.external.complete(tag)
+        let result = self.external.complete(tag);
+        tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::TAG_COMPLETE, enclave = %self.enclave, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), terminal, outcome = if result.is_ok() { "completed" } else { "failed" });
+        result
     }
 }
 

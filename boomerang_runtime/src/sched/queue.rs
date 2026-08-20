@@ -171,9 +171,15 @@ impl EventQueue {
             moves.sort_by(|(_, from_a, _), (_, from_b, _)| from_b.cmp(from_a));
             for (action_key, from, to) in moves {
                 store.reschedule_action_value(action_key, from, to);
+                if from != to {
+                    tracing::trace!(target: crate::trace::TRACE_TARGET, event = crate::trace::event::ACTION_SCHEDULE, action_key = %action_key, old_logical_ns = crate::trace::logical_ns(from), old_microstep = crate::trace::microstep(from), destination_logical_ns = crate::trace::logical_ns(to), destination_microstep = crate::trace::microstep(to), outcome = "rebased");
+                }
             }
         } else if let Some((action_key, from, to)) = first_move {
             store.reschedule_action_value(action_key, from, to);
+            if from != to {
+                tracing::trace!(target: crate::trace::TRACE_TARGET, event = crate::trace::event::ACTION_SCHEDULE, action_key = %action_key, old_logical_ns = crate::trace::logical_ns(from), old_microstep = crate::trace::microstep(from), destination_logical_ns = crate::trace::logical_ns(to), destination_microstep = crate::trace::microstep(to), outcome = "rebased");
+            }
         }
         self.event_queue = events.into_iter().collect();
     }

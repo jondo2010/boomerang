@@ -213,6 +213,7 @@ impl Context {
         value: T,
         delay: Option<Duration>,
     ) {
+        let value_size = std::mem::size_of_val(&value);
         let tag_delay = action.min_delay() + delay.unwrap_or_default();
 
         // Compute the base tag for this scheduling request using the existing
@@ -236,6 +237,21 @@ impl Context {
         self.trigger_res
             .scheduled_actions
             .push((action.key(), new_tag));
+
+        tracing::trace!(
+            target: crate::trace::TRACE_TARGET,
+            event = crate::trace::event::ACTION_SCHEDULE,
+            enclave = %self.enclave_key,
+            logical_ns = crate::trace::logical_ns(self.tag),
+            microstep = crate::trace::microstep(self.tag),
+            action_key = %action.key(),
+            action = action.name(),
+            destination_logical_ns = crate::trace::logical_ns(new_tag),
+            destination_microstep = crate::trace::microstep(new_tag),
+            value_type = std::any::type_name::<T>(),
+            value_size,
+            outcome = "scheduled",
+        );
     }
 
     pub(crate) fn set_mode_transition(&mut self, request: ModeTransitionRequest) {

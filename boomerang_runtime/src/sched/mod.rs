@@ -20,6 +20,7 @@ use crate::{
     keepalive,
     key_set::KeySetView,
     store::Store,
+    trace::{self, event as trace_event},
     Duration, Env, ModeTransitionRequest, ReactionGraph, ReactionKey, ReactionSetLimits,
     ReactorKey, RuntimeError, Tag,
 };
@@ -292,15 +293,20 @@ impl Scheduler {
             AsyncEvent::TagRelease { .. } => unreachable!("coordination consumes tag releases"),
             AsyncEvent::TagReleaseProvisional { enclave: _, tag } => {
                 if tag <= self.current_tag {
+                    tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::ASYNC_INGRESS, enclave = %self.key, kind = "provisional_release", logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), outcome = "ignored_past");
                     if tag < self.current_tag {
                         tracing::warn!(tag = %tag, "Ignoring empty event in the past");
                     }
                     return;
                 }
                 self.events.push_event(tag, std::iter::empty(), false);
+                tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::ASYNC_INGRESS, enclave = %self.key, kind = "provisional_release", logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), outcome = "accepted");
             }
             AsyncEvent::Logical { tag, key, value } => {
+                let value_size = std::mem::size_of_val(&*value);
                 if tag <= self.current_tag {
+                    let (action, value_type) = self.store.action_metadata(key);
+                    tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::ASYNC_INGRESS, enclave = %self.key, kind = "logical", action_key = %key, action, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), destination_logical_ns = trace::logical_ns(tag), destination_microstep = trace::microstep(tag), value_type, value_size, outcome = "ignored_past");
                     tracing::warn!(tag = %tag, "Ignoring empty event in the past");
                     return;
                 }
@@ -308,17 +314,23 @@ impl Scheduler {
                 self.store.push_action_value(key, tag, value);
                 self.events
                     .push_action_event(key, tag, downstream, false, &self.reaction_graph);
+                let (action, value_type) = self.store.action_metadata(key);
+                tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::ASYNC_INGRESS, enclave = %self.key, kind = "logical", action_key = %key, action, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), destination_logical_ns = trace::logical_ns(tag), destination_microstep = trace::microstep(tag), value_type, value_size, outcome = "accepted");
             }
             AsyncEvent::Physical { time, key, value } => {
                 let tag = Tag::from_physical_time(self.start_time, time);
+                let value_size = std::mem::size_of_val(&*value);
                 let downstream = self.reaction_graph.action_triggers[key].iter().copied();
                 self.store.push_action_value(key, tag, value);
                 self.events
                     .push_action_event(key, tag, downstream, false, &self.reaction_graph);
+                let (action, value_type) = self.store.action_metadata(key);
+                tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::ASYNC_INGRESS, enclave = %self.key, kind = "physical", action_key = %key, action, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), destination_logical_ns = trace::logical_ns(tag), destination_microstep = trace::microstep(tag), value_type, value_size, outcome = "accepted");
             }
             AsyncEvent::Shutdown { delay } => {
                 let tag = self.current_tag.delay(delay);
                 self.schedule_shutdown_at(tag);
+                tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::ASYNC_INGRESS, enclave = %self.key, kind = "shutdown", logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), outcome = "accepted");
             }
         }
     }
@@ -352,6 +364,8 @@ impl Scheduler {
         // Initialize the event queue with the startup actions
         for &(action_key, tag) in &self.reaction_graph.startup_actions {
             self.store.push_action_value(action_key, tag, Box::new(()));
+            let (action, value_type) = self.store.action_metadata(action_key);
+            tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::ACTION_SCHEDULE, enclave = %self.key, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), action_key = %action_key, action, destination_logical_ns = trace::logical_ns(tag), destination_microstep = trace::microstep(tag), value_type, value_size = 0usize, outcome = "startup");
             let downstream = self.reaction_graph.action_triggers[action_key]
                 .iter()
                 .inspect(|(lvl, reaction_key)| {
@@ -384,6 +398,9 @@ impl Scheduler {
     #[tracing::instrument(skip(self))]
     fn shutdown(&mut self) {
         tracing::info!("Shutting down.");
+
+        let tag = self.shutdown_tag.unwrap_or(self.current_tag);
+        tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::SHUTDOWN, enclave = %self.key, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), state = "complete", outcome = "success");
 
         self.events.shutdown();
 
@@ -449,6 +466,18 @@ impl Scheduler {
 
             let mut event = self.events.pop_next_event().unwrap();
 
+            let tag_span = tracing::trace_span!(
+                target: crate::trace::TRACE_TARGET,
+                "tag_process",
+                event = trace_event::TAG_PROCESS,
+                enclave = %self.key,
+                logical_ns = trace::logical_ns(event.tag),
+                microstep = trace::microstep(event.tag),
+                terminal = event.terminal,
+                state = "processing",
+            );
+            let _tag_entered = tag_span.enter();
+
             tracing::debug!(event = ?event, "Processing");
 
             if event.terminal {
@@ -504,6 +533,7 @@ impl Scheduler {
                 Ok(true) => {}
                 Ok(false) => break,
                 Err(error) => {
+                    tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::DIAGNOSTIC, enclave = %self.key, state = "runtime_error", outcome = "failed", error = %error);
                     self.shutdown_tx.shutdown();
                     self.events.shutdown();
                     return Err(error);
@@ -560,7 +590,6 @@ impl Scheduler {
     /// Process the reactions at this tag in increasing order of level.
     ///
     /// Reactions at a level N may trigger further reactions at levels M>N
-    #[tracing::instrument(skip(self, reaction_view), fields(tag = %tag))]
     pub fn process_tag(
         &mut self,
         tag: Tag,
@@ -591,17 +620,32 @@ impl Scheduler {
                     .iter_borrow_storage(self.reaction_buffer.iter().copied())
             }
             .enumerate();
-
             #[cfg(feature = "parallel")]
             use rayon::prelude::ParallelIterator;
 
-            #[cfg(feature = "parallel")]
-            let iter_ctx = rayon::prelude::ParallelBridge::par_bridge(iter_ctx);
+            #[cfg(not(feature = "parallel"))]
+            let iter_ctx_res =
+                iter_ctx.map(|(idx, trigger_ctx)| (idx, trigger_ctx.trigger(tag, level)));
 
-            let iter_ctx_res = iter_ctx.map(|(idx, trigger_ctx)| (idx, trigger_ctx.trigger(tag)));
-
             #[cfg(feature = "parallel")]
-            let iter_ctx_res = iter_ctx_res.collect::<Vec<_>>();
+            let iter_ctx_res = {
+                if trace::enabled() {
+                    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+                    let reaction_parent = tracing::Span::current();
+                    rayon::prelude::ParallelBridge::par_bridge(iter_ctx)
+                        .map(|(idx, trigger_ctx)| {
+                            tracing::dispatcher::with_default(&dispatch, || {
+                                let _tag_entered = reaction_parent.enter();
+                                (idx, trigger_ctx.trigger(tag, level))
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    rayon::prelude::ParallelBridge::par_bridge(iter_ctx)
+                        .map(|(idx, trigger_ctx)| (idx, trigger_ctx.trigger(tag, level)))
+                        .collect::<Vec<_>>()
+                }
+            };
 
             let mut pending_shutdown_tag = None;
             for (idx, trigger_res) in iter_ctx_res {
@@ -768,11 +812,18 @@ pub fn execute_enclaves(
     let mut handles = Vec::new();
     for mut sched in schedulers {
         let enclave = sched.key;
+        let dispatch = trace::enabled().then(|| tracing::dispatcher::get_default(Clone::clone));
         let handle = std::thread::Builder::new()
             .name(sched.key.to_string())
-            .spawn(move || {
-                let result = sched.try_event_loop();
-                (sched.key, sched.into_env(), result)
+            .spawn(move || match dispatch {
+                Some(dispatch) => tracing::dispatcher::with_default(&dispatch, || {
+                    let result = sched.try_event_loop();
+                    (sched.key, sched.into_env(), result)
+                }),
+                None => {
+                    let result = sched.try_event_loop();
+                    (sched.key, sched.into_env(), result)
+                }
             })
             .map_err(|source| ExecuteEnclavesError::ThreadSpawn { enclave, source })?;
         handles.push((enclave, handle));

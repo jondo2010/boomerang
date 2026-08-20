@@ -136,16 +136,42 @@ impl<T: ReactorData + Clone> InterPartitionEventSink<T> for InProcessInterPartit
     fn send(&self, time: InterPartitionEventTime, target: &AsyncActionRef<T>, value: &T) {
         match time {
             InterPartitionEventTime::Logical(tag) => {
-                self.remote_context
-                    .schedule_external(crate::event::AsyncEvent::Logical {
-                        tag,
-                        key: target.key(),
-                        value: Box::new(value.clone()),
-                    });
+                let accepted =
+                    self.remote_context
+                        .schedule_external(crate::event::AsyncEvent::Logical {
+                            tag,
+                            key: target.key(),
+                            value: Box::new(value.clone()),
+                        });
+                tracing::trace!(
+                    target: crate::trace::TRACE_TARGET,
+                    event = crate::trace::event::PROPAGATION_SEND,
+                    kind = "logical",
+                    destination = %self.remote_context.enclave_id(),
+                    action_key = %target.key(),
+                    action = target.name(),
+                    logical_ns = crate::trace::logical_ns(tag),
+                    microstep = crate::trace::microstep(tag),
+                    value_type = std::any::type_name::<T>(),
+                    value_size = std::mem::size_of_val(value),
+                    outcome = if accepted { "accepted" } else { "failed" },
+                );
             }
             InterPartitionEventTime::Physical(delay) => {
-                self.remote_context
-                    .schedule_action_async(target, value.clone(), delay);
+                let accepted =
+                    self.remote_context
+                        .schedule_action_async(target, value.clone(), delay);
+                tracing::trace!(
+                    target: crate::trace::TRACE_TARGET,
+                    event = crate::trace::event::PROPAGATION_SEND,
+                    kind = "physical",
+                    destination = %self.remote_context.enclave_id(),
+                    action_key = %target.key(),
+                    action = target.name(),
+                    value_type = std::any::type_name::<T>(),
+                    value_size = std::mem::size_of_val(value),
+                    outcome = if accepted { "accepted" } else { "failed" },
+                );
             }
         }
     }

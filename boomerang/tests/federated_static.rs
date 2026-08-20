@@ -16,9 +16,8 @@ use tracing_subscriber::prelude::*;
 #[cfg(feature = "rerun")]
 fn rerun_chunks(session: &boomerang::rerun::RerunSession) -> Vec<rerun::log::Chunk> {
     session
-        .memory_sink()
+        .take_memory_snapshot_bounded()
         .expect("memory sink")
-        .take()
         .into_iter()
         .filter_map(|message| match message {
             rerun::log::LogMsg::ArrowMsg(_, message) => {
@@ -423,7 +422,7 @@ fn public_api_rejects_runtime_without_lowered_federation() {
 
 #[cfg(feature = "rerun")]
 #[test]
-fn unreachable_rerun_grpc_sink_does_not_change_federation_output() {
+fn unsupported_rerun_grpc_config_rejection_does_not_change_federation_output() {
     let values = Arc::new(Mutex::new(Vec::new()));
     let mut assembly = Assembly::new();
     assembly

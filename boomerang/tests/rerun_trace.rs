@@ -6,8 +6,8 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::time::{Duration, Instant};
 
 use boomerang::rerun::{
-    BlueprintConfig, FlushDriver, RerunSessionBuilder, SinkConfig, TraceRecord, TraceWriter,
-    TraceWriterError,
+    BlueprintConfig, FlushDriver, RerunSessionBuildError, RerunSessionBuilder, SinkConfig,
+    SinkConfigError, TraceRecord, TraceWriter, TraceWriterError,
 };
 use boomerang::runtime::{Enclave, Port, Reactor};
 use rerun::external::arrow::array::Array as _;
@@ -47,9 +47,8 @@ fn session_with_capture(source_id: &str) -> (boomerang::rerun::RerunSession, Arc
 
 fn memory_paths(session: &boomerang::rerun::RerunSession) -> Vec<String> {
     session
-        .memory_sink()
+        .take_memory_snapshot_bounded()
         .expect("memory sink")
-        .take()
         .into_iter()
         .filter_map(|message| match message {
             rerun::log::LogMsg::ArrowMsg(_, message) => {
@@ -165,6 +164,7 @@ fn sink_config_rejects_empty_tee_and_flattens_nested_tees() {
         .is_err());
 
     let path = std::path::PathBuf::from("trace.rrd");
+    let normalized_path = std::env::current_dir().unwrap().join(&path);
     let nested = SinkConfig::Tee(vec![
         SinkConfig::Memory,
         SinkConfig::Tee(vec![
@@ -182,7 +182,7 @@ fn sink_config_rejects_empty_tee_and_flattens_nested_tees() {
         nested,
         SinkConfig::Tee(vec![
             SinkConfig::Memory,
-            SinkConfig::File(path),
+            SinkConfig::File(normalized_path),
             SinkConfig::Grpc {
                 url: "rerun+http://127.0.0.1:9876/proxy".to_owned(),
                 memory_limit_bytes: 4096,
@@ -206,7 +206,54 @@ fn sink_config_rejects_empty_tee_and_flattens_nested_tees() {
 }
 
 #[test]
-fn file_sink_writes_decodable_trace_records() {
+fn invalid_sink_topology_is_rejected_before_file_construction() {
+    let directory = tempfile::tempdir().unwrap();
+    let sentinel = directory.path().join("sentinel.rrd");
+    std::fs::write(&sentinel, b"keep-me").unwrap();
+
+    let later_empty = RerunSessionBuilder::new("later-empty")
+        .sink(SinkConfig::Tee(vec![
+            SinkConfig::File(sentinel.clone()),
+            SinkConfig::Tee(Vec::new()),
+        ]))
+        .build();
+    assert!(matches!(
+        later_empty,
+        Err(RerunSessionBuildError::SinkConfig(
+            SinkConfigError::EmptyTee
+        ))
+    ));
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"keep-me");
+
+    let duplicate = RerunSessionBuilder::new("duplicate-file")
+        .sink(SinkConfig::Tee(vec![
+            SinkConfig::File(sentinel.clone()),
+            SinkConfig::File(directory.path().join("child/../sentinel.rrd")),
+        ]))
+        .build();
+    assert!(matches!(
+        duplicate,
+        Err(RerunSessionBuildError::SinkConfig(
+            SinkConfigError::DuplicateFilePath(_)
+        ))
+    ));
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"keep-me");
+
+    let grpc = RerunSessionBuilder::new("unsupported-grpc")
+        .sink(SinkConfig::Tee(vec![
+            SinkConfig::File(sentinel.clone()),
+            SinkConfig::Grpc {
+                url: "rerun+http://127.0.0.1:9/proxy".to_owned(),
+                memory_limit_bytes: 4096,
+            },
+        ]))
+        .build();
+    assert!(matches!(grpc, Err(RerunSessionBuildError::UnsupportedGrpc)));
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"keep-me");
+}
+
+#[test]
+fn footerless_file_sink_writes_decodable_trace_records() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("trace.rrd");
     let session = RerunSessionBuilder::new("boomerang-rerun-test")
@@ -215,7 +262,7 @@ fn file_sink_writes_decodable_trace_records() {
         .build()
         .unwrap();
 
-    assert!(session.memory_sink().is_none());
+    assert!(session.take_memory_snapshot_bounded().is_none());
     emit_shutdown(&session);
     session.flush();
     assert!(std::fs::metadata(&path).unwrap().len() > 0);
@@ -269,7 +316,7 @@ fn tee_writes_the_same_trace_to_memory_and_file() {
 
     emit_shutdown(&session);
     session.flush();
-    let memory_messages = session.memory_sink().unwrap().take();
+    let memory_messages = session.take_memory_snapshot_bounded().unwrap();
     drop(session);
 
     let file = std::io::BufReader::new(std::fs::File::open(path).unwrap());
@@ -298,6 +345,50 @@ impl FlushDriver for SlowFlush {
     }
 }
 
+struct BlockingTeardown;
+
+impl FlushDriver for BlockingTeardown {
+    fn flush(
+        &self,
+        _recording: &rerun::RecordingStream,
+        _timeout: Duration,
+    ) -> Result<(), rerun::sink::SinkFlushError> {
+        Ok(())
+    }
+
+    fn teardown(
+        &self,
+        recording: rerun::RecordingStream,
+        _timeout: Duration,
+    ) -> Result<(), rerun::sink::SinkFlushError> {
+        drop(recording);
+        std::thread::sleep(Duration::from_millis(200));
+        Ok(())
+    }
+}
+
+struct JoinedLifecycle(Arc<AtomicUsize>);
+
+impl FlushDriver for JoinedLifecycle {
+    fn flush(
+        &self,
+        _recording: &rerun::RecordingStream,
+        _timeout: Duration,
+    ) -> Result<(), rerun::sink::SinkFlushError> {
+        Ok(())
+    }
+
+    fn teardown(
+        &self,
+        recording: rerun::RecordingStream,
+        _timeout: Duration,
+    ) -> Result<(), rerun::sink::SinkFlushError> {
+        drop(recording);
+        self.0.store(1, Ordering::Release);
+        Ok(())
+    }
+}
+
 #[test]
 fn blocking_flush_driver_is_bounded_and_observational() {
     let session = RerunSessionBuilder::new("boomerang-rerun-test")
@@ -317,11 +408,32 @@ fn blocking_flush_driver_is_bounded_and_observational() {
 }
 
 #[test]
+fn session_drop_bounds_blocking_teardown_and_joins_normal_teardown() {
+    let blocking = RerunSessionBuilder::new("blocking-teardown")
+        .flush_timeout(Duration::from_millis(10))
+        .flush_driver(Arc::new(BlockingTeardown))
+        .build()
+        .unwrap();
+    let started = Instant::now();
+    drop(blocking);
+    assert!(started.elapsed() < Duration::from_millis(100));
+
+    let joined = Arc::new(AtomicUsize::new(0));
+    let normal = RerunSessionBuilder::new("joined-teardown")
+        .flush_timeout(Duration::from_secs(1))
+        .flush_driver(Arc::new(JoinedLifecycle(joined.clone())))
+        .build()
+        .unwrap();
+    drop(normal);
+    assert_eq!(joined.load(Ordering::Acquire), 1);
+}
+
+#[test]
 fn default_blueprint_contains_timeline_first_views() {
     let session = RerunSessionBuilder::new("boomerang-rerun-test")
         .build()
         .unwrap();
-    let messages = session.memory_sink().unwrap().take();
+    let messages = session.take_memory_snapshot_bounded().unwrap();
     let blueprint_chunks = messages
         .into_iter()
         .filter_map(|message| match message {
@@ -364,9 +476,8 @@ fn blueprint_none_and_custom_control_blueprint_emission() {
         .build()
         .unwrap();
     assert!(none
-        .memory_sink()
+        .take_memory_snapshot_bounded()
         .unwrap()
-        .take()
         .iter()
         .all(|message| message.store_id().kind() != rerun::StoreKind::Blueprint));
 
@@ -378,7 +489,7 @@ fn blueprint_none_and_custom_control_blueprint_emission() {
         .blueprint(BlueprintConfig::Custom(Box::new(custom)))
         .build()
         .unwrap();
-    let debug = format!("{:#?}", custom.memory_sink().unwrap().take());
+    let debug = format!("{:#?}", custom.take_memory_snapshot_bounded().unwrap());
     assert!(debug.contains("Caller-defined diagnostics"));
 }
 

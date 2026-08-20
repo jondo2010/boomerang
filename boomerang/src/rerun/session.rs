@@ -15,15 +15,20 @@ static SOURCE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Destination for a Rerun recording.
 ///
-/// Active memory, file, and tee sinks use Rerun 0.36.1's bounded batching pipeline. When that
-/// pipeline is saturated, logging from [`RerunLayer`] may apply backpressure to the scheduler
-/// callback that emitted the trace. Boomerang does not add a second dynamic-record queue.
+/// Active memory, file, and tee sinks use Rerun 0.36.1's bounded batching pipeline. That does not
+/// bound a memory sink, which retains the full recording. File sinks disable the SDK's O(chunks)
+/// footer manifest by default. When the pipeline is saturated, logging from [`RerunLayer`] may
+/// apply backpressure to the scheduler callback. Boomerang adds no second dynamic-record queue.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum SinkConfig {
-    /// Retain the recording in memory.
+    /// Retain the full recording in memory; active memory use grows with the trace.
     #[default]
     Memory,
-    /// Write a recording to an RRD file.
+    /// Write a recording to a sequentially-decodable RRD file.
+    ///
+    /// Footer emission is disabled so Rerun 0.36.1 does not retain an O(chunks) manifest for the
+    /// lifetime of long recordings. This reduces random-access performance; `rerun rrd optimize`
+    /// can add a footer after recording.
     File(std::path::PathBuf),
     /// Request streaming to a Rerun data proxy.
     ///
@@ -39,7 +44,8 @@ pub enum SinkConfig {
 }
 
 impl SinkConfig {
-    /// Returns a deterministic, one-level sink configuration.
+    /// Returns a deterministic, one-level sink configuration with lexically normalized absolute
+    /// file paths. Normalization does not access the filesystem or require paths to exist.
     pub fn normalized(self) -> Result<Self, SinkConfigError> {
         match self {
             Self::Tee(sinks) if sinks.is_empty() => Err(SinkConfigError::EmptyTee),
@@ -57,9 +63,49 @@ impl SinkConfig {
                     Ok(Self::Tee(flattened))
                 }
             }
+            Self::File(path) => lexical_absolute_path(&path).map(Self::File),
             leaf => Ok(leaf),
         }
+        .and_then(validate_unique_file_paths)
     }
+}
+
+fn validate_unique_file_paths(config: SinkConfig) -> Result<SinkConfig, SinkConfigError> {
+    let leaves = match &config {
+        SinkConfig::Tee(leaves) => leaves.as_slice(),
+        leaf => std::slice::from_ref(leaf),
+    };
+    let mut files = std::collections::HashSet::new();
+    for leaf in leaves {
+        if let SinkConfig::File(path) = leaf {
+            let key = lexical_absolute_path(path)?;
+            if !files.insert(key.clone()) {
+                return Err(SinkConfigError::DuplicateFilePath(key));
+            }
+        }
+    }
+    Ok(config)
+}
+
+fn lexical_absolute_path(path: &std::path::Path) -> Result<std::path::PathBuf, SinkConfigError> {
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| SinkConfigError::CurrentDirectory(error.to_string()))?
+            .join(path)
+    };
+    let mut normalized = std::path::PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    Ok(normalized)
 }
 
 /// Invalid sink topology.
@@ -67,6 +113,10 @@ impl SinkConfig {
 pub enum SinkConfigError {
     #[error("a Rerun tee sink must contain at least one destination")]
     EmptyTee,
+    #[error("multiple Rerun file sinks resolve to the same path: {0}")]
+    DuplicateFilePath(std::path::PathBuf),
+    #[error("failed to resolve the current directory while validating Rerun sinks: {0}")]
+    CurrentDirectory(String),
 }
 
 /// Viewer layout attached to a recording.
@@ -94,6 +144,8 @@ pub enum RerunSessionBuildError {
         "Rerun 0.36.1 gRPC uses blocking backpressure and cannot be isolated from the scheduler"
     )]
     UnsupportedGrpc,
+    #[error("failed to spawn the Rerun lifecycle worker: {0}")]
+    LifecycleWorker(std::io::Error),
 }
 
 /// Adapter-local flush seam used to isolate sink behavior from application execution.
@@ -103,6 +155,16 @@ pub trait FlushDriver: Send + Sync + 'static {
         recording: &RecordingStream,
         timeout: Duration,
     ) -> Result<(), rerun::sink::SinkFlushError>;
+
+    /// Performs the last strong recording drop after the worker's final flush and disconnect.
+    fn teardown(
+        &self,
+        recording: RecordingStream,
+        _timeout: Duration,
+    ) -> Result<(), rerun::sink::SinkFlushError> {
+        drop(recording);
+        Ok(())
+    }
 }
 
 struct SdkFlushDriver;
@@ -172,9 +234,10 @@ impl RerunSessionBuilder {
 
     /// Overrides the adapter-local flush operation.
     ///
-    /// This is primarily useful for verifying timeout isolation. The adapter always invokes the
-    /// driver on a detached, bounded-wait thread so a broken primitive cannot block application
-    /// shutdown. A permanently blocked driver can retain one detached thread per session.
+    /// This is primarily useful for verifying timeout isolation. The adapter invokes the driver
+    /// on one persistent lifecycle worker, so a broken primitive cannot block the application
+    /// thread. If the SDK never returns, that one detached worker and its sink resources may
+    /// remain for the failed session; the adapter cannot cancel SDK work safely.
     pub fn flush_driver(mut self, flush_driver: Arc<dyn FlushDriver>) -> Self {
         self.flush_driver = flush_driver;
         self
@@ -190,8 +253,15 @@ impl RerunSessionBuilder {
     }
 
     /// Builds the recording session.
+    ///
+    /// The complete topology is normalized and validated before Rerun creates a memory sink or
+    /// opens a file. Once valid sink construction starts, filesystem I/O failures are not
+    /// transactional and may leave an earlier file destination created or truncated.
     pub fn build(self) -> Result<RerunSession, RerunSessionBuildError> {
         let sink = self.sink.normalized()?;
+        if sink_contains_grpc(&sink) {
+            return Err(RerunSessionBuildError::UnsupportedGrpc);
+        }
         let mut builder =
             RecordingStreamBuilder::new(rerun::ApplicationId::new_or_unknown(self.application_id));
         builder = match self.blueprint {
@@ -211,13 +281,21 @@ impl RerunSessionBuilder {
                 })
         });
         let enabled = recording.is_enabled();
+        let has_memory = memory.is_some();
+        let lifecycle = LifecycleWorker::spawn(
+            recording.clone(),
+            memory,
+            self.flush_driver,
+            self.flush_timeout,
+        )
+        .map_err(RerunSessionBuildError::LifecycleWorker)?;
 
         Ok(RerunSession {
-            recording,
-            memory,
+            recording: recording.clone_weak(),
+            has_memory,
             source_id,
             flush_timeout: self.flush_timeout,
-            flush_driver: self.flush_driver,
+            lifecycle: Some(lifecycle),
             state: SessionState::new(enabled),
             trace_writer: self.trace_writer,
             started: Instant::now(),
@@ -234,10 +312,10 @@ impl RerunSessionBuilder {
 /// cached as uninterested when no other subscriber or layer needs them.
 pub struct RerunSession {
     recording: RecordingStream,
-    memory: Option<rerun::sink::MemorySinkStorage>,
+    has_memory: bool,
     source_id: String,
     flush_timeout: Duration,
-    flush_driver: Arc<dyn FlushDriver>,
+    lifecycle: Option<LifecycleWorker>,
     state: SessionState,
     trace_writer: Arc<dyn TraceWriter>,
     started: Instant,
@@ -292,9 +370,27 @@ impl RerunSession {
         .with_filter(SessionFilter::new(state))
     }
 
-    /// Access the backing memory sink for recording inspection or serialization.
-    pub fn memory_sink(&self) -> Option<&rerun::sink::MemorySinkStorage> {
-        self.memory.as_ref()
+    /// Returns and clears a bounded-wait snapshot of the configured memory sink.
+    ///
+    /// Rerun's raw memory export uses an unbounded SDK flush, so the adapter runs it on the single
+    /// lifecycle worker and waits only for `flush_timeout`. A timeout disables the session and
+    /// returns `None`. `None` also indicates that this session has no memory sink.
+    pub fn take_memory_snapshot_bounded(&self) -> Option<Vec<rerun::log::LogMsg>> {
+        if !self.has_memory {
+            return None;
+        }
+        match self
+            .lifecycle
+            .as_ref()
+            .expect("lifecycle worker exists until drop")
+            .snapshot(self.flush_timeout)
+        {
+            Ok(messages) => messages,
+            Err(error) => {
+                self.state.disable_on_error(&error);
+                None
+            }
+        }
     }
 
     /// Registers the immutable hierarchy already produced by builder lowering.
@@ -435,11 +531,21 @@ impl RerunSession {
 
     /// Flushes pending data once, bounded by the configured timeout.
     pub fn flush(&self) {
-        let recording = self.recording.clone();
-        let driver = self.flush_driver.clone();
         let timeout = self.flush_timeout;
-        self.state
-            .flush_once(|| bounded_flush(recording, driver, timeout));
+        self.state.flush_once(|| {
+            self.lifecycle
+                .as_ref()
+                .expect("lifecycle worker exists until drop")
+                .flush(timeout)
+        });
+    }
+}
+
+fn sink_contains_grpc(config: &SinkConfig) -> bool {
+    match config {
+        SinkConfig::Grpc { .. } => true,
+        SinkConfig::Tee(leaves) => leaves.iter().any(sink_contains_grpc),
+        SinkConfig::Memory | SinkConfig::File(_) => false,
     }
 }
 
@@ -456,12 +562,6 @@ fn configure_sinks(
         SinkConfig::Tee(leaves) => leaves,
         leaf => vec![leaf],
     };
-    if leaves
-        .iter()
-        .any(|leaf| matches!(leaf, SinkConfig::Grpc { .. }))
-    {
-        return Err(RerunSessionBuildError::UnsupportedGrpc);
-    }
     let mut memory = None;
     let mut sinks: Vec<Box<dyn rerun::sink::LogSink>> = Vec::with_capacity(leaves.len());
     for leaf in leaves {
@@ -471,7 +571,12 @@ fn configure_sinks(
                 memory = Some(sink.buffer());
                 sinks.push(Box::new(sink));
             }
-            SinkConfig::File(path) => sinks.push(Box::new(rerun::sink::FileSink::new(path)?)),
+            SinkConfig::File(path) => sinks.push(Box::new(rerun::sink::FileSink::with_options(
+                path,
+                rerun::sink::FileSinkOptions {
+                    write_footer: false,
+                },
+            )?)),
             SinkConfig::Grpc {
                 url: _,
                 memory_limit_bytes: _,
@@ -484,35 +589,118 @@ fn configure_sinks(
 }
 
 #[derive(Debug, thiserror::Error)]
-enum BoundedFlushError {
-    #[error("failed to spawn bounded Rerun flush worker: {0}")]
-    Spawn(std::io::Error),
-    #[error("Rerun flush exceeded {0:?}")]
+enum LifecycleError {
+    #[error("Rerun lifecycle operation exceeded {0:?}")]
     Timeout(Duration),
-    #[error("Rerun flush worker disconnected")]
+    #[error("Rerun lifecycle worker disconnected")]
     Disconnected,
     #[error(transparent)]
     Sink(#[from] rerun::sink::SinkFlushError),
 }
 
-fn bounded_flush(
-    recording: RecordingStream,
-    driver: Arc<dyn FlushDriver>,
-    timeout: Duration,
-) -> Result<(), BoundedFlushError> {
-    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    std::thread::Builder::new()
-        .name("boomerang-rerun-flush".to_owned())
-        .spawn(move || {
-            let _ = sender.send(driver.flush(&recording, timeout));
+enum LifecycleCommand {
+    Flush {
+        reply: std::sync::mpsc::SyncSender<Result<(), rerun::sink::SinkFlushError>>,
+    },
+    Snapshot {
+        reply: std::sync::mpsc::SyncSender<Option<Vec<rerun::log::LogMsg>>>,
+    },
+    Shutdown {
+        reply: std::sync::mpsc::SyncSender<Result<(), rerun::sink::SinkFlushError>>,
+    },
+}
+
+struct LifecycleWorker {
+    commands: std::sync::mpsc::Sender<LifecycleCommand>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl LifecycleWorker {
+    fn spawn(
+        recording: RecordingStream,
+        memory: Option<rerun::sink::MemorySinkStorage>,
+        driver: Arc<dyn FlushDriver>,
+        sdk_timeout: Duration,
+    ) -> Result<Self, std::io::Error> {
+        let (commands, receiver) = std::sync::mpsc::channel();
+        let handle = std::thread::Builder::new()
+            .name("boomerang-rerun-lifecycle".to_owned())
+            .spawn(move || {
+                while let Ok(command) = receiver.recv() {
+                    match command {
+                        LifecycleCommand::Flush { reply } => {
+                            let _ = reply.send(driver.flush(&recording, sdk_timeout));
+                        }
+                        LifecycleCommand::Snapshot { reply } => {
+                            let _ = reply.send(memory.as_ref().map(|storage| storage.take()));
+                        }
+                        LifecycleCommand::Shutdown { reply } => {
+                            let flush = driver.flush(&recording, sdk_timeout);
+                            recording.disconnect();
+                            drop(memory);
+                            let result = driver.teardown(recording, sdk_timeout).and(flush);
+                            let _ = reply.send(result);
+                            return;
+                        }
+                    }
+                }
+                recording.disconnect();
+                drop(memory);
+                drop(recording);
+            })?;
+        Ok(Self {
+            commands,
+            handle: Some(handle),
         })
-        .map_err(BoundedFlushError::Spawn)?;
+    }
+
+    fn flush(&self, timeout: Duration) -> Result<(), LifecycleError> {
+        let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(LifecycleCommand::Flush { reply })
+            .map_err(|_| LifecycleError::Disconnected)?;
+        receive_lifecycle_result(receiver, timeout)
+    }
+
+    fn snapshot(
+        &self,
+        timeout: Duration,
+    ) -> Result<Option<Vec<rerun::log::LogMsg>>, LifecycleError> {
+        let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(LifecycleCommand::Snapshot { reply })
+            .map_err(|_| LifecycleError::Disconnected)?;
+        receiver.recv_timeout(timeout).map_err(|error| match error {
+            std::sync::mpsc::RecvTimeoutError::Timeout => LifecycleError::Timeout(timeout),
+            std::sync::mpsc::RecvTimeoutError::Disconnected => LifecycleError::Disconnected,
+        })
+    }
+
+    fn shutdown(mut self, timeout: Duration) -> Result<(), LifecycleError> {
+        let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(LifecycleCommand::Shutdown { reply })
+            .map_err(|_| LifecycleError::Disconnected)?;
+        let result = receive_lifecycle_result(receiver, timeout);
+        if result.is_ok() {
+            if let Some(handle) = self.handle.take() {
+                if handle.join().is_err() {
+                    return Err(LifecycleError::Disconnected);
+                }
+            }
+        }
+        result
+    }
+}
+
+fn receive_lifecycle_result(
+    receiver: std::sync::mpsc::Receiver<Result<(), rerun::sink::SinkFlushError>>,
+    timeout: Duration,
+) -> Result<(), LifecycleError> {
     match receiver.recv_timeout(timeout) {
         Ok(result) => result.map_err(Into::into),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(BoundedFlushError::Timeout(timeout)),
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            Err(BoundedFlushError::Disconnected)
-        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(LifecycleError::Timeout(timeout)),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(LifecycleError::Disconnected),
     }
 }
 
@@ -569,7 +757,11 @@ fn default_blueprint() -> rerun::blueprint::Blueprint {
 
 impl Drop for RerunSession {
     fn drop(&mut self) {
-        self.flush();
+        if let Some(lifecycle) = self.lifecycle.take() {
+            if let Err(error) = lifecycle.shutdown(self.flush_timeout) {
+                self.state.disable_on_error(&error);
+            }
+        }
     }
 }
 

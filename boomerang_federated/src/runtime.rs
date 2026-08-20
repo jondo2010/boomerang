@@ -144,7 +144,7 @@ impl<T: ReactorData> InterPartitionEventSink<T> for SerializedInterPartitionEven
             tracing::error!("Serialized sender cannot target a physical action");
             return;
         };
-        let destination_federate = self.outbound.target_federate().map(ToString::to_string);
+        let destination_federate = self.outbound.target_federate().map(FederateId::as_str);
 
         let span = tracing::trace_span!(
             target: boomerang_runtime::trace::TRACE_TARGET,

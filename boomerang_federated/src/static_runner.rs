@@ -430,7 +430,7 @@ fn execute_connected_static_federation(
                     let span = tracing::trace_span!(
                         target: boomerang_runtime::trace::TRACE_TARGET,
                         "scheduler_thread",
-                        event = "scheduler_thread",
+                        event = boomerang_runtime::trace::event::SCHEDULER_THREAD,
                         federate = %thread_federate_id,
                         enclave = %enclave_key,
                         state = "running",

@@ -32,6 +32,7 @@ pub fn microstep(tag: crate::Tag) -> u64 {
 
 /// Stable event names emitted by runtime instrumentation.
 pub mod event {
+    pub const SCHEDULER_THREAD: &str = "scheduler_thread";
     pub const ASYNC_INGRESS: &str = "async_ingress";
     pub const TAG_PROCESS: &str = "tag_process";
     pub const REACTION_EXECUTE: &str = "reaction_execute";
@@ -54,6 +55,7 @@ pub mod event {
 
     /// All stable event names in canonical order.
     pub const ALL: &[&str] = &[
+        SCHEDULER_THREAD,
         ASYNC_INGRESS,
         TAG_PROCESS,
         REACTION_EXECUTE,

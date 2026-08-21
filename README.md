@@ -131,12 +131,14 @@ A memory sink retains the full trace and therefore grows with the recording;
 `take_memory_snapshot_bounded` applies only to configurations containing one.
 
 Treat `session.finish()?` as the success signal for an offline recording: it
-flushes and finalizes the sinks, and reports lifecycle or sink failures. `Drop`
-performs only a bounded best-effort shutdown and cannot report failure. Explicit
-`flush`, snapshots, `finish`, and drop use `flush_timeout` (five seconds by
-default); if an SDK operation never returns, the adapter may detach its single
-lifecycle worker together with its sinks. Live-viewer latency work is tracked
-in [#106](https://github.com/jondo2010/boomerang/issues/106).
+completes cleanup before reporting lifecycle, sink, or footer-verification
+failures, as well as any earlier observational trace failure. `Drop` performs
+only a bounded best-effort shutdown and cannot report failure. `flush_timeout`
+(five seconds by default) bounds teardown and footer verification in the
+lifecycle worker, as well as explicit flushes and snapshots. If an SDK operation
+never returns, the adapter may detach its single lifecycle worker together with
+its sinks. Live-viewer latency work is tracked in
+[#106](https://github.com/jondo2010/boomerang/issues/106).
 
 `SinkConfig::Grpc` is intentionally rejected as `UnsupportedGrpc`. The pinned
 SDK exposes a fixed blocking channel for that sink, which could otherwise hang

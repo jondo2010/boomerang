@@ -732,6 +732,28 @@ fn layer_composes_and_maps_reaction_span_with_explicit_timepoint() {
 }
 
 #[test]
+fn unrepresentable_logical_value_is_a_component_not_a_timeline_coordinate() {
+    let (session, capture) = session_with_capture("unrepresentable-logical-time");
+    let subscriber = tracing_subscriber::registry().with(session.layer());
+
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::trace!(
+            target: "boomerang::trace",
+            event = "shutdown",
+            enclave = "e0",
+            logical_ns = u64::MAX,
+            state = "complete",
+            outcome = "success",
+        );
+    });
+
+    let records = capture.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].fields.logical_ns, Some(u64::MAX));
+    assert_eq!(records[0].timepoint.logical_ns, None);
+}
+
+#[test]
 fn span_records_updates_and_accounts_for_cross_thread_entries() {
     let (session, capture) = session_with_capture("cross-thread");
     let subscriber = tracing_subscriber::registry().with(session.layer());

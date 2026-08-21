@@ -131,7 +131,7 @@ impl RerunLayer {
             ),
             logical_ns: fields
                 .logical_ns
-                .map(|value| i64::try_from(value).unwrap_or(i64::MAX)),
+                .and_then(|value| i64::try_from(value).ok()),
         }
     }
 

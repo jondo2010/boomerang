@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use rerun::external::re_log_encoding::Decodable as _;
 use rerun::{RecordingStream, RecordingStreamBuilder};
 
 #[cfg(feature = "federated")]
@@ -151,7 +152,35 @@ pub enum RerunSessionBuildError {
 /// An error encountered while finalizing a Rerun recording session.
 #[derive(Debug, thiserror::Error)]
 #[error("failed to finalize Rerun recording: {0}")]
-pub struct RerunSessionFinishError(#[from] LifecycleError);
+pub struct RerunSessionFinishError(#[source] RerunSessionFinishErrorKind);
+
+impl From<LifecycleError> for RerunSessionFinishError {
+    fn from(error: LifecycleError) -> Self {
+        Self(RerunSessionFinishErrorKind::Lifecycle(error))
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum RerunSessionFinishErrorKind {
+    #[error(transparent)]
+    Lifecycle(#[from] LifecycleError),
+    #[error("failed to verify finalized RRD file {path}: {source}")]
+    File {
+        path: std::path::PathBuf,
+        #[source]
+        source: RrdFooterVerificationError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+enum RrdFooterVerificationError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("missing or truncated RRD footer (file has {actual} bytes, requires {required})")]
+    Truncated { actual: u64, required: usize },
+    #[error("invalid RRD footer: {0}")]
+    Invalid(#[source] rerun::external::re_log_encoding::CodecError),
+}
 
 /// Adapter-local flush seam used to isolate sink behavior from application execution.
 pub trait FlushDriver: Send + Sync + 'static {
@@ -281,6 +310,7 @@ impl RerunSessionBuilder {
         if sink_contains_grpc(&sink) {
             return Err(RerunSessionBuildError::UnsupportedGrpc);
         }
+        let file_paths = sink_file_paths(&sink);
         let mut builder =
             RecordingStreamBuilder::new(rerun::ApplicationId::new_or_unknown(self.application_id));
         builder = match self.blueprint {
@@ -319,6 +349,7 @@ impl RerunSessionBuilder {
             source_id,
             flush_timeout: self.flush_timeout,
             lifecycle: Some(lifecycle),
+            file_paths,
             state,
             trace_writer: self.trace_writer,
             started: Instant::now(),
@@ -338,6 +369,7 @@ pub struct RerunSession {
     source_id: String,
     flush_timeout: Duration,
     lifecycle: Option<LifecycleWorker>,
+    file_paths: Vec<std::path::PathBuf>,
     state: SessionState,
     trace_writer: Arc<dyn TraceWriter>,
     started: Instant,
@@ -574,8 +606,50 @@ impl RerunSession {
         let Some(lifecycle) = self.lifecycle.take() else {
             return Ok(());
         };
-        lifecycle.shutdown(self.flush_timeout).map_err(Into::into)
+        lifecycle.shutdown(self.flush_timeout)?;
+        for path in &self.file_paths {
+            verify_rrd_footer(path)?;
+        }
+        Ok(())
     }
+}
+
+fn verify_rrd_footer(path: &std::path::Path) -> Result<(), RerunSessionFinishError> {
+    use std::io::{Read as _, Seek as _};
+
+    fn file_error(
+        path: &std::path::Path,
+        source: impl Into<RrdFooterVerificationError>,
+    ) -> RerunSessionFinishError {
+        RerunSessionFinishError(RerunSessionFinishErrorKind::File {
+            path: path.to_owned(),
+            source: source.into(),
+        })
+    }
+
+    let mut file = std::fs::File::open(path).map_err(|error| file_error(path, error))?;
+    let file_len = file
+        .metadata()
+        .map_err(|error| file_error(path, error))?
+        .len();
+    let footer_size = rerun::external::re_log_encoding::StreamFooter::ENCODED_SIZE_BYTES;
+    if file_len < footer_size as u64 {
+        return Err(file_error(
+            path,
+            RrdFooterVerificationError::Truncated {
+                actual: file_len,
+                required: footer_size,
+            },
+        ));
+    }
+    file.seek(std::io::SeekFrom::End(-(footer_size as i64)))
+        .map_err(|error| file_error(path, error))?;
+    let mut footer = vec![0; footer_size];
+    file.read_exact(&mut footer)
+        .map_err(|error| file_error(path, error))?;
+    rerun::external::re_log_encoding::StreamFooter::from_rrd_bytes(&footer)
+        .map_err(|error| file_error(path, RrdFooterVerificationError::Invalid(error)))?;
+    Ok(())
 }
 
 fn sink_contains_grpc(config: &SinkConfig) -> bool {
@@ -583,6 +657,14 @@ fn sink_contains_grpc(config: &SinkConfig) -> bool {
         SinkConfig::Grpc { .. } => true,
         SinkConfig::Tee(leaves) => leaves.iter().any(sink_contains_grpc),
         SinkConfig::Memory | SinkConfig::File(_) => false,
+    }
+}
+
+fn sink_file_paths(config: &SinkConfig) -> Vec<std::path::PathBuf> {
+    match config {
+        SinkConfig::File(path) => vec![path.clone()],
+        SinkConfig::Tee(leaves) => leaves.iter().flat_map(sink_file_paths).collect(),
+        SinkConfig::Memory | SinkConfig::Grpc { .. } => Vec::new(),
     }
 }
 
@@ -756,9 +838,7 @@ impl LifecycleWorker {
         if !self.state.is_enabled() {
             return Err(LifecycleError::Disabled);
         }
-        self.pending
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| LifecycleError::Busy)?;
+        self.begin_pending()?;
         if !self.state.is_enabled() {
             self.pending.store(false, Ordering::Release);
             return Err(LifecycleError::Disabled);
@@ -766,8 +846,14 @@ impl LifecycleWorker {
         Ok(())
     }
 
-    fn submit(&self, command: LifecycleCommand) -> Result<(), LifecycleError> {
-        self.begin_submission()?;
+    fn begin_pending(&self) -> Result<(), LifecycleError> {
+        self.pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| LifecycleError::Busy)?;
+        Ok(())
+    }
+
+    fn submit_admitted(&self, command: LifecycleCommand) -> Result<(), LifecycleError> {
         self.commands.try_send(command).map_err(|error| {
             self.pending.store(false, Ordering::Release);
             match error {
@@ -775,6 +861,16 @@ impl LifecycleWorker {
                 std::sync::mpsc::TrySendError::Disconnected(_) => LifecycleError::Disconnected,
             }
         })
+    }
+
+    fn submit(&self, command: LifecycleCommand) -> Result<(), LifecycleError> {
+        self.begin_submission()?;
+        self.submit_admitted(command)
+    }
+
+    fn submit_shutdown(&self, command: LifecycleCommand) -> Result<(), LifecycleError> {
+        self.begin_pending()?;
+        self.submit_admitted(command)
     }
 
     fn flush(&self, timeout: Duration) -> Result<(), LifecycleError> {
@@ -797,7 +893,7 @@ impl LifecycleWorker {
 
     fn shutdown(mut self, timeout: Duration) -> Result<(), LifecycleError> {
         let (reply, receiver) = std::sync::mpsc::sync_channel(1);
-        self.submit(LifecycleCommand::Shutdown { reply })?;
+        self.submit_shutdown(LifecycleCommand::Shutdown { reply })?;
         match receiver.recv_timeout(timeout) {
             Ok(result) => {
                 // A reply is sent only after final sink teardown and the last strong recording

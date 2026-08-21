@@ -339,6 +339,35 @@ impl FlushDriver for FailingFinalization {
     }
 }
 
+struct CorruptingTeardown {
+    path: std::path::PathBuf,
+}
+
+impl FlushDriver for CorruptingTeardown {
+    fn flush(
+        &self,
+        _recording: &rerun::RecordingStream,
+        _timeout: Duration,
+    ) -> Result<(), rerun::sink::SinkFlushError> {
+        Ok(())
+    }
+
+    fn teardown(
+        &self,
+        recording: rerun::RecordingStream,
+        _timeout: Duration,
+    ) -> Result<(), rerun::sink::SinkFlushError> {
+        drop(recording);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&self.path)
+            .unwrap()
+            .set_len(0)
+            .unwrap();
+        Ok(())
+    }
+}
+
 #[test]
 fn finish_reports_finalization_failure() {
     let session = RerunSessionBuilder::new("failing-finalization")
@@ -353,6 +382,30 @@ fn finish_reports_finalization_failure() {
         error.to_string(),
         "failed to finalize Rerun recording: injected finalization failure"
     );
+}
+
+#[test]
+fn finish_reports_corrupt_footer_after_teardown() {
+    let directory = tempfile::tempdir().unwrap();
+    let valid_path = directory.path().join("valid-after-teardown.rrd");
+    let path = directory.path().join("corrupt-after-teardown.rrd");
+    let session = RerunSessionBuilder::new("corrupt-after-teardown")
+        .sink(SinkConfig::Tee(vec![
+            SinkConfig::File(valid_path),
+            SinkConfig::File(path.clone()),
+        ]))
+        .blueprint(BlueprintConfig::None)
+        .flush_driver(Arc::new(CorruptingTeardown { path: path.clone() }))
+        .build()
+        .unwrap();
+    emit_shutdown(&session);
+
+    let error = session.finish().unwrap_err();
+    let message = error.to_string();
+
+    assert!(message.contains("failed to finalize Rerun recording"));
+    assert!(message.contains(path.to_string_lossy().as_ref()));
+    assert!(message.contains("missing or truncated RRD footer"));
 }
 
 #[test]
@@ -543,6 +596,23 @@ fn disabled_session_rejects_lifecycle_requests_without_queueing() {
     assert!(started.elapsed() < Duration::from_millis(100));
 
     releasing.join().unwrap();
+}
+
+#[test]
+fn disabled_session_finish_completes_teardown() {
+    let teardown_complete = Arc::new(AtomicUsize::new(0));
+    let session = RerunSessionBuilder::new("disabled-finish-teardown")
+        .blueprint(BlueprintConfig::None)
+        .flush_driver(Arc::new(JoinedLifecycle(teardown_complete.clone())))
+        .trace_writer(Arc::new(FailingWriter))
+        .build()
+        .unwrap();
+    emit_shutdown(&session);
+    assert!(!session.is_enabled());
+
+    session.finish().unwrap();
+
+    assert_eq!(teardown_complete.load(Ordering::Acquire), 1);
 }
 
 #[test]

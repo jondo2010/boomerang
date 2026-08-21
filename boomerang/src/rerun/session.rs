@@ -160,6 +160,12 @@ impl From<LifecycleError> for RerunSessionFinishError {
     }
 }
 
+impl From<RerunSessionFinishErrorKind> for RerunSessionFinishError {
+    fn from(error: RerunSessionFinishErrorKind) -> Self {
+        Self(error)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 enum RerunSessionFinishErrorKind {
     #[error(transparent)]
@@ -170,6 +176,8 @@ enum RerunSessionFinishErrorKind {
         #[source]
         source: RrdFooterVerificationError,
     },
+    #[error("recording was disabled after an observational failure: {0}")]
+    PriorObservationalFailure(String),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -203,6 +211,8 @@ pub trait FlushDriver: Send + Sync + 'static {
 
 #[cfg(test)]
 type LifecycleReplyHook = Arc<dyn Fn() + Send + Sync>;
+#[cfg(test)]
+type LifecycleVerificationHook = Arc<dyn Fn() + Send + Sync>;
 
 struct SdkFlushDriver;
 
@@ -231,6 +241,8 @@ pub struct RerunSessionBuilder {
     trace_writer: Arc<dyn TraceWriter>,
     #[cfg(test)]
     lifecycle_reply_hook: Option<LifecycleReplyHook>,
+    #[cfg(test)]
+    lifecycle_verification_hook: Option<LifecycleVerificationHook>,
 }
 
 impl RerunSessionBuilder {
@@ -246,6 +258,8 @@ impl RerunSessionBuilder {
             trace_writer: Arc::new(RerunTraceWriter),
             #[cfg(test)]
             lifecycle_reply_hook: None,
+            #[cfg(test)]
+            lifecycle_verification_hook: None,
         }
     }
 
@@ -267,7 +281,7 @@ impl RerunSessionBuilder {
         self
     }
 
-    /// Sets the maximum time spent flushing on an explicit flush or drop.
+    /// Sets the maximum time spent on an explicit flush or final teardown and footer verification.
     pub fn flush_timeout(mut self, flush_timeout: Duration) -> Self {
         self.flush_timeout = flush_timeout;
         self
@@ -297,6 +311,12 @@ impl RerunSessionBuilder {
     #[cfg(test)]
     fn lifecycle_reply_hook(mut self, hook: LifecycleReplyHook) -> Self {
         self.lifecycle_reply_hook = Some(hook);
+        self
+    }
+
+    #[cfg(test)]
+    fn lifecycle_verification_hook(mut self, hook: LifecycleVerificationHook) -> Self {
+        self.lifecycle_verification_hook = Some(hook);
         self
     }
 
@@ -338,8 +358,11 @@ impl RerunSessionBuilder {
             self.flush_driver,
             self.flush_timeout,
             state.clone(),
+            file_paths,
             #[cfg(test)]
             self.lifecycle_reply_hook,
+            #[cfg(test)]
+            self.lifecycle_verification_hook,
         )
         .map_err(RerunSessionBuildError::LifecycleWorker)?;
 
@@ -349,7 +372,6 @@ impl RerunSessionBuilder {
             source_id,
             flush_timeout: self.flush_timeout,
             lifecycle: Some(lifecycle),
-            file_paths,
             state,
             trace_writer: self.trace_writer,
             started: Instant::now(),
@@ -369,7 +391,6 @@ pub struct RerunSession {
     source_id: String,
     flush_timeout: Duration,
     lifecycle: Option<LifecycleWorker>,
-    file_paths: Vec<std::path::PathBuf>,
     state: SessionState,
     trace_writer: Arc<dyn TraceWriter>,
     started: Instant,
@@ -601,30 +622,31 @@ impl RerunSession {
         });
     }
 
-    /// Finalizes the recording and reports lifecycle or sink failures.
+    /// Finalizes the recording and reports lifecycle, footer, or prior observational failures.
     pub fn finish(mut self) -> Result<(), RerunSessionFinishError> {
-        let Some(lifecycle) = self.lifecycle.take() else {
-            return Ok(());
-        };
-        lifecycle.shutdown(self.flush_timeout)?;
-        for path in &self.file_paths {
-            verify_rrd_footer(path)?;
+        if let Some(lifecycle) = self.lifecycle.take() {
+            lifecycle.shutdown(self.flush_timeout)?;
+        }
+        if let Some(error) = self.state.first_error() {
+            return Err(RerunSessionFinishError(
+                RerunSessionFinishErrorKind::PriorObservationalFailure(error),
+            ));
         }
         Ok(())
     }
 }
 
-fn verify_rrd_footer(path: &std::path::Path) -> Result<(), RerunSessionFinishError> {
+fn verify_rrd_footer(path: &std::path::Path) -> Result<(), RerunSessionFinishErrorKind> {
     use std::io::{Read as _, Seek as _};
 
     fn file_error(
         path: &std::path::Path,
         source: impl Into<RrdFooterVerificationError>,
-    ) -> RerunSessionFinishError {
-        RerunSessionFinishError(RerunSessionFinishErrorKind::File {
+    ) -> RerunSessionFinishErrorKind {
+        RerunSessionFinishErrorKind::File {
             path: path.to_owned(),
             source: source.into(),
-        })
+        }
     }
 
     let mut file = std::fs::File::open(path).map_err(|error| file_error(path, error))?;
@@ -733,7 +755,7 @@ enum LifecycleCommand {
         reply: std::sync::mpsc::SyncSender<Option<Vec<rerun::log::LogMsg>>>,
     },
     Shutdown {
-        reply: std::sync::mpsc::SyncSender<Result<(), rerun::sink::SinkFlushError>>,
+        reply: std::sync::mpsc::SyncSender<Result<(), RerunSessionFinishErrorKind>>,
     },
 }
 
@@ -778,7 +800,9 @@ impl LifecycleWorker {
         driver: Arc<dyn FlushDriver>,
         sdk_timeout: Duration,
         state: SessionState,
+        file_paths: Vec<std::path::PathBuf>,
         #[cfg(test)] reply_hook: Option<LifecycleReplyHook>,
+        #[cfg(test)] verification_hook: Option<LifecycleVerificationHook>,
     ) -> Result<Self, std::io::Error> {
         let (commands, receiver) = std::sync::mpsc::sync_channel(1);
         let pending = Arc::new(AtomicBool::new(false));
@@ -811,7 +835,22 @@ impl LifecycleWorker {
                             let flush = driver.flush(&recording, sdk_timeout);
                             recording.disconnect();
                             drop(memory);
-                            let result = driver.teardown(recording, sdk_timeout).and(flush);
+                            let result = driver
+                                .teardown(recording, sdk_timeout)
+                                .and(flush)
+                                .map_err(|error| {
+                                    RerunSessionFinishErrorKind::Lifecycle(error.into())
+                                })
+                                .and_then(|()| {
+                                    #[cfg(test)]
+                                    if let Some(hook) = verification_hook.as_ref() {
+                                        hook();
+                                    }
+                                    for path in &file_paths {
+                                        verify_rrd_footer(path)?;
+                                    }
+                                    Ok(())
+                                });
                             pending_reset.release();
                             let _ = reply.send(result);
                             #[cfg(test)]
@@ -891,25 +930,27 @@ impl LifecycleWorker {
         })
     }
 
-    fn shutdown(mut self, timeout: Duration) -> Result<(), LifecycleError> {
+    fn shutdown(mut self, timeout: Duration) -> Result<(), RerunSessionFinishErrorKind> {
         let (reply, receiver) = std::sync::mpsc::sync_channel(1);
-        self.submit_shutdown(LifecycleCommand::Shutdown { reply })?;
+        self.submit_shutdown(LifecycleCommand::Shutdown { reply })
+            .map_err(RerunSessionFinishErrorKind::from)?;
         match receiver.recv_timeout(timeout) {
             Ok(result) => {
-                // A reply is sent only after final sink teardown and the last strong recording
-                // drop. Join even when the flush itself reported an error: cleanup completed.
+                // A reply is sent only after final sink teardown, the last strong recording drop,
+                // and footer verification. Join even when finalization reported an error: the
+                // worker completed its bounded shutdown path.
                 if let Some(handle) = self.handle.take() {
                     if handle.join().is_err() {
-                        return Err(LifecycleError::Disconnected);
+                        return Err(LifecycleError::Disconnected.into());
                     }
                 }
-                result.map_err(Into::into)
+                result
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                Err(LifecycleError::Timeout(timeout))
+                Err(LifecycleError::Timeout(timeout).into())
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                Err(LifecycleError::Disconnected)
+                Err(LifecycleError::Disconnected.into())
             }
         }
     }
@@ -991,6 +1032,7 @@ struct SessionStateInner {
     skipped_count: AtomicUsize,
     warned: AtomicBool,
     flushed: AtomicBool,
+    first_error: std::sync::Mutex<Option<String>>,
 }
 
 impl Default for SessionState {
@@ -1008,6 +1050,7 @@ impl SessionState {
                 skipped_count: AtomicUsize::new(0),
                 warned: AtomicBool::new(false),
                 flushed: AtomicBool::new(false),
+                first_error: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -1022,6 +1065,14 @@ impl SessionState {
 
     fn skipped_count(&self) -> usize {
         self.inner.skipped_count.load(Ordering::Relaxed)
+    }
+
+    fn first_error(&self) -> Option<String> {
+        self.inner
+            .first_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub(super) fn try_begin_attempt(&self) -> bool {
@@ -1046,7 +1097,20 @@ impl SessionState {
     }
 
     pub(super) fn disable_on_error(&self, error: &dyn std::fmt::Display) {
-        if self.inner.enabled.swap(false, Ordering::AcqRel) {
+        let disabled = {
+            let mut first_error = self
+                .inner
+                .first_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.inner.enabled.swap(false, Ordering::AcqRel) {
+                *first_error = Some(error.to_string());
+                true
+            } else {
+                false
+            }
+        };
+        if disabled {
             self.inner.error_count.fetch_add(1, Ordering::Relaxed);
             tracing::callsite::rebuild_interest_cache();
             if !self.inner.warned.swap(true, Ordering::AcqRel) {
@@ -1066,7 +1130,9 @@ mod tests {
     use std::sync::{mpsc, Arc, Barrier};
     use std::time::{Duration, Instant};
 
-    use super::{BlueprintConfig, FlushDriver, LifecycleError, RerunSessionBuilder, SessionState};
+    use super::{
+        BlueprintConfig, FlushDriver, LifecycleError, RerunSessionBuilder, SessionState, SinkConfig,
+    };
 
     struct PanickingFlush;
 
@@ -1142,12 +1208,20 @@ mod tests {
         assert!(!state.is_enabled());
         assert_eq!(state.error_count(), 1);
         assert_eq!(state.skipped_count(), 0);
+        assert_eq!(
+            state.first_error().as_deref(),
+            Some("injected recording failure")
+        );
 
         assert!(!shared_state.try_begin_attempt());
         assert!(!shared_state.try_begin_attempt());
         state.disable_on_error(&"later concurrent failure");
         assert_eq!(state.error_count(), 1);
         assert_eq!(state.skipped_count(), 2);
+        assert_eq!(
+            state.first_error().as_deref(),
+            Some("injected recording failure")
+        );
     }
 
     #[test]
@@ -1181,6 +1255,39 @@ mod tests {
             .unwrap();
 
         session.finish().unwrap();
+    }
+
+    #[test]
+    fn footer_verification_is_bounded_by_shutdown_timeout() {
+        let directory = tempfile::tempdir().unwrap();
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let session = RerunSessionBuilder::new("bounded-footer-verification")
+            .sink(SinkConfig::File(directory.path().join("bounded.rrd")))
+            .blueprint(BlueprintConfig::None)
+            .flush_timeout(Duration::from_millis(10))
+            .lifecycle_verification_hook(Arc::new({
+                let entered = entered.clone();
+                let release = release.clone();
+                move || {
+                    entered.wait();
+                    release.wait();
+                }
+            }))
+            .build()
+            .unwrap();
+        let releasing = std::thread::spawn(move || {
+            entered.wait();
+            std::thread::sleep(Duration::from_millis(100));
+            release.wait();
+        });
+        let started = Instant::now();
+
+        let error = session.finish().unwrap_err();
+
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert!(error.to_string().contains("exceeded 10ms"));
+        releasing.join().unwrap();
     }
 
     #[test]

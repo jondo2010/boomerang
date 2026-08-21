@@ -610,9 +610,10 @@ fn disabled_session_finish_completes_teardown() {
     emit_shutdown(&session);
     assert!(!session.is_enabled());
 
-    session.finish().unwrap();
+    let error = session.finish().unwrap_err();
 
     assert_eq!(teardown_complete.load(Ordering::Acquire), 1);
+    assert!(error.to_string().contains("injected writer failure"));
 }
 
 #[test]

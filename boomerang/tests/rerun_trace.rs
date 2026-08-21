@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 
 use boomerang::rerun::{
     BlueprintConfig, FlushDriver, RerunSessionBuildError, RerunSessionBuilder, SinkConfig,
-    SinkConfigError, TraceRecord, TraceWriter, TraceWriterError,
+    SinkConfigError, TraceRecord, TraceStateChange, TraceStateRecord, TraceWriter,
+    TraceWriterError,
 };
 use boomerang::runtime::{Enclave, Port, Reactor};
 use rerun::external::arrow::array::Array as _;
@@ -17,6 +18,7 @@ use tracing_subscriber::prelude::*;
 #[derive(Default)]
 struct CapturingWriter {
     records: Mutex<Vec<TraceRecord>>,
+    states: Mutex<Vec<TraceStateRecord>>,
 }
 
 impl TraceWriter for CapturingWriter {
@@ -28,11 +30,24 @@ impl TraceWriter for CapturingWriter {
         self.records.lock().unwrap().push(record.clone());
         Ok(())
     }
+
+    fn write_state(
+        &self,
+        _recording: &rerun::RecordingStream,
+        record: &TraceStateRecord,
+    ) -> Result<(), TraceWriterError> {
+        self.states.lock().unwrap().push(record.clone());
+        Ok(())
+    }
 }
 
 impl CapturingWriter {
     fn records(&self) -> Vec<TraceRecord> {
         self.records.lock().unwrap().clone()
+    }
+
+    fn states(&self) -> Vec<TraceStateRecord> {
+        self.states.lock().unwrap().clone()
     }
 }
 
@@ -805,6 +820,71 @@ fn default_memory_writer_accepts_trace_record_smoke_test() {
 }
 
 #[test]
+fn state_overlays_use_builtin_rerun_archetype() {
+    let session = RerunSessionBuilder::new("state-overlay-archetype")
+        .blueprint(BlueprintConfig::None)
+        .build()
+        .unwrap();
+    let subscriber = tracing_subscriber::registry().with(session.layer());
+
+    tracing::subscriber::with_default(subscriber, || {
+        let span = tracing::trace_span!(
+            target: "boomerang::trace",
+            "tag_process",
+            event = "tag_process",
+            enclave = "e0",
+            state = "processing",
+        );
+        let _entered = span.enter();
+        tracing::trace!(
+            target: "boomerang::trace",
+            event = "action_schedule",
+            enclave = "e0",
+            action = "tick",
+            outcome = "scheduled",
+        );
+    });
+    session.flush();
+
+    let chunks = decode_chunks(session.take_memory_snapshot_bounded().unwrap()).unwrap();
+    let tag_chunks = chunks
+        .iter()
+        .filter(|chunk| chunk.entity_path().to_string().ends_with("/tag_process"))
+        .collect::<Vec<_>>();
+    assert!(tag_chunks.iter().any(|chunk| {
+        !chunk.is_static()
+            && chunk.component_descriptors().any(|descriptor| {
+                descriptor
+                    .archetype
+                    .as_ref()
+                    .is_some_and(|archetype| archetype.as_str() == "rerun.archetypes.StateChange")
+            })
+    }));
+
+    let action = chunks
+        .iter()
+        .find(|chunk| {
+            chunk
+                .entity_path()
+                .to_string()
+                .ends_with("/action_schedule")
+        })
+        .expect("instant action trace record");
+    assert!(action.component_descriptors().any(|descriptor| {
+        descriptor
+            .archetype
+            .as_ref()
+            .is_some_and(|archetype| archetype.as_str() == "boomerang.TraceRecord")
+    }));
+    assert!(action.component_descriptors().all(|descriptor| {
+        descriptor
+            .archetype
+            .as_ref()
+            .is_none_or(|archetype| archetype.as_str() != "rerun.archetypes.StateChange")
+    }));
+}
+
+#[test]
 fn child_event_uses_adapter_parent_id_and_neutral_ingress_has_none() {
     let (session, capture) = session_with_capture("parentage");
     let subscriber = tracing_subscriber::registry().with(session.layer());
@@ -967,6 +1047,42 @@ fn closed_runtime_span_has_duration_and_terminal_state() {
 }
 
 #[test]
+fn duration_spans_emit_state_begin_and_reset() {
+    let (session, capture) = session_with_capture("duration-state");
+    let subscriber = tracing_subscriber::registry().with(session.layer());
+
+    tracing::subscriber::with_default(subscriber, || {
+        let span = tracing::trace_span!(
+            target: "boomerang::trace",
+            "tag_process",
+            event = "tag_process",
+            enclave = "e0",
+            terminal = true,
+            state = "processing",
+        );
+        let _entered = span.enter();
+        tracing::trace!(
+            target: "boomerang::trace",
+            event = "action_schedule",
+            enclave = "e0",
+            action = "tick",
+            outcome = "scheduled",
+        );
+    });
+
+    let states = capture.states();
+    assert_eq!(states.len(), 2);
+    assert_eq!(states[0].entity_path, "/enclaves/e0/scheduler/tag_process");
+    assert_eq!(
+        states[0].change,
+        TraceStateChange::Set("processing tag".to_owned())
+    );
+    assert_eq!(states[1].entity_path, states[0].entity_path);
+    assert_eq!(states[1].change, TraceStateChange::Reset);
+    assert!(states[1].timepoint.elapsed_ns >= states[0].timepoint.elapsed_ns);
+}
+
+#[test]
 fn simultaneous_events_receive_unique_adapter_ids() {
     let (session, capture) = session_with_capture("concurrent");
     let barrier = Arc::new(Barrier::new(9));
@@ -1054,6 +1170,48 @@ impl TraceWriter for FailingWriter {
     ) -> Result<(), TraceWriterError> {
         Err("injected writer failure".into())
     }
+}
+
+struct FailingStateWriter;
+
+impl TraceWriter for FailingStateWriter {
+    fn write(
+        &self,
+        _recording: &rerun::RecordingStream,
+        _record: &TraceRecord,
+    ) -> Result<(), TraceWriterError> {
+        Ok(())
+    }
+
+    fn write_state(
+        &self,
+        _recording: &rerun::RecordingStream,
+        _record: &TraceStateRecord,
+    ) -> Result<(), TraceWriterError> {
+        Err("injected state writer failure".into())
+    }
+}
+
+#[test]
+fn state_write_failure_disables_tracing() {
+    let session = RerunSessionBuilder::new("state-writer-failure")
+        .trace_writer(Arc::new(FailingStateWriter))
+        .build()
+        .unwrap();
+    let subscriber = tracing_subscriber::registry().with(session.layer());
+
+    tracing::subscriber::with_default(subscriber, || {
+        let _span = tracing::trace_span!(
+            target: "boomerang::trace",
+            "tag_process",
+            event = "tag_process",
+            enclave = "e0",
+            state = "processing",
+        );
+    });
+
+    assert!(!session.is_enabled());
+    assert_eq!(session.error_count(), 1);
 }
 
 struct CountingDebug<'a>(&'a AtomicUsize);
@@ -1260,6 +1418,51 @@ impl TraceWriter for PanickingWriter {
     ) -> Result<(), TraceWriterError> {
         panic!("injected writer panic")
     }
+}
+
+struct PanickingStateWriter;
+
+impl TraceWriter for PanickingStateWriter {
+    fn write(
+        &self,
+        _recording: &rerun::RecordingStream,
+        _record: &TraceRecord,
+    ) -> Result<(), TraceWriterError> {
+        Ok(())
+    }
+
+    fn write_state(
+        &self,
+        _recording: &rerun::RecordingStream,
+        _record: &TraceStateRecord,
+    ) -> Result<(), TraceWriterError> {
+        panic!("injected state writer panic")
+    }
+}
+
+#[test]
+fn state_writer_panic_isolated_from_traced_application() {
+    let session = RerunSessionBuilder::new("state-writer-panic")
+        .trace_writer(Arc::new(PanickingStateWriter))
+        .build()
+        .unwrap();
+    let subscriber = tracing_subscriber::registry().with(session.layer());
+
+    let application_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tracing::subscriber::with_default(subscriber, || {
+            let _span = tracing::trace_span!(
+                target: "boomerang::trace",
+                "tag_process",
+                event = "tag_process",
+                enclave = "e0",
+                state = "processing",
+            );
+        });
+    }));
+
+    assert!(application_result.is_ok());
+    assert!(!session.is_enabled());
+    assert_eq!(session.error_count(), 1);
 }
 
 #[test]

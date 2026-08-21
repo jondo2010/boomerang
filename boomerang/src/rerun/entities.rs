@@ -96,6 +96,21 @@ pub struct TraceRecord {
     pub fields: TraceFields,
 }
 
+/// One adapter-normalized state transition ready for a recording sink.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TraceStateRecord {
+    pub entity_path: String,
+    pub timepoint: TraceTimePoint,
+    pub change: TraceStateChange,
+}
+
+/// A state value to set, or a reset that ends the preceding state interval.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TraceStateChange {
+    Set(String),
+    Reset,
+}
+
 /// Error returned by a dynamic trace writer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TraceWriterError(pub String);
@@ -135,6 +150,14 @@ pub trait TraceWriter: Send + Sync + 'static {
         recording: &rerun::RecordingStream,
         record: &TraceRecord,
     ) -> Result<(), TraceWriterError>;
+
+    fn write_state(
+        &self,
+        _recording: &rerun::RecordingStream,
+        _record: &TraceStateRecord,
+    ) -> Result<(), TraceWriterError> {
+        Ok(())
+    }
 }
 
 pub(crate) struct RerunTraceWriter;
@@ -152,58 +175,88 @@ impl Drop for TimeContextReset<'_> {
     }
 }
 
+fn with_timepoint(
+    recording: &rerun::RecordingStream,
+    timepoint: &TraceTimePoint,
+    write: impl FnOnce() -> Result<(), TraceWriterError>,
+) -> Result<(), TraceWriterError> {
+    let mut rerun_timepoint = rerun::TimePoint::default();
+    rerun_timepoint.insert_cell(
+        "elapsed",
+        rerun::TimeCell::from_duration_nanos(timepoint.elapsed_ns),
+    );
+    rerun_timepoint.insert_cell(
+        "wall_clock",
+        rerun::TimeCell::from_timestamp_nanos_since_epoch(timepoint.wall_clock_unix_ns),
+    );
+    if let Some(logical_ns) = timepoint.logical_ns {
+        rerun_timepoint.insert_cell("logical", rerun::TimeCell::from_duration_nanos(logical_ns));
+    }
+
+    // Rerun's time context is thread-local. Reset before and after each write so a record
+    // without logical time cannot inherit it from an earlier record on the same thread. The
+    // guard also resets the context during panic unwinding.
+    recording.reset_time();
+    let _reset = TimeContextReset(recording);
+    recording.set_timepoint(rerun_timepoint);
+    write()
+}
+
 impl TraceWriter for RerunTraceWriter {
     fn write(
         &self,
         recording: &rerun::RecordingStream,
         record: &TraceRecord,
     ) -> Result<(), TraceWriterError> {
-        let mut timepoint = rerun::TimePoint::default();
-        timepoint.insert_cell(
-            "elapsed",
-            rerun::TimeCell::from_duration_nanos(record.timepoint.elapsed_ns),
-        );
-        timepoint.insert_cell(
-            "wall_clock",
-            rerun::TimeCell::from_timestamp_nanos_since_epoch(record.timepoint.wall_clock_unix_ns),
-        );
-        if let Some(logical_ns) = record.timepoint.logical_ns {
-            timepoint.insert_cell("logical", rerun::TimeCell::from_duration_nanos(logical_ns));
-        }
-
-        // Rerun's time context is thread-local. Reset before and after each write so a record
-        // without logical time cannot inherit it from an earlier record on the same thread. The
-        // guard also resets the context during panic unwinding.
-        recording.reset_time();
-        let _reset = TimeContextReset(recording);
-        recording.set_timepoint(timepoint);
-        match record.primary_payload() {
-            PrimaryPayload::TextLog(payload) => {
-                recording.log(record.entity_path.clone(), payload.as_ref())?;
+        with_timepoint(recording, &record.timepoint, || {
+            match record.primary_payload() {
+                PrimaryPayload::TextLog(payload) => {
+                    recording.log(record.entity_path.clone(), payload.as_ref())?;
+                }
+                PrimaryPayload::Dynamic(payload) => {
+                    recording.log(record.entity_path.clone(), &payload)?;
+                }
             }
-            PrimaryPayload::Dynamic(payload) => {
-                recording.log(record.entity_path.clone(), &payload)?;
+            if record.event == "causal_link" {
+                if let (Some(source), Some(destination)) = (
+                    record.fields.source.as_deref(),
+                    record.fields.destination.as_deref(),
+                ) {
+                    recording.log(
+                        record.entity_path.clone(),
+                        &rerun::GraphEdges::new([(source, destination)])
+                            .with_graph_type(rerun::components::GraphType::Directed),
+                    )?;
+                }
             }
-        }
-        if record.event == "causal_link" {
-            if let (Some(source), Some(destination)) = (
-                record.fields.source.as_deref(),
-                record.fields.destination.as_deref(),
-            ) {
+            for (name, value) in record.scalar_series() {
                 recording.log(
-                    record.entity_path.clone(),
-                    &rerun::GraphEdges::new([(source, destination)])
-                        .with_graph_type(rerun::components::GraphType::Directed),
+                    format!("{}/metrics/{name}", record.entity_path),
+                    &rerun::Scalars::new([value]),
                 )?;
             }
-        }
-        for (name, value) in record.scalar_series() {
-            recording.log(
-                format!("{}/metrics/{name}", record.entity_path),
-                &rerun::Scalars::new([value]),
-            )?;
-        }
-        Ok(())
+            Ok(())
+        })
+    }
+
+    fn write_state(
+        &self,
+        recording: &rerun::RecordingStream,
+        record: &TraceStateRecord,
+    ) -> Result<(), TraceWriterError> {
+        with_timepoint(recording, &record.timepoint, || {
+            match &record.change {
+                TraceStateChange::Set(value) => recording.log(
+                    record.entity_path.clone(),
+                    &rerun::StateChange::single(value.clone()),
+                )?,
+                TraceStateChange::Reset => recording.log(
+                    record.entity_path.clone(),
+                    &rerun::StateChange::clear_fields(),
+                )?,
+            }
+            Ok(())
+        })
     }
 }
 

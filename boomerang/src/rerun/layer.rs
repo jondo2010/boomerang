@@ -13,8 +13,8 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 
 use super::entities::{
-    entity_path, RegistrationIndex, TraceFields, TraceId, TraceRecord, TraceTimePoint, TraceWriter,
-    TraceWriterError,
+    entity_path, RegistrationIndex, TraceFields, TraceId, TraceRecord, TraceStateChange,
+    TraceStateRecord, TraceTimePoint, TraceWriter, TraceWriterError,
 };
 use super::session::SessionState;
 
@@ -148,6 +148,19 @@ impl RerunLayer {
         }
     }
 
+    fn write_state(&self, record: TraceStateRecord) {
+        if !self.state.try_begin_attempt() {
+            return;
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.writer.write_state(&self.recording, &record)
+        }))
+        .unwrap_or_else(|panic| Err(panic_error("trace writer", panic.as_ref())));
+        if let Err(error) = result {
+            self.disable_safely(&error);
+        }
+    }
+
     fn observe_callback(&self, callback: impl FnOnce()) {
         if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)) {
             self.disable_safely(&panic_error("trace callback", panic.as_ref()));
@@ -208,13 +221,7 @@ impl RerunLayer {
         } else {
             self.next_id(enclave)?
         };
-        let entity_path = self
-            .adapter
-            .registration
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .entity_path(&fields, &event)
-            .unwrap_or_else(|| entity_path(&fields, &event));
+        let entity_path = self.resolved_entity_path(&fields, &event);
         let entity_path = if event == "propagation_send" {
             format!(
                 "/propagation/sends/{}",
@@ -234,6 +241,15 @@ impl RerunLayer {
             terminal_state: None,
             fields,
         })
+    }
+
+    fn resolved_entity_path(&self, fields: &TraceFields, event: &str) -> String {
+        self.adapter
+            .registration
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entity_path(fields, event)
+            .unwrap_or_else(|| entity_path(fields, event))
     }
 
     fn write_with_causality(&self, record: TraceRecord) {
@@ -1183,14 +1199,24 @@ where
             };
             self.begin_propagation_send(&fields, trace_id.clone());
             let timepoint = self.timepoint(&fields);
+            let duration_state = duration_phase(event)
+                .map(|phase| (self.resolved_entity_path(&fields, event), phase));
             let span_state = Arc::new(SpanState::new(
                 trace_id,
                 parent.map(|parent| parent.id.clone()),
                 fields,
-                timepoint,
+                timepoint.clone(),
+                duration_state,
             ));
             if let Some(span) = ctx.span(id) {
-                span.extensions_mut().insert(span_state);
+                span.extensions_mut().insert(span_state.clone());
+            }
+            if let Some((entity_path, phase)) = &span_state.duration_state {
+                self.write_state(TraceStateRecord {
+                    entity_path: entity_path.clone(),
+                    timepoint,
+                    change: TraceStateChange::Set((*phase).to_owned()),
+                });
             }
         });
     }
@@ -1231,7 +1257,7 @@ where
             let fields = state.fields();
             let terminal_state = terminal_span_state(&fields);
             if let Some(mut record) = self.make_record(
-                fields,
+                fields.clone(),
                 state.parent_id.clone(),
                 Some(state.id.clone()),
                 Some(state.close_duration()),
@@ -1239,6 +1265,13 @@ where
                 record.timepoint = state.timepoint.clone();
                 record.terminal_state = terminal_state;
                 self.write_with_causality(record);
+            }
+            if let Some((entity_path, _)) = &state.duration_state {
+                self.write_state(TraceStateRecord {
+                    entity_path: entity_path.clone(),
+                    timepoint: self.timepoint(&fields),
+                    change: TraceStateChange::Reset,
+                });
             }
         });
     }
@@ -1268,6 +1301,7 @@ struct SpanState {
     parent_id: Option<TraceId>,
     fields: Mutex<TraceFields>,
     timepoint: TraceTimePoint,
+    duration_state: Option<(String, &'static str)>,
     timing: Mutex<SpanTiming>,
 }
 
@@ -1283,12 +1317,14 @@ impl SpanState {
         parent_id: Option<TraceId>,
         fields: TraceFields,
         timepoint: TraceTimePoint,
+        duration_state: Option<(String, &'static str)>,
     ) -> Self {
         Self {
             id,
             parent_id,
             fields: Mutex::new(fields),
             timepoint,
+            duration_state,
             timing: Mutex::new(SpanTiming::default()),
         }
     }
@@ -1328,6 +1364,15 @@ impl SpanState {
                 total.saturating_add(now.duration_since(start))
             });
         timing.accumulated.saturating_add(outstanding)
+    }
+}
+
+fn duration_phase(event: &str) -> Option<&'static str> {
+    match event {
+        "tag_process" => Some("processing tag"),
+        "reaction_execute" => Some("executing reaction"),
+        "coordination_wait" => Some("waiting for coordination"),
+        _ => None,
     }
 }
 

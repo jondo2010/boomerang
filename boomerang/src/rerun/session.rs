@@ -7,7 +7,7 @@ use rerun::{RecordingStream, RecordingStreamBuilder};
 
 #[cfg(feature = "federated")]
 use super::entities::{escape_entity_segment, log_runtime_relation, runtime_enclave_root};
-use super::entities::{log_runtime_enclaves, RegistrationIndex, RerunTraceWriter, TraceWriter};
+use super::entities::{log_runtime_enclaves, RegistrationIndex};
 use super::layer::{AdapterState, RerunLayer, SessionFilter};
 use tracing_subscriber::Layer as _;
 
@@ -244,7 +244,6 @@ pub struct RerunSessionBuilder {
     blueprint: BlueprintConfig,
     flush_timeout: Duration,
     flush_driver: Arc<dyn FlushDriver>,
-    trace_writer: Arc<dyn TraceWriter>,
     #[cfg(test)]
     lifecycle_reply_hook: Option<LifecycleReplyHook>,
     #[cfg(test)]
@@ -261,7 +260,6 @@ impl RerunSessionBuilder {
             blueprint: BlueprintConfig::default(),
             flush_timeout: DEFAULT_FLUSH_TIMEOUT,
             flush_driver: Arc::new(SdkFlushDriver),
-            trace_writer: Arc::new(RerunTraceWriter),
             #[cfg(test)]
             lifecycle_reply_hook: None,
             #[cfg(test)]
@@ -302,15 +300,6 @@ impl RerunSessionBuilder {
     /// session; the adapter cannot cancel SDK work safely.
     pub fn flush_driver(mut self, flush_driver: Arc<dyn FlushDriver>) -> Self {
         self.flush_driver = flush_driver;
-        self
-    }
-
-    /// Overrides the synchronous dynamic-record writer.
-    ///
-    /// This seam supports deterministic testing and future file/live/tee sinks without adding a
-    /// second trace queue.
-    pub fn trace_writer(mut self, trace_writer: Arc<dyn TraceWriter>) -> Self {
-        self.trace_writer = trace_writer;
         self
     }
 
@@ -380,7 +369,6 @@ impl RerunSessionBuilder {
             flush_timeout: self.flush_timeout,
             lifecycle: Some(lifecycle),
             state,
-            trace_writer: self.trace_writer,
             started: Instant::now(),
             adapter: AdapterState::default(),
         })
@@ -399,7 +387,6 @@ pub struct RerunSession {
     flush_timeout: Duration,
     lifecycle: Option<LifecycleWorker>,
     state: SessionState,
-    trace_writer: Arc<dyn TraceWriter>,
     started: Instant,
     pub(super) adapter: AdapterState,
 }
@@ -443,7 +430,6 @@ impl RerunSession {
             self.recording.clone_weak(),
             state.clone(),
             Arc::from(self.source_id.as_str()),
-            self.trace_writer.clone(),
             self.started,
             self.adapter.clone(),
         )

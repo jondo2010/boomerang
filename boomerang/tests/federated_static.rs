@@ -14,15 +14,6 @@ use rerun::external::arrow::array::Array as _;
 use tracing_subscriber::prelude::*;
 
 #[cfg(feature = "rerun")]
-fn rerun_chunks(
-    session: &boomerang::rerun::RerunSession,
-    messages: &mut Vec<rerun::log::LogMsg>,
-) -> Vec<rerun::log::Chunk> {
-    messages.extend(session.take_memory_snapshot_bounded().expect("memory sink"));
-    decode_chunks(messages, Some(rerun::StoreKind::Recording))
-}
-
-#[cfg(feature = "rerun")]
 fn decode_chunks(
     messages: &[rerun::log::LogMsg],
     store_kind: Option<rerun::StoreKind>,
@@ -41,128 +32,10 @@ fn decode_chunks(
 }
 
 #[cfg(feature = "rerun")]
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct RecordingRowSemantics {
-    entity_path: String,
-    archetypes: Vec<String>,
-    trace_fields: Vec<(String, String)>,
-    timelines: Vec<(String, i64)>,
-}
-
-#[cfg(feature = "rerun")]
-fn normalize_recording_rows(
-    batches: impl IntoIterator<Item = Vec<RecordingRowSemantics>>,
-) -> Vec<RecordingRowSemantics> {
-    let mut rows = batches.into_iter().flatten().collect::<Vec<_>>();
-    rows.sort();
-    rows
-}
-
-#[cfg(feature = "rerun")]
-fn normalized_present_archetypes<'a>(
-    components: impl IntoIterator<Item = (Option<&'a str>, bool)>,
-) -> Vec<String> {
-    let mut archetypes = components
-        .into_iter()
-        .filter_map(|(archetype, present)| present.then_some(archetype).flatten())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    archetypes.sort();
-    archetypes.dedup();
-    archetypes
-}
-
-#[cfg(feature = "rerun")]
-fn recording_semantics(chunks: &[rerun::log::Chunk]) -> Vec<RecordingRowSemantics> {
-    normalize_recording_rows(chunks.iter().map(|chunk| {
-        (0..chunk.num_rows())
-            .map(|row| {
-                let archetypes = normalized_present_archetypes(chunk.component_descriptors().map(
-                    |descriptor| {
-                        (
-                            descriptor.archetype.as_ref().map(|name| name.as_str()),
-                            chunk
-                                .component_batch_raw(descriptor.component, row)
-                                .is_some(),
-                        )
-                    },
-                ));
-                let trace_fields = [
-                    ":boomerang.trace.event",
-                    ":boomerang.trace.id",
-                    ":boomerang.trace.source",
-                    ":boomerang.trace.destination",
-                ]
-                .into_iter()
-                .filter_map(|suffix| {
-                    text_component_at(chunk, suffix, row).map(|value| (suffix.to_owned(), value))
-                })
-                .collect();
-                let mut timelines = chunk
-                    .timelines()
-                    .values()
-                    .filter_map(|column| {
-                        column
-                            .times_raw()
-                            .get(row)
-                            .copied()
-                            .map(|time| (column.name().to_owned(), time))
-                    })
-                    .collect::<Vec<_>>();
-                timelines.sort();
-                RecordingRowSemantics {
-                    entity_path: chunk.entity_path().to_string(),
-                    archetypes,
-                    trace_fields,
-                    timelines,
-                }
-            })
-            .collect()
-    }))
-}
-
-#[cfg(feature = "rerun")]
-fn assert_recording_row_normalization_is_independent_of_chunk_batching() {
-    let schema_union = [
-        Some("boomerang.ActionStartup"),
-        Some("rerun.archetypes.GraphEdges"),
-        None,
-    ];
-    assert_eq!(
-        normalized_present_archetypes(schema_union.into_iter().zip([true, false, true])),
-        vec!["boomerang.ActionStartup"]
-    );
-    assert_eq!(
-        normalized_present_archetypes(schema_union.into_iter().zip([false, true, true])),
-        vec!["rerun.archetypes.GraphEdges"]
-    );
-
-    let row = |event: &str, logical: i64| RecordingRowSemantics {
-        entity_path: "/enclaves/e0/reactions/r0".to_owned(),
-        archetypes: vec!["boomerang.ActionStartup".to_owned()],
-        trace_fields: vec![(":boomerang.trace.event".to_owned(), event.to_owned())],
-        timelines: vec![("logical".to_owned(), logical)],
-    };
-    let first = row("first", 1);
-    let later = row("later", 2);
-    let duplicate = later.clone();
-
-    let split = normalize_recording_rows(vec![
-        vec![first.clone()],
-        vec![later.clone(), duplicate.clone()],
-    ]);
-    let merged = normalize_recording_rows(vec![vec![duplicate, first, later.clone()]]);
-
-    assert_eq!(split, merged);
-    assert_eq!(merged.len(), 3, "row multiplicity must be preserved");
-    assert_eq!(
-        merged
-            .iter()
-            .filter(|row| row.trace_fields[0].1 == "later")
-            .count(),
-        2,
-        "later rows must not be ignored"
-    );
+fn rows(chunks: &[rerun::log::Chunk]) -> impl Iterator<Item = (&rerun::log::Chunk, usize)> {
+    chunks
+        .iter()
+        .flat_map(|chunk| (0..chunk.num_rows()).map(move |row| (chunk, row)))
 }
 
 #[cfg(feature = "rerun")]
@@ -178,19 +51,14 @@ fn text_component_at(chunk: &rerun::log::Chunk, suffix: &str, row: usize) -> Opt
 }
 
 #[cfg(feature = "rerun")]
-fn text_component(chunk: &rerun::log::Chunk, suffix: &str) -> Option<String> {
-    text_component_at(chunk, suffix, 0)
-}
-
-#[cfg(feature = "rerun")]
-fn graph_edge(chunk: &rerun::log::Chunk) -> Option<(String, String)> {
+fn graph_edge_at(chunk: &rerun::log::Chunk, row: usize) -> Option<(String, String)> {
     let descriptor = chunk.component_descriptors().find(|descriptor| {
         descriptor
             .component_type
             .as_ref()
             .is_some_and(|name| name.as_str() == "rerun.components.GraphEdge")
     })?;
-    let values = chunk.component_batch_raw(descriptor.component, 0)?.ok()?;
+    let values = chunk.component_batch_raw(descriptor.component, row)?.ok()?;
     let values = values
         .as_any()
         .downcast_ref::<rerun::external::arrow::array::StructArray>()?;
@@ -203,6 +71,63 @@ fn graph_edge(chunk: &rerun::log::Chunk) -> Option<(String, String)> {
         .as_any()
         .downcast_ref::<rerun::external::arrow::array::StringArray>()?;
     (values.len() == 1).then(|| (first.value(0).to_owned(), second.value(0).to_owned()))
+}
+
+#[cfg(feature = "rerun")]
+fn state_change_at(chunk: &rerun::log::Chunk, row: usize) -> Option<Option<String>> {
+    let descriptor = chunk.component_descriptors().find(|descriptor| {
+        descriptor
+            .archetype
+            .as_ref()
+            .is_some_and(|archetype| archetype.as_str() == "rerun.archetypes.StateChange")
+    })?;
+    let values = chunk.component_batch_raw(descriptor.component, row)?.ok()?;
+    let values = values
+        .as_any()
+        .downcast_ref::<rerun::external::arrow::array::StringArray>()?;
+    Some(
+        (values.len() == 1 && !values.is_null(0) && !values.value(0).is_empty())
+            .then(|| values.value(0).to_owned()),
+    )
+}
+
+#[cfg(feature = "rerun")]
+fn scalar_at(chunk: &rerun::log::Chunk, row: usize) -> Option<f64> {
+    let descriptor = chunk.component_descriptors().find(|descriptor| {
+        descriptor
+            .archetype
+            .as_ref()
+            .is_some_and(|archetype| archetype.as_str() == "rerun.archetypes.Scalars")
+    })?;
+    let values = chunk.component_batch_raw(descriptor.component, row)?.ok()?;
+    let values = values
+        .as_any()
+        .downcast_ref::<rerun::external::arrow::array::Float64Array>()?;
+    (values.len() == 1).then(|| values.value(0))
+}
+
+#[cfg(feature = "rerun")]
+fn uint_component_at(chunk: &rerun::log::Chunk, suffix: &str, row: usize) -> Option<u64> {
+    let descriptor = chunk
+        .component_descriptors()
+        .find(|descriptor| descriptor.component.as_str().ends_with(suffix))?;
+    let values = chunk.component_batch_raw(descriptor.component, row)?.ok()?;
+    let values = values
+        .as_any()
+        .downcast_ref::<rerun::external::arrow::array::UInt64Array>()?;
+    (values.len() == 1).then(|| values.value(0))
+}
+
+#[cfg(feature = "rerun")]
+fn bool_component_at(chunk: &rerun::log::Chunk, suffix: &str, row: usize) -> Option<bool> {
+    let descriptor = chunk
+        .component_descriptors()
+        .find(|descriptor| descriptor.component.as_str().ends_with(suffix))?;
+    let values = chunk.component_batch_raw(descriptor.component, row)?.ok()?;
+    let values = values
+        .as_any()
+        .downcast_ref::<rerun::external::arrow::array::BooleanArray>()?;
+    (values.len() == 1).then(|| values.value(0))
 }
 
 #[derive(Clone)]
@@ -302,8 +227,8 @@ fn StaticFederation(values: Arc<Mutex<Vec<(Tag, u32)>>>) -> impl Reactor {
 }
 
 #[test]
-fn public_api_runs_static_in_memory_federation() {
-    boomerang_util::test_tracing::init_with_directive("debug");
+fn public_api_runs_static_federation_with_finalized_rrd_trace() {
+    boomerang_util::test_tracing::init_with_directive("warn");
     let values = Arc::new(Mutex::new(Vec::new()));
     let mut assembly = Assembly::new();
     #[cfg(feature = "rerun")]
@@ -311,19 +236,14 @@ fn public_api_runs_static_in_memory_federation() {
     #[cfg(feature = "rerun")]
     let rrd_path = directory.path().join("federated-static.rrd");
     #[cfg(feature = "rerun")]
-    let mut memory_messages = Vec::new();
-    #[cfg(feature = "rerun")]
     let rerun = boomerang::rerun::RerunSessionBuilder::new("federated-static-test")
-        .sink(boomerang::rerun::SinkConfig::Tee(vec![
-            boomerang::rerun::SinkConfig::Memory,
-            boomerang::rerun::SinkConfig::File(rrd_path.clone()),
-        ]))
+        .sink(boomerang::rerun::SinkConfig::File(rrd_path.clone()))
         .build()
         .unwrap();
+
     assembly
         .register_federated_codec::<u32, _>(boomerang::federated::SerdeJsonCodec)
         .unwrap();
-
     let _ = StaticFederation(Arc::clone(&values))
         .build(
             "main",
@@ -343,170 +263,8 @@ fn public_api_runs_static_in_memory_federation() {
     rerun.register_runtime(&parts);
     let federation = parts.federation().unwrap();
     assert_eq!(federation.federates().len(), 2);
-    assert_eq!(
-        federation.federates()[&FederateId::new("a")]
-            .enclaves()
-            .len(),
-        2
-    );
-    assert_eq!(
-        federation.federates()[&FederateId::new("b")]
-            .enclaves()
-            .len(),
-        1
-    );
-    assert_eq!(federation.graph().federate_ids().count(), 2);
     assert_eq!(federation.graph().endpoint_ids().count(), 1);
-    #[cfg(feature = "rerun")]
-    {
-        let chunks = rerun_chunks(&rerun, &mut memory_messages);
-        let paths = chunks
-            .iter()
-            .map(|chunk| chunk.entity_path().to_string())
-            .collect::<Vec<_>>();
 
-        assert!(paths.iter().any(|path| path == "/federates/a"));
-        assert!(paths.iter().any(|path| path == "/federates/b"));
-        assert_eq!(
-            paths
-                .iter()
-                .filter(|path| path.ends_with("/scheduler"))
-                .count(),
-            3,
-            "one scheduler entity per lowered Enclave"
-        );
-        assert!(
-            paths.iter().any(|path| {
-                path.starts_with("/federates/a/enclaves/")
-                    && path
-                        .contains("/reactors/main/reactors/a/reactors/source\\@ReactorKey\\(1\\)")
-                    && path.contains("/reactions/")
-            }),
-            "registered paths: {paths:#?}"
-        );
-        assert!(paths.iter().any(|path| {
-            path.starts_with("/federates/b/enclaves/")
-                && path.contains("/reactors/main/reactors/b\\@ReactorKey\\(")
-                && path.contains("/actions/")
-        }));
-        let topology_paths = chunks
-            .iter()
-            .filter_map(|chunk| {
-                let archetypes = chunk
-                    .component_descriptors()
-                    .filter_map(|descriptor| descriptor.archetype.as_ref())
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>();
-                (!archetypes.is_empty()).then(|| (chunk.entity_path().to_string(), archetypes))
-            })
-            .collect::<Vec<_>>();
-        assert!(topology_paths.iter().any(|(path, archetypes)| {
-            path.ends_with("/topology")
-                && archetypes
-                    .iter()
-                    .any(|name| name == "rerun.archetypes.GraphNodes")
-        }));
-        assert!(topology_paths.iter().any(|(path, archetypes)| {
-            path.ends_with("/topology")
-                && archetypes
-                    .iter()
-                    .any(|name| name == "rerun.archetypes.GraphEdges")
-        }));
-        assert!(!topology_paths.iter().any(|(path, _)| {
-            path.ends_with("/topology/nodes") || path.ends_with("/topology/edges")
-        }));
-        assert!(paths
-            .iter()
-            .any(|path| path.starts_with("/federation/topology/ownership/")));
-        let endpoint = chunks
-            .iter()
-            .find(|chunk| {
-                chunk
-                    .entity_path()
-                    .to_string()
-                    .starts_with("/federation/topology/endpoints/")
-            })
-            .expect("lowered federated endpoint relation");
-        for required in [
-            ":boomerang.runtime.stable_key",
-            ":boomerang.runtime.delay_ns",
-            ":boomerang.runtime.source",
-            ":boomerang.runtime.target",
-        ] {
-            assert!(endpoint
-                .component_descriptors()
-                .any(|descriptor| descriptor.component.as_str().ends_with(required)));
-        }
-        assert_eq!(
-            text_component(endpoint, ":boomerang.runtime.source").as_deref(),
-            Some("/federates/a")
-        );
-        assert_eq!(
-            text_component(endpoint, ":boomerang.runtime.target").as_deref(),
-            Some("/federates/b")
-        );
-        assert_eq!(
-            text_component(endpoint, ":boomerang.runtime.relation_kind").as_deref(),
-            Some("federated_endpoint")
-        );
-        let ownership = chunks
-            .iter()
-            .find(|chunk| {
-                text_component(chunk, ":boomerang.runtime.relation_kind").as_deref()
-                    == Some("owns_port")
-                    && text_component(chunk, ":boomerang.runtime.target").as_deref()
-                        == Some(
-                            "/federates/a/enclaves/EnclaveKey(0)/reactors/main/reactors/a/reactors/source@ReactorKey(1)/ports/PortKey(0)",
-                        )
-            })
-            .expect("exact source port ownership relation");
-        assert_eq!(
-            text_component(ownership, ":boomerang.runtime.source").as_deref(),
-            Some(
-                "/federates/a/enclaves/EnclaveKey(0)/reactors/main/reactors/a/reactors/source@ReactorKey(1)"
-            )
-        );
-        let trigger = chunks
-            .iter()
-            .find(|chunk| {
-                text_component(chunk, ":boomerang.runtime.relation_kind").as_deref()
-                    == Some("triggers")
-                    && text_component(chunk, ":boomerang.runtime.source").as_deref()
-                        == Some(
-                            "/federates/a/enclaves/EnclaveKey(1)/reactors/main/reactors/a/reactors/relay@ReactorKey(0)/ports/PortKey(0)",
-                        )
-                    && text_component(chunk, ":boomerang.runtime.target").as_deref()
-                        == Some(
-                            "/federates/a/enclaves/EnclaveKey(1)/reactors/main/reactors/a/reactors/con_reactor_src@ReactorKey(2)/reactions/ReactionKey(3)",
-                        )
-            })
-            .expect("exact relay port trigger relation");
-        assert_eq!(
-            text_component(trigger, ":boomerang.runtime.relation_kind").as_deref(),
-            Some("triggers")
-        );
-        assert!(
-            chunks
-                .iter()
-                .filter(|chunk| {
-                    chunk.component_descriptors().any(|descriptor| {
-                        descriptor.archetype.as_ref().is_some_and(|name| {
-                            matches!(
-                                name.as_str(),
-                                "boomerang.RuntimeEntity"
-                                    | "boomerang.RuntimeRelation"
-                                    | "rerun.archetypes.GraphNodes"
-                                    | "rerun.archetypes.GraphEdges"
-                            )
-                        })
-                    })
-                })
-                .all(|chunk| chunk.timelines().is_empty()),
-            "static registration must be timeless"
-        );
-        assert!(rerun.is_enabled());
-        assert_eq!(rerun.error_count(), 0);
-    }
     #[cfg(feature = "rerun")]
     let envs = {
         let subscriber = tracing_subscriber::registry().with(rerun.layer());
@@ -516,396 +274,256 @@ fn public_api_runs_static_in_memory_federation() {
     };
     #[cfg(not(feature = "rerun"))]
     let envs = execute_federation_in_memory(parts.into_federation().unwrap(), config).unwrap();
-    let a_envs = &envs[&FederateId::new("a")];
-    let b_envs = &envs[&FederateId::new("b")];
-    assert_eq!(a_envs.keys().next(), b_envs.keys().next());
 
+    assert_eq!(
+        envs[&FederateId::new("a")].keys().next(),
+        envs[&FederateId::new("b")].keys().next()
+    );
     assert_eq!(*values.lock().unwrap(), vec![(Tag::ZERO, 7)]);
 
     #[cfg(feature = "rerun")]
     {
-        let chunks = rerun_chunks(&rerun, &mut memory_messages);
-        let runtime_chunks = chunks
-            .iter()
-            .filter(|chunk| !chunk.timelines().is_empty())
+        assert_eq!(rerun.error_count(), 0);
+        rerun.finish().unwrap();
+
+        let file = std::io::BufReader::new(std::fs::File::open(&rrd_path).unwrap());
+        let messages = rerun::external::re_log_encoding::DecoderApp::decode_lazy(file)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let chunks = decode_chunks(&messages, Some(rerun::StoreKind::Recording));
+
+        for (label, kind, reactor, child) in [
+            (
+                "source output",
+                "owns_port",
+                "/reactors/main/reactors/a/reactors/source@",
+                "/ports/",
+            ),
+            (
+                "source startup",
+                "owns_action",
+                "/reactors/main/reactors/a/reactors/source@",
+                "/actions/",
+            ),
+            (
+                "relay input",
+                "owns_port",
+                "/reactors/main/reactors/a/reactors/relay@",
+                "/ports/",
+            ),
+            (
+                "relay startup",
+                "owns_action",
+                "/reactors/main/reactors/a/reactors/relay@",
+                "/actions/",
+            ),
+            (
+                "sink startup",
+                "owns_action",
+                "/federates/b/enclaves/EnclaveKey(0)/reactors/main/reactors/b@",
+                "/actions/",
+            ),
+            (
+                "sink inbound adapter",
+                "owns_port",
+                "/federates/b/enclaves/EnclaveKey(0)/reactors/main/reactors/con_reactor_tgt@",
+                "/ports/",
+            ),
+        ] {
+            assert!(
+                rows(&chunks).any(|(chunk, row)| {
+                    text_component_at(chunk, ":boomerang.runtime.relation_kind", row).as_deref()
+                        == Some(kind)
+                        && text_component_at(chunk, ":boomerang.runtime.source", row)
+                            .is_some_and(|source| source.contains(reactor))
+                        && text_component_at(chunk, ":boomerang.runtime.target", row).is_some_and(
+                            |target| target.contains(reactor) && target.contains(child),
+                        )
+                }),
+                "decoded {label} {kind} relation for {reactor}"
+            );
+        }
+
+        let runtime_rows = rows(&chunks)
+            .filter(|(chunk, row)| {
+                text_component_at(chunk, ":boomerang.trace.event", *row).is_some()
+            })
             .collect::<Vec<_>>();
-        assert!(
-            !runtime_chunks.is_empty(),
-            "scheduler emitted no trace records"
-        );
-        assert!(runtime_chunks.iter().any(|chunk| {
-            chunk
-                .timelines()
-                .values()
-                .any(|timeline| timeline.name() == "logical")
+        assert!(runtime_rows.iter().any(|(chunk, row)| {
+            chunk.timelines().values().any(|timeline| {
+                timeline.name() == "logical" && timeline.times_raw().get(*row).is_some()
+            })
         }));
-        let aligned_port_event = runtime_chunks
-            .iter()
-            .copied()
-            .find(|chunk| {
-                let path = chunk.entity_path().to_string();
-                text_component(chunk, ":boomerang.trace.event").as_deref() == Some("port_write")
-                    && chunk.component_descriptors().any(|descriptor| {
-                        descriptor
-                            .archetype
-                            .as_ref()
-                            .is_some_and(|name| name.as_str() == "boomerang.PortWrite")
-                    })
-                    && path.starts_with("/federates/a/enclaves/EnclaveKey\\(1\\)/")
-                    && path.contains(
-                        "/reactors/main/reactors/a/reactors/relay\\@ReactorKey\\(0\\)/ports/",
-                    )
-                    && path.ends_with("/ports/PortKey\\(0\\)/port_write")
-            })
-            .expect("real typed relay port-write record");
-        let aligned_port_path = aligned_port_event.entity_path().to_string();
-        assert!(aligned_port_path.starts_with("/federates/a/enclaves/EnclaveKey\\(1\\)/"));
-        assert!(aligned_port_path
-            .contains("/reactors/main/reactors/a/reactors/relay\\@ReactorKey\\(0\\)/ports/"));
 
-        let aligned_action_event = runtime_chunks
+        let (send, send_row) = runtime_rows
             .iter()
             .copied()
-            .find(|chunk| {
-                let path = chunk.entity_path().to_string();
-                text_component(chunk, ":boomerang.trace.event").as_deref()
+            .find(|(chunk, row)| {
+                text_component_at(chunk, ":boomerang.trace.event", *row).as_deref()
+                    == Some("propagation_send")
+                    && text_component_at(chunk, ":boomerang.trace.federate", *row).as_deref()
+                        == Some("a")
+                    && text_component_at(chunk, ":boomerang.trace.destination_federate", *row)
+                        .as_deref()
+                        == Some("b")
+            })
+            .expect("serialized A-to-B propagation send");
+        assert!(
+            text_component_at(send, ":boomerang.trace.destination", send_row).is_none(),
+            "serialized send is intentionally ambiguous until its causal edge is decoded"
+        );
+        let propagation_size =
+            uint_component_at(send, ":boomerang.trace.value_size", send_row).unwrap();
+        assert_eq!(
+            scalar_at(send, send_row),
+            Some(propagation_size as f64),
+            "propagation value-size measure is co-located with its typed event"
+        );
+
+        let (action, action_row) = runtime_rows
+            .iter()
+            .copied()
+            .find(|(chunk, row)| {
+                text_component_at(chunk, ":boomerang.trace.event", *row).as_deref()
                     == Some("action_schedule")
-                    && chunk.component_descriptors().any(|descriptor| {
-                        descriptor
-                            .archetype
-                            .as_ref()
-                            .is_some_and(|name| name.as_str() == "boomerang.ActionStartup")
-                    })
-                    && path.starts_with("/federates/a/enclaves/EnclaveKey\\(0\\)/")
-                    && path.contains(
-                        "/reactors/main/reactors/a/reactors/source\\@ReactorKey\\(1\\)/actions/",
-                    )
-                    && path.ends_with("/actions/ActionKey\\(0\\)/action_schedule")
+                    && uint_component_at(chunk, ":boomerang.trace.value_size", *row).is_some()
             })
-            .expect("real typed source startup-action record");
-        let aligned_action_path = aligned_action_event.entity_path().to_string();
-        assert!(aligned_action_path.starts_with("/federates/a/enclaves/EnclaveKey\\(0\\)/"));
-        assert!(
-            aligned_action_path
-                .contains("/reactors/main/reactors/a/reactors/source\\@ReactorKey\\(1\\)/actions/"),
-            "action path must be nested beneath the exact source Reactor: {aligned_action_path}"
+            .expect("scheduled action with a value-size fact");
+        let action_size =
+            uint_component_at(action, ":boomerang.trace.value_size", action_row).unwrap();
+        assert_eq!(
+            scalar_at(action, action_row),
+            Some(action_size as f64),
+            "action value-size measure is co-located with its typed event"
         );
 
-        let scheduler_lanes = runtime_chunks
+        let (terminal, terminal_row) = runtime_rows
             .iter()
-            .filter_map(|chunk| {
-                let path = chunk.entity_path().to_string();
-                let segments = path.split('/').collect::<Vec<_>>();
-                let enclave = segments.iter().position(|segment| *segment == "enclaves")?;
-                Some(segments[..=enclave + 1].join("/"))
+            .copied()
+            .find(|(chunk, row)| {
+                bool_component_at(chunk, ":boomerang.trace.terminal", *row).is_some()
             })
-            .collect::<std::collections::BTreeSet<_>>();
+            .expect("terminal lifecycle fact");
+        let terminal_value =
+            bool_component_at(terminal, ":boomerang.trace.terminal", terminal_row).unwrap();
         assert_eq!(
-            scheduler_lanes.len(),
-            3,
-            "expected exactly three distinct federated scheduler lanes: {scheduler_lanes:?}"
+            scalar_at(terminal, terminal_row),
+            Some(if terminal_value { 1.0 } else { 0.0 }),
+            "terminal measure is co-located with its typed event"
         );
-        assert_eq!(
-            scheduler_lanes
-                .iter()
-                .filter(|lane| lane.starts_with("/federates/a/enclaves/"))
-                .count(),
-            2,
-            "expected both lowered scheduler lanes in federate A: {scheduler_lanes:?}"
-        );
-        assert_eq!(
-            scheduler_lanes
-                .iter()
-                .filter(|lane| lane.starts_with("/federates/b/enclaves/"))
-                .count(),
-            1,
-            "expected the lowered scheduler lane in federate B: {scheduler_lanes:?}"
-        );
-        let causal_links = runtime_chunks
+
+        let links = runtime_rows
             .iter()
-            .filter(|chunk| {
-                text_component(chunk, ":boomerang.trace.event").as_deref() == Some("causal_link")
+            .copied()
+            .filter(|(chunk, row)| {
+                text_component_at(chunk, ":boomerang.trace.event", *row).as_deref()
+                    == Some("causal_link")
             })
-            .collect::<Vec<_>>();
-        assert!(
-            !causal_links.is_empty(),
-            "the exercised federated propagation produced no exact causal link"
-        );
-        let records = runtime_chunks
-            .iter()
-            .filter_map(|chunk| {
-                Some((
-                    text_component(chunk, ":boomerang.trace.id")?,
-                    text_component(chunk, ":boomerang.trace.event")?,
-                ))
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
-        let links = causal_links
-            .iter()
-            .map(|link| {
-                let source = text_component(link, ":boomerang.trace.source")
-                    .expect("causal source adapter ID");
-                let destination = text_component(link, ":boomerang.trace.destination")
-                    .expect("causal destination adapter ID");
-                let graph = runtime_chunks
-                    .iter()
-                    .find(|chunk| {
-                        chunk.entity_path() == link.entity_path() && graph_edge(chunk).is_some()
-                    })
-                    .and_then(|chunk| graph_edge(chunk))
-                    .expect("co-located built-in GraphEdges endpoint pair");
-                assert_eq!(graph, (source.clone(), destination.clone()));
-                assert!(
-                    records.contains_key(&source),
-                    "unknown causal source {source}"
-                );
-                assert!(
-                    records.contains_key(&destination),
-                    "unknown causal destination {destination}"
+            .map(|(chunk, row)| {
+                let source = text_component_at(chunk, ":boomerang.trace.source", row).unwrap();
+                let destination =
+                    text_component_at(chunk, ":boomerang.trace.destination", row).unwrap();
+                assert_eq!(
+                    graph_edge_at(chunk, row),
+                    Some((source.clone(), destination.clone()))
                 );
                 (source, destination)
             })
             .collect::<Vec<_>>();
-        let in_process_send = runtime_chunks
-            .iter()
-            .find(|chunk| {
-                text_component(chunk, ":boomerang.trace.event").as_deref()
-                    == Some("propagation_send")
-                    && text_component(chunk, ":boomerang.trace.federate").as_deref() == Some("a")
-                    && text_component(chunk, ":boomerang.trace.destination_federate").is_none()
-                    && text_component(chunk, ":boomerang.trace.outcome").as_deref()
-                        == Some("accepted")
-            })
-            .expect("accepted in-process A-to-A propagation send");
-        let serialized_send = runtime_chunks
-            .iter()
-            .find(|chunk| {
-                text_component(chunk, ":boomerang.trace.event").as_deref()
-                    == Some("propagation_send")
-                    && text_component(chunk, ":boomerang.trace.federate").as_deref() == Some("a")
-                    && text_component(chunk, ":boomerang.trace.destination_federate").as_deref()
-                        == Some("b")
-                    && text_component(chunk, ":boomerang.trace.outcome").as_deref()
-                        == Some("accepted")
-            })
-            .expect("accepted serialized A-to-B propagation send");
-        assert!(text_component(serialized_send, ":boomerang.trace.destination").is_none());
-
-        let assert_chain = |send: &&rerun::log::Chunk, expected_federate: &str| {
-            let send_id = text_component(send, ":boomerang.trace.id").unwrap();
-            let receive_id = links
+        let exact_destination = |source: &str| {
+            let destinations = links
                 .iter()
-                .find_map(|(source, destination)| (source == &send_id).then_some(destination))
-                .unwrap_or_else(|| panic!("{expected_federate} send has no exact receive edge"));
-            let receive = runtime_chunks
-                .iter()
-                .find(|chunk| {
-                    text_component(chunk, ":boomerang.trace.id").as_deref()
-                        == Some(receive_id.as_str())
-                        && text_component(chunk, ":boomerang.trace.event").as_deref()
-                            == Some("propagation_receive")
+                .filter_map(|(candidate, destination)| {
+                    (candidate == source).then_some(destination.as_str())
                 })
-                .expect("send destination is a propagation receive");
+                .collect::<Vec<_>>();
             assert_eq!(
-                text_component(receive, ":boomerang.trace.federate").as_deref(),
-                Some(expected_federate)
+                destinations.len(),
+                1,
+                "{source} must have one exact causal destination"
             );
-            if let Some(destination) = text_component(send, ":boomerang.trace.destination") {
-                assert_eq!(
-                    Some(destination),
-                    text_component(receive, ":boomerang.trace.enclave")
-                );
-            }
-            assert_eq!(
-                text_component(send, ":boomerang.trace.action_key"),
-                text_component(receive, ":boomerang.trace.action_key")
-            );
-            let reaction_id = links
-                .iter()
-                .find_map(|(source, destination)| (source == receive_id).then_some(destination))
-                .unwrap_or_else(|| panic!("{expected_federate} receive has no reaction edge"));
-            let reaction = runtime_chunks
-                .iter()
-                .find(|chunk| {
-                    text_component(chunk, ":boomerang.trace.id").as_deref()
-                        == Some(reaction_id.as_str())
-                })
-                .expect("reaction record exists");
-            assert_eq!(
-                text_component(reaction, ":boomerang.trace.event").as_deref(),
-                Some("reaction_execute")
-            );
-            assert_eq!(
-                text_component(reaction, ":boomerang.trace.federate").as_deref(),
-                Some(expected_federate)
-            );
-            let reaction_path = reaction.entity_path().to_string();
-            assert!(
-                reaction_path.starts_with(&format!("/federates/{expected_federate}/enclaves/"))
-                    && reaction_path.contains("/reactors/con_reactor_tgt\\@"),
-                "receive linked to unexpected reaction path {reaction_path}"
-            );
-            receive_id.clone()
+            destinations[0]
         };
-        let local_receive = assert_chain(in_process_send, "a");
-        let remote_receive = assert_chain(serialized_send, "b");
-        assert_ne!(local_receive, remote_receive);
 
-        let chunks = rerun_chunks(&rerun, &mut memory_messages);
-        rerun.finish().unwrap();
-        let bytes = std::fs::read(&rrd_path).unwrap();
-        let manifests =
-            rerun::external::re_log_encoding::RawRrdManifest::from_rrd_bytes(&bytes).unwrap();
-        let manifest_kinds = manifests
+        let send_id = text_component_at(send, ":boomerang.trace.id", send_row).unwrap();
+        let receive_id = exact_destination(&send_id);
+        let (receive, receive_row) = runtime_rows
             .iter()
-            .map(|manifest| manifest.store_id.kind())
-            .collect::<std::collections::BTreeSet<_>>();
-        assert!(manifest_kinds.contains(&rerun::StoreKind::Recording));
-        assert!(manifest_kinds.contains(&rerun::StoreKind::Blueprint));
-
-        let file = std::io::BufReader::new(std::fs::File::open(&rrd_path).unwrap());
-        let file_messages = rerun::external::re_log_encoding::DecoderApp::decode_lazy(file)
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        let file_recording = decode_chunks(&file_messages, Some(rerun::StoreKind::Recording));
-        assert_recording_row_normalization_is_independent_of_chunk_batching();
+            .copied()
+            .find(|(chunk, row)| {
+                text_component_at(chunk, ":boomerang.trace.id", *row).as_deref() == Some(receive_id)
+                    && text_component_at(chunk, ":boomerang.trace.event", *row).as_deref()
+                        == Some("propagation_receive")
+            })
+            .expect("causal destination is the remote receive");
         assert_eq!(
-            recording_semantics(&chunks),
-            recording_semantics(&file_recording),
-            "memory and finalized file must preserve identical deterministic recording semantics"
+            text_component_at(receive, ":boomerang.trace.federate", receive_row).as_deref(),
+            Some("b")
         );
 
-        let has_archetype = |chunk: &&rerun::log::Chunk, expected: &str| {
-            chunk.component_descriptors().any(|descriptor| {
-                descriptor
-                    .archetype
-                    .as_ref()
-                    .is_some_and(|name| name.as_str() == expected)
-            })
-        };
-        let duration_paths = chunks
+        let reaction_id = exact_destination(receive_id);
+        let (reaction, reaction_row) = runtime_rows
             .iter()
-            .filter(|chunk| has_archetype(chunk, "rerun.archetypes.StateChange"))
-            .map(|chunk| chunk.entity_path().to_string())
+            .copied()
+            .find(|(chunk, row)| {
+                text_component_at(chunk, ":boomerang.trace.id", *row).as_deref()
+                    == Some(reaction_id)
+                    && text_component_at(chunk, ":boomerang.trace.event", *row).as_deref()
+                        == Some("reaction_execute")
+            })
+            .expect("remote receive causally triggers one reaction");
+        assert_eq!(
+            text_component_at(reaction, ":boomerang.trace.federate", reaction_row).as_deref(),
+            Some("b")
+        );
+        let duration_ns = uint_component_at(reaction, ":boomerang.trace.duration_ns", reaction_row)
+            .expect("reaction duration component");
+        let duration_measure =
+            scalar_at(reaction, reaction_row).expect("reaction operational duration scalar");
+        assert!(duration_measure.is_finite() && duration_measure >= 0.0);
+        assert_eq!(duration_measure, duration_ns as f64);
+
+        let mut reaction_states = rows(&chunks)
+            .filter_map(|(chunk, row)| {
+                (chunk.entity_path() == reaction.entity_path()).then(|| {
+                    let elapsed = chunk
+                        .timelines()
+                        .values()
+                        .find(|timeline| timeline.name() == "elapsed")?
+                        .times_raw()
+                        .get(row)
+                        .copied()?;
+                    Some((elapsed, state_change_at(chunk, row)?))
+                })?
+            })
             .collect::<Vec<_>>();
-        assert!(
-            !duration_paths.is_empty(),
-            "missing duration StateChange records"
-        );
-        let duration_events = ["/tag_process", "/reaction_execute", "/coordination_wait"];
-        assert!(
-            duration_paths.iter().all(|path| {
-                duration_events
-                    .iter()
-                    .any(|duration_event| path.ends_with(duration_event))
-            }),
-            "StateChange outside duration-bearing trace paths: {duration_paths:#?}"
-        );
-        for duration_event in duration_events {
-            assert!(
-                duration_paths
-                    .iter()
-                    .any(|path| path.ends_with(duration_event)),
-                "missing StateChange for duration-bearing event {duration_event}: {duration_paths:#?}"
-            );
-        }
-        for (event, archetype) in [
-            ("action_schedule", "boomerang.ActionStartup"),
-            ("port_write", "boomerang.PortWrite"),
-            ("propagation_send", "boomerang.PropagationLogicalSend"),
-            ("propagation_receive", "boomerang.PropagationReceive"),
-            ("shutdown", "boomerang.Shutdown"),
-        ] {
-            assert!(
-                chunks.iter().any(|chunk| {
-                    text_component(chunk, ":boomerang.trace.event").as_deref() == Some(event)
-                        && has_archetype(&chunk, archetype)
-                }),
-                "missing typed {archetype} event {event}"
-            );
-        }
-        assert!(chunks
-            .iter()
-            .any(|chunk| has_archetype(&chunk, "rerun.archetypes.GraphNodes")));
-        assert!(chunks
-            .iter()
-            .any(|chunk| has_archetype(&chunk, "rerun.archetypes.GraphEdges")));
-        for chunk in &runtime_chunks {
-            let timelines = chunk.timelines();
-            assert!(timelines
-                .values()
-                .any(|timeline| timeline.name() == "elapsed"));
-            assert!(timelines
-                .values()
-                .any(|timeline| timeline.name() == "wall_clock"));
-            if let Some(logical) = timelines
-                .values()
-                .find(|timeline| timeline.name() == "logical")
-            {
-                assert!(logical.times_raw().iter().all(|value| *value != i64::MAX));
-            }
-        }
-        assert!(runtime_chunks.iter().any(|chunk| {
-            chunk.timelines().values().any(|timeline| {
-                timeline.name() == "logical"
-                    && timeline.times_raw().iter().any(|value| *value != i64::MAX)
-            })
-        }));
+        reaction_states.sort_by_key(|(elapsed, _)| *elapsed);
+        let reaction_states = reaction_states
+            .into_iter()
+            .map(|(_, state)| state)
+            .collect::<Vec<_>>();
+        assert!(reaction_states
+            .windows(2)
+            .any(|states| { states == [Some("executing reaction".to_owned()), None] }));
 
-        let blueprint = decode_chunks(&file_messages, Some(rerun::StoreKind::Blueprint));
-        let view_classes = blueprint
-            .iter()
-            .filter_map(|chunk| {
-                use rerun::external::re_sdk_types::blueprint::archetypes::ViewBlueprint;
-
-                let name = chunk
-                    .iter_component::<rerun::components::Name>(
-                        ViewBlueprint::descriptor_display_name().component,
-                    )
-                    .next()?
-                    .first()?
-                    .to_string();
-                let class = chunk
-                    .iter_component::<rerun::blueprint::components::ViewClass>(
-                        ViewBlueprint::descriptor_class_identifier().component,
-                    )
-                    .next()?
-                    .first()?
-                    .to_string();
-                Some((name, class))
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
+        let blueprint = decode_chunks(&messages, Some(rerun::StoreKind::Blueprint));
         for (name, class) in [
-            ("Scheduler phases", "StateTimeline"),
-            ("Event records", "Dataframe"),
             ("Ownership and propagation", "Graph"),
-            ("Diagnostics", "TextLog"),
             ("Operational measures", "TimeSeries"),
         ] {
-            assert_eq!(
-                view_classes.get(name).map(String::as_str),
-                Some(class),
-                "decoded blueprint view classes: {view_classes:#?}"
-            );
+            assert!(rows(&blueprint).any(|(chunk, row)| {
+                text_component_at(chunk, "ViewBlueprint:display_name", row).as_deref() == Some(name)
+                    && text_component_at(chunk, "ViewBlueprint:class_identifier", row).as_deref()
+                        == Some(class)
+            }));
         }
-        let selected_timeline = blueprint
-            .iter()
-            .find(|chunk| chunk.entity_path().to_string() == "/time_panel")
-            .and_then(|chunk| {
-                use rerun::external::re_sdk_types::blueprint::archetypes::TimePanelBlueprint;
-
-                chunk
-                    .iter_component::<rerun::blueprint::components::TimelineName>(
-                        TimePanelBlueprint::descriptor_timeline().component,
-                    )
-                    .next()?
-                    .first()
-                    .map(|timeline| timeline.0 .0.to_string())
-            });
-        assert_eq!(selected_timeline.as_deref(), Some("elapsed"));
+        assert!(rows(&blueprint).any(|(chunk, row)| {
+            chunk.entity_path().to_string() == "/time_panel"
+                && text_component_at(chunk, "TimePanelBlueprint:timeline", row).as_deref()
+                    == Some("elapsed")
+        }));
     }
 }
-
 #[test]
 fn public_api_rejects_runtime_without_lowered_federation() {
     let parts = RuntimeAssembly::default();

@@ -46,8 +46,8 @@ tracing-subscriber = "0.3"
 
 Add `federated` to the `boomerang` feature list for the federated example. A
 direct Rerun dependency is needed only when consumer code names Rerun SDK types
-or constructs a custom blueprint; the local example leaves its snapshot type
-inferred. Use the same SDK configuration as the adapter:
+or constructs a custom blueprint. Use the same SDK configuration as the
+adapter:
 
 ```toml
 rerun = { version = "=0.36.1", default-features = false, features = ["sdk"] }
@@ -59,7 +59,7 @@ local assembly, the complete flow is:
 ```rust
 # #[cfg(feature = "rerun")]
 # mod rerun_local_example {
-use std::error::Error;
+use std::{error::Error, path::PathBuf};
 
 use boomerang::builder::RuntimeAssembly;
 use boomerang::rerun::{RerunSessionBuilder, SinkConfig};
@@ -71,7 +71,7 @@ fn run_local(
     config: runtime::Config,
 ) -> Result<(), Box<dyn Error>> {
     let session = RerunSessionBuilder::new("my-boomerang-model")
-        .sink(SinkConfig::Memory)
+        .sink(SinkConfig::File(PathBuf::from("recording.rrd")))
         .build()?;
     session.register_runtime(&parts);
 
@@ -82,8 +82,7 @@ fn run_local(
         Ok::<_, Box<dyn Error>>(())
     })?;
 
-    // This bounded call flushes, returns, and clears the memory recording.
-    let _messages = session.take_memory_snapshot_bounded().unwrap_or_default();
+    session.finish()?;
     Ok(())
 }
 # }
@@ -94,10 +93,10 @@ With both `federated` and `rerun` enabled, only the final execution call changes
 ```rust
 # #[cfg(all(feature = "federated", feature = "rerun"))]
 # mod rerun_federated_example {
-use std::error::Error;
+use std::{error::Error, path::PathBuf};
 
 use boomerang::builder::RuntimeAssembly;
-use boomerang::rerun::RerunSessionBuilder;
+use boomerang::rerun::{RerunSessionBuilder, SinkConfig};
 use boomerang::{execute_federation_in_memory, runtime};
 use tracing_subscriber::prelude::*;
 
@@ -105,7 +104,9 @@ fn run_federated(
     parts: RuntimeAssembly,
     config: runtime::Config,
 ) -> Result<(), Box<dyn Error>> {
-    let session = RerunSessionBuilder::new("my-federation").build()?;
+    let session = RerunSessionBuilder::new("my-federation")
+        .sink(SinkConfig::File(PathBuf::from("recording.rrd")))
+        .build()?;
     session.register_runtime(&parts);
 
     let subscriber = tracing_subscriber::registry().with(session.layer());
@@ -114,22 +115,28 @@ fn run_federated(
         execute_federation_in_memory(federation, config)?;
         Ok::<_, Box<dyn Error>>(())
     })?;
-    session.flush(); // bounded by the builder's flush_timeout
+    session.finish()?;
     Ok(())
 }
 # }
 ```
 
-`SinkConfig::Memory`, `SinkConfig::File(path)`, and arbitrary nested
-`SinkConfig::Tee` combinations are supported. A file sink produces a
-sequentially readable `.rrd`; its footer is deliberately omitted to keep
-long-running memory use bounded. Run `rerun rrd optimize recording.rrd` before
-using random access or `LazyStore`. A memory sink retains the full trace and
-therefore grows with the recording. `take_memory_snapshot_bounded` applies only
-to configurations containing a memory sink. Explicit `flush`, snapshot, and
-drop use `flush_timeout` (five seconds by default); if an SDK operation never
-returns, the adapter may detach its single lifecycle worker together with its
-sinks.
+`SinkConfig::Memory`, `SinkConfig::File(path)`, and nested non-empty
+`SinkConfig::Tee` configurations are supported. Lexically duplicate file paths
+are rejected. Validation does not canonicalize paths, so do not use symlink or
+hard-link aliases for the same output. A file sink produces a finalized,
+footer-bearing `.rrd`. Rerun retains an O(chunks) footer manifest while
+recording and constructs the footer with O(chunks) memory during finalization.
+A memory sink retains the full trace and therefore grows with the recording;
+`take_memory_snapshot_bounded` applies only to configurations containing one.
+
+Treat `session.finish()?` as the success signal for an offline recording: it
+flushes and finalizes the sinks, and reports lifecycle or sink failures. `Drop`
+performs only a bounded best-effort shutdown and cannot report failure. Explicit
+`flush`, snapshots, `finish`, and drop use `flush_timeout` (five seconds by
+default); if an SDK operation never returns, the adapter may detach its single
+lifecycle worker together with its sinks. Live-viewer latency work is tracked
+in [#106](https://github.com/jondo2010/boomerang/issues/106).
 
 `SinkConfig::Grpc` is intentionally rejected as `UnsupportedGrpc`. The pinned
 SDK exposes a fixed blocking channel for that sink, which could otherwise hang
@@ -139,18 +146,39 @@ Boomerang adds no second event queue.
 
 ### Reading a recording
 
-The default blueprint opens scheduler and event timelines, ownership and
-propagation graphs, selected records, diagnostics, and operational measures.
-Each dynamic record carries independent axes:
+Open the finalized recording in the interactive Viewer:
+
+```console
+rerun recording.rrd
+```
+
+Validate its RRD structure without opening the Viewer, for example in CI:
+
+```console
+rerun rrd verify recording.rrd
+```
+
+Optionally rewrite it into an optimized copy for random access or `LazyStore`:
+
+```console
+rerun rrd optimize recording.rrd -o recording-optimized.rrd
+```
+
+The default blueprint opens a StateTimeline view for Scheduler phases, a
+Dataframe view for Event records, Ownership and propagation, Diagnostics, and
+Operational measures. Each dynamic record carries independent axes:
 
 - `elapsed`: monotonic time since session creation;
 - `wall_clock`: Unix wall-clock time for correlation with external systems;
-- `logical`: the reactor tag's time component, when the event has a tag.
+- `logical`: the reactor tag's time component, when tagged and representable.
 
 Selecting `logical` removes unrelated wall-clock idle time and therefore
 compresses those gaps. It does not change distances between logical tag times.
-Events at the same logical time share an x-coordinate; inspect the
-`boomerang.trace.microstep` component to order superdense-time events.
+Tagged logical values representable as `i64` become timeline coordinates.
+Values above `i64::MAX` remain available as raw `boomerang.trace.logical_ns`
+components but are omitted from the `logical` timeline. Events at the same
+logical time share an x-coordinate; inspect the `boomerang.trace.microstep`
+component to order superdense-time events.
 
 Static registration is timeless. It recursively records federates, enclaves,
 reactors, reactions, actions, and ports, with actions and ports owned by their

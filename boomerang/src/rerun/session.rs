@@ -837,13 +837,10 @@ fn default_blueprint() -> rerun::blueprint::Blueprint {
     };
 
     let roots = ["/enclaves/**", "/federates/**"];
-    let scheduler = StateTimelineView::new("Scheduler timeline")
+    let scheduler = StateTimelineView::new("Scheduler phases")
         .with_origin("/")
-        .with_contents([
-            "/enclaves/**/scheduler/**",
-            "/federates/**/enclaves/**/scheduler/**",
-        ]);
-    let events = StateTimelineView::new("Event streams")
+        .with_contents(roots);
+    let events = DataframeView::new("Event records")
         .with_origin("/")
         .with_contents(roots);
     let topology = GraphView::new("Ownership and propagation")
@@ -854,9 +851,6 @@ fn default_blueprint() -> rerun::blueprint::Blueprint {
             "/federation/topology",
             "/propagation/**",
         ]);
-    let selected = DataframeView::new("Selected records")
-        .with_origin("/")
-        .with_contents(roots);
     let diagnostics = TextLogView::new("Diagnostics")
         .with_origin("/diagnostics")
         .with_contents(["/diagnostics/**"]);
@@ -869,7 +863,6 @@ fn default_blueprint() -> rerun::blueprint::Blueprint {
             scheduler.into(),
             events.into(),
             topology.into(),
-            selected.into(),
             diagnostics.into(),
             measures.into(),
         ])
@@ -878,7 +871,7 @@ fn default_blueprint() -> rerun::blueprint::Blueprint {
     )
     .with_auto_views(false)
     .with_auto_layout(false)
-    .with_time_panel(TimePanel::new().with_timeline("logical"))
+    .with_time_panel(TimePanel::new().with_timeline("elapsed"))
 }
 
 impl Drop for RerunSession {

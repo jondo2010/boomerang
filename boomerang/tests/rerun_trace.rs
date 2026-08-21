@@ -585,12 +585,33 @@ fn default_blueprint_contains_timeline_first_views() {
                 || chunk.entity_path().to_string() == "/time_panel"
         })
         .collect::<Vec<_>>();
+    let view_classes = blueprint_chunks
+        .iter()
+        .filter_map(|chunk| {
+            use rerun::external::re_sdk_types::blueprint::archetypes::ViewBlueprint;
+
+            let name = chunk
+                .iter_component::<rerun::components::Name>(
+                    ViewBlueprint::descriptor_display_name().component,
+                )
+                .next()?
+                .first()?
+                .to_string();
+            let class = chunk
+                .iter_component::<rerun::blueprint::components::ViewClass>(
+                    ViewBlueprint::descriptor_class_identifier().component,
+                )
+                .next()?
+                .first()?
+                .to_string();
+            Some((name, class))
+        })
+        .collect::<BTreeMap<_, _>>();
     let debug = format!("{blueprint_chunks:#?}");
     for name in [
-        "Scheduler timeline",
-        "Event streams",
+        "Scheduler phases",
+        "Event records",
         "Ownership and propagation",
-        "Selected records",
         "Diagnostics",
         "Operational measures",
     ] {
@@ -600,8 +621,18 @@ fn default_blueprint_contains_timeline_first_views() {
         );
     }
     assert!(
-        debug.contains("logical"),
-        "logical timeline is not selected"
+        debug.contains("elapsed"),
+        "elapsed timeline is not selected"
+    );
+    assert!(!debug.contains("Event streams"));
+    assert!(!debug.contains("Selected records"));
+    assert_eq!(
+        view_classes.get("Scheduler phases").map(String::as_str),
+        Some("StateTimeline")
+    );
+    assert_eq!(
+        view_classes.get("Event records").map(String::as_str),
+        Some("Dataframe")
     );
     assert!(debug.contains("/enclaves/**"));
     assert!(debug.contains("/federates/**"));

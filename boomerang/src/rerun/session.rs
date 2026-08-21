@@ -214,6 +214,12 @@ type LifecycleReplyHook = Arc<dyn Fn() + Send + Sync>;
 #[cfg(test)]
 type LifecycleVerificationHook = Arc<dyn Fn() + Send + Sync>;
 
+#[cfg(test)]
+struct LifecycleHooks {
+    reply: Option<LifecycleReplyHook>,
+    verification: Option<LifecycleVerificationHook>,
+}
+
 struct SdkFlushDriver;
 
 impl FlushDriver for SdkFlushDriver {
@@ -360,9 +366,10 @@ impl RerunSessionBuilder {
             state.clone(),
             file_paths,
             #[cfg(test)]
-            self.lifecycle_reply_hook,
-            #[cfg(test)]
-            self.lifecycle_verification_hook,
+            LifecycleHooks {
+                reply: self.lifecycle_reply_hook,
+                verification: self.lifecycle_verification_hook,
+            },
         )
         .map_err(RerunSessionBuildError::LifecycleWorker)?;
 
@@ -801,8 +808,7 @@ impl LifecycleWorker {
         sdk_timeout: Duration,
         state: SessionState,
         file_paths: Vec<std::path::PathBuf>,
-        #[cfg(test)] reply_hook: Option<LifecycleReplyHook>,
-        #[cfg(test)] verification_hook: Option<LifecycleVerificationHook>,
+        #[cfg(test)] hooks: LifecycleHooks,
     ) -> Result<Self, std::io::Error> {
         let (commands, receiver) = std::sync::mpsc::sync_channel(1);
         let pending = Arc::new(AtomicBool::new(false));
@@ -818,7 +824,7 @@ impl LifecycleWorker {
                             pending_reset.release();
                             let _ = reply.send(result);
                             #[cfg(test)]
-                            if let Some(hook) = reply_hook.as_ref() {
+                            if let Some(hook) = hooks.reply.as_ref() {
                                 hook();
                             }
                         }
@@ -827,7 +833,7 @@ impl LifecycleWorker {
                             pending_reset.release();
                             let _ = reply.send(result);
                             #[cfg(test)]
-                            if let Some(hook) = reply_hook.as_ref() {
+                            if let Some(hook) = hooks.reply.as_ref() {
                                 hook();
                             }
                         }
@@ -843,7 +849,7 @@ impl LifecycleWorker {
                                 })
                                 .and_then(|()| {
                                     #[cfg(test)]
-                                    if let Some(hook) = verification_hook.as_ref() {
+                                    if let Some(hook) = hooks.verification.as_ref() {
                                         hook();
                                     }
                                     for path in &file_paths {
@@ -854,7 +860,7 @@ impl LifecycleWorker {
                             pending_reset.release();
                             let _ = reply.send(result);
                             #[cfg(test)]
-                            if let Some(hook) = reply_hook.as_ref() {
+                            if let Some(hook) = hooks.reply.as_ref() {
                                 hook();
                             }
                             return;

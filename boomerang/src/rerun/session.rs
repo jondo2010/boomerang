@@ -16,19 +16,19 @@ static SOURCE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Destination for a Rerun recording.
 ///
 /// Active memory, file, and tee sinks use Rerun 0.36.1's bounded batching pipeline. That does not
-/// bound a memory sink, which retains the full recording. File sinks disable the SDK's O(chunks)
-/// footer manifest by default. When the pipeline is saturated, logging from [`RerunLayer`] may
-/// apply backpressure to the scheduler callback. Boomerang adds no second dynamic-record queue.
+/// bound a memory sink, which retains the full recording. File sinks retain an O(chunks) footer
+/// manifest while recording. When the pipeline is saturated, logging from [`RerunLayer`] may apply
+/// backpressure to the scheduler callback. Boomerang adds no second dynamic-record queue.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum SinkConfig {
     /// Retain the full recording in memory; active memory use grows with the trace.
     #[default]
     Memory,
-    /// Write a recording to a sequentially-decodable RRD file.
+    /// Write a recording to a finalized standard RRD file.
     ///
-    /// Footer emission is disabled so Rerun 0.36.1 does not retain an O(chunks) manifest for the
-    /// lifetime of long recordings. This reduces random-access performance; `rerun rrd optimize`
-    /// can add a footer after recording.
+    /// Rerun 0.36.1 retains manifest state for the lifetime of the recording and constructs the
+    /// footer using O(chunks) memory during finalization. Call [`RerunSession::finish`] to surface
+    /// finalization failures.
     File(std::path::PathBuf),
     /// Request streaming to a Rerun data proxy.
     ///
@@ -147,6 +147,11 @@ pub enum RerunSessionBuildError {
     #[error("failed to spawn the Rerun lifecycle worker: {0}")]
     LifecycleWorker(std::io::Error),
 }
+
+/// An error encountered while finalizing a Rerun recording session.
+#[derive(Debug, thiserror::Error)]
+#[error("failed to finalize Rerun recording: {0}")]
+pub struct RerunSessionFinishError(#[from] LifecycleError);
 
 /// Adapter-local flush seam used to isolate sink behavior from application execution.
 pub trait FlushDriver: Send + Sync + 'static {
@@ -563,6 +568,14 @@ impl RerunSession {
                 .flush(timeout)
         });
     }
+
+    /// Finalizes the recording and reports lifecycle or sink failures.
+    pub fn finish(mut self) -> Result<(), RerunSessionFinishError> {
+        let Some(lifecycle) = self.lifecycle.take() else {
+            return Ok(());
+        };
+        lifecycle.shutdown(self.flush_timeout).map_err(Into::into)
+    }
 }
 
 fn sink_contains_grpc(config: &SinkConfig) -> bool {
@@ -597,9 +610,7 @@ fn configure_sinks(
             }
             SinkConfig::File(path) => sinks.push(Box::new(rerun::sink::FileSink::with_options(
                 path,
-                rerun::sink::FileSinkOptions {
-                    write_footer: false,
-                },
+                rerun::sink::FileSinkOptions { write_footer: true },
             )?)),
             SinkConfig::Grpc {
                 url: _,
@@ -1065,6 +1076,22 @@ mod tests {
         });
 
         assert_eq!(flushes, 1);
+    }
+
+    #[test]
+    fn finish_without_lifecycle_is_ok() {
+        let mut session = RerunSessionBuilder::new("already-finalized")
+            .blueprint(BlueprintConfig::None)
+            .build()
+            .unwrap();
+        session
+            .lifecycle
+            .take()
+            .unwrap()
+            .shutdown(session.flush_timeout)
+            .unwrap();
+
+        session.finish().unwrap();
     }
 
     #[test]

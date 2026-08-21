@@ -11,6 +11,7 @@ use boomerang::rerun::{
 };
 use boomerang::runtime::{Enclave, Port, Reactor};
 use rerun::external::arrow::array::Array as _;
+use rerun::external::re_log_encoding::Decodable as _;
 use tracing_subscriber::prelude::*;
 
 #[derive(Default)]
@@ -253,7 +254,7 @@ fn invalid_sink_topology_is_rejected_before_file_construction() {
 }
 
 #[test]
-fn footerless_file_sink_writes_decodable_trace_records() {
+fn file_sink_finish_writes_decodable_footer_bearing_trace() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("trace.rrd");
     let session = RerunSessionBuilder::new("boomerang-rerun-test")
@@ -264,11 +265,19 @@ fn footerless_file_sink_writes_decodable_trace_records() {
 
     assert!(session.take_memory_snapshot_bounded().is_none());
     emit_shutdown(&session);
-    session.flush();
+    session.finish().unwrap();
     assert!(std::fs::metadata(&path).unwrap().len() > 0);
-    drop(session);
 
-    let file = std::io::BufReader::new(std::fs::File::open(&path).unwrap());
+    let bytes = std::fs::read(&path).unwrap();
+    let footer_size = rerun::external::re_log_encoding::StreamFooter::ENCODED_SIZE_BYTES;
+    let footer_bytes = bytes
+        .get(bytes.len().saturating_sub(footer_size)..)
+        .filter(|footer| footer.len() == footer_size)
+        .expect("recorded RRD is missing or has a truncated footer");
+    rerun::external::re_log_encoding::StreamFooter::from_rrd_bytes(footer_bytes)
+        .expect("finalized RRD footer");
+
+    let file = std::io::BufReader::new(std::fs::File::open(path).unwrap());
     let messages = rerun::external::re_log_encoding::DecoderApp::decode_lazy(file)
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -299,6 +308,36 @@ fn footerless_file_sink_writes_decodable_trace_records() {
             .as_ref()
             .is_some_and(|name| name == "boomerang.TraceRecord")
     }));
+}
+
+struct FailingFinalization;
+
+impl FlushDriver for FailingFinalization {
+    fn flush(
+        &self,
+        _recording: &rerun::RecordingStream,
+        _timeout: Duration,
+    ) -> Result<(), rerun::sink::SinkFlushError> {
+        Err(rerun::sink::SinkFlushError::failed(
+            "injected finalization failure",
+        ))
+    }
+}
+
+#[test]
+fn finish_reports_finalization_failure() {
+    let session = RerunSessionBuilder::new("failing-finalization")
+        .blueprint(BlueprintConfig::None)
+        .flush_driver(Arc::new(FailingFinalization))
+        .build()
+        .unwrap();
+
+    let error = session.finish().unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "failed to finalize Rerun recording: injected finalization failure"
+    );
 }
 
 #[test]

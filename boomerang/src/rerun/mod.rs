@@ -10,5 +10,5 @@ pub use entities::{
 pub use layer::RerunLayer;
 pub use session::{
     BlueprintConfig, FlushDriver, RerunSession, RerunSessionBuildError, RerunSessionBuilder,
-    SinkConfig, SinkConfigError,
+    RerunSessionFinishError, SinkConfig, SinkConfigError,
 };

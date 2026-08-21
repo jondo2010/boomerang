@@ -21,6 +21,7 @@ pub struct TraceRecord {
     pub entity_path: String,
     pub timepoint: TraceTimePoint,
     pub duration_ns: Option<u64>,
+    pub terminal_state: Option<String>,
     pub event: TraceEvent,
 }
 
@@ -52,13 +53,144 @@ pub enum TraceEvent {
     CausalLink(CausalLink),
 }
 
+impl TraceEvent {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::SchedulerRunning(_) => "scheduler_thread",
+            Self::TagProcessing(_) => "tag_process",
+            Self::ReactionExecution(_) => "reaction_execute",
+            Self::CoordinationWait(_) => "coordination_wait",
+            Self::LogicalIngress(_) | Self::PhysicalIngress(_) | Self::ControlIngress(_) => {
+                "async_ingress"
+            }
+            Self::ActionScheduled(_) | Self::ActionStartup(_) | Self::ActionRebased(_) => {
+                "action_schedule"
+            }
+            Self::PortWrite(_) => "port_write",
+            Self::PropagationLogicalSend(_)
+            | Self::PropagationPhysicalSend(_)
+            | Self::PropagationSerializedSend(_) => "propagation_send",
+            Self::PropagationReceive(_) => "propagation_receive",
+            Self::FrontierCandidate(_) | Self::FrontierState(_) => "frontier_publish",
+            Self::CoordinationGrant(_) => "coordination_grant",
+            Self::TagRelease(_) => "tag_release",
+            Self::TagComplete(_) => "tag_complete",
+            Self::Shutdown(_) => "shutdown",
+            Self::RuntimeDiagnostic(_) | Self::SchemaDiagnostic(_) => "diagnostic",
+            Self::CausalLink(_) => "causal_link",
+        }
+    }
+
+    pub(crate) fn enclave(&self) -> Option<&str> {
+        match self {
+            Self::SchedulerRunning(value) => Some(&value.enclave),
+            Self::TagProcessing(value) => Some(&value.enclave),
+            Self::ReactionExecution(value) => Some(&value.enclave),
+            Self::CoordinationWait(value) => Some(&value.enclave),
+            Self::LogicalIngress(value) => Some(&value.enclave),
+            Self::PhysicalIngress(value) => Some(&value.enclave),
+            Self::ControlIngress(value) => Some(&value.enclave),
+            Self::ActionScheduled(value) => Some(&value.enclave),
+            Self::ActionStartup(value) => Some(&value.enclave),
+            Self::ActionRebased(value) => value.enclave.as_deref(),
+            Self::PortWrite(value) => Some(&value.enclave),
+            Self::PropagationLogicalSend(value) => Some(&value.enclave),
+            Self::PropagationPhysicalSend(value) => Some(&value.enclave),
+            Self::PropagationSerializedSend(value) => Some(&value.enclave),
+            Self::PropagationReceive(value) => Some(&value.enclave),
+            Self::FrontierCandidate(value) => Some(&value.enclave),
+            Self::FrontierState(value) => Some(&value.enclave),
+            Self::CoordinationGrant(value) => Some(&value.enclave),
+            Self::TagRelease(value) => Some(&value.enclave),
+            Self::TagComplete(value) => Some(&value.enclave),
+            Self::Shutdown(value) => Some(&value.enclave),
+            Self::RuntimeDiagnostic(value) => Some(&value.enclave),
+            Self::SchemaDiagnostic(_) => None,
+            Self::CausalLink(value) => Some(&value.enclave),
+        }
+    }
+
+    pub(crate) fn federate(&self) -> Option<&str> {
+        match self {
+            Self::SchedulerRunning(value) => Some(&value.federate),
+            Self::TagProcessing(value) => value.federate.as_deref(),
+            Self::ReactionExecution(value) => value.federate.as_deref(),
+            Self::CoordinationWait(value) => value.federate.as_deref(),
+            Self::LogicalIngress(value) => value.federate.as_deref(),
+            Self::PhysicalIngress(value) => value.federate.as_deref(),
+            Self::ControlIngress(value) => value.federate.as_deref(),
+            Self::ActionScheduled(value) => value.federate.as_deref(),
+            Self::ActionStartup(value) => value.federate.as_deref(),
+            Self::ActionRebased(value) => value.federate.as_deref(),
+            Self::PortWrite(value) => value.federate.as_deref(),
+            Self::PropagationLogicalSend(value) => value.federate.as_deref(),
+            Self::PropagationPhysicalSend(value) => value.federate.as_deref(),
+            Self::PropagationSerializedSend(value) => value.federate.as_deref(),
+            Self::PropagationReceive(value) => value.federate.as_deref(),
+            Self::FrontierCandidate(value) => value.federate.as_deref(),
+            Self::FrontierState(value) => value.federate.as_deref(),
+            Self::CoordinationGrant(value) => value.federate.as_deref(),
+            Self::TagRelease(value) => value.federate.as_deref(),
+            Self::TagComplete(value) => value.federate.as_deref(),
+            Self::Shutdown(value) => value.federate.as_deref(),
+            Self::RuntimeDiagnostic(value) => value.federate.as_deref(),
+            Self::SchemaDiagnostic(_) | Self::CausalLink(_) => None,
+        }
+    }
+
+    pub fn tag(&self) -> Option<TraceTag> {
+        match self {
+            Self::TagProcessing(value) => Some(value.tag),
+            Self::ReactionExecution(value) => Some(value.tag),
+            Self::CoordinationWait(value) => Some(value.tag),
+            Self::LogicalIngress(value) => Some(value.tag),
+            Self::PhysicalIngress(value) => Some(value.tag),
+            Self::ControlIngress(value) => Some(value.tag),
+            Self::ActionScheduled(value) => Some(value.source_tag),
+            Self::ActionStartup(value) => Some(value.source_tag),
+            Self::ActionRebased(value) => value.source_tag,
+            Self::PortWrite(value) => Some(value.tag),
+            Self::PropagationLogicalSend(value) => Some(value.tag),
+            Self::PropagationPhysicalSend(value) => value.source_tag,
+            Self::PropagationSerializedSend(value) => Some(value.tag),
+            Self::PropagationReceive(value) => Some(value.tag),
+            Self::FrontierCandidate(value) => Some(value.tag),
+            Self::CoordinationGrant(value) => Some(value.tag),
+            Self::TagRelease(value) => Some(value.tag),
+            Self::TagComplete(value) => Some(value.tag),
+            Self::Shutdown(value) => Some(value.tag),
+            Self::CausalLink(value) => Some(value.tag),
+            Self::SchedulerRunning(_)
+            | Self::FrontierState(_)
+            | Self::RuntimeDiagnostic(_)
+            | Self::SchemaDiagnostic(_) => None,
+        }
+    }
+
+    pub(crate) fn terminal(&self) -> Option<bool> {
+        match self {
+            Self::TagProcessing(value) => Some(value.terminal),
+            Self::TagComplete(value) => Some(value.terminal),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn duration_phase(&self) -> Option<&'static str> {
+        match self {
+            Self::TagProcessing(_) => Some("processing tag"),
+            Self::ReactionExecution(_) => Some("executing reaction"),
+            Self::CoordinationWait(_) => Some("waiting for coordination"),
+            _ => None,
+        }
+    }
+}
+
 macro_rules! text_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         pub enum $name { $($variant),+ }
 
         impl $name {
-            #[allow(dead_code)] // Task 2 wires the migration-only raw parser into the tracing layer.
             fn parse(field: &'static str, value: &str) -> Result<Self, SchemaErrorKind> {
                 match value {
                     $($value => Ok(Self::$variant),)+
@@ -67,6 +199,10 @@ macro_rules! text_enum {
                         value: value.to_owned(),
                     }),
                 }
+            }
+
+            pub(crate) fn as_str(self) -> &'static str {
+                match self { $(Self::$variant => $value,)+ }
             }
         }
     };
@@ -107,8 +243,24 @@ text_enum!(FrontierStatus {
 });
 text_enum!(ShutdownState { Complete => "complete" });
 text_enum!(ShutdownOutcome { Success => "success" });
-text_enum!(CausalState { Exact => "exact" });
-text_enum!(CausalOutcome { Matched => "matched" });
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CausalState {
+    Exact,
+}
+impl CausalState {
+    pub(crate) fn as_str(self) -> &'static str {
+        "exact"
+    }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CausalOutcome {
+    Matched,
+}
+impl CausalOutcome {
+    pub(crate) fn as_str(self) -> &'static str {
+        "matched"
+    }
+}
 text_enum!(PortWriteOutcome {
     MutableAccess => "mutable_access",
 });
@@ -143,7 +295,7 @@ pub struct ReactionExecution {
     pub reactor: String,
     pub reaction_key: Option<String>,
     pub reaction: String,
-    pub level: String,
+    pub level: u64,
     pub state: ReactionState,
 }
 
@@ -356,6 +508,39 @@ pub struct CausalLink {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum OpenSpan {
+    Complete(TraceEvent),
+    Propagation(OpenPropagationSend),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OpenPropagationSend {
+    event: TraceEvent,
+}
+
+impl OpenSpan {
+    pub(crate) fn event(&self) -> &TraceEvent {
+        match self {
+            Self::Complete(event) => event,
+            Self::Propagation(open) => &open.event,
+        }
+    }
+
+    pub(crate) fn propagation(&self) -> Option<&OpenPropagationSend> {
+        match self {
+            Self::Propagation(open) => Some(open),
+            Self::Complete(_) => None,
+        }
+    }
+}
+
+impl OpenPropagationSend {
+    pub(crate) fn event(&self) -> &TraceEvent {
+        &self.event
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SchemaError {
     pub event: Option<String>,
     pub kind: SchemaErrorKind,
@@ -422,7 +607,6 @@ impl fmt::Display for SchemaError {
 
 impl Error for SchemaError {}
 
-#[allow(dead_code)] // Task 2 wires this migration-only visitor state into the tracing layer.
 #[derive(Clone, Debug, PartialEq)]
 enum RawValue {
     Text(String),
@@ -436,7 +620,6 @@ enum RawValue {
     Error(String),
 }
 
-#[allow(dead_code)] // Task 2 wires this migration-only visitor state into the tracing layer.
 impl RawValue {
     fn kind(&self) -> &'static str {
         match self {
@@ -454,14 +637,13 @@ impl RawValue {
 }
 
 /// Transient tracing visitor state. Values retain the primitive type supplied by `tracing`.
-#[allow(dead_code)] // Task 2 replaces the existing dynamic layer visitor with this state.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct RawTraceFields {
     values: BTreeMap<String, RawValue>,
 }
 
-#[allow(dead_code)] // Task 2 wires this migration-only parser into the tracing layer.
 impl RawTraceFields {
+    #[cfg(test)]
     fn from_iter<'a>(fields: impl IntoIterator<Item = (&'a str, RawValue)>) -> Self {
         let mut raw = Self::default();
         for (name, value) in fields {
@@ -474,20 +656,21 @@ impl RawTraceFields {
         self.values.insert(name.to_owned(), value);
     }
 
+    #[cfg(test)]
     fn contains(&self, name: &str) -> bool {
         self.values.contains_key(name)
     }
 
     pub(crate) fn inherit_missing(&mut self, parent: &Self) {
-        for name in [
-            "federate",
-            "enclave",
-            "reactor",
-            "reaction_key",
-            "reaction",
-            "logical_ns",
-            "microstep",
-        ] {
+        let child_event = match self.values.get("event") {
+            Some(RawValue::Text(value)) => value.as_str(),
+            _ => "",
+        };
+        let mut names = vec!["federate", "enclave", "logical_ns", "microstep"];
+        if child_event == "port_write" {
+            names.extend(["reactor", "reaction_key", "reaction"]);
+        }
+        for name in names {
             if !self.values.contains_key(name) {
                 if let Some(value) = parent.values.get(name) {
                     self.values.insert(name.to_owned(), value.clone());
@@ -524,6 +707,41 @@ impl RawTraceFields {
             event: Some(event),
             kind,
         })
+    }
+
+    pub(crate) fn parse_open_span(&self) -> Result<OpenSpan, SchemaError> {
+        let event_name = match self.values.get("event") {
+            Some(RawValue::Text(value)) => value.as_str(),
+            Some(value) => {
+                return Err(SchemaError {
+                    event: None,
+                    kind: wrong_type("event", "text", value),
+                })
+            }
+            None => {
+                return Err(SchemaError {
+                    event: None,
+                    kind: SchemaErrorKind::MissingField("event"),
+                })
+            }
+        };
+        if event_name != "propagation_send" {
+            return self.parse().map(OpenSpan::Complete);
+        }
+        let mut completed = self.clone();
+        if !completed.values.contains_key("outcome") {
+            completed.insert("outcome", RawValue::Text("accepted".to_owned()));
+        }
+        let event = completed.parse()?;
+        if !matches!(
+            event,
+            TraceEvent::PropagationLogicalSend(_)
+                | TraceEvent::PropagationPhysicalSend(_)
+                | TraceEvent::PropagationSerializedSend(_)
+        ) {
+            unreachable!("propagation parser returned a non-propagation event");
+        }
+        Ok(OpenSpan::Propagation(OpenPropagationSend { event }))
     }
 
     fn parse_event(&self, r: &Reader<'_>) -> Result<TraceEvent, SchemaErrorKind> {
@@ -572,7 +790,7 @@ impl RawTraceFields {
                     reactor: r.text("reactor")?,
                     reaction_key: r.optional_text("reaction_key")?,
                     reaction: r.text("reaction")?,
-                    level: r.text("level")?,
+                    level: r.u64("level")?,
                     state: ReactionState::parse("state", &r.text("state")?)?,
                 }))
             }
@@ -1016,13 +1234,11 @@ impl Visit for RawTraceFields {
     }
 }
 
-#[allow(dead_code)] // Task 2 wires this migration-only parser into the tracing layer.
 struct Reader<'a> {
     raw: &'a RawTraceFields,
     event: &'a str,
 }
 
-#[allow(dead_code)] // Task 2 wires this migration-only parser into the tracing layer.
 impl Reader<'_> {
     fn validate_known(&self) -> Result<(), SchemaErrorKind> {
         const KNOWN: &[&str] = &[
@@ -1269,7 +1485,7 @@ mod tests {
             ("reactor", text("root")),
             ("reaction_key", text("r0")),
             ("reaction", text("respond")),
-            ("level", text("3")),
+            ("level", RawValue::U64(3)),
             ("state", text("begin")),
         ]);
 
@@ -1920,7 +2136,7 @@ mod tests {
             ("microstep", RawValue::U64(0)),
             ("action_key", text("must-not-inherit")),
         ]);
-        let mut child = RawTraceFields::default();
+        let mut child = raw(&[("event", text("port_write"))]);
         child.inherit_missing(&parent);
         assert!(child.contains("reaction"));
         assert!(!child.contains("action_key"));

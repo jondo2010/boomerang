@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Record};
 use tracing::{Event, Id, Subscriber};
 use tracing_subscriber::layer::{Context, Filter};
@@ -13,8 +12,12 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 
 use super::entities::{
-    entity_path, RegistrationIndex, TraceFields, TraceId, TraceRecord, TraceStateChange,
-    TraceStateRecord, TraceTimePoint, TraceWriter, TraceWriterError,
+    entity_path, RegistrationIndex, TraceId, TraceStateChange, TraceStateRecord, TraceTimePoint,
+    TraceWriter, TraceWriterError,
+};
+use super::schema::{
+    CausalLink, CausalOutcome, CausalState, DeliveryOutcome, IngressOutcome, OpenSpan,
+    PropagationReceive, RawTraceFields, SchemaDiagnostic, TraceEvent, TraceRecord, TraceTag,
 };
 use super::session::SessionState;
 
@@ -120,7 +123,7 @@ impl RerunLayer {
         }
     }
 
-    fn timepoint(&self, fields: &TraceFields) -> TraceTimePoint {
+    fn timepoint(&self, tag: Option<TraceTag>) -> TraceTimePoint {
         TraceTimePoint {
             elapsed_ns: saturating_i64(self.started.elapsed().as_nanos()),
             wall_clock_unix_ns: saturating_i64(
@@ -129,9 +132,7 @@ impl RerunLayer {
                     .unwrap_or_default()
                     .as_nanos(),
             ),
-            logical_ns: fields
-                .logical_ns
-                .and_then(|value| i64::try_from(value).ok()),
+            logical_ns: tag.and_then(|value| i64::try_from(value.logical_ns).ok()),
         }
     }
 
@@ -176,13 +177,6 @@ impl RerunLayer {
     fn diagnostic(&self, message: impl Into<String>) {
         let message = message.into();
         tracing::warn!(target: INTERNAL_TARGET, error = %message, "invalid Boomerang trace record");
-        let fields = TraceFields {
-            event: Some("diagnostic".to_owned()),
-            state: Some("schema_error".to_owned()),
-            outcome: Some("ignored".to_owned()),
-            error: Some(message),
-            ..TraceFields::default()
-        };
         let Some(id) = self.next_id("unknown") else {
             return;
         };
@@ -190,39 +184,33 @@ impl RerunLayer {
             id,
             parent_id: None,
             entity_path: "/diagnostics/schema".to_owned(),
-            event: "diagnostic".to_owned(),
-            timepoint: self.timepoint(&fields),
-            microstep: None,
+            timepoint: self.timepoint(None),
             duration_ns: None,
             terminal_state: None,
-            fields,
+            event: TraceEvent::SchemaDiagnostic(SchemaDiagnostic { error: message }),
         });
     }
 
     fn make_record(
         &self,
-        fields: TraceFields,
+        event: TraceEvent,
         parent_id: Option<TraceId>,
         id: Option<TraceId>,
         duration: Option<Duration>,
     ) -> Option<TraceRecord> {
-        let Some(event) = fields.event.clone() else {
-            self.diagnostic("missing required field `event`");
-            return None;
-        };
-        let Some(enclave) = fields.enclave.as_deref() else {
-            self.diagnostic(format!(
-                "event `{event}` is missing required field `enclave`"
-            ));
-            return None;
-        };
+        let enclave = event.enclave().unwrap_or("unknown");
         let id = if let Some(id) = id {
             id
         } else {
             self.next_id(enclave)?
         };
-        let entity_path = self.resolved_entity_path(&fields, &event);
-        let entity_path = if event == "propagation_send" {
+        let entity_path = self.resolved_entity_path(&event);
+        let entity_path = if matches!(
+            event,
+            TraceEvent::PropagationLogicalSend(_)
+                | TraceEvent::PropagationPhysicalSend(_)
+                | TraceEvent::PropagationSerializedSend(_)
+        ) {
             format!(
                 "/propagation/sends/{}",
                 super::entities::escape_entity_segment(&id.0)
@@ -234,22 +222,20 @@ impl RerunLayer {
             id,
             parent_id,
             entity_path,
-            event,
-            timepoint: self.timepoint(&fields),
-            microstep: fields.microstep,
+            timepoint: self.timepoint(event.tag()),
             duration_ns: duration.map(|value| u64::try_from(value.as_nanos()).unwrap_or(u64::MAX)),
             terminal_state: None,
-            fields,
+            event,
         })
     }
 
-    fn resolved_entity_path(&self, fields: &TraceFields, event: &str) -> String {
+    fn resolved_entity_path(&self, event: &TraceEvent) -> String {
         self.adapter
             .registration
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .entity_path(fields, event)
-            .unwrap_or_else(|| entity_path(fields, event))
+            .entity_path(event)
+            .unwrap_or_else(|| entity_path(event))
     }
 
     fn write_with_causality(&self, record: TraceRecord) {
@@ -267,15 +253,18 @@ impl RerunLayer {
                 .registration
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            match record.event.as_str() {
-                "propagation_send" | "async_ingress" | "action_schedule" => registration
-                    .resolve_entity(&record.fields, record.event.as_str())
-                    .map(|action| {
+            match &record.event {
+                TraceEvent::PropagationLogicalSend(_)
+                | TraceEvent::PropagationSerializedSend(_)
+                | TraceEvent::LogicalIngress(_)
+                | TraceEvent::ActionRebased(_) => {
+                    registration.resolve_entity(&record.event).map(|action| {
                         let reactions = registration.triggered_reactions(&action).to_vec();
                         (action, reactions)
-                    }),
-                "reaction_execute" => registration
-                    .resolve_entity(&record.fields, record.event.as_str())
+                    })
+                }
+                TraceEvent::ReactionExecution(_) => registration
+                    .resolve_entity(&record.event)
                     .map(|reaction| (reaction, Vec::new())),
                 _ => None,
             }
@@ -283,21 +272,15 @@ impl RerunLayer {
 
         let mut correlation = lock_unpoisoned(&self.adapter.correlation);
         correlation.advance();
-        match record.event.as_str() {
-            "propagation_send" if record.fields.kind.as_deref() == Some("logical") => {
-                if let (Some((action, _)), Some(tag)) =
-                    (topology, CompleteTag::from_fields(&record.fields))
-                {
+        match &record.event {
+            TraceEvent::PropagationLogicalSend(send) => {
+                if let Some((action, _)) = topology {
                     let key = PropagationKey {
-                        federate: record
-                            .fields
-                            .destination_federate
-                            .clone()
-                            .or_else(|| record.fields.federate.clone()),
+                        federate: send.federate.clone(),
                         action,
-                        tag,
+                        tag: send.tag.into(),
                     };
-                    let accepted = record.fields.outcome.as_deref() == Some("accepted");
+                    let accepted = send.outcome == DeliveryOutcome::Accepted;
                     match correlation.finish_open_send(&key, &record.id, accepted) {
                         FinishOpenSend::NotOpen if accepted => {
                             correlation.insert_send(key, record.id.clone());
@@ -314,19 +297,41 @@ impl RerunLayer {
                 }
                 Vec::new()
             }
-            "async_ingress"
-                if record.fields.kind.as_deref() == Some("logical")
-                    && record.fields.outcome.as_deref() == Some("accepted") =>
-            {
-                let (Some((action, _)), Some(tag)) =
-                    (topology, CompleteTag::from_fields(&record.fields))
-                else {
+            TraceEvent::PropagationSerializedSend(send) => {
+                if let Some((action, _)) = topology {
+                    let key = PropagationKey {
+                        federate: send
+                            .destination_federate
+                            .clone()
+                            .or_else(|| send.federate.clone()),
+                        action,
+                        tag: send.tag.into(),
+                    };
+                    let accepted = send.outcome == DeliveryOutcome::Accepted;
+                    match correlation.finish_open_send(&key, &record.id, accepted) {
+                        FinishOpenSend::NotOpen if accepted => {
+                            correlation.insert_send(key, record.id.clone())
+                        }
+                        FinishOpenSend::EarlyIngress(ingress) => {
+                            return self.derive_receive(
+                                &mut correlation,
+                                record.id.clone(),
+                                *ingress,
+                            )
+                        }
+                        FinishOpenSend::NotOpen | FinishOpenSend::Handled => {}
+                    }
+                }
+                Vec::new()
+            }
+            TraceEvent::LogicalIngress(ingress) if ingress.outcome == IngressOutcome::Accepted => {
+                let Some((action, _)) = topology else {
                     return Vec::new();
                 };
                 let key = PropagationKey {
-                    federate: record.fields.federate.clone(),
+                    federate: ingress.federate.clone(),
                     action,
-                    tag: tag.clone(),
+                    tag: ingress.destination_tag.into(),
                 };
                 if let Some(send) = correlation.take_send(&key) {
                     return self.derive_receive(&mut correlation, send, record.clone());
@@ -336,37 +341,31 @@ impl RerunLayer {
                 }
                 Vec::new()
             }
-            "action_schedule" if record.fields.outcome.as_deref() == Some("rebased") => {
-                if let (Some((_, reactions)), Some(enclave), Some(old_tag), Some(destination_tag)) = (
-                    topology,
-                    record.fields.enclave.as_deref(),
-                    CompleteTag::old_from_fields(&record.fields),
-                    CompleteTag::destination_from_fields(&record.fields),
-                ) {
+            TraceEvent::ActionRebased(rebased) => {
+                if let (Some((_, reactions)), Some(enclave)) =
+                    (topology, rebased.enclave.as_deref())
+                {
                     correlation.rebase_predecessors(
-                        record.fields.federate.as_deref(),
+                        rebased.federate.as_deref(),
                         enclave,
                         &reactions,
-                        &old_tag,
-                        &destination_tag,
+                        &rebased.old_tag.into(),
+                        &rebased.destination_tag.into(),
                     );
                 }
                 Vec::new()
             }
-            "reaction_execute" => {
-                let (Some((reaction, _)), Some(tag), Some(enclave)) = (
-                    topology,
-                    CompleteTag::from_fields(&record.fields),
-                    record.fields.enclave.clone(),
-                ) else {
+            TraceEvent::ReactionExecution(reaction_event) => {
+                let Some((reaction, _)) = topology else {
                     return Vec::new();
                 };
+                let enclave = reaction_event.enclave.clone();
                 correlation
                     .take_predecessors(&ReactionKey {
-                        federate: record.fields.federate.clone(),
+                        federate: reaction_event.federate.clone(),
                         enclave: enclave.clone(),
                         reaction,
-                        tag,
+                        tag: reaction_event.tag.into(),
                     })
                     .into_iter()
                     .filter_map(|receive| self.causal_link(&enclave, &receive, &record.id, record))
@@ -382,12 +381,11 @@ impl RerunLayer {
         send: TraceId,
         ingress: TraceRecord,
     ) -> Vec<TraceRecord> {
-        let Some(enclave) = ingress.fields.enclave.clone() else {
+        let TraceEvent::LogicalIngress(value) = &ingress.event else {
             return Vec::new();
         };
-        let Some(tag) = CompleteTag::from_fields(&ingress.fields) else {
-            return Vec::new();
-        };
+        let enclave = value.enclave.clone();
+        let correlation_tag: CompleteTag = value.destination_tag.into();
         let reactions = {
             let registration = self
                 .adapter
@@ -395,36 +393,41 @@ impl RerunLayer {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             registration
-                .resolve_entity(&ingress.fields, ingress.event.as_str())
+                .resolve_entity(&ingress.event)
                 .map(|action| registration.triggered_reactions(&action).to_vec())
                 .unwrap_or_default()
         };
         let Some(receive_id) = self.next_id(&enclave) else {
             return Vec::new();
         };
-        let mut receive_fields = ingress.fields.clone();
-        receive_fields.event = Some("propagation_receive".to_owned());
         let receive = TraceRecord {
             entity_path: format!(
                 "/propagation/receives/{}",
                 super::entities::escape_entity_segment(&receive_id.0)
             ),
-            event: "propagation_receive".to_owned(),
             id: receive_id.clone(),
             parent_id: Some(send.clone()),
             timepoint: ingress.timepoint.clone(),
-            microstep: ingress.microstep,
             duration_ns: None,
             terminal_state: None,
-            fields: receive_fields,
+            event: TraceEvent::PropagationReceive(PropagationReceive {
+                federate: value.federate.clone(),
+                enclave: value.enclave.clone(),
+                action_key: value.action_key.clone(),
+                action: value.action.clone(),
+                tag: value.tag,
+                destination_tag: value.destination_tag,
+                value: value.value.clone(),
+                outcome: value.outcome,
+            }),
         };
         for reaction in reactions {
             correlation.insert_predecessor(
                 ReactionKey {
-                    federate: ingress.fields.federate.clone(),
+                    federate: value.federate.clone(),
                     enclave: enclave.clone(),
                     reaction,
-                    tag: tag.clone(),
+                    tag: correlation_tag.clone(),
                 },
                 receive_id.clone(),
             );
@@ -436,27 +439,58 @@ impl RerunLayer {
         derived
     }
 
-    fn begin_propagation_send(&self, fields: &TraceFields, id: TraceId) {
-        if fields.event.as_deref() != Some("propagation_send")
-            || fields.kind.as_deref() != Some("logical")
-        {
-            return;
-        }
+    fn begin_propagation_send(&self, event: &TraceEvent, id: TraceId) {
+        let (federate, tag) = match event {
+            TraceEvent::PropagationLogicalSend(send) => (send.federate.clone(), send.tag),
+            TraceEvent::PropagationSerializedSend(send) => (
+                send.destination_federate
+                    .clone()
+                    .or_else(|| send.federate.clone()),
+                send.tag,
+            ),
+            _ => return,
+        };
         let action = self
             .adapter
             .registration
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .resolve_entity(fields, "propagation_send");
-        if let (Some(action), Some(tag)) = (action, CompleteTag::from_fields(fields)) {
+            .resolve_entity(event);
+        if let Some(action) = action {
             lock_unpoisoned(&self.adapter.correlation).begin_open_send(
                 PropagationKey {
-                    federate: fields
-                        .destination_federate
-                        .clone()
-                        .or_else(|| fields.federate.clone()),
+                    federate,
                     action,
-                    tag,
+                    tag: tag.into(),
+                },
+                id,
+            );
+        }
+    }
+
+    fn abort_propagation_send(&self, event: &TraceEvent, id: &TraceId) {
+        let (federate, tag) = match event {
+            TraceEvent::PropagationLogicalSend(send) => (send.federate.clone(), send.tag),
+            TraceEvent::PropagationSerializedSend(send) => (
+                send.destination_federate
+                    .clone()
+                    .or_else(|| send.federate.clone()),
+                send.tag,
+            ),
+            _ => return,
+        };
+        let action = self
+            .adapter
+            .registration
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .resolve_entity(event);
+        if let Some(action) = action {
+            lock_unpoisoned(&self.adapter.correlation).abort_open_send(
+                &PropagationKey {
+                    federate,
+                    action,
+                    tag: tag.into(),
                 },
                 id,
             );
@@ -471,30 +505,25 @@ impl RerunLayer {
         at: &TraceRecord,
     ) -> Option<TraceRecord> {
         let id = self.next_id(enclave)?;
-        let fields = TraceFields {
-            event: Some("causal_link".to_owned()),
-            enclave: Some(enclave.to_owned()),
-            source: Some(source.0.clone()),
-            destination: Some(destination.0.clone()),
-            logical_ns: at.fields.logical_ns,
-            microstep: at.fields.microstep,
-            state: Some("exact".to_owned()),
-            outcome: Some("matched".to_owned()),
-            ..TraceFields::default()
-        };
+        let tag = at.event.tag()?;
         Some(TraceRecord {
             entity_path: format!(
                 "/propagation/links/{}",
                 super::entities::escape_entity_segment(&id.0)
             ),
-            event: "causal_link".to_owned(),
             id,
             parent_id: Some(source.clone()),
             timepoint: at.timepoint.clone(),
-            microstep: at.microstep,
             duration_ns: None,
             terminal_state: None,
-            fields,
+            event: TraceEvent::CausalLink(CausalLink {
+                enclave: enclave.to_owned(),
+                source: source.clone(),
+                destination: destination.clone(),
+                tag,
+                state: CausalState::Exact,
+                outcome: CausalOutcome::Matched,
+            }),
         })
     }
 }
@@ -508,26 +537,12 @@ struct CompleteTag {
     microstep: u64,
 }
 
-impl CompleteTag {
-    fn from_fields(fields: &TraceFields) -> Option<Self> {
-        Some(Self {
-            logical_ns: fields.destination_logical_ns.or(fields.logical_ns)?,
-            microstep: fields.destination_microstep.or(fields.microstep)?,
-        })
-    }
-
-    fn old_from_fields(fields: &TraceFields) -> Option<Self> {
-        Some(Self {
-            logical_ns: fields.old_logical_ns?,
-            microstep: fields.old_microstep?,
-        })
-    }
-
-    fn destination_from_fields(fields: &TraceFields) -> Option<Self> {
-        Some(Self {
-            logical_ns: fields.destination_logical_ns?,
-            microstep: fields.destination_microstep?,
-        })
+impl From<TraceTag> for CompleteTag {
+    fn from(tag: TraceTag) -> Self {
+        Self {
+            logical_ns: tag.logical_ns,
+            microstep: tag.microstep,
+        }
     }
 }
 
@@ -782,6 +797,17 @@ impl CorrelationState {
                         FinishOpenSend::Handled
                     }
                 }
+            }
+        }
+    }
+
+    fn abort_open_send(&mut self, key: &PropagationKey, id: &TraceId) {
+        let remove = matches!(self.open_sends.get(key), Some(PendingResolution::Unique { id: pending, .. }) if pending == id);
+        if remove {
+            self.open_sends.remove(key);
+            self.pending_count = self.pending_count.saturating_sub(1);
+            if self.early_ingress.remove(key).is_some() {
+                self.pending_count = self.pending_count.saturating_sub(1);
             }
         }
     }
@@ -1178,32 +1204,34 @@ where
             if attrs.metadata().target() != TRACE_TARGET {
                 return;
             }
-            let mut fields = TraceFields::default();
+            let mut fields = RawTraceFields::default();
             attrs.record(&mut fields);
             let parent = span_parent(attrs, &ctx);
             if let Some(parent) = &parent {
                 fields.inherit_missing(&parent.fields());
             }
-            let Some(event) = fields.event.as_deref() else {
-                self.diagnostic("missing required field `event`");
+            let open = match fields.parse_open_span() {
+                Ok(open) => open,
+                Err(error) => {
+                    self.diagnostic(error.to_string());
+                    return;
+                }
+            };
+            let Some(trace_id) = self.next_id(open.event().enclave().unwrap_or("unknown")) else {
                 return;
             };
-            let Some(enclave) = fields.enclave.as_deref() else {
-                self.diagnostic(format!(
-                    "span `{event}` is missing required field `enclave`"
-                ));
-                return;
-            };
-            let Some(trace_id) = self.next_id(enclave) else {
-                return;
-            };
-            self.begin_propagation_send(&fields, trace_id.clone());
-            let timepoint = self.timepoint(&fields);
-            let duration_state = duration_phase(event)
-                .map(|phase| (self.resolved_entity_path(&fields, event), phase));
+            if let Some(send) = open.propagation() {
+                self.begin_propagation_send(send.event(), trace_id.clone());
+            }
+            let timepoint = self.timepoint(open.event().tag());
+            let duration_state = open
+                .event()
+                .duration_phase()
+                .map(|phase| (self.resolved_entity_path(open.event()), phase));
             let span_state = Arc::new(SpanState::new(
                 trace_id,
                 parent.map(|parent| parent.id.clone()),
+                open,
                 fields,
                 timepoint.clone(),
                 duration_state,
@@ -1255,21 +1283,32 @@ where
                 return;
             };
             let fields = state.fields();
-            let terminal_state = terminal_span_state(&fields);
-            if let Some(mut record) = self.make_record(
-                fields.clone(),
-                state.parent_id.clone(),
-                Some(state.id.clone()),
-                Some(state.close_duration()),
-            ) {
-                record.timepoint = state.timepoint.clone();
-                record.terminal_state = terminal_state;
-                self.write_with_causality(record);
+            let parsed = match &state.open {
+                OpenSpan::Complete(event) => Ok(event.clone()),
+                OpenSpan::Propagation(_) => fields.parse(),
+            };
+            if let Ok(event) = parsed {
+                let terminal_state = terminal_span_state(&event);
+                if let Some(mut record) = self.make_record(
+                    event,
+                    state.parent_id.clone(),
+                    Some(state.id.clone()),
+                    Some(state.close_duration()),
+                ) {
+                    record.timepoint = state.timepoint.clone();
+                    record.terminal_state = terminal_state;
+                    self.write_with_causality(record);
+                }
+            } else if let Err(error) = parsed {
+                if let Some(open) = state.open.propagation() {
+                    self.abort_propagation_send(open.event(), &state.id);
+                }
+                self.diagnostic(error.to_string());
             }
             if let Some((entity_path, _)) = &state.duration_state {
                 self.write_state(TraceStateRecord {
                     entity_path: entity_path.clone(),
-                    timepoint: self.timepoint(&fields),
+                    timepoint: self.timepoint(state.open.event().tag()),
                     change: TraceStateChange::Reset,
                 });
             }
@@ -1281,16 +1320,21 @@ where
             if event.metadata().target() != TRACE_TARGET {
                 return;
             }
-            let mut fields = TraceFields::default();
+            let mut fields = RawTraceFields::default();
             event.record(&mut fields);
             let parent = event_parent(event, &ctx);
             if let Some(parent) = &parent {
                 fields.inherit_missing(&parent.fields());
             }
-            if let Some(record) =
-                self.make_record(fields, parent.map(|parent| parent.id.clone()), None, None)
-            {
-                self.write_with_causality(record);
+            match fields.parse() {
+                Ok(event) => {
+                    if let Some(record) =
+                        self.make_record(event, parent.map(|parent| parent.id.clone()), None, None)
+                    {
+                        self.write_with_causality(record);
+                    }
+                }
+                Err(error) => self.diagnostic(error.to_string()),
             }
         });
     }
@@ -1299,7 +1343,8 @@ where
 struct SpanState {
     id: TraceId,
     parent_id: Option<TraceId>,
-    fields: Mutex<TraceFields>,
+    open: OpenSpan,
+    fields: Mutex<RawTraceFields>,
     timepoint: TraceTimePoint,
     duration_state: Option<(String, &'static str)>,
     timing: Mutex<SpanTiming>,
@@ -1315,13 +1360,15 @@ impl SpanState {
     fn new(
         id: TraceId,
         parent_id: Option<TraceId>,
-        fields: TraceFields,
+        open: OpenSpan,
+        fields: RawTraceFields,
         timepoint: TraceTimePoint,
         duration_state: Option<(String, &'static str)>,
     ) -> Self {
         Self {
             id,
             parent_id,
+            open,
             fields: Mutex::new(fields),
             timepoint,
             duration_state,
@@ -1329,7 +1376,7 @@ impl SpanState {
         }
     }
 
-    fn fields(&self) -> TraceFields {
+    fn fields(&self) -> RawTraceFields {
         lock_unpoisoned(&self.fields).clone()
     }
 
@@ -1367,15 +1414,6 @@ impl SpanState {
     }
 }
 
-fn duration_phase(event: &str) -> Option<&'static str> {
-    match event {
-        "tag_process" => Some("processing tag"),
-        "reaction_execute" => Some("executing reaction"),
-        "coordination_wait" => Some("waiting for coordination"),
-        _ => None,
-    }
-}
-
 fn span_state<S>(id: &Id, ctx: &Context<'_, S>) -> Option<Arc<SpanState>>
 where
     S: Subscriber + for<'lookup> LookupSpan<'lookup>,
@@ -1400,18 +1438,15 @@ where
     }
 }
 
-fn terminal_span_state(fields: &TraceFields) -> Option<String> {
-    match fields.event.as_deref() {
-        Some("tag_process" | "reaction_execute" | "coordination_wait") => Some(
-            if fields.terminal == Some(true) {
-                "terminal"
-            } else {
-                "complete"
-            }
-            .to_owned(),
-        ),
-        _ => None,
-    }
+fn terminal_span_state(event: &TraceEvent) -> Option<String> {
+    event.duration_phase().map(|_| {
+        if event.terminal() == Some(true) {
+            "terminal"
+        } else {
+            "complete"
+        }
+        .to_owned()
+    })
 }
 
 fn event_parent<S>(event: &Event<'_>, ctx: &Context<'_, S>) -> Option<Arc<SpanState>>
@@ -1448,72 +1483,6 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-impl Visit for TraceFields {
-    fn record_u64(&mut self, field: &Field, value: u64) {
-        match field.name() {
-            "logical_ns" => self.logical_ns = Some(value),
-            "microstep" => self.microstep = Some(value),
-            "destination_logical_ns" => self.destination_logical_ns = Some(value),
-            "destination_microstep" => self.destination_microstep = Some(value),
-            "old_logical_ns" => self.old_logical_ns = Some(value),
-            "old_microstep" => self.old_microstep = Some(value),
-            "value_size" => self.value_size = Some(value),
-            _ => {}
-        }
-    }
-
-    fn record_i64(&mut self, field: &Field, value: i64) {
-        if value >= 0 {
-            self.record_u64(field, value as u64);
-        }
-    }
-
-    fn record_bool(&mut self, field: &Field, value: bool) {
-        if field.name() == "terminal" {
-            self.terminal = Some(value);
-        }
-    }
-
-    fn record_str(&mut self, field: &Field, value: &str) {
-        self.record_text(field.name(), value.to_owned());
-    }
-
-    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-        let mut value = format!("{value:?}");
-        if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
-            value = value[1..value.len() - 1].to_owned();
-        }
-        self.record_text(field.name(), value);
-    }
-}
-
-impl TraceFields {
-    fn record_text(&mut self, name: &str, value: String) {
-        match name {
-            "event" => self.event = Some(value),
-            "federate" => self.federate = Some(value),
-            "enclave" => self.enclave = Some(value),
-            "kind" => self.kind = Some(value),
-            "reactor" => self.reactor = Some(value),
-            "reaction_key" => self.reaction_key = Some(value),
-            "reaction" => self.reaction = Some(value),
-            "action_key" => self.action_key = Some(value),
-            "action" => self.action = Some(value),
-            "port_key" => self.port_key = Some(value),
-            "port" => self.port = Some(value),
-            "destination" => self.destination = Some(value),
-            "destination_federate" => self.destination_federate = Some(value),
-            "source" => self.source = Some(value),
-            "level" => self.level = Some(value),
-            "state" => self.state = Some(value),
-            "value_type" => self.value_type = Some(value),
-            "outcome" => self.outcome = Some(value),
-            "error" => self.error = Some(value),
-            _ => {}
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::Ordering;
@@ -1522,7 +1491,25 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::*;
+    use crate::rerun::schema::{
+        CausalLink, IngressOutcome, LogicalIngress, PropagationReceive, TraceEvent, TraceTag,
+        ValueDescriptor,
+    };
     use crate::rerun::{RerunSessionBuilder, TraceRecord, TraceWriter, TraceWriterError};
+
+    fn causal_link(record: &TraceRecord) -> Option<&CausalLink> {
+        match &record.event {
+            TraceEvent::CausalLink(link) => Some(link),
+            _ => None,
+        }
+    }
+
+    fn propagation_receive(record: &TraceRecord) -> Option<&PropagationReceive> {
+        match &record.event {
+            TraceEvent::PropagationReceive(receive) => Some(receive),
+            _ => None,
+        }
+    }
 
     #[derive(Default)]
     struct IdCapture(Mutex<Vec<TraceId>>);
@@ -1578,7 +1565,11 @@ mod tests {
                 action_key = %self.action_key,
                 logical_ns = boomerang_runtime::trace::logical_ns(message.tag),
                 microstep = boomerang_runtime::trace::microstep(message.tag),
-                source = "during",
+                action = "input",
+                destination_logical_ns = boomerang_runtime::trace::logical_ns(message.tag),
+                destination_microstep = boomerang_runtime::trace::microstep(message.tag),
+                value_type = "u32",
+                value_size = std::mem::size_of::<u32>(),
                 outcome = "accepted",
             );
             Ok(())
@@ -1628,6 +1619,9 @@ mod tests {
             federate = "a",
             enclave = "source",
             reaction_key = "sender",
+            reactor = "source",
+            reaction = "sender",
+            level = 0_u64,
             logical_ns = boomerang_runtime::trace::logical_ns(tag),
             microstep = boomerang_runtime::trace::microstep(tag),
             state = "begin",
@@ -1651,7 +1645,11 @@ mod tests {
             action_key = %action_ref.key(),
             logical_ns = boomerang_runtime::trace::logical_ns(tag),
             microstep = boomerang_runtime::trace::microstep(tag),
-            source = "later",
+            action = "input",
+            destination_logical_ns = boomerang_runtime::trace::logical_ns(tag),
+            destination_microstep = boomerang_runtime::trace::microstep(tag),
+            value_type = "u32",
+            value_size = std::mem::size_of::<u32>(),
             outcome = "accepted",
         );
     }
@@ -1676,6 +1674,8 @@ mod tests {
                     target: TRACE_TARGET,
                     event = "shutdown",
                     enclave = "e0",
+                    logical_ns = 0_u64,
+                    microstep = 0_u64,
                     state = "complete",
                     outcome = "success",
                 );
@@ -1781,16 +1781,32 @@ mod tests {
             id: TraceId(id.to_owned()),
             parent_id: None,
             entity_path: "/ingress".to_owned(),
-            event: "async_ingress".to_owned(),
             timepoint: TraceTimePoint {
                 elapsed_ns: 0,
                 wall_clock_unix_ns: 0,
                 logical_ns: Some(1),
             },
-            microstep: Some(0),
             duration_ns: None,
             terminal_state: None,
-            fields: TraceFields::default(),
+            event: TraceEvent::LogicalIngress(LogicalIngress {
+                federate: Some("b".to_owned()),
+                enclave: "e0".to_owned(),
+                action_key: "/federates/b/actions/input".to_owned(),
+                action: "input".to_owned(),
+                tag: TraceTag {
+                    logical_ns: 1,
+                    microstep: 0,
+                },
+                destination_tag: TraceTag {
+                    logical_ns: 1,
+                    microstep: 0,
+                },
+                value: ValueDescriptor {
+                    value_type: "u32".to_owned(),
+                    value_size: 4,
+                },
+                outcome: IngressOutcome::Accepted,
+            }),
         };
         let open = TraceId("open".to_owned());
         state.begin_open_send(key.clone(), open.clone());
@@ -1833,31 +1849,29 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(session.layer());
         tracing::subscriber::with_default(subscriber, || {
             for action in ["a0", "a1"] {
-                tracing::trace!(target: TRACE_TARGET, event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = action, logical_ns = 3_u64, microstep = 0_u64, outcome = "accepted");
-                tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = action, logical_ns = 3_u64, microstep = 0_u64, destination_logical_ns = 3_u64, destination_microstep = 0_u64, outcome = "accepted");
+                tracing::trace!(target: TRACE_TARGET, event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = action, action, logical_ns = 3_u64, microstep = 0_u64, value_type = "u32", value_size = 4_u64, outcome = "accepted");
+                tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = action, action, logical_ns = 3_u64, microstep = 0_u64, destination_logical_ns = 3_u64, destination_microstep = 0_u64, value_type = "u32", value_size = 4_u64, outcome = "accepted");
             }
-            let reaction = tracing::trace_span!(target: TRACE_TARGET, "reaction_execute", event = "reaction_execute", enclave = "e0", reaction_key = "r0", logical_ns = 3_u64, microstep = 0_u64, state = "begin");
+            let reaction = tracing::trace_span!(target: TRACE_TARGET, "reaction_execute", event = "reaction_execute", enclave = "e0", reactor = "root", reaction_key = "r0", reaction = "r0", level = 0_u64, logical_ns = 3_u64, microstep = 0_u64, state = "begin");
             let _entered = reaction.enter();
         });
 
         let records = lock_unpoisoned(&capture.0);
         let reaction = records
             .iter()
-            .find(|record| record.event == "reaction_execute")
+            .find(|record| matches!(&record.event, TraceEvent::ReactionExecution(_)))
             .unwrap();
         let receives = records
             .iter()
-            .filter(|record| record.event == "propagation_receive")
+            .filter(|record| propagation_receive(record).is_some())
             .map(|record| record.id.clone())
             .collect::<Vec<_>>();
         assert_eq!(receives.len(), 2);
         let predecessors = records
             .iter()
-            .filter(|record| {
-                record.event == "causal_link"
-                    && record.fields.destination.as_deref() == Some(reaction.id.0.as_str())
-            })
-            .filter_map(|record| record.fields.source.clone())
+            .filter_map(causal_link)
+            .filter(|link| link.destination == reaction.id)
+            .map(|link| link.source.0.clone())
             .collect::<Vec<_>>();
         assert_eq!(predecessors.len(), 2);
         assert!(receives
@@ -1885,17 +1899,17 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(session.layer());
         tracing::subscriber::with_default(subscriber, || {
             for _ in 0..2 {
-                tracing::trace!(target: TRACE_TARGET, event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, outcome = "accepted");
+                tracing::trace!(target: TRACE_TARGET, event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", action = "a0", logical_ns = 1_u64, microstep = 0_u64, value_type = "u32", value_size = 4_u64, outcome = "accepted");
             }
-            tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, destination_logical_ns = 1_u64, destination_microstep = 0_u64, outcome = "accepted");
-            tracing::trace!(target: TRACE_TARGET, event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, outcome = "accepted");
-            tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, destination_logical_ns = 1_u64, destination_microstep = 0_u64, outcome = "accepted");
-            let poisoned_reaction = tracing::trace_span!(target: TRACE_TARGET, "reaction_execute", event = "reaction_execute", enclave = "e0", reaction_key = "r0", logical_ns = 1_u64, microstep = 0_u64, state = "begin");
+            tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = "a0", action = "a0", logical_ns = 1_u64, microstep = 0_u64, destination_logical_ns = 1_u64, destination_microstep = 0_u64, value_type = "u32", value_size = 4_u64, outcome = "accepted");
+            tracing::trace!(target: TRACE_TARGET, event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", action = "a0", logical_ns = 1_u64, microstep = 0_u64, value_type = "u32", value_size = 4_u64, outcome = "accepted");
+            tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = "a0", action = "a0", logical_ns = 1_u64, microstep = 0_u64, destination_logical_ns = 1_u64, destination_microstep = 0_u64, value_type = "u32", value_size = 4_u64, outcome = "accepted");
+            let poisoned_reaction = tracing::trace_span!(target: TRACE_TARGET, "reaction_execute", event = "reaction_execute", enclave = "e0", reactor = "root", reaction_key = "r0", reaction = "r0", level = 0_u64, logical_ns = 1_u64, microstep = 0_u64, state = "begin");
             drop(poisoned_reaction.enter());
             drop(poisoned_reaction);
-            tracing::trace!(target: TRACE_TARGET, event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", logical_ns = 2_u64, microstep = 0_u64, outcome = "accepted");
-            tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = "a0", logical_ns = 2_u64, microstep = 0_u64, destination_logical_ns = 2_u64, destination_microstep = 0_u64, outcome = "accepted");
-            let fresh_reaction = tracing::trace_span!(target: TRACE_TARGET, "reaction_execute", event = "reaction_execute", enclave = "e0", reaction_key = "r0", logical_ns = 2_u64, microstep = 0_u64, state = "begin");
+            tracing::trace!(target: TRACE_TARGET, event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", action = "a0", logical_ns = 2_u64, microstep = 0_u64, value_type = "u32", value_size = 4_u64, outcome = "accepted");
+            tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = "a0", action = "a0", logical_ns = 2_u64, microstep = 0_u64, destination_logical_ns = 2_u64, destination_microstep = 0_u64, value_type = "u32", value_size = 4_u64, outcome = "accepted");
+            let fresh_reaction = tracing::trace_span!(target: TRACE_TARGET, "reaction_execute", event = "reaction_execute", enclave = "e0", reactor = "root", reaction_key = "r0", reaction = "r0", level = 0_u64, logical_ns = 2_u64, microstep = 0_u64, state = "begin");
             drop(fresh_reaction.enter());
             drop(fresh_reaction);
         });
@@ -1903,14 +1917,14 @@ mod tests {
         let records = lock_unpoisoned(&capture.0);
         let receives = records
             .iter()
-            .filter(|record| record.event == "propagation_receive")
+            .filter_map(|record| propagation_receive(record).map(|receive| (record, receive)))
             .collect::<Vec<_>>();
         assert_eq!(receives.len(), 1);
-        assert_eq!(receives[0].fields.logical_ns, Some(2));
+        assert_eq!(receives[0].1.tag.logical_ns, 2);
         assert_eq!(
             records
                 .iter()
-                .filter(|record| record.event == "causal_link")
+                .filter(|record| causal_link(record).is_some())
                 .count(),
             2
         );
@@ -1940,8 +1954,11 @@ mod tests {
                 kind = "logical",
                 destination = "e0",
                 action_key = "a0",
+                action = "a0",
                 logical_ns = 1_u64,
                 microstep = 0_u64,
+                value_type = "u32",
+                value_size = 4_u64,
                 outcome = tracing::field::Empty,
             );
             let entered = send.enter();
@@ -1951,10 +1968,13 @@ mod tests {
                 enclave = "e0",
                 kind = "logical",
                 action_key = "a0",
+                action = "a0",
                 logical_ns = 1_u64,
                 microstep = 0_u64,
                 destination_logical_ns = 1_u64,
                 destination_microstep = 0_u64,
+                value_type = "u32",
+                value_size = 4_u64,
                 outcome = "accepted",
             );
             send.record("outcome", "accepted");
@@ -1965,16 +1985,16 @@ mod tests {
         let records = lock_unpoisoned(&capture.0);
         let send = records
             .iter()
-            .find(|record| record.event == "propagation_send")
+            .find(|record| matches!(&record.event, TraceEvent::PropagationLogicalSend(_)))
             .unwrap();
         let receive = records
             .iter()
-            .find(|record| record.event == "propagation_receive")
+            .find(|record| propagation_receive(record).is_some())
             .expect("accepted send must correlate with ingress observed before span close");
         assert_eq!(receive.parent_id.as_ref(), Some(&send.id));
         let ingress = records
             .iter()
-            .find(|record| record.event == "async_ingress")
+            .find(|record| matches!(&record.event, TraceEvent::LogicalIngress(_)))
             .unwrap();
         assert!(send.timepoint.elapsed_ns <= ingress.timepoint.elapsed_ns);
     }
@@ -2001,17 +2021,26 @@ mod tests {
         let send = records
             .iter()
             .find(|record| {
-                record.event == "propagation_send"
-                    && record.fields.destination_federate.as_deref() == Some("b")
+                matches!(
+                    &record.event,
+                    TraceEvent::PropagationSerializedSend(send)
+                        if send.destination_federate.as_deref() == Some("b")
+                )
             })
             .unwrap_or_else(|| panic!("missing serialized send record: {records:#?}"));
         let receives = records
             .iter()
-            .filter(|record| record.event == "propagation_receive")
+            .filter(|record| propagation_receive(record).is_some())
             .collect::<Vec<_>>();
         assert_eq!(receives.len(), 1);
         assert_eq!(receives[0].parent_id.as_ref(), Some(&send.id));
-        assert_eq!(receives[0].fields.source.as_deref(), Some("during"));
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(&record.event, TraceEvent::LogicalIngress(_)))
+                .count(),
+            4
+        );
     }
 
     #[test]
@@ -2030,9 +2059,9 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(session.layer());
 
         tracing::subscriber::with_default(subscriber, || {
-            let send = tracing::trace_span!(target: TRACE_TARGET, "propagation_send", event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, outcome = tracing::field::Empty);
+            let send = tracing::trace_span!(target: TRACE_TARGET, "propagation_send", event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", action = "a0", logical_ns = 1_u64, microstep = 0_u64, value_type = "u32", value_size = 4_u64, outcome = tracing::field::Empty);
             let entered = send.enter();
-            tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, destination_logical_ns = 1_u64, destination_microstep = 0_u64, outcome = "accepted");
+            tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = "a0", action = "a0", logical_ns = 1_u64, microstep = 0_u64, destination_logical_ns = 1_u64, destination_microstep = 0_u64, value_type = "u32", value_size = 4_u64, outcome = "accepted");
             send.record("outcome", "failed");
             drop(entered);
             drop(send);
@@ -2040,7 +2069,51 @@ mod tests {
 
         assert!(lock_unpoisoned(&capture.0)
             .iter()
-            .all(|record| record.event != "propagation_receive" && record.event != "causal_link"));
+            .all(|record| propagation_receive(record).is_none() && causal_link(record).is_none()));
+    }
+
+    #[test]
+    fn invalid_late_send_outcome_rolls_back_early_ingress_correlation() {
+        let capture = Arc::new(RecordCapture::default());
+        let session = RerunSessionBuilder::new("invalid-late-send-outcome")
+            .trace_writer(capture.clone())
+            .build()
+            .unwrap();
+        {
+            let mut registration = session
+                .adapter
+                .registration
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registration.register("e0", "action", "a0", "a0", "/actions/a0");
+            registration.register("e0", "reaction", "r0", "r0", "/reactions/r0");
+            registration.register_action_trigger("/actions/a0", "/reactions/r0");
+        }
+        let subscriber = tracing_subscriber::registry().with(session.layer());
+
+        tracing::subscriber::with_default(subscriber, || {
+            let send = tracing::trace_span!(target: TRACE_TARGET, "propagation_send", event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", action = "a0", logical_ns = 1_u64, microstep = 0_u64, value_type = "u32", value_size = 4_u64, outcome = tracing::field::Empty);
+            let entered = send.enter();
+            tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = "a0", action = "a0", logical_ns = 1_u64, microstep = 0_u64, destination_logical_ns = 1_u64, destination_microstep = 0_u64, value_type = "u32", value_size = 4_u64, outcome = "accepted");
+            send.record("outcome", "invalid");
+            drop(entered);
+            drop(send);
+
+            let reaction = tracing::trace_span!(target: TRACE_TARGET, "reaction_execute", event = "reaction_execute", enclave = "e0", reactor = "root", reaction_key = "r0", reaction = "r0", level = 0_u64, logical_ns = 1_u64, microstep = 0_u64, state = "begin");
+            drop(reaction);
+        });
+
+        let records = lock_unpoisoned(&capture.0);
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(record.event, TraceEvent::SchemaDiagnostic(_)))
+                .count(),
+            1
+        );
+        assert!(records.iter().all(|record| {
+            propagation_receive(record).is_none() && causal_link(record).is_none()
+        }));
     }
 
     #[test]
@@ -2059,9 +2132,9 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(session.layer());
 
         tracing::subscriber::with_default(subscriber, || {
-            let first = tracing::trace_span!(target: TRACE_TARGET, "propagation_send", event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, outcome = tracing::field::Empty);
-            let second = tracing::trace_span!(target: TRACE_TARGET, "propagation_send", event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, outcome = tracing::field::Empty);
-            tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, destination_logical_ns = 1_u64, destination_microstep = 0_u64, outcome = "accepted");
+            let first = tracing::trace_span!(target: TRACE_TARGET, "propagation_send", event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", action = "a0", logical_ns = 1_u64, microstep = 0_u64, value_type = "u32", value_size = 4_u64, outcome = tracing::field::Empty);
+            let second = tracing::trace_span!(target: TRACE_TARGET, "propagation_send", event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", action = "a0", logical_ns = 1_u64, microstep = 0_u64, value_type = "u32", value_size = 4_u64, outcome = tracing::field::Empty);
+            tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = "a0", action = "a0", logical_ns = 1_u64, microstep = 0_u64, destination_logical_ns = 1_u64, destination_microstep = 0_u64, value_type = "u32", value_size = 4_u64, outcome = "accepted");
             first.record("outcome", "accepted");
             second.record("outcome", "accepted");
             drop(first);
@@ -2070,7 +2143,7 @@ mod tests {
 
         assert!(lock_unpoisoned(&capture.0)
             .iter()
-            .all(|record| record.event != "propagation_receive" && record.event != "causal_link"));
+            .all(|record| propagation_receive(record).is_none() && causal_link(record).is_none()));
     }
 
     #[test]
@@ -2089,16 +2162,16 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(session.layer());
 
         tracing::subscriber::with_default(subscriber, || {
-            tracing::trace!(target: TRACE_TARGET, event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, outcome = "accepted");
-            let open = tracing::trace_span!(target: TRACE_TARGET, "propagation_send", event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, outcome = tracing::field::Empty);
-            tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, destination_logical_ns = 1_u64, destination_microstep = 0_u64, outcome = "accepted");
+            tracing::trace!(target: TRACE_TARGET, event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", action = "a0", logical_ns = 1_u64, microstep = 0_u64, value_type = "u32", value_size = 4_u64, outcome = "accepted");
+            let open = tracing::trace_span!(target: TRACE_TARGET, "propagation_send", event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", action = "a0", logical_ns = 1_u64, microstep = 0_u64, value_type = "u32", value_size = 4_u64, outcome = tracing::field::Empty);
+            tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = "a0", action = "a0", logical_ns = 1_u64, microstep = 0_u64, destination_logical_ns = 1_u64, destination_microstep = 0_u64, value_type = "u32", value_size = 4_u64, outcome = "accepted");
             open.record("outcome", "accepted");
             drop(open);
         });
 
         assert!(lock_unpoisoned(&capture.0)
             .iter()
-            .all(|record| record.event != "propagation_receive" && record.event != "causal_link"));
+            .all(|record| propagation_receive(record).is_none() && causal_link(record).is_none()));
     }
 
     #[test]
@@ -2121,26 +2194,25 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(session.layer());
 
         tracing::subscriber::with_default(subscriber, || {
-            tracing::trace!(target: TRACE_TARGET, event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, outcome = "accepted");
-            tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = "a0", logical_ns = 1_u64, microstep = 0_u64, destination_logical_ns = 1_u64, destination_microstep = 0_u64, outcome = "accepted");
+            tracing::trace!(target: TRACE_TARGET, event = "propagation_send", enclave = "source", kind = "logical", destination = "e0", action_key = "a0", action = "a0", logical_ns = 1_u64, microstep = 0_u64, value_type = "u32", value_size = 4_u64, outcome = "accepted");
+            tracing::trace!(target: TRACE_TARGET, event = "async_ingress", enclave = "e0", kind = "logical", action_key = "a0", action = "a0", logical_ns = 1_u64, microstep = 0_u64, destination_logical_ns = 1_u64, destination_microstep = 0_u64, value_type = "u32", value_size = 4_u64, outcome = "accepted");
             tracing::trace!(target: TRACE_TARGET, event = "action_schedule", enclave = "e0", action_key = "a0", old_logical_ns = 1_u64, old_microstep = 0_u64, destination_logical_ns = 5_u64, destination_microstep = 0_u64, outcome = "rebased");
-            let reaction = tracing::trace_span!(target: TRACE_TARGET, "reaction_execute", event = "reaction_execute", enclave = "e0", reaction_key = "r0", logical_ns = 5_u64, microstep = 0_u64, state = "begin");
+            let reaction = tracing::trace_span!(target: TRACE_TARGET, "reaction_execute", event = "reaction_execute", enclave = "e0", reactor = "root", reaction_key = "r0", reaction = "r0", level = 0_u64, logical_ns = 5_u64, microstep = 0_u64, state = "begin");
             drop(reaction);
         });
 
         let records = lock_unpoisoned(&capture.0);
         let receive = records
             .iter()
-            .find(|record| record.event == "propagation_receive")
+            .find(|record| propagation_receive(record).is_some())
             .unwrap();
         let reaction = records
             .iter()
-            .find(|record| record.event == "reaction_execute")
+            .find(|record| matches!(&record.event, TraceEvent::ReactionExecution(_)))
             .unwrap();
         assert!(records.iter().any(|record| {
-            record.event == "causal_link"
-                && record.fields.source.as_deref() == Some(receive.id.0.as_str())
-                && record.fields.destination.as_deref() == Some(reaction.id.0.as_str())
+            causal_link(record)
+                .is_some_and(|link| link.source == receive.id && link.destination == reaction.id)
         }));
     }
 }

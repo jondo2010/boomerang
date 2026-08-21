@@ -124,13 +124,13 @@ fn recording_semantics(chunks: &[rerun::log::Chunk]) -> Vec<RecordingRowSemantic
 #[cfg(feature = "rerun")]
 fn assert_recording_row_normalization_is_independent_of_chunk_batching() {
     let schema_union = [
-        Some("boomerang.TraceRecord"),
+        Some("boomerang.ActionStartup"),
         Some("rerun.archetypes.GraphEdges"),
         None,
     ];
     assert_eq!(
         normalized_present_archetypes(schema_union.into_iter().zip([true, false, true])),
-        vec!["boomerang.TraceRecord"]
+        vec!["boomerang.ActionStartup"]
     );
     assert_eq!(
         normalized_present_archetypes(schema_union.into_iter().zip([false, true, true])),
@@ -139,7 +139,7 @@ fn assert_recording_row_normalization_is_independent_of_chunk_batching() {
 
     let row = |event: &str, logical: i64| RecordingRowSemantics {
         entity_path: "/enclaves/e0/reactions/r0".to_owned(),
-        archetypes: vec!["boomerang.TraceRecord".to_owned()],
+        archetypes: vec!["boomerang.ActionStartup".to_owned()],
         trace_fields: vec![(":boomerang.trace.event".to_owned(), event.to_owned())],
         timelines: vec![("logical".to_owned(), logical)],
     };
@@ -359,25 +359,6 @@ fn public_api_runs_static_in_memory_federation() {
     assert_eq!(federation.graph().endpoint_ids().count(), 1);
     #[cfg(feature = "rerun")]
     {
-        let subscriber = tracing_subscriber::registry().with(rerun.layer());
-        tracing::subscriber::with_default(subscriber, || {
-            tracing::trace!(
-                target: "boomerang::trace",
-                event = "port_write",
-                federate = "a",
-                enclave = %runtime::EnclaveKey::from(1),
-                port_key = %runtime::PortKey::from(0),
-                outcome = "test",
-            );
-            tracing::trace!(
-                target: "boomerang::trace",
-                event = "action_schedule",
-                federate = "a",
-                enclave = %runtime::EnclaveKey::from(0),
-                action_key = %runtime::ActionKey::from(0),
-                outcome = "test",
-            );
-        });
         let chunks = rerun_chunks(&rerun, &mut memory_messages);
         let paths = chunks
             .iter()
@@ -408,24 +389,6 @@ fn public_api_runs_static_in_memory_federation() {
                 && path.contains("/reactors/main/reactors/b\\@ReactorKey\\(")
                 && path.contains("/actions/")
         }));
-        let aligned_port_event = paths
-            .iter()
-            .find(|path| path.ends_with("/ports/PortKey\\(0\\)/port_write"))
-            .expect("unambiguous dynamic port event");
-        assert!(aligned_port_event.starts_with("/federates/a/enclaves/EnclaveKey\\(1\\)/"));
-        assert!(aligned_port_event
-            .contains("/reactors/main/reactors/a/reactors/relay\\@ReactorKey\\(0\\)/ports/"));
-        let aligned_action_event = paths
-            .iter()
-            .find(|path| path.ends_with("/actions/ActionKey\\(0\\)/action_schedule"))
-            .expect("federate-qualified dynamic action event");
-        assert!(aligned_action_event.starts_with("/federates/a/enclaves/EnclaveKey\\(0\\)/"));
-        assert!(
-            aligned_action_event
-                .contains("/reactors/main/reactors/a/reactors/source\\@ReactorKey\\(1\\)/actions/"),
-            "action path must be nested beneath the exact source Reactor: {aligned_action_event}"
-        );
-
         let topology_paths = chunks
             .iter()
             .filter_map(|chunk| {
@@ -576,6 +539,57 @@ fn public_api_runs_static_in_memory_federation() {
                 .values()
                 .any(|timeline| timeline.name() == "logical")
         }));
+        let aligned_port_event = runtime_chunks
+            .iter()
+            .copied()
+            .find(|chunk| {
+                let path = chunk.entity_path().to_string();
+                text_component(chunk, ":boomerang.trace.event").as_deref() == Some("port_write")
+                    && chunk.component_descriptors().any(|descriptor| {
+                        descriptor
+                            .archetype
+                            .as_ref()
+                            .is_some_and(|name| name.as_str() == "boomerang.PortWrite")
+                    })
+                    && path.starts_with("/federates/a/enclaves/EnclaveKey\\(1\\)/")
+                    && path.contains(
+                        "/reactors/main/reactors/a/reactors/relay\\@ReactorKey\\(0\\)/ports/",
+                    )
+                    && path.ends_with("/ports/PortKey\\(0\\)/port_write")
+            })
+            .expect("real typed relay port-write record");
+        let aligned_port_path = aligned_port_event.entity_path().to_string();
+        assert!(aligned_port_path.starts_with("/federates/a/enclaves/EnclaveKey\\(1\\)/"));
+        assert!(aligned_port_path
+            .contains("/reactors/main/reactors/a/reactors/relay\\@ReactorKey\\(0\\)/ports/"));
+
+        let aligned_action_event = runtime_chunks
+            .iter()
+            .copied()
+            .find(|chunk| {
+                let path = chunk.entity_path().to_string();
+                text_component(chunk, ":boomerang.trace.event").as_deref()
+                    == Some("action_schedule")
+                    && chunk.component_descriptors().any(|descriptor| {
+                        descriptor
+                            .archetype
+                            .as_ref()
+                            .is_some_and(|name| name.as_str() == "boomerang.ActionStartup")
+                    })
+                    && path.starts_with("/federates/a/enclaves/EnclaveKey\\(0\\)/")
+                    && path.contains(
+                        "/reactors/main/reactors/a/reactors/source\\@ReactorKey\\(1\\)/actions/",
+                    )
+                    && path.ends_with("/actions/ActionKey\\(0\\)/action_schedule")
+            })
+            .expect("real typed source startup-action record");
+        let aligned_action_path = aligned_action_event.entity_path().to_string();
+        assert!(aligned_action_path.starts_with("/federates/a/enclaves/EnclaveKey\\(0\\)/"));
+        assert!(
+            aligned_action_path
+                .contains("/reactors/main/reactors/a/reactors/source\\@ReactorKey\\(1\\)/actions/"),
+            "action path must be nested beneath the exact source Reactor: {aligned_action_path}"
+        );
 
         let scheduler_lanes = runtime_chunks
             .iter()
@@ -795,19 +809,19 @@ fn public_api_runs_static_in_memory_federation() {
                 "missing StateChange for duration-bearing event {duration_event}: {duration_paths:#?}"
             );
         }
-        for event in [
-            "action_schedule",
-            "port_write",
-            "propagation_send",
-            "propagation_receive",
-            "shutdown",
+        for (event, archetype) in [
+            ("action_schedule", "boomerang.ActionStartup"),
+            ("port_write", "boomerang.PortWrite"),
+            ("propagation_send", "boomerang.PropagationLogicalSend"),
+            ("propagation_receive", "boomerang.PropagationReceive"),
+            ("shutdown", "boomerang.Shutdown"),
         ] {
             assert!(
                 chunks.iter().any(|chunk| {
                     text_component(chunk, ":boomerang.trace.event").as_deref() == Some(event)
-                        && has_archetype(&chunk, "boomerang.TraceRecord")
+                        && has_archetype(&chunk, archetype)
                 }),
-                "missing TraceRecord event {event}"
+                "missing typed {archetype} event {event}"
             );
         }
         assert!(chunks

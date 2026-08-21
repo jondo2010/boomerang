@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 
+use super::schema::{TraceEvent, TraceRecord, TraceTag, ValueDescriptor};
+
 /// Adapter-owned identifier for one dynamic trace record.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TraceId(pub String);
@@ -9,6 +11,644 @@ pub struct TraceId(pub String);
 impl TraceId {
     pub(crate) fn new(source: &str, enclave: &str, sequence: u64) -> Self {
         Self(format!("{source}:{enclave}:{sequence}"))
+    }
+}
+
+#[cfg(test)]
+mod typed_tests {
+    use super::*;
+    use crate::rerun::schema::*;
+    use rerun::AsComponents as _;
+
+    fn record(event: TraceEvent) -> TraceRecord {
+        TraceRecord {
+            id: TraceId("source:e0:1".into()),
+            parent_id: None,
+            entity_path: "/event".into(),
+            timepoint: TraceTimePoint {
+                elapsed_ns: 1,
+                wall_clock_unix_ns: 2,
+                logical_ns: Some(3),
+            },
+            duration_ns: None,
+            terminal_state: None,
+            event,
+        }
+    }
+
+    fn descriptors(record: &TraceRecord) -> Vec<(String, String)> {
+        let mut values = record
+            .dynamic_archetype()
+            .as_serialized_batches()
+            .into_iter()
+            .map(|batch| {
+                (
+                    batch.descriptor.archetype.unwrap().to_string(),
+                    batch.descriptor.component.to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        values.sort();
+        values
+    }
+
+    fn component_names(record: &TraceRecord) -> Vec<String> {
+        let mut values = descriptors(record)
+            .into_iter()
+            .map(|(_, component)| match component.rsplit_once(':') {
+                Some((_, name)) => name.to_owned(),
+                None => component,
+            })
+            .collect::<Vec<_>>();
+        values.sort();
+        values
+    }
+
+    fn expected_components(names: &[&str]) -> Vec<String> {
+        let mut values = names
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        values.sort();
+        values
+    }
+
+    #[test]
+    fn dense_archetype_descriptor_sets_are_exact() {
+        let tag = TraceTag {
+            logical_ns: 3,
+            microstep: 1,
+        };
+        let action = record(TraceEvent::ActionScheduled(ActionScheduled {
+            federate: None,
+            enclave: "e0".into(),
+            source_tag: tag,
+            action_key: "a0".into(),
+            action: "tick".into(),
+            destination_tag: TraceTag {
+                logical_ns: 4,
+                microstep: 0,
+            },
+            value: ValueDescriptor {
+                value_type: "u64".into(),
+                value_size: u64::MAX,
+            },
+        }));
+        let mut with_parent = action.clone();
+        with_parent.parent_id = Some(TraceId("parent".into()));
+        assert_eq!(descriptors(&action), descriptors(&with_parent));
+        let action_descriptors = descriptors(&action);
+        assert!(action_descriptors
+            .iter()
+            .all(|(archetype, _)| archetype == "boomerang.ActionScheduled"));
+        assert_eq!(
+            component_names(&action),
+            expected_components(&[
+                "boomerang.trace.action",
+                "boomerang.trace.action_key",
+                "boomerang.trace.destination_logical_ns",
+                "boomerang.trace.destination_microstep",
+                "boomerang.trace.enclave",
+                "boomerang.trace.event",
+                "boomerang.trace.federate",
+                "boomerang.trace.id",
+                "boomerang.trace.logical_ns",
+                "boomerang.trace.microstep",
+                "boomerang.trace.outcome",
+                "boomerang.trace.parent_id",
+                "boomerang.trace.value_size",
+                "boomerang.trace.value_type",
+            ])
+        );
+        let value_size = action
+            .dynamic_archetype()
+            .as_serialized_batches()
+            .into_iter()
+            .find(|batch| {
+                batch
+                    .descriptor
+                    .component
+                    .as_str()
+                    .ends_with(":boomerang.trace.value_size")
+            })
+            .unwrap();
+        assert_eq!(
+            value_size.array.data_type(),
+            &rerun::external::arrow::datatypes::DataType::UInt64
+        );
+
+        let shutdown = record(TraceEvent::Shutdown(Shutdown {
+            federate: None,
+            enclave: "e0".into(),
+            tag,
+            state: ShutdownState::Complete,
+            outcome: ShutdownOutcome::Success,
+        }));
+        assert!(descriptors(&shutdown)
+            .iter()
+            .all(|(archetype, _)| archetype == "boomerang.Shutdown"));
+        assert_eq!(
+            component_names(&shutdown),
+            expected_components(&[
+                "boomerang.trace.enclave",
+                "boomerang.trace.event",
+                "boomerang.trace.federate",
+                "boomerang.trace.id",
+                "boomerang.trace.logical_ns",
+                "boomerang.trace.microstep",
+                "boomerang.trace.outcome",
+                "boomerang.trace.parent_id",
+                "boomerang.trace.state",
+            ])
+        );
+    }
+
+    #[test]
+    fn optional_tags_do_not_change_variant_descriptors() {
+        let tag = TraceTag {
+            logical_ns: 3,
+            microstep: 1,
+        };
+        let rebased = |source_tag| {
+            record(TraceEvent::ActionRebased(ActionRebased {
+                federate: None,
+                enclave: Some("e0".into()),
+                source_tag,
+                action_key: "a0".into(),
+                old_tag: tag,
+                destination_tag: tag,
+            }))
+        };
+        assert_eq!(
+            descriptors(&rebased(None)),
+            descriptors(&rebased(Some(tag)))
+        );
+
+        let physical = |source_tag| {
+            record(TraceEvent::PropagationPhysicalSend(
+                PropagationPhysicalSend {
+                    federate: None,
+                    enclave: "e0".into(),
+                    destination: "e1".into(),
+                    source_tag,
+                    action_key: "a0".into(),
+                    action: "input".into(),
+                    value: ValueDescriptor {
+                        value_type: "u64".into(),
+                        value_size: 8,
+                    },
+                    outcome: DeliveryOutcome::Accepted,
+                },
+            ))
+        };
+        assert_eq!(
+            descriptors(&physical(None)),
+            descriptors(&physical(Some(tag)))
+        );
+    }
+
+    #[test]
+    fn every_event_variant_has_an_exact_dense_descriptor_set() {
+        let t = TraceTag {
+            logical_ns: 1,
+            microstep: 2,
+        };
+        let v = || ValueDescriptor {
+            value_type: "u8".into(),
+            value_size: 1,
+        };
+        let mut cases: Vec<(TraceEvent, &str, bool, bool, &[&str])> = Vec::new();
+        macro_rules! c { ($e:expr,$a:literal,$tag:expr,$dur:expr,[$($x:literal),*]) => {
+            cases.push(($e,$a,$tag,$dur,&[$($x),*]));
+        }}
+        c!(
+            TraceEvent::SchedulerRunning(SchedulerRunning {
+                federate: "f".into(),
+                enclave: "e".into(),
+                state: SchedulerState::Running
+            }),
+            "boomerang.SchedulerRunning",
+            false,
+            false,
+            ["state"]
+        );
+        c!(
+            TraceEvent::TagProcessing(TagProcessing {
+                federate: None,
+                enclave: "e".into(),
+                tag: t,
+                terminal: false,
+                state: TagState::Processing
+            }),
+            "boomerang.TagProcessing",
+            true,
+            true,
+            ["terminal", "state"]
+        );
+        c!(
+            TraceEvent::ReactionExecution(ReactionExecution {
+                federate: None,
+                enclave: "e".into(),
+                tag: t,
+                reactor: "r".into(),
+                reaction_key: None,
+                reaction: "rx".into(),
+                level: 0,
+                state: ReactionState::Begin
+            }),
+            "boomerang.ReactionExecution",
+            true,
+            true,
+            ["reactor", "reaction_key", "reaction", "level", "state"]
+        );
+        c!(
+            TraceEvent::CoordinationWait(CoordinationWait {
+                federate: None,
+                enclave: "e".into(),
+                tag: t,
+                state: WaitState::Waiting
+            }),
+            "boomerang.CoordinationWait",
+            true,
+            true,
+            ["state"]
+        );
+        c!(
+            TraceEvent::LogicalIngress(LogicalIngress {
+                federate: None,
+                enclave: "e".into(),
+                action_key: "a".into(),
+                action: "x".into(),
+                tag: t,
+                destination_tag: t,
+                value: v(),
+                outcome: IngressOutcome::Accepted
+            }),
+            "boomerang.LogicalIngress",
+            true,
+            false,
+            [
+                "action_key",
+                "action",
+                "destination_logical_ns",
+                "destination_microstep",
+                "value_type",
+                "value_size",
+                "outcome"
+            ]
+        );
+        c!(
+            TraceEvent::PhysicalIngress(PhysicalIngress {
+                federate: None,
+                enclave: "e".into(),
+                action_key: "a".into(),
+                action: "x".into(),
+                tag: t,
+                destination_tag: t,
+                value: v(),
+                outcome: IngressOutcome::Accepted
+            }),
+            "boomerang.PhysicalIngress",
+            true,
+            false,
+            [
+                "action_key",
+                "action",
+                "destination_logical_ns",
+                "destination_microstep",
+                "value_type",
+                "value_size",
+                "outcome"
+            ]
+        );
+        c!(
+            TraceEvent::ControlIngress(ControlIngress {
+                federate: None,
+                enclave: "e".into(),
+                tag: t,
+                kind: ControlKind::Shutdown,
+                outcome: IngressOutcome::Accepted
+            }),
+            "boomerang.ControlIngress",
+            true,
+            false,
+            ["kind", "outcome"]
+        );
+        c!(
+            TraceEvent::ActionScheduled(ActionScheduled {
+                federate: None,
+                enclave: "e".into(),
+                source_tag: t,
+                action_key: "a".into(),
+                action: "x".into(),
+                destination_tag: t,
+                value: v()
+            }),
+            "boomerang.ActionScheduled",
+            true,
+            false,
+            [
+                "action_key",
+                "action",
+                "destination_logical_ns",
+                "destination_microstep",
+                "value_type",
+                "value_size",
+                "outcome"
+            ]
+        );
+        c!(
+            TraceEvent::ActionStartup(ActionStartup {
+                federate: None,
+                enclave: "e".into(),
+                source_tag: t,
+                action_key: "a".into(),
+                action: "x".into(),
+                destination_tag: t,
+                value: v()
+            }),
+            "boomerang.ActionStartup",
+            true,
+            false,
+            [
+                "action_key",
+                "action",
+                "destination_logical_ns",
+                "destination_microstep",
+                "value_type",
+                "value_size",
+                "outcome"
+            ]
+        );
+        c!(
+            TraceEvent::ActionRebased(ActionRebased {
+                federate: None,
+                enclave: None,
+                source_tag: None,
+                action_key: "a".into(),
+                old_tag: t,
+                destination_tag: t
+            }),
+            "boomerang.ActionRebased",
+            true,
+            false,
+            [
+                "action_key",
+                "old_logical_ns",
+                "old_microstep",
+                "destination_logical_ns",
+                "destination_microstep",
+                "outcome"
+            ]
+        );
+        c!(
+            TraceEvent::PortWrite(PortWrite {
+                federate: None,
+                enclave: "e".into(),
+                reactor: "r".into(),
+                reaction_key: None,
+                reaction: "rx".into(),
+                tag: t,
+                port_key: "p".into(),
+                port: "out".into(),
+                value_type: "u8".into(),
+                outcome: PortWriteOutcome::MutableAccess
+            }),
+            "boomerang.PortWrite",
+            true,
+            false,
+            [
+                "reactor",
+                "reaction_key",
+                "reaction",
+                "port_key",
+                "port",
+                "value_type",
+                "outcome"
+            ]
+        );
+        c!(
+            TraceEvent::PropagationLogicalSend(PropagationLogicalSend {
+                federate: None,
+                enclave: "e".into(),
+                destination: "d".into(),
+                action_key: "a".into(),
+                action: "x".into(),
+                tag: t,
+                value: v(),
+                outcome: DeliveryOutcome::Accepted
+            }),
+            "boomerang.PropagationLogicalSend",
+            true,
+            false,
+            [
+                "destination",
+                "action_key",
+                "action",
+                "value_type",
+                "value_size",
+                "outcome"
+            ]
+        );
+        c!(
+            TraceEvent::PropagationPhysicalSend(PropagationPhysicalSend {
+                federate: None,
+                enclave: "e".into(),
+                destination: "d".into(),
+                source_tag: None,
+                action_key: "a".into(),
+                action: "x".into(),
+                value: v(),
+                outcome: DeliveryOutcome::Accepted
+            }),
+            "boomerang.PropagationPhysicalSend",
+            true,
+            false,
+            [
+                "destination",
+                "action_key",
+                "action",
+                "value_type",
+                "value_size",
+                "outcome"
+            ]
+        );
+        c!(
+            TraceEvent::PropagationSerializedSend(PropagationSerializedSend {
+                federate: None,
+                enclave: "e".into(),
+                destination_federate: None,
+                action_key: "a".into(),
+                action: "x".into(),
+                tag: t,
+                value: v(),
+                outcome: DeliveryOutcome::Accepted
+            }),
+            "boomerang.PropagationSerializedSend",
+            true,
+            false,
+            [
+                "destination_federate",
+                "action_key",
+                "action",
+                "value_type",
+                "value_size",
+                "outcome"
+            ]
+        );
+        c!(
+            TraceEvent::PropagationReceive(PropagationReceive {
+                federate: None,
+                enclave: "e".into(),
+                action_key: "a".into(),
+                action: "x".into(),
+                tag: t,
+                destination_tag: t,
+                value: v(),
+                outcome: IngressOutcome::Accepted
+            }),
+            "boomerang.PropagationReceive",
+            true,
+            false,
+            [
+                "action_key",
+                "action",
+                "destination_logical_ns",
+                "destination_microstep",
+                "value_type",
+                "value_size",
+                "outcome"
+            ]
+        );
+        c!(
+            TraceEvent::FrontierCandidate(FrontierCandidate {
+                federate: None,
+                enclave: "e".into(),
+                tag: t,
+                outcome: PublishOutcome::Published
+            }),
+            "boomerang.FrontierCandidate",
+            true,
+            false,
+            ["outcome"]
+        );
+        c!(
+            TraceEvent::FrontierState(FrontierState {
+                federate: None,
+                enclave: "e".into(),
+                state: FrontierStatus::Idle,
+                outcome: PublishOutcome::Published
+            }),
+            "boomerang.FrontierState",
+            false,
+            false,
+            ["state", "outcome"]
+        );
+        c!(
+            TraceEvent::CoordinationGrant(CoordinationGrant {
+                federate: None,
+                enclave: "e".into(),
+                tag: t,
+                outcome: CoordinationGrantOutcome::Granted
+            }),
+            "boomerang.CoordinationGrant",
+            true,
+            false,
+            ["outcome"]
+        );
+        c!(
+            TraceEvent::TagRelease(TagRelease {
+                federate: None,
+                enclave: "e".into(),
+                destination: "d".into(),
+                tag: t,
+                outcome: DeliveryOutcome::Accepted
+            }),
+            "boomerang.TagRelease",
+            true,
+            false,
+            ["destination", "outcome"]
+        );
+        c!(
+            TraceEvent::TagComplete(TagComplete {
+                federate: None,
+                enclave: "e".into(),
+                tag: t,
+                terminal: true,
+                outcome: CompletionOutcome::Completed
+            }),
+            "boomerang.TagComplete",
+            true,
+            false,
+            ["terminal", "outcome"]
+        );
+        c!(
+            TraceEvent::Shutdown(Shutdown {
+                federate: None,
+                enclave: "e".into(),
+                tag: t,
+                state: ShutdownState::Complete,
+                outcome: ShutdownOutcome::Success
+            }),
+            "boomerang.Shutdown",
+            true,
+            false,
+            ["state", "outcome"]
+        );
+        c!(
+            TraceEvent::RuntimeDiagnostic(RuntimeDiagnostic {
+                federate: None,
+                enclave: "e".into(),
+                error: "x".into()
+            }),
+            "boomerang.RuntimeDiagnostic",
+            false,
+            false,
+            ["error"]
+        );
+        c!(
+            TraceEvent::SchemaDiagnostic(SchemaDiagnostic { error: "x".into() }),
+            "boomerang.SchemaDiagnostic",
+            false,
+            false,
+            ["error"]
+        );
+        c!(
+            TraceEvent::CausalLink(CausalLink {
+                enclave: "e".into(),
+                source: TraceId("s".into()),
+                destination: TraceId("d".into()),
+                tag: t,
+                state: CausalState::Exact,
+                outcome: CausalOutcome::Matched
+            }),
+            "boomerang.CausalLink",
+            true,
+            false,
+            ["source", "destination", "state", "outcome"]
+        );
+
+        for (event, archetype, tagged, duration, extras) in cases {
+            let record = record(event);
+            assert!(descriptors(&record).iter().all(|(a, _)| a == archetype));
+            let mut names = vec!["id", "parent_id", "event", "federate", "enclave"];
+            if tagged {
+                names.extend(["logical_ns", "microstep"]);
+            }
+            if duration {
+                names.extend(["duration_ns", "terminal_state"]);
+            }
+            names.extend(extras.iter().copied());
+            let expected = names
+                .into_iter()
+                .map(|name| format!("boomerang.trace.{name}"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                component_names(&record),
+                expected_components(&expected.iter().map(String::as_str).collect::<Vec<_>>()),
+                "{archetype}"
+            );
+        }
     }
 }
 
@@ -26,74 +666,6 @@ pub struct TraceTimePoint {
     pub elapsed_ns: i64,
     pub wall_clock_unix_ns: i64,
     pub logical_ns: Option<i64>,
-}
-
-/// Typed values accepted from Boomerang's stable tracing schema.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct TraceFields {
-    pub event: Option<String>,
-    pub federate: Option<String>,
-    pub enclave: Option<String>,
-    pub kind: Option<String>,
-    pub reactor: Option<String>,
-    pub reaction_key: Option<String>,
-    pub reaction: Option<String>,
-    pub action_key: Option<String>,
-    pub action: Option<String>,
-    pub port_key: Option<String>,
-    pub port: Option<String>,
-    pub logical_ns: Option<u64>,
-    pub microstep: Option<u64>,
-    pub destination: Option<String>,
-    pub destination_federate: Option<String>,
-    /// Adapter-owned source identifier for synthesized causal relations.
-    pub source: Option<String>,
-    pub destination_logical_ns: Option<u64>,
-    pub destination_microstep: Option<u64>,
-    pub old_logical_ns: Option<u64>,
-    pub old_microstep: Option<u64>,
-    pub level: Option<String>,
-    pub state: Option<String>,
-    pub terminal: Option<bool>,
-    pub value_type: Option<String>,
-    pub value_size: Option<u64>,
-    pub outcome: Option<String>,
-    pub error: Option<String>,
-}
-
-impl TraceFields {
-    pub(crate) fn inherit_missing(&mut self, parent: &Self) {
-        macro_rules! inherit {
-            ($($field:ident),* $(,)?) => {
-                $(if self.$field.is_none() { self.$field = parent.$field.clone(); })*
-            };
-        }
-        inherit!(
-            federate,
-            enclave,
-            reactor,
-            reaction_key,
-            reaction,
-            logical_ns,
-            microstep,
-        );
-    }
-}
-
-/// One adapter-normalized dynamic record ready for a recording sink.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TraceRecord {
-    pub id: TraceId,
-    pub parent_id: Option<TraceId>,
-    pub entity_path: String,
-    pub event: String,
-    pub timepoint: TraceTimePoint,
-    /// Microstep is deliberately a component, not a Rerun timeline.
-    pub microstep: Option<u64>,
-    pub duration_ns: Option<u64>,
-    /// Final lifecycle state emitted when a tracked runtime span closes.
-    pub terminal_state: Option<String>,
-    pub fields: TraceFields,
 }
 
 /// One adapter-normalized state transition ready for a recording sink.
@@ -162,11 +734,6 @@ pub trait TraceWriter: Send + Sync + 'static {
 
 pub(crate) struct RerunTraceWriter;
 
-enum PrimaryPayload {
-    TextLog(Box<rerun::TextLog>),
-    Dynamic(rerun::DynamicArchetype),
-}
-
 struct TimeContextReset<'a>(&'a rerun::RecordingStream);
 
 impl Drop for TimeContextReset<'_> {
@@ -209,25 +776,28 @@ impl TraceWriter for RerunTraceWriter {
         record: &TraceRecord,
     ) -> Result<(), TraceWriterError> {
         with_timepoint(recording, &record.timepoint, || {
-            match record.primary_payload() {
-                PrimaryPayload::TextLog(payload) => {
-                    recording.log(record.entity_path.clone(), payload.as_ref())?;
-                }
-                PrimaryPayload::Dynamic(payload) => {
-                    recording.log(record.entity_path.clone(), &payload)?;
-                }
-            }
-            if record.event == "causal_link" {
-                if let (Some(source), Some(destination)) = (
-                    record.fields.source.as_deref(),
-                    record.fields.destination.as_deref(),
-                ) {
-                    recording.log(
-                        record.entity_path.clone(),
-                        &rerun::GraphEdges::new([(source, destination)])
-                            .with_graph_type(rerun::components::GraphType::Directed),
-                    )?;
-                }
+            recording.log(record.entity_path.clone(), &record.dynamic_archetype())?;
+            if let TraceEvent::RuntimeDiagnostic(value) = &record.event {
+                recording.log(
+                    record.entity_path.clone(),
+                    &rerun::TextLog::new(value.error.as_str())
+                        .with_level(rerun::TextLogLevel::ERROR),
+                )?;
+            } else if let TraceEvent::SchemaDiagnostic(value) = &record.event {
+                recording.log(
+                    record.entity_path.clone(),
+                    &rerun::TextLog::new(value.error.as_str())
+                        .with_level(rerun::TextLogLevel::ERROR),
+                )?;
+            } else if let TraceEvent::CausalLink(value) = &record.event {
+                recording.log(
+                    record.entity_path.clone(),
+                    &rerun::GraphEdges::new([(
+                        value.source.0.as_str(),
+                        value.destination.0.as_str(),
+                    )])
+                    .with_graph_type(rerun::components::GraphType::Directed),
+                )?;
             }
             for (name, value) in record.scalar_series() {
                 recording.log(
@@ -261,107 +831,8 @@ impl TraceWriter for RerunTraceWriter {
 }
 
 impl TraceRecord {
-    fn primary_payload(&self) -> PrimaryPayload {
-        if self.event == "diagnostic" {
-            let text = self
-                .fields
-                .error
-                .as_deref()
-                .unwrap_or("Boomerang trace diagnostic");
-            return PrimaryPayload::TextLog(Box::new(
-                rerun::TextLog::new(text).with_level(rerun::TextLogLevel::ERROR),
-            ));
-        }
-
-        let mut payload = rerun::DynamicArchetype::new("boomerang.TraceRecord");
-        for (name, value) in self.string_components() {
-            payload = payload.with_component::<rerun::components::Text>(name, [value]);
-        }
-        for (name, value) in self.u64_components() {
-            payload = payload.with_component_from_data(
-                name,
-                std::sync::Arc::new(rerun::external::arrow::array::UInt64Array::from(vec![
-                    value,
-                ])),
-            );
-        }
-        if let Some(terminal) = self.fields.terminal {
-            payload = payload.with_component_from_data(
-                "boomerang.trace.terminal",
-                std::sync::Arc::new(rerun::external::arrow::array::BooleanArray::from(vec![
-                    terminal,
-                ])),
-            );
-        }
-        PrimaryPayload::Dynamic(payload)
-    }
-
-    fn string_components(&self) -> Vec<(&'static str, String)> {
-        let mut values = vec![
-            ("boomerang.trace.id", self.id.0.clone()),
-            ("boomerang.trace.event", self.event.clone()),
-        ];
-        if let Some(parent_id) = &self.parent_id {
-            values.push(("boomerang.trace.parent_id", parent_id.0.clone()));
-        }
-        if let Some(terminal_state) = &self.terminal_state {
-            values.push(("boomerang.trace.terminal_state", terminal_state.clone()));
-        }
-
-        macro_rules! string_fields {
-            ($($field:ident),* $(,)?) => {
-                $(if let Some(value) = &self.fields.$field {
-                    values.push((concat!("boomerang.trace.", stringify!($field)), value.clone()));
-                })*
-            };
-        }
-        string_fields!(
-            federate,
-            enclave,
-            kind,
-            reactor,
-            reaction_key,
-            reaction,
-            action_key,
-            action,
-            port_key,
-            port,
-            destination,
-            destination_federate,
-            source,
-            level,
-            state,
-            value_type,
-            outcome,
-            error,
-        );
-        values
-    }
-
-    fn u64_components(&self) -> Vec<(&'static str, u64)> {
-        let mut values = Vec::new();
-        macro_rules! component {
-            ($name:literal, $value:expr) => {
-                if let Some(value) = $value {
-                    values.push(($name, value));
-                }
-            };
-        }
-        component!("boomerang.trace.microstep", self.microstep);
-        component!("boomerang.trace.duration_ns", self.duration_ns);
-        component!("boomerang.trace.logical_ns", self.fields.logical_ns);
-        component!(
-            "boomerang.trace.destination_logical_ns",
-            self.fields.destination_logical_ns
-        );
-        component!(
-            "boomerang.trace.destination_microstep",
-            self.fields.destination_microstep
-        );
-        component!("boomerang.trace.old_logical_ns", self.fields.old_logical_ns);
-        component!("boomerang.trace.old_microstep", self.fields.old_microstep);
-        component!("boomerang.trace.value_size", self.fields.value_size);
-        values
+    fn dynamic_archetype(&self) -> rerun::DynamicArchetype {
+        dense_archetype(self)
     }
 
     fn scalar_series(&self) -> Vec<(&'static str, f64)> {
@@ -369,13 +840,376 @@ impl TraceRecord {
         if let Some(duration_ns) = self.duration_ns {
             values.push(("duration_ns", duration_ns as f64));
         }
-        if let Some(value_size) = self.fields.value_size {
+        if let Some(value_size) = event_value(&self.event).map(|value| value.value_size) {
             values.push(("value_size", value_size as f64));
         }
-        if let Some(terminal) = self.fields.terminal {
+        if let Some(terminal) = self.event.terminal() {
             values.push(("terminal", if terminal { 1.0 } else { 0.0 }));
         }
         values
+    }
+}
+
+fn text(
+    mut payload: rerun::DynamicArchetype,
+    name: &'static str,
+    value: Option<&str>,
+) -> rerun::DynamicArchetype {
+    payload = payload.with_component_from_data(
+        name,
+        std::sync::Arc::new(rerun::external::arrow::array::StringArray::from(vec![
+            value,
+        ])),
+    );
+    payload
+}
+
+fn uint(
+    mut payload: rerun::DynamicArchetype,
+    name: &'static str,
+    value: Option<u64>,
+) -> rerun::DynamicArchetype {
+    payload = payload.with_component_from_data(
+        name,
+        std::sync::Arc::new(rerun::external::arrow::array::UInt64Array::from(vec![
+            value,
+        ])),
+    );
+    payload
+}
+
+fn boolean(
+    mut payload: rerun::DynamicArchetype,
+    name: &'static str,
+    value: Option<bool>,
+) -> rerun::DynamicArchetype {
+    payload = payload.with_component_from_data(
+        name,
+        std::sync::Arc::new(rerun::external::arrow::array::BooleanArray::from(vec![
+            value,
+        ])),
+    );
+    payload
+}
+
+fn tag(
+    mut payload: rerun::DynamicArchetype,
+    prefix: &'static str,
+    value: Option<TraceTag>,
+) -> rerun::DynamicArchetype {
+    let (logical, microstep) = value.map_or((None, None), |tag| {
+        (Some(tag.logical_ns), Some(tag.microstep))
+    });
+    let (logical_name, microstep_name) = match prefix {
+        "destination" => (
+            "boomerang.trace.destination_logical_ns",
+            "boomerang.trace.destination_microstep",
+        ),
+        "old" => (
+            "boomerang.trace.old_logical_ns",
+            "boomerang.trace.old_microstep",
+        ),
+        _ => ("boomerang.trace.logical_ns", "boomerang.trace.microstep"),
+    };
+    payload = uint(payload, logical_name, logical);
+    uint(payload, microstep_name, microstep)
+}
+
+fn value(
+    mut payload: rerun::DynamicArchetype,
+    descriptor: &ValueDescriptor,
+) -> rerun::DynamicArchetype {
+    payload = text(
+        payload,
+        "boomerang.trace.value_type",
+        Some(&descriptor.value_type),
+    );
+    uint(
+        payload,
+        "boomerang.trace.value_size",
+        Some(descriptor.value_size),
+    )
+}
+
+fn common(record: &TraceRecord, archetype: &'static str) -> rerun::DynamicArchetype {
+    let mut payload = rerun::DynamicArchetype::new(archetype);
+    payload = text(payload, "boomerang.trace.id", Some(&record.id.0));
+    payload = text(
+        payload,
+        "boomerang.trace.parent_id",
+        record.parent_id.as_ref().map(|id| id.0.as_str()),
+    );
+    payload = text(payload, "boomerang.trace.event", Some(record.event.name()));
+    payload = text(payload, "boomerang.trace.federate", record.event.federate());
+    payload = text(payload, "boomerang.trace.enclave", record.event.enclave());
+    if !matches!(
+        &record.event,
+        TraceEvent::SchedulerRunning(_)
+            | TraceEvent::FrontierState(_)
+            | TraceEvent::RuntimeDiagnostic(_)
+            | TraceEvent::SchemaDiagnostic(_)
+    ) {
+        payload = tag(payload, "", record.event.tag());
+    }
+    if record.event.duration_phase().is_some() {
+        payload = uint(payload, "boomerang.trace.duration_ns", record.duration_ns);
+        payload = text(
+            payload,
+            "boomerang.trace.terminal_state",
+            record.terminal_state.as_deref(),
+        );
+    }
+    payload
+}
+
+fn action(
+    mut p: rerun::DynamicArchetype,
+    key: &str,
+    name: &str,
+    destination: TraceTag,
+    descriptor: &ValueDescriptor,
+    outcome: &str,
+) -> rerun::DynamicArchetype {
+    p = text(p, "boomerang.trace.action_key", Some(key));
+    p = text(p, "boomerang.trace.action", Some(name));
+    p = tag(p, "destination", Some(destination));
+    p = value(p, descriptor);
+    text(p, "boomerang.trace.outcome", Some(outcome))
+}
+
+fn ingress(
+    mut p: rerun::DynamicArchetype,
+    key: &str,
+    name: &str,
+    destination: TraceTag,
+    descriptor: &ValueDescriptor,
+    outcome: &str,
+) -> rerun::DynamicArchetype {
+    p = text(p, "boomerang.trace.action_key", Some(key));
+    p = text(p, "boomerang.trace.action", Some(name));
+    p = tag(p, "destination", Some(destination));
+    p = value(p, descriptor);
+    text(p, "boomerang.trace.outcome", Some(outcome))
+}
+
+fn send(
+    mut p: rerun::DynamicArchetype,
+    key: &str,
+    name: &str,
+    descriptor: &ValueDescriptor,
+    outcome: &str,
+) -> rerun::DynamicArchetype {
+    p = text(p, "boomerang.trace.action_key", Some(key));
+    p = text(p, "boomerang.trace.action", Some(name));
+    p = value(p, descriptor);
+    text(p, "boomerang.trace.outcome", Some(outcome))
+}
+
+fn dense_archetype(record: &TraceRecord) -> rerun::DynamicArchetype {
+    match &record.event {
+        TraceEvent::SchedulerRunning(v) => text(
+            common(record, "boomerang.SchedulerRunning"),
+            "boomerang.trace.state",
+            Some(v.state.as_str()),
+        ),
+        TraceEvent::TagProcessing(v) => {
+            let p = boolean(
+                common(record, "boomerang.TagProcessing"),
+                "boomerang.trace.terminal",
+                Some(v.terminal),
+            );
+            text(p, "boomerang.trace.state", Some(v.state.as_str()))
+        }
+        TraceEvent::ReactionExecution(v) => {
+            let mut p = common(record, "boomerang.ReactionExecution");
+            p = text(p, "boomerang.trace.reactor", Some(&v.reactor));
+            p = text(p, "boomerang.trace.reaction_key", v.reaction_key.as_deref());
+            p = text(p, "boomerang.trace.reaction", Some(&v.reaction));
+            p = uint(p, "boomerang.trace.level", Some(v.level));
+            text(p, "boomerang.trace.state", Some(v.state.as_str()))
+        }
+        TraceEvent::CoordinationWait(v) => text(
+            common(record, "boomerang.CoordinationWait"),
+            "boomerang.trace.state",
+            Some(v.state.as_str()),
+        ),
+        TraceEvent::LogicalIngress(v) => ingress(
+            common(record, "boomerang.LogicalIngress"),
+            &v.action_key,
+            &v.action,
+            v.destination_tag,
+            &v.value,
+            v.outcome.as_str(),
+        ),
+        TraceEvent::PhysicalIngress(v) => ingress(
+            common(record, "boomerang.PhysicalIngress"),
+            &v.action_key,
+            &v.action,
+            v.destination_tag,
+            &v.value,
+            v.outcome.as_str(),
+        ),
+        TraceEvent::ControlIngress(v) => {
+            let p = text(
+                common(record, "boomerang.ControlIngress"),
+                "boomerang.trace.kind",
+                Some(v.kind.as_str()),
+            );
+            text(p, "boomerang.trace.outcome", Some(v.outcome.as_str()))
+        }
+        TraceEvent::ActionScheduled(v) => action(
+            common(record, "boomerang.ActionScheduled"),
+            &v.action_key,
+            &v.action,
+            v.destination_tag,
+            &v.value,
+            "scheduled",
+        ),
+        TraceEvent::ActionStartup(v) => action(
+            common(record, "boomerang.ActionStartup"),
+            &v.action_key,
+            &v.action,
+            v.destination_tag,
+            &v.value,
+            "startup",
+        ),
+        TraceEvent::ActionRebased(v) => {
+            let mut p = text(
+                common(record, "boomerang.ActionRebased"),
+                "boomerang.trace.action_key",
+                Some(&v.action_key),
+            );
+            p = tag(p, "old", Some(v.old_tag));
+            p = tag(p, "destination", Some(v.destination_tag));
+            text(p, "boomerang.trace.outcome", Some("rebased"))
+        }
+        TraceEvent::PortWrite(v) => {
+            let mut p = common(record, "boomerang.PortWrite");
+            p = text(p, "boomerang.trace.reactor", Some(&v.reactor));
+            p = text(p, "boomerang.trace.reaction_key", v.reaction_key.as_deref());
+            p = text(p, "boomerang.trace.reaction", Some(&v.reaction));
+            p = text(p, "boomerang.trace.port_key", Some(&v.port_key));
+            p = text(p, "boomerang.trace.port", Some(&v.port));
+            p = text(p, "boomerang.trace.value_type", Some(&v.value_type));
+            text(p, "boomerang.trace.outcome", Some(v.outcome.as_str()))
+        }
+        TraceEvent::PropagationLogicalSend(v) => send(
+            text(
+                common(record, "boomerang.PropagationLogicalSend"),
+                "boomerang.trace.destination",
+                Some(&v.destination),
+            ),
+            &v.action_key,
+            &v.action,
+            &v.value,
+            v.outcome.as_str(),
+        ),
+        TraceEvent::PropagationPhysicalSend(v) => send(
+            text(
+                common(record, "boomerang.PropagationPhysicalSend"),
+                "boomerang.trace.destination",
+                Some(&v.destination),
+            ),
+            &v.action_key,
+            &v.action,
+            &v.value,
+            v.outcome.as_str(),
+        ),
+        TraceEvent::PropagationSerializedSend(v) => send(
+            text(
+                common(record, "boomerang.PropagationSerializedSend"),
+                "boomerang.trace.destination_federate",
+                v.destination_federate.as_deref(),
+            ),
+            &v.action_key,
+            &v.action,
+            &v.value,
+            v.outcome.as_str(),
+        ),
+        TraceEvent::PropagationReceive(v) => ingress(
+            common(record, "boomerang.PropagationReceive"),
+            &v.action_key,
+            &v.action,
+            v.destination_tag,
+            &v.value,
+            v.outcome.as_str(),
+        ),
+        TraceEvent::FrontierCandidate(v) => text(
+            common(record, "boomerang.FrontierCandidate"),
+            "boomerang.trace.outcome",
+            Some(v.outcome.as_str()),
+        ),
+        TraceEvent::FrontierState(v) => {
+            let p = text(
+                common(record, "boomerang.FrontierState"),
+                "boomerang.trace.state",
+                Some(v.state.as_str()),
+            );
+            text(p, "boomerang.trace.outcome", Some(v.outcome.as_str()))
+        }
+        TraceEvent::CoordinationGrant(v) => text(
+            common(record, "boomerang.CoordinationGrant"),
+            "boomerang.trace.outcome",
+            Some(v.outcome.as_str()),
+        ),
+        TraceEvent::TagRelease(v) => {
+            let p = text(
+                common(record, "boomerang.TagRelease"),
+                "boomerang.trace.destination",
+                Some(&v.destination),
+            );
+            text(p, "boomerang.trace.outcome", Some(v.outcome.as_str()))
+        }
+        TraceEvent::TagComplete(v) => {
+            let p = boolean(
+                common(record, "boomerang.TagComplete"),
+                "boomerang.trace.terminal",
+                Some(v.terminal),
+            );
+            text(p, "boomerang.trace.outcome", Some(v.outcome.as_str()))
+        }
+        TraceEvent::Shutdown(v) => {
+            let p = text(
+                common(record, "boomerang.Shutdown"),
+                "boomerang.trace.state",
+                Some(v.state.as_str()),
+            );
+            text(p, "boomerang.trace.outcome", Some(v.outcome.as_str()))
+        }
+        TraceEvent::RuntimeDiagnostic(v) => text(
+            common(record, "boomerang.RuntimeDiagnostic"),
+            "boomerang.trace.error",
+            Some(&v.error),
+        ),
+        TraceEvent::SchemaDiagnostic(v) => text(
+            common(record, "boomerang.SchemaDiagnostic"),
+            "boomerang.trace.error",
+            Some(&v.error),
+        ),
+        TraceEvent::CausalLink(v) => {
+            let mut p = text(
+                common(record, "boomerang.CausalLink"),
+                "boomerang.trace.source",
+                Some(&v.source.0),
+            );
+            p = text(p, "boomerang.trace.destination", Some(&v.destination.0));
+            p = text(p, "boomerang.trace.state", Some(v.state.as_str()));
+            text(p, "boomerang.trace.outcome", Some(v.outcome.as_str()))
+        }
+    }
+}
+
+fn event_value(event: &TraceEvent) -> Option<&ValueDescriptor> {
+    match event {
+        TraceEvent::LogicalIngress(v) => Some(&v.value),
+        TraceEvent::PhysicalIngress(v) => Some(&v.value),
+        TraceEvent::ActionScheduled(v) => Some(&v.value),
+        TraceEvent::ActionStartup(v) => Some(&v.value),
+        TraceEvent::PropagationLogicalSend(v) => Some(&v.value),
+        TraceEvent::PropagationPhysicalSend(v) => Some(&v.value),
+        TraceEvent::PropagationSerializedSend(v) => Some(&v.value),
+        TraceEvent::PropagationReceive(v) => Some(&v.value),
+        _ => None,
     }
 }
 
@@ -478,33 +1312,21 @@ impl RegistrationIndex {
         }
     }
 
-    pub(super) fn entity_path(&self, fields: &TraceFields, event: &str) -> Option<String> {
-        self.resolve_entity(fields, event)
-            .map(|path| format!("{}/{}", path, escape_entity_segment(event)))
+    pub(super) fn entity_path(&self, event: &TraceEvent) -> Option<String> {
+        self.resolve_entity(event)
+            .map(|path| format!("{}/{}", path, escape_entity_segment(event.name())))
     }
 
-    pub(super) fn resolve_entity(&self, fields: &TraceFields, event: &str) -> Option<String> {
-        let (kind, identity) = if let Some(identity) = fields.action_key.as_ref() {
-            ("action", identity.as_str())
-        } else if let Some(identity) = fields.action.as_ref() {
-            ("action", identity.as_str())
-        } else if let Some(identity) = fields.port_key.as_ref() {
-            ("port", identity.as_str())
-        } else if let Some(identity) = fields.port.as_ref() {
-            ("port", identity.as_str())
-        } else if let Some(identity) = fields.reaction_key.as_ref() {
-            ("reaction", identity.as_str())
-        } else if let Some(identity) = fields.reaction.as_ref() {
-            ("reaction", identity.as_str())
-        } else {
-            ("scheduler", "scheduler")
-        };
-        if event == "propagation_send" {
-            let federate = fields
-                .destination_federate
-                .as_deref()
-                .or(fields.federate.as_deref());
-            if let Some(enclave) = fields.destination.as_deref() {
+    pub(super) fn resolve_entity(&self, event: &TraceEvent) -> Option<String> {
+        let (kind, identity) = event_identity(event);
+        if matches!(
+            event,
+            TraceEvent::PropagationLogicalSend(_)
+                | TraceEvent::PropagationPhysicalSend(_)
+                | TraceEvent::PropagationSerializedSend(_)
+        ) {
+            let (federate, destination) = propagation_destination(event);
+            if let Some(enclave) = destination {
                 return resolve_registration(
                     &self.entities,
                     &RegistrationLookup {
@@ -524,9 +1346,9 @@ impl RegistrationIndex {
                 },
             );
         }
-        let enclave = fields.enclave.as_deref()?;
+        let enclave = event.enclave()?;
         let lookup = RegistrationLookup {
-            federate: fields.federate.clone(),
+            federate: event.federate().map(str::to_owned),
             enclave: enclave.to_owned(),
             kind,
             identity: identity.to_owned(),
@@ -556,6 +1378,37 @@ impl RegistrationIndex {
                 }
             }
         }
+    }
+}
+
+fn event_identity(event: &TraceEvent) -> (&'static str, &str) {
+    match event {
+        TraceEvent::LogicalIngress(v) => ("action", &v.action_key),
+        TraceEvent::PhysicalIngress(v) => ("action", &v.action_key),
+        TraceEvent::ActionScheduled(v) => ("action", &v.action_key),
+        TraceEvent::ActionStartup(v) => ("action", &v.action_key),
+        TraceEvent::ActionRebased(v) => ("action", &v.action_key),
+        TraceEvent::PropagationLogicalSend(v) => ("action", &v.action_key),
+        TraceEvent::PropagationPhysicalSend(v) => ("action", &v.action_key),
+        TraceEvent::PropagationSerializedSend(v) => ("action", &v.action_key),
+        TraceEvent::PropagationReceive(v) => ("action", &v.action_key),
+        TraceEvent::PortWrite(v) => ("port", &v.port_key),
+        TraceEvent::ReactionExecution(v) => {
+            ("reaction", v.reaction_key.as_deref().unwrap_or(&v.reaction))
+        }
+        _ => ("scheduler", "scheduler"),
+    }
+}
+
+fn propagation_destination(event: &TraceEvent) -> (Option<&str>, Option<&str>) {
+    match event {
+        TraceEvent::PropagationLogicalSend(v) => (v.federate.as_deref(), Some(&v.destination)),
+        TraceEvent::PropagationPhysicalSend(v) => (v.federate.as_deref(), Some(&v.destination)),
+        TraceEvent::PropagationSerializedSend(v) => (
+            v.destination_federate.as_deref().or(v.federate.as_deref()),
+            None,
+        ),
+        _ => (event.federate(), None),
     }
 }
 
@@ -1044,12 +1897,21 @@ fn reaction_levels(
     levels
 }
 
-pub(crate) fn entity_path(fields: &TraceFields, event: &str) -> String {
-    if matches!(event, "propagation_send" | "propagation_receive") {
-        return format!("/propagation/unresolved/{}", escape_entity_segment(event));
+pub(crate) fn entity_path(event: &TraceEvent) -> String {
+    if matches!(
+        event,
+        TraceEvent::PropagationLogicalSend(_)
+            | TraceEvent::PropagationPhysicalSend(_)
+            | TraceEvent::PropagationSerializedSend(_)
+            | TraceEvent::PropagationReceive(_)
+    ) {
+        return format!(
+            "/propagation/unresolved/{}",
+            escape_entity_segment(event.name())
+        );
     }
-    let enclave = escape_entity_segment(fields.enclave.as_deref().unwrap_or("unknown"));
-    let root = fields.federate.as_deref().map_or_else(
+    let enclave = escape_entity_segment(event.enclave().unwrap_or("unknown"));
+    let root = event.federate().map_or_else(
         || format!("/enclaves/{enclave}"),
         |federate| {
             format!(
@@ -1058,31 +1920,29 @@ pub(crate) fn entity_path(fields: &TraceFields, event: &str) -> String {
             )
         },
     );
-    if let Some(action) = fields.action_key.as_ref().or(fields.action.as_ref()) {
+    let (kind, identity) = event_identity(event);
+    if kind == "action" {
         return format!(
             "{root}/actions/{}/{}",
-            escape_entity_segment(action),
-            escape_entity_segment(event),
+            escape_entity_segment(identity),
+            escape_entity_segment(event.name()),
         );
     }
-    if let Some(port) = fields.port_key.as_ref().or(fields.port.as_ref()) {
+    if kind == "port" {
         return format!(
             "{root}/ports/{}/{}",
-            escape_entity_segment(port),
-            escape_entity_segment(event),
+            escape_entity_segment(identity),
+            escape_entity_segment(event.name()),
         );
     }
-    if let (Some(reactor), Some(reaction)) = (
-        &fields.reactor,
-        fields.reaction_key.as_ref().or(fields.reaction.as_ref()),
-    ) {
+    if let TraceEvent::ReactionExecution(value) = event {
         return format!(
             "{root}/reactors/{}/reactions/{}",
-            escape_entity_segment(reactor),
-            escape_entity_segment(reaction),
+            escape_entity_segment(&value.reactor),
+            escape_entity_segment(identity),
         );
     }
-    format!("{root}/scheduler/{}", escape_entity_segment(event))
+    format!("{root}/scheduler/{}", escape_entity_segment(event.name()))
 }
 
 #[cfg(test)]
@@ -1091,6 +1951,86 @@ mod tests {
     use rerun::AsComponents as _;
 
     use super::*;
+    use crate::rerun::schema::{
+        ActionScheduled, CausalLink, CausalOutcome, CausalState, CompletionOutcome,
+        DeliveryOutcome, IngressOutcome, LogicalIngress, PropagationLogicalSend,
+        PropagationReceive, ReactionExecution, ReactionState, RuntimeDiagnostic, SchemaDiagnostic,
+        Shutdown, ShutdownOutcome, ShutdownState, TagComplete, ValueDescriptor,
+    };
+
+    const TAG: TraceTag = TraceTag {
+        logical_ns: 3,
+        microstep: 1,
+    };
+
+    fn value() -> ValueDescriptor {
+        ValueDescriptor {
+            value_type: "u64".to_owned(),
+            value_size: u64::MAX,
+        }
+    }
+
+    fn ingress(federate: Option<&str>, enclave: &str, action_key: &str) -> TraceEvent {
+        TraceEvent::LogicalIngress(LogicalIngress {
+            federate: federate.map(str::to_owned),
+            enclave: enclave.to_owned(),
+            action_key: action_key.to_owned(),
+            action: "input".to_owned(),
+            tag: TAG,
+            destination_tag: TAG,
+            value: value(),
+            outcome: IngressOutcome::Accepted,
+        })
+    }
+
+    fn logical_send(
+        federate: Option<&str>,
+        enclave: &str,
+        destination: &str,
+        action_key: &str,
+    ) -> TraceEvent {
+        TraceEvent::PropagationLogicalSend(PropagationLogicalSend {
+            federate: federate.map(str::to_owned),
+            enclave: enclave.to_owned(),
+            destination: destination.to_owned(),
+            action_key: action_key.to_owned(),
+            action: "input".to_owned(),
+            tag: TAG,
+            value: value(),
+            outcome: DeliveryOutcome::Accepted,
+        })
+    }
+
+    fn record(event: TraceEvent) -> TraceRecord {
+        TraceRecord {
+            id: TraceId("source:e0:1".to_owned()),
+            parent_id: None,
+            entity_path: "/diagnostics/schema".to_owned(),
+            timepoint: TraceTimePoint {
+                elapsed_ns: 1,
+                wall_clock_unix_ns: 2,
+                logical_ns: Some(3),
+            },
+            duration_ns: None,
+            terminal_state: None,
+            event,
+        }
+    }
+
+    fn action_scheduled() -> TraceEvent {
+        TraceEvent::ActionScheduled(ActionScheduled {
+            federate: None,
+            enclave: "e0".to_owned(),
+            source_tag: TAG,
+            action_key: "a0".to_owned(),
+            action: "tick".to_owned(),
+            destination_tag: TraceTag {
+                logical_ns: 4,
+                microstep: 0,
+            },
+            value: value(),
+        })
+    }
 
     #[test]
     fn federate_qualifies_overlapping_runtime_entity_keys() {
@@ -1112,24 +2052,26 @@ mod tests {
             "/federates/b/enclaves/0/actions/input",
         );
 
-        let ingress = TraceFields {
-            federate: Some("b".to_owned()),
-            enclave: Some("0".to_owned()),
-            action_key: Some("0".to_owned()),
-            ..TraceFields::default()
-        };
+        let ingress = ingress(Some("b"), "0", "0");
         assert_eq!(
-            index.resolve_entity(&ingress, "async_ingress").as_deref(),
+            index.resolve_entity(&ingress).as_deref(),
             Some("/federates/b/enclaves/0/actions/input")
         );
 
-        let send = TraceFields {
-            destination_federate: Some("b".to_owned()),
-            action_key: Some("0".to_owned()),
-            ..TraceFields::default()
-        };
+        let send = TraceEvent::PropagationSerializedSend(
+            crate::rerun::schema::PropagationSerializedSend {
+                federate: None,
+                enclave: "source".to_owned(),
+                destination_federate: Some("b".to_owned()),
+                action_key: "0".to_owned(),
+                action: "input".to_owned(),
+                tag: TAG,
+                value: value(),
+                outcome: DeliveryOutcome::Accepted,
+            },
+        );
         assert_eq!(
-            index.resolve_entity(&send, "propagation_send").as_deref(),
+            index.resolve_entity(&send).as_deref(),
             Some("/federates/b/enclaves/0/actions/input")
         );
 
@@ -1141,7 +2083,7 @@ mod tests {
             "input",
             "/federates/b/enclaves/1/actions/input",
         );
-        assert_eq!(index.resolve_entity(&send, "propagation_send"), None);
+        assert_eq!(index.resolve_entity(&send), None);
     }
 
     #[test]
@@ -1170,61 +2112,43 @@ mod tests {
 
     #[test]
     fn unresolved_propagation_never_fabricates_an_action_path() {
-        let fields = TraceFields {
-            enclave: Some("EnclaveKey(1)".to_owned()),
-            destination: Some("EnclaveKey(0)".to_owned()),
-            action_key: Some("ActionKey(0)".to_owned()),
-            ..TraceFields::default()
-        };
+        let send = logical_send(None, "EnclaveKey(1)", "EnclaveKey(0)", "ActionKey(0)");
+        let receive = TraceEvent::PropagationReceive(PropagationReceive {
+            federate: None,
+            enclave: "EnclaveKey(1)".to_owned(),
+            action_key: "ActionKey(0)".to_owned(),
+            action: "input".to_owned(),
+            tag: TAG,
+            destination_tag: TAG,
+            value: value(),
+            outcome: IngressOutcome::Accepted,
+        });
 
         assert_eq!(
-            entity_path(&fields, "propagation_send"),
+            entity_path(&send),
             "/propagation/unresolved/propagation_send"
         );
         assert_eq!(
-            entity_path(&fields, "propagation_receive"),
+            entity_path(&receive),
             "/propagation/unresolved/propagation_receive"
         );
     }
 
-    fn record(event: &str) -> TraceRecord {
-        TraceRecord {
-            id: TraceId("source:e0:1".to_owned()),
-            parent_id: None,
-            entity_path: "/diagnostics/schema".to_owned(),
-            event: event.to_owned(),
-            timepoint: TraceTimePoint {
-                elapsed_ns: 1,
-                wall_clock_unix_ns: 2,
-                logical_ns: Some(3),
-            },
-            microstep: Some(u64::MAX),
-            duration_ns: Some(5),
-            terminal_state: None,
-            fields: TraceFields {
-                event: Some(event.to_owned()),
-                enclave: Some("e0".to_owned()),
-                value_size: Some(u64::MAX),
-                error: Some("bad schema".to_owned()),
-                ..TraceFields::default()
-            },
-        }
-    }
-
     #[test]
-    fn diagnostics_use_builtin_text_log() {
-        assert!(matches!(
-            record("diagnostic").primary_payload(),
-            PrimaryPayload::TextLog(_)
-        ));
-    }
-
-    #[test]
-    fn operational_payload_preserves_typed_numeric_components() {
-        let PrimaryPayload::Dynamic(payload) = record("action_schedule").primary_payload() else {
-            panic!("operational records use dynamic components")
-        };
+    fn operational_payload_is_dense_and_preserves_typed_numeric_components() {
+        let payload = record(action_scheduled()).dynamic_archetype();
         let batches = payload.as_serialized_batches();
+        assert!(batches.iter().all(|batch| {
+            batch
+                .descriptor
+                .archetype
+                .as_ref()
+                .is_some_and(|name| name.as_str() == "boomerang.ActionScheduled")
+        }));
+        assert!(batches.iter().all(|batch| {
+            let component = batch.descriptor.component.as_str();
+            !component.contains("port") && !component.contains("reaction")
+        }));
         let value_size = batches
             .iter()
             .find(|batch| {
@@ -1239,35 +2163,69 @@ mod tests {
             value_size.array.data_type(),
             &rerun::external::arrow::datatypes::DataType::UInt64
         );
+
+        let reaction = record(TraceEvent::ReactionExecution(ReactionExecution {
+            federate: None,
+            enclave: "e0".to_owned(),
+            tag: TAG,
+            reactor: "main".to_owned(),
+            reaction_key: Some("r0".to_owned()),
+            reaction: "react".to_owned(),
+            level: 7,
+            state: ReactionState::Begin,
+        }))
+        .dynamic_archetype();
+        let level = reaction
+            .as_serialized_batches()
+            .into_iter()
+            .find(|batch| {
+                batch
+                    .descriptor
+                    .component
+                    .as_str()
+                    .ends_with(":boomerang.trace.level")
+            })
+            .expect("reaction level component");
+        assert_eq!(
+            level.array.data_type(),
+            &rerun::external::arrow::datatypes::DataType::UInt64
+        );
     }
 
     #[test]
     fn duration_is_exposed_as_builtin_scalar_series() {
-        let series = record("reaction_execute").scalar_series();
+        let mut reaction = record(TraceEvent::ReactionExecution(ReactionExecution {
+            federate: None,
+            enclave: "e0".to_owned(),
+            tag: TAG,
+            reactor: "main".to_owned(),
+            reaction_key: Some("r0".to_owned()),
+            reaction: "react".to_owned(),
+            level: 0,
+            state: ReactionState::Begin,
+        }));
+        reaction.duration_ns = Some(5);
+        let series = reaction.scalar_series();
         assert!(series.iter().any(|(name, _)| *name == "duration_ns"));
     }
 
     #[test]
     fn registration_merge_is_idempotent_and_conflicts_become_ambiguous() {
-        let fields = TraceFields {
-            enclave: Some("e0".to_owned()),
-            action_key: Some("a0".to_owned()),
-            ..TraceFields::default()
-        };
+        let event = ingress(None, "e0", "a0");
         let mut registration = RegistrationIndex::default();
-        registration.register("e0", "action", "a0", "input", "/first/action");
+        registration.register_in_federate(None, "e0", "action", "a0", "input", "/first/action");
         let mut repeated = RegistrationIndex::default();
-        repeated.register("e0", "action", "a0", "input", "/first/action");
+        repeated.register_in_federate(None, "e0", "action", "a0", "input", "/first/action");
         registration.merge(repeated);
         assert_eq!(
-            registration.resolve_entity(&fields, "async_ingress"),
+            registration.resolve_entity(&event),
             Some("/first/action".to_owned())
         );
 
         let mut conflicting = RegistrationIndex::default();
-        conflicting.register("e0", "action", "a0", "input", "/second/action");
+        conflicting.register_in_federate(None, "e0", "action", "a0", "input", "/second/action");
         registration.merge(conflicting);
-        assert_eq!(registration.resolve_entity(&fields, "async_ingress"), None);
+        assert_eq!(registration.resolve_entity(&event), None);
     }
 
     #[test]
@@ -1277,18 +2235,68 @@ mod tests {
             .unwrap();
         let writer = RerunTraceWriter;
 
-        let mut logical = record("action_schedule");
+        let mut logical = record(action_scheduled());
         logical.entity_path = "/records/logical".to_owned();
-        logical.fields.terminal = Some(true);
         writer.write(&recording, &logical).unwrap();
 
-        let mut non_logical = record("shutdown");
+        let mut terminal = record(TraceEvent::TagComplete(TagComplete {
+            federate: None,
+            enclave: "e0".to_owned(),
+            tag: TAG,
+            terminal: true,
+            outcome: CompletionOutcome::Completed,
+        }));
+        terminal.entity_path = "/records/terminal".to_owned();
+        writer.write(&recording, &terminal).unwrap();
+
+        let mut non_logical = record(TraceEvent::Shutdown(Shutdown {
+            federate: None,
+            enclave: "e0".to_owned(),
+            tag: TAG,
+            state: ShutdownState::Complete,
+            outcome: ShutdownOutcome::Success,
+        }));
         non_logical.entity_path = "/records/non_logical".to_owned();
         non_logical.timepoint.logical_ns = None;
         writer.write(&recording, &non_logical).unwrap();
 
-        let diagnostic = record("diagnostic");
+        let diagnostic = record(TraceEvent::SchemaDiagnostic(SchemaDiagnostic {
+            error: "bad schema".to_owned(),
+        }));
         writer.write(&recording, &diagnostic).unwrap();
+
+        let mut runtime_diagnostic = record(TraceEvent::RuntimeDiagnostic(RuntimeDiagnostic {
+            federate: None,
+            enclave: "e0".to_owned(),
+            error: "runtime failure".to_owned(),
+        }));
+        runtime_diagnostic.entity_path = "/diagnostics/runtime".to_owned();
+        writer.write(&recording, &runtime_diagnostic).unwrap();
+
+        let mut reaction = record(TraceEvent::ReactionExecution(ReactionExecution {
+            federate: None,
+            enclave: "e0".to_owned(),
+            tag: TAG,
+            reactor: "main".to_owned(),
+            reaction_key: Some("r0".to_owned()),
+            reaction: "react".to_owned(),
+            level: 0,
+            state: ReactionState::Begin,
+        }));
+        reaction.entity_path = "/records/reaction".to_owned();
+        reaction.duration_ns = Some(5);
+        writer.write(&recording, &reaction).unwrap();
+
+        let mut causal = record(TraceEvent::CausalLink(CausalLink {
+            enclave: "e0".to_owned(),
+            source: TraceId("source".to_owned()),
+            destination: TraceId("destination".to_owned()),
+            tag: TAG,
+            state: CausalState::Exact,
+            outcome: CausalOutcome::Matched,
+        }));
+        causal.entity_path = "/causality/source_to_destination".to_owned();
+        writer.write(&recording, &causal).unwrap();
 
         let chunks = memory
             .take()
@@ -1333,11 +2341,24 @@ mod tests {
                 .data_type(),
             &rerun::external::arrow::datatypes::DataType::UInt64
         );
+        let terminal_chunk = chunks
+            .iter()
+            .find(|chunk| chunk.entity_path().to_string() == "/records/terminal")
+            .expect("terminal record chunk");
+        let terminal_component = terminal_chunk
+            .components()
+            .0
+            .values()
+            .find(|column| {
+                column
+                    .descriptor
+                    .component
+                    .as_str()
+                    .ends_with(":boomerang.trace.terminal")
+            })
+            .expect("terminal component");
         assert_eq!(
-            component(":boomerang.trace.terminal")
-                .list_array
-                .values()
-                .data_type(),
+            terminal_component.list_array.values().data_type(),
             &rerun::external::arrow::datatypes::DataType::Boolean
         );
         assert!(chunks
@@ -1355,6 +2376,14 @@ mod tests {
                     .archetype
                     .as_ref()
                     .is_some_and(|name| name.as_str() == "rerun.archetypes.Scalars"))
+            ));
+        assert!(chunks
+            .iter()
+            .any(
+                |chunk| chunk.component_descriptors().any(|descriptor| descriptor
+                    .archetype
+                    .as_ref()
+                    .is_some_and(|name| name.as_str() == "rerun.archetypes.GraphEdges"))
             ));
     }
 }

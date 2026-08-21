@@ -60,7 +60,7 @@ impl<'a> ReactionTriggerCtx<'a> {
             microstep = crate::trace::microstep(tag),
             reactor = self.reactor.name(),
             reaction = self.reaction.get_name(),
-            level = %level,
+            level = level.0,
             state = "begin",
         );
         let _entered = span.enter();

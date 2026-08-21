@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use boomerang::rerun::{
     BlueprintConfig, FlushDriver, RerunSessionBuildError, RerunSessionBuilder, SinkConfig,
-    SinkConfigError, TraceRecord, TraceStateChange, TraceStateRecord, TraceWriter,
+    SinkConfigError, TraceEvent, TraceRecord, TraceStateChange, TraceStateRecord, TraceWriter,
     TraceWriterError,
 };
 use boomerang::runtime::{Enclave, Port, Reactor};
@@ -144,7 +144,10 @@ fn decoded_shutdown(chunks: &[rerun::log::Chunk]) -> DecodedShutdown {
     descriptors.sort();
     assert!(descriptors
         .iter()
-        .any(|(_, archetype)| { archetype.as_deref() == Some("boomerang.TraceRecord") }));
+        .any(|(_, archetype)| { archetype.as_deref() == Some("boomerang.Shutdown") }));
+    assert!(descriptors
+        .iter()
+        .all(|(_, archetype)| { archetype.as_deref() != Some("boomerang.TraceRecord") }));
 
     DecodedShutdown {
         entity_path: chunk.entity_path().to_string(),
@@ -164,6 +167,7 @@ fn emit_shutdown(session: &boomerang::rerun::RerunSession) {
             event = "shutdown",
             enclave = "e0",
             logical_ns = 42_u64,
+            microstep = 0_u64,
             state = "complete",
             outcome = "success",
         );
@@ -321,7 +325,7 @@ fn file_sink_finish_writes_decodable_footer_bearing_trace() {
         descriptor
             .archetype
             .as_ref()
-            .is_some_and(|name| name == "boomerang.TraceRecord")
+            .is_some_and(|name| name == "boomerang.Shutdown")
     }));
 }
 
@@ -760,8 +764,14 @@ fn local_registration_aligns_after_the_runtime_graph_is_dropped() {
             target: "boomerang::trace",
             event = "port_write",
             enclave = %enclave_key,
+            reactor = "local",
+            reaction = "test",
+            logical_ns = 0_u64,
+            microstep = 0_u64,
             port_key = %port_key,
-            outcome = "test",
+            port = "input",
+            value_type = "u32",
+            outcome = "mutable_access",
         );
     });
 
@@ -828,6 +838,7 @@ fn layer_composes_and_maps_reaction_span_with_explicit_timepoint() {
             microstep = 3_u64,
             reactor = "r/0",
             reaction = "react\\0",
+            level = 0_u64,
             state = "begin",
         );
         let _entered = span.enter();
@@ -836,13 +847,13 @@ fn layer_composes_and_maps_reaction_span_with_explicit_timepoint() {
     let records = capture.records();
     assert_eq!(records.len(), 1);
     let record = &records[0];
-    assert_eq!(record.event, "reaction_execute");
+    assert!(matches!(record.event, TraceEvent::ReactionExecution(_)));
     assert_eq!(
         record.entity_path,
         "/enclaves/e\\/0/reactors/r\\/0/reactions/react\\\\0"
     );
     assert_eq!(record.timepoint.logical_ns, Some(42));
-    assert_eq!(record.microstep, Some(3));
+    assert_eq!(record.event.tag().map(|tag| tag.microstep), Some(3));
     assert!(record.timepoint.elapsed_ns >= 0);
     assert!(record.timepoint.wall_clock_unix_ns > 0);
     assert!(record.duration_ns.is_some());
@@ -859,6 +870,7 @@ fn unrepresentable_logical_value_is_a_component_not_a_timeline_coordinate() {
             event = "shutdown",
             enclave = "e0",
             logical_ns = u64::MAX,
+            microstep = 0_u64,
             state = "complete",
             outcome = "success",
         );
@@ -866,7 +878,10 @@ fn unrepresentable_logical_value_is_a_component_not_a_timeline_coordinate() {
 
     let records = capture.records();
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0].fields.logical_ns, Some(u64::MAX));
+    assert_eq!(
+        records[0].event.tag().map(|tag| tag.logical_ns),
+        Some(u64::MAX)
+    );
     assert_eq!(records[0].timepoint.logical_ns, None);
 }
 
@@ -881,9 +896,11 @@ fn span_records_updates_and_accounts_for_cross_thread_entries() {
             "coordination_wait",
             event = "coordination_wait",
             enclave = "e0",
-            state = tracing::field::Empty,
+            logical_ns = 1_u64,
+            microstep = 0_u64,
+            state = "waiting",
         );
-        span.record("state", "waiting");
+        span.record("state", "acquired");
         std::thread::scope(|scope| {
             let span = span.clone();
             scope.spawn(move || {
@@ -895,7 +912,7 @@ fn span_records_updates_and_accounts_for_cross_thread_entries() {
 
     let records = capture.records();
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0].fields.state.as_deref(), Some("waiting"));
+    assert!(matches!(records[0].event, TraceEvent::CoordinationWait(_)));
     assert!(records[0].duration_ns.is_some());
 }
 
@@ -911,6 +928,8 @@ fn default_memory_writer_accepts_trace_record_smoke_test() {
             target: "boomerang::trace",
             event = "shutdown",
             enclave = "e0",
+            logical_ns = 0_u64,
+            microstep = 0_u64,
             state = "complete",
             outcome = "success",
         );
@@ -935,6 +954,9 @@ fn state_overlays_use_builtin_rerun_archetype() {
             "tag_process",
             event = "tag_process",
             enclave = "e0",
+            logical_ns = 0_u64,
+            microstep = 0_u64,
+            terminal = false,
             state = "processing",
         );
         let _entered = span.enter();
@@ -942,7 +964,14 @@ fn state_overlays_use_builtin_rerun_archetype() {
             target: "boomerang::trace",
             event = "action_schedule",
             enclave = "e0",
+            logical_ns = 0_u64,
+            microstep = 0_u64,
+            action_key = "tick",
             action = "tick",
+            destination_logical_ns = 1_u64,
+            destination_microstep = 0_u64,
+            value_type = "()",
+            value_size = 0_u64,
             outcome = "scheduled",
         );
     });
@@ -976,7 +1005,7 @@ fn state_overlays_use_builtin_rerun_archetype() {
         descriptor
             .archetype
             .as_ref()
-            .is_some_and(|archetype| archetype.as_str() == "boomerang.TraceRecord")
+            .is_some_and(|archetype| archetype.as_str() == "boomerang.ActionScheduled")
     }));
     assert!(action.component_descriptors().all(|descriptor| {
         descriptor
@@ -999,6 +1028,9 @@ fn child_event_uses_adapter_parent_id_and_neutral_ingress_has_none() {
             enclave = "e0",
             reactor = "r0",
             reaction = "react",
+            logical_ns = 1_u64,
+            microstep = 0_u64,
+            level = 0_u64,
             state = "begin",
         );
         let entered = reaction.enter();
@@ -1006,9 +1038,14 @@ fn child_event_uses_adapter_parent_id_and_neutral_ingress_has_none() {
             target: "boomerang::trace",
             event = "action_schedule",
             enclave = "e0",
+            action_key = "tick",
             action = "tick",
             logical_ns = 1_u64,
             microstep = 0_u64,
+            destination_logical_ns = 1_u64,
+            destination_microstep = 1_u64,
+            value_type = "()",
+            value_size = 0_u64,
             outcome = "scheduled",
         );
         drop(entered);
@@ -1017,9 +1054,14 @@ fn child_event_uses_adapter_parent_id_and_neutral_ingress_has_none() {
             event = "async_ingress",
             enclave = "e0",
             kind = "logical",
+            action_key = "tick",
             action = "tick",
             logical_ns = 1_u64,
             microstep = 0_u64,
+            destination_logical_ns = 1_u64,
+            destination_microstep = 1_u64,
+            value_type = "()",
+            value_size = 0_u64,
             outcome = "accepted",
         );
     });
@@ -1027,15 +1069,15 @@ fn child_event_uses_adapter_parent_id_and_neutral_ingress_has_none() {
     let records = capture.records();
     let reaction = records
         .iter()
-        .find(|record| record.event == "reaction_execute")
+        .find(|record| matches!(record.event, TraceEvent::ReactionExecution(_)))
         .unwrap();
     let scheduled = records
         .iter()
-        .find(|record| record.event == "action_schedule")
+        .find(|record| matches!(record.event, TraceEvent::ActionScheduled(_)))
         .unwrap();
     let ingress = records
         .iter()
-        .find(|record| record.event == "async_ingress")
+        .find(|record| matches!(record.event, TraceEvent::LogicalIngress(_)))
         .unwrap();
     assert_eq!(scheduled.parent_id.as_ref(), Some(&reaction.id));
     assert_eq!(ingress.parent_id, None, "ambiguous ingress stays neutral");
@@ -1052,6 +1094,9 @@ fn explicit_root_span_does_not_inherit_current_trace_parent() {
             "tag_process",
             event = "tag_process",
             enclave = "e0",
+            logical_ns = 0_u64,
+            microstep = 0_u64,
+            terminal = false,
             state = "processing",
         );
         let _entered = parent.enter();
@@ -1063,6 +1108,9 @@ fn explicit_root_span_does_not_inherit_current_trace_parent() {
             enclave = "e0",
             reactor = "r0",
             reaction = "root",
+            logical_ns = 0_u64,
+            microstep = 0_u64,
+            level = 0_u64,
             state = "begin",
         );
         let _root_entered = root.enter();
@@ -1071,7 +1119,7 @@ fn explicit_root_span_does_not_inherit_current_trace_parent() {
     let records = capture.records();
     let root = records
         .iter()
-        .find(|record| record.fields.reaction.as_deref() == Some("root"))
+        .find(|record| matches!(&record.event, TraceEvent::ReactionExecution(value) if value.reaction == "root"))
         .unwrap();
     assert_eq!(root.parent_id, None);
 }
@@ -1090,6 +1138,9 @@ fn action_and_port_facts_use_their_own_keyed_entity_paths() {
             reactor = "reactor-label",
             reaction_key = "rk/4",
             reaction = "reaction-label",
+            logical_ns = 1_u64,
+            microstep = 0_u64,
+            level = 0_u64,
             state = "begin",
         );
         let _entered = reaction.enter();
@@ -1098,6 +1149,10 @@ fn action_and_port_facts_use_their_own_keyed_entity_paths() {
             event = "action_schedule",
             action_key = "ak/2",
             action = "action-label",
+            destination_logical_ns = 1_u64,
+            destination_microstep = 1_u64,
+            value_type = "()",
+            value_size = 0_u64,
             outcome = "scheduled",
         );
         tracing::trace!(
@@ -1105,6 +1160,7 @@ fn action_and_port_facts_use_their_own_keyed_entity_paths() {
             event = "port_write",
             port_key = "pk/3",
             port = "port-label",
+            value_type = "u32",
             outcome = "mutable_access",
         );
     });
@@ -1112,11 +1168,11 @@ fn action_and_port_facts_use_their_own_keyed_entity_paths() {
     let records = capture.records();
     let action = records
         .iter()
-        .find(|record| record.event == "action_schedule")
+        .find(|record| matches!(record.event, TraceEvent::ActionScheduled(_)))
         .unwrap();
     let port = records
         .iter()
-        .find(|record| record.event == "port_write")
+        .find(|record| matches!(record.event, TraceEvent::PortWrite(_)))
         .unwrap();
     assert_eq!(
         action.entity_path,
@@ -1136,6 +1192,8 @@ fn closed_runtime_span_has_duration_and_terminal_state() {
             "tag_process",
             event = "tag_process",
             enclave = "e0",
+            logical_ns = 0_u64,
+            microstep = 0_u64,
             terminal = true,
             state = "processing",
         );
@@ -1159,6 +1217,8 @@ fn duration_spans_emit_state_begin_and_reset() {
             "tag_process",
             event = "tag_process",
             enclave = "e0",
+            logical_ns = 0_u64,
+            microstep = 0_u64,
             terminal = true,
             state = "processing",
         );
@@ -1167,7 +1227,14 @@ fn duration_spans_emit_state_begin_and_reset() {
             target: "boomerang::trace",
             event = "action_schedule",
             enclave = "e0",
+            logical_ns = 0_u64,
+            microstep = 0_u64,
+            action_key = "tick",
             action = "tick",
+            destination_logical_ns = 1_u64,
+            destination_microstep = 0_u64,
+            value_type = "()",
+            value_size = 0_u64,
             outcome = "scheduled",
         );
     });
@@ -1189,7 +1256,7 @@ fn simultaneous_events_receive_unique_adapter_ids() {
     let (session, capture) = session_with_capture("concurrent");
     let barrier = Arc::new(Barrier::new(9));
     std::thread::scope(|scope| {
-        for worker in 0..8 {
+        for _worker in 0..8 {
             let subscriber = tracing_subscriber::registry().with(session.layer());
             let barrier = barrier.clone();
             scope.spawn(move || {
@@ -1199,9 +1266,10 @@ fn simultaneous_events_receive_unique_adapter_ids() {
                         target: "boomerang::trace",
                         event = "shutdown",
                         enclave = "e0",
+                        logical_ns = 0_u64,
+                        microstep = 0_u64,
                         state = "complete",
                         outcome = "success",
-                        worker,
                     );
                 });
             });
@@ -1232,6 +1300,8 @@ fn independently_created_layers_share_the_session_id_sequence() {
                 target: "boomerang::trace",
                 event = "shutdown",
                 enclave = "e0",
+                logical_ns = 0_u64,
+                microstep = 0_u64,
                 state = "complete",
                 outcome = "success",
             );
@@ -1251,15 +1321,45 @@ fn malformed_trace_emits_one_non_recursive_schema_diagnostic() {
     tracing::subscriber::with_default(subscriber, || {
         tracing::trace!(target: "boomerang::trace", event = "shutdown", outcome = "success");
         tracing::trace!(target: "boomerang::trace", enclave = "e0", outcome = "success");
+        tracing::trace!(target: "boomerang::trace", event = "not_a_boomerang_event", enclave = "e0");
+        tracing::trace!(target: "boomerang::trace", event = 7_u64, enclave = "e0");
+        tracing::trace!(target: "boomerang::trace", event = "shutdown", enclave = "e0", logical_ns = 0_u64, microstep = 0_u64, state = "complete", outcome = "invalid");
+        tracing::trace!(target: "boomerang::trace", event = "propagation_receive", enclave = "e0");
+        tracing::trace!(target: "boomerang::trace", event = "causal_link", enclave = "e0");
+        tracing::trace!(target: "boomerang::trace", event = "shutdown", enclave = "e0", logical_ns = 0_u64, microstep = 0_u64, state = "complete", outcome = "success", unexpected = true);
         tracing::trace!(target: "unrelated", event = "shutdown", enclave = "e0");
     });
 
     let records = capture.records();
-    assert_eq!(records.len(), 2);
-    assert!(records.iter().all(|record| record.event == "diagnostic"));
+    assert_eq!(records.len(), 8);
+    assert!(records
+        .iter()
+        .all(|record| matches!(record.event, TraceEvent::SchemaDiagnostic(_))));
     assert!(records
         .iter()
         .all(|record| record.entity_path == "/diagnostics/schema"));
+}
+
+#[test]
+fn malformed_spans_are_diagnosed_before_state_or_operational_side_effects() {
+    let (session, capture) = session_with_capture("malformed-open-spans");
+    let subscriber = tracing_subscriber::registry().with(session.layer());
+
+    tracing::subscriber::with_default(subscriber, || {
+        let tag = tracing::trace_span!(target: "boomerang::trace", "tag_process", event = "tag_process", enclave = "e0", logical_ns = 1_u64, terminal = false, state = "processing");
+        drop(tag);
+        let reaction = tracing::trace_span!(target: "boomerang::trace", "reaction_execute", event = "reaction_execute", enclave = "e0", logical_ns = 1_u64, microstep = 0_u64, reactor = "root", reaction = "r0", level = "wrong", state = "begin");
+        drop(reaction);
+        let wait = tracing::trace_span!(target: "boomerang::trace", "coordination_wait", event = "coordination_wait", enclave = "e0", logical_ns = 1_u64, microstep = 0_u64, state = "waiting", unexpected = true);
+        drop(wait);
+    });
+
+    assert!(capture.states().is_empty());
+    let records = capture.records();
+    assert_eq!(records.len(), 3);
+    assert!(records
+        .iter()
+        .all(|record| matches!(record.event, TraceEvent::SchemaDiagnostic(_))));
 }
 
 struct FailingWriter;
@@ -1308,6 +1408,9 @@ fn state_write_failure_disables_tracing() {
             "tag_process",
             event = "tag_process",
             enclave = "e0",
+            logical_ns = 0_u64,
+            microstep = 0_u64,
+            terminal = false,
             state = "processing",
         );
     });
@@ -1557,6 +1660,9 @@ fn state_writer_panic_isolated_from_traced_application() {
                 "tag_process",
                 event = "tag_process",
                 enclave = "e0",
+                logical_ns = 0_u64,
+                microstep = 0_u64,
+                terminal = false,
                 state = "processing",
             );
         });
@@ -1648,7 +1754,10 @@ fn poisoned_span_fields_are_recovered_without_application_panic() {
                 enclave = "e0",
                 reactor = "r0",
                 reaction = "react",
-                state = tracing::field::Empty,
+                level = 0_u64,
+                logical_ns = 0_u64,
+                microstep = 0_u64,
+                state = "begin",
             );
             span.record("state", tracing::field::debug(PanickingDebug));
             span.record("state", "recovered");

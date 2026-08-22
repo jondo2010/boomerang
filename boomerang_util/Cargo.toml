@@ -15,7 +15,10 @@ exclude.workspace = true
 default = []
 
 ## Support for built-in CLI/runner methods
-runner = ["dep:clap", "dep:anyhow", "dep:boomerang"]
+runner = ["dep:clap", "dep:anyhow", "dep:boomerang", "dep:tracing-subscriber"]
+
+## Record runner traces to a finalized Rerun RRD file
+rerun = ["runner", "boomerang/rerun"]
 
 ## Support for recording and replaying
 replay = ["dep:boomerang", "boomerang/replay"]

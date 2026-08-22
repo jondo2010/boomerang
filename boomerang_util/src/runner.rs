@@ -34,10 +34,14 @@ struct Args {
     #[arg(long, short)]
     fast_forward: bool,
 
-    /// The finalized Rerun RRD file to record runtime traces into
+    /// Record runtime traces to target/boomerang/diagrams/<reactor>.rrd
     #[cfg(feature = "rerun")]
-    #[arg(long, env = "BOOM_RERUN", value_hint = clap::ValueHint::FilePath)]
-    rerun: Option<PathBuf>,
+    #[arg(
+        long,
+        env = "BOOM_RERUN",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    rerun: bool,
 
     /// The filename to serialize recorded actions into
     #[cfg(feature = "replay")]
@@ -66,15 +70,16 @@ impl TracingSession {
         let _ = (name, args);
 
         #[cfg(feature = "rerun")]
-        let rerun = args
-            .rerun
-            .as_ref()
-            .map(|path| {
+        let rerun = if args.rerun {
+            let path = diagram_output_path(name, "rrd")?;
+            Some(
                 boomerang::rerun::RerunSessionBuilder::new(name)
-                    .sink(boomerang::rerun::SinkConfig::File(path.clone()))
-                    .build()
-            })
-            .transpose()?;
+                    .sink(boomerang::rerun::SinkConfig::File(path))
+                    .build()?,
+            )
+        } else {
+            None
+        };
 
         Ok(Self {
             #[cfg(feature = "rerun")]
@@ -213,7 +218,7 @@ pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
 /// * `--reaction-graph`: Generate a PlantUML graph of the reactor hierarchy
 /// * `--print-debug-info`: Print debug information about the assembly and triggers
 /// * `--fast-forward`: Run the scheduler in fast-forward mode
-/// * `--rerun`: Record runtime traces into a finalized Rerun RRD file
+/// * `--rerun`: Record runtime traces into `target/boomerang/diagrams/<reactor>.rrd`
 /// * `--record-filename`: The filename to serialize recorded actions into
 /// * `--record-actions`: The list of fully-qualified actions to record, e.g., "snake::keyboard::key_press"
 pub fn build_and_run_reactor<S, R>(reactor: R, name: &str, state: S) -> anyhow::Result<R::Ports>

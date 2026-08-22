@@ -21,11 +21,11 @@ path when it installs the layer for runner-based applications.
 
 The modules have distinct responsibilities:
 
-- `session` owns sink validation, `RecordingStream` construction, the default
-  blueprint, static runtime registration, bounded lifecycle operations, and
-  finalized-file verification.
+- `session` owns file-backed `RecordingStream` construction, the default
+  timeline-first blueprint, static runtime registration, finalization, and RRD
+  footer verification.
 - `layer` maps Boomerang trace spans and events directly to dense Rerun
-  archetypes and performs adapter-local causal correlation.
+  archetypes.
 - `entities` maps already-lowered runtime metadata to timeless Rerun entities,
   ownership graphs, and static propagation relationships.
 
@@ -51,34 +51,29 @@ metadata derived from lowered registration identities, include stable-key
 suffixes where necessary, and are bounded to avoid oversized legends.
 
 Trace annotations must not add state to runtime hot-path objects such as
-`TriggerRes`, scheduler queues, events, contexts, or payload wrappers. Causal
-state belongs to the adapter and exists only while its layer is enabled.
+`TriggerRes`, scheduler queues, events, contexts, or payload wrappers. Adapter
+state exists only while its layer is enabled.
 
-## Lifecycle and backpressure
+## File lifecycle
 
-Memory, file, and tee sinks use Rerun 0.36.1's bounded batching pipeline. A
-memory sink retains the complete trace. File sinks retain an O(chunks) footer
-manifest and construct a finalized footer using O(chunks) memory.
+`RerunSession::save(application_id, path)` is the only constructor. It creates a
+file-backed recording with the default blueprint. Call `register_runtime` before
+execution consumes the lowered assembly, install `layer` in the active tracing
+subscriber, and call `finish` after execution.
 
-The SDK's gRPC sink is rejected because its blocking behavior cannot be
-isolated from scheduler callbacks. Supported sinks can still backpressure a
-saturated scheduler; the adapter deliberately adds no second event queue.
-Further live-viewer latency work is tracked in
-[#106](https://github.com/jondo2010/boomerang/issues/106).
-
-`RerunSession::finish` is the authoritative offline success result. It performs
-bounded flush, disconnect, teardown, and RRD footer verification while
-preserving earlier observational failures. `Drop` is bounded best-effort only.
-The first adapter failure disables the session and refreshes tracing interest so
-uninterested runtime callsites become cheap again.
+`finish` is the authoritative success result for the offline recording: it
+finalizes the file, verifies that the RRD footer can be decoded, and reports any
+earlier recording failure.
 
 ## Verification
 
-The focused adapter suite closes the loop from tracing spans/events through a
-finalized RRD and decodes the file again:
+The existing federation integration test closes the loop from tracing
+spans/events through a finalized RRD and decodes the file again:
 
 ```console
-cargo test -p boomerang_rerun
+cargo test -p boomerang --features federated,rerun \
+  --test federated_static \
+  public_api_runs_static_federation_with_finalized_rrd_trace -- --exact
 ```
 
 The facade and federated compatibility paths are covered separately:

@@ -1,11 +1,9 @@
 //! Rerun trace visualization adapter for Boomerang.
 
+#![deny(missing_docs)]
+
 mod entities;
 mod layer;
 mod session;
 
-pub use layer::RerunLayer;
-pub use session::{
-    BlueprintConfig, FlushDriver, RerunSession, RerunSessionBuildError, RerunSessionBuilder,
-    RerunSessionFinishError, SinkConfig, SinkConfigError,
-};
+pub use session::{RerunSession, RerunSessionBuildError, RerunSessionFinishError};

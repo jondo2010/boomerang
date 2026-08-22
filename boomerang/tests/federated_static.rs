@@ -71,29 +71,6 @@ fn text_components_at(chunk: &rerun::log::Chunk, suffix: &str, row: usize) -> Ve
 }
 
 #[cfg(feature = "rerun")]
-fn graph_edge_at(chunk: &rerun::log::Chunk, row: usize) -> Option<(String, String)> {
-    let descriptor = chunk.component_descriptors().find(|descriptor| {
-        descriptor
-            .component_type
-            .as_ref()
-            .is_some_and(|name| name.as_str() == "rerun.components.GraphEdge")
-    })?;
-    let values = chunk.component_batch_raw(descriptor.component, row)?.ok()?;
-    let values = values
-        .as_any()
-        .downcast_ref::<rerun::external::arrow::array::StructArray>()?;
-    let first = values
-        .column_by_name("first")?
-        .as_any()
-        .downcast_ref::<rerun::external::arrow::array::StringArray>()?;
-    let second = values
-        .column_by_name("second")?
-        .as_any()
-        .downcast_ref::<rerun::external::arrow::array::StringArray>()?;
-    (values.len() == 1).then(|| (first.value(0).to_owned(), second.value(0).to_owned()))
-}
-
-#[cfg(feature = "rerun")]
 fn state_change_at(chunk: &rerun::log::Chunk, row: usize) -> Option<Option<String>> {
     let descriptor = chunk.component_descriptors().find(|descriptor| {
         descriptor
@@ -256,10 +233,8 @@ fn public_api_runs_static_federation_with_finalized_rrd_trace() {
     #[cfg(feature = "rerun")]
     let rrd_path = directory.path().join("federated-static.rrd");
     #[cfg(feature = "rerun")]
-    let rerun = boomerang::rerun::RerunSessionBuilder::new("federated-static-test")
-        .sink(boomerang::rerun::SinkConfig::File(rrd_path.clone()))
-        .build()
-        .unwrap();
+    let rerun =
+        boomerang::rerun::RerunSession::save("federated-static-test", rrd_path.clone()).unwrap();
 
     assembly
         .register_federated_codec::<u32, _>(boomerang::federated::SerdeJsonCodec)
@@ -303,7 +278,6 @@ fn public_api_runs_static_federation_with_finalized_rrd_trace() {
 
     #[cfg(feature = "rerun")]
     {
-        assert_eq!(rerun.error_count(), 0);
         rerun.finish().unwrap();
 
         let file = std::io::BufReader::new(std::fs::File::open(&rrd_path).unwrap());
@@ -468,66 +442,31 @@ fn public_api_runs_static_federation_with_finalized_rrd_trace() {
             "terminal measure is co-located with its typed event"
         );
 
-        let links = runtime_rows
-            .iter()
-            .copied()
-            .filter(|(chunk, row)| {
-                text_component_at(chunk, ":boomerang.trace.event", *row).as_deref()
-                    == Some("causal_link")
-            })
-            .map(|(chunk, row)| {
-                let source = text_component_at(chunk, ":boomerang.trace.source", row).unwrap();
-                let destination =
-                    text_component_at(chunk, ":boomerang.trace.destination", row).unwrap();
-                assert_eq!(
-                    graph_edge_at(chunk, row),
-                    Some((source.clone(), destination.clone()))
-                );
-                (source, destination)
-            })
-            .collect::<Vec<_>>();
-        let exact_destination = |source: &str| {
-            let destinations = links
-                .iter()
-                .filter_map(|(candidate, destination)| {
-                    (candidate == source).then_some(destination.as_str())
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(
-                destinations.len(),
-                1,
-                "{source} must have one exact causal destination"
-            );
-            destinations[0]
-        };
-
-        let send_id = text_component_at(send, ":boomerang.trace.id", send_row).unwrap();
-        let receive_id = exact_destination(&send_id);
         let (receive, receive_row) = runtime_rows
             .iter()
             .copied()
             .find(|(chunk, row)| {
-                text_component_at(chunk, ":boomerang.trace.id", *row).as_deref() == Some(receive_id)
-                    && text_component_at(chunk, ":boomerang.trace.event", *row).as_deref()
-                        == Some("propagation_receive")
+                text_component_at(chunk, ":boomerang.trace.event", *row).as_deref()
+                    == Some("propagation_receive")
+                    && text_component_at(chunk, ":boomerang.trace.federate", *row).as_deref()
+                        == Some("b")
             })
-            .expect("causal destination is the remote receive");
+            .expect("remote propagation receive");
         assert_eq!(
             text_component_at(receive, ":boomerang.trace.federate", receive_row).as_deref(),
             Some("b")
         );
 
-        let reaction_id = exact_destination(receive_id);
         let (reaction, reaction_row) = runtime_rows
             .iter()
             .copied()
             .find(|(chunk, row)| {
-                text_component_at(chunk, ":boomerang.trace.id", *row).as_deref()
-                    == Some(reaction_id)
-                    && text_component_at(chunk, ":boomerang.trace.event", *row).as_deref()
-                        == Some("reaction_execute")
+                text_component_at(chunk, ":boomerang.trace.event", *row).as_deref()
+                    == Some("reaction_execute")
+                    && text_component_at(chunk, ":boomerang.trace.federate", *row).as_deref()
+                        == Some("b")
             })
-            .expect("remote receive causally triggers one reaction");
+            .expect("remote federate reaction");
         assert_eq!(
             text_component_at(reaction, ":boomerang.trace.federate", reaction_row).as_deref(),
             Some("b")
@@ -605,48 +544,6 @@ fn public_api_rejects_runtime_without_lowered_federation() {
         parts.into_federation(),
         Err(RuntimeExecutionError::ExpectedFederation)
     ));
-}
-
-#[cfg(feature = "rerun")]
-#[test]
-fn unsupported_rerun_grpc_config_rejection_does_not_change_federation_output() {
-    let values = Arc::new(Mutex::new(Vec::new()));
-    let mut assembly = Assembly::new();
-    assembly
-        .register_federated_codec::<u32, _>(boomerang::federated::SerdeJsonCodec)
-        .unwrap();
-    let _ = StaticFederation(Arc::clone(&values))
-        .build(
-            "main",
-            (),
-            None,
-            None,
-            None,
-            ReactorPlacement::Local,
-            &mut assembly,
-        )
-        .unwrap();
-    assembly.validate_reactions().unwrap();
-    let config = runtime::Config::default().with_fast_forward(true);
-    let parts = assembly.into_runtime_assembly(&config).unwrap();
-    let rerun = boomerang::rerun::RerunSessionBuilder::new("federated-grpc-isolation")
-        .sink(boomerang::rerun::SinkConfig::Grpc {
-            url: "rerun+http://127.0.0.1:9/proxy".to_owned(),
-            memory_limit_bytes: 64 * 1024,
-        })
-        .blueprint(boomerang::rerun::BlueprintConfig::None)
-        .flush_timeout(StdDuration::from_millis(10))
-        .build();
-    assert!(matches!(
-        rerun,
-        Err(boomerang::rerun::RerunSessionBuildError::UnsupportedGrpc)
-    ));
-
-    let envs = execute_federation_in_memory(parts.into_federation().unwrap(), config).unwrap();
-    let a_envs = &envs[&FederateId::new("a")];
-    let b_envs = &envs[&FederateId::new("b")];
-    assert_eq!(a_envs.keys().next(), b_envs.keys().next());
-    assert_eq!(*values.lock().unwrap(), vec![(Tag::ZERO, 7)]);
 }
 
 #[test]

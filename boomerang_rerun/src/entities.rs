@@ -10,7 +10,6 @@ pub(crate) fn escape_entity_segment(segment: &str) -> String {
 pub(super) struct RegistrationIndex {
     entities: HashMap<RegistrationLookup, RegistrationResolution>,
     federated_entities: HashMap<FederatedRegistrationLookup, RegistrationResolution>,
-    action_triggers: HashMap<String, Vec<String>>,
     display_labels: HashMap<String, String>,
 }
 
@@ -51,16 +50,6 @@ impl RegistrationIndex {
         self.register_identity(federate, enclave, kind, stable_key, path);
         if display_name != stable_key {
             self.register_identity(federate, enclave, kind, display_name, path);
-        }
-    }
-
-    pub(super) fn register_action_trigger(&mut self, action_path: &str, reaction_path: &str) {
-        let reactions = self
-            .action_triggers
-            .entry(action_path.to_owned())
-            .or_default();
-        if !reactions.iter().any(|reaction| reaction == reaction_path) {
-            reactions.push(reaction_path.to_owned());
         }
     }
 
@@ -126,30 +115,8 @@ impl RegistrationIndex {
         )
     }
 
-    pub(super) fn triggered_reactions(&self, action_path: &str) -> &[String] {
-        self.action_triggers
-            .get(action_path)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-    }
-
     pub(super) fn display_label(&self, path: &str) -> Option<&str> {
         self.display_labels.get(path).map(String::as_str)
-    }
-
-    pub(super) fn action_triggers_reaction(
-        &self,
-        federate: Option<&str>,
-        enclave: &str,
-        action: &str,
-        reaction_path: &str,
-    ) -> Option<bool> {
-        self.resolve(federate, enclave, "action", action)
-            .map(|action_path| {
-                self.triggered_reactions(&action_path)
-                    .iter()
-                    .any(|path| reaction_path.starts_with(path))
-            })
     }
 
     pub(super) fn merge(&mut self, other: Self) {
@@ -158,14 +125,6 @@ impl RegistrationIndex {
         }
         for (lookup, incoming) in other.federated_entities {
             merge_resolution(&mut self.federated_entities, lookup, incoming);
-        }
-        for (action, reactions) in other.action_triggers {
-            let existing = self.action_triggers.entry(action).or_default();
-            for reaction in reactions {
-                if !existing.contains(&reaction) {
-                    existing.push(reaction);
-                }
-            }
         }
         for (path, label) in other.display_labels {
             self.display_labels.entry(path).or_insert(label);
@@ -525,10 +484,6 @@ pub(super) fn log_runtime_enclaves(
 
         for (action, reactions) in enclave.graph.action_triggers.iter() {
             let action_path = action_path(action);
-            for (_, reaction) in reactions {
-                let reaction = reaction_path(*reaction);
-                index.register_action_trigger(&action_path, &reaction);
-            }
             edges.extend(
                 reactions.iter().map(|(_, reaction)| {
                     (action_path.clone(), reaction_path(*reaction), "triggers")

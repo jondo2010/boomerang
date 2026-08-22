@@ -73,9 +73,7 @@ fn with_tracing<T>(
     #[cfg(feature = "rerun")]
     if args.rerun {
         let path = diagram_output_path(name, "rrd")?;
-        let rerun = boomerang::rerun::RerunSessionBuilder::new(name)
-            .sink(boomerang::rerun::SinkConfig::File(path))
-            .build()?;
+        let rerun = boomerang::rerun::RerunSession::save(name, path)?;
         let subscriber = tracing_subscriber::registry()
             .with(fmt())
             .with(rerun.layer());

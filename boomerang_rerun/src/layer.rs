@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,8 +19,6 @@ use super::entities::{
 use super::session::SessionState;
 
 const TRACE_TARGET: &str = "boomerang::trace";
-const MAX_CORRELATION_ROUTES: usize = 4096;
-const MAX_CORRELATIONS_PER_ROUTE: usize = 16;
 
 #[derive(Clone)]
 pub(super) struct SessionFilter {
@@ -53,7 +51,8 @@ impl<S> Filter<S> for SessionFilter {
 }
 
 #[derive(Clone)]
-pub struct RerunLayer {
+/// Subscriber layer that maps Boomerang tracing callbacks to Rerun archetypes.
+pub(super) struct RerunLayer {
     recording: rerun::RecordingStream,
     state: SessionState,
     source_id: Arc<str>,
@@ -64,7 +63,6 @@ pub struct RerunLayer {
 pub(super) struct AdapterState {
     next_id: Arc<AtomicU64>,
     pub(super) registration: Arc<RwLock<RegistrationIndex>>,
-    correlation: Arc<Mutex<Correlation>>,
     named_series: Arc<RwLock<HashSet<String>>>,
 }
 
@@ -73,7 +71,6 @@ impl Default for AdapterState {
         Self {
             next_id: Arc::new(AtomicU64::new(0)),
             registration: Arc::new(RwLock::new(RegistrationIndex::default())),
-            correlation: Arc::new(Mutex::new(Correlation::default())),
             named_series: Arc::new(RwLock::new(HashSet::new())),
         }
     }
@@ -85,144 +82,6 @@ struct TraceId(String);
 #[derive(Clone, Copy)]
 struct TimePoint {
     logical_ns: Option<i64>,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct RouteKey {
-    federate: Option<String>,
-    enclave: Option<String>,
-    action_key: String,
-    logical_ns: u64,
-    microstep: u64,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct ReactionRoute {
-    federate: Option<String>,
-    enclave: String,
-    logical_ns: u64,
-    microstep: u64,
-}
-
-#[derive(Clone)]
-struct PendingSend {
-    id: TraceId,
-    accepted: bool,
-}
-
-#[derive(Clone)]
-struct PendingIngress {
-    id: TraceId,
-    path: String,
-    time: TimePoint,
-    federate: Option<String>,
-    enclave: String,
-    action_key: String,
-    action: String,
-    logical_ns: u64,
-    microstep: u64,
-    destination_logical_ns: u64,
-    destination_microstep: u64,
-    value_type: String,
-    value_size: u64,
-}
-
-#[derive(Default)]
-struct Correlation {
-    sends: HashMap<RouteKey, Vec<PendingSend>>,
-    ingresses: HashMap<RouteKey, Vec<PendingIngress>>,
-    receives: HashMap<RouteKey, Vec<(TraceId, String)>>,
-    poisoned: HashSet<RouteKey>,
-    reactions: HashMap<ReactionRoute, Vec<PendingReaction>>,
-    poisoned_reactions: HashSet<ReactionRoute>,
-    route_order: VecDeque<RouteKey>,
-    reaction_order: VecDeque<ReactionRoute>,
-}
-
-impl Correlation {
-    fn track(&mut self, key: &RouteKey) {
-        if !self.route_order.contains(key) {
-            self.route_order.push_back(key.clone());
-        }
-        while self.route_order.len() > MAX_CORRELATION_ROUTES {
-            if let Some(expired) = self.route_order.pop_front() {
-                self.sends.remove(&expired);
-                self.ingresses.remove(&expired);
-                self.receives.remove(&expired);
-                self.poisoned.remove(&expired);
-            }
-        }
-    }
-
-    fn push_reaction(&mut self, reaction: PendingReaction) {
-        let route = ReactionRoute::from(&reaction);
-        if !self.reaction_order.contains(&route) {
-            self.reaction_order.push_back(route.clone());
-        }
-        while self.reaction_order.len() > MAX_CORRELATION_ROUTES {
-            if let Some(expired) = self.reaction_order.pop_front() {
-                self.reactions.remove(&expired);
-                self.poisoned_reactions.remove(&expired);
-            }
-        }
-        let values = self.reactions.entry(route.clone()).or_default();
-        if values.len() >= MAX_CORRELATIONS_PER_ROUTE {
-            self.poisoned_reactions.insert(route);
-        } else {
-            values.push(reaction);
-        }
-    }
-
-    fn push_send(&mut self, key: RouteKey, value: PendingSend) {
-        self.track(&key);
-        push_route(&mut self.sends, &mut self.poisoned, key, value);
-    }
-
-    fn push_ingress(&mut self, key: RouteKey, value: PendingIngress) {
-        self.track(&key);
-        push_route(&mut self.ingresses, &mut self.poisoned, key, value);
-    }
-
-    fn push_receive(&mut self, key: RouteKey, value: (TraceId, String)) {
-        self.track(&key);
-        push_route(&mut self.receives, &mut self.poisoned, key, value);
-    }
-}
-
-fn push_route<T>(
-    routes: &mut HashMap<RouteKey, Vec<T>>,
-    poisoned: &mut HashSet<RouteKey>,
-    key: RouteKey,
-    value: T,
-) {
-    let values = routes.entry(key.clone()).or_default();
-    if values.len() >= MAX_CORRELATIONS_PER_ROUTE {
-        poisoned.insert(key);
-    } else {
-        values.push(value);
-    }
-}
-
-#[derive(Clone)]
-struct PendingReaction {
-    id: TraceId,
-    federate: Option<String>,
-    enclave: String,
-    logical_ns: u64,
-    microstep: u64,
-    path: String,
-    time: TimePoint,
-}
-
-impl From<&PendingReaction> for ReactionRoute {
-    fn from(reaction: &PendingReaction) -> Self {
-        Self {
-            federate: reaction.federate.clone(),
-            enclave: reaction.enclave.clone(),
-            logical_ns: reaction.logical_ns,
-            microstep: reaction.microstep,
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -570,230 +429,6 @@ impl RerunLayer {
                 format!("{root}/{}", escape_entity_segment(event))
             })
     }
-
-    fn emit_edge(&self, source: &TraceId, destination: &TraceId, time: TimePoint, path: &str) {
-        let id = self
-            .next_id(Some("causal"))
-            .unwrap_or_else(|| TraceId("causal".into()));
-        let archetype = common(
-            "boomerang.CausalLink",
-            &id,
-            None,
-            "causal_link",
-            None,
-            None,
-            None,
-            None,
-        )
-        .with_component::<rerun::components::Text>("boomerang.trace.source", [source.0.as_str()])
-        .with_component::<rerun::components::Text>(
-            "boomerang.trace.destination",
-            [destination.0.as_str()],
-        )
-        .with_component::<rerun::components::Text>("boomerang.trace.state", ["exact"])
-        .with_component::<rerun::components::Text>("boomerang.trace.outcome", ["matched"]);
-        let graph = rerun::GraphEdges::new([(source.0.as_str(), destination.0.as_str())])
-            .with_graph_type(rerun::components::GraphType::Directed);
-        self.write(path, time, &Combined::new([&archetype, &graph]));
-    }
-
-    fn correlate(&self, key: RouteKey) {
-        let pair = {
-            let mut state = self
-                .adapter
-                .correlation
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if state.poisoned.contains(&key) {
-                return;
-            }
-            let sends = state
-                .sends
-                .get(&key)
-                .into_iter()
-                .flatten()
-                .cloned()
-                .collect::<Vec<_>>();
-            let ingresses = state.ingresses.get(&key).cloned().unwrap_or_default();
-            if sends.len() != 1 || !sends[0].accepted || ingresses.len() != 1 {
-                return;
-            }
-            state.sends.remove(&key);
-            state.ingresses.remove(&key);
-            for pending in state.ingresses.values_mut() {
-                pending.retain(|candidate| candidate.id != ingresses[0].id);
-            }
-            state.ingresses.retain(|_, pending| !pending.is_empty());
-            Some((sends[0].clone(), ingresses[0].clone()))
-        };
-        if let Some((send, ingress)) = pair {
-            let receive = common(
-                "boomerang.PropagationReceive",
-                &ingress.id,
-                None,
-                "propagation_receive",
-                ingress.federate.as_deref(),
-                Some(&ingress.enclave),
-                Some(ingress.logical_ns),
-                Some(ingress.microstep),
-            )
-            .with_component::<rerun::components::Text>(
-                "boomerang.trace.action_key",
-                [ingress.action_key.as_str()],
-            )
-            .with_component::<rerun::components::Text>(
-                "boomerang.trace.action",
-                [ingress.action.as_str()],
-            )
-            .with_component_from_data(
-                "boomerang.trace.destination_logical_ns",
-                u64_array(ingress.destination_logical_ns),
-            )
-            .with_component_from_data(
-                "boomerang.trace.destination_microstep",
-                u64_array(ingress.destination_microstep),
-            )
-            .with_component::<rerun::components::Text>(
-                "boomerang.trace.value_type",
-                [ingress.value_type.as_str()],
-            )
-            .with_component_from_data("boomerang.trace.value_size", u64_array(ingress.value_size))
-            .with_component::<rerun::components::Text>("boomerang.trace.outcome", ["accepted"]);
-            let value_size = rerun::Scalars::new([ingress.value_size as f64]);
-            self.write_measure(
-                &ingress.path,
-                ingress.time,
-                &Combined::new([&receive, &value_size]),
-            );
-            self.emit_edge(&send.id, &ingress.id, ingress.time, &ingress.path);
-            let receive_key = RouteKey {
-                federate: ingress.federate.clone(),
-                enclave: Some(ingress.enclave.clone()),
-                action_key: ingress.action_key.clone(),
-                logical_ns: ingress.logical_ns,
-                microstep: ingress.microstep,
-            };
-            {
-                let mut correlation = self
-                    .adapter
-                    .correlation
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                correlation.push_receive(
-                    receive_key,
-                    (ingress.id.clone(), ingress.action_key.clone()),
-                );
-            }
-            let reaction_route = ReactionRoute {
-                federate: ingress.federate.clone(),
-                enclave: ingress.enclave.clone(),
-                logical_ns: ingress.logical_ns,
-                microstep: ingress.microstep,
-            };
-            let reactions = self
-                .adapter
-                .correlation
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let reactions = if reactions.poisoned_reactions.contains(&reaction_route) {
-                Vec::new()
-            } else {
-                reactions
-                    .reactions
-                    .get(&reaction_route)
-                    .into_iter()
-                    .flatten()
-                    .filter(|reaction| {
-                        self.adapter
-                            .registration
-                            .read()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .action_triggers_reaction(
-                                ingress.federate.as_deref(),
-                                &ingress.enclave,
-                                &ingress.action_key,
-                                &reaction.path,
-                            )
-                            == Some(true)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>()
-            };
-            if reactions.len() == 1 {
-                self.emit_edge(
-                    &ingress.id,
-                    &reactions[0].id,
-                    reactions[0].time,
-                    &reactions[0].path,
-                );
-            }
-        }
-    }
-
-    fn reaction_predecessor(&self, reaction: &SpanState) {
-        let Some(enclave) = reaction.enclave.as_deref() else {
-            return;
-        };
-        let Some(logical_ns) = reaction.logical_ns else {
-            return;
-        };
-        let key_prefix = (
-            reaction.federate.as_deref(),
-            enclave,
-            logical_ns,
-            reaction.microstep.unwrap_or(0),
-        );
-        let reaction_route = ReactionRoute {
-            federate: reaction.federate.clone(),
-            enclave: enclave.to_owned(),
-            logical_ns,
-            microstep: reaction.microstep.unwrap_or(0),
-        };
-        let candidates = {
-            let state = self
-                .adapter
-                .correlation
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if state.poisoned_reactions.contains(&reaction_route) {
-                return;
-            }
-            state
-                .receives
-                .iter()
-                .filter(|(key, _)| {
-                    !state.poisoned.contains(*key)
-                        && key.federate.as_deref() == key_prefix.0
-                        && key.enclave.as_deref() == Some(key_prefix.1)
-                        && key.logical_ns == key_prefix.2
-                        && key.microstep == key_prefix.3
-                })
-                .flat_map(|(_, values)| values)
-                .filter(|(_, action_key)| {
-                    self.adapter
-                        .registration
-                        .read()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .action_triggers_reaction(
-                            reaction.federate.as_deref(),
-                            reaction.enclave.as_deref().unwrap_or_default(),
-                            action_key,
-                            &reaction.path,
-                        )
-                        == Some(true)
-                })
-                .cloned()
-                .collect::<Vec<_>>()
-        };
-        if candidates.len() == 1 {
-            self.emit_edge(
-                &candidates[0].0,
-                &reaction.id,
-                reaction.time,
-                &reaction.path,
-            );
-        }
-    }
 }
 
 impl<S> Layer<S> for RerunLayer
@@ -1011,30 +646,6 @@ where
                     self.timepoint(None),
                     &rerun::StateChange::single(phase),
                 );
-            }
-            if matches!(
-                &*span
-                    .kind
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-                SpanKind::Reaction { .. }
-            ) {
-                if let (Some(enclave), Some(logical_ns)) = (span.enclave.clone(), span.logical_ns) {
-                    self.adapter
-                        .correlation
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .push_reaction(PendingReaction {
-                            id: span.id.clone(),
-                            federate: span.federate.clone(),
-                            enclave,
-                            logical_ns,
-                            microstep: span.microstep.unwrap_or(0),
-                            path: span.path.clone(),
-                            time: span.time,
-                        });
-                }
-                self.reaction_predecessor(&span);
             }
         });
     }
@@ -1296,38 +907,6 @@ where
                     &rerun::StateChange::clear_fields(),
                 );
             }
-            if let SpanKind::Send {
-                destination,
-                destination_federate,
-                action_key,
-                outcome,
-                ..
-            } = kind
-            {
-                if let (Some(logical_ns), Some(microstep)) = (span.logical_ns, span.microstep) {
-                    let key = RouteKey {
-                        federate: destination_federate.or_else(|| span.federate.clone()),
-                        enclave: destination,
-                        action_key,
-                        logical_ns,
-                        microstep,
-                    };
-                    let mut correlation = self
-                        .adapter
-                        .correlation
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    correlation.push_send(
-                        key.clone(),
-                        PendingSend {
-                            id: span.id.clone(),
-                            accepted: outcome.as_deref() == Some("accepted"),
-                        },
-                    );
-                    drop(correlation);
-                    self.correlate(key);
-                }
-            }
         });
     }
 }
@@ -1372,8 +951,17 @@ impl RerunLayer {
                         &["accepted", "ignored_past", "failed"],
                     )?;
                     let enclave = enclave.ok_or("missing or invalid `enclave`")?;
-                    let path = self.path(federate, Some(enclave), "action", &action_key, name);
-                    let archetype = if kind == "logical" {
+                    let accepted_logical = kind == "logical" && outcome == "accepted";
+                    let event_name = if accepted_logical {
+                        "propagation_receive"
+                    } else {
+                        name
+                    };
+                    let path =
+                        self.path(federate, Some(enclave), "action", &action_key, event_name);
+                    let archetype = if accepted_logical {
+                        "boomerang.PropagationReceive"
+                    } else if kind == "logical" {
                         "boomerang.LogicalIngress"
                     } else {
                         "boomerang.PhysicalIngress"
@@ -1382,7 +970,7 @@ impl RerunLayer {
                         archetype,
                         &id,
                         parent_id,
-                        name,
+                        event_name,
                         federate,
                         Some(enclave),
                         Some(logical_ns),
@@ -1413,52 +1001,6 @@ impl RerunLayer {
                         "boomerang.trace.outcome",
                         [outcome.as_str()],
                     );
-                    if kind == "logical" && outcome == "accepted" {
-                        let key = RouteKey {
-                            federate: federate.map(str::to_owned),
-                            enclave: Some(enclave.to_owned()),
-                            action_key: action_key.clone(),
-                            logical_ns,
-                            microstep,
-                        };
-                        let pending = PendingIngress {
-                            id: id.clone(),
-                            path: path.replace("/async_ingress", "/propagation_receive"),
-                            time,
-                            federate: federate.map(str::to_owned),
-                            enclave: enclave.to_owned(),
-                            action_key,
-                            action,
-                            logical_ns,
-                            microstep,
-                            destination_logical_ns,
-                            destination_microstep,
-                            value_type,
-                            value_size,
-                        };
-                        {
-                            let mut correlation = self
-                                .adapter
-                                .correlation
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            correlation.push_ingress(key.clone(), pending.clone());
-                        }
-                        let federated_key = RouteKey {
-                            enclave: None,
-                            ..key.clone()
-                        };
-                        {
-                            let mut correlation = self
-                                .adapter
-                                .correlation
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            correlation.push_ingress(federated_key.clone(), pending);
-                        }
-                        self.correlate(key);
-                        self.correlate(federated_key);
-                    }
                     (path, payload)
                 } else if matches!(kind.as_str(), "shutdown" | "provisional_release") {
                     let enclave = enclave.ok_or("missing or invalid `enclave`")?;

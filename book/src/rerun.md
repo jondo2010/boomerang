@@ -34,13 +34,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 ```
 
-Add `federated` to the Boomerang feature list for a federated model. A direct
-Rerun dependency is needed only when application code names SDK types or builds
-a custom blueprint:
-
-```toml
-rerun = { version = "=0.36.1", default-features = false, features = ["sdk"] }
-```
+Add `federated` to the Boomerang feature list for a federated model.
 
 Register the lowered `RuntimeAssembly` before execution consumes it:
 
@@ -50,7 +44,7 @@ Register the lowered `RuntimeAssembly` before execution consumes it:
 use std::{error::Error, path::PathBuf};
 
 use boomerang::builder::RuntimeAssembly;
-use boomerang::rerun::{RerunSessionBuilder, SinkConfig};
+use boomerang::rerun::RerunSession;
 use boomerang::runtime;
 use tracing_subscriber::prelude::*;
 
@@ -58,9 +52,10 @@ fn run_local(
     parts: RuntimeAssembly,
     config: runtime::Config,
 ) -> Result<(), Box<dyn Error>> {
-    let session = RerunSessionBuilder::new("my-boomerang-model")
-        .sink(SinkConfig::File(PathBuf::from("recording.rrd")))
-        .build()?;
+    let session = RerunSession::save(
+        "my-boomerang-model",
+        PathBuf::from("recording.rrd"),
+    )?;
     session.register_runtime(&parts);
 
     let subscriber = tracing_subscriber::registry().with(session.layer());
@@ -79,22 +74,12 @@ For a federated runtime, registration is identical; enable both features and
 consume the assembly with `execute_federation_in_memory` or
 `execute_federation_over_tcp` inside the subscriber scope.
 
-## Sinks and finalization
+## Finalizing the recording
 
-`SinkConfig::Memory`, `SinkConfig::File(path)`, and nested non-empty
-`SinkConfig::Tee` configurations are supported. Lexically duplicate file paths
-are rejected. Avoid symlink or hard-link aliases to the same destination,
-because validation intentionally does not canonicalize paths.
-
-Treat `session.finish()?` as the success signal for an offline file. It reports
-sink, lifecycle, footer-verification, and earlier observational failures.
-Dropping a session performs only bounded best-effort cleanup and cannot report
-failure.
-
-The gRPC sink is currently rejected as `UnsupportedGrpc`: Rerun 0.36.1 exposes
-blocking behavior that cannot safely be isolated from scheduler callbacks.
-Memory, file, and tee sinks still use the SDK's bounded batching and can apply
-backpressure when saturated.
+Rerun integration is offline-file-first: `RerunSession::save` creates the target
+RRD file and `session.finish()?` finalizes it. Treat a successful `finish` as the
+recording's success signal; it verifies that the finalized RRD footer can be
+decoded and reports earlier recording failures.
 
 ## Opening and checking recordings
 
@@ -123,7 +108,7 @@ The default blueprint provides:
 - **Scheduler phase spans (wall clock)** for entered scheduler activity;
 - **Logical phases and measures** for discrete logical observations;
 - **Event records** for inspecting dense trace archetypes;
-- **Ownership and propagation** for the static hierarchy and causal paths;
+- **Ownership and propagation** for the static runtime topology;
 - **Diagnostics** for malformed annotations or adapter failures.
 
 A recording exposes exactly two axes:
@@ -149,10 +134,9 @@ reactors, reactions, actions, and ports. Actions and ports are owned by their
 reactors; canonical paths remain stable graph IDs while compact labels keep the
 Viewer readable.
 
-Static topology describes possible trigger and propagation relationships.
-Dynamic propagation describes paths actually exercised. When duplicate
-candidates make the exact source ambiguous, the record remains under
-`/propagation/unresolved` rather than receiving a fabricated causal edge.
+Static topology describes possible trigger and propagation relationships. Dense
+dynamic event records separately expose the scheduler annotations observed at
+runtime.
 
 ## Recording privacy
 

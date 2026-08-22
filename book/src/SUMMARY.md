@@ -5,5 +5,6 @@
 - [Quickstart](./quickstart.md)
 - [Modal Reactors](./modal-reactors.md)
 - [Recording and Replay](./replay.md)
+- [Trace Visualization with Rerun](./rerun.md)
 - [Static Federation](./static-federation.md)
 - [Glossary](./glossary.md)

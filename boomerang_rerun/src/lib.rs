@@ -1,4 +1,4 @@
-//! Optional Rerun recording support.
+//! Rerun trace visualization adapter for Boomerang.
 
 mod entities;
 mod layer;

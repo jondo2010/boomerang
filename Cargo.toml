@@ -32,6 +32,7 @@ variadics_please = "1.1"
 
 # Local crates
 boomerang = { path = "boomerang", version = "0.3.0" }
+boomerang_rerun = { path = "boomerang_rerun", version = "0.3.0" }
 boomerang_runtime = { path = "boomerang_runtime", version = "0.3.0" }
 boomerang_tinymap = { path = "boomerang_tinymap", version = "0.3.0" }
 boomerang_util = { path = "boomerang_util", version = "0.3.0" }
@@ -46,6 +47,7 @@ members = [
     "boomerang_builder",
     "boomerang_federated",
     "boomerang_macros",
+    "boomerang_rerun",
     "boomerang_runtime",
     "boomerang_tinymap",
     "examples/snake",

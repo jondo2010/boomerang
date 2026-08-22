@@ -46,7 +46,7 @@
 
 pub mod flatten_transposed;
 #[cfg(feature = "rerun")]
-pub mod rerun;
+pub use boomerang_rerun as rerun;
 #[cfg(feature = "federated")]
 mod static_federation;
 

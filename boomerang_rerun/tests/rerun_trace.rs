@@ -1,9 +1,7 @@
-#![cfg(feature = "rerun")]
-
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use boomerang::rerun::{BlueprintConfig, FlushDriver, RerunSessionBuilder, SinkConfig};
+use boomerang_rerun::{BlueprintConfig, FlushDriver, RerunSessionBuilder, SinkConfig};
 use rerun::external::arrow::array::Array as _;
 use rerun::external::re_log_encoding::Decodable as _;
 use tracing_subscriber::prelude::*;

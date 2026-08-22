@@ -1,0 +1,30 @@
+[package]
+name = "boomerang_rerun"
+description = "Rerun trace visualization adapter for Boomerang."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+exclude.workspace = true
+
+[features]
+default = []
+
+## Static topology registration for federated runtime assemblies
+federated = ["boomerang_builder/federated"]
+
+[dependencies]
+boomerang_builder = { workspace = true }
+boomerang_runtime = { workspace = true }
+boomerang_tinymap = { workspace = true }
+rerun = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

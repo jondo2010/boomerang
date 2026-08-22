@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 
 pub(crate) fn escape_entity_segment(segment: &str) -> String {
     segment.replace('\\', "\\\\").replace('/', "\\/")
@@ -10,6 +11,7 @@ pub(super) struct RegistrationIndex {
     entities: HashMap<RegistrationLookup, RegistrationResolution>,
     federated_entities: HashMap<FederatedRegistrationLookup, RegistrationResolution>,
     action_triggers: HashMap<String, Vec<String>>,
+    display_labels: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -43,6 +45,9 @@ impl RegistrationIndex {
         display_name: &str,
         path: &str,
     ) {
+        self.display_labels
+            .entry(path.to_owned())
+            .or_insert_with(|| runtime_display_label(federate, enclave, display_name, stable_key));
         self.register_identity(federate, enclave, kind, stable_key, path);
         if display_name != stable_key {
             self.register_identity(federate, enclave, kind, display_name, path);
@@ -128,6 +133,10 @@ impl RegistrationIndex {
             .unwrap_or_default()
     }
 
+    pub(super) fn display_label(&self, path: &str) -> Option<&str> {
+        self.display_labels.get(path).map(String::as_str)
+    }
+
     pub(super) fn action_triggers_reaction(
         &self,
         federate: Option<&str>,
@@ -158,7 +167,66 @@ impl RegistrationIndex {
                 }
             }
         }
+        for (path, label) in other.display_labels {
+            self.display_labels.entry(path).or_insert(label);
+        }
     }
+}
+
+pub(super) fn runtime_display_label(
+    federate: Option<&str>,
+    enclave: &str,
+    display_name: &str,
+    stable_key: &str,
+) -> String {
+    let mut parts = Vec::new();
+    if let Some(federate) = federate {
+        parts.push(bounded_fragment(federate, 12));
+    }
+    if !enclave.is_empty() {
+        parts.push(compact_runtime_key(enclave));
+    }
+    let display = bounded_fragment(display_name, 24);
+    let stable = compact_runtime_key(stable_key);
+    parts.push(if display_name == stable_key {
+        display
+    } else {
+        format!("{display}#{stable}")
+    });
+    bounded_fragment(&parts.join(" · "), 64)
+}
+
+pub(super) fn compact_runtime_key(value: &str) -> String {
+    for (prefix, compact) in [
+        ("EnclaveKey(", "E"),
+        ("ReactorKey(", "Rr"),
+        ("ReactionKey(", "R"),
+        ("ActionKey(", "A"),
+        ("PortKey(", "P"),
+    ] {
+        if let Some(index) = value
+            .strip_prefix(prefix)
+            .and_then(|value| value.strip_suffix(')'))
+        {
+            return format!("{compact}{index}");
+        }
+    }
+    bounded_fragment(value, 16)
+}
+
+pub(super) fn bounded_fragment(value: &str, max_chars: usize) -> String {
+    let sanitized = value.replace(['/', '\\'], "›");
+    if sanitized.chars().count() <= max_chars {
+        return sanitized;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    let suffix = format!("~{:04x}", hasher.finish() as u16);
+    let prefix = sanitized
+        .chars()
+        .take(max_chars.saturating_sub(suffix.chars().count()))
+        .collect::<String>();
+    format!("{prefix}{suffix}")
 }
 
 fn register_resolution<K: Eq + std::hash::Hash>(
@@ -213,6 +281,15 @@ pub(super) fn log_runtime_enclaves(
         let scheduler = format!("{root}/scheduler");
         let enclave_path = root.clone();
         let mut nodes = vec![enclave_path.clone(), scheduler.clone()];
+        let mut node_labels = vec![
+            runtime_display_label(
+                federate,
+                &enclave_key.to_string(),
+                &enclave_key.to_string(),
+                &enclave_key.to_string(),
+            ),
+            runtime_display_label(federate, &enclave_key.to_string(), "scheduler", "scheduler"),
+        ];
         let mut edges = vec![(enclave_path.clone(), scheduler.clone(), "owns_scheduler")];
         let enclave_key_string = enclave_key.to_string();
         index.register_in_federate(
@@ -274,6 +351,12 @@ pub(super) fn log_runtime_enclaves(
                 .map(&reactor_path)
                 .unwrap_or_else(|| enclave_path.clone());
             nodes.push(path.clone());
+            node_labels.push(runtime_display_label(
+                federate,
+                &enclave_key_string,
+                reactor.name().rsplit('/').next().unwrap_or(reactor.name()),
+                &key.to_string(),
+            ));
             edges.push((owner_path, path.clone(), "owns_reactor"));
             let owner_key = owner
                 .map(|owner| owner.to_string())
@@ -298,6 +381,12 @@ pub(super) fn log_runtime_enclaves(
             );
             let owner_path = reactor_path(owner);
             nodes.push(path.clone());
+            node_labels.push(runtime_display_label(
+                federate,
+                &enclave_key_string,
+                reaction.get_name(),
+                &key.to_string(),
+            ));
             edges.push((owner_path, path.clone(), "owns_reaction"));
             let owner_key = owner.to_string();
             index.register_in_federate(
@@ -335,6 +424,12 @@ pub(super) fn log_runtime_enclaves(
                 escape_entity_segment(&key.to_string())
             );
             nodes.push(path.clone());
+            node_labels.push(runtime_display_label(
+                federate,
+                &enclave_key_string,
+                action.name(),
+                &key.to_string(),
+            ));
             edges.push((reactor_path(owner), path.clone(), "owns_action"));
             let owner_key = owner.to_string();
             index.register_in_federate(
@@ -374,6 +469,12 @@ pub(super) fn log_runtime_enclaves(
                 escape_entity_segment(&key.to_string())
             );
             nodes.push(path.clone());
+            node_labels.push(runtime_display_label(
+                federate,
+                &enclave_key_string,
+                port.get_name(),
+                &key.to_string(),
+            ));
             edges.push((reactor_path(owner), path.clone(), "owns_port"));
             let owner_key = owner.to_string();
             index.register_in_federate(
@@ -486,7 +587,7 @@ pub(super) fn log_runtime_enclaves(
 
         recording.log_static(
             format!("{root}/topology"),
-            &rerun::GraphNodes::new(nodes.clone()).with_labels(nodes),
+            &rerun::GraphNodes::new(nodes.clone()).with_labels(node_labels),
         )?;
         recording.log_static(
             format!("{root}/topology"),

@@ -51,6 +51,26 @@ fn text_component_at(chunk: &rerun::log::Chunk, suffix: &str, row: usize) -> Opt
 }
 
 #[cfg(feature = "rerun")]
+fn text_components_at(chunk: &rerun::log::Chunk, suffix: &str, row: usize) -> Vec<String> {
+    let Some(descriptor) = chunk
+        .component_descriptors()
+        .find(|descriptor| descriptor.component.as_str().ends_with(suffix))
+    else {
+        return Vec::new();
+    };
+    let Some(Ok(values)) = chunk.component_batch_raw(descriptor.component, row) else {
+        return Vec::new();
+    };
+    let Some(values) = values
+        .as_any()
+        .downcast_ref::<rerun::external::arrow::array::StringArray>()
+    else {
+        return Vec::new();
+    };
+    values.iter().flatten().map(str::to_owned).collect()
+}
+
+#[cfg(feature = "rerun")]
 fn graph_edge_at(chunk: &rerun::log::Chunk, row: usize) -> Option<(String, String)> {
     let descriptor = chunk.component_descriptors().find(|descriptor| {
         descriptor
@@ -292,6 +312,42 @@ fn public_api_runs_static_federation_with_finalized_rrd_trace() {
             .unwrap();
         let chunks = decode_chunks(&messages, Some(rerun::StoreKind::Recording));
 
+        let static_topology = chunks.iter().filter(|chunk| {
+            chunk.entity_path().to_string().ends_with("/topology")
+                || chunk.component_descriptors().any(|descriptor| {
+                    descriptor
+                        .component
+                        .as_str()
+                        .starts_with("boomerang.runtime.")
+                })
+        });
+        let mut static_topology_chunks = 0;
+        let mut graph_labels =
+            std::collections::HashMap::<String, std::collections::HashSet<String>>::new();
+        for chunk in static_topology {
+            static_topology_chunks += 1;
+            assert!(chunk.is_static(), "{} must be static", chunk.entity_path());
+            assert!(chunk.timelines().is_empty());
+            for label in (0..chunk.num_rows())
+                .flat_map(|row| text_components_at(chunk, "GraphNodes:labels", row))
+            {
+                assert!(
+                    !label.contains('/'),
+                    "graph label exposes entity path: {label}"
+                );
+                assert!(label.len() <= 64, "graph label is too long: {label}");
+            }
+            for row in 0..chunk.num_rows() {
+                let ids = text_components_at(chunk, "GraphNodes:node_ids", row);
+                let labels = text_components_at(chunk, "GraphNodes:labels", row);
+                for (id, label) in ids.into_iter().zip(labels) {
+                    graph_labels.entry(label).or_default().insert(id);
+                }
+            }
+        }
+        assert!(static_topology_chunks > 0);
+        assert!(graph_labels.values().all(|ids| ids.len() == 1));
+
         for (label, kind, reactor, child) in [
             (
                 "source output",
@@ -486,18 +542,22 @@ fn public_api_runs_static_federation_with_finalized_rrd_trace() {
         let mut reaction_states = rows(&chunks)
             .filter_map(|(chunk, row)| {
                 (chunk.entity_path() == reaction.entity_path()).then(|| {
-                    let elapsed = chunk
+                    let state = state_change_at(chunk, row)?;
+                    let log_time = chunk
                         .timelines()
                         .values()
-                        .find(|timeline| timeline.name() == "elapsed")?
+                        .find(|timeline| timeline.name() == "log_time")?
                         .times_raw()
                         .get(row)
                         .copied()?;
-                    Some((elapsed, state_change_at(chunk, row)?))
+                    assert!(chunk.timelines().values().all(|timeline| {
+                        timeline.name() != "logical" || timeline.times_raw().get(row).is_none()
+                    }));
+                    Some((log_time, state))
                 })?
             })
             .collect::<Vec<_>>();
-        reaction_states.sort_by_key(|(elapsed, _)| *elapsed);
+        reaction_states.sort_by_key(|(log_time, _)| *log_time);
         let reaction_states = reaction_states
             .into_iter()
             .map(|(_, state)| state)
@@ -508,8 +568,9 @@ fn public_api_runs_static_federation_with_finalized_rrd_trace() {
 
         let blueprint = decode_chunks(&messages, Some(rerun::StoreKind::Blueprint));
         for (name, class) in [
+            ("Scheduler phase spans (wall clock)", "StateTimeline"),
             ("Ownership and propagation", "Graph"),
-            ("Operational measures", "TimeSeries"),
+            ("Logical phases and measures", "TimeSeries"),
         ] {
             assert!(rows(&blueprint).any(|(chunk, row)| {
                 text_component_at(chunk, "ViewBlueprint:display_name", row).as_deref() == Some(name)
@@ -520,8 +581,20 @@ fn public_api_runs_static_federation_with_finalized_rrd_trace() {
         assert!(rows(&blueprint).any(|(chunk, row)| {
             chunk.entity_path().to_string() == "/time_panel"
                 && text_component_at(chunk, "TimePanelBlueprint:timeline", row).as_deref()
-                    == Some("elapsed")
+                    == Some("logical")
         }));
+        let queries = rows(&blueprint)
+            .flat_map(|(chunk, row)| text_components_at(chunk, "ViewContents:query", row))
+            .collect::<Vec<_>>();
+        assert!(
+            queries.iter().any(|query| query.ends_with("/enclaves/**")),
+            "default blueprint must include the complete enclave subtree: {queries:?}"
+        );
+        assert!(queries.iter().any(|query| query == "/propagation/**"));
+        assert!(
+            queries.iter().all(|query| !query.contains("/**/")),
+            "Rerun only supports recursive wildcards as the final path segment: {queries:?}"
+        );
     }
 }
 #[test]

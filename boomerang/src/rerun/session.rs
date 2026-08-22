@@ -1,12 +1,15 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rerun::external::re_log_encoding::Decodable as _;
 use rerun::{RecordingStream, RecordingStreamBuilder};
 
 #[cfg(feature = "federated")]
-use super::entities::{escape_entity_segment, log_runtime_relation, runtime_enclave_root};
+use super::entities::{
+    bounded_fragment, escape_entity_segment, log_runtime_relation, runtime_display_label,
+    runtime_enclave_root,
+};
 use super::entities::{log_runtime_enclaves, RegistrationIndex};
 use super::layer::{AdapterState, RerunLayer, SessionFilter};
 use tracing_subscriber::Layer as _;
@@ -334,6 +337,8 @@ impl RerunSessionBuilder {
             BlueprintConfig::Custom(blueprint) => builder.with_default_blueprint(*blueprint),
         };
         let (recording, initial_memory) = builder.memory()?;
+        recording.set_log_tick_enabled(false);
+        recording.set_log_time_enabled(true);
         let memory = configure_sinks(&recording, sink, initial_memory)?;
         let source_id = self.source_id.unwrap_or_else(|| {
             recording
@@ -369,7 +374,6 @@ impl RerunSessionBuilder {
             flush_timeout: self.flush_timeout,
             lifecycle: Some(lifecycle),
             state,
-            started: Instant::now(),
             adapter: AdapterState::default(),
         })
     }
@@ -387,7 +391,6 @@ pub struct RerunSession {
     flush_timeout: Duration,
     lifecycle: Option<LifecycleWorker>,
     state: SessionState,
-    started: Instant,
     pub(super) adapter: AdapterState,
 }
 
@@ -430,7 +433,6 @@ impl RerunSession {
             self.recording.clone_weak(),
             state.clone(),
             Arc::from(self.source_id.as_str()),
-            self.started,
             self.adapter.clone(),
         )
         .with_filter(SessionFilter::new(state))
@@ -477,10 +479,12 @@ impl RerunSession {
                 if let Some(index) = self.observe_registration(|| {
                     let mut index = RegistrationIndex::default();
                     let mut federation_nodes = Vec::new();
+                    let mut federation_labels = Vec::new();
                     let mut federation_edges = Vec::new();
                     for (id, federate) in federation.federates() {
                         let path = format!("/federates/{}", escape_entity_segment(id.as_str()));
                         federation_nodes.push(path.clone());
+                        federation_labels.push(bounded_fragment(id.as_str(), 24));
                         let entity = rerun::DynamicArchetype::new("boomerang.RuntimeEntity")
                             .with_component::<rerun::components::Text>(
                                 "boomerang.runtime.display_name",
@@ -508,6 +512,12 @@ impl RerunSession {
                                 None,
                             )?;
                             federation_nodes.push(enclave_path.clone());
+                            federation_labels.push(runtime_display_label(
+                                Some(id.as_str()),
+                                &enclave.to_string(),
+                                &enclave.to_string(),
+                                &enclave.to_string(),
+                            ));
                             federation_edges.push((path.clone(), enclave_path));
                         }
                         log_runtime_enclaves(
@@ -540,7 +550,7 @@ impl RerunSession {
                     self.recording.log_static(
                         "/federation/topology",
                         &rerun::GraphNodes::new(federation_nodes.clone())
-                            .with_labels(federation_nodes),
+                            .with_labels(federation_labels),
                     )?;
                     self.recording.log_static(
                         "/federation/topology",
@@ -966,7 +976,7 @@ fn default_blueprint() -> rerun::blueprint::Blueprint {
     };
 
     let roots = ["/enclaves/**", "/federates/**"];
-    let scheduler = StateTimelineView::new("Scheduler phases")
+    let scheduler = StateTimelineView::new("Scheduler phase spans (wall clock)")
         .with_origin("/")
         .with_contents(roots);
     let events = DataframeView::new("Event records")
@@ -975,15 +985,15 @@ fn default_blueprint() -> rerun::blueprint::Blueprint {
     let topology = GraphView::new("Ownership and propagation")
         .with_origin("/")
         .with_contents([
-            "/enclaves/**/topology",
-            "/federates/**/enclaves/**/topology",
-            "/federation/topology",
+            "/enclaves/**",
+            "/federates/**",
+            "/federation/**",
             "/propagation/**",
         ]);
     let diagnostics = TextLogView::new("Diagnostics")
         .with_origin("/diagnostics")
         .with_contents(["/diagnostics/**"]);
-    let measures = TimeSeriesView::new("Operational measures")
+    let measures = TimeSeriesView::new("Logical phases and measures")
         .with_origin("/")
         .with_contents(roots);
 
@@ -1000,7 +1010,7 @@ fn default_blueprint() -> rerun::blueprint::Blueprint {
     )
     .with_auto_views(false)
     .with_auto_layout(false)
-    .with_time_panel(TimePanel::new().with_timeline("elapsed"))
+    .with_time_panel(TimePanel::new().with_timeline("logical"))
 }
 
 impl Drop for RerunSession {

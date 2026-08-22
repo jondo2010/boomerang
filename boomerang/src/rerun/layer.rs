@@ -4,7 +4,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::ThreadId;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Record};
@@ -13,7 +13,9 @@ use tracing_subscriber::layer::{Context, Filter};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 
-use super::entities::{escape_entity_segment, RegistrationIndex};
+use super::entities::{
+    bounded_fragment, compact_runtime_key, escape_entity_segment, RegistrationIndex,
+};
 use super::session::SessionState;
 
 const TRACE_TARGET: &str = "boomerang::trace";
@@ -55,7 +57,6 @@ pub struct RerunLayer {
     recording: rerun::RecordingStream,
     state: SessionState,
     source_id: Arc<str>,
-    started: Instant,
     adapter: AdapterState,
 }
 
@@ -64,6 +65,7 @@ pub(super) struct AdapterState {
     next_id: Arc<AtomicU64>,
     pub(super) registration: Arc<RwLock<RegistrationIndex>>,
     correlation: Arc<Mutex<Correlation>>,
+    named_series: Arc<RwLock<HashSet<String>>>,
 }
 
 impl Default for AdapterState {
@@ -72,6 +74,7 @@ impl Default for AdapterState {
             next_id: Arc::new(AtomicU64::new(0)),
             registration: Arc::new(RwLock::new(RegistrationIndex::default())),
             correlation: Arc::new(Mutex::new(Correlation::default())),
+            named_series: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 }
@@ -81,8 +84,6 @@ struct TraceId(String);
 
 #[derive(Clone, Copy)]
 struct TimePoint {
-    elapsed_ns: i64,
-    wall_clock_ns: i64,
     logical_ns: Option<i64>,
 }
 
@@ -389,14 +390,12 @@ impl RerunLayer {
         recording: rerun::RecordingStream,
         state: SessionState,
         source_id: Arc<str>,
-        started: Instant,
         adapter: AdapterState,
     ) -> Self {
         Self {
             recording,
             state,
             source_id,
-            started,
             adapter,
         }
     }
@@ -425,13 +424,6 @@ impl RerunLayer {
 
     fn timepoint(&self, logical_ns: Option<u64>) -> TimePoint {
         TimePoint {
-            elapsed_ns: saturating_i64(self.started.elapsed().as_nanos()),
-            wall_clock_ns: saturating_i64(
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos(),
-            ),
             logical_ns: logical_ns.and_then(|value| i64::try_from(value).ok()),
         }
     }
@@ -443,14 +435,6 @@ impl RerunLayer {
         self.recording.reset_time();
         let _reset = TimeReset(&self.recording);
         let mut point = rerun::TimePoint::default();
-        point.insert_cell(
-            "elapsed",
-            rerun::TimeCell::from_duration_nanos(time.elapsed_ns),
-        );
-        point.insert_cell(
-            "wall_clock",
-            rerun::TimeCell::from_timestamp_nanos_since_epoch(time.wall_clock_ns),
-        );
         if let Some(logical) = time.logical_ns {
             point.insert_cell("logical", rerun::TimeCell::from_duration_nanos(logical));
         }
@@ -458,6 +442,55 @@ impl RerunLayer {
         if let Err(error) = self.recording.log(path, value) {
             self.state.disable_on_error(&error);
         }
+    }
+
+    fn write_measure(&self, path: &str, time: TimePoint, value: &dyn rerun::AsComponents) {
+        if self
+            .adapter
+            .named_series
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(path)
+        {
+            self.write(path, time, value);
+            return;
+        }
+        let first_measure = self
+            .adapter
+            .named_series
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(path.to_owned());
+        if first_measure {
+            let name = self.compact_series_name(path);
+            if let Err(error) = self
+                .recording
+                .log_static(path, &rerun::SeriesPoints::new().with_names([name]))
+            {
+                self.state.disable_on_error(&error);
+                return;
+            }
+        }
+        self.write(path, time, value);
+    }
+
+    fn compact_series_name(&self, path: &str) -> String {
+        let (entity, event) = path.rsplit_once('/').unwrap_or((path, path));
+        let registered = self
+            .adapter
+            .registration
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .display_label(entity)
+            .map(str::to_owned);
+        let entity = registered.unwrap_or_else(|| {
+            let leaf = entity.rsplit('/').next().unwrap_or(entity);
+            compact_runtime_key(leaf)
+        });
+        bounded_fragment(
+            &format!("{entity} · {}", bounded_fragment(compact_event(event), 16)),
+            64,
+        )
     }
 
     fn diagnostic(&self, event: Option<&str>, error: impl fmt::Display) {
@@ -627,7 +660,7 @@ impl RerunLayer {
             .with_component_from_data("boomerang.trace.value_size", u64_array(ingress.value_size))
             .with_component::<rerun::components::Text>("boomerang.trace.outcome", ["accepted"]);
             let value_size = rerun::Scalars::new([ingress.value_size as f64]);
-            self.write(
+            self.write_measure(
                 &ingress.path,
                 ingress.time,
                 &Combined::new([&receive, &value_size]),
@@ -973,7 +1006,11 @@ where
                 _ => None,
             };
             if let Some(phase) = phase {
-                self.write(&span.path, span.time, &rerun::StateChange::single(phase));
+                self.write(
+                    &span.path,
+                    self.timepoint(None),
+                    &rerun::StateChange::single(phase),
+                );
             }
             if matches!(
                 &*span
@@ -1247,7 +1284,7 @@ where
             };
             {
                 let scalar = rerun::Scalars::new([measure]);
-                self.write(&span.path, span.time, &Combined::new([&payload, &scalar]));
+                self.write_measure(&span.path, span.time, &Combined::new([&payload, &scalar]));
             }
             if matches!(
                 kind,
@@ -1255,7 +1292,7 @@ where
             ) {
                 self.write(
                     &span.path,
-                    self.timepoint(span.logical_ns),
+                    self.timepoint(None),
                     &rerun::StateChange::clear_fields(),
                 );
             }
@@ -1761,7 +1798,7 @@ impl RerunLayer {
         };
         if let Some(scalar) = scalar {
             let measure = rerun::Scalars::new([scalar]);
-            self.write(&path, time, &Combined::new([&payload, &measure]));
+            self.write_measure(&path, time, &Combined::new([&payload, &measure]));
         } else {
             self.write(&path, time, &payload);
         }
@@ -1844,6 +1881,20 @@ fn bool_array(value: bool) -> Arc<dyn rerun::external::arrow::array::Array> {
 }
 fn saturating_i64(value: u128) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn compact_event(event: &str) -> &str {
+    match event {
+        "reaction_execute" => "exec",
+        "propagation_send" => "send",
+        "propagation_receive" => "recv",
+        "action_schedule" => "schedule",
+        "async_ingress" => "ingress",
+        "tag_process" => "tag",
+        "tag_complete" => "tag done",
+        "coordination_wait" => "coord wait",
+        other => other,
+    }
 }
 fn span_state<S>(id: &Id, ctx: &Context<'_, S>) -> Option<Arc<SpanState>>
 where

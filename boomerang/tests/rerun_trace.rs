@@ -32,6 +32,17 @@ fn rows(chunks: &[rerun::log::Chunk]) -> impl Iterator<Item = (&rerun::log::Chun
         .flat_map(|chunk| (0..chunk.num_rows()).map(move |row| (chunk, row)))
 }
 
+fn timeline_names_at(chunk: &rerun::log::Chunk, row: usize) -> Vec<String> {
+    let mut names = chunk
+        .timelines()
+        .values()
+        .filter(|timeline| timeline.times_raw().get(row).is_some())
+        .map(|timeline| timeline.name().to_string())
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
 fn row_has_archetype(chunk: &rerun::log::Chunk, row: usize, expected: &str) -> bool {
     chunk.component_descriptors().any(|descriptor| {
         descriptor
@@ -230,15 +241,26 @@ fn trace_annotations_round_trip_through_finalized_rrd() {
         ]
         .map(|name| format!("boomerang.ReactionExecution:{name}"))
     );
-    for timeline in ["elapsed", "wall_clock", "logical"] {
-        assert!(reaction.timelines().values().any(|column| {
-            column.name() == timeline && column.times_raw().get(reaction_row).is_some()
-        }));
-    }
+    assert_eq!(
+        timeline_names_at(reaction, reaction_row),
+        ["log_time", "logical"]
+    );
     let reaction_id = text_component_at(reaction, reaction_row, ":boomerang.trace.id");
     assert_eq!(
         text_component_at(reaction, reaction_row, ":boomerang.trace.event"),
         "reaction_execute"
+    );
+    let series_name = rows(&chunks)
+        .find_map(|(chunk, row)| {
+            (chunk.is_static() && chunk.entity_path() == reaction.entity_path())
+                .then(|| optional_text_component_at(chunk, row, "SeriesPoints:names"))
+                .flatten()
+        })
+        .expect("static legend alias for reaction measure");
+    assert!(!series_name.contains('/'));
+    assert!(
+        series_name.len() <= 64,
+        "legend alias is too long: {series_name}"
     );
 
     let (action, action_row) = rows(&chunks)
@@ -267,29 +289,30 @@ fn trace_annotations_round_trip_through_finalized_rrd() {
         text_component_at(action, action_row, ":boomerang.trace.parent_id"),
         reaction_id
     );
-    for timeline in ["elapsed", "wall_clock", "logical"] {
-        assert!(action.timelines().values().any(|column| {
-            column.name() == timeline && column.times_raw().get(action_row).is_some()
-        }));
-    }
+    assert_eq!(
+        timeline_names_at(action, action_row),
+        ["log_time", "logical"]
+    );
 
     let mut state_changes = rows(&chunks)
         .filter_map(|(chunk, row)| {
             (chunk.entity_path() == reaction.entity_path())
                 .then(|| {
-                    let elapsed = chunk
+                    let log_time = chunk
                         .timelines()
                         .values()
-                        .find(|timeline| timeline.name() == "elapsed")?
+                        .find(|timeline| timeline.name() == "log_time")?
                         .times_raw()
                         .get(row)
                         .copied()?;
-                    Some((elapsed, state_change_at(chunk, row)?))
+                    let state = state_change_at(chunk, row)?;
+                    assert_eq!(timeline_names_at(chunk, row), ["log_time"]);
+                    Some((log_time, state))
                 })
                 .flatten()
         })
         .collect::<Vec<_>>();
-    state_changes.sort_by_key(|(elapsed, _)| *elapsed);
+    state_changes.sort_by_key(|(log_time, _)| *log_time);
     assert_eq!(
         state_changes
             .into_iter()

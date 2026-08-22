@@ -59,70 +59,40 @@ struct Args {
     replay_filename: Option<std::path::PathBuf>,
 }
 
-struct TracingSession {
+fn with_tracing<T>(
+    name: &str,
+    args: &Args,
+    run: impl FnOnce(&dyn Fn(&boomerang::builder::RuntimeAssembly)) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let fmt = || {
+        tracing_subscriber::fmt::layer().with_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+    };
+
     #[cfg(feature = "rerun")]
-    rerun: Option<boomerang::rerun::RerunSession>,
-}
-
-impl TracingSession {
-    fn new(name: &str, args: &Args) -> anyhow::Result<Self> {
-        #[cfg(not(feature = "rerun"))]
-        let _ = (name, args);
-
-        #[cfg(feature = "rerun")]
-        let rerun = if args.rerun {
-            let path = diagram_output_path(name, "rrd")?;
-            Some(
-                boomerang::rerun::RerunSessionBuilder::new(name)
-                    .sink(boomerang::rerun::SinkConfig::File(path))
-                    .build()?,
-            )
-        } else {
-            None
-        };
-
-        Ok(Self {
-            #[cfg(feature = "rerun")]
-            rerun,
-        })
+    if args.rerun {
+        let path = diagram_output_path(name, "rrd")?;
+        let rerun = boomerang::rerun::RerunSessionBuilder::new(name)
+            .sink(boomerang::rerun::SinkConfig::File(path))
+            .build()?;
+        let subscriber = tracing_subscriber::registry()
+            .with(fmt())
+            .with(rerun.layer());
+        let result = tracing::subscriber::with_default(subscriber, || {
+            run(&|runtime| rerun.register_runtime(runtime))
+        });
+        let finish = rerun.finish();
+        let result = result?;
+        finish?;
+        return Ok(result);
     }
 
-    fn register_runtime(&self, runtime: &boomerang::builder::RuntimeAssembly) {
-        #[cfg(not(feature = "rerun"))]
-        let _ = runtime;
+    #[cfg(not(feature = "rerun"))]
+    let _ = (name, args);
 
-        #[cfg(feature = "rerun")]
-        if let Some(rerun) = &self.rerun {
-            rerun.register_runtime(runtime);
-        }
-    }
-
-    fn with_default<T>(&self, run: impl FnOnce() -> T) -> T {
-        let fmt = || {
-            tracing_subscriber::fmt::layer().with_filter(
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-            )
-        };
-
-        #[cfg(feature = "rerun")]
-        if let Some(rerun) = &self.rerun {
-            let subscriber = tracing_subscriber::registry()
-                .with(fmt())
-                .with(rerun.layer());
-            return tracing::subscriber::with_default(subscriber, run);
-        }
-
-        let subscriber = tracing_subscriber::registry().with(fmt());
-        tracing::subscriber::with_default(subscriber, run)
-    }
-
-    fn finish(self) -> anyhow::Result<()> {
-        #[cfg(feature = "rerun")]
-        if let Some(rerun) = self.rerun {
-            rerun.finish()?;
-        }
-        Ok(())
-    }
+    let subscriber = tracing_subscriber::registry().with(fmt());
+    tracing::subscriber::with_default(subscriber, || run(&|_| {}))
 }
 
 fn sanitize_diagram_stem(name: &str) -> String {
@@ -163,8 +133,7 @@ pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
     config: runtime::Config,
 ) -> anyhow::Result<(R::Ports, Vec<runtime::Env>)> {
     let args = Args::parse_from(["boomerang-test"]);
-    let tracing = TracingSession::new(name, &args)?;
-    let result: anyhow::Result<(R::Ports, Vec<runtime::Env>)> = tracing.with_default(|| {
+    with_tracing(name, &args, |register_runtime| {
         let mut assembly = Assembly::new();
         let reactor = reactor
             .build(
@@ -191,18 +160,14 @@ pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
         let runtime = assembly
             .into_runtime_assembly(&config)
             .context("Error lowering assembly!")?;
-        tracing.register_runtime(&runtime);
+        register_runtime(&runtime);
         let enclaves = runtime
             .into_local()
             .context("generic test runner cannot execute a Federation")?;
         let envs_out = runtime::execute_enclaves(enclaves.into_iter(), config)?;
         let envs_out = envs_out.into_iter().map(|(_, env)| env).collect();
         Ok((reactor, envs_out))
-    });
-    let finish = tracing.finish();
-    let result = result?;
-    finish?;
-    Ok(result)
+    })
 }
 
 /// Utility method to build and run a given top-level `Reactor` locally (non-federated or enclaved).
@@ -227,8 +192,7 @@ where
     R: Reactor<S>,
 {
     let args = Args::parse();
-    let tracing = TracingSession::new(name, &args)?;
-    let result: anyhow::Result<R::Ports> = tracing.with_default(|| {
+    with_tracing(name, &args, |register_runtime| {
         // build the reactor
         let mut assembly = Assembly::new();
         let reactor = reactor
@@ -277,7 +241,7 @@ where
         let runtime = assembly
             .into_runtime_assembly(&config)
             .context("Error lowering assembly!")?;
-        tracing.register_runtime(&runtime);
+        register_runtime(&runtime);
         let enclaves = runtime
             .into_local()
             .context("generic local runner cannot execute a Federation")?;
@@ -290,7 +254,7 @@ where
         }
 
         #[cfg(feature = "replay")]
-        let replay_handle = match args.replay_filename {
+        let replay_handle = match &args.replay_filename {
             Some(filename) => {
                 tracing::info!("Reading replay from {}", filename.display());
                 let enclave_keys = enclaves.keys().collect::<Vec<_>>();
@@ -320,9 +284,5 @@ where
         }
 
         Ok(reactor)
-    });
-    let finish = tracing.finish();
-    let result = result?;
-    finish?;
-    Ok(result)
+    })
 }

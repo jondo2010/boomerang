@@ -1,8 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::{Arc, Mutex, RwLock};
-use std::thread::ThreadId;
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use tracing::field::{Field, Visit};
@@ -59,14 +58,14 @@ pub(super) struct RerunLayer {
 
 #[derive(Clone)]
 pub(super) struct AdapterState {
-    pub(super) registration: Arc<RwLock<RegistrationSnapshot>>,
+    pub(super) registration: Arc<OnceLock<RegistrationSnapshot>>,
     named_series: Arc<RwLock<HashSet<String>>>,
 }
 
 impl Default for AdapterState {
     fn default() -> Self {
         Self {
-            registration: Arc::new(RwLock::new(RegistrationSnapshot::default())),
+            registration: Arc::new(OnceLock::new()),
             named_series: Arc::new(RwLock::new(HashSet::new())),
         }
     }
@@ -77,7 +76,6 @@ struct TimePoint {
     logical_ns: Option<i64>,
 }
 
-#[derive(Clone)]
 enum SpanKind {
     Scheduler {
         state: String,
@@ -104,20 +102,71 @@ enum SpanKind {
         action: String,
         value_type: String,
         value_size: u64,
-        outcome: Option<String>,
+        outcome: OnceLock<String>,
     },
 }
 
 struct SpanState {
-    federate: Option<String>,
-    enclave: Option<String>,
-    logical_ns: Option<u64>,
-    microstep: Option<u64>,
+    context: SpanContext,
     path: String,
     entity_label: Option<String>,
     time: TimePoint,
     timing: Mutex<SpanTiming>,
-    kind: Mutex<SpanKind>,
+    kind: SpanKind,
+}
+
+#[derive(Clone)]
+struct SpanContext {
+    location: Location,
+    tag: Option<LogicalTag>,
+}
+
+#[derive(Clone)]
+struct Location {
+    federate: Option<String>,
+    enclave: String,
+}
+
+#[derive(Clone, Copy)]
+struct LogicalTag {
+    logical_ns: u64,
+    microstep: u64,
+}
+
+impl SpanContext {
+    fn untimed(federate: Option<String>, enclave: String) -> Self {
+        Self {
+            location: Location { federate, enclave },
+            tag: None,
+        }
+    }
+
+    fn logical(federate: Option<String>, enclave: String, tag: LogicalTag) -> Self {
+        Self {
+            location: Location { federate, enclave },
+            tag: Some(tag),
+        }
+    }
+
+    fn federate(&self) -> Option<&str> {
+        self.location.federate.as_deref()
+    }
+
+    fn enclave(&self) -> &str {
+        &self.location.enclave
+    }
+
+    fn tag(&self) -> Option<LogicalTag> {
+        self.tag
+    }
+
+    fn logical_ns(&self) -> Option<u64> {
+        self.tag().map(|tag| tag.logical_ns)
+    }
+
+    fn microstep(&self) -> Option<u64> {
+        self.tag().map(|tag| tag.microstep)
+    }
 }
 
 struct ResolvedPath {
@@ -127,30 +176,20 @@ struct ResolvedPath {
 
 #[derive(Default)]
 struct SpanTiming {
-    entered: HashMap<ThreadId, Vec<Instant>>,
+    started: Option<Instant>,
     total: Duration,
 }
 
 impl SpanTiming {
     fn enter(&mut self) {
-        self.entered
-            .entry(std::thread::current().id())
-            .or_default()
-            .push(Instant::now());
+        if self.started.is_none() {
+            self.started = Some(Instant::now());
+        }
     }
 
     fn exit(&mut self) {
-        let thread = std::thread::current().id();
-        let (started, empty) = self
-            .entered
-            .get_mut(&thread)
-            .map(|stack| (stack.pop(), stack.is_empty()))
-            .unwrap_or((None, false));
-        if empty {
-            self.entered.remove(&thread);
-            if let Some(started) = started {
-                self.total += started.elapsed();
-            }
+        if let Some(started) = self.started.take() {
+            self.total += started.elapsed();
         }
     }
 }
@@ -341,21 +380,39 @@ impl RerunLayer {
         );
     }
 
-    fn context<S>(
+    fn with_context<S, T>(
         &self,
         ctx: &Context<'_, S>,
         explicit_parent: Option<&Id>,
         contextual: bool,
-    ) -> Option<Arc<SpanState>>
+        callback: impl FnOnce(Option<&SpanState>) -> T,
+    ) -> T
     where
         S: Subscriber + for<'a> LookupSpan<'a>,
     {
-        match explicit_parent {
-            Some(id) => span_state(id, ctx),
-            None if contextual => ctx
-                .lookup_current()
-                .and_then(|span| span.extensions().get::<Arc<SpanState>>().cloned()),
+        let parent = match explicit_parent {
+            Some(id) => ctx.span(id),
+            None if contextual => ctx.lookup_current(),
             None => None,
+        };
+        let Some(parent) = parent else {
+            return callback(None);
+        };
+        let extensions = parent.extensions();
+        callback(extensions.get::<SpanState>())
+    }
+
+    fn inherited_tag(
+        fields: &CallbackFields,
+        inherited: Option<LogicalTag>,
+    ) -> Result<Option<LogicalTag>, String> {
+        match (fields.u64("logical_ns"), fields.u64("microstep")) {
+            (Some(logical_ns), Some(microstep)) => Ok(Some(LogicalTag {
+                logical_ns,
+                microstep,
+            })),
+            (None, None) => Ok(inherited),
+            _ => Err("`logical_ns` and `microstep` must be recorded together".into()),
         }
     }
 
@@ -368,12 +425,11 @@ impl RerunLayer {
         event: &str,
     ) -> ResolvedPath {
         let registered = enclave.and_then(|enclave| {
-            self.adapter
-                .registration
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .resolve(federate, enclave, kind, identity)
-                .map(|entity| (entity.path.clone(), entity.label.clone()))
+            self.adapter.registration.get().and_then(|registration| {
+                registration
+                    .resolve(federate, enclave, kind, identity)
+                    .map(|entity| (entity.path.clone(), entity.label.clone()))
+            })
         });
         if let Some((path, label)) = registered {
             ResolvedPath {
@@ -412,21 +468,25 @@ where
                 self.diagnostic(None, "missing or invalid `event`");
                 return;
             };
-            let parent = self.context(&ctx, attrs.parent(), attrs.is_contextual());
-            let federate = fields
-                .text("federate")
-                .map(str::to_owned)
-                .or_else(|| parent.as_ref().and_then(|p| p.federate.clone()));
+            let parent = self.with_context(&ctx, attrs.parent(), attrs.is_contextual(), |parent| {
+                parent.map(|span| span.context.clone())
+            });
+            let federate = fields.text("federate").map(str::to_owned).or_else(|| {
+                parent
+                    .as_ref()
+                    .and_then(|context| context.federate().map(str::to_owned))
+            });
             let enclave = fields
                 .text("enclave")
                 .map(str::to_owned)
-                .or_else(|| parent.as_ref().and_then(|p| p.enclave.clone()));
-            let logical_ns = fields
-                .u64("logical_ns")
-                .or_else(|| parent.as_ref().and_then(|p| p.logical_ns));
-            let microstep = fields
-                .u64("microstep")
-                .or_else(|| parent.as_ref().and_then(|p| p.microstep));
+                .or_else(|| parent.as_ref().map(|context| context.enclave().to_owned()));
+            let tag = match Self::inherited_tag(&fields, parent.and_then(|context| context.tag())) {
+                Ok(tag) => tag,
+                Err(error) => {
+                    self.diagnostic(Some(&event), error);
+                    return;
+                }
+            };
             let built = (|| -> Result<(SpanKind, &'static str, String), String> {
                 Ok(match event.as_str() {
                     "scheduler_thread" => (
@@ -483,16 +543,16 @@ where
                             (None, None) => return Err("missing propagation destination".into()),
                             _ => return Err("ambiguous propagation destination".into()),
                         }
-                        if kind == "logical" {
-                            logical_ns.ok_or("missing or invalid `logical_ns`")?;
-                            microstep.ok_or("missing or invalid `microstep`")?;
-                        }
-                        let outcome = fields
+                        let initial_outcome = fields
                             .text("outcome")
                             .map(|_| {
                                 required_discriminator(&fields, "outcome", &["accepted", "failed"])
                             })
                             .transpose()?;
+                        let outcome = OnceLock::new();
+                        if let Some(initial_outcome) = initial_outcome {
+                            let _ = outcome.set(initial_outcome);
+                        }
                         let action_key = fields.required_text("action_key")?;
                         (
                             SpanKind::Send {
@@ -521,83 +581,84 @@ where
                     return;
                 }
             };
-            match &kind {
-                SpanKind::Scheduler { .. } => {
-                    if enclave.is_none() {
-                        self.diagnostic(Some(&event), "missing or invalid `enclave`");
-                        return;
-                    }
-                }
+            let Some(enclave) = enclave else {
+                let error = if matches!(kind, SpanKind::Send { .. }) {
+                    "missing or invalid source enclave"
+                } else {
+                    "missing or invalid `enclave`"
+                };
+                self.diagnostic(Some(&event), error);
+                return;
+            };
+            let context = match &kind {
                 SpanKind::Tag { .. } | SpanKind::Reaction { .. } | SpanKind::Wait { .. } => {
-                    if enclave.is_none() || logical_ns.is_none() || microstep.is_none() {
-                        self.diagnostic(Some(&event), "missing enclave or logical tag context");
+                    let Some(tag) = tag else {
+                        self.diagnostic(Some(&event), "missing logical tag context");
                         return;
-                    }
+                    };
+                    SpanContext::logical(federate, enclave, tag)
                 }
-                SpanKind::Send { .. } => {
-                    if enclave.is_none() {
-                        self.diagnostic(Some(&event), "missing or invalid source enclave");
+                SpanKind::Send { kind, .. } if kind == "logical" => {
+                    let Some(tag) = tag else {
+                        self.diagnostic(Some(&event), "missing logical tag context");
                         return;
-                    }
+                    };
+                    SpanContext::logical(federate, enclave, tag)
                 }
-            }
+                SpanKind::Scheduler { .. } | SpanKind::Send { .. } => {
+                    SpanContext::untimed(federate, enclave)
+                }
+            };
             let resolved_path = self.path(
-                federate.as_deref(),
-                enclave.as_deref(),
+                context.federate(),
+                Some(context.enclave()),
                 entity_kind,
                 &identity,
                 &event,
             );
-            let span = Arc::new(SpanState {
-                federate,
-                enclave,
-                logical_ns,
-                microstep,
-                path: resolved_path.path,
-                entity_label: resolved_path.entity_label,
-                time: self.timepoint(logical_ns),
-                timing: Mutex::new(SpanTiming::default()),
-                kind: Mutex::new(kind),
-            });
-            if let Some(scope) = ctx.span(id) {
-                scope.extensions_mut().insert(span.clone());
-            }
-            let phase = match &*span
-                .kind
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-            {
+            let phase = match &kind {
                 SpanKind::Tag { .. } => Some("processing tag"),
                 SpanKind::Reaction { .. } => Some("executing reaction"),
                 SpanKind::Wait { .. } => Some("waiting for coordination"),
                 _ => None,
             };
+            let span = SpanState {
+                time: self.timepoint(context.logical_ns()),
+                context,
+                path: resolved_path.path,
+                entity_label: resolved_path.entity_label,
+                timing: Mutex::new(SpanTiming::default()),
+                kind,
+            };
+            if let Some(scope) = ctx.span(id) {
+                scope.extensions_mut().insert(span);
+            }
             if let Some(phase) = phase {
-                self.write(
-                    &span.path,
-                    self.timepoint(None),
-                    &rerun::StateChange::single(phase),
-                );
+                let _ = with_span_state(id, &ctx, |span| {
+                    self.write(
+                        &span.path,
+                        self.timepoint(None),
+                        &rerun::StateChange::single(phase),
+                    );
+                });
             }
         });
     }
 
     fn on_record(&self, id: &Id, values: &Record<'_>, ctx: Context<'_, S>) {
         self.isolate(|| {
-            let Some(span) = span_state(id, &ctx) else {
-                return;
-            };
             let mut fields = CallbackFields::default();
             values.record(&mut fields);
             if let Some(outcome) = fields.text("outcome") {
-                if let SpanKind::Send {
-                    outcome: current, ..
-                } = &mut *span
-                    .kind
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                {
-                    *current = Some(outcome.to_owned());
+                let duplicate = with_span_state(id, &ctx, |span| match &span.kind {
+                    SpanKind::Send {
+                        outcome: current, ..
+                    } => current.set(outcome.to_owned()).is_err(),
+                    _ => false,
+                })
+                .unwrap_or(false);
+                if duplicate {
+                    self.diagnostic(Some("propagation_send"), "duplicate `outcome` record");
                 }
             }
         });
@@ -611,8 +672,10 @@ where
                 self.diagnostic(None, "missing or invalid `event`");
                 return;
             };
-            let parent = self.context(&ctx, event.parent(), event.is_contextual());
-            if let Err(error) = self.emit_event(&name, &fields, parent.as_deref()) {
+            let result = self.with_context(&ctx, event.parent(), event.is_contextual(), |parent| {
+                self.emit_event(&name, &fields, parent)
+            });
+            if let Err(error) = result {
                 self.diagnostic(Some(&name), error);
             }
         });
@@ -620,220 +683,221 @@ where
 
     fn on_enter(&self, id: &Id, ctx: Context<'_, S>) {
         self.isolate(|| {
-            if let Some(span) = span_state(id, &ctx) {
+            let _ = with_span_state(id, &ctx, |span| {
                 span.timing
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .enter();
-            }
+            });
         });
     }
 
     fn on_exit(&self, id: &Id, ctx: Context<'_, S>) {
         self.isolate(|| {
-            if let Some(span) = span_state(id, &ctx) {
+            let _ = with_span_state(id, &ctx, |span| {
                 span.timing
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .exit();
-            }
+            });
         });
     }
 
     fn on_close(&self, id: Id, ctx: Context<'_, S>) {
         self.isolate(|| {
-            let Some(span) = span_state(&id, &ctx) else {
-                return;
-            };
-            let duration = saturating_i64(
-                span.timing
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .total
-                    .as_nanos(),
-            ) as u64;
-            let kind = span
-                .kind
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            if let SpanKind::Send { outcome, .. } = &kind {
-                match outcome.as_deref() {
-                    Some("accepted" | "failed") => {}
-                    Some(outcome) => {
-                        self.diagnostic(
-                            Some("propagation_send"),
-                            format!("invalid `outcome` discriminator `{outcome}`"),
-                        );
-                        return;
-                    }
-                    None => {
-                        self.diagnostic(Some("propagation_send"), "missing or invalid `outcome`");
-                        return;
+            let _ = with_span_state(&id, &ctx, |span| {
+                let duration = saturating_i64(
+                    span.timing
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .total
+                        .as_nanos(),
+                ) as u64;
+                let kind = &span.kind;
+                if let SpanKind::Send { outcome, .. } = kind {
+                    match outcome.get().map(String::as_str) {
+                        Some("accepted" | "failed") => {}
+                        Some(outcome) => {
+                            self.diagnostic(
+                                Some("propagation_send"),
+                                format!("invalid `outcome` discriminator `{outcome}`"),
+                            );
+                            return;
+                        }
+                        None => {
+                            self.diagnostic(
+                                Some("propagation_send"),
+                                "missing or invalid `outcome`",
+                            );
+                            return;
+                        }
                     }
                 }
-            }
-            let mut payload = match &kind {
-                SpanKind::Scheduler { state } => common(
-                    "boomerang.SchedulerRunning",
-                    "scheduler_thread",
-                    span.federate.as_deref(),
-                    span.enclave.as_deref(),
-                    None,
-                    None,
-                )
-                .with_component::<rerun::components::Text>(
-                    "boomerang.trace.state",
-                    [state.as_str()],
-                ),
-                SpanKind::Tag { terminal, state } => common(
-                    "boomerang.TagProcessing",
-                    "tag_process",
-                    span.federate.as_deref(),
-                    span.enclave.as_deref(),
-                    span.logical_ns,
-                    span.microstep,
-                )
-                .with_component_from_data("boomerang.trace.terminal", bool_array(*terminal))
-                .with_component::<rerun::components::Text>(
-                    "boomerang.trace.state",
-                    [state.as_str()],
-                ),
-                SpanKind::Reaction {
-                    reactor,
-                    reaction_key,
-                    reaction,
-                    level,
-                    state,
-                } => {
-                    let mut value = common(
-                        "boomerang.ReactionExecution",
-                        "reaction_execute",
-                        span.federate.as_deref(),
-                        span.enclave.as_deref(),
-                        span.logical_ns,
-                        span.microstep,
+                let mut payload = match kind {
+                    SpanKind::Scheduler { state } => common(
+                        "boomerang.SchedulerRunning",
+                        "scheduler_thread",
+                        span.context.federate(),
+                        Some(span.context.enclave()),
+                        None,
+                        None,
                     )
                     .with_component::<rerun::components::Text>(
-                        "boomerang.trace.reactor",
-                        [reactor.as_str()],
+                        "boomerang.trace.state",
+                        [state.as_str()],
+                    ),
+                    SpanKind::Tag { terminal, state } => common(
+                        "boomerang.TagProcessing",
+                        "tag_process",
+                        span.context.federate(),
+                        Some(span.context.enclave()),
+                        span.context.logical_ns(),
+                        span.context.microstep(),
+                    )
+                    .with_component_from_data("boomerang.trace.terminal", bool_array(*terminal))
+                    .with_component::<rerun::components::Text>(
+                        "boomerang.trace.state",
+                        [state.as_str()],
+                    ),
+                    SpanKind::Reaction {
+                        reactor,
+                        reaction_key,
+                        reaction,
+                        level,
+                        state,
+                    } => {
+                        let mut value = common(
+                            "boomerang.ReactionExecution",
+                            "reaction_execute",
+                            span.context.federate(),
+                            Some(span.context.enclave()),
+                            span.context.logical_ns(),
+                            span.context.microstep(),
+                        )
+                        .with_component::<rerun::components::Text>(
+                            "boomerang.trace.reactor",
+                            [reactor.as_str()],
+                        );
+                        if let Some(key) = reaction_key {
+                            value = value.with_component::<rerun::components::Text>(
+                                "boomerang.trace.reaction_key",
+                                [key.as_str()],
+                            );
+                        }
+                        value
+                            .with_component::<rerun::components::Text>(
+                                "boomerang.trace.reaction",
+                                [reaction.as_str()],
+                            )
+                            .with_component_from_data("boomerang.trace.level", u64_array(*level))
+                            .with_component::<rerun::components::Text>(
+                                "boomerang.trace.state",
+                                [state.as_str()],
+                            )
+                    }
+                    SpanKind::Wait { state } => common(
+                        "boomerang.CoordinationWait",
+                        "coordination_wait",
+                        span.context.federate(),
+                        Some(span.context.enclave()),
+                        span.context.logical_ns(),
+                        span.context.microstep(),
+                    )
+                    .with_component::<rerun::components::Text>(
+                        "boomerang.trace.state",
+                        [state.as_str()],
+                    ),
+                    SpanKind::Send {
+                        kind,
+                        destination,
+                        destination_federate,
+                        action_key,
+                        action,
+                        value_type,
+                        value_size,
+                        outcome,
+                    } => {
+                        let archetype = if destination_federate.is_some() {
+                            "boomerang.PropagationSerializedSend"
+                        } else if kind == "physical" {
+                            "boomerang.PropagationPhysicalSend"
+                        } else {
+                            "boomerang.PropagationLogicalSend"
+                        };
+                        let mut value = common(
+                            archetype,
+                            "propagation_send",
+                            span.context.federate(),
+                            Some(span.context.enclave()),
+                            span.context.logical_ns(),
+                            span.context.microstep(),
+                        )
+                        .with_component::<rerun::components::Text>(
+                            "boomerang.trace.action_key",
+                            [action_key.as_str()],
+                        )
+                        .with_component::<rerun::components::Text>(
+                            "boomerang.trace.action",
+                            [action.as_str()],
+                        )
+                        .with_component::<rerun::components::Text>(
+                            "boomerang.trace.value_type",
+                            [value_type.as_str()],
+                        )
+                        .with_component_from_data(
+                            "boomerang.trace.value_size",
+                            u64_array(*value_size),
+                        );
+                        if let Some(destination) = destination {
+                            value = value.with_component::<rerun::components::Text>(
+                                "boomerang.trace.destination",
+                                [destination.as_str()],
+                            );
+                        }
+                        if let Some(destination) = destination_federate {
+                            value = value.with_component::<rerun::components::Text>(
+                                "boomerang.trace.destination_federate",
+                                [destination.as_str()],
+                            );
+                        }
+                        if let Some(outcome) = outcome.get() {
+                            value = value.with_component::<rerun::components::Text>(
+                                "boomerang.trace.outcome",
+                                [outcome.as_str()],
+                            );
+                        }
+                        value
+                    }
+                };
+                payload = payload
+                    .with_component_from_data("boomerang.trace.duration_ns", u64_array(duration));
+                let measure = match kind {
+                    SpanKind::Send { value_size, .. } => *value_size as f64,
+                    SpanKind::Tag { terminal, .. } => u8::from(*terminal) as f64,
+                    SpanKind::Scheduler { .. }
+                    | SpanKind::Reaction { .. }
+                    | SpanKind::Wait { .. } => duration as f64,
+                };
+                {
+                    let scalar = rerun::Scalars::new([measure]);
+                    self.write_measure(
+                        &span.path,
+                        span.entity_label.as_deref(),
+                        span.time,
+                        &Combined::new([&payload, &scalar]),
                     );
-                    if let Some(key) = reaction_key {
-                        value = value.with_component::<rerun::components::Text>(
-                            "boomerang.trace.reaction_key",
-                            [key.as_str()],
-                        );
-                    }
-                    value
-                        .with_component::<rerun::components::Text>(
-                            "boomerang.trace.reaction",
-                            [reaction.as_str()],
-                        )
-                        .with_component_from_data("boomerang.trace.level", u64_array(*level))
-                        .with_component::<rerun::components::Text>(
-                            "boomerang.trace.state",
-                            [state.as_str()],
-                        )
                 }
-                SpanKind::Wait { state } => common(
-                    "boomerang.CoordinationWait",
-                    "coordination_wait",
-                    span.federate.as_deref(),
-                    span.enclave.as_deref(),
-                    span.logical_ns,
-                    span.microstep,
-                )
-                .with_component::<rerun::components::Text>(
-                    "boomerang.trace.state",
-                    [state.as_str()],
-                ),
-                SpanKind::Send {
+                if matches!(
                     kind,
-                    destination,
-                    destination_federate,
-                    action_key,
-                    action,
-                    value_type,
-                    value_size,
-                    outcome,
-                } => {
-                    let archetype = if destination_federate.is_some() {
-                        "boomerang.PropagationSerializedSend"
-                    } else if kind == "physical" {
-                        "boomerang.PropagationPhysicalSend"
-                    } else {
-                        "boomerang.PropagationLogicalSend"
-                    };
-                    let mut value = common(
-                        archetype,
-                        "propagation_send",
-                        span.federate.as_deref(),
-                        span.enclave.as_deref(),
-                        span.logical_ns,
-                        span.microstep,
-                    )
-                    .with_component::<rerun::components::Text>(
-                        "boomerang.trace.action_key",
-                        [action_key.as_str()],
-                    )
-                    .with_component::<rerun::components::Text>(
-                        "boomerang.trace.action",
-                        [action.as_str()],
-                    )
-                    .with_component::<rerun::components::Text>(
-                        "boomerang.trace.value_type",
-                        [value_type.as_str()],
-                    )
-                    .with_component_from_data("boomerang.trace.value_size", u64_array(*value_size));
-                    if let Some(destination) = destination {
-                        value = value.with_component::<rerun::components::Text>(
-                            "boomerang.trace.destination",
-                            [destination.as_str()],
-                        );
-                    }
-                    if let Some(destination) = destination_federate {
-                        value = value.with_component::<rerun::components::Text>(
-                            "boomerang.trace.destination_federate",
-                            [destination.as_str()],
-                        );
-                    }
-                    if let Some(outcome) = outcome {
-                        value = value.with_component::<rerun::components::Text>(
-                            "boomerang.trace.outcome",
-                            [outcome.as_str()],
-                        );
-                    }
-                    value
+                    SpanKind::Tag { .. } | SpanKind::Reaction { .. } | SpanKind::Wait { .. }
+                ) {
+                    self.write(
+                        &span.path,
+                        self.timepoint(None),
+                        &rerun::StateChange::clear_fields(),
+                    );
                 }
-            };
-            payload = payload
-                .with_component_from_data("boomerang.trace.duration_ns", u64_array(duration));
-            let measure = match &kind {
-                SpanKind::Send { value_size, .. } => *value_size as f64,
-                SpanKind::Tag { terminal, .. } => u8::from(*terminal) as f64,
-                SpanKind::Scheduler { .. } | SpanKind::Reaction { .. } | SpanKind::Wait { .. } => {
-                    duration as f64
-                }
-            };
-            {
-                let scalar = rerun::Scalars::new([measure]);
-                self.write_measure(
-                    &span.path,
-                    span.entity_label.as_deref(),
-                    span.time,
-                    &Combined::new([&payload, &scalar]),
-                );
-            }
-            if matches!(
-                kind,
-                SpanKind::Tag { .. } | SpanKind::Reaction { .. } | SpanKind::Wait { .. }
-            ) {
-                self.write(
-                    &span.path,
-                    self.timepoint(None),
-                    &rerun::StateChange::clear_fields(),
-                );
-            }
+            });
         });
     }
 }
@@ -847,16 +911,16 @@ impl RerunLayer {
     ) -> Result<(), String> {
         let federate = f
             .text("federate")
-            .or_else(|| parent.and_then(|p| p.federate.as_deref()));
+            .or_else(|| parent.and_then(|p| p.context.federate()));
         let enclave = f
             .text("enclave")
-            .or_else(|| parent.and_then(|p| p.enclave.as_deref()));
+            .or_else(|| parent.map(|p| p.context.enclave()));
         let logical = f
             .u64("logical_ns")
-            .or_else(|| parent.and_then(|p| p.logical_ns));
+            .or_else(|| parent.and_then(|p| p.context.logical_ns()));
         let microstep = f
             .u64("microstep")
-            .or_else(|| parent.and_then(|p| p.microstep));
+            .or_else(|| parent.and_then(|p| p.context.microstep()));
         let time = self.timepoint(logical);
         let (path, payload) = match name {
             "async_ingress" => {
@@ -1039,13 +1103,7 @@ impl RerunLayer {
             }
             "port_write" => {
                 if !matches!(
-                    parent.map(|parent| {
-                        parent
-                            .kind
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .clone()
-                    }),
+                    parent.map(|parent| &parent.kind),
                     Some(SpanKind::Reaction { .. })
                 ) {
                     return Err("missing reaction span context".into());
@@ -1085,12 +1143,8 @@ impl RerunLayer {
                     reaction_key,
                     reaction,
                     ..
-                }) = parent.map(|p| {
-                    p.kind
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .clone()
-                }) {
+                }) = parent.map(|parent| &parent.kind)
+                {
                     payload = payload
                         .with_component::<rerun::components::Text>(
                             "boomerang.trace.reactor",
@@ -1337,9 +1391,15 @@ fn compact_event(event: &str) -> &str {
         other => other,
     }
 }
-fn span_state<S>(id: &Id, ctx: &Context<'_, S>) -> Option<Arc<SpanState>>
+fn with_span_state<S, T>(
+    id: &Id,
+    ctx: &Context<'_, S>,
+    callback: impl FnOnce(&SpanState) -> T,
+) -> Option<T>
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
-    ctx.span(id)?.extensions().get::<Arc<SpanState>>().cloned()
+    let span = ctx.span(id)?;
+    let extensions = span.extensions();
+    extensions.get::<SpanState>().map(callback)
 }

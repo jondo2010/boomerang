@@ -91,9 +91,14 @@ impl RerunSession {
 
     /// Logs the immutable hierarchy already produced by builder lowering.
     ///
-    /// Registration is synchronous and retains no runtime graph. Call this before execution
-    /// consumes the [`boomerang_builder::RuntimeAssembly`].
+    /// Registration is synchronous, retains no runtime graph, and may be performed only once per
+    /// session. Call this before execution consumes the [`boomerang_builder::RuntimeAssembly`].
     pub fn register_runtime(&self, runtime: &boomerang_builder::RuntimeAssembly) {
+        if self.adapter.registration.get().is_some() {
+            self.state
+                .disable_on_error(&"runtime registration may only be performed once");
+            return;
+        }
         let registration = match &runtime.execution {
             boomerang_builder::RuntimeExecution::Local(enclaves) => {
                 self.observe_registration(|| {
@@ -187,11 +192,10 @@ impl RerunSession {
                 }),
         };
         if let Some(registration) = registration {
-            *self
-                .adapter
-                .registration
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = registration;
+            if self.adapter.registration.set(registration).is_err() {
+                self.state
+                    .disable_on_error(&"runtime registration may only be performed once");
+            }
         }
     }
 

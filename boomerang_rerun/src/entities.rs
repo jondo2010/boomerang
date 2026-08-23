@@ -18,12 +18,6 @@ pub(super) enum RegistrationSnapshot {
     Federated(BTreeMap<String, TinySecondaryMap<EnclaveKey, EnclaveRegistration>>),
 }
 
-impl Default for RegistrationSnapshot {
-    fn default() -> Self {
-        Self::Local(TinySecondaryMap::new())
-    }
-}
-
 #[derive(Debug)]
 pub(super) struct EnclaveRegistration {
     scheduler: EntityRegistration,

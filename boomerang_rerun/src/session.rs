@@ -94,7 +94,7 @@ impl RerunSession {
     /// Registration is synchronous, retains no runtime graph, and may be performed only once per
     /// session. Call this before execution consumes the [`boomerang_builder::RuntimeAssembly`].
     pub fn register_runtime(&self, runtime: &boomerang_builder::RuntimeAssembly) {
-        if self.adapter.registration.get().is_some() {
+        if !self.adapter.registration.claim() {
             self.state
                 .disable_on_error(&"runtime registration may only be performed once");
             return;
@@ -192,7 +192,7 @@ impl RerunSession {
                 }),
         };
         if let Some(registration) = registration {
-            if self.adapter.registration.set(registration).is_err() {
+            if !self.adapter.registration.initialize(registration) {
                 self.state
                     .disable_on_error(&"runtime registration may only be performed once");
             }

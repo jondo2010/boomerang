@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
 use tracing::field::{Field, Visit};
@@ -58,14 +60,36 @@ pub(super) struct RerunLayer {
 
 #[derive(Clone)]
 pub(super) struct AdapterState {
-    pub(super) registration: Arc<OnceLock<RegistrationSnapshot>>,
+    pub(super) registration: Arc<RegistrationState>,
     named_series: Arc<RwLock<HashSet<String>>>,
+}
+
+#[derive(Default)]
+pub(super) struct RegistrationState {
+    claimed: AtomicBool,
+    snapshot: OnceLock<RegistrationSnapshot>,
+}
+
+impl RegistrationState {
+    pub(super) fn claim(&self) -> bool {
+        self.claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub(super) fn get(&self) -> Option<&RegistrationSnapshot> {
+        self.snapshot.get()
+    }
+
+    pub(super) fn initialize(&self, snapshot: RegistrationSnapshot) -> bool {
+        self.snapshot.set(snapshot).is_ok()
+    }
 }
 
 impl Default for AdapterState {
     fn default() -> Self {
         Self {
-            registration: Arc::new(OnceLock::new()),
+            registration: Arc::new(RegistrationState::default()),
             named_series: Arc::new(RwLock::new(HashSet::new())),
         }
     }
@@ -117,14 +141,9 @@ struct SpanState {
 
 #[derive(Clone)]
 struct SpanContext {
-    location: Location,
-    tag: Option<LogicalTag>,
-}
-
-#[derive(Clone)]
-struct Location {
     federate: Option<String>,
     enclave: String,
+    tag: Option<LogicalTag>,
 }
 
 #[derive(Clone, Copy)]
@@ -136,24 +155,26 @@ struct LogicalTag {
 impl SpanContext {
     fn untimed(federate: Option<String>, enclave: String) -> Self {
         Self {
-            location: Location { federate, enclave },
+            federate,
+            enclave,
             tag: None,
         }
     }
 
     fn logical(federate: Option<String>, enclave: String, tag: LogicalTag) -> Self {
         Self {
-            location: Location { federate, enclave },
+            federate,
+            enclave,
             tag: Some(tag),
         }
     }
 
     fn federate(&self) -> Option<&str> {
-        self.location.federate.as_deref()
+        self.federate.as_deref()
     }
 
     fn enclave(&self) -> &str {
-        &self.location.enclave
+        &self.enclave
     }
 
     fn tag(&self) -> Option<LogicalTag> {
@@ -176,19 +197,27 @@ struct ResolvedPath {
 
 #[derive(Default)]
 struct SpanTiming {
-    started: Option<Instant>,
+    active: HashMap<ThreadId, (Instant, usize)>,
     total: Duration,
 }
 
 impl SpanTiming {
     fn enter(&mut self) {
-        if self.started.is_none() {
-            self.started = Some(Instant::now());
-        }
+        let active = self
+            .active
+            .entry(std::thread::current().id())
+            .or_insert_with(|| (Instant::now(), 0));
+        active.1 = active.1.saturating_add(1);
     }
 
     fn exit(&mut self) {
-        if let Some(started) = self.started.take() {
+        let thread = std::thread::current().id();
+        let started = self.active.get_mut(&thread).and_then(|(started, depth)| {
+            *depth = depth.checked_sub(1)?;
+            (*depth == 0).then_some(*started)
+        });
+        if let Some(started) = started {
+            self.active.remove(&thread);
             self.total += started.elapsed();
         }
     }

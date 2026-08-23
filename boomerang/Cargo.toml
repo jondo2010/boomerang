@@ -32,7 +32,7 @@ federated = [
 ]
 
 ## Record runtime traces with the Rerun SDK
-rerun = ["dep:boomerang_rerun"]
+rerun = ["dep:boomerang_rerun", "boomerang_util/rerun"]
 
 [dependencies]
 document-features = { workspace = true }
@@ -46,7 +46,7 @@ boomerang_runtime = { workspace = true }
 boomerang_macros = { workspace = true }
 
 [dev-dependencies]
-boomerang_util = { path = "../boomerang_util", features = ["runner", "replay", "rerun", "test-tracing"] }
+boomerang_util = { path = "../boomerang_util", features = ["runner", "replay", "test-tracing"] }
 criterion = "0.5"
 rerun = { workspace = true }
 serde = { workspace = true }

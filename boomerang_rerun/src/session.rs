@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,7 +15,6 @@ use super::layer::{AdapterState, RerunLayer, SessionFilter};
 use tracing_subscriber::Layer as _;
 
 const DEFAULT_FINISH_TIMEOUT: Duration = Duration::from_secs(5);
-static SOURCE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Errors returned while creating a file-backed Rerun session.
 #[derive(Debug, thiserror::Error)]
@@ -69,7 +68,6 @@ pub struct RerunSession {
     recording: Option<RecordingStream>,
     path: std::path::PathBuf,
     finish_timeout: Duration,
-    source_id: Arc<str>,
     state: SessionState,
     adapter: AdapterState,
 }
@@ -88,23 +86,11 @@ impl RerunSession {
         let recording = builder.save(path.clone())?;
         recording.set_log_tick_enabled(false);
         recording.set_log_time_enabled(true);
-        let source_id: Arc<str> = recording
-            .store_info()
-            .map(|info| info.recording_id().to_string())
-            .unwrap_or_else(|| {
-                format!(
-                    "boomerang-rerun-{}-{}",
-                    std::process::id(),
-                    SOURCE_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
-                )
-            })
-            .into();
         let state = SessionState::new(recording.is_enabled());
         Ok(Self {
             recording: Some(recording),
             path,
             finish_timeout: DEFAULT_FINISH_TIMEOUT,
-            source_id,
             state,
             adapter: AdapterState::default(),
         })
@@ -119,7 +105,6 @@ impl RerunSession {
         RerunLayer::new(
             self.recording().clone_weak(),
             state.clone(),
-            Arc::clone(&self.source_id),
             self.adapter.clone(),
         )
         .with_filter(SessionFilter::new(state))
@@ -389,12 +374,7 @@ fn default_blueprint() -> rerun::blueprint::Blueprint {
         .with_contents(roots);
     let topology = GraphView::new("Ownership and propagation")
         .with_origin("/")
-        .with_contents([
-            "/enclaves/**",
-            "/federates/**",
-            "/federation/**",
-            "/propagation/**",
-        ]);
+        .with_contents(["/enclaves/**", "/federates/**", "/federation/**"]);
     let diagnostics = TextLogView::new("Diagnostics")
         .with_origin("/diagnostics")
         .with_contents(["/diagnostics/**"]);
@@ -448,10 +428,6 @@ impl SessionState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
-    }
-
-    pub(super) fn try_begin_attempt(&self) -> bool {
-        self.is_enabled()
     }
 
     pub(super) fn disable_on_error(&self, error: &dyn std::fmt::Display) {

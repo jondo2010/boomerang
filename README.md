@@ -32,18 +32,14 @@ See the [Boomerang book](book/src/introduction.md) for the quickstart, reactor
 concepts, federation, recording and replay, and
 [Rerun trace visualization](book/src/rerun.md).
 
-The workspace currently builds on stable Rust `1.97`. Rust `1.95` is not a
-supported promise: pre-existing workspace code uses `core::range::Range`, which
-does not compile on that toolchain.
-
 ## License
 
 Licensed under either of
 
  * Apache License, Version 2.0
-   ([LICENSE-APACHE](LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
+   ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
  * MIT license
-   ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+   ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
 
 at your option.
 

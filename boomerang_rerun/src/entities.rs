@@ -9,7 +9,6 @@ pub(crate) fn escape_entity_segment(segment: &str) -> String {
 #[derive(Clone, Debug, Default)]
 pub(super) struct RegistrationIndex {
     entities: HashMap<RegistrationLookup, RegistrationResolution>,
-    federated_entities: HashMap<FederatedRegistrationLookup, RegistrationResolution>,
     display_labels: HashMap<String, String>,
 }
 
@@ -21,13 +20,6 @@ struct RegistrationLookup {
     identity: String,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct FederatedRegistrationLookup {
-    federate: String,
-    kind: &'static str,
-    identity: String,
-}
-
 #[derive(Clone, Debug)]
 enum RegistrationResolution {
     Unique(String),
@@ -35,7 +27,7 @@ enum RegistrationResolution {
 }
 
 impl RegistrationIndex {
-    pub(super) fn register_in_federate(
+    pub(super) fn register(
         &mut self,
         federate: Option<&str>,
         enclave: &str,
@@ -68,17 +60,6 @@ impl RegistrationIndex {
             identity: identity.to_owned(),
         };
         register_resolution(&mut self.entities, lookup, path);
-        if let Some(federate) = federate {
-            register_resolution(
-                &mut self.federated_entities,
-                FederatedRegistrationLookup {
-                    federate: federate.to_owned(),
-                    kind,
-                    identity: identity.to_owned(),
-                },
-                path,
-            );
-        }
     }
 
     pub(super) fn resolve(
@@ -99,22 +80,6 @@ impl RegistrationIndex {
         )
     }
 
-    pub(super) fn resolve_federated(
-        &self,
-        federate: &str,
-        kind: &'static str,
-        identity: &str,
-    ) -> Option<String> {
-        resolve_registration(
-            &self.federated_entities,
-            &FederatedRegistrationLookup {
-                federate: federate.to_owned(),
-                kind,
-                identity: identity.to_owned(),
-            },
-        )
-    }
-
     pub(super) fn display_label(&self, path: &str) -> Option<&str> {
         self.display_labels.get(path).map(String::as_str)
     }
@@ -122,9 +87,6 @@ impl RegistrationIndex {
     pub(super) fn merge(&mut self, other: Self) {
         for (lookup, incoming) in other.entities {
             merge_resolution(&mut self.entities, lookup, incoming);
-        }
-        for (lookup, incoming) in other.federated_entities {
-            merge_resolution(&mut self.federated_entities, lookup, incoming);
         }
         for (path, label) in other.display_labels {
             self.display_labels.entry(path).or_insert(label);
@@ -251,7 +213,7 @@ pub(super) fn log_runtime_enclaves(
         ];
         let mut edges = vec![(enclave_path.clone(), scheduler.clone(), "owns_scheduler")];
         let enclave_key_string = enclave_key.to_string();
-        index.register_in_federate(
+        index.register(
             federate,
             &enclave_key_string,
             "scheduler",
@@ -348,7 +310,7 @@ pub(super) fn log_runtime_enclaves(
             ));
             edges.push((owner_path, path.clone(), "owns_reaction"));
             let owner_key = owner.to_string();
-            index.register_in_federate(
+            index.register(
                 federate,
                 &enclave_key_string,
                 "reaction",
@@ -391,7 +353,7 @@ pub(super) fn log_runtime_enclaves(
             ));
             edges.push((reactor_path(owner), path.clone(), "owns_action"));
             let owner_key = owner.to_string();
-            index.register_in_federate(
+            index.register(
                 federate,
                 &enclave_key_string,
                 "action",
@@ -436,7 +398,7 @@ pub(super) fn log_runtime_enclaves(
             ));
             edges.push((reactor_path(owner), path.clone(), "owns_port"));
             let owner_key = owner.to_string();
-            index.register_in_federate(
+            index.register(
                 federate,
                 &enclave_key_string,
                 "port",

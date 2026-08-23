@@ -52,7 +52,8 @@ suffixes where necessary, and are bounded to avoid oversized legends.
 
 Trace annotations must not add state to runtime hot-path objects such as
 `TriggerRes`, scheduler queues, events, contexts, or payload wrappers. Adapter
-state exists only while its layer is enabled.
+state is owned by the recording session and shared only with its subscriber
+layer.
 
 ## File lifecycle
 

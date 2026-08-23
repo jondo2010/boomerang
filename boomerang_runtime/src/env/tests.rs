@@ -3,8 +3,8 @@ use crate::{
         ConnectionReceiverReactionFn, InProcessInterPartitionEventSink,
         InterPartitionSenderReactionFn,
     },
-    reaction_closure, Action, ActionRef, Config, Duration, Enclave, EnclaveKey, InputRef,
-    OutputRef, Port, Reactor,
+    reaction_closure, Action, Config, Duration, Enclave, EnclaveKey, InputRef, OutputRef, Port,
+    Reactor,
 };
 
 use super::*;
@@ -125,10 +125,6 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
     // sender-side has a startup reaction that sets the value of 'portA' to 42.
     let port_a = enclave_a.insert_port(|key| Port::<u32>::new("portA", key).boxed());
     enclave_a.insert_port_scope(port_a, reactor_a_scope);
-    let followup_action =
-        enclave_a.insert_action(|key| Action::<()>::new("followup", key, None, true).boxed());
-    enclave_a.insert_action_scope(followup_action, reactor_a_scope);
-
     let reaction_startup = enclave_a.insert_reaction(
         Reaction::new(
             "startup",
@@ -137,8 +133,6 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
                 assert_eq!(ctx.get_elapsed_logical_time(), Duration::ZERO);
                 let mut port: OutputRef<u32> = refs.ports_mut.partition_mut().unwrap();
                 *port = Some(42);
-                let mut followup: ActionRef<()> = refs.actions.partition_mut().unwrap();
-                ctx.schedule_action(&mut followup, (), None);
             }),
             None,
         ),
@@ -146,21 +140,10 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
         std::iter::empty(),
         // portA is effected by reactionStartup
         std::iter::once(port_a),
-        std::iter::once(followup_action),
+        std::iter::empty(),
         reactor_a_scope,
         None,
     );
-
-    let reaction_followup = enclave_a.insert_reaction(
-        Reaction::new("followup", reaction_closure!(), None),
-        reactor_a,
-        std::iter::empty(),
-        std::iter::empty(),
-        std::iter::once(followup_action),
-        reactor_a_scope,
-        None,
-    );
-    enclave_a.insert_action_trigger(followup_action, (Level::from(0), reaction_followup));
 
     // startup action triggers reactionStartup
     let startup_action =

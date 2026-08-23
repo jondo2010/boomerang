@@ -224,15 +224,13 @@ fn StaticFederation(values: Arc<Mutex<Vec<(Tag, u32)>>>) -> impl Reactor {
 }
 
 #[test]
+#[cfg(feature = "rerun")]
 fn public_api_runs_static_federation_with_finalized_rrd_trace() {
     boomerang_util::test_tracing::init_with_directive("warn");
     let values = Arc::new(Mutex::new(Vec::new()));
     let mut assembly = Assembly::new();
-    #[cfg(feature = "rerun")]
     let directory = tempfile::tempdir().unwrap();
-    #[cfg(feature = "rerun")]
     let rrd_path = directory.path().join("federated-static.rrd");
-    #[cfg(feature = "rerun")]
     let rerun =
         boomerang::rerun::RerunSession::save("federated-static-test", rrd_path.clone()).unwrap();
 
@@ -254,288 +252,304 @@ fn public_api_runs_static_federation_with_finalized_rrd_trace() {
 
     let config = runtime::Config::default().with_fast_forward(true);
     let parts = assembly.into_runtime_assembly(&config).unwrap();
-    #[cfg(feature = "rerun")]
     rerun.register_runtime(&parts);
     let federation = parts.federation().unwrap();
     assert_eq!(federation.federates().len(), 2);
     assert_eq!(federation.graph().endpoint_ids().count(), 1);
 
-    #[cfg(feature = "rerun")]
     let envs = {
         let subscriber = tracing_subscriber::registry().with(rerun.layer());
         tracing::subscriber::with_default(subscriber, || {
             execute_federation_in_memory(parts.into_federation().unwrap(), config).unwrap()
         })
     };
-    #[cfg(not(feature = "rerun"))]
-    let envs = execute_federation_in_memory(parts.into_federation().unwrap(), config).unwrap();
-
     assert_eq!(
         envs[&FederateId::new("a")].keys().next(),
         envs[&FederateId::new("b")].keys().next()
     );
     assert_eq!(*values.lock().unwrap(), vec![(Tag::ZERO, 7)]);
 
-    #[cfg(feature = "rerun")]
-    {
-        rerun.finish().unwrap();
+    rerun.finish().unwrap();
 
-        let file = std::io::BufReader::new(std::fs::File::open(&rrd_path).unwrap());
-        let messages = rerun::external::re_log_encoding::DecoderApp::decode_lazy(file)
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        let chunks = decode_chunks(&messages, Some(rerun::StoreKind::Recording));
+    let file = std::io::BufReader::new(std::fs::File::open(&rrd_path).unwrap());
+    let messages = rerun::external::re_log_encoding::DecoderApp::decode_lazy(file)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let chunks = decode_chunks(&messages, Some(rerun::StoreKind::Recording));
 
-        let static_topology = chunks.iter().filter(|chunk| {
-            chunk.entity_path().to_string().ends_with("/topology")
-                || chunk.component_descriptors().any(|descriptor| {
-                    descriptor
-                        .component
-                        .as_str()
-                        .starts_with("boomerang.runtime.")
-                })
-        });
-        let mut static_topology_chunks = 0;
-        let mut graph_labels =
-            std::collections::HashMap::<String, std::collections::HashSet<String>>::new();
-        for chunk in static_topology {
-            static_topology_chunks += 1;
-            assert!(chunk.is_static(), "{} must be static", chunk.entity_path());
-            assert!(chunk.timelines().is_empty());
-            for label in (0..chunk.num_rows())
-                .flat_map(|row| text_components_at(chunk, "GraphNodes:labels", row))
-            {
-                assert!(
-                    !label.contains('/'),
-                    "graph label exposes entity path: {label}"
-                );
-                assert!(label.len() <= 64, "graph label is too long: {label}");
-            }
-            for row in 0..chunk.num_rows() {
-                let ids = text_components_at(chunk, "GraphNodes:node_ids", row);
-                let labels = text_components_at(chunk, "GraphNodes:labels", row);
-                for (id, label) in ids.into_iter().zip(labels) {
-                    graph_labels.entry(label).or_default().insert(id);
-                }
-            }
-        }
-        assert!(static_topology_chunks > 0);
-        assert!(graph_labels.values().all(|ids| ids.len() == 1));
-
-        for (label, kind, reactor, child) in [
-            (
-                "source output",
-                "owns_port",
-                "/reactors/main/reactors/a/reactors/source@",
-                "/ports/",
-            ),
-            (
-                "source startup",
-                "owns_action",
-                "/reactors/main/reactors/a/reactors/source@",
-                "/actions/",
-            ),
-            (
-                "relay input",
-                "owns_port",
-                "/reactors/main/reactors/a/reactors/relay@",
-                "/ports/",
-            ),
-            (
-                "relay startup",
-                "owns_action",
-                "/reactors/main/reactors/a/reactors/relay@",
-                "/actions/",
-            ),
-            (
-                "sink startup",
-                "owns_action",
-                "/federates/b/enclaves/EnclaveKey(0)/reactors/main/reactors/b@",
-                "/actions/",
-            ),
-            (
-                "sink inbound adapter",
-                "owns_port",
-                "/federates/b/enclaves/EnclaveKey(0)/reactors/main/reactors/con_reactor_tgt@",
-                "/ports/",
-            ),
-        ] {
+    let static_topology = chunks.iter().filter(|chunk| {
+        chunk.entity_path().to_string().ends_with("/topology")
+            || chunk.component_descriptors().any(|descriptor| {
+                descriptor
+                    .component
+                    .as_str()
+                    .starts_with("boomerang.runtime.")
+            })
+    });
+    let mut static_topology_chunks = 0;
+    let mut graph_labels =
+        std::collections::HashMap::<String, std::collections::HashSet<String>>::new();
+    for chunk in static_topology {
+        static_topology_chunks += 1;
+        assert!(chunk.is_static(), "{} must be static", chunk.entity_path());
+        assert!(chunk.timelines().is_empty());
+        for label in (0..chunk.num_rows())
+            .flat_map(|row| text_components_at(chunk, "GraphNodes:labels", row))
+        {
             assert!(
-                rows(&chunks).any(|(chunk, row)| {
-                    text_component_at(chunk, ":boomerang.runtime.relation_kind", row).as_deref()
-                        == Some(kind)
-                        && text_component_at(chunk, ":boomerang.runtime.source", row)
-                            .is_some_and(|source| source.contains(reactor))
-                        && text_component_at(chunk, ":boomerang.runtime.target", row).is_some_and(
-                            |target| target.contains(reactor) && target.contains(child),
-                        )
-                }),
-                "decoded {label} {kind} relation for {reactor}"
+                !label.contains('/'),
+                "graph label exposes entity path: {label}"
             );
+            assert!(label.len() <= 64, "graph label is too long: {label}");
         }
-
-        let runtime_rows = rows(&chunks)
-            .filter(|(chunk, row)| {
-                text_component_at(chunk, ":boomerang.trace.event", *row).is_some()
-            })
-            .collect::<Vec<_>>();
-        assert!(runtime_rows.iter().any(|(chunk, row)| {
-            chunk.timelines().values().any(|timeline| {
-                timeline.name() == "logical" && timeline.times_raw().get(*row).is_some()
-            })
-        }));
-
-        let (send, send_row) = runtime_rows
-            .iter()
-            .copied()
-            .find(|(chunk, row)| {
-                text_component_at(chunk, ":boomerang.trace.event", *row).as_deref()
-                    == Some("propagation_send")
-                    && text_component_at(chunk, ":boomerang.trace.federate", *row).as_deref()
-                        == Some("a")
-                    && text_component_at(chunk, ":boomerang.trace.destination_federate", *row)
-                        .as_deref()
-                        == Some("b")
-            })
-            .expect("serialized A-to-B propagation send");
-        assert!(
-            text_component_at(send, ":boomerang.trace.destination", send_row).is_none(),
-            "serialized send is intentionally ambiguous until its causal edge is decoded"
-        );
-        let propagation_size =
-            uint_component_at(send, ":boomerang.trace.value_size", send_row).unwrap();
-        assert_eq!(
-            scalar_at(send, send_row),
-            Some(propagation_size as f64),
-            "propagation value-size measure is co-located with its typed event"
-        );
-
-        let (action, action_row) = runtime_rows
-            .iter()
-            .copied()
-            .find(|(chunk, row)| {
-                text_component_at(chunk, ":boomerang.trace.event", *row).as_deref()
-                    == Some("action_schedule")
-                    && uint_component_at(chunk, ":boomerang.trace.value_size", *row).is_some()
-            })
-            .expect("scheduled action with a value-size fact");
-        let action_size =
-            uint_component_at(action, ":boomerang.trace.value_size", action_row).unwrap();
-        assert_eq!(
-            scalar_at(action, action_row),
-            Some(action_size as f64),
-            "action value-size measure is co-located with its typed event"
-        );
-
-        let (terminal, terminal_row) = runtime_rows
-            .iter()
-            .copied()
-            .find(|(chunk, row)| {
-                bool_component_at(chunk, ":boomerang.trace.terminal", *row).is_some()
-            })
-            .expect("terminal lifecycle fact");
-        let terminal_value =
-            bool_component_at(terminal, ":boomerang.trace.terminal", terminal_row).unwrap();
-        assert_eq!(
-            scalar_at(terminal, terminal_row),
-            Some(if terminal_value { 1.0 } else { 0.0 }),
-            "terminal measure is co-located with its typed event"
-        );
-
-        let (receive, receive_row) = runtime_rows
-            .iter()
-            .copied()
-            .find(|(chunk, row)| {
-                text_component_at(chunk, ":boomerang.trace.event", *row).as_deref()
-                    == Some("propagation_receive")
-                    && text_component_at(chunk, ":boomerang.trace.federate", *row).as_deref()
-                        == Some("b")
-            })
-            .expect("remote propagation receive");
-        assert_eq!(
-            text_component_at(receive, ":boomerang.trace.federate", receive_row).as_deref(),
-            Some("b")
-        );
-
-        let (reaction, reaction_row) = runtime_rows
-            .iter()
-            .copied()
-            .find(|(chunk, row)| {
-                text_component_at(chunk, ":boomerang.trace.event", *row).as_deref()
-                    == Some("reaction_execute")
-                    && text_component_at(chunk, ":boomerang.trace.federate", *row).as_deref()
-                        == Some("b")
-            })
-            .expect("remote federate reaction");
-        assert_eq!(
-            text_component_at(reaction, ":boomerang.trace.federate", reaction_row).as_deref(),
-            Some("b")
-        );
-        let duration_ns = uint_component_at(reaction, ":boomerang.trace.duration_ns", reaction_row)
-            .expect("reaction duration component");
-        let duration_measure =
-            scalar_at(reaction, reaction_row).expect("reaction operational duration scalar");
-        assert!(duration_measure.is_finite() && duration_measure >= 0.0);
-        assert_eq!(duration_measure, duration_ns as f64);
-
-        let mut reaction_states = rows(&chunks)
-            .filter_map(|(chunk, row)| {
-                (chunk.entity_path() == reaction.entity_path()).then(|| {
-                    let state = state_change_at(chunk, row)?;
-                    let log_time = chunk
-                        .timelines()
-                        .values()
-                        .find(|timeline| timeline.name() == "log_time")?
-                        .times_raw()
-                        .get(row)
-                        .copied()?;
-                    assert!(chunk.timelines().values().all(|timeline| {
-                        timeline.name() != "logical" || timeline.times_raw().get(row).is_none()
-                    }));
-                    Some((log_time, state))
-                })?
-            })
-            .collect::<Vec<_>>();
-        reaction_states.sort_by_key(|(log_time, _)| *log_time);
-        let reaction_states = reaction_states
-            .into_iter()
-            .map(|(_, state)| state)
-            .collect::<Vec<_>>();
-        assert!(reaction_states
-            .windows(2)
-            .any(|states| { states == [Some("executing reaction".to_owned()), None] }));
-
-        let blueprint = decode_chunks(&messages, Some(rerun::StoreKind::Blueprint));
-        for (name, class) in [
-            ("Scheduler phase spans (wall clock)", "StateTimeline"),
-            ("Ownership and propagation", "Graph"),
-            ("Logical phases and measures", "TimeSeries"),
-        ] {
-            assert!(rows(&blueprint).any(|(chunk, row)| {
-                text_component_at(chunk, "ViewBlueprint:display_name", row).as_deref() == Some(name)
-                    && text_component_at(chunk, "ViewBlueprint:class_identifier", row).as_deref()
-                        == Some(class)
-            }));
+        for row in 0..chunk.num_rows() {
+            let ids = text_components_at(chunk, "GraphNodes:node_ids", row);
+            let labels = text_components_at(chunk, "GraphNodes:labels", row);
+            for (id, label) in ids.into_iter().zip(labels) {
+                graph_labels.entry(label).or_default().insert(id);
+            }
         }
-        assert!(rows(&blueprint).any(|(chunk, row)| {
-            chunk.entity_path().to_string() == "/time_panel"
-                && text_component_at(chunk, "TimePanelBlueprint:timeline", row).as_deref()
-                    == Some("logical")
-        }));
-        let queries = rows(&blueprint)
-            .flat_map(|(chunk, row)| text_components_at(chunk, "ViewContents:query", row))
-            .collect::<Vec<_>>();
+    }
+    assert!(static_topology_chunks > 0);
+    assert!(graph_labels.values().all(|ids| ids.len() == 1));
+
+    for (label, kind, reactor, child) in [
+        (
+            "source output",
+            "owns_port",
+            "/reactors/main/reactors/a/reactors/source@",
+            "/ports/",
+        ),
+        (
+            "source startup",
+            "owns_action",
+            "/reactors/main/reactors/a/reactors/source@",
+            "/actions/",
+        ),
+        (
+            "relay input",
+            "owns_port",
+            "/reactors/main/reactors/a/reactors/relay@",
+            "/ports/",
+        ),
+        (
+            "relay startup",
+            "owns_action",
+            "/reactors/main/reactors/a/reactors/relay@",
+            "/actions/",
+        ),
+        (
+            "sink startup",
+            "owns_action",
+            "/federates/b/enclaves/EnclaveKey(0)/reactors/main/reactors/b@",
+            "/actions/",
+        ),
+        (
+            "sink inbound adapter",
+            "owns_port",
+            "/federates/b/enclaves/EnclaveKey(0)/reactors/main/reactors/con_reactor_tgt@",
+            "/ports/",
+        ),
+    ] {
         assert!(
-            queries.iter().any(|query| query.ends_with("/enclaves/**")),
-            "default blueprint must include the complete enclave subtree: {queries:?}"
-        );
-        assert!(queries.iter().any(|query| query == "/propagation/**"));
-        assert!(
-            queries.iter().all(|query| !query.contains("/**/")),
-            "Rerun only supports recursive wildcards as the final path segment: {queries:?}"
+            rows(&chunks).any(|(chunk, row)| {
+                text_component_at(chunk, ":boomerang.runtime.relation_kind", row).as_deref()
+                    == Some(kind)
+                    && text_component_at(chunk, ":boomerang.runtime.source", row)
+                        .is_some_and(|source| source.contains(reactor))
+                    && text_component_at(chunk, ":boomerang.runtime.target", row)
+                        .is_some_and(|target| target.contains(reactor) && target.contains(child))
+            }),
+            "decoded {label} {kind} relation for {reactor}"
         );
     }
+
+    let (endpoint, endpoint_row) = rows(&chunks)
+        .find(|(chunk, row)| {
+            text_component_at(chunk, ":boomerang.runtime.relation_kind", *row).as_deref()
+                == Some("federated_endpoint")
+        })
+        .expect("decoded federated endpoint relation");
+    assert_eq!(
+        text_component_at(endpoint, ":boomerang.runtime.source", endpoint_row).as_deref(),
+        Some("/federates/a")
+    );
+    assert_eq!(
+        text_component_at(endpoint, ":boomerang.runtime.target", endpoint_row).as_deref(),
+        Some("/federates/b")
+    );
+    assert_eq!(
+        uint_component_at(endpoint, ":boomerang.runtime.delay_ns", endpoint_row),
+        Some(0)
+    );
+    assert!(
+        text_component_at(endpoint, ":boomerang.runtime.stable_key", endpoint_row).is_some(),
+        "federated endpoint relation carries its lowered stable identity"
+    );
+
+    let runtime_rows = rows(&chunks)
+        .filter(|(chunk, row)| text_component_at(chunk, ":boomerang.trace.event", *row).is_some())
+        .collect::<Vec<_>>();
+    assert!(runtime_rows.iter().any(|(chunk, row)| {
+        chunk.timelines().values().any(|timeline| {
+            timeline.name() == "logical" && timeline.times_raw().get(*row).is_some()
+        })
+    }));
+
+    let (send, send_row) = runtime_rows
+        .iter()
+        .copied()
+        .find(|(chunk, row)| {
+            text_component_at(chunk, ":boomerang.trace.event", *row).as_deref()
+                == Some("propagation_send")
+                && text_component_at(chunk, ":boomerang.trace.federate", *row).as_deref()
+                    == Some("a")
+                && text_component_at(chunk, ":boomerang.trace.destination_federate", *row)
+                    .as_deref()
+                    == Some("b")
+        })
+        .expect("serialized A-to-B propagation send");
+    let send_path = send.entity_path().to_string();
+    assert!(
+        send_path.starts_with("/federates/a/enclaves/")
+            && send_path.ends_with("/scheduler/propagation_send"),
+        "serialized send must remain anchored to its source scheduler: {}",
+        send.entity_path()
+    );
+    assert!(
+        text_component_at(send, ":boomerang.trace.destination", send_row).is_none(),
+        "serialized send must not invent an enclave destination for a federate target"
+    );
+    let propagation_size =
+        uint_component_at(send, ":boomerang.trace.value_size", send_row).unwrap();
+    assert_eq!(
+        scalar_at(send, send_row),
+        Some(propagation_size as f64),
+        "propagation value-size measure is co-located with its typed event"
+    );
+
+    let (action, action_row) = runtime_rows
+        .iter()
+        .copied()
+        .find(|(chunk, row)| {
+            text_component_at(chunk, ":boomerang.trace.event", *row).as_deref()
+                == Some("action_schedule")
+                && uint_component_at(chunk, ":boomerang.trace.value_size", *row).is_some()
+        })
+        .expect("scheduled action with a value-size fact");
+    let action_size = uint_component_at(action, ":boomerang.trace.value_size", action_row).unwrap();
+    assert_eq!(
+        scalar_at(action, action_row),
+        Some(action_size as f64),
+        "action value-size measure is co-located with its typed event"
+    );
+
+    let (terminal, terminal_row) = runtime_rows
+        .iter()
+        .copied()
+        .find(|(chunk, row)| bool_component_at(chunk, ":boomerang.trace.terminal", *row).is_some())
+        .expect("terminal lifecycle fact");
+    let terminal_value =
+        bool_component_at(terminal, ":boomerang.trace.terminal", terminal_row).unwrap();
+    assert_eq!(
+        scalar_at(terminal, terminal_row),
+        Some(if terminal_value { 1.0 } else { 0.0 }),
+        "terminal measure is co-located with its typed event"
+    );
+
+    let (receive, receive_row) = runtime_rows
+        .iter()
+        .copied()
+        .find(|(chunk, row)| {
+            text_component_at(chunk, ":boomerang.trace.event", *row).as_deref()
+                == Some("propagation_receive")
+                && text_component_at(chunk, ":boomerang.trace.federate", *row).as_deref()
+                    == Some("b")
+        })
+        .expect("remote propagation receive");
+    assert_eq!(
+        text_component_at(receive, ":boomerang.trace.federate", receive_row).as_deref(),
+        Some("b")
+    );
+
+    let (reaction, reaction_row) = runtime_rows
+        .iter()
+        .copied()
+        .find(|(chunk, row)| {
+            text_component_at(chunk, ":boomerang.trace.event", *row).as_deref()
+                == Some("reaction_execute")
+                && text_component_at(chunk, ":boomerang.trace.federate", *row).as_deref()
+                    == Some("b")
+        })
+        .expect("remote federate reaction");
+    assert_eq!(
+        text_component_at(reaction, ":boomerang.trace.federate", reaction_row).as_deref(),
+        Some("b")
+    );
+    let duration_ns = uint_component_at(reaction, ":boomerang.trace.duration_ns", reaction_row)
+        .expect("reaction duration component");
+    let duration_measure =
+        scalar_at(reaction, reaction_row).expect("reaction operational duration scalar");
+    assert!(duration_measure.is_finite() && duration_measure >= 0.0);
+    assert_eq!(duration_measure, duration_ns as f64);
+
+    let mut reaction_states = rows(&chunks)
+        .filter_map(|(chunk, row)| {
+            (chunk.entity_path() == reaction.entity_path()).then(|| {
+                let state = state_change_at(chunk, row)?;
+                let log_time = chunk
+                    .timelines()
+                    .values()
+                    .find(|timeline| timeline.name() == "log_time")?
+                    .times_raw()
+                    .get(row)
+                    .copied()?;
+                assert!(chunk.timelines().values().all(|timeline| {
+                    timeline.name() != "logical" || timeline.times_raw().get(row).is_none()
+                }));
+                Some((log_time, state))
+            })?
+        })
+        .collect::<Vec<_>>();
+    reaction_states.sort_by_key(|(log_time, _)| *log_time);
+    let reaction_states = reaction_states
+        .into_iter()
+        .map(|(_, state)| state)
+        .collect::<Vec<_>>();
+    assert!(reaction_states
+        .windows(2)
+        .any(|states| { states == [Some("executing reaction".to_owned()), None] }));
+
+    let blueprint = decode_chunks(&messages, Some(rerun::StoreKind::Blueprint));
+    for (name, class) in [
+        ("Scheduler phase spans (wall clock)", "StateTimeline"),
+        ("Ownership and propagation", "Graph"),
+        ("Logical phases and measures", "TimeSeries"),
+    ] {
+        assert!(rows(&blueprint).any(|(chunk, row)| {
+            text_component_at(chunk, "ViewBlueprint:display_name", row).as_deref() == Some(name)
+                && text_component_at(chunk, "ViewBlueprint:class_identifier", row).as_deref()
+                    == Some(class)
+        }));
+    }
+    assert!(rows(&blueprint).any(|(chunk, row)| {
+        chunk.entity_path().to_string() == "/time_panel"
+            && text_component_at(chunk, "TimePanelBlueprint:timeline", row).as_deref()
+                == Some("logical")
+    }));
+    let queries = rows(&blueprint)
+        .flat_map(|(chunk, row)| text_components_at(chunk, "ViewContents:query", row))
+        .collect::<Vec<_>>();
+    assert!(
+        queries.iter().any(|query| query.ends_with("/enclaves/**")),
+        "default blueprint must include the complete enclave subtree: {queries:?}"
+    );
+    assert!(
+        queries.iter().all(|query| !query.contains("/**/")),
+        "Rerun only supports recursive wildcards as the final path segment: {queries:?}"
+    );
 }
+
 #[test]
 fn public_api_rejects_runtime_without_lowered_federation() {
     let parts = RuntimeAssembly::default();

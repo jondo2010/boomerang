@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
@@ -55,13 +54,11 @@ impl<S> Filter<S> for SessionFilter {
 pub(super) struct RerunLayer {
     recording: rerun::RecordingStream,
     state: SessionState,
-    source_id: Arc<str>,
     adapter: AdapterState,
 }
 
 #[derive(Clone)]
 pub(super) struct AdapterState {
-    next_id: Arc<AtomicU64>,
     pub(super) registration: Arc<RwLock<RegistrationIndex>>,
     named_series: Arc<RwLock<HashSet<String>>>,
 }
@@ -69,15 +66,11 @@ pub(super) struct AdapterState {
 impl Default for AdapterState {
     fn default() -> Self {
         Self {
-            next_id: Arc::new(AtomicU64::new(0)),
             registration: Arc::new(RwLock::new(RegistrationIndex::default())),
             named_series: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 }
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct TraceId(String);
 
 #[derive(Clone, Copy)]
 struct TimePoint {
@@ -116,8 +109,6 @@ enum SpanKind {
 }
 
 struct SpanState {
-    id: TraceId,
-    parent_id: Option<TraceId>,
     federate: Option<String>,
     enclave: Option<String>,
     logical_ns: Option<u64>,
@@ -248,13 +239,11 @@ impl RerunLayer {
     pub(super) fn new(
         recording: rerun::RecordingStream,
         state: SessionState,
-        source_id: Arc<str>,
         adapter: AdapterState,
     ) -> Self {
         Self {
             recording,
             state,
-            source_id,
             adapter,
         }
     }
@@ -266,21 +255,6 @@ impl RerunLayer {
         }
     }
 
-    fn next_id(&self, enclave: Option<&str>) -> Option<TraceId> {
-        let sequence = self
-            .adapter
-            .next_id
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                value.checked_add(1)
-            })
-            .ok()?;
-        Some(TraceId(format!(
-            "{}:{}:{sequence}",
-            self.source_id,
-            enclave.unwrap_or("process")
-        )))
-    }
-
     fn timepoint(&self, logical_ns: Option<u64>) -> TimePoint {
         TimePoint {
             logical_ns: logical_ns.and_then(|value| i64::try_from(value).ok()),
@@ -288,7 +262,7 @@ impl RerunLayer {
     }
 
     fn write(&self, path: &str, time: TimePoint, value: &dyn rerun::AsComponents) {
-        if !self.state.try_begin_attempt() {
+        if !self.state.is_enabled() {
             return;
         }
         self.recording.reset_time();
@@ -357,13 +331,8 @@ impl RerunLayer {
             Some(event) => format!("invalid `{event}` trace annotation: {error}"),
             None => format!("invalid trace annotation: {error}"),
         };
-        let id = self
-            .next_id(Some("diagnostics"))
-            .unwrap_or_else(|| TraceId("diagnostic".into()));
         let archetype = common(
             "boomerang.SchemaDiagnostic",
-            &id,
-            None,
             "schema_diagnostic",
             None,
             None,
@@ -424,7 +393,7 @@ impl RerunLayer {
                     (None, Some(enclave)) => {
                         format!("/enclaves/{}", escape_entity_segment(enclave))
                     }
-                    _ => "/propagation/unresolved".to_owned(),
+                    _ => "/runtime/unresolved".to_owned(),
                 };
                 format!("{root}/{}", escape_entity_segment(event))
             })
@@ -538,8 +507,8 @@ where
                                 value_size: fields.required_u64("value_size")?,
                                 outcome,
                             },
-                            "action",
-                            action_key,
+                            "scheduler",
+                            "scheduler".into(),
                         )
                     }
                     _ => return Err(format!("unsupported span event `{event}`")),
@@ -565,59 +534,21 @@ where
                         return;
                     }
                 }
-                SpanKind::Send { .. } => {}
+                SpanKind::Send { .. } => {
+                    if enclave.is_none() {
+                        self.diagnostic(Some(&event), "missing or invalid source enclave");
+                        return;
+                    }
+                }
             }
-            let Some(trace_id) = self.next_id(enclave.as_deref()) else {
-                return;
-            };
-            let path = if matches!(
-                &kind,
-                SpanKind::Send {
-                    destination_federate: Some(_),
-                    ..
-                }
-            ) {
-                if let SpanKind::Send {
-                    destination_federate: Some(destination),
-                    ..
-                } = &kind
-                {
-                    self.adapter
-                        .registration
-                        .read()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .resolve_federated(destination, entity_kind, &identity)
-                        .map(|path| format!("{path}/{}", escape_entity_segment(&event)))
-                        .unwrap_or_else(|| {
-                            format!("/propagation/unresolved/{}", escape_entity_segment(&event))
-                        })
-                } else {
-                    unreachable!()
-                }
-            } else if let SpanKind::Send {
-                destination: Some(destination),
-                ..
-            } = &kind
-            {
-                self.path(
-                    federate.as_deref(),
-                    Some(destination),
-                    entity_kind,
-                    &identity,
-                    &event,
-                )
-            } else {
-                self.path(
-                    federate.as_deref(),
-                    enclave.as_deref(),
-                    entity_kind,
-                    &identity,
-                    &event,
-                )
-            };
+            let path = self.path(
+                federate.as_deref(),
+                enclave.as_deref(),
+                entity_kind,
+                &identity,
+                &event,
+            );
             let span = Arc::new(SpanState {
-                id: trace_id,
-                parent_id: parent.map(|p| p.id.clone()),
                 federate,
                 enclave,
                 logical_ns,
@@ -744,8 +675,6 @@ where
             let mut payload = match &kind {
                 SpanKind::Scheduler { state } => common(
                     "boomerang.SchedulerRunning",
-                    &span.id,
-                    span.parent_id.as_ref(),
                     "scheduler_thread",
                     span.federate.as_deref(),
                     span.enclave.as_deref(),
@@ -758,8 +687,6 @@ where
                 ),
                 SpanKind::Tag { terminal, state } => common(
                     "boomerang.TagProcessing",
-                    &span.id,
-                    span.parent_id.as_ref(),
                     "tag_process",
                     span.federate.as_deref(),
                     span.enclave.as_deref(),
@@ -780,8 +707,6 @@ where
                 } => {
                     let mut value = common(
                         "boomerang.ReactionExecution",
-                        &span.id,
-                        span.parent_id.as_ref(),
                         "reaction_execute",
                         span.federate.as_deref(),
                         span.enclave.as_deref(),
@@ -811,8 +736,6 @@ where
                 }
                 SpanKind::Wait { state } => common(
                     "boomerang.CoordinationWait",
-                    &span.id,
-                    span.parent_id.as_ref(),
                     "coordination_wait",
                     span.federate.as_deref(),
                     span.enclave.as_deref(),
@@ -842,8 +765,6 @@ where
                     };
                     let mut value = common(
                         archetype,
-                        &span.id,
-                        span.parent_id.as_ref(),
                         "propagation_send",
                         span.federate.as_deref(),
                         span.enclave.as_deref(),
@@ -930,8 +851,6 @@ impl RerunLayer {
         let microstep = f
             .u64("microstep")
             .or_else(|| parent.and_then(|p| p.microstep));
-        let id = self.next_id(enclave).ok_or("trace ID sequence exhausted")?;
-        let parent_id = parent.map(|p| &p.id);
         let time = self.timepoint(logical);
         let (path, payload) = match name {
             "async_ingress" => {
@@ -968,8 +887,6 @@ impl RerunLayer {
                     };
                     let payload = common(
                         archetype,
-                        &id,
-                        parent_id,
                         event_name,
                         federate,
                         Some(enclave),
@@ -1021,8 +938,6 @@ impl RerunLayer {
                         self.path(federate, Some(enclave), "scheduler", "scheduler", name),
                         common(
                             "boomerang.ControlIngress",
-                            &id,
-                            parent_id,
                             name,
                             federate,
                             Some(enclave),
@@ -1075,20 +990,12 @@ impl RerunLayer {
                     logical.ok_or("missing or invalid `logical_ns`")?;
                     microstep.ok_or("missing or invalid `microstep`")?;
                 }
-                let mut payload = common(
-                    archetype,
-                    &id,
-                    parent_id,
-                    name,
-                    federate,
-                    Some(enclave),
-                    logical,
-                    microstep,
-                )
-                .with_component::<rerun::components::Text>(
-                    "boomerang.trace.action_key",
-                    [action_key.as_str()],
-                );
+                let mut payload =
+                    common(archetype, name, federate, Some(enclave), logical, microstep)
+                        .with_component::<rerun::components::Text>(
+                        "boomerang.trace.action_key",
+                        [action_key.as_str()],
+                    );
                 for (component, field) in [
                     (
                         "boomerang.trace.destination_logical_ns",
@@ -1145,8 +1052,6 @@ impl RerunLayer {
                 }
                 let mut payload = common(
                     "boomerang.PortWrite",
-                    &id,
-                    parent_id,
                     name,
                     federate,
                     Some(enclave),
@@ -1217,24 +1122,15 @@ impl RerunLayer {
                     "idle" | "finished" => "boomerang.FrontierState",
                     _ => return Err(format!("invalid `state` discriminator `{state}`")),
                 };
-                let payload = common(
-                    archetype,
-                    &id,
-                    parent_id,
-                    name,
-                    federate,
-                    Some(enclave),
-                    logical,
-                    microstep,
-                )
-                .with_component::<rerun::components::Text>(
-                    "boomerang.trace.state",
-                    [state.as_str()],
-                )
-                .with_component::<rerun::components::Text>(
-                    "boomerang.trace.outcome",
-                    [outcome.as_str()],
-                );
+                let payload = common(archetype, name, federate, Some(enclave), logical, microstep)
+                    .with_component::<rerun::components::Text>(
+                        "boomerang.trace.state",
+                        [state.as_str()],
+                    )
+                    .with_component::<rerun::components::Text>(
+                        "boomerang.trace.outcome",
+                        [outcome.as_str()],
+                    );
                 (
                     self.path(federate, Some(enclave), "scheduler", "scheduler", name),
                     payload,
@@ -1271,16 +1167,8 @@ impl RerunLayer {
                     "tag_complete" => "boomerang.TagComplete",
                     _ => "boomerang.Shutdown",
                 };
-                let mut payload = common(
-                    archetype,
-                    &id,
-                    parent_id,
-                    name,
-                    federate,
-                    Some(enclave),
-                    logical,
-                    microstep,
-                );
+                let mut payload =
+                    common(archetype, name, federate, Some(enclave), logical, microstep);
                 for (component, field) in [
                     ("boomerang.trace.destination", "destination"),
                     ("boomerang.trace.state", "state"),
@@ -1311,8 +1199,6 @@ impl RerunLayer {
                 let error = f.required_text("error")?;
                 let payload = common(
                     "boomerang.RuntimeDiagnostic",
-                    &id,
-                    parent_id,
                     name,
                     federate,
                     Some(enclave),
@@ -1374,11 +1260,8 @@ impl rerun::AsComponents for Combined {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn common(
     archetype: &'static str,
-    id: &TraceId,
-    parent: Option<&TraceId>,
     event: &str,
     federate: Option<&str>,
     enclave: Option<&str>,
@@ -1386,14 +1269,7 @@ fn common(
     microstep: Option<u64>,
 ) -> rerun::DynamicArchetype {
     let mut value = rerun::DynamicArchetype::new(archetype)
-        .with_component::<rerun::components::Text>("boomerang.trace.id", [id.0.as_str()])
         .with_component::<rerun::components::Text>("boomerang.trace.event", [event]);
-    if let Some(parent) = parent {
-        value = value.with_component::<rerun::components::Text>(
-            "boomerang.trace.parent_id",
-            [parent.0.as_str()],
-        );
-    }
     if let Some(federate) = federate {
         value =
             value.with_component::<rerun::components::Text>("boomerang.trace.federate", [federate]);

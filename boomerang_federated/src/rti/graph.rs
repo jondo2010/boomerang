@@ -396,23 +396,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             endpoint_ids
         );
-        assert_eq!(
-            graph
-                .endpoint_routes()
-                .map(|(id, source, target, delay)| (
-                    id.as_str(),
-                    source.as_str(),
-                    target.as_str(),
-                    delay.as_nanos(),
-                ))
-                .collect::<Vec<_>>(),
-            vec![
-                ("a-b", "a", "b", 0),
-                ("a-c", "a", "c", 1),
-                ("b-c", "b", "c", 2),
-            ]
-        );
-
         for id in endpoint_ids {
             let key = graph.endpoint_key(&endpoint(id)).unwrap();
             assert_eq!(graph.endpoint_id(key), &endpoint(id));

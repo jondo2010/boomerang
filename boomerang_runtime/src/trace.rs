@@ -40,7 +40,6 @@ pub mod event {
     /// assigned a different value.
     pub const PORT_WRITE: &str = "port_write";
     pub const PROPAGATION_SEND: &str = "propagation_send";
-    pub const PROPAGATION_RECEIVE: &str = "propagation_receive";
     pub const FRONTIER_PUBLISH: &str = "frontier_publish";
     pub const COORDINATION_WAIT: &str = "coordination_wait";
     pub const COORDINATION_GRANT: &str = "coordination_grant";

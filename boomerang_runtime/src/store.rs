@@ -429,11 +429,13 @@ pub mod tests {
             *p1 = Some(42);
         }
         {
+            let reaction_key = reaction_keys[0];
             let mut ctx_iter = unsafe { store.iter_borrow_storage(reaction_keys.iter().cloned()) };
-            let _res = ctx_iter
-                .next()
-                .unwrap()
-                .trigger(Tag::ZERO, crate::Level::default());
+            let _res =
+                ctx_iter
+                    .next()
+                    .unwrap()
+                    .trigger(reaction_key, Tag::ZERO, crate::Level::default());
         }
     }
 }

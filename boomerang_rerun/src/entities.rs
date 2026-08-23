@@ -1,96 +1,98 @@
-use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+
+#[cfg(feature = "federated")]
+use std::collections::BTreeMap;
+
+use boomerang_runtime::{ActionKey, EnclaveKey, PortKey, ReactionKey};
+use boomerang_tinymap::TinySecondaryMap;
 
 pub(crate) fn escape_entity_segment(segment: &str) -> String {
     segment.replace('\\', "\\\\").replace('/', "\\/")
 }
 
-/// Compact adapter-owned lookup derived synchronously from static registration.
-#[derive(Clone, Debug, Default)]
-pub(super) struct RegistrationIndex {
-    entities: HashMap<RegistrationLookup, RegistrationResolution>,
-    display_labels: HashMap<String, String>,
+/// Adapter-owned registration snapshot mirroring the lowered runtime execution shape.
+#[derive(Debug)]
+pub(super) enum RegistrationSnapshot {
+    Local(TinySecondaryMap<EnclaveKey, EnclaveRegistration>),
+    #[cfg(feature = "federated")]
+    Federated(BTreeMap<String, TinySecondaryMap<EnclaveKey, EnclaveRegistration>>),
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct RegistrationLookup {
-    federate: Option<String>,
-    enclave: String,
-    kind: &'static str,
-    identity: String,
+impl Default for RegistrationSnapshot {
+    fn default() -> Self {
+        Self::Local(TinySecondaryMap::new())
+    }
 }
 
-#[derive(Clone, Debug)]
-enum RegistrationResolution {
-    Unique(String),
-    Ambiguous,
+#[derive(Debug)]
+pub(super) struct EnclaveRegistration {
+    scheduler: EntityRegistration,
+    reactions: TinySecondaryMap<ReactionKey, EntityRegistration>,
+    actions: TinySecondaryMap<ActionKey, EntityRegistration>,
+    ports: TinySecondaryMap<PortKey, EntityRegistration>,
 }
 
-impl RegistrationIndex {
-    pub(super) fn register(
-        &mut self,
-        federate: Option<&str>,
-        enclave: &str,
-        kind: &'static str,
-        stable_key: &str,
-        display_name: &str,
-        path: &str,
-    ) {
-        self.display_labels
-            .entry(path.to_owned())
-            .or_insert_with(|| runtime_display_label(federate, enclave, display_name, stable_key));
-        self.register_identity(federate, enclave, kind, stable_key, path);
-        if display_name != stable_key {
-            self.register_identity(federate, enclave, kind, display_name, path);
+impl EnclaveRegistration {
+    fn new(scheduler: EntityRegistration) -> Self {
+        Self {
+            scheduler,
+            reactions: TinySecondaryMap::new(),
+            actions: TinySecondaryMap::new(),
+            ports: TinySecondaryMap::new(),
         }
     }
+}
 
-    fn register_identity(
-        &mut self,
-        federate: Option<&str>,
-        enclave: &str,
-        kind: &'static str,
-        identity: &str,
-        path: &str,
-    ) {
-        let lookup = RegistrationLookup {
-            federate: federate.map(str::to_owned),
-            enclave: enclave.to_owned(),
-            kind,
-            identity: identity.to_owned(),
-        };
-        register_resolution(&mut self.entities, lookup, path);
+#[derive(Debug)]
+pub(super) struct EntityRegistration {
+    pub(super) path: String,
+    pub(super) label: String,
+}
+
+impl EntityRegistration {
+    fn new(path: String, label: String) -> Self {
+        Self { path, label }
     }
+}
 
+impl RegistrationSnapshot {
     pub(super) fn resolve(
         &self,
         federate: Option<&str>,
         enclave: &str,
         kind: &'static str,
         identity: &str,
-    ) -> Option<String> {
-        resolve_registration(
-            &self.entities,
-            &RegistrationLookup {
-                federate: federate.map(str::to_owned),
-                enclave: enclave.to_owned(),
-                kind,
-                identity: identity.to_owned(),
-            },
-        )
+    ) -> Option<&EntityRegistration> {
+        let enclave = enclave.parse::<EnclaveKey>().ok()?;
+        let enclaves = match (self, federate) {
+            (Self::Local(enclaves), None) => enclaves,
+            #[cfg(feature = "federated")]
+            (Self::Federated(federates), Some(federate)) => federates.get(federate)?,
+            _ => return None,
+        };
+        let registration = enclaves.get(enclave)?;
+        match kind {
+            "scheduler" if identity == "scheduler" => Some(&registration.scheduler),
+            "reaction" => registration
+                .reactions
+                .get(identity.parse::<ReactionKey>().ok()?),
+            "action" => registration
+                .actions
+                .get(identity.parse::<ActionKey>().ok()?),
+            "port" => registration.ports.get(identity.parse::<PortKey>().ok()?),
+            _ => None,
+        }
     }
 
-    pub(super) fn display_label(&self, path: &str) -> Option<&str> {
-        self.display_labels.get(path).map(String::as_str)
+    pub(super) fn local(enclaves: TinySecondaryMap<EnclaveKey, EnclaveRegistration>) -> Self {
+        Self::Local(enclaves)
     }
 
-    pub(super) fn merge(&mut self, other: Self) {
-        for (lookup, incoming) in other.entities {
-            merge_resolution(&mut self.entities, lookup, incoming);
-        }
-        for (path, label) in other.display_labels {
-            self.display_labels.entry(path).or_insert(label);
-        }
+    #[cfg(feature = "federated")]
+    pub(super) fn federated(
+        federates: BTreeMap<String, TinySecondaryMap<EnclaveKey, EnclaveRegistration>>,
+    ) -> Self {
+        Self::Federated(federates)
     }
 }
 
@@ -150,42 +152,6 @@ pub(super) fn bounded_fragment(value: &str, max_chars: usize) -> String {
     format!("{prefix}{suffix}")
 }
 
-fn register_resolution<K: Eq + std::hash::Hash>(
-    map: &mut HashMap<K, RegistrationResolution>,
-    key: K,
-    path: &str,
-) {
-    merge_resolution(map, key, RegistrationResolution::Unique(path.to_owned()));
-}
-
-fn merge_resolution<K: Eq + std::hash::Hash>(
-    map: &mut HashMap<K, RegistrationResolution>,
-    key: K,
-    incoming: RegistrationResolution,
-) {
-    map.entry(key)
-        .and_modify(|current| {
-            if !matches!(
-                (&*current, &incoming),
-                (RegistrationResolution::Unique(left), RegistrationResolution::Unique(right))
-                    if left == right
-            ) {
-                *current = RegistrationResolution::Ambiguous;
-            }
-        })
-        .or_insert(incoming);
-}
-
-fn resolve_registration<K: Eq + std::hash::Hash>(
-    map: &HashMap<K, RegistrationResolution>,
-    key: &K,
-) -> Option<String> {
-    match map.get(key) {
-        Some(RegistrationResolution::Unique(path)) => Some(path.clone()),
-        Some(RegistrationResolution::Ambiguous) | None => None,
-    }
-}
-
 pub(super) fn log_runtime_enclaves(
     recording: &rerun::RecordingStream,
     federate: Option<&str>,
@@ -193,34 +159,30 @@ pub(super) fn log_runtime_enclaves(
         boomerang_runtime::EnclaveKey,
         boomerang_runtime::Enclave,
     >,
-    index: &mut RegistrationIndex,
-) -> rerun::RecordingStreamResult<()> {
+) -> rerun::RecordingStreamResult<TinySecondaryMap<EnclaveKey, EnclaveRegistration>> {
     use boomerang_runtime::{ActionKey, PortKey, ReactionKey, ReactorKey};
 
+    let mut registrations = TinySecondaryMap::new();
     for (enclave_key, enclave) in enclaves.iter() {
         let root = runtime_enclave_root(federate, enclave_key);
         let scheduler = format!("{root}/scheduler");
         let enclave_path = root.clone();
-        let mut nodes = vec![enclave_path.clone(), scheduler.clone()];
-        let mut node_labels = vec![
-            runtime_display_label(
-                federate,
-                &enclave_key.to_string(),
-                &enclave_key.to_string(),
-                &enclave_key.to_string(),
-            ),
-            runtime_display_label(federate, &enclave_key.to_string(), "scheduler", "scheduler"),
-        ];
-        let mut edges = vec![(enclave_path.clone(), scheduler.clone(), "owns_scheduler")];
         let enclave_key_string = enclave_key.to_string();
-        index.register(
+        let enclave_label = runtime_display_label(
             federate,
             &enclave_key_string,
-            "scheduler",
-            "scheduler",
-            "scheduler",
-            &scheduler,
+            &enclave_key_string,
+            &enclave_key_string,
         );
+        let scheduler_label =
+            runtime_display_label(federate, &enclave_key_string, "scheduler", "scheduler");
+        let mut registration = EnclaveRegistration::new(EntityRegistration::new(
+            scheduler.clone(),
+            scheduler_label.clone(),
+        ));
+        let mut nodes = vec![enclave_path.clone(), scheduler.clone()];
+        let mut node_labels = vec![enclave_label, scheduler_label];
+        let mut edges = vec![(enclave_path.clone(), scheduler.clone(), "owns_scheduler")];
 
         log_runtime_entity(
             recording,
@@ -301,23 +263,19 @@ pub(super) fn log_runtime_enclaves(
                 escape_entity_segment(&key.to_string())
             );
             let owner_path = reactor_path(owner);
-            nodes.push(path.clone());
-            node_labels.push(runtime_display_label(
+            let label = runtime_display_label(
                 federate,
                 &enclave_key_string,
                 reaction.get_name(),
                 &key.to_string(),
-            ));
+            );
+            nodes.push(path.clone());
+            node_labels.push(label.clone());
             edges.push((owner_path, path.clone(), "owns_reaction"));
             let owner_key = owner.to_string();
-            index.register(
-                federate,
-                &enclave_key_string,
-                "reaction",
-                &key.to_string(),
-                reaction.get_name(),
-                &path,
-            );
+            registration
+                .reactions
+                .insert(key, EntityRegistration::new(path.clone(), label));
             log_runtime_entity(
                 recording,
                 &path,
@@ -344,23 +302,19 @@ pub(super) fn log_runtime_enclaves(
                 reactor_path(owner),
                 escape_entity_segment(&key.to_string())
             );
-            nodes.push(path.clone());
-            node_labels.push(runtime_display_label(
+            let label = runtime_display_label(
                 federate,
                 &enclave_key_string,
                 action.name(),
                 &key.to_string(),
-            ));
+            );
+            nodes.push(path.clone());
+            node_labels.push(label.clone());
             edges.push((reactor_path(owner), path.clone(), "owns_action"));
             let owner_key = owner.to_string();
-            index.register(
-                federate,
-                &enclave_key_string,
-                "action",
-                &key.to_string(),
-                action.name(),
-                &path,
-            );
+            registration
+                .actions
+                .insert(key, EntityRegistration::new(path.clone(), label));
             log_runtime_entity(
                 recording,
                 &path,
@@ -389,23 +343,19 @@ pub(super) fn log_runtime_enclaves(
                 reactor_path(owner),
                 escape_entity_segment(&key.to_string())
             );
-            nodes.push(path.clone());
-            node_labels.push(runtime_display_label(
+            let label = runtime_display_label(
                 federate,
                 &enclave_key_string,
                 port.get_name(),
                 &key.to_string(),
-            ));
+            );
+            nodes.push(path.clone());
+            node_labels.push(label.clone());
             edges.push((reactor_path(owner), path.clone(), "owns_port"));
             let owner_key = owner.to_string();
-            index.register(
-                federate,
-                &enclave_key_string,
-                "port",
-                &key.to_string(),
-                port.get_name(),
-                &path,
-            );
+            registration
+                .ports
+                .insert(key, EntityRegistration::new(path.clone(), label));
             log_runtime_entity(
                 recording,
                 &path,
@@ -515,8 +465,9 @@ pub(super) fn log_runtime_enclaves(
             )
             .with_graph_type(rerun::components::GraphType::Directed),
         )?;
+        registrations.insert(enclave_key, registration);
     }
-    Ok(())
+    Ok(registrations)
 }
 
 fn runtime_reactor_path(

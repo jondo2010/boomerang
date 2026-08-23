@@ -10,7 +10,7 @@ use super::entities::{
     bounded_fragment, escape_entity_segment, log_runtime_relation, runtime_display_label,
     runtime_enclave_root,
 };
-use super::entities::{log_runtime_enclaves, RegistrationIndex};
+use super::entities::{log_runtime_enclaves, RegistrationSnapshot};
 use super::layer::{AdapterState, RerunLayer, SessionFilter};
 use tracing_subscriber::Layer as _;
 
@@ -115,14 +115,17 @@ impl RerunSession {
     /// Registration is synchronous and retains no runtime graph. Call this before execution
     /// consumes the [`boomerang_builder::RuntimeAssembly`].
     pub fn register_runtime(&self, runtime: &boomerang_builder::RuntimeAssembly) {
-        match &runtime.execution {
+        let registration = match &runtime.execution {
             boomerang_builder::RuntimeExecution::Local(enclaves) => {
-                self.register_enclaves(None, enclaves);
+                self.observe_registration(|| {
+                    log_runtime_enclaves(self.recording(), None, enclaves)
+                        .map(RegistrationSnapshot::local)
+                })
             }
             #[cfg(feature = "federated")]
-            boomerang_builder::RuntimeExecution::Federated(federation) => {
-                if let Some(index) = self.observe_registration(|| {
-                    let mut index = RegistrationIndex::default();
+            boomerang_builder::RuntimeExecution::Federated(federation) => self
+                .observe_registration(|| {
+                    let mut registrations = std::collections::BTreeMap::new();
                     let mut federation_nodes = Vec::new();
                     let mut federation_labels = Vec::new();
                     let mut federation_edges = Vec::new();
@@ -165,12 +168,12 @@ impl RerunSession {
                             ));
                             federation_edges.push((path.clone(), enclave_path));
                         }
-                        log_runtime_enclaves(
+                        let enclaves = log_runtime_enclaves(
                             self.recording(),
                             Some(id.as_str()),
                             federate.enclaves(),
-                            &mut index,
                         )?;
+                        registrations.insert(id.as_str().to_owned(), enclaves);
                     }
 
                     for (endpoint, source, target, delay) in federation.graph().endpoint_routes() {
@@ -201,15 +204,15 @@ impl RerunSession {
                         &rerun::GraphEdges::new(federation_edges)
                             .with_graph_type(rerun::components::GraphType::Directed),
                     )?;
-                    Ok(index)
-                }) {
-                    self.adapter
-                        .registration
-                        .write()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .merge(index);
-                }
-            }
+                    Ok(RegistrationSnapshot::federated(registrations))
+                }),
+        };
+        if let Some(registration) = registration {
+            *self
+                .adapter
+                .registration
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = registration;
         }
     }
 
@@ -230,27 +233,6 @@ impl RerunSession {
         self.recording
             .as_ref()
             .expect("session recording is present")
-    }
-
-    fn register_enclaves(
-        &self,
-        federate: Option<&str>,
-        enclaves: &boomerang_tinymap::TinyMap<
-            boomerang_runtime::EnclaveKey,
-            boomerang_runtime::Enclave,
-        >,
-    ) {
-        if let Some(index) = self.observe_registration(|| {
-            let mut index = RegistrationIndex::default();
-            log_runtime_enclaves(self.recording(), federate, enclaves, &mut index)?;
-            Ok(index)
-        }) {
-            self.adapter
-                .registration
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .merge(index);
-        }
     }
 
     fn observe_registration<T>(

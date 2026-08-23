@@ -13,7 +13,7 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 
 use super::entities::{
-    bounded_fragment, compact_runtime_key, escape_entity_segment, RegistrationIndex,
+    bounded_fragment, compact_runtime_key, escape_entity_segment, RegistrationSnapshot,
 };
 use super::session::SessionState;
 
@@ -59,14 +59,14 @@ pub(super) struct RerunLayer {
 
 #[derive(Clone)]
 pub(super) struct AdapterState {
-    pub(super) registration: Arc<RwLock<RegistrationIndex>>,
+    pub(super) registration: Arc<RwLock<RegistrationSnapshot>>,
     named_series: Arc<RwLock<HashSet<String>>>,
 }
 
 impl Default for AdapterState {
     fn default() -> Self {
         Self {
-            registration: Arc::new(RwLock::new(RegistrationIndex::default())),
+            registration: Arc::new(RwLock::new(RegistrationSnapshot::default())),
             named_series: Arc::new(RwLock::new(HashSet::new())),
         }
     }
@@ -114,9 +114,15 @@ struct SpanState {
     logical_ns: Option<u64>,
     microstep: Option<u64>,
     path: String,
+    entity_label: Option<String>,
     time: TimePoint,
     timing: Mutex<SpanTiming>,
     kind: Mutex<SpanKind>,
+}
+
+struct ResolvedPath {
+    path: String,
+    entity_label: Option<String>,
 }
 
 #[derive(Default)]
@@ -277,7 +283,13 @@ impl RerunLayer {
         }
     }
 
-    fn write_measure(&self, path: &str, time: TimePoint, value: &dyn rerun::AsComponents) {
+    fn write_measure(
+        &self,
+        path: &str,
+        entity_label: Option<&str>,
+        time: TimePoint,
+        value: &dyn rerun::AsComponents,
+    ) {
         if self
             .adapter
             .named_series
@@ -295,7 +307,7 @@ impl RerunLayer {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(path.to_owned());
         if first_measure {
-            let name = self.compact_series_name(path);
+            let name = compact_series_name(path, entity_label);
             if let Err(error) = self
                 .recording
                 .log_static(path, &rerun::SeriesPoints::new().with_names([name]))
@@ -305,25 +317,6 @@ impl RerunLayer {
             }
         }
         self.write(path, time, value);
-    }
-
-    fn compact_series_name(&self, path: &str) -> String {
-        let (entity, event) = path.rsplit_once('/').unwrap_or((path, path));
-        let registered = self
-            .adapter
-            .registration
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .display_label(entity)
-            .map(str::to_owned);
-        let entity = registered.unwrap_or_else(|| {
-            let leaf = entity.rsplit('/').next().unwrap_or(entity);
-            compact_runtime_key(leaf)
-        });
-        bounded_fragment(
-            &format!("{entity} · {}", bounded_fragment(compact_event(event), 16)),
-            64,
-        )
     }
 
     fn diagnostic(&self, event: Option<&str>, error: impl fmt::Display) {
@@ -373,30 +366,37 @@ impl RerunLayer {
         kind: &'static str,
         identity: &str,
         event: &str,
-    ) -> String {
+    ) -> ResolvedPath {
         let registered = enclave.and_then(|enclave| {
             self.adapter
                 .registration
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .resolve(federate, enclave, kind, identity)
+                .map(|entity| (entity.path.clone(), entity.label.clone()))
         });
-        registered
-            .map(|path| format!("{path}/{}", escape_entity_segment(event)))
-            .unwrap_or_else(|| {
-                let root = match (federate, enclave) {
-                    (Some(federate), Some(enclave)) => format!(
-                        "/federates/{}/enclaves/{}",
-                        escape_entity_segment(federate),
-                        escape_entity_segment(enclave)
-                    ),
-                    (None, Some(enclave)) => {
-                        format!("/enclaves/{}", escape_entity_segment(enclave))
-                    }
-                    _ => "/runtime/unresolved".to_owned(),
-                };
-                format!("{root}/{}", escape_entity_segment(event))
-            })
+        if let Some((path, label)) = registered {
+            ResolvedPath {
+                path: format!("{path}/{}", escape_entity_segment(event)),
+                entity_label: Some(label),
+            }
+        } else {
+            let root = match (federate, enclave) {
+                (Some(federate), Some(enclave)) => format!(
+                    "/federates/{}/enclaves/{}",
+                    escape_entity_segment(federate),
+                    escape_entity_segment(enclave)
+                ),
+                (None, Some(enclave)) => {
+                    format!("/enclaves/{}", escape_entity_segment(enclave))
+                }
+                _ => "/runtime/unresolved".to_owned(),
+            };
+            ResolvedPath {
+                path: format!("{root}/{}", escape_entity_segment(event)),
+                entity_label: None,
+            }
+        }
     }
 }
 
@@ -541,7 +541,7 @@ where
                     }
                 }
             }
-            let path = self.path(
+            let resolved_path = self.path(
                 federate.as_deref(),
                 enclave.as_deref(),
                 entity_kind,
@@ -553,7 +553,8 @@ where
                 enclave,
                 logical_ns,
                 microstep,
-                path,
+                path: resolved_path.path,
+                entity_label: resolved_path.entity_label,
                 time: self.timepoint(logical_ns),
                 timing: Mutex::new(SpanTiming::default()),
                 kind: Mutex::new(kind),
@@ -816,7 +817,12 @@ where
             };
             {
                 let scalar = rerun::Scalars::new([measure]);
-                self.write_measure(&span.path, span.time, &Combined::new([&payload, &scalar]));
+                self.write_measure(
+                    &span.path,
+                    span.entity_label.as_deref(),
+                    span.time,
+                    &Combined::new([&payload, &scalar]),
+                );
             }
             if matches!(
                 kind,
@@ -1226,9 +1232,14 @@ impl RerunLayer {
         };
         if let Some(scalar) = scalar {
             let measure = rerun::Scalars::new([scalar]);
-            self.write_measure(&path, time, &Combined::new([&payload, &measure]));
+            self.write_measure(
+                &path.path,
+                path.entity_label.as_deref(),
+                time,
+                &Combined::new([&payload, &measure]),
+            );
         } else {
-            self.write(&path, time, &payload);
+            self.write(&path.path, time, &payload);
         }
         Ok(())
     }
@@ -1299,6 +1310,18 @@ fn bool_array(value: bool) -> Arc<dyn rerun::external::arrow::array::Array> {
 }
 fn saturating_i64(value: u128) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn compact_series_name(path: &str, entity_label: Option<&str>) -> String {
+    let (entity, event) = path.rsplit_once('/').unwrap_or((path, path));
+    let entity = entity_label.map(str::to_owned).unwrap_or_else(|| {
+        let leaf = entity.rsplit('/').next().unwrap_or(entity);
+        compact_runtime_key(leaf)
+    });
+    bounded_fragment(
+        &format!("{entity} · {}", bounded_fragment(compact_event(event), 16)),
+        64,
+    )
 }
 
 fn compact_event(event: &str) -> &str {

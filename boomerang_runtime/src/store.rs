@@ -50,7 +50,12 @@ impl<'a> From<&'a mut ReactionTriggerCtxPtrs> for ReactionTriggerCtx<'a> {
 
 impl<'a> ReactionTriggerCtx<'a> {
     /// Trigger the reaction with the given context and state.
-    pub(crate) fn trigger(self, tag: Tag, level: crate::Level) -> &'a TriggerRes {
+    pub(crate) fn trigger(
+        self,
+        reaction_key: ReactionKey,
+        tag: Tag,
+        level: crate::Level,
+    ) -> &'a TriggerRes {
         let span = tracing::trace_span!(
             target: crate::trace::TRACE_TARGET,
             "reaction_execute",
@@ -59,6 +64,7 @@ impl<'a> ReactionTriggerCtx<'a> {
             logical_ns = crate::trace::logical_ns(tag),
             microstep = crate::trace::microstep(tag),
             reactor = self.reactor.name(),
+            reaction_key = %reaction_key,
             reaction = self.reaction.get_name(),
             level = level.0,
             state = "begin",

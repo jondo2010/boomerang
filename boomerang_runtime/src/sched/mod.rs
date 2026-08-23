@@ -632,8 +632,10 @@ impl Scheduler {
             use rayon::prelude::ParallelIterator;
 
             #[cfg(not(feature = "parallel"))]
-            let iter_ctx_res =
-                iter_ctx.map(|(idx, trigger_ctx)| (idx, trigger_ctx.trigger(tag, level)));
+            let iter_ctx_res = iter_ctx.map(|(idx, trigger_ctx)| {
+                let reaction_key = self.reaction_buffer[idx];
+                (idx, trigger_ctx.trigger(reaction_key, tag, level))
+            });
 
             #[cfg(feature = "parallel")]
             let iter_ctx_res = {
@@ -644,13 +646,17 @@ impl Scheduler {
                         .map(|(idx, trigger_ctx)| {
                             tracing::dispatcher::with_default(&dispatch, || {
                                 let _tag_entered = reaction_parent.enter();
-                                (idx, trigger_ctx.trigger(tag, level))
+                                let reaction_key = self.reaction_buffer[idx];
+                                (idx, trigger_ctx.trigger(reaction_key, tag, level))
                             })
                         })
                         .collect::<Vec<_>>()
                 } else {
                     rayon::prelude::ParallelBridge::par_bridge(iter_ctx)
-                        .map(|(idx, trigger_ctx)| (idx, trigger_ctx.trigger(tag, level)))
+                        .map(|(idx, trigger_ctx)| {
+                            let reaction_key = self.reaction_buffer[idx];
+                            (idx, trigger_ctx.trigger(reaction_key, tag, level))
+                        })
                         .collect::<Vec<_>>()
                 }
             };

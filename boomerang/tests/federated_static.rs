@@ -486,6 +486,20 @@ fn public_api_runs_static_federation_with_finalized_rrd_trace() {
         text_component_at(reaction, ":boomerang.trace.federate", reaction_row).as_deref(),
         Some("b")
     );
+    let reaction_key = text_component_at(reaction, ":boomerang.trace.reaction_key", reaction_row)
+        .expect("reaction execution carries its stable reaction key");
+    let reaction_path = reaction.entity_path().to_string();
+    let registered_reaction_path = reaction_path
+        .strip_suffix("/reaction_execute")
+        .expect("reaction execution is nested beneath its registered entity");
+    assert!(registered_reaction_path.contains("/reactions/"));
+    assert!(rows(&chunks).any(|(chunk, row)| {
+        chunk.entity_path().to_string() == registered_reaction_path
+            && text_component_at(chunk, ":boomerang.runtime.kind", row).as_deref()
+                == Some("reaction")
+            && text_component_at(chunk, ":boomerang.runtime.stable_key", row).as_deref()
+                == Some(reaction_key.as_str())
+    }), "reaction execution resolves through the static reaction registered by its typed key: {reaction_path}");
     let duration_ns = uint_component_at(reaction, ":boomerang.trace.duration_ns", reaction_row)
         .expect("reaction duration component");
     let duration_measure =

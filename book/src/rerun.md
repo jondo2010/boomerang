@@ -77,9 +77,9 @@ consume the assembly with `execute_federation_in_memory` or
 ## Finalizing the recording
 
 Rerun integration is offline-file-first: `RerunSession::save` creates the target
-RRD file and `session.finish()?` finalizes it. Treat a successful `finish` as the
-recording's success signal; it verifies that the finalized RRD footer can be
-decoded and reports earlier recording failures.
+RRD file and `session.finish()?` completes the session. It delegates file-sink
+finalization to Rerun and reports Boomerang's session-level finalizer failures or
+earlier observational failures; Rerun owns sink-level lifecycle and diagnostics.
 
 ## Opening and checking recordings
 

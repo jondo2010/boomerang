@@ -2,7 +2,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rerun::external::re_log_encoding::Decodable as _;
 use rerun::{RecordingStream, RecordingStreamBuilder};
 
 #[cfg(feature = "federated")]
@@ -37,36 +36,17 @@ enum RerunSessionFinishErrorKind {
     Timeout(Duration),
     #[error("Rerun finalizer disconnected")]
     Disconnected,
-    #[error(transparent)]
-    Flush(#[from] rerun::sink::SinkFlushError),
-    #[error("failed to verify finalized RRD file {path}: {source}")]
-    File {
-        path: std::path::PathBuf,
-        #[source]
-        source: RrdFooterVerificationError,
-    },
     #[error("recording was disabled after an observational failure: {0}")]
     PriorObservationalFailure(String),
-}
-
-#[derive(Debug, thiserror::Error)]
-enum RrdFooterVerificationError {
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    #[error("missing or truncated RRD footer (file has {actual} bytes, requires {required})")]
-    Truncated { actual: u64, required: usize },
-    #[error("invalid RRD footer: {0}")]
-    Invalid(#[source] rerun::external::re_log_encoding::CodecError),
 }
 
 /// A file-backed Boomerang trace recording.
 ///
 /// Construct sessions with [`Self::save`], register the already-lowered runtime before execution,
-/// install [`Self::layer`] in the active subscriber, and call [`Self::finish`] to obtain a checked,
-/// footer-bearing RRD file.
+/// install [`Self::layer`] in the active subscriber, and call [`Self::finish`] to delegate RRD
+/// finalization to Rerun.
 pub struct RerunSession {
     recording: Option<RecordingStream>,
-    path: std::path::PathBuf,
     finish_timeout: Duration,
     state: SessionState,
     adapter: AdapterState,
@@ -89,7 +69,6 @@ impl RerunSession {
         let state = SessionState::new(recording.is_enabled());
         Ok(Self {
             recording: Some(recording),
-            path,
             finish_timeout: DEFAULT_FINISH_TIMEOUT,
             state,
             adapter: AdapterState::default(),
@@ -216,11 +195,10 @@ impl RerunSession {
         }
     }
 
-    /// Finalizes the file and verifies that its RRD footer can be decoded.
+    /// Delegates file-sink finalization to Rerun and reports session-level or observational errors.
     pub fn finish(mut self) -> Result<(), RerunSessionFinishError> {
         let recording = self.recording.take().expect("session recording is present");
-        finalize_bounded(recording, self.path.clone(), self.finish_timeout)
-            .map_err(RerunSessionFinishError)?;
+        finalize_bounded(recording, self.finish_timeout).map_err(RerunSessionFinishError)?;
         if let Some(error) = self.state.first_error() {
             return Err(RerunSessionFinishError(
                 RerunSessionFinishErrorKind::PriorObservationalFailure(error),
@@ -262,83 +240,34 @@ impl Drop for RerunSession {
         let Some(recording) = self.recording.take() else {
             return;
         };
-        let timeout = self.finish_timeout;
         let _ = std::thread::Builder::new()
             .name("boomerang-rerun-drop".to_owned())
             .spawn(move || {
-                let _ = recording.flush_with_timeout(timeout);
-                recording.disconnect();
+                recording.finalize_deferred_sinks();
+                drop(recording);
             });
     }
 }
 
 fn finalize_bounded(
     recording: RecordingStream,
-    path: std::path::PathBuf,
     timeout: Duration,
 ) -> Result<(), RerunSessionFinishErrorKind> {
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    let sdk_timeout = timeout / 2;
     std::thread::Builder::new()
         .name("boomerang-rerun-finalize".to_owned())
         .spawn(move || {
-            let result = (|| {
-                recording.flush_with_timeout(sdk_timeout)?;
-                recording.disconnect();
-                drop(recording);
-                verify_rrd_footer(&path)
-            })();
-            let _ = sender.send(result);
+            recording.finalize_deferred_sinks();
+            drop(recording);
+            let _ = sender.send(());
         })
         .map_err(RerunSessionFinishErrorKind::Spawn)?;
-    receiver
-        .recv_timeout(timeout)
-        .map_err(|error| match error {
-            std::sync::mpsc::RecvTimeoutError::Timeout => {
-                RerunSessionFinishErrorKind::Timeout(timeout)
-            }
-            std::sync::mpsc::RecvTimeoutError::Disconnected => {
-                RerunSessionFinishErrorKind::Disconnected
-            }
-        })?
-}
-
-fn verify_rrd_footer(path: &std::path::Path) -> Result<(), RerunSessionFinishErrorKind> {
-    use std::io::{Read as _, Seek as _};
-
-    fn file_error(
-        path: &std::path::Path,
-        source: impl Into<RrdFooterVerificationError>,
-    ) -> RerunSessionFinishErrorKind {
-        RerunSessionFinishErrorKind::File {
-            path: path.to_owned(),
-            source: source.into(),
+    receiver.recv_timeout(timeout).map_err(|error| match error {
+        std::sync::mpsc::RecvTimeoutError::Timeout => RerunSessionFinishErrorKind::Timeout(timeout),
+        std::sync::mpsc::RecvTimeoutError::Disconnected => {
+            RerunSessionFinishErrorKind::Disconnected
         }
-    }
-
-    let mut file = std::fs::File::open(path).map_err(|error| file_error(path, error))?;
-    let file_len = file
-        .metadata()
-        .map_err(|error| file_error(path, error))?
-        .len();
-    let footer_size = rerun::external::re_log_encoding::StreamFooter::ENCODED_SIZE_BYTES;
-    if file_len < footer_size as u64 {
-        return Err(file_error(
-            path,
-            RrdFooterVerificationError::Truncated {
-                actual: file_len,
-                required: footer_size,
-            },
-        ));
-    }
-    file.seek(std::io::SeekFrom::End(-(footer_size as i64)))
-        .map_err(|error| file_error(path, error))?;
-    let mut footer = vec![0; footer_size];
-    file.read_exact(&mut footer)
-        .map_err(|error| file_error(path, error))?;
-    rerun::external::re_log_encoding::StreamFooter::from_rrd_bytes(&footer)
-        .map_err(|error| file_error(path, RrdFooterVerificationError::Invalid(error)))?;
-    Ok(())
+    })
 }
 
 fn default_blueprint() -> rerun::blueprint::Blueprint {

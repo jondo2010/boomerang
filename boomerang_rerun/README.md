@@ -22,8 +22,8 @@ path when it installs the layer for runner-based applications.
 The modules have distinct responsibilities:
 
 - `session` owns file-backed `RecordingStream` construction, the default
-  timeline-first blueprint, static runtime registration, finalization, and RRD
-  footer verification.
+  timeline-first blueprint, static runtime registration, and the finalization
+  handoff to Rerun.
 - `layer` maps Boomerang trace spans and events directly to dense Rerun
   archetypes.
 - `entities` maps already-lowered runtime metadata to timeless Rerun entities,
@@ -62,9 +62,10 @@ file-backed recording with the default blueprint. Call `register_runtime` before
 execution consumes the lowered assembly, install `layer` in the active tracing
 subscriber, and call `finish` after execution.
 
-`finish` is the authoritative success result for the offline recording: it
-finalizes the file, verifies that the RRD footer can be decoded, and reports any
-earlier recording failure.
+`finish` is the completion boundary for the offline recording. It delegates
+file-sink finalization to Rerun and reports Boomerang's session-level finalizer
+failures or an earlier observational failure; Rerun owns sink-level lifecycle
+and diagnostics.
 
 ## Verification
 

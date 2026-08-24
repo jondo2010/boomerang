@@ -21,14 +21,14 @@ pub(super) enum RegistrationSnapshot {
 
 #[derive(Debug)]
 pub(super) struct EnclaveRegistration {
-    scheduler: EntityRegistration<10>,
-    reactions: TinySecondaryMap<ReactionKey, EntityRegistration<1>>,
-    actions: TinySecondaryMap<ActionKey, EntityRegistration<3>>,
-    ports: TinySecondaryMap<PortKey, EntityRegistration<1>>,
+    scheduler: EntityRegistration,
+    reactions: TinySecondaryMap<ReactionKey, EntityRegistration>,
+    actions: TinySecondaryMap<ActionKey, EntityRegistration>,
+    ports: TinySecondaryMap<PortKey, EntityRegistration>,
 }
 
 impl EnclaveRegistration {
-    fn new(scheduler: EntityRegistration<10>) -> Self {
+    fn new(scheduler: EntityRegistration) -> Self {
         Self {
             scheduler,
             reactions: TinySecondaryMap::new(),
@@ -39,15 +39,15 @@ impl EnclaveRegistration {
 }
 
 #[derive(Debug)]
-struct EntityRegistration<const N: usize> {
+struct EntityRegistration {
     label: String,
-    paths: [rerun::EntityPath; N],
+    paths: Box<[rerun::EntityPath]>,
     registered_series: u64,
     named_series: AtomicU64,
 }
-
-impl<const N: usize> EntityRegistration<N> {
-    fn new(root: &str, label: String, mut series: [SeriesKind; N]) -> Self {
+impl EntityRegistration {
+    fn new(root: &str, label: String, series: &[SeriesKind]) -> Self {
+        let mut series = series.to_vec();
         series.sort_unstable_by_key(|series| series.bit());
         let mut registered_series = 0_u64;
         for &series in &series {
@@ -58,7 +58,10 @@ impl<const N: usize> EntityRegistration<N> {
         let root = rerun::EntityPath::from(root);
         Self {
             label,
-            paths: series.map(|series| event_path(&root, series)),
+            paths: series
+                .into_iter()
+                .map(|series| root.join(&rerun::EntityPath::from(series.entity_suffix())))
+                .collect(),
             registered_series,
             named_series: AtomicU64::new(0),
         }
@@ -78,10 +81,6 @@ impl<const N: usize> EntityRegistration<N> {
             .then(|| self.label.clone());
         Some((self.paths[rank].clone(), label))
     }
-}
-
-fn event_path(root: &rerun::EntityPath, series: SeriesKind) -> rerun::EntityPath {
-    root.join(&rerun::EntityPath::from(series.entity_suffix()))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -126,7 +125,7 @@ impl SeriesKind {
     }
 }
 
-const SCHEDULER_SERIES: [SeriesKind; 10] = [
+const SCHEDULER_SERIES: &[SeriesKind] = &[
     SeriesKind::Event(TraceEvent::SchedulerThread),
     SeriesKind::Event(TraceEvent::AsyncIngress),
     SeriesKind::Event(TraceEvent::TagProcess),
@@ -138,13 +137,13 @@ const SCHEDULER_SERIES: [SeriesKind; 10] = [
     SeriesKind::Event(TraceEvent::TagComplete),
     SeriesKind::Event(TraceEvent::Shutdown),
 ];
-const REACTION_SERIES: [SeriesKind; 1] = [SeriesKind::Event(TraceEvent::ReactionExecute)];
-const ACTION_SERIES: [SeriesKind; 3] = [
+const REACTION_SERIES: &[SeriesKind] = &[SeriesKind::Event(TraceEvent::ReactionExecute)];
+const ACTION_SERIES: &[SeriesKind] = &[
     SeriesKind::Event(TraceEvent::AsyncIngress),
     SeriesKind::PropagationReceive,
     SeriesKind::Event(TraceEvent::ActionSchedule),
 ];
-const PORT_SERIES: [SeriesKind; 1] = [SeriesKind::Event(TraceEvent::PortWrite)];
+const PORT_SERIES: &[SeriesKind] = &[SeriesKind::Event(TraceEvent::PortWrite)];
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum EntitySelector {

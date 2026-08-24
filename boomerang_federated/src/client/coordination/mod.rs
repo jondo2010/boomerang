@@ -175,7 +175,8 @@ impl RtiLogicalTimeCoordinator {
         Ok(())
     }
 
-    /// Send a final Stop frame for this federate after its scheduler has terminated.
+    /// Send final terminal frames after the Federate-wide coordination service decides termination.
+    /// Normal completion reaches this point after all participant Enclave schedulers have finished.
     #[tracing::instrument(
         level = "debug",
         skip(self),

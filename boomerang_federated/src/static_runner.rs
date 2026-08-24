@@ -891,7 +891,7 @@ mod tests {
                 assert!(result.is_ok(), "runner failed: {result:?}");
                 assert!(
                     !advanced_early.load(Ordering::Acquire),
-                    "non-gateway Enclave advanced beyond the withheld federate frontier"
+                    "second participant Enclave advanced beyond the withheld federate frontier"
                 );
                 let observations = observations.lock().unwrap();
                 let message = observations

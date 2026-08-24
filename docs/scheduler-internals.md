@@ -274,6 +274,7 @@ sequenceDiagram
     end
     opt every participant is finished
         F->>C: SendStop
+        C->>R: NET(FOREVER)
         C->>R: Stop
     end
 ```

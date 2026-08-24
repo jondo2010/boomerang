@@ -30,21 +30,9 @@ impl RuntimeFederate {
         &self.enclaves
     }
 
-    /// Return mutable access to this Federate's runtime Enclaves.
-    pub fn enclaves_mut(
-        &mut self,
-    ) -> &mut tinymap::TinyMap<boomerang_runtime::EnclaveKey, boomerang_runtime::Enclave> {
-        &mut self.enclaves
-    }
-
     /// Return this Federate's protocol bridge.
     pub fn bridge(&self) -> &FederateRuntimeBridge {
         &self.bridge
-    }
-
-    /// Return mutable access to this Federate's protocol bridge.
-    pub fn bridge_mut(&mut self) -> &mut FederateRuntimeBridge {
-        &mut self.bridge
     }
 
     /// Consume this Federate into its identity, Enclaves, and protocol bridge.
@@ -76,11 +64,6 @@ impl RuntimeFederation {
     /// Return the runtime Federates.
     pub fn federates(&self) -> &BTreeMap<FederateId, RuntimeFederate> {
         &self.federates
-    }
-
-    /// Return mutable access to the runtime Federates.
-    pub fn federates_mut(&mut self) -> &mut BTreeMap<FederateId, RuntimeFederate> {
-        &mut self.federates
     }
 
     /// Consume this Federation into its graph and Federates.

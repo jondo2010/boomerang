@@ -127,14 +127,6 @@ impl RuntimeAssembly {
     }
 
     #[cfg(feature = "federated")]
-    pub fn federation_mut(&mut self) -> Option<&mut boomerang_federated::RuntimeFederation> {
-        match &mut self.execution {
-            RuntimeExecution::Federated(federation) => Some(federation),
-            RuntimeExecution::Local(_) => None,
-        }
-    }
-
-    #[cfg(feature = "federated")]
     pub fn into_federation(
         self,
     ) -> Result<boomerang_federated::RuntimeFederation, RuntimeExecutionError> {
@@ -175,8 +167,27 @@ pub(crate) struct RuntimeAssemblyContext {
     /// Aliases from assembly keys to runtime keys.
     pub(crate) aliases: RuntimeAliases,
     #[cfg(feature = "federated")]
-    /// Fully lowered static-federation data, or `None` for a local-only assembly.
-    pub(crate) federation: Option<boomerang_federated::StaticFederationRuntime>,
+    /// Federation data retained privately until final runtime hierarchy construction.
+    pub(crate) federation: Option<LoweredFederationRuntime>,
+}
+
+#[cfg(feature = "federated")]
+pub(crate) struct LoweredFederationRuntime {
+    rti_graph: boomerang_federated::RtiGraph,
+    connections: boomerang_federated::FederatedRuntimeConnections,
+}
+
+#[cfg(feature = "federated")]
+impl LoweredFederationRuntime {
+    pub(crate) fn connections(&self) -> &boomerang_federated::FederatedRuntimeConnections {
+        &self.connections
+    }
+
+    pub(crate) fn connections_mut(
+        &mut self,
+    ) -> &mut boomerang_federated::FederatedRuntimeConnections {
+        &mut self.connections
+    }
 }
 
 /// Dense runtime Enclave maps grouped by their execution owner.
@@ -371,7 +382,11 @@ fn finish_runtime_assembly_context(
                         .into(),
                 });
             }
-            RuntimeExecution::Federated(federation.finalize(enclaves.federated)?)
+            RuntimeExecution::Federated(boomerang_federated::RuntimeFederation::from_lowered(
+                federation.rti_graph,
+                enclaves.federated,
+                federation.connections,
+            )?)
         }
         None => {
             debug_assert!(enclaves.federated.is_empty());
@@ -1192,7 +1207,6 @@ impl Assembly {
         let FederationLoweringArtifacts {
             rti_graph,
             connections,
-            federate_reactors,
             boundaries,
         } = lower_federation(&partition_analysis, |port| {
             self.fqn_for(port, false).map(|fqn| fqn.to_string())
@@ -1215,11 +1229,11 @@ impl Assembly {
         )?;
 
         #[cfg(feature = "federated")]
-        if !federate_reactors.is_empty() {
-            runtime_assembly.federation = Some(boomerang_federated::StaticFederationRuntime::new(
+        if rti_graph.federate_ids().next().is_some() {
+            runtime_assembly.federation = Some(LoweredFederationRuntime {
                 rti_graph,
                 connections,
-            ));
+            });
         }
 
         self.build_runtime_actions(&partition_map, &mut runtime_assembly)?;

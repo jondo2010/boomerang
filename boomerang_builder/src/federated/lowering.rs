@@ -1,6 +1,6 @@
 //! Projection from assembly partition boundaries to protocol topology artifacts.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeSet, HashMap};
 
 use crate::{runtime, AssemblyError, AssemblyPortKey, AssemblyReactorKey, PartitionAnalysis};
 
@@ -26,9 +26,6 @@ pub(crate) struct FederationLoweringArtifacts {
     pub(crate) rti_graph: boomerang_federated::RtiGraph,
     /// Prebuilt local client mailboxes and routes from the same endpoint records.
     pub(crate) connections: boomerang_federated::FederatedRuntimeConnections,
-    /// Assembly enclave roots grouped by their owning protocol federate.
-    pub(crate) federate_reactors:
-        BTreeMap<boomerang_federated::FederateId, Vec<AssemblyReactorKey>>,
     /// Connection metadata consumed while lowering connection specifications.
     pub(crate) boundaries: FederatedBoundaryIndex,
 }
@@ -38,7 +35,7 @@ pub(crate) fn lower_federation(
     analysis: &PartitionAnalysis,
     mut port_fqn: impl FnMut(AssemblyPortKey) -> Result<String, AssemblyError>,
 ) -> Result<FederationLoweringArtifacts, AssemblyError> {
-    let mut federate_reactors = BTreeMap::new();
+    let mut federates = BTreeSet::new();
     for (reactor, federate) in &analysis.federates {
         if federate.trim().is_empty() {
             return Err(federation_bridge_error(format!(
@@ -46,10 +43,7 @@ pub(crate) fn lower_federation(
             )));
         }
         let federate_id = boomerang_federated::FederateId::new(federate.clone());
-        federate_reactors
-            .entry(federate_id)
-            .or_insert_with(Vec::new)
-            .push(reactor);
+        federates.insert(federate_id);
     }
 
     let mut boundaries = HashMap::new();
@@ -58,12 +52,12 @@ pub(crate) fn lower_federation(
     for (edge, source_federate, target_federate) in analysis.federated_boundaries() {
         let source = boomerang_federated::FederateId::new(source_federate);
         let target = boomerang_federated::FederateId::new(target_federate);
-        if !federate_reactors.contains_key(&source) {
+        if !federates.contains(&source) {
             return Err(federation_bridge_error(format!(
                 "federated boundary references unknown source federate '{source}'"
             )));
         }
-        if !federate_reactors.contains_key(&target) {
+        if !federates.contains(&target) {
             return Err(federation_bridge_error(format!(
                 "federated boundary references unknown target federate '{target}'"
             )));
@@ -97,7 +91,7 @@ pub(crate) fn lower_federation(
             .is_some();
     }
 
-    let graph = analyze_federation_graph(federate_reactors.keys().cloned(), endpoints)?;
+    let graph = analyze_federation_graph(federates, endpoints)?;
     if has_duplicate_boundary {
         return Err(federation_bridge_error(
             "duplicate federated boundary for the same source and target ports",
@@ -120,7 +114,6 @@ pub(crate) fn lower_federation(
     Ok(FederationLoweringArtifacts {
         rti_graph,
         connections,
-        federate_reactors,
         boundaries,
     })
 }

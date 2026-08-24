@@ -64,9 +64,14 @@ struct FederatedOutboundCapture {
 }
 
 impl FederatedOutboundCapture {
-    fn take(parts: &mut RuntimeAssembly) -> Self {
+    fn take(
+        parts: RuntimeAssembly,
+    ) -> (
+        Self,
+        tinymap::TinyMap<runtime::EnclaveKey, runtime::Enclave>,
+    ) {
         let federation = parts
-            .federation_mut()
+            .into_federation()
             .expect("federated assembly must contain lowered federation data");
         assert_eq!(federation.graph().endpoint_ids().count(), 1);
         let source = federation
@@ -77,13 +82,17 @@ impl FederatedOutboundCapture {
             .expect("lowered route exists")
             .source
             .clone();
-        let mailbox = federation
-            .federates_mut()
-            .get_mut(&source)
+        let (_, mut federates) = federation.into_parts();
+        let (_, enclaves, bridge) = federates
+            .remove(&source)
             .expect("source Federate exists")
-            .bridge_mut()
-            .take_mailbox();
-        Self { mailbox }
+            .into_parts();
+        (
+            Self {
+                mailbox: bridge.into_mailbox(),
+            },
+            enclaves,
+        )
     }
 
     fn drain(&mut self) -> Vec<boomerang_federated::FederateToRti> {
@@ -1454,17 +1463,10 @@ fn test_federated_sender_emits_serialized_msg_command() {
     ctx.connect_port(source, sink, Some(delay), false).unwrap();
     ctx.finish().unwrap();
 
-    let mut parts = assembly
+    let parts = assembly
         .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
-    let mut outbound = FederatedOutboundCapture::take(&mut parts);
-    let federation = parts.into_federation().unwrap();
-    let (_, mut federates) = federation.into_parts();
-    let source_enclaves = federates
-        .remove(&boomerang_federated::FederateId::new("source"))
-        .unwrap()
-        .into_parts()
-        .1;
+    let (mut outbound, source_enclaves) = FederatedOutboundCapture::take(parts);
 
     let config = runtime::Config::default()
         .with_fast_forward(true)

@@ -1767,7 +1767,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_error_aborts_rti_session_before_returning() {
+    fn setup_error_cleans_up_started_services_and_session() {
         struct DropSignal(Arc<AtomicBool>);
 
         impl Drop for DropSignal {
@@ -1776,70 +1776,77 @@ mod tests {
             }
         }
 
-        let started = FederateId::new("a-started");
-        let missing = FederateId::new("b-missing");
-        let tokio_runtime = build_tokio_runtime(1).unwrap();
-        let (client_transport, mut rti_transport) = in_memory_transport_pair();
-        let session_dropped = Arc::new(AtomicBool::new(false));
-        let drop_signal = DropSignal(Arc::clone(&session_dropped));
-        let expected_started = started.clone();
-        let session_handle = tokio_runtime.spawn(async move {
-            let _drop_signal = drop_signal;
-            assert!(matches!(
-                recv_federate_frame(&mut rti_transport).await,
-                crate::FederateToRti::Hello { federate_id }
-                    if federate_id == expected_started
-            ));
-            send_federate_frame(
-                &mut rti_transport,
-                crate::RtiToFederate::Start {
-                    start_unix_epoch_ns: 0,
-                },
-            )
-            .await;
-            std::future::pending::<Result<(), SessionError>>().await
-        });
-        let (sink, stream) = client_transport;
-        let client = tokio_runtime
-            .block_on(FederateProtocolClient::connect(
-                started.clone(),
-                sink,
-                stream,
-            ))
-            .unwrap();
+        run_with_wall_timeout(
+            "static federation setup cleanup",
+            StdDuration::from_secs(2),
+            || {
+                let started = FederateId::new("a-started");
+                let missing = FederateId::new("b-missing");
+                let tokio_runtime = build_tokio_runtime(1).unwrap();
+                let (client_transport, mut rti_transport) = in_memory_transport_pair();
+                let session_dropped = Arc::new(AtomicBool::new(false));
+                let drop_signal = DropSignal(Arc::clone(&session_dropped));
+                let expected_started = started.clone();
+                let session_handle = tokio_runtime.spawn(async move {
+                    let _drop_signal = drop_signal;
+                    assert!(matches!(
+                        recv_federate_frame(&mut rti_transport).await,
+                        crate::FederateToRti::Hello { federate_id }
+                            if federate_id == expected_started
+                    ));
+                    send_federate_frame(
+                        &mut rti_transport,
+                        crate::RtiToFederate::Start {
+                            start_unix_epoch_ns: 0,
+                        },
+                    )
+                    .await;
+                    std::future::pending::<Result<(), SessionError>>().await
+                });
+                let (sink, stream) = client_transport;
+                let client = tokio_runtime
+                    .block_on(FederateProtocolClient::connect(
+                        started.clone(),
+                        sink,
+                        stream,
+                    ))
+                    .unwrap();
 
-        let mut started_enclaves = tinymap::TinyMap::new();
-        started_enclaves.insert(boomerang_runtime::Enclave::default());
-        let mut missing_enclaves = tinymap::TinyMap::new();
-        missing_enclaves.insert(boomerang_runtime::Enclave::default());
-        let runtimes = BTreeMap::from([
-            (started.clone(), started_enclaves),
-            (missing, missing_enclaves),
-        ]);
-        let clients = BTreeMap::from([(
-            started,
-            ConnectedFederate {
-                client,
-                routes: Vec::new(),
-                faults: crate::FederatedFaultState::default(),
+                let mut started_enclaves = tinymap::TinyMap::new();
+                started_enclaves.insert(boomerang_runtime::Enclave::default());
+                let mut missing_enclaves = tinymap::TinyMap::new();
+                missing_enclaves.insert(boomerang_runtime::Enclave::default());
+                let runtimes = BTreeMap::from([
+                    (started.clone(), started_enclaves),
+                    (missing, missing_enclaves),
+                ]);
+                let clients = BTreeMap::from([(
+                    started,
+                    ConnectedFederate {
+                        client,
+                        routes: Vec::new(),
+                        faults: crate::FederatedFaultState::default(),
+                    },
+                )]);
+
+                let result = execute_connected_static_federation(
+                    runtimes,
+                    boomerang_runtime::Config::default().with_fast_forward(true),
+                    &tokio_runtime,
+                    session_handle,
+                    clients,
+                );
+
+                assert!(matches!(
+                    result,
+                    Err(StaticFederationRunnerError::Bridge { what })
+                        if what == "missing connected client for federate 'b-missing'"
+                ));
+                assert!(
+                    session_dropped.load(Ordering::SeqCst),
+                    "RTI session must be aborted before setup failure returns"
+                );
             },
-        )]);
-
-        let result = execute_connected_static_federation(
-            runtimes,
-            boomerang_runtime::Config::default().with_fast_forward(true),
-            &tokio_runtime,
-            session_handle,
-            clients,
-        );
-
-        assert!(matches!(
-            result,
-            Err(StaticFederationRunnerError::Bridge { .. })
-        ));
-        assert!(
-            session_dropped.load(Ordering::SeqCst),
-            "RTI session must be aborted before setup failure returns"
         );
     }
 

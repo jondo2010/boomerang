@@ -16,21 +16,6 @@ use crate::{in_memory_transport_pair, EndpointId};
 
 const TEST_TIMEOUT: StdDuration = StdDuration::from_secs(1);
 
-async fn with_wall_timeout<T>(
-    label: &'static str,
-    future: impl std::future::Future<Output = T>,
-) -> T {
-    let (timeout_tx, timeout_rx) = tokio::sync::oneshot::channel();
-    std::thread::spawn(move || {
-        std::thread::sleep(TEST_TIMEOUT);
-        let _ = timeout_tx.send(());
-    });
-    tokio::select! {
-        result = future => result,
-        _ = timeout_rx => panic!("{label} timed out after {TEST_TIMEOUT:?}"),
-    }
-}
-
 fn fed(id: &str) -> FederateId {
     FederateId::new(id)
 }
@@ -226,6 +211,7 @@ async fn bridge_admits_preceding_messages_then_sends_msg_before_ltc() {
         .unwrap();
     let mailbox = connections.take_mailbox(&fed("source")).unwrap();
     let fake_inbound_endpoint = inbound_protocol_endpoint.clone();
+    let (rti_done_tx, rti_done_rx) = std::sync::mpsc::channel();
     let (client, rti) = connect_client_with_fake_rti_and_mailbox(
         fed("source"),
         mailbox,
@@ -263,13 +249,8 @@ async fn bridge_admits_preceding_messages_then_sends_msg_before_ltc() {
                 .await;
             }
             send_rti_to_federate(&mut transport, RtiToFederate::Tag { tag: WireTag::ZERO }).await;
-            let outbound_msg = with_wall_timeout(
-                "waiting for outbound MSG after TAG admission",
-                recv_federate_to_rti(&mut transport),
-            )
-            .await;
             assert_eq!(
-                outbound_msg,
+                recv_federate_to_rti(&mut transport).await,
                 FederateToRti::Msg {
                     source: fed("source"),
                     target: fed("sink"),
@@ -278,18 +259,14 @@ async fn bridge_admits_preceding_messages_then_sends_msg_before_ltc() {
                     payload: b"7".to_vec(),
                 }
             );
-            let ltc = with_wall_timeout(
-                "waiting for LTC after outbound MSG",
-                recv_federate_to_rti(&mut transport),
-            )
-            .await;
             assert_eq!(
-                ltc,
+                recv_federate_to_rti(&mut transport).await,
                 FederateToRti::Ltc {
                     federate_id: fed("source"),
                     tag: WireTag::ZERO,
                 }
             );
+            rti_done_tx.send(()).unwrap();
         },
     )
     .await;
@@ -310,8 +287,8 @@ async fn bridge_admits_preceding_messages_then_sends_msg_before_ltc() {
     for expected in [41, 42] {
         assert_eq!(barrier.poll().unwrap(), ProtocolPoll::Progress);
         let event = event_rx
-            .recv()
-            .expect("each preceding MSG must schedule before TAG");
+            .recv_timeout(TEST_TIMEOUT)
+            .expect("timed out waiting for a preceding MSG to schedule before TAG");
         let boomerang_runtime::AsyncEvent::Logical { tag, key, value } = event else {
             panic!("expected logical async event");
         };
@@ -338,8 +315,10 @@ async fn bridge_admits_preceding_messages_then_sends_msg_before_ltc() {
         .report_logical_tag_complete(boomerang_runtime::Tag::ZERO)
         .unwrap();
 
-    with_wall_timeout("waiting for fake RTI to verify MSG/LTC ordering", rti)
-        .await
+    rti_done_rx
+        .recv_timeout(TEST_TIMEOUT)
+        .expect("timed out waiting for fake RTI to verify MSG/LTC ordering");
+    rti.await
         .expect("fake RTI task panicked while verifying MSG/LTC ordering");
 }
 

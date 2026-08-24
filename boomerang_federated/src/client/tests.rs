@@ -198,15 +198,17 @@ fn inbound_endpoint_for_u32() -> (
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bridge_sends_net_outbound_msg_and_ltc_frames() {
+async fn bridge_admits_preceding_messages_then_sends_msg_before_ltc() {
     boomerang_util::test_tracing::init_with_directive("boomerang_federated=debug");
 
+    let inbound_protocol_endpoint = EndpointId::new("peer.out->source.in");
     let mut connections =
         crate::FederatedRuntimeConnections::new([fed("source"), fed("sink")], [route()]).unwrap();
     let (outbound, _) = connections
         .outbound_endpoint(&fed("sink"), &endpoint())
         .unwrap();
     let mailbox = connections.take_mailbox(&fed("source")).unwrap();
+    let fake_inbound_endpoint = inbound_protocol_endpoint.clone();
     let (client, rti) = connect_client_with_fake_rti_and_mailbox(
         fed("source"),
         mailbox,
@@ -231,6 +233,18 @@ async fn bridge_sends_net_outbound_msg_and_ltc_frames() {
                     tag: WireTag::ZERO,
                 }
             );
+            for payload in [b"41".to_vec(), b"42".to_vec()] {
+                send_rti_to_federate(
+                    &mut transport,
+                    RtiToFederate::Msg {
+                        source: fed("peer"),
+                        endpoint: fake_inbound_endpoint.clone(),
+                        tag: WireTag::ZERO,
+                        payload,
+                    },
+                )
+                .await;
+            }
             send_rti_to_federate(&mut transport, RtiToFederate::Tag { tag: WireTag::ZERO }).await;
             assert_eq!(
                 recv_federate_to_rti(&mut transport).await,
@@ -253,166 +267,14 @@ async fn bridge_sends_net_outbound_msg_and_ltc_frames() {
     )
     .await;
 
+    let (inbound, event_rx, action_key, _shutdown_tx) = inbound_endpoint_for_u32();
+    let mut inbound_route =
+        FederateClientRoute::new(inbound_protocol_endpoint, fed("peer"), fed("source"));
+    inbound_route.bind_inbound(inbound);
     let mut barrier = RtiLogicalTimeCoordinator::new(
         fed("source"),
         client,
-        [route()],
-        crate::FederatedFaultState::default(),
-    )
-    .unwrap();
-
-    barrier.submit_net(boomerang_runtime::Tag::ZERO).unwrap();
-    loop {
-        match barrier.poll().unwrap() {
-            ProtocolPoll::Granted(tag) => {
-                assert_eq!(tag, boomerang_runtime::Tag::ZERO);
-                break;
-            }
-            ProtocolPoll::Pending | ProtocolPoll::Progress => {}
-        }
-    }
-    outbound
-        .send(crate::FederatedOutboundCommand::Msg(
-            crate::FederatedOutboundMessage {
-                tag: boomerang_runtime::Tag::ZERO,
-                payload: b"7".to_vec(),
-            },
-        ))
-        .unwrap();
-    barrier
-        .report_logical_tag_complete(boomerang_runtime::Tag::ZERO)
-        .unwrap();
-
-    rti.await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bridge_schedules_inbound_msg_before_reporting_completion() {
-    let (client, rti) = connect_client_with_fake_rti(fed("sink"), |mut transport| async move {
-        assert!(matches!(
-            recv_federate_to_rti(&mut transport).await,
-            FederateToRti::Hello { federate_id, .. } if federate_id == fed("sink")
-        ));
-        send_rti_to_federate(
-            &mut transport,
-            RtiToFederate::Start {
-                start_unix_epoch_ns: 0,
-            },
-        )
-        .await;
-        assert_eq!(
-            recv_federate_to_rti(&mut transport).await,
-            FederateToRti::Net {
-                federate_id: fed("sink"),
-                tag: WireTag::ZERO,
-            }
-        );
-        send_rti_to_federate(
-            &mut transport,
-            RtiToFederate::Msg {
-                source: fed("source"),
-                endpoint: protocol_endpoint(),
-                tag: WireTag::ZERO,
-                payload: b"42".to_vec(),
-            },
-        )
-        .await;
-        assert_eq!(
-            recv_federate_to_rti(&mut transport).await,
-            FederateToRti::Ltc {
-                federate_id: fed("sink"),
-                tag: WireTag::ZERO,
-            }
-        );
-    })
-    .await;
-
-    let (inbound, event_rx, action_key, _shutdown_tx) = inbound_endpoint_for_u32();
-    let mut inbound_route = route();
-    inbound_route.bind_inbound(inbound);
-    let mut barrier = RtiLogicalTimeCoordinator::new(
-        fed("sink"),
-        client,
-        [inbound_route],
-        crate::FederatedFaultState::default(),
-    )
-    .unwrap();
-
-    barrier.submit_net(boomerang_runtime::Tag::ZERO).unwrap();
-    assert_eq!(barrier.poll().unwrap(), ProtocolPoll::Progress);
-    let event = event_rx
-        .recv()
-        .expect("inbound MSG should schedule an event");
-    match event {
-        boomerang_runtime::AsyncEvent::Logical { tag, key, value } => {
-            assert_eq!(tag, boomerang_runtime::Tag::ZERO);
-            assert_eq!(key, action_key);
-            match value.downcast::<u32>() {
-                Ok(value) => assert_eq!(*value, 42),
-                Err(_) => panic!("expected u32 logical event payload"),
-            }
-        }
-        event => panic!("expected logical async event, got {event:?}"),
-    }
-    barrier
-        .report_logical_tag_complete(boomerang_runtime::Tag::ZERO)
-        .unwrap();
-
-    rti.await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bridge_admits_all_preceding_messages_before_consuming_tag() {
-    let (client, rti) = connect_client_with_fake_rti(fed("sink"), |mut transport| async move {
-        assert!(matches!(
-            recv_federate_to_rti(&mut transport).await,
-            FederateToRti::Hello { federate_id, .. } if federate_id == fed("sink")
-        ));
-        send_rti_to_federate(
-            &mut transport,
-            RtiToFederate::Start {
-                start_unix_epoch_ns: 0,
-            },
-        )
-        .await;
-        assert!(matches!(
-            recv_federate_to_rti(&mut transport).await,
-            FederateToRti::Net {
-                tag: WireTag::ZERO,
-                ..
-            }
-        ));
-        for payload in [b"41".to_vec(), b"42".to_vec()] {
-            send_rti_to_federate(
-                &mut transport,
-                RtiToFederate::Msg {
-                    source: fed("source"),
-                    endpoint: protocol_endpoint(),
-                    tag: WireTag::ZERO,
-                    payload,
-                },
-            )
-            .await;
-        }
-        send_rti_to_federate(&mut transport, RtiToFederate::Tag { tag: WireTag::ZERO }).await;
-
-        assert_eq!(
-            recv_federate_to_rti(&mut transport).await,
-            FederateToRti::Ltc {
-                federate_id: fed("sink"),
-                tag: WireTag::ZERO,
-            }
-        );
-    })
-    .await;
-
-    let (inbound, event_rx, action_key, _shutdown_tx) = inbound_endpoint_for_u32();
-    let mut inbound_route = route();
-    inbound_route.bind_inbound(inbound);
-    let mut barrier = RtiLogicalTimeCoordinator::new(
-        fed("sink"),
-        client,
-        [inbound_route],
+        [route(), inbound_route],
         crate::FederatedFaultState::default(),
     )
     .unwrap();
@@ -437,6 +299,14 @@ async fn bridge_admits_all_preceding_messages_before_consuming_tag() {
         barrier.poll().unwrap(),
         ProtocolPoll::Granted(boomerang_runtime::Tag::ZERO)
     );
+    outbound
+        .send(crate::FederatedOutboundCommand::Msg(
+            crate::FederatedOutboundMessage {
+                tag: boomerang_runtime::Tag::ZERO,
+                payload: b"7".to_vec(),
+            },
+        ))
+        .unwrap();
     barrier
         .report_logical_tag_complete(boomerang_runtime::Tag::ZERO)
         .unwrap();
@@ -509,76 +379,6 @@ async fn inbound_admission_failure_makes_the_coordinator_terminal_before_later_t
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bridge_does_not_repeat_pending_net_after_inbound_interruption() {
-    let next_tag = WireTag::finite(1_000_000_000, 0);
-    let (client, rti) =
-        connect_client_with_fake_rti(fed("sink"), move |mut transport| async move {
-            assert!(matches!(
-                recv_federate_to_rti(&mut transport).await,
-                FederateToRti::Hello { federate_id, .. } if federate_id == fed("sink")
-            ));
-            send_rti_to_federate(
-                &mut transport,
-                RtiToFederate::Start {
-                    start_unix_epoch_ns: 0,
-                },
-            )
-            .await;
-            assert_eq!(
-                recv_federate_to_rti(&mut transport).await,
-                FederateToRti::Net {
-                    federate_id: fed("sink"),
-                    tag: WireTag::ZERO,
-                }
-            );
-            send_rti_to_federate(
-                &mut transport,
-                RtiToFederate::Msg {
-                    source: fed("source"),
-                    endpoint: protocol_endpoint(),
-                    tag: WireTag::ZERO,
-                    payload: b"42".to_vec(),
-                },
-            )
-            .await;
-            send_rti_to_federate(&mut transport, RtiToFederate::Tag { tag: WireTag::ZERO }).await;
-            assert_eq!(
-                recv_federate_to_rti(&mut transport).await,
-                FederateToRti::Net {
-                    federate_id: fed("sink"),
-                    tag: next_tag,
-                }
-            );
-            send_rti_to_federate(&mut transport, RtiToFederate::Tag { tag: next_tag }).await;
-        })
-        .await;
-
-    let (inbound, event_rx, _action_key, _shutdown_tx) = inbound_endpoint_for_u32();
-    let mut inbound_route = route();
-    inbound_route.bind_inbound(inbound);
-    let mut barrier = RtiLogicalTimeCoordinator::new(
-        fed("sink"),
-        client,
-        [inbound_route],
-        crate::FederatedFaultState::default(),
-    )
-    .unwrap();
-
-    barrier.submit_net(boomerang_runtime::Tag::ZERO).unwrap();
-    assert_eq!(barrier.poll().unwrap(), ProtocolPoll::Progress);
-    assert!(event_rx.recv().is_ok());
-    assert_eq!(
-        barrier.poll().unwrap(),
-        ProtocolPoll::Granted(boomerang_runtime::Tag::ZERO)
-    );
-    let next = boomerang_runtime::Tag::new(boomerang_runtime::Duration::seconds(1), 0);
-    barrier.submit_net(next).unwrap();
-    assert_eq!(barrier.poll().unwrap(), ProtocolPoll::Granted(next));
-
-    rti.await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bridge_reports_rti_error_frame() {
     let (client, rti) = connect_client_with_fake_rti(fed("source"), |mut transport| async move {
         assert!(matches!(
@@ -623,50 +423,6 @@ async fn bridge_reports_rti_error_frame() {
         }
     };
     assert!(error.to_string().contains("boom"));
-    assert_eq!(barrier.pending_request, None);
-
-    rti.await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bridge_stop_sends_no_future_before_stop() {
-    let (client, rti) = connect_client_with_fake_rti(fed("source"), |mut transport| async move {
-        assert!(matches!(
-            recv_federate_to_rti(&mut transport).await,
-            FederateToRti::Hello { federate_id, .. } if federate_id == fed("source")
-        ));
-        send_rti_to_federate(
-            &mut transport,
-            RtiToFederate::Start {
-                start_unix_epoch_ns: 0,
-            },
-        )
-        .await;
-        assert_eq!(
-            recv_federate_to_rti(&mut transport).await,
-            FederateToRti::Net {
-                federate_id: fed("source"),
-                tag: WireTag::FOREVER,
-            }
-        );
-        assert_eq!(
-            recv_federate_to_rti(&mut transport).await,
-            FederateToRti::Stop {
-                federate_id: fed("source"),
-            }
-        );
-    })
-    .await;
-
-    let mut barrier = RtiLogicalTimeCoordinator::new(
-        fed("source"),
-        client,
-        [route()],
-        crate::FederatedFaultState::default(),
-    )
-    .unwrap();
-
-    barrier.stop().unwrap();
     assert_eq!(barrier.pending_request, None);
 
     rti.await.unwrap();

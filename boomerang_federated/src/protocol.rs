@@ -3,8 +3,9 @@ use std::fmt;
 /// Stable identity of one participant in a federation.
 ///
 /// A federate is a topology vertex with its own protocol connection and logical-time state. This
-/// identifier authenticates that connection and addresses `NET`, `LTC`, `TAG`, message source,
-/// and message target state. One federate can own many cross-federate endpoints.
+/// identifier is self-declared in a trusted `Hello`, binds that connection, and addresses `NET`,
+/// `LTC`, `TAG`, message source, and message target state. Authentication is deferred. One
+/// federate can own many cross-federate endpoints.
 ///
 /// This is distinct from [`EndpointId`], which identifies one routed logical connection between
 /// federates rather than either participant.
@@ -187,121 +188,12 @@ impl WireDelay {
     }
 }
 
-/// A directed cross-federate edge with the minimum logical delay on that endpoint.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct TopologyEdge {
-    pub source: FederateId,
-    pub target: FederateId,
-    pub endpoint: EndpointId,
-    pub delay: WireDelay,
-}
-
-impl TopologyEdge {
-    pub fn new(
-        source: impl Into<FederateId>,
-        target: impl Into<FederateId>,
-        endpoint: impl Into<EndpointId>,
-        delay: WireDelay,
-    ) -> Self {
-        Self {
-            source: source.into(),
-            target: target.into(),
-            endpoint: endpoint.into(),
-            delay,
-        }
-    }
-}
-
-/// The incoming and outgoing neighbor view for one federate.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct NeighborStructure {
-    pub federate_id: FederateId,
-    pub upstream: Vec<TopologyEdge>,
-    pub downstream: Vec<TopologyEdge>,
-}
-
-/// Static topology used by the RTI for TAG/NET/LTC decisions.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct FederatedTopology {
-    pub federates: Vec<FederateId>,
-    pub edges: Vec<TopologyEdge>,
-}
-
-impl FederatedTopology {
-    pub fn new(federates: impl IntoIterator<Item = FederateId>) -> Self {
-        Self {
-            federates: federates.into_iter().collect(),
-            edges: Vec::new(),
-        }
-    }
-
-    pub fn with_edges(
-        federates: impl IntoIterator<Item = FederateId>,
-        edges: impl IntoIterator<Item = TopologyEdge>,
-    ) -> Self {
-        Self {
-            federates: federates.into_iter().collect(),
-            edges: edges.into_iter().collect(),
-        }
-    }
-
-    pub fn add_federate(&mut self, federate_id: impl Into<FederateId>) {
-        let federate_id = federate_id.into();
-        if !self.federates.contains(&federate_id) {
-            self.federates.push(federate_id);
-        }
-    }
-
-    pub fn add_edge(&mut self, edge: TopologyEdge) {
-        self.add_federate(edge.source.clone());
-        self.add_federate(edge.target.clone());
-        self.edges.push(edge);
-    }
-
-    pub fn contains_federate(&self, federate_id: &FederateId) -> bool {
-        self.federates.contains(federate_id)
-    }
-
-    pub fn incoming_edges<'a>(
-        &'a self,
-        federate_id: &'a FederateId,
-    ) -> impl Iterator<Item = &'a TopologyEdge> + 'a {
-        self.edges
-            .iter()
-            .filter(move |edge| &edge.target == federate_id)
-    }
-
-    pub fn outgoing_edges<'a>(
-        &'a self,
-        federate_id: &'a FederateId,
-    ) -> impl Iterator<Item = &'a TopologyEdge> + 'a {
-        self.edges
-            .iter()
-            .filter(move |edge| &edge.source == federate_id)
-    }
-
-    pub fn neighbors_for(&self, federate_id: &FederateId) -> NeighborStructure {
-        let mut neighbors = NeighborStructure {
-            federate_id: federate_id.clone(),
-            upstream: self.incoming_edges(federate_id).cloned().collect(),
-            downstream: self.outgoing_edges(federate_id).cloned().collect(),
-        };
-        neighbors.upstream.sort();
-        neighbors.downstream.sort();
-        neighbors
-    }
-}
-
 /// Messages sent from a federate client to the centralized RTI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum FederateToRti {
     Hello {
         federate_id: FederateId,
-        topology: NeighborStructure,
     },
     Net {
         federate_id: FederateId,
@@ -392,5 +284,27 @@ mod tests {
             let decoded: WireTag = serde_json::from_slice(&encoded).unwrap();
             assert_eq!(decoded, tag);
         }
+    }
+
+    #[cfg(feature = "serde-json-codec")]
+    #[test]
+    fn stable_protocol_identities_round_trip_without_dense_keys() {
+        let message = FederateToRti::Msg {
+            source: FederateId::new("plant/controller-A"),
+            target: FederateId::new("actuator/controller-B"),
+            endpoint: EndpointId::new("plant.output->actuator.input"),
+            tag: WireTag::finite(42, 7),
+            payload: vec![1, 2, 3],
+        };
+
+        let encoded = serde_json::to_string(&message).unwrap();
+        let decoded: FederateToRti = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded, message);
+        assert!(encoded.contains("plant/controller-A"));
+        assert!(encoded.contains("actuator/controller-B"));
+        assert!(encoded.contains("plant.output->actuator.input"));
+        assert!(!encoded.contains("FederateKey"));
+        assert!(!encoded.contains("EndpointKey"));
     }
 }

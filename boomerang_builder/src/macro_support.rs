@@ -6,30 +6,9 @@ use crate::{
 
 pub trait Reactor<State: runtime::ReactorData = ()>: Sized {
     type Ports;
-    #[allow(clippy::too_many_arguments)]
-    fn build(
-        &self,
-        name: &str,
-        state: State,
-        parent: Option<AssemblyReactorKey>,
-        scope_mode: Option<AssemblyModeKey>,
-        bank_info: Option<runtime::BankInfo>,
-        is_enclave: bool,
-        assembly: &mut Assembly,
-    ) -> Result<Self::Ports, AssemblyError> {
-        self.build_with_placement(
-            name,
-            state,
-            parent,
-            scope_mode,
-            bank_info,
-            ReactorPlacement::from(is_enclave),
-            assembly,
-        )
-    }
 
     #[allow(clippy::too_many_arguments)]
-    fn build_with_placement(
+    fn build(
         &self,
         name: &str,
         state: State,
@@ -56,7 +35,7 @@ where
     State: runtime::ReactorData,
 {
     type Ports = Ports;
-    fn build_with_placement(
+    fn build(
         &self,
         name: &str,
         state: State,
@@ -121,7 +100,7 @@ impl<S: runtime::ReactorData> ReactorContext<'_, S> {
         R: Reactor<ChildState>,
     {
         let scope_mode = self.current_mode();
-        reactor.build_with_placement(
+        reactor.build(
             name,
             state,
             Some(self.key()),
@@ -165,7 +144,7 @@ impl<S: runtime::ReactorData> ReactorContext<'_, S> {
         let scope_mode = self.current_mode();
         let reactors = (0..N)
             .map(|i| {
-                reactor.build_with_placement(
+                reactor.build(
                     &format!("{name}_{i}"),
                     state.clone(),
                     Some(self.key()),

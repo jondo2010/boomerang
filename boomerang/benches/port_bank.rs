@@ -170,13 +170,16 @@ fn bench(c: &mut Criterion) {
                             None,
                             None,
                             None,
-                            false,
+                            false.into(),
                             &mut assembly,
                         )
                         .unwrap();
                     let config = runtime::Config::default().with_fast_forward(true);
-                    let RuntimeAssembly { enclaves, .. } =
-                        assembly.into_runtime_assembly(&config).unwrap();
+                    let enclaves = assembly
+                        .into_runtime_assembly(&config)
+                        .unwrap()
+                        .into_local()
+                        .unwrap();
                     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
                     runtime::Scheduler::new(enclave_key, enclave, config)
                 },

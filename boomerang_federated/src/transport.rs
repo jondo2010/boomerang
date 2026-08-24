@@ -12,8 +12,7 @@ use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 #[cfg(feature = "serde-json-codec")]
 use crate::{
-    FederateId, FederatedTopology, ProtocolFrame, RtiSessionEndpoint, SessionError,
-    StaticRtiSession,
+    FederateId, ProtocolFrame, RtiGraph, RtiSessionEndpoint, SessionError, StaticRtiSession,
 };
 
 #[cfg(feature = "serde-json-codec")]
@@ -103,23 +102,9 @@ pub fn json_protocol_frame_transport(stream: TcpStream) -> JsonProtocolFrameTran
 #[cfg(feature = "serde-json-codec")]
 pub async fn run_tcp_static_rti_session(
     listener: TcpListener,
-    topology: FederatedTopology,
+    graph: RtiGraph,
 ) -> Result<(), SessionError> {
-    run_tcp_static_rti_session_compiled(listener, crate::CompiledTopology::new(topology)?).await
-}
-
-#[cfg(feature = "serde-json-codec")]
-pub(crate) async fn run_tcp_static_rti_session_compiled(
-    listener: TcpListener,
-    topology: crate::CompiledTopology,
-) -> Result<(), SessionError> {
-    let manifest = topology.topology();
-    let expected = manifest.federates.iter().cloned().collect::<BTreeSet<_>>();
-    if expected.len() != manifest.federates.len() {
-        return Err(SessionError::Shutdown(
-            "duplicate federate id in TCP topology".into(),
-        ));
-    }
+    let expected = graph.federate_ids().cloned().collect::<BTreeSet<_>>();
 
     let mut accepted = Vec::with_capacity(expected.len());
     for peer_index in 0..expected.len() {
@@ -157,7 +142,7 @@ pub(crate) async fn run_tcp_static_rti_session_compiled(
     while let Some(first_frame) = first_frames.next().await {
         let (peer_index, sink, stream, frame) = first_frame?;
         let federate_id = match &frame {
-            ProtocolFrame::FederateToRti(crate::FederateToRti::Hello { federate_id, .. }) => {
+            ProtocolFrame::FederateToRti(crate::FederateToRti::Hello { federate_id }) => {
                 federate_id.clone()
             }
             _ => {
@@ -194,9 +179,7 @@ pub(crate) async fn run_tcp_static_rti_session_compiled(
         )));
     }
 
-    StaticRtiSession::from_compiled(topology, endpoints)
-        .run()
-        .await
+    StaticRtiSession::new(graph, endpoints).run().await
 }
 
 #[cfg(test)]
@@ -210,11 +193,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        protocol::{
-            EndpointId, FederateId, FederateToRti, FederatedTopology, RtiToFederate, TopologyEdge,
-            WireDelay, WireTag,
-        },
-        FederateProtocolClient, NeighborStructure, ProtocolFrame,
+        protocol::{EndpointId, FederateId, FederateToRti, RtiToFederate, WireDelay, WireTag},
+        rti::{RtiEndpointParts, RtiFederateParts},
+        FederateProtocolClient, ProtocolFrame,
     };
 
     fn block_on<F: Future>(future: F) -> F::Output {
@@ -312,32 +293,35 @@ mod tests {
         let source = FederateId::new("source");
         let sink = FederateId::new("sink");
         let endpoint = EndpointId::new("source.out->sink.in");
-        let topology = FederatedTopology::with_edges(
-            [source.clone(), sink.clone()],
-            [TopologyEdge::new(
-                source.clone(),
-                sink.clone(),
-                endpoint.clone(),
-                WireDelay::ZERO,
-            )],
+        let graph = crate::rti::test_graph(
+            [
+                RtiFederateParts {
+                    id: source.clone(),
+                    transitive_incoming: Vec::new(),
+                    affected_downstream: vec![sink.clone()],
+                },
+                RtiFederateParts {
+                    id: sink.clone(),
+                    transitive_incoming: vec![(source.clone(), WireDelay::ZERO)],
+                    affected_downstream: Vec::new(),
+                },
+            ],
+            [RtiEndpointParts {
+                id: endpoint.clone(),
+                source: source.clone(),
+                target: sink.clone(),
+                delay: WireDelay::ZERO,
+            }],
         );
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let rti = tokio::spawn(run_tcp_static_rti_session(listener, topology.clone()));
+        let rti = tokio::spawn(run_tcp_static_rti_session(listener, graph));
 
         let sink_stream = TcpStream::connect(addr).await.unwrap();
         let source_stream = TcpStream::connect(addr).await.unwrap();
-        let source_connect = tokio::spawn(connect_tcp_client(
-            source.clone(),
-            topology.neighbors_for(&source),
-            source_stream,
-        ));
-        let sink_connect = tokio::spawn(connect_tcp_client(
-            sink.clone(),
-            topology.neighbors_for(&sink),
-            sink_stream,
-        ));
+        let source_connect = tokio::spawn(connect_tcp_client(source.clone(), source_stream));
+        let sink_connect = tokio::spawn(connect_tcp_client(sink.clone(), sink_stream));
         let source_client = source_connect.await.unwrap();
         let sink_client = sink_connect.await.unwrap();
         let recv_timeout = StdDuration::from_secs(1);
@@ -439,11 +423,10 @@ mod tests {
     #[cfg(feature = "serde-json-codec")]
     async fn connect_tcp_client(
         federate_id: FederateId,
-        topology: NeighborStructure,
         stream: TcpStream,
     ) -> FederateProtocolClient {
         let (sink, stream) = json_protocol_frame_transport(stream).split();
-        FederateProtocolClient::connect(federate_id, topology, sink, stream)
+        FederateProtocolClient::connect(federate_id, sink, stream)
             .await
             .unwrap()
     }

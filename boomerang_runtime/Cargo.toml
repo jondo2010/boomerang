@@ -14,9 +14,6 @@ exclude.workspace = true
 [features]
 default = []
 
-## Optional scheduler hooks for federated logical-time coordination
-federated = []
-
 ## Support for parallel execution
 parallel = ["dep:rayon"]
 

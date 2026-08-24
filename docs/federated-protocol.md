@@ -3,8 +3,10 @@
 This document describes the internal wire protocol used by Boomerang's static
 federation runners. It is a maintainer reference for the protocol types in
 `boomerang_federated/src/protocol.rs`, the RTI state machine in
-`boomerang_federated/src/rti/mod.rs`, and the live client/session adapters in
-`boomerang_federated/src/client.rs` and `boomerang_federated/src/session.rs`.
+`boomerang_federated/src/rti/mod.rs`, the RTI wire adapter in
+`boomerang_federated/src/client/coordination/`, the Federate-wide participant
+aggregation in `boomerang_federated/src/federate_coordination/`, and the session
+adapter in `boomerang_federated/src/session.rs`.
 For crate ownership and scheduler integration, see
 [Federated runtime internals](./federated-runtime.md).
 
@@ -23,17 +25,20 @@ differences are listed under [Protocol Non-Goals](#protocol-non-goals).
 
 ## Participants and Transport
 
-A federate is one statically declared runtime enclave. Every federate has one
-persistent, ordered, bidirectional connection to a centralized runtime
-infrastructure process, abbreviated RTI. Payloads also travel through the RTI;
-there are no direct peer-to-peer payload channels.
+A Federate is one statically declared compute node or process containing one or
+more runtime Enclaves. Every Federate has one persistent, ordered,
+bidirectional connection to a centralized runtime infrastructure process,
+abbreviated RTI. Payloads crossing Federate boundaries travel through the RTI;
+same-Federate Enclave traffic stays in process, and there are no direct
+peer-to-peer payload channels.
 
 The in-memory runner transports `ProtocolFrame` values over ordered channels.
 The TCP runner serializes the same frames as JSON inside a length-delimited
 stream: a big-endian `u32` length followed by that many encoded bytes. TCP
 connection order does not establish identity. The server accepts the static
 number of sockets, reads their first frames concurrently, and keys each socket
-by the federate id declared in `Hello`.
+by the federate id self-declared in `Hello`. The static runner trusts that
+declaration and binds later frames to it; authentication is deferred.
 
 ```mermaid
 sequenceDiagram
@@ -45,12 +50,12 @@ sequenceDiagram
     S->>L: connect first
     O->>L: connect second
     Note over L: accept every required socket
-    S->>L: Hello(sink, sink-neighbors)
-    O->>L: Hello(source, source-neighbors)
+    S->>L: Hello(sink)
+    O->>L: Hello(source)
     Note over L: read first frames concurrently<br/>and map sockets by declared id
-    L->>R: endpoint sink + preserved Hello
-    L->>R: endpoint source + preserved Hello
-    R->>R: validate ids and neighbor structures
+    L->>R: FederateId-keyed sink endpoint + preserved Hello
+    L->>R: FederateId-keyed source endpoint + preserved Hello
+    R->>R: resolve ids to FederateKey and cache per participant
     R-->>S: Start(start_unix_epoch_ns)
     R-->>O: Start(start_unix_epoch_ns)
 ```
@@ -59,12 +64,21 @@ The `Start` frame carries a physical epoch for future clock coordination.
 Current static runners require `Config::with_fast_forward(true)` and do not use
 that epoch to synchronize scheduler clocks.
 
-## Identities, Topology, and Tags
+## Identities, Graph, and Tags
 
 `FederateId` identifies one static federation member. `EndpointId` identifies
-one directed serialized connection. `FederatedTopology` contains the complete
-federate list and directed `TopologyEdge` values; each edge records its source,
-target, endpoint, and minimum logical delay.
+one directed serialized connection. Assembly lowering analyzes the declared
+Federate partitions and cross-partition connections, validates the static
+federation, and produces one immutable `RtiGraph`. The graph contains stable
+Federate and endpoint identities, direct and transitive dependencies, affected
+downstream sets, exact routes, and minimum logical delays.
+
+Stable string identities are serialized in `FederateToRti`, `RtiToFederate`,
+and `ProtocolFrame`. Lowering also assigns crate-private `FederateKey` and
+`EndpointKey` values in lexical stable-ID order. These dense keys are
+process-local indexes owned by `RtiGraph`; they are never serialized or exposed
+by the public facade. The graph moves into the RTI session and is not sent to
+Federate clients.
 
 `WireTag` is independent of process-local clocks and architecture-sized
 integers. It has three forms:
@@ -83,7 +97,7 @@ Frames from a federate to the RTI are:
 
 | Frame | Meaning | Important validation |
 | --- | --- | --- |
-| `Hello { federate_id, topology }` | Declares connection identity and the federate's neighbor view. | Must be the first frame, name a static member, match the endpoint identity, and exactly match the RTI-derived neighbor structure. |
+| `Hello { federate_id }` | Declares connection identity. | Must be the first frame, name a member of the immutable RTI graph, and match the endpoint identity. The session resolves the identity once to its dense key. |
 | `Net { federate_id, tag }` | Announces the federate's next-event tag and requests permission to advance. | The embedded id must match the connection. A finite tag must be nonnegative and not precede the last completed tag. `Never` is invalid. `Forever` means no future event, is not itself granted, and cannot be followed by another `NET`. |
 | `Msg { source, target, endpoint, tag, payload }` | Sends one serialized logical payload through the RTI. | Source must match the connection, both members and the exact route must exist, and the finite tag must be nonnegative. A message already sent by a peer may cross the target's `Stop` ordering; a stopped source cannot send another message. |
 | `Ltc { federate_id, tag }` | Reports that the scheduler completed reactions through the logical tag. | The finite tag must be nonnegative and cannot precede the completion high-watermark. It clears the target's recorded in-transit tags through the completed tag and triggers causal grant reevaluation. |
@@ -107,15 +121,18 @@ uncompleted incoming tags. Multiple payloads at one tag occupy one set entry,
 not one counter per payload. The effective next-event tag, or effective NET, is
 the minimum of the advertised NET and the earliest tag in that set.
 
-During builder lowering, `CompiledTopology` validates the static manifest and
-precomputes each federate's sorted handshake neighbor view, immediate incoming
-edges, sorted transitive upstream and downstream members, and the minimum
-cumulative delay for every reachable ordered source/target pair. The lowered
-runtime parts carry that immutable artifact into the clients and RTI session,
-so startup neither repeats graph compilation nor scans all edges for every
-`Hello`. Direct session users may still supply a raw topology, which is compiled
-at that configuration boundary. Delay composition uses checked arithmetic. An
-overflow rejects topology construction rather than producing a saturated bound.
+Builder lowering consumes `PartitionAnalysis`, validates the derived static
+federation, resolves stable identities into dense Federate and endpoint records,
+and then produces the immutable `RtiGraph`. Each Federate record owns immediate
+incoming dependencies, sorted transitive upstream and downstream keys, and the
+minimum cumulative delay for every reachable ordered source/target pair. The
+graph moves into the RTI session, while each independently deployable
+`RuntimeFederate` receives only its local Enclaves, routes, mailbox, and fault
+state. Startup
+therefore binds an identity-only `Hello` to the precomputed graph rather than
+accepting or compiling topology from a client. Delay composition uses checked
+arithmetic; overflow rejects assembly lowering rather than producing a
+saturated bound.
 
 The earliest incoming message tag (EIMT) for a target is the minimum, over all
 transitive upstream members, of the upstream effective NET shifted by the
@@ -235,15 +252,19 @@ no-future and `Stop` so that one failing scheduler does not strand its peers.
 
 ## Failure Semantics
 
-The session authenticates every frame with the persistent endpoint that
-supplied it and passes both identities to `RtiState::handle_from`. That is the
-single production mutation boundary. It rejects a missing, duplicate, unknown,
-or mismatched `Hello`; a non-`Hello` first frame; illegal tag sentinels or
-negative finite tags; a route not present in the topology; an id that does not
-match its transport endpoint; a duplicate post-start `Hello`; a regression
-behind completed time; an illegal stop transition; and
-frames originating from an endpoint after `Stop`. Where possible it sends
-`RtiToFederate::Error` before terminating the session.
+The session binds every frame to the persistent endpoint that supplied it.
+After validating the complete endpoint set, it resolves each transport
+participant's trusted, self-declared identity once and carries both its stable
+`FederateId` and private dense key. This is identity consistency, not
+authentication; authentication remains deferred. The RTI's validated-event
+boundary still compares every claimed stable identity and route before
+mutation. It rejects a missing, duplicate,
+unknown, or mismatched `Hello`; a non-`Hello` first frame; illegal tag sentinels
+or negative finite tags; a route not present in the topology; an id that does
+not match its transport endpoint; a duplicate post-start `Hello`; a regression
+behind completed time; an illegal stop transition; and frames originating from
+an endpoint after `Stop`. Where possible it sends `RtiToFederate::Error` before
+terminating the session.
 
 An RTI event is failure-atomic: validation and fallible tag-delay calculations
 finish against a staged copy of the one directly changed coordination record,
@@ -290,13 +311,13 @@ barrier drains outbound commands can deadlock a logical tag.
 ## Protocol Non-Goals
 
 The current protocol deliberately differs from the broader LF implementation.
-It uses static membership and a complete topology manifest, centralized RTI
-payload routing, simplified `Hello`/`Start` and no-future/`Stop` exchanges,
-fast-forward clocks, and source-only TAGs. It does not implement dynamic
-membership, reconnect, authentication, direct peer payload channels,
+It uses static membership and an immutable builder-lowered RTI graph,
+centralized RTI payload routing, identity-only `Hello`/`Start` and
+no-future/`Stop` exchanges, fast-forward clocks, and source-only TAGs. It does not
+implement dynamic membership, reconnect, authentication, direct peer payload channels,
 distributed wall-clock synchronization, provisional tag grants (`PTAG`),
 absence messages (`ABS`), tagged-message absence negotiation (`TAN`/`DNET`), or
-distributed zero-delay-cycle execution. Membership and topology are fixed
+distributed zero-delay-cycle execution. Membership and the RTI graph are fixed
 before the handshake, and zero-delay distributed cycles are rejected during
 lowering. The `ACK` constant in reactor-c is a connection-handshake concept;
 Boomerang does not use it and has no corresponding per-payload receipt frame.
@@ -309,7 +330,12 @@ The most focused protocol tests are located in:
   LTC-cleared in-transit tag tracking;
 - `boomerang_federated/src/session.rs` for handshake, validation, and protocol
   ordering;
-- `boomerang_federated/src/client.rs` for scheduler/client frame ordering; and
+- `boomerang_federated/src/client/tests.rs` and
+  `boomerang_federated/src/client/coordination/tests.rs` for inbound admission,
+  RTI adapter frame ordering, and terminal delivery;
+- `boomerang_federated/src/federate_coordination/state.rs` and
+  `boomerang_federated/src/federate_coordination/tests.rs` for participant
+  aggregation, fixed-point completion, and service error handling; and
 - `boomerang_federated/src/transport.rs` for in-memory framing and the ignored
   reversed-connection-order TCP proof.
 

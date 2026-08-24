@@ -6,6 +6,7 @@ on Boomerang itself. End-user guides belong in the mdBook under `book/src`.
 Current notes:
 
 - [Graph partitioning, federation, and replay architecture](./architecture.md)
+- [Scheduler internals and partition coordination](./scheduler-internals.md)
 - [Federated runtime internals](./federated-runtime.md)
 - [Static federated protocol](./federated-protocol.md)
 

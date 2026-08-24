@@ -11,7 +11,7 @@
 
 use anyhow::Context;
 use boomerang::{
-    builder::{Assembly, Reactor, RuntimeAssembly},
+    builder::{Assembly, Reactor, ReactorPlacement},
     runtime,
 };
 use clap::Parser;
@@ -87,7 +87,15 @@ pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
 ) -> anyhow::Result<(R::Ports, Vec<runtime::Env>)> {
     let mut assembly = Assembly::new();
     let reactor = reactor
-        .build(name, state, None, None, None, false, &mut assembly)
+        .build(
+            name,
+            state,
+            None,
+            None,
+            None,
+            ReactorPlacement::Local,
+            &mut assembly,
+        )
         .context("Error building top-level reactor!")?;
 
     assembly.validate_reactions()?;
@@ -101,16 +109,18 @@ pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
         tracing::info!("Wrote plantuml graph to {}", path.display());
     }
 
-    let RuntimeAssembly { enclaves, .. } = assembly
+    let enclaves = assembly
         .into_runtime_assembly(&config)
-        .context("Error lowering assembly!")?;
+        .context("Error lowering assembly!")?
+        .into_local()
+        .context("generic test runner cannot execute a Federation")?;
 
     let envs_out = runtime::execute_enclaves(enclaves.into_iter(), config)?;
     let envs_out = envs_out.into_iter().map(|(_, env)| env).collect();
     Ok((reactor, envs_out))
 }
 
-/// Utility method to build and run a given top-level `Reactor`.
+/// Utility method to build and run a given top-level `Reactor` locally (non-federated or enclaved).
 ///
 /// This method is intended to be used from the `main` function of a binary.
 ///
@@ -133,7 +143,15 @@ where
     // build the reactor
     let mut assembly = Assembly::new();
     let reactor = reactor
-        .build(name, state, None, None, None, false, &mut assembly)
+        .build(
+            name,
+            state,
+            None,
+            None,
+            None,
+            ReactorPlacement::Local,
+            &mut assembly,
+        )
         .context("Error building top-level reactor!")?;
 
     let args = Args::parse();
@@ -169,14 +187,11 @@ where
         ..Default::default()
     };
 
-    let RuntimeAssembly {
-        enclaves,
-        #[cfg(feature = "replay")]
-        replayers,
-        ..
-    } = assembly
+    let mut enclaves = assembly
         .into_runtime_assembly(&config)
-        .context("Error lowering assembly!")?;
+        .context("Error lowering assembly!")?
+        .into_local()
+        .context("generic local runner cannot execute a Federation")?;
 
     if args.print_debug_info {
         println!("{enclaves:#?}");
@@ -186,6 +201,11 @@ where
     let replay_handle = match args.replay_filename {
         Some(filename) => {
             tracing::info!("Reading replay from {}", filename.display());
+            let enclave_keys = enclaves.keys().collect::<Vec<_>>();
+            let replayers = enclave_keys
+                .into_iter()
+                .map(|key| (key, enclaves[key].take_replayers()))
+                .collect();
             Some(runtime::replay::create_replayer(
                 filename, replayers, &enclaves,
             )?)

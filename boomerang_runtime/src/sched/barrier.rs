@@ -1,4 +1,20 @@
-use crate::{event::AsyncEvent, CommonContext, Duration, EnclaveKey, SendContext, Tag};
+use crate::{
+    event::{AsyncEvent, CoordinationWake},
+    CommonContext, Duration, EnclaveKey, RuntimeError, SendContext, Tag,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogicalTimeFrontier {
+    Candidate(Tag),
+    Idle,
+    Finished,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrontierPublication {
+    pub frontier: LogicalTimeFrontier,
+    pub consumed_wake: Option<CoordinationWake>,
+}
 
 /// Failure while coordinating logical time with a local upstream enclave.
 #[derive(Debug, thiserror::Error)]
@@ -7,30 +23,27 @@ pub enum LogicalTimeBarrierError {
     EventChannelClosed { upstream: EnclaveKey },
 }
 
-/// Result of waiting for federated permission to process a logical tag.
-#[cfg(feature = "federated")]
+/// Result of waiting for permission to process a logical tag.
 #[derive(Debug)]
-pub enum FederatedBarrierOutcome {
+pub enum CoordinationOutcome {
     /// The requested tag may be processed.
     Granted,
     /// An asynchronous event must be handled before requesting the tag again.
     Interrupted(AsyncEvent),
 }
 
-/// Protocol-free error returned by a federated scheduler barrier.
-#[cfg(feature = "federated")]
+/// Protocol-free error returned by an external logical-time coordinator.
 #[derive(Debug, thiserror::Error)]
-#[error("federated coordination failed: {source}")]
-pub struct FederatedBarrierError {
+#[error("logical-time coordination failed: {source}")]
+pub struct CoordinationError {
     #[source]
     source: Box<dyn std::error::Error + Send + Sync + 'static>,
 }
 
-#[cfg(feature = "federated")]
-impl FederatedBarrierError {
+impl CoordinationError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
-            source: Box::new(FederatedBarrierMessage(message.into())),
+            source: Box::new(CoordinationMessage(message.into())),
         }
     }
 
@@ -42,60 +55,70 @@ impl FederatedBarrierError {
     }
 }
 
-#[cfg(feature = "federated")]
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
-struct FederatedBarrierMessage(String);
+struct CoordinationMessage(String);
 
-#[cfg(feature = "federated")]
-impl From<String> for FederatedBarrierError {
+impl From<String> for CoordinationError {
     fn from(message: String) -> Self {
         Self::new(message)
     }
 }
 
-/// Optional scheduler hook for federated logical-time coordination.
+/// Optional protocol-free hook for external logical-time coordination.
 ///
 /// Implementations can block until the requested tag is granted, or return an
 /// inbound event that the scheduler should handle before trying to advance.
-#[cfg(feature = "federated")]
-pub trait FederatedTimeBarrier: Send {
+/// The scheduler calls `acquire` only after local upstream barriers grant, and
+/// calls `complete` only after reactions finish and local downstream releases.
+pub trait LogicalTimeCoordinator: Send {
+    fn publish_frontier(
+        &mut self,
+        publication: FrontierPublication,
+    ) -> Result<(), CoordinationError>;
+
     /// Acquire permission to advance to `tag`.
     ///
-    /// A returned [`FederatedBarrierOutcome`] explicitly distinguishes a grant
+    /// A returned [`CoordinationOutcome`] explicitly distinguishes a grant
     /// from an asynchronous interruption. Coordination failures are terminal.
-    fn acquire_tag(
+    fn acquire(
         &mut self,
         tag: Tag,
         event_rx: &crate::Receiver<AsyncEvent>,
-    ) -> Result<FederatedBarrierOutcome, FederatedBarrierError>;
+    ) -> Result<CoordinationOutcome, CoordinationError>;
 
     /// Report that all work for `tag` has completed.
-    fn logical_tag_complete(&mut self, tag: Tag) -> Result<(), FederatedBarrierError>;
+    fn complete(&mut self, tag: Tag) -> Result<(), CoordinationError>;
 }
 
-#[cfg(feature = "federated")]
-pub(super) struct NoFederatedTimeBarrier;
+/// Coordinator used when a scheduler has no external logical-time authority.
+#[derive(Debug, Default)]
+pub struct NoopLogicalTimeCoordinator;
 
-#[cfg(feature = "federated")]
-impl FederatedTimeBarrier for NoFederatedTimeBarrier {
-    fn acquire_tag(
+impl LogicalTimeCoordinator for NoopLogicalTimeCoordinator {
+    fn publish_frontier(
+        &mut self,
+        _publication: FrontierPublication,
+    ) -> Result<(), CoordinationError> {
+        Ok(())
+    }
+
+    fn acquire(
         &mut self,
         _tag: Tag,
         _event_rx: &crate::Receiver<AsyncEvent>,
-    ) -> Result<FederatedBarrierOutcome, FederatedBarrierError> {
-        Ok(FederatedBarrierOutcome::Granted)
+    ) -> Result<CoordinationOutcome, CoordinationError> {
+        Ok(CoordinationOutcome::Granted)
     }
 
-    fn logical_tag_complete(&mut self, _tag: Tag) -> Result<(), FederatedBarrierError> {
+    fn complete(&mut self, _tag: Tag) -> Result<(), CoordinationError> {
         Ok(())
     }
 }
 
-#[cfg(feature = "federated")]
-impl std::fmt::Debug for dyn FederatedTimeBarrier {
+impl std::fmt::Debug for dyn LogicalTimeCoordinator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("dyn FederatedTimeBarrier")
+        f.write_str("dyn LogicalTimeCoordinator")
     }
 }
 
@@ -203,10 +226,153 @@ impl LogicalTimeBarrier {
     }
 }
 
+/// Result of offering an asynchronous event to scheduler coordination.
+pub(super) enum CoordinationEventResult {
+    /// The event updated coordination state and needs no further handling.
+    Consumed,
+    /// The scheduler must continue handling this event normally.
+    Event(AsyncEvent),
+}
+
+/// Scheduler-owned composition of local barriers and one optional external coordinator.
+///
+/// Local upstream acquisition always precedes external acquisition. Local downstream release
+/// always precedes external completion. Coordination events are consumed here before ordinary
+/// scheduler event handling. The external coordinator remains protocol-free; RTI and transport
+/// adapters live outside `boomerang_runtime`.
+#[derive(Debug)]
+pub(super) struct SchedulerCoordination {
+    enclave: EnclaveKey,
+    upstream: tinymap::TinySecondaryMap<EnclaveKey, LogicalTimeBarrier>,
+    downstream: tinymap::TinySecondaryMap<EnclaveKey, SendContext>,
+    external: Box<dyn LogicalTimeCoordinator>,
+    consumed_wake: Option<CoordinationWake>,
+}
+
+impl SchedulerCoordination {
+    pub(super) fn new(
+        enclave: EnclaveKey,
+        upstream: tinymap::TinySecondaryMap<EnclaveKey, LogicalTimeBarrier>,
+        downstream: tinymap::TinySecondaryMap<EnclaveKey, SendContext>,
+    ) -> Self {
+        Self {
+            enclave,
+            upstream,
+            downstream,
+            external: Box::new(NoopLogicalTimeCoordinator),
+            consumed_wake: None,
+        }
+    }
+
+    pub(super) fn set_external(&mut self, coordinator: impl LogicalTimeCoordinator + 'static) {
+        self.external = Box::new(coordinator);
+    }
+
+    pub(super) fn observe_event(
+        &mut self,
+        event: AsyncEvent,
+        current_tag: Tag,
+    ) -> CoordinationEventResult {
+        match event {
+            AsyncEvent::CoordinationWake(wake) => {
+                self.consumed_wake = Some(wake);
+                CoordinationEventResult::Consumed
+            }
+            AsyncEvent::TagRelease { enclave, tag } => {
+                self.upstream
+                    .get_mut(enclave)
+                    .expect("Unknown upstream enclave")
+                    .release_tag(tag);
+                CoordinationEventResult::Consumed
+            }
+            AsyncEvent::TagReleaseProvisional { enclave, tag } => {
+                if tag > current_tag {
+                    // In a local cycle, the requesting downstream may also be an upstream.
+                    if let Some(barrier) = self.upstream.get_mut(enclave) {
+                        barrier.release_tag_provisional(tag);
+                    }
+                }
+                CoordinationEventResult::Event(AsyncEvent::TagReleaseProvisional { enclave, tag })
+            }
+            event => CoordinationEventResult::Event(event),
+        }
+    }
+
+    pub(super) fn publish_frontier(
+        &mut self,
+        frontier: LogicalTimeFrontier,
+    ) -> Result<(), CoordinationError> {
+        let publication = FrontierPublication {
+            frontier,
+            consumed_wake: self.consumed_wake,
+        };
+        self.external.publish_frontier(publication)?;
+        self.consumed_wake = None;
+        Ok(())
+    }
+
+    pub(super) fn acquire(
+        &mut self,
+        tag: Tag,
+        event_rx: &crate::Receiver<AsyncEvent>,
+    ) -> Result<CoordinationOutcome, RuntimeError> {
+        for (_upstream, barrier) in self.upstream.iter_mut() {
+            if let Some(event) = barrier.acquire_tag(tag, self.enclave, event_rx)? {
+                return Ok(CoordinationOutcome::Interrupted(event));
+            }
+        }
+        self.external.acquire(tag, event_rx).map_err(Into::into)
+    }
+
+    pub(super) fn release_downstream(&self, tag: Tag, shutting_down: bool) {
+        for (downstream, context) in self.downstream.iter() {
+            let event = AsyncEvent::release(self.enclave, tag);
+            tracing::trace!(%downstream, event = %event, "Releasing downstream");
+            if !context.schedule_external(event) && !shutting_down {
+                tracing::warn!(
+                    "Failed to send tag downstream, downstream has unexpectedly terminated."
+                );
+            }
+        }
+    }
+
+    pub(super) fn complete(&mut self, tag: Tag, terminal: bool) -> Result<(), CoordinationError> {
+        self.release_downstream(if terminal { Tag::FOREVER } else { tag }, terminal);
+        self.external.complete(tag)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
     use crate::keepalive;
+
+    #[derive(Debug)]
+    struct RecordingCompletion(Arc<Mutex<Vec<Tag>>>);
+
+    impl LogicalTimeCoordinator for RecordingCompletion {
+        fn publish_frontier(
+            &mut self,
+            _publication: FrontierPublication,
+        ) -> Result<(), CoordinationError> {
+            Ok(())
+        }
+
+        fn acquire(
+            &mut self,
+            _tag: Tag,
+            _event_rx: &crate::Receiver<AsyncEvent>,
+        ) -> Result<CoordinationOutcome, CoordinationError> {
+            Ok(CoordinationOutcome::Granted)
+        }
+
+        fn complete(&mut self, tag: Tag) -> Result<(), CoordinationError> {
+            self.0.lock().unwrap().push(tag);
+            Ok(())
+        }
+    }
 
     fn queue_interruption(event_tx: &crate::Sender<AsyncEvent>) {
         event_tx.send(AsyncEvent::shutdown(Duration::ZERO)).unwrap();
@@ -345,6 +511,41 @@ mod tests {
     }
 
     #[test]
+    fn delayed_local_barrier_waits_for_delay_adjusted_upstream_tag() {
+        let (upstream_tx, upstream_rx) = kanal::unbounded();
+        let (_shutdown_tx, shutdown_rx) = keepalive::channel();
+        let delay = Duration::seconds(1);
+        let upstream_tag = Tag::new(Duration::seconds(2), usize::MAX);
+        let downstream_tag = Tag::new(Duration::seconds(3), 0);
+        let mut barrier = LogicalTimeBarrier {
+            released_tag: Tag::NEVER,
+            provisional_tag: Tag::NEVER,
+            upstream_ctx: SendContext {
+                enclave_key: EnclaveKey::from(1),
+                async_tx: upstream_tx,
+                shutdown_rx,
+            },
+            upstream_delay: Some(delay),
+        };
+        let (event_tx, event_rx) = kanal::unbounded();
+        let this_enclave = EnclaveKey::from(0);
+
+        queue_interruption(&event_tx);
+        assert!(barrier
+            .acquire_tag(downstream_tag, this_enclave, &event_rx)
+            .unwrap()
+            .is_some());
+        assert_provisional_request(&upstream_rx, upstream_tag);
+
+        barrier.release_tag(upstream_tag);
+        queue_interruption(&event_tx);
+        assert!(barrier
+            .acquire_tag(downstream_tag, this_enclave, &event_rx)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn local_barrier_release_progress_is_monotonic() {
         let (upstream_tx, _upstream_rx) = kanal::unbounded();
         let (_shutdown_tx, shutdown_rx) = keepalive::channel();
@@ -367,14 +568,74 @@ mod tests {
         assert_eq!(barrier.released_tag, released);
     }
 
-    #[cfg(feature = "federated")]
     #[test]
-    fn federated_barrier_error_preserves_concrete_source() {
+    fn terminal_completion_releases_local_downstreams_forever() {
+        let (downstream_tx, downstream_rx) = kanal::unbounded();
+        let (_shutdown_tx, shutdown_rx) = crate::keepalive::channel();
+        let downstream = EnclaveKey::from(1);
+        let mut downstreams = tinymap::TinySecondaryMap::new();
+        downstreams.insert(
+            downstream,
+            SendContext {
+                enclave_key: downstream,
+                async_tx: downstream_tx,
+                shutdown_rx,
+            },
+        );
+        let mut coordination = SchedulerCoordination::new(
+            EnclaveKey::from(0),
+            tinymap::TinySecondaryMap::new(),
+            downstreams,
+        );
+        let completions = Arc::new(Mutex::new(Vec::new()));
+        coordination.set_external(RecordingCompletion(Arc::clone(&completions)));
+
+        coordination.complete(Tag::ZERO, true).unwrap();
+
+        assert!(matches!(
+            downstream_rx.recv().unwrap(),
+            AsyncEvent::TagRelease { tag, .. } if tag == Tag::FOREVER
+        ));
+        assert_eq!(*completions.lock().unwrap(), vec![Tag::ZERO]);
+    }
+
+    #[test]
+    fn nonterminal_completion_releases_actual_tag_even_with_future_shutdown() {
+        let (downstream_tx, downstream_rx) = kanal::unbounded();
+        let (_shutdown_tx, shutdown_rx) = crate::keepalive::channel();
+        let downstream = EnclaveKey::from(1);
+        let mut downstreams = tinymap::TinySecondaryMap::new();
+        downstreams.insert(
+            downstream,
+            SendContext {
+                enclave_key: downstream,
+                async_tx: downstream_tx,
+                shutdown_rx,
+            },
+        );
+        let mut coordination = SchedulerCoordination::new(
+            EnclaveKey::from(0),
+            tinymap::TinySecondaryMap::new(),
+            downstreams,
+        );
+        let current = Tag::ZERO;
+        let _scheduled_shutdown = Tag::new(Duration::milliseconds(100), 0);
+
+        coordination.complete(current, false).unwrap();
+
+        assert!(matches!(
+            downstream_rx.recv().unwrap(),
+            AsyncEvent::TagRelease { tag, .. } if tag == current
+        ));
+    }
+
+    #[test]
+    fn coordination_error_preserves_concrete_source() {
         #[derive(Debug, thiserror::Error)]
         #[error("concrete coordination failure")]
         struct ConcreteError;
 
-        let error = FederatedBarrierError::from_error(ConcreteError);
+        let error = CoordinationError::from_error(ConcreteError);
         let source = std::error::Error::source(&error).expect("source should be preserved");
 
         assert_eq!(source.to_string(), "concrete coordination failure");

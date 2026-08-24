@@ -53,9 +53,9 @@ the corresponding assembly key.
 ## Boundary
 
 A connection point between runtime partitions. A boundary may be local between
-enclaves or federated between coordinated participants. `BoundaryKind` and
-`InterPartitionPlan` describe the result of boundary analysis during lowering;
-the runtime backend supplies the corresponding delivery mechanism.
+enclaves or federated between coordinated participants. Lowering analyzes each
+cross-partition connection once and selects the corresponding runtime delivery
+mechanism.
 
 ## Connection
 
@@ -100,11 +100,12 @@ assembly.
 
 ## Federate
 
-A statically identified participant in coordinated federated execution. In the
-current experimental federation slice, each federate is placed at an enclave
-root and communicates through the runtime infrastructure loop (RTI). Federates,
-enclaves, processes, and hosts are separate concepts even where the current
-runner maps them one-to-one. See [Static Federation](./static-federation.md).
+A statically identified compute node or process in coordinated execution. A
+Federate owns one or more Enclaves and has one protocol identity and connection
+to the runtime infrastructure (RTI). Enclaves remain independent scheduler
+boundaries; same-Federate Enclave traffic stays in process, while only
+cross-Federate traffic enters the RTI star. See
+[Static Federation](./static-federation.md).
 
 ## History Transition
 
@@ -157,9 +158,9 @@ information used during safe declaration.
 ## Partition
 
 A region of the declared graph selected to execute behind one runtime boundary.
-Current lowering maps each partition root to an enclave and records
-cross-partition connections in an `InterPartitionPlan`. A partition is a graph
-and deployment concept; it is not automatically a process, host, or federate.
+Current lowering maps each partition root to an enclave and transiently analyzes
+its cross-partition connections. A partition is a graph and deployment concept;
+it is not automatically a process, host, or federate.
 
 ## Reaction
 
@@ -196,10 +197,11 @@ durable application identity.
 
 ## Runtime Assembly
 
-`RuntimeAssembly` is the ready-to-run result of lowering an `Assembly`. It owns
-runtime enclaves and the resolved metadata needed by features such as replay and
-static federation. Runners consume it to create schedulers or federation roles;
-it no longer accepts logical graph declarations.
+`RuntimeAssembly` is the ready-to-run result of lowering an `Assembly`. Its
+`RuntimeExecution` variant owns either a local dense Enclave map or a `RuntimeFederation` that
+owns the dense map alongside Federate placement, protocol bridges, and RTI topology. Runners
+consume it to create local schedulers or federation roles; it no longer accepts logical graph
+declarations.
 
 ## Runtime Environment
 

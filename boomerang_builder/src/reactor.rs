@@ -5,37 +5,11 @@ use super::{
     AssemblyPortKey, AssemblyReactionKey, Input, Logical, ModeEffectSpec, Output, Physical,
     PortBank, PortTag, TimerActionKey, TimerSpec, TypedActionKey, TypedPortKey,
 };
-use crate::runtime;
+use crate::{runtime, AssemblyModeKey, ModeKind};
 use slotmap::SecondaryMap;
 
 slotmap::new_key_type! {
     pub struct AssemblyReactorKey;
-}
-
-slotmap::new_key_type! {
-    pub struct AssemblyModeKey;
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModeKind {
-    Initial,
-    Normal,
-}
-
-impl ModeKind {
-    pub fn is_initial(self) -> bool {
-        matches!(self, ModeKind::Initial)
-    }
-}
-
-impl From<bool> for ModeKind {
-    fn from(initial: bool) -> Self {
-        if initial {
-            ModeKind::Initial
-        } else {
-            ModeKind::Normal
-        }
-    }
 }
 
 #[cfg(feature = "federated")]
@@ -709,10 +683,15 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
             .add_reaction(Some("recorder"))
             .with_trigger(action_key)
             .with_deferred_reaction_factory(move |runtime_parts| {
-                let (enclave_key, action_key) =
-                    runtime_parts.aliases.action_aliases[action_key.into()];
+                let (enclave, action_key) =
+                    runtime_parts.aliases.action_aliases[action_key.into()].clone();
                 Box::new(
-                    runtime::replay::RecorderFn::<T>::new(&topic, enclave_key, action_key).unwrap(),
+                    runtime::replay::RecorderFn::<T>::new(
+                        &topic,
+                        enclave.enclave_key(),
+                        action_key,
+                    )
+                    .unwrap(),
                 )
             })
             .finish()?;
@@ -733,8 +712,7 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
         // Add a replay factory.
         self.assembly
             .add_replayer(action_key, move |runtime_parts| {
-                let (_enclave_key, action_key) =
-                    runtime_parts.aliases.action_aliases[action_key.into()];
+                let action_key = runtime_parts.action_aliases[action_key.into()].1;
                 Box::new(runtime::replay::TypedReplayer::<T>::new(action_key))
             })?;
         Ok(())

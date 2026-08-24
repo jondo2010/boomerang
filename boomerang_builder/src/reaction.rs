@@ -5,13 +5,14 @@ use super::{
     AssemblyReactorKey,
 };
 use crate::{
-    runtime, ActionTag, ParentReactorSpec, PortBank, PortTag, RuntimeAssembly, TimerActionKey,
-    TypedActionKey, TypedPortKey,
+    runtime, ActionTag, ModeEffectSpec, ParentReactorSpec, PortBank, PortTag, ResolveModeEffects,
+    RuntimeAssemblyContext, TimerActionKey, TypedActionKey, TypedPortKey,
 };
 use slotmap::SecondaryMap;
 use variadics_please::all_tuples;
 
 slotmap::new_key_type! {
+    /// Stable key for an assembly reaction specification.
     pub struct AssemblyReactionKey;
 }
 
@@ -26,9 +27,14 @@ impl petgraph::graph::GraphIndex for AssemblyReactionKey {
 }
 
 /// A deferred factory for a runtime reaction function.
-pub type DeferredReactionFactory = Box<dyn FnOnce(&RuntimeAssembly) -> runtime::BoxedReactionFn>;
+pub struct DeferredReactionFactory(
+    /// Callback resolved once runtime aliases and enclaves are available.
+    pub(crate) Box<dyn FnOnce(&RuntimeAssemblyContext) -> runtime::BoxedReactionFn>,
+);
 
+/// Build-time specification for a reaction and its declared dependencies.
 pub struct ReactionSpec {
+    /// Optional user-facing reaction name.
     pub(super) name: Option<String>,
     /// The owning Reactor for this Reaction
     pub(super) reactor_key: AssemblyReactorKey,
@@ -54,15 +60,16 @@ pub struct ReactionSpec {
 
 impl ReactionSpec {
     /// Create a new ReactionSpec
-    pub fn new<S: Into<String>>(
+    #[cfg(test)]
+    pub(crate) fn new<S: Into<String>>(
         name: Option<S>,
         parent_key: AssemblyReactorKey,
-        reaction_fn: Box<dyn FnOnce(&RuntimeAssembly) -> runtime::BoxedReactionFn>,
+        reaction_fn: Box<dyn FnOnce(&RuntimeAssemblyContext) -> runtime::BoxedReactionFn>,
     ) -> Self {
         ReactionSpec {
             name: name.map(|s| s.into()),
             reactor_key: parent_key,
-            reaction_fn,
+            reaction_fn: DeferredReactionFactory(reaction_fn),
             enabled_modes: None,
             scope_mode: None,
             mode_effects: Vec::new(),
@@ -96,109 +103,6 @@ impl Debug for ReactionSpec {
             .finish()
     }
 }
-
-#[derive(Clone, Copy, Debug)]
-pub struct ModeEffectSpec {
-    target: AssemblyModeKey,
-    runtime_target: Option<runtime::ModeKey>,
-    transition: runtime::TransitionKind,
-}
-
-impl ModeEffectSpec {
-    pub(crate) fn new(target: AssemblyModeKey, transition: runtime::TransitionKind) -> Self {
-        Self {
-            target,
-            runtime_target: None,
-            transition,
-        }
-    }
-
-    pub fn target(&self) -> AssemblyModeKey {
-        self.target
-    }
-
-    pub fn transition(&self) -> runtime::TransitionKind {
-        self.transition
-    }
-
-    pub fn with_transition(mut self, transition: runtime::TransitionKind) -> Self {
-        self.transition = transition;
-        self
-    }
-}
-
-#[doc(hidden)]
-pub trait ResolveModeEffects {
-    fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssembly);
-}
-
-impl ResolveModeEffects for () {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
-}
-
-impl ResolveModeEffects for ModeEffectSpec {
-    fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssembly) {
-        self.runtime_target = Some(runtime_parts.aliases.mode_aliases[self.target].1);
-    }
-}
-
-impl<T: ResolveModeEffects, const N: usize> ResolveModeEffects for [T; N] {
-    fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssembly) {
-        for item in self {
-            item.resolve_mode_effects(runtime_parts);
-        }
-    }
-}
-
-impl runtime::ReactionRefsExtract for ModeEffectSpec {
-    type Ref<'store>
-        = runtime::ModeEffectRef
-    where
-        Self: 'store;
-
-    fn extract<'store>(
-        &self,
-        _refs: &mut runtime::ReactionRefs<'store>,
-    ) -> Result<Self::Ref<'store>, runtime::ReactionRefsError> {
-        let target = self
-            .runtime_target
-            .ok_or_else(|| runtime::ReactionRefsError::missing("mode effect"))?;
-        Ok(runtime::ModeEffectRef::new_key(target, self.transition))
-    }
-}
-
-impl<T: runtime::ReactorData, Q: ActionTag> ResolveModeEffects for TypedActionKey<T, Q> {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
-}
-
-impl ResolveModeEffects for TimerActionKey {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
-}
-
-impl<T: runtime::ReactorData, Q: PortTag, A> ResolveModeEffects for TypedPortKey<T, Q, A> {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
-}
-
-impl<T: runtime::ReactorData, Q: PortTag, A> ResolveModeEffects for PortBank<T, Q, A> {
-    fn resolve_mode_effects(&mut self, _runtime_parts: &RuntimeAssembly) {}
-}
-
-macro_rules! impl_resolve_mode_effects {
-    ($($T:ident),*) => {
-        impl<$($T,)*> ResolveModeEffects for ($($T,)*)
-        where
-            $($T: ResolveModeEffects,)*
-        {
-            #[allow(non_snake_case)]
-            fn resolve_mode_effects(&mut self, runtime_parts: &RuntimeAssembly) {
-                let ($($T,)*) = self;
-                $($T.resolve_mode_effects(runtime_parts);)*
-            }
-        }
-    };
-}
-
-all_tuples!(impl_resolve_mode_effects, 1, 10, T);
 
 impl ReactionSpec {
     /// Get the name of this Reaction
@@ -642,16 +546,16 @@ where
             ..
         } = self;
         let fields_for_reaction = fields.clone();
-        let reaction_fn: DeferredReactionFactory = Box::new(
-            move |runtime_parts: &RuntimeAssembly| -> runtime::BoxedReactionFn {
+        let reaction_fn = DeferredReactionFactory(Box::new(
+            move |runtime_assembly: &RuntimeAssemblyContext| -> runtime::BoxedReactionFn {
                 let mut fields_for_reaction = fields_for_reaction.clone();
-                fields_for_reaction.resolve_mode_effects(runtime_parts);
+                fields_for_reaction.resolve_mode_effects(&runtime_assembly.aliases);
                 Box::new(runtime::reaction::FnRefsAdapter::new(
                     fields_for_reaction,
                     f,
                 ))
             },
-        );
+        ));
         ReactionDeclaration {
             name,
             reaction_fn,
@@ -676,12 +580,12 @@ where
     S: runtime::ReactorData,
     Fields: runtime::ReactionRefsExtract,
 {
-    pub fn with_deferred_reaction_factory<F>(
+    pub(crate) fn with_deferred_reaction_factory<F>(
         self,
         f: F,
     ) -> ReactionDeclaration<'a, S, Fields, DeferredReactionFactory>
     where
-        F: FnOnce(&RuntimeAssembly) -> runtime::BoxedReactionFn + 'static,
+        F: FnOnce(&RuntimeAssemblyContext) -> runtime::BoxedReactionFn + 'static,
     {
         let Self {
             name,
@@ -700,7 +604,7 @@ where
         } = self;
         ReactionDeclaration {
             name,
-            reaction_fn: Box::new(f),
+            reaction_fn: DeferredReactionFactory(Box::new(f)),
             enabled_modes,
             scope_mode,
             mode_effects,

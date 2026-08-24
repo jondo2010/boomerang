@@ -8,18 +8,20 @@ use slotmap::SecondaryMap;
 
 use crate::{AssemblyFqn, AssemblyPortKey, AssemblyReactionKey, AssemblyReactorKey};
 
-use super::{
-    build::{RuntimeAliases, RuntimeAssembly},
-    runtime, Assembly,
-};
+use super::{build::RuntimeAliases, runtime, Assembly};
 
 use boomerang_runtime::fmt_utils as fmt;
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+/// Debug-only view of an assembly connection.
 struct Connection {
+    /// Fully qualified source port.
     source: AssemblyFqn,
+    /// Fully qualified target port.
     target: AssemblyFqn,
+    /// Optional logical connection delay.
     after: Option<runtime::Duration>,
+    /// Whether the connection uses physical time.
     physical: bool,
 }
 
@@ -267,7 +269,7 @@ impl Debug for RuntimeAliases {
                 .entries(
                     self.enclave_aliases
                         .iter()
-                        .map(|(k, v)| (format!("{k:?}"), v.to_string())),
+                        .map(|(k, v)| (format!("{k:?}"), format!("{v:?}"))),
                 )
                 .finish()
         });
@@ -318,32 +320,6 @@ impl Debug for RuntimeAliases {
             .field("reaction_aliases", &reaction_aliases)
             .field("action_aliases", &action_aliases)
             .field("port_aliases", &port_aliases)
-            .finish()
-    }
-}
-
-impl Debug for RuntimeAssembly {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let enclaves = fmt::from_fn(|f| {
-            f.debug_map()
-                .entries(self.enclaves.iter().map(|(k, v)| (format!("{k:?}"), v)))
-                .finish()
-        });
-
-        f.debug_struct("RuntimeAssembly")
-            .field("enclave_map", &enclaves)
-            .field("aliases_map", &self.aliases)
-            .field("inter_partition_plan", &self.inter_partition_plan)
-            .field("federation", &{
-                #[cfg(feature = "federated")]
-                {
-                    &self.federation.as_ref().map(|federation| &federation.plan)
-                }
-                #[cfg(not(feature = "federated"))]
-                {
-                    &"<disabled>"
-                }
-            })
             .finish()
     }
 }

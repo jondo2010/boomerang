@@ -2,6 +2,13 @@ use std::fmt::{Debug, Display};
 
 use crate::{ActionKey, Duration, EnclaveKey, ReactionSet, ReactorData, Tag};
 
+/// Exact wake observation requested by an external logical-time coordinator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoordinationWake {
+    pub tag: Tag,
+    pub observation_epoch: u64,
+}
+
 /// The action value associated with a scheduled event.
 ///
 /// Root-scope events keep `stored_tag` equal to the event tag. Mode-local events
@@ -61,6 +68,8 @@ impl Ord for ScheduledEvent {
 
 /// `AsyncEvent` is used to inject events into the scheduler from outside of the normal event loop.
 pub enum AsyncEvent {
+    /// Recheck the scheduler frontier and acknowledge this exact wake when consumed.
+    CoordinationWake(CoordinationWake),
     /// A release event is used by upstream enclaves to signal that they have completed processing the tag.
     TagRelease {
         /// The key of the enclave that is releasing the `Tag``.
@@ -105,6 +114,7 @@ pub enum AsyncEvent {
 impl Debug for AsyncEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::CoordinationWake(wake) => f.debug_tuple("CoordinationWake").field(wake).finish(),
             Self::TagRelease { enclave, tag } => f
                 .debug_struct("TagRelease")
                 .field("enclave", enclave)
@@ -141,6 +151,7 @@ impl Debug for AsyncEvent {
 impl Display for AsyncEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            AsyncEvent::CoordinationWake(wake) => write!(f, "CoordinationWake({wake:?})"),
             AsyncEvent::TagRelease { enclave, tag } => {
                 write!(f, "TagRelease[enclave={enclave:?},tag={tag:.3}]")
             }

@@ -3,3 +3,4 @@ boomerang/target
 Cargo.lock
 *.svg
 *.docs-cache/
+.worktrees/

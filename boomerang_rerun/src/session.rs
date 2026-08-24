@@ -7,7 +7,7 @@ use rerun::{RecordingStream, RecordingStreamBuilder};
 #[cfg(feature = "federated")]
 use super::entities::{
     bounded_fragment, escape_entity_segment, log_runtime_relation, runtime_display_label,
-    runtime_enclave_root,
+    runtime_enclave_root, RuntimeLabel,
 };
 use super::entities::{log_runtime_enclaves, RegistrationSnapshot};
 use super::layer::{AdapterState, RerunLayer, SessionFilter};
@@ -146,9 +146,8 @@ impl RerunSession {
                             federation_nodes.push(enclave_path.clone());
                             federation_labels.push(runtime_display_label(
                                 Some(id.as_str()),
-                                &enclave.to_string(),
-                                &enclave.to_string(),
-                                &enclave.to_string(),
+                                enclave,
+                                RuntimeLabel::Enclave,
                             ));
                             federation_edges.push((path.clone(), enclave_path));
                         }

@@ -4,8 +4,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "federated")]
 use std::collections::BTreeMap;
 
-use boomerang_runtime::{trace::TraceEvent, ActionKey, EnclaveKey, PortKey, ReactionKey};
-use boomerang_tinymap::TinySecondaryMap;
+use boomerang_runtime::{
+    trace::TraceEvent, ActionKey, EnclaveKey, PortKey, ReactionKey, ReactorKey,
+};
+use boomerang_tinymap::{Key as _, TinySecondaryMap};
 
 pub(crate) fn escape_entity_segment(segment: &str) -> String {
     segment.replace('\\', "\\\\").replace('/', "\\/")
@@ -194,45 +196,36 @@ impl RegistrationSnapshot {
     }
 }
 
+pub(super) enum RuntimeLabel<'a> {
+    Enclave,
+    Scheduler,
+    Reactor(&'a str, ReactorKey),
+    Reaction(&'a str, ReactionKey),
+    Action(&'a str, ActionKey),
+    Port(&'a str, PortKey),
+}
+
 pub(super) fn runtime_display_label(
     federate: Option<&str>,
-    enclave: &str,
-    display_name: &str,
-    stable_key: &str,
+    enclave: EnclaveKey,
+    label: RuntimeLabel<'_>,
 ) -> String {
     let mut parts = Vec::new();
     if let Some(federate) = federate {
         parts.push(bounded_fragment(federate, 12));
     }
-    if !enclave.is_empty() {
-        parts.push(compact_runtime_key(enclave));
+    parts.push(format!("E{}", enclave.index()));
+    let keyed =
+        |name: &str, prefix: &str, index| format!("{}#{prefix}{index}", bounded_fragment(name, 24));
+    match label {
+        RuntimeLabel::Enclave => parts.push(format!("EnclaveKey({})", enclave.index())),
+        RuntimeLabel::Scheduler => parts.push("scheduler".to_owned()),
+        RuntimeLabel::Reactor(name, key) => parts.push(keyed(name, "Rr", key.index())),
+        RuntimeLabel::Reaction(name, key) => parts.push(keyed(name, "R", key.index())),
+        RuntimeLabel::Action(name, key) => parts.push(keyed(name, "A", key.index())),
+        RuntimeLabel::Port(name, key) => parts.push(keyed(name, "P", key.index())),
     }
-    let display = bounded_fragment(display_name, 24);
-    let stable = compact_runtime_key(stable_key);
-    parts.push(if display_name == stable_key {
-        display
-    } else {
-        format!("{display}#{stable}")
-    });
     bounded_fragment(&parts.join(" · "), 64)
-}
-
-pub(super) fn compact_runtime_key(value: &str) -> String {
-    for (prefix, compact) in [
-        ("EnclaveKey(", "E"),
-        ("ReactorKey(", "Rr"),
-        ("ReactionKey(", "R"),
-        ("ActionKey(", "A"),
-        ("PortKey(", "P"),
-    ] {
-        if let Some(index) = value
-            .strip_prefix(prefix)
-            .and_then(|value| value.strip_suffix(')'))
-        {
-            return format!("{compact}{index}");
-        }
-    }
-    bounded_fragment(value, 16)
 }
 
 pub(super) fn bounded_fragment(value: &str, max_chars: usize) -> String {
@@ -258,22 +251,15 @@ pub(super) fn log_runtime_enclaves(
         boomerang_runtime::Enclave,
     >,
 ) -> rerun::RecordingStreamResult<TinySecondaryMap<EnclaveKey, EnclaveRegistration>> {
-    use boomerang_runtime::{ActionKey, PortKey, ReactionKey, ReactorKey};
+    use boomerang_runtime::{ActionKey, PortKey, ReactionKey};
 
     let mut registrations = TinySecondaryMap::new();
     for (enclave_key, enclave) in enclaves.iter() {
         let root = runtime_enclave_root(federate, enclave_key);
         let scheduler = format!("{root}/scheduler");
         let enclave_path = root.clone();
-        let enclave_key_string = enclave_key.to_string();
-        let enclave_label = runtime_display_label(
-            federate,
-            &enclave_key_string,
-            &enclave_key_string,
-            &enclave_key_string,
-        );
-        let scheduler_label =
-            runtime_display_label(federate, &enclave_key_string, "scheduler", "scheduler");
+        let enclave_label = runtime_display_label(federate, enclave_key, RuntimeLabel::Enclave);
+        let scheduler_label = runtime_display_label(federate, enclave_key, RuntimeLabel::Scheduler);
         let mut registration = EnclaveRegistration::new(EntityRegistration::new(
             &scheduler,
             scheduler_label.clone(),
@@ -319,6 +305,7 @@ pub(super) fn log_runtime_enclaves(
 
         for (key, reactor) in enclave.env.reactors.iter() {
             let path = reactor_path(key);
+            let name = reactor.name().rsplit('/').next().unwrap_or(reactor.name());
             let owner = enclave
                 .graph
                 .reactor_root_scopes
@@ -335,9 +322,8 @@ pub(super) fn log_runtime_enclaves(
             nodes.push(path.clone());
             node_labels.push(runtime_display_label(
                 federate,
-                &enclave_key_string,
-                reactor.name().rsplit('/').next().unwrap_or(reactor.name()),
-                &key.to_string(),
+                enclave_key,
+                RuntimeLabel::Reactor(name, key),
             ));
             edges.push((owner_path, path.clone(), "owns_reactor"));
             let owner_key = owner
@@ -346,7 +332,7 @@ pub(super) fn log_runtime_enclaves(
             log_runtime_entity(
                 recording,
                 &path,
-                reactor.name().rsplit('/').next().unwrap_or(reactor.name()),
+                name,
                 &key.to_string(),
                 "reactor",
                 &[("boomerang.runtime.owner_key", Some(&owner_key))],
@@ -364,9 +350,8 @@ pub(super) fn log_runtime_enclaves(
             let owner_path = reactor_path(owner);
             let label = runtime_display_label(
                 federate,
-                &enclave_key_string,
-                reaction.get_name(),
-                &key.to_string(),
+                enclave_key,
+                RuntimeLabel::Reaction(reaction.get_name(), key),
             );
             nodes.push(path.clone());
             node_labels.push(label.clone());
@@ -403,9 +388,8 @@ pub(super) fn log_runtime_enclaves(
             );
             let label = runtime_display_label(
                 federate,
-                &enclave_key_string,
-                action.name(),
-                &key.to_string(),
+                enclave_key,
+                RuntimeLabel::Action(action.name(), key),
             );
             nodes.push(path.clone());
             node_labels.push(label.clone());
@@ -444,9 +428,8 @@ pub(super) fn log_runtime_enclaves(
             );
             let label = runtime_display_label(
                 federate,
-                &enclave_key_string,
-                port.get_name(),
-                &key.to_string(),
+                enclave_key,
+                RuntimeLabel::Port(port.get_name(), key),
             );
             nodes.push(path.clone());
             node_labels.push(label.clone());

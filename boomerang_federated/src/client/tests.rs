@@ -14,6 +14,23 @@ use super::*;
 use crate::client::coordination::ProtocolPoll;
 use crate::{in_memory_transport_pair, EndpointId};
 
+const TEST_TIMEOUT: StdDuration = StdDuration::from_secs(1);
+
+async fn with_wall_timeout<T>(
+    label: &'static str,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    let (timeout_tx, timeout_rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        std::thread::sleep(TEST_TIMEOUT);
+        let _ = timeout_tx.send(());
+    });
+    tokio::select! {
+        result = future => result,
+        _ = timeout_rx => panic!("{label} timed out after {TEST_TIMEOUT:?}"),
+    }
+}
+
 fn fed(id: &str) -> FederateId {
     FederateId::new(id)
 }
@@ -246,8 +263,13 @@ async fn bridge_admits_preceding_messages_then_sends_msg_before_ltc() {
                 .await;
             }
             send_rti_to_federate(&mut transport, RtiToFederate::Tag { tag: WireTag::ZERO }).await;
+            let outbound_msg = with_wall_timeout(
+                "waiting for outbound MSG after TAG admission",
+                recv_federate_to_rti(&mut transport),
+            )
+            .await;
             assert_eq!(
-                recv_federate_to_rti(&mut transport).await,
+                outbound_msg,
                 FederateToRti::Msg {
                     source: fed("source"),
                     target: fed("sink"),
@@ -256,8 +278,13 @@ async fn bridge_admits_preceding_messages_then_sends_msg_before_ltc() {
                     payload: b"7".to_vec(),
                 }
             );
+            let ltc = with_wall_timeout(
+                "waiting for LTC after outbound MSG",
+                recv_federate_to_rti(&mut transport),
+            )
+            .await;
             assert_eq!(
-                recv_federate_to_rti(&mut transport).await,
+                ltc,
                 FederateToRti::Ltc {
                     federate_id: fed("source"),
                     tag: WireTag::ZERO,
@@ -311,7 +338,9 @@ async fn bridge_admits_preceding_messages_then_sends_msg_before_ltc() {
         .report_logical_tag_complete(boomerang_runtime::Tag::ZERO)
         .unwrap();
 
-    rti.await.unwrap();
+    with_wall_timeout("waiting for fake RTI to verify MSG/LTC ordering", rti)
+        .await
+        .expect("fake RTI task panicked while verifying MSG/LTC ordering");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

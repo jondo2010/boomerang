@@ -15,6 +15,45 @@ use crate::{
     RtiLogicalTimeCoordinator, RtiToFederate, WireTag,
 };
 
+const TEST_TIMEOUT: StdDuration = StdDuration::from_secs(1);
+
+async fn with_wall_timeout<T>(
+    label: &'static str,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    let (timeout_tx, timeout_rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        std::thread::sleep(TEST_TIMEOUT);
+        let _ = timeout_tx.send(());
+    });
+    tokio::select! {
+        result = future => result,
+        _ = timeout_rx => panic!("{label} timed out after {TEST_TIMEOUT:?}"),
+    }
+}
+
+fn run_blocking_with_wall_timeout<T: Send + 'static>(
+    label: &'static str,
+    operation: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
+        let _ = result_tx.send(result);
+    });
+    match result_rx.recv_timeout(TEST_TIMEOUT) {
+        Ok(Ok(result)) => result,
+        Ok(Err(payload)) => std::panic::resume_unwind(payload),
+        Err(_) => panic!("{label} timed out after {TEST_TIMEOUT:?}"),
+    }
+}
+
+async fn join_fake_rti(label: &'static str, rti: tokio::task::JoinHandle<()>) {
+    with_wall_timeout(label, rti)
+        .await
+        .unwrap_or_else(|error| panic!("{label} failed: {error}"));
+}
+
 fn fed() -> FederateId {
     FederateId::new("federate")
 }
@@ -138,11 +177,22 @@ async fn request_net_failure_fans_out_the_first_concrete_error() {
         .publish_frontier(candidate(Tag::ZERO))
         .unwrap_err();
     assert!(publish_error.to_string().contains("first action failure"));
-    let acquire_error = acquire.join().unwrap().unwrap_err();
+    let acquire_error = run_blocking_with_wall_timeout(
+        "waiting for pending acquisition to receive NET failure",
+        move || acquire.join(),
+    )
+    .expect("pending acquisition thread panicked")
+    .unwrap_err();
     assert!(acquire_error.to_string().contains("first action failure"));
     assert!(!acquire_error.to_string().contains("service stopped"));
-    assert!(service.join().unwrap_err().contains("first action failure"));
-    rti.await.unwrap();
+    assert!(
+        run_blocking_with_wall_timeout("joining service after NET failure", move || {
+            service.join()
+        })
+        .unwrap_err()
+        .contains("first action failure")
+    );
+    join_fake_rti("joining fake RTI after NET failure", rti).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -174,22 +224,36 @@ async fn report_ltc_failure_fails_the_pending_completion_with_the_first_error() 
     let mut participant = service.participant(participant_key);
     participant.publish_frontier(candidate(Tag::ZERO)).unwrap();
     let events = receivers.remove(&participant_key).unwrap();
-    let _ = participant.acquire(Tag::ZERO, &events).unwrap();
+    let (participant, acquire_result) = run_blocking_with_wall_timeout(
+        "waiting for initial grant before completion failure",
+        move || {
+            let result = participant.acquire(Tag::ZERO, &events);
+            (participant, result)
+        },
+    );
+    acquire_result.unwrap();
 
     faults.record(crate::FederatedEndpointError::codec(
         "completion action failure",
     ));
-    let completion_error = participant.complete(Tag::ZERO).unwrap_err();
+    let completion_error =
+        run_blocking_with_wall_timeout("waiting for pending completion failure", move || {
+            let mut participant = participant;
+            participant.complete(Tag::ZERO)
+        })
+        .unwrap_err();
     assert!(completion_error
         .to_string()
         .contains("completion action failure"));
     assert!(!completion_error.to_string().contains("service stopped"));
-    assert!(service
-        .join()
-        .unwrap_err()
-        .contains("completion action failure"));
+    assert!(run_blocking_with_wall_timeout(
+        "joining service after completion failure",
+        move || service.join()
+    )
+    .unwrap_err()
+    .contains("completion action failure"));
     let _ = done_tx.send(());
-    rti.await.unwrap();
+    join_fake_rti("joining fake RTI after completion failure", rti).await;
 }
 
 fn participant_channels(
@@ -256,10 +320,24 @@ async fn protocol_error_fans_out_to_all_pending_acquires() {
     let second_rx = receivers.remove(&keys[1]).unwrap();
     let first_waiter = std::thread::spawn(move || first.acquire(Tag::ZERO, &first_rx));
     let second_waiter = std::thread::spawn(move || second.acquire(Tag::ZERO, &second_rx));
-    assert!(first_waiter.join().unwrap().is_err());
-    assert!(second_waiter.join().unwrap().is_err());
-    assert!(service.join().is_err());
-    rti.await.unwrap();
+    assert!(run_blocking_with_wall_timeout(
+        "waiting for first acquire to receive protocol failure",
+        move || first_waiter.join(),
+    )
+    .expect("first acquire thread panicked")
+    .is_err());
+    assert!(run_blocking_with_wall_timeout(
+        "waiting for second acquire to receive protocol failure",
+        move || second_waiter.join(),
+    )
+    .expect("second acquire thread panicked")
+    .is_err());
+    assert!(
+        run_blocking_with_wall_timeout("joining service after protocol failure", move || service
+            .join(),)
+        .is_err()
+    );
+    join_fake_rti("joining fake RTI after protocol failure", rti).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -332,8 +410,13 @@ async fn inbound_msg_interrupts_waiting_participant_before_grant_release() {
     .unwrap();
     let mut participant = service.participant(key);
     participant.publish_frontier(candidate(Tag::ZERO)).unwrap();
+    let interruption =
+        run_blocking_with_wall_timeout("waiting for inbound MSG to interrupt acquire", move || {
+            participant.acquire(Tag::ZERO, &event_rx)
+        })
+        .unwrap();
     assert!(matches!(
-        participant.acquire(Tag::ZERO, &event_rx).unwrap(),
+        interruption,
         CoordinationOutcome::Interrupted(boomerang_runtime::AsyncEvent::Logical {
             tag,
             key: observed,
@@ -342,9 +425,19 @@ async fn inbound_msg_interrupts_waiting_participant_before_grant_release() {
     ));
     grant_tx.send(()).unwrap();
     std::thread::sleep(StdDuration::from_millis(20));
-    service.force_stop().unwrap();
-    service.join().unwrap();
-    rti.await.unwrap();
+    let (service, stop_result) = run_blocking_with_wall_timeout(
+        "forcing service stop after inbound interruption",
+        move || {
+            let result = service.force_stop();
+            (service, result)
+        },
+    );
+    stop_result.unwrap();
+    run_blocking_with_wall_timeout("joining service after inbound interruption", move || {
+        service.join()
+    })
+    .unwrap();
+    join_fake_rti("joining fake RTI after inbound interruption", rti).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -391,7 +484,9 @@ async fn full_participant_event_queue_does_not_block_service_wake_delivery() {
     .unwrap();
     let mut participant = service.participant(key);
     participant.publish_frontier(candidate(Tag::ZERO)).unwrap();
-    grant_sent_rx.recv().unwrap();
+    grant_sent_rx
+        .recv_timeout(TEST_TIMEOUT)
+        .expect("timed out waiting for initial grant to fill participant queue");
     std::thread::sleep(StdDuration::from_millis(20));
 
     let (publication_tx, publication_rx) = std::sync::mpsc::channel();
@@ -406,20 +501,32 @@ async fn full_participant_event_queue_does_not_block_service_wake_delivery() {
         .unwrap();
 
     assert!(matches!(
-        event_rx.recv().unwrap(),
+        event_rx
+            .recv_timeout(TEST_TIMEOUT)
+            .expect("timed out waiting for the prefilled participant event"),
         boomerang_runtime::AsyncEvent::Shutdown { .. }
     ));
     assert!(matches!(
-        event_rx.recv_timeout(StdDuration::from_secs(1)).unwrap(),
+        event_rx
+            .recv_timeout(TEST_TIMEOUT)
+            .expect("timed out waiting for deferred coordination wake"),
         boomerang_runtime::AsyncEvent::CoordinationWake(_)
     ));
-    let mut participant = publisher.join().unwrap();
+    let mut participant = run_blocking_with_wall_timeout(
+        "joining publisher after full-queue wake delivery",
+        move || publisher.join(),
+    )
+    .expect("publisher thread panicked");
     participant
         .publish_frontier(FrontierPublication {
             frontier: LogicalTimeFrontier::Finished,
             consumed_wake: None,
         })
         .unwrap();
-    service.join().unwrap();
-    rti.await.unwrap();
+    run_blocking_with_wall_timeout(
+        "joining service after full-queue wake delivery",
+        move || service.join(),
+    )
+    .unwrap();
+    join_fake_rti("joining fake RTI after full-queue wake delivery", rti).await;
 }

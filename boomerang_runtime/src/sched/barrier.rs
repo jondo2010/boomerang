@@ -511,6 +511,40 @@ mod tests {
     }
 
     #[test]
+    fn delayed_local_barrier_waits_for_delay_adjusted_upstream_tag() {
+        let (upstream_tx, upstream_rx) = kanal::unbounded();
+        let (_shutdown_tx, shutdown_rx) = keepalive::channel();
+        let delay = Duration::seconds(1);
+        let upstream_tag = Tag::new(Duration::seconds(2), usize::MAX);
+        let downstream_tag = Tag::new(Duration::seconds(3), 0);
+        let mut barrier = LogicalTimeBarrier {
+            released_tag: Tag::NEVER,
+            provisional_tag: Tag::NEVER,
+            upstream_ctx: SendContext {
+                enclave_key: EnclaveKey::from(1),
+                async_tx: upstream_tx,
+                shutdown_rx,
+            },
+            upstream_delay: Some(delay),
+        };
+        let (event_tx, event_rx) = kanal::unbounded();
+        let this_enclave = EnclaveKey::from(0);
+
+        queue_interruption(&event_tx);
+        assert!(barrier
+            .acquire_tag(downstream_tag, this_enclave, &event_rx)
+            .unwrap()
+            .is_some());
+        assert_provisional_request(&upstream_rx, upstream_tag);
+
+        barrier.release_tag(upstream_tag);
+        assert!(barrier
+            .acquire_tag(downstream_tag, this_enclave, &event_rx)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn local_barrier_release_progress_is_monotonic() {
         let (upstream_tx, _upstream_rx) = kanal::unbounded();
         let (_shutdown_tx, shutdown_rx) = keepalive::channel();

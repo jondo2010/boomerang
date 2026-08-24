@@ -35,15 +35,17 @@ feature or protocol vocabulary.
 `boomerang_builder/src/connection.rs` chooses the sink while lowering a
 connection. `boomerang_builder/src/assembly/build.rs` derives local crosslinks
 and serialized federation artifacts from one transient partition-boundary analysis.
-`boomerang_federated/src/client.rs` implements the external contract as
-`RtiLogicalTimeCoordinator`; protocol sessions and transports remain in
-`boomerang_federated`.
+`boomerang_federated/src/client/coordination/mod.rs` implements the RTI wire
+adapter as `RtiLogicalTimeCoordinator`.
+`boomerang_federated/src/federate_coordination/` owns the Federate-wide
+aggregate state, service, and per-Enclave participant proxies; protocol sessions
+and transports remain in `boomerang_federated`.
 
 A Federate may own several Enclaves, but it still has one RTI identity and
-protocol client. The static runner selects one gateway Enclave for the blocking
-RTI coordinator. Other Enclaves retain their local schedulers and communicate
-with the gateway through the same upstream/downstream crosslinks used by local
-partitioned execution.
+protocol client. Every active Enclave keeps its own scheduler and publishes its
+frontier through a `FederateParticipantProxy` to one Federate-wide coordination
+service. That service alone owns the `RtiLogicalTimeCoordinator` and adapts
+aggregate-state actions into `NET`, `LTC`, and `Stop` operations.
 
 ## Scheduler Construction
 
@@ -85,15 +87,20 @@ Each `try_next` call performs one scheduler step:
 
 1. Drain immediately available `AsyncEvent` values and offer each one to
    scheduler coordination before ordinary event handling.
-2. Peek the earliest logical tag in `EventManager`.
-3. Acquire that tag through `SchedulerCoordination`. An interruption is handled
-   and returns control to the outer loop without processing the ungranted tag.
+2. Peek the earliest logical tag in `EventManager` and publish that candidate
+   frontier through scheduler coordination.
+3. Acquire every local upstream barrier, then acquire the external coordinator.
+   For a Federated scheduler, the external coordinator is its
+   `FederateParticipantProxy`, which blocks on the Federate-wide service. An
+   interruption is handled and returns control to the outer loop without
+   processing the ungranted tag.
 4. When fast-forwarding is disabled, wait until the tag's wall-clock instant.
    An asynchronous event can interrupt this wait and restart the loop.
 5. Pop and merge all queued root events at the selected tag, then run enabled
    reactions in dependency-level order.
 6. Update the current tag and complete coordination. Local downstream releases
-   are emitted before external completion.
+   are emitted before the participant reports completion to the Federate-wide
+   service.
 7. Stop after a terminal event. Otherwise return to the loop.
 
 If no logical event is queued, the scheduler waits only when a shutdown tag or
@@ -101,8 +108,9 @@ keep-alive policy requires it. An admitted asynchronous event re-enters normal
 handling. Otherwise the scheduler creates its ordinary next-microstep shutdown
 event.
 
-The hot path contains one coordination acquire and one coordination completion
-call. Backend-specific branches do not belong in `try_next`.
+The hot path contains one frontier publication, one coordination acquire, and
+one coordination completion call. Backend-specific branches do not belong in
+`try_next`.
 
 ## Event Management and Reaction Levels
 
@@ -209,12 +217,13 @@ other authority may use different evidence while obeying the same lifecycle.
 
 The exact order for one granted logical tag is:
 
+    publish the Enclave frontier through its FederateParticipantProxy
     acquire every local upstream barrier
-    acquire the external coordinator
+    acquire the Federate-wide service through that participant proxy
     optionally synchronize to wall clock
     process all enabled reactions at the tag
     release every local downstream enclave
-    complete the external coordinator
+    report participant completion to the Federate-wide service
 
 This order is causal, not cosmetic. Local acquisition can reveal an event that
 must be admitted before an external request. Reaction-emitted serialized
@@ -224,28 +233,49 @@ external authority observes completion.
 
 ```mermaid
 sequenceDiagram
-    participant S as Federate scheduler
+    participant S as Enclave scheduler
+    participant L as Local barriers
+    participant P as FederateParticipantProxy
+    participant F as Federate coordination service
     participant C as RtiLogicalTimeCoordinator
-    participant P as Federate protocol client
     participant R as RTI session
 
-    S->>C: acquire(tag)
-    C->>P: enqueue NET(tag)
-    P->>R: NET(tag)
+    S->>P: publish Candidate(tag)
+    P->>F: sequenced frontier publication
+    F->>C: RequestNet(aggregate minimum)
+    C->>R: NET(aggregate minimum)
+    S->>L: acquire local upstream barriers
+    L-->>S: granted
+    S->>P: acquire(tag)
+    P->>F: participant acquire(tag)
     alt inbound payload precedes grant
-        R-->>P: MSG(payload, payload tag)
-        P-->>C: MSG
-        C-->>S: Interrupted(queued logical event)
+        R-->>C: MSG(payload, payload tag)
+        C-->>S: queue logical event
+        C-->>F: protocol progress
+        P-->>S: Interrupted(queued logical event)
         S->>S: admit event and retry
     else tag is safe
-        R-->>P: TAG(tag)
-        P-->>C: TAG(tag)
-        C-->>S: Granted
+        R-->>C: TAG(tag)
+        C-->>F: grant coverage
+        F-->>P: release acquire
+        P-->>S: Granted
     end
     S->>S: process reactions
-    S->>C: complete(tag)
-    C->>P: enqueue LTC(tag) after reaction MSG commands
-    P->>R: LTC(tag)
+    S->>L: release local downstream barriers
+    S->>P: complete(tag)
+    P->>F: participant completion(tag)
+    opt every active participant certifies the round
+        F->>C: ReportLtc(round tag)
+        C->>R: LTC(round tag)
+    end
+    opt scheduler exits
+        S->>P: publish Finished
+        P->>F: participant finished
+    end
+    opt every participant is finished
+        F->>C: SendStop
+        C->>R: Stop
+    end
 ```
 
 ## Cross-Partition Payload Delivery
@@ -331,16 +361,24 @@ suppression and monotonic release state.
 `boomerang_runtime/src/reaction.rs` proves identical local and serialized
 logical tag/value calculation for zero and positive delay and retains the
 physical-local versus serialized rejection boundary.
-`boomerang_builder/src/tests/federated.rs` proves exact local crosslink and
-serialized route projections, distributed-cycle rejection, protocol behavior,
-and local-versus-in-memory-federated value/tag/shutdown equivalence.
+`boomerang_builder/src/tests/federated.rs` proves local crosslink and serialized
+route projection, endpoint runtime lowering, codec boundaries, and
+distributed-cycle rejection.
 
-`boomerang_federated/src/client.rs`, `rti/`, and `session.rs` protect ordered
-`MSG` admission before later `TAG` consumption, LF-aligned grant evidence,
-in-transit tag clearing through `LTC`, deterministic reevaluation, and terminal
-fault behavior. `boomerang/tests/federated_static.rs` is the public facade
-proof. Ignored localhost TCP tests supplement these deterministic in-memory and
-pure-state tests; they do not replace them.
+`boomerang_federated/src/federate_coordination/state.rs` and
+`boomerang_federated/src/federate_coordination/tests.rs` protect
+aggregate-frontier fixed points, observation epochs, completion evidence,
+participant proxy behavior, and error fan-out. The `static_runner.rs` tests
+`all_enclaves_participate_in_federate_rti_frontier` and
+`initially_idle_downstream_is_rewoken_after_later_local_work` exercise the
+multi-Enclave service path. `boomerang_federated/src/client/tests.rs`,
+`boomerang_federated/src/client/coordination/tests.rs`,
+`boomerang_federated/src/rti/tests.rs`, and `boomerang_federated/src/session.rs`
+protect inbound message admission, RTI adapter ordering, grant evidence,
+in-transit tag clearing through `LTC`, and terminal behavior.
+`boomerang/tests/federated_static.rs` is the public facade proof. Ignored
+localhost TCP tests supplement these deterministic in-memory and pure-state
+tests; they do not replace them.
 
 ## Adding a Partition Backend
 

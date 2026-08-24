@@ -3,8 +3,10 @@
 This document describes the internal wire protocol used by Boomerang's static
 federation runners. It is a maintainer reference for the protocol types in
 `boomerang_federated/src/protocol.rs`, the RTI state machine in
-`boomerang_federated/src/rti/mod.rs`, and the live client/session adapters in
-`boomerang_federated/src/client.rs` and `boomerang_federated/src/session.rs`.
+`boomerang_federated/src/rti/mod.rs`, the RTI wire adapter in
+`boomerang_federated/src/client/coordination/`, the Federate-wide participant
+aggregation in `boomerang_federated/src/federate_coordination/`, and the session
+adapter in `boomerang_federated/src/session.rs`.
 For crate ownership and scheduler integration, see
 [Federated runtime internals](./federated-runtime.md).
 
@@ -328,7 +330,12 @@ The most focused protocol tests are located in:
   LTC-cleared in-transit tag tracking;
 - `boomerang_federated/src/session.rs` for handshake, validation, and protocol
   ordering;
-- `boomerang_federated/src/client.rs` for scheduler/client frame ordering; and
+- `boomerang_federated/src/client/tests.rs` and
+  `boomerang_federated/src/client/coordination/tests.rs` for inbound admission,
+  RTI adapter frame ordering, and terminal delivery;
+- `boomerang_federated/src/federate_coordination/state.rs` and
+  `boomerang_federated/src/federate_coordination/tests.rs` for participant
+  aggregation, fixed-point completion, and service error handling; and
 - `boomerang_federated/src/transport.rs` for in-memory framing and the ignored
   reversed-connection-order TCP proof.
 

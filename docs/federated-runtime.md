@@ -148,12 +148,14 @@ advertises one NET for the minimum finite candidate and releases only acquire re
 the cached RTI grant. All-idle Federates remain responsive without advertising `NET(FOREVER)`.
 
 After a grant covers the current minimum candidate, the service opens a local observation round and
-wakes every active participant with the exact tag and epoch. Only a consumed wake can certify that
-participant's later completion, advancement, or quiescence. Any subsequent frontier transition
-invalidates existing certificates and starts a fresh epoch, so stale idle state cannot cause a
-premature LTC. The participant layout is static for one execution; publications, request IDs,
-grants, epochs, certificates, lifecycle, and failure state are dynamic per-run service state and
-are never written back into builder analysis, `RtiGraph`, or `RuntimeFederate`.
+wakes every active participant with the exact tag and epoch. A consumed wake matching that exact
+round tag and epoch certifies a subsequent `Idle` publication or a `Candidate` later than the round
+tag. Independently, a participant completion at or after the round tag certifies that participant's
+progress without a consumed wake. A subsequent frontier transition, or an advancing completion once
+any certificate exists, invalidates existing certificates and starts a fresh epoch, so stale state
+cannot cause a premature LTC. The participant layout is static for one execution; publications,
+request IDs, grants, epochs, certificates, lifecycle, and failure state are dynamic per-run service
+state and are never written back into builder analysis, `RtiGraph`, or `RuntimeFederate`.
 
 The RTI remains a star. Each Federate has one protocol identity and connection. Outbound
 serialized messages enter that Federate's FIFO mailbox before logical-time completion is

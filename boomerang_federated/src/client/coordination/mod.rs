@@ -51,7 +51,8 @@ pub struct RtiLogicalTimeCoordinator {
 }
 
 impl RtiLogicalTimeCoordinator {
-    /// Create an RTI coordinator for one federate runtime enclave.
+    /// Create the Federate-wide RTI protocol adapter owned by the coordination service.
+    /// Enclave schedulers participate through per-Enclave proxies.
     /// Route metadata binds runtime endpoints to source and target federates.
     #[tracing::instrument(
         level = "debug",

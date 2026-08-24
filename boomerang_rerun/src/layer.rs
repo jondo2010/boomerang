@@ -14,9 +14,7 @@ use tracing_subscriber::layer::{Context, Filter};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 
-use super::entities::{
-    bounded_fragment, escape_entity_segment, EntitySelector, RegistrationSnapshot,
-};
+use super::entities::{bounded_fragment, EntitySelector, RegistrationSnapshot, SeriesKind};
 use super::session::SessionState;
 
 const TRACE_TARGET: &str = "boomerang::trace";
@@ -131,9 +129,8 @@ enum SpanKind {
 
 struct SpanState {
     context: SpanContext,
-    path: String,
-    entity_label: Option<String>,
-    name_series: bool,
+    path: rerun::EntityPath,
+    series_label: Option<String>,
     series: SeriesKind,
     time: TimePoint,
     timing: Mutex<SpanTiming>,
@@ -192,45 +189,9 @@ impl SpanContext {
 }
 
 struct ResolvedPath {
-    path: String,
-    entity_label: Option<String>,
-    name_series: bool,
+    path: rerun::EntityPath,
+    series_label: Option<String>,
     series: Option<SeriesKind>,
-}
-
-#[derive(Clone, Copy)]
-enum SeriesKind {
-    Event(TraceEvent),
-    PropagationReceive,
-}
-
-impl SeriesKind {
-    fn bit(self) -> u8 {
-        match self {
-            Self::Event(event) => event as u8 - 1,
-            Self::PropagationReceive => 14,
-        }
-    }
-
-    fn compact_label(self) -> &'static str {
-        match self {
-            Self::Event(TraceEvent::SchedulerThread) => "scheduler_thread",
-            Self::Event(TraceEvent::AsyncIngress) => "ingress",
-            Self::Event(TraceEvent::TagProcess) => "tag",
-            Self::Event(TraceEvent::ReactionExecute) => "exec",
-            Self::Event(TraceEvent::ActionSchedule) => "schedule",
-            Self::Event(TraceEvent::PortWrite) => "port_write",
-            Self::Event(TraceEvent::PropagationSend) => "send",
-            Self::Event(TraceEvent::FrontierPublish) => "frontier_publish",
-            Self::Event(TraceEvent::CoordinationWait) => "coord wait",
-            Self::Event(TraceEvent::CoordinationGrant) => "coordination_grant",
-            Self::Event(TraceEvent::TagRelease) => "tag_release",
-            Self::Event(TraceEvent::TagComplete) => "tag done",
-            Self::Event(TraceEvent::Shutdown) => "shutdown",
-            Self::Event(TraceEvent::Diagnostic) => "diagnostic",
-            Self::PropagationReceive => "recv",
-        }
-    }
 }
 
 #[derive(Default)]
@@ -380,7 +341,7 @@ impl RerunLayer {
         }
     }
 
-    fn write(&self, path: &str, time: TimePoint, value: &dyn rerun::AsComponents) {
+    fn write(&self, path: &rerun::EntityPath, time: TimePoint, value: &dyn rerun::AsComponents) {
         if !self.state.is_enabled() {
             return;
         }
@@ -391,25 +352,24 @@ impl RerunLayer {
             point.insert_cell("logical", rerun::TimeCell::from_duration_nanos(logical));
         }
         self.recording.set_timepoint(point);
-        if let Err(error) = self.recording.log(path, value) {
+        if let Err(error) = self.recording.log(path.clone(), value) {
             self.state.disable_on_error(&error);
         }
     }
 
     fn write_measure(
         &self,
-        path: &str,
-        entity_label: Option<&str>,
-        name_series: bool,
+        path: &rerun::EntityPath,
+        series_label: Option<&str>,
         series: Option<SeriesKind>,
         time: TimePoint,
         value: &dyn rerun::AsComponents,
     ) {
-        if let (true, Some(entity_label), Some(series)) = (name_series, entity_label, series) {
-            let name = compact_series_name(entity_label, series);
+        if let (Some(series_label), Some(series)) = (series_label, series) {
+            let name = compact_series_name(series_label, series);
             if let Err(error) = self
                 .recording
-                .log_static(path, &rerun::SeriesPoints::new().with_names([name]))
+                .log_static(path.clone(), &rerun::SeriesPoints::new().with_names([name]))
             {
                 self.state.disable_on_error(&error);
                 return;
@@ -434,7 +394,7 @@ impl RerunLayer {
         .with_component::<rerun::components::Text>("boomerang.trace.error", [message.as_str()]);
         let text_log = rerun::TextLog::new(message).with_level(rerun::TextLogLevel::ERROR);
         self.write(
-            "/diagnostics/schema",
+            &rerun::EntityPath::from("/diagnostics/schema"),
             self.timepoint(None),
             &Combined::new([&archetype, &text_log]),
         );
@@ -481,47 +441,43 @@ impl RerunLayer {
         federate: Option<&str>,
         enclave: Option<&str>,
         selector: Option<EntitySelector>,
-        series: Option<SeriesKind>,
-        event: &'static str,
+        series: SeriesKind,
+        claim_name: bool,
     ) -> ResolvedPath {
         let registered = enclave.and_then(|enclave| {
             let selector = selector?;
             self.adapter.registration.get().and_then(|registration| {
-                registration
-                    .resolve(federate, enclave, selector)
-                    .map(|entity| {
-                        (
-                            entity.path.clone(),
-                            entity.label.clone(),
-                            series.is_some_and(|series| entity.claim_series(series.bit())),
-                        )
-                    })
+                registration.resolve(federate, enclave, selector, series, claim_name)
             })
         });
-        if let Some((path, label, name_series)) = registered {
+        if let Some((path, series_label)) = registered {
             ResolvedPath {
-                path: format!("{path}/{}", escape_entity_segment(event)),
-                entity_label: Some(label),
-                name_series,
-                series,
+                path,
+                series_label,
+                series: claim_name.then_some(series),
             }
         } else {
-            let root = match (federate, enclave) {
-                (Some(federate), Some(enclave)) => format!(
-                    "/federates/{}/enclaves/{}",
-                    escape_entity_segment(federate),
-                    escape_entity_segment(enclave)
-                ),
-                (None, Some(enclave)) => {
-                    format!("/enclaves/{}", escape_entity_segment(enclave))
-                }
-                _ => "/runtime/unresolved".to_owned(),
+            let mut parts = match (federate, enclave) {
+                (Some(federate), Some(enclave)) => vec![
+                    rerun::EntityPathPart::from("federates"),
+                    rerun::EntityPathPart::from(federate),
+                    rerun::EntityPathPart::from("enclaves"),
+                    rerun::EntityPathPart::from(enclave),
+                ],
+                (None, Some(enclave)) => vec![
+                    rerun::EntityPathPart::from("enclaves"),
+                    rerun::EntityPathPart::from(enclave),
+                ],
+                _ => vec![
+                    rerun::EntityPathPart::from("runtime"),
+                    rerun::EntityPathPart::from("unresolved"),
+                ],
             };
+            parts.push(rerun::EntityPathPart::from(series.entity_suffix()));
             ResolvedPath {
-                path: format!("{root}/{}", escape_entity_segment(event)),
-                entity_label: None,
-                name_series: false,
-                series,
+                path: rerun::EntityPath::from(parts),
+                series_label: None,
+                series: claim_name.then_some(series),
             }
         }
     }
@@ -696,8 +652,8 @@ where
                 context.federate(),
                 Some(context.enclave()),
                 selector,
-                Some(SeriesKind::Event(event)),
-                event.as_str(),
+                SeriesKind::Event(event),
+                true,
             );
             let phase = match &kind {
                 SpanKind::Tag { .. } => Some("processing tag"),
@@ -709,8 +665,7 @@ where
                 time: self.timepoint(context.logical_ns()),
                 context,
                 path: resolved_path.path,
-                entity_label: resolved_path.entity_label,
-                name_series: resolved_path.name_series,
+                series_label: resolved_path.series_label,
                 series: SeriesKind::Event(event),
                 timing: Mutex::new(SpanTiming::default()),
                 kind,
@@ -978,8 +933,7 @@ where
                     let scalar = rerun::Scalars::new([measure]);
                     self.write_measure(
                         &span.path,
-                        span.entity_label.as_deref(),
-                        span.name_series,
+                        span.series_label.as_deref(),
                         Some(span.series),
                         span.time,
                         &Combined::new([&payload, &scalar]),
@@ -1055,12 +1009,12 @@ impl RerunLayer {
                         federate,
                         Some(enclave),
                         action_key.parse().ok().map(EntitySelector::Action),
-                        Some(if accepted_logical {
+                        if accepted_logical {
                             SeriesKind::PropagationReceive
                         } else {
                             SeriesKind::Event(event)
-                        }),
-                        event_name,
+                        },
+                        true,
                     );
                     let archetype = if accepted_logical {
                         "boomerang.PropagationReceive"
@@ -1126,8 +1080,8 @@ impl RerunLayer {
                             federate,
                             Some(enclave),
                             Some(EntitySelector::Scheduler),
-                            None,
-                            name,
+                            SeriesKind::Event(event),
+                            false,
                         ),
                         common(
                             "boomerang.ControlIngress",
@@ -1227,9 +1181,8 @@ impl RerunLayer {
                         federate,
                         Some(enclave),
                         action_key.parse().ok().map(EntitySelector::Action),
-                        matches!(outcome, TraceOutcome::Startup | TraceOutcome::Scheduled)
-                            .then_some(SeriesKind::Event(event)),
-                        name,
+                        SeriesKind::Event(event),
+                        matches!(outcome, TraceOutcome::Startup | TraceOutcome::Scheduled),
                     ),
                     payload,
                 )
@@ -1302,8 +1255,8 @@ impl RerunLayer {
                         federate,
                         Some(enclave),
                         port_key.parse().ok().map(EntitySelector::Port),
-                        None,
-                        name,
+                        SeriesKind::Event(event),
+                        false,
                     ),
                     payload,
                 )
@@ -1346,8 +1299,8 @@ impl RerunLayer {
                         federate,
                         Some(enclave),
                         Some(EntitySelector::Scheduler),
-                        None,
-                        name,
+                        SeriesKind::Event(event),
+                        false,
                     ),
                     payload,
                 )
@@ -1429,8 +1382,8 @@ impl RerunLayer {
                         federate,
                         Some(enclave),
                         Some(EntitySelector::Scheduler),
-                        (event == TraceEvent::TagComplete).then_some(SeriesKind::Event(event)),
-                        name,
+                        SeriesKind::Event(event),
+                        event == TraceEvent::TagComplete,
                     ),
                     payload,
                 )
@@ -1457,7 +1410,7 @@ impl RerunLayer {
                 );
                 let text_log = rerun::TextLog::new(error).with_level(rerun::TextLogLevel::ERROR);
                 self.write(
-                    "/diagnostics/runtime",
+                    &rerun::EntityPath::from("/diagnostics/runtime"),
                     time,
                     &Combined::new([&payload, &text_log]),
                 );
@@ -1476,8 +1429,7 @@ impl RerunLayer {
             let measure = rerun::Scalars::new([scalar]);
             self.write_measure(
                 &path.path,
-                path.entity_label.as_deref(),
-                path.name_series,
+                path.series_label.as_deref(),
                 path.series,
                 time,
                 &Combined::new([&payload, &measure]),

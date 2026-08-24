@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "federated")]
 use std::collections::BTreeMap;
 
-use boomerang_runtime::{ActionKey, EnclaveKey, PortKey, ReactionKey};
+use boomerang_runtime::{trace::TraceEvent, ActionKey, EnclaveKey, PortKey, ReactionKey};
 use boomerang_tinymap::TinySecondaryMap;
 
 pub(crate) fn escape_entity_segment(segment: &str) -> String {
@@ -21,14 +21,14 @@ pub(super) enum RegistrationSnapshot {
 
 #[derive(Debug)]
 pub(super) struct EnclaveRegistration {
-    scheduler: EntityRegistration,
-    reactions: TinySecondaryMap<ReactionKey, EntityRegistration>,
-    actions: TinySecondaryMap<ActionKey, EntityRegistration>,
-    ports: TinySecondaryMap<PortKey, EntityRegistration>,
+    scheduler: EntityRegistration<10>,
+    reactions: TinySecondaryMap<ReactionKey, EntityRegistration<1>>,
+    actions: TinySecondaryMap<ActionKey, EntityRegistration<3>>,
+    ports: TinySecondaryMap<PortKey, EntityRegistration<1>>,
 }
 
 impl EnclaveRegistration {
-    fn new(scheduler: EntityRegistration) -> Self {
+    fn new(scheduler: EntityRegistration<10>) -> Self {
         Self {
             scheduler,
             reactions: TinySecondaryMap::new(),
@@ -39,26 +39,112 @@ impl EnclaveRegistration {
 }
 
 #[derive(Debug)]
-pub(super) struct EntityRegistration {
-    pub(super) path: String,
-    pub(super) label: String,
-    series: AtomicU64,
+struct EntityRegistration<const N: usize> {
+    label: String,
+    paths: [rerun::EntityPath; N],
+    registered_series: u64,
+    named_series: AtomicU64,
 }
 
-impl EntityRegistration {
-    fn new(path: String, label: String) -> Self {
+impl<const N: usize> EntityRegistration<N> {
+    fn new(root: &str, label: String, mut series: [SeriesKind; N]) -> Self {
+        series.sort_unstable_by_key(|series| series.bit());
+        let mut registered_series = 0_u64;
+        for &series in &series {
+            let mask = 1_u64 << series.bit();
+            assert_eq!(registered_series & mask, 0, "duplicate registered series");
+            registered_series |= mask;
+        }
+        let root = rerun::EntityPath::from(root);
         Self {
-            path,
             label,
-            series: AtomicU64::new(0),
+            paths: series.map(|series| event_path(&root, series)),
+            registered_series,
+            named_series: AtomicU64::new(0),
         }
     }
 
-    pub(super) fn claim_series(&self, series: u8) -> bool {
-        let mask = 1_u64 << series;
-        self.series.fetch_or(mask, Ordering::AcqRel) & mask == 0
+    fn resolve(
+        &self,
+        series: SeriesKind,
+        claim_name: bool,
+    ) -> Option<(rerun::EntityPath, Option<String>)> {
+        let mask = 1_u64 << series.bit();
+        (self.registered_series & mask != 0).then_some(())?;
+        let rank = (self.registered_series & mask.wrapping_sub(1)).count_ones() as usize;
+        let label = (claim_name
+            && self.named_series.load(Ordering::Relaxed) & mask == 0
+            && self.named_series.fetch_or(mask, Ordering::Relaxed) & mask == 0)
+            .then(|| self.label.clone());
+        Some((self.paths[rank].clone(), label))
     }
 }
+
+fn event_path(root: &rerun::EntityPath, series: SeriesKind) -> rerun::EntityPath {
+    root.join(&rerun::EntityPath::from(series.entity_suffix()))
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) enum SeriesKind {
+    Event(TraceEvent),
+    PropagationReceive,
+}
+
+impl SeriesKind {
+    pub(super) fn bit(self) -> u8 {
+        match self {
+            Self::Event(event) => event as u8 - 1,
+            Self::PropagationReceive => 14,
+        }
+    }
+
+    pub(super) fn entity_suffix(self) -> &'static str {
+        match self {
+            Self::Event(event) => event.as_str(),
+            Self::PropagationReceive => "propagation_receive",
+        }
+    }
+
+    pub(super) fn compact_label(self) -> &'static str {
+        match self {
+            Self::Event(TraceEvent::SchedulerThread) => "scheduler_thread",
+            Self::Event(TraceEvent::AsyncIngress) => "ingress",
+            Self::Event(TraceEvent::TagProcess) => "tag",
+            Self::Event(TraceEvent::ReactionExecute) => "exec",
+            Self::Event(TraceEvent::ActionSchedule) => "schedule",
+            Self::Event(TraceEvent::PortWrite) => "port_write",
+            Self::Event(TraceEvent::PropagationSend) => "send",
+            Self::Event(TraceEvent::FrontierPublish) => "frontier_publish",
+            Self::Event(TraceEvent::CoordinationWait) => "coord wait",
+            Self::Event(TraceEvent::CoordinationGrant) => "coordination_grant",
+            Self::Event(TraceEvent::TagRelease) => "tag_release",
+            Self::Event(TraceEvent::TagComplete) => "tag done",
+            Self::Event(TraceEvent::Shutdown) => "shutdown",
+            Self::Event(TraceEvent::Diagnostic) => "diagnostic",
+            Self::PropagationReceive => "recv",
+        }
+    }
+}
+
+const SCHEDULER_SERIES: [SeriesKind; 10] = [
+    SeriesKind::Event(TraceEvent::SchedulerThread),
+    SeriesKind::Event(TraceEvent::AsyncIngress),
+    SeriesKind::Event(TraceEvent::TagProcess),
+    SeriesKind::Event(TraceEvent::PropagationSend),
+    SeriesKind::Event(TraceEvent::FrontierPublish),
+    SeriesKind::Event(TraceEvent::CoordinationWait),
+    SeriesKind::Event(TraceEvent::CoordinationGrant),
+    SeriesKind::Event(TraceEvent::TagRelease),
+    SeriesKind::Event(TraceEvent::TagComplete),
+    SeriesKind::Event(TraceEvent::Shutdown),
+];
+const REACTION_SERIES: [SeriesKind; 1] = [SeriesKind::Event(TraceEvent::ReactionExecute)];
+const ACTION_SERIES: [SeriesKind; 3] = [
+    SeriesKind::Event(TraceEvent::AsyncIngress),
+    SeriesKind::PropagationReceive,
+    SeriesKind::Event(TraceEvent::ActionSchedule),
+];
+const PORT_SERIES: [SeriesKind; 1] = [SeriesKind::Event(TraceEvent::PortWrite)];
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum EntitySelector {
@@ -74,7 +160,9 @@ impl RegistrationSnapshot {
         federate: Option<&str>,
         enclave: &str,
         selector: EntitySelector,
-    ) -> Option<&EntityRegistration> {
+        series: SeriesKind,
+        claim_name: bool,
+    ) -> Option<(rerun::EntityPath, Option<String>)> {
         let enclave = enclave.parse::<EnclaveKey>().ok()?;
         let enclaves = match (self, federate) {
             (Self::Local(enclaves), None) => enclaves,
@@ -84,10 +172,14 @@ impl RegistrationSnapshot {
         };
         let registration = enclaves.get(enclave)?;
         match selector {
-            EntitySelector::Scheduler => Some(&registration.scheduler),
-            EntitySelector::Reaction(key) => registration.reactions.get(key),
-            EntitySelector::Action(key) => registration.actions.get(key),
-            EntitySelector::Port(key) => registration.ports.get(key),
+            EntitySelector::Scheduler => registration.scheduler.resolve(series, claim_name),
+            EntitySelector::Reaction(key) => {
+                registration.reactions.get(key)?.resolve(series, claim_name)
+            }
+            EntitySelector::Action(key) => {
+                registration.actions.get(key)?.resolve(series, claim_name)
+            }
+            EntitySelector::Port(key) => registration.ports.get(key)?.resolve(series, claim_name),
         }
     }
 
@@ -184,8 +276,9 @@ pub(super) fn log_runtime_enclaves(
         let scheduler_label =
             runtime_display_label(federate, &enclave_key_string, "scheduler", "scheduler");
         let mut registration = EnclaveRegistration::new(EntityRegistration::new(
-            scheduler.clone(),
+            &scheduler,
             scheduler_label.clone(),
+            SCHEDULER_SERIES,
         ));
         let mut nodes = vec![enclave_path.clone(), scheduler.clone()];
         let mut node_labels = vec![enclave_label, scheduler_label];
@@ -282,7 +375,7 @@ pub(super) fn log_runtime_enclaves(
             let owner_key = owner.to_string();
             registration
                 .reactions
-                .insert(key, EntityRegistration::new(path.clone(), label));
+                .insert(key, EntityRegistration::new(&path, label, REACTION_SERIES));
             log_runtime_entity(
                 recording,
                 &path,
@@ -321,7 +414,7 @@ pub(super) fn log_runtime_enclaves(
             let owner_key = owner.to_string();
             registration
                 .actions
-                .insert(key, EntityRegistration::new(path.clone(), label));
+                .insert(key, EntityRegistration::new(&path, label, ACTION_SERIES));
             log_runtime_entity(
                 recording,
                 &path,
@@ -362,7 +455,7 @@ pub(super) fn log_runtime_enclaves(
             let owner_key = owner.to_string();
             registration
                 .ports
-                .insert(key, EntityRegistration::new(path.clone(), label));
+                .insert(key, EntityRegistration::new(&path, label, PORT_SERIES));
             log_runtime_entity(
                 recording,
                 &path,

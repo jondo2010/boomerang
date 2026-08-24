@@ -241,7 +241,7 @@ impl Context {
         if let Some(value_size) = trace_value_size {
             tracing::trace!(
                 target: crate::trace::TRACE_TARGET,
-                event = crate::trace::event::ACTION_SCHEDULE,
+                event = crate::trace::TraceEvent::ActionSchedule as u64,
                 enclave = %self.enclave_key,
                 logical_ns = crate::trace::logical_ns(self.tag),
                 microstep = crate::trace::microstep(self.tag),
@@ -251,7 +251,7 @@ impl Context {
                 destination_microstep = crate::trace::microstep(new_tag),
                 value_type = std::any::type_name::<T>(),
                 value_size,
-                outcome = "scheduled",
+                outcome = crate::trace::TraceOutcome::Scheduled as u64,
             );
         }
     }

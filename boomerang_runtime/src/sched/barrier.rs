@@ -1,6 +1,6 @@
 use crate::{
     event::{AsyncEvent, CoordinationWake},
-    trace::{self, event as trace_event},
+    trace::{self, TraceEvent, TraceOutcome, TraceState},
     CommonContext, Duration, EnclaveKey, RuntimeError, SendContext, Tag,
 };
 
@@ -310,13 +310,13 @@ impl SchedulerCoordination {
         let result = self.external.publish_frontier(publication);
         match frontier {
             LogicalTimeFrontier::Candidate(tag) => {
-                tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::FRONTIER_PUBLISH, enclave = %self.enclave, state = "candidate", logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), outcome = if result.is_ok() { "published" } else { "failed" })
+                tracing::trace!(target: crate::trace::TRACE_TARGET, event = TraceEvent::FrontierPublish as u64, enclave = %self.enclave, state = TraceState::Candidate as u64, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), outcome = if result.is_ok() { TraceOutcome::Published as u64 } else { TraceOutcome::Failed as u64 })
             }
             LogicalTimeFrontier::Idle => {
-                tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::FRONTIER_PUBLISH, enclave = %self.enclave, state = "idle", outcome = if result.is_ok() { "published" } else { "failed" })
+                tracing::trace!(target: crate::trace::TRACE_TARGET, event = TraceEvent::FrontierPublish as u64, enclave = %self.enclave, state = TraceState::Idle as u64, outcome = if result.is_ok() { TraceOutcome::Published as u64 } else { TraceOutcome::Failed as u64 })
             }
             LogicalTimeFrontier::Finished => {
-                tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::FRONTIER_PUBLISH, enclave = %self.enclave, state = "finished", outcome = if result.is_ok() { "published" } else { "failed" })
+                tracing::trace!(target: crate::trace::TRACE_TARGET, event = TraceEvent::FrontierPublish as u64, enclave = %self.enclave, state = TraceState::Finished as u64, outcome = if result.is_ok() { TraceOutcome::Published as u64 } else { TraceOutcome::Failed as u64 })
             }
         }
         result?;
@@ -332,16 +332,16 @@ impl SchedulerCoordination {
         let wait_span = tracing::trace_span!(
             target: crate::trace::TRACE_TARGET,
             "coordination_wait",
-            event = trace_event::COORDINATION_WAIT,
+            event = TraceEvent::CoordinationWait as u64,
             enclave = %self.enclave,
             logical_ns = trace::logical_ns(tag),
             microstep = trace::microstep(tag),
-            state = "waiting",
+            state = TraceState::Waiting as u64,
         );
         let _wait_entered = wait_span.enter();
         for (_upstream, barrier) in self.upstream.iter_mut() {
             if let Some(event) = barrier.acquire_tag(tag, self.enclave, event_rx)? {
-                tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::COORDINATION_GRANT, enclave = %self.enclave, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), outcome = "interrupted_local");
+                tracing::trace!(target: crate::trace::TRACE_TARGET, event = TraceEvent::CoordinationGrant as u64, enclave = %self.enclave, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), outcome = TraceOutcome::InterruptedLocal as u64);
                 return Ok(CoordinationOutcome::Interrupted(event));
             }
         }
@@ -349,7 +349,7 @@ impl SchedulerCoordination {
             .external
             .acquire(tag, event_rx)
             .map_err(RuntimeError::from)?;
-        tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::COORDINATION_GRANT, enclave = %self.enclave, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), outcome = match &outcome { CoordinationOutcome::Granted => "granted", CoordinationOutcome::Interrupted(_) => "interrupted_external" });
+        tracing::trace!(target: crate::trace::TRACE_TARGET, event = TraceEvent::CoordinationGrant as u64, enclave = %self.enclave, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), outcome = match &outcome { CoordinationOutcome::Granted => TraceOutcome::Granted as u64, CoordinationOutcome::Interrupted(_) => TraceOutcome::InterruptedExternal as u64 });
         Ok(outcome)
     }
 
@@ -358,7 +358,7 @@ impl SchedulerCoordination {
             let event = AsyncEvent::release(self.enclave, tag);
             tracing::trace!(%downstream, event = %event, "Releasing downstream");
             let accepted = context.schedule_external(event);
-            tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::TAG_RELEASE, enclave = %self.enclave, destination = %downstream, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), outcome = if accepted { "accepted" } else { "failed" });
+            tracing::trace!(target: crate::trace::TRACE_TARGET, event = TraceEvent::TagRelease as u64, enclave = %self.enclave, destination = %downstream, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), outcome = if accepted { TraceOutcome::Accepted as u64 } else { TraceOutcome::Failed as u64 });
             if !accepted && !shutting_down {
                 tracing::warn!(
                     "Failed to send tag downstream, downstream has unexpectedly terminated."
@@ -370,7 +370,7 @@ impl SchedulerCoordination {
     pub(super) fn complete(&mut self, tag: Tag, terminal: bool) -> Result<(), CoordinationError> {
         self.release_downstream(if terminal { Tag::FOREVER } else { tag }, terminal);
         let result = self.external.complete(tag);
-        tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::TAG_COMPLETE, enclave = %self.enclave, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), terminal, outcome = if result.is_ok() { "completed" } else { "failed" });
+        tracing::trace!(target: crate::trace::TRACE_TARGET, event = TraceEvent::TagComplete as u64, enclave = %self.enclave, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), terminal, outcome = if result.is_ok() { TraceOutcome::Completed as u64 } else { TraceOutcome::Failed as u64 });
         result
     }
 }

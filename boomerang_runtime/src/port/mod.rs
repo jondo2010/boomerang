@@ -229,11 +229,11 @@ impl<T: ReactorData> DerefMut for OutputRef<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         tracing::trace!(
             target: crate::trace::TRACE_TARGET,
-            event = crate::trace::event::PORT_WRITE,
+            event = crate::trace::TraceEvent::PortWrite as u64,
             port_key = %self.0.get_key(),
             port = self.0.get_name(),
             value_type = std::any::type_name::<T>(),
-            outcome = "mutable_access",
+            outcome = crate::trace::TraceOutcome::MutableAccess as u64,
         );
         self.0.deref_mut()
     }

@@ -1,4 +1,5 @@
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "federated")]
 use std::collections::BTreeMap;
@@ -41,12 +42,30 @@ impl EnclaveRegistration {
 pub(super) struct EntityRegistration {
     pub(super) path: String,
     pub(super) label: String,
+    series: AtomicU64,
 }
 
 impl EntityRegistration {
     fn new(path: String, label: String) -> Self {
-        Self { path, label }
+        Self {
+            path,
+            label,
+            series: AtomicU64::new(0),
+        }
     }
+
+    pub(super) fn claim_series(&self, series: u8) -> bool {
+        let mask = 1_u64 << series;
+        self.series.fetch_or(mask, Ordering::AcqRel) & mask == 0
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) enum EntitySelector {
+    Scheduler,
+    Reaction(ReactionKey),
+    Action(ActionKey),
+    Port(PortKey),
 }
 
 impl RegistrationSnapshot {
@@ -54,8 +73,7 @@ impl RegistrationSnapshot {
         &self,
         federate: Option<&str>,
         enclave: &str,
-        kind: &'static str,
-        identity: &str,
+        selector: EntitySelector,
     ) -> Option<&EntityRegistration> {
         let enclave = enclave.parse::<EnclaveKey>().ok()?;
         let enclaves = match (self, federate) {
@@ -65,16 +83,11 @@ impl RegistrationSnapshot {
             _ => return None,
         };
         let registration = enclaves.get(enclave)?;
-        match kind {
-            "scheduler" if identity == "scheduler" => Some(&registration.scheduler),
-            "reaction" => registration
-                .reactions
-                .get(identity.parse::<ReactionKey>().ok()?),
-            "action" => registration
-                .actions
-                .get(identity.parse::<ActionKey>().ok()?),
-            "port" => registration.ports.get(identity.parse::<PortKey>().ok()?),
-            _ => None,
+        match selector {
+            EntitySelector::Scheduler => Some(&registration.scheduler),
+            EntitySelector::Reaction(key) => registration.reactions.get(key),
+            EntitySelector::Action(key) => registration.actions.get(key),
+            EntitySelector::Port(key) => registration.ports.get(key),
         }
     }
 

@@ -20,7 +20,7 @@ use crate::{
     keepalive,
     key_set::KeySetView,
     store::Store,
-    trace::{self, event as trace_event},
+    trace::{self, TraceEvent, TraceKind, TraceOutcome, TraceState},
     Duration, Env, ModeTransitionRequest, ReactionGraph, ReactionKey, ReactionSetLimits,
     ReactorKey, RuntimeError, Tag,
 };
@@ -293,21 +293,21 @@ impl Scheduler {
             AsyncEvent::TagRelease { .. } => unreachable!("coordination consumes tag releases"),
             AsyncEvent::TagReleaseProvisional { enclave: _, tag } => {
                 if tag <= self.current_tag {
-                    tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::ASYNC_INGRESS, enclave = %self.key, kind = "provisional_release", logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), outcome = "ignored_past");
+                    tracing::trace!(target: crate::trace::TRACE_TARGET, event = TraceEvent::AsyncIngress as u64, enclave = %self.key, kind = TraceKind::ProvisionalRelease as u64, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), outcome = TraceOutcome::IgnoredPast as u64);
                     if tag < self.current_tag {
                         tracing::warn!(tag = %tag, "Ignoring empty event in the past");
                     }
                     return;
                 }
                 self.events.push_event(tag, std::iter::empty(), false);
-                tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::ASYNC_INGRESS, enclave = %self.key, kind = "provisional_release", logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), outcome = "accepted");
+                tracing::trace!(target: crate::trace::TRACE_TARGET, event = TraceEvent::AsyncIngress as u64, enclave = %self.key, kind = TraceKind::ProvisionalRelease as u64, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), outcome = TraceOutcome::Accepted as u64);
             }
             AsyncEvent::Logical { tag, key, value } => {
                 let trace_value_size = trace::collect_if_enabled(|| std::mem::size_of_val(&*value));
                 if tag <= self.current_tag {
                     if let Some(value_size) = trace_value_size {
                         let (action, value_type) = self.store.action_metadata(key);
-                        tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::ASYNC_INGRESS, enclave = %self.key, kind = "logical", action_key = %key, action, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), destination_logical_ns = trace::logical_ns(tag), destination_microstep = trace::microstep(tag), value_type, value_size, outcome = "ignored_past");
+                        tracing::trace!(target: crate::trace::TRACE_TARGET, event = TraceEvent::AsyncIngress as u64, enclave = %self.key, kind = TraceKind::Logical as u64, action_key = %key, action, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), destination_logical_ns = trace::logical_ns(tag), destination_microstep = trace::microstep(tag), value_type, value_size, outcome = TraceOutcome::IgnoredPast as u64);
                     }
                     tracing::warn!(tag = %tag, "Ignoring empty event in the past");
                     return;
@@ -318,7 +318,7 @@ impl Scheduler {
                     .push_action_event(key, tag, downstream, false, &self.reaction_graph);
                 if let Some(value_size) = trace_value_size {
                     let (action, value_type) = self.store.action_metadata(key);
-                    tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::ASYNC_INGRESS, enclave = %self.key, kind = "logical", action_key = %key, action, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), destination_logical_ns = trace::logical_ns(tag), destination_microstep = trace::microstep(tag), value_type, value_size, outcome = "accepted");
+                    tracing::trace!(target: crate::trace::TRACE_TARGET, event = TraceEvent::AsyncIngress as u64, enclave = %self.key, kind = TraceKind::Logical as u64, action_key = %key, action, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), destination_logical_ns = trace::logical_ns(tag), destination_microstep = trace::microstep(tag), value_type, value_size, outcome = TraceOutcome::Accepted as u64);
                 }
             }
             AsyncEvent::Physical { time, key, value } => {
@@ -330,13 +330,13 @@ impl Scheduler {
                     .push_action_event(key, tag, downstream, false, &self.reaction_graph);
                 if let Some(value_size) = trace_value_size {
                     let (action, value_type) = self.store.action_metadata(key);
-                    tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::ASYNC_INGRESS, enclave = %self.key, kind = "physical", action_key = %key, action, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), destination_logical_ns = trace::logical_ns(tag), destination_microstep = trace::microstep(tag), value_type, value_size, outcome = "accepted");
+                    tracing::trace!(target: crate::trace::TRACE_TARGET, event = TraceEvent::AsyncIngress as u64, enclave = %self.key, kind = TraceKind::Physical as u64, action_key = %key, action, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), destination_logical_ns = trace::logical_ns(tag), destination_microstep = trace::microstep(tag), value_type, value_size, outcome = TraceOutcome::Accepted as u64);
                 }
             }
             AsyncEvent::Shutdown { delay } => {
                 let tag = self.current_tag.delay(delay);
                 self.schedule_shutdown_at(tag);
-                tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::ASYNC_INGRESS, enclave = %self.key, kind = "shutdown", logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), outcome = "accepted");
+                tracing::trace!(target: crate::trace::TRACE_TARGET, event = TraceEvent::AsyncIngress as u64, enclave = %self.key, kind = TraceKind::Shutdown as u64, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), outcome = TraceOutcome::Accepted as u64);
             }
         }
     }
@@ -372,7 +372,7 @@ impl Scheduler {
             self.store.push_action_value(action_key, tag, Box::new(()));
             if trace::enabled() {
                 let (action, value_type) = self.store.action_metadata(action_key);
-                tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::ACTION_SCHEDULE, enclave = %self.key, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), action_key = %action_key, action, destination_logical_ns = trace::logical_ns(tag), destination_microstep = trace::microstep(tag), value_type, value_size = 0usize, outcome = "startup");
+                tracing::trace!(target: crate::trace::TRACE_TARGET, event = TraceEvent::ActionSchedule as u64, enclave = %self.key, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), action_key = %action_key, action, destination_logical_ns = trace::logical_ns(tag), destination_microstep = trace::microstep(tag), value_type, value_size = 0usize, outcome = TraceOutcome::Startup as u64);
             }
             let downstream = self.reaction_graph.action_triggers[action_key]
                 .iter()
@@ -408,7 +408,7 @@ impl Scheduler {
         tracing::info!("Shutting down.");
 
         let tag = self.shutdown_tag.unwrap_or(self.current_tag);
-        tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::SHUTDOWN, enclave = %self.key, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), state = "complete", outcome = "success");
+        tracing::trace!(target: crate::trace::TRACE_TARGET, event = TraceEvent::Shutdown as u64, enclave = %self.key, logical_ns = trace::logical_ns(tag), microstep = trace::microstep(tag), state = TraceState::Complete as u64, outcome = TraceOutcome::Success as u64);
 
         self.events.shutdown();
 
@@ -477,12 +477,12 @@ impl Scheduler {
             let tag_span = tracing::trace_span!(
                 target: crate::trace::TRACE_TARGET,
                 "tag_process",
-                event = trace_event::TAG_PROCESS,
+                event = TraceEvent::TagProcess as u64,
                 enclave = %self.key,
                 logical_ns = trace::logical_ns(event.tag),
                 microstep = trace::microstep(event.tag),
                 terminal = event.terminal,
-                state = "processing",
+                state = TraceState::Processing as u64,
             );
             let _tag_entered = tag_span.enter();
 
@@ -541,7 +541,7 @@ impl Scheduler {
                 Ok(true) => {}
                 Ok(false) => break,
                 Err(error) => {
-                    tracing::trace!(target: crate::trace::TRACE_TARGET, event = trace_event::DIAGNOSTIC, enclave = %self.key, state = "runtime_error", outcome = "failed", error = %error);
+                    tracing::trace!(target: crate::trace::TRACE_TARGET, event = TraceEvent::Diagnostic as u64, enclave = %self.key, state = TraceState::RuntimeError as u64, outcome = TraceOutcome::Failed as u64, error = %error);
                     self.shutdown_tx.shutdown();
                     self.events.shutdown();
                     return Err(error);

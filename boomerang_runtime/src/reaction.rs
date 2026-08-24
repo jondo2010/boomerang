@@ -139,8 +139,8 @@ impl<T: ReactorData + Clone> InterPartitionEventSink<T> for InProcessInterPartit
                 let span = tracing::trace_span!(
                     target: crate::trace::TRACE_TARGET,
                     "propagation_send",
-                    event = crate::trace::event::PROPAGATION_SEND,
-                    kind = "logical",
+                    event = crate::trace::TraceEvent::PropagationSend as u64,
+                    kind = crate::trace::TraceKind::Logical as u64,
                     destination = %self.remote_context.enclave_id(),
                     action_key = %target.key(),
                     action = target.name(),
@@ -158,14 +158,21 @@ impl<T: ReactorData + Clone> InterPartitionEventSink<T> for InProcessInterPartit
                             key: target.key(),
                             value: Box::new(value.clone()),
                         });
-                span.record("outcome", if accepted { "accepted" } else { "failed" });
+                span.record(
+                    "outcome",
+                    if accepted {
+                        crate::trace::TraceOutcome::Accepted as u64
+                    } else {
+                        crate::trace::TraceOutcome::Failed as u64
+                    },
+                );
             }
             InterPartitionEventTime::Physical(delay) => {
                 let span = tracing::trace_span!(
                     target: crate::trace::TRACE_TARGET,
                     "propagation_send",
-                    event = crate::trace::event::PROPAGATION_SEND,
-                    kind = "physical",
+                    event = crate::trace::TraceEvent::PropagationSend as u64,
+                    kind = crate::trace::TraceKind::Physical as u64,
                     destination = %self.remote_context.enclave_id(),
                     action_key = %target.key(),
                     action = target.name(),
@@ -177,7 +184,14 @@ impl<T: ReactorData + Clone> InterPartitionEventSink<T> for InProcessInterPartit
                 let accepted =
                     self.remote_context
                         .schedule_action_async(target, value.clone(), delay);
-                span.record("outcome", if accepted { "accepted" } else { "failed" });
+                span.record(
+                    "outcome",
+                    if accepted {
+                        crate::trace::TraceOutcome::Accepted as u64
+                    } else {
+                        crate::trace::TraceOutcome::Failed as u64
+                    },
+                );
             }
         }
     }

@@ -1,11 +1,12 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
+use boomerang_runtime::trace::{TraceEvent, TraceKind, TraceOutcome, TraceState};
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Record};
 use tracing::{Event, Id, Subscriber};
@@ -14,7 +15,8 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 
 use super::entities::{
-    bounded_fragment, compact_runtime_key, escape_entity_segment, RegistrationSnapshot,
+    bounded_fragment, compact_runtime_key, escape_entity_segment, EntitySelector,
+    RegistrationSnapshot,
 };
 use super::session::SessionState;
 
@@ -61,7 +63,6 @@ pub(super) struct RerunLayer {
 #[derive(Clone)]
 pub(super) struct AdapterState {
     pub(super) registration: Arc<RegistrationState>,
-    named_series: Arc<RwLock<HashSet<String>>>,
 }
 
 #[derive(Default)]
@@ -90,7 +91,6 @@ impl Default for AdapterState {
     fn default() -> Self {
         Self {
             registration: Arc::new(RegistrationState::default()),
-            named_series: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 }
@@ -102,31 +102,31 @@ struct TimePoint {
 
 enum SpanKind {
     Scheduler {
-        state: String,
+        state: TraceState,
     },
     Tag {
         terminal: bool,
-        state: String,
+        state: TraceState,
     },
     Reaction {
         reactor: String,
         reaction_key: Option<String>,
         reaction: String,
         level: u64,
-        state: String,
+        state: TraceState,
     },
     Wait {
-        state: String,
+        state: TraceState,
     },
     Send {
-        kind: String,
+        kind: TraceKind,
         destination: Option<String>,
         destination_federate: Option<String>,
         action_key: String,
         action: String,
         value_type: String,
         value_size: u64,
-        outcome: OnceLock<String>,
+        outcome: OnceLock<TraceOutcome>,
     },
 }
 
@@ -134,6 +134,7 @@ struct SpanState {
     context: SpanContext,
     path: String,
     entity_label: Option<String>,
+    name_series: bool,
     time: TimePoint,
     timing: Mutex<SpanTiming>,
     kind: SpanKind,
@@ -193,6 +194,22 @@ impl SpanContext {
 struct ResolvedPath {
     path: String,
     entity_label: Option<String>,
+    name_series: bool,
+}
+
+#[derive(Clone, Copy)]
+enum SeriesKind {
+    Event(TraceEvent),
+    PropagationReceive,
+}
+
+impl SeriesKind {
+    fn bit(self) -> u8 {
+        match self {
+            Self::Event(event) => event as u8 - 1,
+            Self::PropagationReceive => 14,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -265,18 +282,25 @@ impl CallbackFields {
         self.u64(name)
             .ok_or_else(|| format!("missing or invalid `{name}`"))
     }
-}
 
-fn required_discriminator(
-    fields: &CallbackFields,
-    name: &str,
-    allowed: &[&str],
-) -> Result<String, String> {
-    let value = fields.required_text(name)?;
-    if allowed.contains(&value.as_str()) {
-        Ok(value)
-    } else {
-        Err(format!("invalid `{name}` discriminator `{value}`"))
+    fn discriminator<T>(&self, name: &str) -> Result<T, String>
+    where
+        T: TryFrom<u64, Error = u64>,
+    {
+        let code = self.required_u64(name)?;
+        T::try_from(code).map_err(|code| format!("invalid `{name}` discriminator code `{code}`"))
+    }
+
+    fn state(&self, expected: TraceState) -> Result<TraceState, String> {
+        let state = self.discriminator::<TraceState>("state")?;
+        if state == expected {
+            Ok(state)
+        } else {
+            Err(format!(
+                "invalid `state` discriminator `{}`",
+                state.as_str()
+            ))
+        }
     }
 }
 
@@ -355,26 +379,11 @@ impl RerunLayer {
         &self,
         path: &str,
         entity_label: Option<&str>,
+        name_series: bool,
         time: TimePoint,
         value: &dyn rerun::AsComponents,
     ) {
-        if self
-            .adapter
-            .named_series
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(path)
-        {
-            self.write(path, time, value);
-            return;
-        }
-        let first_measure = self
-            .adapter
-            .named_series
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(path.to_owned());
-        if first_measure {
+        if name_series {
             let name = compact_series_name(path, entity_label);
             if let Err(error) = self
                 .recording
@@ -449,21 +458,29 @@ impl RerunLayer {
         &self,
         federate: Option<&str>,
         enclave: Option<&str>,
-        kind: &'static str,
-        identity: &str,
-        event: &str,
+        selector: Option<EntitySelector>,
+        series: SeriesKind,
+        event: &'static str,
     ) -> ResolvedPath {
         let registered = enclave.and_then(|enclave| {
+            let selector = selector?;
             self.adapter.registration.get().and_then(|registration| {
                 registration
-                    .resolve(federate, enclave, kind, identity)
-                    .map(|entity| (entity.path.clone(), entity.label.clone()))
+                    .resolve(federate, enclave, selector)
+                    .map(|entity| {
+                        (
+                            entity.path.clone(),
+                            entity.label.clone(),
+                            entity.claim_series(series.bit()),
+                        )
+                    })
             })
         });
-        if let Some((path, label)) = registered {
+        if let Some((path, label, name_series)) = registered {
             ResolvedPath {
                 path: format!("{path}/{}", escape_entity_segment(event)),
                 entity_label: Some(label),
+                name_series,
             }
         } else {
             let root = match (federate, enclave) {
@@ -480,6 +497,7 @@ impl RerunLayer {
             ResolvedPath {
                 path: format!("{root}/{}", escape_entity_segment(event)),
                 entity_label: None,
+                name_series: false,
             }
         }
     }
@@ -493,9 +511,12 @@ where
         self.isolate(|| {
             let mut fields = CallbackFields::default();
             attrs.record(&mut fields);
-            let Some(event) = fields.text("event").map(str::to_owned) else {
-                self.diagnostic(None, "missing or invalid `event`");
-                return;
+            let event = match fields.discriminator::<TraceEvent>("event") {
+                Ok(event) => event,
+                Err(error) => {
+                    self.diagnostic(None, error);
+                    return;
+                }
             };
             let parent = self.with_context(&ctx, attrs.parent(), attrs.is_contextual(), |parent| {
                 parent.map(|span| span.context.clone())
@@ -512,30 +533,28 @@ where
             let tag = match Self::inherited_tag(&fields, parent.and_then(|context| context.tag())) {
                 Ok(tag) => tag,
                 Err(error) => {
-                    self.diagnostic(Some(&event), error);
+                    self.diagnostic(Some(event.as_str()), error);
                     return;
                 }
             };
-            let built = (|| -> Result<(SpanKind, &'static str, String), String> {
-                Ok(match event.as_str() {
-                    "scheduler_thread" => (
+            let built = (|| -> Result<(SpanKind, Option<EntitySelector>), String> {
+                Ok(match event {
+                    TraceEvent::SchedulerThread => (
                         SpanKind::Scheduler {
-                            state: required_discriminator(&fields, "state", &["running"])?,
+                            state: fields.state(TraceState::Running)?,
                         },
-                        "scheduler",
-                        "scheduler".into(),
+                        Some(EntitySelector::Scheduler),
                     ),
-                    "tag_process" => (
+                    TraceEvent::TagProcess => (
                         SpanKind::Tag {
                             terminal: fields
                                 .boolean("terminal")
                                 .ok_or("missing or invalid `terminal`")?,
-                            state: required_discriminator(&fields, "state", &["processing"])?,
+                            state: fields.state(TraceState::Processing)?,
                         },
-                        "scheduler",
-                        "scheduler".into(),
+                        Some(EntitySelector::Scheduler),
                     ),
-                    "reaction_execute" => {
+                    TraceEvent::ReactionExecute => {
                         let reaction = fields.required_text("reaction")?;
                         let reaction_key = fields.text("reaction_key").map(str::to_owned);
                         (
@@ -544,23 +563,29 @@ where
                                 reaction_key: reaction_key.clone(),
                                 reaction: reaction.clone(),
                                 level: fields.required_u64("level")?,
-                                state: required_discriminator(&fields, "state", &["begin"])?,
+                                state: fields.state(TraceState::Begin)?,
                             },
-                            "reaction",
-                            reaction_key.unwrap_or(reaction),
+                            reaction_key
+                                .as_deref()
+                                .unwrap_or(&reaction)
+                                .parse()
+                                .ok()
+                                .map(EntitySelector::Reaction),
                         )
                     }
-                    "coordination_wait" => (
+                    TraceEvent::CoordinationWait => (
                         SpanKind::Wait {
-                            state: required_discriminator(&fields, "state", &["waiting"])?,
+                            state: fields.state(TraceState::Waiting)?,
                         },
-                        "scheduler",
-                        "scheduler".into(),
+                        Some(EntitySelector::Scheduler),
                     ),
-                    "propagation_send" => {
-                        let kind = fields.required_text("kind")?;
-                        if !matches!(kind.as_str(), "logical" | "physical") {
-                            return Err(format!("invalid `kind` discriminator `{kind}`"));
+                    TraceEvent::PropagationSend => {
+                        let kind = fields.discriminator::<TraceKind>("kind")?;
+                        if !matches!(kind, TraceKind::Logical | TraceKind::Physical) {
+                            return Err(format!(
+                                "invalid `kind` discriminator `{}`",
+                                kind.as_str()
+                            ));
                         }
                         enclave.as_deref().ok_or("missing or invalid `enclave`")?;
                         match (
@@ -568,16 +593,19 @@ where
                             fields.text("destination_federate"),
                         ) {
                             (Some(_), None) => {}
-                            (None, Some(_)) if kind == "logical" => {}
+                            (None, Some(_)) if kind == TraceKind::Logical => {}
                             (None, None) => return Err("missing propagation destination".into()),
                             _ => return Err("ambiguous propagation destination".into()),
                         }
                         let initial_outcome = fields
-                            .text("outcome")
-                            .map(|_| {
-                                required_discriminator(&fields, "outcome", &["accepted", "failed"])
-                            })
+                            .u64("outcome")
+                            .map(|_| fields.discriminator::<TraceOutcome>("outcome"))
                             .transpose()?;
+                        if !initial_outcome.iter().all(|outcome| {
+                            matches!(outcome, TraceOutcome::Accepted | TraceOutcome::Failed)
+                        }) {
+                            return Err("invalid `outcome` for propagation send".into());
+                        }
                         let outcome = OnceLock::new();
                         if let Some(initial_outcome) = initial_outcome {
                             let _ = outcome.set(initial_outcome);
@@ -596,17 +624,16 @@ where
                                 value_size: fields.required_u64("value_size")?,
                                 outcome,
                             },
-                            "scheduler",
-                            "scheduler".into(),
+                            Some(EntitySelector::Scheduler),
                         )
                     }
-                    _ => return Err(format!("unsupported span event `{event}`")),
+                    _ => return Err(format!("unsupported span event `{}`", event.as_str())),
                 })
             })();
-            let (kind, entity_kind, identity) = match built {
+            let (kind, selector) = match built {
                 Ok(value) => value,
                 Err(error) => {
-                    self.diagnostic(Some(&event), error);
+                    self.diagnostic(Some(event.as_str()), error);
                     return;
                 }
             };
@@ -616,20 +643,23 @@ where
                 } else {
                     "missing or invalid `enclave`"
                 };
-                self.diagnostic(Some(&event), error);
+                self.diagnostic(Some(event.as_str()), error);
                 return;
             };
             let context = match &kind {
                 SpanKind::Tag { .. } | SpanKind::Reaction { .. } | SpanKind::Wait { .. } => {
                     let Some(tag) = tag else {
-                        self.diagnostic(Some(&event), "missing logical tag context");
+                        self.diagnostic(Some(event.as_str()), "missing logical tag context");
                         return;
                     };
                     SpanContext::logical(federate, enclave, tag)
                 }
-                SpanKind::Send { kind, .. } if kind == "logical" => {
+                SpanKind::Send {
+                    kind: TraceKind::Logical,
+                    ..
+                } => {
                     let Some(tag) = tag else {
-                        self.diagnostic(Some(&event), "missing logical tag context");
+                        self.diagnostic(Some(event.as_str()), "missing logical tag context");
                         return;
                     };
                     SpanContext::logical(federate, enclave, tag)
@@ -641,9 +671,9 @@ where
             let resolved_path = self.path(
                 context.federate(),
                 Some(context.enclave()),
-                entity_kind,
-                &identity,
-                &event,
+                selector,
+                SeriesKind::Event(event),
+                event.as_str(),
             );
             let phase = match &kind {
                 SpanKind::Tag { .. } => Some("processing tag"),
@@ -656,6 +686,7 @@ where
                 context,
                 path: resolved_path.path,
                 entity_label: resolved_path.entity_label,
+                name_series: resolved_path.name_series,
                 timing: Mutex::new(SpanTiming::default()),
                 kind,
             };
@@ -678,11 +709,18 @@ where
         self.isolate(|| {
             let mut fields = CallbackFields::default();
             values.record(&mut fields);
-            if let Some(outcome) = fields.text("outcome") {
+            if fields.u64("outcome").is_some() {
+                let outcome = match fields.discriminator::<TraceOutcome>("outcome") {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        self.diagnostic(Some("propagation_send"), error);
+                        return;
+                    }
+                };
                 let duplicate = with_span_state(id, &ctx, |span| match &span.kind {
                     SpanKind::Send {
                         outcome: current, ..
-                    } => current.set(outcome.to_owned()).is_err(),
+                    } => current.set(outcome).is_err(),
                     _ => false,
                 })
                 .unwrap_or(false);
@@ -697,15 +735,18 @@ where
         self.isolate(|| {
             let mut fields = CallbackFields::default();
             event.record(&mut fields);
-            let Some(name) = fields.text("event").map(str::to_owned) else {
-                self.diagnostic(None, "missing or invalid `event`");
-                return;
+            let name = match fields.discriminator::<TraceEvent>("event") {
+                Ok(name) => name,
+                Err(error) => {
+                    self.diagnostic(None, error);
+                    return;
+                }
             };
             let result = self.with_context(&ctx, event.parent(), event.is_contextual(), |parent| {
-                self.emit_event(&name, &fields, parent)
+                self.emit_event(name, &fields, parent)
             });
             if let Err(error) = result {
-                self.diagnostic(Some(&name), error);
+                self.diagnostic(Some(name.as_str()), error);
             }
         });
     }
@@ -735,21 +776,22 @@ where
     fn on_close(&self, id: Id, ctx: Context<'_, S>) {
         self.isolate(|| {
             let _ = with_span_state(&id, &ctx, |span| {
-                let duration = saturating_i64(
-                    span.timing
+                let duration = {
+                    let total = span
+                        .timing
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .total
-                        .as_nanos(),
-                ) as u64;
+                        .total;
+                    saturating_i64(total.as_nanos()) as u64
+                };
                 let kind = &span.kind;
                 if let SpanKind::Send { outcome, .. } = kind {
-                    match outcome.get().map(String::as_str) {
-                        Some("accepted" | "failed") => {}
+                    match outcome.get() {
+                        Some(TraceOutcome::Accepted | TraceOutcome::Failed) => {}
                         Some(outcome) => {
                             self.diagnostic(
                                 Some("propagation_send"),
-                                format!("invalid `outcome` discriminator `{outcome}`"),
+                                format!("invalid `outcome` discriminator `{}`", outcome.as_str()),
                             );
                             return;
                         }
@@ -848,7 +890,7 @@ where
                     } => {
                         let archetype = if destination_federate.is_some() {
                             "boomerang.PropagationSerializedSend"
-                        } else if kind == "physical" {
+                        } else if *kind == TraceKind::Physical {
                             "boomerang.PropagationPhysicalSend"
                         } else {
                             "boomerang.PropagationLogicalSend"
@@ -912,6 +954,7 @@ where
                     self.write_measure(
                         &span.path,
                         span.entity_label.as_deref(),
+                        span.name_series,
                         span.time,
                         &Combined::new([&payload, &scalar]),
                     );
@@ -934,7 +977,7 @@ where
 impl RerunLayer {
     fn emit_event(
         &self,
-        name: &str,
+        event: TraceEvent,
         f: &CallbackFields,
         parent: Option<&SpanState>,
     ) -> Result<(), String> {
@@ -951,10 +994,11 @@ impl RerunLayer {
             .u64("microstep")
             .or_else(|| parent.and_then(|p| p.context.microstep()));
         let time = self.timepoint(logical);
-        let (path, payload) = match name {
-            "async_ingress" => {
-                let kind = f.required_text("kind")?;
-                if kind == "logical" || kind == "physical" {
+        let name = event.as_str();
+        let (path, payload) = match event {
+            TraceEvent::AsyncIngress => {
+                let kind = f.discriminator::<TraceKind>("kind")?;
+                if matches!(kind, TraceKind::Logical | TraceKind::Physical) {
                     let action_key = f.required_text("action_key")?;
                     let action = f.required_text("action")?;
                     let logical_ns = logical.ok_or("missing or invalid `logical_ns`")?;
@@ -963,23 +1007,38 @@ impl RerunLayer {
                     let destination_microstep = f.required_u64("destination_microstep")?;
                     let value_type = f.required_text("value_type")?;
                     let value_size = f.required_u64("value_size")?;
-                    let outcome = required_discriminator(
-                        f,
-                        "outcome",
-                        &["accepted", "ignored_past", "failed"],
-                    )?;
+                    let outcome = f.discriminator::<TraceOutcome>("outcome")?;
+                    if !matches!(
+                        outcome,
+                        TraceOutcome::Accepted | TraceOutcome::IgnoredPast | TraceOutcome::Failed
+                    ) {
+                        return Err(format!(
+                            "invalid `outcome` discriminator `{}`",
+                            outcome.as_str()
+                        ));
+                    }
                     let enclave = enclave.ok_or("missing or invalid `enclave`")?;
-                    let accepted_logical = kind == "logical" && outcome == "accepted";
+                    let accepted_logical =
+                        kind == TraceKind::Logical && outcome == TraceOutcome::Accepted;
                     let event_name = if accepted_logical {
                         "propagation_receive"
                     } else {
-                        name
+                        event.as_str()
                     };
-                    let path =
-                        self.path(federate, Some(enclave), "action", &action_key, event_name);
+                    let path = self.path(
+                        federate,
+                        Some(enclave),
+                        action_key.parse().ok().map(EntitySelector::Action),
+                        if accepted_logical {
+                            SeriesKind::PropagationReceive
+                        } else {
+                            SeriesKind::Event(event)
+                        },
+                        event_name,
+                    );
                     let archetype = if accepted_logical {
                         "boomerang.PropagationReceive"
-                    } else if kind == "logical" {
+                    } else if kind == TraceKind::Logical {
                         "boomerang.LogicalIngress"
                     } else {
                         "boomerang.PhysicalIngress"
@@ -1018,23 +1077,32 @@ impl RerunLayer {
                         [outcome.as_str()],
                     );
                     (path, payload)
-                } else if matches!(kind.as_str(), "shutdown" | "provisional_release") {
+                } else if matches!(kind, TraceKind::Shutdown | TraceKind::ProvisionalRelease) {
                     let enclave = enclave.ok_or("missing or invalid `enclave`")?;
                     logical.ok_or("missing or invalid `logical_ns`")?;
                     microstep.ok_or("missing or invalid `microstep`")?;
-                    let outcome = f.required_text("outcome")?;
-                    let valid_outcome = match kind.as_str() {
-                        "shutdown" => outcome == "accepted",
-                        "provisional_release" => {
-                            matches!(outcome.as_str(), "accepted" | "ignored_past")
+                    let outcome = f.discriminator::<TraceOutcome>("outcome")?;
+                    let valid_outcome = match kind {
+                        TraceKind::Shutdown => outcome == TraceOutcome::Accepted,
+                        TraceKind::ProvisionalRelease => {
+                            matches!(outcome, TraceOutcome::Accepted | TraceOutcome::IgnoredPast)
                         }
                         _ => unreachable!(),
                     };
                     if !valid_outcome {
-                        return Err(format!("invalid `outcome` discriminator `{outcome}`"));
+                        return Err(format!(
+                            "invalid `outcome` discriminator `{}`",
+                            outcome.as_str()
+                        ));
                     }
                     (
-                        self.path(federate, Some(enclave), "scheduler", "scheduler", name),
+                        self.path(
+                            federate,
+                            Some(enclave),
+                            Some(EntitySelector::Scheduler),
+                            SeriesKind::Event(event),
+                            name,
+                        ),
                         common(
                             "boomerang.ControlIngress",
                             name,
@@ -1053,27 +1121,27 @@ impl RerunLayer {
                         ),
                     )
                 } else {
-                    return Err(format!("invalid `kind` discriminator `{kind}`"));
+                    return Err(format!("invalid `kind` discriminator `{}`", kind.as_str()));
                 }
             }
-            "action_schedule" => {
+            TraceEvent::ActionSchedule => {
                 let action_key = f.required_text("action_key")?;
-                let outcome = f.required_text("outcome")?;
+                let outcome = f.discriminator::<TraceOutcome>("outcome")?;
                 let enclave = enclave.ok_or("missing or invalid `enclave`")?;
-                let archetype = if outcome == "startup" {
+                let archetype = if outcome == TraceOutcome::Startup {
                     f.required_text("action")?;
                     f.required_u64("destination_logical_ns")?;
                     f.required_u64("destination_microstep")?;
                     f.required_text("value_type")?;
                     f.required_u64("value_size")?;
                     "boomerang.ActionStartup"
-                } else if outcome == "rebased" {
+                } else if outcome == TraceOutcome::Rebased {
                     f.required_u64("old_logical_ns")?;
                     f.required_u64("old_microstep")?;
                     f.required_u64("destination_logical_ns")?;
                     f.required_u64("destination_microstep")?;
                     "boomerang.ActionRebased"
-                } else if outcome == "scheduled" {
+                } else if outcome == TraceOutcome::Scheduled {
                     logical.ok_or("missing or invalid `logical_ns`")?;
                     microstep.ok_or("missing or invalid `microstep`")?;
                     f.required_text("action")?;
@@ -1083,9 +1151,12 @@ impl RerunLayer {
                     f.required_u64("value_size")?;
                     "boomerang.ActionScheduled"
                 } else {
-                    return Err(format!("invalid `outcome` discriminator `{outcome}`"));
+                    return Err(format!(
+                        "invalid `outcome` discriminator `{}`",
+                        outcome.as_str()
+                    ));
                 };
-                if outcome == "startup" {
+                if outcome == TraceOutcome::Startup {
                     logical.ok_or("missing or invalid `logical_ns`")?;
                     microstep.ok_or("missing or invalid `microstep`")?;
                 }
@@ -1126,11 +1197,17 @@ impl RerunLayer {
                     [outcome.as_str()],
                 );
                 (
-                    self.path(federate, Some(enclave), "action", &action_key, name),
+                    self.path(
+                        federate,
+                        Some(enclave),
+                        action_key.parse().ok().map(EntitySelector::Action),
+                        SeriesKind::Event(event),
+                        name,
+                    ),
                     payload,
                 )
             }
-            "port_write" => {
+            TraceEvent::PortWrite => {
                 if !matches!(
                     parent.map(|parent| &parent.kind),
                     Some(SpanKind::Reaction { .. })
@@ -1139,9 +1216,12 @@ impl RerunLayer {
                 }
                 let port_key = f.required_text("port_key")?;
                 let enclave = enclave.ok_or("missing or invalid `enclave`")?;
-                let outcome = f.required_text("outcome")?;
-                if outcome != "mutable_access" {
-                    return Err(format!("invalid `outcome` discriminator `{outcome}`"));
+                let outcome = f.discriminator::<TraceOutcome>("outcome")?;
+                if outcome != TraceOutcome::MutableAccess {
+                    return Err(format!(
+                        "invalid `outcome` discriminator `{}`",
+                        outcome.as_str()
+                    ));
                 }
                 let mut payload = common(
                     "boomerang.PortWrite",
@@ -1191,25 +1271,39 @@ impl RerunLayer {
                     }
                 }
                 (
-                    self.path(federate, Some(enclave), "port", &port_key, name),
+                    self.path(
+                        federate,
+                        Some(enclave),
+                        port_key.parse().ok().map(EntitySelector::Port),
+                        SeriesKind::Event(event),
+                        name,
+                    ),
                     payload,
                 )
             }
-            "frontier_publish" => {
+            TraceEvent::FrontierPublish => {
                 let enclave = enclave.ok_or("missing or invalid `enclave`")?;
-                let state = f.required_text("state")?;
-                let outcome = f.required_text("outcome")?;
-                if !matches!(outcome.as_str(), "published" | "failed") {
-                    return Err(format!("invalid `outcome` discriminator `{outcome}`"));
+                let state = f.discriminator::<TraceState>("state")?;
+                let outcome = f.discriminator::<TraceOutcome>("outcome")?;
+                if !matches!(outcome, TraceOutcome::Published | TraceOutcome::Failed) {
+                    return Err(format!(
+                        "invalid `outcome` discriminator `{}`",
+                        outcome.as_str()
+                    ));
                 }
-                let archetype = match state.as_str() {
-                    "candidate" => {
+                let archetype = match state {
+                    TraceState::Candidate => {
                         logical.ok_or("missing or invalid `logical_ns`")?;
                         microstep.ok_or("missing or invalid `microstep`")?;
                         "boomerang.FrontierCandidate"
                     }
-                    "idle" | "finished" => "boomerang.FrontierState",
-                    _ => return Err(format!("invalid `state` discriminator `{state}`")),
+                    TraceState::Idle | TraceState::Finished => "boomerang.FrontierState",
+                    _ => {
+                        return Err(format!(
+                            "invalid `state` discriminator `{}`",
+                            state.as_str()
+                        ))
+                    }
                 };
                 let payload = common(archetype, name, federate, Some(enclave), logical, microstep)
                     .with_component::<rerun::components::Text>(
@@ -1221,70 +1315,106 @@ impl RerunLayer {
                         [outcome.as_str()],
                     );
                 (
-                    self.path(federate, Some(enclave), "scheduler", "scheduler", name),
+                    self.path(
+                        federate,
+                        Some(enclave),
+                        Some(EntitySelector::Scheduler),
+                        SeriesKind::Event(event),
+                        name,
+                    ),
                     payload,
                 )
             }
-            "coordination_grant" | "tag_release" | "tag_complete" | "shutdown" => {
+            TraceEvent::CoordinationGrant
+            | TraceEvent::TagRelease
+            | TraceEvent::TagComplete
+            | TraceEvent::Shutdown => {
                 let enclave = enclave.ok_or("missing or invalid `enclave`")?;
                 logical.ok_or("missing or invalid `logical_ns`")?;
                 microstep.ok_or("missing or invalid `microstep`")?;
-                let outcome = f.required_text("outcome")?;
-                let valid_outcome = match name {
-                    "coordination_grant" => matches!(
-                        outcome.as_str(),
-                        "granted" | "interrupted_local" | "interrupted_external"
+                let outcome = f.discriminator::<TraceOutcome>("outcome")?;
+                let valid_outcome = match event {
+                    TraceEvent::CoordinationGrant => matches!(
+                        outcome,
+                        TraceOutcome::Granted
+                            | TraceOutcome::InterruptedLocal
+                            | TraceOutcome::InterruptedExternal
                     ),
-                    "tag_release" => matches!(outcome.as_str(), "accepted" | "failed"),
-                    "tag_complete" => matches!(outcome.as_str(), "completed" | "failed"),
-                    "shutdown" => outcome == "success",
+                    TraceEvent::TagRelease => {
+                        matches!(outcome, TraceOutcome::Accepted | TraceOutcome::Failed)
+                    }
+                    TraceEvent::TagComplete => {
+                        matches!(outcome, TraceOutcome::Completed | TraceOutcome::Failed)
+                    }
+                    TraceEvent::Shutdown => outcome == TraceOutcome::Success,
                     _ => unreachable!(),
                 };
                 if !valid_outcome {
-                    return Err(format!("invalid `outcome` discriminator `{outcome}`"));
+                    return Err(format!(
+                        "invalid `outcome` discriminator `{}`",
+                        outcome.as_str()
+                    ));
                 }
-                if name == "tag_release" {
+                if event == TraceEvent::TagRelease {
                     f.required_text("destination")?;
                 }
-                if name == "tag_complete" {
+                if event == TraceEvent::TagComplete {
                     f.boolean("terminal")
                         .ok_or("missing or invalid `terminal`")?;
                 }
-                let archetype = match name {
-                    "coordination_grant" => "boomerang.CoordinationGrant",
-                    "tag_release" => "boomerang.TagRelease",
-                    "tag_complete" => "boomerang.TagComplete",
+                let archetype = match event {
+                    TraceEvent::CoordinationGrant => "boomerang.CoordinationGrant",
+                    TraceEvent::TagRelease => "boomerang.TagRelease",
+                    TraceEvent::TagComplete => "boomerang.TagComplete",
                     _ => "boomerang.Shutdown",
                 };
                 let mut payload =
                     common(archetype, name, federate, Some(enclave), logical, microstep);
-                for (component, field) in [
-                    ("boomerang.trace.destination", "destination"),
-                    ("boomerang.trace.state", "state"),
-                    ("boomerang.trace.outcome", "outcome"),
-                ] {
+                for (component, field) in [("boomerang.trace.destination", "destination")] {
                     if let Some(value) = f.text(field) {
                         payload =
                             payload.with_component::<rerun::components::Text>(component, [value]);
                     }
                 }
+                payload = payload.with_component::<rerun::components::Text>(
+                    "boomerang.trace.outcome",
+                    [outcome.as_str()],
+                );
                 if let Some(value) = f.boolean("terminal") {
                     payload = payload
                         .with_component_from_data("boomerang.trace.terminal", bool_array(value));
                 }
-                if name == "shutdown" {
-                    let state = f.required_text("state")?;
-                    if state != "complete" {
-                        return Err(format!("invalid `state` discriminator `{state}`"));
+                if event == TraceEvent::Shutdown {
+                    let state = f.discriminator::<TraceState>("state")?;
+                    if state != TraceState::Complete {
+                        return Err(format!(
+                            "invalid `state` discriminator `{}`",
+                            state.as_str()
+                        ));
                     }
+                    payload = payload.with_component::<rerun::components::Text>(
+                        "boomerang.trace.state",
+                        [state.as_str()],
+                    );
                 }
                 (
-                    self.path(federate, Some(enclave), "scheduler", "scheduler", name),
+                    self.path(
+                        federate,
+                        Some(enclave),
+                        Some(EntitySelector::Scheduler),
+                        SeriesKind::Event(event),
+                        name,
+                    ),
                     payload,
                 )
             }
-            "diagnostic" => {
+            TraceEvent::Diagnostic => {
                 let enclave = enclave.ok_or("missing or invalid `enclave`")?;
+                let state = f.discriminator::<TraceState>("state")?;
+                let outcome = f.discriminator::<TraceOutcome>("outcome")?;
+                if state != TraceState::RuntimeError || outcome != TraceOutcome::Failed {
+                    return Err("invalid runtime diagnostic discriminators".into());
+                }
                 let error = f.required_text("error")?;
                 let payload = common(
                     "boomerang.RuntimeDiagnostic",
@@ -1308,9 +1438,11 @@ impl RerunLayer {
             }
             _ => return Err(format!("unsupported event `{name}`")),
         };
-        let scalar = match name {
-            "async_ingress" | "action_schedule" => f.u64("value_size").map(|value| value as f64),
-            "tag_complete" => f.boolean("terminal").map(|value| u8::from(value) as f64),
+        let scalar = match event {
+            TraceEvent::AsyncIngress | TraceEvent::ActionSchedule => {
+                f.u64("value_size").map(|value| value as f64)
+            }
+            TraceEvent::TagComplete => f.boolean("terminal").map(|value| u8::from(value) as f64),
             _ => None,
         };
         if let Some(scalar) = scalar {
@@ -1318,6 +1450,7 @@ impl RerunLayer {
             self.write_measure(
                 &path.path,
                 path.entity_label.as_deref(),
+                path.name_series,
                 time,
                 &Combined::new([&payload, &measure]),
             );

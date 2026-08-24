@@ -320,7 +320,7 @@ pub(super) struct SessionState {
 
 struct SessionStateInner {
     enabled: AtomicBool,
-    first_error: std::sync::Mutex<Option<String>>,
+    first_error: std::sync::OnceLock<String>,
 }
 
 impl SessionState {
@@ -328,7 +328,7 @@ impl SessionState {
         Self {
             inner: Arc::new(SessionStateInner {
                 enabled: AtomicBool::new(enabled),
-                first_error: std::sync::Mutex::new(None),
+                first_error: std::sync::OnceLock::new(),
             }),
         }
     }
@@ -338,20 +338,12 @@ impl SessionState {
     }
 
     fn first_error(&self) -> Option<String> {
-        self.inner
-            .first_error
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        self.inner.first_error.get().cloned()
     }
 
     pub(super) fn disable_on_error(&self, error: &dyn std::fmt::Display) {
         if self.inner.enabled.swap(false, Ordering::AcqRel) {
-            *self
-                .inner
-                .first_error
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.to_string());
+            let _ = self.inner.first_error.set(error.to_string());
             tracing::callsite::rebuild_interest_cache();
             tracing::warn!(
                 target: "boomerang::rerun_internal",

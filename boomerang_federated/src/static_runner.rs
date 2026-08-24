@@ -430,10 +430,10 @@ fn execute_connected_static_federation(
                     let span = tracing::trace_span!(
                         target: boomerang_runtime::trace::TRACE_TARGET,
                         "scheduler_thread",
-                        event = boomerang_runtime::trace::event::SCHEDULER_THREAD,
+                        event = boomerang_runtime::trace::TraceEvent::SchedulerThread as u64,
                         federate = %thread_federate_id,
                         enclave = %enclave_key,
-                        state = "running",
+                        state = boomerang_runtime::trace::TraceState::Running as u64,
                     );
                     let _entered = span.enter();
                     catch_scheduler_thread_body(|| {

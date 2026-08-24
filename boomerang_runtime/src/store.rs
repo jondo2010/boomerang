@@ -59,7 +59,7 @@ impl<'a> ReactionTriggerCtx<'a> {
         let span = tracing::trace_span!(
             target: crate::trace::TRACE_TARGET,
             "reaction_execute",
-            event = crate::trace::event::REACTION_EXECUTE,
+            event = crate::trace::TraceEvent::ReactionExecute as u64,
             enclave = %self.context.enclave_id(),
             logical_ns = crate::trace::logical_ns(tag),
             microstep = crate::trace::microstep(tag),
@@ -67,7 +67,7 @@ impl<'a> ReactionTriggerCtx<'a> {
             reaction_key = %reaction_key,
             reaction = self.reaction.get_name(),
             level = level.0,
-            state = "begin",
+            state = crate::trace::TraceState::Begin as u64,
         );
         let _entered = span.enter();
 

@@ -727,173 +727,186 @@ mod tests {
 
     #[test]
     fn all_enclaves_participate_in_federate_rti_frontier() {
-        let federate = FederateId::new("federate");
-        let source = FederateId::new("source");
-        let endpoint = crate::EndpointId::new("source.out->federate.in");
-        let withheld_tag =
-            boomerang_runtime::Tag::new(boomerang_runtime::Duration::milliseconds(10), 0);
-        let later_tag =
-            boomerang_runtime::Tag::new(boomerang_runtime::Duration::milliseconds(20), 0);
-        let observations = Arc::new(Mutex::new(Vec::new()));
-        let advanced_early = Arc::new(AtomicBool::new(false));
+        run_with_wall_timeout(
+            "multi-Enclave federate frontier",
+            StdDuration::from_secs(2),
+            || {
+                let federate = FederateId::new("federate");
+                let source = FederateId::new("source");
+                let endpoint = crate::EndpointId::new("source.out->federate.in");
+                let withheld_tag =
+                    boomerang_runtime::Tag::new(boomerang_runtime::Duration::milliseconds(10), 0);
+                let later_tag =
+                    boomerang_runtime::Tag::new(boomerang_runtime::Duration::milliseconds(20), 0);
+                let observations = Arc::new(Mutex::new(Vec::new()));
+                let advanced_early = Arc::new(AtomicBool::new(false));
 
-        let first_observations = Arc::clone(&observations);
-        let first = scheduled_enclave("old-gateway", withheld_tag, move |tag| {
-            first_observations.lock().unwrap().push(("first", tag));
-        });
-        let first_wake = first.create_send_context(boomerang_runtime::EnclaveKey::from(0));
+                let first_observations = Arc::clone(&observations);
+                let first = scheduled_enclave("old-gateway", withheld_tag, move |tag| {
+                    first_observations.lock().unwrap().push(("first", tag));
+                });
+                let first_wake = first.create_send_context(boomerang_runtime::EnclaveKey::from(0));
 
-        let (later_release_tx, later_release_rx) = mpsc::channel();
-        let later_release_rx = Arc::new(Mutex::new(later_release_rx));
-        let second_observations = Arc::clone(&observations);
-        let later_release = Arc::clone(&later_release_rx);
-        let mut second = scheduled_enclave("routed", later_tag, move |tag| {
-            second_observations.lock().unwrap().push(("later", tag));
-            later_release.lock().unwrap().recv().unwrap();
-        });
-        let second_key = boomerang_runtime::EnclaveKey::from(1);
-        let inbound_action = second.insert_action(|key| {
-            boomerang_runtime::Action::<u32>::new("inbound", key, None, true).boxed()
-        });
-        let second_reactor = second.env.reactors.keys().next().unwrap();
-        let second_scope = second.root_scope(second_reactor);
-        second.insert_action_scope(inbound_action, second_scope);
-        let message_observations = Arc::clone(&observations);
-        let inbound_reaction = second.insert_reaction(
-            boomerang_runtime::Reaction::new(
-                "message",
-                boomerang_runtime::reaction_closure!(ctx, _reactor, _refs => {
-                    message_observations
-                        .lock()
-                        .unwrap()
-                        .push(("message", ctx.get_tag()));
-                }),
-                None,
-            ),
-            second_reactor,
-            std::iter::empty::<boomerang_runtime::PortKey>(),
-            std::iter::empty::<boomerang_runtime::PortKey>(),
-            std::iter::once(inbound_action),
-            second_scope,
-            None,
-        );
-        second.insert_action_trigger(
-            inbound_action,
-            (boomerang_runtime::Level::from(0), inbound_reaction),
-        );
-        let inbound = crate::FederatedInboundEndpoint::new(
-            second.create_send_context(second_key),
-            second.create_async_action_ref::<u32>(inbound_action),
-            Box::new(|payload: &[u8]| {
-                std::str::from_utf8(payload)
-                    .map_err(|error| crate::CodecError::message(error.to_string()))?
-                    .parse::<u32>()
-                    .map_err(|error| crate::CodecError::message(error.to_string()))
-            }),
-        )
-        .unwrap();
-        let mut route =
-            FederateClientRoute::new(endpoint.clone(), source.clone(), federate.clone());
-        route.bind_inbound(inbound);
-
-        let mut enclaves = tinymap::TinyMap::new();
-        assert_eq!(
-            enclaves.insert(first),
-            boomerang_runtime::EnclaveKey::from(0)
-        );
-        assert_eq!(enclaves.insert(second), second_key);
-        let runtimes = BTreeMap::from([(federate.clone(), enclaves)]);
-        let fake_observations = Arc::clone(&observations);
-        let fake_advanced_early = Arc::clone(&advanced_early);
-        let result =
-            execute_with_fake_rti(runtimes, vec![route], move |mut transport| async move {
-                assert!(matches!(
-                    recv_federate_frame(&mut transport).await,
-                    crate::FederateToRti::Hello { federate_id } if federate_id == federate
-                ));
-                send_federate_frame(
-                    &mut transport,
-                    crate::RtiToFederate::Start {
-                        start_unix_epoch_ns: 0,
-                    },
+                let (later_release_tx, later_release_rx) = mpsc::channel();
+                let later_release_rx = Arc::new(Mutex::new(later_release_rx));
+                let second_observations = Arc::clone(&observations);
+                let later_release = Arc::clone(&later_release_rx);
+                let mut second = scheduled_enclave("routed", later_tag, move |tag| {
+                    second_observations.lock().unwrap().push(("later", tag));
+                    later_release.lock().unwrap().recv().unwrap();
+                });
+                let second_key = boomerang_runtime::EnclaveKey::from(1);
+                let inbound_action = second.insert_action(|key| {
+                    boomerang_runtime::Action::<u32>::new("inbound", key, None, true).boxed()
+                });
+                let second_reactor = second.env.reactors.keys().next().unwrap();
+                let second_scope = second.root_scope(second_reactor);
+                second.insert_action_scope(inbound_action, second_scope);
+                let message_observations = Arc::clone(&observations);
+                let inbound_reaction = second.insert_reaction(
+                    boomerang_runtime::Reaction::new(
+                        "message",
+                        boomerang_runtime::reaction_closure!(ctx, _reactor, _refs => {
+                            message_observations
+                                .lock()
+                                .unwrap()
+                                .push(("message", ctx.get_tag()));
+                        }),
+                        None,
+                    ),
+                    second_reactor,
+                    std::iter::empty::<boomerang_runtime::PortKey>(),
+                    std::iter::empty::<boomerang_runtime::PortKey>(),
+                    std::iter::once(inbound_action),
+                    second_scope,
+                    None,
+                );
+                second.insert_action_trigger(
+                    inbound_action,
+                    (boomerang_runtime::Level::from(0), inbound_reaction),
+                );
+                let inbound = crate::FederatedInboundEndpoint::new(
+                    second.create_send_context(second_key),
+                    second.create_async_action_ref::<u32>(inbound_action),
+                    Box::new(|payload: &[u8]| {
+                        std::str::from_utf8(payload)
+                            .map_err(|error| crate::CodecError::message(error.to_string()))?
+                            .parse::<u32>()
+                            .map_err(|error| crate::CodecError::message(error.to_string()))
+                    }),
                 )
-                .await;
-                assert!(matches!(
-                    recv_federate_frame(&mut transport).await,
-                    crate::FederateToRti::Net { tag, .. }
-                        if tag == crate::WireTag::try_from(withheld_tag).unwrap()
-                ));
+                .unwrap();
+                let mut route =
+                    FederateClientRoute::new(endpoint.clone(), source.clone(), federate.clone());
+                route.bind_inbound(inbound);
 
-                tokio::task::spawn_blocking(|| std::thread::sleep(StdDuration::from_millis(50)))
-                    .await
-                    .unwrap();
-                let bypassed = fake_observations
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .any(|(label, _)| *label == "later");
-                fake_advanced_early.store(bypassed, Ordering::Release);
-                send_federate_frame(
-                    &mut transport,
-                    crate::RtiToFederate::Msg {
-                        source,
-                        endpoint,
-                        tag: crate::WireTag::try_from(withheld_tag).unwrap(),
-                        payload: b"7".to_vec(),
-                    },
-                )
-                .await;
-                if bypassed {
-                    let _ = first_wake.schedule_external(
-                        boomerang_runtime::AsyncEvent::TagReleaseProvisional {
-                            enclave: second_key,
-                            tag: withheld_tag,
-                        },
-                    );
-                }
-                tokio::task::spawn_blocking(|| std::thread::sleep(StdDuration::from_millis(20)))
-                    .await
-                    .unwrap();
-                send_federate_frame(
-                    &mut transport,
-                    crate::RtiToFederate::Tag {
-                        tag: crate::WireTag::try_from(withheld_tag).unwrap(),
-                    },
-                )
-                .await;
-                let _ = later_release_tx.send(());
+                let mut enclaves = tinymap::TinyMap::new();
+                assert_eq!(
+                    enclaves.insert(first),
+                    boomerang_runtime::EnclaveKey::from(0)
+                );
+                assert_eq!(enclaves.insert(second), second_key);
+                let runtimes = BTreeMap::from([(federate.clone(), enclaves)]);
+                let fake_observations = Arc::clone(&observations);
+                let fake_advanced_early = Arc::clone(&advanced_early);
+                let result =
+                    execute_with_fake_rti(runtimes, vec![route], move |mut transport| async move {
+                        assert!(matches!(
+                            recv_federate_frame(&mut transport).await,
+                            crate::FederateToRti::Hello { federate_id } if federate_id == federate
+                        ));
+                        send_federate_frame(
+                            &mut transport,
+                            crate::RtiToFederate::Start {
+                                start_unix_epoch_ns: 0,
+                            },
+                        )
+                        .await;
+                        assert!(matches!(
+                            recv_federate_frame(&mut transport).await,
+                            crate::FederateToRti::Net { tag, .. }
+                                if tag == crate::WireTag::try_from(withheld_tag).unwrap()
+                        ));
 
-                loop {
-                    match recv_federate_frame(&mut transport).await {
-                        crate::FederateToRti::Net { tag, .. } => {
-                            send_federate_frame(&mut transport, crate::RtiToFederate::Tag { tag })
-                                .await;
+                        tokio::task::spawn_blocking(|| {
+                            std::thread::sleep(StdDuration::from_millis(50))
+                        })
+                        .await
+                        .unwrap();
+                        let bypassed = fake_observations
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .any(|(label, _)| *label == "later");
+                        fake_advanced_early.store(bypassed, Ordering::Release);
+                        send_federate_frame(
+                            &mut transport,
+                            crate::RtiToFederate::Msg {
+                                source,
+                                endpoint,
+                                tag: crate::WireTag::try_from(withheld_tag).unwrap(),
+                                payload: b"7".to_vec(),
+                            },
+                        )
+                        .await;
+                        if bypassed {
+                            let _ = first_wake.schedule_external(
+                                boomerang_runtime::AsyncEvent::TagReleaseProvisional {
+                                    enclave: second_key,
+                                    tag: withheld_tag,
+                                },
+                            );
                         }
-                        crate::FederateToRti::Ltc { .. } => {}
-                        crate::FederateToRti::Stop { .. } => break,
-                        message => panic!("unexpected federate frame: {message:?}"),
-                    }
-                }
-                Ok(())
-            });
+                        tokio::task::spawn_blocking(|| {
+                            std::thread::sleep(StdDuration::from_millis(20))
+                        })
+                        .await
+                        .unwrap();
+                        send_federate_frame(
+                            &mut transport,
+                            crate::RtiToFederate::Tag {
+                                tag: crate::WireTag::try_from(withheld_tag).unwrap(),
+                            },
+                        )
+                        .await;
+                        let _ = later_release_tx.send(());
 
-        assert!(result.is_ok(), "runner failed: {result:?}");
-        assert!(
-            !advanced_early.load(Ordering::Acquire),
-            "non-gateway Enclave advanced beyond the withheld federate frontier"
-        );
-        let observations = observations.lock().unwrap();
-        let message = observations
-            .iter()
-            .position(|(label, _)| *label == "message")
-            .unwrap();
-        let later = observations
-            .iter()
-            .position(|(label, _)| *label == "later")
-            .unwrap();
-        assert!(
-            message < later,
-            "message must be observed before later-tag work: {observations:?}"
+                        loop {
+                            match recv_federate_frame(&mut transport).await {
+                                crate::FederateToRti::Net { tag, .. } => {
+                                    send_federate_frame(
+                                        &mut transport,
+                                        crate::RtiToFederate::Tag { tag },
+                                    )
+                                    .await;
+                                }
+                                crate::FederateToRti::Ltc { .. } => {}
+                                crate::FederateToRti::Stop { .. } => break,
+                                message => panic!("unexpected federate frame: {message:?}"),
+                            }
+                        }
+                        Ok(())
+                    });
+
+                assert!(result.is_ok(), "runner failed: {result:?}");
+                assert!(
+                    !advanced_early.load(Ordering::Acquire),
+                    "non-gateway Enclave advanced beyond the withheld federate frontier"
+                );
+                let observations = observations.lock().unwrap();
+                let message = observations
+                    .iter()
+                    .position(|(label, _)| *label == "message")
+                    .unwrap();
+                let later = observations
+                    .iter()
+                    .position(|(label, _)| *label == "later")
+                    .unwrap();
+                assert!(
+                    message < later,
+                    "message must be observed before later-tag work: {observations:?}"
+                );
+            },
         );
     }
 

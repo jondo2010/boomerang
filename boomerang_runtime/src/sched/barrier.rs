@@ -538,6 +538,7 @@ mod tests {
         assert_provisional_request(&upstream_rx, upstream_tag);
 
         barrier.release_tag(upstream_tag);
+        queue_interruption(&event_tx);
         assert!(barrier
             .acquire_tag(downstream_tag, this_enclave, &event_rx)
             .unwrap()

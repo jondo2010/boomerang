@@ -420,7 +420,7 @@ fn unknown_federate_errors_are_failure_atomic() {
 }
 
 #[test]
-fn authenticated_origin_mismatches_are_failure_atomic() {
+fn bound_origin_mismatches_are_failure_atomic() {
     let mut rti = rti_with_edge(WireDelay::ZERO);
     let before = snapshot(&rti);
 
@@ -434,7 +434,7 @@ fn authenticated_origin_mismatches_are_failure_atomic() {
         ),
         Err(RtiError::FederateIdentityMismatch {
             event: "NET",
-            authenticated_federate: fed("source"),
+            bound_federate: fed("source"),
             claimed_federate: fed("target"),
         })
     );
@@ -453,7 +453,7 @@ fn authenticated_origin_mismatches_are_failure_atomic() {
         ),
         Err(RtiError::FederateIdentityMismatch {
             event: "MSG",
-            authenticated_federate: fed("target"),
+            bound_federate: fed("target"),
             claimed_federate: fed("source"),
         })
     );

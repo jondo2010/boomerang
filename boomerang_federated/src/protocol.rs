@@ -3,8 +3,9 @@ use std::fmt;
 /// Stable identity of one participant in a federation.
 ///
 /// A federate is a topology vertex with its own protocol connection and logical-time state. This
-/// identifier authenticates that connection and addresses `NET`, `LTC`, `TAG`, message source,
-/// and message target state. One federate can own many cross-federate endpoints.
+/// identifier is self-declared in a trusted `Hello`, binds that connection, and addresses `NET`,
+/// `LTC`, `TAG`, message source, and message target state. Authentication is deferred. One
+/// federate can own many cross-federate endpoints.
 ///
 /// This is distinct from [`EndpointId`], which identifies one routed logical connection between
 /// federates rather than either participant.

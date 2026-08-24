@@ -35,7 +35,8 @@ The TCP runner serializes the same frames as JSON inside a length-delimited
 stream: a big-endian `u32` length followed by that many encoded bytes. TCP
 connection order does not establish identity. The server accepts the static
 number of sockets, reads their first frames concurrently, and keys each socket
-by the federate id declared in `Hello`.
+by the federate id self-declared in `Hello`. The static runner trusts that
+declaration and binds later frames to it; authentication is deferred.
 
 ```mermaid
 sequenceDiagram
@@ -249,11 +250,13 @@ no-future and `Stop` so that one failing scheduler does not strand its peers.
 
 ## Failure Semantics
 
-The session authenticates every frame with the persistent endpoint that
-supplied it. After validating the complete endpoint set, it resolves each
-transport participant once and carries both its stable `FederateId` and private
-dense key. The RTI's validated-event boundary still compares every claimed
-stable identity and route before mutation. It rejects a missing, duplicate,
+The session binds every frame to the persistent endpoint that supplied it.
+After validating the complete endpoint set, it resolves each transport
+participant's trusted, self-declared identity once and carries both its stable
+`FederateId` and private dense key. This is identity consistency, not
+authentication; authentication remains deferred. The RTI's validated-event
+boundary still compares every claimed stable identity and route before
+mutation. It rejects a missing, duplicate,
 unknown, or mismatched `Hello`; a non-`Hello` first frame; illegal tag sentinels
 or negative finite tags; a route not present in the topology; an id that does
 not match its transport endpoint; a duplicate post-start `Hello`; a regression

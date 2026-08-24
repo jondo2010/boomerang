@@ -64,7 +64,7 @@ pub enum SessionError {
     Shutdown(String),
 }
 
-/// One authenticated transport participant resolved against the RTI graph.
+/// One transport participant bound to its trusted, self-declared identity in the RTI graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionParticipant {
     /// Stable identity retained for errors and sink addressing.
@@ -1088,8 +1088,7 @@ mod tests {
             },
         )
         .await;
-        let expected_message =
-            "NET identified federate `sink`, but authenticated endpoint is `source`";
+        let expected_message = "NET identified federate `sink`, but bound endpoint is `source`";
         assert_eq!(
             recv_client_frame(&mut source_client).await,
             RtiToFederate::Error {

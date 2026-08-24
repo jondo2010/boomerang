@@ -383,24 +383,42 @@ fn execute_connected_static_federation(
     let mut services = BTreeMap::new();
     let mut scheduler_inputs = Vec::new();
     for (federate_id, enclaves) in runtimes {
-        let connected = clients.remove(&federate_id).ok_or_else(|| {
-            bridge_error(format!(
-                "missing connected client for federate '{federate_id}'"
-            ))
-        })?;
+        let connected = match clients.remove(&federate_id) {
+            Some(connected) => connected,
+            None => {
+                let error = bridge_error(format!(
+                    "missing connected client for federate '{federate_id}'"
+                ));
+                cleanup_started_execution(tokio_runtime, services, session_handle, Vec::new());
+                return Err(error);
+            }
+        };
         let layout = FederateCoordinationLayout::new(enclaves.keys());
         let wakes = enclaves
             .iter()
             .map(|(key, enclave)| (key, enclave.create_send_context(key)))
             .collect();
-        let coordinator = RtiLogicalTimeCoordinator::new(
+        let coordinator = match RtiLogicalTimeCoordinator::new(
             federate_id.clone(),
             connected.client,
             connected.routes,
             connected.faults,
-        )?;
-        let service = FederateCoordinationService::spawn(coordinator, layout, wakes)
-            .map_err(|source| bridge_error(source.to_string()))?;
+        ) {
+            Ok(coordinator) => coordinator,
+            Err(error) => {
+                let error = error.into();
+                cleanup_started_execution(tokio_runtime, services, session_handle, Vec::new());
+                return Err(error);
+            }
+        };
+        let service = match FederateCoordinationService::spawn(coordinator, layout, wakes) {
+            Ok(service) => service,
+            Err(source) => {
+                let error = bridge_error(source.to_string());
+                cleanup_started_execution(tokio_runtime, services, session_handle, Vec::new());
+                return Err(error);
+            }
+        };
         for (enclave_key, enclave) in enclaves {
             scheduler_inputs.push((
                 federate_id.clone(),
@@ -445,11 +463,7 @@ fn execute_connected_static_federation(
             }) {
             Ok(handle) => handle,
             Err(source) => {
-                force_stop_services(&services);
-                session_handle.abort();
-                for handle in handles {
-                    let _ = handle.join();
-                }
+                cleanup_started_execution(tokio_runtime, services, session_handle, handles);
                 return Err(StaticFederationRunnerError::SchedulerThreadSpawn {
                     federate_id,
                     source,
@@ -529,9 +543,12 @@ fn execute_connected_static_federation(
     }
 
     if let Some(error) = first_error {
+        let _ = tokio_runtime.block_on(session_handle);
         return Err(error);
     }
     if let Some(error) = service_error {
+        session_handle.abort();
+        let _ = tokio_runtime.block_on(session_handle);
         return Err(bridge_error(error));
     }
 
@@ -569,6 +586,23 @@ fn force_stop_services(
 ) {
     for service in services.values() {
         let _ = service.force_stop();
+    }
+}
+
+fn cleanup_started_execution(
+    tokio_runtime: &tokio::runtime::Runtime,
+    services: BTreeMap<FederateId, crate::federate_coordination::FederateCoordinationService>,
+    session_handle: SessionHandle,
+    scheduler_handles: Vec<SchedulerThreadHandle>,
+) {
+    force_stop_services(&services);
+    session_handle.abort();
+    for handle in scheduler_handles {
+        let _ = handle.join();
+    }
+    let _ = tokio_runtime.block_on(session_handle);
+    for service in services.into_values() {
+        let _ = service.join();
     }
 }
 
@@ -1730,6 +1764,83 @@ mod tests {
             Err(StaticFederationRunnerError::Bridge { .. })
         ));
         assert!(cleaned.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn setup_error_aborts_rti_session_before_returning() {
+        struct DropSignal(Arc<AtomicBool>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let started = FederateId::new("a-started");
+        let missing = FederateId::new("b-missing");
+        let tokio_runtime = build_tokio_runtime(1).unwrap();
+        let (client_transport, mut rti_transport) = in_memory_transport_pair();
+        let session_dropped = Arc::new(AtomicBool::new(false));
+        let drop_signal = DropSignal(Arc::clone(&session_dropped));
+        let expected_started = started.clone();
+        let session_handle = tokio_runtime.spawn(async move {
+            let _drop_signal = drop_signal;
+            assert!(matches!(
+                recv_federate_frame(&mut rti_transport).await,
+                crate::FederateToRti::Hello { federate_id }
+                    if federate_id == expected_started
+            ));
+            send_federate_frame(
+                &mut rti_transport,
+                crate::RtiToFederate::Start {
+                    start_unix_epoch_ns: 0,
+                },
+            )
+            .await;
+            std::future::pending::<Result<(), SessionError>>().await
+        });
+        let (sink, stream) = client_transport;
+        let client = tokio_runtime
+            .block_on(FederateProtocolClient::connect(
+                started.clone(),
+                sink,
+                stream,
+            ))
+            .unwrap();
+
+        let mut started_enclaves = tinymap::TinyMap::new();
+        started_enclaves.insert(boomerang_runtime::Enclave::default());
+        let mut missing_enclaves = tinymap::TinyMap::new();
+        missing_enclaves.insert(boomerang_runtime::Enclave::default());
+        let runtimes = BTreeMap::from([
+            (started.clone(), started_enclaves),
+            (missing, missing_enclaves),
+        ]);
+        let clients = BTreeMap::from([(
+            started,
+            ConnectedFederate {
+                client,
+                routes: Vec::new(),
+                faults: crate::FederatedFaultState::default(),
+            },
+        )]);
+
+        let result = execute_connected_static_federation(
+            runtimes,
+            boomerang_runtime::Config::default().with_fast_forward(true),
+            &tokio_runtime,
+            session_handle,
+            clients,
+        );
+
+        assert!(matches!(
+            result,
+            Err(StaticFederationRunnerError::Bridge { .. })
+        ));
+        assert!(
+            session_dropped.load(Ordering::SeqCst),
+            "RTI session must be aborted before setup failure returns"
+        );
     }
 
     #[test]

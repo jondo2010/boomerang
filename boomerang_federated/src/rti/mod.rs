@@ -144,11 +144,11 @@ pub enum RtiError {
     TagPredecessorUnderflow { tag: WireTag },
 
     #[error(
-        "{event} identified federate `{claimed_federate}`, but authenticated endpoint is `{authenticated_federate}`"
+        "{event} identified federate `{claimed_federate}`, but bound endpoint is `{bound_federate}`"
     )]
     FederateIdentityMismatch {
         event: &'static str,
-        authenticated_federate: FederateId,
+        bound_federate: FederateId,
         claimed_federate: FederateId,
     },
 
@@ -249,32 +249,32 @@ impl RtiState {
 
     pub fn handle_from(
         &mut self,
-        authenticated_federate: &FederateId,
+        bound_federate: &FederateId,
         message: FederateToRti,
     ) -> Result<Vec<RtiDelivery>, RtiError> {
-        let authenticated_federate = self.resolve_federate(authenticated_federate)?;
-        self.handle_from_key(authenticated_federate, message)
+        let bound_federate = self.resolve_federate(bound_federate)?;
+        self.handle_from_key(bound_federate, message)
     }
 
     pub(crate) fn handle_from_key(
         &mut self,
-        authenticated_federate: FederateKey,
+        bound_federate: FederateKey,
         message: FederateToRti,
     ) -> Result<Vec<RtiDelivery>, RtiError> {
-        let event = self.validate_message(authenticated_federate, message)?;
+        let event = self.validate_message(bound_federate, message)?;
         self.handle_validated(event)
     }
 
     #[cfg(test)]
     fn handle(&mut self, message: FederateToRti) -> Result<Vec<RtiDelivery>, RtiError> {
-        let authenticated_federate = match &message {
+        let bound_federate = match &message {
             FederateToRti::Hello { federate_id }
             | FederateToRti::Net { federate_id, .. }
             | FederateToRti::Ltc { federate_id, .. }
             | FederateToRti::Stop { federate_id } => federate_id.clone(),
             FederateToRti::Msg { source, .. } => source.clone(),
         };
-        self.handle_from(&authenticated_federate, message)
+        self.handle_from(&bound_federate, message)
     }
 
     fn handle_validated(&mut self, event: ResolvedRtiEvent) -> Result<Vec<RtiDelivery>, RtiError> {
@@ -333,19 +333,19 @@ impl RtiState {
 
     fn validate_message(
         &self,
-        authenticated_federate: FederateKey,
+        bound_federate: FederateKey,
         message: FederateToRti,
     ) -> Result<ResolvedRtiEvent, RtiError> {
-        debug_assert!(self.runtime.federates.contains_key(authenticated_federate));
+        debug_assert!(self.runtime.federates.contains_key(bound_federate));
         match message {
             FederateToRti::Hello { federate_id } => {
-                self.validate_identity(authenticated_federate, &federate_id, "Hello")?;
+                self.validate_identity(bound_federate, &federate_id, "Hello")?;
                 Ok(ResolvedRtiEvent::Hello {
-                    federate: authenticated_federate,
+                    federate: bound_federate,
                 })
             }
             FederateToRti::Net { federate_id, tag } => {
-                self.validate_identity(authenticated_federate, &federate_id, "NET")?;
+                self.validate_identity(bound_federate, &federate_id, "NET")?;
                 if tag == WireTag::NEVER || !is_nonnegative_wire_tag(tag) {
                     return Err(RtiError::InvalidTag {
                         event: "NET",
@@ -353,7 +353,7 @@ impl RtiState {
                         tag,
                     });
                 }
-                let state = self.coordination(authenticated_federate);
+                let state = self.coordination(bound_federate);
                 match state.lifecycle {
                     FederateLifecycle::Stopped => Err(RtiError::InvalidLifecycleTransition {
                         federate_id: federate_id.clone(),
@@ -375,15 +375,15 @@ impl RtiState {
                         })
                     }
                     FederateLifecycle::Running { .. } => Ok(ResolvedRtiEvent::Net {
-                        federate: authenticated_federate,
+                        federate: bound_federate,
                         tag,
                     }),
                 }
             }
             FederateToRti::Ltc { federate_id, tag } => {
-                self.validate_identity(authenticated_federate, &federate_id, "LTC")?;
+                self.validate_identity(bound_federate, &federate_id, "LTC")?;
                 Self::validate_finite_tag(&federate_id, "LTC", tag)?;
-                let state = self.coordination(authenticated_federate);
+                let state = self.coordination(bound_federate);
                 if state.is_stopped() {
                     return Err(RtiError::InvalidLifecycleTransition {
                         federate_id: federate_id.clone(),
@@ -399,7 +399,7 @@ impl RtiState {
                     });
                 }
                 Ok(ResolvedRtiEvent::Ltc {
-                    federate: authenticated_federate,
+                    federate: bound_federate,
                     tag,
                 })
             }
@@ -410,10 +410,10 @@ impl RtiState {
                 tag,
                 payload,
             } => {
-                self.validate_identity(authenticated_federate, &source, "MSG")?;
+                self.validate_identity(bound_federate, &source, "MSG")?;
                 let target_key = self.resolve_federate(&target)?;
                 Self::validate_finite_tag(&source, "MSG", tag)?;
-                let source_state = self.coordination(authenticated_federate);
+                let source_state = self.coordination(bound_federate);
                 if source_state.is_stopped() {
                     return Err(RtiError::InvalidLifecycleTransition {
                         federate_id: source.clone(),
@@ -429,7 +429,7 @@ impl RtiState {
                     });
                 };
                 let compiled_endpoint = self.graph.endpoint(endpoint_key);
-                if compiled_endpoint.source != authenticated_federate
+                if compiled_endpoint.source != bound_federate
                     || compiled_endpoint.target != target_key
                 {
                     return Err(RtiError::InvalidRoute {
@@ -439,7 +439,7 @@ impl RtiState {
                     });
                 }
                 Ok(ResolvedRtiEvent::Msg {
-                    source: authenticated_federate,
+                    source: bound_federate,
                     target: target_key,
                     endpoint: endpoint_key,
                     tag,
@@ -447,13 +447,13 @@ impl RtiState {
                 })
             }
             FederateToRti::Stop { federate_id } => {
-                self.validate_identity(authenticated_federate, &federate_id, "Stop")?;
-                let state = self.coordination(authenticated_federate);
+                self.validate_identity(bound_federate, &federate_id, "Stop")?;
+                let state = self.coordination(bound_federate);
                 match state.lifecycle {
                     FederateLifecycle::Running {
                         next_event: NextEvent::NoFuture,
                     } => Ok(ResolvedRtiEvent::Stop {
-                        federate: authenticated_federate,
+                        federate: bound_federate,
                     }),
                     FederateLifecycle::Running { .. } => {
                         Err(RtiError::InvalidLifecycleTransition {
@@ -474,17 +474,17 @@ impl RtiState {
 
     fn validate_identity(
         &self,
-        authenticated_federate: FederateKey,
+        bound_federate: FederateKey,
         claimed_federate: &FederateId,
         event: &'static str,
     ) -> Result<(), RtiError> {
-        let authenticated_id = self.graph.federate_id(authenticated_federate);
-        if authenticated_id == claimed_federate {
+        let bound_id = self.graph.federate_id(bound_federate);
+        if bound_id == claimed_federate {
             Ok(())
         } else {
             Err(RtiError::FederateIdentityMismatch {
                 event,
-                authenticated_federate: authenticated_id.clone(),
+                bound_federate: bound_id.clone(),
                 claimed_federate: claimed_federate.clone(),
             })
         }

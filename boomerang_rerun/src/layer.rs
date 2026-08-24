@@ -195,7 +195,7 @@ struct ResolvedPath {
     path: String,
     entity_label: Option<String>,
     name_series: bool,
-    series: SeriesKind,
+    series: Option<SeriesKind>,
 }
 
 #[derive(Clone, Copy)]
@@ -401,11 +401,11 @@ impl RerunLayer {
         path: &str,
         entity_label: Option<&str>,
         name_series: bool,
-        series: SeriesKind,
+        series: Option<SeriesKind>,
         time: TimePoint,
         value: &dyn rerun::AsComponents,
     ) {
-        if let (true, Some(entity_label)) = (name_series, entity_label) {
+        if let (true, Some(entity_label), Some(series)) = (name_series, entity_label, series) {
             let name = compact_series_name(entity_label, series);
             if let Err(error) = self
                 .recording
@@ -481,7 +481,7 @@ impl RerunLayer {
         federate: Option<&str>,
         enclave: Option<&str>,
         selector: Option<EntitySelector>,
-        series: SeriesKind,
+        series: Option<SeriesKind>,
         event: &'static str,
     ) -> ResolvedPath {
         let registered = enclave.and_then(|enclave| {
@@ -493,7 +493,7 @@ impl RerunLayer {
                         (
                             entity.path.clone(),
                             entity.label.clone(),
-                            entity.claim_series(series.bit()),
+                            series.is_some_and(|series| entity.claim_series(series.bit())),
                         )
                     })
             })
@@ -696,7 +696,7 @@ where
                 context.federate(),
                 Some(context.enclave()),
                 selector,
-                SeriesKind::Event(event),
+                Some(SeriesKind::Event(event)),
                 event.as_str(),
             );
             let phase = match &kind {
@@ -711,7 +711,7 @@ where
                 path: resolved_path.path,
                 entity_label: resolved_path.entity_label,
                 name_series: resolved_path.name_series,
-                series: resolved_path.series,
+                series: SeriesKind::Event(event),
                 timing: Mutex::new(SpanTiming::default()),
                 kind,
             };
@@ -980,7 +980,7 @@ where
                         &span.path,
                         span.entity_label.as_deref(),
                         span.name_series,
-                        span.series,
+                        Some(span.series),
                         span.time,
                         &Combined::new([&payload, &scalar]),
                     );
@@ -1055,11 +1055,11 @@ impl RerunLayer {
                         federate,
                         Some(enclave),
                         action_key.parse().ok().map(EntitySelector::Action),
-                        if accepted_logical {
+                        Some(if accepted_logical {
                             SeriesKind::PropagationReceive
                         } else {
                             SeriesKind::Event(event)
-                        },
+                        }),
                         event_name,
                     );
                     let archetype = if accepted_logical {
@@ -1126,7 +1126,7 @@ impl RerunLayer {
                             federate,
                             Some(enclave),
                             Some(EntitySelector::Scheduler),
-                            SeriesKind::Event(event),
+                            None,
                             name,
                         ),
                         common(
@@ -1227,7 +1227,8 @@ impl RerunLayer {
                         federate,
                         Some(enclave),
                         action_key.parse().ok().map(EntitySelector::Action),
-                        SeriesKind::Event(event),
+                        matches!(outcome, TraceOutcome::Startup | TraceOutcome::Scheduled)
+                            .then_some(SeriesKind::Event(event)),
                         name,
                     ),
                     payload,
@@ -1301,7 +1302,7 @@ impl RerunLayer {
                         federate,
                         Some(enclave),
                         port_key.parse().ok().map(EntitySelector::Port),
-                        SeriesKind::Event(event),
+                        None,
                         name,
                     ),
                     payload,
@@ -1345,7 +1346,7 @@ impl RerunLayer {
                         federate,
                         Some(enclave),
                         Some(EntitySelector::Scheduler),
-                        SeriesKind::Event(event),
+                        None,
                         name,
                     ),
                     payload,
@@ -1428,7 +1429,7 @@ impl RerunLayer {
                         federate,
                         Some(enclave),
                         Some(EntitySelector::Scheduler),
-                        SeriesKind::Event(event),
+                        (event == TraceEvent::TagComplete).then_some(SeriesKind::Event(event)),
                         name,
                     ),
                     payload,

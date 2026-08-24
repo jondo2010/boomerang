@@ -342,8 +342,11 @@ impl SessionState {
     }
 
     pub(super) fn disable_on_error(&self, error: &dyn std::fmt::Display) {
-        if self.inner.enabled.swap(false, Ordering::AcqRel) {
-            let _ = self.inner.first_error.set(error.to_string());
+        if !self.inner.enabled.load(Ordering::Acquire) {
+            return;
+        }
+        if self.inner.first_error.set(error.to_string()).is_ok() {
+            self.inner.enabled.store(false, Ordering::Release);
             tracing::callsite::rebuild_interest_cache();
             tracing::warn!(
                 target: "boomerang::rerun_internal",

@@ -119,12 +119,14 @@ Cross-Federate boundaries produce an `EndpointId`, analyzed graph edge, encoder,
 inbound decoder, and target action route. No declarative topology manifest crosses into the runtime
 phase, and no compatibility constructor can build an RTI from one.
 
-The aggregate `FederatedRuntimeConnections` value is created during federation lowering and retained
-inside `StaticFederationRuntime`. After runtime actions are lowered, inbound endpoint factories
-temporarily take and mutate it to attach target Enclave contexts and action references. Finalization
-then consumes it, pairing each owned Enclave map with one `FederateRuntimeBridge`. Enclaves are
-allocated directly into their owning Federate's dense map, while owner-qualified aliases pair the
-`FederateId` with the local `EnclaveKey`; there is no parallel placement index to validate or retain.
+The final `RtiGraph` and aggregate `FederatedRuntimeConnections` value are created during federation
+lowering and retained together in builder-private `LoweredFederationRuntime` state. After runtime
+actions are lowered, inbound endpoint factories temporarily take and mutate the connections to
+attach target Enclave contexts and action references. Finalization consumes that private state and
+constructs `RuntimeFederation`, pairing each owned Enclave map with one `FederateRuntimeBridge`
+while keeping the immutable graph separate. Enclaves are allocated directly into their owning
+Federate's dense map, while owner-qualified aliases pair the `FederateId` with the local
+`EnclaveKey`; there is no parallel placement index to validate or retain.
 
 An unowned, reaction-free assembly-root partition may exist transiently while the builder lowers a
 federated declaration graph. It is scaffolding rather than executable Federate state and is

@@ -15,8 +15,7 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 
 use super::entities::{
-    bounded_fragment, compact_runtime_key, escape_entity_segment, EntitySelector,
-    RegistrationSnapshot,
+    bounded_fragment, escape_entity_segment, EntitySelector, RegistrationSnapshot,
 };
 use super::session::SessionState;
 
@@ -135,6 +134,7 @@ struct SpanState {
     path: String,
     entity_label: Option<String>,
     name_series: bool,
+    series: SeriesKind,
     time: TimePoint,
     timing: Mutex<SpanTiming>,
     kind: SpanKind,
@@ -195,6 +195,7 @@ struct ResolvedPath {
     path: String,
     entity_label: Option<String>,
     name_series: bool,
+    series: SeriesKind,
 }
 
 #[derive(Clone, Copy)]
@@ -208,6 +209,26 @@ impl SeriesKind {
         match self {
             Self::Event(event) => event as u8 - 1,
             Self::PropagationReceive => 14,
+        }
+    }
+
+    fn compact_label(self) -> &'static str {
+        match self {
+            Self::Event(TraceEvent::SchedulerThread) => "scheduler_thread",
+            Self::Event(TraceEvent::AsyncIngress) => "ingress",
+            Self::Event(TraceEvent::TagProcess) => "tag",
+            Self::Event(TraceEvent::ReactionExecute) => "exec",
+            Self::Event(TraceEvent::ActionSchedule) => "schedule",
+            Self::Event(TraceEvent::PortWrite) => "port_write",
+            Self::Event(TraceEvent::PropagationSend) => "send",
+            Self::Event(TraceEvent::FrontierPublish) => "frontier_publish",
+            Self::Event(TraceEvent::CoordinationWait) => "coord wait",
+            Self::Event(TraceEvent::CoordinationGrant) => "coordination_grant",
+            Self::Event(TraceEvent::TagRelease) => "tag_release",
+            Self::Event(TraceEvent::TagComplete) => "tag done",
+            Self::Event(TraceEvent::Shutdown) => "shutdown",
+            Self::Event(TraceEvent::Diagnostic) => "diagnostic",
+            Self::PropagationReceive => "recv",
         }
     }
 }
@@ -380,11 +401,12 @@ impl RerunLayer {
         path: &str,
         entity_label: Option<&str>,
         name_series: bool,
+        series: SeriesKind,
         time: TimePoint,
         value: &dyn rerun::AsComponents,
     ) {
-        if name_series {
-            let name = compact_series_name(path, entity_label);
+        if let (true, Some(entity_label)) = (name_series, entity_label) {
+            let name = compact_series_name(entity_label, series);
             if let Err(error) = self
                 .recording
                 .log_static(path, &rerun::SeriesPoints::new().with_names([name]))
@@ -481,6 +503,7 @@ impl RerunLayer {
                 path: format!("{path}/{}", escape_entity_segment(event)),
                 entity_label: Some(label),
                 name_series,
+                series,
             }
         } else {
             let root = match (federate, enclave) {
@@ -498,6 +521,7 @@ impl RerunLayer {
                 path: format!("{root}/{}", escape_entity_segment(event)),
                 entity_label: None,
                 name_series: false,
+                series,
             }
         }
     }
@@ -687,6 +711,7 @@ where
                 path: resolved_path.path,
                 entity_label: resolved_path.entity_label,
                 name_series: resolved_path.name_series,
+                series: resolved_path.series,
                 timing: Mutex::new(SpanTiming::default()),
                 kind,
             };
@@ -955,6 +980,7 @@ where
                         &span.path,
                         span.entity_label.as_deref(),
                         span.name_series,
+                        span.series,
                         span.time,
                         &Combined::new([&payload, &scalar]),
                     );
@@ -1451,6 +1477,7 @@ impl RerunLayer {
                 &path.path,
                 path.entity_label.as_deref(),
                 path.name_series,
+                path.series,
                 time,
                 &Combined::new([&payload, &measure]),
             );
@@ -1528,30 +1555,14 @@ fn saturating_i64(value: u128) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
-fn compact_series_name(path: &str, entity_label: Option<&str>) -> String {
-    let (entity, event) = path.rsplit_once('/').unwrap_or((path, path));
-    let entity = entity_label.map(str::to_owned).unwrap_or_else(|| {
-        let leaf = entity.rsplit('/').next().unwrap_or(entity);
-        compact_runtime_key(leaf)
-    });
+fn compact_series_name(entity_label: &str, series: SeriesKind) -> String {
     bounded_fragment(
-        &format!("{entity} · {}", bounded_fragment(compact_event(event), 16)),
+        &format!(
+            "{entity_label} · {}",
+            bounded_fragment(series.compact_label(), 16)
+        ),
         64,
     )
-}
-
-fn compact_event(event: &str) -> &str {
-    match event {
-        "reaction_execute" => "exec",
-        "propagation_send" => "send",
-        "propagation_receive" => "recv",
-        "action_schedule" => "schedule",
-        "async_ingress" => "ingress",
-        "tag_process" => "tag",
-        "tag_complete" => "tag done",
-        "coordination_wait" => "coord wait",
-        other => other,
-    }
 }
 fn with_span_state<S, T>(
     id: &Id,

@@ -6,6 +6,8 @@
 
 mod action;
 mod assembly;
+/// Target-neutral application compiler models.
+pub mod compiler;
 mod connection;
 #[cfg(feature = "federated")]
 mod federation;

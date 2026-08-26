@@ -38,7 +38,7 @@ pub struct Action {
     pub(super) reactor: ReactorId,
     /// Action category.
     pub(super) kind: ActionKind,
-    /// Position within the owning reactor's action declarations.
+    /// Zero-based contiguous ordinal within the owning reactor's action declarations.
     pub(super) declaration_position: u32,
     /// Optional modal scope.
     pub(super) mode: Option<ModeId>,
@@ -60,7 +60,7 @@ impl Action {
         self.kind
     }
 
-    /// Returns the position within the owning reactor's action declarations.
+    /// Returns the zero-based declaration ordinal within the owning reactor's actions.
     pub fn declaration_position(&self) -> u32 {
         self.declaration_position
     }

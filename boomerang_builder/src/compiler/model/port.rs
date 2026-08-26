@@ -21,7 +21,7 @@ pub struct Port {
     pub(super) direction: PortDirection,
     /// Optional structural bank membership.
     pub(super) bank: Option<BankMember>,
-    /// Position within the owning reactor's port declarations.
+    /// Zero-based contiguous ordinal within the owning reactor's port declarations.
     pub(super) declaration_position: u32,
     /// Optional modal scope.
     pub(super) mode: Option<ModeId>,
@@ -48,7 +48,7 @@ impl Port {
         self.bank
     }
 
-    /// Returns the position within the owning reactor's port declarations.
+    /// Returns the zero-based declaration ordinal within the owning reactor's ports.
     pub fn declaration_position(&self) -> u32 {
         self.declaration_position
     }

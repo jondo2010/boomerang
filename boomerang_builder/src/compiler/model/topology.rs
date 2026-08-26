@@ -306,31 +306,150 @@ where
         })
 }
 
-fn validate_child(
+fn relative_segments<'a>(
+    child: &'a StablePath,
+    owner: &StablePath,
+) -> Option<&'a [StablePathSegment]> {
+    child.segments().strip_prefix(owner.segments())
+}
+
+fn validate_name_child(
     child: &(impl std::ops::Deref<Target = StablePath> + fmt::Display),
     owner: &StablePath,
     kind: &'static str,
 ) -> Result<(), TopologyBuildError> {
     let path: &StablePath = child;
-    let immediate_child = path.parent().as_ref() == Some(owner);
-    let typed_suffix_child = match (kind, path.segments().last()) {
-        ("reactor" | "port", Some(StablePathSegment::BankIndex(_)))
-        | ("reaction", Some(StablePathSegment::GeneratedOrdinal(_))) => {
-            path.parent()
-                .and_then(|named_path| named_path.parent())
-                .as_ref()
-                == Some(owner)
-        }
-        _ => false,
-    };
-    if immediate_child || typed_suffix_child {
+    if matches!(
+        relative_segments(path, owner),
+        Some([StablePathSegment::Name(_)])
+    ) {
         Ok(())
     } else {
         Err(invalid_ownership(
             child,
-            format!("{kind} path is not an immediate child of declared owner '{owner}'"),
+            format!("{kind} path must be one named child of declared owner '{owner}'"),
         ))
     }
+}
+
+/// Collected structural members belonging to one bank declaration.
+struct BankFamily {
+    /// Total declared by every member of the family.
+    total: u32,
+    /// Bank indices present in the topology.
+    indices: BTreeSet<u32>,
+}
+
+fn validate_bank_child(
+    child: &(impl std::ops::Deref<Target = StablePath> + fmt::Display),
+    owner: &StablePath,
+    bank: Option<BankMember>,
+    kind: &'static str,
+) -> Result<Option<(StablePath, BankMember)>, TopologyBuildError> {
+    let path: &StablePath = child;
+    match (relative_segments(path, owner), bank) {
+        (Some([StablePathSegment::Name(_)]), None) => Ok(None),
+        (
+            Some([StablePathSegment::Name(_), StablePathSegment::BankIndex(path_index)]),
+            Some(member),
+        ) if *path_index == member.index() => Ok(Some((
+            path.parent().expect("bank member has a named base"),
+            member,
+        ))),
+        (Some([StablePathSegment::Name(_)]), Some(_)) => Err(invalid_ownership(
+            child,
+            format!("{kind} bank metadata requires a typed bank suffix"),
+        )),
+        (
+            Some([StablePathSegment::Name(_), StablePathSegment::BankIndex(_)]),
+            None,
+        ) => Err(invalid_ownership(
+            child,
+            format!("{kind} typed bank suffix requires bank metadata"),
+        )),
+        (
+            Some([StablePathSegment::Name(_), StablePathSegment::BankIndex(path_index)]),
+            Some(member),
+        ) => Err(invalid_ownership(
+            child,
+            format!(
+                "{kind} bank suffix index {path_index} does not match metadata index {}",
+                member.index()
+            ),
+        )),
+        _ => Err(invalid_ownership(
+            child,
+            format!(
+                "{kind} path must be owner/name or banked owner/name/#bN for declared owner '{owner}'"
+            ),
+        )),
+    }
+}
+
+fn record_bank_member(
+    families: &mut BTreeMap<StablePath, BankFamily>,
+    base: StablePath,
+    member: BankMember,
+) -> Result<(), TopologyBuildError> {
+    let family = families.entry(base.clone()).or_insert_with(|| BankFamily {
+        total: member.total(),
+        indices: BTreeSet::new(),
+    });
+    if family.total != member.total() {
+        return Err(invalid_ownership(
+            &base,
+            format!(
+                "bank family has inconsistent totals {} and {}",
+                family.total,
+                member.total()
+            ),
+        ));
+    }
+    family.indices.insert(member.index());
+    Ok(())
+}
+
+fn validate_bank_families(
+    families: BTreeMap<StablePath, BankFamily>,
+    ordinary_bases: &BTreeSet<StablePath>,
+) -> Result<(), TopologyBuildError> {
+    for (base, family) in families {
+        if ordinary_bases.contains(&base) {
+            return Err(invalid_ownership(
+                &base,
+                "declaration base cannot be both ordinary and banked",
+            ));
+        }
+        if family.indices.iter().copied().ne(0..family.total) {
+            return Err(invalid_ownership(
+                &base,
+                format!(
+                    "bank family must contain every index from 0 through {}",
+                    family.total - 1
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_declaration_positions(
+    positions: BTreeMap<ReactorId, Vec<u32>>,
+    kind: &'static str,
+) -> Result<(), TopologyBuildError> {
+    for (reactor, mut positions) in positions {
+        positions.sort_unstable();
+        let len = u32::try_from(positions.len()).unwrap_or(u32::MAX);
+        if positions.into_iter().ne(0..len) {
+            return Err(invalid_ownership(
+                &reactor,
+                format!(
+                    "{kind} declaration positions must be unique contiguous ordinals starting at zero"
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn invalid_ownership(entity: &impl fmt::Display, reason: impl Into<String>) -> TopologyBuildError {
@@ -381,12 +500,13 @@ fn validate_modes(
             .as_ref()
             .map(|id| id.path())
             .unwrap_or(mode.reactor.path());
-        if mode.id.path().parent().as_ref() != Some(expected_parent) {
+        if !matches!(
+            relative_segments(mode.id.path(), expected_parent),
+            Some([StablePathSegment::Name(_)])
+        ) {
             return Err(invalid_modal(
                 &mode.id,
-                format!(
-                    "mode path is not an immediate child of declared owner '{expected_parent}'"
-                ),
+                format!("mode path must be one named child of declared owner '{expected_parent}'"),
             ));
         }
         if let Some(parent) = &mode.parent {
@@ -426,6 +546,8 @@ fn validate_reactors(
     enclaves: &BTreeMap<StableEnclaveId, Enclave>,
     placement_groups: &BTreeMap<PlacementGroupId, PlacementGroup>,
 ) -> Result<(), TopologyBuildError> {
+    let mut bank_families = BTreeMap::new();
+    let mut ordinary_bases = BTreeSet::new();
     for reactor in reactors.values() {
         require(components, &reactor.component, &reactor.id, "component")?;
         let owner = reactor
@@ -433,7 +555,12 @@ fn validate_reactors(
             .as_ref()
             .map(|id| id.path())
             .unwrap_or(reactor.component.path());
-        validate_child(&reactor.id, owner, "reactor")?;
+        match validate_bank_child(&reactor.id, owner, reactor.bank, "reactor")? {
+            Some((base, member)) => record_bank_member(&mut bank_families, base, member)?,
+            None => {
+                ordinary_bases.insert(reactor.id.path().clone());
+            }
+        }
         if let Some(parent_id) = &reactor.parent {
             let parent = require(reactors, parent_id, &reactor.id, "reactor")?;
             if reactor.component != parent.component {
@@ -463,6 +590,7 @@ fn validate_reactors(
             }
         }
     }
+    validate_bank_families(bank_families, &ordinary_bases)?;
 
     for reactor in reactors.values() {
         let enclave = require(enclaves, &reactor.enclave, &reactor.id, "enclave")?;
@@ -491,7 +619,7 @@ fn validate_placement_groups(
 ) -> Result<(), TopologyBuildError> {
     for group in groups.values() {
         if let Some(parent) = &group.parent {
-            validate_child(&group.id, parent.path(), "placement group")?;
+            validate_name_child(&group.id, parent.path(), "placement group")?;
             require(groups, parent, &group.id, "placement group")?;
         }
     }
@@ -534,12 +662,17 @@ fn validate_actions(
     reactors: &BTreeMap<ReactorId, Reactor>,
     modes: &BTreeMap<ModeId, Mode>,
 ) -> Result<(), TopologyBuildError> {
+    let mut positions = BTreeMap::<ReactorId, Vec<u32>>::new();
     for action in actions.values() {
-        validate_child(&action.id, action.reactor.path(), "action")?;
+        validate_name_child(&action.id, action.reactor.path(), "action")?;
         require(reactors, &action.reactor, &action.id, "reactor")?;
         validate_mode_owner(action.mode.as_ref(), &action.reactor, modes, &action.id)?;
+        positions
+            .entry(action.reactor.clone())
+            .or_default()
+            .push(action.declaration_position);
     }
-    Ok(())
+    validate_declaration_positions(positions, "action")
 }
 
 fn validate_ports(
@@ -547,12 +680,25 @@ fn validate_ports(
     reactors: &BTreeMap<ReactorId, Reactor>,
     modes: &BTreeMap<ModeId, Mode>,
 ) -> Result<(), TopologyBuildError> {
+    let mut bank_families = BTreeMap::new();
+    let mut ordinary_bases = BTreeSet::new();
+    let mut positions = BTreeMap::<ReactorId, Vec<u32>>::new();
     for port in ports.values() {
-        validate_child(&port.id, port.reactor.path(), "port")?;
+        match validate_bank_child(&port.id, port.reactor.path(), port.bank, "port")? {
+            Some((base, member)) => record_bank_member(&mut bank_families, base, member)?,
+            None => {
+                ordinary_bases.insert(port.id.path().clone());
+            }
+        }
         require(reactors, &port.reactor, &port.id, "reactor")?;
         validate_mode_owner(port.mode.as_ref(), &port.reactor, modes, &port.id)?;
+        positions
+            .entry(port.reactor.clone())
+            .or_default()
+            .push(port.declaration_position);
     }
-    Ok(())
+    validate_bank_families(bank_families, &ordinary_bases)?;
+    validate_declaration_positions(positions, "port")
 }
 
 fn validate_connections(
@@ -595,8 +741,30 @@ fn validate_reactions(
     ports: &BTreeMap<PortId, Port>,
     modes: &BTreeMap<ModeId, Mode>,
 ) -> Result<(), TopologyBuildError> {
+    let mut generated_families = BTreeMap::<StablePath, BTreeSet<u32>>::new();
     for reaction in reactions.values() {
-        validate_child(&reaction.id, reaction.reactor.path(), "reaction")?;
+        let path = reaction.id.path();
+        match relative_segments(path, reaction.reactor.path()) {
+            Some([StablePathSegment::Name(_)]) => {}
+            Some([StablePathSegment::GeneratedOrdinal(ordinal)]) => {
+                generated_families
+                    .entry(reaction.reactor.path().clone())
+                    .or_default()
+                    .insert(*ordinal);
+            }
+            Some([StablePathSegment::Name(_), StablePathSegment::GeneratedOrdinal(ordinal)]) => {
+                generated_families
+                    .entry(path.parent().expect("named generated reaction has a base"))
+                    .or_default()
+                    .insert(*ordinal);
+            }
+            _ => {
+                return Err(invalid_ownership(
+                    &reaction.id,
+                    "reaction path must be owner/name, owner/#gN, or owner/name/#gN",
+                ));
+            }
+        }
         require(reactors, &reaction.reactor, &reaction.id, "reactor")?;
 
         let mut targets = BTreeSet::new();
@@ -679,6 +847,15 @@ fn validate_reactions(
                 modes,
                 &reaction.id,
             )?;
+        }
+    }
+    for (base, ordinals) in generated_families {
+        let len = u32::try_from(ordinals.len()).unwrap_or(u32::MAX);
+        if ordinals.iter().copied().ne(0..len) {
+            return Err(invalid_ownership(
+                &base,
+                "generated reaction ordinals must be contiguous starting at zero",
+            ));
         }
     }
     Ok(())
@@ -1288,60 +1465,58 @@ mod tests {
     }
 
     #[test]
-    fn bank_metadata_is_validated_and_round_trips_without_mutating_accepted_state() {
-        let mut builder = ApplicationTopologyBuilder::new("vehicle").unwrap();
-        let component: ComponentInstanceId = id("vehicle/sensors");
-        let root: ReactorId = id("vehicle/sensors/#b1");
-        let enclave: StableEnclaveId = id("vehicle/enclave");
-        builder
-            .add_component(ComponentInstance::new(component.to_string(), "sensor.v1").unwrap())
-            .unwrap();
-        let accepted = crate::compiler::BankMember::new(1, 3).unwrap();
-        builder
-            .add_reactor(Reactor::new(
-                root.clone(),
-                component,
-                None,
-                Some(accepted),
-                enclave.clone(),
-                None,
-                None,
-            ))
-            .unwrap();
-        let port: PortId = id("vehicle/sensors/#b1/readings/#b2");
-        let port_bank = crate::compiler::BankMember::new(2, 4).unwrap();
-        builder
-            .add_port(
-                port.clone(),
-                root.clone(),
-                PortDirection::Output,
-                Some(port_bank),
-                7,
-                None,
-            )
-            .unwrap();
-        builder.add_enclave(enclave, root.clone()).unwrap();
-
-        assert!(crate::compiler::BankMember::new(0, 0).is_err());
-        assert!(crate::compiler::BankMember::new(3, 3).is_err());
-
-        let topology = builder.finish().unwrap();
-        let reactor_bank = topology.reactor(&root).unwrap().bank().unwrap();
-        assert_eq!((reactor_bank.index(), reactor_bank.total()), (1, 3));
-        let port_bank = topology.port(&port).unwrap().bank().unwrap();
-        assert_eq!((port_bank.index(), port_bank.total()), (2, 4));
+    fn bank_member_rejects_empty_and_out_of_range_values() {
+        assert_eq!(
+            crate::compiler::BankMember::new(0, 0),
+            Err(crate::compiler::InvalidBankMember::Empty)
+        );
+        assert_eq!(
+            crate::compiler::BankMember::new(3, 3),
+            Err(crate::compiler::InvalidBankMember::IndexOutOfBounds { index: 3, total: 3 })
+        );
     }
 
     #[test]
-    fn port_declaration_position_round_trips() {
-        let (mut builder, reactor, _) = base("vehicle", "vehicle/root", "vehicle/enclave");
-        let port: PortId = id("vehicle/root/readings");
-        builder
-            .add_port(port.clone(), reactor, PortDirection::Output, None, 17, None)
-            .unwrap();
-
+    fn reactor_and_port_bank_metadata_round_trip() {
+        let (mut builder, root, enclave) = base("vehicle", "vehicle/root", "vehicle/enclave");
+        let mut reactors = Vec::new();
+        let mut ports = Vec::new();
+        for index in 0..2 {
+            let reactor: ReactorId = id(&format!("vehicle/root/sensors/#b{index}"));
+            builder
+                .add_reactor(Reactor::new(
+                    reactor.clone(),
+                    id("vehicle"),
+                    Some(root.clone()),
+                    Some(crate::compiler::BankMember::new(index, 2).unwrap()),
+                    enclave.clone(),
+                    None,
+                    None,
+                ))
+                .unwrap();
+            reactors.push(reactor);
+            let port: PortId = id(&format!("vehicle/root/readings/#b{index}"));
+            builder
+                .add_port(
+                    port.clone(),
+                    root.clone(),
+                    PortDirection::Output,
+                    Some(crate::compiler::BankMember::new(index, 2).unwrap()),
+                    index,
+                    None,
+                )
+                .unwrap();
+            ports.push(port);
+        }
         let topology = builder.finish().unwrap();
-        assert_eq!(topology.port(&port).unwrap().declaration_position(), 17);
+        for (index, reactor) in reactors.iter().enumerate() {
+            let bank = topology.reactor(reactor).unwrap().bank().unwrap();
+            assert_eq!((bank.index(), bank.total()), (index as u32, 2));
+        }
+        for (index, port) in ports.iter().enumerate() {
+            let bank = topology.port(port).unwrap().bank().unwrap();
+            assert_eq!((bank.index(), bank.total()), (index as u32, 2));
+        }
     }
 
     #[test]
@@ -1447,6 +1622,358 @@ mod tests {
                 ReactionOptions::default(),
             )
             .unwrap();
+
+        assert!(builder.finish().is_ok());
+    }
+
+    #[test]
+    fn bank_identity_index_must_match_metadata() {
+        let (mut builder, reactor, _) = base("vehicle", "vehicle/root", "vehicle/enclave");
+        builder
+            .add_port(
+                id("vehicle/root/readings/#b1"),
+                reactor,
+                PortDirection::Output,
+                Some(crate::compiler::BankMember::new(0, 2).unwrap()),
+                0,
+                None,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            builder.finish(),
+            Err(TopologyBuildError::InvalidOwnership { .. })
+        ));
+    }
+
+    #[test]
+    fn bank_metadata_requires_a_typed_bank_suffix() {
+        let (mut builder, reactor, _) = base("vehicle", "vehicle/root", "vehicle/enclave");
+        builder
+            .add_port(
+                id("vehicle/root/readings"),
+                reactor,
+                PortDirection::Output,
+                Some(crate::compiler::BankMember::new(0, 1).unwrap()),
+                0,
+                None,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            builder.finish(),
+            Err(TopologyBuildError::InvalidOwnership { .. })
+        ));
+    }
+
+    #[test]
+    fn typed_bank_suffix_requires_bank_metadata() {
+        let (mut builder, reactor, _) = base("vehicle", "vehicle/root", "vehicle/enclave");
+        builder
+            .add_port(
+                id("vehicle/root/readings/#b0"),
+                reactor,
+                PortDirection::Output,
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            builder.finish(),
+            Err(TopologyBuildError::InvalidOwnership { .. })
+        ));
+    }
+
+    #[test]
+    fn bank_family_totals_must_be_consistent() {
+        let (mut builder, reactor, _) = base("vehicle", "vehicle/root", "vehicle/enclave");
+        for (index, total) in [(0, 2), (1, 3)] {
+            builder
+                .add_port(
+                    id(&format!("vehicle/root/readings/#b{index}")),
+                    reactor.clone(),
+                    PortDirection::Output,
+                    Some(crate::compiler::BankMember::new(index, total).unwrap()),
+                    index,
+                    None,
+                )
+                .unwrap();
+        }
+
+        assert!(matches!(
+            builder.finish(),
+            Err(TopologyBuildError::InvalidOwnership { .. })
+        ));
+    }
+
+    #[test]
+    fn bank_family_must_contain_every_declared_member() {
+        let (mut builder, root, enclave) = base("vehicle", "vehicle/root", "vehicle/enclave");
+        builder
+            .add_reactor(Reactor::new(
+                id("vehicle/root/sensors/#b0"),
+                id("vehicle"),
+                Some(root),
+                Some(crate::compiler::BankMember::new(0, 2).unwrap()),
+                enclave,
+                None,
+                None,
+            ))
+            .unwrap();
+
+        assert!(matches!(
+            builder.finish(),
+            Err(TopologyBuildError::InvalidOwnership { .. })
+        ));
+    }
+
+    #[test]
+    fn ordinary_entity_cannot_share_a_banked_declaration_base() {
+        let (mut builder, reactor, _) = base("vehicle", "vehicle/root", "vehicle/enclave");
+        builder
+            .add_port(
+                id("vehicle/root/readings"),
+                reactor.clone(),
+                PortDirection::Output,
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+        builder
+            .add_port(
+                id("vehicle/root/readings/#b0"),
+                reactor,
+                PortDirection::Output,
+                Some(crate::compiler::BankMember::new(0, 1).unwrap()),
+                1,
+                None,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            builder.finish(),
+            Err(TopologyBuildError::InvalidOwnership { .. })
+        ));
+    }
+
+    #[test]
+    fn action_rejects_typed_suffixes() {
+        let (mut builder, reactor, _) = base("vehicle", "vehicle/root", "vehicle/enclave");
+        builder
+            .add_action(
+                id("vehicle/root/#g0"),
+                reactor,
+                ActionKind::Logical {
+                    minimum_delay: None,
+                },
+                0,
+                None,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            builder.finish(),
+            Err(TopologyBuildError::InvalidOwnership { .. })
+        ));
+    }
+
+    #[test]
+    fn mode_rejects_typed_suffixes() {
+        let (mut builder, reactor, _) = base("vehicle", "vehicle/root", "vehicle/enclave");
+        builder
+            .add_mode(id("vehicle/root/#b0"), reactor, None, true)
+            .unwrap();
+
+        assert!(matches!(
+            builder.finish(),
+            Err(TopologyBuildError::InvalidModalStructure { .. })
+        ));
+    }
+
+    #[test]
+    fn reaction_rejects_bank_suffixes() {
+        let (mut builder, reactor, _) = base("vehicle", "vehicle/root", "vehicle/enclave");
+        builder
+            .add_reaction(
+                id("vehicle/root/#b0"),
+                reactor,
+                [],
+                ReactionOptions::default(),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            builder.finish(),
+            Err(TopologyBuildError::InvalidOwnership { .. })
+        ));
+    }
+
+    #[test]
+    fn generated_reaction_ordinals_must_be_contiguous() {
+        let (mut builder, reactor, _) = base("vehicle", "vehicle/root", "vehicle/enclave");
+        builder
+            .add_reaction(
+                id("vehicle/root/update/#g1"),
+                reactor,
+                [],
+                ReactionOptions::default(),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            builder.finish(),
+            Err(TopologyBuildError::InvalidOwnership { .. })
+        ));
+    }
+
+    #[test]
+    fn approved_identity_grammar_shapes_are_accepted() {
+        let (mut builder, root, enclave) = base("vehicle", "vehicle/root", "vehicle/enclave");
+        builder
+            .add_reactor(Reactor::new(
+                id("vehicle/root/sensors/#b0"),
+                id("vehicle"),
+                Some(root.clone()),
+                Some(crate::compiler::BankMember::new(0, 1).unwrap()),
+                enclave,
+                None,
+                None,
+            ))
+            .unwrap();
+        for reaction in [
+            "vehicle/root/update",
+            "vehicle/root/#g0",
+            "vehicle/root/refresh/#g0",
+        ] {
+            builder
+                .add_reaction(id(reaction), root.clone(), [], ReactionOptions::default())
+                .unwrap();
+        }
+
+        assert!(builder.finish().is_ok());
+    }
+
+    #[test]
+    fn duplicate_action_declaration_positions_are_rejected() {
+        let (mut builder, reactor, _) = base("vehicle", "vehicle/root", "vehicle/enclave");
+        for name in ["first", "second"] {
+            builder
+                .add_action(
+                    id(&format!("vehicle/root/{name}")),
+                    reactor.clone(),
+                    ActionKind::Logical {
+                        minimum_delay: None,
+                    },
+                    0,
+                    None,
+                )
+                .unwrap();
+        }
+
+        assert!(matches!(
+            builder.finish(),
+            Err(TopologyBuildError::InvalidOwnership { .. })
+        ));
+    }
+
+    #[test]
+    fn gapped_action_declaration_positions_are_rejected() {
+        let (mut builder, reactor, _) = base("vehicle", "vehicle/root", "vehicle/enclave");
+        for (name, position) in [("first", 0), ("second", 2)] {
+            builder
+                .add_action(
+                    id(&format!("vehicle/root/{name}")),
+                    reactor.clone(),
+                    ActionKind::Logical {
+                        minimum_delay: None,
+                    },
+                    position,
+                    None,
+                )
+                .unwrap();
+        }
+
+        assert!(matches!(
+            builder.finish(),
+            Err(TopologyBuildError::InvalidOwnership { .. })
+        ));
+    }
+
+    #[test]
+    fn duplicate_port_declaration_positions_are_rejected() {
+        let (mut builder, reactor, _) = base("vehicle", "vehicle/root", "vehicle/enclave");
+        for name in ["first", "second"] {
+            builder
+                .add_port(
+                    id(&format!("vehicle/root/{name}")),
+                    reactor.clone(),
+                    PortDirection::Output,
+                    None,
+                    0,
+                    None,
+                )
+                .unwrap();
+        }
+
+        assert!(matches!(
+            builder.finish(),
+            Err(TopologyBuildError::InvalidOwnership { .. })
+        ));
+    }
+
+    #[test]
+    fn gapped_port_declaration_positions_are_rejected() {
+        let (mut builder, reactor, _) = base("vehicle", "vehicle/root", "vehicle/enclave");
+        for (name, position) in [("first", 0), ("second", 2)] {
+            builder
+                .add_port(
+                    id(&format!("vehicle/root/{name}")),
+                    reactor.clone(),
+                    PortDirection::Output,
+                    None,
+                    position,
+                    None,
+                )
+                .unwrap();
+        }
+
+        assert!(matches!(
+            builder.finish(),
+            Err(TopologyBuildError::InvalidOwnership { .. })
+        ));
+    }
+
+    #[test]
+    fn action_and_port_positions_form_independent_sequences() {
+        let (mut builder, reactor, _) = base("vehicle", "vehicle/root", "vehicle/enclave");
+        for (name, position) in [("a0", 0), ("a1", 1)] {
+            builder
+                .add_action(
+                    id(&format!("vehicle/root/{name}")),
+                    reactor.clone(),
+                    ActionKind::Logical {
+                        minimum_delay: None,
+                    },
+                    position,
+                    None,
+                )
+                .unwrap();
+        }
+        for (name, position) in [("p0", 0), ("p1", 1)] {
+            builder
+                .add_port(
+                    id(&format!("vehicle/root/{name}")),
+                    reactor.clone(),
+                    PortDirection::Output,
+                    None,
+                    position,
+                    None,
+                )
+                .unwrap();
+        }
 
         assert!(builder.finish().is_ok());
     }

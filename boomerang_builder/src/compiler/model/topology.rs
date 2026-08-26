@@ -995,31 +995,6 @@ pub struct ApplicationTopology {
     placement_groups: BTreeMap<PlacementGroupId, PlacementGroup>,
 }
 
-impl fmt::Debug for ApplicationTopology {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ApplicationTopology")
-            .field("application_id", &self.application_id)
-            .field(
-                "components",
-                &self
-                    .components
-                    .keys()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>(),
-            )
-            .field(
-                "reactors",
-                &self
-                    .reactors
-                    .keys()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>(),
-            )
-            .finish_non_exhaustive()
-    }
-}
-
 macro_rules! accessors {
     ($iter:ident, $get:ident, $field:ident, $id:ty, $item:ty) => {
         /// Iterates records in canonical stable-identity order.

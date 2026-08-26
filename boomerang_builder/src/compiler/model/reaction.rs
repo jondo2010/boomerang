@@ -98,7 +98,7 @@ impl ReactionRelation {
 }
 
 /// Modal transition behavior.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ModeTransitionKind {
     /// Reset target mode state on entry.
     Reset,

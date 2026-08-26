@@ -117,22 +117,22 @@ fn assembly_projects_exact_non_modal_structure() {
     }
 
     assembly
-        .add_port_connection::<u32, _, _>(root_outputs.get(0).unwrap(), enclave_input, None, false)
+        .add_port_connection::<u32, _, _>(root_input, enclave_input, None, false)
         .unwrap();
     assembly
         .add_port_connection::<u32, _, _>(
-            root_outputs.get(0).unwrap(),
+            root_input,
             enclave_input,
             Some(runtime::Duration::milliseconds(4)),
             false,
         )
         .unwrap();
     assembly
-        .add_port_connection::<u32, _, _>(root_outputs.get(0).unwrap(), enclave_input, None, true)
+        .add_port_connection::<u32, _, _>(root_input, enclave_input, None, true)
         .unwrap();
     assembly
         .add_port_connection::<u32, _, _>(
-            root_outputs.get(0).unwrap(),
+            root_input,
             enclave_input,
             Some(runtime::Duration::milliseconds(5)),
             true,
@@ -422,7 +422,7 @@ fn assembly_projects_exact_non_modal_structure() {
         .reaction(&id::<ReactionId>("root%2F%25%23%5Bx%5D/step%2F%23/#g1"))
         .is_some());
 
-    let source = "root%2F%25%23%5Bx%5D/out%2F%25%5D/#b0";
+    let source = "root%2F%25%23%5Bx%5D/in%2F%5B%23%5D";
     let target = "root%2F%25%23%5Bx%5D/enc%2F%23%5B%5D/sink%2F%25%5B%5D";
     let connections = topology
         .connections()
@@ -439,19 +439,19 @@ fn assembly_projects_exact_non_modal_structure() {
         connections,
         vec![
             (
-                "boundary/root%252F%2525%2523%255Bx%255D%2Fout%252F%2525%255D%2F%23b0/root%252F%2525%2523%255Bx%255D%2Fenc%252F%2523%255B%255D%2Fsink%252F%2525%255B%255D/c0".into(),
+                "boundary/root%252F%2525%2523%255Bx%255D%2Fin%252F%255B%2523%255D/root%252F%2525%2523%255Bx%255D%2Fenc%252F%2523%255B%255D%2Fsink%252F%2525%255B%255D/c0".into(),
                 source.into(), target.into(), ConnectionSemantics::Logical { after: None },
             ),
             (
-                "boundary/root%252F%2525%2523%255Bx%255D%2Fout%252F%2525%255D%2F%23b0/root%252F%2525%2523%255Bx%255D%2Fenc%252F%2523%255B%255D%2Fsink%252F%2525%255B%255D/c1".into(),
+                "boundary/root%252F%2525%2523%255Bx%255D%2Fin%252F%255B%2523%255D/root%252F%2525%2523%255Bx%255D%2Fenc%252F%2523%255B%255D%2Fsink%252F%2525%255B%255D/c1".into(),
                 source.into(), target.into(), ConnectionSemantics::Logical { after: Some(runtime::Duration::milliseconds(4)) },
             ),
             (
-                "boundary/root%252F%2525%2523%255Bx%255D%2Fout%252F%2525%255D%2F%23b0/root%252F%2525%2523%255Bx%255D%2Fenc%252F%2523%255B%255D%2Fsink%252F%2525%255B%255D/c2".into(),
+                "boundary/root%252F%2525%2523%255Bx%255D%2Fin%252F%255B%2523%255D/root%252F%2525%2523%255Bx%255D%2Fenc%252F%2523%255B%255D%2Fsink%252F%2525%255B%255D/c2".into(),
                 source.into(), target.into(), ConnectionSemantics::Physical { after: None },
             ),
             (
-                "boundary/root%252F%2525%2523%255Bx%255D%2Fout%252F%2525%255D%2F%23b0/root%252F%2525%2523%255Bx%255D%2Fenc%252F%2523%255B%255D%2Fsink%252F%2525%255B%255D/c3".into(),
+                "boundary/root%252F%2525%2523%255Bx%255D%2Fin%252F%255B%2523%255D/root%252F%2525%2523%255Bx%255D%2Fenc%252F%2523%255B%255D%2Fsink%252F%2525%255B%255D/c3".into(),
                 source.into(), target.into(), ConnectionSemantics::Physical { after: Some(runtime::Duration::milliseconds(5)) },
             ),
         ]
@@ -517,4 +517,58 @@ fn local_top_level_roots_share_the_first_implicit_partition() {
         assert_eq!(reactor.placement_group(), Some(&z_group));
     }
     assert_eq!(topology.enclaves().count(), 1);
+}
+
+#[test]
+fn hierarchical_assembly_connections_project_exact_legal_shapes() {
+    let mut assembly = Assembly::new();
+    let (root, root_input, root_output) = {
+        let mut reactor = assembly.add_reactor("root", None, None, (), ReactorPlacement::Local);
+        let input = reactor.add_input_port::<u32>("input").unwrap();
+        let output = reactor.add_output_port::<u32>("output").unwrap();
+        (reactor.finish().unwrap(), input, output)
+    };
+    let (left_output, left_input) = {
+        let mut reactor =
+            assembly.add_reactor("left", Some(root), None, (), ReactorPlacement::Local);
+        let input = reactor.add_input_port::<u32>("input").unwrap();
+        let output = reactor.add_output_port::<u32>("output").unwrap();
+        reactor.finish().unwrap();
+        (output, input)
+    };
+    let right_input = {
+        let mut reactor =
+            assembly.add_reactor("right", Some(root), None, (), ReactorPlacement::Local);
+        let input = reactor.add_input_port::<u32>("input").unwrap();
+        reactor.finish().unwrap();
+        input
+    };
+    assembly
+        .add_port_connection::<u32, _, _>(root_input, left_input, None, false)
+        .unwrap();
+    assembly
+        .add_port_connection::<u32, _, _>(left_output, root_output, None, false)
+        .unwrap();
+    assembly
+        .add_port_connection::<u32, _, _>(left_output, right_input, None, false)
+        .unwrap();
+
+    let topology = assembly.application_topology().unwrap();
+    let endpoints = topology
+        .connections()
+        .map(|(_, connection)| {
+            (
+                connection.source().to_string(),
+                connection.target().to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        endpoints,
+        vec![
+            ("root/input".into(), "root/left/input".into()),
+            ("root/left/output".into(), "root/output".into()),
+            ("root/left/output".into(), "root/right/input".into()),
+        ]
+    );
 }

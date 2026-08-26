@@ -497,7 +497,7 @@ fn validate_topology(builder: &ApplicationTopologyBuilder) -> Result<(), Topolog
     )?;
     validate_actions(&builder.actions, &builder.reactors, &builder.modes)?;
     validate_ports(&builder.ports, &builder.reactors, &builder.modes)?;
-    validate_connections(&builder.connections, &builder.ports)?;
+    validate_connections(&builder.connections, &builder.ports, &builder.reactors)?;
     validate_enclaves(&builder.enclaves, &builder.reactors)?;
     validate_reactions(
         &builder.reactions,
@@ -656,6 +656,7 @@ fn validate_reactors(
 
     for reactor in reactors.values() {
         let enclave = require(enclaves, &reactor.enclave, &reactor.id, "enclave")?;
+        let enclave_root = require(reactors, &enclave.root, &reactor.id, "reactor")?;
         let mut cursor = &reactor.id;
         loop {
             if cursor == &enclave.root {
@@ -670,7 +671,13 @@ fn validate_reactors(
             }
             let Some(parent) = current.parent.as_ref() else {
                 // One scheduler domain may contain multiple disconnected top-level component
-                // trees; ancestry remains structural rather than Enclave ownership.
+                // trees, but a nested Enclave remains rooted in its structural subtree.
+                if enclave_root.parent.is_some() {
+                    return Err(invalid_ownership(
+                        &reactor.id,
+                        "reactor is disconnected from its nested Enclave root",
+                    ));
+                }
                 break;
             };
             cursor = parent;
@@ -770,15 +777,35 @@ fn validate_ports(
 fn validate_connections(
     connections: &BTreeMap<BoundaryId, Connection>,
     ports: &BTreeMap<PortId, Port>,
+    reactors: &BTreeMap<ReactorId, Reactor>,
 ) -> Result<(), TopologyBuildError> {
     for connection in connections.values() {
         validate_name_only_path(&connection.id, "boundary")?;
         let source = require(ports, &connection.source, &connection.id, "port")?;
         let target = require(ports, &connection.target, &connection.id, "port")?;
-        if source.direction != PortDirection::Output || target.direction != PortDirection::Input {
+        let source_reactor = require(reactors, &source.reactor, &connection.id, "reactor")?;
+        let target_reactor = require(reactors, &target.reactor, &connection.id, "reactor")?;
+        let (valid, reason) = match (source.direction, target.direction) {
+            (PortDirection::Input, PortDirection::Input) => (
+                target_reactor.parent.as_ref() == Some(&source.reactor),
+                "input-to-input connection must enter a direct child reactor",
+            ),
+            (PortDirection::Output, PortDirection::Input) => (
+                source_reactor.parent == target_reactor.parent,
+                "output-to-input connection endpoints must be siblings",
+            ),
+            (PortDirection::Output, PortDirection::Output) => (
+                source_reactor.parent.as_ref() == Some(&target.reactor),
+                "output-to-output connection must leave a direct child reactor",
+            ),
+            (PortDirection::Input, PortDirection::Output) => {
+                (false, "input-to-output connection is invalid")
+            }
+        };
+        if !valid {
             return Err(TopologyBuildError::InvalidConnection {
                 connection: connection.id.clone(),
-                reason: "source must be output and target must be input",
+                reason,
             });
         }
     }
@@ -1558,6 +1585,145 @@ mod tests {
             Err(TopologyBuildError::InvalidOwnership { reason, .. })
                 if reason.contains("crosses an enclave boundary")
         ));
+    }
+
+    #[test]
+    fn enclave_rejects_disconnected_member_when_declared_root_is_nested() {
+        let mut builder = ApplicationTopologyBuilder::new("application").unwrap();
+        let component: ComponentInstanceId = id("vehicle");
+        let parent: ReactorId = id("vehicle/a");
+        let nested: ReactorId = id("vehicle/a/b");
+        let enclave: StableEnclaveId = id("vehicle/a/b");
+        builder
+            .add_component(ComponentInstance::new(component.to_string(), "contract").unwrap())
+            .unwrap();
+        builder
+            .add_reactor(Reactor::new(
+                parent.clone(),
+                component.clone(),
+                None,
+                None,
+                enclave.clone(),
+                None,
+                None,
+            ))
+            .unwrap();
+        builder
+            .add_reactor(Reactor::new(
+                nested.clone(),
+                component,
+                Some(parent),
+                None,
+                enclave.clone(),
+                None,
+                None,
+            ))
+            .unwrap();
+        builder.add_enclave(enclave, nested).unwrap();
+
+        assert!(matches!(
+            builder.finish(),
+            Err(TopologyBuildError::InvalidOwnership { reason, .. })
+                if reason.contains("nested Enclave root")
+        ));
+    }
+
+    #[test]
+    fn connection_hierarchy_rejects_every_illegal_direction_shape() {
+        fn finish(
+            source_owner: &str,
+            source_direction: PortDirection,
+            target_owner: &str,
+            target_direction: PortDirection,
+        ) -> Result<ApplicationTopology, TopologyBuildError> {
+            let (mut builder, root, enclave) = base("vehicle", "vehicle/root", "vehicle/root");
+            let left: ReactorId = id("vehicle/root/left");
+            let right: ReactorId = id("vehicle/root/right");
+            for child in [&left, &right] {
+                builder
+                    .add_reactor(Reactor::new(
+                        child.clone(),
+                        id("vehicle"),
+                        Some(root.clone()),
+                        None,
+                        enclave.clone(),
+                        None,
+                        None,
+                    ))
+                    .unwrap();
+            }
+            let source_reactor: ReactorId = id(source_owner);
+            let target_reactor: ReactorId = id(target_owner);
+            let source: PortId = id(&format!("{source_owner}/source"));
+            let target: PortId = id(&format!("{target_owner}/target"));
+            builder
+                .add_port(
+                    source.clone(),
+                    source_reactor,
+                    source_direction,
+                    None,
+                    0,
+                    None,
+                )
+                .unwrap();
+            builder
+                .add_port(
+                    target.clone(),
+                    target_reactor,
+                    target_direction,
+                    None,
+                    u32::from(source_owner == target_owner),
+                    None,
+                )
+                .unwrap();
+            builder
+                .add_connection(
+                    id("boundary/invalid"),
+                    source,
+                    target,
+                    ConnectionSemantics::Logical { after: None },
+                )
+                .unwrap();
+            builder.finish()
+        }
+
+        let cases = [
+            (
+                "vehicle/root/left",
+                PortDirection::Input,
+                "vehicle/root/right",
+                PortDirection::Input,
+            ),
+            (
+                "vehicle/root",
+                PortDirection::Output,
+                "vehicle/root/left",
+                PortDirection::Input,
+            ),
+            (
+                "vehicle/root/left",
+                PortDirection::Output,
+                "vehicle/root/right",
+                PortDirection::Output,
+            ),
+            (
+                "vehicle/root",
+                PortDirection::Input,
+                "vehicle/root",
+                PortDirection::Output,
+            ),
+        ];
+        for (source_owner, source_direction, target_owner, target_direction) in cases {
+            assert!(matches!(
+                finish(
+                    source_owner,
+                    source_direction,
+                    target_owner,
+                    target_direction
+                ),
+                Err(TopologyBuildError::InvalidConnection { .. })
+            ));
+        }
     }
 
     #[test]

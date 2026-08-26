@@ -51,8 +51,8 @@ Boomerang applications use the following deployment architecture:
   one source declaration.
 - Generated launchers bind direct target symbols to host-generated stable binding slots. There is
   no runtime component registry.
-- Canonical host representations use dense typed keys for internal relationships and retain stable
-  IDs only at boundaries that require persistence or external reference.
+- `ApplicationTopology` uses canonical stable-ID keyed host collections and stable-ID
+  relationships. Permanent dense indices appear only in compiled deployment and runtime images.
 - `ApplicationTopology` owns deterministic structural inspection and visualization; transitional
   `Assembly` diagnostics delegate to it, while runtime-state diagnostics remain runtime-owned.
 - Every named type and field introduced for this architecture has a concise documentation comment.
@@ -182,17 +182,19 @@ and selected descriptor facets. It contains:
 It contains no concrete runtime state, target driver objects, reaction closures, protocol clients,
 channels, or runtime allocation keys.
 
-Its canonical in-memory representation uses typed dense keys and dense-key collections for
+Its canonical in-memory representation uses stable-ID keyed ordered host collections for
 components, reactors, ports, actions, reactions, Enclaves, placement groups, boundaries, and other
-internal relationships. Each record also carries a stable ID where that entity can cross an
-authoring, deployment-manifest, diagnostic, fingerprint, wire-protocol, generated-binding, or
-recording/replay boundary. Stable-ID indexes exist only for lookup and validation at those seams;
-representation-local dense keys are never serialized or exposed as durable identity.
+logical entities. Relationships between those records also use typed stable IDs. Canonical map
+ordering makes equality, iteration, serialization, visualization, and fingerprint inputs
+independent of declaration or package-discovery order.
 
-Dense keys are assigned only after inputs have been canonicalized by stable ID, so declaration or
-package discovery order cannot change the resulting topology. Optional or partial relationships
-use dense-key secondary maps rather than sparse stable-ID maps when no durable identity is
-required.
+Nested reaction collections are canonical too: action relations precede port relations, with each
+category ordered by declaration position and then stable target ID. Enabled-mode and reset-mode
+memberships are sorted by stable mode ID, and duplicate memberships are rejected as malformed.
+
+Host graph-analysis and lowering algorithms may construct private temporary dense indexes for
+efficient traversal. Those indexes are implementation details: they are not stored in
+`ApplicationTopology`, exposed as identity, or reused across analysis boundaries.
 
 `ApplicationTopology` also owns structural inspection and visualization of the resolved logical
 graph. Its `Debug` output and graph-oriented helpers use stable identities, deterministic ordering,
@@ -238,7 +240,9 @@ CompiledDeployment
 ```
 
 It is data, not a collection of live runtime objects. It has no channels, closures, threads,
-protocol sessions, or open transports.
+protocol sessions, or open transports. Permanent dense indices are assigned only while lowering
+this representation, after canonical global analysis and deployment slicing. Each index is local
+to its compiled image or Federate slice and is never a source-level identity.
 
 ## Source authoring model
 
@@ -458,7 +462,7 @@ strictly sliced. It performs:
 - placement-group coverage and constraint validation;
 - Enclave partition and local dependency analysis;
 - connection and reaction-level analysis;
-- deterministic dense-key assignment;
+- deployment slicing followed by deterministic image-local dense-key assignment;
 - payload-schema and codec validation;
 - local, cross-Enclave, and cross-Federate boundary selection;
 - zero-delay distributed-cycle validation;
@@ -467,8 +471,9 @@ strictly sliced. It performs:
 - static queue, scratch, and resource-bound validation; and
 - generation of immutable global, coordination, and per-Federate images.
 
-All derived collections are canonicalized by stable identity before dense keys are assigned.
-Input iteration order must not affect compiled images or fingerprints.
+All derived collections are canonicalized by stable identity before deployment slicing and
+image-local dense-key assignment. Input iteration order must not affect compiled images or
+fingerprints.
 
 Connections lower according to the resolved deployment:
 
@@ -526,9 +531,10 @@ The compiler guarantees canonical compiled images for identical locked compiler 
 stronger and more tractable claim than promising bit-identical final binaries across arbitrary
 toolchains.
 
-Canonicalization sorts stable IDs before interning them into dense typed keys. Dense keys are local
-to one representation and are excluded from fingerprints and serialized interchange except where
-their canonical table position is explicitly part of a compiled-image schema.
+Canonicalization sorts stable IDs before compiled deployment slices assign dense typed keys. Dense
+keys are local to one compiled image or Federate slice and are excluded from fingerprints and
+serialized interchange except where their canonical table position is explicitly part of a
+compiled-image schema.
 
 The runtime guarantees deterministic logical scheduling for one compiled deployment given the same
 initial state and input event stream, subject to documented physical-input and reaction-code
@@ -905,9 +911,10 @@ runnable proof, and compatibility decision.
   runtime topology discovery or lowering.
 - Enclave, Federate, deployment unit, compute node, and execution resource remain distinct.
 - Enclave boundaries are scheduler semantics, not evidence of process or safety isolation.
-- Canonical compiler representations use deterministic dense typed keys internally; stable IDs
-  cross authoring, deployment, diagnostic, fingerprint, wire, binding, and recording boundaries.
-- Dense keys never serve as durable identity and are assigned only after stable-ID canonicalization.
+- `ApplicationTopology` uses canonical stable-ID keyed collections and stable-ID relationships;
+  graph algorithms may use private temporary dense indexes.
+- Permanent dense keys never serve as durable identity and are assigned only in compiled/runtime
+  images after stable-ID canonicalization and deployment slicing.
 - Structural topology inspection belongs to `ApplicationTopology`; mutable runtime diagnostics do
   not.
 - Every named architecture type and field has a concise documentation comment.

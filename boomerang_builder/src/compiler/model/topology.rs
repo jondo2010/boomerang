@@ -778,10 +778,13 @@ fn validate_reactions(
     modes: &BTreeMap<ModeId, Mode>,
 ) -> Result<(), TopologyBuildError> {
     let mut generated_families = BTreeMap::<StablePath, BTreeSet<u32>>::new();
+    let mut scalar_bases = BTreeSet::new();
     for reaction in reactions.values() {
         let path = reaction.id.path();
         match relative_segments(path, reaction.reactor.path()) {
-            Some([StablePathSegment::Name(_)]) => {}
+            Some([StablePathSegment::Name(_)]) => {
+                scalar_bases.insert(path.clone());
+            }
             Some([StablePathSegment::GeneratedOrdinal(ordinal)]) => {
                 generated_families
                     .entry(reaction.reactor.path().clone())
@@ -886,6 +889,12 @@ fn validate_reactions(
         }
     }
     for (base, ordinals) in generated_families {
+        if scalar_bases.contains(&base) {
+            return Err(invalid_ownership(
+                &base,
+                "identity base cannot be both a scalar and generated reaction family",
+            ));
+        }
         let len = u32::try_from(ordinals.len()).unwrap_or(u32::MAX);
         if ordinals.iter().copied().ne(0..len) {
             return Err(invalid_ownership(
@@ -1862,6 +1871,28 @@ mod tests {
         assert!(matches!(
             builder.finish(),
             Err(TopologyBuildError::InvalidOwnership { .. })
+        ));
+    }
+
+    #[test]
+    fn scalar_reaction_cannot_share_a_generated_family_base() {
+        let (mut builder, reactor, _) = base("vehicle", "vehicle/root", "vehicle/root");
+        for reaction in ["vehicle/root/update", "vehicle/root/update/#g0"] {
+            builder
+                .add_reaction(
+                    id(reaction),
+                    reactor.clone(),
+                    [],
+                    ReactionOptions::default(),
+                )
+                .unwrap();
+        }
+
+        assert!(matches!(
+            builder.finish(),
+            Err(TopologyBuildError::InvalidOwnership { entity, reason })
+                if entity == "vehicle/root/update"
+                    && reason.contains("scalar and generated reaction family")
         ));
     }
 

@@ -1,5 +1,6 @@
 use quote::quote;
 use quote::{ToTokens, TokenStreamExt};
+use syn::ext::IdentExt;
 use syn::spanned::Spanned;
 use syn::{
     parenthesized,
@@ -86,12 +87,12 @@ fn camelcase_field(field: &ExprField) -> Ident {
             Expr::Field(f) => {
                 flatten(&f.base, out);
                 match &f.member {
-                    syn::Member::Named(ident) => out.push(ident.to_string()),
+                    syn::Member::Named(ident) => out.push(ident.unraw().to_string()),
                     syn::Member::Unnamed(idx) => out.push(idx.index.to_string()),
                 }
             }
             Expr::Path(p) if p.path.segments.len() == 1 => {
-                out.push(p.path.segments[0].ident.to_string());
+                out.push(p.path.segments[0].ident.unraw().to_string());
             }
             _ => {}
         }
@@ -281,7 +282,7 @@ impl ToTokens for Model {
         let name = self.name.as_ref().map_or_else(
             || quote::quote! { None },
             |n| {
-                let n_str = n.to_string();
+                let n_str = n.unraw().to_string();
                 quote! { Some(#n_str) }
             },
         );

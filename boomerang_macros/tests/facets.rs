@@ -157,3 +157,8 @@ fn descriptor_mode_rejects_duplicate_named_reactions() {
         "unexpected compiler diagnostic:\n{stderr}"
     );
 }
+
+#[test]
+fn hosted_mode_accepts_duplicate_named_reactions() {
+    cargo_check("descriptor-duplicate-reaction", &[]).unwrap();
+}

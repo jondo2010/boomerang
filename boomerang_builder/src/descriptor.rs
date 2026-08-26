@@ -344,6 +344,18 @@ pub enum DescriptorBuildError {
         /// Missing source or target identity and category.
         target: String,
     },
+    /// A structural record refers to an absent typed owner or parent.
+    #[error("{owner_kind} `{owner}` references missing {target_kind} `{target}`")]
+    DanglingReference {
+        /// Kind of record containing the reference.
+        owner_kind: &'static str,
+        /// Stable identity of that record.
+        owner: String,
+        /// Kind of referenced record.
+        target_kind: &'static str,
+        /// Missing stable identity.
+        target: String,
+    },
 }
 
 /// Host-owned structural descriptor generated for one component implementation.
@@ -434,6 +446,91 @@ impl ComponentDescriptor {
         reject_duplicate_slots(&codec_slots, "codec", |slot| &slot.id)?;
         reject_duplicate_slots(&placement_groups, "placement group", |slot| &slot.id)?;
         reject_duplicate_slots(&enclaves, "Enclave", |slot| &slot.id)?;
+
+        let missing = |owner_kind, owner: String, target_kind, target: String| {
+            DescriptorBuildError::DanglingReference {
+                owner_kind,
+                owner,
+                target_kind,
+                target,
+            }
+        };
+        let has_reactor = |id: &ReactorSlotId| {
+            reactor_slots
+                .binary_search_by(|slot| slot.id.cmp(id))
+                .is_ok()
+        };
+        for slot in &reactor_slots {
+            if let Some(parent) = &slot.parent {
+                if !has_reactor(parent) {
+                    return Err(missing(
+                        "reactor",
+                        slot.id.to_string(),
+                        "reactor",
+                        parent.to_string(),
+                    ));
+                }
+            }
+        }
+        macro_rules! validate_reactor_owners {
+            ($slots:expr, $kind:literal) => {
+                for slot in $slots {
+                    if !has_reactor(&slot.reactor) {
+                        return Err(missing(
+                            $kind,
+                            slot.id.to_string(),
+                            "reactor",
+                            slot.reactor.to_string(),
+                        ));
+                    }
+                }
+            };
+        }
+        validate_reactor_owners!(&port_slots, "port");
+        validate_reactor_owners!(&action_slots, "action");
+        validate_reactor_owners!(&reaction_slots, "reaction");
+        validate_reactor_owners!(&mode_slots, "mode");
+        validate_reactor_owners!(&state_slots, "state");
+        for slot in &mode_slots {
+            if let Some(parent) = &slot.parent {
+                if mode_slots
+                    .binary_search_by(|candidate| candidate.id.cmp(parent))
+                    .is_err()
+                {
+                    return Err(missing(
+                        "mode",
+                        slot.id.to_string(),
+                        "mode",
+                        parent.to_string(),
+                    ));
+                }
+            }
+        }
+        for group in &placement_groups {
+            if let Some(parent) = &group.parent {
+                if placement_groups
+                    .binary_search_by(|candidate| candidate.id.cmp(parent))
+                    .is_err()
+                {
+                    return Err(missing(
+                        "placement group",
+                        group.id.to_string(),
+                        "placement group",
+                        parent.to_string(),
+                    ));
+                }
+            }
+        }
+        for enclave in &enclaves {
+            if !has_reactor(&enclave.root) {
+                return Err(missing(
+                    "Enclave",
+                    enclave.id.to_string(),
+                    "reactor",
+                    enclave.root.to_string(),
+                ));
+            }
+        }
 
         for relationship in &relationships {
             let reaction = relationship.reaction.to_string();
@@ -578,6 +675,19 @@ where
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct Parts {
+        reactors: Vec<ReactorSlot>,
+        ports: Vec<PortSlot>,
+        actions: Vec<ActionSlot>,
+        reactions: Vec<ReactionSlot>,
+        modes: Vec<ModeSlot>,
+        states: Vec<StateSlot>,
+        relationships: Vec<DescriptorRelationship>,
+        groups: Vec<DescriptorPlacementGroup>,
+        enclaves: Vec<DescriptorEnclave>,
+    }
+
     fn reactor() -> ReactorSlot {
         ReactorSlot {
             id: ReactorSlotId::new("Root").unwrap(),
@@ -598,20 +708,30 @@ mod tests {
         reactions: Vec<ReactionSlot>,
         relationships: Vec<DescriptorRelationship>,
     ) -> Result<ComponentDescriptor, DescriptorBuildError> {
+        build_parts(Parts {
+            reactors: vec![reactor()],
+            ports,
+            reactions,
+            relationships,
+            ..Parts::default()
+        })
+    }
+
+    fn build_parts(parts: Parts) -> Result<ComponentDescriptor, DescriptorBuildError> {
         ComponentDescriptor::try_new(
             ContractId::new("example.contract").unwrap(),
             1,
             COMPONENT_DESCRIPTOR_MACRO_ABI,
-            vec![reactor()],
-            ports,
+            parts.reactors,
+            parts.ports,
+            parts.actions,
+            parts.reactions,
+            parts.modes,
+            parts.states,
             vec![],
-            reactions,
-            vec![],
-            vec![],
-            vec![],
-            relationships,
-            vec![],
-            vec![],
+            parts.relationships,
+            parts.groups,
+            parts.enclaves,
             DescriptorBounds::default(),
         )
     }
@@ -662,5 +782,35 @@ mod tests {
             build(vec![], vec![reaction], vec![relation]),
             Err(DescriptorBuildError::DanglingRelation { .. })
         ));
+    }
+
+    #[test]
+    fn dangling_structural_references_are_rejected() {
+        let missing_reactor = ReactorSlotId::new("Missing").unwrap();
+        macro_rules! dangling {
+            ($kind:literal, $field:ident: $value:expr) => {
+                let mut parts = Parts {
+                    reactors: vec![reactor()],
+                    ..Parts::default()
+                };
+                parts.$field = $value;
+                assert!(matches!(
+                    build_parts(parts),
+                    Err(DescriptorBuildError::DanglingReference {
+                        owner_kind: $kind,
+                        ..
+                    })
+                ));
+            };
+        }
+        dangling!("reactor", reactors: vec![ReactorSlot { id: ReactorSlotId::new("Root").unwrap(), parent: Some(missing_reactor.clone()) }]);
+        dangling!("port", ports: vec![PortSlot { id: PortSlotId::new("Root/p").unwrap(), reactor: missing_reactor.clone(), direction: DescriptorPortDirection::Input }]);
+        dangling!("action", actions: vec![ActionSlot { id: ActionSlotId::new("Root/a").unwrap(), reactor: missing_reactor.clone() }]);
+        dangling!("reaction", reactions: vec![ReactionSlot { id: ReactionSlotId::new("Root/r").unwrap(), reactor: missing_reactor.clone() }]);
+        dangling!("mode", modes: vec![ModeSlot { id: ModeSlotId::new("Root/m").unwrap(), reactor: missing_reactor.clone(), parent: None, initial: false }]);
+        dangling!("state", states: vec![StateSlot { id: StateSlotId::new("Root/s").unwrap(), reactor: missing_reactor.clone() }]);
+        dangling!("mode", modes: vec![ModeSlot { id: ModeSlotId::new("Root/m").unwrap(), reactor: ReactorSlotId::new("Root").unwrap(), parent: Some(ModeSlotId::new("Root/missing").unwrap()), initial: false }]);
+        dangling!("placement group", groups: vec![DescriptorPlacementGroup { id: PlacementGroupId::new("group").unwrap(), parent: Some(PlacementGroupId::new("missing").unwrap()) }]);
+        dangling!("Enclave", enclaves: vec![DescriptorEnclave { id: StableEnclaveId::new("enclave").unwrap(), root: missing_reactor }]);
     }
 }

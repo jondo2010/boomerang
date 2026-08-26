@@ -1,8 +1,10 @@
 use crate::{
     compiler::{
-        ActionId, ActionKind, BankMember, ComponentInstanceId, ConnectionSemantics, ModeId,
-        ModeTransitionKind, PlacementGroupId, PortDirection, ReactionId, ReactionRelationTarget,
-        ReactorId, StableEnclaveId,
+        ActionId, ActionKind, ApplicationTopology, ApplicationTopologyBuilder, BankMember,
+        BoundaryId, ComponentInstance, ComponentInstanceId, ConnectionSemantics, ModeId,
+        ModeTransition, ModeTransitionKind, PlacementGroupId, PortDirection, PortId, ReactionId,
+        ReactionOptions, ReactionRelation, ReactionRelationFlags, ReactionRelationTarget,
+        Reactor as TopologyReactor, ReactorId, StableEnclaveId,
     },
     runtime, Assembly, ModeKind, ReactorPlacement, TimerSpec, TriggerMode,
 };
@@ -870,4 +872,275 @@ fn hierarchical_assembly_connections_project_exact_legal_shapes() {
             ("root/left/output".into(), "root/right/input".into()),
         ]
     );
+}
+
+#[test]
+fn application_topology_debug_uses_stable_structure() {
+    fn build(reverse: bool) -> ApplicationTopology {
+        let component: ComponentInstanceId = id("component/root");
+        let root: ReactorId = id("root");
+        let workers_0: ReactorId = id("root/workers/#b0");
+        let workers_1: ReactorId = id("root/workers/#b1");
+        let enclave: StableEnclaveId = id("root");
+        let placement: PlacementGroupId = id("placement/root");
+        let alternate_placement: PlacementGroupId = id("placement/root/alternate");
+        let active: ModeId = id("root/active");
+        let tick: ActionId = id("root/tick");
+        let output: PortId = id("root/out");
+        let input: PortId = id("root/in");
+        let reaction: ReactionId = id("root/step");
+
+        let mut topology = ApplicationTopologyBuilder::new("inspection").unwrap();
+        topology
+            .add_component(ComponentInstance::new("component/root", "root.v1").unwrap())
+            .unwrap();
+        topology
+            .add_placement_group(placement.clone(), None)
+            .unwrap();
+        topology
+            .add_placement_group(alternate_placement.clone(), Some(placement.clone()))
+            .unwrap();
+        topology.add_enclave(enclave.clone(), root.clone()).unwrap();
+
+        let root_reactor = TopologyReactor::new(
+            root.clone(),
+            component.clone(),
+            None,
+            None,
+            enclave.clone(),
+            Some(placement.clone()),
+            None,
+        );
+        let worker = |id, index, placement_group| {
+            TopologyReactor::new(
+                id,
+                component.clone(),
+                Some(root.clone()),
+                Some(BankMember::new(index, 2).unwrap()),
+                enclave.clone(),
+                Some(placement_group),
+                None,
+            )
+        };
+        let reactors = if reverse {
+            vec![
+                worker(workers_1.clone(), 1, alternate_placement.clone()),
+                worker(workers_0.clone(), 0, placement.clone()),
+                root_reactor,
+            ]
+        } else {
+            vec![
+                root_reactor,
+                worker(workers_0.clone(), 0, placement.clone()),
+                worker(workers_1.clone(), 1, alternate_placement.clone()),
+            ]
+        };
+        for reactor in reactors {
+            topology.add_reactor(reactor).unwrap();
+        }
+
+        topology
+            .add_mode(active.clone(), root.clone(), None, true)
+            .unwrap();
+        topology
+            .add_action(
+                tick.clone(),
+                root.clone(),
+                ActionKind::Logical {
+                    minimum_delay: None,
+                },
+                0,
+                Some(active.clone()),
+            )
+            .unwrap();
+        topology
+            .add_port(
+                output.clone(),
+                root.clone(),
+                PortDirection::Output,
+                None,
+                0,
+                Some(active.clone()),
+            )
+            .unwrap();
+        topology
+            .add_port(
+                input.clone(),
+                root.clone(),
+                PortDirection::Input,
+                None,
+                1,
+                Some(active.clone()),
+            )
+            .unwrap();
+        let mut relations = vec![
+            ReactionRelation::new(
+                ReactionRelationTarget::Action(tick.clone()),
+                ReactionRelationFlags::TRIGGER,
+                0,
+            ),
+            ReactionRelation::new(
+                ReactionRelationTarget::Port(output.clone()),
+                ReactionRelationFlags::EFFECT,
+                0,
+            ),
+            ReactionRelation::new(
+                ReactionRelationTarget::Port(input.clone()),
+                ReactionRelationFlags::USE,
+                1,
+            ),
+        ];
+        if reverse {
+            relations.reverse();
+        }
+        topology
+            .add_reaction(
+                reaction,
+                root.clone(),
+                relations,
+                ReactionOptions {
+                    mode: Some(active.clone()),
+                    enabled_modes: vec![active.clone()],
+                    reset_modes: vec![active.clone()],
+                    transition: Some(ModeTransition::new(active, ModeTransitionKind::Reset)),
+                },
+            )
+            .unwrap();
+        topology
+            .add_connection(
+                id::<BoundaryId>("connection/root-loop"),
+                output,
+                input,
+                ConnectionSemantics::Logical { after: None },
+            )
+            .unwrap();
+        topology.finish().unwrap()
+    }
+
+    let topology = build(false);
+    let reordered = build(true);
+    let formatted = format!("{topology:#?}");
+    assert_eq!(formatted, format!("{reordered:#?}"));
+    for expected in [
+        "root/workers/#b0",
+        "root/workers/#b1",
+        "root/active",
+        "root/step",
+        "root/tick",
+        "root/out",
+        "root/in",
+        "connection/root-loop",
+        "enclaves",
+        "placement_groups",
+    ] {
+        assert!(
+            formatted.contains(expected),
+            "missing {expected:?} from {formatted}"
+        );
+    }
+    assert!(!formatted.contains("KeyData"));
+    assert!(!formatted.contains("AssemblyReactorKey"));
+    assert_eq!(formatted.matches("placement/root/alternate").count(), 2);
+
+    let compact = formatted.split_whitespace().collect::<String>();
+    for relation in [
+        r#"ReactionRelation{target:"action:root/tick",flags:["trigger",],"#,
+        r#"ReactionRelation{target:"port:root/out",flags:["effect",],"#,
+        r#"ReactionRelation{target:"port:root/in",flags:["use",],"#,
+    ] {
+        assert!(
+            compact.contains(relation),
+            "missing relation {relation} from {compact}"
+        );
+    }
+    assert!(compact.contains(r#"Connection{source:"root/out",target:"root/in",semantics:"#));
+    assert!(
+        compact.contains(r#"modes:{"root/active":Mode{reactor:"root",parent:None,initial:true,"#)
+    );
+    assert!(compact.contains(r#"transition:Some(("root/active",Reset,),)"#));
+
+    let reactor_groups = topology.reactors_debug_grouped();
+    assert_eq!(reactor_groups.len(), 2);
+    assert_eq!(reactor_groups[1].0.to_string(), "root/workers/#b0");
+    assert_eq!(
+        reactor_groups[1].1.map(ToString::to_string),
+        Some("root/workers/#b1".into())
+    );
+    let graph = topology.build_reactor_graph_grouped();
+    assert_eq!(graph.node_count(), 2);
+    assert!(graph.contains_edge(&id::<ReactorId>("root"), reactor_groups[1].0));
+
+    let mut assembly = Assembly::new();
+    assembly
+        .add_reactor("root", None, None, (), ReactorPlacement::Local)
+        .finish()
+        .unwrap();
+    let projected = assembly.application_topology().unwrap();
+    assert_eq!(format!("{assembly:#?}"), format!("{projected:#?}"));
+    assert!(format!("{:?}", Assembly::new()).contains("ApplicationTopologyProjectionError"));
+}
+
+fn singleton_bank_topology() -> (ApplicationTopology, ReactorId, PortId) {
+    let component: ComponentInstanceId = id("component/root");
+    let reactor: ReactorId = id("root/#b0");
+    let enclave: StableEnclaveId = id("root/#b0");
+    let port: PortId = id("root/#b0/channel/#b0");
+    let singleton = BankMember::new(0, 1).unwrap();
+
+    let mut builder = ApplicationTopologyBuilder::new("singleton-bank").unwrap();
+    builder
+        .add_component(ComponentInstance::new("component/root", "root.v1").unwrap())
+        .unwrap();
+    builder
+        .add_enclave(enclave.clone(), reactor.clone())
+        .unwrap();
+    builder
+        .add_reactor(TopologyReactor::new(
+            reactor.clone(),
+            component,
+            None,
+            Some(singleton),
+            enclave,
+            None,
+            None,
+        ))
+        .unwrap();
+    builder
+        .add_port(
+            port.clone(),
+            reactor.clone(),
+            PortDirection::Input,
+            Some(singleton),
+            0,
+            None,
+        )
+        .unwrap();
+    (builder.finish().unwrap(), reactor, port)
+}
+
+#[test]
+fn application_topology_debug_preserves_singleton_reactor_bank() {
+    let (topology, reactor, _) = singleton_bank_topology();
+    assert_eq!(
+        topology.reactors_debug_grouped(),
+        vec![(&reactor, Some(&reactor))]
+    );
+    let compact = format!("{topology:#?}")
+        .split_whitespace()
+        .collect::<String>();
+    assert!(compact.contains(
+        r##""root/#b0..root/#b0":[Reactor{component:"component/root",parent:None,bank:Some("#b0of1",)"##
+    ));
+}
+
+#[test]
+fn application_topology_debug_preserves_singleton_port_bank() {
+    let (topology, _, port) = singleton_bank_topology();
+    assert_eq!(topology.ports_debug_grouped(), vec![(&port, Some(&port))]);
+    let compact = format!("{topology:#?}")
+        .split_whitespace()
+        .collect::<String>();
+    assert!(compact.contains(
+        r##""root/#b0/channel/#b0..root/#b0/channel/#b0":[Port{reactor:"root/#b0",direction:Input,bank:Some("#b0of1",)"##
+    ));
 }

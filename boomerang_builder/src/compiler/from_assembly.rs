@@ -4,13 +4,14 @@ use slotmap::SecondaryMap;
 
 use super::{
     ActionId, ActionKind, ApplicationTopology, ApplicationTopologyBuilder, BankMember, BoundaryId,
-    ComponentInstance, ComponentInstanceId, ConnectionSemantics, ContractId, PlacementGroupId,
-    PortDirection, PortId, ReactionId, ReactionOptions, ReactionRelation, ReactionRelationFlags,
-    ReactionRelationTarget, Reactor, ReactorId, StableEnclaveId, StablePath, StablePathSegment,
+    ComponentInstance, ComponentInstanceId, ConnectionSemantics, ContractId, ModeId,
+    ModeTransition, ModeTransitionKind, PlacementGroupId, PortDirection, PortId, ReactionId,
+    ReactionOptions, ReactionRelation, ReactionRelationFlags, ReactionRelationTarget, Reactor,
+    ReactorId, StableEnclaveId, StablePath, StablePathSegment,
 };
 use crate::{
-    ActionType, Assembly, AssemblyActionKey, AssemblyError, AssemblyPortKey, AssemblyReactorKey,
-    PortType, TimerSpec, TriggerMode,
+    ActionType, Assembly, AssemblyActionKey, AssemblyError, AssemblyModeKey, AssemblyPortKey,
+    AssemblyReactorKey, PortType, TimerSpec, TriggerMode,
 };
 
 impl Assembly {
@@ -104,6 +105,49 @@ fn relation_flags(mode: TriggerMode) -> ReactionRelationFlags {
     flags
 }
 
+fn mode_reference(
+    assembly: &Assembly,
+    mode_ids: &SecondaryMap<AssemblyModeKey, ModeId>,
+    reactor_paths: &SecondaryMap<AssemblyReactorKey, StablePath>,
+    mode_key: AssemblyModeKey,
+    expected_owner: Option<AssemblyReactorKey>,
+    entity: &impl std::fmt::Display,
+) -> Result<ModeId, AssemblyError> {
+    let mode = assembly.mode_specs.get(mode_key).ok_or_else(|| {
+        projection_error(format!(
+            "Assembly entity '{entity}' references missing mode {mode_key:?}"
+        ))
+    })?;
+    if let Some(expected_owner) = expected_owner {
+        if mode.reactor_key != expected_owner {
+            let actual = reactor_paths
+                .get(mode.reactor_key)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| format!("{:?}", mode.reactor_key));
+            let expected = reactor_paths
+                .get(expected_owner)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| format!("{expected_owner:?}"));
+            return Err(projection_error(format!(
+                "Assembly entity '{entity}' references mode '{}' that belongs to reactor '{actual}', expected reactor '{expected}'",
+                mode.name
+            )));
+        }
+    }
+    mode_ids.get(mode_key).cloned().ok_or_else(|| {
+        projection_error(format!(
+            "Assembly entity '{entity}' references missing stable mode for {mode_key:?}"
+        ))
+    })
+}
+
+fn transition_kind(kind: crate::runtime::TransitionKind) -> ModeTransitionKind {
+    match kind {
+        crate::runtime::TransitionKind::Reset => ModeTransitionKind::Reset,
+        crate::runtime::TransitionKind::History => ModeTransitionKind::History,
+    }
+}
+
 fn project_application_topology(assembly: &Assembly) -> Result<ApplicationTopology, AssemblyError> {
     if assembly.reactor_specs.is_empty() {
         return Err(projection_error("assembly has no reactor roots"));
@@ -165,11 +209,60 @@ fn project_application_topology(assembly: &Assembly) -> Result<ApplicationTopolo
         placement_groups.insert(*partition, placement);
     }
 
+    let mut mode_ids = SecondaryMap::<AssemblyModeKey, ModeId>::new();
+    let mut stable_mode_origins = BTreeMap::<ModeId, AssemblyModeKey>::new();
+    for (key, spec) in &assembly.mode_specs {
+        let owner_path = reactor_paths.get(spec.reactor_key).ok_or_else(|| {
+            projection_error(format!(
+                "Assembly mode '{}' references missing reactor {:?}",
+                spec.name, spec.reactor_key
+            ))
+        })?;
+        let id = ModeId::from_path(
+            owner_path
+                .append_name(spec.name.clone())
+                .map_err(projection_error)?,
+        );
+        if let Some(previous) = stable_mode_origins.insert(id.clone(), key) {
+            return Err(projection_error(format!(
+                "Assembly mode '{}' projects duplicate stable mode identity '{id}' already used by {previous:?}",
+                spec.name
+            )));
+        }
+        topology
+            .add_mode(
+                id.clone(),
+                ReactorId::from_path(owner_path.clone()),
+                None,
+                spec.kind.is_initial(),
+            )
+            .map_err(projection_error)?;
+        mode_ids.insert(key, id);
+    }
+
     for (key, spec) in &assembly.reactor_specs {
         let id = ReactorId::from_path(reactor_paths[key].clone());
         let parent = spec
             .parent_reactor_key
             .map(|parent| ReactorId::from_path(reactor_paths[parent].clone()));
+        let scope_mode = match spec.scope_mode {
+            Some(scope_mode) => {
+                let structural_parent = spec.parent_reactor_key.ok_or_else(|| {
+                    projection_error(format!(
+                        "Assembly reactor '{id}' declares a mode scope without a structural parent"
+                    ))
+                })?;
+                Some(mode_reference(
+                    assembly,
+                    &mode_ids,
+                    &reactor_paths,
+                    scope_mode,
+                    Some(structural_parent),
+                    &id,
+                )?)
+            }
+            None => None,
+        };
         let root = root_of(assembly, key);
         let partition = partition_map[key];
         topology
@@ -180,7 +273,7 @@ fn project_application_topology(assembly: &Assembly) -> Result<ApplicationTopolo
                 bank_member(spec.bank_info())?,
                 StableEnclaveId::from_path(reactor_paths[partition].clone()),
                 Some(placement_groups[partition].clone()),
-                None,
+                scope_mode,
             ))
             .map_err(projection_error)?;
     }
@@ -217,13 +310,26 @@ fn project_application_topology(assembly: &Assembly) -> Result<ApplicationTopolo
             },
             ActionType::Shutdown => ActionKind::Shutdown,
         };
+        let scope_mode = spec
+            .scope_mode()
+            .map(|mode| {
+                mode_reference(
+                    assembly,
+                    &mode_ids,
+                    &reactor_paths,
+                    mode,
+                    Some(reactor_key),
+                    &id,
+                )
+            })
+            .transpose()?;
         topology
             .add_action(
                 id.clone(),
                 ReactorId::from_path(reactor_paths[reactor_key].clone()),
                 kind,
                 *position,
-                None,
+                scope_mode,
             )
             .map_err(projection_error)?;
         action_ids.insert(key, id);
@@ -303,12 +409,80 @@ fn project_application_topology(assembly: &Assembly) -> Result<ApplicationTopolo
         let relations = action_relations
             .chain(port_relations)
             .collect::<Result<Vec<_>, AssemblyError>>()?;
+
+        let mode = spec
+            .scope_mode
+            .map(|mode| {
+                mode_reference(
+                    assembly,
+                    &mode_ids,
+                    &reactor_paths,
+                    mode,
+                    Some(spec.reactor_key),
+                    &id,
+                )
+            })
+            .transpose()?;
+        let enabled_modes = spec
+            .enabled_modes
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|&mode| {
+                mode_reference(
+                    assembly,
+                    &mode_ids,
+                    &reactor_paths,
+                    mode,
+                    Some(spec.reactor_key),
+                    &id,
+                )
+            })
+            .collect::<Result<Vec<_>, AssemblyError>>()?;
+        let reset_modes = if spec.reset_trigger {
+            vec![mode.clone().ok_or_else(|| {
+                projection_error(format!(
+                    "Assembly reaction '{id}' declares a reset trigger without a direct mode scope"
+                ))
+            })?]
+        } else {
+            Vec::new()
+        };
+        let mut transition = None;
+        for effect in &spec.mode_effects {
+            let candidate = ModeTransition::new(
+                mode_reference(
+                    assembly,
+                    &mode_ids,
+                    &reactor_paths,
+                    effect.target(),
+                    Some(spec.reactor_key),
+                    &id,
+                )?,
+                transition_kind(effect.transition()),
+            );
+            if transition
+                .as_ref()
+                .is_some_and(|current| current != &candidate)
+            {
+                return Err(projection_error(format!(
+                    "Assembly reaction '{id}' has inconsistent transition declarations"
+                )));
+            }
+            transition = Some(candidate);
+        }
+
         topology
             .add_reaction(
                 id.clone(),
                 ReactorId::from_path(owner.clone()),
                 relations,
-                ReactionOptions::default(),
+                ReactionOptions {
+                    mode,
+                    enabled_modes,
+                    reset_modes,
+                    transition,
+                },
             )
             .map_err(projection_error)?;
         *ordinal = ordinal

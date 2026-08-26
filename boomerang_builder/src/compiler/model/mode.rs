@@ -1,6 +1,9 @@
 use crate::compiler::{ModeId, ReactorId};
 
-/// Mode in a reactor-local hierarchy.
+/// Mode owned by one reactor in the structural application hierarchy.
+///
+/// `parent` represents reactor-local mode nesting. A reactor instance inherited from an enclosing
+/// parent mode records that relationship on the reactor's `scope_mode` instead.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Mode {
     /// Stable mode identity.
@@ -24,7 +27,7 @@ impl Mode {
         &self.reactor
     }
 
-    /// Returns the optional parent mode identity.
+    /// Returns the optional reactor-local parent mode identity.
     pub fn parent(&self) -> Option<&ModeId> {
         self.parent.as_ref()
     }

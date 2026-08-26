@@ -1,9 +1,10 @@
 use crate::{
     compiler::{
-        ActionKind, BankMember, ComponentInstanceId, ConnectionSemantics, PlacementGroupId,
-        PortDirection, ReactionId, ReactionRelationTarget, ReactorId, StableEnclaveId,
+        ActionId, ActionKind, BankMember, ComponentInstanceId, ConnectionSemantics, ModeId,
+        ModeTransitionKind, PlacementGroupId, PortDirection, ReactionId, ReactionRelationTarget,
+        ReactorId, StableEnclaveId,
     },
-    runtime, Assembly, ReactorPlacement, TimerSpec, TriggerMode,
+    runtime, Assembly, ModeKind, ReactorPlacement, TimerSpec, TriggerMode,
 };
 
 fn id<T: std::str::FromStr>(value: &str) -> T
@@ -466,6 +467,304 @@ fn assembly_projects_exact_non_modal_structure() {
         banked_reactors,
         banked_ports,
     );
+}
+
+#[test]
+fn assembly_projects_exact_modal_structure() {
+    fn build(reverse_modes: bool) -> crate::compiler::ApplicationTopology {
+        let mut assembly = Assembly::new();
+
+        let (root, idle, active) = {
+            let mut root = assembly.add_reactor("root", None, None, (), ReactorPlacement::Local);
+            let tick = root.add_logical_action::<()>("tick", None).unwrap();
+            let (idle, active) = if reverse_modes {
+                let active = root.add_mode("active", ModeKind::Normal).unwrap();
+                let idle = root.add_mode("idle", ModeKind::Initial).unwrap();
+                (idle, active)
+            } else {
+                let idle = root.add_mode("idle", ModeKind::Initial).unwrap();
+                let active = root.add_mode("active", ModeKind::Normal).unwrap();
+                (idle, active)
+            };
+
+            let enter_active = root.reset_mode_effect(active).unwrap();
+            root.add_reaction(Some("enter-active"))
+                .with_trigger(tick)
+                .with_effect(enter_active)
+                .with_reaction_fn(|_ctx, _state, (_tick, _active)| {})
+                .finish()
+                .unwrap();
+
+            let return_to_idle = root.history_mode_effect(idle).unwrap();
+            root.in_mode(active, |ctx| {
+                ctx.add_logical_action::<()>("active-action", None)?;
+                ctx.add_reaction(Some("active-reset"))
+                    .with_reset_trigger()
+                    .with_effect(return_to_idle)
+                    .with_reaction_fn(|_ctx, _state, (_idle,)| {})
+                    .finish()
+            })
+            .unwrap();
+
+            (root.finish().unwrap(), idle, active)
+        };
+
+        let (child, sleeping, running) = {
+            let mut child =
+                assembly.add_reactor("child", Some(root), None, (), ReactorPlacement::Local);
+            child.set_scope_mode(active).unwrap();
+            let tick = child.add_logical_action::<()>("tick", None).unwrap();
+            let (sleeping, running) = if reverse_modes {
+                let running = child.add_mode("running", ModeKind::Normal).unwrap();
+                let sleeping = child.add_mode("sleeping", ModeKind::Initial).unwrap();
+                (sleeping, running)
+            } else {
+                let sleeping = child.add_mode("sleeping", ModeKind::Initial).unwrap();
+                let running = child.add_mode("running", ModeKind::Normal).unwrap();
+                (sleeping, running)
+            };
+
+            child
+                .add_reaction(Some("inherited"))
+                .with_trigger(tick)
+                .with_reaction_fn(|_ctx, _state, (_tick,)| {})
+                .finish()
+                .unwrap();
+            child
+                .in_mode(running, |ctx| {
+                    ctx.add_reaction(Some("running-reset"))
+                        .with_reset_trigger()
+                        .with_reaction_fn(|_ctx, _state, ()| {})
+                        .finish()
+                })
+                .unwrap();
+
+            (child.finish().unwrap(), sleeping, running)
+        };
+
+        let grandchild = {
+            let mut grandchild =
+                assembly.add_reactor("grandchild", Some(child), None, (), ReactorPlacement::Local);
+            grandchild.set_scope_mode(running).unwrap();
+            grandchild
+                .add_reaction(Some("doubly-inherited"))
+                .with_startup_trigger()
+                .with_reaction_fn(|_ctx, _state, (_startup,)| {})
+                .finish()
+                .unwrap();
+            grandchild.finish().unwrap()
+        };
+
+        let topology = assembly.application_topology().unwrap();
+        let _ = (idle, sleeping, grandchild);
+        topology
+    }
+
+    let topology = build(false);
+    assert_eq!(topology, build(true));
+
+    let root: ReactorId = id("root");
+    let child: ReactorId = id("root/child");
+    let grandchild: ReactorId = id("root/child/grandchild");
+    let active: ModeId = id("root/active");
+    let idle: ModeId = id("root/idle");
+    let running: ModeId = id("root/child/running");
+    let sleeping: ModeId = id("root/child/sleeping");
+
+    assert_eq!(
+        topology
+            .modes()
+            .map(|(id, mode)| (
+                id.clone(),
+                mode.reactor().clone(),
+                mode.parent().cloned(),
+                mode.is_initial(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (active.clone(), root.clone(), None, false),
+            (running.clone(), child.clone(), None, false),
+            (sleeping.clone(), child.clone(), None, true),
+            (idle.clone(), root.clone(), None, true),
+        ]
+    );
+    assert_eq!(topology.reactor(&root).unwrap().scope_mode(), None);
+    assert_eq!(
+        topology.reactor(&child).unwrap().scope_mode(),
+        Some(&active)
+    );
+    assert_eq!(
+        topology.reactor(&grandchild).unwrap().scope_mode(),
+        Some(&running)
+    );
+    assert_eq!(
+        topology
+            .action(&id::<ActionId>("root/active-action"))
+            .unwrap()
+            .mode(),
+        Some(&active)
+    );
+
+    let enter_active = topology
+        .reaction(&id::<ReactionId>("root/enter-active/#g0"))
+        .unwrap();
+    assert_eq!(enter_active.options().mode(), None);
+    assert!(enter_active.options().enabled_modes().is_empty());
+    assert!(enter_active.options().reset_modes().is_empty());
+    let transition = enter_active.options().transition().unwrap();
+    assert_eq!(transition.target(), &active);
+    assert_eq!(transition.kind(), ModeTransitionKind::Reset);
+
+    let active_reset = topology
+        .reaction(&id::<ReactionId>("root/active-reset/#g0"))
+        .unwrap();
+    assert_eq!(active_reset.options().mode(), Some(&active));
+    assert_eq!(
+        active_reset.options().enabled_modes(),
+        std::slice::from_ref(&active)
+    );
+    assert_eq!(
+        active_reset.options().reset_modes(),
+        std::slice::from_ref(&active)
+    );
+    let transition = active_reset.options().transition().unwrap();
+    assert_eq!(transition.target(), &idle);
+    assert_eq!(transition.kind(), ModeTransitionKind::History);
+
+    let inherited = topology
+        .reaction(&id::<ReactionId>("root/child/inherited/#g0"))
+        .unwrap();
+    assert_eq!(inherited.options().mode(), None);
+    assert!(inherited.options().enabled_modes().is_empty());
+    assert!(inherited.options().reset_modes().is_empty());
+    assert!(inherited.options().transition().is_none());
+
+    let running_reset = topology
+        .reaction(&id::<ReactionId>("root/child/running-reset/#g0"))
+        .unwrap();
+    assert_eq!(running_reset.options().mode(), Some(&running));
+    assert_eq!(
+        running_reset.options().enabled_modes(),
+        std::slice::from_ref(&running)
+    );
+    assert_eq!(running_reset.options().reset_modes(), &[running]);
+    assert!(running_reset.options().transition().is_none());
+
+    let doubly_inherited = topology
+        .reaction(&id::<ReactionId>(
+            "root/child/grandchild/doubly-inherited/#g0",
+        ))
+        .unwrap();
+    assert_eq!(doubly_inherited.options().mode(), None);
+    assert!(doubly_inherited.options().enabled_modes().is_empty());
+    assert!(doubly_inherited.options().reset_modes().is_empty());
+}
+
+#[test]
+fn assembly_modal_projection_rejects_invalid_structure() {
+    fn error(assembly: &Assembly) -> String {
+        assembly.application_topology().unwrap_err().to_string()
+    }
+
+    let mut missing = Assembly::new();
+    let (missing_mode, missing_reaction) = {
+        let mut root = missing.add_reactor("root", None, None, (), ReactorPlacement::Local);
+        let mode = root.add_mode("active", ModeKind::Initial).unwrap();
+        let reaction = root
+            .in_mode(mode, |ctx| {
+                ctx.add_reaction(Some("scoped"))
+                    .with_reset_trigger()
+                    .with_reaction_fn(|_ctx, _state, ()| {})
+                    .finish()
+            })
+            .unwrap();
+        root.finish().unwrap();
+        (mode, reaction)
+    };
+    missing.mode_specs.remove(missing_mode);
+    let message = error(&missing);
+    assert!(message.contains("root/scoped/#g0"), "{message}");
+    assert!(message.contains("missing mode"), "{message}");
+    let _ = missing_reaction;
+
+    let mut wrong_owner = Assembly::new();
+    let (root_reaction, foreign_mode) = {
+        let mut root = wrong_owner.add_reactor("root", None, None, (), ReactorPlacement::Local);
+        let tick = root.add_logical_action::<()>("tick", None).unwrap();
+        let reaction = root
+            .add_reaction(Some("wrong-owner"))
+            .with_trigger(tick)
+            .with_reaction_fn(|_ctx, _state, (_tick,)| {})
+            .finish()
+            .unwrap();
+        root.finish().unwrap();
+
+        let mut foreign =
+            wrong_owner.add_reactor("foreign", None, None, (), ReactorPlacement::Local);
+        let mode = foreign.add_mode("active", ModeKind::Initial).unwrap();
+        foreign.finish().unwrap();
+        (reaction, mode)
+    };
+    wrong_owner.reaction_specs[root_reaction].enabled_modes = Some(vec![foreign_mode]);
+    let message = error(&wrong_owner);
+    assert!(message.contains("root/wrong-owner/#g0"), "{message}");
+    assert!(
+        message.contains("belongs to reactor 'foreign'"),
+        "{message}"
+    );
+
+    let mut invalid_ancestry = Assembly::new();
+    let root = invalid_ancestry
+        .add_reactor("root", None, None, (), ReactorPlacement::Local)
+        .finish()
+        .unwrap();
+    let (child, child_mode) = {
+        let mut child =
+            invalid_ancestry.add_reactor("child", Some(root), None, (), ReactorPlacement::Local);
+        let mode = child.add_mode("local", ModeKind::Initial).unwrap();
+        (child.finish().unwrap(), mode)
+    };
+    invalid_ancestry.reactor_specs[child].scope_mode = Some(child_mode);
+    let message = error(&invalid_ancestry);
+    assert!(message.contains("root/child"), "{message}");
+    assert!(message.contains("expected reactor 'root'"), "{message}");
+
+    let mut duplicate = Assembly::new();
+    let duplicate_mode = {
+        let mut root = duplicate.add_reactor("root", None, None, (), ReactorPlacement::Local);
+        root.add_mode("active", ModeKind::Initial).unwrap();
+        let duplicate = root.add_mode("idle", ModeKind::Normal).unwrap();
+        root.finish().unwrap();
+        duplicate
+    };
+    duplicate.mode_specs[duplicate_mode].name = "active".to_owned();
+    let message = error(&duplicate);
+    assert!(message.contains("root/active"), "{message}");
+    assert!(
+        message.contains("duplicate stable mode identity"),
+        "{message}"
+    );
+
+    let mut inconsistent = Assembly::new();
+    {
+        let mut root = inconsistent.add_reactor("root", None, None, (), ReactorPlacement::Local);
+        let tick = root.add_logical_action::<()>("tick", None).unwrap();
+        let idle = root.add_mode("idle", ModeKind::Initial).unwrap();
+        let active = root.add_mode("active", ModeKind::Normal).unwrap();
+        let enter_active = root.reset_mode_effect(active).unwrap();
+        let enter_idle = root.history_mode_effect(idle).unwrap();
+        root.add_reaction(Some("ambiguous"))
+            .with_trigger(tick)
+            .with_effect(enter_active)
+            .with_effect(enter_idle)
+            .with_reaction_fn(|_ctx, _state, (_tick, _active, _idle)| {})
+            .finish()
+            .unwrap();
+        root.finish().unwrap();
+    }
+    let message = error(&inconsistent);
+    assert!(message.contains("root/ambiguous/#g0"), "{message}");
+    assert!(message.contains("inconsistent transition"), "{message}");
 }
 
 #[test]

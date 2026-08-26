@@ -115,17 +115,58 @@ pub struct ModeTransition {
     pub kind: ModeTransitionKind,
 }
 
+impl ModeTransition {
+    /// Constructs a typed modal transition.
+    pub fn new(target: ModeId, kind: ModeTransitionKind) -> Self {
+        Self { target, kind }
+    }
+
+    /// Returns the stable transition target.
+    pub fn target(&self) -> &ModeId {
+        &self.target
+    }
+
+    /// Returns the transition behavior.
+    pub fn kind(&self) -> ModeTransitionKind {
+        self.kind
+    }
+}
+
 /// Optional modal metadata used when constructing a reaction.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ReactionOptions {
-    /// Mode that lexically owns the reaction.
+    /// Reactor-local mode that lexically owns the reaction.
+    ///
+    /// Inherited scope is expressed by the owning reactor's structural ancestry.
     pub mode: Option<ModeId>,
-    /// Modes in which the reaction is enabled.
+    /// Reactor-local modes in which the reaction is enabled.
     pub enabled_modes: Vec<ModeId>,
     /// Modes reset by the reaction.
     pub reset_modes: Vec<ModeId>,
     /// Optional mode transition performed by the reaction.
     pub transition: Option<ModeTransition>,
+}
+
+impl ReactionOptions {
+    /// Returns the optional direct reactor-local mode scope.
+    pub fn mode(&self) -> Option<&ModeId> {
+        self.mode.as_ref()
+    }
+
+    /// Returns the reactor-local enabled-mode set.
+    pub fn enabled_modes(&self) -> &[ModeId] {
+        &self.enabled_modes
+    }
+
+    /// Returns the modes whose reset entry triggers the reaction.
+    pub fn reset_modes(&self) -> &[ModeId] {
+        &self.reset_modes
+    }
+
+    /// Returns the optional typed modal transition.
+    pub fn transition(&self) -> Option<&ModeTransition> {
+        self.transition.as_ref()
+    }
 }
 
 /// Structural reaction declaration using stable identities.

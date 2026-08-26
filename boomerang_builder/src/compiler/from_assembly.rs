@@ -15,7 +15,7 @@ use crate::{
 };
 
 impl Assembly {
-    /// Projects this assembly into an immutable non-modal application topology.
+    /// Projects this assembly into an immutable, target-neutral application topology.
     pub fn application_topology(&self) -> Result<ApplicationTopology, AssemblyError> {
         project_application_topology(self)
     }

@@ -1,6 +1,6 @@
 use crate::{
     compiler::{
-        ActionKind, BankMember, ComponentInstanceId, ConnectionSemantics, ModeId,
+        ActionId, ActionKind, BankMember, ComponentInstanceId, ConnectionSemantics, ModeId,
         ModeTransitionKind, PlacementGroupId, PortDirection, ReactionId, ReactionRelationTarget,
         ReactorId, StableEnclaveId,
     },
@@ -497,6 +497,7 @@ fn assembly_projects_exact_modal_structure() {
 
             let return_to_idle = root.history_mode_effect(idle).unwrap();
             root.in_mode(active, |ctx| {
+                ctx.add_logical_action::<()>("active-action", None)?;
                 ctx.add_reaction(Some("active-reset"))
                     .with_reset_trigger()
                     .with_effect(return_to_idle)
@@ -596,6 +597,13 @@ fn assembly_projects_exact_modal_structure() {
         topology.reactor(&grandchild).unwrap().scope_mode(),
         Some(&running)
     );
+    assert_eq!(
+        topology
+            .action(&id::<ActionId>("root/active-action"))
+            .unwrap()
+            .mode(),
+        Some(&active)
+    );
 
     let enter_active = topology
         .reaction(&id::<ReactionId>("root/enter-active/#g0"))
@@ -611,8 +619,14 @@ fn assembly_projects_exact_modal_structure() {
         .reaction(&id::<ReactionId>("root/active-reset/#g0"))
         .unwrap();
     assert_eq!(active_reset.options().mode(), Some(&active));
-    assert_eq!(active_reset.options().enabled_modes(), &[active.clone()]);
-    assert_eq!(active_reset.options().reset_modes(), &[active.clone()]);
+    assert_eq!(
+        active_reset.options().enabled_modes(),
+        std::slice::from_ref(&active)
+    );
+    assert_eq!(
+        active_reset.options().reset_modes(),
+        std::slice::from_ref(&active)
+    );
     let transition = active_reset.options().transition().unwrap();
     assert_eq!(transition.target(), &idle);
     assert_eq!(transition.kind(), ModeTransitionKind::History);
@@ -629,7 +643,10 @@ fn assembly_projects_exact_modal_structure() {
         .reaction(&id::<ReactionId>("root/child/running-reset/#g0"))
         .unwrap();
     assert_eq!(running_reset.options().mode(), Some(&running));
-    assert_eq!(running_reset.options().enabled_modes(), &[running.clone()]);
+    assert_eq!(
+        running_reset.options().enabled_modes(),
+        std::slice::from_ref(&running)
+    );
     assert_eq!(running_reset.options().reset_modes(), &[running]);
     assert!(running_reset.options().transition().is_none());
 

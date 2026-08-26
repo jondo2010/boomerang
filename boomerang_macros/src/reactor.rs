@@ -661,9 +661,9 @@ fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
         .collect::<Vec<_>>();
     let port_slots = model.args.iter().filter_map(|arg| {
         let direction = match arg.kind {
-            ArgKind::Input { .. } => quote!(::boomerang::builder::DescriptorPortDirection::Input),
+            ArgKind::Input { .. } => quote!(::boomerang::builder::PortDirection::Input),
             ArgKind::Output { .. } => {
-                quote!(::boomerang::builder::DescriptorPortDirection::Output)
+                quote!(::boomerang::builder::PortDirection::Output)
             }
             ArgKind::State { .. } | ArgKind::Param { .. } => return None,
         };
@@ -800,13 +800,13 @@ fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
             };
             let transition = match effect {
                 crate::reaction::EffectType::History(_) => quote! {
-                    Some(::boomerang::builder::DescriptorModeTransition::History)
+                    Some(::boomerang::builder::ModeTransitionKind::History)
                 },
                 crate::reaction::EffectType::Reset(_) => quote! {
-                    Some(::boomerang::builder::DescriptorModeTransition::Reset)
+                    Some(::boomerang::builder::ModeTransitionKind::Reset)
                 },
                 crate::reaction::EffectType::Regular(_) if is_mode => quote! {
-                    Some(::boomerang::builder::DescriptorModeTransition::Reset)
+                    Some(::boomerang::builder::ModeTransitionKind::Reset)
                 },
                 crate::reaction::EffectType::Regular(_) => quote!(None),
             };

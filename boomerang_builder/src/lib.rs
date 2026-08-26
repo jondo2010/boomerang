@@ -27,6 +27,7 @@ pub mod plantuml;
 
 pub use action::*;
 pub use assembly::*;
+pub use compiler::{ModeTransitionKind, PortDirection};
 pub use descriptor::*;
 #[cfg(feature = "federated")]
 pub use federation::*;

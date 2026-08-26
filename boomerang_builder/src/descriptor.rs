@@ -1,6 +1,6 @@
 //! Canonical host-owned component descriptor records.
 
-use crate::compiler::{BindingSlotId, ContractId, PlacementGroupId, StableEnclaveId, StablePath};
+use crate::compiler::{BindingSlotId, ContractId, ModeTransitionKind, PortDirection, StablePath};
 
 /// Macro ABI understood by descriptors emitted from this crate version.
 pub const COMPONENT_DESCRIPTOR_MACRO_ABI: u32 = 1;
@@ -19,6 +19,10 @@ pub enum ModeSlotMarker {}
 pub enum StateSlotMarker {}
 /// Marker for stable codec binding slots.
 pub enum CodecSlotMarker {}
+/// Marker for stable placement-group binding slots.
+pub enum PlacementGroupSlotMarker {}
+/// Marker for stable Enclave binding slots.
+pub enum EnclaveSlotMarker {}
 
 /// Stable implementation-local reactor slot identity.
 pub type ReactorSlotId = BindingSlotId<ReactorSlotMarker>;
@@ -34,6 +38,10 @@ pub type ModeSlotId = BindingSlotId<ModeSlotMarker>;
 pub type StateSlotId = BindingSlotId<StateSlotMarker>;
 /// Stable implementation-local codec slot identity.
 pub type CodecSlotId = BindingSlotId<CodecSlotMarker>;
+/// Stable implementation-local placement-group slot identity.
+pub type PlacementGroupSlotId = BindingSlotId<PlacementGroupSlotMarker>;
+/// Stable implementation-local Enclave slot identity.
+pub type EnclaveSlotId = BindingSlotId<EnclaveSlotMarker>;
 
 /// Stable reactor slot and its structural parent.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -44,15 +52,6 @@ pub struct ReactorSlot {
     pub parent: Option<ReactorSlotId>,
 }
 
-/// Structural direction of a descriptor port slot.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DescriptorPortDirection {
-    /// Input received by its reactor.
-    Input,
-    /// Output produced by its reactor.
-    Output,
-}
-
 /// Stable port slot owned by one reactor slot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PortSlot {
@@ -61,7 +60,7 @@ pub struct PortSlot {
     /// Owning reactor slot.
     pub reactor: ReactorSlotId,
     /// Structural port direction.
-    pub direction: DescriptorPortDirection,
+    pub direction: PortDirection,
 }
 
 /// Stable action slot owned by one reactor slot.
@@ -152,15 +151,6 @@ pub enum DescriptorRelationshipKind {
     Scope,
 }
 
-/// Modal transition carried by a mode relationship.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum DescriptorModeTransition {
-    /// Reset target mode state on entry.
-    Reset,
-    /// Restore target mode history on entry.
-    History,
-}
-
 /// One canonical relationship from a reaction to a stable target.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DescriptorRelationship {
@@ -171,7 +161,7 @@ pub struct DescriptorRelationship {
     /// Stable relationship target.
     pub target: DescriptorRelationshipTarget,
     /// Optional modal transition semantics.
-    pub mode_transition: Option<DescriptorModeTransition>,
+    pub mode_transition: Option<ModeTransitionKind>,
     /// Zero-based position within this relationship category.
     pub declaration_position: u32,
 }
@@ -180,16 +170,16 @@ pub struct DescriptorRelationship {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DescriptorPlacementGroup {
     /// Stable placement-group identity.
-    pub id: PlacementGroupId,
+    pub id: PlacementGroupSlotId,
     /// Optional parent placement group.
-    pub parent: Option<PlacementGroupId>,
+    pub parent: Option<PlacementGroupSlotId>,
 }
 
 /// Source-declared scheduler and logical-time domain.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DescriptorEnclave {
     /// Stable Enclave identity.
-    pub id: StableEnclaveId,
+    pub id: EnclaveSlotId,
     /// Stable root reactor slot.
     pub root: ReactorSlotId,
 }
@@ -261,62 +251,62 @@ pub struct DescriptorFingerprintInput {
 }
 
 macro_rules! descriptor_accessors {
-    () => {
+    ($($field:ident)?) => {
         /// Returns the stable external contract identity.
         pub fn contract_id(&self) -> &ContractId {
-            &self.contract_id
+            &self$(.$field)?.contract_id
         }
         /// Returns the stable external contract version.
         pub fn contract_version(&self) -> u64 {
-            self.contract_version
+            self$(.$field)?.contract_version
         }
         /// Returns the descriptor macro ABI version.
         pub fn macro_abi(&self) -> u32 {
-            self.macro_abi
+            self$(.$field)?.macro_abi
         }
         /// Returns the canonically ordered reactor slots.
         pub fn reactor_slots(&self) -> &[ReactorSlot] {
-            &self.reactor_slots
+            &self$(.$field)?.reactor_slots
         }
         /// Returns the canonically ordered port slots.
         pub fn port_slots(&self) -> &[PortSlot] {
-            &self.port_slots
+            &self$(.$field)?.port_slots
         }
         /// Returns the canonically ordered action slots.
         pub fn action_slots(&self) -> &[ActionSlot] {
-            &self.action_slots
+            &self$(.$field)?.action_slots
         }
         /// Returns the canonically ordered reaction slots.
         pub fn reaction_slots(&self) -> &[ReactionSlot] {
-            &self.reaction_slots
+            &self$(.$field)?.reaction_slots
         }
         /// Returns the canonically ordered mode slots.
         pub fn mode_slots(&self) -> &[ModeSlot] {
-            &self.mode_slots
+            &self$(.$field)?.mode_slots
         }
         /// Returns the canonically ordered state slots.
         pub fn state_slots(&self) -> &[StateSlot] {
-            &self.state_slots
+            &self$(.$field)?.state_slots
         }
         /// Returns the canonically ordered codec slots.
         pub fn codec_slots(&self) -> &[CodecSlot] {
-            &self.codec_slots
+            &self$(.$field)?.codec_slots
         }
         /// Returns the canonically ordered reaction relationships.
         pub fn relationships(&self) -> &[DescriptorRelationship] {
-            &self.relationships
+            &self$(.$field)?.relationships
         }
         /// Returns the canonically ordered placement groups.
         pub fn placement_groups(&self) -> &[DescriptorPlacementGroup] {
-            &self.placement_groups
+            &self$(.$field)?.placement_groups
         }
         /// Returns the canonically ordered Enclaves.
         pub fn enclaves(&self) -> &[DescriptorEnclave] {
-            &self.enclaves
+            &self$(.$field)?.enclaves
         }
         /// Returns the declared resource bounds.
         pub fn bounds(&self) -> DescriptorBounds {
-            self.bounds
+            self$(.$field)?.bounds
         }
     };
 }
@@ -361,44 +351,16 @@ pub enum DescriptorBuildError {
 /// Host-owned structural descriptor generated for one component implementation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ComponentDescriptor {
-    /// Stable external contract identity.
-    contract_id: ContractId,
-    /// Stable external contract version.
-    contract_version: u64,
-    /// Descriptor macro ABI version.
-    macro_abi: u32,
-    /// Canonically ordered reactor slots.
-    reactor_slots: Box<[ReactorSlot]>,
-    /// Canonically ordered port slots.
-    port_slots: Box<[PortSlot]>,
-    /// Canonically ordered action slots.
-    action_slots: Box<[ActionSlot]>,
-    /// Canonically ordered reaction slots.
-    reaction_slots: Box<[ReactionSlot]>,
-    /// Canonically ordered mode slots.
-    mode_slots: Box<[ModeSlot]>,
-    /// Canonically ordered state slots.
-    state_slots: Box<[StateSlot]>,
-    /// Canonically ordered codec slots.
-    codec_slots: Box<[CodecSlot]>,
-    /// Canonically ordered reaction relationships.
-    relationships: Box<[DescriptorRelationship]>,
-    /// Canonically ordered placement groups.
-    placement_groups: Box<[DescriptorPlacementGroup]>,
-    /// Canonically ordered Enclaves.
-    enclaves: Box<[DescriptorEnclave]>,
-    /// Declared resource bounds.
-    bounds: DescriptorBounds,
-    /// Typed canonical input for descriptor fingerprinting.
-    descriptor_fingerprint_input: DescriptorFingerprintInput,
+    /// Single canonical descriptor record and fingerprint input.
+    canonical: DescriptorFingerprintInput,
 }
 
 impl ComponentDescriptor {
-    descriptor_accessors!();
+    descriptor_accessors!(canonical);
 
     /// Returns the immutable canonical fingerprint input.
     pub fn descriptor_fingerprint_input(&self) -> &DescriptorFingerprintInput {
-        &self.descriptor_fingerprint_input
+        &self.canonical
     }
 
     /// Validates, constructs, and canonically orders one descriptor.
@@ -578,7 +540,7 @@ impl ComponentDescriptor {
         let relationships = relationships.into_boxed_slice();
         let placement_groups = placement_groups.into_boxed_slice();
         let enclaves = enclaves.into_boxed_slice();
-        let descriptor_fingerprint_input = DescriptorFingerprintInput {
+        let canonical = DescriptorFingerprintInput {
             contract_id: contract_id.clone(),
             contract_version,
             macro_abi,
@@ -595,23 +557,7 @@ impl ComponentDescriptor {
             bounds,
         };
 
-        Ok(Self {
-            contract_id,
-            contract_version,
-            macro_abi,
-            reactor_slots,
-            port_slots,
-            action_slots,
-            reaction_slots,
-            mode_slots,
-            state_slots,
-            codec_slots,
-            relationships,
-            placement_groups,
-            enclaves,
-            bounds,
-            descriptor_fingerprint_input,
-        })
+        Ok(Self { canonical })
     }
 
     /// Constructs a descriptor whose literals and structure were validated by the reactor macro.
@@ -699,7 +645,7 @@ mod tests {
         PortSlot {
             id: PortSlotId::new(format!("Root/{name}")).unwrap(),
             reactor: ReactorSlotId::new("Root").unwrap(),
-            direction: DescriptorPortDirection::Input,
+            direction: PortDirection::Input,
         }
     }
 
@@ -745,6 +691,72 @@ mod tests {
             left.descriptor_fingerprint_input(),
             right.descriptor_fingerprint_input()
         );
+        assert!(std::ptr::eq(
+            left.contract_id(),
+            left.descriptor_fingerprint_input().contract_id()
+        ));
+        assert!(std::ptr::eq(
+            left.port_slots(),
+            left.descriptor_fingerprint_input().port_slots()
+        ));
+    }
+
+    #[test]
+    fn canonical_types_and_local_deployment_slots_are_preserved() {
+        let root = ReactorSlotId::new("Root").unwrap();
+        let relation = DescriptorRelationship {
+            reaction: ReactionSlotId::new("Root/r").unwrap(),
+            kind: DescriptorRelationshipKind::Mode,
+            target: DescriptorRelationshipTarget::Mode(ModeSlotId::new("Root/m").unwrap()),
+            mode_transition: Some(ModeTransitionKind::Reset),
+            declaration_position: 0,
+        };
+        let descriptor = build_parts(Parts {
+            reactors: vec![reactor()],
+            reactions: vec![ReactionSlot {
+                id: relation.reaction.clone(),
+                reactor: root.clone(),
+            }],
+            modes: vec![ModeSlot {
+                id: ModeSlotId::new("Root/m").unwrap(),
+                reactor: root.clone(),
+                parent: None,
+                initial: true,
+            }],
+            relationships: vec![relation],
+            groups: vec![
+                DescriptorPlacementGroup {
+                    id: PlacementGroupSlotId::new("z").unwrap(),
+                    parent: None,
+                },
+                DescriptorPlacementGroup {
+                    id: PlacementGroupSlotId::new("a").unwrap(),
+                    parent: None,
+                },
+            ],
+            enclaves: vec![
+                DescriptorEnclave {
+                    id: EnclaveSlotId::new("z").unwrap(),
+                    root: root.clone(),
+                },
+                DescriptorEnclave {
+                    id: EnclaveSlotId::new("a").unwrap(),
+                    root,
+                },
+            ],
+            ..Parts::default()
+        })
+        .unwrap();
+        assert_eq!(
+            descriptor.port_slots().first().map(|slot| slot.direction),
+            None
+        );
+        assert_eq!(
+            descriptor.relationships()[0].mode_transition,
+            Some(ModeTransitionKind::Reset)
+        );
+        assert_eq!(descriptor.placement_groups()[0].id.to_string(), "a");
+        assert_eq!(descriptor.enclaves()[0].id.to_string(), "a");
     }
 
     #[test]
@@ -804,13 +816,13 @@ mod tests {
             };
         }
         dangling!("reactor", reactors: vec![ReactorSlot { id: ReactorSlotId::new("Root").unwrap(), parent: Some(missing_reactor.clone()) }]);
-        dangling!("port", ports: vec![PortSlot { id: PortSlotId::new("Root/p").unwrap(), reactor: missing_reactor.clone(), direction: DescriptorPortDirection::Input }]);
+        dangling!("port", ports: vec![PortSlot { id: PortSlotId::new("Root/p").unwrap(), reactor: missing_reactor.clone(), direction: PortDirection::Input }]);
         dangling!("action", actions: vec![ActionSlot { id: ActionSlotId::new("Root/a").unwrap(), reactor: missing_reactor.clone() }]);
         dangling!("reaction", reactions: vec![ReactionSlot { id: ReactionSlotId::new("Root/r").unwrap(), reactor: missing_reactor.clone() }]);
         dangling!("mode", modes: vec![ModeSlot { id: ModeSlotId::new("Root/m").unwrap(), reactor: missing_reactor.clone(), parent: None, initial: false }]);
         dangling!("state", states: vec![StateSlot { id: StateSlotId::new("Root/s").unwrap(), reactor: missing_reactor.clone() }]);
         dangling!("mode", modes: vec![ModeSlot { id: ModeSlotId::new("Root/m").unwrap(), reactor: ReactorSlotId::new("Root").unwrap(), parent: Some(ModeSlotId::new("Root/missing").unwrap()), initial: false }]);
-        dangling!("placement group", groups: vec![DescriptorPlacementGroup { id: PlacementGroupId::new("group").unwrap(), parent: Some(PlacementGroupId::new("missing").unwrap()) }]);
-        dangling!("Enclave", enclaves: vec![DescriptorEnclave { id: StableEnclaveId::new("enclave").unwrap(), root: missing_reactor }]);
+        dangling!("placement group", groups: vec![DescriptorPlacementGroup { id: PlacementGroupSlotId::new("group").unwrap(), parent: Some(PlacementGroupSlotId::new("missing").unwrap()) }]);
+        dangling!("Enclave", enclaves: vec![DescriptorEnclave { id: EnclaveSlotId::new("enclave").unwrap(), root: missing_reactor }]);
     }
 }

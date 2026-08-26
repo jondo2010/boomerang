@@ -1,6 +1,7 @@
 use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use proc_macro_error2::abort;
 use quote::{format_ident, quote, quote_spanned, ToTokens, TokenStreamExt};
+use std::collections::BTreeSet;
 use syn::{
     braced, parse::Parse, parse_quote, spanned::Spanned, Attribute, FnArg, Ident, Meta, Pat,
     PatIdent, Signature, Type, TypePath, Visibility,
@@ -299,7 +300,9 @@ impl ReactorBody {
             items.push(BodyItem::Tokens(pending));
         }
 
-        Ok(Self { items })
+        let body = Self { items };
+        body.validate_unique_reaction_names()?;
+        Ok(body)
     }
 
     fn parse_reaction_at(
@@ -481,6 +484,23 @@ impl ReactorBody {
         }
     }
 
+    fn validate_unique_reaction_names(&self) -> syn::Result<()> {
+        let mut reactions = Vec::new();
+        self.reactions(None, &mut reactions);
+        let mut names = BTreeSet::new();
+        for (_, reaction) in reactions {
+            if let Some(name) = reaction.name() {
+                if !names.insert(name.to_string()) {
+                    return Err(syn::Error::new(
+                        name.span(),
+                        format!("duplicate reaction name `{name}`"),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     fn modes(&self) -> impl Iterator<Item = &ModeDecl> {
         self.items.iter().filter_map(|item| match item {
@@ -566,18 +586,31 @@ fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
     if reactor_args.contract.is_none() && reactor_args.contract_version.is_none() {
         return TokenStream::new();
     }
-    let descriptor_cfg = quote! {
-        #[allow(unexpected_cfgs)]
-        #[cfg(all(feature = "__boomerang_descriptor", not(feature = "__boomerang_payload")))]
-    };
-
     let (Some(contract), Some(contract_version)) =
         (&reactor_args.contract, &reactor_args.contract_version)
     else {
         return quote! {
-            #descriptor_cfg
             compile_error!("deployment descriptor requires contract and contract_version metadata");
         };
+    };
+
+    let contract_text = contract.value();
+    if contract_text.is_empty()
+        || contract_text.trim() != contract_text
+        || contract_text.chars().any(char::is_control)
+    {
+        return syn::Error::new(
+            contract.span(),
+            "contract must be non-empty, contain no control characters, and have no surrounding whitespace",
+        )
+        .to_compile_error();
+    }
+    let contract_version = match contract_version.base10_parse::<u64>() {
+        Ok(contract_version) => contract_version,
+        Err(_) => {
+            return syn::Error::new(contract_version.span(), "contract_version must fit in u64")
+                .to_compile_error()
+        }
     };
 
     if let Some(span) = model.body.unsupported_span() {
@@ -585,7 +618,6 @@ fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
             compile_error!("deployment descriptor requires reaction! syntax");
         };
         return quote! {
-            #descriptor_cfg
             #diagnostic
         };
     }
@@ -623,6 +655,20 @@ fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
                 reactor: ::boomerang::builder::ReactorSlotId::new(#reactor_name)
                     .expect("macro generated a valid reactor slot"),
                 direction: #direction,
+            }
+        })
+    });
+    let state_slots = model.args.iter().filter_map(|arg| {
+        if !matches!(arg.kind, ArgKind::State { .. }) {
+            return None;
+        }
+        let slot = format!("{reactor_name}/{}", arg.name.ident);
+        Some(quote! {
+            ::boomerang::builder::StateSlot {
+                id: ::boomerang::builder::StateSlotId::new(#slot)
+                    .expect("macro generated a valid state slot"),
+                reactor: ::boomerang::builder::ReactorSlotId::new(#reactor_name)
+                    .expect("macro generated a valid reactor slot"),
             }
         })
     });
@@ -767,21 +813,22 @@ fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
     }
 
     quote! {
-        #descriptor_cfg
+        #[doc(hidden)]
+        const ONLY_ONE_DEPLOYMENT_REACTOR_PER_MODULE: () = ();
+
         pub mod __boomerang {
             /// Returns the canonical host-owned component descriptor.
             pub fn descriptor() -> ::boomerang::builder::ComponentDescriptor {
-                ::boomerang::builder::ComponentDescriptor::new(
-                    ::boomerang::builder::compiler::ContractId::new(#contract)
-                        .expect("reactor contract metadata must be a stable identity"),
-                    #contract_version as u64,
+                ::boomerang::builder::ComponentDescriptor::__from_macro(
+                    #contract,
+                    #contract_version,
                     ::boomerang::builder::COMPONENT_DESCRIPTOR_MACRO_ABI,
                     vec![#reactor_slot],
                     vec![#(#port_slots),*],
                     vec![],
                     vec![#(#reaction_slots),*],
                     vec![#(#mode_slots),*],
-                    vec![],
+                    vec![#(#state_slots),*],
                     vec![],
                     vec![#(#relationships),*],
                     vec![],
@@ -864,8 +911,6 @@ impl ToTokens for ArgsModel {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         let descriptor_output = descriptor_output(&self.0, &self.1);
         let conflict_output = quote! {
-            #[allow(unexpected_cfgs)]
-            #[cfg(all(feature = "__boomerang_descriptor", feature = "__boomerang_payload"))]
             compile_error!("__boomerang_descriptor and __boomerang_payload cannot both be enabled");
         };
         let Self(
@@ -879,11 +924,6 @@ impl ToTokens for ArgsModel {
                 body,
             },
         ) = self;
-
-        let hosted_cfg = quote! {
-            #[allow(unexpected_cfgs)]
-            #[cfg(not(any(feature = "__boomerang_descriptor", feature = "__boomerang_payload")))]
-        };
 
         // Extract generics parts
         let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
@@ -944,7 +984,6 @@ impl ToTokens for ArgsModel {
         );
 
         let port_struct = quote! {
-            #hosted_cfg
             #[reactor_ports]
             #vis struct #ports_name #impl_generics #where_clause {
                 #(#port_args),*
@@ -970,12 +1009,10 @@ impl ToTokens for ArgsModel {
         let state_struct = if reactor_args.state.is_none() {
             let state_struct = if state_args.is_empty() {
                 quote! {
-                    #hosted_cfg
                     #vis type #state_ident = ();
                 }
             } else {
                 quote! {
-                    #hosted_cfg
                     #[derive(Clone)]
                     #vis struct #state_ident #impl_generics #where_clause {
                         #(#state_args),*
@@ -989,7 +1026,6 @@ impl ToTokens for ArgsModel {
 
         let state_impl = if reactor_args.state.is_none() && !state_args.is_empty() {
             Some(quote! {
-                #hosted_cfg
                 impl #impl_generics ::core::default::Default for #state_ident #ty_generics {
                     fn default() -> Self {
                         Self {
@@ -1066,7 +1102,6 @@ impl ToTokens for ArgsModel {
             );
 
             let ports_struct = quote! {
-                #hosted_cfg
                 #vis struct #ports_name #impl_generics #where_clause {
                     #(#ports_struct_fields,)*
                 }
@@ -1200,7 +1235,6 @@ impl ToTokens for ArgsModel {
                 #state_struct
                 #state_impl
 
-                #hosted_cfg
                 #[allow(non_snake_case)]
                 #docs
                 #vis fn #name #impl_generics(#(#param_args,)*) #ret #where_clause {
@@ -1238,7 +1272,6 @@ impl ToTokens for ArgsModel {
                 #state_struct
                 #state_impl
 
-                #hosted_cfg
                 #[allow(non_snake_case)]
                 #docs
                 #vis fn #name #impl_generics(#(#param_args,)*) #ret #where_clause {
@@ -1252,9 +1285,33 @@ impl ToTokens for ArgsModel {
             }
         };
 
-        tokens.append_all(output);
-        tokens.append_all(descriptor_output);
-        tokens.append_all(conflict_output);
+        let facet_module = format_ident!("__boomerang_facets_for_{name}");
+        tokens.append_all(quote! {
+            #[allow(non_snake_case, unexpected_cfgs)]
+            mod #facet_module {
+                #[cfg(not(any(feature = "__boomerang_descriptor", feature = "__boomerang_payload")))]
+                macro_rules! hosted { ($($tokens:tt)*) => { $($tokens)* }; }
+                #[cfg(any(feature = "__boomerang_descriptor", feature = "__boomerang_payload"))]
+                macro_rules! hosted { ($($tokens:tt)*) => {} }
+                pub(super) use hosted;
+
+                #[cfg(all(feature = "__boomerang_descriptor", not(feature = "__boomerang_payload")))]
+                macro_rules! descriptor { ($($tokens:tt)*) => { $($tokens)* }; }
+                #[cfg(not(all(feature = "__boomerang_descriptor", not(feature = "__boomerang_payload"))))]
+                macro_rules! descriptor { ($($tokens:tt)*) => {} }
+                pub(super) use descriptor;
+
+                #[cfg(all(feature = "__boomerang_descriptor", feature = "__boomerang_payload"))]
+                macro_rules! conflict { ($($tokens:tt)*) => { $($tokens)* }; }
+                #[cfg(not(all(feature = "__boomerang_descriptor", feature = "__boomerang_payload")))]
+                macro_rules! conflict { ($($tokens:tt)*) => {} }
+                pub(super) use conflict;
+            }
+
+            #facet_module::hosted! { #output }
+            #facet_module::descriptor! { #descriptor_output }
+            #facet_module::conflict! { #conflict_output }
+        });
     }
 }
 

@@ -231,74 +231,167 @@ impl Default for DescriptorBounds {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DescriptorFingerprintInput {
     /// Stable external contract identity.
-    pub contract_id: ContractId,
+    contract_id: ContractId,
     /// Stable external contract version.
-    pub contract_version: u64,
+    contract_version: u64,
     /// Descriptor macro ABI version.
-    pub macro_abi: u32,
+    macro_abi: u32,
     /// Canonically ordered reactor slots.
-    pub reactor_slots: Box<[ReactorSlot]>,
+    reactor_slots: Box<[ReactorSlot]>,
     /// Canonically ordered port slots.
-    pub port_slots: Box<[PortSlot]>,
+    port_slots: Box<[PortSlot]>,
     /// Canonically ordered action slots.
-    pub action_slots: Box<[ActionSlot]>,
+    action_slots: Box<[ActionSlot]>,
     /// Canonically ordered reaction slots.
-    pub reaction_slots: Box<[ReactionSlot]>,
+    reaction_slots: Box<[ReactionSlot]>,
     /// Canonically ordered mode slots.
-    pub mode_slots: Box<[ModeSlot]>,
+    mode_slots: Box<[ModeSlot]>,
     /// Canonically ordered state slots.
-    pub state_slots: Box<[StateSlot]>,
+    state_slots: Box<[StateSlot]>,
     /// Canonically ordered codec slots.
-    pub codec_slots: Box<[CodecSlot]>,
+    codec_slots: Box<[CodecSlot]>,
     /// Canonically ordered reaction relationships.
-    pub relationships: Box<[DescriptorRelationship]>,
+    relationships: Box<[DescriptorRelationship]>,
     /// Canonically ordered placement groups.
-    pub placement_groups: Box<[DescriptorPlacementGroup]>,
+    placement_groups: Box<[DescriptorPlacementGroup]>,
     /// Canonically ordered Enclaves.
-    pub enclaves: Box<[DescriptorEnclave]>,
+    enclaves: Box<[DescriptorEnclave]>,
     /// Declared resource bounds.
-    pub bounds: DescriptorBounds,
+    bounds: DescriptorBounds,
+}
+
+macro_rules! descriptor_accessors {
+    () => {
+        /// Returns the stable external contract identity.
+        pub fn contract_id(&self) -> &ContractId {
+            &self.contract_id
+        }
+        /// Returns the stable external contract version.
+        pub fn contract_version(&self) -> u64 {
+            self.contract_version
+        }
+        /// Returns the descriptor macro ABI version.
+        pub fn macro_abi(&self) -> u32 {
+            self.macro_abi
+        }
+        /// Returns the canonically ordered reactor slots.
+        pub fn reactor_slots(&self) -> &[ReactorSlot] {
+            &self.reactor_slots
+        }
+        /// Returns the canonically ordered port slots.
+        pub fn port_slots(&self) -> &[PortSlot] {
+            &self.port_slots
+        }
+        /// Returns the canonically ordered action slots.
+        pub fn action_slots(&self) -> &[ActionSlot] {
+            &self.action_slots
+        }
+        /// Returns the canonically ordered reaction slots.
+        pub fn reaction_slots(&self) -> &[ReactionSlot] {
+            &self.reaction_slots
+        }
+        /// Returns the canonically ordered mode slots.
+        pub fn mode_slots(&self) -> &[ModeSlot] {
+            &self.mode_slots
+        }
+        /// Returns the canonically ordered state slots.
+        pub fn state_slots(&self) -> &[StateSlot] {
+            &self.state_slots
+        }
+        /// Returns the canonically ordered codec slots.
+        pub fn codec_slots(&self) -> &[CodecSlot] {
+            &self.codec_slots
+        }
+        /// Returns the canonically ordered reaction relationships.
+        pub fn relationships(&self) -> &[DescriptorRelationship] {
+            &self.relationships
+        }
+        /// Returns the canonically ordered placement groups.
+        pub fn placement_groups(&self) -> &[DescriptorPlacementGroup] {
+            &self.placement_groups
+        }
+        /// Returns the canonically ordered Enclaves.
+        pub fn enclaves(&self) -> &[DescriptorEnclave] {
+            &self.enclaves
+        }
+        /// Returns the declared resource bounds.
+        pub fn bounds(&self) -> DescriptorBounds {
+            self.bounds
+        }
+    };
+}
+
+impl DescriptorFingerprintInput {
+    descriptor_accessors!();
+}
+
+/// Invalid structure supplied while constructing a component descriptor.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum DescriptorBuildError {
+    /// Two slots in the same binding category have the same identity.
+    #[error("duplicate {kind} slot `{id}`")]
+    DuplicateSlot {
+        /// Binding category containing the duplicate.
+        kind: &'static str,
+        /// Duplicated stable identity.
+        id: String,
+    },
+    /// A relationship refers to a slot absent from the descriptor.
+    #[error("relationship from `{reaction}` references missing {target}")]
+    DanglingRelation {
+        /// Source reaction identity.
+        reaction: String,
+        /// Missing source or target identity and category.
+        target: String,
+    },
 }
 
 /// Host-owned structural descriptor generated for one component implementation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ComponentDescriptor {
     /// Stable external contract identity.
-    pub contract_id: ContractId,
+    contract_id: ContractId,
     /// Stable external contract version.
-    pub contract_version: u64,
+    contract_version: u64,
     /// Descriptor macro ABI version.
-    pub macro_abi: u32,
+    macro_abi: u32,
     /// Canonically ordered reactor slots.
-    pub reactor_slots: Box<[ReactorSlot]>,
+    reactor_slots: Box<[ReactorSlot]>,
     /// Canonically ordered port slots.
-    pub port_slots: Box<[PortSlot]>,
+    port_slots: Box<[PortSlot]>,
     /// Canonically ordered action slots.
-    pub action_slots: Box<[ActionSlot]>,
+    action_slots: Box<[ActionSlot]>,
     /// Canonically ordered reaction slots.
-    pub reaction_slots: Box<[ReactionSlot]>,
+    reaction_slots: Box<[ReactionSlot]>,
     /// Canonically ordered mode slots.
-    pub mode_slots: Box<[ModeSlot]>,
+    mode_slots: Box<[ModeSlot]>,
     /// Canonically ordered state slots.
-    pub state_slots: Box<[StateSlot]>,
+    state_slots: Box<[StateSlot]>,
     /// Canonically ordered codec slots.
-    pub codec_slots: Box<[CodecSlot]>,
+    codec_slots: Box<[CodecSlot]>,
     /// Canonically ordered reaction relationships.
-    pub relationships: Box<[DescriptorRelationship]>,
+    relationships: Box<[DescriptorRelationship]>,
     /// Canonically ordered placement groups.
-    pub placement_groups: Box<[DescriptorPlacementGroup]>,
+    placement_groups: Box<[DescriptorPlacementGroup]>,
     /// Canonically ordered Enclaves.
-    pub enclaves: Box<[DescriptorEnclave]>,
+    enclaves: Box<[DescriptorEnclave]>,
     /// Declared resource bounds.
-    pub bounds: DescriptorBounds,
+    bounds: DescriptorBounds,
     /// Typed canonical input for descriptor fingerprinting.
-    pub descriptor_fingerprint_input: DescriptorFingerprintInput,
+    descriptor_fingerprint_input: DescriptorFingerprintInput,
 }
 
 impl ComponentDescriptor {
-    /// Constructs and canonically orders one generated descriptor.
+    descriptor_accessors!();
+
+    /// Returns the immutable canonical fingerprint input.
+    pub fn descriptor_fingerprint_input(&self) -> &DescriptorFingerprintInput {
+        &self.descriptor_fingerprint_input
+    }
+
+    /// Validates, constructs, and canonically orders one descriptor.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn try_new(
         contract_id: ContractId,
         contract_version: u64,
         macro_abi: u32,
@@ -313,7 +406,7 @@ impl ComponentDescriptor {
         mut placement_groups: Vec<DescriptorPlacementGroup>,
         mut enclaves: Vec<DescriptorEnclave>,
         bounds: DescriptorBounds,
-    ) -> Self {
+    ) -> Result<Self, DescriptorBuildError> {
         reactor_slots.sort_by(|left, right| left.id.cmp(&right.id));
         port_slots.sort_by(|left, right| left.id.cmp(&right.id));
         action_slots.sort_by(|left, right| left.id.cmp(&right.id));
@@ -331,6 +424,52 @@ impl ComponentDescriptor {
         });
         placement_groups.sort_by(|left, right| left.id.cmp(&right.id));
         enclaves.sort_by(|left, right| left.id.cmp(&right.id));
+
+        reject_duplicate_slots(&reactor_slots, "reactor", |slot| &slot.id)?;
+        reject_duplicate_slots(&port_slots, "port", |slot| &slot.id)?;
+        reject_duplicate_slots(&action_slots, "action", |slot| &slot.id)?;
+        reject_duplicate_slots(&reaction_slots, "reaction", |slot| &slot.id)?;
+        reject_duplicate_slots(&mode_slots, "mode", |slot| &slot.id)?;
+        reject_duplicate_slots(&state_slots, "state", |slot| &slot.id)?;
+        reject_duplicate_slots(&codec_slots, "codec", |slot| &slot.id)?;
+        reject_duplicate_slots(&placement_groups, "placement group", |slot| &slot.id)?;
+        reject_duplicate_slots(&enclaves, "Enclave", |slot| &slot.id)?;
+
+        for relationship in &relationships {
+            let reaction = relationship.reaction.to_string();
+            if reaction_slots
+                .binary_search_by(|slot| slot.id.cmp(&relationship.reaction))
+                .is_err()
+            {
+                return Err(DescriptorBuildError::DanglingRelation {
+                    target: format!("reaction slot `{reaction}`"),
+                    reaction,
+                });
+            }
+            let target = match &relationship.target {
+                DescriptorRelationshipTarget::Port(id)
+                    if port_slots.binary_search_by(|slot| slot.id.cmp(id)).is_err() =>
+                {
+                    Some(format!("port slot `{id}`"))
+                }
+                DescriptorRelationshipTarget::Action(id)
+                    if action_slots
+                        .binary_search_by(|slot| slot.id.cmp(id))
+                        .is_err() =>
+                {
+                    Some(format!("action slot `{id}`"))
+                }
+                DescriptorRelationshipTarget::Mode(id)
+                    if mode_slots.binary_search_by(|slot| slot.id.cmp(id)).is_err() =>
+                {
+                    Some(format!("mode slot `{id}`"))
+                }
+                _ => None,
+            };
+            if let Some(target) = target {
+                return Err(DescriptorBuildError::DanglingRelation { reaction, target });
+            }
+        }
 
         let reactor_slots = reactor_slots.into_boxed_slice();
         let port_slots = port_slots.into_boxed_slice();
@@ -359,7 +498,7 @@ impl ComponentDescriptor {
             bounds,
         };
 
-        Self {
+        Ok(Self {
             contract_id,
             contract_version,
             macro_abi,
@@ -375,6 +514,153 @@ impl ComponentDescriptor {
             enclaves,
             bounds,
             descriptor_fingerprint_input,
+        })
+    }
+
+    /// Constructs a descriptor whose literals and structure were validated by the reactor macro.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn __from_macro(
+        contract: &'static str,
+        contract_version: u64,
+        macro_abi: u32,
+        reactor_slots: Vec<ReactorSlot>,
+        port_slots: Vec<PortSlot>,
+        action_slots: Vec<ActionSlot>,
+        reaction_slots: Vec<ReactionSlot>,
+        mode_slots: Vec<ModeSlot>,
+        state_slots: Vec<StateSlot>,
+        codec_slots: Vec<CodecSlot>,
+        relationships: Vec<DescriptorRelationship>,
+        placement_groups: Vec<DescriptorPlacementGroup>,
+        enclaves: Vec<DescriptorEnclave>,
+        bounds: DescriptorBounds,
+    ) -> Self {
+        let contract_id = ContractId::new(contract).expect("reactor macro validated contract text");
+        Self::try_new(
+            contract_id,
+            contract_version,
+            macro_abi,
+            reactor_slots,
+            port_slots,
+            action_slots,
+            reaction_slots,
+            mode_slots,
+            state_slots,
+            codec_slots,
+            relationships,
+            placement_groups,
+            enclaves,
+            bounds,
+        )
+        .expect("reactor macro generated a valid component descriptor")
+    }
+}
+
+fn reject_duplicate_slots<T, I>(
+    slots: &[T],
+    kind: &'static str,
+    id: impl Fn(&T) -> &I,
+) -> Result<(), DescriptorBuildError>
+where
+    I: Eq + ToString,
+{
+    if let Some(pair) = slots.windows(2).find(|pair| id(&pair[0]) == id(&pair[1])) {
+        return Err(DescriptorBuildError::DuplicateSlot {
+            kind,
+            id: id(&pair[0]).to_string(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reactor() -> ReactorSlot {
+        ReactorSlot {
+            id: ReactorSlotId::new("Root").unwrap(),
+            parent: None,
         }
+    }
+
+    fn port(name: &str) -> PortSlot {
+        PortSlot {
+            id: PortSlotId::new(format!("Root/{name}")).unwrap(),
+            reactor: ReactorSlotId::new("Root").unwrap(),
+            direction: DescriptorPortDirection::Input,
+        }
+    }
+
+    fn build(
+        ports: Vec<PortSlot>,
+        reactions: Vec<ReactionSlot>,
+        relationships: Vec<DescriptorRelationship>,
+    ) -> Result<ComponentDescriptor, DescriptorBuildError> {
+        ComponentDescriptor::try_new(
+            ContractId::new("example.contract").unwrap(),
+            1,
+            COMPONENT_DESCRIPTOR_MACRO_ABI,
+            vec![reactor()],
+            ports,
+            vec![],
+            reactions,
+            vec![],
+            vec![],
+            vec![],
+            relationships,
+            vec![],
+            vec![],
+            DescriptorBounds::default(),
+        )
+    }
+
+    #[test]
+    fn canonical_order_is_input_order_insensitive() {
+        let left = build(vec![port("z"), port("a")], vec![], vec![]).unwrap();
+        let right = build(vec![port("a"), port("z")], vec![], vec![]).unwrap();
+        assert_eq!(left.port_slots()[0].id.to_string(), "Root/a");
+        assert_eq!(
+            left.descriptor_fingerprint_input(),
+            right.descriptor_fingerprint_input()
+        );
+    }
+
+    #[test]
+    fn duplicate_slots_and_dangling_relations_are_rejected() {
+        assert!(matches!(
+            build(vec![port("a"), port("a")], vec![], vec![]),
+            Err(DescriptorBuildError::DuplicateSlot { kind: "port", .. })
+        ));
+
+        let missing_reaction = ReactionSlotId::new("Root/missing").unwrap();
+        let relation = DescriptorRelationship {
+            reaction: missing_reaction,
+            kind: DescriptorRelationshipKind::Trigger,
+            target: DescriptorRelationshipTarget::Lifecycle(DescriptorLifecycle::Startup),
+            mode_transition: None,
+            declaration_position: 0,
+        };
+        assert!(matches!(
+            build(vec![], vec![], vec![relation]),
+            Err(DescriptorBuildError::DanglingRelation { .. })
+        ));
+
+        let reaction = ReactionSlot {
+            id: ReactionSlotId::new("Root/reaction").unwrap(),
+            reactor: ReactorSlotId::new("Root").unwrap(),
+        };
+        let relation = DescriptorRelationship {
+            reaction: reaction.id.clone(),
+            kind: DescriptorRelationshipKind::Use,
+            target: DescriptorRelationshipTarget::Port(PortSlotId::new("Root/missing").unwrap()),
+            mode_transition: None,
+            declaration_position: 0,
+        };
+        assert!(matches!(
+            build(vec![], vec![reaction], vec![relation]),
+            Err(DescriptorBuildError::DanglingRelation { .. })
+        ));
     }
 }

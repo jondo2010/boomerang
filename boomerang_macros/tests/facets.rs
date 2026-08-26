@@ -17,6 +17,7 @@ fn cargo(fixture: &str, subcommand: &str, args: &[&str]) -> Result<(), String> {
         .arg(manifest)
         .args(args)
         .env("CARGO_TARGET_DIR", target_dir)
+        .env("RUSTFLAGS", "-D warnings")
         .output()
         .expect("cargo check should start");
     let _ = fs::remove_file(
@@ -43,7 +44,7 @@ fn cargo_test(fixture: &str, args: &[&str]) -> Result<(), String> {
 
 #[test]
 fn descriptor_mode_excludes_reaction_payloads() {
-    cargo_check("descriptor-pass", &["--features", "__boomerang_descriptor"]).unwrap();
+    cargo_test("descriptor-pass", &["--features", "__boomerang_descriptor"]).unwrap();
 }
 
 #[test]
@@ -70,6 +71,11 @@ fn descriptor_mode_excludes_metadata_free_reactor_payloads() {
 }
 
 #[test]
+fn payload_mode_excludes_metadata_free_hosted_expansion() {
+    cargo_check("metadata-free", &["--features", "__boomerang_payload"]).unwrap();
+}
+
+#[test]
 fn reserved_modes_conflict_for_complete_metadata() {
     let stderr = cargo_check(
         "descriptor-pass",
@@ -91,6 +97,63 @@ fn reserved_modes_conflict_for_metadata_free_reactors() {
     .expect_err("reserved modes should conflict");
     assert!(
         stderr.contains("__boomerang_descriptor and __boomerang_payload cannot both be enabled"),
+        "unexpected compiler diagnostic:\n{stderr}"
+    );
+}
+
+#[test]
+fn feature_free_hosted_consumer_has_no_cfg_warnings() {
+    cargo_check("feature-free", &[]).unwrap();
+}
+
+#[test]
+fn descriptor_mode_rejects_contract_version_overflow() {
+    let stderr = cargo_check(
+        "descriptor-overflow",
+        &["--features", "__boomerang_descriptor"],
+    )
+    .expect_err("overflowing contract version should fail");
+    assert!(
+        stderr.contains("contract_version must fit in u64"),
+        "unexpected compiler diagnostic:\n{stderr}"
+    );
+}
+
+#[test]
+fn descriptor_mode_rejects_invalid_contract_text() {
+    let stderr = cargo_check(
+        "descriptor-invalid-contract",
+        &["--features", "__boomerang_descriptor"],
+    )
+    .expect_err("invalid contract text should fail");
+    assert!(
+        stderr.contains("contract must be non-empty, contain no control characters"),
+        "unexpected compiler diagnostic:\n{stderr}"
+    );
+}
+
+#[test]
+fn descriptor_mode_rejects_multiple_reactors_per_module() {
+    let stderr = cargo_check(
+        "descriptor-multiple",
+        &["--features", "__boomerang_descriptor"],
+    )
+    .expect_err("multiple descriptor reactors should fail");
+    assert!(
+        stderr.contains("ONLY_ONE_DEPLOYMENT_REACTOR_PER_MODULE"),
+        "unexpected compiler diagnostic:\n{stderr}"
+    );
+}
+
+#[test]
+fn descriptor_mode_rejects_duplicate_named_reactions() {
+    let stderr = cargo_check(
+        "descriptor-duplicate-reaction",
+        &["--features", "__boomerang_descriptor"],
+    )
+    .expect_err("duplicate named reactions should fail");
+    assert!(
+        stderr.contains("duplicate reaction name"),
         "unexpected compiler diagnostic:\n{stderr}"
     );
 }

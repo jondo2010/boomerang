@@ -1042,6 +1042,19 @@ fn application_topology_debug_uses_stable_structure() {
     assert!(!formatted.contains("AssemblyReactorKey"));
     assert_eq!(formatted.matches("placement/root/alternate").count(), 2);
 
+    let compact = formatted.split_whitespace().collect::<String>();
+    for relation in [
+        r#"ReactionRelation{target:"action:root/tick",flags:["trigger",],"#,
+        r#"ReactionRelation{target:"port:root/out",flags:["effect",],"#,
+        r#"ReactionRelation{target:"port:root/in",flags:["use",],"#,
+    ] {
+        assert!(
+            compact.contains(relation),
+            "missing relation {relation} from {compact}"
+        );
+    }
+    assert!(compact.contains(r#"Connection{source:"root/out",target:"root/in",semantics:"#));
+
     let reactor_groups = topology.reactors_debug_grouped();
     assert_eq!(reactor_groups.len(), 2);
     assert_eq!(reactor_groups[1].0.to_string(), "root/workers/#b0");

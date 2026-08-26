@@ -97,7 +97,10 @@ impl ApplicationTopology {
 }
 
 /// Formats one canonical stable identity using its public text representation.
-struct Canonical<'a, T>(&'a T);
+struct Canonical<'a, T>(
+    /// Stable identity rendered canonically.
+    &'a T,
+);
 
 impl<T: fmt::Display> fmt::Debug for Canonical<'_, T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -128,7 +131,10 @@ fn bank_member(member: Option<BankMember>) -> Option<String> {
 }
 
 /// Structural reactor fields rendered through stable identities.
-struct ReactorDebug<'a>(&'a Reactor);
+struct ReactorDebug<'a>(
+    /// Structural reactor record.
+    &'a Reactor,
+);
 
 impl fmt::Debug for ReactorDebug<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -164,7 +170,10 @@ impl<T: fmt::Debug> fmt::Debug for GroupedValues<T> {
 }
 
 /// Structural action fields rendered through stable identities.
-struct ActionDebug<'a>(&'a Action);
+struct ActionDebug<'a>(
+    /// Structural action record.
+    &'a Action,
+);
 
 impl fmt::Debug for ActionDebug<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -179,7 +188,10 @@ impl fmt::Debug for ActionDebug<'_> {
 }
 
 /// Structural port fields rendered through stable identities.
-struct PortDebug<'a>(&'a Port);
+struct PortDebug<'a>(
+    /// Structural port record.
+    &'a Port,
+);
 
 impl fmt::Debug for PortDebug<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -195,7 +207,10 @@ impl fmt::Debug for PortDebug<'_> {
 }
 
 /// Stable reaction target and relation flags.
-struct RelationDebug<'a>(&'a ReactionRelation);
+struct RelationDebug<'a>(
+    /// Structural reaction relation.
+    &'a ReactionRelation,
+);
 
 impl fmt::Debug for RelationDebug<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -224,7 +239,10 @@ impl fmt::Debug for RelationDebug<'_> {
 }
 
 /// Structural reaction fields rendered through stable identities.
-struct ReactionDebug<'a>(&'a Reaction);
+struct ReactionDebug<'a>(
+    /// Structural reaction record.
+    &'a Reaction,
+);
 
 impl fmt::Debug for ReactionDebug<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -265,7 +283,10 @@ impl fmt::Debug for ReactionDebug<'_> {
 }
 
 /// Structural connection fields rendered through stable identities.
-struct ConnectionDebug<'a>(&'a Connection);
+struct ConnectionDebug<'a>(
+    /// Structural connection record.
+    &'a Connection,
+);
 
 impl fmt::Debug for ConnectionDebug<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -279,7 +300,10 @@ impl fmt::Debug for ConnectionDebug<'_> {
 }
 
 /// Structural mode fields rendered through stable identities.
-struct ModeDebug<'a>(&'a Mode);
+struct ModeDebug<'a>(
+    /// Structural mode record.
+    &'a Mode,
+);
 
 impl fmt::Debug for ModeDebug<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -293,7 +317,10 @@ impl fmt::Debug for ModeDebug<'_> {
 }
 
 /// Structural Enclave fields rendered through stable identities.
-struct EnclaveDebug<'a>(&'a Enclave);
+struct EnclaveDebug<'a>(
+    /// Structural Enclave record.
+    &'a Enclave,
+);
 
 impl fmt::Debug for EnclaveDebug<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -305,7 +332,10 @@ impl fmt::Debug for EnclaveDebug<'_> {
 }
 
 /// Structural placement-group fields rendered through stable identities.
-struct PlacementGroupDebug<'a>(&'a PlacementGroup);
+struct PlacementGroupDebug<'a>(
+    /// Structural placement-group record.
+    &'a PlacementGroup,
+);
 
 impl fmt::Debug for PlacementGroupDebug<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

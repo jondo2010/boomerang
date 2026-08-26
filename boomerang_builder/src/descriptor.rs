@@ -541,19 +541,19 @@ impl ComponentDescriptor {
         let placement_groups = placement_groups.into_boxed_slice();
         let enclaves = enclaves.into_boxed_slice();
         let canonical = DescriptorFingerprintInput {
-            contract_id: contract_id.clone(),
+            contract_id,
             contract_version,
             macro_abi,
-            reactor_slots: reactor_slots.clone(),
-            port_slots: port_slots.clone(),
-            action_slots: action_slots.clone(),
-            reaction_slots: reaction_slots.clone(),
-            mode_slots: mode_slots.clone(),
-            state_slots: state_slots.clone(),
-            codec_slots: codec_slots.clone(),
-            relationships: relationships.clone(),
-            placement_groups: placement_groups.clone(),
-            enclaves: enclaves.clone(),
+            reactor_slots,
+            port_slots,
+            action_slots,
+            reaction_slots,
+            mode_slots,
+            state_slots,
+            codec_slots,
+            relationships,
+            placement_groups,
+            enclaves,
             bounds,
         };
 

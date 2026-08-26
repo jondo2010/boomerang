@@ -24,13 +24,38 @@ fn bank_family(path: &StablePath, bank: Option<BankMember>) -> StablePath {
     }
 }
 
+/// One scalar declaration or explicit typed bank family.
+struct DebugGroup<'a, Id> {
+    /// Stable identities in canonical member order.
+    members: Vec<&'a Id>,
+    /// Whether the declarations carry typed bank metadata.
+    bank: bool,
+}
+
+impl<'a, Id> DebugGroup<'a, Id> {
+    /// Returns the first identity and the last identity for an explicit bank.
+    fn range(&self) -> (&'a Id, Option<&'a Id>) {
+        let first = self.members[0];
+        let last = self.bank.then(|| self.members[self.members.len() - 1]);
+        (first, last)
+    }
+}
+
 /// Groups validated stable identities by scalar declaration or typed bank family.
-fn grouped<'a, Id: Ord>(
+fn grouped<'a, Id>(
     declarations: impl Iterator<Item = (&'a Id, &'a StablePath, Option<BankMember>)>,
-) -> Vec<Vec<&'a Id>> {
-    let mut groups = BTreeMap::<StablePath, Vec<&Id>>::new();
+) -> Vec<DebugGroup<'a, Id>> {
+    let mut groups = BTreeMap::<StablePath, DebugGroup<Id>>::new();
     for (id, path, bank) in declarations {
-        groups.entry(bank_family(path, bank)).or_default().push(id);
+        let is_bank = bank.is_some();
+        let group = groups
+            .entry(bank_family(path, bank))
+            .or_insert_with(|| DebugGroup {
+                members: Vec::new(),
+                bank: is_bank,
+            });
+        debug_assert_eq!(group.bank, is_bank);
+        group.members.push(id);
     }
     groups.into_values().collect()
 }
@@ -39,30 +64,25 @@ impl ApplicationTopology {
     /// Returns stable reactor ranges grouped by explicit typed bank segments.
     ///
     /// Scalar declarations have no last identity. Bank declarations return their canonical first
-    /// and last member identities without exposing any runtime or construction-order key.
+    /// and last member identities without exposing any runtime or construction-order key. A
+    /// singleton bank returns its sole identity as both first and last.
     pub fn reactors_debug_grouped(&self) -> Vec<(&ReactorId, Option<&ReactorId>)> {
         grouped(
             self.reactors()
                 .map(|(id, reactor)| (id, id.path(), reactor.bank())),
         )
         .into_iter()
-        .map(|group| {
-            let first = group[0];
-            let last = (group.len() > 1).then(|| group[group.len() - 1]);
-            (first, last)
-        })
+        .map(|group| group.range())
         .collect()
     }
 
     /// Returns stable port ranges grouped by explicit typed bank segments.
+    ///
+    /// A singleton bank returns its sole identity as both first and last.
     pub fn ports_debug_grouped(&self) -> Vec<(&PortId, Option<&PortId>)> {
         grouped(self.ports().map(|(id, port)| (id, id.path(), port.bank())))
             .into_iter()
-            .map(|group| {
-                let first = group[0];
-                let last = (group.len() > 1).then(|| group[group.len() - 1]);
-                (first, last)
-            })
+            .map(|group| group.range())
             .collect()
     }
 
@@ -74,15 +94,15 @@ impl ApplicationTopology {
         );
         let mut representatives = BTreeMap::new();
         for group in &groups {
-            let representative = group[0];
-            for member in group {
+            let representative = group.members[0];
+            for member in &group.members {
                 representatives.insert(*member, representative);
             }
         }
 
         let mut graph = DiGraphMap::new();
         for group in groups {
-            let representative = group[0];
+            let representative = group.members[0];
             graph.add_node(representative);
             if let Some(parent) = self
                 .reactor(representative)
@@ -157,15 +177,18 @@ impl fmt::Debug for ReactorDebug<'_> {
 struct GroupedValues<T> {
     /// Structural records in stable member order.
     values: Vec<T>,
+    /// Whether the records form an explicit typed bank.
+    bank: bool,
 }
 
 impl<T: fmt::Debug> fmt::Debug for GroupedValues<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let [value] = self.values.as_slice() {
-            value.fmt(formatter)
-        } else {
-            formatter.debug_list().entries(&self.values).finish()
+        if !self.bank {
+            if let [value] = self.values.as_slice() {
+                return value.fmt(formatter);
+            }
         }
+        formatter.debug_list().entries(&self.values).finish()
     }
 }
 
@@ -366,13 +389,14 @@ impl fmt::Debug for ApplicationTopology {
                             .map(|(id, reactor)| (id, id.path(), reactor.bank())),
                     )
                     .into_iter()
-                    .map(|members| {
-                        let first = members[0];
-                        let last = (members.len() > 1).then(|| members[members.len() - 1]);
+                    .map(|group| {
+                        let (first, last) = group.range();
                         (
                             CanonicalRange { first, last },
                             GroupedValues {
-                                values: members
+                                bank: group.bank,
+                                values: group
+                                    .members
                                     .into_iter()
                                     .map(|id| {
                                         ReactorDebug(
@@ -402,13 +426,14 @@ impl fmt::Debug for ApplicationTopology {
                 .entries(
                     grouped(self.ports().map(|(id, port)| (id, id.path(), port.bank())))
                         .into_iter()
-                        .map(|members| {
-                            let first = members[0];
-                            let last = (members.len() > 1).then(|| members[members.len() - 1]);
+                        .map(|group| {
+                            let (first, last) = group.range();
                             (
                                 CanonicalRange { first, last },
                                 GroupedValues {
-                                    values: members
+                                    bank: group.bank,
+                                    values: group
+                                        .members
                                         .into_iter()
                                         .map(|id| {
                                             PortDebug(

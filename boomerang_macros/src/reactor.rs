@@ -13,6 +13,10 @@ use crate::util::convert_from_snake_case;
 pub struct ReactorArgs {
     /// The name of the state type to use. If not provided, a state struct will be generated.
     state: Option<TypePath>,
+    /// Stable component contract identity for descriptor builds.
+    contract: Option<syn::LitStr>,
+    /// Stable component contract version for descriptor builds.
+    contract_version: Option<syn::LitInt>,
 }
 
 #[derive(Clone, Debug)]
@@ -250,6 +254,7 @@ impl ModeDecl {
 enum BodyItem {
     Tokens(TokenStream),
     Mode(ModeDecl),
+    Reaction(crate::reaction::Model),
 }
 
 #[derive(Debug)]
@@ -275,8 +280,17 @@ impl ReactorBody {
                     idx += consumed;
                 }
                 None => {
-                    pending.extend(std::iter::once(tokens[idx].clone()));
-                    idx += 1;
+                    if let Some((reaction, consumed)) = Self::parse_reaction_at(&tokens, idx)? {
+                        if !pending.is_empty() {
+                            items.push(BodyItem::Tokens(pending));
+                            pending = TokenStream::new();
+                        }
+                        items.push(BodyItem::Reaction(reaction));
+                        idx += consumed;
+                    } else {
+                        pending.extend(std::iter::once(tokens[idx].clone()));
+                        idx += 1;
+                    }
                 }
             }
         }
@@ -286,6 +300,29 @@ impl ReactorBody {
         }
 
         Ok(Self { items })
+    }
+
+    fn parse_reaction_at(
+        tokens: &[TokenTree],
+        idx: usize,
+    ) -> syn::Result<Option<(crate::reaction::Model, usize)>> {
+        if !tokens
+            .get(idx)
+            .is_some_and(|token| is_ident(token, "reaction"))
+            || !tokens.get(idx + 1).is_some_and(is_bang)
+        {
+            return Ok(None);
+        }
+        let Some(TokenTree::Group(group)) = tokens.get(idx + 2) else {
+            return Ok(None);
+        };
+        let reaction = syn::parse2::<crate::reaction::Model>(group.stream())?;
+        let consumed = if tokens.get(idx + 3).is_some_and(is_semicolon) {
+            4
+        } else {
+            3
+        };
+        Ok(Some((reaction, consumed)))
     }
 
     fn parse_mode_at(
@@ -406,6 +443,7 @@ impl ReactorBody {
         for item in &self.items {
             match item {
                 BodyItem::Tokens(body_tokens) => tokens.append_all(body_tokens.clone()),
+                BodyItem::Reaction(reaction) => reaction.to_tokens(&mut tokens),
                 BodyItem::Mode(mode) => {
                     let key_ident = mode.key_ident();
                     let body = mode.body.body_tokens();
@@ -421,11 +459,33 @@ impl ReactorBody {
         tokens
     }
 
+    fn unsupported_span(&self) -> Option<Span> {
+        self.items.iter().find_map(|item| match item {
+            BodyItem::Tokens(tokens) => tokens.clone().into_iter().next().map(|token| token.span()),
+            BodyItem::Mode(mode) => mode.body.unsupported_span(),
+            BodyItem::Reaction(_) => None,
+        })
+    }
+
+    fn reactions<'a>(
+        &'a self,
+        scope: Option<&'a ModeDecl>,
+        output: &mut Vec<(Option<&'a ModeDecl>, &'a crate::reaction::Model)>,
+    ) {
+        for item in &self.items {
+            match item {
+                BodyItem::Mode(mode) => mode.body.reactions(Some(mode), output),
+                BodyItem::Reaction(reaction) => output.push((scope, reaction)),
+                BodyItem::Tokens(_) => {}
+            }
+        }
+    }
+
     #[cfg(test)]
     fn modes(&self) -> impl Iterator<Item = &ModeDecl> {
         self.items.iter().filter_map(|item| match item {
             BodyItem::Mode(mode) => Some(mode),
-            BodyItem::Tokens(_) => None,
+            BodyItem::Tokens(_) | BodyItem::Reaction(_) => None,
         })
     }
 }
@@ -436,6 +496,330 @@ fn is_ident(token: &TokenTree, expected: &str) -> bool {
 
 fn is_bang(token: &TokenTree) -> bool {
     matches!(token, TokenTree::Punct(punct) if punct.as_char() == '!')
+}
+
+fn is_semicolon(token: &TokenTree) -> bool {
+    matches!(token, TokenTree::Punct(punct) if punct.as_char() == ';')
+}
+
+fn path_text(path: &crate::reaction::PathOrIdent) -> String {
+    match path {
+        crate::reaction::PathOrIdent::Simple(ident) => ident.to_string(),
+        crate::reaction::PathOrIdent::Field(field) => {
+            let base = match field.base.as_ref() {
+                syn::Expr::Path(path) => path
+                    .path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("/"),
+                other => quote!(#other).to_string().replace([' ', '.'], ""),
+            };
+            format!("{base}/{}", field.member.to_token_stream())
+        }
+    }
+}
+
+fn relationship_target(
+    reactor_name: &str,
+    port_names: &[String],
+    mode_names: &[String],
+    path: &crate::reaction::PathOrIdent,
+) -> (TokenStream, bool) {
+    let path = path_text(path);
+    let slot = format!("{reactor_name}/{path}");
+    if !path.contains('/') && port_names.contains(&path) {
+        (
+            quote! {
+                ::boomerang::builder::DescriptorRelationshipTarget::Port(
+                    ::boomerang::builder::PortSlotId::new(#slot)
+                        .expect("macro generated a valid port slot"),
+                )
+            },
+            false,
+        )
+    } else if !path.contains('/') && mode_names.contains(&path) {
+        (
+            quote! {
+                ::boomerang::builder::DescriptorRelationshipTarget::Mode(
+                    ::boomerang::builder::ModeSlotId::new(#slot)
+                        .expect("macro generated a valid mode slot"),
+                )
+            },
+            true,
+        )
+    } else {
+        (
+            quote! {
+                ::boomerang::builder::DescriptorRelationshipTarget::Lexical(
+                    #slot.parse::<::boomerang::builder::compiler::StablePath>()
+                        .expect("macro generated a valid lexical target"),
+                )
+            },
+            false,
+        )
+    }
+}
+
+fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
+    if reactor_args.contract.is_none() && reactor_args.contract_version.is_none() {
+        return TokenStream::new();
+    }
+    let conflict = quote! {
+        #[allow(unexpected_cfgs)]
+        #[cfg(all(feature = "__boomerang_descriptor", feature = "__boomerang_payload"))]
+        compile_error!("__boomerang_descriptor and __boomerang_payload cannot both be enabled");
+    };
+    let descriptor_cfg = quote! {
+        #[allow(unexpected_cfgs)]
+        #[cfg(all(feature = "__boomerang_descriptor", not(feature = "__boomerang_payload")))]
+    };
+
+    let (Some(contract), Some(contract_version)) =
+        (&reactor_args.contract, &reactor_args.contract_version)
+    else {
+        return quote! {
+            #conflict
+            #descriptor_cfg
+            compile_error!("deployment descriptor requires contract and contract_version metadata");
+        };
+    };
+
+    if let Some(span) = model.body.unsupported_span() {
+        let diagnostic = quote_spanned! {span =>
+            compile_error!("deployment descriptor requires reaction! syntax");
+        };
+        return quote! {
+            #conflict
+            #descriptor_cfg
+            #diagnostic
+        };
+    }
+
+    let name = &model.name;
+    let reactor_name = name.to_string();
+    let reactor_slot = quote! {
+        ::boomerang::builder::ReactorSlot {
+            id: ::boomerang::builder::ReactorSlotId::new(#reactor_name)
+                .expect("macro generated a valid reactor slot"),
+            parent: None,
+        }
+    };
+    let port_names = model
+        .args
+        .iter()
+        .filter_map(|arg| match arg.kind {
+            ArgKind::Input { .. } | ArgKind::Output { .. } => Some(arg.name.ident.to_string()),
+            ArgKind::State { .. } | ArgKind::Param { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    let port_slots = model.args.iter().filter_map(|arg| {
+        let direction = match arg.kind {
+            ArgKind::Input { .. } => quote!(::boomerang::builder::DescriptorPortDirection::Input),
+            ArgKind::Output { .. } => {
+                quote!(::boomerang::builder::DescriptorPortDirection::Output)
+            }
+            ArgKind::State { .. } | ArgKind::Param { .. } => return None,
+        };
+        let slot = format!("{reactor_name}/{}", arg.name.ident);
+        Some(quote! {
+            ::boomerang::builder::PortSlot {
+                id: ::boomerang::builder::PortSlotId::new(#slot)
+                    .expect("macro generated a valid port slot"),
+                reactor: ::boomerang::builder::ReactorSlotId::new(#reactor_name)
+                    .expect("macro generated a valid reactor slot"),
+                direction: #direction,
+            }
+        })
+    });
+
+    let modes = model
+        .body
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            BodyItem::Mode(mode) => Some(mode),
+            BodyItem::Tokens(_) | BodyItem::Reaction(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let mode_names = modes
+        .iter()
+        .map(|mode| mode.name.to_string())
+        .collect::<Vec<_>>();
+    let mode_slots = modes.iter().map(|mode| {
+        let slot = format!("{reactor_name}/{}", mode.name);
+        let initial = mode.initial;
+        quote! {
+            ::boomerang::builder::ModeSlot {
+                id: ::boomerang::builder::ModeSlotId::new(#slot)
+                    .expect("macro generated a valid mode slot"),
+                reactor: ::boomerang::builder::ReactorSlotId::new(#reactor_name)
+                    .expect("macro generated a valid reactor slot"),
+                parent: None,
+                initial: #initial,
+            }
+        }
+    });
+
+    let mut reactions = Vec::new();
+    model.body.reactions(None, &mut reactions);
+    let mut reaction_slots = Vec::new();
+    let mut relationships = Vec::new();
+    for (ordinal, (scope, reaction)) in reactions.into_iter().enumerate() {
+        let reaction_segment = reaction
+            .name()
+            .map_or_else(|| format!("#g{ordinal}"), ToString::to_string);
+        let reaction_slot = format!("{reactor_name}/{reaction_segment}");
+        reaction_slots.push(quote! {
+            ::boomerang::builder::ReactionSlot {
+                id: ::boomerang::builder::ReactionSlotId::new(#reaction_slot)
+                    .expect("macro generated a valid reaction slot"),
+                reactor: ::boomerang::builder::ReactorSlotId::new(#reactor_name)
+                    .expect("macro generated a valid reactor slot"),
+            }
+        });
+
+        for (position, trigger) in reaction.triggers().iter().enumerate() {
+            let target = match trigger {
+                crate::reaction::TriggerType::Startup => quote! {
+                    ::boomerang::builder::DescriptorRelationshipTarget::Lifecycle(
+                        ::boomerang::builder::DescriptorLifecycle::Startup,
+                    )
+                },
+                crate::reaction::TriggerType::Shutdown => quote! {
+                    ::boomerang::builder::DescriptorRelationshipTarget::Lifecycle(
+                        ::boomerang::builder::DescriptorLifecycle::Shutdown,
+                    )
+                },
+                crate::reaction::TriggerType::Reset => quote! {
+                    ::boomerang::builder::DescriptorRelationshipTarget::Lifecycle(
+                        ::boomerang::builder::DescriptorLifecycle::Reset,
+                    )
+                },
+                crate::reaction::TriggerType::Regular(path) => {
+                    relationship_target(&reactor_name, &port_names, &mode_names, path).0
+                }
+            };
+            relationships.push(relationship_tokens(
+                &reaction_slot,
+                quote!(::boomerang::builder::DescriptorRelationshipKind::Trigger),
+                target,
+                quote!(None),
+                position,
+            ));
+        }
+        for (position, path) in reaction.uses().iter().enumerate() {
+            let target = relationship_target(&reactor_name, &port_names, &mode_names, path).0;
+            relationships.push(relationship_tokens(
+                &reaction_slot,
+                quote!(::boomerang::builder::DescriptorRelationshipKind::Use),
+                target,
+                quote!(None),
+                position,
+            ));
+        }
+        for (position, effect) in reaction.effects().iter().enumerate() {
+            let path = match effect {
+                crate::reaction::EffectType::Regular(path)
+                | crate::reaction::EffectType::Reset(path)
+                | crate::reaction::EffectType::History(path) => path,
+            };
+            let (target, is_mode) =
+                relationship_target(&reactor_name, &port_names, &mode_names, path);
+            let is_transition = matches!(
+                effect,
+                crate::reaction::EffectType::Reset(_) | crate::reaction::EffectType::History(_)
+            );
+            let kind = if is_mode || is_transition {
+                quote!(::boomerang::builder::DescriptorRelationshipKind::Mode)
+            } else {
+                quote!(::boomerang::builder::DescriptorRelationshipKind::Effect)
+            };
+            let transition = match effect {
+                crate::reaction::EffectType::History(_) => quote! {
+                    Some(::boomerang::builder::DescriptorModeTransition::History)
+                },
+                crate::reaction::EffectType::Reset(_) => quote! {
+                    Some(::boomerang::builder::DescriptorModeTransition::Reset)
+                },
+                crate::reaction::EffectType::Regular(_) if is_mode => quote! {
+                    Some(::boomerang::builder::DescriptorModeTransition::Reset)
+                },
+                crate::reaction::EffectType::Regular(_) => quote!(None),
+            };
+            relationships.push(relationship_tokens(
+                &reaction_slot,
+                kind,
+                target,
+                transition,
+                position,
+            ));
+        }
+        if let Some(scope) = scope {
+            let mode_slot = format!("{reactor_name}/{}", scope.name);
+            relationships.push(relationship_tokens(
+                &reaction_slot,
+                quote!(::boomerang::builder::DescriptorRelationshipKind::Scope),
+                quote! {
+                    ::boomerang::builder::DescriptorRelationshipTarget::Mode(
+                        ::boomerang::builder::ModeSlotId::new(#mode_slot)
+                            .expect("macro generated a valid mode slot"),
+                    )
+                },
+                quote!(None),
+                0,
+            ));
+        }
+    }
+
+    quote! {
+        #conflict
+        #descriptor_cfg
+        pub mod __boomerang {
+            /// Returns the canonical host-owned component descriptor.
+            pub fn descriptor() -> ::boomerang::builder::ComponentDescriptor {
+                ::boomerang::builder::ComponentDescriptor::new(
+                    ::boomerang::builder::compiler::ContractId::new(#contract)
+                        .expect("reactor contract metadata must be a stable identity"),
+                    #contract_version as u64,
+                    ::boomerang::builder::COMPONENT_DESCRIPTOR_MACRO_ABI,
+                    vec![#reactor_slot],
+                    vec![#(#port_slots),*],
+                    vec![],
+                    vec![#(#reaction_slots),*],
+                    vec![#(#mode_slots),*],
+                    vec![],
+                    vec![],
+                    vec![#(#relationships),*],
+                    vec![],
+                    vec![],
+                    ::boomerang::builder::DescriptorBounds::default(),
+                )
+            }
+        }
+    }
+}
+
+fn relationship_tokens(
+    reaction_slot: &str,
+    kind: TokenStream,
+    target: TokenStream,
+    mode_transition: TokenStream,
+    declaration_position: usize,
+) -> TokenStream {
+    let declaration_position = u32::try_from(declaration_position)
+        .expect("reaction relationship count exceeds descriptor representation");
+    quote! {
+        ::boomerang::builder::DescriptorRelationship {
+            reaction: ::boomerang::builder::ReactionSlotId::new(#reaction_slot)
+                .expect("macro generated a valid reaction slot"),
+            kind: #kind,
+            target: #target,
+            mode_transition: #mode_transition,
+            declaration_position: #declaration_position,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -486,6 +870,7 @@ pub struct ArgsModel(pub ReactorArgs, pub Model);
 
 impl ToTokens for ArgsModel {
     fn to_tokens(&self, tokens: &mut TokenStream) {
+        let descriptor_output = descriptor_output(&self.0, &self.1);
         let Self(
             reactor_args,
             Model {
@@ -497,6 +882,17 @@ impl ToTokens for ArgsModel {
                 body,
             },
         ) = self;
+
+        let hosted_cfg = if reactor_args.contract.is_some()
+            || reactor_args.contract_version.is_some()
+        {
+            quote! {
+                #[allow(unexpected_cfgs)]
+                #[cfg(not(any(feature = "__boomerang_descriptor", feature = "__boomerang_payload")))]
+            }
+        } else {
+            TokenStream::new()
+        };
 
         // Extract generics parts
         let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
@@ -557,6 +953,7 @@ impl ToTokens for ArgsModel {
         );
 
         let port_struct = quote! {
+            #hosted_cfg
             #[reactor_ports]
             #vis struct #ports_name #impl_generics #where_clause {
                 #(#port_args),*
@@ -582,10 +979,12 @@ impl ToTokens for ArgsModel {
         let state_struct = if reactor_args.state.is_none() {
             let state_struct = if state_args.is_empty() {
                 quote! {
+                    #hosted_cfg
                     #vis type #state_ident = ();
                 }
             } else {
                 quote! {
+                    #hosted_cfg
                     #[derive(Clone)]
                     #vis struct #state_ident #impl_generics #where_clause {
                         #(#state_args),*
@@ -599,6 +998,7 @@ impl ToTokens for ArgsModel {
 
         let state_impl = if reactor_args.state.is_none() && !state_args.is_empty() {
             Some(quote! {
+                #hosted_cfg
                 impl #impl_generics ::core::default::Default for #state_ident #ty_generics {
                     fn default() -> Self {
                         Self {
@@ -675,6 +1075,7 @@ impl ToTokens for ArgsModel {
             );
 
             let ports_struct = quote! {
+                #hosted_cfg
                 #vis struct #ports_name #impl_generics #where_clause {
                     #(#ports_struct_fields,)*
                 }
@@ -808,6 +1209,7 @@ impl ToTokens for ArgsModel {
                 #state_struct
                 #state_impl
 
+                #hosted_cfg
                 #[allow(non_snake_case)]
                 #docs
                 #vis fn #name #impl_generics(#(#param_args,)*) #ret #where_clause {
@@ -845,6 +1247,7 @@ impl ToTokens for ArgsModel {
                 #state_struct
                 #state_impl
 
+                #hosted_cfg
                 #[allow(non_snake_case)]
                 #docs
                 #vis fn #name #impl_generics(#(#param_args,)*) #ret #where_clause {
@@ -858,7 +1261,8 @@ impl ToTokens for ArgsModel {
             }
         };
 
-        tokens.append_all(output)
+        tokens.append_all(output);
+        tokens.append_all(descriptor_output);
     }
 }
 

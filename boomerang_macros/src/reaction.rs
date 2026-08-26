@@ -204,6 +204,24 @@ pub struct Model {
     code: syn::Block,
 }
 
+impl Model {
+    pub(crate) fn name(&self) -> Option<&Ident> {
+        self.name.as_ref()
+    }
+
+    pub(crate) fn triggers(&self) -> &[TriggerType] {
+        &self.triggers
+    }
+
+    pub(crate) fn uses(&self) -> &[PathOrIdent] {
+        &self.uses
+    }
+
+    pub(crate) fn effects(&self) -> &[EffectType] {
+        &self.effects
+    }
+}
+
 impl Parse for Model {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         // Parse optional name

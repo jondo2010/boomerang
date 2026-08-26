@@ -566,11 +566,6 @@ fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
     if reactor_args.contract.is_none() && reactor_args.contract_version.is_none() {
         return TokenStream::new();
     }
-    let conflict = quote! {
-        #[allow(unexpected_cfgs)]
-        #[cfg(all(feature = "__boomerang_descriptor", feature = "__boomerang_payload"))]
-        compile_error!("__boomerang_descriptor and __boomerang_payload cannot both be enabled");
-    };
     let descriptor_cfg = quote! {
         #[allow(unexpected_cfgs)]
         #[cfg(all(feature = "__boomerang_descriptor", not(feature = "__boomerang_payload")))]
@@ -580,7 +575,6 @@ fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
         (&reactor_args.contract, &reactor_args.contract_version)
     else {
         return quote! {
-            #conflict
             #descriptor_cfg
             compile_error!("deployment descriptor requires contract and contract_version metadata");
         };
@@ -591,7 +585,6 @@ fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
             compile_error!("deployment descriptor requires reaction! syntax");
         };
         return quote! {
-            #conflict
             #descriptor_cfg
             #diagnostic
         };
@@ -774,7 +767,6 @@ fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
     }
 
     quote! {
-        #conflict
         #descriptor_cfg
         pub mod __boomerang {
             /// Returns the canonical host-owned component descriptor.
@@ -871,6 +863,11 @@ pub struct ArgsModel(pub ReactorArgs, pub Model);
 impl ToTokens for ArgsModel {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         let descriptor_output = descriptor_output(&self.0, &self.1);
+        let conflict_output = quote! {
+            #[allow(unexpected_cfgs)]
+            #[cfg(all(feature = "__boomerang_descriptor", feature = "__boomerang_payload"))]
+            compile_error!("__boomerang_descriptor and __boomerang_payload cannot both be enabled");
+        };
         let Self(
             reactor_args,
             Model {
@@ -883,15 +880,9 @@ impl ToTokens for ArgsModel {
             },
         ) = self;
 
-        let hosted_cfg = if reactor_args.contract.is_some()
-            || reactor_args.contract_version.is_some()
-        {
-            quote! {
-                #[allow(unexpected_cfgs)]
-                #[cfg(not(any(feature = "__boomerang_descriptor", feature = "__boomerang_payload")))]
-            }
-        } else {
-            TokenStream::new()
+        let hosted_cfg = quote! {
+            #[allow(unexpected_cfgs)]
+            #[cfg(not(any(feature = "__boomerang_descriptor", feature = "__boomerang_payload")))]
         };
 
         // Extract generics parts
@@ -1263,6 +1254,7 @@ impl ToTokens for ArgsModel {
 
         tokens.append_all(output);
         tokens.append_all(descriptor_output);
+        tokens.append_all(conflict_output);
     }
 }
 

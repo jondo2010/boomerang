@@ -10,10 +10,11 @@ pub use identity::{
     StablePath, StablePathSegment, StableText,
 };
 pub use model::{
-    Action, ActionKind, ApplicationTopology, ApplicationTopologyBuilder, ComponentInstance,
-    Connection, Enclave, Mode, ModeTransition, ModeTransitionKind, PlacementGroup, Port,
-    PortDirection, Reaction, ReactionOptions, ReactionRelation, ReactionRelationFlags,
-    ReactionRelationTarget, Reactor, TopologyBuildError,
+    Action, ActionKind, ApplicationTopology, ApplicationTopologyBuilder, BankMember,
+    ComponentInstance, Connection, ConnectionSemantics, Enclave, InvalidBankMember, Mode,
+    ModeTransition, ModeTransitionKind, PlacementGroup, Port, PortDirection, Reaction,
+    ReactionOptions, ReactionRelation, ReactionRelationFlags, ReactionRelationTarget, Reactor,
+    TopologyBuildError,
 };
 
 #[cfg(test)]

@@ -1,14 +1,28 @@
-use crate::compiler::{ActionId, ModeId, ReactorId};
+use crate::{
+    compiler::{ActionId, ModeId, ReactorId},
+    runtime,
+};
 
-/// Structural action category.
+/// Structural action category and its category-specific timing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActionKind {
     /// Logical action scheduled in logical time.
-    Logical,
+    Logical {
+        /// Optional minimum logical delay before scheduling.
+        minimum_delay: Option<runtime::Duration>,
+    },
     /// Physical action sourced outside logical time.
-    Physical,
+    Physical {
+        /// Optional minimum physical delay before scheduling.
+        minimum_delay: Option<runtime::Duration>,
+    },
     /// Runtime timer action.
-    Timer,
+    Timer {
+        /// Optional timer offset from startup.
+        offset: Option<runtime::Duration>,
+        /// Optional timer period.
+        period: Option<runtime::Duration>,
+    },
     /// Built-in startup action.
     Startup,
     /// Built-in shutdown action.
@@ -24,6 +38,8 @@ pub struct Action {
     pub(super) reactor: ReactorId,
     /// Action category.
     pub(super) kind: ActionKind,
+    /// Position within the owning reactor's action declarations.
+    pub(super) declaration_position: u32,
     /// Optional modal scope.
     pub(super) mode: Option<ModeId>,
 }
@@ -42,6 +58,11 @@ impl Action {
     /// Returns the action category.
     pub fn kind(&self) -> ActionKind {
         self.kind
+    }
+
+    /// Returns the position within the owning reactor's action declarations.
+    pub fn declaration_position(&self) -> u32 {
+        self.declaration_position
     }
 
     /// Returns the optional modal scope.

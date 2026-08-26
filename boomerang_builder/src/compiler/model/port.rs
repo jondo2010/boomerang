@@ -1,3 +1,4 @@
+use super::BankMember;
 use crate::compiler::{ModeId, PortId, ReactorId};
 
 /// Structural direction of a port.
@@ -18,6 +19,10 @@ pub struct Port {
     pub(super) reactor: ReactorId,
     /// Port direction.
     pub(super) direction: PortDirection,
+    /// Optional structural bank membership.
+    pub(super) bank: Option<BankMember>,
+    /// Position within the owning reactor's port declarations.
+    pub(super) declaration_position: u32,
     /// Optional modal scope.
     pub(super) mode: Option<ModeId>,
 }
@@ -36,6 +41,16 @@ impl Port {
     /// Returns the port direction.
     pub fn direction(&self) -> PortDirection {
         self.direction
+    }
+
+    /// Returns the optional structural bank membership.
+    pub fn bank(&self) -> Option<BankMember> {
+        self.bank
+    }
+
+    /// Returns the position within the owning reactor's port declarations.
+    pub fn declaration_position(&self) -> u32 {
+        self.declaration_position
     }
 
     /// Returns the optional modal scope.

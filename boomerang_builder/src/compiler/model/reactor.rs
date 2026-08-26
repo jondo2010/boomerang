@@ -1,3 +1,4 @@
+use super::BankMember;
 use crate::compiler::{ComponentInstanceId, ModeId, PlacementGroupId, ReactorId, StableEnclaveId};
 
 /// Structural reactor declaration using stable identities.
@@ -9,6 +10,8 @@ pub struct Reactor {
     pub(super) component: ComponentInstanceId,
     /// Optional parent reactor identity.
     pub(super) parent: Option<ReactorId>,
+    /// Optional structural bank membership.
+    pub(super) bank: Option<BankMember>,
     /// Enclave containing this reactor.
     pub(super) enclave: StableEnclaveId,
     /// Optional placement-group identity.
@@ -18,6 +21,27 @@ pub struct Reactor {
 }
 
 impl Reactor {
+    /// Creates a structural reactor declaration.
+    pub fn new(
+        id: ReactorId,
+        component: ComponentInstanceId,
+        parent: Option<ReactorId>,
+        bank: Option<BankMember>,
+        enclave: StableEnclaveId,
+        placement_group: Option<PlacementGroupId>,
+        scope_mode: Option<ModeId>,
+    ) -> Self {
+        Self {
+            id,
+            component,
+            parent,
+            bank,
+            enclave,
+            placement_group,
+            scope_mode,
+        }
+    }
+
     /// Returns the stable reactor identity.
     pub fn id(&self) -> &ReactorId {
         &self.id
@@ -31,6 +55,11 @@ impl Reactor {
     /// Returns the optional structural parent identity.
     pub fn parent(&self) -> Option<&ReactorId> {
         self.parent.as_ref()
+    }
+
+    /// Returns the optional structural bank membership.
+    pub fn bank(&self) -> Option<BankMember> {
+        self.bank
     }
 
     /// Returns the containing Enclave identity.

@@ -6,17 +6,19 @@ use std::{
 use super::{
     action::{Action, ActionKind},
     component::ComponentInstance,
-    connection::Connection,
+    connection::{Connection, ConnectionSemantics},
     enclave::Enclave,
     mode::Mode,
     placement_group::PlacementGroup,
     port::{Port, PortDirection},
     reaction::{Reaction, ReactionOptions, ReactionRelation, ReactionRelationTarget},
     reactor::Reactor,
+    BankMember,
 };
 use crate::compiler::{
     ActionId, ApplicationId, BoundaryId, ComponentInstanceId, InvalidStableId, ModeId,
     PlacementGroupId, PortId, ReactionId, ReactorId, StableEnclaveId, StablePath,
+    StablePathSegment,
 };
 
 /// Reports an invalid declaration or cross-entity structural reference.
@@ -144,23 +146,8 @@ impl ApplicationTopologyBuilder {
     }
 
     /// Stages one reactor declaration.
-    pub fn add_reactor(
-        &mut self,
-        id: ReactorId,
-        component: ComponentInstanceId,
-        parent: Option<ReactorId>,
-        enclave: StableEnclaveId,
-        placement_group: Option<PlacementGroupId>,
-        scope_mode: Option<ModeId>,
-    ) -> Result<(), TopologyBuildError> {
-        let reactor = Reactor {
-            id: id.clone(),
-            component,
-            parent,
-            enclave,
-            placement_group,
-            scope_mode,
-        };
+    pub fn add_reactor(&mut self, reactor: Reactor) -> Result<(), TopologyBuildError> {
+        let id = reactor.id.clone();
         insert_unique!(self.reactors, id, reactor, "reactor")
     }
 
@@ -170,12 +157,14 @@ impl ApplicationTopologyBuilder {
         id: ActionId,
         reactor: ReactorId,
         kind: ActionKind,
+        declaration_position: u32,
         mode: Option<ModeId>,
     ) -> Result<(), TopologyBuildError> {
         let action = Action {
             id: id.clone(),
             reactor,
             kind,
+            declaration_position,
             mode,
         };
         insert_unique!(self.actions, id, action, "action")
@@ -187,12 +176,16 @@ impl ApplicationTopologyBuilder {
         id: PortId,
         reactor: ReactorId,
         direction: PortDirection,
+        bank: Option<BankMember>,
+        declaration_position: u32,
         mode: Option<ModeId>,
     ) -> Result<(), TopologyBuildError> {
         let port = Port {
             id: id.clone(),
             reactor,
             direction,
+            bank,
+            declaration_position,
             mode,
         };
         insert_unique!(self.ports, id, port, "port")
@@ -221,11 +214,13 @@ impl ApplicationTopologyBuilder {
         id: BoundaryId,
         source: PortId,
         target: PortId,
+        semantics: ConnectionSemantics,
     ) -> Result<(), TopologyBuildError> {
         let connection = Connection {
             id: id.clone(),
             source,
             target,
+            semantics,
         };
         insert_unique!(self.connections, id, connection, "connection")
     }
@@ -316,7 +311,19 @@ fn validate_child(
     owner: &StablePath,
     kind: &'static str,
 ) -> Result<(), TopologyBuildError> {
-    if child.parent().as_ref() == Some(owner) {
+    let path: &StablePath = child;
+    let immediate_child = path.parent().as_ref() == Some(owner);
+    let typed_suffix_child = match (kind, path.segments().last()) {
+        ("reactor" | "port", Some(StablePathSegment::BankIndex(_)))
+        | ("reaction", Some(StablePathSegment::GeneratedOrdinal(_))) => {
+            path.parent()
+                .and_then(|named_path| named_path.parent())
+                .as_ref()
+                == Some(owner)
+        }
+        _ => false,
+    };
+    if immediate_child || typed_suffix_child {
         Ok(())
     } else {
         Err(invalid_ownership(
@@ -794,7 +801,15 @@ mod tests {
             .add_component(ComponentInstance::new(component.to_string(), "contract").unwrap())
             .unwrap();
         builder
-            .add_reactor(root.clone(), component, None, enclave.clone(), None, None)
+            .add_reactor(Reactor::new(
+                root.clone(),
+                component,
+                None,
+                None,
+                enclave.clone(),
+                None,
+                None,
+            ))
             .unwrap();
         builder.add_enclave(enclave.clone(), root.clone()).unwrap();
         (builder, root, enclave)
@@ -808,16 +823,46 @@ mod tests {
         let p0: PortId = id("vehicle/root/p0");
         let p1: PortId = id("vehicle/root/p1");
         builder
-            .add_action(a0.clone(), reactor.clone(), ActionKind::Logical, None)
+            .add_action(
+                a0.clone(),
+                reactor.clone(),
+                ActionKind::Logical {
+                    minimum_delay: None,
+                },
+                0,
+                None,
+            )
             .unwrap();
         builder
-            .add_action(a1.clone(), reactor.clone(), ActionKind::Logical, None)
+            .add_action(
+                a1.clone(),
+                reactor.clone(),
+                ActionKind::Logical {
+                    minimum_delay: None,
+                },
+                1,
+                None,
+            )
             .unwrap();
         builder
-            .add_port(p0.clone(), reactor.clone(), PortDirection::Input, None)
+            .add_port(
+                p0.clone(),
+                reactor.clone(),
+                PortDirection::Input,
+                None,
+                0,
+                None,
+            )
             .unwrap();
         builder
-            .add_port(p1.clone(), reactor.clone(), PortDirection::Output, None)
+            .add_port(
+                p1.clone(),
+                reactor.clone(),
+                PortDirection::Output,
+                None,
+                1,
+                None,
+            )
             .unwrap();
         let reaction_id: ReactionId = id("vehicle/root/reaction");
         let relations = [
@@ -891,16 +936,46 @@ mod tests {
             let p0: PortId = id("vehicle/root/p0");
             let p1: PortId = id("vehicle/root/p1");
             builder
-                .add_action(a0.clone(), reactor.clone(), ActionKind::Logical, None)
+                .add_action(
+                    a0.clone(),
+                    reactor.clone(),
+                    ActionKind::Logical {
+                        minimum_delay: None,
+                    },
+                    0,
+                    None,
+                )
                 .unwrap();
             builder
-                .add_action(a1.clone(), reactor.clone(), ActionKind::Logical, None)
+                .add_action(
+                    a1.clone(),
+                    reactor.clone(),
+                    ActionKind::Logical {
+                        minimum_delay: None,
+                    },
+                    1,
+                    None,
+                )
                 .unwrap();
             builder
-                .add_port(p0.clone(), reactor.clone(), PortDirection::Input, None)
+                .add_port(
+                    p0.clone(),
+                    reactor.clone(),
+                    PortDirection::Input,
+                    None,
+                    0,
+                    None,
+                )
                 .unwrap();
             builder
-                .add_port(p1.clone(), reactor.clone(), PortDirection::Output, None)
+                .add_port(
+                    p1.clone(),
+                    reactor.clone(),
+                    PortDirection::Output,
+                    None,
+                    1,
+                    None,
+                )
                 .unwrap();
 
             let action0 = ReactionRelation::new(
@@ -983,14 +1058,15 @@ mod tests {
             .add_component(ComponentInstance::new("vehicle/b", "contract").unwrap())
             .unwrap();
         builder
-            .add_reactor(
+            .add_reactor(Reactor::new(
                 id("vehicle/a/root/child"),
                 other,
                 Some(root),
+                None,
                 enclave,
                 None,
                 None,
-            )
+            ))
             .unwrap();
         assert!(matches!(
             builder.finish(),
@@ -1018,17 +1094,26 @@ mod tests {
         let a: ReactorId = id("vehicle/root/a");
         let b: ReactorId = id("vehicle/root/a/b");
         builder
-            .add_reactor(
+            .add_reactor(Reactor::new(
                 a.clone(),
                 id("vehicle"),
                 Some(b.clone()),
+                None,
                 enclave.clone(),
                 None,
                 None,
-            )
+            ))
             .unwrap();
         builder
-            .add_reactor(b, id("vehicle"), Some(a), enclave, None, None)
+            .add_reactor(Reactor::new(
+                b,
+                id("vehicle"),
+                Some(a),
+                None,
+                enclave,
+                None,
+                None,
+            ))
             .unwrap();
         assert!(matches!(
             builder.finish(),
@@ -1044,14 +1129,15 @@ mod tests {
             .add_mode(mode.clone(), root.clone(), None, true)
             .unwrap();
         builder
-            .add_reactor(
+            .add_reactor(Reactor::new(
                 id("vehicle/root/child"),
                 id("vehicle"),
                 Some(root),
+                None,
                 enclave,
                 None,
                 Some(mode),
-            )
+            ))
             .unwrap();
         assert!(builder.finish().is_ok());
 
@@ -1062,7 +1148,15 @@ mod tests {
             .add_mode(mode.clone(), child.clone(), None, true)
             .unwrap();
         child_owned
-            .add_reactor(child, id("vehicle"), Some(root), enclave, None, Some(mode))
+            .add_reactor(Reactor::new(
+                child,
+                id("vehicle"),
+                Some(root),
+                None,
+                enclave,
+                None,
+                Some(mode),
+            ))
             .unwrap();
         assert!(matches!(
             child_owned.finish(),
@@ -1076,24 +1170,26 @@ mod tests {
             .add_mode(mode.clone(), sibling.clone(), None, true)
             .unwrap();
         unrelated
-            .add_reactor(
+            .add_reactor(Reactor::new(
                 sibling,
                 id("vehicle"),
                 Some(root.clone()),
+                None,
                 enclave.clone(),
                 None,
                 None,
-            )
+            ))
             .unwrap();
         unrelated
-            .add_reactor(
+            .add_reactor(Reactor::new(
                 id("vehicle/root/child"),
                 id("vehicle"),
                 Some(root),
+                None,
                 enclave,
                 None,
                 Some(mode),
-            )
+            ))
             .unwrap();
         assert!(matches!(
             unrelated.finish(),
@@ -1131,14 +1227,15 @@ mod tests {
     fn enclave_rejects_a_disconnected_parentless_reactor() {
         let (mut builder, _, enclave) = base("vehicle", "vehicle/root", "vehicle/enclave");
         builder
-            .add_reactor(
+            .add_reactor(Reactor::new(
                 id("vehicle/other"),
                 id("vehicle"),
+                None,
                 None,
                 enclave,
                 None,
                 None,
-            )
+            ))
             .unwrap();
         assert!(matches!(
             builder.finish(),
@@ -1152,14 +1249,15 @@ mod tests {
         let nested: ReactorId = id("vehicle/root/nested");
         let enclave: StableEnclaveId = id("vehicle/nested");
         builder
-            .add_reactor(
+            .add_reactor(Reactor::new(
                 nested.clone(),
                 id("vehicle"),
                 Some(root),
+                None,
                 enclave.clone(),
                 None,
                 None,
-            )
+            ))
             .unwrap();
         builder.add_enclave(enclave, nested).unwrap();
         assert!(builder.finish().is_ok());
@@ -1187,5 +1285,169 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["vehicle/a", "vehicle/b", "vehicle/c"]
         );
+    }
+
+    #[test]
+    fn bank_metadata_is_validated_and_round_trips_without_mutating_accepted_state() {
+        let mut builder = ApplicationTopologyBuilder::new("vehicle").unwrap();
+        let component: ComponentInstanceId = id("vehicle/sensors");
+        let root: ReactorId = id("vehicle/sensors/#b1");
+        let enclave: StableEnclaveId = id("vehicle/enclave");
+        builder
+            .add_component(ComponentInstance::new(component.to_string(), "sensor.v1").unwrap())
+            .unwrap();
+        let accepted = crate::compiler::BankMember::new(1, 3).unwrap();
+        builder
+            .add_reactor(Reactor::new(
+                root.clone(),
+                component,
+                None,
+                Some(accepted),
+                enclave.clone(),
+                None,
+                None,
+            ))
+            .unwrap();
+        let port: PortId = id("vehicle/sensors/#b1/readings/#b2");
+        let port_bank = crate::compiler::BankMember::new(2, 4).unwrap();
+        builder
+            .add_port(
+                port.clone(),
+                root.clone(),
+                PortDirection::Output,
+                Some(port_bank),
+                7,
+                None,
+            )
+            .unwrap();
+        builder.add_enclave(enclave, root.clone()).unwrap();
+
+        assert!(crate::compiler::BankMember::new(0, 0).is_err());
+        assert!(crate::compiler::BankMember::new(3, 3).is_err());
+
+        let topology = builder.finish().unwrap();
+        let reactor_bank = topology.reactor(&root).unwrap().bank().unwrap();
+        assert_eq!((reactor_bank.index(), reactor_bank.total()), (1, 3));
+        let port_bank = topology.port(&port).unwrap().bank().unwrap();
+        assert_eq!((port_bank.index(), port_bank.total()), (2, 4));
+    }
+
+    #[test]
+    fn port_declaration_position_round_trips() {
+        let (mut builder, reactor, _) = base("vehicle", "vehicle/root", "vehicle/enclave");
+        let port: PortId = id("vehicle/root/readings");
+        builder
+            .add_port(port.clone(), reactor, PortDirection::Output, None, 17, None)
+            .unwrap();
+
+        let topology = builder.finish().unwrap();
+        assert_eq!(topology.port(&port).unwrap().declaration_position(), 17);
+    }
+
+    #[test]
+    fn action_positions_and_category_specific_timing_round_trip() {
+        let (mut builder, reactor, _) = base("vehicle", "vehicle/root", "vehicle/enclave");
+        let cases = [
+            (
+                "logical",
+                ActionKind::Logical {
+                    minimum_delay: Some(crate::runtime::Duration::milliseconds(1)),
+                },
+            ),
+            (
+                "physical",
+                ActionKind::Physical {
+                    minimum_delay: Some(crate::runtime::Duration::milliseconds(2)),
+                },
+            ),
+            (
+                "timer",
+                ActionKind::Timer {
+                    offset: Some(crate::runtime::Duration::milliseconds(3)),
+                    period: Some(crate::runtime::Duration::milliseconds(4)),
+                },
+            ),
+            ("startup", ActionKind::Startup),
+            ("shutdown", ActionKind::Shutdown),
+        ];
+        let mut ids = Vec::new();
+        for (position, (name, kind)) in cases.into_iter().enumerate() {
+            let action: ActionId = id(&format!("vehicle/root/{name}"));
+            builder
+                .add_action(action.clone(), reactor.clone(), kind, position as u32, None)
+                .unwrap();
+            ids.push((action, kind, position as u32));
+        }
+
+        let topology = builder.finish().unwrap();
+        for (id, kind, position) in ids {
+            let action = topology.action(&id).unwrap();
+            assert_eq!(action.kind(), kind);
+            assert_eq!(action.declaration_position(), position);
+        }
+    }
+
+    #[test]
+    fn logical_and_physical_connection_semantics_round_trip() {
+        let (mut builder, reactor, _) = base("vehicle", "vehicle/root", "vehicle/enclave");
+        let source: PortId = id("vehicle/root/source");
+        let target: PortId = id("vehicle/root/target");
+        builder
+            .add_port(
+                source.clone(),
+                reactor.clone(),
+                PortDirection::Output,
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+        builder
+            .add_port(target.clone(), reactor, PortDirection::Input, None, 1, None)
+            .unwrap();
+        let logical: BoundaryId = id("vehicle/logical");
+        let physical: BoundaryId = id("vehicle/physical");
+        let logical_semantics = crate::compiler::ConnectionSemantics::Logical {
+            after: Some(crate::runtime::Duration::milliseconds(5)),
+        };
+        let physical_semantics = crate::compiler::ConnectionSemantics::Physical {
+            after: Some(crate::runtime::Duration::milliseconds(6)),
+        };
+        builder
+            .add_connection(
+                logical.clone(),
+                source.clone(),
+                target.clone(),
+                logical_semantics,
+            )
+            .unwrap();
+        builder
+            .add_connection(physical.clone(), source, target, physical_semantics)
+            .unwrap();
+
+        let topology = builder.finish().unwrap();
+        assert_eq!(
+            topology.connection(&logical).unwrap().semantics(),
+            logical_semantics
+        );
+        assert_eq!(
+            topology.connection(&physical).unwrap().semantics(),
+            physical_semantics
+        );
+    }
+
+    #[test]
+    fn named_reaction_typed_ordinal_is_logically_owned_by_its_reactor() {
+        let (mut builder, reactor, _) = base("vehicle", "vehicle/root", "vehicle/enclave");
+        builder
+            .add_reaction(
+                id("vehicle/root/update/#g0"),
+                reactor,
+                [],
+                ReactionOptions::default(),
+            )
+            .unwrap();
+
+        assert!(builder.finish().is_ok());
     }
 }

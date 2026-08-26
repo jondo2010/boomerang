@@ -578,12 +578,46 @@ fn validate_reactors(
     let mut ordinary_bases = BTreeSet::new();
     for reactor in reactors.values() {
         require(components, &reactor.component, &reactor.id, "component")?;
-        let owner = reactor
-            .parent
-            .as_ref()
-            .map(|id| id.path())
-            .unwrap_or(reactor.component.path());
-        match validate_bank_child(&reactor.id, owner, reactor.bank, "reactor")? {
+        let bank = if let Some(parent) = reactor.parent.as_ref() {
+            validate_bank_child(&reactor.id, parent.path(), reactor.bank, "reactor")?
+        } else {
+            // Component ownership is the typed reference above; a top-level reactor path is an
+            // independent name-only ancestry, optionally ending in one typed bank index.
+            match (reactor.id.segments(), reactor.bank) {
+                (segments, None)
+                    if !segments.is_empty()
+                        && segments
+                            .iter()
+                            .all(|segment| matches!(segment, StablePathSegment::Name(_))) =>
+                {
+                    None
+                }
+                (segments, Some(member))
+                    if segments.len() > 1
+                        && matches!(segments.last(), Some(StablePathSegment::BankIndex(index)) if *index == member.index())
+                        && segments[..segments.len() - 1]
+                            .iter()
+                            .all(|segment| matches!(segment, StablePathSegment::Name(_))) =>
+                {
+                    Some((
+                        reactor
+                            .id
+                            .parent()
+                            .expect("bank member has a named base")
+                            .path()
+                            .clone(),
+                        member,
+                    ))
+                }
+                _ => {
+                    return Err(invalid_ownership(
+                        &reactor.id,
+                        "top-level reactor path must be name-only or end in a matching bank index",
+                    ));
+                }
+            }
+        };
+        match bank {
             Some((base, member)) => record_bank_member(&mut bank_families, base, member)?,
             None => {
                 ordinary_bases.insert(reactor.id.path().clone());
@@ -634,9 +668,12 @@ fn validate_reactors(
                     "reactor ancestry crosses an enclave boundary",
                 ));
             }
-            cursor = current.parent.as_ref().ok_or_else(|| {
-                invalid_ownership(&reactor.id, "reactor is disconnected from its enclave root")
-            })?;
+            let Some(parent) = current.parent.as_ref() else {
+                // One scheduler domain may contain multiple disconnected top-level component
+                // trees; ancestry remains structural rather than Enclave ownership.
+                break;
+            };
+            cursor = parent;
         }
     }
     Ok(())
@@ -1035,6 +1072,31 @@ mod tests {
             .unwrap();
         builder.add_enclave(enclave.clone(), root.clone()).unwrap();
         (builder, root, enclave)
+    }
+
+    #[test]
+    fn top_level_reactor_identity_is_independent_of_component_path() {
+        let mut builder = ApplicationTopologyBuilder::new("application").unwrap();
+        let component: ComponentInstanceId = id("component/encoded-root");
+        let root: ReactorId = id("raw-root");
+        let enclave: StableEnclaveId = id("raw-root");
+        builder
+            .add_component(ComponentInstance::new(component.to_string(), "contract").unwrap())
+            .unwrap();
+        builder
+            .add_reactor(Reactor::new(
+                root.clone(),
+                component,
+                None,
+                None,
+                enclave.clone(),
+                None,
+                None,
+            ))
+            .unwrap();
+        builder.add_enclave(enclave, root).unwrap();
+
+        builder.finish().unwrap();
     }
 
     #[test]
@@ -1446,7 +1508,7 @@ mod tests {
     }
 
     #[test]
-    fn enclave_rejects_a_disconnected_parentless_reactor() {
+    fn enclave_accepts_a_disconnected_parentless_reactor() {
         let (mut builder, _, enclave) = base("vehicle", "vehicle/root", "vehicle/root");
         builder
             .add_reactor(Reactor::new(
@@ -1459,9 +1521,42 @@ mod tests {
                 None,
             ))
             .unwrap();
+        assert!(builder.finish().is_ok());
+    }
+
+    #[test]
+    fn enclave_rejects_structural_ancestry_crossing_its_boundary() {
+        let (mut builder, root, _) = base("vehicle", "vehicle/root", "vehicle/root");
+        let nested: ReactorId = id("vehicle/root/nested");
+        let enclave: StableEnclaveId = id("vehicle/root/nested");
+        builder
+            .add_reactor(Reactor::new(
+                nested.clone(),
+                id("vehicle"),
+                Some(root.clone()),
+                None,
+                enclave.clone(),
+                None,
+                None,
+            ))
+            .unwrap();
+        builder.add_enclave(enclave.clone(), nested).unwrap();
+        builder
+            .add_reactor(Reactor::new(
+                id("vehicle/root/wrong"),
+                id("vehicle"),
+                Some(root),
+                None,
+                enclave,
+                None,
+                None,
+            ))
+            .unwrap();
+
         assert!(matches!(
             builder.finish(),
-            Err(TopologyBuildError::InvalidOwnership { .. })
+            Err(TopologyBuildError::InvalidOwnership { reason, .. })
+                if reason.contains("crosses an enclave boundary")
         ));
     }
 

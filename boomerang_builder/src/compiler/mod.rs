@@ -1,6 +1,7 @@
 //! Target-neutral application compiler models.
 #![deny(missing_docs)]
 
+mod from_assembly;
 mod identity;
 mod model;
 

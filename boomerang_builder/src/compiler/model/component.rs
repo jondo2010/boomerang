@@ -10,6 +10,11 @@ pub struct ComponentInstance {
 }
 
 impl ComponentInstance {
+    /// Constructs a component from already validated stable identities.
+    pub(crate) fn from_ids(id: ComponentInstanceId, contract: ContractId) -> Self {
+        Self { id, contract }
+    }
+
     /// Constructs a validated component declaration.
     pub fn new(
         id: impl AsRef<str>,

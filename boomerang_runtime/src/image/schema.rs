@@ -57,13 +57,9 @@ impl IdentityRange {
     }
 
     /// Returns the byte length.
+    #[allow(clippy::len_without_is_empty)]
     pub const fn len(self) -> u32 {
         self.len
-    }
-
-    /// Returns whether the identity has no bytes.
-    pub const fn is_empty(self) -> bool {
-        self.len == 0
     }
 }
 
@@ -99,13 +95,9 @@ impl<K> TableRange<K> {
     }
 
     /// Returns the number of entries.
+    #[allow(clippy::len_without_is_empty)]
     pub const fn len(self) -> u32 {
         self.len
-    }
-
-    /// Returns whether the range has no entries.
-    pub const fn is_empty(self) -> bool {
-        self.len == 0
     }
 }
 
@@ -755,180 +747,4 @@ pub struct EnclaveImage<'a> {
     pub required_bindings: &'a [RequiredBindingImage],
     /// Fixed mutable-storage and workspace bounds.
     pub storage_bounds: StorageBounds,
-}
-
-impl<'a> EnclaveImage<'a> {
-    /// Creates an unchecked borrowed scheduler image.
-    #[allow(clippy::too_many_arguments)]
-    pub const fn new(
-        identity_data: &'a str,
-        enclave_id: IdentityRange,
-        reactors: &'a [ReactorImage],
-        actions: &'a [ActionImage],
-        ports: &'a [PortImage],
-        reactions: &'a [ReactionImage],
-        modes: &'a [ModeImage],
-        scopes: &'a [ScopeImage],
-        reaction_triggers: &'a [LevelReactionImage],
-        reaction_use_ports: &'a [PortIndex],
-        reaction_effect_ports: &'a [PortIndex],
-        reaction_actions: &'a [ActionIndex],
-        reaction_modes: &'a [ModeIndex],
-        scope_descendants: &'a [ScopeIndex],
-        scope_logical_actions: &'a [ActionIndex],
-        scope_timer_startups: &'a [TimerStartupImage],
-        scope_reset_reactions: &'a [LevelReactionImage],
-        scope_startup_reactions: &'a [LifecycleReactionImage],
-        scope_shutdown_reactions: &'a [LifecycleReactionImage],
-        startup_actions: &'a [TimerStartupImage],
-        timer_startup_actions: &'a [TimerStartupImage],
-        shutdown_reactions: &'a [LifecycleReactionImage],
-        shutdown_actions: &'a [ActionIndex],
-        routes: &'a [RouteImage],
-        required_bindings: &'a [RequiredBindingImage],
-        storage_bounds: StorageBounds,
-    ) -> Self {
-        Self {
-            identity_data,
-            enclave_id,
-            reactors,
-            actions,
-            ports,
-            reactions,
-            modes,
-            scopes,
-            reaction_triggers,
-            reaction_use_ports,
-            reaction_effect_ports,
-            reaction_actions,
-            reaction_modes,
-            scope_descendants,
-            scope_logical_actions,
-            scope_timer_startups,
-            scope_reset_reactions,
-            scope_startup_reactions,
-            scope_shutdown_reactions,
-            startup_actions,
-            timer_startup_actions,
-            shutdown_reactions,
-            shutdown_actions,
-            routes,
-            required_bindings,
-            storage_bounds,
-        }
-    }
-
-    /// Returns the stable Enclave identity's blob range.
-    pub const fn enclave_id(&self) -> IdentityRange {
-        self.enclave_id
-    }
-
-    /// Returns the UTF-8 stable-identity storage.
-    pub const fn identity_data(&self) -> &'a str {
-        self.identity_data
-    }
-
-    /// Returns the dense reactor records.
-    pub const fn reactors(&self) -> &'a [ReactorImage] {
-        self.reactors
-    }
-
-    /// Returns the dense action records.
-    pub const fn actions(&self) -> &'a [ActionImage] {
-        self.actions
-    }
-
-    /// Returns the dense port records.
-    pub const fn ports(&self) -> &'a [PortImage] {
-        self.ports
-    }
-
-    /// Returns the dense reaction records.
-    pub const fn reactions(&self) -> &'a [ReactionImage] {
-        self.reactions
-    }
-
-    /// Returns the dense mode records.
-    pub const fn modes(&self) -> &'a [ModeImage] {
-        self.modes
-    }
-
-    /// Returns the dense scope records.
-    pub const fn scopes(&self) -> &'a [ScopeImage] {
-        self.scopes
-    }
-
-    /// Returns flattened action and port triggers.
-    pub const fn reaction_triggers(&self) -> &'a [LevelReactionImage] {
-        self.reaction_triggers
-    }
-    /// Returns flattened reaction use ports.
-    pub const fn reaction_use_ports(&self) -> &'a [PortIndex] {
-        self.reaction_use_ports
-    }
-    /// Returns flattened reaction effect ports.
-    pub const fn reaction_effect_ports(&self) -> &'a [PortIndex] {
-        self.reaction_effect_ports
-    }
-    /// Returns flattened reaction actions.
-    pub const fn reaction_actions(&self) -> &'a [ActionIndex] {
-        self.reaction_actions
-    }
-    /// Returns flattened reaction mode filters.
-    pub const fn reaction_modes(&self) -> &'a [ModeIndex] {
-        self.reaction_modes
-    }
-    /// Returns flattened scope descendants.
-    pub const fn scope_descendants(&self) -> &'a [ScopeIndex] {
-        self.scope_descendants
-    }
-    /// Returns flattened scope logical actions.
-    pub const fn scope_logical_actions(&self) -> &'a [ActionIndex] {
-        self.scope_logical_actions
-    }
-    /// Returns flattened scope timer startups.
-    pub const fn scope_timer_startups(&self) -> &'a [TimerStartupImage] {
-        self.scope_timer_startups
-    }
-    /// Returns flattened scope reset reactions.
-    pub const fn scope_reset_reactions(&self) -> &'a [LevelReactionImage] {
-        self.scope_reset_reactions
-    }
-    /// Returns flattened scope startup reactions.
-    pub const fn scope_startup_reactions(&self) -> &'a [LifecycleReactionImage] {
-        self.scope_startup_reactions
-    }
-    /// Returns flattened scope shutdown reactions.
-    pub const fn scope_shutdown_reactions(&self) -> &'a [LifecycleReactionImage] {
-        self.scope_shutdown_reactions
-    }
-    /// Returns global startup actions.
-    pub const fn startup_actions(&self) -> &'a [TimerStartupImage] {
-        self.startup_actions
-    }
-    /// Returns global timer startup actions.
-    pub const fn timer_startup_actions(&self) -> &'a [TimerStartupImage] {
-        self.timer_startup_actions
-    }
-    /// Returns global shutdown reactions.
-    pub const fn shutdown_reactions(&self) -> &'a [LifecycleReactionImage] {
-        self.shutdown_reactions
-    }
-    /// Returns unique actions populated before global shutdown reactions.
-    pub const fn shutdown_actions(&self) -> &'a [ActionIndex] {
-        self.shutdown_actions
-    }
-    /// Returns boundary routes.
-    pub const fn routes(&self) -> &'a [RouteImage] {
-        self.routes
-    }
-    /// Returns required implementation bindings.
-    pub const fn required_bindings(&self) -> &'a [RequiredBindingImage] {
-        self.required_bindings
-    }
-
-    /// Returns the fixed storage and workspace bounds.
-    pub const fn storage_bounds(&self) -> StorageBounds {
-        self.storage_bounds
-    }
 }

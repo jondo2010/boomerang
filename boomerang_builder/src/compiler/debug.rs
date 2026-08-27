@@ -369,6 +369,22 @@ impl fmt::Debug for PlacementGroupDebug<'_> {
     }
 }
 
+/// Structural component fields rendered without dense compiler keys.
+struct ComponentDebug<'a>(
+    /// Structural component record.
+    &'a crate::compiler::ComponentInstance,
+);
+
+impl fmt::Debug for ComponentDebug<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Component")
+            .field("contract", &self.0.contract().as_str())
+            .field("contract_version", &self.0.contract_version())
+            .finish()
+    }
+}
+
 impl fmt::Debug for ApplicationTopology {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let components = crate::runtime::fmt_utils::from_fn(|formatter| {
@@ -376,7 +392,7 @@ impl fmt::Debug for ApplicationTopology {
                 .debug_map()
                 .entries(
                     self.components()
-                        .map(|(id, component)| (Canonical(id), component.contract().as_str())),
+                        .map(|(id, component)| (Canonical(id), ComponentDebug(component))),
                 )
                 .finish()
         });

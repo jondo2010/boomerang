@@ -149,6 +149,8 @@ fn transition_kind(kind: crate::runtime::TransitionKind) -> ModeTransitionKind {
 }
 
 fn project_application_topology(assembly: &Assembly) -> Result<ApplicationTopology, AssemblyError> {
+    const ASSEMBLY_CONTRACT_VERSION: u64 = 1;
+
     if assembly.reactor_specs.is_empty() {
         return Err(projection_error("assembly has no reactor roots"));
     }
@@ -184,6 +186,7 @@ fn project_application_topology(assembly: &Assembly) -> Result<ApplicationTopolo
             .add_component(ComponentInstance::from_ids(
                 component.clone(),
                 contract.clone(),
+                ASSEMBLY_CONTRACT_VERSION,
             ))
             .map_err(projection_error)?;
         components.insert(*root, component);

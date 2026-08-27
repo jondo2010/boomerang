@@ -1059,7 +1059,7 @@ mod tests {
         let root: ReactorId = id(root);
         let enclave: StableEnclaveId = id(enclave);
         builder
-            .add_component(ComponentInstance::new(component.to_string(), "contract").unwrap())
+            .add_component(ComponentInstance::new(component.to_string(), "contract", 1).unwrap())
             .unwrap();
         builder
             .add_reactor(Reactor::new(
@@ -1083,7 +1083,7 @@ mod tests {
         let root: ReactorId = id("raw-root");
         let enclave: StableEnclaveId = id("raw-root");
         builder
-            .add_component(ComponentInstance::new(component.to_string(), "contract").unwrap())
+            .add_component(ComponentInstance::new(component.to_string(), "contract", 1).unwrap())
             .unwrap();
         builder
             .add_reactor(Reactor::new(
@@ -1341,7 +1341,7 @@ mod tests {
         let (mut builder, root, enclave) = base("vehicle/a", "vehicle/a/root", "vehicle/a/root");
         let other: ComponentInstanceId = id("vehicle/b");
         builder
-            .add_component(ComponentInstance::new("vehicle/b", "contract").unwrap())
+            .add_component(ComponentInstance::new("vehicle/b", "contract", 1).unwrap())
             .unwrap();
         builder
             .add_reactor(Reactor::new(
@@ -1570,7 +1570,7 @@ mod tests {
         let nested: ReactorId = id("vehicle/a/b");
         let enclave: StableEnclaveId = id("vehicle/a/b");
         builder
-            .add_component(ComponentInstance::new(component.to_string(), "contract").unwrap())
+            .add_component(ComponentInstance::new(component.to_string(), "contract", 1).unwrap())
             .unwrap();
         builder
             .add_reactor(Reactor::new(
@@ -1727,7 +1727,7 @@ mod tests {
             let mut builder = ApplicationTopologyBuilder::new("vehicle").unwrap();
             for id in order {
                 builder
-                    .add_component(ComponentInstance::new(id, "sensor.v1").unwrap())
+                    .add_component(ComponentInstance::new(id, "sensor.v1", 1).unwrap())
                     .unwrap();
             }
             builder.finish().unwrap()
@@ -2286,7 +2286,7 @@ mod tests {
         for component in ["vehicle/#b0", "vehicle/#g0/sensor"] {
             let mut builder = ApplicationTopologyBuilder::new("vehicle").unwrap();
             builder
-                .add_component(ComponentInstance::new(component, "sensor.v1").unwrap())
+                .add_component(ComponentInstance::new(component, "sensor.v1", 1).unwrap())
                 .unwrap();
 
             assert!(matches!(
@@ -2375,7 +2375,7 @@ mod tests {
         let root: ReactorId = id("vehicle/root");
         let enclave: StableEnclaveId = id("vehicle/enclave");
         builder
-            .add_component(ComponentInstance::new("vehicle", "vehicle.v1").unwrap())
+            .add_component(ComponentInstance::new("vehicle", "vehicle.v1", 1).unwrap())
             .unwrap();
         builder
             .add_reactor(Reactor::new(
@@ -2403,7 +2403,7 @@ mod tests {
         let root: ReactorId = id("vehicle/sensor/#b0");
         let enclave: StableEnclaveId = id("vehicle/sensor/#b0");
         builder
-            .add_component(ComponentInstance::new("vehicle", "sensor.v1").unwrap())
+            .add_component(ComponentInstance::new("vehicle", "sensor.v1", 1).unwrap())
             .unwrap();
         builder
             .add_reactor(Reactor::new(

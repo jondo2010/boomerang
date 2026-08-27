@@ -777,10 +777,12 @@ fn application_topology_projection_does_not_consume_runtime_assembly() {
         .finish()
         .unwrap();
 
+    let topology = assembly.application_topology().unwrap();
     assert_eq!(
-        assembly.application_topology().unwrap(),
-        assembly.application_topology().unwrap()
+        topology.components().next().unwrap().1.contract_version(),
+        1
     );
+    assert_eq!(topology, assembly.application_topology().unwrap());
     let lowered = assembly
         .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
@@ -892,7 +894,7 @@ fn application_topology_debug_uses_stable_structure() {
 
         let mut topology = ApplicationTopologyBuilder::new("inspection").unwrap();
         topology
-            .add_component(ComponentInstance::new("component/root", "root.v1").unwrap())
+            .add_component(ComponentInstance::new("component/root", "root.v1", 1).unwrap())
             .unwrap();
         topology
             .add_placement_group(placement.clone(), None)
@@ -1089,7 +1091,7 @@ fn singleton_bank_topology() -> (ApplicationTopology, ReactorId, PortId) {
 
     let mut builder = ApplicationTopologyBuilder::new("singleton-bank").unwrap();
     builder
-        .add_component(ComponentInstance::new("component/root", "root.v1").unwrap())
+        .add_component(ComponentInstance::new("component/root", "root.v1", 1).unwrap())
         .unwrap();
     builder
         .add_enclave(enclave.clone(), reactor.clone())

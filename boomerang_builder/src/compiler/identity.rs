@@ -338,7 +338,7 @@ text_id!(
     ApplicationId
 );
 text_id!(
-    /// Stable identity and version of a component contract.
+    /// Stable identity of a component contract.
     ContractId
 );
 text_id!(

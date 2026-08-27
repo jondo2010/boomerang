@@ -217,3 +217,323 @@ impl DescriptorFingerprintInput {
         writer.finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EXPECTED_V1: DescriptorFingerprint = DescriptorFingerprint::new([
+        0x7c, 0x4d, 0x0f, 0xbe, 0x54, 0x2a, 0xbb, 0x62, 0xb3, 0x4d, 0x94, 0x35, 0xdd, 0x3c, 0x0f,
+        0x40, 0x68, 0x88, 0xeb, 0x2d, 0x74, 0x0c, 0x18, 0x37, 0x7f, 0x8d, 0x1a, 0x57, 0x0c, 0x13,
+        0x5f, 0x76,
+    ]);
+
+    /// Controls insertion order for the complete descriptor fixture.
+    #[derive(Clone, Copy)]
+    enum InputOrder {
+        /// Inserts records in their declared order.
+        Forward,
+        /// Inserts records in reverse declared order.
+        Reversed,
+    }
+
+    /// Descriptor parts used by fingerprint contract fixtures.
+    #[derive(Default)]
+    struct FixtureParts {
+        /// Reactor slots.
+        reactors: Vec<ReactorSlot>,
+        /// Port slots.
+        ports: Vec<PortSlot>,
+        /// Action slots.
+        actions: Vec<ActionSlot>,
+        /// Reaction slots.
+        reactions: Vec<ReactionSlot>,
+        /// Mode slots.
+        modes: Vec<ModeSlot>,
+        /// State slots.
+        states: Vec<StateSlot>,
+        /// Codec slots.
+        codecs: Vec<CodecSlot>,
+        /// Structural relationships.
+        relationships: Vec<DescriptorRelationship>,
+        /// Placement groups.
+        groups: Vec<DescriptorPlacementGroup>,
+        /// Enclave declarations.
+        enclaves: Vec<DescriptorEnclave>,
+    }
+
+    fn build_descriptor(
+        parts: FixtureParts,
+        contract_version: u64,
+        macro_abi: u32,
+        bounds: DescriptorBounds,
+    ) -> ComponentDescriptor {
+        ComponentDescriptor::try_new(
+            ContractId::new("example.contract").unwrap(),
+            contract_version,
+            macro_abi,
+            parts.reactors,
+            parts.ports,
+            parts.actions,
+            parts.reactions,
+            parts.modes,
+            parts.states,
+            parts.codecs,
+            parts.relationships,
+            parts.groups,
+            parts.enclaves,
+            bounds,
+        )
+        .unwrap()
+    }
+
+    fn complete_descriptor(order: InputOrder) -> ComponentDescriptor {
+        complete_descriptor_with_contract_version_and_macro_abi(
+            order,
+            1,
+            COMPONENT_DESCRIPTOR_MACRO_ABI,
+        )
+    }
+
+    fn complete_descriptor_with_contract_version(contract_version: u64) -> ComponentDescriptor {
+        complete_descriptor_with_contract_version_and_macro_abi(
+            InputOrder::Forward,
+            contract_version,
+            COMPONENT_DESCRIPTOR_MACRO_ABI,
+        )
+    }
+
+    fn complete_descriptor_with_macro_abi(macro_abi: u32) -> ComponentDescriptor {
+        complete_descriptor_with_contract_version_and_macro_abi(InputOrder::Forward, 1, macro_abi)
+    }
+
+    fn complete_descriptor_with_contract_version_and_macro_abi(
+        order: InputOrder,
+        contract_version: u64,
+        macro_abi: u32,
+    ) -> ComponentDescriptor {
+        let root = ReactorSlotId::new("Root").unwrap();
+        let child = ReactorSlotId::new("Root/child").unwrap();
+        let input = PortSlotId::new("Root/input").unwrap();
+        let output = PortSlotId::new("Root/output").unwrap();
+        let action = ActionSlotId::new("Root/action").unwrap();
+        let reaction = ReactionSlotId::new("Root/reaction").unwrap();
+        let mode = ModeSlotId::new("Root/mode").unwrap();
+        let state = StateSlotId::new("Root/state").unwrap();
+        let mut parts = FixtureParts {
+            reactors: vec![
+                ReactorSlot {
+                    id: child,
+                    parent: Some(root.clone()),
+                },
+                ReactorSlot {
+                    id: root.clone(),
+                    parent: None,
+                },
+            ],
+            ports: vec![
+                PortSlot {
+                    id: output,
+                    reactor: root.clone(),
+                    direction: PortDirection::Output,
+                },
+                PortSlot {
+                    id: input.clone(),
+                    reactor: root.clone(),
+                    direction: PortDirection::Input,
+                },
+            ],
+            actions: vec![ActionSlot {
+                id: action.clone(),
+                reactor: root.clone(),
+            }],
+            reactions: vec![ReactionSlot {
+                id: reaction.clone(),
+                reactor: root.clone(),
+            }],
+            modes: vec![ModeSlot {
+                id: mode.clone(),
+                reactor: root.clone(),
+                parent: None,
+                initial: true,
+            }],
+            states: vec![StateSlot {
+                id: state,
+                reactor: root.clone(),
+            }],
+            codecs: vec![CodecSlot {
+                id: CodecSlotId::new("codec").unwrap(),
+            }],
+            relationships: vec![
+                DescriptorRelationship {
+                    reaction: reaction.clone(),
+                    kind: DescriptorRelationshipKind::Effect,
+                    target: DescriptorRelationshipTarget::Mode(mode),
+                    mode_transition: Some(ModeTransitionKind::History),
+                    declaration_position: 1,
+                },
+                DescriptorRelationship {
+                    reaction: reaction.clone(),
+                    kind: DescriptorRelationshipKind::Trigger,
+                    target: DescriptorRelationshipTarget::Port(input),
+                    mode_transition: None,
+                    declaration_position: 0,
+                },
+                DescriptorRelationship {
+                    reaction: reaction.clone(),
+                    kind: DescriptorRelationshipKind::Use,
+                    target: DescriptorRelationshipTarget::Action(action),
+                    mode_transition: Some(ModeTransitionKind::Reset),
+                    declaration_position: 2,
+                },
+                DescriptorRelationship {
+                    reaction: reaction.clone(),
+                    kind: DescriptorRelationshipKind::Scope,
+                    target: DescriptorRelationshipTarget::Lexical(
+                        StablePath::from_name("lexical").unwrap(),
+                    ),
+                    mode_transition: None,
+                    declaration_position: 3,
+                },
+                DescriptorRelationship {
+                    reaction,
+                    kind: DescriptorRelationshipKind::Mode,
+                    target: DescriptorRelationshipTarget::Lifecycle(DescriptorLifecycle::Shutdown),
+                    mode_transition: None,
+                    declaration_position: 4,
+                },
+            ],
+            groups: vec![DescriptorPlacementGroup {
+                id: PlacementGroupSlotId::new("group").unwrap(),
+                parent: None,
+            }],
+            enclaves: vec![DescriptorEnclave {
+                id: EnclaveSlotId::new("enclave").unwrap(),
+                root,
+            }],
+        };
+        if matches!(order, InputOrder::Reversed) {
+            parts.reactors.reverse();
+            parts.ports.reverse();
+            parts.actions.reverse();
+            parts.reactions.reverse();
+            parts.modes.reverse();
+            parts.states.reverse();
+            parts.codecs.reverse();
+            parts.relationships.reverse();
+            parts.groups.reverse();
+            parts.enclaves.reverse();
+        }
+        build_descriptor(
+            parts,
+            contract_version,
+            macro_abi,
+            DescriptorBounds {
+                queue_capacity: DescriptorBound::Known(1),
+                payload_bytes: DescriptorBound::Known(2),
+                state_bytes: DescriptorBound::Unknown,
+                scratch_bytes: DescriptorBound::Known(4),
+            },
+        )
+    }
+
+    fn descriptor_with_port_direction(direction: PortDirection) -> ComponentDescriptor {
+        let root = ReactorSlotId::new("Root").unwrap();
+        build_descriptor(
+            FixtureParts {
+                reactors: vec![ReactorSlot {
+                    id: root.clone(),
+                    parent: None,
+                }],
+                ports: vec![PortSlot {
+                    id: PortSlotId::new("Root/value").unwrap(),
+                    reactor: root,
+                    direction,
+                }],
+                ..FixtureParts::default()
+            },
+            1,
+            COMPONENT_DESCRIPTOR_MACRO_ABI,
+            DescriptorBounds::default(),
+        )
+    }
+
+    fn descriptor_with_ports(names: &[&str]) -> ComponentDescriptor {
+        let root = ReactorSlotId::new("Root").unwrap();
+        build_descriptor(
+            FixtureParts {
+                reactors: vec![ReactorSlot {
+                    id: root.clone(),
+                    parent: None,
+                }],
+                ports: names
+                    .iter()
+                    .map(|name| PortSlot {
+                        id: PortSlotId::new(format!("Root/{name}")).unwrap(),
+                        reactor: root.clone(),
+                        direction: PortDirection::Input,
+                    })
+                    .collect(),
+                ..FixtureParts::default()
+            },
+            1,
+            COMPONENT_DESCRIPTOR_MACRO_ABI,
+            DescriptorBounds::default(),
+        )
+    }
+
+    #[test]
+    fn canonical_order_is_input_order_insensitive() {
+        let left = descriptor_with_ports(&["z", "a"]);
+        let right = descriptor_with_ports(&["a", "z"]);
+        assert_eq!(left.port_slots()[0].id.to_string(), "Root/a");
+        assert_eq!(
+            left.descriptor_fingerprint_input(),
+            right.descriptor_fingerprint_input()
+        );
+        assert!(std::ptr::eq(
+            left.contract_id(),
+            left.descriptor_fingerprint_input().contract_id()
+        ));
+        assert!(std::ptr::eq(
+            left.port_slots(),
+            left.descriptor_fingerprint_input().port_slots()
+        ));
+    }
+
+    #[test]
+    fn descriptor_fingerprint_is_canonical_and_semantically_sensitive() {
+        let forward = complete_descriptor(InputOrder::Forward);
+        let reversed = complete_descriptor(InputOrder::Reversed);
+        let fingerprint = forward.descriptor_fingerprint_input().fingerprint();
+        assert_eq!(fingerprint, EXPECTED_V1);
+        assert_eq!(
+            fingerprint,
+            reversed.descriptor_fingerprint_input().fingerprint(),
+        );
+        assert_ne!(
+            fingerprint,
+            complete_descriptor_with_contract_version(2)
+                .descriptor_fingerprint_input()
+                .fingerprint(),
+        );
+        assert_ne!(
+            fingerprint,
+            complete_descriptor_with_macro_abi(COMPONENT_DESCRIPTOR_MACRO_ABI + 1)
+                .descriptor_fingerprint_input()
+                .fingerprint(),
+        );
+    }
+
+    #[test]
+    fn descriptor_fingerprint_changes_with_port_direction() {
+        assert_ne!(
+            descriptor_with_port_direction(PortDirection::Input)
+                .descriptor_fingerprint_input()
+                .fingerprint(),
+            descriptor_with_port_direction(PortDirection::Output)
+                .descriptor_fingerprint_input()
+                .fingerprint(),
+        );
+    }
+}

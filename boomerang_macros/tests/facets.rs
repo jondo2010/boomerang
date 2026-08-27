@@ -67,7 +67,11 @@ fn hosted_mode_preserves_metadata_free_reactors() {
 
 #[test]
 fn hosted_mode_defers_duplicate_mode_validation_to_the_builder() {
-    cargo_check("hosted-duplicate-mode", &[]).unwrap();
+    cargo_check(
+        "descriptor-duplicate-reaction",
+        &["--features", "duplicate-mode"],
+    )
+    .unwrap();
 }
 
 #[test]
@@ -82,13 +86,19 @@ fn payload_mode_excludes_metadata_free_hosted_expansion() {
 
 #[test]
 fn payload_mode_exports_matching_binding_manifest() {
-    cargo_test("payload-pass", &["--features", "__boomerang_payload"]).unwrap();
+    cargo_test("descriptor-pass", &["--features", "__boomerang_payload"]).unwrap();
 }
 
 #[test]
 fn payload_launcher_rejects_a_descriptor_fingerprint_mismatch() {
-    let stderr = cargo_check("payload-mismatch", &["--features", "__boomerang_payload"])
-        .expect_err("payload fingerprint mismatch should fail");
+    let stderr = cargo_check(
+        "descriptor-pass",
+        &[
+            "--features",
+            "__boomerang_payload binding-fingerprint-mismatch",
+        ],
+    )
+    .expect_err("payload fingerprint mismatch should fail");
     assert!(
         stderr.contains("descriptor fingerprint mismatch"),
         "unexpected compiler diagnostic:\n{stderr}"
@@ -124,8 +134,11 @@ fn reserved_modes_conflict_for_metadata_free_reactors() {
 #[test]
 fn reserved_modes_conflict_before_payload_descriptor_validation() {
     let stderr = cargo_check(
-        "hosted-duplicate-mode",
-        &["--features", "__boomerang_descriptor __boomerang_payload"],
+        "descriptor-duplicate-reaction",
+        &[
+            "--features",
+            "__boomerang_descriptor __boomerang_payload duplicate-mode",
+        ],
     )
     .expect_err("reserved modes should conflict before payload descriptor validation");
     assert!(

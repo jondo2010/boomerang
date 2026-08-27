@@ -7,6 +7,7 @@ publish = false
 [features]
 __boomerang_descriptor = []
 __boomerang_payload = []
+duplicate-mode = []
 
 [dependencies]
 boomerang = { path = "../../../../boomerang" }

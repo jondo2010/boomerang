@@ -598,6 +598,7 @@ fn relationship_target(
     }
 }
 
+/// Builds a compiler stable path from macro-normalized name segments.
 fn stable_path_value(segments: &[String]) -> boomerang_builder::compiler::StablePath {
     let (first, rest) = segments.split_first().expect("stable paths are non-empty");
     let mut path = boomerang_builder::compiler::StablePath::from_name(first.clone())
@@ -610,6 +611,7 @@ fn stable_path_value(segments: &[String]) -> boomerang_builder::compiler::Stable
     path
 }
 
+/// Resolves a reaction reference and reports whether it denotes a mode.
 fn payload_relationship_target(
     reactor_name: &str,
     port_names: &[String],
@@ -643,6 +645,7 @@ fn payload_relationship_target(
     }
 }
 
+/// Generates the payload facet's target-safe compatibility module.
 fn payload_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
     if reactor_args.contract.is_none() && reactor_args.contract_version.is_none() {
         return TokenStream::new();

@@ -60,7 +60,7 @@ impl BindingManifest {
     }
 }
 
-/// Rejects a descriptor/payload mismatch during const evaluation.
+/// Const-asserts that a launcher's expected fingerprint matches its payload facet.
 pub const fn assert_descriptor_fingerprint(
     expected: DescriptorFingerprint,
     actual: DescriptorFingerprint,

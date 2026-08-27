@@ -117,7 +117,7 @@ impl FederateConfig {
 /// Coordination backend selected for the deployment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CoordinationSelection {
-    /// All Federates coordinate in one local process.
+    /// A one-Federate deployment requires no distributed coordination.
     Local,
     /// Federates coordinate through the selected distributed backend.
     Distributed {

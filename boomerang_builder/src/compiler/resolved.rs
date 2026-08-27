@@ -170,49 +170,63 @@ impl ResolvedDeployment {
         boundary_bindings: impl IntoIterator<Item = BoundaryBinding>,
     ) -> Result<Self, ResolveError> {
         let mut canonical_bindings = BTreeMap::new();
+        let mut duplicate_component_bindings = BTreeSet::new();
         for binding in bindings {
             let component = binding.component().clone();
             if canonical_bindings
                 .insert(component.clone(), binding)
                 .is_some()
             {
-                return Err(ResolveError::DuplicateComponentBinding { component });
+                duplicate_component_bindings.insert(component);
             }
+        }
+        if let Some(component) = duplicate_component_bindings.into_iter().next() {
+            return Err(ResolveError::DuplicateComponentBinding { component });
         }
 
         let mut canonical_placements = BTreeMap::new();
+        let mut duplicate_placement_assignments = BTreeSet::new();
         for assignment in placements {
             let placement_group = assignment.placement_group().clone();
             if canonical_placements
                 .insert(placement_group.clone(), assignment)
                 .is_some()
             {
-                return Err(ResolveError::DuplicatePlacementAssignment { placement_group });
+                duplicate_placement_assignments.insert(placement_group);
             }
+        }
+        if let Some(placement_group) = duplicate_placement_assignments.into_iter().next() {
+            return Err(ResolveError::DuplicatePlacementAssignment { placement_group });
         }
 
         let mut canonical_federates = BTreeMap::new();
+        let mut duplicate_federate_configs = BTreeSet::new();
         for federate in federates {
             let federate_id = federate.id().clone();
             if canonical_federates
                 .insert(federate_id.clone(), federate)
                 .is_some()
             {
-                return Err(ResolveError::DuplicateFederateConfig {
-                    federate: federate_id,
-                });
+                duplicate_federate_configs.insert(federate_id);
             }
+        }
+        if let Some(federate) = duplicate_federate_configs.into_iter().next() {
+            return Err(ResolveError::DuplicateFederateConfig { federate });
         }
 
         let mut canonical_boundary_bindings = BTreeMap::new();
+        let mut duplicate_boundary_bindings = BTreeSet::new();
         for binding in boundary_bindings {
             let boundary = binding.boundary().clone();
             if canonical_boundary_bindings
                 .insert(boundary.clone(), binding)
                 .is_some()
             {
-                return Err(ResolveError::DuplicateBoundaryBinding { boundary });
+                duplicate_boundary_bindings.insert(boundary);
             }
+        }
+        if let Some(boundary) = duplicate_boundary_bindings.into_iter().next() {
+            return Err(ResolveError::DuplicateBoundaryBinding { boundary });
         }
 
         for binding in canonical_bindings.values() {
@@ -634,6 +648,157 @@ mod tests {
         .unwrap()
     }
 
+    fn resolution_error(
+        bindings: impl IntoIterator<Item = ImplementationBinding>,
+        placements: impl IntoIterator<Item = PlacementAssignment>,
+        federates: impl IntoIterator<Item = FederateConfig>,
+        coordination: CoordinationSelection,
+        boundary_bindings: impl IntoIterator<Item = BoundaryBinding>,
+    ) -> ResolveError {
+        ResolvedDeployment::new(
+            topology(),
+            bindings,
+            placements,
+            federates,
+            coordination,
+            boundary_bindings,
+        )
+        .unwrap_err()
+    }
+
+    #[test]
+    fn resolution_reports_duplicate_selection_errors_in_canonical_identity_order() {
+        let duplicate_component_bindings = |reverse: bool| {
+            let mut bindings = vec![
+                binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+                binding("vehicle/controller", "controller-host", "controller.v1"),
+                binding("vehicle/sensor", "sensor-sim", "sensor.v1"),
+                binding("vehicle/controller", "controller-sim", "controller.v1"),
+            ];
+            if reverse {
+                bindings.reverse();
+            }
+            resolution_error(
+                bindings,
+                [
+                    placement("placement/controller", "host"),
+                    placement("placement/sensor", "edge"),
+                ],
+                standard_federates(),
+                distributed_coordination(),
+                [controller_to_sensor_binding()],
+            )
+        };
+        let forward = duplicate_component_bindings(false);
+        let reverse = duplicate_component_bindings(true);
+        assert_eq!(forward, reverse);
+        assert_eq!(
+            forward,
+            ResolveError::DuplicateComponentBinding {
+                component: ComponentInstanceId::new("vehicle/controller").unwrap(),
+            }
+        );
+
+        let duplicate_placements = |reverse: bool| {
+            let mut placements = vec![
+                placement("placement/sensor", "edge"),
+                placement("placement/controller", "host"),
+                placement("placement/sensor", "host"),
+                placement("placement/controller", "edge"),
+            ];
+            if reverse {
+                placements.reverse();
+            }
+            resolution_error(
+                [
+                    binding("vehicle/controller", "controller-host", "controller.v1"),
+                    binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+                ],
+                placements,
+                standard_federates(),
+                distributed_coordination(),
+                [controller_to_sensor_binding()],
+            )
+        };
+        let forward = duplicate_placements(false);
+        let reverse = duplicate_placements(true);
+        assert_eq!(forward, reverse);
+        assert_eq!(
+            forward,
+            ResolveError::DuplicatePlacementAssignment {
+                placement_group: PlacementGroupId::new("placement/controller").unwrap(),
+            }
+        );
+
+        let duplicate_federates = |reverse: bool| {
+            let mut federates = vec![
+                federate("host", "x86_64-unknown-linux-gnu", "native"),
+                federate("edge", "aarch64-unknown-linux-gnu", "rtic"),
+                federate("host", "x86_64-unknown-linux-musl", "native"),
+                federate("edge", "aarch64-unknown-linux-musl", "rtic"),
+            ];
+            if reverse {
+                federates.reverse();
+            }
+            resolution_error(
+                [
+                    binding("vehicle/controller", "controller-host", "controller.v1"),
+                    binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+                ],
+                [
+                    placement("placement/controller", "host"),
+                    placement("placement/sensor", "edge"),
+                ],
+                federates,
+                distributed_coordination(),
+                [controller_to_sensor_binding()],
+            )
+        };
+        let forward = duplicate_federates(false);
+        let reverse = duplicate_federates(true);
+        assert_eq!(forward, reverse);
+        assert_eq!(
+            forward,
+            ResolveError::DuplicateFederateConfig {
+                federate: FederateId::new("edge").unwrap(),
+            }
+        );
+
+        let duplicate_boundary_bindings = |reverse: bool| {
+            let mut boundary_bindings = vec![
+                boundary_binding("unknown", "serde-json", "quic"),
+                controller_to_sensor_binding(),
+                boundary_binding("unknown", "postcard", "tcp"),
+                boundary_binding("controller-to-sensor", "postcard", "tcp"),
+            ];
+            if reverse {
+                boundary_bindings.reverse();
+            }
+            resolution_error(
+                [
+                    binding("vehicle/controller", "controller-host", "controller.v1"),
+                    binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+                ],
+                [
+                    placement("placement/controller", "host"),
+                    placement("placement/sensor", "edge"),
+                ],
+                standard_federates(),
+                distributed_coordination(),
+                boundary_bindings,
+            )
+        };
+        let forward = duplicate_boundary_bindings(false);
+        let reverse = duplicate_boundary_bindings(true);
+        assert_eq!(forward, reverse);
+        assert_eq!(
+            forward,
+            ResolveError::DuplicateBoundaryBinding {
+                boundary: BoundaryId::new("controller-to-sensor").unwrap(),
+            }
+        );
+    }
+
     #[test]
     fn resolution_requires_complete_reactor_placement_and_enclave_ownership() {
         let unplaced_reactor = ResolvedDeployment::new(
@@ -916,6 +1081,12 @@ mod tests {
         );
         assert_eq!(
             forward
+                .binding(&ComponentInstanceId::new("vehicle/controller").unwrap())
+                .map(|binding| binding.implementation().to_string()),
+            Some("controller-host".to_owned())
+        );
+        assert_eq!(
+            forward
                 .placements()
                 .map(|assignment| (
                     assignment.placement_group().to_string(),
@@ -934,6 +1105,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["edge", "host"]
         );
+        let edge = forward
+            .federate(&FederateId::new("edge").unwrap())
+            .expect("edge Federate configuration must be retained");
+        assert_eq!(edge.target().to_string(), "aarch64-unknown-linux-gnu");
+        assert_eq!(edge.runtime().to_string(), "rtic");
         assert_eq!(
             forward
                 .boundary_bindings()
@@ -941,6 +1117,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["controller-to-sensor"]
         );
+        let boundary = forward
+            .boundary_binding(&BoundaryId::new("controller-to-sensor").unwrap())
+            .expect("cross-Federate boundary binding must be retained");
+        assert_eq!(boundary.codec().to_string(), "serde-json");
+        assert_eq!(boundary.transport().to_string(), "quic");
         assert_eq!(forward.coordination(), &distributed_coordination());
     }
 

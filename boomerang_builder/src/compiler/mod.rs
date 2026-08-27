@@ -2,16 +2,25 @@
 #![deny(missing_docs)]
 
 mod debug;
+/// Explicit deployment selections supplied to the compiler.
+mod deployment;
 /// Backend-neutral federation graph analysis.
 pub mod federation;
 mod from_assembly;
 mod identity;
 mod model;
+/// Canonical implementation and placement resolution.
+mod resolved;
 
+pub use deployment::{
+    BoundaryBinding, CoordinationSelection, FederateConfig, ImplementationBinding,
+    PlacementAssignment,
+};
 pub use identity::{
-    ActionId, ApplicationId, BindingSlotId, BoundaryId, ComponentInstanceId, ContractId,
-    FederateId, InvalidStableId, ModeId, PlacementGroupId, PortId, ReactionId, ReactorId,
-    StableEnclaveId, StablePath, StablePathSegment, StableText,
+    ActionId, ApplicationId, BindingSlotId, BoundaryId, CodecCapabilityId, ComponentInstanceId,
+    ContractId, CoordinationBackendId, FederateId, ImplementationId, InvalidStableId, ModeId,
+    PlacementGroupId, PortId, ReactionId, ReactorId, RuntimeBackendId, StableEnclaveId, StablePath,
+    StablePathSegment, StableText, TargetTriple, TransportCapabilityId,
 };
 pub use model::{
     Action, ActionKind, ApplicationTopology, ApplicationTopologyBuilder, BankMember,
@@ -20,6 +29,7 @@ pub use model::{
     ReactionOptions, ReactionRelation, ReactionRelationFlags, ReactionRelationTarget, Reactor,
     TopologyBuildError,
 };
+pub use resolved::{ResolveError, ResolvedDeployment};
 
 #[cfg(test)]
 mod tests {

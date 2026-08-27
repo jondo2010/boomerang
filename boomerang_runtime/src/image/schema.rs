@@ -574,7 +574,7 @@ pub struct RouteImage {
     local_port: PortIndex,
     direction: RouteDirection,
     timing_domain: TimingDomain,
-    logical_delay_nanos: u64,
+    delay_nanos: u64,
 }
 
 impl RouteImage {
@@ -584,14 +584,14 @@ impl RouteImage {
         local_port: PortIndex,
         direction: RouteDirection,
         timing_domain: TimingDomain,
-        logical_delay_nanos: u64,
+        delay_nanos: u64,
     ) -> Self {
         Self {
             boundary,
             local_port,
             direction,
             timing_domain,
-            logical_delay_nanos,
+            delay_nanos,
         }
     }
 
@@ -615,9 +615,9 @@ impl RouteImage {
         self.timing_domain
     }
 
-    /// Returns the logical delay in nanoseconds.
-    pub const fn logical_delay_nanos(self) -> u64 {
-        self.logical_delay_nanos
+    /// Returns the route delay in nanoseconds.
+    pub const fn delay_nanos(self) -> u64 {
+        self.delay_nanos
     }
 }
 

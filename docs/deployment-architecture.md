@@ -609,13 +609,20 @@ path.
 Each `EnclaveImage` contains all immutable scheduler information:
 
 - dense reactor, action, port, reaction, mode, and scope tables;
+- reactor-bank metadata and canonical action kind, clock-domain, minimum-delay, and timer-period
+  semantics;
 - precomputed trigger sets, dependency levels, and modal schedule indices;
+- the unique action set populated before shutdown reactions execute;
 - local logical-time dependency tables;
 - state and action-storage slot descriptions;
 - direct initialization and reaction bindings;
 - fixed queue and scratch-buffer capacities;
-- boundary routing tables; and
+- boundary routing tables that retain logical-versus-physical timing semantics; and
 - optional recording/replay admission hooks.
+
+Stable identities are stored once in an immutable UTF-8 blob and referenced by validated byte
+ranges. This keeps generated static images and owned host images on the same zero-copy target-facing
+schema without self-referential owned rows.
 
 Generated Rust expresses these as `const` and `static` data. Deployable targets do not deserialize
 an image at startup.

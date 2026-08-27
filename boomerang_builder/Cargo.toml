@@ -14,6 +14,7 @@ exclude.workspace = true
 [features]
 default = []
 
+## Host-side descriptor hashing for tooling and macros, including the optional BLAKE3 dependency, without burdening ordinary builder consumers
 descriptor-fingerprint = ["dep:blake3"]
 
 ## Support for tracing with Tracy

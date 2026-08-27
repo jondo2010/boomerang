@@ -1,4 +1,4 @@
-//! Canonical host-owned component descriptor records.
+//! Canonical, validated component descriptor records owned by the host-side builder.
 
 use crate::compiler::{BindingSlotId, ContractId, ModeTransitionKind, PortDirection, StablePath};
 
@@ -220,7 +220,7 @@ impl Default for DescriptorBounds {
     }
 }
 
-/// Canonically ordered typed data supplied to a future fingerprint encoder.
+/// Canonically ordered, validated typed input to the descriptor fingerprint encoder.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DescriptorFingerprintInput {
     /// Stable external contract identity.
@@ -967,6 +967,20 @@ mod tests {
             complete_descriptor_with_macro_abi(COMPONENT_DESCRIPTOR_MACRO_ABI + 1)
                 .descriptor_fingerprint_input()
                 .fingerprint(),
+        );
+    }
+
+    #[cfg(feature = "descriptor-fingerprint")]
+    #[test]
+    fn descriptor_fingerprint_changes_with_port_direction() {
+        let input = build(vec![port("value")], vec![], vec![]).unwrap();
+        let mut output_port = port("value");
+        output_port.direction = PortDirection::Output;
+        let output = build(vec![output_port], vec![], vec![]).unwrap();
+
+        assert_ne!(
+            input.descriptor_fingerprint_input().fingerprint(),
+            output.descriptor_fingerprint_input().fingerprint(),
         );
     }
 

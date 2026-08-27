@@ -1,3 +1,7 @@
+//! Target-facing, dependency-free descriptor and payload compatibility values and const checks.
+//!
+//! Fingerprint hashing and encoding belong to host-side tooling, not this module.
+
 /// Fingerprint of one canonical component implementation descriptor.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[repr(transparent)]

@@ -1,3 +1,8 @@
+//! Optional host-only canonical preimage encoding and BLAKE3 hashing.
+//!
+//! Encoding v1 tags top-level descriptor sections. Fields in nested fixed-schema records are
+//! positional in declaration order.
+
 use super::*;
 use boomerang_runtime::binding::DescriptorFingerprint;
 

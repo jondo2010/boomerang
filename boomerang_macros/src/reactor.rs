@@ -874,7 +874,7 @@ fn payload_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
         }
     }
 
-    let descriptor = boomerang_builder::ComponentDescriptor::try_new(
+    let descriptor = match boomerang_builder::ComponentDescriptor::try_new(
         boomerang_builder::compiler::ContractId::new(contract_text)
             .expect("reactor macro validated contract text"),
         contract_version,
@@ -890,8 +890,16 @@ fn payload_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
         vec![],
         vec![],
         boomerang_builder::DescriptorBounds::default(),
-    )
-    .expect("reactor macro generated a valid descriptor");
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(error) => {
+            return syn::Error::new(
+                contract.span(),
+                format!("deployment payload descriptor is invalid: {error}"),
+            )
+            .to_compile_error()
+        }
+    };
     let fingerprint = descriptor
         .descriptor_fingerprint_input()
         .fingerprint()

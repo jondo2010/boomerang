@@ -598,6 +598,329 @@ fn relationship_target(
     }
 }
 
+/// Builds a compiler stable path from macro-normalized name segments.
+fn stable_path_value(segments: &[String]) -> boomerang_builder::compiler::StablePath {
+    let (first, rest) = segments.split_first().expect("stable paths are non-empty");
+    let mut path = boomerang_builder::compiler::StablePath::from_name(first.clone())
+        .expect("macro generated a valid stable path");
+    for segment in rest {
+        path = path
+            .append_name(segment.clone())
+            .expect("macro generated a valid stable path");
+    }
+    path
+}
+
+/// Resolves a reaction reference and reports whether it denotes a mode.
+fn payload_relationship_target(
+    reactor_name: &str,
+    port_names: &[String],
+    mode_names: &[String],
+    path: &crate::reaction::PathOrIdent,
+) -> (boomerang_builder::DescriptorRelationshipTarget, bool) {
+    let path = path_segments(path);
+    let leaf = path.first().expect("paths are non-empty").clone();
+    let mut slot_segments = vec![reactor_name.to_owned()];
+    slot_segments.extend(path);
+    let slot = stable_path_value(&slot_segments);
+    if slot_segments.len() == 2 && mode_names.contains(&leaf) {
+        (
+            boomerang_builder::DescriptorRelationshipTarget::Mode(
+                boomerang_builder::ModeSlotId::from_path(slot),
+            ),
+            true,
+        )
+    } else if slot_segments.len() == 2 && port_names.contains(&leaf) {
+        (
+            boomerang_builder::DescriptorRelationshipTarget::Port(
+                boomerang_builder::PortSlotId::from_path(slot),
+            ),
+            false,
+        )
+    } else {
+        (
+            boomerang_builder::DescriptorRelationshipTarget::Lexical(slot),
+            false,
+        )
+    }
+}
+
+/// Generates the payload facet's target-safe compatibility module.
+fn payload_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
+    if reactor_args.contract.is_none() && reactor_args.contract_version.is_none() {
+        return TokenStream::new();
+    }
+    let (Some(contract), Some(contract_version)) =
+        (&reactor_args.contract, &reactor_args.contract_version)
+    else {
+        return quote! {
+            compile_error!("deployment descriptor requires contract and contract_version metadata");
+        };
+    };
+
+    let contract_text = contract.value();
+    if contract_text.is_empty()
+        || contract_text.trim() != contract_text
+        || contract_text.chars().any(char::is_control)
+    {
+        return syn::Error::new(
+            contract.span(),
+            "contract must be non-empty, contain no control characters, and have no surrounding whitespace",
+        )
+        .to_compile_error();
+    }
+    let contract_version = match contract_version.base10_parse::<u64>() {
+        Ok(contract_version) => contract_version,
+        Err(_) => {
+            return syn::Error::new(contract_version.span(), "contract_version must fit in u64")
+                .to_compile_error()
+        }
+    };
+
+    if let Err(error) = model.body.validate_unique_reaction_names() {
+        return error.to_compile_error();
+    }
+
+    if let Some(span) = model.body.unsupported_span() {
+        let diagnostic = quote_spanned! {span =>
+            compile_error!("deployment descriptor requires reaction! syntax");
+        };
+        return quote! {
+            #diagnostic
+        };
+    }
+
+    let reactor_name = ident_text(&model.name);
+    let reactor_path = stable_path_value(std::slice::from_ref(&reactor_name));
+    let reactor_slot = boomerang_builder::ReactorSlot {
+        id: boomerang_builder::ReactorSlotId::from_path(reactor_path.clone()),
+        parent: None,
+    };
+    let port_names = model
+        .args
+        .iter()
+        .filter_map(|arg| match arg.kind {
+            ArgKind::Input { .. } | ArgKind::Output { .. } => Some(ident_text(&arg.name.ident)),
+            ArgKind::State { .. } | ArgKind::Param { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    let port_slots = model
+        .args
+        .iter()
+        .filter_map(|arg| {
+            let direction = match arg.kind {
+                ArgKind::Input { .. } => boomerang_builder::PortDirection::Input,
+                ArgKind::Output { .. } => boomerang_builder::PortDirection::Output,
+                ArgKind::State { .. } | ArgKind::Param { .. } => return None,
+            };
+            let path = stable_path_value(&[reactor_name.clone(), ident_text(&arg.name.ident)]);
+            Some(boomerang_builder::PortSlot {
+                id: boomerang_builder::PortSlotId::from_path(path),
+                reactor: boomerang_builder::ReactorSlotId::from_path(reactor_path.clone()),
+                direction,
+            })
+        })
+        .collect::<Vec<_>>();
+    let state_slots = model
+        .args
+        .iter()
+        .filter(|arg| matches!(arg.kind, ArgKind::State { .. }))
+        .map(|arg| boomerang_builder::StateSlot {
+            id: boomerang_builder::StateSlotId::from_path(stable_path_value(&[
+                reactor_name.clone(),
+                ident_text(&arg.name.ident),
+            ])),
+            reactor: boomerang_builder::ReactorSlotId::from_path(reactor_path.clone()),
+        })
+        .collect::<Vec<_>>();
+
+    let modes = model
+        .body
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            BodyItem::Mode(mode) => Some(mode),
+            BodyItem::Tokens(_) | BodyItem::Reaction(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let mode_names = modes
+        .iter()
+        .map(|mode| ident_text(&mode.name))
+        .collect::<Vec<_>>();
+    let mode_slots = modes
+        .iter()
+        .map(|mode| boomerang_builder::ModeSlot {
+            id: boomerang_builder::ModeSlotId::from_path(stable_path_value(&[
+                reactor_name.clone(),
+                ident_text(&mode.name),
+            ])),
+            reactor: boomerang_builder::ReactorSlotId::from_path(reactor_path.clone()),
+            parent: None,
+            initial: mode.initial,
+        })
+        .collect::<Vec<_>>();
+
+    let mut reactions = Vec::new();
+    model.body.reactions(None, &mut reactions);
+    let mut reaction_slots = Vec::new();
+    let mut relationships = Vec::new();
+    for (ordinal, (scope, reaction)) in reactions.into_iter().enumerate() {
+        let reaction_id = if let Some(name) = reaction.name() {
+            boomerang_builder::ReactionSlotId::from_path(stable_path_value(&[
+                reactor_name.clone(),
+                ident_text(name),
+            ]))
+        } else {
+            let ordinal =
+                u32::try_from(ordinal).expect("reaction count exceeds descriptor representation");
+            boomerang_builder::ReactionSlotId::from_path(
+                reactor_path.append_generated_ordinal(ordinal),
+            )
+        };
+        reaction_slots.push(boomerang_builder::ReactionSlot {
+            id: reaction_id.clone(),
+            reactor: boomerang_builder::ReactorSlotId::from_path(reactor_path.clone()),
+        });
+
+        for (position, trigger) in reaction.triggers().iter().enumerate() {
+            let target = match trigger {
+                crate::reaction::TriggerType::Startup => {
+                    boomerang_builder::DescriptorRelationshipTarget::Lifecycle(
+                        boomerang_builder::DescriptorLifecycle::Startup,
+                    )
+                }
+                crate::reaction::TriggerType::Shutdown => {
+                    boomerang_builder::DescriptorRelationshipTarget::Lifecycle(
+                        boomerang_builder::DescriptorLifecycle::Shutdown,
+                    )
+                }
+                crate::reaction::TriggerType::Reset => {
+                    boomerang_builder::DescriptorRelationshipTarget::Lifecycle(
+                        boomerang_builder::DescriptorLifecycle::Reset,
+                    )
+                }
+                crate::reaction::TriggerType::Regular(path) => {
+                    payload_relationship_target(&reactor_name, &port_names, &mode_names, path).0
+                }
+            };
+            relationships.push(boomerang_builder::DescriptorRelationship {
+                reaction: reaction_id.clone(),
+                kind: boomerang_builder::DescriptorRelationshipKind::Trigger,
+                target,
+                mode_transition: None,
+                declaration_position: u32::try_from(position)
+                    .expect("reaction relationship count exceeds descriptor representation"),
+            });
+        }
+        for (position, path) in reaction.uses().iter().enumerate() {
+            relationships.push(boomerang_builder::DescriptorRelationship {
+                reaction: reaction_id.clone(),
+                kind: boomerang_builder::DescriptorRelationshipKind::Use,
+                target: payload_relationship_target(&reactor_name, &port_names, &mode_names, path)
+                    .0,
+                mode_transition: None,
+                declaration_position: u32::try_from(position)
+                    .expect("reaction relationship count exceeds descriptor representation"),
+            });
+        }
+        for (position, effect) in reaction.effects().iter().enumerate() {
+            let path = match effect {
+                crate::reaction::EffectType::Regular(path)
+                | crate::reaction::EffectType::Reset(path)
+                | crate::reaction::EffectType::History(path) => path,
+            };
+            let (target, is_mode) =
+                payload_relationship_target(&reactor_name, &port_names, &mode_names, path);
+            let is_transition = matches!(
+                effect,
+                crate::reaction::EffectType::Reset(_) | crate::reaction::EffectType::History(_)
+            );
+            let kind = if is_mode || is_transition {
+                boomerang_builder::DescriptorRelationshipKind::Mode
+            } else {
+                boomerang_builder::DescriptorRelationshipKind::Effect
+            };
+            let mode_transition = match effect {
+                crate::reaction::EffectType::History(_) => {
+                    Some(boomerang_builder::ModeTransitionKind::History)
+                }
+                crate::reaction::EffectType::Reset(_) => {
+                    Some(boomerang_builder::ModeTransitionKind::Reset)
+                }
+                crate::reaction::EffectType::Regular(_) if is_mode => {
+                    Some(boomerang_builder::ModeTransitionKind::Reset)
+                }
+                crate::reaction::EffectType::Regular(_) => None,
+            };
+            relationships.push(boomerang_builder::DescriptorRelationship {
+                reaction: reaction_id.clone(),
+                kind,
+                target,
+                mode_transition,
+                declaration_position: u32::try_from(position)
+                    .expect("reaction relationship count exceeds descriptor representation"),
+            });
+        }
+        if let Some(scope) = scope {
+            relationships.push(boomerang_builder::DescriptorRelationship {
+                reaction: reaction_id,
+                kind: boomerang_builder::DescriptorRelationshipKind::Scope,
+                target: boomerang_builder::DescriptorRelationshipTarget::Mode(
+                    boomerang_builder::ModeSlotId::from_path(stable_path_value(&[
+                        reactor_name.clone(),
+                        ident_text(&scope.name),
+                    ])),
+                ),
+                mode_transition: None,
+                declaration_position: 0,
+            });
+        }
+    }
+
+    let descriptor = match boomerang_builder::ComponentDescriptor::try_new(
+        boomerang_builder::compiler::ContractId::new(contract_text)
+            .expect("reactor macro validated contract text"),
+        contract_version,
+        boomerang_builder::COMPONENT_DESCRIPTOR_MACRO_ABI,
+        vec![reactor_slot],
+        port_slots,
+        vec![],
+        reaction_slots,
+        mode_slots,
+        state_slots,
+        vec![],
+        relationships,
+        vec![],
+        vec![],
+        boomerang_builder::DescriptorBounds::default(),
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(error) => {
+            return syn::Error::new(
+                contract.span(),
+                format!("deployment payload descriptor is invalid: {error}"),
+            )
+            .to_compile_error()
+        }
+    };
+    let fingerprint = descriptor
+        .descriptor_fingerprint_input()
+        .fingerprint()
+        .to_bytes();
+    let macro_abi = boomerang_builder::COMPONENT_DESCRIPTOR_MACRO_ABI;
+
+    quote! {
+        pub mod __boomerang {
+            /// Compatibility header for this payload facet.
+            pub const BINDING_MANIFEST: ::boomerang::runtime::binding::BindingManifest =
+                ::boomerang::runtime::binding::BindingManifest::new(
+                    ::boomerang::runtime::binding::DescriptorFingerprint::new([#(#fingerprint),*]),
+                    #macro_abi,
+                );
+        }
+    }
+}
+
 fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
     if reactor_args.contract.is_none() && reactor_args.contract_version.is_none() {
         return TokenStream::new();
@@ -931,6 +1254,7 @@ pub struct ArgsModel(pub ReactorArgs, pub Model);
 impl ToTokens for ArgsModel {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         let descriptor_output = descriptor_output(&self.0, &self.1);
+        let payload_output = payload_output(&self.0, &self.1);
         let conflict_output = quote! {
             compile_error!("__boomerang_descriptor and __boomerang_payload cannot both be enabled");
         };
@@ -1327,10 +1651,17 @@ impl ToTokens for ArgsModel {
                 #[cfg(not(all(feature = "__boomerang_descriptor", feature = "__boomerang_payload")))]
                 macro_rules! conflict { ($($tokens:tt)*) => {} }
                 pub(super) use conflict;
+
+                #[cfg(all(feature = "__boomerang_payload", not(feature = "__boomerang_descriptor")))]
+                macro_rules! payload { ($($tokens:tt)*) => { $($tokens)* }; }
+                #[cfg(not(all(feature = "__boomerang_payload", not(feature = "__boomerang_descriptor"))))]
+                macro_rules! payload { ($($tokens:tt)*) => {} }
+                pub(super) use payload;
             }
 
             #facet_module::hosted! { #output }
             #facet_module::descriptor! { #descriptor_output }
+            #facet_module::payload! { #payload_output }
             #facet_module::conflict! { #conflict_output }
         });
     }

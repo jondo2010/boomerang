@@ -7,8 +7,10 @@ publish = false
 [features]
 __boomerang_descriptor = []
 __boomerang_payload = []
+binding-fingerprint-mismatch = []
 
 [dependencies]
 boomerang = { path = "../../../../boomerang" }
+boomerang_builder = { path = "../../../../boomerang_builder", features = ["descriptor-fingerprint"] }
 
 [workspace]

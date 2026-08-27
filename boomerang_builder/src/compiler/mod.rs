@@ -2,14 +2,16 @@
 #![deny(missing_docs)]
 
 mod debug;
+/// Backend-neutral federation graph analysis.
+pub mod federation;
 mod from_assembly;
 mod identity;
 mod model;
 
 pub use identity::{
     ActionId, ApplicationId, BindingSlotId, BoundaryId, ComponentInstanceId, ContractId,
-    InvalidStableId, ModeId, PlacementGroupId, PortId, ReactionId, ReactorId, StableEnclaveId,
-    StablePath, StablePathSegment, StableText,
+    FederateId, InvalidStableId, ModeId, PlacementGroupId, PortId, ReactionId, ReactorId,
+    StableEnclaveId, StablePath, StablePathSegment, StableText,
 };
 pub use model::{
     Action, ActionKind, ApplicationTopology, ApplicationTopologyBuilder, BankMember,

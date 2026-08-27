@@ -341,6 +341,10 @@ text_id!(
     /// Stable identity and version of a component contract.
     ContractId
 );
+text_id!(
+    /// Stable identity of a federated compilation member.
+    FederateId
+);
 path_id!(
     /// Stable identity of a logical component instance.
     ComponentInstanceId

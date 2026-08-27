@@ -318,12 +318,13 @@ target-only dependencies.
 
 The target-compiled payload facet exposes:
 
-- concrete state types and initialization functions;
-- direct reaction function symbols;
-- codecs and target driver factories;
-- target-side static storage declarations; and
-- a generated binding manifest containing the supplied stable slots, signatures, descriptor
-  fingerprint, and macro ABI version.
+- a generated compatibility header containing the descriptor fingerprint and macro ABI version.
+
+The compatibility header lands before direct typed bindings. A dedicated later slice adds concrete
+state initialization, reaction, codec, driver, and static-storage symbols after the compiled image
+views and `RequiredBindings` define their host-owned slots and concrete signatures. Codec and
+driver exports require source declaration models; this architecture does not introduce placeholders
+for them. The header contains neither binding slots nor a function table.
 
 The payload facet may also generate wrappers used by the owned host reference executor. Those
 wrappers do not define a separate graph or lowering path.
@@ -359,17 +360,18 @@ entry point, runs the topology entry point, expands the selected descriptors, an
 `ApplicationTopology`. This generated driver is the only place where manifest package selection is
 turned into Rust dependencies during host analysis.
 
-Global lowering turns stable descriptor slots into `RequiredBindings` for each Federate. The
-generated target launcher then depends on only the payload packages assigned to that Federate and
-binds them directly:
+Global lowering turns stable descriptor slots into `RequiredBindings` for each Federate. Once the
+later direct typed bindings exist, the generated target launcher depends on only the payload
+packages assigned to that Federate and binds them directly:
 
 ```text
 ReactionSlotId("vehicle/sensor/sample")
     -> sensor_stm32::__boomerang::sample_reaction
 ```
 
-The Rust compiler verifies state, reaction-reference, payload, and codec types. Const assertions
-verify descriptor fingerprints and macro ABI versions. Missing slots, duplicate slots, type
+The initial compatibility-header slice uses const assertions to verify descriptor fingerprints and
+macro ABI versions. Once the later direct typed bindings exist, the Rust compiler also verifies
+state, reaction-reference, payload, and codec types. Missing slots, duplicate slots, type
 mismatches, or fingerprint mismatches are compile errors. There is no runtime plugin loader,
 service locator, package registry, or symbol lookup.
 

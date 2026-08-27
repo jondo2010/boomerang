@@ -31,6 +31,35 @@ impl DescriptorFingerprint {
     }
 }
 
+/// Target-safe compatibility values for one generated payload facet.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct BindingManifest {
+    /// Canonical descriptor fingerprint computed by the host macro.
+    descriptor_fingerprint: DescriptorFingerprint,
+    /// Descriptor macro ABI expected by the generated payload facet.
+    macro_abi: u32,
+}
+
+impl BindingManifest {
+    /// Constructs a manifest from host-generated compatibility values.
+    pub const fn new(descriptor_fingerprint: DescriptorFingerprint, macro_abi: u32) -> Self {
+        Self {
+            descriptor_fingerprint,
+            macro_abi,
+        }
+    }
+
+    /// Returns the canonical descriptor fingerprint for this payload facet.
+    pub const fn descriptor_fingerprint(self) -> DescriptorFingerprint {
+        self.descriptor_fingerprint
+    }
+
+    /// Returns the descriptor macro ABI expected by this payload facet.
+    pub const fn macro_abi(self) -> u32 {
+        self.macro_abi
+    }
+}
+
 /// Rejects a descriptor/payload mismatch during const evaluation.
 pub const fn assert_descriptor_fingerprint(
     expected: DescriptorFingerprint,

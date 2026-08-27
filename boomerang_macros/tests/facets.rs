@@ -76,6 +76,21 @@ fn payload_mode_excludes_metadata_free_hosted_expansion() {
 }
 
 #[test]
+fn payload_mode_exports_matching_binding_manifest() {
+    cargo_test("payload-pass", &["--features", "__boomerang_payload"]).unwrap();
+}
+
+#[test]
+fn payload_launcher_rejects_a_descriptor_fingerprint_mismatch() {
+    let stderr = cargo_check("payload-mismatch", &["--features", "__boomerang_payload"])
+        .expect_err("payload fingerprint mismatch should fail");
+    assert!(
+        stderr.contains("descriptor fingerprint mismatch"),
+        "unexpected compiler diagnostic:\n{stderr}"
+    );
+}
+
+#[test]
 fn reserved_modes_conflict_for_complete_metadata() {
     let stderr = cargo_check(
         "descriptor-pass",

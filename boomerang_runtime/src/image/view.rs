@@ -110,6 +110,30 @@ pub enum ImageValidationError<'a> {
         /// Offending borrowed identity.
         id: &'a str,
     },
+    /// An identity range exceeds the UTF-8 identity blob or splits a character.
+    #[error("{table}[{index}].{field} identity range {start}+{len} is invalid")]
+    IdentityRangeInvalid {
+        /// Source table.
+        table: &'static str,
+        /// Source record index.
+        index: u32,
+        /// Identity field.
+        field: &'static str,
+        /// Invalid byte offset.
+        start: u32,
+        /// Invalid byte length.
+        len: u32,
+    },
+    /// Reactor-bank metadata has an empty total or an out-of-range index.
+    #[error("reactors[{reactor}] bank index {index} is outside total {total}")]
+    InvalidBankInfo {
+        /// Dense reactor index.
+        reactor: u32,
+        /// Invalid bank index.
+        index: u32,
+        /// Declared bank width.
+        total: u32,
+    },
     /// A dense storage slot reaches or exceeds its declared bound.
     #[error("{table}[{index}] {kind} slot {slot} exceeds bound {bound}")]
     StorageBoundExceeded {
@@ -149,8 +173,11 @@ impl<'a> EnclaveImageView<'a> {
         Ok(Self { image })
     }
     /// Returns the stable Enclave identity.
-    pub const fn enclave_id(&self) -> EnclaveId<'a> {
-        self.image.enclave_id
+    pub fn enclave_id(&self) -> EnclaveId<'a> {
+        EnclaveId::new(identity_slice_unchecked(
+            self.image.identity_data,
+            self.image.enclave_id,
+        ))
     }
     /// Returns the dense reactor table.
     pub const fn reactors(&self) -> TinyMapView<'a, ReactorIndex, ReactorImage> {
@@ -177,14 +204,28 @@ impl<'a> EnclaveImageView<'a> {
         TinyMapView::new(self.image.scopes)
     }
     /// Returns the dense boundary-route table.
-    pub const fn routes(&self) -> TinyMapView<'a, RouteIndex, RouteImage<'a>> {
+    pub const fn routes(&self) -> TinyMapView<'a, RouteIndex, RouteImage> {
         TinyMapView::new(self.image.routes)
     }
     /// Returns the dense required-binding table.
     pub const fn required_bindings(
         &self,
-    ) -> TinyMapView<'a, BindingSlotIndex, RequiredBindingImage<'a>> {
+    ) -> TinyMapView<'a, BindingSlotIndex, RequiredBindingImage> {
         TinyMapView::new(self.image.required_bindings)
+    }
+    /// Resolves a route's stable boundary identity.
+    pub fn route_boundary_id(&self, key: RouteIndex) -> BoundaryId<'a> {
+        BoundaryId::new(identity_slice_unchecked(
+            self.image.identity_data,
+            self.image.routes[key.as_u32() as usize].boundary(),
+        ))
+    }
+    /// Resolves a required implementation binding's stable identity.
+    pub fn required_binding_id(&self, key: BindingSlotIndex) -> BindingSlotId<'a> {
+        BindingSlotId::new(identity_slice_unchecked(
+            self.image.identity_data,
+            self.image.required_bindings[key.as_u32() as usize].id(),
+        ))
     }
     /// Returns the declared mutable-storage and workspace bounds.
     pub const fn storage_bounds(&self) -> StorageBounds {
@@ -286,6 +327,10 @@ impl<'a> EnclaveImageView<'a> {
     pub const fn shutdown_reactions(&self) -> &'a [LifecycleReactionImage] {
         self.image.shutdown_reactions
     }
+    /// Returns unique actions populated before global shutdown reactions.
+    pub const fn shutdown_actions(&self) -> &'a [ActionIndex] {
+        self.image.shutdown_actions
+    }
 }
 
 fn check_len<K: Key>(table: &'static str, len: usize) -> Result<(), ImageValidationError<'static>> {
@@ -353,6 +398,38 @@ fn check_range<'a, K>(
 fn range_slice<T, K>(range: TableRange<K>, values: &[T]) -> &[T] {
     let start = range.start() as usize;
     &values[start..start + range.len() as usize]
+}
+
+fn identity_slice_unchecked(value: &str, range: IdentityRange) -> &str {
+    let start = range.start() as usize;
+    &value[start..start + range.len() as usize]
+}
+
+fn identity_slice<'a>(
+    value: &'a str,
+    table: &'static str,
+    index: u32,
+    field: &'static str,
+    range: IdentityRange,
+) -> Result<&'a str, ImageValidationError<'a>> {
+    let Some(end) = range.start().checked_add(range.len()) else {
+        return Err(ImageValidationError::IdentityRangeInvalid {
+            table,
+            index,
+            field,
+            start: range.start(),
+            len: range.len(),
+        });
+    };
+    value.get(range.start() as usize..end as usize).ok_or(
+        ImageValidationError::IdentityRangeInvalid {
+            table,
+            index,
+            field,
+            start: range.start(),
+            len: range.len(),
+        },
+    )
 }
 
 fn valid_id(value: &str) -> bool {
@@ -467,7 +544,14 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
     check_len::<ScopeIndex>("scopes", image.scopes.len())?;
     check_len::<RouteIndex>("routes", image.routes.len())?;
     check_len::<BindingSlotIndex>("required_bindings", image.required_bindings.len())?;
-    validate_id("enclave", 0, image.enclave_id.as_str(), &mut None)?;
+    let enclave_id = identity_slice(
+        image.identity_data,
+        "image",
+        0,
+        "enclave_id",
+        image.enclave_id,
+    )?;
+    validate_id("enclave", 0, enclave_id, &mut None)?;
 
     let mut mode_end = 0;
     for (i, reactor) in image.reactors.iter().copied().enumerate() {
@@ -539,6 +623,15 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
                     table: "reactors",
                     index,
                     field: "initial_mode",
+                });
+            }
+        }
+        if let Some(bank) = reactor.bank() {
+            if bank.total() == 0 || bank.index() >= bank.total() {
+                return Err(ImageValidationError::InvalidBankInfo {
+                    reactor: index,
+                    index: bank.index(),
+                    total: bank.total(),
                 });
             }
         }
@@ -975,15 +1068,43 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
         )?;
     }
     validate_lifecycle("shutdown_reactions", 0, image.shutdown_reactions, image)?;
+    let mut previous_action = None;
+    for (i, action) in image.shutdown_actions.iter().copied().enumerate() {
+        check_ref(
+            "shutdown_actions",
+            i as u32,
+            "action",
+            "actions",
+            action.as_u32(),
+            image.actions.len(),
+        )?;
+        if let Some(previous) = previous_action {
+            if action == previous {
+                return Err(ImageValidationError::DuplicateEntry {
+                    table: "shutdown_actions",
+                    index: i as u32,
+                });
+            }
+            if action < previous {
+                return Err(ImageValidationError::EntriesNotSorted {
+                    table: "shutdown_actions",
+                    index: i as u32,
+                });
+            }
+        }
+        previous_action = Some(action);
+    }
 
     let mut previous = None;
     for (i, route) in image.routes.iter().copied().enumerate() {
-        validate_id(
-            "boundary",
+        let id = identity_slice(
+            image.identity_data,
+            "routes",
             i as u32,
-            route.boundary().as_str(),
-            &mut previous,
+            "boundary",
+            route.boundary(),
         )?;
+        validate_id("boundary", i as u32, id, &mut previous)?;
         check_ref(
             "routes",
             i as u32,
@@ -995,7 +1116,14 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
     }
     previous = None;
     for (i, binding) in image.required_bindings.iter().copied().enumerate() {
-        validate_id("binding", i as u32, binding.id().as_str(), &mut previous)?;
+        let id = identity_slice(
+            image.identity_data,
+            "required_bindings",
+            i as u32,
+            "id",
+            binding.id(),
+        )?;
+        validate_id("binding", i as u32, id, &mut previous)?;
     }
     Ok(())
 }
@@ -1013,6 +1141,7 @@ mod tests {
             ScopeIndex::new(0),
             TableRange::new(0, 1),
             Some(ModeIndex::new(0)),
+            Some(BankInfoImage::new(0, 2)),
         ),
         ReactorImage::new(
             BindingSlotIndex::new(3),
@@ -1020,12 +1149,16 @@ mod tests {
             ScopeIndex::new(2),
             TableRange::new(1, 0),
             None,
+            Some(BankInfoImage::new(1, 2)),
         ),
     ];
     static ACTIONS: [ActionImage; 1] = [ActionImage::new(
         ScopeIndex::new(1),
         ActionSlotIndex::new(0),
-        true,
+        ActionTiming::Standard {
+            domain: TimingDomain::Logical,
+            min_delay_nanos: 7,
+        },
         TableRange::new(0, 2),
     )];
     static PORTS: [PortImage; 2] = [
@@ -1129,27 +1262,25 @@ mod tests {
         LevelReactionImage::new(1, ReactionIndex::new(1)),
         ActionIndex::new(0),
     )];
-    static ROUTES: [RouteImage<'static>; 1] = [RouteImage::new(
-        BoundaryId::new("network/in"),
+    static SHUTDOWN_ACTIONS: [ActionIndex; 1] = [ActionIndex::new(0)];
+    static IDENTITY_DATA: &str = "plant/controlnetwork/inreaction/r0reaction/r1state/r0state/r1";
+    static ROUTES: [RouteImage; 1] = [RouteImage::new(
+        IdentityRange::new(13, 10),
         PortIndex::new(1),
         RouteDirection::Inbound,
+        TimingDomain::Physical,
         10,
     )];
-    static REQUIRED_BINDINGS: [RequiredBindingImage<'static>; 4] = [
-        RequiredBindingImage::new(BindingSlotId::new("reaction/r0"), BindingKind::Reaction),
-        RequiredBindingImage::new(BindingSlotId::new("reaction/r1"), BindingKind::Reaction),
-        RequiredBindingImage::new(
-            BindingSlotId::new("state/r0"),
-            BindingKind::StateInitializer,
-        ),
-        RequiredBindingImage::new(
-            BindingSlotId::new("state/r1"),
-            BindingKind::StateInitializer,
-        ),
+    static REQUIRED_BINDINGS: [RequiredBindingImage; 4] = [
+        RequiredBindingImage::new(IdentityRange::new(23, 11), BindingKind::Reaction),
+        RequiredBindingImage::new(IdentityRange::new(34, 11), BindingKind::Reaction),
+        RequiredBindingImage::new(IdentityRange::new(45, 8), BindingKind::StateInitializer),
+        RequiredBindingImage::new(IdentityRange::new(53, 8), BindingKind::StateInitializer),
     ];
 
     static IMAGE: EnclaveImage<'static> = EnclaveImage::new(
-        EnclaveId::new("plant/control"),
+        IDENTITY_DATA,
+        IdentityRange::new(0, 13),
         &REACTORS,
         &ACTIONS,
         &PORTS,
@@ -1170,6 +1301,7 @@ mod tests {
         &STARTUP_ACTIONS,
         &TIMER_STARTUP_ACTIONS,
         &SHUTDOWN_REACTIONS,
+        &SHUTDOWN_ACTIONS,
         &ROUTES,
         &REQUIRED_BINDINGS,
         StorageBounds::new(2, 1, 8, 4),
@@ -1181,8 +1313,18 @@ mod tests {
 
         assert_eq!(view.enclave_id().as_str(), "plant/control");
         assert_eq!(view.reactors().len(), 2);
+        assert_eq!(
+            view.reactors()[ReactorIndex::new(1)].bank(),
+            Some(BankInfoImage::new(1, 2))
+        );
         assert_eq!(view.actions().len(), 1);
-        assert!(view.actions()[ActionIndex::new(0)].is_logical_time());
+        assert_eq!(
+            view.actions()[ActionIndex::new(0)].timing(),
+            ActionTiming::Standard {
+                domain: TimingDomain::Logical,
+                min_delay_nanos: 7,
+            }
+        );
         assert_eq!(view.ports().len(), 2);
         assert_eq!(
             view.reactions()[ReactionIndex::new(1)].dependency_level(),
@@ -1200,10 +1342,48 @@ mod tests {
             ]
         );
         assert_eq!(
-            view.routes()[RouteIndex::new(0)].boundary().as_str(),
+            view.route_boundary_id(RouteIndex::new(0)).as_str(),
             "network/in"
         );
+        assert_eq!(
+            view.routes()[RouteIndex::new(0)].timing_domain(),
+            TimingDomain::Physical
+        );
+        assert_eq!(view.shutdown_actions(), &SHUTDOWN_ACTIONS);
+        assert_eq!(
+            view.required_binding_id(BindingSlotIndex::new(2)).as_str(),
+            "state/r0"
+        );
         assert_eq!(view.storage_bounds().event_capacity(), 8);
+    }
+
+    #[test]
+    fn action_timing_preserves_standard_timer_and_shutdown_semantics() {
+        let cases = [
+            ActionTiming::Standard {
+                domain: TimingDomain::Physical,
+                min_delay_nanos: 19,
+            },
+            ActionTiming::Timer {
+                period_nanos: Some(23),
+            },
+            ActionTiming::Shutdown,
+        ];
+
+        for timing in cases {
+            let actions = [ActionImage::new(
+                ScopeIndex::new(1),
+                ActionSlotIndex::new(0),
+                timing,
+                TableRange::new(0, 2),
+            )];
+            let image = EnclaveImage {
+                actions: &actions,
+                ..IMAGE
+            };
+            let view = EnclaveImageView::new(&image).unwrap();
+            assert_eq!(view.actions()[ActionIndex::new(0)].timing(), timing);
+        }
     }
 
     #[test]
@@ -1221,10 +1401,27 @@ mod tests {
         let bad_actions = [ActionImage::new(
             ScopeIndex::new(1),
             ActionSlotIndex::new(0),
-            true,
+            ActionTiming::Standard {
+                domain: TimingDomain::Logical,
+                min_delay_nanos: 7,
+            },
             TableRange::new(4, 1),
         )];
         let cases = [
+            (
+                "identity range",
+                EnclaveImage {
+                    enclave_id: IdentityRange::new(u32::MAX, 2),
+                    ..IMAGE
+                },
+                ImageValidationError::IdentityRangeInvalid {
+                    table: "image",
+                    index: 0,
+                    field: "enclave_id",
+                    start: u32::MAX,
+                    len: 2,
+                },
+            ),
             (
                 "primary cross-reference",
                 EnclaveImage {
@@ -1315,36 +1512,47 @@ mod tests {
     fn invalid_ownership_identity_and_storage_report_specific_errors() {
         let bad_modes = [ModeImage::new(ReactorIndex::new(1), ScopeIndex::new(1))];
         let invalid_routes = [RouteImage::new(
-            BoundaryId::new(" boundary"),
+            IdentityRange::new(13, 9),
             PortIndex::new(1),
             RouteDirection::Inbound,
+            TimingDomain::Logical,
             0,
         )];
+        let invalid_identity_data = "plant/control boundary";
         let unsorted_routes = [
             RouteImage::new(
-                BoundaryId::new("z"),
+                IdentityRange::new(13, 1),
                 PortIndex::new(0),
                 RouteDirection::Outbound,
+                TimingDomain::Logical,
                 0,
             ),
             RouteImage::new(
-                BoundaryId::new("a"),
+                IdentityRange::new(14, 1),
                 PortIndex::new(1),
                 RouteDirection::Inbound,
+                TimingDomain::Logical,
                 0,
             ),
         ];
+        let unsorted_identity_data = "plant/controlza";
         let duplicate_bindings = [
-            RequiredBindingImage::new(BindingSlotId::new("same"), BindingKind::Reaction),
-            RequiredBindingImage::new(BindingSlotId::new("same"), BindingKind::Reaction),
-            RequiredBindingImage::new(
-                BindingSlotId::new("state/r0"),
-                BindingKind::StateInitializer,
+            RequiredBindingImage::new(IdentityRange::new(13, 4), BindingKind::Reaction),
+            RequiredBindingImage::new(IdentityRange::new(13, 4), BindingKind::Reaction),
+            RequiredBindingImage::new(IdentityRange::new(17, 8), BindingKind::StateInitializer),
+            RequiredBindingImage::new(IdentityRange::new(25, 8), BindingKind::StateInitializer),
+        ];
+        let duplicate_binding_identity_data = "plant/controlsamestate/r0state/r1";
+        let invalid_bank_reactors = [
+            ReactorImage::new(
+                BindingSlotIndex::new(2),
+                StateSlotIndex::new(0),
+                ScopeIndex::new(0),
+                TableRange::new(0, 1),
+                Some(ModeIndex::new(0)),
+                Some(BankInfoImage::new(2, 2)),
             ),
-            RequiredBindingImage::new(
-                BindingSlotId::new("state/r1"),
-                BindingKind::StateInitializer,
-            ),
+            REACTORS[1],
         ];
         let cases = [
             (
@@ -1362,6 +1570,7 @@ mod tests {
             (
                 "invalid boundary",
                 EnclaveImage {
+                    identity_data: invalid_identity_data,
                     routes: &invalid_routes,
                     ..IMAGE
                 },
@@ -1374,6 +1583,7 @@ mod tests {
             (
                 "unsorted boundary",
                 EnclaveImage {
+                    identity_data: unsorted_identity_data,
                     routes: &unsorted_routes,
                     ..IMAGE
                 },
@@ -1386,6 +1596,7 @@ mod tests {
             (
                 "duplicate binding",
                 EnclaveImage {
+                    identity_data: duplicate_binding_identity_data,
                     required_bindings: &duplicate_bindings,
                     ..IMAGE
                 },
@@ -1393,6 +1604,18 @@ mod tests {
                     kind: "binding",
                     index: 1,
                     id: "same",
+                },
+            ),
+            (
+                "invalid bank",
+                EnclaveImage {
+                    reactors: &invalid_bank_reactors,
+                    ..IMAGE
+                },
+                ImageValidationError::InvalidBankInfo {
+                    reactor: 0,
+                    index: 2,
+                    total: 2,
                 },
             ),
             (

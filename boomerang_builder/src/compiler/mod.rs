@@ -26,20 +26,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn component_instance_uses_stable_component_and_contract_ids() {
-        let component = ComponentInstance::new("vehicle/sensor", "sensor.v1").unwrap();
+    fn component_instance_preserves_explicit_contract_requirement() {
+        let component = ComponentInstance::new("vehicle/sensor", "sensor", 7).unwrap();
         assert_eq!(component.id().to_string(), "vehicle/sensor");
-        assert_eq!(component.contract().as_str(), "sensor.v1");
+        assert_eq!(component.contract().as_str(), "sensor");
+        assert_eq!(component.contract_version(), 7);
     }
 
     #[test]
     fn topology_builder_rejects_duplicate_component_ids() {
         let mut builder = ApplicationTopologyBuilder::new("vehicle").unwrap();
         builder
-            .add_component(ComponentInstance::new("vehicle/sensor", "sensor.v1").unwrap())
+            .add_component(ComponentInstance::new("vehicle/sensor", "sensor.v1", 1).unwrap())
             .unwrap();
         let error = builder
-            .add_component(ComponentInstance::new("vehicle/sensor", "sensor.v2").unwrap())
+            .add_component(ComponentInstance::new("vehicle/sensor", "sensor.v2", 1).unwrap())
             .unwrap_err();
         assert!(
             matches!(error, TopologyBuildError::DuplicateIdentity { kind: "component", id } if id == "vehicle/sensor")
@@ -56,10 +57,12 @@ mod tests {
     fn topology_debug_uses_stable_identity_not_dense_keys() {
         let mut builder = ApplicationTopologyBuilder::new("vehicle").unwrap();
         builder
-            .add_component(ComponentInstance::new("vehicle/sensor", "sensor.v1").unwrap())
+            .add_component(ComponentInstance::new("vehicle/sensor", "sensor", 3).unwrap())
             .unwrap();
         let debug = format!("{:?}", builder.finish().unwrap());
         assert!(debug.contains("vehicle/sensor"));
+        assert!(debug.contains("contract: \"sensor\""), "{debug}");
+        assert!(debug.contains("contract_version: 3"), "{debug}");
         assert!(!debug.contains("ComponentKey"));
     }
 }

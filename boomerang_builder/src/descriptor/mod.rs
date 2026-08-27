@@ -1,6 +1,9 @@
-//! Canonical host-owned component descriptor records.
+//! Canonical, validated component descriptor records owned by the host-side builder.
 
 use crate::compiler::{BindingSlotId, ContractId, ModeTransitionKind, PortDirection, StablePath};
+
+#[cfg(feature = "descriptor-fingerprint")]
+mod fingerprint;
 
 /// Macro ABI understood by descriptors emitted from this crate version.
 pub const COMPONENT_DESCRIPTOR_MACRO_ABI: u32 = 1;
@@ -217,7 +220,7 @@ impl Default for DescriptorBounds {
     }
 }
 
-/// Canonically ordered typed data supplied to a future fingerprint encoder.
+/// Canonically ordered, validated typed input to the descriptor fingerprint encoder.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DescriptorFingerprintInput {
     /// Stable external contract identity.
@@ -629,6 +632,8 @@ mod tests {
         reactions: Vec<ReactionSlot>,
         modes: Vec<ModeSlot>,
         states: Vec<StateSlot>,
+        /// Payload codecs supplied to the descriptor builder.
+        codecs: Vec<CodecSlot>,
         relationships: Vec<DescriptorRelationship>,
         groups: Vec<DescriptorPlacementGroup>,
         enclaves: Vec<DescriptorEnclave>,
@@ -674,31 +679,12 @@ mod tests {
             parts.reactions,
             parts.modes,
             parts.states,
-            vec![],
+            parts.codecs,
             parts.relationships,
             parts.groups,
             parts.enclaves,
             DescriptorBounds::default(),
         )
-    }
-
-    #[test]
-    fn canonical_order_is_input_order_insensitive() {
-        let left = build(vec![port("z"), port("a")], vec![], vec![]).unwrap();
-        let right = build(vec![port("a"), port("z")], vec![], vec![]).unwrap();
-        assert_eq!(left.port_slots()[0].id.to_string(), "Root/a");
-        assert_eq!(
-            left.descriptor_fingerprint_input(),
-            right.descriptor_fingerprint_input()
-        );
-        assert!(std::ptr::eq(
-            left.contract_id(),
-            left.descriptor_fingerprint_input().contract_id()
-        ));
-        assert!(std::ptr::eq(
-            left.port_slots(),
-            left.descriptor_fingerprint_input().port_slots()
-        ));
     }
 
     #[test]

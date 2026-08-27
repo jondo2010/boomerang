@@ -12,6 +12,7 @@ mod env;
 mod event;
 #[cfg(feature = "federated")]
 mod federated;
+pub mod image;
 pub mod keepalive;
 mod key_set;
 pub mod port;

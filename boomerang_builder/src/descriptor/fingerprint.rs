@@ -17,7 +17,11 @@ const PLACEMENT_GROUPS: u8 = 0x18;
 const ENCLAVES: u8 = 0x19;
 const BOUNDS: u8 = 0x1a;
 
-struct CanonicalWriter(blake3::Hasher);
+/// Private incremental encoder for the descriptor fingerprint byte stream.
+struct CanonicalWriter(
+    /// BLAKE3 state receiving the canonical bytes.
+    blake3::Hasher,
+);
 
 impl CanonicalWriter {
     fn new() -> Self {

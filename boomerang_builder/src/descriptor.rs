@@ -632,6 +632,7 @@ mod tests {
         reactions: Vec<ReactionSlot>,
         modes: Vec<ModeSlot>,
         states: Vec<StateSlot>,
+        /// Payload codecs supplied to the descriptor builder.
         codecs: Vec<CodecSlot>,
         relationships: Vec<DescriptorRelationship>,
         groups: Vec<DescriptorPlacementGroup>,
@@ -765,8 +766,11 @@ mod tests {
 
     #[cfg(feature = "descriptor-fingerprint")]
     #[derive(Clone, Copy)]
+    /// Controls insertion order for the complete descriptor fixture.
     enum InputOrder {
+        /// Insert records in their declared order.
         Forward,
+        /// Insert records in reverse declared order.
         Reversed,
     }
 

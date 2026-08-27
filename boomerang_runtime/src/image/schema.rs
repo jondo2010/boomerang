@@ -38,6 +38,35 @@ borrowed_id!(
     "A stable borrowed implementation-binding identity."
 );
 
+/// A byte range into an Enclave image's UTF-8 identity blob.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IdentityRange {
+    start: u32,
+    len: u32,
+}
+
+impl IdentityRange {
+    /// Creates an unchecked identity range.
+    pub const fn new(start: u32, len: u32) -> Self {
+        Self { start, len }
+    }
+
+    /// Returns the first byte offset.
+    pub const fn start(self) -> u32 {
+        self.start
+    }
+
+    /// Returns the byte length.
+    pub const fn len(self) -> u32 {
+        self.len
+    }
+
+    /// Returns whether the identity has no bytes.
+    pub const fn is_empty(self) -> bool {
+        self.len == 0
+    }
+}
+
 /// A typed start-plus-length range into a flattened table.
 #[derive(Debug, PartialEq, Eq)]
 pub struct TableRange<K> {
@@ -88,6 +117,7 @@ pub struct ReactorImage {
     root_scope: ScopeIndex,
     modes: TableRange<ModeIndex>,
     initial_mode: Option<ModeIndex>,
+    bank: Option<BankInfoImage>,
 }
 
 impl ReactorImage {
@@ -98,6 +128,7 @@ impl ReactorImage {
         root_scope: ScopeIndex,
         modes: TableRange<ModeIndex>,
         initial_mode: Option<ModeIndex>,
+        bank: Option<BankInfoImage>,
     ) -> Self {
         Self {
             state_binding,
@@ -105,6 +136,7 @@ impl ReactorImage {
             root_scope,
             modes,
             initial_mode,
+            bank,
         }
     }
 
@@ -132,6 +164,63 @@ impl ReactorImage {
     pub const fn initial_mode(self) -> Option<ModeIndex> {
         self.initial_mode
     }
+
+    /// Returns the reactor's bank position, if it belongs to a bank.
+    pub const fn bank(self) -> Option<BankInfoImage> {
+        self.bank
+    }
+}
+
+/// A reactor's position in a statically sized bank.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BankInfoImage {
+    index: u32,
+    total: u32,
+}
+
+impl BankInfoImage {
+    /// Creates unchecked reactor-bank metadata.
+    pub const fn new(index: u32, total: u32) -> Self {
+        Self { index, total }
+    }
+
+    /// Returns the zero-based reactor index within the bank.
+    pub const fn index(self) -> u32 {
+        self.index
+    }
+
+    /// Returns the number of reactors in the bank.
+    pub const fn total(self) -> u32 {
+        self.total
+    }
+}
+
+/// The clock domain used to interpret an action or route delay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimingDomain {
+    /// Interpret the delay against logical time.
+    Logical,
+    /// Interpret the delay against physical time.
+    Physical,
+}
+
+/// Immutable scheduling semantics for an action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActionTiming {
+    /// A user-scheduled action with a canonical minimum delay.
+    Standard {
+        /// Clock domain used to schedule the action.
+        domain: TimingDomain,
+        /// Minimum scheduling delay in nanoseconds.
+        min_delay_nanos: u64,
+    },
+    /// A logical timer with an optional repetition period.
+    Timer {
+        /// Repetition period in nanoseconds, or `None` for a one-shot timer.
+        period_nanos: Option<u64>,
+    },
+    /// The internal action supplying a shutdown reaction's unit value.
+    Shutdown,
 }
 
 /// An immutable action scheduler record.
@@ -139,7 +228,7 @@ impl ReactorImage {
 pub struct ActionImage {
     scope: ScopeIndex,
     storage_slot: ActionSlotIndex,
-    logical_time: bool,
+    timing: ActionTiming,
     triggers: TableRange<LevelReactionImage>,
 }
 
@@ -148,13 +237,13 @@ impl ActionImage {
     pub const fn new(
         scope: ScopeIndex,
         storage_slot: ActionSlotIndex,
-        logical_time: bool,
+        timing: ActionTiming,
         triggers: TableRange<LevelReactionImage>,
     ) -> Self {
         Self {
             scope,
             storage_slot,
-            logical_time,
+            timing,
             triggers,
         }
     }
@@ -169,9 +258,9 @@ impl ActionImage {
         self.storage_slot
     }
 
-    /// Returns whether the action uses logical-time scheduling.
-    pub const fn is_logical_time(self) -> bool {
-        self.logical_time
+    /// Returns the action's immutable scheduling semantics.
+    pub const fn timing(self) -> ActionTiming {
+        self.timing
     }
 
     /// Returns the action's flattened trigger range.
@@ -480,31 +569,34 @@ pub enum RouteDirection {
 
 /// An immutable scheduler-boundary route without transport state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RouteImage<'a> {
-    boundary: BoundaryId<'a>,
+pub struct RouteImage {
+    boundary: IdentityRange,
     local_port: PortIndex,
     direction: RouteDirection,
+    timing_domain: TimingDomain,
     logical_delay_nanos: u64,
 }
 
-impl<'a> RouteImage<'a> {
+impl RouteImage {
     /// Creates an unchecked route record.
     pub const fn new(
-        boundary: BoundaryId<'a>,
+        boundary: IdentityRange,
         local_port: PortIndex,
         direction: RouteDirection,
+        timing_domain: TimingDomain,
         logical_delay_nanos: u64,
     ) -> Self {
         Self {
             boundary,
             local_port,
             direction,
+            timing_domain,
             logical_delay_nanos,
         }
     }
 
-    /// Returns the stable boundary identity.
-    pub const fn boundary(self) -> BoundaryId<'a> {
+    /// Returns the boundary identity's blob range.
+    pub const fn boundary(self) -> IdentityRange {
         self.boundary
     }
 
@@ -516,6 +608,11 @@ impl<'a> RouteImage<'a> {
     /// Returns the route direction.
     pub const fn direction(self) -> RouteDirection {
         self.direction
+    }
+
+    /// Returns the clock domain used to interpret the route delay.
+    pub const fn timing_domain(self) -> TimingDomain {
+        self.timing_domain
     }
 
     /// Returns the logical delay in nanoseconds.
@@ -535,19 +632,19 @@ pub enum BindingKind {
 
 /// A required stable implementation-binding slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RequiredBindingImage<'a> {
-    id: BindingSlotId<'a>,
+pub struct RequiredBindingImage {
+    id: IdentityRange,
     kind: BindingKind,
 }
 
-impl<'a> RequiredBindingImage<'a> {
+impl RequiredBindingImage {
     /// Creates an unchecked required-binding record.
-    pub const fn new(id: BindingSlotId<'a>, kind: BindingKind) -> Self {
+    pub const fn new(id: IdentityRange, kind: BindingKind) -> Self {
         Self { id, kind }
     }
 
-    /// Returns the stable binding-slot identity.
-    pub const fn id(self) -> BindingSlotId<'a> {
+    /// Returns the binding identity's blob range.
+    pub const fn id(self) -> IdentityRange {
         self.id
     }
 
@@ -606,8 +703,10 @@ impl StorageBounds {
 /// An unchecked aggregate of borrowed immutable scheduler tables.
 #[derive(Clone, Copy, Debug)]
 pub struct EnclaveImage<'a> {
-    /// Stable Enclave identity.
-    pub enclave_id: EnclaveId<'a>,
+    /// UTF-8 storage for all stable identities referenced by this image.
+    pub identity_data: &'a str,
+    /// Stable Enclave identity range.
+    pub enclave_id: IdentityRange,
     /// Dense reactor records.
     pub reactors: &'a [ReactorImage],
     /// Dense action records.
@@ -648,10 +747,12 @@ pub struct EnclaveImage<'a> {
     pub timer_startup_actions: &'a [TimerStartupImage],
     /// Global shutdown reaction entries.
     pub shutdown_reactions: &'a [LifecycleReactionImage],
+    /// Unique actions populated before global shutdown reactions execute.
+    pub shutdown_actions: &'a [ActionIndex],
     /// Dense scheduler-boundary routes.
-    pub routes: &'a [RouteImage<'a>],
+    pub routes: &'a [RouteImage],
     /// Dense required implementation bindings.
-    pub required_bindings: &'a [RequiredBindingImage<'a>],
+    pub required_bindings: &'a [RequiredBindingImage],
     /// Fixed mutable-storage and workspace bounds.
     pub storage_bounds: StorageBounds,
 }
@@ -660,7 +761,8 @@ impl<'a> EnclaveImage<'a> {
     /// Creates an unchecked borrowed scheduler image.
     #[allow(clippy::too_many_arguments)]
     pub const fn new(
-        enclave_id: EnclaveId<'a>,
+        identity_data: &'a str,
+        enclave_id: IdentityRange,
         reactors: &'a [ReactorImage],
         actions: &'a [ActionImage],
         ports: &'a [PortImage],
@@ -681,11 +783,13 @@ impl<'a> EnclaveImage<'a> {
         startup_actions: &'a [TimerStartupImage],
         timer_startup_actions: &'a [TimerStartupImage],
         shutdown_reactions: &'a [LifecycleReactionImage],
-        routes: &'a [RouteImage<'a>],
-        required_bindings: &'a [RequiredBindingImage<'a>],
+        shutdown_actions: &'a [ActionIndex],
+        routes: &'a [RouteImage],
+        required_bindings: &'a [RequiredBindingImage],
         storage_bounds: StorageBounds,
     ) -> Self {
         Self {
+            identity_data,
             enclave_id,
             reactors,
             actions,
@@ -707,15 +811,21 @@ impl<'a> EnclaveImage<'a> {
             startup_actions,
             timer_startup_actions,
             shutdown_reactions,
+            shutdown_actions,
             routes,
             required_bindings,
             storage_bounds,
         }
     }
 
-    /// Returns the stable Enclave identity.
-    pub const fn enclave_id(&self) -> EnclaveId<'a> {
+    /// Returns the stable Enclave identity's blob range.
+    pub const fn enclave_id(&self) -> IdentityRange {
         self.enclave_id
+    }
+
+    /// Returns the UTF-8 stable-identity storage.
+    pub const fn identity_data(&self) -> &'a str {
+        self.identity_data
     }
 
     /// Returns the dense reactor records.
@@ -804,12 +914,16 @@ impl<'a> EnclaveImage<'a> {
     pub const fn shutdown_reactions(&self) -> &'a [LifecycleReactionImage] {
         self.shutdown_reactions
     }
+    /// Returns unique actions populated before global shutdown reactions.
+    pub const fn shutdown_actions(&self) -> &'a [ActionIndex] {
+        self.shutdown_actions
+    }
     /// Returns boundary routes.
-    pub const fn routes(&self) -> &'a [RouteImage<'a>] {
+    pub const fn routes(&self) -> &'a [RouteImage] {
         self.routes
     }
     /// Returns required implementation bindings.
-    pub const fn required_bindings(&self) -> &'a [RequiredBindingImage<'a>] {
+    pub const fn required_bindings(&self) -> &'a [RequiredBindingImage] {
         self.required_bindings
     }
 

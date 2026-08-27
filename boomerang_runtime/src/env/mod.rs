@@ -64,7 +64,6 @@ impl std::ops::Sub<usize> for Level {
 pub type LevelReactionKey = (Level, ReactionKey);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LifecycleReaction {
     pub reaction: LevelReactionKey,
     pub action: ActionKey,
@@ -74,14 +73,12 @@ tinymap::key_type! { pub ModeKey }
 tinymap::key_type! { pub ScopeKey }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Mode {
     pub name: String,
     pub parent: ReactorKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ScopeInfo {
     pub parent: Option<ScopeKey>,
     pub reactor: ReactorKey,
@@ -96,7 +93,6 @@ pub enum TransitionKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ModeFilter {
     modes: Vec<ModeKey>,
 }
@@ -120,21 +116,15 @@ impl ModeFilter {
 
 /// Flattened scheduler lookup tables derived from [`ReactionGraph`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ModalScheduleIndex {
-    #[cfg_attr(feature = "serde", serde(with = "range_map_serde"))]
     pub scope_descendant_ranges: tinymap::TinySecondaryMap<ScopeKey, Range<usize>>,
     pub scope_descendants: Vec<ScopeKey>,
-    #[cfg_attr(feature = "serde", serde(with = "range_map_serde"))]
     pub scope_logical_action_ranges: tinymap::TinySecondaryMap<ScopeKey, Range<usize>>,
     pub scope_logical_actions: Vec<ActionKey>,
-    #[cfg_attr(feature = "serde", serde(with = "range_map_serde"))]
     pub scope_timer_startup_ranges: tinymap::TinySecondaryMap<ScopeKey, Range<usize>>,
     pub scope_timer_startups: Vec<(ActionKey, Tag)>,
-    #[cfg_attr(feature = "serde", serde(with = "range_map_serde"))]
     pub scope_reset_reaction_ranges: tinymap::TinySecondaryMap<ScopeKey, Range<usize>>,
     pub scope_reset_reactions: Vec<LevelReactionKey>,
-    #[cfg_attr(feature = "serde", serde(with = "range_map_serde"))]
     pub scope_startup_reaction_ranges: tinymap::TinySecondaryMap<ScopeKey, Range<usize>>,
     pub scope_startup_reactions: Vec<LifecycleReaction>,
     pub all_shutdown_reactions: Vec<LifecycleReaction>,
@@ -182,65 +172,6 @@ impl ModalScheduleIndex {
     }
 }
 
-#[cfg(feature = "serde")]
-mod range_map_serde {
-    use super::*;
-
-    #[derive(serde::Serialize, serde::Deserialize)]
-    struct SerializableRange {
-        start: usize,
-        end: usize,
-    }
-
-    pub fn serialize<K, S>(
-        map: &tinymap::TinySecondaryMap<K, Range<usize>>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
-    where
-        K: tinymap::Key + serde::Serialize,
-        S: serde::Serializer,
-    {
-        let serializable = map
-            .iter()
-            .map(|(key, range)| {
-                (
-                    key,
-                    SerializableRange {
-                        start: range.start,
-                        end: range.end,
-                    },
-                )
-            })
-            .collect::<tinymap::TinySecondaryMap<K, SerializableRange>>();
-        serde::Serialize::serialize(&serializable, serializer)
-    }
-
-    pub fn deserialize<'de, K, D>(
-        deserializer: D,
-    ) -> Result<tinymap::TinySecondaryMap<K, Range<usize>>, D::Error>
-    where
-        K: tinymap::Key + serde::Deserialize<'de>,
-        D: serde::Deserializer<'de>,
-    {
-        let serializable =
-            <tinymap::TinySecondaryMap<K, SerializableRange> as serde::Deserialize>::deserialize(
-                deserializer,
-            )?;
-        Ok(serializable
-            .into_iter()
-            .map(|(key, range)| {
-                (
-                    key,
-                    Range {
-                        start: range.start,
-                        end: range.end,
-                    },
-                )
-            })
-            .collect())
-    }
-}
-
 /// `Env` stores the resolved runtime state of all the reactors.
 ///
 /// The reactor hierarchy has been flattened and built by the builder methods.
@@ -280,7 +211,6 @@ pub struct BankInfo {
 ///
 /// Maps of triggers for actions and ports. This data is statically resolved by the builder from the
 /// reaction graph.
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Default)]
 pub struct ReactionGraph {
     /// All static execution scopes. Each reactor has a root scope, and each mode has a child scope.

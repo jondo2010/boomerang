@@ -1,6 +1,8 @@
 use crate::Level;
 
 impl tinymap::Key for Level {
+    const MAX_LEN: usize = usize::MAX;
+
     fn index(&self) -> usize {
         self.0
     }

@@ -299,6 +299,12 @@ mod tests {
 
     use super::*;
 
+    #[cfg(feature = "serde")]
+    crate::key_type! {
+        #[derive(serde::Serialize, serde::Deserialize)]
+        SerializableKey
+    }
+
     #[test]
     fn test_tiny_secondary_map() {
         let mut map = TinySecondaryMap::<DefaultKey, _>::new();
@@ -428,15 +434,16 @@ mod tests {
     #[test]
     #[cfg(feature = "serde")]
     fn test_serialize_roundtrip() {
-        let mut map = TinySecondaryMap::<DefaultKey, _>::new();
-        map.insert(DefaultKey(3), 4);
-        map.insert(DefaultKey(0), 1);
-        map.insert(DefaultKey(2), 3);
-        map.insert(DefaultKey(1), 2);
+        let mut map = TinySecondaryMap::<SerializableKey, _>::new();
+        map.insert(SerializableKey::new(3), 4);
+        map.insert(SerializableKey::new(0), 1);
+        map.insert(SerializableKey::new(2), 3);
+        map.insert(SerializableKey::new(1), 2);
 
         let serialized = serde_json::to_string(&map).unwrap();
-        let deserialized: TinySecondaryMap<DefaultKey, i32> =
+        let deserialized: TinySecondaryMap<SerializableKey, i32> =
             serde_json::from_str(&serialized).unwrap();
         assert_eq!(map, deserialized);
+        assert_eq!(deserialized.first_key().unwrap().as_u32(), 0);
     }
 }

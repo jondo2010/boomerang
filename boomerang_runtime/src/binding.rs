@@ -46,8 +46,8 @@ mod tests {
         const DIFFERENT: bool = VALUE.matches(DescriptorFingerprint::new([0xa5; 32]));
         const _: () = assert_descriptor_fingerprint(VALUE, DescriptorFingerprint::new([0x5a; 32]));
 
-        assert!(SAME);
-        assert!(!DIFFERENT);
+        const { assert!(SAME) };
+        const { assert!(!DIFFERENT) };
         assert_eq!(VALUE.to_bytes(), [0x5a; 32]);
     }
 }

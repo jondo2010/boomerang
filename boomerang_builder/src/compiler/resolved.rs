@@ -1,11 +1,11 @@
 //! Canonical deployment selections resolved before image lowering.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     ApplicationTopology, BoundaryBinding, BoundaryId, ComponentInstanceId, ContractId,
     CoordinationSelection, FederateConfig, FederateId, ImplementationBinding, ImplementationId,
-    PlacementAssignment, PlacementGroupId,
+    PlacementAssignment, PlacementGroupId, ReactorId, StableEnclaveId,
 };
 
 /// Failure while resolving implementation and placement selections.
@@ -79,6 +79,24 @@ pub enum ResolveError {
         /// Boundary with multiple selections.
         boundary: BoundaryId,
     },
+    /// A cross-Federate topology boundary has no selected codec and transport.
+    #[error("cross-Federate boundary `{boundary}` has no binding")]
+    MissingBoundaryBinding {
+        /// Cross-Federate topology boundary missing its selections.
+        boundary: BoundaryId,
+    },
+    /// A binding targets a topology boundary that remains within one Federate.
+    #[error("boundary binding for local boundary `{boundary}` is unexpected")]
+    UnexpectedBoundaryBinding {
+        /// Same-Federate topology boundary with superfluous selections.
+        boundary: BoundaryId,
+    },
+    /// A binding targets no topology boundary.
+    #[error("boundary binding targets unknown boundary `{boundary}`")]
+    UnknownBoundaryBinding {
+        /// Unknown topology boundary identity.
+        boundary: BoundaryId,
+    },
     /// A placement assignment references a Federate without a configuration.
     #[error(
         "placement group `{placement_group}` is assigned to Federate `{federate}` without a configuration"
@@ -94,6 +112,33 @@ pub enum ResolveError {
     UnusedFederateConfig {
         /// Federate with no placement assignments.
         federate: FederateId,
+    },
+    /// A topology reactor does not belong to a source placement group.
+    #[error("reactor `{reactor}` has no placement group")]
+    UnplacedReactor {
+        /// Reactor missing source placement.
+        reactor: ReactorId,
+    },
+    /// Reactors in one Enclave resolve to different Federates.
+    #[error("Enclave `{enclave}` is split between Federates `{first}` and `{second}`")]
+    SplitEnclave {
+        /// Enclave with conflicting Federate owners.
+        enclave: StableEnclaveId,
+        /// First resolved Federate owner in stable reactor order.
+        first: FederateId,
+        /// Conflicting Federate owner.
+        second: FederateId,
+    },
+    /// No Federates are selected by the deployment placement assignments.
+    #[error("deployment resolves to no Federates")]
+    NoFederates,
+    /// The coordination backend does not match the resolved Federate count.
+    #[error("coordination `{coordination:?}` is invalid for {federate_count} resolved Federates")]
+    InvalidCoordination {
+        /// Number of canonical Federates selected by placement assignments.
+        federate_count: usize,
+        /// Coordination selection incompatible with that count.
+        coordination: CoordinationSelection,
     },
 }
 
@@ -233,6 +278,88 @@ impl ResolvedDeployment {
             }
         }
 
+        if canonical_federates.is_empty() {
+            return Err(ResolveError::NoFederates);
+        }
+        let federate_count = canonical_federates.len();
+        if !matches!(
+            (&coordination, federate_count),
+            (CoordinationSelection::Local, 1) | (CoordinationSelection::Distributed { .. }, 2..)
+        ) {
+            return Err(ResolveError::InvalidCoordination {
+                federate_count,
+                coordination,
+            });
+        }
+
+        let mut reactor_federates = BTreeMap::new();
+        let mut enclave_federates = BTreeMap::new();
+        for (reactor_id, reactor) in topology.reactors() {
+            let placement_group =
+                reactor
+                    .placement_group()
+                    .ok_or_else(|| ResolveError::UnplacedReactor {
+                        reactor: reactor_id.clone(),
+                    })?;
+            let federate = canonical_placements
+                .get(placement_group)
+                .expect("all topology placement groups are assigned")
+                .federate()
+                .clone();
+            reactor_federates.insert(reactor_id.clone(), federate.clone());
+
+            if let Some(first) =
+                enclave_federates.insert(reactor.enclave().clone(), federate.clone())
+            {
+                if first != federate {
+                    return Err(ResolveError::SplitEnclave {
+                        enclave: reactor.enclave().clone(),
+                        first,
+                        second: federate,
+                    });
+                }
+            }
+        }
+
+        let mut cross_federate_boundaries = BTreeSet::new();
+        for (boundary, connection) in topology.connections() {
+            let source_reactor = topology
+                .port(connection.source())
+                .expect("topology connections reference source ports")
+                .reactor();
+            let target_reactor = topology
+                .port(connection.target())
+                .expect("topology connections reference target ports")
+                .reactor();
+            let source_federate = reactor_federates
+                .get(source_reactor)
+                .expect("topology ports reference placed source reactors");
+            let target_federate = reactor_federates
+                .get(target_reactor)
+                .expect("topology ports reference placed target reactors");
+            if source_federate != target_federate {
+                cross_federate_boundaries.insert(boundary.clone());
+            }
+        }
+
+        for boundary in canonical_boundary_bindings.keys() {
+            if topology.connection(boundary).is_none() {
+                return Err(ResolveError::UnknownBoundaryBinding {
+                    boundary: boundary.clone(),
+                });
+            }
+            if !cross_federate_boundaries.contains(boundary) {
+                return Err(ResolveError::UnexpectedBoundaryBinding {
+                    boundary: boundary.clone(),
+                });
+            }
+        }
+        for boundary in cross_federate_boundaries {
+            if !canonical_boundary_bindings.contains_key(&boundary) {
+                return Err(ResolveError::MissingBoundaryBinding { boundary });
+            }
+        }
+
         Ok(Self {
             topology,
             bindings: canonical_bindings,
@@ -333,6 +460,14 @@ mod tests {
     }
 
     fn topology() -> ApplicationTopology {
+        topology_with_layout(true, true, false)
+    }
+
+    fn topology_with_layout(
+        controller_is_placed: bool,
+        sensor_is_placed: bool,
+        shared_enclave: bool,
+    ) -> ApplicationTopology {
         let mut topology = ApplicationTopologyBuilder::new("vehicle").unwrap();
         let controller_component = ComponentInstanceId::new("vehicle/controller").unwrap();
         let sensor_component = ComponentInstanceId::new("vehicle/sensor").unwrap();
@@ -340,8 +475,8 @@ mod tests {
         let sensor_reactor = ReactorId::new("vehicle/sensor").unwrap();
         let controller_enclave = StableEnclaveId::new("vehicle/controller").unwrap();
         let sensor_enclave = StableEnclaveId::new("vehicle/sensor").unwrap();
-        let controller_placement = PlacementGroupId::new("placement/controller").unwrap();
-        let sensor_placement = PlacementGroupId::new("placement/sensor").unwrap();
+        let controller_placement_group = PlacementGroupId::new("placement/controller").unwrap();
+        let sensor_placement_group = PlacementGroupId::new("placement/sensor").unwrap();
         topology
             .add_component(
                 ComponentInstance::new("vehicle/controller", "controller.v1", 1).unwrap(),
@@ -351,10 +486,10 @@ mod tests {
             .add_component(ComponentInstance::new("vehicle/sensor", "sensor.v1", 1).unwrap())
             .unwrap();
         topology
-            .add_placement_group(controller_placement.clone(), None)
+            .add_placement_group(controller_placement_group.clone(), None)
             .unwrap();
         topology
-            .add_placement_group(sensor_placement.clone(), None)
+            .add_placement_group(sensor_placement_group.clone(), None)
             .unwrap();
         topology
             .add_reactor(Reactor::new(
@@ -363,7 +498,7 @@ mod tests {
                 None,
                 None,
                 controller_enclave.clone(),
-                Some(controller_placement),
+                controller_is_placed.then_some(controller_placement_group),
                 None,
             ))
             .unwrap();
@@ -373,17 +508,23 @@ mod tests {
                 sensor_component,
                 None,
                 None,
-                sensor_enclave.clone(),
-                Some(sensor_placement),
+                if shared_enclave {
+                    controller_enclave.clone()
+                } else {
+                    sensor_enclave.clone()
+                },
+                sensor_is_placed.then_some(sensor_placement_group),
                 None,
             ))
             .unwrap();
         topology
             .add_enclave(controller_enclave, controller_reactor.clone())
             .unwrap();
-        topology
-            .add_enclave(sensor_enclave, sensor_reactor.clone())
-            .unwrap();
+        if !shared_enclave {
+            topology
+                .add_enclave(sensor_enclave, sensor_reactor.clone())
+                .unwrap();
+        }
         let controller_port = PortId::new("vehicle/controller/output").unwrap();
         let sensor_port = PortId::new("vehicle/sensor/input").unwrap();
         topology
@@ -491,6 +632,273 @@ mod tests {
             boundary_bindings,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn resolution_requires_complete_reactor_placement_and_enclave_ownership() {
+        let unplaced_reactor = ResolvedDeployment::new(
+            topology_with_layout(true, false, false),
+            [
+                binding("vehicle/controller", "controller-host", "controller.v1"),
+                binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+            ],
+            [
+                placement("placement/controller", "host"),
+                placement("placement/sensor", "edge"),
+            ],
+            standard_federates(),
+            distributed_coordination(),
+            [controller_to_sensor_binding()],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            unplaced_reactor,
+            ResolveError::UnplacedReactor { reactor }
+                if reactor.to_string() == "vehicle/sensor"
+        ));
+
+        let split_enclave = ResolvedDeployment::new(
+            topology_with_layout(true, true, true),
+            [
+                binding("vehicle/controller", "controller-host", "controller.v1"),
+                binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+            ],
+            [
+                placement("placement/controller", "host"),
+                placement("placement/sensor", "edge"),
+            ],
+            standard_federates(),
+            distributed_coordination(),
+            [controller_to_sensor_binding()],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            split_enclave,
+            ResolveError::SplitEnclave {
+                enclave,
+                first,
+                second,
+            } if enclave.to_string() == "vehicle/controller"
+                && first.as_str() == "host"
+                && second.as_str() == "edge"
+        ));
+
+        let no_federates = ResolvedDeployment::new(
+            ApplicationTopologyBuilder::new("empty")
+                .unwrap()
+                .finish()
+                .unwrap(),
+            [],
+            [],
+            [],
+            CoordinationSelection::Local,
+            [],
+        )
+        .unwrap_err();
+        assert!(matches!(no_federates, ResolveError::NoFederates));
+    }
+
+    #[test]
+    fn resolution_requires_coordination_matching_federate_cardinality() {
+        let cases = [
+            (
+                "one Federate with local coordination",
+                vec![
+                    placement("placement/controller", "host"),
+                    placement("placement/sensor", "host"),
+                ],
+                vec![federate("host", "x86_64-unknown-linux-gnu", "native")],
+                CoordinationSelection::Local,
+                vec![],
+                1,
+                true,
+            ),
+            (
+                "one Federate with distributed coordination",
+                vec![
+                    placement("placement/controller", "host"),
+                    placement("placement/sensor", "host"),
+                ],
+                vec![federate("host", "x86_64-unknown-linux-gnu", "native")],
+                distributed_coordination(),
+                vec![],
+                1,
+                false,
+            ),
+            (
+                "two Federates with local coordination",
+                vec![
+                    placement("placement/controller", "host"),
+                    placement("placement/sensor", "edge"),
+                ],
+                standard_federates().into(),
+                CoordinationSelection::Local,
+                vec![controller_to_sensor_binding()],
+                2,
+                false,
+            ),
+            (
+                "two Federates with distributed coordination",
+                vec![
+                    placement("placement/controller", "host"),
+                    placement("placement/sensor", "edge"),
+                ],
+                standard_federates().into(),
+                distributed_coordination(),
+                vec![controller_to_sensor_binding()],
+                2,
+                true,
+            ),
+        ];
+
+        for (
+            name,
+            placements,
+            federates,
+            coordination,
+            boundary_bindings,
+            expected_federate_count,
+            accepted,
+        ) in cases
+        {
+            let result = ResolvedDeployment::new(
+                topology(),
+                [
+                    binding("vehicle/controller", "controller-host", "controller.v1"),
+                    binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+                ],
+                placements,
+                federates,
+                coordination.clone(),
+                boundary_bindings,
+            );
+
+            match (accepted, result) {
+                (true, Ok(_)) => {}
+                (
+                    false,
+                    Err(ResolveError::InvalidCoordination {
+                        federate_count,
+                        coordination: selected,
+                    }),
+                ) => {
+                    assert_eq!(federate_count, expected_federate_count, "{name}");
+                    assert_eq!(selected, coordination, "{name}");
+                }
+                (_, result) => panic!("unexpected resolution result for {name}: {result:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn resolution_requires_exact_cross_federate_boundary_bindings() {
+        let missing_binding = ResolvedDeployment::new(
+            topology(),
+            [
+                binding("vehicle/controller", "controller-host", "controller.v1"),
+                binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+            ],
+            [
+                placement("placement/controller", "host"),
+                placement("placement/sensor", "edge"),
+            ],
+            standard_federates(),
+            distributed_coordination(),
+            [],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            missing_binding,
+            ResolveError::MissingBoundaryBinding { boundary }
+                if boundary.to_string() == "controller-to-sensor"
+        ));
+
+        let resolved = ResolvedDeployment::new(
+            topology(),
+            [
+                binding("vehicle/controller", "controller-host", "controller.v1"),
+                binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+            ],
+            [
+                placement("placement/controller", "host"),
+                placement("placement/sensor", "edge"),
+            ],
+            standard_federates(),
+            distributed_coordination(),
+            [controller_to_sensor_binding()],
+        )
+        .unwrap();
+        let selected_binding = resolved
+            .boundary_binding(&BoundaryId::new("controller-to-sensor").unwrap())
+            .expect("cross-Federate connection must retain its binding");
+        assert_eq!(selected_binding.codec().to_string(), "serde-json");
+        assert_eq!(selected_binding.transport().to_string(), "quic");
+
+        let unexpected_binding = ResolvedDeployment::new(
+            topology(),
+            [
+                binding("vehicle/controller", "controller-host", "controller.v1"),
+                binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+            ],
+            [
+                placement("placement/controller", "host"),
+                placement("placement/sensor", "host"),
+            ],
+            [federate("host", "x86_64-unknown-linux-gnu", "native")],
+            CoordinationSelection::Local,
+            [controller_to_sensor_binding()],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            unexpected_binding,
+            ResolveError::UnexpectedBoundaryBinding { boundary }
+                if boundary.to_string() == "controller-to-sensor"
+        ));
+
+        let unknown_binding = ResolvedDeployment::new(
+            topology(),
+            [
+                binding("vehicle/controller", "controller-host", "controller.v1"),
+                binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+            ],
+            [
+                placement("placement/controller", "host"),
+                placement("placement/sensor", "edge"),
+            ],
+            standard_federates(),
+            distributed_coordination(),
+            [boundary_binding("unknown", "serde-json", "quic")],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            unknown_binding,
+            ResolveError::UnknownBoundaryBinding { boundary }
+                if boundary.to_string() == "unknown"
+        ));
+
+        let duplicate_binding = ResolvedDeployment::new(
+            topology(),
+            [
+                binding("vehicle/controller", "controller-host", "controller.v1"),
+                binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+            ],
+            [
+                placement("placement/controller", "host"),
+                placement("placement/sensor", "edge"),
+            ],
+            standard_federates(),
+            distributed_coordination(),
+            [
+                controller_to_sensor_binding(),
+                boundary_binding("controller-to-sensor", "postcard", "tcp"),
+            ],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            duplicate_binding,
+            ResolveError::DuplicateBoundaryBinding { boundary }
+                if boundary.to_string() == "controller-to-sensor"
+        ));
     }
 
     #[test]

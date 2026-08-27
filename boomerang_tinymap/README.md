@@ -10,3 +10,7 @@
 A tiny, fast, and simple Slotkey-type map implementation for [`boomerang`](https://docs.rs/boomerang).
 
 [`TinyMap`], [`TinySecondaryMap`] and [`KeySet`] are built as a write-once, read-many data structures. Methods to remove elements are intentionally omitted.
+
+The [`key_type!`](https://docs.rs/boomerang_tinymap/latest/boomerang_tinymap/macro.key_type.html)
+macro declares transparent `u32` dense keys. Generated keys do not implement Serde traits;
+applications that intentionally serialize a contextual key may add those derives explicitly.

@@ -536,7 +536,8 @@ toolchains.
 Canonicalization sorts stable IDs before compiled deployment slices assign dense typed keys. Dense
 keys are local to one compiled image or Federate slice and are excluded from fingerprints and
 serialized interchange except where their canonical table position is explicitly part of a
-compiled-image schema.
+compiled-image schema. Dense key types do not implement serialization traits; a schema that stores
+a canonical table position represents it explicitly as an integer field.
 
 The runtime guarantees deterministic logical scheduling for one compiled deployment given the same
 initial state and input event stream, subject to documented physical-input and reaction-code

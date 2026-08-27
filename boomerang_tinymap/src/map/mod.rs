@@ -30,9 +30,11 @@ use crate::Key;
 
 mod chunks;
 mod iter_many;
+mod view;
 
 pub use chunks::{Chunks, ChunksMut, SplitChunks};
 pub use iter_many::IterManyMut;
+pub use view::TinyMapView;
 
 /// A map that uses a custom key type to index its values.
 ///
@@ -220,6 +222,8 @@ mod tests {
         let key1 = map.insert(10);
         let key2 = map.insert(20);
 
+        assert_eq!(key1, TestKey::new(0));
+        assert_eq!(key2.as_u32(), 1);
         assert_eq!(map[key1], 10);
         assert_eq!(map[key2], 20);
 

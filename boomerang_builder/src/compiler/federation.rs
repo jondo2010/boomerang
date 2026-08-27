@@ -11,7 +11,7 @@ use petgraph::{
 
 use super::{BoundaryId, FederateId};
 
-/// Nonnegative logical delay carried by a federation endpoint.
+/// Nonnegative logical delay carried by a federation edge.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct FederationDelay(
     /// Delay represented in nanoseconds.
@@ -32,21 +32,21 @@ impl FederationDelay {
     }
 }
 
-/// One preserved cross-federate endpoint between declared members.
+/// One preserved cross-federate edge between declared members.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FederationEndpoint {
+pub struct FederationEdge {
     /// Declared source member identity.
     source: FederateId,
     /// Declared target member identity.
     target: FederateId,
-    /// Stable endpoint identity.
+    /// Stable edge identity.
     id: BoundaryId,
-    /// Direct delay applied by this endpoint.
+    /// Direct delay applied by this edge.
     delay: FederationDelay,
 }
 
-impl FederationEndpoint {
-    /// Constructs a resolved cross-federate endpoint.
+impl FederationEdge {
+    /// Constructs a resolved cross-federate edge.
     #[must_use]
     pub fn new(
         source: FederateId,
@@ -74,13 +74,13 @@ impl FederationEndpoint {
         &self.target
     }
 
-    /// Returns the stable endpoint identity.
+    /// Returns the stable edge identity.
     #[must_use]
     pub fn id(&self) -> &BoundaryId {
         &self.id
     }
 
-    /// Returns the endpoint's direct delay.
+    /// Returns the edge's direct delay.
     #[must_use]
     pub const fn delay(&self) -> FederationDelay {
         self.delay
@@ -96,21 +96,21 @@ pub enum FederationAnalysisError {
         /// Conflicting member identity.
         federate: FederateId,
     },
-    /// An endpoint identity was declared more than once.
-    #[error("duplicate federation endpoint identity '{endpoint}'")]
-    DuplicateEndpointId {
-        /// Conflicting endpoint identity.
-        endpoint: BoundaryId,
+    /// An edge identity was declared more than once.
+    #[error("duplicate federation edge identity '{edge}'")]
+    DuplicateEdgeId {
+        /// Conflicting edge identity.
+        edge: BoundaryId,
     },
-    /// An endpoint references a member absent from the declared member set.
-    #[error("federation endpoint '{endpoint}' references undeclared federate '{federate}'")]
-    UndeclaredEndpointMember {
-        /// Endpoint carrying the unresolved member reference.
-        endpoint: BoundaryId,
+    /// An edge references a member absent from the declared member set.
+    #[error("federation edge '{edge}' references undeclared federate '{federate}'")]
+    UndeclaredEdgeMember {
+        /// Edge carrying the unresolved member reference.
+        edge: BoundaryId,
         /// Member identity absent from the declared member set.
         federate: FederateId,
     },
-    /// A cycle whose every endpoint has zero delay would prevent progress.
+    /// A cycle whose every edge has zero delay would prevent progress.
     #[error("zero-delay federation cycle among {federates:?}")]
     ZeroDelayCycle {
         /// Canonically ordered member identities in the first invalid cycle component.
@@ -126,13 +126,13 @@ pub enum FederationAnalysisError {
     },
 }
 
-/// Canonical, backend-neutral analysis of declared federation members and endpoints.
+/// Canonical, backend-neutral analysis of declared federation members and edges.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnalyzedFederationGraph {
     /// Canonically ordered declared member identities.
     members: Vec<FederateId>,
-    /// Canonically ordered endpoint records, including parallel endpoints.
-    endpoints: Vec<FederationEndpoint>,
+    /// Canonically ordered edge records, including parallel edges.
+    edges: Vec<FederationEdge>,
     /// Minimum direct incoming dependency by target then source member.
     direct_incoming: BTreeMap<FederateId, Vec<(FederateId, FederationDelay)>>,
     /// Minimum non-empty incoming path by target then source member.
@@ -148,10 +148,10 @@ impl AnalyzedFederationGraph {
         &self.members
     }
 
-    /// Returns preserved endpoints in canonical source, target, identity, and delay order.
+    /// Returns preserved edges in canonical source, target, identity, and delay order.
     #[must_use]
-    pub fn endpoints(&self) -> &[FederationEndpoint] {
-        &self.endpoints
+    pub fn edges(&self) -> &[FederationEdge] {
+        &self.edges
     }
 
     /// Returns minimum direct incoming dependencies for a declared target member.
@@ -176,10 +176,10 @@ impl AnalyzedFederationGraph {
     }
 }
 
-/// Validates and canonically analyzes explicit federation members and endpoints.
+/// Validates and canonically analyzes explicit federation members and edges.
 pub fn analyze_federation_graph(
     members: impl IntoIterator<Item = FederateId>,
-    endpoints: impl IntoIterator<Item = FederationEndpoint>,
+    edges: impl IntoIterator<Item = FederationEdge>,
 ) -> Result<AnalyzedFederationGraph, FederationAnalysisError> {
     let mut member_set = BTreeSet::new();
     for member in members {
@@ -189,24 +189,24 @@ pub fn analyze_federation_graph(
     }
     let members = member_set.into_iter().collect::<Vec<_>>();
 
-    let mut endpoint_ids = BTreeSet::new();
-    let mut endpoints = endpoints.into_iter().collect::<Vec<_>>();
-    for endpoint in &endpoints {
-        if !endpoint_ids.insert(endpoint.id.clone()) {
-            return Err(FederationAnalysisError::DuplicateEndpointId {
-                endpoint: endpoint.id.clone(),
+    let mut edge_ids = BTreeSet::new();
+    let mut edges = edges.into_iter().collect::<Vec<_>>();
+    for edge in &edges {
+        if !edge_ids.insert(edge.id.clone()) {
+            return Err(FederationAnalysisError::DuplicateEdgeId {
+                edge: edge.id.clone(),
             });
         }
-        for member in [&endpoint.source, &endpoint.target] {
+        for member in [&edge.source, &edge.target] {
             if members.binary_search(member).is_err() {
-                return Err(FederationAnalysisError::UndeclaredEndpointMember {
-                    endpoint: endpoint.id.clone(),
+                return Err(FederationAnalysisError::UndeclaredEdgeMember {
+                    edge: edge.id.clone(),
                     federate: member.clone(),
                 });
             }
         }
     }
-    endpoints.sort_by(|left, right| {
+    edges.sort_by(|left, right| {
         (&left.source, &left.target, &left.id, left.delay).cmp(&(
             &right.source,
             &right.target,
@@ -215,16 +215,20 @@ pub fn analyze_federation_graph(
         ))
     });
 
-    let mut graph = StableDiGraph::<FederateId, u128>::new();
-    let mut nodes = BTreeMap::<FederateId, NodeIndex>::new();
+    let mut graph = StableDiGraph::<&FederateId, u128>::new();
+    let mut nodes = BTreeMap::<&FederateId, NodeIndex>::new();
     for member in &members {
-        nodes.insert(member.clone(), graph.add_node(member.clone()));
+        nodes.insert(member, graph.add_node(member));
     }
-    for endpoint in &endpoints {
+    for edge in &edges {
         graph.add_edge(
-            nodes[&endpoint.source],
-            nodes[&endpoint.target],
-            u128::from(endpoint.delay.as_nanos()),
+            *nodes
+                .get(&edge.source)
+                .expect("validated source must be a declared member"),
+            *nodes
+                .get(&edge.target)
+                .expect("validated target must be a declared member"),
+            u128::from(edge.delay.as_nanos()),
         );
     }
 
@@ -235,14 +239,14 @@ pub fn analyze_federation_graph(
         .cloned()
         .map(|member| (member, BTreeMap::new()))
         .collect::<BTreeMap<FederateId, BTreeMap<FederateId, FederationDelay>>>();
-    for endpoint in &endpoints {
+    for edge in &edges {
         let dependencies = direct_incoming
-            .get_mut(&endpoint.target)
+            .get_mut(&edge.target)
             .expect("validated target must be a declared member");
         dependencies
-            .entry(endpoint.source.clone())
-            .and_modify(|delay| *delay = (*delay).min(endpoint.delay))
-            .or_insert(endpoint.delay);
+            .entry(edge.source.clone())
+            .and_modify(|delay| *delay = (*delay).min(edge.delay))
+            .or_insert(edge.delay);
     }
 
     let mut transitive_incoming = members
@@ -256,8 +260,11 @@ pub fn analyze_federation_graph(
         .map(|member| (member, Vec::new()))
         .collect::<BTreeMap<_, _>>();
     for source in &members {
-        for (target_node, delay) in minimum_nonempty_paths(&graph, nodes[source]) {
-            let target = graph[target_node].clone();
+        for (target_node, delay) in minimum_nonempty_paths(
+            &graph,
+            *nodes.get(source).expect("source must be a declared member"),
+        ) {
+            let target = (*graph[target_node]).clone();
             let delay = u64::try_from(delay).map_err(|_| {
                 FederationAnalysisError::AccumulatedDelayOverflow {
                     from: source.clone(),
@@ -279,7 +286,7 @@ pub fn analyze_federation_graph(
 
     Ok(AnalyzedFederationGraph {
         members,
-        endpoints,
+        edges,
         direct_incoming: direct_incoming
             .into_iter()
             .map(|(member, dependencies)| (member, dependencies.into_iter().collect()))
@@ -289,8 +296,9 @@ pub fn analyze_federation_graph(
     })
 }
 
+/// Finds the minimum non-empty delay from one source to every reachable member.
 fn minimum_nonempty_paths(
-    graph: &StableDiGraph<FederateId, u128>,
+    graph: &StableDiGraph<&FederateId, u128>,
     source: NodeIndex,
 ) -> BTreeMap<NodeIndex, u128> {
     let mut distances = BTreeMap::new();
@@ -328,13 +336,14 @@ fn minimum_nonempty_paths(
     distances
 }
 
+/// Rejects cycles composed solely of zero-delay edges.
 fn validate_zero_delay_cycles(
-    graph: &StableDiGraph<FederateId, u128>,
+    graph: &StableDiGraph<&FederateId, u128>,
 ) -> Result<(), FederationAnalysisError> {
-    let mut zero_delay = StableDiGraph::<FederateId, ()>::new();
+    let mut zero_delay = StableDiGraph::<&FederateId, ()>::new();
     let mut nodes = BTreeMap::new();
     for node in graph.node_indices() {
-        nodes.insert(node, zero_delay.add_node(graph[node].clone()));
+        nodes.insert(node, zero_delay.add_node(graph[node]));
     }
     for edge in graph.edge_references().filter(|edge| *edge.weight() == 0) {
         zero_delay.add_edge(nodes[&edge.source()], nodes[&edge.target()], ());
@@ -354,7 +363,7 @@ fn validate_zero_delay_cycles(
         .map(|component| {
             let mut members = component
                 .into_iter()
-                .map(|node| zero_delay[node].clone())
+                .map(|node| (*zero_delay[node]).clone())
                 .collect::<Vec<_>>();
             members.sort();
             members
@@ -366,7 +375,7 @@ fn validate_zero_delay_cycles(
         federates: cycles
             .into_iter()
             .next()
-            .unwrap_or_else(|| vec![zero_delay[cycle.node_id()].clone()]),
+            .unwrap_or_else(|| vec![(*zero_delay[cycle.node_id()]).clone()]),
     })
 }
 
@@ -374,7 +383,7 @@ fn validate_zero_delay_cycles(
 mod tests {
     use super::{
         analyze_federation_graph, AnalyzedFederationGraph, FederationAnalysisError,
-        FederationDelay, FederationEndpoint,
+        FederationDelay, FederationEdge,
     };
     use crate::compiler::{BoundaryId, FederateId};
 
@@ -382,8 +391,8 @@ mod tests {
         FederateId::new(id).unwrap()
     }
 
-    fn endpoint(source: &str, target: &str, id: &str, delay_ns: u64) -> FederationEndpoint {
-        FederationEndpoint::new(
+    fn edge(source: &str, target: &str, id: &str, delay_ns: u64) -> FederationEdge {
+        FederationEdge::new(
             federate(source),
             federate(target),
             BoundaryId::new(id).unwrap(),
@@ -393,9 +402,9 @@ mod tests {
 
     fn analyze(
         members: impl IntoIterator<Item = FederateId>,
-        endpoints: impl IntoIterator<Item = FederationEndpoint>,
+        edges: impl IntoIterator<Item = FederationEdge>,
     ) -> Result<AnalyzedFederationGraph, FederationAnalysisError> {
-        analyze_federation_graph(members, endpoints)
+        analyze_federation_graph(members, edges)
     }
 
     fn delay_for(
@@ -409,23 +418,20 @@ mod tests {
     }
 
     #[test]
-    fn canonicalizes_reordered_members_and_endpoints() {
+    fn canonicalizes_reordered_members_and_edges() {
         let members = [federate("c"), federate("a"), federate("b")];
-        let endpoints = [
-            endpoint("a", "b", "a-b", 3),
-            endpoint("b", "c", "b-c", 4),
-            endpoint("a", "c", "a-c", 9),
+        let edges = [
+            edge("a", "b", "a-b", 3),
+            edge("b", "c", "b-c", 4),
+            edge("a", "c", "a-c", 9),
         ];
         let mut reversed_members = members.clone();
         reversed_members.reverse();
-        let mut reversed_endpoints = endpoints.clone();
-        reversed_endpoints.reverse();
+        let mut reversed_edges = edges.clone();
+        reversed_edges.reverse();
 
-        let graph = analyze(members, endpoints).unwrap();
-        assert_eq!(
-            graph,
-            analyze(reversed_members, reversed_endpoints).unwrap()
-        );
+        let graph = analyze(members, edges).unwrap();
+        assert_eq!(graph, analyze(reversed_members, reversed_edges).unwrap());
         assert_eq!(
             graph
                 .members()
@@ -436,45 +442,45 @@ mod tests {
         );
         assert_eq!(
             graph
-                .endpoints()
+                .edges()
                 .iter()
-                .map(|endpoint| endpoint.id().to_canonical_string())
+                .map(|edge| edge.id().to_canonical_string())
                 .collect::<Vec<_>>(),
             vec!["a-b", "a-c", "b-c"]
         );
     }
 
     #[test]
-    fn preserves_parallel_endpoints_but_collapses_direct_dependencies() {
+    fn preserves_parallel_edges_but_collapses_direct_dependencies() {
         let graph = analyze(
             [federate("a"), federate("b")],
-            [endpoint("a", "b", "slow", 5), endpoint("a", "b", "fast", 2)],
+            [edge("a", "b", "slow", 5), edge("a", "b", "fast", 2)],
         )
         .unwrap();
 
-        assert_eq!(graph.endpoints().len(), 2);
+        assert_eq!(graph.edges().len(), 2);
         assert_eq!(
             delay_for(graph.direct_incoming(&federate("b")), "a"),
             Some(2)
         );
         assert_eq!(
             graph
-                .endpoints()
+                .edges()
                 .iter()
-                .map(|endpoint| endpoint.id().to_canonical_string())
+                .map(|edge| edge.id().to_canonical_string())
                 .collect::<Vec<_>>(),
             vec!["fast", "slow"]
         );
     }
 
     #[test]
-    fn finds_cheaper_indirect_transitive_path_than_direct_endpoint() {
+    fn finds_cheaper_indirect_transitive_path_than_direct_edge() {
         let graph = analyze(
             [federate("a"), federate("b"), federate("c")],
             [
-                endpoint("a", "b", "direct", 5),
-                endpoint("a", "c", "via-c", 1),
-                endpoint("c", "b", "to-b", 1),
+                edge("a", "b", "direct", 5),
+                edge("a", "c", "via-c", 1),
+                edge("c", "b", "to-b", 1),
             ],
         )
         .unwrap();
@@ -493,7 +499,7 @@ mod tests {
     fn rejects_zero_delay_cycles() {
         let error = analyze(
             [federate("b"), federate("a")],
-            [endpoint("a", "b", "a-b", 0), endpoint("b", "a", "b-a", 0)],
+            [edge("a", "b", "a-b", 0), edge("b", "a", "b-a", 0)],
         )
         .unwrap_err();
 
@@ -508,7 +514,7 @@ mod tests {
     fn accepts_positive_delay_cycles_and_includes_minimum_nonempty_self_path() {
         let graph = analyze(
             [federate("a"), federate("b")],
-            [endpoint("a", "b", "a-b", 5), endpoint("b", "a", "b-a", 7)],
+            [edge("a", "b", "a-b", 5), edge("b", "a", "b-a", 7)],
         )
         .unwrap();
 
@@ -549,32 +555,31 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_endpoint_ids() {
+    fn rejects_duplicate_edge_ids() {
         let error = analyze(
             [federate("a"), federate("b"), federate("c")],
             [
-                endpoint("a", "b", "duplicate", 1),
-                endpoint("a", "c", "duplicate", 2),
+                edge("a", "b", "duplicate", 1),
+                edge("a", "c", "duplicate", 2),
             ],
         )
         .unwrap_err();
 
         assert!(matches!(
             error,
-            FederationAnalysisError::DuplicateEndpointId { endpoint }
-                if endpoint.to_canonical_string() == "duplicate"
+            FederationAnalysisError::DuplicateEdgeId { edge }
+                if edge.to_canonical_string() == "duplicate"
         ));
     }
 
     #[test]
-    fn rejects_endpoints_with_undeclared_members() {
-        let error =
-            analyze([federate("a")], [endpoint("a", "missing", "a-missing", 1)]).unwrap_err();
+    fn rejects_edges_with_undeclared_members() {
+        let error = analyze([federate("a")], [edge("a", "missing", "a-missing", 1)]).unwrap_err();
 
         assert!(matches!(
             error,
-            FederationAnalysisError::UndeclaredEndpointMember { endpoint, federate }
-                if endpoint.to_canonical_string() == "a-missing" && federate.as_str() == "missing"
+            FederationAnalysisError::UndeclaredEdgeMember { edge, federate }
+                if edge.to_canonical_string() == "a-missing" && federate.as_str() == "missing"
         ));
     }
 
@@ -588,9 +593,9 @@ mod tests {
                 federate("c"),
             ],
             [
-                endpoint("a", "b", "a-b", 2),
-                endpoint("a", "c", "a-c", 1),
-                endpoint("c", "b", "c-b", 1),
+                edge("a", "b", "a-b", 2),
+                edge("a", "c", "a-c", 1),
+                edge("c", "b", "c-b", 1),
             ],
         )
         .unwrap();
@@ -614,10 +619,7 @@ mod tests {
     fn rejects_accumulated_delay_overflow() {
         let error = analyze(
             [federate("a"), federate("b"), federate("c")],
-            [
-                endpoint("a", "b", "a-b", u64::MAX),
-                endpoint("b", "c", "b-c", 1),
-            ],
+            [edge("a", "b", "a-b", u64::MAX), edge("b", "c", "b-c", 1)],
         )
         .unwrap_err();
 

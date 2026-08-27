@@ -4,10 +4,11 @@ use boomerang::prelude::*;
 pub fn r#match(
     #[input] r#async: u32,
     #[output] r#type: u32,
+    #[output] r#yield: u32,
     #[state(default = 0)] r#loop: usize,
 ) -> impl Reactor {
     reaction! {
-        r#move (r#async, startup) r#extern.r#const, r#type -> r#type {
+        r#move (r#async, startup) r#extern.r#const, r#type -> r#type, r#yield {
             unreachable!();
         }
     }
@@ -33,6 +34,7 @@ fn payload_mode_exports_matching_binding_manifest() {
     let reactor = StablePath::from_name("Match").unwrap();
     let input = reactor.append_name("async").unwrap();
     let output = reactor.append_name("type").unwrap();
+    let effect = reactor.append_name("yield").unwrap();
     let state = reactor.append_name("loop").unwrap();
     let mode = reactor.append_name("type").unwrap();
     let named_reaction = reactor.append_name("move").unwrap();
@@ -63,6 +65,11 @@ fn payload_mode_exports_matching_binding_manifest() {
             },
             PortSlot {
                 id: PortSlotId::from_path(output),
+                reactor: reactor_id.clone(),
+                direction: PortDirection::Output,
+            },
+            PortSlot {
+                id: PortSlotId::from_path(effect.clone()),
                 reactor: reactor_id.clone(),
                 direction: PortDirection::Output,
             },
@@ -124,6 +131,13 @@ fn payload_mode_exports_matching_binding_manifest() {
                 target: DescriptorRelationshipTarget::Mode(mode_id.clone()),
                 mode_transition: Some(ModeTransitionKind::Reset),
                 declaration_position: 0,
+            },
+            DescriptorRelationship {
+                reaction: named_reaction_id.clone(),
+                kind: DescriptorRelationshipKind::Effect,
+                target: DescriptorRelationshipTarget::Port(PortSlotId::from_path(effect)),
+                mode_transition: None,
+                declaration_position: 1,
             },
             DescriptorRelationship {
                 reaction: anonymous_reaction_id.clone(),

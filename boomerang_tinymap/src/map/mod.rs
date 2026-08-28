@@ -39,6 +39,7 @@ pub use view::TinyMapView;
 /// A map that uses a custom key type to index its values.
 ///
 /// See the [module-level documentation](index.html) for more information.
+#[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TinyMap<K: Key, V> {
     pub(crate) data: Vec<V>,
@@ -185,6 +186,11 @@ impl<K: Key, V> TinyMap<K, V> {
     pub fn get(&self, key: K) -> Option<&V> {
         self.data.get(key.index())
     }
+
+    /// Borrows this map as an allocation-free typed view.
+    pub fn as_view(&self) -> TinyMapView<'_, K, V> {
+        TinyMapView::new(&self.data)
+    }
 }
 
 impl<K: Key, V> FromIterator<V> for TinyMap<K, V> {
@@ -210,7 +216,7 @@ impl<K: Key, V> IntoIterator for TinyMap<K, V> {
 
 #[cfg(test)]
 mod tests {
-    use crate::key_type;
+    use crate::{key_type, DefaultKey};
 
     use super::*;
 
@@ -230,6 +236,16 @@ mod tests {
         assert_eq!(map.get(key1), Some(&10));
         assert_eq!(map.get(key2), Some(&20));
         assert_eq!(map.get(TestKey::from(2)), None);
+    }
+
+    #[test]
+    fn owned_map_exposes_a_borrowed_typed_view() {
+        let map = [10, 20, 30].into_iter().collect::<TinyMap<DefaultKey, _>>();
+
+        let view = map.as_view();
+
+        assert_eq!(view[DefaultKey(1)], 20);
+        assert_eq!(view.get(DefaultKey(3)), None);
     }
 
     #[test]

@@ -52,7 +52,7 @@ pub enum ImageValidationError<'a> {
         /// Offending start.
         start: u32,
         /// End of the previous range.
-        previous_end: u32,
+        previous_end: usize,
     },
     /// Dependency entries are not in canonical order.
     #[error("{table}[{index}] is not sorted")]
@@ -160,17 +160,101 @@ pub enum ImageValidationError<'a> {
     },
 }
 
+/// A validated allocation-free view of one complete compiled deployment.
+#[derive(Debug)]
+pub struct CompiledDeploymentView<'a> {
+    image: &'a CompiledDeploymentImage<'a>,
+}
+
+impl<'a> CompiledDeploymentView<'a> {
+    /// Validates `image` and borrows its complete immutable hierarchy.
+    pub fn new(image: &'a CompiledDeploymentImage<'a>) -> Result<Self, ImageValidationError<'a>> {
+        validate_compiled_deployment(image)?;
+        Ok(Self { image })
+    }
+
+    /// Returns the dense Federate table.
+    pub const fn federates(&self) -> TinyMapView<'a, FederateIndex, FederateImage> {
+        self.image.federates
+    }
+
+    /// Returns one validated Federate view.
+    pub fn federate(&self, key: FederateIndex) -> FederateImageView<'a> {
+        FederateImageView {
+            image: self.image,
+            federate: self.image.federates[key],
+        }
+    }
+
+    /// Returns the backend-neutral federation structure.
+    pub const fn federation(&self) -> GlobalFederationImage<'a> {
+        self.image.federation
+    }
+
+    /// Returns the selected coordination projection.
+    pub const fn coordination(&self) -> CoordinationProjection {
+        self.image.coordination
+    }
+}
+
+/// A validated borrowed view of one Federate and its Enclaves.
+#[derive(Debug)]
+pub struct FederateImageView<'a> {
+    image: &'a CompiledDeploymentImage<'a>,
+    federate: FederateImage,
+}
+
+impl<'a> FederateImageView<'a> {
+    /// Returns the stable Federate identity.
+    pub fn id(&self) -> FederateId<'a> {
+        FederateId::new(identity_slice_unchecked(
+            self.image.identity_data,
+            self.federate.id(),
+        ))
+    }
+
+    /// Returns the configured compilation target.
+    pub fn target(&self) -> TargetId<'a> {
+        TargetId::new(identity_slice_unchecked(
+            self.image.identity_data,
+            self.federate.target(),
+        ))
+    }
+
+    /// Returns the configured runtime backend.
+    pub fn runtime(&self) -> RuntimeBackendId<'a> {
+        RuntimeBackendId::new(identity_slice_unchecked(
+            self.image.identity_data,
+            self.federate.runtime(),
+        ))
+    }
+
+    /// Iterates validated Enclave views in canonical identity order.
+    pub fn enclaves(&self) -> impl ExactSizeIterator<Item = EnclaveImageView<'a>> + 'a {
+        let images = self
+            .image
+            .enclaves
+            .get_range(self.federate.enclaves())
+            .expect("compiled deployment ranges are validated");
+        images.iter().map(EnclaveImageView::validated)
+    }
+}
+
 /// A validated, allocation-free borrowed view of one Enclave image.
 #[derive(Debug)]
 pub struct EnclaveImageView<'a> {
-    image: &'a EnclaveImage<'a>,
+    image: EnclaveImage<'a>,
 }
 
 impl<'a> EnclaveImageView<'a> {
     /// Validates `image` and borrows all of its tables without copying.
-    pub fn new(image: &'a EnclaveImage<'a>) -> Result<Self, ImageValidationError<'a>> {
+    pub fn new(image: &EnclaveImage<'a>) -> Result<Self, ImageValidationError<'a>> {
         validate(image)?;
-        Ok(Self { image })
+        Ok(Self { image: *image })
+    }
+
+    fn validated(image: &EnclaveImage<'a>) -> Self {
+        Self { image: *image }
     }
     /// Returns the stable Enclave identity.
     pub fn enclave_id(&self) -> EnclaveId<'a> {
@@ -181,50 +265,50 @@ impl<'a> EnclaveImageView<'a> {
     }
     /// Returns the dense reactor table.
     pub const fn reactors(&self) -> TinyMapView<'a, ReactorIndex, ReactorImage> {
-        TinyMapView::new(self.image.reactors)
+        self.image.reactors
     }
     /// Returns the dense action table.
     pub const fn actions(&self) -> TinyMapView<'a, ActionIndex, ActionImage> {
-        TinyMapView::new(self.image.actions)
+        self.image.actions
     }
     /// Returns the dense port table.
     pub const fn ports(&self) -> TinyMapView<'a, PortIndex, PortImage> {
-        TinyMapView::new(self.image.ports)
+        self.image.ports
     }
     /// Returns the dense reaction table.
     pub const fn reactions(&self) -> TinyMapView<'a, ReactionIndex, ReactionImage> {
-        TinyMapView::new(self.image.reactions)
+        self.image.reactions
     }
     /// Returns the dense mode table.
     pub const fn modes(&self) -> TinyMapView<'a, ModeIndex, ModeImage> {
-        TinyMapView::new(self.image.modes)
+        self.image.modes
     }
     /// Returns the dense scope table.
     pub const fn scopes(&self) -> TinyMapView<'a, ScopeIndex, ScopeImage> {
-        TinyMapView::new(self.image.scopes)
+        self.image.scopes
     }
     /// Returns the dense boundary-route table.
     pub const fn routes(&self) -> TinyMapView<'a, RouteIndex, RouteImage> {
-        TinyMapView::new(self.image.routes)
+        self.image.routes
     }
     /// Returns the dense required-binding table.
     pub const fn required_bindings(
         &self,
     ) -> TinyMapView<'a, BindingSlotIndex, RequiredBindingImage> {
-        TinyMapView::new(self.image.required_bindings)
+        self.image.required_bindings
     }
     /// Resolves a route's stable boundary identity.
     pub fn route_boundary_id(&self, key: RouteIndex) -> BoundaryId<'a> {
         BoundaryId::new(identity_slice_unchecked(
             self.image.identity_data,
-            self.image.routes[key.as_u32() as usize].boundary(),
+            self.image.routes[key].boundary(),
         ))
     }
     /// Resolves a required implementation binding's stable identity.
     pub fn required_binding_id(&self, key: BindingSlotIndex) -> BindingSlotId<'a> {
         BindingSlotId::new(identity_slice_unchecked(
             self.image.identity_data,
-            self.image.required_bindings[key.as_u32() as usize].id(),
+            self.image.required_bindings[key].id(),
         ))
     }
     /// Returns the declared mutable-storage and workspace bounds.
@@ -233,87 +317,87 @@ impl<'a> EnclaveImageView<'a> {
     }
     /// Returns an action's ordered leveled triggers.
     pub fn action_triggers(&self, key: ActionIndex) -> &'a [LevelReactionImage] {
-        range_slice(
-            self.image.actions[key.as_u32() as usize].triggers(),
-            self.image.reaction_triggers,
-        )
+        self.image.actions[key]
+            .triggers()
+            .get(self.image.reaction_triggers)
+            .expect("image table ranges are validated")
     }
     /// Returns a port's ordered leveled triggers.
     pub fn port_triggers(&self, key: PortIndex) -> &'a [LevelReactionImage] {
-        range_slice(
-            self.image.ports[key.as_u32() as usize].triggers(),
-            self.image.reaction_triggers,
-        )
+        self.image.ports[key]
+            .triggers()
+            .get(self.image.reaction_triggers)
+            .expect("image table ranges are validated")
     }
     /// Returns a reaction's ordered use ports.
     pub fn reaction_use_ports(&self, key: ReactionIndex) -> &'a [PortIndex] {
-        range_slice(
-            self.image.reactions[key.as_u32() as usize].use_ports(),
-            self.image.reaction_use_ports,
-        )
+        self.image.reactions[key]
+            .use_ports()
+            .get(self.image.reaction_use_ports)
+            .expect("image table ranges are validated")
     }
     /// Returns a reaction's ordered effect ports.
     pub fn reaction_effect_ports(&self, key: ReactionIndex) -> &'a [PortIndex] {
-        range_slice(
-            self.image.reactions[key.as_u32() as usize].effect_ports(),
-            self.image.reaction_effect_ports,
-        )
+        self.image.reactions[key]
+            .effect_ports()
+            .get(self.image.reaction_effect_ports)
+            .expect("image table ranges are validated")
     }
     /// Returns a reaction's ordered action references.
     pub fn reaction_actions(&self, key: ReactionIndex) -> &'a [ActionIndex] {
-        range_slice(
-            self.image.reactions[key.as_u32() as usize].actions(),
-            self.image.reaction_actions,
-        )
+        self.image.reactions[key]
+            .actions()
+            .get(self.image.reaction_actions)
+            .expect("image table ranges are validated")
     }
     /// Returns a reaction's enabled modes.
     pub fn reaction_modes(&self, key: ReactionIndex) -> &'a [ModeIndex] {
-        range_slice(
-            self.image.reactions[key.as_u32() as usize].enabled_modes(),
-            self.image.reaction_modes,
-        )
+        self.image.reactions[key]
+            .enabled_modes()
+            .get(self.image.reaction_modes)
+            .expect("image table ranges are validated")
     }
     /// Returns a scope's precomputed descendants.
     pub fn scope_descendants(&self, key: ScopeIndex) -> &'a [ScopeIndex] {
-        range_slice(
-            self.image.scopes[key.as_u32() as usize].descendants(),
-            self.image.scope_descendants,
-        )
+        self.image.scopes[key]
+            .descendants()
+            .get(self.image.scope_descendants)
+            .expect("image table ranges are validated")
     }
     /// Returns a scope's precomputed logical actions.
     pub fn scope_logical_actions(&self, key: ScopeIndex) -> &'a [ActionIndex] {
-        range_slice(
-            self.image.scopes[key.as_u32() as usize].logical_actions(),
-            self.image.scope_logical_actions,
-        )
+        self.image.scopes[key]
+            .logical_actions()
+            .get(self.image.scope_logical_actions)
+            .expect("image table ranges are validated")
     }
     /// Returns a scope's precomputed timer startups.
     pub fn scope_timer_startups(&self, key: ScopeIndex) -> &'a [TimerStartupImage] {
-        range_slice(
-            self.image.scopes[key.as_u32() as usize].timer_startups(),
-            self.image.scope_timer_startups,
-        )
+        self.image.scopes[key]
+            .timer_startups()
+            .get(self.image.scope_timer_startups)
+            .expect("image table ranges are validated")
     }
     /// Returns a scope's precomputed reset reactions.
     pub fn scope_reset_reactions(&self, key: ScopeIndex) -> &'a [LevelReactionImage] {
-        range_slice(
-            self.image.scopes[key.as_u32() as usize].reset_reactions(),
-            self.image.scope_reset_reactions,
-        )
+        self.image.scopes[key]
+            .reset_reactions()
+            .get(self.image.scope_reset_reactions)
+            .expect("image table ranges are validated")
     }
     /// Returns a scope's precomputed startup reactions.
     pub fn scope_startup_reactions(&self, key: ScopeIndex) -> &'a [LifecycleReactionImage] {
-        range_slice(
-            self.image.scopes[key.as_u32() as usize].startup_reactions(),
-            self.image.scope_startup_reactions,
-        )
+        self.image.scopes[key]
+            .startup_reactions()
+            .get(self.image.scope_startup_reactions)
+            .expect("image table ranges are validated")
     }
     /// Returns a scope's precomputed shutdown reactions.
     pub fn scope_shutdown_reactions(&self, key: ScopeIndex) -> &'a [LifecycleReactionImage] {
-        range_slice(
-            self.image.scopes[key.as_u32() as usize].shutdown_reactions(),
-            self.image.scope_shutdown_reactions,
-        )
+        self.image.scopes[key]
+            .shutdown_reactions()
+            .get(self.image.scope_shutdown_reactions)
+            .expect("image table ranges are validated")
     }
     /// Returns global startup action entries.
     pub const fn startup_actions(&self) -> &'a [TimerStartupImage] {
@@ -362,17 +446,17 @@ fn check_ref<'a>(
     }
 }
 
-fn check_range<'a, K>(
+fn check_range<'a, T>(
     table: &'static str,
     index: u32,
     field: &'static str,
     target: &'static str,
-    range: TableRange<K>,
+    range: TableRange<T>,
     len: usize,
-    previous_end: &mut u32,
+    previous_end: &mut usize,
 ) -> Result<(), ImageValidationError<'a>> {
-    let end = range.start().checked_add(range.len());
-    if end.map(|end| end as usize <= len) != Some(true) {
+    let end = range.checked_end();
+    if end.map(|end| end <= len) != Some(true) {
         return Err(ImageValidationError::RangeOutOfBounds {
             table,
             index,
@@ -382,7 +466,7 @@ fn check_range<'a, K>(
             len: range.len(),
         });
     }
-    if range.start() < *previous_end {
+    if (range.start() as usize) < *previous_end {
         return Err(ImageValidationError::RangesNotMonotonic {
             table,
             index,
@@ -395,14 +479,10 @@ fn check_range<'a, K>(
     Ok(())
 }
 
-fn range_slice<T, K>(range: TableRange<K>, values: &[T]) -> &[T] {
-    let start = range.start() as usize;
-    &values[start..start + range.len() as usize]
-}
-
 fn identity_slice_unchecked(value: &str, range: IdentityRange) -> &str {
-    let start = range.start() as usize;
-    &value[start..start + range.len() as usize]
+    range
+        .get(value)
+        .expect("image identity ranges are validated")
 }
 
 fn identity_slice<'a>(
@@ -412,24 +492,15 @@ fn identity_slice<'a>(
     field: &'static str,
     range: IdentityRange,
 ) -> Result<&'a str, ImageValidationError<'a>> {
-    let Some(end) = range.start().checked_add(range.len()) else {
-        return Err(ImageValidationError::IdentityRangeInvalid {
+    range
+        .get(value)
+        .ok_or(ImageValidationError::IdentityRangeInvalid {
             table,
             index,
             field,
             start: range.start(),
             len: range.len(),
-        });
-    };
-    value.get(range.start() as usize..end as usize).ok_or(
-        ImageValidationError::IdentityRangeInvalid {
-            table,
-            index,
-            field,
-            start: range.start(),
-            len: range.len(),
-        },
-    )
+        })
 }
 
 fn valid_id(value: &str) -> bool {
@@ -457,6 +528,138 @@ fn validate_id<'a>(
     Ok(())
 }
 
+/// Validates deployment ownership, identities, federation edges, and nested images.
+fn validate_compiled_deployment<'a>(
+    image: &CompiledDeploymentImage<'a>,
+) -> Result<(), ImageValidationError<'a>> {
+    check_len::<FederateIndex>("federates", image.federates.len())?;
+    check_len::<EnclaveIndex>("enclaves", image.enclaves.len())?;
+    check_len::<FederateIndex>("federation.members", image.federation.members.len())?;
+
+    let mut previous_federate = None;
+    let mut enclave_end = 0;
+    for (i, federate) in image.federates.values().copied().enumerate() {
+        let index = i as u32;
+        let id = identity_slice(image.identity_data, "federates", index, "id", federate.id())?;
+        validate_id("federate", index, id, &mut previous_federate)?;
+        for (field, range) in [
+            ("target", federate.target()),
+            ("runtime", federate.runtime()),
+        ] {
+            let value = identity_slice(image.identity_data, "federates", index, field, range)?;
+            if !valid_id(value) {
+                return Err(ImageValidationError::InvalidStableId {
+                    kind: field,
+                    index,
+                    id: value,
+                });
+            }
+        }
+        if federate.enclaves().start() as usize != enclave_end {
+            return Err(ImageValidationError::OwnershipMismatch {
+                table: "federates",
+                index,
+                field: "enclaves",
+            });
+        }
+        check_range(
+            "federates",
+            index,
+            "enclaves",
+            "enclaves",
+            federate.enclaves(),
+            image.enclaves.len(),
+            &mut enclave_end,
+        )?;
+    }
+    if enclave_end != image.enclaves.len() {
+        return Err(ImageValidationError::OwnershipMismatch {
+            table: "image",
+            index: 0,
+            field: "enclaves",
+        });
+    }
+
+    if image.federation.members.len() != image.federates.len() {
+        return Err(ImageValidationError::OwnershipMismatch {
+            table: "federation",
+            index: 0,
+            field: "members",
+        });
+    }
+    for (i, member) in image.federation.members.iter().copied().enumerate() {
+        check_ref(
+            "federation.members",
+            i as u32,
+            "federate",
+            "federates",
+            member.as_u32(),
+            image.federates.len(),
+        )?;
+        if member.as_u32() != i as u32 {
+            return Err(ImageValidationError::EntriesNotSorted {
+                table: "federation.members",
+                index: i as u32,
+            });
+        }
+    }
+
+    let mut previous_boundary = None;
+    for (i, edge) in image.federation.edges.iter().copied().enumerate() {
+        let index = i as u32;
+        check_ref(
+            "federation.edges",
+            index,
+            "source",
+            "federates",
+            edge.source().as_u32(),
+            image.federates.len(),
+        )?;
+        check_ref(
+            "federation.edges",
+            index,
+            "target",
+            "federates",
+            edge.target().as_u32(),
+            image.federates.len(),
+        )?;
+        let boundary = identity_slice(
+            image.identity_data,
+            "federation.edges",
+            index,
+            "boundary",
+            edge.boundary(),
+        )?;
+        validate_id(
+            "federation boundary",
+            index,
+            boundary,
+            &mut previous_boundary,
+        )?;
+    }
+
+    for federate in image.federates.values().copied() {
+        let mut previous_enclave = None;
+        let enclaves = image
+            .enclaves
+            .get_range(federate.enclaves())
+            .expect("compiled deployment ranges are validated");
+        for (offset, enclave) in enclaves.iter().enumerate() {
+            let index = federate.enclaves().start() + offset as u32;
+            validate(enclave)?;
+            let id = identity_slice(
+                enclave.identity_data,
+                "enclaves",
+                index,
+                "enclave_id",
+                enclave.enclave_id,
+            )?;
+            validate_id("enclave", index, id, &mut previous_enclave)?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_level_ref<'a>(
     table: &'static str,
     index: u32,
@@ -471,7 +674,7 @@ fn validate_level_ref<'a>(
         entry.reaction().as_u32(),
         image.reactions.len(),
     )?;
-    if image.reactions[entry.reaction().as_u32() as usize].dependency_level() != entry.level() {
+    if image.reactions[entry.reaction()].dependency_level() != entry.level() {
         return Err(ImageValidationError::OwnershipMismatch {
             table,
             index,
@@ -554,7 +757,7 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
     validate_id("enclave", 0, enclave_id, &mut None)?;
 
     let mut mode_end = 0;
-    for (i, reactor) in image.reactors.iter().copied().enumerate() {
+    for (i, reactor) in image.reactors.values().copied().enumerate() {
         let index = i as u32;
         check_ref(
             "reactors",
@@ -564,8 +767,7 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             reactor.state_binding().as_u32(),
             image.required_bindings.len(),
         )?;
-        if image.required_bindings[reactor.state_binding().as_u32() as usize].kind()
-            != BindingKind::StateInitializer
+        if image.required_bindings[reactor.state_binding()].kind() != BindingKind::StateInitializer
         {
             return Err(ImageValidationError::BindingKindMismatch {
                 table: "reactors",
@@ -590,7 +792,7 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             reactor.root_scope().as_u32(),
             image.scopes.len(),
         )?;
-        let root_scope = image.scopes[reactor.root_scope().as_u32() as usize];
+        let root_scope = image.scopes[reactor.root_scope()];
         if root_scope.reactor() != ReactorIndex::new(index) || root_scope.mode().is_some() {
             return Err(ImageValidationError::OwnershipMismatch {
                 table: "reactors",
@@ -616,9 +818,7 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
                 mode.as_u32(),
                 image.modes.len(),
             )?;
-            if mode.as_u32() < reactor.modes().start()
-                || mode.as_u32() >= reactor.modes().start() + reactor.modes().len()
-            {
+            if !reactor.modes().contains(mode.as_u32()) {
                 return Err(ImageValidationError::OwnershipMismatch {
                     table: "reactors",
                     index,
@@ -638,7 +838,7 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
     }
 
     let mut trigger_end = 0;
-    for (i, action) in image.actions.iter().copied().enumerate() {
+    for (i, action) in image.actions.values().copied().enumerate() {
         let index = i as u32;
         check_ref(
             "actions",
@@ -668,7 +868,7 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
         )?;
     }
     trigger_end = 0;
-    for (i, port) in image.ports.iter().copied().enumerate() {
+    for (i, port) in image.ports.values().copied().enumerate() {
         let index = i as u32;
         check_ref(
             "ports",
@@ -690,7 +890,7 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
     }
 
     let (mut use_end, mut effect_end, mut action_end, mut reaction_mode_end) = (0, 0, 0, 0);
-    for (i, reaction) in image.reactions.iter().copied().enumerate() {
+    for (i, reaction) in image.reactions.values().copied().enumerate() {
         let index = i as u32;
         check_ref(
             "reactions",
@@ -716,16 +916,14 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             reaction.binding().as_u32(),
             image.required_bindings.len(),
         )?;
-        if image.required_bindings[reaction.binding().as_u32() as usize].kind()
-            != BindingKind::Reaction
-        {
+        if image.required_bindings[reaction.binding()].kind() != BindingKind::Reaction {
             return Err(ImageValidationError::BindingKindMismatch {
                 table: "reactions",
                 index,
                 field: "binding",
             });
         }
-        if image.scopes[reaction.scope().as_u32() as usize].reactor() != reaction.reactor() {
+        if image.scopes[reaction.scope()].reactor() != reaction.reactor() {
             return Err(ImageValidationError::OwnershipMismatch {
                 table: "reactions",
                 index,
@@ -770,7 +968,7 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
         )?;
     }
 
-    for (i, mode) in image.modes.iter().copied().enumerate() {
+    for (i, mode) in image.modes.values().copied().enumerate() {
         let index = i as u32;
         check_ref(
             "modes",
@@ -788,7 +986,7 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             mode.scope().as_u32(),
             image.scopes.len(),
         )?;
-        let scope = image.scopes[mode.scope().as_u32() as usize];
+        let scope = image.scopes[mode.scope()];
         if scope.reactor() != mode.reactor() {
             return Err(ImageValidationError::OwnershipMismatch {
                 table: "modes",
@@ -803,8 +1001,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
                 field: "scope.mode",
             });
         }
-        let modes = image.reactors[mode.reactor().as_u32() as usize].modes();
-        if index < modes.start() || index >= modes.start() + modes.len() {
+        let modes = image.reactors[mode.reactor()].modes();
+        if !modes.contains(index) {
             return Err(ImageValidationError::OwnershipMismatch {
                 table: "modes",
                 index,
@@ -813,8 +1011,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
         }
     }
 
-    let mut ends = [0_u32; 6];
-    for (i, scope) in image.scopes.iter().copied().enumerate() {
+    let mut ends = [0_usize; 6];
+    for (i, scope) in image.scopes.values().copied().enumerate() {
         let index = i as u32;
         check_ref(
             "scopes",
@@ -843,7 +1041,7 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
                 mode.as_u32(),
                 image.modes.len(),
             )?;
-            let owner = image.modes[mode.as_u32() as usize];
+            let owner = image.modes[mode];
             if owner.scope() != ScopeIndex::new(index) || owner.reactor() != scope.reactor() {
                 return Err(ImageValidationError::OwnershipMismatch {
                     table: "scopes",
@@ -908,19 +1106,24 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
         )?;
     }
 
-    for action in image.actions.iter().copied() {
+    for action in image.actions.values().copied() {
         validate_levels(
             "reaction_triggers",
             action.triggers().start(),
-            range_slice(action.triggers(), image.reaction_triggers),
+            action
+                .triggers()
+                .get(image.reaction_triggers)
+                .expect("image table ranges are validated"),
             image,
         )?;
     }
-    for port in image.ports.iter().copied() {
+    for port in image.ports.values().copied() {
         validate_levels(
             "reaction_triggers",
             port.triggers().start(),
-            range_slice(port.triggers(), image.reaction_triggers),
+            port.triggers()
+                .get(image.reaction_triggers)
+                .expect("image table ranges are validated"),
             image,
         )?;
     }
@@ -964,9 +1167,13 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             image.modes.len(),
         )?;
     }
-    for (i, reaction) in image.reactions.iter().copied().enumerate() {
-        for mode in range_slice(reaction.enabled_modes(), image.reaction_modes) {
-            if image.modes[mode.as_u32() as usize].reactor() != reaction.reactor() {
+    for (i, reaction) in image.reactions.values().copied().enumerate() {
+        for mode in reaction
+            .enabled_modes()
+            .get(image.reaction_modes)
+            .expect("image table ranges are validated")
+        {
+            if image.modes[*mode].reactor() != reaction.reactor() {
                 return Err(ImageValidationError::OwnershipMismatch {
                     table: "reactions",
                     index: i as u32,
@@ -1005,23 +1212,32 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             image.actions.len(),
         )?;
     }
-    for scope in image.scopes.iter().copied() {
+    for scope in image.scopes.values().copied() {
         validate_levels(
             "scope_reset_reactions",
             scope.reset_reactions().start(),
-            range_slice(scope.reset_reactions(), image.scope_reset_reactions),
+            scope
+                .reset_reactions()
+                .get(image.scope_reset_reactions)
+                .expect("image table ranges are validated"),
             image,
         )?;
         validate_lifecycle(
             "scope_startup_reactions",
             scope.startup_reactions().start(),
-            range_slice(scope.startup_reactions(), image.scope_startup_reactions),
+            scope
+                .startup_reactions()
+                .get(image.scope_startup_reactions)
+                .expect("image table ranges are validated"),
             image,
         )?;
         validate_lifecycle(
             "scope_shutdown_reactions",
             scope.shutdown_reactions().start(),
-            range_slice(scope.shutdown_reactions(), image.scope_shutdown_reactions),
+            scope
+                .shutdown_reactions()
+                .get(image.scope_shutdown_reactions)
+                .expect("image table ranges are validated"),
             image,
         )?;
     }
@@ -1096,7 +1312,7 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
     }
 
     let mut previous = None;
-    for (i, route) in image.routes.iter().copied().enumerate() {
+    for (i, route) in image.routes.values().copied().enumerate() {
         let id = identity_slice(
             image.identity_data,
             "routes",
@@ -1115,7 +1331,7 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
         )?;
     }
     previous = None;
-    for (i, binding) in image.required_bindings.iter().copied().enumerate() {
+    for (i, binding) in image.required_bindings.values().copied().enumerate() {
         let id = identity_slice(
             image.identity_data,
             "required_bindings",
@@ -1131,6 +1347,21 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
 #[cfg(test)]
 mod tests {
     use super::super::*;
+
+    #[test]
+    fn table_ranges_address_their_flattened_value_table() {
+        let values = [10, 20, 30];
+
+        assert_eq!(TableRange::new(1, 2).get(&values), Some(&values[1..3]));
+    }
+
+    #[test]
+    fn identity_ranges_respect_utf8_byte_boundaries() {
+        let identities = "aéz";
+
+        assert_eq!(IdentityRange::new(1, 2).get(identities), Some("é"));
+        assert_eq!(IdentityRange::new(1, 1).get(identities), None);
+    }
 
     const RANGE_0_0: TableRange<PortIndex> = TableRange::new(0, 0);
 
@@ -1281,12 +1512,12 @@ mod tests {
     static IMAGE: EnclaveImage<'static> = EnclaveImage {
         identity_data: IDENTITY_DATA,
         enclave_id: IdentityRange::new(0, 13),
-        reactors: &REACTORS,
-        actions: &ACTIONS,
-        ports: &PORTS,
-        reactions: &REACTIONS,
-        modes: &MODES,
-        scopes: &SCOPES,
+        reactors: TinyMapView::new(&REACTORS),
+        actions: TinyMapView::new(&ACTIONS),
+        ports: TinyMapView::new(&PORTS),
+        reactions: TinyMapView::new(&REACTIONS),
+        modes: TinyMapView::new(&MODES),
+        scopes: TinyMapView::new(&SCOPES),
         reaction_triggers: &REACTION_TRIGGERS,
         reaction_use_ports: &REACTION_USE_PORTS,
         reaction_effect_ports: &REACTION_EFFECT_PORTS,
@@ -1302,13 +1533,46 @@ mod tests {
         timer_startup_actions: &TIMER_STARTUP_ACTIONS,
         shutdown_reactions: &SHUTDOWN_REACTIONS,
         shutdown_actions: &SHUTDOWN_ACTIONS,
-        routes: &ROUTES,
-        required_bindings: &REQUIRED_BINDINGS,
-        storage_bounds: StorageBounds::new(2, 1, 8, 4),
+        routes: TinyMapView::new(&ROUTES),
+        required_bindings: TinyMapView::new(&REQUIRED_BINDINGS),
+        storage_bounds: StorageBounds::new(2, 1, 8, 0, 0, 4),
+    };
+
+    static SECOND_IMAGE: EnclaveImage<'static> = EnclaveImage {
+        identity_data: "plant/otherxxnetwork/inreaction/r0reaction/r1state/r0state/r1",
+        enclave_id: IdentityRange::new(0, 13),
+        ..IMAGE
+    };
+    static DEPLOYMENT_IDENTITIES: &str = "hostaarch64-unknown-linux-gnuhosted";
+    static FEDERATES: [FederateImage; 1] = [FederateImage::new(
+        IdentityRange::new(0, 4),
+        IdentityRange::new(4, 25),
+        IdentityRange::new(29, 6),
+        TableRange::new(0, 2),
+    )];
+    static ENCLAVES: [EnclaveImage<'static>; 2] = [IMAGE, SECOND_IMAGE];
+    static FEDERATION_MEMBERS: [FederateIndex; 1] = [FederateIndex::new(0)];
+    static FEDERATION: GlobalFederationImage<'static> =
+        GlobalFederationImage::new(&FEDERATION_MEMBERS, &[]);
+    static COMPILED: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
+        identity_data: DEPLOYMENT_IDENTITIES,
+        federation: FEDERATION,
+        federates: TinyMapView::new(&FEDERATES),
+        enclaves: TinyMapView::new(&ENCLAVES),
+        coordination: CoordinationProjection::Local,
     };
 
     #[test]
     fn static_scheduler_image_exposes_borrowed_typed_tables() {
+        assert_eq!(
+            IMAGE.reactors[ReactorIndex::new(0)].root_scope(),
+            ScopeIndex::new(0)
+        );
+        assert_eq!(
+            COMPILED.federates[FederateIndex::new(0)].enclaves(),
+            TableRange::new(0, 2)
+        );
+
         let view = EnclaveImageView::new(&IMAGE).unwrap();
 
         assert_eq!(view.enclave_id().as_str(), "plant/control");
@@ -1358,6 +1622,108 @@ mod tests {
     }
 
     #[test]
+    fn storage_bounds_preserve_slots_queues_and_byte_limits() {
+        let bounds = StorageBounds::new(2, 4, 8, 16, 32, 64);
+
+        assert_eq!(bounds.state_slots(), 2);
+        assert_eq!(bounds.action_slots(), 4);
+        assert_eq!(bounds.event_capacity(), 8);
+        assert_eq!(bounds.payload_bytes(), 16);
+        assert_eq!(bounds.state_bytes(), 32);
+        assert_eq!(bounds.scratch_bytes(), 64);
+    }
+
+    #[test]
+    fn compiled_view_resolves_static_federate_and_enclave_ranges() {
+        let view = CompiledDeploymentView::new(&COMPILED).unwrap();
+
+        assert_eq!(view.federates().len(), 1);
+        let federate = view.federate(FederateIndex::new(0));
+        assert_eq!(federate.id().as_str(), "host");
+        assert_eq!(federate.enclaves().count(), 2);
+    }
+
+    #[test]
+    fn compiled_view_orders_enclaves_within_each_federate() {
+        let federates = [
+            FederateImage::new(
+                IdentityRange::new(0, 5),
+                IdentityRange::new(5, 6),
+                IdentityRange::new(11, 7),
+                TableRange::new(0, 2),
+            ),
+            FederateImage::new(
+                IdentityRange::new(18, 4),
+                IdentityRange::new(22, 6),
+                IdentityRange::new(28, 7),
+                TableRange::new(2, 2),
+            ),
+        ];
+        let enclaves = [
+            EnclaveImage {
+                identity_data: "zzzza/controlnetwork/inreaction/r0reaction/r1state/r0state/r1",
+                enclave_id: IdentityRange::new(0, 13),
+                ..IMAGE
+            },
+            EnclaveImage {
+                identity_data: "zzzzb/controlnetwork/inreaction/r0reaction/r1state/r0state/r1",
+                enclave_id: IdentityRange::new(0, 13),
+                ..IMAGE
+            },
+            EnclaveImage {
+                identity_data: "aaaaa/controlnetwork/inreaction/r0reaction/r1state/r0state/r1",
+                enclave_id: IdentityRange::new(0, 13),
+                ..IMAGE
+            },
+            EnclaveImage {
+                identity_data: "aaaab/controlnetwork/inreaction/r0reaction/r1state/r0state/r1",
+                enclave_id: IdentityRange::new(0, 13),
+                ..IMAGE
+            },
+        ];
+        let members = [FederateIndex::new(0), FederateIndex::new(1)];
+        let image = CompiledDeploymentImage {
+            identity_data: "alphatargetruntimebetatargetruntime",
+            federation: GlobalFederationImage::new(&members, &[]),
+            federates: TinyMapView::new(&federates),
+            enclaves: TinyMapView::new(&enclaves),
+            coordination: CoordinationProjection::Local,
+        };
+
+        let view = CompiledDeploymentView::new(&image).unwrap();
+        let second_ids = view
+            .federate(FederateIndex::new(1))
+            .enclaves()
+            .map(|enclave| enclave.enclave_id().as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(second_ids, ["aaaaa/control", "aaaab/control"]);
+    }
+
+    #[test]
+    fn compiled_view_rejects_a_federate_enclave_range_outside_the_root_table() {
+        let federates = [FederateImage::new(
+            IdentityRange::new(0, 4),
+            IdentityRange::new(4, 25),
+            IdentityRange::new(29, 6),
+            TableRange::new(0, 3),
+        )];
+        let image = CompiledDeploymentImage {
+            federates: TinyMapView::new(&federates),
+            ..COMPILED
+        };
+
+        assert!(matches!(
+            CompiledDeploymentView::new(&image),
+            Err(ImageValidationError::RangeOutOfBounds {
+                table: "federates",
+                index: 0,
+                field: "enclaves",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn action_timing_preserves_standard_timer_and_shutdown_semantics() {
         let cases = [
             ActionTiming::Standard {
@@ -1378,7 +1744,7 @@ mod tests {
                 TableRange::new(0, 2),
             )];
             let image = EnclaveImage {
-                actions: &actions,
+                actions: TinyMapView::new(&actions),
                 ..IMAGE
             };
             let view = EnclaveImageView::new(&image).unwrap();
@@ -1425,7 +1791,7 @@ mod tests {
             (
                 "primary cross-reference",
                 EnclaveImage {
-                    reactions: &bad_reactions,
+                    reactions: TinyMapView::new(&bad_reactions),
                     ..IMAGE
                 },
                 ImageValidationError::ReferenceOutOfBounds {
@@ -1439,7 +1805,7 @@ mod tests {
             (
                 "flattened range",
                 EnclaveImage {
-                    actions: &bad_actions,
+                    actions: TinyMapView::new(&bad_actions),
                     ..IMAGE
                 },
                 ImageValidationError::RangeOutOfBounds {
@@ -1558,7 +1924,7 @@ mod tests {
             (
                 "ownership",
                 EnclaveImage {
-                    modes: &bad_modes,
+                    modes: TinyMapView::new(&bad_modes),
                     ..IMAGE
                 },
                 ImageValidationError::OwnershipMismatch {
@@ -1571,7 +1937,7 @@ mod tests {
                 "invalid boundary",
                 EnclaveImage {
                     identity_data: invalid_identity_data,
-                    routes: &invalid_routes,
+                    routes: TinyMapView::new(&invalid_routes),
                     ..IMAGE
                 },
                 ImageValidationError::InvalidStableId {
@@ -1584,7 +1950,7 @@ mod tests {
                 "unsorted boundary",
                 EnclaveImage {
                     identity_data: unsorted_identity_data,
-                    routes: &unsorted_routes,
+                    routes: TinyMapView::new(&unsorted_routes),
                     ..IMAGE
                 },
                 ImageValidationError::StableIdsNotSorted {
@@ -1597,7 +1963,7 @@ mod tests {
                 "duplicate binding",
                 EnclaveImage {
                     identity_data: duplicate_binding_identity_data,
-                    required_bindings: &duplicate_bindings,
+                    required_bindings: TinyMapView::new(&duplicate_bindings),
                     ..IMAGE
                 },
                 ImageValidationError::DuplicateStableId {
@@ -1609,7 +1975,7 @@ mod tests {
             (
                 "invalid bank",
                 EnclaveImage {
-                    reactors: &invalid_bank_reactors,
+                    reactors: TinyMapView::new(&invalid_bank_reactors),
                     ..IMAGE
                 },
                 ImageValidationError::InvalidBankInfo {
@@ -1621,7 +1987,7 @@ mod tests {
             (
                 "state storage bound",
                 EnclaveImage {
-                    storage_bounds: StorageBounds::new(1, 1, 8, 4),
+                    storage_bounds: StorageBounds::new(1, 1, 8, 0, 0, 4),
                     ..IMAGE
                 },
                 ImageValidationError::StorageBoundExceeded {

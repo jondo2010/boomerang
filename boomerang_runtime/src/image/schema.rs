@@ -1,4 +1,4 @@
-use core::marker::PhantomData;
+pub use tinymap::{TableRange, TinyMapView};
 
 tinymap::key_type!(pub ReactorIndex);
 tinymap::key_type!(pub ActionIndex);
@@ -10,6 +10,8 @@ tinymap::key_type!(pub StateSlotIndex);
 tinymap::key_type!(pub ActionSlotIndex);
 tinymap::key_type!(pub BindingSlotIndex);
 tinymap::key_type!(pub RouteIndex);
+tinymap::key_type!(pub FederateIndex);
+tinymap::key_type!(pub EnclaveIndex);
 
 macro_rules! borrowed_id {
     ($name:ident, $doc:literal) => {
@@ -32,6 +34,12 @@ macro_rules! borrowed_id {
 }
 
 borrowed_id!(EnclaveId, "A stable borrowed Enclave identity.");
+borrowed_id!(FederateId, "A stable borrowed Federate identity.");
+borrowed_id!(TargetId, "A stable borrowed compilation-target identity.");
+borrowed_id!(
+    RuntimeBackendId,
+    "A stable borrowed runtime-backend identity."
+);
 borrowed_id!(BoundaryId, "A stable borrowed scheduler-boundary identity.");
 borrowed_id!(
     BindingSlotId,
@@ -61,44 +69,142 @@ impl IdentityRange {
     pub const fn len(self) -> u32 {
         self.len
     }
-}
 
-/// A typed start-plus-length range into a flattened table.
-#[derive(Debug, PartialEq, Eq)]
-pub struct TableRange<K> {
-    start: u32,
-    len: u32,
-    marker: PhantomData<fn() -> K>,
-}
-
-impl<K> Clone for TableRange<K> {
-    fn clone(&self) -> Self {
-        *self
+    /// Returns the referenced UTF-8 substring when the byte range is valid.
+    pub fn get(self, value: &str) -> Option<&str> {
+        let end = self.start.checked_add(self.len)?;
+        value.get(self.start as usize..end as usize)
     }
 }
 
-impl<K> Copy for TableRange<K> {}
+/// A Federate and the contiguous Enclave images it owns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FederateImage {
+    id: IdentityRange,
+    target: IdentityRange,
+    runtime: IdentityRange,
+    enclaves: TableRange<EnclaveIndex>,
+}
 
-impl<K> TableRange<K> {
-    /// Creates an unchecked table range.
-    pub const fn new(start: u32, len: u32) -> Self {
+impl FederateImage {
+    /// Creates an unchecked Federate record.
+    pub const fn new(
+        id: IdentityRange,
+        target: IdentityRange,
+        runtime: IdentityRange,
+        enclaves: TableRange<EnclaveIndex>,
+    ) -> Self {
         Self {
-            start,
-            len,
-            marker: PhantomData,
+            id,
+            target,
+            runtime,
+            enclaves,
         }
     }
 
-    /// Returns the first flattened-table index.
-    pub const fn start(self) -> u32 {
-        self.start
+    /// Returns the stable Federate identity range.
+    pub const fn id(self) -> IdentityRange {
+        self.id
     }
 
-    /// Returns the number of entries.
-    #[allow(clippy::len_without_is_empty)]
-    pub const fn len(self) -> u32 {
-        self.len
+    /// Returns the compilation-target identity range.
+    pub const fn target(self) -> IdentityRange {
+        self.target
     }
+
+    /// Returns the runtime-backend identity range.
+    pub const fn runtime(self) -> IdentityRange {
+        self.runtime
+    }
+
+    /// Returns the range of owned Enclave images.
+    pub const fn enclaves(self) -> TableRange<EnclaveIndex> {
+        self.enclaves
+    }
+}
+
+/// A backend-neutral cross-Federate boundary edge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FederationEdgeImage {
+    boundary: IdentityRange,
+    source: FederateIndex,
+    target: FederateIndex,
+    delay_nanos: u64,
+}
+
+impl FederationEdgeImage {
+    /// Creates an unchecked federation edge.
+    pub const fn new(
+        boundary: IdentityRange,
+        source: FederateIndex,
+        target: FederateIndex,
+        delay_nanos: u64,
+    ) -> Self {
+        Self {
+            boundary,
+            source,
+            target,
+            delay_nanos,
+        }
+    }
+
+    /// Returns the stable boundary identity range.
+    pub const fn boundary(self) -> IdentityRange {
+        self.boundary
+    }
+
+    /// Returns the source Federate.
+    pub const fn source(self) -> FederateIndex {
+        self.source
+    }
+
+    /// Returns the target Federate.
+    pub const fn target(self) -> FederateIndex {
+        self.target
+    }
+
+    /// Returns the logical delay in nanoseconds.
+    pub const fn delay_nanos(self) -> u64 {
+        self.delay_nanos
+    }
+}
+
+/// Backend-neutral immutable federation membership and edges.
+#[derive(Clone, Copy, Debug)]
+pub struct GlobalFederationImage<'a> {
+    /// Federates participating in canonical stable-identity order.
+    pub members: &'a [FederateIndex],
+    /// Canonically ordered cross-Federate boundary edges.
+    pub edges: &'a [FederationEdgeImage],
+}
+
+impl<'a> GlobalFederationImage<'a> {
+    /// Creates an unchecked global federation image.
+    pub const fn new(members: &'a [FederateIndex], edges: &'a [FederationEdgeImage]) -> Self {
+        Self { members, edges }
+    }
+}
+
+/// Selected immutable logical-time coordination projection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoordinationProjection {
+    /// No distributed coordinator is required.
+    Local,
+}
+
+/// An unchecked aggregate of one complete compiled deployment.
+#[derive(Clone, Copy, Debug)]
+pub struct CompiledDeploymentImage<'a> {
+    /// UTF-8 storage for deployment-level stable identities.
+    pub identity_data: &'a str,
+    /// Backend-neutral global federation structure.
+    pub federation: GlobalFederationImage<'a>,
+    /// Dense Federate ownership records.
+    pub federates: TinyMapView<'a, FederateIndex, FederateImage>,
+    /// Federate-grouped Enclave scheduler images.
+    pub enclaves: TinyMapView<'a, EnclaveIndex, EnclaveImage<'a>>,
+    /// Selected backend-specific coordination projection.
+    pub coordination: CoordinationProjection,
 }
 
 /// An immutable reactor scheduler record.
@@ -652,22 +758,28 @@ pub struct StorageBounds {
     state_slots: u32,
     action_slots: u32,
     event_capacity: u32,
-    scratch_capacity: u32,
+    payload_bytes: u64,
+    state_bytes: u64,
+    scratch_bytes: u64,
 }
 
 impl StorageBounds {
-    /// Creates bounds in state, action, event, then scratch order.
+    /// Creates slot, queue, payload, state, and scratch bounds.
     pub const fn new(
         state_slots: u32,
         action_slots: u32,
         event_capacity: u32,
-        scratch_capacity: u32,
+        payload_bytes: u64,
+        state_bytes: u64,
+        scratch_bytes: u64,
     ) -> Self {
         Self {
             state_slots,
             action_slots,
             event_capacity,
-            scratch_capacity,
+            payload_bytes,
+            state_bytes,
+            scratch_bytes,
         }
     }
 
@@ -686,9 +798,19 @@ impl StorageBounds {
         self.event_capacity
     }
 
-    /// Returns the scheduler scratch capacity.
-    pub const fn scratch_capacity(self) -> u32 {
-        self.scratch_capacity
+    /// Returns the payload-storage bound in bytes.
+    pub const fn payload_bytes(self) -> u64 {
+        self.payload_bytes
+    }
+
+    /// Returns the reactor-state storage bound in bytes.
+    pub const fn state_bytes(self) -> u64 {
+        self.state_bytes
+    }
+
+    /// Returns the scheduler scratch-storage bound in bytes.
+    pub const fn scratch_bytes(self) -> u64 {
+        self.scratch_bytes
     }
 }
 
@@ -700,17 +822,17 @@ pub struct EnclaveImage<'a> {
     /// Stable Enclave identity range.
     pub enclave_id: IdentityRange,
     /// Dense reactor records.
-    pub reactors: &'a [ReactorImage],
+    pub reactors: TinyMapView<'a, ReactorIndex, ReactorImage>,
     /// Dense action records.
-    pub actions: &'a [ActionImage],
+    pub actions: TinyMapView<'a, ActionIndex, ActionImage>,
     /// Dense port records; each key is also its storage identity.
-    pub ports: &'a [PortImage],
+    pub ports: TinyMapView<'a, PortIndex, PortImage>,
     /// Dense reaction records.
-    pub reactions: &'a [ReactionImage],
+    pub reactions: TinyMapView<'a, ReactionIndex, ReactionImage>,
     /// Dense mode records.
-    pub modes: &'a [ModeImage],
+    pub modes: TinyMapView<'a, ModeIndex, ModeImage>,
     /// Dense execution-scope records.
-    pub scopes: &'a [ScopeImage],
+    pub scopes: TinyMapView<'a, ScopeIndex, ScopeImage>,
     /// Flattened action and port trigger entries.
     pub reaction_triggers: &'a [LevelReactionImage],
     /// Flattened ordered reaction use ports.
@@ -742,9 +864,9 @@ pub struct EnclaveImage<'a> {
     /// Unique actions populated before global shutdown reactions execute.
     pub shutdown_actions: &'a [ActionIndex],
     /// Dense scheduler-boundary routes.
-    pub routes: &'a [RouteImage],
+    pub routes: TinyMapView<'a, RouteIndex, RouteImage>,
     /// Dense required implementation bindings.
-    pub required_bindings: &'a [RequiredBindingImage],
+    pub required_bindings: TinyMapView<'a, BindingSlotIndex, RequiredBindingImage>,
     /// Fixed mutable-storage and workspace bounds.
     pub storage_bounds: StorageBounds,
 }

@@ -10,6 +10,8 @@ tinymap::key_type!(pub StateSlotIndex);
 tinymap::key_type!(pub ActionSlotIndex);
 tinymap::key_type!(pub BindingSlotIndex);
 tinymap::key_type!(pub RouteIndex);
+tinymap::key_type!(pub FederateIndex);
+tinymap::key_type!(pub EnclaveIndex);
 
 macro_rules! borrowed_id {
     ($name:ident, $doc:literal) => {
@@ -32,6 +34,12 @@ macro_rules! borrowed_id {
 }
 
 borrowed_id!(EnclaveId, "A stable borrowed Enclave identity.");
+borrowed_id!(FederateId, "A stable borrowed Federate identity.");
+borrowed_id!(TargetId, "A stable borrowed compilation-target identity.");
+borrowed_id!(
+    RuntimeBackendId,
+    "A stable borrowed runtime-backend identity."
+);
 borrowed_id!(BoundaryId, "A stable borrowed scheduler-boundary identity.");
 borrowed_id!(
     BindingSlotId,
@@ -99,6 +107,136 @@ impl<K> TableRange<K> {
     pub const fn len(self) -> u32 {
         self.len
     }
+}
+
+/// A Federate and the contiguous Enclave images it owns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FederateImage {
+    id: IdentityRange,
+    target: IdentityRange,
+    runtime: IdentityRange,
+    enclaves: TableRange<EnclaveIndex>,
+}
+
+impl FederateImage {
+    /// Creates an unchecked Federate record.
+    pub const fn new(
+        id: IdentityRange,
+        target: IdentityRange,
+        runtime: IdentityRange,
+        enclaves: TableRange<EnclaveIndex>,
+    ) -> Self {
+        Self {
+            id,
+            target,
+            runtime,
+            enclaves,
+        }
+    }
+
+    /// Returns the stable Federate identity range.
+    pub const fn id(self) -> IdentityRange {
+        self.id
+    }
+
+    /// Returns the compilation-target identity range.
+    pub const fn target(self) -> IdentityRange {
+        self.target
+    }
+
+    /// Returns the runtime-backend identity range.
+    pub const fn runtime(self) -> IdentityRange {
+        self.runtime
+    }
+
+    /// Returns the range of owned Enclave images.
+    pub const fn enclaves(self) -> TableRange<EnclaveIndex> {
+        self.enclaves
+    }
+}
+
+/// A backend-neutral cross-Federate boundary edge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FederationEdgeImage {
+    boundary: IdentityRange,
+    source: FederateIndex,
+    target: FederateIndex,
+    delay_nanos: u64,
+}
+
+impl FederationEdgeImage {
+    /// Creates an unchecked federation edge.
+    pub const fn new(
+        boundary: IdentityRange,
+        source: FederateIndex,
+        target: FederateIndex,
+        delay_nanos: u64,
+    ) -> Self {
+        Self {
+            boundary,
+            source,
+            target,
+            delay_nanos,
+        }
+    }
+
+    /// Returns the stable boundary identity range.
+    pub const fn boundary(self) -> IdentityRange {
+        self.boundary
+    }
+
+    /// Returns the source Federate.
+    pub const fn source(self) -> FederateIndex {
+        self.source
+    }
+
+    /// Returns the target Federate.
+    pub const fn target(self) -> FederateIndex {
+        self.target
+    }
+
+    /// Returns the logical delay in nanoseconds.
+    pub const fn delay_nanos(self) -> u64 {
+        self.delay_nanos
+    }
+}
+
+/// Backend-neutral immutable federation membership and edges.
+#[derive(Clone, Copy, Debug)]
+pub struct GlobalFederationImage<'a> {
+    /// Federates participating in canonical stable-identity order.
+    pub members: &'a [FederateIndex],
+    /// Canonically ordered cross-Federate boundary edges.
+    pub edges: &'a [FederationEdgeImage],
+}
+
+impl<'a> GlobalFederationImage<'a> {
+    /// Creates an unchecked global federation image.
+    pub const fn new(members: &'a [FederateIndex], edges: &'a [FederationEdgeImage]) -> Self {
+        Self { members, edges }
+    }
+}
+
+/// Selected immutable logical-time coordination projection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoordinationProjection {
+    /// No distributed coordinator is required.
+    Local,
+}
+
+/// An unchecked aggregate of one complete compiled deployment.
+#[derive(Clone, Copy, Debug)]
+pub struct CompiledDeploymentImage<'a> {
+    /// UTF-8 storage for deployment-level stable identities.
+    pub identity_data: &'a str,
+    /// Backend-neutral global federation structure.
+    pub federation: GlobalFederationImage<'a>,
+    /// Dense Federate ownership records.
+    pub federates: &'a [FederateImage],
+    /// Federate-grouped Enclave scheduler images.
+    pub enclaves: &'a [EnclaveImage<'a>],
+    /// Selected backend-specific coordination projection.
+    pub coordination: CoordinationProjection,
 }
 
 /// An immutable reactor scheduler record.
@@ -652,22 +790,28 @@ pub struct StorageBounds {
     state_slots: u32,
     action_slots: u32,
     event_capacity: u32,
-    scratch_capacity: u32,
+    payload_bytes: u64,
+    state_bytes: u64,
+    scratch_bytes: u64,
 }
 
 impl StorageBounds {
-    /// Creates bounds in state, action, event, then scratch order.
+    /// Creates slot, queue, payload, state, and scratch bounds.
     pub const fn new(
         state_slots: u32,
         action_slots: u32,
         event_capacity: u32,
-        scratch_capacity: u32,
+        payload_bytes: u64,
+        state_bytes: u64,
+        scratch_bytes: u64,
     ) -> Self {
         Self {
             state_slots,
             action_slots,
             event_capacity,
-            scratch_capacity,
+            payload_bytes,
+            state_bytes,
+            scratch_bytes,
         }
     }
 
@@ -686,9 +830,19 @@ impl StorageBounds {
         self.event_capacity
     }
 
-    /// Returns the scheduler scratch capacity.
-    pub const fn scratch_capacity(self) -> u32 {
-        self.scratch_capacity
+    /// Returns the payload-storage bound in bytes.
+    pub const fn payload_bytes(self) -> u64 {
+        self.payload_bytes
+    }
+
+    /// Returns the reactor-state storage bound in bytes.
+    pub const fn state_bytes(self) -> u64 {
+        self.state_bytes
+    }
+
+    /// Returns the scheduler scratch-storage bound in bytes.
+    pub const fn scratch_bytes(self) -> u64 {
+        self.scratch_bytes
     }
 }
 

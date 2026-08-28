@@ -160,17 +160,98 @@ pub enum ImageValidationError<'a> {
     },
 }
 
+/// A validated allocation-free view of one complete compiled deployment.
+#[derive(Debug)]
+pub struct CompiledDeploymentView<'a> {
+    image: &'a CompiledDeploymentImage<'a>,
+}
+
+impl<'a> CompiledDeploymentView<'a> {
+    /// Validates `image` and borrows its complete immutable hierarchy.
+    pub fn new(image: &'a CompiledDeploymentImage<'a>) -> Result<Self, ImageValidationError<'a>> {
+        validate_compiled_deployment(image)?;
+        Ok(Self { image })
+    }
+
+    /// Returns the dense Federate table.
+    pub const fn federates(&self) -> TinyMapView<'a, FederateIndex, FederateImage> {
+        TinyMapView::new(self.image.federates)
+    }
+
+    /// Returns one validated Federate view.
+    pub fn federate(&self, key: FederateIndex) -> FederateImageView<'a> {
+        FederateImageView {
+            image: self.image,
+            federate: self.image.federates[key.as_u32() as usize],
+        }
+    }
+
+    /// Returns the backend-neutral federation structure.
+    pub const fn federation(&self) -> GlobalFederationImage<'a> {
+        self.image.federation
+    }
+
+    /// Returns the selected coordination projection.
+    pub const fn coordination(&self) -> CoordinationProjection {
+        self.image.coordination
+    }
+}
+
+/// A validated borrowed view of one Federate and its Enclaves.
+#[derive(Debug)]
+pub struct FederateImageView<'a> {
+    image: &'a CompiledDeploymentImage<'a>,
+    federate: FederateImage,
+}
+
+impl<'a> FederateImageView<'a> {
+    /// Returns the stable Federate identity.
+    pub fn id(&self) -> FederateId<'a> {
+        FederateId::new(identity_slice_unchecked(
+            self.image.identity_data,
+            self.federate.id(),
+        ))
+    }
+
+    /// Returns the configured compilation target.
+    pub fn target(&self) -> TargetId<'a> {
+        TargetId::new(identity_slice_unchecked(
+            self.image.identity_data,
+            self.federate.target(),
+        ))
+    }
+
+    /// Returns the configured runtime backend.
+    pub fn runtime(&self) -> RuntimeBackendId<'a> {
+        RuntimeBackendId::new(identity_slice_unchecked(
+            self.image.identity_data,
+            self.federate.runtime(),
+        ))
+    }
+
+    /// Iterates validated Enclave views in canonical identity order.
+    pub fn enclaves(&self) -> impl ExactSizeIterator<Item = EnclaveImageView<'a>> + 'a {
+        let images: &'a [EnclaveImage<'a>] =
+            range_slice(self.federate.enclaves(), self.image.enclaves);
+        images.iter().map(EnclaveImageView::validated)
+    }
+}
+
 /// A validated, allocation-free borrowed view of one Enclave image.
 #[derive(Debug)]
 pub struct EnclaveImageView<'a> {
-    image: &'a EnclaveImage<'a>,
+    image: EnclaveImage<'a>,
 }
 
 impl<'a> EnclaveImageView<'a> {
     /// Validates `image` and borrows all of its tables without copying.
-    pub fn new(image: &'a EnclaveImage<'a>) -> Result<Self, ImageValidationError<'a>> {
+    pub fn new(image: &EnclaveImage<'a>) -> Result<Self, ImageValidationError<'a>> {
         validate(image)?;
-        Ok(Self { image })
+        Ok(Self { image: *image })
+    }
+
+    fn validated(image: &EnclaveImage<'a>) -> Self {
+        Self { image: *image }
     }
     /// Returns the stable Enclave identity.
     pub fn enclave_id(&self) -> EnclaveId<'a> {
@@ -454,6 +535,137 @@ fn validate_id<'a>(
         }
     }
     *previous = Some(id);
+    Ok(())
+}
+
+/// Validates deployment ownership, identities, federation edges, and nested images.
+fn validate_compiled_deployment<'a>(
+    image: &CompiledDeploymentImage<'a>,
+) -> Result<(), ImageValidationError<'a>> {
+    check_len::<FederateIndex>("federates", image.federates.len())?;
+    check_len::<EnclaveIndex>("enclaves", image.enclaves.len())?;
+    check_len::<FederateIndex>("federation.members", image.federation.members.len())?;
+
+    let mut previous_federate = None;
+    let mut enclave_end = 0;
+    for (i, federate) in image.federates.iter().copied().enumerate() {
+        let index = i as u32;
+        let id = identity_slice(image.identity_data, "federates", index, "id", federate.id())?;
+        validate_id("federate", index, id, &mut previous_federate)?;
+        for (field, range) in [
+            ("target", federate.target()),
+            ("runtime", federate.runtime()),
+        ] {
+            let value = identity_slice(image.identity_data, "federates", index, field, range)?;
+            if !valid_id(value) {
+                return Err(ImageValidationError::InvalidStableId {
+                    kind: field,
+                    index,
+                    id: value,
+                });
+            }
+        }
+        if federate.enclaves().start() != enclave_end {
+            return Err(ImageValidationError::OwnershipMismatch {
+                table: "federates",
+                index,
+                field: "enclaves",
+            });
+        }
+        check_range(
+            "federates",
+            index,
+            "enclaves",
+            "enclaves",
+            federate.enclaves(),
+            image.enclaves.len(),
+            &mut enclave_end,
+        )?;
+    }
+    if enclave_end as usize != image.enclaves.len() {
+        return Err(ImageValidationError::OwnershipMismatch {
+            table: "image",
+            index: 0,
+            field: "enclaves",
+        });
+    }
+
+    if image.federation.members.len() != image.federates.len() {
+        return Err(ImageValidationError::OwnershipMismatch {
+            table: "federation",
+            index: 0,
+            field: "members",
+        });
+    }
+    for (i, member) in image.federation.members.iter().copied().enumerate() {
+        check_ref(
+            "federation.members",
+            i as u32,
+            "federate",
+            "federates",
+            member.as_u32(),
+            image.federates.len(),
+        )?;
+        if member.as_u32() != i as u32 {
+            return Err(ImageValidationError::EntriesNotSorted {
+                table: "federation.members",
+                index: i as u32,
+            });
+        }
+    }
+
+    let mut previous_boundary = None;
+    for (i, edge) in image.federation.edges.iter().copied().enumerate() {
+        let index = i as u32;
+        check_ref(
+            "federation.edges",
+            index,
+            "source",
+            "federates",
+            edge.source().as_u32(),
+            image.federates.len(),
+        )?;
+        check_ref(
+            "federation.edges",
+            index,
+            "target",
+            "federates",
+            edge.target().as_u32(),
+            image.federates.len(),
+        )?;
+        let boundary = identity_slice(
+            image.identity_data,
+            "federation.edges",
+            index,
+            "boundary",
+            edge.boundary(),
+        )?;
+        validate_id(
+            "federation boundary",
+            index,
+            boundary,
+            &mut previous_boundary,
+        )?;
+    }
+
+    for federate in image.federates.iter().copied() {
+        let mut previous_enclave = None;
+        for (offset, enclave) in range_slice(federate.enclaves(), image.enclaves)
+            .iter()
+            .enumerate()
+        {
+            let index = federate.enclaves().start() + offset as u32;
+            validate(enclave)?;
+            let id = identity_slice(
+                enclave.identity_data,
+                "enclaves",
+                index,
+                "enclave_id",
+                enclave.enclave_id,
+            )?;
+            validate_id("enclave", index, id, &mut previous_enclave)?;
+        }
+    }
     Ok(())
 }
 
@@ -1304,7 +1516,31 @@ mod tests {
         shutdown_actions: &SHUTDOWN_ACTIONS,
         routes: &ROUTES,
         required_bindings: &REQUIRED_BINDINGS,
-        storage_bounds: StorageBounds::new(2, 1, 8, 4),
+        storage_bounds: StorageBounds::new(2, 1, 8, 0, 0, 4),
+    };
+
+    static SECOND_IMAGE: EnclaveImage<'static> = EnclaveImage {
+        identity_data: "plant/otherxxnetwork/inreaction/r0reaction/r1state/r0state/r1",
+        enclave_id: IdentityRange::new(0, 13),
+        ..IMAGE
+    };
+    static DEPLOYMENT_IDENTITIES: &str = "hostaarch64-unknown-linux-gnuhosted";
+    static FEDERATES: [FederateImage; 1] = [FederateImage::new(
+        IdentityRange::new(0, 4),
+        IdentityRange::new(4, 25),
+        IdentityRange::new(29, 6),
+        TableRange::new(0, 2),
+    )];
+    static ENCLAVES: [EnclaveImage<'static>; 2] = [IMAGE, SECOND_IMAGE];
+    static FEDERATION_MEMBERS: [FederateIndex; 1] = [FederateIndex::new(0)];
+    static FEDERATION: GlobalFederationImage<'static> =
+        GlobalFederationImage::new(&FEDERATION_MEMBERS, &[]);
+    static COMPILED: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
+        identity_data: DEPLOYMENT_IDENTITIES,
+        federation: FEDERATION,
+        federates: &FEDERATES,
+        enclaves: &ENCLAVES,
+        coordination: CoordinationProjection::Local,
     };
 
     #[test]
@@ -1355,6 +1591,108 @@ mod tests {
             "state/r0"
         );
         assert_eq!(view.storage_bounds().event_capacity(), 8);
+    }
+
+    #[test]
+    fn storage_bounds_preserve_slots_queues_and_byte_limits() {
+        let bounds = StorageBounds::new(2, 4, 8, 16, 32, 64);
+
+        assert_eq!(bounds.state_slots(), 2);
+        assert_eq!(bounds.action_slots(), 4);
+        assert_eq!(bounds.event_capacity(), 8);
+        assert_eq!(bounds.payload_bytes(), 16);
+        assert_eq!(bounds.state_bytes(), 32);
+        assert_eq!(bounds.scratch_bytes(), 64);
+    }
+
+    #[test]
+    fn compiled_view_resolves_static_federate_and_enclave_ranges() {
+        let view = CompiledDeploymentView::new(&COMPILED).unwrap();
+
+        assert_eq!(view.federates().len(), 1);
+        let federate = view.federate(FederateIndex::new(0));
+        assert_eq!(federate.id().as_str(), "host");
+        assert_eq!(federate.enclaves().count(), 2);
+    }
+
+    #[test]
+    fn compiled_view_orders_enclaves_within_each_federate() {
+        let federates = [
+            FederateImage::new(
+                IdentityRange::new(0, 5),
+                IdentityRange::new(5, 6),
+                IdentityRange::new(11, 7),
+                TableRange::new(0, 2),
+            ),
+            FederateImage::new(
+                IdentityRange::new(18, 4),
+                IdentityRange::new(22, 6),
+                IdentityRange::new(28, 7),
+                TableRange::new(2, 2),
+            ),
+        ];
+        let enclaves = [
+            EnclaveImage {
+                identity_data: "zzzza/controlnetwork/inreaction/r0reaction/r1state/r0state/r1",
+                enclave_id: IdentityRange::new(0, 13),
+                ..IMAGE
+            },
+            EnclaveImage {
+                identity_data: "zzzzb/controlnetwork/inreaction/r0reaction/r1state/r0state/r1",
+                enclave_id: IdentityRange::new(0, 13),
+                ..IMAGE
+            },
+            EnclaveImage {
+                identity_data: "aaaaa/controlnetwork/inreaction/r0reaction/r1state/r0state/r1",
+                enclave_id: IdentityRange::new(0, 13),
+                ..IMAGE
+            },
+            EnclaveImage {
+                identity_data: "aaaab/controlnetwork/inreaction/r0reaction/r1state/r0state/r1",
+                enclave_id: IdentityRange::new(0, 13),
+                ..IMAGE
+            },
+        ];
+        let members = [FederateIndex::new(0), FederateIndex::new(1)];
+        let image = CompiledDeploymentImage {
+            identity_data: "alphatargetruntimebetatargetruntime",
+            federation: GlobalFederationImage::new(&members, &[]),
+            federates: &federates,
+            enclaves: &enclaves,
+            coordination: CoordinationProjection::Local,
+        };
+
+        let view = CompiledDeploymentView::new(&image).unwrap();
+        let second_ids = view
+            .federate(FederateIndex::new(1))
+            .enclaves()
+            .map(|enclave| enclave.enclave_id().as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(second_ids, ["aaaaa/control", "aaaab/control"]);
+    }
+
+    #[test]
+    fn compiled_view_rejects_a_federate_enclave_range_outside_the_root_table() {
+        let federates = [FederateImage::new(
+            IdentityRange::new(0, 4),
+            IdentityRange::new(4, 25),
+            IdentityRange::new(29, 6),
+            TableRange::new(0, 3),
+        )];
+        let image = CompiledDeploymentImage {
+            federates: &federates,
+            ..COMPILED
+        };
+
+        assert!(matches!(
+            CompiledDeploymentView::new(&image),
+            Err(ImageValidationError::RangeOutOfBounds {
+                table: "federates",
+                index: 0,
+                field: "enclaves",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -1621,7 +1959,7 @@ mod tests {
             (
                 "state storage bound",
                 EnclaveImage {
-                    storage_bounds: StorageBounds::new(1, 1, 8, 4),
+                    storage_bounds: StorageBounds::new(1, 1, 8, 0, 0, 4),
                     ..IMAGE
                 },
                 ImageValidationError::StorageBoundExceeded {

@@ -1,6 +1,7 @@
 //! Target-neutral application compiler models.
 #![deny(missing_docs)]
 
+mod compiled;
 mod debug;
 /// Explicit deployment selections supplied to the compiler.
 mod deployment;
@@ -12,6 +13,10 @@ mod model;
 /// Canonical implementation and placement resolution.
 mod resolved;
 
+pub use compiled::{
+    GlobalFederationImage, OwnedCompiledDeployment, OwnedEnclaveImage, OwnedFederateImage,
+    RequiredBinding, RequiredBindings,
+};
 pub use deployment::{
     BoundaryBinding, CoordinationSelection, FederateConfig, ImplementationBinding,
     PlacementAssignment,

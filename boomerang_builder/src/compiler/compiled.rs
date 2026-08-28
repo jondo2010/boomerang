@@ -1,10 +1,12 @@
 use super::{FederateId, ReactionId, ReactorId, RuntimeBackendId, StableEnclaveId, TargetTriple};
 use crate::runtime::image::{
-    ActionImage, ActionIndex, BindingKind, CoordinationProjection, EnclaveImage, EnclaveImageView,
-    ImageValidationError, LevelReactionImage, LifecycleReactionImage, ModeImage, ModeIndex,
-    PortImage, PortIndex, ReactionImage, ReactorImage, RequiredBindingImage, RouteImage,
-    ScopeImage, ScopeIndex, StorageBounds, TimerStartupImage,
+    ActionImage, ActionIndex, BindingKind, BindingSlotIndex, CoordinationProjection, EnclaveImage,
+    EnclaveImageView, ImageValidationError, LevelReactionImage, LifecycleReactionImage, ModeImage,
+    ModeIndex, PortImage, PortIndex, ReactionImage, ReactionIndex, ReactorImage, ReactorIndex,
+    RequiredBindingImage, RouteImage, RouteIndex, ScopeImage, ScopeIndex, StorageBounds,
+    TimerStartupImage,
 };
+use tinymap::TinyMap;
 
 /// Canonical required payload binding identities for one Enclave.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -55,17 +57,17 @@ pub struct OwnedEnclaveImage {
     /// Enclave identity range in `identity_data`.
     pub(crate) enclave_id: crate::runtime::image::IdentityRange,
     /// Dense reactor rows.
-    pub(crate) reactors: Box<[ReactorImage]>,
+    pub(crate) reactors: TinyMap<ReactorIndex, ReactorImage>,
     /// Dense action rows.
-    pub(crate) actions: Box<[ActionImage]>,
+    pub(crate) actions: TinyMap<ActionIndex, ActionImage>,
     /// Dense port rows.
-    pub(crate) ports: Box<[PortImage]>,
+    pub(crate) ports: TinyMap<PortIndex, PortImage>,
     /// Dense reaction rows.
-    pub(crate) reactions: Box<[ReactionImage]>,
+    pub(crate) reactions: TinyMap<ReactionIndex, ReactionImage>,
     /// Dense mode rows.
-    pub(crate) modes: Box<[ModeImage]>,
+    pub(crate) modes: TinyMap<ModeIndex, ModeImage>,
     /// Dense execution scopes.
-    pub(crate) scopes: Box<[ScopeImage]>,
+    pub(crate) scopes: TinyMap<ScopeIndex, ScopeImage>,
     /// Flattened trigger entries.
     pub(crate) reaction_triggers: Box<[LevelReactionImage]>,
     /// Flattened reaction use ports.
@@ -97,9 +99,9 @@ pub struct OwnedEnclaveImage {
     /// Actions populated before shutdown.
     pub(crate) shutdown_actions: Box<[ActionIndex]>,
     /// Scheduler-boundary routes.
-    pub(crate) routes: Box<[RouteImage]>,
+    pub(crate) routes: TinyMap<RouteIndex, RouteImage>,
     /// Dense runtime binding rows.
-    pub(crate) binding_images: Box<[RequiredBindingImage]>,
+    pub(crate) binding_images: TinyMap<BindingSlotIndex, RequiredBindingImage>,
     /// Stable required binding descriptions.
     pub(crate) required_bindings: RequiredBindings,
     /// Mutable storage and workspace bounds.
@@ -122,12 +124,12 @@ impl OwnedEnclaveImage {
         EnclaveImage {
             identity_data: &self.identity_data,
             enclave_id: self.enclave_id,
-            reactors: &self.reactors,
-            actions: &self.actions,
-            ports: &self.ports,
-            reactions: &self.reactions,
-            modes: &self.modes,
-            scopes: &self.scopes,
+            reactors: self.reactors.as_view(),
+            actions: self.actions.as_view(),
+            ports: self.ports.as_view(),
+            reactions: self.reactions.as_view(),
+            modes: self.modes.as_view(),
+            scopes: self.scopes.as_view(),
             reaction_triggers: &self.reaction_triggers,
             reaction_use_ports: &self.reaction_use_ports,
             reaction_effect_ports: &self.reaction_effect_ports,
@@ -143,8 +145,8 @@ impl OwnedEnclaveImage {
             timer_startup_actions: &self.timer_startup_actions,
             shutdown_reactions: &self.shutdown_reactions,
             shutdown_actions: &self.shutdown_actions,
-            routes: &self.routes,
-            required_bindings: &self.binding_images,
+            routes: self.routes.as_view(),
+            required_bindings: self.binding_images.as_view(),
             storage_bounds: self.storage_bounds,
         }
     }
@@ -245,25 +247,46 @@ impl OwnedCompiledDeployment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::image::IdentityRange;
+    use crate::runtime::image::{IdentityRange, StateSlotIndex, TableRange};
 
     fn empty_enclave() -> OwnedEnclaveImage {
         OwnedEnclaveImage {
             id: StableEnclaveId::new("vehicle/main").unwrap(),
-            identity_data: "vehicle/main".into(),
+            identity_data: "vehicle/mainstate/vehicle/main".into(),
             enclave_id: IdentityRange::new(0, 12),
-            reactors: Box::default(),
-            actions: Box::default(),
-            ports: Box::default(),
-            reactions: Box::default(),
-            modes: Box::default(),
-            scopes: Box::default(),
+            reactors: [ReactorImage::new(
+                BindingSlotIndex::new(0),
+                StateSlotIndex::new(0),
+                ScopeIndex::new(0),
+                TableRange::new(0, 0),
+                None,
+                None,
+            )]
+            .into_iter()
+            .collect(),
+            actions: TinyMap::default(),
+            ports: TinyMap::default(),
+            reactions: TinyMap::default(),
+            modes: TinyMap::default(),
+            scopes: [ScopeImage::new(
+                None,
+                ReactorIndex::new(0),
+                None,
+                TableRange::new(0, 1),
+                TableRange::new(0, 0),
+                TableRange::new(0, 0),
+                TableRange::new(0, 0),
+                TableRange::new(0, 0),
+                TableRange::new(0, 0),
+            )]
+            .into_iter()
+            .collect(),
             reaction_triggers: Box::default(),
             reaction_use_ports: Box::default(),
             reaction_effect_ports: Box::default(),
             reaction_actions: Box::default(),
             reaction_modes: Box::default(),
-            scope_descendants: Box::default(),
+            scope_descendants: Box::new([ScopeIndex::new(0)]),
             scope_logical_actions: Box::default(),
             scope_timer_startups: Box::default(),
             scope_reset_reactions: Box::default(),
@@ -273,12 +296,19 @@ mod tests {
             timer_startup_actions: Box::default(),
             shutdown_reactions: Box::default(),
             shutdown_actions: Box::default(),
-            routes: Box::default(),
-            binding_images: Box::default(),
+            routes: TinyMap::default(),
+            binding_images: [RequiredBindingImage::new(
+                IdentityRange::new(12, 18),
+                BindingKind::StateInitializer,
+            )]
+            .into_iter()
+            .collect(),
             required_bindings: RequiredBindings {
-                entries: Box::default(),
+                entries: Box::new([RequiredBinding::State {
+                    reactor: ReactorId::new("vehicle/main").unwrap(),
+                }]),
             },
-            storage_bounds: StorageBounds::new(0, 0, 0, 0, 0, 0),
+            storage_bounds: StorageBounds::new(1, 0, 0, 0, 0, 0),
         }
     }
 
@@ -299,7 +329,14 @@ mod tests {
         };
 
         deployment.validate().unwrap();
-        let view = deployment.federates()[0].enclaves()[0].view().unwrap();
+        let enclave = &deployment.federates()[0].enclaves()[0];
+        let reactor = enclave.reactors.get(ReactorIndex::new(0)).unwrap();
+        assert_eq!(reactor.state_binding(), BindingSlotIndex::new(0));
+        let view = enclave.view().unwrap();
         assert_eq!(view.enclave_id().as_str(), "vehicle/main");
+        assert_eq!(
+            view.reactors()[ReactorIndex::new(0)].state_binding(),
+            BindingSlotIndex::new(0)
+        );
     }
 }

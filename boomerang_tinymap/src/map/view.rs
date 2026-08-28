@@ -1,9 +1,9 @@
 use core::{marker::PhantomData, ops::Index};
 
-use crate::{Key, KeyRange};
+use crate::{Key, TableRange};
 
 /// An allocation-free borrowed view of a densely keyed value table.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct TinyMapView<'a, K: Key, V> {
     data: &'a [V],
     _key: PhantomData<K>,
@@ -37,10 +37,8 @@ impl<'a, K: Key, V> TinyMapView<'a, K, V> {
     }
 
     /// Returns the values in `range`, or `None` when it exceeds this view.
-    pub fn get_range(&self, range: KeyRange<K>) -> Option<&'a [V]> {
-        let start = range.start() as usize;
-        let end = start.checked_add(range.len() as usize)?;
-        self.data.get(start..end)
+    pub fn get_range(&self, range: TableRange<K>) -> Option<&'a [V]> {
+        self.data.get(range.indices()?)
     }
 
     /// Iterates over the values in dense key order.
@@ -72,9 +70,11 @@ impl<K: Key, V> Index<K> for TinyMapView<'_, K, V> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{map::TinyMapView, Key, KeyRange};
+    use crate::{map::TinyMapView, Key, TableRange};
 
     crate::key_type!(TestKey);
+
+    const _: () = assert!(TableRange::<TestKey>::new(u32::MAX, 1).contains(u32::MAX));
 
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     struct ManualKey(usize);
@@ -117,9 +117,19 @@ mod tests {
     }
 
     #[test]
-    fn borrowed_view_returns_checked_dense_key_ranges() {
-        assert_eq!(VIEW.get_range(KeyRange::new(1, 2)), Some(&VALUES[1..3]));
-        assert_eq!(VIEW.get_range(KeyRange::new(2, 2)), None);
+    fn borrowed_view_returns_checked_table_ranges() {
+        assert_eq!(VIEW.get_range(TableRange::new(1, 2)), Some(&VALUES[1..3]));
+        assert_eq!(VIEW.get_range(TableRange::new(2, 2)), None);
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(
+            TableRange::<TestKey>::new(u32::MAX, 1)
+                .checked_end()
+                .map(|end| end as u64),
+            Some(u64::from(u32::MAX) + 1)
+        );
+        let terminal = TableRange::<TestKey>::new(u32::MAX, 1);
+        assert!(terminal.contains(u32::MAX));
+        assert!(!terminal.contains(u32::MAX - 1));
     }
 
     #[test]

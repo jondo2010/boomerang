@@ -9,6 +9,7 @@ mod deployment;
 pub mod federation;
 mod from_assembly;
 mod identity;
+mod lower;
 mod model;
 /// Canonical implementation and placement resolution.
 mod resolved;
@@ -27,6 +28,7 @@ pub use identity::{
     PlacementGroupId, PortId, ReactionId, ReactorId, RuntimeBackendId, StableEnclaveId, StablePath,
     StablePathSegment, StableText, TargetTriple, TransportCapabilityId,
 };
+pub use lower::{lower, CompileError};
 pub use model::{
     Action, ActionKind, ApplicationTopology, ApplicationTopologyBuilder, BankMember,
     ComponentInstance, Connection, ConnectionSemantics, Enclave, InvalidBankMember, Mode,

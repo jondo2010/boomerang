@@ -1406,7 +1406,7 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
         previous_action = Some(action);
     }
 
-    let mut previous = None;
+    let mut previous_route = None;
     for (i, route) in image.routes.values().copied().enumerate() {
         let id = identity_slice(
             image.identity_data,
@@ -1415,7 +1415,38 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             "boundary",
             route.boundary(),
         )?;
-        validate_id("boundary", i as u32, id, &mut previous)?;
+        if !valid_id(id) {
+            return Err(ImageValidationError::InvalidStableId {
+                kind: "boundary",
+                index: i as u32,
+                id,
+            });
+        }
+        if let Some((previous_id, previous_direction)) = previous_route {
+            match id.cmp(previous_id) {
+                std::cmp::Ordering::Less => {
+                    return Err(ImageValidationError::StableIdsNotSorted {
+                        kind: "boundary",
+                        index: i as u32,
+                        id,
+                    })
+                }
+                std::cmp::Ordering::Equal if route.direction() == previous_direction => {
+                    return Err(ImageValidationError::DuplicateRouteHalf {
+                        boundary: id,
+                        direction: route.direction(),
+                    })
+                }
+                std::cmp::Ordering::Equal if previous_direction == RouteDirection::Outbound => {
+                    return Err(ImageValidationError::EntriesNotSorted {
+                        table: "routes",
+                        index: i as u32,
+                    })
+                }
+                _ => {}
+            }
+        }
+        previous_route = Some((id, route.direction()));
         check_ref(
             "routes",
             i as u32,
@@ -1425,7 +1456,7 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             image.ports.len(),
         )?;
     }
-    previous = None;
+    let mut previous = None;
     for (i, binding) in image.required_bindings.values().copied().enumerate() {
         let id = identity_slice(
             image.identity_data,

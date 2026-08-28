@@ -345,6 +345,30 @@ text_id!(
     /// Stable identity of a federated compilation member.
     FederateId
 );
+text_id!(
+    /// Stable identity of a selected component implementation.
+    ImplementationId
+);
+text_id!(
+    /// Rust target triple selected for a deployment artifact.
+    TargetTriple
+);
+text_id!(
+    /// Stable identity of a runtime backend capability.
+    RuntimeBackendId
+);
+text_id!(
+    /// Stable identity of a distributed coordination backend.
+    CoordinationBackendId
+);
+text_id!(
+    /// Stable identity of a payload codec capability.
+    CodecCapabilityId
+);
+text_id!(
+    /// Stable identity of a transport capability.
+    TransportCapabilityId
+);
 path_id!(
     /// Stable identity of a logical component instance.
     ComponentInstanceId

@@ -66,6 +66,20 @@ pub enum TopologyBuildError {
         /// Validation reason.
         reason: &'static str,
     },
+    /// A direct reaction relation crosses an Enclave boundary.
+    #[error(
+        "reaction '{reaction}' in Enclave '{reaction_enclave}' references {target:?} in Enclave '{target_enclave}'; cross-Enclave communication must use a Connection"
+    )]
+    CrossEnclaveReactionRelation {
+        /// Stable reaction identity.
+        reaction: ReactionId,
+        /// Enclave containing the reaction.
+        reaction_enclave: StableEnclaveId,
+        /// Stable action or port target.
+        target: ReactionRelationTarget,
+        /// Enclave containing the target.
+        target_enclave: StableEnclaveId,
+    },
     /// A mode hierarchy or modal reaction reference is invalid.
     #[error("invalid modal structure for '{entity}': {reason}")]
     InvalidModalStructure {
@@ -868,23 +882,35 @@ fn validate_reactions(
                 ));
             }
         }
-        require(reactors, &reaction.reactor, &reaction.id, "reactor")?;
+        let reaction_reactor = require(reactors, &reaction.reactor, &reaction.id, "reactor")?;
 
         let mut targets = BTreeSet::new();
-        for relation in &reaction.relations {
+        let mut relations = reaction.relations.iter().collect::<Vec<_>>();
+        relations.sort_by(|left, right| left.target.cmp(&right.target));
+        for relation in relations {
             if relation.flags.is_empty() || !targets.insert(relation.target.clone()) {
                 return Err(TopologyBuildError::InvalidReactionRelations {
                     reaction: reaction.id.clone(),
                     reason: "empty flags or duplicate target relation",
                 });
             }
-            match &relation.target {
+            let target_reactor = match &relation.target {
                 ReactionRelationTarget::Action(id) => {
-                    require(actions, id, &reaction.id, "action")?;
+                    &require(actions, id, &reaction.id, "action")?.reactor
                 }
                 ReactionRelationTarget::Port(id) => {
-                    require(ports, id, &reaction.id, "port")?;
+                    &require(ports, id, &reaction.id, "port")?.reactor
                 }
+            };
+            let target_enclave =
+                &require(reactors, target_reactor, &reaction.id, "reactor")?.enclave;
+            if reaction_reactor.enclave != *target_enclave {
+                return Err(TopologyBuildError::CrossEnclaveReactionRelation {
+                    reaction: reaction.id.clone(),
+                    reaction_enclave: reaction_reactor.enclave.clone(),
+                    target: relation.target.clone(),
+                    target_enclave: target_enclave.clone(),
+                });
             }
         }
 
@@ -1524,6 +1550,77 @@ mod tests {
             ))
             .unwrap();
         assert!(builder.finish().is_ok());
+    }
+
+    #[test]
+    fn reaction_relation_target_must_belong_to_the_reaction_enclave() {
+        fn finish(action_target: bool) -> Result<ApplicationTopology, TopologyBuildError> {
+            let (mut builder, source, _) = base("vehicle", "vehicle/root", "vehicle/root");
+            let target_reactor: ReactorId = id("vehicle/other");
+            let target_enclave: StableEnclaveId = id("vehicle/other");
+            builder
+                .add_reactor(Reactor::new(
+                    target_reactor.clone(),
+                    id("vehicle"),
+                    None,
+                    None,
+                    target_enclave.clone(),
+                    None,
+                    None,
+                ))
+                .unwrap();
+            builder
+                .add_enclave(target_enclave, target_reactor.clone())
+                .unwrap();
+            let target = if action_target {
+                let action: ActionId = id("vehicle/other/action");
+                builder
+                    .add_action(action.clone(), target_reactor, ActionKind::Startup, 0, None)
+                    .unwrap();
+                ReactionRelationTarget::Action(action)
+            } else {
+                let port: PortId = id("vehicle/other/port");
+                builder
+                    .add_port(
+                        port.clone(),
+                        target_reactor,
+                        PortDirection::Input,
+                        None,
+                        0,
+                        None,
+                    )
+                    .unwrap();
+                ReactionRelationTarget::Port(port)
+            };
+            builder
+                .add_reaction(
+                    id("vehicle/root/reaction"),
+                    source,
+                    [ReactionRelation::new(
+                        target,
+                        super::super::ReactionRelationFlags::EFFECT,
+                        0,
+                    )],
+                    ReactionOptions::default(),
+                )
+                .unwrap();
+            builder.finish()
+        }
+
+        for action_target in [true, false] {
+            let error = finish(action_target).unwrap_err();
+            assert!(matches!(
+                error,
+                TopologyBuildError::CrossEnclaveReactionRelation {
+                    reaction,
+                    reaction_enclave,
+                    target: ReactionRelationTarget::Action(_) | ReactionRelationTarget::Port(_),
+                    target_enclave,
+                } if reaction == id("vehicle/root/reaction")
+                    && reaction_enclave == id("vehicle/root")
+                    && target_enclave == id("vehicle/other")
+            ));
+        }
     }
 
     #[test]

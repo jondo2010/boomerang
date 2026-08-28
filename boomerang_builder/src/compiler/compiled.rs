@@ -221,6 +221,22 @@ pub struct OwnedCompiledDeployment {
     pub(crate) coordination: CoordinationProjection,
 }
 
+/// An owned validation failure for a host-backed compiled deployment.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("invalid compiled deployment image: {message}")]
+pub struct CompiledDeploymentValidationError {
+    /// Runtime image validation detail copied out of temporary aggregate storage.
+    message: Box<str>,
+}
+
+impl CompiledDeploymentValidationError {
+    fn from_image(error: ImageValidationError<'_>) -> Self {
+        Self {
+            message: error.to_string().into_boxed_str(),
+        }
+    }
+}
+
 impl OwnedCompiledDeployment {
     /// Returns the backend-neutral federation structure.
     pub fn federation(&self) -> &GlobalFederationImage {
@@ -237,15 +253,8 @@ impl OwnedCompiledDeployment {
         self.coordination
     }
 
-    /// Builds and visits the complete borrowed deployment validation result.
-    ///
-    /// Temporary aggregate storage is scoped to `visit`, so borrowed view data cannot escape.
-    pub fn with_view<R>(
-        &self,
-        visit: impl for<'a> FnOnce(
-            Result<crate::runtime::image::CompiledDeploymentView<'a>, ImageValidationError<'a>>,
-        ) -> R,
-    ) -> R {
+    /// Validates the complete target-facing deployment hierarchy.
+    pub fn validate(&self) -> Result<(), CompiledDeploymentValidationError> {
         fn checked_len(
             table: &'static str,
             len: usize,
@@ -269,20 +278,18 @@ impl OwnedCompiledDeployment {
         let mut federates = Vec::with_capacity(self.federates.len());
         let mut enclaves = Vec::new();
         let mut members = Vec::with_capacity(self.federates.len());
-        for (index, federate) in self.federates.iter().enumerate() {
-            let index = match checked_len("federates", index) {
-                Ok(index) => index,
-                Err(error) => return visit(Err(error)),
-            };
-            members.push(FederateIndex::new(index));
+        if let Err(error) = checked_len("federates", self.federates.len()) {
+            return Err(CompiledDeploymentValidationError::from_image(error));
+        }
+        for federate in &self.federates {
             let enclave_start = match checked_len("enclaves", enclaves.len()) {
                 Ok(start) => start,
-                Err(error) => return visit(Err(error)),
+                Err(error) => return Err(CompiledDeploymentValidationError::from_image(error)),
             };
             enclaves.extend(federate.enclaves.iter().map(OwnedEnclaveImage::image));
             let enclave_len = match checked_len("enclaves", federate.enclaves.len()) {
                 Ok(len) => len,
-                Err(error) => return visit(Err(error)),
+                Err(error) => return Err(CompiledDeploymentValidationError::from_image(error)),
             };
             let (id, target, runtime) = match (
                 append_identity(&mut identity_data, &federate.id),
@@ -291,7 +298,7 @@ impl OwnedCompiledDeployment {
             ) {
                 (Ok(id), Ok(target), Ok(runtime)) => (id, target, runtime),
                 (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
-                    return visit(Err(error));
+                    return Err(CompiledDeploymentValidationError::from_image(error));
                 }
             };
             federates.push(FederateImage::new(
@@ -301,6 +308,18 @@ impl OwnedCompiledDeployment {
                 TableRange::new(enclave_start, enclave_len),
             ));
         }
+        for member in &self.federation.members {
+            let index = self
+                .federates
+                .iter()
+                .position(|federate| federate.id == *member)
+                .unwrap_or(self.federates.len());
+            let index = match checked_len("federation.members", index) {
+                Ok(index) => index,
+                Err(error) => return Err(CompiledDeploymentValidationError::from_image(error)),
+            };
+            members.push(FederateIndex::new(index));
+        }
 
         let image = crate::runtime::image::CompiledDeploymentImage {
             identity_data: &identity_data,
@@ -309,24 +328,16 @@ impl OwnedCompiledDeployment {
             enclaves: TinyMapView::new(&enclaves),
             coordination: self.coordination,
         };
-        visit(crate::runtime::image::CompiledDeploymentView::new(&image))
-    }
-
-    /// Validates every target-facing Enclave image.
-    pub fn validate(&self) -> Result<(), ImageValidationError<'_>> {
-        for federate in &self.federates {
-            for enclave in &federate.enclaves {
-                enclave.view()?;
-            }
-        }
-        Ok(())
+        crate::runtime::image::CompiledDeploymentView::new(&image)
+            .map(|_| ())
+            .map_err(CompiledDeploymentValidationError::from_image)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::image::{FederateIndex, IdentityRange, StateSlotIndex, TableRange};
+    use crate::runtime::image::{IdentityRange, StateSlotIndex, TableRange};
 
     fn empty_enclave() -> OwnedEnclaveImage {
         OwnedEnclaveImage {
@@ -392,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn owned_deployment_validates_through_the_borrowed_enclave_view() {
+    fn owned_deployment_validates_the_complete_borrowed_hierarchy() {
         let deployment = OwnedCompiledDeployment {
             federation: GlobalFederationImage {
                 members: vec![FederateId::new("host").unwrap()].into_boxed_slice(),
@@ -408,15 +419,13 @@ mod tests {
         };
 
         deployment.validate().unwrap();
-        let summary = deployment.with_view(|view| {
-            let view = view.unwrap();
-            let federate = view.federate(FederateIndex::new(0));
-            (
-                federate.id().as_str().to_owned(),
-                federate.enclaves().count(),
-            )
-        });
-        assert_eq!(summary, ("host".to_owned(), 1));
+        let invalid = OwnedCompiledDeployment {
+            federation: GlobalFederationImage {
+                members: Box::default(),
+            },
+            ..deployment.clone()
+        };
+        assert!(invalid.validate().is_err());
         let enclave = &deployment.federates()[0].enclaves()[0];
         let reactor = enclave.reactors.get(ReactorIndex::new(0)).unwrap();
         assert_eq!(reactor.state_binding(), BindingSlotIndex::new(0));

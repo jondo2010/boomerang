@@ -14,8 +14,8 @@ mod model;
 mod resolved;
 
 pub use compiled::{
-    GlobalFederationImage, OwnedCompiledDeployment, OwnedEnclaveImage, OwnedFederateImage,
-    RequiredBinding, RequiredBindings,
+    CompiledDeploymentValidationError, GlobalFederationImage, OwnedCompiledDeployment,
+    OwnedEnclaveImage, OwnedFederateImage, RequiredBinding, RequiredBindings,
 };
 pub use deployment::{
     BoundaryBinding, CoordinationSelection, FederateConfig, ImplementationBinding,

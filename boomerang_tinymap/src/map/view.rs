@@ -1,6 +1,6 @@
 use core::{marker::PhantomData, ops::Index};
 
-use crate::Key;
+use crate::{Key, KeyRange};
 
 /// An allocation-free borrowed view of a densely keyed value table.
 #[derive(Clone, Copy)]
@@ -36,6 +36,13 @@ impl<'a, K: Key, V> TinyMapView<'a, K, V> {
         self.data.get(key.index())
     }
 
+    /// Returns the values in `range`, or `None` when it exceeds this view.
+    pub fn get_range(&self, range: KeyRange<K>) -> Option<&'a [V]> {
+        let start = range.start() as usize;
+        let end = start.checked_add(range.len() as usize)?;
+        self.data.get(start..end)
+    }
+
     /// Iterates over the values in dense key order.
     pub fn values(&self) -> impl Iterator<Item = &V> {
         self.data.iter()
@@ -65,7 +72,7 @@ impl<K: Key, V> Index<K> for TinyMapView<'_, K, V> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{map::TinyMapView, Key};
+    use crate::{map::TinyMapView, Key, KeyRange};
 
     crate::key_type!(TestKey);
 
@@ -107,6 +114,12 @@ mod tests {
             ]
         );
         assert_eq!(VIEW.values().collect::<Vec<_>>(), vec![&10, &20, &30]);
+    }
+
+    #[test]
+    fn borrowed_view_returns_checked_dense_key_ranges() {
+        assert_eq!(VIEW.get_range(KeyRange::new(1, 2)), Some(&VALUES[1..3]));
+        assert_eq!(VIEW.get_range(KeyRange::new(2, 2)), None);
     }
 
     #[test]

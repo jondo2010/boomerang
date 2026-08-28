@@ -231,8 +231,9 @@ impl<'a> FederateImageView<'a> {
 
     /// Iterates validated Enclave views in canonical identity order.
     pub fn enclaves(&self) -> impl ExactSizeIterator<Item = EnclaveImageView<'a>> + 'a {
-        let images: &'a [EnclaveImage<'a>] =
-            range_slice(self.federate.enclaves(), self.image.enclaves);
+        let images = TinyMapView::<EnclaveIndex, _>::new(self.image.enclaves)
+            .get_range(self.federate.enclaves())
+            .expect("compiled deployment ranges are validated");
         images.iter().map(EnclaveImageView::validated)
     }
 }
@@ -443,12 +444,37 @@ fn check_ref<'a>(
     }
 }
 
-fn check_range<'a, K>(
+trait ImageRange: Copy {
+    fn start(self) -> u32;
+    fn len(self) -> u32;
+}
+
+impl<K: Key> ImageRange for KeyRange<K> {
+    fn start(self) -> u32 {
+        self.start()
+    }
+
+    fn len(self) -> u32 {
+        self.len()
+    }
+}
+
+impl<T> ImageRange for SliceRange<T> {
+    fn start(self) -> u32 {
+        self.start()
+    }
+
+    fn len(self) -> u32 {
+        self.len()
+    }
+}
+
+fn check_range<'a, R: ImageRange>(
     table: &'static str,
     index: u32,
     field: &'static str,
     target: &'static str,
-    range: TableRange<K>,
+    range: R,
     len: usize,
     previous_end: &mut u32,
 ) -> Result<(), ImageValidationError<'a>> {
@@ -476,7 +502,7 @@ fn check_range<'a, K>(
     Ok(())
 }
 
-fn range_slice<T, K>(range: TableRange<K>, values: &[T]) -> &[T] {
+fn range_slice<T>(range: SliceRange<T>, values: &[T]) -> &[T] {
     let start = range.start() as usize;
     &values[start..start + range.len() as usize]
 }
@@ -650,10 +676,10 @@ fn validate_compiled_deployment<'a>(
 
     for federate in image.federates.iter().copied() {
         let mut previous_enclave = None;
-        for (offset, enclave) in range_slice(federate.enclaves(), image.enclaves)
-            .iter()
-            .enumerate()
-        {
+        let enclaves = TinyMapView::<EnclaveIndex, _>::new(image.enclaves)
+            .get_range(federate.enclaves())
+            .expect("compiled deployment ranges are validated");
+        for (offset, enclave) in enclaves.iter().enumerate() {
             let index = federate.enclaves().start() + offset as u32;
             validate(enclave)?;
             let id = identity_slice(
@@ -1343,15 +1369,23 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
 #[cfg(test)]
 mod tests {
     use super::super::*;
+    use super::range_slice;
 
-    const RANGE_0_0: TableRange<PortIndex> = TableRange::new(0, 0);
+    #[test]
+    fn slice_ranges_address_their_flattened_value_table() {
+        let values = [10, 20, 30];
+
+        assert_eq!(range_slice(SliceRange::new(1, 2), &values), &[20, 30]);
+    }
+
+    const RANGE_0_0: SliceRange<PortIndex> = SliceRange::new(0, 0);
 
     static REACTORS: [ReactorImage; 2] = [
         ReactorImage::new(
             BindingSlotIndex::new(2),
             StateSlotIndex::new(0),
             ScopeIndex::new(0),
-            TableRange::new(0, 1),
+            KeyRange::new(0, 1),
             Some(ModeIndex::new(0)),
             Some(BankInfoImage::new(0, 2)),
         ),
@@ -1359,7 +1393,7 @@ mod tests {
             BindingSlotIndex::new(3),
             StateSlotIndex::new(1),
             ScopeIndex::new(2),
-            TableRange::new(1, 0),
+            KeyRange::new(1, 0),
             None,
             Some(BankInfoImage::new(1, 2)),
         ),
@@ -1371,11 +1405,11 @@ mod tests {
             domain: TimingDomain::Logical,
             min_delay_nanos: 7,
         },
-        TableRange::new(0, 2),
+        SliceRange::new(0, 2),
     )];
     static PORTS: [PortImage; 2] = [
-        PortImage::new(ScopeIndex::new(0), TableRange::new(2, 1)),
-        PortImage::new(ScopeIndex::new(2), TableRange::new(3, 1)),
+        PortImage::new(ScopeIndex::new(0), SliceRange::new(2, 1)),
+        PortImage::new(ScopeIndex::new(2), SliceRange::new(3, 1)),
     ];
     static REACTIONS: [ReactionImage; 2] = [
         ReactionImage::new(
@@ -1383,20 +1417,20 @@ mod tests {
             ScopeIndex::new(1),
             0,
             BindingSlotIndex::new(0),
-            TableRange::new(0, 1),
-            TableRange::new(0, 1),
-            TableRange::new(0, 1),
-            TableRange::new(0, 1),
+            SliceRange::new(0, 1),
+            SliceRange::new(0, 1),
+            SliceRange::new(0, 1),
+            SliceRange::new(0, 1),
         ),
         ReactionImage::new(
             ReactorIndex::new(1),
             ScopeIndex::new(2),
             1,
             BindingSlotIndex::new(1),
-            TableRange::new(1, 1),
-            TableRange::new(1, 0),
-            TableRange::new(1, 0),
-            TableRange::new(1, 0),
+            SliceRange::new(1, 1),
+            SliceRange::new(1, 0),
+            SliceRange::new(1, 0),
+            SliceRange::new(1, 0),
         ),
     ];
     static MODES: [ModeImage; 1] = [ModeImage::new(ReactorIndex::new(0), ScopeIndex::new(1))];
@@ -1405,34 +1439,34 @@ mod tests {
             None,
             ReactorIndex::new(0),
             None,
-            TableRange::new(0, 2),
-            TableRange::new(0, 1),
-            TableRange::new(0, 1),
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
+            SliceRange::new(0, 2),
+            SliceRange::new(0, 1),
+            SliceRange::new(0, 1),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
         ),
         ScopeImage::new(
             Some(ScopeIndex::new(0)),
             ReactorIndex::new(0),
             Some(ModeIndex::new(0)),
-            TableRange::new(2, 1),
-            TableRange::new(1, 1),
-            TableRange::new(1, 1),
-            TableRange::new(0, 1),
-            TableRange::new(0, 1),
-            TableRange::new(0, 1),
+            SliceRange::new(2, 1),
+            SliceRange::new(1, 1),
+            SliceRange::new(1, 1),
+            SliceRange::new(0, 1),
+            SliceRange::new(0, 1),
+            SliceRange::new(0, 1),
         ),
         ScopeImage::new(
             None,
             ReactorIndex::new(1),
             None,
-            TableRange::new(3, 1),
-            TableRange::new(2, 0),
-            TableRange::new(2, 0),
-            TableRange::new(1, 0),
-            TableRange::new(1, 0),
-            TableRange::new(1, 0),
+            SliceRange::new(3, 1),
+            SliceRange::new(2, 0),
+            SliceRange::new(2, 0),
+            SliceRange::new(1, 0),
+            SliceRange::new(1, 0),
+            SliceRange::new(1, 0),
         ),
     ];
     static REACTION_TRIGGERS: [LevelReactionImage; 4] = [
@@ -1529,7 +1563,7 @@ mod tests {
         IdentityRange::new(0, 4),
         IdentityRange::new(4, 25),
         IdentityRange::new(29, 6),
-        TableRange::new(0, 2),
+        KeyRange::new(0, 2),
     )];
     static ENCLAVES: [EnclaveImage<'static>; 2] = [IMAGE, SECOND_IMAGE];
     static FEDERATION_MEMBERS: [FederateIndex; 1] = [FederateIndex::new(0)];
@@ -1622,13 +1656,13 @@ mod tests {
                 IdentityRange::new(0, 5),
                 IdentityRange::new(5, 6),
                 IdentityRange::new(11, 7),
-                TableRange::new(0, 2),
+                KeyRange::new(0, 2),
             ),
             FederateImage::new(
                 IdentityRange::new(18, 4),
                 IdentityRange::new(22, 6),
                 IdentityRange::new(28, 7),
-                TableRange::new(2, 2),
+                KeyRange::new(2, 2),
             ),
         ];
         let enclaves = [
@@ -1677,7 +1711,7 @@ mod tests {
             IdentityRange::new(0, 4),
             IdentityRange::new(4, 25),
             IdentityRange::new(29, 6),
-            TableRange::new(0, 3),
+            KeyRange::new(0, 3),
         )];
         let image = CompiledDeploymentImage {
             federates: &federates,
@@ -1713,7 +1747,7 @@ mod tests {
                 ScopeIndex::new(1),
                 ActionSlotIndex::new(0),
                 timing,
-                TableRange::new(0, 2),
+                SliceRange::new(0, 2),
             )];
             let image = EnclaveImage {
                 actions: &actions,
@@ -1733,8 +1767,8 @@ mod tests {
             BindingSlotIndex::new(0),
             RANGE_0_0,
             RANGE_0_0,
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
         )];
         let bad_actions = [ActionImage::new(
             ScopeIndex::new(1),
@@ -1743,7 +1777,7 @@ mod tests {
                 domain: TimingDomain::Logical,
                 min_delay_nanos: 7,
             },
-            TableRange::new(4, 1),
+            SliceRange::new(4, 1),
         )];
         let cases = [
             (
@@ -1886,7 +1920,7 @@ mod tests {
                 BindingSlotIndex::new(2),
                 StateSlotIndex::new(0),
                 ScopeIndex::new(0),
-                TableRange::new(0, 1),
+                KeyRange::new(0, 1),
                 Some(ModeIndex::new(0)),
                 Some(BankInfoImage::new(2, 2)),
             ),

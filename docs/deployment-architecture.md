@@ -487,6 +487,10 @@ Connections lower according to the resolved deployment:
 | Recordable boundary | Scheduler admission tap in addition to the selected route |
 | Replayed implementation | Trace source feeding the same logical boundary contract |
 
+Direct reaction relations are Enclave-local; every cross-Enclave dependency must be represented
+by a `Connection`. Each lowered scheduler boundary has exactly one inbound and one outbound route
+with the same stable boundary identity, timing domain, and delay.
+
 Same-Federate cross-Enclave traffic does not require a federated codec unless the boundary is
 recorded through a serialized trace contract. Cross-Federate traffic always requires a compatible
 codec and transport capability.

@@ -144,6 +144,11 @@ impl fmt::Display for StablePath {
     }
 }
 
+/// Renders the canonical encoded text used to order compiled-image identities.
+pub(crate) fn canonical_identity_text(identity: &impl fmt::Display) -> String {
+    identity.to_string()
+}
+
 fn parse_number(value: &str, whole: &str) -> Result<u32, InvalidStableId> {
     if value.is_empty() || (value.len() > 1 && value.starts_with('0')) {
         return Err(InvalidStableId::new(whole, "noncanonical numeric segment"));
@@ -568,6 +573,23 @@ mod tests {
         assert_ne!(bank, named);
         assert_eq!(bank.to_string(), "root/#b7");
         assert_eq!(named.to_string(), "root/%23b7");
+    }
+
+    #[test]
+    fn compiled_identity_order_uses_canonical_encoded_text() {
+        let root = StablePath::from_name("root").unwrap();
+        let mut paths = [
+            root.append_name("#bank[0]").unwrap(),
+            root.append_bank_index(9),
+            root.append_bank_index(10),
+        ];
+
+        paths.sort_by_cached_key(canonical_identity_text);
+
+        assert_eq!(
+            paths.map(|path| path.to_string()),
+            ["root/#b10", "root/#b9", "root/%23bank%5B0%5D"]
+        );
     }
 
     #[test]

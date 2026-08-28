@@ -1,12 +1,16 @@
-use super::{FederateId, ReactionId, ReactorId, RuntimeBackendId, StableEnclaveId, TargetTriple};
+use super::{
+    identity::canonical_identity_text, FederateId, ReactionId, ReactorId, RuntimeBackendId,
+    StableEnclaveId, TargetTriple,
+};
 use crate::runtime::image::{
     ActionImage, ActionIndex, BindingKind, BindingSlotIndex, CoordinationProjection, EnclaveImage,
-    EnclaveImageView, ImageValidationError, LevelReactionImage, LifecycleReactionImage, ModeImage,
-    ModeIndex, PortImage, PortIndex, ReactionImage, ReactionIndex, ReactorImage, ReactorIndex,
-    RequiredBindingImage, RouteImage, RouteIndex, ScopeImage, ScopeIndex, StorageBounds,
-    TimerStartupImage,
+    EnclaveImageView, FederateImage, FederateIndex,
+    GlobalFederationImage as BorrowedGlobalFederationImage, IdentityRange, ImageValidationError,
+    LevelReactionImage, LifecycleReactionImage, ModeImage, ModeIndex, PortImage, PortIndex,
+    ReactionImage, ReactionIndex, ReactorImage, ReactorIndex, RequiredBindingImage, RouteImage,
+    RouteIndex, ScopeImage, ScopeIndex, StorageBounds, TimerStartupImage,
 };
-use tinymap::TinyMap;
+use tinymap::{TableRange, TinyMap, TinyMapView};
 
 /// Canonical required payload binding identities for one Enclave.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -217,6 +221,22 @@ pub struct OwnedCompiledDeployment {
     pub(crate) coordination: CoordinationProjection,
 }
 
+/// An owned validation failure for a host-backed compiled deployment.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("invalid compiled deployment image: {message}")]
+pub struct CompiledDeploymentValidationError {
+    /// Runtime image validation detail copied out of temporary aggregate storage.
+    message: Box<str>,
+}
+
+impl CompiledDeploymentValidationError {
+    fn from_image(error: ImageValidationError<'_>) -> Self {
+        Self {
+            message: error.to_string().into_boxed_str(),
+        }
+    }
+}
+
 impl OwnedCompiledDeployment {
     /// Returns the backend-neutral federation structure.
     pub fn federation(&self) -> &GlobalFederationImage {
@@ -233,14 +253,84 @@ impl OwnedCompiledDeployment {
         self.coordination
     }
 
-    /// Validates every target-facing Enclave image.
-    pub fn validate(&self) -> Result<(), ImageValidationError<'_>> {
-        for federate in &self.federates {
-            for enclave in &federate.enclaves {
-                enclave.view()?;
-            }
+    /// Validates the complete target-facing deployment hierarchy.
+    pub fn validate(&self) -> Result<(), CompiledDeploymentValidationError> {
+        fn checked_len(
+            table: &'static str,
+            len: usize,
+        ) -> Result<u32, ImageValidationError<'static>> {
+            u32::try_from(len).map_err(|_| ImageValidationError::TableTooLarge { table })
         }
-        Ok(())
+
+        fn append_identity(
+            data: &mut String,
+            value: &impl std::fmt::Display,
+        ) -> Result<IdentityRange, ImageValidationError<'static>> {
+            let start = checked_len("identity_data", data.len())?;
+            let value = canonical_identity_text(value);
+            let len = checked_len("identity_data", value.len())?;
+            data.push_str(&value);
+            checked_len("identity_data", data.len())?;
+            Ok(IdentityRange::new(start, len))
+        }
+
+        let mut identity_data = String::new();
+        let mut federates = Vec::with_capacity(self.federates.len());
+        let mut enclaves = Vec::new();
+        let mut members = Vec::with_capacity(self.federates.len());
+        if let Err(error) = checked_len("federates", self.federates.len()) {
+            return Err(CompiledDeploymentValidationError::from_image(error));
+        }
+        for federate in &self.federates {
+            let enclave_start = match checked_len("enclaves", enclaves.len()) {
+                Ok(start) => start,
+                Err(error) => return Err(CompiledDeploymentValidationError::from_image(error)),
+            };
+            enclaves.extend(federate.enclaves.iter().map(OwnedEnclaveImage::image));
+            let enclave_len = match checked_len("enclaves", federate.enclaves.len()) {
+                Ok(len) => len,
+                Err(error) => return Err(CompiledDeploymentValidationError::from_image(error)),
+            };
+            let (id, target, runtime) = match (
+                append_identity(&mut identity_data, &federate.id),
+                append_identity(&mut identity_data, &federate.target),
+                append_identity(&mut identity_data, &federate.runtime),
+            ) {
+                (Ok(id), Ok(target), Ok(runtime)) => (id, target, runtime),
+                (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
+                    return Err(CompiledDeploymentValidationError::from_image(error));
+                }
+            };
+            federates.push(FederateImage::new(
+                id,
+                target,
+                runtime,
+                TableRange::new(enclave_start, enclave_len),
+            ));
+        }
+        for member in &self.federation.members {
+            let index = self
+                .federates
+                .iter()
+                .position(|federate| federate.id == *member)
+                .unwrap_or(self.federates.len());
+            let index = match checked_len("federation.members", index) {
+                Ok(index) => index,
+                Err(error) => return Err(CompiledDeploymentValidationError::from_image(error)),
+            };
+            members.push(FederateIndex::new(index));
+        }
+
+        let image = crate::runtime::image::CompiledDeploymentImage {
+            identity_data: &identity_data,
+            federation: BorrowedGlobalFederationImage::new(&members, &[]),
+            federates: TinyMapView::new(&federates),
+            enclaves: TinyMapView::new(&enclaves),
+            coordination: self.coordination,
+        };
+        crate::runtime::image::CompiledDeploymentView::new(&image)
+            .map(|_| ())
+            .map_err(CompiledDeploymentValidationError::from_image)
     }
 }
 
@@ -313,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn owned_deployment_validates_through_the_borrowed_enclave_view() {
+    fn owned_deployment_validates_the_complete_borrowed_hierarchy() {
         let deployment = OwnedCompiledDeployment {
             federation: GlobalFederationImage {
                 members: vec![FederateId::new("host").unwrap()].into_boxed_slice(),
@@ -329,6 +419,13 @@ mod tests {
         };
 
         deployment.validate().unwrap();
+        let invalid = OwnedCompiledDeployment {
+            federation: GlobalFederationImage {
+                members: Box::default(),
+            },
+            ..deployment.clone()
+        };
+        assert!(invalid.validate().is_err());
         let enclave = &deployment.federates()[0].enclaves()[0];
         let reactor = enclave.reactors.get(ReactorIndex::new(0)).unwrap();
         assert_eq!(reactor.state_binding(), BindingSlotIndex::new(0));

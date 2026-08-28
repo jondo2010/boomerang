@@ -158,6 +158,30 @@ pub enum ImageValidationError<'a> {
         /// Binding field.
         field: &'static str,
     },
+    /// A scheduler-boundary route has no opposite-direction peer.
+    #[error("boundary route '{boundary}' has no peer for its {direction:?} half")]
+    UnpairedRoute {
+        /// Stable boundary identity.
+        boundary: &'a str,
+        /// Direction of the existing route half.
+        direction: RouteDirection,
+    },
+    /// A scheduler boundary has more than one route half in one direction.
+    #[error("boundary route '{boundary}' has multiple {direction:?} halves")]
+    DuplicateRouteHalf {
+        /// Stable boundary identity.
+        boundary: &'a str,
+        /// Duplicated route direction.
+        direction: RouteDirection,
+    },
+    /// Paired route halves disagree on scheduling semantics.
+    #[error("boundary route '{boundary}' has mismatched {field}")]
+    RoutePairMismatch {
+        /// Stable boundary identity.
+        boundary: &'a str,
+        /// Scheduling field that differs between route halves.
+        field: &'static str,
+    },
 }
 
 /// A validated allocation-free view of one complete compiled deployment.
@@ -655,6 +679,77 @@ fn validate_compiled_deployment<'a>(
                 enclave.enclave_id,
             )?;
             validate_id("enclave", index, id, &mut previous_enclave)?;
+        }
+    }
+    validate_route_pairs(image)?;
+    Ok(())
+}
+
+/// Validates that every deployment boundary has one matching route half per direction.
+fn validate_route_pairs<'a>(
+    image: &CompiledDeploymentImage<'a>,
+) -> Result<(), ImageValidationError<'a>> {
+    for enclave in image.enclaves.values() {
+        for route in enclave.routes.values().copied() {
+            let boundary = route
+                .boundary()
+                .get(enclave.identity_data)
+                .expect("nested Enclave route identities are validated");
+            let mut inbound = None;
+            let mut outbound = None;
+            let mut inbound_count = 0_usize;
+            let mut outbound_count = 0_usize;
+            for candidate_enclave in image.enclaves.values() {
+                for candidate in candidate_enclave.routes.values().copied() {
+                    let candidate_boundary = candidate
+                        .boundary()
+                        .get(candidate_enclave.identity_data)
+                        .expect("nested Enclave route identities are validated");
+                    if candidate_boundary != boundary {
+                        continue;
+                    }
+                    match candidate.direction() {
+                        RouteDirection::Inbound => {
+                            inbound_count += 1;
+                            inbound = Some(candidate);
+                        }
+                        RouteDirection::Outbound => {
+                            outbound_count += 1;
+                            outbound = Some(candidate);
+                        }
+                    }
+                }
+            }
+            if inbound_count > 1 {
+                return Err(ImageValidationError::DuplicateRouteHalf {
+                    boundary,
+                    direction: RouteDirection::Inbound,
+                });
+            }
+            if outbound_count > 1 {
+                return Err(ImageValidationError::DuplicateRouteHalf {
+                    boundary,
+                    direction: RouteDirection::Outbound,
+                });
+            }
+            let (Some(inbound), Some(outbound)) = (inbound, outbound) else {
+                return Err(ImageValidationError::UnpairedRoute {
+                    boundary,
+                    direction: route.direction(),
+                });
+            };
+            if inbound.timing_domain() != outbound.timing_domain() {
+                return Err(ImageValidationError::RoutePairMismatch {
+                    boundary,
+                    field: "timing_domain",
+                });
+            }
+            if inbound.delay_nanos() != outbound.delay_nanos() {
+                return Err(ImageValidationError::RoutePairMismatch {
+                    boundary,
+                    field: "delay_nanos",
+                });
+            }
         }
     }
     Ok(())
@@ -1502,6 +1597,14 @@ mod tests {
         TimingDomain::Physical,
         10,
     )];
+    static OUTBOUND_ROUTES: [RouteImage; 1] = [RouteImage::new(
+        IdentityRange::new(13, 10),
+        PortIndex::new(1),
+        RouteDirection::Outbound,
+        TimingDomain::Physical,
+        10,
+    )];
+    static EMPTY_ROUTES: [RouteImage; 0] = [];
     static REQUIRED_BINDINGS: [RequiredBindingImage; 4] = [
         RequiredBindingImage::new(IdentityRange::new(23, 11), BindingKind::Reaction),
         RequiredBindingImage::new(IdentityRange::new(34, 11), BindingKind::Reaction),
@@ -1541,6 +1644,7 @@ mod tests {
     static SECOND_IMAGE: EnclaveImage<'static> = EnclaveImage {
         identity_data: "plant/otherxxnetwork/inreaction/r0reaction/r1state/r0state/r1",
         enclave_id: IdentityRange::new(0, 13),
+        routes: TinyMapView::new(&OUTBOUND_ROUTES),
         ..IMAGE
     };
     static DEPLOYMENT_IDENTITIES: &str = "hostaarch64-unknown-linux-gnuhosted";
@@ -1644,6 +1748,108 @@ mod tests {
     }
 
     #[test]
+    fn compiled_view_requires_matching_deployment_wide_route_halves() {
+        let missing_enclaves = [
+            IMAGE,
+            EnclaveImage {
+                routes: TinyMapView::new(&EMPTY_ROUTES),
+                ..SECOND_IMAGE
+            },
+        ];
+        let missing_image = CompiledDeploymentImage {
+            enclaves: TinyMapView::new(&missing_enclaves),
+            ..COMPILED
+        };
+        assert!(matches!(
+            CompiledDeploymentView::new(&missing_image).unwrap_err(),
+            ImageValidationError::UnpairedRoute {
+                boundary: "network/in",
+                direction: RouteDirection::Inbound,
+            }
+        ));
+
+        let wrong_domain = [RouteImage::new(
+            IdentityRange::new(13, 10),
+            PortIndex::new(1),
+            RouteDirection::Outbound,
+            TimingDomain::Logical,
+            10,
+        )];
+        let mismatched_enclaves = [
+            IMAGE,
+            EnclaveImage {
+                routes: TinyMapView::new(&wrong_domain),
+                ..SECOND_IMAGE
+            },
+        ];
+        let mismatched_image = CompiledDeploymentImage {
+            enclaves: TinyMapView::new(&mismatched_enclaves),
+            ..COMPILED
+        };
+        assert!(matches!(
+            CompiledDeploymentView::new(&mismatched_image).unwrap_err(),
+            ImageValidationError::RoutePairMismatch {
+                boundary: "network/in",
+                field: "timing_domain",
+            }
+        ));
+
+        let wrong_delay = [RouteImage::new(
+            IdentityRange::new(13, 10),
+            PortIndex::new(1),
+            RouteDirection::Outbound,
+            TimingDomain::Physical,
+            11,
+        )];
+        let delayed_enclaves = [
+            IMAGE,
+            EnclaveImage {
+                routes: TinyMapView::new(&wrong_delay),
+                ..SECOND_IMAGE
+            },
+        ];
+        let delayed_image = CompiledDeploymentImage {
+            enclaves: TinyMapView::new(&delayed_enclaves),
+            ..COMPILED
+        };
+        assert!(matches!(
+            CompiledDeploymentView::new(&delayed_image).unwrap_err(),
+            ImageValidationError::RoutePairMismatch {
+                boundary: "network/in",
+                field: "delay_nanos",
+            }
+        ));
+
+        let duplicate_federates = [FederateImage::new(
+            IdentityRange::new(0, 4),
+            IdentityRange::new(4, 25),
+            IdentityRange::new(29, 6),
+            TableRange::new(0, 3),
+        )];
+        let duplicate_enclaves = [
+            EnclaveImage {
+                identity_data: "plant/anothernetwork/inreaction/r0reaction/r1state/r0state/r1",
+                enclave_id: IdentityRange::new(0, 13),
+                ..IMAGE
+            },
+            IMAGE,
+            SECOND_IMAGE,
+        ];
+        let duplicate_image = CompiledDeploymentImage {
+            federates: TinyMapView::new(&duplicate_federates),
+            enclaves: TinyMapView::new(&duplicate_enclaves),
+            ..COMPILED
+        };
+        assert!(matches!(
+            CompiledDeploymentView::new(&duplicate_image).unwrap_err(),
+            ImageValidationError::DuplicateRouteHalf {
+                boundary: "network/in",
+                direction: RouteDirection::Inbound,
+            }
+        ));
+    }
+
+    #[test]
     fn compiled_view_orders_enclaves_within_each_federate() {
         let federates = [
             FederateImage::new(
@@ -1663,21 +1869,25 @@ mod tests {
             EnclaveImage {
                 identity_data: "zzzza/controlnetwork/inreaction/r0reaction/r1state/r0state/r1",
                 enclave_id: IdentityRange::new(0, 13),
+                routes: TinyMapView::new(&EMPTY_ROUTES),
                 ..IMAGE
             },
             EnclaveImage {
                 identity_data: "zzzzb/controlnetwork/inreaction/r0reaction/r1state/r0state/r1",
                 enclave_id: IdentityRange::new(0, 13),
+                routes: TinyMapView::new(&EMPTY_ROUTES),
                 ..IMAGE
             },
             EnclaveImage {
                 identity_data: "aaaaa/controlnetwork/inreaction/r0reaction/r1state/r0state/r1",
                 enclave_id: IdentityRange::new(0, 13),
+                routes: TinyMapView::new(&EMPTY_ROUTES),
                 ..IMAGE
             },
             EnclaveImage {
                 identity_data: "aaaab/controlnetwork/inreaction/r0reaction/r1state/r0state/r1",
                 enclave_id: IdentityRange::new(0, 13),
+                routes: TinyMapView::new(&EMPTY_ROUTES),
                 ..IMAGE
             },
         ];

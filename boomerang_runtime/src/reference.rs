@@ -3,27 +3,18 @@
 use tinymap::TinyMap;
 
 use crate::{
-    image::{EnclaveImage, StateSlotIndex},
+    image::{EnclaveImage, ImageValidationError, StateSlotIndex},
     run_owned_scheduler,
     storage::owned::StoredState,
     Config, OwnedBindings, OwnedStorage, OwnedStorageError, ReactorData, RuntimeError, Tag,
 };
 
-/// Lifetime-free image-validation message retained for public error chaining.
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-struct OwnedImageValidationError(String);
-
 /// Failure while validating, initializing, or synchronously executing a compiled image.
 #[derive(Debug, thiserror::Error)]
-pub enum ExecuteOwnedError {
+pub enum ExecuteOwnedError<'image> {
     /// The borrowed compiled image was structurally invalid.
-    #[error("invalid compiled image: {source}")]
-    ImageValidation {
-        /// The lifetime-free validation failure retained for error-chain traversal.
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
+    #[error("invalid compiled image: {0}")]
+    ImageValidation(ImageValidationError<'image>),
     /// Direct bindings could not initialize the owned storage described by the image.
     #[error("invalid direct bindings or owned storage: {0}")]
     Storage(#[source] OwnedStorageError),
@@ -106,12 +97,9 @@ pub fn execute_owned<'image>(
     image: &'image EnclaveImage<'image>,
     bindings: OwnedBindings,
     config: Config,
-) -> Result<OwnedExecutionResult, ExecuteOwnedError> {
-    let image = crate::image::EnclaveImageView::new(image).map_err(|error| {
-        ExecuteOwnedError::ImageValidation {
-            source: Box::new(OwnedImageValidationError(error.to_string())),
-        }
-    })?;
+) -> Result<OwnedExecutionResult, ExecuteOwnedError<'image>> {
+    let image =
+        crate::image::EnclaveImageView::new(image).map_err(ExecuteOwnedError::ImageValidation)?;
     let mut storage = OwnedStorage::new(image, bindings).map_err(ExecuteOwnedError::Storage)?;
     let final_tag = run_owned_scheduler(&mut storage, &config).map_err(|error| match error {
         crate::sched::SchedulerCoreError::Runtime(source) => {

@@ -2,11 +2,13 @@ use boomerang::runtime::{
     execute_owned,
     image::{
         ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotIndex,
-        EnclaveImage, IdentityRange, LevelReactionImage, LifecycleReactionImage, ReactionImage,
-        ReactionIndex, ReactorImage, ReactorIndex, RequiredBindingImage, ScopeImage, ScopeIndex,
-        StateSlotIndex, StorageBounds, TableRange, TimerStartupImage, TinyMapView,
+        EnclaveImage, IdentityRange, ImageValidationError, LevelReactionImage,
+        LifecycleReactionImage, ReactionImage, ReactionIndex, ReactorImage, ReactorIndex,
+        RequiredBindingImage, ScopeImage, ScopeIndex, StateSlotIndex, StorageBounds, TableRange,
+        TimerStartupImage, TinyMapView,
     },
-    Config, Context, Duration, OwnedBindings, ReactionBindingError, ReactionRefs, ReactorData, Tag,
+    Config, Context, Duration, ExecuteOwnedError, OwnedBindings, ReactionBindingError,
+    ReactionRefs, ReactorData, Tag,
 };
 
 /// Mutable reactor state whose startup reaction records one execution.
@@ -224,4 +226,28 @@ fn compiled_reference_final_tag_includes_work_coalesced_with_shutdown() {
         2
     );
     assert_eq!(result.final_tag(), Tag::new(Duration::nanoseconds(1), 0));
+}
+
+#[test]
+fn compiled_reference_returns_typed_image_validation_error() {
+    let invalid_image = EnclaveImage {
+        enclave_id: IdentityRange::new(u32::MAX, 1),
+        ..IMAGE
+    };
+
+    let error: ExecuteOwnedError<'_> =
+        match execute_owned(&invalid_image, OwnedBindings::new(), Config::default()) {
+            Err(error) => error,
+            Ok(_) => panic!("invalid image must fail validation"),
+        };
+
+    assert!(matches!(
+        error,
+        ExecuteOwnedError::ImageValidation(ImageValidationError::IdentityRangeInvalid {
+            table: "image",
+            index: 0,
+            field: "enclave_id",
+            ..
+        })
+    ));
 }

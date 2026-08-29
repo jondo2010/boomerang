@@ -3,18 +3,27 @@
 use tinymap::TinyMap;
 
 use crate::{
-    image::{EnclaveImage, ImageValidationError, StateSlotIndex},
+    image::{EnclaveImage, StateSlotIndex},
     run_owned_scheduler,
     storage::owned::StoredState,
     Config, OwnedBindings, OwnedStorage, OwnedStorageError, ReactorData, RuntimeError, Tag,
 };
 
+/// Lifetime-free image-validation message retained for public error chaining.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct OwnedImageValidationError(String);
+
 /// Failure while validating, initializing, or synchronously executing a compiled image.
 #[derive(Debug, thiserror::Error)]
-pub enum ExecuteOwnedError<'image> {
+pub enum ExecuteOwnedError {
     /// The borrowed compiled image was structurally invalid.
-    #[error("invalid compiled image: {0}")]
-    Image(ImageValidationError<'image>),
+    #[error("invalid compiled image: {source}")]
+    ImageValidation {
+        /// The lifetime-free validation failure retained for error-chain traversal.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     /// Direct bindings could not initialize the owned storage described by the image.
     #[error("invalid direct bindings or owned storage: {0}")]
     Storage(#[source] OwnedStorageError),
@@ -32,12 +41,6 @@ pub enum StateAccessError {
     /// The requested slot exceeds the dense state table returned by execution.
     #[error("state slot {slot} is out of range")]
     OutOfRange {
-        /// The requested compiled state storage slot.
-        slot: StateSlotIndex,
-    },
-    /// The requested in-range state slot has no initialized value.
-    #[error("state slot {slot} is missing")]
-    Missing {
         /// The requested compiled state storage slot.
         slot: StateSlotIndex,
     },
@@ -65,16 +68,13 @@ pub struct OwnedExecutionResult {
 impl OwnedExecutionResult {
     /// Borrows the state stored at `slot` as its original concrete type.
     ///
-    /// The state is read-only. Out-of-range, missing, and mismatched-type lookups return a typed
+    /// The state is read-only. Out-of-range and mismatched-type lookups return a typed
     /// [`StateAccessError`].
     pub fn state<T: ReactorData>(&self, slot: StateSlotIndex) -> Result<&T, StateAccessError> {
         if slot.as_u32() as usize >= self.states.len() {
             return Err(StateAccessError::OutOfRange { slot });
         }
-        let state = self
-            .states
-            .get(slot)
-            .ok_or(StateAccessError::Missing { slot })?;
+        let state = &self.states[slot];
         state
             .value
             .downcast_ref::<T>()
@@ -85,7 +85,9 @@ impl OwnedExecutionResult {
             })
     }
 
-    /// Returns the logical tag immediately preceding the executor's terminal shutdown event.
+    /// Returns the last logical tag at which non-shutdown work was processed.
+    ///
+    /// Returns [`Tag::NEVER`] if execution reached only terminal shutdown processing.
     pub const fn final_tag(&self) -> Tag {
         self.final_tag
     }
@@ -104,8 +106,12 @@ pub fn execute_owned<'image>(
     image: &'image EnclaveImage<'image>,
     bindings: OwnedBindings,
     config: Config,
-) -> Result<OwnedExecutionResult, ExecuteOwnedError<'image>> {
-    let image = crate::image::EnclaveImageView::new(image).map_err(ExecuteOwnedError::Image)?;
+) -> Result<OwnedExecutionResult, ExecuteOwnedError> {
+    let image = crate::image::EnclaveImageView::new(image).map_err(|error| {
+        ExecuteOwnedError::ImageValidation {
+            source: Box::new(OwnedImageValidationError(error.to_string())),
+        }
+    })?;
     let mut storage = OwnedStorage::new(image, bindings).map_err(ExecuteOwnedError::Storage)?;
     let final_tag = run_owned_scheduler(&mut storage, &config).map_err(|error| match error {
         crate::sched::SchedulerCoreError::Runtime(source) => {
@@ -115,9 +121,8 @@ pub fn execute_owned<'image>(
             ExecuteOwnedError::SchedulerExecution(source)
         }
     })?;
-    // Keep the scheduler's internal terminal shutdown event out of the result contract.
     Ok(OwnedExecutionResult {
         states: storage.into_states(),
-        final_tag: final_tag.decrement(),
+        final_tag,
     })
 }

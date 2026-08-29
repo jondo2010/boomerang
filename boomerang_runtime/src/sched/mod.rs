@@ -66,7 +66,6 @@ pub struct Config {
     /// Stop the scheduler after a certain amount of time has passed.
     pub timeout: Option<Duration>,
 }
-
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -674,6 +673,7 @@ impl Scheduler {
             events,
             start_time,
             current_tag,
+            last_nonterminal_tag: None,
             shutdown_tag,
             shutdown_tx,
             upstream_enclaves,
@@ -755,6 +755,7 @@ pub(crate) fn run_owned_scheduler(
     let shutdown_tx = storage.take_scheduler_shutdown_tx();
     let mut start_time = std::time::Instant::now();
     let mut current_tag = Tag::NEVER;
+    let mut last_nonterminal_tag = None;
     let mut shutdown_tag = None;
     let mut upstream_enclaves = tinymap::TinySecondaryMap::new();
     let downstream_enclaves = tinymap::TinySecondaryMap::new();
@@ -775,6 +776,7 @@ pub(crate) fn run_owned_scheduler(
         events: &mut events,
         start_time: &mut start_time,
         current_tag: &mut current_tag,
+        last_nonterminal_tag: Some(&mut last_nonterminal_tag),
         shutdown_tag: &mut shutdown_tag,
         shutdown_tx: &shutdown_tx,
         upstream_enclaves: &mut upstream_enclaves,
@@ -788,7 +790,7 @@ pub(crate) fn run_owned_scheduler(
         has_modal_scopes: schedule.has_modal_scopes(),
     }
     .try_event_loop()?;
-    Ok(current_tag)
+    Ok(last_nonterminal_tag.unwrap_or(Tag::NEVER))
 }
 
 /// Execute the given enclaves with the provided configuration.

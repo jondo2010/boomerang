@@ -160,6 +160,8 @@ where
     pub(super) start_time: &'a mut std::time::Instant,
     /// Most recently completed logical tag.
     pub(super) current_tag: &'a mut Tag,
+    /// Last tag that processed non-terminal work, when an adapter needs to retain it.
+    pub(super) last_nonterminal_tag: Option<&'a mut Option<Tag>>,
     /// Earliest scheduled shutdown tag, if any.
     pub(super) shutdown_tag: &'a mut Option<Tag>,
     /// Existing keepalive sender used to interrupt live reaction contexts.
@@ -421,6 +423,11 @@ where
                 .map_err(SchedulerError::Execution)?;
 
             *self.current_tag = event.tag;
+            if event.has_nonterminal_work {
+                if let Some(last_nonterminal_tag) = self.last_nonterminal_tag.as_deref_mut() {
+                    *last_nonterminal_tag = Some(event.tag);
+                }
+            }
 
             // Return the ReactionSet to the free pool
             self.events.return_reaction_set(event.reactions);

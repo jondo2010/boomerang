@@ -6,7 +6,7 @@ use boomerang::runtime::{
         ReactionIndex, ReactorImage, ReactorIndex, RequiredBindingImage, ScopeImage, ScopeIndex,
         StateSlotIndex, StorageBounds, TableRange, TimerStartupImage, TinyMapView,
     },
-    Config, Context, OwnedBindings, ReactionBindingError, ReactionRefs, ReactorData, Tag,
+    Config, Context, Duration, OwnedBindings, ReactionBindingError, ReactionRefs, ReactorData, Tag,
 };
 
 /// Mutable reactor state whose startup reaction records one execution.
@@ -47,6 +47,15 @@ static ACTIONS: [ActionImage; 1] = [ActionImage::new(
     ActionTiming::Timer { period_nanos: None },
     TableRange::new(0, 1),
 )];
+static COALESCED_ACTIONS: [ActionImage; 2] = [
+    ACTIONS[0],
+    ActionImage::new(
+        ScopeIndex::new(0),
+        ActionSlotIndex::new(1),
+        ActionTiming::Timer { period_nanos: None },
+        TableRange::new(1, 1),
+    ),
+];
 static PORTS: [boomerang::runtime::image::PortImage; 0] = [];
 static REACTIONS: [ReactionImage; 1] = [ReactionImage::new(
     ReactorIndex::new(0),
@@ -72,6 +81,10 @@ static SCOPES: [ScopeImage; 1] = [ScopeImage::new(
 )];
 static REACTION_TRIGGERS: [LevelReactionImage; 1] =
     [LevelReactionImage::new(0, ReactionIndex::new(0))];
+static COALESCED_REACTION_TRIGGERS: [LevelReactionImage; 2] = [
+    REACTION_TRIGGERS[0],
+    LevelReactionImage::new(0, ReactionIndex::new(0)),
+];
 static SCOPE_DESCENDANTS: [ScopeIndex; 1] = [ScopeIndex::new(0)];
 static SCOPE_LOGICAL_ACTIONS: [ActionIndex; 1] = [ActionIndex::new(0)];
 static SCOPE_STARTUP_REACTIONS: [LifecycleReactionImage; 1] = [LifecycleReactionImage::new(
@@ -79,6 +92,10 @@ static SCOPE_STARTUP_REACTIONS: [LifecycleReactionImage; 1] = [LifecycleReaction
     ActionIndex::new(0),
 )];
 static STARTUP_ACTIONS: [TimerStartupImage; 1] = [TimerStartupImage::new(ActionIndex::new(0), 0)];
+static COALESCED_STARTUP_ACTIONS: [TimerStartupImage; 2] = [
+    STARTUP_ACTIONS[0],
+    TimerStartupImage::new(ActionIndex::new(1), 1),
+];
 static ROUTES: [boomerang::runtime::image::RouteImage; 0] = [];
 static REQUIRED_BINDINGS: [RequiredBindingImage; 2] = [
     RequiredBindingImage::new(IdentityRange::new(18, 13), BindingKind::StateInitializer),
@@ -114,6 +131,35 @@ static IMAGE: EnclaveImage<'static> = EnclaveImage {
     storage_bounds: StorageBounds::new(1, 1, 1, 0, 0, 0),
 };
 
+static COALESCED_IMAGE: EnclaveImage<'static> = EnclaveImage {
+    identity_data: "compiled/referencecounter-stateincrement-counter",
+    enclave_id: IdentityRange::new(0, 18),
+    reactors: TinyMapView::new(&REACTORS),
+    actions: TinyMapView::new(&COALESCED_ACTIONS),
+    ports: TinyMapView::new(&PORTS),
+    reactions: TinyMapView::new(&REACTIONS),
+    modes: TinyMapView::new(&MODES),
+    scopes: TinyMapView::new(&SCOPES),
+    reaction_triggers: &COALESCED_REACTION_TRIGGERS,
+    reaction_use_ports: &[],
+    reaction_effect_ports: &[],
+    reaction_actions: &[],
+    reaction_modes: &[],
+    scope_descendants: &SCOPE_DESCENDANTS,
+    scope_logical_actions: &SCOPE_LOGICAL_ACTIONS,
+    scope_timer_startups: &[],
+    scope_reset_reactions: &[],
+    scope_startup_reactions: &SCOPE_STARTUP_REACTIONS,
+    scope_shutdown_reactions: &[],
+    startup_actions: &COALESCED_STARTUP_ACTIONS,
+    timer_startup_actions: &[],
+    shutdown_reactions: &[],
+    shutdown_actions: &[],
+    routes: TinyMapView::new(&ROUTES),
+    required_bindings: TinyMapView::new(&REQUIRED_BINDINGS),
+    storage_bounds: StorageBounds::new(1, 2, 1, 0, 0, 0),
+};
+
 #[test]
 fn compiled_reference_executes_startup_to_shutdown() {
     let bindings = OwnedBindings::new()
@@ -132,4 +178,50 @@ fn compiled_reference_executes_startup_to_shutdown() {
         1
     );
     assert_eq!(result.final_tag(), Tag::ZERO);
+}
+
+#[test]
+fn compiled_reference_final_tag_excludes_delayed_shutdown_only_work() {
+    let bindings = OwnedBindings::new()
+        .bind_state(BindingSlotIndex::new(0), initialize_counter)
+        .bind_action::<()>(ActionSlotIndex::new(0))
+        .bind_reaction(BindingSlotIndex::new(1), increment_counter);
+
+    let result = execute_owned(
+        &IMAGE,
+        bindings,
+        Config::default()
+            .with_fast_forward(true)
+            .with_timeout(Duration::nanoseconds(1)),
+    )
+    .unwrap();
+
+    assert_eq!(result.final_tag(), Tag::ZERO);
+}
+
+#[test]
+fn compiled_reference_final_tag_includes_work_coalesced_with_shutdown() {
+    let bindings = OwnedBindings::new()
+        .bind_state(BindingSlotIndex::new(0), initialize_counter)
+        .bind_action::<()>(ActionSlotIndex::new(0))
+        .bind_action::<()>(ActionSlotIndex::new(1))
+        .bind_reaction(BindingSlotIndex::new(1), increment_counter);
+
+    let result = execute_owned(
+        &COALESCED_IMAGE,
+        bindings,
+        Config::default()
+            .with_fast_forward(true)
+            .with_timeout(Duration::nanoseconds(1)),
+    )
+    .unwrap();
+
+    assert_eq!(
+        result
+            .state::<CounterState>(StateSlotIndex::new(0))
+            .unwrap()
+            .count,
+        2
+    );
+    assert_eq!(result.final_tag(), Tag::new(Duration::nanoseconds(1), 0));
 }

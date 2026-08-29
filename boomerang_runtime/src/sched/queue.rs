@@ -30,6 +30,8 @@ pub(super) struct ScheduledEvent<R: tinymap::Key, A: Copy> {
     pub(super) reactions: KeySet<R>,
     /// Whether processing this event terminates the scheduler.
     pub(super) terminal: bool,
+    /// Whether this event includes work other than terminal shutdown processing.
+    pub(super) has_nonterminal_work: bool,
     /// Optional action value metadata needed for modal rebasing.
     pub(super) action_value: Option<ScheduledActionValue<A>>,
 }
@@ -106,6 +108,7 @@ impl<R: tinymap::Key, A: Copy> EventQueue<R, A> {
             let mut event = self.event_queue.peek_mut().unwrap();
             event.reactions.extend_above(reactions);
             event.terminal = event.terminal || terminal;
+            event.has_nonterminal_work |= !terminal;
             if action_value.is_some() {
                 event.action_value = action_value;
             }
@@ -117,6 +120,7 @@ impl<R: tinymap::Key, A: Copy> EventQueue<R, A> {
                 tag,
                 reactions: reaction_set,
                 terminal,
+                has_nonterminal_work: !terminal,
                 action_value,
             };
             self.event_queue.push(event);
@@ -134,6 +138,7 @@ impl<R: tinymap::Key, A: Copy> EventQueue<R, A> {
                     let next_event = self.event_queue.pop().unwrap();
                     event.reactions.merge(&next_event.reactions);
                     event.terminal = event.terminal || next_event.terminal;
+                    event.has_nonterminal_work |= next_event.has_nonterminal_work;
 
                     self.recycle_reaction_set(next_event.reactions);
                 } else {
@@ -236,18 +241,21 @@ mod tests {
             tag: Tag::new(Duration::seconds(1), 0),
             reactions: KeySet::default(),
             terminal: false,
+            has_nonterminal_work: true,
             action_value: None,
         });
         heap.push(ScheduledEvent {
             tag: Tag::new(Duration::seconds(1), 0),
             reactions: KeySet::default(),
             terminal: true,
+            has_nonterminal_work: false,
             action_value: None,
         });
         heap.push(ScheduledEvent {
             tag: Tag::new(Duration::seconds(0), 0),
             reactions: KeySet::default(),
             terminal: false,
+            has_nonterminal_work: true,
             action_value: None,
         });
 

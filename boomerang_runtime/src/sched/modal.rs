@@ -136,6 +136,8 @@ pub(super) struct ReadyEvent<R: tinymap::Key> {
     pub(super) reactions: KeySet<R>,
     /// Whether this event indicates scheduler termination.
     pub(super) terminal: bool,
+    /// Whether this event includes work other than terminal shutdown processing.
+    pub(super) has_nonterminal_work: bool,
 }
 
 /// Owns root and scope-local event queues for modal scheduling.
@@ -297,6 +299,7 @@ impl<S: Schedule> EventManager<S> {
                 tag: event.tag,
                 reactions: event.reactions,
                 terminal: event.terminal,
+                has_nonterminal_work: event.has_nonterminal_work,
             });
         }
 
@@ -305,12 +308,14 @@ impl<S: Schedule> EventManager<S> {
             tag,
             reactions: self.next_reaction_set(),
             terminal: false,
+            has_nonterminal_work: false,
         };
 
         if self.root.peek_tag() == Some(tag) {
             let event = self.root.pop_next_event().unwrap();
             ready.reactions.merge(&event.reactions);
             ready.terminal = ready.terminal || event.terminal;
+            ready.has_nonterminal_work |= event.has_nonterminal_work;
             self.root.recycle_reaction_set(event.reactions);
         }
 
@@ -320,6 +325,7 @@ impl<S: Schedule> EventManager<S> {
 
             ready.reactions.merge(&event.reactions);
             ready.terminal = ready.terminal || event.terminal;
+            ready.has_nonterminal_work |= event.has_nonterminal_work;
 
             self.scope_queues[frontier.scope].recycle_reaction_set(event.reactions);
             self.refresh_frontier(frontier.scope);

@@ -135,7 +135,7 @@ pub(crate) trait ExecutionStorage<S: ScheduleAccess> {
 ///
 /// Coordination, clocks, wake reception, and shutdown remain concrete here; this
 /// core is not a backend and performs no lowering.
-pub(crate) struct SchedulerCore<'a, S, E>
+pub(super) struct SchedulerCore<'a, S, E>
 where
     S: ScheduleAccess,
     E: ExecutionStorage<S>,
@@ -183,7 +183,7 @@ where
 
 /// Failure from concrete time coordination or mutable execution storage.
 #[derive(Debug)]
-pub(crate) enum SchedulerCoreError<E> {
+pub(super) enum SchedulerCoreError<E> {
     /// Existing local or federated logical-time coordination failed.
     Runtime(RuntimeError),
     /// A reaction invocation in the execution storage failed.
@@ -196,10 +196,10 @@ where
     E: ExecutionStorage<S>,
 {
     /// Handle an asynchronous event from the event queue
-    #[tracing::instrument(skip(self, ), fields(event = %event))]
+    #[tracing::instrument(target = "boomerang_runtime::sched", skip(self, ), fields(event = %event))]
     fn handle_async_event(&mut self, event: AsyncEvent) {
         self.stats.increment_processed_events();
-        tracing::trace!("Handling");
+        tracing::trace!(target: "boomerang_runtime::sched", "Handling");
         match event {
             AsyncEvent::TagRelease { enclave, tag } => {
                 self.upstream_enclaves
@@ -210,7 +210,7 @@ where
             AsyncEvent::TagReleaseProvisional { enclave, tag } => {
                 if tag <= *self.current_tag {
                     if tag < *self.current_tag {
-                        tracing::warn!(tag = %tag, "Ignoring empty event in the past");
+                        tracing::warn!(target: "boomerang_runtime::sched", tag = %tag, "Ignoring empty event in the past");
                     }
                     return;
                 }
@@ -223,7 +223,7 @@ where
             }
             AsyncEvent::Logical { tag, key, value } => {
                 if tag <= *self.current_tag {
-                    tracing::warn!(tag = %tag, "Ignoring empty event in the past");
+                    tracing::warn!(target: "boomerang_runtime::sched", tag = %tag, "Ignoring empty event in the past");
                     return;
                 }
                 let key = self.schedule.action_from_runtime(key);
@@ -266,8 +266,8 @@ where
     }
 
     /// Execute startup of the Scheduler.
-    #[tracing::instrument(skip(self))]
-    pub(crate) fn startup(&mut self) {
+    #[tracing::instrument(target = "boomerang_runtime::sched", skip(self))]
+    pub(super) fn startup(&mut self) {
         let tag = Tag::ZERO;
 
         // Initialize the event queue with the startup actions
@@ -276,7 +276,7 @@ where
             self.storage
                 .push_action_value(action_key, tag, Box::new(()));
             let downstream = self.schedule.action_triggers(action_key).inspect(|(lvl, reaction_key)| {
-                    tracing::trace!(level = %lvl, reaction = ?reaction_key, tag = %tag, "Startup reaction");
+                    tracing::trace!(target: "boomerang_runtime::sched", level = %lvl, reaction = ?reaction_key, tag = %tag, "Startup reaction");
                 });
             self.events
                 .push_action_event(action_key, tag, downstream, false, self.schedule);
@@ -285,11 +285,11 @@ where
         // Schedule a shutdown event if a timeout is set
         if let Some(timeout) = self.config.timeout {
             let tag = tag.delay(timeout);
-            tracing::info!(tag = %tag, "Timeout set, scheduling shutdown");
+            tracing::info!(target: "boomerang_runtime::sched", tag = %tag, "Timeout set, scheduling shutdown");
             self.schedule_shutdown_at(tag);
         }
 
-        tracing::info!(tag = %tag, "Starting the execution.");
+        tracing::info!(target: "boomerang_runtime::sched", tag = %tag, "Starting the execution.");
 
         *self.current_tag = tag.decrement();
 
@@ -300,35 +300,35 @@ where
     }
 
     /// Final shutdown of the Scheduler. The last tag has already been processed.
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(target = "boomerang_runtime::sched", skip(self))]
     fn shutdown(&mut self) {
-        tracing::info!("Shutting down.");
+        tracing::info!(target: "boomerang_runtime::sched", "Shutting down.");
 
         self.events.shutdown();
 
         let logical_elapsed = (*self.shutdown_tag).unwrap().offset();
-        tracing::info!("---- Elapsed logical time: {logical_elapsed}",);
+        tracing::info!(target: "boomerang_runtime::sched", "---- Elapsed logical time: {logical_elapsed}",);
         // If physical_start_time is 0, then execution didn't get far enough along to initialize this.
         let physical_elapsed = std::time::Instant::now() - *self.start_time;
-        tracing::info!("---- Elapsed physical time: {physical_elapsed:?}");
+        tracing::info!(target: "boomerang_runtime::sched", "---- Elapsed physical time: {physical_elapsed:?}");
 
-        tracing::info!(stats = ?self.stats, "Scheduler has been shut down.");
+        tracing::info!(target: "boomerang_runtime::sched", stats = ?self.stats, "Scheduler has been shut down.");
     }
 
     /// Try to receive an asynchronous event
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(target = "boomerang_runtime::sched", skip(self))]
     fn receive_event_async(&mut self) -> Option<AsyncEvent> {
         if let Some(shutdown) = *self.shutdown_tag {
             let abs = shutdown.to_logical_time(*self.start_time);
             if let Some(timeout) = abs.checked_duration_since(std::time::Instant::now()) {
-                tracing::debug!(timeout = ?timeout, "Waiting for async event.");
+                tracing::debug!(target: "boomerang_runtime::sched", timeout = ?timeout, "Waiting for async event.");
                 self.event_rx.recv_timeout(timeout).ok()
             } else {
-                tracing::debug!("Cannot wait, already past programmed shutdown time...");
+                tracing::debug!(target: "boomerang_runtime::sched", "Cannot wait, already past programmed shutdown time...");
                 None
             }
         } else if self.config.keep_alive {
-            tracing::debug!("Waiting indefinitely for async event.");
+            tracing::debug!(target: "boomerang_runtime::sched", "Waiting indefinitely for async event.");
             self.event_rx.recv().ok()
         } else {
             None
@@ -336,13 +336,13 @@ where
     }
 
     /// Release the current tag to downstream reactors
-    #[tracing::instrument(skip(self, current_tag), fields(tag = %current_tag))]
+    #[tracing::instrument(target = "boomerang_runtime::sched", skip(self, current_tag), fields(tag = %current_tag))]
     fn release_tag_downstream(&self, current_tag: Tag) {
         for (key, ctx) in self.downstream_enclaves.iter() {
             let event = AsyncEvent::release(self.key, current_tag);
-            tracing::trace!(downstream = %key, event = %event, "Releasing downstream");
+            tracing::trace!(target: "boomerang_runtime::sched", downstream = %key, event = %event, "Releasing downstream");
             if !ctx.schedule_external(event) && self.shutdown_tag.is_none() {
-                tracing::warn!(
+                tracing::warn!(target: "boomerang_runtime::sched",
                     "Failed to send tag downstream, downstream has unexpectedly terminated."
                 );
             }
@@ -363,15 +363,15 @@ where
     }
 
     /// Process one scheduler step, returning coordination failures to the caller.
-    #[tracing::instrument(skip(self), fields(tag = %self.current_tag))]
-    pub(crate) fn try_next(&mut self) -> Result<bool, SchedulerCoreError<E::Error>> {
+    #[tracing::instrument(target = "boomerang_runtime::sched", skip(self), fields(tag = %self.current_tag))]
+    pub(super) fn try_next(&mut self) -> Result<bool, SchedulerCoreError<E::Error>> {
         // Pump the event queue
         while let Ok(Some(async_event)) = self.event_rx.try_recv() {
             self.handle_async_event(async_event);
         }
 
         if let Some(next_tag) = self.events.peek_tag() {
-            tracing::trace!(next_tag = %next_tag, "Trying next tag");
+            tracing::trace!(target: "boomerang_runtime::sched", next_tag = %next_tag, "Trying next tag");
 
             // Wait until all upstream barriers are released
             for (_upstream_enclave_key, barrier) in self.upstream_enclaves.iter_mut() {
@@ -412,7 +412,7 @@ where
 
             let mut event = self.events.pop_next_event().unwrap();
 
-            tracing::debug!(event = ?event, "Processing");
+            tracing::debug!(target: "boomerang_runtime::sched", event = ?event, "Processing");
 
             if event.terminal {
                 // Signal to any waiting threads that the scheduler is shutting down.
@@ -444,7 +444,7 @@ where
         } else if let Some(async_event) = self.receive_event_async() {
             self.handle_async_event(async_event);
         } else {
-            tracing::debug!("No more events in queue, pushing a shutdown event.");
+            tracing::debug!(target: "boomerang_runtime::sched", "No more events in queue, pushing a shutdown event.");
             // Shutdown event will be processed at the next event loop iteration
             let shutdown = (*self.current_tag).delay(Duration::ZERO);
             *self.shutdown_tag = Some(shutdown);
@@ -455,8 +455,8 @@ where
     }
 
     /// Run until shutdown or return the first runtime coordination failure.
-    #[tracing::instrument(skip(self), fields(key = %self.key))]
-    pub(crate) fn try_event_loop(&mut self) -> Result<(), SchedulerCoreError<E::Error>> {
+    #[tracing::instrument(target = "boomerang_runtime::sched", skip(self), fields(key = %self.key))]
+    pub(super) fn try_event_loop(&mut self) -> Result<(), SchedulerCoreError<E::Error>> {
         self.startup();
 
         loop {
@@ -476,25 +476,25 @@ where
     }
 
     // Wait until the wall-clock time is reached
-    #[tracing::instrument(skip(self, target))]
+    #[tracing::instrument(target = "boomerang_runtime::sched", skip(self, target))]
     fn synchronize_wall_clock(&mut self, target: std::time::Instant) -> bool {
         let now = std::time::Instant::now();
 
         match now.cmp(&target) {
             std::cmp::Ordering::Less => {
                 let advance = target - now;
-                tracing::trace!(advance = ?advance, "Need to sleep");
+                tracing::trace!(target: "boomerang_runtime::sched", advance = ?advance, "Need to sleep");
 
                 match self.event_rx.recv_timeout(advance) {
                     Ok(event) => {
-                        tracing::debug!(event = %event, "Sleep interrupted by");
+                        tracing::debug!(target: "boomerang_runtime::sched", event = %event, "Sleep interrupted by");
                         self.handle_async_event(event);
                         return true;
                     }
                     Err(ReceiveErrorTimeout::Closed) | Err(ReceiveErrorTimeout::SendClosed) => {
                         let remaining = target.checked_duration_since(std::time::Instant::now());
                         if let Some(remaining) = remaining {
-                            tracing::debug!(remaining = ?remaining,
+                            tracing::debug!(target: "boomerang_runtime::sched", remaining = ?remaining,
                                 "Sleep interrupted disconnect, sleeping for remaining",
                             );
                             std::thread::sleep(remaining);
@@ -506,7 +506,7 @@ where
 
             std::cmp::Ordering::Greater => {
                 let delay = now - target;
-                tracing::warn!(delay = ?delay, "running late");
+                tracing::warn!(target: "boomerang_runtime::sched", delay = ?delay, "running late");
             }
 
             std::cmp::Ordering::Equal => {}
@@ -518,8 +518,8 @@ where
     /// Process the reactions at this tag in increasing order of level.
     ///
     /// Reactions at a level N may trigger further reactions at levels M>N
-    #[tracing::instrument(skip(self, reaction_view), fields(tag = %tag))]
-    pub(crate) fn process_tag(
+    #[tracing::instrument(target = "boomerang_runtime::sched", skip(self, reaction_view), fields(tag = %tag))]
+    pub(super) fn process_tag(
         &mut self,
         tag: Tag,
         reaction_view: KeySetView<S::Reaction>,
@@ -531,7 +531,7 @@ where
             if execution_error.is_some() {
                 return;
             }
-            tracing::trace!(level=?level, "Iter");
+            tracing::trace!(target: "boomerang_runtime::sched", level=?level, "Iter");
 
             self.reaction_buffer.clear();
             if self.has_modes {

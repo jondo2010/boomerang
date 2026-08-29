@@ -7,10 +7,8 @@ mod queue;
 
 // Kept at the scheduler-module boundary so sibling modules retain their narrow
 // `super::` imports while the generic core lives in its own implementation module.
-pub(crate) use core::{
-    ExecutionStorage, ModeTransition, ReactionOutcome, ScheduleAccess, SchedulerCore,
-    SchedulerCoreError,
-};
+pub(crate) use core::{ExecutionStorage, ModeTransition, ScheduleAccess};
+use core::{ReactionOutcome, SchedulerCore, SchedulerCoreError};
 
 use barrier::LogicalTimeBarrier;
 pub use barrier::LogicalTimeBarrierError;

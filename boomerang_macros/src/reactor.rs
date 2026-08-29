@@ -14,10 +14,24 @@ use crate::util::convert_from_snake_case;
 pub struct ReactorArgs {
     /// The name of the state type to use. If not provided, a state struct will be generated.
     state: Option<TypePath>,
+    /// Zero-argument constructor for custom state in payload builds.
+    state_init: Option<syn::Path>,
     /// Stable component contract identity for descriptor builds.
     contract: Option<syn::LitStr>,
     /// Stable component contract version for descriptor builds.
     contract_version: Option<syn::LitInt>,
+}
+
+impl ReactorArgs {
+    fn validate(&self) -> syn::Result<()> {
+        if let (Some(state_init), None) = (&self.state_init, &self.state) {
+            return Err(syn::Error::new_spanned(
+                state_init,
+                "`state_init` requires `state = T`",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -645,8 +659,214 @@ fn payload_relationship_target(
     }
 }
 
+/// Returns a canonical implementation-local binding symbol as a Rust identifier.
+fn required_binding_symbol(reactor: &str, reaction: Option<&str>) -> Ident {
+    let component = boomerang_builder::compiler::ComponentInstanceId::new("macro")
+        .expect("macro is a valid component ID");
+    let implementation = boomerang_builder::compiler::ImplementationId::new("macro")
+        .expect("macro is a valid implementation ID");
+    let reactor_path = stable_path_value(std::slice::from_ref(&reactor.to_owned()));
+    let binding = if let Some(reaction) = reaction {
+        let reaction_path = if let Some(ordinal) = reaction.strip_prefix("#g") {
+            reactor_path.append_generated_ordinal(
+                ordinal
+                    .parse()
+                    .expect("macro generated a numeric reaction ordinal"),
+            )
+        } else {
+            reactor_path
+                .append_name(reaction)
+                .expect("macro generated a valid reaction name")
+        };
+        boomerang_builder::compiler::RequiredBinding::Reaction {
+            component,
+            implementation,
+            reaction: boomerang_builder::ReactionSlotId::from_path(reaction_path),
+        }
+    } else {
+        boomerang_builder::compiler::RequiredBinding::State {
+            component,
+            implementation,
+            reactor: boomerang_builder::ReactorSlotId::from_path(reactor_path),
+        }
+    };
+    format_ident!("{}", binding.symbol())
+}
+
+/// Resolves one own-relation reference to its concrete payload parameter type.
+fn payload_ref(
+    reactor_name: &str,
+    args: &[Arg],
+    mode_names: &[String],
+    path: &crate::reaction::PathOrIdent,
+    store_lifetime: &syn::Lifetime,
+) -> syn::Result<(Ident, TokenStream)> {
+    let crate::reaction::PathOrIdent::Simple(ident) = path else {
+        return Err(syn::Error::new_spanned(
+            path,
+            "payload mode supports only own ports, modes, and lifecycle relations",
+        ));
+    };
+    let name = ident_text(ident);
+    if mode_names.contains(&name) {
+        return Ok((ident.clone(), quote!(::boomerang::runtime::ModeEffectRef)));
+    }
+    let Some(arg) = args.iter().find(|arg| ident_text(&arg.name.ident) == name) else {
+        return Err(syn::Error::new_spanned(
+            path,
+            format!(
+                "payload mode supports only own ports, modes, and lifecycle relations; `{reactor_name}/{name}` is lexical"
+            ),
+        ));
+    };
+    let reference = match (&arg.kind, &arg.ty) {
+        (ArgKind::Input { len: None }, Type::Array(array)) => {
+            let element = &array.elem;
+            let len = &array.len;
+            quote!([::boomerang::runtime::InputRef<#store_lifetime, #element>; #len])
+        }
+        (ArgKind::Output { len: None }, Type::Array(array)) => {
+            let element = &array.elem;
+            let len = &array.len;
+            quote!([::boomerang::runtime::OutputRef<#store_lifetime, #element>; #len])
+        }
+        (ArgKind::Input { len: Some(_) }, ty) => {
+            quote!(::boomerang::runtime::InputBankRef<#store_lifetime, #ty>)
+        }
+        (ArgKind::Output { len: Some(_) }, ty) => {
+            quote!(::boomerang::runtime::OutputBankRef<#store_lifetime, #ty>)
+        }
+        (ArgKind::Input { len: None }, ty) => {
+            quote!(::boomerang::runtime::InputRef<#store_lifetime, #ty>)
+        }
+        (ArgKind::Output { len: None }, ty) => {
+            quote!(::boomerang::runtime::OutputRef<#store_lifetime, #ty>)
+        }
+        (ArgKind::State { .. } | ArgKind::Param { .. }, _) => {
+            return Err(syn::Error::new_spanned(
+                path,
+                "payload mode supports only own ports, modes, and lifecycle relations",
+            ))
+        }
+    };
+    Ok((ident.clone(), reference))
+}
+
+/// Chooses a generated payload-reference lifetime absent from user generics.
+fn fresh_payload_lifetime(generics: &syn::Generics) -> syn::Lifetime {
+    for ordinal in 0u32.. {
+        let candidate = if ordinal == 0 {
+            "__boomerang_store".to_owned()
+        } else {
+            format!("__boomerang_store_{ordinal}")
+        };
+        if generics
+            .lifetimes()
+            .all(|parameter| parameter.lifetime.ident != candidate)
+        {
+            return syn::Lifetime::new(&format!("'{candidate}"), Span::call_site());
+        }
+    }
+    unreachable!("u32 payload lifetime namespace exhausted")
+}
+
+/// Emits typed payload functions for every descriptor-local reaction slot.
+fn payload_reaction_output(
+    model: &Model,
+    state_type: &syn::Path,
+    mode_names: &[String],
+) -> syn::Result<Vec<TokenStream>> {
+    let reactor_name = ident_text(&model.name);
+    let store_lifetime = fresh_payload_lifetime(&model.generics);
+    let mut reactions = Vec::new();
+    model.body.reactions(None, &mut reactions);
+    reactions
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, (_, reaction))| {
+            let reaction_name = reaction
+                .name()
+                .map(ident_text)
+                .unwrap_or_else(|| format!("#g{ordinal}"));
+            let symbol = required_binding_symbol(&reactor_name, Some(&reaction_name));
+            let export_doc = format!(
+                "Invokes payload reaction `{reactor_name}/{reaction_name}` with concrete references."
+            );
+            let mut refs = Vec::new();
+            for trigger in reaction.triggers() {
+                match trigger {
+                    crate::reaction::TriggerType::Startup => refs.push((
+                        format_ident!("startup"),
+                        quote!(::boomerang::runtime::ActionRef<#store_lifetime>),
+                    )),
+                    crate::reaction::TriggerType::Shutdown => refs.push((
+                        format_ident!("shutdown"),
+                        quote!(::boomerang::runtime::ActionRef<#store_lifetime>),
+                    )),
+                    crate::reaction::TriggerType::Reset => {}
+                    crate::reaction::TriggerType::Regular(path) => {
+                        refs.push(payload_ref(
+                            &reactor_name,
+                            &model.args,
+                            mode_names,
+                            path,
+                            &store_lifetime,
+                        )?);
+                    }
+                }
+            }
+            for path in reaction.uses() {
+                refs.push(payload_ref(
+                    &reactor_name,
+                    &model.args,
+                    mode_names,
+                    path,
+                    &store_lifetime,
+                )?);
+            }
+            for effect in reaction.effects() {
+                let path = match effect {
+                    crate::reaction::EffectType::Regular(path)
+                    | crate::reaction::EffectType::Reset(path)
+                    | crate::reaction::EffectType::History(path) => path,
+                };
+                refs.push(payload_ref(
+                    &reactor_name,
+                    &model.args,
+                    mode_names,
+                    path,
+                    &store_lifetime,
+                )?);
+            }
+            let (ref_names, ref_types): (Vec<_>, Vec<_>) = refs.into_iter().unzip();
+            let code = reaction.code();
+            let mut generics = model.generics.clone();
+            generics.params.insert(
+                0,
+                syn::GenericParam::Lifetime(syn::LifetimeParam::new(store_lifetime.clone())),
+            );
+            let (impl_generics, _, where_clause) = generics.split_for_impl();
+            Ok(quote! {
+                #[doc = #export_doc]
+                #[allow(non_snake_case, unused_mut, unused_variables)]
+                pub fn #symbol #impl_generics(
+                    ctx: &mut ::boomerang::runtime::Context,
+                    state: &mut #state_type,
+                    (#(mut #ref_names,)*): (#(#ref_types,)*),
+                ) #where_clause #code
+            })
+        })
+        .collect()
+}
+
 /// Generates the payload facet's target-safe compatibility module.
-fn payload_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
+fn payload_output(
+    reactor_args: &ReactorArgs,
+    model: &Model,
+    state_type: &syn::Path,
+    state_struct: &Option<TokenStream>,
+    state_impl: &Option<TokenStream>,
+) -> TokenStream {
     if reactor_args.contract.is_none() && reactor_args.contract_version.is_none() {
         return TokenStream::new();
     }
@@ -657,6 +877,11 @@ fn payload_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
             compile_error!("deployment descriptor requires contract and contract_version metadata");
         };
     };
+    if reactor_args.state.is_some() && reactor_args.state_init.is_none() {
+        return quote! {
+            compile_error!("payload mode requires `state_init = path` with `state = T`");
+        };
+    }
 
     let contract_text = contract.value();
     if contract_text.is_empty()
@@ -747,6 +972,10 @@ fn payload_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
         .iter()
         .map(|mode| ident_text(&mode.name))
         .collect::<Vec<_>>();
+    let reaction_exports = match payload_reaction_output(model, state_type, &mode_names) {
+        Ok(exports) => exports,
+        Err(error) => return error.to_compile_error(),
+    };
     let mode_slots = modes
         .iter()
         .map(|mode| boomerang_builder::ModeSlot {
@@ -908,15 +1137,35 @@ fn payload_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
         .fingerprint()
         .to_bytes();
     let macro_abi = boomerang_builder::COMPONENT_DESCRIPTOR_MACRO_ABI;
+    let state_symbol = required_binding_symbol(&reactor_name, None);
+    let state_init = reactor_args.state_init.as_ref().map_or_else(
+        || quote!(::core::default::Default::default()),
+        |path| quote!(#path()),
+    );
+    let (state_generics, _, state_where_clause) = model.generics.split_for_impl();
 
     quote! {
+        #state_struct
+        #state_impl
+
         pub mod __boomerang {
+            #[allow(unused_imports)]
+            use super::*;
+
             /// Compatibility header for this payload facet.
             pub const BINDING_MANIFEST: ::boomerang::runtime::binding::BindingManifest =
                 ::boomerang::runtime::binding::BindingManifest::new(
                     ::boomerang::runtime::binding::DescriptorFingerprint::new([#(#fingerprint),*]),
                     #macro_abi,
                 );
+
+            /// Constructs this reactor's concrete payload state.
+            #[allow(non_snake_case)]
+            pub fn #state_symbol #state_generics() -> #state_type #state_where_clause {
+                #state_init
+            }
+
+            #(#reaction_exports)*
         }
     }
 }
@@ -1253,8 +1502,11 @@ pub struct ArgsModel(pub ReactorArgs, pub Model);
 
 impl ToTokens for ArgsModel {
     fn to_tokens(&self, tokens: &mut TokenStream) {
+        if let Err(error) = self.0.validate() {
+            tokens.append_all(error.to_compile_error());
+            return;
+        }
         let descriptor_output = descriptor_output(&self.0, &self.1);
-        let payload_output = payload_output(&self.0, &self.1);
         let conflict_output = quote! {
             compile_error!("__boomerang_descriptor and __boomerang_payload cannot both be enabled");
         };
@@ -1351,22 +1603,34 @@ impl ToTokens for ArgsModel {
             })
             .collect::<Vec<_>>();
 
-        let state_struct = if reactor_args.state.is_none() {
-            let state_struct = if state_args.is_empty() {
-                quote! {
-                    #vis type #state_ident = ();
-                }
+        let (state_struct, payload_state_struct) = if reactor_args.state.is_none() {
+            if state_args.is_empty() {
+                (
+                    Some(quote! {
+                        #vis type #state_ident = ();
+                    }),
+                    Some(quote! {
+                        pub type #state_ident = ();
+                    }),
+                )
             } else {
-                quote! {
-                    #[derive(Clone)]
-                    #vis struct #state_ident #impl_generics #where_clause {
-                        #(#state_args),*
-                    }
-                }
-            };
-            Some(state_struct)
+                (
+                    Some(quote! {
+                        #[derive(Clone)]
+                        #vis struct #state_ident #impl_generics #where_clause {
+                            #(#state_args),*
+                        }
+                    }),
+                    Some(quote! {
+                        #[derive(Clone)]
+                        pub struct #state_ident #impl_generics #where_clause {
+                            #(#state_args),*
+                        }
+                    }),
+                )
+            }
         } else {
-            None
+            (None, None)
         };
 
         let state_impl = if reactor_args.state.is_none() && !state_args.is_empty() {
@@ -1382,6 +1646,13 @@ impl ToTokens for ArgsModel {
         } else {
             None
         };
+        let payload_output = payload_output(
+            reactor_args,
+            &self.1,
+            &state_type_path,
+            &payload_state_struct,
+            &state_impl,
+        );
 
         let port_idents = args
             .iter()

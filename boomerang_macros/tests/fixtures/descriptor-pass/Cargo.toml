@@ -8,6 +8,9 @@ publish = false
 __boomerang_descriptor = []
 __boomerang_payload = []
 binding-fingerprint-mismatch = []
+binding-macro-abi-mismatch = []
+missing-state-init = []
+payload-lexical-relation = []
 
 [dependencies]
 boomerang = { path = "../../../../boomerang" }

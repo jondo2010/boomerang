@@ -1,7 +1,8 @@
 use super::{
-    identity::canonical_identity_text, FederateId, ReactionId, ReactorId, RuntimeBackendId,
-    StableEnclaveId, TargetTriple,
+    identity::canonical_identity_text, ComponentInstanceId, FederateId, ImplementationId,
+    RuntimeBackendId, StableEnclaveId, StablePath, TargetTriple,
 };
+use crate::descriptor::{ReactionSlotId, ReactorSlotId};
 use crate::runtime::image::{
     ActionImage, ActionIndex, BindingKind, BindingSlotIndex, CoordinationProjection, EnclaveImage,
     EnclaveImageView, FederateImage, FederateIndex,
@@ -31,13 +32,21 @@ impl RequiredBindings {
 pub enum RequiredBinding {
     /// Initializes and owns the state object for one reactor.
     State {
-        /// Stable reactor identity.
-        reactor: ReactorId,
+        /// Logical component instance receiving this binding.
+        component: ComponentInstanceId,
+        /// Selected implementation exporting this binding's symbol.
+        implementation: ImplementationId,
+        /// Implementation-local descriptor reactor slot.
+        reactor: ReactorSlotId,
     },
     /// Invokes one user reaction implementation.
     Reaction {
-        /// Stable reaction identity.
-        reaction: ReactionId,
+        /// Logical component instance receiving this binding.
+        component: ComponentInstanceId,
+        /// Selected implementation exporting this binding's symbol.
+        implementation: ImplementationId,
+        /// Implementation-local descriptor reaction slot.
+        reaction: ReactionSlotId,
     },
 }
 
@@ -49,6 +58,36 @@ impl RequiredBinding {
             Self::Reaction { .. } => BindingKind::Reaction,
         }
     }
+
+    /// Returns the implementation-local Rust symbol required for this binding.
+    pub fn symbol(&self) -> String {
+        match self {
+            Self::State { reactor, .. } => {
+                direct_binding_symbol(BindingKind::StateInitializer, reactor.path())
+            }
+            Self::Reaction { reaction, .. } => {
+                direct_binding_symbol(BindingKind::Reaction, reaction.path())
+            }
+        }
+    }
+}
+
+/// Returns the canonical Rust symbol for one implementation-local descriptor slot.
+pub fn direct_binding_symbol(kind: BindingKind, slot: &StablePath) -> String {
+    use std::fmt::Write as _;
+
+    let mut symbol = match kind {
+        BindingKind::StateInitializer => String::from("state_"),
+        BindingKind::Reaction => String::from("reaction_"),
+    };
+    for byte in slot.to_string().bytes() {
+        if byte.is_ascii_alphanumeric() {
+            symbol.push(char::from(byte));
+        } else {
+            write!(symbol, "_{byte:02x}").expect("writing into a String cannot fail");
+        }
+    }
+    symbol
 }
 
 /// Heap-backed immutable scheduler image for one Enclave.
@@ -337,7 +376,82 @@ impl OwnedCompiledDeployment {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiler::{ComponentInstanceId, ImplementationId, StablePath};
+    use crate::descriptor::{ReactionSlotId, ReactorSlotId};
     use crate::runtime::image::{IdentityRange, StateSlotIndex, TableRange};
+
+    #[test]
+    fn direct_binding_symbols_reversibly_escape_descriptor_slots() {
+        let reactor = ReactorSlotId::new("Match/loop").unwrap();
+        let reaction = ReactionSlotId::new("Match/move").unwrap();
+        let generated = ReactionSlotId::new("Match/#g1").unwrap();
+        let keyword = ReactionSlotId::new("Match/type").unwrap();
+        let raw_identifier = ReactionSlotId::from_path(
+            StablePath::from_name("Match")
+                .unwrap()
+                .append_name("r#type")
+                .unwrap(),
+        );
+        let unicode = ReactionSlotId::new("Mätsch/ø").unwrap();
+        let separator = ReactorSlotId::new("Match/left/right").unwrap();
+        let escaped_separator = ReactorSlotId::new("Match/left_2fright").unwrap();
+
+        assert_eq!(
+            direct_binding_symbol(BindingKind::StateInitializer, reactor.path()),
+            "state_Match_2floop"
+        );
+        assert_eq!(
+            direct_binding_symbol(BindingKind::Reaction, reaction.path()),
+            "reaction_Match_2fmove"
+        );
+        assert_eq!(
+            direct_binding_symbol(BindingKind::Reaction, generated.path()),
+            "reaction_Match_2f_23g1"
+        );
+        assert_eq!(
+            direct_binding_symbol(BindingKind::Reaction, keyword.path()),
+            "reaction_Match_2ftype"
+        );
+        assert_eq!(
+            direct_binding_symbol(BindingKind::Reaction, raw_identifier.path()),
+            "reaction_Match_2fr_2523type"
+        );
+        assert_eq!(
+            direct_binding_symbol(BindingKind::Reaction, unicode.path()),
+            "reaction_M_c3_a4tsch_2f_c3_b8"
+        );
+        assert_eq!(
+            direct_binding_symbol(BindingKind::StateInitializer, separator.path()),
+            "state_Match_2fleft_2fright"
+        );
+        assert_eq!(
+            direct_binding_symbol(BindingKind::StateInitializer, escaped_separator.path()),
+            "state_Match_2fleft_5f2fright"
+        );
+        assert_ne!(
+            direct_binding_symbol(BindingKind::StateInitializer, reactor.path()),
+            direct_binding_symbol(BindingKind::Reaction, reactor.path())
+        );
+    }
+
+    #[test]
+    fn reused_implementation_slots_keep_logical_instances_distinct() {
+        let reactor = ReactorSlotId::new("Match").unwrap();
+        let left = RequiredBinding::State {
+            component: ComponentInstanceId::new("fleet/left").unwrap(),
+            implementation: ImplementationId::new("shared-match").unwrap(),
+            reactor,
+        };
+        let right = RequiredBinding::State {
+            component: ComponentInstanceId::new("fleet/right").unwrap(),
+            implementation: ImplementationId::new("shared-match").unwrap(),
+            reactor: ReactorSlotId::new("Match").unwrap(),
+        };
+
+        assert_ne!(left, right);
+        assert_eq!(left.symbol(), "state_Match");
+        assert_eq!(left.symbol(), right.symbol());
+    }
 
     fn empty_enclave() -> OwnedEnclaveImage {
         OwnedEnclaveImage {
@@ -395,7 +509,9 @@ mod tests {
             .collect(),
             required_bindings: RequiredBindings {
                 entries: Box::new([RequiredBinding::State {
-                    reactor: ReactorId::new("vehicle/main").unwrap(),
+                    component: ComponentInstanceId::new("vehicle/main").unwrap(),
+                    implementation: ImplementationId::new("main-host").unwrap(),
+                    reactor: ReactorSlotId::new("Main").unwrap(),
                 }]),
             },
             storage_bounds: StorageBounds::new(1, 0, 0, 0, 0, 0),

@@ -1,24 +1,147 @@
 use boomerang::prelude::*;
 
+#[cfg(not(feature = "__boomerang_descriptor"))]
+fn initial_count() -> usize {
+    3
+}
+
+#[cfg(not(feature = "__boomerang_descriptor"))]
+fn target_only_reaction_payload() {}
+
 #[reactor(contract = "example.sensor", contract_version = 1)]
 pub fn r#match(
     #[input] r#async: u32,
     #[output] r#type: u32,
     #[output] r#yield: u32,
-    #[state(default = state_constructor_must_not_compile())] r#loop: usize,
+    #[state(default = initial_count())] r#loop: usize,
 ) -> impl Reactor {
     reaction! {
-        r#move (r#async, startup) r#extern.r#const, r#type -> r#type, r#yield {
-            reaction_payload_must_not_compile();
+        r#move (r#async, startup) -> r#type, r#yield {
+            target_only_reaction_payload();
+            state.r#loop += r#async.unwrap_or_default() as usize;
+            r#type.set(ctx);
+            *r#yield = Some(state.r#loop as u32);
         }
     }
     mode! { r#type {
         reaction! {
             (reset) -> history(r#type) {
-                reaction_payload_must_not_compile();
+                target_only_reaction_payload();
+                r#type.set(ctx);
             }
         }
     } }
+}
+
+pub mod custom {
+    //! Custom-state payload export fixture.
+
+    use super::*;
+
+    /// State constructed through an explicit `state_init` path.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct CustomState {
+        /// Initial count observed by the payload test.
+        pub count: usize,
+    }
+
+    #[cfg(feature = "__boomerang_payload")]
+    fn init_custom_state() -> CustomState {
+        CustomState { count: 11 }
+    }
+
+    #[reactor(
+        contract = "example.custom",
+        contract_version = 1,
+        state = CustomState,
+        state_init = init_custom_state
+    )]
+    pub fn Custom() -> impl Reactor {
+        reaction! {
+            start (startup) {
+                state.count += 1;
+            }
+        }
+    }
+}
+
+pub mod shaped {
+    //! Fixed-array and dynamic-bank payload reference fixture.
+
+    use super::*;
+
+    /// Declares every currently supported own-port reference shape.
+    #[reactor(contract = "example.shaped", contract_version = 1)]
+    pub fn Shaped(
+        #[input] array_in: [u16; 2],
+        #[input(len = 2)] bank_in: u64,
+        #[output] array_out: [u32; 3],
+        #[output(len = 3)] bank_out: u8,
+    ) -> impl Reactor {
+        reaction! {
+            shaped (array_in, bank_in) -> array_out, bank_out {}
+        }
+    }
+}
+
+pub mod lifetime_collision {
+    //! User-lifetime collision and private generated-state fixture.
+
+    use super::*;
+
+    /// Declares the lifetime name formerly hardcoded by payload generation.
+    ///
+    /// The generated `LifetimeState::marker` field retains the user's `'store` lifetime.
+    #[reactor(contract = "example.lifetime", contract_version = 1)]
+    fn Lifetime<'store>(#[state(default = "")] marker: &'store str) -> impl Reactor {
+        reaction! {
+            tick (startup) {}
+        }
+    }
+}
+
+pub mod private_empty {
+    //! Private zero-state reactor fixture.
+
+    use super::*;
+
+    /// Provides a generated empty state alias to the payload launcher.
+    #[reactor(contract = "example.private-empty", contract_version = 1)]
+    fn Empty() -> impl Reactor {
+        reaction! {
+            start (startup) {}
+        }
+    }
+}
+
+#[cfg(feature = "missing-state-init")]
+mod missing_state_init {
+    use super::*;
+
+    /// Custom state intentionally missing a payload initializer.
+    #[derive(Clone)]
+    struct CustomState;
+
+    #[reactor(
+        contract = "example.missing-state-init",
+        contract_version = 1,
+        state = CustomState
+    )]
+    fn MissingStateInit() -> impl Reactor {}
+}
+
+#[cfg(feature = "payload-lexical-relation")]
+mod lexical_relation {
+    use super::*;
+
+    #[reactor(contract = "example.lexical", contract_version = 1)]
+    fn LexicalRelation() -> impl Reactor {
+        reaction! {
+            (child.output) {
+                let _ = child_output;
+            }
+        }
+    }
 }
 
 #[cfg(feature = "__boomerang_descriptor")]
@@ -43,7 +166,7 @@ mod descriptor_tests {
         assert_eq!(descriptor.reaction_slots()[0].id.to_string(), "Match/move");
         assert_eq!(descriptor.reaction_slots()[1].id.to_string(), "Match/#g1");
         assert_eq!(descriptor.mode_slots()[0].id.to_string(), "Match/type");
-        assert_eq!(descriptor.relationships().len(), 9);
+        assert_eq!(descriptor.relationships().len(), 7);
         assert_eq!(descriptor.state_slots().len(), 1);
         assert_eq!(descriptor.state_slots()[0].id.to_string(), "Match/loop");
         assert!(descriptor.codec_slots().is_empty());
@@ -75,11 +198,6 @@ mod payload_tests {
         let mode = reactor.append_name("type").unwrap();
         let named_reaction = reactor.append_name("move").unwrap();
         let anonymous_reaction = reactor.append_generated_ordinal(1);
-        let lexical = reactor
-            .append_name("extern")
-            .unwrap()
-            .append_name("const")
-            .unwrap();
         let reactor_id = ReactorSlotId::from_path(reactor.clone());
         let named_reaction_id = ReactionSlotId::from_path(named_reaction);
         let anonymous_reaction_id = ReactionSlotId::from_path(anonymous_reaction);
@@ -149,20 +267,6 @@ mod payload_tests {
                 },
                 DescriptorRelationship {
                     reaction: named_reaction_id.clone(),
-                    kind: DescriptorRelationshipKind::Use,
-                    target: DescriptorRelationshipTarget::Lexical(lexical),
-                    mode_transition: None,
-                    declaration_position: 0,
-                },
-                DescriptorRelationship {
-                    reaction: named_reaction_id.clone(),
-                    kind: DescriptorRelationshipKind::Use,
-                    target: DescriptorRelationshipTarget::Mode(mode_id.clone()),
-                    mode_transition: None,
-                    declaration_position: 1,
-                },
-                DescriptorRelationship {
-                    reaction: named_reaction_id.clone(),
                     kind: DescriptorRelationshipKind::Mode,
                     target: DescriptorRelationshipTarget::Mode(mode_id.clone()),
                     mode_transition: Some(ModeTransitionKind::Reset),
@@ -210,14 +314,10 @@ mod payload_tests {
             super::__boomerang::BINDING_MANIFEST.macro_abi(),
             boomerang_builder::COMPONENT_DESCRIPTOR_MACRO_ABI,
         );
+
+        let state: super::MatchState = super::__boomerang::state_Match();
+        assert_eq!(state.r#loop, 3);
+        let custom_state: super::custom::CustomState = super::custom::__boomerang::state_Custom();
+        assert_eq!(custom_state.count, 11);
     }
 }
-
-#[cfg(all(
-    feature = "__boomerang_payload",
-    feature = "binding-fingerprint-mismatch"
-))]
-const _: () = boomerang::runtime::binding::assert_descriptor_fingerprint(
-    boomerang::runtime::binding::DescriptorFingerprint::new([0; 32]),
-    __boomerang::BINDING_MANIFEST.descriptor_fingerprint(),
-);

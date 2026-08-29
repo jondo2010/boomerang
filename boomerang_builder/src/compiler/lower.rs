@@ -4,7 +4,7 @@ use super::{
     RequiredBinding, RequiredBindings, ResolvedDeployment,
 };
 use crate::{
-    descriptor::DescriptorBound,
+    descriptor::{DescriptorBound, ReactionSlotId, ReactorSlotId},
     runtime::image::{
         ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingSlotIndex,
         CompiledDeploymentImage, CompiledDeploymentView, CoordinationProjection, EnclaveIndex,
@@ -62,6 +62,48 @@ pub enum CompileError {
         /// Canonically ordered stable identities blocked by the cycle.
         reactions: Box<[super::ReactionId]>,
     },
+    /// An implementation descriptor does not provide one root reactor slot.
+    #[error(
+        "implementation {implementation} for component {component} declares {roots} root reactor slots"
+    )]
+    DescriptorRoot {
+        /// Logical component instance receiving the implementation.
+        component: super::ComponentInstanceId,
+        /// Selected implementation with the invalid descriptor root shape.
+        implementation: super::ImplementationId,
+        /// Number of parentless descriptor reactor slots.
+        roots: usize,
+    },
+    /// A logical runtime binding has no matching descriptor-local slot.
+    #[error(
+        "implementation {implementation} for component {component} has no {kind} slot matching {logical}"
+    )]
+    MissingDescriptorSlot {
+        /// Logical component instance receiving the implementation.
+        component: super::ComponentInstanceId,
+        /// Selected implementation lacking the descriptor slot.
+        implementation: super::ImplementationId,
+        /// Required direct binding category.
+        kind: &'static str,
+        /// Fully qualified logical path of the unmatched binding.
+        logical: String,
+    },
+    /// A logical runtime binding matches more than one descriptor-local slot.
+    #[error(
+        "implementation {implementation} for component {component} has {candidates} {kind} slots matching {logical}"
+    )]
+    AmbiguousDescriptorSlot {
+        /// Logical component instance receiving the implementation.
+        component: super::ComponentInstanceId,
+        /// Selected implementation with ambiguous descriptor slots.
+        implementation: super::ImplementationId,
+        /// Required direct binding category.
+        kind: &'static str,
+        /// Fully qualified logical path of the ambiguous binding.
+        logical: String,
+        /// Number of matching descriptor slots.
+        candidates: usize,
+    },
 }
 
 /// Canonical deployment-wide facts computed before image slicing.
@@ -70,6 +112,122 @@ struct GlobalAnalysis {
     port_representatives: BTreeMap<super::PortId, super::PortId>,
     /// Longest-predecessor dependency level for every reaction.
     reaction_levels: BTreeMap<super::ReactionId, u32>,
+}
+
+/// Resolves descriptor-local slots for one selected implementation.
+struct DescriptorSlots<'a> {
+    /// Logical component instance receiving the selected implementation.
+    component: &'a super::ComponentInstanceId,
+    /// Selected implementation exporting direct binding symbols.
+    implementation: &'a super::ImplementationId,
+    /// Canonical implementation descriptor.
+    descriptor: &'a crate::descriptor::ComponentDescriptor,
+    /// Unique parentless descriptor reactor slot.
+    root: &'a crate::descriptor::ReactorSlot,
+}
+
+impl<'a> DescriptorSlots<'a> {
+    /// Looks up the selected descriptor and its unique root reactor slot.
+    fn for_component(
+        deployment: &'a ResolvedDeployment,
+        component: &'a super::ComponentInstanceId,
+    ) -> Result<Self, CompileError> {
+        let binding = deployment
+            .binding(component)
+            .expect("resolved deployment binds every topology component");
+        let roots = binding
+            .descriptor()
+            .reactor_slots()
+            .iter()
+            .filter(|slot| slot.parent.is_none())
+            .collect::<Vec<_>>();
+        let [root] = roots.as_slice() else {
+            return Err(CompileError::DescriptorRoot {
+                component: component.clone(),
+                implementation: binding.implementation().clone(),
+                roots: roots.len(),
+            });
+        };
+        Ok(Self {
+            component,
+            implementation: binding.implementation(),
+            descriptor: binding.descriptor(),
+            root,
+        })
+    }
+
+    /// Returns whether a logical identity and descriptor slot have equal relative paths.
+    fn matches_relative_path(
+        &self,
+        logical: &super::StablePath,
+        descriptor_slot: &super::StablePath,
+    ) -> bool {
+        let Some(logical) = logical
+            .segments()
+            .strip_prefix(self.component.path().segments())
+        else {
+            return false;
+        };
+        let Some(descriptor_slot) = descriptor_slot
+            .segments()
+            .strip_prefix(self.root.id.path().segments())
+        else {
+            return false;
+        };
+        logical == descriptor_slot
+    }
+
+    /// Resolves the descriptor reactor slot for one logical reactor.
+    fn reactor_slot(&self, logical: &super::ReactorId) -> Result<ReactorSlotId, CompileError> {
+        let matches = self
+            .descriptor
+            .reactor_slots()
+            .iter()
+            .filter(|slot| self.matches_relative_path(logical.path(), slot.id.path()))
+            .map(|slot| slot.id.clone())
+            .collect::<Vec<_>>();
+        self.one_slot("reactor", logical.path(), matches)
+    }
+
+    /// Resolves the descriptor reaction slot for one logical reaction.
+    fn reaction_slot(&self, logical: &super::ReactionId) -> Result<ReactionSlotId, CompileError> {
+        let matches = self
+            .descriptor
+            .reaction_slots()
+            .iter()
+            .filter(|slot| self.matches_relative_path(logical.path(), slot.id.path()))
+            .map(|slot| slot.id.clone())
+            .collect::<Vec<_>>();
+        self.one_slot("reaction", logical.path(), matches)
+    }
+
+    /// Converts a matching descriptor-slot set into one required binding slot.
+    fn one_slot<T>(
+        &self,
+        kind: &'static str,
+        logical: &super::StablePath,
+        matches: Vec<T>,
+    ) -> Result<T, CompileError> {
+        match matches.len() {
+            0 => Err(CompileError::MissingDescriptorSlot {
+                component: self.component.clone(),
+                implementation: self.implementation.clone(),
+                kind,
+                logical: logical.to_string(),
+            }),
+            1 => Ok(matches
+                .into_iter()
+                .next()
+                .expect("one matching descriptor slot")),
+            candidates => Err(CompileError::AmbiguousDescriptorSlot {
+                component: self.component.clone(),
+                implementation: self.implementation.clone(),
+                kind,
+                logical: logical.to_string(),
+                candidates,
+            }),
+        }
+    }
 }
 
 /// Lowers a resolved local deployment into canonical immutable compiled images.
@@ -249,40 +407,48 @@ fn lower_enclave(
         .collect::<BTreeMap<_, _>>();
     let mut named_bindings = reactors
         .iter()
-        .map(|(id, _)| {
-            (
+        .map(|(id, reactor)| {
+            let slots = DescriptorSlots::for_component(deployment, reactor.component())?;
+            Ok((
                 format!("state/{id}"),
                 RequiredBinding::State {
-                    reactor: (*id).clone(),
+                    component: reactor.component().clone(),
+                    implementation: slots.implementation.clone(),
+                    reactor: slots.reactor_slot(id)?,
                 },
-            )
+            ))
         })
-        .collect::<Vec<_>>();
-    named_bindings.extend(reactions.iter().map(|(id, _)| {
-        (
-            format!("reaction/{id}"),
-            RequiredBinding::Reaction {
-                reaction: (*id).clone(),
-            },
-        )
-    }));
+        .collect::<Result<Vec<_>, CompileError>>()?;
+    named_bindings.extend(
+        reactions
+            .iter()
+            .map(|(id, reaction)| {
+                let component = topology
+                    .reactor(reaction.reactor())
+                    .expect("validated reaction reactor exists")
+                    .component();
+                let slots = DescriptorSlots::for_component(deployment, component)?;
+                Ok((
+                    format!("reaction/{id}"),
+                    RequiredBinding::Reaction {
+                        component: component.clone(),
+                        implementation: slots.implementation.clone(),
+                        reaction: slots.reaction_slot(id)?,
+                    },
+                ))
+            })
+            .collect::<Result<Vec<_>, CompileError>>()?,
+    );
     named_bindings.sort_by(|left, right| left.0.cmp(&right.0));
     let binding_entries = named_bindings
         .iter()
         .map(|(_, binding)| binding.clone())
         .collect::<Vec<_>>();
     checked_u32(binding_entries.len(), enclave_id, "bindings")?;
-    let binding_indices = binding_entries
+    let binding_indices = named_bindings
         .iter()
         .zip(0u32..)
-        .map(|(binding, index)| match binding {
-            RequiredBinding::State { reactor } => {
-                (format!("state/{reactor}"), BindingSlotIndex::new(index))
-            }
-            RequiredBinding::Reaction { reaction } => {
-                (format!("reaction/{reaction}"), BindingSlotIndex::new(index))
-            }
-        })
+        .map(|((id, _), index)| (id.clone(), BindingSlotIndex::new(index)))
         .collect::<BTreeMap<_, _>>();
     let binding_images = named_bindings
         .iter()
@@ -1191,26 +1357,75 @@ mod tests {
             ConnectionSemantics, CoordinationBackendId, CoordinationSelection, FederateConfig,
             FederateId, ImplementationBinding, ImplementationId, ModeId, PlacementAssignment,
             PlacementGroupId, PortDirection, PortId, ReactionId, ReactionOptions, ReactionRelation,
-            ReactionRelationFlags, ReactionRelationTarget, Reactor, ReactorId, ResolvedDeployment,
-            RuntimeBackendId, StableEnclaveId, TargetTriple, TransportCapabilityId,
+            ReactionRelationFlags, ReactionRelationTarget, Reactor, ReactorId, RequiredBinding,
+            ResolvedDeployment, RuntimeBackendId, StableEnclaveId, TargetTriple,
+            TransportCapabilityId,
         },
         descriptor::{
-            ComponentDescriptor, DescriptorBound, DescriptorBounds, COMPONENT_DESCRIPTOR_MACRO_ABI,
+            ComponentDescriptor, DescriptorBound, DescriptorBounds, ReactionSlot, ReactionSlotId,
+            ReactorSlot, ReactorSlotId, COMPONENT_DESCRIPTOR_MACRO_ABI,
         },
         runtime::image::{
-            ActionIndex, ActionTiming, ModeIndex, ReactionIndex, RouteDirection, RouteIndex,
-            ScopeIndex, TimingDomain,
+            ActionIndex, ActionTiming, ModeIndex, ReactionIndex, ReactorIndex, RouteDirection,
+            RouteIndex, ScopeIndex, TimingDomain,
         },
     };
     fn descriptor(contract: &str, bounds: DescriptorBounds) -> ComponentDescriptor {
+        let root = match contract {
+            "controller.v1" => "Controller",
+            "sensor.v1" => "Sensor",
+            _ => panic!("unexpected test descriptor contract {contract}"),
+        };
+        descriptor_with_root(contract, bounds, root)
+    }
+
+    fn descriptor_with_root(
+        contract: &str,
+        bounds: DescriptorBounds,
+        root: &str,
+    ) -> ComponentDescriptor {
+        let reactions = match contract {
+            "controller.v1" => [
+                "emit",
+                "reset_active",
+                "shutdown",
+                "start",
+                "timer_fired",
+                "#g0",
+                "#g1",
+                "#g2",
+                "#g3",
+                "#g4",
+                "#g5",
+                "#g6",
+                "#g7",
+                "#g8",
+                "#g9",
+                "#g10",
+                "%23generated%5B0%5D",
+            ]
+            .as_slice(),
+            "sensor.v1" => ["receive"].as_slice(),
+            _ => panic!("unexpected test descriptor contract {contract}"),
+        };
+        let reactor = ReactorSlotId::new(root).unwrap();
         ComponentDescriptor::try_new(
             contract.parse().unwrap(),
             1,
             COMPONENT_DESCRIPTOR_MACRO_ABI,
+            vec![ReactorSlot {
+                id: reactor.clone(),
+                parent: None,
+            }],
             vec![],
             vec![],
-            vec![],
-            vec![],
+            reactions
+                .iter()
+                .map(|reaction| ReactionSlot {
+                    id: ReactionSlotId::new(format!("{root}/{reaction}")).unwrap(),
+                    reactor: reactor.clone(),
+                })
+                .collect(),
             vec![],
             vec![],
             vec![],
@@ -1630,6 +1845,210 @@ mod tests {
             dependency_case,
         )
     }
+
+    fn shared_implementation_deployment(reverse: bool) -> ResolvedDeployment {
+        let mut bindings = vec![
+            ImplementationBinding::new(
+                ComponentInstanceId::new("vehicle/controller").unwrap(),
+                ImplementationId::new("shared-host").unwrap(),
+                descriptor_with_root("controller.v1", known_bounds(), "Shared"),
+            ),
+            ImplementationBinding::new(
+                ComponentInstanceId::new("vehicle/sensor").unwrap(),
+                ImplementationId::new("shared-host").unwrap(),
+                descriptor_with_root("sensor.v1", known_bounds(), "Shared"),
+            ),
+        ];
+        let mut placements = vec![
+            PlacementAssignment::new(
+                PlacementGroupId::new("placement/controller").unwrap(),
+                FederateId::new("host").unwrap(),
+            ),
+            PlacementAssignment::new(
+                PlacementGroupId::new("placement/sensor").unwrap(),
+                FederateId::new("host").unwrap(),
+            ),
+        ];
+        if reverse {
+            bindings.reverse();
+            placements.reverse();
+        }
+        ResolvedDeployment::new(
+            topology(
+                reverse,
+                true,
+                ConnectionSemantics::Logical { after: None },
+                DependencyCase::None,
+            ),
+            bindings,
+            placements,
+            [FederateConfig::new(
+                FederateId::new("host").unwrap(),
+                TargetTriple::new("x86_64-unknown-linux-gnu").unwrap(),
+                RuntimeBackendId::new("native").unwrap(),
+            )],
+            CoordinationSelection::Local,
+            [],
+        )
+        .unwrap()
+    }
+
+    fn deployment_with_controller_descriptor(
+        controller_descriptor: ComponentDescriptor,
+    ) -> ResolvedDeployment {
+        ResolvedDeployment::new(
+            topology(
+                false,
+                false,
+                ConnectionSemantics::Logical { after: None },
+                DependencyCase::None,
+            ),
+            [
+                ImplementationBinding::new(
+                    ComponentInstanceId::new("vehicle/controller").unwrap(),
+                    ImplementationId::new("controller-host").unwrap(),
+                    controller_descriptor,
+                ),
+                ImplementationBinding::new(
+                    ComponentInstanceId::new("vehicle/sensor").unwrap(),
+                    ImplementationId::new("sensor-host").unwrap(),
+                    descriptor("sensor.v1", known_bounds()),
+                ),
+            ],
+            [
+                PlacementAssignment::new(
+                    PlacementGroupId::new("placement/controller").unwrap(),
+                    FederateId::new("host").unwrap(),
+                ),
+                PlacementAssignment::new(
+                    PlacementGroupId::new("placement/sensor").unwrap(),
+                    FederateId::new("host").unwrap(),
+                ),
+            ],
+            [FederateConfig::new(
+                FederateId::new("host").unwrap(),
+                TargetTriple::new("x86_64-unknown-linux-gnu").unwrap(),
+                RuntimeBackendId::new("native").unwrap(),
+            )],
+            CoordinationSelection::Local,
+            [],
+        )
+        .unwrap()
+    }
+
+    fn controller_descriptor_with(
+        reactor_slots: Vec<ReactorSlot>,
+        reaction_slots: Vec<ReactionSlot>,
+    ) -> ComponentDescriptor {
+        ComponentDescriptor::try_new(
+            "controller.v1".parse().unwrap(),
+            1,
+            COMPONENT_DESCRIPTOR_MACRO_ABI,
+            reactor_slots,
+            vec![],
+            vec![],
+            reaction_slots,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            known_bounds(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn lowering_keeps_reused_symbols_and_runtime_state_slots_distinct() {
+        let forward = lower(&shared_implementation_deployment(false)).unwrap();
+        let reverse = lower(&shared_implementation_deployment(true)).unwrap();
+        assert_eq!(forward, reverse);
+
+        let enclave = &forward.federates()[0].enclaves()[0];
+        assert_eq!(
+            enclave
+                .required_bindings()
+                .iter()
+                .map(RequiredBinding::symbol)
+                .collect::<Vec<_>>(),
+            [
+                "reaction_Shared_2femit",
+                "reaction_Shared_2freset_5factive",
+                "reaction_Shared_2fshutdown",
+                "reaction_Shared_2fstart",
+                "reaction_Shared_2ftimer_5ffired",
+                "reaction_Shared_2freceive",
+                "state_Shared",
+                "state_Shared",
+            ]
+        );
+        let states = enclave
+            .required_bindings()
+            .iter()
+            .filter_map(|binding| match binding {
+                RequiredBinding::State {
+                    component,
+                    implementation,
+                    ..
+                } => Some((
+                    component.to_string(),
+                    implementation.to_string(),
+                    binding.symbol(),
+                )),
+                RequiredBinding::Reaction { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            states,
+            [
+                (
+                    "vehicle/controller".to_owned(),
+                    "shared-host".to_owned(),
+                    "state_Shared".to_owned(),
+                ),
+                (
+                    "vehicle/sensor".to_owned(),
+                    "shared-host".to_owned(),
+                    "state_Shared".to_owned(),
+                ),
+            ]
+        );
+
+        let image = enclave.view().unwrap();
+        assert_ne!(
+            image.reactors()[ReactorIndex::new(0)].state_binding(),
+            image.reactors()[ReactorIndex::new(1)].state_binding()
+        );
+        assert_eq!(image.storage_bounds().state_slots(), 2);
+    }
+
+    #[test]
+    fn lowering_reports_invalid_descriptor_slot_mappings() {
+        let rootless = controller_descriptor_with(vec![], vec![]);
+        assert!(matches!(
+            lower(&deployment_with_controller_descriptor(rootless)),
+            Err(CompileError::DescriptorRoot { roots: 0, .. })
+        ));
+
+        let root = ReactorSlotId::new("Controller").unwrap();
+        let missing_reaction = controller_descriptor_with(
+            vec![ReactorSlot {
+                id: root,
+                parent: None,
+            }],
+            vec![],
+        );
+        assert!(matches!(
+            lower(&deployment_with_controller_descriptor(missing_reaction)),
+            Err(CompileError::MissingDescriptorSlot {
+                kind: "reaction",
+                logical,
+                ..
+            }) if logical == "vehicle/controller/emit"
+        ));
+    }
+
     #[test]
     fn lowering_is_canonical_under_selection_reordering() {
         let forward = lower(&deployment(false, false)).unwrap();

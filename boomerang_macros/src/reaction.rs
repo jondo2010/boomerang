@@ -221,6 +221,10 @@ impl Model {
     pub(crate) fn effects(&self) -> &[EffectType] {
         &self.effects
     }
+
+    pub(crate) fn code(&self) -> &syn::Block {
+        &self.code
+    }
 }
 
 impl Parse for Model {

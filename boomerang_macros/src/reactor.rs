@@ -14,6 +14,8 @@ use crate::util::convert_from_snake_case;
 pub struct ReactorArgs {
     /// The name of the state type to use. If not provided, a state struct will be generated.
     state: Option<TypePath>,
+    /// Zero-argument constructor for custom state in payload builds.
+    state_init: Option<syn::Path>,
     /// Stable component contract identity for descriptor builds.
     contract: Option<syn::LitStr>,
     /// Stable component contract version for descriptor builds.
@@ -645,8 +647,152 @@ fn payload_relationship_target(
     }
 }
 
+fn required_binding_symbol(reactor: &str, reaction: Option<&str>) -> Ident {
+    let component = boomerang_builder::compiler::ComponentInstanceId::new("macro")
+        .expect("macro is a valid component ID");
+    let implementation = boomerang_builder::compiler::ImplementationId::new("macro")
+        .expect("macro is a valid implementation ID");
+    let reactor_path = stable_path_value(std::slice::from_ref(&reactor.to_owned()));
+    let binding = if let Some(reaction) = reaction {
+        let reaction_path = if let Some(ordinal) = reaction.strip_prefix("#g") {
+            reactor_path.append_generated_ordinal(
+                ordinal
+                    .parse()
+                    .expect("macro generated a numeric reaction ordinal"),
+            )
+        } else {
+            reactor_path
+                .append_name(reaction)
+                .expect("macro generated a valid reaction name")
+        };
+        boomerang_builder::compiler::RequiredBinding::Reaction {
+            component,
+            implementation,
+            reaction: boomerang_builder::ReactionSlotId::from_path(reaction_path),
+        }
+    } else {
+        boomerang_builder::compiler::RequiredBinding::State {
+            component,
+            implementation,
+            reactor: boomerang_builder::ReactorSlotId::from_path(reactor_path),
+        }
+    };
+    format_ident!("{}", binding.symbol())
+}
+
+fn payload_ref(
+    reactor_name: &str,
+    args: &[Arg],
+    mode_names: &[String],
+    path: &crate::reaction::PathOrIdent,
+) -> syn::Result<(Ident, TokenStream)> {
+    let crate::reaction::PathOrIdent::Simple(ident) = path else {
+        return Err(syn::Error::new_spanned(
+            path,
+            "payload mode supports only own ports, modes, and lifecycle relations",
+        ));
+    };
+    let name = ident_text(ident);
+    if mode_names.contains(&name) {
+        return Ok((ident.clone(), quote!(::boomerang::runtime::ModeEffectRef)));
+    }
+    let Some(arg) = args.iter().find(|arg| ident_text(&arg.name.ident) == name) else {
+        return Err(syn::Error::new_spanned(
+            path,
+            format!(
+                "payload mode supports only own ports, modes, and lifecycle relations; `{reactor_name}/{name}` is lexical"
+            ),
+        ));
+    };
+    let ty = &arg.ty;
+    let reference = match arg.kind {
+        ArgKind::Input { .. } => quote!(::boomerang::runtime::InputRef<'store, #ty>),
+        ArgKind::Output { .. } => quote!(::boomerang::runtime::OutputRef<'store, #ty>),
+        ArgKind::State { .. } | ArgKind::Param { .. } => {
+            return Err(syn::Error::new_spanned(
+                path,
+                "payload mode supports only own ports, modes, and lifecycle relations",
+            ))
+        }
+    };
+    Ok((ident.clone(), reference))
+}
+
+fn payload_reaction_output(
+    model: &Model,
+    state_type: &syn::Path,
+    mode_names: &[String],
+) -> syn::Result<Vec<TokenStream>> {
+    let reactor_name = ident_text(&model.name);
+    let mut reactions = Vec::new();
+    model.body.reactions(None, &mut reactions);
+    reactions
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, (_, reaction))| {
+            let reaction_name = reaction
+                .name()
+                .map(ident_text)
+                .unwrap_or_else(|| format!("#g{ordinal}"));
+            let symbol = required_binding_symbol(&reactor_name, Some(&reaction_name));
+            let mut refs = Vec::new();
+            for trigger in reaction.triggers() {
+                match trigger {
+                    crate::reaction::TriggerType::Startup => refs.push((
+                        format_ident!("startup"),
+                        quote!(::boomerang::runtime::ActionRef<'store>),
+                    )),
+                    crate::reaction::TriggerType::Shutdown => refs.push((
+                        format_ident!("shutdown"),
+                        quote!(::boomerang::runtime::ActionRef<'store>),
+                    )),
+                    crate::reaction::TriggerType::Reset => {}
+                    crate::reaction::TriggerType::Regular(path) => {
+                        refs.push(payload_ref(&reactor_name, &model.args, mode_names, path)?);
+                    }
+                }
+            }
+            for path in reaction.uses() {
+                refs.push(payload_ref(&reactor_name, &model.args, mode_names, path)?);
+            }
+            for effect in reaction.effects() {
+                let path = match effect {
+                    crate::reaction::EffectType::Regular(path)
+                    | crate::reaction::EffectType::Reset(path)
+                    | crate::reaction::EffectType::History(path) => path,
+                };
+                refs.push(payload_ref(&reactor_name, &model.args, mode_names, path)?);
+            }
+            let (ref_names, ref_types): (Vec<_>, Vec<_>) = refs.into_iter().unzip();
+            let code = reaction.code();
+            let mut generics = model.generics.clone();
+            generics.params.insert(0, parse_quote!('store));
+            let (impl_generics, _, where_clause) = generics.split_for_impl();
+            Ok(quote! {
+                #[allow(non_snake_case, unused_mut, unused_variables)]
+                pub fn #symbol #impl_generics(
+                    ctx: &mut ::boomerang::runtime::Context,
+                    state: &mut #state_type,
+                    (#(mut #ref_names,)*): (#(#ref_types,)*),
+                ) #where_clause #code
+            })
+        })
+        .collect()
+}
+
 /// Generates the payload facet's target-safe compatibility module.
-fn payload_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
+fn payload_output(
+    reactor_args: &ReactorArgs,
+    model: &Model,
+    state_type: &syn::Path,
+    state_struct: &Option<TokenStream>,
+    state_impl: &Option<TokenStream>,
+) -> TokenStream {
+    if reactor_args.state_init.is_some() && reactor_args.state.is_none() {
+        return quote! {
+            compile_error!("`state_init` requires `state = T`");
+        };
+    }
     if reactor_args.contract.is_none() && reactor_args.contract_version.is_none() {
         return TokenStream::new();
     }
@@ -657,6 +803,11 @@ fn payload_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
             compile_error!("deployment descriptor requires contract and contract_version metadata");
         };
     };
+    if reactor_args.state.is_some() && reactor_args.state_init.is_none() {
+        return quote! {
+            compile_error!("payload mode requires `state_init = path` with `state = T`");
+        };
+    }
 
     let contract_text = contract.value();
     if contract_text.is_empty()
@@ -747,6 +898,10 @@ fn payload_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
         .iter()
         .map(|mode| ident_text(&mode.name))
         .collect::<Vec<_>>();
+    let reaction_exports = match payload_reaction_output(model, state_type, &mode_names) {
+        Ok(exports) => exports,
+        Err(error) => return error.to_compile_error(),
+    };
     let mode_slots = modes
         .iter()
         .map(|mode| boomerang_builder::ModeSlot {
@@ -908,15 +1063,35 @@ fn payload_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
         .fingerprint()
         .to_bytes();
     let macro_abi = boomerang_builder::COMPONENT_DESCRIPTOR_MACRO_ABI;
+    let state_symbol = required_binding_symbol(&reactor_name, None);
+    let state_init = reactor_args.state_init.as_ref().map_or_else(
+        || quote!(::core::default::Default::default()),
+        |path| quote!(#path()),
+    );
+    let (state_generics, _, state_where_clause) = model.generics.split_for_impl();
 
     quote! {
+        #state_struct
+        #state_impl
+
         pub mod __boomerang {
+            #[allow(unused_imports)]
+            use super::*;
+
             /// Compatibility header for this payload facet.
             pub const BINDING_MANIFEST: ::boomerang::runtime::binding::BindingManifest =
                 ::boomerang::runtime::binding::BindingManifest::new(
                     ::boomerang::runtime::binding::DescriptorFingerprint::new([#(#fingerprint),*]),
                     #macro_abi,
                 );
+
+            /// Constructs this reactor's concrete payload state.
+            #[allow(non_snake_case)]
+            pub fn #state_symbol #state_generics() -> #state_type #state_where_clause {
+                #state_init
+            }
+
+            #(#reaction_exports)*
         }
     }
 }
@@ -1254,7 +1429,6 @@ pub struct ArgsModel(pub ReactorArgs, pub Model);
 impl ToTokens for ArgsModel {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         let descriptor_output = descriptor_output(&self.0, &self.1);
-        let payload_output = payload_output(&self.0, &self.1);
         let conflict_output = quote! {
             compile_error!("__boomerang_descriptor and __boomerang_payload cannot both be enabled");
         };
@@ -1382,6 +1556,13 @@ impl ToTokens for ArgsModel {
         } else {
             None
         };
+        let payload_output = payload_output(
+            reactor_args,
+            &self.1,
+            &state_type_path,
+            &state_struct,
+            &state_impl,
+        );
 
         let port_idents = args
             .iter()

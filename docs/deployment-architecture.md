@@ -318,13 +318,17 @@ target-only dependencies.
 
 The target-compiled payload facet exposes:
 
-- a generated compatibility header containing the descriptor fingerprint and macro ABI version.
+- a generated compatibility header containing the descriptor fingerprint and macro ABI version;
+- one typed state initializer per implementation-local reactor slot; and
+- one typed function per implementation-local reaction slot, preserving the source reaction body
+  and its concrete context, state, trigger, use, and effect reference types.
 
-The compatibility header lands before direct typed bindings. A dedicated later slice adds concrete
-state initialization, reaction, codec, driver, and static-storage symbols after the compiled image
-views and `RequiredBindings` define their host-owned slots and concrete signatures. Codec and
-driver exports require source declaration models; this architecture does not introduce placeholders
-for them. The header contains neither binding slots nor a function table.
+Generated state uses its generated `Default` initializer. A custom `#[reactor(state = T)]` must add
+`state_init = path` for payload mode; the path is a zero-argument constructor returning `T`.
+`state_init` without `state` is invalid. Codec, driver, and static-storage bindings remain later
+slices because they require source declaration models or backend choices; this architecture does
+not introduce placeholders for them. The compatibility header contains neither binding slots nor
+a function table.
 
 The payload facet may also generate wrappers used by the owned host reference executor. Those
 wrappers do not define a separate graph or lowering path.
@@ -361,13 +365,19 @@ entry point, runs the topology entry point, expands the selected descriptors, an
 turned into Rust dependencies during host analysis.
 
 Global lowering turns stable descriptor slots into `RequiredBindings` for each Federate. Once the
-later direct typed bindings exist, the generated target launcher depends on only the payload
-packages assigned to that Federate and binds them directly:
+direct typed bindings exist, the generated target launcher depends on only the payload packages
+assigned to that Federate and binds them directly. Required symbols reuse implementation-local
+descriptor slots rather than logical instance paths, so multiple logical instances may share the
+same function while retaining distinct runtime storage:
 
 ```text
-ReactionSlotId("vehicle/sensor/sample")
-    -> sensor_stm32::__boomerang::sample_reaction
+ReactionSlotId("Sensor/sample")
+    -> sensor_stm32::__boomerang::reaction_Sensor_2fsample
 ```
+
+The symbol prefix is `state_` or `reaction_`. Every non-ASCII-alphanumeric byte in the slot's
+canonical UTF-8 text becomes lowercase `_hh`, making separators, raw identifiers, generated slots,
+and Unicode names deterministic and reversible without hashing.
 
 The initial compatibility-header slice uses const assertions to verify descriptor fingerprints and
 macro ABI versions. Once the later direct typed bindings exist, the Rust compiler also verifies

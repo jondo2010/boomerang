@@ -85,8 +85,63 @@ fn payload_mode_excludes_metadata_free_hosted_expansion() {
 }
 
 #[test]
-fn payload_mode_exports_matching_binding_manifest() {
+fn required_bindings_export_typed_payload_symbols() {
     cargo_test("descriptor-pass", &["--features", "__boomerang_payload"]).unwrap();
+}
+
+#[test]
+fn required_bindings_reject_custom_state_without_initializer() {
+    let stderr = cargo_check(
+        "descriptor-pass",
+        &["--features", "__boomerang_payload missing-state-init"],
+    )
+    .expect_err("custom payload state without state_init should fail");
+    assert!(
+        stderr.contains("payload mode requires `state_init = path` with `state = T`"),
+        "unexpected compiler diagnostic:\n{stderr}"
+    );
+}
+
+#[test]
+fn required_bindings_reject_initializer_without_custom_state() {
+    let stderr = cargo_check(
+        "descriptor-pass",
+        &["--features", "__boomerang_payload orphan-state-init"],
+    )
+    .expect_err("state_init without custom state should fail");
+    assert!(
+        stderr.contains("`state_init` requires `state = T`"),
+        "unexpected compiler diagnostic:\n{stderr}"
+    );
+}
+
+#[test]
+fn required_bindings_reject_lexical_payload_relations() {
+    let stderr = cargo_check(
+        "descriptor-pass",
+        &["--features", "__boomerang_payload payload-lexical-relation"],
+    )
+    .expect_err("payload lexical relationships should fail");
+    assert!(
+        stderr.contains("payload mode supports only own ports, modes, and lifecycle relations"),
+        "unexpected compiler diagnostic:\n{stderr}"
+    );
+}
+
+#[test]
+fn required_bindings_reject_macro_abi_mismatch_separately() {
+    let stderr = cargo_check(
+        "descriptor-pass",
+        &[
+            "--features",
+            "__boomerang_payload binding-macro-abi-mismatch",
+        ],
+    )
+    .expect_err("payload macro ABI mismatch should fail");
+    assert!(
+        stderr.contains("macro ABI mismatch"),
+        "unexpected compiler diagnostic:\n{stderr}"
+    );
 }
 
 #[test]

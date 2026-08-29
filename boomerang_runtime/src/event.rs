@@ -1,63 +1,6 @@
 use std::fmt::{Debug, Display};
 
-use crate::{ActionKey, Duration, EnclaveKey, ReactionSet, ReactorData, Tag};
-
-/// The action value associated with a scheduled event.
-///
-/// Root-scope events keep `stored_tag` equal to the event tag. Mode-local events
-/// keep their event tag in local time and update `stored_tag` whenever that
-/// local event is mapped to a new global tag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ScheduledActionValue {
-    pub(crate) key: ActionKey,
-    pub(crate) stored_tag: Tag,
-}
-
-/// `ScheduledEvent` is used internally by the scheduler loop in the event queue. The dependent reactions are already expanded into a single reaction set.
-#[derive(Debug, Clone)]
-pub struct ScheduledEvent {
-    /// The [`Tag`] at which the reactions in this event should be executed.
-    pub(crate) tag: Tag,
-    /// The set of Reactions to be executed at this tag.
-    pub(crate) reactions: ReactionSet,
-    /// Whether the scheduler should terminate after processing this event.
-    pub(crate) terminal: bool,
-    /// Action value made present by this event.
-    ///
-    /// This is only needed while a mode-local event is queued and may be
-    /// rebased on history re-entry. Root/global events do not carry this
-    /// metadata.
-    pub(crate) action_value: Option<ScheduledActionValue>,
-}
-
-impl Display for ScheduledEvent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "L[tag={},terminal={}]", self.tag, self.terminal)
-    }
-}
-
-impl Eq for ScheduledEvent {}
-
-impl PartialEq for ScheduledEvent {
-    fn eq(&self, other: &Self) -> bool {
-        self.tag == other.tag && self.terminal == other.terminal
-    }
-}
-
-impl PartialOrd for ScheduledEvent {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for ScheduledEvent {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.tag
-            .cmp(&other.tag)
-            .then(self.terminal.cmp(&other.terminal))
-            .reverse()
-    }
-}
+use crate::{ActionKey, Duration, EnclaveKey, ReactorData, Tag};
 
 /// `AsyncEvent` is used to inject events into the scheduler from outside of the normal event loop.
 pub enum AsyncEvent {
@@ -193,48 +136,5 @@ impl AsyncEvent {
     /// Create a shutdown event.
     pub(crate) fn shutdown(delay: Duration) -> Self {
         AsyncEvent::Shutdown { delay }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::BinaryHeap;
-
-    #[test]
-    fn test_scheduled_event_order() {
-        // ScheduledEvent is used in a BinaryHeap, which by design is a max-heap. This means that our implementation of Ord
-        // must be reversed to achieve a min-heap behavior.
-        // Additionally, we want to ensure that shutdown events are processed last given multiple events with the same tag.
-        let mut heap = BinaryHeap::new();
-        heap.push(ScheduledEvent {
-            tag: Tag::new(Duration::seconds(1), 0),
-            reactions: ReactionSet::default(),
-            terminal: false,
-            action_value: None,
-        });
-        heap.push(ScheduledEvent {
-            tag: Tag::new(Duration::seconds(1), 0),
-            reactions: ReactionSet::default(),
-            terminal: true,
-            action_value: None,
-        });
-        heap.push(ScheduledEvent {
-            tag: Tag::new(Duration::seconds(0), 0),
-            reactions: ReactionSet::default(),
-            terminal: false,
-            action_value: None,
-        });
-
-        // The top event should NOT be the shutdown event
-        let ev0 = heap.pop().unwrap();
-        assert_eq!(ev0.tag.offset(), Duration::seconds(0));
-        assert!(!ev0.terminal);
-        let ev1 = heap.pop().unwrap();
-        assert!(!ev1.terminal);
-        assert_eq!(ev1.tag.offset(), Duration::seconds(1));
-        let ev2 = heap.pop().unwrap();
-        assert!(ev2.terminal);
-        assert_eq!(ev2.tag.offset(), Duration::seconds(1));
     }
 }

@@ -774,7 +774,7 @@ where
         &mut self,
         tag: Tag,
     ) -> Result<FederatedBarrierOutcome, FederatedBarrierError> {
-        self.federated_time_barrier.acquire_tag(tag, &self.event_rx)
+        self.federated_time_barrier.acquire_tag(tag, self.event_rx)
     }
 
     #[cfg(feature = "federated")]
@@ -796,7 +796,7 @@ where
             // Wait until all upstream barriers are released
             for (_upstream_enclave_key, barrier) in self.upstream_enclaves.iter_mut() {
                 if let Some(async_event) = barrier
-                    .acquire_tag(next_tag, self.key, &self.event_rx)
+                    .acquire_tag(next_tag, self.key, self.event_rx)
                     .map_err(RuntimeError::from)
                     .map_err(SchedulerCoreError::Runtime)?
                 {
@@ -969,7 +969,7 @@ where
 
             let outcome_count = self.reaction_buffer.len();
             if let Err(error) = self.storage.execute_reactions(
-                &self.reaction_buffer,
+                self.reaction_buffer,
                 tag,
                 &mut self.outcomes[..outcome_count],
             ) {

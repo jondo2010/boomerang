@@ -219,3 +219,46 @@ impl<R: tinymap::Key, A: Copy> EventQueue<R, A> {
         self.event_queue = events.into_iter().collect();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Duration;
+    use tinymap::DefaultKey;
+
+    #[test]
+    fn scheduled_event_order() {
+        // ScheduledEvent is used in a BinaryHeap, which by design is a max-heap. This means
+        // that our implementation of Ord must be reversed to achieve min-heap behavior.
+        // Additionally, shutdown events must be processed last among events at the same tag.
+        let mut heap = BinaryHeap::<ScheduledEvent<DefaultKey, u8>>::new();
+        heap.push(ScheduledEvent {
+            tag: Tag::new(Duration::seconds(1), 0),
+            reactions: KeySet::default(),
+            terminal: false,
+            action_value: None,
+        });
+        heap.push(ScheduledEvent {
+            tag: Tag::new(Duration::seconds(1), 0),
+            reactions: KeySet::default(),
+            terminal: true,
+            action_value: None,
+        });
+        heap.push(ScheduledEvent {
+            tag: Tag::new(Duration::seconds(0), 0),
+            reactions: KeySet::default(),
+            terminal: false,
+            action_value: None,
+        });
+
+        let ev0 = heap.pop().unwrap();
+        assert_eq!(ev0.tag.offset(), Duration::seconds(0));
+        assert!(!ev0.terminal);
+        let ev1 = heap.pop().unwrap();
+        assert!(!ev1.terminal);
+        assert_eq!(ev1.tag.offset(), Duration::seconds(1));
+        let ev2 = heap.pop().unwrap();
+        assert!(ev2.terminal);
+        assert_eq!(ev2.tag.offset(), Duration::seconds(1));
+    }
+}

@@ -72,6 +72,30 @@ fn ModalInitialDoesNotReset(#[state] reset_count: u32) -> impl Reactor {
     }
 }
 
+#[reactor]
+fn EmptyResetDoesNotDelayShutdown() -> impl Reactor {
+    mode! { initial idle {
+    } }
+
+    mode! { active {
+    } }
+
+    reaction! {
+        (startup) -> active {
+            active.set(ctx);
+        }
+    }
+
+    reaction! {
+        (shutdown) {
+            assert_eq!(
+                ctx.get_microstep(), 1,
+                "an empty reset transition must not delay automatic shutdown"
+            );
+        }
+    }
+}
+
 #[test]
 fn modal_reset_reaction_runs_on_reset_entry() {
     let _ = tracing_subscriber::fmt::try_init();
@@ -97,6 +121,19 @@ fn modal_initial_mode_does_not_run_reset_reaction() {
         ModalInitialDoesNotReset(),
         "modal_initial_does_not_reset",
         ModalInitialDoesNotResetState { reset_count: 0 },
+        config,
+    )
+    .unwrap();
+}
+
+#[test]
+fn empty_reset_transition_keeps_automatic_shutdown_at_first_microstep() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let config = runtime::Config::default().with_fast_forward(true);
+    boomerang_util::runner::build_and_test_reactor(
+        EmptyResetDoesNotDelayShutdown(),
+        "empty_reset_does_not_delay_shutdown",
+        (),
         config,
     )
     .unwrap();

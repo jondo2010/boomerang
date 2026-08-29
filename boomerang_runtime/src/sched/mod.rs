@@ -173,6 +173,11 @@ trait ScheduleAccess {
         -> impl Iterator<Item = (Level, Self::Reaction)> + '_;
     fn reaction_reactor(&self, reaction: Self::Reaction) -> Self::Reactor;
     fn reaction_scope(&self, reaction: Self::Reaction) -> Self::Scope;
+    /// Whether the enabled-mode filter is absent or exactly matches the static reaction scope.
+    ///
+    /// A compiled schedule adapter must validate this equality before execution. Supporting a
+    /// broader filter instead requires genuine enabled-mode filtering in the scheduler.
+    fn reaction_mode_filter_matches_scope(&self, reaction: Self::Reaction) -> bool;
     fn is_shutdown_reaction(&self, reaction: Self::Reaction) -> bool;
     fn scopes(&self) -> impl Iterator<Item = Self::Scope> + '_;
     fn reactor_initial_modes(
@@ -402,6 +407,16 @@ impl ScheduleAccess for ReactionGraph {
 
     fn reaction_scope(&self, reaction: Self::Reaction) -> Self::Scope {
         self.reaction_scopes[reaction]
+    }
+
+    fn reaction_mode_filter_matches_scope(&self, reaction: Self::Reaction) -> bool {
+        let scope = self.reaction_scopes[reaction];
+        self.reaction_modes[reaction].as_ref().is_none_or(|filter| {
+            self.scopes[scope].mode.is_some_and(|mode| {
+                let modes = filter.modes();
+                modes.len() == 1 && modes[0] == mode
+            })
+        })
     }
 
     fn is_shutdown_reaction(&self, reaction: Self::Reaction) -> bool {
@@ -1081,6 +1096,12 @@ where
             return false;
         }
 
+        debug_assert!(
+            self.schedule
+                .reaction_mode_filter_matches_scope(reaction_key),
+            "reaction mode filters are expected to be equivalent to the static reaction scope"
+        );
+
         true
     }
 }
@@ -1227,19 +1248,16 @@ impl Scheduler {
     }
 
     /// Execute startup of the Scheduler.
-    #[tracing::instrument(skip(self))]
     pub fn startup(&mut self) {
         self.core().startup();
     }
 
     /// Process one scheduler step, returning coordination failures to the caller.
-    #[tracing::instrument(skip(self), fields(tag = %self.current_tag))]
     pub fn try_next(&mut self) -> Result<bool, RuntimeError> {
         live_scheduler_result(self.core().try_next())
     }
 
     /// Run until shutdown or return the first runtime coordination failure.
-    #[tracing::instrument(skip(self), fields(key = %self.key))]
     pub fn try_event_loop(&mut self) -> Result<(), RuntimeError> {
         live_scheduler_result(self.core().try_event_loop())
     }
@@ -1247,7 +1265,6 @@ impl Scheduler {
     /// Process the reactions at this tag in increasing order of level.
     ///
     /// Reactions at a level N may trigger further reactions at levels M>N.
-    #[tracing::instrument(skip(self, reaction_view), fields(tag = %tag))]
     pub fn process_tag(
         &mut self,
         tag: Tag,

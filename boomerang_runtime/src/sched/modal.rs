@@ -538,7 +538,10 @@ impl<S: ScheduleAccess> EventManager<S> {
     }
 
     fn schedule_reset_reactions(&mut self, root_scope: S::Scope, schedule: &S, tag: Tag) {
-        self.push_event(tag, schedule.scope_reset_reactions(root_scope), false);
+        let mut reset_reactions = schedule.scope_reset_reactions(root_scope).peekable();
+        if reset_reactions.peek().is_some() {
+            self.push_event(tag, reset_reactions, false);
+        }
     }
 
     fn next_reaction_set(&mut self) -> KeySet<S::Reaction> {

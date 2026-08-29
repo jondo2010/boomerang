@@ -361,6 +361,23 @@ pub enum OwnedStorageError {
         /// The compiled minimum delay in nanoseconds.
         min_delay_nanos: u64,
     },
+    /// A reaction enables modes other than its statically owning scope's mode.
+    #[error("reaction {reaction} has an enabled-mode filter that does not match its static scope")]
+    ReactionModeFilterMismatch {
+        /// The compiled reaction whose filter requires scheduler support not present in owned execution.
+        reaction: ReactionIndex,
+    },
+    /// A direct reaction requested a dynamic mode transition without a stable compiled mode identity.
+    #[error(
+        "reaction {reaction} requested a dynamic mode transition unsupported by owned storage"
+    )]
+    DynamicModeTransitionUnsupported {
+        /// The reaction whose transition must await generated compiled-mode identities.
+        reaction: ReactionIndex,
+    },
+    /// The scheduler was paired with a different compiled enclave identity than this storage.
+    #[error("scheduler image does not match owned storage image")]
+    SchedulerImageMismatch,
     /// A reaction's port or action references alias mutably within one invocation.
     #[error("reaction {reaction} has aliased mutable references")]
     AliasedReactionReferences {
@@ -418,8 +435,8 @@ pub struct OwnedStorage<'image> {
     reactions: TinySecondaryMap<BindingSlotIndex, Box<dyn ReactionInvoker>>,
     /// Keeps the per-enclave event channel open for stored reaction contexts.
     event_rx: crate::Receiver<crate::event::AsyncEvent>,
-    /// Keeps stored reaction contexts alive until the compiled executor shuts down.
-    shutdown_tx: crate::keepalive::Sender,
+    /// Holds the keepalive sender until a compiled scheduler takes responsibility for shutdown.
+    shutdown_tx: Option<crate::keepalive::Sender>,
 }
 
 impl fmt::Debug for OwnedStorage<'_> {
@@ -452,6 +469,7 @@ impl<'image> OwnedStorage<'image> {
         } = bindings;
 
         validate_action_delays(&action_images)?;
+        validate_reaction_mode_filters(&image)?;
         let states = initialize_states(&state_bindings, &bindings)?;
         let actions = initialize_actions(&action_images, &action_factories)?;
         let ports = initialize_ports(&image, &port_factories)?;
@@ -466,7 +484,7 @@ impl<'image> OwnedStorage<'image> {
             contexts,
             reactions,
             event_rx,
-            shutdown_tx,
+            shutdown_tx: Some(shutdown_tx),
         })
     }
 
@@ -502,12 +520,72 @@ impl<'image> OwnedStorage<'image> {
         self.ports.values_mut().for_each(|port| port.cleanup());
     }
 
+    /// Resolves an action key supplied by a direct reaction to its exact compiled action identity.
+    pub(crate) fn scheduler_action(&self, action: ActionKey) -> crate::image::ActionIndex {
+        self.image
+            .actions()
+            .iter()
+            .find_map(|(index, image)| {
+                (self.actions[image.storage_slot()].key() == action).then_some(index)
+            })
+            .expect("owned action key must belong to the validated compiled image")
+    }
+
+    /// Pushes a payload into the storage slot selected by a compiled action identity.
+    pub(crate) fn scheduler_push_action(
+        &mut self,
+        action: crate::image::ActionIndex,
+        tag: Tag,
+        value: Box<dyn ReactorData>,
+    ) {
+        let slot = self.image.actions()[action].storage_slot();
+        self.actions[slot].push_value(tag, value);
+    }
+
+    /// Clears every queued payload for the storage slot selected by a compiled action identity.
+    pub(crate) fn scheduler_clear_action(&mut self, action: crate::image::ActionIndex) {
+        let slot = self.image.actions()[action].storage_slot();
+        self.actions[slot].clear_values();
+    }
+
+    /// Moves one payload between tags in the storage slot selected by a compiled action identity.
+    pub(crate) fn scheduler_reschedule_action(
+        &mut self,
+        action: crate::image::ActionIndex,
+        from: Tag,
+        to: Tag,
+    ) {
+        if from != to {
+            let slot = self.image.actions()[action].storage_slot();
+            self.actions[slot].reschedule_value(from, to);
+        }
+    }
+
+    /// Iterates over the exact image ports that are currently present.
+    pub(crate) fn scheduler_set_ports(&self) -> impl Iterator<Item = PortIndex> + '_ {
+        self.ports
+            .iter()
+            .filter_map(|(port, value)| value.is_set().then_some(port))
+    }
+
+    /// Clones the receive endpoint while storage retains the channel's owning endpoint.
+    pub(crate) fn scheduler_event_rx(&self) -> crate::Receiver<crate::event::AsyncEvent> {
+        self.event_rx.clone()
+    }
+
+    /// Transfers the keepalive sender to the compiled scheduler that owns terminal shutdown.
+    pub(crate) fn take_scheduler_shutdown_tx(&mut self) -> crate::keepalive::Sender {
+        self.shutdown_tx
+            .take()
+            .expect("owned storage can be attached to only one scheduler")
+    }
+
     /// Invokes a directly bound reaction using the image's ordered port and action references.
     pub(crate) fn invoke_reaction(
         &mut self,
         reaction: ReactionIndex,
         tag: Tag,
-    ) -> Result<TriggerRes, OwnedStorageError> {
+    ) -> Result<(), OwnedStorageError> {
         let reaction_image = self.image.reactions()[reaction];
         let reactor = reaction_image.reactor();
         let state_slot = self.image.reactors()[reactor].state_slot();
@@ -542,7 +620,21 @@ impl<'image> OwnedStorage<'image> {
             actions: RefsMut::new(&mut actions),
         };
         invoker.invoke(context, state.value.as_mut(), refs)?;
-        Ok(context.trigger_res.clone())
+        if context.trigger_res.scheduled_mode.is_some() {
+            return Err(OwnedStorageError::DynamicModeTransitionUnsupported { reaction });
+        }
+        Ok(())
+    }
+
+    /// Borrows the reusable trigger result from a reaction's owning reactor context.
+    pub(crate) fn reaction_trigger_res(&self, reaction: ReactionIndex) -> &TriggerRes {
+        let reactor = self.image.reactions()[reaction].reactor();
+        &self.contexts[reactor].trigger_res
+    }
+
+    /// Checks that a schedule and this storage describe the same stable compiled enclave.
+    pub(crate) fn scheduler_matches(&self, schedule: &EnclaveImageView<'_>) -> bool {
+        self.image.enclave_id() == schedule.enclave_id()
     }
 
     /// Returns the immutable image defining this storage's dense key domains.
@@ -652,6 +744,18 @@ fn validate_storage_layout(
         }
     }
     Ok((state_bindings, action_images))
+}
+
+/// Rejects filters that require dynamic enabled-mode evaluation before state initialization.
+fn validate_reaction_mode_filters(image: &EnclaveImageView<'_>) -> Result<(), OwnedStorageError> {
+    for (reaction, reaction_image) in image.reactions().iter() {
+        let modes = image.reaction_modes(reaction);
+        let scope_mode = image.scopes()[reaction_image.scope()].mode();
+        if !modes.is_empty() && (modes.len() != 1 || Some(modes[0]) != scope_mode) {
+            return Err(OwnedStorageError::ReactionModeFilterMismatch { reaction });
+        }
+    }
+    Ok(())
 }
 
 /// Initializes the dense state map only after all binding and slot validation succeeds.
@@ -830,12 +934,13 @@ mod tests {
     use crate::{
         image::{
             ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotIndex,
-            EnclaveImage, EnclaveImageView, IdentityRange, PortImage, PortIndex, ReactionImage,
-            ReactionIndex, ReactorImage, ReactorIndex, RequiredBindingImage, ScopeImage,
-            ScopeIndex, StateSlotIndex, StorageBounds, TableRange, TimingDomain, TinyMapView,
+            EnclaveImage, EnclaveImageView, IdentityRange, ModeImage, PortImage, PortIndex,
+            ReactionImage, ReactionIndex, ReactorImage, ReactorIndex, RequiredBindingImage,
+            ScopeImage, ScopeIndex, StateSlotIndex, StorageBounds, TableRange, TimingDomain,
+            TinyMapView,
         },
-        CommonContext, Context, Duration, OwnedBindings, OwnedStorage, OwnedStorageError,
-        ReactionBindingError, ReactionRefs, ReactorData, Tag,
+        CommonContext, Context, Duration, ModeTransitionRequest, OwnedBindings, OwnedStorage,
+        OwnedStorageError, ReactionBindingError, ReactionRefs, ReactorData, Tag, TransitionKind,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -880,12 +985,25 @@ mod tests {
         Ok(())
     }
 
+    /// Requests a dynamic mode change that compiled direct execution intentionally defers.
+    fn request_dynamic_mode(
+        context: &mut Context,
+        _state: &mut dyn ReactorData,
+        _refs: ReactionRefs<'_>,
+    ) -> Result<(), ReactionBindingError> {
+        context.set_mode_transition(ModeTransitionRequest {
+            target: crate::ModeKey::new(0),
+            transition: TransitionKind::Reset,
+        });
+        Ok(())
+    }
+
     static REACTORS: [ReactorImage; 1] = [ReactorImage::new(
         BindingSlotIndex::new(0),
         StateSlotIndex::new(0),
         ScopeIndex::new(0),
-        TableRange::new(0, 0),
-        None,
+        TableRange::new(0, 1),
+        Some(crate::image::ModeIndex::new(0)),
         None,
     )];
     static ACTIONS: [ActionImage; 1] = [ActionImage::new(
@@ -917,18 +1035,45 @@ mod tests {
         TableRange::new(0, 0),
         TableRange::new(0, 0),
     )];
-    static SCOPES: [ScopeImage; 1] = [ScopeImage::new(
-        None,
+    static FILTERED_REACTIONS: [ReactionImage; 1] = [ReactionImage::new(
         ReactorIndex::new(0),
-        None,
+        ScopeIndex::new(0),
+        0,
+        BindingSlotIndex::new(1),
+        TableRange::new(0, 0),
+        TableRange::new(0, 0),
+        TableRange::new(0, 0),
         TableRange::new(0, 1),
-        TableRange::new(0, 1),
-        TableRange::new(0, 0),
-        TableRange::new(0, 0),
-        TableRange::new(0, 0),
-        TableRange::new(0, 0),
     )];
-    static SCOPE_DESCENDANTS: [ScopeIndex; 1] = [ScopeIndex::new(0)];
+    static MODES: [ModeImage; 1] = [ModeImage::new(ReactorIndex::new(0), ScopeIndex::new(1))];
+    static SCOPES: [ScopeImage; 2] = [
+        ScopeImage::new(
+            None,
+            ReactorIndex::new(0),
+            None,
+            TableRange::new(0, 2),
+            TableRange::new(0, 1),
+            TableRange::new(0, 0),
+            TableRange::new(0, 0),
+            TableRange::new(0, 0),
+            TableRange::new(0, 0),
+        ),
+        ScopeImage::new(
+            Some(ScopeIndex::new(0)),
+            ReactorIndex::new(0),
+            Some(crate::image::ModeIndex::new(0)),
+            TableRange::new(2, 1),
+            TableRange::new(1, 0),
+            TableRange::new(0, 0),
+            TableRange::new(0, 0),
+            TableRange::new(0, 0),
+            TableRange::new(0, 0),
+        ),
+    ];
+    static SCOPE_DESCENDANTS: [ScopeIndex; 3] =
+        [ScopeIndex::new(0), ScopeIndex::new(1), ScopeIndex::new(1)];
+    static FILTERED_REACTION_MODES: [crate::image::ModeIndex; 1] =
+        [crate::image::ModeIndex::new(0)];
     static SCOPE_LOGICAL_ACTIONS: [ActionIndex; 1] = [ActionIndex::new(0)];
     static REQUIRED_BINDINGS: [RequiredBindingImage; 2] = [
         RequiredBindingImage::new(IdentityRange::new(7, 7), BindingKind::StateInitializer),
@@ -941,7 +1086,7 @@ mod tests {
         actions: TinyMapView::new(&ACTIONS),
         ports: TinyMapView::new(&PORTS),
         reactions: TinyMapView::new(&REACTIONS),
-        modes: TinyMapView::new(&[]),
+        modes: TinyMapView::new(&MODES),
         scopes: TinyMapView::new(&SCOPES),
         reaction_triggers: &[],
         reaction_use_ports: &[],
@@ -966,6 +1111,11 @@ mod tests {
         actions: TinyMapView::new(&UNREPRESENTABLE_ACTIONS),
         ..IMAGE
     };
+    static FILTERED_MODE_IMAGE: EnclaveImage<'static> = EnclaveImage {
+        reactions: TinyMapView::new(&FILTERED_REACTIONS),
+        reaction_modes: &FILTERED_REACTION_MODES,
+        ..IMAGE
+    };
 
     /// Returns a fresh validated view of the immutable test image.
     fn image() -> EnclaveImageView<'static> {
@@ -975,6 +1125,11 @@ mod tests {
     /// Returns a validated image whose action delay cannot fit the runtime duration type.
     fn unrepresentable_action_image() -> EnclaveImageView<'static> {
         EnclaveImageView::new(&UNREPRESENTABLE_ACTION_IMAGE).expect("test image is valid")
+    }
+
+    /// Returns a valid image with a reaction filter broader than its static scope.
+    fn filtered_mode_image() -> EnclaveImageView<'static> {
+        EnclaveImageView::new(&FILTERED_MODE_IMAGE).expect("test image is valid")
     }
 
     /// Returns bindings for every non-lifecycle storage slot in [`IMAGE`].
@@ -1083,7 +1238,26 @@ mod tests {
     }
 
     #[test]
-    fn invocation_uses_the_given_tag_and_returns_a_fresh_trigger_result() {
+    fn rejects_reaction_mode_filter_that_does_not_match_scope_before_initializing_state() {
+        INITIALIZER_CALLS.store(0, Ordering::SeqCst);
+        let bindings = OwnedBindings::new()
+            .bind_state(BindingSlotIndex::new(0), counted_initializer)
+            .bind_action::<u32>(ActionSlotIndex::new(0))
+            .bind_port::<u32>(PortIndex::new(0))
+            .bind_reaction(BindingSlotIndex::new(1), reaction);
+
+        let error = OwnedStorage::new(filtered_mode_image(), bindings).unwrap_err();
+
+        assert!(matches!(
+            error,
+            OwnedStorageError::ReactionModeFilterMismatch { reaction }
+                if reaction == ReactionIndex::new(0)
+        ));
+        assert_eq!(INITIALIZER_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn invocation_uses_the_given_tag_and_resets_the_reusable_trigger_result() {
         REACTION_CALLS.store(0, Ordering::SeqCst);
         let bindings =
             complete_bindings().bind_reaction(BindingSlotIndex::new(1), schedule_shutdown_once);
@@ -1091,17 +1265,36 @@ mod tests {
         let first_tag = Tag::new(Duration::nanoseconds(7), 2);
         let second_tag = Tag::new(Duration::nanoseconds(9), 0);
 
-        let first = storage
+        storage
             .invoke_reaction(ReactionIndex::new(0), first_tag)
             .unwrap();
-        let second = storage
+        let first = storage.reaction_trigger_res(ReactionIndex::new(0)).clone();
+        storage
             .invoke_reaction(ReactionIndex::new(0), second_tag)
             .unwrap();
+        let second = storage.reaction_trigger_res(ReactionIndex::new(0)).clone();
 
         assert_eq!(
             first.scheduled_shutdown,
             Some(Tag::new(Duration::nanoseconds(8), 0))
         );
         assert!(second.scheduled_shutdown.is_none());
+    }
+
+    #[test]
+    fn rejects_dynamic_mode_transitions_without_compiled_identity() {
+        let bindings =
+            complete_bindings().bind_reaction(BindingSlotIndex::new(1), request_dynamic_mode);
+        let mut storage = OwnedStorage::new(image(), bindings).unwrap();
+
+        let error = storage
+            .invoke_reaction(ReactionIndex::new(0), Tag::ZERO)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            OwnedStorageError::DynamicModeTransitionUnsupported { reaction }
+                if reaction == ReactionIndex::new(0)
+        ));
     }
 }

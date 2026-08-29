@@ -185,7 +185,7 @@ where
 
 /// Failure from concrete time coordination or mutable execution storage.
 #[derive(Debug)]
-pub(super) enum SchedulerError<E> {
+pub(crate) enum SchedulerError<E> {
     /// Existing local or federated logical-time coordination failed.
     Coordination(RuntimeError),
     /// A reaction invocation in the execution storage failed.

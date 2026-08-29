@@ -22,12 +22,16 @@ use crate::{
     build_reaction_contexts,
     env::{Enclave, EnclaveKey},
     event::AsyncEvent,
+    image::{
+        ActionIndex, EnclaveImageView, LevelReactionImage, ModeIndex, PortIndex, ReactionIndex,
+        ReactorIndex, ScopeIndex,
+    },
     keepalive,
     key_set::KeySetView,
     store::Store,
-    ActionKey, Duration, Env, Level, ModeKey, PortKey, ReactionGraph, ReactionKey,
-    ReactionSetLimits, ReactorData, ReactorKey, RuntimeError, ScopeKey, SendContext, Tag,
-    TriggerRes,
+    ActionKey, Duration, Env, Level, ModeKey, OwnedStorage, OwnedStorageError, PortKey,
+    ReactionGraph, ReactionKey, ReactionSetLimits, ReactorData, ReactorKey, RuntimeError, ScopeKey,
+    SendContext, Tag, TriggerRes,
 };
 
 /// Failure while starting or running a set of local enclave schedulers.
@@ -50,7 +54,6 @@ pub enum ExecuteEnclavesError {
     #[error("scheduler thread for enclave {enclave} panicked: {what}")]
     ThreadPanic { enclave: EnclaveKey, what: String },
 }
-
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Whether to skip wall-clock synchronization (execute as fast as possible)
@@ -379,6 +382,129 @@ impl Schedule for ReactionGraph {
     }
 }
 
+/// Defines explicit compiled-image schedule methods without repeating adapter boilerplate.
+macro_rules! image_schedule_accessors {
+    ($(fn $name:ident($($argument:ident: $argument_type:ty),*) -> $return_type:ty |$image:ident| $body:expr;)*) => {
+        $(fn $name(&self $(, $argument: $argument_type)*) -> $return_type { let $image = self; $body })*
+    };
+}
+
+/// Adapts immutable compiled-image tables to the shared scheduler's exact key domains.
+impl Schedule for EnclaveImageView<'_> {
+    type Action = ActionIndex;
+    type Port = PortIndex;
+    type Reaction = ReactionIndex;
+    type Reactor = ReactorIndex;
+    type Mode = ModeIndex;
+    type Scope = ScopeIndex;
+
+    fn reaction_limits(&self) -> ReactionSetLimits {
+        let max_level = self
+            .reactions()
+            .values()
+            .map(|reaction| Level::from(reaction.dependency_level() as usize))
+            .max()
+            .unwrap_or_default();
+        ReactionSetLimits {
+            max_level,
+            num_keys: self.reactions().len(),
+        }
+    }
+
+    image_schedule_accessors! {
+        fn startup_actions() -> impl Iterator<Item = (Self::Action, Tag)> + '_ |image| image.startup_actions().iter().map(|startup| (startup.action(), compiled_tag(startup.logical_delay_nanos())));
+        fn shutdown_actions() -> impl Iterator<Item = Self::Action> + '_ |image| image.shutdown_actions().iter().copied();
+        fn reactor_for_reaction(reaction: Self::Reaction) -> Self::Reactor |image| image.reactions()[reaction].reactor();
+        fn scope_for_reaction(reaction: Self::Reaction) -> Self::Scope |image| image.reactions()[reaction].scope();
+        fn scopes() -> impl Iterator<Item = Self::Scope> + '_ |image| image.scopes().keys();
+        fn scope_for_mode(mode: Self::Mode) -> Self::Scope |image| image.modes()[mode].scope();
+        fn scope_for_action(action: Self::Action) -> Self::Scope |image| image.actions()[action].scope();
+        fn parent_scope(scope: Self::Scope) -> Option<Self::Scope> |image| image.scopes()[scope].parent();
+        fn reactor_for_scope(scope: Self::Scope) -> Self::Reactor |image| image.scopes()[scope].reactor();
+        fn mode_for_scope(scope: Self::Scope) -> Option<Self::Mode> |image| image.scopes()[scope].mode();
+        fn logical_actions_in_scope(scope: Self::Scope) -> impl Iterator<Item = Self::Action> + '_ |image| image.scope_logical_actions(scope).iter().copied();
+        fn timer_startups_in_scope(scope: Self::Scope) -> impl Iterator<Item = (Self::Action, Tag)> + '_ |image| image.scope_timer_startups(scope).iter().map(|startup| (startup.action(), compiled_tag(startup.logical_delay_nanos())));
+        fn initial_mode_for_reactor(reactor: Self::Reactor) -> Option<Self::Mode> |image| image.reactors()[reactor].initial_mode();
+        fn shutdown_reactions() -> impl Iterator<Item = (Level, Self::Reaction)> + '_ |image| compiled_reactions(image.shutdown_reactions().iter().map(|lifecycle| lifecycle.reaction()));
+        fn action_triggers(action: Self::Action) -> impl Iterator<Item = (Level, Self::Reaction)> + '_ |image| compiled_reactions(image.action_triggers(action).iter().copied());
+        fn port_triggers(port: Self::Port) -> impl Iterator<Item = (Level, Self::Reaction)> + '_ |image| compiled_reactions(image.port_triggers(port).iter().copied());
+        fn reaction_filter_matches_scope(reaction: Self::Reaction) -> bool |image| { let modes = image.reaction_modes(reaction); modes.is_empty() || (modes.len() == 1 && image.scopes()[image.reactions()[reaction].scope()].mode() == Some(modes[0])) };
+        fn action_is_logical(action: Self::Action) -> bool |image| !matches!(image.actions()[action].timing(), crate::image::ActionTiming::Standard { domain: crate::image::TimingDomain::Physical, .. });
+        fn descendant_scopes(scope: Self::Scope) -> impl Iterator<Item = Self::Scope> + '_ |image| image.scope_descendants(scope).iter().copied();
+        fn reset_reactions_in_scope(scope: Self::Scope) -> impl Iterator<Item = (Level, Self::Reaction)> + '_ |image| compiled_reactions(image.scope_reset_reactions(scope).iter().copied());
+        fn startups_in_scope(scope: Self::Scope) -> impl Iterator<Item = (Self::Action, (Level, Self::Reaction))> + '_ |image| image.scope_startup_reactions(scope).iter().map(|startup| { let reaction = startup.reaction(); (startup.action(), (Level::from(reaction.level() as usize), reaction.reaction())) });
+        fn reactor_root_scopes() -> impl Iterator<Item = (Self::Reactor, Self::Scope)> + '_ |image| (0..image.reactors().len()).map(move |index| { let reactor = ReactorIndex::new(index as u32); (reactor, image.reactors()[reactor].root_scope()) });
+    }
+}
+
+/// Adapts direct owned storage operations to the shared compiled-image scheduler.
+impl ExecutionStorage<EnclaveImageView<'_>> for OwnedStorage<'_> {
+    type Error = OwnedStorageError;
+
+    fn action_from_runtime(&self, key: ActionKey) -> ActionIndex {
+        self.scheduler_action(key)
+    }
+
+    fn push_action_value(&mut self, action: ActionIndex, tag: Tag, value: Box<dyn ReactorData>) {
+        self.scheduler_push_action(action, tag, value);
+    }
+
+    fn clear_action_values(&mut self, action: ActionIndex) {
+        self.scheduler_clear_action(action);
+    }
+
+    fn reschedule_action_value(&mut self, action: ActionIndex, from: Tag, to: Tag) {
+        self.scheduler_reschedule_action(action, from, to);
+    }
+
+    fn execute_reactions(
+        &mut self,
+        reactions: &[ReactionIndex],
+        tag: Tag,
+        outcomes: &mut [ReactionOutcome<ActionIndex, ModeIndex>],
+    ) -> Result<(), Self::Error> {
+        for (&reaction, outcome) in reactions.iter().zip(outcomes) {
+            self.invoke_reaction(reaction, tag)?;
+            let result = self.reaction_trigger_res(reaction);
+            outcome.scheduled_actions.clear();
+            outcome.scheduled_actions.extend(
+                result
+                    .scheduled_actions
+                    .iter()
+                    .map(|&(action, tag)| (self.scheduler_action(action), tag)),
+            );
+            outcome.scheduled_shutdown = result.scheduled_shutdown;
+            outcome.scheduled_mode = None;
+        }
+        Ok(())
+    }
+
+    fn set_ports(&self) -> impl Iterator<Item = PortIndex> + '_ {
+        self.scheduler_set_ports()
+    }
+
+    fn reset_ports(&mut self) {
+        OwnedStorage::reset_ports(self);
+    }
+}
+
+/// Converts a validated compiled logical delay to the runtime tag representation.
+fn compiled_tag(delay_nanos: u64) -> Tag {
+    Tag::new(
+        Duration::nanoseconds(
+            i64::try_from(delay_nanos).expect("validated compiled delay exceeds runtime range"),
+        ),
+        0,
+    )
+}
+
+/// Converts compiled level-reaction rows to the runtime's typed scheduler entries.
+fn compiled_reactions(
+    reactions: impl Iterator<Item = LevelReactionImage>,
+) -> impl Iterator<Item = (Level, ReactionIndex)> {
+    reactions.map(|reaction| (Level::from(reaction.level() as usize), reaction.reaction()))
+}
+
 /// Public live-authoring wrapper around the key-generic scheduler core.
 ///
 /// This preserves the existing `Enclave` authoring path while its internal core
@@ -610,6 +736,64 @@ fn live_scheduler_result<T>(
         Err(SchedulerError::Coordination(error)) => Err(error),
         Err(SchedulerError::Execution(error)) => match error {},
     }
+}
+
+/// Runs validated owned storage through the shared core with local-only coordination.
+///
+/// This crate-private adapter owns the queue, scratch, clock, wake channel, and base-native
+/// no-op federated hook; Task 4 owns the public executor and result boundary.
+#[allow(dead_code)] // Task 4 invokes this crate-private adapter.
+pub(crate) fn run_owned_scheduler(
+    schedule: &EnclaveImageView<'_>,
+    storage: &mut OwnedStorage<'_>,
+    config: &Config,
+) -> Result<Tag, SchedulerError<OwnedStorageError>> {
+    if !storage.scheduler_matches(schedule) {
+        return Err(SchedulerError::Execution(
+            OwnedStorageError::SchedulerImageMismatch,
+        ));
+    }
+    let reaction_limits = schedule.reaction_limits();
+    let reaction_capacity = reaction_limits.num_keys;
+    let mut events = EventManager::new(reaction_limits, schedule);
+    let event_rx = storage.scheduler_event_rx();
+    let shutdown_tx = storage.take_scheduler_shutdown_tx();
+    let mut start_time = std::time::Instant::now();
+    let mut current_tag = Tag::NEVER;
+    let mut shutdown_tag = None;
+    let mut upstream_enclaves = tinymap::TinySecondaryMap::new();
+    let downstream_enclaves = tinymap::TinySecondaryMap::new();
+    #[cfg(feature = "federated")]
+    let mut federated_time_barrier: Box<dyn FederatedTimeBarrier> =
+        Box::new(NoFederatedTimeBarrier);
+    let mut stats = Stats::default();
+    let mut reaction_buffer = Vec::with_capacity(reaction_capacity);
+    let mut transition_buffer = Vec::with_capacity(reaction_capacity);
+    let mut outcomes = (0..reaction_capacity).map(|_| Default::default()).collect();
+
+    SchedulerCore {
+        key: EnclaveKey::default(),
+        config,
+        schedule,
+        storage,
+        event_rx: &event_rx,
+        events: &mut events,
+        start_time: &mut start_time,
+        current_tag: &mut current_tag,
+        shutdown_tag: &mut shutdown_tag,
+        shutdown_tx: &shutdown_tx,
+        upstream_enclaves: &mut upstream_enclaves,
+        downstream_enclaves: &downstream_enclaves,
+        #[cfg(feature = "federated")]
+        federated_time_barrier: &mut federated_time_barrier,
+        stats: &mut stats,
+        reaction_buffer: &mut reaction_buffer,
+        transition_buffer: &mut transition_buffer,
+        outcomes: &mut outcomes,
+        has_modal_scopes: schedule.has_modal_scopes(),
+    }
+    .try_event_loop()?;
+    Ok(current_tag)
 }
 
 /// Execute the given enclaves with the provided configuration.

@@ -23,6 +23,7 @@ mod refs_extract;
 #[cfg(feature = "replay")]
 pub mod replay;
 mod sched;
+pub mod storage;
 pub mod store;
 mod time;
 
@@ -58,6 +59,7 @@ pub use reactor::*;
 pub use refs::{Refs, RefsMut};
 pub use refs_extract::{ReactionRefs, ReactionRefsError, ReactionRefsExtract};
 pub use sched::*;
+pub use storage::owned::{OwnedBindings, OwnedStorage, OwnedStorageError, ReactionBindingError};
 pub use time::*;
 
 /// Types implementing this trait can be used as data in ports, actions, and reactors.

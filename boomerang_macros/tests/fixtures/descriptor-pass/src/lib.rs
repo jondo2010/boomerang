@@ -5,7 +5,7 @@ fn initial_count() -> usize {
     3
 }
 
-#[cfg(feature = "__boomerang_payload")]
+#[cfg(not(feature = "__boomerang_descriptor"))]
 fn target_only_reaction_payload() {}
 
 #[reactor(contract = "example.sensor", contract_version = 1)]
@@ -34,10 +34,14 @@ pub fn r#match(
 }
 
 pub mod custom {
+    //! Custom-state payload export fixture.
+
     use super::*;
 
+    /// State constructed through an explicit `state_init` path.
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub struct CustomState {
+        /// Initial count observed by the payload test.
         pub count: usize,
     }
 
@@ -61,6 +65,25 @@ pub mod custom {
     }
 }
 
+pub mod shaped {
+    //! Fixed-array and dynamic-bank payload reference fixture.
+
+    use super::*;
+
+    /// Declares every currently supported own-port reference shape.
+    #[reactor(contract = "example.shaped", contract_version = 1)]
+    pub fn Shaped(
+        #[input] array_in: [u16; 2],
+        #[input(len = 2)] bank_in: u64,
+        #[output] array_out: [u32; 3],
+        #[output(len = 3)] bank_out: u8,
+    ) -> impl Reactor {
+        reaction! {
+            shaped (array_in, bank_in) -> array_out, bank_out {}
+        }
+    }
+}
+
 #[cfg(feature = "missing-state-init")]
 mod missing_state_init {
     use super::*;
@@ -74,20 +97,6 @@ mod missing_state_init {
         state = CustomState
     )]
     fn MissingStateInit() -> impl Reactor {}
-}
-
-#[cfg(feature = "orphan-state-init")]
-mod orphan_state_init {
-    use super::*;
-
-    fn init_state() {}
-
-    #[reactor(
-        contract = "example.orphan-state-init",
-        contract_version = 1,
-        state_init = init_state
-    )]
-    fn OrphanStateInit() -> impl Reactor {}
 }
 
 #[cfg(feature = "payload-lexical-relation")]
@@ -139,6 +148,68 @@ mod descriptor_tests {
     }
 }
 
+#[cfg(feature = "__boomerang_payload")]
+mod launcher_like {
+    const EXPECTED_FINGERPRINT: boomerang::runtime::binding::DescriptorFingerprint =
+        boomerang::runtime::binding::DescriptorFingerprint::new([
+            199, 47, 226, 90, 173, 60, 225, 154, 76, 243, 98, 167, 187, 152, 112, 172, 14, 8, 133,
+            30, 202, 200, 210, 248, 170, 205, 229, 200, 32, 15, 101, 153,
+        ]);
+    const _: () = boomerang::runtime::binding::assert_descriptor_fingerprint(
+        EXPECTED_FINGERPRINT,
+        super::__boomerang::BINDING_MANIFEST.descriptor_fingerprint(),
+    );
+
+    #[cfg(not(feature = "binding-macro-abi-mismatch"))]
+    const EXPECTED_MACRO_ABI: u32 = boomerang_builder::COMPONENT_DESCRIPTOR_MACRO_ABI;
+    #[cfg(feature = "binding-macro-abi-mismatch")]
+    const EXPECTED_MACRO_ABI: u32 = boomerang_builder::COMPONENT_DESCRIPTOR_MACRO_ABI + 1;
+    const _: () = assert!(
+        EXPECTED_MACRO_ABI == super::__boomerang::BINDING_MANIFEST.macro_abi(),
+        "macro ABI mismatch",
+    );
+
+    #[cfg(feature = "binding-fingerprint-mismatch")]
+    const _: () = boomerang::runtime::binding::assert_descriptor_fingerprint(
+        boomerang::runtime::binding::DescriptorFingerprint::new([0; 32]),
+        super::__boomerang::BINDING_MANIFEST.descriptor_fingerprint(),
+    );
+
+    type MoveRefs<'store> = (
+        boomerang::runtime::InputRef<'store, u32>,
+        boomerang::runtime::ActionRef<'store>,
+        boomerang::runtime::ModeEffectRef,
+        boomerang::runtime::OutputRef<'store, u32>,
+    );
+    type ShapedRefs<'store> = (
+        [boomerang::runtime::InputRef<'store, u16>; 2],
+        boomerang::runtime::InputBankRef<'store, u64>,
+        [boomerang::runtime::OutputRef<'store, u32>; 3],
+        boomerang::runtime::OutputBankRef<'store, u8>,
+    );
+
+    #[allow(dead_code)]
+    fn bind_match<'store>(ctx: &mut boomerang::runtime::Context, refs: MoveRefs<'store>) {
+        let mut state = super::__boomerang::state_Match();
+        super::__boomerang::reaction_Match_2fmove(ctx, &mut state, refs);
+    }
+
+    #[allow(dead_code)]
+    fn bind_shaped<'store>(ctx: &mut boomerang::runtime::Context, refs: ShapedRefs<'store>) {
+        let mut state = super::shaped::__boomerang::state_Shaped();
+        super::shaped::__boomerang::reaction_Shaped_2fshaped(ctx, &mut state, refs);
+    }
+
+    #[allow(dead_code)]
+    fn bind_custom<'store>(
+        ctx: &mut boomerang::runtime::Context,
+        refs: (boomerang::runtime::ActionRef<'store>,),
+    ) {
+        let mut state = super::custom::__boomerang::state_Custom();
+        super::custom::__boomerang::reaction_Custom_2fstart(ctx, &mut state, refs);
+    }
+}
+
 #[cfg(all(test, feature = "__boomerang_payload"))]
 mod payload_tests {
     use boomerang_builder::{
@@ -147,21 +218,6 @@ mod payload_tests {
         ModeTransitionKind, PortDirection, PortSlot, PortSlotId, ReactionSlot, ReactionSlotId,
         ReactorSlot, ReactorSlotId, StateSlot, StateSlotId,
     };
-
-    type MoveRefs<'store> = (
-        boomerang::runtime::InputRef<'store, u32>,
-        boomerang::runtime::ActionRef<'store>,
-        boomerang::runtime::ModeEffectRef,
-        boomerang::runtime::OutputRef<'store, u32>,
-    );
-
-    fn call_move<'store>(
-        ctx: &mut boomerang::runtime::Context,
-        state: &mut super::MatchState,
-        refs: MoveRefs<'store>,
-    ) {
-        super::__boomerang::reaction_Match_2fmove(ctx, state, refs);
-    }
 
     #[test]
     fn payload_mode_exports_matching_binding_manifest() {
@@ -294,52 +350,5 @@ mod payload_tests {
         assert_eq!(state.r#loop, 3);
         let custom_state: super::custom::CustomState = super::custom::__boomerang::state_Custom();
         assert_eq!(custom_state.count, 11);
-
-        let _: for<'store> fn(
-            &mut boomerang::runtime::Context,
-            &mut super::MatchState,
-            MoveRefs<'store>,
-        ) = call_move;
-        let _: for<'store> fn(
-            &mut boomerang::runtime::Context,
-            &mut super::custom::CustomState,
-            (boomerang::runtime::ActionRef<'store>,),
-        ) = super::custom::__boomerang::reaction_Custom_2fstart;
     }
 }
-
-#[cfg(feature = "__boomerang_payload")]
-const _: () = boomerang::runtime::binding::assert_descriptor_fingerprint(
-    boomerang::runtime::binding::DescriptorFingerprint::new([
-        199, 47, 226, 90, 173, 60, 225, 154, 76, 243, 98, 167, 187, 152, 112, 172, 14, 8, 133, 30,
-        202, 200, 210, 248, 170, 205, 229, 200, 32, 15, 101, 153,
-    ]),
-    __boomerang::BINDING_MANIFEST.descriptor_fingerprint(),
-);
-
-#[cfg(all(
-    feature = "__boomerang_payload",
-    not(feature = "binding-macro-abi-mismatch")
-))]
-const EXPECTED_MACRO_ABI: u32 = boomerang_builder::COMPONENT_DESCRIPTOR_MACRO_ABI;
-
-#[cfg(all(
-    feature = "__boomerang_payload",
-    feature = "binding-macro-abi-mismatch"
-))]
-const EXPECTED_MACRO_ABI: u32 = boomerang_builder::COMPONENT_DESCRIPTOR_MACRO_ABI + 1;
-
-#[cfg(feature = "__boomerang_payload")]
-const _: () = assert!(
-    EXPECTED_MACRO_ABI == __boomerang::BINDING_MANIFEST.macro_abi(),
-    "macro ABI mismatch",
-);
-
-#[cfg(all(
-    feature = "__boomerang_payload",
-    feature = "binding-fingerprint-mismatch"
-))]
-const _: () = boomerang::runtime::binding::assert_descriptor_fingerprint(
-    boomerang::runtime::binding::DescriptorFingerprint::new([0; 32]),
-    __boomerang::BINDING_MANIFEST.descriptor_fingerprint(),
-);

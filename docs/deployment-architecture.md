@@ -379,11 +379,11 @@ The symbol prefix is `state_` or `reaction_`. Every non-ASCII-alphanumeric byte 
 canonical UTF-8 text becomes lowercase `_hh`, making separators, raw identifiers, generated slots,
 and Unicode names deterministic and reversible without hashing.
 
-The initial compatibility-header slice uses const assertions to verify descriptor fingerprints and
-macro ABI versions. Once the later direct typed bindings exist, the Rust compiler also verifies
-state, reaction-reference, payload, and codec types. Missing slots, duplicate slots, type
-mismatches, or fingerprint mismatches are compile errors. There is no runtime plugin loader,
-service locator, package registry, or symbol lookup.
+The launcher separately const-asserts the descriptor fingerprint and macro ABI before referring to
+direct bindings. The Rust compiler verifies state, reaction-reference, and payload types; later
+codec bindings extend the same compile-time checks to codec types. Missing slots, duplicate slots,
+type mismatches, or compatibility mismatches are compile errors. There is no runtime plugin
+loader, service locator, package registry, or symbol lookup.
 
 When one implementation package is used for multiple logical instances, lowering instance-
 qualifies its stable slots and the launcher allocates distinct state and action storage for each

@@ -10,7 +10,6 @@ __boomerang_payload = []
 binding-fingerprint-mismatch = []
 binding-macro-abi-mismatch = []
 missing-state-init = []
-orphan-state-init = []
 payload-lexical-relation = []
 
 [dependencies]

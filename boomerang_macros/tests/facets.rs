@@ -104,15 +104,18 @@ fn required_bindings_reject_custom_state_without_initializer() {
 
 #[test]
 fn required_bindings_reject_initializer_without_custom_state() {
-    let stderr = cargo_check(
-        "descriptor-pass",
-        &["--features", "__boomerang_payload orphan-state-init"],
-    )
-    .expect_err("state_init without custom state should fail");
-    assert!(
-        stderr.contains("`state_init` requires `state = T`"),
-        "unexpected compiler diagnostic:\n{stderr}"
-    );
+    for (facet, args) in [
+        ("hosted", &[][..]),
+        ("descriptor", &["--features", "__boomerang_descriptor"][..]),
+        ("payload", &["--features", "__boomerang_payload"][..]),
+    ] {
+        let stderr = cargo_check("state-init-without-state", args)
+            .expect_err("state_init without custom state should fail in every facet");
+        assert!(
+            stderr.contains("`state_init` requires `state = T`"),
+            "unexpected compiler diagnostic for {facet}:\n{stderr}"
+        );
+    }
 }
 
 #[test]

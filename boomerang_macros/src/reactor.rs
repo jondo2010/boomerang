@@ -22,6 +22,18 @@ pub struct ReactorArgs {
     contract_version: Option<syn::LitInt>,
 }
 
+impl ReactorArgs {
+    fn validate(&self) -> syn::Result<()> {
+        if let (Some(state_init), None) = (&self.state_init, &self.state) {
+            return Err(syn::Error::new_spanned(
+                state_init,
+                "`state_init` requires `state = T`",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Docs(Vec<(String, Span)>);
 
@@ -704,11 +716,30 @@ fn payload_ref(
             ),
         ));
     };
-    let ty = &arg.ty;
-    let reference = match arg.kind {
-        ArgKind::Input { .. } => quote!(::boomerang::runtime::InputRef<'store, #ty>),
-        ArgKind::Output { .. } => quote!(::boomerang::runtime::OutputRef<'store, #ty>),
-        ArgKind::State { .. } | ArgKind::Param { .. } => {
+    let reference = match (&arg.kind, &arg.ty) {
+        (ArgKind::Input { len: None }, Type::Array(array)) => {
+            let element = &array.elem;
+            let len = &array.len;
+            quote!([::boomerang::runtime::InputRef<'store, #element>; #len])
+        }
+        (ArgKind::Output { len: None }, Type::Array(array)) => {
+            let element = &array.elem;
+            let len = &array.len;
+            quote!([::boomerang::runtime::OutputRef<'store, #element>; #len])
+        }
+        (ArgKind::Input { len: Some(_) }, ty) => {
+            quote!(::boomerang::runtime::InputBankRef<'store, #ty>)
+        }
+        (ArgKind::Output { len: Some(_) }, ty) => {
+            quote!(::boomerang::runtime::OutputBankRef<'store, #ty>)
+        }
+        (ArgKind::Input { len: None }, ty) => {
+            quote!(::boomerang::runtime::InputRef<'store, #ty>)
+        }
+        (ArgKind::Output { len: None }, ty) => {
+            quote!(::boomerang::runtime::OutputRef<'store, #ty>)
+        }
+        (ArgKind::State { .. } | ArgKind::Param { .. }, _) => {
             return Err(syn::Error::new_spanned(
                 path,
                 "payload mode supports only own ports, modes, and lifecycle relations",
@@ -788,11 +819,6 @@ fn payload_output(
     state_struct: &Option<TokenStream>,
     state_impl: &Option<TokenStream>,
 ) -> TokenStream {
-    if reactor_args.state_init.is_some() && reactor_args.state.is_none() {
-        return quote! {
-            compile_error!("`state_init` requires `state = T`");
-        };
-    }
     if reactor_args.contract.is_none() && reactor_args.contract_version.is_none() {
         return TokenStream::new();
     }
@@ -1428,6 +1454,10 @@ pub struct ArgsModel(pub ReactorArgs, pub Model);
 
 impl ToTokens for ArgsModel {
     fn to_tokens(&self, tokens: &mut TokenStream) {
+        if let Err(error) = self.0.validate() {
+            tokens.append_all(error.to_compile_error());
+            return;
+        }
         let descriptor_output = descriptor_output(&self.0, &self.1);
         let conflict_output = quote! {
             compile_error!("__boomerang_descriptor and __boomerang_payload cannot both be enabled");

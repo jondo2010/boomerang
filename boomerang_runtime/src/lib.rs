@@ -18,6 +18,7 @@ mod key_set;
 pub mod port;
 pub mod reaction;
 mod reactor;
+mod reference;
 pub mod refs;
 mod refs_extract;
 #[cfg(feature = "replay")]
@@ -56,6 +57,7 @@ pub use reaction::{
     EnclaveSenderReactionFn, FromRefs, Reaction, ReactionFn, ReactionKey, ReactionSet,
 };
 pub use reactor::*;
+pub use reference::{execute_owned, ExecuteOwnedError, OwnedExecutionResult, StateAccessError};
 pub use refs::{Refs, RefsMut};
 pub use refs_extract::{ReactionRefs, ReactionRefsError, ReactionRefsExtract};
 pub use sched::*;

@@ -17,6 +17,17 @@ use crate::{
 /// Errors returned by direct reaction implementations.
 pub type ReactionBindingError = crate::ReactionRefsError;
 
+type StorageLayout = (
+    TinySecondaryMap<StateSlotIndex, BindingSlotIndex>,
+    TinySecondaryMap<ActionSlotIndex, crate::image::ActionImage>,
+);
+
+type InitializedContexts = (
+    TinyMap<ReactorIndex, Context>,
+    crate::Receiver<crate::event::AsyncEvent>,
+    crate::keepalive::Sender,
+);
+
 /// Heap-backed factories and invokers bound directly to compiled-image slots.
 pub struct OwnedBindings {
     /// Factories and invokers for the image's typed required binding slots.
@@ -121,11 +132,11 @@ trait StateInitializer: Send + Sync {
 }
 
 /// A dynamically stored state value retaining its concrete type for checked diagnostics.
-struct StoredState {
+pub(crate) struct StoredState {
     /// The heterogeneous reactor state payload.
-    value: Box<dyn ReactorData>,
+    pub(crate) value: Box<dyn ReactorData>,
     /// The payload's concrete Rust type name captured before type erasure.
-    type_name: &'static str,
+    pub(crate) type_name: &'static str,
 }
 
 /// A concrete function-pointer state initializer.
@@ -524,31 +535,9 @@ impl<'image> OwnedStorage<'image> {
         })
     }
 
-    /// Returns an immutable checked state reference for later execution-result delegation.
-    pub(crate) fn state<T: ReactorData>(
-        &self,
-        slot: StateSlotIndex,
-    ) -> Result<&T, OwnedStorageError> {
-        let state = self
-            .states
-            .get(slot)
-            .ok_or(OwnedStorageError::StateMissing { slot })?;
-        state
-            .value
-            .downcast_ref::<T>()
-            .ok_or(OwnedStorageError::StateTypeMismatch {
-                slot,
-                expected: std::any::type_name::<T>(),
-                found: state.type_name,
-            })
-    }
-
-    /// Returns mutable access to the exact action storage slot for scheduler-owned scheduling.
-    pub(crate) fn action_mut(
-        &mut self,
-        slot: ActionSlotIndex,
-    ) -> Result<&mut dyn BaseAction, OwnedStorageError> {
-        Ok(self.actions[slot].as_mut())
+    /// Releases the final owned states after scheduler-owned image data is no longer needed.
+    pub(crate) fn into_states(self) -> TinyMap<StateSlotIndex, StoredState> {
+        self.states
     }
 
     /// Clears every compiled port after its reactions have completed for an execution tag.
@@ -681,13 +670,7 @@ fn validate_bindings(
 /// Verifies dense state and action slot coverage without initializing payload values.
 fn validate_storage_layout(
     image: &EnclaveImageView<'_>,
-) -> Result<
-    (
-        TinySecondaryMap<StateSlotIndex, BindingSlotIndex>,
-        TinySecondaryMap<ActionSlotIndex, crate::image::ActionImage>,
-    ),
-    OwnedStorageError,
-> {
+) -> Result<StorageLayout, OwnedStorageError> {
     let mut state_bindings = TinySecondaryMap::new();
     for (_, reactor) in image.reactors().iter() {
         let slot = reactor.state_slot();
@@ -877,14 +860,7 @@ fn initialize_reaction_refs(
 /// Initializes one context per reactor plus the channels that keep it schedulable.
 fn initialize_contexts(
     image: &EnclaveImageView<'_>,
-) -> Result<
-    (
-        TinyMap<ReactorIndex, Context>,
-        crate::Receiver<crate::event::AsyncEvent>,
-        crate::keepalive::Sender,
-    ),
-    OwnedStorageError,
-> {
+) -> Result<InitializedContexts, OwnedStorageError> {
     let (event_tx, event_rx) = kanal::bounded(image.storage_bounds().event_capacity() as usize);
     let (shutdown_tx, shutdown_rx) = crate::keepalive::channel();
     let start_time = Instant::now();
@@ -1245,24 +1221,6 @@ mod tests {
             OwnedStorageError::MissingPortFactory {
                 slot,
             } if slot == PortIndex::new(0)
-        ));
-    }
-
-    #[test]
-    fn state_accessor_rejects_a_wrong_concrete_type() {
-        let storage = OwnedStorage::new(image(), complete_bindings()).unwrap();
-
-        let error = storage.state::<u32>(StateSlotIndex::new(0)).unwrap_err();
-
-        assert!(matches!(
-            error,
-            OwnedStorageError::StateTypeMismatch {
-                slot,
-                expected,
-                found,
-            } if slot == StateSlotIndex::new(0)
-                && expected == std::any::type_name::<u32>()
-                && found == std::any::type_name::<TestState>()
         ));
     }
 

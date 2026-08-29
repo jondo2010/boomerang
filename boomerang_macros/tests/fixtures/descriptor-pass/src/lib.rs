@@ -90,6 +90,8 @@ pub mod lifetime_collision {
     use super::*;
 
     /// Declares the lifetime name formerly hardcoded by payload generation.
+    ///
+    /// The generated `LifetimeState::marker` field retains the user's `'store` lifetime.
     #[reactor(contract = "example.lifetime", contract_version = 1)]
     fn Lifetime<'store>(#[state(default = "")] marker: &'store str) -> impl Reactor {
         reaction! {
@@ -116,6 +118,7 @@ pub mod private_empty {
 mod missing_state_init {
     use super::*;
 
+    /// Custom state intentionally missing a payload initializer.
     #[derive(Clone)]
     struct CustomState;
 

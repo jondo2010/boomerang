@@ -323,13 +323,14 @@ The target-compiled payload facet exposes:
 - one typed function per implementation-local reaction slot, preserving the source reaction body
   and its concrete context, state, trigger, use, and effect reference types.
 
-Generated state uses its generated `Default` initializer. A custom `#[reactor(state = T)]` must add
-`state_init = path` for payload mode; the path is a zero-argument constructor returning `T`.
-The custom state type must be public at the path used by the payload exports so a separate launcher
-crate can name it. `state_init` without `state` is invalid. Codec, driver, and static-storage
-bindings remain later slices because they require source declaration models or backend choices;
-this architecture does not introduce placeholders for them. The compatibility header contains
-neither binding slots nor a function table.
+Payload-generated state structs and empty state aliases are public regardless of source reactor
+visibility so a separate launcher crate can use them. Generated state uses its generated `Default`
+initializer. Custom `#[reactor(state = T)]` types remain user-owned and must be publicly accessible
+to the launcher; payload mode also requires `state_init = path`, a zero-argument constructor
+returning `T`. `state_init` without `state` is invalid. Codec, driver, and static-storage bindings
+remain later slices because they require source declaration models or backend choices; this
+architecture does not introduce placeholders for them. The compatibility header contains neither
+binding slots nor a function table.
 
 The payload facet may also generate wrappers used by the owned host reference executor. Those
 wrappers do not define a separate graph or lowering path.

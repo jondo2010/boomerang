@@ -744,18 +744,13 @@ fn live_scheduler_result<T>(
 /// no-op federated hook; Task 4 owns the public executor and result boundary.
 #[allow(dead_code)] // Task 4 invokes this crate-private adapter.
 pub(crate) fn run_owned_scheduler(
-    schedule: &EnclaveImageView<'_>,
     storage: &mut OwnedStorage<'_>,
     config: &Config,
 ) -> Result<Tag, SchedulerError<OwnedStorageError>> {
-    if !storage.scheduler_matches(schedule) {
-        return Err(SchedulerError::Execution(
-            OwnedStorageError::SchedulerImageMismatch,
-        ));
-    }
+    let schedule = storage.scheduler_image();
     let reaction_limits = schedule.reaction_limits();
     let reaction_capacity = reaction_limits.num_keys;
-    let mut events = EventManager::new(reaction_limits, schedule);
+    let mut events = EventManager::new(reaction_limits, &schedule);
     let event_rx = storage.scheduler_event_rx();
     let shutdown_tx = storage.take_scheduler_shutdown_tx();
     let mut start_time = std::time::Instant::now();
@@ -774,7 +769,7 @@ pub(crate) fn run_owned_scheduler(
     SchedulerCore {
         key: EnclaveKey::default(),
         config,
-        schedule,
+        schedule: &schedule,
         storage,
         event_rx: &event_rx,
         events: &mut events,

@@ -452,16 +452,8 @@ impl<'image> OwnedStorage<'image> {
         } = bindings;
 
         validate_action_delays(&action_images)?;
-        let states = initialize_states(
-            image.storage_bounds().state_slots(),
-            &state_bindings,
-            &bindings,
-        )?;
-        let actions = initialize_actions(
-            image.storage_bounds().action_slots(),
-            &action_images,
-            &action_factories,
-        )?;
+        let states = initialize_states(&state_bindings, &bindings)?;
+        let actions = initialize_actions(&action_images, &action_factories)?;
         let ports = initialize_ports(&image, &port_factories)?;
         let reactions = initialize_reactions(bindings);
         let (contexts, event_rx, shutdown_tx) = initialize_contexts(&image)?;
@@ -664,14 +656,12 @@ fn validate_storage_layout(
 
 /// Initializes the dense state map only after all binding and slot validation succeeds.
 fn initialize_states(
-    count: u32,
     state_bindings: &TinySecondaryMap<StateSlotIndex, BindingSlotIndex>,
     bindings: &TinySecondaryMap<BindingSlotIndex, Binding>,
 ) -> Result<TinyMap<StateSlotIndex, StoredState>, OwnedStorageError> {
-    let mut states = TinyMap::with_capacity(count as usize);
-    for raw_slot in 0..count {
-        let slot = StateSlotIndex::new(raw_slot);
-        let binding_slot = state_bindings[slot];
+    let mut states = TinyMap::with_capacity(state_bindings.len());
+    for (slot, binding_slot) in state_bindings.iter() {
+        let binding_slot = *binding_slot;
         let binding = &bindings[binding_slot];
         let Binding::State(initializer) = binding else {
             return Err(OwnedStorageError::BindingKindMismatch {
@@ -704,14 +694,11 @@ fn validate_action_delays(
 
 /// Initializes the dense action map and internally supplies shutdown unit actions.
 fn initialize_actions(
-    count: u32,
     action_images: &TinySecondaryMap<ActionSlotIndex, crate::image::ActionImage>,
     factories: &TinySecondaryMap<ActionSlotIndex, Box<dyn ActionFactory>>,
 ) -> Result<TinyMap<ActionSlotIndex, Box<dyn BaseAction>>, OwnedStorageError> {
-    let mut actions = TinyMap::with_capacity(count as usize);
-    for raw_slot in 0..count {
-        let slot = ActionSlotIndex::new(raw_slot);
-        let action = action_images[slot];
+    let mut actions = TinyMap::with_capacity(action_images.len());
+    for (slot, action) in action_images.iter() {
         let value = match action.timing() {
             ActionTiming::Shutdown => {
                 Action::<()>::new("shutdown", ActionKey::new(slot.as_u32()), None, true).boxed()

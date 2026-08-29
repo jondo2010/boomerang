@@ -454,6 +454,11 @@ struct ReactionReferenceLayout {
     actions: Vec<NonNull<dyn BaseAction>>,
 }
 
+// SAFETY: These pointers target the boxed ports and actions owned by the same `OwnedStorage`.
+// Moving storage preserves those heap allocations; construction checks mutable-reference aliases,
+// and invocation requires exclusive mutable access to the storage.
+unsafe impl Send for ReactionReferenceLayout {}
+
 impl fmt::Debug for OwnedStorage<'_> {
     /// Formats structural storage information without requiring erased payloads to be debuggable.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -603,9 +608,14 @@ impl<'image> OwnedStorage<'image> {
 
     /// Copies the borrowed image descriptor so scheduler composition uses this storage's exact image.
     pub(crate) fn scheduler_image(&self) -> EnclaveImageView<'image> {
-        // SAFETY: EnclaveImageView contains only Copy borrowed image data and has no destructor.
-        unsafe { std::ptr::read(&self.image) }
+        copy_borrowed_image_view(&self.image)
     }
+}
+
+/// Copies the present borrowed-only image descriptor without requiring a public `Clone` impl.
+fn copy_borrowed_image_view<'image>(image: &EnclaveImageView<'image>) -> EnclaveImageView<'image> {
+    // SAFETY: `EnclaveImageView` currently contains only Copy borrowed image data and no destructor.
+    unsafe { std::ptr::read(image) }
 }
 
 /// Validates every required binding before any state initializer can run.
@@ -1334,5 +1344,12 @@ mod tests {
             OwnedStorageError::DynamicModeTransitionUnsupported { reaction }
                 if reaction == ReactionIndex::new(0)
         ));
+    }
+
+    #[test]
+    fn owned_storage_is_send() {
+        fn assert_send<T: Send>() {}
+
+        assert_send::<OwnedStorage<'static>>();
     }
 }

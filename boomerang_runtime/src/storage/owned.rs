@@ -11,7 +11,7 @@ use crate::{
         ReactionIndex, ReactorIndex, StateSlotIndex, TimingDomain,
     },
     port::{BasePort, Port, PortKey},
-    Context, Duration, EnclaveKey, ReactionRefs, ReactorData, Refs, RefsMut,
+    Context, Duration, EnclaveKey, ReactionRefs, ReactorData, Refs, RefsMut, Tag, TriggerRes,
 };
 
 /// Errors returned by direct reaction implementations.
@@ -117,7 +117,15 @@ impl Binding {
 /// Object-safe state construction behind the public generic binding method.
 trait StateInitializer: Send + Sync {
     /// Builds a fresh dynamically typed reactor state.
-    fn initialize(&self) -> Box<dyn ReactorData>;
+    fn initialize(&self) -> StoredState;
+}
+
+/// A dynamically stored state value retaining its concrete type for checked diagnostics.
+struct StoredState {
+    /// The heterogeneous reactor state payload.
+    value: Box<dyn ReactorData>,
+    /// The payload's concrete Rust type name captured before type erasure.
+    type_name: &'static str,
 }
 
 /// A concrete function-pointer state initializer.
@@ -130,8 +138,11 @@ struct TypedStateInitializer<T: ReactorData> {
 
 impl<T: ReactorData> StateInitializer for TypedStateInitializer<T> {
     /// Builds the concrete state and erases only its payload type.
-    fn initialize(&self) -> Box<dyn ReactorData> {
-        Box::new((self.init)())
+    fn initialize(&self) -> StoredState {
+        StoredState {
+            value: Box::new((self.init)()),
+            type_name: std::any::type_name::<T>(),
+        }
     }
 }
 
@@ -396,7 +407,7 @@ pub struct OwnedStorage<'image> {
     /// The validated immutable image that defines every dense storage domain.
     image: EnclaveImageView<'image>,
     /// Concrete reactor payloads keyed by exact image state slots.
-    states: TinyMap<StateSlotIndex, Box<dyn ReactorData>>,
+    states: TinyMap<StateSlotIndex, StoredState>,
     /// Concrete actions keyed by exact image action storage slots.
     actions: TinyMap<ActionSlotIndex, Box<dyn BaseAction>>,
     /// Concrete ports keyed by exact image port slots.
@@ -440,6 +451,7 @@ impl<'image> OwnedStorage<'image> {
             ports: port_factories,
         } = bindings;
 
+        validate_action_delays(&action_images)?;
         let states = initialize_states(
             image.storage_bounds().state_slots(),
             &state_bindings,
@@ -475,13 +487,13 @@ impl<'image> OwnedStorage<'image> {
             .states
             .get(slot)
             .ok_or(OwnedStorageError::StateMissing { slot })?;
-        let found = std::any::type_name_of_val(state.as_ref());
         state
+            .value
             .downcast_ref::<T>()
             .ok_or(OwnedStorageError::StateTypeMismatch {
                 slot,
                 expected: std::any::type_name::<T>(),
-                found,
+                found: state.type_name,
             })
     }
 
@@ -502,7 +514,8 @@ impl<'image> OwnedStorage<'image> {
     pub(crate) fn invoke_reaction(
         &mut self,
         reaction: ReactionIndex,
-    ) -> Result<(), OwnedStorageError> {
+        tag: Tag,
+    ) -> Result<TriggerRes, OwnedStorageError> {
         let reaction_image = self.image.reactions()[reaction];
         let reactor = reaction_image.reactor();
         let state_slot = self.image.reactors()[reactor].state_slot();
@@ -523,6 +536,7 @@ impl<'image> OwnedStorage<'image> {
         let mut actions = action_pointers(&mut self.actions, &action_slots)?;
 
         let context = &mut self.contexts[reactor];
+        context.reset_for_reaction(tag);
         let state = &mut self.states[state_slot];
         let invoker = self.reactions.get_mut(reaction_image.binding()).ok_or(
             OwnedStorageError::MissingReactionInvoker {
@@ -535,8 +549,8 @@ impl<'image> OwnedStorage<'image> {
             ports_mut: RefsMut::new(&mut effect_ports),
             actions: RefsMut::new(&mut actions),
         };
-        invoker.invoke(context, state.as_mut(), refs)?;
-        Ok(())
+        invoker.invoke(context, state.value.as_mut(), refs)?;
+        Ok(context.trigger_res.clone())
     }
 
     /// Returns the immutable image defining this storage's dense key domains.
@@ -653,7 +667,7 @@ fn initialize_states(
     count: u32,
     state_bindings: &TinySecondaryMap<StateSlotIndex, BindingSlotIndex>,
     bindings: &TinySecondaryMap<BindingSlotIndex, Binding>,
-) -> Result<TinyMap<StateSlotIndex, Box<dyn ReactorData>>, OwnedStorageError> {
+) -> Result<TinyMap<StateSlotIndex, StoredState>, OwnedStorageError> {
     let mut states = TinyMap::with_capacity(count as usize);
     for raw_slot in 0..count {
         let slot = StateSlotIndex::new(raw_slot);
@@ -670,6 +684,22 @@ fn initialize_states(
         debug_assert_eq!(inserted, slot);
     }
     Ok(states)
+}
+
+/// Rejects action delays that cannot fit the runtime duration type before state initialization.
+fn validate_action_delays(
+    action_images: &TinySecondaryMap<ActionSlotIndex, crate::image::ActionImage>,
+) -> Result<(), OwnedStorageError> {
+    for (_, action) in action_images.iter() {
+        if let ActionTiming::Standard {
+            min_delay_nanos, ..
+        } = action.timing()
+        {
+            i64::try_from(min_delay_nanos)
+                .map_err(|_| OwnedStorageError::DelayOutOfRange { min_delay_nanos })?;
+        }
+    }
+    Ok(())
 }
 
 /// Initializes the dense action map and internally supplies shutdown unit actions.
@@ -814,12 +844,13 @@ mod tests {
         image::{
             ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotIndex,
             EnclaveImage, EnclaveImageView, IdentityRange, PortImage, PortIndex, ReactionImage,
-            ReactorImage, ReactorIndex, RequiredBindingImage, ScopeImage, ScopeIndex,
-            StateSlotIndex, StorageBounds, TableRange, TimingDomain, TinyMapView,
+            ReactionIndex, ReactorImage, ReactorIndex, RequiredBindingImage, ScopeImage,
+            ScopeIndex, StateSlotIndex, StorageBounds, TableRange, TimingDomain, TinyMapView,
         },
-        Context, OwnedBindings, OwnedStorage, OwnedStorageError, ReactionBindingError,
-        ReactionRefs, ReactorData,
+        CommonContext, Context, Duration, OwnedBindings, OwnedStorage, OwnedStorageError,
+        ReactionBindingError, ReactionRefs, ReactorData, Tag,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// State used to prove the checked state accessor rejects a wrong concrete type.
     struct TestState;
@@ -838,6 +869,30 @@ mod tests {
         Ok(())
     }
 
+    /// Counts invocations to prove failed construction does not initialize state.
+    static INITIALIZER_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    /// Initializes state while recording whether construction reached this side effect.
+    fn counted_initializer() -> TestState {
+        INITIALIZER_CALLS.fetch_add(1, Ordering::SeqCst);
+        TestState
+    }
+
+    /// Counts invocations to prove each reaction starts with a fresh trigger result.
+    static REACTION_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    /// Schedules shutdown only during its first invocation.
+    fn schedule_shutdown_once(
+        context: &mut Context,
+        _state: &mut dyn ReactorData,
+        _refs: ReactionRefs<'_>,
+    ) -> Result<(), ReactionBindingError> {
+        if REACTION_CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
+            context.schedule_shutdown(Some(Duration::nanoseconds(1)));
+        }
+        Ok(())
+    }
+
     static REACTORS: [ReactorImage; 1] = [ReactorImage::new(
         BindingSlotIndex::new(0),
         StateSlotIndex::new(0),
@@ -852,6 +907,15 @@ mod tests {
         ActionTiming::Standard {
             domain: TimingDomain::Logical,
             min_delay_nanos: 0,
+        },
+        TableRange::new(0, 0),
+    )];
+    static UNREPRESENTABLE_ACTIONS: [ActionImage; 1] = [ActionImage::new(
+        ScopeIndex::new(0),
+        ActionSlotIndex::new(0),
+        ActionTiming::Standard {
+            domain: TimingDomain::Logical,
+            min_delay_nanos: u64::MAX,
         },
         TableRange::new(0, 0),
     )];
@@ -911,10 +975,19 @@ mod tests {
         required_bindings: TinyMapView::new(&REQUIRED_BINDINGS),
         storage_bounds: StorageBounds::new(1, 1, 1, 0, 0, 0),
     };
+    static UNREPRESENTABLE_ACTION_IMAGE: EnclaveImage<'static> = EnclaveImage {
+        actions: TinyMapView::new(&UNREPRESENTABLE_ACTIONS),
+        ..IMAGE
+    };
 
     /// Returns a fresh validated view of the immutable test image.
     fn image() -> EnclaveImageView<'static> {
         EnclaveImageView::new(&IMAGE).expect("test image is valid")
+    }
+
+    /// Returns a validated image whose action delay cannot fit the runtime duration type.
+    fn unrepresentable_action_image() -> EnclaveImageView<'static> {
+        EnclaveImageView::new(&UNREPRESENTABLE_ACTION_IMAGE).expect("test image is valid")
     }
 
     /// Returns bindings for every non-lifecycle storage slot in [`IMAGE`].
@@ -999,8 +1072,49 @@ mod tests {
             error,
             OwnedStorageError::StateTypeMismatch {
                 slot,
-                ..
+                expected,
+                found,
             } if slot == StateSlotIndex::new(0)
+                && expected == std::any::type_name::<u32>()
+                && found == std::any::type_name::<TestState>()
         ));
+    }
+
+    #[test]
+    fn rejects_unrepresentable_action_delay_before_initializing_state() {
+        INITIALIZER_CALLS.store(0, Ordering::SeqCst);
+        let bindings = OwnedBindings::new()
+            .bind_state(BindingSlotIndex::new(0), counted_initializer)
+            .bind_action::<u32>(ActionSlotIndex::new(0))
+            .bind_port::<u32>(PortIndex::new(0))
+            .bind_reaction(BindingSlotIndex::new(1), reaction);
+
+        let error = OwnedStorage::new(unrepresentable_action_image(), bindings).unwrap_err();
+
+        assert!(matches!(error, OwnedStorageError::DelayOutOfRange { .. }));
+        assert_eq!(INITIALIZER_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn invocation_uses_the_given_tag_and_returns_a_fresh_trigger_result() {
+        REACTION_CALLS.store(0, Ordering::SeqCst);
+        let bindings =
+            complete_bindings().bind_reaction(BindingSlotIndex::new(1), schedule_shutdown_once);
+        let mut storage = OwnedStorage::new(image(), bindings).unwrap();
+        let first_tag = Tag::new(Duration::nanoseconds(7), 2);
+        let second_tag = Tag::new(Duration::nanoseconds(9), 0);
+
+        let first = storage
+            .invoke_reaction(ReactionIndex::new(0), first_tag)
+            .unwrap();
+        let second = storage
+            .invoke_reaction(ReactionIndex::new(0), second_tag)
+            .unwrap();
+
+        assert_eq!(
+            first.scheduled_shutdown,
+            Some(Tag::new(Duration::nanoseconds(8), 0))
+        );
+        assert!(second.scheduled_shutdown.is_none());
     }
 }

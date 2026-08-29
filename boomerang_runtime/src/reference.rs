@@ -102,10 +102,10 @@ pub fn execute_owned<'image>(
         crate::image::EnclaveImageView::new(image).map_err(ExecuteOwnedError::ImageValidation)?;
     let mut storage = OwnedStorage::new(image, bindings).map_err(ExecuteOwnedError::Storage)?;
     let final_tag = run_owned_scheduler(&mut storage, &config).map_err(|error| match error {
-        crate::sched::SchedulerCoreError::Runtime(source) => {
+        crate::sched::SchedulerError::Coordination(source) => {
             ExecuteOwnedError::SchedulerRuntime(source)
         }
-        crate::sched::SchedulerCoreError::Execution(source) => {
+        crate::sched::SchedulerError::Execution(source) => {
             ExecuteOwnedError::SchedulerExecution(source)
         }
     })?;

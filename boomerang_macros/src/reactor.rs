@@ -659,6 +659,7 @@ fn payload_relationship_target(
     }
 }
 
+/// Returns a canonical implementation-local binding symbol as a Rust identifier.
 fn required_binding_symbol(reactor: &str, reaction: Option<&str>) -> Ident {
     let component = boomerang_builder::compiler::ComponentInstanceId::new("macro")
         .expect("macro is a valid component ID");
@@ -692,11 +693,13 @@ fn required_binding_symbol(reactor: &str, reaction: Option<&str>) -> Ident {
     format_ident!("{}", binding.symbol())
 }
 
+/// Resolves one own-relation reference to its concrete payload parameter type.
 fn payload_ref(
     reactor_name: &str,
     args: &[Arg],
     mode_names: &[String],
     path: &crate::reaction::PathOrIdent,
+    store_lifetime: &syn::Lifetime,
 ) -> syn::Result<(Ident, TokenStream)> {
     let crate::reaction::PathOrIdent::Simple(ident) = path else {
         return Err(syn::Error::new_spanned(
@@ -720,24 +723,24 @@ fn payload_ref(
         (ArgKind::Input { len: None }, Type::Array(array)) => {
             let element = &array.elem;
             let len = &array.len;
-            quote!([::boomerang::runtime::InputRef<'store, #element>; #len])
+            quote!([::boomerang::runtime::InputRef<#store_lifetime, #element>; #len])
         }
         (ArgKind::Output { len: None }, Type::Array(array)) => {
             let element = &array.elem;
             let len = &array.len;
-            quote!([::boomerang::runtime::OutputRef<'store, #element>; #len])
+            quote!([::boomerang::runtime::OutputRef<#store_lifetime, #element>; #len])
         }
         (ArgKind::Input { len: Some(_) }, ty) => {
-            quote!(::boomerang::runtime::InputBankRef<'store, #ty>)
+            quote!(::boomerang::runtime::InputBankRef<#store_lifetime, #ty>)
         }
         (ArgKind::Output { len: Some(_) }, ty) => {
-            quote!(::boomerang::runtime::OutputBankRef<'store, #ty>)
+            quote!(::boomerang::runtime::OutputBankRef<#store_lifetime, #ty>)
         }
         (ArgKind::Input { len: None }, ty) => {
-            quote!(::boomerang::runtime::InputRef<'store, #ty>)
+            quote!(::boomerang::runtime::InputRef<#store_lifetime, #ty>)
         }
         (ArgKind::Output { len: None }, ty) => {
-            quote!(::boomerang::runtime::OutputRef<'store, #ty>)
+            quote!(::boomerang::runtime::OutputRef<#store_lifetime, #ty>)
         }
         (ArgKind::State { .. } | ArgKind::Param { .. }, _) => {
             return Err(syn::Error::new_spanned(
@@ -749,12 +752,32 @@ fn payload_ref(
     Ok((ident.clone(), reference))
 }
 
+/// Chooses a generated payload-reference lifetime absent from user generics.
+fn fresh_payload_lifetime(generics: &syn::Generics) -> syn::Lifetime {
+    for ordinal in 0u32.. {
+        let candidate = if ordinal == 0 {
+            "__boomerang_store".to_owned()
+        } else {
+            format!("__boomerang_store_{ordinal}")
+        };
+        if generics
+            .lifetimes()
+            .all(|parameter| parameter.lifetime.ident != candidate)
+        {
+            return syn::Lifetime::new(&format!("'{candidate}"), Span::call_site());
+        }
+    }
+    unreachable!("u32 payload lifetime namespace exhausted")
+}
+
+/// Emits typed payload functions for every descriptor-local reaction slot.
 fn payload_reaction_output(
     model: &Model,
     state_type: &syn::Path,
     mode_names: &[String],
 ) -> syn::Result<Vec<TokenStream>> {
     let reactor_name = ident_text(&model.name);
+    let store_lifetime = fresh_payload_lifetime(&model.generics);
     let mut reactions = Vec::new();
     model.body.reactions(None, &mut reactions);
     reactions
@@ -766,25 +789,40 @@ fn payload_reaction_output(
                 .map(ident_text)
                 .unwrap_or_else(|| format!("#g{ordinal}"));
             let symbol = required_binding_symbol(&reactor_name, Some(&reaction_name));
+            let export_doc = format!(
+                "Invokes payload reaction `{reactor_name}/{reaction_name}` with concrete references."
+            );
             let mut refs = Vec::new();
             for trigger in reaction.triggers() {
                 match trigger {
                     crate::reaction::TriggerType::Startup => refs.push((
                         format_ident!("startup"),
-                        quote!(::boomerang::runtime::ActionRef<'store>),
+                        quote!(::boomerang::runtime::ActionRef<#store_lifetime>),
                     )),
                     crate::reaction::TriggerType::Shutdown => refs.push((
                         format_ident!("shutdown"),
-                        quote!(::boomerang::runtime::ActionRef<'store>),
+                        quote!(::boomerang::runtime::ActionRef<#store_lifetime>),
                     )),
                     crate::reaction::TriggerType::Reset => {}
                     crate::reaction::TriggerType::Regular(path) => {
-                        refs.push(payload_ref(&reactor_name, &model.args, mode_names, path)?);
+                        refs.push(payload_ref(
+                            &reactor_name,
+                            &model.args,
+                            mode_names,
+                            path,
+                            &store_lifetime,
+                        )?);
                     }
                 }
             }
             for path in reaction.uses() {
-                refs.push(payload_ref(&reactor_name, &model.args, mode_names, path)?);
+                refs.push(payload_ref(
+                    &reactor_name,
+                    &model.args,
+                    mode_names,
+                    path,
+                    &store_lifetime,
+                )?);
             }
             for effect in reaction.effects() {
                 let path = match effect {
@@ -792,14 +830,24 @@ fn payload_reaction_output(
                     | crate::reaction::EffectType::Reset(path)
                     | crate::reaction::EffectType::History(path) => path,
                 };
-                refs.push(payload_ref(&reactor_name, &model.args, mode_names, path)?);
+                refs.push(payload_ref(
+                    &reactor_name,
+                    &model.args,
+                    mode_names,
+                    path,
+                    &store_lifetime,
+                )?);
             }
             let (ref_names, ref_types): (Vec<_>, Vec<_>) = refs.into_iter().unzip();
             let code = reaction.code();
             let mut generics = model.generics.clone();
-            generics.params.insert(0, parse_quote!('store));
+            generics.params.insert(
+                0,
+                syn::GenericParam::Lifetime(syn::LifetimeParam::new(store_lifetime.clone())),
+            );
             let (impl_generics, _, where_clause) = generics.split_for_impl();
             Ok(quote! {
+                #[doc = #export_doc]
                 #[allow(non_snake_case, unused_mut, unused_variables)]
                 pub fn #symbol #impl_generics(
                     ctx: &mut ::boomerang::runtime::Context,
@@ -1555,22 +1603,34 @@ impl ToTokens for ArgsModel {
             })
             .collect::<Vec<_>>();
 
-        let state_struct = if reactor_args.state.is_none() {
-            let state_struct = if state_args.is_empty() {
-                quote! {
-                    #vis type #state_ident = ();
-                }
+        let (state_struct, payload_state_struct) = if reactor_args.state.is_none() {
+            if state_args.is_empty() {
+                (
+                    Some(quote! {
+                        #vis type #state_ident = ();
+                    }),
+                    Some(quote! {
+                        pub type #state_ident = ();
+                    }),
+                )
             } else {
-                quote! {
-                    #[derive(Clone)]
-                    #vis struct #state_ident #impl_generics #where_clause {
-                        #(#state_args),*
-                    }
-                }
-            };
-            Some(state_struct)
+                (
+                    Some(quote! {
+                        #[derive(Clone)]
+                        #vis struct #state_ident #impl_generics #where_clause {
+                            #(#state_args),*
+                        }
+                    }),
+                    Some(quote! {
+                        #[derive(Clone)]
+                        pub struct #state_ident #impl_generics #where_clause {
+                            #(#state_args),*
+                        }
+                    }),
+                )
+            }
         } else {
-            None
+            (None, None)
         };
 
         let state_impl = if reactor_args.state.is_none() && !state_args.is_empty() {
@@ -1590,7 +1650,7 @@ impl ToTokens for ArgsModel {
             reactor_args,
             &self.1,
             &state_type_path,
-            &state_struct,
+            &payload_state_struct,
             &state_impl,
         );
 

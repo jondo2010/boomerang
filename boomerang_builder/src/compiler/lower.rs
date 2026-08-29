@@ -85,7 +85,7 @@ pub enum CompileError {
         implementation: super::ImplementationId,
         /// Required direct binding category.
         kind: &'static str,
-        /// Logical path relative to the component instance.
+        /// Fully qualified logical path of the unmatched binding.
         logical: String,
     },
     /// A logical runtime binding matches more than one descriptor-local slot.
@@ -99,7 +99,7 @@ pub enum CompileError {
         implementation: super::ImplementationId,
         /// Required direct binding category.
         kind: &'static str,
-        /// Logical path relative to the component instance.
+        /// Fully qualified logical path of the ambiguous binding.
         logical: String,
         /// Number of matching descriptor slots.
         candidates: usize,

@@ -90,6 +90,11 @@ fn required_bindings_export_typed_payload_symbols() {
 }
 
 #[test]
+fn required_bindings_compile_in_a_separate_launcher() {
+    cargo_check("payload-launcher", &[]).unwrap();
+}
+
+#[test]
 fn required_bindings_reject_custom_state_without_initializer() {
     let stderr = cargo_check(
         "descriptor-pass",
@@ -134,11 +139,8 @@ fn required_bindings_reject_lexical_payload_relations() {
 #[test]
 fn required_bindings_reject_macro_abi_mismatch_separately() {
     let stderr = cargo_check(
-        "descriptor-pass",
-        &[
-            "--features",
-            "__boomerang_payload binding-macro-abi-mismatch",
-        ],
+        "payload-launcher",
+        &["--features", "binding-macro-abi-mismatch"],
     )
     .expect_err("payload macro ABI mismatch should fail");
     assert!(
@@ -150,11 +152,8 @@ fn required_bindings_reject_macro_abi_mismatch_separately() {
 #[test]
 fn payload_launcher_rejects_a_descriptor_fingerprint_mismatch() {
     let stderr = cargo_check(
-        "descriptor-pass",
-        &[
-            "--features",
-            "__boomerang_payload binding-fingerprint-mismatch",
-        ],
+        "payload-launcher",
+        &["--features", "binding-fingerprint-mismatch"],
     )
     .expect_err("payload fingerprint mismatch should fail");
     assert!(

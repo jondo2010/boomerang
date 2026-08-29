@@ -84,6 +84,34 @@ pub mod shaped {
     }
 }
 
+pub mod lifetime_collision {
+    //! User-lifetime collision and private generated-state fixture.
+
+    use super::*;
+
+    /// Declares the lifetime name formerly hardcoded by payload generation.
+    #[reactor(contract = "example.lifetime", contract_version = 1)]
+    fn Lifetime<'store>(#[state(default = "")] marker: &'store str) -> impl Reactor {
+        reaction! {
+            tick (startup) {}
+        }
+    }
+}
+
+pub mod private_empty {
+    //! Private zero-state reactor fixture.
+
+    use super::*;
+
+    /// Provides a generated empty state alias to the payload launcher.
+    #[reactor(contract = "example.private-empty", contract_version = 1)]
+    fn Empty() -> impl Reactor {
+        reaction! {
+            start (startup) {}
+        }
+    }
+}
+
 #[cfg(feature = "missing-state-init")]
 mod missing_state_init {
     use super::*;
@@ -145,68 +173,6 @@ mod descriptor_tests {
             descriptor.descriptor_fingerprint_input().state_slots(),
             descriptor.state_slots()
         );
-    }
-}
-
-#[cfg(feature = "__boomerang_payload")]
-mod launcher_like {
-    const EXPECTED_FINGERPRINT: boomerang::runtime::binding::DescriptorFingerprint =
-        boomerang::runtime::binding::DescriptorFingerprint::new([
-            199, 47, 226, 90, 173, 60, 225, 154, 76, 243, 98, 167, 187, 152, 112, 172, 14, 8, 133,
-            30, 202, 200, 210, 248, 170, 205, 229, 200, 32, 15, 101, 153,
-        ]);
-    const _: () = boomerang::runtime::binding::assert_descriptor_fingerprint(
-        EXPECTED_FINGERPRINT,
-        super::__boomerang::BINDING_MANIFEST.descriptor_fingerprint(),
-    );
-
-    #[cfg(not(feature = "binding-macro-abi-mismatch"))]
-    const EXPECTED_MACRO_ABI: u32 = boomerang_builder::COMPONENT_DESCRIPTOR_MACRO_ABI;
-    #[cfg(feature = "binding-macro-abi-mismatch")]
-    const EXPECTED_MACRO_ABI: u32 = boomerang_builder::COMPONENT_DESCRIPTOR_MACRO_ABI + 1;
-    const _: () = assert!(
-        EXPECTED_MACRO_ABI == super::__boomerang::BINDING_MANIFEST.macro_abi(),
-        "macro ABI mismatch",
-    );
-
-    #[cfg(feature = "binding-fingerprint-mismatch")]
-    const _: () = boomerang::runtime::binding::assert_descriptor_fingerprint(
-        boomerang::runtime::binding::DescriptorFingerprint::new([0; 32]),
-        super::__boomerang::BINDING_MANIFEST.descriptor_fingerprint(),
-    );
-
-    type MoveRefs<'store> = (
-        boomerang::runtime::InputRef<'store, u32>,
-        boomerang::runtime::ActionRef<'store>,
-        boomerang::runtime::ModeEffectRef,
-        boomerang::runtime::OutputRef<'store, u32>,
-    );
-    type ShapedRefs<'store> = (
-        [boomerang::runtime::InputRef<'store, u16>; 2],
-        boomerang::runtime::InputBankRef<'store, u64>,
-        [boomerang::runtime::OutputRef<'store, u32>; 3],
-        boomerang::runtime::OutputBankRef<'store, u8>,
-    );
-
-    #[allow(dead_code)]
-    fn bind_match<'store>(ctx: &mut boomerang::runtime::Context, refs: MoveRefs<'store>) {
-        let mut state = super::__boomerang::state_Match();
-        super::__boomerang::reaction_Match_2fmove(ctx, &mut state, refs);
-    }
-
-    #[allow(dead_code)]
-    fn bind_shaped<'store>(ctx: &mut boomerang::runtime::Context, refs: ShapedRefs<'store>) {
-        let mut state = super::shaped::__boomerang::state_Shaped();
-        super::shaped::__boomerang::reaction_Shaped_2fshaped(ctx, &mut state, refs);
-    }
-
-    #[allow(dead_code)]
-    fn bind_custom<'store>(
-        ctx: &mut boomerang::runtime::Context,
-        refs: (boomerang::runtime::ActionRef<'store>,),
-    ) {
-        let mut state = super::custom::__boomerang::state_Custom();
-        super::custom::__boomerang::reaction_Custom_2fstart(ctx, &mut state, refs);
     }
 }
 

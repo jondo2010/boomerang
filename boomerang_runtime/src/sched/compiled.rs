@@ -46,7 +46,7 @@ impl Schedule for EnclaveImageView<'_> {
     }
 
     image_schedule_accessors! {
-        fn startup_actions() -> impl Iterator<Item = (Self::Action, Tag)> + '_ |image| image.startup_actions().iter().map(|startup| (startup.action(), compiled_tag(startup.logical_delay_nanos())));
+        fn startup_actions() -> impl Iterator<Item = (Self::Action, Tag)> + '_ |image| image.startup_actions().iter().chain(image.timer_startup_actions()).map(|startup| (startup.action(), compiled_tag(startup.logical_delay_nanos())));
         fn shutdown_actions() -> impl Iterator<Item = Self::Action> + '_ |image| image.shutdown_actions().iter().copied();
         fn reactor_for_reaction(reaction: Self::Reaction) -> Self::Reactor |image| image.reactions()[reaction].reactor();
         fn scope_for_reaction(reaction: Self::Reaction) -> Self::Scope |image| image.reactions()[reaction].scope();
@@ -67,7 +67,7 @@ impl Schedule for EnclaveImageView<'_> {
         fn descendant_scopes(scope: Self::Scope) -> impl Iterator<Item = Self::Scope> + '_ |image| image.scope_descendants(scope).iter().copied();
         fn reset_reactions_in_scope(scope: Self::Scope) -> impl Iterator<Item = (Level, Self::Reaction)> + '_ |image| compiled_reactions(image.scope_reset_reactions(scope).iter().copied());
         fn startups_in_scope(scope: Self::Scope) -> impl Iterator<Item = (Self::Action, (Level, Self::Reaction))> + '_ |image| image.scope_startup_reactions(scope).iter().map(|startup| { let reaction = startup.reaction(); (startup.action(), (Level::from(reaction.level() as usize), reaction.reaction())) });
-        fn reactor_root_scopes() -> impl Iterator<Item = (Self::Reactor, Self::Scope)> + '_ |image| (0..image.reactors().len()).map(move |index| { let reactor = ReactorIndex::new(index as u32); (reactor, image.reactors()[reactor].root_scope()) });
+        fn reactor_root_scopes() -> impl Iterator<Item = (Self::Reactor, Self::Scope)> + '_ |image| image.reactors().keys().map(move |reactor| (reactor, image.reactors()[reactor].root_scope()));
     }
 }
 
@@ -143,7 +143,6 @@ fn compiled_reactions(
 ///
 /// This crate-private adapter owns the queue, scratch, clock, wake channel, and base-native
 /// no-op federated hook; Task 4 owns the public executor and result boundary.
-#[allow(dead_code)] // Task 4 invokes this crate-private adapter.
 pub(crate) fn run_owned_scheduler(
     storage: &mut OwnedStorage<'_>,
     config: &Config,

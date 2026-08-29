@@ -8,7 +8,7 @@ use boomerang::runtime::{
         TimerStartupImage, TinyMapView,
     },
     Config, Context, Duration, ExecuteOwnedError, OwnedBindings, ReactionBindingError,
-    ReactionRefs, ReactorData, Tag,
+    ReactionRefs, ReactorData, StateAccessError, Tag,
 };
 
 /// Mutable reactor state whose startup reaction records one execution.
@@ -33,6 +33,13 @@ fn increment_counter(
         .expect("the image's state binding initializes CounterState")
         .count += 1;
     Ok(())
+}
+
+fn reference_bindings() -> OwnedBindings {
+    OwnedBindings::new()
+        .bind_state(BindingSlotIndex::new(0), initialize_counter)
+        .bind_action::<()>(ActionSlotIndex::new(0))
+        .bind_reaction(BindingSlotIndex::new(1), increment_counter)
 }
 
 static REACTORS: [ReactorImage; 1] = [ReactorImage::new(
@@ -93,9 +100,9 @@ static SCOPE_STARTUP_REACTIONS: [LifecycleReactionImage; 1] = [LifecycleReaction
     LevelReactionImage::new(0, ReactionIndex::new(0)),
     ActionIndex::new(0),
 )];
-static STARTUP_ACTIONS: [TimerStartupImage; 1] = [TimerStartupImage::new(ActionIndex::new(0), 0)];
+static STARTUP_ACTIONS: [TimerStartupImage; 1] = [TimerStartupImage::new(ActionIndex::new(0), 5)];
 static COALESCED_STARTUP_ACTIONS: [TimerStartupImage; 2] = [
-    STARTUP_ACTIONS[0],
+    TimerStartupImage::new(ActionIndex::new(0), 0),
     TimerStartupImage::new(ActionIndex::new(1), 1),
 ];
 static ROUTES: [boomerang::runtime::image::RouteImage; 0] = [];
@@ -124,8 +131,8 @@ static IMAGE: EnclaveImage<'static> = EnclaveImage {
     scope_reset_reactions: &[],
     scope_startup_reactions: &SCOPE_STARTUP_REACTIONS,
     scope_shutdown_reactions: &[],
-    startup_actions: &STARTUP_ACTIONS,
-    timer_startup_actions: &[],
+    startup_actions: &[],
+    timer_startup_actions: &STARTUP_ACTIONS,
     shutdown_reactions: &[],
     shutdown_actions: &[],
     routes: TinyMapView::new(&ROUTES),
@@ -164,13 +171,14 @@ static COALESCED_IMAGE: EnclaveImage<'static> = EnclaveImage {
 
 #[test]
 fn compiled_reference_executes_startup_to_shutdown() {
-    let bindings = OwnedBindings::new()
-        .bind_state(BindingSlotIndex::new(0), initialize_counter)
-        .bind_action::<()>(ActionSlotIndex::new(0))
-        .bind_reaction(BindingSlotIndex::new(1), increment_counter);
-
-    let result =
-        execute_owned(&IMAGE, bindings, Config::default().with_fast_forward(true)).unwrap();
+    let result = execute_owned(
+        &IMAGE,
+        reference_bindings(),
+        Config::default()
+            .with_fast_forward(true)
+            .with_timeout(Duration::nanoseconds(6)),
+    )
+    .unwrap();
 
     assert_eq!(
         result
@@ -179,35 +187,51 @@ fn compiled_reference_executes_startup_to_shutdown() {
             .count,
         1
     );
-    assert_eq!(result.final_tag(), Tag::ZERO);
+    assert!(matches!(
+        result.state::<CounterState>(StateSlotIndex::new(1)),
+        Err(StateAccessError::OutOfRange { slot }) if slot == StateSlotIndex::new(1)
+    ));
+    assert!(matches!(
+        result.state::<u32>(StateSlotIndex::new(0)),
+        Err(StateAccessError::TypeMismatch { slot, expected, found })
+            if slot == StateSlotIndex::new(0)
+                && expected == std::any::type_name::<u32>()
+                && found == std::any::type_name::<CounterState>()
+    ));
+    assert_eq!(result.final_tag(), Tag::new(Duration::nanoseconds(5), 0));
 }
 
 #[test]
 fn compiled_reference_final_tag_excludes_delayed_shutdown_only_work() {
-    let bindings = OwnedBindings::new()
-        .bind_state(BindingSlotIndex::new(0), initialize_counter)
-        .bind_action::<()>(ActionSlotIndex::new(0))
-        .bind_reaction(BindingSlotIndex::new(1), increment_counter);
-
     let result = execute_owned(
         &IMAGE,
-        bindings,
+        reference_bindings(),
         Config::default()
             .with_fast_forward(true)
-            .with_timeout(Duration::nanoseconds(1)),
+            .with_timeout(Duration::nanoseconds(6)),
     )
     .unwrap();
 
-    assert_eq!(result.final_tag(), Tag::ZERO);
+    assert_eq!(result.final_tag(), Tag::new(Duration::nanoseconds(5), 0));
+}
+
+#[test]
+fn compiled_reference_terminal_only_execution_returns_never() {
+    let result = execute_owned(
+        &IMAGE,
+        reference_bindings(),
+        Config::default()
+            .with_fast_forward(true)
+            .with_timeout(Duration::ZERO),
+    )
+    .unwrap();
+
+    assert_eq!(result.final_tag(), Tag::NEVER);
 }
 
 #[test]
 fn compiled_reference_final_tag_includes_work_coalesced_with_shutdown() {
-    let bindings = OwnedBindings::new()
-        .bind_state(BindingSlotIndex::new(0), initialize_counter)
-        .bind_action::<()>(ActionSlotIndex::new(0))
-        .bind_action::<()>(ActionSlotIndex::new(1))
-        .bind_reaction(BindingSlotIndex::new(1), increment_counter);
+    let bindings = reference_bindings().bind_action::<()>(ActionSlotIndex::new(1));
 
     let result = execute_owned(
         &COALESCED_IMAGE,

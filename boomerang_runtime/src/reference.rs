@@ -15,15 +15,27 @@ pub enum ExecuteOwnedError<'image> {
     /// The borrowed compiled image was structurally invalid.
     #[error("invalid compiled image: {0}")]
     ImageValidation(ImageValidationError<'image>),
-    /// Direct bindings could not initialize the owned storage described by the image.
-    #[error("invalid direct bindings or owned storage: {0}")]
-    Storage(#[source] OwnedStorageError),
+    /// Owned storage initialization or directly bound reaction execution failed.
+    #[error("compiled storage or reaction execution failed: {0}")]
+    Storage(#[from] OwnedStorageError),
     /// The scheduler's local logical-time coordination failed.
     #[error("compiled scheduler coordination failed: {0}")]
-    SchedulerRuntime(#[source] RuntimeError),
-    /// A directly bound reaction failed while the scheduler was executing.
-    #[error("compiled scheduler execution failed: {0}")]
-    SchedulerExecution(#[source] OwnedStorageError),
+    Coordination(#[source] RuntimeError),
+}
+
+impl<'image> From<ImageValidationError<'image>> for ExecuteOwnedError<'image> {
+    fn from(source: ImageValidationError<'image>) -> Self {
+        Self::ImageValidation(source)
+    }
+}
+
+impl<'image> From<crate::sched::SchedulerError<OwnedStorageError>> for ExecuteOwnedError<'image> {
+    fn from(error: crate::sched::SchedulerError<OwnedStorageError>) -> Self {
+        match error {
+            crate::sched::SchedulerError::Coordination(source) => Self::Coordination(source),
+            crate::sched::SchedulerError::Execution(source) => Self::Storage(source),
+        }
+    }
 }
 
 /// A typed state-access failure from an owned compiled-image execution result.
@@ -52,7 +64,9 @@ pub enum StateAccessError {
 /// This result owns no scheduler machinery or compiled-image borrow and can therefore outlive the
 /// `EnclaveImage` passed to [`execute_owned`].
 pub struct OwnedExecutionResult {
+    /// Final owned reactor states keyed by compiled storage slot.
     states: TinyMap<StateSlotIndex, StoredState>,
+    /// Last logical tag that processed non-terminal work.
     final_tag: Tag,
 }
 
@@ -98,17 +112,9 @@ pub fn execute_owned<'image>(
     bindings: OwnedBindings,
     config: Config,
 ) -> Result<OwnedExecutionResult, ExecuteOwnedError<'image>> {
-    let image =
-        crate::image::EnclaveImageView::new(image).map_err(ExecuteOwnedError::ImageValidation)?;
-    let mut storage = OwnedStorage::new(image, bindings).map_err(ExecuteOwnedError::Storage)?;
-    let final_tag = run_owned_scheduler(&mut storage, &config).map_err(|error| match error {
-        crate::sched::SchedulerError::Coordination(source) => {
-            ExecuteOwnedError::SchedulerRuntime(source)
-        }
-        crate::sched::SchedulerError::Execution(source) => {
-            ExecuteOwnedError::SchedulerExecution(source)
-        }
-    })?;
+    let image = crate::image::EnclaveImageView::new(image)?;
+    let mut storage = OwnedStorage::new(image, bindings)?;
+    let final_tag = run_owned_scheduler(&mut storage, &config)?;
     Ok(OwnedExecutionResult {
         states: storage.into_states(),
         final_tag,

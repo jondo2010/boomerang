@@ -17,11 +17,17 @@ use crate::{
 /// Errors returned by direct reaction implementations.
 pub type ReactionBindingError = crate::ReactionRefsError;
 
+/// Validated dense storage layout:
+/// 1. state initializer bindings keyed by state slot;
+/// 2. action images keyed by action storage slot.
 type StorageLayout = (
     TinySecondaryMap<StateSlotIndex, BindingSlotIndex>,
     TinySecondaryMap<ActionSlotIndex, crate::image::ActionImage>,
 );
 
+/// Initialized scheduler context resources:
+/// 1. contexts keyed by reactor index;
+/// 2. the event receiver and shutdown sender paired with those contexts.
 type InitializedContexts = (
     TinyMap<ReactorIndex, Context>,
     crate::Receiver<crate::event::AsyncEvent>,
@@ -350,22 +356,6 @@ pub enum OwnedStorageError {
         /// The absent compiled state storage slot.
         slot: StateSlotIndex,
     },
-    /// A checked state lookup referred to no initialized state.
-    #[error("state slot {slot} is missing")]
-    StateMissing {
-        /// The requested compiled state storage slot.
-        slot: StateSlotIndex,
-    },
-    /// A checked state lookup used the wrong concrete payload type.
-    #[error("state slot {slot} has type {found}, not {expected}")]
-    StateTypeMismatch {
-        /// The requested compiled state storage slot.
-        slot: StateSlotIndex,
-        /// The requested concrete Rust type.
-        expected: &'static str,
-        /// The stored concrete Rust type.
-        found: &'static str,
-    },
     /// An action delay could not be represented by the runtime duration type.
     #[error("action minimum delay {min_delay_nanos}ns exceeds the runtime duration range")]
     DelayOutOfRange {
@@ -404,30 +394,6 @@ pub enum OwnedStorageError {
         /// The compiled reaction binding slot.
         slot: BindingSlotIndex,
     },
-    /// A reaction refers to a state slot that was not initialized.
-    #[error("reaction state slot {slot} is missing")]
-    MissingReactionState {
-        /// The compiled state storage slot.
-        slot: StateSlotIndex,
-    },
-    /// A reaction refers to a context that was not initialized.
-    #[error("reaction context for {reactor} is missing")]
-    MissingReactionContext {
-        /// The compiled reactor index.
-        reactor: ReactorIndex,
-    },
-    /// A reaction refers to a port that was not initialized.
-    #[error("reaction port slot {slot} is missing")]
-    MissingReactionPort {
-        /// The compiled port slot.
-        slot: PortIndex,
-    },
-    /// A reaction refers to an action storage slot that was not initialized.
-    #[error("reaction action storage slot {slot} is missing")]
-    MissingReactionAction {
-        /// The compiled action storage slot.
-        slot: ActionSlotIndex,
-    },
     /// A directly bound reaction returned a reference-extraction error.
     #[error(transparent)]
     Reaction(#[from] ReactionBindingError),
@@ -465,9 +431,10 @@ struct ReactionReferenceLayout {
     actions: Vec<NonNull<dyn BaseAction>>,
 }
 
-// SAFETY: These pointers target the boxed ports and actions owned by the same `OwnedStorage`.
-// Moving storage preserves those heap allocations; construction checks mutable-reference aliases,
-// and invocation requires exclusive mutable access to the storage.
+// SAFETY: `BasePort` and `BaseAction` are `Send`. These pointers target boxes owned by the same
+// `OwnedStorage`; moving storage preserves their heap allocations, and those boxes are never
+// replaced after this layout is built. Construction rejects mutable aliases, and invocation
+// requires exclusive access to the storage.
 unsafe impl Send for ReactionReferenceLayout {}
 
 impl fmt::Debug for OwnedStorage<'_> {
@@ -516,10 +483,10 @@ impl<'image> OwnedStorage<'image> {
         validate_action_delays(&action_images)?;
         validate_startup_delays(&image)?;
         validate_reaction_mode_filters(&image)?;
-        let states = initialize_states(&state_bindings, &bindings)?;
         let mut actions = initialize_actions(&action_images, &action_factories)?;
         let mut ports = initialize_ports(&image, &port_factories)?;
         let reaction_refs = initialize_reaction_refs(&image, &mut ports, &mut actions)?;
+        let states = initialize_states(&state_bindings, &bindings)?;
         let reactions = initialize_reactions(bindings);
         let (contexts, event_rx, shutdown_tx) = initialize_contexts(&image)?;
         Ok(Self {
@@ -1258,6 +1225,36 @@ mod tests {
             error,
             OwnedStorageError::ReactionModeFilterMismatch { reaction }
                 if reaction == ReactionIndex::new(0)
+        ));
+        assert_eq!(INITIALIZER_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn rejects_aliased_reaction_references_before_initializing_state() {
+        let duplicate_actions = [ActionIndex::new(0); 2];
+        let reactions = [ReactionImage::new(
+            ReactorIndex::new(0),
+            ScopeIndex::new(0),
+            0,
+            BindingSlotIndex::new(1),
+            TableRange::new(0, 0),
+            TableRange::new(0, 0),
+            TableRange::new(0, 2),
+            TableRange::new(0, 0),
+        )];
+        let aliased_image = EnclaveImage {
+            reactions: TinyMapView::new(&reactions),
+            reaction_actions: &duplicate_actions,
+            ..IMAGE
+        };
+        let image = EnclaveImageView::new(&aliased_image).expect("aliased image is structural");
+        INITIALIZER_CALLS.store(0, Ordering::SeqCst);
+
+        let error = OwnedStorage::new(image, counted_bindings()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            OwnedStorageError::AliasedReactionReferences { .. }
         ));
         assert_eq!(INITIALIZER_CALLS.load(Ordering::SeqCst), 0);
     }

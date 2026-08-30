@@ -1,3 +1,7 @@
+//! Exercises the host-runtime seam from an already compiled [`EnclaveImage`] and direct
+//! [`OwnedBindings`] through owned storage and scheduling to typed execution results. Compiler
+//! lowering and the legacy live-graph construction path are intentionally outside this boundary.
+
 use boomerang::runtime::{
     execute_owned,
     image::{

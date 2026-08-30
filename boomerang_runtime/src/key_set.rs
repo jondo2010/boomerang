@@ -50,11 +50,6 @@ impl<K: tinymap::Key> KeySet<K> {
         }
     }
 
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.levels.len()
-    }
-
     /// Extend the levels structure from an iterable
     pub fn extend_above(&mut self, keys: impl IntoIterator<Item = (Level, K)>) {
         for (level, key) in keys.into_iter() {

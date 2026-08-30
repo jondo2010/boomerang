@@ -675,6 +675,9 @@ The reference executor uses owned heap storage for immutable images and mutable 
 the same compiled-image schema and runs the same scheduler algorithm. It exists for fast macro,
 builder, scheduler, and compiler tests; diagnostics; benchmarks; and differential validation of
 generated images.
+Periodic timers are deferred until typed scheduler/storage capabilities preserve their period. This
+executor rejects them rather than treating them as one-shot timers; future support must not restore
+live graph lowering or `DynamicStorage`.
 
 `Assembly::into_runtime_assembly` may temporarily adapt to this path during migration. It is not a
 permanent alternative lowering architecture and is eventually deprecated with live

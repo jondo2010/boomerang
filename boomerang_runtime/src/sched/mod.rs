@@ -1,14 +1,16 @@
 use std::{convert::Infallible, pin::Pin};
 
 mod barrier;
+mod compiled;
 mod core;
 mod modal;
 mod queue;
 
 // Kept at the scheduler-module boundary so sibling modules retain their narrow
 // `super::` imports while the generic core lives in its own implementation module.
-pub(crate) use core::{ExecutionStorage, ModeTransition, Schedule};
-use core::{ReactionOutcome, SchedulerCore, SchedulerError};
+pub(crate) use compiled::run_owned_scheduler;
+pub(crate) use core::{ExecutionStorage, ModeTransition, Schedule, SchedulerError};
+use core::{ReactionOutcome, SchedulerCore};
 
 use barrier::LogicalTimeBarrier;
 pub use barrier::LogicalTimeBarrierError;
@@ -50,7 +52,6 @@ pub enum ExecuteEnclavesError {
     #[error("scheduler thread for enclave {enclave} panicked: {what}")]
     ThreadPanic { enclave: EnclaveKey, what: String },
 }
-
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Whether to skip wall-clock synchronization (execute as fast as possible)
@@ -63,7 +64,6 @@ pub struct Config {
     /// Stop the scheduler after a certain amount of time has passed.
     pub timeout: Option<Duration>,
 }
-
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -548,6 +548,7 @@ impl Scheduler {
             events,
             start_time,
             current_tag,
+            last_nonterminal_tag: None,
             shutdown_tag,
             shutdown_tx,
             upstream_enclaves,

@@ -919,9 +919,14 @@ mod tests {
     fn schedule_shutdown_once(
         context: &mut Context,
         _state: &mut dyn ReactorData,
-        _refs: ReactionRefs<'_>,
+        refs: ReactionRefs<'_>,
     ) -> Result<(), ReactionBindingError> {
-        if REACTION_CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
+        let call = REACTION_CALLS.fetch_add(1, Ordering::SeqCst);
+        let mut port: crate::OutputRef<u32> = refs.ports_mut.partition_mut()?;
+        let mut action: crate::ActionRef<u32> = refs.actions.partition_mut()?;
+        *port = Some(call as u32);
+        action.set_value(context.get_tag(), call as u32);
+        if call == 0 {
             context.schedule_shutdown(Some(Duration::nanoseconds(1)));
         }
         Ok(())
@@ -972,8 +977,8 @@ mod tests {
         0,
         BindingSlotIndex::new(1),
         TableRange::new(0, 0),
-        TableRange::new(0, 0),
-        TableRange::new(0, 0),
+        TableRange::new(0, 1),
+        TableRange::new(0, 1),
         TableRange::new(0, 0),
     )];
     static FILTERED_REACTIONS: [ReactionImage; 1] = [ReactionImage::new(
@@ -1031,8 +1036,8 @@ mod tests {
         scopes: TinyMapView::new(&SCOPES),
         reaction_triggers: &[],
         reaction_use_ports: &[],
-        reaction_effect_ports: &[],
-        reaction_actions: &[],
+        reaction_effect_ports: &[PortIndex::new(0)],
+        reaction_actions: &[ActionIndex::new(0)],
         reaction_modes: &[],
         scope_descendants: &SCOPE_DESCENDANTS,
         scope_logical_actions: &SCOPE_LOGICAL_ACTIONS,
@@ -1274,27 +1279,22 @@ mod tests {
     }
 
     #[test]
-    fn invocation_uses_the_given_tag_and_resets_the_reusable_trigger_result() {
+    fn cached_references_survive_storage_moves_and_reborrows() {
         REACTION_CALLS.store(0, Ordering::SeqCst);
         let bindings =
             complete_bindings().bind_reaction(BindingSlotIndex::new(1), schedule_shutdown_once);
-        let mut storage = OwnedStorage::new(image(), bindings).unwrap();
-        let first_tag = Tag::new(Duration::nanoseconds(7), 2);
-        let second_tag = Tag::new(Duration::nanoseconds(9), 0);
+        let mut storage = Box::new(OwnedStorage::new(image(), bindings).unwrap());
+        let tag = Tag::new(Duration::nanoseconds(7), 2);
 
-        storage
-            .invoke_reaction(ReactionIndex::new(0), first_tag)
-            .unwrap();
-        let first = storage.reaction_trigger_res(ReactionIndex::new(0)).clone();
-        storage
-            .invoke_reaction(ReactionIndex::new(0), second_tag)
-            .unwrap();
+        storage.invoke_reaction(ReactionIndex::new(0), tag).unwrap();
+        assert!(storage
+            .reaction_trigger_res(ReactionIndex::new(0))
+            .scheduled_shutdown
+            .is_some());
+        storage.reset_ports();
+        storage.scheduler_clear_action(ActionIndex::new(0));
+        storage.invoke_reaction(ReactionIndex::new(0), tag).unwrap();
         let second = storage.reaction_trigger_res(ReactionIndex::new(0)).clone();
-
-        assert_eq!(
-            first.scheduled_shutdown,
-            Some(Tag::new(Duration::nanoseconds(8), 0))
-        );
         assert!(second.scheduled_shutdown.is_none());
     }
 

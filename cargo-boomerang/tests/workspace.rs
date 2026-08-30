@@ -1,6 +1,6 @@
 use std::{fs, path::Path, path::PathBuf};
 
-use cargo_boomerang::{resolve_workspace, WorkspaceError};
+use cargo_boomerang::resolve_workspace;
 use cargo_metadata::MetadataCommand;
 
 fn fixture_workspace() -> PathBuf {
@@ -84,14 +84,14 @@ fn resolution_returns_exact_package_ids_and_rejects_nonmembers() {
     assert_eq!(
         resolved.lockfile().digest,
         [
-            0x22, 0x0a, 0x2c, 0x31, 0xf0, 0xbd, 0xdf, 0xe3, 0x55, 0x90, 0xc7, 0xdc, 0x60, 0x87,
-            0xa1, 0xcb, 0x5f, 0xa2, 0x97, 0x41, 0xa3, 0x9c, 0xa0, 0xab, 0xdf, 0x7d, 0x46, 0x72,
-            0x36, 0xba, 0x31, 0x61,
+            0xf5, 0x35, 0x7d, 0x39, 0xf5, 0x32, 0x67, 0x2b, 0xe6, 0x6c, 0x8c, 0x9d, 0x97, 0x76,
+            0xcd, 0x10, 0x80, 0x17, 0x88, 0x31, 0xd8, 0xcf, 0x54, 0x86, 0xb8, 0x52, 0x4a, 0x55,
+            0xa9, 0xb2, 0xf3, 0x24,
         ]
     );
 
     let error = resolve_workspace(&workspace, "outside-member").unwrap_err();
-    let message = error.to_string();
+    let message = format!("{error:#}");
     assert!(message.contains("deployment 'outside-member'"), "{error}");
     assert!(message.contains("binding 'vehicle/sensor'"), "{error}");
     assert!(
@@ -102,6 +102,11 @@ fn resolution_returns_exact_package_ids_and_rejects_nonmembers() {
     let unlocked = tempfile::tempdir().unwrap();
     copy_without_lockfile(&workspace, unlocked.path());
     let error = resolve_workspace(unlocked.path(), "production").unwrap_err();
-    assert!(matches!(error, WorkspaceError::Metadata { .. }));
+    assert!(
+        error
+            .to_string()
+            .contains("failed to resolve locked Cargo metadata"),
+        "{error:#}"
+    );
     assert!(!unlocked.path().join("Cargo.lock").exists());
 }

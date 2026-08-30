@@ -1,7 +1,11 @@
 use crate::compiler::{ComponentInstanceId, ContractId};
+#[cfg(feature = "host-interchange")]
+use serde::{Deserialize, Serialize};
 
 /// Logical component instance and its required contract.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct ComponentInstance {
     /// Stable component identity.
     pub(super) id: ComponentInstanceId,

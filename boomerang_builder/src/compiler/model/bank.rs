@@ -1,5 +1,10 @@
+#[cfg(feature = "host-interchange")]
+use serde::{Deserialize, Serialize};
+
 /// Validated structural metadata for one member of a bank declaration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct BankMember {
     /// Zero-based member index within the bank.
     index: u32,

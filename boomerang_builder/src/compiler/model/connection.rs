@@ -2,9 +2,13 @@ use crate::{
     compiler::{BoundaryId, PortId},
     runtime,
 };
+#[cfg(feature = "host-interchange")]
+use serde::{Deserialize, Serialize};
 
 /// Transfer semantics of a structural connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub enum ConnectionSemantics {
     /// Logical connection carrying an optional `after` delay.
     Logical {
@@ -20,6 +24,8 @@ pub enum ConnectionSemantics {
 
 /// Directed structural connection between stable port identities.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct Connection {
     /// Stable connection identity.
     pub(super) id: BoundaryId,

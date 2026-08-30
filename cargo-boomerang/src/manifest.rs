@@ -1,7 +1,7 @@
-use std::{collections::BTreeMap, ops::Range, path::PathBuf};
+use std::{collections::BTreeMap, path::PathBuf};
 
+use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
-use thiserror::Error;
 
 const SUPPORTED_SCHEMA: u32 = 1;
 
@@ -19,17 +19,18 @@ pub struct Manifest {
 
 impl Manifest {
     /// Returns a named deployment or a diagnostic identifying the missing name.
-    pub fn deployment(&self, name: &str) -> Result<&Deployment, ManifestError> {
+    pub fn deployment(&self, name: &str) -> Result<&Deployment> {
         self.deployments
             .get(name)
-            .ok_or_else(|| ManifestError::UnknownDeployment {
-                name: name.to_owned(),
-            })
+            .ok_or_else(|| anyhow!("deployment {name} is not defined in Boomerang.toml"))
     }
 
-    fn validate(&self) -> Result<(), ManifestError> {
+    fn validate(&self) -> Result<()> {
         if self.schema != SUPPORTED_SCHEMA {
-            return Err(ManifestError::UnsupportedSchema { found: self.schema });
+            bail!(
+                "unsupported Boomerang.toml schema {}; expected {SUPPORTED_SCHEMA}",
+                self.schema
+            );
         }
         for (name, deployment) in &self.deployments {
             deployment.validate(name)?;
@@ -64,7 +65,7 @@ pub struct Deployment<F = Federate> {
 }
 
 impl Deployment<Federate> {
-    fn validate(&self, name: &str) -> Result<(), ManifestError> {
+    fn validate(&self, name: &str) -> Result<()> {
         match self.federates.len() {
             0 => {
                 return Err(invalid_deployment(
@@ -169,85 +170,37 @@ pub struct Rti {
     pub profile: Option<String>,
 }
 
-/// Failure while reading, parsing, or manifest-locally validating `Boomerang.toml`.
-#[derive(Debug, Error)]
-pub enum ManifestError {
-    /// The manifest file could not be read.
-    #[error("failed to read {path}: {source}")]
-    Read {
-        /// Filesystem path that could not be read.
-        path: PathBuf,
-        /// Underlying filesystem error.
-        #[source]
-        source: std::io::Error,
-    },
-    /// TOML syntax or schema deserialization failed.
-    #[error("invalid Boomerang.toml at {path}: {message}")]
-    Parse {
-        /// TOML path at which deserialization failed.
-        path: String,
-        /// Parser or schema diagnostic.
-        message: String,
-        /// Byte range reported by the TOML parser when available.
-        span: Option<Range<usize>>,
-    },
-    /// The manifest declares a schema version this tool does not understand.
-    #[error("unsupported Boomerang.toml schema {found}; expected {SUPPORTED_SCHEMA}")]
-    UnsupportedSchema {
-        /// Unsupported schema version found in the manifest.
-        found: u32,
-    },
-    /// A named deployment violates manifest-local consistency rules.
-    #[error("invalid deployment {deployment}: {message}")]
-    InvalidDeployment {
-        /// Name of the invalid deployment variant.
-        deployment: String,
-        /// Manifest-local consistency diagnostic.
-        message: String,
-    },
-    /// A caller requested a deployment name absent from the manifest.
-    #[error("deployment {name} is not defined in Boomerang.toml")]
-    UnknownDeployment {
-        /// Requested deployment name.
-        name: String,
-    },
-}
-
 /// Parses and manifest-locally validates `Boomerang.toml` source text.
-pub fn parse_manifest(source: &str) -> Result<Manifest, ManifestError> {
-    let deserializer = toml::Deserializer::parse(source).map_err(|error| ManifestError::Parse {
-        path: String::from("root"),
-        span: error.span(),
-        message: error.to_string(),
-    })?;
+pub fn parse_manifest(source: &str) -> Result<Manifest> {
+    let deserializer = toml::Deserializer::parse(source)
+        .map_err(|error| invalid_manifest("root", error.to_string()))?;
     let manifest: Manifest = serde_path_to_error::deserialize(deserializer).map_err(|error| {
         let message = error.inner().to_string();
-        ManifestError::Parse {
-            path: diagnostic_path(&error.path().to_string(), &message),
-            span: error.inner().span(),
+        invalid_manifest(
+            &diagnostic_path(&error.path().to_string(), &message),
             message,
-        }
+        )
     })?;
     manifest.validate()?;
     Ok(manifest)
 }
 
 /// Reads, parses, and manifest-locally validates a `Boomerang.toml` file.
-pub fn load_manifest(path: impl Into<PathBuf>) -> Result<Manifest, ManifestError> {
+pub fn load_manifest(path: impl Into<PathBuf>) -> Result<Manifest> {
     let path = path.into();
-    let source = std::fs::read_to_string(&path).map_err(|source| ManifestError::Read {
-        path: path.clone(),
-        source,
-    })?;
+    let source = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
     parse_manifest(&source)
 }
 
 /// Builds a manifest-local deployment diagnostic with its deployment name attached.
-fn invalid_deployment(name: &str, message: impl Into<String>) -> ManifestError {
-    ManifestError::InvalidDeployment {
-        deployment: name.to_owned(),
-        message: message.into(),
-    }
+fn invalid_deployment(name: &str, message: impl std::fmt::Display) -> anyhow::Error {
+    anyhow!("invalid deployment {name}: {message}")
+}
+
+/// Builds a user-facing manifest parse diagnostic with its TOML path attached.
+fn invalid_manifest(path: &str, message: impl std::fmt::Display) -> anyhow::Error {
+    anyhow!("invalid Boomerang.toml at {path}: {message}")
 }
 
 /// Extends Serde's containing-table path with an unknown field when TOML reports one.

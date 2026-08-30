@@ -1021,6 +1021,132 @@ pub struct ApplicationTopology {
     placement_groups: BTreeMap<PlacementGroupId, PlacementGroup>,
 }
 
+#[cfg(feature = "host-interchange")]
+#[derive(serde::Serialize)]
+struct TopologyRef<'a> {
+    application_id: &'a ApplicationId,
+    components: Vec<&'a ComponentInstance>,
+    reactors: Vec<&'a Reactor>,
+    actions: Vec<&'a Action>,
+    ports: Vec<&'a Port>,
+    reactions: Vec<&'a Reaction>,
+    connections: Vec<&'a Connection>,
+    modes: Vec<&'a Mode>,
+    enclaves: Vec<&'a Enclave>,
+    placement_groups: Vec<&'a PlacementGroup>,
+}
+
+#[cfg(feature = "host-interchange")]
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UncheckedTopology {
+    application_id: ApplicationId,
+    components: Vec<ComponentInstance>,
+    reactors: Vec<Reactor>,
+    actions: Vec<Action>,
+    ports: Vec<Port>,
+    reactions: Vec<Reaction>,
+    connections: Vec<Connection>,
+    modes: Vec<Mode>,
+    enclaves: Vec<Enclave>,
+    placement_groups: Vec<PlacementGroup>,
+}
+
+#[cfg(feature = "host-interchange")]
+impl serde::Serialize for ApplicationTopology {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        TopologyRef {
+            application_id: &self.application_id,
+            components: self.components.values().collect(),
+            reactors: self.reactors.values().collect(),
+            actions: self.actions.values().collect(),
+            ports: self.ports.values().collect(),
+            reactions: self.reactions.values().collect(),
+            connections: self.connections.values().collect(),
+            modes: self.modes.values().collect(),
+            enclaves: self.enclaves.values().collect(),
+            placement_groups: self.placement_groups.values().collect(),
+        }
+        .serialize(serializer)
+    }
+}
+
+#[cfg(feature = "host-interchange")]
+impl<'de> serde::Deserialize<'de> for ApplicationTopology {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+
+        let unchecked = UncheckedTopology::deserialize(deserializer)?;
+        let mut builder = ApplicationTopologyBuilder::new(unchecked.application_id.as_str())
+            .map_err(D::Error::custom)?;
+        for component in unchecked.components {
+            builder.add_component(component).map_err(D::Error::custom)?;
+        }
+        for reactor in unchecked.reactors {
+            builder.add_reactor(reactor).map_err(D::Error::custom)?;
+        }
+        for action in unchecked.actions {
+            builder
+                .add_action(
+                    action.id,
+                    action.reactor,
+                    action.kind,
+                    action.declaration_position,
+                    action.mode,
+                )
+                .map_err(D::Error::custom)?;
+        }
+        for port in unchecked.ports {
+            builder
+                .add_port(
+                    port.id,
+                    port.reactor,
+                    port.direction,
+                    port.bank,
+                    port.declaration_position,
+                    port.mode,
+                )
+                .map_err(D::Error::custom)?;
+        }
+        for reaction in unchecked.reactions {
+            builder
+                .add_reaction(
+                    reaction.id,
+                    reaction.reactor,
+                    reaction.relations,
+                    reaction.options,
+                )
+                .map_err(D::Error::custom)?;
+        }
+        for connection in unchecked.connections {
+            builder
+                .add_connection(
+                    connection.id,
+                    connection.source,
+                    connection.target,
+                    connection.semantics,
+                )
+                .map_err(D::Error::custom)?;
+        }
+        for mode in unchecked.modes {
+            builder
+                .add_mode(mode.id, mode.reactor, mode.parent, mode.initial)
+                .map_err(D::Error::custom)?;
+        }
+        for enclave in unchecked.enclaves {
+            builder
+                .add_enclave(enclave.id, enclave.root)
+                .map_err(D::Error::custom)?;
+        }
+        for group in unchecked.placement_groups {
+            builder
+                .add_placement_group(group.id, group.parent)
+                .map_err(D::Error::custom)?;
+        }
+        builder.finish().map_err(D::Error::custom)
+    }
+}
+
 macro_rules! accessors {
     ($iter:ident, $get:ident, $field:ident, $id:ty, $item:ty) => {
         /// Iterates records in canonical stable-identity order.

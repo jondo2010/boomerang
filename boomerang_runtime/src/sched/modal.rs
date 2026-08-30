@@ -1,13 +1,10 @@
-use std::{collections::BinaryHeap, pin::Pin};
+use std::collections::BinaryHeap;
 
-use tinymap::Key as _;
-
-use super::queue::EventQueue;
-use crate::{
-    event::ScheduledActionValue, store::Store, Duration, Level, ModeKey, ModeTransitionRequest,
-    ReactionGraph, ReactionKey, ReactionSet, ReactionSetLimits, ReactorKey, ScopeKey, Tag,
-    TransitionKind,
+use super::{
+    queue::{EventQueue, ScheduledActionValue},
+    ExecutionStorage, ModeTransition, Schedule,
 };
+use crate::{key_set::KeySet, Duration, Level, ReactionSetLimits, Tag, TransitionKind};
 
 /// Clock state for a scheduler scope that may be suspended and resumed by modal transitions.
 #[derive(Debug)]
@@ -106,16 +103,16 @@ fn local_to_global(
 
 /// Heap entry for the next runnable event in a scope-local queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ScopeFrontierEntry {
+struct ScopeFrontierEntry<S: tinymap::Key> {
     /// Global tag corresponding to the scope queue's current local front event.
     global_tag: Tag,
     /// Scope whose queue contributed this frontier entry.
-    scope: ScopeKey,
+    scope: S,
     /// Clock generation observed when this entry was pushed.
     epoch: u64,
 }
 
-impl Ord for ScopeFrontierEntry {
+impl<S: tinymap::Key> Ord for ScopeFrontierEntry<S> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.global_tag
             .cmp(&other.global_tag)
@@ -124,7 +121,7 @@ impl Ord for ScopeFrontierEntry {
     }
 }
 
-impl PartialOrd for ScopeFrontierEntry {
+impl<S: tinymap::Key> PartialOrd for ScopeFrontierEntry<S> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
@@ -132,61 +129,60 @@ impl PartialOrd for ScopeFrontierEntry {
 
 /// Event returned to the scheduler after root and scope-local queues are merged at one tag.
 #[derive(Debug)]
-pub(super) struct ReadyEvent {
+pub(super) struct ReadyEvent<R: tinymap::Key> {
     /// Global tag at which the contained reactions are ready.
     pub(super) tag: Tag,
     /// Reactions ready to execute at [`tag`](Self::tag).
-    pub(super) reactions: ReactionSet,
+    pub(super) reactions: KeySet<R>,
     /// Whether this event indicates scheduler termination.
     pub(super) terminal: bool,
 }
 
 /// Owns root and scope-local event queues for modal scheduling.
 #[derive(Debug)]
-pub(super) struct EventManager {
+pub(super) struct EventManager<S: Schedule> {
     /// Global event queue used for root-scoped work and non-modal fast paths.
-    root: EventQueue,
+    root: EventQueue<S::Reaction, S::Action>,
+    /// Canonical scope keys retained so modal updates never borrow mutable storage through the schedule.
+    scopes: Vec<S::Scope>,
     /// Current active/inactive state for each static scope.
-    scope_active: tinymap::TinySecondaryMap<ScopeKey, bool>,
+    scope_active: tinymap::TinySecondaryMap<S::Scope, bool>,
     /// Whether each scope has ever been active during this scheduler run.
-    scope_ever_active: tinymap::TinySecondaryMap<ScopeKey, bool>,
+    scope_ever_active: tinymap::TinySecondaryMap<S::Scope, bool>,
     /// Whether scope-local startup reactions have already fired for each scope.
-    scope_startup_fired: tinymap::TinySecondaryMap<ScopeKey, bool>,
+    scope_startup_fired: tinymap::TinySecondaryMap<S::Scope, bool>,
     /// Current mode per reactor for modal scheduling decisions.
-    reactor_modes: tinymap::TinySecondaryMap<ReactorKey, Option<ModeKey>>,
+    reactor_modes: tinymap::TinySecondaryMap<S::Reactor, Option<S::Mode>>,
     /// Local clock state for each static scope.
-    scope_clocks: tinymap::TinySecondaryMap<ScopeKey, ScopeClockState>,
+    scope_clocks: tinymap::TinySecondaryMap<S::Scope, ScopeClockState>,
     /// Per-scope queues for events scheduled in scope-local time.
-    scope_queues: tinymap::TinySecondaryMap<ScopeKey, EventQueue>,
+    scope_queues: tinymap::TinySecondaryMap<S::Scope, EventQueue<S::Reaction, S::Action>>,
     /// Min-heap of each active scope's next event, ordered by global tag.
-    frontier: BinaryHeap<ScopeFrontierEntry>,
+    frontier: BinaryHeap<ScopeFrontierEntry<S::Scope>>,
     /// Reusable reaction sets for merged ready events.
-    free_reaction_sets: Vec<ReactionSet>,
+    free_reaction_sets: Vec<KeySet<S::Reaction>>,
     /// Key and level limits used when allocating reaction sets.
     reaction_set_limits: ReactionSetLimits,
     /// Whether this graph has any modal scopes requiring local queues.
     has_local_scopes: bool,
 }
 
-impl EventManager {
-    pub(super) fn new(
-        reaction_set_limits: ReactionSetLimits,
-        reaction_graph: &ReactionGraph,
-    ) -> Self {
+impl<S: Schedule> EventManager<S> {
+    pub(super) fn new(reaction_set_limits: ReactionSetLimits, schedule: &S) -> Self {
         let root = EventQueue::new(reaction_set_limits.clone());
         let mut scope_active = tinymap::TinySecondaryMap::new();
         let mut scope_ever_active = tinymap::TinySecondaryMap::new();
         let mut scope_startup_fired = tinymap::TinySecondaryMap::new();
-        let reactor_modes = reaction_graph
-            .reactor_initial_modes
-            .iter()
-            .map(|(key, mode)| (key, *mode))
+        let reactor_modes = schedule
+            .reactor_root_scopes()
+            .map(|(reactor, _)| (reactor, schedule.initial_mode_for_reactor(reactor)))
             .collect();
         let mut scope_clocks = tinymap::TinySecondaryMap::new();
         let mut scope_queues = tinymap::TinySecondaryMap::new();
 
-        for scope in reaction_graph.scopes.keys() {
-            let active = Self::scope_is_active_with_modes(reaction_graph, &reactor_modes, scope);
+        let scopes = schedule.scopes().collect::<Vec<_>>();
+        for &scope in &scopes {
+            let active = Self::scope_is_active_with_modes(schedule, &reactor_modes, scope);
             scope_active.insert(scope, active);
             scope_ever_active.insert(scope, active);
             scope_startup_fired.insert(scope, active);
@@ -196,6 +192,7 @@ impl EventManager {
 
         Self {
             root,
+            scopes,
             scope_active,
             scope_ever_active,
             scope_startup_fired,
@@ -205,26 +202,26 @@ impl EventManager {
             frontier: BinaryHeap::new(),
             free_reaction_sets: Vec::new(),
             reaction_set_limits,
-            has_local_scopes: !reaction_graph.modes.is_empty(),
+            has_local_scopes: schedule.has_modal_scopes(),
         }
     }
 
     pub(super) fn push_event<I>(&mut self, tag: Tag, reactions: I, terminal: bool)
     where
-        I: IntoIterator<Item = (Level, ReactionKey)>,
+        I: IntoIterator<Item = (Level, S::Reaction)>,
     {
         self.root.push_event(tag, reactions, terminal);
     }
 
     pub(super) fn push_action_event<I>(
         &mut self,
-        action_key: crate::ActionKey,
+        action_key: S::Action,
         tag: Tag,
         reactions: I,
         terminal: bool,
-        reaction_graph: &ReactionGraph,
+        schedule: &S,
     ) where
-        I: IntoIterator<Item = (Level, ReactionKey)>,
+        I: IntoIterator<Item = (Level, S::Reaction)>,
     {
         let action_value = ScheduledActionValue {
             key: action_key,
@@ -235,9 +232,8 @@ impl EventManager {
             return;
         }
 
-        let scope = reaction_graph.action_scopes[action_key];
-        if !reaction_graph.action_is_logical[action_key]
-            || Self::scope_uses_global_time(reaction_graph, scope)
+        let scope = schedule.scope_for_action(action_key);
+        if !schedule.action_is_logical(action_key) || Self::scope_uses_global_time(schedule, scope)
         {
             self.root.push_action_event(tag, None, reactions, terminal);
             return;
@@ -255,16 +251,16 @@ impl EventManager {
 
     fn push_local_action_event<I>(
         &mut self,
-        scope: ScopeKey,
+        scope: S::Scope,
         local_tag: Tag,
-        action_value: ScheduledActionValue,
+        action_value: ScheduledActionValue<S::Action>,
         reactions: I,
         terminal: bool,
-        reaction_graph: &ReactionGraph,
+        schedule: &S,
     ) where
-        I: IntoIterator<Item = (Level, ReactionKey)>,
+        I: IntoIterator<Item = (Level, S::Reaction)>,
     {
-        if Self::scope_uses_global_time(reaction_graph, scope) {
+        if Self::scope_uses_global_time(schedule, scope) {
             self.root
                 .push_action_event(action_value.stored_tag, None, reactions, terminal);
             return;
@@ -294,7 +290,7 @@ impl EventManager {
         }
     }
 
-    pub(super) fn pop_next_event(&mut self) -> Option<ReadyEvent> {
+    pub(super) fn pop_next_event(&mut self) -> Option<ReadyEvent<S::Reaction>> {
         if !self.has_local_scopes {
             let event = self.root.pop_next_event()?;
             return Some(ReadyEvent {
@@ -336,7 +332,7 @@ impl EventManager {
         self.root.shutdown();
     }
 
-    pub(super) fn return_reaction_set(&mut self, reaction_set: ReactionSet) {
+    pub(super) fn return_reaction_set(&mut self, reaction_set: KeySet<S::Reaction>) {
         if self.has_local_scopes {
             let mut reaction_set = reaction_set;
             reaction_set.clear();
@@ -346,56 +342,53 @@ impl EventManager {
         }
     }
 
-    pub(super) fn apply_transition(
+    pub(super) fn apply_transition<E: ExecutionStorage<S>>(
         &mut self,
-        reactor_key: ReactorKey,
-        request: &ModeTransitionRequest,
-        store: &mut Pin<Box<Store>>,
-        reaction_graph: &ReactionGraph,
+        reactor_key: S::Reactor,
+        request: &ModeTransition<S::Mode>,
+        schedule: &S,
+        storage: &mut E,
         current_tag: Tag,
     ) {
-        let target_scope = reaction_graph.mode_scopes[request.target];
+        let target_scope = schedule.scope_for_mode(request.target);
 
         if matches!(request.transition, TransitionKind::Reset) {
-            self.reset_scope_subtree(target_scope, store, reaction_graph);
-            self.reset_child_modes_in_scope(reaction_graph, target_scope);
+            self.reset_scope_subtree(target_scope, schedule, storage);
+            self.reset_child_modes_in_scope(schedule, target_scope);
         }
 
         self.set_mode(reactor_key, request.target);
         let startup_scopes = self.sync_active_scopes(
-            store,
-            reaction_graph,
+            schedule,
+            storage,
             current_tag,
             target_scope,
             request.transition,
         );
         self.schedule_startup_reactions(
             &startup_scopes,
-            store,
-            reaction_graph,
+            schedule,
+            storage,
             current_tag.delay(Duration::ZERO),
         );
 
         if matches!(request.transition, TransitionKind::Reset) {
-            self.schedule_reset_timer_startups(target_scope, store, reaction_graph);
+            self.schedule_reset_timer_startups(target_scope, schedule, storage);
             self.schedule_reset_reactions(
                 target_scope,
-                reaction_graph,
+                schedule,
                 current_tag.delay(Duration::ZERO),
             );
         }
     }
 
-    fn reset_scope_subtree(
+    fn reset_scope_subtree<E: ExecutionStorage<S>>(
         &mut self,
-        root_scope: ScopeKey,
-        store: &mut Pin<Box<Store>>,
-        reaction_graph: &ReactionGraph,
+        root_scope: S::Scope,
+        schedule: &S,
+        storage: &mut E,
     ) {
-        for &scope in reaction_graph
-            .modal_schedule_index
-            .scope_descendants(root_scope)
-        {
+        for scope in schedule.descendant_scopes(root_scope) {
             self.scope_queues[scope].clear();
             let clock = &mut self.scope_clocks[scope];
             clock.suspended_local = Tag::ZERO;
@@ -403,29 +396,27 @@ impl EventManager {
             clock.frontier_epoch = clock.frontier_epoch.wrapping_add(1);
         }
 
-        for &action_key in reaction_graph
-            .modal_schedule_index
-            .scope_logical_actions(root_scope)
-        {
-            store.clear_action_values(action_key);
+        for action_key in schedule.logical_actions_in_scope(root_scope) {
+            storage.clear_action_values(action_key);
         }
     }
 
-    fn sync_active_scopes(
+    fn sync_active_scopes<E: ExecutionStorage<S>>(
         &mut self,
-        store: &mut Pin<Box<Store>>,
-        reaction_graph: &ReactionGraph,
+        schedule: &S,
+        storage: &mut E,
         current_tag: Tag,
-        reset_root: ScopeKey,
+        reset_root: S::Scope,
         transition: TransitionKind,
-    ) -> Vec<ScopeKey> {
+    ) -> Vec<S::Scope> {
         let activation_global = current_tag;
         let mut startup_scopes = Vec::new();
 
-        for scope in reaction_graph.scopes.keys() {
-            let new_active = self.scope_is_active(reaction_graph, scope);
+        for scope_index in 0..self.scopes.len() {
+            let scope = self.scopes[scope_index];
+            let new_active = self.scope_is_active(schedule, scope);
             let reset = matches!(transition, TransitionKind::Reset)
-                && Self::scope_is_descendant_or_self(reaction_graph, scope, reset_root);
+                && Self::scope_is_descendant_or_self(schedule, scope, reset_root);
 
             match (self.scope_active[scope], new_active) {
                 (true, false) => {
@@ -454,14 +445,17 @@ impl EventManager {
                     let activation_global = clock.activation_global;
                     let activation_local = clock.activation_local;
                     let allow_activation_tag = clock.allow_activation_tag;
-                    self.scope_queues[scope].rebase_action_values(store, |local_tag| {
-                        local_to_global(
-                            activation_global,
-                            activation_local,
-                            allow_activation_tag,
-                            local_tag,
-                        )
-                    });
+                    self.scope_queues[scope].rebase_action_values(
+                        |action, from, to| storage.reschedule_action_value(action, from, to),
+                        |local_tag| {
+                            local_to_global(
+                                activation_global,
+                                activation_local,
+                                allow_activation_tag,
+                                local_tag,
+                            )
+                        },
+                    );
                     self.refresh_frontier(scope);
                 }
                 (true, true) if reset => {
@@ -481,67 +475,55 @@ impl EventManager {
         startup_scopes
     }
 
-    fn schedule_startup_reactions(
+    fn schedule_startup_reactions<E: ExecutionStorage<S>>(
         &mut self,
-        scopes: &[ScopeKey],
-        store: &mut Pin<Box<Store>>,
-        reaction_graph: &ReactionGraph,
+        scopes: &[S::Scope],
+        schedule: &S,
+        storage: &mut E,
         tag: Tag,
     ) {
         if scopes.is_empty() {
             return;
         }
 
-        let has_startup_reactions = scopes.iter().any(|&scope| {
-            !reaction_graph
-                .modal_schedule_index
-                .scope_startup_reactions(scope)
-                .is_empty()
-        });
+        let has_startup_reactions = scopes
+            .iter()
+            .any(|&scope| schedule.startups_in_scope(scope).next().is_some());
         if !has_startup_reactions {
             return;
         }
 
         for &scope in scopes {
-            for reaction in reaction_graph
-                .modal_schedule_index
-                .scope_startup_reactions(scope)
-            {
-                store.push_action_value(reaction.action, tag, Box::new(()));
+            for (action, _) in schedule.startups_in_scope(scope) {
+                storage.push_action_value(action, tag, Box::new(()));
             }
         }
 
-        self.push_event(
-            tag,
-            scopes.iter().flat_map(|&scope| {
-                reaction_graph
-                    .modal_schedule_index
-                    .scope_startup_reactions(scope)
-                    .iter()
-                    .map(|reaction| reaction.reaction)
-            }),
-            false,
-        );
+        for &scope in scopes {
+            self.push_event(
+                tag,
+                schedule
+                    .startups_in_scope(scope)
+                    .map(|(_, reaction)| reaction),
+                false,
+            );
+        }
     }
 
-    fn schedule_reset_timer_startups(
+    fn schedule_reset_timer_startups<E: ExecutionStorage<S>>(
         &mut self,
-        root_scope: ScopeKey,
-        store: &mut Pin<Box<Store>>,
-        reaction_graph: &ReactionGraph,
+        root_scope: S::Scope,
+        schedule: &S,
+        storage: &mut E,
     ) {
-        for &(action_key, local_tag) in reaction_graph
-            .modal_schedule_index
-            .scope_timer_startups(root_scope)
-        {
-            let scope = reaction_graph.action_scopes[action_key];
-            let global_tag = if Self::scope_uses_global_time(reaction_graph, scope) {
+        for (action_key, local_tag) in schedule.timer_startups_in_scope(root_scope) {
+            let scope = schedule.scope_for_action(action_key);
+            let global_tag = if Self::scope_uses_global_time(schedule, scope) {
                 local_tag
             } else {
                 self.scope_clocks[scope].local_to_global(local_tag)
             };
-            store.push_action_value(action_key, global_tag, Box::new(()));
-            let downstream = reaction_graph.action_triggers[action_key].iter().copied();
+            storage.push_action_value(action_key, global_tag, Box::new(()));
             self.push_local_action_event(
                 scope,
                 local_tag,
@@ -549,34 +531,27 @@ impl EventManager {
                     key: action_key,
                     stored_tag: global_tag,
                 },
-                downstream,
+                schedule.action_triggers(action_key),
                 false,
-                reaction_graph,
+                schedule,
             );
         }
     }
 
-    fn schedule_reset_reactions(
-        &mut self,
-        root_scope: ScopeKey,
-        reaction_graph: &ReactionGraph,
-        tag: Tag,
-    ) {
-        let reset_reactions = reaction_graph
-            .modal_schedule_index
-            .scope_reset_reactions(root_scope);
-        if !reset_reactions.is_empty() {
-            self.push_event(tag, reset_reactions.iter().copied(), false);
+    fn schedule_reset_reactions(&mut self, root_scope: S::Scope, schedule: &S, tag: Tag) {
+        let mut reset_reactions = schedule.reset_reactions_in_scope(root_scope).peekable();
+        if reset_reactions.peek().is_some() {
+            self.push_event(tag, reset_reactions, false);
         }
     }
 
-    fn next_reaction_set(&mut self) -> ReactionSet {
+    fn next_reaction_set(&mut self) -> KeySet<S::Reaction> {
         self.free_reaction_sets
             .pop()
-            .unwrap_or_else(|| ReactionSet::new(&self.reaction_set_limits))
+            .unwrap_or_else(|| KeySet::new(&self.reaction_set_limits))
     }
 
-    fn refresh_frontier(&mut self, scope: ScopeKey) {
+    fn refresh_frontier(&mut self, scope: S::Scope) {
         let clock = &mut self.scope_clocks[scope];
         clock.frontier_epoch = clock.frontier_epoch.wrapping_add(1);
         if !self.scope_active[scope] {
@@ -616,32 +591,26 @@ impl EventManager {
         }
     }
 
-    fn scope_uses_global_time(reaction_graph: &ReactionGraph, scope: ScopeKey) -> bool {
-        reaction_graph.scopes[scope].parent.is_none()
+    fn scope_uses_global_time(schedule: &S, scope: S::Scope) -> bool {
+        schedule.parent_scope(scope).is_none()
     }
 
-    fn current_mode(&self, reactor_key: ReactorKey) -> Option<ModeKey> {
+    fn current_mode(&self, reactor_key: S::Reactor) -> Option<S::Mode> {
         self.reactor_modes.get(reactor_key).copied().flatten()
     }
 
-    fn set_mode(&mut self, reactor_key: ReactorKey, mode: ModeKey) {
+    fn set_mode(&mut self, reactor_key: S::Reactor, mode: S::Mode) {
         self.reactor_modes.insert(reactor_key, Some(mode));
     }
 
-    fn reset_child_modes_in_scope(&mut self, reaction_graph: &ReactionGraph, scope: ScopeKey) {
-        let reactor_modes = reaction_graph
-            .reactor_root_scopes
-            .iter()
-            .filter(|(_, &root_scope)| {
+    fn reset_child_modes_in_scope(&mut self, schedule: &S, scope: S::Scope) {
+        let reactor_modes = schedule
+            .reactor_root_scopes()
+            .filter(|&(_, root_scope)| {
                 root_scope != scope
-                    && Self::scope_is_descendant_or_self(reaction_graph, root_scope, scope)
+                    && Self::scope_is_descendant_or_self(schedule, root_scope, scope)
             })
-            .map(|(reactor_key, _)| {
-                (
-                    reactor_key,
-                    reaction_graph.reactor_initial_modes[reactor_key],
-                )
-            })
+            .map(|(reactor_key, _)| (reactor_key, schedule.initial_mode_for_reactor(reactor_key)))
             .collect::<Vec<_>>();
 
         for (reactor_key, initial_mode) in reactor_modes {
@@ -649,16 +618,15 @@ impl EventManager {
         }
     }
 
-    fn scope_is_active(&self, reaction_graph: &ReactionGraph, mut scope_key: ScopeKey) -> bool {
+    fn scope_is_active(&self, schedule: &S, mut scope_key: S::Scope) -> bool {
         loop {
-            let scope = &reaction_graph.scopes[scope_key];
-            if let Some(mode_key) = scope.mode {
-                if self.current_mode(scope.reactor) != Some(mode_key) {
+            if let Some(mode_key) = schedule.mode_for_scope(scope_key) {
+                if self.current_mode(schedule.reactor_for_scope(scope_key)) != Some(mode_key) {
                     return false;
                 }
             }
 
-            let Some(parent) = scope.parent else {
+            let Some(parent) = schedule.parent_scope(scope_key) else {
                 return true;
             };
             scope_key = parent;
@@ -666,44 +634,44 @@ impl EventManager {
     }
 
     fn scope_is_active_with_modes(
-        reaction_graph: &ReactionGraph,
-        reactor_modes: &tinymap::TinySecondaryMap<ReactorKey, Option<ModeKey>>,
-        mut scope_key: ScopeKey,
+        schedule: &S,
+        reactor_modes: &tinymap::TinySecondaryMap<S::Reactor, Option<S::Mode>>,
+        mut scope_key: S::Scope,
     ) -> bool {
         loop {
-            let scope = &reaction_graph.scopes[scope_key];
-            if let Some(mode_key) = scope.mode {
-                if reactor_modes.get(scope.reactor).copied().flatten() != Some(mode_key) {
+            if let Some(mode_key) = schedule.mode_for_scope(scope_key) {
+                if reactor_modes
+                    .get(schedule.reactor_for_scope(scope_key))
+                    .copied()
+                    .flatten()
+                    != Some(mode_key)
+                {
                     return false;
                 }
             }
 
-            let Some(parent) = scope.parent else {
+            let Some(parent) = schedule.parent_scope(scope_key) else {
                 return true;
             };
             scope_key = parent;
         }
     }
 
-    pub(super) fn scope_ever_active(&self, scope: ScopeKey) -> bool {
+    pub(super) fn scope_ever_active(&self, scope: S::Scope) -> bool {
         self.scope_ever_active[scope]
     }
 
-    pub(super) fn scope_active(&self, scope: ScopeKey) -> bool {
+    pub(super) fn scope_active(&self, scope: S::Scope) -> bool {
         self.scope_active[scope]
     }
 
-    fn scope_is_descendant_or_self(
-        reaction_graph: &ReactionGraph,
-        mut scope: ScopeKey,
-        ancestor: ScopeKey,
-    ) -> bool {
+    fn scope_is_descendant_or_self(schedule: &S, mut scope: S::Scope, ancestor: S::Scope) -> bool {
         loop {
             if scope == ancestor {
                 return true;
             }
 
-            let Some(parent) = reaction_graph.scopes[scope].parent else {
+            let Some(parent) = schedule.parent_scope(scope) else {
                 return false;
             };
             scope = parent;

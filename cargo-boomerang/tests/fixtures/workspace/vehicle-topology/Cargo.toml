@@ -1,0 +1,7 @@
+[package]
+name = "vehicle-topology"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+outside-member = { path = "../outside-member" }

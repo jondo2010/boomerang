@@ -48,22 +48,22 @@ pub struct Topology {
     pub entry: String,
 }
 
-/// One named deployment variant.
+/// One named deployment variant, parameterized by its Federate representation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct Deployment {
+pub struct Deployment<F = Federate> {
     /// Component-instance paths mapped to implementation packages.
     #[serde(default)]
     pub bindings: BTreeMap<String, Binding>,
     /// Federate identifiers mapped to their placement and build configuration.
-    pub federates: BTreeMap<String, Federate>,
+    pub federates: BTreeMap<String, F>,
     /// Distributed coordination selection for a multi-Federate deployment.
     pub coordination: Option<Coordination>,
     /// Coordinator artifact configuration for the `central-rti` backend.
     pub rti: Option<Rti>,
 }
 
-impl Deployment {
+impl Deployment<Federate> {
     fn validate(&self, name: &str) -> Result<(), ManifestError> {
         match self.federates.len() {
             0 => {

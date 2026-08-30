@@ -7,46 +7,18 @@ use std::{
 use cargo_metadata::{Metadata, MetadataCommand, Package, PackageId};
 use thiserror::Error;
 
-use crate::{load_manifest, Federate, ManifestError};
+use crate::{load_manifest, Deployment, Federate, ManifestError, Topology};
 
 const DESCRIPTOR_FEATURE: &str = "__boomerang_descriptor";
 const PAYLOAD_FEATURE: &str = "__boomerang_payload";
 
-/// Reserved Cargo features selecting a package's deployment facets.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FacetFeatures {
-    /// Feature selecting host descriptor generation.
-    pub descriptor: &'static str,
-    /// Feature selecting target payload generation.
-    pub payload: &'static str,
-}
-
-/// Exact Cargo package containing the application topology entry point.
+/// Exact Cargo identity and location for a selected workspace package.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ResolvedTopology {
+pub struct CargoPackage {
     /// Opaque package identity reported by Cargo.
     pub id: PackageId,
-    /// Cargo package name retained for diagnostics and generated manifests.
-    pub name: String,
     /// Absolute path to the selected package manifest.
     pub manifest_path: PathBuf,
-    /// Rust path to the topology entry point.
-    pub entry: String,
-}
-
-/// One exact component implementation package selected for deployment analysis.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ResolvedPackage {
-    /// Opaque package identity reported by Cargo.
-    pub id: PackageId,
-    /// Cargo package name retained for diagnostics and generated manifests.
-    pub name: String,
-    /// Absolute path to the selected package manifest.
-    pub manifest_path: PathBuf,
-    /// Normal Cargo features selected by `Boomerang.toml`.
-    pub features: Vec<String>,
-    /// Reserved descriptor and payload features declared by the package.
-    pub facets: FacetFeatures,
 }
 
 /// Resolved target and runtime configuration for one Federate.
@@ -80,14 +52,43 @@ pub struct LockfileIdentity {
 /// Cargo-resolved inputs for one named deployment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedWorkspace {
-    /// Exact package containing the application topology entry point.
-    pub topology: ResolvedTopology,
-    /// Component-instance paths mapped to exact implementation packages.
-    pub bindings: BTreeMap<String, ResolvedPackage>,
-    /// Federate identifiers mapped to resolved build configuration.
-    pub federates: BTreeMap<String, ResolvedFederate>,
+    /// Manifest selection of the topology package and entry point.
+    topology: Topology,
+    /// Name of the selected deployment variant.
+    deployment_name: String,
+    /// Selected deployment with normalized bindings and resolved Federate paths.
+    deployment: Deployment<ResolvedFederate>,
+    /// Selected package names mapped to exact Cargo identities and locations.
+    packages: BTreeMap<String, CargoPackage>,
     /// Identity of the lockfile enforced during Cargo resolution.
-    pub lockfile: LockfileIdentity,
+    lockfile: LockfileIdentity,
+}
+
+impl ResolvedWorkspace {
+    /// Returns the selected topology package and entry point.
+    pub fn topology(&self) -> &Topology {
+        &self.topology
+    }
+
+    /// Returns the name of the selected deployment variant.
+    pub fn deployment_name(&self) -> &str {
+        &self.deployment_name
+    }
+
+    /// Returns the selected deployment with resolved Federate paths.
+    pub fn deployment(&self) -> &Deployment<ResolvedFederate> {
+        &self.deployment
+    }
+
+    /// Returns the exact Cargo identity and location for a selected package.
+    pub fn package(&self, name: &str) -> Option<&CargoPackage> {
+        self.packages.get(name)
+    }
+
+    /// Returns the identity of the lockfile enforced during resolution.
+    pub fn lockfile(&self) -> &LockfileIdentity {
+        &self.lockfile
+    }
 }
 
 /// Failure while resolving a deployment against locked Cargo metadata.
@@ -189,24 +190,22 @@ pub fn resolve_workspace(
     let metadata = locked_metadata(&workspace, &cargo_manifest)?;
     let workspace_root = metadata.workspace_root.clone().into_std_path_buf();
 
-    let topology = resolve_topology(
-        &metadata,
-        &manifest.topology.package,
-        &manifest.topology.entry,
-    )?;
-    let bindings = deployment
-        .bindings
-        .iter()
-        .map(|(component, binding)| {
-            resolve_package(&metadata, &binding.package, &binding.features)
-                .map(|package| (component.clone(), package))
-                .map_err(|source| WorkspaceError::Binding {
+    let topology_package = resolve_topology(&metadata, &manifest.topology.package)?;
+    let mut packages = BTreeMap::from([(manifest.topology.package.clone(), topology_package)]);
+    let mut bindings = deployment.bindings.clone();
+    for (component, binding) in &mut bindings {
+        binding.features.sort();
+        binding.features.dedup();
+        let package =
+            resolve_package(&metadata, &binding.package, &binding.features).map_err(|source| {
+                WorkspaceError::Binding {
                     deployment: deployment_name.to_owned(),
                     component: component.clone(),
                     source: Box::new(source),
-                })
-        })
-        .collect::<Result<_, _>>()?;
+                }
+            })?;
+        packages.insert(binding.package.clone(), package);
+    }
     let federates = deployment
         .federates
         .iter()
@@ -215,25 +214,25 @@ pub fn resolve_workspace(
     let lockfile = lockfile_identity(workspace_root.join("Cargo.lock"))?;
 
     Ok(ResolvedWorkspace {
-        topology,
-        bindings,
-        federates,
+        topology: manifest.topology.clone(),
+        deployment_name: deployment_name.to_owned(),
+        deployment: Deployment {
+            bindings,
+            federates,
+            coordination: deployment.coordination.clone(),
+            rti: deployment.rti.clone(),
+        },
+        packages,
         lockfile,
     })
 }
 
 /// Resolves the host-compatible topology package without imposing implementation facets.
-fn resolve_topology(
-    metadata: &Metadata,
-    name: &str,
-    entry: &str,
-) -> Result<ResolvedTopology, WorkspaceError> {
+fn resolve_topology(metadata: &Metadata, name: &str) -> Result<CargoPackage, WorkspaceError> {
     let package = workspace_member(metadata, name)?;
-    Ok(ResolvedTopology {
+    Ok(CargoPackage {
         id: package.id.clone(),
-        name: package.name.to_string(),
         manifest_path: package.manifest_path.clone().into_std_path_buf(),
-        entry: entry.to_owned(),
     })
 }
 
@@ -255,14 +254,11 @@ fn resolve_package(
     metadata: &Metadata,
     name: &str,
     selected_features: &[String],
-) -> Result<ResolvedPackage, WorkspaceError> {
+) -> Result<CargoPackage, WorkspaceError> {
     let package = workspace_member(metadata, name)?;
 
-    let facets = validate_facets(package)?;
-    let mut features = selected_features.to_vec();
-    features.sort();
-    features.dedup();
-    for feature in &features {
+    validate_facets(package)?;
+    for feature in selected_features {
         if matches!(feature.as_str(), DESCRIPTOR_FEATURE | PAYLOAD_FEATURE) {
             return Err(WorkspaceError::ReservedFeature {
                 package: name.to_owned(),
@@ -277,12 +273,9 @@ fn resolve_package(
         }
     }
 
-    Ok(ResolvedPackage {
+    Ok(CargoPackage {
         id: package.id.clone(),
-        name: package.name.to_string(),
         manifest_path: package.manifest_path.clone().into_std_path_buf(),
-        features,
-        facets,
     })
 }
 
@@ -306,7 +299,7 @@ fn workspace_member<'a>(metadata: &'a Metadata, name: &str) -> Result<&'a Packag
 }
 
 /// Confirms that a package supports both reserved deployment facets.
-fn validate_facets(package: &Package) -> Result<FacetFeatures, WorkspaceError> {
+fn validate_facets(package: &Package) -> Result<(), WorkspaceError> {
     for feature in [DESCRIPTOR_FEATURE, PAYLOAD_FEATURE] {
         if !package.features.contains_key(feature) {
             return Err(WorkspaceError::MissingFacet {
@@ -315,10 +308,7 @@ fn validate_facets(package: &Package) -> Result<FacetFeatures, WorkspaceError> {
             });
         }
     }
-    Ok(FacetFeatures {
-        descriptor: DESCRIPTOR_FEATURE,
-        payload: PAYLOAD_FEATURE,
-    })
+    Ok(())
 }
 
 /// Resolves workspace-relative Federate configuration paths.

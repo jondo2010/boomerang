@@ -34,14 +34,16 @@ fn resolution_returns_exact_package_ids_and_rejects_nonmembers() {
     let metadata = metadata.exec().unwrap();
     let resolved = resolve_workspace(&workspace, "production").unwrap();
 
-    assert_eq!(resolved.topology.name, "vehicle-topology");
-    assert_eq!(resolved.topology.entry, "vehicle_topology::topology");
+    assert_eq!(resolved.deployment_name(), "production");
+    assert_eq!(resolved.topology().package, "vehicle-topology");
+    assert_eq!(resolved.topology().entry, "vehicle_topology::topology");
+    let topology = resolved.package("vehicle-topology").unwrap();
     assert_eq!(
-        resolved.topology.manifest_path,
+        topology.manifest_path,
         workspace.join("vehicle-topology/Cargo.toml")
     );
     assert_eq!(
-        resolved.topology.id,
+        topology.id,
         metadata
             .packages
             .iter()
@@ -50,8 +52,10 @@ fn resolution_returns_exact_package_ids_and_rejects_nonmembers() {
             .id
     );
 
-    let sensor = &resolved.bindings["vehicle/sensor"];
-    assert_eq!(sensor.name, "sensor-host");
+    let sensor_binding = &resolved.deployment().bindings["vehicle/sensor"];
+    assert_eq!(sensor_binding.package, "sensor-host");
+    assert_eq!(sensor_binding.features, ["simulated"]);
+    let sensor = resolved.package("sensor-host").unwrap();
     assert_eq!(
         sensor.id,
         metadata
@@ -61,11 +65,8 @@ fn resolution_returns_exact_package_ids_and_rejects_nonmembers() {
             .unwrap()
             .id
     );
-    assert_eq!(sensor.features, ["simulated"]);
-    assert_eq!(sensor.facets.descriptor, "__boomerang_descriptor");
-    assert_eq!(sensor.facets.payload, "__boomerang_payload");
 
-    let host = &resolved.federates["host"];
+    let host = &resolved.deployment().federates["host"];
     assert_eq!(host.target.as_deref(), Some("x86_64-unknown-linux-gnu"));
     assert_eq!(
         host.target_json.as_deref(),
@@ -77,11 +78,11 @@ fn resolution_returns_exact_package_ids_and_rejects_nonmembers() {
     );
 
     assert_eq!(
-        resolved.lockfile.path,
+        resolved.lockfile().path,
         fs::canonicalize(workspace.join("Cargo.lock")).unwrap()
     );
     assert_eq!(
-        resolved.lockfile.digest,
+        resolved.lockfile().digest,
         [
             0x22, 0x0a, 0x2c, 0x31, 0xf0, 0xbd, 0xdf, 0xe3, 0x55, 0x90, 0xc7, 0xdc, 0x60, 0x87,
             0xa1, 0xcb, 0x5f, 0xa2, 0x97, 0x41, 0xa3, 0x9c, 0xa0, 0xab, 0xdf, 0x7d, 0x46, 0x72,

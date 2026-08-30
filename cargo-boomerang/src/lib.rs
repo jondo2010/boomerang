@@ -8,6 +8,6 @@ pub use manifest::{
     Federate, Manifest, ManifestError, Rti, Topology,
 };
 pub use workspace::{
-    resolve_workspace, FacetFeatures, LockfileIdentity, ResolvedFederate, ResolvedPackage,
-    ResolvedTopology, ResolvedWorkspace, WorkspaceError,
+    resolve_workspace, CargoPackage, LockfileIdentity, ResolvedFederate, ResolvedWorkspace,
+    WorkspaceError,
 };

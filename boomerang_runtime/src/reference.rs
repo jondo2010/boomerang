@@ -1,4 +1,4 @@
-//! Synchronous host execution for validated compiled enclave images.
+//! Standard-library reference implementation for synchronously executing validated compiled enclave images as a behavioral baseline for target executors.
 
 use tinymap::TinyMap;
 

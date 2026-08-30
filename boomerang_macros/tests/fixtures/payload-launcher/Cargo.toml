@@ -1,0 +1,16 @@
+[package]
+name = "payload-launcher"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[features]
+binding-fingerprint-mismatch = ["descriptor-pass/binding-fingerprint-mismatch"]
+binding-macro-abi-mismatch = ["descriptor-pass/binding-macro-abi-mismatch"]
+
+[dependencies]
+boomerang = { path = "../../../../boomerang" }
+boomerang_builder = { path = "../../../../boomerang_builder" }
+descriptor-pass = { path = "../descriptor-pass", features = ["__boomerang_payload"] }
+
+[workspace]

@@ -4,6 +4,10 @@ This document defines the target architecture for composing, partitioning, and
 executing Boomerang reactor graphs. It is normative design guidance, not a
 description of the current implementation and not a migration plan.
 
+The [Static Federate Deployment Architecture](./deployment-architecture.md) specializes this
+logical model into build-time implementation binding, compiled scheduler images, one binary per
+Federate, heterogeneous target builds, coordination backends, and deployment artifacts.
+
 ## Goals
 
 Users should describe application behavior once as a reactor graph and then
@@ -29,8 +33,8 @@ lowering:
 
 ```mermaid
 flowchart TD
-    Graph["GraphBlueprint<br/>reactors, actions, ports, modes, connections, logical delays"]
-    Deployment["DeploymentPlan<br/>reactor → enclave → federate → process or host"]
+    Graph["GraphBlueprint<br/>reactors, actions, ports, modes, connections, enclaves, placement groups"]
+    Deployment["DeploymentPlan<br/>placement group → federate → process or host"]
     Execution["ExecutionPlan<br/>live or replayed partitions, transport, recording policy"]
     Lowering["boomerang_builder lowering"]
     Runtime["RuntimePlan<br/>enclaves, scheduler inputs, boundary endpoints, coordinators"]
@@ -41,15 +45,14 @@ flowchart TD
     Lowering --> Runtime
 ```
 
-`GraphBlueprint` is a logical description. It does not embed enclave,
-federate, process, host, or transport choices. It can be instantiated more than
-once with fresh runtime state so that different deployments can execute the
-same graph definition.
+`GraphBlueprint` is a logical description. It includes source-declared Enclave
+boundaries and placement groups, but does not embed Federate, process, host, or
+transport choices. It can be instantiated more than once with fresh runtime
+state so that different deployments can execute the same graph definition.
 
-`DeploymentPlan` assigns graph regions to deployment boundaries. Enclaves and
-federates are distinct concepts: reactors are assigned to enclaves, and one or
-more enclaves may be assigned to a federate. Federates may then be assigned to
-processes or hosts.
+`DeploymentPlan` maps source-declared placement groups to Federates; it does not
+create or split Enclaves. One Federate may own one or more Enclaves and may then
+be assigned to a process or host.
 
 `ExecutionPlan` selects how the deployment is exercised. It can choose live or
 replayed execution per partition, select an in-memory or network transport,
@@ -216,7 +219,7 @@ flowchart LR
 
     Facade --> AssemblyLayer
     AssemblyLayer --> Runtime
-    Facade -. federated feature .-> Adapter
+    Facade -. selected coordination backend .-> Adapter
     Adapter --> AssemblyLayer
     Adapter --> Runtime
     Adapter --> Protocol
@@ -227,15 +230,18 @@ facade.
 
 ## Feature Model
 
-Users of the top-level crate select `federated` to enable federated deployment
-and `replay` to enable recording and replay. The features are orthogonal and
-may be combined for hybrid replay.
+Federate identity and compiled Federate structure are unconditional, including
+for a wholly local application. A multi-Federate deployment selects a
+coordination backend; a one-Federate deployment selects none.
 
-Lower crates may use implementation features where necessary, but those
-features are not part of the user-facing configuration model. Enabling
-`boomerang/federated` must select a complete, internally consistent federation
-stack without requiring users to coordinate assembly, runtime, protocol, or
-codec feature flags.
+Lower crates may use internal capability features for the selected coordination
+backend, protocol, transport, or trace container, but those features are not
+part of the user-facing placement model. `cargo-boomerang` selects a complete,
+internally consistent stack without requiring users to coordinate assembly,
+runtime, protocol, or codec feature flags.
+
+Replay is orthogonal to Federate placement. Concrete recording and replay
+containers may remain optional hosted capabilities.
 
 The default local execution path must not acquire Tokio, network transport, or
 RTI dependencies.

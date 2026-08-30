@@ -5,6 +5,8 @@ use std::ptr::NonNull;
 use super::*;
 use crate::{port::Contained, runtime};
 
+mod topology;
+
 #[test]
 fn test_duplicate_ports() {
     let mut assembly = Assembly::new();

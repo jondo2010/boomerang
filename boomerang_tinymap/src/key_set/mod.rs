@@ -118,6 +118,12 @@ mod tests {
     use super::*;
     use crate::DefaultKey;
 
+    #[cfg(feature = "serde")]
+    crate::key_type! {
+        #[derive(serde::Serialize, serde::Deserialize)]
+        SerializableKey
+    }
+
     #[test]
     fn test_new() {
         let set: KeySet<DefaultKey> = KeySet::with_capacity(10);
@@ -196,17 +202,18 @@ mod tests {
     fn test_serialize_roundtrip() {
         let mut set = KeySet::with_capacity(10);
         set.extend(vec![
-            DefaultKey::from(0),
-            DefaultKey::from(1),
-            DefaultKey::from(10),
+            SerializableKey::new(0),
+            SerializableKey::new(1),
+            SerializableKey::new(10),
         ]);
 
         let serialized = serde_json::to_string(&set).unwrap();
-        let deserialized: KeySet<DefaultKey> = serde_json::from_str(&serialized).unwrap();
+        let deserialized: KeySet<SerializableKey> = serde_json::from_str(&serialized).unwrap();
 
         assert_eq!(
-            set.iter().collect::<Vec<DefaultKey>>(),
+            set.iter().collect::<Vec<SerializableKey>>(),
             deserialized.iter().collect::<Vec<_>>()
         );
+        assert_eq!(deserialized.iter().next().unwrap().as_u32(), 0);
     }
 }

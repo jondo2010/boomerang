@@ -1,8 +1,8 @@
 use std::{fmt::Debug, sync::RwLock};
 
 use crate::{
-    key_set::KeySet, ActionCommon, ActionRef, AsyncActionRef, BaseReactor, CommonContext, Context,
-    Duration, InputRef, OutputRef, ReactionRefs, ReactionRefsExtract, ReactorData, SendContext,
+    ActionCommon, ActionRef, AsyncActionRef, BaseReactor, CommonContext, Context, Duration,
+    InputRef, OutputRef, ReactionRefs, ReactionRefsExtract, ReactorData, SendContext,
 };
 #[cfg(feature = "federated")]
 use crate::{
@@ -11,8 +11,6 @@ use crate::{
 };
 
 tinymap::key_type! { pub ReactionKey }
-
-pub type ReactionSet = KeySet<ReactionKey>;
 
 pub trait ReactionFn<'store>: Send + Sync {
     fn trigger(

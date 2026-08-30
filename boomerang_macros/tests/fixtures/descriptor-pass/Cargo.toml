@@ -1,0 +1,19 @@
+[package]
+name = "descriptor-pass"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[features]
+__boomerang_descriptor = []
+__boomerang_payload = []
+binding-fingerprint-mismatch = []
+binding-macro-abi-mismatch = []
+missing-state-init = []
+payload-lexical-relation = []
+
+[dependencies]
+boomerang = { path = "../../../../boomerang" }
+boomerang_builder = { path = "../../../../boomerang_builder", features = ["descriptor-fingerprint"] }
+
+[workspace]

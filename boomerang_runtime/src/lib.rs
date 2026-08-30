@@ -6,21 +6,25 @@
 pub use ::time::Duration;
 
 pub mod action;
+pub mod binding;
 mod context;
 mod env;
 mod event;
 #[cfg(feature = "federated")]
 mod federated;
+pub mod image;
 pub mod keepalive;
 mod key_set;
 pub mod port;
 pub mod reaction;
 mod reactor;
+mod reference;
 pub mod refs;
 mod refs_extract;
 #[cfg(feature = "replay")]
 pub mod replay;
 mod sched;
+pub mod storage;
 pub mod store;
 mod time;
 
@@ -50,12 +54,14 @@ pub use port::{DynPortRef, DynPortRefMut, *};
 pub use reaction::FederatedSenderReactionFn;
 pub use reaction::{
     BoxedReactionFn, ConnectionReceiverReactionFn, ConnectionSenderReactionFn, Deadline,
-    EnclaveSenderReactionFn, FromRefs, Reaction, ReactionFn, ReactionKey, ReactionSet,
+    EnclaveSenderReactionFn, FromRefs, Reaction, ReactionFn, ReactionKey,
 };
 pub use reactor::*;
+pub use reference::{execute_owned, ExecuteOwnedError, OwnedExecutionResult, StateAccessError};
 pub use refs::{Refs, RefsMut};
 pub use refs_extract::{ReactionRefs, ReactionRefsError, ReactionRefsExtract};
 pub use sched::*;
+pub use storage::owned::{OwnedBindings, OwnedStorage, OwnedStorageError, ReactionBindingError};
 pub use time::*;
 
 /// Types implementing this trait can be used as data in ports, actions, and reactors.

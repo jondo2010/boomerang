@@ -1,6 +1,8 @@
 use crate::Level;
 
 impl tinymap::Key for Level {
+    const MAX_LEN: usize = usize::MAX;
+
     fn index(&self) -> usize {
         self.0
     }
@@ -46,11 +48,6 @@ impl<K: tinymap::Key> KeySet<K> {
         Self {
             levels: vec![tinymap::KeySet::with_capacity(*num_keys); max_level.0 + 1],
         }
-    }
-
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.levels.len()
     }
 
     /// Extend the levels structure from an iterable

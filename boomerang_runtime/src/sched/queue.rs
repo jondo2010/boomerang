@@ -3,11 +3,11 @@ use std::collections::BinaryHeap;
 use crate::{key_set::KeySet, Level, ReactionSetLimits, Tag};
 
 #[derive(Debug)]
-pub(crate) struct EventQueue<R: tinymap::Key, A: Copy> {
+pub(crate) struct EventQueue<K: tinymap::Key, A: Copy> {
     /// Current event queue
-    event_queue: BinaryHeap<ScheduledEvent<R, A>>,
-    /// Recycled ReactionSets to avoid allocations
-    free_reaction_sets: Vec<KeySet<R>>,
+    event_queue: BinaryHeap<ScheduledEvent<K, A>>,
+    /// Recycled key sets that avoid steady-state allocations.
+    free_reaction_sets: Vec<KeySet<K>>,
     /// Limits for the reaction sets
     reaction_set_limits: ReactionSetLimits,
 }
@@ -23,11 +23,11 @@ pub(super) struct ScheduledActionValue<A> {
 
 /// One queued event parameterized by the schedule's exact key types.
 #[derive(Debug, Clone)]
-pub(super) struct ScheduledEvent<R: tinymap::Key, A: Copy> {
+pub(super) struct ScheduledEvent<K: tinymap::Key, A: Copy> {
     /// Event tag, in global or scope-local time as selected by the manager.
     pub(super) tag: Tag,
     /// Reactions activated by this event.
-    pub(super) reactions: KeySet<R>,
+    pub(super) reactions: KeySet<K>,
     /// Whether processing this event terminates the scheduler.
     pub(super) terminal: bool,
     /// Whether this event includes work other than terminal shutdown processing.
@@ -36,21 +36,21 @@ pub(super) struct ScheduledEvent<R: tinymap::Key, A: Copy> {
     pub(super) action_value: Option<ScheduledActionValue<A>>,
 }
 
-impl<R: tinymap::Key, A: Copy> Eq for ScheduledEvent<R, A> {}
+impl<K: tinymap::Key, A: Copy> Eq for ScheduledEvent<K, A> {}
 
-impl<R: tinymap::Key, A: Copy> PartialEq for ScheduledEvent<R, A> {
+impl<K: tinymap::Key, A: Copy> PartialEq for ScheduledEvent<K, A> {
     fn eq(&self, other: &Self) -> bool {
         self.tag == other.tag && self.terminal == other.terminal
     }
 }
 
-impl<R: tinymap::Key, A: Copy> PartialOrd for ScheduledEvent<R, A> {
+impl<K: tinymap::Key, A: Copy> PartialOrd for ScheduledEvent<K, A> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<R: tinymap::Key, A: Copy> Ord for ScheduledEvent<R, A> {
+impl<K: tinymap::Key, A: Copy> Ord for ScheduledEvent<K, A> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.tag
             .cmp(&other.tag)
@@ -59,7 +59,7 @@ impl<R: tinymap::Key, A: Copy> Ord for ScheduledEvent<R, A> {
     }
 }
 
-impl<R: tinymap::Key, A: Copy> EventQueue<R, A> {
+impl<K: tinymap::Key, A: Copy> EventQueue<K, A> {
     pub(crate) fn new(reaction_set_limits: ReactionSetLimits) -> Self {
         Self {
             event_queue: BinaryHeap::new(),
@@ -73,7 +73,7 @@ impl<R: tinymap::Key, A: Copy> EventQueue<R, A> {
     /// A free event is pulled from the `free_events` vector and then modified with the provided function.
     pub(crate) fn push_event<I>(&mut self, tag: Tag, reactions: I, terminal: bool)
     where
-        I: IntoIterator<Item = (Level, R)>,
+        I: IntoIterator<Item = (Level, K)>,
     {
         self.push_event_inner(tag, reactions, terminal, None);
     }
@@ -85,7 +85,7 @@ impl<R: tinymap::Key, A: Copy> EventQueue<R, A> {
         reactions: I,
         terminal: bool,
     ) where
-        I: IntoIterator<Item = (Level, R)>,
+        I: IntoIterator<Item = (Level, K)>,
     {
         self.push_event_inner(tag, reactions, terminal, action_value);
     }
@@ -97,7 +97,7 @@ impl<R: tinymap::Key, A: Copy> EventQueue<R, A> {
         terminal: bool,
         action_value: Option<ScheduledActionValue<A>>,
     ) where
-        I: IntoIterator<Item = (Level, R)>,
+        I: IntoIterator<Item = (Level, K)>,
     {
         let can_merge = self.event_queue.peek().is_some_and(|event| {
             event.tag == tag && (event.action_value.is_none() || action_value.is_none())
@@ -130,7 +130,7 @@ impl<R: tinymap::Key, A: Copy> EventQueue<R, A> {
     /// Pop the next event from the event queue.
     ///
     /// Any subsequent events with the same tag are merged into the returned event.
-    pub(crate) fn pop_next_event(&mut self) -> Option<ScheduledEvent<R, A>> {
+    pub(crate) fn pop_next_event(&mut self) -> Option<ScheduledEvent<K, A>> {
         if let Some(mut event) = self.event_queue.pop() {
             // Merge events with the same tag
             while let Some(next_event) = self.event_queue.peek() {
@@ -152,14 +152,14 @@ impl<R: tinymap::Key, A: Copy> EventQueue<R, A> {
         None
     }
 
-    /// Get a free [`ReactionSet`] or create a new one if none are available.
-    fn next_reaction_set(&mut self) -> KeySet<R> {
+    /// Gets a recycled reaction key set or creates one when none are available.
+    fn next_reaction_set(&mut self) -> KeySet<K> {
         self.free_reaction_sets
             .pop()
             .unwrap_or_else(|| KeySet::new(&self.reaction_set_limits))
     }
 
-    pub(crate) fn recycle_reaction_set(&mut self, mut reaction_set: KeySet<R>) {
+    pub(crate) fn recycle_reaction_set(&mut self, mut reaction_set: KeySet<K>) {
         reaction_set.clear();
         self.free_reaction_sets.push(reaction_set);
     }

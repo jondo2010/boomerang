@@ -60,9 +60,7 @@ pub enum StateAccessError {
 }
 
 /// Final owned state retained after a synchronous compiled-image execution.
-///
-/// This result owns no scheduler machinery or compiled-image borrow and can therefore outlive the
-/// `EnclaveImage` passed to [`execute_owned`].
+/// It owns no scheduler machinery or image borrow and may outlive the executed image.
 pub struct OwnedExecutionResult {
     /// Final owned reactor states keyed by compiled storage slot.
     states: TinyMap<StateSlotIndex, StoredState>,
@@ -72,9 +70,7 @@ pub struct OwnedExecutionResult {
 
 impl OwnedExecutionResult {
     /// Borrows the state stored at `slot` as its original concrete type.
-    ///
-    /// The state is read-only. Out-of-range and mismatched-type lookups return a typed
-    /// [`StateAccessError`].
+    /// Invalid slots or concrete types return [`StateAccessError`].
     pub fn state<T: ReactorData>(&self, slot: StateSlotIndex) -> Result<&T, StateAccessError> {
         if slot.as_u32() as usize >= self.states.len() {
             return Err(StateAccessError::OutOfRange { slot });
@@ -91,7 +87,6 @@ impl OwnedExecutionResult {
     }
 
     /// Returns the last logical tag at which non-shutdown work was processed.
-    ///
     /// Returns [`Tag::NEVER`] if execution reached only terminal shutdown processing.
     pub const fn final_tag(&self) -> Tag {
         self.final_tag
@@ -99,16 +94,13 @@ impl OwnedExecutionResult {
 }
 
 /// Validates and synchronously executes a borrowed compiled enclave image with direct bindings.
-///
-/// The image is borrowed only for execution. `bindings` is consumed to initialize one owned
-/// storage instance, and the returned result retains only the final owned state and tag.
+/// Consumes `bindings`; the result retains only final owned state and the last work tag.
 ///
 /// # Errors
 ///
-/// Returns [`ExecuteOwnedError`] when image validation, binding/storage initialization, local
-/// coordination, or direct reaction execution fails.
+/// Returns [`ExecuteOwnedError`] for validation, storage, coordination, or reaction failures.
 pub fn execute_owned<'image>(
-    image: &'image EnclaveImage<'image>,
+    image: &EnclaveImage<'image>,
     bindings: OwnedBindings,
     config: Config,
 ) -> Result<OwnedExecutionResult, ExecuteOwnedError<'image>> {

@@ -140,9 +140,7 @@ fn compiled_reactions(
 }
 
 /// Runs validated owned storage through the shared core with local-only coordination.
-///
-/// This crate-private adapter owns the queue, scratch, clock, wake channel, and base-native
-/// no-op federated hook; Task 4 owns the public executor and result boundary.
+/// Owns the queue, scratch, clock, wake channel, and no-op federated hook for public execution.
 pub(crate) fn run_owned_scheduler(
     storage: &mut OwnedStorage<'_>,
     config: &Config,

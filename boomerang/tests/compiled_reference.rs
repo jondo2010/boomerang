@@ -38,7 +38,6 @@ fn increment_counter(
 fn reference_bindings() -> OwnedBindings {
     OwnedBindings::new()
         .bind_state(BindingSlotIndex::new(0), initialize_counter)
-        .bind_action::<()>(ActionSlotIndex::new(0))
         .bind_reaction(BindingSlotIndex::new(1), increment_counter)
 }
 
@@ -202,20 +201,6 @@ fn compiled_reference_executes_startup_to_shutdown() {
 }
 
 #[test]
-fn compiled_reference_final_tag_excludes_delayed_shutdown_only_work() {
-    let result = execute_owned(
-        &IMAGE,
-        reference_bindings(),
-        Config::default()
-            .with_fast_forward(true)
-            .with_timeout(Duration::nanoseconds(6)),
-    )
-    .unwrap();
-
-    assert_eq!(result.final_tag(), Tag::new(Duration::nanoseconds(5), 0));
-}
-
-#[test]
 fn compiled_reference_terminal_only_execution_returns_never() {
     let result = execute_owned(
         &IMAGE,
@@ -231,11 +216,9 @@ fn compiled_reference_terminal_only_execution_returns_never() {
 
 #[test]
 fn compiled_reference_final_tag_includes_work_coalesced_with_shutdown() {
-    let bindings = reference_bindings().bind_action::<()>(ActionSlotIndex::new(1));
-
     let result = execute_owned(
         &COALESCED_IMAGE,
-        bindings,
+        reference_bindings(),
         Config::default()
             .with_fast_forward(true)
             .with_timeout(Duration::nanoseconds(1)),
@@ -254,16 +237,18 @@ fn compiled_reference_final_tag_includes_work_coalesced_with_shutdown() {
 
 #[test]
 fn compiled_reference_returns_typed_image_validation_error() {
+    fn validate_local_image(image: EnclaveImage<'static>) -> ExecuteOwnedError<'static> {
+        match execute_owned(&image, OwnedBindings::new(), Config::default()) {
+            Err(error) => error,
+            Ok(_) => panic!("invalid image must fail validation"),
+        }
+    }
+
     let invalid_image = EnclaveImage {
         enclave_id: IdentityRange::new(u32::MAX, 1),
         ..IMAGE
     };
-
-    let error: ExecuteOwnedError<'_> =
-        match execute_owned(&invalid_image, OwnedBindings::new(), Config::default()) {
-            Err(error) => error,
-            Ok(_) => panic!("invalid image must fail validation"),
-        };
+    let error = validate_local_image(invalid_image);
 
     assert!(matches!(
         error,

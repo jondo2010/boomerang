@@ -103,16 +103,16 @@ fn local_to_global(
 
 /// Heap entry for the next runnable event in a scope-local queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ScopeFrontierEntry<S: tinymap::Key> {
+struct ScopeFrontierEntry<K: tinymap::Key> {
     /// Global tag corresponding to the scope queue's current local front event.
     global_tag: Tag,
     /// Scope whose queue contributed this frontier entry.
-    scope: S,
+    scope: K,
     /// Clock generation observed when this entry was pushed.
     epoch: u64,
 }
 
-impl<S: tinymap::Key> Ord for ScopeFrontierEntry<S> {
+impl<K: tinymap::Key> Ord for ScopeFrontierEntry<K> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.global_tag
             .cmp(&other.global_tag)
@@ -121,7 +121,7 @@ impl<S: tinymap::Key> Ord for ScopeFrontierEntry<S> {
     }
 }
 
-impl<S: tinymap::Key> PartialOrd for ScopeFrontierEntry<S> {
+impl<K: tinymap::Key> PartialOrd for ScopeFrontierEntry<K> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
@@ -129,11 +129,11 @@ impl<S: tinymap::Key> PartialOrd for ScopeFrontierEntry<S> {
 
 /// Event returned to the scheduler after root and scope-local queues are merged at one tag.
 #[derive(Debug)]
-pub(super) struct ReadyEvent<R: tinymap::Key> {
+pub(super) struct ReadyEvent<K: tinymap::Key> {
     /// Global tag at which the contained reactions are ready.
     pub(super) tag: Tag,
     /// Reactions ready to execute at [`tag`](Self::tag).
-    pub(super) reactions: KeySet<R>,
+    pub(super) reactions: KeySet<K>,
     /// Whether this event indicates scheduler termination.
     pub(super) terminal: bool,
     /// Whether this event includes work other than terminal shutdown processing.

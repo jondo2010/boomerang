@@ -429,7 +429,7 @@ where
                 }
             }
 
-            // Return the ReactionSet to the free pool
+            // Return the reaction key set to the free pool.
             self.events.return_reaction_set(event.reactions);
 
             // Release the current tag to downstream reactors

@@ -54,7 +54,7 @@ pub use port::{DynPortRef, DynPortRefMut, *};
 pub use reaction::FederatedSenderReactionFn;
 pub use reaction::{
     BoxedReactionFn, ConnectionReceiverReactionFn, ConnectionSenderReactionFn, Deadline,
-    EnclaveSenderReactionFn, FromRefs, Reaction, ReactionFn, ReactionKey, ReactionSet,
+    EnclaveSenderReactionFn, FromRefs, Reaction, ReactionFn, ReactionKey,
 };
 pub use reactor::*;
 pub use reference::{execute_owned, ExecuteOwnedError, OwnedExecutionResult, StateAccessError};

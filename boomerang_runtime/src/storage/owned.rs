@@ -17,24 +17,19 @@ use crate::{
 /// Errors returned by direct reaction implementations.
 pub type ReactionBindingError = crate::ReactionRefsError;
 
-/// Validated dense storage layout:
-/// 1. state initializer bindings keyed by state slot;
-/// 2. action images keyed by action storage slot.
+/// Validated state-binding and action-image maps keyed by their storage slots.
 type StorageLayout = (
     TinySecondaryMap<StateSlotIndex, BindingSlotIndex>,
     TinySecondaryMap<ActionSlotIndex, crate::image::ActionImage>,
 );
-
-/// Initialized scheduler context resources:
-/// 1. contexts keyed by reactor index;
-/// 2. the event receiver and shutdown sender paired with those contexts.
+/// Initialized reactor contexts and their paired event and shutdown channels.
 type InitializedContexts = (
     TinyMap<ReactorIndex, Context>,
     crate::Receiver<crate::event::AsyncEvent>,
     crate::keepalive::Sender,
 );
-
 /// Heap-backed factories and invokers bound directly to compiled-image slots.
+#[derive(Default)]
 pub struct OwnedBindings {
     /// Factories and invokers for the image's typed required binding slots.
     bindings: TinySecondaryMap<BindingSlotIndex, Binding>,
@@ -47,11 +42,7 @@ pub struct OwnedBindings {
 impl OwnedBindings {
     /// Creates an empty set of direct bindings.
     pub fn new() -> Self {
-        Self {
-            bindings: TinySecondaryMap::new(),
-            actions: TinySecondaryMap::new(),
-            ports: TinySecondaryMap::new(),
-        }
+        Self::default()
     }
 
     /// Binds a state initializer to its compiled required binding slot.
@@ -65,7 +56,6 @@ impl OwnedBindings {
         );
         self
     }
-
     /// Binds a payload action type to its compiled storage slot.
     pub fn bind_action<T: ReactorData>(mut self, slot: ActionSlotIndex) -> Self {
         self.actions.insert(
@@ -76,7 +66,6 @@ impl OwnedBindings {
         );
         self
     }
-
     /// Binds a payload port type to its compiled storage slot.
     pub fn bind_port<T: ReactorData>(mut self, slot: PortIndex) -> Self {
         self.ports.insert(
@@ -87,7 +76,6 @@ impl OwnedBindings {
         );
         self
     }
-
     /// Binds a directly generated reaction implementation to its required binding slot.
     pub fn bind_reaction<F>(mut self, slot: BindingSlotIndex, function: F) -> Self
     where
@@ -103,13 +91,6 @@ impl OwnedBindings {
         self.bindings
             .insert(slot, Binding::Reaction(Box::new(function)));
         self
-    }
-}
-
-impl Default for OwnedBindings {
-    /// Creates an empty set of direct bindings.
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -165,11 +146,12 @@ impl<T: ReactorData> StateInitializer for TypedStateInitializer<T> {
 
 /// Object-safe action construction behind the public generic binding method.
 trait ActionFactory: Send + Sync {
-    /// Builds an action for the supplied compiled slot and timing semantics.
+    /// Builds a standard action for the supplied slot and timing domain.
     fn create(
         &self,
         slot: ActionSlotIndex,
-        timing: ActionTiming,
+        domain: TimingDomain,
+        min_delay_nanos: u64,
     ) -> Result<Box<dyn BaseAction>, OwnedStorageError>;
 }
 
@@ -180,34 +162,22 @@ struct TypedActionFactory<T: ReactorData> {
 }
 
 impl<T: ReactorData> ActionFactory for TypedActionFactory<T> {
-    /// Builds a typed action using the compiled timing semantics.
+    /// Builds a typed standard action using validated compiled timing.
     fn create(
         &self,
         slot: ActionSlotIndex,
-        timing: ActionTiming,
+        domain: TimingDomain,
+        min_delay_nanos: u64,
     ) -> Result<Box<dyn BaseAction>, OwnedStorageError> {
-        let (min_delay, is_logical) = match timing {
-            ActionTiming::Standard {
-                domain,
-                min_delay_nanos,
-            } => (
-                Duration::nanoseconds(
-                    i64::try_from(min_delay_nanos)
-                        .map_err(|_| OwnedStorageError::DelayOutOfRange { min_delay_nanos })?,
-                ),
-                matches!(domain, TimingDomain::Logical),
-            ),
-            ActionTiming::Timer { .. } => (Duration::ZERO, true),
-            ActionTiming::Shutdown => {
-                return Err(OwnedStorageError::UnexpectedActionFactory { slot })
-            }
-        };
-
+        let min_delay = Duration::nanoseconds(
+            i64::try_from(min_delay_nanos)
+                .map_err(|_| OwnedStorageError::DelayOutOfRange { min_delay_nanos })?,
+        );
         Ok(Action::<T>::new(
             &format!("action-{}", slot.as_u32()),
             ActionKey::new(slot.as_u32()),
             Some(min_delay),
-            is_logical,
+            matches!(domain, TimingDomain::Logical),
         )
         .boxed())
     }
@@ -304,19 +274,11 @@ pub enum OwnedStorageError {
         /// The compiled action storage slot.
         slot: ActionSlotIndex,
     },
-    /// An action factory was supplied for an internally constructed shutdown action.
-    #[error("unexpected action factory at shutdown slot {slot}")]
+    /// An action factory was supplied for an executor-owned timer or shutdown action.
+    #[error("unexpected action factory at executor-owned slot {slot}")]
     UnexpectedActionFactory {
-        /// The compiled shutdown action storage slot.
+        /// The compiled timer or shutdown action storage slot.
         slot: ActionSlotIndex,
-    },
-    /// The set of explicit action factories has incorrect coverage.
-    #[error("action factory coverage mismatch: expected {expected}, found {found}")]
-    ActionFactoryCoverageMismatch {
-        /// Number of non-shutdown action slots in the image.
-        expected: usize,
-        /// Number of explicitly supplied action factories.
-        found: usize,
     },
     /// Multiple image actions claim one mutable action storage slot.
     #[error("duplicate action storage slot {slot}")]
@@ -362,6 +324,14 @@ pub enum OwnedStorageError {
         /// The compiled minimum delay in nanoseconds.
         min_delay_nanos: u64,
     },
+    /// A periodic timer requires recurring scheduling support outside this executor slice.
+    #[error("periodic timer at action slot {slot} with period {period_nanos}ns is unsupported")]
+    PeriodicTimerUnsupported {
+        /// The compiled timer action storage slot.
+        slot: ActionSlotIndex,
+        /// The requested recurring period in nanoseconds.
+        period_nanos: u64,
+    },
     /// A reaction enables modes other than its statically owning scope's mode.
     #[error("reaction {reaction} has an enabled-mode filter that does not match its static scope")]
     ReactionModeFilterMismatch {
@@ -375,11 +345,9 @@ pub enum OwnedStorageError {
         delay_nanos: u64,
     },
     /// A direct reaction requested a dynamic mode transition without a stable compiled mode identity.
-    #[error(
-        "reaction {reaction} requested a dynamic mode transition unsupported by owned storage"
-    )]
+    #[error("reaction {reaction} requested an unsupported dynamic mode transition")]
     DynamicModeTransitionUnsupported {
-        /// The reaction whose transition must await generated compiled-mode identities.
+        /// The reaction awaiting generated compiled-mode identities.
         reaction: ReactionIndex,
     },
     /// A reaction's port or action references alias mutably within one invocation.
@@ -413,7 +381,7 @@ pub struct OwnedStorage<'image> {
     contexts: TinyMap<ReactorIndex, Context>,
     /// Generated reaction invokers keyed by exact image binding slots.
     reactions: TinySecondaryMap<BindingSlotIndex, Box<dyn ReactionInvoker>>,
-    /// Stable, alias-checked reaction references whose boxed targets do not move after initialization.
+    /// Alias-checked references to stable boxed targets.
     reaction_refs: TinyMap<ReactionIndex, ReactionReferenceLayout>,
     /// Keeps the per-enclave event channel open for stored reaction contexts.
     event_rx: crate::Receiver<crate::event::AsyncEvent>,
@@ -432,9 +400,8 @@ struct ReactionReferenceLayout {
 }
 
 // SAFETY: `BasePort` and `BaseAction` are `Send`. These pointers target boxes owned by the same
-// `OwnedStorage`; moving storage preserves their heap allocations, and those boxes are never
-// replaced after this layout is built. Construction rejects mutable aliases, and invocation
-// requires exclusive access to the storage.
+// `OwnedStorage`; moves preserve their allocations, and the boxes are never replaced. Construction
+// rejects mutable aliases, and invocation requires exclusive access to the storage.
 unsafe impl Send for ReactionReferenceLayout {}
 
 impl fmt::Debug for OwnedStorage<'_> {
@@ -471,16 +438,15 @@ impl<'image> OwnedStorage<'image> {
         image: EnclaveImageView<'image>,
         bindings: OwnedBindings,
     ) -> Result<Self, OwnedStorageError> {
-        validate_bindings(&image, &bindings)?;
-
         let (state_bindings, action_images) = validate_storage_layout(&image)?;
+        validate_action_timing(&action_images)?;
+        validate_bindings(&image, &bindings)?;
         let OwnedBindings {
             bindings,
             actions: action_factories,
             ports: port_factories,
         } = bindings;
 
-        validate_action_delays(&action_images)?;
         validate_startup_delays(&image)?;
         validate_reaction_mode_filters(&image)?;
         let mut actions = initialize_actions(&action_images, &action_factories)?;
@@ -603,22 +569,22 @@ fn validate_bindings(
         });
     }
 
-    let mut expected_actions = 0;
-    for (_, action) in image.actions().iter() {
-        if matches!(action.timing(), ActionTiming::Shutdown) {
-            continue;
-        }
-        expected_actions += 1;
-        let slot = action.storage_slot();
-        if !bindings.actions.contains_key(slot) {
-            return Err(OwnedStorageError::MissingActionFactory { slot });
+    for slot in bindings.actions.keys() {
+        let is_standard = image.actions().values().any(|action| {
+            action.storage_slot() == slot
+                && matches!(action.timing(), ActionTiming::Standard { .. })
+        });
+        if !is_standard {
+            return Err(OwnedStorageError::UnexpectedActionFactory { slot });
         }
     }
-    if bindings.actions.len() != expected_actions {
-        return Err(OwnedStorageError::ActionFactoryCoverageMismatch {
-            expected: expected_actions,
-            found: bindings.actions.len(),
-        });
+    for (_, action) in image.actions().iter() {
+        let slot = action.storage_slot();
+        if matches!(action.timing(), ActionTiming::Standard { .. })
+            && !bindings.actions.contains_key(slot)
+        {
+            return Err(OwnedStorageError::MissingActionFactory { slot });
+        }
     }
     for slot in image.ports().keys() {
         if !bindings.ports.contains_key(slot) {
@@ -731,23 +697,27 @@ fn initialize_states(
     Ok(states)
 }
 
-/// Rejects action delays that cannot fit the runtime duration type before state initialization.
-fn validate_action_delays(
+/// Rejects unsupported or unrepresentable action timing before state initialization.
+fn validate_action_timing(
     action_images: &TinySecondaryMap<ActionSlotIndex, crate::image::ActionImage>,
 ) -> Result<(), OwnedStorageError> {
-    for (_, action) in action_images.iter() {
-        if let ActionTiming::Standard {
-            min_delay_nanos, ..
-        } = action.timing()
-        {
-            i64::try_from(min_delay_nanos)
-                .map_err(|_| OwnedStorageError::DelayOutOfRange { min_delay_nanos })?;
+    for (slot, action) in action_images.iter() {
+        match action.timing() {
+            ActionTiming::Standard {
+                min_delay_nanos, ..
+            } => i64::try_from(min_delay_nanos)
+                .map(|_| ())
+                .map_err(|_| OwnedStorageError::DelayOutOfRange { min_delay_nanos })?,
+            ActionTiming::Timer {
+                period_nanos: Some(period_nanos),
+            } => return Err(OwnedStorageError::PeriodicTimerUnsupported { slot, period_nanos }),
+            ActionTiming::Timer { .. } | ActionTiming::Shutdown => {}
         }
     }
     Ok(())
 }
 
-/// Initializes the dense action map and internally supplies shutdown unit actions.
+/// Initializes standard payload actions and executor-owned timer or shutdown unit actions.
 fn initialize_actions(
     action_images: &TinySecondaryMap<ActionSlotIndex, crate::image::ActionImage>,
     factories: &TinySecondaryMap<ActionSlotIndex, Box<dyn ActionFactory>>,
@@ -755,13 +725,16 @@ fn initialize_actions(
     let mut actions = TinyMap::with_capacity(action_images.len());
     for (slot, action) in action_images.iter() {
         let value = match action.timing() {
-            ActionTiming::Shutdown => {
-                Action::<()>::new("shutdown", ActionKey::new(slot.as_u32()), None, true).boxed()
+            ActionTiming::Timer { .. } | ActionTiming::Shutdown => {
+                Action::<()>::new("internal", ActionKey::new(slot.as_u32()), None, true).boxed()
             }
-            timing => factories
+            ActionTiming::Standard {
+                domain,
+                min_delay_nanos,
+            } => factories
                 .get(slot)
                 .ok_or(OwnedStorageError::MissingActionFactory { slot })?
-                .create(slot, timing)?,
+                .create(slot, domain, min_delay_nanos)?,
         };
         let inserted = actions.insert(value);
         debug_assert_eq!(inserted, slot);
@@ -975,24 +948,23 @@ mod tests {
         Some(crate::image::ModeIndex::new(0)),
         None,
     )];
-    static ACTIONS: [ActionImage; 1] = [ActionImage::new(
-        ScopeIndex::new(0),
-        ActionSlotIndex::new(0),
-        ActionTiming::Standard {
-            domain: TimingDomain::Logical,
-            min_delay_nanos: 0,
-        },
-        TableRange::new(0, 0),
-    )];
-    static UNREPRESENTABLE_ACTIONS: [ActionImage; 1] = [ActionImage::new(
-        ScopeIndex::new(0),
-        ActionSlotIndex::new(0),
-        ActionTiming::Standard {
-            domain: TimingDomain::Logical,
-            min_delay_nanos: u64::MAX,
-        },
-        TableRange::new(0, 0),
-    )];
+    /// Creates the test action shared by timing-validation fixtures.
+    const fn action(timing: ActionTiming) -> ActionImage {
+        ActionImage::new(
+            ScopeIndex::new(0),
+            ActionSlotIndex::new(0),
+            timing,
+            TableRange::new(0, 0),
+        )
+    }
+    static ACTIONS: [ActionImage; 1] = [action(ActionTiming::Standard {
+        domain: TimingDomain::Logical,
+        min_delay_nanos: 0,
+    })];
+    static UNREPRESENTABLE_ACTIONS: [ActionImage; 1] = [action(ActionTiming::Standard {
+        domain: TimingDomain::Logical,
+        min_delay_nanos: u64::MAX,
+    })];
     static PORTS: [PortImage; 1] = [PortImage::new(ScopeIndex::new(0), TableRange::new(0, 0))];
     static REACTIONS: [ReactionImage; 1] = [ReactionImage::new(
         ReactorIndex::new(0),
@@ -1199,6 +1171,48 @@ mod tests {
 
         assert!(matches!(error, OwnedStorageError::DelayOutOfRange { .. }));
         assert_eq!(INITIALIZER_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn rejects_periodic_timer_before_initializing_state() {
+        let actions = [action(ActionTiming::Timer {
+            period_nanos: Some(7),
+        })];
+        let periodic_image = EnclaveImage {
+            actions: TinyMapView::new(&actions),
+            ..IMAGE
+        };
+        let image = EnclaveImageView::new(&periodic_image).expect("periodic image is structural");
+        INITIALIZER_CALLS.store(0, Ordering::SeqCst);
+
+        let error = OwnedStorage::new(image, counted_bindings()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            OwnedStorageError::PeriodicTimerUnsupported {
+                slot,
+                period_nanos: 7
+            } if slot == ActionSlotIndex::new(0)
+        ));
+        assert_eq!(INITIALIZER_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn rejects_payload_factory_for_executor_owned_timer() {
+        let actions = [action(ActionTiming::Timer { period_nanos: None })];
+        let timer_image = EnclaveImage {
+            actions: TinyMapView::new(&actions),
+            ..IMAGE
+        };
+        let image = EnclaveImageView::new(&timer_image).expect("timer image is structural");
+
+        let error = OwnedStorage::new(image, complete_bindings()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            OwnedStorageError::UnexpectedActionFactory { slot }
+                if slot == ActionSlotIndex::new(0)
+        ));
     }
 
     #[test]

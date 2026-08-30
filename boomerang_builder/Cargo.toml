@@ -17,6 +17,9 @@ default = []
 ## Host-side descriptor hashing for tooling and macros, including the optional BLAKE3 dependency, without burdening ordinary builder consumers
 descriptor-fingerprint = ["dep:blake3"]
 
+## Validated JSON interchange for host-side deployment tooling
+host-interchange = ["dep:serde", "dep:serde_json", "boomerang_runtime/serde"]
+
 ## Support for tracing with Tracy
 tracy = ["tracing-tracy/enable"]
 
@@ -39,6 +42,7 @@ slotmap = { version = "1.0", features = ["unstable"] }
 thiserror.workspace = true
 tracing.workspace = true
 serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 variadics_please.workspace = true
 
 # repo dependencies

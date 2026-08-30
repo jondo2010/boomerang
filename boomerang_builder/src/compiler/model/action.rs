@@ -2,9 +2,13 @@ use crate::{
     compiler::{ActionId, ModeId, ReactorId},
     runtime,
 };
+#[cfg(feature = "host-interchange")]
+use serde::{Deserialize, Serialize};
 
 /// Structural action category and its category-specific timing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub enum ActionKind {
     /// Logical action scheduled in logical time.
     Logical {
@@ -31,6 +35,8 @@ pub enum ActionKind {
 
 /// Structural action declaration using stable identities.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct Action {
     /// Stable action identity.
     pub(super) id: ActionId,

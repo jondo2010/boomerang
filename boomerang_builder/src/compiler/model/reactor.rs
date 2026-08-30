@@ -1,8 +1,12 @@
 use super::BankMember;
 use crate::compiler::{ComponentInstanceId, ModeId, PlacementGroupId, ReactorId, StableEnclaveId};
+#[cfg(feature = "host-interchange")]
+use serde::{Deserialize, Serialize};
 
 /// Structural reactor declaration using stable identities.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct Reactor {
     /// Stable reactor identity.
     pub(super) id: ReactorId,

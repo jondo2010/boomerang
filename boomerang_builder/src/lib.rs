@@ -13,6 +13,8 @@ mod descriptor;
 #[cfg(feature = "federated")]
 mod federation;
 mod fqn;
+#[cfg(feature = "host-interchange")]
+pub mod host_interchange;
 mod inter_partition;
 mod port;
 mod reaction;

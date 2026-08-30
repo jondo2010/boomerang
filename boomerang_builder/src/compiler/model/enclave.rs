@@ -1,7 +1,11 @@
 use crate::compiler::{ReactorId, StableEnclaveId};
+#[cfg(feature = "host-interchange")]
+use serde::{Deserialize, Serialize};
 
 /// Scheduler and logical-time domain.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct Enclave {
     /// Stable enclave identity.
     pub(super) id: StableEnclaveId,

@@ -1,7 +1,10 @@
 [package]
 name = "vehicle-topology"
-version.workspace = true
-edition.workspace = true
+version = "0.1.0"
+edition = "2021"
 
 [dependencies]
+boomerang_builder = { path = "../../../../../boomerang_builder", features = ["host-interchange"] }
+
+[target.'cfg(target_os = "none")'.dependencies]
 outside-member = { path = "../outside-member" }

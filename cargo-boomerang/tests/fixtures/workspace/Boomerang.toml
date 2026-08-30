@@ -8,6 +8,9 @@ entry = "vehicle_topology::topology"
 package = "sensor-host"
 features = ["simulated"]
 
+[deployments.production.bindings."vehicle/controller"]
+package = "vehicle-control"
+
 [deployments.production.federates.host]
 groups = ["vehicle"]
 target = "x86_64-unknown-linux-gnu"
@@ -19,5 +22,12 @@ cargo-config = ".cargo/host.toml"
 package = "outside-member"
 
 [deployments.outside-member.federates.host]
+groups = ["vehicle"]
+runtime = "std"
+
+[deployments.payload-alias.bindings."vehicle/sensor"]
+package = "sensor-host"
+features = ["payload-alias"]
+[deployments.payload-alias.federates.host]
 groups = ["vehicle"]
 runtime = "std"

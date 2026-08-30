@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -15,6 +15,14 @@ const PAYLOAD_FEATURE: &str = "__boomerang_payload";
 /// Exact Cargo identity and location for a selected workspace package.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CargoPackage {
+    /// Cargo package name used in generated dependency declarations.
+    pub name: String,
+    /// Exact package version reported by Cargo metadata.
+    pub version: String,
+    /// Cargo source identity, or `None` for a local path package.
+    pub source: Option<String>,
+    /// Rust library target name when the package exposes one.
+    pub lib_target: Option<String>,
     /// Opaque package identity reported by Cargo.
     pub id: PackageId,
     /// Absolute path to the selected package manifest.
@@ -52,6 +60,8 @@ pub struct LockfileIdentity {
 /// Cargo-resolved inputs for one named deployment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedWorkspace {
+    /// Cargo target directory that owns generated deployment tooling.
+    target_directory: PathBuf,
     /// Manifest selection of the topology package and entry point.
     topology: Topology,
     /// Name of the selected deployment variant.
@@ -60,11 +70,20 @@ pub struct ResolvedWorkspace {
     deployment: Deployment<ResolvedFederate>,
     /// Selected package names mapped to exact Cargo identities and locations.
     packages: BTreeMap<String, CargoPackage>,
+    /// Exact host compiler package used by the generated descriptor driver.
+    host_builder: CargoPackage,
+    /// Exact package identities available in the source application's lock graph.
+    locked_package_ids: BTreeSet<String>,
     /// Identity of the lockfile enforced during Cargo resolution.
     lockfile: LockfileIdentity,
 }
 
 impl ResolvedWorkspace {
+    /// Returns Cargo's application target directory.
+    pub fn target_directory(&self) -> &Path {
+        &self.target_directory
+    }
+
     /// Returns the selected topology package and entry point.
     pub fn topology(&self) -> &Topology {
         &self.topology
@@ -83,6 +102,25 @@ impl ResolvedWorkspace {
     /// Returns the exact Cargo identity and location for a selected package.
     pub fn package(&self, name: &str) -> Option<&CargoPackage> {
         self.packages.get(name)
+    }
+
+    /// Returns the exact host compiler package selected by Cargo metadata.
+    pub fn host_builder(&self) -> &CargoPackage {
+        &self.host_builder
+    }
+
+    /// Returns all direct packages expected beneath the synthetic driver root.
+    pub(crate) fn driver_package_ids(&self) -> BTreeSet<String> {
+        self.packages
+            .values()
+            .chain(std::iter::once(&self.host_builder))
+            .map(|package| package.id.to_string())
+            .collect()
+    }
+
+    /// Returns every exact package identity available to the source application.
+    pub(crate) fn locked_package_ids(&self) -> &BTreeSet<String> {
+        &self.locked_package_ids
     }
 
     /// Returns the identity of the lockfile enforced during resolution.
@@ -132,6 +170,15 @@ pub enum WorkspaceError {
         /// Package name selected by `Boomerang.toml`.
         package: String,
     },
+    /// Cargo metadata did not contain exactly one host compiler package.
+    #[error("expected exactly one boomerang_builder package in locked metadata, found {count}")]
+    HostBuilder {
+        /// Number of matching package identities reported by Cargo.
+        count: usize,
+    },
+    /// Cargo metadata unexpectedly omitted its resolved dependency graph.
+    #[error("locked Cargo metadata did not contain a dependency resolve graph")]
+    MissingResolve,
     /// A visible package is not an application workspace member.
     #[error("package '{package}' must be a member of the application workspace")]
     NonmemberPackage {
@@ -189,6 +236,7 @@ pub fn resolve_workspace(
     let cargo_manifest = workspace.join("Cargo.toml");
     let metadata = locked_metadata(&workspace, &cargo_manifest)?;
     let workspace_root = metadata.workspace_root.clone().into_std_path_buf();
+    let target_directory = metadata.target_directory.clone().into_std_path_buf();
 
     let topology_package = resolve_topology(&metadata, &manifest.topology.package)?;
     let mut packages = BTreeMap::from([(manifest.topology.package.clone(), topology_package)]);
@@ -206,6 +254,13 @@ pub fn resolve_workspace(
             })?;
         packages.insert(binding.package.clone(), package);
     }
+    let host_builder =
+        resolve_host_builder(&metadata, packages.values().map(|package| &package.id))?;
+    let locked_package_ids = metadata
+        .packages
+        .iter()
+        .map(|package| package.id.to_string())
+        .collect();
     let federates = deployment
         .federates
         .iter()
@@ -214,6 +269,7 @@ pub fn resolve_workspace(
     let lockfile = lockfile_identity(workspace_root.join("Cargo.lock"))?;
 
     Ok(ResolvedWorkspace {
+        target_directory,
         topology: manifest.topology.clone(),
         deployment_name: deployment_name.to_owned(),
         deployment: Deployment {
@@ -223,6 +279,8 @@ pub fn resolve_workspace(
             rti: deployment.rti.clone(),
         },
         packages,
+        host_builder,
+        locked_package_ids,
         lockfile,
     })
 }
@@ -230,10 +288,51 @@ pub fn resolve_workspace(
 /// Resolves the host-compatible topology package without imposing implementation facets.
 fn resolve_topology(metadata: &Metadata, name: &str) -> Result<CargoPackage, WorkspaceError> {
     let package = workspace_member(metadata, name)?;
-    Ok(CargoPackage {
-        id: package.id.clone(),
-        manifest_path: package.manifest_path.clone().into_std_path_buf(),
-    })
+    Ok(cargo_package(package))
+}
+
+/// Finds the unique host compiler package already selected by locked application metadata.
+fn resolve_host_builder<'a>(
+    metadata: &Metadata,
+    roots: impl IntoIterator<Item = &'a PackageId>,
+) -> Result<CargoPackage, WorkspaceError> {
+    let resolve = metadata
+        .resolve
+        .as_ref()
+        .ok_or(WorkspaceError::MissingResolve)?;
+    let nodes = resolve
+        .nodes
+        .iter()
+        .map(|node| (&node.id, node))
+        .collect::<BTreeMap<_, _>>();
+    let packages = metadata
+        .packages
+        .iter()
+        .map(|package| (&package.id, package))
+        .collect::<BTreeMap<_, _>>();
+    let mut pending = roots.into_iter().cloned().collect::<Vec<_>>();
+    let mut visited = BTreeSet::new();
+    let mut builders = BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if !visited.insert(id.clone()) {
+            continue;
+        }
+        if packages
+            .get(&id)
+            .is_some_and(|package| package.name == "boomerang_builder")
+        {
+            builders.insert(id.clone());
+        }
+        if let Some(node) = nodes.get(&id) {
+            pending.extend(node.deps.iter().map(|dependency| dependency.pkg.clone()));
+        }
+    }
+    match builders.into_iter().collect::<Vec<_>>().as_slice() {
+        [id] => Ok(cargo_package(packages[id])),
+        values => Err(WorkspaceError::HostBuilder {
+            count: values.len(),
+        }),
+    }
 }
 
 /// Invokes Cargo's metadata command with lockfile updates forbidden.
@@ -273,10 +372,28 @@ fn resolve_package(
         }
     }
 
-    Ok(CargoPackage {
+    Ok(cargo_package(package))
+}
+
+/// Copies the Cargo identity fields required by generated dependency declarations.
+fn cargo_package(package: &Package) -> CargoPackage {
+    CargoPackage {
+        name: package.name.to_string(),
+        version: package.version.to_string(),
+        source: package.source.as_ref().map(ToString::to_string),
+        lib_target: package
+            .targets
+            .iter()
+            .find(|target| {
+                target
+                    .kind
+                    .iter()
+                    .any(|kind| matches!(kind, cargo_metadata::TargetKind::Lib))
+            })
+            .map(|target| target.name.clone()),
         id: package.id.clone(),
         manifest_path: package.manifest_path.clone().into_std_path_buf(),
-    })
+    }
 }
 
 /// Finds a named package only when Cargo reports it as a workspace member.

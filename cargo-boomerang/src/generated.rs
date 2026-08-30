@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use thiserror::Error;
+use anyhow::{anyhow, Result};
 
 use crate::{CargoPackage, ResolvedWorkspace};
 
@@ -13,25 +13,16 @@ pub(crate) struct GeneratedCrate {
     /// Generated Rust executable source.
     pub(crate) main: String,
 }
-/// Failure while rendering a generated descriptor driver.
-#[derive(Debug, Error)]
-#[error("{message}")]
-pub(crate) struct GeneratedError {
-    /// Complete rendering diagnostic.
-    message: String,
-}
 /// Renders a standalone driver crate for one resolved deployment.
-pub(crate) fn render_descriptor_driver(
-    resolved: &ResolvedWorkspace,
-) -> Result<GeneratedCrate, GeneratedError> {
+pub(crate) fn render_descriptor_driver(resolved: &ResolvedWorkspace) -> Result<GeneratedCrate> {
     let topology_package = resolved
         .package(&resolved.topology().package)
         .expect("resolved topology package is retained");
     let topology_crate = topology_package.lib_target.as_deref().ok_or_else(|| {
-        generated_error(format!(
+        anyhow!(
             "topology package '{}' does not expose a library target",
             topology_package.name
-        ))
+        )
     })?;
     let topology_entry = aliased_topology_entry(&resolved.topology().entry, topology_crate)?;
 
@@ -80,7 +71,7 @@ pub(crate) fn render_descriptor_driver(
         ),
         ("workspace".into(), toml::Table::new().into()),
     ]))
-    .map_err(generated_error)?;
+    .map_err(anyhow::Error::from)?;
     let bindings = binding_expressions.join(",\n        ");
     let main = format!(
         "use boomerang_builder::host_interchange::{{encode_descriptor_driver_output, \
@@ -101,7 +92,7 @@ fn dependency(
     package: &CargoPackage,
     default_features: bool,
     features: Vec<String>,
-) -> Result<toml::Value, GeneratedError> {
+) -> Result<toml::Value> {
     let mut rendered = toml::Table::from_iter([
         ("package".into(), package.name.clone().into()),
         ("default-features".into(), default_features.into()),
@@ -132,24 +123,24 @@ fn dependency(
             rendered.insert("version".into(), format!("={}", package.version).into());
         }
         Some(source) => {
-            return Err(generated_error(format!(
+            return Err(anyhow!(
                 "unsupported Cargo source '{source}' for package '{}'",
                 package.name
-            )));
+            ));
         }
     }
     Ok(rendered.into())
 }
 /// Rewrites an application entry path to the generated topology dependency alias.
-fn aliased_topology_entry(entry: &str, expected_crate: &str) -> Result<String, GeneratedError> {
+fn aliased_topology_entry(entry: &str, expected_crate: &str) -> Result<String> {
     let mut segments = entry.split("::");
     let valid = segments.next() == Some(expected_crate)
         && segments.clone().next().is_some()
         && segments.clone().all(valid_rust_identifier);
     if !valid {
-        return Err(generated_error(format!(
+        return Err(anyhow!(
             "topology entry '{entry}' must be rooted at crate '{expected_crate}'"
-        )));
+        ));
     }
     Ok(std::iter::once("topology_package")
         .chain(segments)
@@ -162,10 +153,4 @@ fn valid_rust_identifier(value: &str) -> bool {
     matches!(characters.next(), Some('_' | 'a'..='z' | 'A'..='Z'))
         && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
         && !matches!(value, "crate" | "self" | "super" | "Self")
-}
-/// Converts a rendering failure into the module's compact error wrapper.
-fn generated_error(error: impl std::fmt::Display) -> GeneratedError {
-    GeneratedError {
-        message: error.to_string(),
-    }
 }

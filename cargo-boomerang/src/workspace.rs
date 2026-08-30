@@ -4,10 +4,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use anyhow::{anyhow, bail, Context, Result};
 use cargo_metadata::{Metadata, MetadataCommand, Package, PackageId};
-use thiserror::Error;
 
-use crate::{load_manifest, Deployment, Federate, ManifestError, Topology};
+use crate::{load_manifest, Deployment, Federate, Topology};
 
 const DESCRIPTOR_FEATURE: &str = "__boomerang_descriptor";
 const PAYLOAD_FEATURE: &str = "__boomerang_payload";
@@ -129,108 +129,18 @@ impl ResolvedWorkspace {
     }
 }
 
-/// Failure while resolving a deployment against locked Cargo metadata.
-#[derive(Debug, Error)]
-pub enum WorkspaceError {
-    /// The application workspace path could not be canonicalized.
-    #[error("failed to resolve application workspace {path}: {source}")]
-    WorkspacePath {
-        /// Supplied application workspace path.
-        path: PathBuf,
-        /// Underlying filesystem error.
-        #[source]
-        source: std::io::Error,
-    },
-    /// `Boomerang.toml` could not be loaded or validated.
-    #[error(transparent)]
-    Manifest(#[from] ManifestError),
-    /// Locked Cargo metadata could not be obtained.
-    #[error("failed to resolve locked Cargo metadata for {manifest}: {source}")]
-    Metadata {
-        /// Application workspace manifest passed to Cargo.
-        manifest: PathBuf,
-        /// Cargo invocation or metadata decoding error.
-        #[source]
-        source: cargo_metadata::Error,
-    },
-    /// A component implementation selection failed package resolution.
-    #[error("deployment '{deployment}' binding '{component}': {source}")]
-    Binding {
-        /// Named deployment containing the invalid binding.
-        deployment: String,
-        /// Stable component-instance path selecting the package.
-        component: String,
-        /// Package or feature resolution failure.
-        #[source]
-        source: Box<WorkspaceError>,
-    },
-    /// A selected package is not visible in Cargo metadata.
-    #[error("package '{package}' was not found in the application workspace metadata")]
-    UnknownPackage {
-        /// Package name selected by `Boomerang.toml`.
-        package: String,
-    },
-    /// Cargo metadata did not contain exactly one host compiler package.
-    #[error("expected exactly one boomerang_builder package in locked metadata, found {count}")]
-    HostBuilder {
-        /// Number of matching package identities reported by Cargo.
-        count: usize,
-    },
-    /// Cargo metadata unexpectedly omitted its resolved dependency graph.
-    #[error("locked Cargo metadata did not contain a dependency resolve graph")]
-    MissingResolve,
-    /// A visible package is not an application workspace member.
-    #[error("package '{package}' must be a member of the application workspace")]
-    NonmemberPackage {
-        /// Nonmember package selected by `Boomerang.toml`.
-        package: String,
-    },
-    /// A selected package does not declare a required deployment facet.
-    #[error("package '{package}' must declare reserved feature '{feature}'")]
-    MissingFacet {
-        /// Package missing the reserved feature.
-        package: String,
-        /// Required reserved feature name.
-        feature: &'static str,
-    },
-    /// A binding selects a reserved feature as a normal feature.
-    #[error("package '{package}' feature '{feature}' is reserved for cargo-boomerang")]
-    ReservedFeature {
-        /// Package whose feature selection is invalid.
-        package: String,
-        /// Reserved feature selected by the manifest.
-        feature: String,
-    },
-    /// A binding selects a feature absent from its package.
-    #[error("package '{package}' does not declare selected feature '{feature}'")]
-    UnknownFeature {
-        /// Package whose feature selection is invalid.
-        package: String,
-        /// Missing selected feature.
-        feature: String,
-    },
-    /// The source workspace lockfile could not be read.
-    #[error("failed to read source workspace lockfile {path}: {source}")]
-    Lockfile {
-        /// Source workspace lockfile path.
-        path: PathBuf,
-        /// Underlying filesystem error.
-        #[source]
-        source: std::io::Error,
-    },
-}
-
 /// Resolves one deployment through Cargo's locked workspace metadata without compiling packages.
 pub fn resolve_workspace(
     workspace: impl AsRef<Path>,
     deployment_name: &str,
-) -> Result<ResolvedWorkspace, WorkspaceError> {
+) -> Result<ResolvedWorkspace> {
     let supplied_workspace = workspace.as_ref();
-    let workspace =
-        fs::canonicalize(supplied_workspace).map_err(|source| WorkspaceError::WorkspacePath {
-            path: supplied_workspace.to_path_buf(),
-            source,
-        })?;
+    let workspace = fs::canonicalize(supplied_workspace).with_context(|| {
+        format!(
+            "failed to resolve application workspace {}",
+            supplied_workspace.display()
+        )
+    })?;
     let manifest = load_manifest(workspace.join("Boomerang.toml"))?;
     let deployment = manifest.deployment(deployment_name)?;
     let cargo_manifest = workspace.join("Cargo.toml");
@@ -244,14 +154,8 @@ pub fn resolve_workspace(
     for (component, binding) in &mut bindings {
         binding.features.sort();
         binding.features.dedup();
-        let package =
-            resolve_package(&metadata, &binding.package, &binding.features).map_err(|source| {
-                WorkspaceError::Binding {
-                    deployment: deployment_name.to_owned(),
-                    component: component.clone(),
-                    source: Box::new(source),
-                }
-            })?;
+        let package = resolve_package(&metadata, &binding.package, &binding.features)
+            .with_context(|| format!("deployment '{deployment_name}' binding '{component}'"))?;
         packages.insert(binding.package.clone(), package);
     }
     let host_builder =
@@ -286,7 +190,7 @@ pub fn resolve_workspace(
 }
 
 /// Resolves the host-compatible topology package without imposing implementation facets.
-fn resolve_topology(metadata: &Metadata, name: &str) -> Result<CargoPackage, WorkspaceError> {
+fn resolve_topology(metadata: &Metadata, name: &str) -> Result<CargoPackage> {
     let package = workspace_member(metadata, name)?;
     Ok(cargo_package(package))
 }
@@ -295,11 +199,10 @@ fn resolve_topology(metadata: &Metadata, name: &str) -> Result<CargoPackage, Wor
 fn resolve_host_builder<'a>(
     metadata: &Metadata,
     roots: impl IntoIterator<Item = &'a PackageId>,
-) -> Result<CargoPackage, WorkspaceError> {
-    let resolve = metadata
-        .resolve
-        .as_ref()
-        .ok_or(WorkspaceError::MissingResolve)?;
+) -> Result<CargoPackage> {
+    let resolve = metadata.resolve.as_ref().ok_or_else(|| {
+        anyhow!("locked Cargo metadata did not contain a dependency resolve graph")
+    })?;
     let nodes = resolve
         .nodes
         .iter()
@@ -329,22 +232,25 @@ fn resolve_host_builder<'a>(
     }
     match builders.into_iter().collect::<Vec<_>>().as_slice() {
         [id] => Ok(cargo_package(packages[id])),
-        values => Err(WorkspaceError::HostBuilder {
-            count: values.len(),
-        }),
+        values => bail!(
+            "expected exactly one boomerang_builder package in locked metadata, found {}",
+            values.len()
+        ),
     }
 }
 
 /// Invokes Cargo's metadata command with lockfile updates forbidden.
-fn locked_metadata(workspace: &Path, manifest: &Path) -> Result<Metadata, WorkspaceError> {
+fn locked_metadata(workspace: &Path, manifest: &Path) -> Result<Metadata> {
     let mut command = MetadataCommand::new();
     command
         .current_dir(workspace)
         .manifest_path(manifest)
         .other_options(vec![String::from("--locked")]);
-    command.exec().map_err(|source| WorkspaceError::Metadata {
-        manifest: manifest.to_path_buf(),
-        source,
+    command.exec().with_context(|| {
+        format!(
+            "failed to resolve locked Cargo metadata for {}",
+            manifest.display()
+        )
     })
 }
 
@@ -353,22 +259,16 @@ fn resolve_package(
     metadata: &Metadata,
     name: &str,
     selected_features: &[String],
-) -> Result<CargoPackage, WorkspaceError> {
+) -> Result<CargoPackage> {
     let package = workspace_member(metadata, name)?;
 
     validate_facets(package)?;
     for feature in selected_features {
         if matches!(feature.as_str(), DESCRIPTOR_FEATURE | PAYLOAD_FEATURE) {
-            return Err(WorkspaceError::ReservedFeature {
-                package: name.to_owned(),
-                feature: feature.clone(),
-            });
+            bail!("package '{name}' feature '{feature}' is reserved for cargo-boomerang");
         }
         if !package.features.contains_key(feature) {
-            return Err(WorkspaceError::UnknownFeature {
-                package: name.to_owned(),
-                feature: feature.clone(),
-            });
+            bail!("package '{name}' does not declare selected feature '{feature}'");
         }
     }
 
@@ -397,32 +297,28 @@ fn cargo_package(package: &Package) -> CargoPackage {
 }
 
 /// Finds a named package only when Cargo reports it as a workspace member.
-fn workspace_member<'a>(metadata: &'a Metadata, name: &str) -> Result<&'a Package, WorkspaceError> {
+fn workspace_member<'a>(metadata: &'a Metadata, name: &str) -> Result<&'a Package> {
     metadata
         .packages
         .iter()
         .find(|package| package.name == name && metadata.workspace_members.contains(&package.id))
         .ok_or_else(|| {
             if metadata.packages.iter().any(|package| package.name == name) {
-                WorkspaceError::NonmemberPackage {
-                    package: name.to_owned(),
-                }
+                anyhow!("package '{name}' must be a member of the application workspace")
             } else {
-                WorkspaceError::UnknownPackage {
-                    package: name.to_owned(),
-                }
+                anyhow!("package '{name}' was not found in the application workspace metadata")
             }
         })
 }
 
 /// Confirms that a package supports both reserved deployment facets.
-fn validate_facets(package: &Package) -> Result<(), WorkspaceError> {
+fn validate_facets(package: &Package) -> Result<()> {
     for feature in [DESCRIPTOR_FEATURE, PAYLOAD_FEATURE] {
         if !package.features.contains_key(feature) {
-            return Err(WorkspaceError::MissingFacet {
-                package: package.name.to_string(),
-                feature,
-            });
+            bail!(
+                "package '{}' must declare reserved feature '{feature}'",
+                package.name
+            );
         }
     }
     Ok(())
@@ -453,14 +349,18 @@ fn resolve_optional_path(workspace_root: &Path, value: Option<&str>) -> Option<P
 }
 
 /// Reads and fingerprints the exact source lockfile bytes.
-fn lockfile_identity(path: PathBuf) -> Result<LockfileIdentity, WorkspaceError> {
-    let path = fs::canonicalize(&path).map_err(|source| WorkspaceError::Lockfile {
-        path: path.clone(),
-        source,
+fn lockfile_identity(path: PathBuf) -> Result<LockfileIdentity> {
+    let path = fs::canonicalize(&path).with_context(|| {
+        format!(
+            "failed to read source workspace lockfile {}",
+            path.display()
+        )
     })?;
-    let bytes = fs::read(&path).map_err(|source| WorkspaceError::Lockfile {
-        path: path.clone(),
-        source,
+    let bytes = fs::read(&path).with_context(|| {
+        format!(
+            "failed to read source workspace lockfile {}",
+            path.display()
+        )
     })?;
     Ok(LockfileIdentity {
         path,

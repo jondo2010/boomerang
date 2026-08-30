@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use cargo_boomerang::{load_manifest, parse_manifest, CoordinationBackend, ManifestError};
+use cargo_boomerang::{load_manifest, parse_manifest, CoordinationBackend};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -101,10 +101,10 @@ fn unknown_fields_report_their_toml_path() {
             &format!("entry = \"vehicle::topology\"\n{field} = true"),
         );
         let error = parse_manifest(&source).unwrap_err();
-        let ManifestError::Parse { path, .. } = error else {
-            panic!("expected parse error, got {error}");
-        };
-        assert_eq!(path, expected_path);
+        assert!(
+            error.to_string().contains(&format!("at {expected_path}:")),
+            "{error}"
+        );
     }
 }
 

@@ -1,6 +1,6 @@
 use std::{fs, path::Path, path::PathBuf};
 
-use cargo_boomerang::{resolve_workspace, WorkspaceError};
+use cargo_boomerang::resolve_workspace;
 use cargo_metadata::MetadataCommand;
 
 fn fixture_workspace() -> PathBuf {
@@ -91,7 +91,7 @@ fn resolution_returns_exact_package_ids_and_rejects_nonmembers() {
     );
 
     let error = resolve_workspace(&workspace, "outside-member").unwrap_err();
-    let message = error.to_string();
+    let message = format!("{error:#}");
     assert!(message.contains("deployment 'outside-member'"), "{error}");
     assert!(message.contains("binding 'vehicle/sensor'"), "{error}");
     assert!(
@@ -102,6 +102,11 @@ fn resolution_returns_exact_package_ids_and_rejects_nonmembers() {
     let unlocked = tempfile::tempdir().unwrap();
     copy_without_lockfile(&workspace, unlocked.path());
     let error = resolve_workspace(unlocked.path(), "production").unwrap_err();
-    assert!(matches!(error, WorkspaceError::Metadata { .. }));
+    assert!(
+        error
+            .to_string()
+            .contains("failed to resolve locked Cargo metadata"),
+        "{error:#}"
+    );
     assert!(!unlocked.path().join("Cargo.lock").exists());
 }

@@ -1,6 +1,4 @@
-//! Exercises the host-runtime seam from an already compiled [`EnclaveImage`] and direct
-//! [`OwnedBindings`] through owned storage and scheduling to typed execution results. Compiler
-//! lowering and the legacy live-graph construction path are intentionally outside this boundary.
+//! Exercises the host-runtime seam from a compiled image and direct bindings through owned storage and scheduling to typed results, excluding compiler lowering and live-graph construction.
 
 use boomerang::runtime::{
     execute_owned,

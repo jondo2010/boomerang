@@ -1,22 +1,25 @@
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use boomerang::prelude::*;
 
 struct CountingAllocator;
 
-static COUNT_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    static COUNT_ALLOCATIONS: Cell<bool> = const { Cell::new(false) };
+}
 static ALLOCATION_COUNT: AtomicUsize = AtomicUsize::new(0);
 static FIRST_ALLOCATION_KIND: AtomicUsize = AtomicUsize::new(0);
 static FIRST_ALLOCATION_SIZE: AtomicUsize = AtomicUsize::new(0);
 static FIRST_ALLOCATION_NEW_SIZE: AtomicUsize = AtomicUsize::new(0);
+static ALLOCATION_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ptr = unsafe { System.alloc(layout) };
-        if COUNT_ALLOCATIONS.load(Ordering::Relaxed)
-            && ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed) == 0
-        {
+        if COUNT_ALLOCATIONS.get() && ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed) == 0 {
             FIRST_ALLOCATION_KIND.store(1, Ordering::Relaxed);
             FIRST_ALLOCATION_SIZE.store(layout.size(), Ordering::Relaxed);
         }
@@ -29,9 +32,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let ptr = unsafe { System.realloc(ptr, layout, new_size) };
-        if COUNT_ALLOCATIONS.load(Ordering::Relaxed)
-            && ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed) == 0
-        {
+        if COUNT_ALLOCATIONS.get() && ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed) == 0 {
             FIRST_ALLOCATION_KIND.store(2, Ordering::Relaxed);
             FIRST_ALLOCATION_SIZE.store(layout.size(), Ordering::Relaxed);
             FIRST_ALLOCATION_NEW_SIZE.store(new_size, Ordering::Relaxed);
@@ -114,11 +115,11 @@ fn start_counting_allocations() {
     FIRST_ALLOCATION_KIND.store(0, Ordering::Relaxed);
     FIRST_ALLOCATION_SIZE.store(0, Ordering::Relaxed);
     FIRST_ALLOCATION_NEW_SIZE.store(0, Ordering::Relaxed);
-    COUNT_ALLOCATIONS.store(true, Ordering::Relaxed);
+    COUNT_ALLOCATIONS.set(true);
 }
 
 fn stop_counting_allocations() -> usize {
-    COUNT_ALLOCATIONS.store(false, Ordering::Relaxed);
+    COUNT_ALLOCATIONS.set(false);
     ALLOCATION_COUNT.load(Ordering::Relaxed)
 }
 
@@ -128,6 +129,7 @@ fn stop_counting_allocations() -> usize {
     ignore = "the parallel scheduler path uses Rayon/thread-pool machinery that allocates"
 )]
 fn steady_state_root_action_scheduler_next_does_not_allocate() {
+    let _guard = ALLOCATION_TEST_LOCK.lock().unwrap();
     let mut scheduler = build_scheduler(RootActionLoop(), RootActionLoopState::default());
     scheduler.startup();
 
@@ -147,5 +149,86 @@ fn steady_state_root_action_scheduler_next_does_not_allocate() {
         FIRST_ALLOCATION_KIND.load(Ordering::Relaxed),
         FIRST_ALLOCATION_SIZE.load(Ordering::Relaxed),
         FIRST_ALLOCATION_NEW_SIZE.load(Ordering::Relaxed)
+    );
+}
+
+#[cfg(feature = "federated")]
+struct NoopFederatedRoute {
+    target: boomerang_federated::FederateId,
+}
+
+#[cfg(feature = "federated")]
+impl boomerang_federated::FederatedOutboundSink for NoopFederatedRoute {
+    fn target_federate(&self) -> Option<&boomerang_federated::FederateId> {
+        Some(&self.target)
+    }
+
+    fn send(
+        &self,
+        command: boomerang_federated::FederatedOutboundCommand,
+    ) -> Result<(), boomerang_federated::FederatedEndpointError> {
+        std::hint::black_box(command);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "federated")]
+fn baseline_serialized_send(route: &NoopFederatedRoute, value: u32) {
+    let command = boomerang_federated::FederatedOutboundCommand::Msg(
+        boomerang_federated::FederatedOutboundMessage {
+            tag: runtime::Tag::ZERO,
+            payload: value.to_le_bytes().to_vec(),
+        },
+    );
+    boomerang_federated::FederatedOutboundSink::send(route, command).unwrap();
+}
+
+#[cfg(feature = "federated")]
+#[test]
+fn disabled_serialized_trace_identity_adds_no_allocation() {
+    let _guard = ALLOCATION_TEST_LOCK.lock().unwrap();
+    const ITERATIONS: usize = 128;
+
+    let baseline_route = NoopFederatedRoute {
+        target: boomerang_federated::FederateId::new("b"),
+    };
+    let sink = boomerang_federated::SerializedInterPartitionEventSink::new(
+        Box::new(|value: &u32| Ok(value.to_le_bytes().to_vec())),
+        Box::new(NoopFederatedRoute {
+            target: boomerang_federated::FederateId::new("b"),
+        }),
+        boomerang_federated::FederatedFaultState::default(),
+    );
+    let action = runtime::Action::<u32>::new("input", runtime::ActionKey::from(0), None, true);
+    let action_ref = runtime::AsyncActionRef::try_from(runtime::DynActionRef(&action)).unwrap();
+
+    baseline_serialized_send(&baseline_route, 7);
+    runtime::InterPartitionEventSink::send(
+        &sink,
+        runtime::InterPartitionEventTime::Logical(runtime::Tag::ZERO),
+        &action_ref,
+        &7,
+    );
+
+    start_counting_allocations();
+    for _ in 0..ITERATIONS {
+        baseline_serialized_send(&baseline_route, 7);
+    }
+    let baseline_allocations = stop_counting_allocations();
+
+    start_counting_allocations();
+    for _ in 0..ITERATIONS {
+        runtime::InterPartitionEventSink::send(
+            &sink,
+            runtime::InterPartitionEventTime::Logical(runtime::Tag::ZERO),
+            &action_ref,
+            &7,
+        );
+    }
+    let serialized_allocations = stop_counting_allocations();
+
+    assert_eq!(
+        serialized_allocations, baseline_allocations,
+        "disabled serialized tracing added allocations: baseline={baseline_allocations}, serialized={serialized_allocations}"
     );
 }

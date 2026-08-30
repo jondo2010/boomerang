@@ -136,16 +136,62 @@ impl<T: ReactorData + Clone> InterPartitionEventSink<T> for InProcessInterPartit
     fn send(&self, time: InterPartitionEventTime, target: &AsyncActionRef<T>, value: &T) {
         match time {
             InterPartitionEventTime::Logical(tag) => {
-                self.remote_context
-                    .schedule_external(crate::event::AsyncEvent::Logical {
-                        tag,
-                        key: target.key(),
-                        value: Box::new(value.clone()),
-                    });
+                let span = tracing::trace_span!(
+                    target: crate::trace::TRACE_TARGET,
+                    "propagation_send",
+                    event = crate::trace::TraceEvent::PropagationSend as u64,
+                    kind = crate::trace::TraceKind::Logical as u64,
+                    destination = %self.remote_context.enclave_id(),
+                    action_key = %target.key(),
+                    action = target.name(),
+                    logical_ns = crate::trace::logical_ns(tag),
+                    microstep = crate::trace::microstep(tag),
+                    value_type = std::any::type_name::<T>(),
+                    value_size = std::mem::size_of_val(value),
+                    outcome = tracing::field::Empty,
+                );
+                let _entered = span.enter();
+                let accepted =
+                    self.remote_context
+                        .schedule_external(crate::event::AsyncEvent::Logical {
+                            tag,
+                            key: target.key(),
+                            value: Box::new(value.clone()),
+                        });
+                span.record(
+                    "outcome",
+                    if accepted {
+                        crate::trace::TraceOutcome::Accepted as u64
+                    } else {
+                        crate::trace::TraceOutcome::Failed as u64
+                    },
+                );
             }
             InterPartitionEventTime::Physical(delay) => {
-                self.remote_context
-                    .schedule_action_async(target, value.clone(), delay);
+                let span = tracing::trace_span!(
+                    target: crate::trace::TRACE_TARGET,
+                    "propagation_send",
+                    event = crate::trace::TraceEvent::PropagationSend as u64,
+                    kind = crate::trace::TraceKind::Physical as u64,
+                    destination = %self.remote_context.enclave_id(),
+                    action_key = %target.key(),
+                    action = target.name(),
+                    value_type = std::any::type_name::<T>(),
+                    value_size = std::mem::size_of_val(value),
+                    outcome = tracing::field::Empty,
+                );
+                let _entered = span.enter();
+                let accepted =
+                    self.remote_context
+                        .schedule_action_async(target, value.clone(), delay);
+                span.record(
+                    "outcome",
+                    if accepted {
+                        crate::trace::TraceOutcome::Accepted as u64
+                    } else {
+                        crate::trace::TraceOutcome::Failed as u64
+                    },
+                );
             }
         }
     }

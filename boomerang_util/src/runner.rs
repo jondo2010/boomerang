@@ -16,6 +16,8 @@ use boomerang::{
 };
 use clap::Parser;
 use std::path::PathBuf;
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::EnvFilter;
 
 #[derive(clap::Parser)]
 struct Args {
@@ -32,6 +34,15 @@ struct Args {
     #[arg(long, short)]
     fast_forward: bool,
 
+    /// Record runtime traces to target/boomerang/diagrams/<reactor>.rrd
+    #[cfg(feature = "rerun")]
+    #[arg(
+        long,
+        env = "BOOM_RERUN",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    rerun: bool,
+
     /// The filename to serialize recorded actions into
     #[cfg(feature = "replay")]
     #[arg(long, value_hint = clap::ValueHint::FilePath)]
@@ -46,6 +57,40 @@ struct Args {
     #[cfg(feature = "replay")]
     #[arg(long, value_hint = clap::ValueHint::FilePath, conflicts_with = "record_filename")]
     replay_filename: Option<std::path::PathBuf>,
+}
+
+fn with_tracing<T>(
+    name: &str,
+    args: &Args,
+    run: impl FnOnce(&dyn Fn(&boomerang::builder::RuntimeAssembly)) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let fmt = || {
+        tracing_subscriber::fmt::layer().with_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+    };
+
+    #[cfg(feature = "rerun")]
+    if args.rerun {
+        let path = diagram_output_path(name, "rrd")?;
+        let rerun = boomerang::rerun::RerunSession::save(name, path)?;
+        let subscriber = tracing_subscriber::registry()
+            .with(fmt())
+            .with(rerun.layer());
+        let result = tracing::subscriber::with_default(subscriber, || {
+            run(&|runtime| rerun.register_runtime(runtime))
+        });
+        let finish = rerun.finish();
+        let result = result?;
+        finish?;
+        return Ok(result);
+    }
+
+    #[cfg(not(feature = "rerun"))]
+    let _ = (name, args);
+
+    let subscriber = tracing_subscriber::registry().with(fmt());
+    tracing::subscriber::with_default(subscriber, || run(&|_| {}))
 }
 
 fn sanitize_diagram_stem(name: &str) -> String {
@@ -85,39 +130,42 @@ pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
     state: S,
     config: runtime::Config,
 ) -> anyhow::Result<(R::Ports, Vec<runtime::Env>)> {
-    let mut assembly = Assembly::new();
-    let reactor = reactor
-        .build(
-            name,
-            state,
-            None,
-            None,
-            None,
-            ReactorPlacement::Local,
-            &mut assembly,
-        )
-        .context("Error building top-level reactor!")?;
-
-    assembly.validate_reactions()?;
-
     let args = Args::parse_from(["boomerang-test"]);
-    if args.reaction_graph {
-        let gv = assembly.create_plantuml_graph()?;
-        let path = diagram_output_path(name, "puml")?;
-        let mut f = std::fs::File::create(&path)?;
-        std::io::Write::write_all(&mut f, gv.as_bytes())?;
-        tracing::info!("Wrote plantuml graph to {}", path.display());
-    }
+    with_tracing(name, &args, |register_runtime| {
+        let mut assembly = Assembly::new();
+        let reactor = reactor
+            .build(
+                name,
+                state,
+                None,
+                None,
+                None,
+                ReactorPlacement::Local,
+                &mut assembly,
+            )
+            .context("Error building top-level reactor!")?;
 
-    let enclaves = assembly
-        .into_runtime_assembly(&config)
-        .context("Error lowering assembly!")?
-        .into_local()
-        .context("generic test runner cannot execute a Federation")?;
+        assembly.validate_reactions()?;
 
-    let envs_out = runtime::execute_enclaves(enclaves.into_iter(), config)?;
-    let envs_out = envs_out.into_iter().map(|(_, env)| env).collect();
-    Ok((reactor, envs_out))
+        if args.reaction_graph {
+            let gv = assembly.create_plantuml_graph()?;
+            let path = diagram_output_path(name, "puml")?;
+            let mut f = std::fs::File::create(&path)?;
+            std::io::Write::write_all(&mut f, gv.as_bytes())?;
+            tracing::info!("Wrote plantuml graph to {}", path.display());
+        }
+
+        let runtime = assembly
+            .into_runtime_assembly(&config)
+            .context("Error lowering assembly!")?;
+        register_runtime(&runtime);
+        let enclaves = runtime
+            .into_local()
+            .context("generic test runner cannot execute a Federation")?;
+        let envs_out = runtime::execute_enclaves(enclaves.into_iter(), config)?;
+        let envs_out = envs_out.into_iter().map(|(_, env)| env).collect();
+        Ok((reactor, envs_out))
+    })
 }
 
 /// Utility method to build and run a given top-level `Reactor` locally (non-federated or enclaved).
@@ -133,6 +181,7 @@ pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
 /// * `--reaction-graph`: Generate a PlantUML graph of the reactor hierarchy
 /// * `--print-debug-info`: Print debug information about the assembly and triggers
 /// * `--fast-forward`: Run the scheduler in fast-forward mode
+/// * `--rerun`: Record runtime traces into `target/boomerang/diagrams/<reactor>.rrd`
 /// * `--record-filename`: The filename to serialize recorded actions into
 /// * `--record-actions`: The list of fully-qualified actions to record, e.g., "snake::keyboard::key_press"
 pub fn build_and_run_reactor<S, R>(reactor: R, name: &str, state: S) -> anyhow::Result<R::Ports>
@@ -140,92 +189,98 @@ where
     S: runtime::ReactorData,
     R: Reactor<S>,
 {
-    // build the reactor
-    let mut assembly = Assembly::new();
-    let reactor = reactor
-        .build(
-            name,
-            state,
-            None,
-            None,
-            None,
-            ReactorPlacement::Local,
-            &mut assembly,
-        )
-        .context("Error building top-level reactor!")?;
-
     let args = Args::parse();
+    with_tracing(name, &args, |register_runtime| {
+        // build the reactor
+        let mut assembly = Assembly::new();
+        let reactor = reactor
+            .build(
+                name,
+                state,
+                None,
+                None,
+                None,
+                ReactorPlacement::Local,
+                &mut assembly,
+            )
+            .context("Error building top-level reactor!")?;
 
-    #[cfg(feature = "replay")]
-    let recording_handle = match &args.record_filename {
-        Some(filename) => {
-            tracing::info!("Recording actions to {filename:?}");
+        #[cfg(feature = "replay")]
+        let recording_handle = match &args.record_filename {
+            Some(filename) => {
+                tracing::info!("Recording actions to {filename:?}");
 
-            let opts = runtime::replay::foxglove::McapWriteOptions::new()
-                .library(String::from("boomerang-") + env!("CARGO_PKG_VERSION"));
-            runtime::replay::foxglove::McapWriter::with_options(opts)
-                .create_new_buffered_file(filename)
-                .map(Some)?
+                let opts = runtime::replay::foxglove::McapWriteOptions::new()
+                    .library(String::from("boomerang-") + env!("CARGO_PKG_VERSION"));
+                runtime::replay::foxglove::McapWriter::with_options(opts)
+                    .create_new_buffered_file(filename)
+                    .map(Some)?
+            }
+            None => None,
+        };
+
+        if args.reaction_graph {
+            let gv = assembly.create_plantuml_graph()?;
+            let path = diagram_output_path(name, "puml")?;
+            let mut f = std::fs::File::create(&path)?;
+            std::io::Write::write_all(&mut f, gv.as_bytes())?;
+            tracing::info!("Wrote plantuml graph to {}", path.display());
         }
-        None => None,
-    };
 
-    if args.reaction_graph {
-        let gv = assembly.create_plantuml_graph()?;
-        let path = diagram_output_path(name, "puml")?;
-        let mut f = std::fs::File::create(&path)?;
-        std::io::Write::write_all(&mut f, gv.as_bytes())?;
-        tracing::info!("Wrote plantuml graph to {}", path.display());
-    }
-
-    if args.print_debug_info {
-        println!("{assembly:#?}");
-    }
-
-    let config = runtime::Config {
-        fast_forward: args.fast_forward,
-        ..Default::default()
-    };
-
-    let mut enclaves = assembly
-        .into_runtime_assembly(&config)
-        .context("Error lowering assembly!")?
-        .into_local()
-        .context("generic local runner cannot execute a Federation")?;
-
-    if args.print_debug_info {
-        println!("{enclaves:#?}");
-    }
-
-    #[cfg(feature = "replay")]
-    let replay_handle = match args.replay_filename {
-        Some(filename) => {
-            tracing::info!("Reading replay from {}", filename.display());
-            let enclave_keys = enclaves.keys().collect::<Vec<_>>();
-            let replayers = enclave_keys
-                .into_iter()
-                .map(|key| (key, enclaves[key].take_replayers()))
-                .collect();
-            Some(runtime::replay::create_replayer(
-                filename, replayers, &enclaves,
-            )?)
+        if args.print_debug_info {
+            println!("{assembly:#?}");
         }
-        None => None,
-    };
 
-    let execution_result = runtime::execute_enclaves(enclaves.into_iter(), config);
+        let config = runtime::Config {
+            fast_forward: args.fast_forward,
+            ..Default::default()
+        };
 
-    #[cfg(feature = "replay")]
-    if let Some(handle) = replay_handle {
-        handle.join()?;
-    }
+        let runtime = assembly
+            .into_runtime_assembly(&config)
+            .context("Error lowering assembly!")?;
+        register_runtime(&runtime);
+        let enclaves = runtime
+            .into_local()
+            .context("generic local runner cannot execute a Federation")?;
 
-    let _envs_out = execution_result?;
+        #[cfg(feature = "replay")]
+        let mut enclaves = enclaves;
 
-    #[cfg(feature = "replay")]
-    if let Some(handle) = recording_handle {
-        handle.close()?;
-    }
+        if args.print_debug_info {
+            println!("{enclaves:#?}");
+        }
 
-    Ok(reactor)
+        #[cfg(feature = "replay")]
+        let replay_handle = match &args.replay_filename {
+            Some(filename) => {
+                tracing::info!("Reading replay from {}", filename.display());
+                let enclave_keys = enclaves.keys().collect::<Vec<_>>();
+                let replayers = enclave_keys
+                    .into_iter()
+                    .map(|key| (key, enclaves[key].take_replayers()))
+                    .collect();
+                Some(runtime::replay::create_replayer(
+                    filename, replayers, &enclaves,
+                )?)
+            }
+            None => None,
+        };
+
+        let execution_result = runtime::execute_enclaves(enclaves.into_iter(), config);
+
+        #[cfg(feature = "replay")]
+        if let Some(handle) = replay_handle {
+            handle.join()?;
+        }
+
+        let _envs_out = execution_result?;
+
+        #[cfg(feature = "replay")]
+        if let Some(handle) = recording_handle {
+            handle.close()?;
+        }
+
+        Ok(reactor)
+    })
 }

@@ -27,8 +27,12 @@ replay = ["boomerang_runtime/replay", "boomerang_builder/replay"]
 federated = [
     "boomerang_builder/federated",
     "boomerang_federated/runtime",
+    "boomerang_rerun?/federated",
     "dep:boomerang_federated",
 ]
+
+## Record runtime traces with the Rerun SDK
+rerun = ["dep:boomerang_rerun", "boomerang_util/rerun"]
 
 [dependencies]
 document-features = { workspace = true }
@@ -37,16 +41,19 @@ thiserror.workspace = true
 # repo dependencies
 boomerang_builder = { workspace = true }
 boomerang_federated = { workspace = true, optional = true }
+boomerang_rerun = { workspace = true, optional = true }
 boomerang_runtime = { workspace = true }
 boomerang_macros = { workspace = true }
-
 
 [dev-dependencies]
 boomerang_util = { path = "../boomerang_util", features = ["runner", "replay", "test-tracing"] }
 criterion = "0.5"
+rerun = { workspace = true }
 serde = { workspace = true }
+tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-tracy = { workspace = true }
+tempfile = "3"
 
 # Deps for Snake example
 [target.'cfg(not(windows))'.dev-dependencies]

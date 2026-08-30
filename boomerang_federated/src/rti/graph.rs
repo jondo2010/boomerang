@@ -196,6 +196,23 @@ impl RtiGraph {
         self.endpoint_key(id).map(|key| self.endpoints[key].delay)
     }
 
+    /// Final lowered endpoints with their stable source and target identities.
+    ///
+    /// This is a read-only view of the already-owned RTI graph; callers do not need to reconstruct
+    /// endpoint relationships from pre-lowering declarations.
+    pub fn endpoint_routes(
+        &self,
+    ) -> impl Iterator<Item = (&EndpointId, &FederateId, &FederateId, WireDelay)> {
+        self.endpoints.values().map(|endpoint| {
+            (
+                &endpoint.id,
+                &self.federates[endpoint.source].id,
+                &self.federates[endpoint.target].id,
+                endpoint.delay,
+            )
+        })
+    }
+
     pub(crate) fn federate_key(&self, id: &FederateId) -> Option<FederateKey> {
         self.federate_keys.get(id).copied()
     }
@@ -379,7 +396,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             endpoint_ids
         );
-
         for id in endpoint_ids {
             let key = graph.endpoint_key(&endpoint(id)).unwrap();
             assert_eq!(graph.endpoint_id(key), &endpoint(id));

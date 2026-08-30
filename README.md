@@ -28,6 +28,10 @@ fn HelloWorld() -> impl Reactor {
 }
 ```
 
+See the [Boomerang book](book/src/introduction.md) for the quickstart, reactor
+concepts, federation, recording and replay, and
+[Rerun trace visualization](book/src/rerun.md).
+
 ## License
 
 Licensed under either of

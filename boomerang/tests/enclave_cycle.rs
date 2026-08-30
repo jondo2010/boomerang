@@ -101,7 +101,6 @@ fn MainReactor() -> impl Reactor {
 
 #[test]
 fn enclave_cycle() {
-    tracing_subscriber::fmt::init();
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(Duration::seconds(1));

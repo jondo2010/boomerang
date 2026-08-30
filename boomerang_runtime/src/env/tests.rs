@@ -125,7 +125,6 @@ pub fn create_enclave_pair() -> tinymap::TinyMap<EnclaveKey, Enclave> {
     // sender-side has a startup reaction that sets the value of 'portA' to 42.
     let port_a = enclave_a.insert_port(|key| Port::<u32>::new("portA", key).boxed());
     enclave_a.insert_port_scope(port_a, reactor_a_scope);
-
     let reaction_startup = enclave_a.insert_reaction(
         Reaction::new(
             "startup",

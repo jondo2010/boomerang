@@ -1,0 +1,1531 @@
+use std::collections::HashMap;
+use std::fmt;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::ThreadId;
+use std::time::{Duration, Instant};
+
+use boomerang_runtime::trace::{TraceEvent, TraceKind, TraceOutcome, TraceState};
+use tracing::field::{Field, Visit};
+use tracing::span::{Attributes, Record};
+use tracing::{Event, Id, Subscriber};
+use tracing_subscriber::layer::{Context, Filter};
+use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::Layer;
+
+use super::entities::{bounded_fragment, EntitySelector, RegistrationSnapshot, SeriesKind};
+use super::session::SessionState;
+
+const TRACE_TARGET: &str = "boomerang::trace";
+
+#[derive(Clone)]
+pub(super) struct SessionFilter {
+    state: SessionState,
+}
+
+impl SessionFilter {
+    pub(super) fn new(state: SessionState) -> Self {
+        Self { state }
+    }
+}
+
+impl<S> Filter<S> for SessionFilter {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>, _ctx: &Context<'_, S>) -> bool {
+        metadata.target() == TRACE_TARGET && self.state.is_enabled()
+    }
+
+    fn callsite_enabled(
+        &self,
+        metadata: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        if metadata.target() != TRACE_TARGET {
+            tracing::subscriber::Interest::never()
+        } else if self.state.is_enabled() {
+            tracing::subscriber::Interest::sometimes()
+        } else {
+            tracing::subscriber::Interest::never()
+        }
+    }
+}
+
+#[derive(Clone)]
+/// Subscriber layer that maps Boomerang tracing callbacks to Rerun archetypes.
+pub(super) struct RerunLayer {
+    recording: rerun::RecordingStream,
+    state: SessionState,
+    adapter: AdapterState,
+}
+
+#[derive(Clone)]
+pub(super) struct AdapterState {
+    pub(super) registration: Arc<RegistrationState>,
+}
+
+#[derive(Default)]
+pub(super) struct RegistrationState {
+    claimed: AtomicBool,
+    snapshot: OnceLock<RegistrationSnapshot>,
+}
+
+impl RegistrationState {
+    pub(super) fn claim(&self) -> bool {
+        self.claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub(super) fn get(&self) -> Option<&RegistrationSnapshot> {
+        self.snapshot.get()
+    }
+
+    pub(super) fn initialize(&self, snapshot: RegistrationSnapshot) -> bool {
+        self.snapshot.set(snapshot).is_ok()
+    }
+}
+
+impl Default for AdapterState {
+    fn default() -> Self {
+        Self {
+            registration: Arc::new(RegistrationState::default()),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TimePoint {
+    logical_ns: Option<i64>,
+}
+
+enum SpanKind {
+    Scheduler {
+        state: TraceState,
+    },
+    Tag {
+        terminal: bool,
+        state: TraceState,
+    },
+    Reaction {
+        reactor: String,
+        reaction_key: Option<String>,
+        reaction: String,
+        level: u64,
+        state: TraceState,
+    },
+    Wait {
+        state: TraceState,
+    },
+    Send {
+        kind: TraceKind,
+        destination: Option<String>,
+        destination_federate: Option<String>,
+        action_key: String,
+        action: String,
+        value_type: String,
+        value_size: u64,
+        outcome: OnceLock<TraceOutcome>,
+    },
+}
+
+struct SpanState {
+    context: SpanContext,
+    path: rerun::EntityPath,
+    series_label: Option<String>,
+    series: SeriesKind,
+    time: TimePoint,
+    timing: Mutex<SpanTiming>,
+    kind: SpanKind,
+}
+
+#[derive(Clone)]
+struct SpanContext {
+    federate: Option<String>,
+    enclave: String,
+    tag: Option<LogicalTag>,
+}
+
+#[derive(Clone, Copy)]
+struct LogicalTag {
+    logical_ns: u64,
+    microstep: u64,
+}
+
+impl SpanContext {
+    fn untimed(federate: Option<String>, enclave: String) -> Self {
+        Self {
+            federate,
+            enclave,
+            tag: None,
+        }
+    }
+
+    fn logical(federate: Option<String>, enclave: String, tag: LogicalTag) -> Self {
+        Self {
+            federate,
+            enclave,
+            tag: Some(tag),
+        }
+    }
+
+    fn federate(&self) -> Option<&str> {
+        self.federate.as_deref()
+    }
+
+    fn enclave(&self) -> &str {
+        &self.enclave
+    }
+
+    fn tag(&self) -> Option<LogicalTag> {
+        self.tag
+    }
+
+    fn logical_ns(&self) -> Option<u64> {
+        self.tag().map(|tag| tag.logical_ns)
+    }
+
+    fn microstep(&self) -> Option<u64> {
+        self.tag().map(|tag| tag.microstep)
+    }
+}
+
+struct ResolvedPath {
+    path: rerun::EntityPath,
+    series_label: Option<String>,
+    series: Option<SeriesKind>,
+}
+
+#[derive(Default)]
+struct SpanTiming {
+    active: HashMap<ThreadId, (Instant, usize)>,
+    total: Duration,
+}
+
+impl SpanTiming {
+    fn enter(&mut self) {
+        let active = self
+            .active
+            .entry(std::thread::current().id())
+            .or_insert_with(|| (Instant::now(), 0));
+        active.1 = active.1.saturating_add(1);
+    }
+
+    fn exit(&mut self) {
+        let thread = std::thread::current().id();
+        let started = self.active.get_mut(&thread).and_then(|(started, depth)| {
+            *depth = depth.checked_sub(1)?;
+            (*depth == 0).then_some(*started)
+        });
+        if let Some(started) = started {
+            self.active.remove(&thread);
+            self.total += started.elapsed();
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum Captured {
+    Text(String),
+    U64(u64),
+    Bool(bool),
+}
+
+#[derive(Default)]
+struct CallbackFields(HashMap<&'static str, Captured>);
+
+impl CallbackFields {
+    fn text(&self, name: &str) -> Option<&str> {
+        match self.0.get(name) {
+            Some(Captured::Text(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    fn u64(&self, name: &str) -> Option<u64> {
+        match self.0.get(name) {
+            Some(Captured::U64(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    fn boolean(&self, name: &str) -> Option<bool> {
+        match self.0.get(name) {
+            Some(Captured::Bool(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    fn required_text(&self, name: &str) -> Result<String, String> {
+        self.text(name)
+            .map(str::to_owned)
+            .ok_or_else(|| format!("missing or invalid `{name}`"))
+    }
+
+    fn required_u64(&self, name: &str) -> Result<u64, String> {
+        self.u64(name)
+            .ok_or_else(|| format!("missing or invalid `{name}`"))
+    }
+
+    fn discriminator<T>(&self, name: &str) -> Result<T, String>
+    where
+        T: TryFrom<u64, Error = u64>,
+    {
+        let code = self.required_u64(name)?;
+        T::try_from(code).map_err(|code| format!("invalid `{name}` discriminator code `{code}`"))
+    }
+
+    fn state(&self, expected: TraceState) -> Result<TraceState, String> {
+        let state = self.discriminator::<TraceState>("state")?;
+        if state == expected {
+            Ok(state)
+        } else {
+            Err(format!(
+                "invalid `state` discriminator `{}`",
+                state.as_str()
+            ))
+        }
+    }
+}
+
+impl Visit for CallbackFields {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.0
+            .insert(field.name(), Captured::Text(value.to_owned()));
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.0.insert(field.name(), Captured::U64(value));
+    }
+
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.0.insert(field.name(), Captured::Bool(value));
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        let value = format!("{value:?}");
+        self.0.insert(
+            field.name(),
+            Captured::Text(
+                value
+                    .strip_prefix('"')
+                    .and_then(|v| v.strip_suffix('"'))
+                    .unwrap_or(&value)
+                    .to_owned(),
+            ),
+        );
+    }
+}
+
+impl RerunLayer {
+    pub(super) fn new(
+        recording: rerun::RecordingStream,
+        state: SessionState,
+        adapter: AdapterState,
+    ) -> Self {
+        Self {
+            recording,
+            state,
+            adapter,
+        }
+    }
+
+    fn isolate(&self, callback: impl FnOnce()) {
+        if catch_unwind(AssertUnwindSafe(callback)).is_err() {
+            self.state
+                .disable_on_error(&"Rerun trace callback panicked");
+        }
+    }
+
+    fn timepoint(&self, logical_ns: Option<u64>) -> TimePoint {
+        TimePoint {
+            logical_ns: logical_ns.and_then(|value| i64::try_from(value).ok()),
+        }
+    }
+
+    fn write(&self, path: &rerun::EntityPath, time: TimePoint, value: &dyn rerun::AsComponents) {
+        if !self.state.is_enabled() {
+            return;
+        }
+        self.recording.reset_time();
+        let _reset = TimeReset(&self.recording);
+        let mut point = rerun::TimePoint::default();
+        if let Some(logical) = time.logical_ns {
+            point.insert_cell("logical", rerun::TimeCell::from_duration_nanos(logical));
+        }
+        self.recording.set_timepoint(point);
+        if let Err(error) = self.recording.log(path.clone(), value) {
+            self.state.disable_on_error(&error);
+        }
+    }
+
+    fn write_measure(
+        &self,
+        path: &rerun::EntityPath,
+        series_label: Option<&str>,
+        series: Option<SeriesKind>,
+        time: TimePoint,
+        value: &dyn rerun::AsComponents,
+    ) {
+        if let (Some(series_label), Some(series)) = (series_label, series) {
+            let name = compact_series_name(series_label, series);
+            if let Err(error) = self
+                .recording
+                .log_static(path.clone(), &rerun::SeriesPoints::new().with_names([name]))
+            {
+                self.state.disable_on_error(&error);
+                return;
+            }
+        }
+        self.write(path, time, value);
+    }
+
+    fn diagnostic(&self, event: Option<&str>, error: impl fmt::Display) {
+        let message = match event {
+            Some(event) => format!("invalid `{event}` trace annotation: {error}"),
+            None => format!("invalid trace annotation: {error}"),
+        };
+        let archetype = common(
+            "boomerang.SchemaDiagnostic",
+            "schema_diagnostic",
+            None,
+            None,
+            None,
+            None,
+        )
+        .with_component::<rerun::components::Text>("boomerang.trace.error", [message.as_str()]);
+        let text_log = rerun::TextLog::new(message).with_level(rerun::TextLogLevel::ERROR);
+        self.write(
+            &rerun::EntityPath::from("/diagnostics/schema"),
+            self.timepoint(None),
+            &Combined::new([&archetype, &text_log]),
+        );
+    }
+
+    fn with_context<S, T>(
+        &self,
+        ctx: &Context<'_, S>,
+        explicit_parent: Option<&Id>,
+        contextual: bool,
+        callback: impl FnOnce(Option<&SpanState>) -> T,
+    ) -> T
+    where
+        S: Subscriber + for<'a> LookupSpan<'a>,
+    {
+        let parent = match explicit_parent {
+            Some(id) => ctx.span(id),
+            None if contextual => ctx.lookup_current(),
+            None => None,
+        };
+        let Some(parent) = parent else {
+            return callback(None);
+        };
+        let extensions = parent.extensions();
+        callback(extensions.get::<SpanState>())
+    }
+
+    fn inherited_tag(
+        fields: &CallbackFields,
+        inherited: Option<LogicalTag>,
+    ) -> Result<Option<LogicalTag>, String> {
+        match (fields.u64("logical_ns"), fields.u64("microstep")) {
+            (Some(logical_ns), Some(microstep)) => Ok(Some(LogicalTag {
+                logical_ns,
+                microstep,
+            })),
+            (None, None) => Ok(inherited),
+            _ => Err("`logical_ns` and `microstep` must be recorded together".into()),
+        }
+    }
+
+    fn path(
+        &self,
+        federate: Option<&str>,
+        enclave: Option<&str>,
+        selector: Option<EntitySelector>,
+        series: SeriesKind,
+        claim_name: bool,
+    ) -> ResolvedPath {
+        let registered = enclave.and_then(|enclave| {
+            let selector = selector?;
+            self.adapter.registration.get().and_then(|registration| {
+                registration.resolve(federate, enclave, selector, series, claim_name)
+            })
+        });
+        if let Some((path, series_label)) = registered {
+            ResolvedPath {
+                path,
+                series_label,
+                series: claim_name.then_some(series),
+            }
+        } else {
+            let mut parts = match (federate, enclave) {
+                (Some(federate), Some(enclave)) => vec![
+                    rerun::EntityPathPart::from("federates"),
+                    rerun::EntityPathPart::from(federate),
+                    rerun::EntityPathPart::from("enclaves"),
+                    rerun::EntityPathPart::from(enclave),
+                ],
+                (None, Some(enclave)) => vec![
+                    rerun::EntityPathPart::from("enclaves"),
+                    rerun::EntityPathPart::from(enclave),
+                ],
+                _ => vec![
+                    rerun::EntityPathPart::from("runtime"),
+                    rerun::EntityPathPart::from("unresolved"),
+                ],
+            };
+            parts.push(rerun::EntityPathPart::from(series.entity_suffix()));
+            ResolvedPath {
+                path: rerun::EntityPath::from(parts),
+                series_label: None,
+                series: claim_name.then_some(series),
+            }
+        }
+    }
+}
+
+impl<S> Layer<S> for RerunLayer
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+        self.isolate(|| {
+            let mut fields = CallbackFields::default();
+            attrs.record(&mut fields);
+            let event = match fields.discriminator::<TraceEvent>("event") {
+                Ok(event) => event,
+                Err(error) => {
+                    self.diagnostic(None, error);
+                    return;
+                }
+            };
+            let parent = self.with_context(&ctx, attrs.parent(), attrs.is_contextual(), |parent| {
+                parent.map(|span| span.context.clone())
+            });
+            let federate = fields.text("federate").map(str::to_owned).or_else(|| {
+                parent
+                    .as_ref()
+                    .and_then(|context| context.federate().map(str::to_owned))
+            });
+            let enclave = fields
+                .text("enclave")
+                .map(str::to_owned)
+                .or_else(|| parent.as_ref().map(|context| context.enclave().to_owned()));
+            let tag = match Self::inherited_tag(&fields, parent.and_then(|context| context.tag())) {
+                Ok(tag) => tag,
+                Err(error) => {
+                    self.diagnostic(Some(event.as_str()), error);
+                    return;
+                }
+            };
+            let built = (|| -> Result<(SpanKind, Option<EntitySelector>), String> {
+                Ok(match event {
+                    TraceEvent::SchedulerThread => (
+                        SpanKind::Scheduler {
+                            state: fields.state(TraceState::Running)?,
+                        },
+                        Some(EntitySelector::Scheduler),
+                    ),
+                    TraceEvent::TagProcess => (
+                        SpanKind::Tag {
+                            terminal: fields
+                                .boolean("terminal")
+                                .ok_or("missing or invalid `terminal`")?,
+                            state: fields.state(TraceState::Processing)?,
+                        },
+                        Some(EntitySelector::Scheduler),
+                    ),
+                    TraceEvent::ReactionExecute => {
+                        let reaction = fields.required_text("reaction")?;
+                        let reaction_key = fields.text("reaction_key").map(str::to_owned);
+                        (
+                            SpanKind::Reaction {
+                                reactor: fields.required_text("reactor")?,
+                                reaction_key: reaction_key.clone(),
+                                reaction: reaction.clone(),
+                                level: fields.required_u64("level")?,
+                                state: fields.state(TraceState::Begin)?,
+                            },
+                            reaction_key
+                                .as_deref()
+                                .unwrap_or(&reaction)
+                                .parse()
+                                .ok()
+                                .map(EntitySelector::Reaction),
+                        )
+                    }
+                    TraceEvent::CoordinationWait => (
+                        SpanKind::Wait {
+                            state: fields.state(TraceState::Waiting)?,
+                        },
+                        Some(EntitySelector::Scheduler),
+                    ),
+                    TraceEvent::PropagationSend => {
+                        let kind = fields.discriminator::<TraceKind>("kind")?;
+                        if !matches!(kind, TraceKind::Logical | TraceKind::Physical) {
+                            return Err(format!(
+                                "invalid `kind` discriminator `{}`",
+                                kind.as_str()
+                            ));
+                        }
+                        enclave.as_deref().ok_or("missing or invalid `enclave`")?;
+                        match (
+                            fields.text("destination"),
+                            fields.text("destination_federate"),
+                        ) {
+                            (Some(_), None) => {}
+                            (None, Some(_)) if kind == TraceKind::Logical => {}
+                            (None, None) => return Err("missing propagation destination".into()),
+                            _ => return Err("ambiguous propagation destination".into()),
+                        }
+                        let initial_outcome = fields
+                            .u64("outcome")
+                            .map(|_| fields.discriminator::<TraceOutcome>("outcome"))
+                            .transpose()?;
+                        if !initial_outcome.iter().all(|outcome| {
+                            matches!(outcome, TraceOutcome::Accepted | TraceOutcome::Failed)
+                        }) {
+                            return Err("invalid `outcome` for propagation send".into());
+                        }
+                        let outcome = OnceLock::new();
+                        if let Some(initial_outcome) = initial_outcome {
+                            let _ = outcome.set(initial_outcome);
+                        }
+                        let action_key = fields.required_text("action_key")?;
+                        (
+                            SpanKind::Send {
+                                kind,
+                                destination: fields.text("destination").map(str::to_owned),
+                                destination_federate: fields
+                                    .text("destination_federate")
+                                    .map(str::to_owned),
+                                action_key: action_key.clone(),
+                                action: fields.required_text("action")?,
+                                value_type: fields.required_text("value_type")?,
+                                value_size: fields.required_u64("value_size")?,
+                                outcome,
+                            },
+                            Some(EntitySelector::Scheduler),
+                        )
+                    }
+                    _ => return Err(format!("unsupported span event `{}`", event.as_str())),
+                })
+            })();
+            let (kind, selector) = match built {
+                Ok(value) => value,
+                Err(error) => {
+                    self.diagnostic(Some(event.as_str()), error);
+                    return;
+                }
+            };
+            let Some(enclave) = enclave else {
+                let error = if matches!(kind, SpanKind::Send { .. }) {
+                    "missing or invalid source enclave"
+                } else {
+                    "missing or invalid `enclave`"
+                };
+                self.diagnostic(Some(event.as_str()), error);
+                return;
+            };
+            let context = match &kind {
+                SpanKind::Tag { .. } | SpanKind::Reaction { .. } | SpanKind::Wait { .. } => {
+                    let Some(tag) = tag else {
+                        self.diagnostic(Some(event.as_str()), "missing logical tag context");
+                        return;
+                    };
+                    SpanContext::logical(federate, enclave, tag)
+                }
+                SpanKind::Send {
+                    kind: TraceKind::Logical,
+                    ..
+                } => {
+                    let Some(tag) = tag else {
+                        self.diagnostic(Some(event.as_str()), "missing logical tag context");
+                        return;
+                    };
+                    SpanContext::logical(federate, enclave, tag)
+                }
+                SpanKind::Scheduler { .. } | SpanKind::Send { .. } => {
+                    SpanContext::untimed(federate, enclave)
+                }
+            };
+            let resolved_path = self.path(
+                context.federate(),
+                Some(context.enclave()),
+                selector,
+                SeriesKind::Event(event),
+                true,
+            );
+            let phase = match &kind {
+                SpanKind::Tag { .. } => Some("processing tag"),
+                SpanKind::Reaction { .. } => Some("executing reaction"),
+                SpanKind::Wait { .. } => Some("waiting for coordination"),
+                _ => None,
+            };
+            let span = SpanState {
+                time: self.timepoint(context.logical_ns()),
+                context,
+                path: resolved_path.path,
+                series_label: resolved_path.series_label,
+                series: SeriesKind::Event(event),
+                timing: Mutex::new(SpanTiming::default()),
+                kind,
+            };
+            if let Some(scope) = ctx.span(id) {
+                scope.extensions_mut().insert(span);
+            }
+            if let Some(phase) = phase {
+                let _ = with_span_state(id, &ctx, |span| {
+                    self.write(
+                        &span.path,
+                        self.timepoint(None),
+                        &rerun::StateChange::single(phase),
+                    );
+                });
+            }
+        });
+    }
+
+    fn on_record(&self, id: &Id, values: &Record<'_>, ctx: Context<'_, S>) {
+        self.isolate(|| {
+            let mut fields = CallbackFields::default();
+            values.record(&mut fields);
+            if fields.u64("outcome").is_some() {
+                let outcome = match fields.discriminator::<TraceOutcome>("outcome") {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        self.diagnostic(Some("propagation_send"), error);
+                        return;
+                    }
+                };
+                let duplicate = with_span_state(id, &ctx, |span| match &span.kind {
+                    SpanKind::Send {
+                        outcome: current, ..
+                    } => current.set(outcome).is_err(),
+                    _ => false,
+                })
+                .unwrap_or(false);
+                if duplicate {
+                    self.diagnostic(Some("propagation_send"), "duplicate `outcome` record");
+                }
+            }
+        });
+    }
+
+    fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
+        self.isolate(|| {
+            let mut fields = CallbackFields::default();
+            event.record(&mut fields);
+            let name = match fields.discriminator::<TraceEvent>("event") {
+                Ok(name) => name,
+                Err(error) => {
+                    self.diagnostic(None, error);
+                    return;
+                }
+            };
+            let result = self.with_context(&ctx, event.parent(), event.is_contextual(), |parent| {
+                self.emit_event(name, &fields, parent)
+            });
+            if let Err(error) = result {
+                self.diagnostic(Some(name.as_str()), error);
+            }
+        });
+    }
+
+    fn on_enter(&self, id: &Id, ctx: Context<'_, S>) {
+        self.isolate(|| {
+            let _ = with_span_state(id, &ctx, |span| {
+                span.timing
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .enter();
+            });
+        });
+    }
+
+    fn on_exit(&self, id: &Id, ctx: Context<'_, S>) {
+        self.isolate(|| {
+            let _ = with_span_state(id, &ctx, |span| {
+                span.timing
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .exit();
+            });
+        });
+    }
+
+    fn on_close(&self, id: Id, ctx: Context<'_, S>) {
+        self.isolate(|| {
+            let _ = with_span_state(&id, &ctx, |span| {
+                let duration = {
+                    let total = span
+                        .timing
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .total;
+                    saturating_i64(total.as_nanos()) as u64
+                };
+                let kind = &span.kind;
+                if let SpanKind::Send { outcome, .. } = kind {
+                    match outcome.get() {
+                        Some(TraceOutcome::Accepted | TraceOutcome::Failed) => {}
+                        Some(outcome) => {
+                            self.diagnostic(
+                                Some("propagation_send"),
+                                format!("invalid `outcome` discriminator `{}`", outcome.as_str()),
+                            );
+                            return;
+                        }
+                        None => {
+                            self.diagnostic(
+                                Some("propagation_send"),
+                                "missing or invalid `outcome`",
+                            );
+                            return;
+                        }
+                    }
+                }
+                let mut payload = match kind {
+                    SpanKind::Scheduler { state } => common(
+                        "boomerang.SchedulerRunning",
+                        "scheduler_thread",
+                        span.context.federate(),
+                        Some(span.context.enclave()),
+                        None,
+                        None,
+                    )
+                    .with_component::<rerun::components::Text>(
+                        "boomerang.trace.state",
+                        [state.as_str()],
+                    ),
+                    SpanKind::Tag { terminal, state } => common(
+                        "boomerang.TagProcessing",
+                        "tag_process",
+                        span.context.federate(),
+                        Some(span.context.enclave()),
+                        span.context.logical_ns(),
+                        span.context.microstep(),
+                    )
+                    .with_component_from_data("boomerang.trace.terminal", bool_array(*terminal))
+                    .with_component::<rerun::components::Text>(
+                        "boomerang.trace.state",
+                        [state.as_str()],
+                    ),
+                    SpanKind::Reaction {
+                        reactor,
+                        reaction_key,
+                        reaction,
+                        level,
+                        state,
+                    } => {
+                        let mut value = common(
+                            "boomerang.ReactionExecution",
+                            "reaction_execute",
+                            span.context.federate(),
+                            Some(span.context.enclave()),
+                            span.context.logical_ns(),
+                            span.context.microstep(),
+                        )
+                        .with_component::<rerun::components::Text>(
+                            "boomerang.trace.reactor",
+                            [reactor.as_str()],
+                        );
+                        if let Some(key) = reaction_key {
+                            value = value.with_component::<rerun::components::Text>(
+                                "boomerang.trace.reaction_key",
+                                [key.as_str()],
+                            );
+                        }
+                        value
+                            .with_component::<rerun::components::Text>(
+                                "boomerang.trace.reaction",
+                                [reaction.as_str()],
+                            )
+                            .with_component_from_data("boomerang.trace.level", u64_array(*level))
+                            .with_component::<rerun::components::Text>(
+                                "boomerang.trace.state",
+                                [state.as_str()],
+                            )
+                    }
+                    SpanKind::Wait { state } => common(
+                        "boomerang.CoordinationWait",
+                        "coordination_wait",
+                        span.context.federate(),
+                        Some(span.context.enclave()),
+                        span.context.logical_ns(),
+                        span.context.microstep(),
+                    )
+                    .with_component::<rerun::components::Text>(
+                        "boomerang.trace.state",
+                        [state.as_str()],
+                    ),
+                    SpanKind::Send {
+                        kind,
+                        destination,
+                        destination_federate,
+                        action_key,
+                        action,
+                        value_type,
+                        value_size,
+                        outcome,
+                    } => {
+                        let archetype = if destination_federate.is_some() {
+                            "boomerang.PropagationSerializedSend"
+                        } else if *kind == TraceKind::Physical {
+                            "boomerang.PropagationPhysicalSend"
+                        } else {
+                            "boomerang.PropagationLogicalSend"
+                        };
+                        let mut value = common(
+                            archetype,
+                            "propagation_send",
+                            span.context.federate(),
+                            Some(span.context.enclave()),
+                            span.context.logical_ns(),
+                            span.context.microstep(),
+                        )
+                        .with_component::<rerun::components::Text>(
+                            "boomerang.trace.action_key",
+                            [action_key.as_str()],
+                        )
+                        .with_component::<rerun::components::Text>(
+                            "boomerang.trace.action",
+                            [action.as_str()],
+                        )
+                        .with_component::<rerun::components::Text>(
+                            "boomerang.trace.value_type",
+                            [value_type.as_str()],
+                        )
+                        .with_component_from_data(
+                            "boomerang.trace.value_size",
+                            u64_array(*value_size),
+                        );
+                        if let Some(destination) = destination {
+                            value = value.with_component::<rerun::components::Text>(
+                                "boomerang.trace.destination",
+                                [destination.as_str()],
+                            );
+                        }
+                        if let Some(destination) = destination_federate {
+                            value = value.with_component::<rerun::components::Text>(
+                                "boomerang.trace.destination_federate",
+                                [destination.as_str()],
+                            );
+                        }
+                        if let Some(outcome) = outcome.get() {
+                            value = value.with_component::<rerun::components::Text>(
+                                "boomerang.trace.outcome",
+                                [outcome.as_str()],
+                            );
+                        }
+                        value
+                    }
+                };
+                payload = payload
+                    .with_component_from_data("boomerang.trace.duration_ns", u64_array(duration));
+                let measure = match kind {
+                    SpanKind::Send { value_size, .. } => *value_size as f64,
+                    SpanKind::Tag { terminal, .. } => u8::from(*terminal) as f64,
+                    SpanKind::Scheduler { .. }
+                    | SpanKind::Reaction { .. }
+                    | SpanKind::Wait { .. } => duration as f64,
+                };
+                {
+                    let scalar = rerun::Scalars::new([measure]);
+                    self.write_measure(
+                        &span.path,
+                        span.series_label.as_deref(),
+                        Some(span.series),
+                        span.time,
+                        &Combined::new([&payload, &scalar]),
+                    );
+                }
+                if matches!(
+                    kind,
+                    SpanKind::Tag { .. } | SpanKind::Reaction { .. } | SpanKind::Wait { .. }
+                ) {
+                    self.write(
+                        &span.path,
+                        self.timepoint(None),
+                        &rerun::StateChange::clear_fields(),
+                    );
+                }
+            });
+        });
+    }
+}
+
+impl RerunLayer {
+    fn emit_event(
+        &self,
+        event: TraceEvent,
+        f: &CallbackFields,
+        parent: Option<&SpanState>,
+    ) -> Result<(), String> {
+        let federate = f
+            .text("federate")
+            .or_else(|| parent.and_then(|p| p.context.federate()));
+        let enclave = f
+            .text("enclave")
+            .or_else(|| parent.map(|p| p.context.enclave()));
+        let logical = f
+            .u64("logical_ns")
+            .or_else(|| parent.and_then(|p| p.context.logical_ns()));
+        let microstep = f
+            .u64("microstep")
+            .or_else(|| parent.and_then(|p| p.context.microstep()));
+        let time = self.timepoint(logical);
+        let name = event.as_str();
+        let (path, payload) = match event {
+            TraceEvent::AsyncIngress => {
+                let kind = f.discriminator::<TraceKind>("kind")?;
+                if matches!(kind, TraceKind::Logical | TraceKind::Physical) {
+                    let action_key = f.required_text("action_key")?;
+                    let action = f.required_text("action")?;
+                    let logical_ns = logical.ok_or("missing or invalid `logical_ns`")?;
+                    let microstep = microstep.ok_or("missing or invalid `microstep`")?;
+                    let destination_logical_ns = f.required_u64("destination_logical_ns")?;
+                    let destination_microstep = f.required_u64("destination_microstep")?;
+                    let value_type = f.required_text("value_type")?;
+                    let value_size = f.required_u64("value_size")?;
+                    let outcome = f.discriminator::<TraceOutcome>("outcome")?;
+                    if !matches!(
+                        outcome,
+                        TraceOutcome::Accepted | TraceOutcome::IgnoredPast | TraceOutcome::Failed
+                    ) {
+                        return Err(format!(
+                            "invalid `outcome` discriminator `{}`",
+                            outcome.as_str()
+                        ));
+                    }
+                    let enclave = enclave.ok_or("missing or invalid `enclave`")?;
+                    let accepted_logical =
+                        kind == TraceKind::Logical && outcome == TraceOutcome::Accepted;
+                    let event_name = if accepted_logical {
+                        "propagation_receive"
+                    } else {
+                        event.as_str()
+                    };
+                    let path = self.path(
+                        federate,
+                        Some(enclave),
+                        action_key.parse().ok().map(EntitySelector::Action),
+                        if accepted_logical {
+                            SeriesKind::PropagationReceive
+                        } else {
+                            SeriesKind::Event(event)
+                        },
+                        true,
+                    );
+                    let archetype = if accepted_logical {
+                        "boomerang.PropagationReceive"
+                    } else if kind == TraceKind::Logical {
+                        "boomerang.LogicalIngress"
+                    } else {
+                        "boomerang.PhysicalIngress"
+                    };
+                    let payload = common(
+                        archetype,
+                        event_name,
+                        federate,
+                        Some(enclave),
+                        Some(logical_ns),
+                        Some(microstep),
+                    )
+                    .with_component::<rerun::components::Text>(
+                        "boomerang.trace.action_key",
+                        [action_key.as_str()],
+                    )
+                    .with_component::<rerun::components::Text>(
+                        "boomerang.trace.action",
+                        [action.as_str()],
+                    )
+                    .with_component_from_data(
+                        "boomerang.trace.destination_logical_ns",
+                        u64_array(destination_logical_ns),
+                    )
+                    .with_component_from_data(
+                        "boomerang.trace.destination_microstep",
+                        u64_array(destination_microstep),
+                    )
+                    .with_component::<rerun::components::Text>(
+                        "boomerang.trace.value_type",
+                        [value_type.as_str()],
+                    )
+                    .with_component_from_data("boomerang.trace.value_size", u64_array(value_size))
+                    .with_component::<rerun::components::Text>(
+                        "boomerang.trace.outcome",
+                        [outcome.as_str()],
+                    );
+                    (path, payload)
+                } else if matches!(kind, TraceKind::Shutdown | TraceKind::ProvisionalRelease) {
+                    let enclave = enclave.ok_or("missing or invalid `enclave`")?;
+                    logical.ok_or("missing or invalid `logical_ns`")?;
+                    microstep.ok_or("missing or invalid `microstep`")?;
+                    let outcome = f.discriminator::<TraceOutcome>("outcome")?;
+                    let valid_outcome = match kind {
+                        TraceKind::Shutdown => outcome == TraceOutcome::Accepted,
+                        TraceKind::ProvisionalRelease => {
+                            matches!(outcome, TraceOutcome::Accepted | TraceOutcome::IgnoredPast)
+                        }
+                        _ => unreachable!(),
+                    };
+                    if !valid_outcome {
+                        return Err(format!(
+                            "invalid `outcome` discriminator `{}`",
+                            outcome.as_str()
+                        ));
+                    }
+                    (
+                        self.path(
+                            federate,
+                            Some(enclave),
+                            Some(EntitySelector::Scheduler),
+                            SeriesKind::Event(event),
+                            false,
+                        ),
+                        common(
+                            "boomerang.ControlIngress",
+                            name,
+                            federate,
+                            Some(enclave),
+                            logical,
+                            microstep,
+                        )
+                        .with_component::<rerun::components::Text>(
+                            "boomerang.trace.kind",
+                            [kind.as_str()],
+                        )
+                        .with_component::<rerun::components::Text>(
+                            "boomerang.trace.outcome",
+                            [outcome.as_str()],
+                        ),
+                    )
+                } else {
+                    return Err(format!("invalid `kind` discriminator `{}`", kind.as_str()));
+                }
+            }
+            TraceEvent::ActionSchedule => {
+                let action_key = f.required_text("action_key")?;
+                let outcome = f.discriminator::<TraceOutcome>("outcome")?;
+                let enclave = enclave.ok_or("missing or invalid `enclave`")?;
+                let archetype = if outcome == TraceOutcome::Startup {
+                    f.required_text("action")?;
+                    f.required_u64("destination_logical_ns")?;
+                    f.required_u64("destination_microstep")?;
+                    f.required_text("value_type")?;
+                    f.required_u64("value_size")?;
+                    "boomerang.ActionStartup"
+                } else if outcome == TraceOutcome::Rebased {
+                    f.required_u64("old_logical_ns")?;
+                    f.required_u64("old_microstep")?;
+                    f.required_u64("destination_logical_ns")?;
+                    f.required_u64("destination_microstep")?;
+                    "boomerang.ActionRebased"
+                } else if outcome == TraceOutcome::Scheduled {
+                    logical.ok_or("missing or invalid `logical_ns`")?;
+                    microstep.ok_or("missing or invalid `microstep`")?;
+                    f.required_text("action")?;
+                    f.required_u64("destination_logical_ns")?;
+                    f.required_u64("destination_microstep")?;
+                    f.required_text("value_type")?;
+                    f.required_u64("value_size")?;
+                    "boomerang.ActionScheduled"
+                } else {
+                    return Err(format!(
+                        "invalid `outcome` discriminator `{}`",
+                        outcome.as_str()
+                    ));
+                };
+                if outcome == TraceOutcome::Startup {
+                    logical.ok_or("missing or invalid `logical_ns`")?;
+                    microstep.ok_or("missing or invalid `microstep`")?;
+                }
+                let mut payload =
+                    common(archetype, name, federate, Some(enclave), logical, microstep)
+                        .with_component::<rerun::components::Text>(
+                        "boomerang.trace.action_key",
+                        [action_key.as_str()],
+                    );
+                for (component, field) in [
+                    (
+                        "boomerang.trace.destination_logical_ns",
+                        "destination_logical_ns",
+                    ),
+                    (
+                        "boomerang.trace.destination_microstep",
+                        "destination_microstep",
+                    ),
+                    ("boomerang.trace.old_logical_ns", "old_logical_ns"),
+                    ("boomerang.trace.old_microstep", "old_microstep"),
+                    ("boomerang.trace.value_size", "value_size"),
+                ] {
+                    if let Some(value) = f.u64(field) {
+                        payload = payload.with_component_from_data(component, u64_array(value));
+                    }
+                }
+                for (component, field) in [
+                    ("boomerang.trace.action", "action"),
+                    ("boomerang.trace.value_type", "value_type"),
+                ] {
+                    if let Some(value) = f.text(field) {
+                        payload =
+                            payload.with_component::<rerun::components::Text>(component, [value]);
+                    }
+                }
+                payload = payload.with_component::<rerun::components::Text>(
+                    "boomerang.trace.outcome",
+                    [outcome.as_str()],
+                );
+                (
+                    self.path(
+                        federate,
+                        Some(enclave),
+                        action_key.parse().ok().map(EntitySelector::Action),
+                        SeriesKind::Event(event),
+                        matches!(outcome, TraceOutcome::Startup | TraceOutcome::Scheduled),
+                    ),
+                    payload,
+                )
+            }
+            TraceEvent::PortWrite => {
+                if !matches!(
+                    parent.map(|parent| &parent.kind),
+                    Some(SpanKind::Reaction { .. })
+                ) {
+                    return Err("missing reaction span context".into());
+                }
+                let port_key = f.required_text("port_key")?;
+                let enclave = enclave.ok_or("missing or invalid `enclave`")?;
+                let outcome = f.discriminator::<TraceOutcome>("outcome")?;
+                if outcome != TraceOutcome::MutableAccess {
+                    return Err(format!(
+                        "invalid `outcome` discriminator `{}`",
+                        outcome.as_str()
+                    ));
+                }
+                let mut payload = common(
+                    "boomerang.PortWrite",
+                    name,
+                    federate,
+                    Some(enclave),
+                    logical,
+                    microstep,
+                )
+                .with_component::<rerun::components::Text>(
+                    "boomerang.trace.port_key",
+                    [port_key.as_str()],
+                )
+                .with_component::<rerun::components::Text>(
+                    "boomerang.trace.port",
+                    [f.required_text("port")?.as_str()],
+                )
+                .with_component::<rerun::components::Text>(
+                    "boomerang.trace.value_type",
+                    [f.required_text("value_type")?.as_str()],
+                )
+                .with_component::<rerun::components::Text>(
+                    "boomerang.trace.outcome",
+                    [outcome.as_str()],
+                );
+                if let Some(SpanKind::Reaction {
+                    reactor,
+                    reaction_key,
+                    reaction,
+                    ..
+                }) = parent.map(|parent| &parent.kind)
+                {
+                    payload = payload
+                        .with_component::<rerun::components::Text>(
+                            "boomerang.trace.reactor",
+                            [reactor.as_str()],
+                        )
+                        .with_component::<rerun::components::Text>(
+                            "boomerang.trace.reaction",
+                            [reaction.as_str()],
+                        );
+                    if let Some(key) = reaction_key {
+                        payload = payload.with_component::<rerun::components::Text>(
+                            "boomerang.trace.reaction_key",
+                            [key.as_str()],
+                        );
+                    }
+                }
+                (
+                    self.path(
+                        federate,
+                        Some(enclave),
+                        port_key.parse().ok().map(EntitySelector::Port),
+                        SeriesKind::Event(event),
+                        false,
+                    ),
+                    payload,
+                )
+            }
+            TraceEvent::FrontierPublish => {
+                let enclave = enclave.ok_or("missing or invalid `enclave`")?;
+                let state = f.discriminator::<TraceState>("state")?;
+                let outcome = f.discriminator::<TraceOutcome>("outcome")?;
+                if !matches!(outcome, TraceOutcome::Published | TraceOutcome::Failed) {
+                    return Err(format!(
+                        "invalid `outcome` discriminator `{}`",
+                        outcome.as_str()
+                    ));
+                }
+                let archetype = match state {
+                    TraceState::Candidate => {
+                        logical.ok_or("missing or invalid `logical_ns`")?;
+                        microstep.ok_or("missing or invalid `microstep`")?;
+                        "boomerang.FrontierCandidate"
+                    }
+                    TraceState::Idle | TraceState::Finished => "boomerang.FrontierState",
+                    _ => {
+                        return Err(format!(
+                            "invalid `state` discriminator `{}`",
+                            state.as_str()
+                        ))
+                    }
+                };
+                let payload = common(archetype, name, federate, Some(enclave), logical, microstep)
+                    .with_component::<rerun::components::Text>(
+                        "boomerang.trace.state",
+                        [state.as_str()],
+                    )
+                    .with_component::<rerun::components::Text>(
+                        "boomerang.trace.outcome",
+                        [outcome.as_str()],
+                    );
+                (
+                    self.path(
+                        federate,
+                        Some(enclave),
+                        Some(EntitySelector::Scheduler),
+                        SeriesKind::Event(event),
+                        false,
+                    ),
+                    payload,
+                )
+            }
+            TraceEvent::CoordinationGrant
+            | TraceEvent::TagRelease
+            | TraceEvent::TagComplete
+            | TraceEvent::Shutdown => {
+                let enclave = enclave.ok_or("missing or invalid `enclave`")?;
+                logical.ok_or("missing or invalid `logical_ns`")?;
+                microstep.ok_or("missing or invalid `microstep`")?;
+                let outcome = f.discriminator::<TraceOutcome>("outcome")?;
+                let valid_outcome = match event {
+                    TraceEvent::CoordinationGrant => matches!(
+                        outcome,
+                        TraceOutcome::Granted
+                            | TraceOutcome::InterruptedLocal
+                            | TraceOutcome::InterruptedExternal
+                    ),
+                    TraceEvent::TagRelease => {
+                        matches!(outcome, TraceOutcome::Accepted | TraceOutcome::Failed)
+                    }
+                    TraceEvent::TagComplete => {
+                        matches!(outcome, TraceOutcome::Completed | TraceOutcome::Failed)
+                    }
+                    TraceEvent::Shutdown => outcome == TraceOutcome::Success,
+                    _ => unreachable!(),
+                };
+                if !valid_outcome {
+                    return Err(format!(
+                        "invalid `outcome` discriminator `{}`",
+                        outcome.as_str()
+                    ));
+                }
+                if event == TraceEvent::TagRelease {
+                    f.required_text("destination")?;
+                }
+                if event == TraceEvent::TagComplete {
+                    f.boolean("terminal")
+                        .ok_or("missing or invalid `terminal`")?;
+                }
+                let archetype = match event {
+                    TraceEvent::CoordinationGrant => "boomerang.CoordinationGrant",
+                    TraceEvent::TagRelease => "boomerang.TagRelease",
+                    TraceEvent::TagComplete => "boomerang.TagComplete",
+                    _ => "boomerang.Shutdown",
+                };
+                let mut payload =
+                    common(archetype, name, federate, Some(enclave), logical, microstep);
+                for (component, field) in [("boomerang.trace.destination", "destination")] {
+                    if let Some(value) = f.text(field) {
+                        payload =
+                            payload.with_component::<rerun::components::Text>(component, [value]);
+                    }
+                }
+                payload = payload.with_component::<rerun::components::Text>(
+                    "boomerang.trace.outcome",
+                    [outcome.as_str()],
+                );
+                if let Some(value) = f.boolean("terminal") {
+                    payload = payload
+                        .with_component_from_data("boomerang.trace.terminal", bool_array(value));
+                }
+                if event == TraceEvent::Shutdown {
+                    let state = f.discriminator::<TraceState>("state")?;
+                    if state != TraceState::Complete {
+                        return Err(format!(
+                            "invalid `state` discriminator `{}`",
+                            state.as_str()
+                        ));
+                    }
+                    payload = payload.with_component::<rerun::components::Text>(
+                        "boomerang.trace.state",
+                        [state.as_str()],
+                    );
+                }
+                (
+                    self.path(
+                        federate,
+                        Some(enclave),
+                        Some(EntitySelector::Scheduler),
+                        SeriesKind::Event(event),
+                        event == TraceEvent::TagComplete,
+                    ),
+                    payload,
+                )
+            }
+            TraceEvent::Diagnostic => {
+                let enclave = enclave.ok_or("missing or invalid `enclave`")?;
+                let state = f.discriminator::<TraceState>("state")?;
+                let outcome = f.discriminator::<TraceOutcome>("outcome")?;
+                if state != TraceState::RuntimeError || outcome != TraceOutcome::Failed {
+                    return Err("invalid runtime diagnostic discriminators".into());
+                }
+                let error = f.required_text("error")?;
+                let payload = common(
+                    "boomerang.RuntimeDiagnostic",
+                    name,
+                    federate,
+                    Some(enclave),
+                    None,
+                    None,
+                )
+                .with_component::<rerun::components::Text>(
+                    "boomerang.trace.error",
+                    [error.as_str()],
+                );
+                let text_log = rerun::TextLog::new(error).with_level(rerun::TextLogLevel::ERROR);
+                self.write(
+                    &rerun::EntityPath::from("/diagnostics/runtime"),
+                    time,
+                    &Combined::new([&payload, &text_log]),
+                );
+                return Ok(());
+            }
+            _ => return Err(format!("unsupported event `{name}`")),
+        };
+        let scalar = match event {
+            TraceEvent::AsyncIngress | TraceEvent::ActionSchedule => {
+                f.u64("value_size").map(|value| value as f64)
+            }
+            TraceEvent::TagComplete => f.boolean("terminal").map(|value| u8::from(value) as f64),
+            _ => None,
+        };
+        if let Some(scalar) = scalar {
+            let measure = rerun::Scalars::new([scalar]);
+            self.write_measure(
+                &path.path,
+                path.series_label.as_deref(),
+                path.series,
+                time,
+                &Combined::new([&payload, &measure]),
+            );
+        } else {
+            self.write(&path.path, time, &payload);
+        }
+        Ok(())
+    }
+}
+
+struct TimeReset<'a>(&'a rerun::RecordingStream);
+impl Drop for TimeReset<'_> {
+    fn drop(&mut self) {
+        self.0.reset_time();
+    }
+}
+
+struct Combined(Vec<rerun::SerializedComponentBatch>);
+
+impl Combined {
+    fn new<const N: usize>(values: [&dyn rerun::AsComponents; N]) -> Self {
+        Self(
+            values
+                .into_iter()
+                .flat_map(rerun::AsComponents::as_serialized_batches)
+                .collect(),
+        )
+    }
+}
+
+impl rerun::AsComponents for Combined {
+    fn as_serialized_batches(&self) -> Vec<rerun::SerializedComponentBatch> {
+        self.0.clone()
+    }
+}
+
+fn common(
+    archetype: &'static str,
+    event: &str,
+    federate: Option<&str>,
+    enclave: Option<&str>,
+    logical: Option<u64>,
+    microstep: Option<u64>,
+) -> rerun::DynamicArchetype {
+    let mut value = rerun::DynamicArchetype::new(archetype)
+        .with_component::<rerun::components::Text>("boomerang.trace.event", [event]);
+    if let Some(federate) = federate {
+        value =
+            value.with_component::<rerun::components::Text>("boomerang.trace.federate", [federate]);
+    }
+    if let Some(enclave) = enclave {
+        value =
+            value.with_component::<rerun::components::Text>("boomerang.trace.enclave", [enclave]);
+    }
+    if let Some(logical) = logical {
+        value = value.with_component_from_data("boomerang.trace.logical_ns", u64_array(logical));
+    }
+    if let Some(microstep) = microstep {
+        value = value.with_component_from_data("boomerang.trace.microstep", u64_array(microstep));
+    }
+    value
+}
+
+fn u64_array(value: u64) -> Arc<dyn rerun::external::arrow::array::Array> {
+    Arc::new(rerun::external::arrow::array::UInt64Array::from(vec![
+        value,
+    ]))
+}
+fn bool_array(value: bool) -> Arc<dyn rerun::external::arrow::array::Array> {
+    Arc::new(rerun::external::arrow::array::BooleanArray::from(vec![
+        value,
+    ]))
+}
+fn saturating_i64(value: u128) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn compact_series_name(entity_label: &str, series: SeriesKind) -> String {
+    bounded_fragment(
+        &format!(
+            "{entity_label} · {}",
+            bounded_fragment(series.compact_label(), 16)
+        ),
+        64,
+    )
+}
+fn with_span_state<S, T>(
+    id: &Id,
+    ctx: &Context<'_, S>,
+    callback: impl FnOnce(&SpanState) -> T,
+) -> Option<T>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    let span = ctx.span(id)?;
+    let extensions = span.extensions();
+    extensions.get::<SpanState>().map(callback)
+}

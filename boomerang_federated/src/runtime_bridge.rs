@@ -345,6 +345,10 @@ struct ProtocolFederatedOutboundSink {
 }
 
 impl crate::FederatedOutboundSink for ProtocolFederatedOutboundSink {
+    fn target_federate(&self) -> Option<&FederateId> {
+        Some(&self.target)
+    }
+
     fn send(
         &self,
         command: crate::FederatedOutboundCommand,

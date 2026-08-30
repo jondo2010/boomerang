@@ -10,7 +10,7 @@ use boomerang_runtime::{
     ReactorData, SendContext, Tag,
 };
 
-use crate::{PayloadDecoder, PayloadEncoder};
+use crate::{FederateId, PayloadDecoder, PayloadEncoder};
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum FederatedEndpointError {
@@ -61,6 +61,10 @@ pub enum FederatedOutboundCommand {
 }
 
 pub trait FederatedOutboundSink: Send + Sync + 'static {
+    fn target_federate(&self) -> Option<&FederateId> {
+        None
+    }
+
     fn send(&self, command: FederatedOutboundCommand) -> Result<(), FederatedEndpointError>;
 }
 
@@ -135,15 +139,36 @@ impl<T: ReactorData> SerializedInterPartitionEventSink<T> {
 }
 
 impl<T: ReactorData> InterPartitionEventSink<T> for SerializedInterPartitionEventSink<T> {
-    fn send(&self, time: InterPartitionEventTime, _target: &AsyncActionRef<T>, value: &T) {
+    fn send(&self, time: InterPartitionEventTime, target: &AsyncActionRef<T>, value: &T) {
         let InterPartitionEventTime::Logical(tag) = time else {
             tracing::error!("Serialized sender cannot target a physical action");
             return;
         };
+        let destination_federate = self.outbound.target_federate().map(FederateId::as_str);
+
+        let span = tracing::trace_span!(
+            target: boomerang_runtime::trace::TRACE_TARGET,
+            "propagation_send",
+            event = boomerang_runtime::trace::TraceEvent::PropagationSend as u64,
+            kind = boomerang_runtime::trace::TraceKind::Logical as u64,
+            destination_federate,
+            action_key = %target.key(),
+            action = target.name(),
+            logical_ns = boomerang_runtime::trace::logical_ns(tag),
+            microstep = boomerang_runtime::trace::microstep(tag),
+            value_type = std::any::type_name::<T>(),
+            value_size = std::mem::size_of_val(value),
+            outcome = tracing::field::Empty,
+        );
+        let _entered = span.enter();
 
         let payload = match self.encoder.encode(value) {
             Ok(payload) => payload,
             Err(error) => {
+                span.record(
+                    "outcome",
+                    boomerang_runtime::trace::TraceOutcome::Failed as u64,
+                );
                 let error = FederatedEndpointError::codec(error.to_string());
                 tracing::error!(?error, "Failed to encode federated payload");
                 self.faults.record(error);
@@ -153,8 +178,17 @@ impl<T: ReactorData> InterPartitionEventSink<T> for SerializedInterPartitionEven
 
         let command = FederatedOutboundCommand::Msg(FederatedOutboundMessage { tag, payload });
         if let Err(error) = self.outbound.send(command) {
+            span.record(
+                "outcome",
+                boomerang_runtime::trace::TraceOutcome::Failed as u64,
+            );
             tracing::error!(?error, "Failed to emit federated command");
             self.faults.record(error);
+        } else {
+            span.record(
+                "outcome",
+                boomerang_runtime::trace::TraceOutcome::Accepted as u64,
+            );
         }
     }
 }

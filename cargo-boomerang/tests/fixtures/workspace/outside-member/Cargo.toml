@@ -1,0 +1,8 @@
+[package]
+name = "outside-member"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+__boomerang_descriptor = []
+__boomerang_payload = []

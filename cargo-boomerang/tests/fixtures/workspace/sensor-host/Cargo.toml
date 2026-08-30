@@ -1,0 +1,9 @@
+[package]
+name = "sensor-host"
+version.workspace = true
+edition.workspace = true
+
+[features]
+__boomerang_descriptor = []
+__boomerang_payload = []
+simulated = []

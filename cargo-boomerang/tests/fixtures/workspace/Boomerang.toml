@@ -1,0 +1,23 @@
+schema = 1
+
+[topology]
+package = "vehicle-topology"
+entry = "vehicle_topology::topology"
+
+[deployments.production.bindings."vehicle/sensor"]
+package = "sensor-host"
+features = ["simulated"]
+
+[deployments.production.federates.host]
+groups = ["vehicle"]
+target = "x86_64-unknown-linux-gnu"
+runtime = "std"
+target-json = "targets/host.json"
+cargo-config = ".cargo/host.toml"
+
+[deployments.outside-member.bindings."vehicle/sensor"]
+package = "outside-member"
+
+[deployments.outside-member.federates.host]
+groups = ["vehicle"]
+runtime = "std"

@@ -513,7 +513,19 @@ impl ReactorBody {
         Ok(())
     }
 
-    #[cfg(test)]
+    fn validate_unique_mode_names(&self) -> syn::Result<()> {
+        let mut names = BTreeSet::new();
+        for mode in self.modes() {
+            if !names.insert(ident_text(&mode.name)) {
+                return Err(syn::Error::new(
+                    mode.name.span(),
+                    format!("duplicate mode name `{}`", mode.name),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn modes(&self) -> impl Iterator<Item = &ModeDecl> {
         self.items.iter().filter_map(|item| match item {
             BodyItem::Mode(mode) => Some(mode),
@@ -905,6 +917,9 @@ fn payload_output(
     if let Err(error) = model.body.validate_unique_reaction_names() {
         return error.to_compile_error();
     }
+    if let Err(error) = model.body.validate_unique_mode_names() {
+        return error.to_compile_error();
+    }
 
     if let Some(span) = model.body.unsupported_span() {
         let diagnostic = quote_spanned! {span =>
@@ -1202,6 +1217,9 @@ fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
     };
 
     if let Err(error) = model.body.validate_unique_reaction_names() {
+        return error.to_compile_error();
+    }
+    if let Err(error) = model.body.validate_unique_mode_names() {
         return error.to_compile_error();
     }
 

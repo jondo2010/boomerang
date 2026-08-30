@@ -5,9 +5,9 @@ use boomerang::runtime::{
     image::{
         ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotIndex,
         EnclaveImage, IdentityRange, ImageValidationError, LevelReactionImage,
-        LifecycleReactionImage, ReactionImage, ReactionIndex, ReactorImage, ReactorIndex,
-        RequiredBindingImage, ScopeImage, ScopeIndex, StateSlotIndex, StorageBounds, TableRange,
-        TimerStartupImage, TinyMapView,
+        LifecycleReactionImage, PortImage, PortIndex, ReactionImage, ReactionIndex, ReactorImage,
+        ReactorIndex, RequiredBindingImage, RouteDirection, RouteImage, ScopeImage, ScopeIndex,
+        StateSlotIndex, StorageBounds, TableRange, TimerStartupImage, TimingDomain, TinyMapView,
     },
     Config, Context, Duration, ExecuteOwnedError, OwnedBindings, ReactionBindingError,
     ReactionRefs, ReactorData, StateAccessError, Tag,
@@ -107,6 +107,14 @@ static COALESCED_STARTUP_ACTIONS: [TimerStartupImage; 2] = [
     TimerStartupImage::new(ActionIndex::new(1), 1),
 ];
 static ROUTES: [boomerang::runtime::image::RouteImage; 0] = [];
+static ROUTED_PORTS: [PortImage; 1] = [PortImage::new(ScopeIndex::new(0), TableRange::new(0, 0))];
+static ROUTED_ROUTES: [RouteImage; 1] = [RouteImage::new(
+    IdentityRange::new(0, 18),
+    PortIndex::new(0),
+    RouteDirection::Outbound,
+    TimingDomain::Logical,
+    0,
+)];
 static REQUIRED_BINDINGS: [RequiredBindingImage; 2] = [
     RequiredBindingImage::new(IdentityRange::new(18, 13), BindingKind::StateInitializer),
     RequiredBindingImage::new(IdentityRange::new(31, 17), BindingKind::Reaction),
@@ -168,6 +176,12 @@ static COALESCED_IMAGE: EnclaveImage<'static> = EnclaveImage {
     routes: TinyMapView::new(&ROUTES),
     required_bindings: TinyMapView::new(&REQUIRED_BINDINGS),
     storage_bounds: StorageBounds::new(1, 2, 1, 0, 0, 0),
+};
+
+static ROUTED_IMAGE: EnclaveImage<'static> = EnclaveImage {
+    ports: TinyMapView::new(&ROUTED_PORTS),
+    routes: TinyMapView::new(&ROUTED_ROUTES),
+    ..IMAGE
 };
 
 #[test]
@@ -261,4 +275,28 @@ fn compiled_reference_returns_typed_image_validation_error() {
             ..
         })
     ));
+}
+
+#[test]
+fn compiled_reference_rejects_routes_until_route_execution_is_supported() {
+    let route_free_image = EnclaveImage {
+        routes: TinyMapView::new(&ROUTES),
+        ..ROUTED_IMAGE
+    };
+    execute_owned(
+        &route_free_image,
+        reference_bindings().bind_port::<u32>(PortIndex::new(0)),
+        Config::default().with_fast_forward(true),
+    )
+    .expect("the same image must execute when its route table is empty");
+
+    match execute_owned(
+        &ROUTED_IMAGE,
+        reference_bindings().bind_port::<u32>(PortIndex::new(0)),
+        Config::default().with_fast_forward(true),
+    ) {
+        Ok(_) => panic!("routed images must not execute without route support"),
+        Err(ExecuteOwnedError::RoutesUnsupported { count: 1 }) => {}
+        Err(error) => panic!("unexpected route rejection: {error}"),
+    }
 }

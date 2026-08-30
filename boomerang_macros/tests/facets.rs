@@ -262,6 +262,21 @@ fn descriptor_mode_rejects_duplicate_named_reactions() {
 }
 
 #[test]
+fn deployment_facets_reject_duplicate_mode_names() {
+    for facet in ["__boomerang_descriptor", "__boomerang_payload"] {
+        let features = format!("{facet} duplicate-mode");
+        let stderr = cargo_check("descriptor-duplicate-reaction", &["--features", &features])
+            .expect_err("duplicate mode names should fail in deployment facets");
+        let normalized_stderr = stderr.replace('\\', "/");
+        assert!(
+            normalized_stderr.contains("duplicate mode name")
+                && normalized_stderr.contains("src/lib.rs:14:13"),
+            "unexpected {facet} diagnostic:\n{stderr}"
+        );
+    }
+}
+
+#[test]
 fn hosted_mode_accepts_duplicate_named_reactions() {
     cargo_check("descriptor-duplicate-reaction", &[]).unwrap();
 }

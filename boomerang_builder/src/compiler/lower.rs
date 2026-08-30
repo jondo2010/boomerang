@@ -22,6 +22,12 @@ pub enum CompileError {
     /// This slice cannot project a distributed coordination backend.
     #[error("distributed coordination projection is not implemented")]
     UnsupportedCoordination,
+    /// A reaction requests a mode transition that the compiled image cannot yet represent.
+    #[error("reaction {reaction} requests an unsupported compiled mode transition")]
+    UnsupportedModeTransition {
+        /// Stable identity of the transition-bearing reaction.
+        reaction: super::ReactionId,
+    },
     /// A component did not declare a required finite resource bound.
     #[error("component {component} in Enclave {enclave} has no {resource} bound")]
     UnboundedResource {
@@ -237,6 +243,15 @@ pub fn lower(deployment: &ResolvedDeployment) -> Result<OwnedCompiledDeployment,
         super::CoordinationSelection::Local
     ) {
         return Err(CompileError::UnsupportedCoordination);
+    }
+    if let Some((reaction, _)) = deployment
+        .topology()
+        .reactions()
+        .find(|(_, reaction)| reaction.options().transition().is_some())
+    {
+        return Err(CompileError::UnsupportedModeTransition {
+            reaction: reaction.clone(),
+        });
     }
     let mut federates = deployment.federates();
     let federate = federates
@@ -1355,11 +1370,11 @@ mod tests {
             ActionId, ActionKind, ApplicationTopology, ApplicationTopologyBuilder, BoundaryBinding,
             BoundaryId, CodecCapabilityId, ComponentInstance, ComponentInstanceId,
             ConnectionSemantics, CoordinationBackendId, CoordinationSelection, FederateConfig,
-            FederateId, ImplementationBinding, ImplementationId, ModeId, PlacementAssignment,
-            PlacementGroupId, PortDirection, PortId, ReactionId, ReactionOptions, ReactionRelation,
-            ReactionRelationFlags, ReactionRelationTarget, Reactor, ReactorId, RequiredBinding,
-            ResolvedDeployment, RuntimeBackendId, StableEnclaveId, TargetTriple,
-            TransportCapabilityId,
+            FederateId, ImplementationBinding, ImplementationId, ModeId, ModeTransition,
+            ModeTransitionKind, PlacementAssignment, PlacementGroupId, PortDirection, PortId,
+            ReactionId, ReactionOptions, ReactionRelation, ReactionRelationFlags,
+            ReactionRelationTarget, Reactor, ReactorId, RequiredBinding, ResolvedDeployment,
+            RuntimeBackendId, StableEnclaveId, TargetTriple, TransportCapabilityId,
         },
         descriptor::{
             ComponentDescriptor, DescriptorBound, DescriptorBounds, ReactionSlot, ReactionSlotId,
@@ -1449,6 +1464,7 @@ mod tests {
         PortSelfCycle,
         MutuallyExclusiveModes,
         EncodedOrdering,
+        ModeTransition,
     }
     fn topology(
         reverse: bool,
@@ -1661,7 +1677,8 @@ mod tests {
                     mode: Some(active.clone()),
                     enabled_modes: vec![active.clone()],
                     reset_modes: vec![active.clone()],
-                    transition: None,
+                    transition: matches!(dependency_case, DependencyCase::ModeTransition)
+                        .then(|| ModeTransition::new(idle.clone(), ModeTransitionKind::Reset)),
                 },
             ),
             (
@@ -2067,6 +2084,22 @@ mod tests {
     fn lowering_rejects_distributed_coordination_in_this_slice() {
         let error = lower(&deployment(false, true)).unwrap_err();
         assert!(matches!(error, CompileError::UnsupportedCoordination));
+    }
+    #[test]
+    fn lowering_rejects_mode_transitions_until_the_image_preserves_them() {
+        let error = lower(&local_deployment(
+            false,
+            ConnectionSemantics::Logical { after: None },
+            DependencyCase::ModeTransition,
+        ))
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            CompileError::UnsupportedModeTransition {
+                reaction: ReactionId::new("vehicle/controller/reset_active").unwrap(),
+            }
+        );
     }
     #[test]
     fn bounded_lowering_rejects_unbounded_resources() {

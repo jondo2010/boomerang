@@ -15,6 +15,12 @@ pub enum ExecuteOwnedError<'image> {
     /// The borrowed compiled image was structurally invalid.
     #[error("invalid compiled image: {0}")]
     ImageValidation(ImageValidationError<'image>),
+    /// The image contains scheduler-boundary routes, which this local executor cannot deliver.
+    #[error("compiled reference execution does not support {count} scheduler-boundary route(s)")]
+    RoutesUnsupported {
+        /// Number of routes present in the validated enclave image.
+        count: usize,
+    },
     /// Owned storage initialization or directly bound reaction execution failed.
     #[error("compiled storage or reaction execution failed: {0}")]
     Storage(#[from] OwnedStorageError),
@@ -105,6 +111,11 @@ pub fn execute_owned<'image>(
     config: Config,
 ) -> Result<OwnedExecutionResult, ExecuteOwnedError<'image>> {
     let image = crate::image::EnclaveImageView::new(image)?;
+    if !image.routes().is_empty() {
+        return Err(ExecuteOwnedError::RoutesUnsupported {
+            count: image.routes().len(),
+        });
+    }
     let mut storage = OwnedStorage::new(image, bindings)?;
     let final_tag = run_owned_scheduler(&mut storage, &config)?;
     Ok(OwnedExecutionResult {

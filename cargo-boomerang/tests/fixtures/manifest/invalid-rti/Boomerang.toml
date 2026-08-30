@@ -1,0 +1,16 @@
+schema = 1
+
+[topology]
+package = "vehicle-topology"
+entry = "vehicle::topology"
+
+[deployments.production.federates.sensor]
+groups = ["sensor"]
+runtime = "std"
+
+[deployments.production.federates.compute]
+groups = ["control"]
+runtime = "std"
+
+[deployments.production.coordination]
+backend = "central-rti"

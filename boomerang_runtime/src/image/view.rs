@@ -80,6 +80,12 @@ pub enum ImageValidationError<'a> {
         /// Inconsistent relationship.
         field: &'static str,
     },
+    /// A scope parent chain does not terminate at a root scope.
+    #[error("scope parent cycle is reachable from scopes[{scope}]")]
+    ScopeParentCycle {
+        /// Dense scope whose parent chain contains a cycle.
+        scope: u32,
+    },
     /// A stable identity is empty, untrimmed, or contains controls.
     #[error("invalid {kind} identity at {index}: {id:?}")]
     InvalidStableId {
@@ -1200,6 +1206,17 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             &mut ends[5],
         )?;
     }
+    for scope in image.scopes.keys() {
+        let mut ancestor = Some(scope);
+        for _ in 0..image.scopes.len() {
+            ancestor = ancestor.and_then(|key| image.scopes[key].parent());
+        }
+        if ancestor.is_some() {
+            return Err(ImageValidationError::ScopeParentCycle {
+                scope: scope.as_u32(),
+            });
+        }
+    }
 
     for action in image.actions.values().copied() {
         validate_levels(
@@ -2067,6 +2084,33 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn cyclic_scope_parents_are_rejected_before_execution() {
+        let scopes = [
+            ScopeImage::new(
+                Some(ScopeIndex::new(0)),
+                ReactorIndex::new(0),
+                None,
+                TableRange::new(0, 2),
+                TableRange::new(0, 1),
+                TableRange::new(0, 1),
+                TableRange::new(0, 0),
+                TableRange::new(0, 0),
+                TableRange::new(0, 0),
+            ),
+            SCOPES[1],
+            SCOPES[2],
+        ];
+        let image = EnclaveImage {
+            scopes: TinyMapView::new(&scopes),
+            ..IMAGE
+        };
+
+        let error = EnclaveImageView::new(&image).expect_err("scope cycle must be rejected");
+
+        assert_eq!(error, ImageValidationError::ScopeParentCycle { scope: 0 });
     }
 
     #[test]

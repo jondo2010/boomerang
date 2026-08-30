@@ -11,8 +11,8 @@ use crate::{
     TransitionKind,
 };
 
-/// Immutable scheduler tables addressed by one exact family of dense key types.
-pub(crate) trait ScheduleAccess {
+/// Immutable normalized schedule addressed by one exact family of dense key types.
+pub(crate) trait Schedule {
     /// Action identity used by the schedule.
     type Action: tinymap::Key + Copy + std::fmt::Debug;
     /// Port identity used by the schedule.
@@ -27,12 +27,12 @@ pub(crate) trait ScheduleAccess {
     type Scope: tinymap::Key + Copy + std::fmt::Debug;
 
     fn reaction_limits(&self) -> ReactionSetLimits;
-    fn has_modes(&self) -> bool;
-    fn action_from_runtime(&self, key: ActionKey) -> Self::Action;
-    fn startup_action_count(&self) -> usize;
-    fn startup_action(&self, index: usize) -> (Self::Action, Tag);
-    fn shutdown_action_count(&self) -> usize;
-    fn shutdown_action(&self, index: usize) -> Self::Action;
+    fn has_modal_scopes(&self) -> bool {
+        self.scopes()
+            .any(|scope| self.mode_for_scope(scope).is_some())
+    }
+    fn startup_actions(&self) -> impl Iterator<Item = (Self::Action, Tag)> + '_;
+    fn shutdown_actions(&self) -> impl Iterator<Item = Self::Action> + '_;
     fn shutdown_reactions(&self) -> impl Iterator<Item = (Level, Self::Reaction)> + '_;
     fn action_triggers(
         &self,
@@ -40,41 +40,43 @@ pub(crate) trait ScheduleAccess {
     ) -> impl Iterator<Item = (Level, Self::Reaction)> + '_;
     fn port_triggers(&self, port: Self::Port)
         -> impl Iterator<Item = (Level, Self::Reaction)> + '_;
-    fn reaction_reactor(&self, reaction: Self::Reaction) -> Self::Reactor;
-    fn reaction_scope(&self, reaction: Self::Reaction) -> Self::Scope;
+    fn reactor_for_reaction(&self, reaction: Self::Reaction) -> Self::Reactor;
+    fn scope_for_reaction(&self, reaction: Self::Reaction) -> Self::Scope;
     /// Whether the enabled-mode filter is absent or exactly matches the static reaction scope.
     ///
     /// A compiled schedule adapter must validate this equality before execution. Supporting a
     /// broader filter instead requires genuine enabled-mode filtering in the scheduler.
-    fn reaction_mode_filter_matches_scope(&self, reaction: Self::Reaction) -> bool;
-    fn is_shutdown_reaction(&self, reaction: Self::Reaction) -> bool;
+    fn reaction_filter_matches_scope(&self, reaction: Self::Reaction) -> bool;
+    fn is_shutdown_reaction(&self, reaction: Self::Reaction) -> bool {
+        self.shutdown_reactions()
+            .any(|(_, candidate)| candidate == reaction)
+    }
     fn scopes(&self) -> impl Iterator<Item = Self::Scope> + '_;
-    fn reactor_initial_modes(
-        &self,
-    ) -> impl Iterator<Item = (Self::Reactor, Option<Self::Mode>)> + '_;
-    fn mode_scope(&self, mode: Self::Mode) -> Self::Scope;
-    fn action_scope(&self, action: Self::Action) -> Self::Scope;
+    fn scope_for_mode(&self, mode: Self::Mode) -> Self::Scope;
+    fn scope_for_action(&self, action: Self::Action) -> Self::Scope;
     fn action_is_logical(&self, action: Self::Action) -> bool;
-    fn scope_parent(&self, scope: Self::Scope) -> Option<Self::Scope>;
-    fn scope_reactor(&self, scope: Self::Scope) -> Self::Reactor;
-    fn scope_mode(&self, scope: Self::Scope) -> Option<Self::Mode>;
-    fn scope_descendants(&self, scope: Self::Scope) -> impl Iterator<Item = Self::Scope> + '_;
-    fn scope_logical_action_count(&self, scope: Self::Scope) -> usize;
-    fn scope_logical_action(&self, scope: Self::Scope, index: usize) -> Self::Action;
-    fn scope_timer_startup_count(&self, scope: Self::Scope) -> usize;
-    fn scope_timer_startup(&self, scope: Self::Scope, index: usize) -> (Self::Action, Tag);
-    fn scope_reset_reactions(
+    fn parent_scope(&self, scope: Self::Scope) -> Option<Self::Scope>;
+    fn reactor_for_scope(&self, scope: Self::Scope) -> Self::Reactor;
+    fn mode_for_scope(&self, scope: Self::Scope) -> Option<Self::Mode>;
+    fn descendant_scopes(&self, scope: Self::Scope) -> impl Iterator<Item = Self::Scope> + '_;
+    fn logical_actions_in_scope(
+        &self,
+        scope: Self::Scope,
+    ) -> impl Iterator<Item = Self::Action> + '_;
+    fn timer_startups_in_scope(
+        &self,
+        scope: Self::Scope,
+    ) -> impl Iterator<Item = (Self::Action, Tag)> + '_;
+    fn reset_reactions_in_scope(
         &self,
         scope: Self::Scope,
     ) -> impl Iterator<Item = (Level, Self::Reaction)> + '_;
-    fn scope_startup_count(&self, scope: Self::Scope) -> usize;
-    fn scope_startup(
+    fn startups_in_scope(
         &self,
         scope: Self::Scope,
-        index: usize,
-    ) -> (Self::Action, (Level, Self::Reaction));
+    ) -> impl Iterator<Item = (Self::Action, (Level, Self::Reaction))> + '_;
     fn reactor_root_scopes(&self) -> impl Iterator<Item = (Self::Reactor, Self::Scope)> + '_;
-    fn reactor_initial_mode(&self, reactor: Self::Reactor) -> Option<Self::Mode>;
+    fn initial_mode_for_reactor(&self, reactor: Self::Reactor) -> Option<Self::Mode>;
 }
 
 /// One normalized reaction result retained in reusable scheduler scratch.
@@ -108,10 +110,12 @@ pub(crate) struct ModeTransition<M> {
 }
 
 /// Mutable execution storage consumed by the scheduler independently of its schedule.
-pub(crate) trait ExecutionStorage<S: ScheduleAccess> {
+pub(crate) trait ExecutionStorage<S: Schedule> {
     /// Failure returned while invoking reactions.
     type Error;
 
+    /// Resolves an externally supplied runtime action identity to this storage's action key.
+    fn action_from_runtime(&self, key: ActionKey) -> S::Action;
     /// Retain an action value until its scheduled tag is processed.
     fn push_action_value(&mut self, action: S::Action, tag: Tag, value: Box<dyn ReactorData>);
     /// Remove all pending values for an action during a modal reset.
@@ -125,8 +129,8 @@ pub(crate) trait ExecutionStorage<S: ScheduleAccess> {
         tag: Tag,
         outcomes: &mut [ReactionOutcome<S::Action, S::Mode>],
     ) -> Result<(), Self::Error>;
-    /// Copy currently set port keys into reusable scheduler scratch.
-    fn collect_set_ports(&self, ports: &mut Vec<S::Port>);
+    /// Iterates over ports that are currently set.
+    fn set_ports(&self) -> impl Iterator<Item = S::Port> + '_;
     /// Clear transient port presence after a tag.
     fn reset_ports(&mut self);
 }
@@ -137,7 +141,7 @@ pub(crate) trait ExecutionStorage<S: ScheduleAccess> {
 /// core is not a backend and performs no lowering.
 pub(super) struct SchedulerCore<'a, S, E>
 where
-    S: ScheduleAccess,
+    S: Schedule,
     E: ExecutionStorage<S>,
 {
     /// Enclave whose logical time this invocation advances.
@@ -175,24 +179,22 @@ where
     pub(super) transition_buffer: &'a mut Vec<(S::Reactor, ModeTransition<S::Mode>)>,
     /// Reusable normalized reaction outcomes.
     pub(super) outcomes: &'a mut Vec<ReactionOutcome<S::Action, S::Mode>>,
-    /// Reusable keys for ports set by the current reaction level.
-    pub(super) port_buffer: &'a mut Vec<S::Port>,
     /// Whether modal scope checks are required in the hot path.
-    pub(super) has_modes: bool,
+    pub(super) has_modal_scopes: bool,
 }
 
 /// Failure from concrete time coordination or mutable execution storage.
 #[derive(Debug)]
-pub(super) enum SchedulerCoreError<E> {
+pub(super) enum SchedulerError<E> {
     /// Existing local or federated logical-time coordination failed.
-    Runtime(RuntimeError),
+    Coordination(RuntimeError),
     /// A reaction invocation in the execution storage failed.
     Execution(E),
 }
 
 impl<S, E> SchedulerCore<'_, S, E>
 where
-    S: ScheduleAccess,
+    S: Schedule,
     E: ExecutionStorage<S>,
 {
     /// Handle an asynchronous event from the event queue
@@ -226,7 +228,7 @@ where
                     tracing::warn!(target: "boomerang_runtime::sched", tag = %tag, "Ignoring empty event in the past");
                     return;
                 }
-                let key = self.schedule.action_from_runtime(key);
+                let key = self.storage.action_from_runtime(key);
                 self.storage.push_action_value(key, tag, value);
                 self.events.push_action_event(
                     key,
@@ -238,7 +240,7 @@ where
             }
             AsyncEvent::Physical { time, key, value } => {
                 let tag = Tag::from_physical_time(*self.start_time, time);
-                let key = self.schedule.action_from_runtime(key);
+                let key = self.storage.action_from_runtime(key);
                 self.storage.push_action_value(key, tag, value);
                 self.events.push_action_event(
                     key,
@@ -256,8 +258,7 @@ where
     }
 
     fn schedule_shutdown_at(&mut self, tag: Tag) {
-        for index in 0..self.schedule.shutdown_action_count() {
-            let action = self.schedule.shutdown_action(index);
+        for action in self.schedule.shutdown_actions() {
             self.storage.push_action_value(action, tag, Box::new(()));
         }
 
@@ -271,8 +272,7 @@ where
         let tag = Tag::ZERO;
 
         // Initialize the event queue with the startup actions
-        for index in 0..self.schedule.startup_action_count() {
-            let (action_key, tag) = self.schedule.startup_action(index);
+        for (action_key, tag) in self.schedule.startup_actions() {
             self.storage
                 .push_action_value(action_key, tag, Box::new(()));
             let downstream = self.schedule.action_triggers(action_key).inspect(|(lvl, reaction_key)| {
@@ -364,7 +364,7 @@ where
 
     /// Process one scheduler step, returning coordination failures to the caller.
     #[tracing::instrument(target = "boomerang_runtime::sched", skip(self), fields(tag = %self.current_tag))]
-    pub(super) fn try_next(&mut self) -> Result<bool, SchedulerCoreError<E::Error>> {
+    pub(super) fn try_next(&mut self) -> Result<bool, SchedulerError<E::Error>> {
         // Pump the event queue
         while let Ok(Some(async_event)) = self.event_rx.try_recv() {
             self.handle_async_event(async_event);
@@ -377,8 +377,7 @@ where
             for (_upstream_enclave_key, barrier) in self.upstream_enclaves.iter_mut() {
                 if let Some(async_event) = barrier
                     .acquire_tag(next_tag, self.key, self.event_rx)
-                    .map_err(RuntimeError::from)
-                    .map_err(SchedulerCoreError::Runtime)?
+                    .map_err(|error| SchedulerError::Coordination(error.into()))?
                 {
                     self.handle_async_event(async_event);
                     // Returned early due to async event
@@ -390,8 +389,7 @@ where
             {
                 match self
                     .acquire_federated_tag(next_tag)
-                    .map_err(RuntimeError::from)
-                    .map_err(SchedulerCoreError::Runtime)?
+                    .map_err(|error| SchedulerError::Coordination(error.into()))?
                 {
                     FederatedBarrierOutcome::Granted => {}
                     FederatedBarrierOutcome::Interrupted(async_event) => {
@@ -420,7 +418,7 @@ where
             }
 
             self.process_tag(event.tag, event.reactions.view(), event.terminal)
-                .map_err(SchedulerCoreError::Execution)?;
+                .map_err(SchedulerError::Execution)?;
 
             *self.current_tag = event.tag;
 
@@ -431,8 +429,7 @@ where
             self.release_tag_downstream(*self.current_tag);
             #[cfg(feature = "federated")]
             self.federated_logical_tag_complete(*self.current_tag)
-                .map_err(RuntimeError::from)
-                .map_err(SchedulerCoreError::Runtime)?;
+                .map_err(|error| SchedulerError::Coordination(error.into()))?;
 
             self.stats.increment_processed_tags();
 
@@ -456,7 +453,7 @@ where
 
     /// Run until shutdown or return the first runtime coordination failure.
     #[tracing::instrument(target = "boomerang_runtime::sched", skip(self), fields(key = %self.key))]
-    pub(super) fn try_event_loop(&mut self) -> Result<(), SchedulerCoreError<E::Error>> {
+    pub(super) fn try_event_loop(&mut self) -> Result<(), SchedulerError<E::Error>> {
         self.startup();
 
         loop {
@@ -534,7 +531,7 @@ where
             tracing::trace!(target: "boomerang_runtime::sched", level=?level, "Iter");
 
             self.reaction_buffer.clear();
-            if self.has_modes {
+            if self.has_modal_scopes {
                 for reaction_key in reaction_keys {
                     if self.reaction_is_enabled_at_current_tag(reaction_key, terminal) {
                         self.reaction_buffer.push(reaction_key);
@@ -560,7 +557,7 @@ where
             let mut pending_shutdown_tag = None;
             for (idx, outcome) in self.outcomes[..outcome_count].iter().enumerate() {
                 let reaction_key = self.reaction_buffer[idx];
-                let reactor_key = self.schedule.reaction_reactor(reaction_key);
+                let reactor_key = self.schedule.reactor_for_reaction(reaction_key);
                 if let Some(request) = &outcome.scheduled_mode {
                     if let Some((_, existing)) = self
                         .transition_buffer
@@ -606,15 +603,14 @@ where
             // Collect all the reactions that are triggered by the ports
             if let Some(mut next_levels) = next_levels {
                 let events = &self.events;
-                let has_modes = self.has_modes;
-                self.storage.collect_set_ports(self.port_buffer);
+                let has_modal_scopes = self.has_modal_scopes;
 
-                for &port_key in self.port_buffer.iter() {
+                for port_key in self.storage.set_ports() {
                     self.stats.increment_set_ports();
                     let downstream = self.schedule.port_triggers(port_key);
-                    if has_modes {
+                    if has_modal_scopes {
                         next_levels.extend_above(downstream.filter(|&(_, reaction_key)| {
-                            let scope_key = self.schedule.reaction_scope(reaction_key);
+                            let scope_key = self.schedule.scope_for_reaction(reaction_key);
                             events.scope_active(scope_key)
                         }));
                     } else {
@@ -649,9 +645,9 @@ where
         reaction_key: S::Reaction,
         terminal: bool,
     ) -> bool {
-        debug_assert!(self.has_modes);
+        debug_assert!(self.has_modal_scopes);
 
-        let scope_key = self.schedule.reaction_scope(reaction_key);
+        let scope_key = self.schedule.scope_for_reaction(reaction_key);
         let shutdown_lifecycle = terminal && self.schedule.is_shutdown_reaction(reaction_key);
         if shutdown_lifecycle {
             return self.events.scope_ever_active(scope_key);
@@ -662,8 +658,7 @@ where
         }
 
         debug_assert!(
-            self.schedule
-                .reaction_mode_filter_matches_scope(reaction_key),
+            self.schedule.reaction_filter_matches_scope(reaction_key),
             "reaction mode filters are expected to be equivalent to the static reaction scope"
         );
 

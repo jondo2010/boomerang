@@ -2,7 +2,7 @@ use std::collections::BinaryHeap;
 
 use super::{
     queue::{EventQueue, ScheduledActionValue},
-    ExecutionStorage, ModeTransition, ScheduleAccess,
+    ExecutionStorage, ModeTransition, Schedule,
 };
 use crate::{key_set::KeySet, Duration, Level, ReactionSetLimits, Tag, TransitionKind};
 
@@ -140,7 +140,7 @@ pub(super) struct ReadyEvent<R: tinymap::Key> {
 
 /// Owns root and scope-local event queues for modal scheduling.
 #[derive(Debug)]
-pub(super) struct EventManager<S: ScheduleAccess> {
+pub(super) struct EventManager<S: Schedule> {
     /// Global event queue used for root-scoped work and non-modal fast paths.
     root: EventQueue<S::Reaction, S::Action>,
     /// Canonical scope keys retained so modal updates never borrow mutable storage through the schedule.
@@ -167,13 +167,16 @@ pub(super) struct EventManager<S: ScheduleAccess> {
     has_local_scopes: bool,
 }
 
-impl<S: ScheduleAccess> EventManager<S> {
+impl<S: Schedule> EventManager<S> {
     pub(super) fn new(reaction_set_limits: ReactionSetLimits, schedule: &S) -> Self {
         let root = EventQueue::new(reaction_set_limits.clone());
         let mut scope_active = tinymap::TinySecondaryMap::new();
         let mut scope_ever_active = tinymap::TinySecondaryMap::new();
         let mut scope_startup_fired = tinymap::TinySecondaryMap::new();
-        let reactor_modes = schedule.reactor_initial_modes().collect();
+        let reactor_modes = schedule
+            .reactor_root_scopes()
+            .map(|(reactor, _)| (reactor, schedule.initial_mode_for_reactor(reactor)))
+            .collect();
         let mut scope_clocks = tinymap::TinySecondaryMap::new();
         let mut scope_queues = tinymap::TinySecondaryMap::new();
 
@@ -199,7 +202,7 @@ impl<S: ScheduleAccess> EventManager<S> {
             frontier: BinaryHeap::new(),
             free_reaction_sets: Vec::new(),
             reaction_set_limits,
-            has_local_scopes: schedule.has_modes(),
+            has_local_scopes: schedule.has_modal_scopes(),
         }
     }
 
@@ -229,7 +232,7 @@ impl<S: ScheduleAccess> EventManager<S> {
             return;
         }
 
-        let scope = schedule.action_scope(action_key);
+        let scope = schedule.scope_for_action(action_key);
         if !schedule.action_is_logical(action_key) || Self::scope_uses_global_time(schedule, scope)
         {
             self.root.push_action_event(tag, None, reactions, terminal);
@@ -347,7 +350,7 @@ impl<S: ScheduleAccess> EventManager<S> {
         storage: &mut E,
         current_tag: Tag,
     ) {
-        let target_scope = schedule.mode_scope(request.target);
+        let target_scope = schedule.scope_for_mode(request.target);
 
         if matches!(request.transition, TransitionKind::Reset) {
             self.reset_scope_subtree(target_scope, schedule, storage);
@@ -385,7 +388,7 @@ impl<S: ScheduleAccess> EventManager<S> {
         schedule: &S,
         storage: &mut E,
     ) {
-        for scope in schedule.scope_descendants(root_scope) {
+        for scope in schedule.descendant_scopes(root_scope) {
             self.scope_queues[scope].clear();
             let clock = &mut self.scope_clocks[scope];
             clock.suspended_local = Tag::ZERO;
@@ -393,8 +396,7 @@ impl<S: ScheduleAccess> EventManager<S> {
             clock.frontier_epoch = clock.frontier_epoch.wrapping_add(1);
         }
 
-        for index in 0..schedule.scope_logical_action_count(root_scope) {
-            let action_key = schedule.scope_logical_action(root_scope, index);
+        for action_key in schedule.logical_actions_in_scope(root_scope) {
             storage.clear_action_values(action_key);
         }
     }
@@ -486,14 +488,13 @@ impl<S: ScheduleAccess> EventManager<S> {
 
         let has_startup_reactions = scopes
             .iter()
-            .any(|&scope| schedule.scope_startup_count(scope) != 0);
+            .any(|&scope| schedule.startups_in_scope(scope).next().is_some());
         if !has_startup_reactions {
             return;
         }
 
         for &scope in scopes {
-            for index in 0..schedule.scope_startup_count(scope) {
-                let (action, _) = schedule.scope_startup(scope, index);
+            for (action, _) in schedule.startups_in_scope(scope) {
                 storage.push_action_value(action, tag, Box::new(()));
             }
         }
@@ -501,8 +502,9 @@ impl<S: ScheduleAccess> EventManager<S> {
         for &scope in scopes {
             self.push_event(
                 tag,
-                (0..schedule.scope_startup_count(scope))
-                    .map(|index| schedule.scope_startup(scope, index).1),
+                schedule
+                    .startups_in_scope(scope)
+                    .map(|(_, reaction)| reaction),
                 false,
             );
         }
@@ -514,9 +516,8 @@ impl<S: ScheduleAccess> EventManager<S> {
         schedule: &S,
         storage: &mut E,
     ) {
-        for index in 0..schedule.scope_timer_startup_count(root_scope) {
-            let (action_key, local_tag) = schedule.scope_timer_startup(root_scope, index);
-            let scope = schedule.action_scope(action_key);
+        for (action_key, local_tag) in schedule.timer_startups_in_scope(root_scope) {
+            let scope = schedule.scope_for_action(action_key);
             let global_tag = if Self::scope_uses_global_time(schedule, scope) {
                 local_tag
             } else {
@@ -538,7 +539,7 @@ impl<S: ScheduleAccess> EventManager<S> {
     }
 
     fn schedule_reset_reactions(&mut self, root_scope: S::Scope, schedule: &S, tag: Tag) {
-        let mut reset_reactions = schedule.scope_reset_reactions(root_scope).peekable();
+        let mut reset_reactions = schedule.reset_reactions_in_scope(root_scope).peekable();
         if reset_reactions.peek().is_some() {
             self.push_event(tag, reset_reactions, false);
         }
@@ -591,7 +592,7 @@ impl<S: ScheduleAccess> EventManager<S> {
     }
 
     fn scope_uses_global_time(schedule: &S, scope: S::Scope) -> bool {
-        schedule.scope_parent(scope).is_none()
+        schedule.parent_scope(scope).is_none()
     }
 
     fn current_mode(&self, reactor_key: S::Reactor) -> Option<S::Mode> {
@@ -609,7 +610,7 @@ impl<S: ScheduleAccess> EventManager<S> {
                 root_scope != scope
                     && Self::scope_is_descendant_or_self(schedule, root_scope, scope)
             })
-            .map(|(reactor_key, _)| (reactor_key, schedule.reactor_initial_mode(reactor_key)))
+            .map(|(reactor_key, _)| (reactor_key, schedule.initial_mode_for_reactor(reactor_key)))
             .collect::<Vec<_>>();
 
         for (reactor_key, initial_mode) in reactor_modes {
@@ -619,13 +620,13 @@ impl<S: ScheduleAccess> EventManager<S> {
 
     fn scope_is_active(&self, schedule: &S, mut scope_key: S::Scope) -> bool {
         loop {
-            if let Some(mode_key) = schedule.scope_mode(scope_key) {
-                if self.current_mode(schedule.scope_reactor(scope_key)) != Some(mode_key) {
+            if let Some(mode_key) = schedule.mode_for_scope(scope_key) {
+                if self.current_mode(schedule.reactor_for_scope(scope_key)) != Some(mode_key) {
                     return false;
                 }
             }
 
-            let Some(parent) = schedule.scope_parent(scope_key) else {
+            let Some(parent) = schedule.parent_scope(scope_key) else {
                 return true;
             };
             scope_key = parent;
@@ -638,9 +639,9 @@ impl<S: ScheduleAccess> EventManager<S> {
         mut scope_key: S::Scope,
     ) -> bool {
         loop {
-            if let Some(mode_key) = schedule.scope_mode(scope_key) {
+            if let Some(mode_key) = schedule.mode_for_scope(scope_key) {
                 if reactor_modes
-                    .get(schedule.scope_reactor(scope_key))
+                    .get(schedule.reactor_for_scope(scope_key))
                     .copied()
                     .flatten()
                     != Some(mode_key)
@@ -649,7 +650,7 @@ impl<S: ScheduleAccess> EventManager<S> {
                 }
             }
 
-            let Some(parent) = schedule.scope_parent(scope_key) else {
+            let Some(parent) = schedule.parent_scope(scope_key) else {
                 return true;
             };
             scope_key = parent;
@@ -670,7 +671,7 @@ impl<S: ScheduleAccess> EventManager<S> {
                 return true;
             }
 
-            let Some(parent) = schedule.scope_parent(scope) else {
+            let Some(parent) = schedule.parent_scope(scope) else {
                 return false;
             };
             scope = parent;

@@ -7,8 +7,8 @@ mod queue;
 
 // Kept at the scheduler-module boundary so sibling modules retain their narrow
 // `super::` imports while the generic core lives in its own implementation module.
-pub(crate) use core::{ExecutionStorage, ModeTransition, ScheduleAccess};
-use core::{ReactionOutcome, SchedulerCore, SchedulerCoreError};
+pub(crate) use core::{ExecutionStorage, ModeTransition, Schedule};
+use core::{ReactionOutcome, SchedulerCore, SchedulerError};
 
 use barrier::LogicalTimeBarrier;
 pub use barrier::LogicalTimeBarrierError;
@@ -149,6 +149,10 @@ impl std::fmt::Display for Stats {
 impl ExecutionStorage<ReactionGraph> for Pin<Box<Store>> {
     type Error = Infallible;
 
+    fn action_from_runtime(&self, key: ActionKey) -> ActionKey {
+        key
+    }
+
     fn push_action_value(&mut self, action: ActionKey, tag: Tag, value: Box<dyn ReactorData>) {
         Store::push_action_value(self, action, tag, value);
     }
@@ -191,9 +195,8 @@ impl ExecutionStorage<ReactionGraph> for Pin<Box<Store>> {
         Ok(())
     }
 
-    fn collect_set_ports(&self, ports: &mut Vec<PortKey>) {
-        ports.clear();
-        ports.extend(Store::iter_set_port_keys(self));
+    fn set_ports(&self) -> impl Iterator<Item = PortKey> + '_ {
+        Store::iter_set_port_keys(self)
     }
 
     fn reset_ports(&mut self) {
@@ -217,7 +220,7 @@ fn copy_live_outcome(outcome: &mut ReactionOutcome<ActionKey, ModeKey>, result: 
         });
 }
 
-impl ScheduleAccess for ReactionGraph {
+impl Schedule for ReactionGraph {
     type Action = ActionKey;
     type Port = PortKey;
     type Reaction = ReactionKey;
@@ -240,28 +243,15 @@ impl ScheduleAccess for ReactionGraph {
         }
     }
 
-    fn has_modes(&self) -> bool {
-        !self.modes.is_empty()
+    fn startup_actions(&self) -> impl Iterator<Item = (Self::Action, Tag)> + '_ {
+        self.startup_actions.iter().copied()
     }
 
-    fn action_from_runtime(&self, key: ActionKey) -> Self::Action {
-        key
-    }
-
-    fn startup_action_count(&self) -> usize {
-        self.startup_actions.len()
-    }
-
-    fn startup_action(&self, index: usize) -> (Self::Action, Tag) {
-        self.startup_actions[index]
-    }
-
-    fn shutdown_action_count(&self) -> usize {
-        self.modal_schedule_index.all_shutdown_actions_unique.len()
-    }
-
-    fn shutdown_action(&self, index: usize) -> Self::Action {
-        self.modal_schedule_index.all_shutdown_actions_unique[index]
+    fn shutdown_actions(&self) -> impl Iterator<Item = Self::Action> + '_ {
+        self.modal_schedule_index
+            .all_shutdown_actions_unique
+            .iter()
+            .copied()
     }
 
     fn shutdown_reactions(&self) -> impl Iterator<Item = (Level, Self::Reaction)> + '_ {
@@ -285,15 +275,15 @@ impl ScheduleAccess for ReactionGraph {
         self.port_triggers[port].iter().copied()
     }
 
-    fn reaction_reactor(&self, reaction: Self::Reaction) -> Self::Reactor {
+    fn reactor_for_reaction(&self, reaction: Self::Reaction) -> Self::Reactor {
         self.reaction_reactors[reaction]
     }
 
-    fn reaction_scope(&self, reaction: Self::Reaction) -> Self::Scope {
+    fn scope_for_reaction(&self, reaction: Self::Reaction) -> Self::Scope {
         self.reaction_scopes[reaction]
     }
 
-    fn reaction_mode_filter_matches_scope(&self, reaction: Self::Reaction) -> bool {
+    fn reaction_filter_matches_scope(&self, reaction: Self::Reaction) -> bool {
         let scope = self.reaction_scopes[reaction];
         self.reaction_modes[reaction].as_ref().is_none_or(|filter| {
             self.scopes[scope].mode.is_some_and(|mode| {
@@ -303,27 +293,15 @@ impl ScheduleAccess for ReactionGraph {
         })
     }
 
-    fn is_shutdown_reaction(&self, reaction: Self::Reaction) -> bool {
-        ReactionGraph::is_shutdown_reaction(self, reaction)
-    }
-
     fn scopes(&self) -> impl Iterator<Item = Self::Scope> + '_ {
         self.scopes.keys()
     }
 
-    fn reactor_initial_modes(
-        &self,
-    ) -> impl Iterator<Item = (Self::Reactor, Option<Self::Mode>)> + '_ {
-        self.reactor_initial_modes
-            .iter()
-            .map(|(reactor, mode)| (reactor, *mode))
-    }
-
-    fn mode_scope(&self, mode: Self::Mode) -> Self::Scope {
+    fn scope_for_mode(&self, mode: Self::Mode) -> Self::Scope {
         self.mode_scopes[mode]
     }
 
-    fn action_scope(&self, action: Self::Action) -> Self::Scope {
+    fn scope_for_action(&self, action: Self::Action) -> Self::Scope {
         self.action_scopes[action]
     }
 
@@ -331,42 +309,46 @@ impl ScheduleAccess for ReactionGraph {
         self.action_is_logical[action]
     }
 
-    fn scope_parent(&self, scope: Self::Scope) -> Option<Self::Scope> {
+    fn parent_scope(&self, scope: Self::Scope) -> Option<Self::Scope> {
         self.scopes[scope].parent
     }
 
-    fn scope_reactor(&self, scope: Self::Scope) -> Self::Reactor {
+    fn reactor_for_scope(&self, scope: Self::Scope) -> Self::Reactor {
         self.scopes[scope].reactor
     }
 
-    fn scope_mode(&self, scope: Self::Scope) -> Option<Self::Mode> {
+    fn mode_for_scope(&self, scope: Self::Scope) -> Option<Self::Mode> {
         self.scopes[scope].mode
     }
 
-    fn scope_descendants(&self, scope: Self::Scope) -> impl Iterator<Item = Self::Scope> + '_ {
+    fn descendant_scopes(&self, scope: Self::Scope) -> impl Iterator<Item = Self::Scope> + '_ {
         self.modal_schedule_index
             .scope_descendants(scope)
             .iter()
             .copied()
     }
 
-    fn scope_logical_action_count(&self, scope: Self::Scope) -> usize {
-        self.modal_schedule_index.scope_logical_actions(scope).len()
+    fn logical_actions_in_scope(
+        &self,
+        scope: Self::Scope,
+    ) -> impl Iterator<Item = Self::Action> + '_ {
+        self.modal_schedule_index
+            .scope_logical_actions(scope)
+            .iter()
+            .copied()
     }
 
-    fn scope_logical_action(&self, scope: Self::Scope, index: usize) -> Self::Action {
-        self.modal_schedule_index.scope_logical_actions(scope)[index]
+    fn timer_startups_in_scope(
+        &self,
+        scope: Self::Scope,
+    ) -> impl Iterator<Item = (Self::Action, Tag)> + '_ {
+        self.modal_schedule_index
+            .scope_timer_startups(scope)
+            .iter()
+            .copied()
     }
 
-    fn scope_timer_startup_count(&self, scope: Self::Scope) -> usize {
-        self.modal_schedule_index.scope_timer_startups(scope).len()
-    }
-
-    fn scope_timer_startup(&self, scope: Self::Scope, index: usize) -> (Self::Action, Tag) {
-        self.modal_schedule_index.scope_timer_startups(scope)[index]
-    }
-
-    fn scope_reset_reactions(
+    fn reset_reactions_in_scope(
         &self,
         scope: Self::Scope,
     ) -> impl Iterator<Item = (Level, Self::Reaction)> + '_ {
@@ -376,19 +358,14 @@ impl ScheduleAccess for ReactionGraph {
             .copied()
     }
 
-    fn scope_startup_count(&self, scope: Self::Scope) -> usize {
-        self.modal_schedule_index
-            .scope_startup_reactions(scope)
-            .len()
-    }
-
-    fn scope_startup(
+    fn startups_in_scope(
         &self,
         scope: Self::Scope,
-        index: usize,
-    ) -> (Self::Action, (Level, Self::Reaction)) {
-        let reaction = self.modal_schedule_index.scope_startup_reactions(scope)[index];
-        (reaction.action, reaction.reaction)
+    ) -> impl Iterator<Item = (Self::Action, (Level, Self::Reaction))> + '_ {
+        self.modal_schedule_index
+            .scope_startup_reactions(scope)
+            .iter()
+            .map(|reaction| (reaction.action, reaction.reaction))
     }
 
     fn reactor_root_scopes(&self) -> impl Iterator<Item = (Self::Reactor, Self::Scope)> + '_ {
@@ -397,7 +374,7 @@ impl ScheduleAccess for ReactionGraph {
             .map(|(reactor, scope)| (reactor, *scope))
     }
 
-    fn reactor_initial_mode(&self, reactor: Self::Reactor) -> Option<Self::Mode> {
+    fn initial_mode_for_reactor(&self, reactor: Self::Reactor) -> Option<Self::Mode> {
         self.reactor_initial_modes[reactor]
     }
 }
@@ -444,10 +421,8 @@ pub struct Scheduler {
     transition_buffer: Vec<(ReactorKey, ModeTransition<ModeKey>)>,
     /// Reusable normalized reaction results, one slot per possible reaction.
     outcomes: Vec<ReactionOutcome<ActionKey, ModeKey>>,
-    /// Reusable set-port keys populated after each reaction level.
-    port_buffer: Vec<PortKey>,
-    /// Whether this graph contains any modes and needs modal scope checks in the hot path.
-    has_modes: bool,
+    /// Whether this graph contains modal scopes that need hot-path activity checks.
+    has_modal_scopes: bool,
 }
 
 impl Scheduler {
@@ -473,13 +448,12 @@ impl Scheduler {
 
         let start_time = std::time::Instant::now();
         let reaction_capacity = env.reactions.len();
-        let port_capacity = env.ports.len();
         let reaction_set_limits = graph.reaction_limits();
         // Build contexts for each reaction
         let contexts = build_reaction_contexts(key, &graph, start_time, event_tx, shutdown_rx);
 
         let store = Store::new(env, contexts, &graph);
-        let has_modes = !graph.modes.is_empty();
+        let has_modal_scopes = graph.has_modal_scopes();
         let events = EventManager::new(reaction_set_limits, &graph);
 
         let upstream_enclaves = upstream_enclaves
@@ -521,8 +495,7 @@ impl Scheduler {
             reaction_buffer: Vec::with_capacity(reaction_capacity),
             transition_buffer: Vec::with_capacity(reaction_capacity),
             outcomes: (0..reaction_capacity).map(|_| Default::default()).collect(),
-            port_buffer: Vec::with_capacity(port_capacity),
-            has_modes,
+            has_modal_scopes,
         }
     }
 
@@ -563,8 +536,7 @@ impl Scheduler {
             reaction_buffer,
             transition_buffer,
             outcomes,
-            port_buffer,
-            has_modes,
+            has_modal_scopes,
         } = self;
 
         SchedulerCore {
@@ -586,8 +558,7 @@ impl Scheduler {
             reaction_buffer,
             transition_buffer,
             outcomes,
-            port_buffer,
-            has_modes: *has_modes,
+            has_modal_scopes: *has_modal_scopes,
         }
     }
 
@@ -632,12 +603,12 @@ impl Scheduler {
 
 /// Removes the impossible live-storage error while preserving coordination failures.
 fn live_scheduler_result<T>(
-    result: Result<T, SchedulerCoreError<Infallible>>,
+    result: Result<T, SchedulerError<Infallible>>,
 ) -> Result<T, RuntimeError> {
     match result {
         Ok(value) => Ok(value),
-        Err(SchedulerCoreError::Runtime(error)) => Err(error),
-        Err(SchedulerCoreError::Execution(error)) => match error {},
+        Err(SchedulerError::Coordination(error)) => Err(error),
+        Err(SchedulerError::Execution(error)) => match error {},
     }
 }
 

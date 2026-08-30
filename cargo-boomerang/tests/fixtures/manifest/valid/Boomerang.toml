@@ -1,0 +1,55 @@
+schema = 1
+
+[topology]
+package = "vehicle-topology"
+entry = "vehicle::topology"
+
+[deployments.production.bindings."vehicle/sensor"]
+package = "sensor-stm32"
+features = ["board-a"]
+
+[deployments.production.bindings."vehicle/controller"]
+package = "vehicle-control"
+
+[deployments.production.federates.sensor-edge]
+groups = ["sensor"]
+target = "thumbv7em-none-eabihf"
+toolchain = "nightly-2026-08-01"
+profile = "release"
+runtime = "bare-metal"
+target-json = "targets/sensor.json"
+cargo-config = ".cargo/sensor-target.toml"
+
+[deployments.production.federates.compute]
+groups = ["control", "planning"]
+target = "aarch64-unknown-linux-gnu"
+profile = "release"
+runtime = "std"
+
+[deployments.production.coordination]
+backend = "central-rti"
+
+[deployments.production.rti]
+target = "aarch64-unknown-linux-gnu"
+profile = "release"
+
+[deployments.replay.bindings."vehicle/sensor"]
+package = "sensor-replay"
+
+[deployments.replay.bindings."vehicle/controller"]
+package = "vehicle-control"
+
+[deployments.replay.federates.dev]
+groups = ["sensor", "control", "planning"]
+runtime = "std"
+
+[deployments.future-p2p.federates.left]
+groups = ["sensor"]
+runtime = "std"
+
+[deployments.future-p2p.federates.right]
+groups = ["control", "planning"]
+runtime = "std"
+
+[deployments.future-p2p.coordination]
+backend = "peer-to-peer"

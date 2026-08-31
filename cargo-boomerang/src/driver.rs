@@ -81,7 +81,10 @@ pub(crate) fn run_resolved_descriptor_driver(resolved: &ResolvedWorkspace) -> Re
     fs::copy(resolved.lockfile().path.as_path(), &generated_lock)
         .with_context(|| format!("failed to prepare {}", generated_lock.display()))?;
 
-    let reconcile = cargo(crate_dir, ["generate-lockfile", "--offline"])?;
+    let reconcile = cargo(
+        crate_dir,
+        ["metadata", "--format-version", "1", "--offline"],
+    )?;
     let mut build_log = String::from_utf8_lossy(&reconcile.stderr).into_owned();
     require_success("lock reconciliation", &reconcile, &build_log)?;
     let metadata = cargo(

@@ -71,6 +71,17 @@ impl<T> ReactorData for T where T: Send + Sync + 'static {}
 
 downcast_rs::impl_downcast!(ReactorData);
 
+/// Zero-sized witness for the payload type exported by a direct port or action binding.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PayloadType<T: ReactorData>(std::marker::PhantomData<fn() -> T>);
+
+impl<T: ReactorData> PayloadType<T> {
+    /// Creates a payload type witness without constructing a payload value.
+    pub const fn new() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum RuntimeError {
     #[error("Port Key not found: {}", 0)]

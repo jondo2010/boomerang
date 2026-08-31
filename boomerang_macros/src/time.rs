@@ -65,10 +65,19 @@ impl From<std::time::Duration> for Dur {
     }
 }
 
+fn scaled_seconds(value: u64, scale: u64, span: proc_macro2::Span) -> syn::Result<Dur> {
+    value
+        .checked_mul(scale)
+        .map(std::time::Duration::from_secs)
+        .map(Dur)
+        .ok_or_else(|| syn::Error::new(span, "duration value overflows its unit conversion"))
+}
+
 // Parse a duration string like "10 sec" or "50 msec"
 impl Parse for Dur {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let value: syn::LitInt = input.parse()?;
+        let value_span = value.span();
         let value_u64 = value.base10_parse::<u64>()?;
 
         let lookahead = input.lookahead1();
@@ -116,64 +125,40 @@ impl Parse for Dur {
             Ok(Dur(std::time::Duration::from_secs(value_u64)))
         } else if lookahead.peek(kw::min) {
             input.parse::<kw::min>()?;
-            Ok(Dur(std::time::Duration::from_secs(
-                value_u64 * SECONDS_PER_MINUTE,
-            )))
+            scaled_seconds(value_u64, SECONDS_PER_MINUTE, value_span)
         } else if lookahead.peek(kw::minute) {
             input.parse::<kw::minute>()?;
-            Ok(Dur(std::time::Duration::from_secs(
-                value_u64 * SECONDS_PER_MINUTE,
-            )))
+            scaled_seconds(value_u64, SECONDS_PER_MINUTE, value_span)
         } else if lookahead.peek(kw::mins) {
             input.parse::<kw::mins>()?;
-            Ok(Dur(std::time::Duration::from_secs(
-                value_u64 * SECONDS_PER_MINUTE,
-            )))
+            scaled_seconds(value_u64, SECONDS_PER_MINUTE, value_span)
         } else if lookahead.peek(kw::minutes) {
             input.parse::<kw::minutes>()?;
-            Ok(Dur(std::time::Duration::from_secs(
-                value_u64 * SECONDS_PER_MINUTE,
-            )))
+            scaled_seconds(value_u64, SECONDS_PER_MINUTE, value_span)
         } else if lookahead.peek(kw::h) {
             input.parse::<kw::h>()?;
-            Ok(Dur(std::time::Duration::from_secs(
-                value_u64 * SECONDS_PER_HOUR,
-            )))
+            scaled_seconds(value_u64, SECONDS_PER_HOUR, value_span)
         } else if lookahead.peek(kw::hour) {
             input.parse::<kw::hour>()?;
-            Ok(Dur(std::time::Duration::from_secs(
-                value_u64 * SECONDS_PER_HOUR,
-            )))
+            scaled_seconds(value_u64, SECONDS_PER_HOUR, value_span)
         } else if lookahead.peek(kw::hours) {
             input.parse::<kw::hours>()?;
-            Ok(Dur(std::time::Duration::from_secs(
-                value_u64 * SECONDS_PER_HOUR,
-            )))
+            scaled_seconds(value_u64, SECONDS_PER_HOUR, value_span)
         } else if lookahead.peek(kw::d) {
             input.parse::<kw::d>()?;
-            Ok(Dur(std::time::Duration::from_secs(
-                value_u64 * SECONDS_PER_DAY,
-            )))
+            scaled_seconds(value_u64, SECONDS_PER_DAY, value_span)
         } else if lookahead.peek(kw::day) {
             input.parse::<kw::day>()?;
-            Ok(Dur(std::time::Duration::from_secs(
-                value_u64 * SECONDS_PER_DAY,
-            )))
+            scaled_seconds(value_u64, SECONDS_PER_DAY, value_span)
         } else if lookahead.peek(kw::days) {
             input.parse::<kw::days>()?;
-            Ok(Dur(std::time::Duration::from_secs(
-                value_u64 * SECONDS_PER_DAY,
-            )))
+            scaled_seconds(value_u64, SECONDS_PER_DAY, value_span)
         } else if lookahead.peek(kw::week) {
             input.parse::<kw::week>()?;
-            Ok(Dur(std::time::Duration::from_secs(
-                value_u64 * SECONDS_PER_WEEK,
-            )))
+            scaled_seconds(value_u64, SECONDS_PER_WEEK, value_span)
         } else if lookahead.peek(kw::weeks) {
             input.parse::<kw::weeks>()?;
-            Ok(Dur(std::time::Duration::from_secs(
-                value_u64 * SECONDS_PER_WEEK,
-            )))
+            scaled_seconds(value_u64, SECONDS_PER_WEEK, value_span)
         } else {
             Err(lookahead.error())
         }

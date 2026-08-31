@@ -37,6 +37,14 @@ struct DescriptorBoundsArgs {
     scratch_bytes: syn::LitInt,
 }
 
+/// Validated numeric descriptor bounds retained without a builder dependency.
+struct DescriptorBoundsValues {
+    queue_capacity: u64,
+    payload_bytes: u64,
+    state_bytes: u64,
+    scratch_bytes: u64,
+}
+
 impl ReactorArgs {
     fn validate(&self) -> syn::Result<()> {
         if let (Some(state_init), None) = (&self.state_init, &self.state) {
@@ -61,17 +69,21 @@ impl ReactorArgs {
     }
 
     /// Converts declared bounds into the shared descriptor representation.
-    fn descriptor_bounds(&self) -> syn::Result<boomerang_builder::DescriptorBounds> {
+    fn descriptor_bounds(&self) -> syn::Result<DescriptorBoundsValues> {
         let Some(bounds) = &self.bounds else {
-            return Ok(boomerang_builder::DescriptorBounds::default());
+            return Ok(DescriptorBoundsValues {
+                queue_capacity: u64::MAX,
+                payload_bytes: u64::MAX,
+                state_bytes: u64::MAX,
+                scratch_bytes: u64::MAX,
+            });
         };
         let known = |value: &syn::LitInt| {
             value
                 .base10_parse::<u64>()
-                .map(boomerang_builder::DescriptorBound::Known)
                 .map_err(|_| syn::Error::new(value.span(), "resource bound must fit in u64"))
         };
-        Ok(boomerang_builder::DescriptorBounds {
+        Ok(DescriptorBoundsValues {
             queue_capacity: known(&bounds.queue_capacity)?,
             payload_bytes: known(&bounds.payload_bytes)?,
             state_bytes: known(&bounds.state_bytes)?,
@@ -138,6 +150,8 @@ struct Arg {
 enum ArgKind {
     Input { len: Option<syn::Expr> },
     Output { len: Option<syn::Expr> },
+    LogicalAction { min_delay_nanos: Option<i64> },
+    PhysicalAction { min_delay_nanos: Option<i64> },
     State { default: Option<syn::Expr> },
     Param { default: Option<syn::Expr> },
 }
@@ -159,6 +173,20 @@ impl ArgKind {
                 }
                 let port_len = parse_len(attr)?;
                 kind = Some(ArgKind::Output { len: port_len });
+            } else if attr.path().is_ident("logical_action") {
+                if kind.is_some() {
+                    abort!(attr, "duplicate argument kind");
+                }
+                kind = Some(ArgKind::LogicalAction {
+                    min_delay_nanos: parse_action_min_delay(attr)?,
+                });
+            } else if attr.path().is_ident("physical_action") {
+                if kind.is_some() {
+                    abort!(attr, "duplicate argument kind");
+                }
+                kind = Some(ArgKind::PhysicalAction {
+                    min_delay_nanos: parse_action_min_delay(attr)?,
+                });
             } else if attr.path().is_ident("state") {
                 if kind.is_some() {
                     abort!(attr, "duplicate argument kind");
@@ -174,7 +202,7 @@ impl ArgKind {
             } else {
                 abort!(
                     attr,
-                    "unknown attribute, expected one of: input, output, state, param"
+                    "unknown attribute, expected one of: input, output, logical_action, physical_action, state, param"
                 );
             }
         }
@@ -184,6 +212,49 @@ impl ArgKind {
             None => ArgKind::Param { default: None },
         })
     }
+}
+
+fn parse_action_min_delay(attr: &Attribute) -> syn::Result<Option<i64>> {
+    let Meta::List(list) = &attr.meta else {
+        return match &attr.meta {
+            Meta::Path(_) => Ok(None),
+            _ => Err(syn::Error::new_spanned(
+                attr,
+                "expected `min_delay = <duration>` in action attribute",
+            )),
+        };
+    };
+    if list.tokens.is_empty() {
+        return Ok(None);
+    }
+
+    let parser = |input: syn::parse::ParseStream<'_>| {
+        let key: Ident = input.parse()?;
+        if key != "min_delay" {
+            return Err(syn::Error::new(
+                key.span(),
+                "expected `min_delay = <duration>` in action attribute",
+            ));
+        }
+        input.parse::<syn::Token![=]>()?;
+        let duration = input.parse::<crate::time::Dur>().map_err(|error| {
+            syn::Error::new(
+                error.span(),
+                format!("invalid action minimum delay: {error}"),
+            )
+        })?;
+        if !input.is_empty() {
+            return Err(input.error("unexpected trailing content in action attribute"));
+        }
+        let nanos = duration.0.as_nanos();
+        i64::try_from(nanos).map(Some).map_err(|_| {
+            syn::Error::new(
+                list.tokens.span(),
+                "action minimum delay exceeds the runtime nanosecond range",
+            )
+        })
+    };
+    list.parse_args_with(parser)
 }
 
 fn parse_default(attr: &Attribute) -> syn::Result<Option<syn::Expr>> {
@@ -691,6 +762,7 @@ fn stable_path_tokens(segments: &[String]) -> TokenStream {
 fn relationship_target(
     reactor_name: &str,
     port_names: &[String],
+    action_names: &[String],
     mode_names: &[String],
     path: &crate::reaction::PathOrIdent,
 ) -> (TokenStream, bool) {
@@ -717,6 +789,15 @@ fn relationship_target(
             },
             false,
         )
+    } else if path.len() == 1 && action_names.contains(leaf) {
+        (
+            quote! {
+                ::boomerang::builder::DescriptorRelationshipTarget::Action(
+                    ::boomerang::builder::ActionSlotId::from_path(#slot),
+                )
+            },
+            false,
+        )
     } else {
         (
             quote! {
@@ -729,85 +810,19 @@ fn relationship_target(
     }
 }
 
-/// Builds a compiler stable path from macro-normalized name segments.
-fn stable_path_value(segments: &[String]) -> boomerang_builder::compiler::StablePath {
-    let (first, rest) = segments.split_first().expect("stable paths are non-empty");
-    let mut path = boomerang_builder::compiler::StablePath::from_name(first.clone())
-        .expect("macro generated a valid stable path");
-    for segment in rest {
-        path = path
-            .append_name(segment.clone())
-            .expect("macro generated a valid stable path");
-    }
-    path
-}
-
-/// Resolves a reaction reference and reports whether it denotes a mode.
-fn payload_relationship_target(
-    reactor_name: &str,
-    port_names: &[String],
-    mode_names: &[String],
-    path: &crate::reaction::PathOrIdent,
-) -> (boomerang_builder::DescriptorRelationshipTarget, bool) {
-    let path = path_segments(path);
-    let leaf = path.first().expect("paths are non-empty").clone();
-    let mut slot_segments = vec![reactor_name.to_owned()];
-    slot_segments.extend(path);
-    let slot = stable_path_value(&slot_segments);
-    if slot_segments.len() == 2 && mode_names.contains(&leaf) {
-        (
-            boomerang_builder::DescriptorRelationshipTarget::Mode(
-                boomerang_builder::ModeSlotId::from_path(slot),
-            ),
-            true,
-        )
-    } else if slot_segments.len() == 2 && port_names.contains(&leaf) {
-        (
-            boomerang_builder::DescriptorRelationshipTarget::Port(
-                boomerang_builder::PortSlotId::from_path(slot),
-            ),
-            false,
-        )
-    } else {
-        (
-            boomerang_builder::DescriptorRelationshipTarget::Lexical(slot),
-            false,
-        )
-    }
-}
-
 /// Returns a canonical implementation-local binding symbol as a Rust identifier.
-fn required_binding_symbol(reactor: &str, reaction: Option<&str>) -> Ident {
-    let component = boomerang_builder::compiler::ComponentInstanceId::new("macro")
-        .expect("macro is a valid component ID");
-    let implementation = boomerang_builder::compiler::ImplementationId::new("macro")
-        .expect("macro is a valid implementation ID");
-    let reactor_path = stable_path_value(std::slice::from_ref(&reactor.to_owned()));
-    let binding = if let Some(reaction) = reaction {
-        let reaction_path = if let Some(ordinal) = reaction.strip_prefix("#g") {
-            reactor_path.append_generated_ordinal(
-                ordinal
-                    .parse()
-                    .expect("macro generated a numeric reaction ordinal"),
-            )
+fn required_binding_symbol(prefix: &str, segments: &[&str]) -> Ident {
+    use std::fmt::Write as _;
+
+    let mut symbol = String::from(prefix);
+    for byte in segments.join("/").bytes() {
+        if byte.is_ascii_alphanumeric() {
+            symbol.push(char::from(byte));
         } else {
-            reactor_path
-                .append_name(reaction)
-                .expect("macro generated a valid reaction name")
-        };
-        boomerang_builder::compiler::RequiredBinding::Reaction {
-            component,
-            implementation,
-            reaction: boomerang_builder::ReactionSlotId::from_path(reaction_path),
+            write!(symbol, "_{byte:02x}").expect("writing into a String cannot fail");
         }
-    } else {
-        boomerang_builder::compiler::RequiredBinding::State {
-            component,
-            implementation,
-            reactor: boomerang_builder::ReactorSlotId::from_path(reactor_path),
-        }
-    };
-    format_ident!("{}", binding.symbol())
+    }
+    format_ident!("{symbol}")
 }
 
 /// Resolves one own-relation reference to its concrete payload parameter type.
@@ -859,6 +874,9 @@ fn payload_ref(
         (ArgKind::Output { len: None }, ty) => {
             quote!(::boomerang::runtime::OutputRef<#store_lifetime, #ty>)
         }
+        (ArgKind::LogicalAction { .. } | ArgKind::PhysicalAction { .. }, _) => {
+            quote!(::boomerang::runtime::ActionRef<#store_lifetime>)
+        }
         (ArgKind::State { .. } | ArgKind::Param { .. }, _) => {
             return Err(syn::Error::new_spanned(
                 path,
@@ -903,7 +921,7 @@ fn payload_reaction_output(
         .map(|(_, reaction)| {
             let reaction_name =
                 CanonicalReactionSlot::for_reaction(reaction, &mut next_generated).text();
-            let symbol = required_binding_symbol(&reactor_name, Some(&reaction_name));
+            let symbol = required_binding_symbol("reaction_", &[&reactor_name, &reaction_name]);
             let export_doc = format!(
                 "Invokes payload reaction `{reactor_name}/{reaction_name}` with concrete references."
             );
@@ -974,7 +992,70 @@ fn payload_reaction_output(
         .collect()
 }
 
-/// Generates the payload facet's target-safe compatibility module.
+/// Reads and validates the host-provided compatibility values for one payload facet.
+fn payload_compile_inputs(contract: &syn::LitStr) -> syn::Result<([u8; 32], String)> {
+    use boomerang_runtime::binding::{
+        payload_fingerprint_compile_input_key, COMPONENT_DESCRIPTOR_MACRO_ABI,
+        PAYLOAD_MACRO_ABI_COMPILE_INPUT,
+    };
+
+    let macro_abi = std::env::var(PAYLOAD_MACRO_ABI_COMPILE_INPUT).map_err(|_| {
+        syn::Error::new(
+            contract.span(),
+            format!("missing payload macro ABI compile input `{PAYLOAD_MACRO_ABI_COMPILE_INPUT}`"),
+        )
+    })?;
+    if macro_abi.is_empty() || !macro_abi.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(syn::Error::new(
+            contract.span(),
+            "payload macro ABI compile input must be a decimal u32",
+        ));
+    }
+    let macro_abi = macro_abi.parse::<u32>().map_err(|_| {
+        syn::Error::new(
+            contract.span(),
+            "payload macro ABI compile input must be a decimal u32",
+        )
+    })?;
+    if macro_abi != COMPONENT_DESCRIPTOR_MACRO_ABI {
+        return Err(syn::Error::new(
+            contract.span(),
+            format!(
+                "payload macro ABI mismatch: expected {COMPONENT_DESCRIPTOR_MACRO_ABI}, received {macro_abi}"
+            ),
+        ));
+    }
+
+    let fingerprint_key = payload_fingerprint_compile_input_key(&contract.value());
+    let fingerprint = std::env::var(&fingerprint_key).map_err(|_| {
+        syn::Error::new(
+            contract.span(),
+            format!("missing payload descriptor fingerprint compile input `{fingerprint_key}`"),
+        )
+    })?;
+    if fingerprint.len() != 64
+        || !fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(syn::Error::new(
+            contract.span(),
+            "payload descriptor fingerprint must be exactly 64 lowercase hex digits",
+        ));
+    }
+    let mut bytes = [0u8; 32];
+    for (index, pair) in fingerprint.as_bytes().chunks_exact(2).enumerate() {
+        let digit = |byte: u8| match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            _ => unreachable!("fingerprint characters were validated"),
+        };
+        bytes[index] = (digit(pair[0]) << 4) | digit(pair[1]);
+    }
+    Ok((bytes, fingerprint_key))
+}
+
+/// Generates the payload facet from host-provided compatibility values only.
 fn payload_output(
     reactor_args: &ReactorArgs,
     model: &Model,
@@ -997,7 +1078,6 @@ fn payload_output(
             compile_error!("payload mode requires `state_init = path` with `state = T`");
         };
     }
-
     let contract_text = contract.value();
     if contract_text.is_empty()
         || contract_text.trim() != contract_text
@@ -1009,259 +1089,70 @@ fn payload_output(
         )
         .to_compile_error();
     }
-    let contract_version = match contract_version.base10_parse::<u64>() {
-        Ok(contract_version) => contract_version,
-        Err(_) => {
-            return syn::Error::new(contract_version.span(), "contract_version must fit in u64")
-                .to_compile_error()
-        }
-    };
-    let bounds = match reactor_args.descriptor_bounds() {
-        Ok(bounds) => bounds,
-        Err(error) => return error.to_compile_error(),
-    };
-
+    if contract_version.base10_parse::<u64>().is_err() {
+        return syn::Error::new(contract_version.span(), "contract_version must fit in u64")
+            .to_compile_error();
+    }
+    if let Err(error) = reactor_args.descriptor_bounds() {
+        return error.to_compile_error();
+    }
     if let Err(error) = model.body.validate_unique_reaction_names() {
         return error.to_compile_error();
     }
     if let Err(error) = model.body.validate_unique_mode_names() {
         return error.to_compile_error();
     }
-
     if let Some(span) = model.body.unsupported_span() {
-        let diagnostic = quote_spanned! {span =>
+        return quote_spanned! {span =>
             compile_error!("deployment descriptor requires reaction! syntax");
-        };
-        return quote! {
-            #diagnostic
         };
     }
 
     let reactor_name = ident_text(&model.name);
-    let reactor_path = stable_path_value(std::slice::from_ref(&reactor_name));
-    let reactor_slot = boomerang_builder::ReactorSlot {
-        id: boomerang_builder::ReactorSlotId::from_path(reactor_path.clone()),
-        parent: None,
-    };
-    let port_names = model
-        .args
-        .iter()
-        .filter_map(|arg| match arg.kind {
-            ArgKind::Input { .. } | ArgKind::Output { .. } => Some(ident_text(&arg.name.ident)),
-            ArgKind::State { .. } | ArgKind::Param { .. } => None,
-        })
-        .collect::<Vec<_>>();
-    let port_slots = model
-        .args
-        .iter()
-        .filter_map(|arg| {
-            let direction = match arg.kind {
-                ArgKind::Input { .. } => boomerang_builder::PortDirection::Input,
-                ArgKind::Output { .. } => boomerang_builder::PortDirection::Output,
-                ArgKind::State { .. } | ArgKind::Param { .. } => return None,
-            };
-            let path = stable_path_value(&[reactor_name.clone(), ident_text(&arg.name.ident)]);
-            Some(boomerang_builder::PortSlot {
-                id: boomerang_builder::PortSlotId::from_path(path),
-                reactor: boomerang_builder::ReactorSlotId::from_path(reactor_path.clone()),
-                direction,
-            })
-        })
-        .collect::<Vec<_>>();
-    let state_slots = model
-        .args
-        .iter()
-        .filter(|arg| matches!(arg.kind, ArgKind::State { .. }))
-        .map(|arg| boomerang_builder::StateSlot {
-            id: boomerang_builder::StateSlotId::from_path(stable_path_value(&[
-                reactor_name.clone(),
-                ident_text(&arg.name.ident),
-            ])),
-            reactor: boomerang_builder::ReactorSlotId::from_path(reactor_path.clone()),
-        })
-        .collect::<Vec<_>>();
-
-    let modes = model
+    let mode_names = model
         .body
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            BodyItem::Mode(mode) => Some(mode),
-            BodyItem::Tokens(_) | BodyItem::Reaction(_) => None,
-        })
-        .collect::<Vec<_>>();
-    let mode_names = modes
-        .iter()
+        .modes()
         .map(|mode| ident_text(&mode.name))
         .collect::<Vec<_>>();
     let reaction_exports = match payload_reaction_output(model, state_type, &mode_names) {
         Ok(exports) => exports,
         Err(error) => return error.to_compile_error(),
     };
-    let mode_slots = modes
-        .iter()
-        .map(|mode| boomerang_builder::ModeSlot {
-            id: boomerang_builder::ModeSlotId::from_path(stable_path_value(&[
-                reactor_name.clone(),
-                ident_text(&mode.name),
-            ])),
-            reactor: boomerang_builder::ReactorSlotId::from_path(reactor_path.clone()),
-            parent: None,
-            initial: mode.initial,
-        })
-        .collect::<Vec<_>>();
-
-    let mut reactions = Vec::new();
-    model.body.reactions(None, &mut reactions);
-    let mut reaction_slots = Vec::new();
-    let mut relationships = Vec::new();
-    let mut next_generated = 0;
-    for (scope, reaction) in reactions {
-        let reaction_id = match CanonicalReactionSlot::for_reaction(reaction, &mut next_generated) {
-            CanonicalReactionSlot::Named(name) => {
-                boomerang_builder::ReactionSlotId::from_path(stable_path_value(&[
-                    reactor_name.clone(),
-                    name,
-                ]))
-            }
-            CanonicalReactionSlot::Generated(ordinal) => {
-                boomerang_builder::ReactionSlotId::from_path(
-                    reactor_path.append_generated_ordinal(ordinal),
-                )
-            }
-        };
-        reaction_slots.push(boomerang_builder::ReactionSlot {
-            id: reaction_id.clone(),
-            reactor: boomerang_builder::ReactorSlotId::from_path(reactor_path.clone()),
-        });
-
-        for (position, trigger) in reaction.triggers().iter().enumerate() {
-            let target = match trigger {
-                crate::reaction::TriggerType::Startup => {
-                    boomerang_builder::DescriptorRelationshipTarget::Lifecycle(
-                        boomerang_builder::DescriptorLifecycle::Startup,
-                    )
-                }
-                crate::reaction::TriggerType::Shutdown => {
-                    boomerang_builder::DescriptorRelationshipTarget::Lifecycle(
-                        boomerang_builder::DescriptorLifecycle::Shutdown,
-                    )
-                }
-                crate::reaction::TriggerType::Reset => {
-                    boomerang_builder::DescriptorRelationshipTarget::Lifecycle(
-                        boomerang_builder::DescriptorLifecycle::Reset,
-                    )
-                }
-                crate::reaction::TriggerType::Regular(path) => {
-                    payload_relationship_target(&reactor_name, &port_names, &mode_names, path).0
-                }
-            };
-            relationships.push(boomerang_builder::DescriptorRelationship {
-                reaction: reaction_id.clone(),
-                kind: boomerang_builder::DescriptorRelationshipKind::Trigger,
-                target,
-                mode_transition: None,
-                declaration_position: u32::try_from(position)
-                    .expect("reaction relationship count exceeds descriptor representation"),
-            });
-        }
-        for (position, path) in reaction.uses().iter().enumerate() {
-            relationships.push(boomerang_builder::DescriptorRelationship {
-                reaction: reaction_id.clone(),
-                kind: boomerang_builder::DescriptorRelationshipKind::Use,
-                target: payload_relationship_target(&reactor_name, &port_names, &mode_names, path)
-                    .0,
-                mode_transition: None,
-                declaration_position: u32::try_from(position)
-                    .expect("reaction relationship count exceeds descriptor representation"),
-            });
-        }
-        for (position, effect) in reaction.effects().iter().enumerate() {
-            let path = match effect {
-                crate::reaction::EffectType::Regular(path)
-                | crate::reaction::EffectType::Reset(path)
-                | crate::reaction::EffectType::History(path) => path,
-            };
-            let (target, is_mode) =
-                payload_relationship_target(&reactor_name, &port_names, &mode_names, path);
-            let is_transition = matches!(
-                effect,
-                crate::reaction::EffectType::Reset(_) | crate::reaction::EffectType::History(_)
-            );
-            let kind = if is_mode || is_transition {
-                boomerang_builder::DescriptorRelationshipKind::Mode
-            } else {
-                boomerang_builder::DescriptorRelationshipKind::Effect
-            };
-            let mode_transition = match effect {
-                crate::reaction::EffectType::History(_) => {
-                    Some(boomerang_builder::ModeTransitionKind::History)
-                }
-                crate::reaction::EffectType::Reset(_) => {
-                    Some(boomerang_builder::ModeTransitionKind::Reset)
-                }
-                crate::reaction::EffectType::Regular(_) if is_mode => {
-                    Some(boomerang_builder::ModeTransitionKind::Reset)
-                }
-                crate::reaction::EffectType::Regular(_) => None,
-            };
-            relationships.push(boomerang_builder::DescriptorRelationship {
-                reaction: reaction_id.clone(),
-                kind,
-                target,
-                mode_transition,
-                declaration_position: u32::try_from(position)
-                    .expect("reaction relationship count exceeds descriptor representation"),
-            });
-        }
-        if let Some(scope) = scope {
-            relationships.push(boomerang_builder::DescriptorRelationship {
-                reaction: reaction_id,
-                kind: boomerang_builder::DescriptorRelationshipKind::Scope,
-                target: boomerang_builder::DescriptorRelationshipTarget::Mode(
-                    boomerang_builder::ModeSlotId::from_path(stable_path_value(&[
-                        reactor_name.clone(),
-                        ident_text(&scope.name),
-                    ])),
-                ),
-                mode_transition: None,
-                declaration_position: 0,
-            });
-        }
-    }
-
-    let descriptor = match boomerang_builder::ComponentDescriptor::try_new(
-        boomerang_builder::compiler::ContractId::new(contract_text)
-            .expect("reactor macro validated contract text"),
-        contract_version,
-        boomerang_builder::COMPONENT_DESCRIPTOR_MACRO_ABI,
-        vec![reactor_slot],
-        port_slots,
-        vec![],
-        reaction_slots,
-        mode_slots,
-        state_slots,
-        vec![],
-        relationships,
-        vec![],
-        vec![],
-        bounds,
-    ) {
-        Ok(descriptor) => descriptor,
-        Err(error) => {
-            return syn::Error::new(
-                contract.span(),
-                format!("deployment payload descriptor is invalid: {error}"),
-            )
-            .to_compile_error()
-        }
+    let (fingerprint, fingerprint_key) = match payload_compile_inputs(contract) {
+        Ok(inputs) => inputs,
+        Err(error) => return error.to_compile_error(),
     };
-    let fingerprint = descriptor
-        .descriptor_fingerprint_input()
-        .fingerprint()
-        .to_bytes();
-    let macro_abi = boomerang_builder::COMPONENT_DESCRIPTOR_MACRO_ABI;
-    let state_symbol = required_binding_symbol(&reactor_name, None);
+    let macro_abi = boomerang_runtime::binding::COMPONENT_DESCRIPTOR_MACRO_ABI;
+    let macro_abi_key = boomerang_runtime::binding::PAYLOAD_MACRO_ABI_COMPILE_INPUT;
+    let binding_exports = model.args.iter().filter_map(|arg| {
+        let name = ident_text(&arg.name.ident);
+        let (symbol, payload_type, kind) = match (&arg.kind, &arg.ty) {
+            (ArgKind::Input { .. } | ArgKind::Output { .. }, Type::Array(array)) => (
+                required_binding_symbol("port_", &[&reactor_name, &name]),
+                array.elem.as_ref(),
+                "port",
+            ),
+            (ArgKind::Input { .. } | ArgKind::Output { .. }, ty) => (
+                required_binding_symbol("port_", &[&reactor_name, &name]),
+                ty,
+                "port",
+            ),
+            (ArgKind::LogicalAction { .. } | ArgKind::PhysicalAction { .. }, ty) => (
+                required_binding_symbol("action_", &[&reactor_name, &name]),
+                ty,
+                "action",
+            ),
+            (ArgKind::State { .. } | ArgKind::Param { .. }, _) => return None,
+        };
+        let export_doc = format!("Identifies payload type for {kind} `{reactor_name}/{name}`.");
+        Some(quote! {
+            #[doc = #export_doc]
+            #[allow(non_upper_case_globals)]
+            pub const #symbol: ::boomerang::runtime::PayloadType<#payload_type> =
+                ::boomerang::runtime::PayloadType::new();
+        })
+    });
+    let state_symbol = required_binding_symbol("state_", &[&reactor_name]);
     let state_init = reactor_args.state_init.as_ref().map_or_else(
         || quote!(::core::default::Default::default()),
         |path| quote!(#path()),
@@ -1276,6 +1167,11 @@ fn payload_output(
             #[allow(unused_imports)]
             use super::*;
 
+            #[doc(hidden)]
+            const _: &str = env!(#macro_abi_key);
+            #[doc(hidden)]
+            const _: &str = env!(#fingerprint_key);
+
             /// Compatibility header for this payload facet.
             pub const BINDING_MANIFEST: ::boomerang::runtime::binding::BindingManifest =
                 ::boomerang::runtime::binding::BindingManifest::new(
@@ -1289,6 +1185,7 @@ fn payload_output(
                 #state_init
             }
 
+            #(#binding_exports)*
             #(#reaction_exports)*
         }
     }
@@ -1328,15 +1225,12 @@ fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
         Ok(bounds) => bounds,
         Err(error) => return error.to_compile_error(),
     };
-    let boomerang_builder::DescriptorBounds {
-        queue_capacity: boomerang_builder::DescriptorBound::Known(queue_capacity),
-        payload_bytes: boomerang_builder::DescriptorBound::Known(payload_bytes),
-        state_bytes: boomerang_builder::DescriptorBound::Known(state_bytes),
-        scratch_bytes: boomerang_builder::DescriptorBound::Known(scratch_bytes),
-    } = bounds
-    else {
-        unreachable!("contract metadata requires finite descriptor bounds")
-    };
+    let DescriptorBoundsValues {
+        queue_capacity,
+        payload_bytes,
+        state_bytes,
+        scratch_bytes,
+    } = bounds;
 
     if let Err(error) = model.body.validate_unique_reaction_names() {
         return error.to_compile_error();
@@ -1368,7 +1262,23 @@ fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
         .iter()
         .filter_map(|arg| match arg.kind {
             ArgKind::Input { .. } | ArgKind::Output { .. } => Some(ident_text(&arg.name.ident)),
-            ArgKind::State { .. } | ArgKind::Param { .. } => None,
+            ArgKind::LogicalAction { .. }
+            | ArgKind::PhysicalAction { .. }
+            | ArgKind::State { .. }
+            | ArgKind::Param { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    let action_names = model
+        .args
+        .iter()
+        .filter_map(|arg| match arg.kind {
+            ArgKind::LogicalAction { .. } | ArgKind::PhysicalAction { .. } => {
+                Some(ident_text(&arg.name.ident))
+            }
+            ArgKind::Input { .. }
+            | ArgKind::Output { .. }
+            | ArgKind::State { .. }
+            | ArgKind::Param { .. } => None,
         })
         .collect::<Vec<_>>();
     let port_slots = model.args.iter().filter_map(|arg| {
@@ -1377,7 +1287,10 @@ fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
             ArgKind::Output { .. } => {
                 quote!(::boomerang::builder::PortDirection::Output)
             }
-            ArgKind::State { .. } | ArgKind::Param { .. } => return None,
+            ArgKind::LogicalAction { .. }
+            | ArgKind::PhysicalAction { .. }
+            | ArgKind::State { .. }
+            | ArgKind::Param { .. } => return None,
         };
         let slot = stable_path_tokens(&[reactor_name.clone(), ident_text(&arg.name.ident)]);
         let reactor_path = stable_path_tokens(std::slice::from_ref(&reactor_name));
@@ -1388,6 +1301,16 @@ fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
                 direction: #direction,
             }
         })
+    });
+    let action_slots = action_names.iter().map(|action_name| {
+        let slot = stable_path_tokens(&[reactor_name.clone(), action_name.clone()]);
+        let reactor_path = stable_path_tokens(std::slice::from_ref(&reactor_name));
+        quote! {
+            ::boomerang::builder::ActionSlot {
+                id: ::boomerang::builder::ActionSlotId::from_path(#slot),
+                reactor: ::boomerang::builder::ReactorSlotId::from_path(#reactor_path),
+            }
+        }
     });
     let state_slots = model.args.iter().filter_map(|arg| {
         if !matches!(arg.kind, ArgKind::State { .. }) {
@@ -1475,7 +1398,14 @@ fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
                     )
                 },
                 crate::reaction::TriggerType::Regular(path) => {
-                    relationship_target(&reactor_name, &port_names, &mode_names, path).0
+                    relationship_target(
+                        &reactor_name,
+                        &port_names,
+                        &action_names,
+                        &mode_names,
+                        path,
+                    )
+                    .0
                 }
             };
             relationships.push(relationship_tokens(
@@ -1487,7 +1417,8 @@ fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
             ));
         }
         for (position, path) in reaction.uses().iter().enumerate() {
-            let target = relationship_target(&reactor_name, &port_names, &mode_names, path).0;
+            let target =
+                relationship_target(&reactor_name, &port_names, &action_names, &mode_names, path).0;
             relationships.push(relationship_tokens(
                 &reaction_slot,
                 quote!(::boomerang::builder::DescriptorRelationshipKind::Use),
@@ -1503,7 +1434,7 @@ fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
                 | crate::reaction::EffectType::History(path) => path,
             };
             let (target, is_mode) =
-                relationship_target(&reactor_name, &port_names, &mode_names, path);
+                relationship_target(&reactor_name, &port_names, &action_names, &mode_names, path);
             let is_transition = matches!(
                 effect,
                 crate::reaction::EffectType::Reset(_) | crate::reaction::EffectType::History(_)
@@ -1562,7 +1493,7 @@ fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
                     ::boomerang::builder::COMPONENT_DESCRIPTOR_MACRO_ABI,
                     vec![#reactor_slot],
                     vec![#(#port_slots),*],
-                    vec![],
+                    vec![#(#action_slots),*],
                     vec![#(#reaction_slots),*],
                     vec![#(#mode_slots),*],
                     vec![#(#state_slots),*],
@@ -1826,6 +1757,28 @@ impl ToTokens for ArgsModel {
             )
         });
         let mode_bindings = body.mode_bindings();
+        let action_bindings = args.iter().filter_map(|Arg { kind, name, ty, .. }| {
+            let (method, min_delay_nanos) = match kind {
+                ArgKind::LogicalAction { min_delay_nanos } => {
+                    (format_ident!("add_logical_action"), min_delay_nanos)
+                }
+                ArgKind::PhysicalAction { min_delay_nanos } => {
+                    (format_ident!("add_physical_action"), min_delay_nanos)
+                }
+                ArgKind::Input { .. }
+                | ArgKind::Output { .. }
+                | ArgKind::State { .. }
+                | ArgKind::Param { .. } => return None,
+            };
+            let name_text = ident_text(&name.ident);
+            let min_delay = min_delay_nanos.map_or_else(
+                || quote!(None),
+                |nanos| quote!(Some(::boomerang::runtime::Duration::nanoseconds(#nanos))),
+            );
+            Some(quote! {
+                let #name = ctx.#method::<#ty>(#name_text, #min_delay)?;
+            })
+        });
         let (component_metadata, body_tokens) = match (
             reactor_args.contract.as_ref(),
             reactor_args.contract_version.as_ref(),
@@ -2047,6 +2000,7 @@ impl ToTokens for ArgsModel {
                             ctx.set_scope_mode(scope_mode)?;
                         }
                         #(#create_ports)*
+                        #(#action_bindings)*
                         (move |ctx: &mut ::boomerang::builder::ReactorContext<'_, #state_type_path>,
                               ports: (#(#local_types,)* )| -> Result<(), ::boomerang::builder::AssemblyError> {
                             #[allow(non_snake_case)]
@@ -2074,6 +2028,7 @@ impl ToTokens for ArgsModel {
                     <#ports_name #ty_generics as ::boomerang::builder::ReactorPorts>::build_with::<_, #state_type_path>(
                         move |ctx, (#(#port_idents,)*)| {
                             #component_metadata
+                            #(#action_bindings)*
                             #(#mode_bindings)*
                             #body_tokens
                             Ok(())

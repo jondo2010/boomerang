@@ -4,7 +4,7 @@ use super::{
     RequiredBinding, RequiredBindings, ResolvedDeployment,
 };
 use crate::{
-    descriptor::{DescriptorBound, ReactionSlotId, ReactorSlotId},
+    descriptor::{ActionSlotId, DescriptorBound, PortSlotId, ReactionSlotId, ReactorSlotId},
     runtime::image::{
         ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingSlotIndex,
         CompiledDeploymentImage, CompiledDeploymentView, CoordinationProjection, EnclaveIndex,
@@ -205,6 +205,30 @@ impl<'a> DescriptorSlots<'a> {
             .map(|slot| slot.id.clone())
             .collect::<Vec<_>>();
         self.one_slot("reaction", logical.path(), matches)
+    }
+
+    /// Resolves the descriptor port slot for one logical port.
+    fn port_slot(&self, logical: &super::PortId) -> Result<PortSlotId, CompileError> {
+        let matches = self
+            .descriptor
+            .port_slots()
+            .iter()
+            .filter(|slot| self.matches_relative_path(logical.path(), slot.id.path()))
+            .map(|slot| slot.id.clone())
+            .collect::<Vec<_>>();
+        self.one_slot("port", logical.path(), matches)
+    }
+
+    /// Resolves the descriptor action slot for one logical action.
+    fn action_slot(&self, logical: &super::ActionId) -> Result<ActionSlotId, CompileError> {
+        let matches = self
+            .descriptor
+            .action_slots()
+            .iter()
+            .filter(|slot| self.matches_relative_path(logical.path(), slot.id.path()))
+            .map(|slot| slot.id.clone())
+            .collect::<Vec<_>>();
+        self.one_slot("action", logical.path(), matches)
     }
 
     /// Converts a matching descriptor-slot set into one required binding slot.
@@ -454,6 +478,53 @@ fn lower_enclave(
             })
             .collect::<Result<Vec<_>, CompileError>>()?,
     );
+    named_bindings.extend(
+        representatives
+            .iter()
+            .map(|id| {
+                let port = topology.port(id).expect("port representative exists");
+                let component = topology
+                    .reactor(port.reactor())
+                    .expect("validated port reactor exists")
+                    .component();
+                let slots = DescriptorSlots::for_component(deployment, component)?;
+                Ok((
+                    format!("port/{id}"),
+                    RequiredBinding::Port {
+                        component: component.clone(),
+                        implementation: slots.implementation.clone(),
+                        port: slots.port_slot(id)?,
+                    },
+                ))
+            })
+            .collect::<Result<Vec<_>, CompileError>>()?,
+    );
+    named_bindings.extend(
+        actions
+            .iter()
+            .filter(|(_, action)| {
+                matches!(
+                    action.kind(),
+                    super::ActionKind::Logical { .. } | super::ActionKind::Physical { .. }
+                )
+            })
+            .map(|(id, action)| {
+                let component = topology
+                    .reactor(action.reactor())
+                    .expect("validated action reactor exists")
+                    .component();
+                let slots = DescriptorSlots::for_component(deployment, component)?;
+                Ok((
+                    format!("action/{id}"),
+                    RequiredBinding::Action {
+                        component: component.clone(),
+                        implementation: slots.implementation.clone(),
+                        action: slots.action_slot(id)?,
+                    },
+                ))
+            })
+            .collect::<Result<Vec<_>, CompileError>>()?,
+    );
     named_bindings.sort_by(|left, right| left.0.cmp(&right.0));
     let binding_entries = named_bindings
         .iter()
@@ -523,7 +594,7 @@ fn lower_enclave(
     let action_images = actions
         .iter()
         .enumerate()
-        .map(|(index, (_, action))| {
+        .map(|(index, (id, action))| {
             let start = checked_u32(flattened_triggers.len(), enclave_id, "reaction-triggers")?;
             flattened_triggers.extend_from_slice(&action_triggers[index]);
             let len = checked_u32(
@@ -553,6 +624,11 @@ fn lower_enclave(
                 ActionSlotIndex::new(checked_u32(index, enclave_id, "actions")?),
                 timing,
                 TableRange::new(start, len),
+                matches!(
+                    action.kind(),
+                    super::ActionKind::Logical { .. } | super::ActionKind::Physical { .. }
+                )
+                .then(|| binding_indices[&format!("action/{id}")]),
             ))
         })
         .collect::<Result<tinymap::TinyMap<ActionIndex, _>, CompileError>>()?;
@@ -586,6 +662,7 @@ fn lower_enclave(
             Ok(PortImage::new(
                 scope_for(port.reactor(), port.mode()),
                 TableRange::new(start, len),
+                binding_indices[&format!("port/{id}")],
             ))
         })
         .collect::<Result<tinymap::TinyMap<PortIndex, _>, CompileError>>()?;
@@ -1377,8 +1454,9 @@ mod tests {
             RuntimeBackendId, StableEnclaveId, TargetTriple, TransportCapabilityId,
         },
         descriptor::{
-            ComponentDescriptor, DescriptorBound, DescriptorBounds, ReactionSlot, ReactionSlotId,
-            ReactorSlot, ReactorSlotId, COMPONENT_DESCRIPTOR_MACRO_ABI,
+            ActionSlot, ActionSlotId, ComponentDescriptor, DescriptorBound, DescriptorBounds,
+            PortSlot, PortSlotId, ReactionSlot, ReactionSlotId, ReactorSlot, ReactorSlotId,
+            COMPONENT_DESCRIPTOR_MACRO_ABI,
         },
         runtime::image::{
             ActionIndex, ActionTiming, ModeIndex, ReactionIndex, ReactorIndex, RouteDirection,
@@ -1424,6 +1502,16 @@ mod tests {
             _ => panic!("unexpected test descriptor contract {contract}"),
         };
         let reactor = ReactorSlotId::new(root).unwrap();
+        let ports = match contract {
+            "controller.v1" => ["output"].as_slice(),
+            "sensor.v1" => ["input"].as_slice(),
+            _ => panic!("unexpected test descriptor contract {contract}"),
+        };
+        let actions = match contract {
+            "controller.v1" => ["pulse"].as_slice(),
+            "sensor.v1" => ["ack"].as_slice(),
+            _ => panic!("unexpected test descriptor contract {contract}"),
+        };
         ComponentDescriptor::try_new(
             contract.parse().unwrap(),
             1,
@@ -1432,8 +1520,25 @@ mod tests {
                 id: reactor.clone(),
                 parent: None,
             }],
-            vec![],
-            vec![],
+            ports
+                .iter()
+                .map(|port| PortSlot {
+                    id: PortSlotId::new(format!("{root}/{port}")).unwrap(),
+                    reactor: reactor.clone(),
+                    direction: match *port {
+                        "output" => PortDirection::Output,
+                        "input" => PortDirection::Input,
+                        _ => unreachable!("test descriptor uses known ports"),
+                    },
+                })
+                .collect(),
+            actions
+                .iter()
+                .map(|action| ActionSlot {
+                    id: ActionSlotId::new(format!("{root}/{action}")).unwrap(),
+                    reactor: reactor.clone(),
+                })
+                .collect(),
             reactions
                 .iter()
                 .map(|reaction| ReactionSlot {
@@ -1990,6 +2095,9 @@ mod tests {
                 .map(RequiredBinding::symbol)
                 .collect::<Vec<_>>(),
             [
+                "action_Shared_2fpulse",
+                "action_Shared_2fack",
+                "port_Shared_2foutput",
                 "reaction_Shared_2femit",
                 "reaction_Shared_2freset_5factive",
                 "reaction_Shared_2fshutdown",
@@ -2013,7 +2121,9 @@ mod tests {
                     implementation.to_string(),
                     binding.symbol(),
                 )),
-                RequiredBinding::Reaction { .. } => None,
+                RequiredBinding::Reaction { .. }
+                | RequiredBinding::Port { .. }
+                | RequiredBinding::Action { .. } => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(
@@ -2293,7 +2403,7 @@ mod tests {
             enclave.reactions()[ReactionIndex::new(5)].dependency_level(),
             2
         );
-        assert_eq!(enclave.required_bindings().len(), 8);
+        assert_eq!(enclave.required_bindings().len(), 11);
     }
     #[test]
     fn modes_actions_lifecycle_and_scopes_are_fully_lowered() {
@@ -2312,6 +2422,19 @@ mod tests {
                 domain: TimingDomain::Logical,
                 min_delay_nanos: 3,
             }
+        );
+        let standard_action = enclave.actions()[ActionIndex::new(0)];
+        assert_eq!(
+            standard_action
+                .binding()
+                .map(|slot| enclave.required_bindings()[slot].kind()),
+            Some(crate::runtime::image::BindingKind::Action)
+        );
+        assert_eq!(enclave.actions()[ActionIndex::new(3)].binding(), None);
+        let port_binding = enclave.ports()[crate::runtime::image::PortIndex::new(0)].binding();
+        assert_eq!(
+            enclave.required_bindings()[port_binding].kind(),
+            crate::runtime::image::BindingKind::Port
         );
         assert_eq!(
             enclave.actions()[ActionIndex::new(3)].timing(),
@@ -2394,7 +2517,7 @@ mod tests {
             .values()
             .enumerate()
             .all(|(index, reaction)| {
-                reaction.binding().as_u32() == u32::try_from(index).unwrap()
+                reaction.binding().as_u32() == u32::try_from(index).unwrap() + 3
             }));
     }
     #[test]

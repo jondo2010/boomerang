@@ -11,7 +11,8 @@ use crate::{
         ReactionIndex, ReactorIndex, StateSlotIndex, TimingDomain,
     },
     port::{BasePort, Port, PortKey},
-    Context, Duration, EnclaveKey, ReactionRefs, ReactorData, Refs, RefsMut, Tag, TriggerRes,
+    Context, Duration, EnclaveKey, PayloadType, ReactionRefs, ReactorData, Refs, RefsMut, Tag,
+    TriggerRes,
 };
 
 /// Errors returned by direct reaction implementations.
@@ -33,10 +34,8 @@ type InitializedContexts = (
 pub struct OwnedBindings {
     /// Factories and invokers for the image's typed required binding slots.
     bindings: TinySecondaryMap<BindingSlotIndex, Binding>,
-    /// Payload action factories keyed by compiled action storage slot.
-    actions: TinySecondaryMap<ActionSlotIndex, Box<dyn ActionFactory>>,
-    /// Payload port factories keyed by compiled port slot.
-    ports: TinySecondaryMap<PortIndex, Box<dyn PortFactory>>,
+    /// Stable slots supplied more than once by the caller.
+    duplicate_slots: TinySecondaryMap<BindingSlotIndex, ()>,
 }
 
 impl OwnedBindings {
@@ -47,7 +46,7 @@ impl OwnedBindings {
 
     /// Binds a state initializer to its compiled required binding slot.
     pub fn bind_state<T: ReactorData>(mut self, slot: BindingSlotIndex, init: fn() -> T) -> Self {
-        self.bindings.insert(
+        self.insert_binding(
             slot,
             Binding::State(Box::new(TypedStateInitializer::<T> {
                 init,
@@ -56,23 +55,33 @@ impl OwnedBindings {
         );
         self
     }
-    /// Binds a payload action type to its compiled storage slot.
-    pub fn bind_action<T: ReactorData>(mut self, slot: ActionSlotIndex) -> Self {
-        self.actions.insert(
+    /// Binds a payload action type to its stable required binding slot.
+    pub fn bind_action<T: ReactorData>(
+        mut self,
+        slot: BindingSlotIndex,
+        payload: PayloadType<T>,
+    ) -> Self {
+        let _ = payload;
+        self.insert_binding(
             slot,
-            Box::new(TypedActionFactory::<T> {
+            Binding::Action(Box::new(TypedActionFactory::<T> {
                 marker: PhantomData,
-            }),
+            })),
         );
         self
     }
-    /// Binds a payload port type to its compiled storage slot.
-    pub fn bind_port<T: ReactorData>(mut self, slot: PortIndex) -> Self {
-        self.ports.insert(
+    /// Binds a payload port type to its stable required binding slot.
+    pub fn bind_port<T: ReactorData>(
+        mut self,
+        slot: BindingSlotIndex,
+        payload: PayloadType<T>,
+    ) -> Self {
+        let _ = payload;
+        self.insert_binding(
             slot,
-            Box::new(TypedPortFactory::<T> {
+            Binding::Port(Box::new(TypedPortFactory::<T> {
                 marker: PhantomData,
-            }),
+            })),
         );
         self
     }
@@ -88,18 +97,28 @@ impl OwnedBindings {
             + Sync
             + 'static,
     {
-        self.bindings
-            .insert(slot, Binding::Reaction(Box::new(function)));
+        self.insert_binding(slot, Binding::Reaction(Box::new(function)));
         self
+    }
+
+    /// Records one typed binding while retaining duplicate-slot evidence for validation.
+    fn insert_binding(&mut self, slot: BindingSlotIndex, binding: Binding) {
+        if self.bindings.insert(slot, binding).is_some() {
+            self.duplicate_slots.insert(slot, ());
+        }
     }
 }
 
-/// The two heterogeneous values that may occupy a required image binding slot.
+/// A heterogeneous implementation value occupying a required image binding slot.
 enum Binding {
     /// A factory for one reactor's concrete state value.
     State(Box<dyn StateInitializer>),
     /// An invoker for one generated reaction implementation.
     Reaction(Box<dyn ReactionInvoker>),
+    /// A factory for one concrete port payload type.
+    Port(Box<dyn PortFactory>),
+    /// A factory for one concrete action payload type.
+    Action(Box<dyn ActionFactory>),
 }
 
 impl Binding {
@@ -108,6 +127,8 @@ impl Binding {
         match self {
             Self::State(_) => BindingKind::StateInitializer,
             Self::Reaction(_) => BindingKind::Reaction,
+            Self::Port(_) => BindingKind::Port,
+            Self::Action(_) => BindingKind::Action,
         }
     }
 }
@@ -259,6 +280,12 @@ pub enum OwnedStorageError {
         expected: BindingKind,
         /// The caller-supplied binding kind.
         found: BindingKind,
+    },
+    /// A stable binding slot was supplied more than once.
+    #[error("duplicate binding at {slot}")]
+    DuplicateBinding {
+        /// The duplicated stable binding slot.
+        slot: BindingSlotIndex,
     },
     /// The set of required bindings does not have exact one-to-one coverage.
     #[error("required binding coverage mismatch: expected {expected}, found {found}")]
@@ -443,14 +470,13 @@ impl<'image> OwnedStorage<'image> {
         validate_bindings(&image, &bindings)?;
         let OwnedBindings {
             bindings,
-            actions: action_factories,
-            ports: port_factories,
+            duplicate_slots: _,
         } = bindings;
 
         validate_startup_delays(&image)?;
         validate_reaction_mode_filters(&image)?;
-        let mut actions = initialize_actions(&action_images, &action_factories)?;
-        let mut ports = initialize_ports(&image, &port_factories)?;
+        let mut actions = initialize_actions(&action_images, &bindings)?;
+        let mut ports = initialize_ports(&image, &bindings)?;
         let reaction_refs = initialize_reaction_refs(&image, &mut ports, &mut actions)?;
         let states = initialize_states(&state_bindings, &bindings)?;
         let reactions = initialize_reactions(bindings);
@@ -545,6 +571,9 @@ fn validate_bindings(
     image: &EnclaveImageView<'_>,
     bindings: &OwnedBindings,
 ) -> Result<(), OwnedStorageError> {
+    if let Some(slot) = bindings.duplicate_slots.keys().next() {
+        return Err(OwnedStorageError::DuplicateBinding { slot });
+    }
     for (slot, required) in image.required_bindings().iter() {
         let binding = bindings
             .bindings
@@ -569,33 +598,22 @@ fn validate_bindings(
         });
     }
 
-    for slot in bindings.actions.keys() {
-        let is_standard = image.actions().values().any(|action| {
-            action.storage_slot() == slot
-                && matches!(action.timing(), ActionTiming::Standard { .. })
-        });
-        if !is_standard {
+    let referenced_action_bindings = image
+        .actions()
+        .values()
+        .filter_map(|action| action.binding())
+        .collect::<Vec<_>>();
+    let has_unreferenced_action_binding = bindings.bindings.iter().any(|(slot, binding)| {
+        matches!(binding, Binding::Action(_)) && !referenced_action_bindings.contains(&slot)
+    });
+    if has_unreferenced_action_binding {
+        if let Some(slot) = image
+            .actions()
+            .values()
+            .find_map(|action| action.binding().is_none().then_some(action.storage_slot()))
+        {
             return Err(OwnedStorageError::UnexpectedActionFactory { slot });
         }
-    }
-    for (_, action) in image.actions().iter() {
-        let slot = action.storage_slot();
-        if matches!(action.timing(), ActionTiming::Standard { .. })
-            && !bindings.actions.contains_key(slot)
-        {
-            return Err(OwnedStorageError::MissingActionFactory { slot });
-        }
-    }
-    for slot in image.ports().keys() {
-        if !bindings.ports.contains_key(slot) {
-            return Err(OwnedStorageError::MissingPortFactory { slot });
-        }
-    }
-    if bindings.ports.len() != image.ports().len() {
-        return Err(OwnedStorageError::PortFactoryCoverageMismatch {
-            expected: image.ports().len(),
-            found: bindings.ports.len(),
-        });
     }
     Ok(())
 }
@@ -720,7 +738,7 @@ fn validate_action_timing(
 /// Initializes standard payload actions and executor-owned timer or shutdown unit actions.
 fn initialize_actions(
     action_images: &TinySecondaryMap<ActionSlotIndex, crate::image::ActionImage>,
-    factories: &TinySecondaryMap<ActionSlotIndex, Box<dyn ActionFactory>>,
+    bindings: &TinySecondaryMap<BindingSlotIndex, Binding>,
 ) -> Result<TinyMap<ActionSlotIndex, Box<dyn BaseAction>>, OwnedStorageError> {
     let mut actions = TinyMap::with_capacity(action_images.len());
     for (slot, action) in action_images.iter() {
@@ -731,10 +749,15 @@ fn initialize_actions(
             ActionTiming::Standard {
                 domain,
                 min_delay_nanos,
-            } => factories
-                .get(slot)
-                .ok_or(OwnedStorageError::MissingActionFactory { slot })?
-                .create(slot, domain, min_delay_nanos)?,
+            } => {
+                let binding_slot = action
+                    .binding()
+                    .expect("validated standard action has a payload binding");
+                let Binding::Action(factory) = &bindings[binding_slot] else {
+                    unreachable!("validated action binding has the required kind")
+                };
+                factory.create(slot, domain, min_delay_nanos)?
+            }
         };
         let inserted = actions.insert(value);
         debug_assert_eq!(inserted, slot);
@@ -745,14 +768,14 @@ fn initialize_actions(
 /// Initializes the dense port map from exact image port slots.
 fn initialize_ports(
     image: &EnclaveImageView<'_>,
-    factories: &TinySecondaryMap<PortIndex, Box<dyn PortFactory>>,
+    bindings: &TinySecondaryMap<BindingSlotIndex, Binding>,
 ) -> Result<TinyMap<PortIndex, Box<dyn BasePort>>, OwnedStorageError> {
     let mut ports = TinyMap::with_capacity(image.ports().len());
-    for slot in image.ports().keys() {
-        let value = factories
-            .get(slot)
-            .ok_or(OwnedStorageError::MissingPortFactory { slot })?
-            .create(slot);
+    for (slot, port) in image.ports().iter() {
+        let Binding::Port(factory) = &bindings[port.binding()] else {
+            unreachable!("validated port binding has the required kind")
+        };
+        let value = factory.create(slot);
         let inserted = ports.insert(value);
         debug_assert_eq!(inserted, slot);
     }
@@ -882,7 +905,8 @@ mod tests {
             TimingDomain, TinyMapView,
         },
         CommonContext, Context, Duration, ModeTransitionRequest, OwnedBindings, OwnedStorage,
-        OwnedStorageError, ReactionBindingError, ReactionRefs, ReactorData, Tag, TransitionKind,
+        OwnedStorageError, PayloadType, ReactionBindingError, ReactionRefs, ReactorData, Tag,
+        TransitionKind,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -955,11 +979,16 @@ mod tests {
     )];
     /// Creates the test action shared by timing-validation fixtures.
     const fn action(timing: ActionTiming) -> ActionImage {
+        let binding = match timing {
+            ActionTiming::Standard { .. } => Some(BindingSlotIndex::new(3)),
+            ActionTiming::Timer { .. } | ActionTiming::Shutdown => None,
+        };
         ActionImage::new(
             ScopeIndex::new(0),
             ActionSlotIndex::new(0),
             timing,
             TableRange::new(0, 0),
+            binding,
         )
     }
     static ACTIONS: [ActionImage; 1] = [action(ActionTiming::Standard {
@@ -970,7 +999,11 @@ mod tests {
         domain: TimingDomain::Logical,
         min_delay_nanos: u64::MAX,
     })];
-    static PORTS: [PortImage; 1] = [PortImage::new(ScopeIndex::new(0), TableRange::new(0, 0))];
+    static PORTS: [PortImage; 1] = [PortImage::new(
+        ScopeIndex::new(0),
+        TableRange::new(0, 0),
+        BindingSlotIndex::new(2),
+    )];
     static REACTIONS: [ReactionImage; 1] = [ReactionImage::new(
         ReactorIndex::new(0),
         ScopeIndex::new(0),
@@ -1021,12 +1054,14 @@ mod tests {
     static FILTERED_REACTION_MODES: [crate::image::ModeIndex; 1] =
         [crate::image::ModeIndex::new(0)];
     static SCOPE_LOGICAL_ACTIONS: [ActionIndex; 1] = [ActionIndex::new(0)];
-    static REQUIRED_BINDINGS: [RequiredBindingImage; 2] = [
+    static REQUIRED_BINDINGS: [RequiredBindingImage; 4] = [
         RequiredBindingImage::new(IdentityRange::new(7, 7), BindingKind::StateInitializer),
         RequiredBindingImage::new(IdentityRange::new(14, 10), BindingKind::Reaction),
+        RequiredBindingImage::new(IdentityRange::new(24, 6), BindingKind::Port),
+        RequiredBindingImage::new(IdentityRange::new(30, 8), BindingKind::Action),
     ];
     static IMAGE: EnclaveImage<'static> = EnclaveImage {
-        identity_data: "enclavea-stateb-reaction",
+        identity_data: "enclavea-stateb-reactionc-portd-action",
         enclave_id: IdentityRange::new(0, 7),
         reactors: TinyMapView::new(&REACTORS),
         actions: TinyMapView::new(&ACTIONS),
@@ -1091,18 +1126,18 @@ mod tests {
     fn complete_bindings() -> OwnedBindings {
         OwnedBindings::new()
             .bind_state(BindingSlotIndex::new(0), initialize_state)
-            .bind_action::<u32>(ActionSlotIndex::new(0))
-            .bind_port::<u32>(PortIndex::new(0))
             .bind_reaction(BindingSlotIndex::new(1), reaction)
+            .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
+            .bind_action(BindingSlotIndex::new(3), PayloadType::<u32>::new())
     }
 
     /// Returns bindings whose initializer records that construction reached it.
     fn counted_bindings() -> OwnedBindings {
         OwnedBindings::new()
             .bind_state(BindingSlotIndex::new(0), counted_initializer)
-            .bind_action::<u32>(ActionSlotIndex::new(0))
-            .bind_port::<u32>(PortIndex::new(0))
             .bind_reaction(BindingSlotIndex::new(1), reaction)
+            .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
+            .bind_action(BindingSlotIndex::new(3), PayloadType::<u32>::new())
     }
 
     #[test]
@@ -1135,19 +1170,35 @@ mod tests {
     }
 
     #[test]
-    fn missing_action_factory_is_rejected() {
-        let bindings = OwnedBindings::new()
-            .bind_state(BindingSlotIndex::new(0), initialize_state)
-            .bind_port::<u32>(PortIndex::new(0))
-            .bind_reaction(BindingSlotIndex::new(1), reaction);
+    fn duplicate_required_binding_is_rejected_before_initializing_state() {
+        INITIALIZER_CALLS.store(0, Ordering::SeqCst);
+        let bindings = counted_bindings().bind_state(BindingSlotIndex::new(0), counted_initializer);
 
         let error = OwnedStorage::new(image(), bindings).unwrap_err();
 
         assert!(matches!(
             error,
-            OwnedStorageError::MissingActionFactory {
+            OwnedStorageError::DuplicateBinding { slot }
+                if slot == BindingSlotIndex::new(0)
+        ));
+        assert_eq!(INITIALIZER_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn missing_action_factory_is_rejected() {
+        let bindings = OwnedBindings::new()
+            .bind_state(BindingSlotIndex::new(0), initialize_state)
+            .bind_reaction(BindingSlotIndex::new(1), reaction)
+            .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new());
+
+        let error = OwnedStorage::new(image(), bindings).unwrap_err();
+
+        assert!(matches!(
+            error,
+            OwnedStorageError::MissingBinding {
                 slot,
-            } if slot == ActionSlotIndex::new(0)
+                kind: BindingKind::Action,
+            } if slot == BindingSlotIndex::new(3)
         ));
     }
 
@@ -1155,16 +1206,17 @@ mod tests {
     fn missing_port_factory_is_rejected() {
         let bindings = OwnedBindings::new()
             .bind_state(BindingSlotIndex::new(0), initialize_state)
-            .bind_action::<u32>(ActionSlotIndex::new(0))
-            .bind_reaction(BindingSlotIndex::new(1), reaction);
+            .bind_reaction(BindingSlotIndex::new(1), reaction)
+            .bind_action(BindingSlotIndex::new(3), PayloadType::<u32>::new());
 
         let error = OwnedStorage::new(image(), bindings).unwrap_err();
 
         assert!(matches!(
             error,
-            OwnedStorageError::MissingPortFactory {
+            OwnedStorageError::MissingBinding {
                 slot,
-            } if slot == PortIndex::new(0)
+                kind: BindingKind::Port,
+            } if slot == BindingSlotIndex::new(2)
         ));
     }
 
@@ -1281,8 +1333,11 @@ mod tests {
     #[test]
     fn cached_references_survive_storage_moves_and_reborrows() {
         REACTION_CALLS.store(0, Ordering::SeqCst);
-        let bindings =
-            complete_bindings().bind_reaction(BindingSlotIndex::new(1), schedule_shutdown_once);
+        let bindings = OwnedBindings::new()
+            .bind_state(BindingSlotIndex::new(0), initialize_state)
+            .bind_reaction(BindingSlotIndex::new(1), schedule_shutdown_once)
+            .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
+            .bind_action(BindingSlotIndex::new(3), PayloadType::<u32>::new());
         let mut storage = Box::new(OwnedStorage::new(image(), bindings).unwrap());
         let tag = Tag::new(Duration::nanoseconds(7), 2);
 
@@ -1300,8 +1355,11 @@ mod tests {
 
     #[test]
     fn rejects_dynamic_mode_transitions_without_compiled_identity() {
-        let bindings =
-            complete_bindings().bind_reaction(BindingSlotIndex::new(1), request_dynamic_mode);
+        let bindings = OwnedBindings::new()
+            .bind_state(BindingSlotIndex::new(0), initialize_state)
+            .bind_reaction(BindingSlotIndex::new(1), request_dynamic_mode)
+            .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
+            .bind_action(BindingSlotIndex::new(3), PayloadType::<u32>::new());
         let mut storage = OwnedStorage::new(image(), bindings).unwrap();
 
         let error = storage

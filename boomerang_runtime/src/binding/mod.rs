@@ -2,6 +2,33 @@
 //!
 //! Fingerprint hashing and encoding belong to host-side tooling, not this module.
 
+/// Version of the Cargo environment protocol supplying payload compatibility inputs.
+pub const PAYLOAD_COMPILE_INPUT_SCHEMA: u32 = 1;
+
+/// Authoritative macro ABI understood by descriptors and payload facets in this release.
+pub const COMPONENT_DESCRIPTOR_MACRO_ABI: u32 = 2;
+
+/// Cargo environment key containing the host-expected decimal macro ABI.
+pub const PAYLOAD_MACRO_ABI_COMPILE_INPUT: &str = "BOOMERANG_PAYLOAD_INPUT_V1_MACRO_ABI";
+
+/// Cargo environment key prefix for a contract-specific host descriptor fingerprint.
+pub const PAYLOAD_FINGERPRINT_COMPILE_INPUT_PREFIX: &str =
+    "BOOMERANG_PAYLOAD_INPUT_V1_FINGERPRINT_";
+
+/// Returns the fingerprint input key for a contract using reversible lowercase UTF-8 hex.
+pub fn payload_fingerprint_compile_input_key(contract: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut key = String::with_capacity(
+        PAYLOAD_FINGERPRINT_COMPILE_INPUT_PREFIX.len() + contract.len().saturating_mul(2),
+    );
+    key.push_str(PAYLOAD_FINGERPRINT_COMPILE_INPUT_PREFIX);
+    for byte in contract.bytes() {
+        write!(key, "{byte:02x}").expect("writing into a String cannot fail");
+    }
+    key
+}
+
 /// Fingerprint of one canonical component implementation descriptor.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[repr(transparent)]
@@ -70,7 +97,11 @@ pub const fn assert_descriptor_fingerprint(
 
 #[cfg(test)]
 mod tests {
-    use super::{assert_descriptor_fingerprint, DescriptorFingerprint};
+    use super::{
+        assert_descriptor_fingerprint, payload_fingerprint_compile_input_key,
+        DescriptorFingerprint, COMPONENT_DESCRIPTOR_MACRO_ABI, PAYLOAD_COMPILE_INPUT_SCHEMA,
+        PAYLOAD_MACRO_ABI_COMPILE_INPUT,
+    };
 
     #[test]
     fn descriptor_fingerprint_comparison_is_const_capable() {
@@ -82,5 +113,19 @@ mod tests {
         const { assert!(SAME) };
         const { assert!(!DIFFERENT) };
         assert_eq!(VALUE.to_bytes(), [0x5a; 32]);
+    }
+
+    #[test]
+    fn payload_compile_input_keys_are_versioned_and_reversible() {
+        assert_eq!(PAYLOAD_COMPILE_INPUT_SCHEMA, 1);
+        assert_eq!(COMPONENT_DESCRIPTOR_MACRO_ABI, 2);
+        assert_eq!(
+            PAYLOAD_MACRO_ABI_COMPILE_INPUT,
+            "BOOMERANG_PAYLOAD_INPUT_V1_MACRO_ABI"
+        );
+        assert_eq!(
+            payload_fingerprint_compile_input_key("example.sensor"),
+            "BOOMERANG_PAYLOAD_INPUT_V1_FINGERPRINT_6578616d706c652e73656e736f72"
+        );
     }
 }

@@ -82,13 +82,10 @@ impl Tag {
         }
     }
 
-    /// Returns a strictly future tag when both the duration and microstep remain representable.
+    /// Returns a strictly future tag when the duration is positive and the offset is representable.
     pub fn checked_delay(&self, offset: Duration) -> Option<Self> {
-        if offset.is_zero() {
-            return self.microstep.checked_add(1).map(|microstep| Self {
-                offset: self.offset,
-                microstep,
-            });
+        if offset <= Duration::ZERO {
+            return None;
         }
         self.offset.checked_add(offset).map(|offset| Self {
             offset,
@@ -129,5 +126,22 @@ impl Tag {
                 microstep: self.microstep - 1,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checked_delay_requires_a_positive_duration() {
+        let tag = Tag::new(Duration::nanoseconds(5), 3);
+
+        assert_eq!(tag.checked_delay(Duration::ZERO), None);
+        assert_eq!(tag.checked_delay(Duration::nanoseconds(-1)), None);
+        assert_eq!(
+            tag.checked_delay(Duration::nanoseconds(2)),
+            Some(Tag::new(Duration::nanoseconds(7), 0))
+        );
     }
 }

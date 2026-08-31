@@ -3,7 +3,7 @@
 use tinymap::TinyMap;
 
 use crate::{
-    image::{EnclaveImage, ImageValidationError, RouteDirection, StateSlotIndex},
+    image::{EnclaveImage, ImageValidationError, StateSlotIndex},
     run_owned_scheduler,
     storage::owned::StoredState,
     Config, OwnedBindings, OwnedStorage, OwnedStorageError, ReactorData, RuntimeError, Tag,
@@ -111,11 +111,7 @@ pub fn execute_owned<'image>(
     config: Config,
 ) -> Result<OwnedExecutionResult, ExecuteOwnedError<'image>> {
     let image = crate::image::EnclaveImageView::new(image)?;
-    let unsupported_routes = image
-        .routes()
-        .values()
-        .filter(|route| route.direction() == RouteDirection::Outbound)
-        .count();
+    let unsupported_routes = image.routes().len();
     if unsupported_routes != 0 {
         return Err(ExecuteOwnedError::RoutesUnsupported {
             count: unsupported_routes,

@@ -461,30 +461,13 @@ where
                 .commit_boundary_ports(event.tag)
                 .map_err(SchedulerError::Execution)?;
 
-            self.process_tag(event.tag, event.reactions.view(), event.terminal)
-                .map_err(SchedulerError::Execution)?;
-
-            for &action in &event.action_values {
-                let Some(period) = self.schedule.action_period(action) else {
-                    continue;
-                };
-                let Some(successor) = event.tag.checked_delay(period) else {
-                    tracing::warn!(target: "boomerang_runtime::sched", tag = %event.tag, ?action, ?period, "Periodic timer reached the logical tag range");
-                    continue;
-                };
-                if (*self.shutdown_tag).is_some_and(|shutdown| successor >= shutdown) {
-                    continue;
-                }
-                self.storage
-                    .push_action_value(action, successor, Box::new(()));
-                self.events.push_action_event(
-                    action,
-                    successor,
-                    self.schedule.action_triggers(action),
-                    false,
-                    self.schedule,
-                );
-            }
+            self.process_tag(
+                event.tag,
+                event.reactions.view(),
+                event.terminal,
+                &event.action_values,
+            )
+            .map_err(SchedulerError::Execution)?;
 
             *self.current_tag = event.tag;
             if event.has_nonterminal_work {
@@ -598,6 +581,7 @@ where
         tag: Tag,
         reaction_view: KeySetView<S::Reaction>,
         terminal: bool,
+        periodic_actions: &[S::Action],
     ) -> Result<(), E::Error> {
         self.transition_buffer.clear();
         let mut execution_error = None;
@@ -699,6 +683,28 @@ where
 
         if let Some(error) = execution_error {
             return Err(error);
+        }
+
+        for &action in periodic_actions {
+            let Some(period) = self.schedule.action_period(action) else {
+                continue;
+            };
+            let Some(successor) = tag.checked_delay(period) else {
+                tracing::warn!(target: "boomerang_runtime::sched", %tag, ?action, ?period, "Periodic timer reached the logical tag range");
+                continue;
+            };
+            if (*self.shutdown_tag).is_some_and(|shutdown| successor >= shutdown) {
+                continue;
+            }
+            self.storage
+                .push_action_value(action, successor, Box::new(()));
+            self.events.push_action_event(
+                action,
+                successor,
+                self.schedule.action_triggers(action),
+                false,
+                self.schedule,
+            );
         }
 
         if self.transition_buffer.is_empty() {

@@ -613,7 +613,7 @@ impl Scheduler {
         terminal: bool,
     ) {
         self.core()
-            .process_tag(tag, reaction_view, terminal)
+            .process_tag(tag, reaction_view, terminal, &[])
             .expect("live reaction invocation is infallible");
     }
 

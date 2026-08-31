@@ -12,10 +12,9 @@ use boomerang::runtime::{
         RouteImage, ScopeImage, ScopeIndex, StateSlotIndex, StorageBounds, TableRange,
         TimerStartupImage, TimingDomain, TinyMapView,
     },
-    ActionKey, ActionRef, AsyncEvent, AsyncEventTarget, CommonContext, CompiledModeEffectRef,
-    Config, Context, Duration, ExecuteOwnedError, InputRef, ModeEffectRef, ModeKey, OwnedBindings,
-    OwnedStorageError, PayloadType, PortKey, ReactionBindingError, ReactionRefs, ReactorData,
-    StateAccessError, Tag, TransitionKind,
+    ActionRef, CommonContext, CompiledModeEffectRef, Config, Context, Duration, ExecuteOwnedError,
+    ModeEffectRef, ModeKey, OwnedBindings, OwnedStorageError, PayloadType, ReactionBindingError,
+    ReactionRefs, ReactorData, StateAccessError, Tag, TransitionKind,
 };
 
 macro_rules! r {
@@ -184,6 +183,7 @@ const fn fixture_scope(
     mode: Option<ModeIndex>,
     descendants: TableRange<ScopeIndex>,
     logical_actions: TableRange<ActionIndex>,
+    timer_startups: TableRange<TimerStartupImage>,
     startups: TableRange<LifecycleReactionImage>,
 ) -> ScopeImage {
     ScopeImage::new(
@@ -192,7 +192,7 @@ const fn fixture_scope(
         mode,
         descendants,
         logical_actions,
-        r!(0, 0),
+        timer_startups,
         r!(0, 0),
         startups,
         r!(0, 0),
@@ -202,10 +202,16 @@ const fn fixture_scope(
 #[derive(Debug)]
 struct ModeState {
     entered_mode: u32,
+    reset_once: bool,
+    periodic_tags: Vec<Tag>,
 }
 
 fn initialize_mode_state() -> ModeState {
-    ModeState { entered_mode: 0 }
+    ModeState {
+        entered_mode: 0,
+        reset_once: false,
+        periodic_tags: Vec::new(),
+    }
 }
 
 fn request_compiled_mode(
@@ -215,6 +221,23 @@ fn request_compiled_mode(
     effect: CompiledModeEffectRef,
 ) -> Result<(), ReactionBindingError> {
     effect.set(context);
+    Ok(())
+}
+
+fn reset_periodic_mode_once(
+    context: &mut Context,
+    state: &mut dyn ReactorData,
+    _refs: ReactionRefs<'_>,
+    effect: CompiledModeEffectRef,
+) -> Result<(), ReactionBindingError> {
+    let state = state
+        .downcast_mut::<ModeState>()
+        .expect("the modal image initializes ModeState");
+    state.periodic_tags.push(context.get_tag());
+    if !state.reset_once {
+        state.reset_once = true;
+        effect.set(context);
+    }
     Ok(())
 }
 
@@ -275,6 +298,12 @@ fn forged_mode_bindings() -> OwnedBindings {
         .bind_reaction(BindingSlotIndex::new(2), record_mode_entry)
 }
 
+fn periodic_modal_bindings() -> OwnedBindings {
+    OwnedBindings::new()
+        .bind_state(BindingSlotIndex::new(0), initialize_mode_state)
+        .bind_compiled_reaction(BindingSlotIndex::new(1), reset_periodic_mode_once)
+}
+
 static MODAL_REACTORS: [ReactorImage; 1] = [ReactorImage::new(
     BindingSlotIndex::new(0),
     StateSlotIndex::new(0),
@@ -296,11 +325,12 @@ static MODAL_MODES: [ModeImage; 2] = [
     ModeImage::new(ReactorIndex::new(0), ScopeIndex::new(2)),
 ];
 static MODAL_SCOPES: [ScopeImage; 3] = [
-    fixture_scope(None, None, r!(0, 3), r!(0, 0), r!(0, 0)),
+    fixture_scope(None, None, r!(0, 3), r!(0, 0), r!(0, 0), r!(0, 0)),
     fixture_scope(
         Some(ScopeIndex::new(0)),
         Some(ModeIndex::new(0)),
         r!(3, 1),
+        r!(0, 0),
         r!(0, 0),
         r!(0, 0),
     ),
@@ -308,6 +338,7 @@ static MODAL_SCOPES: [ScopeImage; 3] = [
         Some(ScopeIndex::new(0)),
         Some(ModeIndex::new(1)),
         r!(4, 1),
+        r!(0, 0),
         r!(0, 0),
         r!(0, 1),
     ),
@@ -352,155 +383,65 @@ static MODAL_IMAGE: EnclaveImage<'static> = EnclaveImage {
     ..IMAGE
 };
 
-#[derive(Debug)]
-struct AdmissionState {
-    boundary_values: Vec<Option<u32>>,
-    action_value: Option<u32>,
-}
-
-fn initialize_admission_state() -> AdmissionState {
-    AdmissionState {
-        boundary_values: Vec::new(),
-        action_value: None,
-    }
-}
-
-fn admit_boundary_and_action(
-    context: &mut Context,
-    _state: &mut dyn ReactorData,
-    _refs: ReactionRefs<'_>,
-) -> Result<(), ReactionBindingError> {
-    let tag = context.get_tag().delay(Duration::nanoseconds(2));
-    assert!(context.schedule_external(AsyncEvent::Logical {
-        tag,
-        target: AsyncEventTarget::BoundaryPort(PortKey::new(0)),
-        value: Box::new(42_u32),
-    }));
-    assert!(context.schedule_external(AsyncEvent::Logical {
-        tag,
-        target: AsyncEventTarget::Action(ActionKey::new(1)),
-        value: Box::new(7_u32),
-    }));
-    Ok(())
-}
-
-fn record_boundary_value(
-    _context: &mut Context,
-    state: &mut dyn ReactorData,
-    refs: ReactionRefs<'_>,
-) -> Result<(), ReactionBindingError> {
-    let port: InputRef<u32> = refs.ports.partition()?;
-    state
-        .downcast_mut::<AdmissionState>()
-        .expect("the admission image initializes AdmissionState")
-        .boundary_values
-        .push(port.as_ref().copied());
-    Ok(())
-}
-
-fn record_action_value(
-    context: &mut Context,
-    state: &mut dyn ReactorData,
-    refs: ReactionRefs<'_>,
-) -> Result<(), ReactionBindingError> {
-    let mut action: ActionRef<u32> = refs.actions.partition_mut()?;
-    state
-        .downcast_mut::<AdmissionState>()
-        .expect("the admission image initializes AdmissionState")
-        .action_value = context.get_action_value(&mut action).copied();
-    context.schedule_shutdown(None);
-    Ok(())
-}
-
-fn admission_bindings() -> OwnedBindings {
-    OwnedBindings::new()
-        .bind_action(BindingSlotIndex::new(0), PayloadType::<u32>::new())
-        .bind_port(BindingSlotIndex::new(1), PayloadType::<u32>::new())
-        .bind_reaction(BindingSlotIndex::new(2), admit_boundary_and_action)
-        .bind_reaction(BindingSlotIndex::new(3), record_boundary_value)
-        .bind_reaction(BindingSlotIndex::new(4), record_action_value)
-        .bind_state(BindingSlotIndex::new(5), initialize_admission_state)
-}
-
-static ADMISSION_REACTORS: [ReactorImage; 1] = [ReactorImage::new(
-    BindingSlotIndex::new(5),
-    StateSlotIndex::new(0),
-    ScopeIndex::new(0),
-    r!(0, 0),
-    None,
+static PERIODIC_MODAL_ACTIONS: [ActionImage; 1] = [ActionImage::new(
+    ScopeIndex::new(1),
+    ActionSlotIndex::new(0),
+    ActionTiming::Timer {
+        period_nanos: Some(2),
+    },
+    r!(0, 1),
     None,
 )];
-static ADMISSION_ACTIONS: [ActionImage; 3] = [
-    fixture_timer_action(0, None, r!(0, 1)),
-    ActionImage::new(
-        ScopeIndex::new(0),
-        ActionSlotIndex::new(1),
-        ActionTiming::Standard {
-            domain: TimingDomain::Logical,
-            min_delay_nanos: 0,
-        },
-        r!(1, 1),
-        Some(BindingSlotIndex::new(0)),
+static PERIODIC_MODAL_REACTIONS: [ReactionImage; 1] =
+    [
+        fixture_reaction(1, 1, r!(0, 0), r!(0, 0), r!(0, 1)).with_mode_effect(
+            CompiledModeEffectRef {
+                target: ModeIndex::new(0),
+                transition: TransitionKind::Reset,
+            },
+        ),
+    ];
+static PERIODIC_MODAL_SCOPES: [ScopeImage; 3] = [
+    fixture_scope(None, None, r!(0, 3), r!(0, 0), r!(0, 0), r!(0, 0)),
+    fixture_scope(
+        Some(ScopeIndex::new(0)),
+        Some(ModeIndex::new(0)),
+        r!(3, 1),
+        r!(0, 1),
+        r!(0, 1),
+        r!(0, 0),
     ),
-    fixture_timer_action(2, None, r!(2, 1)),
+    fixture_scope(
+        Some(ScopeIndex::new(0)),
+        Some(ModeIndex::new(1)),
+        r!(4, 1),
+        r!(1, 0),
+        r!(1, 0),
+        r!(0, 0),
+    ),
 ];
-static ADMISSION_PORTS: [PortImage; 1] = [PortImage::new(
-    ScopeIndex::new(0),
-    r!(3, 1),
-    BindingSlotIndex::new(1),
-)];
-static ADMISSION_ROUTES: [RouteImage; 1] = [RouteImage::new(
-    IdentityRange::new(18, 8),
-    PortIndex::new(0),
-    RouteDirection::Inbound,
-    TimingDomain::Logical,
-    0,
-)];
-static ADMISSION_REACTIONS: [ReactionImage; 3] = [
-    fixture_reaction(0, 2, r!(0, 0), r!(0, 0), r!(0, 0)),
-    fixture_reaction(0, 3, r!(0, 1), r!(0, 0), r!(0, 0)),
-    fixture_reaction(0, 4, r!(1, 0), r!(0, 1), r!(0, 0)),
+static PERIODIC_MODAL_STARTUPS: [TimerStartupImage; 1] =
+    [TimerStartupImage::new(ActionIndex::new(0), 5)];
+static PERIODIC_MODAL_BINDINGS: [RequiredBindingImage; 2] = [
+    RequiredBindingImage::new(IdentityRange::new(18, 7), BindingKind::StateInitializer),
+    RequiredBindingImage::new(IdentityRange::new(25, 12), BindingKind::Reaction),
 ];
-static ADMISSION_TRIGGERS: [LevelReactionImage; 4] = [
-    LevelReactionImage::new(0, ReactionIndex::new(0)),
-    LevelReactionImage::new(0, ReactionIndex::new(2)),
-    LevelReactionImage::new(0, ReactionIndex::new(1)),
-    LevelReactionImage::new(0, ReactionIndex::new(1)),
-];
-static ADMISSION_SCOPE: [ScopeImage; 1] = [fixture_scope(None, None, r!(0, 1), r!(0, 1), r!(0, 0))];
-static ADMISSION_BINDINGS: [RequiredBindingImage; 6] = [
-    RequiredBindingImage::new(IdentityRange::new(18, 8), BindingKind::Action),
-    RequiredBindingImage::new(IdentityRange::new(26, 6), BindingKind::Port),
-    RequiredBindingImage::new(IdentityRange::new(32, 8), BindingKind::Reaction),
-    RequiredBindingImage::new(IdentityRange::new(40, 10), BindingKind::Reaction),
-    RequiredBindingImage::new(IdentityRange::new(50, 17), BindingKind::Reaction),
-    RequiredBindingImage::new(IdentityRange::new(67, 7), BindingKind::StateInitializer),
-];
-
-static ADMISSION_IMAGE: EnclaveImage<'static> = EnclaveImage {
-    identity_data: "compiled/referencea-actionb-portc-sourced-boundarye-action-reactionf-state",
-    reactors: TinyMapView::new(&ADMISSION_REACTORS),
-    actions: TinyMapView::new(&ADMISSION_ACTIONS),
-    ports: TinyMapView::new(&ADMISSION_PORTS),
-    reactions: TinyMapView::new(&ADMISSION_REACTIONS),
-    scopes: TinyMapView::new(&ADMISSION_SCOPE),
-    reaction_triggers: &ADMISSION_TRIGGERS,
-    reaction_use_ports: &[PortIndex::new(0)],
-    reaction_actions: &[ActionIndex::new(1)],
-    scope_descendants: &[ScopeIndex::new(0)],
-    scope_logical_actions: &[ActionIndex::new(1)],
-    scope_startup_reactions: &[],
-    timer_startup_actions: &[
-        TimerStartupImage::new(ActionIndex::new(0), 0),
-        TimerStartupImage::new(ActionIndex::new(2), 1),
-    ],
-    required_bindings: TinyMapView::new(&ADMISSION_BINDINGS),
-    storage_bounds: StorageBounds::new(1, 3, 4, 0, 0, 0),
+static PERIODIC_MODAL_IMAGE: EnclaveImage<'static> = EnclaveImage {
+    identity_data: "compiled/referencea-stateb-transitionc-entry",
+    reactors: TinyMapView::new(&MODAL_REACTORS),
+    actions: TinyMapView::new(&PERIODIC_MODAL_ACTIONS),
+    reactions: TinyMapView::new(&PERIODIC_MODAL_REACTIONS),
+    modes: TinyMapView::new(&MODAL_MODES),
+    scopes: TinyMapView::new(&PERIODIC_MODAL_SCOPES),
+    reaction_triggers: &[LevelReactionImage::new(0, ReactionIndex::new(0))],
+    reaction_modes: &[ModeIndex::new(0)],
+    scope_descendants: &MODAL_SCOPE_DESCENDANTS,
+    scope_logical_actions: &[ActionIndex::new(0)],
+    scope_timer_startups: &PERIODIC_MODAL_STARTUPS,
+    timer_startup_actions: &PERIODIC_MODAL_STARTUPS,
+    required_bindings: TinyMapView::new(&PERIODIC_MODAL_BINDINGS),
+    storage_bounds: StorageBounds::new(1, 1, 1, 0, 0, 0),
     ..IMAGE
-};
-static ROUTED_ADMISSION_IMAGE: EnclaveImage<'static> = EnclaveImage {
-    routes: TinyMapView::new(&ADMISSION_ROUTES),
-    ..ADMISSION_IMAGE
 };
 
 static PERIODIC_INITIALIZATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -596,7 +537,14 @@ static COTIMED_TRIGGERS: [LevelReactionImage; 2] = [
     LevelReactionImage::new(0, ReactionIndex::new(0)),
 ];
 static COTIMED_LOGICAL_ACTIONS: [ActionIndex; 2] = [ActionIndex::new(0), ActionIndex::new(1)];
-static COTIMED_SCOPE: [ScopeImage; 1] = [fixture_scope(None, None, r!(0, 1), r!(0, 2), r!(0, 0))];
+static COTIMED_SCOPE: [ScopeImage; 1] = [fixture_scope(
+    None,
+    None,
+    r!(0, 1),
+    r!(0, 2),
+    r!(0, 0),
+    r!(0, 0),
+)];
 static COTIMED_STARTUPS: [TimerStartupImage; 2] = [
     TimerStartupImage::new(ActionIndex::new(0), 1_000_000),
     TimerStartupImage::new(ActionIndex::new(1), 1_000_000),
@@ -764,14 +712,27 @@ fn compiled_reference_rejects_routes_until_route_execution_is_supported() {
     )
     .expect("the same image must execute when its route table is empty");
 
-    match execute_owned(
-        &ROUTED_IMAGE,
-        reference_bindings().bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new()),
-        Config::default().with_fast_forward(true),
-    ) {
-        Ok(_) => panic!("routed images must not execute without route support"),
-        Err(ExecuteOwnedError::RoutesUnsupported { count: 1 }) => {}
-        Err(error) => panic!("unexpected route rejection: {error}"),
+    for direction in [RouteDirection::Inbound, RouteDirection::Outbound] {
+        let routes = [RouteImage::new(
+            IdentityRange::new(0, 18),
+            PortIndex::new(0),
+            direction,
+            TimingDomain::Logical,
+            0,
+        )];
+        let routed = EnclaveImage {
+            routes: TinyMapView::new(&routes),
+            ..ROUTED_IMAGE
+        };
+        match execute_owned(
+            &routed,
+            reference_bindings().bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new()),
+            Config::default().with_fast_forward(true),
+        ) {
+            Ok(_) => panic!("{direction:?} routes must require a route-capable executor"),
+            Err(ExecuteOwnedError::RoutesUnsupported { count: 1 }) => {}
+            Err(error) => panic!("unexpected route rejection: {error}"),
+        }
     }
 }
 
@@ -790,6 +751,30 @@ fn compiled_mode_transition_uses_canonical_mode_index() {
             .unwrap()
             .entered_mode,
         1
+    );
+}
+
+#[test]
+fn compiled_periodic_timer_same_mode_reset_has_one_restarted_stream() {
+    let result = execute_owned(
+        &PERIODIC_MODAL_IMAGE,
+        periodic_modal_bindings(),
+        Config::default()
+            .with_fast_forward(true)
+            .with_timeout(Duration::nanoseconds(13)),
+    )
+    .unwrap();
+
+    assert_eq!(
+        result
+            .state::<ModeState>(StateSlotIndex::new(0))
+            .unwrap()
+            .periodic_tags,
+        [
+            Tag::new(Duration::nanoseconds(5), 0),
+            Tag::new(Duration::nanoseconds(10), 0),
+            Tag::new(Duration::nanoseconds(12), 0),
+        ]
     );
 }
 
@@ -836,55 +821,6 @@ fn compiled_mode_transition_must_match_the_declared_effect() {
                 target: ModeIndex::new(0),
                 transition: TransitionKind::History,
             })
-    ));
-}
-
-#[test]
-fn compiled_async_admission_targets_boundary_ports_and_actions() {
-    let result = execute_owned(
-        &ROUTED_ADMISSION_IMAGE,
-        admission_bindings(),
-        Config::default().with_fast_forward(true),
-    )
-    .unwrap();
-    let state = result
-        .state::<AdmissionState>(StateSlotIndex::new(0))
-        .unwrap();
-
-    assert_eq!(state.boundary_values.last(), Some(&Some(42)));
-    assert_eq!(state.action_value, Some(7));
-}
-
-#[test]
-fn compiled_boundary_payload_is_unset_before_its_tag() {
-    let result = execute_owned(
-        &ROUTED_ADMISSION_IMAGE,
-        admission_bindings(),
-        Config::default().with_fast_forward(true),
-    )
-    .unwrap();
-    let state = result
-        .state::<AdmissionState>(StateSlotIndex::new(0))
-        .unwrap();
-
-    assert_eq!(state.boundary_values, [None, Some(42)]);
-}
-
-#[test]
-fn compiled_async_admission_rejects_unrouted_ordinary_ports() {
-    let error = match execute_owned(
-        &ADMISSION_IMAGE,
-        admission_bindings(),
-        Config::default().with_fast_forward(true),
-    ) {
-        Ok(_) => panic!("an ordinary compiled port is not an inbound scheduler capability"),
-        Err(error) => error,
-    };
-
-    assert!(matches!(
-        error,
-        ExecuteOwnedError::Storage(OwnedStorageError::BoundaryPortNotInbound { port })
-            if port == PortIndex::new(0)
     ));
 }
 

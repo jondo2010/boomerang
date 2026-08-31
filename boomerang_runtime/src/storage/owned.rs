@@ -1317,6 +1317,17 @@ mod tests {
         reaction_modes: &FILTERED_REACTION_MODES,
         ..IMAGE
     };
+    static INBOUND_ROUTES: [RouteImage; 1] = [RouteImage::new(
+        IdentityRange::new(7, 7),
+        PortIndex::new(0),
+        RouteDirection::Inbound,
+        TimingDomain::Logical,
+        0,
+    )];
+    static ROUTED_IMAGE: EnclaveImage<'static> = EnclaveImage {
+        routes: TinyMapView::new(&INBOUND_ROUTES),
+        ..IMAGE
+    };
 
     /// Returns a fresh validated view of the immutable test image.
     fn image() -> EnclaveImageView<'static> {
@@ -1336,6 +1347,10 @@ mod tests {
     /// Returns a valid image with a reaction filter broader than its static scope.
     fn filtered_mode_image() -> EnclaveImageView<'static> {
         EnclaveImageView::new(&FILTERED_MODE_IMAGE).expect("test image is valid")
+    }
+
+    fn routed_image() -> EnclaveImageView<'static> {
+        EnclaveImageView::new(&ROUTED_IMAGE).expect("test image is valid")
     }
 
     /// Returns bindings for every non-lifecycle storage slot in [`IMAGE`].
@@ -1624,21 +1639,43 @@ mod tests {
     }
 
     #[test]
+    fn boundary_write_rejects_port_without_inbound_route() {
+        let mut storage = OwnedStorage::new(image(), complete_bindings()).unwrap();
+        let error = storage
+            .scheduler_retain_boundary_port(PortKey::new(0), Tag::ZERO, Box::new(42_u32))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            OwnedStorageError::BoundaryPortNotInbound { port } if port == PortIndex::new(0)
+        ));
+    }
+
+    #[test]
+    fn boundary_write_commits_only_at_declared_tag() {
+        let mut storage = OwnedStorage::new(routed_image(), complete_bindings()).unwrap();
+        let expected_tag = Tag::new(Duration::nanoseconds(2), 0);
+        storage
+            .scheduler_retain_boundary_port(PortKey::new(0), expected_tag, Box::new(42_u32))
+            .unwrap();
+
+        storage.scheduler_commit_boundary_ports(Tag::ZERO).unwrap();
+        assert!(!storage.ports[PortIndex::new(0)].is_set());
+        storage
+            .scheduler_commit_boundary_ports(expected_tag)
+            .unwrap();
+        assert_eq!(
+            storage.ports[PortIndex::new(0)]
+                .downcast_ref::<crate::Port<u32>>()
+                .unwrap()
+                .get(),
+            &Some(42)
+        );
+    }
+
+    #[test]
     fn boundary_write_rejects_wrong_payload_type() {
-        let routes = [RouteImage::new(
-            IdentityRange::new(7, 7),
-            PortIndex::new(0),
-            RouteDirection::Inbound,
-            TimingDomain::Logical,
-            0,
-        )];
-        let routed = EnclaveImage {
-            routes: TinyMapView::new(&routes),
-            ..IMAGE
-        };
-        let mut storage =
-            OwnedStorage::new(EnclaveImageView::new(&routed).unwrap(), complete_bindings())
-                .unwrap();
+        let mut storage = OwnedStorage::new(routed_image(), complete_bindings()).unwrap();
         storage
             .scheduler_retain_boundary_port(PortKey::new(0), Tag::ZERO, Box::new(42_u64))
             .unwrap();

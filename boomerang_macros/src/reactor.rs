@@ -873,8 +873,8 @@ fn payload_ref(
         (ArgKind::Output { len: None }, ty) => {
             quote!(::boomerang::runtime::OutputRef<#store_lifetime, #ty>)
         }
-        (ArgKind::LogicalAction { .. } | ArgKind::PhysicalAction { .. }, _) => {
-            quote!(::boomerang::runtime::ActionRef<#store_lifetime>)
+        (ArgKind::LogicalAction { .. } | ArgKind::PhysicalAction { .. }, ty) => {
+            quote!(::boomerang::runtime::ActionRef<#store_lifetime, #ty>)
         }
         (ArgKind::State { .. } | ArgKind::Param { .. }, _) => {
             return Err(syn::Error::new_spanned(
@@ -992,7 +992,11 @@ fn payload_reaction_output(
 }
 
 /// Reads and validates the host-provided compatibility values for one payload facet.
-fn payload_compile_inputs(contract: &syn::LitStr) -> syn::Result<([u8; 32], String)> {
+fn payload_compile_inputs(
+    contract: &syn::LitStr,
+    contract_version: u64,
+    reactor_root: &str,
+) -> syn::Result<([u8; 32], String)> {
     use boomerang_runtime::binding::{
         payload_fingerprint_compile_input_key, COMPONENT_DESCRIPTOR_MACRO_ABI,
         PAYLOAD_MACRO_ABI_COMPILE_INPUT,
@@ -1013,7 +1017,20 @@ fn payload_compile_inputs(contract: &syn::LitStr) -> syn::Result<([u8; 32], Stri
                 "payload macro ABI mismatch: expected {COMPONENT_DESCRIPTOR_MACRO_ABI}, received {macro_abi}"
             )));
     }
-    let fingerprint_key = payload_fingerprint_compile_input_key(&contract.value());
+    let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR")
+        .ok_or_else(|| error("missing `CARGO_MANIFEST_DIR` for payload compile input".into()))?;
+    let manifest_dir = std::fs::canonicalize(manifest_dir).map_err(|_| {
+        error("`CARGO_MANIFEST_DIR` must identify an existing payload package directory".into())
+    })?;
+    let manifest_dir = manifest_dir
+        .to_str()
+        .ok_or_else(|| error("canonical `CARGO_MANIFEST_DIR` must be valid UTF-8".into()))?;
+    let fingerprint_key = payload_fingerprint_compile_input_key(
+        manifest_dir,
+        &contract.value(),
+        contract_version,
+        reactor_root,
+    );
     let fingerprint = std::env::var(&fingerprint_key).map_err(|_| {
         error(format!(
             "missing payload descriptor fingerprint compile input `{fingerprint_key}`"
@@ -1073,10 +1090,10 @@ fn payload_output(
         )
         .to_compile_error();
     }
-    if contract_version.base10_parse::<u64>().is_err() {
+    let Ok(contract_version) = contract_version.base10_parse::<u64>() else {
         return syn::Error::new(contract_version.span(), "contract_version must fit in u64")
             .to_compile_error();
-    }
+    };
     if let Err(error) = reactor_args.descriptor_bounds() {
         return error.to_compile_error();
     }
@@ -1102,10 +1119,11 @@ fn payload_output(
         Ok(exports) => exports,
         Err(error) => return error.to_compile_error(),
     };
-    let (fingerprint, fingerprint_key) = match payload_compile_inputs(contract) {
-        Ok(inputs) => inputs,
-        Err(error) => return error.to_compile_error(),
-    };
+    let (fingerprint, fingerprint_key) =
+        match payload_compile_inputs(contract, contract_version, &reactor_name) {
+            Ok(inputs) => inputs,
+            Err(error) => return error.to_compile_error(),
+        };
     let macro_abi = boomerang_runtime::binding::COMPONENT_DESCRIPTOR_MACRO_ABI;
     let macro_abi_key = boomerang_runtime::binding::PAYLOAD_MACRO_ABI_COMPILE_INPUT;
     let binding_exports = model.args.iter().filter_map(|arg| {

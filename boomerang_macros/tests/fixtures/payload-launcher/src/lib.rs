@@ -82,10 +82,10 @@ fn bind_lifetime<'store>(
 
 /// Typed references for the standard-action fixture reaction.
 type ActionRefs<'store> = (
-    boomerang::runtime::ActionRef<'store>,
-    boomerang::runtime::ActionRef<'store>,
-    boomerang::runtime::ActionRef<'store>,
-    boomerang::runtime::ActionRef<'store>,
+    boomerang::runtime::ActionRef<'store, u32>,
+    boomerang::runtime::ActionRef<'store, u16>,
+    boomerang::runtime::ActionRef<'store, u32>,
+    boomerang::runtime::ActionRef<'store, u16>,
 );
 
 /// Invokes a reaction whose references include logical and physical actions.

@@ -1,18 +1,28 @@
-use std::{
-    fs,
-    path::PathBuf,
-    process::{Command, Output},
-};
+use std::{fs, path::PathBuf, process::Command};
 
 const MACRO_ABI_INPUT: &str = "BOOMERANG_PAYLOAD_INPUT_V1_MACRO_ABI";
-const SENSOR_FINGERPRINT_INPUT: &str =
-    "BOOMERANG_PAYLOAD_INPUT_V1_FINGERPRINT_6578616d706c652e73656e736f72";
+const SENSOR_FINGERPRINT: &str = "36c0238776080385e17fc9e0b7bb8412b6b6b99eae1ee9eff11af812eb4a923c";
+const EMPTY_FINGERPRINT: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
-fn command(fixture: &str, subcommand: &str, args: &[&str]) -> Command {
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+fn fixture_path(fixture: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
         .join(fixture)
-        .join("Cargo.toml");
+}
+
+fn fingerprint_input(contract: &str, reactor_root: &str) -> String {
+    let manifest_dir =
+        fs::canonicalize(fixture_path("descriptor-pass")).expect("fixture path should resolve");
+    boomerang_runtime::binding::payload_fingerprint_compile_input_key(
+        manifest_dir.to_str().expect("fixture path should be UTF-8"),
+        contract,
+        1,
+        reactor_root,
+    )
+}
+
+fn command(fixture: &str, subcommand: &str, args: &[&str]) -> Command {
+    let manifest = fixture_path(fixture).join("Cargo.toml");
     let target_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("macros crate should be in the workspace")
@@ -27,34 +37,23 @@ fn command(fixture: &str, subcommand: &str, args: &[&str]) -> Command {
         .args(args)
         .env("CARGO_TARGET_DIR", target_dir)
         .env("RUSTFLAGS", "-D warnings")
-        .env(MACRO_ABI_INPUT, "2")
-        .env(
-            SENSOR_FINGERPRINT_INPUT,
-            "36c0238776080385e17fc9e0b7bb8412b6b6b99eae1ee9eff11af812eb4a923c",
-        );
-    for key in [
-        "BOOMERANG_PAYLOAD_INPUT_V1_FINGERPRINT_6578616d706c652e637573746f6d",
-        "BOOMERANG_PAYLOAD_INPUT_V1_FINGERPRINT_6578616d706c652e736861706564",
-        "BOOMERANG_PAYLOAD_INPUT_V1_FINGERPRINT_6578616d706c652e6c69666574696d65",
-        "BOOMERANG_PAYLOAD_INPUT_V1_FINGERPRINT_6578616d706c652e707269766174652d656d707479",
-        "BOOMERANG_PAYLOAD_INPUT_V1_FINGERPRINT_6578616d706c652e616374696f6e73",
+        .env(MACRO_ABI_INPUT, "2");
+    for (contract, reactor_root, fingerprint) in [
+        ("example.sensor", "Match", SENSOR_FINGERPRINT),
+        ("example.custom", "Custom", EMPTY_FINGERPRINT),
+        ("example.shaped", "Shaped", EMPTY_FINGERPRINT),
+        ("example.lifetime", "Lifetime", EMPTY_FINGERPRINT),
+        ("example.private-empty", "Empty", EMPTY_FINGERPRINT),
+        ("example.actions", "Actions", EMPTY_FINGERPRINT),
     ] {
-        command.env(
-            key,
-            "0000000000000000000000000000000000000000000000000000000000000000",
-        );
+        command.env(fingerprint_input(contract, reactor_root), fingerprint);
     }
     command
 }
 
-fn run(mut command: Command, fixture: &str) -> Output {
+fn run(mut command: Command, fixture: &str) -> std::process::Output {
     let output = command.output().expect("cargo command should start");
-    let _ = fs::remove_file(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures")
-            .join(fixture)
-            .join("Cargo.lock"),
-    );
+    let _ = fs::remove_file(fixture_path(fixture).join("Cargo.lock"));
     output
 }
 
@@ -62,6 +61,22 @@ fn failure(command: Command, fixture: &str) -> String {
     let output = run(command, fixture);
     assert!(!output.status.success(), "fixture unexpectedly succeeded");
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+fn input_failure(key: &str, value: Option<&str>) -> String {
+    let mut cargo = command("payload-launcher", "check", &[]);
+    match value {
+        Some(value) => cargo.env(key, value),
+        None => cargo.env_remove(key),
+    };
+    failure(cargo, "payload-launcher")
+}
+
+fn action_failure(feature: &str) -> String {
+    failure(
+        command("descriptor-pass", "check", &["--features", feature]),
+        "descriptor-pass",
+    )
 }
 
 fn cargo(fixture: &str, subcommand: &str, args: &[&str]) -> Result<(), String> {
@@ -131,72 +146,33 @@ fn required_bindings_export_typed_payload_symbols() {
 
 #[test]
 fn required_bindings_compile_in_a_separate_launcher() {
-    cargo_check("payload-launcher", &[]).unwrap();
+    let fixture = "payload-launcher";
+    let output = command(fixture, "metadata", &["--format-version", "1"])
+        .output()
+        .expect("cargo metadata should start");
+    assert!(output.status.success(), "{output:?}");
+    cargo_check("payload-launcher", &["--locked"]).unwrap();
 }
 
 #[test]
 fn payload_compile_inputs_report_invalid_values() {
-    for (key, value, expected) in [
-        (
-            SENSOR_FINGERPRINT_INPUT,
-            None,
-            "missing payload descriptor fingerprint compile input",
-        ),
-        (
-            SENSOR_FINGERPRINT_INPUT,
-            Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
-            "payload descriptor fingerprint must be exactly 64 lowercase hex digits",
-        ),
-        (
-            MACRO_ABI_INPUT,
-            Some("two"),
-            "payload macro ABI compile input must be a decimal u32",
-        ),
-        (
-            MACRO_ABI_INPUT,
-            Some("1"),
-            "payload macro ABI mismatch: expected 2, received 1",
-        ),
-    ] {
-        let mut command = command("payload-launcher", "check", &[]);
-        match value {
-            Some(value) => command.env(key, value),
-            None => command.env_remove(key),
-        };
-        let stderr = failure(command, "payload-launcher");
-        assert!(
-            stderr.contains(expected),
-            "unexpected diagnostic for {key}={value:?}:\n{stderr}"
-        );
-    }
+    let fingerprint = fingerprint_input("example.sensor", "Match");
+    assert!(input_failure(&fingerprint, None).contains("missing payload descriptor fingerprint"));
+    assert!(input_failure(
+        &fingerprint,
+        Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    )
+    .contains("exactly 64 lowercase hex digits"));
+    assert!(input_failure(MACRO_ABI_INPUT, Some("two")).contains("decimal u32"));
+    assert!(input_failure(MACRO_ABI_INPUT, Some("1")).contains("expected 2, received 1"));
 }
 
 #[test]
 fn action_declarations_reject_malformed_attributes_and_unrepresentable_delays() {
-    for (feature, expected) in [
-        (
-            "invalid-action-attribute",
-            "expected `min_delay = <duration>` in action attribute",
-        ),
-        ("invalid-action-duration", "invalid action minimum delay"),
-        (
-            "action-delay-overflow",
-            "action minimum delay exceeds the runtime nanosecond range",
-        ),
-        (
-            "action-duration-unit-overflow",
-            "duration value overflows its unit conversion",
-        ),
-    ] {
-        let stderr = failure(
-            command("descriptor-pass", "check", &["--features", feature]),
-            "descriptor-pass",
-        );
-        assert!(
-            stderr.contains(expected),
-            "unexpected diagnostic for {feature}:\n{stderr}"
-        );
-    }
+    assert!(action_failure("invalid-action-attribute").contains("min_delay = <duration>"));
+    assert!(action_failure("invalid-action-duration").contains("invalid action minimum delay"));
+    assert!(action_failure("action-delay-overflow").contains("nanosecond range"));
+    assert!(action_failure("action-duration-unit-overflow").contains("unit conversion"));
 }
 
 #[test]
@@ -209,16 +185,9 @@ fn payload_only_dependency_graph_excludes_builder() {
         ),
         "payload-launcher",
     );
-    assert!(
-        output.status.success(),
-        "payload-only cargo tree failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        !stdout.contains("boomerang_builder"),
-        "payload graph unexpectedly contains boomerang_builder:\n{stdout}"
-    );
+    assert!(!stdout.contains("boomerang_builder"), "{stdout}");
 }
 
 #[test]

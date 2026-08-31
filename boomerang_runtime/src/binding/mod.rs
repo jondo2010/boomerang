@@ -15,16 +15,30 @@ pub const PAYLOAD_MACRO_ABI_COMPILE_INPUT: &str = "BOOMERANG_PAYLOAD_INPUT_V1_MA
 pub const PAYLOAD_FINGERPRINT_COMPILE_INPUT_PREFIX: &str =
     "BOOMERANG_PAYLOAD_INPUT_V1_FINGERPRINT_";
 
-/// Returns the fingerprint input key for a contract using reversible lowercase UTF-8 hex.
-pub fn payload_fingerprint_compile_input_key(contract: &str) -> String {
+/// Returns the fingerprint input key for one canonical consuming payload facet.
+pub fn payload_fingerprint_compile_input_key(
+    canonical_manifest_dir: &str,
+    contract: &str,
+    contract_version: u64,
+    reactor_root: &str,
+) -> String {
     use std::fmt::Write as _;
 
-    let mut key = String::with_capacity(
-        PAYLOAD_FINGERPRINT_COMPILE_INPUT_PREFIX.len() + contract.len().saturating_mul(2),
-    );
-    key.push_str(PAYLOAD_FINGERPRINT_COMPILE_INPUT_PREFIX);
-    for byte in contract.bytes() {
-        write!(key, "{byte:02x}").expect("writing into a String cannot fail");
+    let version = contract_version.to_string();
+    let mut key = String::from(PAYLOAD_FINGERPRINT_COMPILE_INPUT_PREFIX);
+    let mut separator = "";
+    for (category, value) in [
+        ('M', canonical_manifest_dir),
+        ('C', contract),
+        ('V', version.as_str()),
+        ('R', reactor_root),
+    ] {
+        write!(key, "{separator}{category}{}_", value.len())
+            .expect("writing into a String cannot fail");
+        separator = "_";
+        for byte in value.bytes() {
+            write!(key, "{byte:02x}").expect("writing into a String cannot fail");
+        }
     }
     key
 }
@@ -116,16 +130,26 @@ mod tests {
     }
 
     #[test]
-    fn payload_compile_input_keys_are_versioned_and_reversible() {
+    fn payload_compile_input_keys_are_canonical_and_collision_free() {
         assert_eq!(PAYLOAD_COMPILE_INPUT_SCHEMA, 1);
         assert_eq!(COMPONENT_DESCRIPTOR_MACRO_ABI, 2);
         assert_eq!(
             PAYLOAD_MACRO_ABI_COMPILE_INPUT,
             "BOOMERANG_PAYLOAD_INPUT_V1_MACRO_ABI"
         );
+        let key = payload_fingerprint_compile_input_key("/pkg", "example.sensor", 1, "Match");
+        assert_eq!(key, "BOOMERANG_PAYLOAD_INPUT_V1_FINGERPRINT_M4_2f706b67_C14_6578616d706c652e73656e736f72_V1_31_R5_4d61746368");
+        for distinct in [
+            payload_fingerprint_compile_input_key("/other", "example.sensor", 1, "Match"),
+            payload_fingerprint_compile_input_key("/pkg", "example.other", 1, "Match"),
+            payload_fingerprint_compile_input_key("/pkg", "example.sensor", 2, "Match"),
+            payload_fingerprint_compile_input_key("/pkg", "example.sensor", 1, "Other"),
+        ] {
+            assert_ne!(key, distinct);
+        }
         assert_eq!(
-            payload_fingerprint_compile_input_key("example.sensor"),
-            "BOOMERANG_PAYLOAD_INPUT_V1_FINGERPRINT_6578616d706c652e73656e736f72"
+            key,
+            payload_fingerprint_compile_input_key("/pkg", "example.sensor", 1, "Match")
         );
     }
 }

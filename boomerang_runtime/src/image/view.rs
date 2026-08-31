@@ -1563,7 +1563,7 @@ mod tests {
 
     static REACTORS: [ReactorImage; 2] = [
         ReactorImage::new(
-            BindingSlotIndex::new(4),
+            BindingSlotIndex::new(2),
             StateSlotIndex::new(0),
             ScopeIndex::new(0),
             TableRange::new(0, 1),
@@ -1571,7 +1571,7 @@ mod tests {
             Some(BankInfoImage::new(0, 2)),
         ),
         ReactorImage::new(
-            BindingSlotIndex::new(5),
+            BindingSlotIndex::new(3),
             StateSlotIndex::new(1),
             ScopeIndex::new(2),
             TableRange::new(1, 0),
@@ -1587,18 +1587,18 @@ mod tests {
             min_delay_nanos: 7,
         },
         TableRange::new(0, 2),
-        Some(BindingSlotIndex::new(3)),
+        Some(BindingSlotIndex::new(5)),
     )];
     static PORTS: [PortImage; 2] = [
         PortImage::new(
             ScopeIndex::new(0),
             TableRange::new(2, 1),
-            BindingSlotIndex::new(2),
+            BindingSlotIndex::new(4),
         ),
         PortImage::new(
             ScopeIndex::new(2),
             TableRange::new(3, 1),
-            BindingSlotIndex::new(2),
+            BindingSlotIndex::new(4),
         ),
     ];
     static REACTIONS: [ReactionImage; 2] = [
@@ -1699,8 +1699,7 @@ mod tests {
         ActionIndex::new(0),
     )];
     static SHUTDOWN_ACTIONS: [ActionIndex; 1] = [ActionIndex::new(0)];
-    static IDENTITY_DATA: &str =
-        "plant/controlnetwork/ina-reaction0b-reaction1c-portd-actione-state0f-state1";
+    static IDENTITY_DATA: &str = "plant/controlnetwork/inreaction/r0reaction/r1state/r0state/r1";
     static ROUTES: [RouteImage; 1] = [RouteImage::new(
         IdentityRange::new(13, 10),
         PortIndex::new(1),
@@ -1719,10 +1718,10 @@ mod tests {
     static REQUIRED_BINDINGS: [RequiredBindingImage; 6] = [
         RequiredBindingImage::new(IdentityRange::new(23, 11), BindingKind::Reaction),
         RequiredBindingImage::new(IdentityRange::new(34, 11), BindingKind::Reaction),
-        RequiredBindingImage::new(IdentityRange::new(45, 6), BindingKind::Port),
-        RequiredBindingImage::new(IdentityRange::new(51, 8), BindingKind::Action),
-        RequiredBindingImage::new(IdentityRange::new(59, 8), BindingKind::StateInitializer),
-        RequiredBindingImage::new(IdentityRange::new(67, 8), BindingKind::StateInitializer),
+        RequiredBindingImage::new(IdentityRange::new(45, 8), BindingKind::StateInitializer),
+        RequiredBindingImage::new(IdentityRange::new(53, 8), BindingKind::StateInitializer),
+        RequiredBindingImage::new(IdentityRange::new(15, 5), BindingKind::Port),
+        RequiredBindingImage::new(IdentityRange::new(16, 4), BindingKind::Action),
     ];
 
     static IMAGE: EnclaveImage<'static> = EnclaveImage {
@@ -1755,8 +1754,7 @@ mod tests {
     };
 
     static SECOND_IMAGE: EnclaveImage<'static> = EnclaveImage {
-        identity_data:
-            "plant/otherxxnetwork/ina-reaction0b-reaction1c-portd-actione-state0f-state1",
+        identity_data: "plant/otherxxnetwork/inreaction/r0reaction/r1state/r0state/r1",
         enclave_id: IdentityRange::new(0, 13),
         routes: TinyMapView::new(&OUTBOUND_ROUTES),
         ..IMAGE
@@ -1802,11 +1800,11 @@ mod tests {
         assert_eq!(view.actions().len(), 1);
         assert_eq!(
             view.actions()[ActionIndex::new(0)].binding(),
-            Some(BindingSlotIndex::new(3))
+            Some(BindingSlotIndex::new(5))
         );
         assert_eq!(
             view.ports()[PortIndex::new(0)].binding(),
-            BindingSlotIndex::new(2)
+            BindingSlotIndex::new(4)
         );
         assert_eq!(
             view.actions()[ActionIndex::new(0)].timing(),
@@ -1841,8 +1839,8 @@ mod tests {
         );
         assert_eq!(view.shutdown_actions(), &SHUTDOWN_ACTIONS);
         assert_eq!(
-            view.required_binding_id(BindingSlotIndex::new(4)).as_str(),
-            "e-state0"
+            view.required_binding_id(BindingSlotIndex::new(2)).as_str(),
+            "state/r0"
         );
         assert_eq!(view.storage_bounds().event_capacity(), 8);
     }
@@ -1950,8 +1948,7 @@ mod tests {
         )];
         let duplicate_enclaves = [
             EnclaveImage {
-                identity_data:
-                    "plant/anothernetwork/ina-reaction0b-reaction1c-portd-actione-state0f-state1",
+                identity_data: "plant/anothernetwork/inreaction/r0reaction/r1state/r0state/r1",
                 enclave_id: IdentityRange::new(0, 13),
                 ..IMAGE
             },
@@ -1990,29 +1987,25 @@ mod tests {
         ];
         let enclaves = [
             EnclaveImage {
-                identity_data:
-                    "zzzza/controlnetwork/ina-reaction0b-reaction1c-portd-actione-state0f-state1",
+                identity_data: "zzzza/controlnetwork/inreaction/r0reaction/r1state/r0state/r1",
                 enclave_id: IdentityRange::new(0, 13),
                 routes: TinyMapView::new(&EMPTY_ROUTES),
                 ..IMAGE
             },
             EnclaveImage {
-                identity_data:
-                    "zzzzb/controlnetwork/ina-reaction0b-reaction1c-portd-actione-state0f-state1",
+                identity_data: "zzzzb/controlnetwork/inreaction/r0reaction/r1state/r0state/r1",
                 enclave_id: IdentityRange::new(0, 13),
                 routes: TinyMapView::new(&EMPTY_ROUTES),
                 ..IMAGE
             },
             EnclaveImage {
-                identity_data:
-                    "aaaaa/controlnetwork/ina-reaction0b-reaction1c-portd-actione-state0f-state1",
+                identity_data: "aaaaa/controlnetwork/inreaction/r0reaction/r1state/r0state/r1",
                 enclave_id: IdentityRange::new(0, 13),
                 routes: TinyMapView::new(&EMPTY_ROUTES),
                 ..IMAGE
             },
             EnclaveImage {
-                identity_data:
-                    "aaaab/controlnetwork/ina-reaction0b-reaction1c-portd-actione-state0f-state1",
+                identity_data: "aaaab/controlnetwork/inreaction/r0reaction/r1state/r0state/r1",
                 enclave_id: IdentityRange::new(0, 13),
                 routes: TinyMapView::new(&EMPTY_ROUTES),
                 ..IMAGE
@@ -2079,7 +2072,7 @@ mod tests {
                 ActionSlotIndex::new(0),
                 timing,
                 TableRange::new(0, 2),
-                matches!(timing, ActionTiming::Standard { .. }).then_some(BindingSlotIndex::new(3)),
+                matches!(timing, ActionTiming::Standard { .. }).then_some(BindingSlotIndex::new(5)),
             )];
             let image = EnclaveImage {
                 actions: TinyMapView::new(&actions),
@@ -2089,7 +2082,7 @@ mod tests {
             assert_eq!(view.actions()[ActionIndex::new(0)].timing(), timing);
             assert_eq!(
                 view.actions()[ActionIndex::new(0)].binding(),
-                matches!(timing, ActionTiming::Standard { .. }).then_some(BindingSlotIndex::new(3))
+                matches!(timing, ActionTiming::Standard { .. }).then_some(BindingSlotIndex::new(5))
             );
         }
     }
@@ -2114,7 +2107,7 @@ mod tests {
                 min_delay_nanos: 7,
             },
             TableRange::new(4, 1),
-            Some(BindingSlotIndex::new(3)),
+            Some(BindingSlotIndex::new(5)),
         )];
         let cases = [
             (
@@ -2275,15 +2268,15 @@ mod tests {
         let duplicate_bindings = [
             RequiredBindingImage::new(IdentityRange::new(13, 4), BindingKind::Reaction),
             RequiredBindingImage::new(IdentityRange::new(13, 4), BindingKind::Reaction),
-            RequiredBindingImage::new(IdentityRange::new(17, 6), BindingKind::Port),
-            RequiredBindingImage::new(IdentityRange::new(23, 8), BindingKind::Action),
-            RequiredBindingImage::new(IdentityRange::new(31, 8), BindingKind::StateInitializer),
-            RequiredBindingImage::new(IdentityRange::new(39, 8), BindingKind::StateInitializer),
+            RequiredBindingImage::new(IdentityRange::new(17, 8), BindingKind::StateInitializer),
+            RequiredBindingImage::new(IdentityRange::new(25, 8), BindingKind::StateInitializer),
+            RequiredBindingImage::new(IdentityRange::new(18, 7), BindingKind::Port),
+            RequiredBindingImage::new(IdentityRange::new(9, 4), BindingKind::Action),
         ];
-        let duplicate_binding_identity_data = "plant/controlsamet-portu-actionv-state0w-state1";
+        let duplicate_binding_identity_data = "plant/controlsamestate/r0state/r1";
         let invalid_bank_reactors = [
             ReactorImage::new(
-                BindingSlotIndex::new(4),
+                BindingSlotIndex::new(2),
                 StateSlotIndex::new(0),
                 ScopeIndex::new(0),
                 TableRange::new(0, 1),

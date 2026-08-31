@@ -32,9 +32,9 @@ type InitializedContexts = (
 /// Heap-backed factories and invokers bound directly to compiled-image slots.
 #[derive(Default)]
 pub struct OwnedBindings {
-    /// Factories and invokers for the image's typed required binding slots.
+    /// Typed state initializers, reaction invokers, and port/action factories by required slot.
     bindings: TinySecondaryMap<BindingSlotIndex, Binding>,
-    /// Stable slots supplied more than once by the caller.
+    /// Repeated caller-supplied slots retained for pre-initialization duplicate validation.
     duplicate_slots: TinySecondaryMap<BindingSlotIndex, ()>,
 }
 

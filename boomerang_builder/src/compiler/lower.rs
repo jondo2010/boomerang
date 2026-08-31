@@ -213,35 +213,37 @@ impl<'a> DescriptorSlots<'a> {
         logical: &super::PortId,
         bank: Option<super::BankMember>,
     ) -> Result<PortSlotId, CompileError> {
-        let declaration = bank.map_or_else(
-            || logical.path().clone(),
-            |_| {
-                logical
-                    .path()
-                    .parent()
-                    .expect("validated bank member has a base")
-            },
-        );
-        let matches = self
-            .descriptor
-            .port_slots()
-            .iter()
-            .filter(|slot| self.matches_relative_path(&declaration, slot.id.path()))
-            .map(|slot| slot.id.clone())
-            .collect::<Vec<_>>();
-        self.one_slot("port", logical.path(), matches)
+        let declaration = match bank {
+            Some(_) => logical
+                .path()
+                .parent()
+                .expect("validated bank member has a base"),
+            None => logical.path().clone(),
+        };
+        self.one_slot(
+            "port",
+            logical.path(),
+            self.descriptor
+                .port_slots()
+                .iter()
+                .filter(|slot| self.matches_relative_path(&declaration, slot.id.path()))
+                .map(|slot| slot.id.clone())
+                .collect(),
+        )
     }
 
     /// Resolves the descriptor action slot for one logical action.
     fn action_slot(&self, logical: &super::ActionId) -> Result<ActionSlotId, CompileError> {
-        let matches = self
-            .descriptor
-            .action_slots()
-            .iter()
-            .filter(|slot| self.matches_relative_path(logical.path(), slot.id.path()))
-            .map(|slot| slot.id.clone())
-            .collect::<Vec<_>>();
-        self.one_slot("action", logical.path(), matches)
+        self.one_slot(
+            "action",
+            logical.path(),
+            self.descriptor
+                .action_slots()
+                .iter()
+                .filter(|slot| self.matches_relative_path(logical.path(), slot.id.path()))
+                .map(|slot| slot.id.clone())
+                .collect(),
+        )
     }
 
     /// Converts a matching descriptor-slot set into one required binding slot.
@@ -1472,8 +1474,8 @@ mod tests {
             COMPONENT_DESCRIPTOR_MACRO_ABI,
         },
         runtime::image::{
-            ActionIndex, ActionTiming, ModeIndex, ReactionIndex, ReactorIndex, RouteDirection,
-            RouteIndex, ScopeIndex, TimingDomain,
+            ActionIndex, ActionTiming, BindingKind, ModeIndex, ReactionIndex, ReactorIndex,
+            RouteDirection, RouteIndex, ScopeIndex, TimingDomain,
         },
     };
     fn descriptor(contract: &str, bounds: DescriptorBounds) -> ComponentDescriptor {
@@ -1515,15 +1517,26 @@ mod tests {
             _ => panic!("unexpected test descriptor contract {contract}"),
         };
         let reactor = ReactorSlotId::new(root).unwrap();
-        let ports = match contract {
-            "controller.v1" => ["output", "array_in", "bank_in"].as_slice(),
-            "sensor.v1" => ["input"].as_slice(),
-            _ => panic!("unexpected test descriptor contract {contract}"),
+        let port = |name| PortSlot {
+            id: PortSlotId::new(format!("{root}/{name}")).unwrap(),
+            reactor: reactor.clone(),
+            direction: if name == "output" {
+                PortDirection::Output
+            } else {
+                PortDirection::Input
+            },
         };
-        let actions = match contract {
-            "controller.v1" => ["pulse"].as_slice(),
-            "sensor.v1" => ["ack"].as_slice(),
-            _ => panic!("unexpected test descriptor contract {contract}"),
+        let action = |name| ActionSlot {
+            id: ActionSlotId::new(format!("{root}/{name}")).unwrap(),
+            reactor: reactor.clone(),
+        };
+        let (ports, actions) = match contract {
+            "controller.v1" => (
+                vec![port("output"), port("array_in"), port("bank_in")],
+                vec![action("pulse")],
+            ),
+            "sensor.v1" => (vec![port("input")], vec![action("ack")]),
+            _ => unreachable!(),
         };
         ComponentDescriptor::try_new(
             contract.parse().unwrap(),
@@ -1533,25 +1546,8 @@ mod tests {
                 id: reactor.clone(),
                 parent: None,
             }],
-            ports
-                .iter()
-                .map(|port| PortSlot {
-                    id: PortSlotId::new(format!("{root}/{port}")).unwrap(),
-                    reactor: reactor.clone(),
-                    direction: match *port {
-                        "output" => PortDirection::Output,
-                        "input" | "array_in" | "bank_in" => PortDirection::Input,
-                        _ => unreachable!("test descriptor uses known ports"),
-                    },
-                })
-                .collect(),
-            actions
-                .iter()
-                .map(|action| ActionSlot {
-                    id: ActionSlotId::new(format!("{root}/{action}")).unwrap(),
-                    reactor: reactor.clone(),
-                })
-                .collect(),
+            ports,
+            actions,
             reactions
                 .iter()
                 .map(|reaction| ReactionSlot {
@@ -2467,16 +2463,14 @@ mod tests {
         );
         let standard_action = enclave.actions()[ActionIndex::new(0)];
         assert_eq!(
-            standard_action
-                .binding()
-                .map(|slot| enclave.required_bindings()[slot].kind()),
-            Some(crate::runtime::image::BindingKind::Action)
+            enclave.required_bindings()[standard_action.binding().unwrap()].kind(),
+            BindingKind::Action
         );
         assert_eq!(enclave.actions()[ActionIndex::new(3)].binding(), None);
         let port_binding = enclave.ports()[crate::runtime::image::PortIndex::new(0)].binding();
         assert_eq!(
             enclave.required_bindings()[port_binding].kind(),
-            crate::runtime::image::BindingKind::Port
+            BindingKind::Port
         );
         assert_eq!(
             enclave.actions()[ActionIndex::new(3)].timing(),

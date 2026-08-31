@@ -145,9 +145,9 @@ pub mod actions {
         bounds(queue_capacity = 1, payload_bytes = 1, state_bytes = 1, scratch_bytes = 1)
     )]
     pub fn Actions(
-        #[logical_action] logical_now: u32,
+        #[logical_action(min_delay = 0)] logical_now: u32,
         #[logical_action(min_delay = 10 msec)] logical_later: u32,
-        #[physical_action] physical_now: u16,
+        #[physical_action(min_delay = 0)] physical_now: u16,
         #[physical_action(min_delay = 7 nsec)] physical_later: u16,
     ) -> impl Reactor {
         reaction! {

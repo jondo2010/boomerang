@@ -36,6 +36,10 @@ pub fn reactor_ports(
 /// }
 /// ```
 ///
+/// Action arguments use `#[logical_action]` or `#[physical_action]`; the argument type is the
+/// action payload type. Both attributes accept an optional `min_delay = <duration>`, where a
+/// positive duration includes a unit (for example, `10 msec`) and zero may be written as `0`.
+///
 /// ### Using your own `state` struct
 ///
 /// By default the macro will generate a state struct definition for you (e.g., `MyComponentState`) consisting of all

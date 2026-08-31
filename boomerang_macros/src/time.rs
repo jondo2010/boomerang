@@ -80,6 +80,10 @@ impl Parse for Dur {
         let value_span = value.span();
         let value_u64 = value.base10_parse::<u64>()?;
 
+        if input.is_empty() && value_u64 == 0 {
+            return Ok(Dur(std::time::Duration::ZERO));
+        }
+
         let lookahead = input.lookahead1();
         if lookahead.peek(kw::ns) {
             input.parse::<kw::ns>()?;
@@ -253,6 +257,12 @@ mod tests {
         assert_eq!(parse.0, StdDuration::from_secs(SECONDS_PER_WEEK));
         let parse: Dur = parse_quote!(2 weeks);
         assert_eq!(parse.0, StdDuration::from_secs(2 * SECONDS_PER_WEEK));
+    }
+
+    #[test]
+    fn test_unitless_zero() {
+        let parse: Dur = parse_quote!(0);
+        assert_eq!(parse.0, StdDuration::ZERO);
     }
 
     #[test]

@@ -70,11 +70,19 @@ fn resolution_returns_exact_package_ids_and_rejects_nonmembers() {
     assert_eq!(host.target.as_deref(), Some("x86_64-unknown-linux-gnu"));
     assert_eq!(
         host.target_json.as_deref(),
-        Some(workspace.join("targets/host.json").as_path())
+        Some(
+            fs::canonicalize(workspace.join("targets/host.json"))
+                .unwrap()
+                .as_path()
+        )
     );
     assert_eq!(
         host.cargo_config.as_deref(),
-        Some(workspace.join(".cargo/host.toml").as_path())
+        Some(
+            fs::canonicalize(workspace.join(".cargo/host.toml"))
+                .unwrap()
+                .as_path()
+        )
     );
 
     assert_eq!(

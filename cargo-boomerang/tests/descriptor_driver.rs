@@ -15,7 +15,15 @@ fn driver_selects_only_bound_descriptors_and_emits_topology() {
             .components()
             .map(|(id, _)| id.to_string())
             .collect::<Vec<_>>(),
-        ["vehicle/controller", "vehicle/sensor"]
+        ["controller", "sensor"]
+    );
+    assert_eq!(
+        output
+            .topology()
+            .components()
+            .map(|(_, component)| (component.contract().as_str(), component.contract_version()))
+            .collect::<Vec<_>>(),
+        [("vehicle.controller", 1), ("vehicle.sensor", 1)]
     );
     assert_eq!(
         output.selected_packages().collect::<Vec<_>>(),

@@ -16,7 +16,7 @@ use boomerang_builder::{
 };
 use cargo_metadata::Metadata;
 
-use crate::{generated::render_descriptor_driver, resolve_workspace};
+use crate::{generated::render_descriptor_driver, resolve_workspace, ResolvedWorkspace};
 
 /// Validated descriptor-driver result plus Cargo diagnostics captured from stderr.
 pub struct DriverOutput {
@@ -56,7 +56,12 @@ pub fn run_descriptor_driver(
     deployment_name: &str,
 ) -> Result<DriverOutput> {
     let resolved = resolve_workspace(workspace, deployment_name)?;
-    let generated = render_descriptor_driver(&resolved)?;
+    run_resolved_descriptor_driver(&resolved)
+}
+
+/// Runs the generated host descriptor driver for an already resolved workspace.
+pub(crate) fn run_resolved_descriptor_driver(resolved: &ResolvedWorkspace) -> Result<DriverOutput> {
+    let generated = render_descriptor_driver(resolved)?;
     let driver_parent = resolved
         .target_directory()
         .join("boomerang/descriptor-driver");
@@ -87,7 +92,7 @@ pub fn run_descriptor_driver(
     require_success("locked metadata verification", &metadata, &build_log)?;
     let metadata: Metadata = serde_json::from_slice(&metadata.stdout)
         .context("failed to decode generated Cargo metadata")?;
-    validate_generated_graph(&resolved, &metadata)?;
+    validate_generated_graph(resolved, &metadata)?;
 
     let target_dir = crate_dir.join("target");
     let target_dir = target_dir.to_string_lossy().into_owned();

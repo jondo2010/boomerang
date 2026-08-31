@@ -12,10 +12,12 @@ anyhow.workspace = true
 blake3.workspace = true
 boomerang_builder = { workspace = true, features = ["host-interchange"] }
 cargo_metadata.workspace = true
+clap = { version = "4.2", features = ["derive"] }
 serde = { workspace = true, features = ["derive"] }
 serde_path_to_error.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+target-lexicon = "0.13"
 toml.workspace = true
 
 [[bin]]

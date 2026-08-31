@@ -281,8 +281,13 @@ impl Parse for Model {
     }
 }
 
-impl ToTokens for Model {
-    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+impl Model {
+    /// Emits a hosted reaction declaration with optional descriptor-slot metadata.
+    pub(crate) fn to_tokens_with_descriptor_slot(
+        &self,
+        tokens: &mut proc_macro2::TokenStream,
+        descriptor_slot: Option<proc_macro2::TokenStream>,
+    ) {
         let name = self.name.as_ref().map_or_else(
             || quote::quote! { None },
             |n| {
@@ -302,6 +307,11 @@ impl ToTokens for Model {
             let _ = ctx
                 .add_reaction(#name)
         };
+        if let Some(descriptor_slot) = descriptor_slot {
+            reaction.append_all(quote! {
+                .with_descriptor_slot(#descriptor_slot)
+            });
+        }
 
         // Add appropriate trigger methods based on trigger type
         for trigger in triggers {
@@ -386,6 +396,12 @@ impl ToTokens for Model {
         });
 
         tokens.append_all(reaction);
+    }
+}
+
+impl ToTokens for Model {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        self.to_tokens_with_descriptor_slot(tokens, None);
     }
 }
 

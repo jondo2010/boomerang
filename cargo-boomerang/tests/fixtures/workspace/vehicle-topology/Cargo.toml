@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+boomerang = { path = "../../../../../boomerang" }
 boomerang_builder = { path = "../../../../../boomerang_builder", features = ["host-interchange"] }
 
 [target.'cfg(target_os = "none")'.dependencies]

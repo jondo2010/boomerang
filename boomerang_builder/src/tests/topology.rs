@@ -1,12 +1,12 @@
 use crate::{
     compiler::{
         ActionId, ActionKind, ApplicationTopology, ApplicationTopologyBuilder, BankMember,
-        BoundaryId, ComponentInstance, ComponentInstanceId, ConnectionSemantics, ModeId,
-        ModeTransition, ModeTransitionKind, PlacementGroupId, PortDirection, PortId, ReactionId,
-        ReactionOptions, ReactionRelation, ReactionRelationFlags, ReactionRelationTarget,
-        Reactor as TopologyReactor, ReactorId, StableEnclaveId,
+        BoundaryId, ComponentInstance, ComponentInstanceId, ConnectionSemantics, ContractId,
+        ModeId, ModeTransition, ModeTransitionKind, PlacementGroupId, PortDirection, PortId,
+        ReactionId, ReactionOptions, ReactionRelation, ReactionRelationFlags,
+        ReactionRelationTarget, Reactor as TopologyReactor, ReactorId, StableEnclaveId,
     },
-    runtime, Assembly, ModeKind, ReactorPlacement, TimerSpec, TriggerMode,
+    runtime, Assembly, ModeKind, ReactionSlotId, ReactorPlacement, TimerSpec, TriggerMode,
 };
 
 fn id<T: std::str::FromStr>(value: &str) -> T
@@ -770,17 +770,26 @@ fn assembly_modal_projection_rejects_invalid_structure() {
 }
 
 #[test]
-fn application_topology_projection_does_not_consume_runtime_assembly() {
+fn application_topology_projection_preserves_component_metadata_without_consuming_assembly() {
     let mut assembly = Assembly::new();
-    assembly
-        .add_reactor("root", None, None, (), ReactorPlacement::Local)
+    let mut root = assembly.add_reactor("root", None, None, (), ReactorPlacement::Local);
+    root.set_component_contract(ContractId::new("root.contract").unwrap(), 7);
+    root.add_reaction(Some("start"))
+        .with_descriptor_slot(ReactionSlotId::new("Root/start").unwrap())
+        .with_startup_trigger()
+        .with_reaction_fn(|_ctx, _state, (_startup,)| {})
         .finish()
         .unwrap();
+    root.finish().unwrap();
 
     let topology = assembly.application_topology().unwrap();
+    let (component_id, component) = topology.components().next().unwrap();
+    assert_eq!(component_id.to_string(), "root");
+    assert_eq!(component.contract().as_str(), "root.contract");
+    assert_eq!(component.contract_version(), 7);
     assert_eq!(
-        topology.components().next().unwrap().1.contract_version(),
-        1
+        topology.reactions().next().unwrap().0.to_string(),
+        "root/start"
     );
     assert_eq!(topology, assembly.application_topology().unwrap());
     let lowered = assembly

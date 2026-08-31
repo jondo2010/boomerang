@@ -33,6 +33,17 @@ impl Manifest {
             );
         }
         for (name, deployment) in &self.deployments {
+            if name.is_empty()
+                || matches!(name.as_str(), "." | "..")
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            {
+                return Err(invalid_deployment(
+                    name,
+                    "deployment names must be non-empty and contain only ASCII letters, digits, '-', '_', or '.'; '.' and '..' are reserved",
+                ));
+            }
             deployment.validate(name)?;
         }
         Ok(())

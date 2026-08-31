@@ -40,7 +40,7 @@ fn resolution_returns_exact_package_ids_and_rejects_nonmembers() {
     let topology = resolved.package("vehicle-topology").unwrap();
     assert_eq!(
         topology.manifest_path,
-        workspace.join("vehicle-topology/Cargo.toml")
+        fs::canonicalize(workspace.join("vehicle-topology/Cargo.toml")).unwrap()
     );
     assert_eq!(
         topology.id,

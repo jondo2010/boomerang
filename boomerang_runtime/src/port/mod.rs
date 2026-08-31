@@ -28,6 +28,9 @@ pub trait BasePort: Debug + Display + Downcast + Send + Sync {
 
     /// Get the internal type name str
     fn type_name(&self) -> &'static str;
+
+    /// Replace the value from a scheduler-boundary payload, returning it on type mismatch.
+    fn set_erased(&mut self, value: Box<dyn ReactorData>) -> Result<(), Box<dyn ReactorData>>;
 }
 impl_downcast!(BasePort);
 
@@ -120,6 +123,16 @@ impl<T: ReactorData> BasePort for Port<T> {
 
     fn type_name(&self) -> &'static str {
         std::any::type_name::<T>()
+    }
+
+    fn set_erased(&mut self, value: Box<dyn ReactorData>) -> Result<(), Box<dyn ReactorData>> {
+        match value.downcast::<T>() {
+            Ok(value) => {
+                self.value = Some(*value);
+                Ok(())
+            }
+            Err(value) => Err(value),
+        }
     }
 }
 

@@ -11,8 +11,8 @@ use crate::{
         ReactionIndex, ReactorIndex, StateSlotIndex, TimingDomain,
     },
     port::{BasePort, Port, PortKey},
-    Context, Duration, EnclaveKey, PayloadType, ReactionRefs, ReactorData, Refs, RefsMut, Tag,
-    TriggerRes,
+    CompiledModeEffectRef, Context, Duration, EnclaveKey, PayloadType, ReactionRefs, ReactorData,
+    Refs, RefsMut, Tag, TriggerRes,
 };
 
 /// Errors returned by direct reaction implementations.
@@ -97,7 +97,30 @@ impl OwnedBindings {
             + Sync
             + 'static,
     {
-        self.insert_binding(slot, Binding::Reaction(Box::new(function)));
+        self.insert_binding(
+            slot,
+            Binding::Reaction(Box::new(LegacyReactionInvoker(function))),
+        );
+        self
+    }
+
+    /// Binds a generated reaction that consumes its validated canonical mode effect.
+    pub fn bind_compiled_reaction<F>(mut self, slot: BindingSlotIndex, function: F) -> Self
+    where
+        F: for<'store> FnMut(
+                &mut Context,
+                &mut dyn ReactorData,
+                ReactionRefs<'store>,
+                CompiledModeEffectRef,
+            ) -> Result<(), ReactionBindingError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.insert_binding(
+            slot,
+            Binding::Reaction(Box::new(CompiledReactionInvoker(function))),
+        );
         self
     }
 
@@ -235,10 +258,14 @@ trait ReactionInvoker: Send + Sync {
         context: &mut Context,
         state: &mut dyn ReactorData,
         refs: ReactionRefs<'_>,
+        mode_effect: Option<CompiledModeEffectRef>,
     ) -> Result<(), ReactionBindingError>;
 }
 
-impl<F> ReactionInvoker for F
+/// Adapter retaining the legacy live-key reaction boundary.
+struct LegacyReactionInvoker<F>(F);
+
+impl<F> ReactionInvoker for LegacyReactionInvoker<F>
 where
     F: for<'store> FnMut(
             &mut Context,
@@ -255,8 +282,37 @@ where
         context: &mut Context,
         state: &mut dyn ReactorData,
         refs: ReactionRefs<'_>,
+        _mode_effect: Option<CompiledModeEffectRef>,
     ) -> Result<(), ReactionBindingError> {
-        self(context, state, refs)
+        (self.0)(context, state, refs)
+    }
+}
+
+/// Adapter supplying one image-owned canonical mode effect to generated compiled code.
+struct CompiledReactionInvoker<F>(F);
+
+impl<F> ReactionInvoker for CompiledReactionInvoker<F>
+where
+    F: for<'store> FnMut(
+            &mut Context,
+            &mut dyn ReactorData,
+            ReactionRefs<'store>,
+            CompiledModeEffectRef,
+        ) -> Result<(), ReactionBindingError>
+        + Send
+        + Sync
+        + 'static,
+{
+    fn invoke(
+        &mut self,
+        context: &mut Context,
+        state: &mut dyn ReactorData,
+        refs: ReactionRefs<'_>,
+        mode_effect: Option<CompiledModeEffectRef>,
+    ) -> Result<(), ReactionBindingError> {
+        let mode_effect =
+            mode_effect.ok_or_else(|| crate::ReactionRefsError::missing("compiled mode effect"))?;
+        (self.0)(context, state, refs, mode_effect)
     }
 }
 
@@ -351,12 +407,28 @@ pub enum OwnedStorageError {
         /// The compiled minimum delay in nanoseconds.
         min_delay_nanos: u64,
     },
-    /// A periodic timer requires recurring scheduling support outside this executor slice.
-    #[error("periodic timer at action slot {slot} with period {period_nanos}ns is unsupported")]
-    PeriodicTimerUnsupported {
-        /// The compiled timer action storage slot.
+    /// A periodic timer cannot make logical progress with a zero period.
+    #[error("periodic timer at action slot {slot} has a zero period")]
+    ZeroPeriodTimer {
+        /// Compiled timer action storage slot.
         slot: ActionSlotIndex,
-        /// The requested recurring period in nanoseconds.
+    },
+    /// A periodic timer period exceeds the runtime duration representation.
+    #[error("periodic timer at action slot {slot} has unrepresentable period {period_nanos}ns")]
+    TimerPeriodOutOfRange {
+        /// Compiled timer action storage slot.
+        slot: ActionSlotIndex,
+        /// Unrepresentable period in nanoseconds.
+        period_nanos: u64,
+    },
+    /// A periodic timer's first successor exceeds the runtime logical tag range.
+    #[error("periodic timer at action slot {slot} overflows after startup {startup_nanos}ns plus period {period_nanos}ns")]
+    PeriodicTimerTagOverflow {
+        /// Compiled timer action storage slot.
+        slot: ActionSlotIndex,
+        /// Initial logical timer tag in nanoseconds.
+        startup_nanos: u64,
+        /// Positive recurrence period in nanoseconds.
         period_nanos: u64,
     },
     /// A reaction enables modes other than its statically owning scope's mode.
@@ -373,7 +445,7 @@ pub enum OwnedStorageError {
     },
     /// A direct reaction requested a dynamic mode transition without a stable compiled mode identity.
     #[error("reaction {reaction} requested an unsupported dynamic mode transition")]
-    DynamicModeTransitionUnsupported {
+    LegacyModeTransition {
         /// The reaction awaiting generated compiled-mode identities.
         reaction: ReactionIndex,
     },
@@ -392,6 +464,20 @@ pub enum OwnedStorageError {
     /// A directly bound reaction returned a reference-extraction error.
     #[error(transparent)]
     Reaction(#[from] ReactionBindingError),
+    /// An async event named a port outside this compiled Enclave image.
+    #[error("boundary port key {key} is not present in the compiled image")]
+    BoundaryPortNotFound {
+        /// Runtime-facing port key supplied by the boundary event.
+        key: PortKey,
+    },
+    /// An async boundary payload did not match the compiled port binding type.
+    #[error("boundary port {port} requires payload type {expected}")]
+    BoundaryPortPayloadTypeMismatch {
+        /// Dense compiled boundary port target.
+        port: PortIndex,
+        /// Concrete payload type required by its direct binding.
+        expected: &'static str,
+    },
 }
 
 /// Mutable, heap-backed storage for one validated compiled enclave image.
@@ -474,6 +560,7 @@ impl<'image> OwnedStorage<'image> {
         } = bindings;
 
         validate_startup_delays(&image)?;
+        validate_periodic_timer_startups(&image)?;
         validate_reaction_mode_filters(&image)?;
         let mut actions = initialize_actions(&action_images, &bindings)?;
         let mut ports = initialize_ports(&image, &bindings)?;
@@ -504,6 +591,13 @@ impl<'image> OwnedStorage<'image> {
         self.ports.values_mut().for_each(|port| port.cleanup());
     }
 
+    /// Sets the scheduler's shared monotonic origin on every owned reaction context.
+    pub(crate) fn set_scheduler_origin(&mut self, origin: Instant) {
+        self.contexts
+            .values_mut()
+            .for_each(|context| context.start_time = origin);
+    }
+
     owned_scheduler_readers! {
         fn scheduler_action(action: ActionKey) -> crate::image::ActionIndex |storage| storage.image.actions().iter().find_map(|(index, image)| (storage.actions[image.storage_slot()].key() == action).then_some(index)).expect("owned action key must belong to the validated compiled image");
         fn scheduler_event_rx() -> crate::Receiver<crate::event::AsyncEvent> |storage| storage.event_rx.clone();
@@ -515,6 +609,25 @@ impl<'image> OwnedStorage<'image> {
         fn scheduler_clear_action(action: crate::image::ActionIndex) |storage| { let slot = storage.image.actions()[action].storage_slot(); storage.actions[slot].clear_values(); };
         fn scheduler_reschedule_action(action: crate::image::ActionIndex, from: Tag, to: Tag) |storage| if from != to { let slot = storage.image.actions()[action].storage_slot(); storage.actions[slot].reschedule_value(from, to); };
         fn take_scheduler_shutdown_tx() -> crate::keepalive::Sender |storage| storage.shutdown_tx.take().expect("owned storage can be attached to only one scheduler");
+    }
+
+    /// Writes one validated scheduler-boundary value and returns its dense compiled port.
+    pub(crate) fn scheduler_write_boundary_port(
+        &mut self,
+        key: PortKey,
+        value: Box<dyn ReactorData>,
+    ) -> Result<PortIndex, OwnedStorageError> {
+        let port = self
+            .ports
+            .iter()
+            .find_map(|(port, storage)| (storage.get_key() == key).then_some(port))
+            .ok_or(OwnedStorageError::BoundaryPortNotFound { key })?;
+        let storage = &mut self.ports[port];
+        let expected = storage.type_name();
+        storage
+            .set_erased(value)
+            .map_err(|_| OwnedStorageError::BoundaryPortPayloadTypeMismatch { port, expected })?;
+        Ok(port)
     }
 
     /// Invokes a directly bound reaction using the image's ordered port and action references.
@@ -541,9 +654,14 @@ impl<'image> OwnedStorage<'image> {
             ports_mut: RefsMut::new(&mut references.effect_ports),
             actions: RefsMut::new(&mut references.actions),
         };
-        invoker.invoke(context, state.value.as_mut(), refs)?;
+        invoker.invoke(
+            context,
+            state.value.as_mut(),
+            refs,
+            reaction_image.mode_effect(),
+        )?;
         if context.trigger_res.scheduled_mode.is_some() {
-            return Err(OwnedStorageError::DynamicModeTransitionUnsupported { reaction });
+            return Err(OwnedStorageError::LegacyModeTransition { reaction });
         }
         Ok(())
     }
@@ -727,12 +845,50 @@ fn validate_action_timing(
                 .map(|_| ())
                 .map_err(|_| OwnedStorageError::DelayOutOfRange { min_delay_nanos })?,
             ActionTiming::Timer {
+                period_nanos: Some(0),
+            } => return Err(OwnedStorageError::ZeroPeriodTimer { slot }),
+            ActionTiming::Timer {
                 period_nanos: Some(period_nanos),
-            } => return Err(OwnedStorageError::PeriodicTimerUnsupported { slot, period_nanos }),
+            } => {
+                i64::try_from(period_nanos)
+                    .map_err(|_| OwnedStorageError::TimerPeriodOutOfRange { slot, period_nanos })?;
+            }
             ActionTiming::Timer { .. } | ActionTiming::Shutdown => {}
         }
     }
     Ok(())
+}
+
+/// Validates each periodic timer's first recurrence before any user state is initialized.
+fn validate_periodic_timer_startups(image: &EnclaveImageView<'_>) -> Result<(), OwnedStorageError> {
+    image
+        .timer_startup_actions()
+        .iter()
+        .chain(
+            image
+                .scopes()
+                .keys()
+                .flat_map(|scope| image.scope_timer_startups(scope)),
+        )
+        .try_for_each(|startup| {
+            let action = image.actions()[startup.action()];
+            let ActionTiming::Timer {
+                period_nanos: Some(period_nanos),
+            } = action.timing()
+            else {
+                return Ok(());
+            };
+            let startup_nanos = startup.logical_delay_nanos();
+            startup_nanos
+                .checked_add(period_nanos)
+                .filter(|&successor| successor <= i64::MAX as u64)
+                .map(|_| ())
+                .ok_or(OwnedStorageError::PeriodicTimerTagOverflow {
+                    slot: action.storage_slot(),
+                    startup_nanos,
+                    period_nanos,
+                })
+        })
 }
 
 /// Initializes standard payload actions and executor-owned timer or shutdown unit actions.
@@ -899,16 +1055,22 @@ mod tests {
     use crate::{
         image::{
             ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotIndex,
-            EnclaveImage, EnclaveImageView, IdentityRange, ModeImage, PortImage, PortIndex,
-            ReactionImage, ReactionIndex, ReactorImage, ReactorIndex, RequiredBindingImage,
-            ScopeImage, ScopeIndex, StateSlotIndex, StorageBounds, TableRange, TimerStartupImage,
-            TimingDomain, TinyMapView,
+            EnclaveImage, EnclaveImageView, IdentityRange, LevelReactionImage, ModeImage,
+            PortImage, PortIndex, ReactionImage, ReactionIndex, ReactorImage, ReactorIndex,
+            RequiredBindingImage, ScopeImage, ScopeIndex, StateSlotIndex, StorageBounds,
+            TableRange, TimerStartupImage, TimingDomain, TinyMapView,
         },
-        CommonContext, Context, Duration, ModeTransitionRequest, OwnedBindings, OwnedStorage,
-        OwnedStorageError, PayloadType, ReactionBindingError, ReactionRefs, ReactorData, Tag,
-        TransitionKind,
+        CommonContext, Config, Context, Duration, ModeTransitionRequest, OwnedBindings,
+        OwnedStorage, OwnedStorageError, PayloadType, PortKey, ReactionBindingError, ReactionRefs,
+        ReactorData, Tag, TransitionKind,
     };
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
+        time::Instant,
+    };
 
     /// State used to prove the checked state accessor rejects a wrong concrete type.
     struct TestState;
@@ -1231,9 +1393,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_periodic_timer_before_initializing_state() {
+    fn rejects_zero_period_timer_before_initializing_state() {
         let actions = [action(ActionTiming::Timer {
-            period_nanos: Some(7),
+            period_nanos: Some(0),
         })];
         let periodic_image = EnclaveImage {
             actions: TinyMapView::new(&actions),
@@ -1246,10 +1408,31 @@ mod tests {
 
         assert!(matches!(
             error,
-            OwnedStorageError::PeriodicTimerUnsupported {
-                slot,
-                period_nanos: 7
-            } if slot == ActionSlotIndex::new(0)
+            OwnedStorageError::ZeroPeriodTimer { slot }
+                if slot == ActionSlotIndex::new(0)
+        ));
+        assert_eq!(INITIALIZER_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn rejects_unrepresentable_timer_period_before_initializing_state() {
+        let period_nanos = i64::MAX as u64 + 1;
+        let actions = [action(ActionTiming::Timer {
+            period_nanos: Some(period_nanos),
+        })];
+        let periodic_image = EnclaveImage {
+            actions: TinyMapView::new(&actions),
+            ..IMAGE
+        };
+        let image = EnclaveImageView::new(&periodic_image).expect("periodic image is structural");
+        INITIALIZER_CALLS.store(0, Ordering::SeqCst);
+
+        let error = OwnedStorage::new(image, counted_bindings()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            OwnedStorageError::TimerPeriodOutOfRange { slot, period_nanos: found }
+                if slot == ActionSlotIndex::new(0) && found == period_nanos
         ));
         assert_eq!(INITIALIZER_CALLS.load(Ordering::SeqCst), 0);
     }
@@ -1368,8 +1551,35 @@ mod tests {
 
         assert!(matches!(
             error,
-            OwnedStorageError::DynamicModeTransitionUnsupported { reaction }
+            OwnedStorageError::LegacyModeTransition { reaction }
                 if reaction == ReactionIndex::new(0)
+        ));
+    }
+
+    #[test]
+    fn boundary_write_rejects_unknown_port_key() {
+        let mut storage = OwnedStorage::new(image(), complete_bindings()).unwrap();
+        let error = storage
+            .scheduler_write_boundary_port(PortKey::new(7), Box::new(42_u32))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            OwnedStorageError::BoundaryPortNotFound { key } if key == PortKey::new(7)
+        ));
+    }
+
+    #[test]
+    fn boundary_write_rejects_wrong_payload_type() {
+        let mut storage = OwnedStorage::new(image(), complete_bindings()).unwrap();
+        let error = storage
+            .scheduler_write_boundary_port(PortKey::new(0), Box::new(42_u64))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            OwnedStorageError::BoundaryPortPayloadTypeMismatch { port, expected }
+                if port == PortIndex::new(0) && expected == std::any::type_name::<u32>()
         ));
     }
 
@@ -1378,5 +1588,55 @@ mod tests {
         fn assert_send<T: Send>() {}
 
         assert_send::<OwnedStorage<'static>>();
+    }
+
+    #[test]
+    fn owned_scheduler_injects_one_origin_into_reaction_contexts() {
+        let actions = [ActionImage::new(
+            ScopeIndex::new(0),
+            ActionSlotIndex::new(0),
+            ActionTiming::Timer { period_nanos: None },
+            TableRange::new(0, 1),
+            None,
+        )];
+        let reaction_triggers = [LevelReactionImage::new(0, ReactionIndex::new(0))];
+        let startup_actions = [TimerStartupImage::new(ActionIndex::new(0), 0)];
+        let required_bindings = [
+            REQUIRED_BINDINGS[0],
+            REQUIRED_BINDINGS[1],
+            REQUIRED_BINDINGS[2],
+        ];
+        let image = EnclaveImage {
+            actions: TinyMapView::new(&actions),
+            reaction_triggers: &reaction_triggers,
+            startup_actions: &startup_actions,
+            required_bindings: TinyMapView::new(&required_bindings),
+            ..IMAGE
+        };
+        let image = EnclaveImageView::new(&image).unwrap();
+        let seen_origin = Arc::new(Mutex::new(None));
+        let reaction_origin = Arc::clone(&seen_origin);
+        let bindings = OwnedBindings::new()
+            .bind_state(BindingSlotIndex::new(0), initialize_state)
+            .bind_reaction(
+                BindingSlotIndex::new(1),
+                move |context: &mut Context, _state, _refs| {
+                    *reaction_origin.lock().unwrap() = Some(context.get_start_time());
+                    context.schedule_shutdown(Some(Duration::ZERO));
+                    Ok(())
+                },
+            )
+            .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new());
+        let mut storage = OwnedStorage::new(image, bindings).unwrap();
+        let origin = Instant::now() - std::time::Duration::from_secs(1);
+
+        crate::sched::run_owned_scheduler_with_origin(
+            &mut storage,
+            &Config::default().with_fast_forward(true),
+            origin,
+        )
+        .unwrap();
+
+        assert_eq!(*seen_origin.lock().unwrap(), Some(origin));
     }
 }

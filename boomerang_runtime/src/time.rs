@@ -82,6 +82,20 @@ impl Tag {
         }
     }
 
+    /// Returns a strictly future tag when both the duration and microstep remain representable.
+    pub fn checked_delay(&self, offset: Duration) -> Option<Self> {
+        if offset.is_zero() {
+            return self.microstep.checked_add(1).map(|microstep| Self {
+                offset: self.offset,
+                microstep,
+            });
+        }
+        self.offset.checked_add(offset).map(|offset| Self {
+            offset,
+            microstep: 0,
+        })
+    }
+
     /// Create a new Tag offset strictly in the past from the current.
     pub fn pre(&self, offset: Duration) -> Self {
         if offset.is_zero() {

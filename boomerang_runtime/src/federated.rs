@@ -130,7 +130,7 @@ impl FederatedInboundEndpoint {
                 let value = decoder.decode(payload)?;
                 let scheduled = context.schedule_external(AsyncEvent::Logical {
                     tag,
-                    key: action_ref.key(),
+                    target: crate::AsyncEventTarget::Action(action_ref.key()),
                     value: Box::new(value),
                 });
                 if scheduled {

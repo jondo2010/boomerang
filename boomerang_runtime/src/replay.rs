@@ -179,7 +179,7 @@ where
             })?;
         Ok(AsyncEvent::Logical {
             tag,
-            key: self.action_key,
+            target: crate::AsyncEventTarget::Action(self.action_key),
             value: Box::new(value),
         })
     }

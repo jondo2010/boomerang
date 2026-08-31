@@ -129,7 +129,7 @@ impl<K: tinymap::Key> PartialOrd for ScopeFrontierEntry<K> {
 
 /// Event returned to the scheduler after root and scope-local queues are merged at one tag.
 #[derive(Debug)]
-pub(super) struct ReadyEvent<K: tinymap::Key> {
+pub(super) struct ReadyEvent<K: tinymap::Key, A: Copy> {
     /// Global tag at which the contained reactions are ready.
     pub(super) tag: Tag,
     /// Reactions ready to execute at [`tag`](Self::tag).
@@ -138,6 +138,8 @@ pub(super) struct ReadyEvent<K: tinymap::Key> {
     pub(super) terminal: bool,
     /// Whether this event includes work other than terminal shutdown processing.
     pub(super) has_nonterminal_work: bool,
+    /// Action identities whose values caused this ready event.
+    pub(super) action_values: Vec<A>,
 }
 
 /// Owns root and scope-local event queues for modal scheduling.
@@ -163,6 +165,8 @@ pub(super) struct EventManager<S: Schedule> {
     frontier: BinaryHeap<ScopeFrontierEntry<S::Scope>>,
     /// Reusable reaction sets for merged ready events.
     free_reaction_sets: Vec<KeySet<S::Reaction>>,
+    /// Reusable action-identity scratch returned with each ready event.
+    ready_action_values: Vec<S::Action>,
     /// Key and level limits used when allocating reaction sets.
     reaction_set_limits: ReactionSetLimits,
     /// Whether this graph has any modal scopes requiring local queues.
@@ -203,6 +207,7 @@ impl<S: Schedule> EventManager<S> {
             scope_queues,
             frontier: BinaryHeap::new(),
             free_reaction_sets: Vec::new(),
+            ready_action_values: Vec::new(),
             reaction_set_limits,
             has_local_scopes: schedule.has_modal_scopes(),
         }
@@ -230,14 +235,16 @@ impl<S: Schedule> EventManager<S> {
             stored_tag: tag,
         };
         if !self.has_local_scopes {
-            self.root.push_action_event(tag, None, reactions, terminal);
+            self.root
+                .push_action_event(tag, Some(action_value), reactions, terminal);
             return;
         }
 
         let scope = schedule.scope_for_action(action_key);
         if !schedule.action_is_logical(action_key) || Self::scope_uses_global_time(schedule, scope)
         {
-            self.root.push_action_event(tag, None, reactions, terminal);
+            self.root
+                .push_action_event(tag, Some(action_value), reactions, terminal);
             return;
         }
 
@@ -263,8 +270,12 @@ impl<S: Schedule> EventManager<S> {
         I: IntoIterator<Item = (Level, S::Reaction)>,
     {
         if Self::scope_uses_global_time(schedule, scope) {
-            self.root
-                .push_action_event(action_value.stored_tag, None, reactions, terminal);
+            self.root.push_action_event(
+                action_value.stored_tag,
+                Some(action_value),
+                reactions,
+                terminal,
+            );
             return;
         }
 
@@ -292,14 +303,18 @@ impl<S: Schedule> EventManager<S> {
         }
     }
 
-    pub(super) fn pop_next_event(&mut self) -> Option<ReadyEvent<S::Reaction>> {
+    pub(super) fn pop_next_event(&mut self) -> Option<ReadyEvent<S::Reaction, S::Action>> {
+        let mut action_values = std::mem::take(&mut self.ready_action_values);
+        action_values.clear();
         if !self.has_local_scopes {
             let event = self.root.pop_next_event()?;
+            action_values.extend(event.action_value.map(|value| value.key));
             return Some(ReadyEvent {
                 tag: event.tag,
                 reactions: event.reactions,
                 terminal: event.terminal,
                 has_nonterminal_work: event.has_nonterminal_work,
+                action_values,
             });
         }
 
@@ -309,6 +324,7 @@ impl<S: Schedule> EventManager<S> {
             reactions: self.next_reaction_set(),
             terminal: false,
             has_nonterminal_work: false,
+            action_values,
         };
 
         if self.root.peek_tag() == Some(tag) {
@@ -316,6 +332,9 @@ impl<S: Schedule> EventManager<S> {
             ready.reactions.merge(&event.reactions);
             ready.terminal = ready.terminal || event.terminal;
             ready.has_nonterminal_work |= event.has_nonterminal_work;
+            ready
+                .action_values
+                .extend(event.action_value.map(|value| value.key));
             self.root.recycle_reaction_set(event.reactions);
         }
 
@@ -326,12 +345,21 @@ impl<S: Schedule> EventManager<S> {
             ready.reactions.merge(&event.reactions);
             ready.terminal = ready.terminal || event.terminal;
             ready.has_nonterminal_work |= event.has_nonterminal_work;
+            ready
+                .action_values
+                .extend(event.action_value.map(|value| value.key));
 
             self.scope_queues[frontier.scope].recycle_reaction_set(event.reactions);
             self.refresh_frontier(frontier.scope);
         }
 
         Some(ready)
+    }
+
+    /// Recycles action-identity scratch after the scheduler processes a ready event.
+    pub(super) fn return_action_values(&mut self, mut values: Vec<S::Action>) {
+        values.clear();
+        self.ready_action_values = values;
     }
 
     pub(super) fn shutdown(&mut self) {

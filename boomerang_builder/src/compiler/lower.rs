@@ -283,15 +283,6 @@ pub fn lower(deployment: &ResolvedDeployment) -> Result<OwnedCompiledDeployment,
     ) {
         return Err(CompileError::UnsupportedCoordination);
     }
-    if let Some((reaction, _)) = deployment
-        .topology()
-        .reactions()
-        .find(|(_, reaction)| reaction.options().transition().is_some())
-    {
-        return Err(CompileError::UnsupportedModeTransition {
-            reaction: reaction.clone(),
-        });
-    }
     let mut federates = deployment.federates();
     let federate = federates
         .next()
@@ -720,7 +711,7 @@ fn lower_enclave(
                     .iter()
                     .map(|mode| mode_indices[mode]),
             );
-            Ok(ReactionImage::new(
+            let image = ReactionImage::new(
                 reactor_indices[reaction.reactor()],
                 scope_for(reaction.reactor(), reaction.options().mode()),
                 analysis.reaction_levels[*id],
@@ -744,7 +735,18 @@ fn lower_enclave(
                     enclave_id,
                     "reaction-modes",
                 )?,
-            ))
+            );
+            Ok(reaction.options().transition().map_or(image, |transition| {
+                image.with_mode_effect(crate::runtime::CompiledModeEffectRef {
+                    target: mode_indices[transition.target()],
+                    transition: match transition.kind() {
+                        super::ModeTransitionKind::Reset => crate::runtime::TransitionKind::Reset,
+                        super::ModeTransitionKind::History => {
+                            crate::runtime::TransitionKind::History
+                        }
+                    },
+                })
+            }))
         })
         .collect::<Result<tinymap::TinyMap<ReactionIndex, _>, CompileError>>()?;
     let mode_images = modes
@@ -2234,19 +2236,21 @@ mod tests {
         assert!(matches!(error, CompileError::UnsupportedCoordination));
     }
     #[test]
-    fn lowering_rejects_mode_transitions_until_the_image_preserves_them() {
-        let error = lower(&local_deployment(
+    fn lowering_preserves_canonical_mode_transition_identity() {
+        let compiled = lower(&local_deployment(
             false,
             ConnectionSemantics::Logical { after: None },
             DependencyCase::ModeTransition,
         ))
-        .unwrap_err();
+        .unwrap();
+        let enclave = compiled.federates()[0].enclaves()[0].view().unwrap();
 
         assert_eq!(
-            error,
-            CompileError::UnsupportedModeTransition {
-                reaction: ReactionId::new("vehicle/controller/reset_active").unwrap(),
-            }
+            enclave.reactions()[ReactionIndex::new(1)].mode_effect(),
+            Some(crate::runtime::CompiledModeEffectRef {
+                target: ModeIndex::new(1),
+                transition: crate::runtime::TransitionKind::Reset,
+            })
         );
     }
     #[test]

@@ -426,6 +426,8 @@ pub struct ReactionImage {
     effect_ports: TableRange<PortIndex>,
     actions: TableRange<ActionIndex>,
     enabled_modes: TableRange<ModeIndex>,
+    /// Canonical transition effect supplied to the owned compiled reaction adapter.
+    mode_effect: Option<crate::CompiledModeEffectRef>,
 }
 
 impl ReactionImage {
@@ -450,7 +452,14 @@ impl ReactionImage {
             effect_ports,
             actions,
             enabled_modes,
+            mode_effect: None,
         }
+    }
+
+    /// Attaches the reaction's canonical compiled mode transition effect.
+    pub const fn with_mode_effect(mut self, mode_effect: crate::CompiledModeEffectRef) -> Self {
+        self.mode_effect = Some(mode_effect);
+        self
     }
 
     /// Returns the owning reactor.
@@ -491,6 +500,11 @@ impl ReactionImage {
     /// Returns the enabled-mode range.
     pub const fn enabled_modes(self) -> TableRange<ModeIndex> {
         self.enabled_modes
+    }
+
+    /// Returns the canonical compiled mode transition effect, if declared.
+    pub const fn mode_effect(self) -> Option<crate::CompiledModeEffectRef> {
+        self.mode_effect
     }
 }
 

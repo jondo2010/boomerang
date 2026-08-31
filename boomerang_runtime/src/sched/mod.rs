@@ -1,4 +1,4 @@
-use std::{convert::Infallible, pin::Pin};
+use std::pin::Pin;
 
 mod barrier;
 mod compiled;
@@ -9,6 +9,8 @@ mod queue;
 // Kept at the scheduler-module boundary so sibling modules retain their narrow
 // `super::` imports while the generic core lives in its own implementation module.
 pub(crate) use compiled::run_owned_scheduler;
+#[cfg(test)]
+pub(crate) use compiled::run_owned_scheduler_with_origin;
 pub(crate) use core::{ExecutionStorage, ModeTransition, Schedule, SchedulerError};
 use core::{ReactionOutcome, SchedulerCore};
 
@@ -147,7 +149,7 @@ impl std::fmt::Display for Stats {
 }
 
 impl ExecutionStorage<ReactionGraph> for Pin<Box<Store>> {
-    type Error = Infallible;
+    type Error = RuntimeError;
 
     fn action_from_runtime(&self, key: ActionKey) -> ActionKey {
         key
@@ -155,6 +157,14 @@ impl ExecutionStorage<ReactionGraph> for Pin<Box<Store>> {
 
     fn push_action_value(&mut self, action: ActionKey, tag: Tag, value: Box<dyn ReactorData>) {
         Store::push_action_value(self, action, tag, value);
+    }
+
+    fn write_boundary_port(
+        &mut self,
+        key: PortKey,
+        _value: Box<dyn ReactorData>,
+    ) -> Result<PortKey, Self::Error> {
+        Err(RuntimeError::AsyncBoundaryPortUnsupported(key))
     }
 
     fn clear_action_values(&mut self, action: ActionKey) {
@@ -587,10 +597,9 @@ impl Scheduler {
         reaction_view: KeySetView<ReactionKey>,
         terminal: bool,
     ) {
-        match self.core().process_tag(tag, reaction_view, terminal) {
-            Ok(()) => {}
-            Err(error) => match error {},
-        }
+        self.core()
+            .process_tag(tag, reaction_view, terminal)
+            .expect("live reaction invocation is infallible");
     }
 
     /// Consume the scheduler and return the `Env` instance.
@@ -602,14 +611,14 @@ impl Scheduler {
     }
 }
 
-/// Removes the impossible live-storage error while preserving coordination failures.
+/// Flattens coordination and live-storage failures into the public runtime error type.
 fn live_scheduler_result<T>(
-    result: Result<T, SchedulerError<Infallible>>,
+    result: Result<T, SchedulerError<RuntimeError>>,
 ) -> Result<T, RuntimeError> {
     match result {
         Ok(value) => Ok(value),
         Err(SchedulerError::Coordination(error)) => Err(error),
-        Err(SchedulerError::Execution(error)) => match error {},
+        Err(SchedulerError::Execution(error)) => Err(error),
     }
 }
 
@@ -877,6 +886,40 @@ mod tests {
 
         let calls = log.lock().unwrap().clone();
         assert_eq!(calls, vec![HookCall::Acquire(future_tag)]);
+    }
+
+    #[test]
+    fn live_scheduler_rejects_async_boundary_ports() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let future_tag = Tag::new(Duration::seconds(1), 0);
+        let boundary = PortKey::new(7);
+        let barrier = RecordingBarrier::interrupting(
+            Arc::clone(&log),
+            AsyncEvent::Logical {
+                tag: Tag::ZERO,
+                target: crate::AsyncEventTarget::BoundaryPort(boundary),
+                value: Box::new(42_u32),
+            },
+        );
+        let mut scheduler = Scheduler::new_with_federated_time_barrier(
+            EnclaveKey::from(0),
+            Enclave::default(),
+            Config::default().with_fast_forward(true),
+            barrier,
+        );
+
+        scheduler.startup();
+        scheduler.events.push_event(
+            future_tag,
+            std::iter::empty::<(Level, ReactionKey)>(),
+            false,
+        );
+
+        assert!(matches!(
+            scheduler.try_next(),
+            Err(RuntimeError::AsyncBoundaryPortUnsupported(key)) if key == boundary
+        ));
+        assert_eq!(*log.lock().unwrap(), vec![HookCall::Acquire(future_tag)]);
     }
 
     #[test]

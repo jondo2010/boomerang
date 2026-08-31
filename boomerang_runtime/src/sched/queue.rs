@@ -59,7 +59,7 @@ impl<K: tinymap::Key, A: Copy> Ord for ScheduledEvent<K, A> {
     }
 }
 
-impl<K: tinymap::Key, A: Copy> EventQueue<K, A> {
+impl<K: tinymap::Key, A: Copy + PartialEq> EventQueue<K, A> {
     pub(crate) fn new(reaction_set_limits: ReactionSetLimits) -> Self {
         Self {
             event_queue: BinaryHeap::new(),
@@ -130,12 +130,23 @@ impl<K: tinymap::Key, A: Copy> EventQueue<K, A> {
     /// Pop the next event from the event queue.
     ///
     /// Any subsequent events with the same tag are merged into the returned event.
-    pub(crate) fn pop_next_event(&mut self) -> Option<ScheduledEvent<K, A>> {
+    pub(crate) fn pop_next_event(
+        &mut self,
+        action_values: &mut Vec<A>,
+    ) -> Option<ScheduledEvent<K, A>> {
         if let Some(mut event) = self.event_queue.pop() {
+            if let Some(value) = event.action_value {
+                action_values.push(value.key);
+            }
             // Merge events with the same tag
             while let Some(next_event) = self.event_queue.peek() {
                 if next_event.tag == event.tag {
                     let next_event = self.event_queue.pop().unwrap();
+                    if let Some(value) = next_event.action_value {
+                        if !action_values.contains(&value.key) {
+                            action_values.push(value.key);
+                        }
+                    }
                     event.reactions.merge(&next_event.reactions);
                     event.terminal = event.terminal || next_event.terminal;
                     event.has_nonterminal_work |= next_event.has_nonterminal_work;

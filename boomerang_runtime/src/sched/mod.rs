@@ -151,6 +151,12 @@ impl std::fmt::Display for Stats {
 impl ExecutionStorage<ReactionGraph> for Pin<Box<Store>> {
     type Error = RuntimeError;
 
+    fn prepare_startup_origin(&mut self, start_time: &mut std::time::Instant) {
+        let origin = std::time::Instant::now();
+        *start_time = origin;
+        Store::set_scheduler_origin(self, origin);
+    }
+
     fn action_from_runtime(&self, key: ActionKey) -> ActionKey {
         key
     }
@@ -159,12 +165,17 @@ impl ExecutionStorage<ReactionGraph> for Pin<Box<Store>> {
         Store::push_action_value(self, action, tag, value);
     }
 
-    fn write_boundary_port(
+    fn retain_boundary_port(
         &mut self,
         key: PortKey,
+        _tag: Tag,
         _value: Box<dyn ReactorData>,
     ) -> Result<PortKey, Self::Error> {
         Err(RuntimeError::AsyncBoundaryPortUnsupported(key))
+    }
+
+    fn commit_boundary_ports(&mut self, _tag: Tag) -> Result<(), Self::Error> {
+        Ok(())
     }
 
     fn clear_action_values(&mut self, action: ActionKey) {
@@ -237,6 +248,10 @@ impl Schedule for ReactionGraph {
     type Reactor = ReactorKey;
     type Mode = ModeKey;
     type Scope = ScopeKey;
+
+    fn action_capacity(&self) -> usize {
+        self.action_scopes.len()
+    }
 
     fn reaction_limits(&self) -> ReactionSetLimits {
         let max_level = self
@@ -824,6 +839,56 @@ mod tests {
             barrier,
         );
         (scheduler, reaction)
+    }
+
+    fn scheduler_recording_start_origin(
+        seen_origin: Arc<Mutex<Option<std::time::Instant>>>,
+    ) -> (Scheduler, ReactionKey) {
+        let mut enclave = Enclave::default();
+        let reactor = enclave.insert_reactor(Reactor::new("root", ()).boxed(), None);
+        let scope = enclave.root_scope(reactor);
+        let reaction = enclave.insert_reaction(
+            Reaction::new(
+                "record-origin",
+                reaction_closure!(ctx, _reactor, _refs => {
+                    *seen_origin.lock().unwrap() = Some(ctx.get_start_time());
+                }),
+                None,
+            ),
+            reactor,
+            std::iter::empty::<PortKey>(),
+            std::iter::empty::<PortKey>(),
+            std::iter::empty::<ActionKey>(),
+            scope,
+            None,
+        );
+        (
+            Scheduler::new(
+                EnclaveKey::from(0),
+                enclave,
+                Config::default().with_fast_forward(true),
+            ),
+            reaction,
+        )
+    }
+
+    #[test]
+    fn live_scheduler_origin_is_captured_at_startup_and_shared_with_contexts() {
+        let seen_origin = Arc::new(Mutex::new(None));
+        let (mut scheduler, reaction) = scheduler_recording_start_origin(Arc::clone(&seen_origin));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let startup_floor = std::time::Instant::now();
+
+        scheduler.startup();
+        scheduler.events.push_event(
+            Tag::ZERO,
+            std::iter::once((Level::from(0), reaction)),
+            false,
+        );
+        assert!(scheduler.try_next().unwrap());
+
+        assert!(scheduler.start_time >= startup_floor);
+        assert_eq!(*seen_origin.lock().unwrap(), Some(scheduler.start_time));
     }
 
     #[test]

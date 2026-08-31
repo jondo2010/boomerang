@@ -32,6 +32,10 @@ impl Schedule for EnclaveImageView<'_> {
     type Mode = ModeIndex;
     type Scope = ScopeIndex;
 
+    fn action_capacity(&self) -> usize {
+        self.actions().len()
+    }
+
     fn reaction_limits(&self) -> ReactionSetLimits {
         let max_level = self
             .reactions()
@@ -76,6 +80,8 @@ impl Schedule for EnclaveImageView<'_> {
 impl ExecutionStorage<EnclaveImageView<'_>> for OwnedStorage<'_> {
     type Error = OwnedStorageError;
 
+    fn prepare_startup_origin(&mut self, _start_time: &mut std::time::Instant) {}
+
     fn action_from_runtime(&self, key: ActionKey) -> ActionIndex {
         self.scheduler_action(key)
     }
@@ -84,12 +90,17 @@ impl ExecutionStorage<EnclaveImageView<'_>> for OwnedStorage<'_> {
         self.scheduler_push_action(action, tag, value);
     }
 
-    fn write_boundary_port(
+    fn retain_boundary_port(
         &mut self,
         key: crate::PortKey,
+        tag: Tag,
         value: Box<dyn ReactorData>,
     ) -> Result<PortIndex, Self::Error> {
-        self.scheduler_write_boundary_port(key, value)
+        self.scheduler_retain_boundary_port(key, tag, value)
+    }
+
+    fn commit_boundary_ports(&mut self, tag: Tag) -> Result<(), Self::Error> {
+        self.scheduler_commit_boundary_ports(tag)
     }
 
     fn clear_action_values(&mut self, action: ActionIndex) {

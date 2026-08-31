@@ -449,6 +449,16 @@ pub enum OwnedStorageError {
         /// The reaction awaiting generated compiled-mode identities.
         reaction: ReactionIndex,
     },
+    /// A reaction requested a canonical mode transition other than its image-declared effect.
+    #[error("reaction {reaction} requested a compiled mode transition that does not match its declared effect")]
+    CompiledModeTransitionMismatch {
+        /// The reaction that attempted to forge or substitute a transition capability.
+        reaction: ReactionIndex,
+        /// Canonical effect declared by the validated image, if any.
+        declared: Option<CompiledModeEffectRef>,
+        /// Canonical effect requested by the bound reaction implementation.
+        requested: CompiledModeEffectRef,
+    },
     /// A reaction's port or action references alias mutably within one invocation.
     #[error("reaction {reaction} has aliased mutable references")]
     AliasedReactionReferences {
@@ -469,6 +479,12 @@ pub enum OwnedStorageError {
     BoundaryPortNotFound {
         /// Runtime-facing port key supplied by the boundary event.
         key: PortKey,
+    },
+    /// An async event named an ordinary port without an inbound compiled route.
+    #[error("compiled port {port} is not authorized by an inbound scheduler route")]
+    BoundaryPortNotInbound {
+        /// Dense compiled port lacking inbound route provenance.
+        port: PortIndex,
     },
     /// An async boundary payload did not match the compiled port binding type.
     #[error("boundary port {port} requires payload type {expected}")]
@@ -496,6 +512,8 @@ pub struct OwnedStorage<'image> {
     reactions: TinySecondaryMap<BindingSlotIndex, Box<dyn ReactionInvoker>>,
     /// Alias-checked references to stable boxed targets.
     reaction_refs: TinyMap<ReactionIndex, ReactionReferenceLayout>,
+    /// Boundary payloads retained until their declared logical tag is processed.
+    pending_boundary_values: Vec<(Tag, PortIndex, Box<dyn ReactorData>)>,
     /// Keeps the per-enclave event channel open for stored reaction contexts.
     event_rx: crate::Receiver<crate::event::AsyncEvent>,
     /// Holds the keepalive sender until a compiled scheduler takes responsibility for shutdown.
@@ -568,6 +586,7 @@ impl<'image> OwnedStorage<'image> {
         let states = initialize_states(&state_bindings, &bindings)?;
         let reactions = initialize_reactions(bindings);
         let (contexts, event_rx, shutdown_tx) = initialize_contexts(&image)?;
+        let event_capacity = image.storage_bounds().event_capacity() as usize;
         Ok(Self {
             image,
             states,
@@ -576,6 +595,7 @@ impl<'image> OwnedStorage<'image> {
             contexts,
             reactions,
             reaction_refs,
+            pending_boundary_values: Vec::with_capacity(event_capacity),
             event_rx,
             shutdown_tx: Some(shutdown_tx),
         })
@@ -611,10 +631,11 @@ impl<'image> OwnedStorage<'image> {
         fn take_scheduler_shutdown_tx() -> crate::keepalive::Sender |storage| storage.shutdown_tx.take().expect("owned storage can be attached to only one scheduler");
     }
 
-    /// Writes one validated scheduler-boundary value and returns its dense compiled port.
-    pub(crate) fn scheduler_write_boundary_port(
+    /// Retains one validated scheduler-boundary value and returns its dense compiled port.
+    pub(crate) fn scheduler_retain_boundary_port(
         &mut self,
         key: PortKey,
+        tag: Tag,
         value: Box<dyn ReactorData>,
     ) -> Result<PortIndex, OwnedStorageError> {
         let port = self
@@ -622,12 +643,34 @@ impl<'image> OwnedStorage<'image> {
             .iter()
             .find_map(|(port, storage)| (storage.get_key() == key).then_some(port))
             .ok_or(OwnedStorageError::BoundaryPortNotFound { key })?;
-        let storage = &mut self.ports[port];
-        let expected = storage.type_name();
-        storage
-            .set_erased(value)
-            .map_err(|_| OwnedStorageError::BoundaryPortPayloadTypeMismatch { port, expected })?;
+        if !self.image.routes().values().any(|route| {
+            route.direction() == crate::image::RouteDirection::Inbound && route.local_port() == port
+        }) {
+            return Err(OwnedStorageError::BoundaryPortNotInbound { port });
+        }
+        self.pending_boundary_values.push((tag, port, value));
         Ok(port)
+    }
+
+    /// Writes all retained boundary values for `tag` immediately before its reactions execute.
+    pub(crate) fn scheduler_commit_boundary_ports(
+        &mut self,
+        tag: Tag,
+    ) -> Result<(), OwnedStorageError> {
+        let mut index = 0;
+        while index < self.pending_boundary_values.len() {
+            if self.pending_boundary_values[index].0 != tag {
+                index += 1;
+                continue;
+            }
+            let (_, port, value) = self.pending_boundary_values.remove(index);
+            let storage = &mut self.ports[port];
+            let expected = storage.type_name();
+            storage.set_erased(value).map_err(|_| {
+                OwnedStorageError::BoundaryPortPayloadTypeMismatch { port, expected }
+            })?;
+        }
+        Ok(())
     }
 
     /// Invokes a directly bound reaction using the image's ordered port and action references.
@@ -660,6 +703,16 @@ impl<'image> OwnedStorage<'image> {
             refs,
             reaction_image.mode_effect(),
         )?;
+        if let Some(requested) = context.trigger_res.scheduled_compiled_mode {
+            let declared = reaction_image.mode_effect();
+            if declared != Some(requested) {
+                return Err(OwnedStorageError::CompiledModeTransitionMismatch {
+                    reaction,
+                    declared,
+                    requested,
+                });
+            }
+        }
         if context.trigger_res.scheduled_mode.is_some() {
             return Err(OwnedStorageError::LegacyModeTransition { reaction });
         }
@@ -1057,8 +1110,9 @@ mod tests {
             ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotIndex,
             EnclaveImage, EnclaveImageView, IdentityRange, LevelReactionImage, ModeImage,
             PortImage, PortIndex, ReactionImage, ReactionIndex, ReactorImage, ReactorIndex,
-            RequiredBindingImage, ScopeImage, ScopeIndex, StateSlotIndex, StorageBounds,
-            TableRange, TimerStartupImage, TimingDomain, TinyMapView,
+            RequiredBindingImage, RouteDirection, RouteImage, ScopeImage, ScopeIndex,
+            StateSlotIndex, StorageBounds, TableRange, TimerStartupImage, TimingDomain,
+            TinyMapView,
         },
         CommonContext, Config, Context, Duration, ModeTransitionRequest, OwnedBindings,
         OwnedStorage, OwnedStorageError, PayloadType, PortKey, ReactionBindingError, ReactionRefs,
@@ -1560,7 +1614,7 @@ mod tests {
     fn boundary_write_rejects_unknown_port_key() {
         let mut storage = OwnedStorage::new(image(), complete_bindings()).unwrap();
         let error = storage
-            .scheduler_write_boundary_port(PortKey::new(7), Box::new(42_u32))
+            .scheduler_retain_boundary_port(PortKey::new(7), Tag::ZERO, Box::new(42_u32))
             .unwrap_err();
 
         assert!(matches!(
@@ -1571,9 +1625,25 @@ mod tests {
 
     #[test]
     fn boundary_write_rejects_wrong_payload_type() {
-        let mut storage = OwnedStorage::new(image(), complete_bindings()).unwrap();
+        let routes = [RouteImage::new(
+            IdentityRange::new(7, 7),
+            PortIndex::new(0),
+            RouteDirection::Inbound,
+            TimingDomain::Logical,
+            0,
+        )];
+        let routed = EnclaveImage {
+            routes: TinyMapView::new(&routes),
+            ..IMAGE
+        };
+        let mut storage =
+            OwnedStorage::new(EnclaveImageView::new(&routed).unwrap(), complete_bindings())
+                .unwrap();
+        storage
+            .scheduler_retain_boundary_port(PortKey::new(0), Tag::ZERO, Box::new(42_u64))
+            .unwrap();
         let error = storage
-            .scheduler_write_boundary_port(PortKey::new(0), Box::new(42_u64))
+            .scheduler_commit_boundary_ports(Tag::ZERO)
             .unwrap_err();
 
         assert!(matches!(

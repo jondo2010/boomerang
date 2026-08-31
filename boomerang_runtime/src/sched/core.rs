@@ -29,6 +29,7 @@ pub(crate) trait Schedule {
     type Scope: tinymap::Key + Copy + std::fmt::Debug;
 
     fn reaction_limits(&self) -> ReactionSetLimits;
+    fn action_capacity(&self) -> usize;
     fn has_modal_scopes(&self) -> bool {
         self.scopes()
             .any(|scope| self.mode_for_scope(scope).is_some())
@@ -120,16 +121,21 @@ pub(crate) trait ExecutionStorage<S: Schedule> {
     /// Failure returned while invoking reactions.
     type Error;
 
+    /// Prepares the scheduler origin immediately before startup begins.
+    fn prepare_startup_origin(&mut self, start_time: &mut std::time::Instant);
     /// Resolves an externally supplied runtime action identity to this storage's action key.
     fn action_from_runtime(&self, key: ActionKey) -> S::Action;
     /// Retain an action value until its scheduled tag is processed.
     fn push_action_value(&mut self, action: S::Action, tag: Tag, value: Box<dyn ReactorData>);
-    /// Writes one scheduler-boundary value and returns the schedule's port key.
-    fn write_boundary_port(
+    /// Retains one scheduler-boundary value until its logical tag is processed.
+    fn retain_boundary_port(
         &mut self,
         key: crate::PortKey,
+        tag: Tag,
         value: Box<dyn ReactorData>,
     ) -> Result<S::Port, Self::Error>;
+    /// Writes all retained scheduler-boundary values for one processing tag.
+    fn commit_boundary_ports(&mut self, tag: Tag) -> Result<(), Self::Error>;
     /// Remove all pending values for an action during a modal reset.
     fn clear_action_values(&mut self, action: S::Action);
     /// Move a retained action value when a modal scope resumes.
@@ -280,7 +286,7 @@ where
                 );
             }
             AsyncEventTarget::BoundaryPort(key) => {
-                let port = self.storage.write_boundary_port(key, value)?;
+                let port = self.storage.retain_boundary_port(key, tag, value)?;
                 self.events
                     .push_event(tag, self.schedule.port_triggers(port), false);
             }
@@ -289,6 +295,7 @@ where
     }
 
     fn schedule_shutdown_at(&mut self, tag: Tag) {
+        *self.shutdown_tag = Some((*self.shutdown_tag).map_or(tag, |pending| pending.min(tag)));
         for action in self.schedule.shutdown_actions() {
             self.storage.push_action_value(action, tag, Box::new(()));
         }
@@ -300,6 +307,7 @@ where
     /// Execute startup of the Scheduler.
     #[tracing::instrument(target = "boomerang_runtime::sched", skip(self))]
     pub(super) fn startup(&mut self) {
+        self.storage.prepare_startup_origin(self.start_time);
         let tag = Tag::ZERO;
 
         // Initialize the event queue with the startup actions
@@ -449,6 +457,10 @@ where
                 self.shutdown_tx.shutdown();
             }
 
+            self.storage
+                .commit_boundary_ports(event.tag)
+                .map_err(SchedulerError::Execution)?;
+
             self.process_tag(event.tag, event.reactions.view(), event.terminal)
                 .map_err(SchedulerError::Execution)?;
 
@@ -460,6 +472,9 @@ where
                     tracing::warn!(target: "boomerang_runtime::sched", tag = %event.tag, ?action, ?period, "Periodic timer reached the logical tag range");
                     continue;
                 };
+                if (*self.shutdown_tag).is_some_and(|shutdown| successor >= shutdown) {
+                    continue;
+                }
                 self.storage
                     .push_action_value(action, successor, Box::new(()));
                 self.events.push_action_event(

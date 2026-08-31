@@ -207,7 +207,7 @@ impl<S: Schedule> EventManager<S> {
             scope_queues,
             frontier: BinaryHeap::new(),
             free_reaction_sets: Vec::new(),
-            ready_action_values: Vec::new(),
+            ready_action_values: Vec::with_capacity(schedule.action_capacity()),
             reaction_set_limits,
             has_local_scopes: schedule.has_modal_scopes(),
         }
@@ -307,8 +307,7 @@ impl<S: Schedule> EventManager<S> {
         let mut action_values = std::mem::take(&mut self.ready_action_values);
         action_values.clear();
         if !self.has_local_scopes {
-            let event = self.root.pop_next_event()?;
-            action_values.extend(event.action_value.map(|value| value.key));
+            let event = self.root.pop_next_event(&mut action_values)?;
             return Some(ReadyEvent {
                 tag: event.tag,
                 reactions: event.reactions,
@@ -328,27 +327,22 @@ impl<S: Schedule> EventManager<S> {
         };
 
         if self.root.peek_tag() == Some(tag) {
-            let event = self.root.pop_next_event().unwrap();
+            let event = self.root.pop_next_event(&mut ready.action_values).unwrap();
             ready.reactions.merge(&event.reactions);
             ready.terminal = ready.terminal || event.terminal;
             ready.has_nonterminal_work |= event.has_nonterminal_work;
-            ready
-                .action_values
-                .extend(event.action_value.map(|value| value.key));
             self.root.recycle_reaction_set(event.reactions);
         }
 
         while self.peek_frontier_tag() == Some(tag) {
             let frontier = self.frontier.pop().unwrap();
-            let event = self.scope_queues[frontier.scope].pop_next_event().unwrap();
+            let event = self.scope_queues[frontier.scope]
+                .pop_next_event(&mut ready.action_values)
+                .unwrap();
 
             ready.reactions.merge(&event.reactions);
             ready.terminal = ready.terminal || event.terminal;
             ready.has_nonterminal_work |= event.has_nonterminal_work;
-            ready
-                .action_values
-                .extend(event.action_value.map(|value| value.key));
-
             self.scope_queues[frontier.scope].recycle_reaction_set(event.reactions);
             self.refresh_frontier(frontier.scope);
         }

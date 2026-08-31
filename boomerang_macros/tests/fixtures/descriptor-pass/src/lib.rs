@@ -137,8 +137,6 @@ pub mod private_empty {
 }
 
 pub mod actions {
-    //! Standard logical and physical action declaration fixture.
-
     use super::*;
 
     #[reactor(
@@ -161,24 +159,15 @@ pub mod actions {
 #[cfg(feature = "invalid-action-attribute")]
 #[reactor]
 fn InvalidActionAttribute(#[logical_action(delay = 1 sec)] tick: ()) -> impl Reactor {}
-
 #[cfg(feature = "invalid-action-duration")]
 #[reactor]
 fn InvalidActionDuration(#[physical_action(min_delay = 1 fortnight)] tick: ()) -> impl Reactor {}
-
 #[cfg(feature = "action-delay-overflow")]
 #[reactor]
-fn ActionDelayOverflow(
-    #[logical_action(min_delay = 9223372036854775808 nsec)] tick: (),
-) -> impl Reactor {
-}
-
+fn Delay(#[logical_action(min_delay = 9223372036854775808 nsec)] tick: ()) -> impl Reactor {}
 #[cfg(feature = "action-duration-unit-overflow")]
 #[reactor]
-fn ActionDurationUnitOverflow(
-    #[logical_action(min_delay = 18446744073709551615 weeks)] tick: (),
-) -> impl Reactor {
-}
+fn Unit(#[logical_action(min_delay = 18446744073709551615 weeks)] tick: ()) -> impl Reactor {}
 
 #[cfg(feature = "missing-state-init")]
 mod missing_state_init {

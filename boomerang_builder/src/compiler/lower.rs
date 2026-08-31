@@ -208,12 +208,25 @@ impl<'a> DescriptorSlots<'a> {
     }
 
     /// Resolves the descriptor port slot for one logical port.
-    fn port_slot(&self, logical: &super::PortId) -> Result<PortSlotId, CompileError> {
+    fn port_slot(
+        &self,
+        logical: &super::PortId,
+        bank: Option<super::BankMember>,
+    ) -> Result<PortSlotId, CompileError> {
+        let declaration = bank.map_or_else(
+            || logical.path().clone(),
+            |_| {
+                logical
+                    .path()
+                    .parent()
+                    .expect("validated bank member has a base")
+            },
+        );
         let matches = self
             .descriptor
             .port_slots()
             .iter()
-            .filter(|slot| self.matches_relative_path(logical.path(), slot.id.path()))
+            .filter(|slot| self.matches_relative_path(&declaration, slot.id.path()))
             .map(|slot| slot.id.clone())
             .collect::<Vec<_>>();
         self.one_slot("port", logical.path(), matches)
@@ -493,7 +506,7 @@ fn lower_enclave(
                     RequiredBinding::Port {
                         component: component.clone(),
                         implementation: slots.implementation.clone(),
-                        port: slots.port_slot(id)?,
+                        port: slots.port_slot(id, port.bank())?,
                     },
                 ))
             })
@@ -1444,8 +1457,8 @@ mod tests {
     use super::{checked_u32, lower, CompileError};
     use crate::{
         compiler::{
-            ActionId, ActionKind, ApplicationTopology, ApplicationTopologyBuilder, BoundaryBinding,
-            BoundaryId, CodecCapabilityId, ComponentInstance, ComponentInstanceId,
+            ActionId, ActionKind, ApplicationTopology, ApplicationTopologyBuilder, BankMember,
+            BoundaryBinding, BoundaryId, CodecCapabilityId, ComponentInstance, ComponentInstanceId,
             ConnectionSemantics, CoordinationBackendId, CoordinationSelection, FederateConfig,
             FederateId, ImplementationBinding, ImplementationId, ModeId, ModeTransition,
             ModeTransitionKind, PlacementAssignment, PlacementGroupId, PortDirection, PortId,
@@ -1503,7 +1516,7 @@ mod tests {
         };
         let reactor = ReactorSlotId::new(root).unwrap();
         let ports = match contract {
-            "controller.v1" => ["output"].as_slice(),
+            "controller.v1" => ["output", "array_in", "bank_in"].as_slice(),
             "sensor.v1" => ["input"].as_slice(),
             _ => panic!("unexpected test descriptor contract {contract}"),
         };
@@ -1527,7 +1540,7 @@ mod tests {
                     reactor: reactor.clone(),
                     direction: match *port {
                         "output" => PortDirection::Output,
-                        "input" => PortDirection::Input,
+                        "input" | "array_in" | "bank_in" => PortDirection::Input,
                         _ => unreachable!("test descriptor uses known ports"),
                     },
                 })
@@ -1716,6 +1729,22 @@ mod tests {
         ) {
             topology
                 .add_port(id, reactor, direction, None, 0, None)
+                .unwrap();
+        }
+        for (position, name) in ["array_in", "array_in", "bank_in", "bank_in"]
+            .into_iter()
+            .enumerate()
+        {
+            let index = position as u32 % 2;
+            topology
+                .add_port(
+                    PortId::new(format!("vehicle/controller/{name}/#b{index}")).unwrap(),
+                    controller_reactor.clone(),
+                    PortDirection::Input,
+                    Some(BankMember::new(index, 2).unwrap()),
+                    position as u32 + 1,
+                    None,
+                )
                 .unwrap();
         }
         topology
@@ -2097,6 +2126,10 @@ mod tests {
             [
                 "action_Shared_2fpulse",
                 "action_Shared_2fack",
+                "port_Shared_2farray_5fin",
+                "port_Shared_2farray_5fin",
+                "port_Shared_2fbank_5fin",
+                "port_Shared_2fbank_5fin",
                 "port_Shared_2foutput",
                 "reaction_Shared_2femit",
                 "reaction_Shared_2freset_5factive",
@@ -2143,6 +2176,15 @@ mod tests {
         );
 
         let image = enclave.view().unwrap();
+        assert_eq!(
+            image
+                .ports()
+                .values()
+                .map(|port| port.binding())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            5
+        );
         assert_ne!(
             image.reactors()[ReactorIndex::new(0)].state_binding(),
             image.reactors()[ReactorIndex::new(1)].state_binding()
@@ -2315,7 +2357,7 @@ mod tests {
             ))
             .unwrap();
             let enclave = compiled.federates()[0].enclaves()[0].view().unwrap();
-            assert_eq!(enclave.ports().len(), 1);
+            assert_eq!(enclave.ports().len(), 5);
             assert!(enclave.routes().is_empty());
         }
     }
@@ -2403,7 +2445,7 @@ mod tests {
             enclave.reactions()[ReactionIndex::new(5)].dependency_level(),
             2
         );
-        assert_eq!(enclave.required_bindings().len(), 11);
+        assert_eq!(enclave.required_bindings().len(), 15);
     }
     #[test]
     fn modes_actions_lifecycle_and_scopes_are_fully_lowered() {
@@ -2517,7 +2559,7 @@ mod tests {
             .values()
             .enumerate()
             .all(|(index, reaction)| {
-                reaction.binding().as_u32() == u32::try_from(index).unwrap() + 3
+                reaction.binding().as_u32() == u32::try_from(index).unwrap() + 7
             }));
     }
     #[test]

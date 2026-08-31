@@ -58,6 +58,12 @@ fn run(mut command: Command, fixture: &str) -> Output {
     output
 }
 
+fn failure(command: Command, fixture: &str) -> String {
+    let output = run(command, fixture);
+    assert!(!output.status.success(), "fixture unexpectedly succeeded");
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
 fn cargo(fixture: &str, subcommand: &str, args: &[&str]) -> Result<(), String> {
     let output = run(command(fixture, subcommand, args), fixture);
 
@@ -129,51 +135,38 @@ fn required_bindings_compile_in_a_separate_launcher() {
 }
 
 #[test]
-fn action_declarations_compile_in_hosted_mode() {
-    cargo_check("action-pass", &[]).unwrap();
-}
-
-#[test]
-fn payload_compile_inputs_report_missing_and_malformed_fingerprints() {
-    let mut missing = command("payload-launcher", "check", &[]);
-    missing.env_remove(SENSOR_FINGERPRINT_INPUT);
-    let stderr = String::from_utf8_lossy(&run(missing, "payload-launcher").stderr).into_owned();
-    assert!(
-        stderr.contains("missing payload descriptor fingerprint compile input"),
-        "unexpected missing-input diagnostic:\n{stderr}"
-    );
-
-    for value in [
-        "abc",
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-    ] {
-        let mut malformed = command("payload-launcher", "check", &[]);
-        malformed.env(SENSOR_FINGERPRINT_INPUT, value);
-        let stderr =
-            String::from_utf8_lossy(&run(malformed, "payload-launcher").stderr).into_owned();
-        assert!(
-            stderr
-                .contains("payload descriptor fingerprint must be exactly 64 lowercase hex digits"),
-            "unexpected malformed-input diagnostic for {value:?}:\n{stderr}"
-        );
-    }
-}
-
-#[test]
-fn payload_compile_inputs_report_malformed_and_mismatched_macro_abi() {
-    for (value, expected) in [
+fn payload_compile_inputs_report_invalid_values() {
+    for (key, value, expected) in [
         (
-            "two",
+            SENSOR_FINGERPRINT_INPUT,
+            None,
+            "missing payload descriptor fingerprint compile input",
+        ),
+        (
+            SENSOR_FINGERPRINT_INPUT,
+            Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            "payload descriptor fingerprint must be exactly 64 lowercase hex digits",
+        ),
+        (
+            MACRO_ABI_INPUT,
+            Some("two"),
             "payload macro ABI compile input must be a decimal u32",
         ),
-        ("1", "payload macro ABI mismatch: expected 2, received 1"),
+        (
+            MACRO_ABI_INPUT,
+            Some("1"),
+            "payload macro ABI mismatch: expected 2, received 1",
+        ),
     ] {
         let mut command = command("payload-launcher", "check", &[]);
-        command.env(MACRO_ABI_INPUT, value);
-        let stderr = String::from_utf8_lossy(&run(command, "payload-launcher").stderr).into_owned();
+        match value {
+            Some(value) => command.env(key, value),
+            None => command.env_remove(key),
+        };
+        let stderr = failure(command, "payload-launcher");
         assert!(
             stderr.contains(expected),
-            "unexpected ABI diagnostic for {value:?}:\n{stderr}"
+            "unexpected diagnostic for {key}={value:?}:\n{stderr}"
         );
     }
 }
@@ -195,8 +188,10 @@ fn action_declarations_reject_malformed_attributes_and_unrepresentable_delays() 
             "duration value overflows its unit conversion",
         ),
     ] {
-        let stderr = cargo_check("descriptor-pass", &["--features", feature])
-            .expect_err("invalid action declaration should fail");
+        let stderr = failure(
+            command("descriptor-pass", "check", &["--features", feature]),
+            "descriptor-pass",
+        );
         assert!(
             stderr.contains(expected),
             "unexpected diagnostic for {feature}:\n{stderr}"

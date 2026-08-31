@@ -228,7 +228,7 @@ fn parse_action_min_delay(attr: &Attribute) -> syn::Result<Option<i64>> {
         return Ok(None);
     }
 
-    let parser = |input: syn::parse::ParseStream<'_>| {
+    list.parse_args_with(|input: syn::parse::ParseStream<'_>| {
         let key: Ident = input.parse()?;
         if key != "min_delay" {
             return Err(syn::Error::new(
@@ -253,8 +253,7 @@ fn parse_action_min_delay(attr: &Attribute) -> syn::Result<Option<i64>> {
                 "action minimum delay exceeds the runtime nanosecond range",
             )
         })
-    };
-    list.parse_args_with(parser)
+    })
 }
 
 fn parse_default(attr: &Attribute) -> syn::Result<Option<syn::Expr>> {
@@ -998,59 +997,44 @@ fn payload_compile_inputs(contract: &syn::LitStr) -> syn::Result<([u8; 32], Stri
         payload_fingerprint_compile_input_key, COMPONENT_DESCRIPTOR_MACRO_ABI,
         PAYLOAD_MACRO_ABI_COMPILE_INPUT,
     };
-
+    let error = |message| syn::Error::new(contract.span(), message);
     let macro_abi = std::env::var(PAYLOAD_MACRO_ABI_COMPILE_INPUT).map_err(|_| {
-        syn::Error::new(
-            contract.span(),
-            format!("missing payload macro ABI compile input `{PAYLOAD_MACRO_ABI_COMPILE_INPUT}`"),
-        )
+        error(format!(
+            "missing payload macro ABI compile input `{PAYLOAD_MACRO_ABI_COMPILE_INPUT}`"
+        ))
     })?;
+    let invalid_abi = || error("payload macro ABI compile input must be a decimal u32".into());
     if macro_abi.is_empty() || !macro_abi.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(syn::Error::new(
-            contract.span(),
-            "payload macro ABI compile input must be a decimal u32",
-        ));
+        return Err(invalid_abi());
     }
-    let macro_abi = macro_abi.parse::<u32>().map_err(|_| {
-        syn::Error::new(
-            contract.span(),
-            "payload macro ABI compile input must be a decimal u32",
-        )
-    })?;
+    let macro_abi = macro_abi.parse::<u32>().map_err(|_| invalid_abi())?;
     if macro_abi != COMPONENT_DESCRIPTOR_MACRO_ABI {
-        return Err(syn::Error::new(
-            contract.span(),
-            format!(
+        return Err(error(format!(
                 "payload macro ABI mismatch: expected {COMPONENT_DESCRIPTOR_MACRO_ABI}, received {macro_abi}"
-            ),
-        ));
+            )));
     }
-
     let fingerprint_key = payload_fingerprint_compile_input_key(&contract.value());
     let fingerprint = std::env::var(&fingerprint_key).map_err(|_| {
-        syn::Error::new(
-            contract.span(),
-            format!("missing payload descriptor fingerprint compile input `{fingerprint_key}`"),
-        )
+        error(format!(
+            "missing payload descriptor fingerprint compile input `{fingerprint_key}`"
+        ))
     })?;
     if fingerprint.len() != 64
         || !fingerprint
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
-        return Err(syn::Error::new(
-            contract.span(),
-            "payload descriptor fingerprint must be exactly 64 lowercase hex digits",
+        return Err(error(
+            "payload descriptor fingerprint must be exactly 64 lowercase hex digits".into(),
         ));
     }
     let mut bytes = [0u8; 32];
     for (index, pair) in fingerprint.as_bytes().chunks_exact(2).enumerate() {
-        let digit = |byte: u8| match byte {
-            b'0'..=b'9' => byte - b'0',
-            b'a'..=b'f' => byte - b'a' + 10,
-            _ => unreachable!("fingerprint characters were validated"),
-        };
-        bytes[index] = (digit(pair[0]) << 4) | digit(pair[1]);
+        bytes[index] = u8::from_str_radix(
+            std::str::from_utf8(pair).expect("fingerprint characters are ASCII"),
+            16,
+        )
+        .expect("fingerprint characters were validated");
     }
     Ok((bytes, fingerprint_key))
 }

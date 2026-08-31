@@ -175,18 +175,27 @@ fn project_application_topology(assembly: &Assembly) -> Result<ApplicationTopolo
     let mut topology =
         ApplicationTopologyBuilder::new(application_path.to_string()).map_err(projection_error)?;
 
-    let contract = ContractId::new("boomerang_builder::Assembly").map_err(projection_error)?;
+    let fallback_contract =
+        ContractId::new("boomerang_builder::Assembly").map_err(projection_error)?;
     let mut components = SecondaryMap::new();
     for root in &roots {
-        let component = ComponentInstanceId::from_path(name_only_path(
-            "component",
-            [reactor_paths[*root].to_string()],
-        )?);
+        let metadata = assembly.reactor_specs[*root].component_contract();
+        let component = match metadata {
+            Some(_) => ComponentInstanceId::from_path(reactor_paths[*root].clone()),
+            None => ComponentInstanceId::from_path(name_only_path(
+                "component",
+                [reactor_paths[*root].to_string()],
+            )?),
+        };
+        let (contract, contract_version) = metadata.map_or_else(
+            || (fallback_contract.clone(), ASSEMBLY_CONTRACT_VERSION),
+            |metadata| (metadata.contract().clone(), metadata.version()),
+        );
         topology
             .add_component(ComponentInstance::from_ids(
                 component.clone(),
-                contract.clone(),
-                ASSEMBLY_CONTRACT_VERSION,
+                contract,
+                contract_version,
             ))
             .map_err(projection_error)?;
         components.insert(*root, component);
@@ -378,7 +387,28 @@ fn project_application_topology(assembly: &Assembly) -> Result<ApplicationTopolo
         let family = (spec.reactor_key, spec.name().map(str::to_owned));
         let ordinal = reaction_ordinals.entry(family).or_default();
         let owner = &reactor_paths[spec.reactor_key];
-        let path = if let Some(name) = spec.name() {
+        let path = if let Some(slot) = spec.descriptor_slot() {
+            let relative = slot.path().segments().get(1..).ok_or_else(|| {
+                projection_error(format!(
+                    "Assembly reaction descriptor slot '{}' has no root segment",
+                    slot
+                ))
+            })?;
+            if relative.is_empty() {
+                return Err(projection_error(format!(
+                    "Assembly reaction descriptor slot '{}' has no reaction segment",
+                    slot
+                )));
+            }
+            StablePath::from_segments(
+                owner
+                    .segments()
+                    .iter()
+                    .cloned()
+                    .chain(relative.iter().cloned()),
+            )
+            .map_err(projection_error)?
+        } else if let Some(name) = spec.name() {
             owner
                 .append_name(name)
                 .map_err(projection_error)?

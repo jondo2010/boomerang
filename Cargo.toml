@@ -12,6 +12,8 @@ exclude = ['.gitignore', '.cargo/config', '.vscode', '.devcontainer', '.github']
 
 [workspace.dependencies]
 anyhow = "1.0"
+blake3 = "1.8"
+cargo_metadata = "0.23"
 time = { version = "0.3", features = [] }
 document-features = "0.2"
 erased-serde = "0.4"
@@ -19,7 +21,10 @@ itertools = "0.14"
 rayon = "1.10"
 serde = "1.0"
 serde_json = "1.0"
+serde_path_to_error = "0.1"
+tempfile = "3"
 thiserror = "2.0"
+toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = [
     "fmt",
@@ -47,6 +52,7 @@ members = [
     "boomerang_macros",
     "boomerang_runtime",
     "boomerang_tinymap",
+    "cargo-boomerang",
     "examples/snake",
 ]
 resolver = "2"

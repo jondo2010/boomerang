@@ -1,0 +1,14 @@
+[package]
+name = "sensor-host"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+__boomerang_descriptor = ["dep:boomerang_builder"]
+__boomerang_payload = []
+simulated = []
+payload-alias = ["__boomerang_payload"]
+
+[dependencies]
+boomerang = { path = "../../../../../boomerang" }
+boomerang_builder = { path = "../../../../../boomerang_builder", optional = true }

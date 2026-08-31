@@ -1,10 +1,14 @@
 use crate::compiler::{ModeId, ReactorId};
+#[cfg(feature = "host-interchange")]
+use serde::{Deserialize, Serialize};
 
 /// Mode owned by one reactor in the structural application hierarchy.
 ///
 /// `parent` represents reactor-local mode nesting. A reactor instance inherited from an enclosing
 /// parent mode records that relationship on the reactor's `scope_mode` instead.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct Mode {
     /// Stable mode identity.
     pub(super) id: ModeId,

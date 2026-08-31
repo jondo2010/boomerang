@@ -1,8 +1,11 @@
 use super::BankMember;
 use crate::compiler::{ModeId, PortId, ReactorId};
+#[cfg(feature = "host-interchange")]
+use serde::{Deserialize, Serialize};
 
 /// Structural direction of a port.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
 pub enum PortDirection {
     /// Input received by its owning reactor.
     Input,
@@ -12,6 +15,8 @@ pub enum PortDirection {
 
 /// Structural port declaration using stable identities.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct Port {
     /// Stable port identity.
     pub(super) id: PortId,

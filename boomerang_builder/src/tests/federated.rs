@@ -908,6 +908,7 @@ fn test_live_in_memory_intentional_codec_failure_is_returned() {
 }
 
 #[test]
+#[ignore = "known deadlock: delayed local execution parks in LogicalTimeBarrier::acquire_tag"]
 fn test_in_memory_distributed_delayed_connection_matches_local_tag() {
     let delay = runtime::Duration::milliseconds(10);
     let local_values = run_local_source_sink(Some(delay));

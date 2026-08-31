@@ -1,0 +1,44 @@
+schema = 1
+
+[topology]
+package = "vehicle-topology"
+entry = "vehicle_topology::topology"
+
+[deployments.production.bindings.sensor]
+package = "sensor-host"
+features = ["simulated"]
+
+[deployments.production.bindings.controller]
+package = "vehicle-control"
+
+[deployments.production.federates.host]
+groups = ["placement/controller", "placement/sensor"]
+runtime = "std"
+
+[deployments.resolution.bindings.sensor]
+package = "sensor-host"
+features = ["simulated"]
+
+[deployments.resolution.bindings.controller]
+package = "vehicle-control"
+
+[deployments.resolution.federates.host]
+groups = ["placement/controller", "placement/sensor"]
+target = "x86_64-unknown-linux-gnu"
+runtime = "std"
+target-json = "targets/host.json"
+cargo-config = ".cargo/host.toml"
+
+[deployments.outside-member.bindings."vehicle/sensor"]
+package = "outside-member"
+
+[deployments.outside-member.federates.host]
+groups = ["vehicle"]
+runtime = "std"
+
+[deployments.payload-alias.bindings."vehicle/sensor"]
+package = "sensor-host"
+features = ["payload-alias"]
+[deployments.payload-alias.federates.host]
+groups = ["vehicle"]
+runtime = "std"

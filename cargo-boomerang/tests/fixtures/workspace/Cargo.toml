@@ -1,0 +1,8 @@
+[workspace]
+members = ["sensor-host", "vehicle-control", "vehicle-topology"]
+exclude = ["outside-member"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"

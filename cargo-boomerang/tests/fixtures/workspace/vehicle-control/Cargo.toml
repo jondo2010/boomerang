@@ -1,0 +1,11 @@
+[package]
+name = "vehicle-control"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+__boomerang_descriptor = []
+__boomerang_payload = []
+
+[dependencies]
+boomerang = { path = "../../../../../boomerang" }

@@ -136,6 +136,39 @@ pub mod private_empty {
     }
 }
 
+pub mod actions {
+    use super::*;
+
+    #[reactor(
+        contract = "example.actions",
+        contract_version = 1,
+        bounds(queue_capacity = 1, payload_bytes = 1, state_bytes = 1, scratch_bytes = 1)
+    )]
+    pub fn Actions(
+        #[logical_action(min_delay = 0)] logical_now: u32,
+        #[logical_action(min_delay = 10 msec)] logical_later: u32,
+        #[physical_action(min_delay = 0)] physical_now: u16,
+        #[physical_action(min_delay = 7 nsec)] physical_later: u16,
+    ) -> impl Reactor {
+        reaction! {
+            act (logical_now, physical_now) -> logical_later, physical_later {}
+        }
+    }
+}
+
+#[cfg(feature = "invalid-action-attribute")]
+#[reactor]
+fn InvalidActionAttribute(#[logical_action(delay = 1 sec)] tick: ()) -> impl Reactor {}
+#[cfg(feature = "invalid-action-duration")]
+#[reactor]
+fn InvalidActionDuration(#[physical_action(min_delay = 1 fortnight)] tick: ()) -> impl Reactor {}
+#[cfg(feature = "action-delay-overflow")]
+#[reactor]
+fn Delay(#[logical_action(min_delay = 9223372036854775808 nsec)] tick: ()) -> impl Reactor {}
+#[cfg(feature = "action-duration-unit-overflow")]
+#[reactor]
+fn Unit(#[logical_action(min_delay = 18446744073709551615 weeks)] tick: ()) -> impl Reactor {}
+
 #[cfg(feature = "missing-state-init")]
 mod missing_state_init {
     use super::*;
@@ -212,148 +245,58 @@ mod descriptor_tests {
             descriptor.descriptor_fingerprint_input().state_slots(),
             descriptor.state_slots()
         );
+        assert_eq!(
+            descriptor
+                .descriptor_fingerprint_input()
+                .fingerprint()
+                .to_bytes(),
+            [
+                54, 192, 35, 135, 118, 8, 3, 133, 225, 127, 201, 224, 183, 187, 132, 18,
+                182, 182, 185, 158, 174, 30, 233, 239, 241, 26, 248, 18, 235, 74, 146, 60,
+            ]
+        );
+    }
+
+    #[test]
+    fn descriptor_contains_standard_action_slots_and_relationships() {
+        let descriptor = super::actions::__boomerang::descriptor();
+        assert_eq!(
+            descriptor
+                .action_slots()
+                .iter()
+                .map(|slot| slot.id.to_string())
+                .collect::<Vec<_>>(),
+            [
+                "Actions/logical_later",
+                "Actions/logical_now",
+                "Actions/physical_later",
+                "Actions/physical_now",
+            ]
+        );
+        assert_eq!(descriptor.relationships().len(), 4);
+        assert!(descriptor.relationships().iter().all(|relationship| matches!(
+            relationship.target,
+            boomerang::builder::DescriptorRelationshipTarget::Action(_)
+        )));
     }
 }
 
 #[cfg(all(test, feature = "__boomerang_payload"))]
-mod payload_tests {
-    use boomerang_builder::{
-        compiler::StablePath, DescriptorBounds, DescriptorLifecycle, DescriptorRelationship,
-        DescriptorRelationshipKind, DescriptorRelationshipTarget, ModeSlot, ModeSlotId,
-        ModeTransitionKind, PortDirection, PortSlot, PortSlotId, ReactionSlot, ReactionSlotId,
-        ReactorSlot, ReactorSlotId, StateSlot, StateSlotId,
-    };
-
+mod payload_compile_input_tests {
     #[test]
-    fn payload_mode_exports_matching_binding_manifest() {
-        let reactor = StablePath::from_name("Match").unwrap();
-        let input = reactor.append_name("async").unwrap();
-        let output = reactor.append_name("type").unwrap();
-        let effect = reactor.append_name("yield").unwrap();
-        let state = reactor.append_name("loop").unwrap();
-        let mode = reactor.append_name("type").unwrap();
-        let named_reaction = reactor.append_name("move").unwrap();
-        let anonymous_reaction = reactor.append_generated_ordinal(0);
-        let reactor_id = ReactorSlotId::from_path(reactor.clone());
-        let named_reaction_id = ReactionSlotId::from_path(named_reaction);
-        let anonymous_reaction_id = ReactionSlotId::from_path(anonymous_reaction);
-        let mode_id = ModeSlotId::from_path(mode);
-
-        let descriptor = boomerang_builder::ComponentDescriptor::__from_macro(
-            "example.sensor",
-            1,
-            boomerang_builder::COMPONENT_DESCRIPTOR_MACRO_ABI,
-            vec![ReactorSlot {
-                id: reactor_id.clone(),
-                parent: None,
-            }],
-            vec![
-                PortSlot {
-                    id: PortSlotId::from_path(input.clone()),
-                    reactor: reactor_id.clone(),
-                    direction: PortDirection::Input,
-                },
-                PortSlot {
-                    id: PortSlotId::from_path(output),
-                    reactor: reactor_id.clone(),
-                    direction: PortDirection::Output,
-                },
-                PortSlot {
-                    id: PortSlotId::from_path(effect.clone()),
-                    reactor: reactor_id.clone(),
-                    direction: PortDirection::Output,
-                },
-            ],
-            vec![],
-            vec![
-                ReactionSlot {
-                    id: named_reaction_id.clone(),
-                    reactor: reactor_id.clone(),
-                },
-                ReactionSlot {
-                    id: anonymous_reaction_id.clone(),
-                    reactor: reactor_id.clone(),
-                },
-            ],
-            vec![ModeSlot {
-                id: mode_id.clone(),
-                reactor: reactor_id.clone(),
-                parent: None,
-                initial: false,
-            }],
-            vec![StateSlot {
-                id: StateSlotId::from_path(state),
-                reactor: reactor_id.clone(),
-            }],
-            vec![],
-            vec![
-                DescriptorRelationship {
-                    reaction: named_reaction_id.clone(),
-                    kind: DescriptorRelationshipKind::Trigger,
-                    target: DescriptorRelationshipTarget::Port(PortSlotId::from_path(input)),
-                    mode_transition: None,
-                    declaration_position: 0,
-                },
-                DescriptorRelationship {
-                    reaction: named_reaction_id.clone(),
-                    kind: DescriptorRelationshipKind::Trigger,
-                    target: DescriptorRelationshipTarget::Lifecycle(DescriptorLifecycle::Startup),
-                    mode_transition: None,
-                    declaration_position: 1,
-                },
-                DescriptorRelationship {
-                    reaction: named_reaction_id.clone(),
-                    kind: DescriptorRelationshipKind::Mode,
-                    target: DescriptorRelationshipTarget::Mode(mode_id.clone()),
-                    mode_transition: Some(ModeTransitionKind::Reset),
-                    declaration_position: 0,
-                },
-                DescriptorRelationship {
-                    reaction: named_reaction_id.clone(),
-                    kind: DescriptorRelationshipKind::Effect,
-                    target: DescriptorRelationshipTarget::Port(PortSlotId::from_path(effect)),
-                    mode_transition: None,
-                    declaration_position: 1,
-                },
-                DescriptorRelationship {
-                    reaction: anonymous_reaction_id.clone(),
-                    kind: DescriptorRelationshipKind::Trigger,
-                    target: DescriptorRelationshipTarget::Lifecycle(DescriptorLifecycle::Reset),
-                    mode_transition: None,
-                    declaration_position: 0,
-                },
-                DescriptorRelationship {
-                    reaction: anonymous_reaction_id.clone(),
-                    kind: DescriptorRelationshipKind::Mode,
-                    target: DescriptorRelationshipTarget::Mode(mode_id.clone()),
-                    mode_transition: Some(ModeTransitionKind::History),
-                    declaration_position: 0,
-                },
-                DescriptorRelationship {
-                    reaction: anonymous_reaction_id,
-                    kind: DescriptorRelationshipKind::Scope,
-                    target: DescriptorRelationshipTarget::Mode(mode_id),
-                    mode_transition: None,
-                    declaration_position: 0,
-                },
-            ],
-            vec![],
-            vec![],
-            DescriptorBounds {
-                queue_capacity: boomerang_builder::DescriptorBound::Known(16),
-                payload_bytes: boomerang_builder::DescriptorBound::Known(1024),
-                state_bytes: boomerang_builder::DescriptorBound::Known(512),
-                scratch_bytes: boomerang_builder::DescriptorBound::Known(256),
-            },
-        );
-
+    fn payload_mode_embeds_host_provided_compatibility_values() {
         assert_eq!(
-            super::__boomerang::BINDING_MANIFEST.descriptor_fingerprint(),
-            descriptor.descriptor_fingerprint_input().fingerprint(),
+            super::__boomerang::BINDING_MANIFEST
+                .descriptor_fingerprint()
+                .to_bytes(),
+            [
+                54, 192, 35, 135, 118, 8, 3, 133, 225, 127, 201, 224, 183, 187, 132, 18,
+                182, 182, 185, 158, 174, 30, 233, 239, 241, 26, 248, 18, 235, 74, 146, 60,
+            ],
         );
         assert_eq!(
             super::__boomerang::BINDING_MANIFEST.macro_abi(),
-            boomerang_builder::COMPONENT_DESCRIPTOR_MACRO_ABI,
+            boomerang::runtime::binding::COMPONENT_DESCRIPTOR_MACRO_ABI,
         );
 
         let state: super::MatchState = super::__boomerang::state_Match();

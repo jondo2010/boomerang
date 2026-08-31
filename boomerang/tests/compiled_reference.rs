@@ -9,7 +9,7 @@ use boomerang::runtime::{
         ReactorIndex, RequiredBindingImage, RouteDirection, RouteImage, ScopeImage, ScopeIndex,
         StateSlotIndex, StorageBounds, TableRange, TimerStartupImage, TimingDomain, TinyMapView,
     },
-    Config, Context, Duration, ExecuteOwnedError, OwnedBindings, ReactionBindingError,
+    Config, Context, Duration, ExecuteOwnedError, OwnedBindings, PayloadType, ReactionBindingError,
     ReactionRefs, ReactorData, StateAccessError, Tag,
 };
 
@@ -56,6 +56,7 @@ static ACTIONS: [ActionImage; 1] = [ActionImage::new(
     ActionSlotIndex::new(0),
     ActionTiming::Timer { period_nanos: None },
     TableRange::new(0, 1),
+    None,
 )];
 static COALESCED_ACTIONS: [ActionImage; 2] = [
     ACTIONS[0],
@@ -64,6 +65,7 @@ static COALESCED_ACTIONS: [ActionImage; 2] = [
         ActionSlotIndex::new(1),
         ActionTiming::Timer { period_nanos: None },
         TableRange::new(1, 1),
+        None,
     ),
 ];
 static PORTS: [boomerang::runtime::image::PortImage; 0] = [];
@@ -107,7 +109,11 @@ static COALESCED_STARTUP_ACTIONS: [TimerStartupImage; 2] = [
     TimerStartupImage::new(ActionIndex::new(1), 1),
 ];
 static ROUTES: [boomerang::runtime::image::RouteImage; 0] = [];
-static ROUTED_PORTS: [PortImage; 1] = [PortImage::new(ScopeIndex::new(0), TableRange::new(0, 0))];
+static ROUTED_PORTS: [PortImage; 1] = [PortImage::new(
+    ScopeIndex::new(0),
+    TableRange::new(0, 0),
+    BindingSlotIndex::new(2),
+)];
 static ROUTED_ROUTES: [RouteImage; 1] = [RouteImage::new(
     IdentityRange::new(0, 18),
     PortIndex::new(0),
@@ -118,6 +124,11 @@ static ROUTED_ROUTES: [RouteImage; 1] = [RouteImage::new(
 static REQUIRED_BINDINGS: [RequiredBindingImage; 2] = [
     RequiredBindingImage::new(IdentityRange::new(18, 13), BindingKind::StateInitializer),
     RequiredBindingImage::new(IdentityRange::new(31, 17), BindingKind::Reaction),
+];
+static ROUTED_REQUIRED_BINDINGS: [RequiredBindingImage; 3] = [
+    REQUIRED_BINDINGS[0],
+    REQUIRED_BINDINGS[1],
+    RequiredBindingImage::new(IdentityRange::new(48, 11), BindingKind::Port),
 ];
 
 static IMAGE: EnclaveImage<'static> = EnclaveImage {
@@ -179,8 +190,10 @@ static COALESCED_IMAGE: EnclaveImage<'static> = EnclaveImage {
 };
 
 static ROUTED_IMAGE: EnclaveImage<'static> = EnclaveImage {
+    identity_data: "compiled/referencecounter-stateincrement-counterrouted-port",
     ports: TinyMapView::new(&ROUTED_PORTS),
     routes: TinyMapView::new(&ROUTED_ROUTES),
+    required_bindings: TinyMapView::new(&ROUTED_REQUIRED_BINDINGS),
     ..IMAGE
 };
 
@@ -285,14 +298,14 @@ fn compiled_reference_rejects_routes_until_route_execution_is_supported() {
     };
     execute_owned(
         &route_free_image,
-        reference_bindings().bind_port::<u32>(PortIndex::new(0)),
+        reference_bindings().bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new()),
         Config::default().with_fast_forward(true),
     )
     .expect("the same image must execute when its route table is empty");
 
     match execute_owned(
         &ROUTED_IMAGE,
-        reference_bindings().bind_port::<u32>(PortIndex::new(0)),
+        reference_bindings().bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new()),
         Config::default().with_fast_forward(true),
     ) {
         Ok(_) => panic!("routed images must not execute without route support"),

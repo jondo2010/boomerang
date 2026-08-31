@@ -270,7 +270,7 @@ fn deployment_facets_reject_duplicate_mode_names() {
         let normalized_stderr = stderr.replace('\\', "/");
         assert!(
             normalized_stderr.contains("duplicate mode name")
-                && normalized_stderr.contains("src/lib.rs:14:13"),
+                && normalized_stderr.contains("src/lib.rs:22:13"),
             "unexpected {facet} diagnostic:\n{stderr}"
         );
     }

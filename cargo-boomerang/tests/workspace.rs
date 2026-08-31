@@ -32,9 +32,9 @@ fn resolution_returns_exact_package_ids_and_rejects_nonmembers() {
         .manifest_path(workspace.join("Cargo.toml"))
         .other_options(vec![String::from("--locked")]);
     let metadata = metadata.exec().unwrap();
-    let resolved = resolve_workspace(&workspace, "production").unwrap();
+    let resolved = resolve_workspace(&workspace, "resolution").unwrap();
 
-    assert_eq!(resolved.deployment_name(), "production");
+    assert_eq!(resolved.deployment_name(), "resolution");
     assert_eq!(resolved.topology().package, "vehicle-topology");
     assert_eq!(resolved.topology().entry, "vehicle_topology::topology");
     let topology = resolved.package("vehicle-topology").unwrap();
@@ -52,7 +52,7 @@ fn resolution_returns_exact_package_ids_and_rejects_nonmembers() {
             .id
     );
 
-    let sensor_binding = &resolved.deployment().bindings["vehicle/sensor"];
+    let sensor_binding = &resolved.deployment().bindings["sensor"];
     assert_eq!(sensor_binding.package, "sensor-host");
     assert_eq!(sensor_binding.features, ["simulated"]);
     let sensor = resolved.package("sensor-host").unwrap();
@@ -84,9 +84,9 @@ fn resolution_returns_exact_package_ids_and_rejects_nonmembers() {
     assert_eq!(
         resolved.lockfile().digest,
         [
-            0xf5, 0x35, 0x7d, 0x39, 0xf5, 0x32, 0x67, 0x2b, 0xe6, 0x6c, 0x8c, 0x9d, 0x97, 0x76,
-            0xcd, 0x10, 0x80, 0x17, 0x88, 0x31, 0xd8, 0xcf, 0x54, 0x86, 0xb8, 0x52, 0x4a, 0x55,
-            0xa9, 0xb2, 0xf3, 0x24,
+            0x2b, 0x71, 0x15, 0x58, 0xa0, 0x6e, 0xca, 0xe0, 0xf5, 0xea, 0x37, 0x0b, 0x85, 0xb1,
+            0xbc, 0x0d, 0x59, 0x61, 0x2f, 0x43, 0x64, 0x6d, 0xa3, 0x67, 0xfb, 0x01, 0xa0, 0xd6,
+            0xea, 0x22, 0x72, 0x90,
         ]
     );
 
@@ -101,7 +101,7 @@ fn resolution_returns_exact_package_ids_and_rejects_nonmembers() {
 
     let unlocked = tempfile::tempdir().unwrap();
     copy_without_lockfile(&workspace, unlocked.path());
-    let error = resolve_workspace(unlocked.path(), "production").unwrap_err();
+    let error = resolve_workspace(unlocked.path(), "resolution").unwrap_err();
     assert!(
         error
             .to_string()

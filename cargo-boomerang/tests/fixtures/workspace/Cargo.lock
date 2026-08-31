@@ -826,6 +826,7 @@ dependencies = [
 name = "vehicle-topology"
 version = "0.1.0"
 dependencies = [
+ "boomerang",
  "boomerang_builder",
  "outside-member",
 ]

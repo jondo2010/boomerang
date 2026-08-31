@@ -8,7 +8,16 @@ fn initial_count() -> usize {
 #[cfg(not(feature = "__boomerang_descriptor"))]
 fn target_only_reaction_payload() {}
 
-#[reactor(contract = "example.sensor", contract_version = 1)]
+#[reactor(
+    contract = "example.sensor",
+    contract_version = 1,
+    bounds(
+        queue_capacity = 16,
+        payload_bytes = 1024,
+        state_bytes = 512,
+        scratch_bytes = 256,
+    )
+)]
 pub fn r#match(
     #[input] r#async: u32,
     #[output] r#type: u32,
@@ -53,6 +62,7 @@ pub mod custom {
     #[reactor(
         contract = "example.custom",
         contract_version = 1,
+        bounds(queue_capacity = 1, payload_bytes = 1, state_bytes = 1, scratch_bytes = 1),
         state = CustomState,
         state_init = init_custom_state
     )]
@@ -71,7 +81,11 @@ pub mod shaped {
     use super::*;
 
     /// Declares every currently supported own-port reference shape.
-    #[reactor(contract = "example.shaped", contract_version = 1)]
+    #[reactor(
+        contract = "example.shaped",
+        contract_version = 1,
+        bounds(queue_capacity = 1, payload_bytes = 1, state_bytes = 1, scratch_bytes = 1)
+    )]
     pub fn Shaped(
         #[input] array_in: [u16; 2],
         #[input(len = 2)] bank_in: u64,
@@ -92,7 +106,11 @@ pub mod lifetime_collision {
     /// Declares the lifetime name formerly hardcoded by payload generation.
     ///
     /// The generated `LifetimeState::marker` field retains the user's `'store` lifetime.
-    #[reactor(contract = "example.lifetime", contract_version = 1)]
+    #[reactor(
+        contract = "example.lifetime",
+        contract_version = 1,
+        bounds(queue_capacity = 1, payload_bytes = 1, state_bytes = 1, scratch_bytes = 1)
+    )]
     fn Lifetime<'store>(#[state(default = "")] marker: &'store str) -> impl Reactor {
         reaction! {
             tick (startup) {}
@@ -106,7 +124,11 @@ pub mod private_empty {
     use super::*;
 
     /// Provides a generated empty state alias to the payload launcher.
-    #[reactor(contract = "example.private-empty", contract_version = 1)]
+    #[reactor(
+        contract = "example.private-empty",
+        contract_version = 1,
+        bounds(queue_capacity = 1, payload_bytes = 1, state_bytes = 1, scratch_bytes = 1)
+    )]
     fn Empty() -> impl Reactor {
         reaction! {
             start (startup) {}
@@ -125,6 +147,7 @@ mod missing_state_init {
     #[reactor(
         contract = "example.missing-state-init",
         contract_version = 1,
+        bounds(queue_capacity = 1, payload_bytes = 1, state_bytes = 1, scratch_bytes = 1),
         state = CustomState
     )]
     fn MissingStateInit() -> impl Reactor {}
@@ -134,7 +157,11 @@ mod missing_state_init {
 mod lexical_relation {
     use super::*;
 
-    #[reactor(contract = "example.lexical", contract_version = 1)]
+    #[reactor(
+        contract = "example.lexical",
+        contract_version = 1,
+        bounds(queue_capacity = 1, payload_bytes = 1, state_bytes = 1, scratch_bytes = 1)
+    )]
     fn LexicalRelation() -> impl Reactor {
         reaction! {
             (child.output) {
@@ -164,7 +191,7 @@ mod descriptor_tests {
         assert_eq!(descriptor.port_slots()[2].id.to_string(), "Match/yield");
         assert_eq!(descriptor.reaction_slots().len(), 2);
         assert_eq!(descriptor.reaction_slots()[0].id.to_string(), "Match/move");
-        assert_eq!(descriptor.reaction_slots()[1].id.to_string(), "Match/#g1");
+        assert_eq!(descriptor.reaction_slots()[1].id.to_string(), "Match/#g0");
         assert_eq!(descriptor.mode_slots()[0].id.to_string(), "Match/type");
         assert_eq!(descriptor.relationships().len(), 7);
         assert_eq!(descriptor.state_slots().len(), 1);
@@ -172,6 +199,15 @@ mod descriptor_tests {
         assert!(descriptor.codec_slots().is_empty());
         assert!(descriptor.placement_groups().is_empty());
         assert!(descriptor.enclaves().is_empty());
+        assert_eq!(
+            descriptor.bounds(),
+            boomerang::builder::DescriptorBounds {
+                queue_capacity: boomerang::builder::DescriptorBound::Known(16),
+                payload_bytes: boomerang::builder::DescriptorBound::Known(1024),
+                state_bytes: boomerang::builder::DescriptorBound::Known(512),
+                scratch_bytes: boomerang::builder::DescriptorBound::Known(256),
+            }
+        );
         assert_eq!(
             descriptor.descriptor_fingerprint_input().state_slots(),
             descriptor.state_slots()
@@ -197,7 +233,7 @@ mod payload_tests {
         let state = reactor.append_name("loop").unwrap();
         let mode = reactor.append_name("type").unwrap();
         let named_reaction = reactor.append_name("move").unwrap();
-        let anonymous_reaction = reactor.append_generated_ordinal(1);
+        let anonymous_reaction = reactor.append_generated_ordinal(0);
         let reactor_id = ReactorSlotId::from_path(reactor.clone());
         let named_reaction_id = ReactionSlotId::from_path(named_reaction);
         let anonymous_reaction_id = ReactionSlotId::from_path(anonymous_reaction);
@@ -303,7 +339,12 @@ mod payload_tests {
             ],
             vec![],
             vec![],
-            DescriptorBounds::default(),
+            DescriptorBounds {
+                queue_capacity: boomerang_builder::DescriptorBound::Known(16),
+                payload_bytes: boomerang_builder::DescriptorBound::Known(1024),
+                state_bytes: boomerang_builder::DescriptorBound::Known(512),
+                scratch_bytes: boomerang_builder::DescriptorBound::Known(256),
+            },
         );
 
         assert_eq!(

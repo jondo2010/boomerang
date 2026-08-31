@@ -5,8 +5,8 @@ use super::{
     AssemblyReactorKey,
 };
 use crate::{
-    runtime, ActionTag, ParentReactorSpec, PortBank, PortTag, RuntimeAssembly, TimerActionKey,
-    TypedActionKey, TypedPortKey,
+    runtime, ActionTag, ParentReactorSpec, PortBank, PortTag, ReactionSlotId, RuntimeAssembly,
+    TimerActionKey, TypedActionKey, TypedPortKey,
 };
 use slotmap::SecondaryMap;
 use variadics_please::all_tuples;
@@ -30,6 +30,8 @@ pub type DeferredReactionFactory = Box<dyn FnOnce(&RuntimeAssembly) -> runtime::
 
 pub struct ReactionSpec {
     pub(super) name: Option<String>,
+    /// Canonical implementation-local descriptor slot, when generated metadata supplied one.
+    descriptor_slot: Option<ReactionSlotId>,
     /// The owning Reactor for this Reaction
     pub(super) reactor_key: AssemblyReactorKey,
     /// The Reaction function
@@ -61,6 +63,7 @@ impl ReactionSpec {
     ) -> Self {
         ReactionSpec {
             name: name.map(|s| s.into()),
+            descriptor_slot: None,
             reactor_key: parent_key,
             reaction_fn,
             enabled_modes: None,
@@ -72,6 +75,11 @@ impl ReactionSpec {
             port_relations: SecondaryMap::new(),
             port_order: Vec::new(),
         }
+    }
+
+    /// Returns the canonical descriptor slot recorded for this reaction.
+    pub fn descriptor_slot(&self) -> Option<&ReactionSlotId> {
+        self.descriptor_slot.as_ref()
     }
 }
 
@@ -358,6 +366,7 @@ impl ReactionDeclarationField for ModeEffectSpec {
 #[derive(Debug)]
 pub struct ReactionDeclaration<'a, S: runtime::ReactorData, Fields = (), ReactionFn = ()> {
     name: Option<String>,
+    descriptor_slot: Option<ReactionSlotId>,
     reaction_fn: ReactionFn,
     enabled_modes: Option<Vec<AssemblyModeKey>>,
     scope_mode: Option<AssemblyModeKey>,
@@ -381,6 +390,7 @@ impl<'a, S: runtime::ReactorData> ReactionDeclaration<'a, S, (), ()> {
     ) -> Self {
         Self {
             name: name.map(|s| s.to_string()),
+            descriptor_slot: None,
             reaction_fn: (),
             enabled_modes: None,
             scope_mode: None,
@@ -401,6 +411,12 @@ impl<'a, S: runtime::ReactorData> ReactionDeclaration<'a, S, (), ()> {
 impl<'a, S: runtime::ReactorData, Fields, ReactionFn>
     ReactionDeclaration<'a, S, Fields, ReactionFn>
 {
+    /// Records the implementation-local descriptor slot represented by this declaration.
+    pub fn with_descriptor_slot(mut self, slot: ReactionSlotId) -> Self {
+        self.descriptor_slot = Some(slot);
+        self
+    }
+
     fn record_port_relation(&mut self, key: AssemblyPortKey, trigger_mode: TriggerMode) {
         if !self.port_relations.contains_key(key) {
             self.port_order.push(key);
@@ -472,6 +488,7 @@ macro_rules! impl_with_field {
                 #[allow(non_snake_case)]
                 let Self {
                     name,
+                    descriptor_slot,
                     enabled_modes,
                     scope_mode,
                     mode_effects,
@@ -487,6 +504,7 @@ macro_rules! impl_with_field {
                 } = self;
                 ReactionDeclaration {
                     name,
+                    descriptor_slot,
                     reaction_fn: (),
                     enabled_modes,
                     scope_mode,
@@ -513,6 +531,7 @@ macro_rules! impl_with_field {
                 #[allow(non_snake_case)]
                 let Self {
                     name,
+                    descriptor_slot,
                     enabled_modes,
                     scope_mode,
                     mode_effects,
@@ -528,6 +547,7 @@ macro_rules! impl_with_field {
                 } = self;
                 ReactionDeclaration {
                     name,
+                    descriptor_slot,
                     reaction_fn: (),
                     enabled_modes,
                     scope_mode,
@@ -553,6 +573,7 @@ macro_rules! impl_with_field {
                 #[allow(non_snake_case)]
                 let Self {
                     name,
+                    descriptor_slot,
                     enabled_modes,
                     scope_mode,
                     mode_effects,
@@ -568,6 +589,7 @@ macro_rules! impl_with_field {
                 } = self;
                 ReactionDeclaration {
                     name,
+                    descriptor_slot,
                     reaction_fn: (),
                     enabled_modes,
                     scope_mode,
@@ -628,6 +650,7 @@ where
     {
         let Self {
             name,
+            descriptor_slot,
             enabled_modes,
             scope_mode,
             mode_effects,
@@ -654,6 +677,7 @@ where
         );
         ReactionDeclaration {
             name,
+            descriptor_slot,
             reaction_fn,
             enabled_modes,
             scope_mode,
@@ -685,6 +709,7 @@ where
     {
         let Self {
             name,
+            descriptor_slot,
             enabled_modes,
             scope_mode,
             mode_effects,
@@ -700,6 +725,7 @@ where
         } = self;
         ReactionDeclaration {
             name,
+            descriptor_slot,
             reaction_fn: Box::new(f),
             enabled_modes,
             scope_mode,
@@ -726,6 +752,7 @@ where
     pub fn finish(self) -> Result<AssemblyReactionKey, AssemblyError> {
         let Self {
             name,
+            descriptor_slot,
             enabled_modes,
             scope_mode,
             mode_effects,
@@ -806,6 +833,7 @@ where
 
         let reaction_spec = ReactionSpec {
             name,
+            descriptor_slot,
             reactor_key,
             reaction_fn,
             enabled_modes,

@@ -144,6 +144,10 @@ runtime = "std"
             "schema = 1\n[topology]\npackage = \"topology\"\nentry = \"topology\"\n[deployments.production]\nfederates = {}".to_owned(),
             "deployments.production.federates must contain at least one Federate",
         ),
+        (
+            "schema = 1\n[topology]\npackage = \"topology\"\nentry = \"topology\"\n[deployments.\"../escape\".federates.host]\ngroups = [\"host\"]\nruntime = \"std\"".to_owned(),
+            "invalid deployment ../escape: deployment names must be non-empty and contain only ASCII letters, digits, '-', '_', or '.'; '.' and '..' are reserved",
+        ),
     ];
 
     for (source, expected) in cases {

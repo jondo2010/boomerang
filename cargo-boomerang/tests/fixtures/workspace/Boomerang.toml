@@ -4,15 +4,26 @@ schema = 1
 package = "vehicle-topology"
 entry = "vehicle_topology::topology"
 
-[deployments.production.bindings."vehicle/sensor"]
+[deployments.production.bindings.sensor]
 package = "sensor-host"
 features = ["simulated"]
 
-[deployments.production.bindings."vehicle/controller"]
+[deployments.production.bindings.controller]
 package = "vehicle-control"
 
 [deployments.production.federates.host]
-groups = ["vehicle"]
+groups = ["placement/controller", "placement/sensor"]
+runtime = "std"
+
+[deployments.resolution.bindings.sensor]
+package = "sensor-host"
+features = ["simulated"]
+
+[deployments.resolution.bindings.controller]
+package = "vehicle-control"
+
+[deployments.resolution.federates.host]
+groups = ["placement/controller", "placement/sensor"]
 target = "x86_64-unknown-linux-gnu"
 runtime = "std"
 target-json = "targets/host.json"

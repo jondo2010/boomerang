@@ -20,6 +20,21 @@ pub struct ReactorArgs {
     contract: Option<syn::LitStr>,
     /// Stable component contract version for descriptor builds.
     contract_version: Option<syn::LitInt>,
+    /// Finite component resource bounds required for static lowering.
+    bounds: Option<DescriptorBoundsArgs>,
+}
+
+/// Parsed values from the nested `bounds(...)` reactor argument.
+#[derive(attribute_derive::FromAttr)]
+struct DescriptorBoundsArgs {
+    /// Maximum queued events.
+    queue_capacity: syn::LitInt,
+    /// Maximum payload storage in bytes.
+    payload_bytes: syn::LitInt,
+    /// Maximum reactor-state storage in bytes.
+    state_bytes: syn::LitInt,
+    /// Maximum scheduler scratch storage in bytes.
+    scratch_bytes: syn::LitInt,
 }
 
 impl ReactorArgs {
@@ -30,7 +45,38 @@ impl ReactorArgs {
                 "`state_init` requires `state = T`",
             ));
         }
+        if self.contract.is_some() != self.contract_version.is_some() {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "deployment descriptor requires contract and contract_version metadata",
+            ));
+        }
+        if self.contract.is_some() != self.bounds.is_some() {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "deployment descriptor requires bounds metadata with contract metadata",
+            ));
+        }
         Ok(())
+    }
+
+    /// Converts declared bounds into the shared descriptor representation.
+    fn descriptor_bounds(&self) -> syn::Result<boomerang_builder::DescriptorBounds> {
+        let Some(bounds) = &self.bounds else {
+            return Ok(boomerang_builder::DescriptorBounds::default());
+        };
+        let known = |value: &syn::LitInt| {
+            value
+                .base10_parse::<u64>()
+                .map(boomerang_builder::DescriptorBound::Known)
+                .map_err(|_| syn::Error::new(value.span(), "resource bound must fit in u64"))
+        };
+        Ok(boomerang_builder::DescriptorBounds {
+            queue_capacity: known(&bounds.queue_capacity)?,
+            payload_bytes: known(&bounds.payload_bytes)?,
+            state_bytes: known(&bounds.state_bytes)?,
+            scratch_bytes: known(&bounds.scratch_bytes)?,
+        })
     }
 }
 
@@ -454,14 +500,42 @@ impl ReactorBody {
     }
 
     fn body_tokens(&self) -> TokenStream {
+        self.body_tokens_with_descriptor_slots(None, &mut 0)
+    }
+
+    /// Emits hosted body tokens while assigning descriptor reaction slots in source order.
+    fn body_tokens_with_descriptor_slots(
+        &self,
+        reactor_name: Option<&str>,
+        ordinal: &mut u32,
+    ) -> TokenStream {
         let mut tokens = TokenStream::new();
         for item in &self.items {
             match item {
                 BodyItem::Tokens(body_tokens) => tokens.append_all(body_tokens.clone()),
-                BodyItem::Reaction(reaction) => reaction.to_tokens(&mut tokens),
+                BodyItem::Reaction(reaction) => {
+                    let descriptor_slot =
+                        reactor_name.map(|reactor_name| match CanonicalReactionSlot::for_reaction(
+                            reaction, ordinal,
+                        ) {
+                            CanonicalReactionSlot::Named(name) => {
+                                let path = stable_path_tokens(&[reactor_name.to_owned(), name]);
+                                quote!(::boomerang::builder::ReactionSlotId::from_path(#path))
+                            }
+                            CanonicalReactionSlot::Generated(ordinal) => {
+                                let reactor_path = stable_path_tokens(&[reactor_name.to_owned()]);
+                                quote!(::boomerang::builder::ReactionSlotId::from_path(
+                                    (#reactor_path).append_generated_ordinal(#ordinal)
+                                ))
+                            }
+                        });
+                    reaction.to_tokens_with_descriptor_slot(&mut tokens, descriptor_slot);
+                }
                 BodyItem::Mode(mode) => {
                     let key_ident = mode.key_ident();
-                    let body = mode.body.body_tokens();
+                    let body = mode
+                        .body
+                        .body_tokens_with_descriptor_slots(reactor_name, ordinal);
                     tokens.append_all(quote! {
                         ctx.in_mode(#key_ident, |ctx| {
                             #body
@@ -531,6 +605,37 @@ impl ReactorBody {
             BodyItem::Mode(mode) => Some(mode),
             BodyItem::Tokens(_) | BodyItem::Reaction(_) => None,
         })
+    }
+}
+
+/// Canonical descriptor-local identity segment for one macro reaction.
+enum CanonicalReactionSlot {
+    /// User-declared reaction name.
+    Named(String),
+    /// Zero-based ordinal among anonymous reactions only.
+    Generated(u32),
+}
+
+impl CanonicalReactionSlot {
+    /// Resolves a named or generated slot while advancing only anonymous ordinals.
+    fn for_reaction(reaction: &crate::reaction::Model, next_generated: &mut u32) -> Self {
+        if let Some(name) = reaction.name() {
+            Self::Named(ident_text(name))
+        } else {
+            let ordinal = *next_generated;
+            *next_generated = next_generated
+                .checked_add(1)
+                .expect("anonymous reaction count exceeds descriptor representation");
+            Self::Generated(ordinal)
+        }
+    }
+
+    /// Formats the slot segment for generated binding symbols.
+    fn text(self) -> String {
+        match self {
+            Self::Named(name) => name,
+            Self::Generated(ordinal) => format!("#g{ordinal}"),
+        }
     }
 }
 
@@ -792,14 +897,12 @@ fn payload_reaction_output(
     let store_lifetime = fresh_payload_lifetime(&model.generics);
     let mut reactions = Vec::new();
     model.body.reactions(None, &mut reactions);
+    let mut next_generated = 0;
     reactions
         .into_iter()
-        .enumerate()
-        .map(|(ordinal, (_, reaction))| {
-            let reaction_name = reaction
-                .name()
-                .map(ident_text)
-                .unwrap_or_else(|| format!("#g{ordinal}"));
+        .map(|(_, reaction)| {
+            let reaction_name =
+                CanonicalReactionSlot::for_reaction(reaction, &mut next_generated).text();
             let symbol = required_binding_symbol(&reactor_name, Some(&reaction_name));
             let export_doc = format!(
                 "Invokes payload reaction `{reactor_name}/{reaction_name}` with concrete references."
@@ -913,6 +1016,10 @@ fn payload_output(
                 .to_compile_error()
         }
     };
+    let bounds = match reactor_args.descriptor_bounds() {
+        Ok(bounds) => bounds,
+        Err(error) => return error.to_compile_error(),
+    };
 
     if let Err(error) = model.body.validate_unique_reaction_names() {
         return error.to_compile_error();
@@ -1008,18 +1115,20 @@ fn payload_output(
     model.body.reactions(None, &mut reactions);
     let mut reaction_slots = Vec::new();
     let mut relationships = Vec::new();
-    for (ordinal, (scope, reaction)) in reactions.into_iter().enumerate() {
-        let reaction_id = if let Some(name) = reaction.name() {
-            boomerang_builder::ReactionSlotId::from_path(stable_path_value(&[
-                reactor_name.clone(),
-                ident_text(name),
-            ]))
-        } else {
-            let ordinal =
-                u32::try_from(ordinal).expect("reaction count exceeds descriptor representation");
-            boomerang_builder::ReactionSlotId::from_path(
-                reactor_path.append_generated_ordinal(ordinal),
-            )
+    let mut next_generated = 0;
+    for (scope, reaction) in reactions {
+        let reaction_id = match CanonicalReactionSlot::for_reaction(reaction, &mut next_generated) {
+            CanonicalReactionSlot::Named(name) => {
+                boomerang_builder::ReactionSlotId::from_path(stable_path_value(&[
+                    reactor_name.clone(),
+                    name,
+                ]))
+            }
+            CanonicalReactionSlot::Generated(ordinal) => {
+                boomerang_builder::ReactionSlotId::from_path(
+                    reactor_path.append_generated_ordinal(ordinal),
+                )
+            }
         };
         reaction_slots.push(boomerang_builder::ReactionSlot {
             id: reaction_id.clone(),
@@ -1136,7 +1245,7 @@ fn payload_output(
         relationships,
         vec![],
         vec![],
-        boomerang_builder::DescriptorBounds::default(),
+        bounds,
     ) {
         Ok(descriptor) => descriptor,
         Err(error) => {
@@ -1214,6 +1323,19 @@ fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
             return syn::Error::new(contract_version.span(), "contract_version must fit in u64")
                 .to_compile_error()
         }
+    };
+    let bounds = match reactor_args.descriptor_bounds() {
+        Ok(bounds) => bounds,
+        Err(error) => return error.to_compile_error(),
+    };
+    let boomerang_builder::DescriptorBounds {
+        queue_capacity: boomerang_builder::DescriptorBound::Known(queue_capacity),
+        payload_bytes: boomerang_builder::DescriptorBound::Known(payload_bytes),
+        state_bytes: boomerang_builder::DescriptorBound::Known(state_bytes),
+        scratch_bytes: boomerang_builder::DescriptorBound::Known(scratch_bytes),
+    } = bounds
+    else {
+        unreachable!("contract metadata requires finite descriptor bounds")
     };
 
     if let Err(error) = model.body.validate_unique_reaction_names() {
@@ -1312,17 +1434,20 @@ fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
     model.body.reactions(None, &mut reactions);
     let mut reaction_slots = Vec::new();
     let mut relationships = Vec::new();
-    for (ordinal, (scope, reaction)) in reactions.into_iter().enumerate() {
+    let mut next_generated = 0;
+    for (scope, reaction) in reactions {
         let reactor_path = stable_path_tokens(std::slice::from_ref(&reactor_name));
-        let reaction_slot = if let Some(name) = reaction.name() {
-            let path = stable_path_tokens(&[reactor_name.clone(), ident_text(name)]);
-            quote!(::boomerang::builder::ReactionSlotId::from_path(#path))
-        } else {
-            let ordinal =
-                u32::try_from(ordinal).expect("reaction count exceeds descriptor representation");
-            quote!(::boomerang::builder::ReactionSlotId::from_path(
-                (#reactor_path).append_generated_ordinal(#ordinal)
-            ))
+        let reaction_slot = match CanonicalReactionSlot::for_reaction(reaction, &mut next_generated)
+        {
+            CanonicalReactionSlot::Named(name) => {
+                let path = stable_path_tokens(&[reactor_name.clone(), name]);
+                quote!(::boomerang::builder::ReactionSlotId::from_path(#path))
+            }
+            CanonicalReactionSlot::Generated(ordinal) => {
+                quote!(::boomerang::builder::ReactionSlotId::from_path(
+                    (#reactor_path).append_generated_ordinal(#ordinal)
+                ))
+            }
         };
         let owner_path = stable_path_tokens(std::slice::from_ref(&reactor_name));
         reaction_slots.push(quote! {
@@ -1445,7 +1570,12 @@ fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
                     vec![#(#relationships),*],
                     vec![],
                     vec![],
-                    ::boomerang::builder::DescriptorBounds::default(),
+                    ::boomerang::builder::DescriptorBounds {
+                        queue_capacity: ::boomerang::builder::DescriptorBound::Known(#queue_capacity),
+                        payload_bytes: ::boomerang::builder::DescriptorBound::Known(#payload_bytes),
+                        state_bytes: ::boomerang::builder::DescriptorBound::Known(#state_bytes),
+                        scratch_bytes: ::boomerang::builder::DescriptorBound::Known(#scratch_bytes),
+                    },
                 )
             }
         }
@@ -1696,7 +1826,38 @@ impl ToTokens for ArgsModel {
             )
         });
         let mode_bindings = body.mode_bindings();
-        let body_tokens = body.body_tokens();
+        let (component_metadata, body_tokens) = match (
+            reactor_args.contract.as_ref(),
+            reactor_args.contract_version.as_ref(),
+        ) {
+            (Some(contract), Some(version)) => {
+                let version = match version.base10_parse::<u64>() {
+                    Ok(version) => version,
+                    Err(_) => {
+                        tokens.append_all(
+                            syn::Error::new(version.span(), "contract_version must fit in u64")
+                                .to_compile_error(),
+                        );
+                        return;
+                    }
+                };
+                let reactor_name = ident_text(name);
+                let body_tokens =
+                    body.body_tokens_with_descriptor_slots(Some(&reactor_name), &mut 0);
+                (
+                    quote! {
+                        ctx.set_component_contract(
+                            ::boomerang::builder::compiler::ContractId::new(#contract)
+                                .expect("reactor macro validated contract text"),
+                            #version,
+                        );
+                    },
+                    body_tokens,
+                )
+            }
+            (None, None) => (TokenStream::new(), body.body_tokens()),
+            _ => unreachable!("reactor argument validation requires complete contract metadata"),
+        };
 
         let output = if has_banked_ports {
             let ports_struct_fields = args.iter().filter_map(
@@ -1881,6 +2042,7 @@ impl ToTokens for ArgsModel {
                          assembly: &mut ::boomerang::builder::Assembly| {
                         #(#len_bindings)*
                         let mut ctx = assembly.add_reactor(name, parent, bank_info, state, placement);
+                        #component_metadata
                         if let Some(scope_mode) = scope_mode {
                             ctx.set_scope_mode(scope_mode)?;
                         }
@@ -1911,6 +2073,7 @@ impl ToTokens for ArgsModel {
                 #vis fn #name #impl_generics(#(#param_args,)*) #ret #where_clause {
                     <#ports_name #ty_generics as ::boomerang::builder::ReactorPorts>::build_with::<_, #state_type_path>(
                         move |ctx, (#(#port_idents,)*)| {
+                            #component_metadata
                             #(#mode_bindings)*
                             #body_tokens
                             Ok(())

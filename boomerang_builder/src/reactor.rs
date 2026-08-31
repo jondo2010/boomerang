@@ -5,7 +5,7 @@ use super::{
     AssemblyPortKey, AssemblyReactionKey, Input, Logical, ModeEffectSpec, Output, Physical,
     PortBank, PortTag, TimerActionKey, TimerSpec, TypedActionKey, TypedPortKey,
 };
-use crate::runtime;
+use crate::{compiler::ContractId, runtime};
 use slotmap::SecondaryMap;
 
 slotmap::new_key_type! {
@@ -131,6 +131,32 @@ impl<T: runtime::ReactorData> Debug for ReactorState<T> {
     }
 }
 
+/// Contract metadata attached to a component-bearing Assembly reactor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ComponentContract {
+    /// Stable external contract identity.
+    contract: ContractId,
+    /// Declared contract version.
+    version: u64,
+}
+
+impl ComponentContract {
+    /// Creates component contract metadata.
+    pub const fn new(contract: ContractId, version: u64) -> Self {
+        Self { contract, version }
+    }
+
+    /// Returns the stable external contract identity.
+    pub const fn contract(&self) -> &ContractId {
+        &self.contract
+    }
+
+    /// Returns the declared contract version.
+    pub const fn version(&self) -> u64 {
+        self.version
+    }
+}
+
 /// `ParentReactorSpec` is implemented for Reactor elements that can have a parent Reactor
 pub trait ParentReactorSpec {
     fn parent_reactor_key(&self) -> Option<AssemblyReactorKey>;
@@ -145,6 +171,8 @@ pub struct ReactorSpec {
     state: Box<dyn BaseReactorState>,
     /// The top-level/class name of the Reactor
     type_name: String,
+    /// Optional component contract declared by generated hosted code.
+    component_contract: Option<ComponentContract>,
     /// Optional parent reactor key
     pub parent_reactor_key: Option<AssemblyReactorKey>,
     /// Enclosing parent mode scope, if this reactor instance was declared inside a mode.
@@ -189,6 +217,7 @@ impl ReactorSpec {
             name: name.into(),
             state: Box::new(ReactorState(reactor_state)),
             type_name: type_name.into(),
+            component_contract: None,
             parent_reactor_key: parent,
             scope_mode: None,
             reactions: SecondaryMap::new(),
@@ -226,6 +255,11 @@ impl ReactorSpec {
     #[allow(dead_code)] // TODO: use or remove this
     pub fn type_name(&self) -> &str {
         self.type_name.as_ref()
+    }
+
+    /// Returns component contract metadata recorded on this reactor.
+    pub fn component_contract(&self) -> Option<&ComponentContract> {
+        self.component_contract.as_ref()
     }
 
     /// Build this [`ReactorSpec`] into a [`Box<dyn runtime::BaseReactor>`]
@@ -324,6 +358,12 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
     /// Get the [`AssemblyReactorKey`] for this `ReactorSpec`
     pub fn key(&self) -> AssemblyReactorKey {
         self.reactor_key
+    }
+
+    /// Marks this reactor instance as carrying a component contract.
+    pub fn set_component_contract(&mut self, contract: ContractId, version: u64) {
+        self.assembly.reactor_specs[self.reactor_key].component_contract =
+            Some(ComponentContract::new(contract, version));
     }
 
     #[doc(hidden)]

@@ -840,7 +840,10 @@ fn payload_ref(
     };
     let name = ident_text(ident);
     if mode_names.contains(&name) {
-        return Ok((ident.clone(), quote!(::boomerang::runtime::ModeEffectRef)));
+        return Ok((
+            ident.clone(),
+            quote!(::boomerang::runtime::CompiledModeEffectRef),
+        ));
     }
     let Some(arg) = args.iter().find(|arg| ident_text(&arg.name.ident) == name) else {
         return Err(syn::Error::new_spanned(

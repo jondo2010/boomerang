@@ -6,7 +6,7 @@
 pub const PAYLOAD_COMPILE_INPUT_SCHEMA: u32 = 1;
 
 /// Authoritative macro ABI understood by descriptors and payload facets in this release.
-pub const COMPONENT_DESCRIPTOR_MACRO_ABI: u32 = 2;
+pub const COMPONENT_DESCRIPTOR_MACRO_ABI: u32 = 3;
 
 /// Cargo environment key containing the host-expected decimal macro ABI.
 pub const PAYLOAD_MACRO_ABI_COMPILE_INPUT: &str = "BOOMERANG_PAYLOAD_INPUT_V1_MACRO_ABI";
@@ -132,7 +132,7 @@ mod tests {
     #[test]
     fn payload_compile_input_keys_are_canonical_and_collision_free() {
         assert_eq!(PAYLOAD_COMPILE_INPUT_SCHEMA, 1);
-        assert_eq!(COMPONENT_DESCRIPTOR_MACRO_ABI, 2);
+        assert_eq!(COMPONENT_DESCRIPTOR_MACRO_ABI, 3);
         assert_eq!(
             PAYLOAD_MACRO_ABI_COMPILE_INPUT,
             "BOOMERANG_PAYLOAD_INPUT_V1_MACRO_ABI"

@@ -3,8 +3,8 @@
 /// Descriptor fingerprint generated independently by the host-side fixture.
 const EXPECTED_FINGERPRINT: boomerang::runtime::binding::DescriptorFingerprint =
     boomerang::runtime::binding::DescriptorFingerprint::new([
-        54, 192, 35, 135, 118, 8, 3, 133, 225, 127, 201, 224, 183, 187, 132, 18, 182, 182, 185,
-        158, 174, 30, 233, 239, 241, 26, 248, 18, 235, 74, 146, 60,
+        173, 248, 107, 207, 105, 80, 159, 129, 225, 21, 134, 108, 49, 224, 42, 183, 112, 195,
+        43, 150, 102, 68, 163, 191, 240, 50, 132, 133, 213, 59, 136, 241,
     ]);
 const _: () = boomerang::runtime::binding::assert_descriptor_fingerprint(
     EXPECTED_FINGERPRINT,
@@ -32,7 +32,7 @@ const _: () = boomerang::runtime::binding::assert_descriptor_fingerprint(
 type MoveRefs<'store> = (
     boomerang::runtime::InputRef<'store, u32>,
     boomerang::runtime::ActionRef<'store>,
-    boomerang::runtime::ModeEffectRef,
+    boomerang::runtime::CompiledModeEffectRef,
     boomerang::runtime::OutputRef<'store, u32>,
 );
 
@@ -44,11 +44,28 @@ type ShapedRefs<'store> = (
     boomerang::runtime::OutputBankRef<'store, u8>,
 );
 
-/// Directly constructs root state and invokes its typed reaction symbol.
+/// Adapts owned-storage references and invokes the root typed reaction symbol.
 #[allow(dead_code)]
-fn bind_match<'store>(ctx: &mut boomerang::runtime::Context, refs: MoveRefs<'store>) {
-    let mut state = descriptor_pass::__boomerang::state_Match();
-    descriptor_pass::__boomerang::reaction_Match_2fmove(ctx, &mut state, refs);
+fn bind_match(
+    ctx: &mut boomerang::runtime::Context,
+    state: &mut dyn boomerang::runtime::ReactorData,
+    refs: boomerang::runtime::ReactionRefs<'_>,
+    mode_effect: Option<boomerang::runtime::CompiledModeEffectRef>,
+) -> Result<(), boomerang::runtime::ReactionBindingError> {
+    let state = state
+        .downcast_mut::<descriptor_pass::MatchState>()
+        .expect("the generated state initializer supplies MatchState");
+    let input = refs.ports.partition()?;
+    let startup = refs.actions.partition_mut()?;
+    let output = refs.ports_mut.partition_mut()?;
+    let refs: MoveRefs<'_> = (
+        input,
+        startup,
+        mode_effect.expect("the compiled reaction declares its canonical mode effect"),
+        output,
+    );
+    descriptor_pass::__boomerang::reaction_Match_2fmove(ctx, state, refs);
+    Ok(())
 }
 
 /// Directly constructs shaped state and invokes its typed reaction symbol.
@@ -108,6 +125,7 @@ fn direct_payload_bindings() -> boomerang::runtime::EnclaveBindings {
 
     boomerang::runtime::EnclaveBindings::new()
         .bind_state(BindingSlotIndex::new(0), descriptor_pass::__boomerang::state_Match)
+        .bind_reaction(BindingSlotIndex::new(3), bind_match)
         .bind_port(
             BindingSlotIndex::new(1),
             descriptor_pass::__boomerang::port_Match_2fasync,

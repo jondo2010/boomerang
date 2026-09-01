@@ -82,12 +82,12 @@ enum ActivityReport {
     Abort,
 }
 
-/// Coordinator-to-scheduler commands for probing, two-phase termination, or abortion.
+/// Coordinator-to-scheduler commands for probing, confirmed termination, or abortion.
 #[derive(Clone, Copy)]
 enum ActivityCommand {
     /// Requests a fresh queue check for the stated idle epoch.
     Probe(usize),
-    /// Prepares termination on first receipt and commits it on the second receipt of this epoch.
+    /// Prepares, rechecks, then commits termination across three receipts of this epoch.
     Terminate(usize),
     /// Stops the scheduler immediately after an execution failure.
     Abort,
@@ -136,8 +136,7 @@ impl OwnedFederateCoordinatorRunner {
         let mut confirmed = BTreeSet::new();
         let mut epoch = 0usize;
         let mut probing = false;
-        let mut preparing_termination = false;
-        let mut committed_termination = false;
+        let mut termination_round = 0_u8;
         let mut termination_confirmed = BTreeSet::new();
         while !active.is_empty() {
             let report = match report_rx.recv() {
@@ -159,14 +158,14 @@ impl OwnedFederateCoordinatorRunner {
                     confirmed.remove(&key);
                     termination_confirmed.remove(&key);
                 }
-                ActivityReport::Active(_) if committed_termination => {}
+                ActivityReport::Active(_) if termination_round == 3 => {}
                 ActivityReport::Active(key) => {
                     busy.insert(key);
                     seen_idle.remove(&key);
                     confirmed.clear();
                     termination_confirmed.clear();
                     probing = false;
-                    preparing_termination = false;
+                    termination_round = 0;
                 }
                 ActivityReport::Idle {
                     key,
@@ -174,22 +173,25 @@ impl OwnedFederateCoordinatorRunner {
                 } => {
                     busy.remove(&key);
                     seen_idle.insert(key);
-                    if preparing_termination && observed == epoch && active.contains(&key) {
+                    if (1..=2).contains(&termination_round)
+                        && observed == epoch
+                        && active.contains(&key)
+                    {
                         termination_confirmed.insert(key);
                     } else if probing && observed == epoch && active.contains(&key) {
                         confirmed.insert(key);
                     }
                 }
             }
-            if preparing_termination && termination_confirmed == active {
+            if (1..=2).contains(&termination_round) && termination_confirmed == active {
                 send(ActivityCommand::Terminate(epoch), &active);
-                preparing_termination = false;
-                committed_termination = true;
-            } else if !committed_termination && busy.is_empty() && seen_idle == active {
+                termination_confirmed.clear();
+                termination_round += 1;
+            } else if termination_round == 0 && busy.is_empty() && seen_idle == active {
                 if probing && confirmed == active {
                     termination_confirmed.clear();
                     send(ActivityCommand::Terminate(epoch), &active);
-                    preparing_termination = true;
+                    termination_round = 1;
                 } else if !probing {
                     epoch = epoch.wrapping_add(1);
                     confirmed.clear();
@@ -209,8 +211,8 @@ pub(crate) struct OwnedSchedulerActivity {
     epoch: usize,
     /// Whether work has been reported since this scheduler last became idle.
     active: bool,
-    /// Termination epoch prepared after a final empty-queue check, if any.
-    prepared_termination: Option<usize>,
+    /// Termination epoch and completed empty-queue confirmations, if any.
+    prepared_termination: Option<(usize, u8)>,
     /// Shared channel used to report scheduler activity and completion.
     report_tx: mpsc::Sender<ActivityReport>,
     /// Dedicated coordinator-command receiver for this scheduler.
@@ -269,14 +271,20 @@ impl SchedulerActivity for OwnedSchedulerActivity {
                     self.report_idle();
                 }
                 Ok(ActivityCommand::Terminate(epoch)) => {
-                    if self.prepared_termination == Some(epoch) {
-                        return None;
-                    }
                     if let Some(event) = self.queued_event() {
                         return Some(event);
                     }
-                    self.prepared_termination = Some(epoch);
-                    self.report_idle();
+                    match self.prepared_termination {
+                        Some((prepared, 2)) if prepared == epoch => return None,
+                        Some((prepared, 1)) if prepared == epoch => {
+                            self.prepared_termination = Some((epoch, 2));
+                            self.report_idle();
+                        }
+                        _ => {
+                            self.prepared_termination = Some((epoch, 1));
+                            self.report_idle();
+                        }
+                    }
                 }
                 Ok(ActivityCommand::Abort) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return None;
@@ -580,4 +588,75 @@ pub(crate) fn run_owned_scheduler_with_coordination(
     }
     .try_event_loop()?;
     Ok(last_nonterminal_tag.unwrap_or(Tag::NEVER))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ActivityCommand, ActivityReport, OwnedSchedulerActivity};
+    use crate::{sched::core::SchedulerActivity, AsyncEvent, Duration, EnclaveKey};
+    use std::{sync::mpsc, time::Duration as StdDuration};
+
+    #[test]
+    fn termination_commit_delivers_event_admitted_after_prepare_confirmation() {
+        let key = EnclaveKey::from(7);
+        let (event_tx, event_rx) = kanal::unbounded();
+        let (report_tx, report_rx) = mpsc::channel();
+        let (command_tx, command_rx) = mpsc::channel();
+        let activity = OwnedSchedulerActivity {
+            key,
+            epoch: 0,
+            active: false,
+            prepared_termination: None,
+            report_tx,
+            command_rx,
+            event_rx,
+        };
+        let receive_report = || {
+            report_rx
+                .recv_timeout(StdDuration::from_secs(1))
+                .expect("scheduler activity report")
+        };
+
+        std::thread::scope(|scope| {
+            let client = scope.spawn(move || {
+                let mut activity = activity;
+                activity.wait()
+            });
+
+            assert!(matches!(
+                receive_report(),
+                ActivityReport::Idle { key: observed, epoch: 0 } if observed == key
+            ));
+            command_tx.send(ActivityCommand::Probe(1)).unwrap();
+            assert!(matches!(
+                receive_report(),
+                ActivityReport::Idle { key: observed, epoch: 1 } if observed == key
+            ));
+            command_tx.send(ActivityCommand::Terminate(1)).unwrap();
+            assert!(matches!(
+                receive_report(),
+                ActivityReport::Idle { key: observed, epoch: 1 } if observed == key
+            ));
+
+            event_tx
+                .send(AsyncEvent::Shutdown {
+                    delay: Duration::ZERO,
+                })
+                .unwrap();
+            command_tx.send(ActivityCommand::Terminate(1)).unwrap();
+
+            assert!(matches!(
+                client.join().unwrap(),
+                Some(AsyncEvent::Shutdown { delay }) if delay == Duration::ZERO
+            ));
+            assert!(matches!(
+                receive_report(),
+                ActivityReport::Active(observed) if observed == key
+            ));
+            assert!(matches!(
+                receive_report(),
+                ActivityReport::Complete(observed) if observed == key
+            ));
+        });
+    }
 }

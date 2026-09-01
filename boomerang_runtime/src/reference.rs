@@ -121,8 +121,10 @@ impl EnclaveExecution {
 /// compiled Federate's shared coordination.
 #[derive(Default)]
 pub struct FederateBindings {
-    /// Caller-supplied Enclave bindings retained with their canonical indices.
-    enclaves: Vec<(EnclaveIndex, EnclaveBindings)>,
+    /// Caller-supplied Enclave bindings keyed directly by canonical deployment index.
+    enclaves: TinySecondaryMap<EnclaveIndex, EnclaveBindings>,
+    /// Repeated Enclave indices retained for pre-initialization duplicate validation.
+    duplicate_enclaves: TinySecondaryMap<EnclaveIndex, ()>,
     /// Statically typed route adapters retained until image preflight resolves their endpoints.
     routes: Vec<Box<dyn RouteBinding>>,
 }
@@ -135,7 +137,9 @@ impl FederateBindings {
 
     /// Binds one canonical Enclave to its complete direct owned bindings.
     pub fn bind_enclave(mut self, enclave: EnclaveIndex, bindings: EnclaveBindings) -> Self {
-        self.enclaves.push((enclave, bindings));
+        if self.enclaves.insert(enclave, bindings).is_some() {
+            self.duplicate_enclaves.insert(enclave, ());
+        }
         self
     }
 
@@ -153,13 +157,18 @@ impl FederateBindings {
         }));
         self
     }
+}
 
-    /// Finds one uniquely supplied Enclave binding during preflight.
-    fn enclave(&self, enclave: EnclaveIndex) -> Option<&EnclaveBindings> {
-        self.enclaves
-            .iter()
-            .find_map(|(candidate, bindings)| (*candidate == enclave).then_some(bindings))
-    }
+#[cfg(test)]
+#[test]
+fn federate_bindings_store_enclaves_by_typed_index() {
+    fn assert_typed_map(_bindings: &TinySecondaryMap<EnclaveIndex, EnclaveBindings>) {}
+
+    let enclave = EnclaveIndex::new(3);
+    let bindings = FederateBindings::new().bind_enclave(enclave, EnclaveBindings::new());
+
+    assert_typed_map(&bindings.enclaves);
+    assert!(bindings.enclaves.contains_key(enclave));
 }
 
 /// Private typed-erased route binding installed after structural and payload preflight.
@@ -540,19 +549,13 @@ fn preflight_owned_federate(
         .copied()
         .ok_or(ExecuteOwnedFederateError::FederateNotFound { federate })?;
 
-    for &(enclave, _) in &bindings.enclaves {
+    for enclave in bindings.enclaves.keys() {
         if !federate_contains_enclave(selected, enclave) {
             return Err(ExecuteOwnedFederateError::UnexpectedEnclaveBinding { enclave, federate });
         }
-        if bindings
-            .enclaves
-            .iter()
-            .filter(|(candidate, _)| *candidate == enclave)
-            .count()
-            > 1
-        {
-            return Err(ExecuteOwnedFederateError::DuplicateEnclaveBinding { enclave });
-        }
+    }
+    if let Some(enclave) = bindings.duplicate_enclaves.keys().next() {
+        return Err(ExecuteOwnedFederateError::DuplicateEnclaveBinding { enclave });
     }
 
     let start = selected.enclaves().start();
@@ -560,7 +563,8 @@ fn preflight_owned_federate(
     for raw in start..end {
         let enclave = EnclaveIndex::new(raw);
         let enclave_bindings = bindings
-            .enclave(enclave)
+            .enclaves
+            .get(enclave)
             .ok_or(ExecuteOwnedFederateError::MissingEnclaveBinding { enclave })?;
         let image = EnclaveImageView::new(&deployment.enclaves[enclave]).map_err(|error| {
             ExecuteOwnedFederateError::ImageValidation {
@@ -623,7 +627,8 @@ fn preflight_owned_federate(
                 .expect("root validation checked endpoint images");
             let slot = image.ports()[port].binding();
             let (found_id, found) = bindings
-                .enclave(enclave)
+                .enclaves
+                .get(enclave)
                 .and_then(|owned| owned.port_payload_type(slot))
                 .expect("owned storage preflight checked endpoint port bindings");
             let (expected_id, expected) = route.payload_type();
@@ -654,7 +659,8 @@ pub fn execute_owned_federate(
 ) -> Result<FederateExecution, ExecuteOwnedFederateError> {
     let endpoints = preflight_owned_federate(deployment, federate, &bindings)?;
     let FederateBindings {
-        mut enclaves,
+        enclaves,
+        duplicate_enclaves: _,
         routes,
     } = bindings;
     let route_bindings = endpoints
@@ -667,8 +673,6 @@ pub fn execute_owned_federate(
             (route.key, binding)
         })
         .collect::<BTreeMap<_, _>>();
-    enclaves.sort_by_key(|(enclave, _)| enclave.as_u32());
-
     let origin = Instant::now();
     let mut storages = Vec::with_capacity(enclaves.len());
     for (enclave, owned) in enclaves {

@@ -5,6 +5,7 @@ use std::{
     time::Instant,
 };
 
+use boomerang::runtime::AsyncEvent;
 use boomerang::runtime::{
     execute_owned, execute_owned_federate,
     image::{
@@ -1433,14 +1434,16 @@ fn synchronized_route_source(
     Ok(())
 }
 
-fn delayed_competing_panic(
-    _context: &mut Context,
+fn competing_panic_after_route_failure(
+    context: &mut Context,
     _state: &mut dyn ReactorData,
     _refs: ReactionRefs<'_>,
     _mode_effect: Option<CompiledModeEffectRef>,
 ) -> Result<(), ReactionBindingError> {
     COMPETING_PANIC_READY.store(true, Ordering::SeqCst);
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(!context.schedule_external(AsyncEvent::Shutdown {
+        delay: Duration::ZERO,
+    }));
     panic!("competing scheduler panic");
 }
 
@@ -1527,7 +1530,7 @@ fn owned_federate_retains_route_failure_before_competing_scheduler_panic() {
             )
             .bind_enclave(
                 EnclaveIndex::new(1),
-                routed_reaction_bindings(delayed_competing_panic),
+                routed_reaction_bindings(competing_panic_after_route_failure),
             )
             .bind_route(
                 route_boundary(),

@@ -76,21 +76,58 @@ enum ActivityReport {
     Active(EnclaveKey),
     /// One Enclave observed no queued work for the stated coordinator epoch.
     Idle { key: EnclaveKey, epoch: usize },
+    /// One Enclave entered the parked barrier for the stated epoch.
+    Parked {
+        /// Canonical identity of the parked scheduler-owned Enclave.
+        key: EnclaveKey,
+        /// Idle epoch that this Enclave remains parked within.
+        epoch: usize,
+    },
+    /// One parked Enclave confirmed its event queue remained empty for the stated epoch.
+    Rechecked {
+        /// Canonical identity of the rechecked scheduler-owned Enclave.
+        key: EnclaveKey,
+        /// Parked epoch whose final queue check was empty.
+        epoch: usize,
+    },
     /// One Enclave scheduler exited and no longer participates in coordination.
     Complete(EnclaveKey),
     /// An execution failure requires immediate Federate-wide abortion.
     Abort,
 }
 
-/// Coordinator-to-scheduler commands for probing, confirmed termination, or abortion.
+/// Coordinator-to-scheduler commands for a parked termination barrier or abortion.
 #[derive(Clone, Copy)]
 enum ActivityCommand {
     /// Requests a fresh queue check for the stated idle epoch.
     Probe(usize),
-    /// Prepares, rechecks, then commits termination across three receipts of this epoch.
-    Terminate(usize),
+    /// Requires a scheduler to remain parked after confirming the stated idle epoch.
+    Park(usize),
+    /// Requests a final event-queue check while every scheduler remains parked.
+    Recheck(usize),
+    /// Cancels the parked candidate and resumes every scheduler in a fresh epoch.
+    Resume(usize),
+    /// Commits termination from a unanimously empty parked state.
+    Commit(usize),
     /// Stops the scheduler immediately after an execution failure.
     Abort,
+}
+
+/// Current phase of one owned Federate's channel-coordinated quiescence barrier.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CoordinationPhase {
+    /// Collecting ordinary idle observations before requesting an epoch confirmation.
+    Observing,
+    /// Awaiting fresh idle confirmations after a probe.
+    Probing,
+    /// Awaiting confirmation that every scheduler has entered the parked state.
+    Parking,
+    /// Awaiting final empty-queue confirmations while every scheduler remains parked.
+    Rechecking,
+    /// Awaiting fresh-epoch idle reports after every parked scheduler was resumed.
+    Resuming,
+    /// Termination was committed from the unanimously empty parked state.
+    Committed,
 }
 
 /// Abort handle for one owned Federate's shared scheduler coordinator.
@@ -114,6 +151,9 @@ pub(crate) struct OwnedFederateCoordinatorRunner {
     commands: BTreeMap<EnclaveKey, mpsc::Sender<ActivityCommand>>,
     /// Enclaves that have not completed or aborted execution.
     active: BTreeSet<EnclaveKey>,
+    #[cfg(test)]
+    /// One-shot test hook that admits work immediately before the final parked queue recheck.
+    commit_window_hook: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl OwnedFederateCoordinatorRunner {
@@ -123,6 +163,8 @@ impl OwnedFederateCoordinatorRunner {
             report_rx,
             commands,
             mut active,
+            #[cfg(test)]
+            mut commit_window_hook,
         } = self;
         let send = |command, active: &BTreeSet<EnclaveKey>| {
             for (key, tx) in &commands {
@@ -135,9 +177,7 @@ impl OwnedFederateCoordinatorRunner {
         let mut seen_idle = BTreeSet::new();
         let mut confirmed = BTreeSet::new();
         let mut epoch = 0usize;
-        let mut probing = false;
-        let mut termination_round = 0_u8;
-        let mut termination_confirmed = BTreeSet::new();
+        let mut phase = CoordinationPhase::Observing;
         while !active.is_empty() {
             let report = match report_rx.recv() {
                 Ok(report) => report,
@@ -156,48 +196,94 @@ impl OwnedFederateCoordinatorRunner {
                     busy.remove(&key);
                     seen_idle.remove(&key);
                     confirmed.remove(&key);
-                    termination_confirmed.remove(&key);
                 }
-                ActivityReport::Active(_) if termination_round == 3 => {}
                 ActivityReport::Active(key) => {
                     busy.insert(key);
                     seen_idle.remove(&key);
                     confirmed.clear();
-                    termination_confirmed.clear();
-                    probing = false;
-                    termination_round = 0;
+                    if matches!(
+                        phase,
+                        CoordinationPhase::Parking | CoordinationPhase::Rechecking
+                    ) {
+                        epoch = epoch.wrapping_add(1);
+                        seen_idle.clear();
+                        send(ActivityCommand::Resume(epoch), &active);
+                        phase = CoordinationPhase::Resuming;
+                    } else if phase != CoordinationPhase::Committed {
+                        phase = CoordinationPhase::Observing;
+                    }
                 }
                 ActivityReport::Idle {
                     key,
                     epoch: observed,
                 } => {
                     busy.remove(&key);
-                    seen_idle.insert(key);
-                    if (1..=2).contains(&termination_round)
-                        && observed == epoch
+                    if phase == CoordinationPhase::Observing {
+                        seen_idle.insert(key);
+                    } else if matches!(
+                        phase,
+                        CoordinationPhase::Probing | CoordinationPhase::Resuming
+                    ) && observed == epoch
                         && active.contains(&key)
                     {
-                        termination_confirmed.insert(key);
-                    } else if probing && observed == epoch && active.contains(&key) {
                         confirmed.insert(key);
                     }
                 }
+                ActivityReport::Parked {
+                    key,
+                    epoch: observed,
+                } if phase == CoordinationPhase::Parking
+                    && observed == epoch
+                    && active.contains(&key) =>
+                {
+                    confirmed.insert(key);
+                }
+                ActivityReport::Rechecked {
+                    key,
+                    epoch: observed,
+                } if phase == CoordinationPhase::Rechecking
+                    && observed == epoch
+                    && active.contains(&key) =>
+                {
+                    confirmed.insert(key);
+                }
+                ActivityReport::Parked { .. } | ActivityReport::Rechecked { .. } => {}
             }
-            if (1..=2).contains(&termination_round) && termination_confirmed == active {
-                send(ActivityCommand::Terminate(epoch), &active);
-                termination_confirmed.clear();
-                termination_round += 1;
-            } else if termination_round == 0 && busy.is_empty() && seen_idle == active {
-                if probing && confirmed == active {
-                    termination_confirmed.clear();
-                    send(ActivityCommand::Terminate(epoch), &active);
-                    termination_round = 1;
-                } else if !probing {
+            if active.is_empty() {
+                continue;
+            }
+            match phase {
+                CoordinationPhase::Observing if busy.is_empty() && seen_idle == active => {
                     epoch = epoch.wrapping_add(1);
                     confirmed.clear();
-                    probing = true;
                     send(ActivityCommand::Probe(epoch), &active);
+                    phase = CoordinationPhase::Probing;
                 }
+                CoordinationPhase::Probing if confirmed == active => {
+                    confirmed.clear();
+                    send(ActivityCommand::Park(epoch), &active);
+                    phase = CoordinationPhase::Parking;
+                }
+                CoordinationPhase::Parking if confirmed == active => {
+                    #[cfg(test)]
+                    if let Some(hook) = commit_window_hook.take() {
+                        hook();
+                    }
+                    confirmed.clear();
+                    send(ActivityCommand::Recheck(epoch), &active);
+                    phase = CoordinationPhase::Rechecking;
+                }
+                CoordinationPhase::Rechecking if confirmed == active => {
+                    send(ActivityCommand::Commit(epoch), &active);
+                    confirmed.clear();
+                    phase = CoordinationPhase::Committed;
+                }
+                CoordinationPhase::Resuming if confirmed == active => {
+                    confirmed.clear();
+                    send(ActivityCommand::Park(epoch), &active);
+                    phase = CoordinationPhase::Parking;
+                }
+                _ => {}
             }
         }
     }
@@ -211,8 +297,8 @@ pub(crate) struct OwnedSchedulerActivity {
     epoch: usize,
     /// Whether work has been reported since this scheduler last became idle.
     active: bool,
-    /// Termination epoch and completed empty-queue confirmations, if any.
-    prepared_termination: Option<(usize, u8)>,
+    /// Termination epoch while this scheduler is held inside the parked barrier.
+    parked_epoch: Option<usize>,
     /// Shared channel used to report scheduler activity and completion.
     report_tx: mpsc::Sender<ActivityReport>,
     /// Dedicated coordinator-command receiver for this scheduler.
@@ -230,32 +316,41 @@ impl OwnedSchedulerActivity {
         });
     }
 
-    /// Removes one queued scheduler event and invalidates any idle candidate.
-    fn queued_event(&mut self) -> Option<AsyncEvent> {
-        match self.event_rx.try_recv() {
-            Ok(Some(event)) => {
-                self.active();
-                Some(event)
-            }
-            _ => None,
-        }
-    }
-}
-
-impl SchedulerActivity for OwnedSchedulerActivity {
-    fn active(&mut self) {
-        self.prepared_termination = None;
+    /// Reports activity once until this scheduler next begins an idle wait.
+    fn report_active(&mut self) {
         if !self.active {
             let _ = self.report_tx.send(ActivityReport::Active(self.key));
             self.active = true;
         }
     }
 
+    /// Removes one queued scheduler event without leaving a parked barrier independently.
+    fn take_queued_event(&self) -> Option<AsyncEvent> {
+        self.event_rx.try_recv().ok().flatten()
+    }
+}
+
+impl SchedulerActivity for OwnedSchedulerActivity {
+    fn active(&mut self) {
+        self.parked_epoch = None;
+        self.report_active();
+    }
+
     fn wait(&mut self) -> Option<AsyncEvent> {
         self.active = false;
+        self.parked_epoch = None;
         self.report_idle();
+        let mut parked_event = None;
         loop {
-            if let Some(event) = self.queued_event() {
+            if self.parked_epoch.is_some() {
+                if parked_event.is_none() {
+                    if let Some(event) = self.take_queued_event() {
+                        self.report_active();
+                        parked_event = Some(event);
+                    }
+                }
+            } else if let Some(event) = self.take_queued_event() {
+                self.active();
                 return Some(event);
             }
             match self
@@ -263,29 +358,56 @@ impl SchedulerActivity for OwnedSchedulerActivity {
                 .recv_timeout(std::time::Duration::from_millis(1))
             {
                 Ok(ActivityCommand::Probe(epoch)) => {
-                    self.prepared_termination = None;
+                    self.parked_epoch = None;
                     self.epoch = epoch;
-                    if let Some(event) = self.queued_event() {
+                    if let Some(event) = self.take_queued_event() {
+                        self.active();
                         return Some(event);
                     }
                     self.report_idle();
                 }
-                Ok(ActivityCommand::Terminate(epoch)) => {
-                    if let Some(event) = self.queued_event() {
+                Ok(ActivityCommand::Park(epoch)) => {
+                    if let Some(event) = self.take_queued_event() {
+                        self.active();
                         return Some(event);
                     }
-                    match self.prepared_termination {
-                        Some((prepared, 2)) if prepared == epoch => return None,
-                        Some((prepared, 1)) if prepared == epoch => {
-                            self.prepared_termination = Some((epoch, 2));
-                            self.report_idle();
-                        }
-                        _ => {
-                            self.prepared_termination = Some((epoch, 1));
-                            self.report_idle();
+                    self.parked_epoch = Some(epoch);
+                    let _ = self.report_tx.send(ActivityReport::Parked {
+                        key: self.key,
+                        epoch,
+                    });
+                }
+                Ok(ActivityCommand::Recheck(epoch)) if self.parked_epoch == Some(epoch) => {
+                    if parked_event.is_none() {
+                        if let Some(event) = self.take_queued_event() {
+                            self.report_active();
+                            parked_event = Some(event);
                         }
                     }
+                    if parked_event.is_none() {
+                        let _ = self.report_tx.send(ActivityReport::Rechecked {
+                            key: self.key,
+                            epoch,
+                        });
+                    }
                 }
+                Ok(ActivityCommand::Resume(epoch)) => {
+                    self.parked_epoch = None;
+                    self.epoch = epoch;
+                    if let Some(event) = parked_event.take() {
+                        return Some(event);
+                    }
+                    if let Some(event) = self.take_queued_event() {
+                        self.active();
+                        return Some(event);
+                    }
+                    self.active = false;
+                    self.report_idle();
+                }
+                Ok(ActivityCommand::Commit(epoch)) if self.parked_epoch == Some(epoch) => {
+                    return None;
+                }
+                Ok(ActivityCommand::Recheck(_)) | Ok(ActivityCommand::Commit(_)) => {}
                 Ok(ActivityCommand::Abort) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return None;
                 }
@@ -321,7 +443,7 @@ pub(crate) fn owned_federate_coordination(
                 key,
                 epoch: 0,
                 active: false,
-                prepared_termination: None,
+                parked_epoch: None,
                 report_tx: report_tx.clone(),
                 command_rx,
                 event_rx,
@@ -337,6 +459,8 @@ pub(crate) fn owned_federate_coordination(
             report_rx,
             commands,
             active,
+            #[cfg(test)]
+            commit_window_hook: None,
         },
         clients,
     )
@@ -592,71 +716,78 @@ pub(crate) fn run_owned_scheduler_with_coordination(
 
 #[cfg(test)]
 mod tests {
-    use super::{ActivityCommand, ActivityReport, OwnedSchedulerActivity};
+    use super::owned_federate_coordination;
     use crate::{sched::core::SchedulerActivity, AsyncEvent, Duration, EnclaveKey};
     use std::{sync::mpsc, time::Duration as StdDuration};
 
     #[test]
-    fn termination_commit_delivers_event_admitted_after_prepare_confirmation() {
-        let key = EnclaveKey::from(7);
-        let (event_tx, event_rx) = kanal::unbounded();
-        let (report_tx, report_rx) = mpsc::channel();
-        let (command_tx, command_rx) = mpsc::channel();
-        let activity = OwnedSchedulerActivity {
-            key,
-            epoch: 0,
-            active: false,
-            prepared_termination: None,
-            report_tx,
-            command_rx,
-            event_rx,
-        };
-        let receive_report = || {
-            report_rx
-                .recv_timeout(StdDuration::from_secs(1))
-                .expect("scheduler activity report")
-        };
-
-        std::thread::scope(|scope| {
-            let client = scope.spawn(move || {
-                let mut activity = activity;
-                activity.wait()
-            });
-
-            assert!(matches!(
-                receive_report(),
-                ActivityReport::Idle { key: observed, epoch: 0 } if observed == key
-            ));
-            command_tx.send(ActivityCommand::Probe(1)).unwrap();
-            assert!(matches!(
-                receive_report(),
-                ActivityReport::Idle { key: observed, epoch: 1 } if observed == key
-            ));
-            command_tx.send(ActivityCommand::Terminate(1)).unwrap();
-            assert!(matches!(
-                receive_report(),
-                ActivityReport::Idle { key: observed, epoch: 1 } if observed == key
-            ));
-
-            event_tx
+    fn parked_barrier_resumes_all_schedulers_when_work_arrives_before_commit() {
+        let eventful = EnclaveKey::from(3);
+        let peer = EnclaveKey::from(7);
+        let (eventful_tx, eventful_rx) = kanal::unbounded();
+        let (_peer_tx, peer_rx) = kanal::unbounded();
+        let (coordinator, mut runner, mut activities) =
+            owned_federate_coordination([(eventful, eventful_rx), (peer, peer_rx)]);
+        runner.commit_window_hook = Some(Box::new(move || {
+            eventful_tx
                 .send(AsyncEvent::Shutdown {
                     delay: Duration::ZERO,
                 })
                 .unwrap();
-            command_tx.send(ActivityCommand::Terminate(1)).unwrap();
+        }));
+        let mut eventful_activity = activities.remove(&eventful).unwrap();
+        let mut peer_activity = activities.remove(&peer).unwrap();
+        let (result_tx, result_rx) = mpsc::channel();
 
-            assert!(matches!(
-                client.join().unwrap(),
-                Some(AsyncEvent::Shutdown { delay }) if delay == Duration::ZERO
-            ));
-            assert!(matches!(
-                receive_report(),
-                ActivityReport::Active(observed) if observed == key
-            ));
-            assert!(matches!(
-                receive_report(),
-                ActivityReport::Complete(observed) if observed == key
-            ));
+        std::thread::scope(|scope| {
+            let coordinator_handle = scope.spawn(move || runner.run());
+            let eventful_result_tx = result_tx.clone();
+            let eventful_handle = scope.spawn(move || {
+                eventful_result_tx
+                    .send((eventful, eventful_activity.wait()))
+                    .unwrap();
+                eventful_result_tx
+                    .send((eventful, eventful_activity.wait()))
+                    .unwrap();
+            });
+            let peer_result_tx = result_tx.clone();
+            let peer_handle = scope.spawn(move || {
+                peer_result_tx.send((peer, peer_activity.wait())).unwrap();
+            });
+            drop(result_tx);
+
+            let mut observations = Vec::new();
+            for _ in 0..3 {
+                match result_rx.recv_timeout(StdDuration::from_secs(1)) {
+                    Ok(observation) => observations.push(observation),
+                    Err(_) => {
+                        coordinator.abort();
+                        break;
+                    }
+                }
+            }
+            eventful_handle.join().unwrap();
+            peer_handle.join().unwrap();
+            coordinator_handle.join().unwrap();
+
+            assert_eq!(
+                observations.len(),
+                3,
+                "both parked schedulers must reach a later common commit"
+            );
+            assert!(observations.iter().any(|(key, event)| {
+                *key == eventful
+                    && matches!(
+                        event,
+                        Some(AsyncEvent::Shutdown { delay }) if *delay == Duration::ZERO
+                    )
+            }));
+            assert!(observations
+                .iter()
+                .any(|(key, event)| *key == eventful && event.is_none()));
+            assert!(observations
+                .iter()
+                .any(|(key, event)| *key == peer && event.is_none()));
         });
     }
 }

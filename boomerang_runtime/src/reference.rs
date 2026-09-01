@@ -651,6 +651,8 @@ fn preflight_owned_federate(
 ///
 /// All root, binding, route, timer, and timing checks complete before any user initializer runs.
 /// The first execution failure triggers Federate-wide shutdown; every scheduler thread is joined.
+/// Automatic quiescence covers executor-owned scheduler and local-route work. Callers that admit
+/// exogenous events must set [`Config::keep_alive`] and request shutdown explicitly.
 pub fn execute_owned_federate(
     deployment: &CompiledDeploymentImage<'_>,
     federate: FederateIndex,

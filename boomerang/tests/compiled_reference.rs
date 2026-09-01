@@ -1280,6 +1280,7 @@ fn owned_federate_coordinates_multiple_same_tag_sources_before_destination_execu
 fn owned_federate_routes_typed_values_and_shares_one_origin() {
     for fast_forward in [true, false] {
         let result = bounded(move || {
+            let boundary = String::from("pipe");
             execute_owned_federate(
                 &ROUTED_DEPLOYMENT,
                 FederateIndex::new(0),
@@ -1287,7 +1288,7 @@ fn owned_federate_routes_typed_values_and_shares_one_origin() {
                     .bind_enclave(EnclaveIndex::new(0), source_bindings())
                     .bind_enclave(EnclaveIndex::new(1), sink_bindings())
                     .bind_route(
-                        route_boundary(),
+                        BoundaryId::new(&boundary),
                         PayloadType::<u32>::new(),
                         PayloadType::<u32>::new(),
                     ),

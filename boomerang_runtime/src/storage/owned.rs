@@ -7,7 +7,7 @@ use tinymap::{TinyMap, TinySecondaryMap};
 use crate::{
     action::{Action, ActionKey, BaseAction},
     image::{
-        ActionSlotIndex, ActionTiming, BindingKind, BindingSlotIndex, EnclaveImageView,
+        ActionSlotIndex, ActionTiming, BindingKind, BindingSlotIndex, BoundaryId, EnclaveImageView,
         EnclaveIndex, PortIndex, ReactionIndex, ReactorIndex, StateSlotIndex, TimingDomain,
     },
     port::{BasePort, Port, PortKey},
@@ -256,9 +256,9 @@ trait OutboundRoute: Send {
 }
 
 /// Direct typed outbound route whose generic parameter is unified by `bind_route`.
-struct TypedOutboundRoute<T: ReactorData + Clone> {
+struct TypedOutboundRoute<'image, T: ReactorData + Clone> {
     /// Stable boundary identity used in route diagnostics.
-    boundary: String,
+    boundary: BoundaryId<'image>,
     /// Canonical destination Enclave identity.
     destination: EnclaveIndex,
     /// Dense destination port admitted by the paired inbound route.
@@ -273,11 +273,11 @@ struct TypedOutboundRoute<T: ReactorData + Clone> {
     marker: PhantomData<fn() -> T>,
 }
 
-impl<T: ReactorData + Clone> OutboundRoute for TypedOutboundRoute<T> {
+impl<T: ReactorData + Clone> OutboundRoute for TypedOutboundRoute<'_, T> {
     fn emit(&mut self, source: &dyn BasePort, tag: Tag) -> Result<(), OwnedStorageError> {
         let typed = source.downcast_ref::<Port<T>>().ok_or_else(|| {
             OwnedStorageError::OutboundRoutePayloadTypeMismatch {
-                boundary: self.boundary.clone(),
+                boundary: self.boundary.as_str().to_owned(),
                 port: source.get_key(),
                 expected: std::any::type_name::<T>(),
                 found: source.type_name(),
@@ -296,7 +296,7 @@ impl<T: ReactorData + Clone> OutboundRoute for TypedOutboundRoute<T> {
                 } else {
                     tag.checked_delay(Duration::nanoseconds(self.delay_nanos as i64))
                         .ok_or_else(|| OwnedStorageError::OutboundRouteTagOverflow {
-                            boundary: self.boundary.clone(),
+                            boundary: self.boundary.as_str().to_owned(),
                             tag,
                             delay_nanos: self.delay_nanos,
                         })?
@@ -311,7 +311,7 @@ impl<T: ReactorData + Clone> OutboundRoute for TypedOutboundRoute<T> {
                 let time = Instant::now()
                     .checked_add(std::time::Duration::from_nanos(self.delay_nanos))
                     .ok_or_else(|| OwnedStorageError::OutboundRouteTimeOverflow {
-                        boundary: self.boundary.clone(),
+                        boundary: self.boundary.as_str().to_owned(),
                         delay_nanos: self.delay_nanos,
                     })?;
                 crate::event::AsyncEvent::Physical {
@@ -324,11 +324,11 @@ impl<T: ReactorData + Clone> OutboundRoute for TypedOutboundRoute<T> {
         match self.destination_tx.try_send(event) {
             Ok(true) => Ok(()),
             Ok(false) => Err(OwnedStorageError::OutboundRouteChannelFull {
-                boundary: self.boundary.clone(),
+                boundary: self.boundary.as_str().to_owned(),
                 destination: self.destination,
             }),
             Err(_) => Err(OwnedStorageError::OutboundRouteChannelClosed {
-                boundary: self.boundary.clone(),
+                boundary: self.boundary.as_str().to_owned(),
                 destination: self.destination,
             }),
         }
@@ -621,7 +621,7 @@ pub struct OwnedStorage<'image> {
     /// Dense ports admitted by one or more inbound image routes.
     inbound_boundary_ports: TinySecondaryMap<PortIndex, ()>,
     /// Typed outbound route adapters grouped by source port.
-    outbound_routes: TinySecondaryMap<PortIndex, Vec<Box<dyn OutboundRoute>>>,
+    outbound_routes: TinySecondaryMap<PortIndex, Vec<Box<dyn OutboundRoute + 'image>>>,
     /// Ports already emitted during the current processing tag.
     emitted_outbound_ports: TinySecondaryMap<PortIndex, ()>,
     /// Keeps a sender for executor-owned route and shutdown admission.
@@ -780,7 +780,7 @@ impl<'image> OwnedStorage<'image> {
     pub(crate) fn bind_outbound_route<T: ReactorData + Clone>(
         &mut self,
         source_port: PortIndex,
-        boundary: String,
+        boundary: BoundaryId<'image>,
         destination: EnclaveIndex,
         destination_port: PortIndex,
         timing_domain: TimingDomain,
@@ -1322,11 +1322,11 @@ mod tests {
     use crate::{
         image::{
             ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotIndex,
-            EnclaveImage, EnclaveImageView, EnclaveIndex, IdentityRange, LevelReactionImage,
-            ModeImage, PortImage, PortIndex, ReactionImage, ReactionIndex, ReactorImage,
-            ReactorIndex, RequiredBindingImage, RouteDirection, RouteImage, ScopeImage, ScopeIndex,
-            StateSlotIndex, StorageBounds, TableRange, TimerStartupImage, TimingDomain,
-            TinyMapView,
+            BoundaryId, EnclaveImage, EnclaveImageView, EnclaveIndex, IdentityRange,
+            LevelReactionImage, ModeImage, PortImage, PortIndex, ReactionImage, ReactionIndex,
+            ReactorImage, ReactorIndex, RequiredBindingImage, RouteDirection, RouteImage,
+            ScopeImage, ScopeIndex, StateSlotIndex, StorageBounds, TableRange, TimerStartupImage,
+            TimingDomain, TinyMapView,
         },
         AsyncEvent, CommonContext, CompiledModeEffectRef, Config, Context, Duration,
         EnclaveBindings, ModeTransitionRequest, OwnedStorage, OwnedStorageError, PayloadType,
@@ -1936,7 +1936,7 @@ mod tests {
         let (physical_tx, physical_rx) = kanal::bounded(1);
         storage.bind_outbound_route::<String>(
             PortIndex::new(0),
-            "logical".into(),
+            BoundaryId::new("logical"),
             EnclaveIndex::new(1),
             PortIndex::new(0),
             TimingDomain::Logical,
@@ -1945,7 +1945,7 @@ mod tests {
         );
         storage.bind_outbound_route::<String>(
             PortIndex::new(0),
-            "physical".into(),
+            BoundaryId::new("physical"),
             EnclaveIndex::new(2),
             PortIndex::new(0),
             TimingDomain::Physical,
@@ -1960,7 +1960,7 @@ mod tests {
             .unwrap();
         storage.bind_outbound_route::<String>(
             PortIndex::new(0),
-            "full".into(),
+            BoundaryId::new("full"),
             EnclaveIndex::new(3),
             PortIndex::new(0),
             TimingDomain::Logical,

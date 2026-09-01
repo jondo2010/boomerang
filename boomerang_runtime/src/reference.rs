@@ -123,16 +123,16 @@ impl EnclaveExecution {
 /// Direct owned bindings aggregating every Enclave and typed local route executed under one
 /// compiled Federate's shared coordination.
 #[derive(Default)]
-pub struct FederateBindings {
+pub struct FederateBindings<'binding> {
     /// Caller-supplied Enclave bindings keyed directly by canonical deployment index.
     enclaves: TinySecondaryMap<EnclaveIndex, EnclaveBindings>,
     /// Repeated Enclave indices retained for pre-initialization duplicate validation.
     duplicate_enclaves: TinySecondaryMap<EnclaveIndex, ()>,
     /// Statically typed route adapters retained until image preflight resolves their endpoints.
-    routes: Vec<Box<dyn RouteBinding>>,
+    routes: Vec<Box<dyn RouteBinding + 'binding>>,
 }
 
-impl FederateBindings {
+impl<'binding> FederateBindings<'binding> {
     /// Creates an empty Federate binding set.
     pub fn new() -> Self {
         Self::default()
@@ -149,13 +149,13 @@ impl FederateBindings {
     /// Binds a route only when Rust has unified both endpoint payloads as the same `T`.
     pub fn bind_route<T: ReactorData + Clone>(
         mut self,
-        boundary: BoundaryId<'_>,
+        boundary: BoundaryId<'binding>,
         source: PayloadType<T>,
         destination: PayloadType<T>,
     ) -> Self {
         let _ = (source, destination);
         self.routes.push(Box::new(TypedRouteBinding::<T> {
-            boundary: boundary.as_str().to_owned(),
+            boundary,
             marker: PhantomData,
         }));
         self
@@ -177,44 +177,44 @@ fn federate_bindings_store_enclaves_by_typed_index() {
 /// Private typed-erased route binding installed after structural and payload preflight.
 trait RouteBinding: Send {
     /// Returns the stable compiled boundary identity selected by the caller.
-    fn boundary(&self) -> &str;
+    fn boundary(&self) -> BoundaryId<'_>;
     /// Returns the concrete endpoint payload type selected at compile time.
     fn payload_type(&self) -> (TypeId, &'static str);
     /// Installs this route in its validated source storage.
-    fn install(
+    fn install<'image>(
         &self,
-        source: &mut OwnedStorage<'_>,
-        route: &ResolvedLocalRoute,
+        source: &mut OwnedStorage<'image>,
+        route: &ResolvedLocalRoute<'image>,
         destination_tx: crate::Sender<AsyncEvent>,
     );
 }
 
 /// Compile-time endpoint witness erased only after `T` is identical at both endpoints.
-struct TypedRouteBinding<T: ReactorData + Clone> {
-    /// Stable boundary identity copied from the caller's borrowed identity.
-    boundary: String,
+struct TypedRouteBinding<'binding, T: ReactorData + Clone> {
+    /// Stable boundary identity borrowed from the caller.
+    boundary: BoundaryId<'binding>,
     /// Retains the statically unified endpoint type without allocating a value.
     marker: PhantomData<fn() -> T>,
 }
 
-impl<T: ReactorData + Clone> RouteBinding for TypedRouteBinding<T> {
-    fn boundary(&self) -> &str {
-        &self.boundary
+impl<T: ReactorData + Clone> RouteBinding for TypedRouteBinding<'_, T> {
+    fn boundary(&self) -> BoundaryId<'_> {
+        self.boundary
     }
 
     fn payload_type(&self) -> (TypeId, &'static str) {
         (TypeId::of::<T>(), std::any::type_name::<T>())
     }
 
-    fn install(
+    fn install<'image>(
         &self,
-        source: &mut OwnedStorage<'_>,
-        route: &ResolvedLocalRoute,
+        source: &mut OwnedStorage<'image>,
+        route: &ResolvedLocalRoute<'image>,
         destination_tx: crate::Sender<AsyncEvent>,
     ) {
         source.bind_outbound_route::<T>(
             route.source_port,
-            route.boundary.clone(),
+            route.boundary,
             route.destination,
             route.destination_port,
             route.timing_domain,
@@ -234,11 +234,11 @@ struct LocalRouteKey {
 }
 
 /// A validated same-Federate route resolved to canonical dense scheduler coordinates.
-struct ResolvedLocalRoute {
+struct ResolvedLocalRoute<'image> {
     /// Typed source Enclave and outbound route slot used for internal selection.
     key: LocalRouteKey,
     /// Stable boundary identity shared by both route halves.
-    boundary: String,
+    boundary: BoundaryId<'image>,
     /// Canonical source Enclave index.
     source: EnclaveIndex,
     /// Dense source port selected by the outbound half.
@@ -490,11 +490,11 @@ fn federate_contains_enclave(federate: crate::image::FederateImage, enclave: Enc
 }
 
 /// Resolves every outbound route to its unique inbound half after root validation.
-fn local_route_endpoints(
-    deployment: &CompiledDeploymentImage<'_>,
+fn local_route_endpoints<'image>(
+    deployment: &CompiledDeploymentImage<'image>,
     selected_federate: FederateIndex,
     selected: crate::image::FederateImage,
-) -> Result<Vec<ResolvedLocalRoute>, ExecuteOwnedFederateError> {
+) -> Result<Vec<ResolvedLocalRoute<'image>>, ExecuteOwnedFederateError> {
     let mut endpoints = Vec::new();
     for (source, source_image) in deployment.enclaves.iter() {
         for (outbound_route, outbound) in source_image
@@ -502,10 +502,12 @@ fn local_route_endpoints(
             .iter()
             .filter(|(_, route)| route.direction() == RouteDirection::Outbound)
         {
-            let boundary = outbound
-                .boundary()
-                .get(source_image.identity_data)
-                .expect("root validation checked outbound boundary identity");
+            let boundary = BoundaryId::new(
+                outbound
+                    .boundary()
+                    .get(source_image.identity_data)
+                    .expect("root validation checked outbound boundary identity"),
+            );
             let (destination, inbound) = deployment
                 .enclaves
                 .iter()
@@ -517,7 +519,11 @@ fn local_route_endpoints(
                 })
                 .find(|(_, image, route)| {
                     route.direction() == RouteDirection::Inbound
-                        && route.boundary().get(image.identity_data) == Some(boundary)
+                        && route
+                            .boundary()
+                            .get(image.identity_data)
+                            .map(BoundaryId::new)
+                            == Some(boundary)
                 })
                 .map(|(enclave, _, route)| (enclave, *route))
                 .expect("root validation paired every outbound route");
@@ -525,7 +531,7 @@ fn local_route_endpoints(
             let destination_selected = federate_contains_enclave(selected, destination);
             if source_selected != destination_selected {
                 return Err(ExecuteOwnedFederateError::CrossFederateRoute {
-                    boundary: boundary.to_owned(),
+                    boundary: boundary.as_str().to_owned(),
                     source_enclave: source,
                     destination,
                     federate: selected_federate,
@@ -537,7 +543,7 @@ fn local_route_endpoints(
                         source,
                         outbound: outbound_route,
                     },
-                    boundary: boundary.to_owned(),
+                    boundary,
                     source,
                     source_port: outbound.local_port(),
                     destination,
@@ -552,11 +558,11 @@ fn local_route_endpoints(
 }
 
 /// Validates complete Enclave and route bindings before any user initializer runs.
-fn preflight_owned_federate(
-    deployment: &CompiledDeploymentImage<'_>,
+fn preflight_owned_federate<'image>(
+    deployment: &CompiledDeploymentImage<'image>,
     federate: FederateIndex,
-    bindings: &FederateBindings,
-) -> Result<Vec<ResolvedLocalRoute>, ExecuteOwnedFederateError> {
+    bindings: &FederateBindings<'_>,
+) -> Result<Vec<ResolvedLocalRoute<'image>>, ExecuteOwnedFederateError> {
     CompiledDeploymentView::new(deployment).map_err(|error| {
         ExecuteOwnedFederateError::ImageValidation {
             message: error.to_string(),
@@ -603,7 +609,7 @@ fn preflight_owned_federate(
             .count();
         if matches > 1 {
             return Err(ExecuteOwnedFederateError::DuplicateRouteBinding {
-                boundary: route.boundary().to_owned(),
+                boundary: route.boundary().as_str().to_owned(),
             });
         }
         if !endpoints
@@ -611,7 +617,7 @@ fn preflight_owned_federate(
             .any(|endpoint| endpoint.boundary == route.boundary())
         {
             return Err(ExecuteOwnedFederateError::UnexpectedRouteBinding {
-                boundary: route.boundary().to_owned(),
+                boundary: route.boundary().as_str().to_owned(),
                 federate,
             });
         }
@@ -622,11 +628,11 @@ fn preflight_owned_federate(
             .iter()
             .find(|route| route.boundary() == endpoint.boundary)
             .ok_or_else(|| ExecuteOwnedFederateError::MissingRouteBinding {
-                boundary: endpoint.boundary.clone(),
+                boundary: endpoint.boundary.as_str().to_owned(),
             })?;
         if endpoint.delay_nanos > i64::MAX as u64 {
             return Err(ExecuteOwnedFederateError::RouteDelayOutOfRange {
-                boundary: endpoint.boundary.clone(),
+                boundary: endpoint.boundary.as_str().to_owned(),
                 delay_nanos: endpoint.delay_nanos,
             });
         }
@@ -653,7 +659,7 @@ fn preflight_owned_federate(
             let (expected_id, expected) = route.payload_type();
             if found_id != expected_id {
                 return Err(ExecuteOwnedFederateError::RoutePayloadTypeMismatch {
-                    boundary: endpoint.boundary.clone(),
+                    boundary: endpoint.boundary.as_str().to_owned(),
                     direction,
                     enclave,
                     port,
@@ -675,7 +681,7 @@ fn preflight_owned_federate(
 pub fn execute_owned_federate(
     deployment: &CompiledDeploymentImage<'_>,
     federate: FederateIndex,
-    bindings: FederateBindings,
+    bindings: FederateBindings<'_>,
     config: Config,
 ) -> Result<FederateExecution, ExecuteOwnedFederateError> {
     execute_owned_federate_with_spawn_guard(deployment, federate, bindings, config, |_| false)
@@ -689,7 +695,7 @@ pub fn execute_owned_federate(
 fn execute_owned_federate_with_spawn_guard(
     deployment: &CompiledDeploymentImage<'_>,
     federate: FederateIndex,
-    bindings: FederateBindings,
+    bindings: FederateBindings<'_>,
     config: Config,
     mut fail_spawn: impl FnMut(Option<EnclaveIndex>) -> bool,
 ) -> Result<FederateExecution, ExecuteOwnedFederateError> {
@@ -1064,7 +1070,7 @@ mod scoped_spawn_tests {
 
     fn initialize_state() {}
 
-    fn bindings() -> FederateBindings {
+    fn bindings() -> FederateBindings<'static> {
         (0..3).fold(FederateBindings::new(), |bindings, enclave| {
             bindings.bind_enclave(
                 EnclaveIndex::new(enclave),

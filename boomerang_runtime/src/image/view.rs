@@ -1084,6 +1084,23 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
                 field: "scope.reactor",
             });
         }
+        if let Some(effect) = reaction.mode_effect() {
+            check_ref(
+                "reactions",
+                index,
+                "mode_effect.target",
+                "modes",
+                effect.target.as_u32(),
+                image.modes.len(),
+            )?;
+            if image.modes[effect.target].reactor() != reaction.reactor() {
+                return Err(ImageValidationError::OwnershipMismatch {
+                    table: "reactions",
+                    index,
+                    field: "mode_effect.target.reactor",
+                });
+            }
+        }
         check_range(
             "reactions",
             index,
@@ -2240,6 +2257,13 @@ mod tests {
     #[test]
     fn invalid_ownership_identity_and_storage_report_specific_errors() {
         let bad_modes = [ModeImage::new(ReactorIndex::new(1), ScopeIndex::new(1))];
+        let bad_mode_effect_reactions = [
+            REACTIONS[0],
+            REACTIONS[1].with_mode_effect(crate::CompiledModeEffectRef {
+                target: ModeIndex::new(0),
+                transition: crate::TransitionKind::Reset,
+            }),
+        ];
         let invalid_routes = [RouteImage::new(
             IdentityRange::new(13, 9),
             PortIndex::new(1),
@@ -2296,6 +2320,18 @@ mod tests {
                     table: "modes",
                     index: 0,
                     field: "scope.reactor",
+                },
+            ),
+            (
+                "mode effect ownership",
+                EnclaveImage {
+                    reactions: TinyMapView::new(&bad_mode_effect_reactions),
+                    ..IMAGE
+                },
+                ImageValidationError::OwnershipMismatch {
+                    table: "reactions",
+                    index: 1,
+                    field: "mode_effect.target.reactor",
                 },
             ),
             (

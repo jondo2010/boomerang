@@ -6,9 +6,11 @@ use super::{barrier::LogicalTimeBarrier, modal::EventManager, Config, Stats};
 #[cfg(feature = "federated")]
 use super::{FederatedBarrierError, FederatedBarrierOutcome, FederatedTimeBarrier};
 use crate::{
-    event::AsyncEvent, keepalive, key_set::KeySetView, ActionKey, CommonContext, Duration,
-    EnclaveKey, Level, ReactionSetLimits, ReactorData, RuntimeError, SendContext, Tag,
-    TransitionKind,
+    event::{AsyncEvent, AsyncEventTarget},
+    keepalive,
+    key_set::KeySetView,
+    ActionKey, CommonContext, Duration, EnclaveKey, Level, ReactionSetLimits, ReactorData,
+    RuntimeError, SendContext, Tag, TransitionKind,
 };
 
 /// Immutable normalized schedule addressed by one exact family of dense key types.
@@ -27,6 +29,7 @@ pub(crate) trait Schedule {
     type Scope: tinymap::Key + Copy + std::fmt::Debug;
 
     fn reaction_limits(&self) -> ReactionSetLimits;
+    fn action_capacity(&self) -> usize;
     fn has_modal_scopes(&self) -> bool {
         self.scopes()
             .any(|scope| self.mode_for_scope(scope).is_some())
@@ -55,6 +58,10 @@ pub(crate) trait Schedule {
     fn scope_for_mode(&self, mode: Self::Mode) -> Self::Scope;
     fn scope_for_action(&self, action: Self::Action) -> Self::Scope;
     fn action_is_logical(&self, action: Self::Action) -> bool;
+    /// Returns a positive recurrence period for a scheduler-owned timer action.
+    fn action_period(&self, _action: Self::Action) -> Option<Duration> {
+        None
+    }
     fn parent_scope(&self, scope: Self::Scope) -> Option<Self::Scope>;
     fn reactor_for_scope(&self, scope: Self::Scope) -> Self::Reactor;
     fn mode_for_scope(&self, scope: Self::Scope) -> Option<Self::Mode>;
@@ -114,10 +121,21 @@ pub(crate) trait ExecutionStorage<S: Schedule> {
     /// Failure returned while invoking reactions.
     type Error;
 
+    /// Prepares the scheduler origin immediately before startup begins.
+    fn prepare_startup_origin(&mut self, start_time: &mut std::time::Instant);
     /// Resolves an externally supplied runtime action identity to this storage's action key.
     fn action_from_runtime(&self, key: ActionKey) -> S::Action;
     /// Retain an action value until its scheduled tag is processed.
     fn push_action_value(&mut self, action: S::Action, tag: Tag, value: Box<dyn ReactorData>);
+    /// Stages one inbound scheduler-boundary value until its logical tag is processed.
+    fn stage_inbound_boundary_value(
+        &mut self,
+        key: crate::PortKey,
+        tag: Tag,
+        value: Box<dyn ReactorData>,
+    ) -> Result<S::Port, Self::Error>;
+    /// Writes all retained scheduler-boundary values for one processing tag.
+    fn commit_boundary_ports(&mut self, tag: Tag) -> Result<(), Self::Error>;
     /// Remove all pending values for an action during a modal reset.
     fn clear_action_values(&mut self, action: S::Action);
     /// Move a retained action value when a modal scope resumes.
@@ -201,7 +219,7 @@ where
 {
     /// Handle an asynchronous event from the event queue
     #[tracing::instrument(target = "boomerang_runtime::sched", skip(self, ), fields(event = %event))]
-    fn handle_async_event(&mut self, event: AsyncEvent) {
+    fn handle_async_event(&mut self, event: AsyncEvent) -> Result<(), E::Error> {
         self.stats.increment_processed_events();
         tracing::trace!(target: "boomerang_runtime::sched", "Handling");
         match event {
@@ -216,7 +234,7 @@ where
                     if tag < *self.current_tag {
                         tracing::warn!(target: "boomerang_runtime::sched", tag = %tag, "Ignoring empty event in the past");
                     }
-                    return;
+                    return Ok(());
                 }
                 // TagReleaseProvisional events are coming from downstream enclaves.
                 // If this enclave is also an upstream (cycle), then also release it provisionally.
@@ -225,41 +243,59 @@ where
                 }
                 self.events.push_event(tag, std::iter::empty(), false);
             }
-            AsyncEvent::Logical { tag, key, value } => {
+            AsyncEvent::Logical { tag, target, value } => {
                 if tag <= *self.current_tag {
                     tracing::warn!(target: "boomerang_runtime::sched", tag = %tag, "Ignoring empty event in the past");
-                    return;
+                    return Ok(());
                 }
-                let key = self.storage.action_from_runtime(key);
-                self.storage.push_action_value(key, tag, value);
-                self.events.push_action_event(
-                    key,
-                    tag,
-                    self.schedule.action_triggers(key),
-                    false,
-                    self.schedule,
-                );
+                self.admit_value(tag, target, value)?;
             }
-            AsyncEvent::Physical { time, key, value } => {
+            AsyncEvent::Physical {
+                time,
+                target,
+                value,
+            } => {
                 let tag = Tag::from_physical_time(*self.start_time, time);
-                let key = self.storage.action_from_runtime(key);
-                self.storage.push_action_value(key, tag, value);
-                self.events.push_action_event(
-                    key,
-                    tag,
-                    self.schedule.action_triggers(key),
-                    false,
-                    self.schedule,
-                );
+                self.admit_value(tag, target, value)?;
             }
             AsyncEvent::Shutdown { delay } => {
                 let tag = self.current_tag.delay(delay);
                 self.schedule_shutdown_at(tag);
             }
         }
+        Ok(())
+    }
+
+    /// Stores one action or validated boundary-port payload and schedules its trigger set.
+    fn admit_value(
+        &mut self,
+        tag: Tag,
+        target: AsyncEventTarget,
+        value: Box<dyn ReactorData>,
+    ) -> Result<(), E::Error> {
+        match target {
+            AsyncEventTarget::Action(key) => {
+                let action = self.storage.action_from_runtime(key);
+                self.storage.push_action_value(action, tag, value);
+                self.events.push_action_event(
+                    action,
+                    tag,
+                    self.schedule.action_triggers(action),
+                    false,
+                    self.schedule,
+                );
+            }
+            AsyncEventTarget::BoundaryPort(key) => {
+                let port = self.storage.stage_inbound_boundary_value(key, tag, value)?;
+                self.events
+                    .push_event(tag, self.schedule.port_triggers(port), false);
+            }
+        }
+        Ok(())
     }
 
     fn schedule_shutdown_at(&mut self, tag: Tag) {
+        *self.shutdown_tag = Some((*self.shutdown_tag).map_or(tag, |pending| pending.min(tag)));
         for action in self.schedule.shutdown_actions() {
             self.storage.push_action_value(action, tag, Box::new(()));
         }
@@ -271,6 +307,7 @@ where
     /// Execute startup of the Scheduler.
     #[tracing::instrument(target = "boomerang_runtime::sched", skip(self))]
     pub(super) fn startup(&mut self) {
+        self.storage.prepare_startup_origin(self.start_time);
         let tag = Tag::ZERO;
 
         // Initialize the event queue with the startup actions
@@ -297,8 +334,6 @@ where
 
         // Release the current tag to downstream reactors
         self.release_tag_downstream(*self.current_tag);
-
-        *self.start_time = std::time::Instant::now();
     }
 
     /// Final shutdown of the Scheduler. The last tag has already been processed.
@@ -369,7 +404,8 @@ where
     pub(super) fn try_next(&mut self) -> Result<bool, SchedulerError<E::Error>> {
         // Pump the event queue
         while let Ok(Some(async_event)) = self.event_rx.try_recv() {
-            self.handle_async_event(async_event);
+            self.handle_async_event(async_event)
+                .map_err(SchedulerError::Execution)?;
         }
 
         if let Some(next_tag) = self.events.peek_tag() {
@@ -381,7 +417,8 @@ where
                     .acquire_tag(next_tag, self.key, self.event_rx)
                     .map_err(|error| SchedulerError::Coordination(error.into()))?
                 {
-                    self.handle_async_event(async_event);
+                    self.handle_async_event(async_event)
+                        .map_err(SchedulerError::Execution)?;
                     // Returned early due to async event
                     return Ok(true);
                 }
@@ -395,7 +432,8 @@ where
                 {
                     FederatedBarrierOutcome::Granted => {}
                     FederatedBarrierOutcome::Interrupted(async_event) => {
-                        self.handle_async_event(async_event);
+                        self.handle_async_event(async_event)
+                            .map_err(SchedulerError::Execution)?;
                         // Returned early due to async event
                         return Ok(true);
                     }
@@ -404,7 +442,7 @@ where
 
             if !self.config.fast_forward {
                 let target = next_tag.to_logical_time(*self.start_time);
-                if self.synchronize_wall_clock(target) {
+                if self.synchronize_wall_clock(target)? {
                     // Woken up by async event
                     return Ok(true);
                 }
@@ -419,8 +457,16 @@ where
                 self.shutdown_tx.shutdown();
             }
 
-            self.process_tag(event.tag, event.reactions.view(), event.terminal)
+            self.storage
+                .commit_boundary_ports(event.tag)
                 .map_err(SchedulerError::Execution)?;
+
+            self.process_tag(
+                event.tag,
+                event.reactions.view(),
+                event.terminal,
+                &event.action_values,
+            )?;
 
             *self.current_tag = event.tag;
             if event.has_nonterminal_work {
@@ -431,6 +477,7 @@ where
 
             // Return the reaction key set to the free pool.
             self.events.return_reaction_set(event.reactions);
+            self.events.return_action_values(event.action_values);
 
             // Release the current tag to downstream reactors
             self.release_tag_downstream(*self.current_tag);
@@ -446,7 +493,8 @@ where
                 return Ok(false);
             }
         } else if let Some(async_event) = self.receive_event_async() {
-            self.handle_async_event(async_event);
+            self.handle_async_event(async_event)
+                .map_err(SchedulerError::Execution)?;
         } else {
             tracing::debug!(target: "boomerang_runtime::sched", "No more events in queue, pushing a shutdown event.");
             // Shutdown event will be processed at the next event loop iteration
@@ -481,7 +529,10 @@ where
 
     // Wait until the wall-clock time is reached
     #[tracing::instrument(target = "boomerang_runtime::sched", skip(self, target))]
-    fn synchronize_wall_clock(&mut self, target: std::time::Instant) -> bool {
+    fn synchronize_wall_clock(
+        &mut self,
+        target: std::time::Instant,
+    ) -> Result<bool, SchedulerError<E::Error>> {
         let now = std::time::Instant::now();
 
         match now.cmp(&target) {
@@ -492,8 +543,9 @@ where
                 match self.event_rx.recv_timeout(advance) {
                     Ok(event) => {
                         tracing::debug!(target: "boomerang_runtime::sched", event = %event, "Sleep interrupted by");
-                        self.handle_async_event(event);
-                        return true;
+                        self.handle_async_event(event)
+                            .map_err(SchedulerError::Execution)?;
+                        return Ok(true);
                     }
                     Err(ReceiveErrorTimeout::Closed) | Err(ReceiveErrorTimeout::SendClosed) => {
                         let remaining = target.checked_duration_since(std::time::Instant::now());
@@ -516,7 +568,7 @@ where
             std::cmp::Ordering::Equal => {}
         }
 
-        false
+        Ok(false)
     }
 
     /// Process the reactions at this tag in increasing order of level.
@@ -528,7 +580,8 @@ where
         tag: Tag,
         reaction_view: KeySetView<S::Reaction>,
         terminal: bool,
-    ) -> Result<(), E::Error> {
+        periodic_actions: &[S::Action],
+    ) -> Result<(), SchedulerError<E::Error>> {
         self.transition_buffer.clear();
         let mut execution_error = None;
         reaction_view.for_each_level(|level, reaction_keys, next_levels| {
@@ -628,7 +681,31 @@ where
         });
 
         if let Some(error) = execution_error {
-            return Err(error);
+            return Err(SchedulerError::Execution(error));
+        }
+
+        for &action in periodic_actions {
+            let Some(period) = self.schedule.action_period(action) else {
+                continue;
+            };
+            let successor = tag.checked_delay(period);
+            if (*self.shutdown_tag)
+                .is_some_and(|shutdown| successor.is_none_or(|successor| successor >= shutdown))
+            {
+                continue;
+            }
+            let successor = successor.ok_or_else(|| {
+                SchedulerError::Coordination(RuntimeError::LogicalTimeOverflow { tag, period })
+            })?;
+            self.storage
+                .push_action_value(action, successor, Box::new(()));
+            self.events.push_action_event(
+                action,
+                successor,
+                self.schedule.action_triggers(action),
+                false,
+                self.schedule,
+            );
         }
 
         if self.transition_buffer.is_empty() {

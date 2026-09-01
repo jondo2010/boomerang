@@ -1,6 +1,15 @@
 use std::fmt::{Debug, Display};
 
-use crate::{ActionKey, Duration, EnclaveKey, ReactorData, Tag};
+use crate::{ActionKey, Duration, EnclaveKey, PortKey, ReactorData, Tag};
+
+/// Scheduler-owned destination for an asynchronously admitted value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AsyncEventTarget {
+    /// A normal asynchronous action destination.
+    Action(ActionKey),
+    /// A validated scheduler boundary port destination.
+    BoundaryPort(PortKey),
+}
 
 /// `AsyncEvent` is used to inject events into the scheduler from outside of the normal event loop.
 pub enum AsyncEvent {
@@ -22,8 +31,8 @@ pub enum AsyncEvent {
     Logical {
         /// The tag at which the Action should be executed
         tag: Tag,
-        /// The key of the action that triggered this event.
-        key: ActionKey,
+        /// Scheduler destination for the admitted value.
+        target: AsyncEventTarget,
         /// The value associated with this event.
         value: Box<dyn ReactorData>,
     },
@@ -32,8 +41,8 @@ pub enum AsyncEvent {
     Physical {
         /// The instant at which the Action should be executed
         time: std::time::Instant,
-        /// The [`ActionKey`] of the action that triggered this event.
-        key: ActionKey,
+        /// Scheduler destination for the admitted value.
+        target: AsyncEventTarget,
         /// The value associated with this event.
         value: Box<dyn ReactorData>,
     },
@@ -58,19 +67,23 @@ impl Debug for AsyncEvent {
                 .field("enclave", enclave)
                 .field("tag", tag)
                 .finish(),
-            Self::Logical { tag, key, value } => f
+            Self::Logical { tag, target, value } => f
                 .debug_struct("Logical")
                 .field("tag", tag)
-                .field("key", key)
+                .field("target", target)
                 .field(
                     "value",
                     &format!("Box<{}>", std::any::type_name_of_val(&**value)),
                 )
                 .finish(),
-            Self::Physical { time, key, value } => f
+            Self::Physical {
+                time,
+                target,
+                value,
+            } => f
                 .debug_struct("Physical")
                 .field("time", time)
-                .field("key", key)
+                .field("target", target)
                 .field(
                     "value",
                     &format!("Box<{}>", std::any::type_name_of_val(&**value)),
@@ -90,15 +103,19 @@ impl Display for AsyncEvent {
             AsyncEvent::TagReleaseProvisional { enclave, tag } => {
                 write!(f, "TagReleaseProvisional[enclave={enclave:?},tag={tag:.3}]")
             }
-            AsyncEvent::Logical { tag, key, value: _ } => {
-                write!(f, "Logical[tag={tag:.3},key={key:?},value=..]",)
+            AsyncEvent::Logical {
+                tag,
+                target,
+                value: _,
+            } => {
+                write!(f, "Logical[tag={tag:.3},target={target:?},value=..]",)
             }
             AsyncEvent::Physical {
                 time,
-                key,
+                target,
                 value: _,
             } => {
-                write!(f, "Physical[tag={time:?},key={key:?},value=..]",)
+                write!(f, "Physical[tag={time:?},target={target:?},value=..]",)
             }
             AsyncEvent::Shutdown { delay } => {
                 write!(f, "Shutdown[delay={delay:.3}]")
@@ -121,7 +138,11 @@ impl AsyncEvent {
     /// Create a logical event.
     #[allow(dead_code)]
     pub(crate) fn logical(key: ActionKey, tag: Tag, value: Box<dyn ReactorData>) -> Self {
-        AsyncEvent::Logical { tag, key, value }
+        AsyncEvent::Logical {
+            tag,
+            target: AsyncEventTarget::Action(key),
+            value,
+        }
     }
 
     /// Create a physical event.
@@ -130,7 +151,11 @@ impl AsyncEvent {
         time: std::time::Instant,
         value: Box<dyn ReactorData>,
     ) -> Self {
-        AsyncEvent::Physical { time, key, value }
+        AsyncEvent::Physical {
+            time,
+            target: AsyncEventTarget::Action(key),
+            value,
+        }
     }
 
     /// Create a shutdown event.

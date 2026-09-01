@@ -39,8 +39,7 @@ pub use env::{
     LifecycleReaction, ModalScheduleIndex, Mode, ModeFilter, ModeKey, ReactionGraph, ScopeInfo,
     ScopeKey, TransitionKind,
 };
-#[cfg(feature = "federated")]
-pub use event::AsyncEvent;
+pub use event::{AsyncEvent, AsyncEventTarget};
 #[cfg(feature = "federated")]
 pub use federated::{
     FederatedEndpointError, FederatedFaultState, FederatedInboundEndpoint,
@@ -86,6 +85,19 @@ impl<T: ReactorData> PayloadType<T> {
 pub enum RuntimeError {
     #[error("Port Key not found: {}", 0)]
     PortKeyNotFound(PortKey),
+
+    /// Live graphs do not admit ordinary synchronous ports through the async channel.
+    #[error("async boundary port target is not available in a live graph: {0}")]
+    AsyncBoundaryPortUnsupported(PortKey),
+
+    /// Advancing a logical tag by a positive duration exceeded the tag range.
+    #[error("logical tag {tag} cannot advance by {period} without overflowing")]
+    LogicalTimeOverflow {
+        /// Last representable logical tag reached by the scheduler.
+        tag: Tag,
+        /// Positive recurrence period that cannot be represented at `tag`.
+        period: Duration,
+    },
 
     #[error("Mismatched Dynamic Types found {found} but wanted {wanted}")]
     TypeMismatch {

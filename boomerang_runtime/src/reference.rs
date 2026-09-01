@@ -111,9 +111,10 @@ pub fn execute_owned<'image>(
     config: Config,
 ) -> Result<OwnedExecutionResult, ExecuteOwnedError<'image>> {
     let image = crate::image::EnclaveImageView::new(image)?;
-    if !image.routes().is_empty() {
+    let unsupported_routes = image.routes().len();
+    if unsupported_routes != 0 {
         return Err(ExecuteOwnedError::RoutesUnsupported {
-            count: image.routes().len(),
+            count: unsupported_routes,
         });
     }
     let mut storage = OwnedStorage::new(image, bindings)?;

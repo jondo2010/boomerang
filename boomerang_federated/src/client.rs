@@ -975,9 +975,12 @@ mod tests {
             .unwrap()
             .expect("inbound MSG should interrupt the barrier wait");
         match event {
-            boomerang_runtime::AsyncEvent::Logical { tag, key, value } => {
+            boomerang_runtime::AsyncEvent::Logical { tag, target, value } => {
                 assert_eq!(tag, boomerang_runtime::Tag::ZERO);
-                assert_eq!(key, action_key);
+                assert_eq!(
+                    target,
+                    boomerang_runtime::AsyncEventTarget::Action(action_key)
+                );
                 match value.downcast::<u32>() {
                     Ok(value) => assert_eq!(*value, 42),
                     Err(_) => panic!("expected u32 logical event payload"),
@@ -1053,11 +1056,14 @@ mod tests {
                 .wait_for_tag(boomerang_runtime::Tag::ZERO, &event_rx)
                 .unwrap()
                 .expect("each preceding MSG must interrupt before TAG");
-            let boomerang_runtime::AsyncEvent::Logical { tag, key, value } = event else {
+            let boomerang_runtime::AsyncEvent::Logical { tag, target, value } = event else {
                 panic!("expected logical async event");
             };
             assert_eq!(tag, boomerang_runtime::Tag::ZERO);
-            assert_eq!(key, action_key);
+            assert_eq!(
+                target,
+                boomerang_runtime::AsyncEventTarget::Action(action_key)
+            );
             match value.downcast::<u32>() {
                 Ok(value) => assert_eq!(*value, expected),
                 Err(_) => panic!("expected u32 payload"),

@@ -393,6 +393,22 @@ pub enum ExecuteOwnedFederateError {
         #[source]
         source: OwnedStorageError,
     },
+    /// The Federate-wide quiescence coordinator thread could not be created.
+    #[error("failed to spawn Federate quiescence coordinator thread: {source}")]
+    CoordinatorThreadSpawn {
+        /// Operating-system thread creation failure.
+        #[source]
+        source: std::io::Error,
+    },
+    /// One Enclave scheduler thread could not be created.
+    #[error("failed to spawn scheduler thread for Enclave {enclave}: {source}")]
+    ThreadSpawn {
+        /// Canonical Enclave index whose scheduler was not started.
+        enclave: EnclaveIndex,
+        /// Operating-system thread creation failure.
+        #[source]
+        source: std::io::Error,
+    },
     /// One Enclave scheduler or typed route failed during execution.
     #[error("Enclave {enclave} execution failed: {source}")]
     EnclaveExecution {
@@ -662,6 +678,21 @@ pub fn execute_owned_federate(
     bindings: FederateBindings,
     config: Config,
 ) -> Result<FederateExecution, ExecuteOwnedFederateError> {
+    execute_owned_federate_with_spawn_guard(deployment, federate, bindings, config, |_| false)
+}
+
+/// Executes one owned Federate while consulting a deterministic scoped-spawn failure seam.
+///
+/// The guard receives `None` for the quiescence coordinator and `Some(enclave)` for each
+/// scheduler. Production always returns `false`; unit tests use the guard to exercise failures
+/// that cannot be induced safely through operating-system resource exhaustion.
+fn execute_owned_federate_with_spawn_guard(
+    deployment: &CompiledDeploymentImage<'_>,
+    federate: FederateIndex,
+    bindings: FederateBindings,
+    config: Config,
+    mut fail_spawn: impl FnMut(Option<EnclaveIndex>) -> bool,
+) -> Result<FederateExecution, ExecuteOwnedFederateError> {
     let endpoints = preflight_owned_federate(deployment, federate, &bindings)?;
     let FederateBindings {
         enclaves,
@@ -777,8 +808,31 @@ pub fn execute_owned_federate(
     };
     let (results, failure) = std::thread::scope(|scope| {
         let (result_tx, result_rx) = std::sync::mpsc::channel();
-        let coordinator_thread =
-            quiescence_coordinator.map(|coordinator| scope.spawn(move || coordinator.run()));
+        let coordinator_thread = match quiescence_coordinator {
+            Some(coordinator) => {
+                let spawned = if fail_spawn(None) {
+                    Err(std::io::Error::other(
+                        "injected scoped thread spawn failure",
+                    ))
+                } else {
+                    std::thread::Builder::new()
+                        .name("federate-quiescence".to_owned())
+                        .spawn_scoped(scope, move || coordinator.run())
+                };
+                match spawned {
+                    Ok(handle) => Some(handle),
+                    Err(source) => {
+                        drop(quiescence_participants);
+                        request_federate_shutdown(&event_senders);
+                        return (
+                            TinySecondaryMap::with_capacity(enclave_count),
+                            Some(ExecuteOwnedFederateError::CoordinatorThreadSpawn { source }),
+                        );
+                    }
+                }
+            }
+            None => None,
+        };
         let abort = || {
             if let Some(handle) = &quiescence_handle {
                 handle.abort();
@@ -786,47 +840,67 @@ pub fn execute_owned_federate(
             request_federate_shutdown(&event_senders);
         };
         let mut handles = Vec::with_capacity(enclave_count);
+        let mut failure = None;
         for ((enclave, mut storage), (_, coordination)) in storages.into_iter().zip(coordinations) {
             let result_tx = result_tx.clone();
             let config = config.clone();
             let key = crate::EnclaveKey::from(enclave.as_u32() as usize);
             let mut participant = quiescence_participants.remove(&key);
-            let handle = scope.spawn(move || {
-                let execution = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    run_owned_scheduler_with_coordination(
-                        &mut storage,
-                        &config,
-                        origin,
-                        coordination,
-                        participant.as_mut(),
-                    )
-                }));
-                drop(participant);
-                let result = match execution {
-                    Ok(Ok(final_tag)) => Ok(EnclaveExecution {
-                        states: storage.into_states(),
-                        final_tag,
-                    }),
-                    Ok(Err(crate::sched::SchedulerError::Execution(source))) => {
-                        Err(ExecuteOwnedFederateError::EnclaveExecution { enclave, source })
-                    }
-                    Ok(Err(crate::sched::SchedulerError::Coordination(source))) => {
-                        Err(ExecuteOwnedFederateError::EnclaveCoordination { enclave, source })
-                    }
-                    Err(payload) => Err(ExecuteOwnedFederateError::ThreadPanicked {
-                        enclave,
-                        message: panic_message(payload),
-                    }),
-                };
-                let _ = result_tx.send((enclave, result));
-            });
-            handles.push((enclave, handle));
+            let spawned = if fail_spawn(Some(enclave)) {
+                Err(std::io::Error::other(
+                    "injected scoped thread spawn failure",
+                ))
+            } else {
+                std::thread::Builder::new()
+                    .name(format!("enclave-{enclave}"))
+                    .spawn_scoped(scope, move || {
+                        let execution = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                            run_owned_scheduler_with_coordination(
+                                &mut storage,
+                                &config,
+                                origin,
+                                coordination,
+                                participant.as_mut(),
+                            )
+                        }));
+                        drop(participant);
+                        let result = match execution {
+                            Ok(Ok(final_tag)) => Ok(EnclaveExecution {
+                                states: storage.into_states(),
+                                final_tag,
+                            }),
+                            Ok(Err(crate::sched::SchedulerError::Execution(source))) => {
+                                Err(ExecuteOwnedFederateError::EnclaveExecution { enclave, source })
+                            }
+                            Ok(Err(crate::sched::SchedulerError::Coordination(source))) => {
+                                Err(ExecuteOwnedFederateError::EnclaveCoordination {
+                                    enclave,
+                                    source,
+                                })
+                            }
+                            Err(payload) => Err(ExecuteOwnedFederateError::ThreadPanicked {
+                                enclave,
+                                message: panic_message(payload),
+                            }),
+                        };
+                        let _ = result_tx.send((enclave, result));
+                    })
+            };
+            match spawned {
+                Ok(handle) => handles.push((enclave, handle)),
+                Err(source) => {
+                    abort();
+                    failure = Some(ExecuteOwnedFederateError::ThreadSpawn { enclave, source });
+                    break;
+                }
+            }
         }
+        drop(quiescence_participants);
         drop(result_tx);
 
+        let started_count = handles.len();
         let mut results = TinySecondaryMap::with_capacity(enclave_count);
-        let mut failure = None;
-        for _ in 0..enclave_count {
+        for _ in 0..started_count {
             match result_rx.recv() {
                 Ok((enclave, Ok(result))) => {
                     results.insert(enclave, result);
@@ -897,4 +971,181 @@ pub fn execute_owned<'image>(
         states: storage.into_states(),
         final_tag,
     })
+}
+
+#[cfg(test)]
+mod scoped_spawn_tests {
+    use std::{io::ErrorKind, time::Duration};
+
+    use tinymap::TinyMapView;
+
+    use super::*;
+    use crate::image::{
+        BindingKind, BindingSlotIndex, CoordinationProjection, FederateImage,
+        GlobalFederationImage, IdentityRange, ReactorImage, ReactorIndex, RequiredBindingImage,
+        ScopeImage, ScopeIndex, StorageBounds, TableRange,
+    };
+
+    static REACTORS: [ReactorImage; 1] = [ReactorImage::new(
+        BindingSlotIndex::new(0),
+        StateSlotIndex::new(0),
+        ScopeIndex::new(0),
+        TableRange::new(0, 0),
+        None,
+        None,
+    )];
+    static SCOPES: [ScopeImage; 1] = [ScopeImage::new(
+        None,
+        ReactorIndex::new(0),
+        None,
+        TableRange::new(0, 1),
+        TableRange::new(0, 0),
+        TableRange::new(0, 0),
+        TableRange::new(0, 0),
+        TableRange::new(0, 0),
+        TableRange::new(0, 0),
+    )];
+    static SCOPE_DESCENDANTS: [ScopeIndex; 1] = [ScopeIndex::new(0)];
+    static REQUIRED_BINDINGS: [RequiredBindingImage; 1] = [RequiredBindingImage::new(
+        IdentityRange::new(5, 5),
+        BindingKind::StateInitializer,
+    )];
+
+    const fn state_only_image(identity_data: &'static str) -> EnclaveImage<'static> {
+        EnclaveImage {
+            identity_data,
+            enclave_id: IdentityRange::new(0, 5),
+            reactors: TinyMapView::new(&REACTORS),
+            actions: TinyMapView::new(&[]),
+            ports: TinyMapView::new(&[]),
+            reactions: TinyMapView::new(&[]),
+            modes: TinyMapView::new(&[]),
+            scopes: TinyMapView::new(&SCOPES),
+            reaction_triggers: &[],
+            reaction_use_ports: &[],
+            reaction_effect_ports: &[],
+            reaction_actions: &[],
+            reaction_modes: &[],
+            scope_descendants: &SCOPE_DESCENDANTS,
+            scope_logical_actions: &[],
+            scope_timer_startups: &[],
+            scope_reset_reactions: &[],
+            scope_startup_reactions: &[],
+            scope_shutdown_reactions: &[],
+            startup_actions: &[],
+            timer_startup_actions: &[],
+            shutdown_reactions: &[],
+            shutdown_actions: &[],
+            routes: TinyMapView::new(&[]),
+            required_bindings: TinyMapView::new(&REQUIRED_BINDINGS),
+            storage_bounds: StorageBounds::new(1, 0, 1, 0, 0, 0),
+        }
+    }
+
+    static ENCLAVES: [EnclaveImage<'static>; 3] = [
+        state_only_image("alphastate"),
+        state_only_image("bravostate"),
+        state_only_image("charlstate"),
+    ];
+    static FEDERATES: [FederateImage; 1] = [FederateImage::new(
+        IdentityRange::new(0, 4),
+        IdentityRange::new(4, 6),
+        IdentityRange::new(10, 7),
+        TableRange::new(0, 3),
+    )];
+    static MEMBERS: [FederateIndex; 1] = [FederateIndex::new(0)];
+    static DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
+        identity_data: "hosttargetruntime",
+        federation: GlobalFederationImage::new(&MEMBERS, &[]),
+        federates: TinyMapView::new(&FEDERATES),
+        enclaves: TinyMapView::new(&ENCLAVES),
+        coordination: CoordinationProjection::Local,
+    };
+
+    fn initialize_state() {}
+
+    fn bindings() -> FederateBindings {
+        (0..3).fold(FederateBindings::new(), |bindings, enclave| {
+            bindings.bind_enclave(
+                EnclaveIndex::new(enclave),
+                EnclaveBindings::new().bind_state(BindingSlotIndex::new(0), initialize_state),
+            )
+        })
+    }
+
+    fn execute_with_spawn_failure(failed_spawn: Option<EnclaveIndex>) -> ExecuteOwnedFederateError {
+        execute_owned_federate_with_spawn_guard(
+            &DEPLOYMENT,
+            FederateIndex::new(0),
+            bindings(),
+            Config::default().with_fast_forward(true),
+            move |spawn| spawn == failed_spawn,
+        )
+        .expect_err("the selected scoped thread creation must fail")
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "the bounded hang regression requires subprocess support"
+    )]
+    fn scoped_thread_spawn_failure_is_typed_and_bounded() {
+        let executable =
+            std::env::current_exe().expect("the runtime unit-test executable is available");
+        let mut child = std::process::Command::new(executable)
+            .args([
+                "--exact",
+                "reference::scoped_spawn_tests::scoped_thread_spawn_failure_child",
+                "--nocapture",
+            ])
+            .env("BOOMERANG_SCOPED_SPAWN_FAILURE_CHILD", "1")
+            .spawn()
+            .expect("the scoped-spawn failure child process starts");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+
+        loop {
+            if let Some(status) = child
+                .try_wait()
+                .expect("the scoped-spawn failure child can be polled")
+            {
+                assert!(
+                    status.success(),
+                    "scoped-spawn failure child failed: {status}"
+                );
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                child
+                    .kill()
+                    .expect("the timed-out scoped-spawn failure child is killed");
+                child
+                    .wait()
+                    .expect("the killed scoped-spawn failure child is reaped");
+                panic!("scoped thread creation failure did not return within two seconds");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn scoped_thread_spawn_failure_child() {
+        if std::env::var_os("BOOMERANG_SCOPED_SPAWN_FAILURE_CHILD").is_none() {
+            return;
+        }
+
+        let coordinator = execute_with_spawn_failure(None);
+        assert!(matches!(
+            coordinator,
+            ExecuteOwnedFederateError::CoordinatorThreadSpawn { source }
+                if source.kind() == ErrorKind::Other
+        ));
+
+        let failed_enclave = EnclaveIndex::new(1);
+        let scheduler = execute_with_spawn_failure(Some(failed_enclave));
+        assert!(matches!(
+            scheduler,
+            ExecuteOwnedFederateError::ThreadSpawn { enclave, source }
+                if enclave == failed_enclave && source.kind() == ErrorKind::Other
+        ));
+    }
 }

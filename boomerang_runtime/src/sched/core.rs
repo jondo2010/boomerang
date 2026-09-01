@@ -2,7 +2,9 @@
 
 use kanal::ReceiveErrorTimeout;
 
-use super::{barrier::LogicalTimeBarrier, modal::EventManager, Config, Stats};
+use super::{
+    barrier::LogicalTimeBarrier, federate::QuiescenceControl, modal::EventManager, Config, Stats,
+};
 #[cfg(feature = "federated")]
 use super::{FederatedBarrierError, FederatedBarrierOutcome, FederatedTimeBarrier};
 use crate::{
@@ -153,14 +155,6 @@ pub(crate) trait ExecutionStorage<S: Schedule> {
     fn reset_ports(&mut self);
 }
 
-/// Optional owned-executor channel hook for activity and idle coordination.
-pub(super) trait SchedulerActivity {
-    /// Reports that queued or processed work invalidates an idle candidate.
-    fn active(&mut self);
-    /// Waits for queued work or a coordinator termination command.
-    fn wait(&mut self) -> Option<AsyncEvent>;
-}
-
 /// One scheduling algorithm borrowing separate immutable schedule and mutable storage concerns.
 ///
 /// Coordination, clocks, wake reception, and shutdown remain concrete here; this
@@ -180,8 +174,8 @@ where
     pub(super) storage: &'a mut E,
     /// Existing asynchronous wake receiver.
     pub(super) event_rx: &'a crate::Receiver<AsyncEvent>,
-    /// Optional owned-Federate activity channel; live schedulers never install one.
-    pub(super) activity: Option<&'a mut dyn SchedulerActivity>,
+    /// Optional owned-Federate quiescence hook; live schedulers never install one.
+    pub(super) quiescence: Option<&'a mut dyn QuiescenceControl>,
     /// Root and modal event queues typed by the schedule keys.
     pub(super) events: &'a mut EventManager<S>,
     /// Physical origin used to translate logical tags.
@@ -374,8 +368,8 @@ where
                 tracing::debug!(target: "boomerang_runtime::sched", "Cannot wait, already past programmed shutdown time...");
                 None
             }
-        } else if let Some(activity) = self.activity.as_deref_mut() {
-            activity.wait()
+        } else if let Some(quiescence) = self.quiescence.as_deref_mut() {
+            quiescence.wait()
         } else if self.config.keep_alive {
             tracing::debug!(target: "boomerang_runtime::sched", "Waiting indefinitely for async event.");
             self.event_rx.recv().ok()
@@ -416,16 +410,16 @@ where
     pub(super) fn try_next(&mut self) -> Result<bool, SchedulerError<E::Error>> {
         // Pump the event queue
         while let Ok(Some(async_event)) = self.event_rx.try_recv() {
-            if let Some(activity) = self.activity.as_deref_mut() {
-                activity.active();
+            if let Some(quiescence) = self.quiescence.as_deref_mut() {
+                quiescence.active();
             }
             self.handle_async_event(async_event)
                 .map_err(SchedulerError::Execution)?;
         }
 
         if let Some(next_tag) = self.events.peek_tag() {
-            if let Some(activity) = self.activity.as_deref_mut() {
-                activity.active();
+            if let Some(quiescence) = self.quiescence.as_deref_mut() {
+                quiescence.active();
             }
             tracing::trace!(target: "boomerang_runtime::sched", next_tag = %next_tag, "Trying next tag");
 

@@ -19,7 +19,10 @@ use crate::{
     },
     run_owned_scheduler,
     sched::{
-        federate::EnclaveDependencies, owned_federate_coordination,
+        federate::{
+            EnclaveDependencies, FederateQuiescence, FederateQuiescenceCoordinator,
+            FederateQuiescenceHandle,
+        },
         run_owned_scheduler_with_coordination,
     },
     storage::owned::StoredState,
@@ -752,24 +755,33 @@ pub fn execute_owned_federate(
             .add_upstream(source_key, source_context, delay);
     }
     let enclave_count = storages.len();
-    let activity = (!config.keep_alive).then(|| {
-        owned_federate_coordination(storages.iter().map(|(enclave, storage)| {
+    let quiescence = (!config.keep_alive).then(|| {
+        FederateQuiescence::new(storages.iter().map(|(enclave, storage)| {
             (
                 crate::EnclaveKey::from(enclave.as_u32() as usize),
                 storage.scheduler_event_rx(),
             )
         }))
     });
-    let (coordinator, coordinator_runner, mut activities) = match activity {
-        Some((coordinator, runner, activities)) => (Some(coordinator), Some(runner), activities),
+    let (quiescence_handle, quiescence_coordinator, mut quiescence_participants): (
+        Option<FederateQuiescenceHandle>,
+        Option<FederateQuiescenceCoordinator>,
+        _,
+    ) = match quiescence {
+        Some(quiescence) => (
+            Some(quiescence.abort_handle),
+            Some(quiescence.coordinator),
+            quiescence.participants,
+        ),
         None => (None, None, BTreeMap::new()),
     };
     let (results, failure) = std::thread::scope(|scope| {
         let (result_tx, result_rx) = std::sync::mpsc::channel();
-        let coordinator_handle = coordinator_runner.map(|runner| scope.spawn(move || runner.run()));
+        let coordinator_thread =
+            quiescence_coordinator.map(|coordinator| scope.spawn(move || coordinator.run()));
         let abort = || {
-            if let Some(coordinator) = &coordinator {
-                coordinator.abort();
+            if let Some(handle) = &quiescence_handle {
+                handle.abort();
             }
             request_federate_shutdown(&event_senders);
         };
@@ -778,7 +790,7 @@ pub fn execute_owned_federate(
             let result_tx = result_tx.clone();
             let config = config.clone();
             let key = crate::EnclaveKey::from(enclave.as_u32() as usize);
-            let mut activity = activities.remove(&key);
+            let mut participant = quiescence_participants.remove(&key);
             let handle = scope.spawn(move || {
                 let execution = std::panic::catch_unwind(AssertUnwindSafe(|| {
                     run_owned_scheduler_with_coordination(
@@ -786,10 +798,10 @@ pub fn execute_owned_federate(
                         &config,
                         origin,
                         coordination,
-                        activity.as_mut(),
+                        participant.as_mut(),
                     )
                 }));
-                drop(activity);
+                drop(participant);
                 let result = match execution {
                     Ok(Ok(final_tag)) => Ok(EnclaveExecution {
                         states: storage.into_states(),
@@ -845,7 +857,7 @@ pub fn execute_owned_federate(
                 }
             }
         }
-        if let Some(handle) = coordinator_handle {
+        if let Some(handle) = coordinator_thread {
             let _ = handle.join();
         }
         (results, failure)

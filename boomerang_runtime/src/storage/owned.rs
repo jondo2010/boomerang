@@ -2058,4 +2058,18 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_millis(500));
         assert_eq!(*seen_origin.lock().unwrap(), Some(origin));
     }
+
+    #[test]
+    fn scheduler_closed_before_first_iteration_shuts_down_without_tag_overflow() {
+        let mut storage = OwnedStorage::new(image(), complete_bindings()).unwrap();
+        storage.scheduler_event_tx().close().unwrap();
+
+        let final_tag = crate::sched::run_owned_scheduler(
+            &mut storage,
+            &Config::default().with_fast_forward(true),
+        )
+        .unwrap();
+
+        assert_eq!(final_tag, Tag::NEVER);
+    }
 }

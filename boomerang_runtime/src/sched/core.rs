@@ -308,6 +308,19 @@ where
             .push_event(tag, self.schedule.shutdown_reactions(), true);
     }
 
+    /// Returns the first representable shutdown tag strictly after the current scheduler tag.
+    fn next_shutdown_tag(&self) -> Tag {
+        if *self.current_tag < Tag::ZERO {
+            Tag::ZERO
+        } else if self.current_tag.microstep() == usize::MAX {
+            self.current_tag
+                .checked_delay(Duration::nanoseconds(1))
+                .unwrap_or(Tag::FOREVER)
+        } else {
+            self.current_tag.delay(Duration::ZERO)
+        }
+    }
+
     /// Execute startup of the Scheduler.
     #[tracing::instrument(target = "boomerang_runtime::sched", skip(self))]
     pub(super) fn startup(&mut self) {
@@ -408,6 +421,10 @@ where
     /// Process one scheduler step, returning coordination failures to the caller.
     #[tracing::instrument(target = "boomerang_runtime::sched", skip(self), fields(tag = %self.current_tag))]
     pub(super) fn try_next(&mut self) -> Result<bool, SchedulerError<E::Error>> {
+        if self.event_rx.is_closed() {
+            self.schedule_shutdown_at(self.next_shutdown_tag());
+        }
+
         // Pump the event queue
         while let Ok(Some(async_event)) = self.event_rx.try_recv() {
             if let Some(quiescence) = self.quiescence.as_deref_mut() {
@@ -510,15 +527,7 @@ where
         } else {
             tracing::debug!(target: "boomerang_runtime::sched", "No more events in queue, pushing a shutdown event.");
             // Shutdown event will be processed at the next event loop iteration
-            let shutdown = if *self.current_tag < Tag::ZERO {
-                Tag::ZERO
-            } else if self.current_tag.microstep() == usize::MAX {
-                self.current_tag
-                    .checked_delay(Duration::nanoseconds(1))
-                    .unwrap_or(Tag::FOREVER)
-            } else {
-                (*self.current_tag).delay(Duration::ZERO)
-            };
+            let shutdown = self.next_shutdown_tag();
             *self.shutdown_tag = Some(shutdown);
             self.schedule_shutdown_at(shutdown);
         }

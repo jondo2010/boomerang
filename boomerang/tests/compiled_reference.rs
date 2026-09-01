@@ -492,6 +492,45 @@ fn counted_periodic_bindings() -> EnclaveBindings {
         .bind_reaction(BindingSlotIndex::new(1), record_periodic_tag)
 }
 
+static RECURRING_ABORT_PEER_READY: AtomicBool = AtomicBool::new(false);
+
+fn signal_recurring_abort_peer_ready(
+    _context: &mut Context,
+    _state: &mut dyn ReactorData,
+    _refs: ReactionRefs<'_>,
+    _mode_effect: Option<CompiledModeEffectRef>,
+) -> Result<(), ReactionBindingError> {
+    RECURRING_ABORT_PEER_READY.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+fn panic_after_recurring_abort_peer_starts(
+    _context: &mut Context,
+    _state: &mut dyn ReactorData,
+    _refs: ReactionRefs<'_>,
+    _mode_effect: Option<CompiledModeEffectRef>,
+) -> Result<(), ReactionBindingError> {
+    while !RECURRING_ABORT_PEER_READY.load(Ordering::SeqCst) {
+        std::thread::yield_now();
+    }
+    panic!("peer scheduler panic");
+}
+
+fn recurring_abort_peer_bindings() -> EnclaveBindings {
+    EnclaveBindings::new()
+        .bind_state(BindingSlotIndex::new(0), initialize_counter)
+        .bind_reaction(BindingSlotIndex::new(1), signal_recurring_abort_peer_ready)
+}
+
+fn aborting_peer_bindings() -> EnclaveBindings {
+    EnclaveBindings::new()
+        .bind_state(BindingSlotIndex::new(0), initialize_counter)
+        .bind_reaction(
+            BindingSlotIndex::new(1),
+            panic_after_recurring_abort_peer_starts,
+        )
+}
+
 fn schedule_later_overflow_timer(
     context: &mut Context,
     _state: &mut dyn ReactorData,
@@ -1634,6 +1673,102 @@ fn owned_federate_panic_requests_bounded_shutdown_and_joins() {
             if enclave == EnclaveIndex::new(1) && message == "routed sink panic"
     ));
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "the bounded hang regression requires subprocess support"
+)]
+fn owned_federate_abort_stops_peer_with_recurring_internal_work() {
+    let executable = std::env::current_exe().expect("integration test executable is available");
+    let mut child = std::process::Command::new(executable)
+        .args([
+            "--exact",
+            "owned_federate_abort_stops_peer_with_recurring_internal_work_child",
+            "--nocapture",
+        ])
+        .env("BOOMERANG_RECURRING_ABORT_CHILD", "1")
+        .spawn()
+        .expect("recurring-abort child process starts");
+    let deadline = Instant::now() + std::time::Duration::from_secs(2);
+
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .expect("recurring-abort child can be polled")
+        {
+            assert!(
+                status.success(),
+                "recurring-abort child failed with {status}"
+            );
+            break;
+        }
+        if Instant::now() >= deadline {
+            child
+                .kill()
+                .expect("timed-out recurring-abort child is killed");
+            child
+                .wait()
+                .expect("killed recurring-abort child is reaped");
+            panic!("Federate abort did not stop its recurring-work scheduler within two seconds");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn owned_federate_abort_stops_peer_with_recurring_internal_work_child() {
+    if std::env::var_os("BOOMERANG_RECURRING_ABORT_CHILD").is_none() {
+        return;
+    }
+
+    let recurring = EnclaveImage {
+        identity_data: "compiled/abortpeercounter-stateincrement-counter",
+        actions: TinyMapView::new(&PERIODIC_ACTIONS),
+        timer_startup_actions: &PERIODIC_STARTUP,
+        ..IMAGE
+    };
+    let panicking = EnclaveImage {
+        identity_data: "compiled/panicpeercounter-stateincrement-counter",
+        ..IMAGE
+    };
+    let enclaves = [recurring, panicking];
+    let federates = [FederateImage::new(
+        IdentityRange::new(0, 4),
+        IdentityRange::new(4, 6),
+        IdentityRange::new(10, 7),
+        r!(0, 2),
+    )];
+    let members = [FederateIndex::new(0)];
+    let deployment = CompiledDeploymentImage {
+        identity_data: "hosttargetruntime",
+        federation: GlobalFederationImage::new(&members, &[]),
+        federates: TinyMapView::new(&federates),
+        enclaves: TinyMapView::new(&enclaves),
+        coordination: CoordinationProjection::Local,
+    };
+
+    for keep_alive in [false, true] {
+        RECURRING_ABORT_PEER_READY.store(false, Ordering::SeqCst);
+        let error = execute_owned_federate(
+            &deployment,
+            FederateIndex::new(0),
+            FederateBindings::new()
+                .bind_enclave(EnclaveIndex::new(0), recurring_abort_peer_bindings())
+                .bind_enclave(EnclaveIndex::new(1), aborting_peer_bindings()),
+            Config::default()
+                .with_fast_forward(true)
+                .with_keep_alive(keep_alive),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ExecuteOwnedFederateError::ThreadPanicked { enclave, ref message }
+                if enclave == EnclaveIndex::new(1) && message == "peer scheduler panic"
+        ));
+    }
 }
 
 #[test]

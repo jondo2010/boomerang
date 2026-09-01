@@ -17,9 +17,9 @@ use boomerang::runtime::{
         RouteDirection, RouteImage, ScopeImage, ScopeIndex, StateSlotIndex, StorageBounds,
         TableRange, TimerStartupImage, TimingDomain, TinyMapView,
     },
-    ActionRef, CommonContext, CompiledModeEffectRef, Config, Context, Duration, EnclaveKey,
-    ExecuteOwnedError, ExecuteOwnedFederateError, InputRef, ModeEffectRef, ModeKey, OutputRef,
-    OwnedBindings, OwnedFederateBindings, OwnedStorageError, PayloadType, ReactionBindingError,
+    ActionRef, CommonContext, CompiledModeEffectRef, Config, Context, Duration, EnclaveBindings,
+    EnclaveKey, ExecuteOwnedError, ExecuteOwnedFederateError, FederateBindings, InputRef,
+    ModeEffectRef, ModeKey, OutputRef, OwnedStorageError, PayloadType, ReactionBindingError,
     ReactionRefs, ReactorData, RuntimeError, StateAccessError, Tag, TransitionKind,
 };
 
@@ -58,8 +58,8 @@ fn increment_counter(
     Ok(())
 }
 
-fn reference_bindings() -> OwnedBindings {
-    OwnedBindings::new()
+fn reference_bindings() -> EnclaveBindings {
+    EnclaveBindings::new()
         .bind_state(BindingSlotIndex::new(0), initialize_counter)
         .bind_reaction(BindingSlotIndex::new(1), increment_counter)
 }
@@ -289,29 +289,29 @@ fn record_mode_entry(
     Ok(())
 }
 
-fn compiled_modal_bindings() -> OwnedBindings {
-    OwnedBindings::new()
+fn compiled_modal_bindings() -> EnclaveBindings {
+    EnclaveBindings::new()
         .bind_state(BindingSlotIndex::new(0), initialize_mode_state)
         .bind_reaction(BindingSlotIndex::new(1), request_compiled_mode)
         .bind_reaction(BindingSlotIndex::new(2), record_mode_entry)
 }
 
-fn legacy_mode_bindings() -> OwnedBindings {
-    OwnedBindings::new()
+fn legacy_mode_bindings() -> EnclaveBindings {
+    EnclaveBindings::new()
         .bind_state(BindingSlotIndex::new(0), initialize_mode_state)
         .bind_reaction(BindingSlotIndex::new(1), request_legacy_mode)
         .bind_reaction(BindingSlotIndex::new(2), record_mode_entry)
 }
 
-fn forged_mode_bindings() -> OwnedBindings {
-    OwnedBindings::new()
+fn forged_mode_bindings() -> EnclaveBindings {
+    EnclaveBindings::new()
         .bind_state(BindingSlotIndex::new(0), initialize_mode_state)
         .bind_reaction(BindingSlotIndex::new(1), request_forged_compiled_mode)
         .bind_reaction(BindingSlotIndex::new(2), record_mode_entry)
 }
 
-fn periodic_modal_bindings() -> OwnedBindings {
-    OwnedBindings::new()
+fn periodic_modal_bindings() -> EnclaveBindings {
+    EnclaveBindings::new()
         .bind_state(BindingSlotIndex::new(0), initialize_mode_state)
         .bind_reaction(BindingSlotIndex::new(1), reset_periodic_mode_once)
 }
@@ -480,14 +480,14 @@ fn record_periodic_tag(
     Ok(())
 }
 
-fn periodic_bindings() -> OwnedBindings {
-    OwnedBindings::new()
+fn periodic_bindings() -> EnclaveBindings {
+    EnclaveBindings::new()
         .bind_state(BindingSlotIndex::new(0), initialize_counter)
         .bind_reaction(BindingSlotIndex::new(1), record_periodic_tag)
 }
 
-fn counted_periodic_bindings() -> OwnedBindings {
-    OwnedBindings::new()
+fn counted_periodic_bindings() -> EnclaveBindings {
+    EnclaveBindings::new()
         .bind_state(BindingSlotIndex::new(0), initialize_periodic_counter)
         .bind_reaction(BindingSlotIndex::new(1), record_periodic_tag)
 }
@@ -577,8 +577,8 @@ fn record_cotimed_timers(
     Ok(())
 }
 
-fn cotimed_bindings() -> OwnedBindings {
-    OwnedBindings::new()
+fn cotimed_bindings() -> EnclaveBindings {
+    EnclaveBindings::new()
         .bind_state(BindingSlotIndex::new(0), initialize_counter)
         .bind_reaction(BindingSlotIndex::new(1), record_cotimed_timers)
 }
@@ -733,7 +733,7 @@ fn compiled_reference_final_tag_includes_work_coalesced_with_shutdown() {
 #[test]
 fn compiled_reference_returns_typed_image_validation_error() {
     fn validate_local_image(image: EnclaveImage<'static>) -> ExecuteOwnedError<'static> {
-        match execute_owned(&image, OwnedBindings::new(), Config::default()) {
+        match execute_owned(&image, EnclaveBindings::new(), Config::default()) {
             Err(error) => error,
             Ok(_) => panic!("invalid image must fail validation"),
         }
@@ -816,7 +816,6 @@ fn emit_routed_value(
     state.origin = Some(context.get_start_time());
     let mut output: OutputRef<u32> = refs.ports_mut.partition_mut()?;
     *output = Some(42);
-    context.schedule_shutdown(Some(Duration::ZERO));
     Ok(())
 }
 
@@ -852,19 +851,18 @@ fn receive_routed_value(
             .expect("the inbound route must set the triggering port"),
     );
     state.origin = Some(context.get_start_time());
-    context.schedule_shutdown(Some(Duration::ZERO));
     Ok(())
 }
 
-fn source_bindings() -> OwnedBindings {
-    OwnedBindings::new()
+fn source_bindings() -> EnclaveBindings {
+    EnclaveBindings::new()
         .bind_state(BindingSlotIndex::new(0), initialize_routed_source)
         .bind_reaction(BindingSlotIndex::new(1), emit_routed_value)
         .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
 }
 
-fn sink_bindings() -> OwnedBindings {
-    OwnedBindings::new()
+fn sink_bindings() -> EnclaveBindings {
+    EnclaveBindings::new()
         .bind_state(BindingSlotIndex::new(0), initialize_routed_sink)
         .bind_reaction(BindingSlotIndex::new(1), receive_routed_value)
         .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
@@ -885,9 +883,7 @@ static ROUTED_SOURCE_REACTORS: [ReactorImage; 1] = [ReactorImage::new(
 static ROUTED_SOURCE_ACTIONS: [ActionImage; 1] = [ActionImage::new(
     ScopeIndex::new(0),
     ActionSlotIndex::new(0),
-    ActionTiming::Timer {
-        period_nanos: Some(1_000_000),
-    },
+    ActionTiming::Timer { period_nanos: None },
     r!(0, 1),
     None,
 )];
@@ -925,7 +921,7 @@ static ROUTED_SOURCE_ROUTES: [RouteImage; 1] = [RouteImage::new(
     PortIndex::new(0),
     RouteDirection::Outbound,
     TimingDomain::Logical,
-    0,
+    1_000_000,
 )];
 static ROUTED_SOURCE_BINDINGS: [RequiredBindingImage; 3] = [
     RequiredBindingImage::new(IdentityRange::new(5, 1), BindingKind::StateInitializer),
@@ -986,7 +982,7 @@ static ROUTED_SINK_ROUTES: [RouteImage; 1] = [RouteImage::new(
     PortIndex::new(0),
     RouteDirection::Inbound,
     TimingDomain::Logical,
-    0,
+    1_000_000,
 )];
 static ROUTED_SINK_BINDINGS: [RequiredBindingImage; 3] = [
     RequiredBindingImage::new(IdentityRange::new(4, 1), BindingKind::StateInitializer),
@@ -1097,15 +1093,15 @@ fn receive_both_source_values(
     Ok(())
 }
 
-fn multi_source_bindings(initializer: fn() -> MultiSourceState) -> OwnedBindings {
-    OwnedBindings::new()
+fn multi_source_bindings(initializer: fn() -> MultiSourceState) -> EnclaveBindings {
+    EnclaveBindings::new()
         .bind_state(BindingSlotIndex::new(0), initializer)
         .bind_reaction(BindingSlotIndex::new(1), emit_multi_source_value)
         .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
 }
 
-fn multi_sink_bindings() -> OwnedBindings {
-    OwnedBindings::new()
+fn multi_sink_bindings() -> EnclaveBindings {
+    EnclaveBindings::new()
         .bind_state(BindingSlotIndex::new(0), MultiSinkState::default)
         .bind_reaction(BindingSlotIndex::new(1), receive_both_source_values)
         .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
@@ -1206,7 +1202,7 @@ fn owned_federate_coordinates_multiple_same_tag_sources_before_destination_execu
     let result = execute_owned_federate(
         &MULTI_DEPLOYMENT,
         FederateIndex::new(0),
-        OwnedFederateBindings::new()
+        FederateBindings::new()
             .bind_enclave(
                 EnclaveIndex::new(0),
                 multi_source_bindings(initialize_fast_source),
@@ -1244,20 +1240,22 @@ fn owned_federate_coordinates_multiple_same_tag_sources_before_destination_execu
 #[test]
 fn owned_federate_routes_typed_values_and_shares_one_origin() {
     for fast_forward in [true, false] {
-        let result = execute_owned_federate(
-            &ROUTED_DEPLOYMENT,
-            FederateIndex::new(0),
-            OwnedFederateBindings::new()
-                .bind_enclave(EnclaveIndex::new(0), source_bindings())
-                .bind_enclave(EnclaveIndex::new(1), sink_bindings())
-                .bind_route(
-                    route_boundary(),
-                    PayloadType::<u32>::new(),
-                    PayloadType::<u32>::new(),
-                ),
-            Config::default().with_fast_forward(fast_forward),
-        )
-        .unwrap();
+        let result = bounded(move || {
+            execute_owned_federate(
+                &ROUTED_DEPLOYMENT,
+                FederateIndex::new(0),
+                FederateBindings::new()
+                    .bind_enclave(EnclaveIndex::new(0), source_bindings())
+                    .bind_enclave(EnclaveIndex::new(1), sink_bindings())
+                    .bind_route(
+                        route_boundary(),
+                        PayloadType::<u32>::new(),
+                        PayloadType::<u32>::new(),
+                    ),
+                Config::default().with_fast_forward(fast_forward),
+            )
+            .unwrap()
+        });
 
         let source = result
             .enclave(EnclaveIndex::new(0))
@@ -1273,11 +1271,115 @@ fn owned_federate_routes_typed_values_and_shares_one_origin() {
             .unwrap();
 
         assert_eq!(sink_state.values, [42]);
-        assert_eq!(source.final_tag(), Tag::ZERO);
-        assert_eq!(sink.final_tag(), Tag::ZERO);
+        assert_eq!(source.final_tag(), Tag::new(Duration::ZERO, usize::MAX));
+        assert_eq!(sink.final_tag(), Tag::new(Duration::milliseconds(1), 0));
         assert_eq!(source_state.origin, Some(result.origin()));
         assert_eq!(sink_state.origin, Some(result.origin()));
     }
+}
+
+fn bounded<T: Send + 'static>(run: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || tx.send(run()).unwrap());
+    let result = rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("owned Federate execution must complete within one second");
+    worker.join().unwrap();
+    result
+}
+
+#[test]
+fn owned_federate_quiesces_when_a_source_emits_no_route_value() {
+    let result = bounded(|| {
+        execute_owned_federate(
+            &ROUTED_DEPLOYMENT,
+            FederateIndex::new(0),
+            FederateBindings::new()
+                .bind_enclave(
+                    EnclaveIndex::new(0),
+                    routed_reaction_bindings(|context, _, _, _| {
+                        context.schedule_shutdown(Some(Duration::ZERO));
+                        Ok(())
+                    }),
+                )
+                .bind_enclave(EnclaveIndex::new(1), sink_bindings())
+                .bind_route(
+                    route_boundary(),
+                    PayloadType::<u32>::new(),
+                    PayloadType::<u32>::new(),
+                ),
+            Config::default().with_fast_forward(true),
+        )
+        .unwrap()
+    });
+    assert!(result
+        .enclave(EnclaveIndex::new(1))
+        .unwrap()
+        .state::<RoutedSinkState>(StateSlotIndex::new(0))
+        .unwrap()
+        .values
+        .is_empty());
+}
+
+#[test]
+fn owned_federate_quiesces_a_positive_delay_route_cycle() {
+    bounded(|| {
+        let actions = [ActionImage::new(
+            ScopeIndex::new(0),
+            ActionSlotIndex::new(0),
+            ActionTiming::Timer { period_nanos: None },
+            r!(0, 1),
+            None,
+        )];
+        let routes = [
+            RouteImage::new(
+                IdentityRange::new(9, 4),
+                PortIndex::new(0),
+                RouteDirection::Inbound,
+                TimingDomain::Logical,
+                1,
+            ),
+            RouteImage::new(
+                IdentityRange::new(9, 4),
+                PortIndex::new(0),
+                RouteDirection::Outbound,
+                TimingDomain::Logical,
+                1,
+            ),
+        ];
+        let enclaves = [EnclaveImage {
+            actions: TinyMapView::new(&actions),
+            routes: TinyMapView::new(&routes),
+            ..ROUTED_SOURCE_IMAGE
+        }];
+        let federates = [FederateImage::new(
+            IdentityRange::new(0, 4),
+            IdentityRange::new(4, 6),
+            IdentityRange::new(10, 7),
+            r!(0, 1),
+        )];
+        let deployment = CompiledDeploymentImage {
+            federates: TinyMapView::new(&federates),
+            enclaves: TinyMapView::new(&enclaves),
+            ..ROUTED_DEPLOYMENT
+        };
+        execute_owned_federate(
+            &deployment,
+            FederateIndex::new(0),
+            FederateBindings::new()
+                .bind_enclave(
+                    EnclaveIndex::new(0),
+                    routed_reaction_bindings(|_, _, _, _| Ok(())),
+                )
+                .bind_route(
+                    route_boundary(),
+                    PayloadType::<u32>::new(),
+                    PayloadType::<u32>::new(),
+                ),
+            Config::default().with_fast_forward(true),
+        )
+        .unwrap();
+    });
 }
 
 static ROUTED_INITIALIZATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -1287,15 +1389,15 @@ fn initialize_counted_routed_source() -> RoutedSourceState {
     initialize_routed_source()
 }
 
-fn counted_source_bindings() -> OwnedBindings {
-    OwnedBindings::new()
+fn counted_source_bindings() -> EnclaveBindings {
+    EnclaveBindings::new()
         .bind_state(BindingSlotIndex::new(0), initialize_counted_routed_source)
         .bind_reaction(BindingSlotIndex::new(1), emit_routed_value)
         .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
 }
 
-fn wrong_sink_bindings() -> OwnedBindings {
-    OwnedBindings::new()
+fn wrong_sink_bindings() -> EnclaveBindings {
+    EnclaveBindings::new()
         .bind_state(BindingSlotIndex::new(0), initialize_routed_sink)
         .bind_reaction(BindingSlotIndex::new(1), receive_routed_value)
         .bind_port(BindingSlotIndex::new(2), PayloadType::<u64>::new())
@@ -1307,7 +1409,7 @@ fn owned_federate_preflight_rejects_before_initializers() {
     let error = execute_owned_federate(
         &ROUTED_DEPLOYMENT,
         FederateIndex::new(0),
-        OwnedFederateBindings::new().bind_enclave(EnclaveIndex::new(0), counted_source_bindings()),
+        FederateBindings::new().bind_enclave(EnclaveIndex::new(0), counted_source_bindings()),
         Config::default(),
     )
     .unwrap_err();
@@ -1333,7 +1435,7 @@ fn owned_federate_preflight_rejects_before_initializers() {
     let error = execute_owned_federate(
         &unpaired,
         FederateIndex::new(0),
-        OwnedFederateBindings::new().bind_enclave(EnclaveIndex::new(0), counted_source_bindings()),
+        FederateBindings::new().bind_enclave(EnclaveIndex::new(0), counted_source_bindings()),
         Config::default(),
     )
     .unwrap_err();
@@ -1346,7 +1448,7 @@ fn owned_federate_preflight_rejects_before_initializers() {
     let error = execute_owned_federate(
         &ROUTED_DEPLOYMENT,
         FederateIndex::new(0),
-        OwnedFederateBindings::new()
+        FederateBindings::new()
             .bind_enclave(EnclaveIndex::new(0), counted_source_bindings())
             .bind_enclave(EnclaveIndex::new(1), wrong_sink_bindings())
             .bind_route(
@@ -1366,6 +1468,53 @@ fn owned_federate_preflight_rejects_before_initializers() {
         } if enclave == EnclaveIndex::new(1)
     ));
     assert_eq!(ROUTED_INITIALIZATIONS.load(Ordering::SeqCst), 0);
+
+    let (source, bindings, source_identity) = {
+        #[derive(Clone, Debug)]
+        struct Collision;
+        (
+            EnclaveBindings::new()
+                .bind_state(BindingSlotIndex::new(0), initialize_routed_source)
+                .bind_reaction(BindingSlotIndex::new(1), emit_routed_value)
+                .bind_port(BindingSlotIndex::new(2), PayloadType::<Collision>::new()),
+            FederateBindings::new().bind_route(
+                route_boundary(),
+                PayloadType::<Collision>::new(),
+                PayloadType::<Collision>::new(),
+            ),
+            (
+                std::any::TypeId::of::<Collision>(),
+                std::any::type_name::<Collision>(),
+            ),
+        )
+    };
+    let sink = {
+        #[derive(Debug)]
+        struct Collision;
+        assert_eq!(source_identity.1, std::any::type_name::<Collision>());
+        assert_ne!(source_identity.0, std::any::TypeId::of::<Collision>());
+        EnclaveBindings::new()
+            .bind_state(BindingSlotIndex::new(0), initialize_routed_sink)
+            .bind_reaction(BindingSlotIndex::new(1), receive_routed_value)
+            .bind_port(BindingSlotIndex::new(2), PayloadType::<Collision>::new())
+    };
+    let error = execute_owned_federate(
+        &ROUTED_DEPLOYMENT,
+        FederateIndex::new(0),
+        bindings
+            .bind_enclave(EnclaveIndex::new(0), source)
+            .bind_enclave(EnclaveIndex::new(1), sink),
+        Config::default().with_fast_forward(true),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ExecuteOwnedFederateError::RoutePayloadTypeMismatch {
+            direction: RouteDirection::Inbound,
+            enclave,
+            ..
+        } if enclave == EnclaveIndex::new(1)
+    ));
 
     let cross_federates = [
         FederateImage::new(
@@ -1391,7 +1540,7 @@ fn owned_federate_preflight_rejects_before_initializers() {
     let error = execute_owned_federate(
         &cross,
         FederateIndex::new(0),
-        OwnedFederateBindings::new().bind_enclave(EnclaveIndex::new(0), counted_source_bindings()),
+        FederateBindings::new().bind_enclave(EnclaveIndex::new(0), counted_source_bindings()),
         Config::default(),
     )
     .unwrap_err();
@@ -1411,8 +1560,8 @@ fn panic_on_routed_value(
     panic!("routed sink panic")
 }
 
-fn panicking_sink_bindings() -> OwnedBindings {
-    OwnedBindings::new()
+fn panicking_sink_bindings() -> EnclaveBindings {
+    EnclaveBindings::new()
         .bind_state(BindingSlotIndex::new(0), initialize_routed_sink)
         .bind_reaction(BindingSlotIndex::new(1), panic_on_routed_value)
         .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
@@ -1447,15 +1596,15 @@ fn competing_panic_after_route_failure(
     panic!("competing scheduler panic");
 }
 
-fn routed_reaction_bindings(
-    reaction: fn(
-        &mut Context,
-        &mut dyn ReactorData,
-        ReactionRefs<'_>,
-        Option<CompiledModeEffectRef>,
-    ) -> Result<(), ReactionBindingError>,
-) -> OwnedBindings {
-    OwnedBindings::new()
+type RoutedReaction = fn(
+    &mut Context,
+    &mut dyn ReactorData,
+    ReactionRefs<'_>,
+    Option<CompiledModeEffectRef>,
+) -> Result<(), ReactionBindingError>;
+
+fn routed_reaction_bindings(reaction: RoutedReaction) -> EnclaveBindings {
+    EnclaveBindings::new()
         .bind_state(BindingSlotIndex::new(0), initialize_routed_source)
         .bind_reaction(BindingSlotIndex::new(1), reaction)
         .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
@@ -1467,7 +1616,7 @@ fn owned_federate_panic_requests_bounded_shutdown_and_joins() {
     let error = execute_owned_federate(
         &ROUTED_DEPLOYMENT,
         FederateIndex::new(0),
-        OwnedFederateBindings::new()
+        FederateBindings::new()
             .bind_enclave(EnclaveIndex::new(0), source_bindings())
             .bind_enclave(EnclaveIndex::new(1), panicking_sink_bindings())
             .bind_route(
@@ -1523,7 +1672,7 @@ fn owned_federate_retains_route_failure_before_competing_scheduler_panic() {
     let error = execute_owned_federate(
         &deployment,
         FederateIndex::new(0),
-        OwnedFederateBindings::new()
+        FederateBindings::new()
             .bind_enclave(
                 EnclaveIndex::new(0),
                 routed_reaction_bindings(synchronized_route_source),
@@ -1675,7 +1824,7 @@ fn compiled_periodic_successor_at_shutdown_is_not_enqueued() {
         [Tag::new(Duration::milliseconds(1), 0)]
     );
 
-    let bindings = OwnedBindings::new()
+    let bindings = EnclaveBindings::new()
         .bind_state(BindingSlotIndex::new(0), initialize_counter)
         .bind_reaction(
             BindingSlotIndex::new(1),
@@ -1753,7 +1902,7 @@ fn compiled_periodic_timer_rejects_first_successor_overflow_before_state_initial
 
 #[test]
 fn compiled_periodic_timer_reports_later_recurrence_overflow() {
-    let bindings = OwnedBindings::new()
+    let bindings = EnclaveBindings::new()
         .bind_state(BindingSlotIndex::new(0), initialize_counter)
         .bind_reaction(BindingSlotIndex::new(1), schedule_later_overflow_timer);
     let error = execute_owned(

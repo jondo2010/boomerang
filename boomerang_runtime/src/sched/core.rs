@@ -153,6 +153,14 @@ pub(crate) trait ExecutionStorage<S: Schedule> {
     fn reset_ports(&mut self);
 }
 
+/// Optional owned-executor channel hook for activity and idle coordination.
+pub(super) trait SchedulerActivity {
+    /// Reports that queued or processed work invalidates an idle candidate.
+    fn active(&mut self);
+    /// Waits for queued work or a coordinator termination command.
+    fn wait(&mut self) -> Option<AsyncEvent>;
+}
+
 /// One scheduling algorithm borrowing separate immutable schedule and mutable storage concerns.
 ///
 /// Coordination, clocks, wake reception, and shutdown remain concrete here; this
@@ -172,6 +180,8 @@ where
     pub(super) storage: &'a mut E,
     /// Existing asynchronous wake receiver.
     pub(super) event_rx: &'a crate::Receiver<AsyncEvent>,
+    /// Optional owned-Federate activity channel; live schedulers never install one.
+    pub(super) activity: Option<&'a mut dyn SchedulerActivity>,
     /// Root and modal event queues typed by the schedule keys.
     pub(super) events: &'a mut EventManager<S>,
     /// Physical origin used to translate logical tags.
@@ -364,6 +374,8 @@ where
                 tracing::debug!(target: "boomerang_runtime::sched", "Cannot wait, already past programmed shutdown time...");
                 None
             }
+        } else if let Some(activity) = self.activity.as_deref_mut() {
+            activity.wait()
         } else if self.config.keep_alive {
             tracing::debug!(target: "boomerang_runtime::sched", "Waiting indefinitely for async event.");
             self.event_rx.recv().ok()
@@ -404,11 +416,17 @@ where
     pub(super) fn try_next(&mut self) -> Result<bool, SchedulerError<E::Error>> {
         // Pump the event queue
         while let Ok(Some(async_event)) = self.event_rx.try_recv() {
+            if let Some(activity) = self.activity.as_deref_mut() {
+                activity.active();
+            }
             self.handle_async_event(async_event)
                 .map_err(SchedulerError::Execution)?;
         }
 
         if let Some(next_tag) = self.events.peek_tag() {
+            if let Some(activity) = self.activity.as_deref_mut() {
+                activity.active();
+            }
             tracing::trace!(target: "boomerang_runtime::sched", next_tag = %next_tag, "Trying next tag");
 
             // Wait until all upstream barriers are released
@@ -498,7 +516,15 @@ where
         } else {
             tracing::debug!(target: "boomerang_runtime::sched", "No more events in queue, pushing a shutdown event.");
             // Shutdown event will be processed at the next event loop iteration
-            let shutdown = (*self.current_tag).delay(Duration::ZERO);
+            let shutdown = if *self.current_tag < Tag::ZERO {
+                Tag::ZERO
+            } else if self.current_tag.microstep() == usize::MAX {
+                self.current_tag
+                    .checked_delay(Duration::nanoseconds(1))
+                    .unwrap_or(Tag::FOREVER)
+            } else {
+                (*self.current_tag).delay(Duration::ZERO)
+            };
             *self.shutdown_tag = Some(shutdown);
             self.schedule_shutdown_at(shutdown);
         }

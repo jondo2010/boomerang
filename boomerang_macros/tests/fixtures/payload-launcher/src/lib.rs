@@ -103,10 +103,10 @@ const _: boomerang::runtime::PayloadType<u16> =
     descriptor_pass::actions::__boomerang::action_Actions_2fphysical_5flater;
 
 #[allow(dead_code)]
-fn direct_payload_bindings() -> boomerang::runtime::OwnedBindings {
+fn direct_payload_bindings() -> boomerang::runtime::EnclaveBindings {
     use boomerang::runtime::image::BindingSlotIndex;
 
-    boomerang::runtime::OwnedBindings::new()
+    boomerang::runtime::EnclaveBindings::new()
         .bind_state(BindingSlotIndex::new(0), descriptor_pass::__boomerang::state_Match)
         .bind_port(
             BindingSlotIndex::new(1),

@@ -45,13 +45,6 @@ impl<T> TableRange<T> {
         (self.start as usize).checked_add(self.len as usize)
     }
 
-    /// Returns whether the table index belongs to this range.
-    pub const fn contains(self, index: u32) -> bool {
-        let index = index as u64;
-        let start = self.start as u64;
-        index >= start && index < start + self.len as u64
-    }
-
     /// Returns this range as checked platform-sized indices.
     pub(crate) fn indices(self) -> Option<core::ops::Range<usize>> {
         Some(self.start as usize..self.checked_end()?)
@@ -60,5 +53,14 @@ impl<T> TableRange<T> {
     /// Returns the entries in this range, or `None` when it exceeds `values`.
     pub fn get(self, values: &[T]) -> Option<&[T]> {
         values.get(self.indices()?)
+    }
+}
+
+impl<K: crate::Key> TableRange<K> {
+    /// Returns whether the typed table key belongs to this range.
+    pub fn contains(self, key: K) -> bool {
+        let index = key.index() as u64;
+        let start = self.start as u64;
+        index >= start && index < start + self.len as u64
     }
 }

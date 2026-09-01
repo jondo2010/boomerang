@@ -1,8 +1,16 @@
 //! Compiled-image scheduler adapters and owned execution composition.
 
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::mpsc,
+};
+
 use super::{
     barrier::LogicalTimeBarrier,
-    core::{ExecutionStorage, ReactionOutcome, Schedule, SchedulerCore, SchedulerError},
+    core::{
+        ExecutionStorage, ReactionOutcome, Schedule, SchedulerActivity, SchedulerCore,
+        SchedulerError,
+    },
     modal::EventManager,
     Config, Stats,
 };
@@ -13,14 +21,17 @@ use crate::{
         ActionIndex, EnclaveImageView, LevelReactionImage, ModeIndex, PortIndex, ReactionIndex,
         ReactorIndex, ScopeIndex,
     },
-    ActionKey, Duration, EnclaveKey, Level, OwnedStorage, OwnedStorageError, ReactionSetLimits,
-    ReactorData, SendContext, Tag,
+    ActionKey, AsyncEvent, Duration, EnclaveKey, Level, OwnedStorage, OwnedStorageError,
+    ReactionSetLimits, ReactorData, SendContext, Tag,
 };
 
 /// Crate-private local coordination links for one owned compiled scheduler.
 pub(crate) struct OwnedSchedulerCoordination {
+    /// Canonical identity of this scheduler-owned Enclave.
     key: EnclaveKey,
+    /// Logical upstream Enclaves and minimum delays across parallel local routes.
     upstream: tinymap::TinySecondaryMap<EnclaveKey, (SendContext, Option<Duration>)>,
+    /// Coalesced downstream Enclave contexts used for logical tag release.
     downstream: tinymap::TinySecondaryMap<EnclaveKey, SendContext>,
 }
 
@@ -57,6 +68,270 @@ impl OwnedSchedulerCoordination {
             self.downstream.insert(key, context);
         }
     }
+}
+
+/// Scheduler-to-coordinator reports for one owned Federate's idle epoch.
+enum ActivityReport {
+    /// One Enclave observed queued or processed work that invalidates the idle candidate.
+    Active(EnclaveKey),
+    /// One Enclave observed no queued work for the stated coordinator epoch.
+    Idle { key: EnclaveKey, epoch: usize },
+    /// One Enclave scheduler exited and no longer participates in coordination.
+    Complete(EnclaveKey),
+    /// An execution failure requires immediate Federate-wide abortion.
+    Abort,
+}
+
+/// Coordinator-to-scheduler commands for probing, two-phase termination, or abortion.
+#[derive(Clone, Copy)]
+enum ActivityCommand {
+    /// Requests a fresh queue check for the stated idle epoch.
+    Probe(usize),
+    /// Prepares termination on first receipt and commits it on the second receipt of this epoch.
+    Terminate(usize),
+    /// Stops the scheduler immediately after an execution failure.
+    Abort,
+}
+
+/// Abort handle for one owned Federate's shared scheduler coordinator.
+pub(crate) struct OwnedFederateCoordinator {
+    /// Shared scheduler-report sender used to request immediate abortion.
+    report_tx: mpsc::Sender<ActivityReport>,
+}
+
+impl OwnedFederateCoordinator {
+    /// Interrupts idle scheduler clients; event-channel closure remains abort-only.
+    pub(crate) fn abort(&self) {
+        let _ = self.report_tx.send(ActivityReport::Abort);
+    }
+}
+
+/// Blocking channel coordinator that confirms an uninterrupted all-idle epoch.
+pub(crate) struct OwnedFederateCoordinatorRunner {
+    /// Serialized activity reports from every scheduler-owned Enclave.
+    report_rx: mpsc::Receiver<ActivityReport>,
+    /// Per-Enclave command senders keyed by canonical scheduler identity.
+    commands: BTreeMap<EnclaveKey, mpsc::Sender<ActivityCommand>>,
+    /// Enclaves that have not completed or aborted execution.
+    active: BTreeSet<EnclaveKey>,
+}
+
+impl OwnedFederateCoordinatorRunner {
+    /// Runs until all schedulers complete or abort is requested.
+    pub(crate) fn run(self) {
+        let Self {
+            report_rx,
+            commands,
+            mut active,
+        } = self;
+        let send = |command, active: &BTreeSet<EnclaveKey>| {
+            for (key, tx) in &commands {
+                if active.contains(key) {
+                    let _ = tx.send(command);
+                }
+            }
+        };
+        let mut busy = BTreeSet::new();
+        let mut seen_idle = BTreeSet::new();
+        let mut confirmed = BTreeSet::new();
+        let mut epoch = 0usize;
+        let mut probing = false;
+        let mut preparing_termination = false;
+        let mut committed_termination = false;
+        let mut termination_confirmed = BTreeSet::new();
+        while !active.is_empty() {
+            let report = match report_rx.recv() {
+                Ok(report) => report,
+                Err(_) => {
+                    send(ActivityCommand::Abort, &active);
+                    break;
+                }
+            };
+            match report {
+                ActivityReport::Abort => {
+                    send(ActivityCommand::Abort, &active);
+                    break;
+                }
+                ActivityReport::Complete(key) => {
+                    active.remove(&key);
+                    busy.remove(&key);
+                    seen_idle.remove(&key);
+                    confirmed.remove(&key);
+                    termination_confirmed.remove(&key);
+                }
+                ActivityReport::Active(_) if committed_termination => {}
+                ActivityReport::Active(key) => {
+                    busy.insert(key);
+                    seen_idle.remove(&key);
+                    confirmed.clear();
+                    termination_confirmed.clear();
+                    probing = false;
+                    preparing_termination = false;
+                }
+                ActivityReport::Idle {
+                    key,
+                    epoch: observed,
+                } => {
+                    busy.remove(&key);
+                    seen_idle.insert(key);
+                    if preparing_termination && observed == epoch && active.contains(&key) {
+                        termination_confirmed.insert(key);
+                    } else if probing && observed == epoch && active.contains(&key) {
+                        confirmed.insert(key);
+                    }
+                }
+            }
+            if preparing_termination && termination_confirmed == active {
+                send(ActivityCommand::Terminate(epoch), &active);
+                preparing_termination = false;
+                committed_termination = true;
+            } else if !committed_termination && busy.is_empty() && seen_idle == active {
+                if probing && confirmed == active {
+                    termination_confirmed.clear();
+                    send(ActivityCommand::Terminate(epoch), &active);
+                    preparing_termination = true;
+                } else if !probing {
+                    epoch = epoch.wrapping_add(1);
+                    confirmed.clear();
+                    probing = true;
+                    send(ActivityCommand::Probe(epoch), &active);
+                }
+            }
+        }
+    }
+}
+
+/// Per-Enclave endpoint for one owned Federate's shared activity protocol.
+pub(crate) struct OwnedSchedulerActivity {
+    /// Canonical identity of this scheduler-owned Enclave.
+    key: EnclaveKey,
+    /// Most recent idle-probe epoch received from the coordinator.
+    epoch: usize,
+    /// Whether work has been reported since this scheduler last became idle.
+    active: bool,
+    /// Termination epoch prepared after a final empty-queue check, if any.
+    prepared_termination: Option<usize>,
+    /// Shared channel used to report scheduler activity and completion.
+    report_tx: mpsc::Sender<ActivityReport>,
+    /// Dedicated coordinator-command receiver for this scheduler.
+    command_rx: mpsc::Receiver<ActivityCommand>,
+    /// Scheduler event queue inspected before confirming idleness or termination.
+    event_rx: crate::Receiver<AsyncEvent>,
+}
+
+impl OwnedSchedulerActivity {
+    /// Reports this scheduler's idle observation for its current epoch.
+    fn report_idle(&self) {
+        let _ = self.report_tx.send(ActivityReport::Idle {
+            key: self.key,
+            epoch: self.epoch,
+        });
+    }
+
+    /// Removes one queued scheduler event and invalidates any idle candidate.
+    fn queued_event(&mut self) -> Option<AsyncEvent> {
+        match self.event_rx.try_recv() {
+            Ok(Some(event)) => {
+                self.active();
+                Some(event)
+            }
+            _ => None,
+        }
+    }
+}
+
+impl SchedulerActivity for OwnedSchedulerActivity {
+    fn active(&mut self) {
+        self.prepared_termination = None;
+        if !self.active {
+            let _ = self.report_tx.send(ActivityReport::Active(self.key));
+            self.active = true;
+        }
+    }
+
+    fn wait(&mut self) -> Option<AsyncEvent> {
+        self.active = false;
+        self.report_idle();
+        loop {
+            if let Some(event) = self.queued_event() {
+                return Some(event);
+            }
+            match self
+                .command_rx
+                .recv_timeout(std::time::Duration::from_millis(1))
+            {
+                Ok(ActivityCommand::Probe(epoch)) => {
+                    self.prepared_termination = None;
+                    self.epoch = epoch;
+                    if let Some(event) = self.queued_event() {
+                        return Some(event);
+                    }
+                    self.report_idle();
+                }
+                Ok(ActivityCommand::Terminate(epoch)) => {
+                    if self.prepared_termination == Some(epoch) {
+                        return None;
+                    }
+                    if let Some(event) = self.queued_event() {
+                        return Some(event);
+                    }
+                    self.prepared_termination = Some(epoch);
+                    self.report_idle();
+                }
+                Ok(ActivityCommand::Abort) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return None;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+    }
+}
+
+impl Drop for OwnedSchedulerActivity {
+    fn drop(&mut self) {
+        let _ = self.report_tx.send(ActivityReport::Complete(self.key));
+    }
+}
+
+/// Creates one coordinator and one activity endpoint per scheduler-owned Enclave.
+pub(crate) fn owned_federate_coordination(
+    keys: impl IntoIterator<Item = (EnclaveKey, crate::Receiver<AsyncEvent>)>,
+) -> (
+    OwnedFederateCoordinator,
+    OwnedFederateCoordinatorRunner,
+    BTreeMap<EnclaveKey, OwnedSchedulerActivity>,
+) {
+    let (report_tx, report_rx) = mpsc::channel();
+    let mut commands = BTreeMap::new();
+    let mut clients = BTreeMap::new();
+    for (key, event_rx) in keys {
+        let (command_tx, command_rx) = mpsc::channel();
+        commands.insert(key, command_tx);
+        clients.insert(
+            key,
+            OwnedSchedulerActivity {
+                key,
+                epoch: 0,
+                active: false,
+                prepared_termination: None,
+                report_tx: report_tx.clone(),
+                command_rx,
+                event_rx,
+            },
+        );
+    }
+    let active = commands.keys().copied().collect();
+    (
+        OwnedFederateCoordinator {
+            report_tx: report_tx.clone(),
+        },
+        OwnedFederateCoordinatorRunner {
+            report_rx,
+            commands,
+            active,
+        },
+        clients,
+    )
 }
 
 /// Defines explicit compiled-image schedule methods without repeating adapter boilerplate.
@@ -124,7 +399,7 @@ impl ExecutionStorage<EnclaveImageView<'_>> for OwnedStorage<'_> {
     type Error = OwnedStorageError;
 
     fn prepare_startup_origin(&mut self, start_time: &mut std::time::Instant) {
-        self.prepare_scheduler_origin(start_time);
+        self.initialize_reaction_context_origins(*start_time);
     }
 
     fn action_from_runtime(&self, key: ActionKey) -> ActionIndex {
@@ -231,6 +506,7 @@ pub(crate) fn run_owned_scheduler_with_origin(
         config,
         origin,
         OwnedSchedulerCoordination::new(EnclaveKey::default()),
+        None,
     )
 }
 
@@ -240,6 +516,7 @@ pub(crate) fn run_owned_scheduler_with_coordination(
     config: &Config,
     origin: std::time::Instant,
     coordination: OwnedSchedulerCoordination,
+    activity: Option<&mut OwnedSchedulerActivity>,
 ) -> Result<Tag, SchedulerError<OwnedStorageError>> {
     let schedule = storage.scheduler_image();
     let reaction_limits = schedule.reaction_limits();
@@ -284,6 +561,7 @@ pub(crate) fn run_owned_scheduler_with_coordination(
         schedule: &schedule,
         storage,
         event_rx: &event_rx,
+        activity: activity.map(|activity| activity as &mut dyn SchedulerActivity),
         events: &mut events,
         start_time: &mut start_time,
         current_tag: &mut current_tag,

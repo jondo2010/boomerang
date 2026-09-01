@@ -269,8 +269,13 @@ impl<'a> FederateImageView<'a> {
         ))
     }
 
+    /// Returns the typed deployment-wide range of Enclaves owned by this Federate.
+    pub const fn enclaves(&self) -> TableRange<EnclaveIndex> {
+        self.federate.enclaves()
+    }
+
     /// Iterates validated Enclave views in canonical identity order.
-    pub fn enclaves(&self) -> impl ExactSizeIterator<Item = EnclaveImageView<'a>> + 'a {
+    pub fn enclave_views(&self) -> impl ExactSizeIterator<Item = EnclaveImageView<'a>> + 'a {
         let images = self
             .image
             .enclaves
@@ -929,7 +934,7 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
                 mode.as_u32(),
                 image.modes.len(),
             )?;
-            if !reactor.modes().contains(mode.as_u32()) {
+            if !reactor.modes().contains(mode) {
                 return Err(ImageValidationError::OwnershipMismatch {
                     table: "reactors",
                     index,
@@ -1173,7 +1178,7 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             });
         }
         let modes = image.reactors[mode.reactor()].modes();
-        if !modes.contains(index) {
+        if !modes.contains(ModeIndex::new(index)) {
             return Err(ImageValidationError::OwnershipMismatch {
                 table: "modes",
                 index,
@@ -1881,7 +1886,8 @@ mod tests {
         assert_eq!(view.federates().len(), 1);
         let federate = view.federate(FederateIndex::new(0));
         assert_eq!(federate.id().as_str(), "host");
-        assert_eq!(federate.enclaves().count(), 2);
+        assert_eq!(federate.enclaves(), TableRange::new(0, 2));
+        assert_eq!(federate.enclave_views().count(), 2);
     }
 
     #[test]
@@ -2040,7 +2046,7 @@ mod tests {
         let view = CompiledDeploymentView::new(&image).unwrap();
         let second_ids = view
             .federate(FederateIndex::new(1))
-            .enclaves()
+            .enclave_views()
             .map(|enclave| enclave.enclave_id().as_str())
             .collect::<Vec<_>>();
         assert_eq!(second_ids, ["aaaaa/control", "aaaab/control"]);

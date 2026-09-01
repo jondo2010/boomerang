@@ -1,6 +1,6 @@
 //! Owned payload bindings and mutable storage for compiled scheduler images.
 
-use std::{fmt, marker::PhantomData, ptr::NonNull, time::Instant};
+use std::{any::TypeId, fmt, marker::PhantomData, ptr::NonNull, time::Instant};
 
 use tinymap::{TinyMap, TinySecondaryMap};
 
@@ -30,16 +30,16 @@ type InitializedContexts = (
     crate::Receiver<crate::event::AsyncEvent>,
     crate::keepalive::Sender,
 );
-/// Heap-backed factories and invokers bound directly to compiled-image slots.
+/// Heap-backed factories and invokers for one scheduler-owned compiled Enclave.
 #[derive(Default)]
-pub struct OwnedBindings {
+pub struct EnclaveBindings {
     /// Typed state initializers, reaction invokers, and port/action factories by required slot.
     bindings: TinySecondaryMap<BindingSlotIndex, Binding>,
     /// Repeated caller-supplied slots retained for pre-initialization duplicate validation.
     duplicate_slots: TinySecondaryMap<BindingSlotIndex, ()>,
 }
 
-impl OwnedBindings {
+impl EnclaveBindings {
     /// Creates an empty set of direct bindings.
     pub fn new() -> Self {
         Self::default()
@@ -114,9 +114,12 @@ impl OwnedBindings {
     }
 
     /// Returns the concrete payload type bound to one compiled port slot.
-    pub(crate) fn port_payload_type(&self, slot: BindingSlotIndex) -> Option<&'static str> {
+    pub(crate) fn port_payload_type(
+        &self,
+        slot: BindingSlotIndex,
+    ) -> Option<(TypeId, &'static str)> {
         match self.bindings.get(slot) {
-            Some(Binding::Port(factory)) => Some(factory.type_name()),
+            Some(Binding::Port(factory)) => Some(factory.payload_type()),
             _ => None,
         }
     }
@@ -222,7 +225,7 @@ trait PortFactory: Send + Sync {
     /// Builds a port for the supplied compiled slot.
     fn create(&self, slot: PortIndex) -> Box<dyn BasePort>;
     /// Returns the concrete payload type produced by this factory.
-    fn type_name(&self) -> &'static str;
+    fn payload_type(&self) -> (TypeId, &'static str);
 }
 
 /// A concrete payload port factory.
@@ -241,8 +244,8 @@ impl<T: ReactorData> PortFactory for TypedPortFactory<T> {
         .boxed()
     }
 
-    fn type_name(&self) -> &'static str {
-        std::any::type_name::<T>()
+    fn payload_type(&self) -> (TypeId, &'static str) {
+        (TypeId::of::<T>(), std::any::type_name::<T>())
     }
 }
 
@@ -623,8 +626,6 @@ pub struct OwnedStorage<'image> {
     emitted_outbound_ports: TinySecondaryMap<PortIndex, ()>,
     /// Keeps a sender for executor-owned route and shutdown admission.
     event_tx: crate::Sender<crate::event::AsyncEvent>,
-    /// Executor-supplied shared origin retained across scheduler attachment.
-    configured_origin: Option<Instant>,
     /// Keeps the per-enclave event channel open for stored reaction contexts.
     event_rx: crate::Receiver<crate::event::AsyncEvent>,
     /// Holds the keepalive sender until a compiled scheduler takes responsibility for shutdown.
@@ -678,7 +679,7 @@ impl<'image> OwnedStorage<'image> {
     /// Validates one image and its direct bindings without invoking any initializer.
     pub(crate) fn validate_image_bindings(
         image: &EnclaveImageView<'_>,
-        bindings: &OwnedBindings,
+        bindings: &EnclaveBindings,
     ) -> Result<(), OwnedStorageError> {
         let (_, action_images) = validate_storage_layout(image)?;
         validate_action_timing(&action_images)?;
@@ -693,20 +694,21 @@ impl<'image> OwnedStorage<'image> {
     /// Validates direct bindings and constructs every owned storage collection for `image`.
     pub fn new(
         image: EnclaveImageView<'image>,
-        bindings: OwnedBindings,
+        bindings: EnclaveBindings,
     ) -> Result<Self, OwnedStorageError> {
-        Self::new_for_enclave(image, bindings, EnclaveKey::default())
+        Self::new_for_enclave(image, bindings, EnclaveKey::default(), Instant::now())
     }
 
     /// Constructs owned storage whose reaction and send contexts use `enclave_key`.
     pub(crate) fn new_for_enclave(
         image: EnclaveImageView<'image>,
-        bindings: OwnedBindings,
+        bindings: EnclaveBindings,
         enclave_key: EnclaveKey,
+        origin: Instant,
     ) -> Result<Self, OwnedStorageError> {
         Self::validate_image_bindings(&image, &bindings)?;
         let (state_bindings, action_images) = validate_storage_layout(&image)?;
-        let OwnedBindings {
+        let EnclaveBindings {
             bindings,
             duplicate_slots: _,
         } = bindings;
@@ -716,7 +718,8 @@ impl<'image> OwnedStorage<'image> {
         let reaction_refs = initialize_reaction_refs(&image, &mut ports, &mut actions)?;
         let states = initialize_states(&state_bindings, &bindings)?;
         let reactions = initialize_reactions(bindings);
-        let (contexts, event_tx, event_rx, shutdown_tx) = initialize_contexts(&image, enclave_key)?;
+        let (contexts, event_tx, event_rx, shutdown_tx) =
+            initialize_contexts(&image, enclave_key, origin)?;
         let event_capacity = image.storage_bounds().event_capacity() as usize;
         let inbound_boundary_ports = image
             .routes()
@@ -737,7 +740,6 @@ impl<'image> OwnedStorage<'image> {
             outbound_routes: TinySecondaryMap::new(),
             emitted_outbound_ports: TinySecondaryMap::new(),
             event_tx,
-            configured_origin: None,
             event_rx,
             shutdown_tx: Some(shutdown_tx),
         })
@@ -756,24 +758,9 @@ impl<'image> OwnedStorage<'image> {
 
     /// Initializes every owned reaction context with the scheduler's startup-time origin.
     pub(crate) fn initialize_reaction_context_origins(&mut self, origin: Instant) {
-        let origin = self.configured_origin.unwrap_or(origin);
         self.contexts
             .values_mut()
             .for_each(|context| context.start_time = origin);
-    }
-
-    /// Applies the optional Federate origin to both the scheduler clock and reaction contexts.
-    pub(crate) fn prepare_scheduler_origin(&mut self, origin: &mut Instant) {
-        if let Some(configured) = self.configured_origin {
-            *origin = configured;
-        }
-        self.initialize_reaction_context_origins(*origin);
-    }
-
-    /// Configures the shared Federate origin before the scheduler takes ownership.
-    pub(crate) fn configure_scheduler_origin(&mut self, origin: Instant) {
-        self.configured_origin = Some(origin);
-        self.initialize_reaction_context_origins(origin);
     }
 
     /// Returns a thread-safe context for local logical-time coordination with this scheduler.
@@ -949,7 +936,7 @@ fn copy_borrowed_image_view<'image>(image: &EnclaveImageView<'image>) -> Enclave
 /// Validates every required binding before any state initializer can run.
 fn validate_bindings(
     image: &EnclaveImageView<'_>,
-    bindings: &OwnedBindings,
+    bindings: &EnclaveBindings,
 ) -> Result<(), OwnedStorageError> {
     if let Some(slot) = bindings.duplicate_slots.keys().next() {
         return Err(OwnedStorageError::DuplicateBinding { slot });
@@ -1259,10 +1246,10 @@ fn initialize_reaction_refs(
 fn initialize_contexts(
     image: &EnclaveImageView<'_>,
     enclave_key: EnclaveKey,
+    start_time: Instant,
 ) -> Result<InitializedContexts, OwnedStorageError> {
     let (event_tx, event_rx) = kanal::bounded(image.storage_bounds().event_capacity() as usize);
     let (shutdown_tx, shutdown_rx) = crate::keepalive::channel();
-    let start_time = Instant::now();
     let mut contexts = TinyMap::with_capacity(image.reactors().len());
     for (reactor, reactor_image) in image.reactors().iter() {
         let bank_info = reactor_image.bank().map(|bank| crate::BankInfo {
@@ -1342,7 +1329,7 @@ mod tests {
             TinyMapView,
         },
         AsyncEvent, CommonContext, CompiledModeEffectRef, Config, Context, Duration,
-        ModeTransitionRequest, OwnedBindings, OwnedStorage, OwnedStorageError, PayloadType,
+        EnclaveBindings, ModeTransitionRequest, OwnedStorage, OwnedStorageError, PayloadType,
         PortKey, ReactionBindingError, ReactionRefs, ReactorData, Tag, TransitionKind,
     };
     use std::{
@@ -1593,8 +1580,8 @@ mod tests {
     }
 
     /// Returns bindings for every non-lifecycle storage slot in [`IMAGE`].
-    fn complete_bindings() -> OwnedBindings {
-        OwnedBindings::new()
+    fn complete_bindings() -> EnclaveBindings {
+        EnclaveBindings::new()
             .bind_state(BindingSlotIndex::new(0), initialize_state)
             .bind_reaction(BindingSlotIndex::new(1), reaction)
             .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
@@ -1602,8 +1589,8 @@ mod tests {
     }
 
     /// Returns bindings whose initializer records that construction reached it.
-    fn counted_bindings() -> OwnedBindings {
-        OwnedBindings::new()
+    fn counted_bindings() -> EnclaveBindings {
+        EnclaveBindings::new()
             .bind_state(BindingSlotIndex::new(0), counted_initializer)
             .bind_reaction(BindingSlotIndex::new(1), reaction)
             .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
@@ -1612,7 +1599,7 @@ mod tests {
 
     #[test]
     fn missing_required_binding_slot_is_rejected() {
-        let error = OwnedStorage::new(image(), OwnedBindings::new()).unwrap_err();
+        let error = OwnedStorage::new(image(), EnclaveBindings::new()).unwrap_err();
 
         assert!(matches!(
             error,
@@ -1625,7 +1612,7 @@ mod tests {
 
     #[test]
     fn wrong_required_binding_kind_is_rejected() {
-        let bindings = OwnedBindings::new().bind_reaction(BindingSlotIndex::new(0), reaction);
+        let bindings = EnclaveBindings::new().bind_reaction(BindingSlotIndex::new(0), reaction);
 
         let error = OwnedStorage::new(image(), bindings).unwrap_err();
 
@@ -1656,7 +1643,7 @@ mod tests {
 
     #[test]
     fn missing_action_factory_is_rejected() {
-        let bindings = OwnedBindings::new()
+        let bindings = EnclaveBindings::new()
             .bind_state(BindingSlotIndex::new(0), initialize_state)
             .bind_reaction(BindingSlotIndex::new(1), reaction)
             .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new());
@@ -1674,7 +1661,7 @@ mod tests {
 
     #[test]
     fn missing_port_factory_is_rejected() {
-        let bindings = OwnedBindings::new()
+        let bindings = EnclaveBindings::new()
             .bind_state(BindingSlotIndex::new(0), initialize_state)
             .bind_reaction(BindingSlotIndex::new(1), reaction)
             .bind_action(BindingSlotIndex::new(3), PayloadType::<u32>::new());
@@ -1824,7 +1811,7 @@ mod tests {
     #[test]
     fn cached_references_survive_storage_moves_and_reborrows() {
         REACTION_CALLS.store(0, Ordering::SeqCst);
-        let bindings = OwnedBindings::new()
+        let bindings = EnclaveBindings::new()
             .bind_state(BindingSlotIndex::new(0), initialize_state)
             .bind_reaction(BindingSlotIndex::new(1), schedule_shutdown_once)
             .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
@@ -1846,7 +1833,7 @@ mod tests {
 
     #[test]
     fn rejects_dynamic_mode_transitions_without_compiled_identity() {
-        let bindings = OwnedBindings::new()
+        let bindings = EnclaveBindings::new()
             .bind_state(BindingSlotIndex::new(0), initialize_state)
             .bind_reaction(BindingSlotIndex::new(1), request_dynamic_mode)
             .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
@@ -1931,7 +1918,7 @@ mod tests {
 
     #[test]
     fn outbound_routes_clone_fanout_apply_delays_once_and_do_not_block() {
-        let bindings = OwnedBindings::new()
+        let bindings = EnclaveBindings::new()
             .bind_state(BindingSlotIndex::new(0), initialize_state)
             .bind_reaction(
                 BindingSlotIndex::new(1),
@@ -2022,7 +2009,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_federate_origin_drives_the_paced_scheduler_clock() {
+    fn supplied_federate_origin_drives_the_paced_scheduler_clock() {
         let actions = [ActionImage::new(
             ScopeIndex::new(0),
             ActionSlotIndex::new(0),
@@ -2047,7 +2034,7 @@ mod tests {
         let image = EnclaveImageView::new(&image).unwrap();
         let seen_origin = Arc::new(Mutex::new(None));
         let reaction_origin = Arc::clone(&seen_origin);
-        let bindings = OwnedBindings::new()
+        let bindings = EnclaveBindings::new()
             .bind_state(BindingSlotIndex::new(0), initialize_state)
             .bind_reaction(
                 BindingSlotIndex::new(1),
@@ -2060,12 +2047,11 @@ mod tests {
             .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new());
         let mut storage = OwnedStorage::new(image, bindings).unwrap();
         let origin = Instant::now() - std::time::Duration::from_millis(800);
-        storage.configure_scheduler_origin(origin);
-
         let started = Instant::now();
-        crate::sched::run_owned_scheduler(
+        crate::sched::run_owned_scheduler_with_origin(
             &mut storage,
             &Config::default().with_fast_forward(false),
+            origin,
         )
         .unwrap();
 

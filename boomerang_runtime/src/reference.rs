@@ -1,6 +1,13 @@
 //! Standard-library reference implementation for synchronously executing validated compiled enclave images as a behavioral baseline for target executors.
 
-use std::{any::Any, fmt, marker::PhantomData, panic::AssertUnwindSafe, time::Instant};
+use std::{
+    any::{Any, TypeId},
+    collections::BTreeMap,
+    fmt,
+    marker::PhantomData,
+    panic::AssertUnwindSafe,
+    time::Instant,
+};
 
 use tinymap::{TinyMap, TinySecondaryMap};
 
@@ -8,12 +15,15 @@ use crate::{
     image::{
         BoundaryId, CompiledDeploymentImage, CompiledDeploymentView, EnclaveImage,
         EnclaveImageView, EnclaveIndex, FederateIndex, ImageValidationError, PortIndex,
-        RouteDirection, StateSlotIndex, TimingDomain,
+        RouteDirection, RouteIndex, StateSlotIndex, TimingDomain,
     },
     run_owned_scheduler,
-    sched::{run_owned_scheduler_with_coordination, OwnedSchedulerCoordination},
+    sched::{
+        owned_federate_coordination, run_owned_scheduler_with_coordination,
+        OwnedSchedulerCoordination,
+    },
     storage::owned::StoredState,
-    AsyncEvent, Config, OwnedBindings, OwnedStorage, OwnedStorageError, PayloadType, ReactorData,
+    AsyncEvent, Config, EnclaveBindings, OwnedStorage, OwnedStorageError, PayloadType, ReactorData,
     RuntimeError, Tag,
 };
 
@@ -73,16 +83,16 @@ pub enum StateAccessError {
     },
 }
 
-/// Final owned state retained after a synchronous compiled-image execution.
+/// Final owned state retained after synchronously executing one scheduler-owned Enclave.
 /// It owns no scheduler machinery or image borrow and may outlive the executed image.
-pub struct OwnedExecutionResult {
+pub struct EnclaveExecution {
     /// Final owned reactor states keyed by compiled storage slot.
     states: TinyMap<StateSlotIndex, StoredState>,
     /// Last logical tag that processed non-terminal work.
     final_tag: Tag,
 }
 
-impl OwnedExecutionResult {
+impl EnclaveExecution {
     /// Borrows the state stored at `slot` as its original concrete type.
     /// Invalid slots or concrete types return [`StateAccessError`].
     pub fn state<T: ReactorData>(&self, slot: StateSlotIndex) -> Result<&T, StateAccessError> {
@@ -107,23 +117,24 @@ impl OwnedExecutionResult {
     }
 }
 
-/// Direct owned bindings for every Enclave and route in one compiled Federate.
+/// Direct owned bindings aggregating every Enclave and typed local route executed under one
+/// compiled Federate's shared coordination.
 #[derive(Default)]
-pub struct OwnedFederateBindings {
+pub struct FederateBindings {
     /// Caller-supplied Enclave bindings retained with their canonical indices.
-    enclaves: Vec<(EnclaveIndex, OwnedBindings)>,
+    enclaves: Vec<(EnclaveIndex, EnclaveBindings)>,
     /// Statically typed route adapters retained until image preflight resolves their endpoints.
     routes: Vec<Box<dyn RouteBinding>>,
 }
 
-impl OwnedFederateBindings {
+impl FederateBindings {
     /// Creates an empty Federate binding set.
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Binds one canonical Enclave to its complete direct owned bindings.
-    pub fn bind_enclave(mut self, enclave: EnclaveIndex, bindings: OwnedBindings) -> Self {
+    pub fn bind_enclave(mut self, enclave: EnclaveIndex, bindings: EnclaveBindings) -> Self {
         self.enclaves.push((enclave, bindings));
         self
     }
@@ -144,7 +155,7 @@ impl OwnedFederateBindings {
     }
 
     /// Finds one uniquely supplied Enclave binding during preflight.
-    fn enclave(&self, enclave: EnclaveIndex) -> Option<&OwnedBindings> {
+    fn enclave(&self, enclave: EnclaveIndex) -> Option<&EnclaveBindings> {
         self.enclaves
             .iter()
             .find_map(|(candidate, bindings)| (*candidate == enclave).then_some(bindings))
@@ -156,12 +167,12 @@ trait RouteBinding: Send {
     /// Returns the stable compiled boundary identity selected by the caller.
     fn boundary(&self) -> &str;
     /// Returns the concrete endpoint payload type selected at compile time.
-    fn payload_type(&self) -> &'static str;
+    fn payload_type(&self) -> (TypeId, &'static str);
     /// Installs this route in its validated source storage.
     fn install(
         &self,
         source: &mut OwnedStorage<'_>,
-        endpoint: &RouteEndpoint,
+        route: &ResolvedLocalRoute,
         destination_tx: crate::Sender<AsyncEvent>,
     );
 }
@@ -179,30 +190,41 @@ impl<T: ReactorData + Clone> RouteBinding for TypedRouteBinding<T> {
         &self.boundary
     }
 
-    fn payload_type(&self) -> &'static str {
-        std::any::type_name::<T>()
+    fn payload_type(&self) -> (TypeId, &'static str) {
+        (TypeId::of::<T>(), std::any::type_name::<T>())
     }
 
     fn install(
         &self,
         source: &mut OwnedStorage<'_>,
-        endpoint: &RouteEndpoint,
+        route: &ResolvedLocalRoute,
         destination_tx: crate::Sender<AsyncEvent>,
     ) {
         source.bind_outbound_route::<T>(
-            endpoint.source_port,
-            endpoint.boundary.clone(),
-            endpoint.destination,
-            endpoint.destination_port,
-            endpoint.timing_domain,
-            endpoint.delay_nanos,
+            route.source_port,
+            route.boundary.clone(),
+            route.destination,
+            route.destination_port,
+            route.timing_domain,
+            route.delay_nanos,
             destination_tx,
         );
     }
 }
 
 /// Validated local endpoints and timing for one paired scheduler route.
-struct RouteEndpoint {
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct LocalRouteKey {
+    /// Canonical source Enclave containing the outbound route table.
+    source: EnclaveIndex,
+    /// Dense outbound route slot within the source Enclave.
+    outbound: RouteIndex,
+}
+
+/// A validated same-Federate route resolved to canonical dense scheduler coordinates.
+struct ResolvedLocalRoute {
+    /// Typed source Enclave and outbound route slot used for internal selection.
+    key: LocalRouteKey,
     /// Stable boundary identity shared by both route halves.
     boundary: String,
     /// Canonical source Enclave index.
@@ -219,27 +241,28 @@ struct RouteEndpoint {
     delay_nanos: u64,
 }
 
-/// Final owned results for every canonical Enclave executed in one Federate.
-pub struct OwnedFederateExecutionResult {
+/// Final owned results aggregating every canonical Enclave executed through typed local routes
+/// under one Federate's shared coordination origin.
+pub struct FederateExecution {
     /// Per-Enclave results keyed by deployment-wide canonical Enclave index.
-    enclaves: TinySecondaryMap<EnclaveIndex, OwnedExecutionResult>,
+    enclaves: TinySecondaryMap<EnclaveIndex, EnclaveExecution>,
     /// Single monotonic origin injected into every scheduler and reaction context.
     origin: Instant,
 }
 
-impl fmt::Debug for OwnedFederateExecutionResult {
+impl fmt::Debug for FederateExecution {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("OwnedFederateExecutionResult")
+            .debug_struct("FederateExecution")
             .field("enclaves", &self.enclaves.len())
             .field("origin", &self.origin)
             .finish()
     }
 }
 
-impl OwnedFederateExecutionResult {
+impl FederateExecution {
     /// Returns one Enclave's final owned result by canonical deployment index.
-    pub fn enclave(&self, enclave: EnclaveIndex) -> Option<&OwnedExecutionResult> {
+    pub fn enclave(&self, enclave: EnclaveIndex) -> Option<&EnclaveExecution> {
         self.enclaves.get(enclave)
     }
 
@@ -435,9 +458,7 @@ fn federate_shutdown_unblocks_a_full_mailbox_and_blocked_sender() {
 
 /// Returns whether a canonical Enclave index belongs to one Federate's dense range.
 fn federate_contains_enclave(federate: crate::image::FederateImage, enclave: EnclaveIndex) -> bool {
-    let start = federate.enclaves().start();
-    let end = start + federate.enclaves().len();
-    (start..end).contains(&enclave.as_u32())
+    federate.enclaves().contains(enclave)
 }
 
 /// Resolves every outbound route to its unique inbound half after root validation.
@@ -445,13 +466,13 @@ fn local_route_endpoints(
     deployment: &CompiledDeploymentImage<'_>,
     selected_federate: FederateIndex,
     selected: crate::image::FederateImage,
-) -> Result<Vec<RouteEndpoint>, ExecuteOwnedFederateError> {
+) -> Result<Vec<ResolvedLocalRoute>, ExecuteOwnedFederateError> {
     let mut endpoints = Vec::new();
     for (source, source_image) in deployment.enclaves.iter() {
-        for outbound in source_image
+        for (outbound_route, outbound) in source_image
             .routes
-            .values()
-            .filter(|route| route.direction() == RouteDirection::Outbound)
+            .iter()
+            .filter(|(_, route)| route.direction() == RouteDirection::Outbound)
         {
             let boundary = outbound
                 .boundary()
@@ -483,7 +504,11 @@ fn local_route_endpoints(
                 });
             }
             if source_selected {
-                endpoints.push(RouteEndpoint {
+                endpoints.push(ResolvedLocalRoute {
+                    key: LocalRouteKey {
+                        source,
+                        outbound: outbound_route,
+                    },
                     boundary: boundary.to_owned(),
                     source,
                     source_port: outbound.local_port(),
@@ -502,8 +527,8 @@ fn local_route_endpoints(
 fn preflight_owned_federate(
     deployment: &CompiledDeploymentImage<'_>,
     federate: FederateIndex,
-    bindings: &OwnedFederateBindings,
-) -> Result<Vec<RouteEndpoint>, ExecuteOwnedFederateError> {
+    bindings: &FederateBindings,
+) -> Result<Vec<ResolvedLocalRoute>, ExecuteOwnedFederateError> {
     CompiledDeploymentView::new(deployment).map_err(|error| {
         ExecuteOwnedFederateError::ImageValidation {
             message: error.to_string(),
@@ -597,17 +622,18 @@ fn preflight_owned_federate(
             let image = EnclaveImageView::new(&deployment.enclaves[enclave])
                 .expect("root validation checked endpoint images");
             let slot = image.ports()[port].binding();
-            let found = bindings
+            let (found_id, found) = bindings
                 .enclave(enclave)
                 .and_then(|owned| owned.port_payload_type(slot))
                 .expect("owned storage preflight checked endpoint port bindings");
-            if found != route.payload_type() {
+            let (expected_id, expected) = route.payload_type();
+            if found_id != expected_id {
                 return Err(ExecuteOwnedFederateError::RoutePayloadTypeMismatch {
                     boundary: endpoint.boundary.clone(),
                     direction,
                     enclave,
                     port,
-                    expected: route.payload_type(),
+                    expected,
                     found,
                 });
             }
@@ -623,23 +649,34 @@ fn preflight_owned_federate(
 pub fn execute_owned_federate(
     deployment: &CompiledDeploymentImage<'_>,
     federate: FederateIndex,
-    bindings: OwnedFederateBindings,
+    bindings: FederateBindings,
     config: Config,
-) -> Result<OwnedFederateExecutionResult, ExecuteOwnedFederateError> {
+) -> Result<FederateExecution, ExecuteOwnedFederateError> {
     let endpoints = preflight_owned_federate(deployment, federate, &bindings)?;
-    let OwnedFederateBindings {
+    let FederateBindings {
         mut enclaves,
         routes,
     } = bindings;
+    let route_bindings = endpoints
+        .iter()
+        .map(|route| {
+            let binding = routes
+                .iter()
+                .position(|binding| binding.boundary() == route.boundary)
+                .expect("Federate preflight required every local route binding");
+            (route.key, binding)
+        })
+        .collect::<BTreeMap<_, _>>();
     enclaves.sort_by_key(|(enclave, _)| enclave.as_u32());
 
+    let origin = Instant::now();
     let mut storages = Vec::with_capacity(enclaves.len());
     for (enclave, owned) in enclaves {
         let image = EnclaveImageView::new(&deployment.enclaves[enclave])
             .expect("Federate preflight validated every selected Enclave image");
         let enclave_key = crate::EnclaveKey::from(enclave.as_u32() as usize);
         let storage =
-            OwnedStorage::new_for_enclave(image, owned, enclave_key).map_err(|source| {
+            OwnedStorage::new_for_enclave(image, owned, enclave_key, origin).map_err(|source| {
                 ExecuteOwnedFederateError::EnclaveInitialization { enclave, source }
             })?;
         storages.push((enclave, storage));
@@ -650,10 +687,7 @@ pub fn execute_owned_federate(
         .map(|(_, storage)| storage.scheduler_event_tx())
         .collect::<Vec<_>>();
     for endpoint in &endpoints {
-        let route = routes
-            .iter()
-            .find(|route| route.boundary() == endpoint.boundary)
-            .expect("Federate preflight required every local route binding");
+        let route = &routes[route_bindings[&endpoint.key]];
         let destination_tx = storages
             .iter()
             .find(|(enclave, _)| *enclave == endpoint.destination)
@@ -667,10 +701,6 @@ pub fn execute_owned_federate(
         route.install(source, endpoint, destination_tx);
     }
 
-    let origin = Instant::now();
-    for (_, storage) in &mut storages {
-        storage.configure_scheduler_origin(origin);
-    }
     let scheduler_contexts = storages
         .iter()
         .map(|(enclave, storage)| (*enclave, storage.scheduler_send_context()))
@@ -715,21 +745,34 @@ pub fn execute_owned_federate(
             .1
             .add_upstream(source_key, source_context, delay);
     }
-    let inbound_enclaves = endpoints
-        .iter()
-        .map(|endpoint| endpoint.destination)
-        .collect::<Vec<_>>();
     let enclave_count = storages.len();
+    let activity = (!config.keep_alive).then(|| {
+        owned_federate_coordination(storages.iter().map(|(enclave, storage)| {
+            (
+                crate::EnclaveKey::from(enclave.as_u32() as usize),
+                storage.scheduler_event_rx(),
+            )
+        }))
+    });
+    let (coordinator, coordinator_runner, mut activities) = match activity {
+        Some((coordinator, runner, activities)) => (Some(coordinator), Some(runner), activities),
+        None => (None, None, BTreeMap::new()),
+    };
     let (results, failure) = std::thread::scope(|scope| {
         let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let coordinator_handle = coordinator_runner.map(|runner| scope.spawn(move || runner.run()));
+        let abort = || {
+            if let Some(coordinator) = &coordinator {
+                coordinator.abort();
+            }
+            request_federate_shutdown(&event_senders);
+        };
         let mut handles = Vec::with_capacity(enclave_count);
         for ((enclave, mut storage), (_, coordination)) in storages.into_iter().zip(coordinations) {
             let result_tx = result_tx.clone();
-            let config = if inbound_enclaves.contains(&enclave) {
-                config.clone().with_keep_alive(true)
-            } else {
-                config.clone()
-            };
+            let config = config.clone();
+            let key = crate::EnclaveKey::from(enclave.as_u32() as usize);
+            let mut activity = activities.remove(&key);
             let handle = scope.spawn(move || {
                 let execution = std::panic::catch_unwind(AssertUnwindSafe(|| {
                     run_owned_scheduler_with_coordination(
@@ -737,10 +780,12 @@ pub fn execute_owned_federate(
                         &config,
                         origin,
                         coordination,
+                        activity.as_mut(),
                     )
                 }));
+                drop(activity);
                 let result = match execution {
-                    Ok(Ok(final_tag)) => Ok(OwnedExecutionResult {
+                    Ok(Ok(final_tag)) => Ok(EnclaveExecution {
                         states: storage.into_states(),
                         final_tag,
                     }),
@@ -770,13 +815,13 @@ pub fn execute_owned_federate(
                 }
                 Ok((_, Err(error))) => {
                     if failure.is_none() {
-                        request_federate_shutdown(&event_senders);
+                        abort();
                         failure = Some(error);
                     }
                 }
                 Err(_) => {
                     if failure.is_none() {
-                        request_federate_shutdown(&event_senders);
+                        abort();
                         failure = Some(ExecuteOwnedFederateError::ResultChannelClosed);
                     }
                     break;
@@ -786,7 +831,7 @@ pub fn execute_owned_federate(
         for (enclave, handle) in handles {
             if let Err(payload) = handle.join() {
                 if failure.is_none() {
-                    request_federate_shutdown(&event_senders);
+                    abort();
                     failure = Some(ExecuteOwnedFederateError::ThreadPanicked {
                         enclave,
                         message: panic_message(payload),
@@ -794,13 +839,16 @@ pub fn execute_owned_federate(
                 }
             }
         }
+        if let Some(handle) = coordinator_handle {
+            let _ = handle.join();
+        }
         (results, failure)
     });
 
     if let Some(error) = failure {
         Err(error)
     } else {
-        Ok(OwnedFederateExecutionResult {
+        Ok(FederateExecution {
             enclaves: results,
             origin,
         })
@@ -815,9 +863,9 @@ pub fn execute_owned_federate(
 /// Returns [`ExecuteOwnedError`] for validation, storage, coordination, or reaction failures.
 pub fn execute_owned<'image>(
     image: &EnclaveImage<'image>,
-    bindings: OwnedBindings,
+    bindings: EnclaveBindings,
     config: Config,
-) -> Result<OwnedExecutionResult, ExecuteOwnedError<'image>> {
+) -> Result<EnclaveExecution, ExecuteOwnedError<'image>> {
     let image = crate::image::EnclaveImageView::new(image)?;
     let unsupported_routes = image.routes().len();
     if unsupported_routes != 0 {
@@ -827,7 +875,7 @@ pub fn execute_owned<'image>(
     }
     let mut storage = OwnedStorage::new(image, bindings)?;
     let final_tag = run_owned_scheduler(&mut storage, &config)?;
-    Ok(OwnedExecutionResult {
+    Ok(EnclaveExecution {
         states: storage.into_states(),
         final_tag,
     })

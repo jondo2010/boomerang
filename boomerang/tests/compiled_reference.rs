@@ -835,12 +835,25 @@ fn compiled_reference_rejects_routes_until_route_execution_is_supported() {
 /// Source state used to verify the shared Federate origin.
 #[derive(Debug)]
 struct RoutedSourceState {
+    /// Completion time of this source's user initializer.
+    initialized_at: Instant,
     /// Origin observed from the source reaction context.
     origin: Option<Instant>,
+    /// Physical time at which the source timer reaction ran.
+    fired_at: Option<Instant>,
 }
 
 fn initialize_routed_source() -> RoutedSourceState {
-    RoutedSourceState { origin: None }
+    RoutedSourceState {
+        initialized_at: Instant::now(),
+        origin: None,
+        fired_at: None,
+    }
+}
+
+fn initialize_delayed_routed_source() -> RoutedSourceState {
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    initialize_routed_source()
 }
 
 fn emit_routed_value(
@@ -853,6 +866,7 @@ fn emit_routed_value(
         .downcast_mut::<RoutedSourceState>()
         .expect("the source state binding initializes RoutedSourceState");
     state.origin = Some(context.get_start_time());
+    state.fired_at = Some(Instant::now());
     let mut output: OutputRef<u32> = refs.ports_mut.partition_mut()?;
     *output = Some(42);
     Ok(())
@@ -896,6 +910,13 @@ fn receive_routed_value(
 fn source_bindings() -> EnclaveBindings {
     EnclaveBindings::new()
         .bind_state(BindingSlotIndex::new(0), initialize_routed_source)
+        .bind_reaction(BindingSlotIndex::new(1), emit_routed_value)
+        .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
+}
+
+fn paced_source_bindings() -> EnclaveBindings {
+    EnclaveBindings::new()
+        .bind_state(BindingSlotIndex::new(0), initialize_delayed_routed_source)
         .bind_reaction(BindingSlotIndex::new(1), emit_routed_value)
         .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
 }
@@ -1316,6 +1337,58 @@ fn owned_federate_routes_typed_values_and_shares_one_origin() {
         assert_eq!(source_state.origin, Some(result.origin()));
         assert_eq!(sink_state.origin, Some(result.origin()));
     }
+}
+
+#[test]
+fn owned_federate_paced_origin_starts_after_delayed_initializer() {
+    const TIMER_DELAY_NANOS: u64 = 100_000_000;
+    let result = bounded(|| {
+        let timer_startups = [TimerStartupImage::new(
+            ActionIndex::new(0),
+            TIMER_DELAY_NANOS,
+        )];
+        let enclaves = [
+            EnclaveImage {
+                scope_timer_startups: &timer_startups,
+                timer_startup_actions: &timer_startups,
+                ..ROUTED_SOURCE_IMAGE
+            },
+            ROUTED_SINK_IMAGE,
+        ];
+        let deployment = CompiledDeploymentImage {
+            enclaves: TinyMapView::new(&enclaves),
+            ..ROUTED_DEPLOYMENT
+        };
+        execute_owned_federate(
+            &deployment,
+            FederateIndex::new(0),
+            FederateBindings::new()
+                .bind_enclave(EnclaveIndex::new(0), paced_source_bindings())
+                .bind_enclave(EnclaveIndex::new(1), sink_bindings())
+                .bind_route(
+                    route_boundary(),
+                    PayloadType::<u32>::new(),
+                    PayloadType::<u32>::new(),
+                ),
+            Config::default().with_fast_forward(false),
+        )
+        .unwrap()
+    });
+
+    let source = result
+        .enclave(EnclaveIndex::new(0))
+        .expect("paced source result must be present");
+    let state = source
+        .state::<RoutedSourceState>(StateSlotIndex::new(0))
+        .unwrap();
+    let origin = result.origin();
+    let fired_at = state.fired_at.expect("paced source timer must fire");
+    let timer_delay = std::time::Duration::from_nanos(TIMER_DELAY_NANOS);
+
+    assert_eq!(state.origin, Some(origin));
+    assert!(origin >= state.initialized_at);
+    assert!(fired_at.duration_since(origin) >= timer_delay);
+    assert!(fired_at.duration_since(state.initialized_at) >= timer_delay);
 }
 
 fn bounded<T: Send + 'static>(run: impl FnOnce() -> T + Send + 'static) -> T {

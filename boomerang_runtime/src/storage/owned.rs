@@ -696,15 +696,15 @@ impl<'image> OwnedStorage<'image> {
         image: EnclaveImageView<'image>,
         bindings: EnclaveBindings,
     ) -> Result<Self, OwnedStorageError> {
-        Self::new_for_enclave(image, bindings, EnclaveKey::default(), Instant::now())
+        Self::new_for_enclave(image, bindings, EnclaveKey::default())
     }
 
     /// Constructs owned storage whose reaction and send contexts use `enclave_key`.
+    /// Scheduler startup replaces the provisional context origin before any reaction executes.
     pub(crate) fn new_for_enclave(
         image: EnclaveImageView<'image>,
         bindings: EnclaveBindings,
         enclave_key: EnclaveKey,
-        origin: Instant,
     ) -> Result<Self, OwnedStorageError> {
         Self::validate_image_bindings(&image, &bindings)?;
         let (state_bindings, action_images) = validate_storage_layout(&image)?;
@@ -718,8 +718,9 @@ impl<'image> OwnedStorage<'image> {
         let reaction_refs = initialize_reaction_refs(&image, &mut ports, &mut actions)?;
         let states = initialize_states(&state_bindings, &bindings)?;
         let reactions = initialize_reactions(bindings);
+        let provisional_origin = Instant::now();
         let (contexts, event_tx, event_rx, shutdown_tx) =
-            initialize_contexts(&image, enclave_key, origin)?;
+            initialize_contexts(&image, enclave_key, provisional_origin)?;
         let event_capacity = image.storage_bounds().event_capacity() as usize;
         let inbound_boundary_ports = image
             .routes()

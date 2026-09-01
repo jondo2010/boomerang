@@ -703,14 +703,13 @@ fn execute_owned_federate_with_spawn_guard(
             (route.key, binding)
         })
         .collect::<BTreeMap<_, _>>();
-    let origin = Instant::now();
     let mut storages = Vec::with_capacity(enclaves.len());
     for (enclave, owned) in enclaves {
         let image = EnclaveImageView::new(&deployment.enclaves[enclave])
             .expect("Federate preflight validated every selected Enclave image");
         let enclave_key = crate::EnclaveKey::from(enclave.as_u32() as usize);
         let storage =
-            OwnedStorage::new_for_enclave(image, owned, enclave_key, origin).map_err(|source| {
+            OwnedStorage::new_for_enclave(image, owned, enclave_key).map_err(|source| {
                 ExecuteOwnedFederateError::EnclaveInitialization { enclave, source }
             })?;
         storages.push((enclave, storage));
@@ -800,6 +799,7 @@ fn execute_owned_federate_with_spawn_guard(
         ),
         None => (None, None, BTreeMap::new()),
     };
+    let origin = Instant::now();
     let (results, failure) = std::thread::scope(|scope| {
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         let coordinator_thread = match quiescence_coordinator {

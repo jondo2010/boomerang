@@ -154,7 +154,7 @@ impl ExecutionStorage<ReactionGraph> for Pin<Box<Store>> {
     fn prepare_startup_origin(&mut self, start_time: &mut std::time::Instant) {
         let origin = std::time::Instant::now();
         *start_time = origin;
-        Store::set_scheduler_origin(self, origin);
+        Store::initialize_reaction_context_origins(self, origin);
     }
 
     fn action_from_runtime(&self, key: ActionKey) -> ActionKey {
@@ -165,7 +165,7 @@ impl ExecutionStorage<ReactionGraph> for Pin<Box<Store>> {
         Store::push_action_value(self, action, tag, value);
     }
 
-    fn retain_boundary_port(
+    fn stage_inbound_boundary_value(
         &mut self,
         key: PortKey,
         _tag: Tag,

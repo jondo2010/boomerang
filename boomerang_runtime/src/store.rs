@@ -247,8 +247,11 @@ impl Store {
         actions[action_key].push_value(tag, value);
     }
 
-    /// Updates every live reaction context to the scheduler's startup-time origin.
-    pub(crate) fn set_scheduler_origin(self: &mut Pin<Box<Self>>, origin: std::time::Instant) {
+    /// Initializes every live reaction context with the scheduler's startup-time origin.
+    pub(crate) fn initialize_reaction_context_origins(
+        self: &mut Pin<Box<Self>>,
+        origin: std::time::Instant,
+    ) {
         let contexts = &mut self.as_mut().project().inner.contexts;
         contexts
             .iter_mut()

@@ -90,13 +90,13 @@ impl ExecutionStorage<EnclaveImageView<'_>> for OwnedStorage<'_> {
         self.scheduler_push_action(action, tag, value);
     }
 
-    fn retain_boundary_port(
+    fn stage_inbound_boundary_value(
         &mut self,
         key: crate::PortKey,
         tag: Tag,
         value: Box<dyn ReactorData>,
     ) -> Result<PortIndex, Self::Error> {
-        self.scheduler_retain_boundary_port(key, tag, value)
+        OwnedStorage::stage_inbound_boundary_value(self, key, tag, value)
     }
 
     fn commit_boundary_ports(&mut self, tag: Tag) -> Result<(), Self::Error> {
@@ -181,7 +181,7 @@ pub(crate) fn run_owned_scheduler_with_origin(
     config: &Config,
     origin: std::time::Instant,
 ) -> Result<Tag, SchedulerError<OwnedStorageError>> {
-    storage.set_scheduler_origin(origin);
+    storage.initialize_reaction_context_origins(origin);
     let schedule = storage.scheduler_image();
     let reaction_limits = schedule.reaction_limits();
     let reaction_capacity = reaction_limits.num_keys;

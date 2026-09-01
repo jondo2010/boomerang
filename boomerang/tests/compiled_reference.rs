@@ -43,6 +43,7 @@ fn increment_counter(
     _context: &mut Context,
     state: &mut dyn ReactorData,
     _refs: ReactionRefs<'_>,
+    _mode_effect: Option<CompiledModeEffectRef>,
 ) -> Result<(), ReactionBindingError> {
     state
         .downcast_mut::<CounterState>()
@@ -218,8 +219,9 @@ fn request_compiled_mode(
     context: &mut Context,
     _state: &mut dyn ReactorData,
     _refs: ReactionRefs<'_>,
-    effect: CompiledModeEffectRef,
+    effect: Option<CompiledModeEffectRef>,
 ) -> Result<(), ReactionBindingError> {
+    let effect = effect.ok_or_else(|| ReactionBindingError::missing("compiled mode effect"))?;
     effect.set(context);
     Ok(())
 }
@@ -228,8 +230,9 @@ fn reset_periodic_mode_once(
     context: &mut Context,
     state: &mut dyn ReactorData,
     _refs: ReactionRefs<'_>,
-    effect: CompiledModeEffectRef,
+    effect: Option<CompiledModeEffectRef>,
 ) -> Result<(), ReactionBindingError> {
+    let effect = effect.ok_or_else(|| ReactionBindingError::missing("compiled mode effect"))?;
     let state = state
         .downcast_mut::<ModeState>()
         .expect("the modal image initializes ModeState");
@@ -245,8 +248,9 @@ fn request_forged_compiled_mode(
     context: &mut Context,
     _state: &mut dyn ReactorData,
     _refs: ReactionRefs<'_>,
-    _effect: CompiledModeEffectRef,
+    effect: Option<CompiledModeEffectRef>,
 ) -> Result<(), ReactionBindingError> {
+    let _effect = effect.ok_or_else(|| ReactionBindingError::missing("compiled mode effect"))?;
     CompiledModeEffectRef {
         target: ModeIndex::new(0),
         transition: TransitionKind::History,
@@ -259,6 +263,7 @@ fn request_legacy_mode(
     context: &mut Context,
     _state: &mut dyn ReactorData,
     _refs: ReactionRefs<'_>,
+    _mode_effect: Option<CompiledModeEffectRef>,
 ) -> Result<(), ReactionBindingError> {
     ModeEffectRef::new_key(ModeKey::from(1), TransitionKind::Reset).set(context);
     Ok(())
@@ -268,6 +273,7 @@ fn record_mode_entry(
     context: &mut Context,
     state: &mut dyn ReactorData,
     _refs: ReactionRefs<'_>,
+    _mode_effect: Option<CompiledModeEffectRef>,
 ) -> Result<(), ReactionBindingError> {
     state
         .downcast_mut::<ModeState>()
@@ -280,7 +286,7 @@ fn record_mode_entry(
 fn compiled_modal_bindings() -> OwnedBindings {
     OwnedBindings::new()
         .bind_state(BindingSlotIndex::new(0), initialize_mode_state)
-        .bind_compiled_reaction(BindingSlotIndex::new(1), request_compiled_mode)
+        .bind_reaction(BindingSlotIndex::new(1), request_compiled_mode)
         .bind_reaction(BindingSlotIndex::new(2), record_mode_entry)
 }
 
@@ -294,14 +300,14 @@ fn legacy_mode_bindings() -> OwnedBindings {
 fn forged_mode_bindings() -> OwnedBindings {
     OwnedBindings::new()
         .bind_state(BindingSlotIndex::new(0), initialize_mode_state)
-        .bind_compiled_reaction(BindingSlotIndex::new(1), request_forged_compiled_mode)
+        .bind_reaction(BindingSlotIndex::new(1), request_forged_compiled_mode)
         .bind_reaction(BindingSlotIndex::new(2), record_mode_entry)
 }
 
 fn periodic_modal_bindings() -> OwnedBindings {
     OwnedBindings::new()
         .bind_state(BindingSlotIndex::new(0), initialize_mode_state)
-        .bind_compiled_reaction(BindingSlotIndex::new(1), reset_periodic_mode_once)
+        .bind_reaction(BindingSlotIndex::new(1), reset_periodic_mode_once)
 }
 
 static MODAL_REACTORS: [ReactorImage; 1] = [ReactorImage::new(
@@ -455,6 +461,7 @@ fn record_periodic_tag(
     context: &mut Context,
     state: &mut dyn ReactorData,
     _refs: ReactionRefs<'_>,
+    _mode_effect: Option<CompiledModeEffectRef>,
 ) -> Result<(), ReactionBindingError> {
     let state = state
         .downcast_mut::<CounterState>()
@@ -506,6 +513,7 @@ fn record_cotimed_timers(
     context: &mut Context,
     state: &mut dyn ReactorData,
     refs: ReactionRefs<'_>,
+    _mode_effect: Option<CompiledModeEffectRef>,
 ) -> Result<(), ReactionBindingError> {
     let (mut first, mut second): (ActionRef, ActionRef) = refs.actions.partition_mut()?;
     let state = state

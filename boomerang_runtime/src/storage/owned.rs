@@ -85,13 +85,14 @@ impl OwnedBindings {
         );
         self
     }
-    /// Binds a directly generated reaction implementation to its required binding slot.
+    /// Binds a generated reaction and its optional image-owned mode effect to a required slot.
     pub fn bind_reaction<F>(mut self, slot: BindingSlotIndex, function: F) -> Self
     where
         F: for<'store> FnMut(
                 &mut Context,
                 &mut dyn ReactorData,
                 ReactionRefs<'store>,
+                Option<CompiledModeEffectRef>,
             ) -> Result<(), ReactionBindingError>
             + Send
             + Sync
@@ -99,27 +100,7 @@ impl OwnedBindings {
     {
         self.insert_binding(
             slot,
-            Binding::Reaction(Box::new(LegacyReactionInvoker(function))),
-        );
-        self
-    }
-
-    /// Binds a generated reaction that consumes its validated canonical mode effect.
-    pub fn bind_compiled_reaction<F>(mut self, slot: BindingSlotIndex, function: F) -> Self
-    where
-        F: for<'store> FnMut(
-                &mut Context,
-                &mut dyn ReactorData,
-                ReactionRefs<'store>,
-                CompiledModeEffectRef,
-            ) -> Result<(), ReactionBindingError>
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.insert_binding(
-            slot,
-            Binding::Reaction(Box::new(CompiledReactionInvoker(function))),
+            Binding::Reaction(Box::new(ErasedReactionInvoker(function))),
         );
         self
     }
@@ -262,15 +243,16 @@ trait ReactionInvoker: Send + Sync {
     ) -> Result<(), ReactionBindingError>;
 }
 
-/// Adapter retaining the legacy live-key reaction boundary.
-struct LegacyReactionInvoker<F>(F);
+/// Type-erasing adapter for the single owned-reaction callback shape.
+struct ErasedReactionInvoker<F>(F);
 
-impl<F> ReactionInvoker for LegacyReactionInvoker<F>
+impl<F> ReactionInvoker for ErasedReactionInvoker<F>
 where
     F: for<'store> FnMut(
             &mut Context,
             &mut dyn ReactorData,
             ReactionRefs<'store>,
+            Option<CompiledModeEffectRef>,
         ) -> Result<(), ReactionBindingError>
         + Send
         + Sync
@@ -282,36 +264,8 @@ where
         context: &mut Context,
         state: &mut dyn ReactorData,
         refs: ReactionRefs<'_>,
-        _mode_effect: Option<CompiledModeEffectRef>,
-    ) -> Result<(), ReactionBindingError> {
-        (self.0)(context, state, refs)
-    }
-}
-
-/// Adapter supplying one image-owned canonical mode effect to generated compiled code.
-struct CompiledReactionInvoker<F>(F);
-
-impl<F> ReactionInvoker for CompiledReactionInvoker<F>
-where
-    F: for<'store> FnMut(
-            &mut Context,
-            &mut dyn ReactorData,
-            ReactionRefs<'store>,
-            CompiledModeEffectRef,
-        ) -> Result<(), ReactionBindingError>
-        + Send
-        + Sync
-        + 'static,
-{
-    fn invoke(
-        &mut self,
-        context: &mut Context,
-        state: &mut dyn ReactorData,
-        refs: ReactionRefs<'_>,
         mode_effect: Option<CompiledModeEffectRef>,
     ) -> Result<(), ReactionBindingError> {
-        let mode_effect =
-            mode_effect.ok_or_else(|| crate::ReactionRefsError::missing("compiled mode effect"))?;
         (self.0)(context, state, refs, mode_effect)
     }
 }
@@ -514,6 +468,8 @@ pub struct OwnedStorage<'image> {
     reaction_refs: TinyMap<ReactionIndex, ReactionReferenceLayout>,
     /// Boundary payloads retained until their declared logical tag is processed.
     pending_boundary_values: Vec<(Tag, PortIndex, Box<dyn ReactorData>)>,
+    /// Dense ports admitted by one or more inbound image routes.
+    inbound_boundary_ports: TinySecondaryMap<PortIndex, ()>,
     /// Keeps the per-enclave event channel open for stored reaction contexts.
     event_rx: crate::Receiver<crate::event::AsyncEvent>,
     /// Holds the keepalive sender until a compiled scheduler takes responsibility for shutdown.
@@ -587,6 +543,12 @@ impl<'image> OwnedStorage<'image> {
         let reactions = initialize_reactions(bindings);
         let (contexts, event_rx, shutdown_tx) = initialize_contexts(&image)?;
         let event_capacity = image.storage_bounds().event_capacity() as usize;
+        let inbound_boundary_ports = image
+            .routes()
+            .values()
+            .filter(|route| route.direction() == crate::image::RouteDirection::Inbound)
+            .map(|route| (route.local_port(), ()))
+            .collect();
         Ok(Self {
             image,
             states,
@@ -596,6 +558,7 @@ impl<'image> OwnedStorage<'image> {
             reactions,
             reaction_refs,
             pending_boundary_values: Vec::with_capacity(event_capacity),
+            inbound_boundary_ports,
             event_rx,
             shutdown_tx: Some(shutdown_tx),
         })
@@ -611,8 +574,8 @@ impl<'image> OwnedStorage<'image> {
         self.ports.values_mut().for_each(|port| port.cleanup());
     }
 
-    /// Sets the scheduler's shared monotonic origin on every owned reaction context.
-    pub(crate) fn set_scheduler_origin(&mut self, origin: Instant) {
+    /// Initializes every owned reaction context with the scheduler's startup-time origin.
+    pub(crate) fn initialize_reaction_context_origins(&mut self, origin: Instant) {
         self.contexts
             .values_mut()
             .for_each(|context| context.start_time = origin);
@@ -631,21 +594,18 @@ impl<'image> OwnedStorage<'image> {
         fn take_scheduler_shutdown_tx() -> crate::keepalive::Sender |storage| storage.shutdown_tx.take().expect("owned storage can be attached to only one scheduler");
     }
 
-    /// Retains one validated scheduler-boundary value and returns its dense compiled port.
-    pub(crate) fn scheduler_retain_boundary_port(
+    /// Stages one validated inbound-boundary value and returns its dense compiled port.
+    pub(crate) fn stage_inbound_boundary_value(
         &mut self,
         key: PortKey,
         tag: Tag,
         value: Box<dyn ReactorData>,
     ) -> Result<PortIndex, OwnedStorageError> {
-        let port = self
-            .ports
-            .iter()
-            .find_map(|(port, storage)| (storage.get_key() == key).then_some(port))
+        let port = PortIndex::new(key.as_u32());
+        self.ports
+            .get(port)
             .ok_or(OwnedStorageError::BoundaryPortNotFound { key })?;
-        if !self.image.routes().values().any(|route| {
-            route.direction() == crate::image::RouteDirection::Inbound && route.local_port() == port
-        }) {
+        if !self.inbound_boundary_ports.contains_key(port) {
             return Err(OwnedStorageError::BoundaryPortNotInbound { port });
         }
         self.pending_boundary_values.push((tag, port, value));
@@ -1114,9 +1074,9 @@ mod tests {
             StateSlotIndex, StorageBounds, TableRange, TimerStartupImage, TimingDomain,
             TinyMapView,
         },
-        CommonContext, Config, Context, Duration, ModeTransitionRequest, OwnedBindings,
-        OwnedStorage, OwnedStorageError, PayloadType, PortKey, ReactionBindingError, ReactionRefs,
-        ReactorData, Tag, TransitionKind,
+        CommonContext, CompiledModeEffectRef, Config, Context, Duration, ModeTransitionRequest,
+        OwnedBindings, OwnedStorage, OwnedStorageError, PayloadType, PortKey, ReactionBindingError,
+        ReactionRefs, ReactorData, Tag, TransitionKind,
     };
     use std::{
         sync::{
@@ -1139,6 +1099,7 @@ mod tests {
         _context: &mut Context,
         _state: &mut dyn ReactorData,
         _refs: ReactionRefs<'_>,
+        _mode_effect: Option<CompiledModeEffectRef>,
     ) -> Result<(), ReactionBindingError> {
         Ok(())
     }
@@ -1160,6 +1121,7 @@ mod tests {
         context: &mut Context,
         _state: &mut dyn ReactorData,
         refs: ReactionRefs<'_>,
+        _mode_effect: Option<CompiledModeEffectRef>,
     ) -> Result<(), ReactionBindingError> {
         let call = REACTION_CALLS.fetch_add(1, Ordering::SeqCst);
         let mut port: crate::OutputRef<u32> = refs.ports_mut.partition_mut()?;
@@ -1177,6 +1139,7 @@ mod tests {
         context: &mut Context,
         _state: &mut dyn ReactorData,
         _refs: ReactionRefs<'_>,
+        _mode_effect: Option<CompiledModeEffectRef>,
     ) -> Result<(), ReactionBindingError> {
         context.set_mode_transition(ModeTransitionRequest {
             target: crate::ModeKey::new(0),
@@ -1317,13 +1280,22 @@ mod tests {
         reaction_modes: &FILTERED_REACTION_MODES,
         ..IMAGE
     };
-    static INBOUND_ROUTES: [RouteImage; 1] = [RouteImage::new(
-        IdentityRange::new(7, 7),
-        PortIndex::new(0),
-        RouteDirection::Inbound,
-        TimingDomain::Logical,
-        0,
-    )];
+    static INBOUND_ROUTES: [RouteImage; 2] = [
+        RouteImage::new(
+            IdentityRange::new(7, 7),
+            PortIndex::new(0),
+            RouteDirection::Inbound,
+            TimingDomain::Logical,
+            0,
+        ),
+        RouteImage::new(
+            IdentityRange::new(14, 10),
+            PortIndex::new(0),
+            RouteDirection::Inbound,
+            TimingDomain::Logical,
+            0,
+        ),
+    ];
     static ROUTED_IMAGE: EnclaveImage<'static> = EnclaveImage {
         routes: TinyMapView::new(&INBOUND_ROUTES),
         ..IMAGE
@@ -1629,7 +1601,7 @@ mod tests {
     fn boundary_write_rejects_unknown_port_key() {
         let mut storage = OwnedStorage::new(image(), complete_bindings()).unwrap();
         let error = storage
-            .scheduler_retain_boundary_port(PortKey::new(7), Tag::ZERO, Box::new(42_u32))
+            .stage_inbound_boundary_value(PortKey::new(7), Tag::ZERO, Box::new(42_u32))
             .unwrap_err();
 
         assert!(matches!(
@@ -1642,7 +1614,7 @@ mod tests {
     fn boundary_write_rejects_port_without_inbound_route() {
         let mut storage = OwnedStorage::new(image(), complete_bindings()).unwrap();
         let error = storage
-            .scheduler_retain_boundary_port(PortKey::new(0), Tag::ZERO, Box::new(42_u32))
+            .stage_inbound_boundary_value(PortKey::new(0), Tag::ZERO, Box::new(42_u32))
             .unwrap_err();
 
         assert!(matches!(
@@ -1656,7 +1628,7 @@ mod tests {
         let mut storage = OwnedStorage::new(routed_image(), complete_bindings()).unwrap();
         let expected_tag = Tag::new(Duration::nanoseconds(2), 0);
         storage
-            .scheduler_retain_boundary_port(PortKey::new(0), expected_tag, Box::new(42_u32))
+            .stage_inbound_boundary_value(PortKey::new(0), expected_tag, Box::new(42_u32))
             .unwrap();
 
         storage.scheduler_commit_boundary_ports(Tag::ZERO).unwrap();
@@ -1677,7 +1649,7 @@ mod tests {
     fn boundary_write_rejects_wrong_payload_type() {
         let mut storage = OwnedStorage::new(routed_image(), complete_bindings()).unwrap();
         storage
-            .scheduler_retain_boundary_port(PortKey::new(0), Tag::ZERO, Box::new(42_u64))
+            .stage_inbound_boundary_value(PortKey::new(0), Tag::ZERO, Box::new(42_u64))
             .unwrap();
         let error = storage
             .scheduler_commit_boundary_ports(Tag::ZERO)
@@ -1727,7 +1699,7 @@ mod tests {
             .bind_state(BindingSlotIndex::new(0), initialize_state)
             .bind_reaction(
                 BindingSlotIndex::new(1),
-                move |context: &mut Context, _state, _refs| {
+                move |context: &mut Context, _state, _refs, _mode_effect| {
                     *reaction_origin.lock().unwrap() = Some(context.get_start_time());
                     context.schedule_shutdown(Some(Duration::ZERO));
                     Ok(())

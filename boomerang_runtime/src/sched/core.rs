@@ -127,8 +127,8 @@ pub(crate) trait ExecutionStorage<S: Schedule> {
     fn action_from_runtime(&self, key: ActionKey) -> S::Action;
     /// Retain an action value until its scheduled tag is processed.
     fn push_action_value(&mut self, action: S::Action, tag: Tag, value: Box<dyn ReactorData>);
-    /// Retains one scheduler-boundary value until its logical tag is processed.
-    fn retain_boundary_port(
+    /// Stages one inbound scheduler-boundary value until its logical tag is processed.
+    fn stage_inbound_boundary_value(
         &mut self,
         key: crate::PortKey,
         tag: Tag,
@@ -286,7 +286,7 @@ where
                 );
             }
             AsyncEventTarget::BoundaryPort(key) => {
-                let port = self.storage.retain_boundary_port(key, tag, value)?;
+                let port = self.storage.stage_inbound_boundary_value(key, tag, value)?;
                 self.events
                     .push_event(tag, self.schedule.port_triggers(port), false);
             }

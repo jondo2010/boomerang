@@ -3,6 +3,7 @@ use std::pin::Pin;
 mod barrier;
 mod compiled;
 mod core;
+pub(crate) mod federate;
 mod modal;
 mod queue;
 
@@ -12,7 +13,6 @@ mod queue;
 pub(crate) use compiled::run_owned_scheduler_with_origin;
 pub(crate) use compiled::{
     owned_federate_coordination, run_owned_scheduler, run_owned_scheduler_with_coordination,
-    OwnedSchedulerCoordination,
 };
 pub(crate) use core::{ExecutionStorage, ModeTransition, Schedule, SchedulerError};
 use core::{ReactionOutcome, SchedulerCore};

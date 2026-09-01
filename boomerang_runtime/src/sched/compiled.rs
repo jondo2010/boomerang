@@ -5,6 +5,7 @@ use std::{
     sync::mpsc,
 };
 
+use super::federate::EnclaveDependencies;
 use super::{
     barrier::LogicalTimeBarrier,
     core::{
@@ -22,53 +23,8 @@ use crate::{
         ReactorIndex, ScopeIndex,
     },
     ActionKey, AsyncEvent, Duration, EnclaveKey, Level, OwnedStorage, OwnedStorageError,
-    ReactionSetLimits, ReactorData, SendContext, Tag,
+    ReactionSetLimits, ReactorData, Tag,
 };
-
-/// Crate-private local coordination links for one owned compiled scheduler.
-pub(crate) struct OwnedSchedulerCoordination {
-    /// Canonical identity of this scheduler-owned Enclave.
-    key: EnclaveKey,
-    /// Logical upstream Enclaves and minimum delays across parallel local routes.
-    upstream: tinymap::TinySecondaryMap<EnclaveKey, (SendContext, Option<Duration>)>,
-    /// Coalesced downstream Enclave contexts used for logical tag release.
-    downstream: tinymap::TinySecondaryMap<EnclaveKey, SendContext>,
-}
-
-impl OwnedSchedulerCoordination {
-    /// Creates an unlinked scheduler descriptor for one canonical Enclave.
-    pub(crate) fn new(key: EnclaveKey) -> Self {
-        Self {
-            key,
-            upstream: tinymap::TinySecondaryMap::new(),
-            downstream: tinymap::TinySecondaryMap::new(),
-        }
-    }
-
-    /// Adds one logical upstream, retaining the most restrictive delay for parallel routes.
-    pub(crate) fn add_upstream(
-        &mut self,
-        key: EnclaveKey,
-        context: SendContext,
-        delay: Option<Duration>,
-    ) {
-        if let Some((_, existing_delay)) = self.upstream.get_mut(key) {
-            *existing_delay = match (*existing_delay, delay) {
-                (None, _) | (_, None) => None,
-                (Some(existing), Some(candidate)) => Some(existing.min(candidate)),
-            };
-        } else {
-            self.upstream.insert(key, (context, delay));
-        }
-    }
-
-    /// Adds one logical downstream, coalescing parallel routes to the same Enclave.
-    pub(crate) fn add_downstream(&mut self, key: EnclaveKey, context: SendContext) {
-        if !self.downstream.contains_key(key) {
-            self.downstream.insert(key, context);
-        }
-    }
-}
 
 /// Scheduler-to-coordinator reports for one owned Federate's idle epoch.
 enum ActivityReport {
@@ -637,7 +593,7 @@ pub(crate) fn run_owned_scheduler_with_origin(
         storage,
         config,
         origin,
-        OwnedSchedulerCoordination::new(EnclaveKey::default()),
+        EnclaveDependencies::new(EnclaveKey::default()),
         None,
     )
 }
@@ -647,7 +603,7 @@ pub(crate) fn run_owned_scheduler_with_coordination(
     storage: &mut OwnedStorage<'_>,
     config: &Config,
     origin: std::time::Instant,
-    coordination: OwnedSchedulerCoordination,
+    dependencies: EnclaveDependencies,
     activity: Option<&mut OwnedSchedulerActivity>,
 ) -> Result<Tag, SchedulerError<OwnedStorageError>> {
     let schedule = storage.scheduler_image();
@@ -660,11 +616,11 @@ pub(crate) fn run_owned_scheduler_with_coordination(
     let mut current_tag = Tag::NEVER;
     let mut last_nonterminal_tag = None;
     let mut shutdown_tag = None;
-    let OwnedSchedulerCoordination {
+    let EnclaveDependencies {
         key,
         upstream,
         downstream: downstream_enclaves,
-    } = coordination;
+    } = dependencies;
     let mut upstream_enclaves = upstream
         .into_iter()
         .map(|(key, (context, delay))| {

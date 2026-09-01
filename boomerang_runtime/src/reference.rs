@@ -19,8 +19,8 @@ use crate::{
     },
     run_owned_scheduler,
     sched::{
-        owned_federate_coordination, run_owned_scheduler_with_coordination,
-        OwnedSchedulerCoordination,
+        federate::EnclaveDependencies, owned_federate_coordination,
+        run_owned_scheduler_with_coordination,
     },
     storage::owned::StoredState,
     AsyncEvent, Config, EnclaveBindings, OwnedStorage, OwnedStorageError, PayloadType, ReactorData,
@@ -716,7 +716,7 @@ pub fn execute_owned_federate(
         .map(|(enclave, _)| {
             (
                 *enclave,
-                OwnedSchedulerCoordination::new(crate::EnclaveKey::from(enclave.as_u32() as usize)),
+                EnclaveDependencies::new(crate::EnclaveKey::from(enclave.as_u32() as usize)),
             )
         })
         .collect::<Vec<_>>();

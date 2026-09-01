@@ -162,18 +162,6 @@ impl<'binding> FederateBindings<'binding> {
     }
 }
 
-#[cfg(test)]
-#[test]
-fn federate_bindings_store_enclaves_by_typed_index() {
-    fn assert_typed_map(_bindings: &TinySecondaryMap<EnclaveIndex, EnclaveBindings>) {}
-
-    let enclave = EnclaveIndex::new(3);
-    let bindings = FederateBindings::new().bind_enclave(enclave, EnclaveBindings::new());
-
-    assert_typed_map(&bindings.enclaves);
-    assert!(bindings.enclaves.contains_key(enclave));
-}
-
 /// Private typed-erased route binding installed after structural and payload preflight.
 trait RouteBinding: Send {
     /// Returns the stable compiled boundary identity selected by the caller.

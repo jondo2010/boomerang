@@ -56,7 +56,10 @@ pub use reaction::{
     EnclaveSenderReactionFn, FromRefs, Reaction, ReactionFn, ReactionKey,
 };
 pub use reactor::*;
-pub use reference::{execute_owned, ExecuteOwnedError, OwnedExecutionResult, StateAccessError};
+pub use reference::{
+    execute_owned, execute_owned_federate, ExecuteOwnedError, ExecuteOwnedFederateError,
+    OwnedExecutionResult, OwnedFederateBindings, OwnedFederateExecutionResult, StateAccessError,
+};
 pub use refs::{Refs, RefsMut};
 pub use refs_extract::{ReactionRefs, ReactionRefsError, ReactionRefsExtract};
 pub use sched::*;

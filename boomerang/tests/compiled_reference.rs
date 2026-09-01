@@ -1,20 +1,25 @@
 //! Exercises the host-runtime seam from a compiled image and direct bindings through owned storage and scheduling to typed results, excluding compiler lowering and live-graph construction.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Instant,
+};
 
 use boomerang::runtime::{
-    execute_owned,
+    execute_owned, execute_owned_federate,
     image::{
         ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotIndex,
-        EnclaveImage, IdentityRange, ImageValidationError, LevelReactionImage,
-        LifecycleReactionImage, ModeImage, ModeIndex, PortImage, PortIndex, ReactionImage,
-        ReactionIndex, ReactorImage, ReactorIndex, RequiredBindingImage, RouteDirection,
-        RouteImage, ScopeImage, ScopeIndex, StateSlotIndex, StorageBounds, TableRange,
-        TimerStartupImage, TimingDomain, TinyMapView,
+        BoundaryId, CompiledDeploymentImage, CoordinationProjection, EnclaveImage, EnclaveIndex,
+        FederateImage, FederateIndex, GlobalFederationImage, IdentityRange, ImageValidationError,
+        LevelReactionImage, LifecycleReactionImage, ModeImage, ModeIndex, PortImage, PortIndex,
+        ReactionImage, ReactionIndex, ReactorImage, ReactorIndex, RequiredBindingImage,
+        RouteDirection, RouteImage, ScopeImage, ScopeIndex, StateSlotIndex, StorageBounds,
+        TableRange, TimerStartupImage, TimingDomain, TinyMapView,
     },
     ActionRef, CommonContext, CompiledModeEffectRef, Config, Context, Duration, ExecuteOwnedError,
-    ModeEffectRef, ModeKey, OwnedBindings, OwnedStorageError, PayloadType, ReactionBindingError,
-    ReactionRefs, ReactorData, RuntimeError, StateAccessError, Tag, TransitionKind,
+    ExecuteOwnedFederateError, InputRef, ModeEffectRef, ModeKey, OutputRef, OwnedBindings,
+    OwnedFederateBindings, OwnedStorageError, PayloadType, ReactionBindingError, ReactionRefs,
+    ReactorData, RuntimeError, StateAccessError, Tag, TransitionKind,
 };
 
 macro_rules! r {
@@ -785,6 +790,454 @@ fn compiled_reference_rejects_routes_until_route_execution_is_supported() {
             Err(error) => panic!("unexpected route rejection: {error}"),
         }
     }
+}
+
+/// Source state used to verify the shared Federate origin.
+#[derive(Debug)]
+struct RoutedSourceState {
+    /// Origin observed from the source reaction context.
+    origin: Option<Instant>,
+}
+
+fn initialize_routed_source() -> RoutedSourceState {
+    RoutedSourceState { origin: None }
+}
+
+fn emit_routed_value(
+    context: &mut Context,
+    state: &mut dyn ReactorData,
+    refs: ReactionRefs<'_>,
+    _mode_effect: Option<CompiledModeEffectRef>,
+) -> Result<(), ReactionBindingError> {
+    let state = state
+        .downcast_mut::<RoutedSourceState>()
+        .expect("the source state binding initializes RoutedSourceState");
+    state.origin = Some(context.get_start_time());
+    let mut output: OutputRef<u32> = refs.ports_mut.partition_mut()?;
+    *output = Some(42);
+    context.schedule_shutdown(Some(Duration::ZERO));
+    Ok(())
+}
+
+/// Destination state used to verify typed route delivery and the shared origin.
+#[derive(Debug)]
+struct RoutedSinkState {
+    /// Typed values observed by the destination reaction.
+    values: Vec<u32>,
+    /// Origin observed from the destination reaction context.
+    origin: Option<Instant>,
+}
+
+fn initialize_routed_sink() -> RoutedSinkState {
+    RoutedSinkState {
+        values: Vec::new(),
+        origin: None,
+    }
+}
+
+fn receive_routed_value(
+    context: &mut Context,
+    state: &mut dyn ReactorData,
+    refs: ReactionRefs<'_>,
+    _mode_effect: Option<CompiledModeEffectRef>,
+) -> Result<(), ReactionBindingError> {
+    let input: InputRef<u32> = refs.ports.partition()?;
+    let state = state
+        .downcast_mut::<RoutedSinkState>()
+        .expect("the sink state binding initializes RoutedSinkState");
+    state.values.push(
+        *input
+            .as_ref()
+            .expect("the inbound route must set the triggering port"),
+    );
+    state.origin = Some(context.get_start_time());
+    context.schedule_shutdown(Some(Duration::ZERO));
+    Ok(())
+}
+
+fn source_bindings() -> OwnedBindings {
+    OwnedBindings::new()
+        .bind_state(BindingSlotIndex::new(0), initialize_routed_source)
+        .bind_reaction(BindingSlotIndex::new(1), emit_routed_value)
+        .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
+}
+
+fn sink_bindings() -> OwnedBindings {
+    OwnedBindings::new()
+        .bind_state(BindingSlotIndex::new(0), initialize_routed_sink)
+        .bind_reaction(BindingSlotIndex::new(1), receive_routed_value)
+        .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
+}
+
+fn route_boundary() -> BoundaryId<'static> {
+    BoundaryId::new("pipe")
+}
+
+static ROUTED_SOURCE_REACTORS: [ReactorImage; 1] = [ReactorImage::new(
+    BindingSlotIndex::new(0),
+    StateSlotIndex::new(0),
+    ScopeIndex::new(0),
+    r!(0, 0),
+    None,
+    None,
+)];
+static ROUTED_SOURCE_ACTIONS: [ActionImage; 1] = [ActionImage::new(
+    ScopeIndex::new(0),
+    ActionSlotIndex::new(0),
+    ActionTiming::Timer {
+        period_nanos: Some(1_000_000),
+    },
+    r!(0, 1),
+    None,
+)];
+static ROUTED_SOURCE_PORTS: [PortImage; 1] = [PortImage::new(
+    ScopeIndex::new(0),
+    r!(0, 0),
+    BindingSlotIndex::new(2),
+)];
+static ROUTED_SOURCE_REACTIONS: [ReactionImage; 1] = [ReactionImage::new(
+    ReactorIndex::new(0),
+    ScopeIndex::new(0),
+    0,
+    BindingSlotIndex::new(1),
+    r!(0, 0),
+    r!(0, 1),
+    r!(0, 0),
+    r!(0, 0),
+)];
+static ROUTED_SOURCE_TRIGGERS: [LevelReactionImage; 1] =
+    [LevelReactionImage::new(0, ReactionIndex::new(0))];
+static ROUTED_SOURCE_EFFECT_PORTS: [PortIndex; 1] = [PortIndex::new(0)];
+static ROUTED_SOURCE_DESCENDANTS: [ScopeIndex; 1] = [ScopeIndex::new(0)];
+static ROUTED_SOURCE_TIMER_STARTUPS: [TimerStartupImage; 1] =
+    [TimerStartupImage::new(ActionIndex::new(0), 0)];
+static ROUTED_SOURCE_SCOPES: [ScopeImage; 1] = [fixture_scope(
+    None,
+    None,
+    r!(0, 1),
+    r!(0, 0),
+    r!(0, 1),
+    r!(0, 0),
+)];
+static ROUTED_SOURCE_ROUTES: [RouteImage; 1] = [RouteImage::new(
+    IdentityRange::new(9, 4),
+    PortIndex::new(0),
+    RouteDirection::Outbound,
+    TimingDomain::Logical,
+    0,
+)];
+static ROUTED_SOURCE_BINDINGS: [RequiredBindingImage; 3] = [
+    RequiredBindingImage::new(IdentityRange::new(5, 1), BindingKind::StateInitializer),
+    RequiredBindingImage::new(IdentityRange::new(6, 1), BindingKind::Reaction),
+    RequiredBindingImage::new(IdentityRange::new(7, 1), BindingKind::Port),
+];
+static ROUTED_SOURCE_IMAGE: EnclaveImage<'static> = EnclaveImage {
+    identity_data: "alphaabcxpipe",
+    enclave_id: IdentityRange::new(0, 5),
+    reactors: TinyMapView::new(&ROUTED_SOURCE_REACTORS),
+    actions: TinyMapView::new(&ROUTED_SOURCE_ACTIONS),
+    ports: TinyMapView::new(&ROUTED_SOURCE_PORTS),
+    reactions: TinyMapView::new(&ROUTED_SOURCE_REACTIONS),
+    modes: TinyMapView::new(&[]),
+    scopes: TinyMapView::new(&ROUTED_SOURCE_SCOPES),
+    reaction_triggers: &ROUTED_SOURCE_TRIGGERS,
+    reaction_use_ports: &[],
+    reaction_effect_ports: &ROUTED_SOURCE_EFFECT_PORTS,
+    reaction_actions: &[],
+    reaction_modes: &[],
+    scope_descendants: &ROUTED_SOURCE_DESCENDANTS,
+    scope_logical_actions: &[],
+    scope_timer_startups: &ROUTED_SOURCE_TIMER_STARTUPS,
+    scope_reset_reactions: &[],
+    scope_startup_reactions: &[],
+    scope_shutdown_reactions: &[],
+    startup_actions: &[],
+    timer_startup_actions: &ROUTED_SOURCE_TIMER_STARTUPS,
+    shutdown_reactions: &[],
+    shutdown_actions: &[],
+    routes: TinyMapView::new(&ROUTED_SOURCE_ROUTES),
+    required_bindings: TinyMapView::new(&ROUTED_SOURCE_BINDINGS),
+    storage_bounds: StorageBounds::new(1, 1, 8, 0, 0, 0),
+};
+
+static ROUTED_SINK_REACTORS: [ReactorImage; 1] = ROUTED_SOURCE_REACTORS;
+static ROUTED_SINK_PORTS: [PortImage; 1] = [PortImage::new(
+    ScopeIndex::new(0),
+    r!(0, 1),
+    BindingSlotIndex::new(2),
+)];
+static ROUTED_SINK_REACTIONS: [ReactionImage; 1] =
+    [fixture_reaction(0, 1, r!(0, 1), r!(0, 0), r!(0, 0))];
+static ROUTED_SINK_TRIGGERS: [LevelReactionImage; 1] =
+    [LevelReactionImage::new(0, ReactionIndex::new(0))];
+static ROUTED_SINK_USE_PORTS: [PortIndex; 1] = [PortIndex::new(0)];
+static ROUTED_SINK_DESCENDANTS: [ScopeIndex; 1] = [ScopeIndex::new(0)];
+static ROUTED_SINK_SCOPES: [ScopeImage; 1] = [fixture_scope(
+    None,
+    None,
+    r!(0, 1),
+    r!(0, 0),
+    r!(0, 0),
+    r!(0, 0),
+)];
+static ROUTED_SINK_ROUTES: [RouteImage; 1] = [RouteImage::new(
+    IdentityRange::new(7, 4),
+    PortIndex::new(0),
+    RouteDirection::Inbound,
+    TimingDomain::Logical,
+    0,
+)];
+static ROUTED_SINK_BINDINGS: [RequiredBindingImage; 3] = [
+    RequiredBindingImage::new(IdentityRange::new(4, 1), BindingKind::StateInitializer),
+    RequiredBindingImage::new(IdentityRange::new(5, 1), BindingKind::Reaction),
+    RequiredBindingImage::new(IdentityRange::new(6, 1), BindingKind::Port),
+];
+static ROUTED_SINK_IMAGE: EnclaveImage<'static> = EnclaveImage {
+    identity_data: "betaabcpipe",
+    enclave_id: IdentityRange::new(0, 4),
+    reactors: TinyMapView::new(&ROUTED_SINK_REACTORS),
+    actions: TinyMapView::new(&[]),
+    ports: TinyMapView::new(&ROUTED_SINK_PORTS),
+    reactions: TinyMapView::new(&ROUTED_SINK_REACTIONS),
+    modes: TinyMapView::new(&[]),
+    scopes: TinyMapView::new(&ROUTED_SINK_SCOPES),
+    reaction_triggers: &ROUTED_SINK_TRIGGERS,
+    reaction_use_ports: &ROUTED_SINK_USE_PORTS,
+    reaction_effect_ports: &[],
+    reaction_actions: &[],
+    reaction_modes: &[],
+    scope_descendants: &ROUTED_SINK_DESCENDANTS,
+    scope_logical_actions: &[],
+    scope_timer_startups: &[],
+    scope_reset_reactions: &[],
+    scope_startup_reactions: &[],
+    scope_shutdown_reactions: &[],
+    startup_actions: &[],
+    timer_startup_actions: &[],
+    shutdown_reactions: &[],
+    shutdown_actions: &[],
+    routes: TinyMapView::new(&ROUTED_SINK_ROUTES),
+    required_bindings: TinyMapView::new(&ROUTED_SINK_BINDINGS),
+    storage_bounds: StorageBounds::new(1, 0, 8, 0, 0, 0),
+};
+
+static ROUTED_FEDERATES: [FederateImage; 1] = [FederateImage::new(
+    IdentityRange::new(0, 4),
+    IdentityRange::new(4, 6),
+    IdentityRange::new(10, 7),
+    r!(0, 2),
+)];
+static ROUTED_ENCLAVES: [EnclaveImage<'static>; 2] = [ROUTED_SOURCE_IMAGE, ROUTED_SINK_IMAGE];
+static ROUTED_FEDERATE_MEMBERS: [FederateIndex; 1] = [FederateIndex::new(0)];
+static ROUTED_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
+    identity_data: "hosttargetruntime",
+    federation: GlobalFederationImage::new(&ROUTED_FEDERATE_MEMBERS, &[]),
+    federates: TinyMapView::new(&ROUTED_FEDERATES),
+    enclaves: TinyMapView::new(&ROUTED_ENCLAVES),
+    coordination: CoordinationProjection::Local,
+};
+
+#[test]
+fn owned_federate_routes_typed_values_and_shares_one_origin() {
+    for fast_forward in [true, false] {
+        let result = execute_owned_federate(
+            &ROUTED_DEPLOYMENT,
+            FederateIndex::new(0),
+            OwnedFederateBindings::new()
+                .bind_enclave(EnclaveIndex::new(0), source_bindings())
+                .bind_enclave(EnclaveIndex::new(1), sink_bindings())
+                .bind_route(
+                    route_boundary(),
+                    PayloadType::<u32>::new(),
+                    PayloadType::<u32>::new(),
+                ),
+            Config::default().with_fast_forward(fast_forward),
+        )
+        .unwrap();
+
+        let source = result
+            .enclave(EnclaveIndex::new(0))
+            .expect("source result must retain its canonical Enclave index");
+        let sink = result
+            .enclave(EnclaveIndex::new(1))
+            .expect("sink result must retain its canonical Enclave index");
+        let source_state = source
+            .state::<RoutedSourceState>(StateSlotIndex::new(0))
+            .unwrap();
+        let sink_state = sink
+            .state::<RoutedSinkState>(StateSlotIndex::new(0))
+            .unwrap();
+
+        assert_eq!(sink_state.values, [42]);
+        assert_eq!(source.final_tag(), Tag::ZERO);
+        assert_eq!(sink.final_tag(), Tag::ZERO);
+        assert_eq!(source_state.origin, Some(result.origin()));
+        assert_eq!(sink_state.origin, Some(result.origin()));
+    }
+}
+
+static ROUTED_INITIALIZATIONS: AtomicUsize = AtomicUsize::new(0);
+
+fn initialize_counted_routed_source() -> RoutedSourceState {
+    ROUTED_INITIALIZATIONS.fetch_add(1, Ordering::SeqCst);
+    initialize_routed_source()
+}
+
+fn counted_source_bindings() -> OwnedBindings {
+    OwnedBindings::new()
+        .bind_state(BindingSlotIndex::new(0), initialize_counted_routed_source)
+        .bind_reaction(BindingSlotIndex::new(1), emit_routed_value)
+        .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
+}
+
+fn wrong_sink_bindings() -> OwnedBindings {
+    OwnedBindings::new()
+        .bind_state(BindingSlotIndex::new(0), initialize_routed_sink)
+        .bind_reaction(BindingSlotIndex::new(1), receive_routed_value)
+        .bind_port(BindingSlotIndex::new(2), PayloadType::<u64>::new())
+}
+
+#[test]
+fn owned_federate_preflight_rejects_before_initializers() {
+    ROUTED_INITIALIZATIONS.store(0, Ordering::SeqCst);
+    let error = execute_owned_federate(
+        &ROUTED_DEPLOYMENT,
+        FederateIndex::new(0),
+        OwnedFederateBindings::new().bind_enclave(EnclaveIndex::new(0), counted_source_bindings()),
+        Config::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ExecuteOwnedFederateError::MissingEnclaveBinding { enclave }
+            if enclave == EnclaveIndex::new(1)
+    ));
+    assert_eq!(ROUTED_INITIALIZATIONS.load(Ordering::SeqCst), 0);
+
+    let unpaired_enclaves = [ROUTED_SOURCE_IMAGE];
+    let unpaired_federates = [FederateImage::new(
+        IdentityRange::new(0, 4),
+        IdentityRange::new(4, 6),
+        IdentityRange::new(10, 7),
+        r!(0, 1),
+    )];
+    let unpaired = CompiledDeploymentImage {
+        federates: TinyMapView::new(&unpaired_federates),
+        enclaves: TinyMapView::new(&unpaired_enclaves),
+        ..ROUTED_DEPLOYMENT
+    };
+    let error = execute_owned_federate(
+        &unpaired,
+        FederateIndex::new(0),
+        OwnedFederateBindings::new().bind_enclave(EnclaveIndex::new(0), counted_source_bindings()),
+        Config::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ExecuteOwnedFederateError::ImageValidation { .. }
+    ));
+    assert_eq!(ROUTED_INITIALIZATIONS.load(Ordering::SeqCst), 0);
+
+    let error = execute_owned_federate(
+        &ROUTED_DEPLOYMENT,
+        FederateIndex::new(0),
+        OwnedFederateBindings::new()
+            .bind_enclave(EnclaveIndex::new(0), counted_source_bindings())
+            .bind_enclave(EnclaveIndex::new(1), wrong_sink_bindings())
+            .bind_route(
+                route_boundary(),
+                PayloadType::<u32>::new(),
+                PayloadType::<u32>::new(),
+            ),
+        Config::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ExecuteOwnedFederateError::RoutePayloadTypeMismatch {
+            direction: RouteDirection::Inbound,
+            enclave,
+            ..
+        } if enclave == EnclaveIndex::new(1)
+    ));
+    assert_eq!(ROUTED_INITIALIZATIONS.load(Ordering::SeqCst), 0);
+
+    let cross_federates = [
+        FederateImage::new(
+            IdentityRange::new(0, 1),
+            IdentityRange::new(1, 1),
+            IdentityRange::new(2, 1),
+            r!(0, 1),
+        ),
+        FederateImage::new(
+            IdentityRange::new(3, 1),
+            IdentityRange::new(4, 1),
+            IdentityRange::new(5, 1),
+            r!(1, 1),
+        ),
+    ];
+    let cross_members = [FederateIndex::new(0), FederateIndex::new(1)];
+    let cross = CompiledDeploymentImage {
+        identity_data: "atrbtr",
+        federation: GlobalFederationImage::new(&cross_members, &[]),
+        federates: TinyMapView::new(&cross_federates),
+        ..ROUTED_DEPLOYMENT
+    };
+    let error = execute_owned_federate(
+        &cross,
+        FederateIndex::new(0),
+        OwnedFederateBindings::new().bind_enclave(EnclaveIndex::new(0), counted_source_bindings()),
+        Config::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ExecuteOwnedFederateError::CrossFederateRoute { .. }
+    ));
+    assert_eq!(ROUTED_INITIALIZATIONS.load(Ordering::SeqCst), 0);
+}
+
+fn panic_on_routed_value(
+    _context: &mut Context,
+    _state: &mut dyn ReactorData,
+    _refs: ReactionRefs<'_>,
+    _mode_effect: Option<CompiledModeEffectRef>,
+) -> Result<(), ReactionBindingError> {
+    panic!("routed sink panic")
+}
+
+fn panicking_sink_bindings() -> OwnedBindings {
+    OwnedBindings::new()
+        .bind_state(BindingSlotIndex::new(0), initialize_routed_sink)
+        .bind_reaction(BindingSlotIndex::new(1), panic_on_routed_value)
+        .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
+}
+
+#[test]
+fn owned_federate_panic_requests_bounded_shutdown_and_joins() {
+    let started = Instant::now();
+    let error = execute_owned_federate(
+        &ROUTED_DEPLOYMENT,
+        FederateIndex::new(0),
+        OwnedFederateBindings::new()
+            .bind_enclave(EnclaveIndex::new(0), source_bindings())
+            .bind_enclave(EnclaveIndex::new(1), panicking_sink_bindings())
+            .bind_route(
+                route_boundary(),
+                PayloadType::<u32>::new(),
+                PayloadType::<u32>::new(),
+            ),
+        Config::default().with_fast_forward(true),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ExecuteOwnedFederateError::ThreadPanicked { enclave, ref message }
+            if enclave == EnclaveIndex::new(1) && message == "routed sink panic"
+    ));
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
 }
 
 #[test]

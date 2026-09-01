@@ -1,12 +1,19 @@
 //! Standard-library reference implementation for synchronously executing validated compiled enclave images as a behavioral baseline for target executors.
 
-use tinymap::TinyMap;
+use std::{any::Any, fmt, marker::PhantomData, panic::AssertUnwindSafe, time::Instant};
+
+use tinymap::{TinyMap, TinySecondaryMap};
 
 use crate::{
-    image::{EnclaveImage, ImageValidationError, StateSlotIndex},
+    image::{
+        BoundaryId, CompiledDeploymentImage, CompiledDeploymentView, EnclaveImage,
+        EnclaveImageView, EnclaveIndex, FederateIndex, ImageValidationError, PortIndex,
+        RouteDirection, StateSlotIndex, TimingDomain,
+    },
     run_owned_scheduler,
     storage::owned::StoredState,
-    Config, OwnedBindings, OwnedStorage, OwnedStorageError, ReactorData, RuntimeError, Tag,
+    AsyncEvent, Config, OwnedBindings, OwnedStorage, OwnedStorageError, PayloadType, ReactorData,
+    RuntimeError, Tag,
 };
 
 /// Failure while validating, initializing, or synchronously executing a compiled image.
@@ -96,6 +103,636 @@ impl OwnedExecutionResult {
     /// Returns [`Tag::NEVER`] if execution reached only terminal shutdown processing.
     pub const fn final_tag(&self) -> Tag {
         self.final_tag
+    }
+}
+
+/// Direct owned bindings for every Enclave and route in one compiled Federate.
+#[derive(Default)]
+pub struct OwnedFederateBindings {
+    /// Caller-supplied Enclave bindings retained with their canonical indices.
+    enclaves: Vec<(EnclaveIndex, OwnedBindings)>,
+    /// Statically typed route adapters retained until image preflight resolves their endpoints.
+    routes: Vec<Box<dyn RouteBinding>>,
+}
+
+impl OwnedFederateBindings {
+    /// Creates an empty Federate binding set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Binds one canonical Enclave to its complete direct owned bindings.
+    pub fn bind_enclave(mut self, enclave: EnclaveIndex, bindings: OwnedBindings) -> Self {
+        self.enclaves.push((enclave, bindings));
+        self
+    }
+
+    /// Binds a route only when Rust has unified both endpoint payloads as the same `T`.
+    pub fn bind_route<T: ReactorData + Clone>(
+        mut self,
+        boundary: BoundaryId<'_>,
+        source: PayloadType<T>,
+        destination: PayloadType<T>,
+    ) -> Self {
+        let _ = (source, destination);
+        self.routes.push(Box::new(TypedRouteBinding::<T> {
+            boundary: boundary.as_str().to_owned(),
+            marker: PhantomData,
+        }));
+        self
+    }
+
+    /// Finds one uniquely supplied Enclave binding during preflight.
+    fn enclave(&self, enclave: EnclaveIndex) -> Option<&OwnedBindings> {
+        self.enclaves
+            .iter()
+            .find_map(|(candidate, bindings)| (*candidate == enclave).then_some(bindings))
+    }
+}
+
+/// Private typed-erased route binding installed after structural and payload preflight.
+trait RouteBinding: Send {
+    /// Returns the stable compiled boundary identity selected by the caller.
+    fn boundary(&self) -> &str;
+    /// Returns the concrete endpoint payload type selected at compile time.
+    fn payload_type(&self) -> &'static str;
+    /// Installs this route in its validated source storage.
+    fn install(
+        &self,
+        source: &mut OwnedStorage<'_>,
+        endpoint: &RouteEndpoint,
+        destination_tx: crate::Sender<AsyncEvent>,
+    );
+}
+
+/// Compile-time endpoint witness erased only after `T` is identical at both endpoints.
+struct TypedRouteBinding<T: ReactorData + Clone> {
+    /// Stable boundary identity copied from the caller's borrowed identity.
+    boundary: String,
+    /// Retains the statically unified endpoint type without allocating a value.
+    marker: PhantomData<fn() -> T>,
+}
+
+impl<T: ReactorData + Clone> RouteBinding for TypedRouteBinding<T> {
+    fn boundary(&self) -> &str {
+        &self.boundary
+    }
+
+    fn payload_type(&self) -> &'static str {
+        std::any::type_name::<T>()
+    }
+
+    fn install(
+        &self,
+        source: &mut OwnedStorage<'_>,
+        endpoint: &RouteEndpoint,
+        destination_tx: crate::Sender<AsyncEvent>,
+    ) {
+        source.bind_outbound_route::<T>(
+            endpoint.source_port,
+            endpoint.boundary.clone(),
+            endpoint.destination,
+            endpoint.destination_port,
+            endpoint.timing_domain,
+            endpoint.delay_nanos,
+            destination_tx,
+        );
+    }
+}
+
+/// Validated local endpoints and timing for one paired scheduler route.
+struct RouteEndpoint {
+    /// Stable boundary identity shared by both route halves.
+    boundary: String,
+    /// Canonical source Enclave index.
+    source: EnclaveIndex,
+    /// Dense source port selected by the outbound half.
+    source_port: PortIndex,
+    /// Canonical destination Enclave index.
+    destination: EnclaveIndex,
+    /// Dense destination port selected by the inbound half.
+    destination_port: PortIndex,
+    /// Compiled timing domain shared by both halves.
+    timing_domain: TimingDomain,
+    /// Compiled delay shared by both halves.
+    delay_nanos: u64,
+}
+
+/// Final owned results for every canonical Enclave executed in one Federate.
+pub struct OwnedFederateExecutionResult {
+    /// Per-Enclave results keyed by deployment-wide canonical Enclave index.
+    enclaves: TinySecondaryMap<EnclaveIndex, OwnedExecutionResult>,
+    /// Single monotonic origin injected into every scheduler and reaction context.
+    origin: Instant,
+}
+
+impl fmt::Debug for OwnedFederateExecutionResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OwnedFederateExecutionResult")
+            .field("enclaves", &self.enclaves.len())
+            .field("origin", &self.origin)
+            .finish()
+    }
+}
+
+impl OwnedFederateExecutionResult {
+    /// Returns one Enclave's final owned result by canonical deployment index.
+    pub fn enclave(&self, enclave: EnclaveIndex) -> Option<&OwnedExecutionResult> {
+        self.enclaves.get(enclave)
+    }
+
+    /// Returns the monotonic origin shared by every Enclave scheduler.
+    pub const fn origin(&self) -> Instant {
+        self.origin
+    }
+}
+
+/// Failure while preflighting, initializing, or executing one owned compiled Federate.
+#[derive(Debug, thiserror::Error)]
+pub enum ExecuteOwnedFederateError {
+    /// The deployment root or one nested image was structurally invalid.
+    #[error("invalid compiled deployment: {message}")]
+    ImageValidation {
+        /// Complete typed validation diagnostic retained as owned text.
+        message: String,
+    },
+    /// The requested canonical Federate index is absent.
+    #[error("compiled Federate {federate} is not present")]
+    FederateNotFound {
+        /// Requested canonical Federate index.
+        federate: FederateIndex,
+    },
+    /// One selected Enclave received no direct binding set.
+    #[error("missing bindings for Enclave {enclave}")]
+    MissingEnclaveBinding {
+        /// Canonical Enclave index lacking bindings.
+        enclave: EnclaveIndex,
+    },
+    /// A canonical Enclave binding was supplied more than once.
+    #[error("duplicate bindings for Enclave {enclave}")]
+    DuplicateEnclaveBinding {
+        /// Canonical Enclave index supplied repeatedly.
+        enclave: EnclaveIndex,
+    },
+    /// A binding named an Enclave outside the selected Federate.
+    #[error("Enclave {enclave} does not belong to Federate {federate}")]
+    UnexpectedEnclaveBinding {
+        /// Canonical Enclave index outside the selected range.
+        enclave: EnclaveIndex,
+        /// Selected canonical Federate index.
+        federate: FederateIndex,
+    },
+    /// A selected route crosses the boundary of the local Federate executor.
+    #[error("route '{boundary}' crosses Enclaves {source_enclave} -> {destination} outside Federate {federate}")]
+    CrossFederateRoute {
+        /// Stable boundary identity.
+        boundary: String,
+        /// Canonical source Enclave index.
+        source_enclave: EnclaveIndex,
+        /// Canonical destination Enclave index.
+        destination: EnclaveIndex,
+        /// Selected canonical Federate index.
+        federate: FederateIndex,
+    },
+    /// A compiled local route received no typed route binding.
+    #[error("missing typed binding for route '{boundary}'")]
+    MissingRouteBinding {
+        /// Stable boundary identity lacking a binding.
+        boundary: String,
+    },
+    /// A stable route identity was bound more than once.
+    #[error("duplicate typed binding for route '{boundary}'")]
+    DuplicateRouteBinding {
+        /// Repeated stable boundary identity.
+        boundary: String,
+    },
+    /// A typed route binding did not name a route in the selected Federate.
+    #[error("route binding '{boundary}' is not present in Federate {federate}")]
+    UnexpectedRouteBinding {
+        /// Unknown stable boundary identity.
+        boundary: String,
+        /// Selected canonical Federate index.
+        federate: FederateIndex,
+    },
+    /// A route binding disagreed with a concrete endpoint port binding.
+    #[error("route '{boundary}' {direction:?} endpoint at Enclave {enclave} port {port} requires {expected}, found {found}")]
+    RoutePayloadTypeMismatch {
+        /// Stable boundary identity.
+        boundary: String,
+        /// Mismatched route half.
+        direction: RouteDirection,
+        /// Canonical endpoint Enclave index.
+        enclave: EnclaveIndex,
+        /// Dense endpoint port.
+        port: PortIndex,
+        /// Concrete type selected by the typed route binding.
+        expected: &'static str,
+        /// Concrete type selected by the port binding.
+        found: &'static str,
+    },
+    /// A compiled route delay cannot fit the runtime logical duration.
+    #[error("route '{boundary}' delay {delay_nanos}ns exceeds the runtime duration range")]
+    RouteDelayOutOfRange {
+        /// Stable boundary identity.
+        boundary: String,
+        /// Unrepresentable compiled delay.
+        delay_nanos: u64,
+    },
+    /// One Enclave image or direct binding set failed initializer-free preflight.
+    #[error("Enclave {enclave} preflight failed: {source}")]
+    EnclavePreflight {
+        /// Canonical failing Enclave index.
+        enclave: EnclaveIndex,
+        /// Existing owned-storage validation failure.
+        #[source]
+        source: OwnedStorageError,
+    },
+    /// One Enclave failed while constructing its already validated owned storage.
+    #[error("Enclave {enclave} initialization failed: {source}")]
+    EnclaveInitialization {
+        /// Canonical failing Enclave index.
+        enclave: EnclaveIndex,
+        /// Existing owned-storage construction failure.
+        #[source]
+        source: OwnedStorageError,
+    },
+    /// One Enclave scheduler or typed route failed during execution.
+    #[error("Enclave {enclave} execution failed: {source}")]
+    EnclaveExecution {
+        /// Canonical failing Enclave index.
+        enclave: EnclaveIndex,
+        /// Existing storage, reaction, or typed route failure.
+        #[source]
+        source: OwnedStorageError,
+    },
+    /// One Enclave scheduler failed in local logical-time coordination.
+    #[error("Enclave {enclave} coordination failed: {source}")]
+    EnclaveCoordination {
+        /// Canonical failing Enclave index.
+        enclave: EnclaveIndex,
+        /// Existing scheduler coordination failure.
+        #[source]
+        source: RuntimeError,
+    },
+    /// One Enclave scheduler thread panicked before producing a result.
+    #[error("Enclave {enclave} thread panicked: {message}")]
+    ThreadPanicked {
+        /// Canonical panicking Enclave index.
+        enclave: EnclaveIndex,
+        /// Best-effort panic payload diagnostic.
+        message: String,
+    },
+    /// The executor's internal result channel closed before every thread reported.
+    #[error("Federate result channel closed before all Enclaves joined")]
+    ResultChannelClosed,
+}
+
+/// Converts a panic payload into a stable best-effort diagnostic.
+fn panic_message(payload: Box<dyn Any + Send>) -> String {
+    match payload.downcast::<String>() {
+        Ok(message) => *message,
+        Err(payload) => payload
+            .downcast::<&'static str>()
+            .map(|message| (*message).to_owned())
+            .unwrap_or_else(|_| "non-string panic payload".to_owned()),
+    }
+}
+
+/// Requests immediate shutdown from every still-live Enclave scheduler without blocking.
+fn request_federate_shutdown(senders: &[crate::Sender<AsyncEvent>]) {
+    for sender in senders {
+        let _ = sender.try_send(AsyncEvent::Shutdown {
+            delay: crate::Duration::ZERO,
+        });
+    }
+}
+
+/// Returns whether a canonical Enclave index belongs to one Federate's dense range.
+fn federate_contains_enclave(federate: crate::image::FederateImage, enclave: EnclaveIndex) -> bool {
+    let start = federate.enclaves().start();
+    let end = start + federate.enclaves().len();
+    (start..end).contains(&enclave.as_u32())
+}
+
+/// Resolves every outbound route to its unique inbound half after root validation.
+fn local_route_endpoints(
+    deployment: &CompiledDeploymentImage<'_>,
+    selected_federate: FederateIndex,
+    selected: crate::image::FederateImage,
+) -> Result<Vec<RouteEndpoint>, ExecuteOwnedFederateError> {
+    let mut endpoints = Vec::new();
+    for (source, source_image) in deployment.enclaves.iter() {
+        for outbound in source_image
+            .routes
+            .values()
+            .filter(|route| route.direction() == RouteDirection::Outbound)
+        {
+            let boundary = outbound
+                .boundary()
+                .get(source_image.identity_data)
+                .expect("root validation checked outbound boundary identity");
+            let (destination, inbound) = deployment
+                .enclaves
+                .iter()
+                .flat_map(|(enclave, image)| {
+                    image
+                        .routes
+                        .values()
+                        .map(move |route| (enclave, image, route))
+                })
+                .find(|(_, image, route)| {
+                    route.direction() == RouteDirection::Inbound
+                        && route.boundary().get(image.identity_data) == Some(boundary)
+                })
+                .map(|(enclave, _, route)| (enclave, *route))
+                .expect("root validation paired every outbound route");
+            let source_selected = federate_contains_enclave(selected, source);
+            let destination_selected = federate_contains_enclave(selected, destination);
+            if source_selected != destination_selected {
+                return Err(ExecuteOwnedFederateError::CrossFederateRoute {
+                    boundary: boundary.to_owned(),
+                    source_enclave: source,
+                    destination,
+                    federate: selected_federate,
+                });
+            }
+            if source_selected {
+                endpoints.push(RouteEndpoint {
+                    boundary: boundary.to_owned(),
+                    source,
+                    source_port: outbound.local_port(),
+                    destination,
+                    destination_port: inbound.local_port(),
+                    timing_domain: outbound.timing_domain(),
+                    delay_nanos: outbound.delay_nanos(),
+                });
+            }
+        }
+    }
+    Ok(endpoints)
+}
+
+/// Validates complete Enclave and route bindings before any user initializer runs.
+fn preflight_owned_federate(
+    deployment: &CompiledDeploymentImage<'_>,
+    federate: FederateIndex,
+    bindings: &OwnedFederateBindings,
+) -> Result<Vec<RouteEndpoint>, ExecuteOwnedFederateError> {
+    CompiledDeploymentView::new(deployment).map_err(|error| {
+        ExecuteOwnedFederateError::ImageValidation {
+            message: error.to_string(),
+        }
+    })?;
+    let selected = deployment
+        .federates
+        .get(federate)
+        .copied()
+        .ok_or(ExecuteOwnedFederateError::FederateNotFound { federate })?;
+
+    for &(enclave, _) in &bindings.enclaves {
+        if !federate_contains_enclave(selected, enclave) {
+            return Err(ExecuteOwnedFederateError::UnexpectedEnclaveBinding { enclave, federate });
+        }
+        if bindings
+            .enclaves
+            .iter()
+            .filter(|(candidate, _)| *candidate == enclave)
+            .count()
+            > 1
+        {
+            return Err(ExecuteOwnedFederateError::DuplicateEnclaveBinding { enclave });
+        }
+    }
+
+    let start = selected.enclaves().start();
+    let end = start + selected.enclaves().len();
+    for raw in start..end {
+        let enclave = EnclaveIndex::new(raw);
+        let enclave_bindings = bindings
+            .enclave(enclave)
+            .ok_or(ExecuteOwnedFederateError::MissingEnclaveBinding { enclave })?;
+        let image = EnclaveImageView::new(&deployment.enclaves[enclave]).map_err(|error| {
+            ExecuteOwnedFederateError::ImageValidation {
+                message: error.to_string(),
+            }
+        })?;
+        OwnedStorage::validate_image_bindings(&image, enclave_bindings)
+            .map_err(|source| ExecuteOwnedFederateError::EnclavePreflight { enclave, source })?;
+    }
+
+    let endpoints = local_route_endpoints(deployment, federate, selected)?;
+    for route in &bindings.routes {
+        let matches = bindings
+            .routes
+            .iter()
+            .filter(|candidate| candidate.boundary() == route.boundary())
+            .count();
+        if matches > 1 {
+            return Err(ExecuteOwnedFederateError::DuplicateRouteBinding {
+                boundary: route.boundary().to_owned(),
+            });
+        }
+        if !endpoints
+            .iter()
+            .any(|endpoint| endpoint.boundary == route.boundary())
+        {
+            return Err(ExecuteOwnedFederateError::UnexpectedRouteBinding {
+                boundary: route.boundary().to_owned(),
+                federate,
+            });
+        }
+    }
+    for endpoint in &endpoints {
+        let route = bindings
+            .routes
+            .iter()
+            .find(|route| route.boundary() == endpoint.boundary)
+            .ok_or_else(|| ExecuteOwnedFederateError::MissingRouteBinding {
+                boundary: endpoint.boundary.clone(),
+            })?;
+        if endpoint.delay_nanos > i64::MAX as u64 {
+            return Err(ExecuteOwnedFederateError::RouteDelayOutOfRange {
+                boundary: endpoint.boundary.clone(),
+                delay_nanos: endpoint.delay_nanos,
+            });
+        }
+        for (direction, enclave, port) in [
+            (
+                RouteDirection::Outbound,
+                endpoint.source,
+                endpoint.source_port,
+            ),
+            (
+                RouteDirection::Inbound,
+                endpoint.destination,
+                endpoint.destination_port,
+            ),
+        ] {
+            let image = EnclaveImageView::new(&deployment.enclaves[enclave])
+                .expect("root validation checked endpoint images");
+            let slot = image.ports()[port].binding();
+            let found = bindings
+                .enclave(enclave)
+                .and_then(|owned| owned.port_payload_type(slot))
+                .expect("owned storage preflight checked endpoint port bindings");
+            if found != route.payload_type() {
+                return Err(ExecuteOwnedFederateError::RoutePayloadTypeMismatch {
+                    boundary: endpoint.boundary.clone(),
+                    direction,
+                    enclave,
+                    port,
+                    expected: route.payload_type(),
+                    found,
+                });
+            }
+        }
+    }
+    Ok(endpoints)
+}
+
+/// Executes every Enclave in one validated Federate with direct typed local routes.
+///
+/// All root, binding, route, timer, and timing checks complete before any user initializer runs.
+/// The first execution failure triggers Federate-wide shutdown; every scheduler thread is joined.
+pub fn execute_owned_federate(
+    deployment: &CompiledDeploymentImage<'_>,
+    federate: FederateIndex,
+    bindings: OwnedFederateBindings,
+    config: Config,
+) -> Result<OwnedFederateExecutionResult, ExecuteOwnedFederateError> {
+    let endpoints = preflight_owned_federate(deployment, federate, &bindings)?;
+    let OwnedFederateBindings {
+        mut enclaves,
+        routes,
+    } = bindings;
+    enclaves.sort_by_key(|(enclave, _)| enclave.as_u32());
+
+    let mut storages = Vec::with_capacity(enclaves.len());
+    for (enclave, owned) in enclaves {
+        let image = EnclaveImageView::new(&deployment.enclaves[enclave])
+            .expect("Federate preflight validated every selected Enclave image");
+        let storage = OwnedStorage::new(image, owned).map_err(|source| {
+            ExecuteOwnedFederateError::EnclaveInitialization { enclave, source }
+        })?;
+        storages.push((enclave, storage));
+    }
+
+    let event_senders = storages
+        .iter()
+        .map(|(_, storage)| storage.scheduler_event_tx())
+        .collect::<Vec<_>>();
+    for endpoint in &endpoints {
+        let route = routes
+            .iter()
+            .find(|route| route.boundary() == endpoint.boundary)
+            .expect("Federate preflight required every local route binding");
+        let destination_tx = storages
+            .iter()
+            .find(|(enclave, _)| *enclave == endpoint.destination)
+            .map(|(_, storage)| storage.scheduler_event_tx())
+            .expect("Federate preflight required destination storage");
+        let source = storages
+            .iter_mut()
+            .find(|(enclave, _)| *enclave == endpoint.source)
+            .map(|(_, storage)| storage)
+            .expect("Federate preflight required source storage");
+        route.install(source, endpoint, destination_tx);
+    }
+
+    let origin = Instant::now();
+    for (_, storage) in &mut storages {
+        storage.configure_scheduler_origin(origin);
+    }
+    let inbound_enclaves = endpoints
+        .iter()
+        .map(|endpoint| endpoint.destination)
+        .collect::<Vec<_>>();
+    let enclave_count = storages.len();
+    let (results, failure) = std::thread::scope(|scope| {
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let mut handles = Vec::with_capacity(enclave_count);
+        for (enclave, mut storage) in storages {
+            let result_tx = result_tx.clone();
+            let config = if inbound_enclaves.contains(&enclave) {
+                config.clone().with_keep_alive(true)
+            } else {
+                config.clone()
+            };
+            let handle = scope.spawn(move || {
+                let execution = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    run_owned_scheduler(&mut storage, &config)
+                }));
+                let result = match execution {
+                    Ok(Ok(final_tag)) => Ok(OwnedExecutionResult {
+                        states: storage.into_states(),
+                        final_tag,
+                    }),
+                    Ok(Err(crate::sched::SchedulerError::Execution(source))) => {
+                        drop(storage);
+                        Err(ExecuteOwnedFederateError::EnclaveExecution { enclave, source })
+                    }
+                    Ok(Err(crate::sched::SchedulerError::Coordination(source))) => {
+                        drop(storage);
+                        Err(ExecuteOwnedFederateError::EnclaveCoordination { enclave, source })
+                    }
+                    Err(payload) => {
+                        drop(storage);
+                        Err(ExecuteOwnedFederateError::ThreadPanicked {
+                            enclave,
+                            message: panic_message(payload),
+                        })
+                    }
+                };
+                let _ = result_tx.send((enclave, result));
+            });
+            handles.push((enclave, handle));
+        }
+        drop(result_tx);
+
+        let mut results = TinySecondaryMap::with_capacity(enclave_count);
+        let mut failure = None;
+        for _ in 0..enclave_count {
+            match result_rx.recv() {
+                Ok((enclave, Ok(result))) => {
+                    results.insert(enclave, result);
+                }
+                Ok((_, Err(error))) => {
+                    if failure.is_none() {
+                        request_federate_shutdown(&event_senders);
+                        failure = Some(error);
+                    }
+                }
+                Err(_) => {
+                    if failure.is_none() {
+                        request_federate_shutdown(&event_senders);
+                        failure = Some(ExecuteOwnedFederateError::ResultChannelClosed);
+                    }
+                    break;
+                }
+            }
+        }
+        for (enclave, handle) in handles {
+            if let Err(payload) = handle.join() {
+                if failure.is_none() {
+                    request_federate_shutdown(&event_senders);
+                    failure = Some(ExecuteOwnedFederateError::ThreadPanicked {
+                        enclave,
+                        message: panic_message(payload),
+                    });
+                }
+            }
+        }
+        (results, failure)
+    });
+
+    if let Some(error) = failure {
+        Err(error)
+    } else {
+        Ok(OwnedFederateExecutionResult {
+            enclaves: results,
+            origin,
+        })
     }
 }
 

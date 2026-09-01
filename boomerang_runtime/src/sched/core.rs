@@ -690,7 +690,7 @@ where
             };
             let successor = tag.checked_delay(period);
             if (*self.shutdown_tag)
-                .is_some_and(|shutdown| successor.map_or(true, |successor| successor >= shutdown))
+                .is_some_and(|shutdown| successor.is_none_or(|successor| successor >= shutdown))
             {
                 continue;
             }

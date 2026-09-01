@@ -492,9 +492,26 @@ fn schedule_later_overflow_timer(
     refs: ReactionRefs<'_>,
     _mode_effect: Option<CompiledModeEffectRef>,
 ) -> Result<(), ReactionBindingError> {
+    if context.get_tag() != Tag::ZERO {
+        return Ok(());
+    }
     let (_startup, mut timer): (ActionRef, ActionRef) = refs.actions.partition_mut()?;
     let delay = Duration::MAX - Duration::nanoseconds(1);
     context.schedule_action(&mut timer, (), Some(delay));
+    Ok(())
+}
+
+fn schedule_later_overflow_timer_with_shutdown(
+    context: &mut Context,
+    state: &mut dyn ReactorData,
+    refs: ReactionRefs<'_>,
+    mode_effect: Option<CompiledModeEffectRef>,
+) -> Result<(), ReactionBindingError> {
+    let tag = context.get_tag();
+    schedule_later_overflow_timer(context, state, refs, mode_effect)?;
+    if tag == Tag::new(Duration::MAX, 0) {
+        context.schedule_shutdown(None);
+    }
     Ok(())
 }
 static PERIODIC_ACTIONS: [ActionImage; 1] = [fixture_timer_action(0, Some(1_000_000), r!(0, 1))];
@@ -502,7 +519,7 @@ static ZERO_PERIOD_ACTIONS: [ActionImage; 1] = [fixture_timer_action(0, Some(0),
 static OVERFLOW_PERIOD_ACTIONS: [ActionImage; 1] = [fixture_timer_action(0, Some(1), r!(0, 1))];
 static LATER_OVERFLOW_PERIOD_ACTIONS: [ActionImage; 2] = [
     fixture_timer_action(0, None, r!(0, 1)),
-    fixture_timer_action(1, Some(1), r!(1, 0)),
+    fixture_timer_action(1, Some(1), r!(1, 1)),
 ];
 static PERIODIC_STARTUP: [TimerStartupImage; 1] =
     [TimerStartupImage::new(ActionIndex::new(0), 1_000_000)];
@@ -527,7 +544,7 @@ static LATER_OVERFLOW_PERIOD_IMAGE: EnclaveImage<'static> = EnclaveImage {
     actions: TinyMapView::new(&LATER_OVERFLOW_PERIOD_ACTIONS),
     reactions: TinyMapView::new(&COTIMED_REACTIONS),
     scopes: TinyMapView::new(&COTIMED_SCOPE),
-    reaction_triggers: &REACTION_TRIGGERS,
+    reaction_triggers: &COTIMED_TRIGGERS,
     reaction_actions: &[ActionIndex::new(0), ActionIndex::new(1)],
     scope_logical_actions: &COTIMED_LOGICAL_ACTIONS,
     timer_startup_actions: &[TimerStartupImage::new(ActionIndex::new(0), 0)],
@@ -893,6 +910,20 @@ fn compiled_periodic_successor_at_shutdown_is_not_enqueued() {
             .tags,
         [Tag::new(Duration::milliseconds(1), 0)]
     );
+
+    let bindings = OwnedBindings::new()
+        .bind_state(BindingSlotIndex::new(0), initialize_counter)
+        .bind_reaction(
+            BindingSlotIndex::new(1),
+            schedule_later_overflow_timer_with_shutdown,
+        );
+    let result = execute_owned(
+        &LATER_OVERFLOW_PERIOD_IMAGE,
+        bindings,
+        Config::default().with_fast_forward(true),
+    )
+    .expect("overflowing periodic successor after shutdown must be suppressed");
+    assert_eq!(result.final_tag(), Tag::new(Duration::MAX, 0));
 }
 
 #[test]

@@ -688,12 +688,15 @@ where
             let Some(period) = self.schedule.action_period(action) else {
                 continue;
             };
-            let successor = tag.checked_delay(period).ok_or_else(|| {
-                SchedulerError::Coordination(RuntimeError::LogicalTimeOverflow { tag, period })
-            })?;
-            if (*self.shutdown_tag).is_some_and(|shutdown| successor >= shutdown) {
+            let successor = tag.checked_delay(period);
+            if (*self.shutdown_tag)
+                .is_some_and(|shutdown| successor.map_or(true, |successor| successor >= shutdown))
+            {
                 continue;
             }
+            let successor = successor.ok_or_else(|| {
+                SchedulerError::Coordination(RuntimeError::LogicalTimeOverflow { tag, period })
+            })?;
             self.storage
                 .push_action_value(action, successor, Box::new(()));
             self.events.push_action_event(

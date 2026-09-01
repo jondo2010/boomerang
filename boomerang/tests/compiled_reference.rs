@@ -1590,6 +1590,66 @@ fn owned_federate_preflight_rejects_before_initializers() {
     assert_eq!(ROUTED_INITIALIZATIONS.load(Ordering::SeqCst), 0);
 }
 
+#[test]
+fn owned_federate_rejects_enclave_without_root_reactor() {
+    let rootless_enclaves = [EnclaveImage {
+        identity_data: "rootless",
+        enclave_id: IdentityRange::new(0, 8),
+        reactors: TinyMapView::new(&[]),
+        actions: TinyMapView::new(&[]),
+        ports: TinyMapView::new(&[]),
+        reactions: TinyMapView::new(&[]),
+        modes: TinyMapView::new(&[]),
+        scopes: TinyMapView::new(&[]),
+        reaction_triggers: &[],
+        reaction_use_ports: &[],
+        reaction_effect_ports: &[],
+        reaction_actions: &[],
+        reaction_modes: &[],
+        scope_descendants: &[],
+        scope_logical_actions: &[],
+        scope_timer_startups: &[],
+        scope_reset_reactions: &[],
+        scope_startup_reactions: &[],
+        scope_shutdown_reactions: &[],
+        startup_actions: &[],
+        timer_startup_actions: &[],
+        shutdown_reactions: &[],
+        shutdown_actions: &[],
+        routes: TinyMapView::new(&[]),
+        required_bindings: TinyMapView::new(&[]),
+        storage_bounds: StorageBounds::new(0, 0, 0, 0, 0, 0),
+    }];
+    let rootless_federates = [FederateImage::new(
+        IdentityRange::new(0, 4),
+        IdentityRange::new(4, 6),
+        IdentityRange::new(10, 7),
+        r!(0, 1),
+    )];
+    let members = [FederateIndex::new(0)];
+    let deployment = CompiledDeploymentImage {
+        identity_data: "hosttargetruntime",
+        federation: GlobalFederationImage::new(&members, &[]),
+        federates: TinyMapView::new(&rootless_federates),
+        enclaves: TinyMapView::new(&rootless_enclaves),
+        coordination: CoordinationProjection::Local,
+    };
+
+    let error = execute_owned_federate(
+        &deployment,
+        FederateIndex::new(0),
+        FederateBindings::new().bind_enclave(EnclaveIndex::new(0), EnclaveBindings::new()),
+        Config::default(),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ExecuteOwnedFederateError::ImageValidation { message }
+            if message == "image[0].root_reactor references missing reactors[0]"
+    ));
+}
+
 fn panic_on_routed_value(
     _context: &mut Context,
     _state: &mut dyn ReactorData,

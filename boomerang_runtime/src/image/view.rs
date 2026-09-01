@@ -863,6 +863,14 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
     check_len::<ScopeIndex>("scopes", image.scopes.len())?;
     check_len::<RouteIndex>("routes", image.routes.len())?;
     check_len::<BindingSlotIndex>("required_bindings", image.required_bindings.len())?;
+    check_ref(
+        "image",
+        0,
+        "root_reactor",
+        "reactors",
+        0,
+        image.reactors.len(),
+    )?;
     let enclave_id = identity_slice(
         image.identity_data,
         "image",
@@ -2414,5 +2422,48 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn enclave_image_requires_a_root_reactor() {
+        let image = EnclaveImage {
+            identity_data: "rootless",
+            enclave_id: IdentityRange::new(0, 8),
+            reactors: TinyMapView::new(&[]),
+            actions: TinyMapView::new(&[]),
+            ports: TinyMapView::new(&[]),
+            reactions: TinyMapView::new(&[]),
+            modes: TinyMapView::new(&[]),
+            scopes: TinyMapView::new(&[]),
+            reaction_triggers: &[],
+            reaction_use_ports: &[],
+            reaction_effect_ports: &[],
+            reaction_actions: &[],
+            reaction_modes: &[],
+            scope_descendants: &[],
+            scope_logical_actions: &[],
+            scope_timer_startups: &[],
+            scope_reset_reactions: &[],
+            scope_startup_reactions: &[],
+            scope_shutdown_reactions: &[],
+            startup_actions: &[],
+            timer_startup_actions: &[],
+            shutdown_reactions: &[],
+            shutdown_actions: &[],
+            routes: TinyMapView::new(&[]),
+            required_bindings: TinyMapView::new(&[]),
+            storage_bounds: StorageBounds::new(0, 0, 0, 0, 0, 0),
+        };
+
+        assert_eq!(
+            EnclaveImageView::new(&image).unwrap_err(),
+            ImageValidationError::ReferenceOutOfBounds {
+                table: "image",
+                index: 0,
+                field: "root_reactor",
+                target: "reactors",
+                referenced: 0,
+            }
+        );
     }
 }

@@ -1,7 +1,7 @@
 //! Exercises the host-runtime seam from a compiled image and direct bindings through owned storage and scheduling to typed results, excluding compiler lowering and live-graph construction.
 
 use std::{
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     time::Instant,
 };
 
@@ -1417,25 +1417,44 @@ fn panicking_sink_bindings() -> OwnedBindings {
         .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
 }
 
-#[derive(Debug)]
-struct ErrorThenPanicOnDrop;
+static COMPETING_PANIC_READY: AtomicBool = AtomicBool::new(false);
 
-impl Drop for ErrorThenPanicOnDrop {
-    fn drop(&mut self) {
-        panic!("destructor panic after reaction error");
+fn synchronized_route_source(
+    _context: &mut Context,
+    _state: &mut dyn ReactorData,
+    refs: ReactionRefs<'_>,
+    _mode_effect: Option<CompiledModeEffectRef>,
+) -> Result<(), ReactionBindingError> {
+    while !COMPETING_PANIC_READY.load(Ordering::SeqCst) {
+        std::thread::yield_now();
     }
+    let mut output: OutputRef<u32> = refs.ports_mut.partition_mut()?;
+    *output = Some(42);
+    Ok(())
 }
 
-fn error_then_panicking_drop_bindings() -> OwnedBindings {
+fn delayed_competing_panic(
+    _context: &mut Context,
+    _state: &mut dyn ReactorData,
+    _refs: ReactionRefs<'_>,
+    _mode_effect: Option<CompiledModeEffectRef>,
+) -> Result<(), ReactionBindingError> {
+    COMPETING_PANIC_READY.store(true, Ordering::SeqCst);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    panic!("competing scheduler panic");
+}
+
+fn routed_reaction_bindings(
+    reaction: fn(
+        &mut Context,
+        &mut dyn ReactorData,
+        ReactionRefs<'_>,
+        Option<CompiledModeEffectRef>,
+    ) -> Result<(), ReactionBindingError>,
+) -> OwnedBindings {
     OwnedBindings::new()
-        .bind_state(BindingSlotIndex::new(0), || ErrorThenPanicOnDrop)
-        .bind_reaction(
-            BindingSlotIndex::new(1),
-            |_context, _state, refs, _mode_effect| {
-                let _: InputRef<u64> = refs.ports.partition()?;
-                Ok(())
-            },
-        )
+        .bind_state(BindingSlotIndex::new(0), initialize_routed_source)
+        .bind_reaction(BindingSlotIndex::new(1), reaction)
         .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
 }
 
@@ -1466,13 +1485,50 @@ fn owned_federate_panic_requests_bounded_shutdown_and_joins() {
 }
 
 #[test]
-fn owned_federate_reports_execution_error_before_destructor_panic() {
+fn owned_federate_retains_route_failure_before_competing_scheduler_panic() {
+    COMPETING_PANIC_READY.store(false, Ordering::SeqCst);
+    let outbound = [RouteImage::new(
+        IdentityRange::new(9, 4),
+        PortIndex::new(0),
+        RouteDirection::Outbound,
+        TimingDomain::Physical,
+        0,
+    )];
+    let inbound = [RouteImage::new(
+        IdentityRange::new(9, 4),
+        PortIndex::new(0),
+        RouteDirection::Inbound,
+        TimingDomain::Physical,
+        0,
+    )];
+    let source = EnclaveImage {
+        routes: TinyMapView::new(&outbound),
+        ..ROUTED_SOURCE_IMAGE
+    };
+    let destination = EnclaveImage {
+        identity_data: "deltaabcxpipe",
+        routes: TinyMapView::new(&inbound),
+        storage_bounds: StorageBounds::new(1, 1, 0, 0, 0, 0),
+        ..ROUTED_SOURCE_IMAGE
+    };
+    let enclaves = [source, destination];
+    let deployment = CompiledDeploymentImage {
+        enclaves: TinyMapView::new(&enclaves),
+        ..ROUTED_DEPLOYMENT
+    };
+    let started = Instant::now();
     let error = execute_owned_federate(
-        &ROUTED_DEPLOYMENT,
+        &deployment,
         FederateIndex::new(0),
         OwnedFederateBindings::new()
-            .bind_enclave(EnclaveIndex::new(0), source_bindings())
-            .bind_enclave(EnclaveIndex::new(1), error_then_panicking_drop_bindings())
+            .bind_enclave(
+                EnclaveIndex::new(0),
+                routed_reaction_bindings(synchronized_route_source),
+            )
+            .bind_enclave(
+                EnclaveIndex::new(1),
+                routed_reaction_bindings(delayed_competing_panic),
+            )
             .bind_route(
                 route_boundary(),
                 PayloadType::<u32>::new(),
@@ -1484,9 +1540,12 @@ fn owned_federate_reports_execution_error_before_destructor_panic() {
 
     assert!(matches!(
         error,
-        ExecuteOwnedFederateError::EnclaveExecution { enclave, .. }
-            if enclave == EnclaveIndex::new(1)
+        ExecuteOwnedFederateError::EnclaveExecution {
+            enclave,
+            source: OwnedStorageError::OutboundRouteChannelFull { destination, .. },
+        } if enclave == EnclaveIndex::new(0) && destination == EnclaveIndex::new(1)
     ));
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
 }
 
 #[test]

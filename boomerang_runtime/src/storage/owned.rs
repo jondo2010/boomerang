@@ -1332,7 +1332,6 @@ fn action_pointers(
 
 #[cfg(test)]
 mod tests {
-    use super::{OutboundRoute, TypedOutboundRoute};
     use crate::{
         image::{
             ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotIndex,
@@ -1343,11 +1342,10 @@ mod tests {
             TinyMapView,
         },
         AsyncEvent, CommonContext, CompiledModeEffectRef, Config, Context, Duration,
-        ModeTransitionRequest, OwnedBindings, OwnedStorage, OwnedStorageError, PayloadType, Port,
+        ModeTransitionRequest, OwnedBindings, OwnedStorage, OwnedStorageError, PayloadType,
         PortKey, ReactionBindingError, ReactionRefs, ReactorData, Tag, TransitionKind,
     };
     use std::{
-        marker::PhantomData,
         sync::{
             atomic::{AtomicUsize, Ordering},
             Arc, Mutex,
@@ -1933,64 +1931,64 @@ mod tests {
 
     #[test]
     fn outbound_routes_clone_fanout_apply_delays_once_and_do_not_block() {
-        let route = |boundary: &str, destination, timing_domain, delay_nanos, destination_tx| {
-            TypedOutboundRoute::<String> {
-                boundary: boundary.to_owned(),
-                destination: EnclaveIndex::new(destination),
-                destination_port: PortIndex::new(0),
-                timing_domain,
-                delay_nanos,
-                destination_tx,
-                marker: PhantomData,
-            }
-        };
-        let mut source = Port::new("source", PortKey::new(0));
-        *source = Some("cloned value".to_owned());
+        let bindings = OwnedBindings::new()
+            .bind_state(BindingSlotIndex::new(0), initialize_state)
+            .bind_reaction(
+                BindingSlotIndex::new(1),
+                |_context, _state, refs: ReactionRefs<'_>, _mode_effect| {
+                    let mut output: crate::OutputRef<String> = refs.ports_mut.partition_mut()?;
+                    *output = Some("cloned value".to_owned());
+                    Ok(())
+                },
+            )
+            .bind_port(BindingSlotIndex::new(2), PayloadType::<String>::new())
+            .bind_action(BindingSlotIndex::new(3), PayloadType::<u32>::new());
+        let mut storage = OwnedStorage::new(image(), bindings).unwrap();
         let source_tag = Tag::new(Duration::nanoseconds(7), 3);
         let (logical_tx, logical_rx) = kanal::bounded(1);
         let (physical_tx, physical_rx) = kanal::bounded(1);
-        let mut logical = route("logical", 1, TimingDomain::Logical, 5, logical_tx);
-        let mut physical = route(
-            "physical",
-            2,
+        storage.bind_outbound_route::<String>(
+            PortIndex::new(0),
+            "logical".into(),
+            EnclaveIndex::new(1),
+            PortIndex::new(0),
+            TimingDomain::Logical,
+            5,
+            logical_tx,
+        );
+        storage.bind_outbound_route::<String>(
+            PortIndex::new(0),
+            "physical".into(),
+            EnclaveIndex::new(2),
+            PortIndex::new(0),
             TimingDomain::Physical,
             1_000_000_000,
             physical_tx,
         );
-
-        logical.emit(&source, source_tag).unwrap();
-        let before = Instant::now();
-        physical.emit(&source, source_tag).unwrap();
-        let after = Instant::now();
-
-        match logical_rx.recv().unwrap() {
-            AsyncEvent::Logical { tag, value, .. } => {
-                assert_eq!(tag, Tag::new(Duration::nanoseconds(12), 0));
-                assert_eq!(*value.downcast::<String>().ok().unwrap(), "cloned value");
-            }
-            event => panic!("unexpected logical route event: {event:?}"),
-        }
-        match physical_rx.recv().unwrap() {
-            AsyncEvent::Physical { time, value, .. } => {
-                assert!(time >= before + std::time::Duration::from_secs(1));
-                assert!(time <= after + std::time::Duration::from_secs(1));
-                assert_eq!(*value.downcast::<String>().ok().unwrap(), "cloned value");
-            }
-            event => panic!("unexpected physical route event: {event:?}"),
-        }
-
         let (full_tx, full_rx) = kanal::bounded(1);
         full_tx
             .send(AsyncEvent::Shutdown {
                 delay: Duration::ZERO,
             })
             .unwrap();
-        let mut full = route("full", 3, TimingDomain::Logical, 0, full_tx);
+        storage.bind_outbound_route::<String>(
+            PortIndex::new(0),
+            "full".into(),
+            EnclaveIndex::new(3),
+            PortIndex::new(0),
+            TimingDomain::Logical,
+            0,
+            full_tx,
+        );
+        let before = Instant::now();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            done_tx.send(full.emit(&source, source_tag)).unwrap();
+            done_tx
+                .send(storage.invoke_reaction(ReactionIndex::new(0), source_tag))
+                .unwrap();
         });
         let result = done_rx.recv_timeout(std::time::Duration::from_secs(1));
+        let after = Instant::now();
         drop(full_rx);
         worker.join().unwrap();
         assert!(matches!(
@@ -1998,6 +1996,22 @@ mod tests {
             Ok(Err(OwnedStorageError::OutboundRouteChannelFull { destination, .. }))
                 if destination == EnclaveIndex::new(3)
         ));
+
+        match logical_rx.try_recv().unwrap().unwrap() {
+            AsyncEvent::Logical { tag, value, .. } => {
+                assert_eq!(tag, Tag::new(Duration::nanoseconds(12), 0));
+                assert_eq!(*value.downcast::<String>().ok().unwrap(), "cloned value");
+            }
+            event => panic!("unexpected logical route event: {event:?}"),
+        }
+        match physical_rx.try_recv().unwrap().unwrap() {
+            AsyncEvent::Physical { time, value, .. } => {
+                assert!(time >= before + std::time::Duration::from_secs(1));
+                assert!(time <= after + std::time::Duration::from_secs(1));
+                assert_eq!(*value.downcast::<String>().ok().unwrap(), "cloned value");
+            }
+            event => panic!("unexpected physical route event: {event:?}"),
+        }
     }
 
     #[test]

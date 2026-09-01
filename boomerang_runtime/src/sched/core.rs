@@ -466,8 +466,7 @@ where
                 event.reactions.view(),
                 event.terminal,
                 &event.action_values,
-            )
-            .map_err(SchedulerError::Execution)?;
+            )?;
 
             *self.current_tag = event.tag;
             if event.has_nonterminal_work {
@@ -582,7 +581,7 @@ where
         reaction_view: KeySetView<S::Reaction>,
         terminal: bool,
         periodic_actions: &[S::Action],
-    ) -> Result<(), E::Error> {
+    ) -> Result<(), SchedulerError<E::Error>> {
         self.transition_buffer.clear();
         let mut execution_error = None;
         reaction_view.for_each_level(|level, reaction_keys, next_levels| {
@@ -682,17 +681,16 @@ where
         });
 
         if let Some(error) = execution_error {
-            return Err(error);
+            return Err(SchedulerError::Execution(error));
         }
 
         for &action in periodic_actions {
             let Some(period) = self.schedule.action_period(action) else {
                 continue;
             };
-            let Some(successor) = tag.checked_delay(period) else {
-                tracing::warn!(target: "boomerang_runtime::sched", %tag, ?action, ?period, "Periodic timer reached the logical tag range");
-                continue;
-            };
+            let successor = tag.checked_delay(period).ok_or_else(|| {
+                SchedulerError::Coordination(RuntimeError::LogicalTimeOverflow { tag, period })
+            })?;
             if (*self.shutdown_tag).is_some_and(|shutdown| successor >= shutdown) {
                 continue;
             }

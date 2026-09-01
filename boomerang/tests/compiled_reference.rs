@@ -14,7 +14,7 @@ use boomerang::runtime::{
     },
     ActionRef, CommonContext, CompiledModeEffectRef, Config, Context, Duration, ExecuteOwnedError,
     ModeEffectRef, ModeKey, OwnedBindings, OwnedStorageError, PayloadType, ReactionBindingError,
-    ReactionRefs, ReactorData, StateAccessError, Tag, TransitionKind,
+    ReactionRefs, ReactorData, RuntimeError, StateAccessError, Tag, TransitionKind,
 };
 
 macro_rules! r {
@@ -486,9 +486,24 @@ fn counted_periodic_bindings() -> OwnedBindings {
         .bind_reaction(BindingSlotIndex::new(1), record_periodic_tag)
 }
 
+fn schedule_later_overflow_timer(
+    context: &mut Context,
+    _state: &mut dyn ReactorData,
+    refs: ReactionRefs<'_>,
+    _mode_effect: Option<CompiledModeEffectRef>,
+) -> Result<(), ReactionBindingError> {
+    let (_startup, mut timer): (ActionRef, ActionRef) = refs.actions.partition_mut()?;
+    let delay = Duration::MAX - Duration::nanoseconds(1);
+    context.schedule_action(&mut timer, (), Some(delay));
+    Ok(())
+}
 static PERIODIC_ACTIONS: [ActionImage; 1] = [fixture_timer_action(0, Some(1_000_000), r!(0, 1))];
 static ZERO_PERIOD_ACTIONS: [ActionImage; 1] = [fixture_timer_action(0, Some(0), r!(0, 1))];
 static OVERFLOW_PERIOD_ACTIONS: [ActionImage; 1] = [fixture_timer_action(0, Some(1), r!(0, 1))];
+static LATER_OVERFLOW_PERIOD_ACTIONS: [ActionImage; 2] = [
+    fixture_timer_action(0, None, r!(0, 1)),
+    fixture_timer_action(1, Some(1), r!(1, 0)),
+];
 static PERIODIC_STARTUP: [TimerStartupImage; 1] =
     [TimerStartupImage::new(ActionIndex::new(0), 1_000_000)];
 static OVERFLOW_PERIOD_STARTUP: [TimerStartupImage; 1] =
@@ -506,6 +521,17 @@ static ZERO_PERIOD_IMAGE: EnclaveImage<'static> = EnclaveImage {
 static OVERFLOW_PERIOD_IMAGE: EnclaveImage<'static> = EnclaveImage {
     actions: TinyMapView::new(&OVERFLOW_PERIOD_ACTIONS),
     timer_startup_actions: &OVERFLOW_PERIOD_STARTUP,
+    ..IMAGE
+};
+static LATER_OVERFLOW_PERIOD_IMAGE: EnclaveImage<'static> = EnclaveImage {
+    actions: TinyMapView::new(&LATER_OVERFLOW_PERIOD_ACTIONS),
+    reactions: TinyMapView::new(&COTIMED_REACTIONS),
+    scopes: TinyMapView::new(&COTIMED_SCOPE),
+    reaction_triggers: &REACTION_TRIGGERS,
+    reaction_actions: &[ActionIndex::new(0), ActionIndex::new(1)],
+    scope_logical_actions: &COTIMED_LOGICAL_ACTIONS,
+    timer_startup_actions: &[TimerStartupImage::new(ActionIndex::new(0), 0)],
+    storage_bounds: StorageBounds::new(1, 2, 3, 0, 0, 0),
     ..IMAGE
 };
 
@@ -928,4 +954,23 @@ fn compiled_periodic_timer_rejects_first_successor_overflow_before_state_initial
         }) if slot == ActionSlotIndex::new(0) && startup_nanos == i64::MAX as u64
     ));
     assert_eq!(PERIODIC_INITIALIZATIONS.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn compiled_periodic_timer_reports_later_recurrence_overflow() {
+    let bindings = OwnedBindings::new()
+        .bind_state(BindingSlotIndex::new(0), initialize_counter)
+        .bind_reaction(BindingSlotIndex::new(1), schedule_later_overflow_timer);
+    let error = execute_owned(
+        &LATER_OVERFLOW_PERIOD_IMAGE,
+        bindings,
+        Config::default().with_fast_forward(true),
+    )
+    .err()
+    .expect("later periodic recurrence overflow must return an error");
+    assert!(matches!(
+        error,
+        ExecuteOwnedError::Coordination(RuntimeError::LogicalTimeOverflow { tag, period })
+            if tag == Tag::new(Duration::MAX, 0) && period == Duration::nanoseconds(1)
+    ));
 }

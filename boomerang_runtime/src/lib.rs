@@ -90,6 +90,15 @@ pub enum RuntimeError {
     #[error("async boundary port target is not available in a live graph: {0}")]
     AsyncBoundaryPortUnsupported(PortKey),
 
+    /// Advancing a logical tag by a positive duration exceeded the tag range.
+    #[error("logical tag {tag} cannot advance by {period} without overflowing")]
+    LogicalTimeOverflow {
+        /// Last representable logical tag reached by the scheduler.
+        tag: Tag,
+        /// Positive recurrence period that cannot be represented at `tag`.
+        period: Duration,
+    },
+
     #[error("Mismatched Dynamic Types found {found} but wanted {wanted}")]
     TypeMismatch {
         found: &'static str,

@@ -318,12 +318,17 @@ impl<T: ReactorData + Clone> OutboundRoute for TypedOutboundRoute<T> {
                 }
             }
         };
-        self.destination_tx
-            .send(event)
-            .map_err(|_| OwnedStorageError::OutboundRouteChannelClosed {
+        match self.destination_tx.try_send(event) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(OwnedStorageError::OutboundRouteChannelFull {
                 boundary: self.boundary.clone(),
                 destination: self.destination,
-            })
+            }),
+            Err(_) => Err(OwnedStorageError::OutboundRouteChannelClosed {
+                boundary: self.boundary.clone(),
+                destination: self.destination,
+            }),
+        }
     }
 }
 
@@ -582,6 +587,14 @@ pub enum OwnedStorageError {
         /// Canonical destination Enclave index.
         destination: EnclaveIndex,
     },
+    /// The bounded destination scheduler mailbox could not immediately admit a routed value.
+    #[error("route '{boundary}' destination Enclave {destination} mailbox is full")]
+    OutboundRouteChannelFull {
+        /// Stable boundary identity.
+        boundary: String,
+        /// Canonical destination Enclave index.
+        destination: EnclaveIndex,
+    },
 }
 
 /// Mutable, heap-backed storage for one validated compiled enclave image.
@@ -682,6 +695,15 @@ impl<'image> OwnedStorage<'image> {
         image: EnclaveImageView<'image>,
         bindings: OwnedBindings,
     ) -> Result<Self, OwnedStorageError> {
+        Self::new_for_enclave(image, bindings, EnclaveKey::default())
+    }
+
+    /// Constructs owned storage whose reaction and send contexts use `enclave_key`.
+    pub(crate) fn new_for_enclave(
+        image: EnclaveImageView<'image>,
+        bindings: OwnedBindings,
+        enclave_key: EnclaveKey,
+    ) -> Result<Self, OwnedStorageError> {
         Self::validate_image_bindings(&image, &bindings)?;
         let (state_bindings, action_images) = validate_storage_layout(&image)?;
         let OwnedBindings {
@@ -694,7 +716,7 @@ impl<'image> OwnedStorage<'image> {
         let reaction_refs = initialize_reaction_refs(&image, &mut ports, &mut actions)?;
         let states = initialize_states(&state_bindings, &bindings)?;
         let reactions = initialize_reactions(bindings);
-        let (contexts, event_tx, event_rx, shutdown_tx) = initialize_contexts(&image)?;
+        let (contexts, event_tx, event_rx, shutdown_tx) = initialize_contexts(&image, enclave_key)?;
         let event_capacity = image.storage_bounds().event_capacity() as usize;
         let inbound_boundary_ports = image
             .routes()
@@ -1236,6 +1258,7 @@ fn initialize_reaction_refs(
 /// Initializes one context per reactor plus the channels that keep it schedulable.
 fn initialize_contexts(
     image: &EnclaveImageView<'_>,
+    enclave_key: EnclaveKey,
 ) -> Result<InitializedContexts, OwnedStorageError> {
     let (event_tx, event_rx) = kanal::bounded(image.storage_bounds().event_capacity() as usize);
     let (shutdown_tx, shutdown_rx) = crate::keepalive::channel();
@@ -1247,7 +1270,7 @@ fn initialize_contexts(
             total: bank.total() as usize,
         });
         let inserted = contexts.insert(Context::new(
-            EnclaveKey::default(),
+            enclave_key,
             start_time,
             bank_info,
             event_tx.clone(),
@@ -1309,20 +1332,22 @@ fn action_pointers(
 
 #[cfg(test)]
 mod tests {
+    use super::{OutboundRoute, TypedOutboundRoute};
     use crate::{
         image::{
             ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotIndex,
-            EnclaveImage, EnclaveImageView, IdentityRange, LevelReactionImage, ModeImage,
-            PortImage, PortIndex, ReactionImage, ReactionIndex, ReactorImage, ReactorIndex,
-            RequiredBindingImage, RouteDirection, RouteImage, ScopeImage, ScopeIndex,
+            EnclaveImage, EnclaveImageView, EnclaveIndex, IdentityRange, LevelReactionImage,
+            ModeImage, PortImage, PortIndex, ReactionImage, ReactionIndex, ReactorImage,
+            ReactorIndex, RequiredBindingImage, RouteDirection, RouteImage, ScopeImage, ScopeIndex,
             StateSlotIndex, StorageBounds, TableRange, TimerStartupImage, TimingDomain,
             TinyMapView,
         },
-        CommonContext, CompiledModeEffectRef, Config, Context, Duration, ModeTransitionRequest,
-        OwnedBindings, OwnedStorage, OwnedStorageError, PayloadType, PortKey, ReactionBindingError,
-        ReactionRefs, ReactorData, Tag, TransitionKind,
+        AsyncEvent, CommonContext, CompiledModeEffectRef, Config, Context, Duration,
+        ModeTransitionRequest, OwnedBindings, OwnedStorage, OwnedStorageError, PayloadType, Port,
+        PortKey, ReactionBindingError, ReactionRefs, ReactorData, Tag, TransitionKind,
     };
     use std::{
+        marker::PhantomData,
         sync::{
             atomic::{AtomicUsize, Ordering},
             Arc, Mutex,
@@ -1907,6 +1932,75 @@ mod tests {
     }
 
     #[test]
+    fn outbound_routes_clone_fanout_apply_delays_once_and_do_not_block() {
+        let route = |boundary: &str, destination, timing_domain, delay_nanos, destination_tx| {
+            TypedOutboundRoute::<String> {
+                boundary: boundary.to_owned(),
+                destination: EnclaveIndex::new(destination),
+                destination_port: PortIndex::new(0),
+                timing_domain,
+                delay_nanos,
+                destination_tx,
+                marker: PhantomData,
+            }
+        };
+        let mut source = Port::new("source", PortKey::new(0));
+        *source = Some("cloned value".to_owned());
+        let source_tag = Tag::new(Duration::nanoseconds(7), 3);
+        let (logical_tx, logical_rx) = kanal::bounded(1);
+        let (physical_tx, physical_rx) = kanal::bounded(1);
+        let mut logical = route("logical", 1, TimingDomain::Logical, 5, logical_tx);
+        let mut physical = route(
+            "physical",
+            2,
+            TimingDomain::Physical,
+            1_000_000_000,
+            physical_tx,
+        );
+
+        logical.emit(&source, source_tag).unwrap();
+        let before = Instant::now();
+        physical.emit(&source, source_tag).unwrap();
+        let after = Instant::now();
+
+        match logical_rx.recv().unwrap() {
+            AsyncEvent::Logical { tag, value, .. } => {
+                assert_eq!(tag, Tag::new(Duration::nanoseconds(12), 0));
+                assert_eq!(*value.downcast::<String>().ok().unwrap(), "cloned value");
+            }
+            event => panic!("unexpected logical route event: {event:?}"),
+        }
+        match physical_rx.recv().unwrap() {
+            AsyncEvent::Physical { time, value, .. } => {
+                assert!(time >= before + std::time::Duration::from_secs(1));
+                assert!(time <= after + std::time::Duration::from_secs(1));
+                assert_eq!(*value.downcast::<String>().ok().unwrap(), "cloned value");
+            }
+            event => panic!("unexpected physical route event: {event:?}"),
+        }
+
+        let (full_tx, full_rx) = kanal::bounded(1);
+        full_tx
+            .send(AsyncEvent::Shutdown {
+                delay: Duration::ZERO,
+            })
+            .unwrap();
+        let mut full = route("full", 3, TimingDomain::Logical, 0, full_tx);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            done_tx.send(full.emit(&source, source_tag)).unwrap();
+        });
+        let result = done_rx.recv_timeout(std::time::Duration::from_secs(1));
+        drop(full_rx);
+        worker.join().unwrap();
+        assert!(matches!(
+            result,
+            Ok(Err(OwnedStorageError::OutboundRouteChannelFull { destination, .. }))
+                if destination == EnclaveIndex::new(3)
+        ));
+    }
+
+    #[test]
     fn owned_storage_is_send() {
         fn assert_send<T: Send>() {}
 
@@ -1914,7 +2008,7 @@ mod tests {
     }
 
     #[test]
-    fn owned_scheduler_injects_one_origin_into_reaction_contexts() {
+    fn configured_federate_origin_drives_the_paced_scheduler_clock() {
         let actions = [ActionImage::new(
             ScopeIndex::new(0),
             ActionSlotIndex::new(0),
@@ -1923,7 +2017,7 @@ mod tests {
             None,
         )];
         let reaction_triggers = [LevelReactionImage::new(0, ReactionIndex::new(0))];
-        let startup_actions = [TimerStartupImage::new(ActionIndex::new(0), 0)];
+        let startup_actions = [TimerStartupImage::new(ActionIndex::new(0), 1_000_000_000)];
         let required_bindings = [
             REQUIRED_BINDINGS[0],
             REQUIRED_BINDINGS[1],
@@ -1951,54 +2045,8 @@ mod tests {
             )
             .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new());
         let mut storage = OwnedStorage::new(image, bindings).unwrap();
-        let origin = Instant::now() - std::time::Duration::from_secs(1);
-
-        crate::sched::run_owned_scheduler_with_origin(
-            &mut storage,
-            &Config::default().with_fast_forward(true),
-            origin,
-        )
-        .unwrap();
-
-        assert_eq!(*seen_origin.lock().unwrap(), Some(origin));
-    }
-
-    #[test]
-    fn configured_federate_origin_drives_the_paced_scheduler_clock() {
-        let actions = [ActionImage::new(
-            ScopeIndex::new(0),
-            ActionSlotIndex::new(0),
-            ActionTiming::Timer { period_nanos: None },
-            TableRange::new(0, 1),
-            None,
-        )];
-        let reaction_triggers = [LevelReactionImage::new(0, ReactionIndex::new(0))];
-        let startup_actions = [TimerStartupImage::new(ActionIndex::new(0), 1_000_000_000)];
-        let required_bindings = [
-            REQUIRED_BINDINGS[0],
-            REQUIRED_BINDINGS[1],
-            REQUIRED_BINDINGS[2],
-        ];
-        let image = EnclaveImage {
-            actions: TinyMapView::new(&actions),
-            reaction_triggers: &reaction_triggers,
-            startup_actions: &startup_actions,
-            required_bindings: TinyMapView::new(&required_bindings),
-            ..IMAGE
-        };
-        let image = EnclaveImageView::new(&image).unwrap();
-        let bindings = OwnedBindings::new()
-            .bind_state(BindingSlotIndex::new(0), initialize_state)
-            .bind_reaction(
-                BindingSlotIndex::new(1),
-                |context: &mut Context, _state, _refs, _mode_effect| {
-                    context.schedule_shutdown(Some(Duration::ZERO));
-                    Ok(())
-                },
-            )
-            .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new());
-        let mut storage = OwnedStorage::new(image, bindings).unwrap();
-        storage.configure_scheduler_origin(Instant::now() - std::time::Duration::from_millis(800));
+        let origin = Instant::now() - std::time::Duration::from_millis(800);
+        storage.configure_scheduler_origin(origin);
 
         let started = Instant::now();
         crate::sched::run_owned_scheduler(
@@ -2008,5 +2056,6 @@ mod tests {
         .unwrap();
 
         assert!(started.elapsed() < std::time::Duration::from_millis(500));
+        assert_eq!(*seen_origin.lock().unwrap(), Some(origin));
     }
 }

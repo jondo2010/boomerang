@@ -16,10 +16,10 @@ use boomerang::runtime::{
         RouteDirection, RouteImage, ScopeImage, ScopeIndex, StateSlotIndex, StorageBounds,
         TableRange, TimerStartupImage, TimingDomain, TinyMapView,
     },
-    ActionRef, CommonContext, CompiledModeEffectRef, Config, Context, Duration, ExecuteOwnedError,
-    ExecuteOwnedFederateError, InputRef, ModeEffectRef, ModeKey, OutputRef, OwnedBindings,
-    OwnedFederateBindings, OwnedStorageError, PayloadType, ReactionBindingError, ReactionRefs,
-    ReactorData, RuntimeError, StateAccessError, Tag, TransitionKind,
+    ActionRef, CommonContext, CompiledModeEffectRef, Config, Context, Duration, EnclaveKey,
+    ExecuteOwnedError, ExecuteOwnedFederateError, InputRef, ModeEffectRef, ModeKey, OutputRef,
+    OwnedBindings, OwnedFederateBindings, OwnedStorageError, PayloadType, ReactionBindingError,
+    ReactionRefs, ReactorData, RuntimeError, StateAccessError, Tag, TransitionKind,
 };
 
 macro_rules! r {
@@ -1082,6 +1082,7 @@ fn receive_both_source_values(
     refs: ReactionRefs<'_>,
     _mode_effect: Option<CompiledModeEffectRef>,
 ) -> Result<(), ReactionBindingError> {
+    assert_eq!(context.enclave_id(), EnclaveKey::from(2));
     let (left, right): (InputRef<u32>, InputRef<u32>) = refs.ports.partition()?;
     state.downcast_mut::<MultiSinkState>().unwrap().0.push((
         *left
@@ -1171,31 +1172,13 @@ static MULTI_SINK_BINDINGS: [RequiredBindingImage; 4] = [
 ];
 static MULTI_SINK_IMAGE: EnclaveImage<'static> = EnclaveImage {
     identity_data: "sinkabcdleftright",
-    enclave_id: IdentityRange::new(0, 4),
-    reactors: TinyMapView::new(&ROUTED_SINK_REACTORS),
-    actions: TinyMapView::new(&[]),
     ports: TinyMapView::new(&MULTI_SINK_PORTS),
     reactions: TinyMapView::new(&MULTI_SINK_REACTIONS),
-    modes: TinyMapView::new(&[]),
-    scopes: TinyMapView::new(&ROUTED_SINK_SCOPES),
     reaction_triggers: &MULTI_SINK_TRIGGERS,
     reaction_use_ports: &MULTI_SINK_USE_PORTS,
-    reaction_effect_ports: &[],
-    reaction_actions: &[],
-    reaction_modes: &[],
-    scope_descendants: &ROUTED_SINK_DESCENDANTS,
-    scope_logical_actions: &[],
-    scope_timer_startups: &[],
-    scope_reset_reactions: &[],
-    scope_startup_reactions: &[],
-    scope_shutdown_reactions: &[],
-    startup_actions: &[],
-    timer_startup_actions: &[],
-    shutdown_reactions: &[],
-    shutdown_actions: &[],
     routes: TinyMapView::new(&MULTI_SINK_ROUTES),
     required_bindings: TinyMapView::new(&MULTI_SINK_BINDINGS),
-    storage_bounds: StorageBounds::new(1, 0, 8, 0, 0, 0),
+    ..ROUTED_SINK_IMAGE
 };
 
 static MULTI_ENCLAVES: [EnclaveImage<'static>; 3] = [
@@ -1434,6 +1417,28 @@ fn panicking_sink_bindings() -> OwnedBindings {
         .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
 }
 
+#[derive(Debug)]
+struct ErrorThenPanicOnDrop;
+
+impl Drop for ErrorThenPanicOnDrop {
+    fn drop(&mut self) {
+        panic!("destructor panic after reaction error");
+    }
+}
+
+fn error_then_panicking_drop_bindings() -> OwnedBindings {
+    OwnedBindings::new()
+        .bind_state(BindingSlotIndex::new(0), || ErrorThenPanicOnDrop)
+        .bind_reaction(
+            BindingSlotIndex::new(1),
+            |_context, _state, refs, _mode_effect| {
+                let _: InputRef<u64> = refs.ports.partition()?;
+                Ok(())
+            },
+        )
+        .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
+}
+
 #[test]
 fn owned_federate_panic_requests_bounded_shutdown_and_joins() {
     let started = Instant::now();
@@ -1458,6 +1463,30 @@ fn owned_federate_panic_requests_bounded_shutdown_and_joins() {
             if enclave == EnclaveIndex::new(1) && message == "routed sink panic"
     ));
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
+}
+
+#[test]
+fn owned_federate_reports_execution_error_before_destructor_panic() {
+    let error = execute_owned_federate(
+        &ROUTED_DEPLOYMENT,
+        FederateIndex::new(0),
+        OwnedFederateBindings::new()
+            .bind_enclave(EnclaveIndex::new(0), source_bindings())
+            .bind_enclave(EnclaveIndex::new(1), error_then_panicking_drop_bindings())
+            .bind_route(
+                route_boundary(),
+                PayloadType::<u32>::new(),
+                PayloadType::<u32>::new(),
+            ),
+        Config::default().with_fast_forward(true),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ExecuteOwnedFederateError::EnclaveExecution { enclave, .. }
+            if enclave == EnclaveIndex::new(1)
+    ));
 }
 
 #[test]

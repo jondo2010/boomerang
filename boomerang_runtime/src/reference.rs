@@ -403,10 +403,34 @@ fn panic_message(payload: Box<dyn Any + Send>) -> String {
 /// Requests immediate shutdown from every still-live Enclave scheduler without blocking.
 fn request_federate_shutdown(senders: &[crate::Sender<AsyncEvent>]) {
     for sender in senders {
-        let _ = sender.try_send(AsyncEvent::Shutdown {
-            delay: crate::Duration::ZERO,
-        });
+        let _ = sender.close();
     }
+}
+
+#[cfg(test)]
+#[test]
+fn federate_shutdown_unblocks_a_full_mailbox_and_blocked_sender() {
+    let (sender, receiver) = kanal::bounded(1);
+    sender
+        .send(AsyncEvent::Shutdown {
+            delay: crate::Duration::ZERO,
+        })
+        .unwrap();
+    let blocked = sender.clone();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        done_tx
+            .send(blocked.send(AsyncEvent::Shutdown {
+                delay: crate::Duration::ZERO,
+            }))
+            .unwrap();
+    });
+
+    request_federate_shutdown(&[sender]);
+    let result = done_rx.recv_timeout(std::time::Duration::from_secs(1));
+    drop(receiver);
+    worker.join().unwrap();
+    assert!(matches!(result, Ok(Err(_))));
 }
 
 /// Returns whether a canonical Enclave index belongs to one Federate's dense range.
@@ -613,9 +637,11 @@ pub fn execute_owned_federate(
     for (enclave, owned) in enclaves {
         let image = EnclaveImageView::new(&deployment.enclaves[enclave])
             .expect("Federate preflight validated every selected Enclave image");
-        let storage = OwnedStorage::new(image, owned).map_err(|source| {
-            ExecuteOwnedFederateError::EnclaveInitialization { enclave, source }
-        })?;
+        let enclave_key = crate::EnclaveKey::from(enclave.as_u32() as usize);
+        let storage =
+            OwnedStorage::new_for_enclave(image, owned, enclave_key).map_err(|source| {
+                ExecuteOwnedFederateError::EnclaveInitialization { enclave, source }
+            })?;
         storages.push((enclave, storage));
     }
 
@@ -719,20 +745,15 @@ pub fn execute_owned_federate(
                         final_tag,
                     }),
                     Ok(Err(crate::sched::SchedulerError::Execution(source))) => {
-                        drop(storage);
                         Err(ExecuteOwnedFederateError::EnclaveExecution { enclave, source })
                     }
                     Ok(Err(crate::sched::SchedulerError::Coordination(source))) => {
-                        drop(storage);
                         Err(ExecuteOwnedFederateError::EnclaveCoordination { enclave, source })
                     }
-                    Err(payload) => {
-                        drop(storage);
-                        Err(ExecuteOwnedFederateError::ThreadPanicked {
-                            enclave,
-                            message: panic_message(payload),
-                        })
-                    }
+                    Err(payload) => Err(ExecuteOwnedFederateError::ThreadPanicked {
+                        enclave,
+                        message: panic_message(payload),
+                    }),
                 };
                 let _ = result_tx.send((enclave, result));
             });

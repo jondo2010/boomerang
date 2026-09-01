@@ -9,11 +9,12 @@ use crate::{Duration, EnclaveKey, SendContext};
 /// Enclave. Federate-wide quiescence remains outside this type.
 pub(crate) struct EnclaveDependencies {
     /// Canonical identity of this scheduler-owned Enclave.
-    pub(crate) key: EnclaveKey,
+    pub(in crate::sched) key: EnclaveKey,
     /// Logical upstream Enclaves and minimum delays across parallel local routes.
-    pub(crate) upstream: tinymap::TinySecondaryMap<EnclaveKey, (SendContext, Option<Duration>)>,
+    pub(in crate::sched) upstream:
+        tinymap::TinySecondaryMap<EnclaveKey, (SendContext, Option<Duration>)>,
     /// Coalesced downstream Enclave contexts used for logical tag release.
-    pub(crate) downstream: tinymap::TinySecondaryMap<EnclaveKey, SendContext>,
+    pub(in crate::sched) downstream: tinymap::TinySecondaryMap<EnclaveKey, SendContext>,
 }
 
 impl EnclaveDependencies {
